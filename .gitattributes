@@ -1,0 +1,31 @@
+# Line endings.
+#
+# `* text=auto` lets git normalise to LF in the repository while checking out
+# whatever the platform prefers. That is the right default, but it breaks one
+# thing here, so that one thing is pinned below.
+* text=auto
+
+# packages/contracts-artifacts/dist is a TRACKED build product (see the negation
+# in .gitignore). Its freshness guard — scripts/check-dist-fresh.mjs — re-runs the
+# export and asks git whether anything changed.
+#
+# The export always writes LF. With `text=auto`, a Windows checkout rewrites the
+# working copy to CRLF, so the very next re-export differs from the checked-out
+# file on every single line and the guard fails on a clean clone. Pinning eol=lf
+# keeps the working copy byte-identical to what the export produces, which is the
+# only way the comparison means anything.
+packages/contracts-artifacts/dist/** text eol=lf
+
+# Same reasoning, different consumer: the golden RPC fixture is compared byte-wise
+# by the session engine's replay client, which throws on any unrecorded request.
+packages/session-engine-old/test/fixtures/*.json text eol=lf
+
+# Solidity and lockfiles are LF everywhere by convention; forge and pnpm both
+# write LF and neither expects to see it changed underneath them.
+*.sol text eol=lf
+pnpm-lock.yaml text eol=lf
+
+# Shell scripts must be LF. A CRLF checkout breaks the shebang under WSL and
+# Linux ("bad interpreter"), and secrets-bundle.sh is the first thing a second
+# machine runs -- before there is any environment in which to debug it.
+*.sh text eol=lf

@@ -1,0 +1,409 @@
+{
+  "schemaVersion": 1,
+  "contractName": "AttesterRegistry",
+  "sourceName": "src/registry/AttesterRegistry.sol",
+  "abi": [
+    {
+      "type": "constructor",
+      "inputs": [
+        {
+          "name": "initialOwner",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "initialGuardian",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "initialAttester",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "acceptOwnership",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "attester",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "attesterEpoch",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint32",
+          "internalType": "uint32"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "disableAttester",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "guardian",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "isCurrentAttester",
+      "inputs": [
+        {
+          "name": "signer",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "epoch",
+          "type": "uint32",
+          "internalType": "uint32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "owner",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "pendingOwner",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "renounceOwnership",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "rotateAttester",
+      "inputs": [
+        {
+          "name": "newAttester",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "setGuardian",
+      "inputs": [
+        {
+          "name": "newGuardian",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "transferOwnership",
+      "inputs": [
+        {
+          "name": "newOwner",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "event",
+      "name": "AttesterDisabled",
+      "inputs": [
+        {
+          "name": "previousAttester",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "caller",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "attesterEpoch",
+          "type": "uint32",
+          "indexed": true,
+          "internalType": "uint32"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "AttesterRotated",
+      "inputs": [
+        {
+          "name": "previousAttester",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "newAttester",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "attesterEpoch",
+          "type": "uint32",
+          "indexed": true,
+          "internalType": "uint32"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "GuardianUpdated",
+      "inputs": [
+        {
+          "name": "previousGuardian",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "newGuardian",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "OwnershipTransferStarted",
+      "inputs": [
+        {
+          "name": "previousOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "newOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "OwnershipTransferred",
+      "inputs": [
+        {
+          "name": "previousOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "newOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "error",
+      "name": "AttesterAlreadyDisabled",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "AttesterUnchanged",
+      "inputs": [
+        {
+          "name": "attester",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "GuardianUnchanged",
+      "inputs": [
+        {
+          "name": "guardian",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InvalidAttester",
+      "inputs": [
+        {
+          "name": "attester",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InvalidGuardian",
+      "inputs": [
+        {
+          "name": "guardian",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "NotOwnerOrGuardian",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "OwnableInvalidOwner",
+      "inputs": [
+        {
+          "name": "owner",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "OwnableUnauthorizedAccount",
+      "inputs": [
+        {
+          "name": "account",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "RenounceDisabled",
+      "inputs": []
+    }
+  ],
+  "bytecode": "0x60803461019b57601f61077338819003918201601f19168301916001600160401b0383118484101761019f5780849260609460405283398101031261019b57610047816101b3565b61005f6040610058602085016101b3565b93016101b3565b6001600160a01b0390911691821561018857600180546001600160a01b03199081169091555f80549182168517815560405194916001600160a01b0316907f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e09080a36001600160a01b0316801561017557600280546001600160a01b031916821790555f7f064d28d3d3071c5cbc271a261c10c2f0f0d9e319390397101aa0eb23c6bad9098180a36001600160a01b0316801561016257600380546001600160c01b0319168217600160a01b1790556001905f7f2f7bf07a4414bdf5cf65c5145de815f4cc99da888bb4ed074d3189c405b8d6198180a46105ab90816101c88239f35b6350ac526b60e01b5f525f60045260245ffd5b63f38d406d60e01b5f525f60045260245ffd5b631e4fbdf760e01b5f525f60045260245ffd5b5f80fd5b634e487b7160e01b5f52604160045260245ffd5b51906001600160a01b038216820361019b5756fe6080806040526004361015610012575f80fd5b5f3560e01c9081632dea1bf5146104fd57508063452a9320146104d557806347b0c3b3146104ad578063715018a61461048e57806379ba50971461040e5780638a0dac4a1461036d5780638da5cb5b14610346578063b901687714610283578063cc26d21c14610206578063de2755b91461013c578063e30c3978146101145763f2fde38b146100a0575f80fd5b34610110576020366003190112610110576100b9610520565b6100c1610562565b600180546001600160a01b0319166001600160a01b039283169081179091555f8054919291909116907f38d16b8cac22d99fc7c124b9cd0de2d3fa1faef420bfe791d8c362d765e227009080a3005b5f80fd5b34610110575f366003190112610110576001546040516001600160a01b039091168152602090f35b34610110575f366003190112610110575f546001600160a01b0316331415806101f1575b6101de576003546001600160a01b0381169081156101cf578061018c63ffffffff809360a01c16610536565b6001600160c01b0319909116911660a081901b919091176003559033907f804e8ca9bedacfcfb67d274ee5d758a01462a27d2412af01d06782d0c19af54b5f80a4005b6328fd8d2360e01b5f5260045ffd5b636b1883f360e01b5f523360045260245ffd5b506002546001600160a01b0316331415610160565b346101105760403660031901126101105761021f610520565b60243563ffffffff8116809103610110576020916001600160a01b031680151591908261026e575b5081610259575b506040519015158152f35b905063ffffffff60035460a01c16148261024e565b6003546001600160a01b031614915083610247565b346101105760203660031901126101105761029c610520565b6102a4610562565b6001600160a01b03168015610333576003546001600160a01b038116919082821461032057806102dd63ffffffff809360a01c16610536565b6001600160c01b03199091168317911660a081901b91909117600355917f2f7bf07a4414bdf5cf65c5145de815f4cc99da888bb4ed074d3189c405b8d6195f80a4005b50637e85992160e11b5f5260045260245ffd5b6350ac526b60e01b5f525f60045260245ffd5b34610110575f366003190112610110575f546040516001600160a01b039091168152602090f35b3461011057602036600319011261011057610386610520565b61038e610562565b6001600160a01b031680156103fb576002546001600160a01b0381169082908282146103e8576001600160a01b031916176002557f064d28d3d3071c5cbc271a261c10c2f0f0d9e319390397101aa0eb23c6bad9095f80a3005b50637ba92ba160e11b5f5260045260245ffd5b63f38d406d60e01b5f525f60045260245ffd5b34610110575f36600319011261011057600154336001600160a01b0382160361047b576001600160a01b03199081166001555f805433928116831782556001600160a01b0316907f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e09080a3005b63118cdaa760e01b5f523360045260245ffd5b34610110575f36600319011261011057638905116560e01b5f5260045ffd5b34610110575f366003190112610110576003546040516001600160a01b039091168152602090f35b34610110575f366003190112610110576002546040516001600160a01b039091168152602090f35b34610110575f3660031901126101105760209063ffffffff60035460a01c168152f35b600435906001600160a01b038216820361011057565b63ffffffff60019116019063ffffffff821161054e57565b634e487b7160e01b5f52601160045260245ffd5b5f546001600160a01b0316330361047b5756fea26469706673582212206e3fa25718ea251d5d81c1fb58a1d1a4bb5f205ce3d17b4fb7be348e204b6a7264736f6c634300081a0033",
+  "deployedBytecode": "0x6080806040526004361015610012575f80fd5b5f3560e01c9081632dea1bf5146104fd57508063452a9320146104d557806347b0c3b3146104ad578063715018a61461048e57806379ba50971461040e5780638a0dac4a1461036d5780638da5cb5b14610346578063b901687714610283578063cc26d21c14610206578063de2755b91461013c578063e30c3978146101145763f2fde38b146100a0575f80fd5b34610110576020366003190112610110576100b9610520565b6100c1610562565b600180546001600160a01b0319166001600160a01b039283169081179091555f8054919291909116907f38d16b8cac22d99fc7c124b9cd0de2d3fa1faef420bfe791d8c362d765e227009080a3005b5f80fd5b34610110575f366003190112610110576001546040516001600160a01b039091168152602090f35b34610110575f366003190112610110575f546001600160a01b0316331415806101f1575b6101de576003546001600160a01b0381169081156101cf578061018c63ffffffff809360a01c16610536565b6001600160c01b0319909116911660a081901b919091176003559033907f804e8ca9bedacfcfb67d274ee5d758a01462a27d2412af01d06782d0c19af54b5f80a4005b6328fd8d2360e01b5f5260045ffd5b636b1883f360e01b5f523360045260245ffd5b506002546001600160a01b0316331415610160565b346101105760403660031901126101105761021f610520565b60243563ffffffff8116809103610110576020916001600160a01b031680151591908261026e575b5081610259575b506040519015158152f35b905063ffffffff60035460a01c16148261024e565b6003546001600160a01b031614915083610247565b346101105760203660031901126101105761029c610520565b6102a4610562565b6001600160a01b03168015610333576003546001600160a01b038116919082821461032057806102dd63ffffffff809360a01c16610536565b6001600160c01b03199091168317911660a081901b91909117600355917f2f7bf07a4414bdf5cf65c5145de815f4cc99da888bb4ed074d3189c405b8d6195f80a4005b50637e85992160e11b5f5260045260245ffd5b6350ac526b60e01b5f525f60045260245ffd5b34610110575f366003190112610110575f546040516001600160a01b039091168152602090f35b3461011057602036600319011261011057610386610520565b61038e610562565b6001600160a01b031680156103fb576002546001600160a01b0381169082908282146103e8576001600160a01b031916176002557f064d28d3d3071c5cbc271a261c10c2f0f0d9e319390397101aa0eb23c6bad9095f80a3005b50637ba92ba160e11b5f5260045260245ffd5b63f38d406d60e01b5f525f60045260245ffd5b34610110575f36600319011261011057600154336001600160a01b0382160361047b576001600160a01b03199081166001555f805433928116831782556001600160a01b0316907f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e09080a3005b63118cdaa760e01b5f523360045260245ffd5b34610110575f36600319011261011057638905116560e01b5f5260045ffd5b34610110575f366003190112610110576003546040516001600160a01b039091168152602090f35b34610110575f366003190112610110576002546040516001600160a01b039091168152602090f35b34610110575f3660031901126101105760209063ffffffff60035460a01c168152f35b600435906001600160a01b038216820361011057565b63ffffffff60019116019063ffffffff821161054e57565b634e487b7160e01b5f52601160045260245ffd5b5f546001600160a01b0316330361047b5756fea26469706673582212206e3fa25718ea251d5d81c1fb58a1d1a4bb5f205ce3d17b4fb7be348e204b6a7264736f6c634300081a0033",
+  "linkReferences": {},
+  "deployedLinkReferences": {},
+  "selectors": {
+    "functions": {
+      "acceptOwnership()": "0x79ba5097",
+      "attester()": "0x47b0c3b3",
+      "attesterEpoch()": "0x2dea1bf5",
+      "disableAttester()": "0xde2755b9",
+      "guardian()": "0x452a9320",
+      "isCurrentAttester(address,uint32)": "0xcc26d21c",
+      "owner()": "0x8da5cb5b",
+      "pendingOwner()": "0xe30c3978",
+      "renounceOwnership()": "0x715018a6",
+      "rotateAttester(address)": "0xb9016877",
+      "setGuardian(address)": "0x8a0dac4a",
+      "transferOwnership(address)": "0xf2fde38b"
+    },
+    "errors": {
+      "AttesterAlreadyDisabled()": "0x28fd8d23",
+      "AttesterUnchanged(address)": "0xfd0b3242",
+      "GuardianUnchanged(address)": "0xf7525742",
+      "InvalidAttester(address)": "0x50ac526b",
+      "InvalidGuardian(address)": "0xf38d406d",
+      "NotOwnerOrGuardian(address)": "0x6b1883f3",
+      "OwnableInvalidOwner(address)": "0x1e4fbdf7",
+      "OwnableUnauthorizedAccount(address)": "0x118cdaa7",
+      "RenounceDisabled()": "0x89051165"
+    },
+    "events": {
+      "AttesterDisabled(address,address,uint32)": "0x804e8ca9bedacfcfb67d274ee5d758a01462a27d2412af01d06782d0c19af54b",
+      "AttesterRotated(address,address,uint32)": "0x2f7bf07a4414bdf5cf65c5145de815f4cc99da888bb4ed074d3189c405b8d619",
+      "GuardianUpdated(address,address)": "0x064d28d3d3071c5cbc271a261c10c2f0f0d9e319390397101aa0eb23c6bad909",
+      "OwnershipTransferred(address,address)": "0x8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0",
+      "OwnershipTransferStarted(address,address)": "0x38d16b8cac22d99fc7c124b9cd0de2d3fa1faef420bfe791d8c362d765e22700"
+    }
+  }
+}

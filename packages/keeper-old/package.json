@@ -1,0 +1,39 @@
+{
+  "name": "@nuvem/keeper",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Unattended attester/keeper: detects finished trading sessions, refuses what the engine refuses, and settles each window at most once",
+  "exports": {
+    ".": {
+      "types": "./src/keeper.ts",
+      "default": "./src/keeper.ts"
+    }
+  },
+  "bin": {
+    "nuvem-keeper": "./bin/keeper.mts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "keeper": "tsx bin/keeper.mts",
+    "tick": "tsx bin/keeper.mts tick",
+    "status": "tsx bin/keeper.mts status",
+    "supervisor": "tsx bin/keeper-supervisor.mts"
+  },
+  "dependencies": {
+    "@nuvem/contracts-artifacts": "workspace:*",
+    "@nuvem/session-engine": "workspace:*",
+    "@privy-io/node": "^0.28.0",
+    "pg": "^8.23.0",
+    "viem": "2.55.8"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.0",
+    "@types/pg": "^8.21.0",
+    "tsx": "4.23.1",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}

@@ -1,0 +1,197 @@
+# Docker build context filter for the repo root.
+#
+# The web image is built with the REPO ROOT as its context (it needs
+# pnpm-lock.yaml, pnpm-workspace.yaml and the contracts-artifacts sibling),
+# so this file is the only thing standing between `docker build` and a layer
+# containing every private key in the working tree. Keep the secret rules at
+# the top and do not reorder them.
+
+# ---------------------------------------------------------------------------
+# SECRETS. .env and .env.mainnet hold DEPLOYER_PRIVATE_KEY,
+# NUVEM_ATTESTER_PRIVATE_KEY, TRADING_OWNER_PRIVATE_KEY and the drill keys.
+# A COPY that captured them would bake them into an image layer permanently,
+# where they survive any later RUN rm. All runtime config is injected as
+# environment variables instead -- see docs/runbooks/DEPLOYMENT_WEB.md.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# ---------------------------------------------------------------------------
+# KEY MATERIAL OUTSIDE .env. THIS SECTION ALSO FAILED ONCE.
+#
+# docker-compose.yml tells the operator, in the recommended key-handling path:
+#
+#     printf '%s' 0x<attester-private-key> > secrets/attester.key
+#
+# at the REPO ROOT -- which is this build context. Until these rules existed the
+# file was copied straight into a layer: proven by building a probe image over
+# this context, which found /ctx/secrets/attester.key. So the runbook's own
+# preferred, most-secure path was the one that leaked the attester key.
+#
+# The attester key signs the profit measurement every settlement is built on.
+# An image carrying it, pushed anywhere, hands that signing authority away
+# permanently -- `RUN rm` in a later layer does not remove it.
+#
+# By directory, and by shape for anything written somewhere unanticipated.
+secrets/
+**/secrets/
+*.key
+**/*.key
+*.pem
+**/*.pem
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx
+# The keystore/mnemonic shapes a signer tool might leave behind.
+*.keystore
+**/*.keystore
+mnemonic.txt
+**/mnemonic.txt
+
+# ---------------------------------------------------------------------------
+# THE KEEPER'S SETTLED-WINDOW STORE. @nuvem/keeper records every settlement it
+# has made. It must never enter a build context. Baked into an image layer it
+# would mean every container started from that image begins life believing a
+# history it did not verify, and SHARING it -- which is precisely how the same
+# profit gets settled twice. It also is, literally, the operator's realized
+# trading-profit history: an image pushed to any registry publishes it. In a
+# deployment it lives on the named volume nuvem-keeper-state; see
+# docs/runbooks/ATTESTER.md.
+#
+# THIS SECTION FAILED ONCE ALREADY, so read the naming carefully before editing.
+# The previous rule was `**/keeper-state`, which does NOT match the actual
+# default directory `.keeper-state` (LEADING DOT -- packages/keeper-old/src/config.ts
+# falls back to ".keeper-state" when NUVEM_KEEPER_STATE_DIR is unset). Every
+# operator who had ever run `pnpm --dir packages/keeper-old tick` on the build host
+# shipped their journal inside the image. The only reason the current
+# nuvem-keeper:local is clean is that no such directory existed when it was
+# built. Do not rely on that again.
+#
+# TWO INDEPENDENT LAYERS, on purpose:
+#
+#   (1) THE DIRECTORY, under every name it can have. This is the contract, and
+#       it is what actually holds. The store is created relative to the PROCESS
+#       CWD, which is whatever directory the CLI was launched from -- the repo
+#       root, packages/keeper-old, or anywhere else -- so every rule is anchored
+#       with `**/` as well as bare.
+#   (2) THE FILES INSIDE IT, by shape. Pure defence in depth for the case where
+#       someone points NUVEM_KEEPER_STATE_DIR at a directory nobody anticipated.
+#       Layer (2) is a backstop; never let it become the only thing catching a
+#       state directory.
+#
+# The store is MIGRATING FROM JSONL TO node:sqlite (packages/keeper-old/src/ledger.ts,
+# owned elsewhere), so both shapes are covered, including SQLite's sidecars:
+# `-wal` and `-shm` in WAL mode and `-journal` in rollback mode are separate
+# files, and a `.sqlite` shipped without its `-wal` is a torn database, which is
+# a worse failure than shipping neither.
+# ---------------------------------------------------------------------------
+
+# (1) The state directory, every name.
+.keeper-state
+**/.keeper-state
+keeper-state
+**/keeper-state
+packages/keeper-old/state
+packages/keeper-old/**/state
+
+# (2) Store files by shape, wherever they landed.
+#
+# `**/*.jsonl` is now blanket rather than keeper-scoped. The old comment argued
+# a JSONL test fixture elsewhere in the workspace was worth keeping; that trade
+# is not worth making for an image whose only two consumers (@nuvem/web,
+# @nuvem/keeper) read no .jsonl at all. If one is ever genuinely needed, add a
+# `!` re-include for that exact path -- do not widen this back out.
+*.jsonl
+**/*.jsonl
+*.sqlite
+**/*.sqlite
+**/*.sqlite3
+**/*.sqlite-wal
+**/*.sqlite-shm
+**/*.sqlite-journal
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.db-journal
+# NARROWED FROM `**/journal-*`, which also matched packages/keeper-old/src/
+# journal-store.ts and silently kept a SOURCE FILE out of the image. The build
+# then failed inside the container with "Cannot find module ./journal-store.js"
+# while typechecking fine on the host — the worst shape of this class of bug,
+# because the host says everything is fine.
+#
+# The keeper's journal files are named by ledger.ts as `keeper-<slug>.db` and its
+# SQLite siblings, all of which the patterns above already cover. This one only
+# needs to catch a rollback journal sitting beside a database.
+**/*-journal
+**/snapshot-*.json
+**/ledger-*.sqlite*
+**/ledger-*.db*
+# The ledger's advisory lock file, named exactly this by ledger.ts. NOT a
+# blanket `**/*.lock`: that would also swallow packages/contracts/foundry.lock,
+# and quietly dropping an unrelated tracked file from the context is the class
+# of surprise this file exists to prevent.
+**/keeper.lock
+
+# ---------------------------------------------------------------------------
+# Installed / generated trees. Never ship the host's node_modules: pnpm's
+# store is symlink-based and host-absolute, so copying it in produces
+# dangling links and MODULE_NOT_FOUND at boot.
+# ---------------------------------------------------------------------------
+**/node_modules
+.pnpm-store
+**/.next
+**/out
+**/cache
+**/broadcast
+**/coverage
+
+# Workspace build output is excluded, WITH ONE DELIBERATE EXCEPTION.
+# @nuvem/contracts-artifacts/dist is the only committed build product the
+# image consumes: Foundry is not installed in the container and the export
+# script cannot regenerate it there (it reads packages/contracts/out, which
+# is itself excluded above and gitignored). See the runbook.
+**/dist
+!packages/contracts-artifacts/dist
+!packages/contracts-artifacts/dist/**
+
+# ---------------------------------------------------------------------------
+# Solidity toolchain inputs the web image has no use for. packages/contracts
+# is filtered out of the install; lib/ is a git submodule that may not even
+# be initialised in a CI or Railway clone.
+# ---------------------------------------------------------------------------
+packages/contracts/lib
+packages/contracts/.openzeppelin
+packages/contracts/deployments
+
+# ---------------------------------------------------------------------------
+# Repo furniture irrelevant to the build.
+# ---------------------------------------------------------------------------
+.git
+.gitmodules
+.github
+.agents
+.claude
+docs
+*.log
+*.md
+!packages/*/README.md
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
+
+# ---------------------------------------------------------------------------
+# The Solana lab. scripts/.local holds the attester and drill keypairs -- the
+# same never-in-a-layer rule as the .env files above. target/ is gigabytes of
+# Rust build output of which images need exactly one committed file (the IDL);
+# test-ledger is a local validator's disk.
+# ---------------------------------------------------------------------------
+packages/solana-lab-old/program/scripts/.local
+packages/solana-lab-old/program/target/*
+!packages/solana-lab-old/program/target/idl
+packages/solana-lab-old/program/test-ledger
+packages/solana-lab-old/program/.anchor

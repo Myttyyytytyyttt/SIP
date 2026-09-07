@@ -1,0 +1,56 @@
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+cache_path = "cache"
+libs = ["lib", "node_modules"]
+solc_version = "0.8.26"
+optimizer = true
+# 20, not the default 200, and it was measured rather than guessed.
+#
+# `PersonalVault` is the binding constraint: it is a beacon implementation sealed
+# into a cohort, so its runtime size has to fit EIP-170 with room left to fix a
+# bug in it. Sweeping the setting gives a curve that is NOT monotonic, so 20 is a
+# genuine minimum rather than "lower is smaller" — 1 is WORSE than 20.
+#
+# RE-MEASURED against the contract as it stands, because the previous sweep was
+# taken when PersonalVault was ~20,000 bytes and no longer described it:
+#
+#   runs=1: 23,786   runs=20: 23,691   runs=50: 23,715   runs=100: 23,756   runs=200: 24,003
+#
+# 20 survived the re-sweep. Re-run it after any change that moves the size
+# materially — an optimum tuned for a contract that has since grown by 20% is a
+# number that looks measured and is not.
+#
+# What it costs is execution gas, and on this chain that is close to free: a real
+# mainnet settlement used 450,545 gas and paid 0.0000188 ETH, about $0.035. The
+# usual size-versus-gas trade does not apply the way it would on L1.
+optimizer_runs = 20
+via_ir = true
+evm_version = "cancun"
+fs_permissions = [
+  { access = "read-write", path = "./deployments" },
+  { access = "read", path = "../../.env" }
+]
+
+[profile.ci]
+# 10,000 rather than 1,024. The properties being fuzzed here are arithmetic on
+# other people's money — the contribution split, the rolling caps, the frontier
+# ordering — and the failure they guard against is a single input in a range that
+# a thousand draws happens to miss. CI is where that cost is affordable; the
+# local [fuzz] profile below stays small so a working iteration is still fast.
+fuzz = { runs = 10000 }
+invariant = { runs = 256, depth = 96, fail_on_revert = true }
+
+[fuzz]
+runs = 512
+
+[invariant]
+runs = 128
+depth = 64
+fail_on_revert = true
+
+[rpc_endpoints]
+robinhood_testnet = "${RH_TESTNET_RPC_URL}"
+

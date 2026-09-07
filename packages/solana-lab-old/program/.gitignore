@@ -1,0 +1,14 @@
+.anchor
+# target/ is build output EXCEPT the IDL: target/idl/nuvem_vault.json is
+# COMMITTED because it describes the one fixed program deployed on mainnet —
+# the supervisor loads it explicitly, and a Railway clone without it cannot
+# start. gitignore cannot re-include below an excluded dir, hence the ladder.
+target/*
+!target/idl/
+target/idl/*
+!target/idl/nuvem_vault.json
+node_modules
+test-ledger
+.DS_Store
+scripts/.local
+.env.mainnet

@@ -1,0 +1,33 @@
+{
+  "name": "@nuvem/contracts-artifacts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./index.json": "./dist/index.json",
+    "./artifacts/*": "./dist/artifacts/*.json",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "node scripts/export-artifacts.mjs",
+    "build:from-out": "node scripts/export-artifacts.mjs --skip-forge",
+    "test": "pnpm run build && node --test test/*.test.mjs",
+    "test:from-out": "pnpm run build:from-out && node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "viem": "2.55.8"
+  },
+  "peerDependencies": {
+    "viem": "2.55.8"
+  }
+}

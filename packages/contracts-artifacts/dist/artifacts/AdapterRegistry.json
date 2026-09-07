@@ -1,0 +1,668 @@
+{
+  "schemaVersion": 1,
+  "contractName": "AdapterRegistry",
+  "sourceName": "src/registry/AdapterRegistry.sol",
+  "abi": [
+    {
+      "type": "constructor",
+      "inputs": [
+        {
+          "name": "initialOwner",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "initialGuardian",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "acceptOwnership",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "adapterCount",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "adapterIdAt",
+      "inputs": [
+        {
+          "name": "index",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "adapterRuntimeCodeHash",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "adapterStatusEpoch",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "deactivateAdapter",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "getAdapter",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "guardian",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "isAdapterActive",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "owner",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "pendingOwner",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "reactivateAdapter",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "registerAdapter",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "adapter",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "renounceOwnership",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "resolveActiveAdapter",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "expectedStatusEpoch",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "adapter",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "setGuardian",
+      "inputs": [
+        {
+          "name": "newGuardian",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "transferOwnership",
+      "inputs": [
+        {
+          "name": "newOwner",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "event",
+      "name": "AdapterDeactivated",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "adapter",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "statusEpoch",
+          "type": "uint64",
+          "indexed": true,
+          "internalType": "uint64"
+        },
+        {
+          "name": "caller",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "AdapterReactivated",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "adapter",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "statusEpoch",
+          "type": "uint64",
+          "indexed": true,
+          "internalType": "uint64"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "AdapterRegistered",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "adapter",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "runtimeCodeHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "statusEpoch",
+          "type": "uint64",
+          "indexed": false,
+          "internalType": "uint64"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "GuardianUpdated",
+      "inputs": [
+        {
+          "name": "previousGuardian",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "newGuardian",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "OwnershipTransferStarted",
+      "inputs": [
+        {
+          "name": "previousOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "newOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "OwnershipTransferred",
+      "inputs": [
+        {
+          "name": "previousOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "newOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "error",
+      "name": "AdapterAlreadyActive",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "AdapterAlreadyInactive",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "AdapterAlreadyRegistered",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "AdapterCodeChanged",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "expectedCodeHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "actualCodeHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "AdapterInactive",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "AdapterIndexOutOfBounds",
+      "inputs": [
+        {
+          "name": "index",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "count",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "AdapterNotRegistered",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "GuardianUnchanged",
+      "inputs": [
+        {
+          "name": "guardian",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InvalidAdapter",
+      "inputs": [
+        {
+          "name": "adapter",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InvalidAdapterId",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InvalidAdapterStatusEpoch",
+      "inputs": [
+        {
+          "name": "adapterId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "expectedEpoch",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "actualEpoch",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InvalidGuardian",
+      "inputs": [
+        {
+          "name": "guardian",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "NotOwnerOrGuardian",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "OwnableInvalidOwner",
+      "inputs": [
+        {
+          "name": "owner",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "OwnableUnauthorizedAccount",
+      "inputs": [
+        {
+          "name": "account",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "RenounceDisabled",
+      "inputs": []
+    }
+  ],
+  "bytecode": "0x60803461012c57601f610aec38819003918201601f19168301916001600160401b0383118484101761013057808492604094855283398101031261012c57610052602061004b83610144565b9201610144565b6001600160a01b0390911690811561011957600180546001600160a01b03199081169091555f80549182168417815560405193916001600160a01b0316907f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e09080a36001600160a01b0316801561010657600280546001600160a01b031916821790555f7f064d28d3d3071c5cbc271a261c10c2f0f0d9e319390397101aa0eb23c6bad9098180a361099390816101598239f35b63f38d406d60e01b5f525f60045260245ffd5b631e4fbdf760e01b5f525f60045260245ffd5b5f80fd5b634e487b7160e01b5f52604160045260245ffd5b51906001600160a01b038216820361012c5756fe60806040526004361015610011575f80fd5b5f3560e01c80630948d75e146107965780631a72472b146105f45780633b8324101461058c578063452a932014610564578063715018a61461054557806379ba5097146104c55780638272e138146104935780638a0dac4a146103f25780638da5cb5b146103cb5780639a87c7731461032b578063ac5bfaba14610242578063c77c880214610209578063d01b03bd146101dc578063ddfaff1d1461018d578063e30c397814610165578063f2fde38b146100f55763f79001c5146100d4575f80fd5b346100f1575f3660031901126100f1576020600454604051908152f35b5f80fd5b346100f15760203660031901126100f15761010e61084a565b6101166108e0565b600180546001600160a01b0319166001600160a01b039283169081179091555f8054919291909116907f38d16b8cac22d99fc7c124b9cd0de2d3fa1faef420bfe791d8c362d765e227009080a3005b346100f1575f3660031901126100f1576001546040516001600160a01b039091168152602090f35b346100f15760203660031901126100f157600435600454808210156101c65760206101b7836108b4565b90549060031b1c604051908152f35b90632c7d5c3960e21b5f5260045260245260445ffd5b346100f15760203660031901126100f1576004355f5260036020526020600160405f200154604051908152f35b346100f15760203660031901126100f1576004355f52600360205260206001600160401b03600260405f20015460081c16604051908152f35b346100f15760203660031901126100f15760043560018060a01b035f541633141580610316575b61030357610276816108f3565b906002820191825460ff8116156102f057806102a06001600160401b036102ae9360081c16610860565b94859160ff19168155610892565b60018060a01b03905416907f5b77b5a64494d0a0e6c46911e756584e206276e1bea5a2cf19713e024151074760206001600160401b03604051953387521694a4005b82632a5e43f960e21b5f5260045260245ffd5b636b1883f360e01b5f523360045260245ffd5b506002546001600160a01b0316331415610269565b346100f15760403660031901126100f1576004356024356001600160401b0381168091036100f15761035c826108f3565b90600282015460ff8116156103b85760081c6001600160401b03169080820361039f5760208361038c8187610929565b546040516001600160a01b039091168152f35b836379826e5560e11b5f5260045260245260445260645ffd5b836379ad8b6560e01b5f5260045260245ffd5b346100f1575f3660031901126100f1575f546040516001600160a01b039091168152602090f35b346100f15760203660031901126100f15761040b61084a565b6104136108e0565b6001600160a01b03168015610480576002546001600160a01b03811690829082821461046d576001600160a01b031916176002557f064d28d3d3071c5cbc271a261c10c2f0f0d9e319390397101aa0eb23c6bad9095f80a3005b50637ba92ba160e11b5f5260045260245ffd5b63f38d406d60e01b5f525f60045260245ffd5b346100f15760203660031901126100f1576004355f526003602052602060018060a01b0360405f205416604051908152f35b346100f1575f3660031901126100f157600154336001600160a01b03821603610532576001600160a01b03199081166001555f805433928116831782556001600160a01b0316907f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e09080a3005b63118cdaa760e01b5f523360045260245ffd5b346100f1575f3660031901126100f157638905116560e01b5f5260045ffd5b346100f1575f3660031901126100f1576002546040516001600160a01b039091168152602090f35b346100f15760203660031901126100f1576004355f526003602052602060405f2060018060a01b038154169081151591826105e5575b826105d4575b50506040519015158152f35b60019192503f9101541482806105c8565b600282015460ff1692506105c2565b346100f15760403660031901126100f1576004356024356001600160a01b038116908181036100f1576106256108e0565b8215610783578115801561077a575b610767575f838152600360205260409020546001600160a01b0316610754573f9160405160808101908082106001600160401b03831117610740576106e0916040528381526001600160401b03602082018681526002604084019360018552606081019260018452875f52600360205260405f209160018060a01b0390511660018060a01b0319835416178255516001820155019251151560ff80198554169116178355511690610892565b600454600160401b811015610740578060016106ff92016004556108b4565b81549060031b9083821b915f19901b19161790557fc012e8c520ce1588579c89c52b8beac83544337542c4375da425bde68079e5a5602060405160018152a4005b634e487b7160e01b5f52604160045260245ffd5b82636ee70a8160e11b5f5260045260245ffd5b50633283c86d60e21b5f5260045260245ffd5b50803b15610634565b826329d5b51f60e21b5f5260045260245ffd5b346100f15760203660031901126100f1576004356107b26108e0565b6107bb816108f3565b600281019081549060ff8216610837576108016001600160401b03926001946107e48488610929565b6107f2858360081c16610860565b95869260ff1916178155610892565b549116916001600160a01b03909116907fac2b867df7f8104f7f37bb97ee7a5c34bfb335f11ef674e7dbe0bb0ef0d92ae05f80a4005b836310c6fc2560e21b5f5260045260245ffd5b600435906001600160a01b03821682036100f157565b6001600160401b036001911601906001600160401b03821161087e57565b634e487b7160e01b5f52601160045260245ffd5b90610100600160481b0382549160081b1690610100600160481b031916179055565b6004548110156108cc5760045f5260205f2001905f90565b634e487b7160e01b5f52603260045260245ffd5b5f546001600160a01b0316330361053257565b5f8181526003602052604090208054909291906001600160a01b0316156109175750565b631d827fed60e11b5f5260045260245ffd5b6001808060a01b038354163f9201549081830361094557505050565b639767ef0f60e01b5f5260045260245260445260645ffdfea2646970667358221220458812514603e5cb29aa28cbf3ed6288d7e78a6da5e75fa8e527428493aee01064736f6c634300081a0033",
+  "deployedBytecode": "0x60806040526004361015610011575f80fd5b5f3560e01c80630948d75e146107965780631a72472b146105f45780633b8324101461058c578063452a932014610564578063715018a61461054557806379ba5097146104c55780638272e138146104935780638a0dac4a146103f25780638da5cb5b146103cb5780639a87c7731461032b578063ac5bfaba14610242578063c77c880214610209578063d01b03bd146101dc578063ddfaff1d1461018d578063e30c397814610165578063f2fde38b146100f55763f79001c5146100d4575f80fd5b346100f1575f3660031901126100f1576020600454604051908152f35b5f80fd5b346100f15760203660031901126100f15761010e61084a565b6101166108e0565b600180546001600160a01b0319166001600160a01b039283169081179091555f8054919291909116907f38d16b8cac22d99fc7c124b9cd0de2d3fa1faef420bfe791d8c362d765e227009080a3005b346100f1575f3660031901126100f1576001546040516001600160a01b039091168152602090f35b346100f15760203660031901126100f157600435600454808210156101c65760206101b7836108b4565b90549060031b1c604051908152f35b90632c7d5c3960e21b5f5260045260245260445ffd5b346100f15760203660031901126100f1576004355f5260036020526020600160405f200154604051908152f35b346100f15760203660031901126100f1576004355f52600360205260206001600160401b03600260405f20015460081c16604051908152f35b346100f15760203660031901126100f15760043560018060a01b035f541633141580610316575b61030357610276816108f3565b906002820191825460ff8116156102f057806102a06001600160401b036102ae9360081c16610860565b94859160ff19168155610892565b60018060a01b03905416907f5b77b5a64494d0a0e6c46911e756584e206276e1bea5a2cf19713e024151074760206001600160401b03604051953387521694a4005b82632a5e43f960e21b5f5260045260245ffd5b636b1883f360e01b5f523360045260245ffd5b506002546001600160a01b0316331415610269565b346100f15760403660031901126100f1576004356024356001600160401b0381168091036100f15761035c826108f3565b90600282015460ff8116156103b85760081c6001600160401b03169080820361039f5760208361038c8187610929565b546040516001600160a01b039091168152f35b836379826e5560e11b5f5260045260245260445260645ffd5b836379ad8b6560e01b5f5260045260245ffd5b346100f1575f3660031901126100f1575f546040516001600160a01b039091168152602090f35b346100f15760203660031901126100f15761040b61084a565b6104136108e0565b6001600160a01b03168015610480576002546001600160a01b03811690829082821461046d576001600160a01b031916176002557f064d28d3d3071c5cbc271a261c10c2f0f0d9e319390397101aa0eb23c6bad9095f80a3005b50637ba92ba160e11b5f5260045260245ffd5b63f38d406d60e01b5f525f60045260245ffd5b346100f15760203660031901126100f1576004355f526003602052602060018060a01b0360405f205416604051908152f35b346100f1575f3660031901126100f157600154336001600160a01b03821603610532576001600160a01b03199081166001555f805433928116831782556001600160a01b0316907f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e09080a3005b63118cdaa760e01b5f523360045260245ffd5b346100f1575f3660031901126100f157638905116560e01b5f5260045ffd5b346100f1575f3660031901126100f1576002546040516001600160a01b039091168152602090f35b346100f15760203660031901126100f1576004355f526003602052602060405f2060018060a01b038154169081151591826105e5575b826105d4575b50506040519015158152f35b60019192503f9101541482806105c8565b600282015460ff1692506105c2565b346100f15760403660031901126100f1576004356024356001600160a01b038116908181036100f1576106256108e0565b8215610783578115801561077a575b610767575f838152600360205260409020546001600160a01b0316610754573f9160405160808101908082106001600160401b03831117610740576106e0916040528381526001600160401b03602082018681526002604084019360018552606081019260018452875f52600360205260405f209160018060a01b0390511660018060a01b0319835416178255516001820155019251151560ff80198554169116178355511690610892565b600454600160401b811015610740578060016106ff92016004556108b4565b81549060031b9083821b915f19901b19161790557fc012e8c520ce1588579c89c52b8beac83544337542c4375da425bde68079e5a5602060405160018152a4005b634e487b7160e01b5f52604160045260245ffd5b82636ee70a8160e11b5f5260045260245ffd5b50633283c86d60e21b5f5260045260245ffd5b50803b15610634565b826329d5b51f60e21b5f5260045260245ffd5b346100f15760203660031901126100f1576004356107b26108e0565b6107bb816108f3565b600281019081549060ff8216610837576108016001600160401b03926001946107e48488610929565b6107f2858360081c16610860565b95869260ff1916178155610892565b549116916001600160a01b03909116907fac2b867df7f8104f7f37bb97ee7a5c34bfb335f11ef674e7dbe0bb0ef0d92ae05f80a4005b836310c6fc2560e21b5f5260045260245ffd5b600435906001600160a01b03821682036100f157565b6001600160401b036001911601906001600160401b03821161087e57565b634e487b7160e01b5f52601160045260245ffd5b90610100600160481b0382549160081b1690610100600160481b031916179055565b6004548110156108cc5760045f5260205f2001905f90565b634e487b7160e01b5f52603260045260245ffd5b5f546001600160a01b0316330361053257565b5f8181526003602052604090208054909291906001600160a01b0316156109175750565b631d827fed60e11b5f5260045260245ffd5b6001808060a01b038354163f9201549081830361094557505050565b639767ef0f60e01b5f5260045260245260445260645ffdfea2646970667358221220458812514603e5cb29aa28cbf3ed6288d7e78a6da5e75fa8e527428493aee01064736f6c634300081a0033",
+  "linkReferences": {},
+  "deployedLinkReferences": {},
+  "selectors": {
+    "functions": {
+      "acceptOwnership()": "0x79ba5097",
+      "adapterCount()": "0xf79001c5",
+      "adapterIdAt(uint256)": "0xddfaff1d",
+      "adapterRuntimeCodeHash(bytes32)": "0xd01b03bd",
+      "adapterStatusEpoch(bytes32)": "0xc77c8802",
+      "deactivateAdapter(bytes32)": "0xac5bfaba",
+      "getAdapter(bytes32)": "0x8272e138",
+      "guardian()": "0x452a9320",
+      "isAdapterActive(bytes32)": "0x3b832410",
+      "owner()": "0x8da5cb5b",
+      "pendingOwner()": "0xe30c3978",
+      "reactivateAdapter(bytes32)": "0x0948d75e",
+      "registerAdapter(bytes32,address)": "0x1a72472b",
+      "renounceOwnership()": "0x715018a6",
+      "resolveActiveAdapter(bytes32,uint64)": "0x9a87c773",
+      "setGuardian(address)": "0x8a0dac4a",
+      "transferOwnership(address)": "0xf2fde38b"
+    },
+    "errors": {
+      "AdapterAlreadyActive(bytes32)": "0x431bf094",
+      "AdapterAlreadyInactive(bytes32)": "0xa9790fe4",
+      "AdapterAlreadyRegistered(bytes32)": "0xddce1502",
+      "AdapterCodeChanged(bytes32,bytes32,bytes32)": "0x9767ef0f",
+      "AdapterInactive(bytes32)": "0x79ad8b65",
+      "AdapterIndexOutOfBounds(uint256,uint256)": "0xb1f570e4",
+      "AdapterNotRegistered(bytes32)": "0x3b04ffda",
+      "GuardianUnchanged(address)": "0xf7525742",
+      "InvalidAdapter(address)": "0xca0f21b4",
+      "InvalidAdapterId(bytes32)": "0xa756d47c",
+      "InvalidAdapterStatusEpoch(bytes32,uint64,uint64)": "0xf304dcaa",
+      "InvalidGuardian(address)": "0xf38d406d",
+      "NotOwnerOrGuardian(address)": "0x6b1883f3",
+      "OwnableInvalidOwner(address)": "0x1e4fbdf7",
+      "OwnableUnauthorizedAccount(address)": "0x118cdaa7",
+      "RenounceDisabled()": "0x89051165"
+    },
+    "events": {
+      "AdapterDeactivated(bytes32,address,uint64,address)": "0x5b77b5a64494d0a0e6c46911e756584e206276e1bea5a2cf19713e0241510747",
+      "AdapterReactivated(bytes32,address,uint64)": "0xac2b867df7f8104f7f37bb97ee7a5c34bfb335f11ef674e7dbe0bb0ef0d92ae0",
+      "AdapterRegistered(bytes32,address,bytes32,uint64)": "0xc012e8c520ce1588579c89c52b8beac83544337542c4375da425bde68079e5a5",
+      "GuardianUpdated(address,address)": "0x064d28d3d3071c5cbc271a261c10c2f0f0d9e319390397101aa0eb23c6bad909",
+      "OwnershipTransferred(address,address)": "0x8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0",
+      "OwnershipTransferStarted(address,address)": "0x38d16b8cac22d99fc7c124b9cd0de2d3fa1faef420bfe791d8c362d765e22700"
+    }
+  }
+}

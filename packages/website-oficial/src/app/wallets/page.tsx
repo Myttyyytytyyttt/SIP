@@ -1,0 +1,92 @@
+/**
+ * /wallets — the first REAL surface: pension key, vault, trading wallets.
+ *
+ * SERVER COMPONENT. It reads the environment at request time (never a
+ * NEXT_PUBLIC_ value baked into the bundle), and renders nothing that depends
+ * on Privy or wallet state — that starts inside <Providers>, gated on `ready`.
+ * A missing variable renders the checklist instead of a broken page.
+ */
+
+import { ArrowLeft } from "lucide-react";
+import type { Metadata } from "next";
+import Link from "next/link";
+
+import Providers from "@/app/providers";
+import { ModeToggle } from "@/components/mode-toggle";
+import { Num } from "@/components/num";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { WalletsScreen } from "@/components/wallets/WalletsScreen";
+import { loadConfig, toPublicConfig, type ConfigProblem, type PublicConfig } from "@/lib/config";
+
+export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Wallets — SIP",
+  description: "Your pension key, your vault, and the trading wallets that put aside a slice of every buy and sell.",
+};
+
+export default function WalletsPage() {
+  const loaded = loadConfig();
+
+  return (
+    <div className="flex min-h-dvh flex-col">
+      <header className="sticky top-0 z-40 h-14 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+        <div className="flex h-14 items-center gap-3 px-4 lg:px-6">
+          <Button variant="ghost" size="icon" asChild>
+            <Link href="/" aria-label="Back to the pension">
+              <ArrowLeft aria-hidden />
+            </Link>
+          </Button>
+          <div className="flex items-baseline gap-2">
+            <h1 className="font-semibold tracking-tight">SIP</h1>
+            <span className="text-xs text-muted-foreground">Wallets</span>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <ModeToggle />
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto w-full max-w-3xl flex-1 p-4 lg:p-6">
+        {loaded.ok ? <Screen config={toPublicConfig(loaded.config)} /> : <SetupChecklist problems={loaded.problems} />}
+      </main>
+    </div>
+  );
+}
+
+/** The browser's share of the configuration, built once and handed to both the provider and the screen. */
+function Screen({ config }: { config: PublicConfig }) {
+  return (
+    <Providers config={config}>
+      <WalletsScreen config={config} />
+    </Providers>
+  );
+}
+
+/** The "collect every problem into a checklist" shape: fix all of them, restart, reload. */
+function SetupChecklist({ problems }: { problems: readonly ConfigProblem[] }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>The wallets page is not configured</CardTitle>
+        <CardDescription>
+          The server is missing what it needs to read the chain. Set these in the package&apos;s environment, restart,
+          and reload.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ol className="space-y-3 text-sm">
+          {problems.map((problem) => (
+            <li key={problem.variable} className="space-y-0.5">
+              <div>
+                <Num className="font-medium">{problem.variable}</Num> — {problem.message}
+              </div>
+              <div className="text-xs text-muted-foreground">{problem.howToFix}</div>
+            </li>
+          ))}
+        </ol>
+      </CardContent>
+    </Card>
+  );
+}

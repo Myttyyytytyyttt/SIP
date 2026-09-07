@@ -1,0 +1,1656 @@
+{
+  "address": "7rtgXTu852M1NTx7PLoJd3bChaCb2hgsgv5o54aFv6Fy",
+  "metadata": {
+    "name": "nuvem_vault",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Created with Anchor"
+  },
+  "instructions": [
+    {
+      "name": "convert",
+      "discriminator": [
+        122,
+        80,
+        212,
+        208,
+        92,
+        200,
+        34,
+        161
+      ],
+      "accounts": [
+        {
+          "name": "crank",
+          "docs": [
+            "NOT ANY SIGNER. This was a bare `Signer` with no constraint, which let a",
+            "stranger wrap a vault's SOL and sell it through a pool of their own —",
+            "the floor below was the only limit, and it was a constant. `config`",
+            "below is what makes this account mean something."
+          ],
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault.owner",
+                "account": "Vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "policy",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  118,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault_wsol",
+          "docs": [
+            "The vault's wSOL account — the conversion's source."
+          ],
+          "writable": true
+        },
+        {
+          "name": "vault_in",
+          "docs": [
+            "The vault's in-asset account — where the fill lands and is measured."
+          ],
+          "writable": true
+        },
+        {
+          "name": "venue_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount_in",
+          "type": "u64"
+        },
+        {
+          "name": "min_out",
+          "type": "u64"
+        },
+        {
+          "name": "venue_data",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "create_vault",
+      "discriminator": [
+        29,
+        237,
+        247,
+        208,
+        193,
+        82,
+        54,
+        135
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "skim_bps",
+          "type": "u16"
+        }
+      ]
+    },
+    {
+      "name": "init_config",
+      "discriminator": [
+        23,
+        235,
+        115,
+        232,
+        168,
+        96,
+        1,
+        231
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "attester",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "invest",
+      "discriminator": [
+        13,
+        245,
+        180,
+        103,
+        254,
+        182,
+        121,
+        4
+      ],
+      "accounts": [
+        {
+          "name": "crank",
+          "docs": [
+            "The vault's owner, or the keeper the config names. NOT anyone.",
+            "",
+            "THIS SAID \"Anyone\" AND MEANT IT, and that was wrong for the same reason",
+            "it was wrong on convert and wrap_sol: the route lives in",
+            "`remaining_accounts`, so a caller who is also the liquidity provider on",
+            "that route sets both sides of the trade. The owner-signed floor bounds",
+            "the loss per call but does not prevent it — a stranger could spend the",
+            "vault's staged USDC at the floor, pocket the spread in their own pool,",
+            "and burn the vault's 30-day allowance doing it, which stops the real",
+            "keeper from investing at all. Constraining convert and wrap_sol while",
+            "leaving this open also made the keeper panic switch a half-measure: a",
+            "suspected keeper key, disarmed in the config, could still call this."
+          ],
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault.owner",
+                "account": "Vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "policy",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  118,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault_in",
+          "docs": [
+            "The vault's in-asset account. The venue pulls from it under the vault",
+            "PDA's CPI signature; the measured delta bounds how much."
+          ],
+          "writable": true
+        },
+        {
+          "name": "vault_target",
+          "docs": [
+            "The vault's token account for the TARGET mint — where the fill lands",
+            "and is measured. Its authority must be the vault, or the \"purchase\"",
+            "lands somewhere the vault cannot withdraw from."
+          ],
+          "writable": true
+        },
+        {
+          "name": "target_mint"
+        },
+        {
+          "name": "venue_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "leg_index",
+          "type": "u8"
+        },
+        {
+          "name": "amount_in",
+          "type": "u64"
+        },
+        {
+          "name": "min_out",
+          "type": "u64"
+        },
+        {
+          "name": "venue_data",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "link_wallet",
+      "discriminator": [
+        86,
+        92,
+        31,
+        146,
+        228,
+        51,
+        209,
+        230
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "wallet",
+          "docs": [
+            "The trading wallet consents by signing; nobody can be linked to a vault",
+            "against their will, and no vault owner can claim a wallet they don't",
+            "control."
+          ],
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "trading_link",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  105,
+                  110,
+                  107
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "set_attester",
+      "docs": [
+        "Replaces the attester `settle` verifies against. See set_attester.rs —",
+        "it did not exist until the original attester key leaked, which is one",
+        "day too late for every key it will ever protect."
+      ],
+      "discriminator": [
+        56,
+        199,
+        234,
+        175,
+        198,
+        241,
+        83,
+        29
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "attester",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "set_invest_policy",
+      "discriminator": [
+        61,
+        189,
+        251,
+        88,
+        127,
+        103,
+        109,
+        28
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "policy",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  118,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "legs",
+          "type": {
+            "vec": {
+              "defined": {
+                "name": "InvestmentLeg"
+              }
+            }
+          }
+        },
+        {
+          "name": "venue_program",
+          "type": "pubkey"
+        },
+        {
+          "name": "min_convert_rate_wad",
+          "type": "u128"
+        },
+        {
+          "name": "min_investment",
+          "type": "u64"
+        },
+        {
+          "name": "max_per_call",
+          "type": "u64"
+        },
+        {
+          "name": "max_rolling_30d",
+          "type": "u64"
+        },
+        {
+          "name": "enabled",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "set_keeper",
+      "docs": [
+        "Names the account allowed to crank `wrap_sol` and `convert`. See",
+        "set_keeper.rs — before it existed, both were open to any signer."
+      ],
+      "discriminator": [
+        102,
+        94,
+        23,
+        78,
+        157,
+        222,
+        243,
+        214
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "keeper",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "set_policy",
+      "discriminator": [
+        40,
+        133,
+        12,
+        157,
+        235,
+        202,
+        2,
+        132
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "skim_bps",
+          "type": "u16"
+        },
+        {
+          "name": "paused",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "settle",
+      "discriminator": [
+        175,
+        42,
+        185,
+        87,
+        144,
+        131,
+        102,
+        212
+      ],
+      "accounts": [
+        {
+          "name": "wallet",
+          "docs": [
+            "The trading wallet: signer AND payer of the contribution."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault.owner",
+                "account": "Vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "trading_link",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  105,
+                  110,
+                  107
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "instructions_sysvar",
+          "docs": [
+            "introspection of this very transaction."
+          ],
+          "address": "Sysvar1nstructions1111111111111111111111111"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "session_start_slot",
+          "type": "u64"
+        },
+        {
+          "name": "session_end_slot",
+          "type": "u64"
+        },
+        {
+          "name": "profit_lamports",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "unlink_wallet",
+      "discriminator": [
+        220,
+        121,
+        97,
+        13,
+        193,
+        137,
+        209,
+        159
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "owner",
+          "docs": [
+            "for the link account, which was the vault owner at link time. Pinned to",
+            "vault.owner by the address constraint; no data is read or written."
+          ],
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault.owner",
+                "account": "Vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "trading_link",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  105,
+                  110,
+                  107
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "trading_link.wallet",
+                "account": "TradingLink"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "withdraw",
+      "discriminator": [
+        183,
+        18,
+        70,
+        156,
+        148,
+        109,
+        161,
+        34
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "withdraw_token",
+      "discriminator": [
+        136,
+        235,
+        181,
+        5,
+        101,
+        109,
+        57,
+        81
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_mint"
+        },
+        {
+          "name": "vault_token",
+          "docs": [
+            "The vault's token account for this mint — the source. Its authority MUST",
+            "be the vault PDA, or this would be a transfer out of someone else's",
+            "account that the vault happens to be able to name."
+          ],
+          "writable": true
+        },
+        {
+          "name": "owner_token",
+          "docs": [
+            "The owner's associated token account — the destination, created if it",
+            "does not exist yet. `associated_token::authority = owner` is the pin",
+            "that keeps the exit \"only you\": savings can only land in the owner's",
+            "own account, never an arbitrary one."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "account",
+                "path": "token_program"
+              },
+              {
+                "kind": "account",
+                "path": "token_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "wrap_sol",
+      "discriminator": [
+        47,
+        62,
+        155,
+        172,
+        131,
+        205,
+        37,
+        201
+      ],
+      "accounts": [
+        {
+          "name": "crank",
+          "docs": [
+            "NOT ANY SIGNER — see `config`. Wrapping is what turns a vault's spendable",
+            "SOL into something `convert` can sell, so leaving it open was half of a",
+            "two-instruction drain that needed no permission at all."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault.owner",
+                "account": "Vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault_wsol",
+          "docs": [
+            "The vault's wSOL account (native mint, authority = the vault PDA)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "InvestmentPolicy",
+      "discriminator": [
+        205,
+        60,
+        2,
+        92,
+        194,
+        105,
+        177,
+        5
+      ]
+    },
+    {
+      "name": "ProtocolConfig",
+      "discriminator": [
+        207,
+        91,
+        250,
+        28,
+        152,
+        179,
+        215,
+        209
+      ]
+    },
+    {
+      "name": "TradingLink",
+      "discriminator": [
+        195,
+        34,
+        139,
+        152,
+        102,
+        10,
+        228,
+        227
+      ]
+    },
+    {
+      "name": "Vault",
+      "discriminator": [
+        211,
+        8,
+        232,
+        43,
+        2,
+        152,
+        117,
+        119
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "InvalidSkimBps",
+      "msg": "skim_bps must be between 1 and 10000"
+    },
+    {
+      "code": 6001,
+      "name": "NotOwner",
+      "msg": "only the vault owner may do this"
+    },
+    {
+      "code": 6002,
+      "name": "UnlinkUnauthorized",
+      "msg": "neither the vault owner nor the linked wallet signed"
+    },
+    {
+      "code": 6003,
+      "name": "LinkVaultMismatch",
+      "msg": "this trading link does not belong to this vault"
+    },
+    {
+      "code": 6004,
+      "name": "InsufficientVaultBalance",
+      "msg": "amount would leave the vault below its rent-exempt minimum"
+    },
+    {
+      "code": 6005,
+      "name": "InsufficientTokenBalance",
+      "msg": "the vault does not hold that much of this token"
+    },
+    {
+      "code": 6006,
+      "name": "ZeroAmount",
+      "msg": "amount must be greater than zero"
+    },
+    {
+      "code": 6007,
+      "name": "VaultPaused",
+      "msg": "settle and invest are paused for this vault; withdraw is not"
+    },
+    {
+      "code": 6008,
+      "name": "AttestationMissing",
+      "msg": "no Ed25519 verification instruction precedes settle"
+    },
+    {
+      "code": 6009,
+      "name": "AttestationMalformed",
+      "msg": "the Ed25519 instruction is not in the expected single-signature shape"
+    },
+    {
+      "code": 6010,
+      "name": "WrongAttester",
+      "msg": "the attestation is signed by a key that is not the configured attester"
+    },
+    {
+      "code": 6011,
+      "name": "AttestationMismatch",
+      "msg": "the attested message does not match this settlement"
+    },
+    {
+      "code": 6012,
+      "name": "InvalidSessionWindow",
+      "msg": "the session window overlaps settled history or has not closed yet"
+    },
+    {
+      "code": 6013,
+      "name": "InvalidPolicy",
+      "msg": "the investment policy is malformed or does not match these accounts"
+    },
+    {
+      "code": 6014,
+      "name": "InvestingDisabled",
+      "msg": "investing is not enabled for this vault"
+    },
+    {
+      "code": 6015,
+      "name": "WrongVenue",
+      "msg": "this is not the venue program the policy pins"
+    },
+    {
+      "code": 6016,
+      "name": "BelowMinimum",
+      "msg": "amount is below the policy's minimum investment"
+    },
+    {
+      "code": 6017,
+      "name": "AboveMaximum",
+      "msg": "amount is above the policy's per-call maximum"
+    },
+    {
+      "code": 6018,
+      "name": "RollingCapExhausted",
+      "msg": "the rolling 30-day investment cap has no room for this amount"
+    },
+    {
+      "code": 6019,
+      "name": "FloorTooLow",
+      "msg": "min_out is below the policy's own floor for this leg"
+    },
+    {
+      "code": 6020,
+      "name": "FillTooSmall",
+      "msg": "the venue delivered less than min_out"
+    },
+    {
+      "code": 6021,
+      "name": "Overspent",
+      "msg": "the venue spent more than amount_in"
+    },
+    {
+      "code": 6022,
+      "name": "UnauthorizedCrank",
+      "msg": "only the vault's owner or the configured keeper may crank this vault"
+    }
+  ],
+  "types": [
+    {
+      "name": "InvestmentLeg",
+      "docs": [
+        "One basket leg: what to buy and the user's own price floor for it."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "weight_bps",
+            "docs": [
+              "Share of each investment, basis points. The keeper splits amounts by",
+              "these; the program enforces them per-leg via the caps, not atomically —",
+              "an 8-leg basket cannot be one transaction under the 64-account cap."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "min_out_rate_wad",
+            "docs": [
+              "USER-SIGNED floor: minimum acceptable out per unit in, WAD (1e18).",
+              "The keeper's per-call min_out may be TIGHTER, never looser."
+            ],
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "InvestmentPolicy",
+      "docs": [
+        "The investment policy — RH's setInvestmentPolicy surface, one PDA per vault.",
+        "",
+        "A SEPARATE ACCOUNT, not fields on Vault, so the Vault layout (and the web's",
+        "pinned decoder fixtures) survive this feature untouched — and because a",
+        "policy is optional: a vault with no policy account simply cannot invest.",
+        "",
+        "Seeds: [\"invest\", vault]."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "enabled",
+            "type": "bool"
+          },
+          {
+            "name": "venue_program",
+            "docs": [
+              "The ONLY program invest() will CPI as a venue. The re-anchored pinning:",
+              "RH pins (pool, fee, tickSpacing) because its chain carries 99.9%-fee",
+              "scam pools; Solana's equivalent hazard is a forged venue, so the venue",
+              "program is pinned here and everything else is measured by delta."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "legs",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "InvestmentLeg"
+                }
+              }
+            }
+          },
+          {
+            "name": "min_convert_rate_wad",
+            "docs": [
+              "USER-SIGNED floor for the SOL->USDC conversion leg: minimum in-asset",
+              "(USDC raw) per lamport of wSOL, WAD. Zero means conversion is off."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "min_investment",
+            "type": "u64"
+          },
+          {
+            "name": "max_per_call",
+            "type": "u64"
+          },
+          {
+            "name": "max_rolling_30d",
+            "type": "u64"
+          },
+          {
+            "name": "bucket_days",
+            "docs": [
+              "31 day-buckets, RH's exact mechanism: index = day % 31, a bucket whose",
+              "recorded day is stale is overwritten rather than summed."
+            ],
+            "type": {
+              "array": [
+                "u32",
+                31
+              ]
+            }
+          },
+          {
+            "name": "bucket_amounts",
+            "type": {
+              "array": [
+                "u64",
+                31
+              ]
+            }
+          },
+          {
+            "name": "lifetime_invested",
+            "type": "u64"
+          },
+          {
+            "name": "policy_nonce",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "_reserved",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProtocolConfig",
+      "docs": [
+        "Protocol-level configuration: who the attester is.",
+        "",
+        "Seeds: [\"config\"] — one per deployment, created once. The lab keeps rotation",
+        "out of scope on purpose (PLAN.md §5: one fixed attester, like the EVM",
+        "deployment today); `authority` exists so a later `set_attester` has someone",
+        "to answer to, and production replaces that key with a Squads multisig."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "attester",
+            "docs": [
+              "The Ed25519 public key settle() demands attestations from."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "keeper",
+            "docs": [
+              "The one account, besides a vault's own owner, allowed to crank that",
+              "vault's funds through `wrap_sol` and `convert`.",
+              "",
+              "TAKEN FROM THE RESERVED BYTES, which is why it sits after `bump` and is",
+              "exactly 32 wide: the layout is byte-identical to the `_reserved: [u8;32]`",
+              "it replaces, so the config account already live on mainnet deserialises",
+              "unchanged — with `keeper` reading as the default (all-zero) pubkey.",
+              "",
+              "A DEFAULT KEEPER MEANS NOBODY, NOT ANYBODY. That is the whole point of",
+              "the field: before it existed both instructions took a bare `crank:",
+              "Signer` with no check at all, so any stranger could wrap a vault's SOL",
+              "and route it through a pool of their own choosing. An unset keeper must",
+              "therefore fail closed to owner-only, never open back to the world."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TradingLink",
+      "docs": [
+        "A trading wallet linked to a vault.",
+        "",
+        "Seeds: [\"link\", wallet] — keyed by WALLET, not by vault, on purpose. Only",
+        "one account can ever exist at that address, so \"one wallet, one vault\" is",
+        "enforced by derivation itself. The same global-uniqueness guarantee costs",
+        "the EVM version three mappings in the factory (activeVaultOf and friends)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "wallet",
+            "type": "pubkey"
+          },
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "epoch",
+            "docs": [
+              "Slot at link creation. The attestation signs it, so a link that is",
+              "closed and re-created invalidates every earlier attestation even though",
+              "`settlement_nonce` restarts at zero. This is bindingEpoch from the EVM",
+              "design, carried by the account's own birth instead of a counter."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "settlement_nonce",
+            "docs": [
+              "Monotonic per link. Replaces the EVM `usedSessions` set: strictly",
+              "ordered sessions need no set, only a cursor."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "frontier_slot",
+            "docs": [
+              "Sessions ending at or below this slot are settled. The watermark the",
+              "keeper resumes from, mirroring the EVM SettlementFrontier."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "_reserved",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Vault",
+      "docs": [
+        "One user's savings vault.",
+        "",
+        "The SOL savings live in this account's own lamports — a program may debit",
+        "lamports from accounts it owns, so no separate token account is needed for",
+        "the native leg. Stock positions live in Token-2022 ATAs owned by this PDA.",
+        "",
+        "Seeds: [\"vault\", owner]. The address is a pure function of the owner, which",
+        "deletes the entire factory/registry surface the EVM version needs",
+        "(vaultById, vaultOfAdmin, creationNonces — see VaultFactory.sol)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "version",
+            "docs": [
+              "Layout version. Bumped on any change to this struct; the instruction",
+              "dispatch may branch on it, which is how SOME vaults can run new logic",
+              "while others do not — the closest Solana gets to the beacon-per-cohort",
+              "model."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "paused",
+            "docs": [
+              "Gates settle and invest. NEVER gates withdraw: an issuer freezing the",
+              "stock leg, or this program pausing itself, must not trap the user's SOL."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "skim_bps",
+            "docs": [
+              "Share of attested session profit that is saved, in basis points.",
+              "Zero is refused at creation: a vault that is enabled, funded and saving",
+              "nothing is the exact silent failure the EVM diagnostics call \"the",
+              "reachable trap\" (savingsBps 0 with otherwise sane caps)."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "lifetime_saved",
+            "docs": [
+              "Lamports ever settled into this vault, monotonic. The keeper's",
+              "anti-double-settlement anchor: it compares this against what it read",
+              "before a broadcast whose receipt was lost, exactly like",
+              "aggregateLifetimeInvested on the EVM side."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "_reserved",
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

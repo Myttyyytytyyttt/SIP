@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "privy-docs": {
+      "type": "http",
+      "url": "https://docs.privy.io/mcp"
+    },
+    "supabase": {
+      "type": "http",
+      "url": "https://mcp.supabase.com/mcp?project_ref=pseqckmlumujeatdnsty&features=docs%2Caccount%2Cdatabase%2Cdebugging%2Cdevelopment%2Cfunctions%2Cbranching"
+    }
+  }
+}

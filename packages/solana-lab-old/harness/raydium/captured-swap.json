@@ -1,0 +1,31 @@
+{
+ "signature": "4f1X7a8JypznzFMZ7zeBW9Lkg1oZ8waFrF17GDJ53W41jumgDnQAS1UStaM4DeNnBdE2ooJgFWeLUyev5xbKw7jZ",
+ "discriminator": "2b04ed0b1ac91e62",
+ "dataHex": "2b04ed0b1ac91e622c0fdf0e000000003977e506000000009a57694ea91a5c84b1c4feff0000000001",
+ "dataLen": 41,
+ "amount": 249499436,
+ "otherAmountThreshold": 115701561,
+ "sqrtPriceLimitX64": 79226673521066979257578248090,
+ "isBaseInput": 1,
+ "accounts": [
+  "Hasda78TSaT9bjiPxDBvP4GpohFpP3TDTaJEcCYK5kyN",
+  "DrdecJVzkaRsf1TQu1g7iFncaokikVTHqpzPjenjRySY",
+  "49iMatQtoyabsYAQc8GafVq6aeBFVDxSRH44oiatyyw6",
+  "ArwpdfBciGYoxVFbJKKqEmhLbtCjZk9sy9Be3VLvrUtL",
+  "mGrcTnintsLNp3JTCNUTjEmSCynZ1kSNjet1snh1YSC",
+  "4JEtq7NraU9U5URcCKSv6sWRRgDSuSnUjYDqpSJSWohY",
+  "DyKsypuzQvhi37K8UvjCMBC43h4HtW4r6jhWoqHyrSSe",
+  "BhVGr6ZSa3kDc2d1XHXHTfoGQos8RbeDTjJfBaXMoLQH",
+  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+  "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh",
+  "4iGbEJNTpdZAUAF8N23w4zXBe1wsq3V3sjRXzMv5EkF6",
+  "DapwbdNYAeniPesZy6Ziyuv9BFEPwhe5D4ByEpJaAJbf",
+  "C2xpU3ayUMNCjSBmsJtNJaN4MyvAYPcD1mRHusPEf73B",
+  "5jMrBRjbAvYa5wdgxbVEgr3ukrTQKKg4P3o6QzkeSU3r",
+  "A72UrtBMcpv7vHUMDBpEEwBKea7n9vNb6iGehQGq1z7L"
+ ],
+ "numAccounts": 18
+}

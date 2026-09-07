@@ -1,0 +1,449 @@
+{
+  "schemaVersion": 1,
+  "contractName": "FeeCollector",
+  "sourceName": "src/fees/FeeCollector.sol",
+  "abi": [
+    {
+      "type": "constructor",
+      "inputs": [
+        {
+          "name": "initialOwner",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "initialTreasury",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "receive",
+      "stateMutability": "payable"
+    },
+    {
+      "type": "function",
+      "name": "acceptOwnership",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "owner",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "pendingOwner",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "renounceOwnership",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "setTreasury",
+      "inputs": [
+        {
+          "name": "newTreasury",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "transferOwnership",
+      "inputs": [
+        {
+          "name": "newOwner",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "treasury",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "withdrawAllERC20",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "amount",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "withdrawAllNative",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "amount",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "withdrawERC20",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "withdrawNative",
+      "inputs": [
+        {
+          "name": "amount",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "event",
+      "name": "ERC20Withdrawn",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "treasury",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "NativeReceived",
+      "inputs": [
+        {
+          "name": "sender",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "NativeWithdrawn",
+      "inputs": [
+        {
+          "name": "treasury",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "OwnershipTransferStarted",
+      "inputs": [
+        {
+          "name": "previousOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "newOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "OwnershipTransferred",
+      "inputs": [
+        {
+          "name": "previousOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "newOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "TreasuryUpdated",
+      "inputs": [
+        {
+          "name": "previousTreasury",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "newTreasury",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "error",
+      "name": "FailedCall",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "InsufficientBalance",
+      "inputs": [
+        {
+          "name": "balance",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "needed",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InvalidToken",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InvalidTreasury",
+      "inputs": [
+        {
+          "name": "treasury",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InvalidWithdrawalAmount",
+      "inputs": [
+        {
+          "name": "amount",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "NotTreasuryOrOwner",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "OwnableInvalidOwner",
+      "inputs": [
+        {
+          "name": "owner",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "OwnableUnauthorizedAccount",
+      "inputs": [
+        {
+          "name": "account",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "ReentrancyGuardReentrantCall",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "RenounceDisabled",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "SafeERC20FailedOperation",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "TreasuryUnchanged",
+      "inputs": [
+        {
+          "name": "treasury",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    }
+  ],
+  "bytecode": "0x60803461015057601f61091738819003918201601f19168301916001600160401b0383118484101761015457808492604094855283398101031261015057610052602061004b83610168565b9201610168565b6001600160a01b0390911690811561013d57600180546001600160a01b03199081169091555f80549182168417815560405193916001600160a01b0316907f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e09080a360017f9b779b17422d0df92223018b32b4d1fa46e071723d6817e2486d003becc55f00556001600160a01b0316801561012a57600280546001600160a01b031916821790555f7f4ab5be82436d353e61ca18726e984e561f5c1cc7c6d38b29d2553c790434705a8180a361079a908161017d8239f35b6312b31bfd60e11b5f525f60045260245ffd5b631e4fbdf760e01b5f525f60045260245ffd5b5f80fd5b634e487b7160e01b5f52604160045260245ffd5b51906001600160a01b03821682036101505756fe60806040526004361015610046575b3615610018575f80fd5b6040513481527f8ac633e5b094e1150d2a6495df4d0c77f51d293abe99e7733c78870dfbee766060203392a2005b5f3560e01c8063482fe024146104e157806361d027b3146104b9578063715018a61461049a57806379ba50971461041a57806384276d8114610378578063857abbd41461026f5780638da5cb5b14610248578063a1db978214610200578063e30c3978146101d8578063f0f44260146101375763f2fde38b0361000e5734610133576020366003190112610133576100dc610577565b6100e4610731565b600180546001600160a01b0319166001600160a01b039283169081179091555f8054919291909116907f38d16b8cac22d99fc7c124b9cd0de2d3fa1faef420bfe791d8c362d765e227009080a3005b5f80fd5b3461013357602036600319011261013357610150610577565b610158610731565b6001600160a01b031680156101c5576002546001600160a01b0381169082908282146101b2576001600160a01b031916176002557f4ab5be82436d353e61ca18726e984e561f5c1cc7c6d38b29d2553c790434705a5f80a3005b50633e41efeb60e21b5f5260045260245ffd5b6312b31bfd60e11b5f525f60045260245ffd5b34610133575f366003190112610133576001546040516001600160a01b039091168152602090f35b346101335760403660031901126101335761023561021c610577565b61022461058d565b61022c6105cf565b6024359061067e565b60015f8051602061074583398151915255005b34610133575f366003190112610133575f546040516001600160a01b039091168152602090f35b3461013357602036600319011261013357610288610577565b61029061058d565b6102986105cf565b6001600160a01b038116908115610365576020602492604051938480926370a0823160e01b82523060048301525afa91821561035a575f926102fb575b6020836102e2818561067e565b60015f8051602061074583398151915255604051908152f35b915060203d602011610353575b601f8101601f191683016001600160401b0381118482101761033f57602091849160405281010312610133579051906102e26102d5565b634e487b7160e01b5f52604160045260245ffd5b503d610308565b6040513d5f823e3d90fd5b63961c9a4f60e01b5f525f60045260245ffd5b346101335760203660031901126101335760043561039461058d565b61039c6105cf565b80158015610411575b6103ff576002546001600160a01b0316907fc303ca808382409472acbbf899c316cf439f409f6584aae22df86dfa3c9ed504906020906103e58185610607565b604051908152a260015f8051602061074583398151915255005b6305a4a8e760e01b5f5260045260245ffd5b504781116103a5565b34610133575f36600319011261013357600154336001600160a01b03821603610487576001600160a01b03199081166001555f805433928116831782556001600160a01b0316907f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e09080a3005b63118cdaa760e01b5f523360045260245ffd5b34610133575f36600319011261013357638905116560e01b5f5260045ffd5b34610133575f366003190112610133576002546040516001600160a01b039091168152602090f35b34610133575f366003190112610133576104f961058d565b6105016105cf565b47801561056457600254602091906001600160a01b03166105228282610607565b7fc303ca808382409472acbbf899c316cf439f409f6584aae22df86dfa3c9ed50483604051848152a260015f8051602061074583398151915255604051908152f35b6305a4a8e760e01b5f525f60045260245ffd5b600435906001600160a01b038216820361013357565b6002546001600160a01b0316331415806105bb575b6105a857565b63deca04a360e01b5f523360045260245ffd5b505f546001600160a01b03163314156105a2565b60025f8051602061074583398151915254146105f85760025f8051602061074583398151915255565b633ee5aeb560e01b5f5260045ffd5b8147106106675760405160208101908082106001600160401b0383111761033f575f9384938480949381946040525260018060a01b03165af11561064757565b3d15610658576040513d5f823e3d90fd5b63d6bda27560e01b5f5260045ffd5b504763cf47918160e01b5f5260045260245260445ffd5b6001600160a01b031680156103655781156105645760018060a01b0360025416916040519063a9059cbb60e01b5f52836004528060245260205f60448180875af160015f5114811615610712575b82604052156106ff57816020917fbfed55bdcd242e3dd0f60ddd7d1e87c67f61c34cd9527b3e6455d841b10253629352a3565b82635274afe760e01b5f5260045260245ffd5b600181151661072857833b15153d1516166106cc565b823d5f823e3d90fd5b5f546001600160a01b031633036104875756fe9b779b17422d0df92223018b32b4d1fa46e071723d6817e2486d003becc55f00a2646970667358221220e38273278c3571474c7081dcf96d05ed8d4c49f46a252262772cc874fad50efe64736f6c634300081a0033",
+  "deployedBytecode": "0x60806040526004361015610046575b3615610018575f80fd5b6040513481527f8ac633e5b094e1150d2a6495df4d0c77f51d293abe99e7733c78870dfbee766060203392a2005b5f3560e01c8063482fe024146104e157806361d027b3146104b9578063715018a61461049a57806379ba50971461041a57806384276d8114610378578063857abbd41461026f5780638da5cb5b14610248578063a1db978214610200578063e30c3978146101d8578063f0f44260146101375763f2fde38b0361000e5734610133576020366003190112610133576100dc610577565b6100e4610731565b600180546001600160a01b0319166001600160a01b039283169081179091555f8054919291909116907f38d16b8cac22d99fc7c124b9cd0de2d3fa1faef420bfe791d8c362d765e227009080a3005b5f80fd5b3461013357602036600319011261013357610150610577565b610158610731565b6001600160a01b031680156101c5576002546001600160a01b0381169082908282146101b2576001600160a01b031916176002557f4ab5be82436d353e61ca18726e984e561f5c1cc7c6d38b29d2553c790434705a5f80a3005b50633e41efeb60e21b5f5260045260245ffd5b6312b31bfd60e11b5f525f60045260245ffd5b34610133575f366003190112610133576001546040516001600160a01b039091168152602090f35b346101335760403660031901126101335761023561021c610577565b61022461058d565b61022c6105cf565b6024359061067e565b60015f8051602061074583398151915255005b34610133575f366003190112610133575f546040516001600160a01b039091168152602090f35b3461013357602036600319011261013357610288610577565b61029061058d565b6102986105cf565b6001600160a01b038116908115610365576020602492604051938480926370a0823160e01b82523060048301525afa91821561035a575f926102fb575b6020836102e2818561067e565b60015f8051602061074583398151915255604051908152f35b915060203d602011610353575b601f8101601f191683016001600160401b0381118482101761033f57602091849160405281010312610133579051906102e26102d5565b634e487b7160e01b5f52604160045260245ffd5b503d610308565b6040513d5f823e3d90fd5b63961c9a4f60e01b5f525f60045260245ffd5b346101335760203660031901126101335760043561039461058d565b61039c6105cf565b80158015610411575b6103ff576002546001600160a01b0316907fc303ca808382409472acbbf899c316cf439f409f6584aae22df86dfa3c9ed504906020906103e58185610607565b604051908152a260015f8051602061074583398151915255005b6305a4a8e760e01b5f5260045260245ffd5b504781116103a5565b34610133575f36600319011261013357600154336001600160a01b03821603610487576001600160a01b03199081166001555f805433928116831782556001600160a01b0316907f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e09080a3005b63118cdaa760e01b5f523360045260245ffd5b34610133575f36600319011261013357638905116560e01b5f5260045ffd5b34610133575f366003190112610133576002546040516001600160a01b039091168152602090f35b34610133575f366003190112610133576104f961058d565b6105016105cf565b47801561056457600254602091906001600160a01b03166105228282610607565b7fc303ca808382409472acbbf899c316cf439f409f6584aae22df86dfa3c9ed50483604051848152a260015f8051602061074583398151915255604051908152f35b6305a4a8e760e01b5f525f60045260245ffd5b600435906001600160a01b038216820361013357565b6002546001600160a01b0316331415806105bb575b6105a857565b63deca04a360e01b5f523360045260245ffd5b505f546001600160a01b03163314156105a2565b60025f8051602061074583398151915254146105f85760025f8051602061074583398151915255565b633ee5aeb560e01b5f5260045ffd5b8147106106675760405160208101908082106001600160401b0383111761033f575f9384938480949381946040525260018060a01b03165af11561064757565b3d15610658576040513d5f823e3d90fd5b63d6bda27560e01b5f5260045ffd5b504763cf47918160e01b5f5260045260245260445ffd5b6001600160a01b031680156103655781156105645760018060a01b0360025416916040519063a9059cbb60e01b5f52836004528060245260205f60448180875af160015f5114811615610712575b82604052156106ff57816020917fbfed55bdcd242e3dd0f60ddd7d1e87c67f61c34cd9527b3e6455d841b10253629352a3565b82635274afe760e01b5f5260045260245ffd5b600181151661072857833b15153d1516166106cc565b823d5f823e3d90fd5b5f546001600160a01b031633036104875756fe9b779b17422d0df92223018b32b4d1fa46e071723d6817e2486d003becc55f00a2646970667358221220e38273278c3571474c7081dcf96d05ed8d4c49f46a252262772cc874fad50efe64736f6c634300081a0033",
+  "linkReferences": {},
+  "deployedLinkReferences": {},
+  "selectors": {
+    "functions": {
+      "acceptOwnership()": "0x79ba5097",
+      "owner()": "0x8da5cb5b",
+      "pendingOwner()": "0xe30c3978",
+      "renounceOwnership()": "0x715018a6",
+      "setTreasury(address)": "0xf0f44260",
+      "transferOwnership(address)": "0xf2fde38b",
+      "treasury()": "0x61d027b3",
+      "withdrawAllERC20(address)": "0x857abbd4",
+      "withdrawAllNative()": "0x482fe024",
+      "withdrawERC20(address,uint256)": "0xa1db9782",
+      "withdrawNative(uint256)": "0x84276d81"
+    },
+    "errors": {
+      "FailedCall()": "0xd6bda275",
+      "InsufficientBalance(uint256,uint256)": "0xcf479181",
+      "InvalidToken(address)": "0x961c9a4f",
+      "InvalidTreasury(address)": "0x256637fa",
+      "InvalidWithdrawalAmount(uint256)": "0x05a4a8e7",
+      "NotTreasuryOrOwner(address)": "0xdeca04a3",
+      "OwnableInvalidOwner(address)": "0x1e4fbdf7",
+      "OwnableUnauthorizedAccount(address)": "0x118cdaa7",
+      "ReentrancyGuardReentrantCall()": "0x3ee5aeb5",
+      "RenounceDisabled()": "0x89051165",
+      "SafeERC20FailedOperation(address)": "0x5274afe7",
+      "TreasuryUnchanged(address)": "0xf907bfac"
+    },
+    "events": {
+      "ERC20Withdrawn(address,address,uint256)": "0xbfed55bdcd242e3dd0f60ddd7d1e87c67f61c34cd9527b3e6455d841b1025362",
+      "NativeReceived(address,uint256)": "0x8ac633e5b094e1150d2a6495df4d0c77f51d293abe99e7733c78870dfbee7660",
+      "NativeWithdrawn(address,uint256)": "0xc303ca808382409472acbbf899c316cf439f409f6584aae22df86dfa3c9ed504",
+      "OwnershipTransferred(address,address)": "0x8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0",
+      "OwnershipTransferStarted(address,address)": "0x38d16b8cac22d99fc7c124b9cd0de2d3fa1faef420bfe791d8c362d765e22700",
+      "TreasuryUpdated(address,address)": "0x4ab5be82436d353e61ca18726e984e561f5c1cc7c6d38b29d2553c790434705a"
+    }
+  }
+}

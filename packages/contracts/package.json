@@ -1,0 +1,27 @@
+{
+  "name": "@nuvem/contracts",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "forge build",
+    "test": "forge test",
+    "test:unit": "forge test --match-path \"test/unit/**\"",
+    "test:e2e": "forge test --match-path \"test/e2e/**\"",
+    "test:fuzz": "forge test --match-path \"test/fuzz/**\"",
+    "test:invariant": "forge test --match-path \"test/invariant/**\"",
+    "devnet:drill": "pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/run-devnet-trading-drill.ps1",
+    "public-testnet:drill": "pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/run-public-testnet-synthetic-drill.ps1",
+    "public-testnet:drill:broadcast": "pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/run-public-testnet-synthetic-drill.ps1 -Broadcast",
+    "coverage": "forge coverage",
+    "snapshot": "forge snapshot",
+    "safe": "node scripts/safe.mjs",
+    "watch:governance": "node scripts/watch-governance.mjs"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "5.6.1",
+    "@openzeppelin/contracts-upgradeable": "5.6.1"
+  },
+  "devDependencies": {
+    "viem": "2.55.8"
+  }
+}

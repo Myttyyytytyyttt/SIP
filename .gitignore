@@ -1,0 +1,69 @@
+.env
+.env.*
+!.env.example
+node_modules/
+.pnpm-store/
+packages/*/node_modules/
+packages/contracts/cache/
+packages/contracts/out/
+packages/contracts/broadcast/
+packages/contracts/.openzeppelin/
+packages/contracts/deployments/*.local.json
+coverage/
+dist/
+# EXCEPTION: @nuvem/contracts-artifacts/dist is the one build product that must
+# be tracked. It is the only way the web container can get the ABIs -- Foundry
+# is not installed there, and the export script's --skip-forge path still reads
+# packages/contracts/out/ (gitignored, line 8). Railway builds from git, so
+# there is nowhere to inject a host-built directory from.
+# Order matters: git will not descend into an excluded directory, so the
+# directory must be re-included before its contents.
+!packages/contracts-artifacts/dist/
+!packages/contracts-artifacts/dist/**
+*.log
+
+# @nuvem/keeper: signing-key material and the durable settled-window ledger.
+# secrets/ is where docker-compose.yml's keeper service expects a mounted
+# attester key file to live (docs/runbooks/ATTESTER.md). state/ is the
+# append-only journal of every settlement the keeper has made -- it is
+# correctness-critical for ONE deployment and actively misleading in any other,
+# so it belongs on a volume and in a backup, never in git.
+#
+# BOTH NAMES MATTER. `state/` is what docker-compose.yml and the runbook mount.
+# `.keeper-state/` is the DEFAULT in src/config.ts when NUVEM_KEEPER_STATE_DIR is
+# unset, which is exactly what `pnpm --dir packages/keeper-old tick` on a laptop
+# produces -- and it was the one not ignored, so the journal of a real operator's
+# realized trading profits sat untracked-but-committable, one `git add -A` from a
+# public commit. The bare `.keeper-state/` is here too because the keeper creates
+# that directory relative to whatever cwd it was started from, which is not always
+# packages/keeper-old. There is deliberately no bare `state/` rule: it is a common
+# enough directory name that it would silently swallow real source one day.
+secrets/
+packages/keeper-old/state/
+packages/keeper-old/.keeper-state/
+.keeper-state/
+
+# Vendored agent-skill content. Regenerable from skills-lock.json with
+# `npx skills add`, so the lockfile is tracked and the payload is not.
+.agents/
+.claude/skills/
+
+# Working state for scripts/testnet-drill.sh. It records what a drill built so
+# the script can refuse to run a step twice — which means a committed copy makes
+# a fresh clone believe a deployment already happened. The addresses that matter
+# live in reports/, which is a record rather than a lock.
+packages/contracts/.drill-state/
+
+# The sealed env bundle. scripts/secrets-bundle.sh can still make one, but SIP
+# does not carry it in git: Nuvem's held five Safe owner keys, and publishing
+# ciphertext only buys time against an offline attacker.
+secrets.enc
+
+# Nuvem's brand media (91 MB of video and a 33 MB background) — the SIP site
+# serves none of it. Kept out so a clone stays a few megabytes.
+images-assets/
+packages/website-oficial/public/brand/
+
+# Finder droppings and a stray boot log from the old stack.
+.DS_Store
+.nuvem-logs-boot.txt
