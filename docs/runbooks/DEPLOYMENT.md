@@ -1,397 +1,387 @@
 # Contract deployment runbook
 
-## Current status
+SIP has **no deployment**. This document is how one is made.
 
-A **single-wallet canary topology is live on Robinhood mainnet `4663`**, with its
-addresses recorded in
-[the mainnet settlement results](../canary/MAINNET_SETTLEMENT_RESULTS.md). It was
-deployed to close the GMGN gate, not under this runbook's gate, and only one of
-that gate's ten items was met at the time. Read it as evidence, not as a
-sanctioned deployment.
+The absence is deliberate. The addresses this repository used to carry belong to
+a product that took a percentage of *profit*; every trading account linked to
+that factory is still active with a savings rate between 1000 and 3000 bps, read
+from chain on 2026-09-08. SIP takes basis points of *volume*, and Phase 0 carries
+the volume in the attestation's cash field, so aiming the worker at one of those
+accounts would apply twenty percent to a notional — about a hundred times what a
+user agreed to, on somebody else's wallet. That is why nothing points there any
+more: `packages/worker/src/config.ts` requires `SIP_VAULT_FACTORY`,
+`SIP_SETTLEMENT_EXECUTOR` and `SIP_LOGS_FROM_BLOCK` and refuses to start without
+them, and `packages/worker/src/chain/constants.ts` pins only facts that belong to
+the chain rather than to a deployment.
 
-### That deployment is SUPERSEDED, and it cannot be migrated
+**A fresh deployment starts with zero trading accounts, and that is the whole
+point.** No account on it carries a profit-era savings rate, because no account
+on it carries anything at all. Everything below exists to get from that empty
+state to a factory SIP can safely aim at.
 
-The contracts it runs no longer exist in this repository. Concretely:
+`packages/contracts/deployments/` holds only public-testnet drill artifacts. It
+contains no mainnet manifest, and it must not gain one before the receipts exist.
 
-- **The executor cannot be replaced at the factory.** `configureProtocol` is
-  one-shot (`VaultFactory.sol:113-128`) and permanently pins the
-  SettlementExecutor address. The current executor has a different `settle`
-  selector (`0xf38ac34f` → `0xc8f2629d`) and a different EIP-712 typehash
-  (`0x88e2beba…` → `0x9bd2dea2…`) because `startBlockL2`/`endBlockL2` were
-  promoted into the attestation. Nothing on that factory can be repointed at it.
-- **The vaults cannot be upgraded onto the current implementation either.**
-  Removing the investment path deleted four `VaultStorage` fields and shifted
-  `settlementExecutor` from offset 9 to offset 7. A beacon upgrade across that
-  boundary makes the vault read its old `adapterRegistry` slot as its settlement
-  executor — demonstrated in
-  `test/unit/UpgradeContinuity.t.sol::testNewImplementationMisreadsALegacyStorageLayout`.
-  `PrepareCohortUpgrade.s.sol` checks cohort separation, beacon ownership and the
-  implementation address; it does **not** check storage layout, so it would build
-  an executable timelock payload doing exactly this. The canary vault must stay on
-  its own cohort forever.
-- **`PersonalVault.setSettlementExecutor` is not a way out.** It exists, and it is
-  the only migration path a vault has, but it does not help here. The canary vault
-  still runs the old implementation, whose `acceptSettlement` takes a
-  `SettlementRecord` without `startBlockL2`/`endBlockL2`; a current executor builds
-  the new record and the call would not decode. Closing that gap means upgrading
-  the vault, which is the storage-layout hazard above. And a second vault on that
-  factory could not follow in any case.
+## What gets deployed, and who owns it
 
-**It still holds real money.** The canary vault
-`0xF7309dC8e1914A5c3848250cec54Ebe7A20D8255` holds `403370889498747` wei of
-canonical WETH from the one settlement it performed. That is withdrawable by its
-vault admin (`0xaed788b3c69ca941a4302899f80ccad219942ca7`) through
-`withdrawToken`, which deducts no protocol fee. Recovering it is an ordinary admin
-withdrawal, not a migration, and it is the only remaining action that deployment
-supports.
+One script builds the whole topology: `script/DeployNuvem.s.sol:DeployNuvem`,
+whose shared body is `NuvemDeploymentBase._deployCore`. In construction order:
 
-**Create no vaults on it.** `createVault` is permissionless and not pausable, so
-this is a matter of discipline rather than an enforced restriction. A vault
-created there today would be bound to a dead executor with no upgrade path and no
-migration path.
+| Contract | Owner / authority after the run |
+| --- | --- |
+| `TimelockController` (via `TimelockBootstrap`) | Self-administered. Sole proposer: the corporate Safe. Executor: `address(0)`, so execution is open after maturity. Guardian holds `CANCELLER_ROLE`. |
+| `ProtocolPauseController` | Timelock owns it; guardian can pause. |
+| `AttesterRegistry` | Timelock owns it; guardian can disable. Initial attester is `NUVEM_ATTESTER`, epoch 1. |
+| `FeeCollector` | Corporate Safe, paying out to `NUVEM_TREASURY`. |
+| `FeeController` | Corporate Safe, constructed at `NUVEM_INITIAL_FEE_BPS`. |
+| `AdapterRegistry` | Timelock owns it; guardian can deactivate an adapter with no delay. |
+| `PersonalVault` implementation | No owner. The adapter registry is an **immutable** of this contract. |
+| `VaultFactory` + `SettlementExecutor` + cohort 1 beacon (via `VaultFactoryBootstrap`) | Beacon: timelock. Factory: timelock, but only *pending* — see the handoff below. |
 
-Still outstanding on that deployment, and now permanently so:
+Two of those are sealed one-shot bootstraps rather than script lines, and each has
+a reason worth knowing before you run it.
 
-- the factory ownership handoff was never scheduled, executed, or rehearsed;
-- no contract source is verified on any explorer;
-- no address manifest exists in `packages/contracts/deployments`.
+`TimelockBootstrap` exists because OpenZeppelin grants `CANCELLER_ROLE` only to
+proposers. On a timelock whose sole proposer is the Safe, the only address that
+could cancel a queued operation would be the one that queued it — so a stolen
+Safe key could schedule a hostile beacon upgrade and the delay would be a
+countdown rather than a defense. The bootstrap grants the guardian the cancel
+role and then renounces its own admin, so the guardian can stop an operation and
+can do nothing else.
 
-`DeployLocal.s.sol` remains a simulation with mock assets. Do not present a local
-simulation or a successful broadcast as end-to-end production validation.
+`VaultFactoryBootstrap` exists so the deployer never owns the factory. It
+constructs the factory, constructs the `SettlementExecutor` against it, calls
+`configureProtocol`, registers cohort 1 with the timelock as upgrade authority,
+and transfers ownership to the timelock — all inside one constructor. Afterwards
+it exposes no method that can call the factory. Factory governance is frozen
+until the handoff below completes.
 
-### What this deployment does not contain
+`AdapterRegistry` is deployed but **empty**. `registerAdapter` is `onlyOwner` on a
+timelock-owned registry, so the first adapter costs a full governance cycle after
+this script has run. Deploying the registry is not the same as being able to
+invest.
 
-There is no investment path. `PersonalVault` has no `invest()`,
-`NuvemTypes.VaultPolicy` is the single field `maxAggregateRolling30dWei`, and
-`VaultFactory.ProtocolConfiguration` pins four addresses — weth, pauseController,
-attesterRegistry, settlementExecutor. `AdapterRegistry` is not deployed at all.
-`FeeCollector` and `FeeController` are still deployed but are deliberately **not**
-pinned into the protocol configuration, so no vault can reach them; settlement
-charges no protocol fee. The rationale is recorded at
-`script/DeployNuvem.s.sol:131-141`.
+## Decisions that cannot be changed afterwards
 
-Nothing in this runbook should instruct an operator to configure, verify, or
-monitor an adapter, a target asset, or a fee-bearing call. If you find such an
-instruction below, it is a bug in this document.
+`VaultFactory.configureProtocol` is one-shot — it reverts with
+`ProtocolAlreadyConfigured` on a second call — and the bootstrap fires it during
+construction. It pins exactly four addresses, permanently:
 
-## Supported chains and governance
+- **`weth`** — the canonical WETH the vaults denominate in. On chain 4663 that is
+  `0x0bd7d308f8e1639fab988df18a8011f41eacad73`, which the worker also pins as a
+  chain fact. Verify name, symbol and decimals yourself before pasting it.
+- **`pauseController`**
+- **`attesterRegistry`**
+- **`settlementExecutor`** — the *initial* one, and the executor the factory will
+  answer with forever. This is not a lock on the product: a vault admin can
+  re-point their own vault with `setSettlementExecutor`, which is how Phase 1
+  works. It is a lock on what a newly created vault is initialized with.
 
-The script rejects every chain except:
+`ProtocolConfiguration` has four fields and can never gain a fifth. The adapter
+registry is deliberately **not** among them: pinning it there made it a per-vault
+value chosen at creation, which could never reach a vault that already existed
+because `initialize` runs once. It is an immutable of the `PersonalVault`
+implementation instead, so a beacon upgrade delivers a new one to every proxy in
+the cohort at once. `FeeCollector` and `FeeController` are deployed and are
+deliberately *not* pinned either, so no vault can reach them and settlement
+charges no protocol fee.
 
-| Environment | Chain ID | Current permission |
-| --- | ---: | --- |
-| Local Anvil | `31337` | Simulation only |
-| Robinhood testnet | `46630` | Simulation/broadcast after preflight |
-| Robinhood mainnet | `4663` | Superseded canary topology live; the full gate below remains unmet |
+Two more decisions are effectively permanent:
 
-The deployment requires a Safe-compatible corporate wallet with exactly five
-owners and threshold three. The script checks only `getOwners()` and
-`getThreshold()`: it does not authenticate Safe bytecode, owners, signer
-security, modules, or guards.
+- **Cohort 1.** Cohorts are append-only and each has one immutable beacon. The
+  vault implementation registered here is what every vault created in cohort 1
+  runs until governance upgrades the beacon.
+- **The timelock delay.** `GOVERNANCE_DELAY` is seven days. It can be shortened
+  only by setting `NUVEM_GOVERNANCE_DELAY` *and* `NUVEM_DISPOSABLE_TEST_DEPLOYMENT`
+  together, with a floor of fifteen minutes (`MIN_TEST_GOVERNANCE_DELAY`) so that
+  `schedule` and `execute` cannot land in the same block. The two variables are
+  separate on purpose: a number can be lowered quietly and look like tuning,
+  whereas the flag has to be written down. Never set it on a deployment that will
+  hold anyone else's money — the delay is the only window in which the guardian's
+  cancel role means anything.
 
-The Safe directly owns `FeeController` and `FeeCollector`, which no vault can
-reach. It is the sole proposer for a seven-day timelock that governs the factory,
-the attester registry, the pause controller, and the initial cohort beacon.
-Timelock execution is permissionless after maturity.
-
-## Prerequisites
-
-From the repository root:
-
-```powershell
-nvm use 22.14.0
-corepack enable
-corepack prepare pnpm@10.18.1 --activate
-pnpm install --frozen-lockfile
-pnpm build
-pnpm test
-Copy-Item .env.example .env
-```
-
-Fill only the required values in the gitignored `.env`. Do not commit or print
-private keys. `DeployNuvem.s.sol` currently reads
-`DEPLOYER_PRIVATE_KEY` directly from the environment; that plaintext
-process-environment dependency is a production hardening blocker.
-
-The deployment variables are:
+## Configuration
 
 | Variable | Requirement |
 | --- | --- |
-| `RH_TESTNET_RPC_URL` | Robinhood testnet RPC used by the commands below. |
-| `DEPLOYER_PRIVATE_KEY` | Funded deployer key; never reuse an admin, Safe owner, attester, trading, or session key. |
-| `NUVEM_INITIAL_FEE_BPS` | Integer from `0` through `10000`. **Still required** — `DeployNuvem.s.sol:279` reads it with `vm.envUint`, which reverts when it is unset — but it now configures only the constructor of a `FeeController` that no vault can reach, so it sets no user-visible percentage. `scripts/deploy-mainnet.ps1` sets it to `0` and says so in its banner; zero rather than a placeholder, so that if the fee path is ever wired up the default is "charge nothing". |
-| `NUVEM_CORPORATE_MULTISIG` | Deployed Safe-compatible contract, exactly 3-of-5. |
-| `NUVEM_GUARDIAN` | Nonzero emergency address, separate from deployer. |
+| `DEPLOYER_PRIVATE_KEY` | Read directly with `vm.envUint`. A funded, single-purpose key. It holds no privilege after the run, but never reuse an admin, Safe-owner, guardian, attester or trading key. That plaintext process-environment dependency is a production hardening blocker and is not fixed. |
+| `NUVEM_CORPORATE_MULTISIG` | A deployed contract that answers `getThreshold()` and `getOwners()`. |
+| `NUVEM_GUARDIAN` | Nonzero. Holds cancel, pause and disable-attester, and nothing else. Keep it separate from the deployer and from the Safe. |
 | `NUVEM_TREASURY` | Nonzero recipient authority on the unpinned `FeeCollector`. |
-| `NUVEM_ATTESTER` | Nonzero initial attester. This is the key the whole protocol's correctness rests on; see the [threat model](../security/THREAT_MODEL.md). |
-| `NUVEM_WETH_ADDRESS` | Deployed WETH contract on the selected chain. Pinned permanently by `configureProtocol`. |
-| `NUVEM_CANARY_APPROVED` | Keep `false` for any deployment intended as production. It is consulted only on chain `4663` and is an operator assertion, not evidence. `scripts/deploy-mainnet.ps1` sets it `true` because that script exists solely to reproduce the canary. |
+| `NUVEM_ATTESTER` | Nonzero initial attester, epoch 1. This is the key the whole protocol's correctness rests on — see the [threat model](../security/THREAT_MODEL.md). It must be the key the worker will sign with; see "Wire SIP to it" below. |
+| `NUVEM_WETH_ADDRESS` | A deployed WETH contract on the selected chain. **Pinned permanently.** |
+| `NUVEM_INITIAL_FEE_BPS` | Integer `0`–`10000`. Still required — the script reads it with `vm.envUint`, which reverts when unset — but it configures only a `FeeController` no vault can reach. Set `0`, so that if a fee path is ever wired up the default is "charge nothing". |
+| `NUVEM_CANARY_APPROVED` | Consulted only on chain `4663`, where the script reverts `CanaryApprovalRequired` without it. It is an operator assertion, not evidence, and bypassing the guard proves nothing. |
+| `NUVEM_GOVERNANCE_DELAY` | Optional. Defaults to seven days. |
+| `NUVEM_DISPOSABLE_TEST_DEPLOYMENT` | Optional, default false. Required alongside any delay under seven days. |
 
-`NUVEM_TARGET_ASSET_ADDRESS` is **no longer read by anything**. It belonged to the
-vault's investment path: there is no `targetAsset` to validate and no adapter to
-route to. `scripts/deploy-mainnet.ps1:61-72` records why it was removed from the
-script rather than left set — the banner printed it, so the operator read back a
-confirmation of configuration the deployment was not performing. Do not supply it.
-It is still present in `.env.example` and `script/README.md`; those are stale.
+`NUVEM_TARGET_ASSET_ADDRESS` is no longer read by anything and must not be
+supplied.
 
-Load the root `.env` into the current PowerShell process before changing into
-the Foundry package:
+The script accepts three chains and reverts `UnsupportedChain` on any other:
 
-```powershell
-Get-Content .env | ForEach-Object {
-  $entry = $_.Trim()
-  if ($entry -and -not $entry.StartsWith("#")) {
-    $name, $value = $entry -split "=", 2
-    [Environment]::SetEnvironmentVariable($name, $value, "Process")
-  }
-}
-```
+| Environment | Chain ID |
+| --- | ---: |
+| Local Anvil | `31337` |
+| Robinhood testnet | `46630` |
+| Robinhood mainnet | `4663` (needs `NUVEM_CANARY_APPROVED`) |
 
-This loader expects the simple unquoted `NAME=value` format used by
-`.env.example`. Close the shell after deployment to discard the process values.
+`packages/contracts/scripts/deploy-mainnet.ps1` still hardcodes the Safe,
+guardian, treasury and attester of the abandoned run. Read it as a record of how
+that deployment was invoked, not as a launcher for a new one.
 
 ## Local simulation
 
-No keys or RPC are required:
+No keys and no RPC:
 
-```powershell
-Set-Location packages/contracts
+```bash
+cd packages/contracts
 forge script script/DeployLocal.s.sol:DeployLocal -vv
-Set-Location ../..
 ```
 
-The script refuses non-`31337`, does not broadcast, and deploys mock WETH, a
-second mock ERC-20 with no protocol role (so `withdrawToken` can be exercised
-against something that is not WETH), and unsafe local call executors. It advances
-local time by seven days, completes governance setup, and creates a sample vault.
-No adapter is deployed, because there is nothing to register one with. Ephemeral
-addresses from this run are not deployment addresses.
+It refuses any chain but `31337`, never broadcasts, and stands in mock WETH, a
+second ERC-20 with no protocol role (so `withdrawToken` can be exercised against
+something that is not WETH), and a permissionless `LocalCallExecutor` in place of
+the Safe. It then does the thing that is easiest to skip on a real chain: it
+schedules the factory-ownership handoff, warps seven days, executes it, and
+creates a sample vault in cohort 1. Run it before every real deployment — it is
+the cheapest proof that the governance path still closes. Its addresses are
+ephemeral and are not deployment addresses.
 
-## Robinhood testnet preflight
+## Pre-flight
 
-All assertions below must be checked against independently sourced intended
-values:
+Every assertion below corresponds to a check `_validateConfig` actually performs,
+and each is worth making yourself first, because the script's revert tells you
+only that something was wrong.
 
-```powershell
-cast chain-id --rpc-url $env:RH_TESTNET_RPC_URL
-cast call $env:NUVEM_CORPORATE_MULTISIG "getThreshold()(uint256)" --rpc-url $env:RH_TESTNET_RPC_URL
-cast call $env:NUVEM_CORPORATE_MULTISIG "getOwners()(address[])" --rpc-url $env:RH_TESTNET_RPC_URL
-cast code $env:NUVEM_CORPORATE_MULTISIG --rpc-url $env:RH_TESTNET_RPC_URL
-cast code $env:NUVEM_WETH_ADDRESS --rpc-url $env:RH_TESTNET_RPC_URL
+```bash
+cast chain-id --rpc-url "$RPC_URL"
+cast call "$NUVEM_CORPORATE_MULTISIG" "getThreshold()(uint256)" --rpc-url "$RPC_URL"
+cast call "$NUVEM_CORPORATE_MULTISIG" "getOwners()(address[])"  --rpc-url "$RPC_URL"
+cast code "$NUVEM_CORPORATE_MULTISIG" --rpc-url "$RPC_URL"
+cast code "$NUVEM_WETH_ADDRESS"       --rpc-url "$RPC_URL"
 ```
 
-Each of these corresponds to a check the script actually performs:
-`_validateConfig` refuses an unsupported chain, requires the multisig and WETH to
-be contracts, and requires `getThreshold() == 3` with five owners
-(`DeployNuvem.s.sol:186-243`). Stop unless the chain ID is exactly `46630`, the
-Safe threshold is `3`, it has exactly five intended owners, and both code results
-are non-empty. Separately inspect Safe bytecode/source, owners, modules, guards,
-and nonce in the Safe interface.
+The multisig check is a **probe, not a shape**. It requires only that the address
+answers both calls and that `0 < threshold <= owners.length`. It used to demand
+exactly 3-of-5; the numbers were never the control. A wrongly pasted address —
+the single most dangerous field here — almost never answers both methods, so it
+reverts either way, whereas the fixed shape forced a solo operator into five keys
+from one seed on one machine, which passes the check and means nothing. An honest
+1-of-2 carries the same real risk and names it. Inspect Safe bytecode, owner
+identity, modules, guards and nonce in the Safe interface; the script
+authenticates none of them.
 
-Review every non-secret input with a second operator. Confirm in particular that
-the attester address is the key you intend and that it is held nowhere else — the
-executor recomputes the arithmetic of an attestation but cannot check its four
-cash figures against history, so that key is the protocol's trust root.
+Review every non-secret input with a second operator, and confirm in particular
+that the attester address is the key you intend and is held nowhere else. The
+executor recomputes an attestation's arithmetic but cannot check its cash figures
+against history, so that key is the trust root.
 
-## Simulate before broadcast
+## Simulate, then broadcast
 
-From `packages/contracts`:
-
-```powershell
-forge script script/DeployNuvem.s.sol:DeployNuvem `
-  --rpc-url $env:RH_TESTNET_RPC_URL `
-  -vvvv
+```bash
+forge script script/DeployNuvem.s.sol:DeployNuvem --rpc-url "$RPC_URL" -vvvv
 ```
 
-This is an RPC simulation only. Review reverts, gas, configuration, calculated
-addresses, and the printed factory-ownership operation. Do not copy simulated
-addresses into a manifest.
+That is an RPC simulation. Read the reverts, the gas, the configuration echo, and
+the factory-ownership operation the script prints. Do not copy simulated
+addresses anywhere.
 
-## Testnet broadcast
-
-Broadcast only after the simulation and human review succeed:
-
-```powershell
-forge script script/DeployNuvem.s.sol:DeployNuvem `
-  --rpc-url $env:RH_TESTNET_RPC_URL `
-  --broadcast `
-  --slow `
-  -vvvv
+```bash
+forge script script/DeployNuvem.s.sol:DeployNuvem --rpc-url "$RPC_URL" \
+  --broadcast --slow -vvvv
 ```
 
-Treat the resulting transaction receipts, not console text alone, as the source
-of truth. Record only confirmed addresses from
-`broadcast/DeployNuvem.s.sol/46630/run-latest.json`. Preserve:
+**Cost.** The last recorded full deployment was **13,895,644 gas across 8
+transactions** — one per top-level creation: the timelock bootstrap, the pause
+controller, the attester registry, the fee collector, the fee controller, the
+adapter registry, the vault implementation, and the factory bootstrap. The last
+two are the expensive ones, and the factory bootstrap deploys three contracts
+inside its constructor. At the gas price recorded in `foundry.toml` for a real
+mainnet settlement — 450,545 gas for 0.0000188 ETH — that is roughly 0.0006 ETH,
+on the order of a dollar. Fund the deployer with room for a retry regardless.
 
-- git commit and clean/dirty status;
-- chain ID and RPC provider class, without credentials;
-- every non-secret configuration value;
-- transaction hashes, block numbers, deployed bytecode hashes, and addresses;
-- the four addresses pinned by `configureProtocol`, read back from the factory;
-- the `FeeCollector` and `FeeController` addresses, recorded explicitly as
-  **deployed but not pinned**, so a later reader does not infer a fee path from
-  their presence in the receipts;
-- Safe owner/threshold/module/guard evidence; and
-- the exact ownership target, value, calldata, predecessor, salt, and delay
-  printed by the script.
+Treat receipts, not console text, as the source of truth. Record only confirmed
+addresses from `broadcast/DeployNuvem.s.sol/<chainId>/run-latest.json`, and
+preserve alongside them: the git commit and whether the tree was clean; the chain
+id and RPC provider class without credentials; every non-secret configuration
+value; transaction hashes, block numbers, deployed bytecode hashes and addresses;
+the four addresses read back from `protocolConfiguration()`; the `FeeCollector`
+and `FeeController` addresses marked explicitly **deployed but not pinned**, so a
+later reader does not infer a fee path from their presence; Safe
+owner/threshold/module/guard evidence; and the exact target, value, calldata,
+predecessor, salt and delay the script printed.
 
-Do not add an explorer verification claim until an actual verifier endpoint and
-successful verification output exist. This repository does not currently
-configure one.
+Note the **deploy block**. The worker and the website both need it, and
+recovering it later means a log scan you could have avoided.
 
-## Complete factory governance
+Do not claim explorer verification until a verifier endpoint exists and has
+returned success. This repository configures none.
 
-Immediately after broadcast, the factory owner is the sealed
-`VaultFactoryBootstrap`, and the timelock is only the pending owner. The
-bootstrap has no callable method that can govern the factory. This deliberate
-freeze ends only after the following operation.
+## Finish the factory handoff — this is the step that gets forgotten
 
-Using addresses confirmed from the receipts:
+Immediately after broadcast the factory's owner is the sealed
+`VaultFactoryBootstrap` and the timelock is only the *pending* owner. The
+bootstrap has no method that can govern the factory. **Until the handoff
+executes, factory governance is frozen: no new cohort, no future owner, no way
+out.** The freeze is intentional, but leaving it in place is not.
 
-```powershell
-$factory = "<confirmed factory address>"
-$timelock = "<confirmed timelock address>"
-cast call $factory "owner()(address)" --rpc-url $env:RH_TESTNET_RPC_URL
-cast call $factory "pendingOwner()(address)" --rpc-url $env:RH_TESTNET_RPC_URL
-cast call $timelock "getMinDelay()(uint256)" --rpc-url $env:RH_TESTNET_RPC_URL
+```bash
+cast call "$FACTORY"  "owner()(address)"        --rpc-url "$RPC_URL"
+cast call "$FACTORY"  "pendingOwner()(address)" --rpc-url "$RPC_URL"
+cast call "$TIMELOCK" "getMinDelay()(uint256)"  --rpc-url "$RPC_URL"
 ```
 
-Through the 3-of-5 Safe, schedule the exact target, value, calldata,
-predecessor, salt, and seven-day delay printed by the deployment script. Do not
-reconstruct or alter those fields manually. Confirm the scheduling transaction
-on-chain, wait the full delay, then execute the matured operation. Execution is
-open, but the schedule must have come from the Safe.
+Through the Safe, schedule the exact target, value, calldata, predecessor, salt
+and delay the deployment script printed. Do not reconstruct those fields by hand;
+the salt is derived from a version constant and the factory address, and a
+mismatch produces an operation that matures into nothing. Confirm the scheduling
+transaction, wait the full delay, then execute — execution is permissionless, but
+the schedule must have come from the Safe.
 
-After execution:
+Afterwards, `owner()` must be the timelock and `pendingOwner()` must be zero.
+Until both hold, the deployment is incomplete.
 
-```powershell
-cast call $factory "owner()(address)" --rpc-url $env:RH_TESTNET_RPC_URL
-cast call $factory "pendingOwner()(address)" --rpc-url $env:RH_TESTNET_RPC_URL
+Then verify the one-shot configuration:
+
+```bash
+cast call "$FACTORY" "protocolConfiguration()(address,address,address,address)" --rpc-url "$RPC_URL"
+cast call "$FACTORY" "protocolConfigured()(bool)" --rpc-url "$RPC_URL"
 ```
 
-The confirmed owner must be the timelock and the pending owner must be zero.
-Until this is true, factory deployment is incomplete.
+Four words, in the order weth / pauseController / attesterRegistry /
+settlementExecutor. If either fee address appears among them, stop: a vault could
+reach a fee path this deployment is not designed for, and `configureProtocol`
+cannot be called again to correct it.
 
-## Post-deployment validation
+Before creating a real vault, also confirm deployed runtime bytecode against the
+build artifacts; every owner, guardian, treasury, attester, delay, proposer and
+executor role; that a harmless timelock action proposes and executes after the
+real delay; that the guardian can pause globally and disable the attester and
+*cannot* unpause; and, on a disposable vault, that `setSettlementExecutor`
+force-pauses settlement, bumps `localPauseEpoch` and `vaultPolicyNonce`, and
+thereby invalidates every attestation signed against the previous executor. That
+last one is Phase 1's only migration path and it must be known to work before it
+is needed.
 
-Before creating a real user vault:
+## Wire SIP to it
 
-1. Verify deployed runtime bytecode against the exact build artifacts.
-2. Verify the one-shot factory configuration and initial cohort/beacon on-chain.
-   Read all four pinned addresses back and confirm they are weth, pauseController,
-   attesterRegistry and settlementExecutor:
+The contracts are only half of a deployment. Four things point at them, and three
+of the four fail loudly while the fourth fails silently.
 
-   ```powershell
-   cast call $factory "protocolConfiguration()(address,address,address,address)" --rpc-url $env:RH_TESTNET_RPC_URL
-   cast call $factory "protocolConfigured()(bool)" --rpc-url $env:RH_TESTNET_RPC_URL
-   ```
+**1. The attester.** There is no separate registration step: `AttesterRegistry`
+takes its initial attester in its constructor, from `NUVEM_ATTESTER`, at epoch 1.
+So the key the worker will sign with must be the key you deployed with. If it is
+not, rotating it is `rotateAttester` on a timelock-owned registry — a full
+governance cycle — and every attestation signed against the old epoch stops
+verifying the moment it lands.
 
-   Confirm that neither the `FeeController` nor the `FeeCollector` address from
-   the receipts appears among them. If either does, stop: a vault could then reach
-   a fee path this deployment is not designed for, and `configureProtocol` cannot
-   be called again to correct it.
-3. Verify every owner, guardian, treasury, attester, delay, proposer, and
-   executor role.
-4. Propose and execute a harmless testnet timelock action after the real delay.
-5. Exercise guardian pause/disable and governance recovery. The guardian can pause
-   globally and disable the attester, and can do nothing else — confirm both, and
-   confirm it cannot unpause.
-6. Create a disposable test vault and test multiple accounts with different
-   savings bps, admin override, self-revoke, caps, pauses, stale epochs, and
-   replay.
-7. Exercise the settlement progression rules explicitly, because they are what
-   replay protection rests on: two distinct L2 sessions inside one L1 block must
-   both settle; an overlapping, contained, identical or inverted L2 window must be
-   refused; an L1 range that rewinds must fail with `NonProgressiveL1BlockRange`
-   rather than `NonProgressiveBlockRange`; and a degenerate L2 window
-   (`startBlockL2 == 0`, or `endBlockL2 <= startBlockL2`) must be refused by the
-   executor *and* independently by the vault. `test/unit/SettlementProgressionL2.t.sol`
-   is the reference for all of these.
-8. Validate that admin withdrawals deduct no Nuvem protocol fee, that
-   `FeeCollector` receives nothing from any settlement, and that the two-step
-   admin transfer works. ERC-20 behavior remains subject to the token's own
-   transfer mechanics.
-9. Exercise `setSettlementExecutor` on the disposable vault and confirm it
-   force-pauses settlement, bumps `localPauseEpoch` and `vaultPolicyNonce`, and
-   thereby invalidates every attestation signed against the previous executor.
-   This is the only migration path a vault has and it must be known to work
-   *before* it is needed.
-10. Run the separate
-    [Alchemy MAv2/EIP-7702 smoke](../AA_SMOKE_RUNBOOK.md) with disposable
-    testnet keys and retain receipts. The session key's native cap rests entirely
-    on the selector allowlist containing `execute` alone; assert that and assert
-    that `executeBatch` is rejected at validation.
+**2. `packages/worker/.env`.** The worker refuses to start without these; a wrong
+value is a startup problem, never a fallback:
 
-Create a deployment manifest only after these facts are confirmed. Never insert
-placeholder or simulated addresses.
+```
+SIP_VAULT_FACTORY=<new factory>
+SIP_SETTLEMENT_EXECUTOR=<new executor>
+SIP_LOGS_FROM_BLOCK=<deploy block>
+SIP_CHAIN_ID=4663
+SIP_RPC_URLS=<archive endpoint>
+```
 
-## Mainnet hard stop
+The RPC must be an archive endpoint whose `eth_getLogs` range is not capped.
+Alchemy's free tier caps it at 10 blocks on 4663, which makes trading-account
+discovery impossible; Pay-As-You-Go lifts the cap.
 
-A **production** Robinhood mainnet deployment is not authorized by this
-repository's current evidence. `NUVEM_CANARY_APPROVED=true` merely bypasses the
-script guard; it does not prove the canary.
+**3. `packages/website-oficial/.env.local`.** `NUVEM_VAULT_FACTORY` is required
+and has no default, on purpose — everything else the site needs is read from
+`protocolConfiguration()` at runtime. Set `NUVEM_LOGS_FROM_BLOCK` to the deploy
+block so wallet discovery stays inside the RPC's log window, and replace the
+optional cross-check values (`NUVEM_SETTLEMENT_EXECUTOR`, `NUVEM_WETH`,
+`NUVEM_PAUSE_CONTROLLER`, `NUVEM_ATTESTER_REGISTRY`) or unset them. They exist
+only so the UI can say "your environment disagrees with the chain"; left stale
+they say it constantly.
 
-The live canary topology on `4663` was deployed with that flag set, deliberately
-and with one of the ten items below met. That does not retroactively authorise
-anything: it is a disposable single-wallet experiment, it must not be built on,
-and the gate below still governs any deployment meant to hold other people's
-funds.
+**4. The Privy policy — the one that fails silently.** The policy that bounds the
+app's signer seat **pins the executor's address**. It currently names the
+abandoned one, so against a new deployment every pull is denied by Privy's
+enclave, the worker records a failure per wallet, and nothing on chain says why.
 
-At minimum, an independent sign-off package must contain these ten items:
+The app's key quorum is `zdhe35f97hmzxes5iuzga7d0` and its policy is
+`nxakvhwt6dctmvorrfp4xlk9`. The policy allows `settle` to be signed and sent to
+the executor address and nothing else, allows `invest` with value 0, and denies
+`exportPrivateKey` and `exportSeedPhrase`. Update the executor address in the
+`settle` rule — and, in Phase 1, update it again to `SipVolumeExecutor` — through
+Privy's dashboard or its policies API. **This repository no longer carries a
+script for it**; the ones that created and updated the policy lived in a package
+that has been deleted, and they have not been replaced.
 
-1. the complete testnet validation and governance evidence above;
-2. an independently reviewed session engine and attester operation, with the
-   position-delta-zero soundness claim in `ledgerRoot` v2 reproducible from a
-   published report — the executor recomputes the arithmetic but cannot check the
-   four cash figures against history, so this is the item that stands in for
-   verification and nothing else does;
-3. a smallest-size disposable-wallet GMGN mainnet buy and sell;
-4. actual transaction receipts, router/calldata attribution, token movements,
-   approvals/Permit2 behavior, and realized-PnL reconciliation;
-5. confirmed EIP-7702/MAv2 installation and exact settlement execution with
-   session-key limits and sponsorship behavior, including the negative cases
-   (wrong target, wrong selector, over-cap value, revocation) against a real
-   executor;
-6. failure-path evidence showing funds remain recoverable and WETH is retained
-   when settlement is deferred or reverts;
-7. Safe bytecode/owners/modules/guards review and signer ceremony;
-8. public source verification, monitoring, alerting, incident response, and a
-   user exit procedure;
-9. a keeper custody model that is not "hold the trader's own private key" — that
-   is total custody of the wallet, and it is why v1 can serve only the operator
-   themselves. See `ATTESTER.md` section 1; the EIP-7702 session-key path
-   described there is the precondition for a second user; and
-10. independent contract/security review with all critical findings resolved.
+That policy is the security boundary, and it is worth being plain about what kind
+of boundary it is: containment is enforced by Privy's policy engine, not by a
+contract. The honest sentence is "we cannot take your money because Privy will
+not let us", not "check the chain yourself". It is also a claim about the
+*signing path* only — an exported key is a second signer with no policy at all,
+which is exactly why collection is best-effort.
 
-Unknown router, PnL, trace, liquidity, signing, or recovery evidence is a failed
-gate. Do not deploy mainnet while any item is unknown.
+## Phase 0 versus Phase 1
 
-None of this gate concerns an investment adapter, an oracle, slippage, or token
-eligibility, because there is no investment path to gate. Those return to this
-list on the cohort that reintroduces investing; the analysis waiting for them is
-in the deferred section of the [threat model](../security/THREAT_MODEL.md).
+**Phase 0 needs no new contract.** It uses the `SettlementExecutor` this script
+deploys, and carries the volume through the attestation's cash fields:
+`cashStart`, `externalDeposits` and `externalWithdrawals` are zero while `cashEnd`
+and `realizedProfit` both hold the window's gross notional, so the executor's
+`calculateRealizedProfit` returns the volume and the contribution comes out as
+`savingsBps x volume`, clamped by the vault's own caps. Nothing about the vault
+changes.
+
+Two consequences follow, and both are why Phase 0 is **for the team's own wallets
+only**:
+
+- Every consumer of `SettlementExecuted` will read volume in a field named
+  `realizedProfit` until Phase 1.
+- A savings rate that was set to mean a percentage of profit becomes, unchanged,
+  a percentage of notional. That is the whole reason a fresh factory exists, and
+  the reason a fresh factory is safe: it has no accounts on it yet, so every rate
+  on it was set under SIP's meaning from the start.
+
+**Phase 1 deploys `SipVolumeExecutor`** and each vault admin re-points their own
+vault with `setSettlementExecutor`. It is immutable and ownerless, with no
+withdrawal, no recipient other than the account's registered vault, and no
+arbitrary call. What it changes: the caller decides `msg.value`, so a pull may be
+partial and the shortfall stays as debt in the executor's storage to be paid down
+later; replay is keyed per batch root in its own storage, so a partially
+collected attestation can never be presented twice; and the vault's L2 frontier
+is driven by a synthetic per-account counter, so a late fill discovered after a
+window closed is still collectible. The attestation is a `VolumeAttestation` with
+`sumNotionalWei` and `owedWei` as real fields rather than volume dressed as
+profit.
+
+Rolling out Phase 1 means, in order: deploy it, verify it, update the Privy policy
+to the new address, then have each vault admin call `setSettlementExecutor` and
+`setLocalPause(false)` — the re-point force-pauses settlement, which is a feature,
+because it invalidates every attestation signed against the old executor.
+`configureProtocol` is not involved and cannot be: the factory keeps answering
+with the Phase 0 executor for newly created vaults, which is why the migration is
+per-vault and voluntary.
 
 ## Incident posture
 
-A broadcast cannot be rolled back. If a testnet issue is discovered:
+A broadcast cannot be rolled back. If something is wrong:
 
-- stop creating vaults, and stop the keeper — remove `--broadcast` and the
-  `NUVEM_KEEPER_ALLOW_BROADCAST` sentinel rather than relying on either alone;
+- stop creating vaults, and stop the worker — clear `SIP_WORKER_ALLOW_BROADCAST`
+  rather than relying on anything else; without that exact sentence the process
+  never reads a secret and cannot sign;
 - have the guardian pause globally, and disable the attester if the attestation
-  data or the attester key is what is in doubt. The guardian can do only these
-  two things and cannot reverse either; reversal is a timelock action;
-- a vault admin can also `setLocalPause(true)` on their own vault, which is
-  faster than reaching the guardian and does not affect anyone else;
-- notify vault admins to use their admin-only withdrawal path if safe. It deducts
-  no protocol fee and consults no fee contract;
-- do not unpause until the root cause and on-chain state are understood; and
-- use the timelock for registry, factory, or cohort recovery and preserve the
-  full operation/receipt trail.
+  data or the attester key is what is in doubt. The guardian can do only those
+  two things and can reverse neither; reversal is a timelock action;
+- a vault admin can `setLocalPause(true)` on their own vault, which is faster than
+  reaching the guardian and affects nobody else;
+- notify vault admins of the admin-only withdrawal path. It deducts no protocol
+  fee and consults no fee contract;
+- if the seat itself is the problem, the containment is at Privy: narrowing or
+  removing the policy stops every pull at once, without touching the chain;
+- do not unpause until the root cause and the on-chain state are understood; and
+- use the timelock for registry, factory or cohort recovery, and keep the full
+  operation and receipt trail.
 
-Fee and collector changes remain immediate Safe actions, but in this deployment
-they reach nothing: `FeeController` and `FeeCollector` are not pinned into the
-factory's `ProtocolConfiguration`, so no vault can read them and settlement
-charges no fee. They are low-signal today and become high-signal again the moment
-either address is pinned. What does deserve high-signal monitoring is any change
-to the attester, the pause controller, the beacon, or a vault's settlement
-executor.
+Fee and collector changes are immediate Safe actions but reach nothing in this
+topology, since neither address is pinned. What deserves high-signal monitoring is
+any change to the attester, the pause controller, a cohort beacon, or a vault's
+settlement executor.

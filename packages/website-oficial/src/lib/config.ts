@@ -44,22 +44,19 @@ import { ROBINHOOD_CHAIN_ID } from "./chain";
 export const UINT128_MAX = 2n ** 128n - 1n;
 
 // ---------------------------------------------------------------------------
-// Mainnet cross-check defaults — the 2026-08-16 deployment.
+// NO DEPLOYMENT IS BUILT IN.
 //
-// VERIFIED AGAINST THE CHAIN, not against the deploy log: factory 0x783BDF02…
-// answers protocolConfiguration() with exactly these four, in this order. They
-// are a convenience for the "your environment disagrees with the chain" check
-// and nothing else; the factory's own answer is the authority and when the two
-// disagree, these are what is wrong. The factory itself has NO default — see
-// loadConfig for why.
+// This block used to carry the 2026-08-16 topology so the "your environment
+// disagrees with the chain" check had something to compare against. SIP does not
+// use that deployment — its vaults hold trading accounts whose savings rate means
+// a PERCENTAGE OF PROFIT, and this product's rate is basis points of VOLUME — so
+// comparing against it would vouch for the wrong chain state.
+//
+// The cross-check still works and is better for it: the factory's own
+// protocolConfiguration() is the authority, and the optional expected* variables
+// are what an operator sets when they want the mismatch reported loudly. Unset,
+// there is simply nothing to disagree with.
 // ---------------------------------------------------------------------------
-export const MAINNET = {
-  vaultFactory: "0x783BDF0281090f21928398cC3Da19cFb64Fed15E",
-  settlementExecutor: "0xfA92ABF15dFAf470Cc8833Cb01464bD6CA139e16",
-  weth: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
-  pauseController: "0x418B3406BC483eB66ca5570b6fF91cE9d090E8a7",
-  attesterRegistry: "0x1a96be4a757e065fb8928a2e5ab2Ab24790Ec7de",
-} as const;
 
 /**
  * The exact length @privy-io/react-auth requires of an app id. Its check is
@@ -423,10 +420,10 @@ export function loadConfig(env: Env = process.env, options: LoadOptions = {}): C
       variable: primary("factory"),
       message: "Not set. It decides which deployment every vault created here belongs to.",
       howToFix:
-        `Set ${primary("factory")} to the VaultFactory of the deployment you mean. The current ` +
-        `mainnet one is ${MAINNET.vaultFactory}. There is deliberately no default: a vault created ` +
-        "against the wrong factory cannot be moved, and a worker watching a different one reports " +
-        "no users rather than an error.",
+        `Set ${primary("factory")} to the VaultFactory of the deployment you mean. No deployment ` +
+        "ships as a default and none is inherited: a vault created against the wrong factory cannot " +
+        "be moved, and a worker watching a different one reports no users rather than an error. " +
+        "See docs/runbooks/DEPLOYMENT.md.",
     });
   }
 
@@ -473,10 +470,10 @@ export function loadConfig(env: Env = process.env, options: LoadOptions = {}): C
   const explorerUrl = httpUrl(env, "explorerUrl", problems, "a block explorer base URL, no trailing path");
 
   const expected = {
-    executor: address(env, "executor", MAINNET.settlementExecutor, problems),
-    weth: address(env, "weth", MAINNET.weth, problems),
-    pauseController: address(env, "pauseController", MAINNET.pauseController, problems),
-    attesterRegistry: address(env, "attesterRegistry", MAINNET.attesterRegistry, problems),
+    executor: address(env, "executor", null, problems),
+    weth: address(env, "weth", null, problems),
+    pauseController: address(env, "pauseController", null, problems),
+    attesterRegistry: address(env, "attesterRegistry", null, problems),
   } as const;
 
   const disable = read(env, "disableRpcProxy");

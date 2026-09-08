@@ -97,14 +97,12 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 # violated:
 #
 # A `workspace:*` DEPENDENCY WHOSE PACKAGE IS NOT IN THE CONTEXT DOES NOT FAIL
-# THE INSTALL. Measured: with packages/solana-core-old absent, this stage installs
 # cleanly, prints "Lockfile is up to date" and "Scope: 2 of 6 workspace
 # projects" -- one project short -- and leaves a DANGLING SYMLINK behind,
 # node_modules/@nuvem/solana-core -> ../../../solana-core, pointing at nothing.
 # pnpm exits 0. The failure surfaces two stages later, out of `next build`, as a
 # module-resolution error naming an import rather than this list.
 #
-# packages/solana-core-old is exactly that case and was missing: the dashboard
 # depends on @nuvem/solana-core with workspace:*, and this list predates that
 # dependency. Its manifest is copied here and its source below, next to the
 # app's own -- next build reads both.
@@ -116,12 +114,8 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 # the keeper's deploy on 2026-08-29; this image had the same defect and nobody
 # noticed because it deploys on Vercel, not from this Dockerfile.
 #
-# packages/keeper-old/test/dockerfile-copy-sources.test.ts now asserts these paths.
 COPY packages/contracts/package.json            packages/contracts/
 COPY packages/contracts-artifacts/package.json  packages/contracts-artifacts/
-COPY packages/session-engine-old/package.json       packages/session-engine-old/
-COPY packages/aa-smoke-old/package.json             packages/aa-smoke-old/
-COPY packages/solana-core-old/package.json          packages/solana-core-old/
 COPY packages/website-oficial/package.json      packages/website-oficial/
 # "@sip/web..." means "web plus everything it depends on". Do NOT use a bare
 # `pnpm install -r`: packages/contracts drags in @openzeppelin/contracts and
@@ -164,7 +158,6 @@ ENV NEXT_PUBLIC_PRIVY_APP_ID=${NEXT_PUBLIC_PRIVY_APP_ID}
 # app-code edit does not invalidate this layer.
 COPY --from=artifacts /repo/packages/contracts-artifacts/dist packages/contracts-artifacts/dist
 
-COPY packages/solana-core-old packages/solana-core-old
 COPY packages/website-oficial packages/website-oficial
 
 # Only the web filter. NEVER the root `pnpm build` -- its first step is

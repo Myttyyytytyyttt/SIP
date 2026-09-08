@@ -1,59 +1,60 @@
-# Nuvem
+# SIP — Self Implemented Pension
 
-Nuvem is a backend-first Robinhood Chain savings system. One permanent personal
-vault is administered by the user's `VaultAdmin` wallet and can receive
-settlements from any number of separately authorized trading wallets.
+A pension you build one trade at a time. A slice of the **size** of every buy and
+every sell goes aside the moment the order fills, accumulates, and buys the assets
+you chose. Not a slice of profit: of volume. Winning or losing never enters into it.
 
-The current workspace contains the Phase 1 smart-contract system, deterministic
-deployment scripts, Foundry verification, a minimal Alchemy MAv2/EIP-7702 smoke
-harness, and the [GMGN mainnet canary results](docs/canary/GMGN_EIP7702_RESULTS.md).
-It intentionally does not include the product frontend, PnL indexer, keeper, or
-production Stock Token adapter.
+## The constraint that shapes everything
 
-The canary gate passed and the loop closed on mainnet: a 7702-delegated EOA
-traded on GMGN, and 20% of the measured profit settled into its PersonalVault as
-WETH. Addresses and evidence are in the
-[mainnet settlement results](docs/canary/MAINNET_SETTLEMENT_RESULTS.md).
+**The trading wallet has to work anywhere.** Export the key and trade on GMGN or
+Axiom, or import one you already had, and the skim still happens. That rules out
+every mechanism living in the execution path — EIP-7702 code does not run on an
+EOA's outbound transactions, a Privy policy permits or denies but cannot insert a
+call, and a router of ours would only ever see our own trades.
 
-Two constraints found the hard way and worth knowing before reading further.
-`block.number` on this chain is the **L1** block number, millions apart from the
-L2 numbers an indexer observes — mixing them makes every settlement revert. And
-the delegation must be applied with a plain EIP-7702 type-4 transaction, because
-the low-level Alchemy SDK path ships the authorization unsigned; the SDK works
-normally once the account is delegated.
+So the skim is **observed on chain after the fill** and **pulled** from the wallet
+afterwards, through a policy-bounded Privy signer seat. Collection is best-effort
+and the product says so: the pull takes `min(owed, balance − reserve)` and carries
+the shortfall forward, because a wallet full of tokens has no ETH to pay with.
 
-## Safety boundary
+## Layout
 
-The protocol is administratively controlled. A company multisig can upgrade a
-vault cohort after a seven-day timelock and can change the investment fee
-immediately from 0% to 100%. At 100%, the selected WETH investment amount is
-transferred to the fee collector without purchasing the target asset. This must
-not be represented as a fully non-custodial or trust-minimized product.
-
-## Local commands
-
-```powershell
-nvm use 22.14.0
-pnpm install --frozen-lockfile
-pnpm build
-pnpm test
-pnpm devnet:drill
-pnpm public-testnet:drill
+```
+packages/contracts            the vault system, and SipVolumeExecutor
+packages/contracts-artifacts  ABIs and bytecode, exported deterministically
+packages/worker               @sip/worker — observe, attest, pull
+packages/website-oficial      @sip/web — the dashboard, and /wallets
 ```
 
-Secrets belong only in the gitignored root `.env`. Copy `.env.example` and fill
-it locally before broadcasting or running a Robinhood Testnet flow. The public
-testnet drill is preflight-only by default; broadcasting requires its separate
-explicit command and confirmation value.
+## Quick start
 
-## Documentation
+```bash
+pnpm install
+pnpm --dir packages/website-oficial dev     # the site on :3002
+pnpm --dir packages/worker tick             # one worker pass, dry run
+pnpm test                                   # contracts + worker
+```
 
-- [Contract architecture](docs/architecture/CONTRACTS.md)
-- [Contract threat model](docs/security/THREAT_MODEL.md)
-- [GMGN / EIP-7702 canary results](docs/canary/GMGN_EIP7702_RESULTS.md)
-- [Mainnet deployment and first settlement](docs/canary/MAINNET_SETTLEMENT_RESULTS.md)
-- [Deployment runbook](docs/runbooks/DEPLOYMENT.md)
-- [Signed local devnet trading drill](docs/runbooks/DEVNET_TRADING_DRILL.md)
-- [Robinhood Testnet synthetic trading drill](docs/runbooks/PUBLIC_TESTNET_SYNTHETIC_DRILL.md)
-- [Alchemy MAv2/EIP-7702 smoke runbook](docs/AA_SMOKE_RUNBOOK.md)
-- [Versioned contract artifacts](packages/contracts-artifacts/README.md)
+Nothing is deployed. The worker refuses to start without `SIP_VAULT_FACTORY` and
+`SIP_SETTLEMENT_EXECUTOR`, on purpose: this project does not reuse the deployment
+it was forked from, whose trading accounts carry a savings rate meaning a
+*percentage of profit*. Applying that rate to a volume would skim roughly a
+hundred times what a user agreed to. See `docs/runbooks/DEPLOYMENT.md`.
+
+## Where the reasoning lives
+
+- `reports/SIP_BACKEND_ASSESSMENT_2026-09-07.md` — why this architecture and not
+  another. Annex D is the part worth reading: five adversarial verifications, all
+  of which came back "partially", each one changing the design.
+- `reports/PENDING_REVIEW_FINDINGS_2026-09-07.md` — what a 35-finding review
+  fixed, and the three things still open.
+- `packages/worker/DESIGN.md` — how the observer decides what a fill is worth, and
+  when it refuses to decide.
+- `docs/security/THREAT_MODEL.md` — what SIP is trusted for, and what bounds it.
+
+## State
+
+Worker: 511 tests. Contracts: 425 tests. The site builds with a 69-fragment ABI
+check against the artifacts. A dry-run pass has run against Robinhood Chain
+mainnet and reconstructed real fills to the wei — but nothing has ever collected
+a single wei, because no SIP deployment exists yet.

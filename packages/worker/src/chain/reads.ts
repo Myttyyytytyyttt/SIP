@@ -7,8 +7,8 @@
 // scan quietly reads less than it claims. Both throw, and `getLogs` proves the
 // node has each chunk's last block before asking for its logs.
 //
-// Ported from packages/session-engine-old/src/chain.ts (cashAt, toL1Block,
-// transactionCountAt, erc20BalanceAt) and packages/keeper-old/src/discovery.ts
+// Ported from the session engine of the project this was forked from (src/chain.ts (cashAt, toL1Block,)
+// transactionCountAt, erc20BalanceAt) and the keeper of the project this was forked from (src/discovery.ts
 // :125-161 (the chunk loop and its coverage check).
 
 import type { Address, Hex, RpcClient, RpcLog, RpcReceipt, RpcTransaction } from "../types.js";

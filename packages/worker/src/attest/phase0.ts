@@ -1,9 +1,9 @@
 // Builds and signs the deployed SettlementExecutor's attestation for one closed
 // volume window. Phase 0: no contract change (DESIGN.md §5).
 //
-// Port of packages/keeper-old/src/attest.ts (preflight order, validity window,
+// Port of the keeper of the project this was forked from (src/attest.ts (preflight order, validity window,)
 // the digest cross-check, the balance hazard) and of the EIP-712 material in
-// packages/keeper-old/src/onchain.ts (ATTESTATION_TYPES, the domain, the
+// the keeper of the project this was forked from (src/onchain.ts (ATTESTATION_TYPES, the domain, the)
 // import-time drift check, encodeSettleCalldata, deriveSessionId). What the old
 // keeper got right is preserved here, in the same order and for the same
 // reasons:

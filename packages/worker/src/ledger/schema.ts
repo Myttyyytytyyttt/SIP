@@ -1,6 +1,6 @@
 // The worker's ledger schema in Postgres.
 //
-// Ported from packages/keeper-old/src/ledger-pg-schema.ts — the DDL DISCIPLINE (re-runnable
+// Ported from the keeper of the project this was forked from (src/ledger-pg-schema.ts — the DDL DISCIPLINE (re-runnable)
 // statements, lowercase-address CHECKs, immutability as triggers, "the constraints are the safety");
 // the tables themselves are new, because what this ledger records is volume, not profit sessions.
 //

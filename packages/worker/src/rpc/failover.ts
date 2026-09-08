@@ -1,7 +1,7 @@
 // More than one RPC endpoint, because one is a single point of failure for the
 // whole product.
 //
-// Ported from packages/session-engine-old/src/failover.ts (owner: rpc). Not
+// Ported from the session engine of the project this was forked from (src/failover.ts (owner: rpc). Not)
 // ported: the tracer capability probe — this worker measures volume from logs,
 // receipts and balances, and no endpoint on 4663 serves debug/trace. Endpoints
 // arrive as bare clients and are named by position, so an event can never

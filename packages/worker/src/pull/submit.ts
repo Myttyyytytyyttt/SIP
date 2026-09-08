@@ -1,6 +1,6 @@
 // Broadcast, and the dry-run gate.
 //
-// Ported from packages/keeper-old/src/submit.ts (the ordering). The settle
+// Ported from the keeper of the project this was forked from (src/submit.ts (the ordering). The settle)
 // calldata is NOT encoded here: attest/phase0.ts owns the executor ABI and the
 // attestation, and two encoders would be two answers to "what did we send".
 //

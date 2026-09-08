@@ -1,6 +1,6 @@
 // Structured logging that cannot print a secret.
 //
-// Ported from packages/keeper-old/src/log.ts (Secret, Redactor, the three
+// Ported from the keeper of the project this was forked from (src/log.ts (Secret, Redactor, the three)
 // overlapping mechanisms, normalizeValue, stripUpstreamMetadata and
 // summarizeUpstreamError). Two things are new and both come from DESIGN.md
 // §0.6: the Redactor also masks ANY 64-hex run by shape, and a module-level

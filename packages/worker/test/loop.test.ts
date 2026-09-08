@@ -11,7 +11,6 @@ import { readFileSync } from "node:fs";
 import { concatHex, keccak256 } from "viem";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { SETTLEMENT_EXECUTOR, VAULT_FACTORY } from "../src/chain/constants.js";
 import { LedgerConnectionLostError } from "../src/ledger/pg.js";
 import { createLogger, silentLogger, type Logger } from "../src/log.js";
 import { StateUnavailableError } from "../src/observe/context.js";
@@ -98,8 +97,10 @@ const WALLET: Address = "0xc455bf7f16ebbc2b07cb26d1dd46194977974e7d";
 const WALLET_B: Address = "0x1111111111111111111111111111111111111111";
 const VAULT: Address = "0x2222222222222222222222222222222222222222";
 const VAULT_B: Address = "0x3333333333333333333333333333333333333333";
-const FACTORY: Address = VAULT_FACTORY;
-const EXECUTOR: Address = SETTLEMENT_EXECUTOR;
+// Addresses of a SIP deployment, invented here: no real deployment is pinned in
+// the source any more, so a test cannot accidentally aim the worker at Nuvem's.
+const FACTORY: Address = "0x1111111111111111111111111111111111111111";
+const EXECUTOR: Address = "0x2222222222222222222222222222222222222222";
 const TOKEN_V3: Address = "0x3792daef78e7c652c8ade7d1ad64fd398ed80056";
 const TRANSFER: Hex = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const ZERO32: Hex = `0x${"0".repeat(64)}`;

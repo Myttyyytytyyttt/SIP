@@ -1,236 +1,275 @@
-# Runbook: setting up Nuvem on another machine
+# Runbook: setting SIP up from scratch
 
-Everything needed to go from a bare machine to a working checkout. Written for
-moving between a desktop and a laptop, so it assumes you own both and can carry a
-passphrase between them out of band.
+From a bare machine to a checkout where the tests pass, the site runs and the
+worker completes a pass. It takes about ten minutes, and none of it needs a
+credential.
 
-The short version: `git clone` gives you all the code and none of the credentials,
-because sixteen private keys are deliberately excluded from version control.
-Section 3 is the part that actually needs doing.
+What it will **not** give you is a working product. **No deployment exists.**
+The contracts are written and tested but not on chain anywhere, so the site can
+show its setup checklist and the worker can refuse to start, and that is as far
+as a fresh clone goes. Section 6 says exactly where the wall is and why it was
+put there deliberately.
 
 ---
 
-## 1. Prerequisites
+## 1. What is in the repository
+
+Four packages, and only four.
+
+| Package | Name | What it is |
+| --- | --- | --- |
+| `packages/contracts` | `@nuvem/contracts` | The vault system, plus `SipVolumeExecutor` — the executor that settles against a volume rather than a profit. Solidity, Foundry. |
+| `packages/contracts-artifacts` | `@nuvem/contracts-artifacts` | The compiled ABIs, exported as an ES module. Its `dist/` is **committed**, which is what lets the other two build with no Solidity toolchain. |
+| `packages/worker` | `@sip/worker` | The observer, the attester and the puller. Watches every buy and sell a bound trading wallet makes anywhere on chain 4663, attests the volume, and pulls the skim through the wallet's Privy seat. Dry run by default. |
+| `packages/website-oficial` | `@sip/web` | The dashboard and `/wallets`: create a vault, bind a trading wallet, see what each trade put aside. |
+
+The product itself, so the variable names below read as something rather than as
+trivia: a slice of the **size** of every buy and every sell — basis points of
+notional, 20 by default, which is 0.2% — goes aside the moment the order fills
+and is invested in the assets the user chose. Not a slice of profit. The trading
+wallet has to keep working anywhere the user already trades, which is why the
+skim is *observed on chain after the fill* and *pulled afterwards*, rather than
+taken by a contract that sits in the trade path.
+
+---
+
+## 2. Prerequisites
 
 | Tool | Version | Needed for |
 | --- | --- | --- |
-| Node | **22.14.0** exactly | everything. Pinned in `package.json` `engines`. `node:sqlite`, which the keeper's store depends on, is a Node 22 built-in. |
-| pnpm | **10.18.1** | pinned in `package.json` `packageManager`. `corepack enable` picks it up automatically. |
-| Foundry | forge 1.5.1 | **only if you touch Solidity.** See below. |
-| Docker | any recent | only for the container path |
-| Git Bash / WSL | — | Windows only. `scripts/secrets-bundle.sh` is a shell script. |
+| Node | **22.14.0** exactly | everything. Pinned twice, in `.nvmrc` and in `package.json` `engines`. |
+| pnpm | **10.18.1** | pinned in `package.json` `packageManager`; `corepack enable` picks that up on its own. |
+| Foundry | forge **1.5.1** | the contracts, and the root `pnpm build` / `pnpm test`. See below. |
+| Docker | any recent | only for the container path — see [DEPLOYMENT_WEB.md](DEPLOYMENT_WEB.md). |
 
-### You probably do not need Foundry
+```bash
+nvm install    # reads .nvmrc
+corepack enable
+```
 
-`packages/contracts-artifacts/dist/` is **committed** — an exception carved into
-`.gitignore` on purpose, because Railway builds from git and the container has no
-Foundry. So the dashboard, the keeper and the session engine all build and run
-from a fresh clone with no Solidity toolchain at all.
+### When you actually need Foundry
 
-You need Foundry only to run `forge test` or to change a contract. If you do
-install it, `packages/contracts-artifacts/scripts/check-dist-fresh.mjs` will start
-verifying that the committed ABIs still match the Solidity — it silently skips
-when forge is absent, so a machine without Foundry is not silently trusting stale
-artifacts, it simply is not checking.
+`packages/contracts-artifacts/dist/` is committed — a deliberate exception in
+`.gitignore` — so **the site and the worker build and run from a fresh clone
+with no Solidity toolchain at all.**
+
+Foundry is needed for three things:
+
+- `forge test` and any change to a contract;
+- the **root** `pnpm build` and `pnpm test`, whose first step is `forge build` /
+  `forge test`. Use `pnpm test:worker` instead if you have no forge;
+- `pnpm --dir packages/contracts-artifacts test:from-out`, which re-exports from
+  `packages/contracts/out/`. That directory is gitignored, so it does not exist
+  until `forge build` has run on this machine.
+
+Foundry also needs the `forge-std` submodule, which a plain `git clone` leaves
+empty:
+
+```bash
+git submodule update --init --recursive
+```
 
 ---
 
-## 2. Clone and install
+## 3. Clone and install
 
 ```bash
-git clone https://github.com/Myttyyytytyyttt/Nuvem.git
-cd Nuvem
+git clone https://github.com/Myttyyytytyyttt/SIP.git
+cd SIP
 corepack enable
 pnpm install --frozen-lockfile
 ```
 
-`--frozen-lockfile` matters: it fails rather than silently resolving different
-versions. `@privy-io/react-auth` pins viem to an exact patch, so a drifting
-install produces peer warnings that are easy to ignore and occasionally are not
-warnings.
+`--frozen-lockfile` matters: it fails rather than quietly resolving different
+versions. `@privy-io/react-auth` pins viem to an exact patch, and a drifting
+install turns that into peer warnings which are easy to scroll past and are
+occasionally not warnings.
 
-At this point everything that does not need a credential already works:
+Everything that needs no credential already works:
 
 ```bash
-pnpm --dir packages/session-engine-old test     # 46, fully offline against a fixture
-pnpm --dir packages/keeper-old test             # 242, offline
-pnpm --dir packages/contracts-artifacts test
+pnpm test:worker                                   # 511 tests, no network
+pnpm --dir packages/website-oficial check:abis     # 69 fragment comparisons
 ```
 
 ---
 
-## 3. Credentials
+## 4. Where each variable lives
 
-**Nothing in section 2 gave you a single key.** Four files are gitignored and hold
-sixteen secrets between them. Without them you cannot deploy, attest, or start the
-dashboard.
+Three example files, one per thing you can run. Copy the one you need; each
+carries its own reasoning inline, so read it rather than only diffing it.
 
-### The four files
-
-| File | Secrets | Without it |
+| Example | Copy to | Read by |
 | --- | --- | --- |
-| `.env` | 8 | no deploys, no aa-smoke, no RPC |
-| `.env.mainnet` | 9 | no mainnet deploy, no Safe operations |
-| `packages/web/.env.local` | 2 | dashboard shows a setup checklist instead of a vault |
-| `.env.docker` | 1 | `docker compose` refuses to start |
+| `.env.example` | `.env` | the chain both services agree on, and the contract deploy |
+| `packages/worker/.env.example` | `packages/worker/.env` | `@sip/worker` |
+| `packages/website-oficial/.env.example` | `packages/website-oficial/.env.local` | `@sip/web` |
 
-### Option A — the encrypted bundle (syncs through git)
+**Root `.env`** holds only what is shared plus `DEPLOYER_PRIVATE_KEY`: the RPC
+URL, the chain id, the factory, the executor and the first block worth scanning.
+The deploy script reads that key in plaintext from the environment — signer
+handling for a real deployment is not hardened yet; see
+[DEPLOYMENT.md](DEPLOYMENT.md).
+
+**The worker** needs `SIP_RPC_URLS`, `SIP_CHAIN_ID`, `SIP_VAULT_FACTORY`,
+`SIP_SETTLEMENT_EXECUTOR` and `SIP_LOGS_FROM_BLOCK` to start at all, and nothing
+else for a dry run. `DATABASE_URL` (Postgres) is what makes a pass remember what
+it did; a live worker cannot run without it. The signing secrets —
+`SIP_ATTESTER_PRIVATE_KEY`, `PRIVY_APP_SECRET`,
+`PRIVY_AUTHORIZATION_PRIVATE_KEY` — are read **only** in live mode. In dry run
+the process deletes those variables by name without ever reading their values,
+so a dry run cannot pull because nothing in the process could sign one.
+
+**The site** needs `PRIVY_APP_ID`, `NUVEM_RPC_URL` and `NUVEM_VAULT_FACTORY`.
+Everything else is optional or cross-check only: the executor, WETH, the pause
+controller and the attester registry are all read from
+`VaultFactory.protocolConfiguration()` at runtime, so setting them buys you a
+"your environment disagrees with the chain" warning and nothing more. Every
+`NUVEM_*` name also accepts a `SIP_*` spelling; the aliases are listed against
+each variable in the example file.
+
+### Loading them
+
+`next dev` loads `.env.local` by itself. **The worker does not load any file** —
+it reads the process environment and nothing else:
 
 ```bash
-# on the machine that has the files
-./scripts/secrets-bundle.sh seal      # -> secrets.enc
-git add secrets.enc && git commit -m "Update the sealed credential bundle"
-git push
-
-# on the other machine
-git pull
-./scripts/secrets-bundle.sh open      # -> the four files, mode 0600
+cd packages/worker && set -a && . ./.env && set +a
 ```
 
-`secrets.enc` is AES-256 with 600k PBKDF2 iterations. The passphrase travels by
-password manager — one string instead of sixteen keys — and never through git,
-chat or email.
-
-Understand the trade before choosing this. **The ciphertext is permanent once
-committed.** Its entire security is the passphrase, so if that passphrase ever
-leaks, every bundle ever pushed becomes readable and you must treat it as key
-compromise and rotate. Use a long random passphrase, not one you invent.
-
-`./scripts/secrets-bundle.sh list` prints what a bundle contains without writing
-anything to disk. Run it after sealing; a bundle nobody verified is a bundle that
-might not open.
-
-### Option B — copy the four files directly
-
-USB stick, or your password manager's secure-file attachment. Slower to repeat,
-but it leaves nothing permanent anywhere. If you are only moving once, this is the
-better choice.
-
-### What must never happen
-
-Do not remove the `.env` rules from `.gitignore` to make syncing easier. Git
-history is permanent: a key committed once survives in every clone, reflog and
-fork, and a later commit removing it hides nothing. Undoing it means rewriting
-history, force-pushing, and rotating every key anyway.
-
-It matters more here than usual because `.env.mainnet` holds all five
-`SAFE_OWNER_*_PRIVATE_KEY` values. A five-owner Safe exists precisely so that
-compromising one owner is not enough; five keys in one commit makes it a 1-of-1,
-permanently.
+Never put a secret behind a `NEXT_PUBLIC_` prefix: Next inlines those into the
+browser bundle at build time. The site is built to need none — the RPC URL stays
+server-side and the browser reaches the chain through the app's own `/api/rpc`
+relay.
 
 ---
 
-## 4. What goes where
-
-Names only — no values. Use it as a checklist against a machine that is missing
-something.
-
-### `.env` — deployment, drills and AA tooling
-
-**Secrets:** `DEPLOYER_PRIVATE_KEY`, `TRADING_OWNER_PRIVATE_KEY`,
-`SESSION_KEY_PRIVATE_KEY`, `ALCHEMY_API_KEY`, and the five
-`PUBLIC_TESTNET_DRILL_*_PRIVATE_KEY` drill keys.
-
-**Not secret:** `RH_TESTNET_RPC_URL`, `RH_TESTNET_CHAIN_ID`, the protocol
-addresses (`NUVEM_GUARDIAN`, `NUVEM_TREASURY`, `NUVEM_ATTESTER`,
-`NUVEM_WETH_ADDRESS`, `NUVEM_CORPORATE_MULTISIG`, `NUVEM_TARGET_ASSET_ADDRESS`),
-`NUVEM_INITIAL_FEE_BPS`, `NUVEM_CANARY_APPROVED`, `SETTLEMENT_EXECUTOR_ADDRESS`,
-`SESSION_NATIVE_LIMIT_WEI`, `SESSION_ENTITY_ID`, `AA_SMOKE_ACTION`, the Alchemy
-paymaster and gas-policy ids, and the ~25 `PUBLIC_TESTNET_DRILL_*` tuning numbers.
-
-The mainnet RPC is **not** a variable here. It is built from `ALCHEMY_API_KEY`:
-`https://robinhood-mainnet.g.alchemy.com/v2/<key>`. `RH_TESTNET_RPC_URL` is a
-*testnet* endpoint and is not a substitute.
-
-### `.env.mainnet` — nine private keys, nothing else
-
-`NUVEM_VAULT_ADMIN_PRIVATE_KEY`, `NUVEM_ATTESTER_PRIVATE_KEY`,
-`NUVEM_GUARDIAN_PRIVATE_KEY`, `NUVEM_TREASURY_PRIVATE_KEY`, and
-`SAFE_OWNER_1..5_PRIVATE_KEY`.
-
-The most sensitive file in the repository. The attester key signs the profit
-measurement behind every settlement.
-
-### `packages/web/.env.local` — the dashboard
-
-**Server-only, never `NEXT_PUBLIC_`:** `PRIVY_APP_SECRET`, `RPC_URL`. `RPC_URL`
-carries the Alchemy key, which is why contract reads go through the server and the
-browser talks to `/api/rpc`.
-
-**Public by design:** `NEXT_PUBLIC_PRIVY_APP_ID`,
-`NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`, `NEXT_PUBLIC_CHAIN_ID`,
-`NEXT_PUBLIC_CHAIN_NAME`, and the deployed contract addresses.
-
-Anything with a `NEXT_PUBLIC_` prefix is compiled into the browser bundle. Never
-put a secret behind one.
-
-### `.env.docker` — compose runtime
-
-`NUVEM_RPC_URL` (secret — carries the Alchemy key), `PRIVY_APP_ID`,
-`WALLETCONNECT_PROJECT_ID`, `WEB_PORT`.
-
-Compose reads `env_file:` for the *container's* environment, but `${VAR:?}`
-placeholders are *interpolation*, resolved at parse time from your shell. So a
-bare `docker compose up` aborts even with the file present. Export once per shell:
+## 5. Running things
 
 ```bash
-export COMPOSE_ENV_FILES=.env.docker
+pnpm dev          # the site on http://localhost:3002  (the port is not 3000)
+pnpm tick         # one worker pass: prints a TickSummary as JSON and exits
+pnpm test         # contracts (forge) + artifacts + worker
+pnpm typecheck    # worker and site
 ```
+
+More precisely:
+
+| Command | What it does |
+| --- | --- |
+| `pnpm test:worker` | 511 tests, offline, no Foundry. The fast loop. |
+| `pnpm --dir packages/contracts test` | 425 tests across 34 suites. Needs forge and the submodule. |
+| `pnpm --dir packages/website-oficial verify` | ABI check, then typecheck, then a real `next build`. |
+| `pnpm --dir packages/worker worker` | the loop rather than a single pass, every `SIP_POLL_MS` (default five minutes). |
+| `node packages/contracts-artifacts/scripts/check-dist-fresh.mjs` | proves the committed ABIs still match the Solidity. |
+
+Two of those deserve a warning about silence:
+
+- `check-dist-fresh.mjs` **skips when forge is absent**, and a skip is not a
+  pass. On a machine without Foundry the committed ABIs are simply not being
+  checked; run `forge build` first so it has `packages/contracts/out/` to compare
+  against.
+- The site's `check:abis` is the opposite — it is hard, offline and always runs,
+  because a stale fragment means the page decodes vault state with the wrong ABI
+  and reports a wrong savings rate rather than crashing.
+
+`pnpm tick` against a real RPC with no deployment configured stops at
+configuration, which is section 6. Against a configured deployment, a dry-run
+pass does everything except sign and send: it discovers linked wallets from the
+factory's logs, reconstructs each fill, closes a window behind the finality
+margin, builds the attestation against live vault state, and logs the pull it
+*would* make with its amounts.
 
 ---
 
-## 5. Verify
+## 6. What you cannot do yet
 
-```bash
-pnpm --dir packages/contracts-artifacts test
-pnpm --dir packages/session-engine-old test
-pnpm --dir packages/keeper-old test
-cd packages/web && RPC_URL="$(grep '^RPC_URL=' .env.local | cut -d= -f2-)" pnpm run verify
-```
+**Nothing is deployed.** There is no factory and no executor on chain 4663 for
+this product, so there is no vault to create, no wallet to bind and nothing for
+the worker to observe.
 
-The last one matters: `verify`'s `check:chainguard` stage **self-skips when no RPC
-URL is set**, and a skip is not a pass. Run it with the variable so it actually
-reaches the chain and confirms both that a foreign chain is refused and that 4663
-is readable.
+The wall is deliberate, and it is worth understanding before you route around
+it. Its shape:
 
-With Foundry:
+- `packages/worker/src/config.ts` **requires** `SIP_VAULT_FACTORY`,
+  `SIP_SETTLEMENT_EXECUTOR` and `SIP_LOGS_FROM_BLOCK`. There is no fallback. A
+  missing one is a refusal to start with a sentence explaining it.
+- `packages/worker/src/chain/constants.ts` pins **chain facts only** — WETH, the
+  GMGN router, the v4 PoolManager, the log topics. No deployment.
+- The site has no default factory either. Without `NUVEM_VAULT_FACTORY`,
+  `/wallets` renders a setup checklist instead of a vault.
 
-```bash
-cd packages/contracts && forge build && forge test
-node packages/contracts-artifacts/scripts/check-dist-fresh.mjs
-```
+### Why no address was left in as a convenience
 
-`forge build` before the artifacts test, not just `forge test`. That test
-re-exports from `packages/contracts/out/`, which is gitignored and therefore
-absent on a fresh clone; without it the test skips and says so. A skip there is
-correct and not a pass — it means the committed ABIs were not checked against the
-Solidity on this machine.
+An earlier deployment exists on chain 4663 and it must **not** be pointed at.
+Its trading accounts were read from chain on 2026-09-08: all eighteen are active
+with a savings rate between 1000 and 3000 bps, and on that deployment the rate
+means a **percentage of profit**. Phase 0 applies the same rate to the
+attestation's cash field, which in this product carries a **volume**. Aiming a
+worker at it would therefore skim twenty to thirty percent of notional instead
+of twenty basis points — about a hundred times what a user agreed to, on
+somebody else's wallet. That is why the defaults were removed rather than
+updated, and why a startup refusal was chosen over a value that happens to point
+somewhere real.
 
-Containers:
-
-```bash
-export COMPOSE_ENV_FILES=.env.docker
-docker compose build web && docker compose up -d
-curl -s http://localhost:3000/api/health
-```
-
-The keeper is behind a compose profile and does **not** start with a plain
-`docker compose up`. That is deliberate: it is the only service that can move
-money. See [ATTESTER.md](ATTESTER.md).
+Deploy fresh, put the new addresses in the three env files, and update the Privy
+policy (below) to the new executor.
 
 ---
 
-## 6. Things that will confuse you at 2am
+## 7. Infrastructure that does exist
 
+**RPC.** Alchemy Pay-As-You-Go on Robinhood Chain 4663, archive access
+confirmed. The tier is not a preference: the free tier caps `eth_getLogs` at ten
+blocks, which makes wallet discovery impossible, and Robinhood's own public RPC
+is pruned at roughly ten thousand blocks while the reconciler reads balances at
+the block *before* a fill. The worker detects both and refuses to report a scan
+that did not happen rather than advancing its cursor over the gap. Put the
+public endpoint second in `SIP_RPC_URLS` as a read fallback, never first.
+
+**Privy.** An app exists, in TEE mode, with:
+
+- key quorum `zdhe35f97hmzxes5iuzga7d0` — the seat, which goes in
+  `PRIVY_SIGNER_ID`;
+- policy `nxakvhwt6dctmvorrfp4xlk9` — which goes in `PRIVY_POLICY_ID`. It ALLOWs
+  `settle`, sign and send, **to the executor's address only**; ALLOWs `invest`
+  with value 0; and DENIES `exportPrivateKey` and `exportSeedPhrase`.
+
+Both or neither: a signer with no policy is full permission at Privy, so the
+site refuses half a pair as a configuration problem rather than letting it
+degrade quietly.
+
+**The policy pins the Phase 0 executor's address, so a new deployment needs the
+policy updated to the new address before any pull can succeed.** The scripts
+that created and updated it were deleted with the old backend; do it in the
+Privy dashboard, or through Privy's API, against policy
+`nxakvhwt6dctmvorrfp4xlk9`.
+
+**Postgres.** The worker's ledger and the site's `/api/skims` read the same
+database through `DATABASE_URL`. It is optional for the site — without it the
+skim figures render "Status unavailable" and nothing else changes — and
+mandatory for a live worker, which must remember what it sent.
+
+---
+
+## 8. Things that will confuse you at 2am
+
+- **The site is on port 3002**, not 3000. Privy will not infer a port, so the
+  allowed-origins list needs `http://localhost:3002` written out in full.
 - **Two addresses, two roles.** The vault admin owns the savings; the trading
-  account is the one that trades and calls `settle`. The protocol forbids one
-  address from being both. Connecting the dashboard with the trading account shows
-  "no vault" and that is correct.
-- **Two block clocks.** Solidity `block.number` on chain 4663 is the **L1** block
-  number and sits millions above the L2 number, by a gap that is **not constant**.
-  Never store an offset; read `l1BlockNumber` off the L2 block.
-- **The keeper is dry-run by default.** Broadcasting needs both `--broadcast` and
-  an environment acknowledgement. If a settlement is not happening, that is
-  probably why, and it is working as intended.
-- **Never `git add -A` right after `secrets-bundle.sh open`.** The four files are
-  gitignored, and `open` prints a confirmation of that for each one. Read it.
+  account is the one that trades. One address cannot be both. Connecting with
+  the trading account shows no vault, and that is correct.
+- **Two block clocks.** Solidity's `block.number` on chain 4663 is the **L1**
+  block number and sits millions above the L2 number, by a gap that is not
+  constant. Never store an offset; read `l1BlockNumber` off the L2 block, which
+  is what `packages/worker/src/chain/reads.ts` does.
+- **The worker is dry run by default, and structurally so.**
+  `SIP_WORKER_ALLOW_BROADCAST` must equal `i-understand-this-moves-real-funds`
+  byte for byte — `true`, `1`, or the same sentence with a trailing newline all
+  keep you in dry run, on purpose, because those are what a human types when
+  they mean the opposite.
+- **A refusal never echoes a value.** The worker names the variable and
+  describes the *shape* of what it read — length and character class — because
+  config validation runs before the logger exists and container logs get pasted
+  into bug reports. If it tells you a variable holds something shaped like a
+  private key, treat that key as exposed and rotate it.

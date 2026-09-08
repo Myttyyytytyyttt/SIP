@@ -7,7 +7,6 @@ import { isAddress, toEventSelector } from "viem";
 import { describe, expect, it } from "vitest";
 
 import {
-  ATTESTER_REGISTRY,
   BALANCE_OF_SELECTOR,
   CHAIN_ID,
   ERC20_TRANSFER_TOPIC,
@@ -16,12 +15,7 @@ import {
   GMGN_FEE_TOPIC,
   GMGN_FILL_TOPIC,
   GMGN_ROUTER,
-  PAUSE_CONTROLLER,
-  SETTLEMENT_EXECUTOR,
-  SETTLEMENT_EXECUTORS,
-  SETTLEMENT_EXECUTOR_CANARY,
   UNISWAP_V4_POOL_MANAGER,
-  VAULT_FACTORY,
   WETH,
   ZERO_ADDRESS,
   ZERO_TOPIC,
@@ -160,21 +154,11 @@ describe("chain/constants", () => {
       WETH,
       GMGN_ROUTER,
       UNISWAP_V4_POOL_MANAGER,
-      VAULT_FACTORY,
-      PAUSE_CONTROLLER,
-      ATTESTER_REGISTRY,
-      SETTLEMENT_EXECUTOR,
-      SETTLEMENT_EXECUTOR_CANARY,
       ZERO_ADDRESS,
-      ...SETTLEMENT_EXECUTORS,
     ]) {
       expect(isAddress(address)).toBe(true);
       expect(address).toBe(address.toLowerCase());
     }
-    expect(SETTLEMENT_EXECUTORS.at(-1)).toBe(SETTLEMENT_EXECUTOR);
-    expect(SETTLEMENT_EXECUTORS.at(0)).toBe(SETTLEMENT_EXECUTOR_CANARY);
-    expect(SETTLEMENT_EXECUTOR).toBe("0xfa92abf15dfaf470cc8833cb01464bd6ca139e16");
-    expect(VAULT_FACTORY).toBe("0x783bdf0281090f21928398cc3da19cfb64fed15e");
   });
 
   it("topics are 32-byte hex and the event selectors match viem", () => {

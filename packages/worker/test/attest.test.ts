@@ -455,7 +455,7 @@ function ethCall(state: SimState, to: Address, data: Hex): Hex {
       case "deriveSessionId":
         return encode(EXECUTOR_ABI, functionName, state.sessionIdOverride ?? solidityDeriveSessionId(args));
       case "previewContribution": {
-        if (state.previewReverts) throw new Error("execution reverted: InvalidVault(0x0000000000000000000000000000000000000000, 0x1111111111111111111111111111111111111111)");
+        if (state.previewReverts) throw new Error("execution reverted: InvalidVault(0x0000000000000000000000000000000000000000, 0x783bdf0281090f21928398cc3da19cfb64fed15e)");
         const a = args[0] as Record<string, unknown>;
         return encode(EXECUTOR_ABI, functionName, state.previewOverride ?? simulateContribution(state, a));
       }

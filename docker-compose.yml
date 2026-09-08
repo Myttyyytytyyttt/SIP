@@ -1,347 +1,69 @@
-# Nuvem -- local development and plain-VPS deployment.
+# SIP — local development and plain-VPS deployment.
 #
 #   docker compose build web
 #   docker compose up -d
 #
-# This file is NOT the Railway deployment description. Railway does not run
-# compose files; it converts services into separate Railway services and
-# ignores depends_on, port mappings and `restart:`. See
-# docs/runbooks/DEPLOYMENT_WEB.md -- the x-chain-env anchor below is
-# deliberately one readable block so the variable list is easy to mirror into
-# the Railway dashboard by hand.
+# Railway does NOT run compose files; it builds each service from its own
+# Dockerfile and ignores depends_on and port mappings. railway.json describes
+# the web service there; the worker is a second Railway service pointed at
+# packages/worker/Dockerfile.
 #
-# NO SECRETS IN THIS FILE. Everything is an ${INTERPOLATION} resolved from the
-# host shell or from .env.docker (uncommitted, optional).
-
-name: nuvem
+# BOTH IMAGES BUILD FROM THE REPOSITORY ROOT, because the install needs
+# pnpm-lock.yaml and the workspace; a build with packages/<name> as its context
+# cannot see them.
 
 x-chain-env: &chain-env
-  # Robinhood Chain, an Arbitrum Nitro L2. NOTE for anything reading blocks:
-  # Solidity block.number on this chain is the L1 block number, roughly 3.5M
-  # away from the L2 block number. Do not conflate them.
-  NUVEM_CHAIN_ID: "4663"
-  # Note: the repo .env has RH_TESTNET_RPC_URL, which is a TESTNET endpoint and
-  # is not this variable. Set NUVEM_RPC_URL explicitly for the chain you mean.
-  NUVEM_RPC_URL: ${NUVEM_RPC_URL:?set NUVEM_RPC_URL (export it, or put it in .env.docker)}
-  # Mainnet addresses. Defaults match docs/canary/MAINNET_SETTLEMENT_RESULTS.md
-  # and are overridable per environment.
-  NUVEM_VAULT_FACTORY: ${NUVEM_VAULT_FACTORY:-0xDf411fdCc7C31e4F6bCa6F6BCaB40FE812Ab4A46}
-  NUVEM_SETTLEMENT_EXECUTOR: ${NUVEM_SETTLEMENT_EXECUTOR:-0xCe676c73bd9fb76a73058EC135106b81A5ABd0f5}
-  NUVEM_WETH: ${NUVEM_WETH:-0x0bd7d308f8e1639fab988df18a8011f41eacad73}
-  NUVEM_PAUSE_CONTROLLER: ${NUVEM_PAUSE_CONTROLLER:-0x2dbbc211dbfe0f15e88e5388c96530f2721baefc}
-  NUVEM_ATTESTER_REGISTRY: ${NUVEM_ATTESTER_REGISTRY:-0x2a3309931a6db1e1b253224551912566d647f921}
+  # Everything the two services agree on. The RPC URL carries an API key and is
+  # therefore server-side only — the browser reaches the chain through the web
+  # app's own /api/rpc relay, never this value.
+  NUVEM_RPC_URL: ${NUVEM_RPC_URL:?set NUVEM_RPC_URL}
+  NUVEM_CHAIN_ID: ${NUVEM_CHAIN_ID:-4663}
+  NUVEM_VAULT_FACTORY: ${NUVEM_VAULT_FACTORY:?set NUVEM_VAULT_FACTORY}
+  NUVEM_SETTLEMENT_EXECUTOR: ${NUVEM_SETTLEMENT_EXECUTOR:?set NUVEM_SETTLEMENT_EXECUTOR}
 
 services:
   web:
     build:
       context: .
       dockerfile: packages/website-oficial/Dockerfile
-      args:
-        # Leave unset unless packages/website-oficial reads NEXT_PUBLIC_PRIVY_APP_ID.
-        # Setting it bakes the id into the client bundle and makes the image
-        # environment-specific. Prefer the runtime PRIVY_APP_ID below.
-        NEXT_PUBLIC_PRIVY_APP_ID: ${NEXT_PUBLIC_PRIVY_APP_ID:-}
-    image: nuvem-web:local
-    # tini as PID 1 so SIGTERM/SIGINT actually reach the Next server.
-    init: true
-    restart: unless-stopped
     environment:
       <<: *chain-env
-      PORT: "3000"
-      HOSTNAME: "0.0.0.0"
-      # From the Privy dashboard at https://dashboard.privy.io -- see the
-      # runbook. Public by design, but it must be a real app id or login
-      # silently fails.
-      PRIVY_APP_ID: ${PRIVY_APP_ID:?set PRIVY_APP_ID -- create an app at https://dashboard.privy.io}
-    env_file:
-      - path: .env.docker
-        required: false
+      PRIVY_APP_ID: ${PRIVY_APP_ID:?set PRIVY_APP_ID}
+      PRIVY_SIGNER_ID: ${PRIVY_SIGNER_ID:-}
+      PRIVY_POLICY_ID: ${PRIVY_POLICY_ID:-}
+      NUVEM_PUBLIC_RPC_URL: ${NUVEM_PUBLIC_RPC_URL:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+      # The image's runner defaults to 3000 and Next reads PORT at start-up. The
+      # repo's dev server uses 3002, so the container is told to match rather
+      # than the port being mapped across — otherwise the health check below,
+      # which runs INSIDE the container, probes a port nothing is listening on.
+      PORT: 3002
     ports:
-      - "${WEB_PORT:-3000}:3000"
-    networks: [nuvem]
-    # The health check is defined in the image (packages/website-oficial/Dockerfile) and
-    # inherited here. It probes GET /api/health with node's fetch and is
-    # deliberately RPC-free: a probe that talks to the chain turns an RPC
-    # hiccup into a restart loop.
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+      - "3002:3002"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3002/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
-  # ===========================================================================
-  # keeper -- the attester / settlement service. THE ONLY SERVICE THAT CAN MOVE
-  # MONEY.
-  #
-  #   docker compose up -d                                  # web only
-  #   docker compose --profile keeper build keeper
-  #   docker compose --profile keeper up -d keeper           # DRY RUN
-  #
-  # WHAT THE `keeper` PROFILE ACTUALLY DOES, AND WHAT IT DOES NOT.
-  # Verified on Compose v2.40.3-desktop.1, because the previous version of this
-  # comment claimed more than profiles deliver and someone could reasonably have
-  # leaned on it:
-  #
-  #   IT DOES     keep the service out of an UNQUALIFIED command. `docker compose
-  #               up -d` starts web only; `docker compose config --services`
-  #               lists only web; an unqualified `build` does not build it.
-  #
-  #   IT DOES NOT require the `--profile` flag. NAMING THE SERVICE IS ENOUGH:
-  #               `docker compose up -d keeper` auto-enables the profile and
-  #               starts the container, with no flag anywhere. Verified.
-  #
-  #   IT DOES NOT resist the environment. `COMPOSE_PROFILES=keeper` in the shell
-  #               (or in a sourced env file) enables it with no flag and no
-  #               service name. Verified.
-  #
-  #   IT DOES NOT gate interpolation. Compose resolves every ${...} in this file
-  #               before it applies profiles -- see the note on `:-` defaults
-  #               below, which exists because of exactly that.
-  #
-  # So a profile is a CONVENIENCE THAT KEEPS THE DASHBOARD'S EVERYDAY COMMANDS
-  # from dragging in a service holding signing keys. It is not a safety
-  # mechanism and nothing about moving money may rest on it. What actually stops
-  # a settlement is the two independent broadcast gates below, which hold no
-  # matter how the container was started.
-  #
-  # Read docs/runbooks/ATTESTER.md before the first live run. Summary of the
-  # safety posture wired in below:
-  #
-  #  * DRY RUN BY DEFAULT. `command:` is absent, so the image's argument-less
-  #    CMD runs and the keeper signs nothing. Broadcasting needs BOTH
-  #    `command: ["--broadcast"]` AND NUVEM_KEEPER_ALLOW_BROADCAST set to the
-  #    exact string i-understand-this-moves-real-funds. Neither is satisfiable
-  #    by a careless `up -d`, and the sentinel is an exact match so a stale
-  #    `=1` or `=true` in a copied env file does not arm it.
-  #  * A NAMED VOLUME for the settled-window ledger. That state is
-  #    correctness-critical -- it is what stops the same profit being settled
-  #    twice -- and it must outlive `docker compose down`, an image rebuild and
-  #    a host reboot. A bind mount would work too; an anonymous volume would
-  #    not, which is why the image declares no VOLUME.
-  #  * NO SECRET IS EVER A BUILD ARG. `build:` below carries no args at all.
-  #    Build args land in image history in plain text.
-  #
-  # Note the `:-` defaults on every ${...} here rather than `:?`. Compose
-  # resolves interpolation for the WHOLE FILE before it applies profiles, so a
-  # `${NUVEM_ATTESTER_PRIVATE_KEY:?}` would abort `docker compose config`,
-  # `up` and `ps` for the web service too, for everyone, with the profile off.
-  # The keeper validates its own configuration at startup and refuses to run
-  # without it -- which is the right place for that check anyway, since it can
-  # say which of the two keys is missing and what it is for.
-  #
-  # On this bridge network the keeper reaches the dashboard at http://web:3000
-  # and the dashboard reaches its status endpoint at http://keeper:8787/status,
-  # with no published ports either way. On Railway the equivalents are
-  # http://web.railway.internal:3000 and http://keeper.railway.internal:8787.
-  # ===========================================================================
-  keeper:
-    profiles: ["keeper"]
+  # DRY RUN UNLESS ARMED. The worker reads no signing secret at all unless
+  # SIP_WORKER_ALLOW_BROADCAST is the exact sentence; see packages/worker/README.md.
+  worker:
     build:
       context: .
-      dockerfile: packages/keeper-old/Dockerfile
-      # NO `args:` HERE, EVER. Build args are recorded in image history
-      # (`docker history --no-trunc`) and in the config blob of any pushed
-      # image, in plain text, and no later RUN can remove them. The attester
-      # key, the trading key and NUVEM_RPC_URL (which carries an Alchemy API
-      # key) are runtime-only. See packages/keeper-old/Dockerfile's header.
-    image: nuvem-keeper:local
-    # No `init: true`: the image already has tini as PID 1 (`tini -g`), so
-    # SIGTERM reaches the keeper mid-cycle without relying on the caller.
-    restart: unless-stopped
-    # A SIGTERM can land between "wrote the INTENT record" and "got the
-    # receipt". 45s lets the keeper finish resolving that in-flight settle
-    # instead of being SIGKILLed at 10s. Being killed there is still safe --
-    # startup recovery resolves the intent against the chain -- but resolving
-    # it now is cheaper than resolving it later.
-    stop_grace_period: 45s
-    # -----------------------------------------------------------------------
-    # TWO SOURCES, AND THE PRECEDENCE BETWEEN THEM MATTERS. Verified on Compose
-    # v2.40.3:
-    #
-    #   `environment:` OVERRIDES `env_file:`, INCLUDING WHEN IT RESOLVES TO AN
-    #   EMPTY STRING.
-    #
-    # So a `FOO: ${FOO:-}` line here does not "leave FOO to the env file" -- it
-    # sets FOO to "" and silently discards whatever .env.keeper said. Every
-    # setting an operator might reasonably put in .env.keeper is therefore
-    # ABSENT from the map below, and only settings with a real default, or the
-    # broadcast gate (where being clobbered to empty is the safe direction),
-    # appear in it.
-    #
-    # Set in .env.keeper (or with `docker run -e`), NOT here:
-    #
-    #   NUVEM_TRADING_ACCOUNT                 the EOA whose sessions to settle.
-    #                                         No default on purpose: settling
-    #                                         for the wrong account is not a
-    #                                         mistake a default should be able
-    #                                         to make.
-    #   TRADING_OWNER_PRIVATE_KEY             the trading account's OWN key. v1
-    #                                         holds it because that wallet
-    #                                         belongs to the operator, which is
-    #                                         exactly why this service cannot
-    #                                         serve third parties yet -- see
-    #                                         the custody statement in
-    #                                         docs/runbooks/ATTESTER.md.
-    #   NUVEM_KEEPER_MAX_CONTRIBUTION_WEI     circuit breakers, checked against
-    #   NUVEM_KEEPER_MAX_SETTLEMENTS_PER_DAY  the journal. Tripping either halts
-    #                                         the keeper -- it stays up and says
-    #                                         so on /status -- rather than
-    #                                         continuing.
-    #
-    # The image declares all three key variables as EMPTY ENV so their absence
-    # is well defined rather than inherited from the host.
-    # -----------------------------------------------------------------------
+      dockerfile: packages/worker/Dockerfile
     environment:
-      <<: *chain-env
-
-      # The vault being settled into. Defaults to the spent canary from
-      # docs/canary/MAINNET_SETTLEMENT_RESULTS.md.
-      NUVEM_VAULT: ${NUVEM_VAULT:-0xF7309dC8e1914A5c3848250cec54Ebe7A20D8255}
-
-      # Must match the volume mount below. The image defaults to the same path;
-      # it is repeated here so the pairing is visible in one place.
-      NUVEM_KEEPER_STATE_DIR: /var/lib/nuvem/keeper
-
-      # --- THE ATTESTER KEY: FILE, NOT ENVIRONMENT -------------------------
-      # THIS IS THE DEFAULT PATH, AND IT IS THE SAFE ONE. It used to be the
-      # commented-out alternative, which meant the copy-paste default was the
-      # leaky inline variable -- the wrong way round for the one file operators
-      # copy without reading.
-      #
-      # A PATH IS NOT A SECRET. The key itself never becomes an environment
-      # variable, so it is absent from `docker inspect`, from /proc/1/environ
-      # (readable by anything that gets into the container), from `docker
-      # compose config`, and from your shell history. Contrast
-      # NUVEM_ATTESTER_PRIVATE_KEY, which is visible in all four for the entire
-      # life of the container.
-      #
-      # A FIXED LITERAL, not an interpolation, and deliberately: it names a path
-      # INSIDE the container, pinned by the bind mount under volumes:. The two
-      # must agree, so they are not independently overridable. Change the HOST
-      # side with NUVEM_ATTESTER_KEY_HOST_PATH instead.
-      #
-      # BEFORE THE FIRST `up`, create the host file. If you skip this the keeper
-      # refuses to start and names the path it could not read -- see the note on
-      # create_host_path under volumes: for why that refusal comes from the
-      # keeper rather than from Docker on some platforms:
-      #
-      #   mkdir -p secrets
-      #   printf '%s' 0x<attester-private-key> > secrets/attester.key
-      #   chmod 400 secrets/attester.key      # `secrets/` is gitignored
-      #
-      # TO USE THE INLINE FALLBACK INSTEAD (hosts with no way to place a file):
-      # comment out BOTH this line and the bind mount under volumes:, then put
-      # NUVEM_ATTESTER_PRIVATE_KEY in .env.keeper. Both edits are required --
-      # config.ts prefers the file whenever this variable is non-empty, and
-      # `environment:` beats `env_file:`, so .env.keeper cannot clear it.
-      NUVEM_ATTESTER_KEY_FILE: /run/secrets/attester.key
-
-      # Heartbeat, unpublished on purpose: /status describes a service holding
-      # a signing key. Reach it with `docker compose exec` or from a sibling
-      # container on this network.
-      NUVEM_KEEPER_HTTP_HOST: "0.0.0.0"
-      NUVEM_KEEPER_HTTP_PORT: "8787"
-
-      NUVEM_KEEPER_POLL_MS: ${NUVEM_KEEPER_POLL_MS:-30000}
-
-      # --- THE BROADCAST GATE ----------------------------------------------
-      # Empty => dry run, which is the default and needs no flag. Arming it
-      # needs this to be EXACTLY
-      #   i-understand-this-moves-real-funds
-      # AND `command: ["--broadcast"]`, which this file does not set.
-      #
-      # Because `environment:` beats `env_file:`, this value can only come from
-      # your shell or from COMPOSE_ENV_FILES / `--env-file`. Putting the
-      # sentinel in .env.keeper does NOT arm the keeper. That asymmetry is
-      # deliberate and worth keeping: the file that holds the signing keys
-      # cannot also be the thing that authorises spending.
-      NUVEM_KEEPER_ALLOW_BROADCAST: ${NUVEM_KEEPER_ALLOW_BROADCAST:-}
-    env_file:
-      # Keys and per-deployment settings. Separate from .env.docker on purpose:
-      # the dashboard's config file then never contains a signing key and can
-      # be handed around more freely. `chmod 600`. Gitignored by the root
-      # `.env.*` rule.
-      #
-      # Reminder from docs/runbooks/DEPLOYMENT_WEB.md section 6: `env_file:`
-      # populates the CONTAINER's environment only. It does NOT feed the
-      # ${...} interpolation above -- that comes from your shell or from
-      # `--env-file` / COMPOSE_ENV_FILES. NUVEM_RPC_URL arrives through the
-      # x-chain-env anchor, i.e. through interpolation, so it belongs in
-      # .env.docker as it already does.
-      - path: .env.keeper
-        required: false
-    volumes:
-      # THE LEDGER. Named, so it survives `docker compose down`, an image
-      # rebuild and a host reboot; only `docker compose down -v` or an explicit
-      # `docker volume rm nuvem-keeper-state` destroys it. The `name:` under
-      # volumes: below pins that literal name, without the `nuvem_` project
-      # prefix compose would otherwise add, so the volume you back up is the
-      # volume you see in `docker volume ls`. Losing it is
-      # recoverable -- the keeper rebuilds the settled-window index from
-      # SettlementExecuted logs and decoded settle calldata -- but recovery is
-      # a procedure with a runbook, not a non-event. Back it up.
-      - nuvem-keeper-state:/var/lib/nuvem/keeper
-
-      # THE ATTESTER KEY. Long form rather than the terse `src:dst:ro` string so
-      # that `create_host_path: false` can be set. What that buys, stated
-      # exactly, because it is PLATFORM-DEPENDENT and it was measured rather
-      # than assumed:
-      #
-      #   On a Linux Docker engine it stops the daemon from inventing an empty
-      #   DIRECTORY at a missing bind source. Without it, `up` succeeds, an
-      #   empty `secrets/attester.key/` appears on the host looking like it
-      #   might be a key, and the container gets a directory where the key
-      #   should be.
-      #
-      #   On Docker Desktop it does NOT prevent that: verified on Desktop
-      #   v2.40.3 -- with create_host_path:false and no host file, the container
-      #   still came up with a directory mounted at /run/secrets/attester.key.
-      #   The file-sharing layer substitutes it below the daemon.
-      #
-      # So this is a useful narrowing, not a guarantee, and the guarantee lives
-      # somewhere better anyway: config.ts opens NUVEM_ATTESTER_KEY_FILE and
-      # REFUSES TO START if it cannot be read, naming the path -- "points at
-      # /run/secrets/attester.key, which could not be read: EISDIR ...", exit 2.
-      # Verified against this image. A missing key is always a refusal, never a
-      # keeper that quietly runs without one.
-      #
-      # read_only: true so the container cannot rewrite the operator's key.
-      # See NUVEM_ATTESTER_KEY_FILE above for how to create the host file and
-      # for the inline fallback if this host cannot mount one.
-      - type: bind
-        source: ${NUVEM_ATTESTER_KEY_HOST_PATH:-./secrets/attester.key}
-        target: /run/secrets/attester.key
-        read_only: true
-        bind:
-          create_host_path: false
-    # The state volume is the ONLY writable path. A keeper that cannot write to
-    # its own code or config cannot be talked into persisting anything except
-    # its ledger.
-    read_only: true
-    tmpfs:
-      - /tmp:size=16m,mode=1777
-    networks: [nuvem]
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      # A non-root node process binding 8787 needs no capability at all.
-      - ALL
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-networks:
-  nuvem:
-    driver: bridge
-
-volumes:
-  # Correctness-critical, and the one piece of state in this repo that is not
-  # reconstructible for free. `docker compose down` keeps it; `down -v` does
-  # not. See docs/runbooks/ATTESTER.md for backup and for what to do when it is
-  # gone anyway.
-  nuvem-keeper-state:
-    name: nuvem-keeper-state
+      SIP_RPC_URLS: ${SIP_RPC_URLS:?set SIP_RPC_URLS}
+      SIP_CHAIN_ID: ${NUVEM_CHAIN_ID:-4663}
+      SIP_VAULT_FACTORY: ${NUVEM_VAULT_FACTORY:?set NUVEM_VAULT_FACTORY}
+      SIP_SETTLEMENT_EXECUTOR: ${NUVEM_SETTLEMENT_EXECUTOR:?set NUVEM_SETTLEMENT_EXECUTOR}
+      SIP_LOGS_FROM_BLOCK: ${SIP_LOGS_FROM_BLOCK:?set SIP_LOGS_FROM_BLOCK}
+      SIP_DATABASE_URL: ${DATABASE_URL:-}
+      SIP_WORKER_ALLOW_BROADCAST: ${SIP_WORKER_ALLOW_BROADCAST:-}
+      SIP_ATTESTER_PRIVATE_KEY: ${SIP_ATTESTER_PRIVATE_KEY:-}
+      PRIVY_APP_ID: ${PRIVY_APP_ID:-}
+      PRIVY_APP_SECRET: ${PRIVY_APP_SECRET:-}
+      PRIVY_AUTHORIZATION_PRIVATE_KEY: ${PRIVY_AUTHORIZATION_PRIVATE_KEY:-}
+      PRIVY_SIGNER_ID: ${PRIVY_SIGNER_ID:-}
+    restart: unless-stopped

@@ -9,7 +9,7 @@
 // is the one unforgivable output, so every branch that cannot name its number
 // refuses instead of guessing.
 //
-// Trade shapes ported from packages/session-engine-old/src/classify.ts (the
+// Trade shapes ported from the session engine of the project this was forked from (src/classify.ts (the)
 // unit is the transaction, not the transfer: a buy is "cash out AND token in" in
 // one atomic act, and splitting it loses the only thing that distinguishes it
 // from a withdrawal plus an airdrop). The gas-only-when-sender rule and the

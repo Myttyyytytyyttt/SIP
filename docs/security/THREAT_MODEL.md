@@ -1,421 +1,562 @@
-# Contract threat model
+# Threat model — the volume skim
 
-## Security posture
+## What is being modeled
 
-Nuvem's current contract design is administratively controlled, upgradeable, and
-dependent on an off-chain PnL attester. It is not a fully non-custodial or
-trust-minimized system.
+SIP takes a slice of the **size** of every buy and every sell — basis points of
+notional, 20 by default, so 0.2% — and moves it into the user's own
+`PersonalVault`, where it accumulates and is invested in the basket that user
+chose. It is not a slice of profit, and nothing in this document is about
+measuring profit.
 
-This threat model covers the Solidity implementation and deployment topology in
-this repository. It does not claim a sanctioned public deployment or a completed
-production gate.
+The trading wallet is meant to work anywhere. A user may export its key into
+GMGN or Axiom, or import a key they already had. So the skim cannot be taken at
+the moment of the trade: it is **observed on chain after the fill** and **pulled
+afterwards** through a policy-bounded Privy signer seat. Collection is
+best-effort by construction — a pull takes `min(owed, balance − reserve)` and
+carries the shortfall forward — and the security analysis has to be read with
+that in mind, because "we can always collect" is never one of the claims.
 
-**There is no investment path in this deployment.** `PersonalVault` has no
-`invest()`, no investment operator, no adapter registry and no fee controller
-reference; `NuvemTypes.VaultPolicy` is the single field
-`maxAggregateRolling30dWei` (`NuvemTypes.sol:43-45`) and
-`VaultFactory.ProtocolConfiguration` pins four addresses — weth, pauseController,
-attesterRegistry, settlementExecutor (`VaultFactory.sol:27-32`). Settlement
-charges no protocol fee. Investing is deferred, not cancelled; the analysis that
-covers it is preserved at the end of this document, under a heading that says so,
-and nothing in it describes a risk that exists today.
+**No deployment exists.** There is no factory, no executor, no vault and no
+attester registry live anywhere for this product. Every address in this
+document's history has been abandoned; see *Nothing is deployed*, below. The
+exact pre-deployment gate lives in the
+[deployment runbook](../runbooks/DEPLOYMENT.md), and this document does not
+duplicate it.
 
-## The central trust assumption: the attester is trusted on the measurement
+Solidity paths and bare `.sol` filenames are relative to `packages/contracts`;
+everything else is written from the repository root.
 
-This is the first thing to understand about Nuvem and it is not mitigated by any
-contract in this repository.
+Verified state at the time of writing: `@sip/worker` 511 tests, `packages/contracts`
+425 tests, `@sip/web` builds against a 69-fragment ABI check. A dry-run tick
+completed against mainnet and the observer reconstructed real fills to the wei.
+That is evidence the mechanism works. It is not evidence that it is safe to arm.
 
-`SettlementExecutor.settle` recomputes `realizedProfit` from four attested cash
-figures — `cashStart`, `cashEnd`, `externalDeposits`, `externalWithdrawals` — and
-reverts `InvalidRealizedProfit` on any mismatch (`SettlementExecutor.sol:93-98`,
-arithmetic at `:164-181`). That check proves the attestation is internally
-consistent. It proves nothing about whether those four numbers describe what the
-wallet actually did.
+## Nothing is deployed, and the old addresses are abandoned on purpose
 
-**No contract can close this gap.** A contract cannot read past state, cannot
-observe a GMGN fill, and cannot see a balance at a historical height. The four
-cash figures are the only place a wrong settlement can hide, and the executor
-accepts any set of them that is arithmetically coherent. This is pinned as a
-test, not asserted as prose:
-`SettlementExecutor.t.sol::testTrustedAttesterCanAuthorizeCoherentFalseProfitButCapsBoundContribution`.
+The factory, executor and trading-account addresses that earlier versions of this
+document carried are not a starting point to be reused. They were read from chain on
+2026-09-08 and all 18 trading accounts linked to that factory are `ACTIVE` with
+`savingsBps` between 1000 and 3000 — a **percentage of profit**, which is what
+that product charged.
 
-What actually bounds the damage is not verification but the clamps: `savingsBps`,
-`maxPerSettlementWei`, the account and aggregate 30-day rolling caps, and the
-trading floor plus gas reserve (`SettlementExecutor.sol:352-369`). A corrupted
-attester can move a false number into the vault, but only up to those limits, and
-only into that account's own registered vault — the executor has no arbitrary
-recipient and no administrative withdrawal (`SettlementExecutor.sol:15-21`).
+This product charges basis points of **volume**, and Phase 0 delivers the volume
+through the attestation's cash field. Pointing a SIP worker at one of those
+accounts would apply a 10–30% rate to a notional: roughly a hundred times what
+the user agreed to, on somebody else's wallet. That is why:
 
-The off-chain answer to this is the soundness claim now carried inside
-`ledgerRoot` v2 — `positionsRoot`, `zeroBasisRealized`, `verdictBits`,
-`replayStartBlockL2` (`docs/architecture/SETTLEMENT_SCHEMA_FINDINGS.md`). Be
-precise about what that buys: `ledgerRoot` is opaque `bytes32` to Solidity, folded
-into `deriveSessionId` and emitted but never checked against a preimage
-(`SettlementExecutor.sol:190-206`). A false claim therefore becomes
-**attributable and publicly checkable against the published report**, which is a
-real improvement, and remains **unenforced onchain**, which is the whole point of
-this section.
+- `packages/worker/src/config.ts` **requires** `SIP_VAULT_FACTORY`,
+  `SIP_SETTLEMENT_EXECUTOR` and `SIP_LOGS_FROM_BLOCK`, and refuses to start
+  without them. There is no fallback that happens to point somewhere real.
+- `packages/worker/src/chain/constants.ts` pins only chain facts — WETH, the GMGN
+  router, the Uniswap v4 PoolManager, the event topics — and no deployment.
+
+Treat any address that reappears in a config, a default or an example as a bug,
+not as a convenience.
+
+## The central trust assumption, and how it changed
+
+The old assumption was that an attester correctly measured **profit**. That was
+unfalsifiable in practice: profit needs cost basis, a position-delta claim across
+the window, and a judgement about airdropped inventory. A reader who disagreed
+with the number had no cheap way to prove it wrong.
+
+The new assumption is that SIP correctly measures **volume**, and the crucial
+difference is that **volume is objectively recomputable by anyone from a public
+RPC**:
+
+- **A buy's notional is `tx.value`.** It is in the transaction itself. Nothing is
+  inferred.
+- **A GMGN sell's notional is stated by the router.** `FILL` and `FEE` are both
+  indexed by the wallet; gross is `amountOut + fee`
+  (`packages/worker/src/observe/venues/gmgn.ts`).
+- **Anything else is a block residual, and the residual must be provable.** The
+  reconciler will only attribute the block's leftover cash to a sale when nothing
+  else in the block could have produced it (`packages/worker/src/observe/reconcile.ts`,
+  §3.3–3.4 of `packages/worker/DESIGN.md`).
+
+A window's `batchRoot` commits the sorted hashes of its fills, so a third party
+with the same public data can recompute the root, the sum, and every individual
+fill, and can contradict a false one with the same evidence SIP used. That is the
+whole security gain of the volume design, and it is worth stating precisely:
+**volume moves from unfalsifiable to falsifiable. It does not move from trusted
+to verified.**
+
+**No contract closes this gap either.** `SipVolumeExecutor.pull` recomputes
+`owedWei = sumNotionalWei × savingsBps / 10_000` and reverts `InvalidOwed` on any
+mismatch. That proves the attestation is arithmetically consistent with the rate
+the user set. It proves nothing about whether `sumNotionalWei` describes trades
+that happened. A contract cannot read a past balance, cannot see a router log
+from a block ago, and cannot recompute a residual.
+
+So the honest statement of the trust model is: the contract enforces the *rate*,
+the public chain enforces the *auditability*, and nothing but the operator's
+discipline enforces the *number* at the moment it is signed.
+
+## What a corrupted attester can still do, and what actually bounds it
+
+A corrupted or buggy attester can sign a window whose `sumNotionalWei` is larger
+than the wallet really traded. What stops that from being unbounded:
+
+1. **`savingsBps` is the user's, and the executor recomputes against it.** At the
+   default 20 bps, an attester must claim 500 wei of fabricated volume for every
+   wei it wants to skim. It is a multiplier on the lie, and it is the single most
+   effective bound in the system. A user who set the rate to 0 cannot be charged
+   at all, whatever is attested.
+2. **`outstanding` bounds the value.** `msg.value` may not exceed
+   `owed + a.owedWei − collected`; a fuzz test pins that value never exceeds owed
+   (`SipVolumeExecutor.t.sol::testFuzzValueNeverExceedsOwed`).
+3. **The balance clamp, but read the phase carefully.** In Phase 0 the deployed
+   `SettlementExecutor` clamps the contribution against the wallet's balance less
+   `tradingFloorWei + gasReserveWei`, and `packages/worker/src/attest/phase0.ts`
+   refuses to sign a window where that clamp would bind — because a clamp that
+   binds makes the recomputed amount disagree with the signed one. In **Phase 1**
+   there is deliberately **no balance clamp in the contract** at all
+   (`SipVolumeExecutor.t.sol::testNoBalanceClampAndNoExactMaximum`): the caller
+   chooses `msg.value`. So under Phase 1 the trading floor is enforced by the
+   worker, off chain, and not by the executor. That is a real reduction in
+   contract-level protection and it is the price of allowing partial pulls.
+4. **`minContributionWei` from below** — anti-dust, not a security bound.
+5. **The executor has no arbitrary recipient.** Value goes to
+   `factory.activeVaultOf(msg.sender)` and nowhere else. `SipVolumeExecutor` is
+   ownerless and immutable: no withdrawal, no admin call, no upgrade,
+   no sweep.
+6. **Replay is per batch root.** `usedBatch[batchRoot]` refuses a second
+   presentation even under a fresh settlement nonce
+   (`testBatchReplayRevertsEvenWithAFreshNonce`), which matters precisely because
+   a partial pull leaves an attestation that was only partly collected.
+7. **The attestation is bound to live vault state.** `policyHash`,
+   `settlementNonce`, `bindingEpoch`, `policyNonce`, `adminEpoch`,
+   `localPauseEpoch`, `globalPauseEpoch` and `attesterEpoch` are all committed and
+   all re-read at execution. A rate change, a pause or an executor repoint between
+   signature and pull fails the pull closed
+   (`testPausesPolicyChangeAndRepointFailClosed`,
+   `testAccountPolicyChangedUnderASignedAttestationRevertsOnThePolicyHash`).
+8. **The wallet has to agree.** The pull is sent *by the trading wallet*, signed
+   through its Privy seat. An inflated attestation is inert without a wallet
+   willing to spend value on it.
+
+### The caps exist in the contract and SIP currently sets them to no-ops
+
+`maxPerSettlementWei`, the account 30-day rolling cap `maxRolling30dWei`, and the
+vault's `maxAggregateRolling30dWei` are all enforced by the executor and the
+vault. **SIP's own provisioning sets all three to `UINT128_MAX`** — see
+`tradingPolicy()` in `packages/website-oficial/src/lib/wallets/policy.ts` and the
+vault creation path in `src/app/api/create-vault/route.ts`, which record the
+reason: a shared aggregate ceiling is consumed by whichever wallet trades first
+and silently blocks the rest of the vault.
+
+That reasoning is defensible as a product choice and it must not be quietly
+reported as a security control. **As provisioned today, the rolling and
+per-settlement caps bound nothing.** The bounds that are actually load-bearing
+are `savingsBps`, `outstanding`, the balance floor (off chain in Phase 1), and
+the absence of any recipient other than the user's own vault.
+
+If the caps are to count as mitigations, someone has to choose real numbers and
+this document has to say what they are.
+
+## The reconciler's refusal discipline is a security property
+
+The worker's first rule is that **fabricated volume is the one unforgivable
+output** (`packages/worker/DESIGN.md` §0.3). A `(wallet, block)` whose cash
+movement cannot be attributed to exactly one thing is refused: recorded, retried
+on later ticks, never attested. A refusal voids every fill *and* every exclusion
+of that block, so the ledger holds either the whole block placed or the single
+reason it was not.
+
+The refusal reasons are `MULTI_FILL_BLOCK`, `UNEXPLAINED_INFLOW`,
+`WALLET_HAS_CODE`, `STATE_UNAVAILABLE`, `INCOMPLETE_RANGE` and `UNDECODED_SELL`
+(`packages/worker/src/types.ts`). Two are worth naming for what they defend:
+
+- **`WALLET_HAS_CODE`** — a delegated (EIP-7702) or contract wallet can move cash
+  by paths balance reasoning cannot see, so anything trade-shaped without a venue
+  decoder refuses rather than being priced. This is exactly the population the
+  product invites, so expect it to fire.
+- **`UNDECODED_SELL`** — a sale the decoder would not parse produces no
+  attributable proceeds unless the residual is positive and provable.
+
+The GMGN decoder refuses rather than guesses too: every shape check returns
+`null`, and a `null` costs nothing because the reconciler still prices a buy from
+`tx.value` and a lone sell from the residual.
+
+### Two ways the residual could have been made to lie, fixed 2026-09-07
+
+Both were found by adversarial review, both are closed, and both are recorded
+here because the reasoning generalizes.
+
+**1. A residual sell absorbing an unrelated inflow from another wallet-sent
+transaction in the same block.** The residual is *defined* as whatever the
+closing cash identity would otherwise call missing, so the identity can never
+contradict it — that is the structural trap. Native cash reaches an EOA through
+internal calls that leave no log, so any other transaction the wallet sent
+carrying native value could have had some of it returned inside the same block,
+and the residual would book that refund as trading proceeds. Routers refund what
+a swap did not spend, so this is an ordinary event, not an exotic one. The
+reconciler now refuses `UNEXPLAINED_INFLOW` when an undecoded sell shares its
+block with any transaction the wallet sent carrying value, names those
+transactions in the refusal detail, and — when the venue paid in WETH, which
+moves only by `Transfer` log — additionally requires the residual to equal the
+sell's own WETH leg exactly.
+
+**2. A stranger's `Transfer` log parking a wallet's cursor.** Candidate blocks are
+nominated by `Transfer` logs, whose indexed fields any third party can fill with
+any address. A refusal parks that wallet's cursor for the whole retention window,
+so a spam log was a denial-of-service anyone could mount for the price of one
+log. A block where the wallet **sent nothing and its cash did not move** now
+yields an *exclusion*, not a refusal. The distinction is deliberate and narrow:
+the same log still refuses when the wallet transacted in that block, or when its
+cash moved, because that could be a genuine relayed sell.
+
+**The residual exposure that remains is bounded on purpose.** A spam log in a
+block where the wallet *did* transact still refuses that block. Widening it needs
+a joint decision by the reconciler and the tick, and it is open item 3 below.
+
+### The direction of error matters
+
+A residual notional is **net** of the venue's fee, because the fee never touches
+the wallet's balance. The decoded path reports **gross**. So the same sale is
+worth slightly less when the decoder could not parse it, and the residual is a
+**lower bound on gross, never above it**. Every failure mode in the measurement
+path therefore under-charges. That is the right direction for a fee, and it is
+the reason the gross-vs-net question below is a product decision rather than an
+incident.
+
+## The Privy seat is a claim on the signing path, never on the funds
+
+`pull` (and Phase 0's `settle`) resolve the vault from `msg.sender`, so the
+transaction has to come from the trading wallet. The only other way to satisfy
+that is to hold the wallet's private key, which is total custody of everything in
+it — the thing that made the earlier design unable to serve anyone but its own
+operator.
+
+The seat replaces it. The user's wallet stays theirs; the app is added as an
+additional **signer** with a **policy**, and Privy's enclave refuses anything the
+policy does not allow. Concretely, the app is key quorum
+`zdhe35f97hmzxes5iuzga7d0` and the policy is `nxakvhwt6dctmvorrfp4xlk9`:
+ALLOW `settle` (sign and send) to the executor address only, ALLOW `invest` with
+value 0, DENY `exportPrivateKey` and `exportSeedPhrase`.
+
+Be exact about what that buys and what it does not:
+
+- **The containment is Privy's policy engine, not a contract.** The honest
+  sentence is "we cannot take your money because Privy will not let us", not
+  "check the chain yourself". The policy is the security boundary, and it is a
+  weaker guarantee than an on-chain module.
+- **The seat is read fresh on every pull.** `walletIdOf` returns `null` when our
+  signer is gone, and the answer is never cached, because the user can remove
+  every signer through Privy's API without touching any UI of ours
+  (`packages/worker/src/pull/privy.ts`).
+- **It must be *our* seat.** A wallet counts as seated only when
+  `PRIVY_SIGNER_ID` is among its additional signers; without that check, any
+  other app's signer would be mistaken for ours.
+- **`signTransaction`, not `sendTransaction`, on purpose.** The worker holds the
+  raw bytes — and therefore the hash — before the network sees them, so the
+  crash-after-broadcast window is closed by ordering (reserve nonce → estimate →
+  sign → record INTENT → send raw), not by detection
+  (`packages/worker/src/pull/submit.ts`). A signature already issued but not yet
+  broadcast survives a revocation; that window is closed by the same ordering.
+- **The policy pins the Phase 0 executor's address.** A new deployment therefore
+  needs the policy updated to the new executor before any live pull. Until it is,
+  the enclave denies the signature — which fails safe, and is the behavior to
+  want. The scripts that created and updated the policy lived in the package
+  deleted in the clean break; the procedure must be redone against Privy's API
+  and is described here rather than linked.
+
+### What an exported key means
+
+Exporting the trading key to GMGN or Axiom is a supported, intended action. An
+exported key is **a second signer with no policy**. Therefore:
+
+- It can empty the wallet at any moment, and it can trade in ways the seat cannot
+  see coming. Nothing SIP holds can stop it.
+- **Collection is best-effort, and that is a design statement rather than an
+  apology.** A pull takes what is available above the floor and reserve; the
+  shortfall is carried forward as debt. The product must never describe the skim
+  as guaranteed.
+- **The seat is not a lien.** It cannot freeze, pre-empt, or claw back.
+- **The DENY on export constrains only our path.** The user's own Privy session
+  can export the key. That is the product working as intended, and it should be
+  said out loud in user-facing copy rather than implied.
+
+### The unowned policy is the live weakness here
+
+`authorization_context` is not accepted on `create` with `@privy-io/node` 0.28,
+so **the policy today can be modified with the app credentials alone**. Anyone
+holding `PRIVY_APP_ID` and `PRIVY_APP_SECRET` can widen it — which makes the app
+secret, not the policy, the real security boundary at this moment. This is open
+item 2 below and it must be closed before any live pull.
+
+## The rate is the user's, and so is the exit
+
+`PersonalVault.setMySavingsBps` (`:470`) and `revokeMyTradingAccount` (`:526`) are
+callable by the trading wallet's own key. **This is deliberate.** A user can set
+the skim to zero, or leave the vault entirely, without asking the vault admin or
+SIP, and without a delay. It is the counterweight to a design in which a service
+signs transactions on their wallet.
+
+The consequences are accepted rather than mitigated:
+
+- A user may trade at 20 bps and set the rate to 0 before the window is pulled.
+  The attestation commits `policyHash` and `settlementNonce`, so the pull reverts
+  `InvalidPolicyHash` instead of charging the old rate. Refusing is the correct
+  outcome; the volume is simply not collected.
+- Carried debt in `SipVolumeExecutor` is indexed **by account only**, so it
+  survives a rate change and a move to another vault. That is an open, low-severity
+  finding in the pending report, and it is the one place where the user's exit is
+  not fully clean.
+- In the web UI, a rate change signs from the trading wallet whenever Privy holds
+  it, with an admin route offered when the wallet has no gas. **Revoke has no
+  equivalent admin route**: `revokeTradingAccount` is the vault admin's own
+  action, not a proxy for the user's. A gasless wallet can therefore be slower to
+  leave than to re-rate.
 
 ## Protected assets and trust boundaries
 
-Protected assets include vault WETH, settlement authorizations, account-to-vault
-bindings, governance control, and the two private keys the keeper holds.
+Protected assets: vault WETH and native balances; the accumulated basket
+positions; volume attestations; account-to-vault bindings; the attester key; the
+Privy app credentials and the seat; governance control.
 
-Trusted or privileged boundaries are:
+Trusted or privileged boundaries:
 
-- each vault admin;
-- the corporate Safe and its owners, modules, guards, and transaction
-  process;
-- the seven-day timelock;
+- each vault admin (the "pension key");
+- the trading wallet's own key **and every exported copy of it**;
+- the corporate Safe, its owners, modules, guards and transaction process;
+- the seven-day timelock (`GOVERNANCE_DELAY`, `script/DeployNuvem.s.sol:112`);
 - the emergency guardian;
-- the current PnL attester, and the host running `packages/keeper-old`;
-- the current settlement executor;
-- the off-chain session engine/indexer and the RPC infrastructure it reads,
-  including the `debug_traceTransaction` provider.
+- the attester key, and the host running `packages/worker`;
+- the Privy app: its secret, its authorization key, and the policy;
+- the settlement executor in force for a vault;
+- the RPC provider the worker reads the world through.
 
 ## Actor analysis
 
 | Actor or compromise | What it can do | Principal control | Residual risk |
 | --- | --- | --- | --- |
-| Vault admin | Withdraw all vault assets, change the vault and every account policy, replace the settlement executor, pause/unpause, and transfer admin. | Two-step admin transfer; policy epochs/nonces; `setSettlementExecutor` force-pauses settlement and bumps `localPauseEpoch` and `vaultPolicyNonce`, killing every already-signed attestation (`PersonalVault.sol:392-403`). | Admin-key compromise is a complete compromise of that vault. No protocol delay stands between the key and the funds. |
-| Trading account | Accept an invite, alter only its own savings bps, and self-revoke. A compromised account may submit trades outside Nuvem. | Global one-vault binding; account caps, floor, reserve, L2 progression, and aggregate cap. | Nuvem cannot stop external trading or guarantee profit data without the attester. |
-| Keeper host (`packages/keeper-old`) | Sign attestations **and** send the `settle` transaction. In v1 it holds `TRADING_OWNER_PRIVATE_KEY`, the trading account's own key. | Two broadcast gates (argv `--broadcast` plus an exact-match env sentinel); mounted key file rather than env var; per-settlement and per-day circuit breakers; a durable settled-window store. | **Holding that key is total custody of the trading wallet**, not scoped access to its profit — the restriction to `settle` is a property of this code, not of the credential. This is why Nuvem cannot serve third parties. See `docs/runbooks/ATTESTER.md` section 1. |
-| PnL attester | Authorize the four cash figures used to calculate realized profit and contribution. | Registry rotation/disable, expiry, `attesterEpoch`, settlement nonce, L2 session progression, executor-side arithmetic, and the contribution clamps. | A malicious or incorrect current attester can authorize false but internally consistent economic inputs. See the section above; this is the protocol's central assumption. |
-| Session key (AA path) | Execute the narrowly encoded settlement call within its native limit. | Exact executor/function permission, native limit, replay controls in contracts. | The native cap rests entirely on the selector allowlist containing `execute` **alone**, because `NativeTokenLimitModule` does not decode `executeBatch` (measured live on 46630). Widening that one line silently removes the value cap. Not installed on mainnet; testnet smoke is not mainnet proof. |
-| Settlement executor | Call vault settlement entry points. | Factory account/vault binding, detailed attestation/policy checks, immutable with no withdrawal or arbitrary-call surface. | A vault admin can replace its executor; a malicious replacement may change the expected trust model even though the vault re-checks every frontier invariant itself (`PersonalVault.sol:511-552`). |
-| Guardian | Pause globally and disable the attester. | Cannot unpause, re-enable, upgrade, or withdraw (`ProtocolPauseController.sol:22-29`, `AttesterRegistry.sol:44`). | Compromise can deny service until timelock governance acts. |
-| Corporate Safe | Propose all delayed governance operations, and immediately change fee/collector/treasury on `FeeController`/`FeeCollector`. | Threshold COHERENCE checked at deployment (non-zero, not above owner count) — **not** a quorum. The Safe live on mainnet is **1-of-2**, so this row's real mitigation is the seven-day delay and the guardian's `CANCELLER_ROLE`, not the multisig shape. A single key proposes. | **The fee contracts are deployed but not pinned into `ProtocolConfiguration`, so no vault can reach them** (`DeployNuvem.s.sol:131-141`); a fee change today moves no money and touches no vault. Safe bytecode, owner identity/security, modules, and guards are not authenticated by the script, and Safe compromise can still queue an upgrade of protocol logic. |
-| Timelock governance | Upgrade a cohort and govern the factory, the attester registry, and global pause. | Seven-day minimum delay; Safe-only proposer; open execution after maturity. | A malicious queued upgrade remains dangerous after the observation window. Monitoring and an operational exit path are required. |
-| Deployer/bootstrap | Creates the initial topology and starts the factory ownership handoff. | Chain/config checks; sealed bootstrap has no post-deployment owner action. | Wrong inputs are irreversible. Until timelock acceptance, factory governance is frozen rather than held by the deployer. |
+| Vault admin | Withdraw everything in the vault, change the vault and every account policy, replace the settlement executor, set the investment basket and adapter, pause settlement or investment, transfer admin. | Two-step admin transfer; policy epochs and nonces; `setSettlementExecutor` (`PersonalVault.sol:851`) force-pauses settlement and bumps the epochs, killing every already-signed attestation. | Admin-key compromise is total compromise of that vault's savings. No protocol delay stands between the key and the funds. |
+| Trading wallet key (including exported copies) | Trade anywhere; set its own rate, including to zero; self-revoke; call `invest` on its own vault; move every asset out of the wallet before a pull lands. | Global one-vault binding; `policyHash`/`settlementNonce` binding on every attestation; the vault decides where investment output lands. | This is the design, not a gap. It is also why collection is best-effort and why the shortfall mechanism exists. |
+| Worker host (`packages/worker`) | Sign volume attestations, and ask the seat to sign a pull. **It holds no trading key.** | Dry run is structural: outside live mode the process never reads the attester key or the Privy secrets, and `submitPull` returns before touching a signer. Live mode needs a byte-exact sentinel and a durable Postgres ledger. | A live host is a signing host. It can inflate volume up to the bounds above and can deny service by not attesting. It cannot move a user's funds anywhere but that user's own vault. |
+| Attester key | Authorize `sumNotionalWei` and the derived `owedWei`. | Registry rotation and guardian disablement; `attesterEpoch`; settlement nonce; the executor's `InvalidOwed` recomputation; the bounds above. | A wrong or malicious attester can sign a coherent false volume. **This is the protocol's central assumption** — but unlike a false profit claim, a false volume claim can be contradicted by anyone with a public RPC. |
+| Privy app credentials | Ask the enclave to sign anything the policy allows — and, today, **widen the policy** (open item 2). | The policy's ALLOW list pins the executor address and the `pull`/`settle` selector (`testPullSelectorIsPinnedForThePrivyPolicy`); DENY on key export. | Until the policy has an owner, `PRIVY_APP_SECRET` is the real boundary and must be treated as a custody-grade secret. |
+| Settlement executor | Call the vault's settlement entry point. | Factory account/vault binding; the vault re-checks every frontier invariant itself in `acceptSettlement` (`:945`); ownerless and immutable, no withdrawal and no arbitrary call. | A vault admin can repoint its own vault at a different executor, changing the trust model for that vault only. |
+| Investment operator (vault admin, or any ACTIVE trading account — `_requireInvestmentAuthority`, `PersonalVault.sol:745`) | Trigger `invest` (`:639`) under the admin's stored basket and thresholds. | Basket hash is a compare-and-swap; `investmentPolicyNonce`; per-leg `minOutRateWad` floors that a caller may only tighten; min/max per call; a 30-day investment rolling cap; deadline; adapter status epoch; `setInvestmentPause` (`:616`) is separate from settlement pause. | Can choose *timing*, including straight after an adverse market move. A static admin-set output floor is not live pricing, and loosens in real terms if the admin never revises it. |
+| Adapter | Receive the vault's WETH and return the target assets. | Append-only registry id; runtime codehash pinned at registration and re-checked on resolve; status epoch; guardian deactivation; the vault's own min-out and deadline. | A codehash pin does not detect a proxy whose implementation changes. Production adapter ids must point at direct immutable deployments. |
+| Guardian | Pause globally; disable the attester. | Cannot unpause, re-enable, upgrade or withdraw. | Compromise denies service until timelock governance acts. |
+| Corporate Safe | Propose every delayed governance operation; own the fee contracts, which no vault reads. | The deploy script checks only *coherence* of `getThreshold()`/`getOwners()` — non-zero and not above owner count — **not a quorum**, and does not authenticate Safe bytecode, owners, modules or guards. | The real mitigation is the seven-day delay and the guardian's cancel role, not the multisig's shape. |
+| Timelock governance | Upgrade a cohort; govern the factory, the attester registry and global pause. | Seven-day minimum delay; Safe-only proposer; permissionless execution after maturity. | A malicious queued upgrade is still dangerous once the window matures. Monitoring and an exit path are required, not optional. |
+| RPC provider | Decide what the worker believes happened. | Multiple endpoints with failover (`packages/worker/src/rpc/failover.ts`); refusals on unreadable state rather than skipped blocks. | A provider that serves wrong or partial logs produces wrong volume, and the worker cannot tell the difference between "no fills" and "logs withheld" except through the refusal paths. Today this is one Alchemy Pay-As-You-Go plan on chain 4663. |
 
 ## Critical scenarios
 
-### False profit attestation
+### Fabricated volume
 
-The executor recomputes arithmetic and the vault enforces progression, but
-neither can observe an external platform fill or a historical balance. A
-corrupted attester can sign false source data that passes every onchain check.
-Independent reconciliation, monitoring, rapid guardian disablement, and attester
-key isolation remain mandatory. The clamps bound the loss per settlement and per
-30 days; they do not detect the lie.
+A corrupted attester signs a window whose fills did not happen, or whose
+notionals are inflated. The executor's recomputation catches only inconsistency
+with the rate, not falsity. What contains it is the bound list above; what
+*detects* it is that anyone can recompute `batchRoot` and every fill from public
+data.
 
-Concretely, the by-hand check that catches this is: take an `ATTESTABLE` decision
-line, independently recompute `realizedProfit` from the four cash figures, and
-confirm `contributionBps == 2000`. Nobody else performs it
-(`docs/runbooks/ATTESTER.md` section 5, step 4).
+The by-hand check that catches it: take a `VolumePulled` event, pull its
+`batchRoot`, recompute the sorted fill hashes for that wallet and window from an
+independent RPC, and confirm the root and `sumNotionalWei`. Until somebody
+actually runs that on a schedule, the auditability is a property of the design
+and not of the operation.
 
-### Keeper host compromise
+### Undercounted volume, which is the ordinary failure
 
-The v1 keeper holds the trading account's own private key. An attacker with that
-key does not need Nuvem at all: they can move every asset in the wallet, to
-anywhere, immediately. The broadcast gates, circuit breakers and refusal logic
-constrain the keeper's own behavior and constrain an attacker not at all.
+Refusals, undecoded fills valued by residual, and unparsed `FILL` payloads all
+push the measured number **down**. The product loses revenue; the user is not
+harmed. This is the failure the system is tuned for, and it is why every
+ambiguous branch refuses instead of guessing.
 
-The consequences that follow are operational rather than contractual: the key
-must belong to the operator running the service, the host must be treated as a
-signing host, and no second user may be onboarded until the EIP-7702 session-key
-path in `docs/runbooks/ATTESTER.md` section 1 is real and tested.
+### The same sale valued on two different bases
 
-### Malicious cohort upgrade
+Measured on chain on 2026-09-07 against a real wallet: sells the GMGN decoder
+understands return `amountOut + fee` (gross), while sells that fall to the
+residual return what the wallet's balance actually gained (net of the router's
+~1% fee). Recomputed by hand against chain, the residual matches to the wei — the
+arithmetic is right, the *base* differs. On real data, 11 of 35 fills were valued
+by residual.
 
-Every vault in a cohort delegates to the same upgradeable beacon. A timelocked
-upgrade can change custody behavior for all of them. The delay provides
-observation time, not technical prevention.
+The cause is that the `FILL` payload is dynamic ABI: in the short form word 5 is
+the pool kind and words 6–7 the path, while in the long form word 5 is 27 and the
+path is shifted. The decoder reads fixed indices and **refuses rather than
+guesses, which is correct** — the cost is only that the sale is priced on the
+other base. Parsing by real ABI offsets would eliminate most residual falls.
 
-**Storage layout is the sharp edge here, and it is not checked by tooling.**
-Removing `adapterRegistry`, `feeController`, `investmentOperator` and
-`investmentPaused` from `VaultStorage` shifted `settlementExecutor` from offset 9
-to offset 7 and everything after it. Promoting this implementation onto a beacon
-whose vaults carry the pre-change layout makes the vault read its old
-`adapterRegistry` slot as its settlement executor — demonstrated in
-`test/unit/UpgradeContinuity.t.sol::testNewImplementationMisreadsALegacyStorageLayout`.
-`PrepareCohortUpgrade` validates cohort separation, beacon ownership and the
-implementation address; it does **not** validate storage layout, so it would
-build an executable timelock payload doing exactly this. Upgrade bytecode,
-storage layout, tests, and an exit procedure must be reviewed before scheduling.
+Security-relevant conclusion: the error is always in the user's favour. It is
+open item 1 because it is a product decision about what is charged, not because
+it is a hazard.
 
-### Position state crossing settlement windows
+### RPC dependence
 
-Recomputed cash deltas are only a valid realized-PnL measure when the session's
-non-cash position is unchanged across the window. Buying for 5 ETH in one window
-and selling for 6 ETH in the next produces cash deltas of -5 and +6, not the
-1 ETH round-trip profit.
+The worker's entire view of the world is one provider's `eth_getLogs` and archive
+reads. On the free tier that provider caps `eth_getLogs` at 10 blocks, which
+makes discovery impossible outright; the Pay-As-You-Go plan on chain 4663 is
+archive-confirmed and is what the measurements above were taken on. A single
+provider is a single point of both failure and truth. Failover exists in code; a
+second independent provider is an operational requirement, not a code change.
 
-The measured condition is **position-delta-zero, not flat-to-flat**: every
-non-cash token has an identical balance at both boundaries, *and* every unit
-disposed of inside the window came from a lot with cash cost basis. The first
-clause alone is insufficient — an airdrop received before the window and dumped
-inside it leaves the delta at zero while manufacturing profit from nothing, and
-the canary wallet contains that exact hazard today (160 units of an airdropped
-token, and four impersonating "40 THEHOOD" transfers from a contract that is not
-the THEHOOD the wallet traded).
+### Reorg
 
-`packages/session-engine-old` enforces this off-chain and refuses to sign a window it
-will not vouch for, with no override flag; `ledgerRoot` v2 commits the claim.
-**The contract still cannot check it.** Production settlement therefore rests on
-the attester honoring its own refusal, which is the same trust assumption as
-above wearing a different hat.
+Neither the contracts nor the worker name a confirmation depth beyond the L2
+finality margin (default 64 blocks) that the scan stops at. A fill recorded from
+inside the margin would survive a reorg in the ledger — its row is keyed by tx
+hash and nothing deletes it — and would be attested once the margin passed, which
+is fabricated volume; that is precisely why the scan stops short of the head. A
+reorg that unwinds an already-*settled* window is still not handled: the local
+frontier ends up ahead of the chain, and the account's next genuine window is
+refused. Nothing detects that today.
 
 ### Compromised vault admin
 
-The admin has intentionally complete control of its vault and can withdraw all
-assets to any nonzero recipient. No protocol-level delay protects the user from
-its compromised key. A contract wallet or secure signer policy is preferable to
-an everyday hot wallet.
+The admin has intentionally complete control of the vault and can withdraw
+everything to any nonzero recipient; `withdrawToken` (`:1051`) and
+`withdrawNative` (`:1059`) deduct no protocol fee and consult no fee contract. No
+protocol delay protects the user from their own compromised key. A contract
+wallet or a hardware signer is preferable to an everyday hot wallet, and the
+product should say so where the pension key is created.
 
-### Degenerate L2 window
+### Malicious cohort upgrade, and the storage layout
 
-Zero is the settlement frontier's "nothing settled yet" sentinel. A window whose
-`endBlockL2` is 0 would write that sentinel back as a real height, and every later
-window — overlapping or not — would then clear the progression guard forever: one
-signature permanently disabling replay protection for that account.
+Every vault in a cohort delegates to the same upgradeable beacon, so one
+timelocked upgrade changes custody behavior for all of them. The delay gives
+observation time, not prevention.
 
-Both layers refuse it. `SettlementExecutor.sol:297-299` reverts
-`InvalidL2BlockRange` when `startBlockL2 == 0` or `endBlockL2 <= startBlockL2`,
-and `PersonalVault.sol:524-530` refuses the same window independently rather than
-trusting the executor to have done so — which it must, because
-`setSettlementExecutor` lets an admin repoint the vault at a different executor.
-Pinned by `testDegenerateL2WindowIsRefusedSoTheFrontierSentinelStaysSound` and
-`testInvertedL2RangeIsRefusedByBothExecutorAndVault`.
+**Storage layout is the sharp edge and no tooling checks it.** Promoting an
+implementation onto a beacon whose vaults carry a different layout makes the
+vault read the wrong slot as its settlement executor — demonstrated by
+`test/unit/UpgradeContinuity.t.sol::testNewImplementationMisreadsALegacyStorageLayout`.
+`PrepareCohortUpgrade.s.sol` validates cohort separation, beacon ownership and the
+implementation address, and would happily build an executable timelock payload
+doing exactly this. Verify layout by hand; nothing else will.
+
+### The synthetic frontier
+
+`SipVolumeExecutor` drives the vault's L2 frontier with a per-account counter
+rather than real heights, because a late-discovered fill behind a real frontier
+would be unskimmable. The counter is seeded on first use by reading the vault's
+own frontier through `extsload` at a **pinned slot** — the same word
+`VaultLens.settlementFrontier` reads. A storage-layout change would silently
+reseed at zero and make the first pull revert forever; that is why the slot is
+pinned by `testSyntheticSeedMatchesTheVaultsOwnFrontierSlot` and the migration
+path by `testPhase0FrontierSeedsTheSyntheticCounterSoMigrationNeedsNoRebind`. Do
+not "tidy" either.
+
+### The investment path
+
+Savings are invested into a basket the vault admin configured. The controls are
+real: the basket hash is a compare-and-swap so a caller holding replaced legs
+cannot present them; every leg carries a non-zero, bounded `minOutRateWad` floor
+that a caller may only tighten; per-call minimum and ceiling; a 30-day investment
+rolling cap; a deadline; an adapter status epoch and a runtime codehash re-checked
+on resolve; and an investment pause deliberately separate from the settlement
+pause, because halting purchases must not halt savings arriving.
+
+What they do not do: make a malicious or mispriced adapter safe, and substitute
+for live pricing. A static admin floor loosens in real terms while the market
+moves. The vault charges no protocol fee on investment or on withdrawal, and
+consults no fee controller — `FeeController`/`FeeCollector` exist and are Safe-owned
+but no vault reads them. Pinning either into a vault's reach reinstates a whole
+class of hazard (an immediately-changeable fee on an operator-triggered call) and
+must be treated as a new design, not a configuration change.
 
 ## Invariants relied upon
 
-- One registered vault per current admin and one active vault per trading
-  account.
-- Trading accounts do not define the vault identity or address.
-- Factory canonical configuration can be set only once.
-- Settlement authorization is bound to chain, executor, vault, account, policy,
-  epochs, nonce, session, both block ranges, expiry, and exact contribution.
-- Account and aggregate rolling caps both apply, and the contribution is
-  additionally clamped by the trading floor plus gas reserve.
-- Session progression is strictly increasing on the **L2** range; the **L1**
-  range is only required to be non-decreasing, under the distinct error
-  `NonProgressiveL1BlockRange` (`PersonalVault.sol:541-552`).
-- A degenerate L2 window is refused at both layers, so the frontier's zero
-  sentinel is never a real height.
-- The L2 heights are part of `sessionId` (`SettlementExecutor.sol:190-206`), so
-  `usedSessions` keys on the window actually signed rather than on an L1 range two
-  distinct sessions can share.
-- Freshness (`endBlock < block.number`) and the activation floor are L1-only,
-  because `block.number` and `activationBlock` are both L1 numbers here and no L2
-  clock is observable from inside a contract.
-- Admin withdrawals deduct no protocol fee and consult no fee contract
-  (`PersonalVault.sol:596-611`).
-- `policyHash` encodes `maxAggregateRolling30dWei` as a discrete `uint128` rather
-  than encoding the `VaultPolicy` struct, which is what keeps the attestation
-  preimage byte-identical across the removal of the investment path
-  (`PersonalVault.sol:448-472`). Do not "tidy" it.
-- Guardian actions are restrictive only; delayed governance performs reversal.
-- Existing cohort upgrades require the seven-day timelock.
+- One registered vault per current admin; one active vault per trading account.
+- `owedWei == sumNotionalWei × savingsBps / 10_000`, recomputed by the executor
+  against the vault's live policy, never taken from the attestation.
+- `msg.value` never exceeds `owed + owedWei − collected` for that account.
+- Value reaches only `factory.activeVaultOf(msg.sender)`. The executor has no
+  withdrawal, no arbitrary recipient and no owner.
+- A batch root is collectible once, even under a fresh settlement nonce, and even
+  when the first collection was partial.
+- The attestation is bound to chain, vault, account, executor, every epoch, the
+  policy hash, the settlement nonce, the batch root, the L2 window, the amounts
+  and a validity window of at most 15 minutes.
+- The attested L2 window is committed by the signature and never handed to the
+  vault; the vault's frontier moves on the synthetic counter.
+- Freshness and the activation floor are L1-only, because Solidity's
+  `block.number` is the L1 height on this chain and no L2 clock is observable
+  from inside a contract.
+- A refusal voids every fill and every exclusion of its block; the block is
+  retried whole.
+- A block's closing cash identity must balance to the wei, gas included, before
+  any fill from it is recorded.
+- A residual is attributable only when nothing came in from outside, nothing else
+  the wallet sent moved native value, and — when the venue paid in WETH — the
+  leftover equals the sell's own WETH leg.
+- A block the wallet did not touch and whose cash did not move cannot be refused
+  by a third party's log.
+- The worker never holds a trading key, in any mode.
+- Outside live mode the process never reads the attester key or the Privy
+  secrets; they are deleted from the environment by name in every mode.
+- Vault admin withdrawals deduct no protocol fee and consult no fee contract.
+- Guardian actions are restrictive only; reversal requires delayed governance.
 
-These are implementation invariants, not proof that external PnL, token value,
-liquidity, or AA wallet behavior is correct.
+These are implementation invariants. They are not proof that the measured volume
+is the volume that happened.
 
 ## Required operational controls
 
-- Isolate Safe owners across people/devices and inspect all enabled Safe modules
-  and guards.
-- Monitor every timelock, beacon, attester, pause, executor, and admin change.
-  Fee and collector changes are currently unreachable by any vault and are
-  therefore low-signal; they become high-signal again the moment a fee path
-  returns.
-- Treat the keeper host as a signing host: mounted key file, no build `ARG`, no
-  populated `ENV`, scrubbed logs, and backups of the settled-window store taken
-  with the keeper stopped. Alert on `store.settleable`, `history.accounted`,
-  `degraded`, `l1RangeCollapsed.count` and heartbeat silence.
-- Keep every vault implementation below the 24,000-byte bound asserted by
-  `test/unit/UpgradeContinuity.t.sol:69`, and below the tighter 20,000-byte
-  ratchet at `:75` that exists to stop the headroom being spent again. THERE IS NO
-  CI: the repository has no `.github` directory, so both bounds hold only when
-  someone runs `forge test`. Review
-  review `forge build --sizes`. Note the second, tighter bound: a 20,000-byte
-  **ratchet** (`test/unit/UpgradeContinuity.t.sol:69-88`). `PersonalVault` runtime
-  is 18,641 bytes, leaving 5,935 against EIP-170's 24,576. The ratchet exists so
-  the ~5 KB freed by removing `invest()` cannot be re-spent silently, which is
-  exactly how commit `63d59bb` lost the per-period outflow cap. Raising it must be
-  a deliberate act with a reason attached.
-- Keep deployer, attester, guardian, vault-admin, trading, and session keys
-  separate. `scripts/deploy-mainnet.ps1:45-50` enforces the deployer/trading half
-  of this at runtime.
-- Use per-vault and per-account limits conservatively; do not treat an unbounded
-  account count as unbounded safe exposure.
-- Preserve a tested admin withdrawal path and document what users should do
-  during the seven-day upgrade window.
-- Never promote an implementation onto a cohort whose vaults carry a different
-  storage layout; verify layout by hand, because no script in this repository
-  does.
+- **Run the independent recomputation.** Recompute `batchRoot` and every fill from
+  a second, independent RPC on a schedule, and alert on any disagreement. The
+  volume design's whole advantage is worthless if nobody exercises it.
+- **Treat `PRIVY_APP_SECRET` as custody-grade** until the policy has an owner.
+  Rotate it on any suspicion, and keep it on a different blast radius from the
+  attester key.
+- **Keep a second RPC provider configured and healthy.** One provider is one
+  source of truth.
+- **Treat the worker host as a signing host.** Secrets mounted rather than baked;
+  scrubbed logs (any 64-hex value is redacted before it reaches a sink); backups
+  of the ledger taken with the worker stopped; alert on refusal rates by reason,
+  on `STATE_UNAVAILABLE` bursts, on carried debt growing, and on heartbeat
+  silence.
+- **Never point a worker at a factory whose accounts were provisioned under a
+  different meaning of `savingsBps`.** The config refuses a missing factory; it
+  cannot tell a profit-rate account from a volume-rate one.
+- **Decide real values for the three caps, or stop describing them as controls.**
+- **Keep deployer, attester, guardian, vault-admin, trading and Privy
+  authorization keys separate.**
+- **Monitor every timelock, beacon, attester, pause, executor and admin change.**
+- **Verify storage layout by hand before any cohort upgrade.** No script does it.
+- **Keep the vault implementation inside the bounds asserted in
+  `test/unit/UpgradeContinuity.t.sol` (24,000 bytes, and a ratchet at the same
+  figure).** There is no CI in this repository — no `.github` directory — so those
+  bounds hold only when someone runs `forge test`. Raising the ratchet must be a
+  deliberate act with a reason attached.
+- **Publish what a best-effort skim means** to users, in plain language, before
+  the first live pull.
 
-## Unresolved production blockers
+## Open items carried from the review
 
-- The per-period outflow cap is still not implemented. It was abandoned in commit
-  `63d59bb` for lack of contract size; that reason no longer holds — there are
-  5,935 bytes of EIP-170 headroom and 1,359 against the repository ratchet — so
-  the only remaining reason is that nobody has written it.
-- **Contiguous ledger coverage is still not enforced onchain.** The attestation
-  commits `replayStartBlockL2` inside `ledgerRoot` v2 and the session engine
-  refuses a window whose replay did not begin at or before the account's
-  activation, but `ledgerRoot` is opaque `bytes32` to Solidity, so nothing in the
-  contract requires that consecutive settlements leave no unexamined gap between
-  them. L2 progression proves each window starts after the last one ENDED; it
-  does not prove the space in between was ever looked at. An attester that simply
-  skips a losing stretch produces a chain of individually valid attestations.
-- **No explicit finality level, and no reorg handling anywhere.** Neither the
-  contracts nor `packages/keeper-old` name a confirmation depth. The keeper attests
-  and settles against whatever the RPC returns as head, and its durable store
-  records a settlement as final the moment the receipt arrives. On a chain whose
-  L2 blocks arrive every ~0.1 s this is the assumption most likely to be wrong in
-  practice, and the cost is not academic: a reorg that unwinds a settled window
-  leaves the local frontier ahead of the chain, and the account's next genuine
-  session is then refused as a replay. Nothing detects that today.
-- The single-wallet canary topology on Robinhood mainnet 4663 is **superseded by
-  this redeploy and cannot be migrated**: `configureProtocol` is one-shot and its
-  executor is pinned, and its vaults carry the pre-change storage layout. No
-  source is verified on any explorer and the factory ownership handoff to the
-  timelock has never been executed or rehearsed on any deployment. See the
-  [deployment runbook](../runbooks/DEPLOYMENT.md).
-- The GMGN/EIP-7702 mainnet canary has passed for market and limit trading; see
-  [the results](../canary/GMGN_EIP7702_RESULTS.md). It covers a single session on
-  a single token and does not cover partial sells, failed-transaction refunds, or
-  concurrent settlement. Session-key installation succeeds once the delegation
-  has been applied by a type-4 transaction, but none of its negative cases
-  (wrong target, wrong selector, over-cap value, revocation) has been exercised
-  against a real executor, so the permission is not yet evidence of containment.
-- The indexer must use `debug_traceTransaction`: `trace_*` and the
-  asset-transfer `internal` category are unavailable on this chain, and sell
-  proceeds arrive only as internal native transfers.
-- `block.number` is the L1 block number on this Arbitrum Nitro chain, and it sits
-  millions of blocks **above** the L2 numbers an indexer reads. The gap is **not
-  constant** — measured at 3,551,127 on 2026-07-29 and about 2.65M a day later,
-  because L2 advances far faster — so anything that stores an offset and adds it
-  will drift into `InvalidBlockRange`. Read `l1BlockNumber` off the L2 block.
-  Freshness and the activation floor are attested in L1 because `block.number` is
-  the only clock a contract here can compare against; balance reads are L2.
+From [`reports/PENDING_REVIEW_FINDINGS_2026-09-07.md`](../../reports/PENDING_REVIEW_FINDINGS_2026-09-07.md),
+the three findings still open, in that document's own order:
 
-  **The liveness failure this used to record is fixed.** At ~120 L2 blocks per L1
-  block, a trader re-entering within ~12 seconds produced two genuinely distinct
-  sessions whose L1 ranges were identical, and an L1 strict-increase rule refused
-  the second one permanently — which struck round-trippers hardest, the 43% of the
-  measured cohort the product works best for. Progression now runs on
-  `startBlockL2`/`endBlockL2`, promoted from `ledgerRoot` v2 into real attestation
-  fields; the L1 range is only required to be non-decreasing, under the distinct
-  error `NonProgressiveL1BlockRange` so an operator can tell a genuine replay from
-  an incoherent attestation. Pinned by
-  `test/unit/SettlementProgressionL2.t.sol::testTwoDistinctL2SessionsInsideOneL1BlockBothSettle`.
+1. **Gross vs net notional.** The same sale is valued gross by the decoder and net
+   by the residual; 11 of 35 fills on real data were valued net. The proposed fix
+   is to add a parsable GMGN `FEE` amount back onto a residual whose `FILL` could
+   not be parsed, returning gross; the alternative is to redefine notional as net
+   on both sides. It is a product decision because it changes what is charged.
+   Security-wise the current behavior only under-charges.
+2. **The Privy policy has no owner.** `authorization_context` is not accepted on
+   `create` with `@privy-io/node` 0.28, so the policy can be modified with the app
+   credentials alone. **This must be closed before any live pull.**
+3. **Bounded residual exposure, kept on purpose.** A spam log in a block where the
+   wallet *did* transact still refuses that block. Narrowing it further requires a
+   joint decision by the reconciler and the tick.
 
-  One consequence to keep in view: zero is the frontier's "nothing settled yet"
-  sentinel, so a window ending at L2 block 0 would disable progression for that
-  account forever. Both layers refuse a degenerate L2 window for exactly that
-  reason — see `testDegenerateL2WindowIsRefusedSoTheFrontierSentinelStaysSound`.
-  See [mainnet settlement results](../canary/MAINNET_SETTLEMENT_RESULTS.md).
-- The session key's native-token cap is bypassable through `executeBatch`, which
-  `NativeTokenLimitModule` does not decode. The installed permission contains it
-  by authorising the `execute` selector alone; that single line is the whole
-  containment and is now pinned by a regression test.
-- The keeper holds the operator's own trading key, which is total custody of that
-  wallet. This is the blocker on serving anyone but the operator, and it is not
-  fixable by configuration — the limitation is the credential.
-- The deployment script consumes a plaintext private key from process
-  environment; production signer/keystore handling has not been hardened.
-- Safe bytecode, owners, modules, and guards require external verification.
-- Alerting, incident response, and user disclosures remain to be implemented.
-- The attestation struct does not encode position state. `ledgerRoot` v2 commits
-  `positionsRoot`, `zeroBasisRealized`, `verdictBits` and `replayStartBlockL2`,
-  which makes a false soundness claim attributable — but `ledgerRoot` is opaque to
-  the contract, so nothing is enforced onchain. Promoting the load-bearing fields
-  into the struct requires another executor redeploy.
-- The market is thinner than the mechanism. Across a 77-wallet GMGN cohort census
-  (`packages/session-engine-old/scripts/market-census.mts`; `census.mts` is the deep single-wallet one): 43% round-trippers, 38% mixed,
-  20% accumulators; 0.246 settleable sessions per buy, and 39.4% of attestable
-  sessions profitable. Most trading this protocol observes produces nothing to
-  settle, which is a product fact before it is a security one — but it also means
-  live settlement volume will be too low to surface a rare fault quickly.
+The same report carries the applied-and-verified list and a longer set of
+medium/low findings in the worker, the contracts and the web app. Read it whole
+before deployment; this document summarizes only what changes the trust model.
 
-The exact pre-deployment gate is in the
-[deployment runbook](../runbooks/DEPLOYMENT.md).
+## The pre-deployment gate
 
----
+There is no deployment. The exact gate that must be met before there is one — and
+every step of the deployment itself — lives in the
+[deployment runbook](../runbooks/DEPLOYMENT.md). Two items belong to this document
+and are repeated here only because they are security preconditions rather than
+deployment steps:
 
-## Deferred: the investment path — NOT IN THIS DEPLOYMENT
-
-**Nothing below describes a risk that exists today.** It is retained because the
-analysis was correct, the path is intended to return with a real adapter and a
-price oracle, and whoever reintroduces investing should inherit this thinking
-rather than rediscover it. Read it as a design constraint on future work, never
-as a live finding.
-
-What makes it unreachable, precisely:
-
-- `PersonalVault` has no `invest()`, no `investmentOperator`, no
-  `investmentPaused`, no `adapterRegistry`, no `feeController`, and no
-  `onlyInvestmentAuthority` modifier.
-- `NuvemTypes.VaultPolicy` holds one field. `targetAsset`, `adapterId`,
-  `minInvestmentWei`, `maxInvestmentPerCallWei`, `minOutputRateWad` and
-  `investmentEnabled` are gone.
-- `VaultFactory.ProtocolConfiguration` pins four addresses and none of them is a
-  fee or adapter contract, so a vault cannot be initialized against one
-  (`PersonalVault.sol:699-709` requires `isProtocolConfiguration` to agree).
-- `DeployNuvem.s.sol` does not deploy `AdapterRegistry` at all, and deploys
-  `FeeCollector`/`FeeController` **without** pinning them into the protocol
-  configuration, so no vault can reach them (`DeployNuvem.s.sol:131-144`). They
-  are the treasury plumbing a future settlement-time fee would land in.
-
-### Actors that return with it
-
-| Actor or compromise | What it could do | Principal control | Residual risk |
-| --- | --- | --- | --- |
-| Investment operator | Trigger investments under the admin-selected policy and current fee. | Cannot change policy or withdraw; exact gross input, deadline, fee/adapter/policy epochs; automatically cleared on admin transfer. The output bound was `max(admin floor, caller min-out)`, so the operator could only tighten it — the caller-supplied minimum was not a control on the caller. | Can choose timing, including immediately after an adverse fee or market move. The floor is a static rate: if the admin leaves it unrevised while the market moves, the bound loosens in real terms, and the operator may still repeat calls up to the vault's balance. |
-| Adapter | Receive approved WETH and return the target asset. | Append-only versioned ID, pinned runtime codehash, status epoch, guardian deactivation, vault min-out/deadline, failed-call rollback behavior. | Malicious or incorrectly valued adapter behavior can lose assets; proxy implementation changes are not detected by proxy runtime-codehash pinning. |
-
-### Scenario: immediate 100% fee
-
-`FeeController.setFeeBps(10_000)` was a valid immediate Safe action, outside the
-seven-day timelock. A vault investment then transferred the selected gross WETH
-to `FeeCollector`, bypassed the adapter, and produced zero target tokens. No
-autonomous transfer occurred merely from changing the fee, and admin-only
-withdrawals always charged `0` bps.
-
-This is the hazard to design against when a fee returns. Two properties made it
-severe and both are structural rather than incidental: the fee was changeable
-without delay, and the fee-bearing call was operator-triggered, so the party who
-chose the fee and the party who chose the timing could be the same principal.
-Product UI and monitoring must show the current fee and fee epoch before any
-fee-bearing call, and automation must stop on an unexpected change.
-
-`FeeController` and `FeeCollector` still exist and the Safe still owns them; what
-removed the hazard is that no vault reads them. A future change that pins either
-into `ProtocolConfiguration` reinstates this scenario in full.
-
-### Scenario: malicious adapter or stale quote
-
-An adapter executes external investment logic. The vault constrained the
-registered adapter, pinned runtime codehash, status epoch, target, amount,
-deadline, and minimum output, but could not make a malicious adapter safe. There
-is no universal on-chain detector for proxy or delegatecall upgradeability:
-production adapter IDs must point to direct immutable deployments with immutable
-or equally governed dependencies, never a proxy. The repository's adapter mocks
-are test fixtures and are not production evidence.
-
-A real adapter requires allowlisted targets and routers, a vault-fixed recipient,
-oracle and eligibility policy, slippage limits, allowance hygiene, fork testing,
-and an independent review.
-
-### Invariants that must be re-established
-
-- Investment cannot be enabled without an output floor, and no caller can execute
-  below it; the vault measures its own target-balance delta.
-- Failed adapter execution charges no fee.
-- A 100% fee path skips the adapter and sends the complete selected amount to the
-  fee collector — stated as an invariant because the alternative is a silent
-  partial execution.
-- A per-period investment ceiling bounds outflow independently of the per-call
-  cap. This is the same missing control as the per-period outflow cap in the
-  blocker list above; it now fits.
-
-### Preconditions before investing returns
-
-A production adapter, a price oracle and a token eligibility module must exist
-and be independently reviewed. A static admin-set output floor is not a
-substitute for live pricing. `AdapterRegistry` returns with the adapter and the
-oracle that justify it — an empty timelock-owned registry that nothing reads is a
-governance surface with no consumer, which is why it is not deployed today
-(`DeployNuvem.s.sol:137-141`).
+- the Privy policy must be updated to the **new** executor address, and must have
+  an owner, before the seat is used live;
+- the independent volume recomputation must be running before the first live
+  pull, because it is the only control that detects the central failure.

@@ -1,6 +1,6 @@
 // Environment loading. Refuses to start rather than guessing.
 //
-// Ported from packages/keeper-old/src/config.ts (the byte-exact sentinel, the
+// Ported from the keeper of the project this was forked from (src/config.ts (the byte-exact sentinel, the)
 // key-shaped env sweep, `shape()`, the address and number readers, and the rule
 // that a refusal never echoes a value); reshaped for the worker's frozen
 // WorkerConfig and for DESIGN.md §0.1, which is stricter than the old keeper
@@ -49,6 +49,7 @@
 //      cannot see them.
 
 import { isAddress } from "viem";
+import { CHAIN_ID } from "./chain/constants.js";
 import { Redactor, sharedRedactor } from "./log.js";
 import type { Address, Hex, WorkerConfig, WorkerMode } from "./types.js";
 
@@ -56,19 +57,20 @@ import type { Address, Hex, WorkerConfig, WorkerMode } from "./types.js";
 export const BROADCAST_ACK = "i-understand-this-moves-real-funds";
 
 /**
- * The 2026-08-16 mainnet topology (DESIGN.md §1), lowercase because every
- * address in this package is. TREAT THESE AS A FALLBACK, NEVER AS TRUTH: the
- * old keeper once carried an entire superseded deployment here and nothing
- * caught it until settlements deferred. `logsFromBlock` is the value the
- * operator ran keeper-old with (NUVEM_LOGS_FROM_BLOCK) and .env.example
- * documents for the worker.
+ * NO DEPLOYMENT IS BUILT IN, and that is the point.
+ *
+ * This constant used to carry Nuvem's 2026-08-16 topology as a FALLBACK, so a
+ * worker with an empty SIP_VAULT_FACTORY silently aimed at it. That deployment's
+ * trading accounts hold a savings rate meaning a PERCENTAGE OF PROFIT — 1000 to
+ * 3000 bps, read from chain on 2026-09-08 — and Phase 0 applies that rate to the
+ * attested cash field, which here is a volume. Arming such a worker would have
+ * skimmed twenty percent of notional instead of the twenty basis points the user
+ * agreed to: a hundred times too much, on somebody else's wallet.
+ *
+ * So the factory and the executor are REQUIRED. A missing one is a startup
+ * problem with a sentence explaining it, never a default that happens to point
+ * somewhere real.
  */
-export const MAINNET = {
-  chainId: 4663,
-  factory: "0x783bdf0281090f21928398cc3da19cfb64fed15e",
-  executor: "0xfa92abf15dfaf470cc8833cb01464bd6ca139e16",
-  logsFromBlock: 37_531_900n,
-} as const;
 
 /** Tuning defaults from DESIGN.md §2 (config). */
 export const DEFAULTS = {
@@ -180,6 +182,36 @@ function takeSecret(env: NodeJS.ProcessEnv, names: readonly string[], label: str
   if (value !== undefined) redactor.register(value, label);
   return value;
 }
+
+/**
+ * An address that has no default. Absent is a problem, not a fallback: the two
+ * addresses this applies to decide whose vault the money lands in.
+ */
+function requiredAddress(value: string | undefined, name: string, problems: string[]): Address {
+  const candidate = (value ?? "").trim();
+  if (candidate === "") {
+    problems.push(
+      `${name} is not set. SIP does not ship a default deployment: Nuvem's vaults hold accounts whose ` +
+        `savings rate means a percentage of PROFIT, and this worker attests VOLUME, so aiming at one would ` +
+        `skim about a hundred times what the user agreed to. Deploy SIP's own factory and set this.`,
+    );
+    return ZERO_ADDRESS_FALLBACK;
+  }
+  return address(candidate, ZERO_ADDRESS_FALLBACK, name, problems);
+}
+
+/** The first block worth scanning for this deployment's factory. No default, same reasoning. */
+function requiredBlock(value: string | undefined, name: string, problems: string[]): bigint {
+  const candidate = (value ?? "").trim();
+  if (candidate === "") {
+    problems.push(`${name} is not set — the block the SIP factory was deployed at, so the log scan has a floor.`);
+    return 0n;
+  }
+  return nonNegativeBigInt(candidate, 0n, name, problems);
+}
+
+/** Only ever reached when a problem was already recorded; loadConfig throws before it is used. */
+const ZERO_ADDRESS_FALLBACK = "0x0000000000000000000000000000000000000000" as Address;
 
 function address(value: string | undefined, fallback: Address, name: string, problems: string[]): Address {
   const candidate = value ?? fallback;
@@ -437,10 +469,10 @@ export function parseConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedR
   }
 
   // --- chain -------------------------------------------------------------------
-  const chainId = positiveInteger(first(env, ["SIP_CHAIN_ID"]), MAINNET.chainId, "SIP_CHAIN_ID", problems);
-  const factory = address(first(env, ["SIP_VAULT_FACTORY"]), MAINNET.factory, "SIP_VAULT_FACTORY", problems);
-  const executor = address(first(env, ["SIP_SETTLEMENT_EXECUTOR"]), MAINNET.executor, "SIP_SETTLEMENT_EXECUTOR", problems);
-  const logsFromBlock = nonNegativeBigInt(first(env, ["SIP_LOGS_FROM_BLOCK"]), MAINNET.logsFromBlock, "SIP_LOGS_FROM_BLOCK", problems);
+  const chainId = positiveInteger(first(env, ["SIP_CHAIN_ID"]), CHAIN_ID, "SIP_CHAIN_ID", problems);
+  const factory = requiredAddress(first(env, ["SIP_VAULT_FACTORY"]), "SIP_VAULT_FACTORY", problems);
+  const executor = requiredAddress(first(env, ["SIP_SETTLEMENT_EXECUTOR"]), "SIP_SETTLEMENT_EXECUTOR", problems);
+  const logsFromBlock = requiredBlock(first(env, ["SIP_LOGS_FROM_BLOCK"]), "SIP_LOGS_FROM_BLOCK", problems);
 
   // --- tuning ------------------------------------------------------------------
   const pollMs = positiveInteger(first(env, ["SIP_POLL_MS"]), DEFAULTS.pollMs, "SIP_POLL_MS", problems);

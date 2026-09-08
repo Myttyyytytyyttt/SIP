@@ -26,7 +26,6 @@ import { decodeAbiParameters, toFunctionSelector } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import type { AttesterSigner } from "../src/attest/phase0.js";
-import { ATTESTER_REGISTRY } from "../src/chain/constants.js";
 import { ConfigError, loadConfig } from "../src/config.js";
 import { memoryLedger, openPgLedger } from "../src/ledger/pg.js";
 import { createLogger, type Logger } from "../src/log.js";
@@ -100,11 +99,31 @@ const rpc: RpcClient = failoverRpcClient(
 );
 
 /** The registered attester's address, read the way keeper-old/src/onchain.ts read it (AttesterRegistry.attester()). */
+
+/** The attester registry this deployment was configured with, straight from the factory. */
+async function attesterRegistryOf(client: RpcClient, config: WorkerConfig): Promise<Address> {
+  const data = toFunctionSelector("protocolConfiguration()");
+  const raw = await client.call<unknown>("eth_call", [{ to: config.factory, data }, "latest"]);
+  if (typeof raw !== "string" || raw.length < 2 + 64 * 4) {
+    throw new Error(`VaultFactory ${config.factory} did not answer protocolConfiguration(); is it a SIP factory?`);
+  }
+  const [, , attesterRegistry] = decodeAbiParameters(
+    [{ type: "address" }, { type: "address" }, { type: "address" }, { type: "address" }],
+    raw as Hex,
+  );
+  return attesterRegistry.toLowerCase() as Address;
+}
+
 async function registeredAttester(client: RpcClient): Promise<Address> {
   const data: Hex = toFunctionSelector("attester()");
-  const result = await client.call<unknown>("eth_call", [{ to: ATTESTER_REGISTRY, data }, "latest"]);
+  // THE REGISTRY IS THE FACTORY'S, NOT A CONSTANT. Nuvem pinned it; SIP asks the
+  // configured factory which registry its own protocol was configured with, so a
+  // worker can never read the attester of one deployment while settling into
+  // another.
+  const registry = await attesterRegistryOf(client, config);
+  const result = await client.call<unknown>("eth_call", [{ to: registry, data }, "latest"]);
   if (typeof result !== "string" || result.length < 66) {
-    throw new Error(`AttesterRegistry ${ATTESTER_REGISTRY} returned no data for attester(); is the registry address right?`);
+    throw new Error(`AttesterRegistry ${registry} returned no data for attester(); is the factory address right?`);
   }
   const [attester] = decodeAbiParameters([{ type: "address" }], result as Hex);
   return lower(attester);

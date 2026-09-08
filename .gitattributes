@@ -18,7 +18,6 @@ packages/contracts-artifacts/dist/** text eol=lf
 
 # Same reasoning, different consumer: the golden RPC fixture is compared byte-wise
 # by the session engine's replay client, which throws on any unrecorded request.
-packages/session-engine-old/test/fixtures/*.json text eol=lf
 
 # Solidity and lockfiles are LF everywhere by convention; forge and pnpm both
 # write LF and neither expects to see it changed underneath them.

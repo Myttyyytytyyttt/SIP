@@ -1,6 +1,6 @@
 // JSON-RPC access, in three flavours: live, recording, and replay.
 //
-// Ported from packages/session-engine-old/src/rpc.ts (owner: rpc). The shapes
+// Ported from the session engine of the project this was forked from (src/rpc.ts (owner: rpc). The shapes)
 // RpcClient / RpcParams / Recording now live in ../types.ts and nothing else
 // changed in shape. What did change: a transport failure or a non-JSON body
 // becomes an RpcError whose message never carries the endpoint URL — an

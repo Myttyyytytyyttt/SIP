@@ -17,7 +17,7 @@ cd packages/worker
 set -a; . ./.env; set +a
 pnpm tick        # one pass, prints a TickSummary as JSON, exits
 pnpm worker      # loop every SIP_POLL_MS (default 5 min) with a heartbeat
-pnpm test        # 479 tests, no network
+pnpm test        # 511 tests, no network
 pnpm typecheck
 ```
 
@@ -61,7 +61,7 @@ src/attest/               batch root, one-height vault snapshot, Phase 0 attesta
 src/pull/                 Privy seat signer (fresh seat check per call), broadcast ordering: nonce → estimate → sign → INTENT → send
 src/ledger/               Postgres (advisory lock, wei as numeric(78,0), immutability triggers) and an in-memory twin
 src/tick.ts, bin/         the pass, the loop, skip-while-running, heartbeat
-test/                     479 tests; test/fixtures/mainnet-4663.json is recorded mainnet truth (four GMGN fills, approve, unwrap, airdrop, settle, deposit, withdrawal)
+test/                     511 tests; test/fixtures/mainnet-4663.json is recorded mainnet truth (four GMGN fills, approve, unwrap, airdrop, settle, deposit, withdrawal)
 ```
 
 ## Known limits (v1)

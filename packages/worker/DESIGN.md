@@ -7,9 +7,10 @@ the app signer seat the website attached to the wallet in Privy — has the wall
 `bps × Σnotional` (or whatever it can) into its `PersonalVault`. Phase 0 talks to the deployed
 `SettlementExecutor` with no contract change; Phase 1 talks to `SipVolumeExecutor`. **Dry run by default.**
 
-Read `reports/SIP_BACKEND_ASSESSMENT_2026-09-07.md` §4 and Annex D first: they are the *why*; this file
-is the *how*. The old keeper (`packages/keeper-old`) and engine (`packages/session-engine-old`) are the
-quarry — port what is named below, with a one-line attribution comment, never import from them.
+Read `reports/SIP_BACKEND_ASSESSMENT_2026-09-07.md` §4 and Anexo D first: they are the *why*; this file
+is the *how*. The worker was quarried out of the forked project's keeper and session engine; those
+packages have since been deleted, so every "came from" below is **attribution for code that now lives
+here in full**, not an instruction to go and read something.
 
 ## 0. Non-negotiables
 
@@ -29,14 +30,14 @@ quarry — port what is named below, with a one-line attribution comment, never 
    (`test/fixtures/mainnet-4663.json`, a map `${method}|${JSON.stringify(params)}` → result; see
    `fixtureRpcClient`) or from hand-built objects. Discovery with OR-topic arrays is NOT in the fixture
    (it was recorded per wallet) — test it against a hand-built `RpcClient` mock.
-6. **No secrets in logs.** Port the `Redactor` idea from `keeper-old/src/log.ts`: any 64-hex string is
-   redacted before it reaches a sink.
+6. **No secrets in logs.** `src/log.ts` carries the `Redactor` inherited from the old keeper: any
+   64-hex string is redacted before it reaches a sink, whatever variable or message it arrived in.
 7. **Own files only.** Each owner edits the files listed under their name and creates tests beside them
    (`test/<owner>.test.ts` or `src/**/x.test.ts`). `src/types.ts` is shared and frozen: if you need a
-   change, put it under `needs` in your report and code around it. Never touch `packages/*-old`,
-   `packages/website-oficial`, or `/Users/walch/ProyectosCT/Nuvem`.
-8. **Style.** Match the repo: short "why" comments in the caps-led style of `keeper-old`, `bigint` for
-   wei and blocks, no `any`, no non-null assertions, `noUncheckedIndexedAccess` on.
+   change, put it under `needs` in your report and code around it. Never touch
+   `packages/website-oficial` or `/Users/walch/ProyectosCT/Nuvem`.
+8. **Style.** Match the repo: short "why" comments in its caps-led style, `bigint` for wei and blocks,
+   no `any`, no non-null assertions, `noUncheckedIndexedAccess` on.
 9. **Verify before reporting:**
    ```
    export PATH="$HOME/.nvm/versions/node/v22.14.0/bin:$PATH"
@@ -48,12 +49,20 @@ quarry — port what is named below, with a one-line attribution comment, never 
 
 - Chain 4663 (Arbitrum Nitro). `block.number` in Solidity is the **L1** height; RPC blocks and logs are
   L2; every L2 block carries `l1BlockNumber`. ~7 L2 blocks/s, ~120 L2 per L1. Cash = native ETH + WETH.
-- Addresses (lowercase): canonical WETH `0x0bd7d308f8e1639fab988df18a8011f41eacad73`; GMGN router
-  `0x65050a9b7e5075a2ba5ced7b1b64ee66262c40dc`; Uniswap v4 PoolManager
-  `0x8366a39cc670b4001a1121b8f6a443a643e40951`; VaultFactory (08-16 topology)
-  `0x783bdf0281090f21928398cc3da19cfb64fed15e`; SettlementExecutor `0xfa92abf15dfaf470cc8833cb01464bd6ca139e16`.
-  ABIs: `@nuvem/contracts-artifacts` (SettlementExecutor, PersonalVault, VaultFactory, AttesterRegistry,
-  ProtocolPauseController) — see `keeper-old/src/onchain.ts` for the exact fragments it used.
+- Addresses that belong to the CHAIN rather than to a deployment, and are therefore pinned in
+  `src/chain/constants.ts` (lowercase): canonical WETH `0x0bd7d308f8e1639fab988df18a8011f41eacad73`;
+  GMGN router `0x65050a9b7e5075a2ba5ced7b1b64ee66262c40dc`; Uniswap v4 PoolManager
+  `0x8366a39cc670b4001a1121b8f6a443a643e40951`. ABIs: `@nuvem/contracts-artifacts` (SettlementExecutor,
+  PersonalVault, VaultFactory, AttesterRegistry, ProtocolPauseController).
+- **A DEPLOYMENT IS CONFIGURATION, NEVER A FACT.** The factory and the executor come from
+  `SIP_VAULT_FACTORY` and `SIP_SETTLEMENT_EXECUTOR`, and `loadConfig` refuses to start without them; the
+  pause controller and the attester registry are read from the executor's own immutables in the snapshot
+  pass, and the vault reports the executor it is bound to — §5 defers the window when that disagrees
+  with the configured one. Nothing is pinned and nothing falls back, because SIP has no deployment yet
+  and the forked project's is abandoned rather than inherited: its trading accounts carry a savings rate
+  that meant a percentage of PROFIT — 1000 to 3000 bps, read from chain on 2026-09-08 — while this
+  worker attests VOLUME and Phase 0 carries that volume in the attestation's cash fields, so aiming at
+  one would skim about a hundred times what the user agreed to.
 - Fixture wallet: `0xc455bf7f16ebbc2b07cb26d1dd46194977974e7d`. Recorded transactions (all in the fixture
   with full receipts; blocks are in the receipts):
 
@@ -82,26 +91,29 @@ quarry — port what is named below, with a one-line attribution comment, never 
 - ERC-20 `Transfer` topic `0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef`; a fill's
   token leg is a **3-topic** Transfer with the wallet in `topics[2]` (buy) or `topics[1]` (sell). 4-topic
   Transfers are ERC-721/404 mints: skip them. WETH `Transfer`s to/from `0x0` are wrap/unwrap.
-- Old engine facts to keep in mind: a provider may answer a capped `eth_getLogs` range with an EMPTY
-  list and no error (`keeper-old/src/discovery.ts:65-71`); `eth_getBalance` at a block older than 128
-  is archive data on Alchemy; the public RPC prunes at ≤10k blocks.
+- RPC facts, learned the hard way and still true: a provider may answer a capped `eth_getLogs` range
+  with an EMPTY list and no error, which is why every chunk is coverage-checked instead of trusted;
+  `eth_getBalance` at a block older than 128 is archive data, so the reconciler needs an archive
+  endpoint; and Alchemy's free tier caps `eth_getLogs` at a 10-BLOCK range, which makes discovery
+  impossible. Alchemy Pay-As-You-Go on 4663 is archive (confirmed) and is the requirement, not a
+  preference.
 
 ## 2. Module contracts (owner → files)
 
 ### rpc → `src/rpc/client.ts`, `src/rpc/failover.ts`
-Port `session-engine-old/src/rpc.ts` (httpRpcClient with 5 attempts / 250 ms doubling backoff on HTTP
-429/502/503/504 and bodies matching `/rate|limit|throttl|capacity|busy/`; `RpcError`; recording and
-fixture clients; `rpcKey`) and `session-engine-old/src/failover.ts` (ordered preference, distinguish
-"cannot answer" from "answered no", re-probe primary after 60 s, events without URLs). Tests: retry on
-429 then success; fixture client throws `UnrecordedRequestError` with a helpful message; failover
-switches on fault and recovers.
+`httpRpcClient` (5 attempts / 250 ms doubling backoff on HTTP 429/502/503/504 and bodies matching
+`/rate|limit|throttl|capacity|busy/`; `RpcError`; the recording and fixture clients; `rpcKey`) and the
+failover (ordered preference, "cannot answer" distinguished from "answered no", the primary re-probed
+after 60 s, events that carry no URLs) came from the old session engine. Tests: retry on 429 then
+success; fixture client throws `UnrecordedRequestError` with a helpful message; failover switches on
+fault and recovers.
 
 ### chain → `src/chain/constants.ts`, `src/chain/reads.ts`
 Typed reads decoding hex → bigint; `getLogs` chunked at `maxSpan` with a `getBlock(toBlock)` coverage
-check before each chunk (port `keeper-old/src/discovery.ts:125-161`), returning logs sorted by
-(blockNumber, logIndex). `l1BlockOf` reads the block's `l1BlockNumber` field (port
-`session-engine-old/src/chain.ts:179-191`). Tests: decoding; chunking boundaries (a 25,000-block range at
-maxSpan 10,000 → three calls with exact bounds); coverage failure surfaces as an error, not an empty list.
+check before each chunk (the chunk-and-check shape is the old keeper's), returning logs sorted by
+(blockNumber, logIndex). `l1BlockOf` reads the block's `l1BlockNumber` field, as the old session engine
+did. Tests: decoding; chunking boundaries (a 25,000-block range at maxSpan 10,000 → three calls with
+exact bounds); coverage failure surfaces as an error, not an empty list.
 
 ### discover → `src/observe/discover.ts`
 `discover(rpc, wallets, range, {maxLogSpan})`: (1) one `getLogs` for `[TRANSFER, walletSet, null]` and one
@@ -110,10 +122,10 @@ distinct (wallet, block) candidate block, `blockTransactions(block)` and add eve
 wallets` or `to ∈ wallets` (this is where the log-less approve, native sends and vault pulls come from);
 (3) per wallet, `nonceAt(toBlock) − nonceAt(fromBlock − 1)` must equal the number of *sent* txs found in
 the range; a mismatch puts the wallet in `incompleteWallets` (the range must not close for it).
-Output candidates deduplicated by (wallet, block, txHash). `discoverLinkedWallets`: port the factory-log
-discovery from `keeper-old/src/discovery.ts` (TradingAccountLinked/Unlinked, then `activeVaultOf` as
-authority). Tests with a mock RpcClient: OR arrays sent as documented; 4-topic logs skipped; WETH
-excluded; nonce mismatch flags the wallet; block txs merged.
+Output candidates deduplicated by (wallet, block, txHash). `discoverLinkedWallets` carries over the old
+keeper's factory-log discovery (TradingAccountLinked/Unlinked, then `activeVaultOf` as the authority).
+Tests with a mock RpcClient: OR arrays sent as documented; 4-topic logs skipped; WETH excluded; nonce
+mismatch flags the wallet; block txs merged.
 
 ### venues → `src/observe/venues/gmgn.ts`, `src/observe/venues/index.ts`
 Implement the GMGN decoder per §1; return `null` for anything without both a FILL and a FEE log from the
@@ -129,19 +141,19 @@ block — build the `BlockContext` by hand from the fixture's receipts and balan
 produce exactly the truths of §1; plus synthetic cases for each refusal and exclusion reason.
 
 ### attest → `src/attest/root.ts`, `src/attest/snapshot.ts`, `src/attest/phase0.ts`
-Port from `keeper-old/src/onchain.ts` (ATTESTATION_TYPES, DOMAIN_NAME/VERSION, readVaultSnapshot, the
-`hashAttestation` cross-check, `encodeSettleCalldata`) and `keeper-old/src/attest.ts` (preflight order,
-validity window). See §5 for the field mapping. Tests: root is order-independent and domain-separated;
-the preflight refuses before signing (a signer that throws proves it); the built attestation round-trips
-through `hashTypedData` to the same digest the contract fragment would produce (compare against a
-vector you compute once with viem and pin).
+ATTESTATION_TYPES, DOMAIN_NAME/VERSION, `readVaultSnapshot`, the `hashAttestation` cross-check and
+`encodeSettleCalldata` came from the old keeper's onchain module; the preflight order and the validity
+window from its attest module. See §5 for the field mapping. Tests: root is order-independent and
+domain-separated; the preflight refuses before signing (a signer that throws proves it); the built
+attestation round-trips through `hashTypedData` to the same digest the contract fragment would produce
+(compare against a vector you compute once with viem and pin).
 
 ### pull → `src/pull/privy.ts`, `src/pull/submit.ts`
-Port `keeper-old/src/privy-signer.ts` / `privy-wallets.ts` (authorization key, `wallets.list` join,
-`delegated` flag read fresh per call — `walletIdOf` returns null when the seat is gone) and the ordering
-of `keeper-old/src/submit.ts` (reserve nonce → estimate → sign → record INTENT → `eth_sendRawTransaction`;
-the tx hash is `keccak256(rawTx)` before sending). Gas floor: skip with `BELOW_GAS_FLOOR` when
-`contributionWei` would not cover ~2× the estimated gas cost. Tests: dry run never touches the signer;
+The Privy signer (authorization key, `wallets.list` join, the `delegated` flag read fresh per call —
+`walletIdOf` returns null when the seat is gone) and the submit ordering (reserve nonce → estimate →
+sign → record INTENT → `eth_sendRawTransaction`; the tx hash is `keccak256(rawTx)` before sending) both
+came from the old keeper. Gas floor: skip with `BELOW_GAS_FLOOR` when `contributionWei` would not
+cover ~2× the estimated gas cost. Tests: dry run never touches the signer;
 seat revoked ⇒ `SKIPPED`; intent recorded before send (ledger mock records order).
 
 ### ledger → `src/ledger/pg.ts`, `src/ledger/schema.ts`
@@ -151,8 +163,8 @@ source, window_id null, pk(wallet, tx_hash))`, `sip_exclusion`, `sip_refusal(wal
 detail, pk(wallet, block_l2))`, `sip_window(id serial, wallet, vault, start_l2, end_l2, batch_root, sum_notional_wei,
 owed_wei, status, detail jsonb)`, `sip_pull(window_id, tx_hash, nonce, contribution_wei, outcome, detail)`.
 Numeric columns as `numeric(78,0)`; addresses/hashes as text lowercase. One advisory lock per worker
-instance (port `keeper-old/src/ledger-pg.ts:42-165`). `memoryLedger()` implements the same interface
-for tests and dry runs. Tests: the memory ledger end to end; SQL strings are valid (pin them; no DB in CI).
+instance — that lock, and the `application_name` that says who is holding it, came from the old keeper.
+`memoryLedger()` implements the same interface for tests and dry runs. Tests: the memory ledger end to end; SQL strings are valid (pin them; no DB in CI).
 
 ### config → `src/config.ts`, `src/log.ts`
 §0.1 exactly; `pollMs` default 300 000; `finalityMarginL2` 64; `maxLogSpan` 10 000; RPC URL list split on
@@ -233,7 +245,7 @@ otherwise keep it OPEN and let it grow (the owed amount accumulates in the ledge
 
 Preflight, in this order, each a `DEFERRED` before any signing: protocol or vault paused; account not
 ACTIVE; `snapshot.executor ≠ config.executor`; attester ≠ signer address (`ATTESTER_MISMATCH`); L1 not
-advanced; contribution zero/below minimum. Then sign EIP-712 (domain from `onchain.ts`), compute the
+advanced; contribution zero/below minimum. Then sign EIP-712 (domain from `src/attest/phase0.ts`), compute the
 local digest with `hashTypedData`, and compare with the contract's `hashAttestation` view; a mismatch is
 `DIGEST_MISMATCH`. `collected = contribution`; `owed − collected` carries forward in the ledger (Phase 0
 cannot carry it on-chain; Phase 1 does).

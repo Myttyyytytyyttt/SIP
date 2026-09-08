@@ -13,7 +13,7 @@
 // discovery.ts:65-71) shows up here as fewer sent txs than the nonce says, and
 // that wallet's range must not close.
 //
-// Ported from packages/keeper-old/src/discovery.ts: the factory-log discovery
+// Ported from the keeper of the project this was forked from (src/discovery.ts: the factory-log discovery)
 // (TradingAccountLinked/Unlinked, `activeVaultOf` as authority), the OR-array
 // Transfer scan and `nextScanFrom`. The per-block union and the nonce
 // reconciliation are new to this worker.

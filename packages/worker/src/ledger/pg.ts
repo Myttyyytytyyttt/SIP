@@ -1,6 +1,6 @@
 // The ledger: what the worker saw, what it refused, what it attested, what it pulled.
 //
-// Ported in part from packages/keeper-old/src/ledger-pg.ts: the session-scoped advisory lock and its
+// Ported in part from the keeper of the project this was forked from (src/ledger-pg.ts: the session-scoped advisory lock and its)
 // holder lookup, the connection settings, the application_name that says its mode first, the
 // load-bearing 'error' listener, and the refuse-when-lost discipline. The record stream and its hash
 // chain are NOT ported: every row here is a fact about volume that anyone can recompute from a public

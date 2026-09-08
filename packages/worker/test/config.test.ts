@@ -15,7 +15,6 @@ import {
   BROADCAST_ACK,
   ConfigError,
   DEFAULTS,
-  MAINNET,
   SECRET_VARS,
   describeConfig,
   loadConfig,
@@ -35,11 +34,23 @@ const AUTH_KEY = "wallet-auth:MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgSe
 const APP_SECRET = "privy-app-secret-value-never-logged";
 
 /** Everything a dry run needs. */
-const dry = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ SIP_RPC_URLS: RPC, ...over });
+/**
+ * A deployment is REQUIRED now — no default aims the worker anywhere — so every
+ * environment a test builds names one. These addresses belong to no deployment
+ * on purpose; a test must never be able to reach a real vault.
+ */
+const DEPLOYMENT: NodeJS.ProcessEnv = {
+  SIP_VAULT_FACTORY: "0x1111111111111111111111111111111111111111",
+  SIP_SETTLEMENT_EXECUTOR: "0x2222222222222222222222222222222222222222",
+  SIP_LOGS_FROM_BLOCK: "1000",
+};
+
+const dry = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ SIP_RPC_URLS: RPC, ...DEPLOYMENT, ...over });
 
 /** Everything a live run needs. */
 const live = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
   SIP_RPC_URLS: RPC,
+  ...DEPLOYMENT,
   SIP_WORKER_ALLOW_BROADCAST: BROADCAST_ACK,
   SIP_ATTESTER_PRIVATE_KEY: ATTESTER,
   PRIVY_APP_ID: "app-id",
@@ -60,10 +71,9 @@ afterEach(() => {
 });
 
 describe("the facts DESIGN.md §1 pins", () => {
-  it("defaults to the 2026-08-16 topology, lowercase", () => {
-    expect(MAINNET.chainId).toBe(4663);
-    expect(MAINNET.factory).toBe("0x783bdf0281090f21928398cc3da19cfb64fed15e");
-    expect(MAINNET.executor).toBe("0xfa92abf15dfaf470cc8833cb01464bd6ca139e16");
+  it("pins the tuning defaults and the acknowledgement, and ships no deployment", () => {
+    // No deployment is built in any more: the factory and the executor are
+    // required, so a worker can never silently aim at Nuvem's vaults.
     expect(DEFAULTS).toEqual({ pollMs: 300_000, finalityMarginL2: 64n, maxLogSpan: 10_000n });
     expect(BROADCAST_ACK).toBe("i-understand-this-moves-real-funds");
   });
@@ -78,9 +88,9 @@ describe("the broadcast gate", () => {
       mode: "dry-run",
       chainId: 4663,
       rpcUrls: [RPC],
-      factory: "0x783bdf0281090f21928398cc3da19cfb64fed15e",
-      executor: "0xfa92abf15dfaf470cc8833cb01464bd6ca139e16",
-      logsFromBlock: 37_531_900n,
+      factory: DEPLOYMENT["SIP_VAULT_FACTORY"],
+      executor: DEPLOYMENT["SIP_SETTLEMENT_EXECUTOR"],
+      logsFromBlock: 1000n,
       databaseUrl: null,
       pollMs: 300_000,
       finalityMarginL2: 64n,
@@ -283,7 +293,7 @@ describe("RPC endpoints", () => {
   });
 
   it("accepts SIP_RPC_URL as a near-miss of SIP_RPC_URLS", () => {
-    const result = parseConfig({ SIP_RPC_URL: RPC }, new Redactor());
+    const result = parseConfig({ SIP_RPC_URL: RPC, ...DEPLOYMENT }, new Redactor());
     expect(result.ok && result.config.rpcUrls).toEqual([RPC]);
   });
 
@@ -320,19 +330,21 @@ describe("addresses", () => {
   it("lowercases a checksummed address and accepts a lowercase one", () => {
     const result = parseConfig(
       dry({
-        SIP_VAULT_FACTORY: "0x783BDF0281090f21928398cC3Da19cFb64Fed15E",
-        SIP_SETTLEMENT_EXECUTOR: "0xfa92abf15dfaf470cc8833cb01464bd6ca139e16",
+        SIP_VAULT_FACTORY: "0x1111111111111111111111111111111111111111",
+        SIP_SETTLEMENT_EXECUTOR: "0x2222222222222222222222222222222222222222",
       }),
       new Redactor(),
     );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.config.factory).toBe("0x783bdf0281090f21928398cc3da19cfb64fed15e");
-    expect(result.config.executor).toBe("0xfa92abf15dfaf470cc8833cb01464bd6ca139e16");
+    expect(result.config.factory).toBe("0x1111111111111111111111111111111111111111");
+    expect(result.config.executor).toBe("0x2222222222222222222222222222222222222222");
   });
 
   it("refuses a mixed-case address whose checksum does not match, rather than talking to a different contract", () => {
-    const result = parseConfig(dry({ SIP_SETTLEMENT_EXECUTOR: "0xfa92abf15dfaf470cc8833cb01464bd6CA139e16" }), new Redactor());
+    // Mixed case with ONE character wrong: an all-lowercase address skips checksum
+    // validation entirely, so the bad-checksum path needs a mixed-case value.
+    const result = parseConfig(dry({ SIP_SETTLEMENT_EXECUTOR: "0xaBcdEFABcdEFabcdEfAbCdefabcdeFABcDEFabCD" }), new Redactor());
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.problems.join(" ")).toContain("SIP_SETTLEMENT_EXECUTOR");

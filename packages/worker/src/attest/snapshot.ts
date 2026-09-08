@@ -1,6 +1,6 @@
 // Everything settle() will compare, read in one pass at one block.
 //
-// Port of `readVaultSnapshot` in packages/keeper-old/src/onchain.ts
+// Port of `readVaultSnapshot` in the keeper of the project this was forked from (src/onchain.ts)
 // (createViemChainAccess), rewritten over the bare RpcClient so tests run against
 // a recorded or hand-built answer set and never a live L2.
 //

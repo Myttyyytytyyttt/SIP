@@ -1,10 +1,12 @@
 {
-  "$schema": "https://railway.com/railway.schema.json",
+  "$schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "DOCKERFILE",
-    "dockerfilePath": "packages/keeper-old/Dockerfile"
+    "dockerfilePath": "packages/website-oficial/Dockerfile"
   },
   "deploy": {
+    "healthcheckPath": "/api/health",
+    "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }

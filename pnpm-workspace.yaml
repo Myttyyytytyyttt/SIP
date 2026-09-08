@@ -1,7 +1,2 @@
 packages:
   - "packages/*"
-  # solana-lab is deliberately OUTSIDE the workspace: it is an experiment with
-  # its own toolchain (Rust/Anchor) and its own node_modules, and nothing in
-  # the main product may import from it. Keeping it out means `pnpm install`
-  # at the root never touches it and its dependencies never enter the lockfile.
-  - "!packages/solana-lab-old"

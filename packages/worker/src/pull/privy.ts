@@ -1,6 +1,6 @@
 // The Privy seat: how a pull gets signed WITHOUT the worker holding a trading key.
 //
-// Ported from packages/keeper-old/src/privy-signer.ts and privy-wallets.ts.
+// Ported from the keeper of the project this was forked from (src/privy-signer.ts and privy-wallets.ts.)
 //
 // WHY THIS EXISTS. `submit.ts` needs a signer for the trading wallet, because
 // `SettlementExecutor.settle` resolves the vault from `msg.sender`. The only

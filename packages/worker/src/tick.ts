@@ -779,7 +779,7 @@ function contributionOf(detail: unknown): bigint | null {
 // ── the schedule ────────────────────────────────────────────────────────────
 
 // Running a periodic body without letting two of them overlap.
-// Ported from packages/keeper-old/src/cycle.ts (skipWhileRunning).
+// Ported from the keeper of the project this was forked from (src/cycle.ts (skipWhileRunning).)
 //
 // `setInterval` fires on the clock whether or not the last firing finished, and
 // a pass can outrun its interval: keeper-old's own logs carried 44 ticks longer
@@ -823,7 +823,7 @@ export function skipWhileRunning(body: () => Promise<void>, onSkip: () => void):
 
 /**
  * A watchdog for the condition that has no event: nothing happening.
- * Ported from packages/keeper-old/src/alerts.ts (createHeartbeat); the alerter
+ * Ported from the keeper of the project this was forked from (src/alerts.ts (createHeartbeat); the alerter)
  * is the logger here — this worker has no webhook yet — and the alerter's
  * per-key de-duplication is a latch that resets on the next beat.
  *

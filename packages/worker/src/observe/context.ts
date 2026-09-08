@@ -2,7 +2,7 @@
 // touched the wallet, each with its receipt, plus cash at both block boundaries
 // and whether the wallet has code. Owner: reconcile.
 //
-// Ported from packages/session-engine-old/src/window.ts (block scan joined with
+// Ported from the session engine of the project this was forked from (src/window.ts (block scan joined with)
 // Transfer logs, receipt decoding, the 3-topic filter) and chain.ts (cashAt and
 // the topic helpers). The old scanner walked a whole window and needed a tracer
 // to see sell proceeds; this one looks at ONE block and lets the balance delta
@@ -92,7 +92,7 @@ export class StateUnavailableError extends Error {
   }
 }
 
-// Hex helpers, ported from packages/session-engine-old/src/chain.ts.
+// Hex helpers, ported from the session engine of the project this was forked from (src/chain.ts.)
 export const hexToBigInt = (value: string): bigint => BigInt(value);
 export const hexToNumber = (value: string): number => Number(BigInt(value));
 export const toBlockTag = (block: bigint): Hex => `0x${block.toString(16)}`;
