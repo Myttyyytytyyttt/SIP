@@ -59,17 +59,19 @@ export default async function Page({
       };
 
   // "Manage wallets" opens a modal over this page rather than leaving for
-  // /wallets — but that modal mounts Privy, which needs the WHOLE
-  // configuration the dashboard itself can do without. When it is incomplete
-  // the link to /wallets stays, and the route renders the setup checklist that
-  // names what is missing.
+  // /wallets — ALWAYS, which is why the problems travel with the config. The
+  // modal mounts Privy and reads the factory, so it needs the WHOLE
+  // configuration the dashboard itself can do without; when that is incomplete
+  // the host opens the setup modal instead, carrying exactly this list. The
+  // /wallets route stays as the deep link and renders the same list server-side.
   const forWallets = loadConfig();
   const walletsConfig = forWallets.ok ? toPublicConfig(forWallets.config) : null;
+  const walletsProblems = forWallets.ok ? [] : forWallets.problems;
 
   const { now, wallet, rule, stats, curve, days, holdings, trades, activity } = data;
 
   return (
-    <WalletsHost config={walletsConfig}>
+    <WalletsHost config={walletsConfig} problems={walletsProblems}>
       <div className="flex min-h-dvh flex-col">
       <SiteHeader wallet={wallet} activity={activity} now={now} />
 

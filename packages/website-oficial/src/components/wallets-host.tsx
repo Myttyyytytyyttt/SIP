@@ -12,27 +12,47 @@
  * stays a server component; only this wrapper and its children cross into the
  * client, and `children` is still server-rendered because it is passed in.
  *
+ * IT ALWAYS OPENS. An earlier shape handed back a null opener when the server
+ * could not assemble a config, and the trigger fell back to a plain link to
+ * /wallets — so on any half-configured deployment (which is every deployment
+ * before the contracts exist) clicking "Manage wallets" NAVIGATED AWAY, the one
+ * thing this component was built to prevent, and did it silently: the click
+ * looked like a broken modal rather than a missing variable. Now the config
+ * decides WHICH modal opens, never WHETHER one does. Without a config it is
+ * WalletsSetupModal, which needs no provider and no chain and names what is
+ * missing.
+ *
  * PRIVY IS NOT MOUNTED UNTIL ASKED FOR. <Providers> builds PrivyProvider, which
  * mounts iframes and talks to auth.privy.io. A visit that never opens the modal
  * should pay none of that, so the provider appears on the first open and stays —
  * a second open is instant and the session survives closing.
  */
 
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
 
 import Providers from "@/app/providers";
 import { WalletsModal } from "@/components/wallets/WalletsModal";
-import type { PublicConfig } from "@/lib/config";
+import { WalletsSetupModal } from "@/components/wallets/WalletsSetupModal";
+import type { ConfigProblem, PublicConfig } from "@/lib/config";
 
-/** null when the server could not assemble a config: the trigger stays a link to /wallets. */
+/** null only OUTSIDE a host — inside one there is always a modal to open. */
 const OpenerContext = createContext<(() => void) | null>(null);
 
-/** The opener, or null when wallets cannot be managed here. Safe outside the host. */
+/** The opener, or null when this subtree has no host. Safe to call anywhere. */
 export function useWalletsOpener(): (() => void) | null {
   return useContext(OpenerContext);
 }
 
-export function WalletsHost({ config, children }: { config: PublicConfig | null; children: ReactNode }) {
+export function WalletsHost({
+  config,
+  problems,
+  children,
+}: {
+  config: PublicConfig | null;
+  /** Why there is no config. Ignored when there is one. */
+  problems?: readonly ConfigProblem[];
+  children: ReactNode;
+}) {
   const [open, setOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
 
@@ -41,16 +61,16 @@ export function WalletsHost({ config, children }: { config: PublicConfig | null;
     setOpen(true);
   }, []);
 
-  const value = useMemo(() => (config === null ? null : opener), [config, opener]);
-
   return (
-    <OpenerContext.Provider value={value}>
+    <OpenerContext.Provider value={opener}>
       {children}
-      {config !== null && mounted ? (
+      {!mounted ? null : config !== null ? (
         <Providers config={config}>
           <WalletsModal config={config} open={open} onOpenChange={setOpen} />
         </Providers>
-      ) : null}
+      ) : (
+        <WalletsSetupModal problems={problems ?? []} open={open} onOpenChange={setOpen} />
+      )}
     </OpenerContext.Provider>
   );
 }

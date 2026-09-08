@@ -13,9 +13,9 @@ import Link from "next/link";
 
 import Providers from "@/app/providers";
 import { ModeToggle } from "@/components/mode-toggle";
-import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { SetupChecklist } from "@/components/wallets/SetupChecklist";
 import { WalletsScreen } from "@/components/wallets/WalletsScreen";
 import { loadConfig, toPublicConfig, type ConfigProblem, type PublicConfig } from "@/lib/config";
 
@@ -49,7 +49,7 @@ export default function WalletsPage() {
       </header>
 
       <main className="mx-auto w-full max-w-3xl flex-1 p-4 lg:p-6">
-        {loaded.ok ? <Screen config={toPublicConfig(loaded.config)} /> : <SetupChecklist problems={loaded.problems} />}
+        {loaded.ok ? <Screen config={toPublicConfig(loaded.config)} /> : <SetupCard problems={loaded.problems} />}
       </main>
     </div>
   );
@@ -64,8 +64,12 @@ function Screen({ config }: { config: PublicConfig }) {
   );
 }
 
-/** The "collect every problem into a checklist" shape: fix all of them, restart, reload. */
-function SetupChecklist({ problems }: { problems: readonly ConfigProblem[] }) {
+/**
+ * The "collect every problem into a checklist" shape: fix all of them, restart,
+ * reload. The list itself is shared with the dashboard's setup modal — this
+ * route only supplies the card around it.
+ */
+function SetupCard({ problems }: { problems: readonly ConfigProblem[] }) {
   return (
     <Card>
       <CardHeader>
@@ -76,16 +80,7 @@ function SetupChecklist({ problems }: { problems: readonly ConfigProblem[] }) {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <ol className="space-y-3 text-sm">
-          {problems.map((problem) => (
-            <li key={problem.variable} className="space-y-0.5">
-              <div>
-                <Num className="font-medium">{problem.variable}</Num> — {problem.message}
-              </div>
-              <div className="text-xs text-muted-foreground">{problem.howToFix}</div>
-            </li>
-          ))}
-        </ol>
+        <SetupChecklist problems={problems} />
       </CardContent>
     </Card>
   );
