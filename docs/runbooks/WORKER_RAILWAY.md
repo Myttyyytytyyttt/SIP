@@ -56,28 +56,40 @@ Two consequences for Railway:
 
 ## Variables
 
-Required in both modes:
+Genuinely required, in both modes — the worker refuses to start without them:
 
     SIP_RPC_URLS            comma-separated; first is preferred, rest are failover
-    SIP_CHAIN_ID            4663
     SIP_VAULT_FACTORY       0xf38448a0550eB31530f58a6d613e74fb109D02Ef
     SIP_SETTLEMENT_EXECUTOR 0xB87fBBAC92d52D543CB289Ee4cBdB23b6330C15c
     SIP_LOGS_FROM_BLOCK     57746389
-    SIP_MAX_LOG_SPAN        the provider's eth_getLogs range cap
+
+Optional; the defaults are the tested ones, so set these only to change them:
+
+    SIP_CHAIN_ID            default 4663
+    SIP_MAX_LOG_SPAN        default 10000 — raise to the provider's eth_getLogs cap
+    SIP_POLL_MS             default 300000
 
 Required additionally to go live:
 
     SIP_WORKER_ALLOW_BROADCAST   i-understand-this-moves-real-funds
     SIP_ATTESTER_PRIVATE_KEY     the key registered in AttesterRegistry; holds no funds
     DATABASE_URL                 postgres://… on port 5432
-    PRIVY_APP_ID / PRIVY_APP_SECRET
-    PRIVY_AUTHORIZATION_PRIVATE_KEY / PRIVY_SIGNER_ID / PRIVY_POLICY_ID
+    PRIVY_APP_ID
+    PRIVY_APP_SECRET
+    PRIVY_AUTHORIZATION_PRIVATE_KEY
+    PRIVY_SIGNER_ID              the key quorum the website seats wallets with
+
+`PRIVY_POLICY_ID` is deliberately absent: the website reads it, the worker never
+does. Setting it here is harmless and misleading, which is worse than useless.
 
 ## The order that keeps the first mistake cheap
 
 1. Deploy in **dry run** with the chain variables only. Confirm from the logs that
    it starts, reaches the RPC, and reports the factory it is watching.
-2. Add Postgres and confirm it takes the advisory lock.
+2. Add Postgres. There is no "lock acquired" log line to wait for — the ledger
+   module logs nothing on success. What you confirm instead is `ledger:"postgres"`
+   on the `worker.start` line, the ABSENCE of a `ledger.unavailable` error, and
+   the first `worker.heartbeat` after it.
 3. Create the first vault and set the trading account's `savingsBps`. Until a
    vault exists the worker is correctly doing nothing.
 4. Let it observe one real fill **in dry run** and check the reconstructed
@@ -204,3 +216,47 @@ was written). Authenticating it is an OAuth flow that needs a real terminal:
 ```bash
 claude /mcp
 ```
+
+
+## Setting the service up, exactly
+
+- **Root Directory: leave it EMPTY.** The instinct in a monorepo is to set it to
+  `packages/worker`; that breaks the build immediately, because the Dockerfile
+  copies `pnpm-lock.yaml` and `pnpm-workspace.yaml` from the repo root and a
+  narrowed context cannot see them.
+- **Config-as-code path: `packages/worker/railway.json`.** This is the whole
+  point of that file. Without it the service inherits the root config and builds
+  the website.
+- **Custom Start Command: leave it EMPTY**, so the image's own CMD runs. Do not
+  set it to anything going through `pnpm` — that is the corepack `$HOME` failure
+  the Dockerfile now carries a comment about.
+- **No healthcheck path.**
+
+Two settings exist because of the advisory lock, and both are already in
+`packages/worker/railway.json`:
+
+- `numReplicas: 1` — a second worker refuses to start rather than sharing.
+- `overlapSeconds: 0` — Railway otherwise starts the new container before
+  draining the old one, and for those seconds the old session still holds the
+  lock, so the new one exits and the deploy looks broken. Zero overlap makes the
+  handover clean. (A worker is not a web service; nobody is waiting on it to
+  answer a request during the gap.)
+
+`watchPatterns` on both services keeps a worker-only commit from rebuilding the
+website and vice versa.
+
+## Reading the logs
+
+The log stream is deliberately hash-blind: every 64-hex run is masked by shape,
+so transaction hashes and batch roots come out as `<redacted:hex64:…>` and cannot
+be copied from the pane. That is intentional, and it means **the audit trail is
+the ledger, not the log**. To follow a real fill, query Postgres:
+
+```sql
+SELECT wallet, block_l2, tx_hash, side, venue, notional_wei FROM sip_fill ORDER BY block_l2 DESC LIMIT 20;
+```
+
+One more thing the log does not say: attaching Postgres persists the per-wallet
+cursor and the record of sent pulls, but the FACTORY scan still starts from
+`SIP_LOGS_FROM_BLOCK` on every process start. A restart is not a resume for that
+part, and the first heartbeat after a restart is therefore slower.

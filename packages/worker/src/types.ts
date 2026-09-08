@@ -446,5 +446,16 @@ export interface WorkerConfig {
   readonly maxLogSpan: bigint;
   /** Only in live mode; never logged. */
   readonly attesterPrivateKey: Hex | null;
-  readonly privy: { readonly appId: string; readonly appSecret: string; readonly authorizationPrivateKey: string } | null;
+  readonly privy: {
+    readonly appId: string;
+    readonly appSecret: string;
+    readonly authorizationPrivateKey: string;
+    /**
+     * `PRIVY_SIGNER_ID`: the key quorum the website seats wallets with. NOT a
+     * secret and not optional -- `seatSignerOver` refuses to build a seat
+     * without it, because without it ANY additional signer on a wallet would
+     * answer for ours and a pull would be planned against a seat we do not hold.
+     */
+    readonly signerId: string;
+  } | null;
 }

@@ -350,6 +350,11 @@ export function parseConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedR
     // a seat without its key cannot sign, and a key without its app cannot be
     // presented.
     const appId = first(env, ["PRIVY_APP_ID"]);
+    // An id, not a secret: read with `first` so it stays legible in logs and in
+    // the startup line. It is required all the same -- the seat throws without
+    // it, and it threw AT STARTUP, after arming, which is the worst possible
+    // moment to discover a missing variable.
+    const signerId = first(env, ["PRIVY_SIGNER_ID"]);
     const appSecret = takeSecret(env, ["PRIVY_APP_SECRET"], "privyAppSecret", redactor);
     const authorizationPrivateKey = takeSecret(
       env,
@@ -358,6 +363,13 @@ export function parseConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedR
       redactor,
     );
     if (appId === undefined) problems.push("Live mode requires PRIVY_APP_ID.");
+    if (signerId === undefined || signerId === "") {
+      problems.push(
+        "Live mode requires PRIVY_SIGNER_ID: the key quorum id the website seats wallets with. " +
+          "A wallet counts as ours only when that id is among its additional signers; without it every " +
+          "additional signer would answer for ours and the pull would be planned against a seat we do not hold.",
+      );
+    }
     if (appSecret === undefined) problems.push("Live mode requires PRIVY_APP_SECRET.");
     if (authorizationPrivateKey === undefined) {
       problems.push(
@@ -365,11 +377,18 @@ export function parseConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedR
           "(or PRIVY_AUTHORIZATION_KEY): the additional signer that Privy lets sign the pull under the policy.",
       );
     }
-    if (appId !== undefined && appSecret !== undefined && authorizationPrivateKey !== undefined) {
-      privy = guarded({ appId, appSecret, authorizationPrivateKey }, () => ({
+    if (
+      appId !== undefined &&
+      appSecret !== undefined &&
+      authorizationPrivateKey !== undefined &&
+      signerId !== undefined &&
+      signerId !== ""
+    ) {
+      privy = guarded({ appId, appSecret, authorizationPrivateKey, signerId }, () => ({
         appId,
         appSecret: "<redacted:privyAppSecret>",
         authorizationPrivateKey: "<redacted:privyAuthorizationKey>",
+        signerId,
       }));
     }
   } else {

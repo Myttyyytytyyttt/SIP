@@ -20,7 +20,15 @@ WORKDIR /repo
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 COPY packages/contracts-artifacts/package.json packages/contracts-artifacts/
 COPY packages/worker/package.json packages/worker/
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile --filter @sip/worker...
+# NO BUILDKIT CACHE MOUNT, for the reason the web image writes out in full
+# (packages/website-oficial/Dockerfile, "NO BUILDKIT CACHE MOUNT HERE"): Railway
+# rejects a bare cache id, demanding `id=s/<service id>-<target>`, so keeping the
+# mount means hardcoding one service's UUID into the Dockerfile and failing with
+# "missing the cacheKey prefix" the day anyone recreates or duplicates it. This
+# line carried the mount the web image had already deleted -- it built fine
+# locally, because local BuildKit accepts any id, and would have failed on the
+# first Railway build.
+RUN pnpm install --frozen-lockfile --filter "@sip/worker..."
 
 FROM deps AS builder
 WORKDIR /repo

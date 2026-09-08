@@ -22,6 +22,7 @@ import {
   shape,
 } from "../src/config.js";
 import { Redactor, createLogger } from "../src/log.js";
+import { seatSignerOver } from "../src/pull/privy.js";
 
 /** Shaped exactly like real keys. Never used to sign anything. */
 const ATTESTER = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
@@ -45,6 +46,8 @@ const DEPLOYMENT: NodeJS.ProcessEnv = {
   SIP_LOGS_FROM_BLOCK: "1000",
 };
 
+const SIGNER_ID = "zdhe35f97hmzxes5iuzga7d0";
+
 const dry = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ SIP_RPC_URLS: RPC, ...DEPLOYMENT, ...over });
 
 /** Everything a live run needs. */
@@ -56,6 +59,7 @@ const live = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
   PRIVY_APP_ID: "app-id",
   PRIVY_APP_SECRET: APP_SECRET,
   PRIVY_AUTHORIZATION_PRIVATE_KEY: AUTH_KEY,
+  PRIVY_SIGNER_ID: SIGNER_ID,
   DATABASE_URL: DB,
   ...over,
 });
@@ -158,7 +162,14 @@ describe("the broadcast gate", () => {
 });
 
 describe("live mode requires every secret", () => {
-  for (const name of ["SIP_ATTESTER_PRIVATE_KEY", "PRIVY_APP_ID", "PRIVY_APP_SECRET", "PRIVY_AUTHORIZATION_PRIVATE_KEY", "DATABASE_URL"]) {
+  for (const name of [
+    "SIP_ATTESTER_PRIVATE_KEY",
+    "PRIVY_APP_ID",
+    "PRIVY_APP_SECRET",
+    "PRIVY_AUTHORIZATION_PRIVATE_KEY",
+    "PRIVY_SIGNER_ID",
+    "DATABASE_URL",
+  ]) {
     it(`refuses to start without ${name}, naming it and echoing nothing`, () => {
       const env = live();
       delete env[name];
@@ -547,5 +558,45 @@ describe("loadConfig, the throwing wrapper the binary uses", () => {
     createLogger({ sink: (line) => lines.push(line), json: true }).error("rpc", { error: new Error(`429 from ${url}`) });
     expect(lines[0]).not.toContain("UniqueKeyForTheSharedRedactorTest");
     expect(lines[0]).toContain("<redacted:rpcUrl:0>");
+  });
+});
+
+describe("the Privy seat is constructible from the config it is handed", () => {
+  // THE REGRESSION. The seat has always demanded a signer id -- seatSignerOver
+  // calls requireSignerId, which throws -- and config.ts did not read
+  // PRIVY_SIGNER_ID at all, so makeSeat built the seat without one. Nothing
+  // caught it because nothing ever built a seat from a parsed config: arming the
+  // worker threw at module load, every time, and only in live mode.
+  it("carries PRIVY_SIGNER_ID through to a seat that builds", () => {
+    const result = parseConfig(live(), new Redactor());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.config.privy?.signerId).toBe(SIGNER_ID);
+
+    // The consumer, with the real precondition and a fake transport.
+    const api = { walletsAt: async () => [], sendPull: async () => "0x" as const };
+    expect(() =>
+      seatSignerOver(api as never, {
+        authorizationPrivateKey: result.config.privy!.authorizationPrivateKey,
+        signerId: result.config.privy!.signerId,
+      }),
+    ).not.toThrow();
+  });
+
+  it("still refuses a signer id that is only whitespace", () => {
+    const result = parseConfig(live({ PRIVY_SIGNER_ID: "   " }), new Redactor());
+    // Trimmed to empty by `first`, so the parser refuses rather than handing the
+    // seat a value requireSignerId would reject later.
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems.join("\n")).toContain("PRIVY_SIGNER_ID");
+  });
+
+  it("keeps the signer id out of the secret set: it is an id, and legible on purpose", () => {
+    const result = parseConfig(live(), new Redactor());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(JSON.stringify(result.config.privy)).toContain(SIGNER_ID);
+    expectNoSecret(JSON.stringify(result.config.privy));
   });
 });

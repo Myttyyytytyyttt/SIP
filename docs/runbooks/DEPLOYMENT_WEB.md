@@ -434,11 +434,19 @@ the two in sync by hand; that is what `x-chain-env` is for.
 ### The worker service
 
 A second Railway service on the same repo, with **Root Directory still at the
-repo root** and `RAILWAY_DOCKERFILE_PATH=packages/worker/Dockerfile` as a service
-variable — `railway.json` describes the web service, and config file paths are
-absolute from the repo root, so they do not follow a per-service root directory.
-Give it section 8's variables, no health check, and leave
+repo root** — the Dockerfile copies the lockfile and the workspace file from
+there, so a narrowed context cannot build. Point it at its own config file,
+**Config-as-code → `packages/worker/railway.json`**, which pins the Dockerfile,
+the single replica and the zero deploy overlap the advisory lock needs. (The
+older `RAILWAY_DOCKERFILE_PATH` service variable also works, but then the replica
+and overlap settings live only in the dashboard, where nothing records why they
+are what they are.)
+
+No health check — the worker listens on no port. Leave
 `SIP_WORKER_ALLOW_BROADCAST` unset until a dry run has been read line by line.
+
+The full procedure, its variables and what a healthy first boot looks like:
+`docs/runbooks/WORKER_RAILWAY.md`.
 
 ### Things that will bite you
 

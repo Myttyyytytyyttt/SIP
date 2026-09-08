@@ -35,7 +35,7 @@ import { failoverRpcClient } from "../src/rpc/failover.js";
 import { runLoop, runTick, type TickDeps } from "../src/tick.js";
 import type { Address, Hex, RpcClient, WorkerConfig } from "../src/types.js";
 
-const USAGE = "usage: worker <tick|run>\n  tick  one pass, print the TickSummary as JSON, exit\n  run   a pass every SIP_WORKER_POLL_MS with a heartbeat line per pass\n";
+const USAGE = "usage: worker <tick|run>\n  tick  one pass, print the TickSummary as JSON, exit\n  run   a pass every SIP_POLL_MS with a heartbeat line per pass\n";
 
 /**
  * EXIT 2 IS "YOU HAVE TO CHANGE SOMETHING", and it is the whole point of the
@@ -166,6 +166,9 @@ function makeSeat(cfg: WorkerConfig): SeatSigner | null {
     appId: cfg.privy.appId,
     appSecret: cfg.privy.appSecret,
     authorizationPrivateKey: cfg.privy.authorizationPrivateKey,
+    // Omitting this threw inside seatSignerOver at module load, so arming the
+    // worker killed it before the first pass every time.
+    signerId: cfg.privy.signerId,
   });
 }
 
