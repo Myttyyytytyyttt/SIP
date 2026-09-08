@@ -17,7 +17,11 @@ export const metadata: Metadata = {
   title: "SIP — Self Implemented Pension",
   description:
     "A pension you build one trade at a time. A slice of every buy and sell is put aside and invested in the assets you chose.",
-  icons: { icon: "/favicon.ico" },
+  // NO `icons` KEY ON PURPOSE. Declaring one here overrides Next's file
+  // convention, and the icons now come from src/app/{favicon.ico,icon.png,
+  // apple-icon.png} — generated from the brand mark, content-hashed, and
+  // emitted with their own sizes and types. The old public/favicon.ico was
+  // Nuvem's mark and is gone: it would also have collided with app/favicon.ico.
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

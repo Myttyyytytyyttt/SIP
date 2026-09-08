@@ -20,6 +20,7 @@
  */
 
 import { Mail } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 
 import { Separator } from "@/components/ui/separator";
@@ -73,10 +74,13 @@ export function SiteFooter({ now, className }: { now: string; className?: string
         */}
         <div className="grid gap-10 py-10 sm:grid-cols-2 lg:grid-cols-3">
           <div>
-            {/* The header's wordmark, at the other end of the page. h2, not h1 — the page already has one. */}
-            <div className="flex items-baseline gap-2">
-              <h2 className="font-semibold tracking-tight">SIP</h2>
-              <span className="text-xs text-muted-foreground">Self Implemented Pension</span>
+            {/* The mark, then the header's wordmark at the other end of the page. h2, not h1 — the page already has one. */}
+            <div className="flex items-center gap-2.5">
+              <SipMark className="h-7 w-auto" />
+              <div className="flex items-baseline gap-2">
+                <h2 className="font-semibold tracking-tight">SIP</h2>
+                <span className="text-xs text-muted-foreground">Self Implemented Pension</span>
+              </div>
             </div>
 
             <p className="mt-3 max-w-sm text-sm text-muted-foreground">
@@ -132,6 +136,34 @@ export function SiteFooter({ now, className }: { now: string; className?: string
         </div>
       </div>
     </footer>
+  );
+}
+
+/**
+ * THE MARK, ONE PER THEME.
+ *
+ * The source art is two flat PNGs with no alpha — black on white, white on
+ * black — so either one dropped straight in would paint its own rectangle over
+ * the page. `public/logo/sip-mark-*.png` are the ink cut out of them: the same
+ * shape, transparent ground, trimmed to the glyph (218 x 256 of the original
+ * 5504 x 3072 sheet, which was almost all margin).
+ *
+ * Two <Image>s rather than one recoloured asset, because a PNG cannot take
+ * `currentColor`. `dark:` is the class-strategy variant next-themes sets on
+ * <html> before React hydrates, so the right one is on screen from the first
+ * paint — no flash of the wrong ink.
+ *
+ * alt="" on purpose: the wordmark beside it already says SIP, and a screen
+ * reader announcing the name twice is worse than not announcing the image.
+ */
+const MARK = { width: 218, height: 256 } as const;
+
+function SipMark({ className }: { className?: string }) {
+  return (
+    <>
+      <Image alt="" className={cn("dark:hidden", className)} src="/logo/sip-mark-black.png" {...MARK} />
+      <Image alt="" className={cn("hidden dark:block", className)} src="/logo/sip-mark-white.png" {...MARK} />
+    </>
   );
 }
 

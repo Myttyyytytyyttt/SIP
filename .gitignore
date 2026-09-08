@@ -70,3 +70,7 @@ packages/website-oficial/public/brand/
 
 # Next.js build output, wherever it lands (a stray `next build` from the repo root makes one here).
 .next/
+
+# Brand source art: multi-megabyte, full-resolution originals. The site ships the
+# derived cut-outs in public/logo/ and src/app/, which are a few KB each.
+packages/website-oficial/brand-source/
