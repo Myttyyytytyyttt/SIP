@@ -30,6 +30,7 @@ import { WalletsHost } from "@/components/wallets-host";
 import { PensionPanel } from "@/components/pension-panel";
 import { SavingsRulePanel } from "@/components/savings-rule-panel";
 import { SavingsStrip } from "@/components/savings-strip";
+import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { loadConfig, toPublicConfig } from "@/lib/config";
 import { loadDashboard, type DashboardLoad } from "@/lib/dashboard";
@@ -98,6 +99,9 @@ export default async function Page({
           </div>
         </main>
       </div>
+
+      {/* Full width, under both columns: the sticky sidebar ends with the row above, so this reads as the bottom of the page rather than the bottom of one column. */}
+      <SiteFooter now={now} />
       </div>
     </WalletsHost>
   );

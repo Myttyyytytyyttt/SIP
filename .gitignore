@@ -67,3 +67,6 @@ packages/website-oficial/public/brand/
 # Finder droppings and a stray boot log from the old stack.
 .DS_Store
 .nuvem-logs-boot.txt
+
+# Next.js build output, wherever it lands (a stray `next build` from the repo root makes one here).
+.next/
