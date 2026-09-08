@@ -1,0 +1,46 @@
+{
+  "name": "SIP — first deployment",
+  "chainId": 4663,
+  "deployedAt": "2026-09-08",
+  "deployBlock": 57746389,
+  "costEth": "0.003948227943128",
+  "script": "script/DeploySip.s.sol",
+  "contracts": {
+    "vaultFactory": "0xf38448a0550eB31530f58a6d613e74fb109D02Ef",
+    "timelock": "0x43553D171063e4D1F7eB94E328C369c17200E5d8",
+    "settlementExecutorPhase0": "0xB87fBBAC92d52D543CB289Ee4cBdB23b6330C15c",
+    "sipVolumeExecutorPhase1": "0xc6b71528f23414CeD4Da3a8a29ee27aFF513492d",
+    "vaultImplementation": "0x190e5Ce27C65Ca4c35407429234c53794E54637e",
+    "cohort1Beacon": "0xb9EC99134a3E415Dfad8bf9367856137BB11E9aD",
+    "protocolPauseController": "0xC55FA33379D75E5A6725Bf99C29F94605b904679",
+    "attesterRegistry": "0x7cD142A20E664f9318D6520A75c9e471d897e7a8",
+    "adapterRegistry": "0xFee89383646e7e7DF49b45E7aC26201Dcb252994",
+    "feeController": "0x15d9f4A593d75216A8589DB7754A0A45773D302d",
+    "feeCollector": "0xd6F75c59f2214Eb93fEBB0ee5bDEdAb16BC7FF56",
+    "weth": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+  },
+  "spent": {
+    "governanceBootstrap": "0x14ABcE83EFf2BB976772b9a35a988F8B4ddf2718",
+    "factoryBootstrap": "0x2739e244f142EA04465d36D4cdF7b0B723BA7b24"
+  },
+  "governance": {
+    "governor": "0xcbf32597a84a471b3C4BB050EBDa457A136cDFD5",
+    "note": "A HOT KEY, generated for testing. It is proposer, executor, canceller, guardian and fee owner. The timelock is what makes moving this to hardware a grant-then-revoke batch rather than a redeploy.",
+    "timelockMinDelaySeconds": 0,
+    "attester": "0x2dB0dc31cfCb9931c79c95BbeAd3873b2D9f6afD",
+    "feeBps": 0
+  },
+  "verifiedOnChain": {
+    "date": "2026-09-08",
+    "factoryOwnerIsTimelock": true,
+    "factoryPendingOwner": "0x0000000000000000000000000000000000000000",
+    "timelockAdminIsOnlyItself": true,
+    "governanceBootstrapRetainsNoRole": true,
+    "cohort1Active": true,
+    "registeredAdapters": 0
+  },
+  "notReadyFor": [
+    "invest(): the AdapterRegistry is empty, so no vault can invest until governance registers an adapter",
+    "anyone else's money: the governor is a hot key and the delay is zero"
+  ]
+}
