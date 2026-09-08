@@ -3,10 +3,20 @@
 // A PASS (`runTick`) is DESIGN.md §6 in order: where the chain is, who the
 // worker is responsible for, what each of them did behind the finality margin,
 // which of it can be closed into a window, and — through the attester and the
-// wallet's own Privy seat — what can be pulled into the vault right now. The
-// summary it returns is the whole truth of the pass in eight numbers: `tick`
-// prints it and exits; `run` prints one heartbeat line per pass and never lets
-// two passes overlap (`skipWhileRunning`, ported from keeper-old).
+// wallet's own Privy seat — what can be pulled into the vault right now. Then a
+// fifth step §6 does not have: what each VAULT can buy with the WETH those
+// pulls left it (assessment §4.6 — the observer and the crank are one process,
+// because a vault full of WETH that never buys anything is the product missing
+// the half it is named for). The summary it returns is the whole truth of the
+// pass in ten numbers: `tick` prints it and exits; `run` prints one heartbeat
+// line per pass and never lets two passes overlap (`skipWhileRunning`, ported
+// from keeper-old).
+//
+// STEP 5 COUNTS VAULTS, NOT WALLETS. Steps 2 to 4 are per trading wallet, since
+// volume, windows and seats are all per wallet. Investment is not: several
+// wallets settle into one PersonalVault, and `invest()` spends that vault's
+// whole WETH balance against one hashed basket. Cranking per wallet would send
+// N calls at the same basket and pay for N−1 reverts.
 //
 // TWO THINGS ARE NOT WHERE §6 PUTS THEM, for structural reasons:
 //
@@ -63,6 +73,8 @@ import type {
   DiscoveryResult,
   Fill,
   Hex,
+  InvestIntent,
+  InvestOutcome,
   Ledger,
   PullOutcome,
   ReconcileOutcome,
@@ -86,6 +98,10 @@ export interface TickSummary {
   readonly windowsOpened: number;
   readonly pulls: number;
   readonly deferred: number;
+  /** Vaults that invested this pass — one per vault at most, and a dry run counts, exactly as `pulls` counts a DRY_RUN. */
+  readonly investments: number;
+  /** Vaults whose crank said "later", or whose crank threw. Its own counter: a deferred window and an unbought basket fail for unrelated reasons. */
+  readonly investDeferred: number;
 }
 
 /** What a pass needs from the process: the chain, the ledger, the config, a logger, and the two signers (null in dry run). */
@@ -102,6 +118,30 @@ export interface BlockRange {
   readonly fromBlock: bigint;
   readonly toBlock: bigint;
 }
+
+/**
+ * THE CRANK SEAM: one vault's whole investment decision, as the pass asks for it.
+ *
+ * It lives here rather than in `types.ts` for one reason: it needs `SeatSigner`,
+ * which belongs to the pull module, and `types.ts` sits above the modules rather
+ * than beside them. Everything that passes THROUGH the seam — the basket, the
+ * intent, the outcome, the reasons — is declared in `types.ts` as usual.
+ *
+ * ONE VAULT, and every trading wallet the ledger binds to it in the ledger's
+ * order: `invest()` is authorised per caller, so the seam needs the candidates
+ * to pick a seated ACTIVE one from — but it spends the VAULT's balance, so it
+ * is asked once whatever the list's length. `now` is injected for the same
+ * reason `attestPhase0` takes it: a deadline a test can pin.
+ */
+export type CrankVault = (
+  rpc: RpcClient,
+  mode: WorkerMode,
+  vault: Address,
+  accounts: readonly Address[],
+  seat: SeatSigner | null,
+  ledger: Ledger,
+  now: { readonly unixSeconds: bigint; readonly headL2: bigint },
+) => Promise<InvestOutcome>;
 
 /**
  * The module functions a pass is wired to. The defaults are the real modules;
@@ -151,6 +191,8 @@ export interface TickPipeline {
   readonly pullGasFloorWei: (rpc: RpcClient) => Promise<bigint>;
   /** The L1 height an L2 block was posted at: the space the vault's activation floor is measured in. */
   readonly l1BlockOf: (rpc: RpcClient, blockL2: bigint) => Promise<bigint>;
+  /** Step 5: one vault's whole investment decision, from the policy read to the broadcast. */
+  readonly crankVault: CrankVault;
   /** Wall clock in unix seconds; injected so a test can pin the attestation's validity window. */
   readonly unixSeconds: () => bigint;
 }
@@ -213,6 +255,19 @@ export async function pullGasFloorWei(rpc: RpcClient): Promise<bigint> {
   return 2n * PHASE0_PULL_GAS * BigInt(raw);
 }
 
+/**
+ * The crank, imported on the first vault a pass reaches rather than at load
+ * time. Investing is the one step of the pass a worker can run without —
+ * observing, attesting and pulling do not know the invest module exists — and
+ * the import being a literal specifier keeps a drift between `CrankVault` and
+ * what `src/invest/crank.ts` actually exports a TYPECHECK error here, in the
+ * seam, rather than a TypeError halfway through a live pass.
+ */
+const crankVault: CrankVault = async (...args) => {
+  const invest = await import("./invest/crank.js");
+  return invest.crankVault(...args);
+};
+
 const DEFAULT_PIPELINE: TickPipeline = {
   blockNumber: blockNumberReal,
   discoverLinkedWallets: discoverLinkedWalletsReal,
@@ -225,6 +280,7 @@ const DEFAULT_PIPELINE: TickPipeline = {
   attestPhase0: attestPhase0Real,
   submitPull: submitPullReal,
   pullGasFloorWei,
+  crankVault,
   l1BlockOf: l1BlockOfReal,
   unixSeconds: () => BigInt(Math.floor(Date.now() / 1000)),
 };
@@ -340,6 +396,24 @@ export async function runTick(deps: TickDeps, options: TickOptions = {}): Promis
     }
   }
 
+  // ---- 5. per vault: buy the basket with what the pulls left behind --------
+  // AFTER the pulls, not among them: this pass's WETH is not in the vault yet
+  // (a pull is a broadcast, not a receipt), so the crank spends what earlier
+  // passes collected. That is the whole reason it is a crank and not a callback.
+  const crank = new InvestCrank(deps, p, headL2);
+  for (const [vault, accounts] of vaultsOf(states)) {
+    try {
+      await crank.run(vault, accounts);
+    } catch (error) {
+      // One vault's crank is one vault's crank, the way step 4 contains one
+      // wallet: an unreadable basket or an adapter registry that will not answer
+      // must not cost every other user their pass. The reason is surfaced, not
+      // swallowed — a crank that throws every pass is a crank nobody is fixing.
+      crank.deferred += 1;
+      log.error("invest.failed", { vault, accounts: accounts.length, detail: describe(error) });
+    }
+  }
+
   return {
     headL2,
     wallets: states.length,
@@ -349,7 +423,30 @@ export async function runTick(deps: TickDeps, options: TickOptions = {}): Promis
     windowsOpened: closer.windowsOpened,
     pulls: closer.pulls,
     deferred: closer.deferred,
+    investments: crank.investments,
+    investDeferred: crank.deferred,
   };
+}
+
+/**
+ * The pass's vaults, each with the trading wallets the ledger binds to it in the
+ * ledger's own order, and the vaults themselves in address order so two passes
+ * over the same ledger crank in the same sequence.
+ *
+ * A wallet whose vault is the zero address is not bound yet — the factory's logs
+ * have not linked it, or the link was revoked — and there is no vault there to
+ * invest from, so it makes no entry rather than an entry nothing can use.
+ */
+function vaultsOf(states: readonly WalletState[]): ReadonlyMap<Address, readonly Address[]> {
+  const byVault = new Map<Address, Address[]>();
+  for (const state of states) {
+    const vault = lower(state.vault);
+    if (/^0x0*$/.test(vault)) continue;
+    const accounts = byVault.get(vault) ?? [];
+    accounts.push(lower(state.wallet));
+    byVault.set(vault, accounts);
+  }
+  return new Map([...byVault].sort(([a], [b]) => a.localeCompare(b)));
 }
 
 /** Step 3 of a pass: discovery and reconciliation over the chunks, and what each wallet's range can vouch for. */
@@ -762,6 +859,73 @@ class WindowCloser {
         await ledger.markWindow(id, "OPEN", { skipped: pull.reason, detail: pull.detail ?? null });
         this.deferred += 1;
         log.warn("pull.skipped", { ...amounts, windowId: id, reason: pull.reason, detail: pull.detail ?? null });
+        return;
+    }
+  }
+}
+
+/**
+ * Step 5 of a pass, for one vault: the WETH the pulls left there, turned into
+ * the basket the user chose, at most once per pass.
+ *
+ * The decision is entirely the crank's — the threshold, the caps, the pause
+ * flags, the adapter's epoch and the exact-debit split all live in
+ * `PersonalVault.invest()` and are read against it there, including WHICH of
+ * the vault's wallets signs. What belongs HERE is only what the pass owes the
+ * operator: a count, a line, and the guarantee that one vault cannot end the
+ * pass.
+ */
+class InvestCrank {
+  investments = 0;
+  deferred = 0;
+
+  constructor(
+    private readonly deps: TickDeps,
+    private readonly p: TickPipeline,
+    private readonly headL2: bigint,
+  ) {}
+
+  async run(vault: Address, accounts: readonly Address[]): Promise<void> {
+    const { rpc, ledger, config, log } = this.deps;
+    const outcome = await this.p.crankVault(rpc, config.mode, vault, accounts, this.deps.seat, ledger, {
+      unixSeconds: this.p.unixSeconds(),
+      headL2: this.headL2,
+    });
+    switch (outcome.kind) {
+      case "SENT":
+        // NOT "invested": a broadcast is not a receipt, exactly as with a pull.
+        // The vault's own WETH balance on the next pass is what says it landed.
+        this.investments += 1;
+        log.info("invest.sent", {
+          vault,
+          account: outcome.intent.account,
+          amountInWei: outcome.intent.amountInWei,
+          legs: outcome.intent.legs.length,
+          deadline: outcome.intent.deadline,
+          nonce: outcome.intent.nonce,
+          txHash: outcome.intent.txHash,
+        });
+        return;
+      case "DRY_RUN":
+        // §0.1: dry run does everything except signing and sending, and says
+        // what it would have bought — with the amounts, or it says nothing.
+        this.investments += 1;
+        log.info("invest.dry_run", {
+          vault,
+          account: outcome.intent.account,
+          amountInWei: outcome.intent.amountInWei,
+          legs: outcome.intent.legs.map((leg) => ({ targetAsset: leg.targetAsset, weightBps: leg.weightBps })),
+          minAmountsOut: outcome.intent.minAmountsOut,
+          deadline: outcome.intent.deadline,
+        });
+        return;
+      case "DEFERRED":
+        // Every reason is "later", never "never": the balance grows with the
+        // next pull, a pause lifts, a basket is read, a seat comes back.
+        // `info`, not `warn` — a vault under its threshold is the resting state
+        // of every vault the worker has just started collecting for.
+        this.deferred += 1;
+        log.info("invest.deferred", { vault, accounts: accounts.length, reason: outcome.reason, detail: outcome.detail ?? null });
         return;
     }
   }

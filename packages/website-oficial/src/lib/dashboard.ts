@@ -20,17 +20,26 @@
  *
  * SAME DISCIPLINE AS src/lib/vault.ts AND src/lib/skims.ts: a value that could
  * not be read is reported, never rendered as a zero. The two places where this
- * bites hardest are the holdings table (there is no position read on this build
- * of PersonalVault, so the table is empty and the notice says why) and the
- * symbol column (see `symbolFor`).
+ * bites hardest are the holdings table (the shares are the vault's own token
+ * balances, but no chain-4663 price feed exists for those tokens, so each row
+ * is shown at what it COST and the notice says so) and the symbol column (see
+ * `symbolFor`).
  */
 
 import { Pool } from "pg";
-import { getAddress, type Address, type PublicClient } from "viem";
+import {
+  decodeAbiParameters,
+  encodeAbiParameters,
+  getAddress,
+  keccak256,
+  type Address,
+  type Hex,
+  type PublicClient,
+} from "viem";
 
-import type { ServerConfig } from "@/lib/config";
+import { configuredRpcUrl, type ServerConfig } from "@/lib/config";
 import { shortHex } from "@/lib/format";
-import { redactSecrets } from "@/lib/redact";
+import { errorSummary, redactSecrets } from "@/lib/redact";
 import {
   createReadClient,
   listTradingAccounts,
@@ -47,6 +56,7 @@ import type {
   SavingsPoint,
   SavingsRule,
   SavingsStats,
+  SavingsTarget,
   Side,
   Ticker,
   Trade,
@@ -419,6 +429,282 @@ async function readLedger(databaseUrl: string, vault: Address): Promise<LedgerRe
 }
 
 // ---------------------------------------------------------------------------
+// The basket, and what the vault holds of it
+// ---------------------------------------------------------------------------
+
+/**
+ * THESE FRAGMENTS LIVE HERE, NOT IN src/lib/abi.ts, AND THAT COSTS A GUARANTEE.
+ *
+ * scripts/check-abis.mts proves every fragment in src/lib/abi.ts byte-identical
+ * to the compiled artifact; it does not reach these. So the reads below carry
+ * their own proof instead: the basket is checked against the hash the vault
+ * stores AND re-encoded back to the exact bytes the vault hashed, which fails
+ * loudly if `BasketLeg` ever gains or reorders a field. See `readInvestment`.
+ */
+const basketLegParams = [
+  {
+    name: "legs",
+    type: "tuple[]",
+    components: [
+      { name: "targetAsset", type: "address" },
+      { name: "weightBps", type: "uint16" },
+      { name: "minOutRateWad", type: "uint128" },
+    ],
+  },
+] as const;
+
+const investmentPolicyUpdatedEvent = {
+  type: "event",
+  name: "InvestmentPolicyUpdated",
+  anonymous: false,
+  inputs: [
+    { name: "policyNonce", type: "uint64", indexed: true },
+    { name: "basketHash", type: "bytes32", indexed: true },
+    { name: "adapterId", type: "bytes32", indexed: true },
+    { name: "enabled", type: "bool", indexed: false },
+    { name: "minInvestmentWei", type: "uint128", indexed: false },
+    { name: "maxPerCallWei", type: "uint128", indexed: false },
+    { name: "maxRolling30dWei", type: "uint128", indexed: false },
+    { name: "encodedLegs", type: "bytes", indexed: false },
+  ],
+} as const;
+
+const investmentPauseUpdatedEvent = {
+  type: "event",
+  name: "InvestmentPauseUpdated",
+  anonymous: false,
+  inputs: [{ name: "paused", type: "bool", indexed: false }],
+} as const;
+
+const investmentExecutedEvent = {
+  type: "event",
+  name: "InvestmentExecuted",
+  anonymous: false,
+  inputs: [
+    { name: "policyNonce", type: "uint64", indexed: true },
+    { name: "adapter", type: "address", indexed: true },
+    { name: "amountIn", type: "uint256", indexed: false },
+    { name: "totalOut", type: "uint256", indexed: false },
+  ],
+} as const;
+
+/** The one investment getter PersonalVault kept; the rest went to `extsload`. */
+const investmentPolicyNonceAbi = [
+  {
+    type: "function",
+    name: "investmentPolicyNonce",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint64" }],
+  },
+] as const;
+
+const erc20Abi = [
+  {
+    type: "function",
+    name: "balanceOf",
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  { type: "function", name: "decimals", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint8" }] },
+] as const;
+
+interface BasketLeg {
+  readonly targetAsset: Address;
+  /** Share of every purchase; the legs sum to 10 000. */
+  readonly weightBps: number;
+}
+
+/** What the vault holds of one leg. Absent from `positions` means the read failed. */
+interface Position {
+  readonly balance: bigint;
+  readonly decimals: number;
+}
+
+interface InvestmentPolicy {
+  readonly legs: readonly BasketLeg[];
+  readonly enabled: boolean;
+  readonly paused: boolean;
+  /** PersonalVault.invest refuses less than this — "the pile invests once it reaches this". */
+  readonly minInvestmentWei: bigint;
+  /** WETH spent by `invest` under THIS policy nonce, which is the basket above. */
+  readonly investedWei: bigint;
+  /** Purchases made under an earlier basket, whose assets these legs do not describe. */
+  readonly earlierInvestments: number;
+}
+
+type Basket =
+  | { readonly kind: "none" }
+  | { readonly kind: "unreadable"; readonly reason: string }
+  | { readonly kind: "policy"; readonly policy: InvestmentPolicy };
+
+interface Investment {
+  readonly basket: Basket;
+  /** Lowercase target-asset address -> the vault's balance of it. */
+  readonly positions: ReadonlyMap<string, Position>;
+  readonly problems: readonly string[];
+}
+
+const NO_INVESTMENT: Investment = { basket: { kind: "none" }, positions: new Map(), problems: [] };
+
+/**
+ * Whether the pension has anything to show for its basket: WETH spent under
+ * this policy, or a balance of one of its assets left over from an earlier one.
+ * The table and the notice must agree on this, so they ask the same question.
+ */
+function holdsBasket(investment: Investment): boolean {
+  if (investment.basket.kind !== "policy") return false;
+  if (investment.basket.policy.investedWei > 0n) return true;
+  return investment.basket.policy.legs.some(
+    (leg) => (investment.positions.get(leg.targetAsset.toLowerCase())?.balance ?? 0n) > 0n,
+  );
+}
+
+/**
+ * THE BASKET IS NOT IN STORAGE, SO IT IS REBUILT FROM LOGS.
+ *
+ * PersonalVault keeps only `keccak256(abi.encode(legs))` — deliberately, it is
+ * the compare-and-swap that stops a keeper substituting an asset — and emits
+ * the legs themselves in `InvestmentPolicyUpdated.encodedLegs`, which the
+ * contract calls the canonical copy. So the read is the same shape as
+ * `listTradingAccounts`: one `eth_getLogs` since NUVEM_LOGS_FROM_BLOCK, an OR
+ * of the three investment topics, newest wins.
+ *
+ * A LOG WINDOW THAT DOES NOT REACH THE CURRENT POLICY IS REFUSED, NOT USED.
+ * Public RPCs cap `eth_getLogs` ranges, and a capped range hands back an OLD
+ * basket that decodes perfectly — assets the vault stopped buying, rendered as
+ * what it holds. The vault's surviving `investmentPolicyNonce()` getter is the
+ * check: if it disagrees with the newest policy log, nothing is derived.
+ */
+async function readInvestment(client: PublicClient, config: ServerConfig, vault: Address): Promise<Investment> {
+  const problems: string[] = [];
+  const chainError = (error: unknown): string => errorSummary(error, configuredRpcUrl(), 1);
+  const unreadable = (reason: string): Investment => ({
+    basket: { kind: "unreadable", reason },
+    positions: new Map(),
+    problems,
+  });
+
+  let policies: { nonce: bigint; basketHash: Hex; enabled: boolean; minInvestmentWei: bigint; encodedLegs: Hex }[];
+  let executions: { nonce: bigint; amountIn: bigint }[];
+  // `enabled` is pinned by the nonce check below; `paused` cannot be — the vault
+  // kept no getter for it, so a pause set before NUVEM_LOGS_FROM_BLOCK and never
+  // touched since would read as unpaused here. It only adds a sentence to the
+  // notice; no number on the page depends on it.
+  let paused = false;
+  try {
+    const logs = await client.getLogs({
+      address: vault,
+      events: [investmentPolicyUpdatedEvent, investmentPauseUpdatedEvent, investmentExecutedEvent],
+      fromBlock: config.logsFromBlock,
+      toBlock: "latest",
+      strict: true,
+    });
+    // Chain order, explicitly: "newest" decides the live basket and the live
+    // pause, and an endpoint is not obliged to return logs in any order.
+    const ordered = [...logs].sort((left, right) => {
+      const blocks = (left.blockNumber ?? 0n) - (right.blockNumber ?? 0n);
+      if (blocks !== 0n) return blocks > 0n ? 1 : -1;
+      return (left.logIndex ?? 0) - (right.logIndex ?? 0);
+    });
+    policies = [];
+    executions = [];
+    for (const log of ordered) {
+      if (log.eventName === "InvestmentPolicyUpdated") {
+        policies.push({
+          nonce: log.args.policyNonce,
+          basketHash: log.args.basketHash,
+          enabled: log.args.enabled,
+          minInvestmentWei: log.args.minInvestmentWei,
+          encodedLegs: log.args.encodedLegs,
+        });
+      } else if (log.eventName === "InvestmentPauseUpdated") {
+        paused = log.args.paused;
+      } else {
+        executions.push({ nonce: log.args.policyNonce, amountIn: log.args.amountIn });
+      }
+    }
+  } catch (error) {
+    return unreadable(chainError(error));
+  }
+
+  const latest = policies.at(-1);
+  // No policy has ever been set on this vault. That is not a failure: it is a
+  // pension whose owner has not chosen what to buy yet.
+  if (latest === undefined) return NO_INVESTMENT;
+
+  let onchainNonce: bigint;
+  try {
+    onchainNonce = await client.readContract({
+      address: vault,
+      abi: investmentPolicyNonceAbi,
+      functionName: "investmentPolicyNonce",
+    });
+  } catch (error) {
+    return unreadable(chainError(error));
+  }
+  if (onchainNonce !== latest.nonce) {
+    return unreadable(
+      `the vault is on investment policy ${onchainNonce} but the newest policy in the log window is ${latest.nonce}, ` +
+        "so the basket read here would be a basket the vault has replaced",
+    );
+  }
+
+  let legs: readonly BasketLeg[];
+  try {
+    if (keccak256(latest.encodedLegs) !== latest.basketHash) {
+      throw new Error("the emitted basket does not hash to the hash emitted with it");
+    }
+    const [decoded] = decodeAbiParameters(basketLegParams, latest.encodedLegs);
+    // ABI decoding is forgiving in the direction that hurts: a struct that has
+    // gained a field decodes into plausible addresses and plausible weights.
+    // Re-encoding is not forgiving, so it is the check.
+    if (encodeAbiParameters(basketLegParams, [decoded]) !== latest.encodedLegs) {
+      throw new Error("it does not re-encode to the bytes the vault hashed, so this build's BasketLeg is not the deployment's");
+    }
+    legs = decoded.map((leg) => ({ targetAsset: getAddress(leg.targetAsset), weightBps: leg.weightBps }));
+  } catch (error) {
+    return unreadable(error instanceof Error ? error.message : String(error));
+  }
+
+  // No Multicall3 is verified on chain 4663 (src/lib/vault.ts, rule 1), so this
+  // is two eth_call per leg, in parallel, and at most eight legs exist.
+  const positions = new Map<string, Position>();
+  await Promise.all(
+    legs.map(async (leg) => {
+      try {
+        const [balance, decimals] = await Promise.all([
+          client.readContract({ address: leg.targetAsset, abi: erc20Abi, functionName: "balanceOf", args: [vault] }),
+          client.readContract({ address: leg.targetAsset, abi: erc20Abi, functionName: "decimals" }),
+        ]);
+        positions.set(leg.targetAsset.toLowerCase(), { balance, decimals });
+      } catch (error) {
+        // Reported, never zeroed: a token that will not answer looks exactly
+        // like a token the vault holds none of.
+        problems.push(`the vault's balance of ${shortHex(leg.targetAsset)} could not be read (${chainError(error)})`);
+      }
+    }),
+  );
+
+  return {
+    basket: {
+      kind: "policy",
+      policy: {
+        legs,
+        enabled: latest.enabled,
+        paused,
+        minInvestmentWei: latest.minInvestmentWei,
+        investedWei: executions.reduce((sum, call) => (call.nonce === latest.nonce ? sum + call.amountIn : sum), 0n),
+        earlierInvestments: executions.filter((call) => call.nonce !== latest.nonce).length,
+      },
+    },
+    positions,
+    problems,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // The chain side: the rate, and what the wallet is worth
 // ---------------------------------------------------------------------------
 
@@ -428,6 +714,8 @@ interface ChainSide {
   /** PersonalVault refuses to pull less than this; see `thresholdUsd` below. */
   readonly minContributionWei: bigint | null;
   readonly balanceWei: bigint | null;
+  /** The basket and the vault's balances of it — the holdings table. */
+  readonly investment: Investment;
   /** Everything that could not be read, phrased for the banner. */
   readonly problems: readonly string[];
 }
@@ -470,7 +758,13 @@ async function readChainSide(
     }
   }
 
-  return { rates, minContributionWei, balanceWei, problems };
+  const investment = await readInvestment(client, config, vault);
+  if (investment.basket.kind === "unreadable") {
+    problems.push(`the investment basket could not be read (${investment.basket.reason})`);
+  }
+  problems.push(...investment.problems);
+
+  return { rates, minContributionWei, balanceWei, investment, problems };
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +797,53 @@ function busiestWallet(ledger: Ledger): string | null {
   );
 }
 
+/**
+ * THE HOLDINGS TABLE, FROM THE VAULT'S OWN BALANCES AND ITS OWN SPENDING.
+ *
+ * `shares` is exact: the vault's ERC-20 balance of the leg, scaled by that
+ * token's decimals. Nothing else on the row can be — there is no price feed for
+ * a chain-4663 stock token, and scraping one would put a number on screen
+ * nobody could reproduce. So `costUsd` is what the vault SPENT on the leg —
+ * `InvestmentExecuted.amountIn` split by the weights `invest` itself splits by,
+ * which is exact because the weights are pinned by the policy nonce those calls
+ * carry — and `valueUsd` repeats it rather than claiming a gain or a loss. It is
+ * the same statement `stats.unrealizedUsd = 0` already makes, and `noticeFor`
+ * says it in words. When a feed exists, `valueUsd` is the one line that changes.
+ */
+function buildHoldings(investment: Investment): readonly Holding[] {
+  // AN EMPTY PENSION IS A TRUE STATEMENT. A basket chosen and never bought is a
+  // table of zeroes, which says less than no table at all; the notice says why.
+  if (investment.basket.kind !== "policy" || !holdsBasket(investment)) return [];
+  const { legs, investedWei } = investment.basket.policy;
+
+  // The last leg absorbs the rounding dust, exactly as PersonalVault.invest
+  // splits `amountIn`, so these costs sum to the wei the vault actually spent.
+  let assigned = 0n;
+  const costWei = legs.map((leg, index) => {
+    const wei = index + 1 === legs.length ? investedWei - assigned : (investedWei * BigInt(leg.weightBps)) / 10_000n;
+    assigned += wei;
+    return wei;
+  });
+  const totalUsd = round2(costWei.reduce((sum, wei) => sum + usdFromWei(wei), 0));
+
+  return legs.map((leg, index) => {
+    const position = investment.positions.get(leg.targetAsset.toLowerCase());
+    const valueUsd = usdFromWei(costWei[index] ?? 0n);
+    return {
+      symbol: symbolFor(leg.targetAsset),
+      // A balance that could not be read is not a balance of zero; `problems`
+      // names the token, and the row still carries the weight the vault signed.
+      shares: position === undefined ? 0 : round6(Number(position.balance) / 10 ** position.decimals),
+      costUsd: valueUsd,
+      valueUsd,
+      // Priced at cost, the actual weight cannot drift from the cost weight.
+      // The column is honest and, until there is a feed, uninformative.
+      weightBps: totalUsd > 0 ? Math.round((valueUsd / totalUsd) * 10_000) : 0,
+      targetWeightBps: leg.weightBps,
+    } satisfies Holding;
+  });
+}
+
 function buildDashboard(ledger: Ledger, chain: ChainSide, vault: Address, nowIso: string): DashboardMock {
   const rateOf = (wallet: string): number => {
     const onchain = chain.rates.get(wallet);
@@ -511,19 +852,29 @@ function buildDashboard(ledger: Ledger, chain: ChainSide, vault: Address, nowIso
   };
 
   const primary = busiestWallet(ledger);
+  const policy = chain.investment.basket.kind === "policy" ? chain.investment.basket.policy : null;
 
   const rule: SavingsRule = {
     rateBps: primary === null ? 0 : rateOf(primary),
     /**
-     * There is no investment threshold on chain 4663 yet — Phase 0 pulls into
-     * the vault and stops there. What DOES gate the pile is the account's
-     * `minContributionWei`: below it the executor will not pull at all. That is
-     * the honest live reading of "the pile moves once it reaches this".
+     * `minInvestmentWei` IS "the pile invests once it reaches this" — the vault
+     * reverts InvestmentBelowThreshold under it. With no basket configured there
+     * is no such floor, and the honest stand-in is the account's
+     * `minContributionWei`: below THAT the executor will not even pull.
      */
-    thresholdUsd: chain.minContributionWei === null ? 0 : usdFromWei(chain.minContributionWei),
-    // The basket lives in a contract this build does not have; an empty list is
-    // "we do not know what it invests in", which is the truth.
-    targets: [],
+    thresholdUsd:
+      policy !== null
+        ? usdFromWei(policy.minInvestmentWei)
+        : chain.minContributionWei === null
+          ? 0
+          : usdFromWei(chain.minContributionWei),
+    // The basket the vault hashed, leg for leg — the same weights `invest`
+    // splits a purchase by. An empty list still means "we do not know".
+    targets: policy === null ? [] : policy.legs.map((leg) => ({ symbol: symbolFor(leg.targetAsset), weightBps: leg.weightBps }) satisfies SavingsTarget),
+    // NOT `policy.paused`. This switch is labelled "Pause the rule" and the rule
+    // is the saving; `setInvestmentPause` stops the buying and leaves the saving
+    // running. Conflating them would report a pension that stopped collecting.
+    // The investment pause is said in words instead — see `noticeFor`.
     paused: false,
   };
 
@@ -638,18 +989,19 @@ function buildDashboard(ledger: Ledger, chain: ChainSide, vault: Address, nowIso
   const pendingWei = owedWei > collectedWei ? owedWei - collectedWei : 0n;
 
   /**
-   * WHAT "HOLDINGS" MEANS BEFORE THERE IS AN INVESTMENT PATH. The pension holds
-   * exactly what has been pulled into the vault: ETH, uninvested. So
-   * `holdingsUsd` is the collected total and `costUsd` is the same number —
-   * ETH valued at the rate it was counted at cannot have moved against itself,
-   * so `unrealizedUsd` is zero and says so rather than inventing a gain. The
-   * holdings TABLE stays empty (there is no position read on this build of
-   * PersonalVault) and the notice explains that; the identities the panels rely
-   * on — pension = holdings + pending, unrealized = holdings − cost — hold.
+   * WHAT "HOLDINGS" MEANS WITH NO PRICE FEED. Everything the pension owns was
+   * paid for out of what was pulled in, whether it now sits in the vault as
+   * WETH or as the basket tokens bought with it — so `holdingsUsd` is the
+   * collected total either way, and `costUsd` is the same number. ETH valued at
+   * the rate it was counted at cannot have moved against itself, and the basket
+   * tokens cannot be marked to market at all, so `unrealizedUsd` is zero and
+   * says so rather than inventing a gain. The identities the panels rely on —
+   * pension = holdings + pending, unrealized = holdings − cost — hold, and the
+   * TABLE below is the same money broken out by asset (see `buildHoldings`).
    */
   const holdingsUsd = usdFromWei(collectedWei);
   const pendingUsd = usdFromWei(pendingWei);
-  const holdings: readonly Holding[] = [];
+  const holdings = buildHoldings(chain.investment);
 
   const best = ledger.biggest.reduce<{ id: string; savedUsd: number } | null>((top, fill) => {
     const saved = usdFromWei(savedWei(fill.notionalWei, rateOf(fill.wallet)));
@@ -725,8 +1077,61 @@ function noticeFor(ledger: Ledger, chain: ChainSide): string {
   const parts = [
     // No toLocale* anywhere in a render path, not even on the server: see WEB_WALLETS.md §0.3.
     `Amounts are converted at a placeholder rate of $${ETH_USD} per ETH — this deployment has no price feed yet.`,
-    "Nothing is invested yet — what is collected sits in the vault as ETH — so the holdings table is empty and the threshold shown is the smallest amount the vault will pull.",
   ];
+
+  // WHY THE HOLDINGS TABLE LOOKS THE WAY IT DOES, IN EVERY CASE IT CAN.
+  const basket = chain.investment.basket;
+  if (basket.kind !== "policy") {
+    parts.push(
+      basket.kind === "none"
+        ? "This pension has chosen no basket yet, so nothing is bought: what is collected sits in the vault as WETH, the holdings table is empty, and the threshold shown is the smallest amount the vault will pull."
+        : "The basket could not be read, so the holdings table is empty rather than wrong, and the threshold shown is the smallest amount the vault will pull.",
+    );
+  } else {
+    const legs = basket.policy.legs.length;
+    if (!holdsBasket(chain.investment)) {
+      parts.push(
+        `This pension has a basket of ${legs} ${legs === 1 ? "asset" : "assets"} but has not invested yet, so the holdings table is empty and what is collected sits in the vault as WETH.`,
+      );
+    } else {
+      parts.push(
+        "The shares in the holdings table are the vault's own token balances. There is no price feed for those tokens, so each row is shown at what it cost in ETH — what it is worth today is not known, and no gain or loss is implied.",
+      );
+      // A leg whose balanceOf did not answer still gets its row — it is in the
+      // basket the vault signed — but the shares cell has nothing true to put in
+      // it, and a zero sitting in a column of real balances reads as a fact.
+      const unread = basket.policy.legs.filter(
+        (leg) => !chain.investment.positions.has(leg.targetAsset.toLowerCase()),
+      ).length;
+      if (unread > 0) {
+        parts.push(
+          `${unread === 1 ? "One asset in the basket did" : `${unread} assets in the basket did`} not answer, so ` +
+            `${unread === 1 ? "its row shows" : "their rows show"} no shares — a reading that failed, not a position of nothing. ` +
+            "The failures are named below.",
+        );
+      }
+      // The table is what the vault BOUGHT; the Holdings total is everything it
+      // collected. The difference is real money waiting for the threshold, and
+      // unsaid it looks like rows that do not add up.
+      const collectedWei = ledger.wallets.reduce((sum, row) => sum + row.collectedTotalWei, 0n);
+      if (basket.policy.investedWei < collectedWei) {
+        parts.push(
+          "What has been collected but not yet spent is still WETH in the vault: it counts toward the Holdings total and has no row of its own.",
+        );
+      }
+      if (basket.policy.earlierInvestments > 0) {
+        parts.push(
+          `${basket.policy.earlierInvestments} earlier ${basket.policy.earlierInvestments === 1 ? "purchase was" : "purchases were"} made under a basket that has since been replaced, and ${basket.policy.earlierInvestments === 1 ? "it is" : "they are"} not attributed to these rows.`,
+        );
+      }
+    }
+    if (basket.policy.paused) {
+      parts.push("Investing is paused by the vault admin; saving continues.");
+    } else if (!basket.policy.enabled) {
+      parts.push("The basket is configured but investing is switched off; saving continues.");
+    }
+  }
+
   if (ledger.wallets.length === 0) {
     parts.push("No trading wallet of this pension has been observed yet.");
   } else if (ledger.days.length === 0) {

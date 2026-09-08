@@ -17,7 +17,7 @@
  */
 
 import type { ConnectedWallet } from "@privy-io/react-auth";
-import { ExternalLink, LoaderCircle, Unlink } from "lucide-react";
+import { ExternalLink, Link2, LoaderCircle, Unlink } from "lucide-react";
 import { useState } from "react";
 import type { Address } from "viem";
 
@@ -30,7 +30,7 @@ import { ExportWalletButton } from "@/components/wallets/ExportWalletButton";
 import { LinkWalletDialog } from "@/components/wallets/LinkWalletDialog";
 import { NEEDS_GAS, RateControl, walletCanPayItsOwnGas } from "@/components/wallets/RateControl";
 import { SeatStatus } from "@/components/wallets/SeatStatus";
-import type { LinkProbe, WalletRow } from "@/components/wallets/TradingWalletsList";
+import type { LinkProbe, LinkTarget, WalletRow } from "@/components/wallets/TradingWalletsList";
 import { personalVaultAbi } from "@/lib/abi";
 import { ROBINHOOD_CHAIN_ID, explorerAddressUrl, robinhoodChain } from "@/lib/chain";
 import { LABEL } from "@/lib/classes";
@@ -96,6 +96,7 @@ export function TradingWalletRow({
   adminWallet,
   vault,
   onChanged,
+  onLink,
 }: {
   row: WalletRow;
   probe: LinkProbe;
@@ -104,6 +105,18 @@ export function TradingWalletRow({
   adminWallet: ConnectedWallet | null;
   vault: Address;
   onChanged: () => void;
+  /**
+   * Ask the container to switch to a link VIEW instead of opening a dialog
+   * here: inside the wallets modal a second Dialog is an overlay on an overlay
+   * — two focus traps, and an Escape that closes the wrong one.
+   *
+   * Absent by default, and the shell in this repo leaves it absent on purpose:
+   * LinkWalletDialog answers `useWalletsView()` itself and swaps its own body
+   * in place, so it has to stay MOUNTED for the modal's link view to exist. A
+   * container that renders the link view itself passes this; one that relies on
+   * that context must not.
+   */
+  onLink?: (target: LinkTarget) => void;
 }) {
   const { address, origin, wallet, held, account } = row;
   const link = linkage(row, probe);
@@ -123,7 +136,9 @@ export function TradingWalletRow({
    * still possible. Linking succeeds, `onChanged` refetches, the account turns
    * ACTIVE and `canLink` goes false — which used to unmount the dialog on the
    * very frame it had something to say, so "linked and active" was a state no
-   * user ever saw.
+   * user ever saw. The modal answers the same problem differently: its link
+   * VIEW outlives this row, and success returns to the list with the row
+   * already repainted Active.
    */
   const [linking, setLinking] = useState(false);
 
@@ -231,17 +246,24 @@ export function TradingWalletRow({
 
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {(canLink || linking) && wallet !== null ? (
-            <LinkWalletDialog
-              config={config}
-              admin={admin}
-              adminWallet={adminWallet}
-              vault={vault}
-              wallet={wallet}
-              account={account}
-              onLinked={onChanged}
-              onOpenChange={setLinking}
-              disabled={busy !== null}
-            />
+            onLink !== undefined ? (
+              <Button type="button" size="sm" disabled={busy !== null} onClick={() => onLink({ ...row, wallet })}>
+                <Link2 aria-hidden />
+                {status === "PENDING" ? "Finish linking" : "Link"}
+              </Button>
+            ) : (
+              <LinkWalletDialog
+                config={config}
+                admin={admin}
+                adminWallet={adminWallet}
+                vault={vault}
+                wallet={wallet}
+                account={account}
+                onLinked={onChanged}
+                onOpenChange={setLinking}
+                disabled={busy !== null}
+              />
+            )
           ) : null}
           {held ? <ExportWalletButton address={address} disabled={busy !== null} /> : null}
           {canRevoke && !confirming ? (

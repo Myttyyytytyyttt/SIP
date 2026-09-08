@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import { PanelLeft, X } from "lucide-react";
 import Link from "next/link";
 
@@ -15,6 +17,7 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet";
 import { WalletActivity } from "@/components/wallet-activity";
+import { useWalletsOpener } from "@/components/wallets-host";
 import { WalletMenu } from "@/components/wallet-menu";
 import { cn } from "@/lib/utils";
 import type { ActivityEvent, Wallet } from "@/mocks";
@@ -33,10 +36,17 @@ const NAV: readonly NavItem[] = [
  * is gone, so the leading button opens the same WalletActivity in a sheet.
  */
 export function SiteHeader({ wallet, activity, now }: { wallet: Wallet; activity: readonly ActivityEvent[]; now: string }) {
+  // THE SHEET IS CONTROLLED SO IT CAN GET OUT OF THE WAY. Below lg this sheet is
+  // where "Manage wallets" lives, and a modal opened from inside a sheet is the
+  // nested-overlay problem again — two focus traps, and Escape closing the wrong
+  // one. So the sheet closes itself first and the host opens the one modal.
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const openWallets = useWalletsOpener();
+
   return (
     <header className="sticky top-0 z-40 h-14 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="flex h-14 items-center gap-3 px-4 lg:px-6">
-        <Sheet>
+        <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
           <SheetTrigger asChild>
             <Button variant="ghost" size="icon" className="lg:hidden" aria-label="Open activity">
               <PanelLeft aria-hidden />
@@ -54,7 +64,21 @@ export function SiteHeader({ wallet, activity, now }: { wallet: Wallet; activity
               </SheetClose>
             </SheetHeader>
             <SheetDescription className="sr-only">What the wallet did, newest first.</SheetDescription>
-            <WalletActivity wallet={wallet} activity={activity} now={now} id="activity-sheet" className="min-h-0 flex-1" />
+            <WalletActivity
+              wallet={wallet}
+              activity={activity}
+              now={now}
+              id="activity-sheet"
+              className="min-h-0 flex-1"
+              {...(openWallets === null
+                ? {}
+                : {
+                    onManageWallets: () => {
+                      setSheetOpen(false);
+                      openWallets();
+                    },
+                  })}
+            />
           </SheetContent>
         </Sheet>
 

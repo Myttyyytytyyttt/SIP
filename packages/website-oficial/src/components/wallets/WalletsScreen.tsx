@@ -1,9 +1,22 @@
 "use client";
 
 /**
- * The wallets page, past the server's configuration check: the pension-key
+ * The wallets surface, past the server's configuration check: the pension-key
  * gate, then the vault this key owns, its trading wallets, and what each has
  * put aside.
+ *
+ * TWO CONTAINERS, ONE COMPONENT. The /wallets route renders it as a page; the
+ * dashboard's <WalletsModal> renders it inside a Dialog. Nothing forks: the
+ * route passes `{ config }` and gets exactly what it always got, and the modal
+ * passes `view` + `variant="modal"` to drive the flows and to drop the chrome
+ * the dialog already provides. Only the edges move.
+ *
+ * WHERE THE FLOWS LIVE. On the page, Import and Link are Dialogs of their own.
+ * In the modal they cannot be — two overlays, two focus traps, one Escape key.
+ * So the shell owns a view and publishes it on a context; the flow components
+ * read it with `useWalletsView()` and swap themselves in place of the list.
+ * The context is absent (null) on the route, which is the signal to keep the
+ * Dialogs. Prop drilling would have crossed three owners' files to reach them.
  *
  * HYDRATION. Nothing here renders before `ready` from usePrivy(): the server
  * paints the skeleton and so does the first client frame, so no Privy or
@@ -19,7 +32,7 @@
 
 import { usePrivy, useWallets, type ConnectedWallet, type User } from "@privy-io/react-auth";
 import { ExternalLink, LogOut, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { getAddress, type Address } from "viem";
 
 import { CopyButton } from "@/components/copy-button";
@@ -36,12 +49,55 @@ import { LABEL } from "@/lib/classes";
 import type { PublicConfig } from "@/lib/config";
 import { shortHex } from "@/lib/format";
 import { parseTagged } from "@/lib/serialize";
+import { cn } from "@/lib/utils";
 import { describeError } from "@/lib/wallets/judge";
 
 /** The wire shapes of GET /api/vault, under the names the rows use. */
 export type LinkStatus = VaultAccountStatus;
 export type VaultAccount = VaultAccountView;
 export type VaultResponse = VaultByAdminResponse;
+
+// ── the shell contract: what a modal container drives, what the flows read ──
+
+/** Which container this is in. `"modal"` drops the page-level chrome the dialog already draws. */
+export type WalletsVariant = "page" | "modal";
+
+/**
+ * The one view on screen inside the modal. `link` names the wallet by address:
+ * the row that owns that address already holds its ConnectedWallet and its
+ * vault account, so nothing has to be carried through the shell.
+ */
+export type WalletsView =
+  | { readonly kind: "list" }
+  | { readonly kind: "import" }
+  | { readonly kind: "link"; readonly address: Address };
+
+/** How a flow asks the shell to change view. The shell owns the state; the flows only ask. */
+export interface WalletsViewApi {
+  readonly view: WalletsView;
+  /** Take over the modal body — `show({ kind: "import" })`, `show({ kind: "link", address })`. */
+  readonly show: (next: WalletsView) => void;
+  /** Back to the list. The shell's header renders this too; a flow calls it when it finishes or cancels. */
+  readonly back: () => void;
+  /**
+   * Hold the shell open. A flow raises this while a signature or an import is
+   * in flight — it is the same lock the flows' own Dialogs use on /wallets
+   * (`showCloseButton={busy === null}`), moved to the one shell that now owns
+   * the chrome. Always lower it again, in a finally.
+   */
+  readonly setBusy: (busy: boolean) => void;
+}
+
+const WalletsViewContext = createContext<WalletsViewApi | null>(null);
+
+/**
+ * The modal's view API, or null when there is no modal — on /wallets each flow
+ * keeps its own Dialog. `null` is the whole test: `const view = useWalletsView()`,
+ * then `view === null ? <Dialog…> : <the same body, inline>`.
+ */
+export function useWalletsView(): WalletsViewApi | null {
+  return useContext(WalletsViewContext);
+}
 
 /** A failed read is UNKNOWN — never "no vault", never an empty list. */
 type VaultRead =
@@ -63,42 +119,46 @@ export function pensionKeyOf(user: User): Address | null {
   return null;
 }
 
-export function WalletsScreen({ config }: { config: PublicConfig }) {
+export function WalletsScreen({
+  config,
+  view = null,
+  variant,
+}: {
+  config: PublicConfig;
+  /** A modal container's view state. Absent on the route, where every flow keeps its own Dialog. */
+  view?: WalletsViewApi | null;
+  /** Defaults to "modal" when `view` is given — the two always travel together, but say it anyway. */
+  variant?: WalletsVariant;
+}) {
   const { ready, authenticated, user, login, logout, linkWallet } = usePrivy();
+  const surface: WalletsVariant = variant ?? (view === null ? "page" : "modal");
 
-  if (!ready) return <ScreenSkeleton />;
+  const body = (() => {
+    if (!ready) return <ScreenSkeleton />;
 
-  if (!authenticated || user === null) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Connect your pension key</CardTitle>
-          <CardDescription>
-            The wallet you connect owns the pension. Only it can withdraw — the team has no access to your funds. Your
-            trading wallets are separate, and never hold the savings.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
+    if (!authenticated || user === null) {
+      return (
+        <Panel
+          variant={surface}
+          title="Connect your pension key"
+          description="The wallet you connect owns the pension. Only it can withdraw — the team has no access to your funds. Your trading wallets are separate, and never hold the savings."
+        >
           <Button type="button" onClick={() => login()}>
             Connect pension key
           </Button>
-        </CardContent>
-      </Card>
-    );
-  }
+        </Panel>
+      );
+    }
 
-  const admin = pensionKeyOf(user);
-  if (admin === null) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>No pension key on this session</CardTitle>
-          <CardDescription>
-            You are signed in without an external wallet. The pension key must be a wallet you hold yourself — connect
-            one to continue.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-wrap gap-2">
+    const admin = pensionKeyOf(user);
+    if (admin === null) {
+      return (
+        <Panel
+          variant={surface}
+          title="No pension key on this session"
+          description="You are signed in without an external wallet. The pension key must be a wallet you hold yourself — connect one to continue."
+          bodyClassName="flex flex-wrap gap-2"
+        >
           <Button type="button" onClick={() => linkWallet()}>
             Connect a wallet
           </Button>
@@ -106,15 +166,30 @@ export function WalletsScreen({ config }: { config: PublicConfig }) {
             <LogOut aria-hidden />
             Disconnect
           </Button>
-        </CardContent>
-      </Card>
-    );
-  }
+        </Panel>
+      );
+    }
 
-  return <VaultView admin={admin} config={config} onDisconnect={() => void logout()} />;
+    return <VaultView admin={admin} config={config} variant={surface} view={view} onDisconnect={() => void logout()} />;
+  })();
+
+  // Published even when null, so a flow nested any depth down can ask.
+  return <WalletsViewContext.Provider value={view}>{body}</WalletsViewContext.Provider>;
 }
 
-function VaultView({ admin, config, onDisconnect }: { admin: Address; config: PublicConfig; onDisconnect: () => void }) {
+function VaultView({
+  admin,
+  config,
+  variant,
+  view,
+  onDisconnect,
+}: {
+  admin: Address;
+  config: PublicConfig;
+  variant: WalletsVariant;
+  view: WalletsViewApi | null;
+  onDisconnect: () => void;
+}) {
   const { connectWallet } = usePrivy();
   const { wallets } = useWallets();
   // The pension key as Privy connects it — what signs. Null when the browser
@@ -125,6 +200,11 @@ function VaultView({ admin, config, onDisconnect }: { admin: Address; config: Pu
       null,
     [wallets, admin],
   );
+
+  // A flow has taken over the body: everything that is not the flow steps out
+  // of the way, so the modal reads as one task and not as a page with a form
+  // buried in it. On the page there is no flow and nothing ever hides.
+  const inFlow = view !== null && view.view.kind !== "list";
 
   const [read, setRead] = useState<VaultRead>({ status: "loading" });
   const [tick, setTick] = useState(0);
@@ -162,41 +242,40 @@ function VaultView({ admin, config, onDisconnect }: { admin: Address; config: Pu
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2">
-        <span className={LABEL}>Pension key</span>
-        <Num className="text-sm">{shortHex(admin)}</Num>
-        <CopyButton value={admin} />
-        {adminWallet === null ? (
-          <Button type="button" variant="outline" size="xs" onClick={() => connectWallet()}>
-            Reconnect to sign
+      {inFlow ? null : (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2">
+          <span className={LABEL}>Pension key</span>
+          <Num className="text-sm">{shortHex(admin)}</Num>
+          <CopyButton value={admin} />
+          {adminWallet === null ? (
+            <Button type="button" variant="outline" size="xs" onClick={() => connectWallet()}>
+              Reconnect to sign
+            </Button>
+          ) : null}
+          <Button type="button" variant="ghost" size="sm" className="ml-auto" onClick={onDisconnect}>
+            <LogOut aria-hidden />
+            Disconnect
           </Button>
-        ) : null}
-        <Button type="button" variant="ghost" size="sm" className="ml-auto" onClick={onDisconnect}>
-          <LogOut aria-hidden />
-          Disconnect
-        </Button>
-      </div>
+        </div>
+      )}
 
       {read.status === "loading" ? (
         <VaultSkeleton />
       ) : read.status === "unknown" ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Pension unknown</CardTitle>
-            <CardDescription>
-              The chain could not be read, so nothing here is known — not even whether a pension exists.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <p role="alert" className="text-sm text-destructive">
-              {read.error}
-            </p>
-            <Button type="button" variant="outline" size="sm" onClick={reload}>
-              <RefreshCw aria-hidden />
-              Try again
-            </Button>
-          </CardContent>
-        </Card>
+        <Panel
+          variant={variant}
+          title="Pension unknown"
+          description="The chain could not be read, so nothing here is known — not even whether a pension exists."
+          bodyClassName="space-y-3"
+        >
+          <p role="alert" className="text-sm text-destructive">
+            {read.error}
+          </p>
+          <Button type="button" variant="outline" size="sm" onClick={reload}>
+            <RefreshCw aria-hidden />
+            Try again
+          </Button>
+        </Panel>
       ) : read.value.vault === null ? (
         <CreateVaultCard admin={admin} config={config} wallet={adminWallet} onCreated={reload} />
       ) : (
@@ -206,6 +285,7 @@ function VaultView({ admin, config, onDisconnect }: { admin: Address; config: Pu
           config={config}
           vault={read.value.vault}
           data={read.value}
+          inFlow={inFlow}
           onChanged={reload}
         />
       )}
@@ -219,6 +299,7 @@ function VaultDetails({
   config,
   vault,
   data,
+  inFlow,
   onChanged,
 }: {
   admin: Address;
@@ -226,6 +307,8 @@ function VaultDetails({
   config: PublicConfig;
   vault: Address;
   data: VaultResponse;
+  /** True while an import or link view owns the modal body: everything around it stands down. */
+  inFlow: boolean;
   onChanged: () => void;
 }) {
   const address = getAddress(vault);
@@ -234,41 +317,44 @@ function VaultDetails({
 
   return (
     <>
-      <Card>
-        <CardHeader>
-          <CardTitle>Your pension</CardTitle>
-          <CardDescription>
-            Everything put aside lands here. Only the pension key can withdraw; the trading wallets below can only add.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="space-y-1">
-            <div className={LABEL}>Address</div>
-            <div className="flex flex-wrap items-center gap-1">
-              <Num className="break-all text-sm">{address}</Num>
-              <CopyButton value={address} />
+      {inFlow ? null : (
+        <Card>
+          <CardHeader>
+            <CardTitle>Your pension</CardTitle>
+            <CardDescription>
+              Everything put aside lands here. Only the pension key can withdraw; the trading wallets below can only add.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="space-y-1">
+              <div className={LABEL}>Address</div>
+              <div className="flex flex-wrap items-center gap-1">
+                <Num className="break-all text-sm">{address}</Num>
+                <CopyButton value={address} />
+              </div>
             </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-            <span>
-              <span className={LABEL}>Cohort</span> <Num>{String(data.cohortId)}</Num>
-            </span>
-            <span>
-              <span className={LABEL}>Linked</span> <Num>{linked}</Num>
-              {data.accountsError !== null ? <span className="text-muted-foreground"> or more</span> : null}
-            </span>
-            {explorer !== null ? (
-              <Button variant="outline" size="sm" asChild className="ml-auto">
-                <a href={explorer} target="_blank" rel="noreferrer">
-                  <ExternalLink aria-hidden />
-                  View on explorer
-                </a>
-              </Button>
-            ) : null}
-          </div>
-        </CardContent>
-      </Card>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+              <span>
+                <span className={LABEL}>Cohort</span> <Num>{String(data.cohortId)}</Num>
+              </span>
+              <span>
+                <span className={LABEL}>Linked</span> <Num>{linked}</Num>
+                {data.accountsError !== null ? <span className="text-muted-foreground"> or more</span> : null}
+              </span>
+              {explorer !== null ? (
+                <Button variant="outline" size="sm" asChild className="ml-auto">
+                  <a href={explorer} target="_blank" rel="noreferrer">
+                    <ExternalLink aria-hidden />
+                    View on explorer
+                  </a>
+                </Button>
+              ) : null}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
+      {/* Always mounted: it holds the flows, and it is what swaps itself for one. */}
       <TradingWalletsList
         config={config}
         admin={admin}
@@ -279,8 +365,53 @@ function VaultDetails({
         onChanged={onChanged}
       />
 
-      <SkimStatus vault={address} wallets={data.accounts.map((account) => getAddress(account.address))} />
+      {inFlow ? null : (
+        <SkimStatus vault={address} wallets={data.accounts.map((account) => getAddress(account.address))} />
+      )}
     </>
+  );
+}
+
+/**
+ * A whole-surface state — connect, no key, unknown.
+ *
+ * On the page it is a Card. In the modal the dialog IS the card, so the frame
+ * goes and the same words come back as a section heading — a framed box inside
+ * a framed box reads as a mistake, but the state still has to name itself.
+ */
+function Panel({
+  variant,
+  title,
+  description,
+  bodyClassName,
+  children,
+}: {
+  variant: WalletsVariant;
+  title: string;
+  description: string;
+  bodyClassName?: string;
+  children: ReactNode;
+}) {
+  if (variant === "modal") {
+    return (
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-sm font-medium">{title}</h2>
+          <p className="text-sm text-muted-foreground">{description}</p>
+        </div>
+        <div className={cn(bodyClassName)}>{children}</div>
+      </section>
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+      <CardContent className={cn(bodyClassName)}>{children}</CardContent>
+    </Card>
   );
 }
 

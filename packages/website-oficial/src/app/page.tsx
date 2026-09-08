@@ -25,12 +25,13 @@
 import { getAddress, isAddress } from "viem";
 
 import { DashboardSource } from "@/components/DashboardSource";
+import { DashboardWallets } from "@/components/dashboard-wallets";
+import { WalletsHost } from "@/components/wallets-host";
 import { PensionPanel } from "@/components/pension-panel";
 import { SavingsRulePanel } from "@/components/savings-rule-panel";
 import { SavingsStrip } from "@/components/savings-strip";
 import { SiteHeader } from "@/components/site-header";
-import { WalletActivity } from "@/components/wallet-activity";
-import { loadConfig } from "@/lib/config";
+import { loadConfig, toPublicConfig } from "@/lib/config";
 import { loadDashboard, type DashboardLoad } from "@/lib/dashboard";
 import { mock } from "@/mocks";
 
@@ -57,16 +58,30 @@ export default async function Page({
         notice: "This deployment is not configured to read the chain, so this is example data.",
       };
 
+  // "Manage wallets" opens a modal over this page rather than leaving for
+  // /wallets — but that modal mounts Privy, which needs the WHOLE
+  // configuration the dashboard itself can do without. When it is incomplete
+  // the link to /wallets stays, and the route renders the setup checklist that
+  // names what is missing.
+  const forWallets = loadConfig();
+  const walletsConfig = forWallets.ok ? toPublicConfig(forWallets.config) : null;
+
   const { now, wallet, rule, stats, curve, days, holdings, trades, activity } = data;
 
   return (
-    <div className="flex min-h-dvh flex-col">
+    <WalletsHost config={walletsConfig}>
+      <div className="flex min-h-dvh flex-col">
       <SiteHeader wallet={wallet} activity={activity} now={now} />
 
       <div className="flex flex-1">
         {/* The sidebar is a column from lg up; below that the header opens the same component in a sheet. */}
         <aside className="hidden w-80 shrink-0 border-r lg:block xl:w-88">
-          <WalletActivity wallet={wallet} activity={activity} now={now} className="sticky top-14 h-[calc(100dvh-3.5rem)]" />
+          <DashboardWallets
+            wallet={wallet}
+            activity={activity}
+            now={now}
+            className="sticky top-14 h-[calc(100dvh-3.5rem)]"
+          />
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col gap-4 p-4 lg:gap-6 lg:p-6">
@@ -81,6 +96,7 @@ export default async function Page({
           </div>
         </main>
       </div>
-    </div>
+      </div>
+    </WalletsHost>
   );
 }

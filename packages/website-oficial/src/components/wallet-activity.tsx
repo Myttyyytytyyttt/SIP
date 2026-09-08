@@ -17,6 +17,9 @@ import type { ActivityEvent, Wallet } from "@/mocks";
  */
 const FEED = "min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!";
 
+/** The one look "Manage wallets" has, whether it navigates or opens the modal. */
+const MANAGE = "h-auto p-0 text-xs text-muted-foreground underline hover:text-foreground";
+
 /** Newest first in, newest first out — one bucket per UTC day, in arrival order. */
 function groupByDay(activity: readonly ActivityEvent[]): ReadonlyArray<readonly [string, readonly ActivityEvent[]]> {
   const groups = new Map<string, ActivityEvent[]>();
@@ -41,6 +44,7 @@ export function WalletActivity({
   now,
   className,
   id = "activity",
+  onManageWallets,
 }: {
   wallet: Wallet;
   activity: readonly ActivityEvent[];
@@ -48,6 +52,13 @@ export function WalletActivity({
   className?: string;
   /** The desktop column is `#activity` (the nav links to it); the sheet passes its own so the two never share an id. */
   id?: string;
+  /**
+   * Manage the wallets without leaving the dashboard. Optional on purpose: this
+   * component is also mounted inside the header's sheet, and a modal opened from
+   * inside an overlay is two focus traps and an Escape that closes the wrong one.
+   * Absent, it stays a link to /wallets — the same screen, one navigation away.
+   */
+  onManageWallets?: () => void;
 }) {
   const groups = groupByDay(activity);
   const trades = activity.filter((event) => event.kind === "trade").length;
@@ -57,18 +68,20 @@ export function WalletActivity({
       <div className="space-y-3 border-b p-4">
         <div className="flex items-center justify-between gap-2">
           <span className={LABEL}>{wallet.label}</span>
-          {/* The ui Button keeps its focus ring on the link to /wallets. */}
-          <Button
-            variant="link"
-            size="sm"
-            asChild
-            className="h-auto p-0 text-xs text-muted-foreground underline hover:text-foreground"
-          >
-            <a href="/wallets">
+          {/* The ui Button carries the focus ring either way — link or modal. */}
+          {onManageWallets === undefined ? (
+            <Button variant="link" size="sm" asChild className={MANAGE}>
+              <a href="/wallets">
+                Manage wallets
+                <Settings className="size-3.5" aria-hidden />
+              </a>
+            </Button>
+          ) : (
+            <Button type="button" variant="link" size="sm" className={MANAGE} onClick={onManageWallets}>
               Manage wallets
               <Settings className="size-3.5" aria-hidden />
-            </a>
-          </Button>
+            </Button>
+          )}
         </div>
         <div className="flex items-center gap-1">
           <Num className="text-sm">{shortHex(wallet.address)}</Num>

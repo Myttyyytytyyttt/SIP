@@ -21,20 +21,34 @@
  * user record after the import, and a wallet that arrived unseated says so by
  * name instead of being shown as saving.
  *
+ * TWO FRAMES, ONE BODY. The wallets modal cannot open this as a Dialog: a
+ * Dialog inside a Dialog stacks two overlays and two focus traps, and a single
+ * Escape then closes whichever one Radix happened to put on top. So the flow
+ * lives in `<ImportWalletView>` — form, status and buttons, NO overlay — and
+ * the wrapper at the bottom of this file picks the frame: a Dialog on the
+ * /wallets route, and inside the modal a button that asks the shell
+ * (`useWalletsView()`) to put this body in place of the list.
+ *
+ * WHY A SEPARATE VIEW rather than one component with a `mode` prop: the
+ * preflights below are the part that must not drift, and they stay in exactly
+ * one place, mounted the same way in both frames. What the frames actually
+ * disagree about is who draws the heading and the way back — so that is all
+ * the wrapper decides, and every refusal, every message and the key-clearing
+ * are the same code either way.
+ *
  * Ported from HEAD (fd927b0) src/components/InviteTradingWallet.tsx
  * (`importRun`) and src/components/WalletsPanel.tsx (`ImportBox`).
  */
 
 import { useImportWallet, usePrivy, useUser } from "@privy-io/react-auth";
 import { LoaderCircle, Upload } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { getAddress, type Address } from "viem";
 
 import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
-  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -45,6 +59,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { seatOf } from "@/components/wallets/SeatStatus";
+import { useWalletsView } from "@/components/wallets/WalletsScreen";
 import { LABEL } from "@/lib/classes";
 import type { PublicConfig } from "@/lib/config";
 import { shortHex } from "@/lib/format";
@@ -56,27 +71,56 @@ import { SEAT_NOT_CONFIGURED, seatSigners } from "@/lib/wallets/policy";
 const ONE_IMPORT =
   "Privy holds one imported wallet per account, and this account already has one. Link that wallet from the list, or create a fresh one instead.";
 
-export function ImportWalletDialog({
+/**
+ * What both wallet views need from whatever holds them — the wallets modal's
+ * view switcher, or the Dialog wrappers in this file and LinkWalletDialog.
+ * It lives here, and not in a third file, because these two components are the
+ * only ones that have this shape.
+ */
+export interface WalletViewShell {
+  /** Leave this view: back to the wallets list, or close the dialog. */
+  onClose: () => void;
+  /**
+   * A key is moving or a signature is in flight. The container must not let an
+   * Escape key, a backdrop click or a back button take the view away while
+   * this is true — the dialog wrapper below refuses exactly that.
+   */
+  onBusyChange?: (busy: boolean) => void;
+  /**
+   * The failure the view is currently showing, in its own words, or null when
+   * there is none. The view renders it either way; a container that moves the
+   * user somewhere else can carry the reason along.
+   */
+  onFailure?: (message: string | null) => void;
+  /**
+   * "dialog" on the /wallets route, "inline" inside the wallets modal. It
+   * changes the way-out copy and the footer's chrome; nothing else.
+   */
+  frame?: "dialog" | "inline";
+}
+
+export function ImportWalletView({
   config,
   admin,
   vault,
   embedded,
   onImported,
-  disabled = false,
-}: {
+  onClose,
+  onBusyChange,
+  onFailure,
+  frame = "dialog",
+}: WalletViewShell & {
   config: PublicConfig;
   admin: Address;
   vault: Address;
   /** Every wallet Privy already holds for this user, so a re-paste is caught before the SDK refuses it. */
   embedded: readonly Address[];
   onImported: (address: Address) => void;
-  disabled?: boolean;
 }) {
   const { user } = usePrivy();
   const { refreshUser } = useUser();
   const { importWallet } = useImportWallet();
 
-  const [open, setOpen] = useState(false);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -86,16 +130,25 @@ export function ImportWalletDialog({
   const problem = judged !== null && "problem" in judged ? judged.problem : null;
   const preview = judged !== null && "address" in judged ? judged.address : null;
 
-  /** Every exit clears the key: an error must never wait on screen with the pasted key behind it. */
-  function leave(next: boolean) {
-    if (busy !== null) return;
-    setKey("");
-    setOpen(next);
-    if (!next) {
-      setFailure(null);
-      setNotice(null);
-    }
-  }
+  // Two ids: nothing stops a container from mounting this view while the
+  // route's dialog is also on screen, and a duplicated id points the label at
+  // the wrong input.
+  const keyId = useId();
+  const noteId = `${keyId}-note`;
+
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    // The dialog frame gets this from Radix. The inline frame swapped one view
+    // for another inside a modal that was already open, so nothing moved focus.
+    if (frame === "inline") inputRef.current?.focus();
+  }, [frame]);
+
+  useEffect(() => {
+    onBusyChange?.(busy !== null);
+  }, [busy, onBusyChange]);
+  useEffect(() => {
+    onFailure?.(failure);
+  }, [failure, onFailure]);
 
   async function run() {
     if (judged === null || !("key" in judged)) return;
@@ -227,15 +280,162 @@ export function ImportWalletDialog({
     }
   }
 
+  /** Leaving is leaving, whichever frame holds this: the key goes first. */
+  function leave() {
+    if (busy !== null) return;
+    setKey("");
+    onClose();
+  }
+
+  // Its own grid, so the body spaces itself wherever it is put: DialogContent
+  // brings `grid gap-4`, the modal's body brings whatever it brings.
   return (
-    <Dialog open={open} onOpenChange={leave}>
+    <div className="grid gap-4">
+      <div className="space-y-2">
+        <Label htmlFor={keyId} className={LABEL}>
+          Private key
+        </Label>
+        <Input
+          id={keyId}
+          ref={inputRef}
+          type="password"
+          autoComplete="new-password"
+          data-1p-ignore
+          data-bwignore
+          data-lpignore="true"
+          spellCheck={false}
+          disabled={busy !== null}
+          aria-invalid={problem !== null}
+          aria-describedby={noteId}
+          placeholder="0x… (64 hex characters — what your wallet's Export shows)"
+          className="font-mono"
+          value={key}
+          onChange={(event) => setKey(event.target.value)}
+        />
+        <p id={noteId} className="text-xs" aria-live="polite">
+          {problem !== null ? (
+            <span className="text-destructive">{problem}</span>
+          ) : preview !== null ? (
+            <>
+              This imports <Num>{shortHex(preview)}</Num>. Check it is the wallet you expect before continuing.
+            </>
+          ) : (
+            <span className="text-muted-foreground">
+              Your copy of the key keeps working — same wallet, same apps. If it came from a Telegram bot, the
+              bot&apos;s operator holds a copy too; only your pension key can withdraw the savings either way.
+            </span>
+          )}
+        </p>
+      </div>
+
+      {busy !== null ? (
+        <p className="inline-flex items-center gap-2 text-sm text-muted-foreground" aria-live="polite">
+          <LoaderCircle className="size-4 animate-spin" aria-hidden />
+          {busy}
+        </p>
+      ) : null}
+      {failure !== null ? (
+        <p role="alert" className="text-sm text-destructive">
+          {failure}
+        </p>
+      ) : null}
+      {notice !== null ? (
+        <p className="text-sm" aria-live="polite">
+          {notice}
+        </p>
+      ) : null}
+
+      {/* Stock DialogFooter in both frames — it is a plain div; inline, only its
+          dialog-edge bleed and fill are dropped. */}
+      <DialogFooter className={frame === "inline" ? "mx-0 mb-0 rounded-none bg-transparent" : undefined}>
+        <Button type="button" variant="outline" disabled={busy !== null} onClick={leave}>
+          {notice !== null ? (frame === "inline" ? "Back to wallets" : "Close") : "Cancel"}
+        </Button>
+        <Button
+          type="button"
+          disabled={busy !== null || preview === null}
+          aria-busy={busy !== null}
+          onClick={() => void run()}
+        >
+          {busy !== null ? <LoaderCircle className="animate-spin" aria-hidden /> : <Upload aria-hidden />}
+          {busy !== null ? "Importing…" : "Import"}
+        </Button>
+      </DialogFooter>
+    </div>
+  );
+}
+
+/**
+ * The frame around that body.
+ *
+ * On /wallets there is no shell, so this is a trigger and an overlay, exactly
+ * as it always was. Inside the wallets modal `useWalletsView()` answers, and
+ * the trigger asks the SHELL to change view instead of opening a second
+ * Dialog — the body then renders in place of the list, under the modal's own
+ * header and back control.
+ */
+export function ImportWalletDialog({
+  config,
+  admin,
+  vault,
+  embedded,
+  onImported,
+  disabled = false,
+}: {
+  config: PublicConfig;
+  admin: Address;
+  vault: Address;
+  /** Every wallet Privy already holds for this user, so a re-paste is caught before the SDK refuses it. */
+  embedded: readonly Address[];
+  onImported: (address: Address) => void;
+  disabled?: boolean;
+}) {
+  const shell = useWalletsView();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  if (shell !== null) {
+    return shell.view.kind === "import" ? (
+      <ImportWalletView
+        config={config}
+        admin={admin}
+        vault={vault}
+        embedded={embedded}
+        onImported={onImported}
+        onClose={shell.back}
+        frame="inline"
+      />
+    ) : (
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        disabled={disabled}
+        onClick={() => shell.show({ kind: "import" })}
+      >
+        <Upload aria-hidden />
+        Import a wallet
+      </Button>
+    );
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        // A key in flight is not abandoned by an Escape key. Closing unmounts
+        // the view, which is what clears the pasted key on the way out.
+        if (busy) return;
+        setOpen(next);
+      }}
+    >
       <DialogTrigger asChild>
         <Button type="button" variant="outline" size="sm" disabled={disabled}>
           <Upload aria-hidden />
           Import a wallet
         </Button>
       </DialogTrigger>
-      <DialogContent showCloseButton={busy === null}>
+      <DialogContent showCloseButton={!busy}>
         <DialogHeader>
           <DialogTitle>Import a wallet you already trade with</DialogTitle>
           <DialogDescription>
@@ -243,76 +443,15 @@ export function ImportWalletDialog({
             never reaches our servers. The keeper gets its policy-bound seat in the same motion; you link it after.
           </DialogDescription>
         </DialogHeader>
-
-        <div className="space-y-2">
-          <Label htmlFor="import-key" className={LABEL}>
-            Private key
-          </Label>
-          <Input
-            id="import-key"
-            type="password"
-            autoComplete="new-password"
-            data-1p-ignore
-            data-bwignore
-            data-lpignore="true"
-            spellCheck={false}
-            disabled={busy !== null}
-            aria-invalid={problem !== null}
-            aria-describedby="import-key-note"
-            placeholder="0x… (64 hex characters — what your wallet's Export shows)"
-            className="font-mono"
-            value={key}
-            onChange={(event) => setKey(event.target.value)}
-          />
-          <p id="import-key-note" className="text-xs" aria-live="polite">
-            {problem !== null ? (
-              <span className="text-destructive">{problem}</span>
-            ) : preview !== null ? (
-              <>
-                This imports <Num>{shortHex(preview)}</Num>. Check it is the wallet you expect before continuing.
-              </>
-            ) : (
-              <span className="text-muted-foreground">
-                Your copy of the key keeps working — same wallet, same apps. If it came from a Telegram bot, the
-                bot&apos;s operator holds a copy too; only your pension key can withdraw the savings either way.
-              </span>
-            )}
-          </p>
-        </div>
-
-        {busy !== null ? (
-          <p className="inline-flex items-center gap-2 text-sm text-muted-foreground" aria-live="polite">
-            <LoaderCircle className="size-4 animate-spin" aria-hidden />
-            {busy}
-          </p>
-        ) : null}
-        {failure !== null ? (
-          <p role="alert" className="text-sm text-destructive">
-            {failure}
-          </p>
-        ) : null}
-        {notice !== null ? (
-          <p className="text-sm" aria-live="polite">
-            {notice}
-          </p>
-        ) : null}
-
-        <DialogFooter>
-          <DialogClose asChild>
-            <Button type="button" variant="outline" disabled={busy !== null}>
-              {notice !== null ? "Close" : "Cancel"}
-            </Button>
-          </DialogClose>
-          <Button
-            type="button"
-            disabled={busy !== null || preview === null}
-            aria-busy={busy !== null}
-            onClick={() => void run()}
-          >
-            {busy !== null ? <LoaderCircle className="animate-spin" aria-hidden /> : <Upload aria-hidden />}
-            {busy !== null ? "Importing…" : "Import"}
-          </Button>
-        </DialogFooter>
+        <ImportWalletView
+          config={config}
+          admin={admin}
+          vault={vault}
+          embedded={embedded}
+          onImported={onImported}
+          onClose={() => setOpen(false)}
+          onBusyChange={setBusy}
+        />
       </DialogContent>
     </Dialog>
   );

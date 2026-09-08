@@ -263,6 +263,117 @@ export type PullOutcome =
   | { readonly kind: "SENT"; readonly intent: PullIntent }
   | { readonly kind: "SKIPPED"; readonly reason: "SEAT_REVOKED" | "SIGNER_UNAVAILABLE" | "BELOW_GAS_FLOOR"; readonly detail?: string };
 
+// ── investment (the crank) ──────────────────────────────────────────────────
+//
+// THE HALF THE PRODUCT IS NAMED FOR. The pull leaves WETH in the PersonalVault;
+// `PersonalVault.invest()` is what turns it into the assets the user chose, and
+// nothing else in this worker calls it. These are the shapes the crank
+// (`src/invest/crank.ts`, `src/invest/policy.ts`) and the pass agree on; the
+// function seam itself is `CrankVault` in `src/tick.ts`, where the Privy seat
+// type already lives.
+//
+// PER VAULT, NOT PER WALLET. Several trading wallets settle into one vault and
+// the vault invests its whole WETH balance once — assessment §4.6.
+
+/** `NuvemTypes.BasketLeg`. Never stored on chain: the vault keeps only `keccak256(abi.encode(legs))`. */
+export interface BasketLeg {
+  readonly targetAsset: Address;
+  readonly weightBps: number;
+  /** Adapter output per wei in, scaled by `OUTPUT_RATE_SCALE`: the admin's slippage floor, which a caller may only tighten. */
+  readonly minOutRateWad: bigint;
+}
+
+/**
+ * The investment half of `PersonalVault`'s storage as `invest()` itself reads
+ * it, plus the one balance it spends, read in a single pass in the order the
+ * function checks them.
+ *
+ * `legs` IS NOT IN STORAGE. The vault keeps only `basketHash`; the legs it
+ * commits to are the bytes `InvestmentPolicyUpdated` emitted, and have to be
+ * read back from the vault's own log. `null` is "not in hand", which defers
+ * (`BASKET_UNKNOWN`) rather than guessing — the hash is a compare-and-swap, and
+ * a guessed basket is a revert at best.
+ */
+export interface VaultInvestmentPolicy {
+  readonly enabled: boolean;
+  readonly paused: boolean;
+  /** `IProtocolPauseController.paused()` — the vault checks it on every invest. */
+  readonly protocolPaused: boolean;
+  readonly policyNonce: bigint;
+  readonly adapterId: bigint;
+  readonly basketHash: Hex;
+  readonly legs: readonly BasketLeg[] | null;
+  readonly minInvestmentWei: bigint;
+  readonly maxPerCallWei: bigint;
+  /** `investmentRollingCapStatus().remaining`: cap − spent over the live 30-day window. */
+  readonly rollingRemainingWei: bigint;
+  /** The vault's WETH: what the pulls put there, and the only thing `invest()` can spend. */
+  readonly wethBalanceWei: bigint;
+}
+
+export interface InvestIntent {
+  readonly vault: Address;
+  /** `msg.sender`: the vault admin or an ACTIVE trading account — the worker only ever holds a seat for the latter. */
+  readonly account: Address;
+  /** `amountIn`: gross WETH this call spends. */
+  readonly amountInWei: bigint;
+  readonly legs: readonly BasketLeg[];
+  /** Per leg, at least the admin's own floor; a caller may only tighten it. */
+  readonly minAmountsOut: readonly bigint[];
+  readonly deadline: bigint;
+  readonly expectedAdapterStatusEpoch: bigint;
+  readonly expectedInvestmentPolicyNonce: bigint;
+  readonly nonce: number;
+  readonly rawTx: Hex;
+  readonly txHash: Hex;
+}
+
+/**
+ * Why a vault is not investing this pass. Every one of them is "later", never
+ * "never": the balance grows with the next pull, a pause lifts, a basket is
+ * read off the vault's log, a seat comes back.
+ *
+ * ORDERED AS `invest()` CHECKS THEM, so a deferral and a revert always agree
+ * about which thing is wrong first — and named after the gate rather than after
+ * the feeling, so nothing has to be folded onto a coarser word on the way out.
+ * The last three are the caller's own gates, which the vault never sees.
+ */
+export type InvestDeferReason =
+  /** `investmentEnabled` is false: the admin has not switched investing on. */
+  | "DISABLED"
+  /** `investmentPaused`: configured, and deliberately stopped. */
+  | "PAUSED"
+  /** `ProtocolPauseController.paused()`: the whole protocol is stopped. */
+  | "PROTOCOL_PAUSED"
+  /** Nothing is registered under the vault's `adapterId` — `resolveActiveAdapter` would revert. */
+  | "ADAPTER_NOT_REGISTERED"
+  /** Registered but deactivated, or its runtime code no longer matches the registry's pin. */
+  | "ADAPTER_DEACTIVATED"
+  /** The vault holds no WETH: nothing has been pulled in yet. */
+  | "NOTHING_TO_INVEST"
+  /** The 30-day rolling cap cannot fit even a minimum-sized call until it releases. */
+  | "CAP_EXHAUSTED"
+  /** There is WETH, but less than the vault's own `minInvestmentWei`. Wait and let it grow. */
+  | "BELOW_MINIMUM"
+  /** The legs behind the vault's `basketHash` are not in hand, or do not hash to it. */
+  | "BASKET_UNKNOWN"
+  /** The basket in hand was emitted at a policy nonce the admin has since replaced. */
+  | "POLICY_NONCE_MOVED"
+  /** A leg's share of this size rounds to zero wei, which `invest()` refuses outright. */
+  | "LEG_ROUNDS_TO_ZERO"
+  /** None of the vault's bound wallets is an ACTIVE trading account that can sign for it. */
+  | "NO_SEATED_ACCOUNT"
+  /** Live mode with no seat, or a seat that refused to sign. Nothing was broadcast. */
+  | "SIGNER_UNAVAILABLE"
+  /** The wallet's native balance would not cover the call's own gas. */
+  | "BELOW_GAS_FLOOR";
+
+/** Deliberately the shape of `PullOutcome`: a dry run says what it would have sent, and says it the same way. */
+export type InvestOutcome =
+  | { readonly kind: "SENT"; readonly intent: InvestIntent }
+  | { readonly kind: "DRY_RUN"; readonly intent: Omit<InvestIntent, "rawTx" | "txHash" | "nonce"> }
+  | { readonly kind: "DEFERRED"; readonly reason: InvestDeferReason; readonly detail?: string };
+
 // ── ledger ──────────────────────────────────────────────────────────────────
 
 export type WindowStatus = "OPEN" | "SIGNED" | "SUBMITTED" | "CONFIRMED" | "FAILED";
@@ -287,6 +398,18 @@ export interface Ledger {
   openWindow(window: VolumeWindow): Promise<number>;
   markWindow(id: number, status: WindowStatus, detail?: unknown): Promise<void>;
   recordPull(windowId: number, intent: PullIntent | null, outcome: PullOutcome): Promise<void>;
+  /**
+   * What a vault's crank did with the WETH the pulls put there — recorded
+   * BEFORE the broadcast, for the reason `submitPull` records its intent first:
+   * a send that times out is not a send that did not happen.
+   *
+   * OPTIONAL ONLY UNTIL THE LEDGER OWNER LANDS IT. Declared here so the crank
+   * has somewhere to write from its first line, optional so declaring it does
+   * not red-build two Ledger implementations that have not seen it yet. It
+   * should lose the `?` — and gain its `sip_investment` table — in the same
+   * change that implements it; see this owner's `needs`.
+   */
+  recordInvestment?(vault: Address, intent: InvestIntent | null, outcome: InvestOutcome): Promise<void>;
   addOwed(wallet: Address, wei: bigint): Promise<void>;
   addCollected(wallet: Address, wei: bigint): Promise<void>;
   /**

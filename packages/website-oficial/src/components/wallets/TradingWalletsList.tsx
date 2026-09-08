@@ -22,9 +22,11 @@
  */
 
 import { usePrivy, useWallets, type ConnectedWallet } from "@privy-io/react-auth";
+import { Upload } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { getAddress, type Address } from "viem";
 
+import { Button } from "@/components/ui/button";
 import { CreateWalletButton } from "@/components/wallets/CreateWalletButton";
 import { ImportWalletDialog } from "@/components/wallets/ImportWalletDialog";
 import { TradingWalletRow } from "@/components/wallets/TradingWalletRow";
@@ -48,6 +50,15 @@ export interface WalletRow {
   readonly account: VaultAccount | null;
 }
 
+/**
+ * A row that CAN be linked: the same row, with the signing wallet proven
+ * present. The container that switches to a link view needs the wallet, not a
+ * null check.
+ */
+export interface LinkTarget extends Omit<WalletRow, "wallet"> {
+  readonly wallet: ConnectedWallet;
+}
+
 /** The factory's answer for a wallet the vault's logs do not list. */
 export type LinkProbe =
   | { readonly kind: "listed" }
@@ -68,6 +79,8 @@ export function TradingWalletsList({
   accounts,
   accountsError,
   onChanged,
+  onImport,
+  onLink,
 }: {
   config: PublicConfig;
   admin: Address;
@@ -77,6 +90,19 @@ export function TradingWalletsList({
   /** Why `accounts` may be INCOMPLETE, or null. Rendered as "may be incomplete", never as "no wallets". */
   accountsError: string | null;
   onChanged: () => void;
+  /**
+   * Ask the container to switch to an import or link VIEW instead of opening a
+   * dialog here: inside the wallets modal a second Dialog stacks two overlays,
+   * two focus traps and an Escape that closes the wrong one.
+   *
+   * Both absent by default, and the shell in this repo leaves them absent on
+   * purpose: ImportWalletDialog and LinkWalletDialog answer `useWalletsView()`
+   * themselves and swap their own bodies in place, so they have to stay MOUNTED
+   * for those views to exist. A container that renders the views itself passes
+   * these; one that relies on that context must not.
+   */
+  onImport?: () => void;
+  onLink?: (target: LinkTarget) => void;
 }) {
   const { user } = usePrivy();
   const { wallets } = useWallets();
@@ -172,7 +198,14 @@ export function TradingWalletsList({
           </p>
         </div>
         <div className="flex flex-wrap items-start gap-2">
-          <ImportWalletDialog config={config} admin={admin} vault={vault} embedded={held} onImported={onChanged} />
+          {onImport !== undefined ? (
+            <Button type="button" variant="outline" size="sm" onClick={onImport}>
+              <Upload aria-hidden />
+              Import a wallet
+            </Button>
+          ) : (
+            <ImportWalletDialog config={config} admin={admin} vault={vault} embedded={held} onImported={onChanged} />
+          )}
           <CreateWalletButton config={config} hasEmbedded={held.length > 0} onCreated={onChanged} />
         </div>
       </div>
@@ -203,6 +236,7 @@ export function TradingWalletsList({
                 adminWallet={adminWallet}
                 vault={vault}
                 onChanged={onChanged}
+                onLink={onLink}
               />
             ))}
           </ul>

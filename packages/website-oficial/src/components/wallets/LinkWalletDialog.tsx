@@ -26,19 +26,27 @@
  * — so the flow resumes at the acceptance; an EXPIRED invite is cleared with
  * `cancelTradingAccountInvitation` first (the only exit from PENDING).
  *
+ * TWO FRAMES, ONE BODY — same split as ImportWalletDialog, and for the same
+ * reason: the wallets modal cannot nest a Dialog inside a Dialog without
+ * stacking two overlays, two focus traps and an Escape key that closes the
+ * wrong one. `<LinkWalletView>` is this flow with no overlay; the wrapper at
+ * the bottom picks the frame — a Dialog on /wallets, and inside the modal a
+ * button that asks the shell (`useWalletsView()`) to show this body in place
+ * of the list. The three-step sequence, its simulations and its named reverts
+ * live once, in the view, mounted identically either way.
+ *
  * Ported from HEAD (fd927b0) src/components/InviteTradingWallet.tsx `link()`.
  */
 
 import type { ConnectedWallet } from "@privy-io/react-auth";
 import { Link2, LoaderCircle } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { getAddress, type Address, type Hex } from "viem";
 
 import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
-  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -46,8 +54,9 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import type { WalletViewShell } from "@/components/wallets/ImportWalletDialog";
 import { RatePicker } from "@/components/wallets/RateControl";
-import type { VaultAccount } from "@/components/wallets/WalletsScreen";
+import { useWalletsView, type VaultAccount } from "@/components/wallets/WalletsScreen";
 import { personalVaultAbi } from "@/lib/abi";
 import { ROBINHOOD_CHAIN_ID, robinhoodChain } from "@/lib/chain";
 import { LABEL } from "@/lib/classes";
@@ -75,7 +84,7 @@ const STEPS = [
   "You sign the activation (2 of 2)",
 ] as const;
 
-export function LinkWalletDialog({
+export function LinkWalletView({
   config,
   admin,
   adminWallet,
@@ -83,9 +92,13 @@ export function LinkWalletDialog({
   wallet,
   account,
   onLinked,
-  onOpenChange,
-  disabled = false,
-}: {
+  invited: invitedBefore = false,
+  onInvited,
+  onClose,
+  onBusyChange,
+  onFailure,
+  frame = "dialog",
+}: WalletViewShell & {
   config: PublicConfig;
   admin: Address;
   adminWallet: ConnectedWallet | null;
@@ -96,29 +109,36 @@ export function LinkWalletDialog({
   account: VaultAccount | null;
   onLinked: () => void;
   /**
-   * Whether the dialog is on screen. The row uses it to keep this component
-   * mounted after linking succeeds — the account turns ACTIVE, the row's own
-   * "can this be linked?" goes false, and the last step would otherwise be
-   * unmounted before anybody read it.
+   * Whether an invite from THIS session is already on chain. The invite
+   * outlives the view — a container that unmounts it (the dialog on close, the
+   * modal on a switch back to the list) latches this from `onInvited` and hands
+   * it back, so a second visit resumes at the acceptance instead of inviting a
+   * PENDING account again and reading its refusal back as a revert.
    */
-  onOpenChange?: (open: boolean) => void;
-  disabled?: boolean;
+  invited?: boolean;
+  onInvited?: () => void;
 }) {
   const address = getAddress(wallet.address);
   const pending = account?.status === "PENDING";
   const invitedBps = account !== null ? Number(account.savingsBps) : null;
 
-  const [open, setOpen] = useState(false);
   const [rate, setRate] = useState<RatePresetBps>(
     invitedBps !== null && isRatePreset(invitedBps) ? invitedBps : DEFAULT_RATE_BPS,
   );
   const [busy, setBusy] = useState<string | null>(null);
-  const [step, setStep] = useState<0 | 1 | 2 | 3>(pending ? 1 : 0);
-  /** Latched once THIS dialog's invite landed, so a retry after a refused acceptance skips it. */
-  const [invited, setInvited] = useState(pending);
+  const [step, setStep] = useState<0 | 1 | 2 | 3>(pending || invitedBefore ? 1 : 0);
+  /** Latched once THIS session's invite landed, so a retry after a refused acceptance skips it. */
+  const [invited, setInvited] = useState(pending || invitedBefore);
   const [failure, setFailure] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const [expired, setExpired] = useState(false);
+
+  useEffect(() => {
+    onBusyChange?.(busy !== null);
+  }, [busy, onBusyChange]);
+  useEffect(() => {
+    onFailure?.(failure);
+  }, [failure, onFailure]);
 
   /**
    * A write, asked of the chain before the user is asked for anything.
@@ -172,6 +192,7 @@ export function LinkWalletDialog({
         setBusy("Waiting for the invite to be included…");
         await client.waitForTransactionReceipt({ hash: inviteHash });
         setInvited(true);
+        onInvited?.();
       }
 
       // Read the invite back rather than assuming what was written: the digest
@@ -268,18 +289,173 @@ export function LinkWalletDialog({
     }
   }
 
+  /** A signature in flight is not abandoned by a back button or an Escape key. */
+  function leave() {
+    if (busy !== null) return;
+    onClose();
+  }
+
+  // Its own grid, so the body spaces itself wherever it is put: DialogContent
+  // brings `grid gap-4`, the modal's body brings whatever it brings.
+  return (
+    <div className="grid gap-4">
+      <div className="space-y-2">
+        <div className={LABEL}>Rate</div>
+        {invited ? (
+          <p className="text-sm">
+            Invited at <Num>{invitedBps !== null ? pct(invitedBps) : pct(rate)}</Num> — the rate is fixed by the invite and can be changed once linked.
+          </p>
+        ) : (
+          <RatePicker value={rate} onChange={setRate} disabled={busy !== null} label="Rate" />
+        )}
+      </div>
+
+      <ol className="space-y-1 text-sm" aria-label="Steps">
+        {STEPS.map((text, index) => (
+          <li
+            key={text}
+            className={
+              index < step || done
+                ? "text-muted-foreground line-through"
+                : index === step
+                  ? "text-foreground"
+                  : "text-muted-foreground"
+            }
+          >
+            <Num className="mr-2 text-xs">{index + 1}</Num>
+            {text}
+          </li>
+        ))}
+      </ol>
+
+      {busy !== null ? (
+        <p className="inline-flex items-center gap-2 text-sm text-muted-foreground" aria-live="polite">
+          <LoaderCircle className="size-4 animate-spin" aria-hidden />
+          {busy}
+        </p>
+      ) : null}
+      {failure !== null ? (
+        <p role="alert" className="text-sm text-destructive">
+          {failure}
+        </p>
+      ) : null}
+      {done ? (
+        <p className="text-sm" aria-live="polite">
+          <Num>{shortHex(address)}</Num> is linked and active. Fund it and trade.
+        </p>
+      ) : null}
+
+      {/* Stock DialogFooter in both frames — it is a plain div; inline, only its
+          dialog-edge bleed and fill are dropped. */}
+      <DialogFooter className={frame === "inline" ? "mx-0 mb-0 rounded-none bg-transparent" : undefined}>
+        <Button type="button" variant="outline" disabled={busy !== null} onClick={leave}>
+          {done ? (frame === "inline" ? "Back to wallets" : "Close") : "Cancel"}
+        </Button>
+        {expired ? (
+          <Button type="button" variant="outline" disabled={busy !== null} onClick={() => void clearExpired()}>
+            Clear the expired invite
+          </Button>
+        ) : null}
+        {!done ? (
+          <Button type="button" disabled={busy !== null || expired} aria-busy={busy !== null} onClick={() => void link()}>
+            {busy !== null ? <LoaderCircle className="animate-spin" aria-hidden /> : null}
+            {invited ? "Finish linking" : "Link it"}
+          </Button>
+        ) : null}
+      </DialogFooter>
+    </div>
+  );
+}
+
+/**
+ * The frame around that body.
+ *
+ * On /wallets there is no shell, so this is a trigger and an overlay, exactly
+ * as it always was. Inside the wallets modal `useWalletsView()` answers, and
+ * the trigger asks the SHELL to show this wallet's link view instead of
+ * opening a second Dialog.
+ *
+ * THE INVITE LATCH LIVES HERE, not in the view, because the view is unmounted
+ * both ways out — a closed dialog, a switch back to the list — and an invite
+ * that already landed is still on chain. Without it, coming back would invite
+ * a PENDING account again and hand the user `_requireInvitable`'s refusal.
+ */
+export function LinkWalletDialog({
+  config,
+  admin,
+  adminWallet,
+  vault,
+  wallet,
+  account,
+  onLinked,
+  onOpenChange,
+  disabled = false,
+}: {
+  config: PublicConfig;
+  admin: Address;
+  adminWallet: ConnectedWallet | null;
+  vault: Address;
+  /** The trading wallet as Privy connects it — the only shape that can sign the acceptance here. */
+  wallet: ConnectedWallet;
+  /** What the vault currently holds for this address, or null when nothing. */
+  account: VaultAccount | null;
+  onLinked: () => void;
+  /**
+   * Whether the flow is on screen. The row uses it to keep this component
+   * mounted after linking succeeds — the account turns ACTIVE, the row's own
+   * "can this be linked?" goes false, and the last step would otherwise be
+   * unmounted before anybody read it. Reported from both frames.
+   */
+  onOpenChange?: (open: boolean) => void;
+  disabled?: boolean;
+}) {
+  const address = getAddress(wallet.address);
+  const pending = account?.status === "PENDING";
+
+  const shell = useWalletsView();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [invited, setInvited] = useState(false);
+
+  const inShell = shell !== null;
+  const showing = shell !== null && shell.view.kind === "link" && shell.view.address.toLowerCase() === address.toLowerCase();
+  useEffect(() => {
+    // In the modal the shell's own back control can end this flow without the
+    // buttons below being touched, so the row hears about it from here.
+    if (inShell) onOpenChange?.(showing);
+  }, [inShell, showing, onOpenChange]);
+
+  if (shell !== null) {
+    return showing ? (
+      <LinkWalletView
+        config={config}
+        admin={admin}
+        adminWallet={adminWallet}
+        vault={vault}
+        wallet={wallet}
+        account={account}
+        onLinked={onLinked}
+        invited={invited}
+        onInvited={() => setInvited(true)}
+        onClose={shell.back}
+        frame="inline"
+      />
+    ) : (
+      <Button type="button" size="sm" disabled={disabled} onClick={() => shell.show({ kind: "link", address })}>
+        <Link2 aria-hidden />
+        {pending ? "Finish linking" : "Link"}
+      </Button>
+    );
+  }
+
   return (
     <Dialog
       open={open}
       onOpenChange={(next) => {
         // A signature in flight is not abandoned by an Escape key.
-        if (busy !== null) return;
+        if (busy) return;
         setOpen(next);
         onOpenChange?.(next);
-        if (!next) {
-          setFailure(null);
-          setDone(false);
-        }
       }}
     >
       <DialogTrigger asChild>
@@ -288,7 +464,7 @@ export function LinkWalletDialog({
           {pending ? "Finish linking" : "Link"}
         </Button>
       </DialogTrigger>
-      <DialogContent showCloseButton={busy === null}>
+      <DialogContent showCloseButton={!busy}>
         <DialogHeader>
           <DialogTitle>
             Link <Num>{shortHex(address)}</Num> to your pension
@@ -298,71 +474,22 @@ export function LinkWalletDialog({
             rate of every buy and sell is put aside.
           </DialogDescription>
         </DialogHeader>
-
-        <div className="space-y-2">
-          <div className={LABEL}>Rate</div>
-          {invited ? (
-            <p className="text-sm">
-              Invited at <Num>{invitedBps !== null ? pct(invitedBps) : pct(rate)}</Num> — the rate is fixed by the invite and can be changed once linked.
-            </p>
-          ) : (
-            <RatePicker value={rate} onChange={setRate} disabled={busy !== null} label="Rate" />
-          )}
-        </div>
-
-        <ol className="space-y-1 text-sm" aria-label="Steps">
-          {STEPS.map((text, index) => (
-            <li
-              key={text}
-              className={
-                index < step || done
-                  ? "text-muted-foreground line-through"
-                  : index === step
-                    ? "text-foreground"
-                    : "text-muted-foreground"
-              }
-            >
-              <Num className="mr-2 text-xs">{index + 1}</Num>
-              {text}
-            </li>
-          ))}
-        </ol>
-
-        {busy !== null ? (
-          <p className="inline-flex items-center gap-2 text-sm text-muted-foreground" aria-live="polite">
-            <LoaderCircle className="size-4 animate-spin" aria-hidden />
-            {busy}
-          </p>
-        ) : null}
-        {failure !== null ? (
-          <p role="alert" className="text-sm text-destructive">
-            {failure}
-          </p>
-        ) : null}
-        {done ? (
-          <p className="text-sm" aria-live="polite">
-            <Num>{shortHex(address)}</Num> is linked and active. Fund it and trade.
-          </p>
-        ) : null}
-
-        <DialogFooter>
-          <DialogClose asChild>
-            <Button type="button" variant="outline" disabled={busy !== null}>
-              {done ? "Close" : "Cancel"}
-            </Button>
-          </DialogClose>
-          {expired ? (
-            <Button type="button" variant="outline" disabled={busy !== null} onClick={() => void clearExpired()}>
-              Clear the expired invite
-            </Button>
-          ) : null}
-          {!done ? (
-            <Button type="button" disabled={busy !== null || expired} aria-busy={busy !== null} onClick={() => void link()}>
-              {busy !== null ? <LoaderCircle className="animate-spin" aria-hidden /> : null}
-              {invited ? "Finish linking" : "Link it"}
-            </Button>
-          ) : null}
-        </DialogFooter>
+        <LinkWalletView
+          config={config}
+          admin={admin}
+          adminWallet={adminWallet}
+          vault={vault}
+          wallet={wallet}
+          account={account}
+          onLinked={onLinked}
+          invited={invited}
+          onInvited={() => setInvited(true)}
+          onClose={() => {
+            setOpen(false);
+            onOpenChange?.(false);
+          }}
+          onBusyChange={setBusy}
+        />
       </DialogContent>
     </Dialog>
   );

@@ -33,6 +33,7 @@ import { PullBroadcastError } from "../src/pull/submit.js";
 import type {
   Address,
   AttestOutcome,
+  BasketLeg,
   BlockContext,
   BlockRefusal,
   Candidate,
@@ -40,6 +41,7 @@ import type {
   Exclusion,
   Fill,
   Hex,
+  InvestOutcome,
   Ledger,
   PullIntent,
   PullOutcome,
@@ -381,6 +383,32 @@ function fillAt(wallet: Address, blockL2: bigint, notionalWei: bigint): Fill {
   };
 }
 
+// ── the crank (step 5) ───────────────────────────────────────────────────────
+
+/** A one-leg basket. The pass never looks inside one; the crank's own tests do. */
+const BASKET: readonly BasketLeg[] = [{ targetAsset: TOKEN_V3, weightBps: 10_000, minOutRateWad: 10n ** 18n }];
+
+const wouldInvest = (vault: Address, account: Address, amountInWei: bigint): InvestOutcome => ({
+  kind: "DRY_RUN",
+  intent: {
+    vault, account, amountInWei, legs: BASKET, minAmountsOut: [0n], deadline: 1_700_000_600n,
+    expectedAdapterStatusEpoch: 1n, expectedInvestmentPolicyNonce: 4n,
+  },
+});
+
+/** A crank that records every vault it was handed and answers with whatever the test scripted. */
+function scriptedCrank(answer: (vault: Address, accounts: readonly Address[]) => InvestOutcome) {
+  const calls: { vault: Address; accounts: readonly Address[]; mode: string; seat: unknown }[] = [];
+  const crankVault: TickPipeline["crankVault"] = async (_rpc, mode, vault, accounts, seat) => {
+    calls.push({ vault, accounts: [...accounts], mode, seat });
+    return answer(vault, accounts);
+  };
+  return { crankVault, calls };
+}
+
+/** The resting state, and the default of every scripted pass: the vault has nothing to buy yet. */
+const idleCrank: TickPipeline["crankVault"] = async () => ({ kind: "DEFERRED", reason: "NOTHING_TO_INVEST" });
+
 function configOf(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
   return {
     mode: "dry-run", chainId: CHAIN_ID, rpcUrls: ["http://unused.test"], factory: FACTORY, executor: EXECUTOR, logsFromBlock: LINK_BLOCK - 10n,
@@ -403,7 +431,7 @@ function depsOf(parts: Partial<TickDeps> & { rpc: RpcClient; ledger: Ledger }): 
 function scriptedPipeline(parts: Partial<TickPipeline> = {}): Partial<TickPipeline> {
   return {
     discoverLinkedWallets: noWallets, buildBlockContext: emptyContext, batchRoot: fakeRoot, readVaultSnapshot: async () => snapshotOf(),
-    attestPhase0: signedAttest, submitPull: dryRunSubmit, pullGasFloorWei: noGasFloor, unixSeconds: () => 1_700_000_000n,
+    attestPhase0: signedAttest, submitPull: dryRunSubmit, pullGasFloorWei: noGasFloor, crankVault: idleCrank, unixSeconds: () => 1_700_000_000n,
     // L1 = L2, so an activation floor can be stated in the same blocks the test already talks about.
     l1BlockOf: async (_rpc, blockL2) => blockL2, ...parts,
   };
@@ -431,6 +459,7 @@ describe("a tick over one fixture-shaped block (DESIGN.md §2 loop, §6)", () =>
         return dryRunSubmit(...args);
       },
       pullGasFloorWei: noGasFloor,
+      crankVault: idleCrank,
       unixSeconds: () => 1_700_000_000n,
     });
     return { state, chain, summary, submitCalls };
@@ -438,7 +467,12 @@ describe("a tick over one fixture-shaped block (DESIGN.md §2 loop, §6)", () =>
 
   it("produces one fill, one open window behind the margin and one DRY_RUN pull", async () => {
     const { state, summary, submitCalls } = await tick();
-    const expected: TickSummary = { headL2: head, wallets: 1, fills: 1, exclusions: 0, refusals: 0, windowsOpened: 1, pulls: 1, deferred: 0 };
+    // The vault holds nothing yet — this pass's pull is a dry run — so step 5
+    // defers it. `investDeferred`, not `deferred`: an unbought basket and a
+    // window below its minimum are not the same event.
+    const expected: TickSummary = {
+      headL2: head, wallets: 1, fills: 1, exclusions: 0, refusals: 0, windowsOpened: 1, pulls: 1, deferred: 0, investments: 0, investDeferred: 1,
+    };
     expect(summary).toEqual(expected);
 
     // The fill is the §1 truth, decoded by the real GMGN decoder from the recorded receipt.
@@ -1077,6 +1111,121 @@ describe("the account's activation floor (§5, review: a pause that stalls the w
     );
     expect(summary.windowsOpened).toBe(1);
     expect(asked).toEqual([]);
+  });
+});
+
+// ── step 5: the crank, per vault (assessment §4.6) ───────────────────────────
+
+describe("step 5: the vault buys what the pulls left it (assessment §4.6)", () => {
+  const B1 = 5_000_000n;
+  const head = B1 + 10n + MARGIN;
+  const oneFill = (ctx: BlockContext): ReconcileOutcome => ({ fills: [fillAt(ctx.wallet, ctx.blockL2, 10n ** 16n)], exclusions: [], refusal: null });
+  const chain = () => mockRpc(() => null).rpc;
+
+  it("pulls first and invests after, and hands the crank a vault rather than a window", async () => {
+    const state = recordingLedger();
+    await seeded(state, WALLET, VAULT, B1 - 10n);
+    const order: string[] = [];
+    const crank = scriptedCrank((vault) => {
+      order.push("invest");
+      return wouldInvest(vault, WALLET, 3n * 10n ** 15n);
+    });
+    const logger = capturingLogger();
+    const summary = await runTick(
+      depsOf({ rpc: chain(), ledger: state.ledger, log: logger.log }),
+      scriptedPipeline({
+        blockNumber: async () => head,
+        discover: scriptedDiscover([{ wallet: WALLET, blockL2: B1 }]).discover,
+        reconcileBlock: oneFill,
+        submitPull: async (...args) => {
+          order.push("pull");
+          return dryRunSubmit(...args);
+        },
+        crankVault: crank.crankVault,
+      }),
+    );
+    expect(summary).toMatchObject({ fills: 1, windowsOpened: 1, pulls: 1, investments: 1, investDeferred: 0 });
+    // THE ORDER IS THE POINT: the crank spends what earlier passes collected, so
+    // it runs after this pass has pulled, never among the wallets.
+    expect(order).toEqual(["pull", "invest"]);
+    expect(crank.calls).toEqual([{ vault: VAULT, accounts: [WALLET], mode: "dry-run", seat: null }]);
+    expect(logger.events("invest.dry_run")[0]).toMatchObject({ vault: VAULT, account: WALLET, amountInWei: (3n * 10n ** 15n).toString() });
+  });
+
+  it("a crank that says wait defers that vault and nothing else", async () => {
+    const state = recordingLedger();
+    await seeded(state, WALLET, VAULT, B1 - 10n);
+    const logger = capturingLogger();
+    const crank = scriptedCrank(() => ({ kind: "DEFERRED", reason: "BELOW_MINIMUM", detail: "3 wei investable, the vault's minimum is 4" }));
+    const summary = await runTick(
+      depsOf({ rpc: chain(), ledger: state.ledger, log: logger.log }),
+      scriptedPipeline({
+        blockNumber: async () => head,
+        discover: scriptedDiscover([{ wallet: WALLET, blockL2: B1 }]).discover,
+        reconcileBlock: oneFill,
+        crankVault: crank.crankVault,
+      }),
+    );
+    expect(summary).toMatchObject({ windowsOpened: 1, pulls: 1, investments: 0, investDeferred: 1 });
+    // Its own counter: the window closed and pulled perfectly well. A basket
+    // that is not bought yet is not a deferred window.
+    expect(summary.deferred).toBe(0);
+    expect(logger.events("invest.deferred")[0]).toMatchObject({
+      vault: VAULT,
+      accounts: 1,
+      reason: "BELOW_MINIMUM",
+      detail: "3 wei investable, the vault's minimum is 4",
+    });
+  });
+
+  it("a crank that throws is contained: the next vault still gets its pass, with the reason on the record", async () => {
+    const state = recordingLedger();
+    await seeded(state, WALLET, VAULT, B1 - 10n);
+    await seeded(state, WALLET_B, VAULT_B, B1 - 10n);
+    const logger = capturingLogger();
+    const crank = scriptedCrank((vault) => {
+      if (vault === VAULT) throw new Error("the adapter registry would not answer");
+      return wouldInvest(vault, WALLET_B, 10n ** 15n);
+    });
+    const summary = await runTick(
+      depsOf({ rpc: chain(), ledger: state.ledger, log: logger.log }),
+      scriptedPipeline({
+        blockNumber: async () => head,
+        discover: scriptedDiscover([{ wallet: WALLET, blockL2: B1 }, { wallet: WALLET_B, blockL2: B1 + 1n }]).discover,
+        reconcileBlock: oneFill,
+        readVaultSnapshot: async (_rpc, _factory, _executor, account) =>
+          account === WALLET ? snapshotOf() : snapshotOf({ vault: VAULT_B, account: WALLET_B }),
+        crankVault: crank.crankVault,
+      }),
+    );
+    expect(summary).toMatchObject({ wallets: 2, pulls: 2, investments: 1, investDeferred: 1 });
+    expect(logger.events("invest.failed")[0]).toMatchObject({ vault: VAULT, accounts: 1, detail: "the adapter registry would not answer" });
+    // Both vaults were asked, in address order: the throw did not end the loop.
+    expect(crank.calls.map((call) => call.vault)).toEqual([VAULT, VAULT_B]);
+  });
+
+  it("two wallets on one vault produce ONE invest attempt", async () => {
+    const state = recordingLedger();
+    await seeded(state, WALLET, VAULT, B1 - 10n);
+    await seeded(state, WALLET_B, VAULT, B1 - 10n);
+    const crank = scriptedCrank((vault, accounts) => wouldInvest(vault, accounts[0] ?? WALLET, 10n ** 15n));
+    const summary = await runTick(
+      depsOf({ rpc: chain(), ledger: state.ledger }),
+      scriptedPipeline({
+        blockNumber: async () => head,
+        discover: scriptedDiscover([{ wallet: WALLET, blockL2: B1 }, { wallet: WALLET_B, blockL2: B1 + 1n }]).discover,
+        reconcileBlock: oneFill,
+        readVaultSnapshot: async (_rpc, _factory, _executor, account) => snapshotOf({ account }),
+        crankVault: crank.crankVault,
+      }),
+    );
+    // Two wallets, two windows, two pulls — and ONE invest: `invest()` spends
+    // the vault's whole WETH balance against one hashed basket, so a second
+    // call would buy nothing and pay for the revert. Both wallets are handed
+    // over, because only the crank knows which of them may sign.
+    expect(summary).toMatchObject({ wallets: 2, windowsOpened: 2, pulls: 2, investments: 1, investDeferred: 0 });
+    expect(crank.calls).toHaveLength(1);
+    expect(crank.calls[0]).toMatchObject({ vault: VAULT, accounts: [WALLET, WALLET_B] });
   });
 });
 
