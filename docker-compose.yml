@@ -65,6 +65,9 @@ services:
       PRIVY_APP_SECRET: ${PRIVY_APP_SECRET:-}
       PRIVY_SIGNER_ID: ${PRIVY_SIGNER_ID:-}
       PRIVY_POLICY_ID: ${PRIVY_POLICY_ID:-}
+      # The same ledger the worker writes to. Without it loadDashboard takes its
+      # second mock branch before reading the chain, and Live cannot be true.
+      DATABASE_URL: ${SIP_DATABASE_URL:-postgres://sip:sip@db:5432/sip?sslmode=disable}
       # The image's runner defaults to 3000 and Next reads PORT at start-up. The
       # repo's dev server uses 3002, so the container is told to match rather
       # than the port being mapped across — otherwise the health check below,

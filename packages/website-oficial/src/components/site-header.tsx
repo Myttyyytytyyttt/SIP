@@ -35,7 +35,18 @@ const NAV: readonly NavItem[] = [
  * The top bar: wordmark, nav, theme toggle, wallet. Below `lg` the sidebar
  * is gone, so the leading button opens the same WalletActivity in a sheet.
  */
-export function SiteHeader({ wallet, activity, now }: { wallet: Wallet; activity: readonly ActivityEvent[]; now: string }) {
+export function SiteHeader({
+  wallet,
+  activity,
+  now,
+  control = null,
+}: {
+  wallet: Wallet;
+  activity: readonly ActivityEvent[];
+  now: string;
+  /** The Live/Mock control. A slot, so the header stays ignorant of what it switches. */
+  control?: React.ReactNode;
+}) {
   // THE SHEET IS CONTROLLED SO IT CAN GET OUT OF THE WAY. Below lg this sheet is
   // where "Manage wallets" lives, and a modal opened from inside a sheet is the
   // nested-overlay problem again — two focus traps, and Escape closing the wrong
@@ -104,6 +115,7 @@ export function SiteHeader({ wallet, activity, now }: { wallet: Wallet; activity
         </nav>
 
         <div className="ml-auto flex items-center gap-2">
+          {control}
           <ModeToggle />
           <WalletMenu wallet={wallet} />
         </div>

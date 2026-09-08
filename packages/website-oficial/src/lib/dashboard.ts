@@ -1157,10 +1157,10 @@ function noticeFor(ledger: Ledger, chain: ChainSide): string {
  */
 export async function loadDashboard(config: ServerConfig, admin: Address | null): Promise<DashboardLoad> {
   if (admin === null) {
-    return sample("No pension key is connected, so this is example data. Connect one on the wallets page to see your own.");
+    return sample("No pension key is connected. Connect one on the wallets page to see your own.");
   }
   if (config.databaseUrl === null) {
-    return sample("The worker's ledger is not configured on this deployment (no DATABASE_URL), so this is example data.");
+    return sample("The worker's ledger is not configured on this deployment (no DATABASE_URL), so nothing observed can be read.");
   }
 
   const client = createReadClient(config);
@@ -1176,7 +1176,7 @@ export async function loadDashboard(config: ServerConfig, admin: Address | null)
     return sample(`The vault of this pension key could not be read (${vault.error}), so this is example data.`);
   }
   if (vault.value === null) {
-    return sample("This pension key has no vault yet, so this is example data. Create one on the wallets page.");
+    return sample("This pension key has no vault yet. Create one on the wallets page.");
   }
 
   const read = await readLedger(config.databaseUrl, vault.value);

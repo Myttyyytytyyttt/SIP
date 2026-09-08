@@ -63,13 +63,27 @@ export function WalletsHost({
 
   return (
     <OpenerContext.Provider value={opener}>
-      {children}
-      {!mounted ? null : config !== null ? (
+      {config !== null ? (
+        // THE PROVIDER NOW WRAPS THE TREE, and no longer sits beside it.
+        //
+        // It used to mount lazily, next to `children`, so a visitor who never
+        // opened the wallets modal never paid for Privy. That was right while
+        // nothing above the modal needed to know who was connected. It stopped
+        // being right when the page itself became the answer to "whose pension
+        // is this": the shell reads the pension key to decide between the
+        // landing and the dashboard, and a hook cannot reach a provider that is
+        // its sibling.
+        //
+        // The MODAL is still lazy, which is where the weight actually was.
         <Providers config={config}>
-          <WalletsModal config={config} open={open} onOpenChange={setOpen} />
+          {children}
+          {mounted ? <WalletsModal config={config} open={open} onOpenChange={setOpen} /> : null}
         </Providers>
       ) : (
-        <WalletsSetupModal problems={problems ?? []} open={open} onOpenChange={setOpen} />
+        <>
+          {children}
+          {mounted ? <WalletsSetupModal problems={problems ?? []} open={open} onOpenChange={setOpen} /> : null}
+        </>
       )}
     </OpenerContext.Provider>
   );
