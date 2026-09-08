@@ -37,7 +37,7 @@ export function Landing() {
         </div>
       </header>
 
-      <main className="flex flex-1 items-center justify-center px-6 pb-24">
+      <main className="flex flex-1 items-center justify-center px-6 pb-14">
         <div className="flex w-full max-w-sm flex-col items-center gap-6 text-center">
           <div className="flex flex-col gap-2">
             <h1 className="text-2xl font-semibold tracking-tight">A pension you keep</h1>
