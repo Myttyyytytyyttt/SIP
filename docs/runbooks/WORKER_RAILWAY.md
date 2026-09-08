@@ -140,3 +140,67 @@ revealed, and both would have failed the first Railway deploy:
 
 If you change either Dockerfile, build and RUN it before deploying. Both of these
 were invisible to a careful reading.
+
+## Running the whole thing locally first
+
+`docker compose up --build` brings up the same two images Railway builds, plus
+the Postgres Railway would give you as a plugin. Railway does not read the
+compose file; compose is the rehearsal, `railway.json` is the performance.
+
+    cp .env.example .env      # then fill in the RPC URL and the Privy values
+    docker compose up --build
+
+`SIP_WEB_PORT` moves the web container's host port when your own dev server is
+already on 3002. The container always listens on 3002 regardless, because its
+healthcheck runs inside it.
+
+What a good local run looks like, measured on the first one:
+
+    db      Healthy
+    worker  worker.start … ledger=postgres … factory=0xf38448a0…
+            worker.heartbeat pass=1 tickMs=357 headL2=…  wallets=0
+    web     /api/health 200, /wallets 200
+
+Zero wallets is right until a vault exists. The worker creates its seven tables
+on first connection: `sip_wallet`, `sip_fill`, `sip_window`, `sip_pull`,
+`sip_refusal`, `sip_exclusion`, `sip_instance`.
+
+To see the single-writer guarantee rather than trust it, start a second worker
+against the same database:
+
+    docker compose run --rm --no-deps worker
+
+It refuses, naming who holds the lock and since when, and the first keeps
+running. That refusal is the whole reason `numReplicas` is 1.
+
+## Supabase
+
+The project is `sgjwrlrixeoqnzbrtjby`, in **eu-west-1**, and the connection that
+works is the **session pooler**:
+
+    postgres://postgres.sgjwrlrixeoqnzbrtjby:<password>@aws-1-eu-west-1.pooler.supabase.com:5432/postgres
+
+Three things about that string are load-bearing:
+
+- **Port 5432, never 6543.** 6543 is the transaction pooler; advisory locks are
+  session scoped and do not survive it, so the lock would appear granted while
+  holding nothing and two workers would run believing they were alone.
+  `config.ts` refuses port 6543 by name rather than letting that happen.
+- **The pooler, not the direct connection.** `db.<ref>.supabase.co` resolves to
+  an AAAA record only — no IPv4 — so it is unreachable from a default Docker
+  bridge network. The pooler has an A record.
+- **`aws-1-`, not `aws-0-`.** Older projects use the `aws-0-` hosts; this one is
+  on `aws-1-`. The wrong prefix fails with
+  `(ENOTFOUND) tenant/user postgres.<ref> not found`, which reads like a
+  credentials problem and is not one.
+
+Verified end to end: the worker connected through this string, created all seven
+tables in the Supabase project, and held one advisory lock while ticking.
+
+The Supabase MCP server is configured in `.mcp.json` (its `project_ref` had been
+inherited from the parent project and pointed at the wrong database until this
+was written). Authenticating it is an OAuth flow that needs a real terminal:
+
+```bash
+claude /mcp
+```

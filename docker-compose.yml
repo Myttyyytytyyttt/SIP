@@ -1,45 +1,80 @@
-# SIP — local development and plain-VPS deployment.
+# SIP — Railway, on your own machine.
 #
-#   docker compose build web
-#   docker compose up -d
+#   cp .env.example .env      # then fill it in
+#   docker compose up --build
 #
-# Railway does NOT run compose files; it builds each service from its own
-# Dockerfile and ignores depends_on and port mappings. railway.json describes
-# the web service there; the worker is a second Railway service pointed at
-# packages/worker/Dockerfile.
+# This file exists so the stack can be run and broken locally before it is run
+# and broken in front of users. It builds the SAME two images Railway builds,
+# from the same Dockerfiles, with the same environment contract, and adds the
+# Postgres that Railway would give you as a plugin.
+#
+# Railway does NOT read this file. It builds each service from its own
+# Dockerfile: the root railway.json describes the web service, and
+# packages/worker/railway.json the worker. Compose is the rehearsal; those two
+# are the performance.
 #
 # BOTH IMAGES BUILD FROM THE REPOSITORY ROOT, because the install needs
 # pnpm-lock.yaml and the workspace; a build with packages/<name> as its context
-# cannot see them.
-
-x-chain-env: &chain-env
-  # Everything the two services agree on. The RPC URL carries an API key and is
-  # therefore server-side only — the browser reaches the chain through the web
-  # app's own /api/rpc relay, never this value.
-  NUVEM_RPC_URL: ${NUVEM_RPC_URL:?set NUVEM_RPC_URL}
-  NUVEM_CHAIN_ID: ${NUVEM_CHAIN_ID:-4663}
-  NUVEM_VAULT_FACTORY: ${NUVEM_VAULT_FACTORY:?set NUVEM_VAULT_FACTORY}
-  NUVEM_SETTLEMENT_EXECUTOR: ${NUVEM_SETTLEMENT_EXECUTOR:?set NUVEM_SETTLEMENT_EXECUTOR}
+# cannot see either.
+#
+# ONE SET OF NAMES. You set SIP_* here and nothing else. The web app still reads
+# the inherited NUVEM_* names internally, so this file translates rather than
+# making you keep two vocabularies in your head.
 
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sip
+      POSTGRES_PASSWORD: sip
+      POSTGRES_DB: sip
+    # Exposed on 5433 so it cannot collide with a Postgres you already run.
+    ports:
+      - "5433:5432"
+    volumes:
+      - sip-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sip -d sip"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
   web:
     build:
       context: .
       dockerfile: packages/website-oficial/Dockerfile
+      args:
+        # BUILD time, not run time. Next bakes NEXT_PUBLIC_* into the browser
+        # bundle, so a value supplied only in `environment:` below arrives after
+        # the bundle is already built and the page loads with no Privy at all —
+        # healthy, serving, and quietly broken. The app id is public by design.
+        NEXT_PUBLIC_PRIVY_APP_ID: ${PRIVY_APP_ID:?set PRIVY_APP_ID}
     environment:
-      <<: *chain-env
-      PRIVY_APP_ID: ${PRIVY_APP_ID:?set PRIVY_APP_ID}
+      NUVEM_RPC_URL: ${SIP_RPC_URL:-${SIP_RPC_URLS:?set SIP_RPC_URLS}}
+      NUVEM_CHAIN_ID: ${SIP_CHAIN_ID:-4663}
+      NUVEM_VAULT_FACTORY: ${SIP_VAULT_FACTORY:?set SIP_VAULT_FACTORY}
+      NUVEM_SETTLEMENT_EXECUTOR: ${SIP_SETTLEMENT_EXECUTOR:?set SIP_SETTLEMENT_EXECUTOR}
+      NUVEM_WETH: ${SIP_WETH:-}
+      NUVEM_PAUSE_CONTROLLER: ${SIP_PAUSE_CONTROLLER:-}
+      NUVEM_ATTESTER_REGISTRY: ${SIP_ATTESTER_REGISTRY:-}
+      NUVEM_LOGS_FROM_BLOCK: ${SIP_LOGS_FROM_BLOCK:?set SIP_LOGS_FROM_BLOCK}
+      NUVEM_COHORT_ID: ${SIP_COHORT_ID:-1}
+      NUVEM_PUBLIC_RPC_URL: ${SIP_PUBLIC_RPC_URL:-}
+      PRIVY_APP_ID: ${PRIVY_APP_ID}
+      PRIVY_APP_SECRET: ${PRIVY_APP_SECRET:-}
       PRIVY_SIGNER_ID: ${PRIVY_SIGNER_ID:-}
       PRIVY_POLICY_ID: ${PRIVY_POLICY_ID:-}
-      NUVEM_PUBLIC_RPC_URL: ${NUVEM_PUBLIC_RPC_URL:-}
-      DATABASE_URL: ${DATABASE_URL:-}
       # The image's runner defaults to 3000 and Next reads PORT at start-up. The
       # repo's dev server uses 3002, so the container is told to match rather
       # than the port being mapped across — otherwise the health check below,
       # which runs INSIDE the container, probes a port nothing is listening on.
       PORT: 3002
     ports:
-      - "3002:3002"
+      # Host port only. The container always listens on 3002 (see PORT above),
+      # because the healthcheck runs INSIDE it. Override SIP_WEB_PORT when your
+      # own dev server already holds this one.
+      - "${SIP_WEB_PORT:-3002}:3002"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3002/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -48,22 +83,40 @@ services:
       retries: 3
 
   # DRY RUN UNLESS ARMED. The worker reads no signing secret at all unless
-  # SIP_WORKER_ALLOW_BROADCAST is the exact sentence; see packages/worker/README.md.
+  # SIP_WORKER_ALLOW_BROADCAST is the exact sentence, compared byte for byte.
+  # Leave it unset and the secrets below are removed from the environment unread.
   worker:
     build:
       context: .
       dockerfile: packages/worker/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
       SIP_RPC_URLS: ${SIP_RPC_URLS:?set SIP_RPC_URLS}
-      SIP_CHAIN_ID: ${NUVEM_CHAIN_ID:-4663}
-      SIP_VAULT_FACTORY: ${NUVEM_VAULT_FACTORY:?set NUVEM_VAULT_FACTORY}
-      SIP_SETTLEMENT_EXECUTOR: ${NUVEM_SETTLEMENT_EXECUTOR:?set NUVEM_SETTLEMENT_EXECUTOR}
+      SIP_CHAIN_ID: ${SIP_CHAIN_ID:-4663}
+      SIP_VAULT_FACTORY: ${SIP_VAULT_FACTORY:?set SIP_VAULT_FACTORY}
+      SIP_SETTLEMENT_EXECUTOR: ${SIP_SETTLEMENT_EXECUTOR:?set SIP_SETTLEMENT_EXECUTOR}
       SIP_LOGS_FROM_BLOCK: ${SIP_LOGS_FROM_BLOCK:?set SIP_LOGS_FROM_BLOCK}
-      SIP_DATABASE_URL: ${DATABASE_URL:-}
+      SIP_MAX_LOG_SPAN: ${SIP_MAX_LOG_SPAN:-}
+      SIP_POLL_MS: ${SIP_POLL_MS:-}
+      # The compose Postgres by default, so a local run keeps its scan cursor
+      # across restarts and takes the advisory lock exactly as it will in
+      # production. Point it elsewhere by setting SIP_DATABASE_URL yourself.
+      # sslmode=disable because this Postgres is a container on a private compose
+      # network with no certificate; the worker honours that mode precisely so a
+      # plain local database can be exercised, and demands TLS for everything
+      # else (ledger/pg.ts, sslOptionsFor). Railway's Postgres speaks TLS, so
+      # there you pass its URL unchanged.
+      SIP_DATABASE_URL: ${SIP_DATABASE_URL:-postgres://sip:sip@db:5432/sip?sslmode=disable}
       SIP_WORKER_ALLOW_BROADCAST: ${SIP_WORKER_ALLOW_BROADCAST:-}
       SIP_ATTESTER_PRIVATE_KEY: ${SIP_ATTESTER_PRIVATE_KEY:-}
       PRIVY_APP_ID: ${PRIVY_APP_ID:-}
       PRIVY_APP_SECRET: ${PRIVY_APP_SECRET:-}
       PRIVY_AUTHORIZATION_PRIVATE_KEY: ${PRIVY_AUTHORIZATION_PRIVATE_KEY:-}
       PRIVY_SIGNER_ID: ${PRIVY_SIGNER_ID:-}
+      PRIVY_POLICY_ID: ${PRIVY_POLICY_ID:-}
     restart: unless-stopped
+
+volumes:
+  sip-db:
