@@ -37,6 +37,15 @@ ENV NODE_ENV=production
 RUN groupadd --system --gid 1001 sip && useradd --system --uid 1001 --gid sip sip
 COPY --from=builder --chown=sip:sip /repo /repo
 USER sip
-# `run` loops on SIP_WORKER_POLL_MS; `tick` does one pass and exits, which is
-# what a cron-style platform wants.
-CMD ["pnpm", "--dir", "packages/worker", "worker"]
+WORKDIR /repo/packages/worker
+# tsx DIRECTLY, not `pnpm run worker`. corepack resolves the pinned pnpm on first
+# use and writes it under $HOME, and this system user was created without one, so
+# going through the package manager dies at startup with
+#   EACCES: permission denied, mkdir '/home/sip/.cache/node/corepack/v1'
+# after a build that looked perfectly healthy. Measured, not feared: it is what
+# the first `docker run` of this image actually did. The runtime does not need a
+# package manager, it needs one binary.
+#
+# `run` loops on SIP_POLL_MS (default 300000). For a cron-style platform, override
+# the command with:  node_modules/.bin/tsx bin/worker.mts tick
+CMD ["node_modules/.bin/tsx", "bin/worker.mts", "run"]

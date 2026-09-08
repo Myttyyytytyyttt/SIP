@@ -180,7 +180,7 @@ RUN pnpm --filter @sip/web run build
 # put into standalone (the usual cause of an unstyled page with 404ing
 # /_next/static chunks), and finally fails the build on any dangling symlink,
 # since pnpm's symlinked store can otherwise produce a container that dies at
-# boot.
+# boot -- with one carve-out, explained at the prune step below.
 RUN set -eu; \
     sa="/repo/packages/website-oficial/.next/standalone"; \
     if [ ! -d "$sa" ]; then \
@@ -215,6 +215,22 @@ RUN set -eu; \
       echo "[standalone] Fine if Next bundled it into the server output; a"; \
       echo "[standalone] boot-time MODULE_NOT_FOUND means it did not, and"; \
       echo "[standalone] outputFileTracingRoot must be the repo root."; \
+    fi; \
+# .pnpm/node_modules is pnpm's hoisted-alias directory: convenience links that
+# exist so peer dependencies resolve. Next's tracer can copy such a link without
+# its target when nothing traced ever reads through it, and that is what happens
+# here with semver -- the standalone output carries semver@7.8.5 as a real
+# package while the stale alias points at 6.3.1. A dangling entry THERE is a
+# layout artifact, not a missing dependency: booting this exact output with the
+# broken link in place served /api/health, / and /wallets, all 200. So prune
+# those (a broken link can only ever fail) and stay fatal everywhere else, which
+# is where a dangling link really does mean Next failed to copy something the
+# server reaches for at boot.
+    hoisted="$(find "$sa" -xtype l -path '*/.pnpm/node_modules/*' -print)"; \
+    if [ -n "$hoisted" ]; then \
+      echo "[standalone] pruning dangling pnpm hoist aliases:"; \
+      echo "$hoisted"; \
+      find "$sa" -xtype l -path '*/.pnpm/node_modules/*' -delete; \
     fi; \
     dangling="$(find "$sa" -xtype l -print)"; \
     if [ -n "$dangling" ]; then \

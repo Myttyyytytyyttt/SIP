@@ -1,5 +1,5 @@
 {
-  "name": "SIP — first deployment",
+  "name": "SIP \u2014 first deployment",
   "chainId": 4663,
   "deployedAt": "2026-09-08",
   "deployBlock": 57746389,
@@ -21,14 +21,18 @@
   },
   "spent": {
     "governanceBootstrap": "0x14ABcE83EFf2BB976772b9a35a988F8B4ddf2718",
-    "factoryBootstrap": "0x2739e244f142EA04465d36D4cdF7b0B723BA7b24"
+    "factoryBootstrap": "0x2739e244f142EA04465d36D4cdF7b0B723BA7b24",
+    "deployerEOA": "0xdb4a3d525bc6907afa2ffab8d73995ce9c14f63f",
+    "note": "The deployer EOA and the two bootstrap contracts are all spent. Verified on chain: the deployer holds NO role on the timelock and owns nothing; the bootstraps revoked their own roles at block 57746449. Nothing needs the deployer key again."
   },
   "governance": {
     "governor": "0xcbf32597a84a471b3C4BB050EBDa457A136cDFD5",
     "note": "A HOT KEY, generated for testing. It is proposer, executor, canceller, guardian and fee owner. The timelock is what makes moving this to hardware a grant-then-revoke batch rather than a redeploy.",
     "timelockMinDelaySeconds": 0,
     "attester": "0x2dB0dc31cfCb9931c79c95BbeAd3873b2D9f6afD",
-    "feeBps": 0
+    "feeBps": 0,
+    "walletCount": 2,
+    "walletPolicy": "TWO wallets for this phase, deliberately. The governor holds every operational role there is \u2014 timelock proposer/executor/canceller, FeeController owner, PauseController guardian, AdapterRegistry guardian \u2014 so it is deployer, governor and guardian in one. The attester is the second, and it never needs gas: it signs the attestation, while the settle transaction is sent by the trading wallet through its Privy seat. Any third address is an accident to be swept and forgotten."
   },
   "verifiedOnChain": {
     "date": "2026-09-08",
