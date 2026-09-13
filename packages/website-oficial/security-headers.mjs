@@ -17,6 +17,16 @@ const WALLETCONNECT_IFRAMES = ["https://verify.walletconnect.com", "https://veri
 const TURNSTILE = "https://challenges.cloudflare.com";
 
 /**
+ * THE LANDING'S BACKGROUND FOOTAGE. Without it media-src falls back to
+ * default-src 'self' and the <video> is refused with nothing on the page to say
+ * so — just an empty background. This host is the reference template's CDN and
+ * serves a PLACEHOLDER clip (another brand's credit card): remove this entry
+ * when the footage is replaced with SIP's own, self-hosted under /public. See
+ * BACKGROUND_VIDEO in src/components/landing.tsx.
+ */
+const LANDING_VIDEO_HOST = "https://d8j0ntlcm91z4.cloudfront.net";
+
+/**
  * Operator overrides that move a browser-facing endpoint off this origin. The
  * wallet RPC defaults to this app's own /api/rpc relay, so nothing is listed
  * unless someone set one of these — in which case its origin has to be in
@@ -96,6 +106,9 @@ export function buildCsp(extraOrigins = overrides()) {
      * list renders with holes where the wallets should be.
      */
     "img-src": ["'self'", "data:", "blob:", "https://explorer-api.walletconnect.com"],
+
+    // The landing's scrubbed background video (see LANDING_VIDEO_HOST).
+    "media-src": ["'self'", LANDING_VIDEO_HOST],
 
     // next/font/google self-hosts at build time, so the faces are same-origin.
     "font-src": ["'self'"],
