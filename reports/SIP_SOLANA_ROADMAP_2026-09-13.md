@@ -392,7 +392,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Escribo el script que crea en Privy la regla que solo deja al vigilante firmar cobros de SIP.
 - **Por qué:** La regla de Solana de Nuvem nunca se escribió en el repo y nadie sabe qué permitía.
 - **Listo cuando:** El script está en el repo, revisado, y no imprime ningún secreto.
-- **Técnico:** ALLOW signAndSendTransaction con programId en {SIP, Ed25519SigVerify, ComputeBudget}; DENY exportPrivateKey y signMessage; owner = key quorum. La regla va en el firmante, nunca en la wallet: en la wallet impediría exportarla a Axiom. Ids a stdout, secretos a un archivo 0600.
+- **Técnico:** ALLOW signAndSendTransaction con programId en {SIP, Ed25519SigVerify, ComputeBudget}; DENY exportPrivateKey y signMessage; owner = key quorum. La regla va en el firmante, nunca en la wallet: en la wallet impediría exportarla a Axiom. Ids a stdout, secretos a un archivo 0600. Dueña de la política: una key quorum de administración distinta de la del vigilante (Privy exige la firma del dueño para cambiarla). Pruebas de rechazo con transacciones que simularían bien (1 lamport a sí misma, Memo): Privy simula antes de evaluar la política.
 
 ### Martes 15
 
@@ -450,7 +450,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** El vigilante lee el modo y la tasa de cada bóveda, construye el cobro nuevo y no cobra si no vio todo el tramo.
 - **Por qué:** Un cobro con el mensaje viejo, o sin ver todas las operaciones, sería dinero mal cobrado.
 - **Listo cuando:** En local, un cobro por modo aterriza con el vector dorado del programa.
-- **Técnico:** Atestación V2 del vector dorado; fetchMultiple de bóvedas con el IDL; frontera alcanzada = vio una firma con slot menor o igual que la frontera, en finalized (no se usa until con la firma del último cobro: saltaría operaciones). PENDING_FINALITY sin alerta; base cero avanza.
+- **Técnico:** Atestación V2 del vector dorado; fetchMultiple de bóvedas con el IDL; frontera alcanzada = vio una firma con slot menor o igual que la frontera, en finalized (no se usa until con la firma del último cobro: saltaría operaciones). PENDING_FINALITY sin alerta; base cero avanza. Fijar o rechazar PRIVY_API_BASE_URL para que el app secret no pueda ir a otro host; pre-comprobar la reserva de la wallet antes de atestar.
 
 #### `keeper-variables` — Pegar las variables del vigilante en Railway
 
@@ -484,7 +484,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Invierte en tramos que puede adelantar, avisa si algo falla, dice la verdad en /health y guarda su historial.
 - **Por qué:** El vigilante viejo se paró cinco días sin que nadie se enterara.
 - **Listo cuando:** En seco contra mainnet: /health responde, /status muestra el último barrido y llega una alerta de prueba.
-- **Técnico:** Envolver min(libre, saldo del crank − 0,02 SOL); convertir min(wSOL, max(max_per_call, 1 SOL)). Alerta en invest FAILED. /health 503 si el último barrido empezado supera max(3 × SWEEP, 10 min). Dos bucles, cobro e inversión. Esquema sip_solana en Supabase. Barrido de 60 s hasta limitar la inversión a después de un cobro.
+- **Técnico:** Envolver min(libre, saldo del crank − 0,02 SOL); convertir min(wSOL, max(max_per_call, 1 SOL)). Alerta en invest FAILED. /health 503 si el último barrido empezado supera max(3 × SWEEP, 10 min). Dos bucles, cobro e inversión. Esquema sip_solana en Supabase. Barrido de 60 s hasta limitar la inversión a después de un cobro. De la revisión del port: comprobar el tope de 30 días antes de empezar una cesta; la clave de settlement_event debe incluir la época del link (hoy un re-vínculo pierde filas); .dockerignore para id.json y .local dentro del paquete; validar la forma de SIP_SOLANA_PRIVY_APP_ID y SIGNER_ID antes de servirlos en /status.
 
 #### `pension-demo` — Preparar las wallets de la demo
 
