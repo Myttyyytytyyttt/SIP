@@ -392,7 +392,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Escribo el script que crea en Privy la regla que solo deja al vigilante firmar cobros de SIP.
 - **Por qué:** La regla de Solana de Nuvem nunca se escribió en el repo y nadie sabe qué permitía.
 - **Listo cuando:** El script está en el repo, revisado, y no imprime ningún secreto.
-- **Técnico:** ALLOW signAndSendTransaction con programId en {SIP, Ed25519SigVerify, ComputeBudget}; DENY exportPrivateKey y signMessage; owner = key quorum. La regla va en el firmante, nunca en la wallet: en la wallet impediría exportarla a Axiom. Ids a stdout, secretos a un archivo 0600. Dueña de la política: una key quorum de administración distinta de la del vigilante (Privy exige la firma del dueño para cambiarla). Pruebas de rechazo con transacciones que simularían bien (1 lamport a sí misma, Memo): Privy simula antes de evaluar la política.
+- **Técnico:** ALLOW signAndSendTransaction con programId en {SIP, Ed25519SigVerify} (sin ComputeBudget: permitiría gastar el SOL de la wallet en comisiones); DENY exportPrivateKey y signMessage; owner = key quorum. La regla va en el firmante, nunca en la wallet: en la wallet impediría exportarla a Axiom. Ids a stdout, secretos a un archivo 0600. Dueña de la política: una key quorum de administración distinta de la del vigilante (Privy exige la firma del dueño para cambiarla). Pruebas de rechazo con transacciones que simularían bien (1 lamport a sí misma, Memo): Privy simula antes de evaluar la política. Hecho 14-sep: pnpm --dir packages/solana-keeper privy-policy (--print, create, check, verify) y docs/runbooks/PRIVY_SOLANA.md.
 
 ### Martes 15
 
