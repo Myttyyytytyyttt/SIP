@@ -19,7 +19,9 @@ import { join } from "node:path";
 const LOCAL = join(__dirname, ".local");
 mkdirSync(LOCAL, { recursive: true });
 
-const PROGRAM_ID = new PublicKey("7rtgXTu852M1NTx7PLoJd3bChaCb2hgsgv5o54aFv6Fy");
+// Read from the built IDL, never typed by hand: the PDAs derived below must match
+// the program the fork actually loads.
+const PROGRAM_ID = new PublicKey(JSON.parse(readFileSync(join(__dirname, "../target/idl/sip_vault.json"), "utf8")).address);
 const USDC = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 const USDC_FUND = 30_000_000n; // 30 USDC
 

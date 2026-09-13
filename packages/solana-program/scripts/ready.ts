@@ -41,7 +41,9 @@ function envFrom(path: string, name: string): string | null {
 
 async function main() {
   const rpc = process.env.NUVEM_SOLANA_MAINNET_RPC;
-  const programId = new PublicKey("7rtgXTu852M1NTx7PLoJd3bChaCb2hgsgv5o54aFv6Fy");
+  // Read from the built IDL, never typed by hand: a hardcoded id is how a script
+  // ends up pointed at a deployment nobody meant.
+  const programId = new PublicKey(JSON.parse(readFileSync(join(__dirname, "../target/idl/sip_vault.json"), "utf8")).address);
 
   section("1. cadena");
   if (!rpc) {
