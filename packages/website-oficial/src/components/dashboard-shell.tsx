@@ -24,7 +24,7 @@
  * the label and the numbers cannot disagree.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { usePrivy } from "@privy-io/react-auth";
 import type { Address } from "viem";
@@ -39,6 +39,7 @@ import { SavingsRulePanel } from "@/components/savings-rule-panel";
 import { SavingsStrip } from "@/components/savings-strip";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { pensionKeyOf } from "@/components/wallets/WalletsScreen";
 import type { DashboardMock } from "@/mocks";
@@ -60,6 +61,8 @@ export function DashboardShell({
   mock,
   pinnedAdmin,
   initialLive,
+  initialMode = "live",
+  walletsConfigured,
 }: {
   /** The seeded example, rendered on the server so Mock never needs the network. */
   mock: DashboardLoadJson;
@@ -67,15 +70,37 @@ export function DashboardShell({
   pinnedAdmin: Address | null;
   /** What the server already loaded for `pinnedAdmin`, so the deep link does not refetch. */
   initialLive: DashboardLoadJson | null;
+  /** `?mode=mock` opens on the example. */
+  initialMode?: DataMode;
+  /** Whether the wallets modal has a configuration; the landing's Connect depends on it. */
+  walletsConfigured: boolean;
 }) {
-  const { ready, user } = usePrivy();
+  const { ready, user, login } = usePrivy();
+
+  // ENTERED WITHOUT A KEY. The landing lets a visitor walk into the example
+  // without connecting — scroll, or click the screenshot. Nothing about them is
+  // known, so Live is not merely empty, it is impossible: the toggle greys it
+  // out, and the example stays under its Sample data badge until a key exists.
+  const [entered, setEntered] = useState(initialMode === "mock");
+  // Entering pushes the URL the links already carry, so the hydrated path and
+  // the no-JS path converge: reload lands on the example, Back returns to the
+  // landing. Next patches pushState itself, so no router round trip is needed.
+  const onEnter = useCallback(() => {
+    setEntered(true);
+    window.history.pushState({}, "", "/?mode=mock");
+  }, []);
+  useEffect(() => {
+    const onPop = () => setEntered(new URLSearchParams(window.location.search).get("mode") === "mock");
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   // The pension key is derived, never stored: the app keeps no copy of who you
   // are, so a disconnect is a disconnect (WalletsScreen.pensionKeyOf).
   const pensionKey = useMemo(() => (user === null ? null : pensionKeyOf(user)), [user]);
   const admin: Address | null = pinnedAdmin ?? pensionKey;
 
-  const [mode, setMode] = useState<DataMode>("live");
+  const [mode, setMode] = useState<DataMode>(initialMode);
   const [live, setLive] = useState<LiveState>(
     pinnedAdmin !== null && initialLive !== null
       ? { status: "ready", admin: pinnedAdmin, load: initialLive }
@@ -87,9 +112,16 @@ export function DashboardShell({
     mode === "live" &&
     (live.status === "idle" || (live.status !== "loading" && live.admin !== admin));
 
+  // KEYED ON A GENERATION, NOT CANCELLED IN CLEANUP. A first version dropped
+  // the answer when the effect re-ran, and left `live` at "loading" with nothing
+  // that would ever refetch: a Mock click during the skeleton, or a key change
+  // mid-load, stranded a connected user on a skeleton until reload. Now an
+  // old answer is simply ignored, and the render never draws a payload that was
+  // fetched for another key.
+  const generation = useRef(0);
   useEffect(() => {
     if (!needsFetch || admin === null) return;
-    let cancelled = false;
+    const mine = ++generation.current;
     setLive({ status: "loading", admin });
     // No cache: a pull that landed a minute ago should show, and this is one
     // request per switch, not a poll.
@@ -100,31 +132,62 @@ export function DashboardShell({
         return body as DashboardLoadJson;
       })
       .then((load) => {
-        if (!cancelled) setLive({ status: "ready", admin, load });
+        if (generation.current === mine) setLive({ status: "ready", admin, load });
       })
       .catch((error: unknown) => {
-        if (!cancelled) {
+        if (generation.current === mine) {
           setLive({ status: "failed", admin, detail: error instanceof Error ? error.message : "unknown error" });
         }
       });
-    return () => {
-      cancelled = true;
-    };
   }, [needsFetch, admin]);
 
-  const onModeChange = useCallback((next: DataMode) => setMode(next), []);
+  // A person who walked in on the example and then connects should land on
+  // their own numbers — unless they have touched the toggle themselves.
+  const touched = useRef(false);
+  const onModeChange = useCallback((next: DataMode) => {
+    touched.current = true;
+    setMode(next);
+  }, []);
+  const hadKey = useRef(admin !== null);
+  useEffect(() => {
+    if (admin !== null && !hadKey.current && !touched.current) setMode("live");
+    hadKey.current = admin !== null;
+  }, [admin]);
 
-  // Privy has not decided yet. Rendering the landing here would flash a connect
-  // button at somebody who is already connected.
-  if (!ready) return <BootSkeleton />;
+  // THE FRONT DOOR DOES NOT WAIT FOR PRIVY. It used to: a skeleton until
+  // `ready`, so a returning user never saw a Connect button flash before the
+  // dashboard. Measured in a headless browser, `ready` never came, and the
+  // page stayed blank for as long as anyone cared to wait — a front door that
+  // depends on a third party's initialisation to open at all. So the landing
+  // renders at once; only its Connect button waits (it shows a placeholder
+  // until Privy can act), and when Privy does resolve with a key, this
+  // component simply re-renders into the dashboard. A returning user sees the
+  // landing for the length of that handshake, which is the better trade.
+  if (admin === null && !entered) return <Landing onEnter={onEnter} walletsConfigured={walletsConfigured} />;
 
-  // Nobody is connected and the URL names nobody: there is no pension to show.
-  if (admin === null) return <Landing />;
+  // With no key there is no Live. The control shows that rather than hiding it.
+  const control = <DataModeToggle mode={admin === null ? "mock" : mode} onModeChange={onModeChange} disabled={admin === null} />;
 
-  const control = <DataModeToggle mode={mode} onModeChange={onModeChange} />;
+  if (admin === null) {
+    // Browse mode, honestly: the notice does not tell the visitor to switch to
+    // a control that is disabled, and the header wears a real Connect instead
+    // of the example's fake wallet menu. `ready` gates it exactly as the
+    // landing's does — on an incomplete deployment there is no provider.
+    return (
+      <Body
+        load={{ ...mock, notice: "Example data. Nobody\u2019s pension \u2014 connect to see your own." }}
+        control={control}
+        account={
+          <Button size="sm" onClick={() => login()} disabled={!ready}>
+            Connect
+          </Button>
+        }
+      />
+    );
+  }
 
   if (mode === "live") {
-    if (live.status === "loading" || live.status === "idle") {
+    if (live.status === "loading" || live.status === "idle" || live.admin !== admin) {
       return <Chrome control={control} admin={admin} now={mock.data.now} loading />;
     }
     if (live.status === "failed") {
@@ -149,12 +212,20 @@ export function DashboardShell({
 }
 
 /** The full dashboard for one payload. Every component takes exactly the slice it renders. */
-function Body({ load, control }: { load: DashboardLoadJson; control: React.ReactNode }) {
+function Body({
+  load,
+  control,
+  account,
+}: {
+  load: DashboardLoadJson;
+  control: React.ReactNode;
+  account?: React.ReactNode;
+}) {
   const { now, wallet, rule, stats, curve, days, holdings, trades, activity } = load.data;
 
   return (
     <div className="flex min-h-dvh flex-col">
-      <SiteHeader wallet={wallet} activity={activity} now={now} control={control} />
+      <SiteHeader wallet={wallet} activity={activity} now={now} control={control} account={account} />
 
       <div className="flex flex-1">
         <aside className="hidden w-80 shrink-0 border-r lg:block xl:w-88">
@@ -237,18 +308,6 @@ function Chrome({
         children
       )}
       <SiteFooter now={now} />
-    </div>
-  );
-}
-
-function BootSkeleton() {
-  return (
-    <div className="flex min-h-dvh flex-col">
-      <div className="h-14 border-b" />
-      <main className="flex flex-1 flex-col gap-4 p-4 lg:gap-6 lg:p-6">
-        <Skeleton className="h-8 w-full max-w-md" />
-        <Skeleton className="h-64 w-full" />
-      </main>
     </div>
   );
 }

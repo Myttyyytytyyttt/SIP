@@ -40,12 +40,15 @@ export function SiteHeader({
   activity,
   now,
   control = null,
+  account,
 }: {
   wallet: Wallet;
   activity: readonly ActivityEvent[];
   now: string;
   /** The Live/Mock control. A slot, so the header stays ignorant of what it switches. */
   control?: React.ReactNode;
+  /** What stands where the wallet menu does. Defaults to the menu; browse mode passes a real Connect. */
+  account?: React.ReactNode;
 }) {
   // THE SHEET IS CONTROLLED SO IT CAN GET OUT OF THE WAY. Below lg this sheet is
   // where "Manage wallets" lives, and a modal opened from inside a sheet is the
@@ -117,7 +120,7 @@ export function SiteHeader({
         <div className="ml-auto flex items-center gap-2">
           {control}
           <ModeToggle />
-          <WalletMenu wallet={wallet} />
+          {account ?? <WalletMenu wallet={wallet} />}
         </div>
       </div>
     </header>

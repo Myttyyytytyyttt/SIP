@@ -37,8 +37,12 @@ export default async function Page({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const requested = (await searchParams).admin;
+  const params = await searchParams;
+  const requested = params.admin;
   const candidate = typeof requested === "string" ? requested.trim() : "";
+  // `?mode=mock` opens the example directly — how the landing's "see the app"
+  // enters, and how a screenshot of the example is taken by URL alone.
+  const initialMode = params.mode === "mock" ? "mock" : "live";
   // strict: false — a key pasted lowercase names the same account as the
   // checksummed form. Anything that is not an address is simply nobody.
   const admin = isAddress(candidate, { strict: false }) ? getAddress(candidate) : null;
@@ -69,7 +73,13 @@ export default async function Page({
 
   return (
     <WalletsHost config={walletsConfig} problems={walletsProblems}>
-      <DashboardShell mock={sample} pinnedAdmin={admin} initialLive={initialLive} />
+      <DashboardShell
+        mock={sample}
+        pinnedAdmin={admin}
+        initialLive={initialLive}
+        initialMode={initialMode}
+        walletsConfigured={walletsConfig !== null}
+      />
     </WalletsHost>
   );
 }

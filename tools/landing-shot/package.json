@@ -1,0 +1,8 @@
+{
+  "name": "sip-landing-shot",
+  "private": true,
+  "description": "Regenerates packages/website-oficial/public/landing/app-dark.png from the running site. Not a workspace package on purpose: Playwright never enters the web image.",
+  "type": "module",
+  "scripts": { "shot": "node shot.mjs" },
+  "devDependencies": { "playwright": "1.55.1" }
+}

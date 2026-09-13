@@ -128,3 +128,48 @@
     @apply font-sans;
     }
 }
+/* ─── The landing ────────────────────────────────────────────────────────────
+   Committed dark, whatever the theme: it paints its own ground (#0A0B11) and
+   its own type, so it reads the same under a light system setting. Everything
+   that moves is driven by custom properties set from one rAF loop — no state
+   per frame, no canvas, no data URLs. Reduced motion turns the theatre off.  */
+@keyframes landing-rise {
+  0%   { opacity: 0; transform: translateY(24px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes landing-fade {
+  0%   { opacity: 0; }
+  100% { opacity: 1; }
+}
+/* `backwards`, not `both`, and no static opacity/transform: with `both` the
+   finished animation kept `transform: translateY(0)` in force and beat the
+   frame's own perspective forever — the tilt never rendered. The 0% keyframe
+   already covers the delay, and 100% equals the base, so nothing snaps. */
+.landing-rise {
+  animation: landing-rise 0.9s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+.landing-fade {
+  animation: landing-fade 1s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+/* The spotlight: a 260px circle at the cursor that reveals the bright copy of
+   the screenshot over the dimmed one. Same feathering as the reference. */
+.landing-reveal {
+  -webkit-mask-image: radial-gradient(260px circle at var(--sx, -1000px) var(--sy, -1000px),
+    #000 0%, #000 40%, rgba(0,0,0,.75) 60%, rgba(0,0,0,.4) 75%, rgba(0,0,0,.12) 88%, transparent 100%);
+  mask-image: radial-gradient(260px circle at var(--sx, -1000px) var(--sy, -1000px),
+    #000 0%, #000 40%, rgba(0,0,0,.75) 60%, rgba(0,0,0,.4) 75%, rgba(0,0,0,.12) 88%, transparent 100%);
+}
+/* The device: tilted at rest, flat and slightly larger as the page scrolls
+   toward the app. --p is scroll progress, 0..1. */
+.landing-device {
+  transform: perspective(1400px) rotateX(calc(9deg * (1 - var(--p, 0)))) scale(calc(1 + 0.05 * var(--p, 0)));
+  transform-origin: 50% 100%;
+  will-change: transform;
+}
+.landing-grain {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.06 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+}
+@media (prefers-reduced-motion: reduce) {
+  .landing-rise, .landing-fade { animation: none; }
+  .landing-device { transform: none; }
+}
