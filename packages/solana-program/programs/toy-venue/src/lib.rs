@@ -18,7 +18,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{self, TransferChecked};
 
-declare_id!("8sa7DUWmKVerygiUKhaSxzE6f7cigiE4mb7Q7WEKeiq8");
+declare_id!("GxTSkuWudYQZpoyeD88tfx8LLWfcU1x213AAv3kraTYH");
 
 pub const RATE_WAD: u128 = 1_000_000_000_000_000_000;
 

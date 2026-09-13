@@ -24,7 +24,7 @@ pub mod state;
 use instructions::*;
 use state::InvestmentLeg;
 
-declare_id!("7rtgXTu852M1NTx7PLoJd3bChaCb2hgsgv5o54aFv6Fy");
+declare_id!("6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J");
 
 #[program]
 pub mod sip_vault {
