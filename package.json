@@ -12,7 +12,8 @@
     "test": "pnpm --dir packages/contracts test && pnpm --dir packages/contracts-artifacts test:from-out && pnpm --dir packages/worker test",
     "test:contracts": "pnpm --dir packages/contracts test",
     "test:worker": "pnpm --dir packages/worker test",
-    "typecheck": "pnpm --dir packages/worker typecheck && pnpm --dir packages/website-oficial typecheck",
+    "test:keeper": "pnpm --dir packages/solana-keeper test",
+    "typecheck": "pnpm --dir packages/worker typecheck && pnpm --dir packages/solana-keeper typecheck && pnpm --dir packages/website-oficial typecheck",
     "dev": "pnpm --dir packages/website-oficial dev",
     "tick": "pnpm --dir packages/worker tick"
   },

@@ -4,6 +4,10 @@
   "version": "0.1.0",
   "description": "SIP volume worker: observes every buy and sell a bound trading wallet makes anywhere on Robinhood Chain, attests the volume, and pulls the skim into the user's vault through the wallet's Privy seat. Dry run by default.",
   "type": "module",
+  "exports": {
+    "./log": "./src/log.ts",
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",

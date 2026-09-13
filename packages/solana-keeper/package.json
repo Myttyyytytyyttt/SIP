@@ -1,0 +1,32 @@
+{
+  "name": "@sip/solana-keeper",
+  "private": true,
+  "version": "0.1.0",
+  "description": "SIP's Solana keeper: discovers every linked trading wallet from the chain, measures its unsettled span, attests and settles it through settle_v2, and invests what the vault's owner-signed policy allows. Dry run by default, and a dry run holds no key.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "keeper": "tsx bin/keeper.mts",
+    "preflight": "tsx bin/keeper.mts --preflight",
+    "ready": "tsx bin/ready.mts",
+    "setup-read-model": "tsx bin/setup-read-model.mts"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@privy-io/node": "^0.28.0",
+    "@sip/solana-program": "workspace:*",
+    "@sip/worker": "workspace:*",
+    "@solana/spl-token": "^0.4.15",
+    "@solana/web3.js": "^1.98.4",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.0",
+    "@types/pg": "^8.21.0",
+    "tsx": "4.23.1",
+    "typescript": "5.9.3",
+    "utf-8-validate": "5.0.10",
+    "vitest": "3.2.4"
+  }
+}

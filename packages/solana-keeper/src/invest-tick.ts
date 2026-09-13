@@ -1,0 +1,320 @@
+// One investment turn for one vault: wrap what settled, convert it, buy the leg.
+//
+// Ported from Nuvem's solana-lab keeper (keeper/src/invest-tick.ts). Three things
+// changed: the policy's in_mint is checked before anything moves, so is either
+// pause switch (both in invest-decision.ts), and the crank is null in a dry run,
+// which never reaches a line that needs it. Everything else is the old
+// behaviour, deliberately: the
+// stranded-wSOL rescue, the refusal before convert on an unroutable basket, the
+// all-or-nothing per-leg minimum, one transaction per leg, the compute budget
+// price, and purchases recorded on FAILED too.
+//
+// THE CRANK OWNS NO AUTHORITY. Every bound — the venue, the floors, the caps —
+// lives in policy state the vault owner signed; this only picks the moment and
+// supplies a live route. That is why it needs no Privy signer, unlike settle:
+// the vault PDA signs its own movements inside the program.
+//
+// IT IS DELIBERATELY LAZY. Below a threshold it does nothing: three pool fees
+// and three transaction fees to move dust is a worse outcome for the user than
+// waiting for the next session. The threshold is the policy's own
+// min_investment, read from the chain rather than configured here twice.
+
+import * as anchor from "@coral-xyz/anchor";
+import {
+  ComputeBudgetProgram,
+  Connection,
+  Keypair,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+} from "@solana/web3.js";
+import {
+  NATIVE_MINT,
+  TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
+  createAssociatedTokenAccountIdempotent,
+  getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
+import { summarizeUpstreamError } from "@sip/worker/log";
+import { decodeVault, readInvestmentPolicy } from "./accounts.js";
+import { USDC_MINT, inMintDecision, investPauseDecision } from "./invest-decision.js";
+import { method } from "./methods.js";
+import { tightenMinOut } from "./min-out.js";
+import { RAYDIUM_CLMM, buildSwapV2AccountMetas, buildSwapV2Data, fetchLiveRoute } from "./program-scripts.js";
+
+const USDC = USDC_MINT;
+const WSOL_USDC_POOL = new PublicKey("3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv");
+
+/** PAUSED, like NO_POLICY and IDLE, is a resting state: nothing moved and nothing broke. */
+export type InvestOutcome = "IDLE" | "NO_POLICY" | "PAUSED" | "INVESTED" | "REFUSED" | "FAILED";
+
+export interface InvestPurchase {
+  readonly target: string;
+  readonly spentRaw: bigint;
+  readonly receivedRaw: bigint;
+  readonly signature: string;
+  readonly slot: bigint;
+}
+
+export interface InvestResult {
+  readonly outcome: InvestOutcome;
+  readonly detail: string;
+  /**
+   * EVERY purchase that confirmed, one per leg, carried out so the keeper
+   * records history from what was MEASURED here, never from what was intended.
+   * Present on INVESTED — and on FAILED too, when legs confirmed before the
+   * basket broke: a 5-leg basket that died on leg 3 still moved real money on
+   * legs 1 and 2, and history that drops a confirmed on-chain purchase because
+   * a LATER one failed is history that lies.
+   */
+  readonly purchases?: readonly InvestPurchase[];
+}
+
+export interface InvestDeps {
+  readonly connection: Connection;
+  readonly program: anchor.Program;
+  readonly vault: PublicKey;
+  /** Pays for every wrap, convert and invest: the settle key. NULL IN DRY RUN; required live. */
+  readonly crank: Keypair | null;
+  /** Pool for each investable mint, from the operator's registry. */
+  readonly pools: ReadonlyMap<string, PublicKey>;
+  readonly live: boolean;
+  /** The protocol's emergency switch, from the ProtocolConfig this sweep read. */
+  readonly protocolPaused: boolean;
+}
+
+export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
+  const { connection, program, vault } = deps;
+
+  const policy = await readInvestmentPolicy(program, vault);
+  if (policy === null) return { outcome: "NO_POLICY", detail: "the owner has not chosen a basket yet" };
+  if (!policy.enabled) return { outcome: "IDLE", detail: "investing is switched off in the policy" };
+
+  // BEFORE ANY BALANCE, ANY WRAP, ANY ROUTE: every floor and cap below is an
+  // amount of in_mint, and the only in_mint this keeper can route is USDC.
+  const refused = inMintDecision(policy.inMint);
+  if (refused !== null) return refused;
+  const policyPda = policy.address;
+
+  const vaultInfo = await connection.getAccountInfo(vault);
+  if (vaultInfo === null) return { outcome: "FAILED", detail: "vault account missing" };
+  // BEFORE ANY OTHER READ, ANY ATA, ANY WRAP: either pause switch. The vault's
+  // own switch is decoded from the read that also gives its lamports, so a
+  // paused vault never gets as far as wrap_sol, which does not check that switch
+  // and would strand the owner's SOL as wSOL once convert refused.
+  const paused = investPauseDecision({
+    vaultPaused: decodeVault(program, vaultInfo.data).paused,
+    protocolPaused: deps.protocolPaused,
+  });
+  if (paused !== null) return paused;
+  const rentFloor = await connection.getMinimumBalanceForRentExemption(vaultInfo.data.length);
+  const free = BigInt(vaultInfo.lamports - rentFloor);
+
+  const wsolAta = getAssociatedTokenAddressSync(NATIVE_MINT, vault, true, TOKEN_PROGRAM_ID);
+  // WHAT IS ALREADY WRAPPED COUNTS. wrap and convert are two transactions, so a
+  // convert that reverts — on slippage, on congestion, on a dropped RPC —
+  // leaves the vault's SOL sitting as wSOL. Nothing used to read this balance:
+  // every convert moved only the amount freshly wrapped in the same tick, so
+  // that stranded wSOL was never converted again, by any later sweep, ever.
+  const wsolHeld = await balanceOf(connection, wsolAta);
+  const usdcAta = getAssociatedTokenAddressSync(USDC, vault, true, TOKEN_PROGRAM_ID);
+  const usdcHeld = await balanceOf(connection, usdcAta);
+
+  // The floor is the policy's own minimum, in USDC. Convert what is free only
+  // if doing so could plausibly clear it — at ~$100/SOL, 0.01 SOL is ~$1.
+  const minInvestment = policy.minInvestment;
+  if (free < 5_000_000n && wsolHeld === 0n && usdcHeld < minInvestment) {
+    return {
+      outcome: "IDLE",
+      detail: `${free} free lamports, ${wsolHeld} wSOL and ${usdcHeld} USDC — below the policy minimum`,
+    };
+  }
+  if (!deps.live) {
+    return { outcome: "INVESTED", detail: `DRY RUN — would wrap ${free} lamports and invest` };
+  }
+  const crank = deps.crank;
+  if (crank === null) {
+    // Unreachable from the keeper, which passes the settle key whenever it is
+    // live. Refused rather than guessed at: nothing can be paid for without it.
+    return { outcome: "FAILED", detail: "a live invest turn arrived without the crank; nothing was sent" };
+  }
+
+  // A MISSING POOL REFUSES THE WHOLE BASKET — and it refuses BEFORE the
+  // convert, not after. The old order wrapped and market-sold the vault's SOL
+  // into USDC first and only then noticed the basket was unroutable, so a
+  // policy the keeper's registry could not serve would sell the owner's SOL
+  // exposure on every sweep in service of a purchase that was knowably
+  // impossible before the swap. Nothing below this line moves money until the
+  // whole basket has a route.
+  const unroutable = policy.legs.map((leg) => leg.mint.toBase58()).filter((mint) => !deps.pools.has(mint));
+  if (unroutable.length > 0) {
+    return {
+      outcome: "REFUSED",
+      detail: `no pool configured for ${unroutable.join(", ")} — refusing to guess, refusing a partial basket, and refusing to convert SOL toward it`,
+    };
+  }
+
+  const purchases: InvestPurchase[] = [];
+  try {
+    // ── wrap + convert, if there is free SOL worth moving ──────────────────
+    if (free >= 5_000_000n || wsolHeld > 0n) {
+      await createAssociatedTokenAccountIdempotent(connection, crank, NATIVE_MINT, vault, undefined, TOKEN_PROGRAM_ID, undefined, true);
+      await createAssociatedTokenAccountIdempotent(connection, crank, USDC, vault, undefined, TOKEN_PROGRAM_ID, undefined, true);
+      // Only if there is new SOL worth wrapping. Reaching here with free below
+      // the threshold means we are here to rescue stranded wSOL, and the
+      // program refuses a zero amount.
+      if (free >= 5_000_000n) {
+        await method(program, "wrapSol")(new anchor.BN(free.toString()))
+          .accountsPartial({
+            crank: crank.publicKey, vault, vaultWsol: wsolAta,
+            tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
+          })
+          .signers([crank])
+          .rpc();
+      }
+
+      // EVERYTHING THE VAULT HOLDS AS wSOL, re-read after the wrap so a balance
+      // stranded by an earlier failed convert is swept up with the new one.
+      const toConvert = await balanceOf(connection, wsolAta);
+      if (toConvert === 0n) return { outcome: "IDLE", detail: "nothing wrapped to convert" };
+
+      const route = await fetchLiveRoute(connection, WSOL_USDC_POOL, NATIVE_MINT, USDC, TOKEN_PROGRAM_ID);
+      const convertFloor = (toConvert * policy.minConvertRateWad) / 10n ** 18n;
+      const { minOut } = tightenMinOut(toConvert, convertFloor, route.observed);
+      const args = { payer: vault, inputTokenAccount: wsolAta, outputTokenAccount: usdcAta, amountIn: toConvert, minAmountOut: minOut };
+      await sendWithBudget(program.provider as anchor.AnchorProvider, crank,
+        await method(program, "convert")(new anchor.BN(toConvert.toString()), new anchor.BN(minOut.toString()), buildSwapV2Data(args))
+          .accountsPartial({ crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta, vaultIn: usdcAta, venueProgram: RAYDIUM_CLMM })
+          .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
+          .instruction());
+    }
+
+    // ── invest EVERY leg, by the weights the owner signed ─────────────────
+    //
+    // ONE TRANSACTION PER LEG, not one for the basket: state.rs says why — an
+    // 8-leg basket cannot fit under the 64-account cap with a CLMM route per
+    // leg. The program takes a leg INDEX for exactly this reason.
+    const usdc = await balanceOf(connection, usdcAta);
+    if (usdc < minInvestment) {
+      return { outcome: "IDLE", detail: `${usdc} USDC held, below policy minimum ${minInvestment}` };
+    }
+
+    const maxPerCall = policy.maxPerCall;
+    const budget = usdc > maxPerCall ? maxPerCall : usdc;
+
+    // THE PROGRAM CHECKS EACH LEG, NOT THE TOTAL.
+    //
+    // invest.rs requires `amount_in >= min_investment` on EVERY call, and a
+    // basket splits the budget by weight — so a six-leg basket at a $5 minimum
+    // needs $25 before even its largest leg qualifies, and $50 before its
+    // smallest does. Comparing only the TOTAL let a vault holding $7.48 sail
+    // past and then have all six of its transactions refused by the program,
+    // one after another, every sweep, forever.
+    //
+    // ALL OR NOTHING, the same doctrine as the unroutable-leg refusal above:
+    // buying only the legs that happen to clear the minimum is a partial basket
+    // that silently drifts away from the weights the owner signed.
+    const shares = policy.legs.map((leg) => (budget * BigInt(leg.weightBps)) / 10_000n);
+    const short = shares.filter((share) => share < minInvestment).length;
+    if (short > 0) {
+      // The number that is actually actionable is how much this basket needs,
+      // not which leg fell short — so it is computed and stated.
+      const heaviest = policy.legs.reduce((a, leg) => Math.max(a, leg.weightBps), 0);
+      const lightest = policy.legs.reduce((a, leg) => Math.min(a, leg.weightBps), 10_000);
+      const usd = (raw: bigint) => `$${(Number(raw) / 1e6).toFixed(2)}`;
+      const needed = (bps: number) => usd((minInvestment * 10_000n) / BigInt(bps));
+      return {
+        outcome: "IDLE",
+        detail:
+          `${usd(usdc)} across ${policy.legs.length} legs is ${usd(shares[0] ?? 0n)}-ish each, under the ` +
+          `${usd(minInvestment)} per-call minimum (${short} of ${policy.legs.length} legs short). ` +
+          `This basket needs ${needed(heaviest)} for its largest leg to qualify and ${needed(lightest)} for all of them. ` +
+          `Lower the minimum or hold fewer stocks to invest smaller amounts.`,
+      };
+    }
+
+    const filled: string[] = [];
+    let anyLive = false;
+    for (const [index, leg] of policy.legs.entries()) {
+      const weight = BigInt(leg.weightBps);
+      const amountIn = (budget * weight) / 10_000n;
+      // A leg whose share rounds to nothing is skipped rather than sent: the
+      // program refuses a zero min_out, and a zero-amount swap is a fee for
+      // nothing.
+      if (amountIn === 0n) continue;
+
+      const mint = leg.mint;
+      const pool = deps.pools.get(mint.toBase58())!;
+      const targetAta = await createAssociatedTokenAccountIdempotent(connection, crank, mint, vault, undefined, TOKEN_2022_PROGRAM_ID, undefined, true);
+
+      const route = await fetchLiveRoute(connection, pool, USDC, mint, TOKEN_2022_PROGRAM_ID);
+      const investFloor = (amountIn * leg.minOutRateWad) / 10n ** 18n;
+      const { minOut, live } = tightenMinOut(amountIn, investFloor, route.observed);
+      anyLive = anyLive || live;
+
+      const args = { payer: vault, inputTokenAccount: usdcAta, outputTokenAccount: targetAta, amountIn, minAmountOut: minOut };
+      const before = await balanceOf(connection, targetAta);
+      const signature = await sendWithBudget(program.provider as anchor.AnchorProvider, crank,
+        await method(program, "invest")(index, new anchor.BN(amountIn.toString()), new anchor.BN(minOut.toString()), buildSwapV2Data(args))
+          .accountsPartial({ crank: crank.publicKey, vault, policy: policyPda, vaultIn: usdcAta, vaultTarget: targetAta, targetMint: mint, venueProgram: RAYDIUM_CLMM })
+          .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
+          .instruction());
+      const bought = (await balanceOf(connection, targetAta)) - before;
+      filled.push(`${Number(weight) / 100}% ${mint.toBase58().slice(0, 8)}… ${amountIn}→${bought}`);
+      purchases.push({
+        target: mint.toBase58(),
+        spentRaw: amountIn,
+        receivedRaw: bought,
+        signature,
+        slot: BigInt(await connection.getSlot("confirmed")),
+      });
+    }
+
+    if (filled.length === 0) {
+      return { outcome: "IDLE", detail: `${budget} USDC splits to nothing across ${policy.legs.length} leg(s)` };
+    }
+    return {
+      outcome: "INVESTED",
+      detail:
+        `bought ${filled.join(" · ")}` +
+        (anyLive
+          ? " (min_out from a live observed price)"
+          : " (min_out is the POLICY FLOOR — no live price was observable)"),
+      purchases,
+    };
+  } catch (error) {
+    return {
+      outcome: "FAILED",
+      detail: summarizeUpstreamError(error, { take: 3, maxChars: 500 }),
+      // The legs that confirmed before the failure are REAL: signatures on
+      // chain, USDC spent. They go into history even though the basket broke.
+      purchases: purchases.length > 0 ? purchases : undefined,
+    };
+  }
+}
+
+async function balanceOf(connection: Connection, ata: PublicKey): Promise<bigint> {
+  try {
+    const res = await connection.getTokenAccountBalance(ata, "confirmed");
+    return BigInt(res.value.amount);
+  } catch {
+    return 0n;
+  }
+}
+
+async function sendWithBudget(
+  provider: anchor.AnchorProvider,
+  crank: Keypair,
+  instruction: anchor.web3.TransactionInstruction,
+): Promise<string> {
+  // A LIMIT WITHOUT A PRICE IS NOT A BID. Setting only the unit limit told the
+  // scheduler how much room to reserve and offered nothing for it, so under
+  // congestion these transactions are deprioritised and dropped — and there is
+  // no retry anywhere. The price is small in absolute terms (600k units at
+  // 10_000 micro-lamports is ~0.006 SOL) and buys inclusion when it matters.
+  const tx = new Transaction()
+    .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }))
+    .add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10_000 }))
+    .add(instruction);
+  return provider.sendAndConfirm(tx, [crank]);
+}

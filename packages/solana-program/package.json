@@ -1,14 +1,26 @@
 {
+  "name": "@sip/solana-program",
+  "private": true,
   "license": "ISC",
+  "exports": {
+    "./attestation": "./scripts/attestation.ts",
+    "./live-route": "./scripts/live-route.ts",
+    "./raydium-swap": "./scripts/raydium-swap.ts",
+    "./idl": "./idl/sip_vault.json",
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "test": "anchor test",
+    "idl:export": "test -f target/idl/sip_vault.json || { echo 'target/idl/sip_vault.json is missing: run anchor build first' >&2; exit 1; }; mkdir -p idl && cp target/idl/sip_vault.json idl/sip_vault.json",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
   },
   "dependencies": {
-    "@coral-xyz/anchor": "^0.32.1"
+    "@coral-xyz/anchor": "^0.32.1",
+    "@solana/spl-token": "^0.4.15",
+    "@solana/web3.js": "^1.98.4",
+    "bs58": "^4.0.1"
   },
   "devDependencies": {
-    "@solana/spl-token": "^0.4.15",
     "@types/bn.js": "^5.1.0",
     "@types/chai": "^4.3.0",
     "@types/mocha": "^9.0.0",
@@ -18,10 +30,6 @@
     "ts-mocha": "^10.0.0",
     "tsx": "^4.23.12",
     "typescript": "^5.7.3",
-    "@solana/web3.js": "^1.98.4",
-    "bs58": "^4.0.1",
     "pg": "^8.23.0"
-  },
-  "name": "@sip/solana-program",
-  "private": true
+  }
 }

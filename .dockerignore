@@ -52,6 +52,17 @@ secrets/
 **/*.keystore
 mnemonic.txt
 **/mnemonic.txt
+# Solana key material, by the places the Anchor and solana CLI toolchains write
+# it: keypair files, the localnet wallet and validator ledger, the lab's
+# per-wallet signers, and Anchor's build tree, whose target/deploy holds the
+# program's own upgrade keypair. The keeper image takes the program's committed
+# idl/ and three scripts by name and needs none of these.
+**/*-keypair.json
+**/.localnet
+**/scripts/.local
+**/test-ledger
+**/.anchor
+packages/solana-program/target
 
 # ---------------------------------------------------------------------------
 

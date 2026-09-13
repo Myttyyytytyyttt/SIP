@@ -89,9 +89,21 @@ cmd_status() {
 }
 
 cmd_ready() {
-  NUVEM_SOLANA_MAINNET_RPC="$RPC" \
-  NUVEM_SOLANA_POOLS="${NUVEM_SOLANA_POOLS:-}" \
-    npx tsx scripts/ready.ts
+  # The readiness check lives with the keeper it checks (packages/solana-keeper,
+  # bin/ready.mts) and speaks only its SIP_SOLANA_* names.
+  #
+  # THIS SCRIPT'S OWN TWO OVERRIDES ARE STRIPPED FIRST. NUVEM_SOLANA_MAINNET_RPC
+  # and NUVEM_SOLANA_KEYPAIR are this script's documented operator variables
+  # (read above for deploy, status, upgrade and set-keeper), and `set -a` exported
+  # them from .env.mainnet. Left in, the keeper's check reported them as copied
+  # config and `ready` failed for an operator who followed this header. The RPC
+  # is already forwarded as SIP_SOLANA_RPC_URLS, and the keypair is the
+  # operator's, never the keeper's. Any OTHER NUVEM_* or bare PRIVY_* name
+  # exported from .env.mainnet is still reported there as copied config.
+  env -u NUVEM_SOLANA_MAINNET_RPC -u NUVEM_SOLANA_KEYPAIR \
+    SIP_SOLANA_RPC_URLS="${SIP_SOLANA_RPC_URLS:-$RPC}" \
+    SIP_SOLANA_POOLS="${SIP_SOLANA_POOLS:-}" \
+    pnpm --dir ../solana-keeper ready
 }
 
 cmd_drill() {
