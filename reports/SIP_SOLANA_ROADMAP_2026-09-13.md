@@ -163,7 +163,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 
 **Total:** ≈ 8 SOL en mano · ≈ 3 SOL gastados
 
-- Publicar el programa: unos 2,76 SOL de alquiler bloqueado con el binario actual (542.872 bytes; crecerá un poco con los dos modos y se mide de nuevo antes de publicar), más un buffer temporal de tamaño similar que vuelve y ~0,1 SOL de comisiones. Unos 6 SOL en tu wallet de administración durante el despliegue.
+- Publicar el programa: 2,79 SOL de alquiler que quedan bloqueados mientras exista (binario de 549,672 bytes el 13-sep, ya con los dos modos; crecerá un poco con la moneda fija y se mide otra vez antes de publicar). Cada actualización pide otro tanto de forma temporal para el buffer, que vuelve al terminar. Ten unos 5,90 SOL en la wallet de administración el martes.
 - Wallet de cobro (atestador y crank): 0,5 SOL para las comisiones de cobros e inversiones de la semana.
 - Operaciones grabadas del lunes: 0,3 SOL en una cartera nueva; vuelve casi todo.
 - Dos llaves de pensión de demo: 2 × 0,05 SOL.

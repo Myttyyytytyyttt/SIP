@@ -18,6 +18,7 @@ use anchor_lang::prelude::*;
 
 pub mod attestation;
 pub mod errors;
+pub mod events;
 pub mod instructions;
 pub mod state;
 
@@ -30,8 +31,17 @@ declare_id!("6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J");
 pub mod sip_vault {
     use super::*;
 
-    pub fn create_vault(ctx: Context<CreateVault>, skim_bps: u16) -> Result<()> {
-        instructions::create_vault::create_vault_handler(ctx, skim_bps)
+    /// Only V2 entrypoints ship. A client built for the old instructions gets
+    /// "instruction not found" instead of settling with a meaning-blind number.
+    pub fn create_vault_v2(
+        ctx: Context<CreateVault>,
+        mode: u8,
+        skim_bps: u16,
+        volume_bps: u16,
+        max_contribution: u64,
+        wallet_reserve: u64,
+    ) -> Result<()> {
+        instructions::create_vault::create_vault_handler(ctx, mode, skim_bps, volume_bps, max_contribution, wallet_reserve)
     }
 
     pub fn link_wallet(ctx: Context<LinkWallet>) -> Result<()> {
@@ -50,8 +60,16 @@ pub mod sip_vault {
         instructions::withdraw_token::withdraw_token_handler(ctx, amount)
     }
 
-    pub fn set_policy(ctx: Context<SetPolicy>, skim_bps: u16, paused: bool) -> Result<()> {
-        instructions::set_policy::set_policy_handler(ctx, skim_bps, paused)
+    pub fn set_policy_v2(
+        ctx: Context<SetPolicy>,
+        mode: u8,
+        skim_bps: u16,
+        volume_bps: u16,
+        paused: bool,
+        max_contribution: u64,
+        wallet_reserve: u64,
+    ) -> Result<()> {
+        instructions::set_policy::set_policy_handler(ctx, mode, skim_bps, volume_bps, paused, max_contribution, wallet_reserve)
     }
 
     pub fn init_config(ctx: Context<InitConfig>, attester: Pubkey) -> Result<()> {
@@ -124,12 +142,14 @@ pub mod sip_vault {
         instructions::wrap_sol::wrap_sol_handler(ctx, amount)
     }
 
-    pub fn settle(
+    pub fn settle_v2(
         ctx: Context<Settle>,
+        mode: u8,
         session_start_slot: u64,
         session_end_slot: u64,
-        profit_lamports: u64,
+        base_lamports: u64,
+        valid_until_slot: u64,
     ) -> Result<()> {
-        instructions::settle::settle_handler(ctx, session_start_slot, session_end_slot, profit_lamports)
+        instructions::settle::settle_handler(ctx, mode, session_start_slot, session_end_slot, base_lamports, valid_until_slot)
     }
 }

@@ -10,6 +10,7 @@ use crate::attestation::{attestation_message, AttestationInputs, ATTESTATION_MES
 /// declared here because this anchor version does not re-export the module.
 const ED25519_PROGRAM_ID: Pubkey = pubkey!("Ed25519SigVerify111111111111111111111111111");
 use crate::errors::NuvemError;
+use crate::events::Settled;
 use crate::state::{ProtocolConfig, TradingLink, Vault};
 
 /// Settles one attested trading session: moves the vault's share of the
@@ -63,79 +64,119 @@ pub struct Settle<'info> {
 
 pub fn settle_handler(
     ctx: Context<Settle>,
+    mode: u8,
     session_start_slot: u64,
     session_end_slot: u64,
-    profit_lamports: u64,
+    base_lamports: u64,
+    valid_until_slot: u64,
 ) -> Result<()> {
     let vault = &ctx.accounts.vault;
     let link = &ctx.accounts.trading_link;
+    let wallet_key = ctx.accounts.wallet.key();
 
     require!(!vault.paused, NuvemError::VaultPaused);
     require!(!ctx.accounts.config.paused, NuvemError::ProtocolPaused);
-    require!(profit_lamports > 0, NuvemError::ZeroAmount);
 
-    // THE SESSION WINDOW MUST SIT ENTIRELY ABOVE THE FRONTIER. Overlapping
-    // windows are how one profitable stretch gets settled twice; the watermark
-    // plus strict ordering replaces the EVM's usedSessions set.
+    // BY NAME BEFORE BY BYTES. The byte comparison below refuses a mismatched
+    // mode anyway; this makes the refusal say what is actually wrong.
+    require!(mode == vault.skim_mode, NuvemError::SkimModeMismatch);
+
+    let now = Clock::get()?.slot;
+    // An attestation is a statement about a moment. One left unsubmitted past
+    // its deadline is measured again, not replayed.
+    require!(now <= valid_until_slot, NuvemError::AttestationExpired);
+
+    // THE SESSION WINDOW MUST SIT ENTIRELY ABOVE THE FRONTIER, and must have
+    // closed: overlapping windows are how one stretch gets settled twice.
     require!(
         session_start_slot >= link.frontier_slot && session_end_slot > session_start_slot,
         NuvemError::InvalidSessionWindow
     );
-    // A session that has not finished yet cannot have been measured.
-    require!(
-        session_end_slot <= Clock::get()?.slot,
-        NuvemError::InvalidSessionWindow
-    );
+    require!(session_end_slot <= now, NuvemError::InvalidSessionWindow);
 
-    // The expected message, from CHAIN STATE plus the args. A signature over
-    // anything else — another wallet, another vault, a spent nonce, a previous
-    // link epoch, a different profit — is a different byte string and fails
-    // the comparison below.
+    // THE MEANING OF THE NUMBER IS IN THE SIGNED BYTES. The old settle
+    // multiplied whatever u64 it was handed by whatever bps the vault held, so
+    // a volume figure could be charged at a profit rate: 100x. Here the mode,
+    // the rate of that mode and the policy nonce are read from the owner-signed
+    // vault and rebuilt into the message, so an attestation made for another
+    // mode, another rate or an older policy is a different byte string.
+    let bps = vault.active_bps();
     let expected = attestation_message(&AttestationInputs {
         program_id: crate::ID,
-        wallet: ctx.accounts.wallet.key(),
+        wallet: wallet_key,
         vault: vault.key(),
         link_epoch: link.epoch,
         settlement_nonce: link.settlement_nonce,
         session_start_slot,
         session_end_slot,
-        profit_lamports,
+        base_lamports,
+        mode: vault.skim_mode,
+        bps,
+        policy_nonce: vault.policy_nonce,
+        valid_until_slot,
     });
-
     verify_preceding_ed25519(
         &ctx.accounts.instructions_sysvar,
         &ctx.accounts.config.attester,
         &expected,
     )?;
 
-    // The share, floored. u128 keeps profit * bps out of overflow territory.
-    let contribution =
-        u64::try_from(u128::from(profit_lamports) * u128::from(vault.skim_bps) / 10_000)
-            .map_err(|_| NuvemError::ZeroAmount)?;
-    require!(contribution > 0, NuvemError::ZeroAmount);
+    // What the window owes, floored. bps <= 10_000, so it never exceeds base.
+    let owed = u64::try_from(u128::from(base_lamports) * u128::from(bps) / 10_000)
+        .map_err(|_| NuvemError::InvalidPolicy)?;
 
-    // The wallet signed this transaction, so its signer privilege flows through
-    // the CPI: the system program sees a transfer authorised by its owner.
-    transfer(
-        CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.wallet.to_account_info(),
-                to: ctx.accounts.vault.to_account_info(),
-            },
-        ),
-        contribution,
-    )?;
+    // THE CAP CLIPS. It is the owner's ceiling on one pull, so an owed amount
+    // above it is paid up to it and the difference shows in `Settled`; it is
+    // not carried on chain yet.
+    let paid = owed.min(vault.max_contribution);
+
+    // A ZERO SETTLEMENT STILL COUNTS. A zero base, or one that floors to zero,
+    // moves nothing and still advances the frontier below, so a quiet or losing
+    // wallet can never wedge its link the way the old program's did.
+    if paid > 0 {
+        // THE RESERVE REFUSES. It is the trader's fee money, so a payment that
+        // would dip into it -- or into the wallet's own rent floor -- is not
+        // trimmed but refused: the frontier stays put, and the keeper settles a
+        // longer window once the wallet is funded again.
+        let wallet_floor = Rent::get()?.minimum_balance(0).saturating_add(vault.wallet_reserve);
+        let left = ctx.accounts.wallet.lamports().checked_sub(paid);
+        require!(left.is_some_and(|left| left >= wallet_floor), NuvemError::WalletBelowReserve);
+
+        // The wallet signed this transaction, so its signer privilege flows
+        // through the CPI: the system program sees a transfer by its owner.
+        transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.wallet.to_account_info(),
+                    to: ctx.accounts.vault.to_account_info(),
+                },
+            ),
+            paid,
+        )?;
+    }
+
+    let nonce = link.settlement_nonce;
+    let active_mode = vault.skim_mode;
+    let vault_key = vault.key();
 
     let vault = &mut ctx.accounts.vault;
+    vault.lifetime_saved = vault.lifetime_saved.checked_add(paid).ok_or(NuvemError::InvalidPolicy)?;
     let link = &mut ctx.accounts.trading_link;
-    vault.lifetime_saved = vault
-        .lifetime_saved
-        .checked_add(contribution)
-        .ok_or(NuvemError::ZeroAmount)?;
-    link.settlement_nonce += 1;
+    link.settlement_nonce = nonce.checked_add(1).ok_or(NuvemError::InvalidPolicy)?;
     link.frontier_slot = session_end_slot;
 
+    emit!(Settled {
+        vault: vault_key,
+        wallet: wallet_key,
+        mode: active_mode,
+        base_lamports,
+        bps,
+        owed,
+        paid,
+        settlement_nonce: nonce,
+        session_end_slot,
+    });
     Ok(())
 }
 

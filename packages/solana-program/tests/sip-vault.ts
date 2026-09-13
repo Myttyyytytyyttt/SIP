@@ -2,8 +2,8 @@
 //
 // THE TESTS THAT MATTER ARE THE REFUSALS. Anyone can write the happy path; the
 // design's promises live in what is refused: a second vault for the same owner,
-// a link the wallet did not sign, a withdraw by a stranger, a skim of zero, and
-// a withdraw that would sink the account below rent exemption.
+// a link the wallet did not sign, a withdraw by a stranger, a rate outside its
+// mode's range, and a withdraw that would sink the account below rent exemption.
 
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
@@ -16,6 +16,7 @@ import {
 } from "@solana/web3.js";
 import { assert } from "chai";
 import { SipVault } from "../target/types/sip_vault";
+import { MODE_PROFIT, MODE_VOLUME } from "../scripts/attestation";
 
 describe("sip-vault M1", () => {
   const provider = anchor.AnchorProvider.env();
@@ -36,38 +37,66 @@ describe("sip-vault M1", () => {
     program.programId,
   );
 
-  const expectFailure = async (p: Promise<unknown>, needle: string) => {
+  const CAP = new anchor.BN(LAMPORTS_PER_SOL);
+  const NO_RESERVE = new anchor.BN(0);
+
+  // Every way a policy can be out of range, and the error that must name it.
+  // The same table runs at creation and on every change, so an existing vault
+  // cannot be steered anywhere a new one could not start.
+  const BAD_POLICIES = [
+    { label: "a profit rate of zero, the reachable trap", mode: MODE_PROFIT, skimBps: 0, volumeBps: 20, cap: CAP, error: "InvalidSkimBps" },
+    { label: "a profit rate of 100 bps, inside the volume range", mode: MODE_PROFIT, skimBps: 100, volumeBps: 20, cap: CAP, error: "InvalidSkimBps" },
+    { label: "a profit rate above 100%", mode: MODE_PROFIT, skimBps: 10_001, volumeBps: 20, cap: CAP, error: "InvalidSkimBps" },
+    { label: "a volume rate of zero", mode: MODE_VOLUME, skimBps: 2_000, volumeBps: 0, cap: CAP, error: "InvalidVolumeBps" },
+    { label: "a volume rate of 101 bps, inside the profit range", mode: MODE_VOLUME, skimBps: 2_000, volumeBps: 101, cap: CAP, error: "InvalidVolumeBps" },
+    { label: "an out-of-range volume rate on a profit vault", mode: MODE_PROFIT, skimBps: 2_000, volumeBps: 500, cap: CAP, error: "InvalidVolumeBps" },
+    { label: "a mode that does not exist", mode: 2, skimBps: 2_000, volumeBps: 20, cap: CAP, error: "InvalidMode" },
+    { label: "a cap of zero, which would forgive every settlement", mode: MODE_PROFIT, skimBps: 2_000, volumeBps: 20, cap: new anchor.BN(0), error: "InvalidContributionCap" },
+  ];
+
+  const expectFailure = async (p: Promise<unknown>, needle: string, what = "") => {
     try {
       await p;
     } catch (err) {
-      assert.include(String(err), needle, `expected failure mentioning "${needle}"`);
+      assert.include(String(err), needle, `expected failure mentioning "${needle}" ${what}`);
       return;
     }
-    assert.fail(`expected a failure mentioning "${needle}", but it succeeded`);
+    assert.fail(`expected a failure mentioning "${needle}", but it succeeded ${what}`);
   };
 
-  it("refuses a skim of zero — the reachable trap dies at the door", async () => {
-    await expectFailure(
-      program.methods.createVault(0).accounts({ owner }).rpc(),
-      "InvalidSkimBps",
-    );
+  it("refuses every out-of-range policy at creation, each for its own reason", async () => {
+    for (const bad of BAD_POLICIES) {
+      await expectFailure(
+        program.methods.createVaultV2(bad.mode, bad.skimBps, bad.volumeBps, bad.cap, NO_RESERVE).accounts({ owner }).rpc(),
+        bad.error,
+        `(${bad.label})`,
+      );
+    }
+    assert.isNull(await connection.getAccountInfo(vaultPda), "and no vault was created");
   });
 
   it("creates the vault, and the address is a pure function of the owner", async () => {
-    await program.methods.createVault(2_000).accounts({ owner }).rpc();
+    await program.methods.createVaultV2(MODE_PROFIT, 2_000, 20, CAP, NO_RESERVE).accounts({ owner }).rpc();
 
     const vault = await program.account.vault.fetch(vaultPda);
     assert.strictEqual(vault.owner.toBase58(), owner.toBase58());
+    assert.strictEqual(vault.skimMode, MODE_PROFIT);
     assert.strictEqual(vault.skimBps, 2_000);
+    assert.strictEqual(vault.volumeBps, 20);
+    assert.strictEqual(vault.policyNonce.toNumber(), 0);
+    assert.strictEqual(vault.maxContribution.toString(), CAP.toString());
+    assert.strictEqual(vault.walletReserve.toNumber(), 0);
     assert.strictEqual(vault.version, 1);
     assert.strictEqual(vault.paused, false);
     assert.strictEqual(vault.lifetimeSaved.toNumber(), 0);
+    // The new fields were carved out of the reserved bytes: the account did not grow.
+    assert.strictEqual((await connection.getAccountInfo(vaultPda))!.data.length, 125);
   });
 
   it("refuses a second vault for the same owner", async () => {
     // `init` on an existing account: the SystemProgram create fails.
     await expectFailure(
-      program.methods.createVault(1_000).accounts({ owner }).rpc(),
+      program.methods.createVaultV2(MODE_PROFIT, 1_000, 20, CAP, NO_RESERVE).accounts({ owner }).rpc(),
       "already in use",
     );
   });
@@ -149,10 +178,19 @@ describe("sip-vault M1", () => {
   });
 
   it("withdraw still works while paused — pause gates settle/invest, never exit", async () => {
-    await program.methods.setPolicy(2_000, true).accounts({ owner }).rpc();
+    const setPaused = (paused: boolean) =>
+      program.methods.setPolicyV2(MODE_PROFIT, 2_000, 20, paused, CAP, NO_RESERVE).accounts({ owner }).rpc();
+    await setPaused(true);
     await program.methods.withdraw(new anchor.BN(1_000)).accounts({ owner }).rpc();
     // restore
-    await program.methods.setPolicy(2_000, false).accounts({ owner }).rpc();
+    await setPaused(false);
+  });
+
+  it("moves the policy nonce on every policy write, even one that changes nothing", async () => {
+    const nonce = async () => BigInt((await program.account.vault.fetch(vaultPda)).policyNonce.toString());
+    const before = await nonce();
+    await program.methods.setPolicyV2(MODE_PROFIT, 2_000, 20, false, CAP, NO_RESERVE).accounts({ owner }).rpc();
+    assert.strictEqual(await nonce(), before + 1n);
   });
 
   it("the wallet can unlink itself without the owner, and relink elsewhere", async () => {
@@ -205,10 +243,19 @@ describe("sip-vault M1", () => {
     assert.isAbove(relinked.epoch.toNumber(), epochBefore, "a new life gets a new epoch");
   });
 
-  it("set_policy refuses the zero-skim trap for existing vaults too", async () => {
-    await expectFailure(
-      program.methods.setPolicy(0, false).accounts({ owner }).rpc(),
-      "InvalidSkimBps",
-    );
+  it("set_policy_v2 refuses the same out-of-range policies on an existing vault, and changes nothing", async () => {
+    const before = await program.account.vault.fetch(vaultPda);
+    for (const bad of BAD_POLICIES) {
+      await expectFailure(
+        program.methods.setPolicyV2(bad.mode, bad.skimBps, bad.volumeBps, false, bad.cap, NO_RESERVE).accounts({ owner }).rpc(),
+        bad.error,
+        `(${bad.label})`,
+      );
+    }
+    const after = await program.account.vault.fetch(vaultPda);
+    assert.strictEqual(after.policyNonce.toString(), before.policyNonce.toString(), "a refused write moves no nonce");
+    assert.strictEqual(after.skimMode, before.skimMode);
+    assert.strictEqual(after.skimBps, before.skimBps);
+    assert.strictEqual(after.volumeBps, before.volumeBps);
   });
 });

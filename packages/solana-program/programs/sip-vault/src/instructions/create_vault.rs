@@ -1,7 +1,6 @@
 use anchor_lang::prelude::*;
 
-use crate::errors::NuvemError;
-use crate::state::{Vault, CURRENT_VAULT_VERSION};
+use crate::state::{validate_policy, Vault, CURRENT_VAULT_VERSION};
 
 #[derive(Accounts)]
 pub struct CreateVault<'info> {
@@ -22,10 +21,17 @@ pub struct CreateVault<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn create_vault_handler(ctx: Context<CreateVault>, skim_bps: u16) -> Result<()> {
-    // Zero is the "reachable trap" (a vault saving nothing, all logs healthy);
-    // above 10_000 is arithmetic nonsense. Both die here, not in settle.
-    require!(skim_bps >= 1 && skim_bps <= 10_000, NuvemError::InvalidSkimBps);
+/// Both rates are always stored, and both are always bounded: switching mode
+/// later is a policy change, not a chance to smuggle an out-of-range rate in.
+pub fn create_vault_handler(
+    ctx: Context<CreateVault>,
+    mode: u8,
+    skim_bps: u16,
+    volume_bps: u16,
+    max_contribution: u64,
+    wallet_reserve: u64,
+) -> Result<()> {
+    validate_policy(mode, skim_bps, volume_bps, max_contribution)?;
 
     let vault = &mut ctx.accounts.vault;
     vault.owner = ctx.accounts.owner.key();
@@ -35,6 +41,10 @@ pub fn create_vault_handler(ctx: Context<CreateVault>, skim_bps: u16) -> Result<
     vault.skim_bps = skim_bps;
     vault.lifetime_saved = 0;
     vault.created_at = Clock::get()?.unix_timestamp;
-
+    vault.skim_mode = mode;
+    vault.volume_bps = volume_bps;
+    vault.policy_nonce = 0;
+    vault.max_contribution = max_contribution;
+    vault.wallet_reserve = wallet_reserve;
     Ok(())
 }

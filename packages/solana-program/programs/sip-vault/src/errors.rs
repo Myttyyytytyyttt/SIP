@@ -4,7 +4,7 @@ use anchor_lang::prelude::*;
 pub enum NuvemError {
     /// skim_bps of 0 is the "reachable trap": a vault that is enabled, funded
     /// and saving nothing, with every log line healthy. Refused at the door.
-    #[msg("skim_bps must be between 1 and 10000")]
+    #[msg("skim_bps (profit rate) must be between 101 and 10000")]
     InvalidSkimBps,
 
     #[msg("only the vault owner may do this")]
@@ -107,4 +107,23 @@ pub enum NuvemError {
 
     #[msg("the default public key cannot hold this role")]
     InvalidAuthority,
+
+    /// Compared by name before the bytes are, so the refusal says what is wrong.
+    #[msg("the attestation is for a different skim mode than this vault uses")]
+    SkimModeMismatch,
+
+    #[msg("the attestation's deadline has passed; the window must be measured again")]
+    AttestationExpired,
+
+    #[msg("mode must be 0 (profit) or 1 (volume)")]
+    InvalidMode,
+
+    #[msg("volume_bps must be between 1 and 100")]
+    InvalidVolumeBps,
+
+    #[msg("max_contribution must be greater than zero")]
+    InvalidContributionCap,
+
+    #[msg("paying this settlement would leave the trading wallet below its reserve")]
+    WalletBelowReserve,
 }

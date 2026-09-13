@@ -50,7 +50,7 @@ async function main() {
   const vaultUsdc = getAssociatedTokenAddressSync(USDC, vaultPda, true, TOKEN_PROGRAM_ID);
 
   // create_vault (owner) — the vault PDA now exists; its USDC ATA was injected.
-  await program.methods.createVault(2_000).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
+  await program.methods.createVaultV2(0 /* PROFIT */, 2_000, 20, new anchor.BN(1_000_000_000), new anchor.BN(0)).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
   const payer = (provider.wallet as anchor.Wallet).payer;
   const vaultStock = await createAssociatedTokenAccountIdempotent(
     connection, payer, NVDAX, vaultPda, undefined, TOKEN_2022_PROGRAM_ID, undefined, true,

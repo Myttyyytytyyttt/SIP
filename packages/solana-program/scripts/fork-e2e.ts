@@ -31,7 +31,7 @@ import {
 } from "@solana/spl-token";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { attestationInstruction } from "./attestation";
+import { attestationInstruction, MODE_PROFIT } from "./attestation";
 import { measureCashSession } from "./measure-session";
 import { buildSwapV2AccountMetas, buildSwapV2Data, MEMO_PROGRAM, RAYDIUM_CLMM } from "./raydium-swap";
 
@@ -74,7 +74,11 @@ async function main() {
     throw new Error("config already initialised by a previous run — restart the validator (fork.sh does)");
   }
   const SKIM_BPS = 2_000;
-  await program.methods.createVault(SKIM_BPS).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
+  await program.methods
+    .createVaultV2(MODE_PROFIT, SKIM_BPS, 20, new anchor.BN(10 * LAMPORTS_PER_SOL), new anchor.BN(0))
+    .accounts({ owner: owner.publicKey })
+    .signers([owner])
+    .rpc();
   await program.methods
     .linkWallet()
     .accounts({ owner: owner.publicKey, wallet: wallet.publicKey })
@@ -122,6 +126,7 @@ async function main() {
   // ── 3. ATTEST the measured number, 4. SETTLE it ───────────────────────────
   const link = await program.account.tradingLink.fetch(linkPda);
   const end = BigInt(await connection.getSlot());
+  const vaultPolicy = await program.account.vault.fetch(vaultPda);
   const inputs = {
     programId: program.programId,
     wallet: wallet.publicKey,
@@ -130,14 +135,20 @@ async function main() {
     settlementNonce: BigInt(link.settlementNonce.toString()),
     sessionStartSlot: BigInt(link.frontierSlot.toString()),
     sessionEndSlot: end,
-    profitLamports: measured.profitLamports,
+    baseLamports: measured.profitLamports,
+    mode: MODE_PROFIT,
+    bps: vaultPolicy.skimBps,
+    policyNonce: BigInt(vaultPolicy.policyNonce.toString()),
+    validUntilSlot: end + 150n,
   };
   const vaultBefore = BigInt(await connection.getBalance(vaultPda));
   await program.methods
-    .settle(
+    .settleV2(
+      inputs.mode,
       new anchor.BN(inputs.sessionStartSlot.toString()),
       new anchor.BN(inputs.sessionEndSlot.toString()),
-      new anchor.BN(inputs.profitLamports.toString()),
+      new anchor.BN(inputs.baseLamports.toString()),
+      new anchor.BN(inputs.validUntilSlot.toString()),
     )
     .accountsPartial({ wallet: wallet.publicKey, vault: vaultPda, tradingLink: linkPda })
     .preInstructions([attestationInstruction(attester.secretKey, inputs)])

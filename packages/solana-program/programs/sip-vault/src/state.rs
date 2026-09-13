@@ -28,10 +28,11 @@ pub struct Vault {
     /// Gates settle and invest. NEVER gates withdraw: an issuer freezing the
     /// stock leg, or this program pausing itself, must not trap the user's SOL.
     pub paused: bool,
-    /// Share of attested session profit that is saved, in basis points.
-    /// Zero is refused at creation: a vault that is enabled, funded and saving
-    /// nothing is the exact silent failure the EVM diagnostics call "the
-    /// reachable trap" (savingsBps 0 with otherwise sane caps).
+    /// PROFIT rate: share of attested session profit saved, basis points,
+    /// 101..=10_000. The floor is 101 so this range never overlaps
+    /// `volume_bps` (1..=100): a profit rate can never be stored where a volume
+    /// rate belongs, and the worst cross-application is under-saving, never 20%
+    /// of turnover.
     pub skim_bps: u16,
     /// Lamports ever settled into this vault, monotonic. The keeper's
     /// anti-double-settlement anchor: it compares this against what it read
@@ -39,10 +40,54 @@ pub struct Vault {
     /// aggregateLifetimeInvested on the EVM side.
     pub lifetime_saved: u64,
     pub created_at: i64,
-    pub _reserved: [u8; 64],
+    /// Which rate settle applies: MODE_PROFIT (0) or MODE_VOLUME (1). Chosen by
+    /// the owner. It is read from here and signed into every attestation, never
+    /// taken from the caller -- see settle.rs.
+    pub skim_mode: u8,
+    /// VOLUME rate: share of the notional of every buy and sell, basis points,
+    /// 1..=100 (0.01%..1%).
+    pub volume_bps: u16,
+    /// Bumped on EVERY set_policy_v2, even one that changes nothing, and signed
+    /// into every attestation: no attestation can ride across a policy write.
+    pub policy_nonce: u64,
+    /// The most one settlement may move out of a trading wallet, lamports.
+    /// Owed amounts above it are clipped, and the clip is visible in `Settled`.
+    pub max_contribution: u64,
+    /// Lamports a settlement always leaves in the trading wallet, on top of its
+    /// own rent floor, so saving never strands a trader without fees. A payment
+    /// that would dip below it is refused, not trimmed.
+    pub wallet_reserve: u64,
+    /// The 64 reserved bytes minus the 27 taken above: the account stays 125 B.
+    pub _reserved: [u8; 37],
 }
 
 pub const CURRENT_VAULT_VERSION: u8 = 1;
+
+pub const MODE_PROFIT: u8 = 0;
+pub const MODE_VOLUME: u8 = 1;
+pub const PROFIT_BPS_MIN: u16 = 101;
+pub const PROFIT_BPS_MAX: u16 = 10_000;
+pub const VOLUME_BPS_MIN: u16 = 1;
+pub const VOLUME_BPS_MAX: u16 = 100;
+
+impl Vault {
+    /// The rate of the vault's active mode: the only rate settle ever applies,
+    /// and the one signed into the attestation.
+    pub fn active_bps(&self) -> u16 {
+        if self.skim_mode == MODE_VOLUME { self.volume_bps } else { self.skim_bps }
+    }
+}
+
+/// One validation for creation and every policy change, so an existing vault
+/// cannot be steered anywhere a new one could not start.
+pub fn validate_policy(mode: u8, skim_bps: u16, volume_bps: u16, max_contribution: u64) -> Result<()> {
+    require!(mode == MODE_PROFIT || mode == MODE_VOLUME, crate::errors::NuvemError::InvalidMode);
+    require!((PROFIT_BPS_MIN..=PROFIT_BPS_MAX).contains(&skim_bps), crate::errors::NuvemError::InvalidSkimBps);
+    require!((VOLUME_BPS_MIN..=VOLUME_BPS_MAX).contains(&volume_bps), crate::errors::NuvemError::InvalidVolumeBps);
+    // A zero cap would forgive every settlement while every log line looks fine.
+    require!(max_contribution > 0, crate::errors::NuvemError::InvalidContributionCap);
+    Ok(())
+}
 
 /// Layout version of ProtocolConfig. 2 is the first SIP layout: the first 105
 /// bytes are Nuvem's, byte for byte, and everything after `keeper` is new.
@@ -84,7 +129,7 @@ pub struct TradingLink {
 #[derive(InitSpace)]
 pub struct ProtocolConfig {
     pub authority: Pubkey,
-    /// The Ed25519 public key settle() demands attestations from.
+    /// The Ed25519 public key settle_v2() demands attestations from.
     pub attester: Pubkey,
     pub bump: u8,
     /// The one account, besides a vault's own owner, allowed to crank that

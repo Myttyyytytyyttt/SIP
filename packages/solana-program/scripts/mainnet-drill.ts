@@ -35,7 +35,7 @@ import {
 } from "@solana/spl-token";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { attestationInstruction } from "./attestation";
+import { attestationInstruction, MODE_PROFIT } from "./attestation";
 import { measureCashSession } from "./measure-session";
 import { fetchLiveRoute } from "./live-route";
 import { buildSwapV2AccountMetas, buildSwapV2Data, MEMO_PROGRAM, RAYDIUM_CLMM } from "./raydium-swap";
@@ -87,7 +87,10 @@ async function main() {
 
   // ── vault + link (idempotent) ──────────────────────────────────────────────
   if ((await connection.getAccountInfo(vaultPda)) === null) {
-    await program.methods.createVault(2_000).accounts({ owner: operator.publicKey }).rpc();
+    await program.methods
+      .createVaultV2(MODE_PROFIT, 2_000, 20, new anchor.BN(LAMPORTS_PER_SOL), new anchor.BN(0))
+      .accounts({ owner: operator.publicKey })
+      .rpc();
     console.log(`vault created: ${vaultPda.toBase58()}`);
   }
   if ((await connection.getAccountInfo(linkPda)) === null) {
@@ -138,6 +141,8 @@ async function main() {
   if (measured.profitLamports <= 0n) throw new Error("no unsettled profit measured");
 
   // ── 3+4. attest the measured number, settle it ─────────────────────────────
+  const vaultPolicy = await program.account.vault.fetch(vaultPda);
+  const sessionEndSlot = BigInt(await connection.getSlot());
   const inputs = {
     programId: program.programId,
     wallet: wallet.publicKey,
@@ -145,15 +150,21 @@ async function main() {
     linkEpoch: BigInt(link.epoch.toString()),
     settlementNonce: BigInt(link.settlementNonce.toString()),
     sessionStartSlot: BigInt(link.frontierSlot.toString()),
-    sessionEndSlot: BigInt(await connection.getSlot()),
-    profitLamports: measured.profitLamports,
+    sessionEndSlot,
+    baseLamports: measured.profitLamports,
+    mode: MODE_PROFIT,
+    bps: vaultPolicy.skimBps,
+    policyNonce: BigInt(vaultPolicy.policyNonce.toString()),
+    validUntilSlot: sessionEndSlot + 150n,
   };
   const vaultBefore = BigInt(await connection.getBalance(vaultPda));
   const settleSig = await program.methods
-    .settle(
+    .settleV2(
+      inputs.mode,
       new anchor.BN(inputs.sessionStartSlot.toString()),
       new anchor.BN(inputs.sessionEndSlot.toString()),
-      new anchor.BN(inputs.profitLamports.toString()),
+      new anchor.BN(inputs.baseLamports.toString()),
+      new anchor.BN(inputs.validUntilSlot.toString()),
     )
     .accountsPartial({ wallet: wallet.publicKey, vault: vaultPda, tradingLink: linkPda })
     .preInstructions([attestationInstruction(attester.secretKey, inputs)])

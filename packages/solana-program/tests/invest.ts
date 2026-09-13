@@ -148,7 +148,7 @@ describe("sip-vault M3: invest", () => {
     // that fails for the wrong reason one day.
     await setKeeper(program, provider.wallet.publicKey, crank.publicKey);
 
-    await program.methods.createVault(2_000).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
+    await program.methods.createVaultV2(0, 2_000, 20, new anchor.BN(1_000_000_000), new anchor.BN(0)).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
 
     usdc = await createMint(connection, payer, payer.publicKey, null, 6);
     stock = await createMint(connection, payer, payer.publicKey, null, 8, Keypair.generate(), undefined, TOKEN_2022_PROGRAM_ID);
@@ -236,9 +236,9 @@ describe("sip-vault M3: invest", () => {
     await setPolicy({ enabled: false });
     await expectFailure(invest(10_000_000n, expectedOut(10_000_000n)), "InvestingDisabled");
     await setPolicy({ enabled: true, maxRolling: 400_000_000n });
-    await program.methods.setPolicy(2_000, true).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
+    await program.methods.setPolicyV2(0, 2_000, 20, true, new anchor.BN(1_000_000_000), new anchor.BN(0)).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
     await expectFailure(invest(10_000_000n, expectedOut(10_000_000n)), "VaultPaused");
-    await program.methods.setPolicy(2_000, false).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
+    await program.methods.setPolicyV2(0, 2_000, 20, false, new anchor.BN(1_000_000_000), new anchor.BN(0)).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
   });
 
   it("refuses while the PROTOCOL is paused, even with the vault and policy enabled", async () => {

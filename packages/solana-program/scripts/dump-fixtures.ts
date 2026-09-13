@@ -43,7 +43,7 @@ async function main() {
   const SKIM_BPS = 3_777;
   const DEPOSIT = Math.floor(1.234567891 * LAMPORTS_PER_SOL);
 
-  await program.methods.createVault(SKIM_BPS).accounts({ owner }).rpc();
+  await program.methods.createVaultV2(0 /* PROFIT */, SKIM_BPS, 20, new anchor.BN(1_000_000_000), new anchor.BN(0)).accounts({ owner }).rpc();
   await program.methods
     .linkWallet()
     .accounts({ owner, wallet: tradingWallet.publicKey })

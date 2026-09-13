@@ -1,12 +1,14 @@
 // Milestone 2: settle — the attested session reaching the vault.
 //
 // THE TESTS THAT MATTER ARE THE REFUSALS, and here each one guards real money:
-// a replayed attestation is the same profit settled twice; a forged signer is
-// anyone printing themselves savings; a tampered profit is the attester's
-// number inflated after signing; an overlapping window is one profitable
-// stretch counted again; and a stale link epoch is a resurrected attestation
-// from a link's previous life. Every one must die, and die for the RIGHT
-// reason — the assertions check the error name, not just failure.
+// a replayed attestation is the same window settled twice; a forged signer is
+// anyone printing themselves savings; a tampered base is the attester's number
+// inflated after signing; an overlapping window is one stretch counted again; a
+// stale link epoch is a resurrected attestation from a link's previous life.
+// Since V2, an attestation made for the other mode, another rate or an older
+// policy is the one that nearly charged a volume figure at a profit rate. Every
+// one must die, and die for the RIGHT reason — the assertions check the error
+// name, not just failure.
 
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
@@ -21,7 +23,7 @@ import {
 import { assert } from "chai";
 import { SipVault } from "../target/types/sip_vault";
 import { configPdaFor, ensureConfig, TEST_ATTESTER } from "./config-fixture";
-import { attestationInstruction, type AttestationInputs } from "../scripts/attestation";
+import { attestationInstruction, MODE_PROFIT, MODE_VOLUME, type AttestationInputs } from "../scripts/attestation";
 
 describe("sip-vault M2: settle", () => {
   const provider = anchor.AnchorProvider.env();
@@ -43,7 +45,39 @@ describe("sip-vault M2: settle", () => {
     program.programId,
   );
 
+  const SOL = BigInt(LAMPORTS_PER_SOL);
   const SKIM_BPS = 2_500; // a quarter, so expected contributions are legible
+  const VOLUME_BPS = 20; // 0.2% of notional
+
+  interface Policy {
+    mode: number;
+    skimBps: number;
+    volumeBps: number;
+    paused: boolean;
+    maxContribution: bigint;
+    walletReserve: bigint;
+  }
+  // The cap sits well above any single test's contribution, so only the test
+  // that is about the cap ever meets it.
+  const POLICY: Policy = {
+    mode: MODE_PROFIT,
+    skimBps: SKIM_BPS,
+    volumeBps: VOLUME_BPS,
+    paused: false,
+    maxContribution: 10n * SOL,
+    walletReserve: 0n,
+  };
+  const bn = (value: bigint) => new anchor.BN(value.toString());
+
+  /** Every write bumps the vault's policy nonce, even one that changes nothing. */
+  const setPolicy = (over: Partial<Policy> = {}) => {
+    const p = { ...POLICY, ...over };
+    return program.methods
+      .setPolicyV2(p.mode, p.skimBps, p.volumeBps, p.paused, bn(p.maxContribution), bn(p.walletReserve))
+      .accounts({ owner: owner.publicKey })
+      .signers([owner])
+      .rpc();
+  };
 
   const airdrop = async (to: PublicKey, sol: number) => {
     const sig = await connection.requestAirdrop(to, sol * LAMPORTS_PER_SOL);
@@ -61,9 +95,13 @@ describe("sip-vault M2: settle", () => {
 
   const linkState = async () => program.account.tradingLink.fetch(linkPda);
 
-  /** Builds the attestation for the link's CURRENT nonce/epoch. */
+  /**
+   * Builds the attestation for the link's CURRENT nonce and epoch and the
+   * vault's CURRENT mode, rate and policy nonce — what an honest keeper signs.
+   */
   const freshAttestation = async (over: Partial<AttestationInputs> = {}) => {
     const link = await linkState();
+    const vault = await program.account.vault.fetch(vaultPda);
     const end = await slotAbove(BigInt(link.frontierSlot.toString()) + 1n);
     const inputs: AttestationInputs = {
       programId: program.programId,
@@ -73,7 +111,11 @@ describe("sip-vault M2: settle", () => {
       settlementNonce: BigInt(link.settlementNonce.toString()),
       sessionStartSlot: BigInt(link.frontierSlot.toString()),
       sessionEndSlot: end,
-      profitLamports: BigInt(LAMPORTS_PER_SOL), // 1 SOL of session profit
+      baseLamports: SOL, // 1 SOL of session profit
+      mode: vault.skimMode,
+      bps: vault.skimMode === MODE_VOLUME ? vault.volumeBps : vault.skimBps,
+      policyNonce: BigInt(vault.policyNonce.toString()),
+      validUntilSlot: end + 10_000n,
       ...over,
     };
     return inputs;
@@ -83,7 +125,9 @@ describe("sip-vault M2: settle", () => {
     inputs: AttestationInputs,
     options: {
       signWith?: Keypair;
-      argsOverride?: Partial<Pick<AttestationInputs, "sessionStartSlot" | "sessionEndSlot" | "profitLamports">>;
+      argsOverride?: Partial<
+        Pick<AttestationInputs, "mode" | "sessionStartSlot" | "sessionEndSlot" | "baseLamports" | "validUntilSlot">
+      >;
       skipEd25519?: boolean;
     } = {},
   ) => {
@@ -92,10 +136,12 @@ describe("sip-vault M2: settle", () => {
       ? []
       : [attestationInstruction((options.signWith ?? attester).secretKey, inputs)];
     return program.methods
-      .settle(
-        new anchor.BN(args.sessionStartSlot.toString()),
-        new anchor.BN(args.sessionEndSlot.toString()),
-        new anchor.BN(args.profitLamports.toString()),
+      .settleV2(
+        args.mode,
+        bn(args.sessionStartSlot),
+        bn(args.sessionEndSlot),
+        bn(args.baseLamports),
+        bn(args.validUntilSlot),
       )
       .accountsPartial({
         wallet: wallet.publicKey,
@@ -117,6 +163,25 @@ describe("sip-vault M2: settle", () => {
     assert.fail(`expected a failure mentioning "${needle}", but it succeeded`);
   };
 
+  /** The `Settled` event a settlement emitted, read back from its logs. */
+  const settledEvent = async (signature: string) => {
+    const parser = new anchor.EventParser(program.programId, new anchor.BorshCoder(program.idl));
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const tx = await connection.getTransaction(signature, {
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0,
+      });
+      if (tx?.meta?.logMessages) {
+        for (const event of parser.parseLogs(tx.meta.logMessages)) {
+          if (event.name.toLowerCase() === "settled") return event.data as { owed: anchor.BN; paid: anchor.BN };
+        }
+        throw new Error("the settlement emitted no Settled event");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error(`settlement ${signature} never became visible`);
+  };
+
   before(async () => {
     await airdrop(owner.publicKey, 2);
     await airdrop(wallet.publicKey, 5);
@@ -125,7 +190,11 @@ describe("sip-vault M2: settle", () => {
     // if no spec has created it yet.
     await ensureConfig(program, provider.wallet.publicKey);
 
-    await program.methods.createVault(SKIM_BPS).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
+    await program.methods
+      .createVaultV2(POLICY.mode, POLICY.skimBps, POLICY.volumeBps, bn(POLICY.maxContribution), bn(POLICY.walletReserve))
+      .accounts({ owner: owner.publicKey })
+      .signers([owner])
+      .rpc();
     await program.methods
       .linkWallet()
       .accounts({ owner: owner.publicKey, wallet: wallet.publicKey })
@@ -140,7 +209,7 @@ describe("sip-vault M2: settle", () => {
 
     await settleTx(inputs);
 
-    const expectedContribution = (inputs.profitLamports * BigInt(SKIM_BPS)) / 10_000n;
+    const expectedContribution = (inputs.baseLamports * BigInt(SKIM_BPS)) / 10_000n;
     const vaultAfter = await connection.getBalance(vaultPda);
     assert.strictEqual(BigInt(vaultAfter - vaultBefore), expectedContribution, "vault received exactly the share");
     assert.isBelow(await connection.getBalance(wallet.publicKey), walletBefore, "the wallet paid it");
@@ -174,10 +243,10 @@ describe("sip-vault M2: settle", () => {
     await expectSettleFailure(settleTx(inputs, { signWith: impostor }), "WrongAttester");
   });
 
-  it("refuses a profit inflated after signing", async () => {
+  it("refuses a base inflated after signing", async () => {
     const inputs = await freshAttestation();
     await expectSettleFailure(
-      settleTx(inputs, { argsOverride: { profitLamports: inputs.profitLamports + 1n } }),
+      settleTx(inputs, { argsOverride: { baseLamports: inputs.baseLamports + 1n } }),
       "AttestationMismatch",
     );
   });
@@ -207,7 +276,7 @@ describe("sip-vault M2: settle", () => {
   });
 
   it("refuses while paused — and withdraw still works, which is the whole point of pause's shape", async () => {
-    await program.methods.setPolicy(SKIM_BPS, true).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
+    await setPolicy({ paused: true });
     const inputs = await freshAttestation();
     await expectSettleFailure(settleTx(inputs), "VaultPaused");
     await program.methods
@@ -215,7 +284,7 @@ describe("sip-vault M2: settle", () => {
       .accounts({ owner: owner.publicKey })
       .signers([owner])
       .rpc();
-    await program.methods.setPolicy(SKIM_BPS, false).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
+    await setPolicy();
   });
 
   it("refuses while the PROTOCOL is paused, even with the vault running — and withdraw still works", async () => {
@@ -238,6 +307,103 @@ describe("sip-vault M2: settle", () => {
     await settleTx(inputs);
     const link = await linkState();
     assert.strictEqual(link.settlementNonce.toString(), "2");
+  });
+
+  // ── V2: the number means what the vault says it means ────────────────────
+
+  it("refuses an attestation for the OTHER mode, by name, when the caller says so", async () => {
+    const inputs = await freshAttestation({ mode: MODE_VOLUME, bps: VOLUME_BPS });
+    await expectSettleFailure(settleTx(inputs), "SkimModeMismatch");
+  });
+
+  it("refuses a volume attestation passed off as profit — the mode is inside the signed bytes", async () => {
+    // The caller claims PROFIT, the vault's mode, so the name check passes.
+    // The attester signed VOLUME, so the bytes do not.
+    const inputs = await freshAttestation({ mode: MODE_VOLUME, bps: VOLUME_BPS });
+    await expectSettleFailure(settleTx(inputs, { argsOverride: { mode: MODE_PROFIT } }), "AttestationMismatch");
+  });
+
+  it("refuses an attestation signed at another rate", async () => {
+    // Right mode, wrong rate: the volume rate applied to a profit figure.
+    const inputs = await freshAttestation({ bps: VOLUME_BPS });
+    await expectSettleFailure(settleTx(inputs), "AttestationMismatch");
+  });
+
+  it("refuses an attestation that crossed a policy change — even one that changed nothing", async () => {
+    const inputs = await freshAttestation();
+    await setPolicy(); // identical values; the policy nonce moves anyway
+    await expectSettleFailure(settleTx(inputs), "AttestationMismatch");
+  });
+
+  it("refuses an attestation past its deadline", async () => {
+    const inputs = await freshAttestation();
+    await expectSettleFailure(settleTx({ ...inputs, validUntilSlot: inputs.sessionEndSlot - 1n }), "AttestationExpired");
+  });
+
+  it("clips at the owner's cap, and the event records what was owed and what was paid", async () => {
+    const cap = SOL / 10n; // a quarter of 1 SOL owes 0.25; the owner allows 0.1 per settlement
+    await setPolicy({ maxContribution: cap });
+    try {
+      const inputs = await freshAttestation();
+      const vaultBefore = BigInt(await connection.getBalance(vaultPda));
+      const signature = await settleTx(inputs);
+
+      assert.strictEqual(BigInt(await connection.getBalance(vaultPda)) - vaultBefore, cap, "exactly the cap moved");
+      const event = await settledEvent(signature);
+      assert.strictEqual(event.owed.toString(), (SOL / 4n).toString(), "owed is the full quarter");
+      assert.strictEqual(event.paid.toString(), cap.toString(), "paid is the cap");
+      assert.strictEqual((await linkState()).frontierSlot.toString(), inputs.sessionEndSlot.toString(), "the window is settled");
+    } finally {
+      await setPolicy();
+    }
+  });
+
+  it("settles a zero base: nothing moves and the frontier still advances, so a quiet wallet never wedges", async () => {
+    const before = await linkState();
+    const inputs = await freshAttestation({ baseLamports: 0n });
+    const vaultBefore = await connection.getBalance(vaultPda);
+
+    await settleTx(inputs);
+
+    const after = await linkState();
+    assert.strictEqual(await connection.getBalance(vaultPda), vaultBefore, "nothing moved");
+    assert.strictEqual(after.settlementNonce.toString(), (BigInt(before.settlementNonce.toString()) + 1n).toString());
+    assert.strictEqual(after.frontierSlot.toString(), inputs.sessionEndSlot.toString());
+  });
+
+  it("refuses a payment that would dip into the wallet's reserve, and leaves the window open", async () => {
+    await setPolicy({ walletReserve: 1_000n * SOL });
+    try {
+      const before = await linkState();
+      await expectSettleFailure(settleTx(await freshAttestation()), "WalletBelowReserve");
+      const after = await linkState();
+      assert.strictEqual(after.frontierSlot.toString(), before.frontierSlot.toString(), "the frontier did not move");
+      assert.strictEqual(after.settlementNonce.toString(), before.settlementNonce.toString(), "nor the nonce");
+    } finally {
+      await setPolicy();
+    }
+  });
+
+  it("in VOLUME mode it charges the volume rate on notional, and a profit attestation stops working", async () => {
+    await setPolicy({ mode: MODE_VOLUME });
+    try {
+      const notional = 10n * SOL;
+      const profitShaped = await freshAttestation({ mode: MODE_PROFIT, bps: SKIM_BPS, baseLamports: notional });
+      await expectSettleFailure(settleTx(profitShaped), "SkimModeMismatch");
+
+      const inputs = await freshAttestation({ baseLamports: notional });
+      assert.strictEqual(inputs.mode, MODE_VOLUME);
+      assert.strictEqual(inputs.bps, VOLUME_BPS);
+      const vaultBefore = BigInt(await connection.getBalance(vaultPda));
+      await settleTx(inputs);
+      assert.strictEqual(
+        BigInt(await connection.getBalance(vaultPda)) - vaultBefore,
+        (notional * BigInt(VOLUME_BPS)) / 10_000n,
+        "0.2% of 10 SOL, not 25%",
+      );
+    } finally {
+      await setPolicy();
+    }
   });
 
   it("a re-created link refuses its previous life's attestations", async () => {
@@ -334,7 +500,11 @@ describe("sip-vault: wrap_sol", () => {
     await connection.confirmTransaction(await connection.requestAirdrop(o.publicKey, 3 * LAMPORTS_PER_SOL));
     const [vaultPda] = PublicKey.findProgramAddressSync([Buffer.from("vault"), o.publicKey.toBuffer()], program.programId);
     const [configPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
-    await program.methods.createVault(2_000).accounts({ owner: o.publicKey }).signers([o]).rpc();
+    await program.methods
+      .createVaultV2(MODE_PROFIT, 2_000, 20, new anchor.BN(LAMPORTS_PER_SOL), new anchor.BN(0))
+      .accounts({ owner: o.publicKey })
+      .signers([o])
+      .rpc();
     // Fund the vault with 1 SOL as a settlement would.
     const fund = new Transaction().add(SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: vaultPda, lamports: LAMPORTS_PER_SOL }));
     await provider.sendAndConfirm(fund);

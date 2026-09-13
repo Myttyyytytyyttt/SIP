@@ -27,7 +27,7 @@ import {
 } from "@solana/web3.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { attestationInstruction } from "./attestation";
+import { attestationInstruction, MODE_PROFIT } from "./attestation";
 
 const LOCAL_DIR = join(__dirname, ".local");
 const PROFIT_SOL = 0.5;
@@ -85,8 +85,13 @@ async function main() {
 
   // ── 2. vault + link ────────────────────────────────────────────────────────
   if ((await connection.getAccountInfo(vaultPda)) === null) {
-    await program.methods.createVault(2_000).accounts({ owner }).rpc();
-    console.log(`vault created (skim 20%): ${vaultPda.toBase58()}`);
+    // PROFIT mode at 20%; the volume rate is stored but idle. The 1 SOL cap per
+    // settlement sits above any drill session, and there is no reserve.
+    await program.methods
+      .createVaultV2(MODE_PROFIT, 2_000, 20, new anchor.BN(LAMPORTS_PER_SOL), new anchor.BN(0))
+      .accounts({ owner })
+      .rpc();
+    console.log(`vault created (profit mode, skim 20%): ${vaultPda.toBase58()}`);
   }
   if ((await connection.getAccountInfo(linkPda)) === null) {
     await program.methods
@@ -130,6 +135,9 @@ async function main() {
     end = BigInt(await connection.getSlot());
   }
 
+  // The attestation names the vault's mode, rate and policy nonce as they are
+  // now, and dies unless it lands within about a minute of slots.
+  const vaultStateBefore = await program.account.vault.fetch(vaultPda);
   const inputs = {
     programId: program.programId,
     wallet: wallet.publicKey,
@@ -138,17 +146,22 @@ async function main() {
     settlementNonce: BigInt(link.settlementNonce.toString()),
     sessionStartSlot: frontier,
     sessionEndSlot: end,
-    profitLamports,
+    baseLamports: profitLamports,
+    mode: MODE_PROFIT,
+    bps: vaultStateBefore.skimBps,
+    policyNonce: BigInt(vaultStateBefore.policyNonce.toString()),
+    validUntilSlot: end + 150n,
   };
 
   const vaultBefore = await connection.getBalance(vaultPda);
-  const vaultStateBefore = await program.account.vault.fetch(vaultPda);
 
   await program.methods
-    .settle(
+    .settleV2(
+      inputs.mode,
       new anchor.BN(inputs.sessionStartSlot.toString()),
       new anchor.BN(inputs.sessionEndSlot.toString()),
-      new anchor.BN(inputs.profitLamports.toString()),
+      new anchor.BN(inputs.baseLamports.toString()),
+      new anchor.BN(inputs.validUntilSlot.toString()),
     )
     .accountsPartial({ wallet: wallet.publicKey, vault: vaultPda, tradingLink: linkPda })
     .preInstructions([attestationInstruction(attester.secretKey, inputs)])

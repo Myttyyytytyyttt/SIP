@@ -134,7 +134,7 @@ describe("sip-vault: protocol config", () => {
     // A vault of its own, so this spec leaves the provider's vault to sip-vault.ts.
     const owner = successor;
     const [vault] = PublicKey.findProgramAddressSync([Buffer.from("vault"), owner.publicKey.toBuffer()], program.programId);
-    await program.methods.createVault(2000).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
+    await program.methods.createVaultV2(0, 2000, 20, new anchor.BN(1_000_000_000), new anchor.BN(0)).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
     await provider.sendAndConfirm(
       new Transaction().add(SystemProgram.transfer({ fromPubkey: authority, toPubkey: vault, lamports: 100_000_000 })),
     );
