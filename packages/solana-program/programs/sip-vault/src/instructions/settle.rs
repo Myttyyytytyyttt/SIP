@@ -71,6 +71,7 @@ pub fn settle_handler(
     let link = &ctx.accounts.trading_link;
 
     require!(!vault.paused, NuvemError::VaultPaused);
+    require!(!ctx.accounts.config.paused, NuvemError::ProtocolPaused);
     require!(profit_lamports > 0, NuvemError::ZeroAmount);
 
     // THE SESSION WINDOW MUST SIT ENTIRELY ABOVE THE FRONTIER. Overlapping

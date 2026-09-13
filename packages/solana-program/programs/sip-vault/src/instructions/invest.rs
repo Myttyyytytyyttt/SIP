@@ -105,6 +105,7 @@ pub fn invest_handler(
         NuvemError::UnauthorizedCrank
     );
     require!(!vault.paused, NuvemError::VaultPaused);
+    require!(!ctx.accounts.config.paused, NuvemError::ProtocolPaused);
     require!(policy.enabled, NuvemError::InvestingDisabled);
     require!(
         ctx.accounts.venue_program.key() == policy.venue_program,

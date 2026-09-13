@@ -66,6 +66,7 @@ pub fn wrap_sol_handler(ctx: Context<WrapSol>, amount: u64) -> Result<()> {
             .may_crank(&ctx.accounts.vault.owner, &ctx.accounts.crank.key()),
         NuvemError::UnauthorizedCrank
     );
+    require!(!ctx.accounts.config.paused, NuvemError::ProtocolPaused);
     require!(amount > 0, NuvemError::ZeroAmount);
 
     // The vault must be able to cover the reimbursement without dipping below

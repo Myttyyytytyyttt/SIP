@@ -75,6 +75,7 @@ pub fn convert_handler(
     let policy = &ctx.accounts.policy;
 
     require!(!vault.paused, NuvemError::VaultPaused);
+    require!(!ctx.accounts.config.paused, NuvemError::ProtocolPaused);
     require!(policy.enabled, NuvemError::InvestingDisabled);
     require!(
         ctx.accounts.venue_program.key() == policy.venue_program,

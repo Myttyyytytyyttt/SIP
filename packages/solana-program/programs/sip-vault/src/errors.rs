@@ -93,4 +93,18 @@ pub enum NuvemError {
     /// a pool they controlled, bounded only by an owner-signed floor.
     #[msg("only the vault's owner or the configured keeper may crank this vault")]
     UnauthorizedCrank,
+
+    #[msg("the protocol is paused: settle and invest are stopped for every vault; withdraw is not")]
+    ProtocolPaused,
+
+    /// init_config is not first-caller-wins any more: the signer must be the
+    /// key the loader records as this program's upgrade authority.
+    #[msg("only this program's upgrade authority may create the protocol config")]
+    NotUpgradeAuthority,
+
+    #[msg("this signer is not the proposed new authority")]
+    NotPendingAuthority,
+
+    #[msg("the default public key cannot hold this role")]
+    InvalidAuthority,
 }

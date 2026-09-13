@@ -58,6 +58,21 @@ pub mod sip_vault {
         instructions::init_config::init_config_handler(ctx, attester)
     }
 
+    /// Proposes a new config authority; see transfer_authority.rs.
+    pub fn transfer_authority(ctx: Context<TransferAuthority>, new_authority: Pubkey) -> Result<()> {
+        instructions::transfer_authority_handler(ctx, new_authority)
+    }
+
+    /// The proposed authority takes control by signing; see accept_authority.rs.
+    pub fn accept_authority(ctx: Context<AcceptAuthority>) -> Result<()> {
+        instructions::accept_authority_handler(ctx)
+    }
+
+    /// Protocol-wide pause of settle, wrap_sol, convert and invest. Never withdraw.
+    pub fn set_protocol_paused(ctx: Context<SetProtocolPaused>, paused: bool) -> Result<()> {
+        instructions::set_protocol_paused_handler(ctx, paused)
+    }
+
     /// Replaces the attester `settle` verifies against. See set_attester.rs —
     /// it did not exist until the original attester key leaked, which is one
     /// day too late for every key it will ever protect.

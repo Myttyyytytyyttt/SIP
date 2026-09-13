@@ -44,6 +44,10 @@ pub struct Vault {
 
 pub const CURRENT_VAULT_VERSION: u8 = 1;
 
+/// Layout version of ProtocolConfig. 2 is the first SIP layout: the first 105
+/// bytes are Nuvem's, byte for byte, and everything after `keeper` is new.
+pub const CURRENT_CONFIG_VERSION: u8 = 2;
+
 /// A trading wallet linked to a vault.
 ///
 /// Seeds: ["link", wallet] — keyed by WALLET, not by vault, on purpose. Only
@@ -97,6 +101,18 @@ pub struct ProtocolConfig {
     /// and route it through a pool of their own choosing. An unset keeper must
     /// therefore fail closed to owner-only, never open back to the world.
     pub keeper: Pubkey,
+    /// TWO-STEP AUTHORITY TRANSFER. The old deployment had no way to move its
+    /// authority at all, so the day its key leaked the config was lost for good.
+    /// `transfer_authority` only proposes; the new key must sign
+    /// `accept_authority` itself, so a typo can never hand the protocol to an
+    /// address nobody controls. Default means no transfer is pending.
+    pub pending_authority: Pubkey,
+    /// PROTOCOL-WIDE PAUSE, set by the authority. Gates settle, wrap_sol,
+    /// convert and invest for every vault at once. It NEVER gates withdraw or
+    /// withdraw_token: stopping the machine must not trap anyone's savings.
+    pub paused: bool,
+    pub version: u8,
+    pub _reserved: [u8; 64],
 }
 
 impl ProtocolConfig {
