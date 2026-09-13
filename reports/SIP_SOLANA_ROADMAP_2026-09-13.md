@@ -58,7 +58,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - [ ] **Aprobar la cesta y las tasas de la demo** (0.5 h · juntos) — Decides que la demo compra el S&P 500 (SPYx) desde 1 $, con tasas de demo visibles en pantalla: volumen 1 % y beneficio 50 %.
 - [ ] **Operar para grabar operaciones reales** (1 h) — Con una cartera nueva y 0,3 SOL haces una compra y una venta en Axiom, GMGN y pump.fun, y me pasas solo las firmas.
 
-**Claude** · 31.5 h
+**Claude** · 39 h
 
 - [ ] **Poner la dirección nueva del programa** (1 h · **imprescindible**) — Genero la dirección del programa nuevo y compruebo que nada apunta al programa viejo.
 - [ ] **Solo tú configuras el programa** (5 h · **imprescindible**) — Solo tu wallet de administración puede configurar el programa la primera vez, el mando se traspasa en dos pasos y hay una pausa general.
@@ -67,6 +67,8 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - [ ] **Traer el vigilante a SIP** (7 h · **imprescindible**) — Traigo de Nuvem el proceso que cobra, como pieza propia de SIP, capaz de arrancar en seco sin ninguna clave secreta.
 - [ ] **La web aprende a hablar con Solana** (8 h · **imprescindible**) — Traigo a la web la pieza que lee Solana, una puerta propia hacia el nodo y los permisos del navegador, sin exponer ninguna clave.
 - [ ] **Escribir la regla del vigilante en Privy** (1.5 h · **imprescindible**) — Escribo el script que crea en Privy la regla que solo deja al vigilante firmar cobros de SIP.
+- [ ] **Cerrar lo que encontró la revisión del programa** (6 h · **imprescindible**) — Corrijo en el programa los fallos graves que encontró la revisión antes de publicarlo.
+- [ ] **El volumen llega al 2 %** (1.5 h · **imprescindible**) — Subo el tope de la tasa de volumen al 2 % sin que se pueda confundir con la de beneficio.
 
 **Control del día:** Pruebas en verde para modos, límites, configuración protegida y moneda fija; Helius y Privy listos; 6 firmas reales guardadas.  
 **Si no se cumple:** El plan B se decide el martes a las 13:00 en vez del miércoles.
@@ -84,11 +86,12 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - [ ] **Crear la llave de firma y la regla en Privy** (1 h · **imprescindible**) — Creas en Privy la llave del vigilante, ejecutas el script de la regla y me pasas solo los dos ids.
 - [ ] **Pegar las variables del vigilante en Railway** (1 h · **imprescindible**) — Creas el servicio del vigilante en Railway, cambias la contraseña de la base de datos y pegas tú las variables.
 
-**Claude** · 18 h
+**Claude** · 21 h
 
 - [ ] **Todas las pruebas en verde y revisión** (6 h · **imprescindible**) — Paso todas las pruebas del programa y una revisión de código antes de publicar nada.
 - [ ] **El vigilante cobra con la regla de cada modo** (6 h · **imprescindible**) — El vigilante lee el modo y la tasa de cada bóveda, construye el cobro nuevo y no cobra si no vio todo el tramo.
 - [ ] **Entrar con Phantom y crear wallets de trading** (6 h · **imprescindible**) — Entras con Phantom como llave de pensión y creas wallets de trading que nacen con el permiso del vigilante y se pueden exportar a Axiom.
+- [ ] **La web pide el consentimiento al vincular** (3 h · **imprescindible**) — Adapto la web al programa corregido: vincular pide una firma de la wallet de trading y la ruta de envío la verifica.
 
 **Control del día:** 13:00: pruebas del programa en verde, o plan B. Por la noche: el programa está en mainnet, coincide con lo probado y el vigilante arranca sin ninguna clave secreta.  
 **Si no se cumple:** Si no se publica el martes, el miércoles se publica con volumen bloqueado y la web trabaja con esa versión.
@@ -360,7 +363,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Decides que la demo compra el S&P 500 (SPYx) desde 1 $, con tasas de demo visibles en pantalla: volumen 1 % y beneficio 50 %.
 - **Por qué:** Con las tasas normales (0,20 % y 20 %) la demo necesitaría cientos de dólares de operaciones para llegar a 1 $.
 - **Listo cuando:** Confirmación tuya por escrito.
-- **Técnico:** SPYx en el pool Raydium CLMM 6truu3rZ; NVDAx (49iMat) como segunda acción solo si su pool pasa ese día; SOL a USDC por 3ucNos4N. Las tasas del producto siguen siendo 20 % y 0,20 %.
+- **Técnico:** Aprobado el 14-sep. SPYx en el pool Raydium CLMM 6truu3rZ; NVDAx (49iMat) como segunda acción solo si su pool pasa ese día; SOL a USDC por 3ucNos4N. Tasas: 20 % del beneficio y 2 % del volumen (antes 0,20 %). Política: compra cada 5 $ acumulados (mínimo por compra = 5 $ entre el número de acciones), sin tope por compra ni por 30 días hasta que el usuario lo cambie.
 
 #### `fills-reales` — Operar para grabar operaciones reales
 
@@ -394,11 +397,27 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Listo cuando:** El script está en el repo, revisado, y no imprime ningún secreto.
 - **Técnico:** ALLOW signAndSendTransaction con programId en {SIP, Ed25519SigVerify} (sin ComputeBudget: permitiría gastar el SOL de la wallet en comisiones); DENY exportPrivateKey y signMessage; owner = key quorum. La regla va en el firmante, nunca en la wallet: en la wallet impediría exportarla a Axiom. Ids a stdout, secretos a un archivo 0600. Dueña de la política: una key quorum de administración distinta de la del vigilante (Privy exige la firma del dueño para cambiarla). Pruebas de rechazo con transacciones que simularían bien (1 lamport a sí misma, Memo): Privy simula antes de evaluar la política. Hecho 14-sep: pnpm --dir packages/solana-keeper privy-policy (--print, create, check, verify) y docs/runbooks/PRIVY_SOLANA.md.
 
+#### `programa-correcciones` — Cerrar lo que encontró la revisión del programa
+
+- **Quién:** Claude · **horas:** 6 · **nivel:** Imprescindible · **depende de:** `programa-dos-modos`, `programa-moneda-fija`, `programa-mando-seguro`
+- **Qué:** Corrijo en el programa los fallos graves que encontró la revisión antes de publicarlo.
+- **Por qué:** Un keeper o un asiento de Privy comprometido podía vaciar cuentas de la bóveda o redirigir los cobros a otra bóveda.
+- **Listo cuando:** Pruebas con forma de ataque en verde y la rama fusionada en main.
+- **Técnico:** invest/convert rechazan cuentas de tokens de la bóveda no medidas (DisallowedVaultAccount); unlink solo el dueño; link_wallet exige wallet != dueño, config sin pausa y consentimiento Ed25519 de la wallet (0xFF‖SIP_LINK_V1‖programa‖wallet‖bóveda‖dueño); wrap_sol respeta la pausa y exige política activa; Settled con época, inicio y nonce. Rama program-review-fixes.
+
+#### `programa-limite-volumen` — El volumen llega al 2 %
+
+- **Quién:** Claude · **horas:** 1.5 · **nivel:** Imprescindible · **depende de:** `programa-correcciones`
+- **Qué:** Subo el tope de la tasa de volumen al 2 % sin que se pueda confundir con la de beneficio.
+- **Por qué:** Decisión del 14-sep: 20 % del beneficio y 2 % del volumen; hoy el volumen está limitado al 1 %.
+- **Listo cuando:** Pruebas: 200 bps de volumen aceptado, 201 rechazado; 200 bps de beneficio rechazado, 201 aceptado.
+- **Técnico:** VOLUME_BPS_MAX 100 → 200 y PROFIT_BPS_MIN 101 → 201 en state.rs (rangos disjuntos); pruebas de límites; keeper y web con las mismas cotas.
+
 ### Martes 15
 
 #### `programa-pruebas` — Todas las pruebas en verde y revisión
 
-- **Quién:** Claude · **horas:** 6 · **nivel:** Imprescindible · **depende de:** `programa-dos-modos`, `programa-mando-seguro`, `programa-moneda-fija`
+- **Quién:** Claude · **horas:** 6 · **nivel:** Imprescindible · **depende de:** `programa-dos-modos`, `programa-mando-seguro`, `programa-moneda-fija`, `programa-correcciones`, `programa-limite-volumen`
 - **Qué:** Paso todas las pruebas del programa y una revisión de código antes de publicar nada.
 - **Por qué:** Una vez publicado, cada error cuesta una actualización con dinero real delante.
 - **Listo cuando:** A las 13:00: pruebas en verde y ningún hallazgo grave abierto en la revisión.
@@ -426,7 +445,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Pones unos 5 SOL en tu wallet de administración para publicar el programa.
 - **Por qué:** Publicar bloquea unos 2,4 SOL de alquiler y necesita otro tanto temporal que luego vuelve.
 - **Listo cuando:** Los saldos se ven en Solscan.
-- **Técnico:** solana rent 468056 (tamaño real de sip_vault.so) da 2,378 SOL permanentes; el buffer de escritura necesita otros ~2,4 SOL que se devuelven; ~0,1 SOL de comisiones. Unos 3,24 SOL salen del rescate de hoy.
+- **Técnico:** solana rent del binario actual (552.200 bytes) da 2,81 SOL permanentes; el buffer de escritura necesita otro tanto que se devuelve; ~0,1-0,3 SOL de comisiones. Unos 5,9 SOL en la wallet de administración EE46GmYq…; pueden salir de los 3,27 SOL rescatados. Se vuelve a medir tras las correcciones y el cambio de límites.
 
 #### `programa-publicar` — Publicar el programa en Solana
 
@@ -468,6 +487,14 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Listo cuando:** En local contra mainnet: entrar con Phantom, crear una wallet de trading con el permiso visible y exportarla.
 - **Técnico:** Privy solo Solana (walletChainType solana, conectores externos; la pensión nunca es una embedded). createWallet con signers para que nazca con asiento; export con el diálogo de Privy; lectura del asiento desde el usuario.
 
+#### `web-consentimiento-vinculo` — La web pide el consentimiento al vincular
+
+- **Quién:** Claude · **horas:** 3 · **nivel:** Imprescindible · **depende de:** `web-solana-base`, `programa-correcciones`
+- **Qué:** Adapto la web al programa corregido: vincular pide una firma de la wallet de trading y la ruta de envío la verifica.
+- **Por qué:** Sin ese consentimiento el programa corregido rechaza el vínculo.
+- **Listo cuando:** Pruebas del builder y del verificador con la instrucción Ed25519 de consentimiento en verde.
+- **Técnico:** Builder [Ed25519(consentimiento), link_wallet] con la cuenta del sysvar de instrucciones y el config; /api/solana-tx acepta exactamente un Ed25519 inmediatamente antes de link_wallet con firmante = wallet; nuevas cotas 1..200 / 201..10000; errores nuevos.
+
 ### Miércoles 16
 
 #### `keeper-medir-volumen` — Medir cuánto se compra y se vende
@@ -500,7 +527,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Desde la web creas tu bóveda eligiendo beneficio o volumen, vinculas la wallet de trading, eliges la acción y puedes sacar el dinero.
 - **Por qué:** Es el recorrido que los jueces tienen que ver funcionar, y retirar demuestra que el dinero es tuyo.
 - **Listo cuando:** En mainnet desde la web: bóveda creada, wallet vinculada, política firmada y un retiro de prueba, cada uno con enlace a Solscan.
-- **Técnico:** create_vault_v2 con texto honesto por modo. Vincular en una transacción: Phantom paga y firma primero, la embedded co-firma después; rechaza wallet igual a dueño. set_invest_policy con SPYx a 1 $ y creación de cuentas pagada por el dueño. withdraw. Comprobación de bytes contra fixtures del programa. Aviso: el emisor de xStocks puede congelar. Primera política de inversión: in_mint USDC, mínimo 1 $, 50 $ por llamada, 500 $ cada 30 días.
+- **Técnico:** create_vault_v2 con texto honesto por modo. Vincular en una transacción: Phantom paga y firma primero, la embedded co-firma después; rechaza wallet igual a dueño. set_invest_policy con SPYx a 1 $ y creación de cuentas pagada por el dueño. withdraw. Comprobación de bytes contra fixtures del programa. Aviso: el emisor de xStocks puede congelar. Primera política de inversión: in_mint USDC, compra cada 5 $ (mínimo por compra = 5 $ entre el número de acciones), topes al máximo hasta que el usuario los cambie. Tasas por defecto 20 % beneficio y 2 % volumen. Vincular lleva antes el consentimiento firmado por la wallet de trading (signMessage) como instrucción Ed25519.
 
 #### `ensayo-seco` — Ensayo en seco contra mainnet
 
