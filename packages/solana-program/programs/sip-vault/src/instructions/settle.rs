@@ -1,17 +1,21 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::sysvar::instructions::{
-    load_current_index_checked, load_instruction_at_checked,
-};
 use anchor_lang::system_program::{transfer, Transfer};
 
-use crate::attestation::{attestation_message, AttestationInputs, ATTESTATION_MESSAGE_LEN};
-
-/// Ed25519SigVerify111111111111111111111111111 — the native precompile's id,
-/// declared here because this anchor version does not re-export the module.
-const ED25519_PROGRAM_ID: Pubkey = pubkey!("Ed25519SigVerify111111111111111111111111111");
+use crate::attestation::{attestation_message, AttestationInputs};
+use crate::ed25519_introspection::{verify_preceding_ed25519, Ed25519Refusals};
 use crate::errors::NuvemError;
 use crate::events::Settled;
 use crate::state::{ProtocolConfig, TradingLink, Vault};
+
+/// settle's name for each way the attestation check can fail. They are the
+/// names settle always gave, and clients match on them: moving the reader into
+/// a module link_wallet shares must not rename a single refusal.
+const ATTESTATION_REFUSALS: Ed25519Refusals = Ed25519Refusals {
+    missing: NuvemError::AttestationMissing,
+    malformed: NuvemError::AttestationMalformed,
+    wrong_signer: NuvemError::WrongAttester,
+    mismatch: NuvemError::AttestationMismatch,
+};
 
 /// Settles one attested trading session: moves the vault's share of the
 /// session's profit from the trading wallet into the vault.
@@ -29,7 +33,7 @@ use crate::state::{ProtocolConfig, TradingLink, Vault};
 /// signature, by the configured attester, over exactly the message this
 /// handler reconstructs from chain state. If any of that fails the runtime
 /// already rejected the transaction (a bad signature never reaches us) or this
-/// handler rejects the mismatch.
+/// handler rejects the mismatch. The reader lives in ed25519_introspection.rs.
 #[derive(Accounts)]
 pub struct Settle<'info> {
     /// The trading wallet: signer AND payer of the contribution.
@@ -119,6 +123,7 @@ pub fn settle_handler(
         &ctx.accounts.instructions_sysvar,
         &ctx.accounts.config.attester,
         &expected,
+        &ATTESTATION_REFUSALS,
     )?;
 
     // What the window owes, floored. bps <= 10_000, so it never exceeds base.
@@ -157,7 +162,9 @@ pub fn settle_handler(
     }
 
     let nonce = link.settlement_nonce;
+    let link_epoch = link.epoch;
     let active_mode = vault.skim_mode;
+    let policy_nonce = vault.policy_nonce;
     let vault_key = vault.key();
 
     let vault = &mut ctx.accounts.vault;
@@ -176,77 +183,9 @@ pub fn settle_handler(
         paid,
         settlement_nonce: nonce,
         session_end_slot,
+        link_epoch,
+        session_start_slot,
+        policy_nonce,
     });
-    Ok(())
-}
-
-/// Proves the instruction immediately before this one is an Ed25519SigVerify
-/// of exactly `expected_message` by exactly `expected_signer`.
-///
-/// THE OFFSET FIELDS ARE HOSTILE INPUT. The Ed25519 program verifies whatever
-/// the offsets point at — including bytes in ANOTHER instruction — and a
-/// forged offset table was a real, responsibly-disclosed bypass elsewhere. So
-/// every offset is required to point into the Ed25519 instruction's own data,
-/// at exactly the widths expected, before any byte is compared.
-fn verify_preceding_ed25519(
-    instructions_sysvar: &UncheckedAccount,
-    expected_signer: &Pubkey,
-    expected_message: &[u8; ATTESTATION_MESSAGE_LEN],
-) -> Result<()> {
-    let current_index = load_current_index_checked(instructions_sysvar)?;
-    require!(current_index > 0, NuvemError::AttestationMissing);
-    let ed25519_index = usize::from(current_index - 1);
-    let instruction = load_instruction_at_checked(ed25519_index, instructions_sysvar)?;
-
-    require!(
-        instruction.program_id == ED25519_PROGRAM_ID,
-        NuvemError::AttestationMissing
-    );
-
-    let data = instruction.data;
-    // Header: count (u8), padding (u8), then one 14-byte offsets struct.
-    require!(data.len() >= 16, NuvemError::AttestationMalformed);
-    require!(data[0] == 1, NuvemError::AttestationMalformed);
-
-    let u16_at = |offset: usize| -> u16 {
-        u16::from_le_bytes([data[offset], data[offset + 1]])
-    };
-    let signature_offset = usize::from(u16_at(2));
-    let signature_ix_index = u16_at(4);
-    let public_key_offset = usize::from(u16_at(6));
-    let public_key_ix_index = u16_at(8);
-    let message_offset = usize::from(u16_at(10));
-    let message_size = usize::from(u16_at(12));
-    let message_ix_index = u16_at(14);
-
-    // Every reference must be to THIS instruction — u16::MAX is the runtime's
-    // "current instruction" sentinel, and the explicit index is also accepted.
-    let this_ix = u16::try_from(ed25519_index).map_err(|_| NuvemError::AttestationMalformed)?;
-    for ix_ref in [signature_ix_index, public_key_ix_index, message_ix_index] {
-        require!(
-            ix_ref == u16::MAX || ix_ref == this_ix,
-            NuvemError::AttestationMalformed
-        );
-    }
-
-    require!(
-        public_key_offset + 32 <= data.len()
-            && signature_offset + 64 <= data.len()
-            && message_offset + message_size <= data.len(),
-        NuvemError::AttestationMalformed
-    );
-
-    let public_key = &data[public_key_offset..public_key_offset + 32];
-    require!(
-        public_key == expected_signer.as_ref(),
-        NuvemError::WrongAttester
-    );
-
-    let message = &data[message_offset..message_offset + message_size];
-    require!(
-        message == expected_message.as_ref(),
-        NuvemError::AttestationMismatch
-    );
-
     Ok(())
 }

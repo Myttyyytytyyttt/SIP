@@ -440,6 +440,10 @@
     },
     {
       "name": "link_wallet",
+      "docs": [
+        "Needs, immediately before it, an Ed25519SigVerify of the wallet's own",
+        "SIP_LINK_V1 consent; see link_wallet.rs and link_consent.rs."
+      ],
       "discriminator": [
         86,
         92,
@@ -459,9 +463,9 @@
         {
           "name": "wallet",
           "docs": [
-            "The trading wallet consents by signing; nobody can be linked to a vault",
-            "against their will, and no vault owner can claim a wallet they don't",
-            "control."
+            "The trading wallet signs the transaction AND, off chain, its consent,",
+            "which the Ed25519 instruction before this one verified. The signature",
+            "alone is something a Privy seat can give; the consent is not."
           ],
           "signer": true
         },
@@ -506,6 +510,34 @@
               }
             ]
           }
+        },
+        {
+          "name": "config",
+          "docs": [
+            "Read for its pause switch: nothing links while the protocol is paused."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "instructions_sysvar",
+          "docs": [
+            "introspection of this very transaction."
+          ],
+          "address": "Sysvar1nstructions1111111111111111111111111"
         },
         {
           "name": "system_program",
@@ -795,7 +827,8 @@
     {
       "name": "set_protocol_paused",
       "docs": [
-        "Protocol-wide pause of settle, wrap_sol, convert and invest. Never withdraw."
+        "Protocol-wide pause of settle, link_wallet, wrap_sol, convert and invest.",
+        "Never withdraw, and never an owner's unlink."
       ],
       "discriminator": [
         47,
@@ -1012,6 +1045,9 @@
     },
     {
       "name": "unlink_wallet",
+      "docs": [
+        "The vault owner's alone; see unlink_wallet.rs."
+      ],
       "discriminator": [
         220,
         121,
@@ -1025,6 +1061,10 @@
       "accounts": [
         {
           "name": "authority",
+          "docs": [
+            "The vault's owner, and nobody else: not the linked wallet, whose key a",
+            "Privy seat holds."
+          ],
           "signer": true
         },
         {
@@ -1328,6 +1368,32 @@
           }
         },
         {
+          "name": "policy",
+          "docs": [
+            "The vault's investment policy. A vault with none has not opted into",
+            "converting, so it is never wrapped: the account simply fails to load."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  118,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
           "name": "vault_wsol",
           "docs": [
             "The vault's wSOL account (native mint, authority = the vault PDA)."
@@ -1433,7 +1499,7 @@
     {
       "code": 6002,
       "name": "UnlinkUnauthorized",
-      "msg": "neither the vault owner nor the linked wallet signed"
+      "msg": "only the vault owner may unlink a wallet"
     },
     {
       "code": 6003,
@@ -1589,6 +1655,31 @@
       "code": 6033,
       "name": "WrongInMint",
       "msg": "this token account is not in the mint the owner invests from"
+    },
+    {
+      "code": 6034,
+      "name": "DisallowedVaultAccount",
+      "msg": "the venue route lists a vault token account this instruction does not measure"
+    },
+    {
+      "code": 6035,
+      "name": "WalletIsOwner",
+      "msg": "a trading wallet cannot be linked to a vault it owns"
+    },
+    {
+      "code": 6036,
+      "name": "LinkConsentMissing",
+      "msg": "no Ed25519 verification of the wallet's link consent precedes link_wallet"
+    },
+    {
+      "code": 6037,
+      "name": "LinkConsentWrongSigner",
+      "msg": "the link consent is signed by a key that is not the wallet being linked"
+    },
+    {
+      "code": 6038,
+      "name": "LinkConsentMismatch",
+      "msg": "the verified link consent does not name this program, wallet, vault and owner"
     }
   ],
   "types": [
@@ -1805,9 +1896,10 @@
           {
             "name": "paused",
             "docs": [
-              "PROTOCOL-WIDE PAUSE, set by the authority. Gates settle, wrap_sol,",
-              "convert and invest for every vault at once. It NEVER gates withdraw or",
-              "withdraw_token: stopping the machine must not trap anyone's savings."
+              "PROTOCOL-WIDE PAUSE, set by the authority. Gates settle, link_wallet,",
+              "wrap_sol, convert and invest for every vault at once. It NEVER gates",
+              "withdraw, withdraw_token or an owner's unlink: stopping the machine must",
+              "not trap anyone's savings, nor keep a wallet linked against its owner."
             ],
             "type": "bool"
           },
@@ -1873,6 +1965,25 @@
           },
           {
             "name": "session_end_slot",
+            "type": "u64"
+          },
+          {
+            "name": "link_epoch",
+            "docs": [
+              "APPENDED, SO EVERY FIELD ABOVE KEEPS ITS OFFSET. `settlement_nonce`",
+              "restarts at zero whenever a link is re-created, so (wallet, nonce)",
+              "repeats across a wallet's link lives and (wallet, link_epoch, nonce) does",
+              "not. With the window's start and the policy nonce the attestation signed,",
+              "the event describes the settlement without another account read."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "session_start_slot",
+            "type": "u64"
+          },
+          {
+            "name": "policy_nonce",
             "type": "u64"
           }
         ]
@@ -1978,8 +2089,9 @@
           {
             "name": "paused",
             "docs": [
-              "Gates settle and invest. NEVER gates withdraw: an issuer freezing the",
-              "stock leg, or this program pausing itself, must not trap the user's SOL."
+              "Gates settle, wrap_sol, convert and invest. NEVER gates withdraw: an",
+              "issuer freezing the stock leg, or this program pausing itself, must not",
+              "trap the user's SOL."
             ],
             "type": "bool"
           },

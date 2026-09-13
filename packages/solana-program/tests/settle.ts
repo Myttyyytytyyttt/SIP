@@ -22,8 +22,9 @@ import {
 } from "@solana/web3.js";
 import { assert } from "chai";
 import { SipVault } from "../target/types/sip_vault";
-import { configPdaFor, ensureConfig, TEST_ATTESTER } from "./config-fixture";
+import { configPdaFor, ensureConfig, setKeeper, TEST_ATTESTER } from "./config-fixture";
 import { attestationInstruction, MODE_PROFIT, MODE_VOLUME, type AttestationInputs } from "../scripts/attestation";
+import { linkWalletWithConsent } from "../scripts/link-consent";
 
 describe("sip-vault M2: settle", () => {
   const provider = anchor.AnchorProvider.env();
@@ -173,7 +174,17 @@ describe("sip-vault M2: settle", () => {
       });
       if (tx?.meta?.logMessages) {
         for (const event of parser.parseLogs(tx.meta.logMessages)) {
-          if (event.name.toLowerCase() === "settled") return event.data as { owed: anchor.BN; paid: anchor.BN };
+          if (event.name.toLowerCase() === "settled") {
+            return event.data as {
+              owed: anchor.BN;
+              paid: anchor.BN;
+              settlementNonce: anchor.BN;
+              sessionEndSlot: anchor.BN;
+              linkEpoch: anchor.BN;
+              sessionStartSlot: anchor.BN;
+              policyNonce: anchor.BN;
+            };
+          }
         }
         throw new Error("the settlement emitted no Settled event");
       }
@@ -195,11 +206,7 @@ describe("sip-vault M2: settle", () => {
       .accounts({ owner: owner.publicKey })
       .signers([owner])
       .rpc();
-    await program.methods
-      .linkWallet()
-      .accounts({ owner: owner.publicKey, wallet: wallet.publicKey })
-      .signers([owner, wallet])
-      .rpc();
+    await linkWalletWithConsent(program, { owner: owner.publicKey, wallet }).signers([owner, wallet]).rpc();
   });
 
   it("settles an attested session: the vault's share arrives, the cursor advances", async () => {
@@ -352,6 +359,14 @@ describe("sip-vault M2: settle", () => {
       const event = await settledEvent(signature);
       assert.strictEqual(event.owed.toString(), (SOL / 4n).toString(), "owed is the full quarter");
       assert.strictEqual(event.paid.toString(), cap.toString(), "paid is the cap");
+      assert.strictEqual(event.settlementNonce.toString(), inputs.settlementNonce.toString());
+      assert.strictEqual(event.sessionEndSlot.toString(), inputs.sessionEndSlot.toString());
+      // The appended fields: which life of the link was settled (its nonce
+      // restarts on relink, its epoch does not), where the window began, and
+      // the policy the attestation was signed against.
+      assert.strictEqual(event.linkEpoch.toString(), inputs.linkEpoch.toString(), "the link's epoch");
+      assert.strictEqual(event.sessionStartSlot.toString(), inputs.sessionStartSlot.toString(), "the window's start");
+      assert.strictEqual(event.policyNonce.toString(), inputs.policyNonce.toString(), "the vault's policy nonce");
       assert.strictEqual((await linkState()).frontierSlot.toString(), inputs.sessionEndSlot.toString(), "the window is settled");
     } finally {
       await setPolicy();
@@ -410,23 +425,20 @@ describe("sip-vault M2: settle", () => {
     // Sign a VALID attestation for the current link, but do not send it.
     const resurrected = await freshAttestation();
 
-    // The wallet unlinks itself and relinks: same wallet, same vault, nonce
-    // back to zero — the exact shape that would replay if epoch did not exist.
+    // The owner unlinks the wallet and relinks it: same wallet, same vault,
+    // nonce back to zero — the exact shape that would replay if epoch did not
+    // exist.
     await program.methods
       .unlinkWallet()
       .accountsPartial({
-        authority: wallet.publicKey,
+        authority: owner.publicKey,
         owner: owner.publicKey,
         vault: vaultPda,
         tradingLink: linkPda,
       })
-      .signers([wallet])
+      .signers([owner])
       .rpc();
-    await program.methods
-      .linkWallet()
-      .accounts({ owner: owner.publicKey, wallet: wallet.publicKey })
-      .signers([owner, wallet])
-      .rpc();
+    await linkWalletWithConsent(program, { owner: owner.publicKey, wallet }).signers([owner, wallet]).rpc();
 
     const relinked = await linkState();
     assert.strictEqual(relinked.settlementNonce.toString(), "0", "the counter did restart");
@@ -494,69 +506,160 @@ describe("sip-vault: wrap_sol", () => {
   const program = anchor.workspace.sipVault as Program<SipVault>;
   const connection = provider.connection;
   const payer = (provider.wallet as anchor.Wallet).payer;
+  const authority = provider.wallet.publicKey;
 
-  it("wraps vault SOL into the vault's own wSOL account, floor untouched", async () => {
+  interface FundedVault {
+    readonly owner: Keypair;
+    readonly vaultPda: PublicKey;
+    readonly policyPda: PublicKey;
+    readonly vaultWsol: PublicKey;
+  }
+
+  /** A fresh owner's vault holding 1 SOL above rent, as a settlement leaves it, and its wSOL account. */
+  const fundedVault = async (): Promise<FundedVault> => {
     const o = Keypair.generate();
     await connection.confirmTransaction(await connection.requestAirdrop(o.publicKey, 3 * LAMPORTS_PER_SOL));
     const [vaultPda] = PublicKey.findProgramAddressSync([Buffer.from("vault"), o.publicKey.toBuffer()], program.programId);
-    const [configPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
+    const [policyPda] = PublicKey.findProgramAddressSync([Buffer.from("invest"), vaultPda.toBuffer()], program.programId);
     await program.methods
       .createVaultV2(MODE_PROFIT, 2_000, 20, new anchor.BN(LAMPORTS_PER_SOL), new anchor.BN(0))
       .accounts({ owner: o.publicKey })
       .signers([o])
       .rpc();
-    // Fund the vault with 1 SOL as a settlement would.
     const fund = new Transaction().add(SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: vaultPda, lamports: LAMPORTS_PER_SOL }));
     await provider.sendAndConfirm(fund);
-
     const vaultWsol = await createAssociatedTokenAccountIdempotent(connection, payer, NATIVE_MINT, vaultPda, undefined, TP, undefined, true);
+    return { owner: o, vaultPda, policyPda, vaultWsol };
+  };
+
+  /**
+   * The owner's investment policy. wrap_sol reads only `enabled` and the
+   * conversion floor; the venue and mints are placeholders it never touches.
+   */
+  const setInvestPolicy = (v: FundedVault, over: { enabled?: boolean; minConvertRateWad?: bigint } = {}) =>
+    program.methods
+      .setInvestPolicy(
+        [{ mint: Keypair.generate().publicKey, weightBps: 10_000, minOutRateWad: new anchor.BN(1) }],
+        Keypair.generate().publicKey,
+        Keypair.generate().publicKey,
+        new anchor.BN((over.minConvertRateWad ?? 30_000_000_000_000_000n).toString()),
+        new anchor.BN(1),
+        new anchor.BN(1),
+        new anchor.BN(1),
+        over.enabled ?? true,
+      )
+      .accountsPartial({ owner: v.owner.publicKey, vault: v.vaultPda, policy: v.policyPda })
+      .signers([v.owner])
+      .rpc();
+
+  const wrap = (v: FundedVault, crank: Keypair) =>
+    program.methods
+      .wrapSol(new anchor.BN((LAMPORTS_PER_SOL / 2).toString()))
+      .accountsPartial({
+        crank: crank.publicKey,
+        vault: v.vaultPda,
+        policy: v.policyPda,
+        vaultWsol: v.vaultWsol,
+        tokenProgram: TP,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([crank])
+      .rpc();
+
+  /** The error code a call was refused with, or "IT SUCCEEDED". */
+  const refusal = async (p: Promise<unknown>): Promise<string> => {
+    try {
+      await p;
+    } catch (error) {
+      return String((error as { error?: { errorCode?: { code?: string } } })?.error?.errorCode?.code ?? error);
+    }
+    return "IT SUCCEEDED";
+  };
+
+  const wsolOf = async (v: FundedVault) => BigInt((await connection.getTokenAccountBalance(v.vaultWsol)).value.amount);
+
+  const fundedCrank = async () => {
     const crank = Keypair.generate();
     await connection.confirmTransaction(await connection.requestAirdrop(crank.publicKey, LAMPORTS_PER_SOL));
+    return crank;
+  };
 
-    const wrap = () =>
-      program.methods.wrapSol(new anchor.BN((LAMPORTS_PER_SOL / 2).toString()))
-        .accountsPartial({ crank: crank.publicKey, vault: vaultPda, vaultWsol, tokenProgram: TP, systemProgram: SystemProgram.programId })
-        .signers([crank]).rpc();
+  it("wraps vault SOL into the vault's own wSOL account, floor untouched", async () => {
+    const v = await fundedVault();
+    // A vault is wrapped only once its owner has opted into converting.
+    await setInvestPolicy(v);
+    const crank = await fundedCrank();
 
     // A STRANGER MAY NOT WRAP SOMEONE ELSE'S SOL. This assertion is the whole
     // reason `config.keeper` exists: wrap_sol and convert took a bare Signer,
     // so any funded account could turn a vault's SOL into wSOL and then sell it
     // through a pool of its own choosing. `crank` here is exactly that
     // stranger — a fresh keypair, airdropped, related to nothing.
-    let refused: string | null = null;
-    try {
-      await wrap();
-    } catch (error) {
-      refused = String((error as { error?: { errorCode?: { code?: string } } })?.error?.errorCode?.code ?? error);
-    }
-    assert.include(refused ?? "IT SUCCEEDED", "UnauthorizedCrank", "an unrelated signer must not be able to wrap this vault's SOL");
-
-    const stillZero = BigInt((await connection.getTokenAccountBalance(vaultWsol)).value.amount);
-    assert.strictEqual(stillZero, 0n, "and nothing moved");
+    assert.include(await refusal(wrap(v, crank)), "UnauthorizedCrank", "an unrelated signer must not be able to wrap this vault's SOL");
+    assert.strictEqual(await wsolOf(v), 0n, "and nothing moved");
 
     // Named as the keeper, the SAME account is allowed — proving the refusal
     // is about authority and not about some unrelated breakage.
-    await program.methods.setKeeper(crank.publicKey)
-      .accountsPartial({ authority: provider.wallet.publicKey, config: configPda })
-      .rpc();
+    await setKeeper(program, authority, crank.publicKey);
 
-    await wrap();
-
-    const wsol = BigInt((await connection.getTokenAccountBalance(vaultWsol)).value.amount);
-    assert.strictEqual(wsol, BigInt(LAMPORTS_PER_SOL / 2), "half a SOL is now wSOL in the vault's account");
+    await wrap(v, crank);
+    assert.strictEqual(await wsolOf(v), BigInt(LAMPORTS_PER_SOL / 2), "half a SOL is now wSOL in the vault's account");
 
     // And the panic switch: unsetting the keeper closes the door again rather
     // than reopening it to everyone, which is what `Pubkey::default()` meaning
     // "nobody" buys.
-    await program.methods.setKeeper(PublicKey.default)
-      .accountsPartial({ authority: provider.wallet.publicKey, config: configPda })
-      .rpc();
-    let refusedAgain: string | null = null;
-    try {
-      await wrap();
-    } catch (error) {
-      refusedAgain = String((error as { error?: { errorCode?: { code?: string } } })?.error?.errorCode?.code ?? error);
-    }
-    assert.include(refusedAgain ?? "IT SUCCEEDED", "UnauthorizedCrank", "clearing the keeper must fail closed, not open");
+    await setKeeper(program, authority, PublicKey.default);
+    assert.include(await refusal(wrap(v, crank)), "UnauthorizedCrank", "clearing the keeper must fail closed, not open");
+  });
+
+  // THE OWNER'S OWN BRAKES, held against the one crank an owner cannot turn
+  // away any other way: the keeper the config names. wrap_sol once ignored all
+  // of them, so a keeper could wrap a paused vault, or one that never opted
+  // into investing, and front-run its owner's withdraw.
+  describe("refuses even the named keeper", () => {
+    let crank: Keypair;
+
+    before(async () => {
+      crank = await fundedCrank();
+      await setKeeper(program, authority, crank.publicKey);
+    });
+
+    after(async () => {
+      await setKeeper(program, authority, PublicKey.default);
+    });
+
+    it("for a vault with no investment policy, which never opted into converting", async () => {
+      const v = await fundedVault();
+      assert.include(await refusal(wrap(v, crank)), "AccountNotInitialized");
+      assert.strictEqual(await wsolOf(v), 0n, "nothing was wrapped");
+    });
+
+    it("while the owner's policy is disabled, or names no conversion floor", async () => {
+      const v = await fundedVault();
+      await setInvestPolicy(v, { enabled: false });
+      assert.include(await refusal(wrap(v, crank)), "InvestingDisabled");
+      await setInvestPolicy(v, { minConvertRateWad: 0n });
+      assert.include(await refusal(wrap(v, crank)), "FloorTooLow");
+      assert.strictEqual(await wsolOf(v), 0n, "nothing was wrapped");
+    });
+
+    it("for a vault its owner paused, and wraps once the owner resumes it", async () => {
+      const v = await fundedVault();
+      await setInvestPolicy(v);
+      const setPaused = (paused: boolean) =>
+        program.methods
+          .setPolicyV2(MODE_PROFIT, 2_000, 20, paused, new anchor.BN(LAMPORTS_PER_SOL), new anchor.BN(0))
+          .accounts({ owner: v.owner.publicKey })
+          .signers([v.owner])
+          .rpc();
+
+      await setPaused(true);
+      assert.include(await refusal(wrap(v, crank)), "VaultPaused", "the owner's pause is the brake against this very keeper");
+      assert.strictEqual(await wsolOf(v), 0n, "the owner's SOL is still SOL, withdrawable in full");
+
+      await setPaused(false);
+      await wrap(v, crank);
+      assert.strictEqual(await wsolOf(v), BigInt(LAMPORTS_PER_SOL / 2), "an enabled policy on a running vault wraps");
+    });
   });
 });

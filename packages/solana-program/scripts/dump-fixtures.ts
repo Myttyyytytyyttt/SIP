@@ -11,12 +11,20 @@
 // Run from program/:  (validator running, program deployed)
 //   npx tsx scripts/dump-fixtures.ts
 //
+// The deploy must go through the UPGRADEABLE loader (anchor test / anchor
+// localnet with Anchor.toml's [test] upgradeable = true, or `solana program
+// deploy`), and ANCHOR_WALLET must be that deployment's upgrade authority:
+// link_wallet reads the protocol config, and init_config accepts only the key
+// ProgramData names, refusing anyone else with NotUpgradeAuthority. A config
+// that already exists (for example one anchor test created) is reused as is.
+//
 // Output: ../../web/scripts/fixtures/solana-accounts.json
 
 import * as anchor from "@coral-xyz/anchor";
 import { Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { linkWalletWithConsent } from "./link-consent";
 
 const OUT = join(__dirname, "../../../web/scripts/fixtures/solana-accounts.json");
 
@@ -43,12 +51,25 @@ async function main() {
   const SKIM_BPS = 3_777;
   const DEPOSIT = Math.floor(1.234567891 * LAMPORTS_PER_SOL);
 
+  // link_wallet reads the protocol config's pause switch, so a freshly deployed
+  // validator needs one. Its attester plays no part in the bytes captured here.
+  // init_config's program_data has no address or seeds in the IDL, so Anchor
+  // cannot resolve it: it is passed here, derived the way the loader stores it.
+  const [configPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
+  if ((await provider.connection.getAccountInfo(configPda)) === null) {
+    const [programData] = PublicKey.findProgramAddressSync(
+      [program.programId.toBuffer()],
+      new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111"),
+    );
+    await program.methods
+      .initConfig(Keypair.generate().publicKey)
+      .accountsPartial({ authority: owner, programData })
+      .rpc();
+  }
+
   await program.methods.createVaultV2(0 /* PROFIT */, SKIM_BPS, 20, new anchor.BN(1_000_000_000), new anchor.BN(0)).accounts({ owner }).rpc();
-  await program.methods
-    .linkWallet()
-    .accounts({ owner, wallet: tradingWallet.publicKey })
-    .signers([tradingWallet])
-    .rpc();
+  // The wallet's own off-chain consent rides immediately before link_wallet.
+  await linkWalletWithConsent(program, { owner, wallet: tradingWallet }).signers([tradingWallet]).rpc();
   await provider.sendAndConfirm(
     new Transaction().add(
       SystemProgram.transfer({ fromPubkey: owner, toPubkey: vaultPda, lamports: DEPOSIT }),

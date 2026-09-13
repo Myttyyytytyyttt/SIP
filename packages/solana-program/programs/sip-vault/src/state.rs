@@ -25,8 +25,9 @@ pub struct Vault {
     /// while others do not — the closest Solana gets to the beacon-per-cohort
     /// model.
     pub version: u8,
-    /// Gates settle and invest. NEVER gates withdraw: an issuer freezing the
-    /// stock leg, or this program pausing itself, must not trap the user's SOL.
+    /// Gates settle, wrap_sol, convert and invest. NEVER gates withdraw: an
+    /// issuer freezing the stock leg, or this program pausing itself, must not
+    /// trap the user's SOL.
     pub paused: bool,
     /// PROFIT rate: share of attested session profit saved, basis points,
     /// 101..=10_000. The floor is 101 so this range never overlaps
@@ -152,9 +153,10 @@ pub struct ProtocolConfig {
     /// `accept_authority` itself, so a typo can never hand the protocol to an
     /// address nobody controls. Default means no transfer is pending.
     pub pending_authority: Pubkey,
-    /// PROTOCOL-WIDE PAUSE, set by the authority. Gates settle, wrap_sol,
-    /// convert and invest for every vault at once. It NEVER gates withdraw or
-    /// withdraw_token: stopping the machine must not trap anyone's savings.
+    /// PROTOCOL-WIDE PAUSE, set by the authority. Gates settle, link_wallet,
+    /// wrap_sol, convert and invest for every vault at once. It NEVER gates
+    /// withdraw, withdraw_token or an owner's unlink: stopping the machine must
+    /// not trap anyone's savings, nor keep a wallet linked against its owner.
     pub paused: bool,
     pub version: u8,
     pub _reserved: [u8; 64],

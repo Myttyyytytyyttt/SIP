@@ -19,7 +19,7 @@ const TARGET = join(PROGRAM_DIR, "target/idl/sip_vault.json");
 
 const exported = JSON.parse(readFileSync(EXPORTED, "utf8")) as {
   address: string;
-  instructions: { name: string }[];
+  instructions: { name: string; accounts: { name: string }[] }[];
 };
 
 describe("the exported sip_vault IDL", () => {
@@ -39,6 +39,21 @@ describe("the exported sip_vault IDL", () => {
     expect(names).not.toContain("settle");
     expect(names).not.toContain("create_vault");
     expect(names).not.toContain("set_policy");
+  });
+
+  it("gives wrap_sol the investment policy account the invest tick passes by name", () => {
+    // invest-tick.ts hands `policy` to wrap_sol through accountsPartial, which
+    // would not notice an IDL that lacked it; this does.
+    const wrapSol = exported.instructions.find((instruction) => instruction.name === "wrap_sol");
+    expect(wrapSol?.accounts.map((account) => account.name)).toEqual([
+      "crank",
+      "config",
+      "vault",
+      "policy",
+      "vault_wsol",
+      "token_program",
+      "system_program",
+    ]);
   });
 
   it("records the TradingLink discriminator Anchor derives, which discovery filters on", () => {

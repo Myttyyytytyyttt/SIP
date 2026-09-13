@@ -31,12 +31,14 @@ export function inMintDecision(inMint: PublicKey): { readonly outcome: "REFUSED"
  * Whether either pause switch stops this investment turn, decided before any
  * balance, ATA or wrap.
  *
- * THE VAULT'S OWN SWITCH IS THE DANGEROUS ONE. convert and invest refuse a paused
- * vault (VaultPaused), but wrap_sol checks only the protocol switch — so a keeper
- * that did not look would wrap a paused vault's free SOL, have the convert
- * refused, and leave the owner's SOL sitting as wSOL that only withdraw_token
- * recovers, again on every sweep. A paused vault is a RESTING state: nothing is
- * wrapped or bought, and nothing is alerted as a failure.
+ * THE VAULT'S OWN SWITCH WAS THE DANGEROUS ONE. convert and invest always refused
+ * a paused vault (VaultPaused), but wrap_sol once checked only the protocol switch
+ * — so a keeper that did not look would wrap a paused vault's free SOL, have the
+ * convert refused, and leave the owner's SOL sitting as wSOL that only
+ * withdraw_token recovers, again on every sweep. wrap_sol refuses a paused vault
+ * too now; resting here first still spares a failed transaction. A paused vault
+ * is a RESTING state: nothing is wrapped or bought, and nothing is alerted as a
+ * failure.
  */
 export function investPauseDecision(input: {
   readonly vaultPaused: boolean;
@@ -44,7 +46,7 @@ export function investPauseDecision(input: {
 }): { readonly outcome: "PAUSED"; readonly detail: string } | null {
   if (!input.vaultPaused && !input.protocolPaused) return null;
   const switches = [
-    input.vaultPaused ? "the vault's owner paused it (convert and invest refuse with VaultPaused; wrap_sol does not check it)" : null,
+    input.vaultPaused ? "the vault's owner paused it (wrap_sol, convert and invest refuse with VaultPaused)" : null,
     input.protocolPaused ? "the protocol's authority paused every vault (wrap_sol, convert and invest refuse with ProtocolPaused)" : null,
   ].filter((part): part is string => part !== null);
   return { outcome: "PAUSED", detail: `${switches.join(" and ")} — nothing is wrapped, converted or bought` };

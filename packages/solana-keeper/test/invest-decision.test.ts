@@ -1,7 +1,7 @@
 // The in_mint refusal and the pause switches. sip-vault pins the in-asset in the
 // owner's policy; the keeper can only route USDC, so anything else is refused
 // before a lamport moves, naming both mints. And a paused vault or protocol
-// rests before any wrap: wrap_sol does not check the vault's own switch.
+// rests before any wrap, so the owner's pause costs no refused transaction.
 
 import { Keypair } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
@@ -23,11 +23,10 @@ describe("the policy's in_mint", () => {
 });
 
 describe("the pause switches, for investing", () => {
-  it("rests a vault its owner paused, and says why wrapping would strand SOL", () => {
+  it("rests a vault its owner paused, naming every step that would refuse it", () => {
     const decision = investPauseDecision({ vaultPaused: true, protocolPaused: false });
     expect(decision?.outcome).toBe("PAUSED");
-    expect(decision?.detail).toContain("VaultPaused");
-    expect(decision?.detail).toContain("wrap_sol does not check it");
+    expect(decision?.detail).toContain("wrap_sol, convert and invest refuse with VaultPaused");
   });
 
   it("rests every vault while the protocol is paused", () => {

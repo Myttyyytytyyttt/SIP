@@ -10,9 +10,10 @@ pub enum NuvemError {
     #[msg("only the vault owner may do this")]
     NotOwner,
 
-    /// Unlink accepts either party: the owner cutting a wallet loose, or the
-    /// wallet removing itself. Neither may be forced to keep the other.
-    #[msg("neither the vault owner nor the linked wallet signed")]
+    /// Unlink is the vault owner's alone. It once accepted the linked wallet as
+    /// well, but a Privy seat signs with that wallet's key, and a seat able to
+    /// free its wallet could re-link it to a vault of its own choosing.
+    #[msg("only the vault owner may unlink a wallet")]
     UnlinkUnauthorized,
 
     #[msg("this trading link does not belong to this vault")]
@@ -42,7 +43,8 @@ pub enum NuvemError {
     AttestationMissing,
 
     /// The offset table is hostile input; anything out of shape is refused
-    /// before a single byte is compared.
+    /// before a single byte is compared. Shared by settle's attestation and
+    /// link_wallet's consent: the shape is the Ed25519 instruction's, not theirs.
     #[msg("the Ed25519 instruction is not in the expected single-signature shape")]
     AttestationMalformed,
 
@@ -129,4 +131,35 @@ pub enum NuvemError {
 
     #[msg("this token account is not in the mint the owner invests from")]
     WrongInMint,
+
+    // ── APPENDED ONLY. Every variant above keeps its number; clients match on
+    // them. New refusals go below this line, never between. ───────────────────
+
+    /// The venue spends from whatever account the route lists, under the
+    /// vault's signature, and only the named accounts are measured. A vault
+    /// token account anywhere else in the route is one the deltas cannot see.
+    /// See venue_route.rs.
+    #[msg("the venue route lists a vault token account this instruction does not measure")]
+    DisallowedVaultAccount,
+
+    /// The owner is the pension key no Privy seat holds. A wallet that owned the
+    /// vault it saves into would let its seat link the two with no other
+    /// signature, then set that vault's policy and crank it.
+    #[msg("a trading wallet cannot be linked to a vault it owns")]
+    WalletIsOwner,
+
+    /// The instruction before link_wallet must be the Ed25519 verification of
+    /// the wallet's off-chain consent. A signature on the transaction is
+    /// something a Privy seat can give; that consent is not.
+    #[msg("no Ed25519 verification of the wallet's link consent precedes link_wallet")]
+    LinkConsentMissing,
+
+    #[msg("the link consent is signed by a key that is not the wallet being linked")]
+    LinkConsentWrongSigner,
+
+    /// The verified bytes are not the SIP_LINK_V1 consent for this program,
+    /// wallet, vault and owner: consent given for another vault, or bytes in
+    /// some other shape.
+    #[msg("the verified link consent does not name this program, wallet, vault and owner")]
+    LinkConsentMismatch,
 }

@@ -100,8 +100,9 @@ export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
   if (vaultInfo === null) return { outcome: "FAILED", detail: "vault account missing" };
   // BEFORE ANY OTHER READ, ANY ATA, ANY WRAP: either pause switch. The vault's
   // own switch is decoded from the read that also gives its lamports, so a
-  // paused vault never gets as far as wrap_sol, which does not check that switch
-  // and would strand the owner's SOL as wSOL once convert refused.
+  // paused vault never gets as far as wrap_sol. The program refuses that wrap
+  // too now (VaultPaused); asking anyway would only buy a failed transaction
+  // and report FAILED where the owner chose a rest.
   const paused = investPauseDecision({
     vaultPaused: decodeVault(program, vaultInfo.data).paused,
     protocolPaused: deps.protocolPaused,
@@ -164,9 +165,11 @@ export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
       // the threshold means we are here to rescue stranded wSOL, and the
       // program refuses a zero amount.
       if (free >= 5_000_000n) {
+        // The policy goes in by name: wrap_sol loads it and refuses a vault
+        // whose policy is disabled or names no conversion floor.
         await method(program, "wrapSol")(new anchor.BN(free.toString()))
           .accountsPartial({
-            crank: crank.publicKey, vault, vaultWsol: wsolAta,
+            crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta,
             tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
           })
           .signers([crank])
