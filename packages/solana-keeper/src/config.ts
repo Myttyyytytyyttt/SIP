@@ -239,6 +239,19 @@ function registerUrl(redactor: Redactor, raw: string, label: string, parsed: URL
   }
 }
 
+/**
+ * Registers a Privy authorization key (a P-256 PKCS8 private key, base64) in
+ * both forms a line can quote it in.
+ *
+ * The SDK strips Privy's "wallet-auth:" prefix and uses the body, so an error
+ * can quote the body alone. Shared by loadConfig and bin/privy-policy.mts, which
+ * reads the same variable outside an armed config.
+ */
+export function registerPrivyAuthorizationKey(redactor: Redactor, value: string, label = "privyAuthorizationKey"): void {
+  redactor.register(value, label);
+  redactor.register(value.replace(/^wallet-auth:/, ""), label);
+}
+
 const isLoopback = (host: string): boolean =>
   host === "localhost" || host === "[::1]" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 
@@ -259,6 +272,38 @@ export function copiedConfigProblems(names: readonly string[]): string[] {
     );
   }
   return problems;
+}
+
+/**
+ * The environment variables the Privy SDK reads on its own
+ * (node_modules/@privy-io/node/client.js), and what each would do to requests
+ * that carry the app secret and, when signing, authorization signatures.
+ */
+const PRIVY_SDK_OVERRIDES: Readonly<Record<string, string>> = {
+  PRIVY_API_BASE_URL: "it sends every Privy request, app secret included, to the host it names",
+  PRIVY_API_LOG: "it makes the SDK log request details",
+  PRIVY_API_CUSTOM_HEADERS: "it adds its headers to every Privy request, and no option in code can turn that off",
+};
+
+export const PRIVY_SDK_OVERRIDE_VARS: readonly string[] = Object.freeze(Object.keys(PRIVY_SDK_OVERRIDES));
+
+/**
+ * Refusals for the Privy SDK's own environment overrides, decided from NAMES
+ * alone.
+ *
+ * NOT NUVEM'S, AND NOTHING TO RENAME. SIP's Privy clients pin the API URL and
+ * the log level in code, but headers from the environment are merged whatever
+ * the options say, so the only safe value for any of the three is unset.
+ */
+export function privySdkOverrideProblems(names: readonly string[]): string[] {
+  return [...names]
+    .sort()
+    .filter((name) => PRIVY_SDK_OVERRIDE_VARS.includes(name))
+    .map(
+      (name) =>
+        `${name} is the Privy SDK's own setting and changes where or how requests carrying the app secret are sent: ` +
+        `${PRIVY_SDK_OVERRIDES[name]}. Unset it. Its value was not read.`,
+    );
 }
 
 /** The old supervisor's near-miss diagnostics for the sentence, without echoing a byte of it. */
@@ -436,6 +481,8 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
   // --- copied Nuvem configuration --------------------------------------------
   const copied = copiedConfigProblems(names);
   problems.push(...copied);
+  // The Privy SDK's own overrides: names only, refused like the above.
+  problems.push(...privySdkOverrideProblems(names));
 
   // --- the arming gate ---------------------------------------------------------
   //
@@ -663,12 +710,7 @@ function readSigning(
   const appSecret = trimmed(env["SIP_SOLANA_PRIVY_APP_SECRET"]);
   if (appSecret !== undefined) redactor.register(appSecret, "privyAppSecret");
   const authorizationKey = trimmed(env["SIP_SOLANA_PRIVY_AUTHORIZATION_KEY"]);
-  if (authorizationKey !== undefined) {
-    redactor.register(authorizationKey, "privyAuthorizationKey");
-    // The SDK strips Privy's "wallet-auth:" prefix and uses the body, so an
-    // error can quote the body alone.
-    redactor.register(authorizationKey.replace(/^wallet-auth:/, ""), "privyAuthorizationKey");
-  }
+  if (authorizationKey !== undefined) registerPrivyAuthorizationKey(redactor, authorizationKey);
   const localDir = trimmed(env["SIP_SOLANA_LOCAL_SIGNERS_DIR"]);
   if (localDir !== undefined) redactor.register(localDir, "localSignersDir");
 

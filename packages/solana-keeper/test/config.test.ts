@@ -322,6 +322,19 @@ describe("copied Nuvem configuration", () => {
   });
 });
 
+describe("the Privy SDK's environment overrides", () => {
+  it("refuses PRIVY_API_BASE_URL, PRIVY_API_LOG and PRIVY_API_CUSTOM_HEADERS by name, reading no value, even armed", () => {
+    for (const name of ["PRIVY_API_BASE_URL", "PRIVY_API_LOG", "PRIVY_API_CUSTOM_HEADERS"]) {
+      const { env, reads } = recording(armed({ [name]: "https://collector.example.test/OverrideNeverRead0009" }));
+      const error = refusal(env);
+      expect(error.message, name).toContain(`${name} is the Privy SDK's own setting`);
+      expect(error.message, name).not.toContain("OverrideNeverRead0009");
+      expect(reads.has(name), name).toBe(false);
+      expectNoSecret(error.message);
+    }
+  });
+});
+
 describe("the program id", () => {
   it("refuses Nuvem's old program with its own message, before any other comparison", () => {
     const error = refusal(dry({ SIP_SOLANA_PROGRAM_ID: OLD_NUVEM_PROGRAM_ID }));

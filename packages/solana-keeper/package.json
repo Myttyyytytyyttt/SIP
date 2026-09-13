@@ -10,6 +10,7 @@
     "keeper": "tsx bin/keeper.mts",
     "preflight": "tsx bin/keeper.mts --preflight",
     "ready": "tsx bin/ready.mts",
+    "privy-policy": "tsx bin/privy-policy.mts",
     "setup-read-model": "tsx bin/setup-read-model.mts"
   },
   "dependencies": {

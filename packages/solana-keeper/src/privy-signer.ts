@@ -31,6 +31,13 @@ import type { Secret } from "@sip/worker/log";
 /** CAIP-2 for Solana mainnet-beta. */
 export const SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
 
+/**
+ * Privy's production API, pinned in code. A PrivyClient built without apiUrl
+ * takes PRIVY_API_BASE_URL from the environment and sends the app secret to
+ * whatever host that names; loadConfig refuses the variable as well.
+ */
+export const PRIVY_API_URL = "https://api.privy.io";
+
 export interface PrivySolanaConfig {
   readonly appId: string;
   readonly appSecret: Secret;
@@ -63,8 +70,11 @@ export interface PrivyWalletEntry {
   readonly granted: readonly string[];
 }
 
+// apiUrl and logLevel explicit: left out, the SDK reads PRIVY_API_BASE_URL and
+// PRIVY_API_LOG from the environment. loadConfig refuses both by name, and
+// PRIVY_API_CUSTOM_HEADERS, which no option can override.
 const clientFor = (config: PrivySolanaConfig): PrivyClient =>
-  new PrivyClient({ appId: config.appId, appSecret: config.appSecret.reveal() });
+  new PrivyClient({ appId: config.appId, appSecret: config.appSecret.reveal(), apiUrl: PRIVY_API_URL, logLevel: "warn" });
 
 /**
  * ONE pass over the app's Solana wallets, indexed by address.

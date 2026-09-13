@@ -22,8 +22,9 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { PrivyClient } from "@privy-io/node";
 import { Secret, sharedRedactor, summarizeUpstreamError } from "@sip/worker/log";
 import { readProtocolConfig } from "../src/accounts.js";
-import { BROADCAST_ACK, copiedConfigProblems, parsePools, parseSettleKey } from "../src/config.js";
+import { BROADCAST_ACK, copiedConfigProblems, parsePools, parseSettleKey, privySdkOverrideProblems } from "../src/config.js";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID, idl } from "../src/idl.js";
+import { PRIVY_API_URL } from "../src/privy-signer.js";
 import { SolanaReadModel } from "../src/read-model.js";
 import { poolFetch } from "../src/rpc-pool.js";
 
@@ -43,10 +44,18 @@ const env = (name: string): string | undefined => {
   return value === undefined || value === "" ? undefined : value;
 };
 
-section("0. configuración copiada de Nuvem");
+section("0. configuración copiada de Nuvem y ajustes del SDK de Privy");
 const copied = copiedConfigProblems(Object.keys(process.env));
 if (copied.length === 0) ok("ninguna variable NUVEM_* ni PRIVY_*/ANCHOR_* sin prefijo");
 for (const problem of copied) bad(problem.split(" is Nuvem's")[0] ?? "variable copiada", "el keeper se niega a arrancar con ella: renómbrala a su SIP_SOLANA_* o bórrala");
+// Solo NOMBRES: con PRIVY_API_BASE_URL la app secret iría a otro host, con
+// PRIVY_API_LOG se apuntarían las peticiones, con PRIVY_API_CUSTOM_HEADERS
+// llevarían cabeceras que ninguna opción quita.
+const sdkOverrides = privySdkOverrideProblems(Object.keys(process.env));
+if (sdkOverrides.length === 0) ok("ninguna PRIVY_API_* que cambie adónde o cómo habla el SDK de Privy");
+for (const problem of sdkOverrides) {
+  bad(problem.split(" is the Privy SDK's")[0] ?? "ajuste del SDK de Privy", "cambia adónde o cómo van las peticiones con la app secret; el keeper se niega a arrancar con ella: bórrala");
+}
 
 section("1. cadena");
 const rpcEntries = (env("SIP_SOLANA_RPC_URLS") ?? "")
@@ -144,11 +153,14 @@ appSecret ? ok("SIP_SOLANA_PRIVY_APP_SECRET presente") : bad("SIP_SOLANA_PRIVY_A
 authorizationKey
   ? ok("SIP_SOLANA_PRIVY_AUTHORIZATION_KEY presente")
   : bad("SIP_SOLANA_PRIVY_AUTHORIZATION_KEY vacío", "la clave privada de la key quorum (PRIVY_SETUP.md, paso 1)");
-if (appId !== undefined && appSecret !== undefined) {
+if (appId !== undefined && appSecret !== undefined && sdkOverrides.length > 0) {
+  note("no probé las credenciales de Privy", "hay una PRIVY_API_* puesta (sección 0): bórrala y repite");
+} else if (appId !== undefined && appSecret !== undefined) {
   // Prueba REAL de credenciales, sin crear nada: una lectura autenticada de la
   // primera página de wallets de Solana. Un 401/403 es lo que buscamos detectar.
+  // apiUrl y logLevel fijados: sin ellos el SDK los tomaría del entorno.
   try {
-    const privy = new PrivyClient({ appId, appSecret });
+    const privy = new PrivyClient({ appId, appSecret, apiUrl: PRIVY_API_URL, logLevel: "warn" });
     for await (const _wallet of privy.wallets().list({ chain_type: "solana", limit: 1 })) break;
     ok("Privy acepta appId + appSecret");
   } catch (error) {
