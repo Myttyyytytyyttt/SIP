@@ -1,6 +1,6 @@
 # SIP — el backend Solana heredado de Nuvem, frente a un skim por beneficio *y* por volumen
 
-**Fecha:** 2026-09-13 · **Versión 1 (borrador con verificación parcial; ver Anexo C)**
+**Fecha:** 2026-09-13 · **Versión 1.1 — verificación adversarial parcial (24 de 96 afirmaciones; ver Anexos C y D)**
 **Alcance:** solo Solana (programa `nuvem_vault`, keeper, `solana-core`, web `/solana`, drills). EVM excluido salvo como referencia.
 **Encargo del owner:** portar el backend a Solana para SIP, mejorarlo y optimizarlo, y soportar **dos modos de skim —
 por beneficio y por volumen— elegibles por el usuario**. Además, responder si Solana permite "manejar las EOA" y el
@@ -17,8 +17,9 @@ solo lectura; **nada se ha modificado ni desplegado**. Los números de cadena lo
 **La hipótesis del owner es medio cierta, y la mitad que falla es la que importa.** Solana simplifica *todo lo que
 rodea* al cobro: la identidad es derivación de PDA (un wallet, un vault, sin factory ni executor ni allowance), el
 vínculo es una transacción con dos firmas, el ahorro vive en los lamports del PDA, y **cada transacción confirmada
-trae los saldos antes/después de SOL y de tokens en su propio meta**, así que observar volumen no necesita tracer, ni
-nodo de archivo, ni el método residual de EVM. Una liquidación cuesta 10.000 lamports (≈ $0,001), unas mil veces menos
+trae los saldos antes/después de SOL y de tokens en su propio meta**, así que observar volumen no necesita tracer ni
+el método residual por bloque de EVM (sí necesita historia *archival* para pasear hasta la frontera, y **el clasificador
+sigue haciendo falta**: §3.3). Una liquidación cuesta 10.000 lamports (≈ $0,001), unas mil veces menos
 que los 445k de gas del `settle` de EVM. **Pero el cobro en sí no cambia:** el SOL nativo no tiene autoridad de
 delegación, y **toda primitiva que quita la firma de la wallet del cobro le quita también la clave a GMGN y Axiom**
 (un PDA no tiene clave; `Assign` rompe cualquier swap externo; Squads/session keys mueven los fondos a otra dirección).
@@ -37,8 +38,9 @@ otra tasa o bajo otra política falla por bytes antes de mover nada.
 **Tres hechos sobre dinero real, hoy, en el despliegue viejo** (no es código de SIP, pero son tus claves):
 
 1. **Una sola clave pegada en un chat es autoridad de upgrade, autoridad del `ProtocolConfig`, keeper y crank.**
-   Quien la tenga puede sustituir el programa por cualquier cosa. Bajo él hay **22,36 SOL de un tercero** (vault
-   `5xGB3psh…`, 8 liquidaciones). `ProtocolConfig` no tiene instrucción para transferir su autoridad.
+   Quien la tenga puede sustituir el programa por cualquier cosa. Bajo él hay **22,36 SOL de alguien que no es el
+   operador ni tú** (vault `5xGB3psh…`, 8 liquidaciones; si es un tester vuestro o un desconocido, no consta).
+   `ProtocolConfig` no tiene instrucción para transferir su autoridad.
 2. **El atestador filtrado el 27-ago sigue siendo el atestador vivo.** Lo verifiqué decodificando el config PDA hoy:
    `attester = 9vCzvLF8…`, la misma clave cuyo secreto se pegó en un chat. `set_attester` existe en cadena desde ese
    día; el lector que recorrió las 55 firmas del PDA solo encontró `InitConfig` y `SetKeeper` — **nunca se ejecutó**.
@@ -53,10 +55,17 @@ otra tasa o bajo otra política falla por bytes antes de mover nada.
    del paseo — el bloqueo de la frontera (§1.1) no es teórico, le está pasando a este usuario. Un `invest FAILED` no
    dispara alerta y `/health` siempre responde `ok:true`.
 
+**Y un hallazgo que valida la premisa del producto.** El router por el que operan las tres wallets activas —
+`FLASHX8D…`, que los lectores dieron por desconocido — **es el router propio de Axiom** (misma autoridad de upgrade que
+los programas `Axiom…`; atribución pública en DefiLlama desde el 31-jul). Es decir: el único usuario con dinero real en
+el sistema **opera en Axiom y se le cobró ocho veces**. GMGN también tiene programa propio (`GMgnVFR8…`). Los dos ids
+se usan como *etiquetas*, nunca como lista blanca: se mide por deltas de saldo y por el DEX de las instrucciones
+internas, porque un observador que buscase "transfer a la fee wallet del venue" sería ciego a Axiom (§1.4).
+
 **Recomendación.** SIP se despliega **con program id nuevo y cuatro claves nuevas** (autoridad de upgrade fría,
-autoridad de config, atestador, keeper/crank); nunca se reutiliza `7rtg…`. En el programa viejo, sin código: rotar la
-autoridad de upgrade a una clave fría, ejecutar `set_attester`, desarmar el keeper (`set-keeper` al programa System) y
-**no cerrarlo** mientras haya vaults ajenos con saldo. Para el hackathon: **el modo BENEFICIO no necesita cambio de
+autoridad de config, atestador, keeper/crank); nunca se reutiliza `7rtg…`. En el programa viejo, sin código y en este
+orden: rotar la autoridad de upgrade a una clave fría (cierra el drenaje), desarmar el keeper (`set-keeper` al programa
+System), ejecutar `set_attester`; y **no cerrarlo** mientras haya vaults ajenos con saldo. Para el hackathon: **el modo BENEFICIO no necesita cambio de
 programa** (web + keeper + Raydium ya corrieron en mainnet de punta a punta); **el modo VOLUMEN necesita el upgrade
 pequeño** de arriba (horas de programa, días de keeper). Los dos caben en cinco días si se secuencian (§5).
 
@@ -129,10 +138,24 @@ lamports; el comentario dice "≈0,006 SOL", error de 1000×, inocuo) con `min_o
 `swap_v2` reciente real del pool)` — observada con un paseo de hasta 60 `getTransaction` a 1,2 s por leg.
 
 **Coste**: una wallet ociosa cuesta ~6 llamadas por barrido; un tramo `NO_PROFIT` de N txs cuesta **N `getTransaction`
-en cada barrido, para siempre** (sin memo). **Fragilidades**: `/health` siempre `ok:true`; el heartbeat "gone quiet"
-existe y no está cableado; `invest FAILED` no alerta; un nodo con retención corta hace **medición parcial silenciosa**
-(página vacía y frontera alcanzada son indistinguibles); el endpoint público es el último failover *en la ruta del
-dinero*.
+en cada barrido, para siempre** (sin memo). **Fragilidades**: `/health` siempre `ok:true`; el heartbeat "gone quiet" existe y no está cableado; `invest FAILED` no
+alerta; y el paseo **no distingue "alcancé la frontera" de "el nodo agotó su historia"** — ambas salidas dejan
+`truncated=false` y la atestación reclama la frontera igualmente, y `settle` la salta más allá del tramo no visto. Es un
+*fail-open* real contra cualquier endpoint **no archival**, que dispararía en el primer tick (los 13 links vivos van de
+10,9 a 27,4 días por detrás de la cabeza). **No dispara en el despliegue documentado**: Helius es archival en todos sus
+planes y el endpoint público, respaldado por BigTable, alcanzó la frontera en todos los links probados; una firma
+`before` desconocida falla *ruidosamente*. El arreglo son ~10 líneas — un booleano `reachedFrontier` e `INCOMPLETE`
+cuando sea falso — más el invariante operativo "todo endpoint del pool debe ser archival".
+
+**Lo que la cadena cuenta del supervisor de Railway** (sin leer ningún secreto): un supervisor *armado* y con el claim
+corrió a cadencia de 60 s al menos del 7-sept 09:44Z al 8-sept 18:26Z (~4.000 txs del crank: las parejas de
+`CreateIdempotent` que solo emite el camino live), actuó por última vez el **9-sept 12:54:41Z**, y desde entonces ni una
+tx de esa clave ni del programa (la última del programa: 8-sept 16:57:47Z) con el vault de 22,36 SOL y su policy activa
+sin cambios — hoy **no está actuando en vivo** (parado, desarmado, sin claim o rechazando en silencio: indistinguibles
+desde fuera). Los 34 `WrapSol` fallidos llevan el log exacto: `Transfer: insufficient lamports 3267284251, need
+22359220653`. Los dos `settle` con éxito (27-ago y 4-sept) prueban que el atestador del keeper coincidía con `9vCz…`
+hasta esa fecha. Detalle de runbook: `docs/RAILWAY.md:210` manda pegar `attester.json`, pero `init_config` escribió
+`mainnet-attester.json`.
 
 ### 1.3 La web y los drills
 
@@ -172,10 +195,20 @@ Peros: el pool fijado en catálogo para SPYx y AAPLx **ya no es el mejor** (`4pC
 para NVDAx y TSLAx es hoy un Orca Whirlpool que el programa no puede usar.
 
 **Por dónde operan de verdad los usuarios.** Las tres wallets activas enrutan **todas** por un mismo programa de nivel
-superior, `FLASHX8DrLbgeR8FcfNV1F5krxYcYMUdBkrP1EPBtxB9`, cuyas instrucciones internas son PumpSwap / Raydium AMM /
-Raydium CPMM / pump.fun. Su identidad es desconocida para ambos repos (una única fuente no verificada lo asocia a un
-router de bots). Los program ids de GMGN y Axiom en Solana **no se han identificado** — e importa poco para medir,
-porque el DEX aparece siempre en las instrucciones internas.
+superior, `FLASHX8DrLbgeR8FcfNV1F5krxYcYMUdBkrP1EPBtxB9` — que los lectores dieron por desconocido y **la refutación
+identificó como el router propio de Axiom**: su autoridad de upgrade (`AxDepcBg…`) es la de los programas
+`AxiomfHaW…` y `Axiomx…`, y DefiLlama lo atribuye a Axiom desde el 31-jul. El usuario firma instrucciones de nivel
+superior de `FLASHX8D` y los DEX (pump.fun, PumpSwap, Raydium AMMv4) corren como CPI a profundidad 2–3; la comisión
+(~1,00 %) entra por transfer del System a una cuenta *propiedad del router* y el programa la reparte por movimiento
+directo de lamports (77,5 % a una fee wallet de Axiom, 22,5 % a un PDA de referidos de `VAULTkV5…`): **ninguna
+instrucción apunta a la fee wallet**. **GMGN** también tiene programa propio,
+`GMgnVFR8Jb39LoXsEVzb3DvBy3ywCmdmJquHUy1Lrkqb`, invocado a nivel superior para trades de bonding curve (en 2 de 6
+muestras llamó a PumpSwap directamente); su comisión (~1,01 %) sí es un transfer del System de nivel superior a una de
+sus nueve fee wallets. Consecuencias: el único usuario con dinero real **opera en Axiom y se le cobró ocho veces** — la
+premisa del producto, en producción —; y un observador que buscase "transfer a la fee wallet del venue" sería **ciego a
+Axiom**: se mide por deltas de saldo y por el DEX de las instrucciones internas, y los ids de los routers se guardan
+como *etiquetas*, nunca como lista blanca (GMGN rota routers). La mención de GoPlus a `FLASHX8D` como "contrato
+malicioso" es compatible con un anillo de fraude que simplemente opera vía Axiom.
 
 ### 1.5 Deudas, por gravedad
 
@@ -192,7 +225,7 @@ porque el DEX aparece siempre en las instrucciones internas.
 | alta | sin tope por liquidación del lado wallet: un keeper comprometido vacía la wallet en un `settle` | código (`max_contribution`) |
 | alta | lavado en modo beneficio: ganancias aparcadas en wSOL/USDC/tokens nunca se cobran; depósitos de tokens externos invisibles | keeper (medición) |
 | alta | dos policies con floors de laboratorio | el dueño re-firma la policy |
-| media | medición parcial silenciosa; `/health` siempre ok; heartbeat sin cablear; endpoint público en ruta del dinero | keeper |
+| media | paseo sin `reachedFrontier` (fail-open contra un nodo no archival); `/health` siempre ok; heartbeat sin cablear; policy Solana de Privy sin definición en el repo | keeper (~10 líneas) |
 
 ---
 
@@ -203,9 +236,10 @@ porque el DEX aparece siempre en las instrucciones internas.
 | identidad vault ↔ wallet | factory + cohort + beacon + executor | `["vault", owner]`, `["link", wallet]` | **más simple** |
 | vincular una wallet | policy en Privy + registro | una tx con dos firmas | **más simple** |
 | dónde vive el ahorro | vault upgradeable | lamports del PDA | **más simple** |
-| observar un fill | eventos del venue + `tx.value` + residual por bloque, con tracer y archivo | `preBalances/postBalances` y `pre/postTokenBalances` en el meta de **cada** tx | **más simple** (pero no "delta neto de fee", §3) |
+| observar un fill | eventos del venue + `tx.value` + residual por bloque, con tracer y archivo | `preBalances/postBalances` y `pre/postTokenBalances` en el meta de **cada** tx | **más simple** (sin tracer ni residual; pero no "delta neto de fee", la pata SOL suele ser wSOL, y el clasificador sigue haciendo falta: §3.3) |
 | coste de cobrar | ~445k gas | 10.000 lamports ≈ $0,001 | **1000× más barato** |
-| **el cobro** | la wallet firma (asiento Privy) | **la wallet firma (asiento Privy)** | **igual** |
+| **el cobro** | la wallet firma y paga (asiento Privy) | **la wallet firma y paga (asiento Privy)** | **igual: el mismo diseño, byte a byte** |
+| clave propia importada | `importWallet` con el asiento adjunto (TEE) | `importWallet({privateKey, additionalSigners})` (TEE) | **igual** |
 | sin firma de la wallet | 7702 no corre en salidas | PDA sin clave / `Assign` rompe swaps / delegado SPL no toca lamports | **igual: imposible sin quitarle la clave a GMGN/Axiom** |
 | custodia del activo comprado | ERC-20 | Token-2022 con `permanentDelegate` del emisor | **peor, y hay que contarlo** |
 
@@ -256,16 +290,30 @@ wallet +10.602.544.310, pool −10.741.969.000, tres tomadores de fee se quedaro
 de fees del venue y del bot; las ventas, netas.** Además pump.fun paga recompensas a la wallet en txs que ella *no*
 firmó. La regla segura para dinero:
 
-1. Admitir una tx solo si **la wallet es firmante** *y* **un saldo de token con `owner == wallet` cambió**; si no,
-   `NOT_A_TRADE` (cubre txs de terceros, creación de ATAs, wraps, staking, transfers, fallidas). Descartada la
-   exclusividad del oráculo de beneficio: contaría un depósito en Kamino o un NFT como compra.
-2. **Notional de compra** = transfers del System de la wallet al pool/curva (+ fees del venue, base bruta como manda
-   `DESIGN.md`), *menos* tips a Jito, *menos* depósitos de rent (crear cuenta/ATA), *menos* `meta.fee` solo si la wallet
-   es `keys[0]`, *más* cualquier débito del ATA de wSOL.
-3. **Notional de venta** = incremento de lamports (o crédito del ATA de wSOL) *más* fees/tips que la wallet pagó en la
-   misma tx, *menos* devoluciones de rent por `closeAccount`.
-4. Pasear a `finalized` desde la frontera del link y **exigir alcanzar la frontera** (con `until`, §4.1); frontera por
-   slot, `fills_root` en el mensaje para idempotencia.
+1. Admitir una tx solo si **es exitosa, la wallet es firmante** *y* **un saldo de token con `owner == wallet` cambió**;
+   si no, `NOT_A_TRADE` (cubre txs de terceros, creación de ATAs, wraps/unwraps, staking, transfers, el propio `settle`,
+   fallidas). Descartada la exclusividad del oráculo de beneficio: contaría un depósito en Kamino o un NFT como compra.
+   Un fill ejecutado por un tercero (Jupiter Trigger/DCA: la wallet aparece listada pero no firma y no mueve lamports)
+   se **rechaza** hasta tener su propia regla.
+2. **La pata SOL suele ser wSOL.** En una muestra de 6 fills reales, **4 se habrían cobrado a cero o solo el tip** si
+   se mide por lamports nativos: cuando el venue no des-envuelve, el SOL vive en el ATA de wSOL. La cantidad base es
+   `|Δ lamports nativos + Δ saldo de wSOL con owner == wallet|`, los dos del mismo meta.
+3. **Notional de compra** = esa base en dirección salida (+ fees del venue, base bruta como manda `DESIGN.md`), *menos*
+   tips a Jito, *menos* depósitos de rent (crear cuenta/ATA, 1.488.440 lamports por ATA), *menos* `meta.fee` **solo si
+   la wallet es la cuenta 0**. En la única compra "limpia" de la muestra, el delta+fee excedió la entrada al pool en
+   **+12,2 %** (fee de bot + tip + fees de pump.fun): al 0,2 % de skim no es una nota al pie, es una sobre-medida del
+   12 % hasta que haya decodificador por venue ("later").
+4. **Notional de venta** = esa base en dirección entrada *más* fees/tips que la wallet pagó en la misma tx, *menos*
+   devoluciones de rent por `closeAccount`.
+5. Fills cotizados en estable: `pre/postTokenBalances` contra una tabla de activos de cotización (**USDC y USDT**, no
+   solo USDC); fills token→token: **rechazo**, no cero.
+6. Pasear a `finalized` desde la frontera del link y **exigir alcanzar la frontera** (`reachedFrontier`, §4.1); frontera
+   por slot, `fills_root` en el mensaje para idempotencia.
+
+**Antes de la demo**: grabar **al menos un fill real por venue** que se vaya a mostrar (Axiom, GMGN, pump.fun directo)
+y fijar la forma de su transacción contra la regla — Nuvem **no tiene ninguno registrado**. Y saber que la fórmula
+ingenua ya está desplegada en algún sitio: `solana-activity.ts:352` suma `|walletDelta|` sin clasificar y cuenta
+depósitos, retiradas y el propio `settle` como "volumen" (etiquetado como actividad, no P&L).
 
 Lo que un atacante puede hacer: inflar con auto-wash (cuesta fees del venue, como en EVM), esconder metiendo un transfer
 entrante en la tx de trade (se rechaza toda tx con transfer entrante de una clave ajena, "later"), o mover volumen a
@@ -277,11 +325,12 @@ cotización USDC (contarla como segunda pata, "later").
 
 ### 4.1 Observación
 
-**Demo (horas):** seguir con polling, `SWEEP_MS` 15–20 s para las wallets de demo, **endpoint con clave** (nunca el
-público en la ruta del dinero); `runInvestTick` solo tras un `SETTLED` o cada N barridos (una wallet ociosa pasa de 6
-llamadas a 1); **hacer explícita la frontera con `until`** en `getSignaturesForAddress` (la firma del último `settle`
-que el read-model ya guarda; para un link nunca liquidado, la firma del `link_wallet`) — si el paseo agota páginas sin
-tocar `until`, es `INCOMPLETE`, no "vacío". Fundir las cinco lecturas de invest en un `getMultipleAccounts`; sustituir
+**Demo (horas):** seguir con polling, `SWEEP_MS` 15–20 s para las wallets de demo, endpoint con clave (Helius, archival
+en todos sus planes; el público puede quedarse de failover — es archival y falla ruidosamente); `runInvestTick` solo
+tras un `SETTLED` o cada N barridos (una wallet ociosa pasa de 6 llamadas a 1); **hacer explícita la frontera**: un
+booleano `reachedFrontier` en el paseo (o `until` con la firma del último `settle`, que el read-model ya guarda; para un
+link nunca liquidado, la del `link_wallet`) e `INCOMPLETE` cuando no se alcance — ~10 líneas, *fail-closed* —, y el
+invariante "todo endpoint del pool es archival" en el runbook. Fundir las cinco lecturas de invest en un `getMultipleAccounts`; sustituir
 el paseo de 60 txs por lectura del `PoolState` + precio por `sqrt_price` o cotización de Jupiter (solo el precio; la
 ruta sigue siendo la lista de cuentas de Raydium).
 
@@ -308,13 +357,22 @@ lamports (100× el coste del cobro) o cuando la ventana tenga ≥ 1 h y ≥ 100.
 vez de reintentar cada 60 s. Corregir dos afirmaciones caducas sobre Privy en el repo (las policies de Solana *sí*
 gatean `signTransaction` y *sí* ven instrucciones del System/Token) antes de que guíen un diseño.
 
+**El contenido de la policy Solana de Nuvem es desconocido** (ningún script del repo la crea): la de SIP se define en el
+repo con pin de programa y tope de lamports, como la de EVM. Las claves **importadas** se cobran igual que las
+generadas — `importWallet({privateKey, additionalSigners:[{signerId, policyIds}]})` adjunta el asiento en la misma
+llamada (solo modo TEE, la misma salvedad que en EVM); una clave nunca importada solo se cobra si el usuario firma el
+`settle` él mismo, en las dos cadenas.
+
 **Después (días):** **partir el cobro** — `record_owed(atestación)`: firma `config.keeper`, paga el crank, verifica el
 Ed25519 previo, escribe `owed += atestado × bps / 10.000` en `TradingLink._reserved` (offset 97: `owed: u64`,
 `collected: u64`), sube el nonce y **fija la frontera aunque `owed` sea 0** (cierra el bloqueo de las wallets
 perdedoras); `pull(amount)`: firma la wallet, `amount ≤ min(owed − collected, max_contribution, saldo − reserva)`. Hacer
 la contribución un **transfer del System de nivel superior** verificado por introspección, para que la **policy de
-Privy pueda acotar importe y destino** por wallet; `settle_v2` con `requested = 0` **patrocinado** (`sponsor: true`)
-cuando la wallet no cubre ni reserva + fee. Para usuarios que guardan la clave en Phantom/Backpack: **vales con durable
+Privy pueda acotar importe y destino** por wallet; `settle_v2` con `requested = 0` **patrocinado** (`sponsor: true`,
+un booleano de Privy que reescribe `feePayer` y blockhash — sin co-firma del crank; el programa no restringe quién paga
+la fee y los tests de Anchor ya liquidan con otro pagador) cuando la wallet no cubre ni reserva + fee. Ojo: el
+patrocinio ahorra los ~5.000 lamports de fee, no la contribución ni el suelo de rent de 650.240 lamports que la wallet
+debe conservar. Para usuarios que guardan la clave en Phantom/Backpack: **vales con durable
 nonce** pre-firmados en el onboarding (semana+). Pata USDC por delegado SPL para quien opera en USDC (días).
 
 Descartados con evidencia: PDA como trading wallet (sin clave para GMGN/Axiom; no puede pagar fees), `Assign` al
@@ -348,9 +406,9 @@ autoridad de config, atestador, keeper/crank; **`init_config` gateado a la autor
 `pending_authority` y transferencia en dos pasos, `paused` global y reservados — diseñado *antes* de que exista la
 cuenta; clave de autorización de Privy nueva y policy solo para el id nuevo.
 
-**Programa viejo, ahora, sin código (tú firmas):** `solana program set-upgrade-authority 7rtg… --new-upgrade-authority
-<fría>`; `set_attester` a un atestador nuevo; `set-keeper 1111…` para desarmar el crank; **no cerrar** (mataría los PDAs
-con 22,36 SOL ajenos). Cerrar y recuperar los 3,33 SOL solo cuando los vaults ajenos estén a cero.
+**Programa viejo, ahora, sin código (tú firmas), en este orden:** (1) `solana program set-upgrade-authority 7rtg…
+--new-upgrade-authority <fría>` — cierra el drenaje incondicional en una transacción; (2) `set-keeper 1111…` — desarma
+el crank; (3) `set_attester` a un atestador nuevo. **No cerrar** (mataría los PDAs con 22,36 SOL ajenos). Cerrar y recuperar los 3,33 SOL solo cuando los vaults ajenos estén a cero.
 
 **Antes de dinero de terceros:** autoridad de upgrade en **Squads v4** (`SQDS4ep6…`, vivo), 2-de-3 con timelock de 24 h,
 upgrades vía `write-buffer` + propuesta; `close_vault` / `close_link` firmados por el dueño; **eventos** (`Settled`,
@@ -390,8 +448,9 @@ nuevo, claves nuevas, `init_config` gateado.
    que los firmes hoy? El tercero con 22,36 SOL no sabe que su dinero está bajo una clave pegada en un chat.
 4. **Defaults:** BENEFICIO 20 %, VOLUMEN 0,20 %, tope 1 SOL por liquidación, reserva 0,01 SOL. ¿Vale?
 5. **Proveedor RPC con clave** para el keeper (Helius Developer o equivalente); presupuesto.
-6. **La narrativa del demo:** hasta identificar `FLASHX8D…`, ¿operamos en el vídeo con pump.fun/Jupiter directamente en
-   vez de afirmar "GMGN/Axiom"?
+6. **Resuelto por la verificación:** `FLASHX8D…` es el router de Axiom y GMGN tiene programa propio; el vídeo puede
+   decir "Axiom" con verdad. Lo que queda: ¿grabamos **un fill real por venue** (Axiom, GMGN, pump.fun directo) antes de
+   la demo para fijar la forma de cada transacción? Nuvem no tiene ninguno registrado.
 
 ---
 
@@ -420,10 +479,18 @@ InvalidPolicy` (mensaje).
 
 - Lecturas: programa, keeper, superficie+drills, cadena, deudas. Diseños: dos modos, volumen, observación, cobro,
   inversión+seguridad. **96 afirmaciones y recomendaciones** generadas; refutación adversarial **capada a 36**; en la
-  primera pasada 7 verificadas (4 refutadas, 3 sobrevivieron) y **29 verificadores cayeron por el límite mensual de
-  gasto**; el run se reanudó — sus veredictos se anexan en D al llegar. **60 afirmaciones nunca pasaron por un
-  verificador**: todo lo marcado "agente" sin "yo" en §1.4 y las recomendaciones "later" deben leerse como *bien
-  fundadas, no adversarialmente verificadas*.
+  primera pasada 7 verificadas y **29 verificadores cayeron por el límite mensual de gasto**; tras reanudar, **24
+  veredictos** al cierre de esta versión (14 refutados, 10 sobrevivieron; Anexo D). **Más de 60 afirmaciones nunca
+  pasaron por un verificador**: todo lo marcado "agente" sin "yo" en §1.4 y las recomendaciones "later" deben leerse
+  como *bien fundadas, no adversarialmente verificadas*.
+- Seis correcciones de hecho que la refutación impuso y que esta versión ya incorpora: (i) `FLASHX8D` es el router de
+  Axiom y GMGN tiene programa propio (§1.4); (ii) la pata SOL de un fill suele ser wSOL, y sin clasificador la fórmula
+  fabrica volumen (§3.3); (iii) el endpoint público es archival y falla ruidosamente — el fail-open real es la falta de
+  `reachedFrontier` (§1.2, §4.1; la cita correcta de la retención corta es `SOLANA_2026-08-17.md:307-308`, y habla de
+  un nodo auto-alojado por defecto); (iv) el programa no restringe quién paga la fee y `sponsor: true` no necesita
+  co-firma (§4.2); (v) las claves importadas se cobran igual que las generadas, vía `importWallet` con asiento (§4.2);
+  (vi) el estado del supervisor de Railway se lee desde la cadena (§1.2). Precisión menor: los `pre/postBalances` son
+  salida determinista del runtime que todo nodo reproduce, no datos hasheados en consenso.
 - Contrastes propios (RPC público, 2026-09-13): ProgramData (bytes, rent, autoridad), conteo de cuentas por
   discriminador y lamports por tipo, decode del `ProtocolConfig` (authority/keeper = `6Nqw…`, attester = `9vCz…`),
   actividad del crank (última tx 9-sept 12:54 UTC; 196 txs el 8-sept con un `Custom(1)` a las 16:57), firmas recientes
@@ -445,4 +512,31 @@ descompuesta al lamport); demo BENEFICIO (corregido: la etiqueta "trocear el wra
 `may_crank` exige `signer == keeper` (`6Nqw`); el esquema de policies de Privy gatea `signTransaction` y ve System/Token;
 el modo dual exige un upgrade pequeño, no una convención del keeper.
 
-*Run reanudado:* **pendiente** — se anexa al llegar.
+*Run reanudado (17 veredictos más al cierre de esta versión):*
+
+**Refutados, con lo que se corrigió** — [1] "no hay camino para otro fee payer": el programa no lo restringe, los tests
+de Anchor ya lo hacen, Privy documenta `sponsor: true` y el camino wallet-firma-primero; lo único no documentado es si
+un `signAndSendTransaction` no patrocinado conserva una firma previa de un tercero (irrelevante: ninguna ruta documentada
+depende de ello). [2] "el estado del supervisor es incognoscible por secretos": se lee de la cadena — armado 7→8-sept,
+última acción 9-sept 12:54Z, hoy no actúa. [5] polling→push: todo "later" y aditivo; el push solo compensa si las txs
+empujadas se **persisten** (mata el re-paseo `NO_PROFIT`); `logsSubscribe` no trae saldos. [7]/[13] "una fuente exacta y
+bruta por construcción": no — suma de swap + fees + tip + rent + fee, pata SOL en wSOL, fee solo si cuenta 0, fills de
+terceros aparte, clasificador imprescindible (§3.3). [8] "trocear el wrap es de demo": no; la demo BENEFICIO solo
+necesita cesta de 1–2 legs, `min_investment` bajo *antes* de firmar, pools registrados, keeper armado y crank con unas
+décimas de SOL — y rotar el crank fuera de la clave pegada. [9] modo dual: confirmado como upgrade de programa, "demo"
+solo si VOLUMEN se muestra en mainnet; los 16 vaults vivos llevan bps de beneficio (14 a 2000, 2 a 3000). [11]
+`settle(owed, paid)`: el mensaje lleva la **base** y el modo; el programa recomputa `owed = base × bps` on-chain y
+`paid = min(pendiente, tope, saldo − reserva)`. [12] Axiom/GMGN identificados (§1.4). [14] "Solana no es más simple para
+el cobro": es *el mismo diseño* en las dos cadenas; y las claves importadas **sí** se cobran (TEE). [19]/[25] la
+recomendación de rotación estaba en orden inseguro: primero la autoridad de upgrade, luego desarmar, luego el
+atestador; "moot" y "demo" mal etiquetados. [26] el fail-open existe pero no dispara en el despliegue documentado;
+arreglo de ~10 líneas; conservar el endpoint público.
+
+**Sobrevivieron** — [3] `may_crank` exige `signer == keeper` (`6Nqw`). [4] el esquema de policies de Privy gatea
+`signTransaction` con condiciones System/Token. [10] rotar lo rotable antes de enseñar nada. [15] si el dueño de
+`5xGB3psh…` es un desconocido o un tester vuestro, **no consta** (no es del operador ni tuyo). [16] el atestador
+filtrado el 27-ago era el de mainnet. [17] por qué `WrapSol` con fondos insuficientes llegó a la cadena en vez de
+pararse en preflight: desconocido. [20] `convert/invest` no fijan el mint de entrada. [21] sin arrastre en cadena.
+[22] la frontera no avanza sin beneficio. [23] el gemelo del 100×.
+
+*Veredictos aún pendientes al cierre de esta versión:* los índices no listados (≈ 12 de los 36 capados).
