@@ -21,6 +21,12 @@ export const TEST_ATTESTER = Keypair.fromSeed(Uint8Array.from({ length: 32 }, (_
 export const configPdaFor = (programId: PublicKey): PublicKey =>
   PublicKey.findProgramAddressSync([Buffer.from("config")], programId)[0];
 
+const UPGRADEABLE_LOADER = new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111");
+
+/** Where the loader records this program's upgrade authority. init_config reads it. */
+export const programDataFor = (programId: PublicKey): PublicKey =>
+  PublicKey.findProgramAddressSync([programId.toBuffer()], UPGRADEABLE_LOADER)[0];
+
 /**
  * Creates the config if it is not there, and returns its address.
  *
@@ -38,7 +44,10 @@ export async function ensureConfig(
   const configPda = configPdaFor(program.programId);
   const existing = await program.account.protocolConfig.fetchNullable(configPda);
   if (existing === null) {
-    await program.methods.initConfig(TEST_ATTESTER.publicKey).accounts({ authority }).rpc();
+    await program.methods
+      .initConfig(TEST_ATTESTER.publicKey)
+      .accountsPartial({ authority, programData: programDataFor(program.programId) })
+      .rpc();
     return configPda;
   }
   if (!existing.attester.equals(TEST_ATTESTER.publicKey)) {

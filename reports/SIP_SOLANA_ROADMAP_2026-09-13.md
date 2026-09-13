@@ -163,7 +163,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 
 **Total:** ≈ 8 SOL en mano · ≈ 3 SOL gastados
 
-- Publicar el programa: 2,43 SOL de alquiler que se quedan bloqueados, más ~2,4 SOL de buffer temporal que vuelven y ~0,1 SOL de comisiones. Unos 5 SOL en tu wallet de administración durante el despliegue.
+- Publicar el programa: unos 2,76 SOL de alquiler bloqueado con el binario actual (542.872 bytes; crecerá un poco con los dos modos y se mide de nuevo antes de publicar), más un buffer temporal de tamaño similar que vuelve y ~0,1 SOL de comisiones. Unos 6 SOL en tu wallet de administración durante el despliegue.
 - Wallet de cobro (atestador y crank): 0,5 SOL para las comisiones de cobros e inversiones de la semana.
 - Operaciones grabadas del lunes: 0,3 SOL en una cartera nueva; vuelve casi todo.
 - Dos llaves de pensión de demo: 2 × 0,05 SOL.
@@ -304,7 +304,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Genero la dirección del programa nuevo y compruebo que nada apunta al programa viejo.
 - **Por qué:** Un programa con la dirección vieja heredaría la llave filtrada.
 - **Listo cuando:** Ninguna referencia a 7rtg… en el programa y las pruebas corren con la dirección nueva.
-- **Técnico:** anchor keys sync con el keypair de target/deploy (ignorado por git; su clave no se lee nunca, solo solana-keygen pubkey). La configuración rechaza 7rtgXTu8 por nombre.
+- **Técnico:** Dirección del programa: 6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J, generada por anchor en target/deploy (ignorado por git; solo se lee su clave pública). declare_id!, Anchor.toml e IDL sincronizados; ningún archivo fuera de target/ nombra 7rtgXTu8.
 
 #### `programa-mando-seguro` — Solo tú configuras el programa
 
@@ -426,7 +426,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Pones unos 5 SOL en tu wallet de administración para publicar el programa.
 - **Por qué:** Publicar bloquea unos 2,4 SOL de alquiler y necesita otro tanto temporal que luego vuelve.
 - **Listo cuando:** Los saldos se ven en Solscan.
-- **Técnico:** solana rent 478317 da 2,43 SOL permanentes; el buffer de escritura necesita otros ~2,4 SOL que se devuelven; ~0,1 SOL de comisiones. Unos 3,24 SOL salen del rescate de hoy.
+- **Técnico:** solana rent 468056 (tamaño real de sip_vault.so) da 2,378 SOL permanentes; el buffer de escritura necesita otros ~2,4 SOL que se devuelven; ~0,1 SOL de comisiones. Unos 3,24 SOL salen del rescate de hoy.
 
 #### `programa-publicar` — Publicar el programa en Solana
 

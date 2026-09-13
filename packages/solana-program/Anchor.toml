@@ -14,10 +14,10 @@ url = "https://api.apr.dev"
 
 [provider]
 cluster = "localnet"
-wallet = "~/.config/solana/id.json"
+wallet = ".localnet/wallet.json"
 
 [scripts]
-test = "npx mocha --import=tsx -t 1000000 \"tests/**/*.ts\""
+test = "npx mocha --import=tsx --sort -t 1000000 \"tests/**/*.ts\""
 
 [test]
 # Deploy through the upgradeable loader so ProgramData exists: init_config

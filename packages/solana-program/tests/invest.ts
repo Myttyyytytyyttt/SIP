@@ -20,7 +20,7 @@ import {
 } from "@solana/spl-token";
 import { assert } from "chai";
 import { SipVault } from "../target/types/sip_vault";
-import { ensureConfig, setKeeper } from "./config-fixture";
+import { configPdaFor, ensureConfig, setKeeper } from "./config-fixture";
 import { ToyVenue } from "../target/types/toy_venue";
 
 const WAD = 10n ** 18n;
@@ -239,6 +239,18 @@ describe("sip-vault M3: invest", () => {
     await program.methods.setPolicy(2_000, true).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
     await expectFailure(invest(10_000_000n, expectedOut(10_000_000n)), "VaultPaused");
     await program.methods.setPolicy(2_000, false).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
+  });
+
+  it("refuses while the PROTOCOL is paused, even with the vault and policy enabled", async () => {
+    const config = configPdaFor(program.programId);
+    const pause = (paused: boolean) =>
+      program.methods.setProtocolPaused(paused).accountsPartial({ authority: provider.wallet.publicKey, config }).rpc();
+    await pause(true);
+    try {
+      await expectFailure(invest(10_000_000n, expectedOut(10_000_000n)), "ProtocolPaused");
+    } finally {
+      await pause(false);
+    }
   });
 
   it("THE FILL GUARD: a venue that under-delivers reverts everything, spend included", async () => {

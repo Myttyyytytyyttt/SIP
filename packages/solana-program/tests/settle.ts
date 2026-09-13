@@ -20,7 +20,7 @@ import {
 } from "@solana/web3.js";
 import { assert } from "chai";
 import { SipVault } from "../target/types/sip_vault";
-import { ensureConfig, TEST_ATTESTER } from "./config-fixture";
+import { configPdaFor, ensureConfig, TEST_ATTESTER } from "./config-fixture";
 import { attestationInstruction, type AttestationInputs } from "../scripts/attestation";
 
 describe("sip-vault M2: settle", () => {
@@ -216,6 +216,20 @@ describe("sip-vault M2: settle", () => {
       .signers([owner])
       .rpc();
     await program.methods.setPolicy(SKIM_BPS, false).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
+  });
+
+  it("refuses while the PROTOCOL is paused, even with the vault running — and withdraw still works", async () => {
+    const config = configPdaFor(program.programId);
+    const pause = (paused: boolean) =>
+      program.methods.setProtocolPaused(paused).accountsPartial({ authority: provider.wallet.publicKey, config }).rpc();
+    await pause(true);
+    try {
+      const inputs = await freshAttestation();
+      await expectSettleFailure(settleTx(inputs), "ProtocolPaused");
+      await program.methods.withdraw(new anchor.BN(1_000)).accounts({ owner: owner.publicKey }).signers([owner]).rpc();
+    } finally {
+      await pause(false);
+    }
   });
 
   it("settles a SECOND session — the cursor is a cursor, not a one-shot", async () => {
