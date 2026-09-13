@@ -63,7 +63,7 @@ function persisted(name: string): Keypair {
 async function main() {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
-  const program = anchor.workspace.nuvemVault;
+  const program = anchor.workspace.sipVault;
   const connection: Connection = provider.connection;
   const operator = (provider.wallet as anchor.Wallet).payer;
 

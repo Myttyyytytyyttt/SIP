@@ -19,14 +19,14 @@ import {
   TransactionInstruction,
 } from "@solana/web3.js";
 import { assert } from "chai";
-import { NuvemVault } from "../target/types/nuvem_vault";
+import { SipVault } from "../target/types/sip_vault";
 import { ensureConfig, TEST_ATTESTER } from "./config-fixture";
 import { attestationInstruction, type AttestationInputs } from "../scripts/attestation";
 
-describe("nuvem-vault M2: settle", () => {
+describe("sip-vault M2: settle", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
-  const program = anchor.workspace.nuvemVault as Program<NuvemVault>;
+  const program = anchor.workspace.sipVault as Program<SipVault>;
   const connection = provider.connection;
 
   // A FRESH owner, so these tests never depend on state the M1 file left.
@@ -308,10 +308,10 @@ describe("nuvem-vault M2: settle", () => {
 // suite already has a funded vault.
 import { getAssociatedTokenAddressSync, createAssociatedTokenAccountIdempotent, NATIVE_MINT, TOKEN_PROGRAM_ID as TP } from "@solana/spl-token";
 
-describe("nuvem-vault: wrap_sol", () => {
+describe("sip-vault: wrap_sol", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
-  const program = anchor.workspace.nuvemVault as Program<NuvemVault>;
+  const program = anchor.workspace.sipVault as Program<SipVault>;
   const connection = provider.connection;
   const payer = (provider.wallet as anchor.Wallet).payer;
 

@@ -11,7 +11,7 @@ const LOCAL = join(__dirname, ".local");
 async function main() {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
-  const program = anchor.workspace.nuvemVault;
+  const program = anchor.workspace.sipVault;
 
   const path = join(LOCAL, "mainnet-attester.json");
   let attester: Keypair;

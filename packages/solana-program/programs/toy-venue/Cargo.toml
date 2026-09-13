@@ -1,7 +1,7 @@
 [package]
 name = "toy-venue"
 version = "0.1.0"
-description = "A swap venue that can be told to misbehave — the counterparty nuvem-vault's invest guards are tested against"
+description = "A swap venue that can be told to misbehave — the counterparty sip-vault's invest guards are tested against"
 edition = "2021"
 
 [lib]

@@ -15,12 +15,12 @@ import {
   Transaction,
 } from "@solana/web3.js";
 import { assert } from "chai";
-import { NuvemVault } from "../target/types/nuvem_vault";
+import { SipVault } from "../target/types/sip_vault";
 
-describe("nuvem-vault M1", () => {
+describe("sip-vault M1", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
-  const program = anchor.workspace.nuvemVault as Program<NuvemVault>;
+  const program = anchor.workspace.sipVault as Program<SipVault>;
   const connection = provider.connection;
 
   // The provider wallet is the vault owner throughout.

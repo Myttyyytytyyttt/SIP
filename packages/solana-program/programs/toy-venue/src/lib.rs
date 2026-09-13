@@ -1,4 +1,4 @@
-// The venue nuvem-vault's invest() guards are tested against.
+// The venue sip-vault's invest() guards are tested against.
 //
 // A REAL PROGRAM MOVING REAL TOKENS, deliberately dumb, and able to MISBEHAVE
 // ON DEMAND — which mainnet Raydium cannot. It models the real swap_v2 shape:

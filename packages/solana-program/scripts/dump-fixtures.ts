@@ -25,7 +25,7 @@ async function main() {
   process.env.ANCHOR_WALLET ??= `${process.env.HOME}/.config/solana/id.json`;
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
-  const program = anchor.workspace.nuvemVault;
+  const program = anchor.workspace.sipVault;
 
   const owner = provider.wallet.publicKey;
   const [vaultPda] = PublicKey.findProgramAddressSync(

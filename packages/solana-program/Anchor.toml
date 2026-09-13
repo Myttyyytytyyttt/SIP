@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-nuvem_vault = "7rtgXTu852M1NTx7PLoJd3bChaCb2hgsgv5o54aFv6Fy"
+sip_vault = "7rtgXTu852M1NTx7PLoJd3bChaCb2hgsgv5o54aFv6Fy"
 toy_venue = "8sa7DUWmKVerygiUKhaSxzE6f7cigiE4mb7Q7WEKeiq8"
 
 [registry]

@@ -36,7 +36,7 @@ cd "$(dirname "$0")/.."
 
 RPC="${NUVEM_SOLANA_MAINNET_RPC:-https://api.mainnet-beta.solana.com}"
 KEYPAIR="${NUVEM_SOLANA_KEYPAIR:-$HOME/.config/solana/id.json}"
-PROGRAM_KEYPAIR=target/deploy/nuvem_vault-keypair.json
+PROGRAM_KEYPAIR=target/deploy/sip_vault-keypair.json
 
 say()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 info() { printf '  %-26s %s\n' "$1" "$2"; }
@@ -68,12 +68,12 @@ cmd_deploy() {
   solana program show "$PROGRAM_ID" -u "$RPC" >/dev/null 2>&1 && die "Already deployed. Use 'anchor upgrade' to iterate; never close-and-redeploy."
   say "building"
   anchor build 2>&1 | tail -1
-  # ONLY nuvem_vault. `anchor deploy` with no -p ships the WHOLE workspace, so
+  # ONLY sip_vault. `anchor deploy` with no -p ships the WHOLE workspace, so
   # it also deployed toy_venue — the test-only venue that must NEVER touch
   # mainnet (there the venue is Raydium) — burning 1.5 SOL and starving the
   # real deploy. `solana program deploy` of the one .so avoids the whole trap.
-  say "deploying nuvem_vault only (locks ~2.79 SOL of recoverable rent)"
-  solana program deploy target/deploy/nuvem_vault.so \
+  say "deploying sip_vault only (locks ~2.79 SOL of recoverable rent)"
+  solana program deploy target/deploy/sip_vault.so \
     --program-id "$PROGRAM_KEYPAIR" \
     --keypair "$KEYPAIR" -u "$RPC" 2>&1 | tail -3
   say "init_config — SAME BREATH as the deploy: first caller wins, so the ceremony leaves no window"
@@ -112,7 +112,7 @@ cmd_upgrade() {
   anchor build
   # The single .so, never the whole workspace: `anchor deploy` ships every
   # program in it, which once cost 1.5 SOL deploying the toy venue to mainnet.
-  solana program deploy target/deploy/nuvem_vault.so \
+  solana program deploy target/deploy/sip_vault.so \
     --program-id "$PROGRAM_KEYPAIR" -u "$RPC" -k "$KEYPAIR"
   say "NOW RUN:  $0 set-keeper <keeper-pubkey>"
 }

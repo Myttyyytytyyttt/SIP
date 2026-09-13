@@ -35,7 +35,7 @@ async function main() {
 
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
-  const program = anchor.workspace.nuvemVault;
+  const program = anchor.workspace.sipVault;
 
   const [configPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
   const existing = await program.account.protocolConfig.fetchNullable(configPda);

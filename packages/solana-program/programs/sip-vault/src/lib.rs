@@ -27,7 +27,7 @@ use state::InvestmentLeg;
 declare_id!("7rtgXTu852M1NTx7PLoJd3bChaCb2hgsgv5o54aFv6Fy");
 
 #[program]
-pub mod nuvem_vault {
+pub mod sip_vault {
     use super::*;
 
     pub fn create_vault(ctx: Context<CreateVault>, skim_bps: u16) -> Result<()> {

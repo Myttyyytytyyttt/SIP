@@ -19,16 +19,16 @@ import {
   mintTo,
 } from "@solana/spl-token";
 import { assert } from "chai";
-import { NuvemVault } from "../target/types/nuvem_vault";
+import { SipVault } from "../target/types/sip_vault";
 import { ensureConfig, setKeeper } from "./config-fixture";
 import { ToyVenue } from "../target/types/toy_venue";
 
 const WAD = 10n ** 18n;
 
-describe("nuvem-vault M3: invest", () => {
+describe("sip-vault M3: invest", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
-  const program = anchor.workspace.nuvemVault as Program<NuvemVault>;
+  const program = anchor.workspace.sipVault as Program<SipVault>;
   const venue = anchor.workspace.toyVenue as Program<ToyVenue>;
   const connection = provider.connection;
   const payer = (provider.wallet as anchor.Wallet).payer;

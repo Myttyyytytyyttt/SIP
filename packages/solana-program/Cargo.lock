@@ -1074,7 +1074,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nuvem-vault"
+name = "sip-vault"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",

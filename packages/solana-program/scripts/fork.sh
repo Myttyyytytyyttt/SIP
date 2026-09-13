@@ -6,7 +6,7 @@
 #
 # Clones the NVDAx/USDC pool and every account swap_v2 touches, injects a
 # pre-funded USDC account for the vault (a clone has no USDC mint authority),
-# deploys nuvem_vault, and runs invest() through the real swap route.
+# deploys sip_vault, and runs invest() through the real swap route.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 RPC="${MAINNET_RPC:-https://api.mainnet-beta.solana.com}"
@@ -53,7 +53,7 @@ solana-test-validator --reset --quiet \
   > /tmp/fork-validator.log 2>&1 &
 sleep 12
 
-echo "── phase 3: deploy nuvem_vault ──"
+echo "── phase 3: deploy sip_vault ──"
 solana airdrop 10 -u http://127.0.0.1:8899 >/dev/null 2>&1 || true
 anchor deploy --provider.cluster http://127.0.0.1:8899 2>&1 | tail -1
 

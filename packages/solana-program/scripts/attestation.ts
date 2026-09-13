@@ -1,4 +1,4 @@
-// TypeScript mirror of programs/nuvem-vault/src/attestation.rs.
+// TypeScript mirror of programs/sip-vault/src/attestation.rs.
 //
 // SAME BYTES OR NOTHING. The program reconstructs this message from chain
 // state and compares it against what the Ed25519 instruction verified; a

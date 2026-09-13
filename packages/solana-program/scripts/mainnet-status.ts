@@ -5,7 +5,7 @@ import { PublicKey } from "@solana/web3.js";
 async function main() {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
-  const program = anchor.workspace.nuvemVault;
+  const program = anchor.workspace.sipVault;
   const operator = provider.wallet.publicKey;
 
   const [configPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
