@@ -1,0 +1,12 @@
+# Build output, local validators and every key-shaped file stay out of git.
+# The IDL is exported to idl/ when it is needed; target/ is never committed.
+.anchor
+target/
+test-ledger/
+node_modules/
+.localnet/
+scripts/.local/
+.env*
+!.env.example
+*-keypair.json
+.DS_Store

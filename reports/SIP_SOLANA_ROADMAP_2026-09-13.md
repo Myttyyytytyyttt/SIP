@@ -1,9 +1,9 @@
 # Rumbo a Stocklana
 
-**Hoja de ruta · redactada el domingo 13 de septiembre de 2026, 17:15 Lisboa** · entrega **viernes 18-sept 21:00 Lisboa (16:00 ET)**
+**Hoja de ruta · redactada el domingo 13 de septiembre de 2026, 17:15 Lisboa · revisado 18:00 (una wallet de administración)** · entrega **viernes 18-sept 21:00 Lisboa (16:00 ET)**
 **Basada en** `reports/SIP_SOLANA_BACKEND_ASSESSMENT_2026-09-13.md`. Versión viva y marcable: (enlace al publicar)
 
-En cinco días llevamos SIP a Solana y lo entregamos en Stocklana. La base es el sistema que ya funcionó en mainnet con Nuvem: lo copiamos a SIP con dirección y llaves nuevas, le enseñamos a cobrar por beneficio o por volumen sin poder confundirlos, y conectamos la web actual a Solana. Hoy, antes de nada, se cierra la puerta del programa viejo, porque una llave pegada en un chat controla 22 SOL de otra persona. Tú haces lo que solo tú puedes hacer: crear llaves, poner SOL, firmar, contratar servicios, operar en Axiom y grabar el vídeo. Yo escribo el programa, el vigilante, la web y los textos. El alcance completo eran unas 200 horas de código y no cabe: esto es el recorte, y lo que no entra está abajo, en Después. Cada día acaba con un control, y si el modo volumen no está listo el miércoles, la demo va solo por beneficio sin tocar nada de la seguridad.
+En cinco días llevamos SIP a Solana y lo entregamos en Stocklana. La base es el sistema que ya funcionó en mainnet con Nuvem: lo copiamos a SIP con dirección nueva y una sola wallet de administración, le enseñamos a cobrar por beneficio o por volumen sin poder confundirlos, y conectamos la web actual a Solana. Hoy, antes de nada, se cierra la puerta del programa viejo, porque una llave pegada en un chat controla 22 SOL de otra persona. Tú haces lo que solo tú puedes hacer: crear tu wallet de administración, poner SOL, firmar, contratar servicios, operar en Axiom y grabar el vídeo. Yo escribo el programa, el vigilante, la web y los textos. El alcance completo eran unas 200 horas de código y no cabe: esto es el recorte, y lo que no entra está abajo, en Después. Cada día acaba con un control, y si el modo volumen no está listo el miércoles, la demo va solo por beneficio sin tocar nada de la seguridad.
 
 ## Lo que depende de ti
 
@@ -11,15 +11,15 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 
 | hora límite | qué | bloquea |
 |---|---|---|
-| hoy · 21:00 | Crear tus 5 llaves nuevas en tu ordenador y pasarme solo las direcciones públicas | quitar el mando del programa viejo, la dirección del programa nuevo y el despliegue |
-| hoy · 22:00 | Pasar el mando del programa viejo a tu llave fría | publicar cualquier cosa; es lo que protege los 22 SOL de otra persona |
+| hoy · 21:00 | Crear tu wallet de administración en Terminal.app y pasarme solo su dirección pública | quitar el mando del programa viejo y todo el despliegue |
+| hoy · 22:00 | Pasar el mando del programa viejo a tu wallet de administración y rescatar sus 3,24 SOL | publicar cualquier cosa; protege los 22 SOL de otra persona |
 | hoy · 22:00 | Revocar el token de Railway, la firma vieja de Privy y la clave de Helius de este Mac | guardar cualquier secreto nuevo |
 | lun · 12:00 | Contratar Helius Developer y crear dos claves, sin pegarlas en el chat | que el vigilante y la web lean Solana |
 | lun · 12:00 | Aprobar la cesta (S&P 500) y las tasas de la demo | la configuración por defecto de las bóvedas |
 | lun · 13:00 | Inscribirte en Stocklana y preguntar si vale partir de Nuvem declarándolo | el README y el formulario |
 | lun · 18:00 | En Privy: activar Solana y el modo TEE en la app de SIP | entrar con Phantom y crear wallets de trading |
 | lun · 21:00 | Una compra y una venta en Axiom, GMGN y pump.fun con 0,3 SOL; pásame solo las 6 firmas | probar el medidor de volumen con operaciones reales |
-| mar · 12:00 | Unos 5 SOL en la llave que publica y 0,5 SOL en el keeper | publicar el programa |
+| mar · 12:00 | Unos 5 SOL en la wallet de administración; crear la wallet de cobro con 0,5 SOL | publicar el programa y configurar el vigilante |
 | mar · 18:00 | Crear la llave de firma y la regla de Privy; pegar tú las variables del keeper en Railway | el primer cobro |
 | mié · 12:00 | Dos cuentas de Phantom de demo y ~2 SOL para operar | las bóvedas de la demo y las operaciones grabadas |
 
@@ -29,39 +29,39 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 
 **Objetivo:** Cerrar la puerta del programa viejo y tener el esqueleto de SIP en Solana.
 
-**Tú** · 3 h
+**Tú** · 2 h
 
-- [ ] **Crear tus llaves nuevas** (1.5 h · **imprescindible**) — Creas cinco llaves en una ventana que Claude no ve y me pasas solo sus direcciones públicas.
-- [ ] **Quitar el mando del programa viejo** (0.5 h · **imprescindible**) — Firmas una transacción que pasa el control de actualización del programa viejo a tu llave fría.
-- [ ] **Sacar los 3,24 SOL de la llave filtrada** (0.25 h · **imprescindible**) — Mueves el SOL de la llave filtrada a tu autoridad de config nueva, dejando 0,02 SOL para los dos pasos que faltan.
+- [ ] **Crear tu wallet de administración** (0.5 h · **imprescindible**) — Creas una única wallet nueva en Terminal.app; publica, actualiza y configura el programa durante el hackathon. Me pasas solo su dirección pública.
+- [ ] **Quitar el mando del programa viejo** (0.5 h · **imprescindible**) — Firmas una transacción que pasa el control de actualización del programa viejo a tu wallet de administración nueva.
+- [ ] **Sacar los 3,24 SOL de la llave filtrada** (0.25 h · **imprescindible**) — Mueves el SOL de la llave filtrada a tu wallet de administración, dejando 0,03 SOL para los dos pasos que faltan.
 - [ ] **Apagar el keeper y el atestador viejos** (0.25 h · **imprescindible**) — Ejecutas el guion: el programa viejo se queda sin robot y deja de aceptar la firma filtrada.
 - [ ] **Revocar los tokens pegados en chats** (0.5 h · **imprescindible**) — Revocas el token de Railway y la firma vieja de Privy de Nuvem, y rotas la clave de Helius guardada en este Mac.
 
 **Claude** · 6.5 h
 
-- [ ] **Candados para que ninguna clave pase por el chat** (1.5 h · **imprescindible**) — Escribo las reglas para crear llaves y bloqueo a Claude la carpeta donde las guardarás, antes de que exista ninguna.
+- [ ] **Candados para que ninguna clave pase por el chat** (1.5 h · **imprescindible**) — Bloqueo a Claude la carpeta donde guardarás tus llaves y dejo escritas las reglas, antes de que exista ninguna.
 - [ ] **Guion para apagar el keeper y el atestador viejos** (1 h · **imprescindible**) — Escribo un único comando que apaga el robot del programa viejo y cambia su firma de cobros.
 - [ ] **Copiar el programa de Nuvem a SIP** (4 h · **imprescindible**) — Traigo a SIP el programa que ya funcionó en Solana, con su nombre nuevo y sin arrastrar llaves viejas.
 
-**Control del día:** La cadena muestra tu llave fría como autoridad del programa viejo, y el programa copiado compila en SIP.  
+**Control del día:** La cadena muestra tu wallet de administración como autoridad del programa viejo, y el programa copiado compila en SIP.  
 **Si no se cumple:** Si la rotación no está hecha, nada se publica y es lo primero del lunes. Si no compila, el lunes empieza por ahí y el vigilante espera.
 
 ### Lunes 14
 
 **Objetivo:** Programa con los dos modos escrito y probado en local; cuentas contratadas; operaciones reales grabadas.
 
-**Tú** · 4.25 h
+**Tú** · 3.25 h
 
-- [ ] **Poner la dirección nueva del programa** (1 h · **imprescindible** · juntos) — Pongo en el código la dirección pública que generaste y compruebo que nada apunta al programa viejo.
 - [ ] **Contratar Helius y crear dos claves** (0.5 h · **imprescindible**) — Contratas Helius Developer y creas una clave para el vigilante y otra para la web, sin pegarlas en el chat.
 - [ ] **Preparar Privy para Solana** (0.5 h · **imprescindible**) — En el panel de Privy activas Solana y el modo TEE, y confirmas que es la app de SIP y no la de Nuvem.
 - [ ] **Inscribirte y preguntar por el código previo** (0.75 h · **imprescindible**) — Te inscribes en Stocklana, miras el formulario sin enviarlo y preguntas si vale partir de Nuvem declarándolo.
 - [ ] **Aprobar la cesta y las tasas de la demo** (0.5 h · juntos) — Decides que la demo compra el S&P 500 (SPYx) desde 1 $, con tasas de demo visibles en pantalla: volumen 1 % y beneficio 50 %.
 - [ ] **Operar para grabar operaciones reales** (1 h) — Con una cartera nueva y 0,3 SOL haces una compra y una venta en Axiom, GMGN y pump.fun, y me pasas solo las firmas.
 
-**Claude** · 30.5 h
+**Claude** · 31.5 h
 
-- [ ] **Solo tú configuras el programa** (5 h · **imprescindible**) — Solo tu llave de actualización puede configurar el programa la primera vez, el mando se traspasa en dos pasos y hay una pausa general.
+- [ ] **Poner la dirección nueva del programa** (1 h · **imprescindible**) — Genero la dirección del programa nuevo y compruebo que nada apunta al programa viejo.
+- [ ] **Solo tú configuras el programa** (5 h · **imprescindible**) — Solo tu wallet de administración puede configurar el programa la primera vez, el mando se traspasa en dos pasos y hay una pausa general.
 - [ ] **La bóveda cobra por beneficio o por volumen, sin confusión** (7 h · **imprescindible**) — Cada bóveda guarda su modo y su tasa, y un cobro firmado para otro modo, otra tasa o una configuración anterior se rechaza.
 - [ ] **La inversión solo acepta la moneda acordada** (2 h · **imprescindible**) — La compra de acciones solo puede usar la moneda que firmó el dueño.
 - [ ] **Traer el vigilante a SIP** (7 h · **imprescindible**) — Traigo de Nuvem el proceso que cobra, como pieza propia de SIP, capaz de arrancar en seco sin ninguna clave secreta.
@@ -75,11 +75,12 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 
 **Objetivo:** Programa nuevo publicado en Solana y el vigilante funcionando en seco contra él.
 
-**Tú** · 5.5 h
+**Tú** · 5.75 h
 
 - [ ] **Decidir: dos modos o volumen bloqueado** (0.25 h · juntos) — A las 13:00 miramos las pruebas: si volumen no está en verde, el programa sale con volumen bloqueado.
-- [ ] **Poner el SOL para publicar el programa** (0.25 h · **imprescindible**) — Pones unos 5 SOL en la llave que publica y 0,5 SOL en el vigilante.
-- [ ] **Publicar el programa en Solana** (3 h · **imprescindible** · juntos) — Publicas el programa con el guion de despliegue, lo configuras con tus llaves y compruebo que lo publicado es exactamente lo probado.
+- [ ] **Crear la wallet de cobro** (0.25 h · **imprescindible**) — Creas una segunda wallet que firmará los cobros y pagará las comisiones del vigilante, y le pones 0,5 SOL.
+- [ ] **Poner el SOL para publicar el programa** (0.25 h · **imprescindible**) — Pones unos 5 SOL en tu wallet de administración para publicar el programa.
+- [ ] **Publicar el programa en Solana** (3 h · **imprescindible** · juntos) — Publicas el programa con tu wallet de administración, lo configuras y compruebo que lo publicado es exactamente lo probado.
 - [ ] **Crear la llave de firma y la regla en Privy** (1 h · **imprescindible**) — Creas en Privy la llave del vigilante, ejecutas el script de la regla y me pasas solo los dos ids.
 - [ ] **Pegar las variables del vigilante en Railway** (1 h · **imprescindible**) — Creas el servicio del vigilante en Railway, cambias la contraseña de la base de datos y pegas tú las variables.
 
@@ -154,7 +155,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 
 **Se aparca:** Medir cuánto se compra y se vende; Decidir: ¿enseñamos volumen?; La bóveda de demo en modo volumen; La segunda acción de la cesta; Copia pública y limpia del código
 
-**No se toca nunca:** Quitar el mando del programa viejo; Crear tus llaves nuevas; Poner la dirección nueva del programa; Solo tú configuras el programa; Candados para que ninguna clave pase por el chat; El tope por cobro y poder retirar siempre
+**No se toca nunca:** Quitar el mando del programa viejo; Crear tu wallet de administración; Poner la dirección nueva del programa; Solo tú configuras el programa; Candados para que ninguna clave pase por el chat; La wallet de administración nunca en un servidor ni en el chat; El tope por cobro y poder retirar siempre
 
 > SIP en Solana funciona de punta a punta en mainnet por beneficio. El programa ya distingue los dos modos, y el de volumen está bloqueado a propósito hasta que su medidor pase las pruebas con operaciones reales de Axiom, GMGN y pump.fun.
 
@@ -162,8 +163,8 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 
 **Total:** ≈ 8 SOL en mano · ≈ 3 SOL gastados
 
-- Publicar el programa: 2,43 SOL de alquiler que se quedan bloqueados, más ~2,4 SOL de buffer temporal que vuelven y ~0,1 SOL de comisiones. Unos 5 SOL en la llave que publica durante el despliegue.
-- Vigilante (crank): 0,5 SOL para las comisiones de cobros e inversiones de la semana.
+- Publicar el programa: 2,43 SOL de alquiler que se quedan bloqueados, más ~2,4 SOL de buffer temporal que vuelven y ~0,1 SOL de comisiones. Unos 5 SOL en tu wallet de administración durante el despliegue.
+- Wallet de cobro (atestador y crank): 0,5 SOL para las comisiones de cobros e inversiones de la semana.
 - Operaciones grabadas del lunes: 0,3 SOL en una cartera nueva; vuelve casi todo.
 - Dos llaves de pensión de demo: 2 × 0,05 SOL.
 - Wallets de trading de demo: ~2 SOL de capital recuperable y 0,05–0,15 SOL de comisiones de Axiom y GMGN.
@@ -176,6 +177,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 
 | riesgo | prob. | impacto | qué hacemos | señal temprana |
 |---|---|---|---|---|
+| La wallet de administración se expone | baja | alto | Solo en tu ordenador: nunca en el chat, en Railway ni en capturas. El traspaso en dos pasos permite moverla a multifirma sin redesplegar. | Cualquier transacción de esa wallet que no hayas firmado tú. |
 | El programa no queda en verde a tiempo | media | alto | Plan B: el mismo programa con volumen bloqueado, sin tocar la seguridad. | El lunes por la noche las pruebas de dos modos siguen en rojo. |
 | Privy no deja firmar el cobro con la regla nueva | media | alto | Probar la regla el martes con los tres rechazos y un cobro en seco antes de armar. | Error de política en signAndSendTransaction durante el ensayo en seco. |
 | Phantom avisa o se niega a firmar el vínculo con un programa nuevo | media | medio | Ensayarlo el miércoles por la mañana; alternativa: vincular desde un guion firmado por las dos llaves. | Aviso de transacción sospechosa en Phantom. |
@@ -188,7 +190,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 ## Después del viernes
 
 - [ ] **Guardar la deuda para cobrarla después** (Claude, 12 h) — Si una wallet está vacía al cobrar, lo pendiente queda anotado en la cadena y se cobra más tarde.
-- [ ] **Multifirma para actualizar el programa** (Juntos, 6 h) — El mando del programa pasa a una multifirma con retraso de 24 horas.
+- [ ] **Multifirma para actualizar el programa** (Juntos, 6 h) — El mando del programa pasa de tu wallet de administración a una multifirma con retraso de 24 horas.
 - [ ] **Separar comisiones por plataforma** (Claude, 8 h) — El medidor separa la comisión del venue y los tips en cada plataforma.
 - [ ] **Unir el vigilante de Solana y el worker de Ethereum** (Claude, 16 h) — Un solo paquete con dos adaptadores de cadena, dos procesos y una base de datos.
 - [ ] **Enterarse de las operaciones al momento** (Claude, 8 h) — El vigilante recibe cada operación en cuanto ocurre en lugar de preguntar cada minuto.
@@ -200,7 +202,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 
 ## Supuestos
 
-- Aceptas las recomendaciones del informe: dirección y llaves nuevas generadas por ti, dos modos con plan B, tasas por defecto de 20 % y 0,20 %, y Helius.
+- Durante el hackathon una sola wallet de administración publica, actualiza y configura el programa; la de cobro va aparte porque vive en Railway. Separar más papeles y la multifirma quedan para después.
 - Ethereum queda en pausa: su código sigue en el repo, sin servicio desplegado.
 - El trabajo de Claude suma unas 93 horas: solo cabe trabajando en paralelo en programa, vigilante y web, y recortando todo lo que está en Después.
 - Tú tienes unas 3 o 4 horas al día para lo tuyo, más el jueves por la tarde para el ensayo y el vídeo.
@@ -214,10 +216,11 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Bóveda** — La cuenta donde se acumula tu ahorro; solo tu llave de pensión puede sacar dinero.
 - **Llave de pensión** — Tu wallet principal (Phantom). Es la dueña de la bóveda.
 - **Wallet de trading** — La wallet con la que operas en Axiom o GMGN; de ahí sale lo apartado.
+- **Wallet de cobro** — La segunda wallet: firma los cobros y paga las comisiones del vigilante desde Railway.
 - **Vigilante (keeper)** — El proceso que mira tus operaciones, calcula lo que toca apartar y lo cobra.
 - **Atestador** — La llave que firma cuánto operó una wallet; el programa solo acepta cobros con esa firma.
 - **Asiento de Privy** — El permiso limitado que deja al vigilante firmar solo cobros de SIP con tu wallet de trading.
-- **Autoridad de actualización** — La llave que puede cambiar el programa; por eso se guarda en frío.
+- **Autoridad de actualización** — La llave que puede cambiar el programa. En el hackathon es tu wallet de administración, y nunca va a un servidor.
 - **Modo beneficio y modo volumen** — Apartar un porcentaje de lo que ganas, o de cada compra y venta.
 - **xStocks** — Acciones tokenizadas; SPYx sigue al S&P 500. Su emisor puede congelarlas, y se dice.
 - **Mainnet** — La red real de Solana, con dinero real.
@@ -232,34 +235,34 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 #### `candados-secretos` — Candados para que ninguna clave pase por el chat
 
 - **Quién:** Claude · **horas:** 1.5 · **nivel:** Imprescindible · **depende de:** —
-- **Qué:** Escribo las reglas para crear llaves y bloqueo a Claude la carpeta donde las guardarás, antes de que exista ninguna.
+- **Qué:** Bloqueo a Claude la carpeta donde guardarás tus llaves y dejo escritas las reglas, antes de que exista ninguna.
 - **Por qué:** Todo el problema del programa viejo empezó con una llave pegada en un chat.
 - **Listo cuando:** La guía está en el repo y un intento de Claude de leer tu carpeta de llaves es denegado.
-- **Técnico:** docs/runbooks/SECRETS.md y permissions.deny en .claude/settings.json para ~/sip-keys/**. Guía: Terminal.app aparte (no la pestaña junto a Claude), solana-keygen new --no-bip39-passphrase -s -o ~/sip-keys/<rol>.json, compartir solo solana-keygen pubkey.
+- **Técnico:** permissions.deny en .claude/settings.json para ~/sip-keys/** (herramientas Read y Edit). Guía: crear llaves en Terminal.app, nunca en el panel de terminal de la app de Claude, que Claude puede leer. Compartir solo la salida de solana-keygen pubkey. El candado cubre las herramientas de lectura; la garantía real es que Claude nunca toca esa carpeta.
 
-#### `llaves-nuevas` — Crear tus llaves nuevas
+#### `llaves-nuevas` — Crear tu wallet de administración
 
-- **Quién:** Tú · **horas:** 1.5 · **nivel:** Imprescindible · **depende de:** `candados-secretos`
-- **Qué:** Creas cinco llaves en una ventana que Claude no ve y me pasas solo sus direcciones públicas.
+- **Quién:** Tú · **horas:** 0.5 · **nivel:** Imprescindible · **depende de:** `candados-secretos`
+- **Qué:** Creas una única wallet nueva en Terminal.app; publica, actualiza y configura el programa durante el hackathon. Me pasas solo su dirección pública.
 - **Por qué:** El programa nuevo no puede nacer con ninguna llave que haya pasado por un chat.
-- **Listo cuando:** Tengo las 5 direcciones públicas y ninguna clave privada ha salido de tu ordenador.
-- **Técnico:** 5 keypairs, 4 papeles: program-id (su secreto se archiva tras publicar), upgrade-authority fría (Ledger si lo tienes), config-authority que además publica, attester y keeper-crank. Deben ser distintas entre sí: el programa lo comprueba.
+- **Listo cuando:** Tengo la dirección pública y la clave privada no ha salido de tu ordenador.
+- **Técnico:** ~/sip-keys/admin.json = deployer + autoridad de upgrade + autoridad de config. La dirección del programa la genera anchor en target/deploy/sip_vault-keypair.json, ignorado por git: no es una wallet, no guarda dinero y no firma nada después del despliegue. La wallet de cobro va aparte y se crea el martes.
 
 #### `viejo-rotar-upgrade` — Quitar el mando del programa viejo
 
 - **Quién:** Tú · **horas:** 0.5 · **nivel:** Imprescindible · **depende de:** `llaves-nuevas`
-- **Qué:** Firmas una transacción que pasa el control de actualización del programa viejo a tu llave fría.
+- **Qué:** Firmas una transacción que pasa el control de actualización del programa viejo a tu wallet de administración nueva.
 - **Por qué:** Con la llave filtrada, cualquiera puede cambiar el programa y llevarse los 22 SOL de otra persona. Esto lo impide para siempre.
-- **Listo cuando:** solana program show muestra tu llave fría como Authority.
-- **Técnico:** solana program set-upgrade-authority 7rtgXTu852M1NTx7PLoJd3bChaCb2hgsgv5o54aFv6Fy --new-upgrade-authority <pubkey fría> -k <llave 6Nqw> -u m, más --skip-new-upgrade-authority-signer-check si la fría no firma. Impide reemplazar el programa; no impide que 6Nqw siga siendo autoridad de config (no existe traspaso).
+- **Listo cuando:** solana program show muestra tu wallet de administración como Authority.
+- **Técnico:** solana program set-upgrade-authority 7rtgXTu852M1NTx7PLoJd3bChaCb2hgsgv5o54aFv6Fy --new-upgrade-authority ~/sip-keys/admin.json -k <keypair de 6Nqw> -u m. La nueva autoridad firma porque se pasa como archivo. Impide reemplazar el programa; 6Nqw sigue siendo autoridad de config porque no existe traspaso.
 
 #### `viejo-rescatar-sol` — Sacar los 3,24 SOL de la llave filtrada
 
 - **Quién:** Tú · **horas:** 0.25 · **nivel:** Imprescindible · **depende de:** `viejo-rotar-upgrade`
-- **Qué:** Mueves el SOL de la llave filtrada a tu autoridad de config nueva, dejando 0,02 SOL para los dos pasos que faltan.
+- **Qué:** Mueves el SOL de la llave filtrada a tu wallet de administración, dejando 0,03 SOL para los dos pasos que faltan.
 - **Por qué:** Es tu dinero en una llave que ya no es secreta, y cubre buena parte del despliegue.
 - **Listo cuando:** La llave 6Nqw queda con unos 0,02 SOL.
-- **Técnico:** solana transfer <config-authority> <saldo menos 0,02> -k <6Nqw> -u m. Saldo leído el 13-sept: 3,27 SOL.
+- **Técnico:** solana transfer <pubkey admin> 3.24 -k <keypair de 6Nqw> -u m --allow-unfunded-recipient. Saldo leído el 13-sept: 3,27 SOL.
 
 #### `viejo-guion` — Guion para apagar el keeper y el atestador viejos
 
@@ -297,19 +300,19 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 
 #### `programa-direccion` — Poner la dirección nueva del programa
 
-- **Quién:** Juntos · **horas:** 1 · **nivel:** Imprescindible · **depende de:** `programa-copia`, `llaves-nuevas`
-- **Qué:** Pongo en el código la dirección pública que generaste y compruebo que nada apunta al programa viejo.
+- **Quién:** Claude · **horas:** 1 · **nivel:** Imprescindible · **depende de:** `programa-copia`
+- **Qué:** Genero la dirección del programa nuevo y compruebo que nada apunta al programa viejo.
 - **Por qué:** Un programa con la dirección vieja heredaría la llave filtrada.
 - **Listo cuando:** Ninguna referencia a 7rtg… en el programa y las pruebas corren con la dirección nueva.
-- **Técnico:** declare_id! y Anchor.toml con tu program-id; la configuración rechaza 7rtgXTu8 por nombre; en localnet el programa se carga en esa dirección vía genesis, sin tener su clave en la máquina.
+- **Técnico:** anchor keys sync con el keypair de target/deploy (ignorado por git; su clave no se lee nunca, solo solana-keygen pubkey). La configuración rechaza 7rtgXTu8 por nombre.
 
 #### `programa-mando-seguro` — Solo tú configuras el programa
 
 - **Quién:** Claude · **horas:** 5 · **nivel:** Imprescindible · **depende de:** `programa-direccion`
-- **Qué:** Solo tu llave de actualización puede configurar el programa la primera vez, el mando se traspasa en dos pasos y hay una pausa general.
+- **Qué:** Solo tu wallet de administración puede configurar el programa la primera vez, el mando se traspasa en dos pasos y hay una pausa general.
 - **Por qué:** El programa viejo lo configuraba el primero que llegara y su mando no se podía traspasar.
-- **Listo cuando:** Pruebas: un extraño no puede configurarlo, el traspaso exige aceptar, y en pausa no se cobra pero sí se retira.
-- **Técnico:** init_config gateado por ProgramData.upgrade_authority_address; ProtocolConfig v2 (primeros 105 bytes idénticos + pending_authority, paused, version y 64 reservados = 203 B); transfer_authority y accept_authority; roles distintos entre sí.
+- **Listo cuando:** Pruebas: otra wallet no puede configurarlo, el traspaso exige aceptar, y en pausa no se cobra pero sí se retira.
+- **Técnico:** init_config gateado por ProgramData.upgrade_authority_address. ProtocolConfig v2: primeros 105 bytes idénticos + pending_authority, paused, version y 64 reservados = 203 B. transfer_authority y accept_authority. En el hackathon los papeles pueden coincidir; el traspaso en dos pasos permite separarlos después sin redesplegar.
 
 #### `programa-dos-modos` — La bóveda cobra por beneficio o por volumen, sin confusión
 
@@ -409,25 +412,33 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Listo cuando:** Decisión escrita a las 13:00.
 - **Técnico:** Plan B = el mismo programa V2 con create_vault_v2 y set_policy_v2 rechazando mode=1. Tope, reserva, configuración protegida y moneda fija se quedan: son lo que hace seguro incluso el modo beneficio.
 
+#### `wallet-cobro` — Crear la wallet de cobro
+
+- **Quién:** Tú · **horas:** 0.25 · **nivel:** Imprescindible · **depende de:** `candados-secretos`
+- **Qué:** Creas una segunda wallet que firmará los cobros y pagará las comisiones del vigilante, y le pones 0,5 SOL.
+- **Por qué:** Su clave tiene que vivir en Railway; si fuera la de administración, quien entrara en el servidor podría cambiar el programa.
+- **Listo cuando:** Tengo su dirección pública y su saldo se ve en Solscan.
+- **Técnico:** ~/sip-keys/settle.json = atestador y crank. En el programa, config.attester y config.keeper apuntan a ella. Su secreto se pega solo en Railway.
+
 #### `fondos-despliegue` — Poner el SOL para publicar el programa
 
 - **Quién:** Tú · **horas:** 0.25 · **nivel:** Imprescindible · **depende de:** `viejo-rescatar-sol`
-- **Qué:** Pones unos 5 SOL en la llave que publica y 0,5 SOL en el vigilante.
+- **Qué:** Pones unos 5 SOL en tu wallet de administración para publicar el programa.
 - **Por qué:** Publicar bloquea unos 2,4 SOL de alquiler y necesita otro tanto temporal que luego vuelve.
 - **Listo cuando:** Los saldos se ven en Solscan.
-- **Técnico:** solana rent 478317 da 2,43 SOL permanentes; el buffer de escritura necesita otros ~2,4 SOL que se devuelven; ~0,1 SOL de comisiones. Crank 0,5 SOL. Unos 3,24 SOL salen del rescate.
+- **Técnico:** solana rent 478317 da 2,43 SOL permanentes; el buffer de escritura necesita otros ~2,4 SOL que se devuelven; ~0,1 SOL de comisiones. Unos 3,24 SOL salen del rescate de hoy.
 
 #### `programa-publicar` — Publicar el programa en Solana
 
-- **Quién:** Juntos · **horas:** 3 · **nivel:** Imprescindible · **depende de:** `programa-pruebas`, `fondos-despliegue`, `decision-programa`
-- **Qué:** Publicas el programa con el guion de despliegue, lo configuras con tus llaves y compruebo que lo publicado es exactamente lo probado.
+- **Quién:** Juntos · **horas:** 3 · **nivel:** Imprescindible · **depende de:** `programa-pruebas`, `fondos-despliegue`, `decision-programa`, `wallet-cobro`
+- **Qué:** Publicas el programa con tu wallet de administración, lo configuras y compruebo que lo publicado es exactamente lo probado.
 - **Por qué:** Es el paso que convierte el código en algo que funciona con dinero real.
-- **Listo cuando:** El hash en cadena coincide con el probado, la configuración muestra tus 4 llaves y la autoridad de actualización es la fría.
-- **Técnico:** deploy.sh: solana program deploy --program-id <tu archivo> --buffer <archivo> (reanudable) --use-rpc -u <Helius> -k <config-authority>. Nunca anchor deploy ni anchor keys sync. init_config firmado mientras es autoridad de upgrade; después set-upgrade-authority a la fría. status: solana program dump comparado por sha256 con target/deploy/sip_vault.so.
+- **Listo cuando:** El hash en cadena coincide con el probado, la autoridad es tu wallet de administración y el atestador y el keeper son la wallet de cobro.
+- **Técnico:** deploy.sh: solana program deploy target/deploy/sip_vault.so --program-id target/deploy/sip_vault-keypair.json --buffer <archivo> (reanudable) --use-rpc -u <Helius> -k ~/sip-keys/admin.json. Nunca anchor deploy. init_config(attester = wallet de cobro) y set_keeper(wallet de cobro) firmados por admin. status: solana program dump comparado por sha256 con target/deploy/sip_vault.so.
 
 #### `privy-llave-regla` — Crear la llave de firma y la regla en Privy
 
-- **Quién:** Tú · **horas:** 1 · **nivel:** Imprescindible · **depende de:** `privy-solana`, `privy-politica-script`, `llaves-nuevas`
+- **Quién:** Tú · **horas:** 1 · **nivel:** Imprescindible · **depende de:** `privy-solana`, `privy-politica-script`
 - **Qué:** Creas en Privy la llave del vigilante, ejecutas el script de la regla y me pasas solo los dos ids.
 - **Por qué:** Sin esta regla el vigilante no puede cobrar, o podría firmar cualquier cosa.
 - **Listo cuando:** Tengo el key quorum id y el policy id, y las tres pruebas de rechazo fallan como deben.
@@ -443,11 +454,11 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 
 #### `keeper-variables` — Pegar las variables del vigilante en Railway
 
-- **Quién:** Tú · **horas:** 1 · **nivel:** Imprescindible · **depende de:** `keeper-traer`, `helius`, `programa-publicar`
+- **Quién:** Tú · **horas:** 1 · **nivel:** Imprescindible · **depende de:** `keeper-traer`, `helius`, `programa-publicar`, `wallet-cobro`
 - **Qué:** Creas el servicio del vigilante en Railway, cambias la contraseña de la base de datos y pegas tú las variables.
 - **Por qué:** Los secretos solo pueden vivir en Railway y en tu gestor, nunca en el chat.
 - **Listo cuando:** El servicio arranca en seco y /status muestra el programa nuevo.
-- **Técnico:** Config-as-code packages/solana-keeper/railway.json, Root Directory vacío. SIP_SOLANA_RPC_URLS, SIP_SOLANA_PROGRAM_ID, atestador y crank (secretos), SIP_SOLANA_PRIVY_*, DATABASE_URL de Supabase por el pooler de sesión 5432 con la contraseña nueva.
+- **Técnico:** Config-as-code packages/solana-keeper/railway.json, Root Directory vacío. SIP_SOLANA_RPC_URLS, SIP_SOLANA_PROGRAM_ID, el secreto de la wallet de cobro (atestador y crank), SIP_SOLANA_PRIVY_*, DATABASE_URL de Supabase por el pooler de sesión 5432 con la contraseña nueva. La wallet de administración nunca va a Railway.
 
 #### `web-login-wallets` — Entrar con Phantom y crear wallets de trading
 
@@ -612,7 +623,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 #### `despues-multifirma` — Multifirma para actualizar el programa
 
 - **Quién:** Juntos · **horas:** 6 · **nivel:** Después · **depende de:** —
-- **Qué:** El mando del programa pasa a una multifirma con retraso de 24 horas.
+- **Qué:** El mando del programa pasa de tu wallet de administración a una multifirma con retraso de 24 horas.
 - **Por qué:** Antes de dinero de terceros, ninguna llave sola debería poder cambiar el programa.
 - **Listo cuando:** La autoridad de upgrade es una bóveda de Squads 2 de 3.
 - **Técnico:** Squads v4, SetTimelock 86400 s, upgrades con write-buffer y propuesta; close_vault y close_link firmados por el dueño.
@@ -687,3 +698,4 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - Unas 150 tareas propuestas se fusionaron en 55, aplicando las correcciones de la verificación: estimaciones, tareas erróneas y tareas que faltaban.
 - El agente que ordenaba el calendario se detuvo tras 54 minutos sin avanzar; el calendario, la fusión y el recorte los hizo Claude a mano con esos 14 resultados. Los cuatro críticos finales (completitud, factibilidad, seguridad y claridad) no llegaron a correr.
 - Base: reports/SIP_SOLANA_BACKEND_ASSESSMENT_2026-09-13.md y lecturas de cadena del 13-sept.
+- Cambio del owner el 13-sept por la tarde: una sola wallet de administración durante el hackathon en vez de cinco llaves; la wallet de cobro va aparte porque su secreto vive en Railway.

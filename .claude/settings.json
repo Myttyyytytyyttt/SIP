@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(~/sip-keys/**)",
+      "Edit(~/sip-keys/**)",
+      "Read(~/ProyectosCT/SOLANA-RECUPERACION/claves/**)",
+      "Edit(~/ProyectosCT/SOLANA-RECUPERACION/claves/**)",
+      "Read(~/ProyectosCT/Nuvem/packages/solana-lab/program/scripts/.local/**)",
+      "Edit(~/ProyectosCT/Nuvem/packages/solana-lab/program/scripts/.local/**)",
+      "Read(~/.config/solana/**)",
+      "Edit(~/.config/solana/**)",
+      "Read(**/*-keypair.json)",
+      "Edit(**/*-keypair.json)"
+    ]
+  }
+}
