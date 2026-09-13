@@ -188,6 +188,7 @@ async function main() {
   await program.methods
     .setInvestPolicy(
       legs, RAYDIUM_CLMM,
+      USDC,
       new anchor.BN("30000000000000000"), // convert floor ≈ $30/SOL
       new anchor.BN("1000000"), new anchor.BN("50000000"), new anchor.BN("100000000"), true,
     )

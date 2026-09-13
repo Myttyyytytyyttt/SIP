@@ -61,10 +61,13 @@ pub struct Invest<'info> {
     pub policy: Box<Account<'info, InvestmentPolicy>>,
 
     /// The vault's in-asset account. The venue pulls from it under the vault
-    /// PDA's CPI signature; the measured delta bounds how much.
+    /// PDA's CPI signature; the measured delta bounds how much. Its mint is
+    /// pinned, or the caps and floors, written in the in-asset, would meter
+    /// whatever else the vault holds, another leg's shares included.
     #[account(
         mut,
         constraint = vault_in.owner == vault.key() @ NuvemError::InvalidPolicy,
+        constraint = vault_in.mint == policy.in_mint @ NuvemError::WrongInMint,
     )]
     pub vault_in: Box<InterfaceAccount<'info, TokenAccount>>,
 

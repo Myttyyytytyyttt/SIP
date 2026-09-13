@@ -12,6 +12,7 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { AccountMeta, Keypair, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 import {
+  NATIVE_MINT,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountIdempotent,
@@ -70,12 +71,13 @@ describe("sip-vault M3: invest", () => {
 
   const setPolicy = async (over: Partial<{
     enabled: boolean; minInvestment: bigint; maxPerCall: bigint; maxRolling: bigint;
-    legsOverride: ReturnType<typeof legs>;
+    legsOverride: ReturnType<typeof legs>; inMint: PublicKey;
   }> = {}) =>
     program.methods
       .setInvestPolicy(
         over.legsOverride ?? legs(),
         venue.programId,
+        over.inMint ?? usdc,
         new anchor.BN("30000000000000000"), // convert floor: 0.03 USDC-raw per lamport (unused by toy tests)
         new anchor.BN((over.minInvestment ?? 1_000_000n).toString()),
         new anchor.BN((over.maxPerCall ?? 100_000_000n).toString()),
@@ -178,12 +180,20 @@ describe("sip-vault M3: invest", () => {
   it("refuses contradictory caps", async () => {
     await expectFailure(setPolicy({ minInvestment: 200_000_000n, maxPerCall: 100_000_000n }), "InvalidPolicy");
   });
+  it("refuses a policy that names no in-asset", async () => {
+    await expectFailure(setPolicy({ inMint: PublicKey.default }), "InvalidPolicy");
+  });
+  it("refuses an in-asset that is also a mint the basket buys", async () => {
+    await expectFailure(setPolicy({ inMint: stock }), "InvalidPolicy");
+  });
 
   it("accepts the real policy", async () => {
     await setPolicy();
     const p = await program.account.investmentPolicy.fetch(policyPda);
     assert.strictEqual(p.enabled, true);
     assert.strictEqual(p.policyNonce.toString(), "1");
+    assert.isTrue(p.inMint.equals(usdc), "the in-asset is the mint the owner named");
+    assert.strictEqual((await connection.getAccountInfo(policyPda))!.data.length, 970);
   });
 
   it("refuses a stranger's crank — the route is caller-chosen, so the caller must not be", async () => {
@@ -284,6 +294,52 @@ describe("sip-vault M3: invest", () => {
         .signers([crank])
         .rpc(),
       "WrongVenue",
+    );
+  });
+
+  // ── the in-asset is pinned ─────────────────────────────────────────────────
+  // Both attacks below use a token account the vault PDA really owns, so they
+  // pass every check that existed before the pin.
+  const junkAccountOfVault = async () => {
+    const junk = await createMint(connection, payer, payer.publicKey, null, 6);
+    const account = await createAssociatedTokenAccountIdempotent(connection, payer, junk, vaultPda, undefined, TOKEN_PROGRAM_ID, undefined, true);
+    await mintTo(connection, payer, junk, account, payer, 1_000_000_000, [], undefined, TOKEN_PROGRAM_ID);
+    return account;
+  };
+
+  it("refuses to spend from any vault account but the in-asset", async () => {
+    const vaultJunk = await junkAccountOfVault();
+    const amountIn = 10_000_000n;
+    await expectFailure(
+      program.methods
+        .invest(0, new anchor.BN(amountIn.toString()), new anchor.BN(expectedOut(amountIn).toString()), venueData(amountIn, expectedOut(amountIn)))
+        .accountsPartial({
+          crank: crank.publicKey, vault: vaultPda, policy: policyPda,
+          vaultIn: vaultJunk, vaultTarget: vaultStock, targetMint: stock,
+          venueProgram: venue.programId,
+        })
+        .remainingAccounts(remaining(HONEST))
+        .signers([crank])
+        .rpc(),
+      "WrongInMint",
+    );
+  });
+
+  it("refuses to convert into anything but the in-asset: the junk-token fill", async () => {
+    // The keeper mints a token, makes the vault own an account of it, and
+    // fills the vault's wSOL into it at whatever "price" clears the floor.
+    const vaultJunk = await junkAccountOfVault();
+    const vaultWsol = await createAssociatedTokenAccountIdempotent(connection, payer, NATIVE_MINT, vaultPda, undefined, TOKEN_PROGRAM_ID, undefined, true);
+    await expectFailure(
+      program.methods
+        .convert(new anchor.BN(1_000_000), new anchor.BN(1_000_000), Buffer.alloc(0))
+        .accountsPartial({
+          crank: crank.publicKey, vault: vaultPda, policy: policyPda,
+          vaultWsol, vaultIn: vaultJunk, venueProgram: venue.programId,
+        })
+        .signers([crank])
+        .rpc(),
+      "WrongInMint",
     );
   });
 });

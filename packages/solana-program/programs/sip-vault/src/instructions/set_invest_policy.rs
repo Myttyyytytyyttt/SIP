@@ -8,7 +8,9 @@ use crate::state::{InvestmentLeg, InvestmentPolicy, Vault, MAX_LEGS};
 /// plus _validateBasket, checks kept in the same spirit line for line: weights
 /// sum to exactly 10_000, at most MAX_LEGS legs, no duplicate mints, no
 /// zero floor (a zero floor is "accept any price", which is not a policy), and
-/// min ≤ perCall ≤ rolling so the caps cannot contradict each other.
+/// min ≤ perCall ≤ rolling so the caps cannot contradict each other. Added for
+/// Solana: the in-asset every floor and cap is written in must be named, and
+/// cannot also be a mint the basket buys.
 #[derive(Accounts)]
 pub struct SetInvestPolicy<'info> {
     #[account(mut)]
@@ -38,6 +40,7 @@ pub fn set_invest_policy_handler(
     ctx: Context<SetInvestPolicy>,
     legs: Vec<InvestmentLeg>,
     venue_program: Pubkey,
+    in_mint: Pubkey,
     min_convert_rate_wad: u128,
     min_investment: u64,
     max_per_call: u64,
@@ -55,6 +58,7 @@ pub fn set_invest_policy_handler(
         weights += u32::from(leg.weight_bps);
     }
     require!(weights == 10_000, NuvemError::InvalidPolicy);
+    require!(in_mint != Pubkey::default() && !mints.contains(&in_mint), NuvemError::InvalidPolicy);
 
     require!(
         min_investment > 0 && min_investment <= max_per_call && max_per_call <= max_rolling_30d,
@@ -66,6 +70,7 @@ pub fn set_invest_policy_handler(
     policy.vault = ctx.accounts.vault.key();
     policy.enabled = enabled;
     policy.venue_program = venue_program;
+    policy.in_mint = in_mint;
     policy.legs = legs;
     policy.min_convert_rate_wad = min_convert_rate_wad;
     policy.min_investment = min_investment;

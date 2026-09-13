@@ -54,10 +54,13 @@ pub struct Convert<'info> {
     )]
     pub vault_wsol: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// The vault's in-asset account — where the fill lands and is measured.
+    /// The vault's in-asset account — where the fill lands and is measured. Its
+    /// mint is pinned: the owner's floor is a price in that mint, and a fill in
+    /// any other one, such as a token the caller minted, clears it for free.
     #[account(
         mut,
         constraint = vault_in.owner == vault.key() @ NuvemError::InvalidPolicy,
+        constraint = vault_in.mint == policy.in_mint @ NuvemError::WrongInMint,
     )]
     pub vault_in: Box<InterfaceAccount<'info, TokenAccount>>,
 

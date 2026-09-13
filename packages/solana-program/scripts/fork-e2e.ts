@@ -177,6 +177,7 @@ async function main() {
   await program.methods
     .setInvestPolicy(
       legs, RAYDIUM_CLMM,
+      USDC,
       new anchor.BN("30000000000000000"), // 0.03 USDC-raw per lamport ≈ $30/SOL floor
       new anchor.BN("1000000"), new anchor.BN("20000000"), new anchor.BN("30000000"), true,
     )

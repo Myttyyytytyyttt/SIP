@@ -163,7 +163,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 
 **Total:** ≈ 8 SOL en mano · ≈ 3 SOL gastados
 
-- Publicar el programa: 2,79 SOL de alquiler que quedan bloqueados mientras exista (binario de 549,672 bytes el 13-sep, ya con los dos modos; crecerá un poco con la moneda fija y se mide otra vez antes de publicar). Cada actualización pide otro tanto de forma temporal para el buffer, que vuelve al terminar. Ten unos 5,90 SOL en la wallet de administración el martes.
+- Publicar el programa: 2,81 SOL de alquiler que quedan bloqueados mientras exista (binario de 552,200 bytes el 13-sep, ya con los dos modos y la moneda fija; se mide otra vez antes de publicar). Cada actualización pide otro tanto de forma temporal para el buffer, que vuelve al terminar. Ten unos 5,90 SOL en la wallet de administración el martes.
 - Wallet de cobro (atestador y crank): 0,5 SOL para las comisiones de cobros e inversiones de la semana.
 - Operaciones grabadas del lunes: 0,3 SOL en una cartera nueva; vuelve casi todo.
 - Dos llaves de pensión de demo: 2 × 0,05 SOL.
@@ -327,7 +327,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Quién:** Claude · **horas:** 2 · **nivel:** Imprescindible · **depende de:** `programa-direccion`
 - **Qué:** La compra de acciones solo puede usar la moneda que firmó el dueño.
 - **Por qué:** Hoy un keeper comprometido podría meter el dinero de la bóveda por un pool basura.
-- **Listo cuando:** Prueba: convertir o invertir con otra moneda falla con InvalidPolicy.
+- **Listo cuando:** Prueba: invertir desde otra moneda o convertir hacia otra falla con WrongInMint.
 - **Técnico:** InvestmentPolicy pasa a 970 B con in_mint (USDC por defecto); constraint vault_in.mint == policy.in_mint en convert.rs e invest.rs. Defaults: 1 $ por acción, 50 $ por llamada, 500 $ cada 30 días.
 
 #### `helius` — Contratar Helius y crear dos claves
@@ -500,7 +500,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Desde la web creas tu bóveda eligiendo beneficio o volumen, vinculas la wallet de trading, eliges la acción y puedes sacar el dinero.
 - **Por qué:** Es el recorrido que los jueces tienen que ver funcionar, y retirar demuestra que el dinero es tuyo.
 - **Listo cuando:** En mainnet desde la web: bóveda creada, wallet vinculada, política firmada y un retiro de prueba, cada uno con enlace a Solscan.
-- **Técnico:** create_vault_v2 con texto honesto por modo. Vincular en una transacción: Phantom paga y firma primero, la embedded co-firma después; rechaza wallet igual a dueño. set_invest_policy con SPYx a 1 $ y creación de cuentas pagada por el dueño. withdraw. Comprobación de bytes contra fixtures del programa. Aviso: el emisor de xStocks puede congelar.
+- **Técnico:** create_vault_v2 con texto honesto por modo. Vincular en una transacción: Phantom paga y firma primero, la embedded co-firma después; rechaza wallet igual a dueño. set_invest_policy con SPYx a 1 $ y creación de cuentas pagada por el dueño. withdraw. Comprobación de bytes contra fixtures del programa. Aviso: el emisor de xStocks puede congelar. Primera política de inversión: in_mint USDC, mínimo 1 $, 50 $ por llamada, 500 $ cada 30 días.
 
 #### `ensayo-seco` — Ensayo en seco contra mainnet
 

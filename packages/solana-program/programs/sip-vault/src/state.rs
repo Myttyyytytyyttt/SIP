@@ -203,6 +203,13 @@ pub struct InvestmentPolicy {
     /// scam pools; Solana's equivalent hazard is a forged venue, so the venue
     /// program is pinned here and everything else is measured by delta.
     pub venue_program: Pubkey,
+    /// The ONLY mint convert() may fill into and invest() may spend from: the
+    /// owner's choice, USDC by default. Every floor and cap in this policy is a
+    /// price or an amount in this mint. Unpinned, they metered whatever the
+    /// keeper passed: convert could fill the vault's wSOL into a junk token the
+    /// keeper mints, clearing any floor, and invest could spend one leg's shares
+    /// to buy another at a floor written for dollars.
+    pub in_mint: Pubkey,
     #[max_len(MAX_LEGS)]
     pub legs: Vec<InvestmentLeg>,
     /// USER-SIGNED floor for the SOL->USDC conversion leg: minimum in-asset

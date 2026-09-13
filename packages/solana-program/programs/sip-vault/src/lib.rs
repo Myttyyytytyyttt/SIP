@@ -108,6 +108,7 @@ pub mod sip_vault {
         ctx: Context<SetInvestPolicy>,
         legs: Vec<InvestmentLeg>,
         venue_program: Pubkey,
+        in_mint: Pubkey,
         min_convert_rate_wad: u128,
         min_investment: u64,
         max_per_call: u64,
@@ -115,7 +116,7 @@ pub mod sip_vault {
         enabled: bool,
     ) -> Result<()> {
         instructions::set_invest_policy::set_invest_policy_handler(
-            ctx, legs, venue_program, min_convert_rate_wad, min_investment, max_per_call, max_rolling_30d, enabled,
+            ctx, legs, venue_program, in_mint, min_convert_rate_wad, min_investment, max_per_call, max_rolling_30d, enabled,
         )
     }
 

@@ -68,6 +68,7 @@ async function main() {
     .setInvestPolicy(
       [{ mint: legMint, weightBps: 10_000, minOutRateWad: new anchor.BN("1234567890123456") }],
       new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK"),
+      new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
       new anchor.BN("98765432109876543"),
       new anchor.BN("1111111"),
       new anchor.BN("22222222"),

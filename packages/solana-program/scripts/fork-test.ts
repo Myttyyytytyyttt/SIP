@@ -64,7 +64,7 @@ async function main() {
   const AMOUNT_IN = 5_000_000n; // 5 USDC
   const legs = [{ mint: NVDAX, weightBps: 10_000, minOutRateWad: new anchor.BN((10n ** 15n).toString()) }];
   await program.methods
-    .setInvestPolicy(legs, RAYDIUM_CLMM, new anchor.BN("30000000000000000"), new anchor.BN("1000000"), new anchor.BN("20000000"), new anchor.BN("30000000"), true)
+    .setInvestPolicy(legs, RAYDIUM_CLMM, USDC, new anchor.BN("30000000000000000"), new anchor.BN("1000000"), new anchor.BN("20000000"), new anchor.BN("30000000"), true)
     .accountsPartial({ owner: owner.publicKey, vault: vaultPda, policy: policyPda })
     .signers([owner])
     .rpc();

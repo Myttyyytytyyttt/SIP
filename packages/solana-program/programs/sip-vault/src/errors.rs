@@ -126,4 +126,7 @@ pub enum NuvemError {
 
     #[msg("paying this settlement would leave the trading wallet below its reserve")]
     WalletBelowReserve,
+
+    #[msg("this token account is not in the mint the owner invests from")]
+    WrongInMint,
 }
