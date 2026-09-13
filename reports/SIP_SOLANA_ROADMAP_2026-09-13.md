@@ -336,7 +336,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Contratas Helius Developer y creas una clave para el vigilante y otra para la web, sin pegarlas en el chat.
 - **Por qué:** El vigilante necesita un nodo con todo el historial y sin límites bajos.
 - **Listo cuando:** Me dices Helius listo; las claves solo existen en tu gestor y en Railway.
-- **Técnico:** Plan Developer, 49 $/mes, 10 M créditos, 50 rps, historial completo. Claves sip-keeper y sip-web, las dos solo de servidor: el navegador pasa por /api/solana-rpc.
+- **Técnico:** Plan Developer, 49 $/mes, 10 M créditos, 50 rps, historial completo. Claves sip-keeper y sip-web, las dos solo de servidor: el navegador pasa por /api/solana-rpc. 14-sep: una clave activa y comprobada en mainnet (getHealth ok), guardada en ~/sip-keys/sip-hackathon.env; se usa para vigilante y web salvo que crees la segunda.
 
 #### `privy-solana` — Preparar Privy para Solana
 
@@ -344,7 +344,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** En el panel de Privy activas Solana y el modo TEE, y confirmas que es la app de SIP y no la de Nuvem.
 - **Por qué:** Sin esto no se pueden crear wallets de trading de Solana con el permiso del vigilante.
 - **Listo cuando:** Me pasas el App ID (es público) y confirmas el modo TEE.
-- **Técnico:** Login methods y Embedded wallets con Solana; TEE mode (lo exige importWallet con additionalSigners); comprobar que no hay un DENY de exportación a nivel de wallet, porque impediría llevar la clave a Axiom.
+- **Técnico:** Login methods y Embedded wallets con Solana; TEE mode (lo exige importWallet con additionalSigners); comprobar que no hay un DENY de exportación a nivel de wallet, porque impediría llevar la clave a Axiom. 14-sep: App ID cmtrt36tb00080dlbrda5aqam (app 'SIP'), modo TEE activo (user-controlled server wallets). Falta en el panel: activar el login con wallets de Solana (hoy solana_wallet_auth = false) y añadir los dominios permitidos (hoy vacío; localhost para probar y el dominio final).
 
 #### `stocklana-reglas` — Inscribirte y preguntar por el código previo
 
@@ -682,7 +682,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Cambias las claves de Helius, Privy y Railway usadas durante la semana, y las de Ethereum que se pegaron en chats.
 - **Por qué:** Una semana de prisas deja rastro; se limpia antes de usuarios reales.
 - **Listo cuando:** Claves nuevas en Railway y las viejas revocadas.
-- **Técnico:** Alchemy, secret de Privy EVM, claves de Helius sip-keeper y sip-web, authorization key del vigilante.
+- **Técnico:** Alchemy, secret de Privy EVM, claves de Helius sip-keeper y sip-web, authorization key del vigilante. El app secret de Privy SIP y la clave de Helius se pegaron en el chat el 14-sep: rotarlas al acabar.
 
 #### `despues-demo-viva` — Mantener la demo viva hasta el 2 de octubre
 
