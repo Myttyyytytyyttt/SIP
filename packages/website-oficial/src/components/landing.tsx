@@ -37,6 +37,14 @@
  * here — and this page resets its scroll on mount and only enters on a gesture
  * the visitor made, so a restored scroll position cannot re-enter it.
  *
+ * THE LOADER, AND WHY THE SCENE COMES LAST. The page opens on the SIP mark in a
+ * spinning ring and stays there until the frame can stand in front of the
+ * footage. Then the words and the frame rise, and only once the frame has fully
+ * arrived does the footage fade in behind it. The order is the point: a first
+ * version showed the footage at ~0.3 s while the frame's entrance ran from 0.8
+ * to 1.7 s, so for about a second the placeholder's card stood alone in the
+ * middle of the page — correctly placed, behind a frame nobody could see yet.
+ *
  * COMMITTED DARK, whatever the theme: the screenshot and the footage are dark.
  */
 
@@ -95,6 +103,19 @@ const ZOOM_VH_FINE = 0.9;
 const ZOOM_VH_COARSE = 1.0;
 const ENTER_TOLERANCE = 0.985;
 const LEAVE_MS = 420;
+
+/**
+ * THE LOADER lifts when the screenshot has decoded and the fonts are in (so
+ * nothing reflows under the frame), but not before MIN — a fast load should not
+ * flash the mark — and no later than MAX: if the screenshot never arrives the
+ * frame's own opaque ground still covers the card, and a page is better than a
+ * spinner. The footage then waits for the frame's entrance to END; the fallback
+ * covers an animationend that never fires (a backgrounded tab throttles them).
+ */
+const MIN_LOADER_MS = 700;
+const MAX_LOADER_MS = 8000;
+const FRAME_RISE_DELAY_S = 0.3;
+const SCENE_FALLBACK_MS = (FRAME_RISE_DELAY_S + 0.9) * 1000 + 250;
 /** Tilt at rest: slight where the frame faces the viewer from the middle of the scene, steep under the words elsewhere. */
 const REST_TILT_STAGED_DEG = 5;
 const REST_TILT_DEG = 16;
@@ -321,6 +342,61 @@ export function Landing({
       schedule();
     };
 
+    // ── THE LOADER ──
+    const img = frame.querySelector("img");
+    const box = stage.firstElementChild as HTMLElement | null;
+    const timers: number[] = [];
+    let loaded = false;
+    const showScene = () => {
+      if (root.hasAttribute("data-scene")) return;
+      root.setAttribute("data-scene", "");
+      // iOS loads nothing for a video it has not been asked to play. A muted,
+      // inline play() is allowed; pausing at once leaves the first frame showing.
+      if (video && coarse && !primed) {
+        primed = true;
+        video.play().then(() => video.pause()).catch(() => {});
+      }
+    };
+    const onBoxRise = (e: AnimationEvent) => {
+      if (e.target !== box || e.animationName !== "landing-rise") return;
+      showScene();
+    };
+    const finishLoading = () => {
+      if (loaded) return;
+      loaded = true;
+      root.setAttribute("data-loaded", "");
+      schedule();
+      if (reduced || !box) {
+        showScene();
+      } else {
+        box.addEventListener("animationend", onBoxRise);
+        timers.push(window.setTimeout(showScene, SCENE_FALLBACK_MS));
+      }
+    };
+    const tryFinish = () => {
+      if (loaded) return;
+      // A screenshot that failed before hydration fired its `error` before this
+      // listener existed: complete with no pixels is broken, and waiting for it
+      // is waiting for MAX (measured: 8.2 s of spinner for a blocked image).
+      if (img && img.complete && img.naturalWidth === 0) {
+        finishLoading();
+        return;
+      }
+      const imageReady = !img || (img.complete && img.naturalWidth > 0);
+      if (!imageReady || document.fonts.status !== "loaded") return;
+      // performance.now() counts from navigation, so the time the mark was on
+      // screen before hydration counts toward MIN; a remount (Back) is long past it.
+      timers.push(window.setTimeout(finishLoading, Math.max(0, MIN_LOADER_MS - performance.now())));
+    };
+    const onVideoData = () => root.setAttribute("data-footage-loaded", "");
+    if (video && video.readyState >= 2) onVideoData();
+    video?.addEventListener("loadeddata", onVideoData);
+    img?.addEventListener("load", tryFinish);
+    img?.addEventListener("error", finishLoading);
+    void document.fonts.ready.then(tryFinish);
+    timers.push(window.setTimeout(finishLoading, MAX_LOADER_MS));
+    tryFinish();
+
     const INTENT = ["wheel", "touchstart", "keydown", "pointerdown"];
     const ro = new ResizeObserver(schedule);
     ro.observe(hero);
@@ -346,6 +422,11 @@ export function Landing({
       video?.removeEventListener("seeked", schedule);
       video?.removeEventListener("loadedmetadata", schedule);
       if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      for (const t of timers) window.clearTimeout(t);
+      box?.removeEventListener("animationend", onBoxRise);
+      img?.removeEventListener("load", tryFinish);
+      img?.removeEventListener("error", finishLoading);
+      video?.removeEventListener("loadeddata", onVideoData);
     };
   }, [enter]);
 
@@ -353,11 +434,32 @@ export function Landing({
     <div
       ref={rootRef}
       className={cn(
-        "relative bg-[#0A0B11] text-white transition-opacity duration-[420ms] ease-out",
+        "landing-root relative bg-[#0A0B11] text-white transition-opacity duration-[420ms] ease-out",
         leaving && "opacity-0",
       )}
       style={{ ["--p" as string]: 0, ["--z" as string]: 0 }}
     >
+      {/* ── The loader: the mark filling inside a spinning ring ─────────── */}
+      <div className="landing-loader" role="status" aria-live="polite">
+        <div className="landing-loader-spin">
+          <svg className="landing-loader-ring" viewBox="0 0 80 80" aria-hidden>
+            <circle cx="40" cy="40" r="37" fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="1.5" />
+            <circle
+              cx="40"
+              cy="40"
+              r="37"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeDasharray="58 175"
+            />
+          </svg>
+          <span className="landing-loader-mark" aria-hidden />
+        </div>
+        <span className="sr-only">Loading</span>
+      </div>
+
       {/* ── Background footage, scrubbed by the scroll ─────────────────── */}
       <div aria-hidden className="landing-fade pointer-events-none fixed inset-0 z-0" style={{ animationDelay: "0.1s" }}>
         {/* BLURRED WHERE IT CANNOT BE HIDDEN. Every stretch of the placeholder
@@ -367,7 +469,8 @@ export function Landing({
             On a phone, a portrait tablet or a short window the frame is smaller
             than the card, so there the blur stays: as ambience the footage
             still moves with the scroll; as text it says nothing. Drop the blur
-            together with the placeholder. */}
+            together with the placeholder. Everywhere, it is invisible until the
+            frame has fully arrived in front of it (THE LOADER). */}
         <video
           ref={videoRef}
           src={BACKGROUND_VIDEO}
@@ -425,20 +528,20 @@ export function Landing({
             <div className="landing-copy-main md:col-span-7 lg:col-span-8">
               <p
                 className="landing-eyebrow landing-eyebrow-main landing-rise mb-5 flex items-center gap-2.5 text-sm text-white/70 sm:text-[15px]"
-                style={{ animationDelay: "0.2s" }}
+                style={{ animationDelay: "0.15s" }}
               >
                 <span className="size-2.5 rounded-full bg-white/80" />
                 <span className="tracking-wide">A pension that builds itself, on Robinhood Chain</span>
               </p>
               <h1
                 className="landing-h1 landing-rise mb-6 text-[clamp(2.2rem,6.5vw,5rem)] font-light leading-[0.95] tracking-[-0.03em] sm:mb-8"
-                style={{ animationDelay: "0.35s" }}
+                style={{ animationDelay: "0.25s" }}
               >
                 A slice of every trade,
                 <br />
                 put aside for later.
               </h1>
-              <div className="landing-rise flex flex-wrap items-center gap-3" style={{ animationDelay: "0.5s" }}>
+              <div className="landing-rise flex flex-wrap items-center gap-3" style={{ animationDelay: "0.4s" }}>
                 <ConnectButton connect={connect} size="lg" />
                 <a
                   href="/?mode=mock"
@@ -453,7 +556,7 @@ export function Landing({
                 </a>
               </div>
             </div>
-            <div className="landing-copy-aside landing-rise md:col-span-5 lg:col-span-4" style={{ animationDelay: "0.65s" }}>
+            <div className="landing-copy-aside landing-rise md:col-span-5 lg:col-span-4" style={{ animationDelay: "0.5s" }}>
               {/* The same eyebrow, shown here instead of above the headline only
                   on a short, wide staged window: this column is the shorter one
                   there, so the line costs the frame nothing (THE STAGED LANDING
@@ -484,7 +587,7 @@ export function Landing({
             never share an element. The stage around both never transforms, which
             is why the loop measures it. */}
         <div ref={stageRef} className="landing-stage mt-10 flex justify-center px-5 md:mt-14">
-          <div className="landing-box landing-rise w-full max-w-[1100px]" style={{ animationDelay: "0.8s" }}>
+          <div className="landing-box landing-rise w-full max-w-[1100px]" style={{ animationDelay: `${FRAME_RISE_DELAY_S}s` }}>
             <div
               ref={frameRef}
               className="group relative z-[6] flex w-full flex-col overflow-hidden border border-white/10 bg-[#0d0e15] shadow-[0_40px_120px_-20px_rgba(0,0,0,0.8),0_0_0_1px_rgba(255,255,255,0.04)_inset]"
