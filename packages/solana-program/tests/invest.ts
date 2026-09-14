@@ -22,7 +22,7 @@ import {
 } from "@solana/spl-token";
 import { assert } from "chai";
 import { SipVault } from "../target/types/sip_vault";
-import { configPdaFor, ensureConfig, setKeeper } from "./config-fixture";
+import { configPdaFor, ensureConfig, pollingConfirm, setKeeper } from "./config-fixture";
 import { ToyVenue } from "../target/types/toy_venue";
 
 const WAD = 10n ** 18n;
@@ -32,7 +32,7 @@ describe("sip-vault M3: invest", () => {
   anchor.setProvider(provider);
   const program = anchor.workspace.sipVault as Program<SipVault>;
   const venue = anchor.workspace.toyVenue as Program<ToyVenue>;
-  const connection = provider.connection;
+  const connection = pollingConfirm(provider.connection);
   const payer = (provider.wallet as anchor.Wallet).payer;
 
   const owner = Keypair.generate();

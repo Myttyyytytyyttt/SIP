@@ -17,7 +17,10 @@ cluster = "localnet"
 wallet = ".localnet/wallet.json"
 
 [scripts]
-test = "npx mocha --import=tsx --sort -t 1000000 \"tests/**/*.ts\""
+# --exit: a run with a failure otherwise never ends (open rpc websockets keep
+# node alive), so anchor never stops the validator and port 8899 stays held.
+# -t 180000: the slowest test takes seconds; a stuck one fails in 3 min, not 16.
+test = "npx mocha --import=tsx --sort --exit -t 180000 \"tests/**/*.ts\""
 
 [test]
 # Deploy through the upgradeable loader so ProgramData exists: init_config

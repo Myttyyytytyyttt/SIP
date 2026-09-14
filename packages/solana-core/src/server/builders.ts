@@ -7,21 +7,29 @@
 // have), no hand-listed account metas and no hand-packed Borsh. Data is
 // encodeArgs over the IDL; account metas are the IDL's accounts, in IDL order,
 // with the IDL's signer and writable flags; fixed addresses (system program,
-// ATA program) come from the IDL too. test/builders.test.ts checks the bytes
-// against Anchor's own instruction coder built from the same IDL.
+// ATA program, instructions sysvar) come from the IDL too. test/builders.test.ts
+// checks the bytes against Anchor's own instruction coder built from the same IDL.
 //
 // VALIDATED BEFORE BUILDING with client/rules.ts — the program's rules — so a
 // bad policy is a BuildError with words, not a signed transaction that bounces.
+//
+// LINKING IS TWO CALLS. link_wallet needs the trading wallet's off-chain consent
+// (client/link-consent.ts) in an Ed25519SigVerify instruction immediately before
+// it, and only the wallet can produce that signature. So prepareLinkWalletConsent
+// hands out the bytes to sign, and buildLinkWallet takes the signature back,
+// verifies it, and only then compiles the transaction both keys sign.
 
 import { Transaction, TransactionInstruction, type PublicKey } from "@solana/web3.js";
 
-import { RAYDIUM_CLMM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT } from "../client/addresses";
+import { ED25519_PROGRAM, RAYDIUM_CLMM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT } from "../client/addresses";
 import { isBase58OfLength } from "../client/base58";
-import { base64Encode } from "../client/base64";
+import { base64Encode, tryBase64Decode } from "../client/base64";
 import { BorshError, encodeArgs } from "../client/borsh";
-import { idlInstruction, type OwnerInstructionName } from "../client/idl";
+import { SIP_PROGRAM_ID, idlInstruction, type OwnerInstructionName } from "../client/idl";
+import { linkConsentMessage } from "../client/link-consent";
 import { U64_MAX, investPolicyProblems, vaultPolicyProblems, type InvestLegInput, type VaultPolicyInput } from "../client/rules";
-import { InvalidKeyError, SIP_PROGRAM_KEY, deriveAta, deriveInvestPda, deriveLinkPda, deriveVaultPda, toPublicKey, type KeyLike } from "./pda";
+import { ED25519_SIGNATURE_BYTES, ed25519SignatureValid, encodeEd25519Verify } from "./ed25519";
+import { InvalidKeyError, SIP_PROGRAM_KEY, deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda, toPublicKey, type KeyLike } from "./pda";
 
 export class BuildError extends Error {
   override readonly name: string = "BuildError";
@@ -30,12 +38,24 @@ export class BuildError extends Error {
   }
 }
 
-/** link_wallet with wallet === owner: SIP refuses it although link_wallet.rs does not. */
+/** link_wallet with wallet === owner: the program refuses it (WalletIsOwner, 6035), so it is refused here first, with words. */
 export class WalletIsOwnerError extends BuildError {
   override readonly name = "WalletIsOwnerError";
   constructor() {
-    super(["the trading wallet cannot be the owner's own key: settle would pull from the pension key"]);
+    super(["the trading wallet cannot be the owner's own key: the program refuses to link a wallet to a vault it owns"]);
   }
+}
+
+/** A link consent signature that is missing, malformed, or not the wallet's signature over this link's SIP_LINK_V1 bytes. */
+export class LinkConsentError extends BuildError {
+  override readonly name = "LinkConsentError";
+}
+
+export interface RecentBlockhash {
+  /** base58, from getLatestBlockhash. */
+  readonly blockhash: string;
+  /** From the same getLatestBlockhash answer. Echoed back for client/confirm.ts; it does not change the bytes. */
+  readonly lastValidBlockHeight?: number;
 }
 
 export interface BuiltTransaction {
@@ -48,10 +68,14 @@ export interface BuiltTransaction {
   readonly signers: readonly string[];
   readonly feePayer: string;
   readonly recentBlockhash: string;
+  /** As given with the blockhash, or null. */
+  readonly lastValidBlockHeight: number | null;
   readonly vault: string;
-  /** IDL account name → address, as placed in the instruction. */
+  /** IDL account name → address, as placed in the SIP instruction. */
   readonly accounts: Readonly<Record<string, string>>;
 }
+
+const ED25519_PROGRAM_KEY = toPublicKey(ED25519_PROGRAM, "the Ed25519 program");
 
 function key(value: KeyLike, what: string): PublicKey {
   try {
@@ -96,16 +120,31 @@ export function sipInstruction(name: OwnerInstructionName, accounts: Readonly<Re
   return new TransactionInstruction({ programId: SIP_PROGRAM_KEY, keys, data: Buffer.from(data) });
 }
 
+function blockHeight(value: unknown): number | null {
+  if (value === undefined) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new BuildError(["lastValidBlockHeight must be a non-negative integer, from the same getLatestBlockhash answer as the blockhash"]);
+  }
+  return value;
+}
+
+/**
+ * Compiles `instructions` (the SIP instruction last, anything it needs before
+ * it) into an unsigned legacy transaction and checks the signer order.
+ */
 function compile(
   name: OwnerInstructionName,
-  instruction: TransactionInstruction,
+  instructions: readonly TransactionInstruction[],
   feePayer: PublicKey,
   expectedSigners: readonly PublicKey[],
-  blockhash: string,
+  recent: RecentBlockhash,
   vault: PublicKey,
 ): BuiltTransaction {
+  const { blockhash } = recent;
   if (!isBase58OfLength(blockhash, 32)) throw new BuildError(["the recent blockhash must be base58 of 32 bytes"]);
-  const tx = new Transaction({ feePayer, recentBlockhash: blockhash }).add(instruction);
+  const lastValidBlockHeight = blockHeight(recent.lastValidBlockHeight);
+  const sip = instructions[instructions.length - 1]!;
+  const tx = new Transaction({ feePayer, recentBlockhash: blockhash }).add(...instructions);
   const message = tx.compileMessage();
   const signers = message.accountKeys.slice(0, message.header.numRequiredSignatures).map((signer) => signer.toBase58());
   const expected = expectedSigners.map((signer) => signer.toBase58());
@@ -116,7 +155,7 @@ function compile(
   }
   const accounts: Record<string, string> = {};
   idlInstruction(name).accounts.forEach((account, index) => {
-    accounts[account.name] = instruction.keys[index]!.pubkey.toBase58();
+    accounts[account.name] = sip.keys[index]!.pubkey.toBase58();
   });
   return {
     instruction: name,
@@ -125,6 +164,7 @@ function compile(
     signers,
     feePayer: feePayer.toBase58(),
     recentBlockhash: blockhash,
+    lastValidBlockHeight,
     vault: vault.toBase58(),
     accounts,
   };
@@ -141,9 +181,8 @@ function vaultPolicyArgs(input: VaultPolicyInput): Record<string, unknown> {
   };
 }
 
-export interface CreateVaultV2Input extends VaultPolicyInput {
+export interface CreateVaultV2Input extends VaultPolicyInput, RecentBlockhash {
   readonly owner: KeyLike;
-  readonly blockhash: string;
 }
 
 /** create_vault_v2(mode, skim_bps, volume_bps, max_contribution, wallet_reserve): the owner signs and pays. */
@@ -151,13 +190,12 @@ export function buildCreateVaultV2(input: CreateVaultV2Input): BuiltTransaction 
   const owner = key(input.owner, "owner");
   const vault = deriveVaultPda(owner);
   const instruction = sipInstruction("create_vault_v2", { owner, vault }, vaultPolicyArgs(input));
-  return compile("create_vault_v2", instruction, owner, [owner], input.blockhash, vault);
+  return compile("create_vault_v2", [instruction], owner, [owner], input, vault);
 }
 
-export interface SetPolicyV2Input extends VaultPolicyInput {
+export interface SetPolicyV2Input extends VaultPolicyInput, RecentBlockhash {
   readonly owner: KeyLike;
   readonly paused: boolean;
-  readonly blockhash: string;
 }
 
 /** set_policy_v2(mode, skim_bps, volume_bps, paused, max_contribution, wallet_reserve). Every field travels: the instruction writes them all. */
@@ -175,58 +213,127 @@ export function buildSetPolicyV2(input: SetPolicyV2Input): BuiltTransaction {
     wallet_reserve: base.wallet_reserve,
   };
   const instruction = sipInstruction("set_policy_v2", { owner, vault }, args);
-  return compile("set_policy_v2", instruction, owner, [owner], input.blockhash, vault);
+  return compile("set_policy_v2", [instruction], owner, [owner], input, vault);
 }
 
-export interface LinkWalletInput {
+export interface LinkWalletConsentInput {
   readonly owner: KeyLike;
   readonly wallet: KeyLike;
-  readonly blockhash: string;
 }
 
-/**
- * link_wallet: ONE transaction, TWO signers, owner first. The owner's wallet
- * signs first and the trading wallet second, over the same message, so a wallet
- * that rewrites the message before signing (adding a priority fee) is the first
- * signer and the co-signature still verifies.
- */
-export function buildLinkWallet(input: LinkWalletInput): BuiltTransaction & { readonly tradingLink: string } {
+export interface LinkWalletConsent {
+  readonly instruction: "link_wallet";
+  readonly programId: string;
+  readonly owner: string;
+  readonly wallet: string;
+  /** ["vault", owner]: the vault the consent names. */
+  readonly vault: string;
+  /** ["link", wallet]: the account the link will create. */
+  readonly tradingLink: string;
+  /**
+   * The 140 SIP_LINK_V1 bytes, base64. The trading wallet signs them with
+   * signMessage (never signTransaction: a Privy seat can give that). The browser
+   * may rebuild them with linkConsentMessage from @sip/solana-core/client and
+   * refuse to sign anything else.
+   */
+  readonly consentMessageBase64: string;
+}
+
+function linkParties(input: LinkWalletConsentInput): { owner: PublicKey; wallet: PublicKey; vault: PublicKey; tradingLink: PublicKey; consent: Uint8Array } {
   const owner = key(input.owner, "owner");
   const wallet = key(input.wallet, "wallet");
   if (owner.equals(wallet)) throw new WalletIsOwnerError();
   const vault = deriveVaultPda(owner);
-  const tradingLink = deriveLinkPda(wallet);
-  const instruction = sipInstruction("link_wallet", { owner, wallet, vault, trading_link: tradingLink }, {});
-  return { ...compile("link_wallet", instruction, owner, [owner, wallet], input.blockhash, vault), tradingLink: tradingLink.toBase58() };
+  const consent = linkConsentMessage({ programId: SIP_PROGRAM_ID, wallet: wallet.toBytes(), vault: vault.toBytes(), owner: owner.toBytes() });
+  return { owner, wallet, vault, tradingLink: deriveLinkPda(wallet), consent };
 }
 
-export interface UnlinkWalletInput {
+/** Link, step 1: the consent the trading wallet must sign before the link transaction can be built. */
+export function prepareLinkWalletConsent(input: LinkWalletConsentInput): LinkWalletConsent {
+  const parties = linkParties(input);
+  return {
+    instruction: "link_wallet",
+    programId: SIP_PROGRAM_ID,
+    owner: parties.owner.toBase58(),
+    wallet: parties.wallet.toBase58(),
+    vault: parties.vault.toBase58(),
+    tradingLink: parties.tradingLink.toBase58(),
+    consentMessageBase64: base64Encode(parties.consent),
+  };
+}
+
+export interface LinkWalletInput extends LinkWalletConsentInput, RecentBlockhash {
+  /** The wallet's 64-byte signMessage signature over the consent step 1 returned: bytes, or standard base64. */
+  readonly consentSignature: Uint8Array | string;
+}
+
+function consentSignatureBytes(value: unknown): Uint8Array {
+  const bytes = value instanceof Uint8Array ? value : typeof value === "string" ? tryBase64Decode(value) : null;
+  if (bytes === null || bytes.length !== ED25519_SIGNATURE_BYTES) {
+    throw new LinkConsentError([`the consent signature must be ${ED25519_SIGNATURE_BYTES} bytes, given as bytes or standard base64`]);
+  }
+  return bytes;
+}
+
+/**
+ * Link, step 2: [Ed25519SigVerify(wallet, consent, signature), link_wallet] in
+ * ONE transaction with TWO signers, owner first. The consent signature is
+ * checked here, with node:crypto, before anything is compiled: a signature by
+ * another key, or over another owner's consent, would only bounce on chain
+ * after both people signed.
+ *
+ * The owner's wallet signs first and the trading wallet second, over the same
+ * message, so a wallet that rewrites the message before signing (adding a
+ * priority fee) is the first signer and the co-signature still verifies. The
+ * Ed25519 instruction reads its own data (u16::MAX indexes), so an instruction
+ * prepended in front of it does not break it.
+ */
+export function buildLinkWallet(input: LinkWalletInput): BuiltTransaction & { readonly tradingLink: string; readonly consentMessageBase64: string } {
+  const { owner, wallet, vault, tradingLink, consent } = linkParties(input);
+  const signature = consentSignatureBytes(input.consentSignature);
+  if (!ed25519SignatureValid(consent, signature, wallet.toBytes())) {
+    throw new LinkConsentError([
+      "the consent signature is not the trading wallet's signature over the SIP_LINK_V1 consent for this owner's vault: have the wallet being linked sign the bytes prepareLinkWalletConsent returned",
+    ]);
+  }
+  const verifyConsent = new TransactionInstruction({
+    programId: ED25519_PROGRAM_KEY,
+    keys: [],
+    data: Buffer.from(encodeEd25519Verify({ publicKey: wallet.toBytes(), message: consent, signature })),
+  });
+  const link = sipInstruction("link_wallet", { owner, wallet, vault, trading_link: tradingLink, config: deriveConfigPda() }, {});
+  return {
+    ...compile("link_wallet", [verifyConsent, link], owner, [owner, wallet], input, vault),
+    tradingLink: tradingLink.toBase58(),
+    consentMessageBase64: base64Encode(consent),
+  };
+}
+
+export interface UnlinkWalletInput extends RecentBlockhash {
   readonly owner: KeyLike;
   readonly wallet: KeyLike;
-  readonly blockhash: string;
-  /** Who is the authority: the owner cutting the wallet loose (default), or the wallet removing itself. The owner pays either way. */
-  readonly by?: "owner" | "wallet";
 }
 
-/** unlink_wallet: closes the link; the rent goes back to the owner. */
+/**
+ * unlink_wallet: closes the link; the rent goes back to the owner. THE OWNER
+ * ALONE is the authority and the one signer: the program refuses a wallet
+ * unlinking itself (UnlinkUnauthorized), because a Privy seat signs with that
+ * wallet's key and could then re-link it wherever it liked.
+ */
 export function buildUnlinkWallet(input: UnlinkWalletInput): BuiltTransaction & { readonly tradingLink: string } {
   const owner = key(input.owner, "owner");
   const wallet = key(input.wallet, "wallet");
-  const by = input.by ?? "owner";
-  if (by !== "owner" && by !== "wallet") throw new BuildError(['by must be "owner" or "wallet"']);
-  if (by === "wallet" && owner.equals(wallet)) throw new WalletIsOwnerError();
+  // No such link can exist: link_wallet refuses it.
+  if (owner.equals(wallet)) throw new WalletIsOwnerError();
   const vault = deriveVaultPda(owner);
   const tradingLink = deriveLinkPda(wallet);
-  const authority = by === "owner" ? owner : wallet;
-  const instruction = sipInstruction("unlink_wallet", { authority, owner, vault, trading_link: tradingLink }, {});
-  const signers = by === "owner" ? [owner] : [owner, wallet];
-  return { ...compile("unlink_wallet", instruction, owner, signers, input.blockhash, vault), tradingLink: tradingLink.toBase58() };
+  const instruction = sipInstruction("unlink_wallet", { authority: owner, owner, vault, trading_link: tradingLink }, {});
+  return { ...compile("unlink_wallet", [instruction], owner, [owner], input, vault), tradingLink: tradingLink.toBase58() };
 }
 
-export interface WithdrawInput {
+export interface WithdrawInput extends RecentBlockhash {
   readonly owner: KeyLike;
   readonly lamports: bigint;
-  readonly blockhash: string;
 }
 
 /** withdraw(amount): native SOL out of the vault. Never gated by any pause. */
@@ -235,16 +342,15 @@ export function buildWithdraw(input: WithdrawInput): BuiltTransaction {
   const amount = positiveU64(input.lamports, "lamports");
   const vault = deriveVaultPda(owner);
   const instruction = sipInstruction("withdraw", { owner, vault }, { amount });
-  return compile("withdraw", instruction, owner, [owner], input.blockhash, vault);
+  return compile("withdraw", [instruction], owner, [owner], input, vault);
 }
 
-export interface WithdrawTokenInput {
+export interface WithdrawTokenInput extends RecentBlockhash {
   readonly owner: KeyLike;
   readonly mint: KeyLike;
   /** The mint's owning program, read from the chain: classic SPL Token or Token-2022. */
   readonly tokenProgram: KeyLike;
   readonly amountRaw: bigint;
-  readonly blockhash: string;
   /** The vault-owned source account. Defaults to the vault's ATA; the program accepts any account the vault owns for the mint. */
   readonly vaultToken?: KeyLike;
 }
@@ -268,15 +374,14 @@ export function buildWithdrawToken(input: WithdrawTokenInput): BuiltTransaction 
     { amount },
   );
   return {
-    ...compile("withdraw_token", instruction, owner, [owner], input.blockhash, vault),
+    ...compile("withdraw_token", [instruction], owner, [owner], input, vault),
     ownerTokenAccount: ownerToken.toBase58(),
     vaultTokenAccount: vaultToken.toBase58(),
   };
 }
 
-export interface SetInvestPolicyInput {
+export interface SetInvestPolicyInput extends RecentBlockhash {
   readonly owner: KeyLike;
-  readonly blockhash: string;
   readonly legs: readonly InvestLegInput[];
   /** Default Raydium CLMM. */
   readonly venueProgram?: string;
@@ -316,5 +421,5 @@ export function buildSetInvestPolicy(input: SetInvestPolicyInput): BuiltTransact
     enabled: rules.enabled,
   };
   const instruction = sipInstruction("set_invest_policy", { owner, vault, policy }, args);
-  return { ...compile("set_invest_policy", instruction, owner, [owner], input.blockhash, vault), policy: policy.toBase58() };
+  return { ...compile("set_invest_policy", [instruction], owner, [owner], input, vault), policy: policy.toBase58() };
 }

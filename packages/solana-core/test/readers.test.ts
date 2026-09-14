@@ -168,7 +168,20 @@ describe("listVaultHoldings", () => {
 });
 
 function settledLine(vault: string, wallet: string, paid: bigint): string {
-  const body = encodeStruct("Settled", { vault, wallet, mode: 1, base_lamports: 100n, bps: 10, owed: paid, paid, settlement_nonce: 1n, session_end_slot: 2n });
+  const body = encodeStruct("Settled", {
+    vault,
+    wallet,
+    mode: 1,
+    base_lamports: 100n,
+    bps: 10,
+    owed: paid,
+    paid,
+    settlement_nonce: 1n,
+    session_end_slot: 2n,
+    link_epoch: 3n,
+    session_start_slot: 1n,
+    policy_nonce: 4n,
+  });
   const bytes = new Uint8Array(8 + body.length);
   bytes.set(eventDiscriminator("Settled"), 0);
   bytes.set(body, 8);
@@ -195,6 +208,7 @@ describe("settledEventsFromLogs", () => {
     const events = settledEventsFromLogs(logs);
     expect(events.map((event) => event.paid)).toEqual([7n]);
     expect(events[0]!.vault).toBe(vault);
+    expect([events[0]!.linkEpoch, events[0]!.sessionStartSlot, events[0]!.policyNonce]).toEqual([3n, 1n, 4n]);
   });
 });
 

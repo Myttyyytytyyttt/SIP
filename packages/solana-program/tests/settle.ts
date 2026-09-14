@@ -22,7 +22,7 @@ import {
 } from "@solana/web3.js";
 import { assert } from "chai";
 import { SipVault } from "../target/types/sip_vault";
-import { configPdaFor, ensureConfig, setKeeper, TEST_ATTESTER } from "./config-fixture";
+import { configPdaFor, ensureConfig, pollingConfirm, setKeeper, TEST_ATTESTER } from "./config-fixture";
 import { attestationInstruction, MODE_PROFIT, MODE_VOLUME, type AttestationInputs } from "../scripts/attestation";
 import { linkWalletWithConsent } from "../scripts/link-consent";
 
@@ -30,7 +30,7 @@ describe("sip-vault M2: settle", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
   const program = anchor.workspace.sipVault as Program<SipVault>;
-  const connection = provider.connection;
+  const connection = pollingConfirm(provider.connection);
 
   // A FRESH owner, so these tests never depend on state the M1 file left.
   const owner = Keypair.generate();
@@ -534,7 +534,7 @@ describe("sip-vault: wrap_sol", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
   const program = anchor.workspace.sipVault as Program<SipVault>;
-  const connection = provider.connection;
+  const connection = pollingConfirm(provider.connection);
   const payer = (provider.wallet as anchor.Wallet).payer;
   const authority = provider.wallet.publicKey;
 

@@ -10,6 +10,8 @@ export const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 export const ATA_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 export const MEMO_PROGRAM = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 export const INSTRUCTIONS_SYSVAR = "Sysvar1nstructions1111111111111111111111111";
+/** The native Ed25519 signature-verification precompile. link_wallet reads the wallet's consent back from it. */
+export const ED25519_PROGRAM = "Ed25519SigVerify111111111111111111111111111";
 
 /** Raydium CLMM: the venue program SIP's invest policy pins. */
 export const RAYDIUM_CLMM = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";

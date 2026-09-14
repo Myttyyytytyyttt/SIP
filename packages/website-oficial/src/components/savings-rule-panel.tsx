@@ -23,9 +23,15 @@ import { tickerLogo, type ActivityEvent, type InvestedEvent, type SavingsRule, t
 
 /** The reference's ½ · 2x · MAX, as slices of volume — in basis points. */
 const RATE_PRESETS = [10, 20, 50] as const;
-/** The slider's range, in basis points: 0.01% to 1% of every fill. */
+/**
+ * The slider's range, in basis points: 0.01% to 2% of every fill — the volume
+ * rates the SIP program accepts (VOLUME_BPS_MIN..VOLUME_BPS_MAX in
+ * @sip/solana-core/client, pinned there to state.rs). Written out rather than
+ * imported: that entry carries the program's IDL, and this panel ships to the
+ * browser for a pair of numbers.
+ */
 const RATE_MIN = 1;
-const RATE_MAX = 100;
+const RATE_MAX = 200;
 /** Names both the rate group and, on the thumb itself, the slider. */
 const RATE_LABEL_ID = "rate-label";
 /** Milliseconds that "Rule updated" stays on the button. */

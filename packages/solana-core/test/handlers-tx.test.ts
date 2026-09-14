@@ -4,12 +4,11 @@ import { SystemProgram } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 
 import { SIP_PROGRAM_ID } from "../src/client/idl";
-import { buildLinkWallet } from "../src/server/builders";
 import { loadSolanaServerSettings } from "../src/server/config";
 import { createSolanaTxHandler, type SolanaGate, type SolanaTxHandlerOptions } from "../src/server/handlers";
 import { CLIENT_AGGREGATE_FACTOR, createWeightedLimiter } from "../src/server/rate-limit";
 import { verifySignedTransaction } from "../src/server/verify-tx";
-import { BLOCKHASH, SECRET_QUERY, UPSTREAM_1, b64, fakeFetch, jsonResponse, keypair, legacyTx, rpcResult, signWire, type UpstreamCall } from "./helpers";
+import { SECRET_QUERY, UPSTREAM_1, b64, fakeFetch, jsonResponse, keypair, legacyTx, rpcResult, signedLinkWallet, type UpstreamCall } from "./helpers";
 
 const load = loadSolanaServerSettings({ SIP_SOLANA_RPC_URLS: UPSTREAM_1, SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID, SIP_TRUSTED_CLIENT_IP_HEADER: "x-envoy-external-address" });
 if (!load.ok) throw new Error("test settings must load");
@@ -18,10 +17,9 @@ const SEND = load.settings.send;
 
 const method = (call: UpstreamCall): string => (call.body as { method: string }).method;
 
+/** A two-signer link carrying the wallet's consent, the largest transaction the web builds. */
 function signedLink(): { base64: string; signature: string } {
-  const owner = keypair();
-  const wallet = keypair();
-  const bytes = signWire(buildLinkWallet({ owner: owner.publicKey, wallet: wallet.publicKey, blockhash: BLOCKHASH }).txBase64, owner, wallet);
+  const bytes = signedLinkWallet(keypair(), keypair());
   const verified = verifySignedTransaction(bytes);
   if (!verified.ok) throw new Error(verified.detail);
   return { base64: b64(bytes), signature: verified.signature };

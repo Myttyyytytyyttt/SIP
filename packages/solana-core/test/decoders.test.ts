@@ -139,7 +139,7 @@ describe("decoders agree with Anchor's coder", () => {
     });
   }
 
-  it("Settled: bytes this package encodes are what Anchor's event coder reads from a log", () => {
+  it("Settled: bytes this package encodes are what Anchor's event coder reads from a log, the appended fields included", () => {
     const vault = pk();
     const wallet = pk();
     const body = encodeStruct("Settled", {
@@ -147,19 +147,35 @@ describe("decoders agree with Anchor's coder", () => {
       wallet: wallet.toBase58(),
       mode: 1,
       base_lamports: 4_000_000_000n,
-      bps: 25,
-      owed: 10_000_000n,
+      bps: 200,
+      owed: 80_000_000n,
       paid: 9_000_000n,
       settlement_nonce: 8n,
       session_end_slot: 311_000_000n,
+      link_epoch: 310_000_000n,
+      session_start_slot: 310_999_000n,
+      policy_nonce: 18_446_744_073_709_551_615n,
     });
     const line = new Uint8Array(8 + body.length);
     line.set(eventDiscriminator("Settled"), 0);
     line.set(body, 8);
     const read = events.decode(base64Encode(line));
     expect(read?.name).toBe("Settled");
-    expect(decodeSettledEvent(line)).toEqual(normalize(read!.data));
-    expect(Object.keys(decodeSettledEvent(line)).sort()).toEqual(fieldNames("Settled"));
+    const decoded = decodeSettledEvent(line);
+    expect(decoded).toEqual(normalize(read!.data));
+    expect(Object.keys(decoded).sort()).toEqual(fieldNames("Settled"));
+    expect([decoded.linkEpoch, decoded.sessionStartSlot, decoded.policyNonce]).toEqual([310_000_000n, 310_999_000n, 18_446_744_073_709_551_615n]);
+    // 8 + 32 + 32 + 1 + 8 + 2 + 8 + 8 + 8 + 8, then the three appended u64s.
+    expect(line).toHaveLength(115 + 24);
+  });
+
+  it("Settled: a body without the three appended fields is refused, not read short", () => {
+    const line = new Uint8Array(115);
+    line.set(eventDiscriminator("Settled"), 0);
+    expect(() => decodeSettledEvent(line)).toThrow(/Settled\.link_epoch/);
+    const long = new Uint8Array(115 + 24 + 1);
+    long.set(eventDiscriminator("Settled"), 0);
+    expect(() => decodeSettledEvent(long)).toThrow(/1 trailing bytes/);
   });
 
   it("covers every account the IDL declares", () => {

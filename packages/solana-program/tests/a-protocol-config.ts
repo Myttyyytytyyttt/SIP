@@ -12,13 +12,13 @@ import { Program } from "@coral-xyz/anchor";
 import { Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { assert } from "chai";
 import { SipVault } from "../target/types/sip_vault";
-import { configPdaFor, ensureConfig, programDataFor } from "./config-fixture";
+import { configPdaFor, ensureConfig, pollingConfirm, programDataFor } from "./config-fixture";
 
 describe("sip-vault: protocol config", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
   const program = anchor.workspace.sipVault as Program<SipVault>;
-  const connection = provider.connection;
+  const connection = pollingConfirm(provider.connection);
   const authority = provider.wallet.publicKey;
   const configPda = configPdaFor(program.programId);
   const programData = programDataFor(program.programId);

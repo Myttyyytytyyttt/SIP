@@ -19,22 +19,45 @@
 //   6  every signature present and a valid ed25519 signature
 //      over the message, for EVERY required signer              missing_signature / bad_signature
 //   7  Nuvem's program nowhere in the account keys              old_program
-//   8  1..4 instructions, each for SIP or ComputeBudget         instruction_count / program_not_allowed
+//   8  1..4 instructions, each for SIP, ComputeBudget or
+//      Ed25519SigVerify                                         instruction_count / program_not_allowed
 //   9  exactly one SIP instruction, an owner instruction, whose
 //      arguments decode exactly                                 instruction_count / unknown_discriminator /
 //                                                               instruction_not_allowed
 //  10  ComputeBudget only SetComputeUnitLimit ≤ 1.4M and
 //      SetComputeUnitPrice ≤ 5M µlamports, once each            compute_budget_invalid
-//  11  the signers are the instruction's own accounts:
-//      owner = fee payer (key 0); link_wallet also wallet = key 1
-//      and wallet ≠ owner; unlink_wallet's authority may be the
-//      owner or the wallet                                      account_binding / wallet_is_owner /
+//  11  Ed25519SigVerify only as the ONE instruction immediately
+//      before link_wallet, and link_wallet never without it     ed25519_misplaced / link_consent_missing
+//  12  that instruction in the shape the program reads: no
+//      accounts, exactly one signature, every instruction index
+//      its own and every offset inside its own data             ed25519_malformed / ed25519_signature_count /
+//                                                               ed25519_offsets
+//  13  the accounts are the instruction's own: an IDL-fixed
+//      address (system program, instructions sysvar) where the
+//      IDL fixes one; owner = fee payer (key 0); link_wallet
+//      also wallet = key 1, wallet ≠ owner, and vault,
+//      trading_link and config at their PDAs; unlink_wallet's
+//      authority is the owner of ['vault', owner], signing
+//      alone                                                    account_binding / wallet_is_owner /
 //                                                               signature_count
+//  14  the consent says what link_wallet will compare: its key is
+//      the wallet, its bytes are SIP_LINK_V1 for (program,
+//      wallet, vault, owner), and its signature verifies        link_consent_wrong_signer /
+//                                                               link_consent_mismatch /
+//                                                               link_consent_bad_signature
+//
+// WHY 11 TO 14. A signature on the transaction is no longer the wallet's consent
+// to be linked: a Privy seat holds that key under a policy that can name nothing
+// finer than a program id. link_wallet reads back, through the instructions
+// sysvar, an Ed25519SigVerify of the wallet's signMessage over SIP_LINK_V1
+// immediately before it (link_consent.rs, ed25519_introspection.rs). Those rules
+// run here first, so a consent the chain would refuse costs no simulation, and
+// an Ed25519 instruction anywhere else is refused because nothing SIP builds
+// puts one there.
 
-import { createPublicKey, verify as ed25519 } from "node:crypto";
 import { VersionedTransaction } from "@solana/web3.js";
 
-import { COMPUTE_BUDGET_PROGRAM } from "../client/addresses";
+import { COMPUTE_BUDGET_PROGRAM, ED25519_PROGRAM } from "../client/addresses";
 import { base58Encode } from "../client/base58";
 import { base64Encode } from "../client/base64";
 import { decodeArgs } from "../client/borsh";
@@ -47,6 +70,9 @@ import {
   matchInstruction,
   type OwnerInstructionName,
 } from "../client/idl";
+import { linkConsentMessage } from "../client/link-consent";
+import { ed25519SignatureValid, readEd25519Verify, type Ed25519Verify } from "./ed25519";
+import { deriveConfigPda, deriveLinkPda, deriveVaultPda } from "./pda";
 import { MAX_TX_BYTES } from "./relay-policy";
 
 export const VERIFY_REFUSALS = [
@@ -65,6 +91,22 @@ export const VERIFY_REFUSALS = [
   "compute_budget_invalid",
   "account_binding",
   "wallet_is_owner",
+  /** link_wallet with no Ed25519SigVerify immediately before it. */
+  "link_consent_missing",
+  /** An Ed25519SigVerify that is not the one instruction immediately before link_wallet. */
+  "ed25519_misplaced",
+  /** The consent's Ed25519SigVerify checks other than exactly one signature. */
+  "ed25519_signature_count",
+  /** The consent's Ed25519SigVerify lists accounts, or is shorter than its header. */
+  "ed25519_malformed",
+  /** The consent's Ed25519SigVerify reads from another instruction, or past its own data. */
+  "ed25519_offsets",
+  /** The consent verifies a key that is not link_wallet's wallet. */
+  "link_consent_wrong_signer",
+  /** The consent's bytes are not SIP_LINK_V1 for this program, wallet, vault and owner. */
+  "link_consent_mismatch",
+  /** The consent's signature does not verify: the runtime would refuse the transaction. */
+  "link_consent_bad_signature",
 ] as const;
 export type VerifyRefusal = (typeof VERIFY_REFUSALS)[number];
 
@@ -102,20 +144,8 @@ export type VerifyResult =
 
 const refuse = (reason: VerifyRefusal, detail: string): VerifyResult => ({ ok: false, reason, detail });
 
-function signatureValid(message: Uint8Array, signature: Uint8Array, publicKey: Uint8Array): boolean {
-  try {
-    const key = createPublicKey({
-      key: { kty: "OKP", crv: "Ed25519", x: Buffer.from(publicKey).toString("base64url") },
-      format: "jwk",
-    });
-    return ed25519(null, message, key, signature);
-  } catch {
-    return false;
-  }
-}
-
-/** Signing rules for the owner instructions, by the IDL account names they bind. */
-function bindSigners(
+/** Signing and account rules for the owner instructions, by the IDL account names they bind. */
+function bindAccounts(
   name: OwnerInstructionName,
   accounts: Readonly<Record<string, string>>,
   signers: readonly string[],
@@ -125,24 +155,34 @@ function bindSigners(
     case "link_wallet": {
       const owner = accounts["owner"]!;
       const wallet = accounts["wallet"]!;
-      // SIP's rule, not the program's: link_wallet.rs has no wallet != owner
-      // require, and a pension key linked as its own trading wallet would be
-      // pulled from by settle.
+      // The program refuses it too (WalletIsOwner): a pension key linked as its
+      // own trading wallet would let a seat link and crank with no other key.
       if (owner === wallet) return refuse("wallet_is_owner", "link_wallet names the same key as owner and wallet");
       if (signers.length !== 2) return refuse("signature_count", `link_wallet needs exactly 2 signers (owner, wallet), the message requires ${signers.length}`);
       if (feePayer !== owner) return refuse("account_binding", "link_wallet's owner must be the fee payer (signer 1)");
       if (signers[1] !== wallet) return refuse("account_binding", "link_wallet's wallet must be signer 2");
+      // The consent names the vault; it must be the owner's.
+      if (accounts["vault"] !== deriveVaultPda(owner).toBase58()) return refuse("account_binding", "link_wallet's vault is not ['vault', owner]");
+      if (accounts["trading_link"] !== deriveLinkPda(wallet).toBase58()) return refuse("account_binding", "link_wallet's trading_link is not ['link', wallet]");
+      if (accounts["config"] !== deriveConfigPda().toBase58()) return refuse("account_binding", "link_wallet's config is not ['config']");
       return null;
     }
     case "unlink_wallet": {
       const authority = accounts["authority"]!;
       const owner = accounts["owner"]!;
-      // The program lets the owner cut a wallet loose OR the wallet remove
-      // itself; either may be the authority, and the fee payer is one of them.
-      if (!signers.includes(authority)) return refuse("account_binding", "unlink_wallet's authority must be a required signer");
-      if (feePayer !== authority && feePayer !== owner) return refuse("account_binding", "unlink_wallet's fee payer must be the owner or the authority");
-      const stranger = signers.find((signer) => signer !== authority && signer !== owner);
-      if (stranger !== undefined) return refuse("account_binding", "unlink_wallet carries a signer that is neither the owner nor the authority");
+      // The owner alone: the program refuses any other authority
+      // (UnlinkUnauthorized), because the linked wallet's key is a Privy seat's.
+      if (authority !== owner) return refuse("account_binding", "unlink_wallet's authority must be the vault owner; a wallet cannot unlink itself");
+      if (feePayer !== owner) return refuse("account_binding", "unlink_wallet's owner must be the fee payer");
+      if (signers.length !== 1) return refuse("signature_count", `unlink_wallet is signed by the vault owner alone; the message requires ${signers.length} signers`);
+      // Pure proof that `owner` is the vault's owner: the program derives the vault from it.
+      if (accounts["vault"] !== deriveVaultPda(owner).toBase58()) return refuse("account_binding", "unlink_wallet's vault is not ['vault', owner]");
+      // trading_link is NOT bound here: the transaction does not name the
+      // wallet, so there is no ['link', wallet] to derive. The program pins it
+      // instead: its seeds are the link's own stored wallet, and its stored
+      // vault must be this vault (LinkVaultMismatch). Any other account fails
+      // on chain, in simulation, before it is sent. The builder's derivation is
+      // checked in builders.test.ts.
       return null;
     }
     default: {
@@ -194,7 +234,7 @@ export function verifySignedTransaction(bytes: Uint8Array, context: { readonly p
     if (signature.length !== 64 || signature.every((byte) => byte === 0)) {
       return refuse("missing_signature", `signer ${i + 1} of ${required} has not signed`);
     }
-    if (!signatureValid(messageBytes, signature, message.staticAccountKeys[i]!.toBytes())) {
+    if (!ed25519SignatureValid(messageBytes, signature, message.staticAccountKeys[i]!.toBytes())) {
       return refuse("bad_signature", `signer ${i + 1} of ${required}: the signature does not verify over this message`);
     }
   }
@@ -207,11 +247,12 @@ export function verifySignedTransaction(bytes: Uint8Array, context: { readonly p
   }
 
   const instructions: { program: string; name: string | null }[] = [];
-  let sip: { name: OwnerInstructionName; indexes: readonly number[]; args: Record<string, unknown> } | null = null;
+  let sip: { name: OwnerInstructionName; position: number; indexes: readonly number[]; args: Record<string, unknown> } | null = null;
+  const ed25519: { position: number; data: Uint8Array; accountCount: number }[] = [];
   let unitLimit: number | null = null;
   let microLamports: bigint | null = null;
 
-  for (const instruction of compiled) {
+  for (const [position, instruction] of compiled.entries()) {
     if (instruction.programIdIndex >= keys.length || instruction.accountKeyIndexes.some((index) => index >= keys.length)) {
       return refuse("undecodable", "an instruction references an account the message does not carry");
     }
@@ -234,7 +275,7 @@ export function verifySignedTransaction(bytes: Uint8Array, context: { readonly p
       } catch (error) {
         return refuse("instruction_not_allowed", `${matched.name}: the arguments do not decode (${error instanceof Error ? error.message : "error"})`);
       }
-      sip = { name: matched.name, indexes: instruction.accountKeyIndexes, args };
+      sip = { name: matched.name, position, indexes: instruction.accountKeyIndexes, args };
       instructions.push({ program, name: matched.name });
       continue;
     }
@@ -261,20 +302,72 @@ export function verifySignedTransaction(bytes: Uint8Array, context: { readonly p
       return refuse("compute_budget_invalid", "only SetComputeUnitLimit and SetComputeUnitPrice are accepted");
     }
 
+    if (program === ED25519_PROGRAM) {
+      // Where it stands and what it holds are rules 11 and 12, once the SIP
+      // instruction's position is known.
+      ed25519.push({ position, data, accountCount: instruction.accountKeyIndexes.length });
+      instructions.push({ program, name: "Ed25519SigVerify" });
+      continue;
+    }
+
     return refuse("program_not_allowed", `instructions for ${program} are not relayed`);
   }
 
   if (sip === null) return refuse("instruction_count", "no SIP instruction");
 
-  const idlAccounts = matchInstruction(compiled.find((entry) => keys[entry.programIdIndex] === SIP_PROGRAM_ID)!.data)!.accounts;
+  // 11: the one place an Ed25519SigVerify may stand.
+  const consentAt = sip.name === "link_wallet" ? sip.position - 1 : null;
+  for (const entry of ed25519) {
+    if (entry.position !== consentAt) {
+      return refuse(
+        "ed25519_misplaced",
+        consentAt === null
+          ? `an Ed25519SigVerify instruction is relayed only as the wallet's consent immediately before link_wallet, and this transaction's SIP instruction is ${sip.name}`
+          : `the Ed25519SigVerify instruction at position ${entry.position + 1} is not the one immediately before link_wallet`,
+      );
+    }
+  }
+  let consent: Ed25519Verify | null = null;
+  if (consentAt !== null) {
+    const entry = ed25519.find((candidate) => candidate.position === consentAt);
+    if (entry === undefined) {
+      return refuse("link_consent_missing", "link_wallet needs the wallet's consent: an Ed25519SigVerify of its SIP_LINK_V1 signature immediately before it");
+    }
+    // 12: the shape ed25519_introspection.rs accepts.
+    if (entry.accountCount !== 0) return refuse("ed25519_malformed", "the Ed25519SigVerify instruction takes no accounts");
+    const read = readEd25519Verify(entry.data, entry.position);
+    if (!read.ok) return refuse(`ed25519_${read.reason}`, read.detail);
+    consent = read;
+  }
+
+  // 13: the accounts, by IDL name.
+  const idlAccounts = matchInstruction(compiled[sip.position]!.data)!.accounts;
   const accounts: Record<string, string> = {};
-  idlAccounts.forEach((account, position) => {
-    accounts[account.name] = keys[sip!.indexes[position]!]!;
-  });
+  for (const [position, account] of idlAccounts.entries()) {
+    const address = keys[sip.indexes[position]!]!;
+    if (account.address !== undefined && address !== account.address) {
+      return refuse("account_binding", `${sip.name}.${account.name} must be ${account.address}, the IDL's fixed address`);
+    }
+    accounts[account.name] = address;
+  }
 
   const signers = keys.slice(0, required);
-  const binding = bindSigners(sip.name, accounts, signers);
+  const binding = bindAccounts(sip.name, accounts, signers);
   if (binding !== null) return binding;
+
+  // 14: what link_wallet will compare, and what the runtime will verify.
+  if (consent !== null) {
+    if (base58Encode(consent.publicKey) !== accounts["wallet"]) {
+      return refuse("link_consent_wrong_signer", "the consent verifies a key that is not link_wallet's wallet");
+    }
+    const expected = linkConsentMessage({ programId: SIP_PROGRAM_ID, wallet: accounts["wallet"]!, vault: accounts["vault"]!, owner: accounts["owner"]! });
+    if (!bytesEqual(consent.message, expected)) {
+      return refuse("link_consent_mismatch", "the verified bytes are not the SIP_LINK_V1 consent naming this program, wallet, vault and owner");
+    }
+    if (!ed25519SignatureValid(consent.message, consent.signature, consent.publicKey)) {
+      return refuse("link_consent_bad_signature", "the consent signature does not verify over SIP_LINK_V1: the runtime would refuse the transaction");
+    }
+  }
 
   return {
     ok: true,

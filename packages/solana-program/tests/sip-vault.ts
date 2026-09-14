@@ -28,13 +28,13 @@ import {
   linkWalletWithConsent,
   type LinkConsentInputs,
 } from "../scripts/link-consent";
-import { configPdaFor, ensureConfig } from "./config-fixture";
+import { configPdaFor, ensureConfig, pollingConfirm } from "./config-fixture";
 
 describe("sip-vault M1", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
   const program = anchor.workspace.sipVault as Program<SipVault>;
-  const connection = provider.connection;
+  const connection = pollingConfirm(provider.connection);
 
   // The provider wallet is the vault owner throughout.
   const owner = provider.wallet.publicKey;
@@ -322,7 +322,7 @@ describe("sip-vault: link_wallet needs the wallet's own consent", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
   const program = anchor.workspace.sipVault as Program<SipVault>;
-  const connection = provider.connection;
+  const connection = pollingConfirm(provider.connection);
 
   // Owners with vaults of their own, so nothing here leans on M1's state.
   const owner = Keypair.generate();

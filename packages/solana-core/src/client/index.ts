@@ -26,6 +26,7 @@ export * from "./confirm";
 export * from "./decoders";
 export * from "./diagnostics-types";
 export * from "./idl";
+export * from "./link-consent";
 export * from "./pda";
 export * from "./pending";
 export * from "./rules";

@@ -25,6 +25,15 @@ and to verify and broadcast transactions its users sign.
     factories.
   - The split exists so a client component that imports a constant cannot pull the
     verifier, the pool or endpoint handling into the browser bundle.
+- **A link is two server calls.** `link_wallet` no longer takes the trading wallet's
+  transaction signature as consent, because a Privy seat holds that key. The program
+  reads back an Ed25519SigVerify instruction, immediately before `link_wallet`, of the
+  wallet's `signMessage` over 140 bytes: `0xFF ‖ "SIP_LINK_V1" ‖ program ‖ wallet ‖
+  vault ‖ owner`. `prepareLinkWalletConsent` returns those bytes (the browser can rebuild
+  them with `linkConsentMessage` from `./client`). `buildLinkWallet` takes the signature
+  back, checks it, and compiles `[Ed25519SigVerify, link_wallet]`, which owner and wallet
+  then sign. The verifier accepts an Ed25519 instruction only there, and only in
+  that shape. `unlink_wallet` is the owner's alone.
 - **`@sip/solana-core/public-ws-url`** is one plain-JavaScript validator for
   `SIP_SOLANA_PUBLIC_WS_URL`. The server config and the web's `security-headers.mjs`
   both import it, so they apply the same rule.

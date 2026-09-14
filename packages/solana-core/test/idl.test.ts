@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { INSTRUCTIONS_SYSVAR, SYSTEM_PROGRAM } from "../src/client/addresses";
 import { base58Encode } from "../src/client/base58";
 import { fieldOffset, structMaxSize } from "../src/client/borsh";
 import { DecodeError, SIP_ACCOUNT_SPACE, decodeInvestmentPolicy, decodeProtocolConfig, decodeTradingLink, decodeVault } from "../src/client/decoders";
@@ -18,9 +19,12 @@ import {
   SIP_PROGRAM_ID,
   accountDiscriminator,
   eventDiscriminator,
+  idlErrorByCode,
   idlInstruction,
   idlPartitionProblems,
   instructionDiscriminator,
+  isForbiddenInstruction,
+  isOwnerInstruction,
   toHex,
 } from "../src/client/idl";
 import { CONFIG_SEED, INVEST_SEED, LINK_SEED, VAULT_SEED } from "../src/client/pda";
@@ -29,6 +33,7 @@ import { keypair } from "./helpers";
 const require = createRequire(import.meta.url);
 const PROGRAM_DIR = dirname(require.resolve("@sip/solana-program/package.json"));
 const STATE_RS = readFileSync(join(PROGRAM_DIR, "programs/sip-vault/src/state.rs"), "utf8");
+const ERRORS_RS = readFileSync(join(PROGRAM_DIR, "programs/sip-vault/src/errors.rs"), "utf8");
 
 const sha8 = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 16);
 const key = (): Uint8Array => keypair().publicKey.toBytes();
@@ -51,6 +56,52 @@ describe("the instruction classification", () => {
   it("reports an instruction the program gains but nobody classified", () => {
     const grown = { ...SIP_IDL, instructions: [...SIP_IDL.instructions, { ...idlInstruction("withdraw"), name: "sweep_everything" }] };
     expect(idlPartitionProblems(grown).join("\n")).toContain("sweep_everything");
+  });
+
+  it("keeps the link pair an owner's, and the keeper's cranks forbidden", () => {
+    for (const name of ["link_wallet", "unlink_wallet"]) expect([name, isOwnerInstruction(name), isForbiddenInstruction(name)]).toEqual([name, true, false]);
+    for (const name of ["wrap_sol", "convert", "invest", "settle_v2"]) expect([name, isOwnerInstruction(name), isForbiddenInstruction(name)]).toEqual([name, false, true]);
+  });
+
+  it("lists link_wallet's and unlink_wallet's accounts under the names and addresses the verifier binds", () => {
+    const link = idlInstruction("link_wallet").accounts;
+    expect(link.map((account) => account.name)).toEqual(["owner", "wallet", "vault", "trading_link", "config", "instructions_sysvar", "system_program"]);
+    expect(link.map((account) => [account.signer === true, account.writable === true])).toEqual([
+      [true, true],
+      [true, false],
+      [false, false],
+      [false, true],
+      [false, false],
+      [false, false],
+      [false, false],
+    ]);
+    expect(link.find((account) => account.name === "instructions_sysvar")?.address).toBe(INSTRUCTIONS_SYSVAR);
+    expect(link.find((account) => account.name === "system_program")?.address).toBe(SYSTEM_PROGRAM);
+    const unlink = idlInstruction("unlink_wallet").accounts;
+    expect(unlink.map((account) => [account.name, account.signer === true, account.writable === true])).toEqual([
+      ["authority", true, false],
+      ["owner", false, true],
+      ["vault", false, false],
+      ["trading_link", false, true],
+    ]);
+  });
+});
+
+describe("the program's errors", () => {
+  it("are errors.rs, variant by variant from 6000, each with its #[msg]", () => {
+    const declared = [...ERRORS_RS.matchAll(/#\[msg\("((?:[^"\\]|\\.)*)"\)\]\s*(\w+),/g)].map((match, index) => ({ code: 6000 + index, name: match[2]!, msg: match[1]! }));
+    expect(declared.length).toBeGreaterThanOrEqual(39);
+    expect(SIP_IDL.errors.map((error) => ({ code: error.code, name: error.name, msg: error.msg }))).toEqual(declared);
+  });
+
+  it("explain the refusals the program review appended, and the owner-only unlink", () => {
+    expect(idlErrorByCode(6002)).toEqual({ name: "UnlinkUnauthorized", msg: "only the vault owner may unlink a wallet" });
+    expect(idlErrorByCode(6034)).toEqual({ name: "DisallowedVaultAccount", msg: "the venue route lists a vault token account this instruction does not measure" });
+    expect(idlErrorByCode(6035)).toEqual({ name: "WalletIsOwner", msg: "a trading wallet cannot be linked to a vault it owns" });
+    expect(idlErrorByCode(6036)).toEqual({ name: "LinkConsentMissing", msg: "no Ed25519 verification of the wallet's link consent precedes link_wallet" });
+    expect(idlErrorByCode(6037)).toEqual({ name: "LinkConsentWrongSigner", msg: "the link consent is signed by a key that is not the wallet being linked" });
+    expect(idlErrorByCode(6038)).toEqual({ name: "LinkConsentMismatch", msg: "the verified link consent does not name this program, wallet, vault and owner" });
+    expect(idlErrorByCode(6039)).toBeNull();
   });
 });
 
@@ -102,6 +153,8 @@ describe("account sizes and bounds", () => {
     };
     expect(seedOf("create_vault_v2", "vault")).toBe(VAULT_SEED);
     expect(seedOf("link_wallet", "trading_link")).toBe(LINK_SEED);
+    expect(seedOf("link_wallet", "vault")).toBe(VAULT_SEED);
+    expect(seedOf("link_wallet", "config")).toBe(CONFIG_SEED);
     expect(seedOf("set_invest_policy", "policy")).toBe(INVEST_SEED);
     expect(seedOf("accept_authority", "config")).toBe(CONFIG_SEED);
   });
