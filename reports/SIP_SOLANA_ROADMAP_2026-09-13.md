@@ -55,7 +55,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - [ ] **Contratar Helius y crear dos claves** (0.5 h · **imprescindible**) — Contratas Helius Developer y creas una clave para el vigilante y otra para la web, sin pegarlas en el chat.
 - [ ] **Preparar Privy para Solana** (0.5 h · **imprescindible**) — En el panel de Privy activas Solana y el modo TEE, y confirmas que es la app de SIP y no la de Nuvem.
 - [ ] **Inscribirte y preguntar por el código previo** (0.75 h · **imprescindible**) — Te inscribes en Stocklana, miras el formulario sin enviarlo y preguntas si vale partir de Nuvem declarándolo.
-- [ ] **Aprobar la cesta y las tasas de la demo** (0.5 h · juntos) — Decides que la demo compra el S&P 500 (SPYx) desde 1 $, con tasas de demo visibles en pantalla: volumen 1 % y beneficio 50 %.
+- [ ] **Aprobar la cesta y las tasas de la demo** (0.5 h · juntos) — Decides que la demo compra el S&P 500 (SPYx) cada 5 $ acumulados, con las tasas de la demo: 2 % del volumen y 20 % del beneficio.
 - [ ] **Operar para grabar operaciones reales** (1 h) — Con una cartera nueva y 0,3 SOL haces una compra y una venta en Axiom, GMGN y pump.fun, y me pasas solo las firmas.
 
 **Claude** · 39 h
@@ -360,8 +360,8 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 #### `cesta-y-tasas` — Aprobar la cesta y las tasas de la demo
 
 - **Quién:** Juntos · **horas:** 0.5 · **nivel:** Para la demo · **depende de:** —
-- **Qué:** Decides que la demo compra el S&P 500 (SPYx) desde 1 $, con tasas de demo visibles en pantalla: volumen 1 % y beneficio 50 %.
-- **Por qué:** Con las tasas normales (0,20 % y 20 %) la demo necesitaría cientos de dólares de operaciones para llegar a 1 $.
+- **Qué:** Decides que la demo compra el S&P 500 (SPYx) cada 5 $ acumulados, con las tasas de la demo: 2 % del volumen y 20 % del beneficio.
+- **Por qué:** Con tasas más bajas la demo necesitaría cientos de dólares de operaciones para llegar a la primera compra.
 - **Listo cuando:** Confirmación tuya por escrito.
 - **Técnico:** Aprobado el 14-sep. SPYx en el pool Raydium CLMM 6truu3rZ; NVDAx (49iMat) como segunda acción solo si su pool pasa ese día; SOL a USDC por 3ucNos4N. Tasas: 20 % del beneficio y 2 % del volumen (antes 0,20 %). Política: compra cada 5 $ acumulados (mínimo por compra = 5 $ entre el número de acciones), sin tope por compra ni por 30 días hasta que el usuario lo cambie.
 
@@ -379,7 +379,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Traigo de Nuvem el proceso que cobra, como pieza propia de SIP, capaz de arrancar en seco sin ninguna clave secreta.
 - **Por qué:** El de Nuvem exige los secretos incluso para probar, y así no se puede ensayar sin exponerlos.
 - **Listo cuando:** Arranca en seco contra mainnet sin atestador ni crank, y /status responde.
-- **Técnico:** packages/solana-keeper (~3.140 líneas portadas, no un adaptador del worker EVM). Secretos solo tras BROADCAST y el centinela. Reutiliza el Redactor del worker. Candado de Postgres sip-solana-keeper. Variables SIP_SOLANA_* sin alias NUVEM_. Rechaza el program id viejo.
+- **Técnico:** packages/solana-keeper (~3.140 líneas portadas, no un adaptador del worker EVM). Secretos solo tras BROADCAST y el centinela. Reutiliza el Redactor del worker (desde solana-solo vive en @sip/solana-log). Candado de Postgres sip-solana-keeper. Variables SIP_SOLANA_* sin alias NUVEM_. Rechaza el program id viejo.
 
 #### `web-solana-base` — La web aprende a hablar con Solana
 
@@ -387,7 +387,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Traigo a la web la pieza que lee Solana, una puerta propia hacia el nodo y los permisos del navegador, sin exponer ninguna clave.
 - **Por qué:** La web de SIP hoy solo sabe de Ethereum.
 - **Listo cuando:** Build de producción en verde con Solana activo y la consola sin errores de permisos.
-- **Técnico:** packages/solana-core como @sip/solana-core. SIP_CHAIN=solana con configuración por cadena (el código EVM sigue compilado). /api/solana-rpc de solo lectura con lista de métodos y límite por IP; /api/solana-tx send verifica firmas y programa. CSP para Privy y el WSS público. Hecho 14-sep: build de producción en EVM y Solana; con el App ID real en localhost:3013, iframe de Privy montado, Connect activo y 0 violaciones de CSP; relé real a Helius. Pendiente: construir la imagen Docker de la web.
+- **Técnico:** packages/solana-core como @sip/solana-core. SIP_CHAIN=solana con configuración por cadena (el código EVM seguía compilado; desde solana-solo no hay SIP_CHAIN ni EVM). /api/solana-rpc de solo lectura con lista de métodos y límite por IP; /api/solana-tx send verifica firmas y programa. CSP para Privy y el WSS público. Hecho 14-sep: build de producción en EVM y Solana; con el App ID real en localhost:3013, iframe de Privy montado, Connect activo y 0 violaciones de CSP; relé real a Helius. Imagen Docker de la web construida el 14-sep dentro de solana-solo.
 
 #### `privy-politica-script` — Escribir la regla del vigilante en Privy
 
@@ -403,7 +403,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Corrijo en el programa los fallos graves que encontró la revisión antes de publicarlo.
 - **Por qué:** Un keeper o un asiento de Privy comprometido podía vaciar cuentas de la bóveda o redirigir los cobros a otra bóveda.
 - **Listo cuando:** Pruebas con forma de ataque en verde y la rama fusionada en main.
-- **Técnico:** invest/convert rechazan cuentas de tokens de la bóveda no medidas (DisallowedVaultAccount); unlink solo el dueño; link_wallet exige wallet != dueño, config sin pausa y consentimiento Ed25519 de la wallet (0xFF‖SIP_LINK_V1‖programa‖wallet‖bóveda‖dueño); wrap_sol respeta la pausa y exige política activa; Settled con época, inicio y nonce. Rama program-review-fixes. 14-sep: en la rama program-review-fixes (1d83a7d), 76 pruebas de Anchor; falta fusionar con la adaptación de la web.
+- **Técnico:** invest/convert rechazan cuentas de tokens de la bóveda no medidas (DisallowedVaultAccount); unlink solo el dueño; link_wallet exige wallet != dueño, config sin pausa y consentimiento Ed25519 de la wallet (0xFF‖SIP_LINK_V1‖programa‖wallet‖bóveda‖dueño); wrap_sol respeta la pausa y exige política activa; Settled con época, inicio y nonce. Rama program-review-fixes. 14-sep: en la rama program-review-fixes (1d83a7d), 76 pruebas de Anchor; fusionado en main el 14-sep (1f4b8bc) con la adaptación de la web; 79 pruebas de Anchor en verde en main.
 
 #### `programa-limite-volumen` — El volumen llega al 2 %
 
@@ -411,7 +411,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Subo el tope de la tasa de volumen al 2 % sin que se pueda confundir con la de beneficio.
 - **Por qué:** Decisión del 14-sep: 20 % del beneficio y 2 % del volumen; hoy el volumen está limitado al 1 %.
 - **Listo cuando:** Pruebas: 200 bps de volumen aceptado, 201 rechazado; 200 bps de beneficio rechazado, 201 aceptado.
-- **Técnico:** VOLUME_BPS_MAX 100 → 200 y PROFIT_BPS_MIN 101 → 201 en state.rs (rangos disjuntos); pruebas de límites; keeper y web con las mismas cotas. 14-sep: en la rama (f5f4ef6), 79 pruebas de Anchor y 110 del keeper; falta fusionar.
+- **Técnico:** VOLUME_BPS_MAX 100 → 200 y PROFIT_BPS_MIN 101 → 201 en state.rs (rangos disjuntos); pruebas de límites; keeper y web con las mismas cotas. 14-sep: en la rama (f5f4ef6), 79 pruebas de Anchor y 110 del keeper; fusionado en main (1f4b8bc); 79 pruebas de Anchor en verde en main.
 
 ### Martes 15
 
@@ -493,7 +493,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Adapto la web al programa corregido: vincular pide una firma de la wallet de trading y la ruta de envío la verifica.
 - **Por qué:** Sin ese consentimiento el programa corregido rechaza el vínculo.
 - **Listo cuando:** Pruebas del builder y del verificador con la instrucción Ed25519 de consentimiento en verde.
-- **Técnico:** Builder [Ed25519(consentimiento), link_wallet] con la cuenta del sysvar de instrucciones y el config; /api/solana-tx acepta exactamente un Ed25519 inmediatamente antes de link_wallet con firmante = wallet; nuevas cotas 1..200 / 201..10000; errores nuevos.
+- **Técnico:** Builder [Ed25519(consentimiento), link_wallet] con la cuenta del sysvar de instrucciones y el config; /api/solana-tx acepta exactamente un Ed25519 inmediatamente antes de link_wallet con firmante = wallet; nuevas cotas 1..200 / 201..10000; errores nuevos. Hecho 14-sep: en main (f5a6667, fusión 1f4b8bc); core 340 pruebas y web en verde. Queda comprobar con Privy real que signMessage de la wallet de trading firma los 140 bytes que empiezan por 0xFF tal cual.
 
 #### `solana-solo` — SIP pasa a ser solo Solana
 
@@ -501,7 +501,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** La web arranca siempre en Solana y el código de Ethereum queda archivado fuera del proyecto activo.
 - **Por qué:** Decisión del 14-sep: el producto del concurso es solo Solana; el modo EVM confundía (el servidor local arrancaba en EVM).
 - **Listo cuando:** pnpm dev y el build de producción arrancan en Solana sin SIP_CHAIN; archive/evm fuera del workspace; keeper, core y web en verde.
-- **Técnico:** Mover packages/contracts, contracts-artifacts y worker a archive/evm (fuera de pnpm-workspace, sin build ni despliegue, en git). El logger y el Redactor que el keeper importa de @sip/worker/log pasan a un paquete propio. La web pierde SIP_CHAIN, las rutas y la configuración EVM, viem y check:abis; Dockerfile, railway.json, docker-compose y scripts raíz sin EVM; el .env.local viejo de EVM se aparta con otro nombre.
+- **Técnico:** Mover packages/contracts, contracts-artifacts y worker a archive/evm (fuera de pnpm-workspace, sin build ni despliegue, en git). El logger y el Redactor que el keeper importa de @sip/worker/log pasan a un paquete propio. La web pierde SIP_CHAIN, las rutas y la configuración EVM, viem y check:abis; Dockerfile, railway.json, docker-compose y scripts raíz sin EVM; el .env.local viejo de EVM se aparta con otro nombre. Hecho 14-sep: en main (0841f6a, fusión 7d21580). archive/evm con 176 archivos y 9 documentos; @sip/solana-log; la web solo Solana (un SIP_CHAIN distinto de solana, PRIVY_APP_SECRET y PRIVY_AUTHORIZATION_PRIVATE_KEY se rechazan por nombre); CSP idéntica; imágenes Docker de web y keeper construidas; Chrome con Privy sin violaciones. El .env.local viejo quedó como .env.local.evm-archived, sin abrir.
 
 ### Miércoles 16
 
@@ -535,7 +535,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Desde la web creas tu bóveda eligiendo beneficio o volumen, vinculas la wallet de trading, eliges la acción y puedes sacar el dinero.
 - **Por qué:** Es el recorrido que los jueces tienen que ver funcionar, y retirar demuestra que el dinero es tuyo.
 - **Listo cuando:** En mainnet desde la web: bóveda creada, wallet vinculada, política firmada y un retiro de prueba, cada uno con enlace a Solscan.
-- **Técnico:** create_vault_v2 con texto honesto por modo. Vincular en una transacción: Phantom paga y firma primero, la embedded co-firma después; rechaza wallet igual a dueño. set_invest_policy con SPYx a 1 $ y creación de cuentas pagada por el dueño. withdraw. Comprobación de bytes contra fixtures del programa. Aviso: el emisor de xStocks puede congelar. Primera política de inversión: in_mint USDC, compra cada 5 $ (mínimo por compra = 5 $ entre el número de acciones), topes al máximo hasta que el usuario los cambie. Tasas por defecto 20 % beneficio y 2 % volumen. Vincular lleva antes el consentimiento firmado por la wallet de trading (signMessage) como instrucción Ed25519.
+- **Técnico:** create_vault_v2 con texto honesto por modo. Vincular en una transacción: Phantom paga y firma primero, la embedded co-firma después; rechaza wallet igual a dueño. set_invest_policy con SPYx cada 5 $ y creación de cuentas pagada por el dueño. withdraw. Comprobación de bytes contra fixtures del programa. Aviso: el emisor de xStocks puede congelar. Primera política de inversión: in_mint USDC, compra cada 5 $ (mínimo por compra = 5 $ entre el número de acciones), topes al máximo hasta que el usuario los cambie. Tasas por defecto 20 % beneficio y 2 % volumen. Vincular lleva antes el consentimiento firmado por la wallet de trading (signMessage) como instrucción Ed25519.
 
 #### `ensayo-seco` — Ensayo en seco contra mainnet
 
@@ -577,7 +577,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** La portada habla de Solana y acciones, se quita el vídeo de otra marca y la web queda en una dirección pública.
 - **Por qué:** Los jueces necesitan un enlace que funcione.
 - **Listo cuando:** La dirección pública carga la portada nueva y deja entrar con Phantom.
-- **Técnico:** Textos en landing.tsx, layout.tsx y site-footer.tsx. Quitar el vídeo, videoRef y el scrub. Servicio web en Railway con SIP_CHAIN=solana. Dominio exacto añadido a los orígenes de Privy.
+- **Técnico:** Textos en landing.tsx, layout.tsx y site-footer.tsx. Quitar el vídeo, videoRef y el scrub. Servicio web en Railway (solo Solana, sin SIP_CHAIN; un SIP_CHAIN=solana que quede se acepta y se puede borrar). Dominio exacto añadido a los orígenes de Privy. 14-sep (solana-solo): la portada ya dice «on Solana», las tasas 2 % del volumen o 20 % del beneficio, y la frase de la autoridad de actualización del programa; falta quitar el vídeo y publicar.
 
 #### `recorrido-completo` — Recorrido completo en la web pública
 
