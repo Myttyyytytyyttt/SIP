@@ -347,7 +347,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** En el panel de Privy activas Solana y el modo TEE, y confirmas que es la app de SIP y no la de Nuvem.
 - **Por qué:** Sin esto no se pueden crear wallets de trading de Solana con el permiso del vigilante.
 - **Listo cuando:** Me pasas el App ID (es público) y confirmas el modo TEE.
-- **Técnico:** Login methods y Embedded wallets con Solana; TEE mode (lo exige importWallet con additionalSigners); comprobar que no hay un DENY de exportación a nivel de wallet, porque impediría llevar la clave a Axiom. 14-sep: App ID cmtrt36tb00080dlbrda5aqam (app 'SIP'), modo TEE activo (user-controlled server wallets). Falta en el panel: activar el login con wallets de Solana (hoy solana_wallet_auth = false) y añadir los dominios permitidos (hoy vacío; localhost para probar y el dominio final).
+- **Técnico:** Login methods y Embedded wallets con Solana; TEE mode (lo exige importWallet con additionalSigners); comprobar que no hay un DENY de exportación a nivel de wallet, porque impediría llevar la clave a Axiom. 14-sep: App ID cmtrt36tb00080dlbrda5aqam (app 'SIP'), modo TEE activo (user-controlled server wallets). Falta en el panel: activar el login con wallets de Solana (hoy solana_wallet_auth = false) y añadir los dominios permitidos (hoy vacío; localhost para probar y el dominio final). 14-sep: login con wallets de Solana activo y dominios localhost:3002 y :3013 permitidos, comprobado en la config pública de Privy.
 
 #### `stocklana-reglas` — Inscribirte y preguntar por el código previo
 
@@ -437,7 +437,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Creas una segunda wallet que firmará los cobros y pagará las comisiones del vigilante, y le pones 0,5 SOL.
 - **Por qué:** Su clave tiene que vivir en Railway; si fuera la de administración, quien entrara en el servidor podría cambiar el programa.
 - **Listo cuando:** Tengo su dirección pública y su saldo se ve en Solscan.
-- **Técnico:** ~/sip-keys/settle.json = atestador y crank. En el programa, config.attester y config.keeper apuntan a ella. Su secreto se pega solo en Railway.
+- **Técnico:** ~/sip-keys/settle.json = atestador y crank. En el programa, config.attester y config.keeper apuntan a ella. Su secreto se pega solo en Railway. 14-sep: creada por el dueño; falta su dirección pública y el saldo.
 
 #### `fondos-despliegue` — Poner el SOL para publicar el programa
 
@@ -445,7 +445,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Pones unos 5 SOL en tu wallet de administración para publicar el programa.
 - **Por qué:** Publicar bloquea unos 2,4 SOL de alquiler y necesita otro tanto temporal que luego vuelve.
 - **Listo cuando:** Los saldos se ven en Solscan.
-- **Técnico:** solana rent del binario actual (552.200 bytes) da 2,81 SOL permanentes; el buffer de escritura necesita otro tanto que se devuelve; ~0,1-0,3 SOL de comisiones. Unos 5,9 SOL en la wallet de administración EE46GmYq…; pueden salir de los 3,27 SOL rescatados. Se vuelve a medir tras las correcciones y el cambio de límites.
+- **Técnico:** solana rent del binario actual (552.200 bytes) da 2,81 SOL permanentes; el buffer de escritura necesita otro tanto que se devuelve; ~0,1-0,3 SOL de comisiones. Unos 5,9 SOL en la wallet de administración EE46GmYq…; pueden salir de los 3,27 SOL rescatados. Se vuelve a medir tras las correcciones y el cambio de límites. 14-sep: 6.00 SOL en EE46GmYq… (tx 4gaX4eAe…), comprobado en cadena.
 
 #### `programa-publicar` — Publicar el programa en Solana
 
@@ -461,7 +461,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Creas en Privy la llave del vigilante, ejecutas el script de la regla y me pasas solo los dos ids.
 - **Por qué:** Sin esta regla el vigilante no puede cobrar, o podría firmar cualquier cosa.
 - **Listo cuando:** Tengo el key quorum id y el policy id, y las tres pruebas de rechazo fallan como deben.
-- **Técnico:** La privada de la authorization key se muestra una vez y va a tu gestor. Cargar secretos con read -s. Rechazos esperados: transferencia de SOL de nivel superior, signMessage y una instrucción al programa viejo.
+- **Técnico:** La privada de la authorization key se muestra una vez y va a tu gestor. Cargar secretos con read -s. Rechazos esperados: transferencia de SOL de nivel superior, signMessage y una instrucción al programa viejo. 14-sep: llave del vigilante cbx133itb717vxp3dqwhk808 y política jsuzcjv6njl0raqjjhzqe9fh (dueña g8a6xig4yhjdujgh8sqnvbgw) creadas; check = OK. Falta verify cuando la web registre el signer en una wallet de prueba.
 
 #### `keeper-cobro-v2` — El vigilante cobra con la regla de cada modo
 
