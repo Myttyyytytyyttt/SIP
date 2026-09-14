@@ -86,12 +86,13 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - [ ] **Crear la llave de firma y la regla en Privy** (1 h · **imprescindible**) — Creas en Privy la llave del vigilante, ejecutas el script de la regla y me pasas solo los dos ids.
 - [ ] **Pegar las variables del vigilante en Railway** (1 h · **imprescindible**) — Creas el servicio del vigilante en Railway, cambias la contraseña de la base de datos y pegas tú las variables.
 
-**Claude** · 21 h
+**Claude** · 25 h
 
 - [ ] **Todas las pruebas en verde y revisión** (6 h · **imprescindible**) — Paso todas las pruebas del programa y una revisión de código antes de publicar nada.
 - [ ] **El vigilante cobra con la regla de cada modo** (6 h · **imprescindible**) — El vigilante lee el modo y la tasa de cada bóveda, construye el cobro nuevo y no cobra si no vio todo el tramo.
 - [ ] **Entrar con Phantom y crear wallets de trading** (6 h · **imprescindible**) — Entras con Phantom como llave de pensión y creas wallets de trading que nacen con el permiso del vigilante y se pueden exportar a Axiom.
 - [ ] **La web pide el consentimiento al vincular** (3 h · **imprescindible**) — Adapto la web al programa corregido: vincular pide una firma de la wallet de trading y la ruta de envío la verifica.
+- [ ] **SIP pasa a ser solo Solana** (4 h · **imprescindible**) — La web arranca siempre en Solana y el código de Ethereum queda archivado fuera del proyecto activo.
 
 **Control del día:** 13:00: pruebas del programa en verde, o plan B. Por la noche: el programa está en mainnet, coincide con lo probado y el vigilante arranca sin ninguna clave secreta.  
 **Si no se cumple:** Si no se publica el martes, el miércoles se publica con volumen bloqueado y la web trabaja con esa versión.
@@ -195,7 +196,6 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - [ ] **Guardar la deuda para cobrarla después** (Claude, 12 h) — Si una wallet está vacía al cobrar, lo pendiente queda anotado en la cadena y se cobra más tarde.
 - [ ] **Multifirma para actualizar el programa** (Juntos, 6 h) — El mando del programa pasa de tu wallet de administración a una multifirma con retraso de 24 horas.
 - [ ] **Separar comisiones por plataforma** (Claude, 8 h) — El medidor separa la comisión del venue y los tips en cada plataforma.
-- [ ] **Unir el vigilante de Solana y el worker de Ethereum** (Claude, 16 h) — Un solo paquete con dos adaptadores de cadena, dos procesos y una base de datos.
 - [ ] **Enterarse de las operaciones al momento** (Claude, 8 h) — El vigilante recibe cada operación en cuanto ocurre en lugar de preguntar cada minuto.
 - [ ] **Importar tu propia clave con el permiso del vigilante** (Claude, 4 h) — Importas una clave que ya usabas y queda cobrable desde el primer segundo.
 - [ ] **Avisar al dueño de los 22 SOL y cerrar el programa viejo** (Juntos, 2 h) — Se avisa al dueño de esa bóveda para que retire, y cuando esté vacía se cierra el programa y vuelven 3,33 SOL.
@@ -495,6 +495,14 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Listo cuando:** Pruebas del builder y del verificador con la instrucción Ed25519 de consentimiento en verde.
 - **Técnico:** Builder [Ed25519(consentimiento), link_wallet] con la cuenta del sysvar de instrucciones y el config; /api/solana-tx acepta exactamente un Ed25519 inmediatamente antes de link_wallet con firmante = wallet; nuevas cotas 1..200 / 201..10000; errores nuevos.
 
+#### `solana-solo` — SIP pasa a ser solo Solana
+
+- **Quién:** Claude · **horas:** 4 · **nivel:** Imprescindible · **depende de:** `web-consentimiento-vinculo`
+- **Qué:** La web arranca siempre en Solana y el código de Ethereum queda archivado fuera del proyecto activo.
+- **Por qué:** Decisión del 14-sep: el producto del concurso es solo Solana; el modo EVM confundía (el servidor local arrancaba en EVM).
+- **Listo cuando:** pnpm dev y el build de producción arrancan en Solana sin SIP_CHAIN; archive/evm fuera del workspace; keeper, core y web en verde.
+- **Técnico:** Mover packages/contracts, contracts-artifacts y worker a archive/evm (fuera de pnpm-workspace, sin build ni despliegue, en git). El logger y el Redactor que el keeper importa de @sip/worker/log pasan a un paquete propio. La web pierde SIP_CHAIN, las rutas y la configuración EVM, viem y check:abis; Dockerfile, railway.json, docker-compose y scripts raíz sin EVM; el .env.local viejo de EVM se aparta con otro nombre.
+
 ### Miércoles 16
 
 #### `keeper-medir-volumen` — Medir cuánto se compra y se vende
@@ -662,14 +670,6 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Por qué:** Sin esto una compra puede medirse hasta un 12 % por encima.
 - **Listo cuando:** Fixtures por venue con el volumen neto exacto.
 - **Técnico:** Decodificadores de pump.fun, PumpSwap, Raydium y Jupiter; los ids de Axiom y GMGN como etiquetas, nunca como lista blanca.
-
-#### `despues-unir-workers` — Unir el vigilante de Solana y el worker de Ethereum
-
-- **Quién:** Claude · **horas:** 16 · **nivel:** Después · **depende de:** —
-- **Qué:** Un solo paquete con dos adaptadores de cadena, dos procesos y una base de datos.
-- **Por qué:** Hoy son dos copias del mismo núcleo que ya empiezan a divergir.
-- **Listo cuando:** @sip/worker con src/chains/{evm,solana} y ambas suites en verde.
-- **Técnico:** Núcleo común: Redactor, advisory lock, bucle y latido, alertas, salud; ChainAdapter; DDL parametrizado por cadena.
 
 #### `despues-al-momento` — Enterarse de las operaciones al momento
 
