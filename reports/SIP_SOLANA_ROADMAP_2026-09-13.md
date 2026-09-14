@@ -387,7 +387,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Traigo a la web la pieza que lee Solana, una puerta propia hacia el nodo y los permisos del navegador, sin exponer ninguna clave.
 - **Por qué:** La web de SIP hoy solo sabe de Ethereum.
 - **Listo cuando:** Build de producción en verde con Solana activo y la consola sin errores de permisos.
-- **Técnico:** packages/solana-core como @sip/solana-core. SIP_CHAIN=solana con configuración por cadena (el código EVM sigue compilado). /api/solana-rpc de solo lectura con lista de métodos y límite por IP; /api/solana-tx send verifica firmas y programa. CSP para Privy y el WSS público.
+- **Técnico:** packages/solana-core como @sip/solana-core. SIP_CHAIN=solana con configuración por cadena (el código EVM sigue compilado). /api/solana-rpc de solo lectura con lista de métodos y límite por IP; /api/solana-tx send verifica firmas y programa. CSP para Privy y el WSS público. Hecho 14-sep: build de producción en EVM y Solana; con el App ID real en localhost:3013, iframe de Privy montado, Connect activo y 0 violaciones de CSP; relé real a Helius. Pendiente: construir la imagen Docker de la web.
 
 #### `privy-politica-script` — Escribir la regla del vigilante en Privy
 
@@ -403,7 +403,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Corrijo en el programa los fallos graves que encontró la revisión antes de publicarlo.
 - **Por qué:** Un keeper o un asiento de Privy comprometido podía vaciar cuentas de la bóveda o redirigir los cobros a otra bóveda.
 - **Listo cuando:** Pruebas con forma de ataque en verde y la rama fusionada en main.
-- **Técnico:** invest/convert rechazan cuentas de tokens de la bóveda no medidas (DisallowedVaultAccount); unlink solo el dueño; link_wallet exige wallet != dueño, config sin pausa y consentimiento Ed25519 de la wallet (0xFF‖SIP_LINK_V1‖programa‖wallet‖bóveda‖dueño); wrap_sol respeta la pausa y exige política activa; Settled con época, inicio y nonce. Rama program-review-fixes.
+- **Técnico:** invest/convert rechazan cuentas de tokens de la bóveda no medidas (DisallowedVaultAccount); unlink solo el dueño; link_wallet exige wallet != dueño, config sin pausa y consentimiento Ed25519 de la wallet (0xFF‖SIP_LINK_V1‖programa‖wallet‖bóveda‖dueño); wrap_sol respeta la pausa y exige política activa; Settled con época, inicio y nonce. Rama program-review-fixes. 14-sep: en la rama program-review-fixes (1d83a7d), 76 pruebas de Anchor; falta fusionar con la adaptación de la web.
 
 #### `programa-limite-volumen` — El volumen llega al 2 %
 
@@ -411,7 +411,7 @@ Hasta que esto esté hecho, Claude no puede avanzar en lo que bloquea.
 - **Qué:** Subo el tope de la tasa de volumen al 2 % sin que se pueda confundir con la de beneficio.
 - **Por qué:** Decisión del 14-sep: 20 % del beneficio y 2 % del volumen; hoy el volumen está limitado al 1 %.
 - **Listo cuando:** Pruebas: 200 bps de volumen aceptado, 201 rechazado; 200 bps de beneficio rechazado, 201 aceptado.
-- **Técnico:** VOLUME_BPS_MAX 100 → 200 y PROFIT_BPS_MIN 101 → 201 en state.rs (rangos disjuntos); pruebas de límites; keeper y web con las mismas cotas.
+- **Técnico:** VOLUME_BPS_MAX 100 → 200 y PROFIT_BPS_MIN 101 → 201 en state.rs (rangos disjuntos); pruebas de límites; keeper y web con las mismas cotas. 14-sep: en la rama (f5f4ef6), 79 pruebas de Anchor y 110 del keeper; falta fusionar.
 
 ### Martes 15
 
