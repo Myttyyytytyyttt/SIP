@@ -3,7 +3,7 @@
 // hosts, placeholder values, and a placeholder Privy app id of the right length.
 
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "@sip/solana-core/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
 import { toSolanaPublicConfig, type ConfigProblem, type Env } from "@/lib/config";
 import { loadConfig, solanaGate } from "@/lib/load-config";
@@ -43,6 +43,16 @@ function readTrap(env: Record<string, string | undefined>, trapped: readonly str
 /** A distinct, recognisable placeholder per name, so a value that leaked into a problem would show. */
 const placeholders = (names: readonly string[]): Record<string, string> =>
   Object.fromEntries(names.map((name, index) => [name, `PLACEHOLDERVALUE${index}XYZ`]));
+
+/**
+ * Every configuration problem writes a line to console.error. Silenced for the whole file and recorded here, so the
+ * cases about that line read it without spying on console.error a second time.
+ */
+let errorLog: MockInstance<typeof console.error>;
+
+beforeEach(() => {
+  errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -239,6 +249,139 @@ describe("the retired EVM names", () => {
     expect(routes.solanaGate(env).kind).toBe("ok");
     expect(routes.loadConfig(env).ok).toBe(true);
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** load-config.ts's other process-wide latch: the names of the last problems line. Cleared the same way. */
+const PROBLEMS_LOGGED = Symbol.for("sip.web.config.problemsLogged");
+
+interface ProblemsLine {
+  readonly event: string;
+  readonly names: readonly string[];
+  readonly message: string;
+}
+
+/** Every console.error line so far, parsed. In these cases the problems line is the only thing written there. */
+const problemLines = (): ProblemsLine[] => errorLog.mock.calls.map((call) => JSON.parse(String(call[0])) as ProblemsLine);
+
+describe("the configuration problems, in the server's log", () => {
+  beforeEach(() => {
+    delete (globalThis as unknown as Record<symbol, unknown>)[PROBLEMS_LOGGED];
+  });
+
+  it("names SIP_CHAIN, PRIVY_APP_SECRET and SIP_SOLANA_SETTLE_KEY in one line, with no value and no problem text, and reads neither secret", async () => {
+    vi.resetModules();
+    const fresh = await import("@/lib/load-config");
+    const otherLogs = (["log", "info", "warn", "debug"] as const).map((method) => vi.spyOn(console, method).mockImplementation(() => undefined));
+    const canaries = {
+      SIP_CHAIN: "evm-canary-9c1d",
+      PRIVY_APP_SECRET: "canary-value-never-logged-7f3a",
+      SIP_SOLANA_SETTLE_KEY: "canary-settle-key-never-logged-4e2b",
+    };
+    // SIP_CHAIN's value is compared with solana, so it is read, and must never be repeated. The two secrets are
+    // checked by name: reading either value throws.
+    const env = readTrap({ ...SOLANA_ENV, ...canaries }, ["PRIVY_APP_SECRET", "SIP_SOLANA_SETTLE_KEY"]);
+    let problems: readonly ConfigProblem[] = [];
+    for (let request = 0; request < 3; request += 1) {
+      const load = fresh.loadConfig(env);
+      if (load.ok) throw new Error("expected problems");
+      problems = load.problems;
+      expect(fresh.solanaGate(env).kind).toBe("invalid");
+    }
+
+    expect(problemLines()).toEqual([
+      { event: "web.config.problems", names: ["PRIVY_APP_SECRET", "SIP_CHAIN", "SIP_SOLANA_SETTLE_KEY"], message: expect.stringContaining("/wallets") },
+    ]);
+    const written = [errorLog, ...otherLogs].flatMap((spy) => spy.mock.calls.flat().map(String)).join("\n");
+    for (const canary of Object.values(canaries)) expect(written).not.toContain(canary);
+    expect(problems.map((problem) => problem.variable).sort()).toEqual(["PRIVY_APP_SECRET", "SIP_CHAIN", "SIP_SOLANA_SETTLE_KEY"]);
+    for (const problem of problems) {
+      expect(written).not.toContain(problem.message);
+      expect(written).not.toContain(problem.howToFix);
+    }
+  });
+
+  it("writes one line when the pages and the route handlers each load their own copy and are asked again and again", async () => {
+    // Two module registries in one process, as in a production build. The routes are asked first, and the environment
+    // also holds a problem only the page checks (the Privy app id): the line is still the page's whole list, once.
+    vi.resetModules();
+    const pages = await import("@/lib/load-config");
+    vi.resetModules();
+    const routes = await import("@/lib/load-config");
+    expect(routes).not.toBe(pages);
+    const env: Env = { ...SOLANA_ENV, SIP_CHAIN: "evm", SIP_SOLANA_RPC_URLS: "", PRIVY_APP_ID: "short" };
+    // The gate on its own, before any page: a deployment whose first traffic is the relay still gets the line.
+    expect(routes.solanaGate(env).kind).toBe("invalid");
+    expect(problemLines()).toEqual([
+      { event: "web.config.problems", names: ["PRIVY_APP_ID", "SIP_CHAIN", "SIP_SOLANA_RPC_URLS"], message: expect.stringContaining("/wallets") },
+    ]);
+    for (let request = 0; request < 3; request += 1) {
+      expect(routes.solanaGate(env).kind).toBe("invalid");
+      expect(pages.loadConfig(env).ok).toBe(false);
+      expect(pages.solanaGate(env).kind).toBe("invalid");
+      expect(routes.loadConfig(env).ok).toBe(false);
+    }
+    expect(problemLines()).toEqual([
+      { event: "web.config.problems", names: ["PRIVY_APP_ID", "SIP_CHAIN", "SIP_SOLANA_RPC_URLS"], message: expect.stringContaining("/wallets") },
+    ]);
+  });
+
+  it("writes nothing for a complete configuration, on the page or on the routes", async () => {
+    vi.resetModules();
+    const fresh = await import("@/lib/load-config");
+    const seated: Env = {
+      ...SOLANA_ENV,
+      SIP_CHAIN: "solana",
+      SIP_SOLANA_PRIVY_SIGNER_ID: "signer-id-0000000000000000",
+      SIP_SOLANA_PRIVY_POLICY_ID: "policy-id-0000000000000000",
+    };
+    for (const env of [SOLANA_ENV, seated, SOLANA_ENV]) {
+      expect(fresh.loadConfig(env).ok).toBe(true);
+      expect(fresh.solanaGate(env).kind).toBe("ok");
+    }
+    expect(errorLog).not.toHaveBeenCalled();
+  });
+
+  it("leaves a problem only the page has to the page: the routes stay ok and write nothing", async () => {
+    vi.resetModules();
+    const fresh = await import("@/lib/load-config");
+    const { PRIVY_APP_ID: _app, ...noApp } = SOLANA_ENV;
+    expect(fresh.solanaGate(noApp).kind).toBe("ok");
+    expect(errorLog).not.toHaveBeenCalled();
+    expect(fresh.loadConfig(noApp).ok).toBe(false);
+    expect(problemLines().map((line) => line.names)).toEqual([["PRIVY_APP_ID"]]);
+  });
+
+  it("names a missing SIP_SOLANA_RPC_URLS, and a malformed one is the same name, so it is not written twice", async () => {
+    vi.resetModules();
+    const fresh = await import("@/lib/load-config");
+    const { SIP_SOLANA_RPC_URLS: _rpc, ...missing } = SOLANA_ENV;
+    expect(fresh.solanaGate(missing).kind).toBe("invalid");
+    expect(fresh.loadConfig(missing).ok).toBe(false);
+    expect(problemLines()).toEqual([
+      { event: "web.config.problems", names: ["SIP_SOLANA_RPC_URLS"], message: expect.stringContaining("/wallets") },
+    ]);
+
+    // Two bad entries are two problems under one name. The line lists names once each, and it has already said this one.
+    const malformed: Env = { ...SOLANA_ENV, SIP_SOLANA_RPC_URLS: "MALFORMEDENTRY1,ftp://MALFORMEDENTRY2.invalid" };
+    const load = fresh.loadConfig(malformed);
+    expect(!load.ok && load.problems.map((problem) => problem.variable)).toEqual(["SIP_SOLANA_RPC_URLS", "SIP_SOLANA_RPC_URLS"]);
+    expect(fresh.solanaGate(malformed).kind).toBe("invalid");
+    expect(errorLog).toHaveBeenCalledTimes(1);
+    expect(errorLog.mock.calls.flat().map(String).join("\n")).not.toContain("MALFORMEDENTRY");
+  });
+
+  it("writes again for a different set of names, as after an edited .env under next dev", async () => {
+    vi.resetModules();
+    const fresh = await import("@/lib/load-config");
+    const before: Env = { ...SOLANA_ENV, SIP_CHAIN: "evm" };
+    const after: Env = { ...SOLANA_ENV, SIP_CHAIN: "evm", PRIVY_AUTHORIZATION_PRIVATE_KEY: "" };
+    for (const env of [before, before, after, after]) {
+      expect(fresh.loadConfig(env).ok).toBe(false);
+      expect(fresh.solanaGate(env).kind).toBe("invalid");
+    }
+    expect(fresh.loadConfig(SOLANA_ENV).ok).toBe(true);
+    expect(problemLines().map((line) => line.names)).toEqual([["SIP_CHAIN"], ["PRIVY_AUTHORIZATION_PRIVATE_KEY", "SIP_CHAIN"]]);
   });
 });
 

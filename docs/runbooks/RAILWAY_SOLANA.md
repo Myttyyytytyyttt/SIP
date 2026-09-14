@@ -5,8 +5,9 @@ qué variable va en cada uno, cuál es secreta y en qué momento se añade. Los 
 Railway. Claude no tiene acceso a Railway.
 
 **Nunca van a Railway:** tu wallet de administración (`~/sip-keys/admin.json`), la llave de administración de la
-política de Privy (`~/sip-keys/privy-policy-admin.key`) ni ninguna variable `NUVEM_*`. Los dos servicios se niegan a
-arrancar si ven una variable de Nuvem: no copies variables de un servicio viejo.
+política de Privy (`~/sip-keys/privy-policy-admin.key`) ni ninguna variable `NUVEM_*`. El vigilante se niega a arrancar si
+ve una variable de Nuvem; la web arranca, pero con una `NUVEM_SOLANA_*` se queda sin Solana y la nombra en `/wallets`.
+No copies variables de un servicio viejo.
 
 ## 0. Antes de empezar
 
@@ -101,7 +102,8 @@ Si el servicio ya tiene `SIP_CHAIN=solana` (lo pedía una versión anterior de e
 **Nunca en la web:** `SIP_SOLANA_SETTLE_KEY`, `SIP_SOLANA_PRIVY_APP_SECRET`, `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`,
 `PRIVY_APP_SECRET` ni `PRIVY_AUTHORIZATION_PRIVATE_KEY`. La web no firma nada y las rechaza por el nombre, aunque estén
 vacías. Con cualquiera de ellas, o con `SIP_CHAIN` en un valor que no sea `solana`, Connect y `/wallets` enseñan la lista
-de configuración, y `/api/solana-rpc` y `/api/solana-tx` responden 503. `/api/health` sigue respondiendo 200.
+de configuración, y `/api/solana-rpc` y `/api/solana-tx` responden 503. `/api/health` sigue respondiendo 200 y, en cuanto
+alguien abre la web, los logs nombran esas variables en una línea `web.config.problems`, nunca sus valores.
 
 `SIP_TRUSTED_CLIENT_IP_HEADER` es la cabecera con la que la web limita peticiones por visitante. En Railway debería ser
 `x-envoy-external-address`; tras el primer despliegue lo comprobamos juntos.
@@ -119,10 +121,12 @@ bóveda y vincular wallets desde la web llegan después, y Railway redespliega s
 
 ## Si algo falla
 
-- **El despliegue termina y el servicio se reinicia en bucle**: abre los logs y busca `configuration refused`. La línea
-  nombra la variable que falta o sobra, nunca su valor.
-- **La web abre, pero Connect enseña una lista de variables**: cada línea nombra una variable que falta o sobra en
-  `sip-web`, nunca su valor. Corrígelas en Railway y vuelve a desplegar.
+- **El vigilante termina de desplegar y se reinicia en bucle**: abre los logs de `sip-solana-keeper` y busca
+  `configuration refused`. La línea nombra la variable que falta o sobra, nunca su valor.
+- **La web abre, pero Connect enseña una lista de variables**: la web no se reinicia ni falla su chequeo `/api/health`,
+  así que Railway la da por sana. `/wallets` enseña la misma lista, y cada línea nombra una variable que falta o sobra en
+  `sip-web`, nunca su valor. En los logs de `sip-web`, desde la primera visita (el chequeo de salud no la escribe), hay una línea
+  `web.config.problems` que nombra esas variables, nunca sus valores. Corrígelas en Railway y vuelve a desplegar.
 - **El vigilante dice que el atestador no coincide**: `SIP_SOLANA_SETTLE_KEY` no es la wallet de cobro que se configuró
   en el programa. No lo arregles cambiando el programa: revisa qué archivo pegaste.
 - **Un secreto se pega en el sitio equivocado** (en la web, en un chat, en un log): se rota, como dice
