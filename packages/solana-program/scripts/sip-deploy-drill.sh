@@ -161,6 +161,9 @@ D_CLUSTER="" expect fail "is not mainnet" "a local validator without SIP_DEPLOY_
 D_URL="127.0.0.1:$PORT/?api-key=$CANARY" expect fail "does not start with http\(s\)://host \(the value is not shown\)" "an RPC value without a scheme refuses without echoing it" -- sd status
 D_URL="http://localhost:1@127.0.0.1:$PORT/" expect fail "does not start with http\(s\)://host" "a user@ prefix cannot dress a host as localhost" -- sd status
 D_ADMIN_PUBKEY=not-an-address expect fail "SIP_ADMIN_PUBKEY is not a base58 address \(the value is not shown\)" "a malformed admin address refuses without echoing it" -- sd status
+SIP_DEPLOY_CONFIRM=--help expect fail "not a base58 address" "an option like --help never passes for an address" -- sd set-keeper --help
+SIP_DEPLOY_CU_PRICE=10000000 expect fail "at most 5000000" "a priority fee above the admin tool's cap refuses before anything is confirmed" -- sd status
+SIP_DEPLOY_SEND=smoke expect fail "SIP_DEPLOY_SEND is rpc" "an unknown send mode refuses" -- sd status
 D_SETTLE=$ADMIN SIP_DEPLOY_CONFIRM=CONFIGURE expect fail "IS the admin wallet" "the settle wallet cannot be the admin wallet" -- sd configure
 D_SETTLE=not-an-address SIP_DEPLOY_CONFIRM=CONFIGURE expect fail "not a base58 address \(the value is not shown\)" "a malformed settle address refuses configure without echoing it" -- sd configure
 D_ADMIN_PUBKEY=$STRANGER expect fail "holds $ADMIN, not the admin wallet $STRANGER" "an admin file that is not the admin wallet refuses" -- sd preflight configure
@@ -208,7 +211,7 @@ SIP_DEPLOY_CONFIRM=$PROGRAM_ID expect 0 "pinned copy.*all checks pass" "upgrade 
 echo
 echo "deploy, at drill ids (the real program keypair is never opened)"
 SIP_PROGRAM_KEYPAIR=$TMP/drill-program.json SIP_DEPLOY_CONFIRM=$DRILL_ID expect 0 "the first [0-9]+ bytes have the same sha256" "deploy publishes the tested binary, upgradeable by the admin" -- sd deploy
-SIP_PROGRAM_KEYPAIR=$TMP/drill-program.json SIP_DEPLOY_CONFIRM=$DRILL_ID expect fail "already deployed: use upgrade" "deploy refuses an id that is taken" -- sd deploy
+SIP_PROGRAM_KEYPAIR=$TMP/drill-program.json SIP_DEPLOY_CONFIRM=$DRILL_ID expect fail "already deployed: run .*status" "deploy refuses an id that is taken, and says to check status first" -- sd deploy
 SIP_PROGRAM_ID=$DRILL_ID expect 0 "upgrade authority +$ADMIN \(admin\)" "the drill program's upgrade authority is the admin" -- sd status --allow-unconfigured
 check "no write buffer of the admin is left behind" -- [ "$(buffer_count "$ADMIN")" = 0 ]
 

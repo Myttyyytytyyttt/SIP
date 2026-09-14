@@ -42,7 +42,8 @@
 #   SIP_SETTLE_PUBKEY        the settle wallet's address; configure and status need it
 #   SIP_EXPECTED_SO_SHA256   the tested binary's sha256; deploy and upgrade need it
 #   SIP_PROGRAM_SO           default target/deploy/sip_vault.so
-#   SIP_DEPLOY_CU_PRICE      priority fee, micro-lamports per compute unit, default 20000
+#   SIP_DEPLOY_CU_PRICE      priority fee, micro-lamports per compute unit, default 20000, at most 5000000
+#   SIP_DEPLOY_SEND          "rpc" (default) sends the upload's writes through the RPC; "tpu" straight to validators
 # For scripts/sip-deploy-drill.sh against a local validator, refused on mainnet:
 #   SIP_DEPLOY_CLUSTER=localnet, SIP_DEPLOY_CONFIRM, SIP_PROGRAM_KEYPAIR, SIP_PROGRAM_ID, SIP_ADMIN_SKIP_PRECHECK
 #
@@ -64,12 +65,16 @@ NOBODY=11111111111111111111111111111111
 PROGRAMDATA_HEADER=45
 BUFFER_HEADER=37
 PROGRAM_ACCOUNT_BYTES=36
+# Bytes per buffer write transaction, roughly: only used to tell the owner how long the upload is.
+BYTES_PER_WRITE=950
 # Fees for ~600 buffer writes and the deploy itself, with room to spare.
 DEPLOY_FEE_MARGIN=50000000
 # init_config's rent and a handful of fees.
 ADMIN_VERB_MINIMUM=10000000
 PAUSE_MINIMUM=1000000
 SETTLE_LOW=50000000
+# sip-admin.ts refuses more than this; the shell refuses it first, before anything is confirmed.
+CU_PRICE_MAX=5000000
 TSX=node_modules/.bin/tsx
 USE_NODE22='export PATH="$HOME/.nvm/versions/node/v22.14.0/bin:$PATH"'
 
@@ -118,17 +123,18 @@ URL_RE='^https?://[A-Za-z0-9.-]+(:[0-9]+)?([/?#][^"\\]*)?$'
 printf %s "$RPC" | grep -Eq "$URL_RE" || die "SIP_SOLANA_RPC_URLS does not start with http(s)://host (the value is not shown)"
 HOST=$(printf %s "$RPC" | sed -E 's#^https?://([A-Za-z0-9.-]+).*#\1#')
 
+TICKER=""
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/sip-deploy.XXXXXX") || die "could not create a private working directory"
 chmod 700 "$WORK"
-trap 'rm -rf "$WORK"' EXIT
+trap 'if [ -n "$TICKER" ]; then kill "$TICKER" 2>/dev/null; fi; rm -rf "$WORK"' EXIT
 # A config file that does not parse sends `solana` back to its DEFAULT config, without a word:
 # mainnet's public RPC and ~/.config/solana/id.json. keypair_path is a required field. So every
 # field is written, the default signer is a file that does not exist, and the parse is checked
-# before anything runs.
+# before anything runs. Colour is off so the check reads plain text.
 CLI_CONFIG=$WORK/solana-cli.yml
 (umask 077 && printf 'json_rpc_url: "%s"\nwebsocket_url: ""\nkeypair_path: "%s"\naddress_labels: {}\ncommitment: confirmed\n' \
   "$RPC" "$WORK/no-default-signer.json" >"$CLI_CONFIG")
-sol_cli() { solana -C "$CLI_CONFIG" "$@"; }
+sol_cli() { env -u CLICOLOR_FORCE NO_COLOR=1 solana -C "$CLI_CONFIG" "$@"; }
 sol_cli config get 2>/dev/null | SIP_EXPECT_LINE="RPC URL: $RPC" awk 'index($0, ENVIRON["SIP_EXPECT_LINE"]) == 1 { found = 1 } END { exit !found }' ||
   die "solana did not take the private config file, and would have fallen back to its default RPC and keypair"
 
@@ -138,23 +144,24 @@ sha256_of() {
 sol() { awk -v l="$1" 'BEGIN { printf "%.4f SOL", l / 1e9 }'; }
 # A canonical 32-byte base58 address, checked with no dependency. Exit 10 means
 # "not an address"; any other failure stops the script rather than reading as one.
+# The "--" keeps a value like --help from reaching node as an option.
 is_address() {
   local code=0
   node -e '
     const s = process.argv[1], digits = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s)) process.exit(10)
+    if (typeof s !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s)) process.exit(10)
     let n = 0n
     for (const c of s) n = n * 58n + BigInt(digits.indexOf(c))
     let hex = n === 0n ? "" : n.toString(16)
     if (hex.length % 2) hex = "0" + hex
-    process.exit(s.match(/^1*/)[0].length + hex.length / 2 === 32 ? 0 : 10)' "$1" 2>/dev/null || code=$?
+    process.exit(s.match(/^1*/)[0].length + hex.length / 2 === 32 ? 0 : 10)' -- "$1" 2>/dev/null || code=$?
   case "$code" in
     0) return 0 ;;
     10) return 1 ;;
     *) die "node could not check an address (exit $code)" ;;
   esac
 }
-other_users_bits() { node -e 'process.stdout.write(String(require("fs").statSync(process.argv[1]).mode & 0o077))' "$1"; }
+other_users_bits() { node -e 'process.stdout.write(String(require("fs").statSync(process.argv[1]).mode & 0o077))' -- "$1"; }
 json_get() {
   node -e '
     let s = ""
@@ -163,7 +170,7 @@ json_get() {
       try { v = JSON.parse(s) } catch { process.exit(3) }
       for (const k of process.argv[1].split(".")) v = v == null ? undefined : v[k]
       process.stdout.write(v == null ? "" : String(v))
-    })' "$1"
+    })' -- "$1"
 }
 balance_of() { sol_cli balance "$1" --lamports 2>/dev/null | awk '{print $1}'; }
 rent_for() {
@@ -180,6 +187,12 @@ SETTLE_PUBKEY=${SIP_SETTLE_PUBKEY:-}
 SO=${SIP_PROGRAM_SO:-target/deploy/sip_vault.so}
 CU_PRICE=${SIP_DEPLOY_CU_PRICE:-20000}
 case "$CU_PRICE" in '' | *[!0-9]*) die "SIP_DEPLOY_CU_PRICE must be a whole number of micro-lamports" ;; esac
+{ [ "${#CU_PRICE}" -le 7 ] && [ "$CU_PRICE" -le "$CU_PRICE_MAX" ]; } || die "SIP_DEPLOY_CU_PRICE is at most $CU_PRICE_MAX micro-lamports per compute unit"
+case "${SIP_DEPLOY_SEND:-rpc}" in
+  rpc) SEND_FLAG=--use-rpc ;;
+  tpu) SEND_FLAG="" ;;
+  *) die "SIP_DEPLOY_SEND is rpc (the default) or tpu" ;;
+esac
 DECLARED_ID=$(sed -n 's/^declare_id!("\([1-9A-HJ-NP-Za-km-z]*\)");.*/\1/p' programs/sip-vault/src/lib.rs)
 [ -n "$DECLARED_ID" ] || die "no declare_id! found in programs/sip-vault/src/lib.rs"
 IDL_ID=$(node -p 'require("./idl/sip_vault.json").address') || die "could not read idl/sip_vault.json"
@@ -229,6 +242,38 @@ admin_tool() {
     "$TSX" scripts/sip-admin.ts "$@" 2>&1 | redact
 }
 
+# A node that lags a few seconds behind the one that confirmed can still show the old state.
+status_until_ok() {
+  local attempt
+  for attempt in 1 2 3; do
+    if admin_tool status "$@"; then return 0; fi
+    if [ "$attempt" -lt 3 ]; then
+      say "checking again in 10 s: the RPC node that answered can lag behind the one that confirmed"
+      sleep 10
+    fi
+  done
+  return 1
+}
+
+# solana hides its progress when its output is filtered, so the owner sees a line every 20 s instead.
+start_ticker() {
+  (
+    elapsed=0
+    while sleep 20; do
+      elapsed=$((elapsed + 20))
+      printf '  … %s, %d s so far; if it stops, the same command resumes\n' "$1" "$elapsed"
+    done
+  ) &
+  TICKER=$!
+}
+stop_ticker() {
+  if [ -n "$TICKER" ]; then
+    kill "$TICKER" 2>/dev/null || true
+    wait "$TICKER" 2>/dev/null || true
+    TICKER=""
+  fi
+}
+
 require_admin_file() {
   [ -f "$ADMIN_KEYPAIR" ] || die "no admin keypair at $ADMIN_KEYPAIR (SIP_ADMIN_KEYPAIR)"
   local bits file_pubkey
@@ -238,29 +283,41 @@ require_admin_file() {
   [ "$file_pubkey" = "$ADMIN_PUBKEY" ] || die "$ADMIN_KEYPAIR holds ${file_pubkey:-no readable key}, not the admin wallet $ADMIN_PUBKEY"
 }
 
+# Returns when nothing is at PROGRAM_ID; stops with what is there when it is not an upgradeable program.
+require_empty_id() {
+  local out owner lamports
+  if out=$(sol_cli account "$PROGRAM_ID" --output json 2>"$WORK/account.err"); then
+    owner=$(printf %s "$out" | json_get account.owner 2>/dev/null) || owner=""
+    lamports=$(printf %s "$out" | json_get account.lamports 2>/dev/null) || lamports=""
+    if [ "$owner" = "$NOBODY" ]; then
+      die "$PROGRAM_ID is an ordinary account holding ${lamports:-some} lamports that someone sent there, so the loader cannot create the program at this id"
+    fi
+    die "$PROGRAM_ID holds an account owned by ${owner:-an unknown program}, not an upgradeable program"
+  fi
+  case "$(cat "$WORK/account.err" 2>/dev/null)" in
+    *AccountNotFound* | *"not found"*) return 0 ;;
+    *) die "could not read $PROGRAM_ID from $HOST: $(head -1 "$WORK/account.err" 2>/dev/null | redact)" ;;
+  esac
+}
+
 # DEPLOYED, CHAIN_AUTHORITY and CHAIN_DATA_LEN for PROGRAM_ID. Only "Unable to find the account"
 # means not deployed; any other error stops here instead of passing for it.
 # --buffer-authority is there because `program show` otherwise loads the default signer, and there is none.
 load_chain_program() {
-  local show out
+  local show errors
   DEPLOYED=no CHAIN_AUTHORITY="" CHAIN_DATA_LEN=0
   if show=$(sol_cli program show "$PROGRAM_ID" --buffer-authority "$ADMIN_PUBKEY" --output json 2>"$WORK/program-show.err"); then
     DEPLOYED=yes
-    CHAIN_AUTHORITY=$(printf %s "$show" | json_get authority)
-    CHAIN_DATA_LEN=$(printf %s "$show" | json_get dataLen)
+    CHAIN_AUTHORITY=$(printf %s "$show" | json_get authority) || die "unexpected output from solana program show"
+    CHAIN_DATA_LEN=$(printf %s "$show" | json_get dataLen) || die "unexpected output from solana program show"
     CHAIN_DATA_LEN=${CHAIN_DATA_LEN:-0}
     return 0
   fi
-  case "$(cat "$WORK/program-show.err" "$show" 2>/dev/null)" in
+  errors=$({ cat "$WORK/program-show.err"; printf '%s\n' "$show"; } 2>/dev/null)
+  require_empty_id
+  case "$errors" in
     *"Unable to find the account"*) ;;
-    *) die "could not read $PROGRAM_ID from $HOST: $(head -1 "$WORK/program-show.err" 2>/dev/null | redact)" ;;
-  esac
-  if out=$(sol_cli account "$PROGRAM_ID" --output json 2>&1); then
-    die "$PROGRAM_ID holds an account that is not an upgradeable program"
-  fi
-  case "$out" in
-    *AccountNotFound* | *"not found"*) ;;
-    *) die "could not read $PROGRAM_ID from $HOST: $(printf %s "$out" | head -1 | redact)" ;;
+    *) die "could not read $PROGRAM_ID from $HOST: $(printf %s "$errors" | head -1 | redact)" ;;
   esac
 }
 
@@ -292,7 +349,11 @@ cmd_preflight() {
     else
       bad "program keypair" "$PROGRAM_KEYPAIR holds $keypair_id, not $DECLARED_ID"
     fi
-    if [ "$DEPLOYED" = yes ]; then bad "on chain" "$PROGRAM_ID is already deployed: use upgrade"; else ok "on chain" "$PROGRAM_ID is free"; fi
+    if [ "$DEPLOYED" = yes ]; then
+      bad "on chain" "$PROGRAM_ID is already deployed: run '$SELF status', and if its bytes are the tested binary the deploy is done; to change them, use upgrade"
+    else
+      ok "on chain" "$PROGRAM_ID is free"
+    fi
   elif [ "$DEPLOYED" = no ]; then
     bad "on chain" "$PROGRAM_ID is not deployed: run deploy first"
   elif [ "$CHAIN_AUTHORITY" = "$ADMIN_PUBKEY" ]; then
@@ -382,20 +443,23 @@ cmd_preflight() {
       buffer_address=$(solana-keygen pubkey "$BUFFER_FILE" 2>/dev/null || true)
       if [ -z "$buffer_address" ]; then
         bad "write buffer" "$BUFFER_FILE is unreadable"
-      elif show=$(sol_cli program show "$buffer_address" --buffer-authority "$ADMIN_PUBKEY" --output json 2>/dev/null); then
-        buffer_authority=$(printf %s "$show" | json_get authority)
-        buffer_len=$(printf %s "$show" | json_get dataLen)
+      elif show=$(sol_cli program show "$buffer_address" --buffer-authority "$ADMIN_PUBKEY" --output json 2>"$WORK/buffer-show.err"); then
+        buffer_authority=$(printf %s "$show" | json_get authority) || die "unexpected output from solana program show"
+        buffer_len=$(printf %s "$show" | json_get dataLen) || die "unexpected output from solana program show"
         if [ "$buffer_authority" != "$ADMIN_PUBKEY" ]; then
           bad "write buffer" "$buffer_address belongs to ${buffer_authority:-nobody}, not the admin wallet"
         elif [ "$buffer_len" != "$SO_BYTES" ]; then
           bad "write buffer" "$buffer_address has room for ${buffer_len:-an unknown number of} bytes, not $SO_BYTES: '$SELF buffers --close' first"
         else
-          buffer_lamports=$(printf %s "$show" | json_get lamports)
+          buffer_lamports=$(printf %s "$show" | json_get lamports) || die "unexpected output from solana program show"
           buffer_lamports=${buffer_lamports:-0}
           note "write buffer" "resuming $buffer_address, which already holds $(sol "$buffer_lamports")"
         fi
       else
-        note "write buffer" "$buffer_address was never created; the upload starts from the beginning"
+        case "$(cat "$WORK/buffer-show.err" 2>/dev/null)" in
+          *"Unable to find the account"*) note "write buffer" "$buffer_address was never created; the upload starts from the beginning" ;;
+          *) bad "write buffer" "could not read $buffer_address from $HOST: $(head -1 "$WORK/buffer-show.err" 2>/dev/null | redact)" ;;
+        esac
       fi
     fi
     local programdata_rent
@@ -417,6 +481,11 @@ cmd_preflight() {
       note "write buffer rent" "$(sol "$buffer_rent"), given back when the bytes land"
       note "ProgramData growth" "$(sol "$grow")"
       need=$((buffer_rent + grow + DEPLOY_FEE_MARGIN - buffer_lamports))
+    fi
+    if [ -n "$SEND_FLAG" ]; then
+      note "upload" "about $((SO_BYTES / BYTES_PER_WRITE + 1)) write transactions through the RPC; one that allows ~1 send a second (a free Helius key) stretches that to 10-20 min, and SIP_DEPLOY_SEND=tpu sends straight to validators"
+    else
+      note "upload" "about $((SO_BYTES / BYTES_PER_WRITE + 1)) write transactions straight to validators (SIP_DEPLOY_SEND=tpu); if they stall, SIP_DEPLOY_SEND=rpc resumes the same buffer"
     fi
   elif [ "$MODE" = configure ]; then
     need=$ADMIN_VERB_MINIMUM
@@ -465,13 +534,16 @@ cmd_deploy() {
   pin_binary
   new_buffer_keypair
   confirm "$PROGRAM_ID" "Publish $SO (sha256 $SO_SHA) as $PROGRAM_ID on $CLUSTER, paid for by and upgradeable only by $ADMIN_PUBKEY."
-  say "deploying; if this stops for any reason, run the same command again"
+  say "deploying: about $((SO_BYTES / BYTES_PER_WRITE + 1)) writes, then the deploy; if this stops for any reason, run the same command again"
+  start_ticker "uploading"
+  # shellcheck disable=SC2086 # SEND_FLAG is one flag or nothing
   sol_cli program deploy "$PINNED" --program-id "$PROGRAM_KEYPAIR" --buffer "$BUFFER_FILE" \
     --upgrade-authority "$ADMIN_KEYPAIR" --fee-payer "$ADMIN_KEYPAIR" --keypair "$ADMIN_KEYPAIR" \
-    --use-rpc --with-compute-unit-price "$CU_PRICE" --max-sign-attempts 100 2>&1 | redact
+    $SEND_FLAG --with-compute-unit-price "$CU_PRICE" --max-sign-attempts 100 2>&1 | redact
+  stop_ticker
   rm -f "$BUFFER_FILE"
   say "what landed"
-  admin_tool status --allow-unconfigured
+  status_until_ok --allow-unconfigured || die "the deploy command finished, but status does not pass: read the lines above"
   say "next: SIP_SETTLE_PUBKEY=<settle wallet address> $SELF configure"
 }
 
@@ -480,14 +552,17 @@ cmd_upgrade() {
   pin_binary
   new_buffer_keypair
   confirm "$PROGRAM_ID" "Replace the bytes of $PROGRAM_ID on $CLUSTER with $SO (sha256 $SO_SHA). The config, vaults, links and policies stay."
-  say "upgrading; if this stops for any reason, run the same command again"
+  say "upgrading: about $((SO_BYTES / BYTES_PER_WRITE + 1)) writes, then the upgrade; if this stops for any reason, run the same command again"
+  start_ticker "uploading"
   # For an upgrade --program-id is the address: the program keypair is not needed, and not read.
+  # shellcheck disable=SC2086 # SEND_FLAG is one flag or nothing
   sol_cli program deploy "$PINNED" --program-id "$PROGRAM_ID" --buffer "$BUFFER_FILE" \
     --upgrade-authority "$ADMIN_KEYPAIR" --fee-payer "$ADMIN_KEYPAIR" --keypair "$ADMIN_KEYPAIR" \
-    --use-rpc --with-compute-unit-price "$CU_PRICE" --max-sign-attempts 100 2>&1 | redact
+    $SEND_FLAG --with-compute-unit-price "$CU_PRICE" --max-sign-attempts 100 2>&1 | redact
+  stop_ticker
   rm -f "$BUFFER_FILE"
   say "what landed"
-  admin_tool status
+  status_until_ok || die "the upgrade command finished, but status does not pass: read the lines above"
 }
 
 cmd_configure() {
@@ -495,7 +570,7 @@ cmd_configure() {
   confirm CONFIGURE "Configure $PROGRAM_ID on $CLUSTER: authority $ADMIN_PUBKEY (admin), attester and keeper $SETTLE_PUBKEY (settle)."
   admin_tool init-config
   say "status"
-  admin_tool status
+  status_until_ok || die "configure finished, but status does not pass: read the lines above"
 }
 
 cmd_panic() {
@@ -566,7 +641,7 @@ case "${1:-}" in
   upgrade) cmd_upgrade ;;
   buffers) cmd_buffers "${2:-}" ;;
   *)
-    sed -n '3,12p' "$SELF" | sed 's/^# \{0,1\}//'
+    sed -n '4,13p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

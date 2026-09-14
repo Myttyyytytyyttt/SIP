@@ -49,6 +49,11 @@ const SETTLE_LOW_LAMPORTS = 0.05 * LAMPORTS_PER_SOL;
 const POLL_MS = 500;
 /** How long a read-back waits for an RPC node that lags behind the confirmation. */
 const READ_BACK_ATTEMPTS = 20;
+/** Refusals a node one slot behind can give. Nothing was sent, so signing again is safe. */
+const TRANSIENT_REFUSAL = /blockhash not found|AccountNotInitialized|could not find account|account not found/i;
+const SEND_ATTEMPTS = 3;
+/** Past this, an RPC whose block height has stopped moving is not waited on any longer. */
+const CONFIRM_WALL_MS = 120_000;
 
 const PACKAGE = join(__dirname, "..");
 const IDL = JSON.parse(readFileSync(join(PACKAGE, "idl", "sip_vault.json"), "utf8")) as Idl;
@@ -364,23 +369,37 @@ async function send(connection: Connection, cluster: Cluster, admin: Keypair, wh
   if (!Number.isInteger(price) || price < 0 || price > 5_000_000) {
     throw new Refused("SIP_DEPLOY_CU_PRICE must be a whole number of micro-lamports, at most 5000000");
   }
-  const tx = new Transaction().add(
-    ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
-    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: price }),
-    ...built.instructions,
-  );
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
-  tx.feePayer = admin.publicKey;
-  tx.recentBlockhash = blockhash;
-  tx.sign(admin);
-  if (tx.signature === null) throw new Error(`${what} could not be signed`);
-  const signature = utils.bytes.bs58.encode(tx.signature);
 
-  try {
-    await connection.sendRawTransaction(tx.serialize(), { preflightCommitment: "confirmed", maxRetries: 5 });
-  } catch (error) {
-    if (refusedBySimulation(error)) throw new Refused(`${what} was refused in simulation, nothing was sent: ${programError(error)}`);
-    say(`  ! sending ${what} returned an error, and it may still land, so its signature is watched: ${oneLine(error)}`);
+  let signature = "";
+  let lastValidBlockHeight = 0;
+  for (let attempt = 1; ; attempt += 1) {
+    const tx = new Transaction().add(
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: price }),
+      ...built.instructions,
+    );
+    const latest = await connection.getLatestBlockhash("confirmed");
+    tx.feePayer = admin.publicKey;
+    tx.recentBlockhash = latest.blockhash;
+    tx.sign(admin);
+    if (tx.signature === null) throw new Error(`${what} could not be signed`);
+    signature = utils.bytes.bs58.encode(tx.signature);
+    lastValidBlockHeight = latest.lastValidBlockHeight;
+    try {
+      await connection.sendRawTransaction(tx.serialize(), { preflightCommitment: "confirmed", maxRetries: 5 });
+      break;
+    } catch (error) {
+      if (!refusedBySimulation(error)) {
+        say(`  ! sending ${what} returned an error, and it may still land, so its signature is watched: ${oneLine(error)}`);
+        break;
+      }
+      const reason = programError(error);
+      // A node a slot behind can refuse a fresh blockhash, or not see the account the previous verb created yet.
+      const transient = TRANSIENT_REFUSAL.test([reason, oneLine(error), ...(logsOf(error) ?? [])].join("\n"));
+      if (!transient || attempt >= SEND_ATTEMPTS) throw new Refused(`${what} was refused in simulation, nothing was sent: ${reason}`);
+      say(`  ! ${what} was refused in simulation (${reason}); nothing was sent, so it is signed again with a fresh blockhash`);
+      await sleep(2_000);
+    }
   }
   say(`  … ${what}: ${signature}`);
 
@@ -390,8 +409,15 @@ async function send(connection: Connection, cluster: Cluster, admin: Keypair, wh
     if (found?.err) throw new Error(`${what} failed on chain (${signature}): ${JSON.stringify(found.err)}`);
     return found?.confirmationStatus === "confirmed" || found?.confirmationStatus === "finalized";
   };
+  // An RPC whose block height stops moving would otherwise keep this loop alive for ever.
+  const deadline = Date.now() + CONFIRM_WALL_MS;
   for (;;) {
     if (await landed()) break;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `${what} is not confirmed after ${CONFIRM_WALL_MS / 1000} s (${signature}): run status, then the verb again; it reads what is already done first.`,
+      );
+    }
     if ((await connection.getBlockHeight("confirmed")) > lastValidBlockHeight) {
       // One node's view: give a lagging one a few more looks before calling it.
       let late = false;
