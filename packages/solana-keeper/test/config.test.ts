@@ -6,10 +6,9 @@
 // On top of it, the two refusals this keeper exists to make: Nuvem's copied
 // configuration and Nuvem's program id.
 
-import { readFileSync } from "node:fs";
 import { inspect } from "node:util";
 import { Keypair } from "@solana/web3.js";
-import { Redactor } from "@sip/worker/log";
+import { Redactor } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
 import {
   BROADCAST_ACK,
@@ -87,10 +86,7 @@ const expectNoSecret = (text: string): void => {
 };
 
 describe("the facts this keeper pins", () => {
-  it("declares the same arming sentence as the worker, read from the worker's source", () => {
-    const source = readFileSync(new URL("../../worker/src/config.ts", import.meta.url), "utf8");
-    const declared = /export const BROADCAST_ACK = "([^"]*)";/.exec(source)?.[1];
-    expect(declared).toBe(BROADCAST_ACK);
+  it("declares the arming sentence, byte for byte", () => {
     expect(BROADCAST_ACK).toBe("i-understand-this-moves-real-funds");
   });
 });

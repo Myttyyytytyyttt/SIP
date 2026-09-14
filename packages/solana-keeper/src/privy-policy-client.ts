@@ -20,7 +20,7 @@
 import { randomUUID } from "node:crypto";
 import { PrivyClient } from "@privy-io/node";
 import { Connection, PublicKey } from "@solana/web3.js";
-import type { Secret } from "@sip/worker/log";
+import type { Secret } from "@sip/solana-log";
 import type { PrivyPolicyClient, ProbeChain } from "./privy-policy-cli.js";
 import { PRIVY_API_URL, SOLANA_MAINNET_CAIP2 } from "./privy-signer.js";
 import { poolFetch } from "./rpc-pool.js";

@@ -9,18 +9,14 @@ import { useWalletsOpener } from "@/components/wallets-host";
 /**
  * LIVE WITH NOTHING IN IT -- which is what Live truly is until a vault exists.
  *
- * THIS COMPONENT IS THE WHOLE POINT OF SEPARATING THE TWO MODES. `loadDashboard`
- * answers every degraded case the same way: `source: "mock"` carrying the SEEDED
- * data and a reason. That is the right answer for a page with one mode -- it is
- * the wrong answer under a control the user has just set to "Live", because it
- * would put a stranger's invented pension under a label promising theirs. So the
- * shell never renders that payload on Live; it renders this, which shows the
- * reason and nothing else.
+ * Kept for the Solana vault screens, and rendered by nothing until they bring a
+ * live loader: today the dashboard shell has no Live mode at all.
  *
- * The reason is `notice`, written by loadDashboard, and it already distinguishes
- * the states that must not be conflated: no vault, a vault with no observed
- * trading wallet, and a wallet with no fills recorded. We do not restate it here
- * -- one sentence, written once, where the fact is known.
+ * THE RULE IT EXISTS FOR. A live loader that cannot read a pension must not answer
+ * with the seeded example under a control the user set to "Live": that would put
+ * a stranger's invented pension under a label promising theirs. The shell renders
+ * this instead, with the loader's own reason as `notice` -- one sentence, written
+ * once, where the fact is known.
  */
 export function LiveEmpty({ notice }: { notice: string | null }) {
   const openWallets = useWalletsOpener();

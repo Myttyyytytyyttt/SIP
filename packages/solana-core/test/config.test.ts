@@ -55,7 +55,7 @@ describe("a valid Solana environment", () => {
     }
   });
 
-  it("ignores EVM variables instead of refusing them", () => {
+  it("ignores variables it does not read, the retired EVM names included", () => {
     expect(loadSolanaServerSettings({ ...valid, NUVEM_RPC_URL: "https://evm.invalid", SIP_CHAIN_ID: "4663", NUVEM_CHAIN_ID: "4663", NUVEM_VAULT_FACTORY: "0x1" }).ok).toBe(true);
   });
 

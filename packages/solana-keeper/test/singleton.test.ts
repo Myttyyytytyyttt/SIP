@@ -13,7 +13,6 @@
 // the database.
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { KEEPER_LOCK_NAME, KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
 
@@ -49,12 +48,6 @@ describe("the lock key", () => {
     expect(expected >= -(2n ** 63n) && expected < 2n ** 63n).toBe(true);
     // And never the worker's own lock: two services on one database must not share a key.
     expect(advisoryKeyFor(KEEPER_LOCK_NAME)).not.toBe(advisoryKeyFor("sip-worker"));
-  });
-
-  it("matches the rule the worker's ledger actually uses", () => {
-    const source = readFileSync(new URL("../../worker/src/ledger/pg.ts", import.meta.url), "utf8");
-    expect(source).toContain('createHash("sha256").update(name).digest()');
-    expect(source).toContain("BigInt.asIntN(64, digest.readBigUInt64BE(0))");
   });
 });
 

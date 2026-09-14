@@ -29,9 +29,11 @@ describe("shared modules", () => {
     }
   });
 
-  it("takes the worker's logger from packages/worker/src/log.ts, not a copy", () => {
-    expect(realpathSync(keeper.resolve("@sip/worker/log"))).toBe(
-      realpathSync(fileURLToPath(new URL("../../worker/src/log.ts", import.meta.url))),
+  it("takes the logger from packages/solana-log/src/log.ts, one copy", () => {
+    // One module instance: config.ts registers secrets into sharedRedactor and
+    // keeper-log.ts scrubs with it, so a second copy would scrub with an empty one.
+    expect(realpathSync(keeper.resolve("@sip/solana-log"))).toBe(
+      realpathSync(fileURLToPath(new URL("../../solana-log/src/log.ts", import.meta.url))),
     );
   });
 

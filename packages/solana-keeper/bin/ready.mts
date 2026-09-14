@@ -20,7 +20,7 @@ import "../src/console-bridge.js";
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { PrivyClient } from "@privy-io/node";
-import { Secret, sharedRedactor, summarizeUpstreamError } from "@sip/worker/log";
+import { Secret, sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
 import { readProtocolConfig } from "../src/accounts.js";
 import { BROADCAST_ACK, copiedConfigProblems, parsePools, parseSettleKey, privySdkOverrideProblems } from "../src/config.js";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID, idl } from "../src/idl.js";
@@ -152,7 +152,7 @@ appId ? ok("SIP_SOLANA_PRIVY_APP_ID presente", appId) : bad("SIP_SOLANA_PRIVY_AP
 appSecret ? ok("SIP_SOLANA_PRIVY_APP_SECRET presente") : bad("SIP_SOLANA_PRIVY_APP_SECRET vacío", "dashboard de Privy → App settings → Basics");
 authorizationKey
   ? ok("SIP_SOLANA_PRIVY_AUTHORIZATION_KEY presente")
-  : bad("SIP_SOLANA_PRIVY_AUTHORIZATION_KEY vacío", "la clave privada de la key quorum (PRIVY_SETUP.md, paso 1)");
+  : bad("SIP_SOLANA_PRIVY_AUTHORIZATION_KEY vacío", "la clave privada de la key quorum (docs/runbooks/PRIVY_SOLANA.md, paso 2)");
 if (appId !== undefined && appSecret !== undefined && sdkOverrides.length > 0) {
   note("no probé las credenciales de Privy", "hay una PRIVY_API_* puesta (sección 0): bórrala y repite");
 } else if (appId !== undefined && appSecret !== undefined) {
@@ -171,12 +171,6 @@ if (appId !== undefined && appSecret !== undefined && sdkOverrides.length > 0) {
 section("4. signer de Solana");
 const signerId = env("SIP_SOLANA_PRIVY_SIGNER_ID");
 signerId ? ok("SIP_SOLANA_PRIVY_SIGNER_ID", signerId) : bad("SIP_SOLANA_PRIVY_SIGNER_ID vacío", "el key quorum ID; sin él, «no concedido» aparece como un envío rechazado");
-// El signer EVM del worker debe seguir siendo otro: compartirlo registraría el
-// signer equivocado en todas las wallets de una de las dos cadenas.
-const evmSigner = env("PRIVY_SIGNER_ID");
-if (evmSigner !== undefined && signerId !== undefined && evmSigner === signerId) {
-  bad("el signer de EVM y el de Solana son el MISMO", "son cadenas distintas; sepáralos o romperás la otra");
-}
 
 section("5. pools de inversión");
 const poolProblems: string[] = [];

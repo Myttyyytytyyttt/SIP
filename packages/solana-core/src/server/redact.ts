@@ -1,10 +1,10 @@
 // Keeping endpoint URLs out of every string that leaves this package.
 //
-// The house rule is the worker's (packages/worker/src/log.ts): a credential is
-// held in a value that will not serialize, revealed only at the point of use,
+// The house rule is SIP's logger's (packages/solana-log/src/log.ts): a credential
+// is held in a value that will not serialize, revealed only at the point of use,
 // and every outgoing string is scrubbed. It is re-implemented here in a few
-// lines rather than imported, because @sip/worker would bring the worker's
-// dependency graph (viem, pg, the Privy SDK) into the web image for two classes.
+// lines rather than imported, so the web image does not take in another
+// workspace package for two classes.
 
 const URL_PATTERN = /\b(?:https?|wss?):\/\/[^\s"'<>`)]+/gi;
 const MIN_NEEDLE = 6;

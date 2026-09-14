@@ -1,13 +1,13 @@
 // The keeper's one way to write a line.
 //
-// EVERY LINE GOES THROUGH THE WORKER'S LOGGER (@sip/worker/log): JSON lines,
+// EVERY LINE GOES THROUGH SIP'S REDACTING LOGGER (@sip/solana-log): JSON lines,
 // scrubbed against the shared redactor that config.ts primes with every
 // endpoint, credential and signing secret it reads, with a suppression marker in
 // place of any line the scrub could not clean. Nuvem's supervisor wrote
 // console.log(JSON.stringify(...)) directly, so the only thing between an RPC
 // error that quoted its endpoint and the container log was the author's memory.
 
-import { createLogger, sharedRedactor, type Logger, type Redactor } from "@sip/worker/log";
+import { createLogger, sharedRedactor, type Logger, type Redactor } from "@sip/solana-log";
 
 export const SERVICE = "sip-solana-keeper";
 
@@ -44,7 +44,7 @@ function withoutByteRuns(sink: (line: string) => void): (line: string) => void {
     } catch {
       suppressedEvent = undefined;
     }
-    // The worker's own suppression shape, so one search finds both kinds.
+    // The logger's own suppression shape (@sip/solana-log), so one search finds both kinds.
     sink(
       JSON.stringify({
         ts: new Date().toISOString(),

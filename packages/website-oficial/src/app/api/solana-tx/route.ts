@@ -24,7 +24,8 @@
  * acknowledged is 502 send_unconfirmed and still carries the signature: confirm
  * it before the owner signs again, or a second write can land.
  *
- * 404 unless SIP_CHAIN=solana. The build actions arrive with the vault screens.
+ * 503, with no detail, when the Solana settings are incomplete or the environment
+ * holds a refused name. The build actions arrive with the vault screens.
  */
 import { solanaTxRoute } from "@/lib/solana-routes";
 

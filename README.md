@@ -1,60 +1,92 @@
 # SIP — Self Implemented Pension
 
-A pension you build one trade at a time. A slice of the **size** of every buy and
-every sell goes aside the moment the order fills, accumulates, and buys the assets
-you chose. Not a slice of profit: of volume. Winning or losing never enters into it.
+A pension you build one trade at a time, on Solana. A slice of your trading goes
+into a vault of your own and buys the assets you chose.
 
-## The constraint that shapes everything
+Each vault chooses how its trading is measured:
 
-**The trading wallet has to work anywhere.** Export the key and trade on GMGN or
-Axiom, or import one you already had, and the skim still happens. That rules out
-every mechanism living in the execution path — EIP-7702 code does not run on an
-EOA's outbound transactions, a Privy policy permits or denies but cannot insert a
-call, and a router of ours would only ever see our own trades.
+- **Volume.** A slice of the size of every buy and every sell, winning or losing.
+  The demo rate is **2 %** (200 bps). The program accepts 0.01 % to 2 %.
+- **Realized profit.** A slice of what the trading made. The demo rate is
+  **20 %** (2,000 bps). The program accepts 2.01 % to 100 %.
 
-So the skim is **observed on chain after the fill** and **pulled** from the wallet
-afterwards, through a policy-bounded Privy signer seat. Collection is best-effort
-and the product says so: the pull takes `min(owed, balance − reserve)` and carries
-the shortfall forward, because a wallet full of tokens has no ETH to pay with.
+What is put aside accumulates in the vault and is invested under the policy the
+vault's owner signed. The demo policy buys every **$5**.
+
+## How the slice is collected
+
+**The trading wallet has to work anywhere.** Trade on GMGN, Axiom or your own
+router and the slice is still collected. That rules out anything in the
+execution path: a Privy policy can allow or deny a transaction but cannot add an
+instruction to it, and a router of ours would only ever see our own trades.
+
+So the keeper (`packages/solana-keeper`) works from the chain after the fact. It
+finds every trading wallet linked to a vault, measures what that wallet traded
+since its last settlement, attests the figure and settles it with `settle_v2`.
+The trading wallet signs that transaction through a Privy signer seat. A Solana
+policy limits the seat to transactions built only from the SIP program's
+instructions and Ed25519 signature checks. A settlement pays at most the vault's
+maximum contribution and is refused if it would leave the wallet below its
+reserve. The same keeper invests what has accumulated, as far as the owner's
+investment policy allows.
+
+The keeper runs dry by default. A dry run reads no signing secret and only
+reports what it would settle. Moving funds takes an explicit arming variable,
+and the on-chain configuration must name the keeper's key.
 
 ## Layout
 
 ```
-packages/contracts            the vault system, and SipVolumeExecutor
-packages/contracts-artifacts  ABIs and bytecode, exported deterministically
-packages/worker               @sip/worker — observe, attest, pull
-packages/website-oficial      @sip/web — the dashboard, and /wallets
+packages/solana-program   Anchor workspace: the sip-vault program and its IDL, and toy-venue, the venue its invest guards are tested against
+packages/solana-core      @sip/solana-core: the IDL codec the browser may load, and the server-only relay, verifier and builders behind the web's Solana routes
+packages/solana-keeper    @sip/solana-keeper: discovers links, settles and invests; dry run by default
+packages/solana-log       @sip/solana-log: the keeper's redacting logger
+packages/website-oficial  @sip/web: the landing, the example dashboard, /wallets, /api/solana-rpc and /api/solana-tx
+tools/landing-shot        regenerates the landing's screenshot of the dashboard (not a workspace package)
+archive/evm               the retired EVM stack (Robinhood Chain): kept for its history, not installed, built, tested or deployed
 ```
 
 ## Quick start
 
 ```bash
 pnpm install
-pnpm --dir packages/website-oficial dev     # the site on :3002
-pnpm --dir packages/worker tick             # one worker pass, dry run
-pnpm test                                   # contracts + worker
+pnpm dev          # the site on http://localhost:3002 (localhost, not 127.0.0.1)
+pnpm typecheck    # solana-log, solana-core, solana-keeper and the web
+pnpm test         # the same four packages
+pnpm test:keeper  # the keeper alone
+pnpm build        # the web's production build; its prebuild runs check:csp and check:idl
 ```
 
-Nothing is deployed. The worker refuses to start without `SIP_VAULT_FACTORY` and
-`SIP_SETTLEMENT_EXECUTOR`, on purpose: this project does not reuse the deployment
-it was forked from, whose trading accounts carry a savings rate meaning a
-*percentage of profit*. Applying that rate to a volume would skim roughly a
-hundred times what a user agreed to. See `docs/runbooks/DEPLOYMENT.md`.
+The landing and the example dashboard need no environment. Connect, `/wallets`
+and the Solana routes read the variables in
+[`packages/website-oficial/.env.example`](packages/website-oficial/.env.example).
 
-## Where the reasoning lives
+The program has its own toolchain. `pnpm --dir packages/solana-program test`
+runs `anchor test` against a local validator and is not part of `pnpm test`.
 
-- `reports/SIP_BACKEND_ASSESSMENT_2026-09-07.md` — why this architecture and not
-  another. Annex D is the part worth reading: five adversarial verifications, all
-  of which came back "partially", each one changing the design.
-- `reports/PENDING_REVIEW_FINDINGS_2026-09-07.md` — what a 35-finding review
-  fixed, and the three things still open.
-- `packages/worker/DESIGN.md` — how the observer decides what a fill is worth, and
-  when it refuses to decide.
-- `docs/security/THREAT_MODEL.md` — what SIP is trusted for, and what bounds it.
+## Where things are written down
+
+- [docs/runbooks/RAILWAY_SOLANA.md](docs/runbooks/RAILWAY_SOLANA.md) — deploying
+  the keeper and the web on Railway: every variable, which ones are secret, and
+  when each is added.
+- [docs/runbooks/PRIVY_SOLANA.md](docs/runbooks/PRIVY_SOLANA.md) — the keeper's
+  Privy signer, the policy that bounds it, and what that policy does not prevent.
+- [docs/runbooks/SECRETS.md](docs/runbooks/SECRETS.md) — which keys exist, where
+  each one lives, and the rules that keep them out of chats and servers.
+- [reports/SIP_SOLANA_BACKEND_ASSESSMENT_2026-09-13.md](reports/SIP_SOLANA_BACKEND_ASSESSMENT_2026-09-13.md)
+  — the old Solana backend read from the chain, and why SIP deploys a fresh
+  program with separate keys.
+- [reports/SIP_SOLANA_ROADMAP_2026-09-13.md](reports/SIP_SOLANA_ROADMAP_2026-09-13.md)
+  — the hackathon plan, task by task.
+- [packages/website-oficial/README.md](packages/website-oficial/README.md) and
+  [packages/solana-core/README.md](packages/solana-core/README.md).
+
+The runbooks and reports are in Spanish.
 
 ## State
 
-Worker: 511 tests. Contracts: 425 tests. The site builds with a 69-fragment ABI
-check against the artifacts. A dry-run pass has run against Robinhood Chain
-mainnet and reconstructed real fills to the wei — but nothing has ever collected
-a single wei, because no SIP deployment exists yet.
+Beta, built for the Stocklana hackathon. The dashboard shows example data until
+the Solana vault screens land, and `/wallets` is a placeholder. The keeper
+stays dry unless it is armed. The SIP program
+(`6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J`) is upgradeable by its upgrade
+authority, today a single team key with no timelock.

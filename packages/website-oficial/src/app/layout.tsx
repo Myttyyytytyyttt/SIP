@@ -16,7 +16,7 @@ const mono = Geist_Mono({ subsets: ["latin"], variable: "--font-mono", display: 
 export const metadata: Metadata = {
   title: "SIP — Self Implemented Pension",
   description:
-    "A pension you build one trade at a time. A slice of every buy and sell is put aside and invested in the assets you chose.",
+    "A pension you build one trade at a time. A slice of your trading is put aside and invested in the assets you chose.",
   // NO `icons` KEY ON PURPOSE. Declaring one here overrides Next's file
   // convention, and the icons now come from src/app/{favicon.ico,icon.png,
   // apple-icon.png} — generated from the brand mark, content-hashed, and

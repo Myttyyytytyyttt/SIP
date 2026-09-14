@@ -24,7 +24,7 @@ import "../src/console-bridge.js";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateP256KeyPair } from "@privy-io/node";
-import { sharedRedactor, summarizeUpstreamError } from "@sip/worker/log";
+import { sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
 import { createKeeperLogger } from "../src/keeper-log.js";
 import { findRepositoryRoot } from "../src/privy-policy.js";
 import { runPrivyPolicyCli } from "../src/privy-policy-cli.js";

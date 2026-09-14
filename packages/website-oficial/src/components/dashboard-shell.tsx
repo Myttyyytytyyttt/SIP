@@ -3,45 +3,36 @@
 /**
  * WHOSE NUMBERS, AND WHETHER THEY ARE REAL. Both questions, answered in one place.
  *
- * THE PROBLEM THIS SOLVES. `/` is a server component and Privy is a browser
- * thing, so the server cannot know who is looking; page.tsx said as much in its
- * own header and, for want of an answer, rendered the seeded mock to everyone.
- * Nothing in the app ever set `?admin=` -- the deep link existed and had no
- * producer. This component is the producer: it reads the pension key from Privy
- * in the browser and asks `/api/dashboard` for that person, a route that was
- * written for exactly this and until now had zero callers.
+ * `/` is a server component and Privy is a browser thing, so the server cannot
+ * know who is looking. This component asks Privy in the browser whether there
+ * is a session, and decides between the landing and the dashboard by that; the
+ * pension key (src/lib/pension-key.ts) says whether the session has one.
  *
- * WHY THE MOCK IS STILL RENDERED ON THE SERVER. It arrives as a prop, complete,
- * so switching to Mock costs no request and cannot fail. Live is the one that
- * goes to the network, which is the right way round: the example should never be
- * the thing that breaks.
+ * THERE IS NO LIVE DATA YET. It arrives with the Solana vault screens, and until
+ * then nothing is fetched: whoever walks in, connected or not, sees the example
+ * under its Sample data badge with Live greyed out, and one note says why. The
+ * note never tells anyone to switch to a control they cannot use.
  *
- * THE RULE THAT MATTERS. On Live, a payload that comes back `source: "mock"` is
- * NOT rendered. loadDashboard answers every degraded case with the seeded data
- * plus a reason -- correct for one mode, dishonest under a control the user set
- * to "Live". It renders LiveEmpty and the reason instead. The badge, meanwhile,
- * always reads the payload actually on screen, never this component's state, so
- * the label and the numbers cannot disagree.
+ * WHY THE MOCK IS RENDERED ON THE SERVER. It arrives as a prop, complete, so the
+ * example costs no request and cannot fail. The badge reads the payload actually
+ * on screen, never the toggle, so the label and the numbers cannot disagree.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { usePrivy } from "@privy-io/react-auth";
-import type { Address } from "viem";
 
 import { DashboardSource } from "@/components/DashboardSource";
 import { DashboardWallets } from "@/components/dashboard-wallets";
 import { DataModeToggle, type DataMode } from "@/components/data-mode";
 import { Landing } from "@/components/landing";
-import { LiveEmpty } from "@/components/live-empty";
 import { PensionPanel } from "@/components/pension-panel";
 import { SavingsRulePanel } from "@/components/savings-rule-panel";
 import { SavingsStrip } from "@/components/savings-strip";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
-import { pensionKeyOf } from "@/components/wallets/WalletsScreen";
+import { pensionKeyOf } from "@/lib/pension-key";
 import type { DashboardMock } from "@/mocks";
 
 export interface DashboardLoadJson {
@@ -50,37 +41,32 @@ export interface DashboardLoadJson {
   readonly notice: string | null;
 }
 
-/** The live payload plus the key it was fetched for, so a key change cannot show stale numbers. */
-type LiveState =
-  | { readonly status: "idle" }
-  | { readonly status: "loading"; readonly admin: Address }
-  | { readonly status: "ready"; readonly admin: Address; readonly load: DashboardLoadJson }
-  | { readonly status: "failed"; readonly admin: Address; readonly detail: string };
+/** The one note over the example, for everyone, until there is live data to show. */
+const SAMPLE_NOTICE = "Example data. Nobody’s pension. Live data arrives with the Solana vault screens.";
+
+/** The note instead, for a session with no pension key: what to do about it. */
+const KEYLESS_NOTICE =
+  "Example data. Nobody’s pension. This session has no Solana wallet: disconnect, then connect Phantom, Backpack, Solflare or another Solana wallet.";
+
+/** Live is disabled and Mock is already selected, so the control has nothing to change. */
+const keepMock = (): void => undefined;
 
 export function DashboardShell({
   mock,
-  pinnedAdmin,
-  initialLive,
   initialMode = "live",
   walletsConfigured,
 }: {
-  /** The seeded example, rendered on the server so Mock never needs the network. */
+  /** The seeded example, rendered on the server so it never needs the network. */
   mock: DashboardLoadJson;
-  /** `?admin=0x…` from the URL: a deep link, and the one identity the server can know. */
-  pinnedAdmin: Address | null;
-  /** What the server already loaded for `pinnedAdmin`, so the deep link does not refetch. */
-  initialLive: DashboardLoadJson | null;
-  /** `?mode=mock` opens on the example. */
+  /** `?mode=mock` opens on the example instead of the landing. */
   initialMode?: DataMode;
   /** Whether the wallets modal has a configuration; the landing's Connect depends on it. */
   walletsConfigured: boolean;
 }) {
-  const { ready, user, login } = usePrivy();
+  const { ready, user, login, logout } = usePrivy();
 
   // ENTERED WITHOUT A KEY. The landing lets a visitor walk into the example
-  // without connecting — scroll, or click the screenshot. Nothing about them is
-  // known, so Live is not merely empty, it is impossible: the toggle greys it
-  // out, and the example stays under its Sample data badge until a key exists.
+  // without connecting — scroll, or click the screenshot.
   const [entered, setEntered] = useState(initialMode === "mock");
   // Entering pushes the URL the links already carry, so the hydrated path and
   // the no-JS path converge: reload lands on the example, Back returns to the
@@ -96,119 +82,43 @@ export function DashboardShell({
   }, []);
 
   // The pension key is derived, never stored: the app keeps no copy of who you
-  // are, so a disconnect is a disconnect (WalletsScreen.pensionKeyOf).
+  // are, so a disconnect is a disconnect.
   const pensionKey = useMemo(() => (user === null ? null : pensionKeyOf(user)), [user]);
-  const admin: Address | null = pinnedAdmin ?? pensionKey;
 
-  const [mode, setMode] = useState<DataMode>(initialMode);
-  const [live, setLive] = useState<LiveState>(
-    pinnedAdmin !== null && initialLive !== null
-      ? { status: "ready", admin: pinnedAdmin, load: initialLive }
-      : { status: "idle" },
-  );
-
-  const needsFetch =
-    admin !== null &&
-    mode === "live" &&
-    (live.status === "idle" || (live.status !== "loading" && live.admin !== admin));
-
-  // KEYED ON A GENERATION, NOT CANCELLED IN CLEANUP. A first version dropped
-  // the answer when the effect re-ran, and left `live` at "loading" with nothing
-  // that would ever refetch: a Mock click during the skeleton, or a key change
-  // mid-load, stranded a connected user on a skeleton until reload. Now an
-  // old answer is simply ignored, and the render never draws a payload that was
-  // fetched for another key.
-  const generation = useRef(0);
-  useEffect(() => {
-    if (!needsFetch || admin === null) return;
-    const mine = ++generation.current;
-    setLive({ status: "loading", admin });
-    // No cache: a pull that landed a minute ago should show, and this is one
-    // request per switch, not a poll.
-    fetch(`/api/dashboard?admin=${admin}`, { cache: "no-store" })
-      .then(async (response) => {
-        const body: unknown = await response.json();
-        if (!response.ok) throw new Error(`the dashboard service answered ${response.status}`);
-        return body as DashboardLoadJson;
-      })
-      .then((load) => {
-        if (generation.current === mine) setLive({ status: "ready", admin, load });
-      })
-      .catch((error: unknown) => {
-        if (generation.current === mine) {
-          setLive({ status: "failed", admin, detail: error instanceof Error ? error.message : "unknown error" });
-        }
-      });
-  }, [needsFetch, admin]);
-
-  // A person who walked in on the example and then connects should land on
-  // their own numbers — unless they have touched the toggle themselves.
-  const touched = useRef(false);
-  const onModeChange = useCallback((next: DataMode) => {
-    touched.current = true;
-    setMode(next);
-  }, []);
-  const hadKey = useRef(admin !== null);
-  useEffect(() => {
-    if (admin !== null && !hadKey.current && !touched.current) setMode("live");
-    hadKey.current = admin !== null;
-  }, [admin]);
-
-  // THE FRONT DOOR DOES NOT WAIT FOR PRIVY. It used to: a skeleton until
-  // `ready`, so a returning user never saw a Connect button flash before the
-  // dashboard. Measured in a headless browser, `ready` never came, and the
-  // page stayed blank for as long as anyone cared to wait — a front door that
+  // THE FRONT DOOR DOES NOT WAIT FOR PRIVY. Measured in a headless browser,
+  // `ready` never came, and a page gated on it stayed blank — a front door that
   // depends on a third party's initialisation to open at all. So the landing
   // renders at once; only its Connect button waits (it shows a placeholder
-  // until Privy can act), and when Privy does resolve with a key, this
-  // component simply re-renders into the dashboard. A returning user sees the
-  // landing for the length of that handshake, which is the better trade.
-  if (admin === null && !entered) return <Landing onEnter={onEnter} walletsConfigured={walletsConfigured} />;
+  // until Privy can act), and when Privy resolves with a session, this component
+  // simply re-renders into the dashboard.
+  //
+  // BY SESSION, NOT BY KEY. A session with no external Solana wallet (one
+  // restored from the old EVM site on this origin, say) has no pension key. On
+  // the landing it would be stuck: Privy ignores login() for a user who is
+  // already signed in. So it gets the example, a note, and a real Disconnect.
+  if (user === null && !entered) return <Landing onEnter={onEnter} walletsConfigured={walletsConfigured} />;
 
-  // With no key there is no Live. The control shows that rather than hiding it.
-  const control = <DataModeToggle mode={admin === null ? "mock" : mode} onModeChange={onModeChange} disabled={admin === null} />;
+  // Live is impossible until there is live data, connected or not. The control
+  // shows that rather than hiding it.
+  const control = <DataModeToggle mode="mock" onModeChange={keepMock} disabled />;
 
-  if (admin === null) {
-    // Browse mode, honestly: the notice does not tell the visitor to switch to
-    // a control that is disabled, and the header wears a real Connect instead
-    // of the example's fake wallet menu. `ready` gates it exactly as the
-    // landing's does — on an incomplete deployment there is no provider.
-    return (
-      <Body
-        load={{ ...mock, notice: "Example data. Nobody\u2019s pension \u2014 connect to see your own." }}
-        control={control}
-        account={
-          <Button size="sm" onClick={() => login()} disabled={!ready}>
-            Connect
-          </Button>
-        }
-      />
+  // The header wears a real Connect or a real Disconnect, never the example's
+  // fake wallet menu: a Privy session exists or it does not. `ready` gates both —
+  // on an incomplete deployment there is no provider.
+  const account =
+    user === null ? (
+      <Button size="sm" onClick={() => login()} disabled={!ready}>
+        Connect
+      </Button>
+    ) : (
+      <Button size="sm" variant="outline" onClick={() => void logout()} disabled={!ready}>
+        Disconnect
+      </Button>
     );
-  }
 
-  if (mode === "live") {
-    if (live.status === "loading" || live.status === "idle" || live.admin !== admin) {
-      return <Chrome control={control} admin={admin} now={mock.data.now} loading />;
-    }
-    if (live.status === "failed") {
-      return (
-        <Chrome control={control} admin={admin} now={mock.data.now}>
-          <LiveEmpty notice={`The dashboard could not be read: ${live.detail}.`} />
-        </Chrome>
-      );
-    }
-    // THE RULE: a mock payload is never drawn under the Live label.
-    if (live.load.source === "mock") {
-      return (
-        <Chrome control={control} admin={admin} now={mock.data.now}>
-          <LiveEmpty notice={live.load.notice} />
-        </Chrome>
-      );
-    }
-    return <Body load={live.load} control={control} />;
-  }
+  const notice = user !== null && pensionKey === null ? KEYLESS_NOTICE : SAMPLE_NOTICE;
 
-  return <Body load={mock} control={control} />;
+  return <Body load={{ ...mock, notice }} control={control} account={account} />;
 }
 
 /** The full dashboard for one payload. Every component takes exactly the slice it renders. */
@@ -264,49 +174,6 @@ function Body({
         </main>
       </div>
 
-      <SiteFooter now={now} />
-    </div>
-  );
-}
-
-/**
- * Header and footer around something that is not a dashboard. The header needs a
- * wallet to render its menu; it gets the example's, which is why the sidebar --
- * where an address is copyable and could be mistaken for the user's own -- is
- * deliberately absent here.
- */
-function Chrome({
-  control,
-  admin,
-  now,
-  children,
-  loading = false,
-}: {
-  control: React.ReactNode;
-  /** The pension key actually on screen. NEVER the example's address. */
-  admin: Address;
-  now: string;
-  children?: React.ReactNode;
-  loading?: boolean;
-}) {
-  // THE HEADER MUST NOT WEAR SOMEBODY ELSE'S ADDRESS. It used to take the
-  // example's wallet, which is a plausible-looking 0x7a3f… that a person would
-  // read as their own — under a control set to "Live", next to a card saying
-  // there is nothing saved. The balance is 0 because that is what is known: no
-  // vault means no balance to state, and stating one would be inventing it.
-  const wallet = { address: admin, network: "Robinhood Chain", label: "Pension key", balanceUsd: 0 };
-
-  return (
-    <div className="flex min-h-dvh flex-col">
-      <SiteHeader wallet={wallet} activity={[]} now={now} control={control} />
-      {loading ? (
-        <main className="flex flex-1 flex-col gap-4 p-4 lg:gap-6 lg:p-6">
-          <Skeleton className="h-8 w-full max-w-md" />
-          <Skeleton className="h-64 w-full" />
-        </main>
-      ) : (
-        children
-      )}
       <SiteFooter now={now} />
     </div>
   );

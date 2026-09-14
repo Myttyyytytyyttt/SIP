@@ -13,7 +13,7 @@
 
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, Transaction } from "@solana/web3.js";
-import { summarizeUpstreamError } from "@sip/worker/log";
+import { summarizeUpstreamError } from "@sip/solana-log";
 import { readVault } from "./accounts.js";
 import type { ManagedLink } from "./discovery.js";
 import { measureSince } from "./measure-window.js";

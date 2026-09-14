@@ -21,8 +21,8 @@ import { cn } from "@/lib/utils";
 // The leaf, not the barrel: `@/mocks` also re-exports the seeded dataset, and this file ships to the browser.
 import { tickerLogo, type ActivityEvent, type InvestedEvent, type SavingsRule, type SavingsStats } from "@/mocks/types";
 
-/** The reference's ½ · 2x · MAX, as slices of volume — in basis points. */
-const RATE_PRESETS = [10, 20, 50] as const;
+/** Three volume rates, in basis points: 0.5%, 1% and 2%. The last is the program's ceiling and the demo's rate. */
+const RATE_PRESETS = [50, 100, 200] as const;
 /**
  * The slider's range, in basis points: 0.01% to 2% of every fill — the volume
  * rates the SIP program accepts (VOLUME_BPS_MIN..VOLUME_BPS_MAX in

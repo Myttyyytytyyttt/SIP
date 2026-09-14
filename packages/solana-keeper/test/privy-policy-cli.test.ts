@@ -21,7 +21,7 @@ import {
   generateP256KeyPair,
 } from "@privy-io/node";
 import { Keypair, SystemInstruction, SystemProgram, Transaction } from "@solana/web3.js";
-import { Redactor, type Secret } from "@sip/worker/log";
+import { Redactor, type Secret } from "@sip/solana-log";
 import { afterAll, describe, expect, it } from "vitest";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "../src/idl.js";
 import { SERVICE } from "../src/keeper-log.js";

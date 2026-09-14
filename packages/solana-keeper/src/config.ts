@@ -1,6 +1,6 @@
 // Environment loading. Refuses to start rather than guessing.
 //
-// The doctrine is the worker's (packages/worker/src/config.ts): a dry run needs
+// The doctrine is the EVM worker's (now in archive/evm): a dry run needs
 // no secret and READS none, going live takes an exact sentence compared byte for
 // byte, and a refusal names the variable and never its value. The variables are
 // the keeper's own, SIP_SOLANA_*, and Nuvem's names are not aliases but refusals.
@@ -40,15 +40,15 @@
 import { createHash } from "node:crypto";
 import * as anchor from "@coral-xyz/anchor";
 import { Keypair, PublicKey } from "@solana/web3.js";
-import { Redactor, Secret, sharedRedactor } from "@sip/worker/log";
+import { Redactor, Secret, sharedRedactor } from "@sip/solana-log";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "./idl.js";
 
 /**
  * The literal acknowledgement that arms the keeper. Nothing else does.
  *
- * REDECLARED, NOT IMPORTED: the worker's config.ts drags viem and the worker's
- * whole type graph behind it. test/config.test.ts reads that file as text and
- * asserts it declares this same sentence, so the two cannot drift apart.
+ * REDECLARED, NOT IMPORTED: the same sentence the EVM worker (now archived)
+ * declared, byte for byte. test/config.test.ts pins the literal, so changing it
+ * takes a deliberate edit in two places.
  */
 export const BROADCAST_ACK = "i-understand-this-moves-real-funds";
 

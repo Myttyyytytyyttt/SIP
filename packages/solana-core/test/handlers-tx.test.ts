@@ -115,16 +115,13 @@ describe("send", () => {
     expect(upstream.calls).toHaveLength(0);
   });
 
-  it("text/plain is 415, cross-site is 403, a body over 4096 bytes is 413, GET is 405, off-chain is 404", async () => {
+  it("text/plain is 415, cross-site is 403, a body over 4096 bytes is 413, GET is 405", async () => {
     const { handler, upstream, link } = setup(happy);
     expect((await handler.POST(post({ action: "send", signedTxBase64: link.base64 }, { "content-type": "text/plain" }))).status).toBe(415);
     expect((await handler.POST(post({ action: "send", signedTxBase64: link.base64 }, { "sec-fetch-site": "cross-site" }))).status).toBe(403);
     expect((await handler.POST(post({ action: "send", signedTxBase64: link.base64, pad: "x".repeat(5_000) }))).status).toBe(413);
     expect(handler.GET().status).toBe(405);
     expect(upstream.calls).toHaveLength(0);
-    const off = setup(happy, { kind: "disabled" });
-    const response = await read(await off.handler.POST(post({ action: "send", signedTxBase64: link.base64 })));
-    expect([response.status, response.json.error?.code]).toEqual([404, "not_enabled"]);
   });
 });
 

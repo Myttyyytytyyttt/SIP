@@ -14,32 +14,23 @@
  *
  * IT ALWAYS OPENS. An earlier shape handed back a null opener when the server
  * could not assemble a config, and the trigger fell back to a plain link to
- * /wallets — so on any half-configured deployment (which is every deployment
- * before the contracts exist) clicking "Manage wallets" NAVIGATED AWAY, the one
- * thing this component was built to prevent, and did it silently: the click
- * looked like a broken modal rather than a missing variable. Now the config
- * decides WHICH modal opens, never WHETHER one does. Without a config it is
- * WalletsSetupModal, which needs no provider and no chain and names what is
+ * /wallets — so on any half-configured deployment clicking "Manage wallets"
+ * NAVIGATED AWAY, the one thing this component was built to prevent, and did it
+ * silently: the click looked like a broken modal rather than a missing variable.
+ * Now the config decides WHICH modal opens, never WHETHER one does. Without a
+ * config it is WalletsSetupModal, which needs no provider and names what is
  * missing.
  *
- * PRIVY IS NOT MOUNTED UNTIL ASKED FOR. <Providers> builds PrivyProvider, which
- * mounts iframes and talks to auth.privy.io. A visit that never opens the modal
- * should pay none of that, so the provider appears on the first open and stays —
- * a second open is instant and the session survives closing.
- *
- * UNDER SIP_CHAIN=solana the provider is the Solana one, and the modal is a
- * placeholder: the real WalletsModal is EVM through and through and must not
- * mount there.
+ * THE MODAL IS A PLACEHOLDER until the Solana wallet screens exist:
+ * SolanaWalletsPendingModal, which says so.
  */
 
 import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
 
 import Providers from "@/app/providers";
 import { SolanaWalletsPendingModal } from "@/components/wallets/SolanaWalletsPendingModal";
-import { WalletsModal } from "@/components/wallets/WalletsModal";
 import { WalletsSetupModal } from "@/components/wallets/WalletsSetupModal";
-import { isSolana } from "@/lib/chain-kind";
-import type { AnyPublicConfig, ConfigProblem } from "@/lib/config";
+import type { ConfigProblem, SolanaPublicConfig } from "@/lib/config";
 
 /** null only OUTSIDE a host — inside one there is always a modal to open. */
 const OpenerContext = createContext<(() => void) | null>(null);
@@ -54,7 +45,7 @@ export function WalletsHost({
   problems,
   children,
 }: {
-  config: AnyPublicConfig | null;
+  config: SolanaPublicConfig | null;
   /** Why there is no config. Ignored when there is one. */
   problems?: readonly ConfigProblem[];
   children: ReactNode;
@@ -70,26 +61,14 @@ export function WalletsHost({
   return (
     <OpenerContext.Provider value={opener}>
       {config !== null ? (
-        // THE PROVIDER NOW WRAPS THE TREE, and no longer sits beside it.
-        //
-        // It used to mount lazily, next to `children`, so a visitor who never
-        // opened the wallets modal never paid for Privy. That was right while
-        // nothing above the modal needed to know who was connected. It stopped
-        // being right when the page itself became the answer to "whose pension
-        // is this": the shell reads the pension key to decide between the
-        // landing and the dashboard, and a hook cannot reach a provider that is
-        // its sibling.
-        //
-        // The MODAL is still lazy, which is where the weight actually was.
+        // THE PROVIDER WRAPS THE TREE, and does not sit beside it: the shell
+        // reads the pension key to decide between the landing and the dashboard,
+        // and a hook cannot reach a provider that is its sibling. The MODAL is
+        // still lazy, mounted on the first open and kept, so a second open is
+        // instant.
         <Providers config={config}>
           {children}
-          {mounted ? (
-            isSolana(config) ? (
-              <SolanaWalletsPendingModal open={open} onOpenChange={setOpen} />
-            ) : (
-              <WalletsModal config={config} open={open} onOpenChange={setOpen} />
-            )
-          ) : null}
+          {mounted ? <SolanaWalletsPendingModal open={open} onOpenChange={setOpen} /> : null}
         </Providers>
       ) : (
         <>

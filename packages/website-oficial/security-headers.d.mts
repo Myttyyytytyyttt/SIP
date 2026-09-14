@@ -1,20 +1,18 @@
 /**
  * The types for security-headers.mjs, which stays plain JavaScript so
- * next.config.mjs (which cannot import TypeScript) and the middleware read the
+ * next.config.mjs (which cannot import TypeScript) and src/proxy.ts read the
  * SAME policy object. A second spelling of it is how a CSP drifts from what
  * anything checks it against.
  */
-export type ChainKind = "evm" | "solana";
-
 export interface CspOptions {
-  /** Default: SIP_CHAIN at call time (chainKind()). */
-  readonly chain?: ChainKind;
-  /** Extra connect-src origins. Default: the chain's own list (EVM wallet-RPC overrides, or the Solana WebSocket). */
+  /**
+   * Extra connect-src origins, each reduced to its origin. Default: the browser's
+   * Solana WebSocket (SIP_SOLANA_PUBLIC_WS_URL when it passes the key-free rule,
+   * otherwise the public default).
+   */
   readonly extraOrigins?: readonly (string | null | undefined)[];
 }
 
-export declare function chainKind(): ChainKind;
 export declare function endpointOrigin(value: unknown): string | null;
-/** An array is the pre-SIP_CHAIN signature: the EVM policy with those overrides. */
-export declare function buildCsp(options?: CspOptions | readonly (string | null | undefined)[]): string;
+export declare function buildCsp(options?: CspOptions): string;
 export declare function securityHeaders(): readonly { readonly key: string; readonly value: string }[];

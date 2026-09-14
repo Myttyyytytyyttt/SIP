@@ -17,7 +17,7 @@
 import "../src/console-bridge.js";
 import { readFileSync } from "node:fs";
 import pg from "pg";
-import { sharedRedactor, summarizeUpstreamError } from "@sip/worker/log";
+import { sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
 import { createKeeperLogger } from "../src/keeper-log.js";
 import { READ_MODEL_SCHEMA, READ_MODEL_TABLES, sslFor } from "../src/read-model.js";
 

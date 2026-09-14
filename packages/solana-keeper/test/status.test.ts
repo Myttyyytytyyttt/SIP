@@ -9,7 +9,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Keypair } from "@solana/web3.js";
-import { Redactor } from "@sip/worker/log";
+import { Redactor } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
 import { BROADCAST_ACK, loadConfig } from "../src/config.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";

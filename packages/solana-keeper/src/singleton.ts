@@ -23,14 +23,14 @@ export const KEEPER_LOCK_NAME = "sip-solana-keeper";
 /**
  * A 64-bit key for pg_try_advisory_lock, derived from a name.
  *
- * THE WORKER'S DERIVATION, REIMPLEMENTED RATHER THAN IMPORTED. The function
- * lives in packages/worker/src/ledger/pg.ts, and importing that file drags the
- * worker's whole ledger graph (viem, its types, its Postgres ledger) into a
- * process that needs four lines of it. Nuvem's keeper used a hand-typed hex
- * literal instead; a derived key means two services on one database can only
- * collide if they choose the same NAME, which is a thing a human can see. The
- * test pins the value by recomputing sha256 itself, so a drift from the worker's
- * rule fails there.
+ * THE WORKER'S DERIVATION, REIMPLEMENTED RATHER THAN IMPORTED. The EVM worker,
+ * now archived under archive/evm, derived its ledger lock the same way; the
+ * keeper never imported that file, because it dragged the worker's whole ledger
+ * graph (viem, its types, its Postgres ledger) into a process that needs four
+ * lines of it. Nuvem's keeper used a hand-typed hex literal instead; a derived
+ * key means two services on one database can only collide if they choose the
+ * same NAME, which is a thing a human can see. The test pins the value by
+ * recomputing sha256 itself, so a drift from this rule fails there.
  */
 export function advisoryKeyFor(name: string): bigint {
   const digest = createHash("sha256").update(name).digest();

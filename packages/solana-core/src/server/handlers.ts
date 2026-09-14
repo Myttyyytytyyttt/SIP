@@ -1,11 +1,11 @@
 // /api/solana-rpc and /api/solana-tx as injectable Fetch handlers.
 //
 // The web's route files stay thin: they build one handler per process with a
-// `gate` that reads SIP_CHAIN and the settings at request time, and export its
-// POST and GET. Tests build fresh handlers with fake clocks, stub upstreams and
-// their own limiters, so no state leaks between cases. Nothing here imports Next.
+// `gate` that reads the settings at request time, and export its POST and GET.
+// Tests build fresh handlers with fake clocks, stub upstreams and their own
+// limiters, so no state leaks between cases. Nothing here imports Next.
 //
-// ORDER, /api/solana-rpc: chain gate → cross-site refusal → content type → one
+// ORDER, /api/solana-rpc: settings gate → cross-site refusal → content type → one
 // token from the client's own bucket, then from its network's (before the body
 // is read) → capped body read → validation → an in-flight slot → the remaining
 // weight and the process-wide budgets → upstream, the slot given back in finally.
@@ -41,9 +41,7 @@ import { simulateAndSend } from "./send";
 import { verifySignedTransaction, type VerifyRefusal } from "./verify-tx";
 
 export type SolanaGate =
-  /** SIP_CHAIN is not solana: the route does not exist here (404). */
-  | { readonly kind: "disabled" }
-  /** SIP_CHAIN=solana but the settings have problems (503, no detail). */
+  /** The settings have problems (503, no detail: the page's setup checklist names them). */
   | { readonly kind: "invalid" }
   | { readonly kind: "ok"; readonly settings: SolanaServerSettings };
 
@@ -96,7 +94,6 @@ export interface SolanaTxHandlerOptions {
 
 export type SolanaTxErrorCode =
   | VerifyRefusal
-  | "not_enabled"
   | "unavailable"
   | "method_not_allowed"
   | "cross_site"
@@ -292,7 +289,6 @@ export function createSolanaRpcHandler(options: SolanaRpcHandlerOptions): Solana
   return {
     async POST(request: Request): Promise<Response> {
       const gate = options.gate();
-      if (gate.kind === "disabled") return rpcError(404, -32601, "Solana is not enabled on this deployment.");
       if (gate.kind === "invalid") return rpcError(503, -32000, "The Solana relay is not available.");
       const settings = gate.settings;
       if (isCrossSite(request)) return refuse(403, -32600, "cross_site", "Cross-site requests are not relayed.", null);
@@ -377,7 +373,6 @@ export function createSolanaTxHandler(options: SolanaTxHandlerOptions): SolanaRo
   return {
     async POST(request: Request): Promise<Response> {
       const gate = options.gate();
-      if (gate.kind === "disabled") return apiError(404, "not_enabled", "Solana is not enabled on this deployment.");
       if (gate.kind === "invalid") return apiError(503, "unavailable", "Solana sending is not available.");
       const settings = gate.settings;
       if (isCrossSite(request)) return refuse(403, "cross_site", "Cross-site requests are refused.");

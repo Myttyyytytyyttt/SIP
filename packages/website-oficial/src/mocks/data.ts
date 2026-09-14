@@ -8,11 +8,15 @@
  * number on the server and another on the client, and React would tell you
  * about it on every load.
  *
- * The story it tells: a trader funded a wallet on the first day and has been
- * buying and selling the desk products and xStocks since. Every fill — buy or
- * sell — put 0.20% of its size aside. Once the pile reached five dollars, the
- * pension invested it in whichever target was furthest under its weight. That
- * is the rule in src/mocks/types.ts, run forward.
+ * The story it tells: a trader funded a wallet on the first day, linked it to a
+ * volume-mode vault, and has been buying and selling the desk products and
+ * xStocks since. Every fill — buy or sell — put 2% of its size aside. Once the
+ * pile reached five dollars, the pension invested it in whichever target was
+ * furthest under its weight. That is the rule in src/mocks/types.ts, run forward.
+ *
+ * IDENTIFIERS HAVE THEIR OWN SEEDED STREAM. The address and the signatures are
+ * base58, as Solana prints them. Drawing their bytes from the trades' generator
+ * would move every trade that comes after them.
  */
 
 import type {
@@ -32,10 +36,12 @@ export const MOCK_NOW = "2026-09-07T14:32:00.000Z";
 
 const DAYS = 90;
 const SEED = 137;
+/** The identifiers' stream; see the note at the top. */
+const ID_SEED = 7919;
 const DAY_MS = 86_400_000;
 
 const RULE: SavingsRule = {
-  rateBps: 20,
+  rateBps: 200,
   thresholdUsd: 5,
   targets: [
     { symbol: "INDEX", weightBps: 6000 },
@@ -45,8 +51,13 @@ const RULE: SavingsRule = {
   paused: false,
 };
 
-const WALLET_ADDRESS = "0x7a3f9c1e4b2d8a6f0e5c3b9d1a7e2f4c6b8d0a1e";
-const OPENING_DEPOSIT_USD = 5000;
+/** A Solana address of the usual length, made up for the example. */
+const WALLET_ADDRESS = "FezjSXZsF5dcDjHS9PGq2zvw2Nu8SNmJwbDRPAJZgyXA";
+/**
+ * Sized against the rule: 2% of the roughly $250K this wallet trades puts about
+ * $5K aside, and a $5K deposit would leave it almost nothing to trade with.
+ */
+const OPENING_DEPOSIT_USD = 25_000;
 
 /** What the wallet trades, weighted toward the desk products. */
 const TRADED: ReadonlyArray<readonly [Ticker, number]> = [
@@ -84,6 +95,7 @@ function mulberry32(seed: number): () => number {
 }
 
 const rnd = mulberry32(SEED);
+const idRnd = mulberry32(ID_SEED);
 
 function gaussian(mean: number, sd: number): number {
   const u = 1 - rnd();
@@ -103,10 +115,29 @@ function pickWeighted<T>(items: ReadonlyArray<readonly [T, number]>): T {
   return last[0];
 }
 
-function txHash(): string {
-  let out = "0x";
-  while (out.length < 66) out += Math.floor(rnd() * 16).toString(16);
+const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function base58(bytes: readonly number[]): string {
+  let value = 0n;
+  for (const byte of bytes) value = (value << 8n) | BigInt(byte);
+  let out = "";
+  while (value > 0n) {
+    out = BASE58.charAt(Number(value % 58n)) + out;
+    value /= 58n;
+  }
+  for (const byte of bytes) {
+    if (byte !== 0) break;
+    out = `1${out}`;
+  }
   return out;
+}
+
+/** A transaction signature as Solana prints it: 64 bytes in base58, 87 or 88 characters. */
+function txHash(): string {
+  for (;;) {
+    const signature = base58(Array.from({ length: 64 }, () => Math.floor(idRnd() * 256)));
+    if (signature.length >= 87) return signature;
+  }
 }
 
 const round2 = (value: number): number => Math.round(value * 100) / 100;
@@ -345,7 +376,7 @@ function buildMock(): DashboardMock {
 
   const wallet: Wallet = {
     address: WALLET_ADDRESS,
-    network: "Robinhood Chain",
+    network: "Solana",
     label: "Trading wallet",
     // What went in, minus what every fill put aside. Positions are not
     // modelled here; the balance is the cash the wallet still trades with.

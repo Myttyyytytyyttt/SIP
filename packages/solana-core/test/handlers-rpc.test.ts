@@ -92,9 +92,7 @@ async function until(condition: () => boolean, what: string): Promise<void> {
 }
 
 describe("the gate", () => {
-  it("answers 404 when SIP_CHAIN is not solana, and 503 without detail when the settings are invalid", async () => {
-    const disabled = await read(await setup({ gate: { kind: "disabled" } }).handler.POST(post(blockhashCall())));
-    expect(disabled.status).toBe(404);
+  it("answers 503 without detail when the settings are invalid", async () => {
     const invalid = await read(await setup({ gate: { kind: "invalid" } }).handler.POST(post(blockhashCall())));
     expect(invalid.status).toBe(503);
     expect(invalid.text).not.toMatch(/SIP_|NUVEM_|variable/);

@@ -18,7 +18,7 @@
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
-import { Redactor, Secret, sharedRedactor, summarizeUpstreamError, type Logger } from "@sip/worker/log";
+import { Redactor, Secret, sharedRedactor, summarizeUpstreamError, type Logger } from "@sip/solana-log";
 import { ConfigError, copiedConfigProblems, loadConfig, privySdkOverrideProblems, registerPrivyAuthorizationKey, shape } from "./config.js";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "./idl.js";
 import { createKeeperLogger } from "./keeper-log.js";

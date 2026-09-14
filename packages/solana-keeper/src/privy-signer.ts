@@ -26,7 +26,7 @@
 
 import { PrivyClient } from "@privy-io/node";
 import { PublicKey, VersionedTransaction, Transaction } from "@solana/web3.js";
-import type { Secret } from "@sip/worker/log";
+import type { Secret } from "@sip/solana-log";
 
 /** CAIP-2 for Solana mainnet-beta. */
 export const SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";

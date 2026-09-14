@@ -20,7 +20,7 @@
 // and it is the reason this replaces the TRANSPORT rather than wrapping
 // individual calls, which would have to reason about each one.
 
-import type { Secret } from "@sip/worker/log";
+import type { Secret } from "@sip/solana-log";
 
 const COOLDOWN_MS = 30_000;
 

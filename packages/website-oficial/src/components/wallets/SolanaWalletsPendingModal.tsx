@@ -1,11 +1,10 @@
 "use client";
 
 /**
- * THE WALLETS MODAL ON A SOLANA DEPLOYMENT, until the Solana wallet screens exist.
+ * THE WALLETS MODAL, until the Solana wallet screens exist.
  *
- * The real modal is EVM through and through (chain 4663, the factory, EVM-only
- * Privy calls), so it must not mount under SIP_CHAIN=solana. "Manage wallets"
- * still opens a modal, never a navigation, and it says what is true.
+ * "Manage wallets" still opens a modal, never a navigation, and it says what is
+ * true: nothing here can move funds yet.
  */
 
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";

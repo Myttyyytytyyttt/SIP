@@ -35,7 +35,7 @@ import {
   createAssociatedTokenAccountIdempotent,
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
-import { summarizeUpstreamError } from "@sip/worker/log";
+import { summarizeUpstreamError } from "@sip/solana-log";
 import { decodeVault, readInvestmentPolicy } from "./accounts.js";
 import { USDC_MINT, convertDecision, inMintDecision, investPauseDecision } from "./invest-decision.js";
 import { method } from "./methods.js";

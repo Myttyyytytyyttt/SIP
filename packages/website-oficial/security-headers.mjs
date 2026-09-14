@@ -1,7 +1,6 @@
 /**
  * THE BROWSER-FACING ALLOWLIST, as one policy. Restored from the Nuvem
- * dashboard's security-headers.mjs (HEAD fd927b0) for the wallets wave, minus
- * the Solana entries.
+ * dashboard's security-headers.mjs (HEAD fd927b0) for the wallets wave.
  *
  * Privy's production checklist asks for two things — a CSP around the embedded
  * wallet iframe, and X-Frame-Options — and both are headers this app has to
@@ -12,12 +11,10 @@
  * later: the first time a directive has to change, there is no way to tell
  * which lines are load-bearing.
  *
- * TWO CHAINS (SIP_CHAIN), ONE DIFFERENCE. The policy below is the EVM one, byte
- * for byte what it was before SIP_CHAIN existed; scripts/check-csp.mts compares it
- * with a golden copy on every build. Under SIP_CHAIN=solana exactly one thing
- * changes: connect-src drops the EVM wallet-RPC overrides and gains the origin of
- * the browser's Solana WebSocket. The Solana HTTP RPC needs no entry, because it
- * is this app's own /api/solana-rpc, and no Helius origin ever appears here.
+ * ONE POLICY, PINNED. scripts/check-csp.mts compares it with a golden copy on
+ * every build. Its one Solana origin is the browser's WebSocket in connect-src.
+ * The Solana HTTP RPC needs no entry, because it is this app's own
+ * /api/solana-rpc, and no Helius origin ever appears here.
  */
 import { DEFAULT_PUBLIC_WS_URL, checkPublicWsUrl } from "@sip/solana-core/public-ws-url";
 
@@ -36,29 +33,6 @@ const TURNSTILE = "https://challenges.cloudflare.com";
 const LANDING_VIDEO_HOST = "https://d8j0ntlcm91z4.cloudfront.net";
 
 /**
- * Operator overrides that move a browser-facing endpoint off this origin. The
- * wallet RPC defaults to this app's own /api/rpc relay, so nothing is listed
- * unless someone set one of these — in which case its origin has to be in
- * connect-src or the wallet's every call is blocked silently.
- */
-/**
- * READ AT CALL TIME, NOT AT MODULE LOAD. `next.config.mjs` compiles `headers()`
- * into the route manifest at BUILD time, so a policy built from a module-level
- * snapshot of these variables cannot see an endpoint the platform sets at
- * RESTART time — and the browser's only symptom is a blocked request with no
- * server-side trace. `middleware.ts` calls securityHeaders() per request, which
- * is what makes a restart enough.
- */
-function overrides() {
-  return [
-  process.env.NUVEM_PUBLIC_RPC_URL,
-  process.env.SIP_PUBLIC_RPC_URL,
-  process.env.NEXT_PUBLIC_RPC_URL,
-  process.env.NEXT_PUBLIC_RPC_URL_4663,
-  ];
-}
-
-/**
  * THE BROWSER'S SOLANA WEBSOCKET, the one Solana origin in the policy. Privy's
  * solana.rpcs hands it to @solana/kit, which opens it lazily, only when a
  * subscription runs. That is rare, but when it happens a missing entry stalls
@@ -68,7 +42,14 @@ function overrides() {
  * (@sip/solana-core/public-ws-url): no path, no query, no credentials, and not an
  * RPC host or any part of one. A value that fails the rule is not trusted into a
  * response header. The public default goes in instead, and the setup checklist
- * names the variable. Read at call time, like the EVM overrides.
+ * names the variable.
+ *
+ * READ AT CALL TIME, NOT AT MODULE LOAD. `next.config.mjs` compiles `headers()`
+ * into the route manifest at BUILD time, so a policy built from a module-level
+ * snapshot of these variables cannot see a WebSocket the platform sets at
+ * RESTART time — and the browser's only symptom is a blocked request with no
+ * server-side trace. src/proxy.ts calls securityHeaders() per request, which is
+ * what makes a restart enough.
  */
 function solanaOverrides() {
   const rpcUrls = (process.env.SIP_SOLANA_RPC_URLS ?? "")
@@ -79,16 +60,7 @@ function solanaOverrides() {
   return [checked.ok ? checked.url : DEFAULT_PUBLIC_WS_URL];
 }
 
-/**
- * "solana" only for that exact value (trimmed, any case); anything else, unset
- * included, is the EVM policy. src/lib/config.ts reports a value that is neither.
- */
-export function chainKind() {
-  const raw = process.env.SIP_CHAIN;
-  return typeof raw === "string" && raw.trim().toLowerCase() === "solana" ? "solana" : "evm";
-}
-
-/** An override's origin, or null when it is unset, relative, or unparseable. */
+/** An extra origin's origin, or null when it is unset, relative, or unparseable. */
 export function endpointOrigin(value) {
   if (typeof value !== "string" || value.trim() === "") return null;
   try {
@@ -99,15 +71,11 @@ export function endpointOrigin(value) {
 }
 
 /**
- * @param options `{ chain, extraOrigins }`: the chain defaults to SIP_CHAIN, and
- *   the extra connect-src origins to that chain's own list. An ARRAY is the
- *   signature from before SIP_CHAIN existed, meaning the EVM policy with those
- *   overrides; it is kept so the golden comparison can call it exactly as before.
+ * @param options `{ extraOrigins }`: extra connect-src origins, each reduced to its
+ *   origin. Default: the browser's Solana WebSocket (see solanaOverrides).
  */
 export function buildCsp(options = {}) {
-  const legacy = Array.isArray(options);
-  const chain = legacy ? "evm" : (options.chain ?? chainKind());
-  const extraOrigins = legacy ? options : (options.extraOrigins ?? (chain === "solana" ? solanaOverrides() : overrides()));
+  const extraOrigins = options.extraOrigins ?? solanaOverrides();
   const extra = [...new Set(extraOrigins.map(endpointOrigin).filter((origin) => origin !== null))];
 
   const directives = {
@@ -178,9 +146,7 @@ export function buildCsp(options = {}) {
     "frame-src": [PRIVY_IFRAME, ...WALLETCONNECT_IFRAMES, TURNSTILE],
 
     "connect-src": [
-      // The whole page: /api/vault, /api/create-vault, /api/rpc, /api/skims,
-      // and under SIP_CHAIN=solana /api/solana-rpc and /api/solana-tx — all
-      // same-origin by design.
+      // The whole page: /api/solana-rpc and /api/solana-tx, same-origin by design.
       "'self'",
       // Privy's auth API and its embedded-wallet RPC fan-out.
       PRIVY_IFRAME,
@@ -190,7 +156,7 @@ export function buildCsp(options = {}) {
       "wss://relay.walletconnect.com",
       "wss://relay.walletconnect.org",
       "wss://www.walletlink.org",
-      // EVM: the wallet-RPC overrides. Solana: the public WebSocket origin.
+      // The browser's Solana WebSocket origin (solanaOverrides above).
       ...extra,
     ],
 

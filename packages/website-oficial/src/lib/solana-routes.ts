@@ -3,7 +3,7 @@
  *
  * Everything that decides what is relayed, verified, simulated or sent lives in
  * @sip/solana-core (createSolanaRpcHandler / createSolanaTxHandler) and is tested
- * there. This file only answers "is Solana on, and with which settings?" per
+ * there. This file only answers "are the settings complete, and which are they?" per
  * request, from process.env (or an env a test passes). The route files export one
  * module-level instance each; tests build fresh ones with their own clock, fetch
  * and limiters, so bucket state never leaks between cases.
