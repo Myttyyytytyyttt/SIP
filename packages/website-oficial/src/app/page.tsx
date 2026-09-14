@@ -19,14 +19,20 @@
  * the example and the shell asks the browser. What it no longer does is show a
  * visitor the example as though it were a dashboard: an unconnected visitor gets
  * a landing page and a Connect button.
+ *
+ * UNDER SIP_CHAIN=solana the EVM half of this file does not run: `?admin=0x…` is
+ * not parsed and no EVM configuration is read. The page is the landing and the
+ * example, with the Solana Privy provider mounted behind Connect. The Solana
+ * dashboard read arrives with its own loader.
  */
 
 import { getAddress, isAddress } from "viem";
 
 import { DashboardShell, type DashboardLoadJson } from "@/components/dashboard-shell";
 import { WalletsHost } from "@/components/wallets-host";
-import { loadConfig, toPublicConfig } from "@/lib/config";
+import { chainFrom, loadEvmConfig, toAnyPublicConfig } from "@/lib/config";
 import { loadDashboard } from "@/lib/dashboard";
+import { loadConfig } from "@/lib/load-config";
 import { mock } from "@/mocks";
 
 // The ledger and the RPC are read at request time, never at build time.
@@ -43,11 +49,16 @@ export default async function Page({
   // `?mode=mock` opens the example directly — how the landing's "see the app"
   // enters, and how a screenshot of the example is taken by URL alone.
   const initialMode = params.mode === "mock" ? "mock" : "live";
+
+  // The deep link and its server-side read are EVM things; see the header.
+  const chain = chainFrom(process.env);
+  const evm = chain.ok && chain.chain === "evm";
+
   // strict: false — a key pasted lowercase names the same account as the
   // checksummed form. Anything that is not an address is simply nobody.
-  const admin = isAddress(candidate, { strict: false }) ? getAddress(candidate) : null;
+  const admin = evm && isAddress(candidate, { strict: false }) ? getAddress(candidate) : null;
 
-  const config = loadConfig(process.env, { needPrivyAppId: false });
+  const config = evm ? loadEvmConfig(process.env, { needPrivyAppId: false }) : null;
 
   // The example, always: it is what Mock renders, and it is the header's wallet
   // while Live has nothing to show.
@@ -59,7 +70,7 @@ export default async function Page({
 
   // Only the deep link can be resolved here; anyone else is resolved in the browser.
   const initialLive: DashboardLoadJson | null =
-    admin !== null && config.ok ? await loadDashboard(config.config, admin) : null;
+    admin !== null && config !== null && config.ok ? await loadDashboard(config.config, admin) : null;
 
   // "Manage wallets" opens a modal over this page rather than leaving for
   // /wallets — ALWAYS, which is why the problems travel with the config. The
@@ -68,7 +79,7 @@ export default async function Page({
   // the host opens the setup modal instead, carrying exactly this list. The
   // /wallets route stays as the deep link and renders the same list server-side.
   const forWallets = loadConfig();
-  const walletsConfig = forWallets.ok ? toPublicConfig(forWallets.config) : null;
+  const walletsConfig = forWallets.ok ? toAnyPublicConfig(forWallets.config) : null;
   const walletsProblems = forWallets.ok ? [] : forWallets.problems;
 
   return (

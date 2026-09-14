@@ -15,25 +15,57 @@
  * What arrives here is PublicConfig, never ServerConfig: the privileged RPC URL
  * stays on the server. The `walletRpcUrl` below is what the wallet is given for
  * chain 4663, and no page read uses it.
+ *
+ * TWO CHAINS. The config's `chain` picks one of two providers, and they share
+ * nothing but this file. The EVM branch is the provider above, unchanged. The
+ * Solana branch (SIP_CHAIN=solana) is the minimum the Solana wallet screens build
+ * on: external Solana wallets only for login, no embedded wallet minted on login,
+ * and Privy's Solana RPC pointed at this app's own relay.
  */
 
 import { PrivyProvider } from "@privy-io/react-auth";
+import { toSolanaWalletConnectors, useSolanaLedgerPlugin } from "@privy-io/react-auth/solana";
+import { createSolanaRpc, createSolanaRpcSubscriptions } from "@solana/kit";
 import { createContext, useContext, useMemo } from "react";
 
 import { robinhoodChain } from "@/lib/chain";
-import type { PublicConfig } from "@/lib/config";
+import type { AnyPublicConfig, PublicConfig, SolanaPublicConfig } from "@/lib/config";
 
 const ConfigContext = createContext<PublicConfig | null>(null);
+const SolanaConfigContext = createContext<SolanaPublicConfig | null>(null);
 
+/** The EVM configuration. Every existing wallets component reads this one. */
 export function useConfig(): PublicConfig {
   const config = useContext(ConfigContext);
+  const solana = useContext(SolanaConfigContext);
   if (config === null) {
-    throw new Error("useConfig() was called outside <Providers>. Wrap the component in it.");
+    throw new Error(
+      solana !== null
+        ? "useConfig() is the EVM configuration, and this deployment runs SIP_CHAIN=solana. Use useSolanaConfig()."
+        : "useConfig() was called outside <Providers>. Wrap the component in it.",
+    );
   }
   return config;
 }
 
-export function Providers({ config, children }: { config: PublicConfig; children: React.ReactNode }) {
+/** The Solana configuration (SIP_CHAIN=solana). */
+export function useSolanaConfig(): SolanaPublicConfig {
+  const config = useContext(SolanaConfigContext);
+  if (config === null) {
+    throw new Error("useSolanaConfig() was called outside a Solana <Providers>. This deployment may be SIP_CHAIN=evm.");
+  }
+  return config;
+}
+
+export function Providers({ config, children }: { config: AnyPublicConfig; children: React.ReactNode }) {
+  return config.chain === "solana" ? (
+    <SolanaProviders config={config}>{children}</SolanaProviders>
+  ) : (
+    <EvmProviders config={config}>{children}</EvmProviders>
+  );
+}
+
+function EvmProviders({ config, children }: { config: PublicConfig; children: React.ReactNode }) {
   const chain = useMemo(() => robinhoodChain(config.walletRpcUrl, config.explorerUrl), [config.walletRpcUrl, config.explorerUrl]);
 
   return (
@@ -97,6 +129,86 @@ export function Providers({ config, children }: { config: PublicConfig; children
         {children}
       </PrivyProvider>
     </ConfigContext.Provider>
+  );
+}
+
+/**
+ * Solana Ledger support, mounted INSIDE PrivyProvider. A Ledger signs
+ * transactions but not the message Sign-In With Solana needs, so a Ledger-backed
+ * Phantom fails to log in with "There was an error attempting to sign the
+ * transaction" unless this is mounted. It does nothing for software wallets.
+ */
+function SolanaLedgerSetup() {
+  useSolanaLedgerPlugin();
+  return null;
+}
+
+/**
+ * The relay URL, absolute. @solana/kit's HTTP transport is handed a URL, and the
+ * loader only knows the origin when the page passed one, so a relative path is
+ * resolved against the page here. During server rendering there is no page; the
+ * placeholder origin is never called, because Privy issues no RPC while rendering.
+ */
+function absoluteRelayUrl(url: string): string {
+  return new URL(url, typeof window === "undefined" ? "http://localhost" : window.location.origin).href;
+}
+
+function SolanaProviders({ config, children }: { config: SolanaPublicConfig; children: React.ReactNode }) {
+  // DEFAULT AUTO-CONNECT, DELIBERATELY. It silently reconnects only wallets that
+  // already trust this site. Turned off, Phantom is missing from useWallets()
+  // after every reload until the user clicks again, and the first write after a
+  // refresh fails for want of a signer.
+  const connectors = useMemo(() => toSolanaWalletConnectors(), []);
+
+  // THE RPC PRIVY SIGNS AGAINST: before an embedded wallet signs, Privy prices and
+  // simulates the transaction through it. It is the same-origin /api/solana-rpc,
+  // never the keyed upstream. The WebSocket is the key-free public one the server
+  // validated; kit opens it only when a subscription runs.
+  const rpcUrl = useMemo(() => absoluteRelayUrl(config.solanaRpcUrl), [config.solanaRpcUrl]);
+  const solana = useMemo(
+    () => ({
+      rpcs: {
+        "solana:mainnet": {
+          rpc: createSolanaRpc(rpcUrl),
+          rpcSubscriptions: createSolanaRpcSubscriptions(config.solanaWsUrl),
+          blockExplorerUrl: "https://solscan.io",
+        },
+      },
+    }),
+    [rpcUrl, config.solanaWsUrl],
+  );
+
+  return (
+    <SolanaConfigContext.Provider value={config}>
+      <PrivyProvider
+        appId={config.privyAppId}
+        {...(config.privyClientId ? { clientId: config.privyClientId } : {})}
+        config={{
+          // The same custody stance as the EVM branch: the pension key is an
+          // EXTERNAL wallet (Phantom, Solflare, Backpack), and nothing is minted
+          // on login. Trading wallets are created on demand by the wallet screens.
+          loginMethods: ["wallet"],
+          embeddedWallets: {
+            ethereum: { createOnLogin: "off" },
+            solana: { createOnLogin: "off" },
+          },
+          externalWallets: { solana: { connectors } },
+          solana,
+
+          appearance: {
+            landingHeader: "Connect your pension key",
+            loginMessage:
+              "SIP is permissionless. Only your pension key can withdraw — the team has no access to your funds.",
+            // Solana only: an EVM wallet has nothing to sign on this deployment.
+            walletChainType: "solana-only",
+            walletList: ["phantom", "solflare", "backpack", "detected_solana_wallets"],
+          },
+        }}
+      >
+        <SolanaLedgerSetup />
+        {children}
+      </PrivyProvider>
+    </SolanaConfigContext.Provider>
   );
 }
 

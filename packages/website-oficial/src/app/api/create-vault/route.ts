@@ -34,7 +34,7 @@ import { encodeAbiParameters, getAddress, isAddress, isHex, keccak256, stringToH
 
 import { vaultFactoryAbi, vaultInitializationParam } from "@/lib/abi";
 import type { CreateVaultPreview, ReceiptState } from "@/lib/api-types";
-import { UINT128_MAX, loadConfig } from "@/lib/config";
+import { EVM_ROUTE_OFF_MESSAGE, UINT128_MAX, evmRouteGate, loadEvmConfig } from "@/lib/config";
 import { errorSummary } from "@/lib/redact";
 import { jsonResponse } from "@/lib/serialize";
 import { createReadClient, predictVault, readCohort, readProtocol } from "@/lib/vault";
@@ -50,7 +50,14 @@ interface Body {
 }
 
 export async function POST(request: Request): Promise<Response> {
-  const load = loadConfig(process.env, { needPrivyAppId: false });
+  // An EVM route: under SIP_CHAIN=solana it does not exist on this deployment.
+  const gate = evmRouteGate(process.env);
+  if (gate.kind === "solana") return jsonResponse({ error: EVM_ROUTE_OFF_MESSAGE }, 404);
+  if (gate.kind === "invalid") {
+    return jsonResponse({ error: "This deployment is not configured.", problems: [gate.problem] }, 503);
+  }
+
+  const load = loadEvmConfig(process.env, { needPrivyAppId: false });
   if (!load.ok) {
     return jsonResponse({ error: "This deployment is not configured.", problems: load.problems }, 503);
   }

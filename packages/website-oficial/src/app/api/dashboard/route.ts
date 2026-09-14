@@ -22,7 +22,7 @@
 
 import { getAddress, isAddress } from "viem";
 
-import { loadConfig } from "@/lib/config";
+import { EVM_ROUTE_OFF_MESSAGE, evmRouteGate, loadEvmConfig } from "@/lib/config";
 import { loadDashboard } from "@/lib/dashboard";
 import { jsonResponse } from "@/lib/serialize";
 
@@ -30,6 +30,14 @@ import { jsonResponse } from "@/lib/serialize";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request): Promise<Response> {
+  // The EVM dashboard. Under SIP_CHAIN=solana it answers 404 until the Solana
+  // loader lands here; nothing EVM is read.
+  const gate = evmRouteGate(process.env);
+  if (gate.kind === "solana") return jsonResponse({ error: EVM_ROUTE_OFF_MESSAGE }, 404);
+  if (gate.kind === "invalid") {
+    return jsonResponse({ error: "This deployment is not configured.", problems: [gate.problem] }, 503);
+  }
+
   const admin = new URL(request.url).searchParams.get("admin")?.trim() ?? "";
   // strict: false — a pension key pasted lowercase names the same account as
   // the checksummed form /api/vault hands out.
@@ -37,7 +45,7 @@ export async function GET(request: Request): Promise<Response> {
     return jsonResponse({ error: "`admin` must be an address." }, 400);
   }
 
-  const load = loadConfig(process.env, { needPrivyAppId: false });
+  const load = loadEvmConfig(process.env, { needPrivyAppId: false });
   if (!load.ok) {
     return jsonResponse({ error: "This deployment is not configured.", problems: load.problems }, 503);
   }

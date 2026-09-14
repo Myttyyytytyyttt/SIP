@@ -34,8 +34,19 @@
  * NAMING. The NUVEM_* names are canonical because the container and Railway
  * configuration already use them; SIP_* is accepted as an alias of every one,
  * and the NEXT_PUBLIC_* / plain spellings of the old .env files still resolve.
+ *
+ * TWO CHAINS, ONE IMAGE (SIP_CHAIN). `evm`, which is also what an unset variable
+ * means, is everything above, unchanged. `solana` swaps in a second configuration
+ * (SolanaPublicConfig / SolanaServerConfig). Its loader lives in
+ * src/lib/load-config.ts, not here, because it reaches @sip/solana-core/server,
+ * and this file must stay importable from client modules (UINT128_MAX) and from
+ * tsx scripts (check-abis, through vault.ts), where a `server-only` import throws.
+ * The names PublicConfig and ServerConfig stay the EVM interfaces, so every EVM
+ * component compiles untouched. Only the boundaries take the Any* unions and
+ * narrow them: the pages, WalletsHost, Providers and the route handlers.
  */
 
+import type { SolanaServerSettings } from "@sip/solana-core/server";
 import { getAddress, isAddress, type Address } from "viem";
 
 import { ROBINHOOD_CHAIN_ID } from "./chain";
@@ -126,6 +137,60 @@ export function settingFrom(env: Env, setting: Setting): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Which chain (SIP_CHAIN)
+// ---------------------------------------------------------------------------
+
+export type ChainKind = "evm" | "solana";
+
+export type ChainRead =
+  | { readonly ok: true; readonly chain: ChainKind }
+  | { readonly ok: false; readonly problem: ConfigProblem };
+
+/**
+ * SIP_CHAIN, read at request time like everything else here. Unset or blank is
+ * "evm", so a deployment that has never heard of the variable keeps running
+ * exactly as it did. It is a NEW name on purpose: SIP_CHAIN_ID is still the EVM
+ * 4663 assertion, and one variable must not mean both.
+ */
+export function chainFrom(env: Env = process.env): ChainRead {
+  const raw = env["SIP_CHAIN"];
+  const value = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (value === "") return { ok: true, chain: "evm" };
+  if (value === "evm" || value === "solana") return { ok: true, chain: value };
+  return {
+    ok: false,
+    problem: {
+      variable: "SIP_CHAIN",
+      message: `SIP_CHAIN must be "evm" or "solana", but it is ${JSON.stringify(value.slice(0, 32))}.`,
+      howToFix:
+        "Set SIP_CHAIN=solana for the Solana site, or unset it for the Robinhood Chain site. It is read per request, " +
+        "so a restart applies it; no rebuild is needed.",
+    },
+  };
+}
+
+export type EvmRouteGate =
+  | { readonly kind: "evm" }
+  | { readonly kind: "solana" }
+  | { readonly kind: "invalid"; readonly problem: ConfigProblem };
+
+/**
+ * The first thing every EVM route handler asks. Under SIP_CHAIN=solana those
+ * routes do not exist on this deployment and answer 404 before anything else is
+ * read, whatever the rest of the environment holds. An unreadable SIP_CHAIN is a
+ * configuration problem like any other (503). The EVM code stays compiled either
+ * way; only the answer changes.
+ */
+export function evmRouteGate(env: Env = process.env): EvmRouteGate {
+  const chain = chainFrom(env);
+  if (!chain.ok) return { kind: "invalid", problem: chain.problem };
+  return chain.chain === "solana" ? { kind: "solana" } : { kind: "evm" };
+}
+
+/** What an EVM route says when it answers 404 under SIP_CHAIN=solana. */
+export const EVM_ROUTE_OFF_MESSAGE = "This is a Robinhood Chain (EVM) route, and this deployment runs SIP_CHAIN=solana.";
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -136,6 +201,9 @@ export function settingFrom(env: Env, setting: Setting): string | null {
  * encodes it natively), but never a function, a class instance or a Map.
  */
 export interface PublicConfig {
+  /** Which configuration this is: PublicConfig is the EVM one, SolanaPublicConfig the other. */
+  readonly chain: "evm";
+
   /** Privy app id. Public by design; the dashboard origin list is the control. */
   readonly privyAppId: string;
   readonly privyClientId: string | null;
@@ -211,6 +279,40 @@ export interface ServerConfig extends PublicConfig {
   };
 }
 
+/**
+ * THE BROWSER'S SHARE UNDER SIP_CHAIN=solana. Exactly what Privy and the Solana
+ * surfaces need, and nothing that reaches an endpoint key: the HTTP RPC is always
+ * this app's own relay, and the WebSocket passed the key-free rule in
+ * @sip/solana-core (no path, no query, no credentials, not an RPC host).
+ */
+export interface SolanaPublicConfig {
+  readonly chain: "solana";
+  readonly privyAppId: string;
+  readonly privyClientId: string | null;
+  /** SIP_SOLANA_PRIVY_SIGNER_ID: the solana-keeper's Privy signer, seated on trading wallets. An id, not a key. */
+  readonly privySignerId: string | null;
+  /** SIP_SOLANA_PRIVY_POLICY_ID: the Solana policy that bounds that signer. Both or neither. */
+  readonly privyPolicyId: string | null;
+  /** Always the same-origin /api/solana-rpc; absolute when the loader was given the origin. */
+  readonly solanaRpcUrl: string;
+  /** Key-free wss:// origin for Privy's rpcSubscriptions (SIP_SOLANA_PUBLIC_WS_URL or the public default). */
+  readonly solanaWsUrl: string;
+  /** The sip_vault IDL's address, which SIP_SOLANA_PROGRAM_ID must equal. Public. */
+  readonly programId: string;
+  readonly explorer: "solscan";
+}
+
+/** Server-side superset under SIP_CHAIN=solana. Never serialise it into a page or a response. */
+export interface SolanaServerConfig extends SolanaPublicConfig {
+  /** Endpoints (keyed, non-serialising), limits and the trusted client-IP header. */
+  readonly solana: SolanaServerSettings;
+  readonly databaseUrl: string | null;
+}
+
+/** The boundary unions. Only the pages, WalletsHost, Providers and the route handlers take these. */
+export type AnyPublicConfig = PublicConfig | SolanaPublicConfig;
+export type AnyServerConfig = ServerConfig | SolanaServerConfig;
+
 /** A configuration problem, phrased so a non-author can fix it. */
 export interface ConfigProblem {
   readonly variable: string;
@@ -220,6 +322,14 @@ export interface ConfigProblem {
 
 export type ConfigLoad =
   | { readonly ok: true; readonly config: ServerConfig }
+  | { readonly ok: false; readonly problems: readonly ConfigProblem[] };
+
+export type SolanaConfigLoad =
+  | { readonly ok: true; readonly config: SolanaServerConfig }
+  | { readonly ok: false; readonly problems: readonly ConfigProblem[] };
+
+export type AnyConfigLoad =
+  | { readonly ok: true; readonly config: AnyServerConfig }
   | { readonly ok: false; readonly problems: readonly ConfigProblem[] };
 
 export interface LoadOptions {
@@ -242,6 +352,7 @@ export interface LoadOptions {
 
 export function toPublicConfig(config: ServerConfig): PublicConfig {
   return {
+    chain: config.chain,
     privyAppId: config.privyAppId,
     privyClientId: config.privyClientId,
     privySignerId: config.privySignerId,
@@ -252,6 +363,25 @@ export function toPublicConfig(config: ServerConfig): PublicConfig {
     cohortId: config.cohortId,
     chainId: config.chainId,
   };
+}
+
+/** Field by field, so `solana` (the keyed endpoints) and `databaseUrl` can never ride along. */
+export function toSolanaPublicConfig(config: SolanaServerConfig): SolanaPublicConfig {
+  return {
+    chain: config.chain,
+    privyAppId: config.privyAppId,
+    privyClientId: config.privyClientId,
+    privySignerId: config.privySignerId,
+    privyPolicyId: config.privyPolicyId,
+    solanaRpcUrl: config.solanaRpcUrl,
+    solanaWsUrl: config.solanaWsUrl,
+    programId: config.programId,
+    explorer: config.explorer,
+  };
+}
+
+export function toAnyPublicConfig(config: AnyServerConfig): AnyPublicConfig {
+  return config.chain === "solana" ? toSolanaPublicConfig(config) : toPublicConfig(config);
 }
 
 // ---------------------------------------------------------------------------
@@ -320,12 +450,15 @@ function httpUrl(env: Env, setting: Setting, problems: ConfigProblem[], what: st
 // loadConfig
 // ---------------------------------------------------------------------------
 
-/** Collects the whole configuration, reporting every problem at once. */
-export function loadConfig(env: Env = process.env, options: LoadOptions = {}): ConfigLoad {
-  const origin = options.origin ?? null;
-  const needPrivyAppId = options.needPrivyAppId ?? true;
-  const problems: ConfigProblem[] = [];
-
+/**
+ * The Privy app id, with its two refusals (not set, wrong length) pushed onto
+ * `problems`. Shared by both chains' loaders: the rule is Privy's, not the chain's.
+ */
+export function readPrivyAppId(
+  env: Env,
+  needPrivyAppId: boolean,
+  problems: ConfigProblem[],
+): { readonly name: string; readonly value: string } | null {
   const privy = read(env, "privyAppId");
   if (privy === null && needPrivyAppId) {
     problems.push({
@@ -359,6 +492,25 @@ export function loadConfig(env: Env = process.env, options: LoadOptions = {}): C
           "no quotes, no surrounding whitespace, not truncated. It is a 25-character opaque string.",
     });
   }
+  return privy;
+}
+
+// ---------------------------------------------------------------------------
+// loadEvmConfig
+// ---------------------------------------------------------------------------
+
+/**
+ * The EVM configuration (SIP_CHAIN unset or evm), reporting every problem at
+ * once. It does not read SIP_CHAIN: callers that do not already know the chain
+ * use loadConfig from src/lib/load-config.ts, and the EVM route handlers ask
+ * evmRouteGate first.
+ */
+export function loadEvmConfig(env: Env = process.env, options: LoadOptions = {}): ConfigLoad {
+  const origin = options.origin ?? null;
+  const needPrivyAppId = options.needPrivyAppId ?? true;
+  const problems: ConfigProblem[] = [];
+
+  const privy = readPrivyAppId(env, needPrivyAppId, problems);
 
   // THE SIGNER ID IS NOT THE POLICY ID, and at Privy both are 25-character
   // lowercase ids, so pasting one into the other's variable yields a config that
@@ -502,6 +654,7 @@ export function loadConfig(env: Env = process.env, options: LoadOptions = {}): C
   }
 
   const config: ServerConfig = {
+    chain: "evm",
     // Empty only for callers that declared they do not need it. PrivyProvider is
     // never constructed from such a config — the page always requires it.
     privyAppId: privy?.value ?? "",

@@ -31,7 +31,8 @@
 import { getAddress, isAddress, type Address } from "viem";
 
 import type { ApiError, VaultAccountView, VaultByAccountResponse, VaultByAdminResponse } from "@/lib/api-types";
-import { loadConfig } from "@/lib/config";
+import { EVM_ROUTE_OFF_MESSAGE, evmRouteGate, loadEvmConfig } from "@/lib/config";
+import { clientKey, createLimiter, retryAfterSeconds } from "@/lib/rate-limit";
 import { jsonResponse } from "@/lib/serialize";
 import {
   activeVaultOf,
@@ -47,66 +48,14 @@ import {
 export const dynamic = "force-dynamic";
 
 // ---------------------------------------------------------------------------
-// Per-client token bucket — the same shape and the same numbers as
-// src/app/api/rpc/route.ts. Duplicated rather than shared because the two
-// routes have no module between them yet; the moment a third caller needs it,
-// it belongs in src/lib.
+// Per-client token bucket — the same numbers as src/app/api/rpc/route.ts, and
+// now the same module: src/lib/rate-limit.ts holds the buckets and the rule for
+// who a client is (edge headers over `x-forwarded-for`, or the one header
+// SIP_TRUSTED_CLIENT_IP_HEADER names). Each route keeps its own buckets.
 // ---------------------------------------------------------------------------
 
 const BUCKET_CAPACITY = 60;
-const REFILL_PER_MS = BUCKET_CAPACITY / 60_000;
-/** An address idle this long is forgotten, so the map cannot grow without bound. */
-const BUCKET_IDLE_MS = 5 * 60_000;
-/** Sweep idle buckets every N requests rather than on a timer — no handle to leak. */
-const SWEEP_EVERY = 256;
-
-const buckets = new Map<string, { tokens: number; updatedAt: number }>();
-let requestsSinceSweep = 0;
-
-/**
- * Headers the EDGE writes from the socket it sees, preferred over
- * `x-forwarded-for` — which is appended to, so its first entry is whatever the
- * client sent, and a caller rotating it would get a fresh bucket per request.
- * See the long version in src/app/api/rpc/route.ts, including what this trusts.
- */
-const TRUSTED_CLIENT_IP_HEADERS = [
-  "cf-connecting-ip",
-  "x-vercel-forwarded-for",
-  "x-envoy-external-address",
-  "fly-client-ip",
-  "true-client-ip",
-  "x-real-ip",
-] as const;
-
-function clientKey(request: Request): string {
-  for (const name of TRUSTED_CLIENT_IP_HEADERS) {
-    const value = request.headers.get(name)?.trim();
-    if (value !== undefined && value !== "") return value;
-  }
-  const first = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  if (first !== undefined && first !== "") return first;
-  return "unknown";
-}
-
-/** Takes one token for `key`. Returns how many ms until one is available, or 0 when taken. */
-function take(key: string, now: number): number {
-  requestsSinceSweep += 1;
-  if (requestsSinceSweep >= SWEEP_EVERY) {
-    requestsSinceSweep = 0;
-    for (const [other, bucket] of buckets) {
-      if (now - bucket.updatedAt > BUCKET_IDLE_MS) buckets.delete(other);
-    }
-  }
-  const bucket = buckets.get(key) ?? { tokens: BUCKET_CAPACITY, updatedAt: now };
-  bucket.tokens = Math.min(BUCKET_CAPACITY, bucket.tokens + (now - bucket.updatedAt) * REFILL_PER_MS);
-  bucket.updatedAt = now;
-  buckets.set(key, bucket);
-  if (bucket.tokens >= 1) {
-    bucket.tokens -= 1;
-    return 0;
-  }
-  return Math.ceil((1 - bucket.tokens) / REFILL_PER_MS);
-}
+const limiter = createLimiter({ capacity: BUCKET_CAPACITY });
 
 /**
  * Not jsonResponse, only because this one answer carries a `retry-after` and
@@ -114,7 +63,7 @@ function take(key: string, now: number): number {
  * the wait in words.
  */
 function tooManyRequests(waitMs: number): Response {
-  const retryAfter = String(Math.max(1, Math.ceil(waitMs / 1000)));
+  const retryAfter = String(retryAfterSeconds(waitMs));
   const body: ApiError = {
     error: `Rate limit: ${BUCKET_CAPACITY} requests a minute per client. Retry in ${retryAfter} s.`,
   };
@@ -134,9 +83,16 @@ function parseAddress(value: string | null): Address | null {
 }
 
 export async function GET(request: Request): Promise<Response> {
+  // An EVM route: under SIP_CHAIN=solana it does not exist on this deployment.
+  const gate = evmRouteGate(process.env);
+  if (gate.kind === "solana") return jsonResponse({ error: EVM_ROUTE_OFF_MESSAGE }, 404);
+  if (gate.kind === "invalid") {
+    return jsonResponse({ error: "This deployment is not configured.", problems: [gate.problem] }, 503);
+  }
+
   // Before the parameters are even looked at, so a flood costs this process a
   // header lookup and nothing upstream.
-  const waitMs = take(clientKey(request), Date.now());
+  const waitMs = limiter.take(clientKey(request), 1, Date.now());
   if (waitMs > 0) return tooManyRequests(waitMs);
 
   const url = new URL(request.url);
@@ -147,7 +103,7 @@ export async function GET(request: Request): Promise<Response> {
     return jsonResponse({ error: "Pass exactly one of `admin` or `account`." }, 400);
   }
 
-  const load = loadConfig(process.env, { needPrivyAppId: false });
+  const load = loadEvmConfig(process.env, { needPrivyAppId: false });
   if (!load.ok) {
     return jsonResponse({ error: "This deployment is not configured.", problems: load.problems }, 503);
   }

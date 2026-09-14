@@ -117,6 +117,12 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 COPY packages/contracts/package.json            packages/contracts/
 COPY packages/contracts-artifacts/package.json  packages/contracts-artifacts/
 COPY packages/website-oficial/package.json      packages/website-oficial/
+# @sip/web depends on @sip/solana-core (workspace:*), and the core depends on
+# @sip/solana-program (workspace:*) for the committed sip_vault IDL. Both
+# manifests must be here, or the install leaves exactly the dangling symlink
+# described above. Their sources are copied in the builder stage.
+COPY packages/solana-core/package.json          packages/solana-core/
+COPY packages/solana-program/package.json       packages/solana-program/
 # "@sip/web..." means "web plus everything it depends on". Do NOT use a bare
 # `pnpm install -r`: packages/contracts drags in @openzeppelin/contracts and
 # -upgradeable (tens of MB of Solidity source) the web app cannot use, and its
@@ -157,6 +163,14 @@ ENV NEXT_PUBLIC_PRIVY_APP_ID=${NEXT_PUBLIC_PRIVY_APP_ID}
 # Committed ABIs from the stage above, copied before packages/website-oficial so an
 # app-code edit does not invalidate this layer.
 COPY --from=artifacts /repo/packages/contracts-artifacts/dist packages/contracts-artifacts/dist
+
+# The Solana core: TypeScript source that next build compiles (transpilePackages),
+# plus the bin/ that prebuild's check:idl runs. From the program package, ONLY its
+# manifest and the committed IDL. Never programs/, scripts/, tests/ or target/,
+# where Anchor keeps the program's upgrade keypair (.dockerignore excludes it too).
+COPY packages/solana-core packages/solana-core
+COPY packages/solana-program/package.json packages/solana-program/package.json
+COPY packages/solana-program/idl packages/solana-program/idl
 
 COPY packages/website-oficial packages/website-oficial
 

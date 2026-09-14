@@ -11,7 +11,16 @@
  * what. A CSP assembled by copying a snippet is a CSP nobody can safely edit
  * later: the first time a directive has to change, there is no way to tell
  * which lines are load-bearing.
+ *
+ * TWO CHAINS (SIP_CHAIN), ONE DIFFERENCE. The policy below is the EVM one, byte
+ * for byte what it was before SIP_CHAIN existed; scripts/check-csp.mts compares it
+ * with a golden copy on every build. Under SIP_CHAIN=solana exactly one thing
+ * changes: connect-src drops the EVM wallet-RPC overrides and gains the origin of
+ * the browser's Solana WebSocket. The Solana HTTP RPC needs no entry, because it
+ * is this app's own /api/solana-rpc, and no Helius origin ever appears here.
  */
+import { DEFAULT_PUBLIC_WS_URL, checkPublicWsUrl } from "@sip/solana-core/public-ws-url";
+
 const PRIVY_IFRAME = "https://auth.privy.io";
 const WALLETCONNECT_IFRAMES = ["https://verify.walletconnect.com", "https://verify.walletconnect.org"];
 const TURNSTILE = "https://challenges.cloudflare.com";
@@ -49,6 +58,36 @@ function overrides() {
   ];
 }
 
+/**
+ * THE BROWSER'S SOLANA WEBSOCKET, the one Solana origin in the policy. Privy's
+ * solana.rpcs hands it to @solana/kit, which opens it lazily, only when a
+ * subscription runs. That is rare, but when it happens a missing entry stalls
+ * confirmation without an error anyone sees.
+ *
+ * Validated by the SAME rule the server configuration applies
+ * (@sip/solana-core/public-ws-url): no path, no query, no credentials, and not an
+ * RPC host or any part of one. A value that fails the rule is not trusted into a
+ * response header. The public default goes in instead, and the setup checklist
+ * names the variable. Read at call time, like the EVM overrides.
+ */
+function solanaOverrides() {
+  const rpcUrls = (process.env.SIP_SOLANA_RPC_URLS ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+  const checked = checkPublicWsUrl(process.env.SIP_SOLANA_PUBLIC_WS_URL, rpcUrls);
+  return [checked.ok ? checked.url : DEFAULT_PUBLIC_WS_URL];
+}
+
+/**
+ * "solana" only for that exact value (trimmed, any case); anything else, unset
+ * included, is the EVM policy. src/lib/config.ts reports a value that is neither.
+ */
+export function chainKind() {
+  const raw = process.env.SIP_CHAIN;
+  return typeof raw === "string" && raw.trim().toLowerCase() === "solana" ? "solana" : "evm";
+}
+
 /** An override's origin, or null when it is unset, relative, or unparseable. */
 export function endpointOrigin(value) {
   if (typeof value !== "string" || value.trim() === "") return null;
@@ -59,7 +98,16 @@ export function endpointOrigin(value) {
   }
 }
 
-export function buildCsp(extraOrigins = overrides()) {
+/**
+ * @param options `{ chain, extraOrigins }`: the chain defaults to SIP_CHAIN, and
+ *   the extra connect-src origins to that chain's own list. An ARRAY is the
+ *   signature from before SIP_CHAIN existed, meaning the EVM policy with those
+ *   overrides; it is kept so the golden comparison can call it exactly as before.
+ */
+export function buildCsp(options = {}) {
+  const legacy = Array.isArray(options);
+  const chain = legacy ? "evm" : (options.chain ?? chainKind());
+  const extraOrigins = legacy ? options : (options.extraOrigins ?? (chain === "solana" ? solanaOverrides() : overrides()));
   const extra = [...new Set(extraOrigins.map(endpointOrigin).filter((origin) => origin !== null))];
 
   const directives = {
@@ -96,6 +144,8 @@ export function buildCsp(extraOrigins = overrides()) {
     /**
      * Ticker and brand marks are local files under /public; data: and blob:
      * cover the canvas and object URLs the wallet SDKs render QR codes with.
+     * Solana wallet-standard icons (Phantom, Solflare, Backpack) arrive as data:
+     * URIs too.
      *
      * THE WALLETCONNECT EXPLORER IS HERE BECAUSE THE MODAL BREAKS WITHOUT IT,
      * and Privy's published baseline does not mention it: that host is listed
@@ -128,8 +178,9 @@ export function buildCsp(extraOrigins = overrides()) {
     "frame-src": [PRIVY_IFRAME, ...WALLETCONNECT_IFRAMES, TURNSTILE],
 
     "connect-src": [
-      // The whole page: /api/vault, /api/create-vault, /api/rpc, /api/skims —
-      // all same-origin by design.
+      // The whole page: /api/vault, /api/create-vault, /api/rpc, /api/skims,
+      // and under SIP_CHAIN=solana /api/solana-rpc and /api/solana-tx — all
+      // same-origin by design.
       "'self'",
       // Privy's auth API and its embedded-wallet RPC fan-out.
       PRIVY_IFRAME,
@@ -139,6 +190,7 @@ export function buildCsp(extraOrigins = overrides()) {
       "wss://relay.walletconnect.com",
       "wss://relay.walletconnect.org",
       "wss://www.walletlink.org",
+      // EVM: the wallet-RPC overrides. Solana: the public WebSocket origin.
       ...extra,
     ],
 

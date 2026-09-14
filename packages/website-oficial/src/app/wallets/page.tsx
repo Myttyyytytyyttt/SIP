@@ -5,6 +5,10 @@
  * NEXT_PUBLIC_ value baked into the bundle), and renders nothing that depends
  * on Privy or wallet state — that starts inside <Providers>, gated on `ready`.
  * A missing variable renders the checklist instead of a broken page.
+ *
+ * Under SIP_CHAIN=solana the screen is a placeholder until the Solana wallet
+ * screens exist, still inside <Providers> so the Solana Privy provider mounts
+ * here exactly as it will for them.
  */
 
 import { ArrowLeft } from "lucide-react";
@@ -17,7 +21,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SetupChecklist } from "@/components/wallets/SetupChecklist";
 import { WalletsScreen } from "@/components/wallets/WalletsScreen";
-import { loadConfig, toPublicConfig, type ConfigProblem, type PublicConfig } from "@/lib/config";
+import {
+  toPublicConfig,
+  toSolanaPublicConfig,
+  type ConfigProblem,
+  type PublicConfig,
+  type SolanaPublicConfig,
+} from "@/lib/config";
+import { loadConfig } from "@/lib/load-config";
 
 export const dynamic = "force-dynamic";
 
@@ -49,7 +60,15 @@ export default function WalletsPage() {
       </header>
 
       <main className="mx-auto w-full max-w-3xl flex-1 p-4 lg:p-6">
-        {loaded.ok ? <Screen config={toPublicConfig(loaded.config)} /> : <SetupCard problems={loaded.problems} />}
+        {loaded.ok ? (
+          loaded.config.chain === "solana" ? (
+            <SolanaScreen config={toSolanaPublicConfig(loaded.config)} />
+          ) : (
+            <Screen config={toPublicConfig(loaded.config)} />
+          )
+        ) : (
+          <SetupCard problems={loaded.problems} />
+        )}
       </main>
     </div>
   );
@@ -60,6 +79,23 @@ function Screen({ config }: { config: PublicConfig }) {
   return (
     <Providers config={config}>
       <WalletsScreen config={config} />
+    </Providers>
+  );
+}
+
+/** SIP_CHAIN=solana: the provider mounts, and the page says what is true. */
+function SolanaScreen({ config }: { config: SolanaPublicConfig }) {
+  return (
+    <Providers config={config}>
+      <Card>
+        <CardHeader>
+          <CardTitle>Solana wallets are on their way</CardTitle>
+          <CardDescription>
+            This deployment runs on Solana. The screens for your pension key, your vault and your trading wallets are
+            the next release. Nothing here can move funds yet.
+          </CardDescription>
+        </CardHeader>
+      </Card>
     </Providers>
   );
 }

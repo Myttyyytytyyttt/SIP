@@ -6,6 +6,9 @@
     "watchPatterns": [
       "packages/website-oficial/**",
       "packages/contracts-artifacts/dist/**",
+      "packages/solana-core/**",
+      "packages/solana-program/idl/**",
+      "packages/solana-program/package.json",
       "pnpm-lock.yaml",
       "pnpm-workspace.yaml",
       "package.json",
@@ -13,6 +16,7 @@
     ]
   },
   "deploy": {
+    "numReplicas": 1,
     "healthcheckPath": "/api/health",
     "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",

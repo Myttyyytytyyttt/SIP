@@ -26,14 +26,20 @@
  * mounts iframes and talks to auth.privy.io. A visit that never opens the modal
  * should pay none of that, so the provider appears on the first open and stays —
  * a second open is instant and the session survives closing.
+ *
+ * UNDER SIP_CHAIN=solana the provider is the Solana one, and the modal is a
+ * placeholder: the real WalletsModal is EVM through and through and must not
+ * mount there.
  */
 
 import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
 
 import Providers from "@/app/providers";
+import { SolanaWalletsPendingModal } from "@/components/wallets/SolanaWalletsPendingModal";
 import { WalletsModal } from "@/components/wallets/WalletsModal";
 import { WalletsSetupModal } from "@/components/wallets/WalletsSetupModal";
-import type { ConfigProblem, PublicConfig } from "@/lib/config";
+import { isSolana } from "@/lib/chain-kind";
+import type { AnyPublicConfig, ConfigProblem } from "@/lib/config";
 
 /** null only OUTSIDE a host — inside one there is always a modal to open. */
 const OpenerContext = createContext<(() => void) | null>(null);
@@ -48,7 +54,7 @@ export function WalletsHost({
   problems,
   children,
 }: {
-  config: PublicConfig | null;
+  config: AnyPublicConfig | null;
   /** Why there is no config. Ignored when there is one. */
   problems?: readonly ConfigProblem[];
   children: ReactNode;
@@ -77,7 +83,13 @@ export function WalletsHost({
         // The MODAL is still lazy, which is where the weight actually was.
         <Providers config={config}>
           {children}
-          {mounted ? <WalletsModal config={config} open={open} onOpenChange={setOpen} /> : null}
+          {mounted ? (
+            isSolana(config) ? (
+              <SolanaWalletsPendingModal open={open} onOpenChange={setOpen} />
+            ) : (
+              <WalletsModal config={config} open={open} onOpenChange={setOpen} />
+            )
+          ) : null}
         </Providers>
       ) : (
         <>

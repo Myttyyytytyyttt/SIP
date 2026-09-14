@@ -16,6 +16,7 @@
 
 import { isAddress } from "viem";
 
+import { EVM_ROUTE_OFF_MESSAGE, evmRouteGate } from "@/lib/config";
 import { jsonResponse } from "@/lib/serialize";
 import { databaseUrlFrom, explorerUrlFrom, readSkims, type SkimsResponse } from "@/lib/skims";
 
@@ -27,6 +28,13 @@ function unavailable(reason: string): SkimsResponse {
 }
 
 export async function GET(request: Request): Promise<Response> {
+  // The EVM worker's ledger. Under SIP_CHAIN=solana this route does not exist here.
+  const gate = evmRouteGate(process.env);
+  if (gate.kind === "solana") return jsonResponse({ error: EVM_ROUTE_OFF_MESSAGE }, 404);
+  if (gate.kind === "invalid") {
+    return jsonResponse({ error: "This deployment is not configured.", problems: [gate.problem] }, 503);
+  }
+
   const vault = new URL(request.url).searchParams.get("vault")?.trim() ?? "";
   // strict: false — /api/vault hands out checksummed addresses and the worker
   // stores lowercase ones; both name the same vault and both are welcome here.

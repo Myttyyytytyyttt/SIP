@@ -20,6 +20,11 @@ const nextConfig = {
   // standalone/packages/website-oficial/server.js, which the Dockerfile detects.
   outputFileTracingRoot: path.join(import.meta.dirname, "../../"),
 
+  // @sip/solana-core ships TypeScript source with no build step, and it reads
+  // the committed sip_vault IDL from @sip/solana-program. Next compiles both as
+  // app code; without this the first import of the core fails the build.
+  transpilePackages: ["@sip/solana-core", "@sip/solana-program"],
+
   reactStrictMode: true,
 
   // Never let a type error reach a deployed image.
