@@ -2,20 +2,17 @@
   "name": "sip",
   "private": true,
   "version": "0.1.0",
-  "description": "SIP \u2014 a pension you build one trade at a time. A slice of the size of every buy and sell, observed on chain and pulled into the user's vault.",
+  "description": "SIP \u2014 a pension you build one trade at a time, on Solana. A slice of every linked wallet's trading, measured as volume or as realized profit, is settled into the user's vault and invested.",
   "packageManager": "pnpm@10.18.1",
   "engines": {
     "node": "22.14.0"
   },
   "scripts": {
-    "build": "pnpm --dir packages/contracts build && pnpm --dir packages/contracts-artifacts build:from-out",
-    "test": "pnpm --dir packages/contracts test && pnpm --dir packages/contracts-artifacts test:from-out && pnpm --dir packages/worker test",
-    "test:contracts": "pnpm --dir packages/contracts test",
-    "test:worker": "pnpm --dir packages/worker test",
+    "build": "pnpm --dir packages/website-oficial build",
+    "test": "pnpm --dir packages/solana-log test && pnpm --dir packages/solana-core test && pnpm --dir packages/solana-keeper test && pnpm --dir packages/website-oficial test",
     "test:keeper": "pnpm --dir packages/solana-keeper test",
-    "typecheck": "pnpm --dir packages/worker typecheck && pnpm --dir packages/solana-keeper typecheck && pnpm --dir packages/website-oficial typecheck",
-    "dev": "pnpm --dir packages/website-oficial dev",
-    "tick": "pnpm --dir packages/worker tick"
+    "typecheck": "pnpm --dir packages/solana-log typecheck && pnpm --dir packages/solana-core typecheck && pnpm --dir packages/solana-keeper typecheck && pnpm --dir packages/website-oficial typecheck",
+    "dev": "pnpm --dir packages/website-oficial dev"
   },
   "devDependencies": {
     "tsx": "4.23.1"

@@ -1,90 +1,48 @@
-# SIP — Railway, on your own machine.
+# SIP — the web service, on your own machine.
 #
 #   cp .env.example .env      # then fill it in
 #   docker compose up --build
 #
-# This file exists so the stack can be run and broken locally before it is run
-# and broken in front of users. It builds the SAME two images Railway builds,
-# from the same Dockerfiles, with the same environment contract, and adds the
-# Postgres that Railway would give you as a plugin.
+# This file exists so the web can be run and broken locally before it is run and
+# broken in front of users. It builds the SAME image Railway builds for the web
+# service, from the same Dockerfile, with the same environment contract.
 #
-# Railway does NOT read this file. It builds each service from its own
-# Dockerfile: the root railway.json describes the web service, and
-# packages/worker/railway.json the worker. Compose is the rehearsal; those two
-# are the performance.
+# Railway does NOT read this file. The root railway.json describes the web
+# service, and packages/solana-keeper/railway.json the keeper. Compose is the
+# rehearsal; those are the performance.
 #
-# BOTH IMAGES BUILD FROM THE REPOSITORY ROOT, because the install needs
-# pnpm-lock.yaml and the workspace; a build with packages/<name> as its context
-# cannot see either.
+# THE IMAGE BUILDS FROM THE REPOSITORY ROOT, because the install needs
+# pnpm-lock.yaml and the workspace; a build with packages/website-oficial as its
+# context cannot see either.
 #
-# ONE SET OF NAMES. You set SIP_* here and nothing else. The web app still reads
-# the inherited NUVEM_* names internally, so this file translates rather than
-# making you keep two vocabularies in your head.
+# NO KEEPER, AND NO SIGNING SECRET. The web refuses SIP_SOLANA_SETTLE_KEY,
+# SIP_SOLANA_PRIVY_APP_SECRET, SIP_SOLANA_PRIVY_AUTHORIZATION_KEY, PRIVY_APP_SECRET
+# and PRIVY_AUTHORIZATION_PRIVATE_KEY by NAME, even blank, so none of them may be
+# added below. See packages/website-oficial/.env.example.
 
 services:
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: sip
-      POSTGRES_PASSWORD: sip
-      POSTGRES_DB: sip
-    # Exposed on 5433 so it cannot collide with a Postgres you already run.
-    ports:
-      - "5433:5432"
-    volumes:
-      - sip-db:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sip -d sip"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    restart: unless-stopped
-
   web:
     build:
       context: .
       dockerfile: packages/website-oficial/Dockerfile
-      args:
-        # BUILD time, not run time. Next bakes NEXT_PUBLIC_* into the browser
-        # bundle, so a value supplied only in `environment:` below arrives after
-        # the bundle is already built and the page loads with no Privy at all —
-        # healthy, serving, and quietly broken. The app id is public by design.
-        NEXT_PUBLIC_PRIVY_APP_ID: ${PRIVY_APP_ID:?set PRIVY_APP_ID}
     environment:
-      NUVEM_RPC_URL: ${SIP_RPC_URL:-${SIP_RPC_URLS:?set SIP_RPC_URLS}}
-      NUVEM_CHAIN_ID: ${SIP_CHAIN_ID:-4663}
-      NUVEM_VAULT_FACTORY: ${SIP_VAULT_FACTORY:?set SIP_VAULT_FACTORY}
-      NUVEM_SETTLEMENT_EXECUTOR: ${SIP_SETTLEMENT_EXECUTOR:?set SIP_SETTLEMENT_EXECUTOR}
-      NUVEM_WETH: ${SIP_WETH:-}
-      NUVEM_PAUSE_CONTROLLER: ${SIP_PAUSE_CONTROLLER:-}
-      NUVEM_ATTESTER_REGISTRY: ${SIP_ATTESTER_REGISTRY:-}
-      NUVEM_LOGS_FROM_BLOCK: ${SIP_LOGS_FROM_BLOCK:?set SIP_LOGS_FROM_BLOCK}
-      NUVEM_COHORT_ID: ${SIP_COHORT_ID:-1}
-      NUVEM_PUBLIC_RPC_URL: ${SIP_PUBLIC_RPC_URL:-}
-      PRIVY_APP_ID: ${PRIVY_APP_ID}
-      PRIVY_APP_SECRET: ${PRIVY_APP_SECRET:-}
-      PRIVY_SIGNER_ID: ${PRIVY_SIGNER_ID:-}
-      PRIVY_POLICY_ID: ${PRIVY_POLICY_ID:-}
-      # SOLANA MODE: set SIP_CHAIN=solana plus the SIP_SOLANA_* values in .env.
-      # The web then IGNORES every EVM name above (NUVEM_CHAIN_ID's default
-      # included), so nothing here has to be deleted to flip, or to flip back.
-      # Compose itself still insists on the `:?` values above while it parses
-      # this file, because the worker service reads the same ones; any
-      # placeholder satisfies it for a web-only Solana rehearsal
-      # (`docker compose up web`). Required under solana: SIP_SOLANA_RPC_URLS,
-      # SIP_SOLANA_PROGRAM_ID and SIP_TRUSTED_CLIENT_IP_HEADER. No edge sits in
-      # front of compose, so for a local rehearsal any header name works and
-      # every browser shares one bucket. See packages/website-oficial/.env.example.
-      SIP_CHAIN: ${SIP_CHAIN:-evm}
-      SIP_SOLANA_RPC_URLS: ${SIP_SOLANA_RPC_URLS:-}
-      SIP_SOLANA_PROGRAM_ID: ${SIP_SOLANA_PROGRAM_ID:-}
+      # Read at request time, never baked into the image.
+      PRIVY_APP_ID: ${PRIVY_APP_ID:?set PRIVY_APP_ID}
+      SIP_SOLANA_RPC_URLS: ${SIP_SOLANA_RPC_URLS:?set SIP_SOLANA_RPC_URLS}
+      SIP_SOLANA_PROGRAM_ID: ${SIP_SOLANA_PROGRAM_ID:?set SIP_SOLANA_PROGRAM_ID}
+      # No edge sits in front of compose, so for a local rehearsal any header
+      # name works and every browser shares one bucket.
+      SIP_TRUSTED_CLIENT_IP_HEADER: ${SIP_TRUSTED_CLIENT_IP_HEADER:?set SIP_TRUSTED_CLIENT_IP_HEADER}
+      # Optional. Blank means the default (the public WebSocket, no seat, the
+      # built-in budgets).
       SIP_SOLANA_PUBLIC_WS_URL: ${SIP_SOLANA_PUBLIC_WS_URL:-}
       SIP_SOLANA_PRIVY_SIGNER_ID: ${SIP_SOLANA_PRIVY_SIGNER_ID:-}
       SIP_SOLANA_PRIVY_POLICY_ID: ${SIP_SOLANA_PRIVY_POLICY_ID:-}
-      SIP_TRUSTED_CLIENT_IP_HEADER: ${SIP_TRUSTED_CLIENT_IP_HEADER:-}
-      # The same ledger the worker writes to. Without it loadDashboard takes its
-      # second mock branch before reading the chain, and Live cannot be true.
-      DATABASE_URL: ${SIP_DATABASE_URL:-postgres://sip:sip@db:5432/sip?sslmode=disable}
+      SIP_SOLANA_RELAY_PER_MIN: ${SIP_SOLANA_RELAY_PER_MIN:-}
+      SIP_SOLANA_RELAY_SIGNING_GLOBAL_PER_MIN: ${SIP_SOLANA_RELAY_SIGNING_GLOBAL_PER_MIN:-}
+      SIP_SOLANA_RELAY_READS_GLOBAL_PER_MIN: ${SIP_SOLANA_RELAY_READS_GLOBAL_PER_MIN:-}
+      SIP_SOLANA_SEND_PER_MIN: ${SIP_SOLANA_SEND_PER_MIN:-}
+      SIP_SOLANA_SEND_GLOBAL_PER_MIN: ${SIP_SOLANA_SEND_GLOBAL_PER_MIN:-}
       # The image's runner defaults to 3000 and Next reads PORT at start-up. The
       # repo's dev server uses 3002, so the container is told to match rather
       # than the port being mapped across — otherwise the health check below,
@@ -101,42 +59,3 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-
-  # DRY RUN UNLESS ARMED. The worker reads no signing secret at all unless
-  # SIP_WORKER_ALLOW_BROADCAST is the exact sentence, compared byte for byte.
-  # Leave it unset and the secrets below are removed from the environment unread.
-  worker:
-    build:
-      context: .
-      dockerfile: packages/worker/Dockerfile
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      SIP_RPC_URLS: ${SIP_RPC_URLS:?set SIP_RPC_URLS}
-      SIP_CHAIN_ID: ${SIP_CHAIN_ID:-4663}
-      SIP_VAULT_FACTORY: ${SIP_VAULT_FACTORY:?set SIP_VAULT_FACTORY}
-      SIP_SETTLEMENT_EXECUTOR: ${SIP_SETTLEMENT_EXECUTOR:?set SIP_SETTLEMENT_EXECUTOR}
-      SIP_LOGS_FROM_BLOCK: ${SIP_LOGS_FROM_BLOCK:?set SIP_LOGS_FROM_BLOCK}
-      SIP_MAX_LOG_SPAN: ${SIP_MAX_LOG_SPAN:-}
-      SIP_POLL_MS: ${SIP_POLL_MS:-}
-      # The compose Postgres by default, so a local run keeps its scan cursor
-      # across restarts and takes the advisory lock exactly as it will in
-      # production. Point it elsewhere by setting SIP_DATABASE_URL yourself.
-      # sslmode=disable because this Postgres is a container on a private compose
-      # network with no certificate; the worker honours that mode precisely so a
-      # plain local database can be exercised, and demands TLS for everything
-      # else (ledger/pg.ts, sslOptionsFor). Railway's Postgres speaks TLS, so
-      # there you pass its URL unchanged.
-      SIP_DATABASE_URL: ${SIP_DATABASE_URL:-postgres://sip:sip@db:5432/sip?sslmode=disable}
-      SIP_WORKER_ALLOW_BROADCAST: ${SIP_WORKER_ALLOW_BROADCAST:-}
-      SIP_ATTESTER_PRIVATE_KEY: ${SIP_ATTESTER_PRIVATE_KEY:-}
-      PRIVY_APP_ID: ${PRIVY_APP_ID:-}
-      PRIVY_APP_SECRET: ${PRIVY_APP_SECRET:-}
-      PRIVY_AUTHORIZATION_PRIVATE_KEY: ${PRIVY_AUTHORIZATION_PRIVATE_KEY:-}
-      PRIVY_SIGNER_ID: ${PRIVY_SIGNER_ID:-}
-      PRIVY_POLICY_ID: ${PRIVY_POLICY_ID:-}
-    restart: unless-stopped
-
-volumes:
-  sip-db:

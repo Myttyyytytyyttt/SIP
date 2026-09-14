@@ -5,22 +5,17 @@
  * PrivyProvider is a third-party React context that mounts dialogs and iframes,
  * so importing it from a server component is the classic App Router failure
  * ("createContext is not a function" / "window is not defined"). Ported from
- * the Nuvem dashboard's src/app/providers.tsx (HEAD fd927b0), EVM only.
+ * the Nuvem dashboard's src/app/providers.tsx (HEAD fd927b0).
  *
  * It also carries the runtime configuration down to the rest of the tree. The
  * server read `process.env` per request and passed the result as a prop, so no
  * `NEXT_PUBLIC_*` value had to be baked into the bundle at build time — which is
  * what keeps one Docker image usable on both a VPS and Railway.
  *
- * What arrives here is PublicConfig, never ServerConfig: the privileged RPC URL
- * stays on the server. The `walletRpcUrl` below is what the wallet is given for
- * chain 4663, and no page read uses it.
- *
- * TWO CHAINS. The config's `chain` picks one of two providers, and they share
- * nothing but this file. The EVM branch is the provider above, unchanged. The
- * Solana branch (SIP_CHAIN=solana) is the minimum the Solana wallet screens build
- * on: external Solana wallets only for login, no embedded wallet minted on login,
- * and Privy's Solana RPC pointed at this app's own relay.
+ * What arrives here is SolanaPublicConfig, never the server configuration: the
+ * keyed RPC URLs stay on the server. It is the minimum the Solana wallet screens
+ * build on: external Solana wallets only for login, no embedded wallet minted on
+ * login, and Privy's Solana RPC pointed at this app's own relay.
  */
 
 import { PrivyProvider } from "@privy-io/react-auth";
@@ -28,108 +23,17 @@ import { toSolanaWalletConnectors, useSolanaLedgerPlugin } from "@privy-io/react
 import { createSolanaRpc, createSolanaRpcSubscriptions } from "@solana/kit";
 import { createContext, useContext, useMemo } from "react";
 
-import { robinhoodChain } from "@/lib/chain";
-import type { AnyPublicConfig, PublicConfig, SolanaPublicConfig } from "@/lib/config";
+import type { SolanaPublicConfig } from "@/lib/config";
 
-const ConfigContext = createContext<PublicConfig | null>(null);
 const SolanaConfigContext = createContext<SolanaPublicConfig | null>(null);
 
-/** The EVM configuration. Every existing wallets component reads this one. */
-export function useConfig(): PublicConfig {
-  const config = useContext(ConfigContext);
-  const solana = useContext(SolanaConfigContext);
-  if (config === null) {
-    throw new Error(
-      solana !== null
-        ? "useConfig() is the EVM configuration, and this deployment runs SIP_CHAIN=solana. Use useSolanaConfig()."
-        : "useConfig() was called outside <Providers>. Wrap the component in it.",
-    );
-  }
-  return config;
-}
-
-/** The Solana configuration (SIP_CHAIN=solana). */
+/** The browser's share of the configuration, for the Solana wallet screens. */
 export function useSolanaConfig(): SolanaPublicConfig {
   const config = useContext(SolanaConfigContext);
   if (config === null) {
-    throw new Error("useSolanaConfig() was called outside a Solana <Providers>. This deployment may be SIP_CHAIN=evm.");
+    throw new Error("useSolanaConfig() was called outside <Providers>. Wrap the component in it.");
   }
   return config;
-}
-
-export function Providers({ config, children }: { config: AnyPublicConfig; children: React.ReactNode }) {
-  return config.chain === "solana" ? (
-    <SolanaProviders config={config}>{children}</SolanaProviders>
-  ) : (
-    <EvmProviders config={config}>{children}</EvmProviders>
-  );
-}
-
-function EvmProviders({ config, children }: { config: PublicConfig; children: React.ReactNode }) {
-  const chain = useMemo(() => robinhoodChain(config.walletRpcUrl, config.explorerUrl), [config.walletRpcUrl, config.explorerUrl]);
-
-  return (
-    <ConfigContext.Provider value={config}>
-      <PrivyProvider
-        appId={config.privyAppId}
-        {...(config.privyClientId ? { clientId: config.privyClientId } : {})}
-        config={{
-          // Chain 4663 is absent from viem/chains and from Privy's built-in
-          // list. Passing a defineChain object here is the documented path.
-          // supportedChains must be non-empty AND contain defaultChain, or
-          // PrivyProvider throws at construction — with one custom chain, the
-          // same object goes in both.
-          defaultChain: chain,
-          supportedChains: [chain],
-
-          // The PENSION KEY signs in with an external EOA: it holds the
-          // withdrawal key for every saving in the vault, and an
-          // email-recoverable custody model is the wrong place for that.
-          //
-          // A TRADING wallet is the opposite case. It is generated on demand,
-          // the user owns it, losing it costs trading capital rather than
-          // savings, and being fresh is a feature — the worker only attests
-          // what it has observed, so a wallet with no history has nothing it
-          // cannot account for. Creation stays MANUAL ('off' on login) so an
-          // address is minted only when someone asks for one, and minted
-          // born-seated (WEB_WALLETS.md §0.5) rather than by a login hook
-          // that cannot attach a signer.
-          loginMethods: ["wallet"],
-          embeddedWallets: {
-            ethereum: { createOnLogin: "off" },
-          },
-
-          appearance: {
-            // THE TRUST STATEMENT LIVES ON THE MODAL, NOT IN THE SIGNED
-            // MESSAGE. The SIWE body is generated by Privy's server and must
-            // stay the standard shape — wallets treat marketing text inside a
-            // signature request as a phishing signal, which is the opposite of
-            // reassurance. What we CAN say, we say here, where the user
-            // decides whether to connect.
-            landingHeader: "Connect your pension key",
-            loginMessage:
-              "SIP is permissionless. Only your pension key can withdraw — the team has no access to your funds.",
-            // EVM only. Phantom is also a Solana wallet and, offered through the
-            // ethereum path, it starts SIWE against a Solana account and dies
-            // with "There was an error attempting to sign the transaction";
-            // filtering the modal to ethereum keeps that path closed.
-            walletChainType: "ethereum-only",
-            // ORDER IS THE PRODUCT DECISION HERE: the wallets our users
-            // actually trade with come first. Privy deprecated the explicit
-            // `rabby_wallet` entry, so Rabby arrives via
-            // `detected_ethereum_wallets` in FIRST position; MetaMask being
-            // listed explicitly below pulls it OUT of that detected group,
-            // which leaves the group ≈ Rabby (plus any other EVM extension
-            // the browser carries). Note detected_ethereum_wallets does not
-            // work in mobile browsers.
-            walletList: ["detected_ethereum_wallets", "metamask"],
-          },
-        }}
-      >
-        {children}
-      </PrivyProvider>
-    </ConfigContext.Provider>
-  );
 }
 
 /**
@@ -153,7 +57,7 @@ function absoluteRelayUrl(url: string): string {
   return new URL(url, typeof window === "undefined" ? "http://localhost" : window.location.origin).href;
 }
 
-function SolanaProviders({ config, children }: { config: SolanaPublicConfig; children: React.ReactNode }) {
+function Providers({ config, children }: { config: SolanaPublicConfig; children: React.ReactNode }) {
   // DEFAULT AUTO-CONNECT, DELIBERATELY. It silently reconnects only wallets that
   // already trust this site. Turned off, Phantom is missing from useWallets()
   // after every reload until the user clicks again, and the first write after a
@@ -184,9 +88,12 @@ function SolanaProviders({ config, children }: { config: SolanaPublicConfig; chi
         appId={config.privyAppId}
         {...(config.privyClientId ? { clientId: config.privyClientId } : {})}
         config={{
-          // The same custody stance as the EVM branch: the pension key is an
-          // EXTERNAL wallet (Phantom, Solflare, Backpack), and nothing is minted
-          // on login. Trading wallets are created on demand by the wallet screens.
+          // The PENSION KEY is an EXTERNAL wallet (Phantom, Solflare, Backpack):
+          // it holds the withdrawal key for every saving in the vault, and an
+          // email-recoverable custody model is the wrong place for that. Nothing is
+          // minted on login; trading wallets are created on demand by the wallet
+          // screens. The ethereum entry stays an explicit "off" so a change in
+          // Privy's defaults can never mint an EVM wallet here.
           loginMethods: ["wallet"],
           embeddedWallets: {
             ethereum: { createOnLogin: "off" },
@@ -199,7 +106,9 @@ function SolanaProviders({ config, children }: { config: SolanaPublicConfig; chi
             landingHeader: "Connect your pension key",
             loginMessage:
               "SIP is permissionless. Only your pension key can withdraw — the team has no access to your funds.",
-            // Solana only: an EVM wallet has nothing to sign on this deployment.
+            // Solana only: an EVM wallet has nothing to sign here, and Phantom
+            // offered through an ethereum path starts SIWE against a Solana
+            // account and fails.
             walletChainType: "solana-only",
             // ORDER IS THE PRODUCT DECISION: Phantom and Backpack first, then
             // Solflare, then any other Solana extension the browser carries.

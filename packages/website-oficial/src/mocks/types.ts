@@ -4,13 +4,17 @@
  * deterministic instance of it. Swapping the mock for a fetch later means
  * satisfying these interfaces, not touching a component.
  *
- * THE RULE IS ABOUT VOLUME, NOT PROFIT. A slice of every buy and every sell
- * is put aside the moment it fills — the side does not matter, and neither
- * does whether the trade made money. It accumulates, and once the pile
- * reaches the threshold the pension invests it in the targets.
+ * THIS EXAMPLE IS A VOLUME-MODE VAULT. SIP measures a linked wallet's trading
+ * one of two ways, chosen per vault: as volume (a slice of the size of every
+ * buy and every sell) or as realized profit (a slice of what the trading
+ * made). The demo rates are 2% of volume and 20% of realized profit. This
+ * contract, and the mock that fills it, model the volume rule only: every
+ * fill puts its slice aside, whatever the side and whether or not the trade
+ * made money. It accumulates, and once the pile reaches the threshold the
+ * pension invests it in the targets.
  *
  * All money is USD as a plain number (dollars, not cents). All times are ISO
- * 8601 UTC strings. All rates are basis points — 20 bps is 0.20%.
+ * 8601 UTC strings. All rates are basis points — 200 bps is 2%.
  */
 
 export const TICKERS = [
@@ -52,7 +56,7 @@ export interface SavingsTarget {
 }
 
 export interface SavingsRule {
-  /** Basis points of every fill's notional — 20 is 0.20% of volume. */
+  /** Basis points of every fill's notional — 200 is 2% of volume, the most the SIP program accepts. */
   readonly rateBps: number;
   /** The pile invests once it reaches this. */
   readonly thresholdUsd: number;
@@ -72,12 +76,14 @@ export interface Trade {
   readonly notionalUsd: number;
   /** notional × rate: what this fill put aside. THE STRIP'S NUMBER. */
   readonly savedUsd: number;
+  /** The transaction's signature, base58. */
   readonly txHash: string;
 }
 
 interface EventBase {
   readonly id: string;
   readonly at: string;
+  /** The transaction's signature, base58. */
   readonly txHash: string;
 }
 

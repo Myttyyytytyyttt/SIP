@@ -32,7 +32,7 @@ import "../src/console-bridge.js";
 import { createServer } from "node:http";
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
-import { sharedRedactor, summarizeUpstreamError } from "@sip/worker/log";
+import { sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
 import { readVault } from "../src/accounts.js";
 import { createAlerter } from "../src/alerts.js";
 import {

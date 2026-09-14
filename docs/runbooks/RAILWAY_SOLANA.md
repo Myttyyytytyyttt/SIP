@@ -89,7 +89,6 @@ En Railway: **New → GitHub repo → SIP**. En **Settings**:
 
 | variable | valor | secreta |
 |---|---|---|
-| `SIP_CHAIN` | `solana` | no |
 | `SIP_SOLANA_RPC_URLS` | la URL de Helius (mejor otra clave distinta de la del vigilante, si la creas) | **sí** |
 | `SIP_SOLANA_PROGRAM_ID` | `6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J` | no |
 | `SIP_TRUSTED_CLIENT_IP_HEADER` | `x-envoy-external-address` | no |
@@ -97,8 +96,12 @@ En Railway: **New → GitHub repo → SIP**. En **Settings**:
 | `SIP_SOLANA_PRIVY_SIGNER_ID` | `cbx133itb717vxp3dqwhk808` | no |
 | `SIP_SOLANA_PRIVY_POLICY_ID` | `jsuzcjv6njl0raqjjhzqe9fh` | no |
 
-**Nunca en la web:** `SIP_SOLANA_SETTLE_KEY`, `SIP_SOLANA_PRIVY_APP_SECRET` ni `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`. La
-web no firma nada y se niega a arrancar si las ve, aunque estén vacías.
+Si el servicio ya tiene `SIP_CHAIN=solana` (lo pedía una versión anterior de esta guía), la web la acepta y puedes borrarla.
+
+**Nunca en la web:** `SIP_SOLANA_SETTLE_KEY`, `SIP_SOLANA_PRIVY_APP_SECRET`, `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`,
+`PRIVY_APP_SECRET` ni `PRIVY_AUTHORIZATION_PRIVATE_KEY`. La web no firma nada y las rechaza por el nombre, aunque estén
+vacías. Con cualquiera de ellas, o con `SIP_CHAIN` en un valor que no sea `solana`, Connect y `/wallets` enseñan la lista
+de configuración, y `/api/solana-rpc` y `/api/solana-tx` responden 503. `/api/health` sigue respondiendo 200.
 
 `SIP_TRUSTED_CLIENT_IP_HEADER` es la cabecera con la que la web limita peticiones por visitante. En Railway debería ser
 `x-envoy-external-address`; tras el primer despliegue lo comprobamos juntos.
@@ -110,13 +113,16 @@ Después del despliegue:
 2. Abre `/api/health`: tiene que responder 200.
 3. Abre la web: el botón **Connect** tiene que abrir el modal de Privy.
 
-Mientras se integran las correcciones del programa, la web ya se puede desplegar: el login funciona. Vincular wallets
-llega con esa integración, y Railway redespliega solo cuando llegue a `main`.
+Las correcciones del programa y la vinculación de wallets (el consentimiento firmado por la wallet de trading, en el
+programa y en el núcleo) ya están en `main`, y la web se puede desplegar: el login funciona. Las pantallas para crear la
+bóveda y vincular wallets desde la web llegan después, y Railway redespliega solo cuando lleguen a `main`.
 
 ## Si algo falla
 
 - **El despliegue termina y el servicio se reinicia en bucle**: abre los logs y busca `configuration refused`. La línea
   nombra la variable que falta o sobra, nunca su valor.
+- **La web abre, pero Connect enseña una lista de variables**: cada línea nombra una variable que falta o sobra en
+  `sip-web`, nunca su valor. Corrígelas en Railway y vuelve a desplegar.
 - **El vigilante dice que el atestador no coincide**: `SIP_SOLANA_SETTLE_KEY` no es la wallet de cobro que se configuró
   en el programa. No lo arregles cambiando el programa: revisa qué archivo pegaste.
 - **Un secreto se pega en el sitio equivocado** (en la web, en un chat, en un log): se rota, como dice

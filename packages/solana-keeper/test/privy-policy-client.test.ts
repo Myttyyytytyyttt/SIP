@@ -6,7 +6,7 @@
 // answers it itself, and the app secret is a throwaway string.
 
 import { generateP256KeyPair } from "@privy-io/node";
-import { Secret } from "@sip/worker/log";
+import { Secret } from "@sip/solana-log";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 import { buildKeeperPolicy } from "../src/privy-policy.js";

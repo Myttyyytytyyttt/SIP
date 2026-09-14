@@ -1,4 +1,4 @@
-// /api/solana-rpc as wired in this app: the SIP_CHAIN gate, the environment, and
+// /api/solana-rpc as wired in this app: the settings gate, the environment, and
 // the core handler behind them. The relay's own rules (allowlist, parameters,
 // weights, caps) are tested in @sip/solana-core; these prove the route reaches
 // them. No network: fetch is a stub and every URL is an .invalid host with a fake key.
@@ -14,12 +14,23 @@ import { GET, POST } from "./route";
 const SECRET = "WEBRPCSECRET123";
 const UPSTREAM = `https://upstream.invalid/?api-key=${SECRET}`;
 const SOLANA_ENV = {
-  SIP_CHAIN: "solana",
   SIP_SOLANA_RPC_URLS: UPSTREAM,
   SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID,
   SIP_TRUSTED_CLIENT_IP_HEADER: "x-envoy-external-address",
 } as const;
-const NAMES = ["SIP_CHAIN", "SIP_SOLANA_RPC_URLS", "SIP_SOLANA_PROGRAM_ID", "SIP_TRUSTED_CLIENT_IP_HEADER", "SIP_SOLANA_PUBLIC_WS_URL"];
+/** Cleared before each case, so nothing the calling shell exported can decide the answer. */
+const NAMES = [
+  "SIP_CHAIN",
+  "SIP_SOLANA_RPC_URLS",
+  "SIP_SOLANA_PROGRAM_ID",
+  "SIP_TRUSTED_CLIENT_IP_HEADER",
+  "SIP_SOLANA_PUBLIC_WS_URL",
+  "SIP_SOLANA_SETTLE_KEY",
+  "SIP_SOLANA_PRIVY_APP_SECRET",
+  "SIP_SOLANA_PRIVY_AUTHORIZATION_KEY",
+  "PRIVY_APP_SECRET",
+  "PRIVY_AUTHORIZATION_PRIVATE_KEY",
+];
 
 let lastIp = 0;
 const freshIp = (): string => `198.51.100.${(lastIp = (lastIp % 250) + 1)}`;
@@ -62,23 +73,35 @@ function useEnv(env: Readonly<Record<string, string | undefined>>): void {
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("/api/solana-rpc", () => {
-  it("does not exist unless SIP_CHAIN=solana (404), and calls nothing upstream", async () => {
-    useEnv({ ...SOLANA_ENV, SIP_CHAIN: undefined });
-    const seen = stubUpstream((body) => ok(body, 1));
-    const response = await POST(rpcRequest(call("getSlot")));
-    expect(response.status).toBe(404);
-    expect(((await response.json()) as { error: { code: number } }).error.code).toBe(-32601);
-    expect(seen).toHaveLength(0);
+  it("has no off switch: with SIP_CHAIN unset, or a leftover SIP_CHAIN=solana, it relays", async () => {
+    for (const env of [SOLANA_ENV, { ...SOLANA_ENV, SIP_CHAIN: "solana" }]) {
+      useEnv(env);
+      stubUpstream((body) => ok(body, 1));
+      expect((await POST(rpcRequest(call("getSlot")))).status).toBe(200);
+    }
   });
 
-  it("is 503 with no detail when SIP_CHAIN=solana but the settings are incomplete", async () => {
-    useEnv({ ...SOLANA_ENV, SIP_SOLANA_RPC_URLS: undefined });
-    const response = await POST(rpcRequest(call("getSlot")));
-    expect(response.status).toBe(503);
-    expect(await response.text()).not.toMatch(/SIP_|NUVEM_/);
+  it("is 503 with no detail, never 404, when the settings are incomplete or the environment holds a refused name", async () => {
+    const refused: Readonly<Record<string, string | undefined>>[] = [
+      { ...SOLANA_ENV, SIP_SOLANA_RPC_URLS: undefined },
+      { ...SOLANA_ENV, SIP_CHAIN: "evm" },
+      { ...SOLANA_ENV, SIP_SOLANA_SETTLE_KEY: "" },
+      { ...SOLANA_ENV, PRIVY_APP_SECRET: "" },
+    ];
+    for (const env of refused) {
+      useEnv(env);
+      const seen = stubUpstream((body) => ok(body, 1));
+      const response = await POST(rpcRequest(call("getSlot")));
+      expect(response.status).toBe(503);
+      const text = await response.text();
+      expect((JSON.parse(text) as { error: { code: number } }).error.code).toBe(-32000);
+      expect(text).not.toMatch(/SIP_|NUVEM_|PRIVY_|variable/);
+      expect(seen).toHaveLength(0);
+    }
   });
 
   it("relays an allowed call to SIP_SOLANA_RPC_URLS as the validated call, and never shows the key", async () => {
@@ -97,10 +120,14 @@ describe("/api/solana-rpc", () => {
     expect(forwarded).toEqual(sent);
   });
 
-  it("ignores the EVM variables: compose's NUVEM_CHAIN_ID default and an EVM RPC URL change nothing", async () => {
+  it("ignores the retired EVM variables: an old NUVEM_CHAIN_ID and an EVM RPC URL change nothing, and no warning quotes them", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     useEnv({ ...SOLANA_ENV, NUVEM_CHAIN_ID: "4663", NUVEM_RPC_URL: "https://evm.invalid/v2/EVMKEY" });
     stubUpstream((body) => ok(body, 12));
     expect((await POST(rpcRequest(call("getSlot")))).status).toBe(200);
+    const logged = warn.mock.calls.flat().map(String).join("\n");
+    expect(logged).not.toContain("EVMKEY");
+    expect(logged).not.toContain("evm.invalid");
   });
 
   it("refuses a CORS-simple text/plain POST (415) and a cross-site one (403) before anything upstream", async () => {

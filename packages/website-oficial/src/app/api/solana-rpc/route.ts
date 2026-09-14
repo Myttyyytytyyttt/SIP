@@ -17,8 +17,8 @@
  * order all live in @sip/solana-core (relay-policy.ts, handlers.ts) and are
  * tested there.
  *
- * 404 unless SIP_CHAIN=solana; 503, with no detail, when the Solana settings are
- * incomplete (the page's setup checklist names them).
+ * 503, with no detail, when the Solana settings are incomplete or the environment
+ * holds a refused name (the page's setup checklist names them).
  */
 import { solanaRpcRoute } from "@/lib/solana-routes";
 

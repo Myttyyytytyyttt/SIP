@@ -15,7 +15,7 @@
 // survives, the page is withheld rather than served.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Redactor } from "@sip/worker/log";
+import type { Redactor } from "@sip/solana-log";
 import { SERVICE } from "./keeper-log.js";
 
 export interface WalletStatus {

@@ -10,9 +10,10 @@
  *
  * IT SAYS NOTHING THE RULE CAN CONTRADICT. "How it works" is deliberately
  * written without the rate or the threshold in it: those live in SavingsRule
- * and the user can change them, and a footer that says 0.2% under a panel set
- * to 0.5% is worse than a footer that says neither. The strip at the top of the
- * main column is where the live numbers belong.
+ * and the user can change them, and a footer that says 2% under a panel set to
+ * 1% is worse than a footer that says neither. It does not pick a mode either:
+ * a vault measures its trading as volume or as realized profit. The strip at
+ * the top of the main column is where the live numbers belong.
  *
  * The brand marks are inline SVG because lucide-react 1.x REMOVED its brand
  * icons — there is no `Twitter`, `Github` or `Twitch` export to import (verified
@@ -44,7 +45,7 @@ const LINKS = [
 /** The product in three lines. No numbers — see the note at the top of the file. */
 const STEPS = [
   "Trade where you already trade — GMGN, Axiom, your own router.",
-  "A slice of every buy and sell is set aside the moment it fills.",
+  "A slice of that trading — of its volume, or of its realized profit — is set aside.",
   "When the pile is big enough, it buys your basket.",
 ] as const;
 
@@ -84,8 +85,8 @@ export function SiteFooter({ now, className }: { now: string; className?: string
             </div>
 
             <p className="mt-3 max-w-sm text-sm text-muted-foreground">
-              A pension you build one trade at a time. A slice of the volume of every buy and sell, put aside and
-              invested — wherever you happen to be trading.
+              A pension you build one trade at a time. A slice of your trading — its volume or its realized profit —
+              put aside and invested, wherever you happen to be trading.
             </p>
           </div>
 

@@ -31,7 +31,7 @@ export function DataModeToggle({
 }: {
   mode: DataMode;
   onModeChange: (mode: DataMode) => void;
-  /** No pension key connected: there is nothing Live could be. */
+  /** Nothing Live could show: no pension key, or no live data yet. */
   disabled?: boolean;
 }) {
   return (

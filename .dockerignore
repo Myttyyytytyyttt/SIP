@@ -1,7 +1,7 @@
 # Docker build context filter for the repo root.
 #
-# The web image is built with the REPO ROOT as its context (it needs
-# pnpm-lock.yaml, pnpm-workspace.yaml and the contracts-artifacts sibling),
+# The web and keeper images are built with the REPO ROOT as their context (they
+# need pnpm-lock.yaml, pnpm-workspace.yaml and their workspace siblings),
 # so this file is the only thing standing between `docker build` and a layer
 # containing every private key in the working tree. Keep the secret rules at
 # the top and do not reorder them.
@@ -11,7 +11,7 @@
 # NUVEM_ATTESTER_PRIVATE_KEY, TRADING_OWNER_PRIVATE_KEY and the drill keys.
 # A COPY that captured them would bake them into an image layer permanently,
 # where they survive any later RUN rm. All runtime config is injected as
-# environment variables instead -- see docs/runbooks/DEPLOYMENT_WEB.md.
+# environment variables instead -- see docs/runbooks/RAILWAY_SOLANA.md.
 # ---------------------------------------------------------------------------
 .env
 .env.*
@@ -92,7 +92,7 @@ packages/solana-program/target
 **/ledger-*.sqlite*
 **/ledger-*.db*
 # The ledger's advisory lock file, named exactly this by ledger.ts. NOT a
-# blanket `**/*.lock`: that would also swallow packages/contracts/foundry.lock,
+# blanket `**/*.lock`: that would also swallow packages/solana-program/Cargo.lock,
 # and quietly dropping an unrelated tracked file from the context is the class
 # of surprise this file exists to prevent.
 
@@ -109,32 +109,19 @@ packages/solana-program/target
 **/broadcast
 **/coverage
 
-# Workspace build output is excluded, WITH ONE DELIBERATE EXCEPTION.
-# @nuvem/contracts-artifacts/dist is the only committed build product the
-# image consumes: Foundry is not installed in the container and the export
-# script cannot regenerate it there (it reads packages/contracts/out, which
-# is itself excluded above and gitignored). See the runbook.
+# Workspace build output is excluded.
 **/dist
-!packages/contracts-artifacts/dist
-!packages/contracts-artifacts/dist/**
 
 # ---------------------------------------------------------------------------
-# Solidity toolchain inputs the web image has no use for. packages/contracts
-# is filtered out of the install; lib/ is a git submodule that may not even
-# be initialised in a CI or Railway clone.
-# ---------------------------------------------------------------------------
-packages/contracts/lib
-packages/contracts/.openzeppelin
-packages/contracts/deployments
-
-# ---------------------------------------------------------------------------
-# Repo furniture irrelevant to the build.
+# Repo furniture irrelevant to the build. archive/ holds the retired EVM
+# stack, which no image builds.
 # ---------------------------------------------------------------------------
 .git
 .gitmodules
 .github
 .agents
 .claude
+archive
 docs
 *.log
 *.md

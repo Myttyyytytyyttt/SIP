@@ -11,7 +11,7 @@
 
 import type * as anchor from "@coral-xyz/anchor";
 import { Connection, PublicKey } from "@solana/web3.js";
-import { summarizeUpstreamError } from "@sip/worker/log";
+import { summarizeUpstreamError } from "@sip/solana-log";
 import { readProtocolConfig, type ProtocolConfigState } from "./accounts.js";
 import { KEEPER_LOCK_NAME } from "./singleton.js";
 

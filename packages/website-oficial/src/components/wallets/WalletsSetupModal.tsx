@@ -4,9 +4,9 @@
  * THE SAME MODAL, WHEN THERE IS NOTHING TO MANAGE YET.
  *
  * "Manage wallets" must open a modal — never navigate — and that promise cannot
- * depend on the environment being complete. But the real modal mounts Privy and
- * reads the factory, so with a half-set environment there is no honest screen to
- * put inside it. This is the other half: the same overlay, carrying the setup
+ * depend on the environment being complete. But the real modal mounts Privy, so
+ * with a half-set environment there is no honest screen to put inside it. This is
+ * the other half: the same overlay, carrying the setup
  * checklist the /wallets route renders server-side.
  *
  * It mounts NO provider and reads NO chain, so it works with a completely empty

@@ -1,4 +1,4 @@
-// /api/solana-tx as wired in this app: the SIP_CHAIN gate, the environment, and
+// /api/solana-tx as wired in this app: the settings gate, the environment, and
 // the core verifier and sender behind them (tested in depth in @sip/solana-core).
 // Every key is Keypair.generate(); every URL an .invalid host. No network.
 
@@ -24,12 +24,23 @@ import { GET, POST } from "./route";
 const SECRET = "WEBTXSECRET456";
 const UPSTREAM = `https://upstream.invalid/?api-key=${SECRET}`;
 const SOLANA_ENV = {
-  SIP_CHAIN: "solana",
   SIP_SOLANA_RPC_URLS: UPSTREAM,
   SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID,
   SIP_TRUSTED_CLIENT_IP_HEADER: "x-envoy-external-address",
 } as const;
-const NAMES = ["SIP_CHAIN", "SIP_SOLANA_RPC_URLS", "SIP_SOLANA_PROGRAM_ID", "SIP_TRUSTED_CLIENT_IP_HEADER", "SIP_SOLANA_PUBLIC_WS_URL"];
+/** Cleared before each case, so nothing the calling shell exported can decide the answer. */
+const NAMES = [
+  "SIP_CHAIN",
+  "SIP_SOLANA_RPC_URLS",
+  "SIP_SOLANA_PROGRAM_ID",
+  "SIP_TRUSTED_CLIENT_IP_HEADER",
+  "SIP_SOLANA_PUBLIC_WS_URL",
+  "SIP_SOLANA_SETTLE_KEY",
+  "SIP_SOLANA_PRIVY_APP_SECRET",
+  "SIP_SOLANA_PRIVY_AUTHORIZATION_KEY",
+  "PRIVY_APP_SECRET",
+  "PRIVY_AUTHORIZATION_PRIVATE_KEY",
+];
 
 /** A fixed, valid-looking blockhash: nothing here is ever simulated for real. */
 const BLOCKHASH = base58Encode(Uint8Array.from({ length: 32 }, (_, i) => (i * 7 + 1) & 0xff));
@@ -135,11 +146,23 @@ afterEach(() => {
 });
 
 describe("/api/solana-tx", () => {
-  it("does not exist unless SIP_CHAIN=solana (404 not_enabled)", async () => {
-    useEnv({ ...SOLANA_ENV, SIP_CHAIN: undefined });
-    const response = await POST(sendRequest({ action: "send", signedTxBase64: signedCreateVault().base64 }));
-    expect(response.status).toBe(404);
-    expect(((await response.json()) as { error: { code: string } }).error.code).toBe("not_enabled");
+  it("is 503 unavailable with no detail, never 404, when the settings are incomplete or a refused name is present", async () => {
+    const created = signedCreateVault();
+    const refused: Readonly<Record<string, string | undefined>>[] = [
+      { ...SOLANA_ENV, SIP_SOLANA_PROGRAM_ID: undefined },
+      { ...SOLANA_ENV, SIP_CHAIN: "evm" },
+      { ...SOLANA_ENV, PRIVY_AUTHORIZATION_PRIVATE_KEY: "" },
+    ];
+    for (const env of refused) {
+      useEnv(env);
+      const seen = stubUpstream((body) => rpcOk(body, null));
+      const response = await POST(sendRequest({ action: "send", signedTxBase64: created.base64 }));
+      expect(response.status).toBe(503);
+      const text = await response.text();
+      expect((JSON.parse(text) as { error: { code: string } }).error.code).toBe("unavailable");
+      expect(text).not.toMatch(/SIP_|NUVEM_|PRIVY_|variable/);
+      expect(seen).toHaveLength(0);
+    }
   });
 
   it("refuses text/plain (415) and garbage (400) with nothing sent upstream", async () => {

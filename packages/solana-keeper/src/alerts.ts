@@ -23,7 +23,7 @@
 // passes. The counter is reported when it re-fires, so a long outage still reads
 // as a long outage rather than as a single old message.
 
-import type { Secret } from "@sip/worker/log";
+import type { Secret } from "@sip/solana-log";
 
 export type AlertSeverity = "warn" | "critical";
 

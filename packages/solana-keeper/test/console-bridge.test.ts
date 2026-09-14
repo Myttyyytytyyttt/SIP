@@ -11,7 +11,7 @@
 import { inspect } from "node:util";
 import * as anchor from "@coral-xyz/anchor";
 import { Keypair } from "@solana/web3.js";
-import { Secret } from "@sip/worker/log";
+import { Secret } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
 // Importing the bridge installs it on this file's console.
 import { sanitizeConsoleArg } from "../src/console-bridge.js";

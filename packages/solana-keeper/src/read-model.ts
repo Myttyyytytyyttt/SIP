@@ -16,7 +16,7 @@
 // settlement is not. If this file ever blocks a settle, it is wrong.
 
 import pg from "pg";
-import { summarizeUpstreamError, type Secret } from "@sip/worker/log";
+import { summarizeUpstreamError, type Secret } from "@sip/solana-log";
 
 export const READ_MODEL_SCHEMA = "sip_solana";
 export const READ_MODEL_TABLES = ["vault", "trading_link", "settlement_event", "investment_event"] as const;

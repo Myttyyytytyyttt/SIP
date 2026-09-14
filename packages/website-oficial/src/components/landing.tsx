@@ -531,7 +531,7 @@ export function Landing({
                 style={{ animationDelay: "0.15s" }}
               >
                 <span className="size-2.5 rounded-full bg-white/80" />
-                <span className="tracking-wide">A pension that builds itself, on Robinhood Chain</span>
+                <span className="tracking-wide">A pension that builds itself, on Solana</span>
               </p>
               <h1
                 className="landing-h1 landing-rise mb-6 text-[clamp(2.2rem,6.5vw,5rem)] font-light leading-[0.95] tracking-[-0.03em] sm:mb-8"
@@ -564,18 +564,19 @@ export function Landing({
                   technology from reading it twice. */}
               <p className="landing-eyebrow-aside mb-2 hidden items-center gap-2.5 text-sm text-white/70">
                 <span className="size-2.5 rounded-full bg-white/80" />
-                <span className="tracking-wide">A pension that builds itself, on Robinhood Chain</span>
+                <span className="tracking-wide">A pension that builds itself, on Solana</span>
               </p>
               <p className="landing-copy-lede text-[15px] leading-relaxed text-white/70 sm:text-base">
-                SIP puts a slice of every buy and sell — 0.2% in the example, yours to set — into a pension of your own.
-                Trade wherever you already trade — GMGN, Axiom, your own router — and it grows on its own.
+                SIP puts a slice of your trading — 2% of its volume or 20% of its realized profit, yours to set — into a
+                pension of your own. Trade wherever you already trade — GMGN, Axiom, your own router — and it grows on
+                its own.
               </p>
-              {/* True of the chain today, and to be replaced by the new truth
-                  when governance moves to hardware behind a delay — not by the
+              {/* True of the program today, and to be replaced by the new truth
+                  when its upgrade authority moves behind a delay — not by the
                   absolutes it replaced. */}
               <p className="mt-3 text-xs leading-relaxed text-white/45">
-                Beta. The team has no key to your pension, but its contracts are upgradeable by SIP governance — today a
-                single team key with no timelock.
+                Beta. The team has no key to your pension, but the SIP program is upgradeable by its upgrade authority —
+                today a single team key with no timelock.
               </p>
             </div>
           </div>

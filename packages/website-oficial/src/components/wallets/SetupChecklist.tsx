@@ -10,6 +10,9 @@
  *
  * Plain, no "use client": it renders text. That is what lets the server
  * component and the client modal share it.
+ *
+ * Keyed by position as well as variable: one variable can carry several
+ * problems (one per bad SIP_SOLANA_RPC_URLS entry), and the list never reorders.
  */
 
 import { Num } from "@/components/num";
@@ -18,8 +21,8 @@ import type { ConfigProblem } from "@/lib/config";
 export function SetupChecklist({ problems }: { problems: readonly ConfigProblem[] }) {
   return (
     <ol className="space-y-3 text-sm">
-      {problems.map((problem) => (
-        <li key={problem.variable} className="space-y-0.5">
+      {problems.map((problem, index) => (
+        <li key={`${index}:${problem.variable}`} className="space-y-0.5">
           <div>
             <Num className="font-medium">{problem.variable}</Num> — {problem.message}
           </div>

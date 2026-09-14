@@ -13,7 +13,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Keypair } from "@solana/web3.js";
-import { sharedRedactor, type Redactor, type Secret } from "@sip/worker/log";
+import { sharedRedactor, type Redactor, type Secret } from "@sip/solana-log";
 import { registerSecretKeyForms } from "./config.js";
 
 export interface LocalSigners {

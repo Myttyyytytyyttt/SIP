@@ -6,9 +6,11 @@
 // problem names the variable and never echoes a value, nothing is appended to
 // the endpoint list, and Nuvem's names are refused rather than aliased.
 //
-// WHAT IS NOT CHECKED HERE: anything EVM. Under SIP_CHAIN=solana the web ignores
-// NUVEM_RPC_URL, SIP_CHAIN_ID and the rest; only NUVEM_SOLANA_* (copied from the
-// deployment whose program key leaked) and the old program id are refusals.
+// WHAT IS NOT CHECKED HERE: anything EVM. NUVEM_RPC_URL, SIP_CHAIN_ID and the
+// other retired EVM names are not read here, and what the web says about them is
+// its own business (packages/website-oficial/src/lib/load-config.ts). Only
+// NUVEM_SOLANA_* (copied from the deployment whose program key leaked), the old
+// program id and the keeper's secret names are refusals.
 
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "../client/idl";
 import { checkPublicWsUrl } from "../shared/public-ws-url.mjs";
@@ -162,7 +164,7 @@ export function loadSolanaServerSettings(env: Env): SolanaSettingsLoad {
   if (entries.length === 0) {
     problems.push({
       variable: "SIP_SOLANA_RPC_URLS",
-      message: "SIP_SOLANA_RPC_URLS is required when SIP_CHAIN=solana.",
+      message: "SIP_SOLANA_RPC_URLS is required.",
       howToFix:
         "Set it to the web's Helius JSON-RPC URL (comma-separate a second provider if you have one). Nothing is " +
         "appended implicitly; list a public endpoint yourself if you want it last.",
@@ -196,7 +198,7 @@ export function loadSolanaServerSettings(env: Env): SolanaSettingsLoad {
   if (program === undefined) {
     problems.push({
       variable: "SIP_SOLANA_PROGRAM_ID",
-      message: "SIP_SOLANA_PROGRAM_ID is required when SIP_CHAIN=solana.",
+      message: "SIP_SOLANA_PROGRAM_ID is required.",
       howToFix: `Set it to ${SIP_PROGRAM_ID}, the sip_vault IDL's address.`,
     });
   } else if (program === OLD_NUVEM_PROGRAM_ID) {
@@ -235,7 +237,7 @@ export function loadSolanaServerSettings(env: Env): SolanaSettingsLoad {
     problems.push({
       variable: "SIP_TRUSTED_CLIENT_IP_HEADER",
       message:
-        "SIP_TRUSTED_CLIENT_IP_HEADER is required when SIP_CHAIN=solana: the per-client limits key on the ONE header " +
+        "SIP_TRUSTED_CLIENT_IP_HEADER is required: the per-client limits key on the ONE header " +
         "the edge in front of this process writes from the socket. Every other header is ignored.",
       howToFix:
         "Set it to the header your edge overwrites (on Railway, confirm by echoing headers on the deployed service; " +

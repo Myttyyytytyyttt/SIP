@@ -51,8 +51,8 @@ export function WalletMenu({ wallet }: { wallet: Wallet }) {
     );
   }
 
-  // The first two hex chars after 0x, uppercase — a stable mark for this address.
-  const initials = wallet.address.slice(2, 4).toUpperCase();
+  // The address's first two characters, uppercase — a stable mark for this address.
+  const initials = wallet.address.slice(0, 2).toUpperCase();
 
   return (
     <DropdownMenu>

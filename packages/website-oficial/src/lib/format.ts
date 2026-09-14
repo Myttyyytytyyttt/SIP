@@ -61,7 +61,7 @@ export function usdCompact(value: number): string {
 const PERCENT = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
 
 /**
- * 20 bps -> "0.2%", 25 -> "0.25%", 1000 -> "10%". Trailing zeros are dropped
+ * 200 bps -> "2%", 25 -> "0.25%", 2000 -> "20%". Trailing zeros are dropped
  * because a rate is a setting, not a column; pass `digits` where a column
  * needs a fixed width.
  */
@@ -74,7 +74,7 @@ export function shares(value: number): string {
   return NUMBER.format(value);
 }
 
-/** "0x7a3f…0a1e" — addresses and hashes alike. */
+/** "FezjSX…gyXA" — addresses and signatures alike. */
 export function shortHex(value: string): string {
   return value.length <= 12 ? value : `${value.slice(0, 6)}…${value.slice(-4)}`;
 }

@@ -1,9 +1,9 @@
 # @sip/solana-keeper — SIP's Solana settle-and-invest keeper, as an image.
 #
-# BUILT FROM THE REPOSITORY ROOT, like the worker's image: the install needs
-# pnpm-lock.yaml and pnpm-workspace.yaml, and the keeper imports two workspace
-# siblings (@sip/solana-program for the IDL and the attestation/route modules,
-# @sip/worker for its redacting logger).
+# BUILT FROM THE REPOSITORY ROOT: the install needs pnpm-lock.yaml and
+# pnpm-workspace.yaml, and the keeper imports two workspace siblings
+# (@sip/solana-program for the IDL and the attestation/route modules,
+# @sip/solana-log for its redacting logger).
 #
 #   docker build -f packages/solana-keeper/Dockerfile -t sip-solana-keeper .
 #
@@ -26,24 +26,23 @@ RUN corepack enable
 FROM base AS deps
 WORKDIR /repo
 # Manifests first, so a dependency change is the only thing that busts this layer.
-# contracts-artifacts is here only because @sip/worker declares it: pnpm needs
-# every workspace manifest in the filtered graph to install against the lockfile.
+# pnpm needs every workspace manifest in the filtered graph to install against
+# the lockfile.
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
-COPY packages/contracts-artifacts/package.json packages/contracts-artifacts/
-COPY packages/worker/package.json packages/worker/
+COPY packages/solana-log/package.json packages/solana-log/
 COPY packages/solana-program/package.json packages/solana-program/
 COPY packages/solana-keeper/package.json packages/solana-keeper/
-# NO BUILDKIT CACHE MOUNT, for the reason packages/worker/Dockerfile writes out:
-# Railway rejects a bare cache id and a keyed one hardcodes a service UUID.
+# NO BUILDKIT CACHE MOUNT: Railway rejects a bare cache id and a keyed one
+# hardcodes a service UUID.
 RUN pnpm install --frozen-lockfile --filter "@sip/solana-keeper..."
 
 FROM deps AS builder
 WORKDIR /repo
-# ONLY WHAT THE KEEPER'S MODULE GRAPH READS. The worker contributes one file, its
-# logger, which imports nothing but node:crypto. The program contributes its
+# ONLY WHAT THE KEEPER'S MODULE GRAPH READS. @sip/solana-log contributes one file,
+# its logger, which imports nothing but node:crypto. The program contributes its
 # committed IDL and the three scripts its package exports — not target/, whose
 # deploy directory holds the program's upgrade keypair, and not .localnet/.
-COPY packages/worker/src/log.ts packages/worker/src/log.ts
+COPY packages/solana-log/src/log.ts packages/solana-log/src/log.ts
 COPY packages/solana-program/idl packages/solana-program/idl
 COPY packages/solana-program/scripts/attestation.ts packages/solana-program/scripts/live-route.ts packages/solana-program/scripts/raydium-swap.ts packages/solana-program/scripts/
 COPY packages/solana-keeper packages/solana-keeper
@@ -74,6 +73,6 @@ ENV PORT=8080
 EXPOSE 8080
 
 # tsx DIRECTLY, not `pnpm run keeper`: corepack writes under $HOME on first use
-# and this system user has none (the worker image measured that failure), and
+# and this system user has none (measured on the archived EVM image), and
 # SIGTERM must reach node so the keeper releases its claim on every redeploy.
 CMD ["node_modules/.bin/tsx", "bin/keeper.mts"]

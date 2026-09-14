@@ -8,8 +8,7 @@
       "packages/solana-program/idl/**",
       "packages/solana-program/scripts/**",
       "packages/solana-program/package.json",
-      "packages/worker/src/log.ts",
-      "packages/worker/package.json",
+      "packages/solana-log/**",
       "pnpm-lock.yaml",
       "pnpm-workspace.yaml",
       "package.json"

@@ -4,22 +4,24 @@
 node_modules/
 .pnpm-store/
 packages/*/node_modules/
+archive/evm/packages/contracts/cache/
+archive/evm/packages/contracts/out/
+archive/evm/packages/contracts/broadcast/
+archive/evm/packages/contracts/.openzeppelin/
+archive/evm/packages/contracts/deployments/*.local.json
+# PRE-ARCHIVE LEFTOVERS. A checkout that built the contracts before the
+# 2026-09-14 move still has their output under packages/contracts/, and a merge
+# neither moves nor deletes ignored files. Without these rules that output turns
+# committable, and cache/ can hold the RPC URL of a Foundry script run. Delete
+# these lines once no checkout has a packages/contracts directory.
 packages/contracts/cache/
 packages/contracts/out/
 packages/contracts/broadcast/
 packages/contracts/.openzeppelin/
 packages/contracts/deployments/*.local.json
+packages/contracts/.drill-state/
 coverage/
 dist/
-# EXCEPTION: @nuvem/contracts-artifacts/dist is the one build product that must
-# be tracked. It is the only way the web container can get the ABIs -- Foundry
-# is not installed there, and the export script's --skip-forge path still reads
-# packages/contracts/out/ (gitignored, line 8). Railway builds from git, so
-# there is nowhere to inject a host-built directory from.
-# Order matters: git will not descend into an excluded directory, so the
-# directory must be re-included before its contents.
-!packages/contracts-artifacts/dist/
-!packages/contracts-artifacts/dist/**
 *.log
 
 # @nuvem/keeper: signing-key material and the durable settled-window ledger.
@@ -52,7 +54,7 @@ packages/keeper-old/.keeper-state/
 # the script can refuse to run a step twice — which means a committed copy makes
 # a fresh clone believe a deployment already happened. The addresses that matter
 # live in reports/, which is a record rather than a lock.
-packages/contracts/.drill-state/
+archive/evm/packages/contracts/.drill-state/
 
 # The sealed env bundle. scripts/secrets-bundle.sh can still make one, but SIP
 # does not carry it in git: Nuvem's held five Safe owner keys, and publishing

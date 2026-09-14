@@ -16,8 +16,8 @@
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
     "@privy-io/node": "^0.28.0",
+    "@sip/solana-log": "workspace:*",
     "@sip/solana-program": "workspace:*",
-    "@sip/worker": "workspace:*",
     "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.98.4",
     "pg": "^8.23.0"

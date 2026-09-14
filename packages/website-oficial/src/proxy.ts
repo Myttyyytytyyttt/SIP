@@ -3,8 +3,8 @@
  * replaced `middleware`).
  *
  * `next.config.mjs`'s `headers()` is compiled into the route manifest at BUILD
- * time, so any origin the policy has to allow — the browser-facing RPC endpoint,
- * above all — was frozen into the image. An operator who set NUVEM_PUBLIC_RPC_URL
+ * time, so any origin the policy has to allow — the browser's Solana WebSocket,
+ * above all — was frozen into the image. An operator who set SIP_SOLANA_PUBLIC_WS_URL
  * at restart got a Content-Security-Policy that did not name it, and the only
  * symptom was a blocked request in the browser with nothing on the server to
  * explain it. Middleware runs per request, so a restart is enough again.
