@@ -5,11 +5,15 @@ use crate::state::{TradingLink, Vault};
 
 /// Removes a trading wallet's link, closing the account.
 ///
-/// ONE `authority` SIGNER, TWO PEOPLE IT MAY BE: the vault owner cutting a
-/// wallet loose, or the wallet removing itself. Neither is held hostage by the
-/// other. Both identities are already stored on chain (vault.owner and
-/// trading_link.wallet), so the instruction needs one signature checked against
-/// either — not two optional signers, which Anchor clients cannot express.
+/// THE OWNER ALONE UNLINKS. This once accepted either signer, the owner cutting
+/// a wallet loose or the wallet removing itself, so that neither was held
+/// hostage by the other. But the wallet's key is also held by a Privy seat,
+/// under a policy that can match nothing finer than this program's id. A seat
+/// that could free its wallet could then co-sign a link to a vault of an
+/// attacker's choosing: every later settlement paid there, and with the attester
+/// key as well, the wallet's whole balance. The owner is the pension key no seat
+/// ever holds. A user who wants a wallet to stop saving without that key removes
+/// the seat in Privy, which stops the keeper settling it.
 ///
 /// The account is CLOSED, not flagged inactive. Closing frees the ["link",
 /// wallet] address so the wallet can link elsewhere — and destroys the nonce
@@ -18,6 +22,8 @@ use crate::state::{TradingLink, Vault};
 /// attestations even though its counters restart. See state.rs.
 #[derive(Accounts)]
 pub struct UnlinkWallet<'info> {
+    /// The vault's owner, and nobody else: not the linked wallet, whose key a
+    /// Privy seat holds.
     pub authority: Signer<'info>,
 
     /// CHECK: only a lamport destination — the rent goes back to whoever paid
@@ -45,9 +51,8 @@ pub struct UnlinkWallet<'info> {
 }
 
 pub fn unlink_wallet_handler(ctx: Context<UnlinkWallet>) -> Result<()> {
-    let who = ctx.accounts.authority.key();
     require!(
-        who == ctx.accounts.vault.owner || who == ctx.accounts.trading_link.wallet,
+        ctx.accounts.authority.key() == ctx.accounts.vault.owner,
         NuvemError::UnlinkUnauthorized
     );
     Ok(())

@@ -3,7 +3,7 @@ use anchor_lang::system_program::{transfer, Transfer};
 use anchor_spl::token_interface::{self, SyncNative, TokenAccount, TokenInterface};
 
 use crate::errors::NuvemError;
-use crate::state::{ProtocolConfig, Vault};
+use crate::state::{InvestmentPolicy, ProtocolConfig, Vault};
 
 /// The missing link between settle and invest: the vault's savings arrive as
 /// native SOL (settle credits the PDA's lamports), but every liquid xStocks
@@ -16,6 +16,15 @@ use crate::state::{ProtocolConfig, Vault};
 /// the step that turns a vault's idle SOL into the one asset `convert` can
 /// sell, so open wrapping plus open converting was a two-instruction drain
 /// needing no permission at all.
+///
+/// ONLY A VAULT THAT OPTED INTO CONVERTING, AND NEVER WHILE PAUSED. This once
+/// checked the protocol's switch and none of the vault's own, and wrapped vaults
+/// that had no investment policy at all. So a keeper the owner had paused
+/// against could still turn any vault's withdrawable SOL into wSOL, front-run a
+/// full `withdraw` into InsufficientVaultBalance, and leave the SOL reachable
+/// only through withdraw_token. wSOL is useful to nothing but `convert`, so the
+/// switches that stop convert stop this too: the vault's pause, the protocol's,
+/// an enabled policy, and a conversion floor the owner actually signed.
 ///
 /// WHY THE CRANK FRONTS THE LAMPORTS. The vault PDA is a data account, so
 /// `system_program::transfer` cannot move lamports FROM it (System transfers
@@ -45,6 +54,15 @@ pub struct WrapSol<'info> {
     )]
     pub vault: Box<Account<'info, Vault>>,
 
+    /// The vault's investment policy. A vault with none has not opted into
+    /// converting, so it is never wrapped: the account simply fails to load.
+    #[account(
+        seeds = [b"invest", vault.key().as_ref()],
+        bump = policy.bump,
+        constraint = policy.vault == vault.key() @ NuvemError::InvalidPolicy,
+    )]
+    pub policy: Box<Account<'info, InvestmentPolicy>>,
+
     /// The vault's wSOL account (native mint, authority = the vault PDA).
     #[account(
         mut,
@@ -66,7 +84,12 @@ pub fn wrap_sol_handler(ctx: Context<WrapSol>, amount: u64) -> Result<()> {
             .may_crank(&ctx.accounts.vault.owner, &ctx.accounts.crank.key()),
         NuvemError::UnauthorizedCrank
     );
+    // The same brakes convert honours, in the same order: the owner's own
+    // pause first, then the protocol's, then the owner's consent to convert.
+    require!(!ctx.accounts.vault.paused, NuvemError::VaultPaused);
     require!(!ctx.accounts.config.paused, NuvemError::ProtocolPaused);
+    require!(ctx.accounts.policy.enabled, NuvemError::InvestingDisabled);
+    require!(ctx.accounts.policy.min_convert_rate_wad > 0, NuvemError::FloorTooLow);
     require!(amount > 0, NuvemError::ZeroAmount);
 
     // The vault must be able to cover the reimbursement without dipping below

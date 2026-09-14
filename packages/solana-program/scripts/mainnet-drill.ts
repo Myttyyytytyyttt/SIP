@@ -36,6 +36,7 @@ import {
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { attestationInstruction, MODE_PROFIT } from "./attestation";
+import { linkWalletWithConsent } from "./link-consent";
 import { measureCashSession } from "./measure-session";
 import { fetchLiveRoute } from "./live-route";
 import { buildSwapV2AccountMetas, buildSwapV2Data, MEMO_PROGRAM, RAYDIUM_CLMM } from "./raydium-swap";
@@ -94,11 +95,8 @@ async function main() {
     console.log(`vault created: ${vaultPda.toBase58()}`);
   }
   if ((await connection.getAccountInfo(linkPda)) === null) {
-    await program.methods
-      .linkWallet()
-      .accounts({ owner: operator.publicKey, wallet: wallet.publicKey })
-      .signers([wallet])
-      .rpc();
+    // The wallet's own off-chain consent rides immediately before link_wallet.
+    await linkWalletWithConsent(program, { owner: operator.publicKey, wallet }).signers([wallet]).rpc();
     console.log(`trading wallet linked: ${wallet.publicKey.toBase58()}`);
   }
 
@@ -177,13 +175,9 @@ async function main() {
   const vaultWsol = await createAssociatedTokenAccountIdempotent(connection, operator, NATIVE_MINT, vaultPda, undefined, TOKEN_PROGRAM_ID, undefined, true);
   const vaultUsdc = await createAssociatedTokenAccountIdempotent(connection, operator, USDC, vaultPda, undefined, TOKEN_PROGRAM_ID, undefined, true);
   const vaultStock = await createAssociatedTokenAccountIdempotent(connection, operator, NVDAX, vaultPda, undefined, TOKEN_2022_PROGRAM_ID, undefined, true);
-  await program.methods
-    .wrapSol(new anchor.BN(settled.toString()))
-    .accountsPartial({ crank: operator.publicKey, vault: vaultPda, vaultWsol, tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId })
-    .rpc();
-  console.log(`wrapped: ${sol(settled)} -> wSOL`);
-
   // ── policy (idempotent-ish: set every run, owner signs anyway) ─────────────
+  // BEFORE the wrap: wrap_sol refuses a vault whose owner has not enabled a
+  // policy with a conversion floor, which is every vault on its first run.
   const legs = [{ mint: NVDAX, weightBps: 10_000, minOutRateWad: new anchor.BN((10n ** 15n).toString()) }];
   await program.methods
     .setInvestPolicy(
@@ -194,6 +188,12 @@ async function main() {
     )
     .accountsPartial({ owner: operator.publicKey, vault: vaultPda, policy: policyPda })
     .rpc();
+
+  await program.methods
+    .wrapSol(new anchor.BN(settled.toString()))
+    .accountsPartial({ crank: operator.publicKey, vault: vaultPda, policy: policyPda, vaultWsol, tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId })
+    .rpc();
+  console.log(`wrapped: ${sol(settled)} -> wSOL`);
 
   // ── 6. convert via a LIVE route ────────────────────────────────────────────
   console.log("fetching live wSOL/USDC route…");
