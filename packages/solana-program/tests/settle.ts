@@ -176,6 +176,9 @@ describe("sip-vault M2: settle", () => {
         for (const event of parser.parseLogs(tx.meta.logMessages)) {
           if (event.name.toLowerCase() === "settled") {
             return event.data as {
+              mode: number;
+              baseLamports: anchor.BN;
+              bps: number;
               owed: anchor.BN;
               paid: anchor.BN;
               settlementNonce: anchor.BN;
@@ -416,6 +419,33 @@ describe("sip-vault M2: settle", () => {
         (notional * BigInt(VOLUME_BPS)) / 10_000n,
         "0.2% of 10 SOL, not 25%",
       );
+    } finally {
+      await setPolicy();
+    }
+  });
+
+  it("in VOLUME mode at 200 bps, the owner's own 2%, the vault gains notional x 200 / 10000 and the event says 200", async () => {
+    // The product's volume rate is the top edge of its range (state.rs), so the
+    // edge is settled for real here, not only accepted by set_policy_v2.
+    const PRODUCT_VOLUME_BPS = 200;
+    await setPolicy({ mode: MODE_VOLUME, volumeBps: PRODUCT_VOLUME_BPS });
+    try {
+      const notional = 10n * SOL;
+      const inputs = await freshAttestation({ baseLamports: notional });
+      assert.strictEqual(inputs.mode, MODE_VOLUME);
+      assert.strictEqual(inputs.bps, PRODUCT_VOLUME_BPS);
+      const expected = (notional * BigInt(PRODUCT_VOLUME_BPS)) / 10_000n;
+
+      const vaultBefore = BigInt(await connection.getBalance(vaultPda));
+      const signature = await settleTx(inputs);
+      assert.strictEqual(BigInt(await connection.getBalance(vaultPda)) - vaultBefore, expected, "2% of 10 SOL is 0.2 SOL, not 25%");
+
+      const event = await settledEvent(signature);
+      assert.strictEqual(event.mode, MODE_VOLUME, "the event names the mode");
+      assert.strictEqual(event.bps, PRODUCT_VOLUME_BPS, "and the rate that was charged");
+      assert.strictEqual(event.baseLamports.toString(), notional.toString(), "on the attested notional");
+      assert.strictEqual(event.owed.toString(), expected.toString());
+      assert.strictEqual(event.paid.toString(), expected.toString(), "under the cap, what was owed is what was paid");
     } finally {
       await setPolicy();
     }

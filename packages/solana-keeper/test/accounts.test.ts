@@ -11,6 +11,7 @@
 // method it was not given, and records every one it was.
 
 import * as anchor from "@coral-xyz/anchor";
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import {
@@ -314,6 +315,53 @@ describe("the ticks' first steps, over the same bytes", () => {
     expect(result.outcome).toBe("INVESTED");
     expect(result.detail).toContain("DRY RUN");
     expect(calls).toContain("getMinimumBalanceForRentExemption");
+  });
+
+  it("send nothing, live, for a policy with no conversion floor: no ATA, no wrap, and a detail that says why", async () => {
+    // 10 SOL in the vault, no token accounts, and a routable one-leg basket. A
+    // turn that looked only at `enabled` went on to create the vault's wSOL and
+    // USDC accounts and send the wrap_sol the program refuses with FloorTooLow;
+    // over this stub, which sends nothing, that turn ended FAILED.
+    const mint = key();
+    const legPools = new Map([[mint.toBase58(), key()]]);
+    const { vault, connection, program, calls } = chainWith(
+      {},
+      { minConvertRateWad: 0n, legs: [{ mint, weightBps: 10_000, minOutRateWad: 1n }] },
+      {
+        getMinimumBalanceForRentExemption: async () => 2_000_000,
+        getTokenAccountBalance: async () => {
+          throw new Error("could not find account");
+        },
+      },
+    );
+    const result = await runInvestTick({ connection, program, vault, crank: Keypair.generate(), pools: legPools, live: true, protocolPaused: false });
+    expect(result.outcome).toBe("IDLE");
+    expect(result.detail).toContain("0 USDC, below the policy minimum");
+    expect(result.detail).toContain("min_convert_rate_wad is 0");
+    expect(calls).toEqual([
+      "getAccountInfoAndContext",
+      "getAccountInfo",
+      "getMinimumBalanceForRentExemption",
+      "getTokenAccountBalance",
+      "getTokenAccountBalance",
+    ]);
+  });
+
+  it("still invest the USDC a vault with no conversion floor already holds, and say its SOL stays SOL", async () => {
+    let usdcAta: PublicKey | undefined;
+    const { vault, connection, program } = chainWith({}, { minConvertRateWad: 0n }, {
+      getMinimumBalanceForRentExemption: async () => 2_000_000,
+      getTokenAccountBalance: async (address) => {
+        if (usdcAta === undefined || !(address as PublicKey).equals(usdcAta)) throw new Error("could not find account");
+        return { context: { slot: 1 }, value: { amount: "7000000", decimals: 6, uiAmount: 7 } };
+      },
+    });
+    usdcAta = getAssociatedTokenAddressSync(USDC_MINT, vault, true);
+    const result = await runInvestTick({ connection, program, vault, crank: null, pools, live: false, protocolPaused: false });
+    expect(result.outcome).toBe("INVESTED");
+    expect(result.detail).toContain("DRY RUN — would invest the 7000000 USDC already in the vault");
+    expect(result.detail).not.toContain("would wrap");
+    expect(result.detail).toContain("min_convert_rate_wad is 0");
   });
 
   function linkTo(vault: PublicKey): ManagedLink {

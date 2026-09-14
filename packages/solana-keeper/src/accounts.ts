@@ -74,9 +74,13 @@ export interface VaultState {
   readonly paused: boolean;
   /** 0 PROFIT, 1 VOLUME. */
   readonly skimMode: number;
-  /** The PROFIT rate, 101..=10_000. */
+  /** The PROFIT rate, 201..=10_000 (2.01%..100%); the product charges 2_000 (20%). */
   readonly skimBps: number;
-  /** The VOLUME rate, 1..=100. */
+  /**
+   * The VOLUME rate, 1..=200 (0.01%..2%); the product charges 200 (2%), the top
+   * of the range. It ends where the profit range begins, so neither rate can be
+   * stored in the other's field (state.rs).
+   */
   readonly volumeBps: number;
   /** Bumped on every set_policy_v2 and signed into every attestation. */
   readonly policyNonce: bigint;

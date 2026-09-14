@@ -1,10 +1,10 @@
 // One investment turn for one vault: wrap what settled, convert it, buy the leg.
 //
-// Ported from Nuvem's solana-lab keeper (keeper/src/invest-tick.ts). Three things
-// changed: the policy's in_mint is checked before anything moves, so is either
-// pause switch (both in invest-decision.ts), and the crank is null in a dry run,
-// which never reaches a line that needs it. Everything else is the old
-// behaviour, deliberately: the
+// Ported from Nuvem's solana-lab keeper (keeper/src/invest-tick.ts). Four things
+// changed: the policy's in_mint is checked before anything moves, so are either
+// pause switch and the owner's conversion floor (all three in
+// invest-decision.ts), and the crank is null in a dry run, which never reaches a
+// line that needs it. Everything else is the old behaviour, deliberately: the
 // stranded-wSOL rescue, the refusal before convert on an unroutable basket, the
 // all-or-nothing per-leg minimum, one transaction per leg, the compute budget
 // price, and purchases recorded on FAILED too.
@@ -37,7 +37,7 @@ import {
 } from "@solana/spl-token";
 import { summarizeUpstreamError } from "@sip/worker/log";
 import { decodeVault, readInvestmentPolicy } from "./accounts.js";
-import { USDC_MINT, inMintDecision, investPauseDecision } from "./invest-decision.js";
+import { USDC_MINT, convertDecision, inMintDecision, investPauseDecision } from "./invest-decision.js";
 import { method } from "./methods.js";
 import { tightenMinOut } from "./min-out.js";
 import { RAYDIUM_CLMM, buildSwapV2AccountMetas, buildSwapV2Data, fetchLiveRoute } from "./program-scripts.js";
@@ -108,6 +108,16 @@ export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
     protocolPaused: deps.protocolPaused,
   });
   if (paused !== null) return paused;
+
+  // BEFORE ANY ATA, ANY WRAP: whether the owner ever turned conversion on.
+  // wrap_sol and convert both refuse a zero conversion floor, and this tick once
+  // looked only at `enabled`, so such a vault had a refused wrap sent for it on
+  // every sweep. Its SOL now stays SOL, the USDC it already holds is still
+  // invested, and every detail from here on says why the SOL did not move.
+  const conversion = convertDecision(policy);
+  const noted = (detail: string): string =>
+    conversion.convert ? detail : `${detail.replace(/\.$/, "")} — ${conversion.detail}`;
+
   const rentFloor = await connection.getMinimumBalanceForRentExemption(vaultInfo.data.length);
   const free = BigInt(vaultInfo.lamports - rentFloor);
 
@@ -122,16 +132,27 @@ export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
   const usdcHeld = await balanceOf(connection, usdcAta);
 
   // The floor is the policy's own minimum, in USDC. Convert what is free only
-  // if doing so could plausibly clear it — at ~$100/SOL, 0.01 SOL is ~$1.
+  // if doing so could plausibly clear it — at ~$100/SOL, 0.01 SOL is ~$1 — and
+  // sweep up any wSOL an earlier convert left behind. Neither while conversion
+  // is off: then only the USDC already held can wake this turn.
   const minInvestment = policy.minInvestment;
-  if (free < 5_000_000n && wsolHeld === 0n && usdcHeld < minInvestment) {
+  const wrapsFree = conversion.convert && free >= 5_000_000n;
+  const converts = conversion.convert && (wrapsFree || wsolHeld > 0n);
+  if (!converts && usdcHeld < minInvestment) {
     return {
       outcome: "IDLE",
-      detail: `${free} free lamports, ${wsolHeld} wSOL and ${usdcHeld} USDC — below the policy minimum`,
+      detail: conversion.convert
+        ? `${free} free lamports, ${wsolHeld} wSOL and ${usdcHeld} USDC — below the policy minimum`
+        : noted(`${usdcHeld} USDC, below the policy minimum ${minInvestment}`),
     };
   }
   if (!deps.live) {
-    return { outcome: "INVESTED", detail: `DRY RUN — would wrap ${free} lamports and invest` };
+    return {
+      outcome: "INVESTED",
+      detail: conversion.convert
+        ? `DRY RUN — would wrap ${free} lamports and invest`
+        : noted(`DRY RUN — would invest the ${usdcHeld} USDC already in the vault`),
+    };
   }
   const crank = deps.crank;
   if (crank === null) {
@@ -157,16 +178,17 @@ export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
 
   const purchases: InvestPurchase[] = [];
   try {
-    // ── wrap + convert, if there is free SOL worth moving ──────────────────
-    if (free >= 5_000_000n || wsolHeld > 0n) {
+    // ── wrap + convert, if conversion is on and there is SOL worth moving ──
+    if (converts) {
       await createAssociatedTokenAccountIdempotent(connection, crank, NATIVE_MINT, vault, undefined, TOKEN_PROGRAM_ID, undefined, true);
       await createAssociatedTokenAccountIdempotent(connection, crank, USDC, vault, undefined, TOKEN_PROGRAM_ID, undefined, true);
       // Only if there is new SOL worth wrapping. Reaching here with free below
       // the threshold means we are here to rescue stranded wSOL, and the
       // program refuses a zero amount.
-      if (free >= 5_000_000n) {
+      if (wrapsFree) {
         // The policy goes in by name: wrap_sol loads it and refuses a vault
-        // whose policy is disabled or names no conversion floor.
+        // whose policy is disabled or names no conversion floor, both of which
+        // this turn ruled out before it got here.
         await method(program, "wrapSol")(new anchor.BN(free.toString()))
           .accountsPartial({
             crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta,
@@ -199,7 +221,7 @@ export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
     // leg. The program takes a leg INDEX for exactly this reason.
     const usdc = await balanceOf(connection, usdcAta);
     if (usdc < minInvestment) {
-      return { outcome: "IDLE", detail: `${usdc} USDC held, below policy minimum ${minInvestment}` };
+      return { outcome: "IDLE", detail: noted(`${usdc} USDC held, below policy minimum ${minInvestment}`) };
     }
 
     const maxPerCall = policy.maxPerCall;
@@ -228,11 +250,12 @@ export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
       const needed = (bps: number) => usd((minInvestment * 10_000n) / BigInt(bps));
       return {
         outcome: "IDLE",
-        detail:
+        detail: noted(
           `${usd(usdc)} across ${policy.legs.length} legs is ${usd(shares[0] ?? 0n)}-ish each, under the ` +
-          `${usd(minInvestment)} per-call minimum (${short} of ${policy.legs.length} legs short). ` +
-          `This basket needs ${needed(heaviest)} for its largest leg to qualify and ${needed(lightest)} for all of them. ` +
-          `Lower the minimum or hold fewer stocks to invest smaller amounts.`,
+            `${usd(minInvestment)} per-call minimum (${short} of ${policy.legs.length} legs short). ` +
+            `This basket needs ${needed(heaviest)} for its largest leg to qualify and ${needed(lightest)} for all of them. ` +
+            `Lower the minimum or hold fewer stocks to invest smaller amounts.`,
+        ),
       };
     }
 
@@ -274,21 +297,22 @@ export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
     }
 
     if (filled.length === 0) {
-      return { outcome: "IDLE", detail: `${budget} USDC splits to nothing across ${policy.legs.length} leg(s)` };
+      return { outcome: "IDLE", detail: noted(`${budget} USDC splits to nothing across ${policy.legs.length} leg(s)`) };
     }
     return {
       outcome: "INVESTED",
-      detail:
+      detail: noted(
         `bought ${filled.join(" · ")}` +
-        (anyLive
-          ? " (min_out from a live observed price)"
-          : " (min_out is the POLICY FLOOR — no live price was observable)"),
+          (anyLive
+            ? " (min_out from a live observed price)"
+            : " (min_out is the POLICY FLOOR — no live price was observable)"),
+      ),
       purchases,
     };
   } catch (error) {
     return {
       outcome: "FAILED",
-      detail: summarizeUpstreamError(error, { take: 3, maxChars: 500 }),
+      detail: noted(summarizeUpstreamError(error, { take: 3, maxChars: 500 })),
       // The legs that confirmed before the failure are REAL: signatures on
       // chain, USDC spent. They go into history even though the basket broke.
       purchases: purchases.length > 0 ? purchases : undefined,

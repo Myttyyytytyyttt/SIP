@@ -57,14 +57,34 @@ describe("sip-vault M1", () => {
   // cannot be steered anywhere a new one could not start.
   const BAD_POLICIES = [
     { label: "a profit rate of zero, the reachable trap", mode: MODE_PROFIT, skimBps: 0, volumeBps: 20, cap: CAP, error: "InvalidSkimBps" },
-    { label: "a profit rate of 100 bps, inside the volume range", mode: MODE_PROFIT, skimBps: 100, volumeBps: 20, cap: CAP, error: "InvalidSkimBps" },
+    { label: "a profit rate of 200 bps, inside the volume range", mode: MODE_PROFIT, skimBps: 200, volumeBps: 20, cap: CAP, error: "InvalidSkimBps" },
     { label: "a profit rate above 100%", mode: MODE_PROFIT, skimBps: 10_001, volumeBps: 20, cap: CAP, error: "InvalidSkimBps" },
     { label: "a volume rate of zero", mode: MODE_VOLUME, skimBps: 2_000, volumeBps: 0, cap: CAP, error: "InvalidVolumeBps" },
-    { label: "a volume rate of 101 bps, inside the profit range", mode: MODE_VOLUME, skimBps: 2_000, volumeBps: 101, cap: CAP, error: "InvalidVolumeBps" },
+    { label: "a volume rate of 201 bps, inside the profit range", mode: MODE_VOLUME, skimBps: 2_000, volumeBps: 201, cap: CAP, error: "InvalidVolumeBps" },
     { label: "an out-of-range volume rate on a profit vault", mode: MODE_PROFIT, skimBps: 2_000, volumeBps: 500, cap: CAP, error: "InvalidVolumeBps" },
     { label: "a mode that does not exist", mode: 2, skimBps: 2_000, volumeBps: 20, cap: CAP, error: "InvalidMode" },
     { label: "a cap of zero, which would forgive every settlement", mode: MODE_PROFIT, skimBps: 2_000, volumeBps: 20, cap: new anchor.BN(0), error: "InvalidContributionCap" },
   ];
+
+  // And the edges themselves, which must stay open. The two ranges meet between
+  // 200 and 201, and 200 bps (2%) is the owner's own volume rate, so a bound
+  // one short would refuse the product itself. Each pair is written in both
+  // modes: the bounds hold whichever rate the vault applies.
+  const EDGE_POLICIES = [
+    { label: "volume 200, the product's 2%, beside profit 201", skimBps: 201, volumeBps: 200 },
+    { label: "volume 1 beside profit 10000", skimBps: 10_000, volumeBps: 1 },
+  ].flatMap((edge) =>
+    [MODE_PROFIT, MODE_VOLUME].map((mode) => ({ ...edge, mode, label: `${edge.label}, mode ${mode}` })),
+  );
+
+  const expectPolicy = (
+    vault: { skimMode: number; skimBps: number; volumeBps: number },
+    edge: (typeof EDGE_POLICIES)[number],
+  ) => {
+    assert.strictEqual(vault.skimMode, edge.mode, `mode (${edge.label})`);
+    assert.strictEqual(vault.skimBps, edge.skimBps, `profit rate (${edge.label})`);
+    assert.strictEqual(vault.volumeBps, edge.volumeBps, `volume rate (${edge.label})`);
+  };
 
   const expectFailure = async (p: Promise<unknown>, needle: string, what = "") => {
     try {
@@ -91,6 +111,24 @@ describe("sip-vault M1", () => {
       );
     }
     assert.isNull(await connection.getAccountInfo(vaultPda), "and no vault was created");
+  });
+
+  it("accepts the edges of both ranges at creation: volume 200 beside profit 201, volume 1 beside profit 10000", async () => {
+    for (const edge of EDGE_POLICIES) {
+      // A fresh owner per edge, since one owner has one vault.
+      const edgeOwner = Keypair.generate();
+      await connection.confirmTransaction(await connection.requestAirdrop(edgeOwner.publicKey, LAMPORTS_PER_SOL));
+      await program.methods
+        .createVaultV2(edge.mode, edge.skimBps, edge.volumeBps, CAP, NO_RESERVE)
+        .accounts({ owner: edgeOwner.publicKey })
+        .signers([edgeOwner])
+        .rpc();
+      const [edgeVault] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), edgeOwner.publicKey.toBuffer()],
+        program.programId,
+      );
+      expectPolicy(await program.account.vault.fetch(edgeVault), edge);
+    }
   });
 
   it("creates the vault, and the address is a pure function of the owner", async () => {
@@ -254,6 +292,21 @@ describe("sip-vault M1", () => {
     assert.strictEqual(after.skimMode, before.skimMode);
     assert.strictEqual(after.skimBps, before.skimBps);
     assert.strictEqual(after.volumeBps, before.volumeBps);
+  });
+
+  it("set_policy_v2 accepts the same edges on an existing vault, and each one lands as written", async () => {
+    try {
+      for (const edge of EDGE_POLICIES) {
+        await program.methods
+          .setPolicyV2(edge.mode, edge.skimBps, edge.volumeBps, false, CAP, NO_RESERVE)
+          .accounts({ owner })
+          .rpc();
+        expectPolicy(await program.account.vault.fetch(vaultPda), edge);
+      }
+    } finally {
+      // Back to the policy this vault was created with.
+      await program.methods.setPolicyV2(MODE_PROFIT, 2_000, 20, false, CAP, NO_RESERVE).accounts({ owner }).rpc();
+    }
   });
 });
 

@@ -4,7 +4,7 @@ use anchor_lang::prelude::*;
 pub enum NuvemError {
     /// skim_bps of 0 is the "reachable trap": a vault that is enabled, funded
     /// and saving nothing, with every log line healthy. Refused at the door.
-    #[msg("skim_bps (profit rate) must be between 101 and 10000")]
+    #[msg("skim_bps (profit rate) must be between 201 and 10000")]
     InvalidSkimBps,
 
     #[msg("only the vault owner may do this")]
@@ -120,7 +120,7 @@ pub enum NuvemError {
     #[msg("mode must be 0 (profit) or 1 (volume)")]
     InvalidMode,
 
-    #[msg("volume_bps must be between 1 and 100")]
+    #[msg("volume_bps must be between 1 and 200")]
     InvalidVolumeBps,
 
     #[msg("max_contribution must be greater than zero")]
