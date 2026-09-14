@@ -48,6 +48,7 @@ describe("@sip/solana-core/client", () => {
   it("reaches the whole client tree and the shared validator", () => {
     const names = files.map((file) => relative(ROOT, file)).sort();
     expect(names).toContain("src/client/decoders.ts");
+    expect(names).toContain("src/client/link-consent.ts");
     expect(names).toContain("src/shared/public-ws-url.mjs");
     expect(names.some((name) => name.startsWith("src/server/"))).toBe(false);
   });

@@ -201,7 +201,10 @@ function SolanaProviders({ config, children }: { config: SolanaPublicConfig; chi
               "SIP is permissionless. Only your pension key can withdraw — the team has no access to your funds.",
             // Solana only: an EVM wallet has nothing to sign on this deployment.
             walletChainType: "solana-only",
-            walletList: ["phantom", "solflare", "backpack", "detected_solana_wallets"],
+            // ORDER IS THE PRODUCT DECISION: Phantom and Backpack first, then
+            // Solflare, then any other Solana extension the browser carries.
+            // Every entry is a Solana wallet; nothing EVM is offered here.
+            walletList: ["phantom", "backpack", "solflare", "detected_solana_wallets"],
           },
         }}
       >

@@ -1,5 +1,5 @@
-// Which in-asset this keeper can invest from, and whether it may invest at all,
-// as pure decisions.
+// Which in-asset this keeper can invest from, whether it may invest at all, and
+// whether it may convert the vault's SOL to get there, as pure decisions.
 //
 // NEW IN SIP. sip-vault's InvestmentPolicy pins `in_mint`: the only mint convert
 // may fill into and invest may spend from, chosen by the owner, with every floor
@@ -31,12 +31,14 @@ export function inMintDecision(inMint: PublicKey): { readonly outcome: "REFUSED"
  * Whether either pause switch stops this investment turn, decided before any
  * balance, ATA or wrap.
  *
- * THE VAULT'S OWN SWITCH IS THE DANGEROUS ONE. convert and invest refuse a paused
- * vault (VaultPaused), but wrap_sol checks only the protocol switch — so a keeper
- * that did not look would wrap a paused vault's free SOL, have the convert
- * refused, and leave the owner's SOL sitting as wSOL that only withdraw_token
- * recovers, again on every sweep. A paused vault is a RESTING state: nothing is
- * wrapped or bought, and nothing is alerted as a failure.
+ * THE VAULT'S OWN SWITCH WAS THE DANGEROUS ONE. convert and invest always refused
+ * a paused vault (VaultPaused), but wrap_sol once checked only the protocol switch
+ * — so a keeper that did not look would wrap a paused vault's free SOL, have the
+ * convert refused, and leave the owner's SOL sitting as wSOL that only
+ * withdraw_token recovers, again on every sweep. wrap_sol refuses a paused vault
+ * too now; resting here first still spares a failed transaction. A paused vault
+ * is a RESTING state: nothing is wrapped or bought, and nothing is alerted as a
+ * failure.
  */
 export function investPauseDecision(input: {
   readonly vaultPaused: boolean;
@@ -44,8 +46,35 @@ export function investPauseDecision(input: {
 }): { readonly outcome: "PAUSED"; readonly detail: string } | null {
   if (!input.vaultPaused && !input.protocolPaused) return null;
   const switches = [
-    input.vaultPaused ? "the vault's owner paused it (convert and invest refuse with VaultPaused; wrap_sol does not check it)" : null,
+    input.vaultPaused ? "the vault's owner paused it (wrap_sol, convert and invest refuse with VaultPaused)" : null,
     input.protocolPaused ? "the protocol's authority paused every vault (wrap_sol, convert and invest refuse with ProtocolPaused)" : null,
   ].filter((part): part is string => part !== null);
   return { outcome: "PAUSED", detail: `${switches.join(" and ")} — nothing is wrapped, converted or bought` };
+}
+
+/** Whether a turn may wrap and convert; when it may not, why, in words for the turn's detail. */
+export type ConvertDecision = { readonly convert: true } | { readonly convert: false; readonly detail: string };
+
+/**
+ * Whether this investment turn may wrap and convert the vault's SOL, decided
+ * from the policy alone, before any ATA or wrap.
+ *
+ * A ZERO FLOOR MEANS THE OWNER NEVER TURNED CONVERSION ON, and wrap_sol and
+ * convert both refuse it with FloorTooLow: "accept any price" is not a policy.
+ * The tick once checked only `enabled` before wrapping, so a vault whose owner
+ * enabled investing without ever signing a conversion floor had its ATAs
+ * re-created and a refused wrap_sol sent on every sweep, reported as FAILED.
+ *
+ * NOT A REFUSAL. The owner chose to keep the SOL as SOL, and USDC already in
+ * the vault is still invested against the legs as usual, so the turn goes on
+ * without wrap and convert, says so in its detail, and alerts nobody.
+ */
+export function convertDecision(policy: { readonly minConvertRateWad: bigint }): ConvertDecision {
+  if (policy.minConvertRateWad > 0n) return { convert: true };
+  return {
+    convert: false,
+    detail:
+      "conversion is off: the policy's min_convert_rate_wad is 0, which wrap_sol and convert refuse with FloorTooLow, " +
+      "so the vault's SOL is not wrapped or converted and only USDC already in the vault is invested",
+  };
 }

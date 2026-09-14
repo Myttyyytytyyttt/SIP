@@ -417,7 +417,9 @@ describe("endpoints, cadence, pools and credentials", () => {
     expect(shape("abc")).toBe("a 3-character base58-alphabet value");
     expect(shape("12")).toBe("a 2-character decimal-integer value");
     expect(shape(SETTLE_KEY)).toContain("rotate");
-    expect(shape(SETTLE_KEY)).not.toContain(String(settleKeypair.secretKey[0]));
+    // Two bytes with their comma: shape() never writes a comma, so this cannot
+    // collide with the length digits the way a lone byte did (~2% of keys).
+    expect(shape(SETTLE_KEY)).not.toContain(`${settleKeypair.secretKey[0]},${settleKeypair.secretKey[1]}`);
     const error = refusal(dry({ SIP_SOLANA_SWEEP_MS: SETTLE_KEY }));
     expect(error.message).toContain("JSON array secret key");
     expectNoSecret(error.message);

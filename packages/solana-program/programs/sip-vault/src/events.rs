@@ -16,4 +16,12 @@ pub struct Settled {
     pub paid: u64,
     pub settlement_nonce: u64,
     pub session_end_slot: u64,
+    /// APPENDED, SO EVERY FIELD ABOVE KEEPS ITS OFFSET. `settlement_nonce`
+    /// restarts at zero whenever a link is re-created, so (wallet, nonce)
+    /// repeats across a wallet's link lives and (wallet, link_epoch, nonce) does
+    /// not. With the window's start and the policy nonce the attestation signed,
+    /// the event describes the settlement without another account read.
+    pub link_epoch: u64,
+    pub session_start_slot: u64,
+    pub policy_nonce: u64,
 }

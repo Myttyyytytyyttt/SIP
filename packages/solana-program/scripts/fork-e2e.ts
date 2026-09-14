@@ -32,6 +32,7 @@ import {
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { attestationInstruction, MODE_PROFIT } from "./attestation";
+import { linkWalletWithConsent } from "./link-consent";
 import { measureCashSession } from "./measure-session";
 import { buildSwapV2AccountMetas, buildSwapV2Data, MEMO_PROGRAM, RAYDIUM_CLMM } from "./raydium-swap";
 
@@ -79,11 +80,7 @@ async function main() {
     .accounts({ owner: owner.publicKey })
     .signers([owner])
     .rpc();
-  await program.methods
-    .linkWallet()
-    .accounts({ owner: owner.publicKey, wallet: wallet.publicKey })
-    .signers([owner, wallet])
-    .rpc();
+  await linkWalletWithConsent(program, { owner: owner.publicKey, wallet }).signers([owner, wallet]).rpc();
   console.log(`vault ${vaultPda.toBase58()}  wallet ${wallet.publicKey.toBase58()}`);
 
   // ── 1. the SESSION: capital arrives, trades win and lose ──────────────────
@@ -164,15 +161,9 @@ async function main() {
   const vaultUsdc = await createAssociatedTokenAccountIdempotent(connection, payer, USDC, vaultPda, undefined, TOKEN_PROGRAM_ID, undefined, true);
   const vaultStock = await createAssociatedTokenAccountIdempotent(connection, payer, NVDAX, vaultPda, undefined, TOKEN_2022_PROGRAM_ID, undefined, true);
 
-  const wrapAmount = settled; // wrap everything that was just saved
-  await program.methods
-    .wrapSol(new anchor.BN(wrapAmount.toString()))
-    .accountsPartial({ crank: crank.publicKey, vault: vaultPda, vaultWsol, tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId })
-    .signers([crank])
-    .rpc();
-  console.log(`wrapped: ${sol(wrapAmount)} -> wSOL`);
-
   // ── policy: Raydium pinned, NVDAx leg, convert floor $30/SOL-equivalent ───
+  // BEFORE the wrap: wrap_sol refuses a vault whose owner has not enabled a
+  // policy with a conversion floor.
   const legs = [{ mint: NVDAX, weightBps: 10_000, minOutRateWad: new anchor.BN((10n ** 15n).toString()) }];
   await program.methods
     .setInvestPolicy(
@@ -184,6 +175,14 @@ async function main() {
     .accountsPartial({ owner: owner.publicKey, vault: vaultPda, policy: policyPda })
     .signers([owner])
     .rpc();
+
+  const wrapAmount = settled; // wrap everything that was just saved
+  await program.methods
+    .wrapSol(new anchor.BN(wrapAmount.toString()))
+    .accountsPartial({ crank: crank.publicKey, vault: vaultPda, policy: policyPda, vaultWsol, tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId })
+    .signers([crank])
+    .rpc();
+  console.log(`wrapped: ${sol(wrapAmount)} -> wSOL`);
 
   // ── 6. CONVERT wSOL -> USDC through the REAL cloned pool ──────────────────
   const wa = wsolSwap.accounts;

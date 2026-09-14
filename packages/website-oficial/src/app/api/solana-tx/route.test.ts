@@ -2,7 +2,10 @@
 // the core verifier and sender behind them (tested in depth in @sip/solana-core).
 // Every key is Keypair.generate(); every URL an .invalid host. No network.
 
+import { createPrivateKey, sign } from "node:crypto";
+
 import {
+  DEFAULT_RATES,
   OLD_NUVEM_PROGRAM_ID,
   SIP_PROGRAM_ID,
   base58Encode,
@@ -10,7 +13,7 @@ import {
   instructionDiscriminator,
   tryBase64Decode,
 } from "@sip/solana-core/client";
-import { buildCreateVaultV2 } from "@sip/solana-core/server";
+import { buildCreateVaultV2, buildLinkWallet, prepareLinkWalletConsent } from "@sip/solana-core/server";
 import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, VersionedTransaction } from "@solana/web3.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -73,8 +76,8 @@ function signedCreateVault(): { base64: string; signature: string } {
     // copies of the class fails. Production never hands the core a web3.js object.
     owner: owner.publicKey.toBase58(),
     mode: 1,
-    skimBps: 101,
-    volumeBps: 20,
+    skimBps: DEFAULT_RATES.profitBps,
+    volumeBps: DEFAULT_RATES.volumeBps,
     maxContribution: 1_000_000_000n,
     walletReserve: 0n,
     blockhash: BLOCKHASH,
@@ -86,6 +89,38 @@ function signedCreateVault(): { base64: string; signature: string } {
   const signature = tx.signatures[0];
   if (signature === undefined) throw new Error("no signature");
   return { base64: base64Encode(tx.serialize()), signature: base58Encode(signature) };
+}
+
+/** What a wallet's signMessage returns: an ed25519 signature, here with node:crypto and a throwaway key. */
+function signMessage(signer: Keypair, message: Uint8Array): Uint8Array {
+  const privateKey = createPrivateKey({
+    key: {
+      kty: "OKP",
+      crv: "Ed25519",
+      d: Buffer.from(signer.secretKey.subarray(0, 32)).toString("base64url"),
+      x: Buffer.from(signer.publicKey.toBytes()).toString("base64url"),
+    },
+    format: "jwk",
+  });
+  return Uint8Array.from(sign(null, message, privateKey));
+}
+
+/** A link through both core calls: the trading wallet signs the consent, then owner and wallet sign the transaction. */
+function signedLink(): { owner: Keypair; wallet: Keypair; base64: string; signature: string } {
+  const owner = Keypair.generate();
+  const wallet = Keypair.generate();
+  // Base58 strings, not PublicKey objects, for the reason signedCreateVault gives.
+  const parties = { owner: owner.publicKey.toBase58(), wallet: wallet.publicKey.toBase58() };
+  const consent = tryBase64Decode(prepareLinkWalletConsent(parties).consentMessageBase64);
+  if (consent === null) throw new Error("the consent is not base64");
+  const built = buildLinkWallet({ ...parties, consentSignature: signMessage(wallet, consent), blockhash: BLOCKHASH });
+  const unsigned = tryBase64Decode(built.txBase64);
+  if (unsigned === null) throw new Error("the builder returned something that is not base64");
+  const tx = VersionedTransaction.deserialize(unsigned);
+  tx.sign([owner, wallet]);
+  const signature = tx.signatures[0];
+  if (signature === undefined) throw new Error("no signature");
+  return { owner, wallet, base64: base64Encode(tx.serialize()), signature: base58Encode(signature) };
 }
 
 function signedLegacy(instruction: TransactionInstruction, payer: Keypair): string {
@@ -164,6 +199,31 @@ describe("/api/solana-tx", () => {
     expect(seen.map((body) => body.method)).toEqual(["simulateTransaction", "sendTransaction"]);
     expect(seen[0]!.params?.[1]).toMatchObject({ sigVerify: true, replaceRecentBlockhash: false });
     expect(seen[1]!.params?.[1]).toMatchObject({ skipPreflight: true });
+  });
+
+  it("relays a link only with the wallet's consent before it: the link is sent, the same link stripped of its consent is 422 link_consent_missing", async () => {
+    useEnv(SOLANA_ENV);
+    const linked = signedLink();
+    const seen = stubUpstream((body) =>
+      body.method === "simulateTransaction"
+        ? rpcOk(body, { context: { slot: 322 }, value: { err: null, logs: ["Program log: Instruction: LinkWallet"], unitsConsumed: 9_000 } })
+        : rpcOk(body, linked.signature),
+    );
+    const response = await POST(sendRequest({ action: "send", signedTxBase64: linked.base64 }));
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { signature: string }).signature).toBe(linked.signature);
+    expect(seen.map((body) => body.method)).toEqual(["simulateTransaction", "sendTransaction"]);
+
+    const bytes = tryBase64Decode(linked.base64);
+    if (bytes === null) throw new Error("not base64");
+    const stripped = Transaction.from(Buffer.from(bytes));
+    expect(stripped.instructions.map((instruction) => instruction.programId.toBase58())).toEqual(["Ed25519SigVerify111111111111111111111111111", SIP_PROGRAM_ID]);
+    stripped.instructions.shift();
+    stripped.sign(linked.owner, linked.wallet);
+    const refused = await POST(sendRequest({ action: "send", signedTxBase64: base64Encode(stripped.serialize()) }));
+    expect(refused.status).toBe(422);
+    expect(((await refused.json()) as { error: { code: string } }).error.code).toBe("link_consent_missing");
+    expect(seen).toHaveLength(2);
   });
 
   it("a send-stage upstream failure is 502 send_unconfirmed with the signature to confirm, and never quotes the endpoint", async () => {

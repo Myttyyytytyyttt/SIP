@@ -5,6 +5,7 @@ use anchor_spl::token_interface::{Mint, TokenAccount};
 
 use crate::errors::NuvemError;
 use crate::state::{InvestmentPolicy, ProtocolConfig, Vault};
+use crate::venue_route::refuse_unmeasured_vault_accounts;
 
 /// Invests one leg: the vault buys `leg`'s mint through the policy's pinned
 /// venue, behind RH's full guard surface.
@@ -19,6 +20,10 @@ use crate::state::{InvestmentPolicy, ProtocolConfig, Vault};
 ///   * the vault PDA signs the CPI, so the venue can spend from the vault's
 ///     input account — and the SPEND IS MEASURED: input-account delta must not
 ///     exceed amount_in, or the whole call unwinds;
+///   * the route may list NO OTHER VAULT ACCOUNT: the venue spends from
+///     whatever account sits in its input slot, so every vault-owned token
+///     account in the route must be vault_in or vault_target, the two that are
+///     measured (venue_route.rs);
 ///   * the FILL IS MEASURED: target-account delta must reach min_out, which
 ///     itself must clear the user's own min_out_rate_wad floor;
 ///   * RH's envelope: threshold, per-call ceiling, rolling 31-bucket window,
@@ -87,7 +92,8 @@ pub struct Invest<'info> {
     pub venue_program: UncheckedAccount<'info>,
     // remaining_accounts: the venue's account list, in the venue's order. The
     // vault PDA may appear anywhere in it and is the only key this program
-    // will mark as a CPI signer.
+    // will mark as a CPI signer. No token account the vault owns may appear in
+    // it but vault_in and vault_target.
 }
 
 pub fn invest_handler(
@@ -141,6 +147,16 @@ pub fn invest_handler(
     )
     .map_err(|_| NuvemError::InvalidPolicy)?;
     require!(min_out >= floor && min_out > 0, NuvemError::FloorTooLow);
+
+    // NO VAULT ACCOUNT THE DELTAS CANNOT SEE. The venue spends from whatever
+    // the route lists, under the vault's signature, so vault_in and
+    // vault_target must be the only vault token accounts in it, or the guards
+    // below measure accounts the venue never touched. See venue_route.rs.
+    refuse_unmeasured_vault_accounts(
+        ctx.remaining_accounts,
+        &vault.key(),
+        [&ctx.accounts.vault_in.key(), &ctx.accounts.vault_target.key()],
+    )?;
 
     let in_before = ctx.accounts.vault_in.amount;
     let target_before = ctx.accounts.vault_target.amount;

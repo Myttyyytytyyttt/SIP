@@ -7,7 +7,10 @@
 // IDL, not offsets — and what is read: the V2 vault fields Nuvem never decoded
 // (skim_mode, volume_bps, policy_nonce, max_contribution, wallet_reserve), the
 // policy's in_mint (which moved the legs from byte 77 to 109), ProtocolConfig
-// (whose `paused` gates settle and invest for everyone) and the Settled event.
+// (whose `paused` gates settle, link_wallet and invest for everyone) and the
+// Settled event with its appended link_epoch, session_start_slot and
+// policy_nonce. The program is a fresh deployment, so no event without them
+// exists under its id: a 9-field body is refused, not read short.
 //
 // Integers above u32 are bigints. Decimal strings are the route boundary's job.
 // Field names are the IDL's in camelCase (max_rolling_30d → maxRolling30d, not
@@ -90,14 +93,14 @@ export interface VaultState {
   readonly bump: number;
   readonly version: number;
   readonly paused: boolean;
-  /** Profit rate, bps (101..=10000). */
+  /** Profit rate, bps (201..=10000). */
   readonly skimBps: number;
   readonly lifetimeSaved: bigint;
   /** Unix seconds (i64). */
   readonly createdAt: bigint;
   /** 0 profit, 1 volume. */
   readonly skimMode: number;
-  /** Volume rate, bps (1..=100). */
+  /** Volume rate, bps (1..=200). */
   readonly volumeBps: number;
   readonly policyNonce: bigint;
   readonly maxContribution: bigint;
@@ -145,7 +148,7 @@ export interface ProtocolConfigState {
   readonly keeper: string;
   /** The default key means no transfer is pending. */
   readonly pendingAuthority: string;
-  /** Protocol-wide pause: settle, wrap_sol, convert and invest stop; withdrawals never do. */
+  /** Protocol-wide pause: settle, link_wallet, wrap_sol, convert and invest stop; withdrawals and an owner's unlink never do. */
   readonly paused: boolean;
   readonly version: number;
 }
@@ -160,8 +163,15 @@ export interface SettledEvent {
   readonly owed: bigint;
   /** What actually moved, after max_contribution. */
   readonly paid: bigint;
+  /** Restarts at zero when a link is re-created: (wallet, linkEpoch, settlementNonce) is unique, (wallet, settlementNonce) is not. */
   readonly settlementNonce: bigint;
   readonly sessionEndSlot: bigint;
+  /** The link's birth slot (TradingLink.epoch) the attestation signed. Appended, so every field above keeps its offset. */
+  readonly linkEpoch: bigint;
+  /** The first slot of the settled window. */
+  readonly sessionStartSlot: bigint;
+  /** The vault's policy nonce the attestation signed. */
+  readonly policyNonce: bigint;
 }
 
 export const decodeVault = (data: Uint8Array): VaultState => decodeAccount("Vault", data) as unknown as VaultState;

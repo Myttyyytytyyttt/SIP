@@ -6,22 +6,38 @@
 // IDL carries none of these constants, so test/rules.test.ts reads the Rust
 // source and pins every number here to it. Browser-safe: the forms use the same
 // functions the server builders use.
+//
+// THE RATE RANGES ARE DISJOINT ON PURPOSE. Volume is 1..=200 bps (0.01 %..2 %),
+// profit 201..=10000 (2.01 %..100 %): a profit rate can never be stored where a
+// volume rate belongs, and the worst cross-application is under-saving. The
+// owner's product rates sit inside them, volume on its own edge.
 
+import { USDC_MINT } from "./addresses";
 import { DEFAULT_PUBKEY, isPubkey } from "./base58";
 import { IDL_VEC_MAX_LEN } from "./idl";
 
 export const MODE_PROFIT = 0;
 export const MODE_VOLUME = 1;
-export const PROFIT_BPS_MIN = 101;
+export const PROFIT_BPS_MIN = 201;
 export const PROFIT_BPS_MAX = 10_000;
 export const VOLUME_BPS_MIN = 1;
-export const VOLUME_BPS_MAX = 100;
+export const VOLUME_BPS_MAX = 200;
 /** state.rs MAX_LEGS, through the IDL vec bound so there is one copy of the number. */
 export const MAX_LEGS: number = IDL_VEC_MAX_LEN.InvestmentPolicy!.legs!;
 export const LEG_WEIGHT_TOTAL_BPS = 10_000;
 
 export const U64_MAX = (1n << 64n) - 1n;
 export const U128_MAX = (1n << 128n) - 1n;
+
+/**
+ * The owner's product rates, decided 2026-09-14 (state.rs, on skim_bps and
+ * volume_bps): 20 % of profit, 2 % of every buy and sell. What a new vault is
+ * offered; both must be valid whatever the mode, and they are.
+ */
+export const DEFAULT_RATES = { profitBps: 2_000, volumeBps: 200 } as const;
+
+/** One purchase of the first investment policy: 5 USDC, in USDC's raw units (6 decimals). */
+export const DEFAULT_PURCHASE_USDC_RAW = 5_000_000n;
 
 const isInt = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value);
 const inU64 = (value: unknown): value is bigint => typeof value === "bigint" && value >= 0n && value <= U64_MAX;
@@ -30,9 +46,9 @@ const inU128 = (value: unknown): value is bigint => typeof value === "bigint" &&
 export interface VaultPolicyInput {
   /** MODE_PROFIT (0) or MODE_VOLUME (1). */
   readonly mode: number;
-  /** Profit rate, 101..=10000 bps. Required valid in BOTH modes (validate_policy checks both). */
+  /** Profit rate, 201..=10000 bps. Required valid in BOTH modes (validate_policy checks both). */
   readonly skimBps: number;
-  /** Volume rate, 1..=100 bps. Required valid in BOTH modes. */
+  /** Volume rate, 1..=200 bps. Required valid in BOTH modes. */
   readonly volumeBps: number;
   /** Lamports; > 0. */
   readonly maxContribution: bigint;
@@ -102,4 +118,24 @@ export function investPolicyProblems(input: InvestPolicyInput): string[] {
   }
   if (typeof input.enabled !== "boolean") problems.push("enabled must be a boolean");
   return problems;
+}
+
+export type DefaultInvestAmounts = Pick<InvestPolicyInput, "inMint" | "minInvestment" | "maxPerCall" | "maxRolling30d">;
+
+/**
+ * The first investment policy's amounts for a basket of `legCount` legs: a
+ * purchase every 5 USDC, so min_investment is 5 USDC divided by the leg count
+ * (rounded down, so a 5 USDC pile always covers every leg's minimum), and no
+ * per-call or 30-day ceiling (u64 max) until the owner sets one. In USDC.
+ * Legs, weights, floors and the venue are the owner's to choose; this is only
+ * the part decided for them. Throws RangeError outside 1..MAX_LEGS.
+ */
+export function defaultInvestPolicy(legCount: number): DefaultInvestAmounts {
+  if (!isInt(legCount) || legCount < 1 || legCount > MAX_LEGS) throw new RangeError(`defaultInvestPolicy: a basket has between 1 and ${MAX_LEGS} legs`);
+  return {
+    inMint: USDC_MINT,
+    minInvestment: DEFAULT_PURCHASE_USDC_RAW / BigInt(legCount),
+    maxPerCall: U64_MAX,
+    maxRolling30d: U64_MAX,
+  };
 }

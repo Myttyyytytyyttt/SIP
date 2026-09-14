@@ -3,6 +3,7 @@
 import {
   AddressLookupTableAccount,
   ComputeBudgetProgram,
+  Ed25519Program,
   Keypair,
   PublicKey,
   SystemProgram,
@@ -12,22 +13,27 @@ import {
 } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 
-import { MEMO_PROGRAM, USDC_MINT } from "../src/client/addresses";
+import { ED25519_PROGRAM, INSTRUCTIONS_SYSVAR, MEMO_PROGRAM, USDC_MINT } from "../src/client/addresses";
 import { base58Encode } from "../src/client/base58";
+import { base64Encode } from "../src/client/base64";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID, instructionDiscriminator } from "../src/client/idl";
+import { linkConsentMessage } from "../src/client/link-consent";
 import {
   buildCreateVaultV2,
   buildLinkWallet,
   buildSetInvestPolicy,
   buildUnlinkWallet,
   buildWithdraw,
+  prepareLinkWalletConsent,
   sipInstruction,
+  type BuiltTransaction,
 } from "../src/server/builders";
-import { deriveLinkPda, deriveVaultPda } from "../src/server/pda";
+import { deriveConfigPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
+import { MAX_TX_BASE64_CHARS, MAX_TX_BYTES } from "../src/server/relay-policy";
 import { verifySignedTransaction, type VerifyRefusal } from "../src/server/verify-tx";
-import { BLOCKHASH, b64, fromB64, keypair, legacyTx, signWire } from "./helpers";
+import { BLOCKHASH, b64, fromB64, keypair, legacyTx, signBytes, signWire, signedLinkWallet } from "./helpers";
 
-const vaultPolicy = { mode: 1, skimBps: 2_000, volumeBps: 10, maxContribution: 1_000_000_000n, walletReserve: 5_000_000n };
+const vaultPolicy = { mode: 1, skimBps: 2_000, volumeBps: 200, maxContribution: 1_000_000_000n, walletReserve: 5_000_000n };
 
 function expectRefusal(bytes: Uint8Array, reason: VerifyRefusal | readonly VerifyRefusal[]): void {
   const result = verifySignedTransaction(bytes);
@@ -38,8 +44,53 @@ function expectRefusal(bytes: Uint8Array, reason: VerifyRefusal | readonly Verif
   }
 }
 
-function linkInstruction(owner: PublicKey, wallet: PublicKey): TransactionInstruction {
-  return sipInstruction("link_wallet", { owner, wallet, vault: deriveVaultPda(owner), trading_link: deriveLinkPda(wallet) }, {});
+type LinkAccount = "vault" | "trading_link" | "config";
+
+/** link_wallet alone, by the IDL, with its PDAs unless overridden. */
+function linkInstruction(owner: PublicKey, wallet: PublicKey, overrides: Partial<Record<LinkAccount, PublicKey>> = {}): TransactionInstruction {
+  return sipInstruction("link_wallet", { owner, wallet, vault: deriveVaultPda(owner), trading_link: deriveLinkPda(wallet), config: deriveConfigPda(), ...overrides }, {});
+}
+
+/** The SIP_LINK_V1 bytes for linking `wallet` to `owner`'s vault, on `programId`. */
+const consentBytes = (owner: PublicKey, wallet: PublicKey, programId: string = SIP_PROGRAM_ID): Uint8Array =>
+  linkConsentMessage({ programId, wallet: wallet.toBase58(), vault: deriveVaultPda(owner).toBase58(), owner: owner.toBase58() });
+
+/**
+ * An Ed25519SigVerify instruction as web3.js writes it. By default the wallet's
+ * genuine consent; `key` is the public key it names, `signer` who actually
+ * signed, `message` the bytes signed.
+ */
+function consentInstruction(
+  owner: PublicKey,
+  wallet: Keypair,
+  options: { readonly key?: PublicKey; readonly signer?: Keypair; readonly message?: Uint8Array; readonly instructionIndex?: number } = {},
+): TransactionInstruction {
+  const message = options.message ?? consentBytes(owner, wallet.publicKey);
+  const signer = options.signer ?? wallet;
+  return Ed25519Program.createInstructionWithPublicKey({
+    publicKey: (options.key ?? signer.publicKey).toBytes(),
+    message,
+    signature: signBytes(signer, message),
+    instructionIndex: options.instructionIndex,
+  });
+}
+
+/** The genuine consent with its data edited: the shapes the program refuses. */
+function editedConsent(owner: PublicKey, wallet: Keypair, edit: (data: Uint8Array, view: DataView) => Uint8Array | void): TransactionInstruction {
+  const data = Uint8Array.from(consentInstruction(owner, wallet).data);
+  const replaced = edit(data, new DataView(data.buffer)) ?? data;
+  return new TransactionInstruction({ programId: new PublicKey(ED25519_PROGRAM), keys: [], data: Buffer.from(replaced) });
+}
+
+/** `before`, then link_wallet (or `link`), then `after`, paid by the owner and signed by the owner and the wallet. */
+function linkTx(owner: Keypair, wallet: Keypair, before: TransactionInstruction[], options: { readonly link?: TransactionInstruction; readonly after?: TransactionInstruction[] } = {}): Uint8Array {
+  return legacyTx(owner.publicKey, [...before, options.link ?? linkInstruction(owner.publicKey, wallet.publicKey), ...(options.after ?? [])], [owner, wallet]);
+}
+
+/** The link transaction exactly as the builder returns it, unsigned. */
+function builtLink(owner: Keypair, wallet: Keypair, blockhash = BLOCKHASH): BuiltTransaction {
+  const consent = fromB64(prepareLinkWalletConsent({ owner: owner.publicKey, wallet: wallet.publicKey }).consentMessageBase64);
+  return buildLinkWallet({ owner: owner.publicKey, wallet: wallet.publicKey, consentSignature: signBytes(wallet, consent), blockhash });
 }
 
 describe("accepted", () => {
@@ -53,39 +104,59 @@ describe("accepted", () => {
     expect(result.signature).toBe(base58Encode(VersionedTransaction.deserialize(signed).signatures[0]!));
     expect(result.feePayer).toBe(owner.publicKey.toBase58());
     expect(result.instruction.name).toBe("create_vault_v2");
-    expect(result.instruction.args).toEqual({ mode: 1, skim_bps: 2_000, volume_bps: 10, max_contribution: 1_000_000_000n, wallet_reserve: 5_000_000n });
+    expect(result.instruction.args).toEqual({ mode: 1, skim_bps: 2_000, volume_bps: 200, max_contribution: 1_000_000_000n, wallet_reserve: 5_000_000n });
     expect(result.wireBase64).toBe(b64(signed));
     expect(result.version).toBe("legacy");
   });
 
-  it("(b) link_wallet signed owner first, then the trading wallet", () => {
+  it("(b) link_wallet as the builder makes it: the wallet's consent, then link_wallet, signed owner first, then the wallet", () => {
     const owner = keypair();
     const wallet = keypair();
-    const built = buildLinkWallet({ owner: owner.publicKey, wallet: wallet.publicKey, blockhash: BLOCKHASH });
-    const result = verifySignedTransaction(signWire(built.txBase64, owner, wallet));
+    const signed = signedLinkWallet(owner, wallet);
+    expect(signed.length).toBeLessThanOrEqual(MAX_TX_BYTES);
+    expect(base64Encode(signed).length).toBeLessThanOrEqual(MAX_TX_BASE64_CHARS);
+    const result = verifySignedTransaction(signed, { programId: SIP_PROGRAM_ID });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.feePayer).toBe(owner.publicKey.toBase58());
     expect(result.signers).toEqual([owner.publicKey.toBase58(), wallet.publicKey.toBase58()]);
-    expect(result.instruction.accounts.wallet).toBe(wallet.publicKey.toBase58());
+    expect(result.instruction.accounts).toMatchObject({
+      wallet: wallet.publicKey.toBase58(),
+      vault: deriveVaultPda(owner.publicKey).toBase58(),
+      config: deriveConfigPda().toBase58(),
+      instructions_sysvar: INSTRUCTIONS_SYSVAR,
+    });
+    expect(result.instructions).toEqual([
+      { program: ED25519_PROGRAM, name: "Ed25519SigVerify" },
+      { program: SIP_PROGRAM_ID, name: "link_wallet" },
+    ]);
   });
 
-  it("(c) link_wallet with a SetComputeUnitPrice(10_000) prepended before signing", () => {
+  it("(c) the consent reads its own data wherever it sits: budget instructions prepended, and an explicit own index", () => {
     const owner = keypair();
     const wallet = keypair();
-    const bytes = legacyTx(owner.publicKey, [ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10_000 }), linkInstruction(owner.publicKey, wallet.publicKey)], [owner, wallet]);
-    const result = verifySignedTransaction(bytes);
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.computeBudget.microLamports).toBe(10_000n);
-      expect(result.instructions.map((instruction) => instruction.name)).toEqual(["SetComputeUnitPrice", "link_wallet"]);
+    const priced = verifySignedTransaction(linkTx(owner, wallet, [ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10_000 }), consentInstruction(owner.publicKey, wallet)]));
+    expect(priced.ok).toBe(true);
+    if (priced.ok) {
+      expect(priced.computeBudget.microLamports).toBe(10_000n);
+      expect(priced.instructions.map((instruction) => instruction.name)).toEqual(["SetComputeUnitPrice", "Ed25519SigVerify", "link_wallet"]);
     }
+    const budget = [ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 })];
+    expect(verifySignedTransaction(linkTx(owner, wallet, [...budget, consentInstruction(owner.publicKey, wallet, { instructionIndex: 2 })])).ok).toBe(true);
+    const ownIndexZero = editedConsent(owner.publicKey, wallet, (_, view) => {
+      for (const at of [4, 8, 14]) view.setUint16(at, 0, true);
+    });
+    expect(verifySignedTransaction(linkTx(owner, wallet, [ownIndexZero])).ok).toBe(true);
   });
 
   it("(d) the same link as a v0 message with no lookup tables", () => {
     const owner = keypair();
     const wallet = keypair();
-    const message = new TransactionMessage({ payerKey: owner.publicKey, recentBlockhash: BLOCKHASH, instructions: [linkInstruction(owner.publicKey, wallet.publicKey)] }).compileToV0Message();
+    const message = new TransactionMessage({
+      payerKey: owner.publicKey,
+      recentBlockhash: BLOCKHASH,
+      instructions: [consentInstruction(owner.publicKey, wallet), linkInstruction(owner.publicKey, wallet.publicKey)],
+    }).compileToV0Message();
     const tx = new VersionedTransaction(message);
     tx.sign([owner, wallet]);
     const result = verifySignedTransaction(tx.serialize());
@@ -113,15 +184,13 @@ describe("accepted", () => {
     if (result.ok) expect(result.instruction.args.in_mint).toBe(USDC_MINT);
   });
 
-  it("unlink_wallet by the owner, and by the wallet with the owner paying", () => {
+  it("unlink_wallet by the owner, alone", () => {
     const owner = keypair();
     const wallet = keypair();
-    const byOwner = buildUnlinkWallet({ owner: owner.publicKey, wallet: wallet.publicKey, blockhash: BLOCKHASH });
-    expect(verifySignedTransaction(signWire(byOwner.txBase64, owner)).ok).toBe(true);
-    const byWallet = buildUnlinkWallet({ owner: owner.publicKey, wallet: wallet.publicKey, blockhash: BLOCKHASH, by: "wallet" });
-    const result = verifySignedTransaction(signWire(byWallet.txBase64, owner, wallet));
+    const built = buildUnlinkWallet({ owner: owner.publicKey, wallet: wallet.publicKey, blockhash: BLOCKHASH });
+    const result = verifySignedTransaction(signWire(built.txBase64, owner));
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.instruction.accounts.authority).toBe(wallet.publicKey.toBase58());
+    if (result.ok) expect([result.signers, result.instruction.accounts.authority]).toEqual([[owner.publicKey.toBase58()], owner.publicKey.toBase58()]);
   });
 });
 
@@ -129,36 +198,29 @@ describe("refused", () => {
   it("(f) a link carrying only the owner's signature: missing_signature", () => {
     const owner = keypair();
     const wallet = keypair();
-    const built = buildLinkWallet({ owner: owner.publicKey, wallet: wallet.publicKey, blockhash: BLOCKHASH });
-    expectRefusal(signWire(built.txBase64, owner), "missing_signature");
+    expectRefusal(signWire(builtLink(owner, wallet).txBase64, owner), "missing_signature");
   });
 
   it("(g) a link whose wallet signed a different message: bad_signature", () => {
     const owner = keypair();
     const wallet = keypair();
-    const real = VersionedTransaction.deserialize(fromB64(buildLinkWallet({ owner: owner.publicKey, wallet: wallet.publicKey, blockhash: BLOCKHASH }).txBase64));
+    const real = VersionedTransaction.deserialize(fromB64(builtLink(owner, wallet).txBase64));
     real.sign([owner]);
     const otherHash = base58Encode(Uint8Array.from({ length: 32 }, (_, i) => (i * 7 + 2) & 0xff));
-    const other = VersionedTransaction.deserialize(fromB64(buildLinkWallet({ owner: owner.publicKey, wallet: wallet.publicKey, blockhash: otherHash }).txBase64));
+    const other = VersionedTransaction.deserialize(fromB64(builtLink(owner, wallet, otherHash).txBase64));
     other.sign([wallet]);
     real.signatures[1] = other.signatures[1]!;
     expectRefusal(real.serialize(), "bad_signature");
   });
 
-  it("(h) a hand-built link_wallet naming the owner twice: wallet_is_owner", () => {
+  it("(h) a hand-built link_wallet naming the owner twice, with the owner's own consent: wallet_is_owner", () => {
     const owner = keypair();
-    const ix = new TransactionInstruction({
-      programId: new PublicKey(SIP_PROGRAM_ID),
-      keys: [
-        { pubkey: owner.publicKey, isSigner: true, isWritable: true },
-        { pubkey: owner.publicKey, isSigner: true, isWritable: false },
-        { pubkey: deriveVaultPda(owner.publicKey), isSigner: false, isWritable: false },
-        { pubkey: deriveLinkPda(owner.publicKey), isSigner: false, isWritable: true },
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      ],
-      data: Buffer.from(instructionDiscriminator("link_wallet")),
-    });
-    expectRefusal(legacyTx(owner.publicKey, [ix], [owner]), ["wallet_is_owner", "signature_count"]);
+    const ix = sipInstruction(
+      "link_wallet",
+      { owner: owner.publicKey, wallet: owner.publicKey, vault: deriveVaultPda(owner.publicKey), trading_link: deriveLinkPda(owner.publicKey), config: deriveConfigPda() },
+      {},
+    );
+    expectRefusal(legacyTx(owner.publicKey, [consentInstruction(owner.publicKey, owner), ix], [owner]), "wallet_is_owner");
   });
 
   it("(i) a System transfer: program_not_allowed", () => {
@@ -183,6 +245,14 @@ describe("refused", () => {
     expectRefusal(legacyTx(wallet.publicKey, [ix], [wallet]), "instruction_not_allowed");
   });
 
+  it("(k2) wrap_sol, convert and invest are refused whatever their data: instruction_not_allowed", () => {
+    const crank = keypair();
+    for (const name of ["wrap_sol", "convert", "invest"]) {
+      const ix = new TransactionInstruction({ programId: new PublicKey(SIP_PROGRAM_ID), keys: [{ pubkey: crank.publicKey, isSigner: true, isWritable: true }], data: Buffer.from(instructionDiscriminator(name)) });
+      expectRefusal(legacyTx(crank.publicKey, [ix], [crank]), "instruction_not_allowed");
+    }
+  });
+
   it("(l) an unknown discriminator: unknown_discriminator", () => {
     const owner = keypair();
     const ix = new TransactionInstruction({ programId: new PublicKey(SIP_PROGRAM_ID), keys: [{ pubkey: owner.publicKey, isSigner: true, isWritable: true }], data: Buffer.from("deadbeef00000000", "hex") });
@@ -202,7 +272,11 @@ describe("refused", () => {
       key: keypair().publicKey,
       state: { deactivationSlot: BigInt("18446744073709551615"), lastExtendedSlot: 0, lastExtendedSlotStartIndex: 0, addresses: [deriveVaultPda(owner.publicKey)] },
     });
-    const message = new TransactionMessage({ payerKey: owner.publicKey, recentBlockhash: BLOCKHASH, instructions: [linkInstruction(owner.publicKey, wallet.publicKey)] }).compileToV0Message([table]);
+    const message = new TransactionMessage({
+      payerKey: owner.publicKey,
+      recentBlockhash: BLOCKHASH,
+      instructions: [consentInstruction(owner.publicKey, wallet), linkInstruction(owner.publicKey, wallet.publicKey)],
+    }).compileToV0Message([table]);
     expect(message.addressTableLookups.length).toBeGreaterThan(0);
     const tx = new VersionedTransaction(message);
     tx.sign([owner, wallet]);
@@ -265,11 +339,18 @@ describe("refused", () => {
     expectRefusal(legacyTx(stranger.publicKey, [ix], [stranger]), "account_binding");
   });
 
+  it("a create_vault_v2 whose system_program is not the System program: account_binding", () => {
+    const owner = keypair();
+    const ix = sipInstruction("create_vault_v2", { owner: owner.publicKey, vault: deriveVaultPda(owner.publicKey) }, { mode: 1, skim_bps: 2_000, volume_bps: 10, max_contribution: 1n, wallet_reserve: 0n });
+    ix.keys = ix.keys.map((meta, index) => (index === 2 ? { ...meta, pubkey: keypair().publicKey } : meta));
+    expectRefusal(legacyTx(owner.publicKey, [ix], [owner]), "account_binding");
+  });
+
   it("(r) a Memo instruction beside link_wallet: program_not_allowed", () => {
     const owner = keypair();
     const wallet = keypair();
     const memo = new TransactionInstruction({ programId: new PublicKey(MEMO_PROGRAM), keys: [], data: Buffer.from("hello") });
-    expectRefusal(legacyTx(owner.publicKey, [linkInstruction(owner.publicKey, wallet.publicKey), memo], [owner, wallet]), "program_not_allowed");
+    expectRefusal(linkTx(owner, wallet, [consentInstruction(owner.publicKey, wallet)], { after: [memo] }), "program_not_allowed");
   });
 
   it("bytes that decode but are not canonical (an over-long length prefix, or a trailing byte): non_canonical", () => {
@@ -286,14 +367,12 @@ describe("refused", () => {
     expect(verifySignedTransaction(signed).ok).toBe(true);
   });
 
-  it("an unlink paid by a stranger, and three signers", () => {
+  it("a link with three signers: signature_count", () => {
     const owner = keypair();
     const wallet = keypair();
     const stranger = keypair();
-    const unlink = sipInstruction("unlink_wallet", { authority: owner.publicKey, owner: owner.publicKey, vault: deriveVaultPda(owner.publicKey), trading_link: deriveLinkPda(wallet.publicKey) }, {});
-    expectRefusal(legacyTx(stranger.publicKey, [unlink], [stranger, owner]), "account_binding");
     const link = linkInstruction(owner.publicKey, wallet.publicKey);
-    expectRefusal(legacyTx(stranger.publicKey, [link], [stranger, owner, wallet]), "signature_count");
+    expectRefusal(legacyTx(stranger.publicKey, [consentInstruction(owner.publicKey, wallet), link], [stranger, owner, wallet]), "signature_count");
   });
 
   it("refuses to run with a configured program id that is not the IDL's", () => {
@@ -303,5 +382,148 @@ describe("refused", () => {
   it("never needs a network: a random key set is refused or accepted from bytes alone", () => {
     const signer = Keypair.generate();
     expect(verifySignedTransaction(legacyTx(signer.publicKey, [SystemProgram.transfer({ fromPubkey: signer.publicKey, toPubkey: signer.publicKey, lamports: 0 })], [signer])).ok).toBe(false);
+  });
+});
+
+describe("the wallet's link consent", () => {
+  it("link_wallet with no Ed25519SigVerify before it, alone or behind a budget instruction: link_consent_missing", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    expectRefusal(linkTx(owner, wallet, []), "link_consent_missing");
+    expectRefusal(linkTx(owner, wallet, [ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 })]), "link_consent_missing");
+  });
+
+  it("an Ed25519SigVerify anywhere but immediately before link_wallet: ed25519_misplaced", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    const consent = (): TransactionInstruction => consentInstruction(owner.publicKey, wallet);
+    // A budget instruction between the consent and the link.
+    expectRefusal(linkTx(owner, wallet, [consent(), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 })]), "ed25519_misplaced");
+    // Two consents.
+    expectRefusal(linkTx(owner, wallet, [consent(), consent()]), "ed25519_misplaced");
+    // After the link.
+    expectRefusal(linkTx(owner, wallet, [], { after: [consent()] }), "ed25519_misplaced");
+    // Beside another owner instruction.
+    const withdraw = sipInstruction("withdraw", { owner: owner.publicKey, vault: deriveVaultPda(owner.publicKey) }, { amount: 1n });
+    expectRefusal(legacyTx(owner.publicKey, [consent(), withdraw], [owner]), "ed25519_misplaced");
+    const unlink = sipInstruction("unlink_wallet", { authority: owner.publicKey, owner: owner.publicKey, vault: deriveVaultPda(owner.publicKey), trading_link: deriveLinkPda(wallet.publicKey) }, {});
+    expectRefusal(legacyTx(owner.publicKey, [consent(), unlink], [owner]), "ed25519_misplaced");
+  });
+
+  it("an Ed25519SigVerify checking 0 or 2 signatures: ed25519_signature_count", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    for (const count of [0, 2]) {
+      const consent = editedConsent(owner.publicKey, wallet, (data) => {
+        data[0] = count;
+      });
+      expectRefusal(linkTx(owner, wallet, [consent]), "ed25519_signature_count");
+    }
+  });
+
+  it("an Ed25519SigVerify shorter than its header, or listing an account: ed25519_malformed", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    expectRefusal(linkTx(owner, wallet, [editedConsent(owner.publicKey, wallet, (data) => data.slice(0, 10))]), "ed25519_malformed");
+    const genuine = consentInstruction(owner.publicKey, wallet);
+    const withAccount = new TransactionInstruction({ programId: genuine.programId, keys: [{ pubkey: owner.publicKey, isSigner: false, isWritable: false }], data: genuine.data });
+    expectRefusal(linkTx(owner, wallet, [withAccount]), "ed25519_malformed");
+  });
+
+  it("an Ed25519SigVerify reading from another instruction or past its own data: ed25519_offsets", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    // The message read out of instruction 1: link_wallet's own data.
+    expectRefusal(linkTx(owner, wallet, [editedConsent(owner.publicKey, wallet, (_, view) => view.setUint16(14, 1, true))]), "ed25519_offsets");
+    // The public key read from instruction 1.
+    expectRefusal(linkTx(owner, wallet, [editedConsent(owner.publicKey, wallet, (_, view) => view.setUint16(8, 1, true))]), "ed25519_offsets");
+    // A message one byte longer than the data holds.
+    expectRefusal(linkTx(owner, wallet, [editedConsent(owner.publicKey, wallet, (_, view) => view.setUint16(12, 141, true))]), "ed25519_offsets");
+    // A signature offset whose 64 bytes run past the end.
+    expectRefusal(linkTx(owner, wallet, [editedConsent(owner.publicKey, wallet, (data, view) => view.setUint16(2, data.length - 63, true))]), "ed25519_offsets");
+  });
+
+  it("a consent verifying another key than the wallet's: link_consent_wrong_signer", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    const stranger = keypair();
+    expectRefusal(linkTx(owner, wallet, [consentInstruction(owner.publicKey, wallet, { signer: stranger })]), "link_consent_wrong_signer");
+    // The owner "consenting" for the wallet.
+    expectRefusal(linkTx(owner, wallet, [consentInstruction(owner.publicKey, wallet, { signer: owner })]), "link_consent_wrong_signer");
+  });
+
+  it("the wallet's genuine signature over other bytes — another owner's vault, another deployment, a truncated consent: link_consent_mismatch", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    const other = keypair().publicKey;
+    expectRefusal(linkTx(owner, wallet, [consentInstruction(owner.publicKey, wallet, { message: consentBytes(other, wallet.publicKey) })]), "link_consent_mismatch");
+    expectRefusal(linkTx(owner, wallet, [consentInstruction(owner.publicKey, wallet, { message: consentBytes(owner.publicKey, wallet.publicKey, OLD_NUVEM_PROGRAM_ID) })]), "link_consent_mismatch");
+    expectRefusal(linkTx(owner, wallet, [consentInstruction(owner.publicKey, wallet, { message: consentBytes(owner.publicKey, wallet.publicKey).subarray(0, 139) })]), "link_consent_mismatch");
+  });
+
+  it("the wallet's key and the right bytes with a signature that does not verify: link_consent_bad_signature", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    expectRefusal(linkTx(owner, wallet, [consentInstruction(owner.publicKey, wallet, { key: wallet.publicKey, signer: keypair() })]), "link_consent_bad_signature");
+    const flipped = editedConsent(owner.publicKey, wallet, (data) => {
+      data[48] = data[48]! ^ 1;
+    });
+    expectRefusal(linkTx(owner, wallet, [flipped]), "link_consent_bad_signature");
+  });
+
+  it("link_wallet's accounts at the wrong addresses, with a genuine consent: account_binding", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    const consent = (): TransactionInstruction => consentInstruction(owner.publicKey, wallet);
+    for (const account of ["vault", "trading_link", "config"] as const) {
+      expectRefusal(linkTx(owner, wallet, [consent()], { link: linkInstruction(owner.publicKey, wallet.publicKey, { [account]: keypair().publicKey }) }), "account_binding");
+    }
+    // The fixed addresses: 5 is the instructions sysvar, 6 the System program.
+    for (const index of [5, 6]) {
+      const ix = linkInstruction(owner.publicKey, wallet.publicKey);
+      ix.keys = ix.keys.map((meta, position) => (position === index ? { ...meta, pubkey: keypair().publicKey } : meta));
+      expectRefusal(linkTx(owner, wallet, [consent()], { link: ix }), "account_binding");
+    }
+    // A consent AND a vault for another owner agree with each other, not with the owner who signs.
+    const other = keypair().publicKey;
+    expectRefusal(
+      linkTx(owner, wallet, [consentInstruction(owner.publicKey, wallet, { message: consentBytes(other, wallet.publicKey) })], {
+        link: linkInstruction(owner.publicKey, wallet.publicKey, { vault: deriveVaultPda(other) }),
+      }),
+      "account_binding",
+    );
+  });
+});
+
+describe("unlink_wallet: the owner alone", () => {
+  const unlink = (authority: PublicKey, owner: PublicKey, wallet: PublicKey, vaultOwner: PublicKey = owner): TransactionInstruction =>
+    sipInstruction("unlink_wallet", { authority, owner, vault: deriveVaultPda(vaultOwner), trading_link: deriveLinkPda(wallet) }, {});
+
+  it("the wallet as its own authority, even with the owner paying and signing: account_binding", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    expectRefusal(legacyTx(owner.publicKey, [unlink(wallet.publicKey, owner.publicKey, wallet.publicKey)], [owner, wallet]), "account_binding");
+  });
+
+  it("the wallet as authority and fee payer, alone: account_binding", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    const ix = unlink(wallet.publicKey, owner.publicKey, wallet.publicKey);
+    // The owner meta is only the rent destination; the wallet signs and pays.
+    expectRefusal(legacyTx(wallet.publicKey, [ix], [wallet]), "account_binding");
+  });
+
+  it("an owner's unlink paid by a stranger: account_binding", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    const stranger = keypair();
+    expectRefusal(legacyTx(stranger.publicKey, [unlink(owner.publicKey, owner.publicKey, wallet.publicKey)], [stranger, owner]), "account_binding");
+  });
+
+  it("an owner naming a vault that is not ['vault', owner]: account_binding", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    const other = keypair().publicKey;
+    expectRefusal(legacyTx(owner.publicKey, [unlink(owner.publicKey, owner.publicKey, wallet.publicKey, other)], [owner]), "account_binding");
   });
 });

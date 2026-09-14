@@ -10,18 +10,19 @@
 
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { AccountMeta, Keypair, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
+import { AccountMeta, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import {
   NATIVE_MINT,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountIdempotent,
   createMint,
+  createSyncNativeInstruction,
   mintTo,
 } from "@solana/spl-token";
 import { assert } from "chai";
 import { SipVault } from "../target/types/sip_vault";
-import { configPdaFor, ensureConfig, setKeeper } from "./config-fixture";
+import { configPdaFor, ensureConfig, pollingConfirm, setKeeper } from "./config-fixture";
 import { ToyVenue } from "../target/types/toy_venue";
 
 const WAD = 10n ** 18n;
@@ -31,7 +32,7 @@ describe("sip-vault M3: invest", () => {
   anchor.setProvider(provider);
   const program = anchor.workspace.sipVault as Program<SipVault>;
   const venue = anchor.workspace.toyVenue as Program<ToyVenue>;
-  const connection = provider.connection;
+  const connection = pollingConfirm(provider.connection);
   const payer = (provider.wallet as anchor.Wallet).payer;
 
   const owner = Keypair.generate();
@@ -341,5 +342,128 @@ describe("sip-vault M3: invest", () => {
         .rpc(),
       "WrongInMint",
     );
+  });
+
+  // ── the route may list no vault account but the measured ones ─────────────
+  // The venue takes its input from whatever account sits in its input slot, and
+  // the vault's signature rides on the CPI, so ANY token account the vault owns
+  // is one it can debit. The two attacks below name the real accounts, clear
+  // every floor and cap, and put a different, funded vault account in the input
+  // slot. Before venue_route.rs, the venue drained that account while both
+  // deltas measured accounts it never touched.
+  const tokenBal = async (account: PublicKey) => BigInt((await connection.getTokenAccountBalance(account)).value.amount);
+
+  /** The vault's wSOL account, topped up by `lamports`, as wrap_sol would leave it. */
+  const fundedVaultWsol = async (lamports: number) => {
+    const account = await createAssociatedTokenAccountIdempotent(connection, payer, NATIVE_MINT, vaultPda, undefined, TOKEN_PROGRAM_ID, undefined, true);
+    await provider.sendAndConfirm(
+      new Transaction()
+        .add(SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: account, lamports }))
+        .add(createSyncNativeInstruction(account)),
+    );
+    return account;
+  };
+
+  /** The honest pool's route, slot by slot in toy-venue's order, for any pair of accounts. */
+  const routeThrough = (slots: {
+    input: PublicKey; venueIn: PublicKey; venueOut: PublicKey; output: PublicKey;
+    inMint: PublicKey; outMint: PublicKey; inProgram: PublicKey; outProgram: PublicKey;
+  }): AccountMeta[] => [
+    { pubkey: poolPda(HONEST), isSigner: false, isWritable: false },
+    { pubkey: slots.input, isSigner: false, isWritable: true },
+    { pubkey: slots.venueIn, isSigner: false, isWritable: true },
+    { pubkey: slots.venueOut, isSigner: false, isWritable: true },
+    { pubkey: slots.output, isSigner: false, isWritable: true },
+    { pubkey: vaultPda, isSigner: false, isWritable: false },
+    { pubkey: slots.inMint, isSigner: false, isWritable: false },
+    { pubkey: slots.outMint, isSigner: false, isWritable: false },
+    { pubkey: slots.inProgram, isSigner: false, isWritable: false },
+    { pubkey: slots.outProgram, isSigner: false, isWritable: false },
+  ];
+
+  const convertThrough = (vaultWsol: PublicKey, amountIn: bigint, minOut: bigint, route: AccountMeta[]) =>
+    program.methods
+      .convert(new anchor.BN(amountIn.toString()), new anchor.BN(minOut.toString()), venueData(amountIn, minOut))
+      .accountsPartial({
+        crank: crank.publicKey, vault: vaultPda, policy: policyPda,
+        vaultWsol, vaultIn: vaultUsdc, venueProgram: venue.programId,
+      })
+      .remainingAccounts(route)
+      .signers([crank])
+      .rpc();
+
+  it("converts when the route lists only the vault's wSOL and in-asset accounts", async () => {
+    // The honest shape of the hop the guard below protects, so a refusal there
+    // is about the account in the input slot and nothing else.
+    const vaultWsol = await fundedVaultWsol(50_000_000);
+    const venueWsol = await createAssociatedTokenAccountIdempotent(connection, payer, NATIVE_MINT, poolPda(HONEST), undefined, TOKEN_PROGRAM_ID, undefined, true);
+    await mintTo(connection, payer, usdc, venueUsdc[HONEST]!, payer, 10_000_000, [], undefined, TOKEN_PROGRAM_ID);
+    const amountIn = 10_000_000n;
+    const minOut = expectedOut(amountIn);
+    const wsolBefore = await tokenBal(vaultWsol);
+    const usdcBefore = await usdcBal();
+
+    await convertThrough(vaultWsol, amountIn, minOut, routeThrough({
+      input: vaultWsol, venueIn: venueWsol, venueOut: venueUsdc[HONEST]!, output: vaultUsdc,
+      inMint: NATIVE_MINT, outMint: usdc, inProgram: TOKEN_PROGRAM_ID, outProgram: TOKEN_PROGRAM_ID,
+    }));
+
+    assert.strictEqual(wsolBefore - (await tokenBal(vaultWsol)), amountIn, "exactly amount_in of wSOL was sold");
+    assert.strictEqual((await usdcBal()) - usdcBefore, minOut, "and the fill landed in the in-asset account");
+  });
+
+  it("THE ROUTE GUARD: invest refuses a route that spends the vault's wSOL in place of its in-asset", async () => {
+    // A pool pairing wSOL with the leg's stock, and the vault's wSOL in the
+    // input slot. vault_in never moves, the stock fill clears min_out, and
+    // before the guard the wSOL was the venue's to take.
+    const vaultWsol = await fundedVaultWsol(50_000_000);
+    const venueWsol = await createAssociatedTokenAccountIdempotent(connection, payer, NATIVE_MINT, poolPda(HONEST), undefined, TOKEN_PROGRAM_ID, undefined, true);
+    const amountIn = 10_000_000n;
+    const minOut = expectedOut(amountIn);
+    const held = { wsol: await tokenBal(vaultWsol), usdc: await usdcBal(), stock: await stockBal() };
+
+    await expectFailure(
+      program.methods
+        .invest(0, new anchor.BN(amountIn.toString()), new anchor.BN(minOut.toString()), venueData(amountIn, minOut))
+        .accountsPartial({
+          crank: crank.publicKey, vault: vaultPda, policy: policyPda,
+          vaultIn: vaultUsdc, vaultTarget: vaultStock, targetMint: stock,
+          venueProgram: venue.programId,
+        })
+        .remainingAccounts(routeThrough({
+          input: vaultWsol, venueIn: venueWsol, venueOut: venueStock[HONEST]!, output: vaultStock,
+          inMint: NATIVE_MINT, outMint: stock, inProgram: TOKEN_PROGRAM_ID, outProgram: TOKEN_2022_PROGRAM_ID,
+        }))
+        .signers([crank])
+        .rpc(),
+      "DisallowedVaultAccount",
+    );
+
+    assert.strictEqual(await tokenBal(vaultWsol), held.wsol, "the wSOL is still the vault's");
+    assert.strictEqual(await usdcBal(), held.usdc, "vault_in is unchanged");
+    assert.strictEqual(await stockBal(), held.stock, "vault_target is unchanged");
+  });
+
+  it("THE ROUTE GUARD: convert refuses a route that sells the vault's stock in place of its wSOL", async () => {
+    // The same drain one hop earlier: a pool pairing the stock with the
+    // in-asset, the vault's stock in the input slot, a fill into vault_in.
+    const vaultWsol = await fundedVaultWsol(1_000_000);
+    await mintTo(connection, payer, stock, vaultStock, payer, 100_000_000, [], undefined, TOKEN_2022_PROGRAM_ID);
+    await mintTo(connection, payer, usdc, venueUsdc[HONEST]!, payer, 10_000_000, [], undefined, TOKEN_PROGRAM_ID);
+    const amountIn = 10_000_000n;
+    const minOut = expectedOut(amountIn);
+    const held = { wsol: await tokenBal(vaultWsol), usdc: await usdcBal(), stock: await stockBal() };
+
+    await expectFailure(
+      convertThrough(vaultWsol, amountIn, minOut, routeThrough({
+        input: vaultStock, venueIn: venueStock[HONEST]!, venueOut: venueUsdc[HONEST]!, output: vaultUsdc,
+        inMint: stock, outMint: usdc, inProgram: TOKEN_2022_PROGRAM_ID, outProgram: TOKEN_PROGRAM_ID,
+      })),
+      "DisallowedVaultAccount",
+    );
+
+    assert.strictEqual(await stockBal(), held.stock, "the stock is still the vault's");
+    assert.strictEqual(await tokenBal(vaultWsol), held.wsol, "vault_wsol is unchanged");
+    assert.strictEqual(await usdcBal(), held.usdc, "vault_in is unchanged");
   });
 });

@@ -1,10 +1,12 @@
 // Shared test fixtures. Every key is generated per run (Keypair.generate); the
 // endpoint URLs are .invalid hosts with obviously fake keys. No network.
 
+import { createPrivateKey, sign } from "node:crypto";
 import { Keypair, Transaction, TransactionInstruction, VersionedTransaction, type PublicKey } from "@solana/web3.js";
 
 import { base58Encode } from "../src/client/base58";
 import { base64Encode, tryBase64Decode } from "../src/client/base64";
+import { buildLinkWallet, prepareLinkWalletConsent } from "../src/server/builders";
 
 /** A fixed, valid-looking blockhash so transaction bytes are deterministic per key set. */
 export const BLOCKHASH = base58Encode(Uint8Array.from({ length: 32 }, (_, i) => (i * 7 + 1) & 0xff));
@@ -28,6 +30,27 @@ export function signWire(unsignedBase64: string, ...signers: Keypair[]): Uint8Ar
   const tx = VersionedTransaction.deserialize(fromB64(unsignedBase64));
   for (const signer of signers) tx.sign([signer]);
   return Uint8Array.from(tx.serialize());
+}
+
+/** `signer`'s ed25519 signature over `message`, with node:crypto: what a wallet's signMessage returns. */
+export function signBytes(signer: Keypair, message: Uint8Array): Uint8Array {
+  const privateKey = createPrivateKey({
+    key: {
+      kty: "OKP",
+      crv: "Ed25519",
+      d: Buffer.from(signer.secretKey.subarray(0, 32)).toString("base64url"),
+      x: Buffer.from(signer.publicKey.toBytes()).toString("base64url"),
+    },
+    format: "jwk",
+  });
+  return Uint8Array.from(sign(null, message, privateKey));
+}
+
+/** The whole link flow with throwaway keys: prepare, the wallet signs the consent, build, both sign the transaction. */
+export function signedLinkWallet(owner: Keypair, wallet: Keypair, blockhash = BLOCKHASH): Uint8Array {
+  const consent = prepareLinkWalletConsent({ owner: owner.publicKey, wallet: wallet.publicKey });
+  const built = buildLinkWallet({ owner: owner.publicKey, wallet: wallet.publicKey, consentSignature: signBytes(wallet, fromB64(consent.consentMessageBase64)), blockhash });
+  return signWire(built.txBase64, owner, wallet);
 }
 
 /** A legacy transaction from instructions, partially signed by `signers`. */

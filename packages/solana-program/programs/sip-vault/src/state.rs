@@ -25,14 +25,16 @@ pub struct Vault {
     /// while others do not — the closest Solana gets to the beacon-per-cohort
     /// model.
     pub version: u8,
-    /// Gates settle and invest. NEVER gates withdraw: an issuer freezing the
-    /// stock leg, or this program pausing itself, must not trap the user's SOL.
+    /// Gates settle, wrap_sol, convert and invest. NEVER gates withdraw: an
+    /// issuer freezing the stock leg, or this program pausing itself, must not
+    /// trap the user's SOL.
     pub paused: bool,
     /// PROFIT rate: share of attested session profit saved, basis points,
-    /// 101..=10_000. The floor is 101 so this range never overlaps
-    /// `volume_bps` (1..=100): a profit rate can never be stored where a volume
-    /// rate belongs, and the worst cross-application is under-saving, never 20%
-    /// of turnover.
+    /// 201..=10_000 (2.01%..100%). The floor is 201, one above the volume
+    /// ceiling, so this range never overlaps `volume_bps` (1..=200): a profit
+    /// rate can never be stored where a volume rate belongs, and the worst
+    /// cross-application is under-saving, never 20% of turnover. The owner's
+    /// product rate is 2_000 (20%).
     pub skim_bps: u16,
     /// Lamports ever settled into this vault, monotonic. The keeper's
     /// anti-double-settlement anchor: it compares this against what it read
@@ -45,7 +47,10 @@ pub struct Vault {
     /// taken from the caller -- see settle.rs.
     pub skim_mode: u8,
     /// VOLUME rate: share of the notional of every buy and sell, basis points,
-    /// 1..=100 (0.01%..1%).
+    /// 1..=200 (0.01%..2%). 200 (2%) is the owner's product rate, decided
+    /// 2026-09-14, so the rate the product charges sits on the range's own
+    /// edge; the profit floor moved up to 201 with it, so the two ranges stay
+    /// disjoint (see `skim_bps`).
     pub volume_bps: u16,
     /// Bumped on EVERY set_policy_v2, even one that changes nothing, and signed
     /// into every attestation: no attestation can ride across a policy write.
@@ -65,10 +70,11 @@ pub const CURRENT_VAULT_VERSION: u8 = 1;
 
 pub const MODE_PROFIT: u8 = 0;
 pub const MODE_VOLUME: u8 = 1;
-pub const PROFIT_BPS_MIN: u16 = 101;
+// Disjoint on purpose: VOLUME_BPS_MAX + 1 == PROFIT_BPS_MIN. See `skim_bps`.
+pub const PROFIT_BPS_MIN: u16 = 201;
 pub const PROFIT_BPS_MAX: u16 = 10_000;
 pub const VOLUME_BPS_MIN: u16 = 1;
-pub const VOLUME_BPS_MAX: u16 = 100;
+pub const VOLUME_BPS_MAX: u16 = 200;
 
 impl Vault {
     /// The rate of the vault's active mode: the only rate settle ever applies,
@@ -152,9 +158,10 @@ pub struct ProtocolConfig {
     /// `accept_authority` itself, so a typo can never hand the protocol to an
     /// address nobody controls. Default means no transfer is pending.
     pub pending_authority: Pubkey,
-    /// PROTOCOL-WIDE PAUSE, set by the authority. Gates settle, wrap_sol,
-    /// convert and invest for every vault at once. It NEVER gates withdraw or
-    /// withdraw_token: stopping the machine must not trap anyone's savings.
+    /// PROTOCOL-WIDE PAUSE, set by the authority. Gates settle, link_wallet,
+    /// wrap_sol, convert and invest for every vault at once. It NEVER gates
+    /// withdraw, withdraw_token or an owner's unlink: stopping the machine must
+    /// not trap anyone's savings, nor keep a wallet linked against its owner.
     pub paused: bool,
     pub version: u8,
     pub _reserved: [u8; 64],

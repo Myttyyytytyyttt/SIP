@@ -17,10 +17,13 @@
 use anchor_lang::prelude::*;
 
 pub mod attestation;
+pub mod ed25519_introspection;
 pub mod errors;
 pub mod events;
 pub mod instructions;
+pub mod link_consent;
 pub mod state;
+pub mod venue_route;
 
 use instructions::*;
 use state::InvestmentLeg;
@@ -44,10 +47,13 @@ pub mod sip_vault {
         instructions::create_vault::create_vault_handler(ctx, mode, skim_bps, volume_bps, max_contribution, wallet_reserve)
     }
 
+    /// Needs, immediately before it, an Ed25519SigVerify of the wallet's own
+    /// SIP_LINK_V1 consent; see link_wallet.rs and link_consent.rs.
     pub fn link_wallet(ctx: Context<LinkWallet>) -> Result<()> {
         instructions::link_wallet::link_wallet_handler(ctx)
     }
 
+    /// The vault owner's alone; see unlink_wallet.rs.
     pub fn unlink_wallet(ctx: Context<UnlinkWallet>) -> Result<()> {
         instructions::unlink_wallet::unlink_wallet_handler(ctx)
     }
@@ -86,7 +92,8 @@ pub mod sip_vault {
         instructions::accept_authority_handler(ctx)
     }
 
-    /// Protocol-wide pause of settle, wrap_sol, convert and invest. Never withdraw.
+    /// Protocol-wide pause of settle, link_wallet, wrap_sol, convert and invest.
+    /// Never withdraw, and never an owner's unlink.
     pub fn set_protocol_paused(ctx: Context<SetProtocolPaused>, paused: bool) -> Result<()> {
         instructions::set_protocol_paused_handler(ctx, paused)
     }

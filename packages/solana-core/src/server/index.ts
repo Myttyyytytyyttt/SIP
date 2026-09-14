@@ -10,6 +10,7 @@ import "server-only";
 
 export * from "./builders";
 export * from "./config";
+export * from "./ed25519";
 export * from "./handlers";
 export * from "./pda";
 export * from "./rate-limit";

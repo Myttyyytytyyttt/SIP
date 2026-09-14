@@ -28,6 +28,7 @@ import {
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { attestationInstruction, MODE_PROFIT } from "./attestation";
+import { linkWalletWithConsent } from "./link-consent";
 
 const LOCAL_DIR = join(__dirname, ".local");
 const PROFIT_SOL = 0.5;
@@ -94,11 +95,8 @@ async function main() {
     console.log(`vault created (profit mode, skim 20%): ${vaultPda.toBase58()}`);
   }
   if ((await connection.getAccountInfo(linkPda)) === null) {
-    await program.methods
-      .linkWallet()
-      .accounts({ owner, wallet: wallet.publicKey })
-      .signers([wallet])
-      .rpc();
+    // The wallet's own off-chain consent rides immediately before link_wallet.
+    await linkWalletWithConsent(program, { owner, wallet }).signers([wallet]).rpc();
     console.log(`trading wallet linked: ${wallet.publicKey.toBase58()}`);
   }
 

@@ -5,6 +5,7 @@ use anchor_spl::token_interface::TokenAccount;
 
 use crate::errors::NuvemError;
 use crate::state::{InvestmentPolicy, ProtocolConfig, Vault};
+use crate::venue_route::refuse_unmeasured_vault_accounts;
 
 /// Converts the vault's wSOL into its in-asset (USDC) — the first hop of
 /// wSOL -> USDC -> stock, split from invest() because on Solana each hop is
@@ -12,7 +13,9 @@ use crate::state::{InvestmentPolicy, ProtocolConfig, Vault};
 ///
 /// SAME GUARD SHAPE AS INVEST, DIFFERENT ENVELOPE. The venue program is the
 /// SAME pinned one from the policy; both deltas are measured (spend bounded by
-/// amount_in, fill floored by min_out); and min_out must clear the OWNER'S
+/// amount_in, fill floored by min_out); the route may list no vault token
+/// account but vault_wsol and vault_in, the two measured (venue_route.rs); and
+/// min_out must clear the OWNER'S
 /// `min_convert_rate_wad` — USDC-raw per lamport, signed into the policy the
 /// same way each leg's floor is. What it does NOT touch: the investment
 /// buckets. Conversion is not spend — the USDC stays in the vault, and the
@@ -66,6 +69,8 @@ pub struct Convert<'info> {
 
     /// CHECK: pinned against policy.venue_program below.
     pub venue_program: UncheckedAccount<'info>,
+    // remaining_accounts: the venue's route, in the venue's order. No token
+    // account the vault owns may appear in it but vault_wsol and vault_in.
 }
 
 pub fn convert_handler(
@@ -106,6 +111,14 @@ pub fn convert_handler(
     )
     .map_err(|_| NuvemError::InvalidPolicy)?;
     require!(min_out >= floor && min_out > 0, NuvemError::FloorTooLow);
+
+    // The drain venue_route.rs describes, closed for this hop: a route that
+    // sells any vault token but the wSOL being measured is refused.
+    refuse_unmeasured_vault_accounts(
+        ctx.remaining_accounts,
+        &vault.key(),
+        [&ctx.accounts.vault_wsol.key(), &ctx.accounts.vault_in.key()],
+    )?;
 
     let wsol_before = ctx.accounts.vault_wsol.amount;
     let in_before = ctx.accounts.vault_in.amount;
