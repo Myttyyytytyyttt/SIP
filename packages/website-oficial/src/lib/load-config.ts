@@ -21,6 +21,11 @@
  *
  * A refused name is a problem on the page (the setup checklist) and makes the
  * Solana routes answer 503 with no detail, exactly like incomplete settings.
+ *
+ * Every problem, refused or missing, is also named in the server's log, because
+ * nothing else would show it there: the process does not restart and
+ * /api/health stays 200. One line per process for a given set of names, and
+ * names only.
  */
 import "server-only";
 
@@ -114,14 +119,15 @@ function environmentProblems(env: Env): ConfigProblem[] {
 }
 
 /**
- * THE LATCH IS THE PROCESS'S, NOT THIS MODULE'S. A production build compiles
+ * THE LATCHES ARE THE PROCESS'S, NOT THIS MODULE'S. A production build compiles
  * this file into two server runtimes, one for the pages and one for the route
  * handlers, each with its own module registry, so a module-level flag warned
  * once in each. Both runtimes share the process's globalThis, and a registered
  * symbol is the same key in both.
  */
 const RETIRED_NAMES_WARNED = Symbol.for("sip.web.config.retiredNamesWarned");
-const processWide = globalThis as unknown as Record<symbol, true | undefined>;
+const PROBLEMS_LOGGED = Symbol.for("sip.web.config.problemsLogged");
+const processWide = globalThis as unknown as Record<symbol, unknown>;
 
 /**
  * ONE WARNING PER PROCESS, NAMES ONLY. The first time any retired EVM name holds
@@ -141,6 +147,32 @@ function warnRetiredNamesOnce(env: Env): void {
       message:
         "These variables are no longer read: SIP is Solana-only. Remove them." +
         (seat ? ` The Privy seat is now ${SIGNER} and ${POLICY}.` : ""),
+    }),
+  );
+}
+
+/**
+ * THE OPERATOR'S LINE, NAMES ONLY. A problem restarts nothing and /api/health
+ * stays 200, so without this line a broken service looks healthy with silent
+ * logs. It lists the problems' variable names, sorted and once each, and sends
+ * the operator to /wallets for what to fix. Only `variable` is taken from a
+ * problem: its message and howToFix stay on the page, and no value is logged.
+ *
+ * The latch holds the last names written, so repeated requests and both server
+ * runtimes write one line, and a different set of names (an edited .env under
+ * next dev) writes another.
+ */
+function logProblemsOnce(problems: readonly ConfigProblem[]): void {
+  const names = [...new Set(problems.map((problem) => problem.variable))].sort();
+  if (names.length === 0) return;
+  const signature = JSON.stringify(names);
+  if (processWide[PROBLEMS_LOGGED] === signature) return;
+  processWide[PROBLEMS_LOGGED] = signature;
+  console.error(
+    JSON.stringify({
+      event: "web.config.problems",
+      names,
+      message: "These variables need fixing in this service's environment. The /wallets page lists what to fix.",
     }),
   );
 }
@@ -183,6 +215,7 @@ export function loadConfig(env: Env = process.env, options: LoadOptions = {}): S
   if (!settings.ok) problems.push(...settings.problems);
 
   if (!settings.ok || problems.length > 0 || (privy === null && needPrivyAppId)) {
+    logProblemsOnce(problems);
     return { ok: false, problems };
   }
 
@@ -209,10 +242,19 @@ export function loadConfig(env: Env = process.env, options: LoadOptions = {}): S
  * settings and a clean environment, and nothing browser-facing: a missing Privy
  * app id must not take the relay down. There is no off switch; a deployment that
  * should not relay leaves the settings incomplete and gets 503.
+ *
+ * AN INVALID GATE LOGS WHAT /wallets LISTS. The gate's own problems are a subset
+ * of the page's (the page adds the Privy app id and the seat), so logging only
+ * them would alternate with the page's line, one more line each time a route
+ * request follows a page request. loadConfig collects the page's whole list and
+ * logs it; the gate's answer does not depend on that list and stays invalid.
  */
 export function solanaGate(env: Env = process.env): SolanaGate {
   warnRetiredNamesOnce(env);
-  if (environmentProblems(env).length > 0) return { kind: "invalid" };
-  const settings = loadSolanaServerSettings(env);
-  return settings.ok ? { kind: "ok", settings: settings.settings } : { kind: "invalid" };
+  if (environmentProblems(env).length === 0) {
+    const settings = loadSolanaServerSettings(env);
+    if (settings.ok) return { kind: "ok", settings: settings.settings };
+  }
+  loadConfig(env);
+  return { kind: "invalid" };
 }
