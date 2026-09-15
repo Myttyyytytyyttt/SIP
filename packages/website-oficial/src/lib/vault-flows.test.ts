@@ -365,6 +365,16 @@ describe("linkWalletFlow", () => {
     expect(await linkWalletFlow(other.linkDeps, other.linkInput)).toMatchObject({ ok: false, kind: "refused", message: "Your trading wallet signed a different transaction than Phantom approved. Nothing was sent." });
     expect(other.send).not.toHaveBeenCalled();
 
+    // Its own slot only, over another message, Phantom's slot left empty: only the message comparison can refuse this.
+    const alone = harness();
+    alone.signWithTrading.mockImplementationOnce(async (bytes) => {
+      const rewritten = withPrice(bytes, 300_000n);
+      rewritten.fill(0, 1, 65);
+      return signWith(rewritten, alone.trading);
+    });
+    expect(await linkWalletFlow(alone.linkDeps, alone.linkInput)).toMatchObject({ ok: false, kind: "refused", message: "Your trading wallet signed a different transaction than Phantom approved. Nothing was sent." });
+    expect(alone.send).not.toHaveBeenCalled();
+
     const lighthouse = harness();
     lighthouse.signWithPension.mockImplementationOnce(async (bytes) => withLighthouse(bytes, lighthouse.owner));
     const refused = await linkWalletFlow(lighthouse.linkDeps, lighthouse.linkInput);
