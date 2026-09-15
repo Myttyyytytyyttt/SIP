@@ -571,8 +571,9 @@ describe("the ticks' first steps, over the same bytes", () => {
   });
 
   it("describe a zero-base dry run in either mode: nothing moves at the mode's rate, and the frontier advances over the span", async () => {
-    // 100 zero-lamport transfers above the link's own transaction: a flat span
-    // with no trade in it, at the zero-settle threshold.
+    // 100 zero-lamport transfers the wallet signs itself, the fake ledger's
+    // default signer, above the link's own transaction: a flat span with no trade
+    // in it, at the zero-settle threshold.
     for (const [vaultOver, named] of [
       [{ skimMode: 0 }, "in PROFIT at 2345 bps"],
       [{ skimMode: 1 }, "in VOLUME at 37 bps"],

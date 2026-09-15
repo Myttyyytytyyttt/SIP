@@ -7,6 +7,8 @@
 // the frontier, the walk itself, run over a fake ledger that refuses any other
 // commitment and any `until`. A backlog past the read limit is read and settled
 // one complete prefix at a time, oldest first, and that drain is walked here too.
+// So is the zero-base cadence, which counts only what the wallet itself signed:
+// the fake ledger's entries name their signers, in legacy and v0 messages.
 
 import { readFileSync } from "node:fs";
 import { Keypair, PublicKey } from "@solana/web3.js";
@@ -22,7 +24,7 @@ import {
 } from "../src/measure-window.js";
 import { tightenMinOut } from "../src/min-out.js";
 import { MODE_PROFIT } from "../src/program-scripts.js";
-import { decideFromMeasurement, defaultVolumeBase } from "../src/settle-decision.js";
+import { ZERO_BASE_MIN_TXS, decideFromMeasurement, defaultVolumeBase } from "../src/settle-decision.js";
 import { FakeLedger, chained, type LedgerEntry } from "./fake-ledger.js";
 
 const SIP = SIP_PROGRAM_ID;
@@ -423,9 +425,129 @@ describe("the walk, over a finalized ledger", () => {
       ]),
     );
     const measured = await measureSince(ledger, wallet, 200n, settleProgram);
-    expect(measured).toMatchObject({ txCount: 5, settleTxCount: 1, successfulTradeCount: 2, chainBreaks: 0, unfetchable: 0 });
+    // The wallet signed all five: the settle is the one the zero-base cadence leaves out, the failed trade is not.
+    expect(measured).toMatchObject({ txCount: 5, settleTxCount: 1, walletSignedTxCount: 4, successfulTradeCount: 2, chainBreaks: 0, unfetchable: 0 });
     // The failed trade's fee sits inside the chain and inside the profit, as a cost of trading.
     expect(measured.profitLamports).toBe(300_000n - 5_000n - 20_000n);
+  });
+});
+
+// ── the zero-base cadence ───────────────────────────────────────────────────
+//
+// The owner's rule of 2026-09-15: toward ZERO_BASE_MIN_TXS count only what the
+// wallet itself signed, and never our own settles. Anyone can name a wallet for a
+// fraction of a cent, and 100 transfers a stranger sent used to make a losing
+// span zero-settle and forget its loss. The fake ledger's signers build each case
+// as the chain would carry it.
+
+describe("the zero-base cadence counts only what the wallet signed", () => {
+  const stranger = Keypair.generate().publicKey;
+  /** One transaction at `slot`: a flat transfer the wallet signs alone, in a v0 message, unless `over` says otherwise. */
+  const tx = (slot: number, over: Partial<Omit<LedgerEntry, "signature" | "slot" | "pre" | "post">> & { readonly delta?: number } = {}) => ({
+    signature: `tx-${slot}`,
+    slot,
+    programs: FLOW,
+    delta: 0,
+    ...over,
+  });
+  /** The wallet's own losing trade, the first transaction above the frontier. */
+  const loss = tx(501, { programs: TRADE, delta: -400_000 });
+  const ledgerOf = (span: Parameters<typeof chained>[1]) => new FakeLedger(wallet, chained(1_000_000, [tx(500), ...span]));
+  const walk = (span: Parameters<typeof chained>[1]) => measureSince(ledgerOf(span), wallet, 500n, settleProgram);
+
+  it("rests a stranger's 100 zero-lamport transfers beside one losing trade at NO_PROFIT, and the loss keeps netting against the next win", async () => {
+    expect(ZERO_BASE_MIN_TXS).toBe(100);
+    // Half in legacy messages and half in v0: the wallet is an unsigned key in every one.
+    const transfers = Array.from({ length: 100 }, (_, i) => tx(502 + i, { signers: [stranger], legacy: i % 2 === 1 }));
+    const measured = await walk([loss, ...transfers]);
+    expect(measured).toMatchObject({ txCount: 101, walletSignedTxCount: 1, settleTxCount: 0, chainBreaks: 0, prefixCut: false, profitLamports: -400_000n });
+    // Counted as every transaction was, the transfers alone zero-settled this span, and the loss was gone.
+    const decision = await decideFromMeasurement(measured, at500);
+    expect(decision).toMatchObject({ kind: "stop", outcome: "NO_PROFIT", baseLamports: -400_000n });
+    if (decision.kind === "stop") expect(decision.detail).toContain("1 so far, 99 to go");
+
+    // The frontier stayed, so the next sweep measures the same span, and the trader's win nets against the loss.
+    const won = await walk([loss, ...transfers, tx(602, { programs: TRADE, delta: 1_000_000 })]);
+    expect(won).toMatchObject({ txCount: 102, walletSignedTxCount: 2, chainBreaks: 0 });
+    expect(await decideFromMeasurement(won, at500)).toEqual({ kind: "settle", baseLamports: 600_000n, endSlot: 602n });
+  });
+
+  it("settles a losing span with a zero base once the wallet has signed 100 of its transactions", async () => {
+    const measured = await walk([loss, ...Array.from({ length: 99 }, (_, i) => tx(502 + i))]);
+    expect(measured).toMatchObject({ txCount: 100, walletSignedTxCount: 100, chainBreaks: 0, profitLamports: -400_000n });
+    expect(await decideFromMeasurement(measured, at500)).toEqual({ kind: "settle", baseLamports: 0n, endSlot: 600n });
+  });
+
+  it("rests 99 transactions the wallet signed and 50 a stranger sent at NO_PROFIT, one short", async () => {
+    // A stranger's transfer before each of the wallet's own, through the first hundred slots.
+    const span = Array.from({ length: 148 }, (_, i) => tx(502 + i, i % 2 === 0 && i < 100 ? { signers: [stranger] } : {}));
+    const measured = await walk([loss, ...span]);
+    expect(measured).toMatchObject({ txCount: 149, walletSignedTxCount: 99, chainBreaks: 0 });
+    const decision = await decideFromMeasurement(measured, at500);
+    expect(decision).toMatchObject({ kind: "stop", outcome: "NO_PROFIT" });
+    if (decision.kind === "stop") expect(decision.detail).toContain("99 so far, 1 to go");
+  });
+
+  it("never counts our own settles, although the wallet signs each one as its fee payer", async () => {
+    // Three zero settles among 98 transfers, each costing the wallet its fee.
+    const span = Array.from({ length: 101 }, (_, i) => tx(502 + i, i % 30 === 29 ? { programs: SETTLE, delta: -5_000 } : {}));
+    const settle = await ledgerOf([loss, ...span]).transaction("tx-531", "finalized");
+    expect(settle?.transaction.message.staticAccountKeys[0]?.equals(wallet), "the wallet pays for the settle").toBe(true);
+    expect(settle?.transaction.message.header.numRequiredSignatures, "and signs it").toBe(1);
+
+    const measured = await walk([loss, ...span]);
+    expect(measured).toMatchObject({ txCount: 102, settleTxCount: 3, walletSignedTxCount: 99, chainBreaks: 0, profitLamports: -400_000n });
+    const decision = await decideFromMeasurement(measured, at500);
+    expect(decision).toMatchObject({ kind: "stop", outcome: "NO_PROFIT" });
+    if (decision.kind === "stop") expect(decision.detail).toContain("99 so far, 1 to go");
+
+    // One more transfer the wallet signs, and the span is worth a zero settle.
+    const oneMore = await walk([loss, ...span, tx(603)]);
+    expect(oneMore).toMatchObject({ settleTxCount: 3, walletSignedTxCount: 100 });
+    expect(await decideFromMeasurement(oneMore, at500)).toEqual({ kind: "settle", baseLamports: 0n, endSlot: 603n });
+  });
+
+  it("never counts a v0 transaction that names the wallet only through an address lookup table", async () => {
+    // A stranger's 250 000-lamport transfer into the wallet, loaded from a table: the walk reads its balances all the same.
+    const looked = tx(600, { signers: [stranger], walletThroughLookup: true, delta: 250_000 });
+    const span = [loss, ...Array.from({ length: 98 }, (_, i) => tx(502 + i)), looked];
+    const response = await ledgerOf(span).transaction("tx-600", "finalized");
+    expect(response?.transaction.message.staticAccountKeys.some((key) => key.equals(wallet)), "the wallet is no static key").toBe(false);
+    expect(response?.meta?.loadedAddresses?.writable.map(String)).toEqual([wallet.toBase58()]);
+
+    const measured = await walk(span);
+    expect(measured).toMatchObject({ txCount: 100, walletSignedTxCount: 99, deposits: 250_000n, chainBreaks: 0, profitLamports: -400_000n });
+    const decision = await decideFromMeasurement(measured, at500);
+    expect(decision).toMatchObject({ kind: "stop", outcome: "NO_PROFIT" });
+    if (decision.kind === "stop") expect(decision.detail).toContain("99 so far, 1 to go");
+  });
+
+  it("counts a transaction the wallet signs as fee payer or as a second signer, in a legacy message or a v0 one", async () => {
+    const positions = [
+      { named: "v0, fee payer beside a co-signer", signers: [wallet, stranger], legacy: false },
+      { named: "v0, second signer behind a stranger who pays", signers: [stranger, wallet], legacy: false },
+      { named: "legacy, sole signer", signers: [wallet], legacy: true },
+      { named: "legacy, fee payer beside a co-signer", signers: [wallet, stranger], legacy: true },
+      { named: "legacy, second signer behind a stranger who pays", signers: [stranger, wallet], legacy: true },
+    ];
+    for (const { named, ...position } of positions) {
+      /** The losing trade, `own` transfers the wallet signs, the stranger's legacy transfer, and last the transaction under test. */
+      const span = (own: number) => [
+        loss,
+        ...Array.from({ length: own }, (_, i) => tx(502 + i)),
+        // The stranger's own legacy transfer names the wallet as an unsigned key, and does not count.
+        tx(600, { signers: [stranger], legacy: true }),
+        tx(601, { ...position, programs: TRADE, delta: -1_000 }),
+      ];
+      // Counted, it is the 99th the wallet signed: one short.
+      const short = await walk(span(97));
+      expect(short, named).toMatchObject({ txCount: 100, walletSignedTxCount: 99, chainBreaks: 0 });
+      expect(await decideFromMeasurement(short, at500), named).toMatchObject({ kind: "stop", outcome: "NO_PROFIT" });
+      // Beside one more of the wallet's own, it is the 100th, and the span settles a zero base.
+      const tipped = await walk(span(98));
+      expect(tipped, named).toMatchObject({ txCount: 101, walletSignedTxCount: 100, chainBreaks: 0 });
+      expect(await decideFromMeasurement(tipped, at500), named).toEqual({ kind: "settle", baseLamports: 0n, endSlot: 601n });
+    }
   });
 });
 

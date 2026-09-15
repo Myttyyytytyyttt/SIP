@@ -50,10 +50,10 @@ export type SettleOutcome =
    * one. Nuvem's settle required profit > 0, so a flat or losing span stayed
    * inside the window and grew until the walk refused it, forever. settle_v2
    * accepts a zero base — it moves nothing and still advances the frontier — and
-   * baseDecision sends one once ZERO_BASE_MIN_TXS transactions other than our own
-   * settles sit in the span. Until then the span rests here and its losses keep
-   * netting against the next win; a zero settle forgets them, because TradingLink
-   * keeps no high-water mark.
+   * baseDecision sends one once the trading wallet itself has signed
+   * ZERO_BASE_MIN_TXS of the span's transactions, our own settles not counted.
+   * Until then the span rests here and its losses keep netting against the next
+   * win; a zero settle forgets them, because TradingLink keeps no high-water mark.
    */
   | "NO_PROFIT"
   /** The completeness oracle broke — a human should look. */
@@ -231,15 +231,31 @@ export type VolumeBase = (measured: WindowMeasurement) => Promise<bigint | null>
 export const defaultVolumeBase: VolumeBase = async (measured) => (measured.successfulTradeCount === 0 ? 0n : null);
 
 /**
- * How many transactions other than our own settles a span needs before a zero
- * base is worth a transaction: 100.
+ * How many transactions THE TRADING WALLET SIGNED ITSELF, our own settles not
+ * counted, a span needs before a zero base is worth a transaction: 100.
  *
  * WHY A COUNT AND NOT A CLOCK. A time trigger measured from the frontier fires on
  * the first trade after any idle stretch and forgets that trade's loss at once.
  * A count lets losses net against the next win for as long as the span is small,
- * and still settles a flat span before it outgrows one settlement's read
- * (MAX_SIGNATURES, 300). A span past that settles its oldest prefix whatever the
- * prefix's base, so no backlog ever waits on this count. The owner can change it.
+ * and still settles a flat span of the trader's own activity before it outgrows
+ * one settlement's read (MAX_SIGNATURES, 300). A span past that settles its oldest
+ * prefix whatever the prefix's base, so no backlog ever waits on this count. The
+ * owner can change it.
+ *
+ * WHY ONLY WHAT THE WALLET SIGNED. The owner's rule of 2026-09-15: count only the
+ * transactions the wallet itself signs. This used to count every transaction that
+ * named the wallet, and anyone can name one. A stranger who sent a losing trader's
+ * wallet 100 zero-lamport transfers, about 0.0005 SOL of fees, made its span
+ * zero-settle: the frontier moved past the loss, and the next win was charged
+ * without that loss netted against it. Only the wallet's key signs as the wallet,
+ * so the count (walletSignedTxCount, measure-window.ts) moves with the trader
+ * alone. Our own settles are signed by the wallet too, through its Privy seat, and
+ * never count.
+ *
+ * WHAT IT DOES NOT CLOSE. A cut prefix never waits for this count, so a stranger
+ * who sends a wallet more than MAX_SIGNATURES transactions still makes its oldest
+ * prefix settle a zero base when that prefix is flat or losing. That is the
+ * prefix's rule, not this count's, and it is decided apart.
  */
 export const ZERO_BASE_MIN_TXS = 100;
 
@@ -354,8 +370,10 @@ export async function decideFromMeasurement(
  * THE BASE: a PROFIT span's measured profit, and a VOLUME span's notional from
  * the volumeBase seam — null there is UNSUPPORTED_MODE, and nothing is attested.
  * A positive base settles over the measured window. A zero or negative one
- * settles a ZERO base once the span holds ZERO_BASE_MIN_TXS transactions other
- * than our own settles, and rests at NO_PROFIT before that.
+ * settles a ZERO base once the trading wallet itself has signed ZERO_BASE_MIN_TXS
+ * of the span's transactions, our own settles not counted (walletSignedTxCount),
+ * and rests at NO_PROFIT before that. Nothing else here reads that count: the
+ * loop guard and the backlog line count every transaction the walk read.
  *
  * A PREFIX DECIDES LIKE A WHOLE WINDOW, AND NEVER WAITS. When the window is only
  * the oldest complete prefix of a backlog (measured.prefixCut), a positive base
@@ -384,7 +402,9 @@ export async function baseDecision({
   // forever. First, before any base: a window with nothing but our own settles
   // holds nothing to charge, so no base — not even one a seam returns — settles it.
   // A cut prefix is not "only our own settle since" the frontier: the rest of its
-  // backlog sits above it, so it is decided below.
+  // backlog sits above it, so it is decided below. EVERY TRANSACTION COUNTS HERE,
+  // the wallet's or a stranger's: a window with a foreign transfer beside our
+  // settle is decided below, where that transfer brings no zero settle closer.
   const others = measured.txCount - measured.settleTxCount;
   if (others === 0 && !measured.prefixCut) {
     return { kind: "stop", outcome: "IDLE", detail: `only our own settle since slot ${from}; nothing to charge` };
@@ -433,12 +453,15 @@ export async function baseDecision({
   }
 
   if (base > 0n) return { kind: "settle", baseLamports: base, endSlot: measured.lastSlot, ...backlog };
-  // A ZERO SETTLE ONCE THE SPAN IS WORTH ONE, OR ONCE IT IS A BACKLOG'S PREFIX. It
-  // moves nothing and advances the frontier past everything measured. A small span
-  // waits for ZERO_BASE_MIN_TXS so its losses keep netting against the next win; a
-  // prefix never waits, because resting would leave the same prefix above the
-  // frontier every sweep.
-  if (others >= ZERO_BASE_MIN_TXS || measured.prefixCut) {
+  // A ZERO SETTLE ONCE THE WALLET HAS SIGNED ENOUGH OF THE SPAN, OR ONCE IT IS A
+  // BACKLOG'S PREFIX. It moves nothing and advances the frontier past everything
+  // measured. A small span waits for ZERO_BASE_MIN_TXS so its losses keep netting
+  // against the next win, and only what the wallet signed brings that closer: a
+  // stranger's transfer is not the trader's activity, and must not decide when the
+  // trader's losses are forgotten. A prefix never waits, because resting would
+  // leave the same prefix above the frontier every sweep.
+  const signed = measured.walletSignedTxCount;
+  if (signed >= ZERO_BASE_MIN_TXS || measured.prefixCut) {
     return { kind: "settle", baseLamports: 0n, endSlot: measured.lastSlot, ...backlog };
   }
   const what =
@@ -449,8 +472,8 @@ export async function baseDecision({
     kind: "stop",
     outcome: "NO_PROFIT",
     detail:
-      `${what}; a zero settle advances the frontier at ${ZERO_BASE_MIN_TXS} transactions other than our own settles, ` +
-      `${ZERO_BASE_MIN_TXS - others} to go`,
+      `${what}; a zero settle advances the frontier once the wallet itself has signed ${ZERO_BASE_MIN_TXS} transactions ` +
+      `other than our own settles: ${signed} so far, ${ZERO_BASE_MIN_TXS - signed} to go`,
     baseLamports: base,
   };
 }

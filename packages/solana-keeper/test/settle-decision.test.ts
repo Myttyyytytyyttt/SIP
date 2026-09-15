@@ -8,8 +8,9 @@
 // confirmed slot. The measurement order is the old tick's behind two new stops —
 // a walk that did not reach the frontier, and a window finality has not caught up
 // with — and it ends in the base: a positive base settles, a flat span settles a
-// zero base once it is worth a transaction, a window holding only our own settle
-// never settles again, and a VOLUME span is charged only on a notional that is
+// zero base once the wallet itself has signed enough of it to be worth a
+// transaction, a window holding only our own settle never settles again, and a
+// VOLUME span is charged only on a notional that is
 // proven. A span past the read limit is no stop: its oldest complete prefix
 // settles like a window and never waits, and neither the PAUSED detail nor any
 // INCOMPLETE detail promises a catch-up no sweep performs. The frontier-from-epoch
@@ -64,10 +65,11 @@ const vault = (over: Partial<VaultState> = {}): VaultState => ({
   ...over,
 });
 
-/** A walk that reached the frontier and read twelve clean trades above it. */
+/** A walk that reached the frontier and read twelve clean trades above it, each signed by the wallet. */
 const measured = (over: Partial<WindowMeasurement> = {}): WindowMeasurement => ({
   txCount: 12,
   settleTxCount: 0,
+  walletSignedTxCount: 12,
   successfulTradeCount: 12,
   chainBreaks: 0,
   unfetchable: 0,
@@ -269,8 +271,8 @@ describe("the base, and when a zero base is worth a transaction", () => {
   const volume = (span: WindowMeasurement, volumeBase: VolumeBase = defaultVolumeBase) =>
     baseDecision({ mode: MODE_VOLUME, measured: span, from, volumeBase });
 
-  it("a losing span with enough transactions in it settles a zero base over the measured window", async () => {
-    expect(await profit(measured({ profitLamports: -5n, txCount: 150, settleTxCount: 1 }))).toEqual({
+  it("a losing span the wallet signed enough of settles a zero base over the measured window", async () => {
+    expect(await profit(measured({ profitLamports: -5n, txCount: 150, settleTxCount: 1, walletSignedTxCount: 149 }))).toEqual({
       kind: "settle",
       baseLamports: 0n,
       endSlot: 300_000_900n,
@@ -279,12 +281,22 @@ describe("the base, and when a zero base is worth a transaction", () => {
 
   it("THE LOOP GUARD: a window holding only our own previous settle is IDLE, however many, and whatever a seam says", async () => {
     // A settle is external flow, so this window measures a profit of exactly zero.
-    const onlyOurSettle = measured({ txCount: 1, settleTxCount: 1, successfulTradeCount: 0, cashDelta: -10_000n, withdrawals: 10_000n, profitLamports: 0n });
+    const onlyOurSettle = measured({
+      txCount: 1,
+      settleTxCount: 1,
+      walletSignedTxCount: 0,
+      successfulTradeCount: 0,
+      cashDelta: -10_000n,
+      withdrawals: 10_000n,
+      profitLamports: 0n,
+    });
     const decision = await profit(onlyOurSettle);
     expect(decision).toMatchObject({ kind: "stop", outcome: "IDLE" });
     if (decision.kind === "stop") expect(decision.detail).toContain("only our own settle");
     const many = ZERO_BASE_MIN_TXS + 5;
-    expect(await profit(measured({ txCount: many, settleTxCount: many, successfulTradeCount: 0, profitLamports: 0n }))).toMatchObject({ outcome: "IDLE" });
+    expect(
+      await profit(measured({ txCount: many, settleTxCount: many, walletSignedTxCount: 0, successfulTradeCount: 0, profitLamports: 0n })),
+    ).toMatchObject({ outcome: "IDLE" });
 
     let asked = 0;
     const seam: VolumeBase = async () => {
@@ -295,28 +307,35 @@ describe("the base, and when a zero base is worth a transaction", () => {
     expect(asked, "the seam is never asked about our own settles").toBe(0);
   });
 
-  it("a small flat or losing span rests at NO_PROFIT, carries its base, and says how far it is from a zero settle", async () => {
-    const flat = await profit(measured({ txCount: 3, successfulTradeCount: 3, profitLamports: 0n }));
+  it("a small flat or losing span rests at NO_PROFIT, carries its base, and says how far the wallet is from a zero settle", async () => {
+    const flat = await profit(measured({ txCount: 3, walletSignedTxCount: 3, successfulTradeCount: 3, profitLamports: 0n }));
     expect(flat).toMatchObject({ kind: "stop", outcome: "NO_PROFIT", baseLamports: 0n });
     if (flat.kind === "stop") {
       expect(flat.detail).toContain("a losing or flat span");
-      expect(flat.detail).toContain(`${ZERO_BASE_MIN_TXS - 3} to go`);
+      expect(flat.detail).toContain(`once the wallet itself has signed ${ZERO_BASE_MIN_TXS} transactions other than our own settles`);
+      expect(flat.detail).toContain(`3 so far, ${ZERO_BASE_MIN_TXS - 3} to go`);
       // The old warning promised a wedge the zero settle now prevents.
       expect(flat.detail).not.toContain("WARNING");
     }
     expect(await profit(measured({ profitLamports: -5n }))).toMatchObject({ kind: "stop", outcome: "NO_PROFIT", baseLamports: -5n });
   });
 
-  it("counts only transactions other than our own settles toward a zero settle, at the boundary", async () => {
+  it("counts only what the wallet signed toward a zero settle, at the boundary, however many transactions the span holds", async () => {
     expect(ZERO_BASE_MIN_TXS).toBe(100);
-    const below = await profit(measured({ txCount: ZERO_BASE_MIN_TXS, settleTxCount: 1, profitLamports: 0n }));
+    // 250 transactions, our settle and a stranger's transfers among them, and 99 the wallet signed.
+    const below = await profit(measured({ txCount: 250, settleTxCount: 1, walletSignedTxCount: ZERO_BASE_MIN_TXS - 1, profitLamports: 0n }));
     expect(below).toMatchObject({ kind: "stop", outcome: "NO_PROFIT" });
-    if (below.kind === "stop") expect(below.detail).toContain("1 to go");
-    expect(await profit(measured({ txCount: ZERO_BASE_MIN_TXS + 1, settleTxCount: 1, profitLamports: 0n }))).toEqual({
+    if (below.kind === "stop") expect(below.detail).toContain("99 so far, 1 to go");
+    expect(await profit(measured({ txCount: ZERO_BASE_MIN_TXS, walletSignedTxCount: ZERO_BASE_MIN_TXS, profitLamports: 0n }))).toEqual({
       kind: "settle",
       baseLamports: 0n,
       endSlot: 300_000_900n,
     });
+    // THE LOOP GUARD STILL COUNTS EVERY TRANSACTION. Our settle beside a stranger's
+    // 149 transfers is not "only our own settle", and not a zero settle either.
+    const foreign = await profit(measured({ txCount: 150, settleTxCount: 1, walletSignedTxCount: 0, successfulTradeCount: 0, profitLamports: 0n }));
+    expect(foreign).toMatchObject({ kind: "stop", outcome: "NO_PROFIT" });
+    if (foreign.kind === "stop") expect(foreign.detail).toContain("0 so far, 100 to go");
   });
 
   it("positive profit settles whatever the span's size, and never asks the VOLUME seam", async () => {
@@ -331,7 +350,7 @@ describe("the base, and when a zero base is worth a transaction", () => {
   });
 
   it("a VOLUME span with no successful trade settles a zero base, attested in mode 1 at the volume rate", async () => {
-    const quiet = measured({ txCount: 120, settleTxCount: 0, successfulTradeCount: 0, profitLamports: -600_000n });
+    const quiet = measured({ txCount: 120, settleTxCount: 0, walletSignedTxCount: 120, successfulTradeCount: 0, profitLamports: -600_000n });
     const decision = await volume(quiet);
     expect(decision).toEqual({ kind: "settle", baseLamports: 0n, endSlot: 300_000_900n });
     if (decision.kind !== "settle") return;
@@ -349,17 +368,17 @@ describe("the base, and when a zero base is worth a transaction", () => {
   });
 
   it("a small VOLUME span with no successful trade rests at NO_PROFIT and says so", async () => {
-    const decision = await volume(measured({ txCount: 4, successfulTradeCount: 0, profitLamports: 0n }));
+    const decision = await volume(measured({ txCount: 4, walletSignedTxCount: 4, successfulTradeCount: 0, profitLamports: 0n }));
     expect(decision).toMatchObject({ kind: "stop", outcome: "NO_PROFIT", baseLamports: 0n });
     if (decision.kind === "stop") {
       expect(decision.detail).toContain("no successful trade over 4 txs");
-      expect(decision.detail).toContain(`${ZERO_BASE_MIN_TXS - 4} to go`);
+      expect(decision.detail).toContain(`4 so far, ${ZERO_BASE_MIN_TXS - 4} to go`);
     }
   });
 
   it("a VOLUME span with a successful trade rests at UNSUPPORTED_MODE under the default seam, and attests nothing", async () => {
     // Large enough for a zero settle, which must not happen: its notional is unknown, not zero.
-    const decision = await volume(measured({ txCount: 150, successfulTradeCount: 1, profitLamports: 0n }));
+    const decision = await volume(measured({ txCount: 150, walletSignedTxCount: 150, successfulTradeCount: 1, profitLamports: 0n }));
     expect(decision).toEqual({ kind: "stop", outcome: "UNSUPPORTED_MODE", detail: "1 successful trade(s) await keeper-medir-volumen; nothing attested" });
   });
 
@@ -384,7 +403,15 @@ describe("the base, and when a zero base is worth a transaction", () => {
 
   it("a cut prefix never waits for the zero-base count: flat or losing, it settles a zero base to its last slot and names the backlog", async () => {
     // Mostly our own settles, so the count alone would rest it at NO_PROFIT — the same prefix, every sweep.
-    const losing = measured({ prefixCut: true, signaturesAbove: 900, txCount: 300, settleTxCount: 250, successfulTradeCount: 50, profitLamports: -7n });
+    const losing = measured({
+      prefixCut: true,
+      signaturesAbove: 900,
+      txCount: 300,
+      settleTxCount: 250,
+      walletSignedTxCount: 50,
+      successfulTradeCount: 50,
+      profitLamports: -7n,
+    });
     expect(await profit(losing)).toEqual({
       kind: "settle",
       baseLamports: 0n,
@@ -400,7 +427,15 @@ describe("the base, and when a zero base is worth a transaction", () => {
       asked += 1;
       return 1_000_000_000n;
     };
-    const onlySettles = measured({ prefixCut: true, signaturesAbove: 301, txCount: 300, settleTxCount: 300, successfulTradeCount: 0, profitLamports: 0n });
+    const onlySettles = measured({
+      prefixCut: true,
+      signaturesAbove: 301,
+      txCount: 300,
+      settleTxCount: 300,
+      walletSignedTxCount: 0,
+      successfulTradeCount: 0,
+      profitLamports: 0n,
+    });
     expect(await profit(onlySettles)).toMatchObject({ kind: "settle", baseLamports: 0n, endSlot: 300_000_900n });
     expect(await volume(onlySettles, seam)).toMatchObject({ kind: "settle", baseLamports: 0n, endSlot: 300_000_900n });
     expect(asked, "the seam is never asked about our own settles, cut or not").toBe(0);

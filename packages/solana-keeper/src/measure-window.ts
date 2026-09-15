@@ -16,7 +16,7 @@
 // lamports. Pure System/ComputeBudget transfers are external flows; everything
 // else (Jupiter, pump.fun, Raydium, anything) is trading and counts.
 
-import type { Connection, Finality, PublicKey, VersionedTransactionResponse } from "@solana/web3.js";
+import type { Connection, Finality, PublicKey, VersionedMessage, VersionedTransactionResponse } from "@solana/web3.js";
 
 // Programs whose presence NEVER means trading: the System/ComputeBudget pair,
 // plus the Ed25519 precompile that a settle carries for its attestation. A
@@ -167,6 +167,23 @@ export interface WindowMeasurement {
    * measures a profit of zero and must not be settled again.
    */
   readonly settleTxCount: number;
+  /**
+   * Transactions in the window THE TRADING WALLET SIGNED ITSELF, failed ones
+   * included and our own settles not: the one count the zero-base cadence reads
+   * (ZERO_BASE_MIN_TXS, settle-decision.ts). Every other count here — txCount,
+   * settleTxCount, the prefix and the walk's bounds — still takes every
+   * transaction that names the wallet.
+   *
+   * SIGNED, NOT NAMED. Anyone can name a wallet: a stranger's zero-lamport
+   * transfer lands in its history for a fraction of a cent. While every such
+   * transfer counted, 100 of them made a losing span zero-settle, and its losses
+   * were forgotten before the next win could net against them. Only the wallet's
+   * key signs as the wallet, so this count moves with the trader's own activity
+   * alone. Our own settles are signed by the wallet too, through its Privy seat,
+   * and never count: settling is not trading, and one zero settle must not bring
+   * the next one closer.
+   */
+  readonly walletSignedTxCount: number;
   /** Trading transactions (not external flows) that succeeded. A failed swap pays its fee and trades nothing. */
   readonly successfulTradeCount: number;
   readonly chainBreaks: number;
@@ -297,6 +314,7 @@ export async function measureSince(
   const measurement = {
     txCount: 0,
     settleTxCount: 0,
+    walletSignedTxCount: 0,
     successfulTradeCount: 0,
     chainBreaks: 0,
     unfetchable: 0,
@@ -335,6 +353,7 @@ export async function measureSince(
   let withdrawals = 0n;
   let txCount = 0;
   let settleTxCount = 0;
+  let walletSignedTxCount = 0;
   let successfulTradeCount = 0;
   let firstSlot = 0n;
   const settleProgramId = settleProgram?.toBase58();
@@ -379,14 +398,19 @@ export async function measureSince(
     txCount += 1;
 
     const isExternalFlow = isExternalFlowTx(programs, settleProgramId);
+    const ownSettle = isExternalFlow && settleProgramId !== undefined && programs.has(settleProgramId);
     if (isExternalFlow) {
       const delta = post - pre;
       if (delta > 0n) deposits += delta;
       else withdrawals += -delta;
-      if (settleProgramId !== undefined && programs.has(settleProgramId)) settleTxCount += 1;
+      if (ownSettle) settleTxCount += 1;
     } else if (tx.meta.err === null) {
       successfulTradeCount += 1;
     }
+    // THE CADENCE COUNTS WHAT THE WALLET SIGNED, AND NOTHING WE SENT. A failed
+    // transaction the wallet signed counts: the trader acted, and paid its fee.
+    // Our own settle does not, although the wallet signed it too.
+    if (!ownSettle && isSignedByWallet(tx.transaction.message, wallet)) walletSignedTxCount += 1;
   }
 
   const cashDelta = firstPre === null ? 0n : lastPost - firstPre;
@@ -394,6 +418,7 @@ export async function measureSince(
     ...measurement,
     txCount,
     settleTxCount,
+    walletSignedTxCount,
     successfulTradeCount,
     chainBreaks,
     unfetchable,
@@ -408,6 +433,22 @@ export async function measureSince(
     lastSlot: endSlot === null ? from : BigInt(endSlot),
     prefixCut,
   };
+}
+
+/**
+ * Whether the wallet signed a transaction: it is one of the message's STATIC
+ * account keys, at an index below header.numRequiredSignatures. Every message
+ * version puts its signers there, fee payer first: legacy, v0 and v1 alike.
+ *
+ * STATIC KEYS ONLY. A v0 message can load the wallet from an address lookup
+ * table, and a loaded key follows every static key and never signs, so a wallet
+ * named only through a table did not sign, whatever its balance did. The
+ * signature list is not read: a response gives it as bare strings, with no key
+ * beside any of them.
+ */
+function isSignedByWallet(message: VersionedMessage, wallet: PublicKey): boolean {
+  const index = message.staticAccountKeys.findIndex((key) => key.equals(wallet));
+  return index >= 0 && index < message.header.numRequiredSignatures;
 }
 
 /**

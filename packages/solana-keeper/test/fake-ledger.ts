@@ -5,13 +5,19 @@
 //
 // Entries are given oldest first, as the chain executed them, and served newest
 // first, as getSignaturesForAddress serves them, in pages that honour `before`
-// and `limit`. Each transaction is a real MessageV0 whose first key is the
-// wallet and whose instructions invoke the entry's programs, with the wallet's
-// balances at index 0, so the walk's key and program extraction runs on it
-// unchanged. Every request is recorded with its arguments.
+// and `limit`. Each transaction is a real message whose instructions invoke the
+// entry's programs over the wallet, with the wallet's balances where its key
+// sits, so the walk's key, program and signer extraction runs on it unchanged.
+// Unless an entry says otherwise it is a MessageV0 the wallet alone signs, first
+// among its keys; an entry can name other signers, load the wallet from an
+// address lookup table, or ask for a legacy message. Every request is recorded
+// with its arguments.
 
-import { MessageV0, PublicKey, type Finality, type TransactionError, type VersionedTransactionResponse } from "@solana/web3.js";
+import { Message, MessageV0, PublicKey, type Finality, type TransactionError, type VersionedTransactionResponse } from "@solana/web3.js";
 import type { LedgerReader } from "../src/measure-window.js";
+
+/** The table a looked-up wallet is loaded from. Nothing reads it: a response carries the keys it loaded. */
+const LOOKUP_TABLE = new PublicKey(Buffer.alloc(32, 7));
 
 export interface LedgerEntry {
   readonly signature: string;
@@ -21,6 +27,17 @@ export interface LedgerEntry {
   readonly post: number;
   readonly programs: readonly string[];
   readonly err?: TransactionError | null;
+  /**
+   * Who signed, fee payer first: the message's first static keys. Absent, the
+   * wallet alone signs and pays, as it does for its own trades. A wallet left out
+   * of it is an unsigned static key right after the signers, or, with
+   * `walletThroughLookup`, no static key at all.
+   */
+  readonly signers?: readonly PublicKey[];
+  /** The wallet is loaded from an address lookup table, after every static key: a v0 message only, and never a signer. */
+  readonly walletThroughLookup?: boolean;
+  /** A legacy message instead of a v0 one. */
+  readonly legacy?: boolean;
 }
 
 export class FakeLedger implements LedgerReader {
@@ -69,26 +86,50 @@ export class FakeLedger implements LedgerReader {
     if (entry === undefined) throw new Error(`${signature} is not in the fake ledger`);
     if (this.unreadable.has(signature)) return null;
     const programs = entry.programs.map((program) => new PublicKey(program));
-    const message = new MessageV0({
-      header: { numRequiredSignatures: 1, numReadonlySignedAccounts: 0, numReadonlyUnsignedAccounts: programs.length },
-      staticAccountKeys: [this.wallet, ...programs],
-      recentBlockhash: PublicKey.default.toBase58(),
-      compiledInstructions: programs.map((_, i) => ({ programIdIndex: i + 1, accountKeyIndexes: [0], data: new Uint8Array() })),
-      addressTableLookups: [],
-    });
-    const programBalances = programs.map(() => 1);
+    const signers = entry.signers ?? [this.wallet];
+    if (signers.length === 0) throw new Error(`entry ${signature} names no signer, and every transaction has a fee payer`);
+    const walletSigns = signers.some((signer) => signer.equals(this.wallet));
+    const throughLookup = entry.walletThroughLookup === true;
+    if (throughLookup && (walletSigns || entry.legacy === true)) {
+      throw new Error(`entry ${signature} loads the wallet from a lookup table, which only a v0 message does, and never for a signer`);
+    }
+    // The signers, then the wallet when it is an unsigned static key, then the
+    // programs, read-only and unsigned. A looked-up key follows every static one.
+    const staticAccountKeys = [...signers, ...(walletSigns || throughLookup ? [] : [this.wallet]), ...programs];
+    const accountKeys = throughLookup ? [...staticAccountKeys, this.wallet] : staticAccountKeys;
+    const walletIndex = accountKeys.findIndex((key) => key.equals(this.wallet));
+    const firstProgram = staticAccountKeys.length - programs.length;
+    const header = { numRequiredSignatures: signers.length, numReadonlySignedAccounts: 0, numReadonlyUnsignedAccounts: programs.length };
+    const recentBlockhash = PublicKey.default.toBase58();
+    const message =
+      entry.legacy === true
+        ? new Message({
+            header,
+            accountKeys: staticAccountKeys,
+            recentBlockhash,
+            instructions: programs.map((_, i) => ({ programIdIndex: firstProgram + i, accounts: [walletIndex], data: "" })),
+          })
+        : new MessageV0({
+            header,
+            staticAccountKeys,
+            recentBlockhash,
+            compiledInstructions: programs.map((_, i) => ({ programIdIndex: firstProgram + i, accountKeyIndexes: [walletIndex], data: new Uint8Array() })),
+            addressTableLookups: throughLookup ? [{ accountKey: LOOKUP_TABLE, writableIndexes: [0], readonlyIndexes: [] }] : [],
+          });
+    // The wallet's balances at its own index; every other account holds one lamport throughout.
+    const balances = (lamports: number) => accountKeys.map((key) => (key.equals(this.wallet) ? lamports : 1));
     return {
       slot: entry.slot,
-      version: 0,
+      version: entry.legacy === true ? "legacy" : 0,
       blockTime: null,
-      transaction: { message, signatures: [entry.signature] },
+      transaction: { message, signatures: signers.map((_, i) => (i === 0 ? entry.signature : `${entry.signature}:${i}`)) },
       meta: {
         err: entry.err ?? null,
         fee: 5_000,
-        preBalances: [entry.pre, ...programBalances],
-        postBalances: [entry.post, ...programBalances],
+        preBalances: balances(entry.pre),
+        postBalances: balances(entry.post),
         innerInstructions: [],
-        loadedAddresses: { writable: [], readonly: [] },
+        loadedAddresses: { writable: throughLookup ? [this.wallet] : [], readonly: [] },
         logMessages: [],
       },
     };
