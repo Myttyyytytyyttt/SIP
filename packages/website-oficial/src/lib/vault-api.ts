@@ -359,7 +359,8 @@ export function programErrorWords(code: number): string {
   return `The transaction failed with error ${code}. Nothing moved.`;
 }
 
-function customCode(err: unknown): number | null {
+/** The custom error code of a failed instruction ({InstructionError:[n,{Custom:code}]}), or null. */
+export function customCode(err: unknown): number | null {
   const failure = (err as { InstructionError?: unknown } | null)?.InstructionError;
   if (!Array.isArray(failure)) return null;
   const custom = (failure[1] as { Custom?: unknown } | null)?.Custom;

@@ -45,6 +45,7 @@ import { Keypair, PublicKey, TransactionInstruction, TransactionMessage, Version
 import { describe, expect, it, vi } from "vitest";
 
 import { LIGHTHOUSE_PROGRAM } from "@/lib/tx-intent";
+import { WITHDRAW_COPY } from "@/lib/vault-copy";
 import type { ApiFailure, ApiResult, BuiltTransactionJson, InvestmentPolicyJson, SendResponseJson, VaultApi } from "@/lib/vault-api";
 import { LINK_MAX_BUILDS, checkAgainFlow, createVaultFlow, investPolicyFlow, linkWalletFlow, pauseInvestingFlow, withdrawFlow, withdrawTokenFlow, type FlowStep } from "@/lib/vault-flows";
 import { deriveAtaAddress, deriveConfigAddress, deriveInvestAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
@@ -488,6 +489,26 @@ describe("withdrawFlow and withdrawTokenFlow", () => {
     const result = await withdrawFlow(h.createDeps, { pensionKey: h.pensionKey, lamports: 150_000_000n });
     expect(result).toMatchObject({ ok: false, kind: "refused" });
     expect(h.signWithPension).not.toHaveBeenCalled();
+  });
+
+  it("withdraw: the program's 6004 after the build checked the amount says the SOL moved, most likely into investing, in simulation and on chain, with a code the screen refreshes on", async () => {
+    const vaultBelowRent = { InstructionError: [2, { Custom: 6004 }] };
+    const simulated = harness();
+    simulated.build.mockImplementationOnce(async () => ok(withdrawAnswer(simulated.pensionKey, 150_000_000n)));
+    simulated.send.mockImplementationOnce(async () => failure(422, "simulation_failed", { err: vaultBelowRent, logs: ["Program log: AnchorError occurred. Error Code: InsufficientVaultBalance."] }));
+    const refusedInSimulation = await withdrawFlow(simulated.createDeps, { pensionKey: simulated.pensionKey, lamports: 150_000_000n });
+    expect(refusedInSimulation).toEqual({ ok: false, kind: "refused", message: WITHDRAW_COPY.balanceMoved, code: "balance_moved" });
+
+    const landedFailed = harness();
+    landedFailed.build.mockImplementationOnce(async () => ok(withdrawAnswer(landedFailed.pensionKey, 150_000_000n)));
+    landedFailed.confirm.mockImplementationOnce(async () => ({ status: "failed", slot: 11, err: vaultBelowRent }));
+    const failedOnChain = await withdrawFlow(landedFailed.createDeps, { pensionKey: landedFailed.pensionKey, lamports: 150_000_000n });
+    expect(failedOnChain).toEqual({ ok: false, kind: "refused", message: WITHDRAW_COPY.balanceMoved, code: "balance_moved" });
+
+    // Only a withdrawal says so: the same error on another write keeps the program's words.
+    const created = harness();
+    created.send.mockImplementationOnce(async () => failure(422, "simulation_failed", { err: vaultBelowRent, logs: [] }));
+    expect(await createVaultFlow(created.createDeps, { pensionKey: created.pensionKey, mode: 0 })).toMatchObject({ ok: false, kind: "refused", message: "That would leave the vault below its rent reserve." });
   });
 
   it("withdrawToken: from the vault account the screen showed, into the pension key's own associated account, the amount asked", async () => {

@@ -66,6 +66,7 @@ import { privyFailure } from "@/lib/privy-failure";
 import { SigningError, isSignerRefusal, type PensionSigner, type SignerRefusal, type TradingSigners } from "@/lib/signing-wallets";
 import { IntentError, checkBuiltIntent, checkSignedIntent, mergeCoSignature, type OwnerIntent, type ReadTransaction, type TokenAccountCreateIntent } from "@/lib/tx-intent";
 import {
+  customCode,
   transactionErrorWords,
   vaultFailureWords,
   type ApiFailure,
@@ -80,7 +81,7 @@ import {
   type WithdrawBuildJson,
   type WithdrawTokenBuildJson,
 } from "@/lib/vault-api";
-import { FAILURE_COPY, LINK_COPY, PROGRESS_COPY } from "@/lib/vault-copy";
+import { FAILURE_COPY, LINK_COPY, PROGRESS_COPY, WITHDRAW_COPY } from "@/lib/vault-copy";
 import { deriveAtaAddress, deriveConfigAddress, deriveInvestAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
 
 /** TxProgress's steps, in order. "trading_signing" is the link's co-signature only. */
@@ -115,7 +116,10 @@ export const LINK_MAX_BUILDS = 2;
 
 const refused = (message: string, code?: string): FlowResult => (code === undefined ? { ok: false, kind: "refused", message } : { ok: false, kind: "refused", message, code });
 
-function fromFailure(failure: ApiFailure): FlowResult {
+/** A flow's own words for a transaction the chain refused, by its error, with a code the screen acts on; null for the general words. */
+type Explain = (err: unknown) => { readonly message: string; readonly code: string } | null;
+
+function fromFailure(failure: ApiFailure, explain?: Explain): FlowResult {
   if (failure.status === 429 || failure.code === "rate_limited") {
     return { ok: false, kind: "rate_limited", message: vaultFailureWords(failure), retryAfterSeconds: failure.retryAfterSeconds };
   }
@@ -123,6 +127,8 @@ function fromFailure(failure: ApiFailure): FlowResult {
     return { ok: false, kind: "unreadable", message: vaultFailureWords(failure) };
   }
   if (failure.code === "simulation_failed" && failure.body.err === "BlockhashNotFound") return { ok: false, kind: "expired", message: PROGRESS_COPY.tookTooLongDetail };
+  const own = failure.code === "simulation_failed" ? (explain?.(failure.body.err) ?? null) : null;
+  if (own !== null) return refused(own.message, own.code);
   const words = vaultFailureWords(failure);
   // An account that already exists is a state to re-read, not a mistake.
   return refused(words, words === FAILURE_COPY.alreadyExists ? "already_exists" : failure.code);
@@ -142,7 +148,7 @@ function signingFailure(error: unknown, who: "phantom" | "trading"): FlowResult 
   return refused(described.kind === "exited" ? declined : described.message);
 }
 
-async function confirmed(deps: FlowDeps, signature: string, lastValidBlockHeight: number, unitsConsumed: number | null): Promise<FlowResult> {
+async function confirmed(deps: FlowDeps, signature: string, lastValidBlockHeight: number, unitsConsumed: number | null, explain?: Explain): Promise<FlowResult> {
   const confirm = deps.confirm ?? ((sig: string, height: number) => confirmSignature({ rpc: (method, params) => deps.api.rpc(method, params), signature: sig, lastValidBlockHeight: height }));
   let outcome: ConfirmOutcome;
   try {
@@ -154,26 +160,29 @@ async function confirmed(deps: FlowDeps, signature: string, lastValidBlockHeight
     deps.onStep?.("done");
     return { ok: true, signature, explorerUrl: solscanTx(signature), slot: outcome.slot, unitsConsumed };
   }
-  if (outcome.status === "failed") return refused(transactionErrorWords(outcome.err, []));
+  if (outcome.status === "failed") {
+    const own = explain?.(outcome.err) ?? null;
+    return own === null ? refused(transactionErrorWords(outcome.err, [])) : refused(own.message, own.code);
+  }
   return { ok: false, kind: "expired", message: PROGRESS_COPY.tookTooLongDetail };
 }
 
 type Landing = FlowResult | { readonly rebuild: true };
 
 /** What the send route's answer means: confirm a sent signature (200, or 502 with one), rebuild on an expired blockhash, or words. */
-async function landing(deps: FlowDeps, sent: ApiResult<SendResponseJson>, lastValidBlockHeight: number): Promise<Landing> {
+async function landing(deps: FlowDeps, sent: ApiResult<SendResponseJson>, lastValidBlockHeight: number, explain?: Explain): Promise<Landing> {
   if (sent.ok) {
     deps.onStep?.("confirming");
-    return confirmed(deps, sent.body.signature, lastValidBlockHeight, sent.body.unitsConsumed);
+    return confirmed(deps, sent.body.signature, lastValidBlockHeight, sent.body.unitsConsumed, explain);
   }
   if (sent.code === "simulation_failed" && sent.body.err === "BlockhashNotFound") return { rebuild: true };
   const signature = typeof sent.body.signature === "string" ? sent.body.signature : null;
   if ((sent.code === "send_unconfirmed" || sent.code === "send_failed") && signature !== null) {
     // It may land: confirm this signature before anyone is asked to sign again.
     deps.onStep?.("confirming");
-    return confirmed(deps, signature, lastValidBlockHeight, null);
+    return confirmed(deps, signature, lastValidBlockHeight, null, explain);
   }
-  return fromFailure(sent);
+  return fromFailure(sent, explain);
 }
 
 /** Confirms a signature the send route already took ("Check again"): never builds or signs. */
@@ -203,6 +212,7 @@ async function pensionWrite<T extends BuiltTransactionJson>(
   deps: PensionFlowDeps,
   request: Readonly<Record<string, unknown>>,
   intentOf: (body: T) => Promise<OwnerIntent>,
+  explain?: Explain,
 ): Promise<FlowResult> {
   if (isSignerRefusal(deps.signers)) return refused(deps.signers.refusal);
   const signers = deps.signers;
@@ -236,7 +246,7 @@ async function pensionWrite<T extends BuiltTransactionJson>(
   }
 
   deps.onStep?.("sending");
-  const landed = await landing(deps, await deps.api.send(signed), unsigned.lastValidBlockHeight);
+  const landed = await landing(deps, await deps.api.send(signed), unsigned.lastValidBlockHeight, explain);
   return "rebuild" in landed ? { ok: false, kind: "expired", message: PROGRESS_COPY.tookTooLongDetail } : landed;
 }
 
@@ -413,14 +423,29 @@ export interface WithdrawInput {
   readonly lamports: bigint;
 }
 
-/** Takes SOL out of the vault to the pension key: exactly the lamports asked. */
+/** The program's InsufficientVaultBalance: the withdrawal would leave the vault below its rent floor. */
+const INSUFFICIENT_VAULT_BALANCE = 6004;
+
+/**
+ * Takes SOL out of the vault to the pension key: exactly the lamports asked.
+ *
+ * The build route only builds an amount the vault could release when it read it,
+ * so a 6004 afterwards means the vault's SOL moved in between: with investing on,
+ * an armed keeper wraps and converts free SOL at its next sweep. That is said, not
+ * a rent reserve the person never touched, and the screen reads the vault again.
+ */
 export async function withdrawFlow(deps: PensionFlowDeps, input: WithdrawInput): Promise<FlowResult> {
-  return pensionWrite<WithdrawBuildJson>(deps, { action: "withdraw", owner: input.pensionKey, lamports: input.lamports.toString() }, async () => ({
-    instruction: "withdraw",
-    signers: [input.pensionKey],
-    accounts: { owner: input.pensionKey, vault: await deriveVaultAddress(input.pensionKey) },
-    args: { amount: input.lamports },
-  }));
+  return pensionWrite<WithdrawBuildJson>(
+    deps,
+    { action: "withdraw", owner: input.pensionKey, lamports: input.lamports.toString() },
+    async () => ({
+      instruction: "withdraw",
+      signers: [input.pensionKey],
+      accounts: { owner: input.pensionKey, vault: await deriveVaultAddress(input.pensionKey) },
+      args: { amount: input.lamports },
+    }),
+    (err) => (customCode(err) === INSUFFICIENT_VAULT_BALANCE ? { message: WITHDRAW_COPY.balanceMoved, code: "balance_moved" } : null),
+  );
 }
 
 export interface WithdrawTokenInput {

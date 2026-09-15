@@ -153,6 +153,11 @@ export const WITHDRAW_COPY = {
   solRule: (rentFloor: string): string =>
     `Only your pension key can withdraw, and SIP cannot pause or block a SOL withdrawal. The vault keeps ${rentFloor} SOL of rent, which Solana requires, and a vault cannot be closed.`,
   empty: "Savings arrive from linked trading wallets. To try a withdrawal now, send a little SOL to the vault address from your wallet app.",
+  /** Shown beside the SOL section while the vault's investment policy is on. */
+  investingOn:
+    "Investing is on, so the keeper can convert SOL that reaches this vault to USDC within about a minute, and it then shows under Tokens. To test a SOL withdrawal, pause investing first.",
+  /** A withdrawal the build checked, refused on chain because the vault then held less SOL: the keeper's conversion, most likely. */
+  balanceMoved: "The vault's SOL moved after this was prepared, most likely into investing by the keeper: see Tokens. Nothing was withdrawn.",
   vaultAddress: "Vault address",
   tokens: "Tokens",
   noTokens: "The vault holds no tokens yet.",

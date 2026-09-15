@@ -187,6 +187,8 @@ function SolSection({
   const withdrawable = rawFrom(vault.withdrawableLamports) ?? 0n;
   const reading = readWithdrawal(amountText, withdrawable);
   const blocked = write.running || write.busyElsewhere || write.unconfirmed;
+  // While investing is on, an armed keeper wraps and converts SOL that reaches the vault at its next sweep.
+  const investing = state.policy.status === "exists" && state.policy.state?.enabled === true;
 
   return (
     <section className="space-y-3" data-section="sol">
@@ -196,6 +198,11 @@ function SolSection({
         <Fact label={WITHDRAW_COPY.withdrawable}>{formatSol(withdrawable)} SOL</Fact>
       </dl>
       <p className="text-xs text-muted-foreground">{WITHDRAW_COPY.keptAsRent(formatSol(rentFloor))}</p>
+      {investing ? (
+        <p role="note" className="text-xs">
+          {WITHDRAW_COPY.investingOn}
+        </p>
+      ) : null}
       {withdrawable === 0n ? (
         <div className="space-y-1">
           <p className="text-xs">{WITHDRAW_COPY.empty}</p>

@@ -120,6 +120,7 @@ const REFRESH_AFTER = new Set([
   "mint_unexpected",
   "policy_missing",
   "already_paused",
+  "balance_moved",
 ]);
 
 type LastRequest =

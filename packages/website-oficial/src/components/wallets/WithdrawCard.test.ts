@@ -104,6 +104,32 @@ describe("WithdrawCard", () => {
     expect(buttons("Withdraw SOL")).toHaveLength(0);
   });
 
+  it("with investing on, the SOL section says the keeper can convert SOL that reaches the vault within about a minute, and to pause first to test a withdrawal; paused or with no policy it says nothing of it", () => {
+    const policy: NonNullable<VaultStateJson["policy"]["state"]> = {
+      vault: VAULT,
+      enabled: true,
+      venueProgram: "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+      inMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "124719467624105690" }],
+      minConvertRateWad: "90034840399943305",
+      minInvestment: "5000000",
+      maxPerCall: "10000000",
+      maxRolling30d: "50000000",
+      bucketDays: new Array<number>(31).fill(0),
+      bucketAmounts: new Array<string>(31).fill("0"),
+      lifetimeInvested: "0",
+      policyNonce: "1",
+    };
+    const empty = { status: "exists" as const, address: VAULT, lamports: "1285240", rentFloor: "1285240", withdrawableLamports: "0" };
+    const words = "Investing is on, so the keeper can convert SOL that reaches this vault to USDC within about a minute, and it then shows under Tokens. To test a SOL withdrawal, pause investing first.";
+    const on = render(screen({ kind: "ready", state: stateWith({ vault: empty, policy: { status: "exists", address: account(), state: policy } }) }));
+    expect(on).toContain("send a little SOL to the vault address");
+    expect(on).toContain(words);
+    expect(render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: policy } }) }))).toContain(words);
+    expect(render(screen({ kind: "ready", state: stateWith({ vault: empty, policy: { status: "exists", address: account(), state: { ...policy, enabled: false } } }) }))).not.toContain(words);
+    expect(render(screen({ kind: "ready", state: stateWith({ vault: empty }) }))).not.toContain(words);
+  });
+
   it("Max is exactly the withdrawable lamports; an amount above it, zero, or ten decimals is refused with words", () => {
     for (const withdrawable of [150_000_000n, 298_714_760n, 1n, 18_446_744_073_709_551_615n]) {
       expect(readWithdrawal(maxWithdrawalText(withdrawable), withdrawable)).toEqual({ ok: true, lamports: withdrawable });
