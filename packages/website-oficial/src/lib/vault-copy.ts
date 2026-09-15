@@ -86,6 +86,80 @@ export const LINK_COPY = {
   coSignMismatch: "Your trading wallet signed a different transaction than Phantom approved. Nothing was sent.",
 } as const;
 
+export const INVEST_COPY = {
+  title: "Investing",
+  needsVault: "Create your vault first.",
+  policyUnreadable: "SIP could not read your investment policy just now. Nothing was offered to sign.",
+  basket: "Basket",
+  rule: "Rule",
+  buysEach: (usd: string): string => `Buys each time ${usd} of USDC is ready`,
+  mostPerBuy: "Most per buy",
+  mostPer30Days: "Most per 30 days",
+  floorsTitle: "Today's price limits",
+  solFloor: (floor: string, today: string): string => `SOL is never sold below ${floor} (90 % of today's ${today})`,
+  legCeiling: (symbol: string, max: string): string => `${symbol} is never bought above ${max} per 100,000,000 raw units (5.3 % over today's pool price)`,
+  pricesUnknown: "Today's prices could not be read just now. The build reads them again, and the limits you sign are shown before Phantom asks.",
+  /** The owner's words for what a policy does, at the limits shown. */
+  policyRule: (floorUsdPerSol: string, maxUsdPer1e8: string, maxPerCall: string, maxRolling: string, rent: string): string =>
+    `Your vault invests in SPYx (SP500 xStock) through Raydium. When it holds SOL, the keeper converts it to USDC, never below ${floorUsdPerSol} per SOL. It buys SPYx each time $5.00 of USDC is ready, never paying more than ${maxUsdPer1e8} per 100,000,000 raw units. At most ${maxPerCall} per buy and ${maxRolling} per 30 days until you change them. If prices move past these limits, buying waits until you sign again. Nothing is sold at a worse price. Setting this up costs ${rent} SOL of rent for the policy and the vault's token accounts, and none of it comes back.`,
+  freezeNotice:
+    "SPYx is a tokenized share on Token-2022. Its issuer can freeze or pause it, and holds a permanent delegate that can move it, including out of your vault. If that happens, withdrawing SPYx can fail or find less than you hold. USDC's issuer can freeze USDC accounts too. Withdrawing SOL does not depend on either issuer.",
+  freezeShort: "Its issuer can freeze, pause or move SPYx, even in your vault. Withdrawing SOL does not depend on it.",
+  acknowledge: "I understand the issuer can freeze, pause or move SPYx",
+  sign: "Sign investment policy",
+  signing: "Signing…",
+  signed: "Policy signed",
+  capsProblem: (minimum: string): string => `Most per buy must be at least ${minimum}, and Most per 30 days at least Most per buy.`,
+  convertWarning: "Above $1,000.00 per buy, one conversion can sell more than 1 SOL of your savings at the floor.",
+  youAreSigning: (solFloor: string, legs: string, perBuy: string, per30Days: string): string =>
+    `You are signing: SOL never sold below ${solFloor}; ${legs}; at most ${perBuy} per buy and ${per30Days} per 30 days.`,
+  legSigning: (symbol: string, max: string): string => `${symbol} never bought above ${max} per 100,000,000 raw units`,
+  enabled: "Investing is on.",
+  paused: "Investing is paused.",
+  floorsBelowMarket: "Floors below market",
+  floorPassed: "Floor passed",
+  marketPast: "The market moved past a floor: buying waits until you sign again with today's prices.",
+  storedSolFloor: (floor: string, today: string | null): string => (today === null ? `SOL floor ${floor}` : `SOL floor ${floor}, today ${today}`),
+  storedLegCeiling: (symbol: string, max: string, today: string | null): string =>
+    today === null ? `${symbol} ceiling ${max} per 100,000,000 raw units` : `${symbol} ceiling ${max} per 100,000,000 raw units, today ${today}`,
+  usedLast30: "Used in the last 30 days",
+  lifetime: "Invested so far",
+  ready: "Ready: the next sweep can buy.",
+  waiting: (at: string): string => `Waiting: it buys once the vault holds ${at} of USDC.`,
+  unreachable: "These limits can never buy the whole basket: raise Most per buy.",
+  signAgain: "Sign again with today's prices",
+  pause: "Pause investing",
+  resume: "Resume investing",
+  noRefill: "Signing again does not refill this month's cap.",
+} as const;
+
+export const WITHDRAW_COPY = {
+  title: "Take money out",
+  refresh: "Refresh",
+  needsVault: "Create your vault first.",
+  sol: "SOL",
+  balance: "Balance",
+  withdrawable: "Withdrawable",
+  keptAsRent: (rent: string): string => `Kept as rent ${rent} SOL`,
+  amount: "Amount to withdraw",
+  max: "Max",
+  withdrawSol: "Withdraw SOL",
+  withdrawing: "Withdrawing…",
+  withdrawn: "Withdrawn",
+  zero: "Enter more than 0 SOL.",
+  aboveWithdrawable: (max: string): string => `The vault can release at most ${max} SOL.`,
+  solRule: (rentFloor: string): string =>
+    `Only your pension key can withdraw, and SIP cannot pause or block a SOL withdrawal. The vault keeps ${rentFloor} SOL of rent, which Solana requires, and a vault cannot be closed.`,
+  empty: "Savings arrive from linked trading wallets. To try a withdrawal now, send a little SOL to the vault address from your wallet app.",
+  vaultAddress: "Vault address",
+  tokens: "Tokens",
+  noTokens: "The vault holds no tokens yet.",
+  tokensUnreadable: "SIP could not read the vault's tokens just now. Nothing was offered to sign.",
+  share: (percent: number): string => (percent === 100 ? "All" : `${percent} %`),
+  wsolNote: "Arrives in your wallet as SOL.",
+  createsLegAccount: (symbol: string, rent: string): string => `Creates your own ${symbol} token account if you have none (${rent} SOL of rent, paid by you and kept by you).`,
+} as const;
+
 export const PROGRESS_COPY = {
   preparing: "Preparing",
   approve_pension: "Approve in Phantom",

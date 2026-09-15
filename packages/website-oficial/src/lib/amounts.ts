@@ -61,6 +61,15 @@ export function formatUsd(usdcRaw: bigint): string {
 /** What `lamports` of SOL come to in USDC raw units at `usdcRawPerSol`, rounded down. */
 export const usdcRawForLamports = (lamports: bigint, usdcRawPerSol: bigint): bigint => (lamports * usdcRawPerSol) / 1_000_000_000n;
 
+/**
+ * `percent` of `raw`, rounded down; 100 is `raw` itself. Token shares are taken
+ * from raw units, never from the display amount: SPYx's display amount is scaled.
+ */
+export function shareOfRaw(raw: bigint, percent: number): bigint {
+  if (!Number.isInteger(percent) || percent < 1 || percent > 100) throw new AmountError("A share is 1 to 100 percent.");
+  return percent === 100 ? raw : (raw * BigInt(percent)) / 100n;
+}
+
 /** A decimal string from the server (bigints travel as strings), or null when it is not one. */
 export function rawFrom(text: unknown): bigint | null {
   return typeof text === "string" && /^[0-9]{1,39}$/.test(text) ? BigInt(text) : null;

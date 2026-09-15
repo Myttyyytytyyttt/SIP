@@ -16,9 +16,10 @@
  * end, and the way out is Disconnect, because Privy ignores login() for a user who
  * is already signed in.
  *
- * TOP TO BOTTOM: the pension key, its vault (create it, or what it holds), and the
- * trading wallets, each with its link to the vault. One read of the chain feeds
- * them all, and one write at a time runs on the whole screen (VaultScreen). Every
+ * TOP TO BOTTOM: the pension key, its vault (create it, or what it holds), the
+ * trading wallets, each with its link to the vault, investing (the policy, or the
+ * form that signs it) and taking money out. One read of the chain feeds them all,
+ * and one write at a time runs on the whole screen (VaultScreen). Every
  * confirmation is an inline panel, never a nested dialog, so the Manage wallets
  * modal's untrapped focus scope keeps working with Privy's dialogs on top.
  */
@@ -31,9 +32,11 @@ import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddressLine } from "@/components/wallets/AddressLine";
+import { InvestingCard } from "@/components/wallets/InvestingCard";
 import { TradingWalletsCard } from "@/components/wallets/TradingWalletsCard";
 import { VaultCard } from "@/components/wallets/VaultCard";
 import { VaultScreen } from "@/components/wallets/VaultScreen";
+import { WithdrawCard } from "@/components/wallets/WithdrawCard";
 import { LABEL } from "@/lib/classes";
 import { pensionKeyOf } from "@/lib/pension-key";
 import { privyFailure } from "@/lib/privy-failure";
@@ -60,6 +63,8 @@ export function WalletsScreen() {
         <PensionKeyCard address={pensionKey} onDisconnect={disconnect} />
         <VaultCard />
         <TradingWalletsCard />
+        <InvestingCard />
+        <WithdrawCard />
       </div>
     </VaultScreen>
   );

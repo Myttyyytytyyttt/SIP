@@ -11,6 +11,7 @@
  */
 
 import { Check, ExternalLink, LoaderCircle, RefreshCw } from "lucide-react";
+import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import type { WriteProgress } from "@/hooks/use-vault-actions";
@@ -51,13 +52,16 @@ export function TxProgress({
   onBuildAgain,
   onCheckAgain,
   onDismiss,
+  approveDetail,
 }: {
   readonly progress: WriteProgress;
-  /** What landed: "Vault created", "Linked". */
+  /** What landed: "Vault created", "Linked", "Policy signed", "Withdrawn". */
   readonly successLabel: string;
   readonly onBuildAgain?: () => void;
   readonly onCheckAgain?: () => void;
   readonly onDismiss?: () => void;
+  /** What is being signed, shown while Phantom asks. */
+  readonly approveDetail?: ReactNode;
 }) {
   if (progress.phase === "idle") return null;
 
@@ -72,6 +76,7 @@ export function TxProgress({
             {PROGRESS_COPY[step]}
           </div>
         ))}
+        {progress.step === "approve_pension" && approveDetail !== undefined && approveDetail !== null ? <div className="pt-1">{approveDetail}</div> : null}
       </div>
     );
   }

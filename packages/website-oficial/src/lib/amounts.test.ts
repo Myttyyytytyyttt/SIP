@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import { AmountError, formatSol, formatUnits, formatUsd, parseUnits, rawFrom, solToLamports, usdcRawForLamports, usdcToRaw } from "@/lib/amounts";
+import { AmountError, formatSol, formatUnits, formatUsd, parseUnits, rawFrom, shareOfRaw, solToLamports, usdcRawForLamports, usdcToRaw } from "@/lib/amounts";
+
+describe("token shares", () => {
+  it("25 % and 50 % round down; All is the raw amount itself", () => {
+    expect(shareOfRaw(12_345_678n, 25)).toBe(3_086_419n);
+    expect(shareOfRaw(12_345_678n, 50)).toBe(6_172_839n);
+    expect(shareOfRaw(12_345_678n, 100)).toBe(12_345_678n);
+    expect(shareOfRaw(18_446_744_073_709_551_615n, 100)).toBe(18_446_744_073_709_551_615n);
+    expect(shareOfRaw(3n, 25)).toBe(0n);
+  });
+
+  it.each([0, 101, 12.5, -25])("refuses %s percent", (percent) => {
+    expect(() => shareOfRaw(100n, percent)).toThrow(AmountError);
+  });
+});
 
 describe("text to raw units", () => {
   it("parses digit by digit, with no float in between", () => {

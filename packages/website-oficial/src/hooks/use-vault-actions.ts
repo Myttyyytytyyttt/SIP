@@ -6,8 +6,18 @@ import { createContext, createElement, useCallback, useContext, useMemo, useRef,
 
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { pensionSigner, tradingSigners, type SignMessageFn, type SignTransactionFn } from "@/lib/signing-wallets";
+import type { BuiltTransactionJson } from "@/lib/vault-api";
 import { FAILURE_COPY } from "@/lib/vault-copy";
-import { checkAgainFlow, createVaultFlow, linkWalletFlow, type FlowResult, type FlowStep } from "@/lib/vault-flows";
+import {
+  checkAgainFlow,
+  createVaultFlow,
+  investPolicyFlow,
+  linkWalletFlow,
+  withdrawFlow,
+  withdrawTokenFlow,
+  type FlowResult,
+  type FlowStep,
+} from "@/lib/vault-flows";
 
 /**
  * THE VAULT WRITES, WIRED TO PRIVY: Phantom and the trading wallets from
@@ -16,9 +26,9 @@ import { checkAgainFlow, createVaultFlow, linkWalletFlow, type FlowResult, type 
  *
  * ONE WRITE AT A TIME FOR THE WHOLE SCREEN. VaultWriteLock holds the key of the
  * write in progress; a ref closes the gap before React re-renders, so a second
- * click anywhere on the screen (the vault card, another wallet's row) starts
- * nothing. Wallet approvals that overlap would fight over Phantom's window and
- * the blockhash's lifetime.
+ * click anywhere on the screen (the vault card, another wallet's row, investing,
+ * a withdrawal) starts nothing. Wallet approvals that overlap would fight over
+ * Phantom's window and the blockhash's lifetime.
  *
  * EXPLICIT CALLS ONLY. Every action takes the values it needs and no event; the
  * signers hand Privy explicit objects (src/lib/signing-wallets.ts).
@@ -26,21 +36,40 @@ import { checkAgainFlow, createVaultFlow, linkWalletFlow, type FlowResult, type 
  * A link's consent signature is kept in memory for this row, so "Link this
  * wallet" after an expired approval window reuses it; it is dropped once the
  * link lands or the server refuses it.
+ *
+ * WHILE PHANTOM ASKS, the checked build answer rides in the progress, so a card
+ * can show what is being signed (an investment policy's floors).
  */
 
 type ConnectedWallet = ReturnType<typeof useWallets>["wallets"][number];
 
-export type WriteKind = "create" | "link";
+export type WriteKind = "create" | "link" | "policy" | "withdraw" | "withdrawToken";
 
 export type WriteProgress =
   | { readonly phase: "idle" }
-  | { readonly phase: "running"; readonly kind: WriteKind; readonly step: FlowStep }
+  | { readonly phase: "running"; readonly kind: WriteKind; readonly step: FlowStep; readonly built: BuiltTransactionJson | null }
   | { readonly phase: "finished"; readonly kind: WriteKind; readonly result: FlowResult };
 
 export interface CreateRequest {
   readonly mode: number;
   readonly maxContribution: bigint;
   readonly walletReserve: bigint;
+}
+
+export interface InvestRequest {
+  /** USDC raw units. */
+  readonly maxPerCall: bigint;
+  /** USDC raw units. */
+  readonly maxRolling30d: bigint;
+  readonly enabled: boolean;
+}
+
+export interface TokenWithdrawRequest {
+  readonly mint: string;
+  readonly amountRaw: bigint;
+  /** The vault account the screen showed the holding in, and its token program. */
+  readonly vaultTokenAccount: string;
+  readonly tokenProgram: string;
 }
 
 interface WriteLock {
@@ -77,11 +106,32 @@ export function VaultWriteLock({ children }: { readonly children?: ReactNode }) 
 }
 
 /** Outcomes after which the page's picture of the chain is stale. */
-const REFRESH_AFTER = new Set(["vault_exists", "vault_missing", "config_missing", "protocol_paused", "wallet_already_linked", "already_exists"]);
+const REFRESH_AFTER = new Set([
+  "vault_exists",
+  "vault_missing",
+  "config_missing",
+  "protocol_paused",
+  "wallet_already_linked",
+  "already_exists",
+  "above_withdrawable",
+  "not_held",
+  "above_holding",
+  "mint_unexpected",
+]);
 
-type LastRequest = { readonly kind: "create"; readonly input: CreateRequest } | { readonly kind: "link"; readonly tradingAddress: string };
+type LastRequest =
+  | { readonly kind: "create"; readonly input: CreateRequest }
+  | { readonly kind: "link"; readonly tradingAddress: string }
+  | { readonly kind: "policy"; readonly input: InvestRequest }
+  | { readonly kind: "withdraw"; readonly lamports: bigint }
+  | { readonly kind: "withdrawToken"; readonly input: TokenWithdrawRequest };
 
-/** One card's or one row's writes, under the screen's lock. `key` names the writer ("vault", "link:<address>"). */
+interface FlowHooks {
+  readonly onStep: (step: FlowStep) => void;
+  readonly onBuilt: (body: BuiltTransactionJson) => void;
+}
+
+/** One card's or one row's writes, under the screen's lock. `key` names the writer ("vault", "link:<address>", "policy", "withdraw:sol"…). */
 export function useVaultWrite(key: string) {
   const screen = useVaultScreen();
   const lock = useContext(WriteLockContext);
@@ -97,11 +147,18 @@ export function useVaultWrite(key: string) {
   const signMessageOne = useCallback<SignMessageFn<ConnectedWallet>>((input) => signMessage(input), [signMessage]);
 
   const run = useCallback(
-    async (kind: WriteKind, flow: (onStep: (step: FlowStep) => void) => Promise<FlowResult>): Promise<void> => {
+    async (kind: WriteKind, flow: (hooks: FlowHooks) => Promise<FlowResult>): Promise<void> => {
       if (screen === null || lock === null || !lock.acquire(key)) return;
-      setProgress({ phase: "running", kind, step: "preparing" });
+      let built: BuiltTransactionJson | null = null;
+      setProgress({ phase: "running", kind, step: "preparing", built });
+      const hooks: FlowHooks = {
+        onStep: (step) => setProgress({ phase: "running", kind, step, built }),
+        onBuilt: (body) => {
+          built = body;
+        },
+      };
       try {
-        const result = await flow((step) => setProgress({ phase: "running", kind, step }));
+        const result = await flow(hooks);
         setProgress({ phase: "finished", kind, result });
         if (result.ok || (result.kind === "refused" && result.code !== undefined && REFRESH_AFTER.has(result.code))) screen.refresh();
       } catch {
@@ -118,9 +175,9 @@ export function useVaultWrite(key: string) {
       if (screen === null) return Promise.resolve();
       lastRequest.current = { kind: "create", input };
       const { api, pensionKey } = screen;
-      return run("create", (onStep) =>
+      return run("create", ({ onStep, onBuilt }) =>
         createVaultFlow(
-          { api, onStep, signers: pensionSigner({ wallets, pensionKey, signTransaction: signOne }) },
+          { api, onStep, onBuilt, signers: pensionSigner({ wallets, pensionKey, signTransaction: signOne }) },
           { pensionKey, mode: input.mode, maxContribution: input.maxContribution, walletReserve: input.walletReserve },
         ),
       );
@@ -134,11 +191,12 @@ export function useVaultWrite(key: string) {
       lastRequest.current = { kind: "link", tradingAddress };
       const { api, pensionKey } = screen;
       const cacheKey = `${pensionKey}:${tradingAddress}`;
-      return run("link", async (onStep) => {
+      return run("link", async ({ onStep, onBuilt }) => {
         const outcome = await linkWalletFlow(
           {
             api,
             onStep,
+            onBuilt,
             pension: pensionSigner({ wallets, pensionKey, signTransaction: signOne }),
             trading: tradingSigners({ wallets, pensionKey, tradingAddress, signTransaction: signOne, signMessage: signMessageOne }),
           },
@@ -152,12 +210,65 @@ export function useVaultWrite(key: string) {
     [screen, run, wallets, signOne, signMessageOne],
   );
 
-  /** "Build again": the last write, built fresh with the wallets as they are now. */
+  const investPolicy = useCallback(
+    (input: InvestRequest): Promise<void> => {
+      if (screen === null) return Promise.resolve();
+      lastRequest.current = { kind: "policy", input };
+      const { api, pensionKey } = screen;
+      return run("policy", ({ onStep, onBuilt }) =>
+        investPolicyFlow(
+          { api, onStep, onBuilt, signers: pensionSigner({ wallets, pensionKey, signTransaction: signOne }) },
+          { pensionKey, maxPerCall: input.maxPerCall, maxRolling30d: input.maxRolling30d, enabled: input.enabled },
+        ),
+      );
+    },
+    [screen, run, wallets, signOne],
+  );
+
+  const withdraw = useCallback(
+    (lamports: bigint): Promise<void> => {
+      if (screen === null) return Promise.resolve();
+      lastRequest.current = { kind: "withdraw", lamports };
+      const { api, pensionKey } = screen;
+      return run("withdraw", ({ onStep, onBuilt }) =>
+        withdrawFlow({ api, onStep, onBuilt, signers: pensionSigner({ wallets, pensionKey, signTransaction: signOne }) }, { pensionKey, lamports }),
+      );
+    },
+    [screen, run, wallets, signOne],
+  );
+
+  const withdrawToken = useCallback(
+    (input: TokenWithdrawRequest): Promise<void> => {
+      if (screen === null) return Promise.resolve();
+      lastRequest.current = { kind: "withdrawToken", input };
+      const { api, pensionKey } = screen;
+      return run("withdrawToken", ({ onStep, onBuilt }) =>
+        withdrawTokenFlow(
+          { api, onStep, onBuilt, signers: pensionSigner({ wallets, pensionKey, signTransaction: signOne }) },
+          { pensionKey, mint: input.mint, amountRaw: input.amountRaw, vaultTokenAccount: input.vaultTokenAccount, tokenProgram: input.tokenProgram },
+        ),
+      );
+    },
+    [screen, run, wallets, signOne],
+  );
+
+  /** "Build again": the last write, built fresh with the wallets and the prices as they are now. */
   const buildAgain = useCallback((): Promise<void> => {
     const last = lastRequest.current;
     if (last === null) return Promise.resolve();
-    return last.kind === "create" ? createVault(last.input) : link(last.tradingAddress);
-  }, [createVault, link]);
+    switch (last.kind) {
+      case "create":
+        return createVault(last.input);
+      case "link":
+        return link(last.tradingAddress);
+      case "policy":
+        return investPolicy(last.input);
+      case "withdraw":
+        return withdraw(last.lamports);
+      case "withdrawToken":
+        return withdrawToken(last.input);
+    }
+  }, [createVault, link, investPolicy, withdraw, withdrawToken]);
 
   /** "Check again": confirms the signature the send route already took. It never builds or signs. */
   const checkAgain = useCallback((): Promise<void> => {
@@ -166,7 +277,7 @@ export function useVaultWrite(key: string) {
     if (result.ok || result.kind !== "unconfirmed") return Promise.resolve();
     const { signature, lastValidBlockHeight } = result;
     const { api } = screen;
-    return run(kind, (onStep) => checkAgainFlow({ api, onStep }, { signature, lastValidBlockHeight }));
+    return run(kind, ({ onStep }) => checkAgainFlow({ api, onStep }, { signature, lastValidBlockHeight }));
   }, [screen, progress, run]);
 
   const dismiss = useCallback(() => setProgress({ phase: "idle" }), []);
@@ -183,6 +294,9 @@ export function useVaultWrite(key: string) {
     unconfirmed,
     createVault,
     link,
+    investPolicy,
+    withdraw,
+    withdrawToken,
     buildAgain,
     checkAgain,
     dismiss,
