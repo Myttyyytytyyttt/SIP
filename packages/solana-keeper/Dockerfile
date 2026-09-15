@@ -7,6 +7,16 @@
 #
 #   docker build -f packages/solana-keeper/Dockerfile -t sip-solana-keeper .
 #
+# ON RAILWAY, WITHOUT CONFIG AS CODE. Since 2026-08-28 Railway refuses railway.json
+# for services that never used it, so packages/solana-keeper/railway.json only
+# documents the settings. A service created since then reads none of it, and
+# Railpack builds the repository root's package.json instead, which is the web.
+# Set these on the service: the variable
+# RAILWAY_DOCKERFILE_PATH=packages/solana-keeper/Dockerfile, Root Directory
+# empty (this file needs the repository root as its context), healthcheck path
+# /health, one replica, restart on failure, and the watch paths from that
+# railway.json. docs/runbooks/RAILWAY_SOLANA.md has the steps.
+#
 # DRY RUN IS THE DEFAULT, AND A DRY RUN HOLDS NO KEY. The process reads no signing
 # secret unless SIP_SOLANA_BROADCAST=1 and SIP_SOLANA_ALLOW_BROADCAST is the exact
 # sentence; started without them it cannot sign anything, whatever else is in its

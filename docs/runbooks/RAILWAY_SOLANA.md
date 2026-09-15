@@ -1,8 +1,9 @@
-# Railway: el vigilante y la web en Solana
+# Railway: el vigilante de Solana
 
-Dos servicios salen del mismo repositorio: el **vigilante** (keeper), que cobra e invierte, y la **web**. Esta guía dice
-qué variable va en cada uno, cuál es secreta y en qué momento se añade. Los secretos los pegas **tú**, directamente en
-Railway. Claude no tiene acceso a Railway.
+En Railway solo vive el **vigilante** (keeper), que cobra e invierte. **La web se aloja en Vercel**, por decisión del
+15 de septiembre: la sección 2 (la web en Railway) queda obsoleta hasta que la sustituya la guía de Vercel. Esta guía
+dice qué variable va en el vigilante, cuál es secreta y en qué momento se añade. Los secretos los pegas **tú**,
+directamente en Railway. Claude no tiene acceso a Railway.
 
 **Nunca van a Railway:** tu wallet de administración (`~/sip-keys/admin.json`), la llave de administración de la
 política de Privy (`~/sip-keys/privy-policy-admin.key`) ni ninguna variable `NUVEM_*`. El vigilante se niega a arrancar si
@@ -24,11 +25,26 @@ No copies variables de un servicio viejo.
 
 ## 1. El vigilante (`sip-solana-keeper`)
 
-En Railway: **New → GitHub repo → SIP**. En **Settings**:
+En Railway: **New → GitHub repo → SIP**. Desde el 28 de agosto de 2026, Railway ya no deja activar *config as code*
+en servicios nuevos, así que no lee `packages/solana-keeper/railway.json`. Sin los ajustes de abajo, Railpack compila
+el `package.json` de la raíz, que es el de la web. Configúralo a mano:
 
-- **Root Directory**: vacío.
-- **Config as code**: `packages/solana-keeper/railway.json`. Ya fija el Dockerfile, una sola réplica y el chequeo
-  `/health`.
+- **Variables → `RAILWAY_DOCKERFILE_PATH`** = `packages/solana-keeper/Dockerfile`. En **Settings → Build**, el builder
+  pasa a *Dockerfile*.
+- **Settings → Source → Root Directory**: vacío, porque el Dockerfile necesita la raíz del repositorio como contexto.
+- **Settings → Build → Watch Paths**, una por línea: `/packages/solana-keeper/**`, `/packages/solana-log/**`,
+  `/packages/solana-program/idl/**`, `/packages/solana-program/scripts/**`, `/packages/solana-program/package.json`,
+  `/pnpm-lock.yaml`, `/pnpm-workspace.yaml`, `/package.json`.
+- **Settings → Deploy**: *Healthcheck Path* `/health`; reinicio *On Failure*, con 10 intentos.
+- **Settings → Scale**: 1 réplica. El candado que deja actuar a una sola copia vive en la base de datos; sin ella,
+  dos réplicas actuarían dos veces.
+- **Settings → Networking**: genera un dominio (puerto 8080) para ver `/health` y `/status`.
+
+Para saber que el servicio es el vigilante y no la web:
+
+- en *Build Logs* se construye con el Dockerfile y pasa el paso `--preflight`;
+- en *Deploy Logs* sale `heartbeat listening`, nunca `Next.js`;
+- `/health` responde `{"ok":true}` en JSON.
 
 ### Fase A — en seco, ya hoy
 
