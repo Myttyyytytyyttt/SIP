@@ -2,11 +2,13 @@
 //
 // Ported from Nuvem's solana-lab keeper (keeper/src/settle-tick.ts), moved to
 // settle_v2. What is new: the vault arrives decoded through the IDL from the
-// sweep's one batched read, a paused vault or protocol stops at PAUSED, a VOLUME
-// vault stops at UNSUPPORTED_MODE, a confirmed probe decides whether there is
-// anything to walk, the walk reads finalized history and must reach the
-// frontier, the attestation binds the vault's own mode, rate and policy nonce
-// and a deadline, and a dry run measures and reports without any key in reach.
+// sweep's one batched read, a paused vault or protocol stops at PAUSED, an
+// undefined mode stops at UNSUPPORTED_MODE while both real modes are measured, a
+// confirmed probe decides whether there is anything to walk, the walk reads
+// finalized history and must reach the frontier, a flat span settles a zero base
+// once it is worth a transaction, the attestation binds the vault's own mode,
+// rate and policy nonce and a deadline, and a dry run measures and reports
+// without any key in reach.
 // What is unchanged: the frontier-from-epoch rule, the completeness checks
 // behind the new frontier and finality stops, confirm plus the receipt's own
 // meta.err, and the vault delta read from pre/post balances.
@@ -21,16 +23,18 @@ import type { ManagedLink } from "./discovery.js";
 import { connectionReader, measureSince } from "./measure-window.js";
 import { method } from "./methods.js";
 import type { SolanaWalletSubmitter } from "./privy-signer.js";
-import { attestationInstruction } from "./program-scripts.js";
+import { MODE_VOLUME, attestationInstruction } from "./program-scripts.js";
 import {
   attestationInputs,
   decideFromMeasurement,
+  defaultVolumeBase,
   expectedContribution,
   measurementStart,
   modeDecision,
   noSignerDetail,
   pauseDecision,
   type SettleOutcome,
+  type VolumeBase,
 } from "./settle-decision.js";
 
 export type { SettleOutcome } from "./settle-decision.js";
@@ -74,6 +78,13 @@ export interface SettleDeps {
    * False when there is no config, and then there are no links either.
    */
   readonly protocolPaused: boolean;
+  /**
+   * Where a VOLUME span's notional comes from. Absent — as keeper.mts always
+   * leaves it — it is defaultVolumeBase: zero for a span with no successful
+   * trade, and nothing attested otherwise. keeper-medir-volumen replaces the
+   * default; the local proof injects a notional here.
+   */
+  readonly volumeBase?: VolumeBase;
 }
 
 export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
@@ -124,7 +135,12 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   // BEFORE THE WALK, NOT AFTER: see MeasurementContext.finalizedSlot.
   const finalizedSlot = BigInt(await connection.getSlot("finalized"));
   const measured = await measureSince(connectionReader(connection), link.wallet, from, program.programId);
-  const decision = decideFromMeasurement(measured, { from, finalizedSlot });
+  const decision = await decideFromMeasurement(measured, {
+    from,
+    finalizedSlot,
+    mode: vault.skimMode,
+    volumeBase: deps.volumeBase ?? defaultVolumeBase,
+  });
   if (decision.kind === "stop") {
     return {
       outcome: decision.outcome,
@@ -148,12 +164,18 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
 
   if (!deps.live) {
     const { owed, paid } = expectedContribution(inputs.baseLamports, inputs.bps, vault.maxContribution);
+    const modeName = inputs.mode === MODE_VOLUME ? "VOLUME" : "PROFIT";
     return {
       outcome: "SETTLED",
       detail:
-        `DRY RUN — would settle ${paid} lamports (${owed} owed at ${inputs.bps} bps` +
-        (paid < owed ? `, clipped at max_contribution ${vault.maxContribution}` : "") +
-        `) from ${inputs.baseLamports} lamports of measured profit over slots ${inputs.sessionStartSlot}..${inputs.sessionEndSlot}`,
+        // A ZERO BASE SAYS WHAT IT IS FOR: nothing moves, and the frontier does.
+        inputs.baseLamports === 0n
+          ? `DRY RUN — would settle 0 lamports in ${modeName} at ${inputs.bps} bps and advance the frontier ` +
+            `from ${inputs.sessionStartSlot} to ${inputs.sessionEndSlot} over ${measured.txCount} txs`
+          : `DRY RUN — would settle ${paid} lamports (${owed} owed at ${inputs.bps} bps` +
+            (paid < owed ? `, clipped at max_contribution ${vault.maxContribution}` : "") +
+            `) from ${inputs.baseLamports} lamports of measured ${inputs.mode === MODE_VOLUME ? "notional" : "profit"} ` +
+            `over slots ${inputs.sessionStartSlot}..${inputs.sessionEndSlot}`,
       baseLamports: inputs.baseLamports,
       mode: inputs.mode,
     };

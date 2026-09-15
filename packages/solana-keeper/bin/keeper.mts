@@ -58,6 +58,7 @@ import {
 } from "../src/privy-signer.js";
 import { SolanaReadModel } from "../src/read-model.js";
 import { poolFetch } from "../src/rpc-pool.js";
+import { settleAlert } from "../src/settle-decision.js";
 import { runSettleTick } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KEEPER_LOCK_NAME, KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
@@ -527,18 +528,6 @@ async function sweep(): Promise<void> {
             signature: settle.signature,
           });
           changes.forget(`settle:${wallet}`);
-          // A settle that broke is money that should have moved and did not.
-          if (settle.outcome === "FAILED") {
-            alerter.fire({
-              key: `settle-failed:${wallet}`,
-              severity: "critical",
-              title: "A settlement failed",
-              detail: settle.detail,
-              context: { wallet, vault: vaultAddr },
-            });
-          } else {
-            alerter.clear(`settle-failed:${wallet}`);
-          }
           // Recorded from what the tick MEASURED, and only when every field is
           // present: a settle whose receipt was not read in time has no
           // contribution to record, and a guessed row is worse than no row.
@@ -574,35 +563,13 @@ async function sweep(): Promise<void> {
           }
         } else {
           changes.change(`settle:${wallet}`, `settle ${settle.outcome.toLowerCase()}`, { wallet, vault: vaultAddr, detail: settle.detail });
-          // A PAUSE IS DELIBERATE, NOT MONEY LOST. It also explains the settles
-          // that failed with VaultPaused or ProtocolPaused while it was being
-          // switched on, so their critical alert clears instead of standing.
-          if (settle.outcome === "PAUSED") alerter.clear(`settle-failed:${wallet}`);
-          // INCOMPLETE is the one resting state that never resolves itself: the
-          // frontier cannot advance while it holds.
-          if (settle.outcome === "INCOMPLETE") {
-            alerter.fire({
-              key: `incomplete:${wallet}`,
-              severity: "warn",
-              title: "A wallet cannot be measured, so it is not saving",
-              detail: settle.detail,
-              context: { wallet },
-            });
-          } else {
-            alerter.clear(`incomplete:${wallet}`);
-          }
-          if (settle.outcome === "NO_SIGNER") {
-            alerter.fire({
-              key: `no-signer:${wallet}`,
-              severity: "warn",
-              title: "A linked wallet never granted the keeper's signer",
-              detail: settle.detail,
-              context: { wallet },
-            });
-          } else {
-            alerter.clear(`no-signer:${wallet}`);
-          }
         }
+        // WHO IS WOKEN, AND FOR WHAT, is settleAlert's (src/settle-decision.ts),
+        // where a test pins the rule for every outcome. What it resolves is
+        // cleared first, then what it raises is fired.
+        const settleAlerts = settleAlert(settle.outcome, { wallet, vault: vaultAddr }, settle.detail);
+        for (const key of settleAlerts.clear) alerter.clear(key);
+        if (settleAlerts.fire !== null) alerter.fire(settleAlerts.fire);
 
         // Asked again: the settle turn above can take long enough for the claim
         // to go.

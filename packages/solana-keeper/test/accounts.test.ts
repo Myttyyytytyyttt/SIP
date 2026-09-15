@@ -437,13 +437,72 @@ describe("the ticks' first steps, over the same bytes", () => {
     }
   });
 
-  it("stop a VOLUME vault at UNSUPPORTED_MODE on the sweep's vault read with no request of its own", async () => {
-    const { vault, connection, program, calls } = chainWith({ skimMode: 1 }, null);
+  it("walk a VOLUME vault in a dry run instead of stopping it: IDLE on the probe when nothing is newer than its start, with no blockhash read", async () => {
+    const { vault, connection, program, calls } = chainWith({ skimMode: 1 }, null, {
+      getSignaturesForAddress: async () => [{ signature: "link", slot: 300_000_000, err: null, memo: null }],
+    });
     const read = await readVaults(program, [vault]);
     expect(calls.splice(0)).toEqual(["getMultipleAccountsInfoAndContext"]);
     const result = await runSettleTick({ connection, program, link: linkTo(vault), vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false });
-    expect(result.outcome).toBe("UNSUPPORTED_MODE");
-    expect(calls).toEqual([]);
+    expect(result).toEqual({ outcome: "IDLE", detail: "nothing since slot 300000000" });
+    expect(calls).toEqual(["getSignaturesForAddress"]);
+    expect(calls).not.toContain("getLatestBlockhash");
+  });
+
+  it("measure a VOLUME span with a successful trade, and rest it at UNSUPPORTED_MODE past the walk, before any deadline or blockhash", async () => {
+    let ledger: FakeLedger | undefined;
+    const { vault, connection, program, calls } = chainWith({ skimMode: 1 }, null, {
+      getSignaturesForAddress: async (wallet, options, commitment) =>
+        commitment === "confirmed"
+          ? [{ signature: "trade-5", slot: 300_000_005, err: null, memo: null }]
+          : ledger!.signatures(wallet as PublicKey, options as { limit: number }, commitment as Finality),
+      getTransaction: async (signature, config) => ledger!.transaction(signature as string, (config as { commitment: Finality }).commitment),
+      getSlot: async () => 300_000_100,
+    });
+    const link = linkTo(vault);
+    ledger = new FakeLedger(
+      link.wallet,
+      chained(2_000_000_000, [
+        { signature: "link-0", slot: 300_000_000, programs: ["11111111111111111111111111111111"], delta: -2_000_000 },
+        { signature: "trade-5", slot: 300_000_005, programs: ["JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"], delta: 1_000_000_000 },
+      ]),
+    );
+    const read = await readVaults(program, [vault]);
+    calls.splice(0);
+    const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false });
+    expect(result).toEqual({ outcome: "UNSUPPORTED_MODE", detail: "1 successful trade(s) await keeper-medir-volumen; nothing attested" });
+    expect(calls).toEqual(["getSignaturesForAddress", "getSlot", "getSignaturesForAddress", "getTransaction", "getTransaction"]);
+  });
+
+  it("describe a zero-base dry run in either mode: nothing moves at the mode's rate, and the frontier advances over the span", async () => {
+    // 100 zero-lamport transfers above the link's own transaction: a flat span
+    // with no trade in it, at the zero-settle threshold.
+    for (const [vaultOver, named] of [
+      [{ skimMode: 0 }, "in PROFIT at 2345 bps"],
+      [{ skimMode: 1 }, "in VOLUME at 37 bps"],
+    ] as const) {
+      let ledger: FakeLedger | undefined;
+      const { vault, connection, program } = chainWith(vaultOver, null, {
+        getSignaturesForAddress: async (wallet, options, commitment) =>
+          commitment === "confirmed"
+            ? [{ signature: "flow-100", slot: 300_000_100, err: null, memo: null }]
+            : ledger!.signatures(wallet as PublicKey, options as { limit: number }, commitment as Finality),
+        getTransaction: async (signature, config) => ledger!.transaction(signature as string, (config as { commitment: Finality }).commitment),
+        getSlot: async (commitment) => (commitment === "finalized" ? 300_000_200 : 300_000_240),
+      });
+      const link = linkTo(vault);
+      ledger = new FakeLedger(
+        link.wallet,
+        chained(2_000_000_000, [
+          { signature: "link-0", slot: 300_000_000, programs: ["11111111111111111111111111111111"], delta: -2_000_000 },
+          ...Array.from({ length: 100 }, (_, i) => ({ signature: `flow-${i + 1}`, slot: 300_000_001 + i, programs: ["11111111111111111111111111111111"], delta: 0 })),
+        ]),
+      );
+      const read = await readVaults(program, [vault]);
+      const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false });
+      expect(result).toMatchObject({ outcome: "SETTLED", baseLamports: 0n, mode: vaultOver.skimMode });
+      expect(result.detail).toBe(`DRY RUN — would settle 0 lamports ${named} and advance the frontier from 300000000 to 300000100 over 100 txs`);
+    }
   });
 
   it("fail a settle whose vault the sweep's read did not find, naming the address, with no request of its own", async () => {

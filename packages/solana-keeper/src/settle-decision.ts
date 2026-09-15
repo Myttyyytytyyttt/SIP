@@ -21,6 +21,7 @@
 
 import type { PublicKey } from "@solana/web3.js";
 import type { VaultState } from "./accounts.js";
+import type { Alert } from "./alerts.js";
 import type { ManagedLink } from "./discovery.js";
 import { MAX_SIGNATURE_PAGES, MAX_SIGNATURES, type WindowMeasurement } from "./measure-window.js";
 import { MODE_PROFIT, MODE_VOLUME, type AttestationInputs } from "./program-scripts.js";
@@ -42,15 +43,17 @@ export type SettleOutcome =
   /** New profit measured, attested and settled — or, in dry run, what would be. */
   | "SETTLED"
   /**
-   * Measured a loss or zero, so nothing is taken.
+   * Measured a loss or zero — for a VOLUME vault, no successful trade — over a
+   * span too small to spend a transaction on. Nothing is taken and nothing is sent.
    *
-   * THE FRONTIER DOES NOT ADVANCE, still. Nuvem's settle required profit > 0,
-   * so a flat or losing span stayed inside the window and kept growing until it
-   * exceeded the walk limit and flipped to INCOMPLETE, which never resolves.
-   * settle_v2 accepts a ZERO base — it moves nothing and advances the frontier —
-   * which closes that wedge on chain. This tick does not send one yet:
-   * keeper-cobro-v2 switches NO_PROFIT to a zero-base settle together with the
-   * cadence that decides when a flat span is worth a transaction.
+   * A ZERO SETTLE IS WHAT MOVES A FLAT SPAN'S FRONTIER, and this is the wait for
+   * one. Nuvem's settle required profit > 0, so a flat or losing span stayed
+   * inside the window and grew until the walk refused it, forever. settle_v2
+   * accepts a zero base — it moves nothing and still advances the frontier — and
+   * baseDecision sends one once ZERO_BASE_MIN_TXS transactions other than our own
+   * settles sit in the span. Until then the span rests here and its losses keep
+   * netting against the next win; a zero settle forgets them, because TradingLink
+   * keeps no high-water mark.
    */
   | "NO_PROFIT"
   /** The completeness oracle broke — a human should look. */
@@ -63,7 +66,11 @@ export type SettleOutcome =
    * dry run does not read.
    */
   | "NO_SIGNER"
-  /** The vault saves in a mode this keeper cannot measure yet. Nothing is attested. */
+  /**
+   * The vault saves in a mode no sip-vault version defines, or a VOLUME span holds
+   * successful trades whose notional this keeper cannot measure yet. Resting;
+   * nothing is attested.
+   */
   | "UNSUPPORTED_MODE"
   /**
    * The vault's owner paused it, or the protocol's authority paused everything.
@@ -109,23 +116,18 @@ export function measurementStart(link: Pick<ManagedLink, "epoch" | "frontierSlot
  * Whether this keeper can settle the vault's mode at all. Decided BEFORE
  * measuring, in dry run too.
  *
- * NOTHING ON CHAIN BACKS THIS STOP ANY MORE. The attestation takes the vault's
- * own mode and rate (attestationInputs), so a PROFIT measurement handed to it
- * for a VOLUME vault would no longer be refused as SkimModeMismatch: it would be
- * signed as a notional, verify, and be charged at the volume rate — a number the
- * owner never agreed to be charged on. Until keeper-medir-volumen measures
- * volume, a VOLUME vault ends here.
+ * BOTH MODES ARE MEASURED; ONLY AN UNDEFINED ONE STOPS HERE. A VOLUME vault used
+ * to end at this line, and its frontier never moved: a quiet VOLUME link grew
+ * toward the walk's read limit like any flat span. It is walked now, with every
+ * completeness stop a PROFIT span has, and baseDecision takes its base from the
+ * volumeBase seam, which attests a notional only where one is proven. The
+ * attestation takes the vault's own mode and rate (attestationInputs), so
+ * nothing on chain would refuse a PROFIT number signed for a VOLUME vault: it
+ * would verify and be charged at the volume rate. The seam is the only place a
+ * VOLUME base comes from.
  */
 export function modeDecision(vault: Pick<VaultState, "skimMode">): { readonly outcome: "UNSUPPORTED_MODE"; readonly detail: string } | null {
-  if (vault.skimMode === MODE_PROFIT) return null;
-  if (vault.skimMode === MODE_VOLUME) {
-    return {
-      outcome: "UNSUPPORTED_MODE",
-      detail:
-        "this vault saves a share of VOLUME (skim_mode 1); volume measurement arrives with keeper-medir-volumen, " +
-        "so nothing is measured or attested",
-    };
-  }
+  if (vault.skimMode === MODE_PROFIT || vault.skimMode === MODE_VOLUME) return null;
   return {
     outcome: "UNSUPPORTED_MODE",
     detail: `this vault reports skim_mode ${vault.skimMode}, which no sip-vault version defines; nothing is attested`,
@@ -165,13 +167,46 @@ export function noSignerDetail(wallet: PublicKey): string {
 export type MeasurementDecision =
   | {
       readonly kind: "stop";
-      readonly outcome: "IDLE" | "INCOMPLETE" | "NO_PROFIT" | "PENDING_FINALITY";
+      readonly outcome: "IDLE" | "INCOMPLETE" | "NO_PROFIT" | "PENDING_FINALITY" | "UNSUPPORTED_MODE";
       readonly detail: string;
       readonly baseLamports?: bigint;
     }
   | { readonly kind: "settle"; readonly baseLamports: bigint; readonly endSlot: bigint };
 
-/** Where a turn's walk started, and how far finality had come when it did. */
+/**
+ * The notional a complete VOLUME span is charged on, in lamports, or null when
+ * this keeper cannot measure it. Called only for a span every completeness stop
+ * has passed, and never for our own settles alone.
+ */
+export type VolumeBase = (measured: WindowMeasurement) => Promise<bigint | null>;
+
+/**
+ * The production VOLUME base until keeper-medir-volumen: zero for a span with no
+ * successful trade, and nothing otherwise.
+ *
+ * A NOTIONAL IS NEVER GUESSED. A span holding only transfers, our own settles and
+ * failed swaps has no notional under Wednesday's own rule — a volume is the
+ * successful trades a wallet signs — so its zero is proven, and settling it moves
+ * a quiet VOLUME link's frontier. One successful trade makes the number unknown,
+ * and an unknown number is never signed: that span rests at UNSUPPORTED_MODE,
+ * intact, for keeper-medir-volumen to measure. keeper.mts never passes another;
+ * the local proof injects the trade's notional.
+ */
+export const defaultVolumeBase: VolumeBase = async (measured) => (measured.successfulTradeCount === 0 ? 0n : null);
+
+/**
+ * How many transactions other than our own settles a span needs before a zero
+ * base is worth a transaction: 100.
+ *
+ * WHY A COUNT AND NOT A CLOCK. A time trigger measured from the frontier fires on
+ * the first trade after any idle stretch and forgets that trade's loss at once.
+ * A count lets losses net against the next win for as long as the span is small,
+ * and still settles a flat span well before the walk's read limit
+ * (MAX_SIGNATURES, 300) could refuse it. The owner can change it.
+ */
+export const ZERO_BASE_MIN_TXS = 100;
+
+/** Where a turn's walk started, how far finality had come when it did, and how the span is charged. */
 export interface MeasurementContext {
   /** measurementStart(link): the slot the walk had to reach. */
   readonly from: bigint;
@@ -182,10 +217,19 @@ export interface MeasurementContext {
    * merely early, and a truthful PENDING_FINALITY would be reported INCOMPLETE.
    */
   readonly finalizedSlot: bigint;
+  /**
+   * The vault's skim_mode, REQUIRED. A default would decide a VOLUME span as
+   * PROFIT, and the attestation would charge that profit at the volume rate.
+   */
+  readonly mode: number;
+  readonly volumeBase: VolumeBase;
 }
 
 /** What a measurement allows, in order — and the order is the point. */
-export function decideFromMeasurement(measured: WindowMeasurement, { from, finalizedSlot }: MeasurementContext): MeasurementDecision {
+export async function decideFromMeasurement(
+  measured: WindowMeasurement,
+  { from, finalizedSlot, mode, volumeBase }: MeasurementContext,
+): Promise<MeasurementDecision> {
   // UNFETCHABLE FIRST. This used to run after the empty check, so a span where
   // the RPC returned null for EVERY transaction — exactly what heavy throttling
   // looks like — reported "nothing since slot N" and went quiet. An empty walk
@@ -270,25 +314,148 @@ export function decideFromMeasurement(measured: WindowMeasurement, { from, final
         "a transaction was missed, so the measurement is incomplete and nothing will be attested",
     };
   }
-  if (measured.profitLamports <= 0n) {
-    return {
-      kind: "stop",
-      outcome: "NO_PROFIT",
-      detail:
-        `measured ${measured.profitLamports} lamports over ${measured.txCount} txs — a losing or flat span` +
-        // The frontier does not move without a settle, so this span is
-        // re-walked in full every sweep and keeps growing.
-        (measured.txCount > 200
-          ? ` — WARNING: this unsettled span is ${measured.txCount} transactions and the walk stops at ${MAX_SIGNATURES}; ` +
-            "past that the wallet reports INCOMPLETE and stops being measurable"
-          : ""),
-      baseLamports: measured.profitLamports,
-    };
+  return baseDecision({ mode, measured, from, volumeBase });
+}
+
+/**
+ * What a COMPLETE measurement is charged on, and whether it is worth a
+ * transaction. decideFromMeasurement calls it once every completeness stop has
+ * passed; nothing else should.
+ *
+ * THE BASE: a PROFIT span's measured profit, and a VOLUME span's notional from
+ * the volumeBase seam — null there is UNSUPPORTED_MODE, and nothing is attested.
+ * A positive base settles over the measured window. A zero or negative one
+ * settles a ZERO base once the span holds ZERO_BASE_MIN_TXS transactions other
+ * than our own settles, and rests at NO_PROFIT before that.
+ */
+export async function baseDecision({
+  mode,
+  measured,
+  from,
+  volumeBase,
+}: {
+  readonly mode: number;
+  readonly measured: WindowMeasurement;
+  readonly from: bigint;
+  readonly volumeBase: VolumeBase;
+}): Promise<MeasurementDecision> {
+  // THE LOOP GUARD, AND IT COMES FIRST. A settle is external flow
+  // (measure-window.ts), so a window holding only the previous settle measures a
+  // profit of exactly zero. Without this stop, every zero settle would be
+  // followed by another one the next sweep, each paid by the trading wallet,
+  // forever. First, before any base: a window with nothing but our own settles
+  // holds nothing to charge, so no base — not even one a seam returns — settles it.
+  const others = measured.txCount - measured.settleTxCount;
+  if (others === 0) {
+    return { kind: "stop", outcome: "IDLE", detail: `only our own settle since slot ${from}; nothing to charge` };
   }
+  // settle_v2 refuses a window whose end is not above its start
+  // (InvalidSessionWindow). A walk that read transactions above the frontier
+  // always ends above it; kept so a caller bug is a resting state, not a refusal.
   if (measured.lastSlot <= from) {
     return { kind: "stop", outcome: "IDLE", detail: "no slot beyond the frontier yet" };
   }
-  return { kind: "settle", baseLamports: measured.profitLamports, endSlot: measured.lastSlot };
+
+  let base: bigint;
+  if (mode === MODE_PROFIT) {
+    base = measured.profitLamports;
+  } else if (mode === MODE_VOLUME) {
+    const notional = await volumeBase(measured);
+    if (notional === null) {
+      return {
+        kind: "stop",
+        outcome: "UNSUPPORTED_MODE",
+        detail: `${measured.successfulTradeCount} successful trade(s) await keeper-medir-volumen; nothing attested`,
+      };
+    }
+    // A u64 on chain. A negative notional is a broken seam, and resting would
+    // dress it up as a quiet span.
+    if (notional < 0n) throw new Error(`the VOLUME base seam returned ${notional} lamports; a notional is never negative`);
+    base = notional;
+  } else {
+    // modeDecision stops these before anything is measured.
+    return { kind: "stop", outcome: "UNSUPPORTED_MODE", detail: `skim_mode ${mode} is not a mode this keeper measures; nothing attested` };
+  }
+
+  if (base > 0n) return { kind: "settle", baseLamports: base, endSlot: measured.lastSlot };
+  // A ZERO SETTLE ONCE THE SPAN IS WORTH ONE. It moves nothing and advances the
+  // frontier past everything measured, so the span can never grow into the walk's
+  // read limit. (keeper-cobro-v2's backlog prefix joins this condition when it
+  // lands: a prefix is settled whatever its size.)
+  if (others >= ZERO_BASE_MIN_TXS) return { kind: "settle", baseLamports: 0n, endSlot: measured.lastSlot };
+  const what =
+    mode === MODE_VOLUME
+      ? `no successful trade over ${measured.txCount} txs, so the notional is zero`
+      : `measured ${base} lamports over ${measured.txCount} txs — a losing or flat span`;
+  return {
+    kind: "stop",
+    outcome: "NO_PROFIT",
+    detail:
+      `${what}; a zero settle advances the frontier at ${ZERO_BASE_MIN_TXS} transactions other than our own settles, ` +
+      `${ZERO_BASE_MIN_TXS - others} to go`,
+    baseLamports: base,
+  };
+}
+
+/** What one settle outcome raises and resolves, as keeper.mts applies it. */
+export interface SettleAlertRule {
+  /** The alert this outcome raises, or null. */
+  readonly fire: Alert | null;
+  /** The keys this outcome resolves, so their next occurrence alerts again. */
+  readonly clear: readonly string[];
+}
+
+/**
+ * The outcome-to-alert rule for one wallet's settle turn, pure so a test can pin
+ * it for every outcome.
+ *
+ * MONEY THAT SHOULD HAVE MOVED AND DID NOT IS CRITICAL: FAILED. The resting states
+ * each explain themselves and fire nothing — IDLE, PENDING_FINALITY, NO_PROFIT and
+ * UNSUPPORTED_MODE — except the two a human must act on: INCOMPLETE, the one
+ * resting state that never resolves itself (the frontier cannot advance while it
+ * holds), and NO_SIGNER, which repeats until the user re-runs onboarding. Both
+ * warn, and each outcome other than itself clears it.
+ *
+ * A PAUSE IS DELIBERATE, NOT MONEY LOST. It also explains the settles that were
+ * refused with VaultPaused or ProtocolPaused while it was being switched on, so it
+ * clears their critical alert instead of leaving it standing. A SETTLED clears it
+ * too; nothing else does.
+ */
+export function settleAlert(
+  outcome: SettleOutcome,
+  where: { readonly wallet: string; readonly vault: string },
+  detail: string,
+): SettleAlertRule {
+  const { wallet, vault } = where;
+  const failed = `settle-failed:${wallet}`;
+  const incomplete = `incomplete:${wallet}`;
+  const noSigner = `no-signer:${wallet}`;
+  switch (outcome) {
+    case "FAILED":
+      return {
+        fire: { key: failed, severity: "critical", title: "A settlement failed", detail, context: { wallet, vault } },
+        clear: [],
+      };
+    case "SETTLED":
+      return { fire: null, clear: [failed] };
+    case "PAUSED":
+      return { fire: null, clear: [failed, incomplete, noSigner] };
+    case "INCOMPLETE":
+      return {
+        fire: { key: incomplete, severity: "warn", title: "A wallet cannot be measured, so it is not saving", detail, context: { wallet } },
+        clear: [noSigner],
+      };
+    case "NO_SIGNER":
+      return {
+        fire: { key: noSigner, severity: "warn", title: "A linked wallet never granted the keeper's signer", detail, context: { wallet } },
+        clear: [incomplete],
+      };
+    case "IDLE":
+    case "PENDING_FINALITY":
+    case "NO_PROFIT":
+    case "UNSUPPORTED_MODE":
+      return { fire: null, clear: [incomplete, noSigner] };
+  }
 }
 
 /**

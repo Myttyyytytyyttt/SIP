@@ -1,15 +1,18 @@
 // The settle tick's decisions, reached without a Connection, a Program or a mock.
 //
-// Two things are new in SIP and both are pinned here: a VOLUME vault stops at
-// UNSUPPORTED_MODE before anything is measured or attested, and the attestation
-// binds exactly the fields settle_v2 rebuilds from chain state — the vault's own
-// mode, the rate of that mode as state.rs's active_bps reads it, its policy
-// nonce, a start that is the link's measurementStart and nothing else, and a
-// deadline 150 slots past the confirmed slot. The measurement order is the old
-// tick's behind two new stops — a walk that did not reach the frontier, and a
-// window finality has not caught up with — and the frontier-from-epoch rule is
-// unchanged. The bytes those inputs encode to are pinned to the program's golden
-// vector in attestation-golden.test.ts.
+// What is pinned here: both modes are measured and only a mode no program version
+// defines stops before anything is read; the attestation binds exactly the fields
+// settle_v2 rebuilds from chain state — the vault's own mode, the rate of that
+// mode as state.rs's active_bps reads it, its policy nonce, a start that is the
+// link's measurementStart and nothing else, and a deadline 150 slots past the
+// confirmed slot. The measurement order is the old tick's behind two new stops —
+// a walk that did not reach the frontier, and a window finality has not caught up
+// with — and it ends in the base: a positive base settles, a flat span settles a
+// zero base once it is worth a transaction, a window holding only our own settle
+// never settles again, and a VOLUME span is charged only on a notional that is
+// proven. The frontier-from-epoch rule is unchanged, and the outcome-to-alert rule
+// is pinned for every outcome. The bytes those inputs encode to are pinned to the
+// program's golden vector in attestation-golden.test.ts.
 
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
@@ -20,13 +23,19 @@ import type { WindowMeasurement } from "../src/measure-window.js";
 import { ATTESTATION_MESSAGE_LEN, MODE_PROFIT, MODE_VOLUME, attestationMessage } from "../src/program-scripts.js";
 import {
   ATTESTATION_VALIDITY_SLOTS,
+  ZERO_BASE_MIN_TXS,
   activeBps,
   attestationInputs,
+  baseDecision,
   decideFromMeasurement,
+  defaultVolumeBase,
   expectedContribution,
   measurementStart,
   modeDecision,
   pauseDecision,
+  settleAlert,
+  type SettleOutcome,
+  type VolumeBase,
 } from "../src/settle-decision.js";
 
 const link: ManagedLink = {
@@ -70,18 +79,15 @@ const measured = (over: Partial<WindowMeasurement> = {}): WindowMeasurement => (
 });
 
 describe("the vault's mode", () => {
-  it("stops a VOLUME vault at UNSUPPORTED_MODE, pointing at keeper-medir-volumen", () => {
-    const decision = modeDecision(vault({ skimMode: 1 }));
-    expect(decision?.outcome).toBe("UNSUPPORTED_MODE");
-    expect(decision?.detail).toContain("keeper-medir-volumen");
-  });
-
-  it("stops a mode no program version defines", () => {
-    expect(modeDecision(vault({ skimMode: 9 }))?.outcome).toBe("UNSUPPORTED_MODE");
-  });
-
-  it("lets a PROFIT vault through", () => {
+  it("lets both real modes through to be measured", () => {
     expect(modeDecision(vault())).toBeNull();
+    expect(modeDecision(vault({ skimMode: MODE_VOLUME }))).toBeNull();
+  });
+
+  it("stops a mode no program version defines, before anything is measured", () => {
+    const decision = modeDecision(vault({ skimMode: 9 }));
+    expect(decision?.outcome).toBe("UNSUPPORTED_MODE");
+    expect(decision?.detail).toContain("skim_mode 9");
   });
 });
 
@@ -124,46 +130,48 @@ describe("where a measurement starts", () => {
 
 describe("what a measurement allows, in order", () => {
   const from = 300_000_500n;
+  /** A PROFIT span's context at a finalized slot, as settle-tick.ts builds it. */
+  const context = (finalizedSlot: bigint) => ({ from, finalizedSlot, mode: MODE_PROFIT, volumeBase: defaultVolumeBase });
   // Finality well past the start: the ordinary case.
-  const at = { from, finalizedSlot: 300_001_000n };
+  const at = context(300_001_000n);
 
-  it("an unreadable span is INCOMPLETE even when it looks empty", () => {
-    const decision = decideFromMeasurement(measured({ unfetchable: 3, txCount: 0 }), at);
+  it("an unreadable span is INCOMPLETE even when it looks empty", async () => {
+    const decision = await decideFromMeasurement(measured({ unfetchable: 3, txCount: 0 }), at);
     expect(decision).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
     if (decision.kind === "stop") expect(decision.detail).toContain("OUR node");
   });
 
-  it("a walk whose finalized history ends above a start not finalized yet rests at PENDING_FINALITY", () => {
-    const decision = decideFromMeasurement(measured({ frontierReached: false, txCount: 0 }), { from, finalizedSlot: from - 1n });
+  it("a walk whose finalized history ends above a start not finalized yet rests at PENDING_FINALITY", async () => {
+    const decision = await decideFromMeasurement(measured({ frontierReached: false, txCount: 0 }), context(from - 1n));
     expect(decision).toMatchObject({ kind: "stop", outcome: "PENDING_FINALITY" });
     if (decision.kind === "stop") expect(decision.detail).toContain(`slot ${from}`);
   });
 
-  it("a walk whose finalized history ends above a finalized start is INCOMPLETE, naming the slot", () => {
+  it("a walk whose finalized history ends above a finalized start is INCOMPLETE, naming the slot", async () => {
     // At the boundary too: a start AT the finalized slot is finalized.
     for (const finalizedSlot of [from, from + 1_000n]) {
-      const decision = decideFromMeasurement(measured({ frontierReached: false, txCount: 0 }), { from, finalizedSlot });
+      const decision = await decideFromMeasurement(measured({ frontierReached: false, txCount: 0 }), context(finalizedSlot));
       expect(decision).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
       if (decision.kind === "stop") expect(decision.detail).toContain(`stops above slot ${from}`);
     }
   });
 
-  it("a walk that ran out of pages is INCOMPLETE, even over a start finality has not reached", () => {
-    const decision = decideFromMeasurement(
+  it("a walk that ran out of pages is INCOMPLETE, even over a start finality has not reached", async () => {
+    const decision = await decideFromMeasurement(
       measured({ frontierReached: false, pagesExhausted: true, signaturesAbove: 20_000, txCount: 0 }),
-      { from, finalizedSlot: from - 1n },
+      context(from - 1n),
     );
     expect(decision).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
     if (decision.kind === "stop") expect(decision.detail).toContain("walked 20000 signatures over 20 pages");
   });
 
-  it("a walk that reached the frontier with nothing finalized above it rests at PENDING_FINALITY, never IDLE", () => {
+  it("a walk that reached the frontier with nothing finalized above it rests at PENDING_FINALITY, never IDLE", async () => {
     // The turn walks only after a confirmed probe saw a newer signature, so
     // this is finality catching up. An idle wallet never gets this far.
-    expect(decideFromMeasurement(measured({ txCount: 0, signaturesAbove: 0 }), at)).toMatchObject({ kind: "stop", outcome: "PENDING_FINALITY" });
+    expect(await decideFromMeasurement(measured({ txCount: 0, signaturesAbove: 0 }), at)).toMatchObject({ kind: "stop", outcome: "PENDING_FINALITY" });
   });
 
-  it("words each finality stop the same while finality advances, so the sweep logs it once", () => {
+  it("words each finality stop the same while finality advances, so the sweep logs it once", async () => {
     // The sweep's change log emits a resting state only when its line changes,
     // and the finalized slot moves every sweep.
     const shapes = [
@@ -172,36 +180,165 @@ describe("what a measurement allows, in order", () => {
       [measured({ txCount: 0, signaturesAbove: 0 }), [300_001_000n, 300_001_032n]],
     ] as const;
     for (const [shape, [earlier, later]] of shapes) {
-      expect(decideFromMeasurement(shape, { from, finalizedSlot: earlier })).toEqual(decideFromMeasurement(shape, { from, finalizedSlot: later }));
+      expect(await decideFromMeasurement(shape, context(earlier))).toEqual(await decideFromMeasurement(shape, context(later)));
     }
   });
 
-  it("more signatures above the frontier than one settlement reads is INCOMPLETE and promises no catch-up; the limit itself is measured", () => {
-    const over = decideFromMeasurement(measured({ signaturesAbove: 301, txCount: 0 }), at);
+  it("more signatures above the frontier than one settlement reads is INCOMPLETE and promises no catch-up; the limit itself is measured", async () => {
+    const over = await decideFromMeasurement(measured({ signaturesAbove: 301, txCount: 0 }), at);
     expect(over).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
     if (over.kind === "stop") {
       expect(over.detail).toContain("301 signatures");
       expect(over.detail).not.toContain("catch up");
     }
-    expect(decideFromMeasurement(measured({ signaturesAbove: 300, txCount: 300 }), at)).toMatchObject({ kind: "settle" });
+    expect(await decideFromMeasurement(measured({ signaturesAbove: 300, txCount: 300 }), at)).toMatchObject({ kind: "settle" });
   });
 
-  it("a broken chain is INCOMPLETE", () => {
-    expect(decideFromMeasurement(measured({ chainBreaks: 1 }), at)).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+  it("a broken chain is INCOMPLETE", async () => {
+    expect(await decideFromMeasurement(measured({ chainBreaks: 1 }), at)).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
   });
 
-  it("a flat or losing span is NO_PROFIT and carries its base, and does not settle", () => {
-    const decision = decideFromMeasurement(measured({ profitLamports: -5n }), at);
-    expect(decision).toMatchObject({ kind: "stop", outcome: "NO_PROFIT", baseLamports: -5n });
-    expect(decideFromMeasurement(measured({ profitLamports: 0n }), at)).toMatchObject({ outcome: "NO_PROFIT" });
+  it("reaches the base only past every completeness stop: an incomplete VOLUME span never asks the seam", async () => {
+    let asked = 0;
+    const volumeBase: VolumeBase = async () => {
+      asked += 1;
+      return 1n;
+    };
+    const volumeAt = { ...at, mode: MODE_VOLUME, volumeBase };
+    expect(await decideFromMeasurement(measured({ unfetchable: 1 }), volumeAt)).toMatchObject({ outcome: "INCOMPLETE" });
+    expect(await decideFromMeasurement(measured({ chainBreaks: 1 }), volumeAt)).toMatchObject({ outcome: "INCOMPLETE" });
+    expect(await decideFromMeasurement(measured({ frontierReached: false, txCount: 0 }), volumeAt)).toMatchObject({ outcome: "INCOMPLETE" });
+    expect(asked).toBe(0);
+    expect(await decideFromMeasurement(measured(), volumeAt)).toEqual({ kind: "settle", baseLamports: 1n, endSlot: 300_000_900n });
+    expect(asked).toBe(1);
   });
 
-  it("profit with no slot beyond the frontier is IDLE", () => {
-    expect(decideFromMeasurement(measured({ lastSlot: from }), at)).toMatchObject({ kind: "stop", outcome: "IDLE" });
+  it("profit with no slot beyond the frontier is IDLE", async () => {
+    expect(await decideFromMeasurement(measured({ lastSlot: from }), at)).toMatchObject({ kind: "stop", outcome: "IDLE" });
   });
 
-  it("clean profit settles over the measured window", () => {
-    expect(decideFromMeasurement(measured(), at)).toEqual({ kind: "settle", baseLamports: 50_000_000n, endSlot: 300_000_900n });
+  it("clean profit settles over the measured window", async () => {
+    expect(await decideFromMeasurement(measured(), at)).toEqual({ kind: "settle", baseLamports: 50_000_000n, endSlot: 300_000_900n });
+  });
+});
+
+describe("the base, and when a zero base is worth a transaction", () => {
+  const from = 300_000_500n;
+  const profit = (span: WindowMeasurement) => baseDecision({ mode: MODE_PROFIT, measured: span, from, volumeBase: defaultVolumeBase });
+  const volume = (span: WindowMeasurement, volumeBase: VolumeBase = defaultVolumeBase) =>
+    baseDecision({ mode: MODE_VOLUME, measured: span, from, volumeBase });
+
+  it("a losing span with enough transactions in it settles a zero base over the measured window", async () => {
+    expect(await profit(measured({ profitLamports: -5n, txCount: 150, settleTxCount: 1 }))).toEqual({
+      kind: "settle",
+      baseLamports: 0n,
+      endSlot: 300_000_900n,
+    });
+  });
+
+  it("THE LOOP GUARD: a window holding only our own previous settle is IDLE, however many, and whatever a seam says", async () => {
+    // A settle is external flow, so this window measures a profit of exactly zero.
+    const onlyOurSettle = measured({ txCount: 1, settleTxCount: 1, successfulTradeCount: 0, cashDelta: -10_000n, withdrawals: 10_000n, profitLamports: 0n });
+    const decision = await profit(onlyOurSettle);
+    expect(decision).toMatchObject({ kind: "stop", outcome: "IDLE" });
+    if (decision.kind === "stop") expect(decision.detail).toContain("only our own settle");
+    const many = ZERO_BASE_MIN_TXS + 5;
+    expect(await profit(measured({ txCount: many, settleTxCount: many, successfulTradeCount: 0, profitLamports: 0n }))).toMatchObject({ outcome: "IDLE" });
+
+    let asked = 0;
+    const seam: VolumeBase = async () => {
+      asked += 1;
+      return 1_000_000_000n;
+    };
+    expect(await volume(onlyOurSettle, seam)).toMatchObject({ kind: "stop", outcome: "IDLE" });
+    expect(asked, "the seam is never asked about our own settles").toBe(0);
+  });
+
+  it("a small flat or losing span rests at NO_PROFIT, carries its base, and says how far it is from a zero settle", async () => {
+    const flat = await profit(measured({ txCount: 3, successfulTradeCount: 3, profitLamports: 0n }));
+    expect(flat).toMatchObject({ kind: "stop", outcome: "NO_PROFIT", baseLamports: 0n });
+    if (flat.kind === "stop") {
+      expect(flat.detail).toContain("a losing or flat span");
+      expect(flat.detail).toContain(`${ZERO_BASE_MIN_TXS - 3} to go`);
+      // The old warning promised a wedge the zero settle now prevents.
+      expect(flat.detail).not.toContain("WARNING");
+    }
+    expect(await profit(measured({ profitLamports: -5n }))).toMatchObject({ kind: "stop", outcome: "NO_PROFIT", baseLamports: -5n });
+  });
+
+  it("counts only transactions other than our own settles toward a zero settle, at the boundary", async () => {
+    expect(ZERO_BASE_MIN_TXS).toBe(100);
+    const below = await profit(measured({ txCount: ZERO_BASE_MIN_TXS, settleTxCount: 1, profitLamports: 0n }));
+    expect(below).toMatchObject({ kind: "stop", outcome: "NO_PROFIT" });
+    if (below.kind === "stop") expect(below.detail).toContain("1 to go");
+    expect(await profit(measured({ txCount: ZERO_BASE_MIN_TXS + 1, settleTxCount: 1, profitLamports: 0n }))).toEqual({
+      kind: "settle",
+      baseLamports: 0n,
+      endSlot: 300_000_900n,
+    });
+  });
+
+  it("positive profit settles whatever the span's size, and never asks the VOLUME seam", async () => {
+    let asked = 0;
+    const seam: VolumeBase = async () => {
+      asked += 1;
+      return 5n;
+    };
+    const one = measured({ txCount: 1, successfulTradeCount: 1, profitLamports: 1n });
+    expect(await baseDecision({ mode: MODE_PROFIT, measured: one, from, volumeBase: seam })).toEqual({ kind: "settle", baseLamports: 1n, endSlot: 300_000_900n });
+    expect(asked).toBe(0);
+  });
+
+  it("a VOLUME span with no successful trade settles a zero base, attested in mode 1 at the volume rate", async () => {
+    const quiet = measured({ txCount: 120, settleTxCount: 0, successfulTradeCount: 0, profitLamports: -600_000n });
+    const decision = await volume(quiet);
+    expect(decision).toEqual({ kind: "settle", baseLamports: 0n, endSlot: 300_000_900n });
+    if (decision.kind !== "settle") return;
+    const inputs = attestationInputs({
+      programId: new PublicKey(SIP_PROGRAM_ID),
+      link,
+      vault: vault({ skimMode: MODE_VOLUME, skimBps: 2_000, volumeBps: 200 }),
+      from,
+      endSlot: decision.endSlot,
+      baseLamports: decision.baseLamports,
+      currentSlot: 300_001_000n,
+    });
+    expect(inputs).toMatchObject({ mode: MODE_VOLUME, bps: 200, baseLamports: 0n, sessionEndSlot: 300_000_900n });
+    expect(inputs.bps, "the volume rate, never skim_bps").not.toBe(2_000);
+  });
+
+  it("a small VOLUME span with no successful trade rests at NO_PROFIT and says so", async () => {
+    const decision = await volume(measured({ txCount: 4, successfulTradeCount: 0, profitLamports: 0n }));
+    expect(decision).toMatchObject({ kind: "stop", outcome: "NO_PROFIT", baseLamports: 0n });
+    if (decision.kind === "stop") {
+      expect(decision.detail).toContain("no successful trade over 4 txs");
+      expect(decision.detail).toContain(`${ZERO_BASE_MIN_TXS - 4} to go`);
+    }
+  });
+
+  it("a VOLUME span with a successful trade rests at UNSUPPORTED_MODE under the default seam, and attests nothing", async () => {
+    // Large enough for a zero settle, which must not happen: its notional is unknown, not zero.
+    const decision = await volume(measured({ txCount: 150, successfulTradeCount: 1, profitLamports: 0n }));
+    expect(decision).toEqual({ kind: "stop", outcome: "UNSUPPORTED_MODE", detail: "1 successful trade(s) await keeper-medir-volumen; nothing attested" });
+  });
+
+  it("a VOLUME span settles at the notional an injected seam measures, the seam sees the measurement, and a negative one throws", async () => {
+    const span = measured({ successfulTradeCount: 1 });
+    let seen: WindowMeasurement | undefined;
+    const seam: VolumeBase = async (measurement) => {
+      seen = measurement;
+      return 1_000_000_000n;
+    };
+    expect(await volume(span, seam)).toEqual({ kind: "settle", baseLamports: 1_000_000_000n, endSlot: 300_000_900n });
+    expect(seen).toBe(span);
+    await expect(volume(span, async () => -1n)).rejects.toThrow(/never negative/);
+  });
+
+  it("an undefined mode that reached the base is UNSUPPORTED_MODE, never charged at the profit rate", async () => {
+    expect(await baseDecision({ mode: 9, measured: measured(), from, volumeBase: defaultVolumeBase })).toMatchObject({
+      kind: "stop",
+      outcome: "UNSUPPORTED_MODE",
+    });
   });
 });
 
@@ -255,6 +392,16 @@ describe("the attestation", () => {
     }
   });
 
+  it("carries a zero base as eight zero bytes at 144..151, and nothing else about the message changes", () => {
+    // base is the fifth u64: 16 + 96 + 32.
+    const zero = attestationMessage(attestationInputs({ programId, link, vault: vault(), ...span, baseLamports: 0n }));
+    const some = attestationMessage(attestationInputs({ programId, link, vault: vault(), ...span }));
+    expect([...zero.subarray(144, 152)]).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+    expect(some.readBigUInt64LE(144)).toBe(50_000_000n);
+    const outsideBase = (message: Buffer) => Buffer.concat([message.subarray(0, 144), message.subarray(152)]);
+    expect(outsideBase(zero).equals(outsideBase(some))).toBe(true);
+  });
+
   it("a start other than measurementStart throws, above it or below it", () => {
     // Above forgives the slots in between; below is a window settle_v2 would
     // refuse for a settled link.
@@ -272,5 +419,40 @@ describe("the attestation", () => {
     expect(expectedContribution(50_000_000n, 2_000, 1_000_000_000n)).toEqual({ owed: 10_000_000n, paid: 10_000_000n });
     expect(expectedContribution(9_999n, 2_000, 1_000_000_000n)).toEqual({ owed: 1_999n, paid: 1_999n });
     expect(expectedContribution(50_000_000n, 2_000, 4_000_000n)).toEqual({ owed: 10_000_000n, paid: 4_000_000n });
+  });
+});
+
+describe("the alert rule", () => {
+  const where = { wallet: "Wallet1111", vault: "Vault1111" };
+  const failed = "settle-failed:Wallet1111";
+  const incomplete = "incomplete:Wallet1111";
+  const noSigner = "no-signer:Wallet1111";
+  type Want = { readonly fire: { readonly key: string; readonly severity: "warn" | "critical" } | null; readonly clear: readonly string[] };
+  // A Record over SettleOutcome, so an outcome added without a row here fails to compile.
+  const table: Record<SettleOutcome, Want> = {
+    IDLE: { fire: null, clear: [incomplete, noSigner] },
+    PENDING_FINALITY: { fire: null, clear: [incomplete, noSigner] },
+    NO_PROFIT: { fire: null, clear: [incomplete, noSigner] },
+    UNSUPPORTED_MODE: { fire: null, clear: [incomplete, noSigner] },
+    SETTLED: { fire: null, clear: [failed] },
+    PAUSED: { fire: null, clear: [failed, incomplete, noSigner] },
+    INCOMPLETE: { fire: { key: incomplete, severity: "warn" }, clear: [noSigner] },
+    NO_SIGNER: { fire: { key: noSigner, severity: "warn" }, clear: [incomplete] },
+    FAILED: { fire: { key: failed, severity: "critical" }, clear: [] },
+  };
+
+  it("raises and resolves exactly this for every outcome, carrying the turn's detail", () => {
+    for (const [outcome, want] of Object.entries(table) as [SettleOutcome, Want][]) {
+      const rule = settleAlert(outcome, where, "the turn's detail");
+      const got = { fire: rule.fire === null ? null : { key: rule.fire.key, severity: rule.fire.severity }, clear: [...rule.clear].sort() };
+      expect(got, outcome).toEqual({ fire: want.fire, clear: [...want.clear].sort() });
+      if (rule.fire !== null) expect(rule.fire.detail, outcome).toBe("the turn's detail");
+    }
+  });
+
+  it("names the wallet and the vault on a failed settle, and the wallet on a warning", () => {
+    expect(settleAlert("FAILED", where, "d").fire).toMatchObject({ title: "A settlement failed", context: { wallet: "Wallet1111", vault: "Vault1111" } });
+    expect(settleAlert("INCOMPLETE", where, "d").fire?.context).toEqual({ wallet: "Wallet1111" });
+    expect(settleAlert("NO_SIGNER", where, "d").fire?.context).toEqual({ wallet: "Wallet1111" });
   });
 });

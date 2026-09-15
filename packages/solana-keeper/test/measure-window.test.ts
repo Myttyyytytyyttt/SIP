@@ -13,7 +13,8 @@ import { describe, expect, it } from "vitest";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 import { MAX_SIGNATURES, MAX_SIGNATURE_PAGES, SIGNATURE_PAGE_LIMIT, isExternalFlowTx, measureSince } from "../src/measure-window.js";
 import { tightenMinOut } from "../src/min-out.js";
-import { decideFromMeasurement } from "../src/settle-decision.js";
+import { MODE_PROFIT } from "../src/program-scripts.js";
+import { decideFromMeasurement, defaultVolumeBase } from "../src/settle-decision.js";
 import { FakeLedger, chained, type LedgerEntry } from "./fake-ledger.js";
 
 const SIP = SIP_PROGRAM_ID;
@@ -82,7 +83,9 @@ const settleProgram = new PublicKey(SIP);
 const FLOW = [SYSTEM];
 const TRADE = [JUPITER, SYSTEM];
 const SETTLE = [ED25519, SIP, SYSTEM];
-const at500 = { from: 500n, finalizedSlot: 10_000n };
+/** A PROFIT span's context, as settle-tick.ts builds it. */
+const ctx = (from: bigint, finalizedSlot: bigint) => ({ from, finalizedSlot, mode: MODE_PROFIT, volumeBase: defaultVolumeBase });
+const at500 = ctx(500n, 10_000n);
 const finalized = (signature: string) => ({ signature, commitment: "finalized" });
 
 /** `count` transactions, one per slot from `firstSlot`, each moving the wallet by `delta`, chained from `balance`. */
@@ -118,7 +121,7 @@ describe("the walk, over a finalized ledger", () => {
     });
     expect(ledger.signatureCalls).toEqual([{ limit: SIGNATURE_PAGE_LIMIT, commitment: "finalized" }]);
     expect(ledger.transactionCalls).toEqual([finalized("anchor-500"), finalized("trade-505"), finalized("trade-510")]);
-    expect(decideFromMeasurement(measured, at500)).toEqual({ kind: "settle", baseLamports: 250_000n, endSlot: 510n });
+    expect(await decideFromMeasurement(measured, at500)).toEqual({ kind: "settle", baseLamports: 250_000n, endSlot: 510n });
   });
 
   it("does not reach a frontier its history ends above, on a short page or an empty one, and reads no transaction", async () => {
@@ -127,8 +130,8 @@ describe("the walk, over a finalized ledger", () => {
     expect(shortWalk).toMatchObject({ frontierReached: false, pagesExhausted: false, signaturesAbove: 2, txCount: 0 });
     expect(short.signatureCalls).toHaveLength(1);
     expect(short.transactionCalls).toEqual([]);
-    expect(decideFromMeasurement(shortWalk, at500)).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
-    expect(decideFromMeasurement(shortWalk, { from: 500n, finalizedSlot: 499n })).toMatchObject({ kind: "stop", outcome: "PENDING_FINALITY" });
+    expect(await decideFromMeasurement(shortWalk, at500)).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+    expect(await decideFromMeasurement(shortWalk, ctx(500n, 499n))).toMatchObject({ kind: "stop", outcome: "PENDING_FINALITY" });
 
     // One full page above the frontier and nothing at or below it: the second
     // page comes back empty, which the old walk took for arriving.
@@ -154,7 +157,7 @@ describe("the walk, over a finalized ledger", () => {
     expect(ledger.signatureCalls.map((call) => call.before)).toEqual([undefined, "sig-101"]);
     // Above the read limit, refused before a single transaction is fetched.
     expect(ledger.transactionCalls).toEqual([]);
-    expect(decideFromMeasurement(measured, { from: 100n, finalizedSlot: 10_000n })).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+    expect(await decideFromMeasurement(measured, ctx(100n, 10_000n))).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
   });
 
   it("reads exactly MAX_SIGNATURES above the frontier, where the old walk called itself truncated, and refuses one more unread", async () => {
@@ -163,13 +166,13 @@ describe("the walk, over a finalized ledger", () => {
     const measured = await measureSince(atLimit, wallet, 500n, settleProgram);
     expect(measured).toMatchObject({ frontierReached: true, signaturesAbove: MAX_SIGNATURES, txCount: MAX_SIGNATURES, chainBreaks: 0 });
     expect(atLimit.transactionCalls).toHaveLength(MAX_SIGNATURES + 1);
-    expect(decideFromMeasurement(measured, at500)).toEqual({ kind: "settle", baseLamports: BigInt(MAX_SIGNATURES), endSlot: 800n });
+    expect(await decideFromMeasurement(measured, at500)).toEqual({ kind: "settle", baseLamports: BigInt(MAX_SIGNATURES), endSlot: 800n });
 
     const overLimit = new FakeLedger(wallet, [anchor, ...perSlot(501, MAX_SIGNATURES + 1, { programs: TRADE, delta: 1 })]);
     const over = await measureSince(overLimit, wallet, 500n, settleProgram);
     expect(over).toMatchObject({ frontierReached: true, signaturesAbove: MAX_SIGNATURES + 1, txCount: 0 });
     expect(overLimit.transactionCalls).toEqual([]);
-    const decision = decideFromMeasurement(over, at500);
+    const decision = await decideFromMeasurement(over, at500);
     expect(decision).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
     if (decision.kind === "stop") expect(decision.detail).not.toContain("catch up");
   });
@@ -184,7 +187,7 @@ describe("the walk, over a finalized ledger", () => {
     expect(ledger.signatureCalls).toHaveLength(MAX_SIGNATURE_PAGES);
     expect(ledger.transactionCalls).toEqual([]);
     // INCOMPLETE even over a start finality has not reached: pages decide first.
-    expect(decideFromMeasurement(measured, { from: 100n, finalizedSlot: 50n })).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+    expect(await decideFromMeasurement(measured, ctx(100n, 50n))).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
   });
 
   it("excludes every signature in the frontier's own slot and anchors on the newest of them", async () => {
@@ -207,7 +210,7 @@ describe("the walk, over a finalized ledger", () => {
     ]);
     const measured = await measureSince(ledger, wallet, 500n, settleProgram);
     expect(measured).toMatchObject({ frontierReached: true, txCount: 1, chainBreaks: 1, unfetchable: 0 });
-    expect(decideFromMeasurement(measured, at500)).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+    expect(await decideFromMeasurement(measured, at500)).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
   });
 
   it("counts an anchor the RPC will not return as unfetchable, and refuses the window above it", async () => {
@@ -218,7 +221,7 @@ describe("the walk, over a finalized ledger", () => {
     const ledger = new FakeLedger(wallet, entries, new Set(["anchor-500"]));
     const measured = await measureSince(ledger, wallet, 500n, settleProgram);
     expect(measured).toMatchObject({ frontierReached: true, unfetchable: 1, chainBreaks: 0, txCount: 1 });
-    const decision = decideFromMeasurement(measured, at500);
+    const decision = await decideFromMeasurement(measured, at500);
     expect(decision).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
     if (decision.kind === "stop") expect(decision.detail).toContain("OUR node");
   });
