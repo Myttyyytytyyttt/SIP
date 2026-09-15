@@ -2,20 +2,24 @@
 
 import { describe, expect, it } from "vitest";
 
-import { TOKEN_2022_PROGRAM, TOKEN_PROGRAM } from "../src/client/addresses";
+import { RAYDIUM_CLMM, SOL_USDC_POOL, SPYX_MINT, SPYX_USDC_POOL, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../src/client/addresses";
+import { SOL_SQRT_PRICE, SPYX_SQRT_PRICE, clmmPoolAccount } from "./chain-fixtures";
 import { base58Encode } from "../src/client/base58";
 import { base64Encode } from "../src/client/base64";
 import { encodeStruct } from "../src/client/borsh";
 import { SIP_ACCOUNT_SPACE } from "../src/client/decoders";
 import { SIP_PROGRAM_ID, accountDiscriminator, eventDiscriminator, instructionDiscriminator } from "../src/client/idl";
-import { deriveConfigPda, deriveInvestPda, deriveVaultPda } from "../src/server/pda";
+import { deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
 import {
+  MAX_WALLET_LINKS,
   listVaultActivity,
   listVaultHoldings,
   listVaultLinks,
   readOwnerAccounts,
+  readPoolPrices,
   readProtocolConfig,
   readVault,
+  readWalletLinks,
   settledEventsFromLogs,
 } from "../src/server/readers";
 import { createRpcPool } from "../src/server/rpc-pool";
@@ -263,5 +267,74 @@ describe("listVaultActivity", () => {
     const { pool: p } = pool((call) => rpcResult(call, []));
     await expect(listVaultActivity(p, key(), { limit: 26 })).rejects.toThrow(RangeError);
     expect(await listVaultActivity(p, key())).toEqual({ kind: "exists", value: { entries: [], nextBefore: null } });
+  });
+});
+
+describe("readPoolPrices", () => {
+  const solPool = (owner = RAYDIUM_CLMM, mints: [string, string] = [WSOL_MINT, USDC_MINT]) => accountInfo(owner, clmmPoolAccount(mints[0], mints[1], SOL_SQRT_PRICE));
+  const spyxPool = (owner = RAYDIUM_CLMM, mints: [string, string] = [SPYX_MINT, USDC_MINT]) => accountInfo(owner, clmmPoolAccount(mints[0], mints[1], SPYX_SQRT_PRICE, [8, 6]));
+
+  it("reads both pinned pools in one call, and their rates are the mainnet goldens", async () => {
+    const { pool: p, upstream } = pool((call) => rpcResult(call, { context: { slot: 99 }, value: [solPool(), spyxPool()] }));
+    expect(await readPoolPrices(p)).toEqual({ kind: "exists", value: { slot: 99, convertWad: 100_038_711_555_492_562n, legWads: { [SPYX_MINT]: 131_283_650_130_637_569n } } });
+    expect(upstream.calls).toHaveLength(1);
+    expect((upstream.calls[0]!.body as { params: unknown[] }).params).toEqual([[SOL_USDC_POOL, SPYX_USDC_POOL], { encoding: "base64", commitment: "confirmed" }]);
+  });
+
+  it.each([
+    ["the SOL pool owned by another program", () => [solPool(key()), spyxPool()]],
+    ["the SOL pool with its mints swapped", () => [solPool(RAYDIUM_CLMM, [USDC_MINT, WSOL_MINT]), spyxPool()]],
+    ["the SPYx pool with its mints swapped", () => [solPool(), spyxPool(RAYDIUM_CLMM, [USDC_MINT, SPYX_MINT])]],
+    ["a pool that does not exist", () => [solPool(), null]],
+    ["one account where two were asked", () => [solPool()]],
+  ])("%s is unreadable, never a price", async (_, accounts) => {
+    const { pool: p } = pool((call) => rpcResult(call, { context: { slot: 1 }, value: accounts() }));
+    expect((await readPoolPrices(p)).kind).toBe("unreadable");
+  });
+
+  it("an RPC that does not answer is unreadable, and the endpoint is not quoted", async () => {
+    const { pool: p } = pool(() => {
+      throw new Error(`boom ${UPSTREAM_1}`);
+    });
+    const read = await readPoolPrices(p);
+    expect(read.kind).toBe("unreadable");
+    expect(JSON.stringify(read)).not.toContain(SECRET_QUERY);
+  });
+});
+
+describe("readWalletLinks", () => {
+  it("names each wallet's link this vault, another vault, missing or unreadable, in one call, never conflating them", async () => {
+    const vault = key();
+    const [mine, theirs, fresh, forged, impostor] = [key(), key(), key(), key(), key()];
+    const { pool: p, upstream } = pool((call) =>
+      rpcResult(call, {
+        value: [
+          accountInfo(SIP_PROGRAM_ID, linkBytes(mine, vault)),
+          accountInfo(SIP_PROGRAM_ID, linkBytes(theirs, key())),
+          null,
+          accountInfo(key(), linkBytes(forged, vault)),
+          // The account at impostor's link address names another wallet.
+          accountInfo(SIP_PROGRAM_ID, linkBytes(key(), vault)),
+        ],
+      }),
+    );
+    const read = await readWalletLinks(p, vault, [mine, theirs, fresh, forged, impostor]);
+    expect(read.map((link) => link.status)).toEqual(["this_vault", "other_vault", "missing", "unreadable", "unreadable"]);
+    expect(read.map((link) => link.link)).toEqual([mine, theirs, fresh, forged, impostor].map((wallet) => deriveLinkPda(wallet).toBase58()));
+    expect(read[0]!.vault).toBe(vault);
+    expect(read[1]!.vault).not.toBe(vault);
+    expect([read[2]!.vault, read[3]!.vault]).toEqual([null, null]);
+    expect(upstream.calls).toHaveLength(1);
+  });
+
+  it("a failed read makes every wallet unreadable; no wallets asks nothing; more than the limit is refused", async () => {
+    const down = pool(() => {
+      throw new Error(`boom ${UPSTREAM_1}`);
+    });
+    expect((await readWalletLinks(down.pool, key(), [key(), key()])).map((link) => link.status)).toEqual(["unreadable", "unreadable"]);
+    const idle = pool((call) => rpcResult(call, { value: [] }));
+    expect(await readWalletLinks(idle.pool, key(), [])).toEqual([]);
+    expect(idle.upstream.calls).toHaveLength(0);
+    await expect(readWalletLinks(idle.pool, key(), Array.from({ length: MAX_WALLET_LINKS + 1 }, key))).rejects.toThrow(RangeError);
   });
 });

@@ -8,6 +8,7 @@ import "server-only";
 // or @solana/web3.js. It never settles, invests, converts or wraps, and never
 // reads a keeper secret: packages/solana-keeper owns those.
 
+export * from "./build-handler";
 export * from "./builders";
 export * from "./config";
 export * from "./ed25519";
