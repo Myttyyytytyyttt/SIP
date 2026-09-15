@@ -59,7 +59,9 @@ function stateWith(overrides: Partial<VaultStateJson> = {}): VaultStateJson {
     policy: { status: "missing", address: Keypair.generate().publicKey.toBase58() },
     config: { address: Keypair.generate().publicKey.toBase58(), status: "missing", exists: false, paused: null },
     walletLinks: [],
-    rents: { vault: "1285240", link: "1305560" },
+    holdings: { status: "exists", items: [] },
+    vaultTokenAccounts: { status: "exists", items: [] },
+    rents: { vault: "1285240", link: "1305560", policy: "5577840", tokenAccount: "1488440", legTokenAccounts: {} },
     prices: { slot: 1, convertWad: "100038711555492562", usdcRawPerSol: "100038711", legs: [] },
     ...overrides,
   };

@@ -25,16 +25,62 @@
  * Two calls, never one variadic signTransaction. If the blockhash is no longer
  * valid, or the simulation says BlockhashNotFound, the transaction is built again
  * with the same consent: at most LINK_MAX_BUILDS builds.
+ *
+ * AN INVESTMENT POLICY'S FLOORS ARE READ BY THE SERVER, AND CHECKED HERE. The
+ * build answers the rates it read and the floors under them; the page requires
+ * each floor to be SIP's margin under its rate and never zero, the basket to be
+ * SIP's, the caps and on/off to be what the person chose, and every token
+ * account created ahead of the policy to be the vault's own, at an address the
+ * page derived itself. The floors are shown again while Phantom asks (onBuilt).
+ *
+ * A WITHDRAWAL signs the amount asked and nothing else: SOL to the pension key,
+ * or a token from the vault account the screen showed to the pension key's own
+ * associated account.
  */
 
-import { DEFAULT_VAULT_POLICY, SIP_PROGRAM_ID, base64Encode, bytesEqual, confirmSignature, linkConsentMessage, solscanTx, tryBase64Decode, type ConfirmOutcome } from "@sip/solana-core/client";
+import {
+  CONVERT_FLOOR_MARGIN_BPS,
+  DEFAULT_INVEST_CAPS,
+  DEFAULT_VAULT_POLICY,
+  LEG_FLOOR_MARGIN_BPS,
+  OFFERED_LEGS,
+  RAYDIUM_CLMM,
+  SIP_PROGRAM_ID,
+  TOKEN_PROGRAM,
+  USDC_MINT,
+  WSOL_MINT,
+  base64Encode,
+  basketWeightsBps,
+  bytesEqual,
+  confirmSignature,
+  defaultInvestPolicy,
+  floorWad,
+  linkConsentMessage,
+  solscanTx,
+  tryBase64Decode,
+  type ConfirmOutcome,
+} from "@sip/solana-core/client";
 
+import { rawFrom } from "@/lib/amounts";
 import { privyFailure } from "@/lib/privy-failure";
 import { SigningError, isSignerRefusal, type PensionSigner, type SignerRefusal, type TradingSigners } from "@/lib/signing-wallets";
-import { IntentError, checkBuiltIntent, checkSignedIntent, mergeCoSignature, type OwnerIntent, type ReadTransaction } from "@/lib/tx-intent";
-import { transactionErrorWords, vaultFailureWords, type ApiFailure, type ApiResult, type BuiltTransactionJson, type LinkConsentJson, type SendResponseJson, type VaultApi } from "@/lib/vault-api";
+import { IntentError, checkBuiltIntent, checkSignedIntent, mergeCoSignature, type OwnerIntent, type ReadTransaction, type TokenAccountCreateIntent } from "@/lib/tx-intent";
+import {
+  transactionErrorWords,
+  vaultFailureWords,
+  type ApiFailure,
+  type ApiResult,
+  type BuiltTransactionJson,
+  type InvestPolicyBuildJson,
+  type LinkConsentJson,
+  type PolicyFloorsJson,
+  type SendResponseJson,
+  type VaultApi,
+  type WithdrawBuildJson,
+  type WithdrawTokenBuildJson,
+} from "@/lib/vault-api";
 import { FAILURE_COPY, LINK_COPY, PROGRESS_COPY } from "@/lib/vault-copy";
-import { deriveConfigAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
+import { deriveAtaAddress, deriveConfigAddress, deriveInvestAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
 
 /** TxProgress's steps, in order. "trading_signing" is the link's co-signature only. */
 export type FlowStep = "preparing" | "approve_pension" | "trading_signing" | "sending" | "confirming" | "done";
@@ -57,6 +103,8 @@ export type FlowResult =
 export interface FlowDeps {
   readonly api: VaultApi;
   readonly onStep?: (step: FlowStep) => void;
+  /** The build route's answer once the page has checked it, just before Phantom is asked: what the screen shows while it waits. */
+  readonly onBuilt?: (body: BuiltTransactionJson) => void;
   /** Default: confirmSignature through api.rpc (getSignatureStatuses, getBlockHeight). */
   readonly confirm?: (signature: string, lastValidBlockHeight: number) => Promise<ConfirmOutcome>;
 }
@@ -139,54 +187,40 @@ function builtBytes(body: BuiltTransactionJson): { readonly bytes: Uint8Array; r
   return bytes === null || typeof lastValidBlockHeight !== "number" ? null : { bytes, lastValidBlockHeight };
 }
 
-// ── create_vault_v2 ──────────────────────────────────────────────────────────
+// ── the writes the pension key signs alone ───────────────────────────────────
 
-export interface CreateVaultDeps extends FlowDeps {
+export interface PensionFlowDeps extends FlowDeps {
   readonly signers: PensionSigner | SignerRefusal;
 }
 
-export interface CreateVaultInput {
-  readonly pensionKey: string;
-  /** 0 PROFIT, 1 VOLUME (the server refuses 1 while it is not offered). */
-  readonly mode: number;
-  /** Lamports; the product's default when absent. */
-  readonly maxContribution?: bigint;
-  /** Lamports; the product's default when absent. */
-  readonly walletReserve?: bigint;
-}
-
-/** Creates the pension key's vault: one build, Phantom's one signature, one send. */
-export async function createVaultFlow(deps: CreateVaultDeps, input: CreateVaultInput): Promise<FlowResult> {
+/**
+ * Build `request`, check the unsigned bytes against the intent the page derives
+ * from the answer, have Phantom sign, check what it returned, send, confirm.
+ * `intentOf` throws IntentError when the answer is not what the person asked for.
+ */
+async function pensionWrite<T extends BuiltTransactionJson>(
+  deps: PensionFlowDeps,
+  request: Readonly<Record<string, unknown>>,
+  intentOf: (body: T) => Promise<OwnerIntent>,
+): Promise<FlowResult> {
   if (isSignerRefusal(deps.signers)) return refused(deps.signers.refusal);
   const signers = deps.signers;
   deps.onStep?.("preparing");
-  const request: Record<string, unknown> = { action: "createVault", owner: input.pensionKey, mode: input.mode };
-  if (input.maxContribution !== undefined) request.maxContribution = input.maxContribution.toString();
-  if (input.walletReserve !== undefined) request.walletReserve = input.walletReserve.toString();
-  const built = await deps.api.build<BuiltTransactionJson>(request);
+  const built = await deps.api.build<T>(request);
   if (!built.ok) return fromFailure(built);
   const unsigned = builtBytes(built.body);
   if (unsigned === null) return refused(FAILURE_COPY.unreadableBuilt);
 
-  const intent: OwnerIntent = {
-    instruction: "create_vault_v2",
-    signers: [input.pensionKey],
-    accounts: { owner: input.pensionKey, vault: await deriveVaultAddress(input.pensionKey) },
-    args: {
-      mode: input.mode,
-      skim_bps: DEFAULT_VAULT_POLICY.skimBps,
-      volume_bps: DEFAULT_VAULT_POLICY.volumeBps,
-      max_contribution: input.maxContribution ?? DEFAULT_VAULT_POLICY.maxContribution,
-      wallet_reserve: input.walletReserve ?? DEFAULT_VAULT_POLICY.walletReserve,
-    },
-  };
+  let intent: OwnerIntent;
   let checked: ReadTransaction;
   try {
+    intent = await intentOf(built.body);
     checked = checkBuiltIntent(unsigned.bytes, intent);
   } catch (error) {
     return intentFailure(error);
   }
 
+  deps.onBuilt?.(built.body);
   deps.onStep?.("approve_pension");
   let signed: Uint8Array;
   try {
@@ -203,6 +237,177 @@ export async function createVaultFlow(deps: CreateVaultDeps, input: CreateVaultI
   deps.onStep?.("sending");
   const landed = await landing(deps, await deps.api.send(signed), unsigned.lastValidBlockHeight);
   return "rebuild" in landed ? { ok: false, kind: "expired", message: PROGRESS_COPY.tookTooLongDetail } : landed;
+}
+
+// ── create_vault_v2 ──────────────────────────────────────────────────────────
+
+export type CreateVaultDeps = PensionFlowDeps;
+
+export interface CreateVaultInput {
+  readonly pensionKey: string;
+  /** 0 PROFIT, 1 VOLUME (the server refuses 1 while it is not offered). */
+  readonly mode: number;
+  /** Lamports; the product's default when absent. */
+  readonly maxContribution?: bigint;
+  /** Lamports; the product's default when absent. */
+  readonly walletReserve?: bigint;
+}
+
+/** Creates the pension key's vault: one build, Phantom's one signature, one send. */
+export async function createVaultFlow(deps: CreateVaultDeps, input: CreateVaultInput): Promise<FlowResult> {
+  const request: Record<string, unknown> = { action: "createVault", owner: input.pensionKey, mode: input.mode };
+  if (input.maxContribution !== undefined) request.maxContribution = input.maxContribution.toString();
+  if (input.walletReserve !== undefined) request.walletReserve = input.walletReserve.toString();
+  return pensionWrite<BuiltTransactionJson>(deps, request, async () => ({
+    instruction: "create_vault_v2",
+    signers: [input.pensionKey],
+    accounts: { owner: input.pensionKey, vault: await deriveVaultAddress(input.pensionKey) },
+    args: {
+      mode: input.mode,
+      skim_bps: DEFAULT_VAULT_POLICY.skimBps,
+      volume_bps: DEFAULT_VAULT_POLICY.volumeBps,
+      max_contribution: input.maxContribution ?? DEFAULT_VAULT_POLICY.maxContribution,
+      wallet_reserve: input.walletReserve ?? DEFAULT_VAULT_POLICY.walletReserve,
+    },
+  }));
+}
+
+// ── set_invest_policy ────────────────────────────────────────────────────────
+
+export interface InvestPolicyInput {
+  readonly pensionKey: string;
+  /** USDC raw units; the product's default when absent. */
+  readonly maxPerCall?: bigint;
+  /** USDC raw units; the product's default when absent. */
+  readonly maxRolling30d?: bigint;
+  /** Default true. */
+  readonly enabled?: boolean;
+}
+
+/** Why the floors a build answered are not SIP's margins under the rates it read, for SIP's basket; null when they are. */
+function floorsProblem(floors: PolicyFloorsJson | undefined): string | null {
+  const margin = (wad: bigint | null, bps: number): bigint | null => {
+    try {
+      return wad === null ? null : floorWad(wad, bps);
+    } catch {
+      return null;
+    }
+  };
+  if (floors === undefined || floors === null) return "it carries no price floors";
+  if (floors.marginBps?.convert !== CONVERT_FLOOR_MARGIN_BPS || floors.marginBps?.leg !== LEG_FLOOR_MARGIN_BPS) return "its price margins are not SIP's";
+  const convert = rawFrom(floors.convertWad);
+  if (convert === null || convert === 0n || convert !== margin(rawFrom(floors.liveConvertWad), CONVERT_FLOOR_MARGIN_BPS)) {
+    return "its SOL floor is not 90 % of the price it read";
+  }
+  if (!Array.isArray(floors.legs) || floors.legs.length !== OFFERED_LEGS.length) return "its basket is not SIP's";
+  for (const [index, leg] of OFFERED_LEGS.entries()) {
+    const entry = floors.legs[index];
+    const wad = rawFrom(entry?.wad);
+    if (entry?.mint !== leg.mint || wad === null || wad === 0n || wad !== margin(rawFrom(entry.liveWad), LEG_FLOOR_MARGIN_BPS)) {
+      return `its ${leg.symbol} floor is not 95 % of the rate it read`;
+    }
+  }
+  return null;
+}
+
+/** The token accounts a policy build says it creates, bound to the vault's own associated addresses as this page derives them. */
+async function tokenAccountCreates(pensionKey: string, vault: string, listed: InvestPolicyBuildJson["vaultTokenAccounts"] | undefined): Promise<TokenAccountCreateIntent[]> {
+  const targets = [
+    { mint: WSOL_MINT, tokenProgram: TOKEN_PROGRAM },
+    { mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM },
+    ...OFFERED_LEGS.map((leg) => ({ mint: leg.mint, tokenProgram: leg.tokenProgram })),
+  ];
+  const matches =
+    Array.isArray(listed) &&
+    listed.length === targets.length &&
+    listed.every((entry, index) => entry?.mint === targets[index]!.mint && entry.tokenProgram === targets[index]!.tokenProgram && typeof entry.create === "boolean");
+  if (!matches) throw new IntentError(FAILURE_COPY.builtMismatch("its list of your vault's token accounts is not SIP's"));
+  const creates: TokenAccountCreateIntent[] = [];
+  for (const [index, target] of targets.entries()) {
+    if (listed[index]!.create !== true) continue;
+    creates.push({ funder: pensionKey, account: await deriveAtaAddress(vault, target.mint, target.tokenProgram), wallet: vault, mint: target.mint, tokenProgram: target.tokenProgram });
+  }
+  return creates;
+}
+
+/**
+ * Signs the vault's investment policy: SIP's basket at the floors the build read,
+ * the caps and on/off the person chose, and the vault token accounts it lacks,
+ * paid by the pension key.
+ */
+export async function investPolicyFlow(deps: PensionFlowDeps, input: InvestPolicyInput): Promise<FlowResult> {
+  const request: Record<string, unknown> = { action: "investPolicy", owner: input.pensionKey };
+  if (input.maxPerCall !== undefined) request.maxPerCall = input.maxPerCall.toString();
+  if (input.maxRolling30d !== undefined) request.maxRolling30d = input.maxRolling30d.toString();
+  if (input.enabled !== undefined) request.enabled = input.enabled;
+  return pensionWrite<InvestPolicyBuildJson>(deps, request, async (body) => {
+    const problem = floorsProblem(body.floors);
+    if (problem !== null) throw new IntentError(FAILURE_COPY.builtMismatch(problem));
+    const vault = await deriveVaultAddress(input.pensionKey);
+    const weights = basketWeightsBps(OFFERED_LEGS.length);
+    return {
+      instruction: "set_invest_policy",
+      signers: [input.pensionKey],
+      accounts: { owner: input.pensionKey, vault, policy: await deriveInvestAddress(vault) },
+      args: {
+        legs: OFFERED_LEGS.map((leg, index) => ({ mint: leg.mint, weight_bps: weights[index]!, min_out_rate_wad: BigInt(body.floors.legs[index]!.wad) })),
+        venue_program: RAYDIUM_CLMM,
+        in_mint: USDC_MINT,
+        min_convert_rate_wad: BigInt(body.floors.convertWad),
+        min_investment: defaultInvestPolicy(OFFERED_LEGS.length).minInvestment,
+        max_per_call: input.maxPerCall ?? DEFAULT_INVEST_CAPS.maxPerCall,
+        max_rolling_30d: input.maxRolling30d ?? DEFAULT_INVEST_CAPS.maxRolling30d,
+        enabled: input.enabled ?? true,
+      },
+      tokenAccountCreates: await tokenAccountCreates(input.pensionKey, vault, body.vaultTokenAccounts),
+    };
+  });
+}
+
+// ── withdraw and withdraw_token ──────────────────────────────────────────────
+
+export interface WithdrawInput {
+  readonly pensionKey: string;
+  readonly lamports: bigint;
+}
+
+/** Takes SOL out of the vault to the pension key: exactly the lamports asked. */
+export async function withdrawFlow(deps: PensionFlowDeps, input: WithdrawInput): Promise<FlowResult> {
+  return pensionWrite<WithdrawBuildJson>(deps, { action: "withdraw", owner: input.pensionKey, lamports: input.lamports.toString() }, async () => ({
+    instruction: "withdraw",
+    signers: [input.pensionKey],
+    accounts: { owner: input.pensionKey, vault: await deriveVaultAddress(input.pensionKey) },
+    args: { amount: input.lamports },
+  }));
+}
+
+export interface WithdrawTokenInput {
+  readonly pensionKey: string;
+  readonly mint: string;
+  /** Raw units: what moves. */
+  readonly amountRaw: bigint;
+  /** The vault's token account the screen showed this holding in: the build must take it from exactly there. */
+  readonly vaultTokenAccount: string;
+  /** Its token program, as the screen read it. */
+  readonly tokenProgram: string;
+}
+
+/** Takes a token out of the vault account the screen showed, into the pension key's own associated account for that mint. */
+export async function withdrawTokenFlow(deps: PensionFlowDeps, input: WithdrawTokenInput): Promise<FlowResult> {
+  const request = { action: "withdrawToken", owner: input.pensionKey, mint: input.mint, amountRaw: input.amountRaw.toString() };
+  return pensionWrite<WithdrawTokenBuildJson>(deps, request, async () => ({
+    instruction: "withdraw_token",
+    signers: [input.pensionKey],
+    accounts: {
+      owner: input.pensionKey,
+      vault: await deriveVaultAddress(input.pensionKey),
+      token_mint: input.mint,
+      vault_token: input.vaultTokenAccount,
+      owner_token: await deriveAtaAddress(input.pensionKey, input.mint, input.tokenProgram),
+      token_program: input.tokenProgram,
+    },
+    args: { amount: input.amountRaw },
+  }));
 }
 
 // ── link_wallet ──────────────────────────────────────────────────────────────

@@ -18,6 +18,11 @@
  * bytes: its answer must be a 64-byte signature or a transaction over the very
  * message Phantom approved.
  *
+ * An investment policy may create the vault's token accounts ahead of
+ * set_invest_policy: each must be exactly the CreateIdempotent the page expects,
+ * paid by the pension key, for the vault and the associated address the page
+ * derived itself, and Phantom's bytes must keep them as they were.
+ *
  * None of this replaces /api/solana-tx: its verifier and simulation decide what
  * reaches the chain. This is the page refusing to ask for a signature it would
  * not stand behind. Client-safe and pure.
@@ -75,6 +80,8 @@ const PROGRAM_NAMES: Readonly<Record<string, string>> = {
 export const programLabel = (programId: string): string => (PROGRAM_NAMES[programId] !== undefined ? `${PROGRAM_NAMES[programId]} (${programId})` : programId);
 
 const RELAYED = new Set([SIP_PROGRAM_ID, COMPUTE_BUDGET_PROGRAM, ED25519_PROGRAM]);
+/** Beside set_invest_policy the relay also takes the vault's token-account creations. */
+const RELAYED_WITH_TOKEN_ACCOUNTS = new Set([...RELAYED, ATA_PROGRAM]);
 
 /** The Ed25519SigVerify header SIP writes for the 140-byte consent: one signature at 48, key at 16, message at 112 of length 140, every index u16::MAX. */
 const CONSENT_HEADER = Uint8Array.from([0x01, 0x00, 0x30, 0x00, 0xff, 0xff, 0x10, 0x00, 0xff, 0xff, 0x70, 0x00, 0x8c, 0x00, 0xff, 0xff]);
@@ -87,6 +94,18 @@ export interface ReadTransaction {
   readonly parsed: ParsedLegacyMessage;
 }
 
+/** One CreateIdempotent the page expects ahead of set_invest_policy, every address its own. */
+export interface TokenAccountCreateIntent {
+  /** Who pays the rent: the pension key. */
+  readonly funder: string;
+  /** ATA(wallet, mint, tokenProgram), derived by the page. */
+  readonly account: string;
+  /** The vault, derived by the page. */
+  readonly wallet: string;
+  readonly mint: string;
+  readonly tokenProgram: string;
+}
+
 export interface OwnerIntent {
   readonly instruction: OwnerInstructionName;
   /** Required signers in signature order; the pension key, who pays, first. */
@@ -97,7 +116,11 @@ export interface OwnerIntent {
   readonly args: Readonly<Record<string, unknown>>;
   /** For link_wallet: what the Ed25519SigVerify ahead of it must carry. */
   readonly consent?: { readonly wallet: string; readonly message: Uint8Array; readonly signature: Uint8Array };
+  /** For set_invest_policy: the vault token accounts created ahead of it, in order. None when absent. */
+  readonly tokenAccountCreates?: readonly TokenAccountCreateIntent[];
 }
+
+const sameCreate = (a: ParsedInstruction, b: ParsedInstruction): boolean => bytesEqual(a.data, b.data) && a.accountKeys.join() === b.accountKeys.join();
 
 function readTransaction(bytes: Uint8Array, unreadable: string): ReadTransaction {
   try {
@@ -173,9 +196,23 @@ export function checkBuiltIntent(bytes: Uint8Array, intent: OwnerIntent): ReadTr
   if (signers !== null) throw refuse(signers);
   if (tx.signatures.some((signature) => !isZeroSignature(signature))) throw refuse("it arrived already signed");
 
-  const expected = [COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, ...(intent.consent === undefined ? [] : [ED25519_PROGRAM]), SIP_PROGRAM_ID];
+  const creates = intent.tokenAccountCreates ?? [];
+  const expected = [
+    COMPUTE_BUDGET_PROGRAM,
+    COMPUTE_BUDGET_PROGRAM,
+    ...(intent.consent === undefined ? [] : [ED25519_PROGRAM]),
+    ...creates.map(() => ATA_PROGRAM),
+    SIP_PROGRAM_ID,
+  ];
   const programs = parsed.instructions.map((instruction) => instruction.programId);
   if (programs.length !== expected.length || programs.some((program, index) => program !== expected[index])) throw refuse("its instructions are not the ones this action needs");
+  creates.forEach((create, index) => {
+    const instruction = parsed.instructions[2 + index]!;
+    const keys = [create.funder, create.account, create.wallet, create.mint, SYSTEM_PROGRAM, create.tokenProgram];
+    if (instruction.data.length !== 1 || instruction.data[0] !== 1 || instruction.accountKeys.length !== keys.length || instruction.accountKeys.some((key, at) => key !== keys[at])) {
+      throw refuse(`its token account #${index + 1} is not your vault's own ${programLabel(create.mint)} account, paid by you`);
+    }
+  });
 
   const [limit, price] = parsed.instructions;
   const units = readComputeBudget(limit!.data);
@@ -227,9 +264,11 @@ export function checkSignedIntent(bytes: Uint8Array, built: ReadTransaction, int
   const refuse = (detail: string): IntentError => new IntentError(FAILURE_COPY.signedMismatch(detail));
   const tx = readTransaction(bytes, FAILURE_COPY.unreadableSigned);
   const { parsed } = tx;
-  const foreign = parsed.instructions.find((instruction) => !RELAYED.has(instruction.programId));
+  const creates = intent.tokenAccountCreates ?? [];
+  const relayed = creates.length > 0 ? RELAYED_WITH_TOKEN_ACCOUNTS : RELAYED;
+  const foreign = parsed.instructions.find((instruction) => !relayed.has(instruction.programId));
   if (foreign !== undefined) throw new IntentError(FAILURE_COPY.foreignProgram(programLabel(foreign.programId)));
-  if (parsed.instructions.length > 4) throw refuse("it holds more instructions than SIP relays");
+  if (parsed.instructions.length > 4 + creates.length) throw refuse("it holds more instructions than SIP relays");
   const signers = signersProblem(parsed, tx.signatures, intent.signers);
   if (signers !== null) throw refuse(signers);
   if (parsed.recentBlockhash !== built.parsed.recentBlockhash) throw refuse("its blockhash changed");
@@ -242,6 +281,15 @@ export function checkSignedIntent(bytes: Uint8Array, built: ReadTransaction, int
   if (typeof before === "string") throw refuse(before);
   if (!bytesEqual(now.instruction.data, before.instruction.data) || now.instruction.accountKeys.join() !== before.instruction.accountKeys.join()) {
     throw refuse("its SIP instruction changed");
+  }
+
+  const createsNow = parsed.instructions.flatMap((instruction, index) => (instruction.programId === ATA_PROGRAM ? [{ instruction, index }] : []));
+  const createsBefore = built.parsed.instructions.filter((instruction) => instruction.programId === ATA_PROGRAM);
+  if (
+    createsNow.length !== createsBefore.length ||
+    createsNow.some((create, at) => create.index > now.index || !sameCreate(create.instruction, createsBefore[at]!))
+  ) {
+    throw refuse("its token account creations changed");
   }
 
   const verifies = parsed.instructions.filter((instruction) => instruction.programId === ED25519_PROGRAM);

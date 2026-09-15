@@ -58,6 +58,17 @@ describe("words", () => {
     expect(vaultFailureWords(failure("unreadable", {}, 502))).toBe("SIP could not read Solana just now. Nothing was offered to sign.");
   });
 
+  it.each([
+    ["zero_amount", 400, "The amount must be more than zero."],
+    ["above_withdrawable", 422, "That is more than the vault can release: it keeps its rent reserve."],
+    ["not_held", 422, "Your vault holds none of this token."],
+    ["above_holding", 422, "Your vault holds less of this token than that."],
+    ["price_unavailable", 502, "SIP could not read today's prices from Raydium, so no floor was set. Nothing was built."],
+    ["mint_unexpected", 409, "A token this policy names is not held by the token program SIP expects. Nothing was built."],
+  ])("the build route's %s is shown as its own words", (code, status, message) => {
+    expect(vaultFailureWords(failure(code, {}, status, message))).toBe(message);
+  });
+
   it("the build route's refusals are shown as its words; an invalid rule lists its problems", () => {
     expect(vaultFailureWords(failure("config_missing", {}, 409, "Linking opens once SIP's program is configured on Solana."))).toBe("Linking opens once SIP's program is configured on Solana.");
     expect(vaultFailureWords(failure("invalid_policy", { problems: ["maxContribution must be a u64 greater than zero"] }, 400, "The program would refuse this vault rule."))).toBe(

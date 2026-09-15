@@ -72,7 +72,9 @@ function stateOf(chain: Chain): VaultStateJson {
     policy: { status: "missing", address: Keypair.generate().publicKey.toBase58() },
     config: { address: Keypair.generate().publicKey.toBase58(), status: config, exists: config === "exists", paused: config === "exists" ? chain.paused === true : null },
     walletLinks: [{ wallet: chain.wallet ?? TRADING_0, link: LINK, status: chain.link ?? "missing", vault: chain.link === "this_vault" ? VAULT : null }],
-    rents: { vault: "1285240", link: "1305560" },
+    holdings: { status: "exists", items: [] },
+    vaultTokenAccounts: { status: "exists", items: [] },
+    rents: { vault: "1285240", link: "1305560", policy: "5577840", tokenAccount: "1488440", legTokenAccounts: {} },
     prices: null,
   };
 }

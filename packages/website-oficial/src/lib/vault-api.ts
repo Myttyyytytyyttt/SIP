@@ -32,6 +32,57 @@ export interface BuiltTransactionJson {
   readonly costs?: { readonly rentLamports: string; readonly signatureFeeLamports: string; readonly priorityFeeLamports: string };
 }
 
+/** The floors an investPolicy build signs, with the rates they were read from. Bigints as decimal strings. */
+export interface PolicyFloorsJson {
+  readonly slot: number | null;
+  readonly marginBps: { readonly convert: number; readonly leg: number };
+  /** USDC raw per lamport × 1e18, read from the SOL/USDC pool. */
+  readonly liveConvertWad: string;
+  /** min_convert_rate_wad: liveConvertWad less the convert margin. */
+  readonly convertWad: string;
+  readonly usdcRawPerSol: string;
+  readonly floorUsdcRawPerSol: string;
+  readonly legs: readonly {
+    readonly symbol: string;
+    readonly mint: string;
+    /** Leg raw per USDC raw × 1e18, read from the leg's pool. */
+    readonly liveWad: string;
+    /** min_out_rate_wad: liveWad less the leg margin. */
+    readonly wad: string;
+    readonly usdcRawPer1e8: string;
+    readonly maxUsdcRawPer1e8: string;
+  }[];
+}
+
+export interface InvestPolicyBuildJson extends BuiltTransactionJson {
+  readonly policy: string;
+  readonly policyExists: boolean;
+  readonly floors: PolicyFloorsJson;
+  /** Every vault token account the policy needs (wSOL, USDC, each leg), and whether this transaction creates it. */
+  readonly vaultTokenAccounts: readonly { readonly mint: string; readonly address: string; readonly tokenProgram: string; readonly create: boolean }[];
+  readonly costs: {
+    readonly rentLamports: string;
+    readonly signatureFeeLamports: string;
+    readonly priorityFeeLamports: string;
+    readonly policyRentLamports: string;
+    readonly tokenAccountRentLamports: string;
+  };
+  readonly warnings: readonly string[];
+}
+
+export interface WithdrawBuildJson extends BuiltTransactionJson {
+  readonly withdrawableLamports: string;
+}
+
+export interface WithdrawTokenBuildJson extends BuiltTransactionJson {
+  readonly ownerTokenAccount: string;
+  readonly vaultTokenAccount: string;
+  readonly heldRaw: string;
+  readonly ownerTokenAccountExists: boolean;
+  /** 0 when the account exists or unwraps (wSOL); null when its size is not known. */
+  readonly ownerTokenAccountRentLamports: string | null;
+}
+
 export interface LinkConsentJson {
   readonly instruction: "link_wallet";
   readonly programId: string;
@@ -64,6 +115,36 @@ export interface VaultAccountJson {
 
 export type WalletLinkStatus = "missing" | "this_vault" | "other_vault" | "unreadable";
 
+/** The InvestmentPolicy account, decoded; bigints as decimal strings. */
+export interface InvestmentPolicyJson {
+  readonly vault: string;
+  readonly enabled: boolean;
+  readonly venueProgram: string;
+  readonly inMint: string;
+  readonly legs: readonly { readonly mint: string; readonly weightBps: number; readonly minOutRateWad: string }[];
+  readonly minConvertRateWad: string;
+  readonly minInvestment: string;
+  readonly maxPerCall: string;
+  readonly maxRolling30d: string;
+  /** 31 day-buckets: the day (unix seconds / 86400) each was last written, and what was invested that day. */
+  readonly bucketDays: readonly number[];
+  readonly bucketAmounts: readonly string[];
+  readonly lifetimeInvested: string;
+  readonly policyNonce: string;
+}
+
+/** One non-zero token balance the vault owns. */
+export interface HoldingJson {
+  readonly tokenAccount: string;
+  readonly mint: string;
+  /** What a transfer moves. */
+  readonly amountRaw: string;
+  readonly decimals: number;
+  /** The RPC's display amount: shown as is, never computed from amountRaw (SPYx's scaled UI amount). */
+  readonly uiAmount: string;
+  readonly tokenProgram: string;
+}
+
 export interface VaultStateJson {
   readonly owner: string;
   readonly programId: string;
@@ -75,10 +156,24 @@ export interface VaultStateJson {
     readonly withdrawableLamports?: string;
     readonly state?: VaultAccountJson;
   };
-  readonly policy: { readonly status: ReadStatus; readonly address: string; readonly lamports?: string; readonly state?: Readonly<Record<string, unknown>> };
+  readonly policy: { readonly status: ReadStatus; readonly address: string; readonly lamports?: string; readonly state?: InvestmentPolicyJson };
   readonly config: { readonly address: string; readonly status: ReadStatus; readonly exists: boolean; readonly paused: boolean | null };
   readonly walletLinks: readonly { readonly wallet: string; readonly link: string; readonly status: WalletLinkStatus; readonly vault: string | null }[];
-  readonly rents: { readonly vault: string; readonly link: string } | null;
+  readonly holdings: { readonly status: "exists" | "unreadable"; readonly items: readonly HoldingJson[] };
+  /** The accounts an investment policy needs (wSOL, USDC, each leg), and whether each exists. */
+  readonly vaultTokenAccounts: {
+    readonly status: "exists" | "unreadable";
+    readonly items: readonly { readonly mint: string; readonly address: string; readonly tokenProgram: string; readonly status: ReadStatus }[];
+  };
+  readonly rents: {
+    readonly vault: string;
+    readonly link: string;
+    readonly policy: string;
+    /** A classic token account (165 bytes). */
+    readonly tokenAccount: string;
+    /** Each offered leg's token account, by mint. */
+    readonly legTokenAccounts: Readonly<Record<string, string>>;
+  } | null;
   readonly prices: {
     readonly slot: number | null;
     readonly convertWad: string;
@@ -233,6 +328,12 @@ const BUILD_REFUSALS = new Set([
   "protocol_paused",
   "wallet_already_linked",
   "link_consent_invalid",
+  "zero_amount",
+  "above_withdrawable",
+  "not_held",
+  "above_holding",
+  "price_unavailable",
+  "mint_unexpected",
   "bad_request",
 ]);
 

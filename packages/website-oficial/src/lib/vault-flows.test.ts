@@ -8,9 +8,15 @@ import {
   DEFAULT_VAULT_POLICY,
   OWNER_TX_MICROLAMPORTS,
   SIP_PROGRAM_ID,
+  SPYX_MINT,
+  TOKEN_2022_PROGRAM,
+  TOKEN_PROGRAM,
+  USDC_MINT,
+  WSOL_MINT,
   base58Encode,
   base64Encode,
   encodeSetComputeUnitPrice,
+  floorWad,
   linkConsentMessage,
   ownerComputeBudget,
   splitWire,
@@ -23,7 +29,12 @@ import {
   LinkConsentError,
   buildCreateVaultV2,
   buildLinkWallet,
+  buildSetInvestPolicy,
+  buildWithdraw,
+  buildWithdrawToken,
+  deriveAta,
   deriveConfigPda,
+  deriveInvestPda,
   deriveLinkPda,
   deriveVaultPda,
   prepareLinkWalletConsent,
@@ -33,9 +44,9 @@ import { Keypair, PublicKey, TransactionInstruction, TransactionMessage, Version
 import { describe, expect, it, vi } from "vitest";
 
 import { LIGHTHOUSE_PROGRAM } from "@/lib/tx-intent";
-import type { ApiFailure, ApiResult, SendResponseJson, VaultApi } from "@/lib/vault-api";
-import { LINK_MAX_BUILDS, checkAgainFlow, createVaultFlow, linkWalletFlow, type FlowStep } from "@/lib/vault-flows";
-import { deriveConfigAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
+import type { ApiFailure, ApiResult, BuiltTransactionJson, SendResponseJson, VaultApi } from "@/lib/vault-api";
+import { LINK_MAX_BUILDS, checkAgainFlow, createVaultFlow, investPolicyFlow, linkWalletFlow, withdrawFlow, withdrawTokenFlow, type FlowStep } from "@/lib/vault-flows";
+import { deriveAtaAddress, deriveConfigAddress, deriveInvestAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
 
 function signBytes(signer: Keypair, message: Uint8Array): Uint8Array {
   const privateKey = createPrivateKey({
@@ -192,6 +203,242 @@ describe("the browser's addresses", () => {
     expect(await deriveVaultAddress(key)).toBe(deriveVaultPda(key).toBase58());
     expect(await deriveLinkAddress(key)).toBe(deriveLinkPda(key).toBase58());
     expect(await deriveConfigAddress()).toBe(deriveConfigPda().toBase58());
+  });
+
+  it("kit derives the same investment policy and associated token accounts, for the vault and for the pension key, under both token programs", async () => {
+    const owner = Keypair.generate().publicKey.toBase58();
+    const vault = deriveVaultPda(owner).toBase58();
+    expect(await deriveInvestAddress(vault)).toBe(deriveInvestPda(vault).toBase58());
+    for (const [mint, program] of [
+      [WSOL_MINT, TOKEN_PROGRAM],
+      [USDC_MINT, TOKEN_PROGRAM],
+      [SPYX_MINT, TOKEN_2022_PROGRAM],
+    ] as const) {
+      expect(await deriveAtaAddress(vault, mint, program)).toBe(deriveAta(vault, mint, program).toBase58());
+      expect(await deriveAtaAddress(owner, mint, program)).toBe(deriveAta(owner, mint, program).toBase58());
+    }
+  });
+});
+
+// ── the policy and the withdrawals ───────────────────────────────────────────
+
+/** The pools' rates at mainnet slot 447313239, and SIP's floors under them. */
+const LIVE_CONVERT = 100_038_711_555_492_562n;
+const LIVE_SPYX = 131_283_650_130_637_569n;
+const CONVERT_FLOOR = floorWad(LIVE_CONVERT, 1_000);
+const SPYX_FLOOR = floorWad(LIVE_SPYX, 500);
+const POLICY_TARGETS = [
+  { mint: WSOL_MINT, tokenProgram: TOKEN_PROGRAM },
+  { mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM },
+  { mint: SPYX_MINT, tokenProgram: TOKEN_2022_PROGRAM },
+] as const;
+
+interface PolicyForge {
+  readonly maxPerCall?: bigint;
+  readonly maxRolling30d?: bigint;
+  readonly enabled?: boolean;
+  /** What the transaction carries; the answer's floors stay the honest ones unless `floors` rewrites them. */
+  readonly legFloor?: bigint;
+  readonly convertFloor?: bigint;
+  readonly create?: readonly boolean[];
+  readonly floors?: (floors: Record<string, unknown>) => Record<string, unknown>;
+}
+
+type Answer = Record<string, unknown> & { readonly txBase64: string };
+
+/** What the build route answers for investPolicy, the transaction from the core builder. */
+function policyAnswer(owner: string, forge: PolicyForge = {}): Answer {
+  const create = forge.create ?? [true, true, true];
+  const vault = deriveVaultPda(owner).toBase58();
+  const built = buildSetInvestPolicy({
+    owner,
+    legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: forge.legFloor ?? SPYX_FLOOR }],
+    minConvertRateWad: forge.convertFloor ?? CONVERT_FLOOR,
+    minInvestment: 5_000_000n,
+    maxPerCall: forge.maxPerCall ?? 1_000_000_000n,
+    maxRolling30d: forge.maxRolling30d ?? 31_000_000_000n,
+    enabled: forge.enabled ?? true,
+    ...recent(),
+    computeBudget: ownerComputeBudget("set_invest_policy"),
+    vaultTokenAccounts: POLICY_TARGETS.filter((_, index) => create[index]),
+  });
+  const floors: Record<string, unknown> = {
+    slot: 1,
+    marginBps: { convert: 1_000, leg: 500 },
+    liveConvertWad: LIVE_CONVERT,
+    convertWad: CONVERT_FLOOR,
+    usdcRawPerSol: 100_038_711n,
+    floorUsdcRawPerSol: 90_034_840n,
+    legs: [{ symbol: "SPYx", mint: SPYX_MINT, liveWad: LIVE_SPYX, wad: SPYX_FLOOR, usdcRawPer1e8: 761_709_474n, maxUsdcRawPer1e8: 801_799_446n }],
+  };
+  return asJson<Answer>({
+    ...built,
+    policyExists: false,
+    floors: forge.floors === undefined ? floors : forge.floors(floors),
+    vaultTokenAccounts: POLICY_TARGETS.map((target, index) => ({ ...target, address: deriveAta(vault, target.mint, target.tokenProgram).toBase58(), create: create[index] })),
+    costs: { rentLamports: 1n, signatureFeeLamports: 5_000n, priorityFeeLamports: 30_000n, policyRentLamports: 1n, tokenAccountRentLamports: 0n },
+    warnings: [],
+  });
+}
+
+/** The same unsigned transaction with instruction `index`'s account metas edited, recompiled. */
+function withInstructionKeys(txBase64: string, index: number, edit: (keys: TransactionInstruction["keys"]) => TransactionInstruction["keys"]): string {
+  const message = TransactionMessage.decompile(VersionedTransaction.deserialize(tryBase64Decode(txBase64)!).message);
+  const instruction = message.instructions[index]!;
+  message.instructions[index] = new TransactionInstruction({ programId: instruction.programId, keys: edit(instruction.keys), data: Buffer.from(instruction.data) });
+  return base64Encode(new VersionedTransaction(message.compileToLegacyMessage()).serialize());
+}
+
+/** A web3.js key of this package, from a key of the core's copy. */
+const here = (key: { toBase58(): string }): PublicKey => new PublicKey(key.toBase58());
+
+describe("investPolicyFlow", () => {
+  it("builds with the caps asked, checks the floors and the vault's own token accounts, shows the checked answer, has Phantom sign the built bytes, and sends", async () => {
+    const h = harness();
+    const shown: BuiltTransactionJson[] = [];
+    h.build.mockImplementationOnce(async (body) => {
+      h.order.push(`build:${String(body.action)}`);
+      return ok(policyAnswer(h.pensionKey, { maxPerCall: 10_000_000n, maxRolling30d: 50_000_000n }));
+    });
+    const result = await investPolicyFlow({ ...h.createDeps, onBuilt: (body) => shown.push(body) }, { pensionKey: h.pensionKey, maxPerCall: 10_000_000n, maxRolling30d: 50_000_000n });
+    expect(result.ok).toBe(true);
+    expect(h.order).toEqual(["build:investPolicy", "pension", "send"]);
+    expect(h.build.mock.calls[0]![0]).toEqual({ action: "investPolicy", owner: h.pensionKey, maxPerCall: "10000000", maxRolling30d: "50000000" });
+    expect(shown).toHaveLength(1);
+    expect(toHex(h.signWithPension.mock.calls[0]![0])).toBe(toHex(await builtTx(h, 0)));
+    expect(h.steps).toEqual(["preparing", "approve_pension", "sending", "confirming", "done"]);
+  });
+
+  it("pausing sends enabled false and no caps, and expects the product's caps with no token account to create", async () => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey, { enabled: false, create: [false, false, false] })));
+    const result = await investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey, enabled: false });
+    expect(result.ok).toBe(true);
+    expect(h.build.mock.calls[0]![0]).toEqual({ action: "investPolicy", owner: h.pensionKey, enabled: false });
+  });
+
+  it.each<[string, (h: Harness) => Answer]>([
+    ["a SPYx floor lower than the answer shows", (h) => policyAnswer(h.pensionKey, { legFloor: SPYX_FLOOR - 1n })],
+    ["a cap the person did not choose", (h) => policyAnswer(h.pensionKey, { maxPerCall: 2_000_000_000n })],
+    ["floors that are not SIP's margins under the prices read", (h) => policyAnswer(h.pensionKey, { convertFloor: LIVE_CONVERT / 2n, floors: (floors) => ({ ...floors, convertWad: LIVE_CONVERT / 2n }) })],
+    ["a SOL floor of zero, which would turn conversion off", (h) => policyAnswer(h.pensionKey, { convertFloor: 0n, floors: (floors) => ({ ...floors, convertWad: 0n, liveConvertWad: 0n }) })],
+    ["a basket that is not SIP's", (h) => policyAnswer(h.pensionKey, { floors: (floors) => ({ ...floors, legs: [] }) })],
+    [
+      "a token account paid by another key",
+      (h) => {
+        const answer = policyAnswer(h.pensionKey);
+        return { ...answer, txBase64: withInstructionKeys(answer.txBase64, 2, (keys) => keys.map((meta, at) => (at === 0 ? { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: true } : meta))) };
+      },
+    ],
+    [
+      "a token account for another owner's vault",
+      (h) => {
+        const answer = policyAnswer(h.pensionKey);
+        const otherVault = deriveVaultPda(Keypair.generate().publicKey.toBase58());
+        const theirs = deriveAta(otherVault, WSOL_MINT, TOKEN_PROGRAM);
+        const txBase64 = withInstructionKeys(answer.txBase64, 2, (keys) =>
+          keys.map((meta, at) => (at === 1 ? { ...meta, pubkey: here(theirs) } : at === 2 ? { ...meta, pubkey: here(otherVault) } : meta)),
+        );
+        return { ...answer, txBase64 };
+      },
+    ],
+    [
+      "token accounts listed under another program",
+      (h) => {
+        const answer = policyAnswer(h.pensionKey);
+        const listed = answer.vaultTokenAccounts as { tokenProgram: string }[];
+        return { ...answer, vaultTokenAccounts: listed.map((entry, index) => (index === 1 ? { ...entry, tokenProgram: TOKEN_2022_PROGRAM } : entry)) };
+      },
+    ],
+    [
+      "a token account created that the answer does not list",
+      (h) => {
+        const answer = policyAnswer(h.pensionKey);
+        const listed = answer.vaultTokenAccounts as { create: boolean }[];
+        return { ...answer, vaultTokenAccounts: listed.map((entry, index) => (index === 0 ? { ...entry, create: false } : entry)) };
+      },
+    ],
+  ])("a build with %s is refused before Phantom is asked", async (_, forge) => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => ok(forge(h)));
+    const result = await investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey });
+    expect(result).toMatchObject({ ok: false, kind: "refused" });
+    expect(!result.ok && result.message).toContain("Nothing was signed.");
+    expect(h.signWithPension).not.toHaveBeenCalled();
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
+  it("Phantom dropping a token account creation is refused before anything is sent", async () => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey)));
+    h.signWithPension.mockImplementationOnce(async (bytes) => {
+      const message = TransactionMessage.decompile(VersionedTransaction.deserialize(bytes).message);
+      message.instructions.splice(2, 1);
+      const tx = new VersionedTransaction(message.compileToLegacyMessage());
+      tx.sign([h.owner]);
+      return Uint8Array.from(tx.serialize());
+    });
+    const result = await investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey });
+    expect(result).toMatchObject({ ok: false, kind: "refused" });
+    expect(!result.ok && result.message).toContain("Nothing was sent.");
+    expect(h.send).not.toHaveBeenCalled();
+  });
+});
+
+describe("withdrawFlow and withdrawTokenFlow", () => {
+  const withdrawAnswer = (owner: string, lamports: bigint) => asJson<Answer>({ ...buildWithdraw({ owner, lamports, ...recent(), computeBudget: ownerComputeBudget("withdraw") }), withdrawableLamports: 200_000_000n });
+  const tokenAnswer = (owner: string, fields: { mint?: string; tokenProgram?: string; amountRaw?: bigint; vaultToken: string }) =>
+    asJson<Answer>(
+      buildWithdrawToken({
+        owner,
+        mint: fields.mint ?? SPYX_MINT,
+        tokenProgram: fields.tokenProgram ?? TOKEN_2022_PROGRAM,
+        amountRaw: fields.amountRaw ?? 12_345_678n,
+        vaultToken: fields.vaultToken,
+        ...recent(),
+        computeBudget: ownerComputeBudget("withdraw_token"),
+      }),
+    );
+
+  it("withdraw: the lamports asked, as a decimal string, found in the built bytes, signed and sent", async () => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => ok(withdrawAnswer(h.pensionKey, 150_000_000n)));
+    const result = await withdrawFlow(h.createDeps, { pensionKey: h.pensionKey, lamports: 150_000_000n });
+    expect(result.ok).toBe(true);
+    expect(h.build.mock.calls[0]![0]).toEqual({ action: "withdraw", owner: h.pensionKey, lamports: "150000000" });
+    expect(h.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("withdraw: a build for one lamport more than asked is refused before Phantom is asked", async () => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => ok(withdrawAnswer(h.pensionKey, 150_000_001n)));
+    const result = await withdrawFlow(h.createDeps, { pensionKey: h.pensionKey, lamports: 150_000_000n });
+    expect(result).toMatchObject({ ok: false, kind: "refused" });
+    expect(h.signWithPension).not.toHaveBeenCalled();
+  });
+
+  it("withdrawToken: from the vault account the screen showed, into the pension key's own associated account, the amount asked", async () => {
+    const h = harness();
+    const holding = Keypair.generate().publicKey.toBase58();
+    h.build.mockImplementationOnce(async () => ok(tokenAnswer(h.pensionKey, { vaultToken: holding })));
+    const result = await withdrawTokenFlow(h.createDeps, { pensionKey: h.pensionKey, mint: SPYX_MINT, amountRaw: 12_345_678n, vaultTokenAccount: holding, tokenProgram: TOKEN_2022_PROGRAM });
+    expect(result.ok).toBe(true);
+    expect(h.build.mock.calls[0]![0]).toEqual({ action: "withdrawToken", owner: h.pensionKey, mint: SPYX_MINT, amountRaw: "12345678" });
+    expect(h.send).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<[string, (owner: string, holding: string) => Answer]>([
+    ["another amount", (owner, holding) => tokenAnswer(owner, { vaultToken: holding, amountRaw: 12_345_677n })],
+    ["another source account", (owner) => tokenAnswer(owner, { vaultToken: Keypair.generate().publicKey.toBase58() })],
+    ["another mint", (owner, holding) => tokenAnswer(owner, { vaultToken: holding, mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM })],
+  ])("withdrawToken: a build with %s is refused before Phantom is asked", async (_, forge) => {
+    const h = harness();
+    const holding = Keypair.generate().publicKey.toBase58();
+    h.build.mockImplementationOnce(async () => ok(forge(h.pensionKey, holding)));
+    const result = await withdrawTokenFlow(h.createDeps, { pensionKey: h.pensionKey, mint: SPYX_MINT, amountRaw: 12_345_678n, vaultTokenAccount: holding, tokenProgram: TOKEN_2022_PROGRAM });
+    expect(result).toMatchObject({ ok: false, kind: "refused" });
+    expect(!result.ok && result.message).toContain("Nothing was signed.");
+    expect(h.signWithPension).not.toHaveBeenCalled();
   });
 });
 
