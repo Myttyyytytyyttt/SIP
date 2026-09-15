@@ -14,6 +14,7 @@
 
 import { base64Encode, idlErrorByCode } from "@sip/solana-core/client";
 
+import { formatSol } from "@/lib/amounts";
 import { FAILURE_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
 
 export type ReadStatus = "exists" | "missing" | "unreadable";
@@ -367,12 +368,40 @@ export function customCode(err: unknown): number | null {
   return typeof custom === "number" ? custom : null;
 }
 
-/** A failed transaction's error and logs, in words: a blockhash, an account that exists, SIP's own errors, then the token issuers'. */
-export function transactionErrorWords(err: unknown, logs: unknown): string {
+/** What the words may say beyond the error itself. */
+export interface FailureContext {
+  /** The action's rent and fees in lamports, from its build; null or absent when unknown. */
+  readonly costLamports?: bigint | null;
+}
+
+/** The System program's ResultWithNegativeLamports: a transfer, or an account's rent, the payer could not cover. */
+const SYSTEM_NEGATIVE_LAMPORTS = 1;
+
+/**
+ * Whether the fee payer ran short of SOL: a fee it cannot pay, rent it cannot
+ * leave behind, no account at all, or rent the System program could not take
+ * for an account being created (its Custom 1, with its "insufficient lamports"
+ * log; SPL Token's own error 1 logs "insufficient funds" and is not this).
+ */
+function payerShortOfSol(err: unknown, custom: number | null, lines: readonly string[]): boolean {
+  if (err === "InsufficientFundsForFee" || err === "AccountNotFound") return true;
+  if (err !== null && typeof err === "object" && "InsufficientFundsForRent" in err) return true;
+  return custom === SYSTEM_NEGATIVE_LAMPORTS && lines.some((line) => /insufficient lamports/i.test(line));
+}
+
+/**
+ * A failed transaction's error and logs, in words: a blockhash, an account that exists, a pension key short of SOL,
+ * SIP's own errors, then the token issuers'.
+ */
+export function transactionErrorWords(err: unknown, logs: unknown, context: FailureContext = {}): string {
   const lines = Array.isArray(logs) ? logs.filter((line): line is string => typeof line === "string") : [];
   if (err === "BlockhashNotFound") return FAILURE_COPY.blockhashExpired;
   if (lines.some((line) => /already in use/i.test(line))) return FAILURE_COPY.alreadyExists;
   const custom = customCode(err);
+  if (payerShortOfSol(err, custom, lines)) {
+    const cost = context.costLamports;
+    return FAILURE_COPY.needsSol(cost === null || cost === undefined || cost <= 0n ? null : formatSol(cost));
+  }
   // SIP's own errors first: its ProtocolPaused log says "paused" too.
   if (custom !== null && custom >= 6_000) return programErrorWords(custom);
   const tokenFrozen = custom === 0x11 && lines.some((line) => /TokenzQd|Tokenkeg/.test(line));
@@ -382,11 +411,11 @@ export function transactionErrorWords(err: unknown, logs: unknown): string {
   return FAILURE_COPY.simulationRefused;
 }
 
-/** Any failure from the server, in words. */
-export function vaultFailureWords(failure: Pick<ApiFailure, "status" | "code" | "message" | "retryAfterSeconds" | "body">): string {
+/** Any failure from the server, in words. `context` carries what the build said the action costs, for a pension key short of SOL. */
+export function vaultFailureWords(failure: Pick<ApiFailure, "status" | "code" | "message" | "retryAfterSeconds" | "body">, context: FailureContext = {}): string {
   if (failure.status === 429 || failure.code === "rate_limited") return FAILURE_COPY.rateLimited(failure.retryAfterSeconds);
   if (failure.code === "network") return FAILURE_COPY.network;
-  if (failure.code === "simulation_failed") return transactionErrorWords(failure.body.err, failure.body.logs);
+  if (failure.code === "simulation_failed") return transactionErrorWords(failure.body.err, failure.body.logs, context);
   const verifier = VERIFIER_WORDS[failure.code];
   if (verifier !== undefined) return verifier;
   if (failure.code === "unreadable") return VAULT_COPY.unreadable;

@@ -119,7 +119,22 @@ const refused = (message: string, code?: string): FlowResult => (code === undefi
 /** A flow's own words for a transaction the chain refused, by its error, with a code the screen acts on; null for the general words. */
 type Explain = (err: unknown) => { readonly message: string; readonly code: string } | null;
 
-function fromFailure(failure: ApiFailure, explain?: Explain): FlowResult {
+/** How a refusal of one built transaction is put in words: the flow's own, and what the build said it costs. */
+interface Refusal {
+  readonly explain?: Explain;
+  /** Rent and fees in lamports, from the build's costs; null when it did not say. */
+  readonly costLamports?: bigint | null;
+}
+
+/** A build's rent, signature fees and priority fee, in lamports; null when any part is missing. */
+function costOf(body: BuiltTransactionJson): bigint | null {
+  const costs = body.costs;
+  if (costs === undefined || costs === null) return null;
+  const parts = [rawFrom(costs.rentLamports), rawFrom(costs.signatureFeeLamports), rawFrom(costs.priorityFeeLamports)];
+  return parts.every((part): part is bigint => part !== null) ? parts.reduce((total, part) => total + part, 0n) : null;
+}
+
+function fromFailure(failure: ApiFailure, refusal: Refusal = {}): FlowResult {
   if (failure.status === 429 || failure.code === "rate_limited") {
     return { ok: false, kind: "rate_limited", message: vaultFailureWords(failure), retryAfterSeconds: failure.retryAfterSeconds };
   }
@@ -127,9 +142,9 @@ function fromFailure(failure: ApiFailure, explain?: Explain): FlowResult {
     return { ok: false, kind: "unreadable", message: vaultFailureWords(failure) };
   }
   if (failure.code === "simulation_failed" && failure.body.err === "BlockhashNotFound") return { ok: false, kind: "expired", message: PROGRESS_COPY.tookTooLongDetail };
-  const own = failure.code === "simulation_failed" ? (explain?.(failure.body.err) ?? null) : null;
+  const own = failure.code === "simulation_failed" ? (refusal.explain?.(failure.body.err) ?? null) : null;
   if (own !== null) return refused(own.message, own.code);
-  const words = vaultFailureWords(failure);
+  const words = vaultFailureWords(failure, { costLamports: refusal.costLamports ?? null });
   // An account that already exists is a state to re-read, not a mistake.
   return refused(words, words === FAILURE_COPY.alreadyExists ? "already_exists" : failure.code);
 }
@@ -148,7 +163,7 @@ function signingFailure(error: unknown, who: "phantom" | "trading"): FlowResult 
   return refused(described.kind === "exited" ? declined : described.message);
 }
 
-async function confirmed(deps: FlowDeps, signature: string, lastValidBlockHeight: number, unitsConsumed: number | null, explain?: Explain): Promise<FlowResult> {
+async function confirmed(deps: FlowDeps, signature: string, lastValidBlockHeight: number, unitsConsumed: number | null, refusal: Refusal = {}): Promise<FlowResult> {
   const confirm = deps.confirm ?? ((sig: string, height: number) => confirmSignature({ rpc: (method, params) => deps.api.rpc(method, params), signature: sig, lastValidBlockHeight: height }));
   let outcome: ConfirmOutcome;
   try {
@@ -161,8 +176,8 @@ async function confirmed(deps: FlowDeps, signature: string, lastValidBlockHeight
     return { ok: true, signature, explorerUrl: solscanTx(signature), slot: outcome.slot, unitsConsumed };
   }
   if (outcome.status === "failed") {
-    const own = explain?.(outcome.err) ?? null;
-    return own === null ? refused(transactionErrorWords(outcome.err, [])) : refused(own.message, own.code);
+    const own = refusal.explain?.(outcome.err) ?? null;
+    return own === null ? refused(transactionErrorWords(outcome.err, [], { costLamports: refusal.costLamports ?? null })) : refused(own.message, own.code);
   }
   return { ok: false, kind: "expired", message: PROGRESS_COPY.tookTooLongDetail };
 }
@@ -170,19 +185,19 @@ async function confirmed(deps: FlowDeps, signature: string, lastValidBlockHeight
 type Landing = FlowResult | { readonly rebuild: true };
 
 /** What the send route's answer means: confirm a sent signature (200, or 502 with one), rebuild on an expired blockhash, or words. */
-async function landing(deps: FlowDeps, sent: ApiResult<SendResponseJson>, lastValidBlockHeight: number, explain?: Explain): Promise<Landing> {
+async function landing(deps: FlowDeps, sent: ApiResult<SendResponseJson>, lastValidBlockHeight: number, refusal: Refusal = {}): Promise<Landing> {
   if (sent.ok) {
     deps.onStep?.("confirming");
-    return confirmed(deps, sent.body.signature, lastValidBlockHeight, sent.body.unitsConsumed, explain);
+    return confirmed(deps, sent.body.signature, lastValidBlockHeight, sent.body.unitsConsumed, refusal);
   }
   if (sent.code === "simulation_failed" && sent.body.err === "BlockhashNotFound") return { rebuild: true };
   const signature = typeof sent.body.signature === "string" ? sent.body.signature : null;
   if ((sent.code === "send_unconfirmed" || sent.code === "send_failed") && signature !== null) {
     // It may land: confirm this signature before anyone is asked to sign again.
     deps.onStep?.("confirming");
-    return confirmed(deps, signature, lastValidBlockHeight, null, explain);
+    return confirmed(deps, signature, lastValidBlockHeight, null, refusal);
   }
-  return fromFailure(sent, explain);
+  return fromFailure(sent, refusal);
 }
 
 /** Confirms a signature the send route already took ("Check again"): never builds or signs. */
@@ -246,7 +261,7 @@ async function pensionWrite<T extends BuiltTransactionJson>(
   }
 
   deps.onStep?.("sending");
-  const landed = await landing(deps, await deps.api.send(signed), unsigned.lastValidBlockHeight, explain);
+  const landed = await landing(deps, await deps.api.send(signed), unsigned.lastValidBlockHeight, { explain, costLamports: costOf(built.body) });
   return "rebuild" in landed ? { ok: false, kind: "expired", message: PROGRESS_COPY.tookTooLongDetail } : landed;
 }
 
@@ -590,7 +605,7 @@ export async function linkWalletFlow(deps: LinkWalletDeps, input: LinkWalletInpu
 
     if (!(await blockhashStillValid(deps, checked.parsed.recentBlockhash))) continue;
     deps.onStep?.("sending");
-    const landed = await landing(deps, await deps.api.send(merged), unsigned.lastValidBlockHeight);
+    const landed = await landing(deps, await deps.api.send(merged), unsigned.lastValidBlockHeight, { costLamports: costOf(built.body) });
     if ("rebuild" in landed) continue;
     return result(landed, landed.ok ? null : consent);
   }

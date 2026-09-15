@@ -211,6 +211,11 @@ export const FAILURE_COPY = {
   frozen: "The issuer has frozen this token account. SOL withdrawals still work.",
   issuerPaused: "The issuer has paused SPYx transfers.",
   simulationRefused: "Solana refused this transaction in simulation. Nothing was sent.",
+  /** The pension key cannot pay this action's rent and fees; `cost` is its total in SOL when the build said it, else null. */
+  needsSol: (cost: string | null): string =>
+    cost === null
+      ? "Your pension key does not hold enough SOL for this action's rent and fees. Add SOL in Phantom, then try again. Nothing moved."
+      : `Your pension key needs more SOL: this action costs about ${cost} SOL in rent and fees. Add SOL in Phantom, then try again. Nothing moved.`,
   unknown: "Something went wrong. Nothing was sent.",
   builtMismatch: (detail: string): string => `SIP's server sent a transaction that is not what you asked for (${detail}). Nothing was signed.`,
   signedMismatch: (detail: string): string => `Phantom changed the transaction beyond its fee (${detail}). Nothing was sent.`,

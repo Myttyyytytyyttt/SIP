@@ -581,6 +581,27 @@ describe("createVaultFlow", () => {
     expect(h.send).not.toHaveBeenCalled();
   });
 
+  it("a pension key short of SOL is told to add SOL, with the rent and fees the build quoted, or without a figure when the build quoted none", async () => {
+    const rentShort = { err: { InstructionError: [2, { Custom: 1 }] }, logs: ["Transfer: insufficient lamports 1000000, need 1760880"] };
+    const quoted = harness();
+    quoted.build.mockImplementationOnce(async () => ok({ ...(quoted.createVault() as Record<string, unknown>), costs: { rentLamports: "1760880", signatureFeeLamports: "5000", priorityFeeLamports: "6000" } }));
+    quoted.send.mockImplementationOnce(async () => failure(422, "simulation_failed", rentShort));
+    expect(await createVaultFlow(quoted.createDeps, { pensionKey: quoted.pensionKey, mode: 0 })).toEqual({
+      ok: false,
+      kind: "refused",
+      message: "Your pension key needs more SOL: this action costs about 0.00177188 SOL in rent and fees. Add SOL in Phantom, then try again. Nothing moved.",
+      code: "simulation_failed",
+    });
+
+    const unquoted = harness();
+    unquoted.send.mockImplementationOnce(async () => failure(422, "simulation_failed", { err: "InsufficientFundsForFee", logs: [] }));
+    expect(await createVaultFlow(unquoted.createDeps, { pensionKey: unquoted.pensionKey, mode: 0 })).toMatchObject({
+      ok: false,
+      kind: "refused",
+      message: "Your pension key does not hold enough SOL for this action's rent and fees. Add SOL in Phantom, then try again. Nothing moved.",
+    });
+  });
+
   it("without Phantom connected, refuses with words and makes no request", async () => {
     const h = harness();
     const result = await createVaultFlow({ ...h.createDeps, signers: { refusal: "Phantom is not connected to this page. Open Phantom, unlock it, and reload." } }, { pensionKey: h.pensionKey, mode: 0 });

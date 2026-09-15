@@ -50,6 +50,21 @@ describe("words", () => {
     );
   });
 
+  it("a pension key short of SOL is told to add SOL, with what the action costs when known: rent the System program could not take, a fee, rent for the fee payer, or no account at all", () => {
+    const needsSol = (cost: string) => `Your pension key needs more SOL: this action costs about ${cost} SOL in rent and fees. Add SOL in Phantom, then try again. Nothing moved.`;
+    const withoutCost = "Your pension key does not hold enough SOL for this action's rent and fees. Add SOL in Phantom, then try again. Nothing moved.";
+    const rentShort = { InstructionError: [2, { Custom: 1 }] };
+    const rentLogs = ["Program 11111111111111111111111111111111 invoke [2]", "Transfer: insufficient lamports 1000000, need 1760880", "Program 11111111111111111111111111111111 failed: custom program error: 0x1"];
+    expect(transactionErrorWords(rentShort, rentLogs, { costLamports: 1_771_880n })).toBe(needsSol("0.00177188"));
+    expect(vaultFailureWords(failure("simulation_failed", { err: rentShort, logs: rentLogs }), { costLamports: 1_771_880n })).toBe(needsSol("0.00177188"));
+    expect(transactionErrorWords(rentShort, rentLogs)).toBe(withoutCost);
+    for (const err of ["InsufficientFundsForFee", "AccountNotFound", { InsufficientFundsForRent: { account_index: 0 } }]) {
+      expect(vaultFailureWords(failure("simulation_failed", { err, logs: [] }), { costLamports: 11_000n })).toBe(needsSol("0.000011"));
+    }
+    // SPL Token's own error 1 is a token balance, not SOL: it keeps the program's words.
+    expect(transactionErrorWords(rentShort, ["Program log: Error: insufficient funds"])).not.toContain("Add SOL");
+  });
+
   it("an account that exists, an expired blockhash, a rate limit and an unreachable server", () => {
     expect(transactionErrorWords(instructionError(0), ["Allocate: account Address { address: X, base: None } already in use"])).toBe("It already exists. Refreshing.");
     expect(vaultFailureWords(failure("simulation_failed", { err: "BlockhashNotFound", logs: [] }))).toBe(FAILURE_COPY.blockhashExpired);

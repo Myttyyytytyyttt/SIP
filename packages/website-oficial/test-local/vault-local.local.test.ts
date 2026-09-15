@@ -801,6 +801,25 @@ describe("web-boveda on the tested sip_vault", () => {
     expect((await rawBuild({ action: "mintMoney", owner: key(ownerA) })).status).toBe(400);
   });
 
+  it("15b. a pension key short of SOL is told by the validator's own refusal to add SOL, with what the action costs; one that never held SOL too", async () => {
+    // Enough for the fees, not for the vault's rent: the System program refuses to fund the account.
+    const short = Keypair.generate();
+    await direct(new Transaction().add(SystemProgram.transfer({ fromPubkey: ownerA.publicKey, toPubkey: short.publicKey, lamports: 1_000_000 })), ownerA);
+    const quoted = rent(125) + 5_000n + 6_000n;
+    const refused = await createVaultFlow({ api, signers: wallets(short, tradingA).pension }, { pensionKey: key(short), mode: 0 });
+    expect(refused).toMatchObject({ ok: false, kind: "refused", code: "simulation_failed" });
+    expect(!refused.ok && refused.message).toBe(
+      `Your pension key needs more SOL: this action costs about ${Number(quoted) / 1e9} SOL in rent and fees. Add SOL in Phantom, then try again. Nothing moved.`,
+    );
+    expect(await connection.getAccountInfo(new PublicKey(deriveVaultPda(key(short)).toBase58()), "confirmed")).toBeNull();
+
+    // Never funded: the simulation cannot find the fee payer at all.
+    const empty = Keypair.generate();
+    const none = await createVaultFlow({ api, signers: wallets(empty, tradingA).pension }, { pensionKey: key(empty), mode: 0 });
+    expect(none).toMatchObject({ ok: false, kind: "refused" });
+    expect(!none.ok && none.message).toContain("Add SOL in Phantom, then try again.");
+  });
+
   it("16. every landing used at most half of its compute limit", () => {
     const landings = Object.values(report.units);
     // Part 1's five, two policies and a pause, a withdrawal, and the wSOL and SPYx token withdrawals.
