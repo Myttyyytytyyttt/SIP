@@ -21,14 +21,13 @@
  * config it is WalletsSetupModal, which needs no provider and names what is
  * missing.
  *
- * THE MODAL IS A PLACEHOLDER until the Solana wallet screens exist:
- * SolanaWalletsPendingModal, which says so.
+ * With a config the modal is WalletsModal: the same WalletsScreen as /wallets.
  */
 
 import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
 
 import Providers from "@/app/providers";
-import { SolanaWalletsPendingModal } from "@/components/wallets/SolanaWalletsPendingModal";
+import { WalletsModal } from "@/components/wallets/WalletsModal";
 import { WalletsSetupModal } from "@/components/wallets/WalletsSetupModal";
 import type { ConfigProblem, SolanaPublicConfig } from "@/lib/config";
 
@@ -68,7 +67,7 @@ export function WalletsHost({
         // instant.
         <Providers config={config}>
           {children}
-          {mounted ? <SolanaWalletsPendingModal open={open} onOpenChange={setOpen} /> : null}
+          {mounted ? <WalletsModal open={open} onOpenChange={setOpen} /> : null}
         </Providers>
       ) : (
         <>
