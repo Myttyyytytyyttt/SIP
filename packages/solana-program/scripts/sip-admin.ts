@@ -563,7 +563,7 @@ const USAGE = "usage: sip-admin.ts status [--allow-unconfigured] | init-config |
 
 async function main(): Promise<number> {
   const nuvem = Object.keys(process.env).filter((name) => name.startsWith("NUVEM_"));
-  if (nuvem.length > 0) throw new Refused(`Nuvem-era variables are set (${nuvem.join(", ")}): this tool speaks SIP_* only`);
+  if (nuvem.length > 0) throw new Refused(`Legacy variable names are set (${nuvem.join(", ")}): this tool speaks SIP_* only`);
   const [verb, ...rest] = process.argv.slice(2);
   switch (verb) {
     case "status":

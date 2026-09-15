@@ -107,7 +107,7 @@ redact() {
 }
 
 NUVEM_SET=$(env | sed -n 's/^\(NUVEM_[A-Za-z0-9_]*\)=.*/\1/p' | tr '\n' ' ')
-[ -z "$NUVEM_SET" ] || die "Refused: Nuvem-era variables are set (${NUVEM_SET% }). This script speaks SIP_* only: unset them."
+[ -z "$NUVEM_SET" ] || die "Refused: legacy variable names are set (${NUVEM_SET% }). This script speaks SIP_* only: unset them."
 
 # @solana/web3.js no longer loads on Node 20, and a login shell on this Mac starts on Node 20.
 command -v node >/dev/null 2>&1 || die "node is not on PATH. Node 22 is required: $USE_NODE22"

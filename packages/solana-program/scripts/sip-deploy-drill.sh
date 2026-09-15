@@ -156,7 +156,7 @@ echo
 echo "refused before anything is sent"
 mkdir -p "$TMP/node20" && printf '#!/bin/sh\necho 20\n' >"$TMP/node20/node" && chmod +x "$TMP/node20/node"
 PATH="$TMP/node20:$PATH" expect fail "Node 22 is required" "a shell on Node 20 is refused before anything runs" -- sd status
-NUVEM_SOLANA_KEYPAIR=/nonexistent expect fail "Nuvem-era variables" "a NUVEM_* variable refuses" -- sd status
+NUVEM_SOLANA_KEYPAIR=/nonexistent expect fail "legacy variable names are set" "a NUVEM_* variable refuses" -- sd status
 D_CLUSTER="" expect fail "is not mainnet" "a local validator without SIP_DEPLOY_CLUSTER=localnet refuses" -- sd status
 D_URL="127.0.0.1:$PORT/?api-key=$CANARY" expect fail "does not start with http\(s\)://host \(the value is not shown\)" "an RPC value without a scheme refuses without echoing it" -- sd status
 D_URL="http://localhost:1@127.0.0.1:$PORT/" expect fail "does not start with http\(s\)://host" "a user@ prefix cannot dress a host as localhost" -- sd status
