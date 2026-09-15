@@ -23,6 +23,8 @@ import { PublicKey, type PublicKeyInitData } from "@solana/web3.js";
 interface AccountClient {
   fetch(address: PublicKey): Promise<unknown>;
   fetchNullable(address: PublicKey): Promise<unknown>;
+  /** One decoded account per address, in order, null where none exists. Anchor chunks the request. */
+  fetchMultiple(addresses: PublicKey[]): Promise<(unknown | null)[]>;
 }
 
 function client(program: anchor.Program, name: string): AccountClient {
@@ -104,6 +106,37 @@ function vaultState(decoded: unknown): VaultState {
 
 export async function readVault(program: anchor.Program, address: PublicKey): Promise<VaultState> {
   return vaultState(await client(program, "vault").fetch(address));
+}
+
+/**
+ * Every vault a sweep's links name, in one batched read, keyed by base58.
+ *
+ * ONE REQUEST, NOT ONE PER LINK. Each settle turn read its own vault, and the
+ * read-model mirror read it again after every SETTLED: two account reads per
+ * settling link per sweep, repeated for every link that shares a vault. The
+ * addresses are de-duplicated here and fetched through the IDL's fetchMultiple,
+ * which Anchor splits into requests of 99.
+ *
+ * NULL MEANS THE CHAIN HAS NO ACCOUNT THERE, never "could not read". A failed
+ * request throws, and so does an account that does not decode, naming the
+ * field, exactly as readVault does.
+ */
+export async function readVaults(
+  program: anchor.Program,
+  addresses: readonly PublicKey[],
+): Promise<ReadonlyMap<string, VaultState | null>> {
+  const unique = [...new Map(addresses.map((address) => [address.toBase58(), address] as const)).values()];
+  const vaults = new Map<string, VaultState | null>();
+  if (unique.length === 0) return vaults;
+  const decoded = await client(program, "vault").fetchMultiple(unique);
+  if (decoded.length !== unique.length) {
+    throw new Error(`asked for ${unique.length} vaults and got ${decoded.length} answers: the batched read no longer lines up with its addresses`);
+  }
+  unique.forEach((address, index) => {
+    const account = decoded[index];
+    vaults.set(address.toBase58(), account === null || account === undefined ? null : vaultState(account));
+  });
+  return vaults;
 }
 
 /**

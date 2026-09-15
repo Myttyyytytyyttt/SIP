@@ -1,11 +1,11 @@
 // One settlement turn for one linked wallet.
 //
 // Ported from Nuvem's solana-lab keeper (keeper/src/settle-tick.ts), moved to
-// settle_v2. What is new: the vault is read through the IDL on every turn, a
-// paused vault or protocol stops at PAUSED, a VOLUME vault stops at
-// UNSUPPORTED_MODE, the attestation binds the mode, the vault's own rate and
-// policy nonce and a deadline, and a dry run measures and reports without any
-// key in reach. What is unchanged: the frontier-from-epoch
+// settle_v2. What is new: the vault arrives decoded through the IDL from the
+// sweep's one batched read, a paused vault or protocol stops at PAUSED, a VOLUME
+// vault stops at UNSUPPORTED_MODE, the attestation binds the vault's own mode,
+// rate and policy nonce and a deadline, and a dry run measures and reports
+// without any key in reach. What is unchanged: the frontier-from-epoch
 // rule, the order of the completeness checks, confirm plus the receipt's own
 // meta.err, and the vault delta read from pre/post balances.
 //
@@ -14,7 +14,7 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, Transaction } from "@solana/web3.js";
 import { summarizeUpstreamError } from "@sip/solana-log";
-import { readVault } from "./accounts.js";
+import type { VaultState } from "./accounts.js";
 import type { ManagedLink } from "./discovery.js";
 import { measureSince } from "./measure-window.js";
 import { method } from "./methods.js";
@@ -52,6 +52,11 @@ export interface SettleDeps {
   readonly connection: Connection;
   readonly program: anchor.Program;
   readonly link: ManagedLink;
+  /**
+   * The link's vault, decoded from the sweep's one batched read (readVaults),
+   * or null when that read found no account at the address the link names.
+   */
+  readonly vault: VaultState | null;
   /** Signs attestations: the settle key. NULL IN DRY RUN — a dry run holds no key. */
   readonly attester: Keypair | null;
   /**
@@ -70,13 +75,26 @@ export interface SettleDeps {
 }
 
 export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
-  const { connection, program, link } = deps;
+  const { connection, program, link, vault } = deps;
 
-  // THE VAULT IS READ EVERY TURN. Its mode, its rate and its policy nonce are
-  // what settle_v2 rebuilds into the message it verifies, so an attestation
-  // built from a remembered copy is refused the moment the owner writes a new
-  // policy.
-  const vault = await readVault(program, link.vault);
+  // THE VAULT COMES FROM THIS SWEEP'S BATCHED READ, NEVER FROM AN EARLIER ONE.
+  // Its mode, its rate and its policy nonce are what settle_v2 rebuilds into the
+  // message it verifies. Within a sweep the copy is as old as the turns before
+  // this one; a policy the owner writes in that gap makes this attestation a
+  // different byte string, so settle_v2 refuses it, nothing moves, the frontier
+  // stays, and the next sweep reads the new policy.
+  if (vault === null) {
+    // NOT A RESTING STATE. No sip-vault instruction closes a vault (withdraw
+    // keeps its rent floor) and settle_v2 needs this one, so an address the
+    // sweep's read found empty means the read or the link is wrong, and a human
+    // should look.
+    return {
+      outcome: "FAILED",
+      detail:
+        `vault account missing: the sweep's read found no account at ${link.vault.toBase58()}, the vault this link names; ` +
+        "nothing was measured or attested",
+    };
+  }
   // EITHER PAUSE SWITCH ENDS THE TURN HERE, before the mode, in settle.rs's own
   // order. settle_v2 refuses both, so a turn that measured, signed and sent
   // anyway burned a fee and fired a critical "settlement failed" for every

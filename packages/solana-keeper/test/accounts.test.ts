@@ -21,6 +21,7 @@ import {
   readInvestmentPolicy,
   readProtocolConfig,
   readVault,
+  readVaults,
 } from "../src/accounts.js";
 import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
@@ -141,9 +142,10 @@ function policyBytes(p: PolicyFields): Buffer {
 
 type Handler = (...args: unknown[]) => unknown;
 
-/** A Program over a stub chain that serves `accounts` and records every RPC method called. */
+/** A Program over a stub chain that serves `accounts` and records every RPC method called, with its arguments. */
 function stubChain(accounts: ReadonlyMap<string, Buffer>, extra: Readonly<Record<string, Handler>> = {}) {
   const calls: string[] = [];
+  const callArgs: unknown[][] = [];
   const info = (address: unknown) => {
     const data = accounts.get((address as PublicKey).toBase58());
     return data === undefined ? null : { data, executable: false, lamports: 10_000_000_000, owner: programId, rentEpoch: 0 };
@@ -151,6 +153,7 @@ function stubChain(accounts: ReadonlyMap<string, Buffer>, extra: Readonly<Record
   const served: Record<string, Handler> = {
     getAccountInfoAndContext: async (address) => ({ context: { slot: 1 }, value: info(address) }),
     getAccountInfo: async (address) => info(address),
+    getMultipleAccountsInfoAndContext: async (addresses) => ({ context: { slot: 1 }, value: (addresses as PublicKey[]).map(info) }),
     ...extra,
   };
   const connection = new Proxy(
@@ -160,6 +163,7 @@ function stubChain(accounts: ReadonlyMap<string, Buffer>, extra: Readonly<Record
         if (typeof prop !== "string" || prop === "then") return undefined;
         return (...args: unknown[]) => {
           calls.push(prop);
+          callArgs.push(args);
           const handler = served[prop];
           if (handler === undefined) throw new Error(`unexpected RPC call: ${prop}`);
           return handler(...args);
@@ -172,7 +176,7 @@ function stubChain(accounts: ReadonlyMap<string, Buffer>, extra: Readonly<Record
   };
   const wallet = { publicKey: PublicKey.default, signTransaction: refuse, signAllTransactions: refuse };
   const program = new anchor.Program(idl, new anchor.AnchorProvider(connection, wallet, { commitment: "confirmed" }));
-  return { program, connection, calls };
+  return { program, connection, calls, callArgs };
 }
 
 const vaultFields = (over: Partial<VaultFields> = {}): VaultFields => ({
@@ -213,6 +217,55 @@ describe("the account readers, over bytes laid out as state.rs declares them", (
     expect(read).toEqual(planted);
     expect(decodeVault(program, vaultBytes(planted))).toEqual(planted);
     expect(calls).toEqual(["getAccountInfoAndContext"]);
+  });
+
+  it("read every Vault field for three links over two vaults, in one request that names each vault once", async () => {
+    const [shared, own] = [key(), key()];
+    const plantedShared = vaultFields({
+      skimMode: 0,
+      skimBps: 2_000,
+      volumeBps: 200,
+      policyNonce: 4n,
+      maxContribution: 7_000_000_000n,
+      walletReserve: 10_000_000n,
+    });
+    const plantedOwn = vaultFields({
+      paused: true,
+      skimMode: 1,
+      skimBps: 9_999,
+      volumeBps: 1,
+      policyNonce: 0x0a0b_0c0d_0e0f_1011n,
+      maxContribution: 1n,
+      walletReserve: 1_000_000_000n,
+    });
+    const { program, calls, callArgs } = stubChain(
+      new Map([
+        [shared.toBase58(), vaultBytes(plantedShared)],
+        [own.toBase58(), vaultBytes(plantedOwn)],
+      ]),
+    );
+
+    const vaults = await readVaults(program, [shared, own, shared]);
+    expect(calls).toEqual(["getMultipleAccountsInfoAndContext"]);
+    expect((callArgs[0]?.[0] as PublicKey[]).map((address) => address.toBase58())).toEqual([shared.toBase58(), own.toBase58()]);
+    expect(vaults.size).toBe(2);
+    expect(vaults.get(shared.toBase58())).toEqual(plantedShared);
+    expect(vaults.get(own.toBase58())).toEqual(plantedOwn);
+  });
+
+  it("map an address with no vault account to null, in order, and ask for nothing when there are no links", async () => {
+    const [absent, present] = [key(), key()];
+    const planted = vaultFields();
+    const { program, calls } = stubChain(new Map([[present.toBase58(), vaultBytes(planted)]]));
+
+    const vaults = await readVaults(program, [absent, present]);
+    expect(vaults.get(absent.toBase58())).toBeNull();
+    expect(vaults.get(present.toBase58())).toEqual(planted);
+    expect(calls).toEqual(["getMultipleAccountsInfoAndContext"]);
+
+    const empty = stubChain(new Map());
+    expect((await readVaults(empty.program, [])).size).toBe(0);
+    expect(empty.calls).toEqual([]);
   });
 
   it("read every ProtocolConfig field, and null when the PDA does not exist", async () => {
@@ -368,23 +421,41 @@ describe("the ticks' first steps, over the same bytes", () => {
     return { linkAddress: key(), wallet: key(), vault, epoch: 300_000_000n, settlementNonce: 0n, frontierSlot: 0n };
   }
 
-  it("rest a settle for a paused vault, or a paused protocol, after reading the vault alone", async () => {
+  it("rest a settle for a paused vault, or a paused protocol, on the sweep's vault read with no request of its own", async () => {
     for (const [vaultOver, protocolPaused, named] of [
       [{ paused: true }, false, "VaultPaused"],
       [{}, true, "ProtocolPaused"],
     ] as const) {
       const { vault, connection, program, calls } = chainWith(vaultOver, null);
-      const result = await runSettleTick({ connection, program, link: linkTo(vault), attester: null, walletSigner: null, live: false, protocolPaused });
+      const read = await readVaults(program, [vault]);
+      expect(calls.splice(0)).toEqual(["getMultipleAccountsInfoAndContext"]);
+      const result = await runSettleTick({ connection, program, link: linkTo(vault), vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused });
       expect(result.outcome).toBe("PAUSED");
       expect(result.detail).toContain(named);
-      expect(calls).toEqual(["getAccountInfoAndContext"]);
+      expect(calls).toEqual([]);
     }
   });
 
-  it("stop a VOLUME vault at UNSUPPORTED_MODE after reading the vault alone", async () => {
+  it("stop a VOLUME vault at UNSUPPORTED_MODE on the sweep's vault read with no request of its own", async () => {
     const { vault, connection, program, calls } = chainWith({ skimMode: 1 }, null);
-    const result = await runSettleTick({ connection, program, link: linkTo(vault), attester: null, walletSigner: null, live: false, protocolPaused: false });
+    const read = await readVaults(program, [vault]);
+    expect(calls.splice(0)).toEqual(["getMultipleAccountsInfoAndContext"]);
+    const result = await runSettleTick({ connection, program, link: linkTo(vault), vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false });
     expect(result.outcome).toBe("UNSUPPORTED_MODE");
-    expect(calls).toEqual(["getAccountInfoAndContext"]);
+    expect(calls).toEqual([]);
+  });
+
+  it("fail a settle whose vault the sweep's read did not find, naming the address, with no request of its own", async () => {
+    const { connection, program, calls } = chainWith({}, null);
+    const missing = key();
+    const read = await readVaults(program, [missing]);
+    expect(read.get(missing.toBase58())).toBeNull();
+    expect(calls.splice(0)).toEqual(["getMultipleAccountsInfoAndContext"]);
+    // Live and with no signer: the missing vault is what gets reported, not NO_SIGNER.
+    const result = await runSettleTick({ connection, program, link: linkTo(missing), vault: read.get(missing.toBase58()) ?? null, attester: null, walletSigner: null, live: true, protocolPaused: false });
+    expect(result.outcome).toBe("FAILED");
+    expect(result.detail).toContain("vault account missing");
+    expect(result.detail).toContain(missing.toBase58());
+    expect(calls).toEqual([]);
   });
 });

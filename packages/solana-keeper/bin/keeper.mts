@@ -33,7 +33,7 @@ import { createServer } from "node:http";
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
-import { readVault } from "../src/accounts.js";
+import { readVaults } from "../src/accounts.js";
 import { createAlerter } from "../src/alerts.js";
 import {
   keysForTurn,
@@ -389,6 +389,11 @@ async function sweep(): Promise<void> {
       if (snapshot.programDeployed === true) changes.change("program", "the program is deployed", { program: programId.toBase58() });
       links = await discoverLinks(connection, programId, TRADING_LINK_DISC);
     }
+    // EVERY VAULT THE LINKS NAME, IN ONE REQUEST. Each settle turn read its own
+    // vault, and the history mirror read it again after every SETTLED. A failed
+    // read fails the sweep loudly, as a failed discovery does; no links, no
+    // request.
+    const vaults = await readVaults(program, links.map((link) => link.vault));
 
     // THE AUTHORITY'S EMERGENCY SWITCH, from this sweep's config read. While it
     // is on, every turn below rests as PAUSED; said once here, on change.
@@ -500,10 +505,12 @@ async function sweep(): Promise<void> {
         // through a sweep takes the keys away from the next turn, not the next
         // sweep.
         const settleTurn = keysForTurn(isLive, { settleKey: settleKeypair, walletSigner });
+        const vaultState = vaults.get(vaultAddr) ?? null;
         const settle = await runSettleTick({
           connection,
           program,
           link,
+          vault: vaultState,
           attester: settleTurn.settleKey,
           walletSigner: settleTurn.walletSigner,
           live: settleTurn.live,
@@ -544,20 +551,15 @@ async function sweep(): Promise<void> {
             settle.nonce !== undefined &&
             settle.endSlot !== undefined
           ) {
-            if (readModel.enabled) {
-              // THE WHOLE MIRROR IS OFF THE SETTLEMENT PATH — the extra RPC read
-              // as much as the write. Awaiting either here stopped that wallet's
-              // turn while `cycleRunning` stayed true, so every later sweep
-              // logged "cycle skipped" and nobody was settled.
-              void (async () => {
-                try {
-                  // The owner and skim are READ FROM THE VAULT, never assumed.
-                  const vaultState = await readVault(program, link.vault);
-                  await readModel.recordLink(vaultAddr, vaultState.owner.toBase58(), vaultState.skimBps, wallet);
-                } catch (error) {
-                  log.warn("read-model link mirror skipped (settlement unaffected)", { wallet, detail: summarizeUpstreamError(error) });
-                }
-              })();
+            // THE WHOLE MIRROR IS OFF THE SETTLEMENT PATH. Awaiting it here once
+            // stopped that wallet's turn while `cycleRunning` stayed true, so
+            // every later sweep logged "cycle skipped" and nobody was settled.
+            // The owner and skim are READ FROM THE VAULT, never assumed: the one
+            // this turn settled against, from the sweep's batched read, so the
+            // mirror no longer costs a request of its own. A failed write warns
+            // inside the read model and never throws, like recordSettlement's.
+            if (vaultState !== null) {
+              void readModel.recordLink(vaultAddr, vaultState.owner.toBase58(), vaultState.skimBps, wallet);
             }
             void readModel.recordSettlement({
               walletAddr: wallet,
