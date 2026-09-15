@@ -5,15 +5,25 @@
 import { createPrivateKey, sign } from "node:crypto";
 
 import {
+  ATA_PROGRAM,
   DEFAULT_RATES,
   OLD_NUVEM_PROGRAM_ID,
+  RAYDIUM_CLMM,
   SIP_PROGRAM_ID,
+  SPYX_MINT,
+  SYSTEM_PROGRAM,
+  TOKEN_2022_PROGRAM,
+  TOKEN_PROGRAM,
+  USDC_MINT,
+  WSOL_MINT,
   base58Encode,
   base64Encode,
+  encodeArgs,
   instructionDiscriminator,
+  ownerComputeBudget,
   tryBase64Decode,
 } from "@sip/solana-core/client";
-import { buildCreateVaultV2, buildLinkWallet, prepareLinkWalletConsent } from "@sip/solana-core/server";
+import { buildCreateVaultV2, buildLinkWallet, buildSetInvestPolicy, deriveAta, deriveInvestPda, deriveVaultPda, prepareLinkWalletConsent } from "@sip/solana-core/server";
 import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, VersionedTransaction } from "@solana/web3.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -247,6 +257,90 @@ describe("/api/solana-tx", () => {
     expect(refused.status).toBe(422);
     expect(((await refused.json()) as { error: { code: string } }).error.code).toBe("link_consent_missing");
     expect(seen).toHaveLength(2);
+  });
+
+  it("relays a first investment policy that pays for the vault's wSOL, USDC and SPYx accounts: six instructions, simulated, then sent", async () => {
+    useEnv(SOLANA_ENV);
+    const owner = Keypair.generate();
+    const built = buildSetInvestPolicy({
+      // A base58 string, for the reason signedCreateVault gives.
+      owner: owner.publicKey.toBase58(),
+      blockhash: BLOCKHASH,
+      legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: 124_719_467_624_105_690n }],
+      minConvertRateWad: 90_034_840_399_943_305n,
+      minInvestment: 5_000_000n,
+      maxPerCall: 1_000_000_000n,
+      maxRolling30d: 31_000_000_000n,
+      enabled: true,
+      computeBudget: ownerComputeBudget("set_invest_policy"),
+      vaultTokenAccounts: [
+        { mint: WSOL_MINT, tokenProgram: TOKEN_PROGRAM },
+        { mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM },
+        { mint: SPYX_MINT, tokenProgram: TOKEN_2022_PROGRAM },
+      ],
+    });
+    const unsigned = tryBase64Decode(built.txBase64);
+    if (unsigned === null) throw new Error("the builder returned something that is not base64");
+    const tx = VersionedTransaction.deserialize(unsigned);
+    expect(tx.message.compiledInstructions).toHaveLength(6);
+    tx.sign([owner]);
+    const signature = base58Encode(tx.signatures[0]!);
+    const seen = stubUpstream((body) =>
+      body.method === "simulateTransaction" ? rpcOk(body, { context: { slot: 323 }, value: { err: null, logs: [], unitsConsumed: 60_000 } }) : rpcOk(body, signature),
+    );
+    const response = await POST(sendRequest({ action: "send", signedTxBase64: base64Encode(tx.serialize()) }));
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { signature: string }).signature).toBe(signature);
+    expect(seen.map((body) => body.method)).toEqual(["simulateTransaction", "sendTransaction"]);
+  });
+
+  it("refuses a policy that creates a token account for another owner's vault (422 vault_account_invalid) before any upstream call", async () => {
+    useEnv(SOLANA_ENV);
+    const seen = stubUpstream((body) => rpcOk(body, null));
+    const owner = Keypair.generate();
+    const vault = deriveVaultPda(owner.publicKey.toBase58()).toBase58();
+    const otherVault = deriveVaultPda(Keypair.generate().publicKey.toBase58()).toBase58();
+    // This app's own web3.js objects, from base58: the core's copy of the class is never mixed in.
+    const at = (address: string): PublicKey => new PublicKey(address);
+    const theirAccount = new TransactionInstruction({
+      programId: at(ATA_PROGRAM),
+      keys: [
+        { pubkey: owner.publicKey, isSigner: true, isWritable: true },
+        { pubkey: at(deriveAta(otherVault, WSOL_MINT, TOKEN_PROGRAM).toBase58()), isSigner: false, isWritable: true },
+        { pubkey: at(otherVault), isSigner: false, isWritable: false },
+        { pubkey: at(WSOL_MINT), isSigner: false, isWritable: false },
+        { pubkey: at(SYSTEM_PROGRAM), isSigner: false, isWritable: false },
+        { pubkey: at(TOKEN_PROGRAM), isSigner: false, isWritable: false },
+      ],
+      data: Buffer.from([1]),
+    });
+    const policy = new TransactionInstruction({
+      programId: at(SIP_PROGRAM_ID),
+      keys: [
+        { pubkey: owner.publicKey, isSigner: true, isWritable: true },
+        { pubkey: at(vault), isSigner: false, isWritable: false },
+        { pubkey: at(deriveInvestPda(vault).toBase58()), isSigner: false, isWritable: true },
+        { pubkey: at(SYSTEM_PROGRAM), isSigner: false, isWritable: false },
+      ],
+      data: Buffer.from(
+        encodeArgs("set_invest_policy", {
+          legs: [{ mint: SPYX_MINT, weight_bps: 10_000, min_out_rate_wad: 124_719_467_624_105_690n }],
+          venue_program: RAYDIUM_CLMM,
+          in_mint: USDC_MINT,
+          min_convert_rate_wad: 90_034_840_399_943_305n,
+          min_investment: 5_000_000n,
+          max_per_call: 1_000_000_000n,
+          max_rolling_30d: 31_000_000_000n,
+          enabled: true,
+        }),
+      ),
+    });
+    const tx = new Transaction({ feePayer: owner.publicKey, recentBlockhash: BLOCKHASH }).add(theirAccount, policy);
+    tx.sign(owner);
+    const response = await POST(sendRequest({ action: "send", signedTxBase64: base64Encode(tx.serialize()) }));
+    expect(response.status).toBe(422);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe("vault_account_invalid");
+    expect(seen).toHaveLength(0);
   });
 
   it("a send-stage upstream failure is 502 send_unconfirmed with the signature to confirm, and never quotes the endpoint", async () => {

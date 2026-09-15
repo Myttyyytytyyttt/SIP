@@ -24,10 +24,28 @@
 // else, so a wallet that adds a priority fee only to a transaction without one
 // (Phantom) leaves the message alone. Without it the bytes are exactly what they
 // were before the option existed. The SIP instruction stays last either way.
+//
+// A POLICY CAN PAY FOR ITS VAULT'S TOKEN ACCOUNTS. set_invest_policy creates no
+// token account, and the keeper would otherwise create the vault's wSOL, USDC and
+// leg accounts at the crank's expense. With `vaultTokenAccounts` the owner pays
+// instead: one Associated Token Account CreateIdempotent per entry, after the
+// compute budget and before set_invest_policy, each for ATA(vault, mint), and
+// only for wSOL, the policy's in-mint or one of its legs. The verifier holds the
+// same bounds (verify-tx.ts rule 13b).
 
 import { Transaction, TransactionInstruction, type PublicKey } from "@solana/web3.js";
 
-import { COMPUTE_BUDGET_PROGRAM, ED25519_PROGRAM, RAYDIUM_CLMM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT } from "../client/addresses";
+import {
+  ATA_PROGRAM,
+  COMPUTE_BUDGET_PROGRAM,
+  ED25519_PROGRAM,
+  RAYDIUM_CLMM,
+  SYSTEM_PROGRAM,
+  TOKEN_2022_PROGRAM,
+  TOKEN_PROGRAM,
+  USDC_MINT,
+  WSOL_MINT,
+} from "../client/addresses";
 import { isBase58OfLength } from "../client/base58";
 import { base64Encode, tryBase64Decode } from "../client/base64";
 import { BorshError, encodeArgs } from "../client/borsh";
@@ -38,7 +56,7 @@ import type { ComputeBudget } from "../client/product";
 import { U64_MAX, investPolicyProblems, vaultPolicyProblems, type InvestLegInput, type VaultPolicyInput } from "../client/rules";
 import { ED25519_SIGNATURE_BYTES, ed25519SignatureValid, encodeEd25519Verify } from "./ed25519";
 import { InvalidKeyError, SIP_PROGRAM_KEY, deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda, toPublicKey, type KeyLike } from "./pda";
-import { MAX_COMPUTE_UNIT_LIMIT, MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS } from "./verify-tx";
+import { MAX_COMPUTE_UNIT_LIMIT, MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS, MAX_VAULT_TOKEN_ACCOUNT_CREATES } from "./verify-tx";
 
 export class BuildError extends Error {
   override readonly name: string = "BuildError";
@@ -97,6 +115,11 @@ export interface BuiltTransaction {
 
 const ED25519_PROGRAM_KEY = toPublicKey(ED25519_PROGRAM, "the Ed25519 program");
 const COMPUTE_BUDGET_PROGRAM_KEY = toPublicKey(COMPUTE_BUDGET_PROGRAM, "the ComputeBudget program");
+const ATA_PROGRAM_KEY = toPublicKey(ATA_PROGRAM, "the Associated Token Account program");
+const SYSTEM_PROGRAM_KEY = toPublicKey(SYSTEM_PROGRAM, "the System program");
+
+/** The Associated Token Account program's CreateIdempotent: data [1]. Create is [] and RecoverNested [2]. */
+export const ATA_CREATE_IDEMPOTENT = 1;
 
 function key(value: KeyLike, what: string): PublicKey {
   try {
@@ -438,6 +461,19 @@ export function buildWithdrawToken(input: WithdrawTokenInput): BuiltTransaction 
   };
 }
 
+export interface VaultTokenAccountInput {
+  readonly mint: KeyLike;
+  /** The mint's owning program, read from the chain: classic SPL Token or Token-2022. */
+  readonly tokenProgram: KeyLike;
+}
+
+export interface VaultTokenAccount {
+  readonly mint: string;
+  /** ATA(vault, mint, tokenProgram): the account CreateIdempotent makes. */
+  readonly address: string;
+  readonly tokenProgram: string;
+}
+
 export interface SetInvestPolicyInput extends OwnerTxOptions {
   readonly owner: KeyLike;
   readonly legs: readonly InvestLegInput[];
@@ -450,10 +486,65 @@ export interface SetInvestPolicyInput extends OwnerTxOptions {
   readonly maxPerCall: bigint;
   readonly maxRolling30d: bigint;
   readonly enabled: boolean;
+  /**
+   * The vault's token accounts the owner pays for, in this order, ahead of
+   * set_invest_policy: at most MAX_VAULT_TOKEN_ACCOUNT_CREATES, each for wSOL,
+   * the in-mint or a leg, no mint twice. Absent: none, and the bytes are
+   * unchanged.
+   */
+  readonly vaultTokenAccounts?: readonly VaultTokenAccountInput[];
 }
 
-/** set_invest_policy(legs, venue_program, in_mint, min_convert_rate_wad, min_investment, max_per_call, max_rolling_30d, enabled). */
-export function buildSetInvestPolicy(input: SetInvestPolicyInput): BuiltTransaction & { readonly policy: string } {
+/** One CreateIdempotent per entry, in spl-token's account order: [payer (s,w), ATA (w), wallet, mint, System, token program]. */
+function vaultTokenAccountCreates(
+  owner: PublicKey,
+  vault: PublicKey,
+  entries: unknown,
+  allowedMints: ReadonlySet<string>,
+): { readonly instructions: TransactionInstruction[]; readonly accounts: VaultTokenAccount[] } {
+  if (entries === undefined) return { instructions: [], accounts: [] };
+  if (!Array.isArray(entries)) throw new BuildError(["vaultTokenAccounts must be a list of {mint, tokenProgram}"]);
+  if (entries.length > MAX_VAULT_TOKEN_ACCOUNT_CREATES) {
+    throw new BuildError([`at most ${MAX_VAULT_TOKEN_ACCOUNT_CREATES} vault token accounts are created with a policy (wSOL, the in-mint and a leg)`]);
+  }
+  const instructions: TransactionInstruction[] = [];
+  const accounts: VaultTokenAccount[] = [];
+  const seen = new Set<string>();
+  for (const [index, entry] of (entries as readonly Partial<VaultTokenAccountInput>[]).entries()) {
+    const at = `vault token account #${index + 1}`;
+    const mint = key(entry?.mint as KeyLike, `${at}'s mint`);
+    const program = key(entry?.tokenProgram as KeyLike, `${at}'s tokenProgram`);
+    const mintName = mint.toBase58();
+    const programName = program.toBase58();
+    if (programName !== TOKEN_PROGRAM && programName !== TOKEN_2022_PROGRAM) throw new BuildError([`${at}: tokenProgram must be the SPL Token or Token-2022 program`]);
+    if (!allowedMints.has(mintName)) throw new BuildError([`${at}: ${mintName} is neither wSOL, the policy's in-mint nor one of its legs`]);
+    if (seen.has(mintName)) throw new BuildError([`${at}: the ${mintName} account is already in the list`]);
+    seen.add(mintName);
+    const address = deriveAta(vault, mint, program);
+    instructions.push(
+      new TransactionInstruction({
+        programId: ATA_PROGRAM_KEY,
+        keys: [
+          { pubkey: owner, isSigner: true, isWritable: true },
+          { pubkey: address, isSigner: false, isWritable: true },
+          { pubkey: vault, isSigner: false, isWritable: false },
+          { pubkey: mint, isSigner: false, isWritable: false },
+          { pubkey: SYSTEM_PROGRAM_KEY, isSigner: false, isWritable: false },
+          { pubkey: program, isSigner: false, isWritable: false },
+        ],
+        data: Buffer.from([ATA_CREATE_IDEMPOTENT]),
+      }),
+    );
+    accounts.push({ mint: mintName, address: address.toBase58(), tokenProgram: programName });
+  }
+  return { instructions, accounts };
+}
+
+/**
+ * set_invest_policy(legs, venue_program, in_mint, min_convert_rate_wad, min_investment, max_per_call, max_rolling_30d, enabled),
+ * behind the CreateIdempotent of every vault token account the owner pays for.
+ */
+export function buildSetInvestPolicy(input: SetInvestPolicyInput): BuiltTransaction & { readonly policy: string; readonly vaultTokenAccounts: readonly VaultTokenAccount[] } {
   const owner = key(input.owner, "owner");
   const rules = {
     legs: input.legs,
@@ -478,6 +569,12 @@ export function buildSetInvestPolicy(input: SetInvestPolicyInput): BuiltTransact
     max_rolling_30d: rules.maxRolling30d,
     enabled: rules.enabled,
   };
+  const allowedMints = new Set([WSOL_MINT, rules.inMint, ...rules.legs.map((leg) => leg.mint)]);
+  const creates = vaultTokenAccountCreates(owner, vault, input.vaultTokenAccounts, allowedMints);
   const instruction = sipInstruction("set_invest_policy", { owner, vault, policy }, args);
-  return { ...compile("set_invest_policy", [instruction], owner, [owner], input, vault), policy: policy.toBase58() };
+  return {
+    ...compile("set_invest_policy", [...creates.instructions, instruction], owner, [owner], input, vault),
+    policy: policy.toBase58(),
+    vaultTokenAccounts: creates.accounts,
+  };
 }

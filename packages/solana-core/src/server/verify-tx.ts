@@ -21,6 +21,9 @@
 //   7  Nuvem's program nowhere in the account keys              old_program
 //   8  1..4 instructions, each for SIP, ComputeBudget or
 //      Ed25519SigVerify                                         instruction_count / program_not_allowed
+//  8b  the Associated Token Account program only beside
+//      set_invest_policy, and only its instructions may take the
+//      count past 4, to at most 6                               program_not_allowed / instruction_count
 //   9  exactly one SIP instruction, an owner instruction, whose
 //      arguments decode exactly                                 instruction_count / unknown_discriminator /
 //                                                               instruction_not_allowed
@@ -40,6 +43,12 @@
 //      authority is the owner of ['vault', owner], signing
 //      alone                                                    account_binding / wallet_is_owner /
 //                                                               signature_count
+// 13b  each of those token-account instructions is CreateIdempotent
+//      (data [1], 6 accounts) ahead of set_invest_policy, paid by
+//      its owner (the fee payer), for ['vault', owner], a mint the
+//      policy names (wSOL, in_mint or a leg), the System program,
+//      SPL Token or Token-2022, at ATA(vault, mint, program), no
+//      mint twice and at most 3                                 vault_account_invalid
 //  14  the consent says what link_wallet will compare: its key is
 //      the wallet, its bytes are SIP_LINK_V1 for (program,
 //      wallet, vault, owner), and its signature verifies        link_consent_wrong_signer /
@@ -54,10 +63,17 @@
 // run here first, so a consent the chain would refuse costs no simulation, and
 // an Ed25519 instruction anywhere else is refused because nothing SIP builds
 // puts one there.
+//
+// WHY 8b AND 13b. set_invest_policy creates no token account, and the owner pays
+// for the vault's wSOL, USDC and leg accounts in the same transaction. Bound this
+// way, a CreateIdempotent can only make a token account owned by the signer's own
+// vault, for a mint the policy it sits beside names, paid by that signer: it moves
+// no token and sends no lamport anywhere but into that account's rent. A mint
+// whose owner is not the named token program fails in simulation.
 
 import { VersionedTransaction } from "@solana/web3.js";
 
-import { COMPUTE_BUDGET_PROGRAM, ED25519_PROGRAM } from "../client/addresses";
+import { ATA_PROGRAM, COMPUTE_BUDGET_PROGRAM, ED25519_PROGRAM, SYSTEM_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, WSOL_MINT } from "../client/addresses";
 import { base58Encode } from "../client/base58";
 import { base64Encode } from "../client/base64";
 import { decodeArgs } from "../client/borsh";
@@ -72,7 +88,7 @@ import {
 } from "../client/idl";
 import { linkConsentMessage } from "../client/link-consent";
 import { ed25519SignatureValid, readEd25519Verify, type Ed25519Verify } from "./ed25519";
-import { deriveConfigPda, deriveLinkPda, deriveVaultPda } from "./pda";
+import { deriveAta, deriveConfigPda, deriveLinkPda, deriveVaultPda } from "./pda";
 import { MAX_TX_BYTES } from "./relay-policy";
 
 export const VERIFY_REFUSALS = [
@@ -107,11 +123,17 @@ export const VERIFY_REFUSALS = [
   "link_consent_mismatch",
   /** The consent's signature does not verify: the runtime would refuse the transaction. */
   "link_consent_bad_signature",
+  /** A token-account instruction beside set_invest_policy that is not CreateIdempotent of the owner's own vault's account for a policy mint. */
+  "vault_account_invalid",
 ] as const;
 export type VerifyRefusal = (typeof VERIFY_REFUSALS)[number];
 
 export const MAX_SIGNERS = 2;
 export const MAX_INSTRUCTIONS = 4;
+/** The instruction limit when every instruction past MAX_INSTRUCTIONS creates a vault token account beside set_invest_policy. */
+export const MAX_INSTRUCTIONS_WITH_VAULT_ACCOUNTS = 6;
+/** Token-account creations beside one set_invest_policy: wSOL, the in-mint and a leg. */
+export const MAX_VAULT_TOKEN_ACCOUNT_CREATES = 3;
 export const MAX_COMPUTE_UNIT_LIMIT = 1_400_000;
 export const MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS = 5_000_000n;
 
@@ -194,6 +216,40 @@ function bindAccounts(
   }
 }
 
+interface TokenAccountCreate {
+  readonly position: number;
+  readonly data: Uint8Array;
+  /** The instruction's accounts, base58, in its order. */
+  readonly accounts: readonly string[];
+}
+
+/** Rule 13b: why these token-account instructions are not the owner's own vault accounts for this policy, or null. */
+function vaultAccountProblem(creates: readonly TokenAccountCreate[], sipPosition: number, args: Readonly<Record<string, unknown>>, owner: string, feePayer: string): string | null {
+  if (creates.length > MAX_VAULT_TOKEN_ACCOUNT_CREATES) {
+    return `${creates.length} token-account instructions; at most ${MAX_VAULT_TOKEN_ACCOUNT_CREATES} (wSOL, the in-mint and a leg) are relayed beside set_invest_policy`;
+  }
+  const vault = deriveVaultPda(owner).toBase58();
+  const legs = Array.isArray(args["legs"]) ? (args["legs"] as readonly { readonly mint?: unknown }[]) : [];
+  const allowed = new Set<unknown>([WSOL_MINT, args["in_mint"], ...legs.map((leg) => leg.mint)]);
+  const seen = new Set<string>();
+  for (const create of creates) {
+    const at = `the token-account instruction at position ${create.position + 1}`;
+    if (create.position > sipPosition) return `${at} comes after set_invest_policy`;
+    if (create.data.length !== 1 || create.data[0] !== 1) return `${at} is not CreateIdempotent (data [1])`;
+    if (create.accounts.length !== 6) return `${at} lists ${create.accounts.length} accounts; CreateIdempotent takes 6`;
+    const [funder, account, wallet, mint, system, tokenProgram] = create.accounts as readonly [string, string, string, string, string, string];
+    if (funder !== feePayer || funder !== owner) return `${at} is not paid by the owner who signs set_invest_policy`;
+    if (wallet !== vault) return `${at} creates an account for ${wallet}, not for ['vault', owner]`;
+    if (!allowed.has(mint)) return `${at} names mint ${mint}, which is neither wSOL, the policy's in-mint nor one of its legs`;
+    if (system !== SYSTEM_PROGRAM) return `${at}'s system program is not the System program`;
+    if (tokenProgram !== TOKEN_PROGRAM && tokenProgram !== TOKEN_2022_PROGRAM) return `${at}'s token program is neither SPL Token nor Token-2022`;
+    if (account !== deriveAta(wallet, mint, tokenProgram).toBase58()) return `${at}'s account is not the vault's associated token account for ${mint}`;
+    if (seen.has(mint)) return `${at} creates the vault's ${mint} account a second time`;
+    seen.add(mint);
+  }
+  return null;
+}
+
 /**
  * Verifies a fully signed transaction for /api/solana-tx. Pure: no network.
  * `context.programId`, when given, must be the IDL's (a mismatch is a bug in
@@ -242,13 +298,19 @@ export function verifySignedTransaction(bytes: Uint8Array, context: { readonly p
   if (keys.includes(OLD_NUVEM_PROGRAM_ID)) return refuse("old_program", "the transaction names Nuvem's old program");
 
   const compiled = message.compiledInstructions;
-  if (compiled.length < 1 || compiled.length > MAX_INSTRUCTIONS) {
-    return refuse("instruction_count", `${compiled.length} instructions; 1 to ${MAX_INSTRUCTIONS} are accepted`);
+  // 8 and 8b: only token-account instructions count past MAX_INSTRUCTIONS; whether they may stand at all waits for the SIP instruction.
+  const tokenAccountInstructions = compiled.filter((instruction) => keys[instruction.programIdIndex] === ATA_PROGRAM).length;
+  if (compiled.length < 1 || compiled.length > MAX_INSTRUCTIONS_WITH_VAULT_ACCOUNTS || compiled.length - tokenAccountInstructions > MAX_INSTRUCTIONS) {
+    return refuse(
+      "instruction_count",
+      `${compiled.length} instructions; 1 to ${MAX_INSTRUCTIONS} are accepted, or up to ${MAX_INSTRUCTIONS_WITH_VAULT_ACCOUNTS} when those past ${MAX_INSTRUCTIONS} create the vault's token accounts`,
+    );
   }
 
   const instructions: { program: string; name: string | null }[] = [];
   let sip: { name: OwnerInstructionName; position: number; indexes: readonly number[]; args: Record<string, unknown> } | null = null;
   const ed25519: { position: number; data: Uint8Array; accountCount: number }[] = [];
+  const tokenAccountCreates: TokenAccountCreate[] = [];
   let unitLimit: number | null = null;
   let microLamports: bigint | null = null;
 
@@ -310,10 +372,22 @@ export function verifySignedTransaction(bytes: Uint8Array, context: { readonly p
       continue;
     }
 
+    if (program === ATA_PROGRAM) {
+      // Rules 8b and 13b, once the SIP instruction and its arguments are known.
+      tokenAccountCreates.push({ position, data, accounts: instruction.accountKeyIndexes.map((index) => keys[index]!) });
+      instructions.push({ program, name: data.length === 1 && data[0] === 1 ? "CreateIdempotent" : null });
+      continue;
+    }
+
     return refuse("program_not_allowed", `instructions for ${program} are not relayed`);
   }
 
   if (sip === null) return refuse("instruction_count", "no SIP instruction");
+
+  // 8b: the vault's token accounts are created beside set_invest_policy, and nowhere else.
+  if (tokenAccountCreates.length > 0 && sip.name !== "set_invest_policy") {
+    return refuse("program_not_allowed", `instructions for ${ATA_PROGRAM} are relayed only beside set_invest_policy, and this transaction's SIP instruction is ${sip.name}`);
+  }
 
   // 11: the one place an Ed25519SigVerify may stand.
   const consentAt = sip.name === "link_wallet" ? sip.position - 1 : null;
@@ -354,6 +428,12 @@ export function verifySignedTransaction(bytes: Uint8Array, context: { readonly p
   const signers = keys.slice(0, required);
   const binding = bindAccounts(sip.name, accounts, signers);
   if (binding !== null) return binding;
+
+  // 13b: every token account created is the signer's own vault's, for a mint this policy names.
+  if (tokenAccountCreates.length > 0) {
+    const problem = vaultAccountProblem(tokenAccountCreates, sip.position, sip.args, accounts["owner"]!, signers[0]!);
+    if (problem !== null) return refuse("vault_account_invalid", problem);
+  }
 
   // 14: what link_wallet will compare, and what the runtime will verify.
   if (consent !== null) {

@@ -11,10 +11,12 @@ import {
   ED25519_PROGRAM,
   INSTRUCTIONS_SYSVAR,
   RAYDIUM_CLMM,
+  SPYX_MINT,
   SYSTEM_PROGRAM,
   TOKEN_2022_PROGRAM,
   TOKEN_PROGRAM,
   USDC_MINT,
+  WSOL_MINT,
 } from "../src/client/addresses";
 import { base58Encode } from "../src/client/base58";
 import { base64Encode } from "../src/client/base64";
@@ -26,8 +28,11 @@ import { DEFAULT_RATES } from "../src/client/rules";
 import { verifySignedTransaction } from "../src/server/verify-tx";
 import {
   ED25519_CONSENT_HEADER_HEX,
+  FIRST_POLICY_VAULT_TOKEN_ACCOUNTS,
   FIXTURE_OWNER,
   FIXTURE_WALLET,
+  GOLDEN_CONVERT_FLOOR_WAD,
+  GOLDEN_SPYX_FLOOR_WAD,
   OWNER_INSTRUCTION_DATA_HEX,
   OWNER_WIRE_HEX,
   buildOwnerFixtures,
@@ -421,6 +426,64 @@ describe("set_invest_policy", () => {
       ...override(mint),
     };
     expect(() => buildSetInvestPolicy(input)).toThrow(BuildError);
+  });
+});
+
+describe("set_invest_policy with the vault's token accounts", () => {
+  const instructionsOf = (built: BuiltTransaction) => parseLegacyMessage(splitWire(fromB64(built.txBase64)).message).instructions;
+  const firstPolicy = (owner: string) => ({
+    owner,
+    blockhash: BLOCKHASH,
+    legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: GOLDEN_SPYX_FLOOR_WAD }],
+    minConvertRateWad: GOLDEN_CONVERT_FLOOR_WAD,
+    minInvestment: 5_000_000n,
+    maxPerCall: 1_000_000_000n,
+    maxRolling30d: 31_000_000_000n,
+    enabled: true,
+  });
+
+  it("one CreateIdempotent per account, after the budget and before set_invest_policy: data [1], spl-token's metas, ATA(vault, mint, program)", () => {
+    const owner = keypair().publicKey;
+    const built = buildSetInvestPolicy({ ...firstPolicy(owner.toBase58()), computeBudget: ownerComputeBudget("set_invest_policy"), vaultTokenAccounts: FIRST_POLICY_VAULT_TOKEN_ACCOUNTS });
+    const instructions = instructionsOf(built);
+    expect(instructions.map((instruction) => instruction.programId)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, SIP_PROGRAM_ID]);
+    const vault = new PublicKey(built.vault);
+    const message = VersionedTransaction.deserialize(fromB64(built.txBase64)).message;
+    FIRST_POLICY_VAULT_TOKEN_ACCOUNTS.forEach(({ mint, tokenProgram }, index) => {
+      const create = instructions[2 + index]!;
+      expect(toHex(create.data)).toBe("01");
+      // @solana/spl-token's createAssociatedTokenAccountIdempotentInstruction: payer, associated token, owner, mint, System, token program.
+      expect(create.accountKeys).toEqual([owner.toBase58(), ata(vault, new PublicKey(mint), tokenProgram), built.vault, mint, SYSTEM_PROGRAM, tokenProgram]);
+      expect(create.accountIndexes.map((at) => [message.isAccountSigner(at), message.isAccountWritable(at)])).toEqual([
+        [true, true],
+        [false, true],
+        [false, false],
+        [false, false],
+        [false, false],
+        [false, false],
+      ]);
+    });
+    expect(built.vaultTokenAccounts).toEqual(FIRST_POLICY_VAULT_TOKEN_ACCOUNTS.map(({ mint, tokenProgram }) => ({ mint, address: ata(vault, new PublicKey(mint), tokenProgram), tokenProgram })));
+    expect(built.signers).toEqual([owner.toBase58()]);
+    expect(fromB64(built.txBase64).length).toBeLessThanOrEqual(1_232);
+
+    const plain = buildSetInvestPolicy(firstPolicy(owner.toBase58()));
+    expect(toHex(instructions[5]!.data)).toBe(toHex(instructionsOf(plain)[0]!.data));
+    expect(built.accounts).toEqual(plain.accounts);
+    expect(plain.vaultTokenAccounts).toEqual([]);
+    expect(instructionsOf(plain)).toHaveLength(1);
+  });
+
+  it.each<[string, () => unknown, RegExp]>([
+    ["a mint the policy does not name", () => [{ mint: keypair().publicKey.toBase58(), tokenProgram: TOKEN_PROGRAM }], /neither wSOL/],
+    ["the same mint twice", () => [{ mint: WSOL_MINT, tokenProgram: TOKEN_PROGRAM }, { mint: WSOL_MINT, tokenProgram: TOKEN_PROGRAM }], /already in the list/],
+    ["four accounts", () => [...FIRST_POLICY_VAULT_TOKEN_ACCOUNTS, { mint: USDC_MINT, tokenProgram: TOKEN_2022_PROGRAM }], /at most 3/],
+    ["a program that is not a token program", () => [{ mint: WSOL_MINT, tokenProgram: SYSTEM_PROGRAM }], /SPL Token or Token-2022/],
+    ["something that is not a list", () => "wSOL", /a list/],
+  ])("refuses %s", (_, entries, words) => {
+    const input = { ...firstPolicy(keypair().publicKey.toBase58()), vaultTokenAccounts: entries() as never };
+    expect(() => buildSetInvestPolicy(input)).toThrow(BuildError);
+    expect(() => buildSetInvestPolicy(input)).toThrow(words);
   });
 });
 

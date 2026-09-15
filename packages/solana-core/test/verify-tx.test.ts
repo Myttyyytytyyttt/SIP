@@ -13,11 +13,24 @@ import {
 } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 
-import { ED25519_PROGRAM, INSTRUCTIONS_SYSVAR, MEMO_PROGRAM, USDC_MINT } from "../src/client/addresses";
+import {
+  ATA_PROGRAM,
+  ED25519_PROGRAM,
+  INSTRUCTIONS_SYSVAR,
+  MEMO_PROGRAM,
+  RAYDIUM_CLMM,
+  SPYX_MINT,
+  SYSTEM_PROGRAM,
+  TOKEN_2022_PROGRAM,
+  TOKEN_PROGRAM,
+  USDC_MINT,
+  WSOL_MINT,
+} from "../src/client/addresses";
 import { base58Encode } from "../src/client/base58";
 import { base64Encode } from "../src/client/base64";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID, instructionDiscriminator } from "../src/client/idl";
 import { linkConsentMessage } from "../src/client/link-consent";
+import { ownerComputeBudget } from "../src/client/product";
 import {
   buildCreateVaultV2,
   buildLinkWallet,
@@ -28,9 +41,10 @@ import {
   sipInstruction,
   type BuiltTransaction,
 } from "../src/server/builders";
-import { deriveConfigPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
+import { deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
 import { MAX_TX_BASE64_CHARS, MAX_TX_BYTES } from "../src/server/relay-policy";
 import { verifySignedTransaction, type VerifyRefusal } from "../src/server/verify-tx";
+import { FIRST_POLICY_VAULT_TOKEN_ACCOUNTS, GOLDEN_CONVERT_FLOOR_WAD, GOLDEN_SPYX_FLOOR_WAD } from "./fixtures/owner-transactions";
 import { BLOCKHASH, b64, fromB64, keypair, legacyTx, signBytes, signWire, signedLinkWallet } from "./helpers";
 
 const vaultPolicy = { mode: 1, skimBps: 2_000, volumeBps: 200, maxContribution: 1_000_000_000n, walletReserve: 5_000_000n };
@@ -492,6 +506,189 @@ describe("the wallet's link consent", () => {
       }),
       "account_binding",
     );
+  });
+});
+
+describe("set_invest_policy's vault token accounts (rules 8b and 13b)", () => {
+  /** set_invest_policy's arguments for a basket of `legs`, at the golden floors. */
+  const policyArgs = (legs: readonly string[]) => ({
+    legs: legs.map((mint) => ({ mint, weight_bps: 10_000 / legs.length, min_out_rate_wad: GOLDEN_SPYX_FLOOR_WAD })),
+    venue_program: RAYDIUM_CLMM,
+    in_mint: USDC_MINT,
+    min_convert_rate_wad: GOLDEN_CONVERT_FLOOR_WAD,
+    min_investment: 2_500_000n,
+    max_per_call: 1_000_000_000n,
+    max_rolling_30d: 31_000_000_000n,
+    enabled: true,
+  });
+
+  function policyInstruction(owner: PublicKey, legs: readonly string[] = [SPYX_MINT]): TransactionInstruction {
+    const vault = deriveVaultPda(owner);
+    return sipInstruction("set_invest_policy", { owner, vault, policy: deriveInvestPda(vault) }, policyArgs(legs));
+  }
+
+  interface Slots {
+    funder: PublicKey;
+    funderSigns: boolean;
+    account: PublicKey;
+    wallet: PublicKey;
+    mint: PublicKey;
+    system: PublicKey;
+    tokenProgram: PublicKey;
+    data: number[];
+  }
+
+  /** A CreateIdempotent for `owner`'s vault's `mint` account, as the builder writes it, with any slot replaced. */
+  function createAccount(owner: PublicKey, mint: string, tokenProgram: string, overrides: Partial<Slots> = {}): TransactionInstruction {
+    const vault = deriveVaultPda(owner);
+    const slots: Slots = {
+      funder: owner,
+      funderSigns: true,
+      account: deriveAta(vault, mint, tokenProgram),
+      wallet: vault,
+      mint: new PublicKey(mint),
+      system: new PublicKey(SYSTEM_PROGRAM),
+      tokenProgram: new PublicKey(tokenProgram),
+      data: [1],
+      ...overrides,
+    };
+    return new TransactionInstruction({
+      programId: new PublicKey(ATA_PROGRAM),
+      keys: [
+        { pubkey: slots.funder, isSigner: slots.funderSigns, isWritable: true },
+        { pubkey: slots.account, isSigner: false, isWritable: true },
+        { pubkey: slots.wallet, isSigner: false, isWritable: false },
+        { pubkey: slots.mint, isSigner: false, isWritable: false },
+        { pubkey: slots.system, isSigner: false, isWritable: false },
+        { pubkey: slots.tokenProgram, isSigner: false, isWritable: false },
+      ],
+      data: Buffer.from(slots.data),
+    });
+  }
+
+  const wsolAccount = (owner: PublicKey, overrides: Partial<Slots> = {}): TransactionInstruction => createAccount(owner, WSOL_MINT, TOKEN_PROGRAM, overrides);
+  const budget = (): TransactionInstruction[] => [ComputeBudgetProgram.setComputeUnitLimit({ units: 300_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 })];
+
+  it("accepted: the builder's first policy behind its compute budget with 0, 1, 2 or 3 of the vault's accounts, up to 6 instructions", () => {
+    for (let count = 0; count <= 3; count++) {
+      const owner = keypair();
+      const built = buildSetInvestPolicy({
+        owner: owner.publicKey,
+        blockhash: BLOCKHASH,
+        legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: GOLDEN_SPYX_FLOOR_WAD }],
+        minConvertRateWad: GOLDEN_CONVERT_FLOOR_WAD,
+        minInvestment: 5_000_000n,
+        maxPerCall: 1_000_000_000n,
+        maxRolling30d: 31_000_000_000n,
+        enabled: true,
+        computeBudget: ownerComputeBudget("set_invest_policy"),
+        vaultTokenAccounts: FIRST_POLICY_VAULT_TOKEN_ACCOUNTS.slice(0, count),
+      });
+      const result = verifySignedTransaction(signWire(built.txBase64, owner));
+      expect(result.ok, result.ok ? "" : result.detail).toBe(true);
+      if (!result.ok) continue;
+      expect(result.instructions.map((instruction) => instruction.name)).toEqual([
+        "SetComputeUnitLimit",
+        "SetComputeUnitPrice",
+        ...new Array<string>(count).fill("CreateIdempotent"),
+        "set_invest_policy",
+      ]);
+    }
+  });
+
+  it("a well-formed CreateIdempotent beside withdraw: program_not_allowed", () => {
+    const owner = keypair();
+    const withdraw = sipInstruction("withdraw", { owner: owner.publicKey, vault: deriveVaultPda(owner.publicKey) }, { amount: 1n });
+    expectRefusal(legacyTx(owner.publicKey, [...budget(), wsolAccount(owner.publicKey), withdraw], [owner]), "program_not_allowed");
+  });
+
+  it.each<[string, number[]]>([
+    ["Create (data [])", []],
+    ["RecoverNested (data [2])", [2]],
+  ])("%s instead of CreateIdempotent: vault_account_invalid", (_, data) => {
+    const owner = keypair();
+    expectRefusal(legacyTx(owner.publicKey, [...budget(), wsolAccount(owner.publicKey, { data }), policyInstruction(owner.publicKey)], [owner]), "vault_account_invalid");
+  });
+
+  it("a funder that is not the fee payer: vault_account_invalid", () => {
+    const owner = keypair();
+    const funded = wsolAccount(owner.publicKey, { funder: keypair().publicKey, funderSigns: false });
+    expectRefusal(legacyTx(owner.publicKey, [funded, policyInstruction(owner.publicKey)], [owner]), "vault_account_invalid");
+  });
+
+  it("an account for another owner's vault, at that vault's own ATA: vault_account_invalid", () => {
+    const owner = keypair();
+    const otherVault = deriveVaultPda(keypair().publicKey);
+    const theirs = wsolAccount(owner.publicKey, { wallet: otherVault, account: deriveAta(otherVault, WSOL_MINT, TOKEN_PROGRAM) });
+    expectRefusal(legacyTx(owner.publicKey, [...budget(), theirs, policyInstruction(owner.publicKey)], [owner]), "vault_account_invalid");
+  });
+
+  it("a mint that is neither wSOL, the in-mint nor a leg: vault_account_invalid", () => {
+    const owner = keypair();
+    const stray = createAccount(owner.publicKey, keypair().publicKey.toBase58(), TOKEN_PROGRAM);
+    expectRefusal(legacyTx(owner.publicKey, [stray, policyInstruction(owner.publicKey)], [owner]), "vault_account_invalid");
+  });
+
+  it("an account that is not ATA(vault, mint, program), including the SPYx account under the wrong token program: vault_account_invalid", () => {
+    const owner = keypair();
+    const vault = deriveVaultPda(owner.publicKey);
+    for (const account of [keypair().publicKey, deriveAta(vault, SPYX_MINT, TOKEN_PROGRAM)]) {
+      const wrong = createAccount(owner.publicKey, SPYX_MINT, TOKEN_2022_PROGRAM, { account });
+      expectRefusal(legacyTx(owner.publicKey, [wrong, policyInstruction(owner.publicKey)], [owner]), "vault_account_invalid");
+    }
+  });
+
+  it("Memo in the token program's slot: vault_account_invalid", () => {
+    const owner = keypair();
+    const memo = wsolAccount(owner.publicKey, { tokenProgram: new PublicKey(MEMO_PROGRAM), account: keypair().publicKey });
+    expectRefusal(legacyTx(owner.publicKey, [memo, policyInstruction(owner.publicKey)], [owner]), "vault_account_invalid");
+  });
+
+  it("another key in the System program's slot: vault_account_invalid", () => {
+    const owner = keypair();
+    const system = wsolAccount(owner.publicKey, { system: keypair().publicKey });
+    expectRefusal(legacyTx(owner.publicKey, [system, policyInstruction(owner.publicKey)], [owner]), "vault_account_invalid");
+  });
+
+  it("a CreateIdempotent after set_invest_policy: vault_account_invalid", () => {
+    const owner = keypair();
+    expectRefusal(legacyTx(owner.publicKey, [...budget(), policyInstruction(owner.publicKey), wsolAccount(owner.publicKey)], [owner]), "vault_account_invalid");
+  });
+
+  it("the same mint twice: vault_account_invalid", () => {
+    const owner = keypair();
+    expectRefusal(legacyTx(owner.publicKey, [wsolAccount(owner.publicKey), wsolAccount(owner.publicKey), policyInstruction(owner.publicKey)], [owner]), "vault_account_invalid");
+  });
+
+  it("four accounts, even for four mints a two-leg policy names: vault_account_invalid", () => {
+    const owner = keypair();
+    const second = keypair().publicKey.toBase58();
+    const creates = [
+      wsolAccount(owner.publicKey),
+      createAccount(owner.publicKey, USDC_MINT, TOKEN_PROGRAM),
+      createAccount(owner.publicKey, SPYX_MINT, TOKEN_2022_PROGRAM),
+      createAccount(owner.publicKey, second, TOKEN_PROGRAM),
+    ];
+    expectRefusal(legacyTx(owner.publicKey, [...creates, policyInstruction(owner.publicKey, [SPYX_MINT, second])], [owner]), "vault_account_invalid");
+  });
+
+  it("five instructions with no token-account instruction, and seven with three: instruction_count", () => {
+    const owner = keypair();
+    const withdraw = sipInstruction("withdraw", { owner: owner.publicKey, vault: deriveVaultPda(owner.publicKey) }, { amount: 1n });
+    expectRefusal(legacyTx(owner.publicKey, [...budget(), ...budget(), withdraw], [owner]), "instruction_count");
+    const creates = [wsolAccount(owner.publicKey), createAccount(owner.publicKey, USDC_MINT, TOKEN_PROGRAM), createAccount(owner.publicKey, SPYX_MINT, TOKEN_2022_PROGRAM)];
+    const memo = new TransactionInstruction({ programId: new PublicKey(MEMO_PROGRAM), keys: [], data: Buffer.from("x") });
+    expectRefusal(legacyTx(owner.publicKey, [...budget(), memo, ...creates, policyInstruction(owner.publicKey)], [owner]), "instruction_count");
+  });
+
+  it("link_wallet behind its compute budget is still [CU limit, CU price, Ed25519SigVerify, link_wallet], and verifies", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    const consent = fromB64(prepareLinkWalletConsent({ owner: owner.publicKey, wallet: wallet.publicKey }).consentMessageBase64);
+    const built = buildLinkWallet({ owner: owner.publicKey, wallet: wallet.publicKey, consentSignature: signBytes(wallet, consent), blockhash: BLOCKHASH, computeBudget: ownerComputeBudget("link_wallet") });
+    const result = verifySignedTransaction(signWire(built.txBase64, owner, wallet));
+    expect(result.ok, result.ok ? "" : result.detail).toBe(true);
+    if (result.ok) expect(result.instructions.map((instruction) => instruction.name)).toEqual(["SetComputeUnitLimit", "SetComputeUnitPrice", "Ed25519SigVerify", "link_wallet"]);
   });
 });
 

@@ -207,6 +207,7 @@ const VERIFIER_WORDS: Readonly<Record<string, string>> = {
   link_consent_wrong_signer: "The consent was signed by a key that is not this trading wallet. Nothing was sent.",
   link_consent_mismatch: "The consent names another program, wallet, vault or owner. Nothing was sent.",
   link_consent_bad_signature: "The consent signature does not verify. Nothing was sent.",
+  vault_account_invalid: "The transaction creates a token account that is not your vault's own for this policy. Nothing was sent.",
 };
 
 /** The program's errors, by code, where the IDL's own message is not the person's words. */
