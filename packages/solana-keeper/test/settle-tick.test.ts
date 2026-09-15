@@ -224,6 +224,53 @@ describe("the wallet reserve, before anything is signed", () => {
     }
   });
 
+  it("rests a backlog's positive prefix the wallet cannot pay at BELOW_RESERVE, never settling past it with a zero base, and reads nothing above the prefix", async () => {
+    // 301 winning trades above the link: the oldest 300 are the window, 300 000 000
+    // lamports of profit, 60 000 000 paid at 2 000 bps. One lamport short of that
+    // payment is still far more than a zero settle needs, so a turn that fell back
+    // to a zero base here would settle past a profit it never charged.
+    const backlog = new FakeLedger(
+      link.wallet,
+      chained(2_000_000_000, [
+        { signature: "link-0", slot: EPOCH, programs: [SYSTEM], delta: -2_000_000 },
+        ...Array.from({ length: 301 }, (_, i) => ({ signature: `trade-${i + 1}`, slot: EPOCH + 1 + i, programs: [JUPITER], delta: 1_000_000 })),
+      ]),
+    );
+    const needed = FEE + 60_000_000 + RENT0 + Number(vault.walletReserve);
+    for (const [live, balance, outcome] of [
+      [false, needed - 1, "BELOW_RESERVE"],
+      [true, needed - 1, "BELOW_RESERVE"],
+      [false, needed, "SETTLED"],
+    ] as const) {
+      const c = chain({
+        getSignaturesForAddress: async (address, options, commitment) =>
+          commitment === "confirmed"
+            ? [{ signature: "trade-301", slot: EPOCH + 301, err: null, memo: null }]
+            : backlog.signatures(address as PublicKey, options as { limit: number }, commitment as Finality),
+        getTransaction: async (signature, config) => backlog.transaction(signature as string, (config as { commitment: Finality }).commitment),
+        getSlot: async (commitment) => (commitment === "finalized" ? EPOCH + 400 : EPOCH + 440),
+        getBalance: async () => balance,
+      });
+      const result = await runSettleTick(c.deps(live ? {} : { live: false, attester: null, walletSigner: null }));
+      const named = `live ${live}, balance ${balance}`;
+      expect(result, named).toMatchObject({ outcome, baseLamports: 300_000_000n, expectedLamports: 60_000_000n });
+      expect(c.calls, named).not.toContain("sendRawTransaction");
+      const read = c.calls.flatMap((name, i) => (name === "getTransaction" ? [c.callArgs[i]![0]] : []));
+      expect(read, "the anchor and the 300 oldest trades, and nothing above them").toHaveLength(301);
+      expect(read).not.toContain("trade-301");
+      if (outcome === "BELOW_RESERVE") {
+        expect(result.detail).toContain("1 lamports short");
+        expect(result.detail).toContain("WalletBelowReserve");
+      } else {
+        expect(result.detail).toContain("DRY RUN — would settle 60000000 lamports");
+        expect(result.detail).toContain(
+          `over slots ${EPOCH}..${EPOCH + 300}; backlog: settling the oldest 300 of 301 signatures above slot ${EPOCH}, ` +
+            `up to slot ${EPOCH + 300}; the rest continues next sweep`,
+        );
+      }
+    }
+  });
+
   it("prices the fee on the settle's own message, with the attester's key in the Ed25519 instruction when live", async () => {
     for (const live of [false, true]) {
       const c = chain({ getBalance: async () => EXACT - 1 });

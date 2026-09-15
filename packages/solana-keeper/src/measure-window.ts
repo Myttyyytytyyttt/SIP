@@ -66,15 +66,64 @@ export const SIGNATURE_PAGE_LIMIT = 1_000;
 /**
  * Pages walked before a turn gives up on reaching the frontier: 20 000
  * signatures. It bounds what a griefer can make one turn cost, not what a turn
- * reads — see MAX_SIGNATURES for that.
+ * reads — see MAX_SIGNATURES for that. It is also the one backlog no turn
+ * drains: a prefix starts at the frontier, so a walk that never reaches it has
+ * nothing to settle, and the span is INCOMPLETE every sweep, because nothing but
+ * a landed settle moves the frontier.
  */
 export const MAX_SIGNATURE_PAGES = 20;
 
 /**
- * The most transactions one measurement reads. A span with more signatures
- * above its frontier is reported, and none of its transactions are read.
+ * How many transactions one settlement measures: the oldest 300 above the
+ * frontier, and the rest of the slot the 300th sits in. A larger span is settled
+ * a prefix at a time, oldest first, and nothing above the prefix is read — see
+ * oldestCompletePrefix.
  */
 export const MAX_SIGNATURES = 300;
+
+/**
+ * The oldest complete stretch of a span, which is what one settlement measures:
+ * the oldest `limit` signatures, and every other signature in the slot the
+ * newest of them sits in.
+ *
+ * A BACKLOG DRAINS FROM ITS OLD END. The frontier moves only when a settle lands,
+ * to the window's end slot (settle.rs), and the walk used to refuse every span
+ * above the read limit without reading it. So a link stayed wedged for good once
+ * 300 signatures sat above its frontier: after a pause, after a VOLUME detour, or
+ * after anyone at all sent its wallet 300 zero-lamport transfers for about
+ * 0.0015 SOL of fees. settle_v2 accepts any window that starts at or above the
+ * frontier and ends above its start, so the oldest part of a span settles on its
+ * own, and the next sweep measures from where it ended.
+ *
+ * A SLOT IS NEVER SPLIT. The settle moves the frontier to the prefix's last slot
+ * S, and the next walk stops at the first signature at or below S, so a signature
+ * in S left out of this prefix would never be read by anyone. Every collected
+ * signature at or below S is in, however many that makes; the walk collected
+ * them all, because it reached the frontier. Taken by slot rather than by
+ * position, so an endpoint that orders a slot's signatures its own way changes
+ * nothing about which ones are in.
+ *
+ * `signaturesNewestFirst` is the walk's collection, in getSignaturesForAddress's
+ * order; the prefix comes back oldest first. `endSlot` is S, or null for an empty
+ * span, and `prefixCut` says signatures newer than S remain for a later
+ * settlement.
+ */
+export function oldestCompletePrefix<T extends { readonly slot: number }>(
+  signaturesNewestFirst: readonly T[],
+  limit: number = MAX_SIGNATURES,
+): { readonly prefix: T[]; readonly endSlot: number | null; readonly prefixCut: boolean } {
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error(`a prefix holds at least one signature, so its limit must be a positive integer, not ${limit}`);
+  }
+  const oldestFirst = [...signaturesNewestFirst].reverse();
+  if (oldestFirst.length === 0) return { prefix: [], endSlot: null, prefixCut: false };
+  let endSlot = oldestFirst[0]!.slot;
+  for (const info of oldestFirst.slice(0, limit)) {
+    if (info.slot > endSlot) endSlot = info.slot;
+  }
+  const prefix = oldestFirst.filter((info) => info.slot <= endSlot);
+  return { prefix, endSlot, prefixCut: prefix.length < oldestFirst.length };
+}
 
 /**
  * Where the walk reads the ledger. A Connection in production (connectionReader);
@@ -134,6 +183,11 @@ export interface WindowMeasurement {
   readonly withdrawals: bigint;
   readonly profitLamports: bigint;
   readonly firstSlot: bigint;
+  /**
+   * The slot this window ends at, which a settle makes the new frontier: the
+   * newest slot the walk read, every signature in it included. `from` when
+   * nothing was read.
+   */
   readonly lastSlot: bigint;
   /** Signatures the walk collected strictly above the frontier, read or not. */
   readonly signaturesAbove: number;
@@ -145,6 +199,14 @@ export interface WindowMeasurement {
   readonly frontierReached: boolean;
   /** True when the walk stopped at MAX_SIGNATURE_PAGES full pages without reaching the frontier. */
   readonly pagesExhausted: boolean;
+  /**
+   * True when this window is only the oldest complete prefix of its span
+   * (oldestCompletePrefix): more than MAX_SIGNATURES signatures sat above the
+   * frontier, the walk read the oldest of them through the end of lastSlot, and
+   * every signature newer than lastSlot waits for the next settlement. False for
+   * a walk that did not reach the frontier, which reads nothing.
+   */
+  readonly prefixCut: boolean;
 }
 
 export async function measureSince(
@@ -247,15 +309,22 @@ export async function measureSince(
     signaturesAbove,
     frontierReached,
     pagesExhausted,
+    prefixCut: false,
   };
   // NOTHING IS READ THAT CANNOT BE ATTESTED. A walk that did not reach the
-  // frontier is refused whatever its transactions say, and a span above the
-  // read limit is refused before one of them is fetched: reading every
-  // transaction under 20 pages of signatures to report INCOMPLETE would cost
-  // thousands of requests a sweep, every sweep.
-  if (anchor === null || signaturesAbove > MAX_SIGNATURES) return measurement;
+  // frontier is refused whatever its transactions say, so not one of them is
+  // fetched.
+  if (anchor === null) return measurement;
 
-  collected.reverse(); // oldest first
+  // ONLY THE OLDEST COMPLETE PREFIX IS READ. A span above the read limit used to
+  // be refused here before a single transaction was fetched, and nothing ever
+  // settled part of one, so the refusal repeated every sweep and the link never
+  // saved again. Now its oldest MAX_SIGNATURES signatures, and the rest of their
+  // last slot, are measured as a window of their own, and the next sweep walks
+  // back to the frontier that window's settle leaves and takes the next prefix.
+  // Nothing above the prefix is fetched: the next sweep reads it from its own
+  // anchor anyway.
+  const { prefix, endSlot, prefixCut } = oldestCompletePrefix(collected);
 
   let unfetchable = 0;
   let firstPre: bigint | null = null;
@@ -268,7 +337,6 @@ export async function measureSince(
   let settleTxCount = 0;
   let successfulTradeCount = 0;
   let firstSlot = 0n;
-  let lastSlot = from;
   const settleProgramId = settleProgram?.toBase58();
 
   // THE ANCHOR SEEDS THE CHAIN. Each walk used to start its chain at null, so
@@ -284,7 +352,7 @@ export async function measureSince(
   if (anchorBalances === null) unfetchable += 1;
   else prevPost = anchorBalances.post;
 
-  for (const entry of collected) {
+  for (const entry of prefix) {
     const tx = await reader.transaction(entry.signature, WALK_COMMITMENT);
     if (!tx || !tx.meta) {
       // A NULL IS NOT AN ABSENCE. live-route.ts documents the same hazard in
@@ -308,7 +376,6 @@ export async function measureSince(
       firstSlot = BigInt(tx.slot);
     }
     lastPost = post;
-    lastSlot = BigInt(tx.slot);
     txCount += 1;
 
     const isExternalFlow = isExternalFlowTx(programs, settleProgramId);
@@ -335,7 +402,11 @@ export async function measureSince(
     withdrawals,
     profitLamports: cashDelta - deposits + withdrawals,
     firstSlot,
-    lastSlot,
+    // THE PREFIX'S LAST SLOT, NOT THE LAST TRANSACTION'S. Every signature the walk
+    // collected at or below it was read, and none above it, so it is the one end a
+    // settle can move the frontier to without skipping or rereading anything.
+    lastSlot: endSlot === null ? from : BigInt(endSlot),
+    prefixCut,
   };
 }
 

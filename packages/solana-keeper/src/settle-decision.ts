@@ -23,7 +23,7 @@ import type { PublicKey } from "@solana/web3.js";
 import type { VaultState } from "./accounts.js";
 import type { Alert } from "./alerts.js";
 import type { ManagedLink } from "./discovery.js";
-import { MAX_SIGNATURE_PAGES, MAX_SIGNATURES, type WindowMeasurement } from "./measure-window.js";
+import { MAX_SIGNATURE_PAGES, MAX_SIGNATURES, SIGNATURE_PAGE_LIMIT, type WindowMeasurement } from "./measure-window.js";
 import { MODE_PROFIT, MODE_VOLUME, type AttestationInputs } from "./program-scripts.js";
 
 export type SettleOutcome =
@@ -77,7 +77,10 @@ export type SettleOutcome =
    * A RESTING state, not a failure: settle_v2 refuses both, so sending would
    * only burn a fee and fire a critical alert every sweep for a switch someone
    * turned on deliberately. Nothing is measured or attested, and the frontier
-   * stays where it is, so the span settles once the switch is off.
+   * stays where it is. Once the switch is off, the span that grew meanwhile is
+   * walked back to the frontier and settled oldest first, one prefix of
+   * MAX_SIGNATURES transactions a sweep (oldestCompletePrefix), for as long as
+   * the walk's pages reach the frontier.
    */
   | "PAUSED"
   /**
@@ -169,9 +172,14 @@ export function pauseDecision(
   ].filter((part): part is string => part !== null);
   return {
     outcome: "PAUSED",
+    // WHAT A LATER SWEEP DOES, AND NO MORE. This used to say the span settles
+    // once the switch is off, and above the walk's read limit it never did. It
+    // drains oldest first now, a prefix per settlement, within the walk's pages.
     detail:
-      `${switches.join(" and ")}: settle_v2 refuses, so nothing is measured or attested. ` +
-      "The frontier stays put and the span settles once the switch is off; withdraw is never paused",
+      `${switches.join(" and ")}: settle_v2 refuses, so nothing is measured or attested, and the frontier stays put. ` +
+      "Once the switch is off, the unsettled span is walked back to the frontier and settled oldest first, " +
+      `${MAX_SIGNATURES} transactions per settlement and never part of a slot, while it holds at most ` +
+      `${MAX_SIGNATURE_PAGES * SIGNATURE_PAGE_LIMIT} signatures; withdraw is never paused`,
   };
 }
 
@@ -189,7 +197,17 @@ export type MeasurementDecision =
       readonly detail: string;
       readonly baseLamports?: bigint;
     }
-  | { readonly kind: "settle"; readonly baseLamports: bigint; readonly endSlot: bigint };
+  | {
+      readonly kind: "settle";
+      readonly baseLamports: bigint;
+      readonly endSlot: bigint;
+      /**
+       * Set only when the window is the oldest complete prefix of a larger span:
+       * how much of that backlog this settlement takes. settle-tick.ts adds it to
+       * the SETTLED detail.
+       */
+      readonly backlog?: string;
+    };
 
 /**
  * The notional a complete VOLUME span is charged on, in lamports, or null when
@@ -219,8 +237,9 @@ export const defaultVolumeBase: VolumeBase = async (measured) => (measured.succe
  * WHY A COUNT AND NOT A CLOCK. A time trigger measured from the frontier fires on
  * the first trade after any idle stretch and forgets that trade's loss at once.
  * A count lets losses net against the next win for as long as the span is small,
- * and still settles a flat span well before the walk's read limit
- * (MAX_SIGNATURES, 300) could refuse it. The owner can change it.
+ * and still settles a flat span before it outgrows one settlement's read
+ * (MAX_SIGNATURES, 300). A span past that settles its oldest prefix whatever the
+ * prefix's base, so no backlog ever waits on this count. The owner can change it.
  */
 export const ZERO_BASE_MIN_TXS = 100;
 
@@ -297,20 +316,12 @@ export async function decideFromMeasurement(
         "is finalized; the walk never reached the frontier, so nothing is attested",
     };
   }
-  // ABOVE THE READ LIMIT, NOTHING WAS READ. The walk refuses before fetching a
-  // single transaction of a span this large, so this comes before the empty
-  // check below, which would otherwise call it finality catching up. The old
-  // detail promised the frontier would catch up; nothing settles part of a
-  // span yet, so it does not.
-  if (measured.signaturesAbove > MAX_SIGNATURES) {
-    return {
-      kind: "stop",
-      outcome: "INCOMPLETE",
-      detail:
-        `${measured.signaturesAbove} signatures sit above slot ${from}, more than the ${MAX_SIGNATURES} one settlement reads, ` +
-        "so none was read and nothing is attested; the frontier does not move while this holds",
-    };
-  }
+  // A SPAN PAST THE READ LIMIT IS NOT A STOP. It was one, INCOMPLETE every sweep
+  // with nothing read, while nothing settled part of a span, so a pause or 300
+  // foreign transfers wedged the link for good. The walk now reads the span's
+  // oldest complete prefix (measure-window.ts), and that prefix is decided below
+  // like any window, ending at its own last slot.
+  //
   // REACHED, AND NOTHING FINALIZED ABOVE IT. The turn walks only after a
   // confirmed probe saw a signature above the start, so an empty finalized
   // window is activity finality has not caught up with, not an idle wallet.
@@ -345,6 +356,15 @@ export async function decideFromMeasurement(
  * A positive base settles over the measured window. A zero or negative one
  * settles a ZERO base once the span holds ZERO_BASE_MIN_TXS transactions other
  * than our own settles, and rests at NO_PROFIT before that.
+ *
+ * A PREFIX DECIDES LIKE A WHOLE WINDOW, AND NEVER WAITS. When the window is only
+ * the oldest complete prefix of a backlog (measured.prefixCut), a positive base
+ * settles to the prefix's last slot, and a zero or negative one settles a zero
+ * base at once, whatever its count: a prefix that rested would be the same prefix
+ * next sweep, and every sweep after. Each such settle carries a `backlog` line.
+ * The reserve is not decided here: settle-tick.ts checks what the wallet can pay
+ * for exactly this base, and a positive prefix it cannot pay rests at
+ * BELOW_RESERVE with nothing sent, never settled past with a zero base instead.
  */
 export async function baseDecision({
   mode,
@@ -363,8 +383,10 @@ export async function baseDecision({
   // followed by another one the next sweep, each paid by the trading wallet,
   // forever. First, before any base: a window with nothing but our own settles
   // holds nothing to charge, so no base — not even one a seam returns — settles it.
+  // A cut prefix is not "only our own settle since" the frontier: the rest of its
+  // backlog sits above it, so it is decided below.
   const others = measured.txCount - measured.settleTxCount;
-  if (others === 0) {
+  if (others === 0 && !measured.prefixCut) {
     return { kind: "stop", outcome: "IDLE", detail: `only our own settle since slot ${from}; nothing to charge` };
   }
   // settle_v2 refuses a window whose end is not above its start
@@ -372,6 +394,21 @@ export async function baseDecision({
   // always ends above it; kept so a caller bug is a resting state, not a refusal.
   if (measured.lastSlot <= from) {
     return { kind: "stop", outcome: "IDLE", detail: "no slot beyond the frontier yet" };
+  }
+
+  const backlog = measured.prefixCut
+    ? {
+        backlog:
+          `backlog: settling the oldest ${measured.txCount} of ${measured.signaturesAbove} signatures above slot ${from}, ` +
+          `up to slot ${measured.lastSlot}; the rest continues next sweep`,
+      }
+    : {};
+  // A PREFIX OF NOTHING BUT OUR OWN SETTLES moves the frontier with a zero base,
+  // and no seam is asked about it, because it holds nothing to charge. It cannot
+  // loop: each such settle adds one transaction above the frontier and takes a
+  // whole prefix below it. An undefined mode falls through to its stop.
+  if (others === 0 && (mode === MODE_PROFIT || mode === MODE_VOLUME)) {
+    return { kind: "settle", baseLamports: 0n, endSlot: measured.lastSlot, ...backlog };
   }
 
   let base: bigint;
@@ -395,12 +432,15 @@ export async function baseDecision({
     return { kind: "stop", outcome: "UNSUPPORTED_MODE", detail: `skim_mode ${mode} is not a mode this keeper measures; nothing attested` };
   }
 
-  if (base > 0n) return { kind: "settle", baseLamports: base, endSlot: measured.lastSlot };
-  // A ZERO SETTLE ONCE THE SPAN IS WORTH ONE. It moves nothing and advances the
-  // frontier past everything measured, so the span can never grow into the walk's
-  // read limit. (keeper-cobro-v2's backlog prefix joins this condition when it
-  // lands: a prefix is settled whatever its size.)
-  if (others >= ZERO_BASE_MIN_TXS) return { kind: "settle", baseLamports: 0n, endSlot: measured.lastSlot };
+  if (base > 0n) return { kind: "settle", baseLamports: base, endSlot: measured.lastSlot, ...backlog };
+  // A ZERO SETTLE ONCE THE SPAN IS WORTH ONE, OR ONCE IT IS A BACKLOG'S PREFIX. It
+  // moves nothing and advances the frontier past everything measured. A small span
+  // waits for ZERO_BASE_MIN_TXS so its losses keep netting against the next win; a
+  // prefix never waits, because resting would leave the same prefix above the
+  // frontier every sweep.
+  if (others >= ZERO_BASE_MIN_TXS || measured.prefixCut) {
+    return { kind: "settle", baseLamports: 0n, endSlot: measured.lastSlot, ...backlog };
+  }
   const what =
     mode === MODE_VOLUME
       ? `no successful trade over ${measured.txCount} txs, so the notional is zero`
@@ -435,10 +475,12 @@ export const SETTLE_RETRY_CRITICAL_AFTER = 3;
  *
  * MONEY THAT SHOULD HAVE MOVED AND DID NOT IS CRITICAL: FAILED. The resting states
  * each explain themselves and fire nothing — IDLE, PENDING_FINALITY, NO_PROFIT and
- * UNSUPPORTED_MODE — except the two a human must act on: INCOMPLETE, the one
- * resting state that never resolves itself (the frontier cannot advance while it
- * holds), and NO_SIGNER, which repeats until the user re-runs onboarding. Both
- * warn, and each outcome other than itself clears it.
+ * UNSUPPORTED_MODE — except the two a human must act on: INCOMPLETE, where the
+ * frontier cannot advance until what the walk could not see is fixed (a broken
+ * chain, an endpoint that will not serve the span or its transactions, a span
+ * past the walk's pages; a span past the read limit is no longer one of them, it
+ * settles a prefix at a time), and NO_SIGNER, which repeats until the user re-runs
+ * onboarding. Both warn, and each outcome other than itself clears it.
  *
  * A PAUSE IS DELIBERATE, NOT MONEY LOST, AND A THIN WALLET IS THE TRADER'S. PAUSED
  * also explains the settles refused with VaultPaused or ProtocolPaused while it

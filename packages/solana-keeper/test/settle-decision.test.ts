@@ -10,7 +10,10 @@
 // with — and it ends in the base: a positive base settles, a flat span settles a
 // zero base once it is worth a transaction, a window holding only our own settle
 // never settles again, and a VOLUME span is charged only on a notional that is
-// proven. The frontier-from-epoch rule is unchanged, and the outcome-to-alert rule
+// proven. A span past the read limit is no stop: its oldest complete prefix
+// settles like a window and never waits, and neither the PAUSED detail nor any
+// INCOMPLETE detail promises a catch-up no sweep performs. The frontier-from-epoch
+// rule is unchanged, and the outcome-to-alert rule
 // is pinned for every outcome. The bytes those inputs encode to are pinned to the
 // program's golden vector in attestation-golden.test.ts.
 
@@ -77,6 +80,7 @@ const measured = (over: Partial<WindowMeasurement> = {}): WindowMeasurement => (
   signaturesAbove: 12,
   frontierReached: true,
   pagesExhausted: false,
+  prefixCut: false,
   ...over,
 });
 
@@ -117,6 +121,21 @@ describe("the pause switches", () => {
 
   it("lets an unpaused vault in an unpaused protocol through", () => {
     expect(pauseDecision(vault(), false)).toBeNull();
+  });
+
+  it("promises only what a later sweep does: the span is walked back and settled oldest first, a prefix per settlement, within the walk's pages", () => {
+    for (const [over, protocolPaused] of [
+      [{ paused: true }, false],
+      [{}, true],
+    ] as const) {
+      const detail = pauseDecision(vault(over), protocolPaused)?.detail ?? "";
+      expect(detail).toContain("walked back to the frontier and settled oldest first");
+      expect(detail).toContain("300 transactions per settlement and never part of a slot");
+      expect(detail).toContain("at most 20000 signatures");
+      expect(detail).toContain("withdraw is never paused");
+      // The old promise, which a span past 300 signatures never kept.
+      expect(detail).not.toContain("the span settles once the switch is off");
+    }
   });
 });
 
@@ -186,14 +205,34 @@ describe("what a measurement allows, in order", () => {
     }
   });
 
-  it("more signatures above the frontier than one settlement reads is INCOMPLETE and promises no catch-up; the limit itself is measured", async () => {
-    const over = await decideFromMeasurement(measured({ signaturesAbove: 301, txCount: 0 }), at);
-    expect(over).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
-    if (over.kind === "stop") {
-      expect(over.detail).toContain("301 signatures");
-      expect(over.detail).not.toContain("catch up");
+  it("more signatures above the frontier than one settlement reads is no stop: the oldest prefix settles to its own last slot and names the backlog", async () => {
+    const prefix = measured({ prefixCut: true, signaturesAbove: 450, txCount: 300, successfulTradeCount: 300, lastSlot: 300_000_800n });
+    expect(await decideFromMeasurement(prefix, at)).toEqual({
+      kind: "settle",
+      baseLamports: 50_000_000n,
+      endSlot: 300_000_800n,
+      backlog: "backlog: settling the oldest 300 of 450 signatures above slot 300000500, up to slot 300000800; the rest continues next sweep",
+    });
+    // A whole window, at the limit or under it, names no backlog.
+    expect(await decideFromMeasurement(measured({ signaturesAbove: 300, txCount: 300 }), at)).toEqual({
+      kind: "settle",
+      baseLamports: 50_000_000n,
+      endSlot: 300_000_900n,
+    });
+  });
+
+  it("no INCOMPLETE detail promises a catch-up", async () => {
+    const shapes = [
+      [measured({ unfetchable: 1 }), at],
+      [measured({ frontierReached: false, txCount: 0 }), at],
+      [measured({ frontierReached: false, pagesExhausted: true, signaturesAbove: 20_000, txCount: 0 }), context(from - 1n)],
+      [measured({ chainBreaks: 2 }), at],
+    ] as const;
+    for (const [shape, where] of shapes) {
+      const decision = await decideFromMeasurement(shape, where);
+      expect(decision).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+      if (decision.kind === "stop") expect(decision.detail).not.toMatch(/catch(es|ing)?[ -]up/i);
     }
-    expect(await decideFromMeasurement(measured({ signaturesAbove: 300, txCount: 300 }), at)).toMatchObject({ kind: "settle" });
   });
 
   it("a broken chain is INCOMPLETE", async () => {
@@ -341,6 +380,41 @@ describe("the base, and when a zero base is worth a transaction", () => {
       kind: "stop",
       outcome: "UNSUPPORTED_MODE",
     });
+  });
+
+  it("a cut prefix never waits for the zero-base count: flat or losing, it settles a zero base to its last slot and names the backlog", async () => {
+    // Mostly our own settles, so the count alone would rest it at NO_PROFIT — the same prefix, every sweep.
+    const losing = measured({ prefixCut: true, signaturesAbove: 900, txCount: 300, settleTxCount: 250, successfulTradeCount: 50, profitLamports: -7n });
+    expect(await profit(losing)).toEqual({
+      kind: "settle",
+      baseLamports: 0n,
+      endSlot: 300_000_900n,
+      backlog: "backlog: settling the oldest 300 of 900 signatures above slot 300000500, up to slot 300000900; the rest continues next sweep",
+    });
+    expect(await profit({ ...losing, prefixCut: false })).toMatchObject({ kind: "stop", outcome: "NO_PROFIT" });
+  });
+
+  it("a cut prefix of nothing but our own settles moves the frontier with a zero base and asks no seam; only a whole window of them is IDLE", async () => {
+    let asked = 0;
+    const seam: VolumeBase = async () => {
+      asked += 1;
+      return 1_000_000_000n;
+    };
+    const onlySettles = measured({ prefixCut: true, signaturesAbove: 301, txCount: 300, settleTxCount: 300, successfulTradeCount: 0, profitLamports: 0n });
+    expect(await profit(onlySettles)).toMatchObject({ kind: "settle", baseLamports: 0n, endSlot: 300_000_900n });
+    expect(await volume(onlySettles, seam)).toMatchObject({ kind: "settle", baseLamports: 0n, endSlot: 300_000_900n });
+    expect(asked, "the seam is never asked about our own settles, cut or not").toBe(0);
+    expect(await profit({ ...onlySettles, prefixCut: false })).toMatchObject({ kind: "stop", outcome: "IDLE" });
+    // An undefined mode still stops, cut or not.
+    expect(await baseDecision({ mode: 9, measured: onlySettles, from, volumeBase: defaultVolumeBase })).toMatchObject({
+      kind: "stop",
+      outcome: "UNSUPPORTED_MODE",
+    });
+  });
+
+  it("a cut VOLUME prefix with a successful trade still rests at UNSUPPORTED_MODE under the default seam: its notional is unknown, not zero", async () => {
+    const prefix = measured({ prefixCut: true, signaturesAbove: 400, txCount: 300, successfulTradeCount: 1, profitLamports: 0n });
+    expect(await volume(prefix)).toMatchObject({ kind: "stop", outcome: "UNSUPPORTED_MODE" });
   });
 });
 

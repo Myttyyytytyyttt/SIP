@@ -5,13 +5,21 @@
 // scripted drills do not fail. These are the cases that drill could never
 // produce, and, since the walk reads finalized history and must prove it reached
 // the frontier, the walk itself, run over a fake ledger that refuses any other
-// commitment and any `until`.
+// commitment and any `until`. A backlog past the read limit is read and settled
+// one complete prefix at a time, oldest first, and that drain is walked here too.
 
 import { readFileSync } from "node:fs";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
-import { MAX_SIGNATURES, MAX_SIGNATURE_PAGES, SIGNATURE_PAGE_LIMIT, isExternalFlowTx, measureSince } from "../src/measure-window.js";
+import {
+  MAX_SIGNATURES,
+  MAX_SIGNATURE_PAGES,
+  SIGNATURE_PAGE_LIMIT,
+  isExternalFlowTx,
+  measureSince,
+  oldestCompletePrefix,
+} from "../src/measure-window.js";
 import { tightenMinOut } from "../src/min-out.js";
 import { MODE_PROFIT } from "../src/program-scripts.js";
 import { decideFromMeasurement, defaultVolumeBase } from "../src/settle-decision.js";
@@ -73,6 +81,77 @@ describe("the wedge", () => {
       /if\s*\(\s*info\.err\s*!==\s*null\s*\)\s*continue/.test(source),
       "failed signatures must be WALKED — skipping them breaks the balance chain and wedges the wallet",
     ).toBe(false);
+  });
+});
+
+// ── the oldest complete prefix ──────────────────────────────────────────────
+//
+// What one settlement of a backlog measures. The frontier moves to the prefix's
+// last slot, and no walk reads a slot at or below the frontier again, so the
+// prefix must hold every signature in that slot.
+
+describe("the oldest complete prefix", () => {
+  /** `count` signatures newest first, as getSignaturesForAddress serves them; `slotOf(i)` is the slot of the i-th oldest. */
+  const newestFirst = (count: number, slotOf: (i: number) => number) =>
+    Array.from({ length: count }, (_, i) => ({ signature: `s-${i}`, slot: slotOf(i) })).reverse();
+
+  it("takes the oldest 300 of 301 signatures, one per slot, and ends at the 300th-oldest slot", () => {
+    expect(MAX_SIGNATURES).toBe(300);
+    const { prefix, endSlot, prefixCut } = oldestCompletePrefix(newestFirst(301, (i) => 1_000 + i));
+    expect(prefix).toHaveLength(300);
+    expect(prefix[0]).toEqual({ signature: "s-0", slot: 1_000 });
+    expect(prefix.at(-1)).toEqual({ signature: "s-299", slot: 1_299 });
+    expect(endSlot).toBe(1_299);
+    expect(prefixCut).toBe(true);
+  });
+
+  it("extends to every signature in its last slot: when signatures 299, 300 and 301 share one, 302 are in", () => {
+    const { prefix, endSlot, prefixCut } = oldestCompletePrefix(newestFirst(310, (i) => (i >= 299 && i <= 301 ? 1_299 : 1_000 + i)));
+    expect(prefix).toHaveLength(302);
+    expect(prefix.slice(-3).map((info) => info.signature)).toEqual(["s-299", "s-300", "s-301"]);
+    expect(endSlot).toBe(1_299);
+    expect(prefixCut).toBe(true);
+  });
+
+  it("takes a span of 250 whole, and leaves nothing for a later settlement", () => {
+    const { prefix, endSlot, prefixCut } = oldestCompletePrefix(newestFirst(250, (i) => 1_000 + i));
+    expect(prefix).toHaveLength(250);
+    expect(endSlot).toBe(1_249);
+    expect(prefixCut).toBe(false);
+  });
+
+  it("takes all 400 when the first slot alone holds 400, whether or not more follow", () => {
+    const cut = oldestCompletePrefix(newestFirst(450, (i) => (i < 400 ? 7 : 8 + i)));
+    expect(cut.prefix).toHaveLength(400);
+    expect(cut).toMatchObject({ endSlot: 7, prefixCut: true });
+    const whole = oldestCompletePrefix(newestFirst(400, () => 7));
+    expect(whole.prefix).toHaveLength(400);
+    expect(whole).toMatchObject({ endSlot: 7, prefixCut: false });
+  });
+
+  it("decides by slot, not by position: a signature served out of order is in when its slot is, and nothing newer than the last slot is", () => {
+    const oldestFirst = [
+      ...Array.from({ length: 300 }, (_, i) => ({ signature: `s-${i}`, slot: 1_000 + i })),
+      { signature: "s-302", slot: 1_302 },
+      { signature: "s-late", slot: 1_100 },
+      { signature: "s-303", slot: 1_303 },
+    ];
+    const { prefix, endSlot, prefixCut } = oldestCompletePrefix([...oldestFirst].reverse());
+    const signatures = prefix.map((info) => info.signature);
+    expect(endSlot).toBe(1_299);
+    expect(signatures).toHaveLength(301);
+    expect(signatures).toContain("s-late");
+    for (const newer of ["s-302", "s-303"]) expect(signatures).not.toContain(newer);
+    expect(prefixCut).toBe(true);
+  });
+
+  it("returns nothing for an empty span, refuses a limit that is not a positive integer, and leaves the walk's list as it was", () => {
+    expect(oldestCompletePrefix([])).toEqual({ prefix: [], endSlot: null, prefixCut: false });
+    for (const limit of [0, -1, 1.5]) expect(() => oldestCompletePrefix(newestFirst(3, (i) => i), limit)).toThrow(/positive integer/);
+    const served = newestFirst(5, (i) => 10 + i);
+    const before = [...served];
+    expect(oldestCompletePrefix(served, 2)).toMatchObject({ endSlot: 11, prefixCut: true });
+    expect(served).toEqual(before);
   });
 });
 
@@ -145,7 +224,7 @@ describe("the walk, over a finalized ledger", () => {
     expect(full.transactionCalls).toEqual([]);
   });
 
-  it("reaches a frontier whose signature opens the second page, however full the first one was", async () => {
+  it("reaches a frontier whose signature opens the second page, however full the first one was, and reads only the oldest prefix above it", async () => {
     // The old walk declared itself truncated after its last full page even when
     // the frontier signature was the very next one.
     const ledger = new FakeLedger(wallet, [
@@ -155,39 +234,115 @@ describe("the walk, over a finalized ledger", () => {
     const measured = await measureSince(ledger, wallet, 100n, settleProgram);
     expect(measured).toMatchObject({ frontierReached: true, pagesExhausted: false, signaturesAbove: SIGNATURE_PAGE_LIMIT });
     expect(ledger.signatureCalls.map((call) => call.before)).toEqual([undefined, "sig-101"]);
-    // Above the read limit, refused before a single transaction is fetched.
-    expect(ledger.transactionCalls).toEqual([]);
-    expect(await decideFromMeasurement(measured, ctx(100n, 10_000n))).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+    // A thousand flat transfers: the anchor and the oldest 300 are read, and not one above them.
+    expect(measured).toMatchObject({ prefixCut: true, txCount: MAX_SIGNATURES, firstSlot: 101n, lastSlot: 400n, chainBreaks: 0 });
+    expect(ledger.transactionCalls).toHaveLength(MAX_SIGNATURES + 1);
+    expect(ledger.transactionCalls.at(0)).toEqual(finalized("anchor-100"));
+    expect(ledger.transactionCalls.at(-1)).toEqual(finalized("sig-400"));
+    // A flat prefix settles a zero base at once: resting would leave the same prefix there every sweep.
+    expect(await decideFromMeasurement(measured, ctx(100n, 10_000n))).toMatchObject({ kind: "settle", baseLamports: 0n, endSlot: 400n });
   });
 
-  it("reads exactly MAX_SIGNATURES above the frontier, where the old walk called itself truncated, and refuses one more unread", async () => {
+  it("reads exactly MAX_SIGNATURES above the frontier and settles them whole; one more cuts the window to the oldest 300 and leaves the newest unread", async () => {
     const anchor: LedgerEntry = { signature: "anchor-500", slot: 500, pre: 1_000_000, post: 1_000_000, programs: FLOW };
     const atLimit = new FakeLedger(wallet, [anchor, ...perSlot(501, MAX_SIGNATURES, { programs: TRADE, delta: 1 })]);
     const measured = await measureSince(atLimit, wallet, 500n, settleProgram);
-    expect(measured).toMatchObject({ frontierReached: true, signaturesAbove: MAX_SIGNATURES, txCount: MAX_SIGNATURES, chainBreaks: 0 });
+    expect(measured).toMatchObject({ frontierReached: true, signaturesAbove: MAX_SIGNATURES, txCount: MAX_SIGNATURES, chainBreaks: 0, prefixCut: false });
     expect(atLimit.transactionCalls).toHaveLength(MAX_SIGNATURES + 1);
     expect(await decideFromMeasurement(measured, at500)).toEqual({ kind: "settle", baseLamports: BigInt(MAX_SIGNATURES), endSlot: 800n });
 
+    // THE 301-TRANSACTION SPAN that was INCOMPLETE every sweep, over a consistent chain.
     const overLimit = new FakeLedger(wallet, [anchor, ...perSlot(501, MAX_SIGNATURES + 1, { programs: TRADE, delta: 1 })]);
     const over = await measureSince(overLimit, wallet, 500n, settleProgram);
-    expect(over).toMatchObject({ frontierReached: true, signaturesAbove: MAX_SIGNATURES + 1, txCount: 0 });
-    expect(overLimit.transactionCalls).toEqual([]);
+    expect(over).toMatchObject({
+      frontierReached: true,
+      signaturesAbove: MAX_SIGNATURES + 1,
+      txCount: MAX_SIGNATURES,
+      chainBreaks: 0,
+      unfetchable: 0,
+      prefixCut: true,
+      lastSlot: 800n,
+    });
+    expect(overLimit.transactionCalls).toHaveLength(MAX_SIGNATURES + 1);
+    expect(overLimit.transactionCalls.map((call) => call.signature)).not.toContain("sig-801");
     const decision = await decideFromMeasurement(over, at500);
-    expect(decision).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
-    if (decision.kind === "stop") expect(decision.detail).not.toContain("catch up");
+    expect(decision).toMatchObject({ kind: "settle", baseLamports: BigInt(MAX_SIGNATURES), endSlot: 800n });
+    if (decision.kind === "settle") {
+      expect(decision.backlog).toBe("backlog: settling the oldest 300 of 301 signatures above slot 500, up to slot 800; the rest continues next sweep");
+    }
   });
 
-  it("stops after MAX_SIGNATURE_PAGES full pages, one page short of the frontier, and reads nothing", async () => {
+  it("settles a 301-transaction span in two windows, oldest first, whose bases add up to the one window's profit", async () => {
+    // Trades that win and lose, and a deposit every tenth transaction, so the profit is not a count.
+    const anchor: LedgerEntry = { signature: "anchor-500", slot: 500, pre: 1_000_000, post: 1_000_000, programs: FLOW };
+    const span = chained(
+      1_000_000,
+      Array.from({ length: MAX_SIGNATURES + 1 }, (_, i) =>
+        i % 10 === 9
+          ? { signature: `tx-${501 + i}`, slot: 501 + i, programs: FLOW, delta: 250_000 }
+          : { signature: `tx-${501 + i}`, slot: 501 + i, programs: TRADE, delta: i % 3 === 1 ? -40_000 : 35_000 },
+      ),
+    );
+    const oneWindowProfit = span.filter((entry) => entry.programs === TRADE).reduce((sum, entry) => sum + BigInt(entry.post - entry.pre), 0n);
+    const ledger = new FakeLedger(wallet, [anchor, ...span]);
+
+    const first = await measureSince(ledger, wallet, 500n, settleProgram);
+    expect(first).toMatchObject({ prefixCut: true, chainBreaks: 0, txCount: MAX_SIGNATURES, firstSlot: 501n, lastSlot: 800n });
+    const decision1 = await decideFromMeasurement(first, at500);
+    expect(decision1).toMatchObject({ kind: "settle", endSlot: 800n });
+    if (decision1.kind !== "settle") return;
+
+    // settle_v2 moves the frontier to the window's end, and the next sweep measures from there.
+    const s1 = decision1.endSlot;
+    ledger.transactionCalls.splice(0);
+    const second = await measureSince(ledger, wallet, s1, settleProgram);
+    expect(second).toMatchObject({ prefixCut: false, chainBreaks: 0, signaturesAbove: 1, txCount: 1, firstSlot: 801n, lastSlot: 801n });
+    // Its chain starts where the first window's ended: the anchor is that window's last transaction.
+    expect(ledger.transactionCalls).toEqual([finalized("tx-800"), finalized("tx-801")]);
+    const decision2 = await decideFromMeasurement(second, ctx(s1, 10_000n));
+    expect(decision2).toEqual({ kind: "settle", baseLamports: 35_000n, endSlot: 801n });
+    if (decision2.kind !== "settle") return;
+
+    expect(decision1.baseLamports > 0n && decision2.baseLamports > 0n, "both windows are positive").toBe(true);
+    expect(decision1.baseLamports + decision2.baseLamports).toBe(oneWindowProfit);
+  });
+
+  it("never splits the prefix's last slot: every signature in it is read, however far past the limit, and nothing newer", async () => {
+    const anchor: LedgerEntry = { signature: "anchor-500", slot: 500, pre: 1_000_000, post: 1_000_000, programs: FLOW };
+    // The 300th, 301st and 302nd oldest share slot 800, and three more follow it.
+    const span = chained(
+      1_000_000,
+      Array.from({ length: 305 }, (_, i) => ({ signature: `tx-${i}`, slot: i < 299 ? 501 + i : i <= 301 ? 800 : 499 + i, programs: TRADE, delta: 1 })),
+    );
+    const ledger = new FakeLedger(wallet, [anchor, ...span]);
+    const measured = await measureSince(ledger, wallet, 500n, settleProgram);
+    expect(measured).toMatchObject({ prefixCut: true, signaturesAbove: 305, txCount: 302, lastSlot: 800n, chainBreaks: 0, profitLamports: 302n });
+    const read = ledger.transactionCalls.map((call) => call.signature);
+    expect(read).toHaveLength(303);
+    expect(read.slice(-3)).toEqual(["tx-299", "tx-300", "tx-301"]);
+    for (const unread of ["tx-302", "tx-303", "tx-304"]) expect(read).not.toContain(unread);
+    expect(await decideFromMeasurement(measured, at500)).toMatchObject({ kind: "settle", baseLamports: 302n, endSlot: 800n });
+  });
+
+  it("stops after MAX_SIGNATURE_PAGES full pages, one page short of the frontier, and reads nothing: a prefix starts only at a frontier the walk saw", async () => {
     const ledger = new FakeLedger(wallet, [
       { signature: "anchor-100", slot: 100, pre: 1_000_000, post: 1_000_000, programs: FLOW },
       ...perSlot(101, MAX_SIGNATURE_PAGES * SIGNATURE_PAGE_LIMIT),
     ]);
     const measured = await measureSince(ledger, wallet, 100n, settleProgram);
-    expect(measured).toMatchObject({ frontierReached: false, pagesExhausted: true, signaturesAbove: MAX_SIGNATURE_PAGES * SIGNATURE_PAGE_LIMIT });
+    expect(measured).toMatchObject({
+      frontierReached: false,
+      pagesExhausted: true,
+      signaturesAbove: MAX_SIGNATURE_PAGES * SIGNATURE_PAGE_LIMIT,
+      prefixCut: false,
+      txCount: 0,
+    });
     expect(ledger.signatureCalls).toHaveLength(MAX_SIGNATURE_PAGES);
     expect(ledger.transactionCalls).toEqual([]);
     // INCOMPLETE even over a start finality has not reached: pages decide first.
-    expect(await decideFromMeasurement(measured, ctx(100n, 50n))).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+    const decision = await decideFromMeasurement(measured, ctx(100n, 50n));
+    expect(decision).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+    if (decision.kind === "stop") expect(decision.detail).not.toMatch(/catch(es|ing)?[ -]up/i);
   });
 
   it("excludes every signature in the frontier's own slot and anchors on the newest of them", async () => {

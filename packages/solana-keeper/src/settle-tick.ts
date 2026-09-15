@@ -5,8 +5,9 @@
 // sweep's one batched read, a paused vault or protocol stops at PAUSED, an
 // undefined mode stops at UNSUPPORTED_MODE while both real modes are measured, a
 // confirmed probe decides whether there is anything to walk, the walk reads
-// finalized history and must reach the frontier, a flat span settles a zero base
-// once it is worth a transaction, the attestation binds the vault's own mode,
+// finalized history and must reach the frontier, a backlog settles its oldest
+// complete prefix one sweep at a time, a flat span settles a zero base once it
+// is worth a transaction, the attestation binds the vault's own mode,
 // rate and policy nonce and a deadline, the wallet's reserve is checked against
 // the node's own fee before anything is signed, a send is confirmed by polling
 // its status, a refusal is classified by the program's own error name, a send
@@ -242,6 +243,11 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     };
   }
 
+  // A BACKLOG SAYS HOW MUCH OF IT THIS SETTLE TAKES, in every SETTLED detail
+  // below: the window is the span's oldest complete prefix, and the next sweep
+  // measures the rest from its end.
+  const backlog = decision.backlog === undefined ? "" : `; ${decision.backlog}`;
+
   // The deadline counts from the chain's own confirmed slot, read now rather
   // than taken from the measurement: a walk over a busy span takes seconds.
   const currentSlot = BigInt(await connection.getSlot("confirmed"));
@@ -315,10 +321,10 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
         // A ZERO BASE SAYS WHAT IT IS FOR: nothing moves, and the frontier does.
         inputs.baseLamports === 0n
           ? `DRY RUN — would settle 0 lamports in ${modeName} at ${inputs.bps} bps and advance the frontier ` +
-            `from ${inputs.sessionStartSlot} to ${inputs.sessionEndSlot} over ${measured.txCount} txs`
+            `from ${inputs.sessionStartSlot} to ${inputs.sessionEndSlot} over ${measured.txCount} txs${backlog}`
           : `DRY RUN — would settle ${paid} lamports (${owed} owed at ${inputs.bps} bps${clipped}) ` +
             `from ${inputs.baseLamports} lamports of measured ${inputs.mode === MODE_VOLUME ? "notional" : "profit"} ` +
-            `over slots ${inputs.sessionStartSlot}..${inputs.sessionEndSlot}`,
+            `over slots ${inputs.sessionStartSlot}..${inputs.sessionEndSlot}${backlog}`,
       ...carried,
     };
   }
@@ -355,7 +361,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
       if (nonce === link.settlementNonce + 1n) {
         return {
           outcome: "SETTLED",
-          detail: `landed; receipt not read — ${where}, and this link's nonce has moved to ${nonce} (${expectation})`,
+          detail: `landed; receipt not read — ${where}, and this link's nonce has moved to ${nonce} (${expectation})${backlog}`,
           ...carried,
           ...withSignature,
           nonce: link.settlementNonce,
@@ -440,8 +446,8 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     outcome: "SETTLED",
     detail:
       settled === null
-        ? `confirmed ${signature.slice(0, 12)}… (${expectation}) — the vault delta is on chain, its receipt not read in time`
-        : `settled ${settled} lamports from ${inputs.baseLamports} measured over ${measured.txCount} txs (${expectation})` +
+        ? `confirmed ${signature.slice(0, 12)}… (${expectation}) — the vault delta is on chain, its receipt not read in time${backlog}`
+        : `settled ${settled} lamports from ${inputs.baseLamports} measured over ${measured.txCount} txs (${expectation})${backlog}` +
           // settle_v2's arithmetic is expectedContribution's, so any other
           // amount means one of the two is not what the other believes.
           (settled === paid ? "" : ` — WARNING: the vault moved ${settled} lamports, not the ${paid} settle_v2 computes for this base`),
