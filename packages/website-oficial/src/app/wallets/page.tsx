@@ -6,8 +6,8 @@
  * on Privy or wallet state — that starts inside <Providers>. A missing variable
  * renders the checklist instead of a broken page.
  *
- * The screen is a placeholder until the Solana wallet screens exist, still inside
- * <Providers> so the Solana Privy provider mounts here exactly as it will for them.
+ * With a configuration it mounts <Providers> around WalletsScreen, the same
+ * screen the dashboard's "Manage wallets" modal shows.
  */
 
 import { ArrowLeft } from "lucide-react";
@@ -19,6 +19,7 @@ import { ModeToggle } from "@/components/mode-toggle";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SetupChecklist } from "@/components/wallets/SetupChecklist";
+import { WalletsScreen } from "@/components/wallets/WalletsScreen";
 import { toSolanaPublicConfig, type ConfigProblem, type SolanaPublicConfig } from "@/lib/config";
 import { loadConfig } from "@/lib/load-config";
 
@@ -58,19 +59,11 @@ export default function WalletsPage() {
   );
 }
 
-/** The provider mounts, and the page says what is true. */
+/** The provider mounts, and everything that depends on Privy starts inside it. */
 function SolanaScreen({ config }: { config: SolanaPublicConfig }) {
   return (
     <Providers config={config}>
-      <Card>
-        <CardHeader>
-          <CardTitle>Solana wallets are on their way</CardTitle>
-          <CardDescription>
-            This deployment runs on Solana. The screens for your pension key, your vault and your trading wallets are
-            the next release. Nothing here can move funds yet.
-          </CardDescription>
-        </CardHeader>
-      </Card>
+      <WalletsScreen />
     </Providers>
   );
 }

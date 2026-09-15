@@ -12,8 +12,8 @@
  */
 import type { User } from "@privy-io/react-auth";
 
-/** Privy's walletClientType values for its embedded wallets (@privy-io/react-auth's Wallet type). */
-const EMBEDDED_CLIENT_TYPES: ReadonlySet<string> = new Set(["privy", "privy-v2"]);
+/** Privy's walletClientType values for its embedded wallets (@privy-io/react-auth's Wallet type). Trading wallets are exactly these. */
+export const EMBEDDED_CLIENT_TYPES: ReadonlySet<string> = new Set(["privy", "privy-v2"]);
 
 interface WalletFields {
   readonly address: string;

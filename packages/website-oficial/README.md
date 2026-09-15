@@ -12,7 +12,7 @@ and the two Solana routes the browser talks to.
 | ----------------- | ---------- |
 | `/`               | The landing for a visitor without a pension key. Signing in with a Solana wallet, or following "See the app", opens the dashboard. |
 | `/?mode=mock`     | The dashboard on example data, badged **Sample data**, with **Live** disabled. There is no live data until the Solana vault screens land. |
-| `/wallets`        | A placeholder for the Solana wallet screens, or the setup checklist when the configuration is incomplete. |
+| `/wallets`        | The wallets screen: connect the pension key with a Solana wallet; create trading wallets born with the keeper's seat (its Privy signer, bounded by its policy); see whether Privy records a signer on each wallet (not whose: `privy-policy verify` confirms the keeper's, with its policy), grant a missing seat, and export a trading wallet's key through Privy's dialog. The setup checklist when the configuration is incomplete. |
 | `/api/health`     | Liveness. Always 200, whatever the configuration: check `/wallets` for that. |
 | `/api/solana-rpc` | A narrow JSON-RPC relay for Privy's Solana signing UI. The keyed upstream URL never reaches the browser. |
 | `/api/solana-tx`  | Verified broadcast: a transaction the user already signed is checked against the core's verifier, simulated and sent. The route never signs. |
@@ -91,7 +91,7 @@ sheet.
 src/app/layout.tsx                  fonts, ThemeProvider, TooltipProvider
 src/app/page.tsx                    reads the configuration; hands the shell the example and the wallets host
 src/app/providers.tsx               the Solana PrivyProvider: wallet login, Solana wallets only, no embedded wallet on login
-src/app/wallets/page.tsx            the placeholder, or the setup checklist
+src/app/wallets/page.tsx            the wallets screen inside <Providers>, or the setup checklist
 src/app/api/health/route.ts         liveness
 src/app/api/solana-rpc/route.ts     the relay (handlers from @sip/solana-core/server)
 src/app/api/solana-tx/route.ts      verified broadcast (handlers from @sip/solana-core/server)
@@ -99,10 +99,14 @@ src/proxy.ts, security-headers.mjs  the Content-Security-Policy and the other he
 src/lib/config.ts, load-config.ts   the configuration: its types, the readers, the refusals and the routes' gate
 src/lib/solana-routes.ts            the core's route handlers, behind that gate
 src/lib/pension-key.ts              the pension key, derived from Privy's user in the browser
+src/lib/privy-failure.ts            what Privy's failures mean, in words someone can act on
+src/lib/trading-wallets.ts          trading wallets and the keeper's seat: its signer with its policy, the list from Privy's record, the create, whether Privy records a signer (never whose), the repair, the export
 src/components/landing.tsx          the front door
 src/components/dashboard-shell.tsx  landing or dashboard, and the note over the example
-src/components/wallets-host.tsx     "Manage wallets": the pending modal, or the setup modal when the configuration is incomplete
-src/components/wallets/*            SetupChecklist, WalletsSetupModal, SolanaWalletsPendingModal
+src/components/wallets-host.tsx     "Manage wallets": the wallets modal, or the setup modal when the configuration is incomplete
+src/components/wallets/*            WalletsScreen (both containers), WalletsModal, TradingWalletsCard, TradingWalletRow, AddressLine, SetupChecklist, WalletsSetupModal
+src/hooks/use-create-trading-wallet.ts, use-keeper-seat.ts, use-export-trading-wallet.ts
+                                    create born seated; read whether a signer is recorded, grant a missing seat, re-read; export through Privy's dialog
 src/mocks/types.ts                  THE CONTRACT — what the backend will have to produce
 src/mocks/data.ts                   one deterministic instance: a volume-mode vault at 2%, seeded, identical on server and client
 src/lib/format.ts                   every number and date on the page (UTC, en-US, on purpose)
@@ -153,6 +157,15 @@ server.
 Privy must run the app in TEE mode for a signer seat to attach to a trading
 wallet (step 4 in `.env.example`, and
 [docs/runbooks/PRIVY_SOLANA.md](../../docs/runbooks/PRIVY_SOLANA.md)).
+
+A trading wallet's badge says **Has a signer**, never "Seated". Privy's browser
+SDK reports that a wallet has a signer (`delegated`), not which signer or which
+policy, and the web holds no app secret to ask Privy's API. The row prints the
+check with its ids, `privy-policy verify --wallet <Privy wallet id> --policy <policy id>`
+(`packages/solana-keeper`, step 6 of the runbook). A wallet whose signer is
+another key quorum, or the keeper's without its policy, is its owner's to fix:
+Privy's `removeSigners`, which removes every signer on the wallet, then Grant
+keeper permission. The page does not offer the removal.
 
 ## Deployment
 
