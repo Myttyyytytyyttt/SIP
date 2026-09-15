@@ -29,6 +29,10 @@
 //
 // CLONING READS MAINNET'S PUBLIC RPC, which throttles. A start that fails while
 // cloning is tried once more, then fails loudly.
+//
+// PRELOADED ACCOUNTS. A caller may hand accounts to load at genesis (--account):
+// the local proof gives the vault a SPYx holding built from a copy of a real
+// Token-2022 account, since no freeze or mint authority is available locally.
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -72,6 +76,12 @@ export interface LocalValidator {
   readonly rpcUrl: string;
   /** Idempotent. */
   stop(): Promise<StoppedValidator>;
+}
+
+/** An account preloaded at genesis with --account: the JSON solana-test-validator reads, written into the temporary directory. */
+export interface PreloadedAccount {
+  readonly pubkey: string;
+  readonly json: unknown;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -163,7 +173,7 @@ async function checkPreloadedProgram(connection: Connection, authority: PublicKe
   }
 }
 
-async function startOnce(authority: PublicKey, so: string, binary: Buffer): Promise<LocalValidator> {
+async function startOnce(authority: PublicKey, so: string, binary: Buffer, preloaded: readonly PreloadedAccount[]): Promise<LocalValidator> {
   const busy = await busyPorts();
   if (busy.length > 0) throw new Error(`refusing to start: port(s) ${busy.join(", ")} are in use. Nothing was stopped.`);
 
@@ -177,6 +187,11 @@ async function startOnce(authority: PublicKey, so: string, binary: Buffer): Prom
     cliConfig,
     ["---", `json_rpc_url: "${rpcUrl}"`, `websocket_url: "ws://127.0.0.1:${LOCAL_PORTS.websocket}/"`, `keypair_path: "${join(dir, "no-signer")}"`, "address_labels: {}", "commitment: confirmed", ""].join("\n"),
   );
+  const accountArgs = preloaded.flatMap((account) => {
+    const file = join(dir, `${account.pubkey}.account.json`);
+    writeFileSync(file, JSON.stringify(account.json));
+    return ["--account", account.pubkey, file];
+  });
 
   const args = [
     "--reset",
@@ -200,6 +215,7 @@ async function startOnce(authority: PublicKey, so: string, binary: Buffer): Prom
     "--url",
     MAINNET_RPC,
     ...MAINNET_CLONES.flatMap((address) => ["--clone", address]),
+    ...accountArgs,
     "--upgradeable-program",
     SIP_VAULT_PROGRAM_ID.toBase58(),
     so,
@@ -273,6 +289,9 @@ async function startOnce(authority: PublicKey, so: string, binary: Buffer): Prom
     for (const address of MAINNET_CLONES) {
       if ((await connection.getAccountInfo(new PublicKey(address), "confirmed")) === null) throw new Error(`the clone of ${address} is missing`);
     }
+    for (const account of preloaded) {
+      if ((await connection.getAccountInfo(new PublicKey(account.pubkey), "confirmed")) === null) throw new Error(`the preloaded account ${account.pubkey} is missing`);
+    }
   } catch (error) {
     const logTail = existsSync(logPath) ? readFileSync(logPath, "utf8").slice(-4_000) : "(no validator.log was written)";
     await stop();
@@ -286,19 +305,20 @@ async function startOnce(authority: PublicKey, so: string, binary: Buffer): Prom
  * `authority`, and returns once the program is executable, its ProgramData
  * checked and the clones present. Fails loudly, never as a skip.
  */
-export async function startLocalValidator(authority: PublicKey): Promise<LocalValidator> {
+export async function startLocalValidator(authority: PublicKey, options: { readonly accounts?: readonly PreloadedAccount[] } = {}): Promise<LocalValidator> {
   if (!process.versions.node.startsWith("22.")) throw new Error(`the local proof needs Node 22; this is Node ${process.versions.node}`);
   const version = spawnSync("solana-test-validator", ["--version"], { encoding: "utf8", env: childEnvironment() });
   if (version.error !== undefined || version.status !== 0) throw new Error("solana-test-validator is not on PATH, or `solana-test-validator --version` failed");
   const so = testedProgramBinary();
   const binary = readFileSync(so);
+  const preloaded = options.accounts ?? [];
   try {
-    return await startOnce(authority, so, binary);
+    return await startOnce(authority, so, binary, preloaded);
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
     if (!/429|too many requests|rate limit|clone|failed to fetch/i.test(text)) throw error;
     // Mainnet's public RPC throttles: one more try, then the failure stands.
     await sleep(10_000);
-    return startOnce(authority, so, binary);
+    return startOnce(authority, so, binary, preloaded);
   }
 }

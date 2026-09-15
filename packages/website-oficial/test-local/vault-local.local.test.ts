@@ -1,6 +1,12 @@
-// The local proof for web-boveda, Part 1: the vault is created and a trading
-// wallet linked by the web's own flows, over HTTP to the web's own production
+// The local proof for web-boveda: the vault is created, a trading wallet linked,
+// the investment policy signed with the vault's token accounts, and SOL, wSOL and
+// SPYx taken out, by the web's own flows, over HTTP to the web's own production
 // build, against a validator running the tested sip_vault.so.
+//
+// THE SPYx HOLDING. No SPYx mint or freeze authority exists locally, so the
+// vault's SPYx is a copy of a real Token-2022 account (the SPYx/USDC pool's own
+// vault, read once from mainnet's public RPC, read-only), its owner set to vault
+// A and its amount to 12,345,678, loaded at genesis with --account.
 //
 // WHAT RUNS. test-local/local-validator.ts starts solana-test-validator with the
 // tested binary at its real id; test-local/web-server.ts serves .next on
@@ -28,31 +34,56 @@
 import { createPrivateKey, sign } from "node:crypto";
 
 import {
+  ATA_PROGRAM,
+  DEFAULT_INVEST_CAPS,
   DEFAULT_VAULT_POLICY,
   OWNER_TX_COMPUTE,
+  RAYDIUM_CLMM,
   SIP_ACCOUNT_SPACE,
   SIP_PROGRAM_ID,
+  SOL_USDC_POOL,
+  SPYX_MINT,
+  SPYX_USDC_POOL,
+  TOKEN_2022_PROGRAM,
+  TOKEN_PROGRAM,
+  USDC_MINT,
+  WSOL_MINT,
   base64Encode,
+  convertWadFromSqrtPrice,
+  decodeClmmPoolPrice,
+  decodeInvestmentPolicy,
   decodeProtocolConfig,
   decodeTradingLink,
   decodeVault,
   encodeArgs,
   idlInstruction,
+  legWadFromSqrtPrice,
   linkConsentMessage,
   ownerComputeBudget,
   toHex,
   tryBase64Decode,
   type OwnerInstructionName,
 } from "@sip/solana-core/client";
-import { buildCreateVaultV2, deriveConfigPda, deriveLinkPda, deriveVaultPda } from "@sip/solana-core/server";
-import { Keypair, LAMPORTS_PER_SOL, PublicKey, Transaction, TransactionInstruction, VersionedTransaction, type Connection, type VersionedTransactionResponse } from "@solana/web3.js";
+import { buildCreateVaultV2, buildSetInvestPolicy, buildWithdraw, deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "@sip/solana-core/server";
+import {
+  Keypair,
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  TransactionInstruction,
+  VersionedTransaction,
+  type Connection,
+  type ParsedAccountData,
+  type VersionedTransactionResponse,
+} from "@solana/web3.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { createVaultApi, type VaultApi } from "@/lib/vault-api";
-import { createVaultFlow, linkWalletFlow, type FlowResult } from "@/lib/vault-flows";
+import { createVaultApi, transactionErrorWords, type InvestPolicyBuildJson, type VaultApi } from "@/lib/vault-api";
+import { createVaultFlow, investPolicyFlow, linkWalletFlow, withdrawFlow, withdrawTokenFlow, type FlowResult } from "@/lib/vault-flows";
 
 import { ED25519_CONSENT_HEADER_HEX, OWNER_INSTRUCTION_DATA_HEX } from "../../solana-core/test/fixtures/owner-transactions";
-import { startLocalValidator, type LocalValidator, type StoppedValidator } from "./local-validator";
+import { startLocalValidator, type LocalValidator, type PreloadedAccount, type StoppedValidator } from "./local-validator";
 import { CLIENT_IP_HEADERS, WEB_ORIGIN, startWebServer, withClientIp, type WebServer } from "./web-server";
 
 const SOL = BigInt(LAMPORTS_PER_SOL);
@@ -69,8 +100,52 @@ const ownerV = Keypair.generate();
 const tradingA = Keypair.generate();
 const tradingB = Keypair.generate();
 const tradingC = Keypair.generate();
+/** The vault's SPYx holding: a copy of a real Token-2022 account, not the vault's ATA. */
+const spyxHolding = Keypair.generate();
 
 const key = (keypair: Keypair): string => keypair.publicKey.toBase58();
+
+const MAINNET_RPC = "https://api.mainnet-beta.solana.com";
+/** The SPYx/USDC pool's SPYx vault on mainnet: a Token-2022 account with SPYx's account extensions, 175 bytes. */
+const SPYX_TEMPLATE_ACCOUNT = "CiQuPAfYp5v82vijk6u7wqFnaZqtGdJfUUSjDKAtT9ML";
+const SPYX_HOLDING_RAW = 12_345_678n;
+
+/** One read-only getAccountInfo from mainnet's public RPC, retried once if it throttles. */
+async function mainnetAccountBytes(address: string): Promise<{ owner: string; data: Uint8Array }> {
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch(MAINNET_RPC, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getAccountInfo", params: [address, { encoding: "base64", commitment: "confirmed" }] }),
+    });
+    if (response.status === 429 && attempt === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+      continue;
+    }
+    const body = (await response.json()) as { result?: { value?: { owner?: string; data?: [string, string] } | null } };
+    const value = body.result?.value;
+    const data = tryBase64Decode(value?.data?.[0] ?? "");
+    if (value?.owner === undefined || data === null) throw new Error(`mainnet did not answer the account ${address} (HTTP ${response.status})`);
+    return { owner: value.owner, data };
+  }
+}
+
+/** The vault's SPYx holding: the template's bytes with owner vault A, amount 12,345,678, and no delegate or close authority. */
+async function spyxHoldingAccount(vault: PublicKey): Promise<PreloadedAccount> {
+  const template = await mainnetAccountBytes(SPYX_TEMPLATE_ACCOUNT);
+  if (template.owner !== TOKEN_2022_PROGRAM || template.data.length !== 175 || template.data[165] !== 2 || template.data[108] !== 1) {
+    throw new Error("the SPYx template account is no longer an initialized 175-byte Token-2022 account");
+  }
+  const data = template.data.slice();
+  data.set(vault.toBytes(), 32);
+  new DataView(data.buffer).setBigUint64(64, SPYX_HOLDING_RAW, true);
+  data[72] = 0; // delegate: none
+  data[129] = 0; // close authority: none
+  return {
+    pubkey: key(spyxHolding),
+    json: { pubkey: key(spyxHolding), account: { lamports: 10_000_000, data: [base64Encode(data), "base64"], owner: TOKEN_2022_PROGRAM, executable: false, rentEpoch: 0, space: 175 } },
+  };
+}
 
 let validator: LocalValidator | undefined;
 let web: WebServer | undefined;
@@ -89,6 +164,7 @@ const report = {
     tradingA: key(tradingA),
     tradingB: key(tradingB),
     tradingC: key(tradingC),
+    spyxHolding: key(spyxHolding),
   },
   rents: {} as Record<string, string>,
   signatures: {} as Record<string, string>,
@@ -216,8 +292,20 @@ async function rawBuild(body: unknown, headers: Record<string, string> = {}): Pr
   return { status: response.status, json: (await response.json()) as never };
 }
 
+/** Sends signed bytes straight to the validator, past the web's relay, and waits for them to land. */
+async function direct(transaction: Transaction, ...signers: Keypair[]): Promise<VersionedTransactionResponse> {
+  const recent = await connection.getLatestBlockhash("confirmed");
+  transaction.recentBlockhash = recent.blockhash;
+  transaction.feePayer = signers[0]!.publicKey;
+  transaction.sign(...signers);
+  return landed(await connection.sendRawTransaction(transaction.serialize(), { skipPreflight: false }));
+}
+
+const tokenAmount = async (account: string): Promise<bigint> => BigInt((await connection.getTokenAccountBalance(new PublicKey(account), "confirmed")).value.amount);
+
 beforeAll(async () => {
-  validator = await startLocalValidator(upgradeAuthority.publicKey);
+  const vaultA = new PublicKey(deriveVaultPda(key(ownerA)).toBase58());
+  validator = await startLocalValidator(upgradeAuthority.publicKey, { accounts: [await spyxHoldingAccount(vaultA)] });
   connection = validator.connection;
   web = await startWebServer();
   api = createVaultApi({ origin: WEB_ORIGIN, fetch: withClientIp });
@@ -236,10 +324,10 @@ afterAll(async () => {
   if (validatorStopped !== null) expect(validatorStopped).toEqual({ exited: true, rpcRefused: true, tempDirGone: true });
 });
 
-describe("web-boveda Part 1 on the tested sip_vault", () => {
+describe("web-boveda on the tested sip_vault", () => {
   it("1. funds the keys from the faucet and reads the local rents", async () => {
     for (const keypair of [upgradeAuthority, ownerA, ownerB, ownerV]) await airdrop(keypair.publicKey, 20n * SOL);
-    for (const size of [0, SIP_ACCOUNT_SPACE.Vault, SIP_ACCOUNT_SPACE.TradingLink]) {
+    for (const size of [0, SIP_ACCOUNT_SPACE.Vault, SIP_ACCOUNT_SPACE.TradingLink, SIP_ACCOUNT_SPACE.InvestmentPolicy, 165, 179]) {
       rents.set(size, BigInt(await connection.getMinimumBalanceForRentExemption(size, "confirmed")));
       report.rents[String(size)] = rent(size).toString();
     }
@@ -251,7 +339,13 @@ describe("web-boveda Part 1 on the tested sip_vault", () => {
     const state = await api.state({ owner: key(ownerA), wallets: [] });
     if (!state.ok) throw new Error(state.code);
     expect([state.body.vault.status, state.body.policy.status, state.body.config.status]).toEqual(["missing", "missing", "missing"]);
-    expect(state.body.rents).toEqual({ vault: rent(125).toString(), link: rent(129).toString() });
+    expect(state.body.rents).toEqual({
+      vault: rent(125).toString(),
+      link: rent(129).toString(),
+      policy: rent(970).toString(),
+      tokenAccount: rent(165).toString(),
+      legTokenAccounts: { [SPYX_MINT]: rent(179).toString() },
+    });
     expect(state.body.prices).not.toBeNull();
   });
 
@@ -428,6 +522,202 @@ describe("web-boveda Part 1 on the tested sip_vault", () => {
     expect([refused.status, refused.json.error?.code]).toEqual([422, "link_consent_invalid"]);
   });
 
+  it("11. investPolicyFlow signs SPYx at the cloned pools' floors, creating and paying for the vault's three token accounts; again with other caps and none; an account for another vault is refused", async () => {
+    const owner = key(ownerA);
+    const vault = deriveVaultPda(owner).toBase58();
+    const signers = wallets(ownerA, tradingA);
+
+    // The harness's own floors, from the cloned pools' sqrt prices, with no code of the build route.
+    const [solPool, spyxPool] = await connection.getMultipleAccountsInfo([new PublicKey(SOL_USDC_POOL), new PublicKey(SPYX_USDC_POOL)], "confirmed");
+    expect([solPool?.owner.toBase58(), spyxPool?.owner.toBase58()]).toEqual([RAYDIUM_CLMM, RAYDIUM_CLMM]);
+    const solSqrt = decodeClmmPoolPrice(Uint8Array.from(solPool!.data)).sqrtPriceX64;
+    const spyxSqrt = decodeClmmPoolPrice(Uint8Array.from(spyxPool!.data)).sqrtPriceX64;
+    const convertFloor = (convertWadFromSqrtPrice(solSqrt) * 9_000n) / 10_000n;
+    const legFloor = (legWadFromSqrtPrice(spyxSqrt) * 9_500n) / 10_000n;
+    expect(convertFloor).toBe(((solSqrt * solSqrt * 10n ** 18n) >> 128n) * 9_000n / 10_000n);
+    expect(legFloor).toBe(((((1n << 128n) * 10n ** 18n) / (spyxSqrt * spyxSqrt)) * 9_500n) / 10_000n);
+
+    const shown: InvestPolicyBuildJson[] = [];
+    const before = await lamports(owner);
+    const result = await investPolicyFlow({ api, signers: signers.pension, onBuilt: (body) => void shown.push(body as InvestPolicyBuildJson) }, { pensionKey: owner });
+    const signature = landedSignature(result);
+    const tx = await landed(signature);
+    expect(shown).toHaveLength(1);
+    expect([shown[0]!.floors.convertWad, shown[0]!.floors.legs[0]!.wad]).toEqual([convertFloor.toString(), legFloor.toString()]);
+
+    expect(programsOf(tx)).toEqual([COMPUTE_BUDGET, COMPUTE_BUDGET, ATA_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, SIP_PROGRAM_ID]);
+    expect(signers.calls.pensionIn[0]!.length).toBeLessThanOrEqual(1_232);
+    const policyAddress = new PublicKey(deriveInvestPda(vault).toBase58());
+    const policy = decodeInvestmentPolicy(Uint8Array.from((await connection.getAccountInfo(policyAddress, "confirmed"))!.data));
+    expect(policy).toMatchObject({
+      vault,
+      enabled: true,
+      venueProgram: RAYDIUM_CLMM,
+      inMint: USDC_MINT,
+      legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: legFloor }],
+      minConvertRateWad: convertFloor,
+      minInvestment: 5_000_000n,
+      maxPerCall: DEFAULT_INVEST_CAPS.maxPerCall,
+      maxRolling30d: DEFAULT_INVEST_CAPS.maxRolling30d,
+      policyNonce: 1n,
+    });
+    expect(policy.bucketAmounts.every((amount) => amount === 0n)).toBe(true);
+
+    const expected = [
+      { mint: WSOL_MINT, program: TOKEN_PROGRAM, size: 165 },
+      { mint: USDC_MINT, program: TOKEN_PROGRAM, size: 165 },
+      { mint: SPYX_MINT, program: TOKEN_2022_PROGRAM, size: 179 },
+    ];
+    for (const { mint, program, size } of expected) {
+      const address = new PublicKey(deriveAta(vault, mint, program).toBase58());
+      const account = await connection.getParsedAccountInfo(address, "confirmed");
+      const value = account.value!;
+      expect([value.owner.toBase58(), (value as { space?: number }).space]).toEqual([program, size]);
+      const info = (value.data as ParsedAccountData).parsed.info as { owner: string; mint: string; isNative: boolean; state: string; extensions?: { extension: string }[] };
+      expect([info.owner, info.mint, info.state]).toEqual([vault, mint, "initialized"]);
+      if (mint === SPYX_MINT) expect(info.extensions?.map((extension) => extension.extension)).toEqual(["immutableOwner", "pausableAccount", "transferHookAccount"]);
+    }
+    expect((await lamports(owner)) - before).toBe(-(rent(970) + 2n * rent(165) + rent(179) + BigInt(tx.meta!.fee)));
+    withinHalf("set_invest_policy", tx, "set_invest_policy ownerA with 3 token accounts", signature);
+
+    const beforeAgain = await lamports(owner);
+    const again = await investPolicyFlow({ api, signers: signers.pension }, { pensionKey: owner, maxPerCall: 10_000_000n, maxRolling30d: 50_000_000n });
+    const againSignature = landedSignature(again);
+    const againTx = await landed(againSignature);
+    expect(programsOf(againTx)).toEqual([COMPUTE_BUDGET, COMPUTE_BUDGET, SIP_PROGRAM_ID]);
+    const resigned = decodeInvestmentPolicy(Uint8Array.from((await connection.getAccountInfo(policyAddress, "confirmed"))!.data));
+    expect(resigned).toMatchObject({ policyNonce: 2n, maxPerCall: 10_000_000n, maxRolling30d: 50_000_000n });
+    expect((await lamports(owner)) - beforeAgain).toBe(-BigInt(againTx.meta!.fee));
+    withinHalf("set_invest_policy", againTx, "set_invest_policy ownerA again", againSignature);
+
+    // The core builder with a token account for ownerB's vault spliced in front, signed by ownerA.
+    const recent = await connection.getLatestBlockhash("confirmed");
+    const honest = buildSetInvestPolicy({
+      owner,
+      legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: legFloor }],
+      minConvertRateWad: convertFloor,
+      minInvestment: 5_000_000n,
+      maxPerCall: 10_000_000n,
+      maxRolling30d: 50_000_000n,
+      enabled: true,
+      blockhash: recent.blockhash,
+      computeBudget: ownerComputeBudget("set_invest_policy"),
+    });
+    const forged = Transaction.from(Buffer.from(tryBase64Decode(honest.txBase64)!));
+    const otherVault = new PublicKey(deriveVaultPda(key(ownerB)).toBase58());
+    const theirs = new PublicKey(deriveAta(otherVault.toBase58(), WSOL_MINT, TOKEN_PROGRAM).toBase58());
+    forged.instructions.splice(
+      2,
+      0,
+      new TransactionInstruction({
+        programId: new PublicKey(ATA_PROGRAM),
+        keys: [
+          { pubkey: ownerA.publicKey, isSigner: true, isWritable: true },
+          { pubkey: theirs, isSigner: false, isWritable: true },
+          { pubkey: otherVault, isSigner: false, isWritable: false },
+          { pubkey: new PublicKey(WSOL_MINT), isSigner: false, isWritable: false },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+          { pubkey: new PublicKey(TOKEN_PROGRAM), isSigner: false, isWritable: false },
+        ],
+        data: Buffer.from([1]),
+      }),
+    );
+    forged.sign(ownerA);
+    expect(await api.send(Uint8Array.from(forged.serialize()))).toMatchObject({ ok: false, status: 422, code: "vault_account_invalid" });
+  });
+
+  it("12. withdraw: a deposit the relay refuses lands straight on the validator, a lamport past what the vault can release is refused, withdrawFlow lands, and the program's own refusal reads in words", async () => {
+    const owner = key(ownerA);
+    const vault = new PublicKey(deriveVaultPda(owner).toBase58());
+
+    const deposit = new Transaction({ feePayer: ownerA.publicKey, recentBlockhash: (await connection.getLatestBlockhash("confirmed")).blockhash }).add(
+      SystemProgram.transfer({ fromPubkey: ownerA.publicKey, toPubkey: vault, lamports: 200_000_000 }),
+    );
+    deposit.sign(ownerA);
+    expect(await api.send(Uint8Array.from(deposit.serialize()))).toMatchObject({ ok: false, status: 422, code: "program_not_allowed" });
+    await direct(new Transaction().add(SystemProgram.transfer({ fromPubkey: ownerA.publicKey, toPubkey: vault, lamports: 200_000_000 })), ownerA);
+
+    const state = await api.state({ owner, wallets: [] });
+    expect(state.ok && state.body.vault.withdrawableLamports).toBe("200000000");
+    expect(await api.build({ action: "withdraw", owner, lamports: "200000001" })).toMatchObject({ ok: false, status: 422, code: "above_withdrawable", body: { withdrawableLamports: "200000000" } });
+
+    const [ownerBefore, vaultBefore] = [await lamports(owner), await lamports(vault.toBase58())];
+    const result = await withdrawFlow({ api, signers: wallets(ownerA, tradingA).pension }, { pensionKey: owner, lamports: 150_000_000n });
+    const signature = landedSignature(result);
+    const tx = await landed(signature);
+    expect((await lamports(vault.toBase58())) - vaultBefore).toBe(-150_000_000n);
+    expect((await lamports(owner)) - ownerBefore).toBe(150_000_000n - BigInt(tx.meta!.fee));
+    expect(programsOf(tx)).toEqual([COMPUTE_BUDGET, COMPUTE_BUDGET, SIP_PROGRAM_ID]);
+    expect(toHex(dataOf(tx, 2))).toBe(OWNER_INSTRUCTION_DATA_HEX.WITHDRAW_150000000);
+    withinHalf("withdraw", tx, "withdraw ownerA 150000000", signature);
+
+    // The core builder past the rent floor: the relay's simulation answers the program's 6004.
+    const recent = await connection.getLatestBlockhash("confirmed");
+    const above = buildWithdraw({ owner, lamports: 50_000_001n, blockhash: recent.blockhash, computeBudget: ownerComputeBudget("withdraw") });
+    const refused = await api.send(signWith(tryBase64Decode(above.txBase64)!, ownerA));
+    expect(refused).toMatchObject({ ok: false, status: 422, code: "simulation_failed", body: { err: { InstructionError: [2, { Custom: 6004 }] } } });
+    if (!refused.ok) expect(transactionErrorWords(refused.body.err, refused.body.logs)).toContain("below its rent reserve");
+  });
+
+  it("13. withdraw_token for wSOL: SOL synced into the vault's wSOL account comes back to the pension key as SOL, and its account closes", async () => {
+    const owner = key(ownerA);
+    const vault = deriveVaultPda(owner).toBase58();
+    const vaultWsol = new PublicKey(deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58());
+    await direct(
+      new Transaction().add(
+        SystemProgram.transfer({ fromPubkey: ownerA.publicKey, toPubkey: vaultWsol, lamports: 100_000_000 }),
+        new TransactionInstruction({ programId: new PublicKey(TOKEN_PROGRAM), keys: [{ pubkey: vaultWsol, isSigner: false, isWritable: true }], data: Buffer.from([17]) }),
+      ),
+      ownerA,
+    );
+
+    const state = await api.state({ owner, wallets: [] });
+    if (!state.ok) throw new Error(state.code);
+    const holding = state.body.holdings.items.find((item) => item.mint === WSOL_MINT);
+    expect(holding).toMatchObject({ tokenAccount: vaultWsol.toBase58(), amountRaw: "100000000", tokenProgram: TOKEN_PROGRAM });
+
+    const before = await lamports(owner);
+    const result = await withdrawTokenFlow(
+      { api, signers: wallets(ownerA, tradingA).pension },
+      { pensionKey: owner, mint: WSOL_MINT, amountRaw: BigInt(holding!.amountRaw), vaultTokenAccount: holding!.tokenAccount, tokenProgram: holding!.tokenProgram },
+    );
+    const signature = landedSignature(result);
+    const tx = await landed(signature);
+    expect(await tokenAmount(vaultWsol.toBase58())).toBe(0n);
+    expect(await connection.getAccountInfo(new PublicKey(deriveAta(owner, WSOL_MINT, TOKEN_PROGRAM).toBase58()), "confirmed")).toBeNull();
+    expect((await lamports(owner)) - before).toBe(100_000_000n - BigInt(tx.meta!.fee));
+    expect(toHex(dataOf(tx, 2))).toBe(OWNER_INSTRUCTION_DATA_HEX.WITHDRAW_TOKEN_100000000);
+    withinHalf("withdraw_token", tx, "withdraw_token ownerA wSOL", signature);
+  });
+
+  it("14. withdraw_token for SPYx on Token-2022: from the holding that is not the vault's ATA, into the pension key's own new account, which it pays for", async () => {
+    const owner = key(ownerA);
+    const state = await api.state({ owner, wallets: [] });
+    if (!state.ok) throw new Error(state.code);
+    const holding = state.body.holdings.items.find((item) => item.mint === SPYX_MINT);
+    expect(holding).toMatchObject({ tokenAccount: key(spyxHolding), amountRaw: SPYX_HOLDING_RAW.toString(), tokenProgram: TOKEN_2022_PROGRAM });
+
+    const built = await api.build<{ vaultTokenAccount: string }>({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: SPYX_HOLDING_RAW.toString() });
+    expect(built.ok && built.body.vaultTokenAccount).toBe(key(spyxHolding));
+
+    const before = await lamports(owner);
+    const result = await withdrawTokenFlow(
+      { api, signers: wallets(ownerA, tradingA).pension },
+      { pensionKey: owner, mint: SPYX_MINT, amountRaw: SPYX_HOLDING_RAW, vaultTokenAccount: holding!.tokenAccount, tokenProgram: holding!.tokenProgram },
+    );
+    const signature = landedSignature(result);
+    const tx = await landed(signature);
+    expect(await tokenAmount(key(spyxHolding))).toBe(0n);
+    const ownerSpyx = new PublicKey(deriveAta(owner, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58());
+    const parsed = (await connection.getParsedAccountInfo(ownerSpyx, "confirmed")).value!;
+    expect([parsed.owner.toBase58(), (parsed as { space?: number }).space]).toEqual([TOKEN_2022_PROGRAM, 179]);
+    expect(((parsed.data as ParsedAccountData).parsed.info as { owner: string }).owner).toBe(owner);
+    expect(await tokenAmount(ownerSpyx.toBase58())).toBe(SPYX_HOLDING_RAW);
+    expect((await lamports(owner)) - before).toBe(-(rent(179) + BigInt(tx.meta!.fee)));
+    expect(toHex(dataOf(tx, 2))).toBe(OWNER_INSTRUCTION_DATA_HEX.WITHDRAW_TOKEN_12345678);
+    withinHalf("withdraw_token", tx, "withdraw_token ownerA SPYx", signature);
+  });
+
   it("15. the live build route refuses a cross-site request, text/plain and an unknown action", async () => {
     expect((await rawBuild({ action: "createVault", owner: key(ownerA), mode: 0 }, { "sec-fetch-site": "cross-site" })).status).toBe(403);
     expect((await rawBuild(JSON.stringify({ action: "createVault" }), { "content-type": "text/plain" })).status).toBe(415);
@@ -436,7 +726,8 @@ describe("web-boveda Part 1 on the tested sip_vault", () => {
 
   it("16. every landing used at most half of its compute limit", () => {
     const landings = Object.values(report.units);
-    expect(landings.length).toBe(5);
+    // Part 1's five, two policies, a withdrawal, and the wSOL and SPYx token withdrawals.
+    expect(landings.length).toBe(10);
     for (const { consumed, limit } of landings) expect(consumed).toBeLessThanOrEqual(limit / 2);
   });
 });
