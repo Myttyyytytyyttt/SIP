@@ -110,6 +110,9 @@ describe("VaultCard", () => {
     expect(radio(html, "0")).toContain('checked=""');
     expect(radio(html, "1")).toContain('disabled=""');
     expect(html).toContain("Profit · 20 % of what your trading wallet gains. The keeper watches your trading wallet&#x27;s SOL.");
+    expect(html).toContain(
+      "A losing stretch moves nothing, and its loss comes off the next gain. Once your trading wallet has signed 100 transactions of its own while still behind, that loss is dropped and later gains count in full.",
+    );
     expect(html).toContain("One settlement moves at most 0.06 SOL; anything above that is not carried over. It never leaves the trading wallet with less than 0.05 SOL.");
     expect(html).toContain("Coming soon");
     expect(html).toContain("Coming soon: the keeper cannot measure trading volume yet, so a volume vault would receive nothing.");

@@ -17,6 +17,15 @@ export const PROFIT_RATE = ratePercent(DEFAULT_VAULT_POLICY.skimBps);
 /** "2 %", from the product's default volume rate. */
 export const VOLUME_RATE = ratePercent(DEFAULT_VAULT_POLICY.volumeBps);
 
+/**
+ * How many transactions of its own a trading wallet signs, while a PROFIT span is
+ * still behind, before the keeper settles zero and drops that loss: the keeper's
+ * ZERO_BASE_MIN_TXS (packages/solana-keeper/src/settle-decision.ts). TradingLink
+ * keeps no high-water mark, so a dropped loss is not netted against later gains.
+ * vault-copy.test.ts reads the keeper's file and holds the two equal.
+ */
+export const LOSS_DROPPED_AFTER_TXS = 100;
+
 /** The first and last four characters of an address. */
 export const shortAddress = (address: string): string => (address.length > 10 ? `${address.slice(0, 4)}…${address.slice(-4)}` : address);
 
@@ -47,7 +56,7 @@ export const VAULT_COPY = {
   address: "Vault address",
   /** The PROFIT rule, at `rate` ("20 %"). */
   profitRule: (rate: string, maxContribution: string, walletReserve: string): string =>
-    `Profit · ${rate} of what your trading wallet gains. The keeper watches your trading wallet's SOL. When a stretch of trading ends with more SOL than it started, not counting plain transfers you send in or take out, ${rate} of the gain moves into this vault. Gains held in tokens count once they are sold back to SOL. A losing stretch moves nothing, and its loss comes off the next gain. One settlement moves at most ${maxContribution} SOL; anything above that is not carried over. It never leaves the trading wallet with less than ${walletReserve} SOL.`,
+    `Profit · ${rate} of what your trading wallet gains. The keeper watches your trading wallet's SOL. When a stretch of trading ends with more SOL than it started, not counting plain transfers you send in or take out, ${rate} of the gain moves into this vault. Gains held in tokens count once they are sold back to SOL. A losing stretch moves nothing, and its loss comes off the next gain. Once your trading wallet has signed ${LOSS_DROPPED_AFTER_TXS} transactions of its own while still behind, that loss is dropped and later gains count in full. One settlement moves at most ${maxContribution} SOL; anything above that is not carried over. It never leaves the trading wallet with less than ${walletReserve} SOL.`,
   volumeComing: `Volume · ${VOLUME_RATE} of every buy and sell. Coming soon: the keeper cannot measure trading volume yet, so a volume vault would receive nothing. You will be able to switch when it is ready.`,
   /** The VOLUME rule, at `rate` ("2 %"), once VOLUME is offered. */
   volumeRule: (rate: string, maxContribution: string, walletReserve: string): string =>
