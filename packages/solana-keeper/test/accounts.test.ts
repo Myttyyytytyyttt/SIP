@@ -12,7 +12,7 @@
 
 import * as anchor from "@coral-xyz/anchor";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, SYSVAR_CLOCK_PUBKEY } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import {
   configAddress,
@@ -101,6 +101,8 @@ interface PolicyFields {
   readonly minInvestment: bigint;
   readonly maxPerCall: bigint;
   readonly maxRolling30d: bigint;
+  readonly bucketDays: readonly number[];
+  readonly bucketAmounts: readonly bigint[];
 }
 
 /** state.rs InvestmentPolicy: 970 bytes, the space of eight legs, however many are used. */
@@ -127,15 +129,29 @@ function policyBytes(p: PolicyFields): Buffer {
   at += 8;
   buf.writeBigUInt64LE(p.maxRolling30d, at);
   at += 8;
-  for (let day = 0; day < 31; day++) buf.writeUInt32LE(20_000 + day, at + 4 * day); // bucket_days
+  for (const [index, day] of p.bucketDays.entries()) buf.writeUInt32LE(day, at + 4 * index); // bucket_days
   at += 124;
-  for (let day = 0; day < 31; day++) buf.writeBigUInt64LE(BigInt(1_000 + day), at + 8 * day); // bucket_amounts
+  for (const [index, amount] of p.bucketAmounts.entries()) buf.writeBigUInt64LE(amount, at + 8 * index); // bucket_amounts
   at += 248;
   buf.writeBigUInt64LE(777n, at); // lifetime_invested
   at += 8;
   buf.writeBigUInt64LE(9n, at); // policy_nonce
   at += 8;
   buf.writeUInt8(251, at); // bump
+  return buf;
+}
+
+/** 2026-09-15 00:00 UTC, chain day 20_711. */
+const TODAY_UNIX = 1_789_430_400n;
+
+/** The Clock sysvar: 40 bytes, unix_timestamp an i64 at byte 32, after four fields that must not be read as it. */
+function clockBytes(unixTimestamp: bigint): Buffer {
+  const buf = Buffer.alloc(40);
+  buf.writeBigUInt64LE(400_000_000n, 0); // slot
+  buf.writeBigInt64LE(unixTimestamp - 172_800n, 8); // epoch_start_timestamp
+  buf.writeBigUInt64LE(930n, 16); // epoch
+  buf.writeBigUInt64LE(931n, 24); // leader_schedule_epoch
+  buf.writeBigInt64LE(unixTimestamp, 32);
   return buf;
 }
 
@@ -151,6 +167,7 @@ function stubChain(accounts: ReadonlyMap<string, Buffer>, extra: Readonly<Record
   const served: Record<string, Handler> = {
     getAccountInfoAndContext: async (address) => ({ context: { slot: 1 }, value: info(address) }),
     getAccountInfo: async (address) => info(address),
+    getMultipleAccountsInfo: async (addresses) => (addresses as PublicKey[]).map(info),
     ...extra,
   };
   const connection = new Proxy(
@@ -200,6 +217,10 @@ const policyFields = (vault: PublicKey, over: Partial<PolicyFields> = {}): Polic
   minInvestment: 5_000_000n,
   maxPerCall: 250_000_000n,
   maxRolling30d: 900_000_000n,
+  // A distinct value in every bucket, and every day long out of the window of
+  // the Clock chainWith serves, so nothing counts against the cap.
+  bucketDays: Array.from({ length: 31 }, (_, index) => 20_000 + index),
+  bucketAmounts: Array.from({ length: 31 }, (_, index) => BigInt(1_000 + index)),
   ...over,
 });
 
@@ -247,9 +268,25 @@ describe("the account readers, over bytes laid out as state.rs declares them", (
       minInvestment: planted.minInvestment,
       maxPerCall: planted.maxPerCall,
       maxRolling30d: 900_000_000n,
+      bucketDays: Array.from({ length: 31 }, (_, index) => 20_000 + index),
+      bucketAmounts: Array.from({ length: 31 }, (_, index) => BigInt(1_000 + index)),
     });
 
     expect(await readInvestmentPolicy(stubChain(new Map()).program, vault)).toBeNull();
+  });
+
+  it("refuse day buckets of any length but state.rs's 31", async () => {
+    const vault = key();
+    const { program } = stubChain(new Map([[investmentPolicyAddress(programId, vault).toBase58(), policyBytes(policyFields(vault))]]));
+    const client = (program.account as unknown as Record<string, { fetchNullable: (address: PublicKey) => Promise<unknown> }>)[
+      "investmentPolicy"
+    ]!;
+    const real = client.fetchNullable.bind(client);
+    client.fetchNullable = async (address) => {
+      const decoded = (await real(address)) as Record<string, unknown>;
+      return { ...decoded, bucketAmounts: (decoded["bucketAmounts"] as unknown[]).slice(1) };
+    };
+    await expect(readInvestmentPolicy(program, vault)).rejects.toThrow(/InvestmentPolicy\.bucketAmounts decoded 30 buckets, not state\.rs's 31/);
   });
 
   it("name the account and the field when the decoded names drift from the reader", async () => {
@@ -271,7 +308,10 @@ describe("the account readers, over bytes laid out as state.rs declares them", (
 describe("the ticks' first steps, over the same bytes", () => {
   function chainWith(vaultOver: Partial<VaultFields>, policyOver: Partial<PolicyFields> | null, extra: Readonly<Record<string, Handler>> = {}) {
     const vault = key();
-    const accounts = new Map([[vault.toBase58(), vaultBytes(vaultFields(vaultOver))]]);
+    const accounts = new Map([
+      [vault.toBase58(), vaultBytes(vaultFields(vaultOver))],
+      [SYSVAR_CLOCK_PUBKEY.toBase58(), clockBytes(TODAY_UNIX)],
+    ]);
     if (policyOver !== null) accounts.set(investmentPolicyAddress(programId, vault).toBase58(), policyBytes(policyFields(vault, policyOver)));
     return { vault, ...stubChain(accounts, extra) };
   }
@@ -293,7 +333,7 @@ describe("the ticks' first steps, over the same bytes", () => {
     const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, pools, live: false, protocolPaused: false });
     expect(result.outcome).toBe("PAUSED");
     expect(result.detail).toContain("VaultPaused");
-    expect(calls).toEqual(["getAccountInfoAndContext", "getAccountInfo"]);
+    expect(calls).toEqual(["getAccountInfoAndContext", "getMultipleAccountsInfo"]);
   });
 
   it("rest every investment while the protocol is paused", async () => {
@@ -301,7 +341,7 @@ describe("the ticks' first steps, over the same bytes", () => {
     const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, pools, live: false, protocolPaused: true });
     expect(result.outcome).toBe("PAUSED");
     expect(result.detail).toContain("ProtocolPaused");
-    expect(calls).toEqual(["getAccountInfoAndContext", "getAccountInfo"]);
+    expect(calls).toEqual(["getAccountInfoAndContext", "getMultipleAccountsInfo"]);
   });
 
   it("go on past the switches when nothing is paused", async () => {
@@ -364,7 +404,7 @@ describe("the ticks' first steps, over the same bytes", () => {
     expect(result.detail).toContain("min_convert_rate_wad is 0");
     expect(calls).toEqual([
       "getAccountInfoAndContext",
-      "getAccountInfo",
+      "getMultipleAccountsInfo",
       "getMinimumBalanceForRentExemption",
       "getTokenAccountBalance",
       "getTokenAccountBalance",
@@ -386,6 +426,30 @@ describe("the ticks' first steps, over the same bytes", () => {
     expect(result.detail).toContain("DRY RUN — would invest the 7000000 USDC already in the vault");
     expect(result.detail).not.toContain("would wrap");
     expect(result.detail).toContain("min_convert_rate_wad is 0");
+  });
+
+  it("rest a live turn whose 30-day cap is spent, before any balance, ATA, wrap or convert", async () => {
+    // 10 SOL free, a funded crank, a routable two-leg basket, and 31 buckets
+    // inside the served Clock's window holding 899_000_000 of the 900_000_000
+    // cap. The tick that never read the buckets wrapped and sold this SOL, and
+    // then every leg was refused with RollingCapExhausted.
+    const legs = [
+      { mint: key(), weightBps: 6_000, minOutRateWad: 1n },
+      { mint: key(), weightBps: 4_000, minOutRateWad: 1n },
+    ];
+    const legPools = new Map(legs.map((leg) => [leg.mint.toBase58(), key()] as const));
+    const { vault, connection, program, calls } = chainWith({}, {
+      legs,
+      bucketDays: Array.from({ length: 31 }, (_, index) => 20_681 + index),
+      bucketAmounts: Array.from({ length: 31 }, () => 29_000_000n),
+    });
+    const result = await runInvestTick({ connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: legPools, live: true, protocolPaused: false });
+    expect(result.outcome).toBe("IDLE");
+    expect(result.detail).toContain("RollingCapExhausted: rolling 899000000 of max 900000000");
+    expect(result.detail).toContain("headroom 1000000 is below the basket minimum 12500000");
+    expect(result.detail).toContain("headroom next grows on day 20712 (2026-09-16)");
+    expect(calls).toEqual(["getAccountInfoAndContext", "getMultipleAccountsInfo"]);
+    for (const rpc of ["getTokenAccountBalance", "getBalance", "sendTransaction"]) expect(calls).not.toContain(rpc);
   });
 
   function linkTo(vault: PublicKey): ManagedLink {

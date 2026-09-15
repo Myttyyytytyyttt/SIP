@@ -1,13 +1,15 @@
 // One investment turn for one vault: wrap what settled, convert it, buy the leg.
 //
-// Ported from Nuvem's solana-lab keeper (keeper/src/invest-tick.ts). Five things
-// changed: the policy's in_mint is checked before anything moves, so are either
-// pause switch and the owner's conversion floor, a wrap moves no more than the
-// crank can front (all four in invest-decision.ts), and the crank is null in a
-// dry run, which never reaches a line that needs it. Everything else is the old
-// behaviour, deliberately: the stranded-wSOL rescue, the refusal before convert
-// on an unroutable basket, the all-or-nothing per-leg minimum, one transaction
-// per leg, the compute budget price, and purchases recorded on FAILED too.
+// Ported from Nuvem's solana-lab keeper (keeper/src/invest-tick.ts). Seven
+// things changed: the policy's in_mint is checked before anything moves, so are
+// either pause switch, the 30-day cap and the owner's conversion floor, a wrap
+// moves no more than the crank can front and a convert no more than convert.rs
+// admits in one call (all six in invest-decision.ts), and the crank is null in
+// a dry run, which never reaches a line that needs it. Everything else is the
+// old behaviour, deliberately: the stranded-wSOL rescue, the refusal before
+// convert on an unroutable basket, the all-or-nothing per-leg minimum, one
+// transaction per leg, the compute budget price, and purchases recorded on
+// FAILED too.
 //
 // THE CRANK OWNS NO AUTHORITY. Every bound — the venue, the floors, the caps —
 // lives in policy state the vault owner signed; this only picks the moment and
@@ -25,6 +27,7 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  SYSVAR_CLOCK_PUBKEY,
   SystemProgram,
   Transaction,
 } from "@solana/web3.js";
@@ -41,9 +44,13 @@ import {
   CRANK_WRAP_RESERVE_LAMPORTS,
   USDC_MINT,
   WRAP_DUST_LAMPORTS,
+  chainDay,
+  convertAmount,
   convertDecision,
   inMintDecision,
   investPauseDecision,
+  rollingDecision,
+  shouldConvert,
   wrapPlan,
   type WrapPlan,
   type WrapReport,
@@ -109,17 +116,23 @@ export interface InvestDeps {
 /** What a turn learns on its way through, whichever way it then ends. */
 interface TurnFindings {
   wrap?: WrapReport;
+  /** Set once a convert that left wSOL behind has landed, saying how much waits. */
+  converted?: string;
 }
 
 /**
- * One investment turn, with what it found about the wrap attached to whichever
- * outcome it ends in. The turn has ten ways out; the report is written once,
- * here, rather than in each of them.
+ * One investment turn, with what it found about the wrap and the convert
+ * attached to whichever outcome it ends in. The turn has a dozen ways out; the
+ * findings are written once, here, rather than in each of them.
  */
 export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
   const found: TurnFindings = {};
   const result = await investTurn(deps, found);
-  return found.wrap === undefined ? result : { ...result, wrap: found.wrap };
+  return {
+    ...result,
+    ...(found.converted === undefined ? {} : { detail: `${found.converted}; ${result.detail}` }),
+    ...(found.wrap === undefined ? {} : { wrap: found.wrap }),
+  };
 }
 
 async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<InvestResult> {
@@ -135,8 +148,10 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   if (refused !== null) return refused;
   const policyPda = policy.address;
 
-  const vaultInfo = await connection.getAccountInfo(vault);
-  if (vaultInfo === null) return { outcome: "FAILED", detail: "vault account missing" };
+  // THE CHAIN'S CLOCK COMES WITH THE VAULT, in the same request: the 30-day cap
+  // below is counted in the program's days, never this host's.
+  const [vaultInfo, clockInfo] = await connection.getMultipleAccountsInfo([vault, SYSVAR_CLOCK_PUBKEY]);
+  if (vaultInfo === null || vaultInfo === undefined) return { outcome: "FAILED", detail: "vault account missing" };
   // BEFORE ANY OTHER READ, ANY ATA, ANY WRAP: either pause switch. The vault's
   // own switch is decoded from the read that also gives its lamports, so a
   // paused vault never gets as far as wrap_sol. The program refuses that wrap
@@ -147,6 +162,18 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
     protocolPaused: deps.protocolPaused,
   });
   if (paused !== null) return paused;
+
+  // BEFORE ANY BALANCE, ANY ATA, ANY WRAP: whether the 30-day cap leaves the
+  // basket room. convert records nothing against it and invest refuses every
+  // leg past it, so a turn that sold the SOL first would leave the savings in
+  // USDC the vault may not spend (rollingDecision). The Clock sysvar is slot,
+  // epoch_start_timestamp, epoch and leader_schedule_epoch, then unix_timestamp
+  // as an i64 at byte 32.
+  if (clockInfo === null || clockInfo === undefined || clockInfo.data.length < 40) {
+    return { outcome: "FAILED", detail: "the Clock sysvar could not be read, so the 30-day cap cannot be checked; nothing was sent" };
+  }
+  const rolling = rollingDecision({ policy, today: chainDay(clockInfo.data.readBigInt64LE(32)) });
+  if (!rolling.invest) return { outcome: rolling.outcome, detail: rolling.detail };
 
   // BEFORE ANY ATA, ANY WRAP: whether the owner ever turned conversion on.
   // wrap_sol and convert both refuse a zero conversion floor, and this tick once
@@ -172,8 +199,9 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
 
   // The floor is the policy's own minimum, in USDC. Convert what is free only
   // if doing so could plausibly clear it — at ~$100/SOL, 0.01 SOL is ~$1 — and
-  // sweep up any wSOL an earlier convert left behind. Neither while conversion
-  // is off: then only the USDC already held can wake this turn.
+  // sweep up any wSOL an earlier convert left behind, once it is more than dust
+  // (shouldConvert). Neither while conversion is off: then only the USDC
+  // already held can wake this turn.
   //
   // AND NO MORE THAN THE CRANK CAN FRONT (wrapPlan), sized here from the
   // sweep's snapshot of its balance. That figure decides whether the turn wakes
@@ -183,7 +211,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   const crankRead = deps.crankLamports !== null;
   const planned = conversion.convert ? wrapPlan({ free, crankLamports: deps.crankLamports ?? 0n }) : null;
   if (planned !== null) found.wrap = wrapReport(planned, deps.live ? 0n : planned.amount);
-  const converts = planned !== null && (planned.amount > 0n || wsolHeld > 0n);
+  const converts = planned !== null && shouldConvert(wsolHeld, planned.amount);
   if (!converts && usdcHeld < minInvestment) {
     return {
       outcome: "IDLE",
@@ -257,9 +285,14 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       }
 
       // EVERYTHING THE VAULT HOLDS AS wSOL, re-read after the wrap so a balance
-      // stranded by an earlier failed convert is swept up with the new one.
-      const toConvert = await balanceOf(connection, wsolAta);
-      if (toConvert === 0n) return { outcome: "IDLE", detail: "nothing wrapped to convert" };
+      // stranded by an earlier failed convert is swept up with the new one —
+      // up to what convert.rs admits in one call, the rest left for later
+      // sweeps (convertAmount), and none of it when it is dust nothing wrapped.
+      const held = await balanceOf(connection, wsolAta);
+      if (held === 0n || !shouldConvert(held, found.wrap?.wrapped ?? 0n)) {
+        return { outcome: "IDLE", detail: `nothing wrapped to convert, and ${held} wSOL is not worth a swap` };
+      }
+      const toConvert = convertAmount(held, policy.maxPerCall);
 
       const route = await fetchLiveRoute(connection, WSOL_USDC_POOL, NATIVE_MINT, USDC, TOKEN_PROGRAM_ID);
       const convertFloor = (toConvert * policy.minConvertRateWad) / 10n ** 18n;
@@ -270,6 +303,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
           .accountsPartial({ crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta, vaultIn: usdcAta, venueProgram: RAYDIUM_CLMM })
           .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
           .instruction());
+      if (toConvert < held) found.converted = `converted ${toConvert} of ${held} wSOL; ${held - toConvert} left for later sweeps`;
     }
 
     // ── invest EVERY leg, by the weights the owner signed ─────────────────
@@ -282,8 +316,12 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       return { outcome: "IDLE", detail: noted(`${usdc} USDC held, below policy minimum ${minInvestment}`) };
     }
 
+    // NO MORE THAN THE 30-DAY CAP ADMITS, as well as the per-call cap. Every leg
+    // records its spend before the next is checked, and the shares add up to at
+    // most the budget, so a budget within the headroom keeps every leg within it.
     const maxPerCall = policy.maxPerCall;
-    const budget = usdc > maxPerCall ? maxPerCall : usdc;
+    const perCall = usdc > maxPerCall ? maxPerCall : usdc;
+    const budget = perCall > rolling.headroom ? rolling.headroom : perCall;
 
     // THE PROGRAM CHECKS EACH LEG, NOT THE TOTAL.
     //
