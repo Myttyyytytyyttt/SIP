@@ -4,9 +4,8 @@ A pension you build one trade at a time, on Solana. A slice of your trading goes
 into a vault of your own and buys the assets you chose. Only your pension key —
 the Solana wallet you sign in with — can take anything out of it.
 
-The code name is SIP: the package names (`@sip/*`), the environment variables
-(`SIP_SOLANA_*`), the `sip-vault` program and its signed domains
-(`SIP_SETTLE_V2`, `SIP_LINK_V1`) all keep it.
+The code name is SIP: the package names, the environment variables, the
+`sip-vault` program and its signed domains all keep it.
 
 ## What a vault does
 
@@ -91,10 +90,14 @@ runs `anchor test` against a local validator and is not part of `pnpm test`.
   Privy signer, the policy that bounds it, and what that policy does not prevent.
 - [docs/runbooks/SECRETS.md](docs/runbooks/SECRETS.md) — which keys exist, where
   each one lives, and the rules that keep them out of chats and servers.
+- [reports/SIP_SOLANA_BACKEND_ASSESSMENT_2026-09-13.md](reports/SIP_SOLANA_BACKEND_ASSESSMENT_2026-09-13.md)
+  — the assessment the Solana design was decided from.
+- [reports/SIP_SOLANA_ROADMAP_2026-09-13.md](reports/SIP_SOLANA_ROADMAP_2026-09-13.md)
+  — the plan, task by task.
 - [packages/website-oficial/README.md](packages/website-oficial/README.md) and
   [packages/solana-core/README.md](packages/solana-core/README.md).
 
-The runbooks are in Spanish.
+The runbooks and reports are in Spanish.
 
 ## State
 
