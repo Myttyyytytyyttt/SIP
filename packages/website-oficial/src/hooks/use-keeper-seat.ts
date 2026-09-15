@@ -7,9 +7,10 @@ import { useCallback, useRef, useState } from "react";
 import { failureText, grantKeeperSeat, seatOf, type SeatConfig } from "@/lib/trading-wallets";
 
 /**
- * The keeper's seat on one trading wallet: its status from Privy's record on every
- * render (never local state), the grant that repairs a missing seat, and a re-read
- * for an unknown one. The rules live in grantKeeperSeat (src/lib/trading-wallets.ts).
+ * The keeper's seat on one trading wallet: what Privy's record says of its signers on
+ * every render (never local state) — a signer, none, or not listed yet, but never
+ * whose — the grant that repairs a missing seat, and a re-read for an unknown one.
+ * The rules live in seatOf and grantKeeperSeat (src/lib/trading-wallets.ts).
  *
  * Ported from the EVM web's SeatStatus (968e06c), for Solana.
  */

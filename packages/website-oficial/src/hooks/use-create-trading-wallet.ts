@@ -17,7 +17,7 @@ import { SeatNotConfigured, createTradingWallet, type SeatConfig } from "@/lib/t
  *
  * PRIVY'S RECORD IS READ AGAIN AFTER ANY ANSWER. On success the list must show the
  * wallet from the user record, not from what createWallet returned; on a failure a
- * wallet may exist anyway, and the list should show it with the seat Privy records.
+ * wallet may exist anyway, and the list should show it with whatever signer Privy records.
  *
  * Ported from the EVM web's CreateWalletButton (968e06c), for Solana.
  */

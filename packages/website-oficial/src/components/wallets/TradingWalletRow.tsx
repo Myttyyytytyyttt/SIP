@@ -1,18 +1,23 @@
 "use client";
 
 /**
- * ONE TRADING WALLET: its address, the keeper's seat as Privy records it, and what
- * can be done about each — grant a missing seat, re-read an unknown one, export
- * the key.
+ * ONE TRADING WALLET: its address, what Privy records of its signers, and what can
+ * be done about each — grant a missing seat, re-read an unknown one, export the key.
  *
  * WHAT THE BADGE CAN KNOW. Privy's browser SDK says whether a wallet has a signer
- * (`delegated`), never which signer or which policy. So "Seated" means Privy
- * records a signer on the wallet; that it is the keeper's, with its policy, follows
- * from this page never adding a signer without it — and the Privy dashboard shows
- * both, which is the owner's check.
+ * (`delegated`), never which signer or which policy. So the badge says "Has a
+ * signer" and never "Seated": another key quorum, the keeper's signer without its
+ * policy, or a legacy on-device delegation all look exactly like the keeper's seat
+ * in Privy's record. This page never adds a signer without its policy, but the
+ * Privy dashboard, an earlier build or another client of the same Privy app can.
+ * The row prints the command that reads the binding itself, `privy-policy verify`,
+ * with this wallet's Privy id and the keeper's policy id.
+ *
+ * A WRONG SIGNER IS THE WALLET OWNER'S TO FIX: Privy's removeSigners, which removes
+ * every signer on the wallet, then the grant. This page does not offer the removal.
  *
  * THE GRANT IS OFFERED ONLY FOR "missing". Privy's addSigners appends, so a grant
- * on a wallet that is already seated would seat the keeper twice. An unknown seat
+ * on a wallet that already has a signer could seat the keeper twice. An unknown seat
  * gets a re-read instead.
  */
 
@@ -26,7 +31,7 @@ import { AddressLine } from "@/components/wallets/AddressLine";
 import { useExportTradingWallet } from "@/hooks/use-export-trading-wallet";
 import { useKeeperSeat } from "@/hooks/use-keeper-seat";
 import { LABEL } from "@/lib/classes";
-import { seatProblem, type SeatStatus, type TradingWallet } from "@/lib/trading-wallets";
+import { keeperSigners, seatProblem, type SeatStatus, type TradingWallet } from "@/lib/trading-wallets";
 
 export interface TradingWalletRowData extends TradingWallet {
   /** False only for a wallet createWallet reported that Privy's record does not list yet. */
@@ -34,10 +39,10 @@ export interface TradingWalletRowData extends TradingWallet {
 }
 
 const SEAT: Record<SeatStatus, { readonly badge: string; readonly variant: "outline" | "destructive" | "secondary"; readonly note: string }> = {
-  seated: {
-    badge: "Seated",
+  "has-signer": {
+    badge: "Has a signer",
     variant: "outline",
-    note: "Privy records a signer on this wallet. This page seats only the keeper's signer, and always with its policy.",
+    note: "Privy records a signer on this wallet, but not whose it is or which policy bounds it.",
   },
   missing: {
     badge: "No seat",
@@ -57,6 +62,8 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
   const exporter = useExportTradingWallet(row.address);
   const seat = SEAT[keeper.seat];
   const refused = seatProblem(config) !== null;
+  // One string, so the command renders as one piece of text.
+  const verify = `privy-policy verify --wallet ${row.id ?? "<Privy wallet id>"} --policy ${keeperSigners(config)?.[0]?.policyIds[0] ?? "<policy id>"}`;
 
   return (
     <li className="space-y-2 py-3 first:pt-0 last:pb-0" data-seat={keeper.seat}>
@@ -85,6 +92,11 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
       ) : null}
 
       <p className="text-xs text-muted-foreground">{seat.note}</p>
+      {keeper.seat === "has-signer" ? (
+        <p className="text-xs text-muted-foreground">
+          To confirm it is the keeper&apos;s signer, bounded by its policy, run <Num className="break-all">{verify}</Num>
+        </p>
+      ) : null}
 
       <div className="flex flex-wrap items-center gap-2">
         {keeper.seat === "missing" ? (

@@ -160,25 +160,30 @@ export async function createTradingWallet(createWallet: CreateWalletFn, config: 
 }
 
 /**
- * The keeper's seat on one wallet, as Privy's record of the user states it — read
- * on every call, never cached, never inferred from having asked for it:
+ * What Privy's record of the user says about the signers on one wallet — read on
+ * every call, never cached, never inferred from having asked for one:
  *
- * - "seated": listed as a trading wallet with delegated: true. Privy documents that
- *   a wallet with signers always has the flag set. The record does not say which
- *   signer or which policy — Privy's browser SDK exposes neither — so the binding
- *   itself is confirmed in the Privy dashboard, or by `privy-policy verify`.
- * - "missing": listed with delegated: false. Nothing can sign for it.
+ * - "has-signer": listed as a trading wallet with delegated: true. Privy sets the
+ *   flag for a wallet with ANY signer, and for a legacy on-device delegation too, so
+ *   it proves that a signer exists — not that it is the keeper's, nor that it carries
+ *   the keeper's policy. Privy's browser SDK lists neither, and this web holds no app
+ *   secret to ask Privy's API. So there is no "seated" here: nothing this page can
+ *   read proves it. `privy-policy verify --wallet <id> --policy <id>` reads the
+ *   wallet's additional_signers, and stops with SIGNER_NOT_GRANTED or
+ *   OVERRIDE_POLICY_MISMATCH unless the keeper's signer is there with exactly its policy.
+ * - "missing": listed with delegated: false. Privy records no signer at all, so the
+ *   keeper's seat is certainly missing and nothing can sign for the wallet.
  * - "unknown": not listed as a trading wallet (one created a moment ago, or an
  *   address that is not one, like the pension key), or listed without the flag.
  */
-export type SeatStatus = "seated" | "missing" | "unknown";
+export type SeatStatus = "has-signer" | "missing" | "unknown";
 
 export function seatOf(user: User | null, address: string): SeatStatus {
   for (const account of user?.linkedAccounts ?? []) {
     if (account.type !== "wallet" || account.chainType !== "solana" || account.address !== address) continue;
     if (!EMBEDDED_CLIENT_TYPES.has(account.walletClientType ?? "")) continue;
     const delegated: unknown = account.delegated;
-    return delegated === true ? "seated" : delegated === false ? "missing" : "unknown";
+    return delegated === true ? "has-signer" : delegated === false ? "missing" : "unknown";
   }
   return "unknown";
 }
@@ -195,14 +200,15 @@ export const GRANT_BACKOFF_MS: readonly number[] = [1_000, 2_000, 4_000, 6_000, 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * The repair: grant the keeper its seat on a trading wallet whose record shows none.
+ * The repair: grant the keeper its seat on a trading wallet whose record shows no signer.
  *
  * REFUSES FIRST, like createTradingWallet: never a signer without its policy.
  *
- * RE-READS BEFORE IT ADDS. Privy's addSigners appends to the wallet's existing
- * signers, so a grant on a wallet that turns out to be seated would seat the keeper
- * twice. The record is fetched again first, and if it now shows the seat nothing
- * is added. A re-read that fails grants nothing.
+ * RE-READS BEFORE IT ADDS, AND ADDS NOTHING TO A WALLET WITH A SIGNER. Privy's
+ * addSigners appends to the wallet's existing signers, so a grant on a wallet that
+ * already carries the keeper would seat it twice; on a legacy on-device delegation it
+ * returns without adding anything. The record is fetched again first, and if it now
+ * shows any signer nothing is added. A re-read that fails grants nothing.
  *
  * ONLY THE PROPAGATION RACE IS RETRIED. A wallet created moments ago may not have
  * reached Privy's record, and Privy says "not associated with current user" until
@@ -211,6 +217,12 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  *
  * Only the wallet's owner, signed in here, can add a signer: the keeper can never
  * repair its own seat.
+ *
+ * A WRONG SIGNER IS NOT REPAIRED HERE. A wallet whose signer is another key quorum,
+ * or the keeper's without its policy, reads "has-signer" exactly like the keeper's
+ * seat, so this adds nothing to it. `privy-policy verify` names it; the fix is the
+ * wallet owner's: Privy's removeSigners, which removes every signer on the wallet,
+ * then this grant.
  */
 export async function grantKeeperSeat({
   address,
@@ -224,11 +236,11 @@ export async function grantKeeperSeat({
   addSigners: AddSignersFn;
   refreshUser: RefreshUserFn;
   wait?: (ms: number) => Promise<void>;
-}): Promise<"granted" | "already-seated"> {
+}): Promise<"granted" | "has-signer"> {
   const signers = keeperSigners(config);
   if (signers === null) throw new SeatNotConfigured(seatProblem(config) ?? "The keeper's seat is not configured.");
 
-  if (seatOf(await refreshUser(), address) === "seated") return "already-seated";
+  if (seatOf(await refreshUser(), address) === "has-signer") return "has-signer";
 
   for (let attempt = 0; ; attempt += 1) {
     try {

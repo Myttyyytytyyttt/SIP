@@ -7,7 +7,7 @@
  * THE LIST IS PRIVY'S RECORD OF THE USER, read on every render (tradingWalletsOf).
  * One exception: a wallet createWallet has just reported that the record does not
  * list yet is shown as such, rather than vanishing between the create and Privy's
- * refresh. Each row reads its own seat (TradingWalletRow).
+ * refresh. Each row reads what Privy records of its signer (TradingWalletRow).
  *
  * A REFUSAL IS VISIBLE. With the keeper's seat not configured the create button is
  * disabled and the card names the missing variables: a trading wallet without the

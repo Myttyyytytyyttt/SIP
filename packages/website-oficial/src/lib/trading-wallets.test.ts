@@ -124,11 +124,20 @@ describe("tradingWalletsOf, on a record shaped like the installed types", () => 
 });
 
 describe("seatOf, read from Privy's record", () => {
-  it("is seated for delegated: true, missing for delegated: false", () => {
-    expect(seatOf(RECORD, TRADING_1)).toBe("seated");
-    expect(seatOf(RECORD, TRADING_2)).toBe("seated");
+  it("has a signer for delegated: true, missing for delegated: false", () => {
+    expect(seatOf(RECORD, TRADING_1)).toBe("has-signer");
+    expect(seatOf(RECORD, TRADING_2)).toBe("has-signer");
     expect(seatOf(RECORD, TRADING_0)).toBe("missing");
     expect(seatOf(RECORD, IMPORTED)).toBe("missing");
+  });
+
+  it("never says seated: delegated: true is Privy's flag for any signer, not for the keeper's with its policy", () => {
+    // Privy's record of a wallet carries delegated and an id, never additional_signers. The keeper's signer with its
+    // policy, the keeper's without it, and another key quorum are all this same entry, so no status may claim more.
+    const anySigner = userWith([phantom(), embedded(TRADING_1, 1, true)]);
+    const statuses: string[] = [TRADING_0, TRADING_1, TRADING_2, IMPORTED].map((address) => seatOf(RECORD, address));
+    expect([...statuses, seatOf(anySigner, TRADING_1)]).not.toContain("seated");
+    expect(seatOf(anySigner, TRADING_1)).toBe("has-signer");
   });
 
   it("is unknown for an address the record does not list as a trading wallet — never missing, so no grant is offered", () => {
@@ -146,12 +155,12 @@ describe("seatOf, read from Privy's record", () => {
 
 describe("grantKeeperSeat", () => {
   const missing = userWith([phantom(), embedded(TRADING_0, 0, false)]);
-  const seated = userWith([phantom(), embedded(TRADING_0, 0, true)]);
+  const withSigner = userWith([phantom(), embedded(TRADING_0, 0, true)]);
   const noWait = (_ms: number): Promise<void> => Promise.resolve();
 
   it("re-reads Privy's record, then adds exactly the keeper's signer with its policy", async () => {
-    const refreshUser = vi.fn<RefreshUserFn>().mockResolvedValueOnce(missing).mockResolvedValueOnce(seated);
-    const addSigners = vi.fn<AddSignersFn>(async () => ({ user: seated }));
+    const refreshUser = vi.fn<RefreshUserFn>().mockResolvedValueOnce(missing).mockResolvedValueOnce(withSigner);
+    const addSigners = vi.fn<AddSignersFn>(async () => ({ user: withSigner }));
 
     await expect(grantKeeperSeat({ address: TRADING_0, config: SEAT, addSigners, refreshUser, wait: noWait })).resolves.toBe("granted");
 
@@ -160,10 +169,10 @@ describe("grantKeeperSeat", () => {
     expect(refreshUser.mock.invocationCallOrder[0]).toBeLessThan(addSigners.mock.invocationCallOrder[0] ?? 0);
   });
 
-  it("adds nothing when the re-read record already shows the seat, because addSigners appends", async () => {
-    const refreshUser = vi.fn<RefreshUserFn>(async () => seated);
+  it("adds nothing when the re-read record shows any signer, because addSigners appends — and answers has-signer, not seated", async () => {
+    const refreshUser = vi.fn<RefreshUserFn>(async () => withSigner);
     const addSigners = vi.fn<AddSignersFn>(async () => ({}));
-    await expect(grantKeeperSeat({ address: TRADING_0, config: SEAT, addSigners, refreshUser, wait: noWait })).resolves.toBe("already-seated");
+    await expect(grantKeeperSeat({ address: TRADING_0, config: SEAT, addSigners, refreshUser, wait: noWait })).resolves.toBe("has-signer");
     expect(addSigners).not.toHaveBeenCalled();
   });
 

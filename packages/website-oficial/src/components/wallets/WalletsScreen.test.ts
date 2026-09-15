@@ -92,7 +92,7 @@ const buttons = (label: string) => mocked.buttons.filter((button) => button.labe
 
 /** Each trading wallet row: its seat as rendered, and the addresses inside it. */
 function rows(html: string): { seat: string; body: string }[] {
-  return [...html.matchAll(/<li[^>]*data-seat="([a-z]+)"[^>]*>(.*?)<\/li>/g)].map((match) => ({
+  return [...html.matchAll(/<li[^>]*data-seat="([a-z-]+)"[^>]*>(.*?)<\/li>/g)].map((match) => ({
     seat: match[1] ?? "",
     body: match[2] ?? "",
   }));
@@ -161,11 +161,12 @@ describe("WalletsScreen with the seat configured", () => {
     const seen = rows(html).map((row) => [row.seat, [TRADING_0, TRADING_1, TRADING_2, IMPORTED, PENSION_KEY].filter((a) => row.body.includes(a))]);
     expect(seen).toStrictEqual([
       ["missing", [TRADING_0]],
-      ["seated", [TRADING_1]],
-      ["seated", [TRADING_2]],
+      ["has-signer", [TRADING_1]],
+      ["has-signer", [TRADING_2]],
       ["missing", [IMPORTED]],
     ]);
-    expect(html).toContain("Seated");
+    expect(html).toContain("Has a signer");
+    expect(html).not.toContain("Seated");
     expect(html).toContain("No seat");
     // The ids a new wallet is seated with, for the owner to match in the Privy dashboard.
     expect(html).toContain(SIGNER);
@@ -176,10 +177,25 @@ describe("WalletsScreen with the seat configured", () => {
     const flagless = { ...embedded(TRADING_0, 0, false), delegated: undefined } as unknown as WalletWithMetadata;
     mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), flagless, embedded(TRADING_1, 1, true)]) };
     const html = render();
-    expect(rows(html).map((row) => row.seat)).toStrictEqual(["unknown", "seated"]);
+    expect(rows(html).map((row) => row.seat)).toStrictEqual(["unknown", "has-signer"]);
     expect(html).toContain("Seat unknown");
     expect(buttons("Grant keeper permission")).toHaveLength(0);
     expect(buttons("Check again")).toHaveLength(1);
+  });
+
+  it("a wallet Privy lists with a signer says only that — never Seated — and prints the verify command with its ids", () => {
+    // Privy's record is the same whatever the signer is: the keeper's with its policy, the keeper's without it, or
+    // another key quorum set from the Privy dashboard or another client. The row must not claim the keeper's seat.
+    mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), embedded(TRADING_1, 1, true)]) };
+    const html = render();
+    const [row, ...others] = rows(html);
+    expect(others).toHaveLength(0);
+    expect(row?.seat).toBe("has-signer");
+    expect(row?.body).toContain("Has a signer");
+    expect(row?.body).not.toMatch(/seated|seats only/i);
+    expect(row?.body).toContain(`privy-policy verify --wallet wallet-id-tradingone --policy ${POLICY}`);
+    expect(buttons("Grant keeper permission")).toHaveLength(0);
+    expect(buttons("Check again")).toHaveLength(0);
   });
 
   it("Create wallet hands Privy exactly createAdditional and the keeper's signer id with its policy id", async () => {
