@@ -1,0 +1,102 @@
+// What SIP offers a new vault and its first investment policy, decided once and
+// kept beside the rules those values must pass. Browser-safe: the forms, the
+// build route and the local proof read the same numbers.
+//
+// test/product.test.ts pins every value here to rules.ts and to the verifier's
+// caps, so a changed default fails a test before it reaches a wallet.
+//
+// THE VOLUME DECISION IS ONE CONSTANT. The keeper cannot yet settle VOLUME from
+// real trades (settle-decision.ts UNSUPPORTED_MODE), so a volume vault would
+// receive nothing. Until the owner decides to build the volume meter, the web
+// offers PROFIT only: the build route refuses mode 1 and the form greys it out.
+// The program itself accepts VOLUME vaults from any client, which is intended.
+//
+// WHY THESE CAPS (review findings 1 and 2 on the program):
+//  * max_contribution 0.06 SOL bounds one settlement. At about $100 a SOL it is
+//    $6.00, $5.9999 after the SOL/USDC pool's 0.04 % fee, so one settle can fund
+//    the first $5 buy down to about $83 a SOL. It does not bound how many
+//    settlements run; nothing on chain does.
+//  * wallet_reserve 0.05 SOL is the one web-chosen bound on a settle burst: a
+//    settlement that would leave less than rent(0) + reserve is refused.
+//  * max_per_call 1,000 USDC is the largest value that keeps convert at its
+//    tightest program bound, 1 SOL per call (convert.rs compares lamports with
+//    max(max_per_call, 1e9)). rules.ts's default, u64::MAX, leaves convert
+//    unbounded per call. This overrides "caps at the maximum"; the owner confirms.
+//  * max_rolling_30d = 31 × max_per_call: one maximum buy per day-bucket.
+
+import { SPYX_MINT, SPYX_USDC_POOL, TOKEN_2022_PROGRAM } from "./addresses";
+import type { OwnerInstructionName } from "./idl";
+import { DEFAULT_RATES, MODE_PROFIT, type VaultPolicyInput } from "./rules";
+
+/** The owner's open decision on VOLUME, off until the keeper can measure volume. Changing it must change a test. */
+export const VOLUME_MODE_OFFERED: boolean = false;
+
+/** What create_vault_v2 is built with when the request names nothing else. Both rates travel in both modes. */
+export const DEFAULT_VAULT_POLICY: Readonly<VaultPolicyInput> = Object.freeze({
+  mode: MODE_PROFIT,
+  skimBps: DEFAULT_RATES.profitBps,
+  volumeBps: DEFAULT_RATES.volumeBps,
+  maxContribution: 60_000_000n,
+  walletReserve: 50_000_000n,
+});
+
+/** The first investment policy's caps, in USDC raw units (6 decimals): $1,000 per buy, $31,000 per 30 days. */
+export const DEFAULT_INVEST_CAPS = Object.freeze({ maxPerCall: 1_000_000_000n, maxRolling30d: 31_000_000_000n });
+
+/** The convert floor sits this far under the live SOL/USDC pool price: 10 %. */
+export const CONVERT_FLOOR_MARGIN_BPS = 1_000;
+/** A leg's floor sits this far under the live pool rate: 5 %, so at most about 5.3 % over today's price is paid. */
+export const LEG_FLOOR_MARGIN_BPS = 500;
+
+export interface OfferedLeg {
+  readonly symbol: string;
+  readonly name: string;
+  readonly mint: string;
+  /** The Raydium CLMM pool (mint0 = this leg, mint1 = USDC) its floor is read from. */
+  readonly pool: string;
+  readonly tokenProgram: string;
+  readonly decimals: number;
+}
+
+/** The stocks a policy can buy from the web. One for now. */
+export const OFFERED_LEGS: readonly OfferedLeg[] = Object.freeze([
+  Object.freeze({ symbol: "SPYx", name: "SP500 xStock", mint: SPYX_MINT, pool: SPYX_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 8 }),
+]);
+
+export interface ComputeBudget {
+  /** SetComputeUnitLimit. */
+  readonly unitLimit: number;
+  /** SetComputeUnitPrice, in micro-lamports per unit. */
+  readonly microLamports: bigint;
+}
+
+/**
+ * The unit limit every owner transaction carries, per SIP instruction. Every
+ * owner transaction carries both compute-budget instructions, because Phantom
+ * rewrites an unsigned transaction's fees only when it has none. The local proof
+ * requires each landing to consume at most half of its limit.
+ */
+export const OWNER_TX_COMPUTE: Readonly<Record<OwnerInstructionName, number>> = Object.freeze({
+  create_vault_v2: 60_000,
+  set_policy_v2: 40_000,
+  link_wallet: 100_000,
+  unlink_wallet: 40_000,
+  withdraw: 40_000,
+  withdraw_token: 200_000,
+  set_invest_policy: 300_000,
+});
+
+/** The priority price of every owner transaction. The verifier's cap is 5,000,000. */
+export const OWNER_TX_MICROLAMPORTS = 100_000n;
+
+/** Solana's base fee per required signature. */
+export const SIGNATURE_FEE_LAMPORTS = 5_000n;
+
+/** The compute budget an owner transaction for `name` is built with. */
+export const ownerComputeBudget = (name: OwnerInstructionName): ComputeBudget => ({ unitLimit: OWNER_TX_COMPUTE[name], microLamports: OWNER_TX_MICROLAMPORTS });
+
+/** What the priority price costs on top of the signature fees: ceil(limit × price / 1e6), as the runtime charges it. */
+export function priorityFeeLamports(budget: ComputeBudget): bigint {
+  const microLamports = BigInt(budget.unitLimit) * budget.microLamports;
+  return (microLamports + 999_999n) / 1_000_000n;
+}

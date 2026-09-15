@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ATA_PROGRAM,
+  COMPUTE_BUDGET_PROGRAM,
   ED25519_PROGRAM,
   INSTRUCTIONS_SYSVAR,
   RAYDIUM_CLMM,
@@ -19,7 +20,19 @@ import { base58Encode } from "../src/client/base58";
 import { base64Encode } from "../src/client/base64";
 import { SIP_PROGRAM_ID, idlInstruction, toHex, type OwnerInstructionName } from "../src/client/idl";
 import { linkConsentMessage } from "../src/client/link-consent";
+import { parseLegacyMessage, splitWire } from "../src/client/message";
+import { OWNER_TX_COMPUTE, OWNER_TX_MICROLAMPORTS, ownerComputeBudget } from "../src/client/product";
 import { DEFAULT_RATES } from "../src/client/rules";
+import { verifySignedTransaction } from "../src/server/verify-tx";
+import {
+  ED25519_CONSENT_HEADER_HEX,
+  FIXTURE_OWNER,
+  FIXTURE_WALLET,
+  OWNER_INSTRUCTION_DATA_HEX,
+  OWNER_WIRE_HEX,
+  buildOwnerFixtures,
+  type OwnerFixtureName,
+} from "./fixtures/owner-transactions";
 import {
   BuildError,
   LinkConsentError,
@@ -35,7 +48,7 @@ import {
   sipInstruction,
   type BuiltTransaction,
 } from "../src/server/builders";
-import { BLOCKHASH, fromB64, keypair, signBytes } from "./helpers";
+import { BLOCKHASH, fromB64, keypair, signBytes, signWire } from "./helpers";
 
 const require = createRequire(import.meta.url);
 const rawIdl = require("@sip/solana-program/idl") as anchor.Idl;
@@ -408,5 +421,80 @@ describe("set_invest_policy", () => {
       ...override(mint),
     };
     expect(() => buildSetInvestPolicy(input)).toThrow(BuildError);
+  });
+});
+
+describe("the compute budget option", () => {
+  /** Every top-level instruction of an unsigned built transaction, read with the browser's own parser. */
+  const instructionsOf = (built: BuiltTransaction) => parseLegacyMessage(splitWire(fromB64(built.txBase64)).message).instructions;
+
+  it("puts [2, u32 LE] and [3, u64 LE] ahead of the SIP instruction, with no accounts, and changes nothing else", () => {
+    const owner = keypair().publicKey.toBase58();
+    const policy = { owner, mode: 0, skimBps: 2_000, volumeBps: 200, maxContribution: 60_000_000n, walletReserve: 50_000_000n, blockhash: BLOCKHASH };
+    const plain = buildCreateVaultV2(policy);
+    const budgeted = buildCreateVaultV2({ ...policy, computeBudget: { unitLimit: 60_000, microLamports: 100_000n } });
+    const [limit, price, sip, ...rest] = instructionsOf(budgeted);
+    expect(rest).toEqual([]);
+    expect([limit!.programId, price!.programId, sip!.programId]).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, SIP_PROGRAM_ID]);
+    expect([limit!.accountKeys, price!.accountKeys]).toEqual([[], []]);
+    expect(toHex(limit!.data)).toBe("0260ea0000");
+    expect(toHex(price!.data)).toBe("03a086010000000000");
+    const [plainSip] = instructionsOf(plain);
+    expect(toHex(sip!.data)).toBe(toHex(plainSip!.data));
+    expect(sip!.accountKeys).toEqual(plainSip!.accountKeys);
+    expect(budgeted.accounts).toEqual(plain.accounts);
+    expect(budgeted.signers).toEqual(plain.signers);
+    expect(budgeted.computeBudget).toEqual({ unitLimit: 60_000, microLamports: 100_000n });
+    expect(plain.computeBudget).toBeNull();
+    expect(instructionsOf(plain)).toHaveLength(1);
+  });
+
+  it("a link becomes [CU limit, CU price, Ed25519SigVerify, link_wallet] with the same consent bytes", () => {
+    const owner = keypair();
+    const wallet = keypair();
+    const consent = fromB64(prepareLinkWalletConsent({ owner: owner.publicKey, wallet: wallet.publicKey }).consentMessageBase64);
+    const base = { owner: owner.publicKey, wallet: wallet.publicKey, consentSignature: signBytes(wallet, consent), blockhash: BLOCKHASH };
+    const plain = instructionsOf(buildLinkWallet(base));
+    const budgeted = instructionsOf(buildLinkWallet({ ...base, computeBudget: ownerComputeBudget("link_wallet") }));
+    expect(budgeted.map((instruction) => instruction.programId)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, ED25519_PROGRAM, SIP_PROGRAM_ID]);
+    expect(toHex(budgeted[2]!.data)).toBe(toHex(plain[0]!.data));
+    expect(toHex(budgeted[2]!.data.subarray(0, 16))).toBe(ED25519_CONSENT_HEADER_HEX);
+    expect(toHex(budgeted[3]!.data)).toBe(toHex(plain[1]!.data));
+  });
+
+  it.each([
+    ["a zero unit limit", { unitLimit: 0, microLamports: 1n }],
+    ["a unit limit over 1.4M", { unitLimit: 1_400_001, microLamports: 1n }],
+    ["a fractional unit limit", { unitLimit: 1.5, microLamports: 1n }],
+    ["a price over 5M micro-lamports", { unitLimit: 1, microLamports: 5_000_001n }],
+    ["a negative price", { unitLimit: 1, microLamports: -1n }],
+    ["a price given as a number", { unitLimit: 1, microLamports: 1 as unknown as bigint }],
+  ])("refuses %s", (_, computeBudget) => {
+    expect(() => buildWithdraw({ owner: keypair().publicKey, lamports: 1n, blockhash: BLOCKHASH, computeBudget })).toThrow(BuildError);
+  });
+});
+
+describe("owner transaction fixtures", () => {
+  const fixtures = buildOwnerFixtures();
+
+  it.each(Object.keys(OWNER_WIRE_HEX) as OwnerFixtureName[])("%s: the builders produce the pinned bytes", (name) => {
+    expect(fixtures[name].wireHex).toBe(OWNER_WIRE_HEX[name]);
+    expect(fixtures[name].dataHex).toBe(OWNER_INSTRUCTION_DATA_HEX[name]);
+    expect(fixtures[name].built.computeBudget).toEqual({ unitLimit: OWNER_TX_COMPUTE[fixtures[name].built.instruction], microLamports: OWNER_TX_MICROLAMPORTS });
+  });
+
+  it("create_vault_v2 with the product defaults is 29 bytes: PROFIT, 2000 and 200 bps, 0.06 SOL, 0.05 SOL", () => {
+    const data = OWNER_INSTRUCTION_DATA_HEX.CREATE_VAULT_V2_PROFIT_DEFAULTS;
+    expect(data.length / 2).toBe(29);
+    const expected = anchorCoder.encode("create_vault_v2", { mode: 0, skim_bps: 2_000, volume_bps: 200, max_contribution: new BN(60_000_000), wallet_reserve: new BN(50_000_000) });
+    expect(data).toBe(toHex(expected));
+  });
+
+  it("every fixture verifies once its fixture keys sign it: the compute budget is inside the relay's rules", () => {
+    for (const fixture of Object.values(fixtures)) {
+      const signers = fixture.built.signers.length === 2 ? [FIXTURE_OWNER, FIXTURE_WALLET] : [FIXTURE_OWNER];
+      const verified = verifySignedTransaction(signWire(fixture.built.txBase64, ...signers));
+      expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
+    }
   });
 });
