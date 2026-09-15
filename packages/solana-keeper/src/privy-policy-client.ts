@@ -6,8 +6,9 @@
 // `code` in the parsed body). Secrets are revealed inside the call that needs
 // them and nowhere else, as in privy-signer.ts.
 //
-// THE TRANSPORT IS PINNED, NOT INHERITED:
-//   * apiUrl and logLevel are set here. Left out, the SDK takes
+// THE TRANSPORT IS PINNED, NOT INHERITED. The client comes from
+// pinnedPrivyClient (privy-signer.ts), the one place the keeper builds one:
+//   * apiUrl and logLevel are set there. Left out, the SDK takes
 //     PRIVY_API_BASE_URL and PRIVY_API_LOG from the environment, and the first
 //     sends the app secret to whatever host it names. The third variable the
 //     SDK reads, PRIVY_API_CUSTOM_HEADERS, has no option that overrides it, so
@@ -18,11 +19,10 @@
 //     created again, and `create` could no longer say which objects exist.
 
 import { randomUUID } from "node:crypto";
-import { PrivyClient } from "@privy-io/node";
 import { Connection, PublicKey } from "@solana/web3.js";
 import type { Secret } from "@sip/solana-log";
 import type { PrivyPolicyClient, ProbeChain } from "./privy-policy-cli.js";
-import { PRIVY_API_URL, SOLANA_MAINNET_CAIP2 } from "./privy-signer.js";
+import { SOLANA_MAINNET_CAIP2, pinnedPrivyClient } from "./privy-signer.js";
 import { poolFetch } from "./rpc-pool.js";
 
 export interface PrivyPolicyClientOptions {
@@ -34,14 +34,7 @@ export function createPrivyPolicyClient(
   credentials: { readonly appId: string; readonly appSecret: Secret },
   options: PrivyPolicyClientOptions = {},
 ): PrivyPolicyClient {
-  const privy = new PrivyClient({
-    appId: credentials.appId,
-    appSecret: credentials.appSecret.reveal(),
-    apiUrl: PRIVY_API_URL,
-    logLevel: "warn",
-    maxRetries: 0,
-    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
-  });
+  const privy = pinnedPrivyClient({ appId: credentials.appId, appSecret: credentials.appSecret.reveal(), fetch: options.fetch });
   const authorization = (key: Secret): { authorization_private_keys: string[] } => ({ authorization_private_keys: [key.reveal()] });
   return {
     async createKeyQuorum({ publicKey, displayName }) {

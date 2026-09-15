@@ -9,7 +9,9 @@
 // complete prefix one sweep at a time, a flat span settles a zero base once it
 // is worth a transaction, the attestation binds the vault's own mode,
 // rate and policy nonce and a deadline, the wallet's reserve is checked against
-// the node's own fee before anything is signed, a send is confirmed by polling
+// the node's own fee before anything is signed, only [Ed25519SigVerify,
+// settle_v2] paid by the wallet is sent on either route, the Privy route sends
+// it once under an idempotency key of its own, a send is confirmed by polling
 // its status, a refusal is classified by the program's own error name, a send
 // that threw or never confirmed is read back from its link before it is
 // reported, and a dry run measures and reports without any key in reach.
@@ -20,16 +22,25 @@
 // The decisions live in settle-decision.ts and settle-refusal.ts, where a test
 // can reach them.
 
+import { createHash } from "node:crypto";
 import * as anchor from "@coral-xyz/anchor";
-import { Connection, Ed25519Program, Keypair, Transaction, type TransactionError } from "@solana/web3.js";
+import {
+  Connection,
+  Ed25519Program,
+  Keypair,
+  PublicKey,
+  Transaction,
+  type TransactionError,
+  type TransactionInstruction,
+} from "@solana/web3.js";
 import { summarizeUpstreamError } from "@sip/solana-log";
 import { readSettlementNonce, type VaultState } from "./accounts.js";
 import type { ManagedLink } from "./discovery.js";
 import { idl } from "./idl.js";
 import { connectionReader, measureSince } from "./measure-window.js";
 import { method } from "./methods.js";
-import type { SolanaWalletSubmitter } from "./privy-signer.js";
-import { MODE_VOLUME, attestationInstruction, attestationMessage } from "./program-scripts.js";
+import { assertSettleShape, type SolanaWalletSubmitter } from "./privy-signer.js";
+import { MODE_VOLUME, attestationInstruction, attestationMessage, type AttestationInputs } from "./program-scripts.js";
 import {
   attestationInputs,
   decideFromMeasurement,
@@ -158,6 +169,58 @@ async function landing(connection: Connection, signature: string): Promise<{ rea
   }
 }
 
+/** The settle_v2 instruction for an attestation's inputs: the IDL's own builder, over the accounts the link names. */
+export function settleInstruction(
+  program: anchor.Program,
+  link: Pick<ManagedLink, "wallet" | "vault" | "linkAddress">,
+  inputs: AttestationInputs,
+): Promise<TransactionInstruction> {
+  return method(program, "settleV2")(
+    inputs.mode,
+    new anchor.BN(inputs.sessionStartSlot.toString()),
+    new anchor.BN(inputs.sessionEndSlot.toString()),
+    new anchor.BN(inputs.baseLamports.toString()),
+    new anchor.BN(inputs.validUntilSlot.toString()),
+  )
+    .accountsPartial({ wallet: link.wallet, vault: link.vault, tradingLink: link.linkAddress })
+    .instruction();
+}
+
+/**
+ * A settle transaction, as it is priced and as it leaves on either route.
+ *
+ * THE ORDER IS LOAD-BEARING: settle_v2 proves, through the instructions
+ * sysvar, that the instruction IMMEDIATELY BEFORE it is the attester's
+ * Ed25519 verification of exactly this message. The transaction is signed
+ * BY the wallet, which pays, and carries the blockhash its fee was priced at.
+ * assertSettleShape (privy-signer.ts) holds every settle sent to this shape.
+ */
+export function settleTransaction(
+  recent: { readonly blockhash: string; readonly lastValidBlockHeight: number },
+  wallet: PublicKey,
+  attestation: TransactionInstruction,
+  settle: TransactionInstruction,
+): Transaction {
+  return new Transaction({ blockhash: recent.blockhash, lastValidBlockHeight: recent.lastValidBlockHeight, feePayer: wallet }).add(attestation, settle);
+}
+
+/**
+ * The idempotency key one settle attempt is sent to Privy under: sha256, in hex,
+ * of the link, the nonce its attestation consumes and the attestation's deadline.
+ *
+ * NEW FOR EVERY ATTEMPT. On /rpc Privy caches a 4xx or a 5xx against the key for
+ * 24 hours and replays it (docs.privy.io, api-reference/idempotency-keys, "Error
+ * replay behavior"), so a key the next sweep reused after a 504 could only ever
+ * be answered 504. The deadline is the chain's confirmed slot at the turn plus
+ * ATTESTATION_VALIDITY_SLOTS, so each sweep's attempt carries its own, and a
+ * landed settle moves the nonce, so no later attempt shares its key either. Only
+ * a node that reports the same confirmed slot to two sweeps repeats one, and
+ * Privy answers that repeat from its record rather than signing again.
+ */
+export function settleIdempotencyKey(link: Pick<ManagedLink, "linkAddress" | "settlementNonce">, validUntilSlot: bigint): string {
+  return createHash("sha256").update(`${link.linkAddress.toBase58()}:${link.settlementNonce}:${validUntilSlot}`).digest("hex");
+}
+
 /** A refusal's detail: where it happened, what said no, and what happens next. */
 function refusalDetail(where: string, refusal: SettleRefusal, raw: string): string {
   switch (refusal.outcome) {
@@ -266,15 +329,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   // BUILT ONCE, PRICED, THEN SENT. The fee below is the node's price for a
   // message carrying exactly this instruction and this blockhash, and a live
   // turn sends those same two.
-  const settleIx = await method(program, "settleV2")(
-    inputs.mode,
-    new anchor.BN(inputs.sessionStartSlot.toString()),
-    new anchor.BN(inputs.sessionEndSlot.toString()),
-    new anchor.BN(inputs.baseLamports.toString()),
-    new anchor.BN(inputs.validUntilSlot.toString()),
-  )
-    .accountsPartial({ wallet: link.wallet, vault: link.vault, tradingLink: link.linkAddress })
-    .instruction();
+  const settleIx = await settleInstruction(program, link, inputs);
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
 
   // THE RESERVE, BEFORE ANYTHING IS SIGNED, IN DRY RUN TOO. settle_v2 refuses a
@@ -285,7 +340,9 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   // node's price for this message, the Ed25519 instruction's signature included,
   // with the attester's key and a blank signature of the same size standing in
   // for the one a live turn signs.
-  const priced = new Transaction({ blockhash, lastValidBlockHeight, feePayer: link.wallet }).add(
+  const priced = settleTransaction(
+    { blockhash, lastValidBlockHeight },
+    link.wallet,
     Ed25519Program.createInstructionWithPublicKey({
       publicKey: deps.attester?.publicKey.toBytes() ?? new Uint8Array(32),
       message: attestationMessage(inputs),
@@ -372,13 +429,19 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     return { outcome: refusal.outcome, detail: refusalDetail(where, refusal, raw), ...carried, ...withSignature };
   };
 
-  // THE ORDER IS LOAD-BEARING: settle_v2 proves, through the instructions
-  // sysvar, that the instruction IMMEDIATELY BEFORE it is the attester's
-  // Ed25519 verification of exactly this message. The transaction is signed
-  // BY the wallet, which pays, and carries the blockhash its fee was priced at.
-  const tx = new Transaction({ blockhash, lastValidBlockHeight, feePayer: link.wallet })
-    .add(attestationInstruction(attester.secretKey, inputs))
-    .add(settleIx);
+  // The same two instructions the fee was priced for, the attestation now signed.
+  const tx = settleTransaction({ blockhash, lastValidBlockHeight }, link.wallet, attestationInstruction(attester.secretKey, inputs), settleIx);
+
+  // ONLY THE SETTLE LEAVES, ON EITHER ROUTE. The Privy policy bounds the signer
+  // by program and never sees instruction data (privy-policy.ts), so the shape is
+  // held here, before a keypair signs or Privy is asked, and the local proof
+  // sends through the same check the product path does. A transaction that fails
+  // it is a bug in this file: nothing is sent, and a human should look.
+  try {
+    assertSettleShape(tx, program.programId, link.wallet);
+  } catch (error) {
+    return { outcome: "FAILED", detail: error instanceof Error ? error.message : String(error), ...carried };
+  }
 
   let signature: string;
   try {
@@ -388,8 +451,9 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
       signature = await connection.sendRawTransaction(tx.serialize(), { preflightCommitment: "confirmed" });
     } else {
       // The product path: Privy signs as the wallet AND broadcasts, so the
-      // policy's program allowlist is in force on the way out.
-      signature = await walletSigner.submit(tx);
+      // policy's program allowlist is in force on the way out. One request,
+      // under this attempt's own key.
+      signature = await walletSigner.submit(tx, { idempotencyKey: settleIdempotencyKey(link, inputs.validUntilSlot) });
     }
   } catch (error) {
     return unconfirmed(error, "sending the settle threw", summarizeUpstreamError(error, { take: 3, maxChars: 500 }));

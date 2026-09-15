@@ -48,6 +48,16 @@ export function accountDiscriminator(name: string): Buffer {
   return Buffer.from(account.discriminator);
 }
 
+/**
+ * An instruction's 8-byte discriminator as the IDL records it: the first eight
+ * bytes of its data, which is how a transaction names the instruction it calls.
+ */
+export function instructionDiscriminator(name: string): Buffer {
+  const instruction = idl.instructions.find((candidate) => candidate.name === name);
+  if (instruction === undefined) throw new Error(`the exported IDL has no ${name} instruction`);
+  return Buffer.from(instruction.discriminator);
+}
+
 /** The same discriminator derived the way Anchor derives it, for the preflight to cross-check. */
 export function derivedDiscriminator(name: string): Buffer {
   return createHash("sha256").update(`account:${name}`).digest().subarray(0, 8);

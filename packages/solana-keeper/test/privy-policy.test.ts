@@ -40,6 +40,7 @@ import {
   writeAdminKeyFile,
   type PolicyLike,
 } from "../src/privy-policy.js";
+import { buildTestSettle } from "./settle-transaction.js";
 
 const policy = buildKeeperPolicy(SIP_PROGRAM_ID);
 
@@ -110,6 +111,16 @@ describe("buildKeeperPolicy", () => {
     // The literals are the programs web3.js means, not look-alikes.
     expect(Ed25519Program.programId.toBase58()).toBe(ED25519_PROGRAM_ID);
     expect(ComputeBudgetProgram.programId.toBase58()).toBe(COMPUTE_BUDGET_PROGRAM_ID);
+  });
+
+  it("allows every top-level program of a settle built as settle-tick.ts builds it, read back from the bytes Privy is sent", async () => {
+    const { transaction } = await buildTestSettle();
+    // Privy evaluates the serialized transaction: every top-level instruction
+    // in it must be ALLOWed, and settle_v2's System transfer is a CPI, not one.
+    const sent = Transaction.from(transaction.serialize({ requireAllSignatures: false, verifySignatures: false }));
+    const programs = sent.instructions.map((instruction) => instruction.programId.toBase58());
+    expect(programs).toEqual([ED25519_PROGRAM_ID, SIP_PROGRAM_ID]);
+    for (const program of programs) expect(allowedPrograms(policy), program).toContain(program);
   });
 });
 

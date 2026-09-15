@@ -6,9 +6,10 @@
 // methods a test gives it, throws on any other, and records every call. The
 // Program is a real anchor.Program over it, so the settle_v2 instruction is the
 // IDL's own; the wallet signs with a Keypair.generate(), as on localnet, and the
-// Privy route is a submitter that throws what a test tells it to. No network, and
-// no real key.
+// Privy route is a submitter that throws what a test tells it to, or records what
+// it is handed. No network, and no real key.
 
+import { createHash } from "node:crypto";
 import * as anchor from "@coral-xyz/anchor";
 import {
   Connection,
@@ -19,13 +20,14 @@ import {
   VersionedTransaction,
   type Finality,
   type Message,
+  type Transaction,
   type TransactionError,
 } from "@solana/web3.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { VaultState } from "../src/accounts.js";
 import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
-import type { SolanaWalletSubmitter } from "../src/privy-signer.js";
+import { assertSettleShape, type SolanaWalletSubmitter } from "../src/privy-signer.js";
 import { attestationMessage } from "../src/program-scripts.js";
 import { attestationInputs } from "../src/settle-decision.js";
 import { CONFIRM_POLL_MS, CONFIRM_TIMEOUT_MS, runSettleTick, type SettleDeps, type SettleResult } from "../src/settle-tick.js";
@@ -338,6 +340,36 @@ describe("a live settle", () => {
     expect(Buffer.from(pricedVerify!.data.subarray(0, 48)).equals(Buffer.from(verify!.data.subarray(0, 48)))).toBe(true);
     expect(Buffer.from(pricedVerify!.data.subarray(112)).equals(Buffer.from(verify!.data.subarray(112)))).toBe(true);
     expect(Buffer.from(pricedSettle!.data).equals(Buffer.from(tx!.message.compiledInstructions[1]!.data))).toBe(true);
+  });
+
+  it("through the Privy route is submitted once, as the pair its fee was priced for, under an idempotency key new for each attempt", async () => {
+    const keys: string[] = [];
+    for (const confirmedSlot of [EPOCH + 140, EPOCH + 141]) {
+      const c = chain({ getSlot: async (commitment) => (commitment === "finalized" ? EPOCH + 100 : confirmedSlot) });
+      const handed: { readonly transaction: Transaction; readonly idempotencyKey: string }[] = [];
+      const privy: SolanaWalletSubmitter = {
+        address: link.wallet,
+        submit: async (transaction, { idempotencyKey }) => {
+          handed.push({ transaction, idempotencyKey });
+          // What Privy would broadcast, so the stub chain's receipt has a message to read.
+          c.sent.push(VersionedTransaction.deserialize(transaction.serialize({ requireAllSignatures: false, verifySignatures: false })));
+          return SIGNATURE;
+        },
+      };
+      const result = await runSettleTick(c.deps({ walletSigner: privy }));
+      const named = `confirmed slot ${confirmedSlot}`;
+      expect(result, named).toMatchObject({ outcome: "SETTLED", settledLamports: BigInt(PAID), signature: SIGNATURE, nonce: 4n });
+      expect(c.calls, named).not.toContain("sendRawTransaction");
+      expect(handed, named).toHaveLength(1);
+      const { transaction, idempotencyKey } = handed[0]!;
+      expect(() => assertSettleShape(transaction, programId, link.wallet)).not.toThrow();
+      expect(transaction.recentBlockhash).toBe(BLOCKHASH);
+      // sha256 of the link, the nonce this attestation consumes, and its deadline: the confirmed slot plus 150.
+      const deadline = BigInt(confirmedSlot) + 150n;
+      expect(idempotencyKey, named).toBe(createHash("sha256").update(`${link.linkAddress.toBase58()}:4:${deadline}`).digest("hex"));
+      keys.push(idempotencyKey);
+    }
+    expect(new Set(keys).size).toBe(2);
   });
 
   it("warns in its detail when the vault moved another amount than settle_v2 computes", async () => {

@@ -19,12 +19,11 @@
 import "../src/console-bridge.js";
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, PublicKey } from "@solana/web3.js";
-import { PrivyClient } from "@privy-io/node";
 import { Secret, sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
 import { readProtocolConfig } from "../src/accounts.js";
 import { BROADCAST_ACK, copiedConfigProblems, parsePools, parseSettleKey, privySdkOverrideProblems } from "../src/config.js";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID, idl } from "../src/idl.js";
-import { PRIVY_API_URL } from "../src/privy-signer.js";
+import { pinnedPrivyClient } from "../src/privy-signer.js";
 import { SolanaReadModel } from "../src/read-model.js";
 import { poolFetch } from "../src/rpc-pool.js";
 
@@ -158,9 +157,10 @@ if (appId !== undefined && appSecret !== undefined && sdkOverrides.length > 0) {
 } else if (appId !== undefined && appSecret !== undefined) {
   // Prueba REAL de credenciales, sin crear nada: una lectura autenticada de la
   // primera página de wallets de Solana. Un 401/403 es lo que buscamos detectar.
-  // apiUrl y logLevel fijados: sin ellos el SDK los tomaría del entorno.
+  // El cliente sale de pinnedPrivyClient, como todos los del keeper: apiUrl y
+  // logLevel fijados (sin ellos el SDK los tomaría del entorno) y un solo intento.
   try {
-    const privy = new PrivyClient({ appId, appSecret, apiUrl: PRIVY_API_URL, logLevel: "warn" });
+    const privy = pinnedPrivyClient({ appId, appSecret });
     for await (const _wallet of privy.wallets().list({ chain_type: "solana", limit: 1 })) break;
     ok("Privy acepta appId + appSecret");
   } catch (error) {

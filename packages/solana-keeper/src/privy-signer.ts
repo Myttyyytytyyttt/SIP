@@ -23,16 +23,24 @@
 // The attester's Ed25519 instruction rides INSIDE the serialized transaction,
 // so Privy adds only the wallet's signature and broadcasts. Nothing about the
 // attestation passes through Privy's hands as data it could alter.
+//
+// ONE CLIENT FACTORY, ONE ATTEMPT, ONE SHAPE. Every Privy client in the keeper
+// comes from pinnedPrivyClient below, so where the app secret goes and how often
+// a request is sent are decided in one place. A settle leaves once, under an
+// idempotency key of its own, and only as [Ed25519SigVerify, settle_v2] paid by
+// the wallet: the policy bounds this signer by program, and assertSettleShape
+// bounds it by instruction.
 
 import { PrivyClient } from "@privy-io/node";
-import { PublicKey, VersionedTransaction, Transaction } from "@solana/web3.js";
+import { Ed25519Program, PublicKey, Transaction, type TransactionInstruction } from "@solana/web3.js";
 import type { Secret } from "@sip/solana-log";
+import { SIP_PROGRAM_ID, instructionDiscriminator } from "./idl.js";
 
 /** CAIP-2 for Solana mainnet-beta. */
 export const SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
 
 /**
- * Privy's production API, pinned in code. A PrivyClient built without apiUrl
+ * Privy's production API, pinned in code. A Privy client built without apiUrl
  * takes PRIVY_API_BASE_URL from the environment and sends the app secret to
  * whatever host that names; loadConfig refuses the variable as well.
  */
@@ -45,12 +53,29 @@ export interface PrivySolanaConfig {
   readonly authorizationKey: Secret;
   /** Defaults to mainnet-beta. */
   readonly caip2?: string;
+  /** Tests only: a fetch that answers in-process, so the signer's requests are checked with no network. */
+  readonly fetch?: typeof globalThis.fetch;
+}
+
+export interface SolanaSubmitOptions {
+  /**
+   * Sent as privy-idempotency-key, inside the request's authorization
+   * signature. NEW FOR EVERY ATTEMPT: on /rpc Privy caches a 4xx or a 5xx
+   * against the key for 24 hours and replays it, so a key reused after a 504
+   * could only ever be answered 504 (docs.privy.io, api-reference/
+   * idempotency-keys). settle-tick.ts's settleIdempotencyKey makes one per
+   * attempt.
+   */
+  readonly idempotencyKey: string;
 }
 
 export interface SolanaWalletSubmitter {
   readonly address: PublicKey;
-  /** Signs as the wallet and broadcasts; returns the transaction signature. */
-  submit(transaction: Transaction | VersionedTransaction): Promise<string>;
+  /**
+   * Signs as the wallet and broadcasts, in one request; returns the transaction
+   * signature. Refuses anything but assertSettleShape's pair, sending nothing.
+   */
+  submit(transaction: Transaction, options: SolanaSubmitOptions): Promise<string>;
 }
 
 /**
@@ -70,11 +95,107 @@ export interface PrivyWalletEntry {
   readonly granted: readonly string[];
 }
 
-// apiUrl and logLevel explicit: left out, the SDK reads PRIVY_API_BASE_URL and
-// PRIVY_API_LOG from the environment. loadConfig refuses both by name, and
-// PRIVY_API_CUSTOM_HEADERS, which no option can override.
+export interface PinnedPrivyClientOptions {
+  readonly appId: string;
+  /** Revealed by the caller, inside the call that builds the client. */
+  readonly appSecret: string;
+  /** Tests only: a fetch that answers in-process. */
+  readonly fetch?: typeof globalThis.fetch;
+  /** How many times the SDK re-sends a failed request. 0: one attempt. */
+  readonly maxRetries?: number;
+}
+
+/**
+ * THE ONE PLACE A PRIVY CLIENT IS BUILT. The signer below, the policy CLI's
+ * client (privy-policy-client.ts) and bin/ready.mts all take theirs from here,
+ * and test/privy-client-sites.test.ts fails the day a second construction
+ * appears anywhere in src/ or bin/.
+ *
+ * WHAT IS PINNED, AND WHY:
+ *   * apiUrl and logLevel. Left out, the SDK reads PRIVY_API_BASE_URL and
+ *     PRIVY_API_LOG from the environment: the first sends the app secret to
+ *     whatever host it names, the second logs request details. loadConfig
+ *     refuses both by name, and PRIVY_API_CUSTOM_HEADERS, which no option can
+ *     override.
+ *   * maxRetries 0: ONE ATTEMPT PER REQUEST. The SDK's default re-sends up to
+ *     twice on 408, 409, 429, 5xx and dropped connections, POSTs included, with
+ *     backoff sleeps in between (client.js shouldRetry). On /rpc a re-send under
+ *     the same idempotency key only replays the cached error, and a POST sent
+ *     without one — a key quorum — can land twice. The keeper's own loop is the
+ *     retry: the next sweep reads the link again, measures anew, and sends under
+ *     a new key.
+ */
+export function pinnedPrivyClient({ appId, appSecret, fetch, maxRetries = 0 }: PinnedPrivyClientOptions): PrivyClient {
+  return new PrivyClient({
+    appId,
+    appSecret,
+    apiUrl: PRIVY_API_URL,
+    logLevel: "warn",
+    maxRetries,
+    ...(fetch === undefined ? {} : { fetch }),
+  });
+}
+
 const clientFor = (config: PrivySolanaConfig): PrivyClient =>
-  new PrivyClient({ appId: config.appId, appSecret: config.appSecret.reveal(), apiUrl: PRIVY_API_URL, logLevel: "warn" });
+  pinnedPrivyClient({ appId: config.appId, appSecret: config.appSecret.reveal(), fetch: config.fetch });
+
+/** sip-vault, as the exported IDL names it: the only program a settle calls. */
+const SIP_PROGRAM = new PublicKey(SIP_PROGRAM_ID);
+
+/** settle_v2's discriminator, from the exported IDL: [5, 41, 238, 141, 219, 81, 39, 145]. */
+const SETTLE_V2_DISCRIMINATOR = instructionDiscriminator("settle_v2");
+
+/**
+ * Throws unless `transaction` is exactly what a settle sends: the attester's
+ * Ed25519SigVerify, then settle_v2 on `programId`, paid by `wallet`.
+ *
+ * WHY THE SHAPE IS CHECKED HERE AND NOT LEFT TO THE POLICY. The keeper's Privy
+ * policy (privy-policy.ts) allows any transaction made entirely of sip-vault and
+ * Ed25519SigVerify instructions, because Privy's solana_program_instruction
+ * source sees program ids and never instruction data. So the policy would let
+ * this signer send link_wallet, a second settle_v2, or an Ed25519 instruction
+ * that declares extra signatures only to charge the wallet a fee for each. None
+ * of those is a settle, and the keeper builds nothing else, so anything else is
+ * a bug and never leaves.
+ *
+ * WHAT IS REQUIRED, READ FROM settle.rs AND ed25519_introspection.rs:
+ *   * exactly two instructions, the Ed25519SigVerify one FIRST. settle_v2 reads
+ *     the instruction at its own index minus one and refuses AttestationMissing
+ *     when that is not the precompile, and the keeper sends nothing besides;
+ *   * the Ed25519SigVerify instruction names no accounts and declares ONE
+ *     signature in a header the program can read (data.len() >= 16 and
+ *     data[0] == 1, its AttestationMalformed checks), so the wallet pays for one;
+ *   * the second instruction is `programId` with settle_v2's discriminator.
+ *     link_wallet, the other sip-vault instruction that reads a preceding
+ *     Ed25519 check, is refused;
+ *   * the fee payer is the wallet the signer signs as: settle_v2's `wallet` is
+ *     the Signer that pays the contribution, and a transaction someone else
+ *     pays for is not this wallet's settle.
+ *
+ * A LEGACY Transaction, as settle-tick.ts builds it. A VersionedTransaction can
+ * load accounts from lookup tables no local check reads, so the signer takes none.
+ */
+export function assertSettleShape(transaction: Transaction, programId: PublicKey, wallet: PublicKey): void {
+  const refuse = (what: string): never => {
+    throw new Error(
+      `refusing to send a transaction that is not a settle: ${what}. Only [Ed25519SigVerify, settle_v2] paid by the ` +
+        "trading wallet leaves through its signer; nothing was sent",
+    );
+  };
+  const count = transaction.instructions.length;
+  if (count !== 2) refuse(`it has ${count} instruction${count === 1 ? "" : "s"}, not 2`);
+  const [verify, settle] = transaction.instructions as [TransactionInstruction, TransactionInstruction];
+  if (!verify.programId.equals(Ed25519Program.programId)) refuse(`instruction 0 calls ${verify.programId.toBase58()}, not Ed25519SigVerify`);
+  if (verify.keys.length !== 0) {
+    refuse(`the Ed25519SigVerify instruction names ${verify.keys.length} account${verify.keys.length === 1 ? "" : "s"}, and it takes none`);
+  }
+  if (verify.data.length < 16 || verify.data[0] !== 1) refuse("the Ed25519SigVerify instruction does not declare exactly one signature");
+  if (!settle.programId.equals(programId)) refuse(`instruction 1 calls ${settle.programId.toBase58()}, not sip-vault ${programId.toBase58()}`);
+  if (settle.data.length < 8 || !settle.data.subarray(0, 8).equals(SETTLE_V2_DISCRIMINATOR)) refuse("instruction 1 is not settle_v2");
+  if (transaction.feePayer === undefined || !transaction.feePayer.equals(wallet)) {
+    refuse(`it is paid by ${transaction.feePayer?.toBase58() ?? "no fee payer"}, not the wallet ${wallet.toBase58()}`);
+  }
+}
 
 /**
  * ONE pass over the app's Solana wallets, indexed by address.
@@ -138,18 +259,21 @@ export async function createPrivySolanaSigner(
 
   const signer: SolanaWalletSubmitter = {
     address,
-    async submit(transaction) {
-      const serialized =
-        transaction instanceof VersionedTransaction
-          ? Buffer.from(transaction.serialize())
-          : transaction.serialize({ requireAllSignatures: false, verifySignatures: false });
+    async submit(transaction, { idempotencyKey }) {
+      // THE SIGNER ITSELF REFUSES ANYTHING BUT A SETTLE, whoever calls it.
+      // settle-tick.ts checks the same shape before either route sends, so a
+      // refusal here is a new caller, never a settle turn.
+      assertSettleShape(transaction, SIP_PROGRAM, address);
+      const serialized = transaction.serialize({ requireAllSignatures: false, verifySignatures: false });
 
       // `transaction` goes at the TOP level: this SDK builds the raw `params`
       // object itself (a base64 string in, {transaction, encoding} out). The
       // first version nested a hand-built `params`, which the SDK's own
       // overwrote with {transaction: undefined}, and Privy answered 400
       // `params.transaction` is required — an error naming a field this file
-      // believed it had sent.
+      // believed it had sent. `idempotency_key` sits there too: the SDK takes it
+      // out of the body and sends it as privy-idempotency-key, signed into the
+      // authorization signature with the rest of the request.
       const response = await clientFor(config)
         .wallets()
         .solana()
@@ -157,6 +281,7 @@ export async function createPrivySolanaSigner(
           caip2: (config.caip2 ?? SOLANA_MAINNET_CAIP2) as `${string}:${string}`,
           transaction: serialized.toString("base64"),
           authorization_context: { authorization_private_keys: [config.authorizationKey.reveal()] },
+          idempotency_key: idempotencyKey,
         });
 
       const hash = response.hash;
