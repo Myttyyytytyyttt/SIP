@@ -159,6 +159,13 @@ const alerter = createAlerter({
 
 const changes = createChangeLog(log);
 
+/**
+ * Sweeps in a row each wallet's settle came back RETRY. Any other outcome
+ * removes the wallet; settleAlert pages critical once the count reaches
+ * SETTLE_RETRY_CRITICAL_AFTER.
+ */
+const settleRetries = new Map<string, number>();
+
 const privyConfig: PrivySolanaConfig | null = config.signing?.privy ?? null;
 
 function signingRoute(): string {
@@ -517,11 +524,16 @@ async function sweep(): Promise<void> {
           live: settleTurn.live,
           protocolPaused,
         });
-        // MONEY EVENTS always log and clear the dedupe key — a SETTLED or a
-        // real FAILED is news every time. The resting states each log ONCE on
-        // change; they stay visible in /status instead, which never dedupes.
-        if (settle.outcome === "SETTLED" || settle.outcome === "FAILED") {
-          log[settle.outcome === "FAILED" ? "error" : "info"](`settle ${settle.outcome.toLowerCase()}`, {
+        // MONEY EVENTS always log and clear the dedupe key — a SETTLED, a RETRY
+        // or a real FAILED is news every time. The resting states each log ONCE
+        // on change; they stay visible in /status instead, which never dedupes.
+        if (settle.outcome === "SETTLED" || settle.outcome === "FAILED" || settle.outcome === "RETRY") {
+          // A VAULT THAT MOVED ANYTHING BUT settle_v2's OWN ARITHMETIC warns,
+          // every time: the tick's detail names both amounts.
+          const amountDiffers =
+            settle.settledLamports !== undefined && settle.expectedLamports !== undefined && settle.settledLamports !== settle.expectedLamports;
+          const level = settle.outcome === "FAILED" ? "error" : settle.outcome === "RETRY" || amountDiffers ? "warn" : "info";
+          log[level](`settle ${settle.outcome.toLowerCase()}`, {
             wallet,
             vault: vaultAddr,
             detail: settle.detail,
@@ -566,8 +578,12 @@ async function sweep(): Promise<void> {
         }
         // WHO IS WOKEN, AND FOR WHAT, is settleAlert's (src/settle-decision.ts),
         // where a test pins the rule for every outcome. What it resolves is
-        // cleared first, then what it raises is fired.
-        const settleAlerts = settleAlert(settle.outcome, { wallet, vault: vaultAddr }, settle.detail);
+        // cleared first, then what it raises is fired. A RETRY is counted per
+        // wallet, sweep after sweep, and any other outcome resets the count.
+        const consecutiveRetries = settle.outcome === "RETRY" ? (settleRetries.get(wallet) ?? 0) + 1 : 0;
+        if (consecutiveRetries === 0) settleRetries.delete(wallet);
+        else settleRetries.set(wallet, consecutiveRetries);
+        const settleAlerts = settleAlert(settle.outcome, { wallet, vault: vaultAddr }, settle.detail, consecutiveRetries);
         for (const key of settleAlerts.clear) alerter.clear(key);
         if (settleAlerts.fire !== null) alerter.fire(settleAlerts.fire);
 

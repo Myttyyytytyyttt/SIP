@@ -23,6 +23,7 @@ import type { WindowMeasurement } from "../src/measure-window.js";
 import { ATTESTATION_MESSAGE_LEN, MODE_PROFIT, MODE_VOLUME, attestationMessage } from "../src/program-scripts.js";
 import {
   ATTESTATION_VALIDITY_SLOTS,
+  SETTLE_RETRY_CRITICAL_AFTER,
   ZERO_BASE_MIN_TXS,
   activeBps,
   attestationInputs,
@@ -33,6 +34,7 @@ import {
   measurementStart,
   modeDecision,
   pauseDecision,
+  reserveDecision,
   settleAlert,
   type SettleOutcome,
   type VolumeBase,
@@ -422,31 +424,99 @@ describe("the attestation", () => {
   });
 });
 
+describe("the wallet reserve, as settle.rs refuses it, with the fee the wallet pays first", () => {
+  const fee = 10_000n;
+  const rent0 = 890_880n;
+  const reserve = 50_000_000n;
+  const paid = 20_000_000n;
+  const decide = (walletLamports: bigint, over: Partial<Parameters<typeof reserveDecision>[0]> = {}) =>
+    reserveDecision({ walletLamports, feeLamports: fee, rentExemptZero: rent0, walletReserve: reserve, paid, ...over });
+
+  it("lets a wallet left at exactly rent_exempt(0) + wallet_reserve through, and refuses one lamport less", () => {
+    // z-review-settle-link.ts's boundary — balance − paid == rent0 + reserve —
+    // with the fee the runtime takes before settle_v2 runs.
+    const exact = fee + paid + rent0 + reserve;
+    expect(decide(exact)).toBeNull();
+    const short = decide(exact - 1n);
+    expect(short?.outcome).toBe("BELOW_RESERVE");
+    expect(short?.detail).toContain("1 lamports short");
+  });
+
+  it("checks what is PAID, clipped at max_contribution, never what is owed", () => {
+    // 1 SOL owed against a 0.1 SOL cap: a wallet covering 0.1 SOL settles.
+    const { owed, paid: clipped } = expectedContribution(5_000_000_000n, 2_000, 100_000_000n);
+    expect([owed, clipped]).toEqual([1_000_000_000n, 100_000_000n]);
+    const covering = fee + clipped + rent0 + reserve;
+    expect(decide(covering, { paid: clipped })).toBeNull();
+    expect(decide(covering, { paid: owed })?.outcome).toBe("BELOW_RESERVE");
+  });
+
+  it("ignores wallet_reserve for a zero payment, which needs only the fee and the rent floor", () => {
+    expect(decide(fee + rent0, { paid: 0n, walletReserve: 1_000_000_000_000n })).toBeNull();
+    expect(decide(fee + rent0 - 1n, { paid: 0n })?.outcome).toBe("BELOW_RESERVE");
+  });
+
+  it("refuses a wallet holding less than the fee, or nothing, without throwing", () => {
+    for (const payment of [0n, paid]) {
+      expect(() => decide(fee - 1n, { paid: payment })).not.toThrow();
+      expect(decide(fee - 1n, { paid: payment })?.outcome).toBe("BELOW_RESERVE");
+      expect(decide(0n, { paid: payment })?.outcome).toBe("BELOW_RESERVE");
+    }
+  });
+
+  it("names WalletBelowReserve and wallet_reserve, and never calls a resting state a failure", () => {
+    const positive = decide(0n)?.detail ?? "";
+    expect(positive).toContain("WalletBelowReserve");
+    expect(positive).toContain(`wallet_reserve ${reserve}`);
+    expect(positive).toContain("frontier stays put");
+    const zero = decide(0n, { paid: 0n })?.detail ?? "";
+    for (const detail of [positive, zero]) expect(detail.toLowerCase()).not.toContain("fail");
+  });
+});
+
 describe("the alert rule", () => {
   const where = { wallet: "Wallet1111", vault: "Vault1111" };
   const failed = "settle-failed:Wallet1111";
+  const retry = "settle-retry:Wallet1111";
   const incomplete = "incomplete:Wallet1111";
   const noSigner = "no-signer:Wallet1111";
   type Want = { readonly fire: { readonly key: string; readonly severity: "warn" | "critical" } | null; readonly clear: readonly string[] };
   // A Record over SettleOutcome, so an outcome added without a row here fails to compile.
   const table: Record<SettleOutcome, Want> = {
-    IDLE: { fire: null, clear: [incomplete, noSigner] },
-    PENDING_FINALITY: { fire: null, clear: [incomplete, noSigner] },
-    NO_PROFIT: { fire: null, clear: [incomplete, noSigner] },
-    UNSUPPORTED_MODE: { fire: null, clear: [incomplete, noSigner] },
-    SETTLED: { fire: null, clear: [failed] },
-    PAUSED: { fire: null, clear: [failed, incomplete, noSigner] },
-    INCOMPLETE: { fire: { key: incomplete, severity: "warn" }, clear: [noSigner] },
-    NO_SIGNER: { fire: { key: noSigner, severity: "warn" }, clear: [incomplete] },
-    FAILED: { fire: { key: failed, severity: "critical" }, clear: [] },
+    IDLE: { fire: null, clear: [retry, incomplete, noSigner] },
+    PENDING_FINALITY: { fire: null, clear: [retry, incomplete, noSigner] },
+    NO_PROFIT: { fire: null, clear: [retry, incomplete, noSigner] },
+    UNSUPPORTED_MODE: { fire: null, clear: [retry, incomplete, noSigner] },
+    SETTLED: { fire: null, clear: [failed, retry] },
+    PAUSED: { fire: null, clear: [failed, retry, incomplete, noSigner] },
+    BELOW_RESERVE: { fire: null, clear: [failed, retry, incomplete, noSigner] },
+    INCOMPLETE: { fire: { key: incomplete, severity: "warn" }, clear: [retry, noSigner] },
+    NO_SIGNER: { fire: { key: noSigner, severity: "warn" }, clear: [retry, incomplete] },
+    RETRY: { fire: { key: retry, severity: "warn" }, clear: [] },
+    FAILED: { fire: { key: failed, severity: "critical" }, clear: [retry] },
   };
 
   it("raises and resolves exactly this for every outcome, carrying the turn's detail", () => {
     for (const [outcome, want] of Object.entries(table) as [SettleOutcome, Want][]) {
-      const rule = settleAlert(outcome, where, "the turn's detail");
+      // A RETRY is the first of its run; every other outcome resets the run to 0.
+      const rule = settleAlert(outcome, where, "the turn's detail", outcome === "RETRY" ? 1 : 0);
       const got = { fire: rule.fire === null ? null : { key: rule.fire.key, severity: rule.fire.severity }, clear: [...rule.clear].sort() };
       expect(got, outcome).toEqual({ fire: want.fire, clear: [...want.clear].sort() });
       if (rule.fire !== null) expect(rule.fire.detail, outcome).toBe("the turn's detail");
+    }
+  });
+
+  it("warns on a RETRY and pages it as a failed settlement at the third sweep in a row", () => {
+    expect(SETTLE_RETRY_CRITICAL_AFTER).toBe(3);
+    for (const run of [1, 2]) expect(settleAlert("RETRY", where, "d", run).fire, String(run)).toMatchObject({ key: retry, severity: "warn" });
+    for (const run of [3, 4]) {
+      expect(settleAlert("RETRY", where, "AttestationMismatch", run).fire, String(run)).toEqual({
+        key: failed,
+        severity: "critical",
+        title: "A settlement keeps not landing",
+        detail: `${run} sweeps in a row: AttestationMismatch`,
+        context: { wallet: "Wallet1111", vault: "Vault1111" },
+      });
     }
   });
 

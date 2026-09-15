@@ -148,6 +148,19 @@ export function decodeVault(program: anchor.Program, data: Buffer): VaultState {
   return vaultState(program.coder.accounts.decode("vault", data));
 }
 
+/**
+ * A trading link's settlement nonce as the chain holds it now, or null when the
+ * link account is gone (its owner unlinked it).
+ *
+ * THE ONE WITNESS A LOST RECEIPT LEAVES. settle_v2 bumps the nonce exactly once
+ * for every settle that lands, so a send that threw, or a confirmation that never
+ * came, is told apart from a settle that landed by reading this again.
+ */
+export async function readSettlementNonce(program: anchor.Program, link: PublicKey): Promise<bigint | null> {
+  const decoded = await client(program, "tradingLink").fetchNullable(link);
+  return decoded === null ? null : fields("TradingLink", decoded).big("settlementNonce");
+}
+
 /** The deployment's ProtocolConfig (state.rs), the source of truth for who attests and who cranks. */
 export interface ProtocolConfigState {
   readonly address: PublicKey;

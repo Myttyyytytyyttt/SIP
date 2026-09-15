@@ -422,6 +422,14 @@ describe("the ticks' first steps, over the same bytes", () => {
     return { linkAddress: key(), wallet: key(), vault, epoch: 300_000_000n, settlementNonce: 0n, frontierSlot: 0n };
   }
 
+  /** What a turn that reaches a settle reads before it would sign: a blockhash, the fee for its message, the wallet's balance and rent. 10 SOL covers any reserve here. */
+  const pricedAndFunded: Readonly<Record<string, Handler>> = {
+    getLatestBlockhash: async () => ({ blockhash: key().toBase58(), lastValidBlockHeight: 1_000 }),
+    getFeeForMessage: async () => ({ context: { slot: 1 }, value: 10_000 }),
+    getBalance: async () => 10_000_000_000,
+    getMinimumBalanceForRentExemption: async () => 890_880,
+  };
+
   it("rest a settle for a paused vault, or a paused protocol, on the sweep's vault read with no request of its own", async () => {
     for (const [vaultOver, protocolPaused, named] of [
       [{ paused: true }, false, "VaultPaused"],
@@ -489,6 +497,7 @@ describe("the ticks' first steps, over the same bytes", () => {
             : ledger!.signatures(wallet as PublicKey, options as { limit: number }, commitment as Finality),
         getTransaction: async (signature, config) => ledger!.transaction(signature as string, (config as { commitment: Finality }).commitment),
         getSlot: async (commitment) => (commitment === "finalized" ? 300_000_200 : 300_000_240),
+        ...pricedAndFunded,
       });
       const link = linkTo(vault);
       ledger = new FakeLedger(
@@ -554,7 +563,7 @@ describe("the ticks' first steps, over the same bytes", () => {
     ]);
   });
 
-  it("walk a finalized window through the connection, and read the confirmed slot for the deadline only once it settles, in a dry run", async () => {
+  it("walk a finalized window through the connection, read the confirmed slot for the deadline only once it settles, then price the fee and check the reserve, in a dry run", async () => {
     let ledger: FakeLedger | undefined;
     const { vault, connection, program, calls, callArgs } = chainWith({}, null, {
       getSignaturesForAddress: async (wallet, options, commitment) =>
@@ -563,6 +572,7 @@ describe("the ticks' first steps, over the same bytes", () => {
           : ledger!.signatures(wallet as PublicKey, options as { limit: number }, commitment as Finality),
       getTransaction: async (signature, config) => ledger!.transaction(signature as string, (config as { commitment: Finality }).commitment),
       getSlot: async (commitment) => (commitment === "finalized" ? 300_000_100 : 300_000_140),
+      ...pricedAndFunded,
     });
     const link = linkTo(vault);
     ledger = new FakeLedger(
@@ -577,15 +587,28 @@ describe("the ticks' first steps, over the same bytes", () => {
     calls.splice(0);
     callArgs.splice(0);
     const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false });
-    expect(result).toMatchObject({ outcome: "SETTLED", baseLamports: 1_000_000_000n, mode: 0 });
+    expect(result).toMatchObject({ outcome: "SETTLED", baseLamports: 1_000_000_000n, mode: 0, feeLamports: 10_000n, expectedLamports: 234_500_000n });
     // 1 SOL of profit at the planted 2 345 bps.
     expect(result.detail).toContain("DRY RUN — would settle 234500000 lamports");
     expect(result.detail).toContain("over slots 300000000..300000005");
-    expect(calls).toEqual(["getSignaturesForAddress", "getSlot", "getSignaturesForAddress", "getTransaction", "getTransaction", "getSlot"]);
-    expect(callArgs.slice(3)).toEqual([
+    expect(calls).toEqual([
+      "getSignaturesForAddress",
+      "getSlot",
+      "getSignaturesForAddress",
+      "getTransaction",
+      "getTransaction",
+      "getSlot",
+      "getLatestBlockhash",
+      "getFeeForMessage",
+      "getBalance",
+      "getMinimumBalanceForRentExemption",
+    ]);
+    expect(callArgs.slice(3, 7)).toEqual([
       ["link-0", { maxSupportedTransactionVersion: 0, commitment: "finalized" }],
       ["trade-5", { maxSupportedTransactionVersion: 0, commitment: "finalized" }],
       ["confirmed"],
+      ["confirmed"],
     ]);
+    expect(callArgs[8]).toEqual([link.wallet, "confirmed"]);
   });
 });

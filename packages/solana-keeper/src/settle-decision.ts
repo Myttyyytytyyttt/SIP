@@ -80,6 +80,24 @@ export type SettleOutcome =
    * stays where it is, so the span settles once the switch is off.
    */
   | "PAUSED"
+  /**
+   * The wallet cannot pay this settle and keep what settle_v2 makes it keep, so
+   * the program would refuse with WalletBelowReserve (or, for a zero payment,
+   * the runtime would refuse the fee). A RESTING state, like PAUSED: checked
+   * before anything is signed, in dry run too, and the frontier stays put, so the
+   * span settles once the wallet is funded again. The same name covers a
+   * WalletBelowReserve refusal that raced the balance read.
+   */
+  | "BELOW_RESERVE"
+  /**
+   * An attempt that did not land and may land on the next sweep: a transport
+   * error, an endpoint that timed out or throttled, an attestation that expired
+   * or no longer matches a policy written mid-sweep, or a fee the node could not
+   * price. It warns, and turns critical after SETTLE_RETRY_CRITICAL_AFTER sweeps
+   * in a row: the same refusal every sweep is not weather, and an
+   * AttestationMismatch that repeats means the encoder drifted.
+   */
+  | "RETRY"
   | "FAILED";
 
 /**
@@ -406,6 +424,12 @@ export interface SettleAlertRule {
 }
 
 /**
+ * How many sweeps in a row a wallet's settle may come back RETRY before it pages
+ * critical as a failed settlement: 3.
+ */
+export const SETTLE_RETRY_CRITICAL_AFTER = 3;
+
+/**
  * The outcome-to-alert rule for one wallet's settle turn, pure so a test can pin
  * it for every outcome.
  *
@@ -416,45 +440,72 @@ export interface SettleAlertRule {
  * holds), and NO_SIGNER, which repeats until the user re-runs onboarding. Both
  * warn, and each outcome other than itself clears it.
  *
- * A PAUSE IS DELIBERATE, NOT MONEY LOST. It also explains the settles that were
- * refused with VaultPaused or ProtocolPaused while it was being switched on, so it
- * clears their critical alert instead of leaving it standing. A SETTLED clears it
- * too; nothing else does.
+ * A PAUSE IS DELIBERATE, NOT MONEY LOST, AND A THIN WALLET IS THE TRADER'S. PAUSED
+ * also explains the settles refused with VaultPaused or ProtocolPaused while it
+ * was being switched on, and BELOW_RESERVE the ones refused with
+ * WalletBelowReserve, so both clear the critical alert instead of leaving it
+ * standing. A SETTLED clears it too; nothing else does.
+ *
+ * A RETRY WARNS, THEN PAGES. `consecutiveRetries` is how many sweeps in a row,
+ * this one included, came back RETRY for the wallet; the caller counts them and
+ * any other outcome resets the count. At SETTLE_RETRY_CRITICAL_AFTER the same
+ * condition fires as a failed settlement, because a refusal that repeats every
+ * sweep is a defect, not weather. Every other outcome clears the warning.
  */
 export function settleAlert(
   outcome: SettleOutcome,
   where: { readonly wallet: string; readonly vault: string },
   detail: string,
+  consecutiveRetries = 0,
 ): SettleAlertRule {
   const { wallet, vault } = where;
   const failed = `settle-failed:${wallet}`;
+  const retry = `settle-retry:${wallet}`;
   const incomplete = `incomplete:${wallet}`;
   const noSigner = `no-signer:${wallet}`;
   switch (outcome) {
     case "FAILED":
       return {
         fire: { key: failed, severity: "critical", title: "A settlement failed", detail, context: { wallet, vault } },
+        clear: [retry],
+      };
+    case "RETRY":
+      if (consecutiveRetries >= SETTLE_RETRY_CRITICAL_AFTER) {
+        return {
+          fire: {
+            key: failed,
+            severity: "critical",
+            title: "A settlement keeps not landing",
+            detail: `${consecutiveRetries} sweeps in a row: ${detail}`,
+            context: { wallet, vault },
+          },
+          clear: [],
+        };
+      }
+      return {
+        fire: { key: retry, severity: "warn", title: "A settlement did not land and is retried next sweep", detail, context: { wallet, vault } },
         clear: [],
       };
     case "SETTLED":
-      return { fire: null, clear: [failed] };
+      return { fire: null, clear: [failed, retry] };
     case "PAUSED":
-      return { fire: null, clear: [failed, incomplete, noSigner] };
+    case "BELOW_RESERVE":
+      return { fire: null, clear: [failed, retry, incomplete, noSigner] };
     case "INCOMPLETE":
       return {
         fire: { key: incomplete, severity: "warn", title: "A wallet cannot be measured, so it is not saving", detail, context: { wallet } },
-        clear: [noSigner],
+        clear: [retry, noSigner],
       };
     case "NO_SIGNER":
       return {
         fire: { key: noSigner, severity: "warn", title: "A linked wallet never granted the keeper's signer", detail, context: { wallet } },
-        clear: [incomplete],
+        clear: [retry, incomplete],
       };
     case "IDLE":
     case "PENDING_FINALITY":
     case "NO_PROFIT":
     case "UNSUPPORTED_MODE":
-      return { fire: null, clear: [incomplete, noSigner] };
+      return { fire: null, clear: [retry, incomplete, noSigner] };
   }
 }
 
@@ -527,4 +578,55 @@ export function attestationInputs(args: {
 export function expectedContribution(baseLamports: bigint, bps: number, maxContribution: bigint): { owed: bigint; paid: bigint } {
   const owed = (baseLamports * BigInt(bps)) / 10_000n;
   return { owed, paid: owed < maxContribution ? owed : maxContribution };
+}
+
+/**
+ * Whether the trading wallet can pay this settle and keep what settle_v2 makes
+ * it keep. Decided BEFORE ANYTHING IS SIGNED, in dry run too.
+ *
+ * settle.rs's RULE, WITH THE FEE TAKEN FIRST. The wallet is the fee payer, so the
+ * runtime takes the fee before settle_v2 runs, and the program sees what is left.
+ * For a positive payment it requires `lamports - paid >= rent_exempt(0) +
+ * wallet_reserve` and refuses with WalletBelowReserve otherwise: here, a balance
+ * of at least fee + paid + rent_exempt(0) + wallet_reserve. For a zero payment the
+ * program checks nothing, and the runtime alone refuses a fee that would take a
+ * rent-exempt payer below rent_exempt(0): fee + rent_exempt(0).
+ *
+ * ADDITIONS ONLY. A balance below the fee would take a subtraction negative; the
+ * balance compared against the sum it must cover cannot. settle.rs saturates
+ * rent_exempt(0) + wallet_reserve at u64::MAX, which no balance reaches, so the
+ * unbounded sum decides the same.
+ *
+ * `paid` is what settle_v2 pays, clipped at max_contribution — expectedContribution's
+ * `paid`, never what is owed: the program checks the clipped payment.
+ */
+export function reserveDecision(args: {
+  readonly walletLamports: bigint;
+  readonly feeLamports: bigint;
+  readonly rentExemptZero: bigint;
+  readonly walletReserve: bigint;
+  readonly paid: bigint;
+}): { readonly outcome: "BELOW_RESERVE"; readonly detail: string } | null {
+  const { walletLamports, feeLamports, rentExemptZero, walletReserve, paid } = args;
+  const rest = "Nothing is attested; the frontier stays put and the span settles once the wallet is funded";
+  if (paid > 0n) {
+    const needed = feeLamports + paid + rentExemptZero + walletReserve;
+    if (walletLamports >= needed) return null;
+    return {
+      outcome: "BELOW_RESERVE",
+      detail:
+        `the wallet holds ${walletLamports} lamports and this settle needs ${needed}: the ${feeLamports}-lamport fee, ` +
+        `the ${paid}-lamport payment, the ${rentExemptZero}-lamport rent floor and wallet_reserve ${walletReserve}. ` +
+        `${needed - walletLamports} lamports short, settle_v2 would refuse with WalletBelowReserve. ${rest}`,
+    };
+  }
+  const needed = feeLamports + rentExemptZero;
+  if (walletLamports >= needed) return null;
+  return {
+    outcome: "BELOW_RESERVE",
+    detail:
+      `the wallet holds ${walletLamports} lamports and even a zero settle needs ${needed}: the ${feeLamports}-lamport fee ` +
+      `and the ${rentExemptZero}-lamport rent floor a fee payer keeps (wallet_reserve does not apply to a zero payment). ` +
+      `${needed - walletLamports} lamports short, the runtime would refuse the fee. ${rest}`,
+  };
 }

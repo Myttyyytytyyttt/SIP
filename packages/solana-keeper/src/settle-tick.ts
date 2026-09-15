@@ -7,23 +7,28 @@
 // confirmed probe decides whether there is anything to walk, the walk reads
 // finalized history and must reach the frontier, a flat span settles a zero base
 // once it is worth a transaction, the attestation binds the vault's own mode,
-// rate and policy nonce and a deadline, and a dry run measures and reports
-// without any key in reach.
+// rate and policy nonce and a deadline, the wallet's reserve is checked against
+// the node's own fee before anything is signed, a send is confirmed by polling
+// its status, a refusal is classified by the program's own error name, a send
+// that threw or never confirmed is read back from its link before it is
+// reported, and a dry run measures and reports without any key in reach.
 // What is unchanged: the frontier-from-epoch rule, the completeness checks
-// behind the new frontier and finality stops, confirm plus the receipt's own
-// meta.err, and the vault delta read from pre/post balances.
+// behind the new frontier and finality stops, the receipt's own meta.err, and
+// the vault delta read from pre/post balances.
 //
-// The decisions live in settle-decision.ts, where a test can reach them.
+// The decisions live in settle-decision.ts and settle-refusal.ts, where a test
+// can reach them.
 
 import * as anchor from "@coral-xyz/anchor";
-import { Connection, Keypair, Transaction } from "@solana/web3.js";
+import { Connection, Ed25519Program, Keypair, Transaction, type TransactionError } from "@solana/web3.js";
 import { summarizeUpstreamError } from "@sip/solana-log";
-import type { VaultState } from "./accounts.js";
+import { readSettlementNonce, type VaultState } from "./accounts.js";
 import type { ManagedLink } from "./discovery.js";
+import { idl } from "./idl.js";
 import { connectionReader, measureSince } from "./measure-window.js";
 import { method } from "./methods.js";
 import type { SolanaWalletSubmitter } from "./privy-signer.js";
-import { MODE_VOLUME, attestationInstruction } from "./program-scripts.js";
+import { MODE_VOLUME, attestationInstruction, attestationMessage } from "./program-scripts.js";
 import {
   attestationInputs,
   decideFromMeasurement,
@@ -33,9 +38,11 @@ import {
   modeDecision,
   noSignerDetail,
   pauseDecision,
+  reserveDecision,
   type SettleOutcome,
   type VolumeBase,
 } from "./settle-decision.js";
+import { classifySettleRefusal, type SettleRefusal } from "./settle-refusal.js";
 
 export type { SettleOutcome } from "./settle-decision.js";
 
@@ -47,6 +54,13 @@ export interface SettleResult {
   /** The mode `baseLamports` was measured in. */
   readonly mode?: number;
   readonly settledLamports?: bigint;
+  /**
+   * What settle_v2 computes for this base: floor(base × bps / 10 000), clipped at
+   * max_contribution. A landed settle whose vault moved anything else is a warning.
+   */
+  readonly expectedLamports?: bigint;
+  /** The node's price for this settle's message: the fee the reserve check counted. */
+  readonly feeLamports?: bigint;
   readonly signature?: string;
   /** The nonce this settlement consumed, and the slot it closed. Carried out
    * so the keeper can record history without re-deriving either. */
@@ -85,6 +99,85 @@ export interface SettleDeps {
    * default; the local proof injects a notional here.
    */
   readonly volumeBase?: VolumeBase;
+}
+
+/** How often a sent settle's status is asked for. */
+export const CONFIRM_POLL_MS = 500;
+
+/**
+ * How long a sent settle is waited for: 60 s, about the life of the blockhash it
+ * carries (150 blocks) and of its attestation's 150-slot deadline. A settle not
+ * confirmed by then is read back from its link, and otherwise retried.
+ */
+export const CONFIRM_TIMEOUT_MS = 60_000;
+
+/**
+ * rent_exempt(0) per connection, read once: the rent floor settle_v2 adds to
+ * wallet_reserve. Rent does not change while a process runs. A read that failed
+ * is forgotten, so the next turn asks again.
+ */
+const rentExemptZeroByConnection = new WeakMap<Connection, Promise<bigint>>();
+
+function rentExemptZero(connection: Connection): Promise<bigint> {
+  const cached = rentExemptZeroByConnection.get(connection);
+  if (cached !== undefined) return cached;
+  const read = connection.getMinimumBalanceForRentExemption(0).then((lamports) => BigInt(lamports));
+  rentExemptZeroByConnection.set(connection, read);
+  read.catch(() => rentExemptZeroByConnection.delete(connection));
+  return read;
+}
+
+/**
+ * Whether a sent settle landed: its confirmed error, null for success — or null
+ * for the whole answer when no confirmed status arrived within CONFIRM_TIMEOUT_MS.
+ *
+ * HTTP POLLING, NOT confirmTransaction. confirmTransaction listens on a websocket
+ * web3.js derives from the Connection's one endpoint, outside the pool's failover
+ * (rpc-pool.ts), and a confirmation that timed out became FAILED however the
+ * settle had ended. Every getSignatureStatuses here goes through the pool, and a
+ * request that throws is asked again until the deadline.
+ *
+ * CONFIRMED, FOR SUCCESS AND FOR FAILURE ALIKE, as confirmTransaction's
+ * "confirmed" was: an error seen at processed can belong to a fork that is dropped.
+ */
+async function landing(connection: Connection, signature: string): Promise<{ readonly err: TransactionError | null } | null> {
+  const deadline = Date.now() + CONFIRM_TIMEOUT_MS;
+  for (;;) {
+    try {
+      const { value } = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+      const status = value[0];
+      // A node that omits confirmationStatus reports a rooted transaction as confirmations: null.
+      const level = status?.confirmationStatus ?? (status?.confirmations === null ? "finalized" : "processed");
+      if (status && (level === "confirmed" || level === "finalized")) return { err: status.err };
+    } catch {
+      // Asked again below: the pool has set the failing endpoint aside.
+    }
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, CONFIRM_POLL_MS));
+  }
+}
+
+/** A refusal's detail: where it happened, what said no, and what happens next. */
+function refusalDetail(where: string, refusal: SettleRefusal, raw: string): string {
+  switch (refusal.outcome) {
+    case "PAUSED":
+      return (
+        `${where}: settle_v2 refused it with ${refusal.programError} — a pause switch went on after this sweep read the vault; ` +
+        "nothing moved and the frontier stays put"
+      );
+    case "BELOW_RESERVE":
+      return (
+        `${where}: settle_v2 refused it with ${refusal.programError} — the wallet dropped below its reserve after its balance was read; ` +
+        "nothing moved and the frontier stays put until it is funded"
+      );
+    case "RETRY":
+      return (
+        `${where}: ${refusal.programError === null ? raw : `settle_v2 refused it with ${refusal.programError}`} — ` +
+        "the next sweep reads the vault and the link again and measures anew"
+      );
+    case "FAILED":
+      return `${where}: ${refusal.programError === null ? raw : `settle_v2 refused it with ${refusal.programError} (${raw})`}`;
+  }
 }
 
 export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
@@ -161,9 +254,60 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     baseLamports: decision.baseLamports,
     currentSlot,
   });
+  const { owed, paid } = expectedContribution(inputs.baseLamports, inputs.bps, vault.maxContribution);
+  const clipped = paid < owed ? `, clipped at max_contribution ${vault.maxContribution}` : "";
+
+  // BUILT ONCE, PRICED, THEN SENT. The fee below is the node's price for a
+  // message carrying exactly this instruction and this blockhash, and a live
+  // turn sends those same two.
+  const settleIx = await method(program, "settleV2")(
+    inputs.mode,
+    new anchor.BN(inputs.sessionStartSlot.toString()),
+    new anchor.BN(inputs.sessionEndSlot.toString()),
+    new anchor.BN(inputs.baseLamports.toString()),
+    new anchor.BN(inputs.validUntilSlot.toString()),
+  )
+    .accountsPartial({ wallet: link.wallet, vault: link.vault, tradingLink: link.linkAddress })
+    .instruction();
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+
+  // THE RESERVE, BEFORE ANYTHING IS SIGNED, IN DRY RUN TOO. settle_v2 refuses a
+  // payment that would leave the wallet below rent_exempt(0) + wallet_reserve,
+  // and the wallet pays the fee before settle_v2 runs. A turn that signed and sent
+  // anyway burned that fee and paged a critical "settlement failed" every sweep
+  // for a wallet that only needed funding. The fee is not a constant: it is the
+  // node's price for this message, the Ed25519 instruction's signature included,
+  // with the attester's key and a blank signature of the same size standing in
+  // for the one a live turn signs.
+  const priced = new Transaction({ blockhash, lastValidBlockHeight, feePayer: link.wallet }).add(
+    Ed25519Program.createInstructionWithPublicKey({
+      publicKey: deps.attester?.publicKey.toBytes() ?? new Uint8Array(32),
+      message: attestationMessage(inputs),
+      signature: new Uint8Array(64),
+    }),
+    settleIx,
+  );
+  const { value: fee } = await connection.getFeeForMessage(priced.compileMessage(), "confirmed");
+  if (fee === null) {
+    return {
+      outcome: "RETRY",
+      detail: "the node could not price this settle's fee, so the wallet's reserve could not be checked; nothing was signed",
+    };
+  }
+  const feeLamports = BigInt(fee);
+  const walletLamports = BigInt(await connection.getBalance(link.wallet, "confirmed"));
+  const belowReserve = reserveDecision({
+    walletLamports,
+    feeLamports,
+    rentExemptZero: await rentExemptZero(connection),
+    walletReserve: vault.walletReserve,
+    paid,
+  });
+  /** What every result from here on carries. */
+  const carried = { baseLamports: inputs.baseLamports, mode: inputs.mode, feeLamports, expectedLamports: paid };
+  if (belowReserve !== null) return { ...belowReserve, ...carried };
 
   if (!deps.live) {
-    const { owed, paid } = expectedContribution(inputs.baseLamports, inputs.bps, vault.maxContribution);
     const modeName = inputs.mode === MODE_VOLUME ? "VOLUME" : "PROFIT";
     return {
       outcome: "SETTLED",
@@ -172,12 +316,10 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
         inputs.baseLamports === 0n
           ? `DRY RUN — would settle 0 lamports in ${modeName} at ${inputs.bps} bps and advance the frontier ` +
             `from ${inputs.sessionStartSlot} to ${inputs.sessionEndSlot} over ${measured.txCount} txs`
-          : `DRY RUN — would settle ${paid} lamports (${owed} owed at ${inputs.bps} bps` +
-            (paid < owed ? `, clipped at max_contribution ${vault.maxContribution}` : "") +
-            `) from ${inputs.baseLamports} lamports of measured ${inputs.mode === MODE_VOLUME ? "notional" : "profit"} ` +
+          : `DRY RUN — would settle ${paid} lamports (${owed} owed at ${inputs.bps} bps${clipped}) ` +
+            `from ${inputs.baseLamports} lamports of measured ${inputs.mode === MODE_VOLUME ? "notional" : "profit"} ` +
             `over slots ${inputs.sessionStartSlot}..${inputs.sessionEndSlot}`,
-      baseLamports: inputs.baseLamports,
-      mode: inputs.mode,
+      ...carried,
     };
   }
 
@@ -189,29 +331,51 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     return { outcome: "FAILED", detail: "a live settle turn arrived without the settle key or a wallet signer; nothing was sent" };
   }
 
-  // Declared out here: the receipt block below runs OUTSIDE the broadcast try
-  // and needs the signature the broadcast produced.
+  const expectation = `${paid} expected at ${inputs.bps} bps${clipped}`;
+
+  // A REFUSAL THE CHAIN STATED is named by the program and classified. Nothing is
+  // read back: a settle that reverted moved no nonce.
+  const refused = (err: TransactionError, where: string, signature: string): SettleResult => {
+    const refusal = classifySettleRefusal(err, idl);
+    return { outcome: refusal.outcome, detail: refusalDetail(where, refusal, JSON.stringify(err)), ...carried, signature };
+  };
+
+  // A SETTLE THAT LANDED IS NEVER FAILED. A send can throw after the transaction
+  // reached a leader — a 504 from Privy, a connection dropped mid-answer — and a
+  // confirmation can time out on a settle that landed. settle_v2 bumps the link's
+  // nonce exactly once for each settle that lands, so before a thrown or
+  // unconfirmed send is reported RETRY or FAILED, the link is read again: one
+  // nonce past this attestation's is this settle, landed. A read that fails
+  // proves nothing and leaves the classification standing.
+  const unconfirmed = async (error: unknown, where: string, raw: string, signature?: string): Promise<SettleResult> => {
+    const refusal = classifySettleRefusal(error, idl);
+    const withSignature = signature === undefined ? {} : { signature };
+    if (refusal.outcome === "RETRY" || refusal.outcome === "FAILED") {
+      const nonce = await readSettlementNonce(program, link.linkAddress).catch(() => null);
+      if (nonce === link.settlementNonce + 1n) {
+        return {
+          outcome: "SETTLED",
+          detail: `landed; receipt not read — ${where}, and this link's nonce has moved to ${nonce} (${expectation})`,
+          ...carried,
+          ...withSignature,
+          nonce: link.settlementNonce,
+          endSlot: inputs.sessionEndSlot,
+        };
+      }
+    }
+    return { outcome: refusal.outcome, detail: refusalDetail(where, refusal, raw), ...carried, ...withSignature };
+  };
+
+  // THE ORDER IS LOAD-BEARING: settle_v2 proves, through the instructions
+  // sysvar, that the instruction IMMEDIATELY BEFORE it is the attester's
+  // Ed25519 verification of exactly this message. The transaction is signed
+  // BY the wallet, which pays, and carries the blockhash its fee was priced at.
+  const tx = new Transaction({ blockhash, lastValidBlockHeight, feePayer: link.wallet })
+    .add(attestationInstruction(attester.secretKey, inputs))
+    .add(settleIx);
+
   let signature: string;
   try {
-    const settleIx = await method(program, "settleV2")(
-      inputs.mode,
-      new anchor.BN(inputs.sessionStartSlot.toString()),
-      new anchor.BN(inputs.sessionEndSlot.toString()),
-      new anchor.BN(inputs.baseLamports.toString()),
-      new anchor.BN(inputs.validUntilSlot.toString()),
-    )
-      .accountsPartial({ wallet: link.wallet, vault: link.vault, tradingLink: link.linkAddress })
-      .instruction();
-
-    // THE ORDER IS LOAD-BEARING: settle_v2 proves, through the instructions
-    // sysvar, that the instruction IMMEDIATELY BEFORE it is the attester's
-    // Ed25519 verification of exactly this message. The transaction is signed
-    // BY the wallet, which pays.
-    const tx = new Transaction().add(attestationInstruction(attester.secretKey, inputs)).add(settleIx);
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
-    tx.recentBlockhash = blockhash;
-    tx.feePayer = link.wallet;
-
     if (walletSigner instanceof Keypair) {
       // Localnet: a local keypair signs, we broadcast.
       tx.partialSign(walletSigner);
@@ -221,34 +385,34 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
       // policy's program allowlist is in force on the way out.
       signature = await walletSigner.submit(tx);
     }
-    const confirmation = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
-    // confirmTransaction RESOLVES on an on-chain revert (web3.js only rejects
-    // on the fallback path), so a settle that landed-and-reverted would sail
-    // past here. A confirmed error is a FAILED settle, not a settlement of
-    // zero — the frontier did not move and the next sweep retries.
-    if (confirmation.value.err !== null) {
-      return {
-        outcome: "FAILED",
-        detail: `settle confirmed WITH an on-chain error: ${JSON.stringify(confirmation.value.err)}`,
-        signature,
-      };
-    }
   } catch (error) {
-    return { outcome: "FAILED", detail: summarizeUpstreamError(error, { take: 3, maxChars: 500 }) };
+    return unconfirmed(error, "sending the settle threw", summarizeUpstreamError(error, { take: 3, maxChars: 500 }));
   }
+
+  const landed = await landing(connection, signature);
+  if (landed === null) {
+    const waited = `${CONFIRM_TIMEOUT_MS / 1_000} s`;
+    return unconfirmed(
+      new Error(`no confirmed status within ${waited}`),
+      `settle ${signature.slice(0, 12)}… was not confirmed within ${waited}`,
+      "no confirmed status arrived",
+      signature,
+    );
+  }
+  if (landed.err !== null) return refused(landed.err, "the settle landed and reverted", signature);
 
   // PAST THIS LINE THE SETTLE HAS LANDED SUCCESSFULLY. The receipt read is only
   // to report HOW MUCH; a failure to read it must never turn a real settlement
   // into a FAILED — so it lives in its own try, outside the broadcast's.
   let settled: bigint | null = null;
-  let receiptErr: unknown = null;
+  let receiptErr: TransactionError | null = null;
   try {
     const receipt = await connection.getTransaction(signature, {
       maxSupportedTransactionVersion: 0,
       commitment: "confirmed",
     });
     // A second, independent read of success: the receipt's own meta.err. If it
-    // is set, the tx did NOT settle — report FAILED even though confirm passed.
+    // is set, the tx did NOT settle, even though its status said it did.
     if (receipt?.meta?.err != null) receiptErr = receipt.meta.err;
     else if (receipt?.meta) {
       // pre/postBalances are consensus data about exactly this tx — no racy
@@ -271,17 +435,17 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     settled = null;
   }
 
-  if (receiptErr !== null) {
-    return { outcome: "FAILED", detail: `settle reverted on chain: ${JSON.stringify(receiptErr)}`, signature };
-  }
+  if (receiptErr !== null) return refused(receiptErr, "the settle's receipt shows it reverted", signature);
   return {
     outcome: "SETTLED",
     detail:
       settled === null
-        ? `confirmed ${signature.slice(0, 12)}… — the vault delta is on chain, its receipt not read in time`
-        : `settled ${settled} lamports from ${inputs.baseLamports} measured over ${measured.txCount} txs`,
-    baseLamports: inputs.baseLamports,
-    mode: inputs.mode,
+        ? `confirmed ${signature.slice(0, 12)}… (${expectation}) — the vault delta is on chain, its receipt not read in time`
+        : `settled ${settled} lamports from ${inputs.baseLamports} measured over ${measured.txCount} txs (${expectation})` +
+          // settle_v2's arithmetic is expectedContribution's, so any other
+          // amount means one of the two is not what the other believes.
+          (settled === paid ? "" : ` — WARNING: the vault moved ${settled} lamports, not the ${paid} settle_v2 computes for this base`),
+    ...carried,
     ...(settled === null ? {} : { settledLamports: settled }),
     signature,
     nonce: link.settlementNonce,
