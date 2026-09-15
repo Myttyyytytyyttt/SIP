@@ -22,11 +22,20 @@ import { SIP_ACCOUNT_SPACE } from "../src/client/decoders";
 import { SIP_PROGRAM_ID, toHex } from "../src/client/idl";
 import { linkConsentMessage } from "../src/client/link-consent";
 import { parseLegacyMessage, splitWire } from "../src/client/message";
-import { BUILD_READS_WEIGHT, BUILD_REQUEST_WEIGHT, MAX_BUILD_REQUEST_BYTES, createSolanaBuildHandler, createSolanaVaultHandler, type SolanaBuildHandlerOptions } from "../src/server/build-handler";
+import {
+  BUILD_READS_WEIGHT,
+  BUILD_REQUEST_WEIGHT,
+  MAX_BUILD_REQUEST_BYTES,
+  createSolanaBuildHandler,
+  createSolanaVaultHandler,
+  sharedBuildReadsBudget,
+  type SolanaBuildHandlerOptions,
+} from "../src/server/build-handler";
 import { DEFAULT_RELAY_LIMITS, loadSolanaServerSettings } from "../src/server/config";
 import type { SolanaGate } from "../src/server/handlers";
 import { deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
-import { createWeightedLimiter } from "../src/server/rate-limit";
+import { createWeightedLimiter, type WeightedLimiter } from "../src/server/rate-limit";
+import { MAX_RELAY_REQUEST_WEIGHT } from "../src/server/relay-policy";
 import { verifySignedTransaction } from "../src/server/verify-tx";
 import {
   SOL_SQRT_PRICE,
@@ -165,6 +174,86 @@ describe("the order of refusals, before any chain read", () => {
     const refused = await build({ action: "createVault", owner: key(), mode: 0 });
     expect([refused.status, refused.json.error?.code]).toEqual([429, "rate_limited"]);
     expect(upstream.calls).toHaveLength(calls);
+  });
+
+  it(`the heaviest action, state at ${BUILD_READS_WEIGHT.state} calls, costs its client every call: one address spends at most ${DEFAULT_RELAY_LIMITS.perClientPerMin} read tokens a minute, a reads budget 25 or more addresses deep`, async () => {
+    expect(Math.max(...Object.values(BUILD_READS_WEIGHT))).toBe(BUILD_READS_WEIGHT.state);
+    const inner = createWeightedLimiter({ capacity: DEFAULT_RELAY_LIMITS.readsGlobalPerMin });
+    let spent = 0;
+    const readsBudget: WeightedLimiter = {
+      take: (budgetKey, cost, at) => {
+        const wait = inner.take(budgetKey, cost, at);
+        if (wait === 0) spent += cost;
+        return wait;
+      },
+      get size() {
+        return inner.size;
+      },
+    };
+    const { state, upstream } = setup(undefined, { readsBudget });
+    const client = { "x-envoy-external-address": "203.0.113.50" };
+    let served = 0;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const answer = await state({ action: "state", owner: key(), wallets: [] }, client);
+      if (answer.status !== 200) {
+        expect([answer.status, answer.json.error?.code]).toEqual([429, "rate_limited"]);
+        break;
+      }
+      served += 1;
+    }
+    expect(served).toBe(DEFAULT_RELAY_LIMITS.perClientPerMin / BUILD_READS_WEIGHT.state);
+    expect(spent).toBe(served * BUILD_READS_WEIGHT.state);
+    expect(spent).toBeLessThanOrEqual(DEFAULT_RELAY_LIMITS.perClientPerMin);
+    expect(DEFAULT_RELAY_LIMITS.readsGlobalPerMin / spent).toBeGreaterThanOrEqual(25);
+    expect(upstream.calls.length).toBeGreaterThan(0);
+  });
+
+  it("eight addresses in two /24s, each spending all it may on state, leave the reads budget for everyone else", async () => {
+    const { state, build } = setup(undefined, { readsBudget: createWeightedLimiter({ capacity: DEFAULT_RELAY_LIMITS.readsGlobalPerMin }) });
+    for (const network of [18, 19]) {
+      for (let host = 1; host <= 4; host++) {
+        const client = { "x-envoy-external-address": `198.18.${network}.${host}` };
+        for (let attempt = 0; attempt < 100; attempt++) {
+          if ((await state({ action: "state", owner: key(), wallets: [] }, client)).status !== 200) break;
+        }
+      }
+    }
+    const visitor = { "x-envoy-external-address": "192.0.2.77" };
+    expect((await state({ action: "state", owner: key(), wallets: [] }, visitor)).status).toBe(200);
+    expect((await build({ action: "withdraw", owner: key(), lamports: "1" }, { "x-envoy-external-address": "192.0.2.78" })).json.error?.code).toBe("vault_missing");
+  });
+
+  it("a build past the client's flat charge is refused 429 before any read, and spends nothing of the reads budget", async () => {
+    const reads = createWeightedLimiter({ capacity: DEFAULT_RELAY_LIMITS.readsGlobalPerMin });
+    const { build, upstream } = setup(undefined, { limiter: createWeightedLimiter({ capacity: BUILD_REQUEST_WEIGHT + 1 }), readsBudget: reads });
+    const refused = await build({ action: "investPolicy", owner: key() }, { "x-envoy-external-address": "203.0.113.51" });
+    expect([refused.status, refused.json.error?.code]).toEqual([429, "rate_limited"]);
+    expect(upstream.calls).toHaveLength(0);
+    expect(reads.take("global", DEFAULT_RELAY_LIMITS.readsGlobalPerMin, 0)).toBe(0);
+  });
+
+  it("the build and vault routes share one reads budget in a process: what state reads spend is gone for builds", async () => {
+    // A capacity no other case uses, so this case has the shared budget to itself.
+    const capacity = 3 * BUILD_READS_WEIGHT.state;
+    expect(capacity).toBeGreaterThanOrEqual(MAX_RELAY_REQUEST_WEIGHT);
+    const shared = loadSolanaServerSettings({
+      SIP_SOLANA_RPC_URLS: UPSTREAM_1,
+      SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID,
+      SIP_TRUSTED_CLIENT_IP_HEADER: "x-envoy-external-address",
+      SIP_SOLANA_RELAY_READS_GLOBAL_PER_MIN: String(capacity),
+    });
+    if (!shared.ok) throw new Error("test settings must load");
+    const upstream = fakeFetch(answerRpc({ accounts: new Map() }));
+    const options: SolanaBuildHandlerOptions = { gate: () => ({ kind: "ok", settings: shared.settings }), fetch: upstream.fetch, now: () => 0, onRefusal: () => undefined };
+    const vaultRoute = createSolanaVaultHandler(options);
+    const buildRoute = createSolanaBuildHandler(options);
+    for (let i = 0; i < 3; i++) expect((await vaultRoute.POST(post("vault", { action: "state", owner: key(), wallets: [] }))).status).toBe(200);
+    const calls = upstream.calls.length;
+    const refused = await read(await buildRoute.POST(post("build", { action: "createVault", owner: key(), mode: 0 })));
+    expect([refused.status, refused.json.error?.code]).toEqual([429, "rate_limited"]);
+    expect(refused.json.error?.message).toMatch(/^SIP is reading Solana for many people right now\./);
+    expect(upstream.calls).toHaveLength(calls);
+    expect(sharedBuildReadsBudget(capacity)).toBe(sharedBuildReadsBudget(capacity));
   });
 });
 

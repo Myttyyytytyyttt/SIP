@@ -68,9 +68,15 @@ export type Env = Readonly<Record<string, string | undefined>>;
  * every visitor. At 600 ÷ 120, five addresses (or five /64s of one home /56)
  * stopped every wallet's co-sign. The defaults keep the ratio at 25 or more (30
  * for the relay, 25 for sends; a test pins it), and the network buckets make a
- * /48 or a /24 count as at most CLIENT_AGGREGATE_FACTOR clients. Size the two
- * relay globals together against the Helius plan: 3,600 weighted tokens a minute
- * is at most 60 upstream requests a second.
+ * /48 or a /24 count as at most CLIENT_AGGREGATE_FACTOR clients. The build and
+ * vault routes charge a client every upstream call its request makes, so they
+ * keep readsGlobalPerMin ÷ perClientPerMin too (build-handler.ts).
+ *
+ * UPSTREAM SIZING. Three budgets reach the endpoints, each readsGlobalPerMin or
+ * signingGlobalPerMin wide: the relay's signing budget, the relay's reads
+ * budget, and the ONE reads budget /api/solana-build and /api/solana-vault share.
+ * Size them together against the Helius plan: with the defaults, 5,400 weighted
+ * tokens a minute is at most 90 upstream requests a second.
  */
 export const DEFAULT_RELAY_LIMITS: RelayLimits = { perClientPerMin: 60, signingGlobalPerMin: 1_800, readsGlobalPerMin: 1_800 };
 /** Only a transaction that verified spends the global send budget (handlers.ts), so junk cannot empty it. */

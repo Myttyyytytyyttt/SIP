@@ -20,10 +20,17 @@
 // ORDER: settings gate (503) → cross-site (403) → application/json (415) → a
 // weighted take from the client's bucket, then its network's (429, before the
 // body is read) → body ≤ 2048 bytes (413) → exact fields per action (400) →
-// refusals that need no chain (400, 422) → the process-wide reads budget (429)
-// → chain reads and their refusals (409, 502) → getLatestBlockhash (confirmed)
-// → the builder → 200. A malformed request costs its sender's own buckets and
-// no RPC quota.
+// refusals that need no chain (400, 422) → the rest of the action's read weight
+// from the client's buckets, then all of it from the reads budget both routes
+// share (429) → chain reads and their refusals (409, 502) → getLatestBlockhash
+// (confirmed) → the builder → 200. A malformed request costs its sender's own
+// buckets and no RPC quota.
+//
+// THE RATIO HOLDS HERE TOO (config.ts). A client's buckets are charged at least
+// the upstream calls its request makes, so one address spends at most
+// relay.perClientPerMin read tokens a minute: 60 of 1,800, thirty addresses
+// deep. /api/solana-build and /api/solana-vault draw on ONE reads budget per
+// process (sharedBuildReadsBudget), counted in config.ts's upstream sizing.
 //
 // THE WIRE. Bigints travel as decimal strings, both ways. Refusals are
 // {error:{code, message, ...}}, the shape /api/solana-tx answers with. No upstream
@@ -140,7 +147,7 @@ export interface SolanaBuildHandlerOptions {
   readonly limiter?: WeightedLimiter;
   /** Per client network (IPv4 /24, IPv6 /48), weighted. Default: capacity CLIENT_AGGREGATE_FACTOR × settings.relay.perClientPerMin. */
   readonly aggregateLimiter?: WeightedLimiter;
-  /** Process-wide, keyed "global", in upstream JSON-RPC calls. Default: capacity settings.relay.readsGlobalPerMin. */
+  /** Process-wide, keyed "global", in upstream JSON-RPC calls. Default: the one budget both routes share, sharedBuildReadsBudget(settings.relay.readsGlobalPerMin). */
   readonly readsBudget?: WeightedLimiter;
   /** Default: createRpcPool(settings.rpcEndpoints, {fetch, redactor: settings.redactor}). */
   readonly pool?: RpcPool;
@@ -158,8 +165,32 @@ export type SolanaVaultHandlerOptions = Omit<SolanaBuildHandlerOptions, "volumeO
 export const MAX_BUILD_REQUEST_BYTES = 2048;
 /** What one build or state request takes from its client's buckets, before its body is read. */
 export const BUILD_REQUEST_WEIGHT = 3;
-/** Upstream JSON-RPC calls each action may make, taken from the process-wide reads budget before the first one. */
+/**
+ * Upstream JSON-RPC calls each action may make. Before the first one, the
+ * client's buckets are charged what this weight exceeds BUILD_REQUEST_WEIGHT by,
+ * so a request costs its client at least the calls it makes; then the shared
+ * reads budget is charged all of it.
+ */
 export const BUILD_READS_WEIGHT = { createVault: 4, prepareLink: 1, link: 3, investPolicy: 7, withdraw: 3, withdrawToken: 7, state: 12 } as const;
+
+const SHARED_READS_BUDGETS = Symbol.for("@sip/solana-core/build-handler/reads-budgets");
+
+/**
+ * The reads budget /api/solana-build and /api/solana-vault share in this process,
+ * one per capacity. It is held on globalThis, so the two route bundles reach the
+ * same buckets however the server bundled them; each process (each Vercel
+ * instance) still has its own.
+ */
+export function sharedBuildReadsBudget(capacity: number): WeightedLimiter {
+  const holder = globalThis as unknown as Record<symbol, Map<number, WeightedLimiter> | undefined>;
+  const budgets = (holder[SHARED_READS_BUDGETS] ??= new Map<number, WeightedLimiter>());
+  let budget = budgets.get(capacity);
+  if (budget === undefined) {
+    budget = createWeightedLimiter({ capacity });
+    budgets.set(capacity, budget);
+  }
+  return budget;
+}
 
 /** Above this max_per_call, convert is no longer held to its tightest program bound, 1 SOL per call (convert.rs compares lamports with max(max_per_call, 1e9)). */
 export const CONVERT_TIGHTEST_MAX_PER_CALL = 1_000_000_000n;
@@ -229,7 +260,7 @@ function createRoute(route: BuildRefusalEvent["route"], options: SolanaBuildHand
   const state = memoBySettings((settings) => ({
     exact: options.limiter ?? createWeightedLimiter({ capacity: settings.relay.perClientPerMin }),
     aggregate: options.aggregateLimiter ?? createWeightedLimiter({ capacity: CLIENT_AGGREGATE_FACTOR * settings.relay.perClientPerMin }),
-    reads: options.readsBudget ?? createWeightedLimiter({ capacity: settings.relay.readsGlobalPerMin }),
+    reads: options.readsBudget ?? sharedBuildReadsBudget(settings.relay.readsGlobalPerMin),
     pool: options.pool ?? createRpcPool(settings.rpcEndpoints, { fetch: options.fetch, redactor: settings.redactor }),
   }));
 
@@ -276,7 +307,15 @@ function createRoute(route: BuildRefusalEvent["route"], options: SolanaBuildHand
         volumeOffered,
         refuse: (status, code, message, more) => refuse(status, code, message, more),
         spendReads: (weight) => {
-          const wait = reads.take(GLOBAL, weight, now());
+          const readsAt = now();
+          // The client first, for every call past what it already paid: its own bucket, then its network's.
+          const rest = weight - BUILD_REQUEST_WEIGHT;
+          if (rest > 0) {
+            const own = exact.take(identity.exact, rest, readsAt);
+            const client = own > 0 ? own : aggregate.take(identity.aggregate, rest, readsAt);
+            if (client > 0) return limited(client, "Too many requests from this client.");
+          }
+          const wait = reads.take(GLOBAL, weight, readsAt);
           return wait > 0 ? limited(wait, "SIP is reading Solana for many people right now.") : null;
         },
       };
