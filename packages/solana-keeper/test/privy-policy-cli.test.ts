@@ -468,10 +468,10 @@ describe("refusals", () => {
     expect(existsSync(join(keys, "never.key"))).toBe(false);
   });
 
-  it("refuses Nuvem's variables, a malformed key and the old program, without echoing a value", async () => {
+  it("refuses a legacy variable name, a malformed key and the retired program, without echoing a value", async () => {
     const nuvem = await run(["check", "--policy", POLICY_ID], { env: { ...privyEnv, NUVEM_SOLANA_SIGNER_ID: "nuvem-signer-value-0001" } });
     expect(nuvem.code).toBe(2);
-    expect(nuvem.text).toContain("NUVEM_SOLANA_SIGNER_ID is Nuvem's configuration");
+    expect(nuvem.text).toContain("NUVEM_SOLANA_SIGNER_ID is a legacy variable name");
     expect(nuvem.text).not.toContain("nuvem-signer-value-0001");
 
     const malformed = await run(["verify", "--wallet", WALLET_ID, "--policy", POLICY_ID], {
@@ -483,7 +483,7 @@ describe("refusals", () => {
 
     const old = await run(["check", "--policy", POLICY_ID], { env: { ...privyEnv, SIP_SOLANA_PROGRAM_ID: OLD_NUVEM_PROGRAM_ID } });
     expect(old.code).toBe(2);
-    expect(old.text).toContain("names Nuvem's old program");
+    expect(old.text).toContain("names a retired program");
   });
 
   it("refuses the Privy SDK's own environment overrides by name, before any client, chain or key exists", async () => {

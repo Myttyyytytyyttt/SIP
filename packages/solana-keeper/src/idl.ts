@@ -34,7 +34,7 @@ export const SIP_PROGRAM_ID: string = idl.address;
 if (SIP_PROGRAM_ID === OLD_NUVEM_PROGRAM_ID) {
   // A file-level guard, not a config check: if the exported IDL itself ever
   // names Nuvem's program, no configuration can make this keeper safe to run.
-  throw new Error("the exported sip_vault IDL names Nuvem's old program; refusing to load it");
+  throw new Error("the exported sip_vault IDL names a retired program; refusing to load it");
 }
 
 export function hasInstruction(name: string): boolean {

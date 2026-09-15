@@ -2,7 +2,7 @@
   "name": "@sip/solana-keeper",
   "private": true,
   "version": "0.1.0",
-  "description": "SIP's Solana keeper: discovers every linked trading wallet from the chain, measures its unsettled span, attests and settles it through settle_v2, and invests what the vault's owner-signed policy allows. Dry run by default, and a dry run holds no key.",
+  "description": "SaverFi's Solana keeper: discovers every linked trading wallet from the chain, measures its unsettled span, attests and settles it through settle_v2, and invests what the vault's owner-signed policy allows. Dry run by default, and a dry run holds no key.",
   "type": "module",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",

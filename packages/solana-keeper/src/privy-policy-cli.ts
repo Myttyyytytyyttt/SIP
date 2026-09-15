@@ -108,8 +108,8 @@ const FLAGS: Readonly<Record<Command, readonly string[]>> = {
 
 /** What each variable is, for a refusal that has to say what to set. */
 const PURPOSE: Readonly<Record<string, string>> = {
-  SIP_SOLANA_PRIVY_APP_ID: "the SIP Privy app's id (not Nuvem's app)",
-  SIP_SOLANA_PRIVY_APP_SECRET: "the SIP Privy app's secret, loaded for this one command and never written to a file",
+  SIP_SOLANA_PRIVY_APP_ID: "the SaverFi Privy app's id",
+  SIP_SOLANA_PRIVY_APP_SECRET: "the SaverFi Privy app's secret, loaded for this one command and never written to a file",
   SIP_SOLANA_PRIVY_AUTHORIZATION_KEY: "the keeper signer's private authorization key, from the password manager",
   SIP_SOLANA_PRIVY_SIGNER_ID: "the keeper signer's key quorum id",
   SIP_SOLANA_RPC_URLS: "one or more Solana mainnet-beta JSON-RPC endpoints, comma-separated, to read a recent blockhash",
@@ -267,7 +267,7 @@ function readCommandEnv(
   const programRaw = trimmed(env["SIP_SOLANA_PROGRAM_ID"]);
   if (programRaw === OLD_NUVEM_PROGRAM_ID) {
     problems.push(
-      "SIP_SOLANA_PROGRAM_ID names Nuvem's old program. Its upgrade authority key leaked, so SIP never talks to it; " +
+      "SIP_SOLANA_PROGRAM_ID names a retired program. Its upgrade authority key leaked, so SaverFi never talks to it; " +
         `the policy allows only the sip-vault program, ${SIP_PROGRAM_ID}.`,
     );
   } else if (programRaw !== undefined && programRaw !== SIP_PROGRAM_ID) {
@@ -671,7 +671,7 @@ async function verify(walletId: string, policyId: string, config: CommandEnv, de
     detail:
       "Not in the allowlist, which names only sip-vault and Ed25519SigVerify, so a transaction with any " +
       "instruction for it is denied; check proves the allowlist. It is not probed: Privy simulates before it evaluates " +
-      "the policy, so a refusal probe has to be a call that would succeed, and SIP builds no successful call into a " +
+      "the policy, so a refusal probe has to be a call that would succeed, and SaverFi builds no successful call into a " +
       "program whose upgrade key leaked. A failing one would stop at simulation and prove nothing.",
   });
 

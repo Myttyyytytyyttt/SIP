@@ -27,7 +27,7 @@ describe("the exported sip_vault IDL", () => {
     expect(IDL_PATH).toBe(EXPORTED);
   });
 
-  it("names the sip-vault program, and not Nuvem's", () => {
+  it("names the sip-vault program, and not the retired one", () => {
     expect(exported.address).toBe("6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J");
     expect(SIP_PROGRAM_ID).toBe(exported.address);
     expect(exported.address).not.toBe(OLD_NUVEM_PROGRAM_ID);

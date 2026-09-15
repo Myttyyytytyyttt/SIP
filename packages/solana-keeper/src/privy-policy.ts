@@ -141,7 +141,7 @@ const deepFreeze = <T>(value: T): T => {
 export function buildKeeperPolicy(programId: string): KeeperPolicy {
   if (programId === OLD_NUVEM_PROGRAM_ID) {
     throw new Error(
-      "refusing to build a policy for Nuvem's old program: its upgrade authority key leaked, so whoever holds that " +
+      "refusing to build a policy for a retired program: its upgrade authority key leaked, so whoever holds that " +
         `key can rewrite what it does. The keeper's policy allows only sip-vault, ${SIP_PROGRAM_ID}.`,
     );
   }
@@ -253,7 +253,7 @@ export function diffPolicy(expected: KeeperPolicy, actual: PolicyLike, options: 
     rule.conditions.some((condition) => valueSet(condition.value).includes(OLD_NUVEM_PROGRAM_ID)),
   );
   if (mentionsOldProgram) {
-    differences.push(`a rule names Nuvem's old program ${OLD_NUVEM_PROGRAM_ID}, whose upgrade key leaked; no SIP policy may mention it`);
+    differences.push(`a rule names a retired program ${OLD_NUVEM_PROGRAM_ID}, whose upgrade key leaked; no SaverFi policy may mention it`);
   }
 
   const missing: PolicyRuleLike[] = [...expected.rules];

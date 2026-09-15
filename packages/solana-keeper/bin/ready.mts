@@ -43,10 +43,10 @@ const env = (name: string): string | undefined => {
   return value === undefined || value === "" ? undefined : value;
 };
 
-section("0. configuración copiada de Nuvem y ajustes del SDK de Privy");
+section("0. nombres de variable retirados y ajustes del SDK de Privy");
 const copied = copiedConfigProblems(Object.keys(process.env));
 if (copied.length === 0) ok("ninguna variable NUVEM_* ni PRIVY_*/ANCHOR_* sin prefijo");
-for (const problem of copied) bad(problem.split(" is Nuvem's")[0] ?? "variable copiada", "el keeper se niega a arrancar con ella: renómbrala a su SIP_SOLANA_* o bórrala");
+for (const problem of copied) bad(problem.split(" is a legacy variable name")[0] ?? "nombre de variable retirado", "el keeper se niega a arrancar con ella: renómbrala a su SIP_SOLANA_* o bórrala");
 // Solo NOMBRES: con PRIVY_API_BASE_URL la app secret iría a otro host, con
 // PRIVY_API_LOG se apuntarían las peticiones, con PRIVY_API_CUSTOM_HEADERS
 // llevarían cabeceras que ninguna opción quita.
@@ -72,7 +72,7 @@ ok(`${endpoints.length} endpoint(s) en SIP_SOLANA_RPC_URLS`, "(las URLs no se im
 
 const programEnv = env("SIP_SOLANA_PROGRAM_ID");
 if (programEnv === undefined) bad("SIP_SOLANA_PROGRAM_ID vacío", `ponlo a ${SIP_PROGRAM_ID}, el address del IDL exportado`);
-else if (programEnv === OLD_NUVEM_PROGRAM_ID) bad("SIP_SOLANA_PROGRAM_ID es el programa viejo de Nuvem", `su clave de upgrade se filtró; usa ${SIP_PROGRAM_ID}`);
+else if (programEnv === OLD_NUVEM_PROGRAM_ID) bad("SIP_SOLANA_PROGRAM_ID es un programa retirado", `su clave de upgrade se filtró; usa ${SIP_PROGRAM_ID}`);
 else if (programEnv !== SIP_PROGRAM_ID) bad("SIP_SOLANA_PROGRAM_ID no coincide con el IDL exportado", `debe ser ${SIP_PROGRAM_ID}`);
 else ok("SIP_SOLANA_PROGRAM_ID == address del IDL", SIP_PROGRAM_ID);
 

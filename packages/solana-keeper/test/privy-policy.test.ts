@@ -93,10 +93,10 @@ describe("buildKeeperPolicy", () => {
     expect(Object.isFrozen(policy.rules[0]!.conditions[0]!.value)).toBe(true);
   });
 
-  it("allows the exported IDL's program and refuses Nuvem's, or any other", () => {
+  it("allows the exported IDL's program and refuses the retired one, or any other", () => {
     expect(SIP_PROGRAM_ID).toBe(idl.address);
     expect(allowedPrograms(policy)[0]).toBe(idl.address);
-    expect(() => buildKeeperPolicy(OLD_NUVEM_PROGRAM_ID)).toThrow(/Nuvem's old program/);
+    expect(() => buildKeeperPolicy(OLD_NUVEM_PROGRAM_ID)).toThrow(/a retired program/);
     expect(() => buildKeeperPolicy(Keypair.generate().publicKey.toBase58())).toThrow(/exported IDL's address/);
     expect(JSON.stringify(policy)).not.toContain(OLD_NUVEM_PROGRAM_ID);
   });
@@ -171,7 +171,7 @@ describe("diffPolicy", () => {
     expect(diffPolicy(policy, stored({ owner_id: "keeper-signer-1" })).ok).toBe(true);
   });
 
-  it("names a '*' rule, a dropped program, the old program and a wrong chain", () => {
+  it("names a '*' rule, a dropped program, the retired program and a wrong chain", () => {
     const copy = stored({ chain_type: "ethereum" });
     copy.rules.push({ id: "rule-9", name: "open", method: "*", action: "ALLOW", conditions: [] });
     copy.rules[0]!.conditions[0]!.value = [OLD_NUVEM_PROGRAM_ID, ED25519_PROGRAM_ID, COMPUTE_BUDGET_PROGRAM_ID];
@@ -179,7 +179,7 @@ describe("diffPolicy", () => {
     expect(text).toContain("chain_type is ethereum");
     expect(text).toContain("unexpected rule: ALLOW * always (a '*' rule");
     expect(text).toContain(`drops [${SIP_PROGRAM_ID}]`);
-    expect(text).toContain("names Nuvem's old program");
+    expect(text).toContain("names a retired program");
   });
 
   it("catches a missing rule", () => {

@@ -34,7 +34,7 @@ export function runPreflight(): PreflightResult {
     ["pure deposit is flow", isExternalFlowTx([SYSTEM], SIP), true],
     ["clean trade is trading", isExternalFlowTx([JUPITER, SYSTEM], SIP), false],
     ["settle+trade bundle is trading", isExternalFlowTx([SIP, JUPITER, SYSTEM], SIP), false],
-    ["the IDL is not Nuvem's program", SIP !== OLD_NUVEM_PROGRAM_ID, true],
+    ["the IDL is not the retired program", SIP !== OLD_NUVEM_PROGRAM_ID, true],
     ["the IDL has settle_v2", hasInstruction("settle_v2"), true],
     ["the IDL has no V1 settle", hasInstruction("settle"), false],
     ["TradingLink discriminator is Anchor's", accountDiscriminator("TradingLink").equals(derivedDiscriminator("TradingLink")), true],

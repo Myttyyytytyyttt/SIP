@@ -263,11 +263,11 @@ export function copiedConfigProblems(names: readonly string[]): string[] {
     const replacement = bare ?? (name.startsWith("NUVEM_") ? (NUVEM_REPLACEMENTS[name] ?? null) : undefined);
     if (replacement === undefined) continue;
     problems.push(
-      `${name} is Nuvem's configuration, not SIP's` +
+      `${name} is a legacy variable name, not one SaverFi reads` +
         (replacement === null
-          ? "; SIP's keeper has no counterpart for it. Remove it."
-          : `; SIP's keeper reads ${replacement} instead. Rename it and re-check the value.`) +
-        " Its value was not read. Nuvem's program key leaked, so an environment copied from that deployment " +
+          ? "; the SaverFi keeper has no counterpart for it. Remove it."
+          : `; the SaverFi keeper reads ${replacement} instead. Rename it and re-check the value.`) +
+        " Its value was not read, and an environment that carries a legacy name " +
         "is refused whole rather than half-applied.",
     );
   }
@@ -567,8 +567,8 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
     // BEFORE ANY OTHER COMPARISON, and in its own words: "does not match the IDL"
     // would be true and would hide the only fact that matters.
     problems.push(
-      "SIP_SOLANA_PROGRAM_ID names Nuvem's old program. Its upgrade authority key leaked, so whoever holds that " +
-        `key can rewrite its logic: SIP never talks to it. Set the sip-vault program id, ${SIP_PROGRAM_ID}.`,
+      "SIP_SOLANA_PROGRAM_ID names a retired program. Its upgrade authority key leaked, so whoever holds that " +
+        `key can rewrite its logic: SaverFi never talks to it. Set the sip-vault program id, ${SIP_PROGRAM_ID}.`,
     );
   } else if (programRaw !== SIP_PROGRAM_ID) {
     problems.push(

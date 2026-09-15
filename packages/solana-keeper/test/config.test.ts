@@ -262,7 +262,7 @@ describe("arming", () => {
   });
 });
 
-describe("copied Nuvem configuration", () => {
+describe("legacy variable names", () => {
   it("refuses NUVEM_* by name and names the SIP_SOLANA_ replacement, reading no value", () => {
     const { env, reads } = recording(dry({ NUVEM_SOLANA_BROADCAST: "1", NUVEM_SOLANA_CRANK_KEY: SETTLE_KEY }));
     const error = (() => {
@@ -287,7 +287,7 @@ describe("copied Nuvem configuration", () => {
     expect(refusal(dry({ NUVEM_SOMETHING_ELSE: "x" })).message).toContain("no counterpart");
   });
 
-  it("refuses the bare PRIVY_* and ANCHOR_* names Nuvem's keeper read", () => {
+  it("refuses the bare PRIVY_* and ANCHOR_* legacy names", () => {
     const pairs: [string, string][] = [
       ["PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_ID"],
       ["PRIVY_APP_SECRET", "SIP_SOLANA_PRIVY_APP_SECRET"],
@@ -311,7 +311,7 @@ describe("copied Nuvem configuration", () => {
     }
   });
 
-  it("does not read signing secrets while refusing a copied environment, even armed", () => {
+  it("does not read signing secrets while refusing legacy names, even armed", () => {
     const { env, reads } = recording(armed({ NUVEM_SOLANA_POOLS: "x" }));
     expect(() => loadConfig(env, new Redactor())).toThrow(ConfigError);
     for (const name of SIGNING_SECRET_VARS) expect(reads.has(name)).toBe(false);
@@ -332,10 +332,10 @@ describe("the Privy SDK's environment overrides", () => {
 });
 
 describe("the program id", () => {
-  it("refuses Nuvem's old program with its own message, before any other comparison", () => {
+  it("refuses the retired program with its own message, before any other comparison", () => {
     const error = refusal(dry({ SIP_SOLANA_PROGRAM_ID: OLD_NUVEM_PROGRAM_ID }));
     expect(error.problems).toHaveLength(1);
-    expect(error.message).toContain("Nuvem's old program");
+    expect(error.message).toContain("names a retired program");
     expect(error.message).toContain("leaked");
     expect(error.message).not.toContain("does not match");
     expect(error.message).not.toContain(OLD_NUVEM_PROGRAM_ID);
