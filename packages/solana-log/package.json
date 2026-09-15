@@ -2,7 +2,7 @@
   "name": "@sip/solana-log",
   "private": true,
   "version": "0.1.0",
-  "description": "SIP's redacting logger (Secret, Redactor, sharedRedactor, createLogger, summarizeUpstreamError) for the Solana keeper. Copied from the archived EVM worker; no runtime dependencies.",
+  "description": "SaverFi's redacting logger (Secret, Redactor, sharedRedactor, createLogger, summarizeUpstreamError) for the Solana keeper. Copied from the archived EVM worker; no runtime dependencies.",
   "type": "module",
   "exports": {
     ".": "./src/log.ts",
