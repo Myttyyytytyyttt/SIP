@@ -2,7 +2,8 @@
 
 A pension you build one trade at a time, on Solana. A slice of your trading goes
 into a vault of your own and buys the assets you chose. Only your pension key —
-the Solana wallet you sign in with — can take anything out of it.
+the Solana wallet you sign in with — can take anything out of it. The program is
+upgradeable during the beta.
 
 The code name is SIP: the package names, the environment variables, the
 `sip-vault` program and its signed domains all keep it.
