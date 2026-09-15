@@ -240,8 +240,8 @@ export function loadSolanaServerSettings(env: Env): SolanaSettingsLoad {
         "SIP_TRUSTED_CLIENT_IP_HEADER is required: the per-client limits key on the ONE header " +
         "the edge in front of this process writes from the socket. Every other header is ignored.",
       howToFix:
-        "Set it to the header your edge overwrites (on Railway, confirm by echoing headers on the deployed service; " +
-        "Envoy writes x-envoy-external-address). Requests without it share one bucket.",
+        "Set it to the one header your host writes from the connection. On Vercel that is x-real-ip. " +
+        "Requests without a parseable value share one bucket.",
     });
   } else if (!/^[a-z0-9-]{1,64}$/.test(header) || SPOOFABLE_HEADERS.has(header)) {
     problems.push({
@@ -249,7 +249,7 @@ export function loadSolanaServerSettings(env: Env): SolanaSettingsLoad {
       message: SPOOFABLE_HEADERS.has(header)
         ? `SIP_TRUSTED_CLIENT_IP_HEADER names ${header}, which the client itself can write, so every request could claim a fresh bucket.`
         : "SIP_TRUSTED_CLIENT_IP_HEADER is not a header name.",
-      howToFix: "Name the single header your edge writes from the connection (for example x-envoy-external-address).",
+      howToFix: "Name the single header your host writes from the connection (on Vercel, x-real-ip).",
     });
   } else {
     trustedClientIpHeader = header;

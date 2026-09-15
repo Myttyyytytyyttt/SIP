@@ -67,8 +67,11 @@ runs `anchor test` against a local validator and is not part of `pnpm test`.
 ## Where things are written down
 
 - [docs/runbooks/RAILWAY_SOLANA.md](docs/runbooks/RAILWAY_SOLANA.md) — deploying
-  the keeper and the web on Railway: every variable, which ones are secret, and
-  when each is added.
+  the keeper on Railway: the service settings, every variable, which ones are
+  secret, and when each is added.
+- [docs/runbooks/VERCEL_WEB.md](docs/runbooks/VERCEL_WEB.md) — deploying the web
+  on Vercel: project settings, every variable and its environment, and the
+  Privy domain.
 - [docs/runbooks/PRIVY_SOLANA.md](docs/runbooks/PRIVY_SOLANA.md) — the keeper's
   Privy signer, the policy that bounds it, and what that policy does not prevent.
 - [docs/runbooks/SECRETS.md](docs/runbooks/SECRETS.md) — which keys exist, where

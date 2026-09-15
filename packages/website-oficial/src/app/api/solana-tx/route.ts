@@ -31,6 +31,9 @@ import { solanaTxRoute } from "@/lib/solana-routes";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+// On Vercel, route code outranks vercel.json and the dashboard. A send cut off after
+// sendTransaction left would answer 504 without the signature the client must confirm.
+export const maxDuration = 300;
 
 const route = solanaTxRoute();
 

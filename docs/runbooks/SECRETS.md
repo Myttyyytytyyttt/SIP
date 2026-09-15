@@ -40,7 +40,7 @@ ignorado por git. No es una wallet: no guarda dinero y no firma nada después de
 - Pegar en el chat una clave privada, una frase de recuperación, un token de API o una contraseña.
 - Copiar `~/sip-keys` dentro de un repositorio, un Dockerfile o una variable `NEXT_PUBLIC_*`.
 - Poner la wallet de administración en Railway, Vercel o cualquier servidor.
-- Enseñar un gestor de contraseñas, un panel de Railway o esa carpeta en el vídeo.
+- Enseñar un gestor de contraseñas, un panel de Railway o de Vercel, o esa carpeta en el vídeo.
 
 ## Lo que hace Claude
 

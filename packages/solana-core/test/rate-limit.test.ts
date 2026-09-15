@@ -141,6 +141,13 @@ describe("the client identity", () => {
     expect(new Set(identities.map((identity) => identity.aggregate))).toEqual(new Set(["2001:db8:0::/48"]));
   });
 
+  it("keys a Vercel request by the x-real-ip it names, and nothing else", () => {
+    expect(clientIdentityFromHeaders(headers({ "x-real-ip": "203.0.113.7", "x-forwarded-for": "198.51.100.9" }), "x-real-ip")).toEqual({
+      exact: "203.0.113.7",
+      aggregate: "203.0.113.0/24",
+    });
+  });
+
   it("gives a request without a usable trusted header the unknown identity on both keys", () => {
     expect(clientIdentityFromHeaders(headers({ "cf-connecting-ip": "198.51.100.1" }), "x-envoy-external-address")).toEqual(UNKNOWN_IDENTITY);
     expect(clientIdentityFromHeaders(headers({ "x-envoy-external-address": "not-an-ip" }), "x-envoy-external-address")).toEqual(UNKNOWN_IDENTITY);

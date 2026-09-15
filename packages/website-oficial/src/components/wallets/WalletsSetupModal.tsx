@@ -34,7 +34,7 @@ export function WalletsSetupModal({
           <DialogTitle>Wallets are not configured yet</DialogTitle>
           <DialogDescription>
             This deployment is missing what the wallets screen needs to read the chain. Set these in the
-            package&apos;s environment, restart the server, and reload.
+            deployment&apos;s environment, redeploy (or restart a local server), and reload.
           </DialogDescription>
         </DialogHeader>
 

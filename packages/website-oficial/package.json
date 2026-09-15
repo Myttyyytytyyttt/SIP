@@ -2,6 +2,9 @@
   "name": "@sip/web",
   "private": true,
   "version": "0.1.0",
+  "engines": {
+    "node": "22.x"
+  },
   "description": "SIP \u2014 Self Implemented Pension. The savings dashboard: what each trade put aside, what it adds up to, and the wallet activity behind it. Mock data until the backend exists.",
   "scripts": {
     "dev": "next dev --port 3002",

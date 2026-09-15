@@ -4,11 +4,12 @@
 #   docker compose up --build
 #
 # This file exists so the web can be run and broken locally before it is run and
-# broken in front of users. It builds the SAME image Railway builds for the web
-# service, from the same Dockerfile, with the same environment contract.
+# broken in front of users: a production build of the web, from the web's
+# Dockerfile, with the same environment contract.
 #
-# Railway does NOT read this file. The root railway.json describes the web
-# service, and packages/solana-keeper/railway.json the keeper. Compose is the
+# No platform reads this file or builds that image. The web is hosted on Vercel
+# from source (docs/runbooks/VERCEL_WEB.md), and Railway runs only the keeper,
+# configured by hand (docs/runbooks/RAILWAY_SOLANA.md). Compose is the
 # rehearsal; those are the performance.
 #
 # THE IMAGE BUILDS FROM THE REPOSITORY ROOT, because the install needs

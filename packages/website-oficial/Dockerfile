@@ -10,8 +10,11 @@
 #
 # Building with packages/website-oficial as the context cannot work: the install
 # needs pnpm-lock.yaml, pnpm-workspace.yaml and the @sip/solana-core and
-# @sip/solana-program siblings, none of which live here. Railway builds this file
-# through the root railway.json; see docs/runbooks/RAILWAY_SOLANA.md.
+# @sip/solana-program siblings, none of which live here.
+#
+# A LOCAL PRODUCTION REHEARSAL ONLY. No platform builds this image: the web is
+# hosted on Vercel from source (docs/runbooks/VERCEL_WEB.md), and Railway runs
+# only the keeper, configured by hand (docs/runbooks/RAILWAY_SOLANA.md).
 #
 # NOTHING ABOUT THE DEPLOYMENT IS BAKED IN. The server reads PRIVY_APP_ID and the
 # SIP_SOLANA_* settings at request time, so this image takes no build argument and

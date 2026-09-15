@@ -74,6 +74,24 @@ describe("a valid Solana environment", () => {
   });
 });
 
+describe("the client identity header on Vercel", () => {
+  it("accepts x-real-ip and x-vercel-forwarded-for, lowercased", () => {
+    for (const name of ["X-Real-IP", "x-vercel-forwarded-for"]) {
+      const load = loadSolanaServerSettings({ ...valid, SIP_TRUSTED_CLIENT_IP_HEADER: name });
+      expect(load.ok).toBe(true);
+      if (!load.ok) return;
+      expect(load.settings.trustedClientIpHeader).toBe(name.toLowerCase());
+    }
+  });
+
+  it("tells an operator without the header to use x-real-ip, not Railway's Envoy header", () => {
+    const { SIP_TRUSTED_CLIENT_IP_HEADER: _dropped, ...withoutHeader } = valid;
+    const found = problems(withoutHeader).find((problem) => problem.variable === "SIP_TRUSTED_CLIENT_IP_HEADER");
+    expect(found?.howToFix).toContain("x-real-ip");
+    expect(found?.howToFix.toLowerCase()).not.toContain("envoy");
+  });
+});
+
 describe("refusals", () => {
   it("requires the endpoints, the program id and the client header", () => {
     expect(variables({}).sort()).toEqual(["SIP_SOLANA_PROGRAM_ID", "SIP_SOLANA_RPC_URLS", "SIP_TRUSTED_CLIENT_IP_HEADER"]);

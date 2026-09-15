@@ -1,10 +1,11 @@
 // Weighted token buckets and the one client identity they key on.
 //
-// IN MEMORY, PER PROCESS. Correct for exactly one web replica, which is how SIP
-// runs on Railway through the hackathon; two replicas or a restart double or
-// refill every bucket. No timers and no Redis: sweeping happens on use.
+// IN MEMORY, PER PROCESS. On Vercel that means per Fluid compute instance: when
+// Vercel adds an instance or starts a cold one, every bucket multiplies or
+// refills. Accepted through the hackathon. No timers and no Redis: sweeping
+// happens on use.
 //
-// ONE HEADER. The EVM relay trusted the first of six headers, so behind Railway a
+// ONE HEADER. The EVM relay trusted the first of six headers, so behind any edge a
 // client could send `cf-connecting-ip: <random>` and get a fresh bucket per
 // request. Here the operator names the single header the edge writes
 // (SIP_TRUSTED_CLIENT_IP_HEADER); everything else is ignored, and a request

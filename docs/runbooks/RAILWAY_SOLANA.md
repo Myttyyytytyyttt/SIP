@@ -1,14 +1,13 @@
 # Railway: el vigilante de Solana
 
 En Railway solo vive el **vigilante** (keeper), que cobra e invierte. **La web se aloja en Vercel**, por decisión del
-15 de septiembre: la sección 2 (la web en Railway) queda obsoleta hasta que la sustituya la guía de Vercel. Esta guía
+15 de septiembre, y su guía es [VERCEL_WEB.md](VERCEL_WEB.md). Esta guía
 dice qué variable va en el vigilante, cuál es secreta y en qué momento se añade. Los secretos los pegas **tú**,
 directamente en Railway. Claude no tiene acceso a Railway.
 
 **Nunca van a Railway:** tu wallet de administración (`~/sip-keys/admin.json`), la llave de administración de la
 política de Privy (`~/sip-keys/privy-policy-admin.key`) ni ninguna variable `NUVEM_*`. El vigilante se niega a arrancar si
-ve una variable de Nuvem; la web arranca, pero con una `NUVEM_SOLANA_*` se queda sin Solana y la nombra en `/wallets`.
-No copies variables de un servicio viejo.
+ve una variable de Nuvem. No copies variables de un servicio viejo.
 
 ## 0. Antes de empezar
 
@@ -96,53 +95,18 @@ Solo cuando el ensayo en seco cuadre:
 
 `/status` pasa a `mode` = `live`. Si no, dice qué condición falta. Para volver a seco, borra `SIP_SOLANA_BROADCAST`.
 
-## 2. La web (`sip-web`)
+## 2. La web no va en Railway
 
-En Railway: **New → GitHub repo → SIP**. En **Settings**:
-
-- **Root Directory**: vacío.
-- **Config as code**: `railway.json` (el de la raíz). Fija el Dockerfile de la web, una réplica y el chequeo
-  `/api/health`.
-
-| variable | valor | secreta |
-|---|---|---|
-| `SIP_SOLANA_RPC_URLS` | la URL de Helius (mejor otra clave distinta de la del vigilante, si la creas) | **sí** |
-| `SIP_SOLANA_PROGRAM_ID` | `6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J` | no |
-| `SIP_TRUSTED_CLIENT_IP_HEADER` | `x-envoy-external-address` | no |
-| `PRIVY_APP_ID` | `cmtrt36tb00080dlbrda5aqam` | no |
-| `SIP_SOLANA_PRIVY_SIGNER_ID` | `cbx133itb717vxp3dqwhk808` | no |
-| `SIP_SOLANA_PRIVY_POLICY_ID` | `jsuzcjv6njl0raqjjhzqe9fh` | no |
-
-Si el servicio ya tiene `SIP_CHAIN=solana` (lo pedía una versión anterior de esta guía), la web la acepta y puedes borrarla.
-
-**Nunca en la web:** `SIP_SOLANA_SETTLE_KEY`, `SIP_SOLANA_PRIVY_APP_SECRET`, `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`,
-`PRIVY_APP_SECRET` ni `PRIVY_AUTHORIZATION_PRIVATE_KEY`. La web no firma nada y las rechaza por el nombre, aunque estén
-vacías. Con cualquiera de ellas, o con `SIP_CHAIN` en un valor que no sea `solana`, Connect y `/wallets` enseñan la lista
-de configuración, y `/api/solana-rpc` y `/api/solana-tx` responden 503. `/api/health` sigue respondiendo 200 y, en cuanto
-alguien abre la web, los logs nombran esas variables en una línea `web.config.problems`, nunca sus valores.
-
-`SIP_TRUSTED_CLIENT_IP_HEADER` es la cabecera con la que la web limita peticiones por visitante. En Railway debería ser
-`x-envoy-external-address`; tras el primer despliegue lo comprobamos juntos.
-
-Después del despliegue:
-
-1. Railway te da un dominio (`https://….up.railway.app`, o el tuyo propio). Añádelo en Privy a los **dominios
-   permitidos**, junto a los de `localhost`.
-2. Abre `/api/health`: tiene que responder 200.
-3. Abre la web: el botón **Connect** tiene que abrir el modal de Privy.
-
-Las correcciones del programa y la vinculación de wallets (el consentimiento firmado por la wallet de trading, en el
-programa y en el núcleo) ya están en `main`, y la web se puede desplegar: el login funciona. Las pantallas para crear la
-bóveda y vincular wallets desde la web llegan después, y Railway redespliega solo cuando lleguen a `main`.
+Desde el 15 de septiembre la web se aloja en Vercel: [VERCEL_WEB.md](VERCEL_WEB.md). Si llegaste a crear un servicio
+`sip-web` en Railway, bórralo junto con sus variables (Settings → Danger). Quita también su dominio `*.up.railway.app`
+de los dominios permitidos de Privy. Si su clave de Helius es la misma que vas a usar en Vercel, rótala después del
+concurso. En la raíz del repositorio ya no hay un `railway.json`: cada servicio de Railway se configura a mano, como el
+vigilante de la sección 1.
 
 ## Si algo falla
 
 - **El vigilante termina de desplegar y se reinicia en bucle**: abre los logs de `sip-solana-keeper` y busca
   `configuration refused`. La línea nombra la variable que falta o sobra, nunca su valor.
-- **La web abre, pero Connect enseña una lista de variables**: la web no se reinicia ni falla su chequeo `/api/health`,
-  así que Railway la da por sana. `/wallets` enseña la misma lista, y cada línea nombra una variable que falta o sobra en
-  `sip-web`, nunca su valor. En los logs de `sip-web`, desde la primera visita (el chequeo de salud no la escribe), hay una línea
-  `web.config.problems` que nombra esas variables, nunca sus valores. Corrígelas en Railway y vuelve a desplegar.
 - **El vigilante dice que el atestador no coincide**: `SIP_SOLANA_SETTLE_KEY` no es la wallet de cobro que se configuró
   en el programa. No lo arregles cambiando el programa: revisa qué archivo pegaste.
 - **Un secreto se pega en el sitio equivocado** (en la web, en un chat, en un log): se rota, como dice

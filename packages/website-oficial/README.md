@@ -13,7 +13,7 @@ and the two Solana routes the browser talks to.
 | `/`               | The landing for a visitor without a pension key. Signing in with a Solana wallet, or following "See the app", opens the dashboard. |
 | `/?mode=mock`     | The dashboard on example data, badged **Sample data**, with **Live** disabled. There is no live data until the Solana vault screens land. |
 | `/wallets`        | A placeholder for the Solana wallet screens, or the setup checklist when the configuration is incomplete. |
-| `/api/health`     | Liveness for the Dockerfile's HEALTHCHECK and for Railway. Always 200. |
+| `/api/health`     | Liveness. Always 200, whatever the configuration: check `/wallets` for that. |
 | `/api/solana-rpc` | A narrow JSON-RPC relay for Privy's Solana signing UI. The keyed upstream URL never reaches the browser. |
 | `/api/solana-tx`  | Verified broadcast: a transaction the user already signed is checked against the core's verifier, simulated and sent. The route never signs. |
 
@@ -163,8 +163,9 @@ docker build -f packages/website-oficial/Dockerfile -t sip-web:local .
 ```
 
 It takes no build argument, because the server reads its configuration at
-request time. Railway builds it through the root `railway.json`; the variables,
-and the ones that must never be set on the web, are in
-[docs/runbooks/RAILWAY_SOLANA.md](../../docs/runbooks/RAILWAY_SOLANA.md). The
-root `docker-compose.yml` runs this service alone, with the variables listed in
-the root `.env.example`.
+request time. **The web is hosted on Vercel**, not from this image: Root
+Directory `packages/website-oficial`, the variables set in the Vercel project,
+`SIP_TRUSTED_CLIENT_IP_HEADER=x-real-ip`, and the production domain in Privy, as
+[docs/runbooks/VERCEL_WEB.md](../../docs/runbooks/VERCEL_WEB.md) walks through.
+The `Dockerfile` and the root `docker-compose.yml` remain a local production
+rehearsal only; no platform deploys them.

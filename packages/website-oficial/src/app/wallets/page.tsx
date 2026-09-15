@@ -76,7 +76,7 @@ function SolanaScreen({ config }: { config: SolanaPublicConfig }) {
 }
 
 /**
- * The "collect every problem into a checklist" shape: fix all of them, restart,
+ * The "collect every problem into a checklist" shape: fix all of them, redeploy,
  * reload. The list itself is shared with the dashboard's setup modal — this
  * route only supplies the card around it.
  */
@@ -86,7 +86,7 @@ function SetupCard({ problems }: { problems: readonly ConfigProblem[] }) {
       <CardHeader>
         <CardTitle>The wallets page is not configured</CardTitle>
         <CardDescription>
-          The server is missing what it needs to read the chain. Set these in the package&apos;s environment, restart,
+          The server is missing what it needs to read the chain. Set these in the deployment&apos;s environment, redeploy (or restart a local server),
           and reload.
         </CardDescription>
       </CardHeader>
