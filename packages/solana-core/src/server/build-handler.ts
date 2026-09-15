@@ -87,6 +87,7 @@ import {
   readVault,
   readVaultTokenAccounts,
   readWalletLinks,
+  readWithdrawTokenSource,
   tokenAccountStatus,
   vaultTokenAccountTargets,
   type AccountSnapshot,
@@ -120,7 +121,7 @@ export type SolanaBuildErrorCode =
   | "zero_amount"
   /** More SOL than the vault can release above its rent floor; `withdrawableLamports` says how much it can. */
   | "above_withdrawable"
-  /** The vault holds none of this mint. */
+  /** The account a token withdrawal names holds none of this mint for this vault: gone, not a token account, another vault's, another mint, or empty. */
   | "not_held"
   /** More of this mint than the vault holds; `heldRaw` says how much it does. */
   | "above_holding"
@@ -171,7 +172,7 @@ export const BUILD_REQUEST_WEIGHT = 3;
  * so a request costs its client at least the calls it makes; then the shared
  * reads budget is charged all of it.
  */
-export const BUILD_READS_WEIGHT = { createVault: 4, prepareLink: 1, link: 3, investPolicy: 7, withdraw: 3, withdrawToken: 7, state: 12 } as const;
+export const BUILD_READS_WEIGHT = { createVault: 4, prepareLink: 1, link: 3, investPolicy: 7, withdraw: 3, withdrawToken: 4, state: 12 } as const;
 
 const SHARED_READS_BUDGETS = Symbol.for("@sip/solana-core/build-handler/reads-budgets");
 
@@ -628,47 +629,54 @@ async function withdraw(fields: Readonly<Record<string, unknown>>, served: Serve
   return json(200, { ...built, withdrawableLamports, costs: costs(0n, 1, computeBudget) });
 }
 
-const WITHDRAW_TOKEN_FIELDS = ["action", "owner", "mint", "amountRaw"] as const;
-
-const largestFirst = (a: { readonly amountRaw: bigint }, b: { readonly amountRaw: bigint }): number => (a.amountRaw === b.amountRaw ? 0 : a.amountRaw > b.amountRaw ? -1 : 1);
+const WITHDRAW_TOKEN_FIELDS = ["action", "owner", "mint", "amountRaw", "vaultToken"] as const;
 
 /**
- * withdrawToken: tokens out of the vault to the owner's own account. The vault's
- * source account and its token program come from the vault's holdings on chain,
- * never from the request: the largest holding of that mint.
+ * withdrawToken: tokens out of the vault account the screen showed, to the
+ * owner's own associated account. The request names that account, and it is read
+ * by address, from its own bytes: a token account whose owner field is the
+ * vault, of this mint, holding at least the amount. Its token program is the one
+ * the chain says holds it, never the request's.
+ *
+ * NEVER A LISTING. Anyone can open token accounts whose owner is the vault, and
+ * enough of them make getTokenAccountsByOwner's answer too large to read. A build
+ * that needed that listing could be stopped for good; this one reads two
+ * accounts, however many others exist.
  */
 async function withdrawToken(fields: Readonly<Record<string, unknown>>, served: Served): Promise<Response> {
   const extra = unexpectedField(fields, WITHDRAW_TOKEN_FIELDS);
   if (extra !== null) return served.refuse(400, "bad_request", extra);
-  const { owner, mint } = fields;
-  if (!isPubkey(owner) || !isPubkey(mint)) return served.refuse(400, "bad_request", "owner and mint must be base58 32-byte public keys.");
+  const { owner, mint, vaultToken } = fields;
+  if (!isPubkey(owner) || !isPubkey(mint) || !isPubkey(vaultToken)) return served.refuse(400, "bad_request", "owner, mint and vaultToken must be base58 32-byte public keys.");
   const amountRaw = decimalU64(fields.amountRaw);
   if (amountRaw === null) return served.refuse(400, "bad_request", "amountRaw is an amount of the token's raw units, written as a decimal string.");
   if (amountRaw === 0n) return served.refuse(400, "zero_amount", "The amount must be more than zero.");
 
   const spent = served.spendReads(BUILD_READS_WEIGHT.withdrawToken);
   if (spent !== null) return spent;
-  const vaultAddress = deriveVaultPda(owner).toBase58();
-  const [vault, holdings] = await Promise.all([readVault(served.pool, vaultAddress), listVaultHoldings(served.pool, vaultAddress)]);
-  if (vault.kind === "unreadable" || holdings.kind !== "exists") return unreadable(served);
-  if (vault.kind === "missing") return served.refuse(409, "vault_missing", "Create your vault first.");
-  const holding = holdings.value.filter((entry) => entry.mint === mint).sort(largestFirst)[0];
-  if (holding === undefined) return served.refuse(422, "not_held", "Your vault holds none of this token.");
-  if (amountRaw > holding.amountRaw) return served.refuse(422, "above_holding", "Your vault holds less of this token than that.", { heldRaw: holding.amountRaw });
+  const read = await readWithdrawTokenSource(served.pool, owner, vaultToken);
+  if (read.vault.kind === "unreadable" || read.source.kind === "unreadable") return unreadable(served);
+  if (read.vault.kind === "missing") return served.refuse(409, "vault_missing", "Create your vault first.");
+  const source = read.source.kind === "exists" ? read.source.value : null;
+  // Gone, not a token account, not the vault's, or another mint: for this vault, that account holds none of this token.
+  if (source === null || source.owner !== read.vaultAddress || source.mint !== mint || source.amountRaw === 0n) {
+    return served.refuse(422, "not_held", "Your vault holds none of this token.");
+  }
+  if (amountRaw > source.amountRaw) return served.refuse(422, "above_holding", "Your vault holds less of this token than that.", { heldRaw: source.amountRaw });
 
-  const ownerTokenAccount = deriveAta(owner, mint, holding.tokenProgram).toBase58();
+  const ownerTokenAccount = deriveAta(owner, mint, source.tokenProgram).toBase58();
   // What the owner's account takes if withdraw_token must create it: known for classic accounts and the offered legs.
-  const size = holding.tokenProgram === TOKEN_PROGRAM ? CLASSIC_TOKEN_ACCOUNT_BYTES : (OFFERED_LEGS.find((leg) => leg.mint === mint)?.tokenAccountBytes ?? null);
+  const size = source.tokenProgram === TOKEN_PROGRAM ? CLASSIC_TOKEN_ACCOUNT_BYTES : (OFFERED_LEGS.find((leg) => leg.mint === mint)?.tokenAccountBytes ?? null);
   const batch = await readBuildBatch(served.pool, { addresses: [ownerTokenAccount], sizes: size === null ? [] : [size] });
   if (batch.kind !== "exists") return upstreamUnavailable(served);
-  const ownerTokenAccountExists = tokenAccountStatus(batch.value.accounts[0], holding.tokenProgram) === "exists";
+  const ownerTokenAccountExists = tokenAccountStatus(batch.value.accounts[0], source.tokenProgram) === "exists";
   const computeBudget = ownerComputeBudget("withdraw_token");
-  const built = buildWithdrawToken({ owner, mint, tokenProgram: holding.tokenProgram, amountRaw, vaultToken: holding.tokenAccount, ...batch.value.recent, computeBudget });
+  const built = buildWithdrawToken({ owner, mint, tokenProgram: source.tokenProgram, amountRaw, vaultToken: source.address, ...batch.value.recent, computeBudget });
   // wSOL arrives as SOL: the program closes the owner's wSOL account in the same instruction, so its rent comes straight back.
   const ownerTokenAccountRentLamports = ownerTokenAccountExists || mint === WSOL_MINT ? 0n : (batch.value.rents[0] ?? null);
   return json(200, {
     ...built,
-    heldRaw: holding.amountRaw,
+    heldRaw: source.amountRaw,
     ownerTokenAccountExists,
     ownerTokenAccountRentLamports,
     costs: costs(ownerTokenAccountRentLamports ?? 0n, 1, computeBudget),

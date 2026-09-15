@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import { RAYDIUM_CLMM, SOL_USDC_POOL, SPYX_MINT, SPYX_USDC_POOL, SYSTEM_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../src/client/addresses";
-import { SOL_SQRT_PRICE, SPYX_SQRT_PRICE, clmmPoolAccount } from "./chain-fixtures";
+import { SOL_SQRT_PRICE, SPYX_SQRT_PRICE, clmmPoolAccount, parsedTokenAccount, tokenAccountData } from "./chain-fixtures";
 import { base58Encode } from "../src/client/base58";
 import { base64Encode } from "../src/client/base64";
 import { encodeStruct } from "../src/client/borsh";
@@ -22,7 +22,9 @@ import {
   readVault,
   readVaultTokenAccounts,
   readWalletLinks,
+  readWithdrawTokenSource,
   settledEventsFromLogs,
+  tokenAccountFromSnapshot,
   tokenAccountStatus,
   vaultTokenAccountTargets,
 } from "../src/server/readers";
@@ -395,6 +397,88 @@ describe("the vault's token accounts", () => {
     });
     const failed = await readVaultTokenAccounts(down.pool, vault);
     expect(failed.kind).toBe("unreadable");
+    expect(JSON.stringify(failed)).not.toContain(SECRET_QUERY);
+  });
+
+  it("asks jsonParsed, and carries what each holds only when the RPC parsed it as the vault's own account of that mint", async () => {
+    const vault = key();
+    const { pool: p, upstream } = pool((call) =>
+      rpcResult(call, {
+        value: [
+          parsedTokenAccount({ tokenProgram: TOKEN_PROGRAM, mint: WSOL_MINT, owner: vault, amount: "100000000", decimals: 9, uiAmountString: "0.1" }),
+          parsedTokenAccount({ tokenProgram: TOKEN_PROGRAM, mint: USDC_MINT, owner: key(), amount: "5", decimals: 6, uiAmountString: "0.000005" }),
+          parsedTokenAccount({ tokenProgram: TOKEN_2022_PROGRAM, mint: SPYX_MINT, owner: vault, amount: "12345678", decimals: 8, uiAmountString: "0.1241643", bytes: 179 }),
+        ],
+      }),
+    );
+    const read = await readVaultTokenAccounts(p, vault);
+    expect((upstream.calls[0]!.body as { params: unknown[] }).params[1]).toEqual({ encoding: "jsonParsed", commitment: "confirmed" });
+    expect(read.kind === "exists" && read.value.map((entry) => [entry.mint, entry.status, entry.amountRaw, entry.decimals, entry.uiAmount])).toEqual([
+      [WSOL_MINT, "exists", 100_000_000n, 9, "0.1"],
+      [USDC_MINT, "exists", null, null, null],
+      [SPYX_MINT, "exists", 12_345_678n, 8, "0.1241643"],
+    ]);
+  });
+});
+
+describe("a token withdrawal's source, read by address", () => {
+  const snap = (owner: string, data: Uint8Array | null) => ({ owner, lamports: 1n, data });
+
+  it("decodes an initialized SPL Token or Token-2022 account from its bytes, and nothing else", () => {
+    const [mint, owner, address] = [key(), key(), key()];
+    const classic = tokenAccountData({ mint, owner, amount: 18_446_744_073_709_551_615n });
+    expect(tokenAccountFromSnapshot(address, snap(TOKEN_PROGRAM, classic))).toEqual({ address, tokenProgram: TOKEN_PROGRAM, mint, owner, amountRaw: 18_446_744_073_709_551_615n, frozen: false });
+    expect(tokenAccountFromSnapshot(address, snap(TOKEN_2022_PROGRAM, tokenAccountData({ mint, owner, amount: 5n, state: 2, bytes: 179 })))).toEqual({
+      address,
+      tokenProgram: TOKEN_2022_PROGRAM,
+      mint,
+      owner,
+      amountRaw: 5n,
+      frozen: true,
+    });
+    const mintWithExtensions = tokenAccountData({ mint, owner, amount: 1n, bytes: 179 });
+    mintWithExtensions[165] = 1;
+    const multisig = new Uint8Array(355);
+    multisig[108] = 1;
+    multisig[165] = 2;
+    const notAccounts: readonly (readonly [string, Uint8Array | null])[] = [
+      [SYSTEM_PROGRAM, classic],
+      [key(), classic],
+      [TOKEN_PROGRAM, tokenAccountData({ mint, owner, amount: 1n, bytes: 179 })],
+      [TOKEN_2022_PROGRAM, mintWithExtensions],
+      [TOKEN_2022_PROGRAM, multisig],
+      [TOKEN_PROGRAM, tokenAccountData({ mint, owner, amount: 1n, state: 0 })],
+      [TOKEN_2022_PROGRAM, new Uint8Array(82)],
+      [TOKEN_PROGRAM, null],
+    ];
+    for (const [program, data] of notAccounts) expect(tokenAccountFromSnapshot(address, snap(program, data))).toBeNull();
+    expect(tokenAccountFromSnapshot(address, null)).toBeNull();
+  });
+
+  it("reads the vault and the named account in ONE base64 getMultipleAccounts; an account that is gone, one that is not a token account and a failed read keep their own outcomes", async () => {
+    const owner = key();
+    const vault = deriveVaultPda(owner).toBase58();
+    const [source, mint] = [key(), key()];
+    const answers: unknown[][] = [
+      [accountInfo(SIP_PROGRAM_ID, vaultBytes(owner)), accountInfo(TOKEN_PROGRAM, tokenAccountData({ mint, owner: vault, amount: 42n }))],
+      [accountInfo(SIP_PROGRAM_ID, vaultBytes(owner)), null],
+      [null, accountInfo(SYSTEM_PROGRAM, new Uint8Array(0))],
+    ];
+    const { pool: p, upstream } = pool((call) => rpcResult(call, { value: answers.shift() }));
+    const read = await readWithdrawTokenSource(p, owner, source);
+    expect(upstream.calls).toHaveLength(1);
+    expect(upstream.calls[0]!.body).toMatchObject({ method: "getMultipleAccounts", params: [[vault, source], { encoding: "base64", commitment: "confirmed" }] });
+    expect([read.vaultAddress, read.vault.kind]).toEqual([vault, "exists"]);
+    expect(read.source).toEqual({ kind: "exists", value: { address: source, tokenProgram: TOKEN_PROGRAM, mint, owner: vault, amountRaw: 42n, frozen: false } });
+    expect((await readWithdrawTokenSource(p, owner, source)).source).toEqual({ kind: "missing" });
+    const notToken = await readWithdrawTokenSource(p, owner, source);
+    expect([notToken.vault.kind, notToken.source]).toEqual(["missing", { kind: "exists", value: null }]);
+
+    const down = pool(() => {
+      throw new Error(`boom ${UPSTREAM_1}`);
+    });
+    const failed = await readWithdrawTokenSource(down.pool, owner, source);
+    expect([failed.vault.kind, failed.source.kind]).toEqual(["unreadable", "unreadable"]);
     expect(JSON.stringify(failed)).not.toContain(SECRET_QUERY);
   });
 });

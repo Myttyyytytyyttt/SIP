@@ -323,7 +323,7 @@ describe("/api/solana-build", () => {
     expect([above.status, above.json.error?.code, above.json.error?.withdrawableLamports]).toEqual([422, "above_withdrawable", "1000"]);
     const within = await answer(await POST(buildRequest({ action: "withdraw", owner, lamports: "1000" })));
     expect([within.status, programsOf(within.json.txBase64)]).toEqual([200, [COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, SIP_PROGRAM_ID]]);
-    const notHeld = await answer(await POST(buildRequest({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: "1" })));
+    const notHeld = await answer(await POST(buildRequest({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: "1", vaultToken: someKey() })));
     expect([notHeld.status, notHeld.json.error?.code]).toEqual([422, "not_held"]);
   });
 

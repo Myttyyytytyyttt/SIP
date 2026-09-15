@@ -36,6 +36,7 @@ import type { SolanaGate } from "../src/server/handlers";
 import { deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
 import { createWeightedLimiter, type WeightedLimiter } from "../src/server/rate-limit";
 import { MAX_RELAY_REQUEST_WEIGHT } from "../src/server/relay-policy";
+import { createRpcPool } from "../src/server/rpc-pool";
 import { verifySignedTransaction } from "../src/server/verify-tx";
 import {
   SOL_SQRT_PRICE,
@@ -47,7 +48,9 @@ import {
   localRent,
   methodsOf,
   mintAccount,
+  parsedTokenAccount,
   policyAccount,
+  tokenAccountData,
   tokenAccountInfo,
   vaultAccount,
   type StubChain,
@@ -138,8 +141,10 @@ describe("the order of refusals, before any chain read", () => {
     ["an investment policy's cap as a number", { action: "investPolicy", owner: key(), maxPerCall: 10_000_000 }],
     ["an investment policy's enabled as text", { action: "investPolicy", owner: key(), enabled: "yes" }],
     ["a withdrawal in lamports as a number", { action: "withdraw", owner: key(), lamports: 5 }],
-    ["a token withdrawal naming its source account", { action: "withdrawToken", owner: key(), mint: SPYX_MINT, amountRaw: "1", vaultToken: key() }],
-    ["a token withdrawal whose mint is not a key", { action: "withdrawToken", owner: key(), mint: "SPYx", amountRaw: "1" }],
+    ["a token withdrawal that does not name its source account", { action: "withdrawToken", owner: key(), mint: SPYX_MINT, amountRaw: "1" }],
+    ["a token withdrawal naming its token program", { action: "withdrawToken", owner: key(), mint: SPYX_MINT, amountRaw: "1", vaultToken: key(), tokenProgram: TOKEN_PROGRAM }],
+    ["a token withdrawal whose source is not a key", { action: "withdrawToken", owner: key(), mint: SPYX_MINT, amountRaw: "1", vaultToken: "the largest" }],
+    ["a token withdrawal whose mint is not a key", { action: "withdrawToken", owner: key(), mint: "SPYx", amountRaw: "1", vaultToken: key() }],
     ["an array body", [1]],
   ])("%s is 400 bad_request with no chain read", async (_, body) => {
     const { build, upstream } = setup();
@@ -644,19 +649,18 @@ describe("withdraw", () => {
 });
 
 describe("withdrawToken", () => {
-  const spyxHolding = (pubkey: string, amount: string) => ({ pubkey, mint: SPYX_MINT, amount, decimals: 8, uiAmountString: "0.1241643", tokenProgram: TOKEN_2022_PROGRAM });
+  /** The vault's SPYx account: 179 bytes under Token-2022, its owner field the vault unless said otherwise. */
+  const spyxAccount = (vault: string, amount: bigint, fields: { readonly owner?: string; readonly state?: number } = {}) =>
+    accountInfo(TOKEN_2022_PROGRAM, tokenAccountData({ mint: SPYX_MINT, owner: fields.owner ?? vault, amount, state: fields.state, bytes: 179 }), localRent(179));
 
-  it("takes the source account and the token program from the vault's holdings, the largest of that mint, never the request, and quotes the rent of the owner's new account", async () => {
+  it("reads the source account the request names by address, from its own bytes, takes the token program from the chain, never lists the vault, and quotes the rent of the owner's new account", async () => {
     const owner = keypair();
     const ownerKey = owner.publicKey.toBase58();
     const vault = deriveVaultPda(ownerKey).toBase58();
     const holding = key();
-    const chain: StubChain = {
-      accounts: new Map([[vault, sipOwned(vaultAccount(ownerKey), localRent(125))]]),
-      tokenAccounts: new Map([[vault, [spyxHolding(key(), "1000"), spyxHolding(holding, "12345678")]]]),
-    };
+    const chain: StubChain = { accounts: new Map([[vault, sipOwned(vaultAccount(ownerKey), localRent(125))], [holding, spyxAccount(vault, 12_345_678n)]]) };
     const { build, upstream } = setup(chain);
-    const answer = await build({ action: "withdrawToken", owner: ownerKey, mint: SPYX_MINT, amountRaw: "12345678" });
+    const answer = await build({ action: "withdrawToken", owner: ownerKey, mint: SPYX_MINT, amountRaw: "12345678", vaultToken: holding });
     expect(answer.status).toBe(200);
     expect(programsOf(answer.json.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, SIP_PROGRAM_ID]);
     expect(decodeArgs("withdraw_token", instructionsOf(answer.json.txBase64)[2]!.data)).toEqual({ amount: 12_345_678n });
@@ -665,7 +669,9 @@ describe("withdrawToken", () => {
     expect([answer.json.vaultTokenAccount, answer.json.ownerTokenAccount, answer.json.heldRaw]).toEqual([holding, ownerToken, "12345678"]);
     expect([answer.json.ownerTokenAccountExists, answer.json.ownerTokenAccountRentLamports]).toEqual([false, String(localRent(179))]);
     expect(answer.json.costs).toEqual({ rentLamports: String(localRent(179)), signatureFeeLamports: "5000", priorityFeeLamports: "20000" });
-    expect(methodsOf(upstream.calls)).toHaveLength(BUILD_READS_WEIGHT.withdrawToken);
+    const methods = methodsOf(upstream.calls);
+    expect(methods).toHaveLength(BUILD_READS_WEIGHT.withdrawToken);
+    expect(methods).not.toContain("getTokenAccountsByOwner");
     const verified = verifySignedTransaction(signWire(answer.json.txBase64, owner));
     expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
   });
@@ -673,27 +679,88 @@ describe("withdrawToken", () => {
   it("wSOL comes out as SOL, so no rent is quoted; nor for an owner's account that already exists", async () => {
     const owner = key();
     const vault = deriveVaultPda(owner).toBase58();
-    const wsol = { pubkey: deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58(), mint: WSOL_MINT, amount: "100000000", decimals: 9, uiAmountString: "0.1", tokenProgram: TOKEN_PROGRAM };
-    const chain: StubChain = { accounts: new Map([[vault, sipOwned(vaultAccount(owner), localRent(125))]]), tokenAccounts: new Map([[vault, [wsol, spyxHolding(key(), "5")]]]) };
+    const wsol = deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58();
+    const spyx = key();
+    const chain: StubChain = {
+      accounts: new Map([
+        [vault, sipOwned(vaultAccount(owner), localRent(125))],
+        [wsol, accountInfo(TOKEN_PROGRAM, tokenAccountData({ mint: WSOL_MINT, owner: vault, amount: 100_000_000n }), localRent(165) + 100_000_000)],
+        [spyx, spyxAccount(vault, 5n)],
+      ]),
+    };
     const { build } = setup(chain);
-    const unwrapped = await build({ action: "withdrawToken", owner, mint: WSOL_MINT, amountRaw: "100000000" });
+    const unwrapped = await build({ action: "withdrawToken", owner, mint: WSOL_MINT, amountRaw: "100000000", vaultToken: wsol });
     expect([unwrapped.status, unwrapped.json.ownerTokenAccountRentLamports, unwrapped.json.costs.rentLamports]).toEqual([200, "0", "0"]);
     chain.accounts.set(deriveAta(owner, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenAccountInfo(TOKEN_2022_PROGRAM, 179));
-    const held = await build({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: "5" });
+    const held = await build({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: "5", vaultToken: spyx });
     expect([held.json.ownerTokenAccountExists, held.json.ownerTokenAccountRentLamports]).toEqual([true, "0"]);
   });
 
-  it("a mint the vault does not hold is 422 not_held; more than it holds is 422 above_holding with what it holds; zero is 400 zero_amount before any read", async () => {
+  it("an account that is gone, another vault's, of another mint, empty, uninitialized or not a token account is 422 not_held; more than it holds is 422 above_holding with what it holds; neither reads a blockhash", async () => {
     const owner = key();
     const vault = deriveVaultPda(owner).toBase58();
-    const chain: StubChain = { accounts: new Map([[vault, sipOwned(vaultAccount(owner), localRent(125))]]), tokenAccounts: new Map([[vault, [spyxHolding(key(), "12345678")]]]) };
+    const [holding, theirs, usdc, empty, uninitialized] = [key(), key(), key(), key(), key()];
+    const chain: StubChain = {
+      accounts: new Map([
+        [vault, sipOwned(vaultAccount(owner), localRent(125))],
+        [holding, spyxAccount(vault, 12_345_678n)],
+        [theirs, spyxAccount(vault, 12_345_678n, { owner: deriveVaultPda(key()).toBase58() })],
+        [usdc, accountInfo(TOKEN_PROGRAM, tokenAccountData({ mint: USDC_MINT, owner: vault, amount: 9n }))],
+        [empty, spyxAccount(vault, 0n)],
+        [uninitialized, spyxAccount(vault, 7n, { state: 0 })],
+        [SPYX_MINT, mintAccount(TOKEN_2022_PROGRAM)],
+      ]),
+    };
     const { build, upstream } = setup(chain);
-    expect((await build({ action: "withdrawToken", owner, mint: USDC_MINT, amountRaw: "1" })).json.error?.code).toBe("not_held");
-    const above = await build({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: "12345679" });
+    for (const vaultToken of [key(), theirs, usdc, empty, uninitialized, SPYX_MINT, vault]) {
+      const answer = await build({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: "1", vaultToken });
+      expect([vaultToken, answer.status, answer.json.error?.code]).toEqual([vaultToken, 422, "not_held"]);
+    }
+    const above = await build({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: "12345679", vaultToken: holding });
     expect([above.status, above.json.error?.code, (above.json.error as { heldRaw?: string } | undefined)?.heldRaw]).toEqual([422, "above_holding", "12345678"]);
-    const calls = upstream.calls.length;
-    expect((await build({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: "0" })).json.error?.code).toBe("zero_amount");
-    expect(upstream.calls).toHaveLength(calls);
+    expect(methodsOf(upstream.calls)).not.toContain("getLatestBlockhash");
+  });
+
+  it("zero is 400 zero_amount before any read; no vault is 409 vault_missing; an unreadable chain is 502 unreadable", async () => {
+    const { build, upstream } = setup();
+    expect((await build({ action: "withdrawToken", owner: key(), mint: SPYX_MINT, amountRaw: "0", vaultToken: key() })).json.error?.code).toBe("zero_amount");
+    expect(upstream.calls).toHaveLength(0);
+    expect((await build({ action: "withdrawToken", owner: key(), mint: SPYX_MINT, amountRaw: "1", vaultToken: key() })).json.error?.code).toBe("vault_missing");
+    const down = await setup({ accounts: new Map(), down: true }).build({ action: "withdrawToken", owner: key(), mint: SPYX_MINT, amountRaw: "1", vaultToken: key() });
+    expect([down.status, down.json.error?.code]).toEqual([502, "unreadable"]);
+    expect(down.text).not.toContain(SECRET_QUERY);
+  });
+
+  it("a vault buried in token accounts it never asked for: the listing is too large to read, yet the state offers the vault's own SPYx account and the build withdraws from it", async () => {
+    const owner = keypair();
+    const ownerKey = owner.publicKey.toBase58();
+    const vault = deriveVaultPda(ownerKey).toBase58();
+    const spyxAta = deriveAta(vault, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58();
+    // Empty SPYx accounts anyone can open with the vault as their owner: 400 overflow this pool's 32 KiB answers, as about 12,650 overflow mainnet's 8 MiB.
+    const spam = Array.from({ length: 400 }, () => ({ pubkey: spyxAta, mint: SPYX_MINT, amount: "0", decimals: 8, uiAmountString: "0", tokenProgram: TOKEN_2022_PROGRAM }));
+    const chain: StubChain = {
+      accounts: new Map([
+        [vault, sipOwned(vaultAccount(ownerKey), localRent(125))],
+        [spyxAta, spyxAccount(vault, 12_345_678n)],
+      ]),
+      parsedAccounts: new Map([[spyxAta, parsedTokenAccount({ tokenProgram: TOKEN_2022_PROGRAM, mint: SPYX_MINT, owner: vault, amount: "12345678", decimals: 8, uiAmountString: "0.1241643", bytes: 179 })]]),
+      tokenAccounts: new Map([[vault, spam]]),
+    };
+    const upstream = fakeFetch(answerRpc(chain));
+    const pool = createRpcPool(load.settings.rpcEndpoints, { fetch: upstream.fetch, redactor: load.settings.redactor, maxResponseBytes: 32 * 1024 });
+    const { state, build } = setup(chain, { pool });
+
+    const listed = await state({ action: "state", owner: ownerKey, wallets: [] });
+    expect(listed.status).toBe(200);
+    expect(listed.json.holdings).toEqual({ status: "unreadable", items: [] });
+    expect(listed.json.vaultTokenAccounts.items[2]).toEqual({ mint: SPYX_MINT, address: spyxAta, tokenProgram: TOKEN_2022_PROGRAM, status: "exists", amountRaw: "12345678", decimals: 8, uiAmount: "0.1241643" });
+
+    const built = await build({ action: "withdrawToken", owner: ownerKey, mint: SPYX_MINT, amountRaw: "12345678", vaultToken: spyxAta });
+    expect(built.status).toBe(200);
+    expect(built.json.accounts).toMatchObject({ vault_token: spyxAta, token_program: TOKEN_2022_PROGRAM });
+    expect(methodsOf(upstream.calls).filter((method) => method === "getTokenAccountsByOwner")).toHaveLength(2);
+    const verified = verifySignedTransaction(signWire(built.json.txBase64, owner));
+    expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
   });
 });
 
@@ -712,7 +779,8 @@ describe("state", () => {
     const usdcAccount = deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58();
     chain.accounts.set(usdcAccount, tokenAccountInfo(TOKEN_PROGRAM));
     const holdings = [{ pubkey: usdcAccount, mint: USDC_MINT, amount: "9007199254740993", decimals: 6, uiAmountString: "9007199254.740993", tokenProgram: TOKEN_PROGRAM }];
-    const { state } = setup({ ...chain, tokenAccounts: new Map([[vault, holdings]]) });
+    const parsedAccounts = new Map([[usdcAccount, parsedTokenAccount({ tokenProgram: TOKEN_PROGRAM, mint: USDC_MINT, owner: vault, amount: "9007199254740993", decimals: 6, uiAmountString: "9007199254.740993" })]]);
+    const { state } = setup({ ...chain, parsedAccounts, tokenAccounts: new Map([[vault, holdings]]) });
     const answer = await state({ action: "state", owner, wallets: [mine, theirs, fresh, forged] });
     expect(answer.status).toBe(200);
     const body = answer.json;
@@ -745,9 +813,9 @@ describe("state", () => {
     expect(body.vaultTokenAccounts).toEqual({
       status: "exists",
       items: [
-        { mint: WSOL_MINT, address: deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58(), tokenProgram: TOKEN_PROGRAM, status: "missing" },
-        { mint: USDC_MINT, address: usdcAccount, tokenProgram: TOKEN_PROGRAM, status: "exists" },
-        { mint: SPYX_MINT, address: deriveAta(vault, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenProgram: TOKEN_2022_PROGRAM, status: "missing" },
+        { mint: WSOL_MINT, address: deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58(), tokenProgram: TOKEN_PROGRAM, status: "missing", amountRaw: null, decimals: null, uiAmount: null },
+        { mint: USDC_MINT, address: usdcAccount, tokenProgram: TOKEN_PROGRAM, status: "exists", amountRaw: "9007199254740993", decimals: 6, uiAmount: "9007199254.740993" },
+        { mint: SPYX_MINT, address: deriveAta(vault, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenProgram: TOKEN_2022_PROGRAM, status: "missing", amountRaw: null, decimals: null, uiAmount: null },
       ],
     });
     expect(body.prices).toEqual({

@@ -2,7 +2,7 @@
 // through the IDL, Raydium pools with a chosen sqrt price, and a JSON-RPC stub
 // that answers from a map. No network; the endpoint is an .invalid host.
 
-import { RAYDIUM_CLMM, SPYX_MINT, USDC_MINT } from "../src/client/addresses";
+import { RAYDIUM_CLMM, SPYX_MINT, TOKEN_2022_PROGRAM, USDC_MINT } from "../src/client/addresses";
 import { tryBase58Decode } from "../src/client/base58";
 import { encodeStruct } from "../src/client/borsh";
 import { CLMM_POOL_STATE_BYTES, CLMM_POOL_STATE_DISCRIMINATOR } from "../src/client/clmm-price";
@@ -100,6 +100,37 @@ export const mintAccount = (tokenProgram: string): AccountJson => accountInfo(to
 /** A token account held by `tokenProgram`: only its owner is read. */
 export const tokenAccountInfo = (tokenProgram: string, bytes = 165): AccountJson => accountInfo(tokenProgram, new Uint8Array(bytes), localRent(bytes));
 
+/**
+ * A token account's real bytes: SPL Token's Account layout (mint, owner, amount,
+ * state at 108), and past 165 bytes Token-2022's account type byte, 2, at 165.
+ */
+export function tokenAccountData(fields: { readonly mint: string; readonly owner: string; readonly amount: bigint; readonly state?: number; readonly bytes?: number }): Uint8Array {
+  const bytes = new Uint8Array(fields.bytes ?? 165);
+  bytes.set(tryBase58Decode(fields.mint)!, 0);
+  bytes.set(tryBase58Decode(fields.owner)!, 32);
+  new DataView(bytes.buffer).setBigUint64(64, fields.amount, true);
+  bytes[108] = fields.state ?? 1;
+  if (bytes.length > 165) bytes[165] = 2;
+  return bytes;
+}
+
+/** A token account as getMultipleAccounts answers it with jsonParsed. */
+export function parsedTokenAccount(fields: { readonly tokenProgram: string; readonly mint: string; readonly owner: string; readonly amount: string; readonly decimals: number; readonly uiAmountString: string; readonly bytes?: number }) {
+  const space = fields.bytes ?? 165;
+  return {
+    data: {
+      program: fields.tokenProgram === TOKEN_2022_PROGRAM ? "spl-token-2022" : "spl-token",
+      parsed: { type: "account", info: { mint: fields.mint, owner: fields.owner, state: "initialized", isNative: false, tokenAmount: { amount: fields.amount, decimals: fields.decimals, uiAmountString: fields.uiAmountString } } },
+      space,
+    },
+    lamports: localRent(space),
+    owner: fields.tokenProgram,
+    executable: false,
+    rentEpoch: 0,
+    space,
+  };
+}
+
 /** One jsonParsed token account getTokenAccountsByOwner lists for its owner. */
 export interface StubTokenAccount {
   readonly pubkey: string;
@@ -112,6 +143,8 @@ export interface StubTokenAccount {
 
 export interface StubChain {
   readonly accounts: Map<string, AccountJson | null>;
+  /** What getMultipleAccounts answers for these addresses when asked for jsonParsed; `accounts` otherwise. */
+  readonly parsedAccounts?: Map<string, unknown>;
   /** getTokenAccountsByOwner's answers, by owner. */
   readonly tokenAccounts?: Map<string, readonly StubTokenAccount[]>;
   readonly slot?: number;
@@ -129,8 +162,11 @@ export function answerRpc(chain: StubChain): (call: UpstreamCall) => Response {
     const context = { slot: chain.slot ?? 321 };
     const params = request.params ?? [];
     switch (request.method) {
-      case "getMultipleAccounts":
-        return { jsonrpc: "2.0", id, result: { context, value: (params[0] as string[]).map((address) => chain.accounts.get(address) ?? null) } };
+      case "getMultipleAccounts": {
+        const parsed = (params[1] as { encoding?: string } | undefined)?.encoding === "jsonParsed";
+        const answer = (address: string): unknown => (parsed && chain.parsedAccounts?.has(address) ? chain.parsedAccounts.get(address) : (chain.accounts.get(address) ?? null));
+        return { jsonrpc: "2.0", id, result: { context, value: (params[0] as string[]).map(answer) } };
+      }
       case "getAccountInfo":
         return { jsonrpc: "2.0", id, result: { context, value: chain.accounts.get(params[0] as string) ?? null } };
       case "getMinimumBalanceForRentExemption":

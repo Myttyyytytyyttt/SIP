@@ -160,10 +160,21 @@ export interface VaultStateJson {
   readonly config: { readonly address: string; readonly status: ReadStatus; readonly exists: boolean; readonly paused: boolean | null };
   readonly walletLinks: readonly { readonly wallet: string; readonly link: string; readonly status: WalletLinkStatus; readonly vault: string | null }[];
   readonly holdings: { readonly status: "exists" | "unreadable"; readonly items: readonly HoldingJson[] };
-  /** The accounts an investment policy needs (wSOL, USDC, each leg), and whether each exists. */
+  /**
+   * The vault's own associated accounts (wSOL, USDC, each leg), read by address: whether each exists, and what it
+   * holds when the RPC parsed it as the vault's (null otherwise). Readable even when the listing in `holdings` is not.
+   */
   readonly vaultTokenAccounts: {
     readonly status: "exists" | "unreadable";
-    readonly items: readonly { readonly mint: string; readonly address: string; readonly tokenProgram: string; readonly status: ReadStatus }[];
+    readonly items: readonly {
+      readonly mint: string;
+      readonly address: string;
+      readonly tokenProgram: string;
+      readonly status: ReadStatus;
+      readonly amountRaw?: string | null;
+      readonly decimals?: number | null;
+      readonly uiAmount?: string | null;
+    }[];
   };
   readonly rents: {
     readonly vault: string;

@@ -728,6 +728,10 @@ describe("web-boveda on the tested sip_vault", () => {
     if (!state.ok) throw new Error(state.code);
     const holding = state.body.holdings.items.find((item) => item.mint === WSOL_MINT);
     expect(holding).toMatchObject({ tokenAccount: vaultWsol.toBase58(), amountRaw: "100000000", tokenProgram: TOKEN_PROGRAM });
+    // The vault's own accounts, read by address with jsonParsed and no listing: the same balance, and SPYx's empty account parsed under Token-2022.
+    const own = state.body.vaultTokenAccounts.items;
+    expect(own.find((item) => item.mint === WSOL_MINT)).toMatchObject({ address: vaultWsol.toBase58(), status: "exists", amountRaw: "100000000", decimals: 9, uiAmount: "0.1" });
+    expect(own.find((item) => item.mint === SPYX_MINT)).toMatchObject({ status: "exists", amountRaw: "0", decimals: 8 });
 
     const before = await lamports(owner);
     const result = await withdrawTokenFlow(
@@ -750,8 +754,11 @@ describe("web-boveda on the tested sip_vault", () => {
     const holding = state.body.holdings.items.find((item) => item.mint === SPYX_MINT);
     expect(holding).toMatchObject({ tokenAccount: key(spyxHolding), amountRaw: SPYX_HOLDING_RAW.toString(), tokenProgram: TOKEN_2022_PROGRAM });
 
-    const built = await api.build<{ vaultTokenAccount: string }>({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: SPYX_HOLDING_RAW.toString() });
+    const built = await api.build<{ vaultTokenAccount: string }>({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: SPYX_HOLDING_RAW.toString(), vaultToken: key(spyxHolding) });
     expect(built.ok && built.body.vaultTokenAccount).toBe(key(spyxHolding));
+    // The vault's own SPYx account exists and is empty: named as the source, it is refused before anything is built.
+    const emptyAta = deriveAta(deriveVaultPda(owner).toBase58(), SPYX_MINT, TOKEN_2022_PROGRAM).toBase58();
+    expect(await api.build({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: "1", vaultToken: emptyAta })).toMatchObject({ ok: false, status: 422, code: "not_held" });
 
     const before = await lamports(owner);
     const result = await withdrawTokenFlow(

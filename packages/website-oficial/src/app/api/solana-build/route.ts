@@ -17,9 +17,10 @@
  *   those accounts and every rent come with it.
  * - {"action":"withdraw","owner","lamports"} → withdraw, at most what the vault
  *   holds above its rent floor.
- * - {"action":"withdrawToken","owner","mint","amountRaw"} → withdraw_token from
- *   the vault's largest holding of that mint, its account and token program read
- *   from the chain.
+ * - {"action":"withdrawToken","owner","mint","amountRaw","vaultToken"} →
+ *   withdraw_token from the vault account the screen showed, read by address: it
+ *   must be the vault's, of that mint, holding the amount, and its token program
+ *   is the one the chain names. The vault's accounts are never listed for it.
  *
  * WHAT IT IS NOT. It holds no key, signs nothing and takes no blockhash from the
  * browser. Its answer is advice: the page checks the bytes against what the

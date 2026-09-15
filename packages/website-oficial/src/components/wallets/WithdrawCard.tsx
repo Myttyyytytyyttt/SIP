@@ -12,6 +12,10 @@
  * amount as it is (SPYx's is scaled, so it is never computed from raw), and 25 %,
  * 50 % and All taken from the raw amount, All being the raw amount itself. wSOL
  * arrives as SOL; SPYx carries the issuer's powers and the account it may create.
+ * When the vault's listing cannot be read (anyone can open enough token accounts
+ * for the vault to make it too large), the vault's own wSOL, USDC and SPYx
+ * accounts, read by address, are offered instead, and the card says so. Each
+ * withdrawal names the account its row showed, which the build route re-reads.
  *
  * Each withdrawal is one Phantom approval; the flow checks the amount and the
  * accounts before Phantom is asked.
@@ -59,6 +63,35 @@ export function largestHoldings(items: readonly HoldingJson[]): HoldingJson[] {
   }
   return [...byMint.values()];
 }
+
+export type TokenRows =
+  | { readonly source: "listing"; readonly rows: HoldingJson[] }
+  /** The listing could not be read; these are the vault's own associated accounts, read by address. */
+  | { readonly source: "own_accounts"; readonly rows: HoldingJson[] }
+  | { readonly source: "unreadable"; readonly rows: readonly [] };
+
+/**
+ * What the token section offers: the largest holding of each mint the vault's
+ * listing found, or, when that listing could not be read (someone can open enough
+ * token accounts for the vault to make it too large), the vault's own wSOL, USDC
+ * and leg accounts that hold something, read by address.
+ */
+export function tokenRows(state: VaultStateJson): TokenRows {
+  if (state.holdings.status === "exists") return { source: "listing", rows: largestHoldings(state.holdings.items) };
+  if (state.vaultTokenAccounts.status !== "exists") return { source: "unreadable", rows: [] };
+  const own = state.vaultTokenAccounts.items.flatMap((item): HoldingJson[] =>
+    item.status === "exists" && typeof item.amountRaw === "string" && typeof item.decimals === "number" && typeof item.uiAmount === "string"
+      ? [{ tokenAccount: item.address, mint: item.mint, amountRaw: item.amountRaw, decimals: item.decimals, uiAmount: item.uiAmount, tokenProgram: item.tokenProgram }]
+      : [],
+  );
+  return { source: "own_accounts", rows: largestHoldings(own) };
+}
+
+/** "wSOL, USDC and SPYx": the vault's own token accounts, in the order the state lists them. */
+const OWN_ACCOUNT_SYMBOLS = (() => {
+  const symbols = ["wSOL", "USDC", ...OFFERED_LEGS.map((leg) => leg.symbol)];
+  return `${symbols.slice(0, -1).join(", ")} and ${symbols[symbols.length - 1]}`;
+})();
 
 /** The text Max puts in the field: exactly the withdrawable lamports, as SOL. */
 export const maxWithdrawalText = (withdrawableLamports: bigint): string => formatUnits(withdrawableLamports, SOL_DECIMALS);
@@ -218,23 +251,28 @@ function SolSection({
 }
 
 function TokenSection({ state, write }: { readonly state: VaultStateJson; readonly write: VaultWrite }) {
-  const rows = state.holdings.status === "exists" ? largestHoldings(state.holdings.items) : [];
+  const offered = tokenRows(state);
   const blocked = write.running || write.busyElsewhere || write.unconfirmed;
   const withdraw = (request: TokenWithdrawRequest): void => void write.withdrawToken(request);
 
   return (
     <section className="space-y-3" data-section="tokens">
       <h3 className={LABEL}>{WITHDRAW_COPY.tokens}</h3>
-      {state.holdings.status === "unreadable" ? (
+      {offered.source === "unreadable" ? (
         <p className="text-xs text-muted-foreground">{WITHDRAW_COPY.tokensUnreadable}</p>
-      ) : rows.length === 0 ? (
-        <p className="text-xs text-muted-foreground">{WITHDRAW_COPY.noTokens}</p>
       ) : (
-        <ul className="divide-y">
-          {rows.map((holding) => (
-            <TokenRow key={holding.tokenAccount} holding={holding} rents={state.rents} blocked={blocked} onWithdraw={withdraw} />
-          ))}
-        </ul>
+        <>
+          {offered.source === "own_accounts" ? <p className="text-xs text-muted-foreground">{WITHDRAW_COPY.tokensOwnAccountsOnly(OWN_ACCOUNT_SYMBOLS)}</p> : null}
+          {offered.rows.length === 0 ? (
+            <p className="text-xs text-muted-foreground">{offered.source === "own_accounts" ? WITHDRAW_COPY.ownAccountsEmpty : WITHDRAW_COPY.noTokens}</p>
+          ) : (
+            <ul className="divide-y">
+              {offered.rows.map((holding) => (
+                <TokenRow key={holding.tokenAccount} holding={holding} rents={state.rents} blocked={blocked} onWithdraw={withdraw} />
+              ))}
+            </ul>
+          )}
+        </>
       )}
       <TxProgress
         progress={write.progress}

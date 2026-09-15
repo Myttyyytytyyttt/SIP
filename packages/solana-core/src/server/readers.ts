@@ -12,8 +12,8 @@
 // browser relay no longer serves (getSignaturesForAddress, getTransaction and
 // getProgramAccounts live here, behind the web's own routes).
 
-import { RAYDIUM_CLMM, SOL_USDC_POOL, SYSTEM_PROGRAM, TOKEN_PROGRAM, TOKEN_PROGRAMS, USDC_MINT, WSOL_MINT } from "../client/addresses";
-import { isBase58OfLength, isPubkey, isSignature, tryBase58Decode } from "../client/base58";
+import { RAYDIUM_CLMM, SOL_USDC_POOL, SYSTEM_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, TOKEN_PROGRAMS, USDC_MINT, WSOL_MINT } from "../client/addresses";
+import { base58Encode, isBase58OfLength, isPubkey, isSignature, tryBase58Decode } from "../client/base58";
 import { tryBase64Decode } from "../client/base64";
 import { fieldOffset } from "../client/borsh";
 import { PoolPriceError, legUsdcWad, solUsdcConvertWad } from "../client/clmm-price";
@@ -478,21 +478,157 @@ export interface VaultTokenAccountRead {
   readonly address: string;
   readonly tokenProgram: string;
   readonly status: TokenAccountStatus;
+  /**
+   * What it holds, when it exists and the RPC parsed it as the vault's own account
+   * of this mint; null otherwise. A build never trusts it: the build route reads
+   * the account's bytes again (readWithdrawTokenSource).
+   */
+  readonly amountRaw: bigint | null;
+  readonly decimals: number | null;
+  /** The RPC's display amount, never computed from amountRaw (SPYx's is scaled); null with amountRaw. */
+  readonly uiAmount: string | null;
 }
 
-/** Whether each of vaultTokenAccountTargets(vault) exists, in ONE getMultipleAccounts. A failed read is unreadable as a whole. */
+interface ParsedTokenInfo {
+  readonly mint?: unknown;
+  readonly owner?: unknown;
+  readonly tokenAmount?: { readonly amount?: unknown; readonly decimals?: unknown; readonly uiAmountString?: unknown } | null;
+}
+
+/** What a jsonParsed token account holds, when it is `vault`'s own account of `mint`; null for anything else. */
+function parsedBalance(account: unknown, vault: string, mint: string): { readonly amountRaw: bigint; readonly decimals: number; readonly uiAmount: string } | null {
+  const parsed = (account as { data?: { parsed?: { type?: unknown; info?: ParsedTokenInfo } } } | null | undefined)?.data?.parsed;
+  const info = parsed?.info;
+  if (parsed?.type !== "account" || info?.mint !== mint || info.owner !== vault) return null;
+  const amount = info.tokenAmount?.amount;
+  const decimals = info.tokenAmount?.decimals;
+  const uiAmount = info.tokenAmount?.uiAmountString;
+  if (typeof amount !== "string" || !/^[0-9]+$/.test(amount) || typeof decimals !== "number" || !Number.isInteger(decimals) || typeof uiAmount !== "string") return null;
+  return { amountRaw: BigInt(amount), decimals, uiAmount };
+}
+
+/**
+ * Whether each of vaultTokenAccountTargets(vault) exists, and what each holds, in
+ * ONE getMultipleAccounts (jsonParsed). A failed read is unreadable as a whole.
+ *
+ * READ BY ADDRESS, NEVER LISTED. Anyone can open token accounts whose owner is
+ * the vault, and enough of them make listVaultHoldings' answer too large to read.
+ * These three addresses stay one small answer, so the wallets screen can always
+ * offer the vault's own wSOL, USDC and SPYx.
+ */
 export async function readVaultTokenAccounts(pool: RpcPool, vault: string): Promise<ChainRead<readonly VaultTokenAccountRead[]>> {
   const targets = vaultTokenAccountTargets(vault);
   try {
-    const result = await pool.call<{ value?: unknown }>("getMultipleAccounts", [targets.map((target) => target.address), { encoding: "base64", commitment: COMMITMENT }]);
+    const result = await pool.call<{ value?: unknown }>("getMultipleAccounts", [targets.map((target) => target.address), { encoding: "jsonParsed", commitment: COMMITMENT }]);
     const value = result?.value;
     if (!Array.isArray(value) || value.length !== targets.length) return { kind: "unreadable", error: "getMultipleAccounts did not answer every token account" };
     return {
       kind: "exists",
-      value: targets.map((target, index) => ({ mint: target.mint, address: target.address, tokenProgram: target.tokenProgram, status: tokenAccountStatus(snapshotOf(value[index]), target.tokenProgram) })),
+      value: targets.map((target, index): VaultTokenAccountRead => {
+        const status = tokenAccountStatus(snapshotOf(value[index]), target.tokenProgram);
+        const balance = status === "exists" ? parsedBalance(value[index], vault, target.mint) : null;
+        return {
+          mint: target.mint,
+          address: target.address,
+          tokenProgram: target.tokenProgram,
+          status,
+          amountRaw: balance?.amountRaw ?? null,
+          decimals: balance?.decimals ?? null,
+          uiAmount: balance?.uiAmount ?? null,
+        };
+      }),
     };
   } catch (error) {
     return { kind: "unreadable", error: errorText(pool, error) };
+  }
+}
+
+// ── a token withdrawal's source ──────────────────────────────────────────────
+
+/** A token account, decoded from its own bytes. */
+export interface TokenAccountRead {
+  readonly address: string;
+  /** The program that holds it: SPL Token or Token-2022. */
+  readonly tokenProgram: string;
+  readonly mint: string;
+  /** Its owner field: the key that may move it. */
+  readonly owner: string;
+  readonly amountRaw: bigint;
+  /** Its state byte says frozen. */
+  readonly frozen: boolean;
+}
+
+/** SPL Token's Account: every token account's first 165 bytes. */
+const TOKEN_ACCOUNT_BYTES = 165;
+/** A multisig: the one size past 165 that is not an account with extensions. */
+const TOKEN_MULTISIG_BYTES = 355;
+/** Token-2022's AccountType byte, at 165, for an account. */
+const TOKEN_2022_ACCOUNT_TYPE = 2;
+/** The state byte: 0 uninitialized, 1 initialized, 2 frozen. */
+const TOKEN_ACCOUNT_STATE_OFFSET = 108;
+
+/**
+ * An initialized token account from its bytes, or null for anything else: an
+ * account no token program holds, a mint, a multisig, an uninitialized account.
+ * SPL Token's accounts are exactly 165 bytes; Token-2022's are 165, or longer
+ * with the account type byte at 165 saying Account.
+ */
+export function tokenAccountFromSnapshot(address: string, account: AccountSnapshot | null | undefined): TokenAccountRead | null {
+  if (account === null || account === undefined || account.data === null) return null;
+  const { owner: tokenProgram, data } = account;
+  if (tokenProgram !== TOKEN_PROGRAM && tokenProgram !== TOKEN_2022_PROGRAM) return null;
+  const shaped =
+    data.length === TOKEN_ACCOUNT_BYTES ||
+    (tokenProgram === TOKEN_2022_PROGRAM && data.length > TOKEN_ACCOUNT_BYTES && data.length !== TOKEN_MULTISIG_BYTES && data[TOKEN_ACCOUNT_BYTES] === TOKEN_2022_ACCOUNT_TYPE);
+  const state = data[TOKEN_ACCOUNT_STATE_OFFSET];
+  if (!shaped || (state !== 1 && state !== 2)) return null;
+  return {
+    address,
+    tokenProgram,
+    mint: base58Encode(data.subarray(0, 32)),
+    owner: base58Encode(data.subarray(32, 64)),
+    amountRaw: new DataView(data.buffer, data.byteOffset, data.byteLength).getBigUint64(64, true),
+    frozen: state === 2,
+  };
+}
+
+export interface WithdrawTokenSourceRead {
+  readonly vaultAddress: string;
+  readonly vault: ChainRead<AccountRead<VaultState>>;
+  /** "exists" with null: the chain holds an account there, and it is not an initialized token account. */
+  readonly source: ChainRead<TokenAccountRead | null>;
+}
+
+/**
+ * What a token withdrawal is checked against before it is built, in ONE
+ * getMultipleAccounts: the owner's vault, and the token account named as its
+ * source, decoded from its own bytes. Nothing is listed, so no number of token
+ * accounts anyone opens for the vault can make this unreadable.
+ */
+export async function readWithdrawTokenSource(pool: RpcPool, owner: string, source: string): Promise<WithdrawTokenSourceRead> {
+  if (!isPubkey(owner) || !isPubkey(source)) throw new RangeError("readWithdrawTokenSource: owner and source are base58 32-byte keys");
+  const vaultAddress = deriveVaultPda(owner).toBase58();
+  const failAll = (error: string): WithdrawTokenSourceRead => {
+    const unreadable = { kind: "unreadable" as const, error };
+    return { vaultAddress, vault: unreadable, source: unreadable };
+  };
+  try {
+    const result = await pool.call<{ value?: unknown }>("getMultipleAccounts", [[vaultAddress, source], { encoding: "base64", commitment: COMMITMENT }]);
+    const value = result?.value;
+    if (!Array.isArray(value) || value.length !== 2) return failAll("getMultipleAccounts did not answer two accounts");
+    const snapshot = snapshotOf(value[1]);
+    return {
+      vaultAddress,
+      vault: addressed(vaultAddress, decodeOwned(value[0] as RpcAccount | null, decodeVault)),
+      source:
+        snapshot === undefined
+          ? { kind: "unreadable", error: "getMultipleAccounts answered something that is not an account" }
+          : snapshot === null
+            ? { kind: "missing" }
+            : { kind: "exists", value: tokenAccountFromSnapshot(source, snapshot) },
+    };
+  } catch (error) {
+    return failAll(errorText(pool, error));
   }
 }
 

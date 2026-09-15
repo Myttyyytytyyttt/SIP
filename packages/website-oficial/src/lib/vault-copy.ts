@@ -155,6 +155,9 @@ export const WITHDRAW_COPY = {
   tokens: "Tokens",
   noTokens: "The vault holds no tokens yet.",
   tokensUnreadable: "SIP could not read the vault's tokens just now. Nothing was offered to sign.",
+  /** When the vault's token listing could not be read and its own accounts, read by address, could: `symbols` is "wSOL, USDC and SPYx". */
+  tokensOwnAccountsOnly: (symbols: string): string => `SIP could not list every token account your vault owns just now, so only its own ${symbols} accounts are shown.`,
+  ownAccountsEmpty: "Those accounts hold no tokens.",
   share: (percent: number): string => (percent === 100 ? "All" : `${percent} %`),
   wsolNote: "Arrives in your wallet as SOL.",
   createsLegAccount: (symbol: string, rent: string): string => `Creates your own ${symbol} token account if you have none (${rent} SOL of rent, paid by you and kept by you).`,

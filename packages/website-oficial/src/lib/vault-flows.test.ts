@@ -423,7 +423,7 @@ describe("withdrawFlow and withdrawTokenFlow", () => {
     h.build.mockImplementationOnce(async () => ok(tokenAnswer(h.pensionKey, { vaultToken: holding })));
     const result = await withdrawTokenFlow(h.createDeps, { pensionKey: h.pensionKey, mint: SPYX_MINT, amountRaw: 12_345_678n, vaultTokenAccount: holding, tokenProgram: TOKEN_2022_PROGRAM });
     expect(result.ok).toBe(true);
-    expect(h.build.mock.calls[0]![0]).toEqual({ action: "withdrawToken", owner: h.pensionKey, mint: SPYX_MINT, amountRaw: "12345678" });
+    expect(h.build.mock.calls[0]![0]).toEqual({ action: "withdrawToken", owner: h.pensionKey, mint: SPYX_MINT, amountRaw: "12345678", vaultToken: holding });
     expect(h.send).toHaveBeenCalledTimes(1);
   });
 

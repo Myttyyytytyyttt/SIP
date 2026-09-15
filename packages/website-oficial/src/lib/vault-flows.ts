@@ -392,9 +392,12 @@ export interface WithdrawTokenInput {
   readonly tokenProgram: string;
 }
 
-/** Takes a token out of the vault account the screen showed, into the pension key's own associated account for that mint. */
+/**
+ * Takes a token out of the vault account the screen showed, into the pension key's own associated account for that
+ * mint. The request names that account, and the build route reads it by address before it builds.
+ */
 export async function withdrawTokenFlow(deps: PensionFlowDeps, input: WithdrawTokenInput): Promise<FlowResult> {
-  const request = { action: "withdrawToken", owner: input.pensionKey, mint: input.mint, amountRaw: input.amountRaw.toString() };
+  const request = { action: "withdrawToken", owner: input.pensionKey, mint: input.mint, amountRaw: input.amountRaw.toString(), vaultToken: input.vaultTokenAccount };
   return pensionWrite<WithdrawTokenBuildJson>(deps, request, async () => ({
     instruction: "withdraw_token",
     signers: [input.pensionKey],

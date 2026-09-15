@@ -1,7 +1,7 @@
 // The withdrawal card rendered to HTML with Privy mocked, and its buttons pressed: the pattern
 // VaultCard.test.ts uses. Pressing a share runs the real flow against a stub client.
 
-import { SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, WSOL_MINT } from "@sip/solana-core/client";
+import { SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
 import { Keypair } from "@solana/web3.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -40,7 +40,7 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 });
 
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { WithdrawCard, largestHoldings, maxWithdrawalText, readWithdrawal, tokenLabel } from "@/components/wallets/WithdrawCard";
+import { WithdrawCard, largestHoldings, maxWithdrawalText, readWithdrawal, tokenLabel, tokenRows } from "@/components/wallets/WithdrawCard";
 import { VaultWriteLock } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
 import type { HoldingJson, VaultApi, VaultStateJson } from "@/lib/vault-api";
@@ -134,16 +134,44 @@ describe("WithdrawCard", () => {
     all?.onClick?.(CLICK);
     await vi.waitFor(() => expect(value.refresh).toHaveBeenCalledTimes(2));
     expect(build.mock.calls).toStrictEqual([
-      [{ action: "withdrawToken", owner: PENSION, mint: SPYX_MINT, amountRaw: "3086419" }],
-      [{ action: "withdrawToken", owner: PENSION, mint: SPYX_MINT, amountRaw: "12345678" }],
+      [{ action: "withdrawToken", owner: PENSION, mint: SPYX_MINT, amountRaw: "3086419", vaultToken: SPYX_HOLDING.tokenAccount }],
+      [{ action: "withdrawToken", owner: PENSION, mint: SPYX_MINT, amountRaw: "12345678", vaultToken: SPYX_HOLDING.tokenAccount }],
     ]);
     expect(mocked.signTransaction).not.toHaveBeenCalled();
   });
 
-  it("no vault says to create it first; unreadable tokens are never offered", () => {
+  it("no vault says to create it first; tokens neither listed nor read by address are never offered", () => {
     expect(render(screen({ kind: "ready", state: stateWith({ vault: { status: "missing", address: VAULT } }) }))).toContain("Create your vault first.");
-    const html = render(screen({ kind: "ready", state: stateWith({ holdings: { status: "unreadable", items: [] } }) }));
+    const html = render(screen({ kind: "ready", state: stateWith({ holdings: { status: "unreadable", items: [] }, vaultTokenAccounts: { status: "unreadable", items: [] } }) }));
     expect(html).toContain("SIP could not read the vault&#x27;s tokens just now.");
+    expect(buttons("All")).toHaveLength(0);
+  });
+
+  it("a listing too large to read still offers the vault's own accounts that hold something, says only they are shown, and All names that account", async () => {
+    const usdc = account();
+    const vaultTokenAccounts: VaultStateJson["vaultTokenAccounts"] = {
+      status: "exists",
+      items: [
+        { mint: WSOL_MINT, address: account(), tokenProgram: TOKEN_PROGRAM, status: "missing", amountRaw: null, decimals: null, uiAmount: null },
+        { mint: USDC_MINT, address: usdc, tokenProgram: TOKEN_PROGRAM, status: "exists", amountRaw: "12500000", decimals: 6, uiAmount: "12.5" },
+        { mint: SPYX_MINT, address: account(), tokenProgram: TOKEN_2022_PROGRAM, status: "exists", amountRaw: "0", decimals: 8, uiAmount: "0" },
+      ],
+    };
+    const state = stateWith({ holdings: { status: "unreadable", items: [] }, vaultTokenAccounts });
+    expect(tokenRows(state)).toEqual({ source: "own_accounts", rows: [{ tokenAccount: usdc, mint: USDC_MINT, amountRaw: "12500000", decimals: 6, uiAmount: "12.5", tokenProgram: TOKEN_PROGRAM }] });
+    const build = vi.fn(async () => ({ ok: false as const, status: 422, code: "not_held", message: "Your vault holds none of this token.", retryAfterSeconds: null, body: {} }));
+    const value = screen({ kind: "ready", state }, { build: build as unknown as VaultApi["build"] });
+    const html = render(value);
+    expect(html).toContain("SIP could not list every token account your vault owns just now, so only its own wSOL, USDC and SPYx accounts are shown.");
+    expect(html).toContain("12.5");
+    expect(html).not.toContain("SIP could not read the vault&#x27;s tokens just now.");
+    expect(buttons("All")).toHaveLength(1);
+    buttons("All")[0]?.onClick?.(CLICK);
+    await vi.waitFor(() => expect(value.refresh).toHaveBeenCalledTimes(1));
+    expect(build.mock.calls).toStrictEqual([[{ action: "withdrawToken", owner: PENSION, mint: USDC_MINT, amountRaw: "12500000", vaultToken: usdc }]]);
+
+    const empty = { ...vaultTokenAccounts, items: vaultTokenAccounts.items.filter((item) => item.mint !== USDC_MINT) };
+    expect(render(screen({ kind: "ready", state: stateWith({ holdings: { status: "unreadable", items: [] }, vaultTokenAccounts: empty }) }))).toContain("Those accounts hold no tokens.");
     expect(buttons("All")).toHaveLength(0);
   });
 
