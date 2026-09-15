@@ -95,9 +95,14 @@ export function measurementStart(link: Pick<ManagedLink, "epoch" | "frontierSlot
 
 /**
  * Whether this keeper can settle the vault's mode at all. Decided BEFORE
- * measuring, in dry run too: a PROFIT measurement attested for a VOLUME vault
- * is refused on chain (SkimModeMismatch), and worse, it would describe a number
- * the owner never agreed to be charged on.
+ * measuring, in dry run too.
+ *
+ * NOTHING ON CHAIN BACKS THIS STOP ANY MORE. The attestation takes the vault's
+ * own mode and rate (attestationInputs), so a PROFIT measurement handed to it
+ * for a VOLUME vault would no longer be refused as SkimModeMismatch: it would be
+ * signed as a notional, verify, and be charged at the volume rate — a number the
+ * owner never agreed to be charged on. Until keeper-medir-volumen measures
+ * volume, a VOLUME vault ends here.
  */
 export function modeDecision(vault: Pick<VaultState, "skimMode">): { readonly outcome: "UNSUPPORTED_MODE"; readonly detail: string } | null {
   if (vault.skimMode === MODE_PROFIT) return null;
@@ -213,25 +218,54 @@ export function decideFromMeasurement(measured: WindowMeasurement, from: bigint)
 }
 
 /**
- * The attestation a PROFIT settle signs.
+ * The rate settle_v2 applies to a vault: its VOLUME rate in VOLUME mode and its
+ * PROFIT rate otherwise, exactly as state.rs's `Vault::active_bps` reads it.
+ *
+ * THE PROGRAM'S BRANCH, NOT A TIDIER ONE. active_bps() tests `== MODE_VOLUME`
+ * and gives skim_bps to everything else, so a mode no version defines reads the
+ * PROFIT rate here too. modeDecision stops such a vault before anything is
+ * attested; if one ever got through, these bytes would still be the ones the
+ * program rebuilds.
+ */
+export function activeBps(vault: Pick<VaultState, "skimMode" | "skimBps" | "volumeBps">): number {
+  return vault.skimMode === MODE_VOLUME ? vault.volumeBps : vault.skimBps;
+}
+
+/**
+ * The attestation a settle signs, in the vault's own mode.
  *
  * EVERY FIELD IS ONE settle_v2 REBUILDS FROM CHAIN STATE, which is why none of
- * them is configured here: the mode, the rate of that mode and the policy nonce
- * are the vault's own, so an attestation made for another mode, another rate or
- * a policy the owner has since rewritten is a different byte string and is
- * refused. The window is the one ACTUALLY measured — the program requires
- * session_start_slot >= frontier_slot, and a never-settled link's epoch satisfies
- * that while describing the real span.
+ * them is configured here: the mode is the vault's skim_mode, the rate is its
+ * activeBps and the policy nonce is its own, so an attestation made for another
+ * mode, another rate or a policy the owner has since rewritten is a different
+ * byte string and is refused. This builder once hard-coded mode 0 and skim_bps,
+ * which was right only because every other mode stopped first; the program's
+ * golden vector is a VOLUME attestation, and attestation-golden.test.ts has this
+ * builder reproduce it byte for byte.
+ *
+ * THE WINDOW STARTS WHERE THE MEASUREMENT DID, OR NOTHING IS BUILT. settle_v2
+ * refuses a start below the frontier but checks nothing above it, and nothing
+ * against the epoch: a start past measurementStart would settle the later span
+ * and forgive every slot in between, and a never-settled link's start below its
+ * epoch would charge trading from before the user linked. Either is a caller
+ * bug, and an attestation is the one place it must not pass quietly.
  */
-export function profitAttestationInputs(args: {
+export function attestationInputs(args: {
   readonly programId: PublicKey;
-  readonly link: ManagedLink;
-  readonly vault: Pick<VaultState, "skimBps" | "policyNonce">;
+  readonly link: Pick<ManagedLink, "wallet" | "vault" | "epoch" | "settlementNonce" | "frontierSlot">;
+  readonly vault: Pick<VaultState, "skimMode" | "skimBps" | "volumeBps" | "policyNonce">;
   readonly from: bigint;
   readonly endSlot: bigint;
   readonly baseLamports: bigint;
   readonly currentSlot: bigint;
 }): AttestationInputs {
+  const start = measurementStart(args.link);
+  if (args.from !== start) {
+    throw new Error(
+      `refusing to build an attestation from slot ${args.from}: this link's unsettled span starts at slot ${start}, ` +
+        "and a window that starts anywhere else would charge or forgive slots it should not",
+    );
+  }
   return {
     programId: args.programId,
     wallet: args.link.wallet,
@@ -241,8 +275,8 @@ export function profitAttestationInputs(args: {
     sessionStartSlot: args.from,
     sessionEndSlot: args.endSlot,
     baseLamports: args.baseLamports,
-    mode: MODE_PROFIT,
-    bps: args.vault.skimBps,
+    mode: args.vault.skimMode,
+    bps: activeBps(args.vault),
     policyNonce: args.vault.policyNonce,
     validUntilSlot: args.currentSlot + ATTESTATION_VALIDITY_SLOTS,
   };

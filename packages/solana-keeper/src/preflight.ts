@@ -6,11 +6,13 @@
 // Railway. Beyond Nuvem's four classification invariants it pins what SIP's
 // port depends on: the IDL is sip-vault's and not Nuvem's, it carries settle_v2
 // and no V1 settle, its TradingLink discriminator is the one Anchor derives, and
-// the shared attestation mirror loaded with its 171-byte message.
+// the shared attestation mirror loaded with its 171-byte message and encodes the
+// program's golden vector byte for byte.
 
+import { GOLDEN_V2_HEX, GOLDEN_V2_INPUTS } from "./attestation-golden.js";
 import { isExternalFlowTx } from "./measure-window.js";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID, accountDiscriminator, derivedDiscriminator, hasInstruction } from "./idl.js";
-import { ATTESTATION_MESSAGE_LEN } from "./program-scripts.js";
+import { ATTESTATION_MESSAGE_LEN, attestationMessage } from "./program-scripts.js";
 
 export interface PreflightResult {
   readonly ok: boolean;
@@ -37,6 +39,15 @@ export function runPreflight(): PreflightResult {
     ["the IDL has no V1 settle", hasInstruction("settle"), false],
     ["TradingLink discriminator is Anchor's", accountDiscriminator("TradingLink").equals(derivedDiscriminator("TradingLink")), true],
     ["the attestation message is 171 bytes", ATTESTATION_MESSAGE_LEN === 171, true],
+    // THE BYTES, NOT ONLY THEIR COUNT. A mirror that swapped two fields of one
+    // width keeps its length and signs attestations settle_v2 never verifies.
+    // Checked in the image that will sign, against the vector attestation.rs's
+    // own unit test pins; the image has no attestation.rs, hence the copy.
+    [
+      "the attestation mirror matches the program golden vector",
+      attestationMessage(GOLDEN_V2_INPUTS).toString("hex") === GOLDEN_V2_HEX,
+      true,
+    ],
   ];
   for (const [name, got, want] of invariants) {
     if (got !== want) {

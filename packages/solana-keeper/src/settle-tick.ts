@@ -19,15 +19,15 @@ import type { ManagedLink } from "./discovery.js";
 import { measureSince } from "./measure-window.js";
 import { method } from "./methods.js";
 import type { SolanaWalletSubmitter } from "./privy-signer.js";
-import { MODE_PROFIT, attestationInstruction } from "./program-scripts.js";
+import { attestationInstruction } from "./program-scripts.js";
 import {
+  attestationInputs,
   decideFromMeasurement,
   expectedContribution,
   measurementStart,
   modeDecision,
   noSignerDetail,
   pauseDecision,
-  profitAttestationInputs,
   type SettleOutcome,
 } from "./settle-decision.js";
 
@@ -105,7 +105,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   // The deadline counts from the chain's own confirmed slot, read now rather
   // than taken from the measurement: a walk over a busy span takes seconds.
   const currentSlot = BigInt(await connection.getSlot("confirmed"));
-  const inputs = profitAttestationInputs({
+  const inputs = attestationInputs({
     programId: program.programId,
     link,
     vault,
@@ -124,7 +124,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
         (paid < owed ? `, clipped at max_contribution ${vault.maxContribution}` : "") +
         `) from ${inputs.baseLamports} lamports of measured profit over slots ${inputs.sessionStartSlot}..${inputs.sessionEndSlot}`,
       baseLamports: inputs.baseLamports,
-      mode: MODE_PROFIT,
+      mode: inputs.mode,
     };
   }
 
