@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddressLine } from "@/components/wallets/AddressLine";
+import { TradingWalletsCard } from "@/components/wallets/TradingWalletsCard";
 import { LABEL } from "@/lib/classes";
 import { pensionKeyOf } from "@/lib/pension-key";
 import { privyFailure } from "@/lib/privy-failure";
@@ -48,6 +49,7 @@ export function WalletsScreen() {
   return (
     <div className="space-y-4">
       <PensionKeyCard address={pensionKey} onDisconnect={disconnect} />
+      <TradingWalletsCard />
     </div>
   );
 }

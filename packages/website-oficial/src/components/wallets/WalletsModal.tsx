@@ -63,7 +63,7 @@ export function WalletsModal({ open, onOpenChange }: { open: boolean; onOpenChan
             {/* pr-12 keeps the title clear of the close button, which sits absolute in the corner. */}
             <DialogHeader className="border-b p-4 pr-12 text-left">
               <DialogTitle>Wallets</DialogTitle>
-              <DialogDescription>Your pension key: the Solana wallet that owns your pension.</DialogDescription>
+              <DialogDescription>Your pension key, and the trading wallets that put a slice of every trade aside.</DialogDescription>
             </DialogHeader>
 
             <div className="min-h-0 overflow-y-auto p-4">
