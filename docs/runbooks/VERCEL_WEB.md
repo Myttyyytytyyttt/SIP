@@ -1,4 +1,4 @@
-# Vercel: la web de SIP
+# Vercel: la web de SaverFi
 
 La web (`packages/website-oficial`) se aloja en **Vercel**, en el equipo `mytytys-projects`. En Railway solo queda el
 vigilante: [RAILWAY_SOLANA.md](RAILWAY_SOLANA.md). Esta guía dice cómo crear el proyecto, qué variable va y en qué
@@ -6,7 +6,7 @@ entorno, y cómo comprobar que funciona. Los secretos los pegas **tú**, directa
 
 **Nunca en la web:** `SIP_SOLANA_SETTLE_KEY`, `SIP_SOLANA_PRIVY_APP_SECRET`, `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`,
 `PRIVY_APP_SECRET`, `PRIVY_AUTHORIZATION_PRIVATE_KEY` ni ninguna `NUVEM_SOLANA_*`. La web no firma nada y las rechaza
-por el nombre, aunque estén vacías: con cualquiera de ellas se queda sin Solana. Los demás nombres viejos de Nuvem
+por el nombre, aunque estén vacías: con cualquiera de ellas se queda sin Solana. Los demás nombres retirados
 (`NUVEM_RPC_URL`, `NUVEM_CHAIN_ID`…) no se rechazan: si tienen valor, los logs los nombran una vez en una línea
 `web.config.retired_names`. Tampoco sirven para nada, así que no pongas ninguna variable `NUVEM_*`.
 

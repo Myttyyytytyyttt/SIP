@@ -7,7 +7,7 @@ directamente en Railway. Claude no tiene acceso a Railway.
 
 **Nunca van a Railway:** tu wallet de administración (`~/sip-keys/admin.json`), la llave de administración de la
 política de Privy (`~/sip-keys/privy-policy-admin.key`) ni ninguna variable `NUVEM_*`. El vigilante se niega a arrancar si
-ve una variable de Nuvem. No copies variables de un servicio viejo.
+ve un nombre de variable retirado. Copia solo los nombres de esta guía.
 
 ## 0. Antes de empezar
 

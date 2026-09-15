@@ -25,12 +25,12 @@ Esta guía la sigues tú. Ninguna de estas llaves hace falta que la vea Claude.
 
 ## 1. Comprueba la app de Privy de SIP y activa TEE
 
-1. Entra en el dashboard de Privy y **comprueba arriba que la app es la de SIP**, no la de Nuvem. Todo lo que sigue
-   se hace en la app de SIP.
+1. Entra en el dashboard de Privy y **comprueba arriba que la app es la del app id `cmtrt36tb00080dlbrda5aqam`**, la de
+   SaverFi. En el dashboard se llama SIP, el nombre en clave, mientras no se renombre. Todo lo que sigue se hace en esa app.
 2. Para el vigilante **no hay que buscar ningún interruptor de Solana**. Firma desde el servidor con `@privy-io/node`, y
    eso funciona en cualquier app con TEE (punto 3). La web crea y usa las wallets de Solana desde su propio código
    (`PrivyProvider`). Lo único de Solana que la documentación de Privy pone en el dashboard es entrar con una wallet
-   (Sign in with Solana, SIWS), en **Login methods**. **La web de SIP entra con Phantom, así que actívalo**: el 14-sep
+   (Sign in with Solana, SIWS), en **Login methods**. **La web de SaverFi entra con Phantom, así que actívalo**: el 14-sep
    estaba apagado. El vigilante no lo necesita.
 3. Ve a **Wallets → Advanced**. Tiene que decir **"TEE enabled"**. Si dice "On-device", pulsa **"Request access to
    migrate to TEE"** y sigue las instrucciones. Sin TEE no hay signers ni políticas.
@@ -64,7 +64,7 @@ Tiene tres reglas:
 - **DENY `exportPrivateKey`**: el vigilante no puede sacar la clave de ninguna wallet.
 - **DENY `signMessage`**: el vigilante no puede firmar mensajes sueltos.
 
-Cualquier otra cosa se deniega porque no tiene regla. El programa viejo de Nuvem (`7rtg…`) no está: el comando se niega a
+Cualquier otra cosa se deniega porque no tiene regla. El programa retirado (`7rtg…`) no está: el comando se niega a
 construir una política que lo nombre.
 
 Privy mira **de qué programa** es cada instrucción, no qué hace. Por eso la regla deja pasar más que el cobro: lo cuenta
@@ -173,7 +173,7 @@ Cada intento sale como una línea `privy probe`:
 
 La última línea, `privy verify`, da el resultado: `PASS` (código 0) solo si los tres son `REFUSED`.
 
-Una línea `old program` explica por qué el programa viejo de Nuvem no se prueba. Queda fuera porque no está en la lista
+Una línea `old program` explica por qué el programa retirado no se prueba. Queda fuera porque no está en la lista
 (el paso 5 lo comprueba). No se puede probar porque Privy simula antes de mirar la política, así que la prueba tendría
 que ser una llamada que funcione de verdad contra un programa cuya llave se filtró. Eso no se hace.
 
@@ -221,7 +221,8 @@ expuso, quita el signer de las wallets o rota la llave enseguida, como dice [SEC
 - Poner la política en los `policy_ids` de la wallet: eso ata también al usuario y le bloquea exportar a Axiom. Va
   solo como override del signer.
 - Añadir una regla `*` o un programa "por si acaso".
-- Usar la app de Privy de Nuvem, sus variables `NUVEM_*` o su programa viejo. El comando se niega.
+- Usar una app de Privy que no sea la del paso 1, variables `NUVEM_*` o el programa retirado. Con las dos últimas el
+  comando se niega.
 - Dar por buena una verificación `INCONCLUSIVE`.
 - Dejar puestas `PRIVY_API_BASE_URL`, `PRIVY_API_LOG` o `PRIVY_API_CUSTOM_HEADERS`. Son ajustes del propio SDK de Privy:
   mandan las peticiones que llevan la app secret a otro sitio, las apuntan en el log o les añaden cabeceras. El comando
