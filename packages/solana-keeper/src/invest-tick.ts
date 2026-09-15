@@ -1,13 +1,13 @@
 // One investment turn for one vault: wrap what settled, convert it, buy the leg.
 //
-// Ported from Nuvem's solana-lab keeper (keeper/src/invest-tick.ts). Four things
+// Ported from Nuvem's solana-lab keeper (keeper/src/invest-tick.ts). Five things
 // changed: the policy's in_mint is checked before anything moves, so are either
-// pause switch and the owner's conversion floor (all three in
-// invest-decision.ts), and the crank is null in a dry run, which never reaches a
-// line that needs it. Everything else is the old behaviour, deliberately: the
-// stranded-wSOL rescue, the refusal before convert on an unroutable basket, the
-// all-or-nothing per-leg minimum, one transaction per leg, the compute budget
-// price, and purchases recorded on FAILED too.
+// pause switch and the owner's conversion floor, a wrap moves no more than the
+// crank can front (all four in invest-decision.ts), and the crank is null in a
+// dry run, which never reaches a line that needs it. Everything else is the old
+// behaviour, deliberately: the stranded-wSOL rescue, the refusal before convert
+// on an unroutable basket, the all-or-nothing per-leg minimum, one transaction
+// per leg, the compute budget price, and purchases recorded on FAILED too.
 //
 // THE CRANK OWNS NO AUTHORITY. Every bound — the venue, the floors, the caps —
 // lives in policy state the vault owner signed; this only picks the moment and
@@ -37,7 +37,17 @@ import {
 } from "@solana/spl-token";
 import { summarizeUpstreamError } from "@sip/solana-log";
 import { decodeVault, readInvestmentPolicy } from "./accounts.js";
-import { USDC_MINT, convertDecision, inMintDecision, investPauseDecision } from "./invest-decision.js";
+import {
+  CRANK_WRAP_RESERVE_LAMPORTS,
+  USDC_MINT,
+  WRAP_DUST_LAMPORTS,
+  convertDecision,
+  inMintDecision,
+  investPauseDecision,
+  wrapPlan,
+  type WrapPlan,
+  type WrapReport,
+} from "./invest-decision.js";
 import { method } from "./methods.js";
 import { tightenMinOut } from "./min-out.js";
 import { RAYDIUM_CLMM, buildSwapV2AccountMetas, buildSwapV2Data, fetchLiveRoute } from "./program-scripts.js";
@@ -68,6 +78,13 @@ export interface InvestResult {
    * a LATER one failed is history that lies.
    */
   readonly purchases?: readonly InvestPurchase[];
+  /**
+   * What the turn found about the wrap, whenever conversion is on and it read
+   * the vault's free SOL: a dry run's plan, or a live turn's, sized against the
+   * crank's balance at the moment of the wrap. The keeper counts the turns in a
+   * row that found the crank short of the vault.
+   */
+  readonly wrap?: WrapReport;
 }
 
 export interface InvestDeps {
@@ -76,6 +93,12 @@ export interface InvestDeps {
   readonly vault: PublicKey;
   /** Pays for every wrap, convert and invest: the settle key. NULL IN DRY RUN; required live. */
   readonly crank: Keypair | null;
+  /**
+   * The crank's lamports from this sweep's chain snapshot, null when it could
+   * not be read. It decides whether a turn wakes to wrap and what a dry run
+   * says it would wrap; a live wrap reads the balance again first.
+   */
+  readonly crankLamports: bigint | null;
   /** Pool for each investable mint, from the operator's registry. */
   readonly pools: ReadonlyMap<string, PublicKey>;
   readonly live: boolean;
@@ -83,7 +106,23 @@ export interface InvestDeps {
   readonly protocolPaused: boolean;
 }
 
+/** What a turn learns on its way through, whichever way it then ends. */
+interface TurnFindings {
+  wrap?: WrapReport;
+}
+
+/**
+ * One investment turn, with what it found about the wrap attached to whichever
+ * outcome it ends in. The turn has ten ways out; the report is written once,
+ * here, rather than in each of them.
+ */
 export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
+  const found: TurnFindings = {};
+  const result = await investTurn(deps, found);
+  return found.wrap === undefined ? result : { ...result, wrap: found.wrap };
+}
+
+async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<InvestResult> {
   const { connection, program, vault } = deps;
 
   const policy = await readInvestmentPolicy(program, vault);
@@ -135,23 +174,35 @@ export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
   // if doing so could plausibly clear it — at ~$100/SOL, 0.01 SOL is ~$1 — and
   // sweep up any wSOL an earlier convert left behind. Neither while conversion
   // is off: then only the USDC already held can wake this turn.
+  //
+  // AND NO MORE THAN THE CRANK CAN FRONT (wrapPlan), sized here from the
+  // sweep's snapshot of its balance. That figure decides whether the turn wakes
+  // and what a dry run says; a live turn reads the balance again before it
+  // wraps. A balance the snapshot could not read fronts nothing.
   const minInvestment = policy.minInvestment;
-  const wrapsFree = conversion.convert && free >= 5_000_000n;
-  const converts = conversion.convert && (wrapsFree || wsolHeld > 0n);
+  const crankRead = deps.crankLamports !== null;
+  const planned = conversion.convert ? wrapPlan({ free, crankLamports: deps.crankLamports ?? 0n }) : null;
+  if (planned !== null) found.wrap = wrapReport(planned, deps.live ? 0n : planned.amount);
+  const converts = planned !== null && (planned.amount > 0n || wsolHeld > 0n);
   if (!converts && usdcHeld < minInvestment) {
     return {
       outcome: "IDLE",
-      detail: conversion.convert
-        ? `${free} free lamports, ${wsolHeld} wSOL and ${usdcHeld} USDC — below the policy minimum`
-        : noted(`${usdcHeld} USDC, below the policy minimum ${minInvestment}`),
+      detail:
+        planned === null
+          ? noted(`${usdcHeld} USDC, below the policy minimum ${minInvestment}`)
+          : planned.short
+            ? `${wsolHeld} wSOL and ${usdcHeld} USDC, below the policy minimum, and nothing wrapped: ${shortfall(planned, crankRead)}`
+            : `${planned.free} free lamports, ${wsolHeld} wSOL and ${usdcHeld} USDC — below the policy minimum`,
     };
   }
   if (!deps.live) {
     return {
       outcome: "INVESTED",
-      detail: conversion.convert
-        ? `DRY RUN — would wrap ${free} lamports and invest`
-        : noted(`DRY RUN — would invest the ${usdcHeld} USDC already in the vault`),
+      detail:
+        planned === null
+          ? noted(`DRY RUN — would invest the ${usdcHeld} USDC already in the vault`)
+          : `DRY RUN — would wrap ${planned.amount} lamports and invest` +
+            (planned.short ? `; ${shortfall(planned, crankRead)}` : ""),
     };
   }
   const crank = deps.crank;
@@ -182,20 +233,27 @@ export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
     if (converts) {
       await createAssociatedTokenAccountIdempotent(connection, crank, NATIVE_MINT, vault, undefined, TOKEN_PROGRAM_ID, undefined, true);
       await createAssociatedTokenAccountIdempotent(connection, crank, USDC, vault, undefined, TOKEN_PROGRAM_ID, undefined, true);
-      // Only if there is new SOL worth wrapping. Reaching here with free below
-      // the threshold means we are here to rescue stranded wSOL, and the
-      // program refuses a zero amount.
-      if (wrapsFree) {
+      // THE CRANK'S BALANCE NOW, NOT THE SNAPSHOT'S. Every earlier turn in this
+      // sweep paid its fees and token-account rent out of it, and so did the two
+      // accounts just above, so the top of the sweep can promise a wrap the
+      // crank no longer covers.
+      const wrap = wrapPlan({ free, crankLamports: BigInt(await connection.getBalance(crank.publicKey, "confirmed")) });
+      found.wrap = wrapReport(wrap, 0n);
+      // Only if there is new SOL worth wrapping and a crank to front it.
+      // Reaching here with nothing to wrap means we are here to rescue stranded
+      // wSOL, and the program refuses a zero amount.
+      if (wrap.amount > 0n) {
         // The policy goes in by name: wrap_sol loads it and refuses a vault
         // whose policy is disabled or names no conversion floor, both of which
         // this turn ruled out before it got here.
-        await method(program, "wrapSol")(new anchor.BN(free.toString()))
+        await method(program, "wrapSol")(new anchor.BN(wrap.amount.toString()))
           .accountsPartial({
             crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta,
             tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
           })
           .signers([crank])
           .rpc();
+        found.wrap = wrapReport(wrap, wrap.amount);
       }
 
       // EVERYTHING THE VAULT HOLDS AS wSOL, re-read after the wrap so a balance
@@ -329,6 +387,20 @@ async function balanceOf(connection: Connection, ata: PublicKey): Promise<bigint
   }
 }
 
+/** A wrap plan as the turn reports it, with the lamports it actually wrapped. */
+function wrapReport(plan: WrapPlan, wrapped: bigint): WrapReport {
+  return { free: plan.free, allowance: plan.allowance, wrapped, short: plan.short };
+}
+
+/** Why a short plan leaves free SOL unwrapped, in words for a detail. */
+function shortfall(plan: WrapPlan, crankRead: boolean): string {
+  const why = !crankRead
+    ? "the crank's balance was not read this sweep, and a balance not read fronts nothing"
+    : `the crank can front ${plan.allowance} (its balance less the ${CRANK_WRAP_RESERVE_LAMPORTS}-lamport reserve)` +
+      (plan.amount === 0n ? `, under the ${WRAP_DUST_LAMPORTS} lamports worth a wrap` : "");
+  return `${plan.free - plan.amount} free lamports wait for later sweeps, because ${why}`;
+}
+
 async function sendWithBudget(
   provider: anchor.AnchorProvider,
   crank: Keypair,
@@ -338,7 +410,8 @@ async function sendWithBudget(
   // scheduler how much room to reserve and offered nothing for it, so under
   // congestion these transactions are deprioritised and dropped — and there is
   // no retry anywhere. The price is small in absolute terms (600k units at
-  // 10_000 micro-lamports is ~0.006 SOL) and buys inclusion when it matters.
+  // 10_000 micro-lamports is 6_000 lamports, on top of the 5_000-lamport
+  // signature fee) and buys inclusion when it matters.
   const tx = new Transaction()
     .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }))
     .add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10_000 }))

@@ -281,7 +281,7 @@ describe("the ticks' first steps, over the same bytes", () => {
   it("refuse a non-USDC in_mint in a dry run after reading the policy and nothing else", async () => {
     const inMint = key();
     const { vault, connection, program, calls } = chainWith({}, { inMint });
-    const result = await runInvestTick({ connection, program, vault, crank: null, pools, live: false, protocolPaused: false });
+    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, pools, live: false, protocolPaused: false });
     expect(result.outcome).toBe("REFUSED");
     expect(result.detail).toContain(inMint.toBase58());
     expect(result.detail).toContain(USDC_MINT.toBase58());
@@ -290,7 +290,7 @@ describe("the ticks' first steps, over the same bytes", () => {
 
   it("rest a paused vault's investment before any balance, ATA or wrap", async () => {
     const { vault, connection, program, calls } = chainWith({ paused: true }, {});
-    const result = await runInvestTick({ connection, program, vault, crank: null, pools, live: false, protocolPaused: false });
+    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, pools, live: false, protocolPaused: false });
     expect(result.outcome).toBe("PAUSED");
     expect(result.detail).toContain("VaultPaused");
     expect(calls).toEqual(["getAccountInfoAndContext", "getAccountInfo"]);
@@ -298,7 +298,7 @@ describe("the ticks' first steps, over the same bytes", () => {
 
   it("rest every investment while the protocol is paused", async () => {
     const { vault, connection, program, calls } = chainWith({}, {});
-    const result = await runInvestTick({ connection, program, vault, crank: null, pools, live: false, protocolPaused: true });
+    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, pools, live: false, protocolPaused: true });
     expect(result.outcome).toBe("PAUSED");
     expect(result.detail).toContain("ProtocolPaused");
     expect(calls).toEqual(["getAccountInfoAndContext", "getAccountInfo"]);
@@ -311,10 +311,34 @@ describe("the ticks' first steps, over the same bytes", () => {
         throw new Error("could not find account");
       },
     });
-    const result = await runInvestTick({ connection, program, vault, crank: null, pools, live: false, protocolPaused: false });
+    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: 20_000_000_000n, pools, live: false, protocolPaused: false });
     expect(result.outcome).toBe("INVESTED");
     expect(result.detail).toContain("DRY RUN");
     expect(calls).toContain("getMinimumBalanceForRentExemption");
+  });
+
+  it("say a dry run would wrap what the crank can front, never the vault's whole free balance", async () => {
+    // 10 SOL in the vault over a 2_000_000 rent floor, and a crank holding 0.3
+    // SOL. wrap_sol has the crank pay the amount in before the vault pays it
+    // back, so the 9_998_000_000-lamport wrap the tick once planned fails on
+    // every sweep; the turn wraps the crank's balance less its 0.02 SOL reserve.
+    const { vault, connection, program } = chainWith({}, {}, {
+      getMinimumBalanceForRentExemption: async () => 2_000_000,
+      getTokenAccountBalance: async () => {
+        throw new Error("could not find account");
+      },
+    });
+    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: 300_000_000n, pools, live: false, protocolPaused: false });
+    expect(result.outcome).toBe("INVESTED");
+    expect(result.detail).toContain("would wrap 280000000");
+    expect(result.detail).not.toContain("9998000000");
+    expect(result.wrap).toEqual({ free: 9_998_000_000n, allowance: 280_000_000n, wrapped: 280_000_000n, short: true });
+
+    // A balance the snapshot could not read fronts nothing: the turn rests, and says why.
+    const unread = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, pools, live: false, protocolPaused: false });
+    expect(unread.outcome).toBe("IDLE");
+    expect(unread.detail).toContain("the crank's balance was not read this sweep");
+    expect(unread.wrap).toEqual({ free: 9_998_000_000n, allowance: 0n, wrapped: 0n, short: true });
   });
 
   it("send nothing, live, for a policy with no conversion floor: no ATA, no wrap, and a detail that says why", async () => {
@@ -334,7 +358,7 @@ describe("the ticks' first steps, over the same bytes", () => {
         },
       },
     );
-    const result = await runInvestTick({ connection, program, vault, crank: Keypair.generate(), pools: legPools, live: true, protocolPaused: false });
+    const result = await runInvestTick({ connection, program, vault, crank: Keypair.generate(), crankLamports: null, pools: legPools, live: true, protocolPaused: false });
     expect(result.outcome).toBe("IDLE");
     expect(result.detail).toContain("0 USDC, below the policy minimum");
     expect(result.detail).toContain("min_convert_rate_wad is 0");
@@ -357,7 +381,7 @@ describe("the ticks' first steps, over the same bytes", () => {
       },
     });
     usdcAta = getAssociatedTokenAddressSync(USDC_MINT, vault, true);
-    const result = await runInvestTick({ connection, program, vault, crank: null, pools, live: false, protocolPaused: false });
+    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, pools, live: false, protocolPaused: false });
     expect(result.outcome).toBe("INVESTED");
     expect(result.detail).toContain("DRY RUN — would invest the 7000000 USDC already in the vault");
     expect(result.detail).not.toContain("would wrap");
