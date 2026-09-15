@@ -8,7 +8,9 @@
 // commitment and any `until`. A backlog past the read limit is read and settled
 // one complete prefix at a time, oldest first, and that drain is walked here too.
 // So is the zero-base cadence, which counts only what the wallet itself signed:
-// the fake ledger's entries name their signers, in legacy and v0 messages.
+// the fake ledger's entries name their signers, in legacy and v0 messages. And so
+// is a loss a stranger's transfers bury under a prefix: carried past that prefix's
+// zero settle, it nets against the win above, and two windows charge what one would.
 
 import { readFileSync } from "node:fs";
 import { Keypair, PublicKey } from "@solana/web3.js";
@@ -165,7 +167,7 @@ const FLOW = [SYSTEM];
 const TRADE = [JUPITER, SYSTEM];
 const SETTLE = [ED25519, SIP, SYSTEM];
 /** A PROFIT span's context, as settle-tick.ts builds it. */
-const ctx = (from: bigint, finalizedSlot: bigint) => ({ from, finalizedSlot, mode: MODE_PROFIT, volumeBase: defaultVolumeBase });
+const ctx = (from: bigint, finalizedSlot: bigint) => ({ from, finalizedSlot, mode: MODE_PROFIT, volumeBase: defaultVolumeBase, carry: null });
 const at500 = ctx(500n, 10_000n);
 const finalized = (signature: string) => ({ signature, commitment: "finalized" });
 
@@ -548,6 +550,56 @@ describe("the zero-base cadence counts only what the wallet signed", () => {
       expect(tipped, named).toMatchObject({ txCount: 101, walletSignedTxCount: 100, chainBreaks: 0 });
       expect(await decideFromMeasurement(tipped, at500), named).toEqual({ kind: "settle", baseLamports: 0n, endSlot: 601n });
     }
+  });
+
+  it("carries a loss the wallet signed past the zero settle a stranger's 320 transfers force, and nets it against the win above: two windows charge what one would", async () => {
+    // The wallet buys at 501 and sells at 822 for a 500 000-lamport gain; between them a stranger's transfers cut the span.
+    const buy = tx(501, { programs: TRADE, delta: -10_000_000 });
+    const transfers = Array.from({ length: 320 }, (_, i) => tx(502 + i, { signers: [stranger] }));
+    const sell = tx(822, { programs: TRADE, delta: 10_500_000 });
+    const span = [tx(500), buy, ...transfers, sell];
+    const oneWindowProfit = 10_500_000n - 10_000_000n;
+
+    const first = await measureSince(new FakeLedger(wallet, chained(50_000_000, span)), wallet, 500n, settleProgram);
+    expect(first).toMatchObject({
+      prefixCut: true,
+      signaturesAbove: 322,
+      txCount: MAX_SIGNATURES,
+      walletSignedTxCount: 1,
+      lastSlot: 800n,
+      profitLamports: -10_000_000n,
+      chainBreaks: 0,
+    });
+    const decision1 = await decideFromMeasurement(first, at500);
+    expect(decision1).toEqual({
+      kind: "settle",
+      baseLamports: 0n,
+      endSlot: 800n,
+      backlog: "backlog: settling the oldest 300 of 322 signatures above slot 500, up to slot 800; the rest continues next sweep",
+      carry: { lossLamports: 10_000_000n, walletSignedTxCount: 1 },
+    });
+    if (decision1.kind !== "settle" || decision1.carry === undefined) return;
+
+    // Our zero settle lands at 823, signed and paid by the wallet, and settle_v2 moves the frontier to 800.
+    const settled = new FakeLedger(wallet, chained(50_000_000, [...span, tx(823, { programs: SETTLE, delta: -10_000 })]));
+    const second = await measureSince(settled, wallet, decision1.endSlot, settleProgram);
+    expect(second).toMatchObject({
+      prefixCut: false,
+      signaturesAbove: 23,
+      txCount: 23,
+      settleTxCount: 1,
+      walletSignedTxCount: 1,
+      lastSlot: 823n,
+      profitLamports: 10_500_000n,
+      chainBreaks: 0,
+    });
+    const decision2 = await decideFromMeasurement(second, { ...ctx(800n, 10_000n), carry: decision1.carry });
+    expect(decision2).toEqual({ kind: "settle", baseLamports: 500_000n, endSlot: 823n });
+    if (decision2.kind !== "settle") return;
+    expect(decision1.baseLamports + decision2.baseLamports).toBe(oneWindowProfit);
+
+    // THE VECTOR, PINNED: with the carry forgotten, the buy never nets, and the sell is charged whole.
+    expect(await decideFromMeasurement(second, ctx(800n, 10_000n))).toEqual({ kind: "settle", baseLamports: 10_500_000n, endSlot: 823n });
   });
 });
 

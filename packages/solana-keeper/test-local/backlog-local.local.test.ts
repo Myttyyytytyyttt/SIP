@@ -1,23 +1,32 @@
 // Review finding 5 on a validator running the tested binary: a link buried under
 // more than 300 transactions drains oldest first, one complete prefix per settle,
-// through the keeper's own turn.
+// through the keeper's own turn, and a loss the wallet signed under that pile is
+// carried past the zero settle the pile forces instead of forgotten.
 //
 // THE GRIEF, AS THE REVIEW PRICED IT. A stranger who holds nothing of the user's
 // sends a linked wallet zero-lamport System transfers and pays every fee itself.
 // Each one keeps the wallet's balance chain intact and counts toward the walk's
 // read limit. Before the prefix, a walk with more than 300 signatures above the
 // frontier read none of them and reported INCOMPLETE every sweep, and the frontier
-// never moved again. Here 320 transfers and one 1 SOL trade sit above a fresh
-// link, and two turns settle them:
-// - the first settles the oldest 300 as a zero base over (epoch, S1], S1 being the
-//   slot the 300th transfer landed in, and names the backlog;
+// never moved again. With the prefix, a losing prefix settled a zero base and its
+// loss was forgotten, so the stranger decided when a trader's loss was forgiven.
+// Here a loss the wallet signs sits right above a fresh link, a stranger buries it
+// under 319 transfers, a 1 SOL trade follows, and two turns settle them:
+// - the first settles the oldest 300, the loss and 299 transfers, as a zero base
+//   over (epoch, S1], S1 being the slot the 299th transfer landed in, and names
+//   the backlog; it still moves the frontier, and it carries the loss into the
+//   window above;
+// - between the turns, a dry run nets that carried loss against the trade, and a
+//   dry run over an empty book, standing in for a restart, charges the trade whole;
 // - the second settles the rest over (S1, S2], from the frontier the first one
-//   left, pays 20 % of the trade, and the link's nonce has moved by 2.
+//   left, on the trade net of the carried loss, pays 20 % of that net, and the
+//   link's nonce has moved by 2.
 //
 // THE BOUNDARY IS MADE, NOT HOPED FOR. A prefix never splits a slot, so transfers
-// sharing the 300th one's slot would join its window, and with the trade in it
-// there would be no second window at all. The first 300 are all confirmed before
-// the rest are signed, and the rest wait for a slot past the last of them.
+// sharing the 299th one's slot would join its window, and with the trade in it
+// there would be no second window at all. The loss and the first 299 are all
+// confirmed before the rest are signed, and the rest wait for a slot past the last
+// of them.
 //
 // EVERY KEY IS Keypair.generate(), IN MEMORY, as in settle-local.local.test.ts,
 // whose validator harness this file uses and nothing else. NOT PART OF `pnpm
@@ -42,26 +51,28 @@ import { linkWalletWithConsent } from "@sip/solana-program/link-consent";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readVaults } from "../src/accounts.js";
 import { readChainSnapshot, verifySettleKey } from "../src/chain-state.js";
-import { discoverLinks } from "../src/discovery.js";
+import { discoverLinks, type ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import { MAX_SIGNATURES } from "../src/measure-window.js";
 import { method } from "../src/methods.js";
 import { MODE_PROFIT } from "../src/program-scripts.js";
-import { expectedContribution } from "../src/settle-decision.js";
+import { carryFor, expectedContribution, type CarryBook } from "../src/settle-decision.js";
 import { runSettleTick, type SettleResult } from "../src/settle-tick.js";
 import { LOCAL_PORTS, SIP_VAULT_PROGRAM_ID, startLocalValidator, type LocalValidator } from "./local-validator.js";
 
 const SOL = BigInt(LAMPORTS_PER_SOL);
-/** The market's one payment into the wallet: the second window's profit. */
+/** The market's one payment into the wallet: the second window's profit, before the carried loss nets against it. */
 const TRADE_LAMPORTS = SOL;
+/** What the wallet itself sends the stranger, right above the link: the loss the first settle carries. */
+const LOSS_LAMPORTS = 500_000_000n;
 const MAX_CONTRIBUTION = 10n * SOL;
 const PROFIT_BPS = 2_000;
 const VOLUME_BPS = 200;
 const WALLET_RESERVE = 10_000_000n;
 const WALLET_FUNDING = 2n * SOL;
-/** The oldest part of the backlog: exactly what one settlement reads. */
-const FIRST_TRANSFERS = MAX_SIGNATURES;
-/** What sits above it, so the span holds more than 300 transfers. */
+/** The rest of the backlog's oldest part: with the loss, exactly what one settlement reads. */
+const FIRST_TRANSFERS = MAX_SIGNATURES - 1;
+/** What sits above it, so the span holds more than 300 signatures. */
 const LATER_TRANSFERS = 20;
 const MEMO_PROGRAM = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 /** Transactions sent at once, and signatures per status request (the RPC takes at most 256). */
@@ -82,6 +93,9 @@ const wallet = Keypair.generate();
 const vaultAddress = PublicKey.findProgramAddressSync([Buffer.from("vault"), owner.publicKey.toBuffer()], SIP_VAULT_PROGRAM_ID)[0];
 const linkAddress = PublicKey.findProgramAddressSync([Buffer.from("link"), wallet.publicKey.toBuffer()], SIP_VAULT_PROGRAM_ID)[0];
 
+/** The keeper's carry book, kept from turn to turn as bin/keeper.mts keeps it from sweep to sweep. */
+const carries: CarryBook = new Map();
+
 interface Landed {
   readonly signature: string;
   readonly slot: bigint;
@@ -91,7 +105,9 @@ let validator: LocalValidator | undefined;
 let connection: Connection;
 let program: anchor.Program;
 let linkEpoch: bigint | undefined;
-/** The slot of the newest of the first 300 transfers, S1, and of the oldest of the rest. */
+/** What the loss took from the wallet, its fee included, as its receipt says. */
+let carriedLoss: bigint | undefined;
+/** The slot of the newest of the first 299 transfers, S1, and of the oldest of the rest. */
 let firstTransfersEnd: bigint | undefined;
 let laterTransfersStart: bigint | undefined;
 let trade: Landed | undefined;
@@ -175,6 +191,22 @@ async function zeroTransfers(count: number, firstUnits: number): Promise<Buffer[
 }
 
 /**
+ * An instruction that makes the transaction beside it a trade, paid by `payer`.
+ *
+ * Any program outside System, ComputeBudget, Ed25519 and sip-vault makes a
+ * transaction trading (measure-window.ts). Memo is in the validator's genesis; the
+ * ATA program is the fallback if it ever is not, and then `payer` also pays the
+ * rent of its own wrapped-SOL account, which is why the loss is read from its
+ * receipt and never assumed.
+ */
+async function tradeMarker(payer: PublicKey): Promise<TransactionInstruction> {
+  const memo = await connection.getAccountInfo(MEMO_PROGRAM, "confirmed");
+  return memo?.executable === true
+    ? new TransactionInstruction({ programId: MEMO_PROGRAM, keys: [], data: Buffer.from("trade") })
+    : createAssociatedTokenAccountIdempotentInstruction(payer, getAssociatedTokenAddressSync(NATIVE_MINT, payer), payer, NATIVE_MINT);
+}
+
+/**
  * Sends every transaction and returns each one's confirmed slot, in the order
  * given, once all have landed without an error.
  *
@@ -222,12 +254,22 @@ const slotRange = (landed: readonly Landed[]): { readonly lowest: bigint; readon
     { lowest: landed[0]!.slot, highest: landed[0]!.slot },
   );
 
+/** The buried wallet's link, as discovery reads it now. */
+async function discoveredLink(): Promise<ManagedLink> {
+  const links = await discoverLinks(connection, program.programId, accountDiscriminator("TradingLink"));
+  const link = links.find((candidate) => candidate.wallet.equals(wallet.publicKey));
+  if (link === undefined) throw new Error("discovery found no link for the buried wallet");
+  return link;
+}
+
 /**
  * The wallet's turn, as bin/keeper.mts runs it: the config for the pause switch,
  * every link from discovery, every vault those links name in one request, then
- * runSettleTick, live, with the settle key and the wallet's local signer.
+ * runSettleTick over the carry book `book`, the keeper's own unless a turn says
+ * otherwise. Live, with the settle key and the wallet's local signer; a dry run
+ * holds neither, as the keeper's does not.
  */
-async function keeperTurn(): Promise<SettleResult> {
+async function keeperTurn({ live = true, book = carries }: { readonly live?: boolean; readonly book?: CarryBook } = {}): Promise<SettleResult> {
   const snapshot = await readChainSnapshot(connection, program);
   const links = await discoverLinks(connection, program.programId, accountDiscriminator("TradingLink"));
   const vaults = await readVaults(program, links.map((candidate) => candidate.vault));
@@ -238,10 +280,11 @@ async function keeperTurn(): Promise<SettleResult> {
     program,
     link,
     vault: vaults.get(link.vault.toBase58()) ?? null,
-    attester: settleKey,
-    walletSigner: wallet,
-    live: true,
+    attester: live ? settleKey : null,
+    walletSigner: live ? wallet : null,
+    live,
     protocolPaused: snapshot.config?.paused === true,
+    carries: book,
   });
 }
 
@@ -287,7 +330,7 @@ async function settledWindow(signature: string): Promise<{
   };
 }
 
-describe("the local proof of finding 5: a buried link drains oldest first, one complete prefix per settle", () => {
+describe("the local proof of finding 5: a buried link drains oldest first, one complete prefix per settle, and a buried loss is carried, not forgotten", () => {
   beforeAll(async () => {
     expect(idl.address).toBe(SIP_VAULT_PROGRAM_ID.toBase58());
     validator = await startLocalValidator(authority.publicKey);
@@ -340,55 +383,66 @@ describe("the local proof of finding 5: a buried link drains oldest first, one c
     linkEpoch = link.epoch;
   });
 
-  it("buries the link under 320 zero-lamport transfers the stranger pays for, the first 300 in slots of their own, then a 1 SOL trade", async () => {
+  it("has the wallet sign a 0.5 SOL loss right above the link, buries it under 319 zero-lamport transfers the stranger pays for, the first 299 in slots of their own, then a 1 SOL trade", async () => {
     const epoch = earlier(linkEpoch, "the setup");
     // A transaction in the link's own slot is never measured: the walk stops at the epoch.
     while (BigInt(await connection.getSlot("confirmed")) <= epoch) await sleep(200);
 
+    // THE WALLET'S OWN LOSS, signed by the wallet alone, which also pays its fee. A
+    // transfer out of a System account needs its owner's signature, so no stranger
+    // can make one.
+    const loss = new Transaction().add(
+      SystemProgram.transfer({ fromPubkey: wallet.publicKey, toPubkey: stranger.publicKey, lamports: LOSS_LAMPORTS }),
+      await tradeMarker(wallet.publicKey),
+    );
+    const lossSignature = await sendAndConfirmTransaction(connection, loss, [wallet], { commitment: "confirmed" });
+    const lossReceipt = await receiptOf(lossSignature);
+    const lossSlot = BigInt(lossReceipt.slot);
+    expect(lossSlot > epoch, `the loss landed at ${lossSlot}, past the epoch ${epoch}`).toBe(true);
+    const lossMessage = lossReceipt.transaction.message;
+    expect(lossMessage.staticAccountKeys[0]!.equals(wallet.publicKey), "the wallet pays for its loss").toBe(true);
+    expect(lossMessage.header.numRequiredSignatures, "and signs it alone").toBe(1);
+    // WHAT THE LOSS TOOK, as the chain says it: the transfer and whatever fee its receipt
+    // charged. The proof never assumes a fee, not even that there is one.
+    const carried = BigInt(lossReceipt.meta.preBalances[0]!) - BigInt(lossReceipt.meta.postBalances[0]!);
+    const lossFee = BigInt(lossReceipt.meta.fee);
+    expect(carried >= LOSS_LAMPORTS + lossFee, `the loss took ${carried} lamports: the transfer and the receipt's ${lossFee}-lamport fee`).toBe(true);
+
+    // Signed only once the loss is confirmed, so none of them is older than it.
     const first = await landAll(await zeroTransfers(FIRST_TRANSFERS, 10_000));
     const firstRange = slotRange(first);
-    expect(firstRange.lowest > epoch, `the first transfer landed at ${firstRange.lowest}, past the epoch ${epoch}`).toBe(true);
-    // THE BOUNDARY: nothing signed from here on can land in the 300th transfer's slot.
+    expect(firstRange.lowest >= lossSlot, `the first transfer landed at ${firstRange.lowest}, not before the loss at ${lossSlot}`).toBe(true);
+    // THE BOUNDARY: nothing signed from here on can land in the 299th transfer's slot.
     while (BigInt(await connection.getSlot("confirmed")) <= firstRange.highest) await sleep(200);
     const later = await landAll(await zeroTransfers(LATER_TRANSFERS, 20_000));
     const laterRange = slotRange(later);
     expect(laterRange.lowest > firstRange.highest, `the later transfers start at ${laterRange.lowest}, past S1 ${firstRange.highest}`).toBe(true);
 
-    // Any program outside System, ComputeBudget, Ed25519 and sip-vault makes a
-    // transaction trading (measure-window.ts). Memo is in the validator's genesis;
-    // the ATA program is the fallback if it ever is not.
-    const memo = await connection.getAccountInfo(MEMO_PROGRAM, "confirmed");
-    const marker =
-      memo?.executable === true
-        ? new TransactionInstruction({ programId: MEMO_PROGRAM, keys: [], data: Buffer.from("trade") })
-        : createAssociatedTokenAccountIdempotentInstruction(
-            stranger.publicKey,
-            getAssociatedTokenAddressSync(NATIVE_MINT, stranger.publicKey),
-            stranger.publicKey,
-            NATIVE_MINT,
-          );
     const payment = new Transaction().add(
       SystemProgram.transfer({ fromPubkey: stranger.publicKey, toPubkey: wallet.publicKey, lamports: TRADE_LAMPORTS }),
-      marker,
+      await tradeMarker(stranger.publicKey),
     );
     const signature = await sendAndConfirmTransaction(connection, payment, [stranger], { commitment: "confirmed" });
     const tradeSlot = BigInt((await receiptOf(signature)).slot);
     expect(tradeSlot > laterRange.highest, `the trade landed at ${tradeSlot}, above every transfer`).toBe(true);
     // The transfers moved nothing, and the stranger paid for all of them.
-    expect(await lamports(wallet.publicKey), "the wallet holds its funding and the trade").toBe(WALLET_FUNDING + TRADE_LAMPORTS);
+    expect(await lamports(wallet.publicKey), "the wallet holds its funding, less the loss, and the trade").toBe(WALLET_FUNDING - carried + TRADE_LAMPORTS);
 
+    carriedLoss = carried;
     firstTransfersEnd = firstRange.highest;
     laterTransfersStart = laterRange.lowest;
     trade = { signature, slot: tradeSlot };
     console.log(
-      `local proof: ${FIRST_TRANSFERS} zero-lamport transfers in slots ${firstRange.lowest}..${firstRange.highest}, ` +
-        `${LATER_TRANSFERS} more in ${laterRange.lowest}..${laterRange.highest}, and the trade at ${tradeSlot}, all above epoch ${epoch}`,
+      `local proof: the wallet's loss of ${carried} lamports at ${lossSlot}, ${FIRST_TRANSFERS} zero-lamport transfers in slots ` +
+        `${firstRange.lowest}..${firstRange.highest}, ${LATER_TRANSFERS} more in ${laterRange.lowest}..${laterRange.highest}, ` +
+        `and the trade at ${tradeSlot}, all above epoch ${epoch}`,
     );
   });
 
-  it("settles the oldest 300 as a zero base over (epoch, S1], S1 the 300th transfer's slot, and names the backlog it leaves", async () => {
+  it("settles the oldest 300, the loss among them, as a zero base over (epoch, S1], names the backlog it leaves, and carries the loss into the window above", async () => {
     const epoch = earlier(linkEpoch, "the setup");
     const s1 = earlier(firstTransfersEnd, "the transfers");
+    const carried = earlier(carriedLoss, "the loss");
     await finalized(earlier(trade, "the trade").signature);
     expect(await linkAccount()).toEqual({ epoch, settlementNonce: 0n, frontierSlot: 0n });
     const vaultBefore = await lamports(vaultAddress);
@@ -396,29 +450,60 @@ describe("the local proof of finding 5: a buried link drains oldest first, one c
     const result = await keeperTurn();
     expect(result.outcome, result.detail).toBe("SETTLED");
     expect(result).toMatchObject({ baseLamports: 0n, expectedLamports: 0n, settledLamports: 0n, endSlot: s1, nonce: 0n });
-    expect(result.detail).toContain(
-      `backlog: settling the oldest ${FIRST_TRANSFERS} of ${FIRST_TRANSFERS + LATER_TRANSFERS + 1} signatures above slot ${epoch}, ` +
-        `up to slot ${s1}; the rest continues next sweep`,
-    );
+    expect(result.detail).toContain(`backlog: settling the oldest 300 of 321 signatures above slot ${epoch}, up to slot ${s1}; the rest continues next sweep`);
+    // THE ZERO SETTLE STILL MOVES THE FRONTIER, and the loss goes with it: of the 300, the wallet signed the loss alone.
+    expect(result.carry).toEqual({ lossLamports: carried, walletSignedTxCount: 1 });
+    expect(result.detail).toContain(`carrying ${carried} lamports`);
     const signature = earlier(result.signature, "the first settle's signature");
 
     expect(await linkAccount(), "the frontier is S1 and the nonce moved by one").toEqual({ epoch, settlementNonce: 1n, frontierSlot: s1 });
     expect(await lamports(vaultAddress), "a zero base moves nothing").toBe(vaultBefore);
     expect(await settledWindow(signature)).toEqual({ start: epoch, end: s1, nonce: 0n, base: 0n, paid: 0n, mode: MODE_PROFIT, bps: PROFIT_BPS });
+    const rediscovered = await discoveredLink();
+    expect({ settlementNonce: rediscovered.settlementNonce, frontierSlot: rediscovered.frontierSlot }).toEqual({ settlementNonce: 1n, frontierSlot: s1 });
+    expect(carryFor(carries, rediscovered), "the book holds the carry for the state the settle left").toEqual({ lossLamports: carried, walletSignedTxCount: 1 });
     firstSettle = result;
-    console.log(`local proof: settle 1 closed (${epoch}, ${s1}] with a zero base over ${FIRST_TRANSFERS} transfers; nonce 0 -> 1; ${signature}`);
+    console.log(`local proof: settle 1 closed (${epoch}, ${s1}] with a zero base, carrying ${carried} lamports of losses; nonce 0 -> 1; ${signature}`);
   });
 
-  it("settles the rest over (S1, S2] from the frontier the first settle left, pays 20 % of the trade, and the nonce is up by 2", async () => {
+  it("between the turns, a dry run nets the carried loss against the trade, and one over an empty book, standing in for a restart, charges the trade whole; neither sends anything", async () => {
+    const s1 = earlier(firstTransfersEnd, "the transfers");
+    const carried = earlier(carriedLoss, "the loss");
+    await finalized(earlier(earlier(firstSettle, "the first settle").signature, "the first settle's signature"));
+    const walletBefore = await lamports(wallet.publicKey);
+    const net = TRADE_LAMPORTS - carried;
+
+    const netted = await keeperTurn({ live: false });
+    expect(netted.outcome, netted.detail).toBe("SETTLED");
+    expect(netted.baseLamports).toBe(net);
+    expect(netted.detail).toContain(`would settle ${expectedContribution(net, PROFIT_BPS, MAX_CONTRIBUTION).paid} lamports`);
+    expect(netted.detail).toContain(`net of ${carried} lamports carried`);
+
+    // THE ONE HOLE LEFT: a restart forgets a pending carry, and the trade is charged on its own profit.
+    const restarted = await keeperTurn({ live: false, book: new Map() });
+    expect(restarted.outcome, restarted.detail).toBe("SETTLED");
+    expect(restarted.baseLamports).toBe(1_000_000_000n);
+    expect(expectedContribution(TRADE_LAMPORTS, PROFIT_BPS, MAX_CONTRIBUTION).paid, "settle.rs's floor(base × bps / 10 000) for the whole trade").toBe(200_000_000n);
+    expect(restarted.detail).toContain("would settle 200000000 lamports");
+    expect(restarted.detail).not.toContain("net of");
+
+    expect(await linkAccount(), "nothing was sent").toMatchObject({ settlementNonce: 1n, frontierSlot: s1 });
+    expect(await lamports(wallet.publicKey), "and the wallet paid no fee").toBe(walletBefore);
+    expect(carryFor(carries, await discoveredLink()), "and the keeper's book still holds the carry").toEqual({ lossLamports: carried, walletSignedTxCount: 1 });
+  });
+
+  it("settles the rest over (S1, S2] from the frontier the first settle left, on the trade net of the carried loss, pays 20 % of that net, and the nonce is up by 2", async () => {
     const epoch = earlier(linkEpoch, "the setup");
     const s1 = earlier(firstTransfersEnd, "the transfers");
     const laterStart = earlier(laterTransfersStart, "the transfers");
     const theTrade = earlier(trade, "the trade");
+    const carried = earlier(carriedLoss, "the loss");
     const firstSignature = earlier(earlier(firstSettle, "the first settle").signature, "the first settle's signature");
     await finalized(firstSignature);
     const firstSettleSlot = BigInt((await receiptOf(firstSignature)).slot);
-    const expected = expectedContribution(TRADE_LAMPORTS, PROFIT_BPS, MAX_CONTRIBUTION).paid;
-    expect(expected, "settle.rs's floor(base × bps / 10 000) for the trade").toBe(200_000_000n);
+    const net = TRADE_LAMPORTS - carried;
+    const expected = expectedContribution(net, PROFIT_BPS, MAX_CONTRIBUTION).paid;
+    expect(expected, "settle.rs's floor(base × bps / 10 000) for the net").toBe((net * BigInt(PROFIT_BPS)) / 10_000n);
     const vaultBefore = await lamports(vaultAddress);
 
     const result = await keeperTurn();
@@ -426,15 +511,18 @@ describe("the local proof of finding 5: a buried link drains oldest first, one c
     // What was left above S1 fits one settlement: the later transfers, the trade and the first settle.
     expect(result.detail).not.toContain("backlog");
     expect(result.detail).toContain(`measured over ${LATER_TRANSFERS + 2} txs`);
+    expect(result.detail).toContain(`net of ${carried} lamports carried`);
     const s2 = earlier(result.endSlot, "the second settle's end slot");
     expect(s2, "S2 is the newest finalized signature, the first settle").toBe(firstSettleSlot);
     expect(laterStart > s1 && theTrade.slot <= s2, "the later transfers and the trade sit inside (S1, S2]").toBe(true);
-    expect(result).toMatchObject({ baseLamports: TRADE_LAMPORTS, expectedLamports: expected, settledLamports: expected, nonce: 1n });
+    expect(result).toMatchObject({ baseLamports: net, expectedLamports: expected, settledLamports: expected, nonce: 1n });
+    expect(result.carry, "a win carries nothing on").toBeUndefined();
     const signature = earlier(result.signature, "the second settle's signature");
 
-    expect((await lamports(vaultAddress)) - vaultBefore, "the vault gained the trade's 20 %").toBe(expected);
+    expect((await lamports(vaultAddress)) - vaultBefore, "the vault gained 20 % of the net").toBe(expected);
     expect(await linkAccount(), "the frontier is S2 and the nonce is up by 2").toEqual({ epoch, settlementNonce: 2n, frontierSlot: s2 });
-    expect(await settledWindow(signature)).toEqual({ start: s1, end: s2, nonce: 1n, base: TRADE_LAMPORTS, paid: expected, mode: MODE_PROFIT, bps: PROFIT_BPS });
-    console.log(`local proof: settle 2 closed (${s1}, ${s2}] paying ${expected} on a base of ${TRADE_LAMPORTS}; nonce 1 -> 2; ${signature}`);
+    expect(await settledWindow(signature)).toEqual({ start: s1, end: s2, nonce: 1n, base: net, paid: expected, mode: MODE_PROFIT, bps: PROFIT_BPS });
+    expect(carryFor(carries, await discoveredLink()), "the carry netted once, and is gone").toBeNull();
+    console.log(`local proof: settle 2 closed (${s1}, ${s2}] paying ${expected} on a base of ${net}, net of ${carried} carried; nonce 1 -> 2; ${signature}`);
   });
 });

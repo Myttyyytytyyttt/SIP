@@ -65,7 +65,7 @@ import {
 } from "../src/privy-signer.js";
 import { SolanaReadModel } from "../src/read-model.js";
 import { poolFetch } from "../src/rpc-pool.js";
-import { settleAlert } from "../src/settle-decision.js";
+import { settleAlert, type CarryBook } from "../src/settle-decision.js";
 import { runSettleTick } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KEEPER_LOCK_NAME, KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
@@ -172,6 +172,14 @@ const changes = createChangeLog(log);
  * SETTLE_RETRY_CRITICAL_AFTER.
  */
 const settleRetries = new Map<string, number>();
+
+/**
+ * The losses zero settles carried forward, per link state (LossCarry,
+ * src/settle-decision.ts). IN MEMORY: a restart forgets every pending carry, and
+ * that is the only way a loss is forgotten without the wallet's own 100 signed
+ * transactions (ZERO_BASE_MIN_TXS).
+ */
+const settleCarries: CarryBook = new Map();
 
 /**
  * Consecutive invest turns, per vault, that found more free SOL than the crank
@@ -544,6 +552,7 @@ async function sweep(): Promise<void> {
           walletSigner: settleTurn.walletSigner,
           live: settleTurn.live,
           protocolPaused,
+          carries: settleCarries,
         });
         // MONEY EVENTS always log and clear the dedupe key — a SETTLED, a RETRY
         // or a real FAILED is news every time. The resting states each log ONCE
@@ -588,6 +597,8 @@ async function sweep(): Promise<void> {
               nonce: settle.nonce,
               vaultAddr,
               mode: settle.mode,
+              // THE ATTESTED BASE, as the Settled event records it: in PROFIT mode,
+              // net of any loss an earlier zero settle carried into the window.
               baseRaw: settle.baseLamports,
               contributionRaw: settle.settledLamports,
               txRef: settle.signature,

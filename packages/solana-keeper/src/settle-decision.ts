@@ -43,17 +43,24 @@ export type SettleOutcome =
   /** New profit measured, attested and settled — or, in dry run, what would be. */
   | "SETTLED"
   /**
-   * Measured a loss or zero — for a VOLUME vault, no successful trade — over a
-   * span too small to spend a transaction on. Nothing is taken and nothing is sent.
+   * Measured a loss or zero — net of any loss an earlier zero settle carried in,
+   * for a PROFIT vault; for a VOLUME vault, no successful trade — over a span too
+   * small to spend a transaction on. Nothing is taken and nothing is sent.
    *
    * A ZERO SETTLE IS WHAT MOVES A FLAT SPAN'S FRONTIER, and this is the wait for
    * one. Nuvem's settle required profit > 0, so a flat or losing span stayed
    * inside the window and grew until the walk refused it, forever. settle_v2
    * accepts a zero base — it moves nothing and still advances the frontier — and
    * baseDecision sends one once the trading wallet itself has signed
-   * ZERO_BASE_MIN_TXS of the span's transactions, our own settles not counted.
-   * Until then the span rests here and its losses keep netting against the next
-   * win; a zero settle forgets them, because TradingLink keeps no high-water mark.
+   * ZERO_BASE_MIN_TXS of the span's transactions, our own settles not counted and
+   * a carried window's own count added. Until then the span rests here and its
+   * losses keep netting against the next win; that zero settle forgets them,
+   * because TradingLink keeps no high-water mark.
+   *
+   * A PREFIX NEVER WAITS, AND NO LONGER FORGETS A LOSS. A backlog's oldest prefix
+   * never rests here: it settles a zero base at once, and a PROFIT prefix that
+   * lost carries its loss, and the transactions the wallet signed in it, into the
+   * window above it (LossCarry).
    */
   | "NO_PROFIT"
   /** The completeness oracle broke — a human should look. */
@@ -207,6 +214,13 @@ export type MeasurementDecision =
        * the SETTLED detail.
        */
       readonly backlog?: string;
+      /**
+       * Set only on a PROFIT prefix's zero settle whose base, net of any carry it
+       * took in, is negative: the loss and the wallet-signed count this settle
+       * hands to the window above it. settle-tick.ts records it (recordCarry)
+       * before the settle is sent.
+       */
+      readonly carry?: LossCarry;
     };
 
 /**
@@ -252,12 +266,125 @@ export const defaultVolumeBase: VolumeBase = async (measured) => (measured.succe
  * alone. Our own settles are signed by the wallet too, through its Privy seat, and
  * never count.
  *
- * WHAT IT DOES NOT CLOSE. A cut prefix never waits for this count, so a stranger
- * who sends a wallet more than MAX_SIGNATURES transactions still makes its oldest
- * prefix settle a zero base when that prefix is flat or losing. That is the
- * prefix's rule, not this count's, and it is decided apart.
+ * A PREFIX NEVER WAITS, AND NO LONGER FORGETS A LOSS. A stranger who sends a
+ * wallet more than MAX_SIGNATURES transactions still cuts its span, and a flat or
+ * losing oldest prefix still settles a zero base at once, whatever this count
+ * says: resting would leave the same prefix above the frontier every sweep. That
+ * settle used to forget the prefix's loss, so the stranger's transfers decided
+ * when a trader's losses were forgiven after all. A PROFIT prefix that lost now
+ * carries its loss, and the transactions the wallet signed in it, into the window
+ * above it (LossCarry): that window's base is its profit less the loss, and its
+ * count adds the prefix's. A carried loss is forgotten only once the wallet itself
+ * has signed this many transactions across the carried windows together.
  */
 export const ZERO_BASE_MIN_TXS = 100;
+
+/**
+ * The loss a zero settle moved the frontier past, and the transactions the
+ * trading wallet signed in that window, handed to the next window of the same
+ * link: that window's base is its profit less `lossLamports`, and its count toward
+ * ZERO_BASE_MIN_TXS adds `walletSignedTxCount`. PROFIT only; a VOLUME span is
+ * charged on a notional and ignores it. A carry belongs to exactly one link state,
+ * the epoch, the nonce and the frontier its zero settle leaves behind (carryFor,
+ * recordCarry), and `lossLamports` is always positive.
+ *
+ * WHY A CARRY AND NOT A REST. A backlog's oldest prefix is finalized history that
+ * never changes. A losing prefix that rested at NO_PROFIT would be the same
+ * prefix next sweep, and every sweep after, while the backlog above it only
+ * grew: resting wedges the link, which is what the prefix drain exists to end. So
+ * the prefix still settles a zero base and moves the frontier, and what that
+ * settle used to forget is handed to the window above it instead.
+ *
+ * WHY IT ONLY LOWERS A BASE. A base net of a carry is never above the window's own
+ * profit, and a settle's base is never below zero. Nor can a stranger make a carry
+ * larger: a stranger can only add lamports to a System account, because taking
+ * any out needs the wallet's own signature, so a negative span is the wallet's own
+ * doing, and so is every lamport of loss a carry holds. What a stranger's
+ * transactions can still do is cut a prefix, and a cut now moves the loss instead
+ * of forgetting it.
+ *
+ * WHY IN MEMORY, AND THE ONE HOLE THAT LEAVES. TradingLink keeps no high-water
+ * mark and the program does not change, so the carry lives in the keeper's
+ * process (CarryBook). A restart forgets a pending carry, and the window above it
+ * is then charged on its own profit, as every window was before. A stranger cannot
+ * cause one: the keeper restarts on a deploy or a crash of its own, never on a
+ * transaction someone sends a wallet.
+ */
+export interface LossCarry {
+  readonly lossLamports: bigint;
+  readonly walletSignedTxCount: number;
+}
+
+/**
+ * Every pending carry, by the link's address (linkAddress.toBase58()) and then by
+ * the link state it belongs to, `${epoch}:${settlementNonce}:${frontierSlot}`. At
+ * most two entries per link: the state the link is in, and the state its settle
+ * being sent would leave.
+ */
+export type CarryBook = Map<string, Map<string, LossCarry>>;
+
+type CarryLink = Pick<ManagedLink, "linkAddress" | "epoch" | "settlementNonce" | "frontierSlot">;
+
+function carryKey(epoch: bigint, settlementNonce: bigint, frontierSlot: bigint): string {
+  return `${epoch}:${settlementNonce}:${frontierSlot}`;
+}
+
+/**
+ * The carry for the link's exact current state, or null.
+ *
+ * EXACT, OR NOTHING. A carry recorded for the state a settle would leave applies
+ * only once the link reads that state: the same epoch (a relinked wallet starts
+ * over), the nonce that settle moved to, and the frontier it moved to. A settle
+ * that did not land, or landed with another window, leaves another state, and the
+ * carry is not this span's.
+ *
+ * IT PRUNES WHAT NO LATER STATE CAN MATCH. A nonce only grows within an epoch, so
+ * the link's entries under another epoch or a lower nonce are deleted, and the
+ * link's key once it holds none.
+ */
+export function carryFor(book: CarryBook, link: CarryLink): LossCarry | null {
+  const address = link.linkAddress.toBase58();
+  const entries = book.get(address);
+  if (entries === undefined) return null;
+  for (const key of [...entries.keys()]) {
+    const [epoch, settlementNonce] = key.split(":");
+    if (BigInt(epoch!) !== link.epoch || BigInt(settlementNonce!) < link.settlementNonce) entries.delete(key);
+  }
+  if (entries.size === 0) {
+    book.delete(address);
+    return null;
+  }
+  return entries.get(carryKey(link.epoch, link.settlementNonce, link.frontierSlot)) ?? null;
+}
+
+/**
+ * Records what the settle about to be sent from the link's current state hands on:
+ * `carry` under the state it leaves when it lands, `${epoch}:${settlementNonce + 1}:
+ * ${endSlot}`, or, when `carry` is null, nothing there.
+ *
+ * THE CURRENT STATE'S ENTRY STAYS, EVERY OTHER ONE GOES. A settle that does not
+ * land leaves the link where it is, and the next sweep still needs the carry that
+ * brought it there. Any other entry is an earlier attempt's post state, and a
+ * null carry deletes it too: a loss an earlier, different window would have
+ * carried must not net against the window this settle closes.
+ *
+ * A carry whose loss is not positive is a caller bug, and throws: it would raise
+ * the next window's base.
+ */
+export function recordCarry(book: CarryBook, link: CarryLink, endSlot: bigint, carry: LossCarry | null): void {
+  if (carry !== null && carry.lossLamports <= 0n) {
+    throw new Error(`a carried loss is positive, not ${carry.lossLamports} lamports: a carry that is not a loss would raise the next base`);
+  }
+  const address = link.linkAddress.toBase58();
+  const current = carryKey(link.epoch, link.settlementNonce, link.frontierSlot);
+  const entries = book.get(address) ?? new Map<string, LossCarry>();
+  for (const key of [...entries.keys()]) {
+    if (key !== current) entries.delete(key);
+  }
+  if (carry !== null) entries.set(carryKey(link.epoch, link.settlementNonce + 1n, endSlot), carry);
+  if (entries.size === 0) book.delete(address);
+  else book.set(address, entries);
+}
 
 /** Where a turn's walk started, how far finality had come when it did, and how the span is charged. */
 export interface MeasurementContext {
@@ -276,12 +403,18 @@ export interface MeasurementContext {
    */
   readonly mode: number;
   readonly volumeBase: VolumeBase;
+  /**
+   * carryFor(book, link): the loss an earlier zero settle carried into this span,
+   * or null. REQUIRED, like the mode: a default of null would forget every carried
+   * loss silently, and the next win would be charged as if it had never happened.
+   */
+  readonly carry: LossCarry | null;
 }
 
 /** What a measurement allows, in order — and the order is the point. */
 export async function decideFromMeasurement(
   measured: WindowMeasurement,
-  { from, finalizedSlot, mode, volumeBase }: MeasurementContext,
+  { from, finalizedSlot, mode, volumeBase, carry }: MeasurementContext,
 ): Promise<MeasurementDecision> {
   // UNFETCHABLE FIRST. This used to run after the empty check, so a span where
   // the RPC returned null for EVERY transaction — exactly what heavy throttling
@@ -359,7 +492,7 @@ export async function decideFromMeasurement(
         "a transaction was missed, so the measurement is incomplete and nothing will be attested",
     };
   }
-  return baseDecision({ mode, measured, from, volumeBase });
+  return baseDecision({ mode, measured, from, volumeBase, carry });
 }
 
 /**
@@ -367,33 +500,42 @@ export async function decideFromMeasurement(
  * transaction. decideFromMeasurement calls it once every completeness stop has
  * passed; nothing else should.
  *
- * THE BASE: a PROFIT span's measured profit, and a VOLUME span's notional from
- * the volumeBase seam — null there is UNSUPPORTED_MODE, and nothing is attested.
- * A positive base settles over the measured window. A zero or negative one
- * settles a ZERO base once the trading wallet itself has signed ZERO_BASE_MIN_TXS
- * of the span's transactions, our own settles not counted (walletSignedTxCount),
- * and rests at NO_PROFIT before that. Nothing else here reads that count: the
- * loop guard and the backlog line count every transaction the walk read.
+ * THE BASE: a PROFIT span's measured profit less any loss an earlier zero settle
+ * carried into it (`carry`), and a VOLUME span's notional from the volumeBase
+ * seam — null there is UNSUPPORTED_MODE, and nothing is attested; a VOLUME span
+ * ignores a carry. A positive base settles over the measured window. A zero or
+ * negative one settles a ZERO base once the trading wallet itself has signed
+ * ZERO_BASE_MIN_TXS transactions, our own settles not counted
+ * (walletSignedTxCount), across this span and the window a carry came from
+ * together, and rests at NO_PROFIT before that. Nothing else here reads that
+ * count: the loop guard and the backlog line count every transaction the walk read.
  *
- * A PREFIX DECIDES LIKE A WHOLE WINDOW, AND NEVER WAITS. When the window is only
- * the oldest complete prefix of a backlog (measured.prefixCut), a positive base
+ * A PREFIX NEVER WAITS, AND NO LONGER FORGETS A LOSS. When the window is only the
+ * oldest complete prefix of a backlog (measured.prefixCut), a positive base
  * settles to the prefix's last slot, and a zero or negative one settles a zero
  * base at once, whatever its count: a prefix that rested would be the same prefix
- * next sweep, and every sweep after. Each such settle carries a `backlog` line.
- * The reserve is not decided here: settle-tick.ts checks what the wallet can pay
- * for exactly this base, and a positive prefix it cannot pay rests at
- * BELOW_RESERVE with nothing sent, never settled past with a zero base instead.
+ * next sweep, and every sweep after. A PROFIT prefix whose net base is negative
+ * hands that loss, and the count so far, to the window above it (the decision's
+ * `carry`); only a count that has reached ZERO_BASE_MIN_TXS forgets it, as a
+ * whole window's zero settle does. A flat prefix has nothing to hand on. Each such
+ * settle carries a `backlog` line. The reserve is not decided here: settle-tick.ts
+ * checks what the wallet can pay for exactly this base, and a positive prefix it
+ * cannot pay rests at BELOW_RESERVE with nothing sent, never settled past with a
+ * zero base instead.
  */
 export async function baseDecision({
   mode,
   measured,
   from,
   volumeBase,
+  carry,
 }: {
   readonly mode: number;
   readonly measured: WindowMeasurement;
   readonly from: bigint;
   readonly volumeBase: VolumeBase;
+  /** The loss carried into this span, or null. Required: see MeasurementContext.carry. */
+  readonly carry: LossCarry | null;
 }): Promise<MeasurementDecision> {
   // THE LOOP GUARD, AND IT COMES FIRST. A settle is external flow
   // (measure-window.ts), so a window holding only the previous settle measures a
@@ -423,17 +565,24 @@ export async function baseDecision({
           `up to slot ${measured.lastSlot}; the rest continues next sweep`,
       }
     : {};
-  // A PREFIX OF NOTHING BUT OUR OWN SETTLES moves the frontier with a zero base,
-  // and no seam is asked about it, because it holds nothing to charge. It cannot
-  // loop: each such settle adds one transaction above the frontier and takes a
-  // whole prefix below it. An undefined mode falls through to its stop.
-  if (others === 0 && (mode === MODE_PROFIT || mode === MODE_VOLUME)) {
+  // A VOLUME PREFIX OF NOTHING BUT OUR OWN SETTLES moves the frontier with a zero
+  // base, and no seam is asked about it, because it holds nothing to charge. It
+  // cannot loop: each such settle adds one transaction above the frontier and takes
+  // a whole prefix below it. A PROFIT one is decided below like any prefix, so a
+  // loss carried into it is carried on, not dropped: our settles are flow, its
+  // profit is exactly zero, and its net base is minus that loss. An undefined mode
+  // falls through to its stop.
+  if (others === 0 && mode === MODE_VOLUME) {
     return { kind: "settle", baseLamports: 0n, endSlot: measured.lastSlot, ...backlog };
   }
 
   let base: bigint;
+  let signed: number;
   if (mode === MODE_PROFIT) {
-    base = measured.profitLamports;
+    // NET OF THE CARRY, IN BOTH FIGURES. The carried loss lowers the base, and the
+    // transactions the wallet signed in the carried window join this span's count.
+    base = measured.profitLamports - (carry?.lossLamports ?? 0n);
+    signed = measured.walletSignedTxCount + (carry?.walletSignedTxCount ?? 0);
   } else if (mode === MODE_VOLUME) {
     const notional = await volumeBase(measured);
     if (notional === null) {
@@ -447,27 +596,45 @@ export async function baseDecision({
     // dress it up as a quiet span.
     if (notional < 0n) throw new Error(`the VOLUME base seam returned ${notional} lamports; a notional is never negative`);
     base = notional;
+    // A notional is not a profit, so there is no loss to carry: a VOLUME span
+    // ignores a carry, and its count is its own.
+    signed = measured.walletSignedTxCount;
   } else {
     // modeDecision stops these before anything is measured.
     return { kind: "stop", outcome: "UNSUPPORTED_MODE", detail: `skim_mode ${mode} is not a mode this keeper measures; nothing attested` };
   }
 
   if (base > 0n) return { kind: "settle", baseLamports: base, endSlot: measured.lastSlot, ...backlog };
-  // A ZERO SETTLE ONCE THE WALLET HAS SIGNED ENOUGH OF THE SPAN, OR ONCE IT IS A
-  // BACKLOG'S PREFIX. It moves nothing and advances the frontier past everything
-  // measured. A small span waits for ZERO_BASE_MIN_TXS so its losses keep netting
-  // against the next win, and only what the wallet signed brings that closer: a
-  // stranger's transfer is not the trader's activity, and must not decide when the
-  // trader's losses are forgotten. A prefix never waits, because resting would
-  // leave the same prefix above the frontier every sweep.
-  const signed = measured.walletSignedTxCount;
-  if (signed >= ZERO_BASE_MIN_TXS || measured.prefixCut) {
+  // A ZERO SETTLE ONCE THE WALLET HAS SIGNED ENOUGH. It moves nothing, advances the
+  // frontier past everything measured, and forgets the span's net loss, carried
+  // part included. A small span waits for ZERO_BASE_MIN_TXS so its losses keep
+  // netting against the next win, and only what the wallet signed brings that
+  // closer: a stranger's transfer is not the trader's activity, and must not decide
+  // when the trader's losses are forgotten.
+  if (signed >= ZERO_BASE_MIN_TXS) {
     return { kind: "settle", baseLamports: 0n, endSlot: measured.lastSlot, ...backlog };
+  }
+  // A PREFIX NEVER WAITS, AND NO LONGER FORGETS A LOSS. Resting would leave the same
+  // prefix above the frontier every sweep, so it settles a zero base now. A stranger
+  // who sent the transactions that cut it used to decide, that way, when a trader's
+  // loss was forgotten; the loss now goes on to the window above, with the count the
+  // wallet has so far, and only that count reaching ZERO_BASE_MIN_TXS forgets it.
+  if (measured.prefixCut) {
+    return {
+      kind: "settle",
+      baseLamports: 0n,
+      endSlot: measured.lastSlot,
+      ...backlog,
+      ...(mode === MODE_PROFIT && base < 0n ? { carry: { lossLamports: -base, walletSignedTxCount: signed } } : {}),
+    };
   }
   const what =
     mode === MODE_VOLUME
       ? `no successful trade over ${measured.txCount} txs, so the notional is zero`
-      : `measured ${base} lamports over ${measured.txCount} txs — a losing or flat span`;
+      : carry === null
+        ? `measured ${base} lamports over ${measured.txCount} txs — a losing or flat span`
+        : `measured ${measured.profitLamports} lamports over ${measured.txCount} txs, ` +
+          `net of ${carry.lossLamports} lamports carried from an earlier zero settle: ${base} — a losing or flat span`;
   return {
     kind: "stop",
     outcome: "NO_PROFIT",

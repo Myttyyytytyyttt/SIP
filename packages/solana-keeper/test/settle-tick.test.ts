@@ -1,6 +1,8 @@
 // One settle turn over a stub chain, live and dry: the reserve checked against the
 // node's own fee before anything is signed, a refusal classified by the program's
-// name, and a settle that landed never reported FAILED.
+// name, a settle that landed never reported FAILED, and a loss carried past a
+// backlog's zero settle: recorded before the send, netted by the window above, and
+// never left under a state another window's settle leaves.
 //
 // The chain is a Proxy Connection like accounts.test.ts's: it serves only the
 // methods a test gives it, throws on any other, and records every call. The
@@ -29,7 +31,7 @@ import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import { assertSettleShape, type SolanaWalletSubmitter } from "../src/privy-signer.js";
 import { attestationMessage } from "../src/program-scripts.js";
-import { attestationInputs } from "../src/settle-decision.js";
+import { attestationInputs, type CarryBook, type LossCarry } from "../src/settle-decision.js";
 import { CONFIRM_POLL_MS, CONFIRM_TIMEOUT_MS, runSettleTick, type SettleDeps, type SettleResult } from "../src/settle-tick.js";
 import { FakeLedger, chained } from "./fake-ledger.js";
 
@@ -165,9 +167,10 @@ function chain(extra: Readonly<Record<string, Handler>> = {}) {
     walletSigner: wallet,
     live: true,
     protocolPaused: false,
+    carries: new Map(),
     ...over,
   });
-  return { connection, program, calls, callArgs, sent, deps };
+  return { connection, program, calls, callArgs, sent, deps, receipt };
 }
 
 /** The link as the chain holds it after the turn: `nonce`. */
@@ -517,5 +520,155 @@ describe("a settle that landed with an on-chain error", () => {
     );
     expect(result).toMatchObject({ outcome: "RETRY", signature: SIGNATURE });
     expect(result.detail).toContain("the settle's receipt shows it reverted: settle_v2 refused it with AttestationMismatch");
+  });
+});
+
+describe("a loss carried past a backlog's zero settle", () => {
+  const stranger = Keypair.generate().publicKey;
+  const address = link.linkAddress.toBase58();
+  /** The carry book's key for a link state of this link's epoch. */
+  const stateKey = (settlementNonce: bigint, frontierSlot: number | bigint) => `${EPOCH}:${settlementNonce}:${frontierSlot}`;
+  /** Where the losing prefix ends: the loss and 299 of the stranger's transfers. */
+  const PREFIX_END = EPOCH + 300;
+  /** The link's own transaction, the wallet's 0.5 SOL loss on Jupiter, then 300 zero-lamport transfers a stranger sent. */
+  const losingBacklog = new FakeLedger(
+    link.wallet,
+    chained(2_000_000_000, [
+      { signature: "link-0", slot: EPOCH, programs: [SYSTEM], delta: -2_000_000 },
+      { signature: "loss-1", slot: EPOCH + 1, programs: [JUPITER], delta: -500_000_000 },
+      ...Array.from({ length: 300 }, (_, i) => ({ signature: `transfer-${i + 2}`, slot: EPOCH + 2 + i, programs: [SYSTEM], delta: 0, signers: [stranger] })),
+    ]),
+  );
+  const lossCarried = { lossLamports: 500_000_000n, walletSignedTxCount: 1 };
+
+  /** The stub chain over the losing backlog's finalized history, whose confirmed receipt of the settle moves the vault by nothing, as a zero base does. */
+  function backlogChain(extra: Readonly<Record<string, Handler>> = {}) {
+    let built: ReturnType<typeof chain> | undefined;
+    built = chain({
+      getSignaturesForAddress: async (address, options, commitment) =>
+        commitment === "confirmed"
+          ? [{ signature: "transfer-301", slot: EPOCH + 301, err: null, memo: null }]
+          : losingBacklog.signatures(address as PublicKey, options as { limit: number }, commitment as Finality),
+      getTransaction: async (signature, config) => {
+        const commitment = (config as { commitment: Finality }).commitment;
+        return commitment === "finalized" ? losingBacklog.transaction(signature as string, commitment) : built!.receipt(0);
+      },
+      getSlot: async (commitment) => (commitment === "finalized" ? EPOCH + 400 : EPOCH + 440),
+      ...extra,
+    });
+    return built;
+  }
+
+  /** The stub chain's connection with one method wrapped: `wrap` is handed the chain's own and returns what the turn calls instead. */
+  const wrapping = (connection: Connection, name: string, wrap: (served: Handler) => Handler): Connection =>
+    new Proxy(connection, {
+      get(target, prop) {
+        const served = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return prop === name ? wrap(served as Handler) : served;
+      },
+    }) as Connection;
+
+  /** The message the sent settle's Ed25519 instruction verifies: the attestation the settle key signed. */
+  const attested = (c: ReturnType<typeof chain>) => Buffer.from(c.sent.at(-1)!.message.compiledInstructions[0]!.data.subarray(112));
+
+  it("records a losing prefix's carry before its zero settle is sent, attests a zero base, and says what it carries; a dry run only says it would", async () => {
+    const carries: CarryBook = new Map();
+    const c = backlogChain();
+    let atSend: LossCarry | undefined;
+    const result = await runSettleTick({
+      ...c.deps({ carries }),
+      connection: wrapping(c.connection, "sendRawTransaction", (served) => async (...args) => {
+        atSend = carries.get(address)?.get(stateKey(5n, PREFIX_END));
+        return served(...args);
+      }),
+    });
+    expect(result, result.detail).toMatchObject({
+      outcome: "SETTLED",
+      baseLamports: 0n,
+      expectedLamports: 0n,
+      settledLamports: 0n,
+      nonce: 4n,
+      endSlot: BigInt(PREFIX_END),
+      carry: lossCarried,
+    });
+    expect(result.detail).toBe(
+      `settled 0 lamports from 0 measured over 300 txs (0 expected at 2000 bps); ` +
+        `backlog: settling the oldest 300 of 301 signatures above slot ${EPOCH}, up to slot ${PREFIX_END}; the rest continues next sweep; ` +
+        `carrying 500000000 lamports of losses and 1 wallet-signed transactions into the window from slot ${PREFIX_END}`,
+    );
+    expect(atSend, "the carry is in the book before the settle leaves").toEqual(lossCarried);
+    expect([...(carries.get(address)?.entries() ?? [])]).toEqual([[stateKey(5n, PREFIX_END), lossCarried]]);
+    expect(c.calls.filter((name) => name === "sendRawTransaction")).toHaveLength(1);
+    const inputs = attestationInputs({ programId, link, vault, from: BigInt(EPOCH), endSlot: BigInt(PREFIX_END), baseLamports: 0n, currentSlot: BigInt(EPOCH + 440) });
+    expect(attested(c).equals(attestationMessage(inputs)), "the sent settle_v2 attests base 0").toBe(true);
+
+    const dry = backlogChain();
+    const dryBook: CarryBook = new Map();
+    const preview = await runSettleTick(dry.deps({ live: false, attester: null, walletSigner: null, carries: dryBook }));
+    expect(preview, preview.detail).toMatchObject({ outcome: "SETTLED", baseLamports: 0n, carry: lossCarried });
+    expect(preview.detail).toBe(
+      `DRY RUN — would settle 0 lamports in PROFIT at 2000 bps and advance the frontier from ${EPOCH} to ${PREFIX_END} over 300 txs; ` +
+        `backlog: settling the oldest 300 of 301 signatures above slot ${EPOCH}, up to slot ${PREFIX_END}; the rest continues next sweep; ` +
+        `would carry 500000000 lamports of losses and 1 wallet-signed transactions into the window from slot ${PREFIX_END}`,
+    );
+    expect(dryBook.size, "a dry run records nothing").toBe(0);
+    expect(dry.calls).not.toContain("sendRawTransaction");
+  });
+
+  it("nets a carried loss against the next window's profit: the base, the attestation, the payment and the reserve are all the net's, and a wallet short of the net's reserve sends nothing", async () => {
+    const carry = { lossLamports: 600_000_000n, walletSignedTxCount: 1 };
+    const paid = 80_000_000;
+    const exact = FEE + paid + RENT0 + Number(vault.walletReserve);
+    for (const [balance, outcome] of [
+      [exact, "SETTLED"],
+      [exact - 1, "BELOW_RESERVE"],
+    ] as const) {
+      const named = `balance ${balance}`;
+      const carries: CarryBook = new Map([[address, new Map([[stateKey(4n, 0n), carry]])]]);
+      const c = chain({ getBalance: async () => balance });
+      const result = await runSettleTick({
+        ...c.deps({ carries }),
+        connection: wrapping(c.connection, "getTransaction", (served) => async (signature, config) =>
+          (config as { commitment: Finality }).commitment === "finalized" ? served(signature, config) : c.receipt(paid),
+        ),
+      });
+      expect(result, named).toMatchObject({ outcome, baseLamports: 400_000_000n, expectedLamports: BigInt(paid) });
+      expect(result.carry, named).toBeUndefined();
+      if (outcome === "SETTLED") {
+        expect(result, named).toMatchObject({ settledLamports: BigInt(paid), nonce: 4n, endSlot: BigInt(EPOCH + 5) });
+        expect(result.detail).toBe(`settled ${paid} lamports from 400000000 measured over 1 txs (${paid} expected at 2000 bps); net of 600000000 lamports carried`);
+        const inputs = attestationInputs({ programId, link, vault, from: BigInt(EPOCH), endSlot: BigInt(EPOCH + 5), baseLamports: 400_000_000n, currentSlot: BigInt(EPOCH + 140) });
+        expect(attested(c).equals(attestationMessage(inputs)), "the attested base is the net").toBe(true);
+      } else {
+        expect(result.detail).toContain("1 lamports short");
+        expect(c.calls, named).not.toContain("sendRawTransaction");
+      }
+      // The carry that brought the link here stays until a later state prunes it, sent or not.
+      expect([...(carries.get(address)?.entries() ?? [])], named).toEqual([[stateKey(4n, 0n), carry]]);
+    }
+  });
+
+  it("keeps the carry of a settle whose send threw and landed: SETTLED from the re-read link, and the book holds the state it left", async () => {
+    const carries: CarryBook = new Map();
+    const c = backlogChain({ getAccountInfoAndContext: linkRead(link.settlementNonce + 1n) });
+    const result = await runSettleTick(
+      c.deps({ carries, walletSigner: throwingSubmitter(Object.assign(new Error("504 Gateway Timeout"), { status: 504 })) }),
+    );
+    expect(result, result.detail).toMatchObject({ outcome: "SETTLED", nonce: 4n, endSlot: BigInt(PREFIX_END), carry: lossCarried });
+    expect(result.detail.startsWith("landed; receipt not read")).toBe(true);
+    expect(result.detail).toContain(`carrying 500000000 lamports of losses and 1 wallet-signed transactions into the window from slot ${PREFIX_END}`);
+    expect([...(carries.get(address)?.entries() ?? [])]).toEqual([[stateKey(5n, PREFIX_END), lossCarried]]);
+  });
+
+  it("deletes a stale carry under the state a winning settle leaves, so a loss another window would have carried never nets against the next one", async () => {
+    const stale = { lossLamports: 9n, walletSignedTxCount: 1 };
+    const carries: CarryBook = new Map([[address, new Map([[stateKey(5n, EPOCH + 5), stale]])]]);
+    const c = chain();
+    const result = await runSettleTick(c.deps({ carries }));
+    expect(result, result.detail).toMatchObject({ outcome: "SETTLED", baseLamports: 1_000_000_000n, settledLamports: BigInt(PAID), endSlot: BigInt(EPOCH + 5) });
+    expect(result.carry).toBeUndefined();
+    expect(result.detail).toBe(`settled ${PAID} lamports from 1000000000 measured over 1 txs (${PAID} expected at 2000 bps)`);
+    expect(carries.get(address)?.has(stateKey(5n, EPOCH + 5)) ?? false, "the stale entry is deleted").toBe(false);
+    expect(carries.size).toBe(0);
   });
 });

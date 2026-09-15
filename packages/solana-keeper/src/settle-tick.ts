@@ -7,7 +7,9 @@
 // confirmed probe decides whether there is anything to walk, the walk reads
 // finalized history and must reach the frontier, a backlog settles its oldest
 // complete prefix one sweep at a time, a flat span settles a zero base once it
-// is worth a transaction, the attestation binds the vault's own mode,
+// is worth a transaction, a losing prefix's zero settle carries its loss into
+// the next window and records that carry before it is sent, the attestation
+// binds the vault's own mode,
 // rate and policy nonce and a deadline, the wallet's reserve is checked against
 // the node's own fee before anything is signed, only [Ed25519SigVerify,
 // settle_v2] paid by the wallet is sent on either route, the Privy route sends
@@ -40,9 +42,10 @@ import { idl } from "./idl.js";
 import { connectionReader, measureSince } from "./measure-window.js";
 import { method } from "./methods.js";
 import { assertSettleShape, type SolanaWalletSubmitter } from "./privy-signer.js";
-import { MODE_VOLUME, attestationInstruction, attestationMessage, type AttestationInputs } from "./program-scripts.js";
+import { MODE_PROFIT, MODE_VOLUME, attestationInstruction, attestationMessage, type AttestationInputs } from "./program-scripts.js";
 import {
   attestationInputs,
+  carryFor,
   decideFromMeasurement,
   defaultVolumeBase,
   expectedContribution,
@@ -50,7 +53,10 @@ import {
   modeDecision,
   noSignerDetail,
   pauseDecision,
+  recordCarry,
   reserveDecision,
+  type CarryBook,
+  type LossCarry,
   type SettleOutcome,
   type VolumeBase,
 } from "./settle-decision.js";
@@ -61,7 +67,7 @@ export type { SettleOutcome } from "./settle-decision.js";
 export interface SettleResult {
   readonly outcome: SettleOutcome;
   readonly detail: string;
-  /** The attested base. In PROFIT mode, the measured profit. */
+  /** The attested base. In PROFIT mode, the measured profit net of any loss carried into the window. */
   readonly baseLamports?: bigint;
   /** The mode `baseLamports` was measured in. */
   readonly mode?: number;
@@ -78,6 +84,12 @@ export interface SettleResult {
    * so the keeper can record history without re-deriving either. */
   readonly nonce?: bigint;
   readonly endSlot?: bigint;
+  /**
+   * The loss, and the wallet-signed count, this settle hands to the window from
+   * `endSlot` (LossCarry): set only on a PROFIT prefix's zero settle whose net base
+   * is negative. A live turn has recorded it in the book before sending.
+   */
+  readonly carry?: LossCarry;
 }
 
 export interface SettleDeps {
@@ -111,6 +123,13 @@ export interface SettleDeps {
    * default; the local proof injects a notional here.
    */
   readonly volumeBase?: VolumeBase;
+  /**
+   * The losses zero settles carried forward, per link state (LossCarry): read
+   * before the base is decided, and written before a live settle is sent.
+   * REQUIRED, because a fresh book every turn would forget every carried loss
+   * without a word. In memory: a restart forgets it.
+   */
+  readonly carries: CarryBook;
 }
 
 /** How often a sent settle's status is asked for. */
@@ -292,11 +311,16 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   // BEFORE THE WALK, NOT AFTER: see MeasurementContext.finalizedSlot.
   const finalizedSlot = BigInt(await connection.getSlot("finalized"));
   const measured = await measureSince(connectionReader(connection), link.wallet, from, program.programId);
+  // THE CARRY FOR THIS LINK'S EXACT STATE, read after the walk and before the base.
+  // Only a zero settle that landed leaves a link in the state a carry was recorded
+  // for, so a loss is netted once, by the window right above that settle.
+  const carry = carryFor(deps.carries, link);
   const decision = await decideFromMeasurement(measured, {
     from,
     finalizedSlot,
     mode: vault.skimMode,
     volumeBase: deps.volumeBase ?? defaultVolumeBase,
+    carry,
   });
   if (decision.kind === "stop") {
     return {
@@ -310,6 +334,17 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   // below: the window is the span's oldest complete prefix, and the next sweep
   // measures the rest from its end.
   const backlog = decision.backlog === undefined ? "" : `; ${decision.backlog}`;
+  // A CARRY SAYS WHAT IT TOOK AND WHAT IT LEAVES, in every SETTLED detail below,
+  // right after the backlog: a PROFIT base is net of the loss an earlier zero settle
+  // carried into this window, and a losing prefix's zero settle names the loss and
+  // the count it hands to the window above. Neither appears without a carry, so a
+  // detail with none reads as it always did.
+  const applied = carry !== null && vault.skimMode === MODE_PROFIT ? `; net of ${carry.lossLamports} lamports carried` : "";
+  const passing =
+    decision.carry === undefined
+      ? ""
+      : `; ${deps.live ? "carrying" : "would carry"} ${decision.carry.lossLamports} lamports of losses and ` +
+        `${decision.carry.walletSignedTxCount} wallet-signed transactions into the window from slot ${decision.endSlot}`;
 
   // The deadline counts from the chain's own confirmed slot, read now rather
   // than taken from the measurement: a walk over a busy span takes seconds.
@@ -367,7 +402,13 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     paid,
   });
   /** What every result from here on carries. */
-  const carried = { baseLamports: inputs.baseLamports, mode: inputs.mode, feeLamports, expectedLamports: paid };
+  const carried = {
+    baseLamports: inputs.baseLamports,
+    mode: inputs.mode,
+    feeLamports,
+    expectedLamports: paid,
+    ...(decision.carry === undefined ? {} : { carry: decision.carry }),
+  };
   if (belowReserve !== null) return { ...belowReserve, ...carried };
 
   if (!deps.live) {
@@ -378,10 +419,10 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
         // A ZERO BASE SAYS WHAT IT IS FOR: nothing moves, and the frontier does.
         inputs.baseLamports === 0n
           ? `DRY RUN — would settle 0 lamports in ${modeName} at ${inputs.bps} bps and advance the frontier ` +
-            `from ${inputs.sessionStartSlot} to ${inputs.sessionEndSlot} over ${measured.txCount} txs${backlog}`
+            `from ${inputs.sessionStartSlot} to ${inputs.sessionEndSlot} over ${measured.txCount} txs${backlog}${applied}${passing}`
           : `DRY RUN — would settle ${paid} lamports (${owed} owed at ${inputs.bps} bps${clipped}) ` +
             `from ${inputs.baseLamports} lamports of measured ${inputs.mode === MODE_VOLUME ? "notional" : "profit"} ` +
-            `over slots ${inputs.sessionStartSlot}..${inputs.sessionEndSlot}${backlog}`,
+            `over slots ${inputs.sessionStartSlot}..${inputs.sessionEndSlot}${backlog}${applied}${passing}`,
       ...carried,
     };
   }
@@ -418,7 +459,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
       if (nonce === link.settlementNonce + 1n) {
         return {
           outcome: "SETTLED",
-          detail: `landed; receipt not read — ${where}, and this link's nonce has moved to ${nonce} (${expectation})${backlog}`,
+          detail: `landed; receipt not read — ${where}, and this link's nonce has moved to ${nonce} (${expectation})${backlog}${applied}${passing}`,
           ...carried,
           ...withSignature,
           nonce: link.settlementNonce,
@@ -442,6 +483,16 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   } catch (error) {
     return { outcome: "FAILED", detail: error instanceof Error ? error.message : String(error), ...carried };
   }
+
+  // THE CARRY IS RECORDED BEFORE THE SEND, NEVER AFTER IT. A send can throw, or go
+  // unconfirmed, on a settle that landed, and the next sweep then reads the link in
+  // the state this settle leaves: a carry recorded only once the send answered
+  // would be missing there, and the loss forgotten. A settle that never lands leaves
+  // the link where it is, whose own entry recordCarry keeps. A NULL IS RECORDED TOO:
+  // an earlier attempt from this state may have left a carry under the state this
+  // settle leaves, for another window, and it must not net against this one. A dry
+  // run and BELOW_RESERVE returned above, so neither records anything.
+  recordCarry(deps.carries, link, decision.endSlot, decision.carry ?? null);
 
   let signature: string;
   try {
@@ -510,8 +561,8 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     outcome: "SETTLED",
     detail:
       settled === null
-        ? `confirmed ${signature.slice(0, 12)}… (${expectation}) — the vault delta is on chain, its receipt not read in time${backlog}`
-        : `settled ${settled} lamports from ${inputs.baseLamports} measured over ${measured.txCount} txs (${expectation})${backlog}` +
+        ? `confirmed ${signature.slice(0, 12)}… (${expectation}) — the vault delta is on chain, its receipt not read in time${backlog}${applied}${passing}`
+        : `settled ${settled} lamports from ${inputs.baseLamports} measured over ${measured.txCount} txs (${expectation})${backlog}${applied}${passing}` +
           // settle_v2's arithmetic is expectedContribution's, so any other
           // amount means one of the two is not what the other believes.
           (settled === paid ? "" : ` — WARNING: the vault moved ${settled} lamports, not the ${paid} settle_v2 computes for this base`),

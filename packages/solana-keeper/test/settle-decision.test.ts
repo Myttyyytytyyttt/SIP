@@ -12,7 +12,10 @@
 // transaction, a window holding only our own settle never settles again, and a
 // VOLUME span is charged only on a notional that is
 // proven. A span past the read limit is no stop: its oldest complete prefix
-// settles like a window and never waits, and neither the PAUSED detail nor any
+// settles like a window and never waits, a losing PROFIT prefix carries its loss
+// and the wallet's count into the window above, where the loss lowers the base
+// and never raises it and the counts add up toward the owner's 100, the carry book
+// finds a carry only at its exact link state, and neither the PAUSED detail nor any
 // INCOMPLETE detail promises a catch-up no sweep performs. The frontier-from-epoch
 // rule is unchanged, and the outcome-to-alert rule
 // is pinned for every outcome. The bytes those inputs encode to are pinned to the
@@ -32,14 +35,18 @@ import {
   activeBps,
   attestationInputs,
   baseDecision,
+  carryFor,
   decideFromMeasurement,
   defaultVolumeBase,
   expectedContribution,
   measurementStart,
   modeDecision,
   pauseDecision,
+  recordCarry,
   reserveDecision,
   settleAlert,
+  type CarryBook,
+  type LossCarry,
   type SettleOutcome,
   type VolumeBase,
 } from "../src/settle-decision.js";
@@ -154,7 +161,7 @@ describe("where a measurement starts", () => {
 describe("what a measurement allows, in order", () => {
   const from = 300_000_500n;
   /** A PROFIT span's context at a finalized slot, as settle-tick.ts builds it. */
-  const context = (finalizedSlot: bigint) => ({ from, finalizedSlot, mode: MODE_PROFIT, volumeBase: defaultVolumeBase });
+  const context = (finalizedSlot: bigint) => ({ from, finalizedSlot, mode: MODE_PROFIT, volumeBase: defaultVolumeBase, carry: null });
   // Finality well past the start: the ordinary case.
   const at = context(300_001_000n);
 
@@ -267,9 +274,10 @@ describe("what a measurement allows, in order", () => {
 
 describe("the base, and when a zero base is worth a transaction", () => {
   const from = 300_000_500n;
-  const profit = (span: WindowMeasurement) => baseDecision({ mode: MODE_PROFIT, measured: span, from, volumeBase: defaultVolumeBase });
-  const volume = (span: WindowMeasurement, volumeBase: VolumeBase = defaultVolumeBase) =>
-    baseDecision({ mode: MODE_VOLUME, measured: span, from, volumeBase });
+  const profit = (span: WindowMeasurement, carry: LossCarry | null = null) =>
+    baseDecision({ mode: MODE_PROFIT, measured: span, from, volumeBase: defaultVolumeBase, carry });
+  const volume = (span: WindowMeasurement, volumeBase: VolumeBase = defaultVolumeBase, carry: LossCarry | null = null) =>
+    baseDecision({ mode: MODE_VOLUME, measured: span, from, volumeBase, carry });
 
   it("a losing span the wallet signed enough of settles a zero base over the measured window", async () => {
     expect(await profit(measured({ profitLamports: -5n, txCount: 150, settleTxCount: 1, walletSignedTxCount: 149 }))).toEqual({
@@ -345,7 +353,7 @@ describe("the base, and when a zero base is worth a transaction", () => {
       return 5n;
     };
     const one = measured({ txCount: 1, successfulTradeCount: 1, profitLamports: 1n });
-    expect(await baseDecision({ mode: MODE_PROFIT, measured: one, from, volumeBase: seam })).toEqual({ kind: "settle", baseLamports: 1n, endSlot: 300_000_900n });
+    expect(await baseDecision({ mode: MODE_PROFIT, measured: one, from, volumeBase: seam, carry: null })).toEqual({ kind: "settle", baseLamports: 1n, endSlot: 300_000_900n });
     expect(asked).toBe(0);
   });
 
@@ -395,13 +403,13 @@ describe("the base, and when a zero base is worth a transaction", () => {
   });
 
   it("an undefined mode that reached the base is UNSUPPORTED_MODE, never charged at the profit rate", async () => {
-    expect(await baseDecision({ mode: 9, measured: measured(), from, volumeBase: defaultVolumeBase })).toMatchObject({
+    expect(await baseDecision({ mode: 9, measured: measured(), from, volumeBase: defaultVolumeBase, carry: null })).toMatchObject({
       kind: "stop",
       outcome: "UNSUPPORTED_MODE",
     });
   });
 
-  it("a cut prefix never waits for the zero-base count: flat or losing, it settles a zero base to its last slot and names the backlog", async () => {
+  it("a cut prefix never waits for the zero-base count: losing, it settles a zero base to its last slot, names the backlog and carries its loss", async () => {
     // Mostly our own settles, so the count alone would rest it at NO_PROFIT — the same prefix, every sweep.
     const losing = measured({
       prefixCut: true,
@@ -417,6 +425,7 @@ describe("the base, and when a zero base is worth a transaction", () => {
       baseLamports: 0n,
       endSlot: 300_000_900n,
       backlog: "backlog: settling the oldest 300 of 900 signatures above slot 300000500, up to slot 300000900; the rest continues next sweep",
+      carry: { lossLamports: 7n, walletSignedTxCount: 50 },
     });
     expect(await profit({ ...losing, prefixCut: false })).toMatchObject({ kind: "stop", outcome: "NO_PROFIT" });
   });
@@ -441,7 +450,7 @@ describe("the base, and when a zero base is worth a transaction", () => {
     expect(asked, "the seam is never asked about our own settles, cut or not").toBe(0);
     expect(await profit({ ...onlySettles, prefixCut: false })).toMatchObject({ kind: "stop", outcome: "IDLE" });
     // An undefined mode still stops, cut or not.
-    expect(await baseDecision({ mode: 9, measured: onlySettles, from, volumeBase: defaultVolumeBase })).toMatchObject({
+    expect(await baseDecision({ mode: 9, measured: onlySettles, from, volumeBase: defaultVolumeBase, carry: null })).toMatchObject({
       kind: "stop",
       outcome: "UNSUPPORTED_MODE",
     });
@@ -450,6 +459,188 @@ describe("the base, and when a zero base is worth a transaction", () => {
   it("a cut VOLUME prefix with a successful trade still rests at UNSUPPORTED_MODE under the default seam: its notional is unknown, not zero", async () => {
     const prefix = measured({ prefixCut: true, signaturesAbove: 400, txCount: 300, successfulTradeCount: 1, profitLamports: 0n });
     expect(await volume(prefix)).toMatchObject({ kind: "stop", outcome: "UNSUPPORTED_MODE" });
+  });
+});
+
+describe("a loss carried past a backlog's zero settle", () => {
+  const from = 300_000_500n;
+  const decide = (span: WindowMeasurement, carry: LossCarry | null, mode: number = MODE_PROFIT, volumeBase: VolumeBase = defaultVolumeBase) =>
+    baseDecision({ mode, measured: span, from, volumeBase, carry });
+  const backlogLine = (taken: number, above: number) =>
+    `backlog: settling the oldest ${taken} of ${above} signatures above slot 300000500, up to slot 300000900; the rest continues next sweep`;
+  /** A seam that fails the turn if it is ever asked. */
+  const unasked: VolumeBase = async () => {
+    throw new Error("the VOLUME seam was asked about a span of nothing but our own settles");
+  };
+
+  it("a losing cut prefix below the count settles zero and carries its loss; at the count, or flat, it carries nothing", async () => {
+    const losing = measured({ prefixCut: true, signaturesAbove: 900, txCount: 300, walletSignedTxCount: 99, profitLamports: -7n });
+    expect(await decide(losing, null)).toEqual({
+      kind: "settle",
+      baseLamports: 0n,
+      endSlot: 300_000_900n,
+      backlog: backlogLine(300, 900),
+      carry: { lossLamports: 7n, walletSignedTxCount: 99 },
+    });
+    // The owner's rule: once the wallet itself has signed 100, the loss is forgotten, as a whole window's is.
+    expect(await decide({ ...losing, walletSignedTxCount: ZERO_BASE_MIN_TXS }, null)).toEqual({
+      kind: "settle",
+      baseLamports: 0n,
+      endSlot: 300_000_900n,
+      backlog: backlogLine(300, 900),
+    });
+    // A flat prefix has no loss to hand on.
+    const flat = measured({ prefixCut: true, signaturesAbove: 900, txCount: 300, walletSignedTxCount: 0, successfulTradeCount: 0, profitLamports: 0n });
+    expect(await decide(flat, null)).toEqual({ kind: "settle", baseLamports: 0n, endSlot: 300_000_900n, backlog: backlogLine(300, 900) });
+  });
+
+  it("a whole window nets a carried loss against its profit and names it when it rests; a VOLUME span ignores the carry", async () => {
+    const carry = { lossLamports: 7n, walletSignedTxCount: 5 };
+    expect(await decide(measured({ profitLamports: 10n }), carry)).toEqual({ kind: "settle", baseLamports: 3n, endSlot: 300_000_900n });
+    expect(await decide(measured({ profitLamports: 7n }), carry)).toMatchObject({ kind: "stop", outcome: "NO_PROFIT", baseLamports: 0n });
+    const behind = await decide(measured({ profitLamports: 5n }), carry);
+    expect(behind).toMatchObject({ kind: "stop", outcome: "NO_PROFIT", baseLamports: -2n });
+    if (behind.kind === "stop") {
+      expect(behind.detail).toContain("measured 5 lamports over 12 txs, net of 7 lamports carried from an earlier zero settle: -2 — a losing or flat span");
+      // The wallet's 12 here and the 5 it signed in the carried window.
+      expect(behind.detail).toContain("17 so far, 83 to go");
+    }
+
+    // VOLUME: a quiet cut prefix settles zero and hands nothing on, and a seam's notional is charged whole.
+    const quiet = measured({ prefixCut: true, signaturesAbove: 400, txCount: 300, walletSignedTxCount: 50, successfulTradeCount: 0, profitLamports: -600_000n });
+    expect(await decide(quiet, carry, MODE_VOLUME)).toEqual({ kind: "settle", baseLamports: 0n, endSlot: 300_000_900n, backlog: backlogLine(300, 400) });
+    expect(await decide(measured(), carry, MODE_VOLUME, async () => 5n)).toEqual({ kind: "settle", baseLamports: 5n, endSlot: 300_000_900n });
+  });
+
+  it("a carry never raises a base: a settle takes the net profit when it is positive and zero otherwise, never more than the profit", async () => {
+    let settles = 0;
+    for (const profitLamports of [-10n, 0n, 1n, 10n, 10n ** 12n]) {
+      for (const lossLamports of [1n, 10n, 10n ** 12n]) {
+        for (const prefixCut of [false, true]) {
+          const span = measured({ prefixCut, signaturesAbove: prefixCut ? 900 : 12, profitLamports });
+          const decision = await decide(span, { lossLamports, walletSignedTxCount: 1 });
+          if (decision.kind !== "settle") continue;
+          settles += 1;
+          const named = `profit ${profitLamports}, carried ${lossLamports}, cut ${prefixCut}`;
+          const net = profitLamports - lossLamports;
+          expect(decision.baseLamports >= 0n && decision.baseLamports <= (profitLamports > 0n ? profitLamports : 0n), named).toBe(true);
+          expect(decision.baseLamports, named).toBe(net > 0n ? net : 0n);
+        }
+      }
+    }
+    expect(settles).toBeGreaterThan(0);
+  });
+
+  it("the owner's count sums the carried window's: 60 carried and 40 signed settle a losing window with a zero base, 39 do not", async () => {
+    const carry = { lossLamports: 7n, walletSignedTxCount: 60 };
+    expect(await decide(measured({ profitLamports: -1n, walletSignedTxCount: 40 }), carry)).toEqual({ kind: "settle", baseLamports: 0n, endSlot: 300_000_900n });
+    const short = await decide(measured({ profitLamports: -1n, walletSignedTxCount: 39 }), carry);
+    expect(short).toMatchObject({ kind: "stop", outcome: "NO_PROFIT", baseLamports: -8n });
+    if (short.kind === "stop") expect(short.detail).toContain("99 so far, 1 to go");
+  });
+
+  it("a cut prefix passes the sum on: the net loss and the count so far, or it settles a net win and passes nothing", async () => {
+    const carry = { lossLamports: 7n, walletSignedTxCount: 10 };
+    const cut = (profitLamports: bigint) => measured({ prefixCut: true, signaturesAbove: 900, txCount: 300, walletSignedTxCount: 20, profitLamports });
+    const settled = { kind: "settle", endSlot: 300_000_900n, backlog: backlogLine(300, 900) } as const;
+    expect(await decide(cut(-1n), carry)).toEqual({ ...settled, baseLamports: 0n, carry: { lossLamports: 8n, walletSignedTxCount: 30 } });
+    expect(await decide(cut(3n), carry)).toEqual({ ...settled, baseLamports: 0n, carry: { lossLamports: 4n, walletSignedTxCount: 30 } });
+    expect(await decide(cut(9n), carry)).toEqual({ ...settled, baseLamports: 2n });
+  });
+
+  it("a PROFIT cut prefix of nothing but our own settles passes a carry on; a VOLUME one passes nothing and asks no seam; a whole window of our settle stays IDLE", async () => {
+    const carry = { lossLamports: 7n, walletSignedTxCount: 10 };
+    const onlyOurs = measured({ prefixCut: true, signaturesAbove: 301, txCount: 1, settleTxCount: 1, walletSignedTxCount: 0, successfulTradeCount: 0, profitLamports: 0n });
+    // Our settles are flow, so the prefix's profit is zero and its net base is minus the carried loss: the loss moves up, whole.
+    expect(await decide(onlyOurs, carry)).toEqual({ kind: "settle", baseLamports: 0n, endSlot: 300_000_900n, backlog: backlogLine(1, 301), carry });
+    expect(await decide(onlyOurs, carry, MODE_VOLUME, unasked)).toEqual({ kind: "settle", baseLamports: 0n, endSlot: 300_000_900n, backlog: backlogLine(1, 301) });
+    // THE LOOP GUARD STILL COMES FIRST, carry or not, in either mode.
+    for (const mode of [MODE_PROFIT, MODE_VOLUME]) {
+      const idle = await decide({ ...onlyOurs, prefixCut: false }, carry, mode, unasked);
+      expect(idle, `mode ${mode}`).toMatchObject({ kind: "stop", outcome: "IDLE" });
+      if (idle.kind === "stop") expect(idle.detail).toContain("only our own settle");
+    }
+  });
+
+  it("finds a carry only at its exact link state, keeps the current state's entry while a settle is out, and never holds more than two per link", () => {
+    const address = link.linkAddress.toBase58();
+    const state = (settlementNonce: bigint, frontierSlot: bigint, epoch: bigint = link.epoch) => ({ linkAddress: link.linkAddress, epoch, settlementNonce, frontierSlot });
+    const keys = (book: CarryBook) => [...(book.get(address)?.keys() ?? [])].sort();
+    const first = { lossLamports: 7n, walletSignedTxCount: 10 };
+    const second = { lossLamports: 8n, walletSignedTxCount: 30 };
+    const book: CarryBook = new Map();
+
+    // A zero settle from nonce 7 at frontier 300_000_500, closing at 300_000_900, records under the state it leaves.
+    recordCarry(book, state(7n, 300_000_500n), 300_000_900n, first);
+    expect(keys(book)).toEqual(["300000000:8:300000900"]);
+    // Not before it lands, and not at another frontier.
+    expect(carryFor(book, state(7n, 300_000_500n))).toBeNull();
+    expect(carryFor(book, state(8n, 300_000_899n))).toBeNull();
+    expect(carryFor(book, state(8n, 300_000_900n))).toEqual(first);
+
+    // The next prefix's settle keeps the entry that brought the link here and adds its own.
+    recordCarry(book, state(8n, 300_000_900n), 300_001_300n, second);
+    expect(keys(book)).toEqual(["300000000:8:300000900", "300000000:9:300001300"]);
+    // Attempt after attempt with other windows replaces the post state, never the current one.
+    for (let end = 300_001_301n; end <= 300_001_320n; end++) {
+      recordCarry(book, state(8n, 300_000_900n), end, second);
+      expect(keys(book)).toHaveLength(2);
+    }
+    expect(keys(book)).toEqual(["300000000:8:300000900", "300000000:9:300001320"]);
+    // Once one lands, the lookup at nonce 9 finds its carry and prunes the entry for nonce 8.
+    expect(carryFor(book, state(9n, 300_001_320n))).toEqual(second);
+    expect(keys(book)).toEqual(["300000000:9:300001320"]);
+
+    // A settle that hands nothing on deletes its post state's entry, one an earlier attempt left included.
+    recordCarry(book, state(9n, 300_001_320n), 300_001_800n, first);
+    expect(keys(book)).toEqual(["300000000:10:300001800", "300000000:9:300001320"]);
+    recordCarry(book, state(9n, 300_001_320n), 300_001_800n, null);
+    expect(keys(book)).toEqual(["300000000:9:300001320"]);
+
+    // Another epoch finds nothing, and the link's entries under the old one are pruned with its key.
+    expect(carryFor(book, state(9n, 300_001_320n, link.epoch + 1n))).toBeNull();
+    expect(book.has(address)).toBe(false);
+
+    // A carry that is not a loss would raise the next base: a caller bug, refused before the book is touched.
+    for (const lossLamports of [0n, -1n]) {
+      expect(() => recordCarry(book, state(9n, 300_001_320n), 300_001_800n, { lossLamports, walletSignedTxCount: 1 })).toThrow(/positive/);
+    }
+    expect(book.size).toBe(0);
+  });
+
+  it("THE OWNER'S RULE, over every shape: no settle's base exceeds the profit, a net loss is forgotten only at 100 signed across the carried windows, and a carry passed on is exactly that loss and that count", async () => {
+    let passedOn = 0;
+    let forgotten = 0;
+    const carries = [null, { lossLamports: 1n, walletSignedTxCount: 0 }, { lossLamports: 1n, walletSignedTxCount: 99 }, { lossLamports: 10n, walletSignedTxCount: 50 }];
+    for (const profitLamports of [-10n, -1n, 0n, 1n, 10n]) {
+      for (const carry of carries) {
+        for (const walletSignedTxCount of [0, 1, 99, 100]) {
+          for (const prefixCut of [false, true]) {
+            for (const txCount of [1, 300]) {
+              const span = measured({ profitLamports, walletSignedTxCount, prefixCut, txCount, settleTxCount: 0, signaturesAbove: prefixCut ? 900 : txCount });
+              const decision = await decide(span, carry);
+              if (decision.kind !== "settle") continue;
+              const carriedLoss = carry?.lossLamports ?? 0n;
+              const signed = walletSignedTxCount + (carry?.walletSignedTxCount ?? 0);
+              const named =
+                `profit ${profitLamports}, carry ${carry === null ? "none" : `${carry.lossLamports}/${carry.walletSignedTxCount}`}, ` +
+                `signed ${walletSignedTxCount}, cut ${prefixCut}, txs ${txCount}`;
+              expect(decision.baseLamports >= 0n && decision.baseLamports <= (profitLamports > 0n ? profitLamports : 0n), named).toBe(true);
+              if (decision.carry === undefined) {
+                if (profitLamports - carriedLoss < 0n) {
+                  expect(signed, named).toBeGreaterThanOrEqual(ZERO_BASE_MIN_TXS);
+                  forgotten += 1;
+                }
+              } else {
+                expect(decision.carry, named).toEqual({ lossLamports: carriedLoss - profitLamports, walletSignedTxCount: signed });
+                passedOn += 1;
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(passedOn > 0 && forgotten > 0, "the grid reaches both a carry passed on and a loss the owner's count forgets").toBe(true);
   });
 });
 

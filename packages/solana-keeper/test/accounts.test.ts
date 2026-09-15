@@ -526,7 +526,7 @@ describe("the ticks' first steps, over the same bytes", () => {
       const { vault, connection, program, calls } = chainWith(vaultOver, null);
       const read = await readVaults(program, [vault]);
       expect(calls.splice(0)).toEqual(["getMultipleAccountsInfoAndContext"]);
-      const result = await runSettleTick({ connection, program, link: linkTo(vault), vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused });
+      const result = await runSettleTick({ connection, program, link: linkTo(vault), vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused, carries: new Map() });
       expect(result.outcome).toBe("PAUSED");
       expect(result.detail).toContain(named);
       expect(calls).toEqual([]);
@@ -539,7 +539,7 @@ describe("the ticks' first steps, over the same bytes", () => {
     });
     const read = await readVaults(program, [vault]);
     expect(calls.splice(0)).toEqual(["getMultipleAccountsInfoAndContext"]);
-    const result = await runSettleTick({ connection, program, link: linkTo(vault), vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false });
+    const result = await runSettleTick({ connection, program, link: linkTo(vault), vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false, carries: new Map() });
     expect(result).toEqual({ outcome: "IDLE", detail: "nothing since slot 300000000" });
     expect(calls).toEqual(["getSignaturesForAddress"]);
     expect(calls).not.toContain("getLatestBlockhash");
@@ -565,7 +565,7 @@ describe("the ticks' first steps, over the same bytes", () => {
     );
     const read = await readVaults(program, [vault]);
     calls.splice(0);
-    const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false });
+    const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false, carries: new Map() });
     expect(result).toEqual({ outcome: "UNSUPPORTED_MODE", detail: "1 successful trade(s) await keeper-medir-volumen; nothing attested" });
     expect(calls).toEqual(["getSignaturesForAddress", "getSlot", "getSignaturesForAddress", "getTransaction", "getTransaction"]);
   });
@@ -597,7 +597,7 @@ describe("the ticks' first steps, over the same bytes", () => {
         ]),
       );
       const read = await readVaults(program, [vault]);
-      const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false });
+      const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false, carries: new Map() });
       expect(result).toMatchObject({ outcome: "SETTLED", baseLamports: 0n, mode: vaultOver.skimMode });
       expect(result.detail).toBe(`DRY RUN — would settle 0 lamports ${named} and advance the frontier from 300000000 to 300000100 over 100 txs`);
     }
@@ -610,7 +610,7 @@ describe("the ticks' first steps, over the same bytes", () => {
     expect(read.get(missing.toBase58())).toBeNull();
     expect(calls.splice(0)).toEqual(["getMultipleAccountsInfoAndContext"]);
     // Live and with no signer: the missing vault is what gets reported, not NO_SIGNER.
-    const result = await runSettleTick({ connection, program, link: linkTo(missing), vault: read.get(missing.toBase58()) ?? null, attester: null, walletSigner: null, live: true, protocolPaused: false });
+    const result = await runSettleTick({ connection, program, link: linkTo(missing), vault: read.get(missing.toBase58()) ?? null, attester: null, walletSigner: null, live: true, protocolPaused: false, carries: new Map() });
     expect(result.outcome).toBe("FAILED");
     expect(result.detail).toContain("vault account missing");
     expect(result.detail).toContain(missing.toBase58());
@@ -625,7 +625,7 @@ describe("the ticks' first steps, over the same bytes", () => {
       calls.splice(0);
       callArgs.splice(0);
       const link = linkTo(vault);
-      const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false });
+      const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false, carries: new Map() });
       expect(result).toEqual({ outcome: "IDLE", detail: "nothing since slot 300000000" });
       expect(calls).toEqual(["getSignaturesForAddress"]);
       expect(callArgs).toEqual([[link.wallet, { limit: 1 }, "confirmed"]]);
@@ -642,7 +642,7 @@ describe("the ticks' first steps, over the same bytes", () => {
     calls.splice(0);
     callArgs.splice(0);
     const link = linkTo(vault);
-    const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false });
+    const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false, carries: new Map() });
     expect(result.outcome).toBe("PENDING_FINALITY");
     expect(calls).toEqual(["getSignaturesForAddress", "getSlot", "getSignaturesForAddress"]);
     expect(callArgs).toEqual([
@@ -675,7 +675,7 @@ describe("the ticks' first steps, over the same bytes", () => {
     const read = await readVaults(program, [vault]);
     calls.splice(0);
     callArgs.splice(0);
-    const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false });
+    const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false, carries: new Map() });
     expect(result).toMatchObject({ outcome: "SETTLED", baseLamports: 1_000_000_000n, mode: 0, feeLamports: 10_000n, expectedLamports: 234_500_000n });
     // 1 SOL of profit at the planted 2 345 bps.
     expect(result.detail).toContain("DRY RUN — would settle 234500000 lamports");

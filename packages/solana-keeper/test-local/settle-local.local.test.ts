@@ -232,6 +232,7 @@ async function keeperTurn(p: Participant): Promise<{ readonly link: ManagedLink;
     walletSigner: p.wallet,
     live: true,
     protocolPaused: snapshot.config?.paused === true,
+    carries: new Map(),
     ...(p.mode === MODE_VOLUME ? { volumeBase: tradeNotional } : {}),
   });
   return { link, result };
