@@ -29,6 +29,7 @@
 import type { User } from "@privy-io/react-auth";
 
 import { EMBEDDED_CLIENT_TYPES } from "@/lib/pension-key";
+import { privyFailure } from "@/lib/privy-failure";
 
 export const SIGNER_VARIABLE = "SIP_SOLANA_PRIVY_SIGNER_ID";
 export const POLICY_VARIABLE = "SIP_SOLANA_PRIVY_POLICY_ID";
@@ -156,4 +157,136 @@ export async function createTradingWallet(createWallet: CreateWalletFn, config: 
   const created = await createWallet({ createAdditional: true, signers });
   const address = created?.wallet?.address;
   return typeof address === "string" && address !== "" ? address : null;
+}
+
+/**
+ * The keeper's seat on one wallet, as Privy's record of the user states it — read
+ * on every call, never cached, never inferred from having asked for it:
+ *
+ * - "seated": listed as a trading wallet with delegated: true. Privy documents that
+ *   a wallet with signers always has the flag set. The record does not say which
+ *   signer or which policy — Privy's browser SDK exposes neither — so the binding
+ *   itself is confirmed in the Privy dashboard, or by `privy-policy verify`.
+ * - "missing": listed with delegated: false. Nothing can sign for it.
+ * - "unknown": not listed as a trading wallet (one created a moment ago, or an
+ *   address that is not one, like the pension key), or listed without the flag.
+ */
+export type SeatStatus = "seated" | "missing" | "unknown";
+
+export function seatOf(user: User | null, address: string): SeatStatus {
+  for (const account of user?.linkedAccounts ?? []) {
+    if (account.type !== "wallet" || account.chainType !== "solana" || account.address !== address) continue;
+    if (!EMBEDDED_CLIENT_TYPES.has(account.walletClientType ?? "")) continue;
+    const delegated: unknown = account.delegated;
+    return delegated === true ? "seated" : delegated === false ? "missing" : "unknown";
+  }
+  return "unknown";
+}
+
+/** Privy's addSigners (root @privy-io/react-auth: it has no Solana variant), narrowed to the call this page makes. */
+export type AddSignersFn = (input: { address: string; signers: KeeperSigner[] }) => Promise<unknown>;
+
+/** Privy's refreshUser: fetches the user record again and returns it. */
+export type RefreshUserFn = () => Promise<User | null>;
+
+/** The waits between grant attempts while Privy records a new wallet: the EVM web's 1, 2, 4, 6, 8 and 10 seconds. */
+export const GRANT_BACKOFF_MS: readonly number[] = [1_000, 2_000, 4_000, 6_000, 8_000, 10_000];
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The repair: grant the keeper its seat on a trading wallet whose record shows none.
+ *
+ * REFUSES FIRST, like createTradingWallet: never a signer without its policy.
+ *
+ * RE-READS BEFORE IT ADDS. Privy's addSigners appends to the wallet's existing
+ * signers, so a grant on a wallet that turns out to be seated would seat the keeper
+ * twice. The record is fetched again first, and if it now shows the seat nothing
+ * is added. A re-read that fails grants nothing.
+ *
+ * ONLY THE PROPAGATION RACE IS RETRIED. A wallet created moments ago may not have
+ * reached Privy's record, and Privy says "not associated with current user" until
+ * it has; that is waited out on GRANT_BACKOFF_MS. Any other refusal is an answer,
+ * and asking again does not change it.
+ *
+ * Only the wallet's owner, signed in here, can add a signer: the keeper can never
+ * repair its own seat.
+ */
+export async function grantKeeperSeat({
+  address,
+  config,
+  addSigners,
+  refreshUser,
+  wait = sleep,
+}: {
+  address: string;
+  config: SeatConfig;
+  addSigners: AddSignersFn;
+  refreshUser: RefreshUserFn;
+  wait?: (ms: number) => Promise<void>;
+}): Promise<"granted" | "already-seated"> {
+  const signers = keeperSigners(config);
+  if (signers === null) throw new SeatNotConfigured(seatProblem(config) ?? "The keeper's seat is not configured.");
+
+  if (seatOf(await refreshUser(), address) === "seated") return "already-seated";
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await addSigners({ address, signers });
+      break;
+    } catch (error) {
+      const delay = GRANT_BACKOFF_MS[attempt];
+      if (delay === undefined || privyFailure(error).kind !== "propagating") throw error;
+      await wait(delay);
+    }
+  }
+
+  // The badge reads Privy's record, so the record is read again. The grant itself has already succeeded.
+  await refreshUser().catch(() => null);
+  return "granted";
+}
+
+/** Privy's exportWallet from @privy-io/react-auth/solana. */
+export type ExportWalletFn = (options: { address: string }) => Promise<void>;
+
+/** Thrown before Privy is called when an address is not a trading wallet on this account. */
+export class NotATradingWallet extends Error {
+  override readonly name = "NotATradingWallet";
+}
+
+/**
+ * Open Privy's export dialog for one trading wallet.
+ *
+ * ONLY A TRADING WALLET. The address must be a Privy embedded Solana wallet on this
+ * user, so the pension key — an external wallet — can never be passed through.
+ *
+ * THE ADDRESS IS ALWAYS PASSED. Without one Privy exports the wallet at HD index 0,
+ * which is the wrong one as soon as there are two.
+ */
+export async function exportTradingWallet({
+  exportWallet,
+  user,
+  address,
+}: {
+  exportWallet: ExportWalletFn;
+  user: User | null;
+  address: string;
+}): Promise<void> {
+  if (!tradingWalletsOf(user).some((wallet) => wallet.address === address)) {
+    throw new NotATradingWallet(
+      "Only a trading wallet Privy holds on this account can be exported. The pension key stays in your own wallet app.",
+    );
+  }
+  await exportWallet({ address });
+}
+
+/**
+ * A failure from any of the above, for the page: this module's own refusals as they
+ * are written, Privy's in words (privy-failure.ts), and null when the person only
+ * closed Privy's dialog.
+ */
+export function failureText(error: unknown): string | null {
+  if (error instanceof SeatNotConfigured || error instanceof NotATradingWallet) return error.message;
+  const described = privyFailure(error);
+  return described.kind === "exited" ? null : described.message;
 }

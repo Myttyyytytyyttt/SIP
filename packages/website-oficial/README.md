@@ -12,7 +12,7 @@ and the two Solana routes the browser talks to.
 | ----------------- | ---------- |
 | `/`               | The landing for a visitor without a pension key. Signing in with a Solana wallet, or following "See the app", opens the dashboard. |
 | `/?mode=mock`     | The dashboard on example data, badged **Sample data**, with **Live** disabled. There is no live data until the Solana vault screens land. |
-| `/wallets`        | The wallets screen: connect the pension key with a Solana wallet, and create trading wallets born with the keeper's seat (its Privy signer, bounded by its policy). The setup checklist when the configuration is incomplete. |
+| `/wallets`        | The wallets screen: connect the pension key with a Solana wallet; create trading wallets born with the keeper's seat (its Privy signer, bounded by its policy); see each wallet's seat as Privy records it, grant a missing one, and export a trading wallet's key through Privy's dialog. The setup checklist when the configuration is incomplete. |
 | `/api/health`     | Liveness. Always 200, whatever the configuration: check `/wallets` for that. |
 | `/api/solana-rpc` | A narrow JSON-RPC relay for Privy's Solana signing UI. The keyed upstream URL never reaches the browser. |
 | `/api/solana-tx`  | Verified broadcast: a transaction the user already signed is checked against the core's verifier, simulated and sent. The route never signs. |
@@ -100,12 +100,13 @@ src/lib/config.ts, load-config.ts   the configuration: its types, the readers, t
 src/lib/solana-routes.ts            the core's route handlers, behind that gate
 src/lib/pension-key.ts              the pension key, derived from Privy's user in the browser
 src/lib/privy-failure.ts            what Privy's failures mean, in words someone can act on
-src/lib/trading-wallets.ts          trading wallets and the keeper's seat: its signer with its policy, the list from Privy's record, the create
+src/lib/trading-wallets.ts          trading wallets and the keeper's seat: its signer with its policy, the list from Privy's record, the create, the seat read back, its repair, the export
 src/components/landing.tsx          the front door
 src/components/dashboard-shell.tsx  landing or dashboard, and the note over the example
 src/components/wallets-host.tsx     "Manage wallets": the wallets modal, or the setup modal when the configuration is incomplete
-src/components/wallets/*            WalletsScreen (both containers), WalletsModal, TradingWalletsCard, AddressLine, SetupChecklist, WalletsSetupModal
-src/hooks/use-create-trading-wallet.ts  one trading wallet at a time, born seated
+src/components/wallets/*            WalletsScreen (both containers), WalletsModal, TradingWalletsCard, TradingWalletRow, AddressLine, SetupChecklist, WalletsSetupModal
+src/hooks/use-create-trading-wallet.ts, use-keeper-seat.ts, use-export-trading-wallet.ts
+                                    create born seated; read, grant and re-read the seat; export through Privy's dialog
 src/mocks/types.ts                  THE CONTRACT — what the backend will have to produce
 src/mocks/data.ts                   one deterministic instance: a volume-mode vault at 2%, seeded, identical on server and client
 src/lib/format.ts                   every number and date on the page (UTC, en-US, on purpose)

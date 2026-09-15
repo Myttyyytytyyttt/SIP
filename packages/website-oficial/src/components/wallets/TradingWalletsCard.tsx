@@ -7,7 +7,7 @@
  * THE LIST IS PRIVY'S RECORD OF THE USER, read on every render (tradingWalletsOf).
  * One exception: a wallet createWallet has just reported that the record does not
  * list yet is shown as such, rather than vanishing between the create and Privy's
- * refresh.
+ * refresh. Each row reads its own seat (TradingWalletRow).
  *
  * A REFUSAL IS VISIBLE. With the keeper's seat not configured the create button is
  * disabled and the card names the missing variables: a trading wallet without the
@@ -23,15 +23,9 @@ import { useSolanaConfig } from "@/app/providers";
 import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
-import { AddressLine } from "@/components/wallets/AddressLine";
+import { TradingWalletRow, type TradingWalletRowData } from "@/components/wallets/TradingWalletRow";
 import { useCreateTradingWallet } from "@/hooks/use-create-trading-wallet";
-import { LABEL } from "@/lib/classes";
-import { MAX_TRADING_WALLETS, keeperSigners, seatProblem, tradingWalletsOf, type TradingWallet } from "@/lib/trading-wallets";
-
-export interface TradingWalletRowData extends TradingWallet {
-  /** False only for a wallet createWallet reported that Privy's record does not list yet. */
-  readonly listed: boolean;
-}
+import { MAX_TRADING_WALLETS, keeperSigners, seatProblem, tradingWalletsOf } from "@/lib/trading-wallets";
 
 export function TradingWalletsCard() {
   const config = useSolanaConfig();
@@ -54,7 +48,8 @@ export function TradingWalletsCard() {
         <CardTitle>Trading wallets</CardTitle>
         <CardDescription>
           The wallets you trade from. Each is created inside Privy with the keeper&apos;s seat: its permission to put a
-          slice of your trading aside, bounded by the keeper&apos;s policy.
+          slice of your trading aside, bounded by the keeper&apos;s policy. Export a wallet&apos;s key to trade from Axiom
+          or any Solana app; the seat stays.
         </CardDescription>
         <CardAction>
           <Button
@@ -89,7 +84,9 @@ export function TradingWalletsCard() {
         ) : null}
 
         {rows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No trading wallets yet.</p>
+          <p className="text-sm text-muted-foreground">
+            No trading wallets yet. Create one, then export its key to trade from Axiom or any Solana app.
+          </p>
         ) : (
           <ul className="divide-y">
             {rows.map((row) => (
@@ -108,33 +105,5 @@ export function TradingWalletsCard() {
         </CardFooter>
       ) : null}
     </Card>
-  );
-}
-
-function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
-  return (
-    <li className="space-y-1.5 py-3 first:pt-0 last:pb-0">
-      <div className={LABEL}>
-        {row.walletIndex !== null ? (
-          <>
-            Trading wallet <Num>{row.walletIndex + 1}</Num>
-          </>
-        ) : row.listed ? (
-          "Imported wallet"
-        ) : (
-          "New trading wallet"
-        )}
-      </div>
-      <AddressLine address={row.address} />
-      {!row.listed ? (
-        <p className="text-xs text-muted-foreground">Privy has not listed this wallet on your account yet.</p>
-      ) : null}
-      {row.id !== null ? (
-        <div className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
-          <span>Privy wallet id</span>
-          <Num className="break-all">{row.id}</Num>
-        </div>
-      ) : null}
-    </li>
   );
 }
