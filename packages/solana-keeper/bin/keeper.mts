@@ -46,6 +46,13 @@ import {
 import { ConfigError, SIGNING_SECRET_VARS, loadConfig, type KeeperConfig } from "../src/config.js";
 import { discoverLinks, type ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
+import {
+  INVEST_FAILED_CRITICAL_STREAK,
+  investFailedAlert,
+  investFailedStreak,
+  wrapShortAlert,
+  wrapShortStreak,
+} from "../src/invest-decision.js";
 import { runInvestTick } from "../src/invest-tick.js";
 import { SERVICE, createChangeLog, createKeeperLogger } from "../src/keeper-log.js";
 import { runPreflight } from "../src/preflight.js";
@@ -165,6 +172,20 @@ const changes = createChangeLog(log);
  * SETTLE_RETRY_CRITICAL_AFTER.
  */
 const settleRetries = new Map<string, number>();
+
+/**
+ * Consecutive invest turns, per vault, that found more free SOL than the crank
+ * could front. One large settlement wraps in slices over a few sweeps; a crank
+ * that stays short of a vault leaves its savings unwrapped, and one between
+ * 0.02 and 0.025 SOL wraps nothing at all while crank-low stays silent.
+ */
+const wrapShort = new Map<string, number>();
+
+/**
+ * Consecutive FAILED invest turns, per vault. Only REFUSED used to alert, so a
+ * vault that had stopped buying logged one warn line per sweep and paged nobody.
+ */
+const investFailed = new Map<string, number>();
 
 const privyConfig: PrivySolanaConfig | null = config.signing?.privy ?? null;
 
@@ -595,6 +616,7 @@ async function sweep(): Promise<void> {
           program,
           vault: link.vault,
           crank: investTurn.settleKey,
+          crankLamports: snapshot.crankLamports,
           pools: config.pools,
           live: investTurn.live,
           protocolPaused,
@@ -632,6 +654,31 @@ async function sweep(): Promise<void> {
           }
         } else {
           changes.change(`invest:${vaultAddr}`, `invest ${invest.outcome.toLowerCase()}`, { vault: vaultAddr, detail: invest.detail });
+        }
+        // A CRANK THAT STAYS SHORT OF A VAULT, told on the third turn in a row.
+        // Any turn that did not find it short — nothing to wrap, a crank that
+        // covered it, a pause, conversion off — ends the run and clears it.
+        const shortStreak = wrapShortStreak(wrapShort.get(vaultAddr) ?? 0, invest.wrap?.short === true);
+        const shortAlert = invest.wrap === undefined ? null : wrapShortAlert(vaultAddr, shortStreak, invest.wrap);
+        if (shortStreak === 0) {
+          wrapShort.delete(vaultAddr);
+          alerter.clear(`wrap-short:${vaultAddr}`);
+        } else {
+          wrapShort.set(vaultAddr, shortStreak);
+          if (shortAlert !== null) alerter.fire(shortAlert);
+        }
+        // AN INVESTMENT THAT KEEPS FAILING: warned on the first turn, critical on
+        // the third in a row. The alerter dedupes by key alone, so the warning
+        // standing under the same key is cleared first, or it would swallow the
+        // escalation. REFUSED holds the count; every other outcome ends it.
+        const failedStreak = investFailedStreak(investFailed.get(vaultAddr) ?? 0, invest.outcome);
+        if (invest.outcome === "FAILED") {
+          investFailed.set(vaultAddr, failedStreak);
+          if (failedStreak === INVEST_FAILED_CRITICAL_STREAK) alerter.clear(`invest-failed:${vaultAddr}`);
+          alerter.fire(investFailedAlert(vaultAddr, failedStreak, invest.detail));
+        } else if (failedStreak === 0) {
+          investFailed.delete(vaultAddr);
+          alerter.clear(`invest-failed:${vaultAddr}`);
         }
 
         // /status always reflects the latest condition, deduped or not.

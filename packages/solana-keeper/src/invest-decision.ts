@@ -1,5 +1,8 @@
-// Which in-asset this keeper can invest from, whether it may invest at all, and
-// whether it may convert the vault's SOL to get there, as pure decisions.
+// Which in-asset this keeper can invest from, whether it may invest at all,
+// whether it may convert the vault's SOL to get there, how much of that SOL one
+// turn may wrap and convert, and whether the 30-day cap leaves the basket room,
+// as pure decisions, with the alerts for a crank or an investment that stays
+// stuck.
 //
 // NEW IN SIP. sip-vault's InvestmentPolicy pins `in_mint`: the only mint convert
 // may fill into and invest may spend from, chosen by the owner, with every floor
@@ -13,6 +16,9 @@
 // both mints so the operator can see which side must change.
 
 import { PublicKey } from "@solana/web3.js";
+import type { InvestmentPolicyState } from "./accounts.js";
+import type { Alert } from "./alerts.js";
+import type { InvestOutcome } from "./invest-tick.js";
 
 /** USDC on mainnet: the only in-asset the keeper has routes for. */
 export const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
@@ -76,5 +82,296 @@ export function convertDecision(policy: { readonly minConvertRateWad: bigint }):
     detail:
       "conversion is off: the policy's min_convert_rate_wad is 0, which wrap_sol and convert refuse with FloorTooLow, " +
       "so the vault's SOL is not wrapped or converted and only USDC already in the vault is invested",
+  };
+}
+
+/**
+ * Below this, free SOL is not wrapped: three pool fees and three transaction
+ * fees to move dust is a worse outcome for the owner than waiting for the next
+ * settlement. The 0.005 SOL the tick has always used.
+ */
+export const WRAP_DUST_LAMPORTS = 5_000_000n;
+
+/**
+ * What the crank keeps back from fronting a wrap: 0.02 SOL, the line the
+ * crank-low alert draws. Its own rent floor and the fees of the turn come out
+ * of it. It does NOT cover a first basket's token-account rent, which is spent
+ * after the wrap has already paid the crank back.
+ */
+export const CRANK_WRAP_RESERVE_LAMPORTS = 20_000_000n;
+
+/** How much of a vault's free SOL one turn wraps, and whether the crank had to leave some behind. */
+export interface WrapPlan {
+  /** The vault's lamports above its rent floor, never below zero: wrap_sol saturates the same way. */
+  readonly free: bigint;
+  /** What the crank can front: its balance less CRANK_WRAP_RESERVE_LAMPORTS, never below zero. */
+  readonly allowance: bigint;
+  /** What the turn wraps: the smaller of the two, and nothing below WRAP_DUST_LAMPORTS. */
+  readonly amount: bigint;
+  /** The vault holds wrap-worthy free SOL that the crank cannot front in full. */
+  readonly short: boolean;
+}
+
+/**
+ * How much free SOL one turn may wrap: min(free, crank − 0.02 SOL).
+ *
+ * THE CRANK FRONTS EVERY WRAP. wrap_sol's first step is a System transfer of
+ * `amount` from the crank into the vault's wSOL account; only its third step
+ * debits the vault to pay the crank back (wrap_sol.rs). A crank holding less
+ * than `amount` fails that transfer before any reimbursement exists. The tick
+ * once wrapped the vault's whole free balance, so a vault holding more than the
+ * settle key's own SOL — one large settlement, several wallets settling in one
+ * sweep, SOL sent straight to the PDA — had its wrap refused on every sweep,
+ * and nothing was wrapped, converted or invested until an operator funded the
+ * hot key above the largest vault: the balance a key leak would expose.
+ *
+ * A SLICE PER TURN INSTEAD. The wrap pays the crank back inside the same
+ * instruction, so the crank's balance bounds one wrap and not the vault's
+ * savings; the rest waits for later sweeps. `short` says so, and a crank that
+ * stays short is alerted on rather than left to fall behind in silence.
+ */
+export function wrapPlan(input: { readonly free: bigint; readonly crankLamports: bigint }): WrapPlan {
+  const free = input.free > 0n ? input.free : 0n;
+  const allowance =
+    input.crankLamports > CRANK_WRAP_RESERVE_LAMPORTS ? input.crankLamports - CRANK_WRAP_RESERVE_LAMPORTS : 0n;
+  const fronted = free < allowance ? free : allowance;
+  return {
+    free,
+    allowance,
+    amount: fronted < WRAP_DUST_LAMPORTS ? 0n : fronted,
+    short: free >= WRAP_DUST_LAMPORTS && free > allowance,
+  };
+}
+
+/** What a turn found and did about the wrap, carried on its result for the wrap-short alert. */
+export interface WrapReport {
+  readonly free: bigint;
+  readonly allowance: bigint;
+  /** Lamports the turn wrapped; in a dry run, the lamports it would wrap. */
+  readonly wrapped: bigint;
+  readonly short: boolean;
+}
+
+/** Consecutive short turns before a vault's wrap-short alert fires. */
+export const WRAP_SHORT_ALERT_STREAK = 3;
+
+/** A vault's count of consecutive short turns, after one more turn. */
+export function wrapShortStreak(previous: number, short: boolean): number {
+  return short ? previous + 1 : 0;
+}
+
+/**
+ * The alert for a crank that stays short of a vault, or null until it has.
+ *
+ * NOT ON THE FIRST SHORT TURN. One large settlement is wrapped in slices over a
+ * few sweeps, and that is the clamp working. Three turns in a row is a crank
+ * that is not keeping up — and one inside its reserve wraps nothing at all,
+ * while crank-low stays silent until the crank is below the reserve itself.
+ */
+export function wrapShortAlert(vault: string, streak: number, wrap: WrapReport): Alert | null {
+  if (streak < WRAP_SHORT_ALERT_STREAK) return null;
+  return {
+    key: `wrap-short:${vault}`,
+    severity: "warn",
+    title: "A vault holds more free SOL than the crank can front",
+    detail:
+      `${wrap.free} free lamports, but the crank can front ${wrap.allowance} (its balance less the ` +
+      `${CRANK_WRAP_RESERVE_LAMPORTS}-lamport reserve), ${streak} turns in a row; ${wrap.wrapped} wrapped this turn ` +
+      `and the rest waits for later sweeps. A crank below ${CRANK_WRAP_RESERVE_LAMPORTS + WRAP_DUST_LAMPORTS} lamports wraps nothing.`,
+    context: { vault },
+  };
+}
+
+/** The 1 SOL floor under convert.rs's per-call cap. */
+export const CONVERT_CAP_FLOOR_LAMPORTS = 1_000_000_000n;
+
+/**
+ * The most lamports of wSOL one convert may sell: max(max_per_call, 1 SOL), the
+ * bound convert.rs puts on amount_in (AboveMaximum above it).
+ *
+ * TWO SCALES, ONE KNOB. amount_in is lamports; max_per_call is written in the
+ * in-asset's raw units, USDC's six decimals. The program reads the owner's
+ * figure as lamports anyway and floors it at 1_000_000_000, so a 50-USDC cap
+ * lets 1 SOL convert per call and a 1_500-USDC cap lets 1.5 SOL
+ * (tests/z-review-invest.ts pins both boundaries).
+ */
+export function convertCapLamports(maxPerCall: bigint): bigint {
+  return maxPerCall > CONVERT_CAP_FLOOR_LAMPORTS ? maxPerCall : CONVERT_CAP_FLOOR_LAMPORTS;
+}
+
+/**
+ * How much of the vault's wSOL one turn converts: all of it up to the cap, the
+ * rest left for later sweeps.
+ *
+ * THE WHOLE BALANCE WAS REFUSED ON EVERY SWEEP. The tick once converted all the
+ * vault held as wSOL in one call, so once a wrap took that above the cap — an
+ * owner's 50-USDC max_per_call and a 1.5 SOL settlement are enough — convert
+ * was refused, the next sweep asked again for the same balance plus whatever it
+ * had wrapped since, and the vault never invested again: its savings sat as
+ * liquid wSOL and every sweep ended FAILED.
+ */
+export function convertAmount(wsol: bigint, maxPerCall: bigint): bigint {
+  const cap = convertCapLamports(maxPerCall);
+  return wsol < cap ? wsol : cap;
+}
+
+/** Below this, wSOL the turn did not just wrap is left where it is. */
+export const CONVERT_DUST_LAMPORTS = 5_000_000n;
+
+/**
+ * Whether the turn converts: always after a wrap, and otherwise only when the
+ * wSOL already held is worth a swap.
+ *
+ * DUST FAILED EVERY SWEEP. Any wSOL at all woke the convert, but a few lamports
+ * price to a floor and a min_out of 0, which convert refuses with FloorTooLow —
+ * so wSOL anyone can send to the vault's token account, or a partial fill left
+ * behind, turned every later sweep into a refused convert reported as FAILED.
+ * What a wrap just added is never dust: WRAP_DUST_LAMPORTS is the same line.
+ */
+export function shouldConvert(wsolHeld: bigint, wrapped: bigint): boolean {
+  return wrapped > 0n || wsolHeld >= CONVERT_DUST_LAMPORTS;
+}
+
+/** u64::MAX: the product's default for max_per_call and max_rolling_30d, and where state.rs saturates. */
+export const U64_MAX = (1n << 64n) - 1n;
+
+/**
+ * The chain's day, as invest.rs derives it: unix_timestamp / 86_400 in i64
+ * division, which truncates toward zero as BigInt division does, and refused
+ * outside u32 (InvalidPolicy).
+ *
+ * THE CHAIN'S CLOCK, NOT THIS HOST'S. A host clock a few minutes ahead near
+ * midnight UTC would let a bucket out of the window a day before the program
+ * does, and see headroom the program refuses.
+ */
+export function chainDay(unixTimestamp: bigint): number {
+  const day = unixTimestamp / 86_400n;
+  if (day < 0n || day > 0xffff_ffffn) {
+    throw new Error(`the chain's unix_timestamp ${unixTimestamp} gives day ${day}, outside u32; invest refuses it with InvalidPolicy`);
+  }
+  return Number(day);
+}
+
+/**
+ * What the policy has invested in the trailing 31 days, as state.rs's
+ * rolling_total computes it: every bucket whose day + 31 is after today, added
+ * in order with saturation at u64::MAX. The buckets are read, never rebuilt:
+ * record() overwrites a stale one in place, so the stored days are the truth.
+ */
+export function rollingTotal(days: readonly number[], amounts: readonly bigint[], today: number): bigint {
+  if (days.length !== amounts.length) throw new Error(`${days.length} bucket days against ${amounts.length} bucket amounts`);
+  let total = 0n;
+  for (const [index, day] of days.entries()) {
+    // state.rs adds in u32 with overflow checks on (Cargo.toml), so a day this
+    // large panics the program; the mirror refuses it too.
+    if (day + 31 > 0xffff_ffff) throw new Error(`bucket day ${day} overflows u32 at day + 31, which panics rolling_total`);
+    if (day + 31 > today) {
+      total += amounts[index]!;
+      if (total > U64_MAX) total = U64_MAX;
+    }
+  }
+  return total;
+}
+
+/**
+ * The smallest budget the whole basket can be bought with: ceil(min_investment
+ * × 10_000 / the lightest weight). Split by weight and rounded down, as the
+ * tick splits it, that budget gives every leg at least the min_investment
+ * invest.rs requires of each call; one lamport less starves the lightest leg.
+ */
+export function basketMinimum(minInvestment: bigint, weightsBps: readonly number[]): bigint {
+  if (weightsBps.length === 0 || weightsBps.some((weight) => !Number.isInteger(weight) || weight <= 0)) {
+    throw new Error("a basket needs at least one leg and a positive weight on each, as set_invest_policy requires");
+  }
+  const lightest = BigInt(Math.min(...weightsBps));
+  return (minInvestment * 10_000n + lightest - 1n) / lightest;
+}
+
+/** Whether the 30-day cap leaves the basket room; when it does, how much. */
+export type RollingDecision =
+  | { readonly invest: true; readonly headroom: bigint }
+  | { readonly invest: false; readonly outcome: "IDLE"; readonly detail: string };
+
+/**
+ * Whether the 30-day cap leaves room to buy the basket, decided before any
+ * balance, ATA, wrap or convert.
+ *
+ * SOLD FOR A PURCHASE THE CAP FORBIDS. invest.rs refuses every leg that would
+ * take rolling_total past max_rolling_30d (RollingCapExhausted), but convert
+ * records nothing against the cap. The tick never read the buckets, so a vault
+ * whose month was spent had its SOL wrapped and market-sold to USDC and then
+ * every leg refused — the SOL exposure gone and nothing bought — the sequence
+ * this keeper already refuses for an unroutable basket.
+ *
+ * THE BASKET'S MINIMUM, NOT ONE LEG'S. Headroom of one min_investment lets one
+ * leg through, but the tick buys every leg or none, and a basket of several
+ * needs basketMinimum before its lightest leg qualifies. Resting only below
+ * min_investment would still sell SOL for a basket the split then refuses.
+ *
+ * THE HEADROOM IS WHAT THE PROGRAM ADMITS: the largest amount_in for which
+ * rolling.saturating_add(amount_in) <= max_rolling_30d. Under u64::MAX, the
+ * product default, that is every amount, however much is already recorded.
+ */
+export function rollingDecision(input: {
+  readonly policy: Pick<InvestmentPolicyState, "minInvestment" | "maxRolling30d" | "legs" | "bucketDays" | "bucketAmounts">;
+  readonly today: number;
+}): RollingDecision {
+  const { policy, today } = input;
+  const rolling = rollingTotal(policy.bucketDays, policy.bucketAmounts, today);
+  const max = policy.maxRolling30d;
+  const headroom = max === U64_MAX ? U64_MAX : rolling >= max ? 0n : max - rolling;
+  const minimum = basketMinimum(policy.minInvestment, policy.legs.map((leg) => leg.weightBps));
+  if (headroom >= minimum) return { invest: true, headroom };
+
+  // A counted bucket leaves the window on its day + 31, and the headroom grows
+  // by its amount that day.
+  const leaving = policy.bucketDays
+    .filter((day, index) => day + 31 > today && (policy.bucketAmounts[index] ?? 0n) > 0n)
+    .map((day) => day + 31);
+  const next = leaving.length === 0 ? null : Math.min(...leaving);
+  return {
+    invest: false,
+    outcome: "IDLE",
+    detail:
+      `RollingCapExhausted: rolling ${rolling} of max ${max}; headroom ${headroom} is below the basket minimum ${minimum}; ` +
+      (next === null || max < minimum
+        ? "max_rolling_30d itself is below the basket minimum, so the basket cannot be bought until the owner raises it or lowers min_investment"
+        : `headroom next grows on day ${next} (${new Date(next * 86_400_000).toISOString().slice(0, 10)})`) +
+      " — nothing is wrapped, converted or bought",
+  };
+}
+
+/** Consecutive FAILED turns at which a vault's invest-failed alert turns critical. */
+export const INVEST_FAILED_CRITICAL_STREAK = 3;
+
+/**
+ * A vault's count of consecutive FAILED invest turns, after one more turn.
+ * REFUSED neither counts nor ends the run: it has its own alert. INVESTED and
+ * every resting outcome end it.
+ */
+export function investFailedStreak(previous: number, outcome: InvestOutcome): number {
+  if (outcome === "FAILED") return previous + 1;
+  if (outcome === "REFUSED") return previous;
+  return 0;
+}
+
+/**
+ * The alert for a vault whose invest turn FAILED: a warning at first, critical
+ * from the third turn in a row.
+ *
+ * ONLY REFUSED USED TO ALERT. A vault stuck on AboveMaximum, a short crank,
+ * dust or slippage logged one warn line per sweep and reached no webhook,
+ * while a settle that failed paged at once. One failure is often the market —
+ * a fill under min_out, a dropped transaction — and the next sweep clears it;
+ * three in a row is a vault that has stopped buying.
+ */
+export function investFailedAlert(vault: string, streak: number, detail: string): Alert {
+  const critical = streak >= INVEST_FAILED_CRITICAL_STREAK;
+  return {
+    key: `invest-failed:${vault}`,
+    severity: critical ? "critical" : "warn",
+    title: critical ? "A vault's investing keeps failing" : "An investment turn failed",
+    detail: `${streak} failed turn${streak === 1 ? "" : "s"} in a row: ${detail}`,
+    context: { vault },
   };
 }

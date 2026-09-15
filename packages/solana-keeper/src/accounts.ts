@@ -211,6 +211,13 @@ export interface InvestmentPolicyState {
   readonly minInvestment: bigint;
   readonly maxPerCall: bigint;
   readonly maxRolling30d: bigint;
+  /**
+   * The 31 day-buckets invest records its measured spend in (state.rs): index
+   * day % 31, a stale day overwritten rather than added to. rolling_total sums
+   * them, and the keeper reads them before it sells any SOL toward a purchase.
+   */
+  readonly bucketDays: readonly number[];
+  readonly bucketAmounts: readonly bigint[];
 }
 
 export function investmentPolicyAddress(programId: PublicKey, vault: PublicKey): PublicKey {
@@ -223,6 +230,13 @@ export async function readInvestmentPolicy(program: anchor.Program, vault: Publi
   const decoded = await client(program, "investmentPolicy").fetchNullable(address);
   if (decoded === null) return null;
   const f = fields("InvestmentPolicy", decoded);
+  // `[u32; 31]` and `[u64; 31]` in state.rs, which Anchor decodes as plain
+  // lists: any other length is a layout this reader does not know.
+  const buckets = (name: string): readonly unknown[] => {
+    const list = f.list(name);
+    if (list.length !== 31) throw new Error(`InvestmentPolicy.${name} decoded ${list.length} buckets, not state.rs's 31`);
+    return list;
+  };
   return {
     address,
     enabled: f.flag("enabled"),
@@ -237,5 +251,11 @@ export async function readInvestmentPolicy(program: anchor.Program, vault: Publi
     maxPerCall: f.big("maxPerCall"),
     // `maxRolling30D`, with the capital D: see the header.
     maxRolling30d: f.big("maxRolling30D"),
+    bucketDays: buckets("bucketDays").map((day, index) => {
+      const value = Number(day);
+      if (!Number.isInteger(value)) throw new Error(`InvestmentPolicy.bucketDays[${index}] did not decode to an integer`);
+      return value;
+    }),
+    bucketAmounts: buckets("bucketAmounts").map((amount) => BigInt(String(amount))),
   };
 }
