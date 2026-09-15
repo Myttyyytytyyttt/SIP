@@ -3,10 +3,12 @@
 // Ported from Nuvem's solana-lab keeper (keeper/src/settle-tick.ts), moved to
 // settle_v2. What is new: the vault arrives decoded through the IDL from the
 // sweep's one batched read, a paused vault or protocol stops at PAUSED, a VOLUME
-// vault stops at UNSUPPORTED_MODE, the attestation binds the vault's own mode,
-// rate and policy nonce and a deadline, and a dry run measures and reports
-// without any key in reach. What is unchanged: the frontier-from-epoch
-// rule, the order of the completeness checks, confirm plus the receipt's own
+// vault stops at UNSUPPORTED_MODE, a confirmed probe decides whether there is
+// anything to walk, the walk reads finalized history and must reach the
+// frontier, the attestation binds the vault's own mode, rate and policy nonce
+// and a deadline, and a dry run measures and reports without any key in reach.
+// What is unchanged: the frontier-from-epoch rule, the completeness checks
+// behind the new frontier and finality stops, confirm plus the receipt's own
 // meta.err, and the vault delta read from pre/post balances.
 //
 // The decisions live in settle-decision.ts, where a test can reach them.
@@ -16,7 +18,7 @@ import { Connection, Keypair, Transaction } from "@solana/web3.js";
 import { summarizeUpstreamError } from "@sip/solana-log";
 import type { VaultState } from "./accounts.js";
 import type { ManagedLink } from "./discovery.js";
-import { measureSince } from "./measure-window.js";
+import { connectionReader, measureSince } from "./measure-window.js";
 import { method } from "./methods.js";
 import type { SolanaWalletSubmitter } from "./privy-signer.js";
 import { attestationInstruction } from "./program-scripts.js";
@@ -110,8 +112,19 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
 
   // Measure ONLY the unsettled span.
   const from = measurementStart(link);
-  const measured = await measureSince(connection, link.wallet, from, program.programId);
-  const decision = decideFromMeasurement(measured, from);
+  // ONE CONFIRMED PROBE BEFORE ANY WALK: the wallet's newest signature. None
+  // above the start is an idle wallet, and it costs this one request, as its one
+  // page did before the walk read finalized history. Past this line there IS
+  // activity above the start, which is how an empty finalized walk is known to
+  // be finality catching up rather than a wallet with nothing to settle.
+  const [newest] = await connection.getSignaturesForAddress(link.wallet, { limit: 1 }, "confirmed");
+  if (newest === undefined || BigInt(newest.slot) <= from) {
+    return { outcome: "IDLE", detail: `nothing since slot ${from}` };
+  }
+  // BEFORE THE WALK, NOT AFTER: see MeasurementContext.finalizedSlot.
+  const finalizedSlot = BigInt(await connection.getSlot("finalized"));
+  const measured = await measureSince(connectionReader(connection), link.wallet, from, program.programId);
+  const decision = decideFromMeasurement(measured, { from, finalizedSlot });
   if (decision.kind === "stop") {
     return {
       outcome: decision.outcome,

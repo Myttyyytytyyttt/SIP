@@ -1,8 +1,9 @@
 // Measures a wallet's cash profit over ONE BOUNDED WINDOW: strictly after a
-// frontier slot, up to now.
+// frontier slot, up to the newest FINALIZED transaction.
 //
-// Ported from Nuvem's solana-lab keeper (keeper/src/measure-window.ts),
-// unchanged in behaviour. The settle marker is now sip-vault's program id.
+// Ported from Nuvem's solana-lab keeper (keeper/src/measure-window.ts). The
+// settle marker is now sip-vault's program id, and the walk now reads finalized
+// history only and proves it reached the frontier instead of assuming it.
 //
 // The drill's measure-session.ts walks a fixed count of recent transactions,
 // which is right for a one-shot demo and wrong for a keeper: a tester trading
@@ -15,7 +16,7 @@
 // lamports. Pure System/ComputeBudget transfers are external flows; everything
 // else (Jupiter, pump.fun, Raydium, anything) is trading and counts.
 
-import { Connection, PublicKey } from "@solana/web3.js";
+import type { Connection, Finality, PublicKey, VersionedTransactionResponse } from "@solana/web3.js";
 
 // Programs whose presence NEVER means trading: the System/ComputeBudget pair,
 // plus the Ed25519 precompile that a settle carries for its attestation. A
@@ -46,17 +47,86 @@ export function isExternalFlowTx(programs: Iterable<string>, settleProgramId?: s
   return true;
 }
 
-/** How many signatures to walk before giving up on reaching the frontier. */
+/**
+ * The commitment every read of the window is made at: signatures, the window's
+ * transactions and the anchor below it.
+ *
+ * FINALIZED, BECAUSE SETTLED SLOTS ARE NEVER READ AGAIN. A settle moves the
+ * frontier to the window's last slot, and the next walk stops at that slot, so
+ * a transaction the walk did not see at or below it is never measured by
+ * anyone. At confirmed a slot can still be missing a transaction a slower node
+ * has not indexed, or belong to a fork that is dropped; at finalized it is what
+ * the chain will always say.
+ */
+export const WALK_COMMITMENT: Finality = "finalized";
+
+/** Signatures per page: the RPC's own maximum, so pages are few and cheap. */
+export const SIGNATURE_PAGE_LIMIT = 1_000;
+
+/**
+ * Pages walked before a turn gives up on reaching the frontier: 20 000
+ * signatures. It bounds what a griefer can make one turn cost, not what a turn
+ * reads — see MAX_SIGNATURES for that.
+ */
+export const MAX_SIGNATURE_PAGES = 20;
+
+/**
+ * The most transactions one measurement reads. A span with more signatures
+ * above its frontier is reported, and none of its transactions are read.
+ */
 export const MAX_SIGNATURES = 300;
+
+/**
+ * Where the walk reads the ledger. A Connection in production (connectionReader);
+ * a fake ledger in tests, which is how a walk is tested without a network.
+ *
+ * NO `until`, BY TYPE. Paging back to the last settle's own signature looks like
+ * the cheap way to stop, and it skips trades: a window (F, S] is settled by a
+ * transaction that lands at a slot above S, the program moves the frontier to S,
+ * and a trade made at a slot between S and that settle is OLDER than the settle
+ * signature — so a walk that stops there never sees it, and no balance-chain
+ * break reveals it, because the walk starts after it. The walk stops on SLOT,
+ * and this interface cannot carry anything else.
+ */
+export interface LedgerReader {
+  signatures(
+    wallet: PublicKey,
+    options: { readonly before?: string; readonly limit: number },
+    commitment: Finality,
+  ): Promise<readonly { readonly signature: string; readonly slot: number }[]>;
+  transaction(signature: string, commitment: Finality): Promise<VersionedTransactionResponse | null>;
+}
+
+export function connectionReader(connection: Connection): LedgerReader {
+  return {
+    signatures: (wallet, options, commitment) =>
+      connection.getSignaturesForAddress(
+        wallet,
+        options.before === undefined ? { limit: options.limit } : { before: options.before, limit: options.limit },
+        commitment,
+      ),
+    transaction: (signature, commitment) => connection.getTransaction(signature, { maxSupportedTransactionVersion: 0, commitment }),
+  };
+}
 
 export interface WindowMeasurement {
   readonly txCount: number;
+  /**
+   * Transactions in the window that are OUR OWN SETTLES: every program they
+   * touch is non-trading or sip-vault, and sip-vault is among them. The
+   * zero-base loop guard needs it: a window holding only the previous settle
+   * measures a profit of zero and must not be settled again.
+   */
+  readonly settleTxCount: number;
+  /** Trading transactions (not external flows) that succeeded. A failed swap pays its fee and trades nothing. */
+  readonly successfulTradeCount: number;
   readonly chainBreaks: number;
   /**
    * Transactions the RPC would not return. NOT the same as a chain break: a
    * break says the chain has a hole, this says WE could not see. Any non-zero
    * value makes the measurement unusable, and saying which it is decides
-   * whether an operator looks at the user's wallet or at their RPC plan.
+   * whether an operator looks at the user's wallet or at their RPC plan. The
+   * anchor counts too: without it the window's first balance is unchecked.
    */
   readonly unfetchable: number;
   readonly cashDelta: bigint;
@@ -65,22 +135,30 @@ export interface WindowMeasurement {
   readonly profitLamports: bigint;
   readonly firstSlot: bigint;
   readonly lastSlot: bigint;
-  /** True when the walk hit MAX_SIGNATURES before reaching the frontier. */
-  readonly truncated: boolean;
+  /** Signatures the walk collected strictly above the frontier, read or not. */
+  readonly signaturesAbove: number;
+  /**
+   * True only when the walk SAW a finalized signature at or below the frontier.
+   * Nothing is attested without it: a walk that ran out of history, or out of
+   * pages, measured a window whose oldest part it never saw.
+   */
+  readonly frontierReached: boolean;
+  /** True when the walk stopped at MAX_SIGNATURE_PAGES full pages without reaching the frontier. */
+  readonly pagesExhausted: boolean;
 }
 
 export async function measureSince(
-  connection: Connection,
+  reader: LedgerReader,
   wallet: PublicKey,
   /**
    * The watermark to measure from. ZERO IS NOT "the beginning of time": a
    * freshly linked wallet has frontier_slot 0, and walking a real trader's
-   * whole history from there both truncates at MAX_SIGNATURES (which reports
+   * whole history from there both runs past the walk's limits (which reports
    * INCOMPLETE forever, the same deadlock) and would take a skim on profit
    * earned BEFORE they joined. Callers pass the link's `epoch` — the slot the
    * link was created — in that case; see settle-decision.ts.
    */
-  frontierSlot: bigint,
+  from: bigint,
   /**
    * The sip-vault program id. A transaction that invokes it from this wallet
    * is OUR OWN SETTLE — the wallet pushing savings to the vault — and savings
@@ -93,16 +171,33 @@ export async function measureSince(
    */
   settleProgram?: PublicKey,
 ): Promise<WindowMeasurement> {
-  // Collect signatures newest-first until we pass the frontier.
+  // Collect signatures newest-first until one sits at or below the frontier.
   const collected: { signature: string; slot: number }[] = [];
+  let anchor: string | null = null;
   let before: string | undefined;
-  let truncated = false;
+  let pages = 0;
+  let pagesExhausted = false;
 
-  outer: while (collected.length < MAX_SIGNATURES) {
-    const batch = await connection.getSignaturesForAddress(wallet, { limit: 100, before }, "confirmed");
-    if (batch.length === 0) break;
-    for (const info of batch) {
-      if (BigInt(info.slot) <= frontierSlot) break outer;
+  walk: for (;;) {
+    if (pages === MAX_SIGNATURE_PAGES) {
+      pagesExhausted = true;
+      break;
+    }
+    const page = await reader.signatures(
+      wallet,
+      before === undefined ? { limit: SIGNATURE_PAGE_LIMIT } : { before, limit: SIGNATURE_PAGE_LIMIT },
+      WALK_COMMITMENT,
+    );
+    pages += 1;
+    for (const info of page) {
+      // REACHED MEANS SEEN. The first signature at or below the frontier is the
+      // proof that everything above it was collected, and it becomes the
+      // anchor the balance chain starts from. Signatures in the frontier's own
+      // slot are settled already, so they end the walk too.
+      if (BigInt(info.slot) <= from) {
+        anchor = info.signature;
+        break walk;
+      }
       // FAILED TRANSACTIONS ARE WALKED, NOT SKIPPED — and this is the single
       // most consequential line in the file.
       //
@@ -124,9 +219,41 @@ export async function measureSince(
       // inside cashDelta, as a cost of trading, which is what it is.
       collected.push({ signature: info.signature, slot: info.slot });
     }
-    before = batch[batch.length - 1]!.signature;
-    if (collected.length >= MAX_SIGNATURES) truncated = true;
+    // A SHORT PAGE IS THE END OF HISTORY, NOT THE FRONTIER. An empty page used
+    // to end the walk as if it had arrived, so an endpoint whose history stops
+    // above the frontier — a pruned node the pool failed over to, or a start
+    // not finalized yet — produced a "complete" window missing its oldest part.
+    if (page.length < SIGNATURE_PAGE_LIMIT) break;
+    // A FULL PAGE ONLY MEANS "LOOK AGAIN". The old walk declared itself
+    // truncated after its third full page even when the frontier signature was
+    // the very next one.
+    before = page[page.length - 1]!.signature;
   }
+
+  const frontierReached = anchor !== null;
+  const signaturesAbove = collected.length;
+  const measurement = {
+    txCount: 0,
+    settleTxCount: 0,
+    successfulTradeCount: 0,
+    chainBreaks: 0,
+    unfetchable: 0,
+    cashDelta: 0n,
+    deposits: 0n,
+    withdrawals: 0n,
+    profitLamports: 0n,
+    firstSlot: 0n,
+    lastSlot: from,
+    signaturesAbove,
+    frontierReached,
+    pagesExhausted,
+  };
+  // NOTHING IS READ THAT CANNOT BE ATTESTED. A walk that did not reach the
+  // frontier is refused whatever its transactions say, and a span above the
+  // read limit is refused before one of them is fetched: reading every
+  // transaction under 20 pages of signatures to report INCOMPLETE would cost
+  // thousands of requests a sweep, every sweep.
+  if (anchor === null || signaturesAbove > MAX_SIGNATURES) return measurement;
 
   collected.reverse(); // oldest first
 
@@ -138,14 +265,27 @@ export async function measureSince(
   let deposits = 0n;
   let withdrawals = 0n;
   let txCount = 0;
+  let settleTxCount = 0;
+  let successfulTradeCount = 0;
   let firstSlot = 0n;
-  let lastSlot = frontierSlot;
+  let lastSlot = from;
+  const settleProgramId = settleProgram?.toBase58();
+
+  // THE ANCHOR SEEDS THE CHAIN. Each walk used to start its chain at null, so
+  // the first transaction of a window was checked against nothing, and a hole
+  // just above the frontier was invisible. The anchor is the newest finalized
+  // transaction at or below the frontier; its post balance is the wallet's
+  // balance when the window opens, and the window's first pre balance must
+  // equal it. An anchor the RPC would not return, or returned without the
+  // wallet among its keys, is counted as unfetchable, never skipped: a skipped
+  // anchor is a window whose first balance nobody checked.
+  const anchorTx = await reader.transaction(anchor, WALK_COMMITMENT);
+  const anchorBalances = anchorTx === null ? null : walletBalances(anchorTx, wallet);
+  if (anchorBalances === null) unfetchable += 1;
+  else prevPost = anchorBalances.post;
 
   for (const entry of collected) {
-    const tx = await connection.getTransaction(entry.signature, {
-      maxSupportedTransactionVersion: 0,
-      commitment: "confirmed",
-    });
+    const tx = await reader.transaction(entry.signature, WALK_COMMITMENT);
     if (!tx || !tx.meta) {
       // A NULL IS NOT AN ABSENCE. live-route.ts documents the same hazard in
       // its own error text: a throttling RPC returns null WITHOUT erroring. So
@@ -157,20 +297,10 @@ export async function measureSince(
       unfetchable += 1;
       continue;
     }
-    const keys = tx.transaction.message.getAccountKeys({
-      accountKeysFromLookups: tx.meta.loadedAddresses ?? undefined,
-    });
-    let index = -1;
-    for (let i = 0; i < keys.length; i++) {
-      if (keys.get(i)!.equals(wallet)) {
-        index = i;
-        break;
-      }
-    }
-    if (index < 0) continue;
+    const balances = walletBalances(tx, wallet);
+    if (balances === null) continue;
+    const { pre, post, programs } = balances;
 
-    const pre = BigInt(tx.meta.preBalances[index]!);
-    const post = BigInt(tx.meta.postBalances[index]!);
     if (prevPost !== null && pre !== prevPost) chainBreaks += 1;
     prevPost = post;
     if (firstPre === null) {
@@ -181,24 +311,23 @@ export async function measureSince(
     lastSlot = BigInt(tx.slot);
     txCount += 1;
 
-    const programs = new Set<string>();
-    for (const ix of tx.transaction.message.compiledInstructions) {
-      programs.add(keys.get(ix.programIdIndex)!.toBase58());
-    }
-    for (const inner of tx.meta.innerInstructions ?? []) {
-      for (const ix of inner.instructions) programs.add(keys.get(ix.programIdIndex)!.toBase58());
-    }
-    const isExternalFlow = isExternalFlowTx(programs, settleProgram?.toBase58());
+    const isExternalFlow = isExternalFlowTx(programs, settleProgramId);
     if (isExternalFlow) {
       const delta = post - pre;
       if (delta > 0n) deposits += delta;
       else withdrawals += -delta;
+      if (settleProgramId !== undefined && programs.has(settleProgramId)) settleTxCount += 1;
+    } else if (tx.meta.err === null) {
+      successfulTradeCount += 1;
     }
   }
 
   const cashDelta = firstPre === null ? 0n : lastPost - firstPre;
   return {
+    ...measurement,
     txCount,
+    settleTxCount,
+    successfulTradeCount,
     chainBreaks,
     unfetchable,
     cashDelta,
@@ -207,6 +336,37 @@ export async function measureSince(
     profitLamports: cashDelta - deposits + withdrawals,
     firstSlot,
     lastSlot,
-    truncated,
   };
+}
+
+/**
+ * The wallet's balance before and after one transaction, and every program the
+ * transaction touched, inner instructions included. Null when there is no meta
+ * or the transaction does not name the wallet.
+ */
+function walletBalances(
+  tx: VersionedTransactionResponse,
+  wallet: PublicKey,
+): { readonly pre: bigint; readonly post: bigint; readonly programs: ReadonlySet<string> } | null {
+  if (!tx.meta) return null;
+  const keys = tx.transaction.message.getAccountKeys({
+    accountKeysFromLookups: tx.meta.loadedAddresses ?? undefined,
+  });
+  let index = -1;
+  for (let i = 0; i < keys.length; i++) {
+    if (keys.get(i)!.equals(wallet)) {
+      index = i;
+      break;
+    }
+  }
+  if (index < 0) return null;
+
+  const programs = new Set<string>();
+  for (const ix of tx.transaction.message.compiledInstructions) {
+    programs.add(keys.get(ix.programIdIndex)!.toBase58());
+  }
+  for (const inner of tx.meta.innerInstructions ?? []) {
+    for (const ix of inner.instructions) programs.add(keys.get(ix.programIdIndex)!.toBase58());
+  }
+  return { pre: BigInt(tx.meta.preBalances[index]!), post: BigInt(tx.meta.postBalances[index]!), programs };
 }

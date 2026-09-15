@@ -3,14 +3,18 @@
 // program id as the settle marker. The one bug that mattered — a failed
 // transaction wedging a wallet forever — survived a full mainnet drill because
 // scripted drills do not fail. These are the cases that drill could never
-// produce.
+// produce, and, since the walk reads finalized history and must prove it reached
+// the frontier, the walk itself, run over a fake ledger that refuses any other
+// commitment and any `until`.
 
 import { readFileSync } from "node:fs";
-import { PublicKey } from "@solana/web3.js";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
-import { isExternalFlowTx } from "../src/measure-window.js";
+import { MAX_SIGNATURES, MAX_SIGNATURE_PAGES, SIGNATURE_PAGE_LIMIT, isExternalFlowTx, measureSince } from "../src/measure-window.js";
 import { tightenMinOut } from "../src/min-out.js";
+import { decideFromMeasurement } from "../src/settle-decision.js";
+import { FakeLedger, chained, type LedgerEntry } from "./fake-ledger.js";
 
 const SIP = SIP_PROGRAM_ID;
 const SYSTEM = "11111111111111111111111111111111";
@@ -55,9 +59,8 @@ describe("classification", () => {
 
 // ── the wedge ───────────────────────────────────────────────────────────────
 //
-// These assert the SHAPE of the fix rather than re-running an RPC walk: the
-// walk itself is exercised against the chain by the keeper's dry run. What must
-// never regress is the decision to include failed signatures.
+// The SHAPE of the fix, pinned in the source: what must never regress is the
+// decision to include failed signatures. The walk below also runs one.
 
 describe("the wedge", () => {
   it("failed transactions are not filtered out of the walk", () => {
@@ -69,6 +72,202 @@ describe("the wedge", () => {
       /if\s*\(\s*info\.err\s*!==\s*null\s*\)\s*continue/.test(source),
       "failed signatures must be WALKED — skipping them breaks the balance chain and wedges the wallet",
     ).toBe(false);
+  });
+});
+
+// ── the walk ────────────────────────────────────────────────────────────────
+
+const wallet = Keypair.generate().publicKey;
+const settleProgram = new PublicKey(SIP);
+const FLOW = [SYSTEM];
+const TRADE = [JUPITER, SYSTEM];
+const SETTLE = [ED25519, SIP, SYSTEM];
+const at500 = { from: 500n, finalizedSlot: 10_000n };
+const finalized = (signature: string) => ({ signature, commitment: "finalized" });
+
+/** `count` transactions, one per slot from `firstSlot`, each moving the wallet by `delta`, chained from `balance`. */
+function perSlot(firstSlot: number, count: number, over: { programs?: readonly string[]; balance?: number; delta?: number } = {}): LedgerEntry[] {
+  const { programs = FLOW, balance = 1_000_000, delta = 0 } = over;
+  return chained(
+    balance,
+    Array.from({ length: count }, (_, i) => ({ signature: `sig-${firstSlot + i}`, slot: firstSlot + i, programs, delta })),
+  );
+}
+
+describe("the walk, over a finalized ledger", () => {
+  it("reaches the frontier at the first signature in its slot, and reads the window and that anchor, all at finalized", async () => {
+    const ledger = new FakeLedger(
+      wallet,
+      chained(1_000_000, [
+        { signature: "anchor-500", slot: 500, programs: FLOW, delta: 1_000_000 },
+        { signature: "trade-505", slot: 505, programs: TRADE, delta: 400_000 },
+        { signature: "trade-510", slot: 510, programs: TRADE, delta: -150_000 },
+      ]),
+    );
+    const measured = await measureSince(ledger, wallet, 500n, settleProgram);
+    expect(measured).toMatchObject({
+      frontierReached: true,
+      pagesExhausted: false,
+      signaturesAbove: 2,
+      txCount: 2,
+      chainBreaks: 0,
+      unfetchable: 0,
+      firstSlot: 505n,
+      lastSlot: 510n,
+      profitLamports: 250_000n,
+    });
+    expect(ledger.signatureCalls).toEqual([{ limit: SIGNATURE_PAGE_LIMIT, commitment: "finalized" }]);
+    expect(ledger.transactionCalls).toEqual([finalized("anchor-500"), finalized("trade-505"), finalized("trade-510")]);
+    expect(decideFromMeasurement(measured, at500)).toEqual({ kind: "settle", baseLamports: 250_000n, endSlot: 510n });
+  });
+
+  it("does not reach a frontier its history ends above, on a short page or an empty one, and reads no transaction", async () => {
+    const short = new FakeLedger(wallet, perSlot(505, 2, { programs: TRADE, delta: 1 }));
+    const shortWalk = await measureSince(short, wallet, 500n, settleProgram);
+    expect(shortWalk).toMatchObject({ frontierReached: false, pagesExhausted: false, signaturesAbove: 2, txCount: 0 });
+    expect(short.signatureCalls).toHaveLength(1);
+    expect(short.transactionCalls).toEqual([]);
+    expect(decideFromMeasurement(shortWalk, at500)).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+    expect(decideFromMeasurement(shortWalk, { from: 500n, finalizedSlot: 499n })).toMatchObject({ kind: "stop", outcome: "PENDING_FINALITY" });
+
+    // One full page above the frontier and nothing at or below it: the second
+    // page comes back empty, which the old walk took for arriving.
+    const full = new FakeLedger(wallet, perSlot(501, SIGNATURE_PAGE_LIMIT));
+    expect(await measureSince(full, wallet, 500n, settleProgram)).toMatchObject({
+      frontierReached: false,
+      pagesExhausted: false,
+      signaturesAbove: SIGNATURE_PAGE_LIMIT,
+    });
+    expect(full.signatureCalls.map((call) => call.before)).toEqual([undefined, "sig-501"]);
+    expect(full.transactionCalls).toEqual([]);
+  });
+
+  it("reaches a frontier whose signature opens the second page, however full the first one was", async () => {
+    // The old walk declared itself truncated after its last full page even when
+    // the frontier signature was the very next one.
+    const ledger = new FakeLedger(wallet, [
+      { signature: "anchor-100", slot: 100, pre: 1_000_000, post: 1_000_000, programs: FLOW },
+      ...perSlot(101, SIGNATURE_PAGE_LIMIT),
+    ]);
+    const measured = await measureSince(ledger, wallet, 100n, settleProgram);
+    expect(measured).toMatchObject({ frontierReached: true, pagesExhausted: false, signaturesAbove: SIGNATURE_PAGE_LIMIT });
+    expect(ledger.signatureCalls.map((call) => call.before)).toEqual([undefined, "sig-101"]);
+    // Above the read limit, refused before a single transaction is fetched.
+    expect(ledger.transactionCalls).toEqual([]);
+    expect(decideFromMeasurement(measured, { from: 100n, finalizedSlot: 10_000n })).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+  });
+
+  it("reads exactly MAX_SIGNATURES above the frontier, where the old walk called itself truncated, and refuses one more unread", async () => {
+    const anchor: LedgerEntry = { signature: "anchor-500", slot: 500, pre: 1_000_000, post: 1_000_000, programs: FLOW };
+    const atLimit = new FakeLedger(wallet, [anchor, ...perSlot(501, MAX_SIGNATURES, { programs: TRADE, delta: 1 })]);
+    const measured = await measureSince(atLimit, wallet, 500n, settleProgram);
+    expect(measured).toMatchObject({ frontierReached: true, signaturesAbove: MAX_SIGNATURES, txCount: MAX_SIGNATURES, chainBreaks: 0 });
+    expect(atLimit.transactionCalls).toHaveLength(MAX_SIGNATURES + 1);
+    expect(decideFromMeasurement(measured, at500)).toEqual({ kind: "settle", baseLamports: BigInt(MAX_SIGNATURES), endSlot: 800n });
+
+    const overLimit = new FakeLedger(wallet, [anchor, ...perSlot(501, MAX_SIGNATURES + 1, { programs: TRADE, delta: 1 })]);
+    const over = await measureSince(overLimit, wallet, 500n, settleProgram);
+    expect(over).toMatchObject({ frontierReached: true, signaturesAbove: MAX_SIGNATURES + 1, txCount: 0 });
+    expect(overLimit.transactionCalls).toEqual([]);
+    const decision = decideFromMeasurement(over, at500);
+    expect(decision).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+    if (decision.kind === "stop") expect(decision.detail).not.toContain("catch up");
+  });
+
+  it("stops after MAX_SIGNATURE_PAGES full pages, one page short of the frontier, and reads nothing", async () => {
+    const ledger = new FakeLedger(wallet, [
+      { signature: "anchor-100", slot: 100, pre: 1_000_000, post: 1_000_000, programs: FLOW },
+      ...perSlot(101, MAX_SIGNATURE_PAGES * SIGNATURE_PAGE_LIMIT),
+    ]);
+    const measured = await measureSince(ledger, wallet, 100n, settleProgram);
+    expect(measured).toMatchObject({ frontierReached: false, pagesExhausted: true, signaturesAbove: MAX_SIGNATURE_PAGES * SIGNATURE_PAGE_LIMIT });
+    expect(ledger.signatureCalls).toHaveLength(MAX_SIGNATURE_PAGES);
+    expect(ledger.transactionCalls).toEqual([]);
+    // INCOMPLETE even over a start finality has not reached: pages decide first.
+    expect(decideFromMeasurement(measured, { from: 100n, finalizedSlot: 50n })).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+  });
+
+  it("excludes every signature in the frontier's own slot and anchors on the newest of them", async () => {
+    const ledger = new FakeLedger(wallet, [
+      { signature: "older-500", slot: 500, pre: 0, post: 700_000, programs: FLOW },
+      { signature: "newer-500", slot: 500, pre: 700_000, post: 900_000, programs: TRADE },
+      { signature: "trade-505", slot: 505, pre: 900_000, post: 950_000, programs: TRADE },
+    ]);
+    const measured = await measureSince(ledger, wallet, 500n, settleProgram);
+    // Anchored on older-500, the chain would break: its post is not trade-505's pre.
+    expect(measured).toMatchObject({ frontierReached: true, signaturesAbove: 1, txCount: 1, chainBreaks: 0, firstSlot: 505n, profitLamports: 50_000n });
+    expect(ledger.transactionCalls).toEqual([finalized("newer-500"), finalized("trade-505")]);
+  });
+
+  it("counts a break between the anchor and the window's first transaction, which the old walk never checked", async () => {
+    const ledger = new FakeLedger(wallet, [
+      { signature: "anchor-500", slot: 500, pre: 0, post: 2_000_000, programs: FLOW },
+      // 100 000 lamports left the wallet in a transaction the walk never saw.
+      { signature: "trade-505", slot: 505, pre: 1_900_000, post: 2_500_000, programs: TRADE },
+    ]);
+    const measured = await measureSince(ledger, wallet, 500n, settleProgram);
+    expect(measured).toMatchObject({ frontierReached: true, txCount: 1, chainBreaks: 1, unfetchable: 0 });
+    expect(decideFromMeasurement(measured, at500)).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+  });
+
+  it("counts an anchor the RPC will not return as unfetchable, and refuses the window above it", async () => {
+    const entries = chained(1_000_000, [
+      { signature: "anchor-500", slot: 500, programs: FLOW, delta: 0 },
+      { signature: "trade-505", slot: 505, programs: TRADE, delta: 400_000 },
+    ]);
+    const ledger = new FakeLedger(wallet, entries, new Set(["anchor-500"]));
+    const measured = await measureSince(ledger, wallet, 500n, settleProgram);
+    expect(measured).toMatchObject({ frontierReached: true, unfetchable: 1, chainBreaks: 0, txCount: 1 });
+    const decision = decideFromMeasurement(measured, at500);
+    expect(decision).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+    if (decision.kind === "stop") expect(decision.detail).toContain("OUR node");
+  });
+
+  it("walks a trade made between the last window's end and the settle that closed it", async () => {
+    // The window ending at slot 100 was settled by a transaction that landed at
+    // 110, and settle_v2 moved the frontier to 100. The trade at 105 happened
+    // while that settle was being built, so its signature is OLDER than the
+    // settle's: a walk that stopped at the settle's signature would never see it.
+    const ledger = new FakeLedger(
+      wallet,
+      chained(3_000_000, [
+        { signature: "window-end-100", slot: 100, programs: TRADE, delta: 500_000 },
+        { signature: "trade-105", slot: 105, programs: TRADE, delta: 250_000 },
+        { signature: "settle-110", slot: 110, programs: SETTLE, delta: -110_000 },
+      ]),
+    );
+    const measured = await measureSince(ledger, wallet, 100n, settleProgram);
+    expect(measured).toMatchObject({ frontierReached: true, txCount: 2, settleTxCount: 1, successfulTradeCount: 1, chainBreaks: 0 });
+    // The settle is flow: the trade's 250 000 is the profit, not 140 000.
+    expect(measured.profitLamports).toBe(250_000n);
+    expect(ledger.transactionCalls.map((call) => call.signature)).toEqual(["window-end-100", "trade-105", "settle-110"]);
+  });
+
+  it("never stops on a signature: `until` is absent from the walk's source", () => {
+    const source = readFileSync(new URL("../src/measure-window.ts", import.meta.url), "utf8");
+    expect(
+      /until\s*:/.test(source),
+      "the walk stops on slot — a stop at the last settle's signature skips trades made while that settle was built",
+    ).toBe(false);
+  });
+
+  it("counts our own settles and successful trades; a failed trade is walked, costs its fee, and is never a successful trade", async () => {
+    const ledger = new FakeLedger(
+      wallet,
+      chained(5_000_000, [
+        { signature: "anchor-200", slot: 200, programs: FLOW, delta: 0 },
+        { signature: "trade-201", slot: 201, programs: TRADE, delta: 300_000 },
+        { signature: "failed-202", slot: 202, programs: [RAYDIUM, COMPUTE], delta: -5_000, err: { InstructionError: [0, { Custom: 6001 }] } },
+        { signature: "settle-203", slot: 203, programs: SETTLE, delta: -65_000 },
+        { signature: "deposit-204", slot: 204, programs: FLOW, delta: 1_000_000 },
+        // Our instruction bundled into a trade stays a trade, so it is not one of our settles.
+        { signature: "bundle-205", slot: 205, programs: [SIP, JUPITER, SYSTEM], delta: -20_000 },
+      ]),
+    );
+    const measured = await measureSince(ledger, wallet, 200n, settleProgram);
+    expect(measured).toMatchObject({ txCount: 5, settleTxCount: 1, successfulTradeCount: 2, chainBreaks: 0, unfetchable: 0 });
+    // The failed trade's fee sits inside the chain and inside the profit, as a cost of trading.
+    expect(measured.profitLamports).toBe(300_000n - 5_000n - 20_000n);
   });
 });
 

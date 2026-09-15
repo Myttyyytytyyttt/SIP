@@ -6,8 +6,10 @@
 // mode, the rate of that mode as state.rs's active_bps reads it, its policy
 // nonce, a start that is the link's measurementStart and nothing else, and a
 // deadline 150 slots past the confirmed slot. The measurement order is the old
-// tick's, and so is the frontier-from-epoch rule. The bytes those inputs encode
-// to are pinned to the program's golden vector in attestation-golden.test.ts.
+// tick's behind two new stops — a walk that did not reach the frontier, and a
+// window finality has not caught up with — and the frontier-from-epoch rule is
+// unchanged. The bytes those inputs encode to are pinned to the program's golden
+// vector in attestation-golden.test.ts.
 
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
@@ -48,8 +50,11 @@ const vault = (over: Partial<VaultState> = {}): VaultState => ({
   ...over,
 });
 
+/** A walk that reached the frontier and read twelve clean trades above it. */
 const measured = (over: Partial<WindowMeasurement> = {}): WindowMeasurement => ({
   txCount: 12,
+  settleTxCount: 0,
+  successfulTradeCount: 12,
   chainBreaks: 0,
   unfetchable: 0,
   cashDelta: 50_000_000n,
@@ -58,7 +63,9 @@ const measured = (over: Partial<WindowMeasurement> = {}): WindowMeasurement => (
   profitLamports: 50_000_000n,
   firstSlot: 300_000_600n,
   lastSlot: 300_000_900n,
-  truncated: false,
+  signaturesAbove: 12,
+  frontierReached: true,
+  pagesExhausted: false,
   ...over,
 });
 
@@ -117,34 +124,84 @@ describe("where a measurement starts", () => {
 
 describe("what a measurement allows, in order", () => {
   const from = 300_000_500n;
+  // Finality well past the start: the ordinary case.
+  const at = { from, finalizedSlot: 300_001_000n };
 
   it("an unreadable span is INCOMPLETE even when it looks empty", () => {
-    const decision = decideFromMeasurement(measured({ unfetchable: 3, txCount: 0 }), from);
+    const decision = decideFromMeasurement(measured({ unfetchable: 3, txCount: 0 }), at);
     expect(decision).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
     if (decision.kind === "stop") expect(decision.detail).toContain("OUR node");
   });
 
-  it("an empty readable span is IDLE", () => {
-    expect(decideFromMeasurement(measured({ txCount: 0 }), from)).toMatchObject({ kind: "stop", outcome: "IDLE" });
+  it("a walk whose finalized history ends above a start not finalized yet rests at PENDING_FINALITY", () => {
+    const decision = decideFromMeasurement(measured({ frontierReached: false, txCount: 0 }), { from, finalizedSlot: from - 1n });
+    expect(decision).toMatchObject({ kind: "stop", outcome: "PENDING_FINALITY" });
+    if (decision.kind === "stop") expect(decision.detail).toContain(`slot ${from}`);
   });
 
-  it("a truncated walk and a broken chain are INCOMPLETE", () => {
-    expect(decideFromMeasurement(measured({ truncated: true }), from)).toMatchObject({ outcome: "INCOMPLETE" });
-    expect(decideFromMeasurement(measured({ chainBreaks: 1 }), from)).toMatchObject({ outcome: "INCOMPLETE" });
+  it("a walk whose finalized history ends above a finalized start is INCOMPLETE, naming the slot", () => {
+    // At the boundary too: a start AT the finalized slot is finalized.
+    for (const finalizedSlot of [from, from + 1_000n]) {
+      const decision = decideFromMeasurement(measured({ frontierReached: false, txCount: 0 }), { from, finalizedSlot });
+      expect(decision).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+      if (decision.kind === "stop") expect(decision.detail).toContain(`stops above slot ${from}`);
+    }
+  });
+
+  it("a walk that ran out of pages is INCOMPLETE, even over a start finality has not reached", () => {
+    const decision = decideFromMeasurement(
+      measured({ frontierReached: false, pagesExhausted: true, signaturesAbove: 20_000, txCount: 0 }),
+      { from, finalizedSlot: from - 1n },
+    );
+    expect(decision).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+    if (decision.kind === "stop") expect(decision.detail).toContain("walked 20000 signatures over 20 pages");
+  });
+
+  it("a walk that reached the frontier with nothing finalized above it rests at PENDING_FINALITY, never IDLE", () => {
+    // The turn walks only after a confirmed probe saw a newer signature, so
+    // this is finality catching up. An idle wallet never gets this far.
+    expect(decideFromMeasurement(measured({ txCount: 0, signaturesAbove: 0 }), at)).toMatchObject({ kind: "stop", outcome: "PENDING_FINALITY" });
+  });
+
+  it("words each finality stop the same while finality advances, so the sweep logs it once", () => {
+    // The sweep's change log emits a resting state only when its line changes,
+    // and the finalized slot moves every sweep.
+    const shapes = [
+      [measured({ frontierReached: false, txCount: 0 }), [from - 50n, from - 1n]],
+      [measured({ frontierReached: false, txCount: 0 }), [from, from + 1_000n]],
+      [measured({ txCount: 0, signaturesAbove: 0 }), [300_001_000n, 300_001_032n]],
+    ] as const;
+    for (const [shape, [earlier, later]] of shapes) {
+      expect(decideFromMeasurement(shape, { from, finalizedSlot: earlier })).toEqual(decideFromMeasurement(shape, { from, finalizedSlot: later }));
+    }
+  });
+
+  it("more signatures above the frontier than one settlement reads is INCOMPLETE and promises no catch-up; the limit itself is measured", () => {
+    const over = decideFromMeasurement(measured({ signaturesAbove: 301, txCount: 0 }), at);
+    expect(over).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+    if (over.kind === "stop") {
+      expect(over.detail).toContain("301 signatures");
+      expect(over.detail).not.toContain("catch up");
+    }
+    expect(decideFromMeasurement(measured({ signaturesAbove: 300, txCount: 300 }), at)).toMatchObject({ kind: "settle" });
+  });
+
+  it("a broken chain is INCOMPLETE", () => {
+    expect(decideFromMeasurement(measured({ chainBreaks: 1 }), at)).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
   });
 
   it("a flat or losing span is NO_PROFIT and carries its base, and does not settle", () => {
-    const decision = decideFromMeasurement(measured({ profitLamports: -5n }), from);
+    const decision = decideFromMeasurement(measured({ profitLamports: -5n }), at);
     expect(decision).toMatchObject({ kind: "stop", outcome: "NO_PROFIT", baseLamports: -5n });
-    expect(decideFromMeasurement(measured({ profitLamports: 0n }), from)).toMatchObject({ outcome: "NO_PROFIT" });
+    expect(decideFromMeasurement(measured({ profitLamports: 0n }), at)).toMatchObject({ outcome: "NO_PROFIT" });
   });
 
   it("profit with no slot beyond the frontier is IDLE", () => {
-    expect(decideFromMeasurement(measured({ lastSlot: from }), from)).toMatchObject({ kind: "stop", outcome: "IDLE" });
+    expect(decideFromMeasurement(measured({ lastSlot: from }), at)).toMatchObject({ kind: "stop", outcome: "IDLE" });
   });
 
   it("clean profit settles over the measured window", () => {
-    expect(decideFromMeasurement(measured(), from)).toEqual({ kind: "settle", baseLamports: 50_000_000n, endSlot: 300_000_900n });
+    expect(decideFromMeasurement(measured(), at)).toEqual({ kind: "settle", baseLamports: 50_000_000n, endSlot: 300_000_900n });
   });
 });
 

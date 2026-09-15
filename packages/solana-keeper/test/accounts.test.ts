@@ -12,7 +12,7 @@
 
 import * as anchor from "@coral-xyz/anchor";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, type Finality } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import {
   configAddress,
@@ -28,6 +28,7 @@ import { accountDiscriminator, idl } from "../src/idl.js";
 import { USDC_MINT } from "../src/invest-decision.js";
 import { runInvestTick } from "../src/invest-tick.js";
 import { runSettleTick } from "../src/settle-tick.js";
+import { FakeLedger, chained } from "./fake-ledger.js";
 
 const programId = new PublicKey(idl.address);
 const key = (): PublicKey => Keypair.generate().publicKey;
@@ -457,5 +458,75 @@ describe("the ticks' first steps, over the same bytes", () => {
     expect(result.detail).toContain("vault account missing");
     expect(result.detail).toContain(missing.toBase58());
     expect(calls).toEqual([]);
+  });
+
+  it("rest a PROFIT settle at IDLE on one confirmed probe when nothing is newer than its start, and walk nothing", async () => {
+    // No signature at all, and only the link's own, at its epoch.
+    for (const newest of [[], [{ signature: "link", slot: 300_000_000, err: null, memo: null }]]) {
+      const { vault, connection, program, calls, callArgs } = chainWith({}, null, { getSignaturesForAddress: async () => newest });
+      const read = await readVaults(program, [vault]);
+      calls.splice(0);
+      callArgs.splice(0);
+      const link = linkTo(vault);
+      const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false });
+      expect(result).toEqual({ outcome: "IDLE", detail: "nothing since slot 300000000" });
+      expect(calls).toEqual(["getSignaturesForAddress"]);
+      expect(callArgs).toEqual([[link.wallet, { limit: 1 }, "confirmed"]]);
+    }
+  });
+
+  it("read finality before a finalized walk, and rest at PENDING_FINALITY when that history does not reach a start not finalized yet", async () => {
+    const { vault, connection, program, calls, callArgs } = chainWith({}, null, {
+      getSignaturesForAddress: async (_wallet, _options, commitment) =>
+        commitment === "confirmed" ? [{ signature: "trade", slot: 300_000_010, err: null, memo: null }] : [],
+      getSlot: async () => 299_999_990,
+    });
+    const read = await readVaults(program, [vault]);
+    calls.splice(0);
+    callArgs.splice(0);
+    const link = linkTo(vault);
+    const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false });
+    expect(result.outcome).toBe("PENDING_FINALITY");
+    expect(calls).toEqual(["getSignaturesForAddress", "getSlot", "getSignaturesForAddress"]);
+    expect(callArgs).toEqual([
+      [link.wallet, { limit: 1 }, "confirmed"],
+      ["finalized"],
+      [link.wallet, { limit: 1_000 }, "finalized"],
+    ]);
+  });
+
+  it("walk a finalized window through the connection, and read the confirmed slot for the deadline only once it settles, in a dry run", async () => {
+    let ledger: FakeLedger | undefined;
+    const { vault, connection, program, calls, callArgs } = chainWith({}, null, {
+      getSignaturesForAddress: async (wallet, options, commitment) =>
+        commitment === "confirmed"
+          ? [{ signature: "trade-5", slot: 300_000_005, err: null, memo: null }]
+          : ledger!.signatures(wallet as PublicKey, options as { limit: number }, commitment as Finality),
+      getTransaction: async (signature, config) => ledger!.transaction(signature as string, (config as { commitment: Finality }).commitment),
+      getSlot: async (commitment) => (commitment === "finalized" ? 300_000_100 : 300_000_140),
+    });
+    const link = linkTo(vault);
+    ledger = new FakeLedger(
+      link.wallet,
+      chained(2_000_000_000, [
+        // The link's own transaction at its epoch: the anchor the walk stops on.
+        { signature: "link-0", slot: 300_000_000, programs: ["11111111111111111111111111111111"], delta: -2_000_000 },
+        { signature: "trade-5", slot: 300_000_005, programs: ["JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"], delta: 1_000_000_000 },
+      ]),
+    );
+    const read = await readVaults(program, [vault]);
+    calls.splice(0);
+    callArgs.splice(0);
+    const result = await runSettleTick({ connection, program, link, vault: read.get(vault.toBase58()) ?? null, attester: null, walletSigner: null, live: false, protocolPaused: false });
+    expect(result).toMatchObject({ outcome: "SETTLED", baseLamports: 1_000_000_000n, mode: 0 });
+    // 1 SOL of profit at the planted 2 345 bps.
+    expect(result.detail).toContain("DRY RUN — would settle 234500000 lamports");
+    expect(result.detail).toContain("over slots 300000000..300000005");
+    expect(calls).toEqual(["getSignaturesForAddress", "getSlot", "getSignaturesForAddress", "getTransaction", "getTransaction", "getSlot"]);
+    expect(callArgs.slice(3)).toEqual([
+      ["link-0", { maxSupportedTransactionVersion: 0, commitment: "finalized" }],
+      ["trade-5", { maxSupportedTransactionVersion: 0, commitment: "finalized" }],
+      ["confirmed"],
+    ]);
   });
 });

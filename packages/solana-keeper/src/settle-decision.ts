@@ -16,17 +16,29 @@
 //
 // IT REFUSES RATHER THAN GUESSES. A broken balance chain means a transaction was
 // missed, so the measurement is incomplete and no attestation is signed: an
-// unproven number never moves money.
+// unproven number never moves money. A walk that never saw the frontier is
+// refused the same way, unless the only thing it is missing is finality.
 
 import type { PublicKey } from "@solana/web3.js";
 import type { VaultState } from "./accounts.js";
 import type { ManagedLink } from "./discovery.js";
-import { MAX_SIGNATURES, type WindowMeasurement } from "./measure-window.js";
+import { MAX_SIGNATURE_PAGES, MAX_SIGNATURES, type WindowMeasurement } from "./measure-window.js";
 import { MODE_PROFIT, MODE_VOLUME, type AttestationInputs } from "./program-scripts.js";
 
 export type SettleOutcome =
   /** Nothing new since the frontier. The resting state of a linked wallet. */
   | "IDLE"
+  /**
+   * There is activity, and the finalized history the walk reads cannot show it
+   * yet: newer transactions are confirmed but not finalized, or the span starts
+   * at a slot that is not finalized itself, like a link made seconds ago.
+   *
+   * A RESTING state with no alert. Finality trails the confirmed tip by a few
+   * dozen slots, so the next sweep measures again. Nothing is measured from
+   * confirmed data instead, because a slot is never read again once a settle
+   * has moved the frontier past it.
+   */
+  | "PENDING_FINALITY"
   /** New profit measured, attested and settled — or, in dry run, what would be. */
   | "SETTLED"
   /**
@@ -153,14 +165,27 @@ export function noSignerDetail(wallet: PublicKey): string {
 export type MeasurementDecision =
   | {
       readonly kind: "stop";
-      readonly outcome: "IDLE" | "INCOMPLETE" | "NO_PROFIT";
+      readonly outcome: "IDLE" | "INCOMPLETE" | "NO_PROFIT" | "PENDING_FINALITY";
       readonly detail: string;
       readonly baseLamports?: bigint;
     }
   | { readonly kind: "settle"; readonly baseLamports: bigint; readonly endSlot: bigint };
 
-/** What a measurement allows, in the old tick's order — and the order is the point. */
-export function decideFromMeasurement(measured: WindowMeasurement, from: bigint): MeasurementDecision {
+/** Where a turn's walk started, and how far finality had come when it did. */
+export interface MeasurementContext {
+  /** measurementStart(link): the slot the walk had to reach. */
+  readonly from: bigint;
+  /**
+   * getSlot("finalized"), READ BEFORE THE WALK. A start at or below it was
+   * final before the walk began, so a walk that did not reach it is an endpoint
+   * problem. Read after, finality could pass the start during a walk that was
+   * merely early, and a truthful PENDING_FINALITY would be reported INCOMPLETE.
+   */
+  readonly finalizedSlot: bigint;
+}
+
+/** What a measurement allows, in order — and the order is the point. */
+export function decideFromMeasurement(measured: WindowMeasurement, { from, finalizedSlot }: MeasurementContext): MeasurementDecision {
   // UNFETCHABLE FIRST. This used to run after the empty check, so a span where
   // the RPC returned null for EVERY transaction — exactly what heavy throttling
   // looks like — reported "nothing since slot N" and went quiet. An empty walk
@@ -175,16 +200,65 @@ export function decideFromMeasurement(measured: WindowMeasurement, from: bigint)
         "the next sweep retries the same span",
     };
   }
-  if (measured.txCount === 0) {
-    return { kind: "stop", outcome: "IDLE", detail: `nothing since slot ${from}` };
-  }
-  if (measured.truncated) {
+  // THE FRONTIER, SEEN OR NOT. A walk that did not see a finalized signature at
+  // or below its start measured a window whose oldest part it never read, and
+  // used to settle it anyway: an empty page counted as arriving. What it is
+  // missing decides the name. Pages first, because no amount of finality
+  // brings 20 000 signatures closer.
+  if (!measured.frontierReached) {
+    if (measured.pagesExhausted) {
+      return {
+        kind: "stop",
+        outcome: "INCOMPLETE",
+        detail:
+          `walked ${measured.signaturesAbove} signatures over ${MAX_SIGNATURE_PAGES} pages without reaching slot ${from}, ` +
+          "where this span starts, so nothing is attested",
+      };
+    }
+    // THE DETAILS NAME NO FINALIZED SLOT. The sweep logs a resting state only
+    // when its line changes, and the finalized slot moves every sweep, so a
+    // detail that named it would log every wallet waiting here every minute.
+    if (from > finalizedSlot) {
+      return {
+        kind: "stop",
+        outcome: "PENDING_FINALITY",
+        detail:
+          `slot ${from}, where this span starts, is not finalized yet, ` +
+          "and the walk reads finalized history only; nothing is attested until it is",
+      };
+    }
     return {
       kind: "stop",
       outcome: "INCOMPLETE",
       detail:
-        `the unsettled span exceeds the ${measured.txCount}-tx walk limit — measured only part of it, ` +
-        "so nothing is attested (the frontier will catch up as earlier spans settle)",
+        `the endpoint's finalized history stops above slot ${from}, where this span starts, although that slot ` +
+        "is finalized; the walk never reached the frontier, so nothing is attested",
+    };
+  }
+  // ABOVE THE READ LIMIT, NOTHING WAS READ. The walk refuses before fetching a
+  // single transaction of a span this large, so this comes before the empty
+  // check below, which would otherwise call it finality catching up. The old
+  // detail promised the frontier would catch up; nothing settles part of a
+  // span yet, so it does not.
+  if (measured.signaturesAbove > MAX_SIGNATURES) {
+    return {
+      kind: "stop",
+      outcome: "INCOMPLETE",
+      detail:
+        `${measured.signaturesAbove} signatures sit above slot ${from}, more than the ${MAX_SIGNATURES} one settlement reads, ` +
+        "so none was read and nothing is attested; the frontier does not move while this holds",
+    };
+  }
+  // REACHED, AND NOTHING FINALIZED ABOVE IT. The turn walks only after a
+  // confirmed probe saw a signature above the start, so an empty finalized
+  // window is activity finality has not caught up with, not an idle wallet.
+  if (measured.txCount === 0) {
+    return {
+      kind: "stop",
+      outcome: "PENDING_FINALITY",
+      detail:
+        `activity after slot ${from} is confirmed but not finalized yet; ` +
+        "the walk reads finalized history only, so nothing is attested until it is",
     };
   }
   if (measured.chainBreaks > 0) {
