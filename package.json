@@ -2,7 +2,7 @@
   "name": "sip",
   "private": true,
   "version": "0.1.0",
-  "description": "SIP \u2014 a pension you build one trade at a time, on Solana. A slice of every linked wallet's trading, measured as volume or as realized profit, is settled into the user's vault and invested.",
+  "description": "SaverFi \u2014 a pension you build one trade at a time, on Solana. A slice of every linked wallet's trading, measured as volume or as realized profit, is settled into the user's vault and invested.",
   "packageManager": "pnpm@10.18.1",
   "engines": {
     "node": "22.14.0"
