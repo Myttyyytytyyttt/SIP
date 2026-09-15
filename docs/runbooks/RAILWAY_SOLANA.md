@@ -25,15 +25,16 @@ ve una variable de Nuvem. No copies variables de un servicio viejo.
 ## 1. El vigilante (`sip-solana-keeper`)
 
 En Railway: **New → GitHub repo → SIP**. Desde el 28 de agosto de 2026, Railway ya no deja activar *config as code*
-en servicios nuevos, así que no lee `packages/solana-keeper/railway.json`. Sin los ajustes de abajo, Railpack compila
-el `package.json` de la raíz, que es el de la web. Configúralo a mano:
+en servicios nuevos, así que no lee `packages/solana-keeper/railway.json`. En la raíz del repositorio hay un `Dockerfile`
+idéntico al del vigilante, y Railway lo detecta solo: un servicio creado desde este repositorio compila el vigilante,
+nunca la web. Configúralo a mano:
 
-- **Variables → `RAILWAY_DOCKERFILE_PATH`** = `packages/solana-keeper/Dockerfile`. En **Settings → Build**, el builder
-  pasa a *Dockerfile*.
+- **Variables → `RAILWAY_DOCKERFILE_PATH`** = `packages/solana-keeper/Dockerfile`. Es opcional, porque apunta a una copia
+  idéntica. En **Settings → Build**, el builder tiene que decir *Dockerfile*; si dice *Railpack*, algo va mal.
 - **Settings → Source → Root Directory**: vacío, porque el Dockerfile necesita la raíz del repositorio como contexto.
 - **Settings → Build → Watch Paths**, una por línea: `/packages/solana-keeper/**`, `/packages/solana-log/**`,
   `/packages/solana-program/idl/**`, `/packages/solana-program/scripts/**`, `/packages/solana-program/package.json`,
-  `/pnpm-lock.yaml`, `/pnpm-workspace.yaml`, `/package.json`.
+  `/pnpm-lock.yaml`, `/pnpm-workspace.yaml`, `/package.json`, `/Dockerfile`.
 - **Settings → Deploy**: *Healthcheck Path* `/health`; reinicio *On Failure*, con 10 intentos.
 - **Settings → Scale**: 1 réplica. El candado que deja actuar a una sola copia vive en la base de datos; sin ella,
   dos réplicas actuarían dos veces.
