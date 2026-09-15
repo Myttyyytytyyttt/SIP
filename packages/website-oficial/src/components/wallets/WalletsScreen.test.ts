@@ -58,6 +58,10 @@ vi.mock("@privy-io/react-auth", () => ({
 vi.mock("@privy-io/react-auth/solana", () => ({
   useCreateWallet: () => ({ createWallet: mocked.createWallet }),
   useExportWallet: () => ({ exportWallet: mocked.exportWallet }),
+  // The vault card and each row's link control take their signers from these; nothing here signs.
+  useWallets: () => ({ ready: true, wallets: [] }),
+  useSignTransaction: () => ({ signTransaction: async () => ({ signedTransaction: new Uint8Array(0) }) }),
+  useSignMessage: () => ({ signMessage: async () => ({ signature: new Uint8Array(0) }) }),
 }));
 
 vi.mock("@/app/providers", () => ({ useSolanaConfig: () => mocked.config }));

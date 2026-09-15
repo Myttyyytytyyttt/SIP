@@ -4,17 +4,18 @@
  * The rule texts are the owner's, word for word: what a mode takes, what the
  * keeper can and cannot move, and which rent never comes back. Components and
  * flows import from here, so a claim is changed once and a test can pin it.
- * Client-safe and pure; amounts arrive already written as text.
+ * Client-safe and pure; amounts and rates arrive already written as text.
  */
 
 import { DEFAULT_VAULT_POLICY } from "@sip/solana-core/client";
 
-const percent = (bps: number): string => `${Number((bps / 100).toFixed(2))} %`;
+/** Basis points as a percentage: 2000 is "20 %". */
+export const ratePercent = (bps: number): string => `${Number((bps / 100).toFixed(2))} %`;
 
 /** "20 %", from the product's default profit rate. */
-export const PROFIT_RATE = percent(DEFAULT_VAULT_POLICY.skimBps);
+export const PROFIT_RATE = ratePercent(DEFAULT_VAULT_POLICY.skimBps);
 /** "2 %", from the product's default volume rate. */
-export const VOLUME_RATE = percent(DEFAULT_VAULT_POLICY.volumeBps);
+export const VOLUME_RATE = ratePercent(DEFAULT_VAULT_POLICY.volumeBps);
 
 /** The first and last four characters of an address. */
 export const shortAddress = (address: string): string => (address.length > 10 ? `${address.slice(0, 4)}…${address.slice(-4)}` : address);
@@ -33,6 +34,7 @@ export const VAULT_COPY = {
   limits: "Limits",
   mostPerSettlement: "Most per settlement",
   alwaysLeft: "Always left in the trading wallet",
+  zeroSettlement: "Most per settlement must be more than 0 SOL.",
   create: "Create vault",
   creating: "Creating…",
   created: "Vault created",
@@ -43,12 +45,13 @@ export const VAULT_COPY = {
   withdrawable: "Withdrawable",
   createdOn: "Created",
   address: "Vault address",
-  rule: "Rule",
-  profitRule: (maxContribution: string, walletReserve: string): string =>
-    `Profit · ${PROFIT_RATE} of what your trading wallet gains. The keeper watches your trading wallet's SOL. When a stretch of trading ends with more SOL than it started, not counting plain transfers you send in or take out, ${PROFIT_RATE} of the gain moves into this vault. Gains held in tokens count once they are sold back to SOL. A losing stretch moves nothing, and its loss comes off the next gain. One settlement moves at most ${maxContribution} SOL; anything above that is not carried over. It never leaves the trading wallet with less than ${walletReserve} SOL.`,
+  /** The PROFIT rule, at `rate` ("20 %"). */
+  profitRule: (rate: string, maxContribution: string, walletReserve: string): string =>
+    `Profit · ${rate} of what your trading wallet gains. The keeper watches your trading wallet's SOL. When a stretch of trading ends with more SOL than it started, not counting plain transfers you send in or take out, ${rate} of the gain moves into this vault. Gains held in tokens count once they are sold back to SOL. A losing stretch moves nothing, and its loss comes off the next gain. One settlement moves at most ${maxContribution} SOL; anything above that is not carried over. It never leaves the trading wallet with less than ${walletReserve} SOL.`,
   volumeComing: `Volume · ${VOLUME_RATE} of every buy and sell. Coming soon: the keeper cannot measure trading volume yet, so a volume vault would receive nothing. You will be able to switch when it is ready.`,
-  volumeRule: (maxContribution: string, walletReserve: string): string =>
-    `Volume · ${VOLUME_RATE} of the SOL value of every buy and sell your trading wallet makes, win or lose. At most ${maxContribution} SOL per settlement, and never leaving less than ${walletReserve} SOL in the trading wallet.`,
+  /** The VOLUME rule, at `rate` ("2 %"), once VOLUME is offered. */
+  volumeRule: (rate: string, maxContribution: string, walletReserve: string): string =>
+    `Volume · ${rate} of the SOL value of every buy and sell your trading wallet makes, win or lose. At most ${maxContribution} SOL per settlement, and never leaving less than ${walletReserve} SOL in the trading wallet.`,
   bothModes: (rent: string): string =>
     `Only your pension key can withdraw from the vault, and SIP cannot pause or block a SOL withdrawal. The keeper can only move SOL from a linked trading wallet into this vault, never out of it. Creating the vault costs ${rent} SOL of rent plus the network fee. Solana keeps that rent in the vault, and a vault cannot be closed, so it does not come back.`,
   cost: (rent: string, fees: string): string => `Cost: ${rent} SOL of rent that does not come back, plus ${fees} SOL of network fees.`,
@@ -58,6 +61,7 @@ export const VAULT_COPY = {
 
 export const LINK_COPY = {
   linked: "Linked to your vault",
+  viewLink: "View link on Solscan",
   otherVault: "This wallet saves into another vault. Only that vault's owner can unlink it.",
   link: "Link to vault",
   linkThis: "Link this wallet",

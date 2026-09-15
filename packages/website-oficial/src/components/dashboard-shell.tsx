@@ -42,7 +42,7 @@ export interface DashboardLoadJson {
 }
 
 /** The one note over the example, for everyone, until there is live data to show. */
-const SAMPLE_NOTICE = "Example data. Nobody’s pension. Live data arrives with the Solana vault screens.";
+const SAMPLE_NOTICE = "Example data. Nobody’s pension. Your vault is on the Wallets screen; live numbers arrive with the live panel.";
 
 /** The note instead, for a session with no pension key: what to do about it. */
 const KEYLESS_NOTICE =

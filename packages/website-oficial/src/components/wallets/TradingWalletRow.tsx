@@ -2,7 +2,8 @@
 
 /**
  * ONE TRADING WALLET: its address, what Privy records of its signers, and what can
- * be done about each — grant a missing seat, re-read an unknown one, export the key.
+ * be done about each — grant a missing seat, re-read an unknown one, export the key
+ * — and whether it saves into the vault (LinkControl).
  *
  * WHAT THE BADGE CAN KNOW. Privy's browser SDK says whether a wallet has a signer
  * (`delegated`), never which signer or which policy. So the badge says "Has a
@@ -19,6 +20,9 @@
  * THE GRANT IS OFFERED ONLY FOR "missing". Privy's addSigners appends, so a grant
  * on a wallet that already has a signer could seat the keeper twice. An unknown seat
  * gets a re-read instead.
+ *
+ * THE LINK is the chain's record, read by the screen, not Privy's: a wallet can be
+ * linked with or without a seat, and a seat puts nothing aside until it is linked.
  */
 
 import { KeyRound, LoaderCircle, RefreshCw } from "lucide-react";
@@ -28,6 +32,7 @@ import { Num } from "@/components/num";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AddressLine } from "@/components/wallets/AddressLine";
+import { LinkControl } from "@/components/wallets/LinkControl";
 import { useExportTradingWallet } from "@/hooks/use-export-trading-wallet";
 import { useKeeperSeat } from "@/hooks/use-keeper-seat";
 import { LABEL } from "@/lib/classes";
@@ -97,6 +102,8 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
           To confirm it is the keeper&apos;s signer, bounded by its policy, run <Num className="break-all">{verify}</Num>
         </p>
       ) : null}
+
+      <LinkControl address={row.address} seat={keeper.seat} />
 
       <div className="flex flex-wrap items-center gap-2">
         {keeper.seat === "missing" ? (

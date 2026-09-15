@@ -15,6 +15,12 @@
  * user's own wallet app. A session without one gets a way out rather than a dead
  * end, and the way out is Disconnect, because Privy ignores login() for a user who
  * is already signed in.
+ *
+ * TOP TO BOTTOM: the pension key, its vault (create it, or what it holds), and the
+ * trading wallets, each with its link to the vault. One read of the chain feeds
+ * them all, and one write at a time runs on the whole screen (VaultScreen). Every
+ * confirmation is an inline panel, never a nested dialog, so the Manage wallets
+ * modal's untrapped focus scope keeps working with Privy's dialogs on top.
  */
 
 import { useLogin, usePrivy } from "@privy-io/react-auth";
@@ -26,6 +32,8 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddressLine } from "@/components/wallets/AddressLine";
 import { TradingWalletsCard } from "@/components/wallets/TradingWalletsCard";
+import { VaultCard } from "@/components/wallets/VaultCard";
+import { VaultScreen } from "@/components/wallets/VaultScreen";
 import { LABEL } from "@/lib/classes";
 import { pensionKeyOf } from "@/lib/pension-key";
 import { privyFailure } from "@/lib/privy-failure";
@@ -47,10 +55,13 @@ export function WalletsScreen() {
   if (pensionKey === null) return <KeylessCard onDisconnect={disconnect} />;
 
   return (
-    <div className="space-y-4">
-      <PensionKeyCard address={pensionKey} onDisconnect={disconnect} />
-      <TradingWalletsCard />
-    </div>
+    <VaultScreen pensionKey={pensionKey}>
+      <div className="space-y-4">
+        <PensionKeyCard address={pensionKey} onDisconnect={disconnect} />
+        <VaultCard />
+        <TradingWalletsCard />
+      </div>
+    </VaultScreen>
   );
 }
 
