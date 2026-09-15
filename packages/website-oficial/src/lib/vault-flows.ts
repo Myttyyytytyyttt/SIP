@@ -72,6 +72,7 @@ import {
   type ApiResult,
   type BuiltTransactionJson,
   type InvestPolicyBuildJson,
+  type InvestmentPolicyJson,
   type LinkConsentJson,
   type PolicyFloorsJson,
   type SendResponseJson,
@@ -360,6 +361,47 @@ export async function investPolicyFlow(deps: PensionFlowDeps, input: InvestPolic
         enabled: input.enabled ?? true,
       },
       tokenAccountCreates: await tokenAccountCreates(input.pensionKey, vault, body.vaultTokenAccounts),
+    };
+  });
+}
+
+export interface PauseInvestingInput {
+  readonly pensionKey: string;
+  /** The policy the screen shows. The transaction must re-sign exactly it, with investing off. */
+  readonly policy: InvestmentPolicyJson;
+}
+
+/**
+ * Pauses investing: set_invest_policy re-signing the stored policy the screen
+ * shows, every leg, floor, venue, in-mint and cap as they are, with enabled
+ * false. The build reads no pool, so a pause works when today's prices cannot be
+ * read; the page holds the bytes to the policy it shows, not to any price.
+ */
+export async function pauseInvestingFlow(deps: PensionFlowDeps, input: PauseInvestingInput): Promise<FlowResult> {
+  return pensionWrite<BuiltTransactionJson>(deps, { action: "pauseInvesting", owner: input.pensionKey }, async () => {
+    const { policy } = input;
+    const shown = FAILURE_COPY.builtMismatch("the policy on screen could not be read");
+    const amount = (text: string | undefined): bigint => {
+      const value = rawFrom(text);
+      if (value === null) throw new IntentError(shown);
+      return value;
+    };
+    const vault = await deriveVaultAddress(input.pensionKey);
+    if (policy.vault !== vault || !Array.isArray(policy.legs)) throw new IntentError(shown);
+    return {
+      instruction: "set_invest_policy",
+      signers: [input.pensionKey],
+      accounts: { owner: input.pensionKey, vault, policy: await deriveInvestAddress(vault) },
+      args: {
+        legs: policy.legs.map((leg) => ({ mint: leg.mint, weight_bps: leg.weightBps, min_out_rate_wad: amount(leg.minOutRateWad) })),
+        venue_program: policy.venueProgram,
+        in_mint: policy.inMint,
+        min_convert_rate_wad: amount(policy.minConvertRateWad),
+        min_investment: amount(policy.minInvestment),
+        max_per_call: amount(policy.maxPerCall),
+        max_rolling_30d: amount(policy.maxRolling30d),
+        enabled: false,
+      },
     };
   });
 }

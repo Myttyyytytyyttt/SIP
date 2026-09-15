@@ -89,7 +89,7 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createVaultApi, transactionErrorWords, type InvestPolicyBuildJson, type VaultApi } from "@/lib/vault-api";
-import { createVaultFlow, investPolicyFlow, linkWalletFlow, withdrawFlow, withdrawTokenFlow, type FlowResult } from "@/lib/vault-flows";
+import { createVaultFlow, investPolicyFlow, linkWalletFlow, pauseInvestingFlow, withdrawFlow, withdrawTokenFlow, type FlowResult } from "@/lib/vault-flows";
 
 import { ED25519_CONSENT_HEADER_HEX, GOLDEN_CONVERT_FLOOR_WAD, GOLDEN_SPYX_FLOOR_WAD, OWNER_INSTRUCTION_DATA_HEX } from "../../solana-core/test/fixtures/owner-transactions";
 import { startLocalValidator, type LocalValidator, type PreloadedAccount, type StoppedValidator } from "./local-validator";
@@ -643,6 +643,23 @@ describe("web-boveda on the tested sip_vault", () => {
     expect((await lamports(owner)) - beforeAgain).toBe(-BigInt(againTx.meta!.fee));
     withinHalf("set_invest_policy", againTx, "set_invest_policy ownerA again", againSignature);
 
+    // Pause: the policy /api/solana-vault shows, signed again with investing off. The landed data is "again"'s with only its last byte, enabled, turned to 0.
+    const shownState = await api.state({ owner, wallets: [] });
+    if (!shownState.ok || shownState.body.policy.state === undefined) throw new Error("the policy could not be read back through /api/solana-vault");
+    const beforePause = await lamports(owner);
+    const paused = await pauseInvestingFlow({ api, signers: signers.pension }, { pensionKey: owner, policy: shownState.body.policy.state });
+    const pauseSignature = landedSignature(paused);
+    const pauseTx = await landed(pauseSignature);
+    expect(programsOf(pauseTx)).toEqual([COMPUTE_BUDGET, COMPUTE_BUDGET, SIP_PROGRAM_ID]);
+    const againData = toHex(dataOf(againTx, 2));
+    expect(againData.endsWith("01")).toBe(true);
+    expect(toHex(dataOf(pauseTx, 2))).toBe(`${againData.slice(0, -2)}00`);
+    const pausedPolicy = decodeInvestmentPolicy(Uint8Array.from((await connection.getAccountInfo(policyAddress, "confirmed"))!.data));
+    expect(pausedPolicy).toMatchObject({ enabled: false, policyNonce: 3n, minConvertRateWad: convertFloor, legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: legFloor }], maxPerCall: 10_000_000n, maxRolling30d: 50_000_000n });
+    expect((await lamports(owner)) - beforePause).toBe(-BigInt(pauseTx.meta!.fee));
+    withinHalf("set_invest_policy", pauseTx, "set_invest_policy ownerA paused", pauseSignature);
+    expect(await api.build({ action: "pauseInvesting", owner })).toMatchObject({ ok: false, status: 409, code: "already_paused" });
+
     // The core builder with a token account for ownerB's vault spliced in front, signed by ownerA.
     const recent = await connection.getLatestBlockhash("confirmed");
     const honest = buildSetInvestPolicy({
@@ -786,8 +803,8 @@ describe("web-boveda on the tested sip_vault", () => {
 
   it("16. every landing used at most half of its compute limit", () => {
     const landings = Object.values(report.units);
-    // Part 1's five, two policies, a withdrawal, and the wSOL and SPYx token withdrawals.
-    expect(landings.length).toBe(10);
+    // Part 1's five, two policies and a pause, a withdrawal, and the wSOL and SPYx token withdrawals.
+    expect(landings.length).toBe(11);
     for (const { consumed, limit } of landings) expect(consumed).toBeLessThanOrEqual(limit / 2);
   });
 });

@@ -10,7 +10,10 @@
  * before Sign investment policy. A policy: on or paused, the floors it signed
  * against today's prices, its caps, what it used in the trailing 30 days and in
  * all, whether the next sweep can buy, and buttons to sign again at today's
- * prices or to pause and resume, each keeping the caps it has.
+ * prices or to pause and resume, each keeping the caps it has. Pause signs the
+ * stored policy again with investing off and reads no price, so the owner can
+ * stop investing when the pools cannot be priced; Sign again and Resume set
+ * floors from today's prices.
  *
  * WHAT IS SIGNED is the build's floors, not the ones shown here before building:
  * the flow checks them against SIP's margins, and they are shown again while
@@ -132,7 +135,7 @@ function readinessWords(readiness: InvestmentReadiness): string {
 export function InvestingCard() {
   const screen = useVaultScreen();
   const write = useVaultWrite("policy");
-  const [signing, setSigning] = useState<InvestRequest | null>(null);
+  const [signing, setSigning] = useState<InvestRequest | "pause" | null>(null);
   if (screen === null) return null;
   const { view } = screen;
 
@@ -140,6 +143,11 @@ export function InvestingCard() {
   const start = (input: InvestRequest): void => {
     setSigning(input);
     void write.investPolicy(input);
+  };
+  // The policy on screen, re-signed with investing off: no prices are read.
+  const pause = (policy: InvestmentPolicyJson): void => {
+    setSigning("pause");
+    void write.pauseInvesting(policy);
   };
   const progress = (
     <TxProgress
@@ -173,7 +181,7 @@ export function InvestingCard() {
   return state.policy.status === "missing" || state.policy.state === undefined ? (
     <PolicySetup state={state} write={write} start={start} progress={progress} />
   ) : (
-    <PolicySummary state={state} policy={state.policy.state} write={write} start={start} progress={progress} />
+    <PolicySummary state={state} policy={state.policy.state} write={write} start={start} pause={pause} progress={progress} />
   );
 }
 
@@ -200,9 +208,10 @@ function Fact({ label, children }: { readonly label: string; readonly children: 
   );
 }
 
-/** What Phantom is asked to sign, from the checked build: its floors, and the caps this card sent. */
-function SigningDetail({ progress, request }: { readonly progress: WriteProgress; readonly request: InvestRequest | null }) {
+/** What Phantom is asked to sign, from the checked build: its floors, and the caps this card sent; or, for a pause, the policy as it is. */
+function SigningDetail({ progress, request }: { readonly progress: WriteProgress; readonly request: InvestRequest | "pause" | null }) {
   if (progress.phase !== "running" || progress.built === null || request === null) return null;
+  if (request === "pause") return <p className="font-normal text-foreground">{INVEST_COPY.pauseSigning}</p>;
   const floors = (progress.built as Partial<InvestPolicyBuildJson>).floors;
   const solFloor = rawFrom(floors?.floorUsdcRawPerSol);
   if (floors === undefined || solFloor === null) return null;
@@ -331,12 +340,14 @@ function PolicySummary({
   policy,
   write,
   start,
+  pause,
   progress,
 }: {
   readonly state: VaultStateJson;
   readonly policy: InvestmentPolicyJson;
   readonly write: VaultWrite;
   readonly start: (input: InvestRequest) => void;
+  readonly pause: (policy: InvestmentPolicyJson) => void;
   readonly progress: ReactNode;
 }) {
   const limits = todaysLimits(state.prices);
@@ -401,10 +412,17 @@ function PolicySummary({
           <Button type="button" size="sm" disabled={blocked} aria-busy={write.running} onClick={() => start({ maxPerCall, maxRolling30d, enabled: policy.enabled })}>
             {INVEST_COPY.signAgain}
           </Button>
-          <Button type="button" size="sm" variant="outline" disabled={blocked} onClick={() => start({ maxPerCall, maxRolling30d, enabled: !policy.enabled })}>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={blocked}
+            onClick={() => (policy.enabled ? pause(policy) : start({ maxPerCall, maxRolling30d, enabled: true }))}
+          >
             {policy.enabled ? INVEST_COPY.pause : INVEST_COPY.resume}
           </Button>
         </div>
+        {policy.enabled ? <p className="text-xs text-muted-foreground">{INVEST_COPY.pauseKeeps}</p> : null}
         <p className="text-xs text-muted-foreground">{INVEST_COPY.noRefill}</p>
         {progress}
       </CardContent>

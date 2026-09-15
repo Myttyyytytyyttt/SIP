@@ -6,13 +6,14 @@ import { createContext, createElement, useCallback, useContext, useMemo, useRef,
 
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { pensionSigner, tradingSigners, type SignMessageFn, type SignTransactionFn } from "@/lib/signing-wallets";
-import type { BuiltTransactionJson } from "@/lib/vault-api";
+import type { BuiltTransactionJson, InvestmentPolicyJson } from "@/lib/vault-api";
 import { FAILURE_COPY } from "@/lib/vault-copy";
 import {
   checkAgainFlow,
   createVaultFlow,
   investPolicyFlow,
   linkWalletFlow,
+  pauseInvestingFlow,
   withdrawFlow,
   withdrawTokenFlow,
   type FlowResult,
@@ -117,12 +118,15 @@ const REFRESH_AFTER = new Set([
   "not_held",
   "above_holding",
   "mint_unexpected",
+  "policy_missing",
+  "already_paused",
 ]);
 
 type LastRequest =
   | { readonly kind: "create"; readonly input: CreateRequest }
   | { readonly kind: "link"; readonly tradingAddress: string }
   | { readonly kind: "policy"; readonly input: InvestRequest }
+  | { readonly kind: "pause"; readonly policy: InvestmentPolicyJson }
   | { readonly kind: "withdraw"; readonly lamports: bigint }
   | { readonly kind: "withdrawToken"; readonly input: TokenWithdrawRequest };
 
@@ -225,6 +229,19 @@ export function useVaultWrite(key: string) {
     [screen, run, wallets, signOne],
   );
 
+  /** Pause: the policy on screen, signed again with investing off. It reads no prices. */
+  const pauseInvesting = useCallback(
+    (policy: InvestmentPolicyJson): Promise<void> => {
+      if (screen === null) return Promise.resolve();
+      lastRequest.current = { kind: "pause", policy };
+      const { api, pensionKey } = screen;
+      return run("policy", ({ onStep, onBuilt }) =>
+        pauseInvestingFlow({ api, onStep, onBuilt, signers: pensionSigner({ wallets, pensionKey, signTransaction: signOne }) }, { pensionKey, policy }),
+      );
+    },
+    [screen, run, wallets, signOne],
+  );
+
   const withdraw = useCallback(
     (lamports: bigint): Promise<void> => {
       if (screen === null) return Promise.resolve();
@@ -263,12 +280,14 @@ export function useVaultWrite(key: string) {
         return link(last.tradingAddress);
       case "policy":
         return investPolicy(last.input);
+      case "pause":
+        return pauseInvesting(last.policy);
       case "withdraw":
         return withdraw(last.lamports);
       case "withdrawToken":
         return withdrawToken(last.input);
     }
-  }, [createVault, link, investPolicy, withdraw, withdrawToken]);
+  }, [createVault, link, investPolicy, pauseInvesting, withdraw, withdrawToken]);
 
   /** "Check again": confirms the signature the send route already took. It never builds or signs. */
   const checkAgain = useCallback((): Promise<void> => {
@@ -295,6 +314,7 @@ export function useVaultWrite(key: string) {
     createVault,
     link,
     investPolicy,
+    pauseInvesting,
     withdraw,
     withdrawToken,
     buildAgain,

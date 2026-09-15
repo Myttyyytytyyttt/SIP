@@ -613,6 +613,76 @@ describe("investPolicy", () => {
   });
 });
 
+describe("pauseInvesting", () => {
+  /** A vault with a policy whose floors and caps are not the product's, and no pinned pool on chain. */
+  function unpricedChain(owner: string, policy: Record<string, unknown> = {}): StubChain {
+    const vault = deriveVaultPda(owner).toBase58();
+    return {
+      accounts: new Map([
+        [vault, sipOwned(vaultAccount(owner), localRent(125))],
+        [deriveInvestPda(vault).toBase58(), sipOwned(policyAccount(vault, { legs: [{ mint: SPYX_MINT, weight_bps: 10_000, min_out_rate_wad: 111n }], min_convert_rate_wad: 222n, ...policy }), localRent(970))],
+      ]),
+    };
+  }
+
+  it("re-signs the stored policy with investing off and reads no pool: it builds with both pinned pools gone, and verifies once the owner signs", async () => {
+    const owner = keypair();
+    const ownerKey = owner.publicKey.toBase58();
+    const { build, upstream } = setup(unpricedChain(ownerKey));
+    const answer = await build({ action: "pauseInvesting", owner: ownerKey });
+    expect(answer.status).toBe(200);
+    expect(programsOf(answer.json.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, SIP_PROGRAM_ID]);
+    expect(decodeArgs("set_invest_policy", instructionsOf(answer.json.txBase64)[2]!.data)).toEqual({
+      legs: [{ mint: SPYX_MINT, weight_bps: 10_000, min_out_rate_wad: 111n }],
+      venue_program: RAYDIUM_CLMM,
+      in_mint: USDC_MINT,
+      min_convert_rate_wad: 222n,
+      min_investment: 5_000_000n,
+      max_per_call: 10_000_000n,
+      max_rolling_30d: 50_000_000n,
+      enabled: false,
+    });
+    expect(answer.json.costs).toEqual({ rentLamports: "0", signatureFeeLamports: "5000", priorityFeeLamports: "30000" });
+    const requests = upstream.calls.flatMap((call) => (Array.isArray(call.body) ? call.body : [call.body]) as { method: string; params: unknown[] }[]);
+    const addresses = requests.filter((request) => request.method === "getMultipleAccounts").flatMap((request) => request.params[0] as string[]);
+    expect(addresses).not.toContain(SOL_USDC_POOL);
+    expect(addresses).not.toContain(SPYX_USDC_POOL);
+    expect(methodsOf(upstream.calls)).toHaveLength(BUILD_READS_WEIGHT.pauseInvesting);
+    const verified = verifySignedTransaction(signWire(answer.json.txBase64, owner));
+    expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
+
+    // Signing again and resuming set new floors: on the same chain they still need today's prices.
+    for (const enabled of [true, false]) {
+      const resigned = await build({ action: "investPolicy", owner: ownerKey, maxPerCall: "10000000", maxRolling30d: "50000000", enabled });
+      expect([resigned.status, resigned.json.error?.code]).toEqual([502, "price_unavailable"]);
+    }
+  });
+
+  it("no vault is 409 vault_missing; no policy 409 policy_missing; a paused policy 409 already_paused; an unreadable chain 502 unreadable; none reads a blockhash", async () => {
+    const owner = key();
+    const noVault = setup();
+    expect((await noVault.build({ action: "pauseInvesting", owner })).json.error?.code).toBe("vault_missing");
+    const noPolicy = setup({ accounts: new Map([[deriveVaultPda(owner).toBase58(), sipOwned(vaultAccount(owner), localRent(125))]]) });
+    const missing = await noPolicy.build({ action: "pauseInvesting", owner });
+    expect([missing.status, missing.json.error?.code, missing.json.error?.message]).toEqual([409, "policy_missing", "Your vault has no investment policy to pause."]);
+    const paused = setup(unpricedChain(owner, { enabled: false }));
+    const again = await paused.build({ action: "pauseInvesting", owner });
+    expect([again.status, again.json.error?.code, again.json.error?.message]).toEqual([409, "already_paused", "Investing is already paused."]);
+    for (const { upstream } of [noVault, noPolicy, paused]) expect(methodsOf(upstream.calls)).not.toContain("getLatestBlockhash");
+    const down = await setup({ accounts: new Map(), down: true }).build({ action: "pauseInvesting", owner });
+    expect([down.status, down.json.error?.code]).toEqual([502, "unreadable"]);
+  });
+
+  it("a pause naming caps or a switch is 400 bad_request with no read: a pause changes nothing but the switch", async () => {
+    const { build, upstream } = setup();
+    for (const extra of [{ maxPerCall: "10000000" }, { enabled: false }]) {
+      const answer = await build({ action: "pauseInvesting", owner: key(), ...extra });
+      expect([answer.status, answer.json.error?.code]).toEqual([400, "bad_request"]);
+    }
+    expect(upstream.calls).toHaveLength(0);
+  });
+});
+
 describe("withdraw", () => {
   it("builds [CU limit, CU price, withdraw] for exactly what the vault can release, with one blockhash; it verifies once the owner signs", async () => {
     const owner = keypair();

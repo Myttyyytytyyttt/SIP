@@ -15,6 +15,9 @@
  *   SOL's price, 95 % of SPYx's rate), behind a CreateIdempotent for each of the
  *   vault's wSOL, USDC and SPYx accounts it lacks, paid by the owner; the floors,
  *   those accounts and every rent come with it.
+ * - {"action":"pauseInvesting","owner"} → set_invest_policy re-signing the
+ *   stored policy, every floor and cap as it is, with investing off. It reads no
+ *   pool, so the owner can pause when prices cannot be read.
  * - {"action":"withdraw","owner","lamports"} → withdraw, at most what the vault
  *   holds above its rent floor.
  * - {"action":"withdrawToken","owner","mint","amountRaw","vaultToken"} →

@@ -129,6 +129,10 @@ export type SolanaBuildErrorCode =
   | "price_unavailable"
   /** A mint the policy names is not held by the token program SIP expects; `mint` names it. */
   | "mint_unexpected"
+  /** pauseInvesting: the vault has no investment policy to pause. */
+  | "policy_missing"
+  /** pauseInvesting: the stored policy is already paused. */
+  | "already_paused"
   /** A chain read failed or answered something that is not ours: nothing was offered. */
   | "unreadable"
   /** The blockhash could not be read: nothing was built. */
@@ -172,7 +176,7 @@ export const BUILD_REQUEST_WEIGHT = 3;
  * so a request costs its client at least the calls it makes; then the shared
  * reads budget is charged all of it.
  */
-export const BUILD_READS_WEIGHT = { createVault: 4, prepareLink: 1, link: 3, investPolicy: 7, withdraw: 3, withdrawToken: 4, state: 12 } as const;
+export const BUILD_READS_WEIGHT = { createVault: 4, prepareLink: 1, link: 3, investPolicy: 7, pauseInvesting: 3, withdraw: 3, withdrawToken: 4, state: 12 } as const;
 
 const SHARED_READS_BUDGETS = Symbol.for("@sip/solana-core/build-handler/reads-budgets");
 
@@ -598,6 +602,57 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
   });
 }
 
+const PAUSE_INVESTING_FIELDS = ["action", "owner"] as const;
+
+/**
+ * pauseInvesting: set_invest_policy re-signing the policy the vault holds, every
+ * leg, floor, venue, in-mint and cap as stored, with investing off. It reads no
+ * pool. A pause is the owner's control to stop the keeper investing, so it must
+ * work when the pinned pools cannot be priced (closed, migrated, a changed
+ * layout) or while the prices are why the owner wants to stop. Signing again and
+ * resuming set new floors, and read today's prices (investPolicy).
+ */
+async function pauseInvesting(fields: Readonly<Record<string, unknown>>, served: Served): Promise<Response> {
+  const extra = unexpectedField(fields, PAUSE_INVESTING_FIELDS);
+  if (extra !== null) return served.refuse(400, "bad_request", extra);
+  const owner = fields.owner;
+  if (!isPubkey(owner)) return served.refuse(400, "bad_request", "owner must be a base58 32-byte public key.");
+
+  const spent = served.spendReads(BUILD_READS_WEIGHT.pauseInvesting);
+  if (spent !== null) return spent;
+  const accounts = await readOwnerAccounts(served.pool, owner);
+  if (accounts.vault.kind === "unreadable" || accounts.policy.kind === "unreadable") return unreadable(served);
+  if (accounts.vault.kind === "missing") return served.refuse(409, "vault_missing", "Create your vault first.");
+  if (accounts.policy.kind === "missing") return served.refuse(409, "policy_missing", "Your vault has no investment policy to pause.");
+  const stored = accounts.policy.value.state;
+  if (!stored.enabled) return served.refuse(409, "already_paused", "Investing is already paused.");
+
+  const policy: InvestPolicyInput = {
+    legs: stored.legs.map((leg) => ({ mint: leg.mint, weightBps: leg.weightBps, minOutRateWad: leg.minOutRateWad })),
+    venueProgram: stored.venueProgram,
+    inMint: stored.inMint,
+    minConvertRateWad: stored.minConvertRateWad,
+    minInvestment: stored.minInvestment,
+    maxPerCall: stored.maxPerCall,
+    maxRolling30d: stored.maxRolling30d,
+    enabled: false,
+  };
+  const problems = investPolicyProblems(policy);
+  if (problems.length > 0) return served.refuse(409, "invalid_policy", "The program would refuse this policy signed again. Nothing was built.", { problems });
+
+  const batch = await readBuildBatch(served.pool, { addresses: [], sizes: [] });
+  if (batch.kind !== "exists") return upstreamUnavailable(served);
+  const computeBudget = ownerComputeBudget("set_invest_policy");
+  let built;
+  try {
+    built = buildSetInvestPolicy({ owner, ...policy, ...batch.value.recent, computeBudget });
+  } catch (error) {
+    if (error instanceof BuildError) return served.refuse(409, "invalid_policy", "The program would refuse this policy signed again. Nothing was built.", { problems: error.problems });
+    throw error;
+  }
+  return json(200, { ...built, policyExists: true, costs: costs(0n, 1, computeBudget) });
+}
+
 // ── withdraw and withdraw_token ──────────────────────────────────────────────
 
 const WITHDRAW_FIELDS = ["action", "owner", "lamports"] as const;
@@ -683,7 +738,7 @@ async function withdrawToken(fields: Readonly<Record<string, unknown>>, served: 
   });
 }
 
-/** POST /api/solana-build: unsigned owner transactions (createVault, link, investPolicy, withdraw, withdrawToken) and the link consent (prepareLink). */
+/** POST /api/solana-build: unsigned owner transactions (createVault, link, investPolicy, pauseInvesting, withdraw, withdrawToken) and the link consent (prepareLink). */
 export function createSolanaBuildHandler(options: SolanaBuildHandlerOptions): SolanaRouteHandler {
   return createRoute("solana-build", options, async (action, fields, served) => {
     switch (action) {
@@ -695,12 +750,14 @@ export function createSolanaBuildHandler(options: SolanaBuildHandlerOptions): So
         return linkWallet(fields, served, true);
       case "investPolicy":
         return investPolicy(fields, served);
+      case "pauseInvesting":
+        return pauseInvesting(fields, served);
       case "withdraw":
         return withdraw(fields, served);
       case "withdrawToken":
         return withdrawToken(fields, served);
       default:
-        return served.refuse(400, "bad_request", "action must be createVault, prepareLink, link, investPolicy, withdraw or withdrawToken.");
+        return served.refuse(400, "bad_request", "action must be createVault, prepareLink, link, investPolicy, pauseInvesting, withdraw or withdrawToken.");
     }
   });
 }

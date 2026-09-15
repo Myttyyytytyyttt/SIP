@@ -199,14 +199,26 @@ describe("InvestingCard", () => {
     expect(html).not.toContain("Floors below market");
   });
 
-  it("Pause hands the flow the stored caps with enabled false, as an explicit object, never the click event", async () => {
+  it("Pause asks for the policy on screen to be signed again with investing off, and is offered with no prices on screen; it never hands the flow the click event", async () => {
     const build = vi.fn(async () => ({ ok: false as const, status: 409, code: "vault_missing", message: "Create your vault first.", retryAfterSeconds: null, body: {} }));
-    const value = screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: POLICY } }) }, { build: build as unknown as VaultApi["build"] });
-    render(value);
+    const value = screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: POLICY }, prices: null }) }, { build: build as unknown as VaultApi["build"] });
+    const html = render(value);
+    expect(html).toContain("Pausing signs this policy again as it is, with investing off, so it needs no prices.");
+    expect(buttons("Pause investing").map((button) => button.disabled)).toEqual([false]);
     buttons("Pause investing")[0]?.onClick?.(CLICK);
     await vi.waitFor(() => expect(value.refresh).toHaveBeenCalledTimes(1));
-    expect(build.mock.calls).toStrictEqual([[{ action: "investPolicy", owner: PENSION, maxPerCall: "10000000", maxRolling30d: "50000000", enabled: false }]]);
+    expect(build.mock.calls).toStrictEqual([[{ action: "pauseInvesting", owner: PENSION }]]);
     expect(mocked.signTransaction).not.toHaveBeenCalled();
+  });
+
+  it("Resume hands the flow the stored caps with investing on, which reads today's prices", async () => {
+    const build = vi.fn(async () => ({ ok: false as const, status: 409, code: "vault_missing", message: "Create your vault first.", retryAfterSeconds: null, body: {} }));
+    const value = screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: { ...POLICY, enabled: false } } }) }, { build: build as unknown as VaultApi["build"] });
+    const html = render(value);
+    expect(html).toContain("Investing is paused.");
+    buttons("Resume investing")[0]?.onClick?.(CLICK);
+    await vi.waitFor(() => expect(value.refresh).toHaveBeenCalledTimes(1));
+    expect(build.mock.calls).toStrictEqual([[{ action: "investPolicy", owner: PENSION, maxPerCall: "10000000", maxRolling30d: "50000000", enabled: true }]]);
   });
 
   it("sums the day-buckets of the trailing 31 days as the program does", () => {

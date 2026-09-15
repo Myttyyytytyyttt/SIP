@@ -130,6 +130,8 @@ export const INVEST_COPY = {
   signAgain: "Sign again with today's prices",
   pause: "Pause investing",
   resume: "Resume investing",
+  pauseKeeps: "Pausing signs this policy again as it is, with investing off, so it needs no prices. Resuming and signing again read today's prices.",
+  pauseSigning: "You are signing: investing paused, with every floor and limit this policy has.",
   noRefill: "Signing again does not refill this month's cap.",
 } as const;
 

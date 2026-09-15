@@ -7,6 +7,7 @@ import { createPrivateKey, sign } from "node:crypto";
 import {
   DEFAULT_VAULT_POLICY,
   OWNER_TX_MICROLAMPORTS,
+  RAYDIUM_CLMM,
   SIP_PROGRAM_ID,
   SPYX_MINT,
   TOKEN_2022_PROGRAM,
@@ -44,8 +45,8 @@ import { Keypair, PublicKey, TransactionInstruction, TransactionMessage, Version
 import { describe, expect, it, vi } from "vitest";
 
 import { LIGHTHOUSE_PROGRAM } from "@/lib/tx-intent";
-import type { ApiFailure, ApiResult, BuiltTransactionJson, SendResponseJson, VaultApi } from "@/lib/vault-api";
-import { LINK_MAX_BUILDS, checkAgainFlow, createVaultFlow, investPolicyFlow, linkWalletFlow, withdrawFlow, withdrawTokenFlow, type FlowStep } from "@/lib/vault-flows";
+import type { ApiFailure, ApiResult, BuiltTransactionJson, InvestmentPolicyJson, SendResponseJson, VaultApi } from "@/lib/vault-api";
+import { LINK_MAX_BUILDS, checkAgainFlow, createVaultFlow, investPolicyFlow, linkWalletFlow, pauseInvestingFlow, withdrawFlow, withdrawTokenFlow, type FlowStep } from "@/lib/vault-flows";
 import { deriveAtaAddress, deriveConfigAddress, deriveInvestAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
 
 function signBytes(signer: Keypair, message: Uint8Array): Uint8Array {
@@ -382,6 +383,78 @@ describe("investPolicyFlow", () => {
     expect(result).toMatchObject({ ok: false, kind: "refused" });
     expect(!result.ok && result.message).toContain("Nothing was sent.");
     expect(h.send).not.toHaveBeenCalled();
+  });
+});
+
+describe("pauseInvestingFlow", () => {
+  /** The policy the screen shows: floors and caps that are not the product's, so nothing here is derived from a price. */
+  const shownPolicy = (vault: string, fields: Partial<InvestmentPolicyJson> = {}): InvestmentPolicyJson => ({
+    vault,
+    enabled: true,
+    venueProgram: RAYDIUM_CLMM,
+    inMint: USDC_MINT,
+    legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "111" }],
+    minConvertRateWad: "222",
+    minInvestment: "5000000",
+    maxPerCall: "10000000",
+    maxRolling30d: "50000000",
+    bucketDays: new Array<number>(31).fill(0),
+    bucketAmounts: new Array<string>(31).fill("0"),
+    lifetimeInvested: "0",
+    policyNonce: "3",
+    ...fields,
+  });
+  const pauseAnswer = (owner: string, forge: { legFloor?: bigint; convertFloor?: bigint; maxPerCall?: bigint; enabled?: boolean } = {}): Answer =>
+    asJson<Answer>({
+      ...buildSetInvestPolicy({
+        owner,
+        legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: forge.legFloor ?? 111n }],
+        minConvertRateWad: forge.convertFloor ?? 222n,
+        minInvestment: 5_000_000n,
+        maxPerCall: forge.maxPerCall ?? 10_000_000n,
+        maxRolling30d: 50_000_000n,
+        enabled: forge.enabled ?? false,
+        ...recent(),
+        computeBudget: ownerComputeBudget("set_invest_policy"),
+      }),
+      policyExists: true,
+      costs: { rentLamports: 0n, signatureFeeLamports: 5_000n, priorityFeeLamports: 30_000n },
+    });
+
+  it("asks for the pause by owner alone, then has Phantom sign the policy on screen with investing off, and sends", async () => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => ok(pauseAnswer(h.pensionKey)));
+    const result = await pauseInvestingFlow(h.createDeps, { pensionKey: h.pensionKey, policy: shownPolicy(deriveVaultPda(h.pensionKey).toBase58()) });
+    expect(result.ok).toBe(true);
+    expect(h.build.mock.calls[0]![0]).toEqual({ action: "pauseInvesting", owner: h.pensionKey });
+    expect(toHex(h.signWithPension.mock.calls[0]![0])).toBe(toHex(await builtTx(h, 0)));
+    expect(h.send).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<[string, (owner: string) => Answer]>([
+    ["a SPYx floor other than the one on screen", (owner) => pauseAnswer(owner, { legFloor: 110n })],
+    ["a SOL floor other than the one on screen", (owner) => pauseAnswer(owner, { convertFloor: 223n })],
+    ["a cap other than the one on screen", (owner) => pauseAnswer(owner, { maxPerCall: 20_000_000n })],
+    ["investing left on", (owner) => pauseAnswer(owner, { enabled: true })],
+  ])("a build with %s is refused before Phantom is asked", async (_, forge) => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => ok(forge(h.pensionKey)));
+    const result = await pauseInvestingFlow(h.createDeps, { pensionKey: h.pensionKey, policy: shownPolicy(deriveVaultPda(h.pensionKey).toBase58()) });
+    expect(result).toMatchObject({ ok: false, kind: "refused" });
+    expect(!result.ok && result.message).toContain("Nothing was signed.");
+    expect(h.signWithPension).not.toHaveBeenCalled();
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
+  it("a policy on screen that belongs to another vault, or does not read as amounts, is refused before Phantom is asked", async () => {
+    for (const policy of [shownPolicy(deriveVaultPda(Keypair.generate().publicKey.toBase58()).toBase58()), (vault: string) => shownPolicy(vault, { maxPerCall: "ten" })] as const) {
+      const h = harness();
+      h.build.mockImplementationOnce(async () => ok(pauseAnswer(h.pensionKey)));
+      const shown = typeof policy === "function" ? policy(deriveVaultPda(h.pensionKey).toBase58()) : policy;
+      const result = await pauseInvestingFlow(h.createDeps, { pensionKey: h.pensionKey, policy: shown });
+      expect(result).toMatchObject({ ok: false, kind: "refused" });
+      expect(h.signWithPension).not.toHaveBeenCalled();
+    }
   });
 });
 

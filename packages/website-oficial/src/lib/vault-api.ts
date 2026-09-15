@@ -345,6 +345,8 @@ const BUILD_REFUSALS = new Set([
   "above_holding",
   "price_unavailable",
   "mint_unexpected",
+  "policy_missing",
+  "already_paused",
   "bad_request",
 ]);
 
