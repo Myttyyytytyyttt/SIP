@@ -12,6 +12,10 @@
 //
 // localhost, never 127.0.0.1, as the page itself is served. Every request sends
 // x-real-ip, the one client-IP header the settings trust.
+//
+// NOTHING LEFT. stop() reports the process exited, the port refused on both
+// loopbacks and its temporary HOME removed; proofPortsInUse() lets the proof check
+// this port with the validator's before anything starts and after both stop.
 
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -21,7 +25,7 @@ import { fileURLToPath } from "node:url";
 
 import { Keypair } from "@solana/web3.js";
 
-import { LOCAL_PORTS, SIP_VAULT_PROGRAM_ID, tcpRefused } from "./local-validator";
+import { LOCAL_PORTS, SIP_VAULT_PROGRAM_ID, busyPorts, tcpRefused } from "./local-validator";
 
 export const WEB_PORT = 3_015;
 export const WEB_ORIGIN = `http://localhost:${WEB_PORT}`;
@@ -31,14 +35,31 @@ const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
 const READY_TIMEOUT_MS = 60_000;
 const STOP_GRACE_MS = 10_000;
 
+export interface StoppedWebServer {
+  readonly exited: boolean;
+  readonly portRefused: boolean;
+  /** Its temporary HOME was removed. */
+  readonly homeGone: boolean;
+}
+
 export interface WebServer {
-  stop(): Promise<{ readonly exited: boolean; readonly portRefused: boolean }>;
+  stop(): Promise<StoppedWebServer>;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Nothing listens on `port`, on either loopback address. */
 export const portRefused = async (port: number): Promise<boolean> => (await tcpRefused(port, "127.0.0.1")) && (await tcpRefused(port, "::1"));
+
+/**
+ * Every port the proof binds that something already holds: the validator's, over
+ * TCP and UDP, and this server's. Empty before anything starts, and empty again
+ * once both are stopped. It names ports and stops nothing.
+ */
+export async function proofPortsInUse(): Promise<number[]> {
+  const busy = await busyPorts();
+  return (await portRefused(WEB_PORT)) ? busy : [...busy, WEB_PORT];
+}
 
 /** fetch with the trusted client-IP header added. */
 export const withClientIp: typeof fetch = (input, init) => fetch(input, { ...init, headers: { ...(init?.headers as Record<string, string> | undefined), ...CLIENT_IP_HEADERS } });
@@ -93,8 +114,8 @@ export async function startWebServer(): Promise<WebServer> {
   };
   process.once("exit", killNow);
 
-  let stopped: Promise<{ exited: boolean; portRefused: boolean }> | null = null;
-  const stop = () =>
+  let stopped: Promise<StoppedWebServer> | null = null;
+  const stop = (): Promise<StoppedWebServer> =>
     (stopped ??= (async () => {
       process.off("exit", killNow);
       if (!hasExited()) {
@@ -105,7 +126,7 @@ export async function startWebServer(): Promise<WebServer> {
         }
       }
       rmSync(home, { recursive: true, force: true });
-      return { exited: hasExited(), portRefused: await portRefused(WEB_PORT) };
+      return { exited: hasExited(), portRefused: await portRefused(WEB_PORT), homeGone: !existsSync(home) };
     })());
 
   try {

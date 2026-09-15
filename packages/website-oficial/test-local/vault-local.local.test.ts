@@ -16,10 +16,19 @@
 // trading wallet's signMessage by node:crypto, its signTransaction by a Keypair.
 // Every call to those, its order and the bytes it received, is recorded.
 //
-// WHAT IT TIES TOGETHER. The SIP instruction data that LANDED equals the byte
-// fixtures in packages/solana-core/test/fixtures/owner-transactions.ts, which
-// builders.test.ts holds the builders to; the consent the program verified is the
-// bytes the page rebuilt; each landing uses at most half of its compute limit.
+// WHAT IT TIES TOGETHER. Every SIP instruction's data that LANDED equals its byte
+// fixture in packages/solana-core/test/fixtures/owner-transactions.ts, which
+// builders.test.ts holds the builders to. set_invest_policy's is that fixture with
+// only its two floors put in, since they come from the cloned pools, and signed
+// again, its two caps as well. The Ed25519 data the program verified is the
+// fixture's header, the trading wallet's key, the signature its signMessage
+// returned and the consent the page rebuilt. Each landing uses at most half of
+// its compute limit.
+//
+// BEFORE AND AFTER. Nothing starts, and mainnet is not read, while any port of the
+// proof is held (the validator's over TCP and UDP, and 3015). Once both are
+// stopped, each process has exited, both temporary directories are gone and every
+// one of those ports is free again. The printed report carries runSeconds.
 //
 // NOT PROVABLE HERE: Privy's TEE signMessage and signTransaction, Phantom's own
 // rewrites or Lighthouse, mainnet rent (the local validator charges 6,960
@@ -82,9 +91,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createVaultApi, transactionErrorWords, type InvestPolicyBuildJson, type VaultApi } from "@/lib/vault-api";
 import { createVaultFlow, investPolicyFlow, linkWalletFlow, withdrawFlow, withdrawTokenFlow, type FlowResult } from "@/lib/vault-flows";
 
-import { ED25519_CONSENT_HEADER_HEX, OWNER_INSTRUCTION_DATA_HEX } from "../../solana-core/test/fixtures/owner-transactions";
+import { ED25519_CONSENT_HEADER_HEX, GOLDEN_CONVERT_FLOOR_WAD, GOLDEN_SPYX_FLOOR_WAD, OWNER_INSTRUCTION_DATA_HEX } from "../../solana-core/test/fixtures/owner-transactions";
 import { startLocalValidator, type LocalValidator, type PreloadedAccount, type StoppedValidator } from "./local-validator";
-import { CLIENT_IP_HEADERS, WEB_ORIGIN, startWebServer, withClientIp, type WebServer } from "./web-server";
+import { CLIENT_IP_HEADERS, WEB_ORIGIN, proofPortsInUse, startWebServer, withClientIp, type StoppedWebServer, type WebServer } from "./web-server";
 
 const SOL = BigInt(LAMPORTS_PER_SOL);
 const COMPUTE_BUDGET = "ComputeBudget111111111111111111111111111111";
@@ -226,6 +235,22 @@ const programsOf = (tx: VersionedTransactionResponse): string[] => tx.transactio
 const dataOf = (tx: VersionedTransactionResponse, index: number): Uint8Array => Uint8Array.from(tx.transaction.message.compiledInstructions[index]!.data);
 const signersOf = (tx: VersionedTransactionResponse): string[] => keysOf(tx).slice(0, tx.transaction.message.header.numRequiredSignatures);
 
+/** An unsigned integer's little-endian bytes as hex, `bytes` wide: how borsh writes a u64 (8) or a u128 (16). */
+function leHex(value: bigint, bytes: number): string {
+  if (value < 0n || value >> BigInt(8 * bytes) !== 0n) throw new RangeError(`${value} does not fit in ${bytes} bytes`);
+  let hex = "";
+  for (let index = 0; index < bytes; index++) hex += Number((value >> BigInt(8 * index)) & 0xffn).toString(16).padStart(2, "0");
+  return hex;
+}
+
+/** `hex` with its one byte-aligned occurrence of the field `from` replaced by `to`. Zero occurrences, or two, fail the step. */
+function replaceField(hex: string, from: string, to: string): string {
+  const at: number[] = [];
+  for (let index = hex.indexOf(from); index !== -1; index = hex.indexOf(from, index + 1)) if (index % 2 === 0) at.push(index);
+  expect(at, `byte-aligned occurrences of ${from}`).toHaveLength(1);
+  return hex.slice(0, at[0]) + to + hex.slice(at[0]! + from.length);
+}
+
 function withinHalf(name: OwnerInstructionName, tx: VersionedTransactionResponse, label: string, signature: string): void {
   const consumed = tx.meta?.computeUnitsConsumed;
   expect(typeof consumed).toBe("number");
@@ -256,7 +281,7 @@ async function airdrop(to: PublicKey, amount: bigint): Promise<void> {
 
 /** Privy, replaced: a pension key and a trading wallet as Keypairs, every call recorded. */
 function wallets(owner: Keypair, trading: Keypair) {
-  const calls = { order: [] as string[], consent: [] as Uint8Array[], pensionIn: [] as Uint8Array[], pensionOut: [] as Uint8Array[], tradingIn: [] as Uint8Array[] };
+  const calls = { order: [] as string[], consent: [] as Uint8Array[], consentSigned: [] as Uint8Array[], pensionIn: [] as Uint8Array[], pensionOut: [] as Uint8Array[], tradingIn: [] as Uint8Array[] };
   return {
     calls,
     pension: {
@@ -272,7 +297,9 @@ function wallets(owner: Keypair, trading: Keypair) {
       signMessageWithTrading: async (message: Uint8Array) => {
         calls.order.push("consent");
         calls.consent.push(message);
-        return signBytes(trading, message);
+        const signature = signBytes(trading, message);
+        calls.consentSigned.push(signature);
+        return signature;
       },
       signWithTrading: async (bytes: Uint8Array) => {
         calls.order.push("trading");
@@ -303,25 +330,39 @@ async function direct(transaction: Transaction, ...signers: Keypair[]): Promise<
 
 const tokenAmount = async (account: string): Promise<bigint> => BigInt((await connection.getTokenAccountBalance(new PublicKey(account), "confirmed")).value.amount);
 
+/** Set once this run may have spawned something, so a start refused for a held port reports it once and stops nothing. */
+let started = false;
+let startedAt = 0;
+
 beforeAll(async () => {
+  startedAt = Date.now();
+  // Before anything: every port of the proof is free. Nothing is spawned, and mainnet is not read, while one is held.
+  const held = await proofPortsInUse();
+  if (held.length > 0) throw new Error(`refusing to start: port(s) ${held.join(", ")} are in use. Nothing was started, and nothing was stopped.`);
   const vaultA = new PublicKey(deriveVaultPda(key(ownerA)).toBase58());
-  validator = await startLocalValidator(upgradeAuthority.publicKey, { accounts: [await spyxHoldingAccount(vaultA)] });
+  const holding = await spyxHoldingAccount(vaultA);
+  started = true;
+  validator = await startLocalValidator(upgradeAuthority.publicKey, { accounts: [holding] });
   connection = validator.connection;
   web = await startWebServer();
   api = createVaultApi({ origin: WEB_ORIGIN, fetch: withClientIp });
 });
 
 afterAll(async () => {
-  let webStopped: { exited: boolean; portRefused: boolean } | null = null;
+  let webStopped: StoppedWebServer | null = null;
   let validatorStopped: StoppedValidator | null = null;
   try {
     webStopped = web === undefined ? null : await web.stop();
   } finally {
     validatorStopped = validator === undefined ? null : await validator.stop();
   }
-  console.log(JSON.stringify({ event: "web-boveda.local-proof", ...report, stopped: { web: webStopped, validator: validatorStopped } }, null, 1));
-  if (webStopped !== null) expect(webStopped).toEqual({ exited: true, portRefused: true });
+  // After: nothing of this run is left. Both processes exited with their temporary directories removed, and every port of the proof is free again.
+  const portsInUseAfter = started ? await proofPortsInUse() : null;
+  const runSeconds = Number(((Date.now() - startedAt) / 1_000).toFixed(1));
+  console.log(JSON.stringify({ event: "web-boveda.local-proof", ...report, runSeconds, stopped: { web: webStopped, validator: validatorStopped, portsInUseAfter } }, null, 1));
+  if (webStopped !== null) expect(webStopped).toEqual({ exited: true, portRefused: true, homeGone: true });
   if (validatorStopped !== null) expect(validatorStopped).toEqual({ exited: true, rpcRefused: true, tempDirGone: true });
+  if (portsInUseAfter !== null) expect(portsInUseAfter).toEqual([]);
 });
 
 describe("web-boveda on the tested sip_vault", () => {
@@ -480,7 +521,8 @@ describe("web-boveda on the tested sip_vault", () => {
     expect(signersOf(tx)).toEqual([owner, wallet]);
     expect(programsOf(tx)).toEqual([COMPUTE_BUDGET, COMPUTE_BUDGET, ED25519, SIP_PROGRAM_ID]);
     expect(toHex(dataOf(tx, 3))).toBe(OWNER_INSTRUCTION_DATA_HEX.LINK_WALLET);
-    expect(toHex(dataOf(tx, 2).subarray(0, 16))).toBe(ED25519_CONSENT_HEADER_HEX);
+    // The Ed25519 data the program read the consent from: the fixture's offsets header, the trading wallet's key, the signature its signMessage returned, and the 140 bytes the page rebuilt.
+    expect(toHex(dataOf(tx, 2))).toBe(ED25519_CONSENT_HEADER_HEX + toHex(tradingA.publicKey.toBytes()) + toHex(signers.calls.consentSigned[0]!) + toHex(consent));
     expect(tx.meta?.logMessages).toContain(`Program ${SIP_PROGRAM_ID} success`);
     withinHalf("link_wallet", tx, "link_wallet ownerA tradingA", signature);
 
@@ -546,6 +588,13 @@ describe("web-boveda on the tested sip_vault", () => {
     expect([shown[0]!.floors.convertWad, shown[0]!.floors.legs[0]!.wad]).toEqual([convertFloor.toString(), legFloor.toString()]);
 
     expect(programsOf(tx)).toEqual([COMPUTE_BUDGET, COMPUTE_BUDGET, ATA_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, SIP_PROGRAM_ID]);
+    // The landed data is the core fixture with only its two floors put in from the cloned pools: the same basket, venue, in-mint, $5 minimum, caps and switch.
+    const firstPolicyData = replaceField(
+      replaceField(OWNER_INSTRUCTION_DATA_HEX.SET_INVEST_POLICY_GOLDEN_FLOORS, leHex(GOLDEN_SPYX_FLOOR_WAD, 16), leHex(legFloor, 16)),
+      leHex(GOLDEN_CONVERT_FLOOR_WAD, 16),
+      leHex(convertFloor, 16),
+    );
+    expect(toHex(dataOf(tx, 5))).toBe(firstPolicyData);
     expect(signers.calls.pensionIn[0]!.length).toBeLessThanOrEqual(1_232);
     const policyAddress = new PublicKey(deriveInvestPda(vault).toBase58());
     const policy = decodeInvestmentPolicy(Uint8Array.from((await connection.getAccountInfo(policyAddress, "confirmed"))!.data));
@@ -585,6 +634,10 @@ describe("web-boveda on the tested sip_vault", () => {
     const againSignature = landedSignature(again);
     const againTx = await landed(againSignature);
     expect(programsOf(againTx)).toEqual([COMPUTE_BUDGET, COMPUTE_BUDGET, SIP_PROGRAM_ID]);
+    // The same bytes with only the two caps changed to $10 and $50.
+    expect(toHex(dataOf(againTx, 2))).toBe(
+      replaceField(replaceField(firstPolicyData, leHex(DEFAULT_INVEST_CAPS.maxPerCall, 8), leHex(10_000_000n, 8)), leHex(DEFAULT_INVEST_CAPS.maxRolling30d, 8), leHex(50_000_000n, 8)),
+    );
     const resigned = decodeInvestmentPolicy(Uint8Array.from((await connection.getAccountInfo(policyAddress, "confirmed"))!.data));
     expect(resigned).toMatchObject({ policyNonce: 2n, maxPerCall: 10_000_000n, maxRolling30d: 50_000_000n });
     expect((await lamports(owner)) - beforeAgain).toBe(-BigInt(againTx.meta!.fee));
