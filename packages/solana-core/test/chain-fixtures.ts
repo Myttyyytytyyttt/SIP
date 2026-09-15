@@ -2,6 +2,7 @@
 // through the IDL, Raydium pools with a chosen sqrt price, and a JSON-RPC stub
 // that answers from a map. No network; the endpoint is an .invalid host.
 
+import { RAYDIUM_CLMM, SPYX_MINT, USDC_MINT } from "../src/client/addresses";
 import { tryBase58Decode } from "../src/client/base58";
 import { encodeStruct } from "../src/client/borsh";
 import { CLMM_POOL_STATE_BYTES, CLMM_POOL_STATE_DISCRIMINATOR } from "../src/client/clmm-price";
@@ -14,7 +15,7 @@ export type AccountJson = ReturnType<typeof accountInfo>;
 /** The local validator's rent: 6,960 lamports per byte, the 128 bytes of overhead included. */
 export const localRent = (size: number): number => (size + 128) * 6_960;
 
-function sipAccount(name: "Vault" | "TradingLink" | "ProtocolConfig", fields: Record<string, unknown>): Uint8Array {
+function sipAccount(name: "Vault" | "TradingLink" | "ProtocolConfig" | "InvestmentPolicy", fields: Record<string, unknown>): Uint8Array {
   const body = encodeStruct(name, fields);
   const bytes = new Uint8Array(SIP_ACCOUNT_SPACE[name]);
   bytes.set(accountDiscriminator(name), 0);
@@ -55,6 +56,27 @@ export const configAccount = (paused: boolean): Uint8Array =>
     _reserved: new Array(64).fill(0),
   });
 
+/** An InvestmentPolicy for `vault`: SPYx at the golden floors, $10 per buy and $50 per 30 days, as the first mainnet test types them. */
+export const policyAccount = (vault: string, fields: Record<string, unknown> = {}): Uint8Array =>
+  sipAccount("InvestmentPolicy", {
+    vault,
+    enabled: true,
+    venue_program: RAYDIUM_CLMM,
+    in_mint: USDC_MINT,
+    legs: [{ mint: SPYX_MINT, weight_bps: 10_000, min_out_rate_wad: 124_719_467_624_105_690n }],
+    min_convert_rate_wad: 90_034_840_399_943_305n,
+    min_investment: 5_000_000n,
+    max_per_call: 10_000_000n,
+    max_rolling_30d: 50_000_000n,
+    bucket_days: new Array(31).fill(0),
+    bucket_amounts: new Array(31).fill(0n),
+    lifetime_invested: 0n,
+    policy_nonce: 1n,
+    bump: 252,
+    _reserved: new Array(32).fill(0),
+    ...fields,
+  });
+
 /** A Raydium CLMM PoolState with the fields a price is read from. */
 export function clmmPoolAccount(mint0: string, mint1: string, sqrtPriceX64: bigint, decimals: readonly [number, number] = [9, 6]): Uint8Array {
   const bytes = new Uint8Array(CLMM_POOL_STATE_BYTES);
@@ -72,8 +94,26 @@ export function clmmPoolAccount(mint0: string, mint1: string, sqrtPriceX64: bigi
 export const SOL_SQRT_PRICE = 5_834_501_654_111_004_443n;
 export const SPYX_SQRT_PRICE = 50_911_325_114_989_095_030n;
 
+/** A mint account held by `tokenProgram`: only its owner is read. */
+export const mintAccount = (tokenProgram: string): AccountJson => accountInfo(tokenProgram, new Uint8Array(82), 1_461_600);
+
+/** A token account held by `tokenProgram`: only its owner is read. */
+export const tokenAccountInfo = (tokenProgram: string, bytes = 165): AccountJson => accountInfo(tokenProgram, new Uint8Array(bytes), localRent(bytes));
+
+/** One jsonParsed token account getTokenAccountsByOwner lists for its owner. */
+export interface StubTokenAccount {
+  readonly pubkey: string;
+  readonly mint: string;
+  readonly amount: string;
+  readonly decimals: number;
+  readonly uiAmountString: string;
+  readonly tokenProgram: string;
+}
+
 export interface StubChain {
   readonly accounts: Map<string, AccountJson | null>;
+  /** getTokenAccountsByOwner's answers, by owner. */
+  readonly tokenAccounts?: Map<string, readonly StubTokenAccount[]>;
   readonly slot?: number;
   readonly lastValidBlockHeight?: number;
   /** Every call fails at the transport, quoting the endpoint, so a test can prove the quote never leaves. */
@@ -97,6 +137,29 @@ export function answerRpc(chain: StubChain): (call: UpstreamCall) => Response {
         return { jsonrpc: "2.0", id, result: localRent(params[0] as number) };
       case "getLatestBlockhash":
         return { jsonrpc: "2.0", id, result: { context, value: { blockhash: BLOCKHASH, lastValidBlockHeight: chain.lastValidBlockHeight ?? 300_000_150 } } };
+      case "getTokenAccountsByOwner": {
+        const owner = params[0] as string;
+        const programId = (params[1] as { programId?: string } | undefined)?.programId;
+        const listed = (chain.tokenAccounts?.get(owner) ?? []).filter((entry) => entry.tokenProgram === programId);
+        return {
+          jsonrpc: "2.0",
+          id,
+          result: {
+            context,
+            value: listed.map((entry) => ({
+              pubkey: entry.pubkey,
+              account: {
+                data: { parsed: { info: { mint: entry.mint, owner, tokenAmount: { amount: entry.amount, decimals: entry.decimals, uiAmountString: entry.uiAmountString } } } },
+                owner: entry.tokenProgram,
+                lamports: localRent(165),
+                executable: false,
+                rentEpoch: 0,
+                space: 165,
+              },
+            })),
+          },
+        };
+      }
       default:
         return { jsonrpc: "2.0", id, error: { code: -32601, message: `the stub has no ${String(request.method)}` } };
     }

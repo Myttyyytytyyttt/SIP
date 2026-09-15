@@ -12,12 +12,12 @@
 // browser relay no longer serves (getSignaturesForAddress, getTransaction and
 // getProgramAccounts live here, behind the web's own routes).
 
-import { RAYDIUM_CLMM, SOL_USDC_POOL, TOKEN_PROGRAMS } from "../client/addresses";
+import { RAYDIUM_CLMM, SOL_USDC_POOL, SYSTEM_PROGRAM, TOKEN_PROGRAM, TOKEN_PROGRAMS, USDC_MINT, WSOL_MINT } from "../client/addresses";
 import { isBase58OfLength, isPubkey, isSignature, tryBase58Decode } from "../client/base58";
 import { tryBase64Decode } from "../client/base64";
 import { fieldOffset } from "../client/borsh";
 import { PoolPriceError, legUsdcWad, solUsdcConvertWad } from "../client/clmm-price";
-import { OFFERED_LEGS } from "../client/product";
+import { CLASSIC_TOKEN_ACCOUNT_BYTES, OFFERED_LEGS } from "../client/product";
 import {
   SIP_ACCOUNT_SPACE,
   decodeInvestmentPolicy,
@@ -32,7 +32,7 @@ import {
   type VaultState,
 } from "../client/decoders";
 import { SIP_PROGRAM_ID, matchInstruction } from "../client/idl";
-import { deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "./pda";
+import { deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "./pda";
 import { RpcAnswerError, type JsonRpcMember, type RpcPool } from "./rpc-pool";
 
 export type ChainRead<T> =
@@ -379,35 +379,120 @@ export interface PoolPrices {
   readonly legWads: Readonly<Record<string, bigint>>;
 }
 
+/** The pools prices are read from, in order: SOL_USDC_POOL, then each offered leg's pool. */
+export const PRICED_POOLS: readonly string[] = Object.freeze([SOL_USDC_POOL, ...OFFERED_LEGS.map((leg) => leg.pool)]);
+
+/** An account as a read needs it: its owner, its lamports, and its bytes when they came as base64. */
+export interface AccountSnapshot {
+  readonly owner: string;
+  readonly lamports: bigint;
+  readonly data: Uint8Array | null;
+}
+
+/** null for an account the chain does not have; undefined for an answer that is not an account. */
+function snapshotOf(account: unknown): AccountSnapshot | null | undefined {
+  if (account === null) return null;
+  const candidate = account as Partial<RpcAccount> | undefined;
+  if (candidate === undefined || typeof candidate.owner !== "string" || typeof candidate.lamports !== "number" || !Number.isSafeInteger(candidate.lamports)) return undefined;
+  return { owner: candidate.owner, lamports: BigInt(candidate.lamports), data: accountBytes(candidate as RpcAccount) };
+}
+
 /**
- * The live rates behind the floors and the forms' dollar figures: SOL_USDC_POOL
- * and every offered leg's pool in ONE getMultipleAccounts. Each pool must exist,
- * be owned by Raydium CLMM, and hold its mints in the pinned order. Anything else
- * is unreadable: a floor is never guessed.
+ * The rates from PRICED_POOLS' accounts, in that order. Each pool must exist, be
+ * owned by Raydium CLMM, and hold its mints in the pinned order; anything else
+ * throws PoolPriceError, because a floor is never guessed.
+ */
+export function poolPricesFromAccounts(accounts: readonly (AccountSnapshot | null | undefined)[], slot: number | null): PoolPrices {
+  if (accounts.length !== PRICED_POOLS.length) throw new PoolPriceError("every priced pool must be read");
+  const dataOf = (index: number): Uint8Array => {
+    const account = accounts[index];
+    if (account === null || account === undefined) throw new PoolPriceError(`the pool ${PRICED_POOLS[index]} does not exist`);
+    if (account.owner !== RAYDIUM_CLMM) throw new PoolPriceError(`the pool ${PRICED_POOLS[index]} is owned by ${account.owner}, not Raydium CLMM`);
+    if (account.data === null) throw new PoolPriceError(`the pool ${PRICED_POOLS[index]}'s data is not base64`);
+    return account.data;
+  };
+  const convertWad = solUsdcConvertWad(dataOf(0)).wad;
+  const legWads: Record<string, bigint> = {};
+  OFFERED_LEGS.forEach((leg, index) => {
+    legWads[leg.mint] = legUsdcWad(dataOf(index + 1), leg.mint).wad;
+  });
+  return { slot, convertWad, legWads };
+}
+
+/**
+ * The live rates behind the floors and the forms' dollar figures: PRICED_POOLS in
+ * ONE getMultipleAccounts (poolPricesFromAccounts). Anything but every pool,
+ * ours, in order, is unreadable: a floor is never guessed.
  */
 export async function readPoolPrices(pool: RpcPool): Promise<ChainRead<PoolPrices>> {
-  const pools = [SOL_USDC_POOL, ...OFFERED_LEGS.map((leg) => leg.pool)];
   try {
-    const result = await pool.call<{ context?: { slot?: unknown }; value?: unknown }>("getMultipleAccounts", [pools, { encoding: "base64", commitment: COMMITMENT }]);
+    const result = await pool.call<{ context?: { slot?: unknown }; value?: unknown }>("getMultipleAccounts", [PRICED_POOLS, { encoding: "base64", commitment: COMMITMENT }]);
     const value = result?.value;
-    if (!Array.isArray(value) || value.length !== pools.length) return { kind: "unreadable", error: "getMultipleAccounts did not answer every pool" };
-    const dataOf = (index: number): Uint8Array => {
-      const account = value[index] as RpcAccount | null | undefined;
-      if (account === null || account === undefined) throw new PoolPriceError(`the pool ${pools[index]} does not exist`);
-      if (account.owner !== RAYDIUM_CLMM) throw new PoolPriceError(`the pool ${pools[index]} is owned by ${account.owner}, not Raydium CLMM`);
-      const bytes = accountBytes(account);
-      if (bytes === null) throw new PoolPriceError(`the pool ${pools[index]}'s data is not base64`);
-      return bytes;
-    };
-    const convertWad = solUsdcConvertWad(dataOf(0)).wad;
-    const legWads: Record<string, bigint> = {};
-    OFFERED_LEGS.forEach((leg, index) => {
-      legWads[leg.mint] = legUsdcWad(dataOf(index + 1), leg.mint).wad;
-    });
+    if (!Array.isArray(value) || value.length !== PRICED_POOLS.length) return { kind: "unreadable", error: "getMultipleAccounts did not answer every pool" };
     const slot = typeof result?.context?.slot === "number" ? result.context.slot : null;
-    return { kind: "exists", value: { slot, convertWad, legWads } };
+    return { kind: "exists", value: poolPricesFromAccounts(value.map(snapshotOf), slot) };
   } catch (error) {
     return { kind: "unreadable", error: error instanceof PoolPriceError ? error.message : errorText(pool, error) };
+  }
+}
+
+// ── the vault's token accounts ───────────────────────────────────────────────
+
+export interface VaultTokenAccountTarget {
+  readonly mint: string;
+  /** ATA(vault, mint, tokenProgram). */
+  readonly address: string;
+  readonly tokenProgram: string;
+  /** What the account takes once created: the size its rent is read for. */
+  readonly bytes: number;
+}
+
+/** The vault's token accounts an investment policy needs, in the order the build route lists them: wSOL, USDC, then each offered leg. */
+export function vaultTokenAccountTargets(vault: string): readonly VaultTokenAccountTarget[] {
+  if (!isPubkey(vault)) throw new RangeError("vaultTokenAccountTargets: vault is not a base58 32-byte key");
+  const entries = [
+    { mint: WSOL_MINT, tokenProgram: TOKEN_PROGRAM, bytes: CLASSIC_TOKEN_ACCOUNT_BYTES },
+    { mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM, bytes: CLASSIC_TOKEN_ACCOUNT_BYTES },
+    ...OFFERED_LEGS.map((leg) => ({ mint: leg.mint, tokenProgram: leg.tokenProgram, bytes: leg.tokenAccountBytes })),
+  ];
+  return entries.map((entry) => ({ ...entry, address: deriveAta(vault, entry.mint, entry.tokenProgram).toBase58() }));
+}
+
+/**
+ * "exists" when the token program holds the account; "missing" when
+ * CreateIdempotent must create it (no account, or only lamports someone sent to
+ * the address first); "unreadable" for anything else, which no ATA address can be.
+ */
+export type TokenAccountStatus = "exists" | "missing" | "unreadable";
+
+export function tokenAccountStatus(account: AccountSnapshot | null | undefined, tokenProgram: string): TokenAccountStatus {
+  if (account === null) return "missing";
+  if (account === undefined) return "unreadable";
+  if (account.owner === tokenProgram) return "exists";
+  if (account.owner === SYSTEM_PROGRAM && (account.data === null || account.data.length === 0)) return "missing";
+  return "unreadable";
+}
+
+export interface VaultTokenAccountRead {
+  readonly mint: string;
+  readonly address: string;
+  readonly tokenProgram: string;
+  readonly status: TokenAccountStatus;
+}
+
+/** Whether each of vaultTokenAccountTargets(vault) exists, in ONE getMultipleAccounts. A failed read is unreadable as a whole. */
+export async function readVaultTokenAccounts(pool: RpcPool, vault: string): Promise<ChainRead<readonly VaultTokenAccountRead[]>> {
+  const targets = vaultTokenAccountTargets(vault);
+  try {
+    const result = await pool.call<{ value?: unknown }>("getMultipleAccounts", [targets.map((target) => target.address), { encoding: "base64", commitment: COMMITMENT }]);
+    const value = result?.value;
+    if (!Array.isArray(value) || value.length !== targets.length) return { kind: "unreadable", error: "getMultipleAccounts did not answer every token account" };
+    return {
+      kind: "exists",
+      value: targets.map((target, index) => ({ mint: target.mint, address: target.address, tokenProgram: target.tokenProgram, status: tokenAccountStatus(snapshotOf(value[index]), target.tokenProgram) })),
+    };
+  } catch (error) {
+    return { kind: "unreadable", error: errorText(pool, error) };
   }
 }
 
@@ -461,6 +546,76 @@ export async function readBlockhashAndRents(
   const read = await rentsAndBlockhash(pool, sizes, true);
   if (read.kind !== "exists" || read.value.recent === null) return read.kind === "exists" ? { kind: "unreadable", error: "no blockhash" } : read;
   return { kind: "exists", value: { recent: read.value.recent, rents: read.value.rents } };
+}
+
+export interface BuildBatch {
+  /** The slot getMultipleAccounts answered at, or null when none was asked or it did not say. */
+  readonly slot: number | null;
+  readonly recent: RecentBlockhashRead;
+  /** In the order of `sizes`. */
+  readonly rents: readonly bigint[];
+  /** In the order of `addresses`; null where the chain has no account. */
+  readonly accounts: readonly (AccountSnapshot | null)[];
+}
+
+/** One getMultipleAccounts is asked for at most this many addresses. */
+export const MAX_BUILD_BATCH_ADDRESSES = 100;
+
+/**
+ * What a build reads right before it compiles, in ONE batch: the latest confirmed
+ * blockhash, the accounts at `addresses` and the rent-exempt minimums for `sizes`.
+ * A member that fails, or answers anything that is not what was asked, makes the
+ * whole read unreadable: nothing is compiled over half an answer.
+ */
+export async function readBuildBatch(pool: RpcPool, input: { readonly addresses: readonly string[]; readonly sizes: readonly number[] }): Promise<ChainRead<BuildBatch>> {
+  const { addresses, sizes } = input;
+  if (addresses.length > MAX_BUILD_BATCH_ADDRESSES || !addresses.every((address) => isPubkey(address))) {
+    throw new RangeError(`readBuildBatch: 0 to ${MAX_BUILD_BATCH_ADDRESSES} base58 32-byte addresses`);
+  }
+  if (!sizes.every((size) => Number.isSafeInteger(size) && size >= 0)) throw new RangeError("rent sizes are byte counts");
+  const accountsId = 2;
+  const rentId = (index: number): number => 3 + index;
+  try {
+    const calls: { id: number; method: string; params: unknown[] }[] = [{ id: 1, method: "getLatestBlockhash", params: [{ commitment: COMMITMENT }] }];
+    if (addresses.length > 0) calls.push({ id: accountsId, method: "getMultipleAccounts", params: [addresses, { encoding: "base64", commitment: COMMITMENT }] });
+    sizes.forEach((size, index) => calls.push({ id: rentId(index), method: "getMinimumBalanceForRentExemption", params: [size] }));
+    const members = await pool.batch(calls);
+
+    const latest = memberResult(members, 1);
+    if (!latest.ok) return { kind: "unreadable", error: pool.scrub(latest.error) };
+    const answered = (latest.result as { value?: { blockhash?: unknown; lastValidBlockHeight?: unknown } } | null)?.value;
+    const blockhash = answered?.blockhash;
+    const lastValidBlockHeight = answered?.lastValidBlockHeight;
+    if (!isBase58OfLength(blockhash, 32) || typeof lastValidBlockHeight !== "number" || !Number.isSafeInteger(lastValidBlockHeight)) {
+      return { kind: "unreadable", error: "getLatestBlockhash did not answer a blockhash with its last valid block height" };
+    }
+
+    let slot: number | null = null;
+    const accounts: (AccountSnapshot | null)[] = [];
+    if (addresses.length > 0) {
+      const answer = memberResult(members, accountsId);
+      if (!answer.ok) return { kind: "unreadable", error: pool.scrub(answer.error) };
+      const result = answer.result as { context?: { slot?: unknown }; value?: unknown } | null;
+      if (!Array.isArray(result?.value) || result.value.length !== addresses.length) return { kind: "unreadable", error: "getMultipleAccounts did not answer every address" };
+      for (const account of result.value) {
+        const snapshot = snapshotOf(account);
+        if (snapshot === undefined) return { kind: "unreadable", error: "getMultipleAccounts answered something that is not an account" };
+        accounts.push(snapshot);
+      }
+      slot = typeof result.context?.slot === "number" ? result.context.slot : null;
+    }
+
+    const rents: bigint[] = [];
+    for (const index of sizes.keys()) {
+      const answer = memberResult(members, rentId(index));
+      if (!answer.ok) return { kind: "unreadable", error: pool.scrub(answer.error) };
+      if (typeof answer.result !== "number" || !Number.isSafeInteger(answer.result) || answer.result < 0) return { kind: "unreadable", error: "a rent-exempt minimum is not a number" };
+      rents.push(BigInt(answer.result));
+    }
+    return { kind: "exists", value: { slot, recent: { blockhash, lastValidBlockHeight }, rents, accounts } };
+  } catch (error) {
+    return { kind: "unreadable", error: errorText(pool, error) };
+  }
 }
 
 // ── history ──────────────────────────────────────────────────────────────────

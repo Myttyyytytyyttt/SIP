@@ -10,6 +10,16 @@
  * - {"action":"link","owner","wallet","consentSignature"} → the link transaction,
  *   [compute budget, Ed25519SigVerify, link_wallet], that the pension key signs
  *   first and the trading wallet second.
+ * - {"action":"investPolicy","owner","maxPerCall"?,"maxRolling30d"?,"enabled"?} →
+ *   set_invest_policy for SPYx at floors read from the pools right now (90 % of
+ *   SOL's price, 95 % of SPYx's rate), behind a CreateIdempotent for each of the
+ *   vault's wSOL, USDC and SPYx accounts it lacks, paid by the owner; the floors,
+ *   those accounts and every rent come with it.
+ * - {"action":"withdraw","owner","lamports"} → withdraw, at most what the vault
+ *   holds above its rent floor.
+ * - {"action":"withdrawToken","owner","mint","amountRaw"} → withdraw_token from
+ *   the vault's largest holding of that mint, its account and token program read
+ *   from the chain.
  *
  * WHAT IT IS NOT. It holds no key, signs nothing and takes no blockhash from the
  * browser. Its answer is advice: the page checks the bytes against what the

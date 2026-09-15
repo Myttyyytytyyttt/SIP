@@ -1,8 +1,8 @@
 // /api/solana-vault as wired in this app: the gate, the environment, and the core
 // state handler behind them (tested in depth in @sip/solana-core). No network.
 
-import { SIP_ACCOUNT_SPACE, SIP_PROGRAM_ID, accountDiscriminator, base64Encode, encodeStruct } from "@sip/solana-core/client";
-import { deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "@sip/solana-core/server";
+import { SIP_ACCOUNT_SPACE, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_PROGRAM, USDC_MINT, accountDiscriminator, base64Encode, encodeStruct } from "@sip/solana-core/client";
+import { deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "@sip/solana-core/server";
 import { Keypair } from "@solana/web3.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -49,7 +49,10 @@ function useEnv(env: Readonly<Record<string, string | undefined>>): void {
 type RpcCall = { readonly id?: unknown; readonly method?: string; readonly params?: readonly unknown[] };
 type AccountJson = { data: [string, "base64"]; lamports: number; owner: string; executable: boolean; rentEpoch: number; space: number };
 
-function stubChain(accounts: ReadonlyMap<string, AccountJson>, down = false): void {
+/** A jsonParsed token account as getTokenAccountsByOwner lists it. */
+type ParsedTokenAccount = { pubkey: string; mint: string; amount: string; uiAmountString: string; programId: string };
+
+function stubChain(accounts: ReadonlyMap<string, AccountJson>, down = false, holdings: ReadonlyMap<string, readonly ParsedTokenAccount[]> = new Map()): void {
   const one = (call: RpcCall): Record<string, unknown> => {
     const params = call.params ?? [];
     switch (call.method) {
@@ -57,6 +60,16 @@ function stubChain(accounts: ReadonlyMap<string, AccountJson>, down = false): vo
         return { jsonrpc: "2.0", id: call.id ?? null, result: { context: { slot: 9 }, value: (params[0] as string[]).map((address) => accounts.get(address) ?? null) } };
       case "getMinimumBalanceForRentExemption":
         return { jsonrpc: "2.0", id: call.id ?? null, result: ((params[0] as number) + 128) * 5_080 };
+      case "getTokenAccountsByOwner": {
+        const owner = params[0] as string;
+        const programId = (params[1] as { programId?: string }).programId;
+        const listed = (holdings.get(owner) ?? []).filter((entry) => entry.programId === programId);
+        const value = listed.map((entry) => ({
+          pubkey: entry.pubkey,
+          account: { data: { parsed: { info: { mint: entry.mint, owner, tokenAmount: { amount: entry.amount, decimals: 6, uiAmountString: entry.uiAmountString } } } }, owner: entry.programId },
+        }));
+        return { jsonrpc: "2.0", id: call.id ?? null, result: { context: { slot: 9 }, value } };
+      }
       default:
         return { jsonrpc: "2.0", id: call.id ?? null, error: { code: -32601, message: "not stubbed" } };
     }
@@ -111,6 +124,8 @@ describe("/api/solana-vault", () => {
         [deriveLinkPda(mine).toBase58(), sipAccount("TradingLink", { wallet: mine, vault, epoch: 7n, settlement_nonce: 0n, frontier_slot: 0n, bump: 254, _reserved: reserved(32) })],
         [deriveLinkPda(theirs).toBase58(), sipAccount("TradingLink", { wallet: theirs, vault: someKey(), epoch: 7n, settlement_nonce: 0n, frontier_slot: 0n, bump: 254, _reserved: reserved(32) })],
       ]),
+      false,
+      new Map([[vault, [{ pubkey: deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58(), mint: USDC_MINT, amount: "12500000", uiAmountString: "12.5", programId: TOKEN_PROGRAM }]]]),
     );
     const response = await POST(stateRequest({ action: "state", owner, wallets: [mine, theirs, fresh] }));
     expect(response.status).toBe(200);
@@ -121,7 +136,18 @@ describe("/api/solana-vault", () => {
     expect(body.policy).toEqual({ status: "missing", address: deriveInvestPda(vault).toBase58() });
     expect(body.config).toMatchObject({ status: "exists", exists: true, paused: true });
     expect(body.walletLinks.map((link: { status: string }) => link.status)).toEqual(["this_vault", "other_vault", "missing"]);
-    expect(body.rents).toEqual({ vault: String(253 * 5_080), link: String(257 * 5_080) });
+    expect(body.rents).toEqual({
+      vault: String(253 * 5_080),
+      link: String(257 * 5_080),
+      policy: String(1_098 * 5_080),
+      tokenAccount: String(293 * 5_080),
+      legTokenAccounts: { [SPYX_MINT]: String(307 * 5_080) },
+    });
+    expect(body.holdings).toEqual({
+      status: "exists",
+      items: [{ tokenAccount: deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58(), mint: USDC_MINT, amountRaw: "12500000", decimals: 6, uiAmount: "12.5", tokenProgram: TOKEN_PROGRAM }],
+    });
+    expect(body.vaultTokenAccounts.items.map((entry: { status: string }) => entry.status)).toEqual(["missing", "missing", "missing"]);
     // The pools are not in this stub's map, so there is no price rather than a guessed one.
     expect(body.prices).toBeNull();
   });
@@ -136,6 +162,7 @@ describe("/api/solana-vault", () => {
     const body = JSON.parse(text) as Record<string, any>;
     expect([body.vault.status, body.policy.status, body.config.status]).toEqual(["unreadable", "unreadable", "unreadable"]);
     expect(body.walletLinks).toEqual([{ wallet, link: deriveLinkPda(wallet).toBase58(), status: "unreadable", vault: null }]);
+    expect([body.holdings.status, body.vaultTokenAccounts.status]).toEqual(["unreadable", "unreadable"]);
     expect(text).not.toContain(SECRET);
     expect(text).not.toContain("upstream.invalid");
   });

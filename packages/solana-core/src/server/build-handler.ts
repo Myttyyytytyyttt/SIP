@@ -29,26 +29,60 @@
 // {error:{code, message, ...}}, the shape /api/solana-tx answers with. No upstream
 // text is ever returned: a read that failed is "unreadable", with no detail.
 
+import { RAYDIUM_CLMM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../client/addresses";
 import { isPubkey } from "../client/base58";
 import { tryBase64Decode } from "../client/base64";
-import { usdcRawPer1e8LegRaw, usdcRawPerSol } from "../client/clmm-price";
+import { PoolPriceError, floorWad, usdcRawPer1e8LegRaw, usdcRawPerSol } from "../client/clmm-price";
 import { SIP_ACCOUNT_SPACE } from "../client/decoders";
 import { SIP_PROGRAM_ID } from "../client/idl";
-import { DEFAULT_VAULT_POLICY, OFFERED_LEGS, SIGNATURE_FEE_LAMPORTS, VOLUME_MODE_OFFERED, ownerComputeBudget, priorityFeeLamports, type ComputeBudget } from "../client/product";
-import { MODE_PROFIT, MODE_VOLUME, U64_MAX, vaultPolicyProblems, type VaultPolicyInput } from "../client/rules";
-import { BuildError, LinkConsentError, WalletIsOwnerError, buildCreateVaultV2, buildLinkWallet, checkLinkConsent, prepareLinkWalletConsent } from "./builders";
+import {
+  CLASSIC_TOKEN_ACCOUNT_BYTES,
+  CONVERT_FLOOR_MARGIN_BPS,
+  DEFAULT_INVEST_CAPS,
+  DEFAULT_VAULT_POLICY,
+  LEG_FLOOR_MARGIN_BPS,
+  OFFERED_LEGS,
+  SIGNATURE_FEE_LAMPORTS,
+  VOLUME_MODE_OFFERED,
+  basketWeightsBps,
+  ownerComputeBudget,
+  priorityFeeLamports,
+  type ComputeBudget,
+} from "../client/product";
+import { MODE_PROFIT, MODE_VOLUME, U64_MAX, defaultInvestPolicy, investPolicyProblems, vaultPolicyProblems, type InvestPolicyInput, type VaultPolicyInput } from "../client/rules";
+import {
+  BuildError,
+  LinkConsentError,
+  WalletIsOwnerError,
+  buildCreateVaultV2,
+  buildLinkWallet,
+  buildSetInvestPolicy,
+  buildWithdraw,
+  buildWithdrawToken,
+  checkLinkConsent,
+  prepareLinkWalletConsent,
+} from "./builders";
 import type { SolanaServerSettings } from "./config";
 import { isCrossSite, isJsonContentType, readBodyCapped, type SolanaGate, type SolanaRouteHandler } from "./handlers";
-import { deriveVaultPda } from "./pda";
+import { deriveAta, deriveVaultPda } from "./pda";
 import { CLIENT_AGGREGATE_FACTOR, clientIdentityFromHeaders, createWeightedLimiter, retryAfterSeconds, type WeightedLimiter } from "./rate-limit";
 import {
   MAX_WALLET_LINKS,
+  PRICED_POOLS,
+  listVaultHoldings,
+  poolPricesFromAccounts,
   readBlockhashAndRents,
+  readBuildBatch,
   readLinkPrerequisites,
   readOwnerAccounts,
   readPoolPrices,
   readRents,
+  readVault,
+  readVaultTokenAccounts,
   readWalletLinks,
+  tokenAccountStatus,
+  vaultTokenAccountTargets,
+  type AccountSnapshot,
   type ChainRead,
 } from "./readers";
 import { createRpcPool, type RpcPool } from "./rpc-pool";
@@ -75,6 +109,18 @@ export type SolanaBuildErrorCode =
   | "wallet_already_linked"
   /** The consent signature is not the trading wallet's over this link's SIP_LINK_V1 bytes. */
   | "link_consent_invalid"
+  /** A withdrawal of nothing. */
+  | "zero_amount"
+  /** More SOL than the vault can release above its rent floor; `withdrawableLamports` says how much it can. */
+  | "above_withdrawable"
+  /** The vault holds none of this mint. */
+  | "not_held"
+  /** More of this mint than the vault holds; `heldRaw` says how much it does. */
+  | "above_holding"
+  /** A pinned pool could not be priced (missing, not Raydium CLMM's, mints swapped): no floor is guessed. */
+  | "price_unavailable"
+  /** A mint the policy names is not held by the token program SIP expects; `mint` names it. */
+  | "mint_unexpected"
   /** A chain read failed or answered something that is not ours: nothing was offered. */
   | "unreadable"
   /** The blockhash could not be read: nothing was built. */
@@ -113,7 +159,10 @@ export const MAX_BUILD_REQUEST_BYTES = 2048;
 /** What one build or state request takes from its client's buckets, before its body is read. */
 export const BUILD_REQUEST_WEIGHT = 3;
 /** Upstream JSON-RPC calls each action may make, taken from the process-wide reads budget before the first one. */
-export const BUILD_READS_WEIGHT = { createVault: 4, prepareLink: 1, link: 3, state: 6 } as const;
+export const BUILD_READS_WEIGHT = { createVault: 4, prepareLink: 1, link: 3, investPolicy: 7, withdraw: 3, withdrawToken: 7, state: 12 } as const;
+
+/** Above this max_per_call, convert is no longer held to its tightest program bound, 1 SOL per call (convert.rs compares lamports with max(max_per_call, 1e9)). */
+export const CONVERT_TIGHTEST_MAX_PER_CALL = 1_000_000_000n;
 
 const GLOBAL = "global";
 const HEADERS = { "content-type": "application/json; charset=utf-8", "cache-control": "private, no-store" } as const;
@@ -381,7 +430,213 @@ async function linkWallet(fields: Readonly<Record<string, unknown>>, served: Ser
   return json(200, { ...built, costs: costs(chain.value.rents[0]!, 2, computeBudget) });
 }
 
-/** POST /api/solana-build: unsigned owner transactions (createVault, link) and the link consent (prepareLink). */
+// ── set_invest_policy ────────────────────────────────────────────────────────
+
+const INVEST_POLICY_FIELDS = ["action", "owner", "maxPerCall", "maxRolling30d", "enabled"] as const;
+
+interface LiveFloors {
+  readonly convertWad: bigint;
+  readonly convertFloor: bigint;
+  /** In OFFERED_LEGS' order. */
+  readonly legWads: readonly bigint[];
+  readonly legFloors: readonly bigint[];
+}
+
+/** Today's rates from PRICED_POOLS' accounts and the floors under them, or null when a pool is not what SIP pins. */
+function liveFloors(pools: readonly (AccountSnapshot | null)[], slot: number | null): LiveFloors | null {
+  try {
+    const prices = poolPricesFromAccounts(pools, slot);
+    const legWads = OFFERED_LEGS.map((leg) => prices.legWads[leg.mint]!);
+    return {
+      convertWad: prices.convertWad,
+      convertFloor: floorWad(prices.convertWad, CONVERT_FLOOR_MARGIN_BPS),
+      legWads,
+      legFloors: legWads.map((wad) => floorWad(wad, LEG_FLOOR_MARGIN_BPS)),
+    };
+  } catch (error) {
+    if (error instanceof PoolPriceError) return null;
+    throw error;
+  }
+}
+
+/**
+ * investPolicy: set_invest_policy for the offered basket, with floors read from
+ * the pinned pools at build time and every vault token account the vault lacks
+ * created ahead of it at the owner's expense. The request names only the caps
+ * and whether investing is on: legs, floors, venue and in-mint are SIP's.
+ */
+async function investPolicy(fields: Readonly<Record<string, unknown>>, served: Served): Promise<Response> {
+  const extra = unexpectedField(fields, INVEST_POLICY_FIELDS);
+  if (extra !== null) return served.refuse(400, "bad_request", extra);
+  const owner = fields.owner;
+  if (!isPubkey(owner)) return served.refuse(400, "bad_request", "owner must be a base58 32-byte public key.");
+  const maxPerCall = fields.maxPerCall === undefined ? DEFAULT_INVEST_CAPS.maxPerCall : decimalU64(fields.maxPerCall);
+  const maxRolling30d = fields.maxRolling30d === undefined ? DEFAULT_INVEST_CAPS.maxRolling30d : decimalU64(fields.maxRolling30d);
+  if (maxPerCall === null || maxRolling30d === null) return served.refuse(400, "bad_request", "maxPerCall and maxRolling30d are USDC raw units, written as decimal strings.");
+  const enabled = fields.enabled ?? true;
+  if (typeof enabled !== "boolean") return served.refuse(400, "bad_request", "enabled must be true or false.");
+
+  const weights = basketWeightsBps(OFFERED_LEGS.length);
+  const policyAt = (convertFloor: bigint, legFloors: readonly bigint[]): InvestPolicyInput => ({
+    legs: OFFERED_LEGS.map((leg, index) => ({ mint: leg.mint, weightBps: weights[index]!, minOutRateWad: legFloors[index]! })),
+    venueProgram: RAYDIUM_CLMM,
+    inMint: USDC_MINT,
+    minConvertRateWad: convertFloor,
+    minInvestment: defaultInvestPolicy(OFFERED_LEGS.length).minInvestment,
+    maxPerCall,
+    maxRolling30d,
+    enabled,
+  });
+  // The caps against the $5 minimum need no chain.
+  const capProblems = investPolicyProblems(policyAt(1n, OFFERED_LEGS.map(() => 1n)));
+  if (capProblems.length > 0) return served.refuse(400, "invalid_policy", "The program would refuse these limits.", { problems: capProblems });
+
+  const spent = served.spendReads(BUILD_READS_WEIGHT.investPolicy);
+  if (spent !== null) return spent;
+  const accounts = await readOwnerAccounts(served.pool, owner);
+  // A policy that could not be read might exist: its rent is not quoted over a guess.
+  if (accounts.vault.kind === "unreadable" || accounts.policy.kind === "unreadable") return unreadable(served);
+  if (accounts.vault.kind === "missing") return served.refuse(409, "vault_missing", "Create your vault first.");
+
+  const targets = vaultTokenAccountTargets(accounts.vaultAddress);
+  const mints = [{ mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM }, ...OFFERED_LEGS.map((leg) => ({ mint: leg.mint, tokenProgram: leg.tokenProgram }))];
+  const sizes = [...new Set([SIP_ACCOUNT_SPACE.InvestmentPolicy, ...targets.map((target) => target.bytes)])];
+  const batch = await readBuildBatch(served.pool, { addresses: [...PRICED_POOLS, ...mints.map((entry) => entry.mint), ...targets.map((target) => target.address)], sizes });
+  if (batch.kind !== "exists") return unreadable(served);
+  const chain = batch.value;
+  const rentFor = (size: number): bigint => chain.rents[sizes.indexOf(size)]!;
+
+  const floors = liveFloors(chain.accounts.slice(0, PRICED_POOLS.length), chain.slot);
+  if (floors === null) return served.refuse(502, "price_unavailable", "SIP could not read today's prices from Raydium, so no floor was set. Nothing was built.");
+  for (const [index, entry] of mints.entries()) {
+    if (chain.accounts[PRICED_POOLS.length + index]?.owner !== entry.tokenProgram) {
+      return served.refuse(409, "mint_unexpected", "A token this policy names is not held by the token program SIP expects. Nothing was built.", { mint: entry.mint });
+    }
+  }
+  const statuses = targets.map((target, index) => tokenAccountStatus(chain.accounts[PRICED_POOLS.length + mints.length + index], target.tokenProgram));
+  if (statuses.includes("unreadable")) return unreadable(served);
+
+  const policy = policyAt(floors.convertFloor, floors.legFloors);
+  const problems = investPolicyProblems(policy);
+  if (problems.length > 0) return served.refuse(400, "invalid_policy", "The program would refuse this policy.", { problems });
+  const missing = targets.filter((_, index) => statuses[index] === "missing");
+  const computeBudget = ownerComputeBudget("set_invest_policy");
+  let built;
+  try {
+    built = buildSetInvestPolicy({ owner, ...policy, ...chain.recent, computeBudget, vaultTokenAccounts: missing.map(({ mint, tokenProgram }) => ({ mint, tokenProgram })) });
+  } catch (error) {
+    if (error instanceof BuildError) return served.refuse(400, "invalid_policy", "The program would refuse this policy.", { problems: error.problems });
+    throw error;
+  }
+
+  const policyExists = accounts.policy.kind === "exists";
+  const policyRentLamports = policyExists ? 0n : rentFor(SIP_ACCOUNT_SPACE.InvestmentPolicy);
+  const tokenAccountRentLamports = missing.reduce((total, target) => total + rentFor(target.bytes), 0n);
+  return json(200, {
+    ...built,
+    policyExists,
+    floors: {
+      slot: chain.slot,
+      marginBps: { convert: CONVERT_FLOOR_MARGIN_BPS, leg: LEG_FLOOR_MARGIN_BPS },
+      liveConvertWad: floors.convertWad,
+      convertWad: floors.convertFloor,
+      usdcRawPerSol: usdcRawPerSol(floors.convertWad),
+      floorUsdcRawPerSol: usdcRawPerSol(floors.convertFloor),
+      legs: OFFERED_LEGS.map((leg, index) => ({
+        symbol: leg.symbol,
+        mint: leg.mint,
+        liveWad: floors.legWads[index]!,
+        wad: floors.legFloors[index]!,
+        usdcRawPer1e8: usdcRawPer1e8LegRaw(floors.legWads[index]!),
+        maxUsdcRawPer1e8: usdcRawPer1e8LegRaw(floors.legFloors[index]!),
+      })),
+    },
+    // Every account the policy needs, in the builder's order, and whether this transaction creates it.
+    vaultTokenAccounts: targets.map((target, index) => ({ mint: target.mint, address: target.address, tokenProgram: target.tokenProgram, create: statuses[index] === "missing" })),
+    costs: { ...costs(policyRentLamports + tokenAccountRentLamports, 1, computeBudget), policyRentLamports, tokenAccountRentLamports },
+    warnings: maxPerCall > CONVERT_TIGHTEST_MAX_PER_CALL ? ["convert_per_call_above_1_sol"] : [],
+  });
+}
+
+// ── withdraw and withdraw_token ──────────────────────────────────────────────
+
+const WITHDRAW_FIELDS = ["action", "owner", "lamports"] as const;
+
+/** withdraw: SOL out of the vault, at most what it holds above its rent floor. No pause gates it. */
+async function withdraw(fields: Readonly<Record<string, unknown>>, served: Served): Promise<Response> {
+  const extra = unexpectedField(fields, WITHDRAW_FIELDS);
+  if (extra !== null) return served.refuse(400, "bad_request", extra);
+  const owner = fields.owner;
+  if (!isPubkey(owner)) return served.refuse(400, "bad_request", "owner must be a base58 32-byte public key.");
+  const lamports = decimalU64(fields.lamports);
+  if (lamports === null) return served.refuse(400, "bad_request", "lamports is an amount of lamports, written as a decimal string.");
+  if (lamports === 0n) return served.refuse(400, "zero_amount", "The amount must be more than zero.");
+
+  const spent = served.spendReads(BUILD_READS_WEIGHT.withdraw);
+  if (spent !== null) return spent;
+  const vault = await readVault(served.pool, deriveVaultPda(owner).toBase58());
+  if (vault.kind === "unreadable") return unreadable(served);
+  if (vault.kind === "missing") return served.refuse(409, "vault_missing", "Create your vault first.");
+  const { withdrawableLamports } = vault.value;
+  if (lamports > withdrawableLamports) {
+    return served.refuse(422, "above_withdrawable", "That is more than the vault can release: it keeps its rent reserve.", { withdrawableLamports });
+  }
+
+  const batch = await readBuildBatch(served.pool, { addresses: [], sizes: [] });
+  if (batch.kind !== "exists") return upstreamUnavailable(served);
+  const computeBudget = ownerComputeBudget("withdraw");
+  const built = buildWithdraw({ owner, lamports, ...batch.value.recent, computeBudget });
+  return json(200, { ...built, withdrawableLamports, costs: costs(0n, 1, computeBudget) });
+}
+
+const WITHDRAW_TOKEN_FIELDS = ["action", "owner", "mint", "amountRaw"] as const;
+
+const largestFirst = (a: { readonly amountRaw: bigint }, b: { readonly amountRaw: bigint }): number => (a.amountRaw === b.amountRaw ? 0 : a.amountRaw > b.amountRaw ? -1 : 1);
+
+/**
+ * withdrawToken: tokens out of the vault to the owner's own account. The vault's
+ * source account and its token program come from the vault's holdings on chain,
+ * never from the request: the largest holding of that mint.
+ */
+async function withdrawToken(fields: Readonly<Record<string, unknown>>, served: Served): Promise<Response> {
+  const extra = unexpectedField(fields, WITHDRAW_TOKEN_FIELDS);
+  if (extra !== null) return served.refuse(400, "bad_request", extra);
+  const { owner, mint } = fields;
+  if (!isPubkey(owner) || !isPubkey(mint)) return served.refuse(400, "bad_request", "owner and mint must be base58 32-byte public keys.");
+  const amountRaw = decimalU64(fields.amountRaw);
+  if (amountRaw === null) return served.refuse(400, "bad_request", "amountRaw is an amount of the token's raw units, written as a decimal string.");
+  if (amountRaw === 0n) return served.refuse(400, "zero_amount", "The amount must be more than zero.");
+
+  const spent = served.spendReads(BUILD_READS_WEIGHT.withdrawToken);
+  if (spent !== null) return spent;
+  const vaultAddress = deriveVaultPda(owner).toBase58();
+  const [vault, holdings] = await Promise.all([readVault(served.pool, vaultAddress), listVaultHoldings(served.pool, vaultAddress)]);
+  if (vault.kind === "unreadable" || holdings.kind !== "exists") return unreadable(served);
+  if (vault.kind === "missing") return served.refuse(409, "vault_missing", "Create your vault first.");
+  const holding = holdings.value.filter((entry) => entry.mint === mint).sort(largestFirst)[0];
+  if (holding === undefined) return served.refuse(422, "not_held", "Your vault holds none of this token.");
+  if (amountRaw > holding.amountRaw) return served.refuse(422, "above_holding", "Your vault holds less of this token than that.", { heldRaw: holding.amountRaw });
+
+  const ownerTokenAccount = deriveAta(owner, mint, holding.tokenProgram).toBase58();
+  // What the owner's account takes if withdraw_token must create it: known for classic accounts and the offered legs.
+  const size = holding.tokenProgram === TOKEN_PROGRAM ? CLASSIC_TOKEN_ACCOUNT_BYTES : (OFFERED_LEGS.find((leg) => leg.mint === mint)?.tokenAccountBytes ?? null);
+  const batch = await readBuildBatch(served.pool, { addresses: [ownerTokenAccount], sizes: size === null ? [] : [size] });
+  if (batch.kind !== "exists") return upstreamUnavailable(served);
+  const ownerTokenAccountExists = tokenAccountStatus(batch.value.accounts[0], holding.tokenProgram) === "exists";
+  const computeBudget = ownerComputeBudget("withdraw_token");
+  const built = buildWithdrawToken({ owner, mint, tokenProgram: holding.tokenProgram, amountRaw, vaultToken: holding.tokenAccount, ...batch.value.recent, computeBudget });
+  // wSOL arrives as SOL: the program closes the owner's wSOL account in the same instruction, so its rent comes straight back.
+  const ownerTokenAccountRentLamports = ownerTokenAccountExists || mint === WSOL_MINT ? 0n : (batch.value.rents[0] ?? null);
+  return json(200, {
+    ...built,
+    heldRaw: holding.amountRaw,
+    ownerTokenAccountExists,
+    ownerTokenAccountRentLamports,
+    costs: costs(ownerTokenAccountRentLamports ?? 0n, 1, computeBudget),
+  });
+}
+
+/** POST /api/solana-build: unsigned owner transactions (createVault, link, investPolicy, withdraw, withdrawToken) and the link consent (prepareLink). */
 export function createSolanaBuildHandler(options: SolanaBuildHandlerOptions): SolanaRouteHandler {
   return createRoute("solana-build", options, async (action, fields, served) => {
     switch (action) {
@@ -391,8 +646,14 @@ export function createSolanaBuildHandler(options: SolanaBuildHandlerOptions): So
         return linkWallet(fields, served, false);
       case "link":
         return linkWallet(fields, served, true);
+      case "investPolicy":
+        return investPolicy(fields, served);
+      case "withdraw":
+        return withdraw(fields, served);
+      case "withdrawToken":
+        return withdrawToken(fields, served);
       default:
-        return served.refuse(400, "bad_request", "action must be createVault, prepareLink or link.");
+        return served.refuse(400, "bad_request", "action must be createVault, prepareLink, link, investPolicy, withdraw or withdrawToken.");
     }
   });
 }
@@ -408,8 +669,9 @@ function readView<T>(address: string, read: ChainRead<T>, view: (value: T) => Re
 /**
  * POST /api/solana-vault {"action":"state","owner","wallets":[…]}: the owner's
  * vault, policy and the protocol config, where each trading wallet saves, the
- * rents the forms quote, and the live pool prices. Every read keeps its own
- * outcome, and "unreadable" is never reported as "missing".
+ * vault's token holdings and whether its policy token accounts exist, the rents
+ * the forms quote, and the live pool prices. Every read keeps its own outcome,
+ * and "unreadable" is never reported as "missing".
  */
 export function createSolanaVaultHandler(options: SolanaVaultHandlerOptions): SolanaRouteHandler {
   return createRoute("solana-vault", options, async (action, fields, served) => {
@@ -425,11 +687,14 @@ export function createSolanaVaultHandler(options: SolanaVaultHandlerOptions): So
     const spent = served.spendReads(BUILD_READS_WEIGHT.state);
     if (spent !== null) return spent;
     const vaultAddress = deriveVaultPda(owner).toBase58();
-    const [accounts, links, prices, rents] = await Promise.all([
+    const rentSizes = [SIP_ACCOUNT_SPACE.Vault, SIP_ACCOUNT_SPACE.TradingLink, SIP_ACCOUNT_SPACE.InvestmentPolicy, CLASSIC_TOKEN_ACCOUNT_BYTES, ...OFFERED_LEGS.map((leg) => leg.tokenAccountBytes)];
+    const [accounts, links, prices, rents, holdings, tokenAccounts] = await Promise.all([
       readOwnerAccounts(served.pool, owner),
       readWalletLinks(served.pool, vaultAddress, wallets as string[]),
       readPoolPrices(served.pool),
-      readRents(served.pool, [SIP_ACCOUNT_SPACE.Vault, SIP_ACCOUNT_SPACE.TradingLink]),
+      readRents(served.pool, rentSizes),
+      listVaultHoldings(served.pool, vaultAddress),
+      readVaultTokenAccounts(served.pool, vaultAddress),
     ]);
 
     return json(200, {
@@ -449,7 +714,20 @@ export function createSolanaVaultHandler(options: SolanaVaultHandlerOptions): So
         paused: accounts.config.kind === "exists" ? accounts.config.value.state.paused : null,
       },
       walletLinks: links,
-      rents: rents.kind === "exists" ? { vault: rents.value[0], link: rents.value[1] } : null,
+      // Non-zero balances under both token programs; uiAmount is the RPC's display amount, amountRaw what moves.
+      holdings: holdings.kind === "exists" ? { status: "exists", items: holdings.value } : { status: "unreadable", items: [] },
+      // The accounts an investment policy needs (wSOL, USDC, each leg) and whether each exists.
+      vaultTokenAccounts: tokenAccounts.kind === "exists" ? { status: "exists", items: tokenAccounts.value } : { status: "unreadable", items: [] },
+      rents:
+        rents.kind === "exists"
+          ? {
+              vault: rents.value[0],
+              link: rents.value[1],
+              policy: rents.value[2],
+              tokenAccount: rents.value[3],
+              legTokenAccounts: Object.fromEntries(OFFERED_LEGS.map((leg, index) => [leg.mint, rents.value[4 + index]])),
+            }
+          : null,
       prices:
         prices.kind === "exists"
           ? {

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { SPYX_MINT, SPYX_USDC_POOL, TOKEN_2022_PROGRAM, USDC_MINT, RAYDIUM_CLMM } from "../src/client/addresses";
 import { OWNER_INSTRUCTIONS } from "../src/client/idl";
 import {
+  CLASSIC_TOKEN_ACCOUNT_BYTES,
   CONVERT_FLOOR_MARGIN_BPS,
   DEFAULT_INVEST_CAPS,
   DEFAULT_VAULT_POLICY,
@@ -13,6 +14,7 @@ import {
   OWNER_TX_COMPUTE,
   OWNER_TX_MICROLAMPORTS,
   VOLUME_MODE_OFFERED,
+  basketWeightsBps,
   ownerComputeBudget,
   priorityFeeLamports,
 } from "../src/client/product";
@@ -62,8 +64,20 @@ describe("the first investment policy", () => {
   });
 
   it("offers SPYx on Token-2022 at 8 decimals, priced from the keeper's pool, with 10 % and 5 % margins", () => {
-    expect(OFFERED_LEGS).toEqual([{ symbol: "SPYx", name: "SP500 xStock", mint: SPYX_MINT, pool: SPYX_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 8 }]);
+    expect(OFFERED_LEGS).toEqual([{ symbol: "SPYx", name: "SP500 xStock", mint: SPYX_MINT, pool: SPYX_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 8, tokenAccountBytes: 179 }]);
     expect([CONVERT_FLOOR_MARGIN_BPS, LEG_FLOOR_MARGIN_BPS]).toEqual([1_000, 500]);
+  });
+
+  it("sizes the vault's token accounts: 165 bytes classic, and 179 for SPYx (account type, ImmutableOwner, PausableAccount, TransferHookAccount)", () => {
+    expect(CLASSIC_TOKEN_ACCOUNT_BYTES).toBe(165);
+    expect(OFFERED_LEGS[0]!.tokenAccountBytes).toBe(165 + 1 + 4 + 4 + 5);
+  });
+
+  it("weighs a basket's legs to exactly 10,000 bps, the remainder on the first leg", () => {
+    expect(basketWeightsBps(1)).toEqual([10_000]);
+    expect(basketWeightsBps(3)).toEqual([3_334, 3_333, 3_333]);
+    for (let count = 1; count <= 8; count++) expect(basketWeightsBps(count).reduce((total, weight) => total + weight, 0)).toBe(10_000);
+    expect(() => basketWeightsBps(0)).toThrow(RangeError);
   });
 });
 

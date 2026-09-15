@@ -48,6 +48,9 @@ export const CONVERT_FLOOR_MARGIN_BPS = 1_000;
 /** A leg's floor sits this far under the live pool rate: 5 %, so at most about 5.3 % over today's price is paid. */
 export const LEG_FLOOR_MARGIN_BPS = 500;
 
+/** A classic SPL Token account (the vault's wSOL and USDC accounts): 165 bytes. Its rent is read from the chain, never derived. */
+export const CLASSIC_TOKEN_ACCOUNT_BYTES = 165;
+
 export interface OfferedLeg {
   readonly symbol: string;
   readonly name: string;
@@ -56,12 +59,25 @@ export interface OfferedLeg {
   readonly pool: string;
   readonly tokenProgram: string;
   readonly decimals: number;
+  /** What the Associated Token Account program allocates for this mint, extensions included: the size its rent is read for. */
+  readonly tokenAccountBytes: number;
 }
 
-/** The stocks a policy can buy from the web. One for now. */
+/**
+ * The stocks a policy can buy from the web. One for now. SPYx's token account is
+ * 179 bytes: 165, the account type (1), ImmutableOwner (4), PausableAccount (4)
+ * and TransferHookAccount (5), which its mint's extensions require.
+ */
 export const OFFERED_LEGS: readonly OfferedLeg[] = Object.freeze([
-  Object.freeze({ symbol: "SPYx", name: "SP500 xStock", mint: SPYX_MINT, pool: SPYX_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 8 }),
+  Object.freeze({ symbol: "SPYx", name: "SP500 xStock", mint: SPYX_MINT, pool: SPYX_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 8, tokenAccountBytes: 179 }),
 ]);
+
+/** Each of `count` legs' weight, summing to exactly 10,000 bps: equal shares, any remainder on the first leg. */
+export function basketWeightsBps(count: number): number[] {
+  if (!Number.isInteger(count) || count < 1) throw new RangeError("a basket has at least one leg");
+  const share = Math.floor(10_000 / count);
+  return Array.from({ length: count }, (_, index) => (index === 0 ? share + (10_000 - share * count) : share));
+}
 
 export interface ComputeBudget {
   /** SetComputeUnitLimit. */

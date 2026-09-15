@@ -2,17 +2,30 @@
 
 import { describe, expect, it } from "vitest";
 
-import { COMPUTE_BUDGET_PROGRAM, ED25519_PROGRAM, RAYDIUM_CLMM, SOL_USDC_POOL, SPYX_MINT, SPYX_USDC_POOL, USDC_MINT, WSOL_MINT } from "../src/client/addresses";
+import {
+  ATA_PROGRAM,
+  COMPUTE_BUDGET_PROGRAM,
+  ED25519_PROGRAM,
+  RAYDIUM_CLMM,
+  SOL_USDC_POOL,
+  SPYX_MINT,
+  SPYX_USDC_POOL,
+  SYSTEM_PROGRAM,
+  TOKEN_2022_PROGRAM,
+  TOKEN_PROGRAM,
+  USDC_MINT,
+  WSOL_MINT,
+} from "../src/client/addresses";
 import { base64Encode } from "../src/client/base64";
 import { decodeArgs } from "../src/client/borsh";
 import { SIP_ACCOUNT_SPACE } from "../src/client/decoders";
 import { SIP_PROGRAM_ID, toHex } from "../src/client/idl";
 import { linkConsentMessage } from "../src/client/link-consent";
 import { parseLegacyMessage, splitWire } from "../src/client/message";
-import { BUILD_REQUEST_WEIGHT, MAX_BUILD_REQUEST_BYTES, createSolanaBuildHandler, createSolanaVaultHandler, type SolanaBuildHandlerOptions } from "../src/server/build-handler";
+import { BUILD_READS_WEIGHT, BUILD_REQUEST_WEIGHT, MAX_BUILD_REQUEST_BYTES, createSolanaBuildHandler, createSolanaVaultHandler, type SolanaBuildHandlerOptions } from "../src/server/build-handler";
 import { DEFAULT_RELAY_LIMITS, loadSolanaServerSettings } from "../src/server/config";
 import type { SolanaGate } from "../src/server/handlers";
-import { deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
+import { deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
 import { createWeightedLimiter } from "../src/server/rate-limit";
 import { verifySignedTransaction } from "../src/server/verify-tx";
 import {
@@ -24,6 +37,9 @@ import {
   linkAccount,
   localRent,
   methodsOf,
+  mintAccount,
+  policyAccount,
+  tokenAccountInfo,
   vaultAccount,
   type StubChain,
 } from "./chain-fixtures";
@@ -109,6 +125,12 @@ describe("the order of refusals, before any chain read", () => {
     ["a link without its signature", { action: "link", owner: key(), wallet: key() }],
     ["a consent signature that is not 64 bytes", { action: "link", owner: key(), wallet: key(), consentSignature: base64Encode(new Uint8Array(63)) }],
     ["a prepareLink with a signature", { action: "prepareLink", owner: key(), wallet: key(), consentSignature: base64Encode(new Uint8Array(64)) }],
+    ["an investment policy naming its own legs", { action: "investPolicy", owner: key(), legs: [] }],
+    ["an investment policy's cap as a number", { action: "investPolicy", owner: key(), maxPerCall: 10_000_000 }],
+    ["an investment policy's enabled as text", { action: "investPolicy", owner: key(), enabled: "yes" }],
+    ["a withdrawal in lamports as a number", { action: "withdraw", owner: key(), lamports: 5 }],
+    ["a token withdrawal naming its source account", { action: "withdrawToken", owner: key(), mint: SPYX_MINT, amountRaw: "1", vaultToken: key() }],
+    ["a token withdrawal whose mint is not a key", { action: "withdrawToken", owner: key(), mint: "SPYx", amountRaw: "1" }],
     ["an array body", [1]],
   ])("%s is 400 bad_request with no chain read", async (_, body) => {
     const { build, upstream } = setup();
@@ -338,6 +360,254 @@ describe("prepareLink and link", () => {
   });
 });
 
+/** A chain where `owner` has a vault, the pinned pools price SOL and SPYx at the goldens, and USDC and SPYx are their token programs' mints. */
+function investableChain(owner: string): StubChain {
+  return {
+    accounts: new Map([
+      [deriveVaultPda(owner).toBase58(), sipOwned(vaultAccount(owner), localRent(125))],
+      [SOL_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(WSOL_MINT, USDC_MINT, SOL_SQRT_PRICE))],
+      [SPYX_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(SPYX_MINT, USDC_MINT, SPYX_SQRT_PRICE, [8, 6]))],
+      [USDC_MINT, mintAccount(TOKEN_PROGRAM)],
+      [SPYX_MINT, mintAccount(TOKEN_2022_PROGRAM)],
+    ]),
+  };
+}
+
+const instructionsOf = (txBase64: string) => parseLegacyMessage(splitWire(fromB64(txBase64)).message).instructions;
+
+describe("investPolicy", () => {
+  it("a first policy: [CU limit, CU price, ATA wSOL, ATA USDC, ATA SPYx, set_invest_policy] at 90 % and 95 % of the pools, the default caps and every rent; it verifies once the owner signs", async () => {
+    const owner = keypair();
+    const ownerKey = owner.publicKey.toBase58();
+    const vault = deriveVaultPda(ownerKey).toBase58();
+    const { build, upstream } = setup(investableChain(ownerKey));
+    const answer = await build({ action: "investPolicy", owner: ownerKey });
+    expect(answer.status).toBe(200);
+    const body = answer.json;
+    expect(programsOf(body.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, SIP_PROGRAM_ID]);
+    expect(decodeArgs("set_invest_policy", instructionsOf(body.txBase64)[5]!.data)).toEqual({
+      legs: [{ mint: SPYX_MINT, weight_bps: 10_000, min_out_rate_wad: 124_719_467_624_105_690n }],
+      venue_program: RAYDIUM_CLMM,
+      in_mint: USDC_MINT,
+      min_convert_rate_wad: 90_034_840_399_943_305n,
+      min_investment: 5_000_000n,
+      max_per_call: 1_000_000_000n,
+      max_rolling_30d: 31_000_000_000n,
+      enabled: true,
+    });
+    expect(body.policy).toBe(deriveInvestPda(vault).toBase58());
+    expect(body.policyExists).toBe(false);
+    expect(body.vaultTokenAccounts).toEqual([
+      { mint: WSOL_MINT, address: deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58(), tokenProgram: TOKEN_PROGRAM, create: true },
+      { mint: USDC_MINT, address: deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58(), tokenProgram: TOKEN_PROGRAM, create: true },
+      { mint: SPYX_MINT, address: deriveAta(vault, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenProgram: TOKEN_2022_PROGRAM, create: true },
+    ]);
+    expect(body.floors).toEqual({
+      slot: 321,
+      marginBps: { convert: 1_000, leg: 500 },
+      liveConvertWad: "100038711555492562",
+      convertWad: "90034840399943305",
+      usdcRawPerSol: "100038711",
+      floorUsdcRawPerSol: "90034840",
+      legs: [{ symbol: "SPYx", mint: SPYX_MINT, liveWad: "131283650130637569", wad: "124719467624105690", usdcRawPer1e8: "761709474", maxUsdcRawPer1e8: "801799446" }],
+    });
+    expect(body.costs).toEqual({
+      rentLamports: String(localRent(970) + 2 * localRent(165) + localRent(179)),
+      signatureFeeLamports: "5000",
+      priorityFeeLamports: "30000",
+      policyRentLamports: String(localRent(970)),
+      tokenAccountRentLamports: String(2 * localRent(165) + localRent(179)),
+    });
+    expect(body.warnings).toEqual([]);
+    const verified = verifySignedTransaction(signWire(body.txBase64, owner));
+    expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
+    const methods = methodsOf(upstream.calls);
+    expect(methods.filter((method) => method === "getLatestBlockhash")).toHaveLength(1);
+    expect(methods).toHaveLength(BUILD_READS_WEIGHT.investPolicy);
+  });
+
+  it("creates only what the vault lacks: an existing USDC account is left alone, a wSOL address holding only lamports is still created, and an existing policy costs no policy rent", async () => {
+    const owner = keypair();
+    const ownerKey = owner.publicKey.toBase58();
+    const vault = deriveVaultPda(ownerKey).toBase58();
+    const chain = investableChain(ownerKey);
+    chain.accounts.set(deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58(), tokenAccountInfo(TOKEN_PROGRAM));
+    chain.accounts.set(deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58(), accountInfo(SYSTEM_PROGRAM, new Uint8Array(0), 5_000));
+    chain.accounts.set(deriveInvestPda(vault).toBase58(), sipOwned(policyAccount(vault), localRent(970)));
+    const { build } = setup(chain);
+    const answer = await build({ action: "investPolicy", owner: ownerKey, maxPerCall: "10000000", maxRolling30d: "50000000" });
+    expect(answer.status).toBe(200);
+    expect(programsOf(answer.json.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, SIP_PROGRAM_ID]);
+    const instructions = instructionsOf(answer.json.txBase64);
+    expect([instructions[2]!.accountKeys[3], instructions[3]!.accountKeys[3]]).toEqual([WSOL_MINT, SPYX_MINT]);
+    expect(answer.json.vaultTokenAccounts.map((entry: { mint: string; create: boolean }) => [entry.mint, entry.create])).toEqual([
+      [WSOL_MINT, true],
+      [USDC_MINT, false],
+      [SPYX_MINT, true],
+    ]);
+    expect(answer.json.policyExists).toBe(true);
+    expect(answer.json.costs).toMatchObject({
+      rentLamports: String(localRent(165) + localRent(179)),
+      policyRentLamports: "0",
+      tokenAccountRentLamports: String(localRent(165) + localRent(179)),
+    });
+    expect(decodeArgs("set_invest_policy", instructions[4]!.data)).toMatchObject({ max_per_call: 10_000_000n, max_rolling_30d: 50_000_000n, enabled: true });
+    const verified = verifySignedTransaction(signWire(answer.json.txBase64, owner));
+    expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
+  });
+
+  it("with every account in place: [CU limit, CU price, set_invest_policy] alone, enabled false when asked; past 1,000 USDC a call it warns that convert is no longer held to 1 SOL", async () => {
+    const owner = key();
+    const vault = deriveVaultPda(owner).toBase58();
+    const chain = investableChain(owner);
+    chain.accounts.set(deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58(), tokenAccountInfo(TOKEN_PROGRAM));
+    chain.accounts.set(deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58(), tokenAccountInfo(TOKEN_PROGRAM));
+    chain.accounts.set(deriveAta(vault, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenAccountInfo(TOKEN_2022_PROGRAM, 179));
+    const { build } = setup(chain);
+    const paused = await build({ action: "investPolicy", owner, enabled: false });
+    expect(programsOf(paused.json.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, SIP_PROGRAM_ID]);
+    expect(decodeArgs("set_invest_policy", instructionsOf(paused.json.txBase64)[2]!.data)).toMatchObject({ enabled: false });
+    expect([paused.json.warnings, paused.json.costs.rentLamports]).toEqual([[], String(localRent(970))]);
+    const wide = await build({ action: "investPolicy", owner, maxPerCall: "1000000001", maxRolling30d: "31000000031" });
+    expect(wide.status).toBe(200);
+    expect(wide.json.warnings).toEqual(["convert_per_call_above_1_sol"]);
+  });
+
+  it.each<[string, (chain: StubChain) => void]>([
+    ["the SOL/USDC pool missing", (chain) => void chain.accounts.delete(SOL_USDC_POOL)],
+    ["the SPYx pool with its mints swapped", (chain) => void chain.accounts.set(SPYX_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(USDC_MINT, SPYX_MINT, SPYX_SQRT_PRICE)))],
+    ["the SOL/USDC pool owned by another program", (chain) => void chain.accounts.set(SOL_USDC_POOL, accountInfo(key(), clmmPoolAccount(WSOL_MINT, USDC_MINT, SOL_SQRT_PRICE)))],
+  ])("%s is 502 price_unavailable, and nothing is built", async (_, spoil) => {
+    const owner = key();
+    const chain = investableChain(owner);
+    spoil(chain);
+    const answer = await setup(chain).build({ action: "investPolicy", owner });
+    expect([answer.status, answer.json.error?.code]).toEqual([502, "price_unavailable"]);
+    expect(answer.json).not.toHaveProperty("txBase64");
+  });
+
+  it("a SPYx mint held by classic Token, or a USDC mint that does not exist, is 409 mint_unexpected naming it", async () => {
+    const owner = key();
+    const classic = investableChain(owner);
+    classic.accounts.set(SPYX_MINT, mintAccount(TOKEN_PROGRAM));
+    const wrong = await setup(classic).build({ action: "investPolicy", owner });
+    expect([wrong.status, wrong.json.error?.code, (wrong.json.error as { mint?: string } | undefined)?.mint]).toEqual([409, "mint_unexpected", SPYX_MINT]);
+    const absent = investableChain(owner);
+    absent.accounts.delete(USDC_MINT);
+    const missing = await setup(absent).build({ action: "investPolicy", owner });
+    expect([missing.json.error?.code, (missing.json.error as { mint?: string } | undefined)?.mint]).toEqual(["mint_unexpected", USDC_MINT]);
+  });
+
+  it("no vault is 409 vault_missing, with no blockhash read; an unreadable chain is 502 unreadable and never quotes the endpoint", async () => {
+    const { build, upstream } = setup();
+    const answer = await build({ action: "investPolicy", owner: key() });
+    expect([answer.status, answer.json.error?.code]).toEqual([409, "vault_missing"]);
+    expect(methodsOf(upstream.calls)).not.toContain("getLatestBlockhash");
+    const down = await setup({ accounts: new Map(), down: true }).build({ action: "investPolicy", owner: key() });
+    expect([down.status, down.json.error?.code]).toEqual([502, "unreadable"]);
+    expect(down.text).not.toContain(SECRET_QUERY);
+  });
+
+  it("caps the program would refuse are 400 invalid_policy before any read", async () => {
+    const { build, upstream } = setup();
+    for (const caps of [{ maxRolling30d: "999999999" }, { maxPerCall: "4999999", maxRolling30d: "4999999" }]) {
+      const answer = await build({ action: "investPolicy", owner: key(), ...caps });
+      expect([answer.status, answer.json.error?.code]).toEqual([400, "invalid_policy"]);
+      expect(answer.json.error?.problems?.join(" ")).toMatch(/minInvestment <= maxPerCall <= maxRolling30d/);
+    }
+    expect(upstream.calls).toHaveLength(0);
+  });
+});
+
+describe("withdraw", () => {
+  it("builds [CU limit, CU price, withdraw] for exactly what the vault can release, with one blockhash; it verifies once the owner signs", async () => {
+    const owner = keypair();
+    const ownerKey = owner.publicKey.toBase58();
+    const vault = deriveVaultPda(ownerKey).toBase58();
+    const { build, upstream } = setup({ accounts: new Map([[vault, sipOwned(vaultAccount(ownerKey), 200_000_000 + localRent(125))]]) });
+    const answer = await build({ action: "withdraw", owner: ownerKey, lamports: "200000000" });
+    expect(answer.status).toBe(200);
+    expect(programsOf(answer.json.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, SIP_PROGRAM_ID]);
+    expect(decodeArgs("withdraw", instructionsOf(answer.json.txBase64)[2]!.data)).toEqual({ amount: 200_000_000n });
+    expect(answer.json.accounts).toEqual({ owner: ownerKey, vault });
+    expect(answer.json.withdrawableLamports).toBe("200000000");
+    expect(answer.json.costs).toEqual({ rentLamports: "0", signatureFeeLamports: "5000", priorityFeeLamports: "4000" });
+    expect(methodsOf(upstream.calls)).toHaveLength(BUILD_READS_WEIGHT.withdraw);
+    const verified = verifySignedTransaction(signWire(answer.json.txBase64, owner));
+    expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
+  });
+
+  it("one lamport more than the vault can release is 422 above_withdrawable, saying how much it can, with no blockhash read", async () => {
+    const owner = key();
+    const vault = deriveVaultPda(owner).toBase58();
+    const { build, upstream } = setup({ accounts: new Map([[vault, sipOwned(vaultAccount(owner), 200_000_000 + localRent(125))]]) });
+    const answer = await build({ action: "withdraw", owner, lamports: "200000001" });
+    expect([answer.status, answer.json.error?.code, (answer.json.error as { withdrawableLamports?: string } | undefined)?.withdrawableLamports]).toEqual([422, "above_withdrawable", "200000000"]);
+    expect(methodsOf(upstream.calls)).not.toContain("getLatestBlockhash");
+  });
+
+  it("zero is 400 zero_amount before any read; no vault is 409 vault_missing", async () => {
+    const { build, upstream } = setup();
+    expect((await build({ action: "withdraw", owner: key(), lamports: "0" })).json.error?.code).toBe("zero_amount");
+    expect(upstream.calls).toHaveLength(0);
+    expect((await build({ action: "withdraw", owner: key(), lamports: "1" })).json.error?.code).toBe("vault_missing");
+  });
+});
+
+describe("withdrawToken", () => {
+  const spyxHolding = (pubkey: string, amount: string) => ({ pubkey, mint: SPYX_MINT, amount, decimals: 8, uiAmountString: "0.1241643", tokenProgram: TOKEN_2022_PROGRAM });
+
+  it("takes the source account and the token program from the vault's holdings, the largest of that mint, never the request, and quotes the rent of the owner's new account", async () => {
+    const owner = keypair();
+    const ownerKey = owner.publicKey.toBase58();
+    const vault = deriveVaultPda(ownerKey).toBase58();
+    const holding = key();
+    const chain: StubChain = {
+      accounts: new Map([[vault, sipOwned(vaultAccount(ownerKey), localRent(125))]]),
+      tokenAccounts: new Map([[vault, [spyxHolding(key(), "1000"), spyxHolding(holding, "12345678")]]]),
+    };
+    const { build, upstream } = setup(chain);
+    const answer = await build({ action: "withdrawToken", owner: ownerKey, mint: SPYX_MINT, amountRaw: "12345678" });
+    expect(answer.status).toBe(200);
+    expect(programsOf(answer.json.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, SIP_PROGRAM_ID]);
+    expect(decodeArgs("withdraw_token", instructionsOf(answer.json.txBase64)[2]!.data)).toEqual({ amount: 12_345_678n });
+    const ownerToken = deriveAta(ownerKey, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58();
+    expect(answer.json.accounts).toMatchObject({ owner: ownerKey, vault, token_mint: SPYX_MINT, vault_token: holding, owner_token: ownerToken, token_program: TOKEN_2022_PROGRAM });
+    expect([answer.json.vaultTokenAccount, answer.json.ownerTokenAccount, answer.json.heldRaw]).toEqual([holding, ownerToken, "12345678"]);
+    expect([answer.json.ownerTokenAccountExists, answer.json.ownerTokenAccountRentLamports]).toEqual([false, String(localRent(179))]);
+    expect(answer.json.costs).toEqual({ rentLamports: String(localRent(179)), signatureFeeLamports: "5000", priorityFeeLamports: "20000" });
+    expect(methodsOf(upstream.calls)).toHaveLength(BUILD_READS_WEIGHT.withdrawToken);
+    const verified = verifySignedTransaction(signWire(answer.json.txBase64, owner));
+    expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
+  });
+
+  it("wSOL comes out as SOL, so no rent is quoted; nor for an owner's account that already exists", async () => {
+    const owner = key();
+    const vault = deriveVaultPda(owner).toBase58();
+    const wsol = { pubkey: deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58(), mint: WSOL_MINT, amount: "100000000", decimals: 9, uiAmountString: "0.1", tokenProgram: TOKEN_PROGRAM };
+    const chain: StubChain = { accounts: new Map([[vault, sipOwned(vaultAccount(owner), localRent(125))]]), tokenAccounts: new Map([[vault, [wsol, spyxHolding(key(), "5")]]]) };
+    const { build } = setup(chain);
+    const unwrapped = await build({ action: "withdrawToken", owner, mint: WSOL_MINT, amountRaw: "100000000" });
+    expect([unwrapped.status, unwrapped.json.ownerTokenAccountRentLamports, unwrapped.json.costs.rentLamports]).toEqual([200, "0", "0"]);
+    chain.accounts.set(deriveAta(owner, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenAccountInfo(TOKEN_2022_PROGRAM, 179));
+    const held = await build({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: "5" });
+    expect([held.json.ownerTokenAccountExists, held.json.ownerTokenAccountRentLamports]).toEqual([true, "0"]);
+  });
+
+  it("a mint the vault does not hold is 422 not_held; more than it holds is 422 above_holding with what it holds; zero is 400 zero_amount before any read", async () => {
+    const owner = key();
+    const vault = deriveVaultPda(owner).toBase58();
+    const chain: StubChain = { accounts: new Map([[vault, sipOwned(vaultAccount(owner), localRent(125))]]), tokenAccounts: new Map([[vault, [spyxHolding(key(), "12345678")]]]) };
+    const { build, upstream } = setup(chain);
+    expect((await build({ action: "withdrawToken", owner, mint: USDC_MINT, amountRaw: "1" })).json.error?.code).toBe("not_held");
+    const above = await build({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: "12345679" });
+    expect([above.status, above.json.error?.code, (above.json.error as { heldRaw?: string } | undefined)?.heldRaw]).toEqual([422, "above_holding", "12345678"]);
+    const calls = upstream.calls.length;
+    expect((await build({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: "0" })).json.error?.code).toBe("zero_amount");
+    expect(upstream.calls).toHaveLength(calls);
+  });
+});
+
 describe("state", () => {
   it("answers every read with its own outcome, bigints as strings, links per wallet, rents and the live prices", async () => {
     const owner = key();
@@ -350,7 +620,10 @@ describe("state", () => {
     chain.accounts.set(deriveLinkPda(forged).toBase58(), accountInfo(key(), linkAccount(forged, vault)));
     chain.accounts.set(SOL_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(WSOL_MINT, USDC_MINT, SOL_SQRT_PRICE)));
     chain.accounts.set(SPYX_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(SPYX_MINT, USDC_MINT, SPYX_SQRT_PRICE, [8, 6])));
-    const { state } = setup(chain);
+    const usdcAccount = deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58();
+    chain.accounts.set(usdcAccount, tokenAccountInfo(TOKEN_PROGRAM));
+    const holdings = [{ pubkey: usdcAccount, mint: USDC_MINT, amount: "9007199254740993", decimals: 6, uiAmountString: "9007199254.740993", tokenProgram: TOKEN_PROGRAM }];
+    const { state } = setup({ ...chain, tokenAccounts: new Map([[vault, holdings]]) });
     const answer = await state({ action: "state", owner, wallets: [mine, theirs, fresh, forged] });
     expect(answer.status).toBe(200);
     const body = answer.json;
@@ -368,7 +641,26 @@ describe("state", () => {
       [forged, "unreadable"],
     ]);
     expect(body.walletLinks[0].link).toBe(deriveLinkPda(mine).toBase58());
-    expect(body.rents).toEqual({ vault: String(localRent(125)), link: String(localRent(129)) });
+    expect(body.rents).toEqual({
+      vault: String(localRent(125)),
+      link: String(localRent(129)),
+      policy: String(localRent(970)),
+      tokenAccount: String(localRent(165)),
+      legTokenAccounts: { [SPYX_MINT]: String(localRent(179)) },
+    });
+    // Past 2^53, as the RPC wrote it: a number would have lost the last digit.
+    expect(body.holdings).toEqual({
+      status: "exists",
+      items: [{ tokenAccount: usdcAccount, mint: USDC_MINT, amountRaw: "9007199254740993", decimals: 6, uiAmount: "9007199254.740993", tokenProgram: TOKEN_PROGRAM }],
+    });
+    expect(body.vaultTokenAccounts).toEqual({
+      status: "exists",
+      items: [
+        { mint: WSOL_MINT, address: deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58(), tokenProgram: TOKEN_PROGRAM, status: "missing" },
+        { mint: USDC_MINT, address: usdcAccount, tokenProgram: TOKEN_PROGRAM, status: "exists" },
+        { mint: SPYX_MINT, address: deriveAta(vault, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenProgram: TOKEN_2022_PROGRAM, status: "missing" },
+      ],
+    });
     expect(body.prices).toEqual({
       slot: 321,
       convertWad: "100038711555492562",
@@ -388,6 +680,10 @@ describe("state", () => {
     expect(answer.json.config).toMatchObject({ status: "unreadable", exists: false, paused: null });
     expect(answer.json.walletLinks).toEqual([{ wallet, link: deriveLinkPda(wallet).toBase58(), status: "unreadable", vault: null }]);
     expect([answer.json.rents, answer.json.prices]).toEqual([null, null]);
+    expect([answer.json.holdings, answer.json.vaultTokenAccounts]).toEqual([
+      { status: "unreadable", items: [] },
+      { status: "unreadable", items: [] },
+    ]);
     expect(answer.text).not.toContain(SECRET_QUERY);
     expect(answer.text).not.toContain("upstream.invalid");
   });

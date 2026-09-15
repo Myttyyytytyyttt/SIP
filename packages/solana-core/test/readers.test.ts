@@ -2,28 +2,32 @@
 
 import { describe, expect, it } from "vitest";
 
-import { RAYDIUM_CLMM, SOL_USDC_POOL, SPYX_MINT, SPYX_USDC_POOL, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../src/client/addresses";
+import { RAYDIUM_CLMM, SOL_USDC_POOL, SPYX_MINT, SPYX_USDC_POOL, SYSTEM_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../src/client/addresses";
 import { SOL_SQRT_PRICE, SPYX_SQRT_PRICE, clmmPoolAccount } from "./chain-fixtures";
 import { base58Encode } from "../src/client/base58";
 import { base64Encode } from "../src/client/base64";
 import { encodeStruct } from "../src/client/borsh";
 import { SIP_ACCOUNT_SPACE } from "../src/client/decoders";
 import { SIP_PROGRAM_ID, accountDiscriminator, eventDiscriminator, instructionDiscriminator } from "../src/client/idl";
-import { deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
+import { deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
 import {
   MAX_WALLET_LINKS,
   listVaultActivity,
   listVaultHoldings,
   listVaultLinks,
+  readBuildBatch,
   readOwnerAccounts,
   readPoolPrices,
   readProtocolConfig,
   readVault,
+  readVaultTokenAccounts,
   readWalletLinks,
   settledEventsFromLogs,
+  tokenAccountStatus,
+  vaultTokenAccountTargets,
 } from "../src/server/readers";
 import { createRpcPool } from "../src/server/rpc-pool";
-import { SECRET_QUERY, UPSTREAM_1, accountInfo, fakeFetch, jsonResponse, keypair, rpcResult, type UpstreamCall } from "./helpers";
+import { BLOCKHASH, SECRET_QUERY, UPSTREAM_1, accountInfo, fakeFetch, jsonResponse, keypair, rpcResult, type UpstreamCall } from "./helpers";
 
 const key = (): string => keypair().publicKey.toBase58();
 
@@ -299,6 +303,99 @@ describe("readPoolPrices", () => {
     const read = await readPoolPrices(p);
     expect(read.kind).toBe("unreadable");
     expect(JSON.stringify(read)).not.toContain(SECRET_QUERY);
+  });
+});
+
+describe("readBuildBatch", () => {
+  it("asks the blockhash, the accounts and the rents in ONE batch, in order, and answers null for an account the chain lacks", async () => {
+    const [present, absent] = [key(), key()];
+    const { pool: p, upstream } = pool((call) => {
+      expect(batchOf(call).map((entry) => entry.method)).toEqual(["getLatestBlockhash", "getMultipleAccounts", "getMinimumBalanceForRentExemption", "getMinimumBalanceForRentExemption"]);
+      expect(batchOf(call)[1]!.params[0]).toEqual([present, absent]);
+      return jsonResponse([
+        { jsonrpc: "2.0", id: 1, result: { context: { slot: 54 }, value: { blockhash: BLOCKHASH, lastValidBlockHeight: 77 } } },
+        { jsonrpc: "2.0", id: 2, result: { context: { slot: 55 }, value: [accountInfo(TOKEN_PROGRAM, new Uint8Array(165), 9), null] } },
+        { jsonrpc: "2.0", id: 3, result: 111 },
+        { jsonrpc: "2.0", id: 4, result: 222 },
+      ]);
+    });
+    const read = await readBuildBatch(p, { addresses: [present, absent], sizes: [165, 970] });
+    expect(upstream.calls).toHaveLength(1);
+    if (read.kind !== "exists") throw new Error(read.kind);
+    expect(read.value.recent).toEqual({ blockhash: BLOCKHASH, lastValidBlockHeight: 77 });
+    expect(read.value.rents).toEqual([111n, 222n]);
+    expect(read.value.slot).toBe(55);
+    expect(read.value.accounts[0]).toMatchObject({ owner: TOKEN_PROGRAM, lamports: 9n });
+    expect(read.value.accounts[0]!.data).toHaveLength(165);
+    expect(read.value.accounts[1]).toBeNull();
+  });
+
+  it("a blockhash alone is one member; a member that fails, accounts short of what was asked, or a bad blockhash is unreadable, and never quotes the endpoint", async () => {
+    const alone = pool((call) => {
+      expect(batchOf(call).map((entry) => entry.method)).toEqual(["getLatestBlockhash"]);
+      return jsonResponse([{ jsonrpc: "2.0", id: 1, result: { value: { blockhash: BLOCKHASH, lastValidBlockHeight: 1 } } }]);
+    });
+    expect((await readBuildBatch(alone.pool, { addresses: [], sizes: [] })).kind).toBe("exists");
+
+    const short = pool(() =>
+      jsonResponse([
+        { jsonrpc: "2.0", id: 1, result: { value: { blockhash: BLOCKHASH, lastValidBlockHeight: 1 } } },
+        { jsonrpc: "2.0", id: 2, result: { value: [null] } },
+      ]),
+    );
+    expect((await readBuildBatch(short.pool, { addresses: [key(), key()], sizes: [] })).kind).toBe("unreadable");
+
+    const failedRent = pool(() =>
+      jsonResponse([
+        { jsonrpc: "2.0", id: 1, result: { value: { blockhash: BLOCKHASH, lastValidBlockHeight: 1 } } },
+        { jsonrpc: "2.0", id: 3, error: { code: -32000, message: `boom ${UPSTREAM_1}` } },
+      ]),
+    );
+    const failed = await readBuildBatch(failedRent.pool, { addresses: [], sizes: [165] });
+    expect(failed.kind).toBe("unreadable");
+    expect(JSON.stringify(failed)).not.toContain(SECRET_QUERY);
+
+    const badHash = pool(() => jsonResponse([{ jsonrpc: "2.0", id: 1, result: { value: { blockhash: "nope", lastValidBlockHeight: 1 } } }]));
+    expect((await readBuildBatch(badHash.pool, { addresses: [], sizes: [] })).kind).toBe("unreadable");
+  });
+});
+
+describe("the vault's token accounts", () => {
+  it("wSOL and USDC under SPL Token at 165 bytes, then SPYx under Token-2022 at 179, each at the vault's associated address", () => {
+    const vault = key();
+    expect(vaultTokenAccountTargets(vault)).toEqual([
+      { mint: WSOL_MINT, tokenProgram: TOKEN_PROGRAM, bytes: 165, address: deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58() },
+      { mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM, bytes: 165, address: deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58() },
+      { mint: SPYX_MINT, tokenProgram: TOKEN_2022_PROGRAM, bytes: 179, address: deriveAta(vault, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58() },
+    ]);
+  });
+
+  it("held by its token program exists; absent, or only lamports sent to the address, is missing; anything else is unreadable", () => {
+    const snap = (owner: string, data: Uint8Array | null = new Uint8Array(165)) => ({ owner, lamports: 1n, data });
+    expect(tokenAccountStatus(snap(TOKEN_2022_PROGRAM, new Uint8Array(179)), TOKEN_2022_PROGRAM)).toBe("exists");
+    expect(tokenAccountStatus(null, TOKEN_PROGRAM)).toBe("missing");
+    expect(tokenAccountStatus(snap(SYSTEM_PROGRAM, new Uint8Array(0)), TOKEN_PROGRAM)).toBe("missing");
+    expect(tokenAccountStatus(snap(TOKEN_PROGRAM), TOKEN_2022_PROGRAM)).toBe("unreadable");
+    expect(tokenAccountStatus(snap(SYSTEM_PROGRAM, new Uint8Array(8)), TOKEN_PROGRAM)).toBe("unreadable");
+    expect(tokenAccountStatus(undefined, TOKEN_PROGRAM)).toBe("unreadable");
+  });
+
+  it("reads all of them in one getMultipleAccounts; a read that fails is unreadable as a whole", async () => {
+    const vault = key();
+    const { pool: p, upstream } = pool((call) => rpcResult(call, { value: [accountInfo(TOKEN_PROGRAM, new Uint8Array(165)), null, accountInfo(key(), new Uint8Array(179))] }));
+    const read = await readVaultTokenAccounts(p, vault);
+    expect(upstream.calls).toHaveLength(1);
+    expect(read.kind === "exists" && read.value.map((entry) => [entry.mint, entry.status])).toEqual([
+      [WSOL_MINT, "exists"],
+      [USDC_MINT, "missing"],
+      [SPYX_MINT, "unreadable"],
+    ]);
+    const down = pool(() => {
+      throw new Error(`boom ${UPSTREAM_1}`);
+    });
+    const failed = await readVaultTokenAccounts(down.pool, vault);
+    expect(failed.kind).toBe("unreadable");
+    expect(JSON.stringify(failed)).not.toContain(SECRET_QUERY);
   });
 });
 

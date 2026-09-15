@@ -5,10 +5,21 @@
 import { createPrivateKey, sign } from "node:crypto";
 
 import {
+  ATA_PROGRAM,
+  CLMM_POOL_STATE_BYTES,
+  CLMM_POOL_STATE_DISCRIMINATOR,
   COMPUTE_BUDGET_PROGRAM,
   ED25519_PROGRAM,
+  RAYDIUM_CLMM,
   SIP_ACCOUNT_SPACE,
   SIP_PROGRAM_ID,
+  SOL_USDC_POOL,
+  SPYX_MINT,
+  SPYX_USDC_POOL,
+  TOKEN_2022_PROGRAM,
+  TOKEN_PROGRAM,
+  USDC_MINT,
+  WSOL_MINT,
   accountDiscriminator,
   base58Encode,
   base64Encode,
@@ -17,9 +28,10 @@ import {
   parseLegacyMessage,
   splitWire,
   toHex,
+  tryBase58Decode,
   tryBase64Decode,
 } from "@sip/solana-core/client";
-import { deriveConfigPda, deriveLinkPda, deriveVaultPda, verifySignedTransaction } from "@sip/solana-core/server";
+import { deriveAta, deriveConfigPda, deriveLinkPda, deriveVaultPda, verifySignedTransaction } from "@sip/solana-core/server";
 import { Keypair, VersionedTransaction } from "@solana/web3.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -83,6 +95,11 @@ function stubChain(accounts: ReadonlyMap<string, AccountJson>, down = false): st
         return { jsonrpc: "2.0", id: call.id ?? null, result: ((params[0] as number) + 128) * 5_080 };
       case "getLatestBlockhash":
         return { jsonrpc: "2.0", id: call.id ?? null, result: { context, value: { blockhash: BLOCKHASH, lastValidBlockHeight: 300_000_150 } } };
+      case "getAccountInfo":
+        return { jsonrpc: "2.0", id: call.id ?? null, result: { context, value: accounts.get(params[0] as string) ?? null } };
+      case "getTokenAccountsByOwner":
+        // The vault holds no token in these cases.
+        return { jsonrpc: "2.0", id: call.id ?? null, result: { context, value: [] } };
       default:
         return { jsonrpc: "2.0", id: call.id ?? null, error: { code: -32601, message: "not stubbed" } };
     }
@@ -153,7 +170,23 @@ function signed(txBase64: string, ...signers: Keypair[]): Uint8Array {
 
 const programsOf = (txBase64: string): string[] => parseLegacyMessage(splitWire(tryBase64Decode(txBase64)!).message).instructions.map((instruction) => instruction.programId);
 
-type Answer = { status: number; text: string; json: { error?: { code: string; message: string; vault?: string } } & Record<string, any> };
+/** An account some program other than SIP holds: only its owner and size matter here. */
+const ownedBy = (owner: string, size: number): AccountJson => ({ data: [base64Encode(new Uint8Array(size)), "base64"], lamports: 1_000_000, owner, executable: false, rentEpoch: 0, space: size });
+
+/** A Raydium CLMM PoolState with the fields SIP prices from: the mints at 73 and 105, sqrt_price_x64 at 253. */
+function poolOf(mint0: string, mint1: string, sqrtPriceX64: bigint): AccountJson {
+  const bytes = new Uint8Array(CLMM_POOL_STATE_BYTES);
+  bytes.set(CLMM_POOL_STATE_DISCRIMINATOR, 0);
+  bytes.set(tryBase58Decode(mint0)!, 73);
+  bytes.set(tryBase58Decode(mint1)!, 105);
+  let value = sqrtPriceX64;
+  for (let i = 0; i < 16; i++, value >>= 8n) bytes[253 + i] = Number(value & 0xffn);
+  return { data: [base64Encode(bytes), "base64"], lamports: 1_000_000, owner: RAYDIUM_CLMM, executable: false, rentEpoch: 0, space: bytes.length };
+}
+
+const mainnetRent = (size: number): number => (size + 128) * 5_080;
+
+type Answer = { status: number; text: string; json: { error?: { code: string; message: string; vault?: string; withdrawableLamports?: string } } & Record<string, any> };
 async function answer(response: Response): Promise<Answer> {
   const text = await response.text();
   return { status: response.status, text, json: JSON.parse(text) as never };
@@ -250,6 +283,48 @@ describe("/api/solana-build", () => {
     expect(programsOf(built.json.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, ED25519_PROGRAM, SIP_PROGRAM_ID]);
     const verified = verifySignedTransaction(signed(built.json.txBase64, owner, wallet));
     expect(verified.ok).toBe(true);
+  });
+
+  it("investPolicy: floors at 90 % and 95 % of the pools SIP prices from, a CreateIdempotent only for each vault account missing, and 502 price_unavailable without a pool", async () => {
+    useEnv(SOLANA_ENV);
+    const owner = Keypair.generate();
+    const ownerKey = owner.publicKey.toBase58();
+    const vault = deriveVaultPda(ownerKey).toBase58();
+    const accounts = new Map<string, AccountJson>([
+      [vault, vaultOf(ownerKey)],
+      [SOL_USDC_POOL, poolOf(WSOL_MINT, USDC_MINT, 5_834_501_654_111_004_443n)],
+      [SPYX_USDC_POOL, poolOf(SPYX_MINT, USDC_MINT, 50_911_325_114_989_095_030n)],
+      [USDC_MINT, ownedBy(TOKEN_PROGRAM, 82)],
+      [SPYX_MINT, ownedBy(TOKEN_2022_PROGRAM, 82)],
+      [deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58(), ownedBy(TOKEN_PROGRAM, 165)],
+    ]);
+    const methods = stubChain(accounts);
+    const built = await answer(await POST(buildRequest({ action: "investPolicy", owner: ownerKey })));
+    expect(built.status).toBe(200);
+    expect(built.json.floors).toMatchObject({ convertWad: "90034840399943305", legs: [{ mint: SPYX_MINT, wad: "124719467624105690" }] });
+    expect(programsOf(built.json.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, SIP_PROGRAM_ID]);
+    expect(built.json.vaultTokenAccounts.map((entry: { create: boolean }) => entry.create)).toEqual([true, false, true]);
+    expect(built.json.costs.rentLamports).toBe(String(mainnetRent(970) + mainnetRent(165) + mainnetRent(179)));
+    expect(verifySignedTransaction(signed(built.json.txBase64, owner)).ok).toBe(true);
+    expect(methods.filter((method) => method === "getLatestBlockhash")).toHaveLength(1);
+
+    accounts.delete(SPYX_USDC_POOL);
+    const unpriced = await answer(await POST(buildRequest({ action: "investPolicy", owner: ownerKey })));
+    expect([unpriced.status, unpriced.json.error?.code]).toEqual([502, "price_unavailable"]);
+    expect(unpriced.json).not.toHaveProperty("txBase64");
+  });
+
+  it("withdraw past what the vault can release is 422 above_withdrawable; withdrawToken of a mint the vault does not hold is 422 not_held", async () => {
+    useEnv(SOLANA_ENV);
+    const owner = someKey();
+    const vault = deriveVaultPda(owner).toBase58();
+    stubChain(new Map([[vault, { ...vaultOf(owner), lamports: mainnetRent(125) + 1_000 }]]));
+    const above = await answer(await POST(buildRequest({ action: "withdraw", owner, lamports: "1001" })));
+    expect([above.status, above.json.error?.code, above.json.error?.withdrawableLamports]).toEqual([422, "above_withdrawable", "1000"]);
+    const within = await answer(await POST(buildRequest({ action: "withdraw", owner, lamports: "1000" })));
+    expect([within.status, programsOf(within.json.txBase64)]).toEqual([200, [COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, SIP_PROGRAM_ID]]);
+    const notHeld = await answer(await POST(buildRequest({ action: "withdrawToken", owner, mint: SPYX_MINT, amountRaw: "1" })));
+    expect([notHeld.status, notHeld.json.error?.code]).toEqual([422, "not_held"]);
   });
 
   it("an upstream that fails is 502 unreadable, and the answer never contains the upstream URL", async () => {
