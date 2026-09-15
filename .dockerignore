@@ -129,5 +129,9 @@ docs
 .dockerignore
 docker-compose.yml
 docker-compose.*.yml
+# The keeper's local end-to-end proof. The keeper image copies its package
+# whole, and the proof starts a validator no image runs and imports
+# @sip/solana-program/link-consent, a script the image does not carry.
+packages/solana-keeper/test-local
 
 # ---------------------------------------------------------------------------

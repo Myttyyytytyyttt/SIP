@@ -7,6 +7,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:local": "vitest run -c vitest.local.config.ts",
     "keeper": "tsx bin/keeper.mts",
     "preflight": "tsx bin/keeper.mts --preflight",
     "ready": "tsx bin/ready.mts",
