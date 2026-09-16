@@ -133,7 +133,7 @@ function signMessage(signer: Keypair, message: Uint8Array): Uint8Array {
  * System, DataLength == 0], log level 4) inserted at instruction `at`, then owner
  * and wallet sign that message.
  */
-function signedLinkWithLighthouse(at: number | "end"): { base64: string; signature: string } {
+function signedLinkWithLighthouse(at: number | "end", leading: "trading_link" | null = null): { base64: string; signature: string } {
   const owner = Keypair.generate();
   const wallet = Keypair.generate();
   const parties = { owner: owner.publicKey.toBase58(), wallet: wallet.publicKey.toBase58() };
@@ -149,6 +149,11 @@ function signedLinkWithLighthouse(at: number | "end"): { base64: string; signatu
     data: Buffer.from([6, 4, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0, 4, 3, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
   });
   message.instructions.splice(at === "end" ? message.instructions.length : at, 0, check);
+  if (leading === "trading_link") {
+    // Phantom's pre-state check right after the compute budget: no lamports yet on the link it creates (AssertAccountInfoMulti [Lamports == 0]).
+    const tradingLink = built.accounts["trading_link"]!;
+    message.instructions.splice(2, 0, new TransactionInstruction({ programId: new PublicKey(LIGHTHOUSE_PROGRAM), keys: [{ pubkey: new PublicKey(tradingLink), isSigner: false, isWritable: false }], data: Buffer.from([6, 4, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) }));
+  }
   const tx = new VersionedTransaction(message.compileToLegacyMessage());
   tx.sign([owner]);
   tx.sign([wallet]);
@@ -308,6 +313,21 @@ describe("/api/solana-tx", () => {
     expect(between.status).toBe(422);
     expect(((await between.json()) as { error: { code: string } }).error.code).toBe("lighthouse_misplaced");
     expect(seen).toHaveLength(2);
+  });
+
+  it("relays a link Phantom rewrote for two signers, a check on the new trading link right after the compute budget and one after link_wallet, simulated then sent", async () => {
+    useEnv(SOLANA_ENV);
+    const rewritten = signedLinkWithLighthouse("end", "trading_link");
+    const seen = stubUpstream((body) =>
+      body.method === "simulateTransaction"
+        ? rpcOk(body, { context: { slot: 324 }, value: { err: null, logs: ["Program log: Instruction: LinkWallet"], unitsConsumed: 12_000 } })
+        : rpcOk(body, rewritten.signature),
+    );
+    const response = await POST(sendRequest({ action: "send", signedTxBase64: rewritten.base64 }));
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { signature: string }).signature).toBe(rewritten.signature);
+    expect(seen.map((body) => body.method)).toEqual(["simulateTransaction", "sendTransaction"]);
+    expect(seen[1]!.params?.[0]).toBe(rewritten.base64);
   });
 
   it("relays a first investment policy that pays for the vault's wSOL, USDC and SPYx accounts: six instructions, simulated, then sent", async () => {

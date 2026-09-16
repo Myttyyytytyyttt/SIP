@@ -106,6 +106,11 @@ export interface ReadTransaction {
   readonly parsed: ParsedLegacyMessage;
 }
 
+/** The bytes a wallet returned, checked: and where they hold the Lighthouse checks it added, by instruction index. */
+export interface SignedTransaction extends ReadTransaction {
+  readonly walletGuards: readonly number[];
+}
+
 /** One CreateIdempotent the page expects ahead of set_invest_policy, every address its own. */
 export interface TokenAccountCreateIntent {
   /** Who pays the rent: the pension key. */
@@ -286,9 +291,10 @@ export function checkBuiltIntent(bytes: Uint8Array, intent: OwnerIntent): ReadTr
  * The bytes Phantom returned for `built`: Lighthouse checks the relay accepts,
  * around SaverFi's own instructions exactly as built. Anything else is refused
  * with words, a foreign program by name. Only the first signature slot may be
- * signed.
+ * signed. Returns them read, with the checks' instruction indexes: a failure at
+ * one of those is Phantom's check, not SaverFi's.
  */
-export function checkSignedIntent(bytes: Uint8Array, built: ReadTransaction, intent: OwnerIntent): ReadTransaction {
+export function checkSignedIntent(bytes: Uint8Array, built: ReadTransaction, intent: OwnerIntent): SignedTransaction {
   const refuse = (detail: string): IntentError => new IntentError(FAILURE_COPY.signedMismatch(detail));
   const tx = readTransaction(bytes, FAILURE_COPY.unreadableSigned);
   const { parsed } = tx;
@@ -329,7 +335,7 @@ export function checkSignedIntent(bytes: Uint8Array, built: ReadTransaction, int
   for (const key of now.keys()) {
     if (!builtPrivileges.has(key) && !(key === LIGHTHOUSE_PROGRAM && guards.guards.length > 0)) throw refuse(`it names ${programLabel(key)}, which SaverFi did not`);
   }
-  return tx;
+  return { ...tx, walletGuards: guards.guards.map((guard) => guard.position) };
 }
 
 /**

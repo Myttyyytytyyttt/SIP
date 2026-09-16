@@ -834,6 +834,38 @@ describe("linkWalletFlow", () => {
     expect(verifySignedTransaction(sent)).toMatchObject({ ok: true, signers: [h.pensionKey, h.tradingAddress] });
   });
 
+  it("Phantom's two-signer rewrite, a check on the new trading link right after the compute budget: the trading wallet co-signs Phantom's message, the consent still right before link_wallet, and the relay verifies both signatures", async () => {
+    for (const answer of ["transaction", "signature"] as const) {
+      const h = harness();
+      const tradingLink = deriveLinkPda(h.tradingAddress).toBase58();
+      h.signWithPension.mockImplementationOnce(async (bytes) => {
+        h.order.push("pension");
+        return phantomRewrite(bytes, { leading: [guard(GUARD.created(), tradingLink)], guards: [guard(GUARD.payer(1_000_000n), h.pensionKey), guard(GUARD.owner(SIP_PROGRAM_ID), tradingLink)] }, h.owner);
+      });
+      if (answer === "signature") h.signWithTrading.mockImplementationOnce(async (bytes) => signBytes(h.trading, splitWire(bytes).message));
+      const result = await linkWalletFlow(h.linkDeps, h.linkInput);
+      expect(result.ok, `${answer}: ${result.ok ? "" : result.message}`).toBe(true);
+      const phantomReturned = (await h.signWithPension.mock.results[0]!.value) as Uint8Array;
+      expect(toHex(h.signWithTrading.mock.calls[0]![0])).toBe(toHex(phantomReturned));
+      const sent = h.send.mock.calls[0]![0];
+      expect(toHex(splitWire(sent).message)).toBe(toHex(splitWire(phantomReturned).message));
+      expect(toHex(splitWire(sent).signatures[0]!)).toBe(toHex(splitWire(phantomReturned).signatures[0]!));
+      const verified = verifySignedTransaction(sent);
+      expect(verified.ok).toBe(true);
+      if (!verified.ok) continue;
+      expect(verified.signers).toEqual([h.pensionKey, h.tradingAddress]);
+      expect(verified.instructions.map((instruction) => instruction.name)).toEqual([
+        "SetComputeUnitLimit",
+        "SetComputeUnitPrice",
+        "AssertAccountInfoMulti",
+        "Ed25519SigVerify",
+        "link_wallet",
+        "AssertAccountInfoMulti",
+        "AssertAccountInfoMulti",
+      ]);
+    }
+  });
+
   it("a 64-byte answer from the trading wallet is spliced into slot 1 of Phantom's bytes, as Phantom returned them or rewritten", async () => {
     for (const rewrite of [false, true]) {
       const h = harness();
@@ -1205,7 +1237,7 @@ describe("Phantom's Lighthouse checks, in the browser and at the relay", () => {
       landed.confirm.mockImplementationOnce(async () => ({ status: "failed", slot: 11, err: { InstructionError: [index, { Custom: 6001 }] } }));
       expect(await flows[name]!.run(landed)).toMatchObject({ ok: false, kind: "refused", message: FAILURE_COPY.walletGuardFailed });
     }
-    // The link counts its own four instructions.
+    // The link's check after its own four instructions.
     const link = harness();
     link.signWithPension.mockImplementationOnce(async (bytes) => phantomRewrite(bytes, { guards: [guard(GUARD.payer(1n), link.pensionKey)] }, link.owner));
     link.confirm.mockImplementationOnce(async () => ({ status: "failed", slot: 11, err: { InstructionError: [4, { Custom: 6400 }] } }));
@@ -1215,5 +1247,39 @@ describe("Phantom's Lighthouse checks, in the browser and at the relay", () => {
     phantomSigns(own, (h) => ({ guards: flows.withdraw!.guards(h) }));
     own.send.mockImplementationOnce(async () => failure(422, "simulation_failed", { err: { InstructionError: [2, { Custom: 6004 }] }, logs: [] }));
     expect(await flows.withdraw!.run(own)).toEqual({ ok: false, kind: "refused", message: WITHDRAW_COPY.balanceMoved, code: "balance_moved" });
+  });
+
+  it("with Phantom's leading block, the failing instruction's position in the bytes sent says whose failure it is: a check ahead of SaverFi's instruction is Phantom's, SaverFi's instruction after the block keeps SaverFi's words, in simulation and on chain, for withdraw and for the link", async () => {
+    // withdraw as [budget pair, the vault's owner, withdraw, the pension key's check].
+    const withLeading = (h: Harness): Rewrite => ({ leading: flows.withdraw!.leading(h), guards: flows.withdraw!.guards(h) });
+    for (const [index, words] of [
+      [2, { ok: false, kind: "refused", message: FAILURE_COPY.walletGuardFailed }],
+      [3, { ok: false, kind: "refused", message: WITHDRAW_COPY.balanceMoved, code: "balance_moved" }],
+      [4, { ok: false, kind: "refused", message: FAILURE_COPY.walletGuardFailed }],
+    ] as const) {
+      const simulated = harness();
+      phantomSigns(simulated, withLeading);
+      simulated.send.mockImplementationOnce(async () => failure(422, "simulation_failed", { err: { InstructionError: [index, { Custom: 6004 }] }, logs: [] }));
+      expect(await flows.withdraw!.run(simulated), `simulated at ${index}`).toMatchObject(words);
+
+      const landed = harness();
+      phantomSigns(landed, withLeading);
+      landed.confirm.mockImplementationOnce(async () => ({ status: "failed", slot: 11, err: { InstructionError: [index, { Custom: 6004 }] } }));
+      expect(await flows.withdraw!.run(landed), `landed at ${index}`).toMatchObject(words);
+    }
+
+    // The link as Phantom writes it for two signers: [budget pair, the new trading link, Ed25519SigVerify, link_wallet, the pension key's check].
+    for (const [index, custom, message] of [
+      [2, 6400, FAILURE_COPY.walletGuardFailed],
+      [4, 6036, "The trading wallet's consent is missing from this link. Nothing was linked."],
+      [5, 6001, FAILURE_COPY.walletGuardFailed],
+    ] as const) {
+      const link = harness();
+      link.signWithPension.mockImplementationOnce(async (bytes) =>
+        phantomRewrite(bytes, { leading: [guard(GUARD.created(), deriveLinkPda(link.tradingAddress).toBase58())], guards: [guard(GUARD.payer(1n), link.pensionKey)] }, link.owner),
+      );
+      link.confirm.mockImplementationOnce(async () => ({ status: "failed", slot: 11, err: { InstructionError: [index, { Custom: custom }] } }));
+      expect(await linkWalletFlow(link.linkDeps, link.linkInput), `link at ${index}`).toMatchObject({ ok: false, kind: "refused", message });
+    }
   });
 });

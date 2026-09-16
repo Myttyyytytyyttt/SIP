@@ -14,10 +14,11 @@
  * answered 502 with a signature and confirming it could not finish: the page
  * offers Check again on that signature and never re-signing first, or a second
  * write could land. "rate_limited" carries when to retry; "unreadable" means
- * nothing was offered to sign; "refused" carries words. A failed instruction
- * past the ones SaverFi built is one of Phantom's Lighthouse checks, and its
- * words say so: Lighthouse's error codes overlap the program's, so they are never
- * read as SaverFi's.
+ * nothing was offered to sign; "refused" carries words. A failed instruction at
+ * an index where the checked bytes hold one of Phantom's Lighthouse checks (ahead
+ * of SaverFi's instructions or after them) is that check, and its words say so:
+ * Lighthouse's error codes overlap the program's, so they are never read as
+ * SaverFi's.
  *
  * LINKING, IN ORDER. The consent (the trading wallet's signMessage over
  * SIP_LINK_V1, rebuilt and compared here first) carries no blockhash, so it is
@@ -72,7 +73,7 @@ import {
 import { rawFrom } from "@/lib/amounts";
 import { privyFailure } from "@/lib/privy-failure";
 import { SigningError, isSignerRefusal, type PensionSigner, type SignerRefusal, type TradingSigners } from "@/lib/signing-wallets";
-import { IntentError, checkBuiltIntent, checkSignedIntent, mergeCoSignature, type OwnerIntent, type ReadTransaction, type TokenAccountCreateIntent } from "@/lib/tx-intent";
+import { IntentError, checkBuiltIntent, checkSignedIntent, mergeCoSignature, type OwnerIntent, type ReadTransaction, type SignedTransaction, type TokenAccountCreateIntent } from "@/lib/tx-intent";
 import {
   customCode,
   transactionErrorWords,
@@ -135,12 +136,12 @@ interface Refusal {
   readonly explain?: Explain;
   /** Rent and fees in lamports, from the build's costs; null when it did not say. */
   readonly costLamports?: bigint | null;
-  /** How many instructions SaverFi built: any later one that fails is a Lighthouse check Phantom added. */
-  readonly ownInstructions?: number;
+  /** Where the bytes sent hold the Lighthouse checks Phantom added: an instruction failing at one of these indexes is that check. */
+  readonly walletGuards?: readonly number[];
 }
 
 /** What the words of a refusal may say beyond the error itself. */
-const contextOf = (refusal: Refusal): FailureContext => ({ costLamports: refusal.costLamports ?? null, ...(refusal.ownInstructions === undefined ? {} : { ownInstructions: refusal.ownInstructions }) });
+const contextOf = (refusal: Refusal): FailureContext => ({ costLamports: refusal.costLamports ?? null, ...(refusal.walletGuards === undefined ? {} : { walletGuards: refusal.walletGuards }) });
 
 /** A build's rent, signature fees and priority fee, in lamports; null when any part is missing. */
 function costOf(body: BuiltTransactionJson): bigint | null {
@@ -272,8 +273,9 @@ async function pensionWrite<T extends BuiltTransactionJson>(
   } catch (error) {
     return signingFailure(error, "phantom");
   }
+  let phantom: SignedTransaction;
   try {
-    checkSignedIntent(signed, checked, intent);
+    phantom = checkSignedIntent(signed, checked, intent);
   } catch (error) {
     return intentFailure(error);
   }
@@ -282,7 +284,7 @@ async function pensionWrite<T extends BuiltTransactionJson>(
   const landed = await landing(deps, await deps.api.send(signed), unsigned.lastValidBlockHeight, {
     explain,
     costLamports: costOf(built.body),
-    ownInstructions: checked.parsed.instructions.length,
+    walletGuards: phantom.walletGuards,
   });
   return "rebuild" in landed ? { ok: false, kind: "expired", message: PROGRESS_COPY.tookTooLongDetail } : landed;
 }
@@ -650,8 +652,9 @@ export async function linkWalletFlow(deps: LinkWalletDeps, input: LinkWalletInpu
     } catch (error) {
       return result(signingFailure(error, "phantom"), consent);
     }
+    let phantom: SignedTransaction;
     try {
-      checkSignedIntent(phantomBytes, checked, intent);
+      phantom = checkSignedIntent(phantomBytes, checked, intent);
     } catch (error) {
       return result(intentFailure(error), consent);
     }
@@ -667,7 +670,8 @@ export async function linkWalletFlow(deps: LinkWalletDeps, input: LinkWalletInpu
 
     if (!(await blockhashStillValid(deps, checked.parsed.recentBlockhash))) continue;
     deps.onStep?.("sending");
-    const landed = await landing(deps, await deps.api.send(merged), unsigned.lastValidBlockHeight, { costLamports: costOf(built.body), ownInstructions: checked.parsed.instructions.length });
+    // The co-signature changes no byte of Phantom's message, so its checks stand where the page found them.
+    const landed = await landing(deps, await deps.api.send(merged), unsigned.lastValidBlockHeight, { costLamports: costOf(built.body), walletGuards: phantom.walletGuards });
     if ("rebuild" in landed) continue;
     return result(landed, landed.ok ? null : consent);
   }

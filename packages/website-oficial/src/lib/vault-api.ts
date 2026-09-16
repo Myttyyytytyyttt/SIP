@@ -409,17 +409,19 @@ export interface FailureContext {
   /** The action's rent and fees in lamports, from its build; null or absent when unknown. */
   readonly costLamports?: bigint | null;
   /**
-   * How many instructions SaverFi built, when the bytes sent were checked to keep
-   * them first: an instruction at or past this index is one of the Lighthouse
-   * checks Phantom added, and its custom code is Lighthouse's, not SaverFi's.
+   * Where the bytes sent hold the Lighthouse checks Phantom added, by instruction
+   * index, as the page checked them: ahead of SaverFi's instructions or after
+   * them. An instruction failing at one of these is Phantom's check, and its
+   * custom code is Lighthouse's, not SaverFi's; at any other index it is
+   * SaverFi's own.
    */
-  readonly ownInstructions?: number;
+  readonly walletGuards?: readonly number[];
 }
 
-/** Whether `err` is a failure of a Lighthouse check the wallet added after SaverFi's own instructions. */
+/** Whether `err` is a failure of one of the Lighthouse checks the wallet added. */
 export function walletGuardFailed(err: unknown, context: FailureContext = {}): boolean {
   const at = failedInstruction(err);
-  return context.ownInstructions !== undefined && at !== null && at >= context.ownInstructions;
+  return at !== null && (context.walletGuards ?? []).includes(at);
 }
 
 /** The System program's ResultWithNegativeLamports: a transfer, or an account's rent, the payer could not cover. */

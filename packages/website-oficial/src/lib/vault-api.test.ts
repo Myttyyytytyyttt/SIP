@@ -32,16 +32,19 @@ describe("words", () => {
     expect(vaultFailureWords(failure("simulation_failed", { err: instructionError(code), logs: [] }))).toContain(words);
   });
 
-  it("a failure at or past the instructions SaverFi built is Phantom's Lighthouse check, whatever its code; before them, and with no count given, the program's words stand", () => {
+  it("a failure at a position the bytes sent hold a Lighthouse check is Phantom's check, whatever its code, ahead of SaverFi's instructions or after them; any other position, and no positions given, keeps the program's words", () => {
     const at = (index: number, custom: number) => ({ InstructionError: [index, { Custom: custom }] });
-    // Lighthouse's AssertionFailed is 6001 and a Multi's failed assertion 6400 + i: SaverFi's range, or past it.
-    for (const err of [at(3, 6001), at(4, 6400), at(5, 1)]) {
-      expect(transactionErrorWords(err, [], { ownInstructions: 3 })).toBe(FAILURE_COPY.walletGuardFailed);
-      expect(vaultFailureWords(failure("simulation_failed", { err, logs: [] }), { ownInstructions: 3 })).toBe(FAILURE_COPY.walletGuardFailed);
+    // [budget pair, a leading check, withdraw, two trailing checks]. Lighthouse's AssertionFailed is 6001 and a Multi's failed assertion 6400 + i: SaverFi's range, or past it.
+    const walletGuards = [2, 4, 5];
+    for (const err of [at(2, 6001), at(2, 6400), at(4, 6400), at(5, 1)]) {
+      expect(transactionErrorWords(err, [], { walletGuards })).toBe(FAILURE_COPY.walletGuardFailed);
+      expect(vaultFailureWords(failure("simulation_failed", { err, logs: [] }), { walletGuards })).toBe(FAILURE_COPY.walletGuardFailed);
     }
-    expect(transactionErrorWords(at(2, 6001), [], { ownInstructions: 3 })).toBe("This vault belongs to another pension key.");
+    // SaverFi's own instruction after a leading block, and the instructions before it.
+    for (const index of [3, 1]) expect(transactionErrorWords(at(index, 6001), [], { walletGuards })).toBe("This vault belongs to another pension key.");
+    expect(transactionErrorWords(at(3, 6001), [], { walletGuards: [] })).toBe("This vault belongs to another pension key.");
     expect(transactionErrorWords(at(3, 6001), [])).toBe("This vault belongs to another pension key.");
-    expect(transactionErrorWords("BlockhashNotFound", [], { ownInstructions: 0 })).toBe(FAILURE_COPY.blockhashExpired);
+    expect(transactionErrorWords("BlockhashNotFound", [], { walletGuards })).toBe(FAILURE_COPY.blockhashExpired);
   });
 
   it("a program error with no words of its own uses the IDL's message; an unknown one says its number", () => {
