@@ -222,6 +222,8 @@ export const FAILURE_COPY = {
   foreignProgram: (label: string): string => `Phantom added an instruction for ${label}, which SaverFi does not relay. Nothing was sent.`,
   /** Phantom's Lighthouse checks broke the rule the relay holds them to; `detail` is @sip/solana-core's checkWalletGuards words. */
   walletGuardRefused: (detail: string): string => `Phantom added a Lighthouse safety check SaverFi does not relay (${detail}). Nothing was sent.`,
+  /** A Lighthouse check Phantom added failed: an account was not as Phantom's preview showed when the transaction ran. */
+  walletGuardFailed: "Phantom's safety check stopped this transaction: an account changed after Phantom previewed it. Nothing moved. Try again.",
   unreadableBuilt: "SaverFi's server sent something that is not a transaction. Nothing was signed.",
   unreadableSigned: "Phantom returned something that is not a transaction SaverFi can read. Nothing was sent.",
 } as const;

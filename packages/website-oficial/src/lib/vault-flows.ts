@@ -14,7 +14,10 @@
  * answered 502 with a signature and confirming it could not finish: the page
  * offers Check again on that signature and never re-signing first, or a second
  * write could land. "rate_limited" carries when to retry; "unreadable" means
- * nothing was offered to sign; "refused" carries words.
+ * nothing was offered to sign; "refused" carries words. A failed instruction
+ * past the ones SaverFi built is one of Phantom's Lighthouse checks, and its
+ * words say so: Lighthouse's error codes overlap the program's, so they are never
+ * read as SaverFi's.
  *
  * LINKING, IN ORDER. The consent (the trading wallet's signMessage over
  * SIP_LINK_V1, rebuilt and compared here first) carries no blockhash, so it is
@@ -74,9 +77,11 @@ import {
   customCode,
   transactionErrorWords,
   vaultFailureWords,
+  walletGuardFailed,
   type ApiFailure,
   type ApiResult,
   type BuiltTransactionJson,
+  type FailureContext,
   type InvestPolicyBuildJson,
   type InvestmentPolicyJson,
   type LinkConsentJson,
@@ -130,7 +135,12 @@ interface Refusal {
   readonly explain?: Explain;
   /** Rent and fees in lamports, from the build's costs; null when it did not say. */
   readonly costLamports?: bigint | null;
+  /** How many instructions SaverFi built: any later one that fails is a Lighthouse check Phantom added. */
+  readonly ownInstructions?: number;
 }
+
+/** What the words of a refusal may say beyond the error itself. */
+const contextOf = (refusal: Refusal): FailureContext => ({ costLamports: refusal.costLamports ?? null, ...(refusal.ownInstructions === undefined ? {} : { ownInstructions: refusal.ownInstructions }) });
 
 /** A build's rent, signature fees and priority fee, in lamports; null when any part is missing. */
 function costOf(body: BuiltTransactionJson): bigint | null {
@@ -148,9 +158,10 @@ function fromFailure(failure: ApiFailure, refusal: Refusal = {}): FlowResult {
     return { ok: false, kind: "unreadable", message: vaultFailureWords(failure) };
   }
   if (failure.code === "simulation_failed" && failure.body.err === "BlockhashNotFound") return { ok: false, kind: "expired", message: PROGRESS_COPY.tookTooLongDetail };
-  const own = failure.code === "simulation_failed" ? (refusal.explain?.(failure.body.err) ?? null) : null;
+  const context = contextOf(refusal);
+  const own = failure.code === "simulation_failed" && !walletGuardFailed(failure.body.err, context) ? (refusal.explain?.(failure.body.err) ?? null) : null;
   if (own !== null) return refused(own.message, own.code);
-  const words = vaultFailureWords(failure, { costLamports: refusal.costLamports ?? null });
+  const words = vaultFailureWords(failure, context);
   // An account that already exists is a state to re-read, not a mistake.
   return refused(words, words === FAILURE_COPY.alreadyExists ? "already_exists" : failure.code);
 }
@@ -182,8 +193,9 @@ async function confirmed(deps: FlowDeps, signature: string, lastValidBlockHeight
     return { ok: true, signature, explorerUrl: solscanTx(signature), slot: outcome.slot, unitsConsumed };
   }
   if (outcome.status === "failed") {
-    const own = refusal.explain?.(outcome.err) ?? null;
-    return own === null ? refused(transactionErrorWords(outcome.err, [], { costLamports: refusal.costLamports ?? null })) : refused(own.message, own.code);
+    const context = contextOf(refusal);
+    const own = walletGuardFailed(outcome.err, context) ? null : (refusal.explain?.(outcome.err) ?? null);
+    return own === null ? refused(transactionErrorWords(outcome.err, [], context)) : refused(own.message, own.code);
   }
   return { ok: false, kind: "expired", message: PROGRESS_COPY.tookTooLongDetail };
 }
@@ -267,7 +279,11 @@ async function pensionWrite<T extends BuiltTransactionJson>(
   }
 
   deps.onStep?.("sending");
-  const landed = await landing(deps, await deps.api.send(signed), unsigned.lastValidBlockHeight, { explain, costLamports: costOf(built.body) });
+  const landed = await landing(deps, await deps.api.send(signed), unsigned.lastValidBlockHeight, {
+    explain,
+    costLamports: costOf(built.body),
+    ownInstructions: checked.parsed.instructions.length,
+  });
   return "rebuild" in landed ? { ok: false, kind: "expired", message: PROGRESS_COPY.tookTooLongDetail } : landed;
 }
 
@@ -651,7 +667,7 @@ export async function linkWalletFlow(deps: LinkWalletDeps, input: LinkWalletInpu
 
     if (!(await blockhashStillValid(deps, checked.parsed.recentBlockhash))) continue;
     deps.onStep?.("sending");
-    const landed = await landing(deps, await deps.api.send(merged), unsigned.lastValidBlockHeight, { costLamports: costOf(built.body) });
+    const landed = await landing(deps, await deps.api.send(merged), unsigned.lastValidBlockHeight, { costLamports: costOf(built.body), ownInstructions: checked.parsed.instructions.length });
     if ("rebuild" in landed) continue;
     return result(landed, landed.ok ? null : consent);
   }

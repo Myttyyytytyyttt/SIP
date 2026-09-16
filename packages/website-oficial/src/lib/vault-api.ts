@@ -390,6 +390,12 @@ export function programErrorWords(code: number): string {
   return `The transaction failed with error ${code}. Nothing moved.`;
 }
 
+/** The index of the instruction that failed ({InstructionError:[n, …]}), or null. */
+export function failedInstruction(err: unknown): number | null {
+  const failure = (err as { InstructionError?: unknown } | null)?.InstructionError;
+  return Array.isArray(failure) && typeof failure[0] === "number" ? failure[0] : null;
+}
+
 /** The custom error code of a failed instruction ({InstructionError:[n,{Custom:code}]}), or null. */
 export function customCode(err: unknown): number | null {
   const failure = (err as { InstructionError?: unknown } | null)?.InstructionError;
@@ -402,6 +408,18 @@ export function customCode(err: unknown): number | null {
 export interface FailureContext {
   /** The action's rent and fees in lamports, from its build; null or absent when unknown. */
   readonly costLamports?: bigint | null;
+  /**
+   * How many instructions SaverFi built, when the bytes sent were checked to keep
+   * them first: an instruction at or past this index is one of the Lighthouse
+   * checks Phantom added, and its custom code is Lighthouse's, not SaverFi's.
+   */
+  readonly ownInstructions?: number;
+}
+
+/** Whether `err` is a failure of a Lighthouse check the wallet added after SaverFi's own instructions. */
+export function walletGuardFailed(err: unknown, context: FailureContext = {}): boolean {
+  const at = failedInstruction(err);
+  return context.ownInstructions !== undefined && at !== null && at >= context.ownInstructions;
 }
 
 /** The System program's ResultWithNegativeLamports: a transfer, or an account's rent, the payer could not cover. */
@@ -426,6 +444,8 @@ function payerShortOfSol(err: unknown, custom: number | null, lines: readonly st
 export function transactionErrorWords(err: unknown, logs: unknown, context: FailureContext = {}): string {
   const lines = Array.isArray(logs) ? logs.filter((line): line is string => typeof line === "string") : [];
   if (err === "BlockhashNotFound") return FAILURE_COPY.blockhashExpired;
+  // Lighthouse's error codes overlap SaverFi's (6000…): the failing instruction says whose it is.
+  if (walletGuardFailed(err, context)) return FAILURE_COPY.walletGuardFailed;
   if (lines.some((line) => /already in use/i.test(line))) return FAILURE_COPY.alreadyExists;
   const custom = customCode(err);
   if (payerShortOfSol(err, custom, lines)) {

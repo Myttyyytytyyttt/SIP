@@ -1138,4 +1138,32 @@ describe("Phantom's Lighthouse checks, in the browser and at the relay", () => {
     expect(result.message).toMatch(/^Phantom changed the transaction SaverFi built \(it makes .* writable, where SaverFi built it read-only\)/);
     expect(h.send).not.toHaveBeenCalled();
   });
+
+  it("a check that fails when the transaction runs says it was Phantom's check, never SaverFi's error under the same code, in simulation and on chain", async () => {
+    // Lighthouse's AssertionFailed is 6001, which is also sip_vault's "This vault belongs to another pension key."
+    for (const [name, index] of [
+      ["create_vault_v2", 3],
+      ["withdraw", 3],
+    ] as const) {
+      const simulated = harness();
+      phantomSigns(simulated, (h) => ({ guards: flows[name]!.guards(h) }));
+      simulated.send.mockImplementationOnce(async () => failure(422, "simulation_failed", { err: { InstructionError: [index, { Custom: 6004 }] }, logs: [] }));
+      expect(await flows[name]!.run(simulated)).toMatchObject({ ok: false, kind: "refused", message: FAILURE_COPY.walletGuardFailed });
+
+      const landed = harness();
+      phantomSigns(landed, (h) => ({ guards: flows[name]!.guards(h) }));
+      landed.confirm.mockImplementationOnce(async () => ({ status: "failed", slot: 11, err: { InstructionError: [index, { Custom: 6001 }] } }));
+      expect(await flows[name]!.run(landed)).toMatchObject({ ok: false, kind: "refused", message: FAILURE_COPY.walletGuardFailed });
+    }
+    // The link counts its own four instructions.
+    const link = harness();
+    link.signWithPension.mockImplementationOnce(async (bytes) => phantomRewrite(bytes, { guards: [guard(GUARD.payer(1n), link.pensionKey)] }, link.owner));
+    link.confirm.mockImplementationOnce(async () => ({ status: "failed", slot: 11, err: { InstructionError: [4, { Custom: 6400 }] } }));
+    expect(await linkWalletFlow(link.linkDeps, link.linkInput)).toMatchObject({ ok: false, kind: "refused", message: FAILURE_COPY.walletGuardFailed });
+    // SaverFi's own instruction keeps SaverFi's words.
+    const own = harness();
+    phantomSigns(own, (h) => ({ guards: flows.withdraw!.guards(h) }));
+    own.send.mockImplementationOnce(async () => failure(422, "simulation_failed", { err: { InstructionError: [2, { Custom: 6004 }] }, logs: [] }));
+    expect(await flows.withdraw!.run(own)).toEqual({ ok: false, kind: "refused", message: WITHDRAW_COPY.balanceMoved, code: "balance_moved" });
+  });
 });
