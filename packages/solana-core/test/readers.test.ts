@@ -3,16 +3,19 @@
 import { describe, expect, it } from "vitest";
 
 import { RAYDIUM_CLMM, SOL_USDC_POOL, SPYX_MINT, SPYX_USDC_POOL, SYSTEM_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../src/client/addresses";
-import { SOL_SQRT_PRICE, SPYX_SQRT_PRICE, clmmPoolAccount, parsedTokenAccount, tokenAccountData } from "./chain-fixtures";
+import { SOL_SQRT_PRICE, SPYX_SQRT_PRICE, clmmPoolAccount, localRent, parsedTokenAccount, policyAccount, tokenAccountData } from "./chain-fixtures";
 import { base58Encode } from "../src/client/base58";
 import { base64Encode } from "../src/client/base64";
-import { encodeStruct } from "../src/client/borsh";
+import { encodeArgs, encodeStruct } from "../src/client/borsh";
 import { SIP_ACCOUNT_SPACE } from "../src/client/decoders";
 import { SIP_PROGRAM_ID, accountDiscriminator, eventDiscriminator, instructionDiscriminator } from "../src/client/idl";
 import { deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
 import {
   MAX_WALLET_LINKS,
   listVaultActivity,
+  listVaultSignatures,
+  readLiveSnapshot,
+  readVaultTransactions,
   listVaultHoldings,
   listVaultLinks,
   readBuildBatch,
@@ -32,6 +35,7 @@ import { createRpcPool } from "../src/server/rpc-pool";
 import { BLOCKHASH, SECRET_QUERY, UPSTREAM_1, accountInfo, fakeFetch, jsonResponse, keypair, rpcResult, type UpstreamCall } from "./helpers";
 
 const key = (): string => keypair().publicKey.toBase58();
+const SIGNATURE = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => i + 11));
 
 function account(name: "Vault" | "TradingLink" | "ProtocolConfig", fields: Record<string, unknown>): Uint8Array {
   const body = encodeStruct(name, fields);
@@ -480,6 +484,318 @@ describe("a token withdrawal's source, read by address", () => {
     const failed = await readWithdrawTokenSource(down.pool, owner, source);
     expect([failed.vault.kind, failed.source.kind]).toEqual(["unreadable", "unreadable"]);
     expect(JSON.stringify(failed)).not.toContain(SECRET_QUERY);
+  });
+});
+
+describe("readLiveSnapshot", () => {
+  const owner = key();
+  const vault = deriveVaultPda(owner).toBase58();
+  const policyAddress = deriveInvestPda(vault).toBase58();
+  const configAddress = deriveConfigPda().toBase58();
+
+  const sipVault = () => accountInfo(SIP_PROGRAM_ID, vaultBytes(owner), 250_000_000);
+  const solPool = (owned = RAYDIUM_CLMM, mints: [string, string] = [WSOL_MINT, USDC_MINT]) => accountInfo(owned, clmmPoolAccount(mints[0], mints[1], SOL_SQRT_PRICE));
+  const spyxPool = () => accountInfo(RAYDIUM_CLMM, clmmPoolAccount(SPYX_MINT, USDC_MINT, SPYX_SQRT_PRICE, [8, 6]));
+  /** A link with values that are not zero, so it is visible whether they survive the read. */
+  const richLink = (wallet: string, savesInto = vault) =>
+    account("TradingLink", { wallet, vault: savesInto, epoch: 12n, settlement_nonce: 5n, frontier_slot: 999n, bump: 254, _reserved: new Array(32).fill(0) });
+
+  type Member = { readonly rpcError: string } | { readonly result: unknown };
+  const answered = (result: unknown): Member => ({ result });
+  const broke = (message: string): Member => ({ rpcError: message });
+
+  /** The five members readLiveSnapshot asks for, each answerable or breakable on its own. */
+  function livePool(values: readonly unknown[], plan: { accounts?: Member; tokens?: Member; rentVault?: Member; rentZero?: Member; links?: Member } = {}, slot = 91) {
+    const byId = new Map<number, Member>([
+      [1, plan.accounts ?? answered({ context: { slot }, value: values })],
+      [2, plan.tokens ?? answered({ value: [null, null, null] })],
+      [3, plan.rentVault ?? answered(localRent(125))],
+      [4, plan.rentZero ?? answered(localRent(0))],
+      [5, plan.links ?? answered([])],
+    ]);
+    return pool((call) =>
+      jsonResponse(
+        batchOf(call).map((entry) => {
+          const member = byId.get(Number(entry.id))!;
+          return "rpcError" in member
+            ? { jsonrpc: "2.0", id: entry.id, error: { code: -32000, message: member.rpcError } }
+            : { jsonrpc: "2.0", id: entry.id, result: member.result };
+        }),
+      ),
+    );
+  }
+
+  it("is ONE batch: the accounts in order, the vault's three token accounts, two rents, and getProgramAccounts only with discover", async () => {
+    const [walletA, walletB] = [key(), key()];
+    const { pool: p, upstream } = livePool([sipVault(), null, null, solPool(), spyxPool(), null, null, null, null]);
+    await readLiveSnapshot(p, { owner, wallets: [walletA, walletB], discover: true });
+
+    expect(upstream.calls).toHaveLength(1);
+    const members = batchOf(upstream.calls[0]!);
+    expect(members.map((member) => member.method)).toEqual([
+      "getMultipleAccounts",
+      "getMultipleAccounts",
+      "getMinimumBalanceForRentExemption",
+      "getMinimumBalanceForRentExemption",
+      "getProgramAccounts",
+    ]);
+    expect(members[0]!.params[0]).toEqual([
+      vault,
+      policyAddress,
+      configAddress,
+      SOL_USDC_POOL,
+      SPYX_USDC_POOL,
+      deriveLinkPda(walletA).toBase58(),
+      deriveLinkPda(walletB).toBase58(),
+      walletA,
+      walletB,
+    ]);
+    expect(members[0]!.params[1]).toEqual({ encoding: "base64", commitment: "confirmed" });
+    // Read BY ADDRESS, never listed: no number of accounts anyone opens for the vault can make this unreadable.
+    expect(members[1]!.params[0]).toEqual(vaultTokenAccountTargets(vault).map((target) => target.address));
+    expect(members[1]!.params[1]).toEqual({ encoding: "jsonParsed", commitment: "confirmed" });
+    expect(members[2]!.params).toEqual([SIP_ACCOUNT_SPACE.Vault]);
+    expect(members[3]!.params).toEqual([0]);
+    expect(members[4]!.params[1]).toMatchObject({ filters: [{ dataSize: SIP_ACCOUNT_SPACE.TradingLink }, { memcmp: { offset: 40, bytes: vault } }] });
+  });
+
+  it("without discover it asks four members and reports no link listing at all", async () => {
+    const { pool: p, upstream } = livePool([sipVault(), null, null, solPool(), spyxPool()]);
+    const read = await readLiveSnapshot(p, { owner, wallets: [], discover: false });
+    expect(batchOf(upstream.calls[0]!).map((member) => member.method)).not.toContain("getProgramAccounts");
+    expect(read.links).toBeNull();
+    expect([read.slot, read.rents.vault, read.rents.walletFloor]).toEqual([91, BigInt(localRent(125)), BigInt(localRent(0))]);
+  });
+
+  it("a member that fails takes down ONLY its own part", async () => {
+    const values = [sipVault(), null, null, solPool(), spyxPool()];
+    const tokens = await readLiveSnapshot(livePool(values, { tokens: broke("no") }).pool, { owner, wallets: [], discover: false });
+    expect([tokens.vault.kind, tokens.prices.kind, tokens.tokenAccounts.kind]).toEqual(["exists", "exists", "unreadable"]);
+
+    const links = await readLiveSnapshot(livePool(values, { links: broke("no") }).pool, { owner, wallets: [], discover: true });
+    expect([links.vault.kind, links.prices.kind, links.links?.kind]).toEqual(["exists", "exists", "unreadable"]);
+
+    // The vault's rent is read, never derived, so a vault without one is unreadable rather than wrongly withdrawable.
+    const rent = await readLiveSnapshot(livePool(values, { rentVault: broke("no") }).pool, { owner, wallets: [], discover: false });
+    expect([rent.vault.kind, rent.prices.kind, rent.rents.vault]).toEqual(["unreadable", "exists", null]);
+  });
+
+  it("a failed batch makes EVERY part unreadable, never missing, and never quotes the endpoint", async () => {
+    const wallet = key();
+    const { pool: p } = pool(() => {
+      throw new Error(`boom ${UPSTREAM_1}`);
+    });
+    const read = await readLiveSnapshot(p, { owner, wallets: [wallet], discover: true });
+    expect([read.vault.kind, read.policy.kind, read.config.kind, read.prices.kind, read.tokenAccounts.kind, read.links?.kind]).toEqual([
+      "unreadable",
+      "unreadable",
+      "unreadable",
+      "unreadable",
+      "unreadable",
+      "unreadable",
+    ]);
+    // A balance nobody read is null; "0" would be a claim that the wallet is empty.
+    expect(read.wallets).toEqual([{ wallet, lamports: null, link: { address: deriveLinkPda(wallet).toBase58(), status: "unreadable", vault: null, state: null } }]);
+    expect(read.rents).toEqual({ vault: null, walletFloor: null });
+    expect(JSON.stringify(read)).not.toContain(SECRET_QUERY);
+  });
+
+  it.each([
+    ["a pool owned by another program", () => [sipVault(), null, null, solPool(key()), spyxPool()]],
+    ["a pool with its mints swapped", () => [sipVault(), null, null, solPool(RAYDIUM_CLMM, [USDC_MINT, WSOL_MINT]), spyxPool()]],
+    ["a pool that does not exist", () => [sipVault(), null, null, null, spyxPool()]],
+  ])("%s gives NO price rather than a wrong one, and the vault is still read", async (_, values) => {
+    const read = await readLiveSnapshot(livePool(values()).pool, { owner, wallets: [], discover: false });
+    expect(read.prices.kind).toBe("unreadable");
+    expect(read.vault.kind).toBe("exists");
+  });
+
+  it("a link another program owns, or one naming another wallet, is unreadable — never this wallet's", async () => {
+    const [mine, forged, impostor, absent] = [key(), key(), key(), key()];
+    const values = [
+      sipVault(),
+      null,
+      null,
+      solPool(),
+      spyxPool(),
+      accountInfo(SIP_PROGRAM_ID, richLink(mine)),
+      accountInfo(key(), richLink(forged)),
+      accountInfo(SIP_PROGRAM_ID, richLink(key())),
+      null,
+      null,
+      null,
+      null,
+      null,
+    ];
+    const read = await readLiveSnapshot(livePool(values).pool, { owner, wallets: [mine, forged, impostor, absent], discover: false });
+    expect(read.wallets.map((wallet) => wallet.link.status)).toEqual(["this_vault", "unreadable", "unreadable", "missing"]);
+    expect(read.wallets[1]!.link.state).toBeNull();
+  });
+
+  it("a wallet the chain answers null for holds 0, and a link that WAS read keeps its epoch, nonce and frontier", async () => {
+    const wallet = key();
+    const other = key();
+    const values = [
+      sipVault(),
+      null,
+      null,
+      solPool(),
+      spyxPool(),
+      accountInfo(SIP_PROGRAM_ID, richLink(wallet)),
+      accountInfo(SIP_PROGRAM_ID, richLink(other, deriveVaultPda(key()).toBase58())),
+      null,
+      accountInfo(SYSTEM_PROGRAM, new Uint8Array(0), 420_000_000),
+    ];
+    const read = await readLiveSnapshot(livePool(values).pool, { owner, wallets: [wallet, other], discover: false });
+    expect(read.wallets[0]).toMatchObject({ wallet, lamports: 0n, link: { status: "this_vault", vault } });
+    expect(read.wallets[0]!.link.state).toMatchObject({ epoch: 12n, settlementNonce: 5n, frontierSlot: 999n });
+    expect(read.wallets[1]).toMatchObject({ wallet: other, lamports: 420_000_000n, link: { status: "other_vault" } });
+  });
+
+  it("discover re-reads the vault field of every link the RPC filtered, because the RPC is not the trust boundary", async () => {
+    const [mine, theirs] = [key(), key()];
+    const listed = [
+      { pubkey: deriveLinkPda(mine).toBase58(), account: accountInfo(SIP_PROGRAM_ID, richLink(mine)) },
+      { pubkey: deriveLinkPda(theirs).toBase58(), account: accountInfo(SIP_PROGRAM_ID, richLink(theirs, deriveVaultPda(key()).toBase58())) },
+      { pubkey: deriveLinkPda(key()).toBase58(), account: accountInfo(key(), richLink(key())) },
+    ];
+    const read = await readLiveSnapshot(livePool([sipVault(), null, null, solPool(), spyxPool()], { links: answered(listed) }).pool, { owner, wallets: [], discover: true });
+    expect(read.links?.kind).toBe("exists");
+    expect(read.links?.kind === "exists" && read.links.value.map((link) => link.state.wallet)).toEqual([mine]);
+  });
+
+  it("refuses more than the limit, a repeated wallet, a wallet that is not a key, and the owner among its own trading wallets", async () => {
+    const { pool: p, upstream } = livePool([]);
+    const repeated = key();
+    await expect(readLiveSnapshot(p, { owner, wallets: Array.from({ length: MAX_WALLET_LINKS + 1 }, key), discover: false })).rejects.toThrow(RangeError);
+    await expect(readLiveSnapshot(p, { owner, wallets: [repeated, repeated], discover: false })).rejects.toThrow(RangeError);
+    await expect(readLiveSnapshot(p, { owner, wallets: ["nope"], discover: false })).rejects.toThrow(RangeError);
+    await expect(readLiveSnapshot(p, { owner, wallets: [owner], discover: false })).rejects.toThrow(RangeError);
+    await expect(readLiveSnapshot(p, { owner: "nope", wallets: [], discover: false })).rejects.toThrow(RangeError);
+    expect(upstream.calls).toHaveLength(0);
+  });
+});
+
+describe("listVaultSignatures and readVaultTransactions", () => {
+  const vault = key();
+
+  it("passes before and until through, and reports a full page's cursor", async () => {
+    const signature = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => i + 1));
+    const until = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => i + 2));
+    const { pool: p, upstream } = pool((call) => rpcResult(call, [{ signature, slot: 10, blockTime: 1_700_000_000, err: null }]));
+
+    const page = await listVaultSignatures(p, vault, { limit: 1, until });
+    expect(page.kind === "exists" && page.value.nextBefore).toBe(signature);
+    expect((upstream.calls[0]!.body as { params: unknown[] }).params).toEqual([vault, { limit: 1, commitment: "confirmed", until }]);
+
+    await listVaultSignatures(p, vault, { limit: 5, before: signature });
+    expect((upstream.calls[1]!.body as { params: unknown[] }).params).toEqual([vault, { limit: 5, commitment: "confirmed", before: signature }]);
+
+    // A page shorter than the limit is the end of the history.
+    const short = await listVaultSignatures(p, vault, { limit: 5 });
+    expect(short.kind === "exists" && short.value.nextBefore).toBeNull();
+  });
+
+  it("reads nothing when nothing was listed, and refuses a cursor that is not a signature", async () => {
+    const { pool: p, upstream } = pool((call) => rpcResult(call, []));
+    expect(await readVaultTransactions(p, vault, [])).toEqual({ kind: "exists", value: [] });
+    expect(upstream.calls).toHaveLength(0);
+    await expect(listVaultSignatures(p, vault, { before: "nope" })).rejects.toThrow(RangeError);
+    await expect(listVaultSignatures(p, vault, { until: "nope" })).rejects.toThrow(RangeError);
+    await expect(listVaultSignatures(p, vault, { limit: 26 })).rejects.toThrow(RangeError);
+  });
+
+  it("decodes each SIP instruction's arguments, DROPS venue_data, and names its accounts from the IDL", async () => {
+    const [crank, config, policy, vaultWsol, vaultIn, venue] = [key(), key(), key(), key(), key(), key()];
+    const data = encodeArgs("convert", { amount_in: 10_000_000n, min_out: 900_000n, venue_data: Uint8Array.from([1, 2, 3, 4]) });
+    const { pool: p } = pool((call) => {
+      if (!Array.isArray(call.body)) return rpcResult(call, [{ signature: SIGNATURE, slot: 10, blockTime: 1, err: null }]);
+      return jsonResponse([
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            slot: 10,
+            blockTime: 1,
+            meta: { err: null, fee: 5_000, preBalances: [1, 1, 1, 1, 1, 1, 1, 1], postBalances: [1, 1, 1, 1, 1, 1, 1, 1], logMessages: [], loadedAddresses: { writable: [], readonly: [] } },
+            transaction: {
+              message: {
+                accountKeys: [crank, config, vault, policy, vaultWsol, vaultIn, venue, SIP_PROGRAM_ID],
+                instructions: [{ programIdIndex: 7, accounts: [0, 1, 2, 3, 4, 5, 6], data: base58Encode(data) }],
+              },
+            },
+          },
+        },
+      ]);
+    });
+    const page = await listVaultSignatures(p, vault, { limit: 1 });
+    const read = await readVaultTransactions(p, vault, page.kind === "exists" ? page.value.listed : []);
+    if (read.kind !== "exists") throw new Error(read.kind);
+    const [call] = read.value[0]!.instructions;
+    expect(call!.name).toBe("convert");
+    // venue_data is an opaque venue blob: decoded, then dropped.
+    expect(call!.args).toEqual({ amount_in: 10_000_000n, min_out: 900_000n });
+    expect(call!.args).not.toHaveProperty("venue_data");
+    expect(call!.accounts).toEqual({ crank, config, vault, policy, vault_wsol: vaultWsol, vault_in: vaultIn, venue_program: venue });
+    expect(read.value[0]!.sipInstructions).toEqual(["convert"]);
+    expect(read.value[0]!.readable).toBe(true);
+  });
+
+  it("keeps only the token balances the VAULT owns, counts a missing side as 0, and finds the vault among the loaded addresses", async () => {
+    const [signer, stranger, strangerAccount, vaultUsdc, vaultSpyx] = [key(), key(), key(), key(), key()];
+    const balance = (accountIndex: number, mint: string, ownerOf: string, amount: string, ui: string, decimals = 6) => ({
+      accountIndex,
+      mint,
+      owner: ownerOf,
+      uiTokenAmount: { amount, decimals, uiAmountString: ui },
+    });
+    const { pool: p } = pool((call) => {
+      if (!Array.isArray(call.body)) return rpcResult(call, [{ signature: SIGNATURE, slot: 10, blockTime: 1, err: null }]);
+      return jsonResponse([
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            slot: 10,
+            blockTime: 1,
+            meta: {
+              err: null,
+              fee: 5_000,
+              // The vault sits at index 3, which only exists once the loaded addresses are appended.
+              preBalances: [1, 1, 1, 10_000_000, 1, 1],
+              postBalances: [1, 1, 1, 70_000_000, 1, 1],
+              preTokenBalances: [balance(4, USDC_MINT, vault, "5000000", "5"), balance(2, SPYX_MINT, stranger, "999", "0.9", 8)],
+              postTokenBalances: [balance(5, SPYX_MINT, vault, "11345678", "0.1241643", 8), balance(2, SPYX_MINT, stranger, "0", "0", 8)],
+              logMessages: [],
+              loadedAddresses: { writable: [vault, vaultUsdc, vaultSpyx], readonly: [] },
+            },
+            transaction: { message: { accountKeys: [signer, strangerAccount, strangerAccount], instructions: [] } },
+          },
+        },
+      ]);
+    });
+    const page = await listVaultSignatures(p, vault, { limit: 1 });
+    const read = await readVaultTransactions(p, vault, page.kind === "exists" ? page.value.listed : []);
+    if (read.kind !== "exists") throw new Error(read.kind);
+    const entry = read.value[0]!;
+    expect(entry.vaultLamportsDelta).toBe(60_000_000n);
+    // The stranger's account is not this vault's business, whatever it did.
+    expect(entry.vaultTokenDeltas).toEqual([
+      { account: vaultUsdc, mint: USDC_MINT, decimals: 6, preRaw: "5000000", postRaw: "0", preUi: "5", postUi: "0" },
+      { account: vaultSpyx, mint: SPYX_MINT, decimals: 8, preRaw: "0", postRaw: "11345678", preUi: "0", postUi: "0.1241643" },
+    ]);
+  });
+
+  it("a transaction the batch could not answer is readable false, which is not the same as an empty one", async () => {
+    const { pool: p } = pool((call) => {
+      if (!Array.isArray(call.body)) return rpcResult(call, [{ signature: SIGNATURE, slot: 10, blockTime: 7, err: null }]);
+      return jsonResponse([{ jsonrpc: "2.0", id: 1, result: null }]);
+    });
+    const page = await listVaultSignatures(p, vault, { limit: 1 });
+    const read = await readVaultTransactions(p, vault, page.kind === "exists" ? page.value.listed : []);
+    if (read.kind !== "exists") throw new Error(read.kind);
+    expect(read.value[0]).toMatchObject({ readable: false, fee: null, vaultLamportsDelta: null, blockTime: 7 });
+    expect(read.value[0]!.instructions).toEqual([]);
   });
 });
 

@@ -15,7 +15,8 @@
 import { RAYDIUM_CLMM, SOL_USDC_POOL, SYSTEM_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, TOKEN_PROGRAMS, USDC_MINT, WSOL_MINT } from "../client/addresses";
 import { base58Encode, isBase58OfLength, isPubkey, isSignature, tryBase58Decode } from "../client/base58";
 import { tryBase64Decode } from "../client/base64";
-import { fieldOffset } from "../client/borsh";
+import type { ClassifiableEntry, SipInstructionCall, VaultTokenDelta } from "../client/activity";
+import { decodeArgs, fieldOffset } from "../client/borsh";
 import { PoolPriceError, legUsdcWad, solUsdcConvertWad } from "../client/clmm-price";
 import { CLASSIC_TOKEN_ACCOUNT_BYTES, OFFERED_LEGS } from "../client/product";
 import {
@@ -31,7 +32,7 @@ import {
   type TradingLinkState,
   type VaultState,
 } from "../client/decoders";
-import { SIP_PROGRAM_ID, matchInstruction } from "../client/idl";
+import { SIP_PROGRAM_ID, idlInstruction, matchInstruction } from "../client/idl";
 import { deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "./pda";
 import { RpcAnswerError, type JsonRpcMember, type RpcPool } from "./rpc-pool";
 
@@ -754,6 +755,266 @@ export async function readBuildBatch(pool: RpcPool, input: { readonly addresses:
   }
 }
 
+// ── the live dashboard's one read ────────────────────────────────────────────
+
+/** One trading wallet as the live dashboard reads it: what it holds, and where it saves. */
+export interface LiveWalletRead {
+  readonly wallet: string;
+  /**
+   * 0 when the chain answered that there is no such account; NULL when the read
+   * failed. "It could not be read" is never shown as "it holds nothing".
+   */
+  readonly lamports: bigint | null;
+  readonly link: {
+    /** ["link", wallet] */
+    readonly address: string;
+    readonly status: WalletLinkStatus;
+    /** The vault the link saves into, when it was read. */
+    readonly vault: string | null;
+    /**
+     * The link itself, kept whole: readWalletLinks drops epoch, settlementNonce
+     * and frontierSlot, and the dashboard counts settlements with them.
+     */
+    readonly state: TradingLinkState | null;
+  };
+}
+
+export interface LiveSnapshot {
+  /** The context slot of the account read, so the chart can leave out what it did not cover. */
+  readonly slot: number | null;
+  readonly owner: string;
+  readonly vaultAddress: string;
+  readonly policyAddress: string;
+  readonly configAddress: string;
+  readonly vault: ChainRead<VaultRead>;
+  readonly policy: ChainRead<AccountRead<InvestmentPolicyState>>;
+  readonly config: ChainRead<AccountRead<ProtocolConfigState>>;
+  readonly prices: ChainRead<PoolPrices>;
+  readonly tokenAccounts: ChainRead<readonly VaultTokenAccountRead[]>;
+  readonly rents: {
+    readonly vault: bigint | null;
+    /** rent(0): settle.rs's wallet floor, under which a settlement is refused. */
+    readonly walletFloor: bigint | null;
+  };
+  readonly wallets: readonly LiveWalletRead[];
+  /** Every link on chain, when `discover` asked for them; null when it did not. */
+  readonly links: ChainRead<readonly VaultLink[]> | null;
+}
+
+export interface LiveSnapshotInput {
+  readonly owner: string;
+  /** 0 to MAX_WALLET_LINKS distinct trading wallets, none of them the owner. */
+  readonly wallets: readonly string[];
+  /** Also list every link the vault has on chain (getProgramAccounts). */
+  readonly discover: boolean;
+}
+
+/** At most this many addresses go into the snapshot's getMultipleAccounts: 3 + 2 pools + 10 links + 10 wallets. */
+export const MAX_LIVE_SNAPSHOT_ADDRESSES = 25;
+
+/**
+ * EVERYTHING THE LIVE DASHBOARD SHOWS, IN ONE ROUND TRIP: the vault, its policy,
+ * the protocol config, the pinned pools' prices, the vault's own wSOL, USDC and
+ * SPYx accounts, two rents, each trading wallet's balance and link — and, on
+ * demand, every link the vault has on chain.
+ *
+ * ONE BATCH, FIVE MEMBERS. A dashboard that polls every minute cannot afford a
+ * read per fact, and the Helius key is the keeper's too.
+ *
+ * EVERY PART KEEPS ITS OWN OUTCOME, and decodeOwned stays the anti-forgery gate:
+ * a link that names another wallet is unreadable, a pool the pinned check refuses
+ * makes prices unreadable rather than wrong, and a member that fails takes down
+ * only its own part. A failed batch makes every part unreadable — never missing,
+ * because "no vault" is an invitation to create one the chain would refuse.
+ *
+ * READ BY ADDRESS, NEVER LISTED: the vault's token accounts are its three
+ * associated addresses, so no number of accounts anyone opens for the vault can
+ * make this unreadable (the reason readVaultTokenAccounts gives).
+ */
+export async function readLiveSnapshot(pool: RpcPool, input: LiveSnapshotInput): Promise<LiveSnapshot> {
+  const { owner, wallets, discover } = input;
+  if (!isPubkey(owner)) throw new RangeError("readLiveSnapshot: owner is not a base58 32-byte key");
+  if (wallets.length > MAX_WALLET_LINKS) throw new RangeError(`readLiveSnapshot: at most ${MAX_WALLET_LINKS} wallets`);
+  if (!wallets.every((wallet) => isPubkey(wallet))) throw new RangeError("readLiveSnapshot: every wallet is a base58 32-byte key");
+  if (new Set(wallets).size !== wallets.length) throw new RangeError("readLiveSnapshot: the wallets must be distinct");
+  if (wallets.includes(owner)) throw new RangeError("readLiveSnapshot: a trading wallet cannot be the owner");
+
+  const vaultAddress = deriveVaultPda(owner).toBase58();
+  const policyAddress = deriveInvestPda(vaultAddress).toBase58();
+  const configAddress = deriveConfigPda().toBase58();
+  const linkAddresses = wallets.map((wallet) => deriveLinkPda(wallet).toBase58());
+  const targets = vaultTokenAccountTargets(vaultAddress);
+  const base = { owner, vaultAddress, policyAddress, configAddress };
+
+  const failAll = (error: string): LiveSnapshot => {
+    const unreadable = { kind: "unreadable" as const, error };
+    return {
+      ...base,
+      slot: null,
+      vault: unreadable,
+      policy: unreadable,
+      config: unreadable,
+      prices: unreadable,
+      tokenAccounts: unreadable,
+      rents: { vault: null, walletFloor: null },
+      wallets: wallets.map((wallet, index) => ({
+        wallet,
+        lamports: null,
+        link: { address: linkAddresses[index]!, status: "unreadable" as const, vault: null, state: null },
+      })),
+      links: discover ? unreadable : null,
+    };
+  };
+
+  const addresses = [vaultAddress, policyAddress, configAddress, ...PRICED_POOLS, ...linkAddresses, ...wallets];
+  const ACCOUNTS = 1;
+  const TOKENS = 2;
+  const RENT_VAULT = 3;
+  const RENT_ZERO = 4;
+  const LINKS = 5;
+
+  try {
+    const calls: { id: number; method: string; params: unknown[] }[] = [
+      { id: ACCOUNTS, method: "getMultipleAccounts", params: [addresses, { encoding: "base64", commitment: COMMITMENT }] },
+      { id: TOKENS, method: "getMultipleAccounts", params: [targets.map((target) => target.address), { encoding: "jsonParsed", commitment: COMMITMENT }] },
+      { id: RENT_VAULT, method: "getMinimumBalanceForRentExemption", params: [SIP_ACCOUNT_SPACE.Vault] },
+      { id: RENT_ZERO, method: "getMinimumBalanceForRentExemption", params: [0] },
+    ];
+    if (discover) {
+      calls.push({
+        id: LINKS,
+        method: "getProgramAccounts",
+        params: [
+          SIP_PROGRAM_ID,
+          {
+            encoding: "base64",
+            commitment: COMMITMENT,
+            filters: [{ dataSize: SIP_ACCOUNT_SPACE.TradingLink }, { memcmp: { offset: 8 + fieldOffset("TradingLink", "vault"), bytes: vaultAddress } }],
+          },
+        ],
+      });
+    }
+    const members = await pool.batch(calls);
+
+    // ── member 1: the accounts ────────────────────────────────────────────────
+    const answered = memberResult(members, ACCOUNTS);
+    const accountsResult = answered.ok ? (answered.result as { context?: { slot?: unknown }; value?: unknown } | null) : null;
+    const values = Array.isArray(accountsResult?.value) && accountsResult.value.length === addresses.length ? (accountsResult.value as (RpcAccount | null)[]) : null;
+    const accountsError = !answered.ok ? pool.scrub(answered.error) : values === null ? "getMultipleAccounts did not answer every address" : null;
+    const slot = typeof accountsResult?.context?.slot === "number" ? accountsResult.context.slot : null;
+    const accountsUnreadable = { kind: "unreadable" as const, error: accountsError ?? "" };
+
+    // ── members 3 and 4: the rents ────────────────────────────────────────────
+    const rentOf = (id: number): bigint | null => {
+      const answer = memberResult(members, id);
+      return answer.ok && typeof answer.result === "number" && Number.isSafeInteger(answer.result) && answer.result >= 0 ? BigInt(answer.result) : null;
+    };
+    const vaultRent = rentOf(RENT_VAULT);
+    const walletFloor = rentOf(RENT_ZERO);
+
+    // ── the vault, its policy and the config ──────────────────────────────────
+    const vaultRead = accountsError !== null ? accountsUnreadable : decodeOwned(values![0], decodeVault);
+    const vault: ChainRead<VaultRead> =
+      vaultRead.kind !== "exists"
+        ? vaultRead
+        : vaultRent === null
+          ? { kind: "unreadable", error: "the rent floor could not be read" }
+          : withRent(vaultAddress, vaultRead, Number(vaultRent));
+
+    // ── the pinned pools ──────────────────────────────────────────────────────
+    let prices: ChainRead<PoolPrices>;
+    if (accountsError !== null) {
+      prices = accountsUnreadable;
+    } else {
+      try {
+        prices = { kind: "exists", value: poolPricesFromAccounts(values!.slice(3, 3 + PRICED_POOLS.length).map(snapshotOf), slot) };
+      } catch (error) {
+        // A pool that is not the one SIP pins gives NO price, never a wrong one.
+        prices = { kind: "unreadable", error: error instanceof PoolPriceError ? error.message : errorText(pool, error) };
+      }
+    }
+
+    // ── each trading wallet, and where it saves ───────────────────────────────
+    const linkAt = 3 + PRICED_POOLS.length;
+    const walletAt = linkAt + wallets.length;
+    const walletReads = wallets.map((wallet, index): LiveWalletRead => {
+      const address = linkAddresses[index]!;
+      if (accountsError !== null) return { wallet, lamports: null, link: { address, status: "unreadable", vault: null, state: null } };
+      const account = snapshotOf(values![walletAt + index]);
+      const lamports = account === null || account === undefined ? 0n : account.lamports;
+      const read = decodeOwned(values![linkAt + index], decodeTradingLink);
+      if (read.kind === "missing") return { wallet, lamports, link: { address, status: "missing", vault: null, state: null } };
+      // An account at ["link", wallet] naming another wallet is not this wallet's link.
+      if (read.kind === "unreadable" || read.value.state.wallet !== wallet) {
+        return { wallet, lamports, link: { address, status: "unreadable", vault: null, state: null } };
+      }
+      const state = read.value.state;
+      return { wallet, lamports, link: { address, status: state.vault === vaultAddress ? "this_vault" : "other_vault", vault: state.vault, state } };
+    });
+
+    // ── member 2: the vault's own token accounts ──────────────────────────────
+    const tokensAnswer = memberResult(members, TOKENS);
+    const tokensValue = tokensAnswer.ok ? (tokensAnswer.result as { value?: unknown } | null)?.value : undefined;
+    const tokenAccounts: ChainRead<readonly VaultTokenAccountRead[]> =
+      !tokensAnswer.ok
+        ? { kind: "unreadable", error: pool.scrub(tokensAnswer.error) }
+        : !Array.isArray(tokensValue) || tokensValue.length !== targets.length
+          ? { kind: "unreadable", error: "getMultipleAccounts did not answer every token account" }
+          : {
+              kind: "exists",
+              value: targets.map((target, index): VaultTokenAccountRead => {
+                const status = tokenAccountStatus(snapshotOf(tokensValue[index]), target.tokenProgram);
+                const balance = status === "exists" ? parsedBalance(tokensValue[index], vaultAddress, target.mint) : null;
+                return {
+                  mint: target.mint,
+                  address: target.address,
+                  tokenProgram: target.tokenProgram,
+                  status,
+                  amountRaw: balance?.amountRaw ?? null,
+                  decimals: balance?.decimals ?? null,
+                  uiAmount: balance?.uiAmount ?? null,
+                };
+              }),
+            };
+
+    // ── member 5: every link on chain ─────────────────────────────────────────
+    let links: ChainRead<readonly VaultLink[]> | null = null;
+    if (discover) {
+      const answer = memberResult(members, LINKS);
+      if (!answer.ok) {
+        links = { kind: "unreadable", error: pool.scrub(answer.error) };
+      } else if (!Array.isArray(answer.result)) {
+        links = { kind: "unreadable", error: "getProgramAccounts did not answer a list" };
+      } else {
+        const found: VaultLink[] = [];
+        for (const entry of answer.result as readonly { pubkey?: string; account?: RpcAccount }[]) {
+          const read = decodeOwned(entry?.account, decodeTradingLink);
+          // The RPC's filter is not the trust boundary: the field is read again.
+          if (read.kind === "exists" && read.value.state.vault === vaultAddress && isPubkey(entry.pubkey)) {
+            found.push({ address: entry.pubkey, state: read.value.state });
+          }
+        }
+        links = { kind: "exists", value: found };
+      }
+    }
+
+    return {
+      ...base,
+      slot,
+      vault,
+      policy: accountsError !== null ? accountsUnreadable : addressed(policyAddress, decodeOwned(values![1], decodeInvestmentPolicy)),
+      config: accountsError !== null ? accountsUnreadable : addressed(configAddress, decodeOwned(values![2], decodeProtocolConfig)),
+      prices,
+      tokenAccounts,
+      rents: { vault: vaultRent, walletFloor },
+      wallets: walletReads,
+      links,
+    };
+  } catch (error) {
+    return failAll(errorText(pool, error));
+  }
+}
+
 // ── history ──────────────────────────────────────────────────────────────────
 
 const INVOKE = /^Program (\S+) invoke \[\d+\]$/;
@@ -796,19 +1057,15 @@ export function settledEventsFromLogs(logs: readonly string[] | null | undefined
   return events;
 }
 
-export interface VaultActivityEntry {
-  readonly signature: string;
-  readonly slot: number;
-  readonly blockTime: number | null;
-  /** False when the transaction failed on chain. */
-  readonly ok: boolean;
+/**
+ * One transaction of a vault's history. It satisfies ClassifiableEntry, so
+ * classifyVaultEntry (browser-safe) names it without ever reaching the server.
+ */
+export interface VaultActivityEntry extends ClassifiableEntry {
   readonly err: unknown;
   readonly fee: bigint | null;
   /** Top-level SIP instructions by IDL name (from their discriminators, not from log text). */
   readonly sipInstructions: readonly string[];
-  /** The vault's SOL balance change in this transaction; null when the transaction could not be read. */
-  readonly vaultLamportsDelta: bigint | null;
-  readonly settled: readonly SettledEvent[];
 }
 
 export interface VaultActivityPage {
@@ -819,6 +1076,15 @@ export interface VaultActivityPage {
 
 export const MAX_ACTIVITY_PAGE = 25;
 
+/** One token balance as getTransaction reports it, before or after. */
+interface RpcTokenBalance {
+  readonly accountIndex?: number;
+  readonly mint?: string;
+  /** Whose account it is. Absent on old answers, and then the balance is not used. */
+  readonly owner?: string;
+  readonly uiTokenAmount?: { readonly amount?: string; readonly decimals?: number; readonly uiAmountString?: string };
+}
+
 interface RpcTransaction {
   readonly slot?: number;
   readonly blockTime?: number | null;
@@ -827,29 +1093,122 @@ interface RpcTransaction {
     readonly fee?: number;
     readonly preBalances?: readonly number[];
     readonly postBalances?: readonly number[];
+    readonly preTokenBalances?: readonly RpcTokenBalance[];
+    readonly postTokenBalances?: readonly RpcTokenBalance[];
     readonly logMessages?: readonly string[] | null;
     readonly loadedAddresses?: { readonly writable?: readonly string[]; readonly readonly?: readonly string[] };
   } | null;
   readonly transaction?: {
     readonly message?: {
       readonly accountKeys?: readonly string[];
-      readonly instructions?: readonly { readonly programIdIndex: number; readonly data: string }[];
+      readonly instructions?: readonly { readonly programIdIndex: number; readonly data: string; readonly accounts?: readonly number[] }[];
     };
   };
 }
 
+/**
+ * An instruction's arguments by IDL name, or null when the data did not decode.
+ * A `bytes` argument (convert and invest carry venue_data) is DROPPED: it is an
+ * opaque venue blob, it can be large, and no row ever shows it.
+ */
+function decodedArgs(name: string, data: Uint8Array): Readonly<Record<string, unknown>> | null {
+  try {
+    const kept: Record<string, unknown> = {};
+    for (const [field, value] of Object.entries(decodeArgs(name, data))) {
+      if (value instanceof Uint8Array) continue;
+      kept[field] = value;
+    }
+    return kept;
+  } catch {
+    return null;
+  }
+}
+
+/** The instruction's accounts under their IDL names, as far as the transaction lists them. */
+function namedAccounts(name: string, indexes: readonly number[] | undefined, keys: readonly string[]): Readonly<Record<string, string>> {
+  const named: Record<string, string> = {};
+  if (indexes === undefined) return named;
+  try {
+    idlInstruction(name).accounts.forEach((account, position) => {
+      const at = indexes[position];
+      const address = at === undefined ? undefined : keys[at];
+      if (address !== undefined) named[account.name] = address;
+    });
+  } catch {
+    // "unknown" is not an IDL instruction, so it has no account names.
+  }
+  return named;
+}
+
+const rawAmount = (balance: RpcTokenBalance | undefined): string => {
+  const amount = balance?.uiTokenAmount?.amount;
+  return typeof amount === "string" && /^[0-9]+$/.test(amount) ? amount : "0";
+};
+
+const uiAmountOf = (balance: RpcTokenBalance | undefined): string => {
+  const ui = balance?.uiTokenAmount?.uiAmountString;
+  return typeof ui === "string" && ui !== "" ? ui : "0";
+};
+
+/**
+ * The token balances of accounts the VAULT owns, joined by accountIndex. A side
+ * the transaction did not carry counts as "0" (an account created or emptied
+ * here), and a balance whose owner is not the vault is not this vault's business.
+ */
+function vaultTokenDeltasOf(vault: string, keys: readonly string[], meta: RpcTransaction["meta"]): VaultTokenDelta[] {
+  const sides = new Map<number, { pre?: RpcTokenBalance; post?: RpcTokenBalance }>();
+  const gather = (list: readonly RpcTokenBalance[] | undefined, side: "pre" | "post"): void => {
+    for (const balance of list ?? []) {
+      const index = balance?.accountIndex;
+      // Without an owner the RPC has not said whose account it is; it is not read as the vault's.
+      if (typeof index !== "number" || !Number.isInteger(index) || balance.owner !== vault) continue;
+      const found = sides.get(index) ?? {};
+      found[side] = balance;
+      sides.set(index, found);
+    }
+  };
+  gather(meta?.preTokenBalances, "pre");
+  gather(meta?.postTokenBalances, "post");
+
+  const deltas: VaultTokenDelta[] = [];
+  for (const [index, side] of [...sides.entries()].sort((left, right) => left[0] - right[0])) {
+    const either = side.post ?? side.pre;
+    const account = keys[index];
+    const mint = either?.mint;
+    if (account === undefined || typeof mint !== "string") continue;
+    const decimals = either?.uiTokenAmount?.decimals;
+    deltas.push({
+      account,
+      mint,
+      decimals: typeof decimals === "number" && Number.isInteger(decimals) ? decimals : 0,
+      preRaw: rawAmount(side.pre),
+      postRaw: rawAmount(side.post),
+      preUi: uiAmountOf(side.pre),
+      postUi: uiAmountOf(side.post),
+    });
+  }
+  return deltas;
+}
+
 function entryFrom(vault: string, signature: string, slot: number, blockTime: number | null, err: unknown, tx: RpcTransaction | null): VaultActivityEntry {
   if (tx === null || tx.transaction?.message === undefined) {
-    return { signature, slot, blockTime, ok: err === null, err, fee: null, sipInstructions: [], vaultLamportsDelta: null, settled: [] };
+    // readable false: the signature is known and its body is not. Everything
+    // below is empty because nothing was READ, not because nothing happened.
+    return { signature, slot, blockTime, ok: err === null, err, fee: null, readable: false, sipInstructions: [], instructions: [], vaultLamportsDelta: null, vaultTokenDeltas: [], settled: [] };
   }
   const message = tx.transaction.message;
   const keys = [...(message.accountKeys ?? []), ...(tx.meta?.loadedAddresses?.writable ?? []), ...(tx.meta?.loadedAddresses?.readonly ?? [])];
-  const sipInstructions: string[] = [];
+  const instructions: SipInstructionCall[] = [];
   for (const instruction of message.instructions ?? []) {
     if (keys[instruction.programIdIndex] !== SIP_PROGRAM_ID) continue;
     const data = tryBase58DecodeLong(instruction.data);
     const matched = data === null ? null : matchInstruction(data);
-    sipInstructions.push(matched?.name ?? "unknown");
+    const name = matched?.name ?? "unknown";
+    instructions.push({
+      name,
+      args: matched === null || data === null ? null : decodedArgs(name, data),
+      accounts: namedAccounts(name, instruction.accounts, keys),
+    });
   }
   const index = keys.indexOf(vault);
   const pre = tx.meta?.preBalances?.[index];
@@ -861,8 +1220,11 @@ function entryFrom(vault: string, signature: string, slot: number, blockTime: nu
     ok: (tx.meta?.err ?? err) === null,
     err: tx.meta?.err ?? err,
     fee: typeof tx.meta?.fee === "number" ? BigInt(tx.meta.fee) : null,
-    sipInstructions,
+    readable: true,
+    sipInstructions: instructions.map((call) => call.name),
+    instructions,
     vaultLamportsDelta: index >= 0 && typeof pre === "number" && typeof post === "number" ? BigInt(post) - BigInt(pre) : null,
+    vaultTokenDeltas: vaultTokenDeltasOf(vault, keys, tx.meta ?? null),
     settled: settledEventsFromLogs(tx.meta?.logMessages),
   };
 }
@@ -891,28 +1253,63 @@ function tryBase58DecodeLong(text: string): Uint8Array | null {
   return Uint8Array.from(bytes);
 }
 
+/** One signature of a vault's history, as getSignaturesForAddress lists it. */
+export interface VaultSignature {
+  readonly signature: string;
+  readonly slot: number;
+  readonly blockTime: number | null;
+  readonly err: unknown;
+}
+
+export interface VaultSignaturePage {
+  readonly listed: readonly VaultSignature[];
+  /** Pass as `before` for the next page; null at the end. */
+  readonly nextBefore: string | null;
+}
+
 /**
- * One page of the vault's history, newest first: getSignaturesForAddress (at most
- * 25) then every transaction in ONE batch. Server-side only — the browser relay
- * does not serve either method.
+ * ONE getSignaturesForAddress. Split from the transactions below so a handler can
+ * charge its client for the N transactions it is about to read BEFORE it reads
+ * them: a client out of tokens is then refused with no upstream call wasted.
+ *
+ * `until` stops at a signature already known, which is what a poll asks for.
  */
-export async function listVaultActivity(
+export async function listVaultSignatures(
   pool: RpcPool,
   vault: string,
-  options: { readonly limit?: number; readonly before?: string } = {},
-): Promise<ChainRead<VaultActivityPage>> {
+  options: { readonly limit?: number; readonly before?: string; readonly until?: string } = {},
+): Promise<ChainRead<VaultSignaturePage>> {
   const limit = options.limit ?? MAX_ACTIVITY_PAGE;
   if (!isPubkey(vault)) return { kind: "unreadable", error: "not a base58 32-byte address" };
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_ACTIVITY_PAGE) throw new RangeError(`listVaultActivity: limit must be 1..${MAX_ACTIVITY_PAGE}`);
-  if (options.before !== undefined && !isSignature(options.before)) throw new RangeError("listVaultActivity: before must be a signature");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_ACTIVITY_PAGE) throw new RangeError(`listVaultSignatures: limit must be 1..${MAX_ACTIVITY_PAGE}`);
+  if (options.before !== undefined && !isSignature(options.before)) throw new RangeError("listVaultSignatures: before must be a signature");
+  if (options.until !== undefined && !isSignature(options.until)) throw new RangeError("listVaultSignatures: until must be a signature");
   try {
     const signatures = await pool.call<readonly { signature: string; slot: number; blockTime?: number | null; err: unknown }[]>("getSignaturesForAddress", [
       vault,
-      { limit, commitment: COMMITMENT, ...(options.before === undefined ? {} : { before: options.before }) },
+      {
+        limit,
+        commitment: COMMITMENT,
+        ...(options.before === undefined ? {} : { before: options.before }),
+        ...(options.until === undefined ? {} : { until: options.until }),
+      },
     ]);
     if (!Array.isArray(signatures)) return { kind: "unreadable", error: "getSignaturesForAddress did not answer a list" };
-    const listed = signatures.filter((entry) => isSignature(entry?.signature));
-    if (listed.length === 0) return { kind: "exists", value: { entries: [], nextBefore: null } };
+    const listed = signatures
+      .filter((entry) => isSignature(entry?.signature))
+      .map((entry): VaultSignature => ({ signature: entry.signature, slot: entry.slot, blockTime: entry.blockTime ?? null, err: entry.err ?? null }));
+    return { kind: "exists", value: { listed, nextBefore: listed.length === limit ? listed[listed.length - 1]!.signature : null } };
+  } catch (error) {
+    if (error instanceof RpcAnswerError) return { kind: "unreadable", error: pool.scrub(error.message) };
+    return { kind: "unreadable", error: errorText(pool, error) };
+  }
+}
+
+/** Every listed transaction in ONE batch. A member that failed is that entry's own `readable: false`, not a failed page. */
+export async function readVaultTransactions(pool: RpcPool, vault: string, listed: readonly VaultSignature[]): Promise<ChainRead<readonly VaultActivityEntry[]>> {
+  if (!isPubkey(vault)) return { kind: "unreadable", error: "not a base58 32-byte address" };
+  if (listed.length === 0) return { kind: "exists", value: [] };
+  try {
     const members = await pool.batch(
       listed.map((entry, index) => ({
         id: index + 1,
@@ -920,14 +1317,32 @@ export async function listVaultActivity(
         params: [entry.signature, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: COMMITMENT }],
       })),
     );
-    const entries = listed.map((entry, index) => {
-      const answer = memberResult(members, index + 1);
-      const tx = answer.ok ? ((answer.result as RpcTransaction | null) ?? null) : null;
-      return entryFrom(vault, entry.signature, entry.slot, entry.blockTime ?? null, entry.err ?? null, tx);
-    });
-    return { kind: "exists", value: { entries, nextBefore: listed.length === limit ? listed[listed.length - 1]!.signature : null } };
+    return {
+      kind: "exists",
+      value: listed.map((entry, index) => {
+        const answer = memberResult(members, index + 1);
+        const tx = answer.ok ? ((answer.result as RpcTransaction | null) ?? null) : null;
+        return entryFrom(vault, entry.signature, entry.slot, entry.blockTime, entry.err, tx);
+      }),
+    };
   } catch (error) {
     if (error instanceof RpcAnswerError) return { kind: "unreadable", error: pool.scrub(error.message) };
     return { kind: "unreadable", error: errorText(pool, error) };
   }
+}
+
+/**
+ * One page of the vault's history, newest first: the two calls above, composed.
+ * Server-side only — the browser relay serves neither method.
+ */
+export async function listVaultActivity(
+  pool: RpcPool,
+  vault: string,
+  options: { readonly limit?: number; readonly before?: string } = {},
+): Promise<ChainRead<VaultActivityPage>> {
+  const page = await listVaultSignatures(pool, vault, options);
+  if (page.kind !== "exists") return page;
+  const entries = await readVaultTransactions(pool, vault, page.value.listed);
+  if (entries.kind !== "exists") return entries;
+  return { kind: "exists", value: { entries: entries.value, nextBefore: page.value.nextBefore } };
 }

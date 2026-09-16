@@ -4,7 +4,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { SAVED } from "@/lib/classes";
 import { fillLabel, timeAgo, usd, usdSigned } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { tickerLogo, type Trade } from "@/mocks";
+// The leaf, not the barrel: `@/mocks` also re-exports the seeded dataset, and this file ships to the browser.
+import { tickerLogo, type Trade } from "@/mocks/types";
 
 /**
  * One trade on the strip: its mark and what it put aside. Every fill — buy or

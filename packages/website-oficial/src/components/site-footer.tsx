@@ -35,8 +35,9 @@ import { cn } from "@/lib/utils";
  * modal over the dashboard; a second, worse door in the footer would undo that.
  */
 const LINKS = [
-  { title: "Pension", href: "#" },
-  { title: "Activity", href: "#activity" },
+  { title: "Pension", href: "/" },
+  // A real route now, not an anchor into a sidebar that only exists from lg up.
+  { title: "Activity", href: "/activity" },
   { title: "Docs", href: "#" },
   { title: "Privacy", href: "#" },
   { title: "Terms", href: "#" },

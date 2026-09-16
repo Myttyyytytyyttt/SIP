@@ -37,6 +37,18 @@ export function useSolanaConfig(): SolanaPublicConfig {
 }
 
 /**
+ * The same configuration, or null outside <Providers>, for a component that can
+ * say LESS without it rather than fail.
+ *
+ * The live dashboard uses this to name a missing keeper seat: worth saying when
+ * the configuration is there, never worth a thrown error when it is not (a unit
+ * test rendering one panel, or any tree mounted without the provider).
+ */
+export function useSolanaConfigOrNull(): SolanaPublicConfig | null {
+  return useContext(SolanaConfigContext);
+}
+
+/**
  * Solana Ledger support, mounted INSIDE PrivyProvider. A Ledger signs
  * transactions but not the message Sign-In With Solana needs, so a Ledger-backed
  * Phantom fails to log in with "There was an error attempting to sign the

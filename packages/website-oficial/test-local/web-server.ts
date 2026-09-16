@@ -30,6 +30,8 @@ import { LOCAL_PORTS, SIP_VAULT_PROGRAM_ID, busyPorts, tcpRefused } from "./loca
 export const WEB_PORT = 3_015;
 export const WEB_ORIGIN = `http://localhost:${WEB_PORT}`;
 export const CLIENT_IP_HEADERS = { "x-real-ip": "127.0.0.1" } as const;
+/** The live proof's counting relay sits here, between the web and the validator. */
+export const RELAY_PORT = 3_016;
 
 const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
 const READY_TIMEOUT_MS = 60_000;
@@ -56,15 +58,24 @@ export const portRefused = async (port: number): Promise<boolean> => (await tcpR
  * TCP and UDP, and this server's. Empty before anything starts, and empty again
  * once both are stopped. It names ports and stops nothing.
  */
-export async function proofPortsInUse(): Promise<number[]> {
+export async function proofPortsInUse(extra: readonly number[] = []): Promise<number[]> {
   const busy = await busyPorts();
-  return (await portRefused(WEB_PORT)) ? busy : [...busy, WEB_PORT];
+  const held = [...busy];
+  for (const port of [WEB_PORT, ...extra]) {
+    if (!(await portRefused(port))) held.push(port);
+  }
+  return held;
 }
 
 /** fetch with the trusted client-IP header added. */
 export const withClientIp: typeof fetch = (input, init) => fetch(input, { ...init, headers: { ...(init?.headers as Record<string, string> | undefined), ...CLIENT_IP_HEADERS } });
 
-export async function startWebServer(): Promise<WebServer> {
+/**
+ * `rpcUrl` points the web at something other than the validator directly — the
+ * live proof puts its counting relay in between, to see what actually left the
+ * web. Default unchanged: the validator's own RPC.
+ */
+export async function startWebServer(options: { readonly rpcUrl?: string } = {}): Promise<WebServer> {
   if (!existsSync(join(PACKAGE_DIR, ".next", "BUILD_ID"))) {
     throw new Error("there is no production build: run `pnpm --filter @sip/web run build` first. This harness never builds.");
   }
@@ -76,7 +87,7 @@ export async function startWebServer(): Promise<WebServer> {
     NODE_ENV: "production",
     NEXT_TELEMETRY_DISABLED: "1",
     HOME: home,
-    SIP_SOLANA_RPC_URLS: `http://127.0.0.1:${LOCAL_PORTS.rpc}`,
+    SIP_SOLANA_RPC_URLS: options.rpcUrl ?? `http://127.0.0.1:${LOCAL_PORTS.rpc}`,
     SIP_SOLANA_PROGRAM_ID: SIP_VAULT_PROGRAM_ID.toBase58(),
     SIP_TRUSTED_CLIENT_IP_HEADER: "x-real-ip",
     SIP_SOLANA_SEND_PER_MIN: "120",

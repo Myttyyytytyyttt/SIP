@@ -32,7 +32,8 @@ await page.evaluate(() => document.fonts.ready);
 await page.addStyleTag({ content: "nextjs-portal{display:none!important}header{display:none!important}" });
 await page.waitForTimeout(2200);
 const tabs = await page.$$eval('[role="tab"]', (ts) => ts.map((t) => `${t.textContent.trim()}:${t.getAttribute("data-state")}${t.hasAttribute("disabled") ? ":disabled" : ""}`));
-if (!tabs.includes("Mock:active") || !tabs.includes("Live:inactive:disabled")) throw new Error(`not the example-without-a-key state: ${tabs.join(" ")}`);
+// Live is a real choice now (it shows the connect card), so it is inactive but never disabled.
+if (!tabs.includes("Mock:active") || !tabs.includes("Live:inactive")) throw new Error(`not the example-without-a-key state: ${tabs.join(" ")}`);
 await page.screenshot({ path: out, type: "png", clip: { x: 0, y: 0, width: 1600, height: 1000 } });
 console.log(`wrote ${out}`);
 await browser.close();

@@ -40,8 +40,6 @@
 // test:local`, with SIP_LOCAL_PROGRAM_SO naming the binary when this checkout has
 // no target/.
 
-import { createPrivateKey, sign } from "node:crypto";
-
 import {
   ATA_PROGRAM,
   DEFAULT_INVEST_CAPS,
@@ -92,7 +90,10 @@ import { createVaultApi, transactionErrorWords, type InvestPolicyBuildJson, type
 import { createVaultFlow, investPolicyFlow, linkWalletFlow, pauseInvestingFlow, withdrawFlow, withdrawTokenFlow, type FlowResult } from "@/lib/vault-flows";
 
 import { ED25519_CONSENT_HEADER_HEX, GOLDEN_CONVERT_FLOOR_WAD, GOLDEN_SPYX_FLOOR_WAD, OWNER_INSTRUCTION_DATA_HEX } from "../../solana-core/test/fixtures/owner-transactions";
-import { startLocalValidator, type LocalValidator, type PreloadedAccount, type StoppedValidator } from "./local-validator";
+import { startLocalValidator, type LocalValidator, type StoppedValidator } from "./local-validator";
+// The waits, the throwaway signers and the mainnet template: shared with the
+// live proof rather than copied, so one cannot drift from the other.
+import { createProofChain, signBytes, signWith, spyxHoldingAccount, wallets } from "./proof-helpers";
 import { CLIENT_IP_HEADERS, WEB_ORIGIN, proofPortsInUse, startWebServer, withClientIp, type StoppedWebServer, type WebServer } from "./web-server";
 
 const SOL = BigInt(LAMPORTS_PER_SOL);
@@ -114,47 +115,7 @@ const spyxHolding = Keypair.generate();
 
 const key = (keypair: Keypair): string => keypair.publicKey.toBase58();
 
-const MAINNET_RPC = "https://api.mainnet-beta.solana.com";
-/** The SPYx/USDC pool's SPYx vault on mainnet: a Token-2022 account with SPYx's account extensions, 175 bytes. */
-const SPYX_TEMPLATE_ACCOUNT = "CiQuPAfYp5v82vijk6u7wqFnaZqtGdJfUUSjDKAtT9ML";
 const SPYX_HOLDING_RAW = 12_345_678n;
-
-/** One read-only getAccountInfo from mainnet's public RPC, retried once if it throttles. */
-async function mainnetAccountBytes(address: string): Promise<{ owner: string; data: Uint8Array }> {
-  for (let attempt = 0; ; attempt++) {
-    const response = await fetch(MAINNET_RPC, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getAccountInfo", params: [address, { encoding: "base64", commitment: "confirmed" }] }),
-    });
-    if (response.status === 429 && attempt === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 5_000));
-      continue;
-    }
-    const body = (await response.json()) as { result?: { value?: { owner?: string; data?: [string, string] } | null } };
-    const value = body.result?.value;
-    const data = tryBase64Decode(value?.data?.[0] ?? "");
-    if (value?.owner === undefined || data === null) throw new Error(`mainnet did not answer the account ${address} (HTTP ${response.status})`);
-    return { owner: value.owner, data };
-  }
-}
-
-/** The vault's SPYx holding: the template's bytes with owner vault A, amount 12,345,678, and no delegate or close authority. */
-async function spyxHoldingAccount(vault: PublicKey): Promise<PreloadedAccount> {
-  const template = await mainnetAccountBytes(SPYX_TEMPLATE_ACCOUNT);
-  if (template.owner !== TOKEN_2022_PROGRAM || template.data.length !== 175 || template.data[165] !== 2 || template.data[108] !== 1) {
-    throw new Error("the SPYx template account is no longer an initialized 175-byte Token-2022 account");
-  }
-  const data = template.data.slice();
-  data.set(vault.toBytes(), 32);
-  new DataView(data.buffer).setBigUint64(64, SPYX_HOLDING_RAW, true);
-  data[72] = 0; // delegate: none
-  data[129] = 0; // close authority: none
-  return {
-    pubkey: key(spyxHolding),
-    json: { pubkey: key(spyxHolding), account: { lamports: 10_000_000, data: [base64Encode(data), "base64"], owner: TOKEN_2022_PROGRAM, executable: false, rentEpoch: 0, space: 175 } },
-  };
-}
 
 let validator: LocalValidator | undefined;
 let web: WebServer | undefined;
@@ -162,6 +123,10 @@ let connection: Connection;
 let api: VaultApi;
 const rents = new Map<number, bigint>();
 let configured = false;
+
+// The validator opens in beforeAll, so the helpers read the connection through a
+// getter. Bound to the same names the steps below already use.
+const { confirmed, landed, airdrop, direct } = createProofChain(() => connection);
 
 const report = {
   keys: {
@@ -190,45 +155,6 @@ function earlier<T>(value: T | undefined, what: string): T {
 const rent = (size: number): bigint => earlier(rents.get(size), `the rent for ${size} bytes`);
 const lamports = async (address: string): Promise<bigint> => BigInt(await connection.getBalance(new PublicKey(address), "confirmed"));
 
-/** What a wallet's signMessage returns, with node:crypto. */
-function signBytes(signer: Keypair, message: Uint8Array): Uint8Array {
-  const privateKey = createPrivateKey({
-    key: { kty: "OKP", crv: "Ed25519", d: Buffer.from(signer.secretKey.subarray(0, 32)).toString("base64url"), x: Buffer.from(signer.publicKey.toBytes()).toString("base64url") },
-    format: "jwk",
-  });
-  return Uint8Array.from(sign(null, message, privateKey));
-}
-
-/** What a wallet's signTransaction returns: its own slot signed over the bytes it was given. */
-function signWith(bytes: Uint8Array, signer: Keypair): Uint8Array {
-  const tx = VersionedTransaction.deserialize(bytes);
-  tx.sign([signer]);
-  return Uint8Array.from(tx.serialize());
-}
-
-async function confirmed(signature: string): Promise<void> {
-  const deadline = Date.now() + CONFIRM_TIMEOUT_MS;
-  for (;;) {
-    const [status] = (await connection.getSignatureStatuses([signature])).value;
-    if (status?.err) throw new Error(`${signature} failed: ${JSON.stringify(status.err)}`);
-    if (status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized") return;
-    if (Date.now() > deadline) throw new Error(`${signature} was not confirmed within ${CONFIRM_TIMEOUT_MS / 1_000} s`);
-    await sleep(250);
-  }
-}
-
-async function landed(signature: string): Promise<VersionedTransactionResponse> {
-  await confirmed(signature);
-  for (let attempt = 0; attempt < 40; attempt++) {
-    const tx = await connection.getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 });
-    if (tx !== null) {
-      expect(tx.meta?.err ?? null).toBeNull();
-      return tx;
-    }
-    await sleep(250);
-  }
-  throw new Error(`${signature} could not be read back`);
-}
 
 const keysOf = (tx: VersionedTransactionResponse): string[] => tx.transaction.message.staticAccountKeys.map((account) => account.toBase58());
 const programsOf = (tx: VersionedTransactionResponse): string[] => tx.transaction.message.compiledInstructions.map((instruction) => keysOf(tx)[instruction.programIdIndex]!);
@@ -264,52 +190,6 @@ function landedSignature(result: FlowResult): string {
   return result.signature;
 }
 
-async function airdrop(to: PublicKey, amount: bigint): Promise<void> {
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt < 10; attempt++) {
-    try {
-      await confirmed(await connection.requestAirdrop(to, Number(amount)));
-      return;
-    } catch (error) {
-      // The faucet answers a moment after the RPC does.
-      lastError = error;
-      await sleep(1_000);
-    }
-  }
-  throw new Error(`the faucet did not fund ${to.toBase58()}: ${String(lastError)}`);
-}
-
-/** Privy, replaced: a pension key and a trading wallet as Keypairs, every call recorded. */
-function wallets(owner: Keypair, trading: Keypair) {
-  const calls = { order: [] as string[], consent: [] as Uint8Array[], consentSigned: [] as Uint8Array[], pensionIn: [] as Uint8Array[], pensionOut: [] as Uint8Array[], tradingIn: [] as Uint8Array[] };
-  return {
-    calls,
-    pension: {
-      signWithPension: async (bytes: Uint8Array) => {
-        calls.order.push("pension");
-        calls.pensionIn.push(bytes);
-        const signed = signWith(bytes, owner);
-        calls.pensionOut.push(signed);
-        return signed;
-      },
-    },
-    trading: {
-      signMessageWithTrading: async (message: Uint8Array) => {
-        calls.order.push("consent");
-        calls.consent.push(message);
-        const signature = signBytes(trading, message);
-        calls.consentSigned.push(signature);
-        return signature;
-      },
-      signWithTrading: async (bytes: Uint8Array) => {
-        calls.order.push("trading");
-        calls.tradingIn.push(bytes);
-        return signWith(bytes, trading);
-      },
-    },
-  };
-}
-
 async function rawBuild(body: unknown, headers: Record<string, string> = {}): Promise<{ status: number; json: { error?: { code?: string; vault?: string } } }> {
   const response = await fetch(`${WEB_ORIGIN}/api/solana-build`, {
     method: "POST",
@@ -317,15 +197,6 @@ async function rawBuild(body: unknown, headers: Record<string, string> = {}): Pr
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
   return { status: response.status, json: (await response.json()) as never };
-}
-
-/** Sends signed bytes straight to the validator, past the web's relay, and waits for them to land. */
-async function direct(transaction: Transaction, ...signers: Keypair[]): Promise<VersionedTransactionResponse> {
-  const recent = await connection.getLatestBlockhash("confirmed");
-  transaction.recentBlockhash = recent.blockhash;
-  transaction.feePayer = signers[0]!.publicKey;
-  transaction.sign(...signers);
-  return landed(await connection.sendRawTransaction(transaction.serialize(), { skipPreflight: false }));
 }
 
 const tokenAmount = async (account: string): Promise<bigint> => BigInt((await connection.getTokenAccountBalance(new PublicKey(account), "confirmed")).value.amount);
@@ -340,7 +211,7 @@ beforeAll(async () => {
   const held = await proofPortsInUse();
   if (held.length > 0) throw new Error(`refusing to start: port(s) ${held.join(", ")} are in use. Nothing was started, and nothing was stopped.`);
   const vaultA = new PublicKey(deriveVaultPda(key(ownerA)).toBase58());
-  const holding = await spyxHoldingAccount(vaultA);
+  const holding = await spyxHoldingAccount({ vault: vaultA, at: spyxHolding.publicKey, amountRaw: SPYX_HOLDING_RAW });
   started = true;
   validator = await startLocalValidator(upgradeAuthority.publicKey, { accounts: [holding] });
   connection = validator.connection;

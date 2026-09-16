@@ -6,7 +6,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { MONO } from "@/lib/classes";
 import { pct, shares, usd } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { tickerLogo, type Holding, type SavingsRule, type SavingsStats } from "@/mocks";
+// The leaf, not the barrel: `@/mocks` also re-exports the seeded dataset.
+import { tickerLogo, type Holding, type SavingsRule, type SavingsStats } from "@/mocks/types";
 
 /**
  * What the pension holds, one row per asset, in the order they arrive: the
