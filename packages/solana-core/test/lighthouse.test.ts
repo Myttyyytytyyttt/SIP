@@ -7,7 +7,15 @@ import { describe, expect, it } from "vitest";
 
 import { LIGHTHOUSE_PROGRAM, MEMO_PROGRAM, SPYX_MINT, TOKEN_2022_PROGRAM } from "../src/client/addresses";
 import { SIP_PROGRAM_ID } from "../src/client/idl";
-import { MAX_GUARD_ASSERTIONS, MAX_WALLET_GUARDS, WALLET_GUARD_REFUSALS, checkWalletGuards, readLighthouseGuard } from "../src/client/lighthouse";
+import {
+  MAX_GUARD_ASSERTIONS,
+  MAX_LEADING_WALLET_GUARDS,
+  MAX_TRAILING_WALLET_GUARDS,
+  MAX_WALLET_GUARDS,
+  WALLET_GUARD_REFUSALS,
+  checkWalletGuards,
+  readLighthouseGuard,
+} from "../src/client/lighthouse";
 import { buildWithdrawToken } from "../src/server/builders";
 import { deriveAta } from "../src/server/pda";
 import { MAX_TX_BYTES } from "../src/server/relay-policy";
@@ -28,6 +36,12 @@ const phantom = (name: OwnerFixtureName, rewrite: PhantomRewrite): Uint8Array =>
 
 /** Phantom's usual check: the pension key's lamports, owner and data length after the transaction. */
 const payerCheck = (): TransactionInstruction => guard(GUARD_DATA.payer(1_000_000_000n), owner.publicKey);
+
+/** The accounts `name`'s own instructions write, other than the fee payer: what Phantom's leading block checks, one each. */
+const writtenBesidesPayer = (name: OwnerFixtureName): string[] => {
+  const message = VersionedTransaction.deserialize(unsigned(name)).message;
+  return message.staticAccountKeys.flatMap((key, index) => (index > 0 && message.isAccountWritable(index) ? [key.toBase58()] : []));
+};
 
 function expectRefusal(bytes: Uint8Array, reason: VerifyRefusal, detail?: RegExp): void {
   const result = verifySignedTransaction(bytes);
@@ -59,6 +73,9 @@ describe("readLighthouseGuard", () => {
     ["a token account's delegate, delegated amount and derivation", "0a04030300000600000000000000000508", "AssertTokenAccountMulti", 3],
     ["a program-owned account's owner", "0604010297b9457d8bbefa5f1562efbf3db07d84cdc0ef3cab00ccafc499c4411c05da9800", "AssertAccountInfoMulti", 1],
     ["a token account's owner and mint, as 4ZE2LMw9…", "0a04040300000600000000000000000501c5b057ab45a92c6088bf5ee002180a75dee9f7468279e80ad28428ac4f5ad3ab0000d6f4cb70e5e68dcccdd719d4502f42bb8113a2b60ce9b4cf61bec675f0b38d3300", "AssertTokenAccountMulti", 4],
+    // Ahead of the dapp's instructions, before the account changes.
+    ["an account about to be created: no lamports, as 37v2uzTK… #6", "06040100000000000000000000", "AssertAccountInfoMulti", 1],
+    ["a mint's owner, length and data hash, as 2R41Np8D… #5", "060403030100015200000000000000000826f8f5f22fbbe99f2cd00004223a890e81f2299299ca8aa8087cd48537076b3b0052", "AssertAccountInfoMulti", 3],
   ])("reads Phantom's mainnet check on %s", (_, hex, kind, assertions) => {
     expect(readLighthouseGuard(Uint8Array.from(Buffer.from(hex, "hex")))).toEqual({ ok: true, kind, logLevel: 4, assertions });
   });
@@ -130,7 +147,7 @@ describe("readLighthouseGuard", () => {
 describe("checkWalletGuards", () => {
   it("with no Lighthouse instruction answers ok and reads nothing else: every other rule stays the caller's", () => {
     const message = { keys: ["a", "b"], privileges: [], instructions: [{ programId: "x", accountKeys: ["zzz"], data: new Uint8Array(0) }] };
-    expect(checkWalletGuards(message, new Map())).toEqual({ ok: true, ownCount: 1, guards: [] });
+    expect(checkWalletGuards(message, new Map())).toEqual({ ok: true, guards: [] });
   });
 
   it("names its refusals as the verifier does", () => {
@@ -177,7 +194,7 @@ describe("rule 8c accepts Phantom's checks on what SaverFi builds", () => {
     }
   });
 
-  it(`set_invest_policy: its three token-account creations, then checks on the pension key, the policy and each new account — ${MAX_WALLET_GUARDS} in all`, () => {
+  it(`set_invest_policy: its three token-account creations, then checks on the pension key, the policy and each new account — ${MAX_TRAILING_WALLET_GUARDS} in all`, () => {
     const vault = account("SET_INVEST_POLICY_GOLDEN_FLOORS", "vault");
     const created = FIRST_POLICY_VAULT_TOKEN_ACCOUNTS.map((entry) => deriveAta(vault, entry.mint, entry.tokenProgram));
     const guards = [
@@ -186,7 +203,7 @@ describe("rule 8c accepts Phantom's checks on what SaverFi builds", () => {
       guard(GUARD_DATA.owner(SIP_PROGRAM_ID), account("SET_INVEST_POLICY_GOLDEN_FLOORS", "policy")),
       guard(GUARD_DATA.owner(SIP_PROGRAM_ID), vault),
     ];
-    expect(guards).toHaveLength(MAX_WALLET_GUARDS);
+    expect(guards).toHaveLength(MAX_TRAILING_WALLET_GUARDS);
     const result = expectVerified(phantom("SET_INVEST_POLICY_GOLDEN_FLOORS", { guards }));
     expect(result.instructions.map((instruction) => instruction.name)).toEqual([
       "SetComputeUnitLimit",
@@ -211,23 +228,155 @@ describe("rule 8c accepts Phantom's checks on what SaverFi builds", () => {
   });
 });
 
-describe("rule 8c refuses everything else", () => {
-  it("a check before SaverFi's first instruction, between the compute-budget pair, or after it and before create_vault_v2 (where Phantom sometimes puts one): lighthouse_misplaced", () => {
-    for (const at of [0, 1, 2]) {
-      expectRefusal(phantom("CREATE_VAULT_V2_PROFIT_DEFAULTS", { guards: [payerCheck()], at }), "lighthouse_misplaced", /relayed only after all of SaverFi's instructions|stands first/);
+describe("rule 8c accepts Phantom's leading block of pre-state checks, right after the compute budget", () => {
+  const names = (bytes: Uint8Array): (string | null)[] => expectVerified(bytes).instructions.map((instruction) => instruction.name);
+
+  it.each(Object.keys(fixtures) as OwnerFixtureName[])("%s with a check on each account it writes besides the pension key, then the pension key's, legacy and v0", (name) => {
+    const written = writtenBesidesPayer(name);
+    expect(written.length).toBeGreaterThan(0);
+    for (const version of ["legacy", 0] as const) {
+      const result = expectVerified(phantom(name, { leading: written.map((address) => guard(GUARD_DATA.created(), address)), guards: [payerCheck()], version }));
+      expect(result.instruction.name).toBe(fixtures[name].built.instruction);
+      expect(result.instructions.slice(0, 2 + written.length).map((instruction) => instruction.name)).toEqual([
+        "SetComputeUnitLimit",
+        "SetComputeUnitPrice",
+        ...written.map(() => "AssertAccountInfoMulti"),
+      ]);
     }
-    // A leading block and a trailing check together.
-    const signed = signedAsPhantom(unsigned("WITHDRAW_150000000"), { guards: [guard(GUARD_DATA.owner(SIP_PROGRAM_ID), account("WITHDRAW_150000000", "vault"))], at: 2, edit: (message) => message.instructions.push(payerCheck()) }, owner);
-    expectRefusal(signed, "lighthouse_misplaced", /at position 3 stands before SaverFi's own instruction at position 4/);
   });
 
-  it("a check between the consent's Ed25519SigVerify and link_wallet, or ahead of the consent: lighthouse_misplaced, before the consent rules read positions", () => {
+  it("create_vault_v2 exactly as Phantom opens a transaction that creates an account: no lamports on the vault ahead of create_vault_v2, the pension key's check after it", () => {
+    const vault = account("CREATE_VAULT_V2_PROFIT_DEFAULTS", "vault");
+    const signed = phantom("CREATE_VAULT_V2_PROFIT_DEFAULTS", { leading: [guard(Uint8Array.from(Buffer.from("06040100000000000000000000", "hex")), vault)], guards: [payerCheck()] });
+    expect(names(signed)).toEqual(["SetComputeUnitLimit", "SetComputeUnitPrice", "AssertAccountInfoMulti", "create_vault_v2", "AssertAccountInfoMulti"]);
+  });
+
+  it("checkWalletGuards names each block: the leading check's position and account, then the trailing one's", () => {
+    const tx = rewriteAsPhantom(unsigned("CREATE_VAULT_V2_PROFIT_DEFAULTS"), { leading: [guard(GUARD_DATA.created(), account("CREATE_VAULT_V2_PROFIT_DEFAULTS", "vault"))], guards: [payerCheck()] });
+    const message = tx.message;
+    const keys = message.staticAccountKeys.map((key) => key.toBase58());
+    const privileges = keys.map((_, index) => ({ signer: message.isAccountSigner(index), writable: message.isAccountWritable(index) }));
+    const instructions = message.compiledInstructions.map((instruction) => ({ programId: keys[instruction.programIdIndex]!, accountKeys: instruction.accountKeyIndexes.map((index) => keys[index]!), data: instruction.data }));
+    const own = new Map(keys.flatMap((key, index) => (key === LIGHTHOUSE_PROGRAM ? [] : [[key, privileges[index]!] as const])));
+    expect(checkWalletGuards({ keys, privileges, instructions }, own)).toEqual({
+      ok: true,
+      guards: [
+        { position: 2, block: "leading", kind: "AssertAccountInfoMulti", logLevel: 4, assertions: 1, account: account("CREATE_VAULT_V2_PROFIT_DEFAULTS", "vault") },
+        { position: 4, block: "trailing", kind: "AssertAccountInfoMulti", logLevel: 4, assertions: 3, account: owner.publicKey.toBase58() },
+      ],
+    });
+  });
+
+  it("link_wallet, both signers, as Phantom writes it for SaverFi's two-signer shape: checks on the new trading link ahead of the consent, which still stands immediately before link_wallet", () => {
+    const tradingLink = account("LINK_WALLET", "trading_link");
+    // Lamports == 0 on an account about to be created, or KnownOwner == System with DataLength == 0 (the bytes of 58h7tTNX… #7).
+    for (const check of [GUARD_DATA.created(), Uint8Array.from(Buffer.from("06040203000001000000000000000000", "hex"))]) {
+      for (const version of ["legacy", 0] as const) {
+        const signed = phantom("LINK_WALLET", { leading: [guard(check, tradingLink)], guards: [payerCheck(), guard(GUARD_DATA.owner(SIP_PROGRAM_ID), tradingLink)], version });
+        expect(signed.length).toBeLessThanOrEqual(MAX_TX_BYTES);
+        const result = expectVerified(signed);
+        expect(result.signers).toEqual([owner.publicKey.toBase58(), wallet.publicKey.toBase58()]);
+        expect(result.instructions.map((instruction) => instruction.name)).toEqual([
+          "SetComputeUnitLimit",
+          "SetComputeUnitPrice",
+          "AssertAccountInfoMulti",
+          "Ed25519SigVerify",
+          "link_wallet",
+          "AssertAccountInfoMulti",
+          "AssertAccountInfoMulti",
+        ]);
+      }
+    }
+  });
+
+  it(`set_invest_policy: no lamports on the policy and on each token account ahead of their creations (${MAX_LEADING_WALLET_GUARDS}, the most any owner transaction writes), then the pension key and each new token account after`, () => {
+    const vault = account("SET_INVEST_POLICY_GOLDEN_FLOORS", "vault");
+    const created = FIRST_POLICY_VAULT_TOKEN_ACCOUNTS.map((entry) => deriveAta(vault, entry.mint, entry.tokenProgram).toBase58());
+    const leading = [account("SET_INVEST_POLICY_GOLDEN_FLOORS", "policy"), ...created].map((address) => guard(GUARD_DATA.created(), address));
+    expect(leading).toHaveLength(MAX_LEADING_WALLET_GUARDS);
+    expect(Math.max(...(Object.keys(fixtures) as OwnerFixtureName[]).map((name) => writtenBesidesPayer(name).length))).toBe(MAX_LEADING_WALLET_GUARDS);
+    const signed = phantom("SET_INVEST_POLICY_GOLDEN_FLOORS", { leading, guards: [payerCheck(), ...created.map((address) => guard(GUARD_DATA.token(0n), address))] });
+    expect(signed.length).toBeLessThanOrEqual(MAX_TX_BYTES);
+    expect(names(signed)).toEqual([
+      "SetComputeUnitLimit",
+      "SetComputeUnitPrice",
+      "AssertAccountInfoMulti",
+      "AssertAccountInfoMulti",
+      "AssertAccountInfoMulti",
+      "AssertAccountInfoMulti",
+      "CreateIdempotent",
+      "CreateIdempotent",
+      "CreateIdempotent",
+      "set_invest_policy",
+      "AssertAccountInfoMulti",
+      "AssertTokenAccountMulti",
+      "AssertTokenAccountMulti",
+      "AssertTokenAccountMulti",
+    ]);
+  });
+
+  it("withdraw and withdraw_token: the vault's owner, and each token account's delegate and derivation, ahead of them", () => {
+    expect(names(phantom("WITHDRAW_150000000", { leading: [guard(GUARD_DATA.owner(SIP_PROGRAM_ID), account("WITHDRAW_150000000", "vault"))], guards: [payerCheck()] }))).toEqual([
+      "SetComputeUnitLimit",
+      "SetComputeUnitPrice",
+      "AssertAccountInfoMulti",
+      "withdraw",
+      "AssertAccountInfoMulti",
+    ]);
+    const ownerToken = account("WITHDRAW_TOKEN_12345678", "owner_token");
+    const leading = [guard(GUARD_DATA.pretoken(), account("WITHDRAW_TOKEN_12345678", "vault_token")), guard(GUARD_DATA.created(), ownerToken)];
+    expect(expectVerified(phantom("WITHDRAW_TOKEN_12345678", { leading, guards: [payerCheck(), guard(GUARD_DATA.token(12_345_678n), ownerToken)] })).instruction.name).toBe("withdraw_token");
+    // A leading block with no check after SaverFi's instructions.
+    expectVerified(phantom("WITHDRAW_150000000", { leading: [guard(GUARD_DATA.owner(SIP_PROGRAM_ID), account("WITHDRAW_150000000", "vault"))], guards: [] }));
+  });
+});
+
+describe("rule 8c refuses everything else", () => {
+  it("a check before SaverFi's first instruction or inside the compute-budget pair: lighthouse_misplaced; right after the pair, on the fee payer: lighthouse_accounts", () => {
+    expectRefusal(phantom("CREATE_VAULT_V2_PROFIT_DEFAULTS", { guards: [payerCheck()], at: 0 }), "lighthouse_misplaced", /stands first, before any of SaverFi's own instructions/);
+    const vaultCheck = guard(GUARD_DATA.created(), account("CREATE_VAULT_V2_PROFIT_DEFAULTS", "vault"));
+    expectRefusal(phantom("CREATE_VAULT_V2_PROFIT_DEFAULTS", { guards: [vaultCheck], at: 1 }), "lighthouse_misplaced", /position 2 stands before SaverFi's own instruction at position 3; Lighthouse checks are relayed only right after SaverFi's compute budget, or after all of SaverFi's instructions/);
+    expectRefusal(phantom("CREATE_VAULT_V2_PROFIT_DEFAULTS", { guards: [payerCheck()], at: 2 }), "lighthouse_accounts", /position 3, ahead of SaverFi's instructions, checks the fee payer/);
+  });
+
+  it("a leading block with a compute-budget instruction after it, anywhere, or after one compute-budget instruction alone: lighthouse_misplaced", () => {
+    const vaultCheck = guard(GUARD_DATA.created(), account("CREATE_VAULT_V2_PROFIT_DEFAULTS", "vault"));
+    // [SetComputeUnitLimit, check, create_vault_v2, SetComputeUnitPrice, the pension key's check]: the price moved past the block.
+    const signed = phantom("CREATE_VAULT_V2_PROFIT_DEFAULTS", {
+      leading: [vaultCheck],
+      guards: [payerCheck()],
+      edit: (message) => {
+        const [price] = message.instructions.splice(1, 1);
+        message.instructions.splice(2, 0, price!);
+      },
+    });
+    expect(VersionedTransaction.deserialize(signed).message.compiledInstructions).toHaveLength(5);
+    expectRefusal(signed, "lighthouse_misplaced", /position 2 stands before SaverFi's own instruction at position 3/);
+    // [SetComputeUnitLimit, check, create_vault_v2, the pension key's check]: the relay takes an owner transaction with no price, but no block after a lone limit.
+    const limitOnly = phantom("CREATE_VAULT_V2_PROFIT_DEFAULTS", { leading: [vaultCheck], guards: [payerCheck()], edit: (message) => void message.instructions.splice(1, 1) });
+    expect(verifySignedTransaction(phantom("CREATE_VAULT_V2_PROFIT_DEFAULTS", { guards: [payerCheck()], edit: (message) => void message.instructions.splice(1, 1) })).ok).toBe(true);
+    expectRefusal(limitOnly, "lighthouse_misplaced", /position 2 stands before SaverFi's own instruction at position 3/);
+  });
+
+  it("a check ahead of SaverFi's instructions on an account they only read — the trading wallet, the vault and config of a link, withdraw_token's vault — or twice on one account: lighthouse_accounts", () => {
+    for (const address of [wallet.publicKey.toBase58(), account("LINK_WALLET", "vault"), account("LINK_WALLET", "config")]) {
+      expectRefusal(phantom("LINK_WALLET", { leading: [guard(GUARD_DATA.system(), address)], guards: [payerCheck()] }), "lighthouse_accounts", new RegExp(`position 3, ahead of SaverFi's instructions, checks ${address}, which SaverFi's own instructions do not write`));
+    }
+    expectRefusal(phantom("WITHDRAW_TOKEN_12345678", { leading: [guard(GUARD_DATA.owner(SIP_PROGRAM_ID), account("WITHDRAW_TOKEN_12345678", "vault"))] , guards: [] }), "lighthouse_accounts", /which SaverFi's own instructions do not write/);
+    const vault = account("WITHDRAW_150000000", "vault");
+    expectRefusal(phantom("WITHDRAW_150000000", { leading: [guard(GUARD_DATA.owner(SIP_PROGRAM_ID), vault), guard(GUARD_DATA.created(), vault)], guards: [] }), "lighthouse_accounts", new RegExp(`position 4, ahead of SaverFi's instructions, checks ${vault} a second time`));
+  });
+
+  it("a check between the consent's Ed25519SigVerify and link_wallet, alone or beside a valid leading block: lighthouse_misplaced, before the consent rules read positions", () => {
     expectRefusal(phantom("LINK_WALLET", { guards: [payerCheck()], at: 3 }), "lighthouse_misplaced", /position 4 stands before SaverFi's own instruction at position 5/);
-    expectRefusal(phantom("LINK_WALLET", { guards: [payerCheck()], at: 2 }), "lighthouse_misplaced");
+    const tradingLink = guard(GUARD_DATA.created(), account("LINK_WALLET", "trading_link"));
+    expectRefusal(phantom("LINK_WALLET", { leading: [tradingLink], guards: [guard(GUARD_DATA.owner(SIP_PROGRAM_ID), account("LINK_WALLET", "trading_link"))], at: 3 }), "lighthouse_misplaced", /position 5 stands before SaverFi's own instruction at position 6/);
   });
 
-  it("a check among the vault's token-account creations, or between them and set_invest_policy: lighthouse_misplaced", () => {
+  it("a check among the vault's token-account creations, or between them and set_invest_policy, alone or beside a valid leading block: lighthouse_misplaced", () => {
     for (const at of [3, 5]) expectRefusal(phantom("SET_INVEST_POLICY_GOLDEN_FLOORS", { guards: [payerCheck()], at }), "lighthouse_misplaced");
+    const policy = guard(GUARD_DATA.created(), account("SET_INVEST_POLICY_GOLDEN_FLOORS", "policy"));
+    expectRefusal(phantom("SET_INVEST_POLICY_GOLDEN_FLOORS", { leading: [policy], guards: [payerCheck()], at: 4 }), "lighthouse_misplaced", /position 6 stands before SaverFi's own instruction at position 7/);
   });
 
   it("MemoryWrite and MemoryClose with the accounts they take, the old fixture's bare MemoryClose, a Noop log level, and trailing bytes: lighthouse_instruction", () => {
@@ -274,9 +423,14 @@ describe("rule 8c refuses everything else", () => {
     expectRefusal(phantom("WITHDRAW_150000000", { guards: [two] }), "lighthouse_instruction", /names 2 accounts; an assertion names exactly one/);
   });
 
-  it(`${MAX_WALLET_GUARDS + 1} checks: lighthouse_count`, () => {
+  it(`${MAX_WALLET_GUARDS + 1} checks, ${MAX_TRAILING_WALLET_GUARDS + 1} after SaverFi's instructions, or ${MAX_LEADING_WALLET_GUARDS + 1} ahead of them: lighthouse_count`, () => {
     const guards = Array.from({ length: MAX_WALLET_GUARDS + 1 }, () => payerCheck());
-    expectRefusal(phantom("WITHDRAW_150000000", { guards }), "lighthouse_count", new RegExp(`${MAX_WALLET_GUARDS + 1} Lighthouse instructions; at most ${MAX_WALLET_GUARDS}`));
+    expectRefusal(phantom("WITHDRAW_150000000", { guards }), "lighthouse_count", new RegExp(`^${MAX_WALLET_GUARDS + 1} Lighthouse instructions; at most ${MAX_WALLET_GUARDS} are relayed$`));
+    const trailing = Array.from({ length: MAX_TRAILING_WALLET_GUARDS + 1 }, () => payerCheck());
+    expectRefusal(phantom("WITHDRAW_150000000", { guards: trailing }), "lighthouse_count", new RegExp(`^${MAX_TRAILING_WALLET_GUARDS + 1} Lighthouse instructions after SaverFi's; at most ${MAX_TRAILING_WALLET_GUARDS} are relayed there$`));
+    const vault = account("WITHDRAW_150000000", "vault");
+    const leading = Array.from({ length: MAX_LEADING_WALLET_GUARDS + 1 }, () => guard(GUARD_DATA.owner(SIP_PROGRAM_ID), vault));
+    expectRefusal(phantom("WITHDRAW_150000000", { leading, guards: [payerCheck()] }), "lighthouse_count", new RegExp(`^${MAX_LEADING_WALLET_GUARDS + 1} Lighthouse instructions ahead of SaverFi's; at most ${MAX_LEADING_WALLET_GUARDS} are relayed there$`));
   });
 
   it("the same bytes for a program one byte away from Lighthouse's id: program_not_allowed", () => {

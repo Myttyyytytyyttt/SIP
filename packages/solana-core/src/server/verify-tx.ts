@@ -26,9 +26,11 @@
 //      count past 4, to at most 6                               program_not_allowed / instruction_count
 //  8c  Lighthouse only as the wallet's checks, by
 //      client/lighthouse.ts checkWalletGuards: after every other
-//      instruction, at most 6, each one assertion kind Phantom
-//      adds, exactly encoded, about one account the others name,
-//      adding no key but its program and no privilege to any    lighthouse_misplaced / lighthouse_count /
+//      instruction (at most 6), or right after the compute budget
+//      on accounts the others write, never the fee payer (at most
+//      4), each one assertion kind Phantom adds, exactly encoded,
+//      about one account the others name, adding no key but its
+//      program and no privilege to any                          lighthouse_misplaced / lighthouse_count /
 //                                                               lighthouse_instruction / lighthouse_accounts
 //   9  exactly one SIP instruction, an owner instruction, whose
 //      arguments decode exactly                                 instruction_count / unknown_discriminator /
@@ -70,8 +72,11 @@
 // an Ed25519 instruction anywhere else is refused because nothing SIP builds
 // puts one there.
 //
-// WHY 8c. Phantom signs on mainnet by appending Lighthouse assertions: each fails
-// the transaction if an account did not end up as Phantom's simulation showed.
+// WHY 8c. Phantom signs on mainnet by adding Lighthouse assertions: each fails
+// the transaction if an account did not end up as Phantom's simulation showed,
+// and some transactions also open with checks on the accounts about to change.
+// A block right after the compute budget ends before the consent's
+// Ed25519SigVerify, so rule 11 still finds it immediately before link_wallet.
 // They are the only instructions relayed that SaverFi did not build, so they are
 // held to what an assertion is. The browser checks Phantom's bytes against the
 // build with the same function; this verifier never saw the build, so its

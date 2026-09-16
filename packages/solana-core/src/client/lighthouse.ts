@@ -12,17 +12,25 @@
 //
 // WHAT IS ACCEPTED, all of it or the whole transaction is refused:
 //   1  the program is exactly LIGHTHOUSE_PROGRAM, read-only and never a signer
-//   2  every Lighthouse instruction stands after ALL of SaverFi's own: never
-//      before or between the compute budget, the consent's Ed25519SigVerify and
-//      link_wallet (the program reads the consent at link_wallet's index − 1,
-//      ed25519_introspection.rs), or the vault's token-account creations and
-//      set_invest_policy
-//   3  at most MAX_WALLET_GUARDS of them
+//   2  every Lighthouse instruction stands in one of two contiguous blocks:
+//        trailing  after ALL of SaverFi's own instructions
+//        leading   right after the compute-budget pair (SetComputeUnitLimit and
+//                  SetComputeUnitPrice) that opens every owner transaction,
+//                  and before every other instruction of SaverFi's
+//      never before or inside the compute budget, between the consent's
+//      Ed25519SigVerify and link_wallet (the program reads the consent at
+//      link_wallet's index − 1, ed25519_introspection.rs; a leading block ends
+//      before the consent, so the two stay adjacent), or among the vault's
+//      token-account creations and set_invest_policy
+//   3  at most MAX_LEADING_WALLET_GUARDS leading and MAX_TRAILING_WALLET_GUARDS
+//      trailing, MAX_WALLET_GUARDS in all
 //   4  each is AssertAccountInfoMulti (6) or AssertTokenAccountMulti (10), at a
 //      log level that calls no program, holding 1 to MAX_GUARD_ASSERTIONS
 //      assertions that decode exactly, every byte consumed (the program itself
 //      ignores trailing bytes; this does not)
-//   5  each names exactly one account, and SaverFi's own instructions name it
+//   5  each names exactly one account, and SaverFi's own instructions name it;
+//      a leading one names an account those instructions WRITE, never the fee
+//      payer, and no account twice in the block
 //   6  the message holds no key but the ones SaverFi's own instructions name and
 //      Lighthouse's, and every key keeps the signer and writable flags those
 //      instructions give it
@@ -41,13 +49,25 @@
 // WHAT PHANTOM WAS SEEN ADDING (mainnet, read-only RPC, September 2026): kinds
 // 6 and 10 only, at log level 4, each naming one account the dapp's own
 // instructions name (the fee payer's lamports, owner and data length; a token
-// account's amount, delegate and derivation), 1 to 6 per transaction, the
+// account's amount, delegate and derivation), 1 to 8 per transaction, the
 // Lighthouse program the only new key, and the dapp's compute budget untouched.
-// In a few transactions Phantom also put checks right after the compute budget,
-// before the dapp's first instruction: rule 2 refuses those, by the owner's
-// decision, and says where the check stood.
+// Most transactions carry checks only at the end: 88 of 96 in one sample. The
+// other 8, and 4 more a review found, open with a block of PRE-state checks, and
+// in all 12 the block
+//   - stands right after the dapp's two compute-budget instructions and before
+//     its first other instruction, contiguous, never anywhere else;
+//   - checks each account the dapp's instructions write, other than the fee
+//     payer, exactly once (Lamports == 0 on one about to be created,
+//     KnownOwner == System with DataLength == 0, Owner == program, a data hash,
+//     or a token account's delegate), 1 to 7 of them;
+//   - is followed by the usual trailing checks, the fee payer's first.
+// Six of the twelve have one signer and six have two, so the block is not about
+// a co-signer; two put it ahead of an Ed25519SigVerify and the program reading
+// it, the shape of SaverFi's link_wallet (58h7tTNXznBLq5M9hJNPLwqysQsLyaQCMH99gKqY6tZEWuXo1EhhVWiD7tcPdJx917dsX2RrkTaqkVbVRek1yYfh,
+// 37v2uzTK8ue91KSKR8zT8hRkYuSDS5Zox6UF8ghZ8bp4kkmDkCg2mJKSY5DafBoxWkv8DwXwMoEcfPae2vW9fPxe).
+// Rules 2, 3 and 5 accept exactly that block and nothing wider.
 
-import { LIGHTHOUSE_PROGRAM } from "./addresses";
+import { COMPUTE_BUDGET_PROGRAM, LIGHTHOUSE_PROGRAM } from "./addresses";
 import type { KeyPrivileges } from "./message";
 
 /** Lighthouse's AssertAccountInfoMulti: lamports, owner, data length, flags or a data hash of one account. */
@@ -56,13 +76,22 @@ export const LIGHTHOUSE_ASSERT_ACCOUNT_INFO_MULTI = 6;
 export const LIGHTHOUSE_ASSERT_TOKEN_ACCOUNT_MULTI = 10;
 
 /**
- * Lighthouse instructions relayed in one transaction. Phantom was seen adding 1
- * to 6 (most often 1 or 2; at most 5 after the dapp's instructions), and
- * SaverFi's largest owner transaction names 6 writable accounts a post-state
- * check could be about (the pension key, the vault, its policy and the three
- * vault token accounts created beside set_invest_policy).
+ * Lighthouse instructions relayed after all of SaverFi's. Phantom was seen adding
+ * 1 to 5 there (most often 1 or 2), and SaverFi's largest owner transaction names
+ * 6 accounts a post-state check could be about (the pension key, the vault, its
+ * policy and the three vault token accounts created beside set_invest_policy).
  */
-export const MAX_WALLET_GUARDS = 6;
+export const MAX_TRAILING_WALLET_GUARDS = 6;
+/**
+ * Lighthouse instructions relayed right after SaverFi's compute budget: one per
+ * account SaverFi's instructions write other than the fee payer (rule 5), and
+ * SaverFi's owner transaction that writes the most, set_invest_policy with its
+ * three token-account creations, writes 4 besides the pension key (the policy and
+ * the three token accounts). Phantom was seen writing 1 to 7 for other programs.
+ */
+export const MAX_LEADING_WALLET_GUARDS = 4;
+/** Lighthouse instructions relayed in one transaction: both blocks. Phantom was seen adding up to 8. */
+export const MAX_WALLET_GUARDS = MAX_LEADING_WALLET_GUARDS + MAX_TRAILING_WALLET_GUARDS;
 /** Assertions in one Lighthouse instruction. Phantom was seen writing 1 to 4. */
 export const MAX_GUARD_ASSERTIONS = 8;
 
@@ -262,9 +291,9 @@ export function readLighthouseGuard(data: Uint8Array): LighthouseGuardRead {
 }
 
 export const WALLET_GUARD_REFUSALS = [
-  /** A Lighthouse instruction before or between SaverFi's own instructions. */
+  /** A Lighthouse instruction anywhere but right after SaverFi's compute budget or after all of SaverFi's instructions. */
   "lighthouse_misplaced",
-  /** More Lighthouse instructions than MAX_WALLET_GUARDS. */
+  /** More Lighthouse instructions than a block, or the transaction, may hold. */
   "lighthouse_count",
   /** A Lighthouse instruction that is not one assertion kind SaverFi relays, exactly encoded, naming one account. */
   "lighthouse_instruction",
@@ -291,6 +320,8 @@ export interface GuardCheckedMessage {
 
 export interface WalletGuard {
   readonly position: number;
+  /** "leading": right after SaverFi's compute budget, checking an account before it changes; "trailing": after all of SaverFi's instructions. */
+  readonly block: "leading" | "trailing";
   readonly kind: LighthouseGuardKind;
   readonly logLevel: number;
   readonly assertions: number;
@@ -301,11 +332,13 @@ export interface WalletGuard {
 export type WalletGuardCheck =
   | {
       readonly ok: true;
-      /** SaverFi's own instructions: the first `ownCount`. All of them when there is no guard. */
-      readonly ownCount: number;
+      /** In message order. Every other instruction is SaverFi's own. */
       readonly guards: readonly WalletGuard[];
     }
   | { readonly ok: false; readonly reason: WalletGuardRefusal; readonly detail: string };
+
+/** SetComputeUnitLimit and SetComputeUnitPrice: every owner transaction opens with both, and Phantom's leading block was only ever seen right after them. */
+const COMPUTE_BUDGET_PAIR = 2;
 
 const describePrivileges = (privileges: KeyPrivileges): string =>
   privileges.signer ? (privileges.writable ? "a writable signer" : "a read-only signer") : privileges.writable ? "writable" : "read-only";
@@ -323,33 +356,55 @@ const describePrivileges = (privileges: KeyPrivileges): string =>
  */
 export function checkWalletGuards(message: GuardCheckedMessage, own: ReadonlyMap<string, KeyPrivileges>): WalletGuardCheck {
   const { instructions } = message;
-  const ownCount = instructions.findIndex((instruction) => instruction.programId === LIGHTHOUSE_PROGRAM);
-  if (ownCount === -1) return { ok: true, ownCount: instructions.length, guards: [] };
+  const isGuard = (position: number): boolean => instructions[position]?.programId === LIGHTHOUSE_PROGRAM;
+  if (!instructions.some((_, position) => isGuard(position))) return { ok: true, guards: [] };
 
-  // 2: after all of SaverFi's own instructions.
-  const after = instructions.findIndex((instruction, position) => position > ownCount && instruction.programId !== LIGHTHOUSE_PROGRAM);
-  if (ownCount === 0 || after !== -1) {
+  // 2: a leading block right after the compute-budget pair that opens the transaction, with no compute-budget instruction after it and
+  // another of SaverFi's instructions after it; a trailing block after all of them. Any other Lighthouse instruction is misplaced.
+  const budget = instructions.findIndex((instruction) => instruction.programId !== COMPUTE_BUDGET_PROGRAM);
+  let leadingEnd = budget;
+  if (budget === COMPUTE_BUDGET_PAIR) {
+    while (isGuard(leadingEnd)) leadingEnd++;
+    const rest = instructions.slice(leadingEnd);
+    if (rest.length === 0 || rest.some((instruction) => instruction.programId === COMPUTE_BUDGET_PROGRAM)) leadingEnd = budget;
+  }
+  let trailingStart = instructions.length;
+  while (trailingStart > leadingEnd && isGuard(trailingStart - 1)) trailingStart--;
+  for (let position = 0; position < instructions.length; position++) {
+    if (!isGuard(position) || (position >= budget && position < leadingEnd) || position >= trailingStart) continue;
+    const next = instructions.findIndex((instruction, at) => at > position && instruction.programId !== LIGHTHOUSE_PROGRAM);
     return {
       ok: false,
       reason: "lighthouse_misplaced",
       detail:
-        ownCount === 0
+        position === 0
           ? "a Lighthouse instruction stands first, before any of SaverFi's own instructions"
-          : `the Lighthouse instruction at position ${ownCount + 1} stands before SaverFi's own instruction at position ${after + 1}; Lighthouse checks are relayed only after all of SaverFi's instructions`,
+          : `the Lighthouse instruction at position ${position + 1} stands before SaverFi's own instruction at position ${next + 1}; Lighthouse checks are relayed only right after SaverFi's compute budget, or after all of SaverFi's instructions`,
     };
   }
 
   // 3
-  const guardCount = instructions.length - ownCount;
-  if (guardCount > MAX_WALLET_GUARDS) {
-    return { ok: false, reason: "lighthouse_count", detail: `${guardCount} Lighthouse instructions; at most ${MAX_WALLET_GUARDS} are relayed` };
+  const leading = leadingEnd - budget;
+  const trailing = instructions.length - trailingStart;
+  if (leading + trailing > MAX_WALLET_GUARDS) {
+    return { ok: false, reason: "lighthouse_count", detail: `${leading + trailing} Lighthouse instructions; at most ${MAX_WALLET_GUARDS} are relayed` };
+  }
+  if (leading > MAX_LEADING_WALLET_GUARDS) {
+    return { ok: false, reason: "lighthouse_count", detail: `${leading} Lighthouse instructions ahead of SaverFi's; at most ${MAX_LEADING_WALLET_GUARDS} are relayed there` };
+  }
+  if (trailing > MAX_TRAILING_WALLET_GUARDS) {
+    return { ok: false, reason: "lighthouse_count", detail: `${trailing} Lighthouse instructions after SaverFi's; at most ${MAX_TRAILING_WALLET_GUARDS} are relayed there` };
   }
 
   // 4 and 5
-  const named = new Set(instructions.slice(0, ownCount).flatMap((instruction) => instruction.accountKeys));
+  const named = new Set(instructions.flatMap((instruction, position) => (isGuard(position) ? [] : instruction.accountKeys)));
+  const feePayer = message.keys[0];
+  const checkedAhead = new Set<string>();
   const guards: WalletGuard[] = [];
-  for (let position = ownCount; position < instructions.length; position++) {
+  for (let position = 0; position < instructions.length; position++) {
+    if (!isGuard(position)) continue;
     const instruction = instructions[position]!;
+    const block = position < leadingEnd ? "leading" : "trailing";
     const at = `the Lighthouse instruction at position ${position + 1}`;
     const read = readLighthouseGuard(instruction.data);
     if (!read.ok) return { ok: false, reason: "lighthouse_instruction", detail: `${at} is ${read.detail}` };
@@ -360,7 +415,15 @@ export function checkWalletGuards(message: GuardCheckedMessage, own: ReadonlyMap
     if (!named.has(account)) {
       return { ok: false, reason: "lighthouse_accounts", detail: `${at} checks ${account}, which SaverFi's own instructions do not name` };
     }
-    guards.push({ position, kind: read.kind, logLevel: read.logLevel, assertions: read.assertions, account });
+    if (block === "leading") {
+      const ahead = `${at}, ahead of SaverFi's instructions,`;
+      const onlyWritten = "checks there are relayed only on the accounts SaverFi's instructions write, other than the fee payer";
+      if (account === feePayer) return { ok: false, reason: "lighthouse_accounts", detail: `${ahead} checks the fee payer ${account}; ${onlyWritten}` };
+      if (own.get(account)?.writable !== true) return { ok: false, reason: "lighthouse_accounts", detail: `${ahead} checks ${account}, which SaverFi's own instructions do not write; ${onlyWritten}` };
+      if (checkedAhead.has(account)) return { ok: false, reason: "lighthouse_accounts", detail: `${ahead} checks ${account} a second time` };
+      checkedAhead.add(account);
+    }
+    guards.push({ position, block, kind: read.kind, logLevel: read.logLevel, assertions: read.assertions, account });
   }
 
   // 1 and 6: no new key but Lighthouse's, and no key's privileges changed.
@@ -382,5 +445,5 @@ export function checkWalletGuards(message: GuardCheckedMessage, own: ReadonlyMap
   for (const key of own.keys()) {
     if (!present.has(key)) return { ok: false, reason: "lighthouse_accounts", detail: `the message no longer holds ${key}` };
   }
-  return { ok: true, ownCount, guards };
+  return { ok: true, guards };
 }

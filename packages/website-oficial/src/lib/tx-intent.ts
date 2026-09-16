@@ -11,8 +11,9 @@
  * After Phantom signs, the bytes it RETURNED are read again. On mainnet Phantom
  * adds Lighthouse checks: those pass only as @sip/solana-core's
  * checkWalletGuards allows, the very function the relay's verifier runs (after
- * all of SaverFi's instructions, assertion kinds only, bounded, about accounts
- * SaverFi names). Everything else must be what was built: SaverFi's own
+ * all of SaverFi's instructions, or right after its compute budget on accounts it
+ * writes; assertion kinds only, bounded, about accounts SaverFi names).
+ * Everything else must be what was built: SaverFi's own
  * instructions decompiled and compared one by one (program, accounts, data,
  * the compute budget included), every key with the signer and writable flags it
  * had, the same blockhash, signers and fee payer, and only the pension key's slot
@@ -283,7 +284,7 @@ export function checkBuiltIntent(bytes: Uint8Array, intent: OwnerIntent): ReadTr
 
 /**
  * The bytes Phantom returned for `built`: Lighthouse checks the relay accepts,
- * after SaverFi's own instructions exactly as built. Anything else is refused
+ * around SaverFi's own instructions exactly as built. Anything else is refused
  * with words, a foreign program by name. Only the first signature slot may be
  * signed.
  */

@@ -97,6 +97,10 @@ const GUARD = {
   token: (min: bigint): number[] => [10, 4, 4, 2, ...u64le(min), 4, 3, 0, 0, 6, ...u64le(0n), 5, 8],
   /** AssertAccountInfoMulti [Owner == program]. */
   owner: (program: string): number[] => [6, 4, 1, 2, ...new PublicKey(program).toBytes(), 0],
+  /** Ahead of the dapp's instructions: AssertAccountInfoMulti [Lamports == 0], on an account about to be created. */
+  created: (): number[] => [6, 4, 1, 0, ...u64le(0n), 0],
+  /** Ahead of the dapp's instructions: AssertTokenAccountMulti [Delegate == None, DelegatedAmount <= 0, OwnerIsDerived]. */
+  pretoken: (): number[] => [10, 4, 3, 3, 0, 0, 6, ...u64le(0n), 5, 8],
 };
 
 /** A Lighthouse instruction checking `account`, read-only and unsigned as Phantom names it, unless `meta` says otherwise. */
@@ -107,6 +111,8 @@ interface Rewrite {
   readonly guards: readonly TransactionInstruction[];
   /** Where the guards go; after every instruction when absent. */
   readonly at?: number;
+  /** Pre-state checks right after SaverFi's compute-budget pair (instruction 2), inserted after `guards`. */
+  readonly leading?: readonly TransactionInstruction[];
   readonly edit?: (message: TransactionMessage) => void;
 }
 
@@ -114,6 +120,7 @@ interface Rewrite {
 function phantomRewrite(bytes: Uint8Array, rewrite: Rewrite, signer: Keypair): Uint8Array {
   const message = TransactionMessage.decompile(VersionedTransaction.deserialize(bytes).message);
   message.instructions.splice(rewrite.at ?? message.instructions.length, 0, ...rewrite.guards);
+  message.instructions.splice(2, 0, ...(rewrite.leading ?? []));
   rewrite.edit?.(message);
   const tx = new VersionedTransaction(message.compileToLegacyMessage());
   tx.sign([signer]);
@@ -860,7 +867,9 @@ describe("linkWalletFlow", () => {
     lighthouse.signWithPension.mockImplementationOnce(async (bytes) => phantomRewrite(bytes, { guards: [guard(GUARD.payer(1n), lighthouse.pensionKey)], at: 3 }, lighthouse.owner));
     const refused = await linkWalletFlow(lighthouse.linkDeps, lighthouse.linkInput);
     expect(!refused.ok && refused.message).toBe(
-      FAILURE_COPY.walletGuardRefused("the Lighthouse instruction at position 4 stands before SaverFi's own instruction at position 5; Lighthouse checks are relayed only after all of SaverFi's instructions"),
+      FAILURE_COPY.walletGuardRefused(
+        "the Lighthouse instruction at position 4 stands before SaverFi's own instruction at position 5; Lighthouse checks are relayed only right after SaverFi's compute budget, or after all of SaverFi's instructions",
+      ),
     );
     expect(lighthouse.signWithTrading).not.toHaveBeenCalled();
     expect(lighthouse.send).not.toHaveBeenCalled();
@@ -947,10 +956,11 @@ describe("Phantom's Lighthouse checks, in the browser and at the relay", () => {
 
   /** The flow, run against `h`: every owner flow whose bytes Phantom signs alone. */
   type Flow = (h: Harness) => Promise<{ ok: boolean; message?: string }>;
-  const flows: Readonly<Record<string, { run: Flow; guards: (h: Harness) => TransactionInstruction[] }>> = {
+  const flows: Readonly<Record<string, { run: Flow; guards: (h: Harness) => TransactionInstruction[]; leading: (h: Harness) => TransactionInstruction[] }>> = {
     create_vault_v2: {
       run: (h) => createVaultFlow(h.createDeps, { pensionKey: h.pensionKey, mode: 0 }),
       guards: (h) => [guard(GUARD.payer(1_000_000n), h.pensionKey)],
+      leading: (h) => [guard(GUARD.created(), deriveVaultPda(h.pensionKey).toBase58())],
     },
     "set_invest_policy with three token-account creations": {
       run: (h) => {
@@ -961,6 +971,10 @@ describe("Phantom's Lighthouse checks, in the browser and at the relay", () => {
         const vault = deriveVaultPda(h.pensionKey);
         return [guard(GUARD.payer(1_000_000n), h.pensionKey), ...POLICY_TARGETS.map((target) => guard(GUARD.token(0n), deriveAta(vault, target.mint, target.tokenProgram).toBase58()))];
       },
+      leading: (h) => {
+        const vault = deriveVaultPda(h.pensionKey);
+        return [deriveInvestPda(vault).toBase58(), ...POLICY_TARGETS.map((target) => deriveAta(vault, target.mint, target.tokenProgram).toBase58())].map((address) => guard(GUARD.created(), address));
+      },
     },
     withdraw: {
       run: (h) => {
@@ -968,6 +982,7 @@ describe("Phantom's Lighthouse checks, in the browser and at the relay", () => {
         return withdrawFlow(h.createDeps, { pensionKey: h.pensionKey, lamports: 150_000_000n });
       },
       guards: (h) => [guard(GUARD.payer(150_000_000n), h.pensionKey)],
+      leading: (h) => [guard(GUARD.owner(SIP_PROGRAM_ID), deriveVaultPda(h.pensionKey).toBase58())],
     },
     withdraw_token: {
       run: (h) => {
@@ -975,6 +990,7 @@ describe("Phantom's Lighthouse checks, in the browser and at the relay", () => {
         return withdrawTokenFlow(h.createDeps, tokenInput(h));
       },
       guards: (h) => [guard(GUARD.payer(1_000_000n), h.pensionKey), guard(GUARD.token(12_345_678n), deriveAta(h.pensionKey, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58())],
+      leading: (h) => [guard(GUARD.pretoken(), holding), guard(GUARD.created(), deriveAta(h.pensionKey, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58())],
     },
   };
 
@@ -992,6 +1008,23 @@ describe("Phantom's Lighthouse checks, in the browser and at the relay", () => {
     if (verified.ok) expect(verified.instructions.filter((instruction) => instruction.program === LIGHTHOUSE_PROGRAM)).toHaveLength(flow.guards(h).length);
   });
 
+  it.each(Object.keys(flows))("%s: Phantom's leading block right after the compute budget, one check on each account SaverFi writes besides the pension key, and its checks after, are accepted by the page, sent as Phantom returned them, and verified by the relay", async (name) => {
+    const flow = flows[name]!;
+    const h = harness();
+    phantomSigns(h, (harnessed) => ({ leading: flow.leading(harnessed), guards: flow.guards(harnessed) }));
+    const result = await flow.run(h);
+    expect(result.ok, result.message).toBe(true);
+    const sent = h.send.mock.calls[0]![0];
+    expect(toHex(sent)).toBe(toHex(await h.signWithPension.mock.results[0]!.value));
+    const verified = verifySignedTransaction(sent);
+    expect(verified.ok).toBe(true);
+    if (!verified.ok) return;
+    const lighthouseAt = verified.instructions.flatMap((instruction, index) => (instruction.program === LIGHTHOUSE_PROGRAM ? [index] : []));
+    const leading = flow.leading(h).length;
+    expect(lighthouseAt.slice(0, leading)).toEqual(Array.from({ length: leading }, (_, index) => 2 + index));
+    expect(lighthouseAt).toHaveLength(leading + flow.guards(h).length);
+  });
+
   /** A refusal before sending, in exactly these words. */
   async function refusedBeforeSending(run: Flow, h: Harness, message: string | RegExp): Promise<void> {
     const result = await run(h);
@@ -1001,15 +1034,32 @@ describe("Phantom's Lighthouse checks, in the browser and at the relay", () => {
     expect(h.send).not.toHaveBeenCalled();
   }
 
-  it("a check before SaverFi's instructions end — between the budget pair, after it and before create_vault_v2, between a creation and set_invest_policy — is refused with where it stood", async () => {
-    for (const at of [1, 2]) {
-      const h = harness();
-      phantomSigns(h, () => ({ guards: [guard(GUARD.payer(1n), h.pensionKey)], at }));
-      await refusedBeforeSending(flows.create_vault_v2!.run, h, FAILURE_COPY.walletGuardRefused(`the Lighthouse instruction at position ${at + 1} stands before SaverFi's own instruction at position ${at + 2}; Lighthouse checks are relayed only after all of SaverFi's instructions`));
-    }
-    const h = harness();
-    phantomSigns(h, () => ({ guards: [guard(GUARD.payer(1n), h.pensionKey)], at: 5 }));
-    await refusedBeforeSending(flows["set_invest_policy with three token-account creations"]!.run, h, /position 6 stands before SaverFi's own instruction at position 7/);
+  it("a check inside the budget pair or between a creation and set_invest_policy is refused with where it stood; one ahead of create_vault_v2 on the pension key, or on an account SaverFi only reads, with what it checks", async () => {
+    const between = harness();
+    phantomSigns(between, (h) => ({ guards: [guard(GUARD.created(), deriveVaultPda(h.pensionKey).toBase58())], at: 1 }));
+    await refusedBeforeSending(
+      flows.create_vault_v2!.run,
+      between,
+      FAILURE_COPY.walletGuardRefused(
+        "the Lighthouse instruction at position 2 stands before SaverFi's own instruction at position 3; Lighthouse checks are relayed only right after SaverFi's compute budget, or after all of SaverFi's instructions",
+      ),
+    );
+    const policy = harness();
+    phantomSigns(policy, (h) => ({ guards: [guard(GUARD.payer(1n), h.pensionKey)], at: 5 }));
+    await refusedBeforeSending(flows["set_invest_policy with three token-account creations"]!.run, policy, /position 6 stands before SaverFi's own instruction at position 7/);
+
+    const payer = harness();
+    phantomSigns(payer, (h) => ({ leading: [guard(GUARD.payer(1n), h.pensionKey)], guards: [] }));
+    await refusedBeforeSending(
+      flows.create_vault_v2!.run,
+      payer,
+      FAILURE_COPY.walletGuardRefused(
+        `the Lighthouse instruction at position 3, ahead of SaverFi's instructions, checks the fee payer ${payer.pensionKey}; checks there are relayed only on the accounts SaverFi's instructions write, other than the fee payer`,
+      ),
+    );
+    const readOnly = harness();
+    phantomSigns(readOnly, (h) => ({ leading: [guard(GUARD.owner(SIP_PROGRAM_ID), deriveVaultPda(h.pensionKey).toBase58())], guards: [] }));
+    await refusedBeforeSending(flows.withdraw_token!.run, readOnly, /ahead of SaverFi's instructions, checks \w+, which SaverFi's own instructions do not write/);
   });
 
   it("a Lighthouse instruction that writes and pays rent, a bare MemoryClose, more checks than the bound, or a check on an account SaverFi does not name, is refused in Lighthouse's words", async () => {
