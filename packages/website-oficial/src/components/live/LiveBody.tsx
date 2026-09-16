@@ -138,6 +138,7 @@ export function LiveBody({
             onLoadOlder={onLoadOlder}
             onRetryActivity={onRefresh}
             activityUnreadable={activityUnreadable}
+            nextStep={nextStep}
             {...(emptyNote === undefined ? {} : { emptyNote })}
           />
         ) : (

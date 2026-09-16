@@ -11,9 +11,15 @@
  *
  * THE COUNTDOWN IS THE HONEST PART. When the server refuses with a retry-after,
  * the button says when it can be pressed rather than failing again on click.
+ *
+ * A PENSION THAT DOES NOT EXIST YET GETS THE SAME GUARD THE PENSION VIEW GIVES
+ * ITS PANELS. Before there is a vault there is no total, no history and no
+ * window to claim one over, so this page shows what to do next instead of a
+ * summary — a hero reading "0.00 SOL" over "Complete history" describes a
+ * pension that is broken rather than one nobody has created.
  */
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { FeedFooter, HiddenCounts, LiveActivityFeed } from "@/components/live/LiveActivityFeed";
 import { secondsUntil } from "@/components/live/LiveStates";
@@ -53,6 +59,7 @@ export function LiveActivityPage({
   onLoadOlder,
   onRetryActivity,
   activityUnreadable,
+  nextStep,
   emptyNote,
   className,
 }: {
@@ -71,6 +78,8 @@ export function LiveActivityPage({
    * and the honest branch in the feed was dead code for every real failure.
    */
   readonly activityUnreadable: boolean;
+  /** The one thing to do next. Shown INSTEAD of the summary before a vault exists. */
+  readonly nextStep: ReactNode;
   readonly emptyNote?: string;
   readonly className?: string;
 }) {
@@ -82,14 +91,23 @@ export function LiveActivityPage({
   const settlements = data.rows.filter((row) => row.event.kind === "settled").length;
   const retryIn = secondsUntil(older.retryAt, nowMs);
 
-  return (
-    <div className={cn("flex min-w-0 flex-1 flex-col gap-4 p-4 lg:gap-6 lg:p-6", className)}>
+  const frame = (children: ReactNode) => <div className={cn("flex min-w-0 flex-1 flex-col gap-4 p-4 lg:gap-6 lg:p-6", className)}>{children}</div>;
+
+  // No vault: no total to show, and nothing was ever asked for to be complete.
+  // The sidebar says why the feed is empty; this column says what to do about it.
+  if (data.stage === "no_vault") return frame(nextStep);
+
+  return frame(
+    <>
       <Card>
         <CardHeader>
           <dl className="flex flex-wrap items-baseline gap-x-8 gap-y-3">
             <div className="space-y-1">
               <dt className={LABEL}>{LIVE_COPY.savedSoFar}</dt>
-              <dd className="font-mono text-2xl font-semibold tabular-nums">{formatSol(data.vault.lifetimeSaved ?? 0n)} SOL</dd>
+              {/* A total nobody could read is not a zero — the module's own rule. */}
+              <dd className="font-mono text-2xl font-semibold tabular-nums">
+                {data.vault.lifetimeSaved === null ? LIVE_COPY.unknownFigure : `${formatSol(data.vault.lifetimeSaved)} SOL`}
+              </dd>
             </div>
             <div className="space-y-1">
               <dt className={LABEL}>{ACTIVITY_COPY.filterSavings}</dt>
@@ -99,7 +117,17 @@ export function LiveActivityPage({
             </div>
             <div className="space-y-1">
               <dt className={LABEL}>{LIVE_COPY.activity}</dt>
-              <dd className="text-sm text-muted-foreground">{older.complete || since === null ? ACTIVITY_COPY.complete : ACTIVITY_COPY.showingSince(dateLabel(since))}</dd>
+              {/*
+                COMPLETE IS A CLAIM ABOUT A PAGE THAT WAS READ. `older.complete`
+                is set only by a head page that actually came back, so it is the
+                whole test: nothing loaded and nothing complete means the history
+                is unknown, not finished. It used to read `since === null` as
+                completeness, which is how a read that FAILED came out as
+                "Complete history".
+              */}
+              <dd className="text-sm text-muted-foreground">
+                {older.complete ? ACTIVITY_COPY.complete : since === null ? LIVE_COPY.unknownFigure : ACTIVITY_COPY.showingSince(dateLabel(since))}
+              </dd>
             </div>
           </dl>
         </CardHeader>
@@ -145,6 +173,6 @@ export function LiveActivityPage({
           <HiddenCounts upkeep={data.hiddenUpkeep} dust={data.hiddenDust} />
         </CardContent>
       </Card>
-    </div>
+    </>,
   );
 }

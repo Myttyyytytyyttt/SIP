@@ -25,7 +25,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ACTIVITY_COPY, LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
 
-import { NOW_MS, OWNER, liveDashboard } from "../../../test/fixtures/live-dashboard";
+import { NOW_MS, OWNER, liveDashboard, liveSnapshot } from "../../../test/fixtures/live-dashboard";
 
 const older = { busy: false, retryAt: null, message: null, complete: false };
 
@@ -94,5 +94,46 @@ describe("a history that really is empty", () => {
     const html = render({ view: "activity", activityUnreadable: false });
     expect(html).toContain(ACTIVITY_COPY.empty);
     expect(html).not.toContain(ACTIVITY_COPY.unreadableNow);
+  });
+});
+
+/** A pension key on its very first visit: no vault, no wallet, no link, no policy. */
+const noVault = (): LiveDashboard =>
+  liveDashboard({
+    snapshot: liveSnapshot({ vault: { status: "missing", address: "v" }, policy: { status: "missing", address: "p" }, wallets: [] }),
+    activity: null,
+    privyWallets: [],
+  });
+
+describe("/activity before there is a vault", () => {
+  it("shows the one thing to do next, not a hero of zeroes", () => {
+    const data = noVault();
+    expect(data.stage).toBe("no_vault");
+
+    const html = render({ view: "activity", data, activityUnreadable: false });
+    expect(html).toContain(LIVE_COPY.noVault.create);
+
+    // The three claims the summary card used to make about a pension nobody has:
+    // a total, that total being zero, and a complete history of nothing.
+    expect(html).not.toContain(LIVE_COPY.savedSoFar);
+    expect(html).not.toContain("0.00 SOL");
+    expect(html).not.toContain(ACTIVITY_COPY.complete);
+  });
+
+  it("still summarises a pension that DOES exist: the guard is the stage, not the page", () => {
+    const html = render({ view: "activity", activityUnreadable: false });
+    expect(html).toContain(LIVE_COPY.savedSoFar);
+    expect(html).not.toContain(LIVE_COPY.noVault.create);
+  });
+});
+
+describe("how much of the history is loaded", () => {
+  it("is never called complete when no page was read", () => {
+    // A vault WITH settlements whose history could not be read: no rows, and
+    // `older.complete` false because no head page ever came back. "Complete
+    // history" there is a claim about something nobody looked at.
+    const html = render({ view: "activity", activityUnreadable: true });
+    expect(html).not.toContain(ACTIVITY_COPY.complete);
+    expect(html).toContain(LIVE_COPY.unknownFigure);
   });
 });
