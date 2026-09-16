@@ -96,6 +96,13 @@ lleve exactamente: esa wallet sale en `/status` como `none (seat not bounded by 
 crítica, porque un signer sin su política podría firmar cualquier mensaje, enviar cualquier transacción y exportar la
 clave de esa wallet. Sin ella el vigilante firma como siempre y lo dice una vez al arrancar, en una línea del log.
 
+**Al revés no vale.** Con `SIP_SOLANA_PRIVY_POLICY_ID` puesta y `SIP_SOLANA_PRIVY_SIGNER_ID` vacía no hay asiento que
+buscar: no se mira ni la concesión ni la política, y el vigilante firmaría por CUALQUIER wallet de Solana de la app.
+Arranca igual —la sanidad de Railway no depende de estas variables—, pero lo dice como error al arrancar y lanza una
+alerta crítica, porque un `/status` con `privyPolicyId` puesto se lee justo al revés de lo que está pasando. Lo que el
+vigilante hace de verdad sale en `/status` como `signing.seatCheck`: `policy-enforced` (las dos puestas), `seat-only`
+(solo el signer) o `unchecked` (sin signer).
+
 Ponla **después** de comprobar con `privy-policy verify --wallet <id de wallet> --policy jsuzcjv6njl0raqjjhzqe9fh` que
 una wallet real ya está bien asentada. Si el id no fuera el que la web puso, ninguna wallet se podría liquidar, y eso no
 se ve: sin firmante, la liquidación descansa en `NO_SIGNER`.

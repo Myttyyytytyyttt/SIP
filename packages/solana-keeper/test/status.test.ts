@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import { BROADCAST_ACK, loadConfig } from "../src/config.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 import { SERVICE } from "../src/keeper-log.js";
+import { seatCheck } from "../src/seat-check.js";
 import {
   HEALTH_STALE_FLOOR_MS,
   decideHealth,
@@ -86,6 +87,7 @@ function setup(): { redactor: Redactor; status: KeeperStatus } {
       privyAppId: config.privyAppId,
       privySignerId: config.privySignerId,
       privyPolicyId: config.privyPolicyId,
+      seatCheck: seatCheck(config.privySignerId, config.privyPolicyId),
       secretsRead: true,
       settleKey: config.signing!.settleKey.publicKey.toBase58(),
       wallets: { signable: 1, of: 1 },
@@ -133,8 +135,10 @@ describe("the /status JSON", () => {
     expect(parsed.program).toBe(SIP_PROGRAM_ID);
     expect(parsed.programDeployed).toBe(false);
     expect(parsed.signing.settleKey).toBe(keypair.publicKey.toBase58());
-    // Public ids, and the policy id says whether an unbounded seat is refused.
+    // Public ids. The policy id alone says nothing: this environment sets it and
+    // NO signer id, so no seat is examined at all and the page says so.
     expect(parsed.signing.privyPolicyId).toBe("policy-id");
+    expect(parsed.signing.seatCheck).toBe("unchecked");
     expect(parsed.lastSweepError).toContain("<redacted:rpcUrl:0>");
     expect(parsed.history).toContain("<redacted:databaseUrl>");
     // A pending carry's lamports are a bigint, which JSON.stringify throws on:

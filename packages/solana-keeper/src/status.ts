@@ -17,6 +17,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Redactor } from "@sip/solana-log";
 import { SERVICE } from "./keeper-log.js";
+import type { SeatCheck } from "./seat-check.js";
 
 export interface WalletStatus {
   readonly settle: string;
@@ -43,11 +44,19 @@ export interface SigningStatus {
   readonly privyAppId: string | null;
   readonly privySignerId: string | null;
   /**
-   * The policy that must bound the keeper's seat on each trading wallet. Null
-   * means it is not configured — and then the seat is NOT checked, so an
-   * operator can tell from here whether an unbounded seat would be refused.
+   * The policy that must bound the keeper's seat on each trading wallet, or null
+   * when it is not configured.
+   *
+   * ON ITS OWN IT ANSWERS NOTHING. A populated policy id does NOT mean an
+   * unbounded seat would be refused: with no signer id there is no seat to hold
+   * to it, and the keeper signs for every wallet in the app. Read `seatCheck`.
    */
   readonly privyPolicyId: string | null;
+  /**
+   * What the keeper actually examines before it signs for a wallet — the one
+   * question the two ids above cannot answer separately (src/seat-check.ts).
+   */
+  readonly seatCheck: SeatCheck;
   /** False in dry run, by construction: nothing that can sign was read. */
   readonly secretsRead: boolean;
   /** The settle key's PUBLIC key, when armed. */

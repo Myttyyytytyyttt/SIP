@@ -65,6 +65,7 @@ import {
 } from "../src/privy-signer.js";
 import { SolanaReadModel } from "../src/read-model.js";
 import { poolFetch } from "../src/rpc-pool.js";
+import { seatCheck, seatCheckNotice } from "../src/seat-check.js";
 import { activeBps, settleAlert, type CarryBook } from "../src/settle-decision.js";
 import { runSettleTick } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
@@ -262,15 +263,22 @@ let vaultReadFailures = 0;
 const privyConfig: PrivySolanaConfig | null = config.signing?.privy ?? null;
 
 // SAYING WHAT IS NOT BEING CHECKED, once per process rather than once per sweep.
-// With no policy id there is no rule to hold a seat to, so the keeper signs for
-// any wallet that lists its signer id — exactly as it always did. Names only.
-if (privyConfig !== null && config.privyPolicyId === null) {
-  log.warn("SIP_SOLANA_PRIVY_POLICY_ID is not set", {
-    detail:
-      "The keeper accepts a wallet that seats its signer WITHOUT the keeper's policy, and such a seat is an unbounded " +
-      "signer at Privy: it could sign any message, send any transaction and export that wallet's key. Set it and the " +
-      "keeper refuses to sign for those wallets.",
-  });
+// Which of the three states the two public ids amount to, and what each costs,
+// is seatCheckNotice's (src/seat-check.ts). Names only, never values.
+//
+// IT USED TO ASK ABOUT THE POLICY ID ALONE, and so said nothing at all about the
+// combination that widens signing: a policy id with NO signer id leaves no seat
+// to look for, the grant check is skipped with it, and every Solana wallet in
+// the app is signed for — while /status showed a populated policy id, which
+// reads as "an unbounded seat would be refused". That one pages, because no
+// page an operator opens would show it. A dry run holds no privyConfig, so
+// nothing here can fire for a keeper that signs nothing.
+if (privyConfig !== null) {
+  const notice = seatCheckNotice(config.privySignerId, config.privyPolicyId);
+  if (notice !== null) {
+    log[notice.severity === "critical" ? "error" : "warn"](notice.message, { detail: notice.detail });
+    if (notice.alert !== null) alerter.fire(notice.alert);
+  }
 }
 
 function signingRoute(): string {
@@ -312,6 +320,8 @@ const health: KeeperStatus = {
     privyAppId: config.privyAppId,
     privySignerId: config.privySignerId,
     privyPolicyId: config.privyPolicyId,
+    // Neither id answers "would an unbounded seat be refused?" on its own.
+    seatCheck: seatCheck(config.privySignerId, config.privyPolicyId),
     secretsRead: config.signing !== null,
     settleKey: config.signing?.settleKey.publicKey.toBase58() ?? null,
     wallets: null,
