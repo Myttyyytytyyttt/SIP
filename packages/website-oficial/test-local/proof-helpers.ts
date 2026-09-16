@@ -11,8 +11,8 @@
 import { createPrivateKey, sign } from "node:crypto";
 import { createServer, type Server } from "node:http";
 
-import { base64Encode, tryBase64Decode, TOKEN_2022_PROGRAM } from "@sip/solana-core/client";
-import { Keypair, PublicKey, Transaction, VersionedTransaction, type Connection, type VersionedTransactionResponse } from "@solana/web3.js";
+import { LIGHTHOUSE_PROGRAM, base64Encode, tryBase64Decode, TOKEN_2022_PROGRAM } from "@sip/solana-core/client";
+import { Keypair, PublicKey, Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction, type Connection, type VersionedTransactionResponse } from "@solana/web3.js";
 import { expect } from "vitest";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -31,6 +31,56 @@ export function signWith(bytes: Uint8Array, signer: Keypair): Uint8Array {
   const tx = VersionedTransaction.deserialize(bytes);
   tx.sign([signer]);
   return Uint8Array.from(tx.serialize());
+}
+
+const u64le = (value: bigint): number[] => {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setBigUint64(0, value, true);
+  return [...bytes];
+};
+
+/**
+ * Lighthouse checks in the byte shapes Phantom adds on mainnet (log level 4;
+ * packages/solana-core/test/phantom-rewrite.ts cites the transactions they were
+ * decoded from), with the proof's own bounds.
+ */
+export const PHANTOM_CHECK = {
+  /** AssertAccountInfoMulti [Lamports >= min, KnownOwner == System, DataLength == 0]: Phantom's check on the fee payer. */
+  payer: (minLamports: bigint): number[] => [6, 4, 3, 0, ...u64le(minLamports), 4, 3, 0, 0, 1, ...u64le(0n), 0],
+  /** AssertAccountInfoMulti [KnownOwner == System, DataLength == 0]. */
+  system: (): number[] => [6, 4, 2, 3, 0, 0, 1, ...u64le(0n), 0],
+  /** AssertAccountInfoMulti [Owner == program]. */
+  owner: (program: string): number[] => [6, 4, 1, 2, ...new PublicKey(program).toBytes(), 0],
+  /** AssertTokenAccountMulti [Delegate == None, DelegatedAmount <= 0, TokenAccountOwnerIsDerived]. */
+  tokenAccount: (): number[] => [10, 4, 3, 3, 0, 0, 6, ...u64le(0n), 5, 8],
+};
+
+/** A Lighthouse instruction checking `account`, named read-only and unsigned, as Phantom names it. */
+export const lighthouseCheck = (data: readonly number[], account: string): TransactionInstruction =>
+  new TransactionInstruction({ programId: new PublicKey(LIGHTHOUSE_PROGRAM), keys: [{ pubkey: new PublicKey(account), isSigner: false, isWritable: false }], data: Buffer.from(data) });
+
+/**
+ * Phantom as it signs on mainnet, replaced: `checks` (read when Phantom is asked)
+ * appended after every instruction it was given, the message compiled again,
+ * the pension key's slot signed. Every call recorded.
+ */
+export function phantomOnMainnet(owner: Keypair, checks: () => Promise<readonly TransactionInstruction[]>) {
+  const calls = { pensionIn: [] as Uint8Array[], pensionOut: [] as Uint8Array[] };
+  return {
+    calls,
+    pension: {
+      signWithPension: async (bytes: Uint8Array) => {
+        calls.pensionIn.push(bytes);
+        const message = TransactionMessage.decompile(VersionedTransaction.deserialize(bytes).message);
+        message.instructions.push(...(await checks()));
+        const tx = new VersionedTransaction(message.compileToLegacyMessage());
+        tx.sign([owner]);
+        const signed = Uint8Array.from(tx.serialize());
+        calls.pensionOut.push(signed);
+        return signed;
+      },
+    },
+  };
 }
 
 /** Privy, replaced: a pension key and a trading wallet as Keypairs, every call recorded. */

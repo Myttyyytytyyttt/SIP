@@ -6,7 +6,8 @@
 // own proof runs. This one binds 28999 (RPC), 29000 (its websocket), 29999
 // (faucet), 30099 (gossip) and 30199-30299 (dynamic), and clones four accounts
 // from mainnet, read-only: the USDC and SPYx mints and the two Raydium pools the
-// vault screens price from.
+// vault screens price from; and one program with its executable data: Lighthouse,
+// whose checks Phantom adds on mainnet (immutable there: no upgrade authority).
 //
 // THE BINARY IS THE ONE PUBLISHED, OR NOTHING STARTS. The .so comes from
 // SIP_LOCAL_PROGRAM_SO, or ../../solana-program/target/deploy/sip_vault.so, and is
@@ -43,7 +44,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { SOL_USDC_POOL, SPYX_MINT, SPYX_USDC_POOL, USDC_MINT } from "@sip/solana-core/client";
+import { LIGHTHOUSE_PROGRAM, SOL_USDC_POOL, SPYX_MINT, SPYX_USDC_POOL, USDC_MINT } from "@sip/solana-core/client";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 
 /** sha256 of the sip_vault.so that was tested and is published to mainnet unchanged. */
@@ -55,6 +56,8 @@ export const LOCAL_PORTS = { rpc: 28_999, websocket: 29_000, faucet: 29_999, gos
 
 /** What the validator clones from mainnet at start: the mints an owner-paid token account needs, and the pools the floors read. */
 export const MAINNET_CLONES: readonly string[] = [USDC_MINT, SPYX_MINT, SOL_USDC_POOL, SPYX_USDC_POOL];
+/** Upgradeable programs it clones with their executable data: Lighthouse, so Phantom's checks run on the real program. */
+export const MAINNET_PROGRAM_CLONES: readonly string[] = [LIGHTHOUSE_PROGRAM];
 const MAINNET_RPC = "https://api.mainnet-beta.solana.com";
 
 const DEFAULT_PROGRAM_SO = fileURLToPath(new URL("../../solana-program/target/deploy/sip_vault.so", import.meta.url));
@@ -215,6 +218,7 @@ async function startOnce(authority: PublicKey, so: string, binary: Buffer, prelo
     "--url",
     MAINNET_RPC,
     ...MAINNET_CLONES.flatMap((address) => ["--clone", address]),
+    ...MAINNET_PROGRAM_CLONES.flatMap((address) => ["--clone-upgradeable-program", address]),
     ...accountArgs,
     "--upgradeable-program",
     SIP_VAULT_PROGRAM_ID.toBase58(),
@@ -288,6 +292,9 @@ async function startOnce(authority: PublicKey, so: string, binary: Buffer, prelo
     await checkPreloadedProgram(connection, authority, binary);
     for (const address of MAINNET_CLONES) {
       if ((await connection.getAccountInfo(new PublicKey(address), "confirmed")) === null) throw new Error(`the clone of ${address} is missing`);
+    }
+    for (const address of MAINNET_PROGRAM_CLONES) {
+      if ((await connection.getAccountInfo(new PublicKey(address), "confirmed"))?.executable !== true) throw new Error(`the cloned program ${address} is not executable`);
     }
     for (const account of preloaded) {
       if ((await connection.getAccountInfo(new PublicKey(account.pubkey), "confirmed")) === null) throw new Error(`the preloaded account ${account.pubkey} is missing`);
