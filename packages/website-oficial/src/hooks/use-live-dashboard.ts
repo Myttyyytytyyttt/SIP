@@ -97,6 +97,9 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
   const [lastReadAt, setLastReadAt] = useState<number | null>(null);
   const [older, setOlder] = useState<LiveOlder>({ busy: false, retryAt: null, message: null, complete: false });
   const [activityUnreadable, setActivityUnreadable] = useState(false);
+  // State, not only the ref below: the poll must re-arm when a read FINISHES,
+  // and a ref changing does not re-run the effect that would do it.
+  const [reading, setReading] = useState(false);
   const [tick, setTick] = useState(0);
 
   // Everything a late answer must be checked against before it is believed.
@@ -125,9 +128,13 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
   }, [pensionKey]);
 
   const read = useCallback(
-    async (discover: boolean): Promise<void> => {
-      if (pensionKey === null || readingRef.current) return;
+    async (discover: boolean): Promise<boolean> => {
+      // FALSE means no read happened. The poll re-arms on this answer, and a
+      // call that turned back at the guard must not re-arm as though one had
+      // just finished — that is the 0 ms loop.
+      if (pensionKey === null || readingRef.current) return false;
       readingRef.current = true;
+      setReading(true);
       const mine = ++request.current;
       const stale = (): boolean => mine !== request.current;
       try {
@@ -138,13 +145,13 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
           if (!wallets.includes(link.wallet)) wallets.push(link.wallet);
         }
         const answered = await api.snapshot({ owner: pensionKey, wallets: wallets.slice(0, MAX_WALLETS), discover });
-        if (stale()) return;
+        if (stale()) return true;
         if (!answered.ok) {
           // The last good data stays on screen; only the note changes.
           setFailures((count) => count + 1);
           setFailure({ message: wordsFor(answered), retryAt: answered.retryAfterSeconds === null ? null : Date.now() + answered.retryAfterSeconds * 1_000, since: Date.now() });
           setLastReadAt(Date.now());
-          return;
+          return true;
         }
         setSnapshot(answered.body);
 
@@ -152,7 +159,7 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
         if (answered.body.vault.status === "exists") {
           const until = newestSignature(entriesRef.current);
           const page = await api.activity({ owner: pensionKey, limit: ACTIVITY_PAGE, ...(until === null ? {} : { until }) });
-          if (stale()) return;
+          if (stale()) return true;
           // CARRIED, NOT DROPPED. A page that failed, or one the route marked
           // unreadable, leaves the rows already on screen alone and tells the
           // feed it could not read — never "No activity yet".
@@ -176,8 +183,10 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
         setFailures(0);
         setFailure(null);
         setLastReadAt(Date.now());
+        return true;
       } finally {
         readingRef.current = false;
+        setReading(false);
       }
     },
     [api, pensionKey, walletsKey],
@@ -194,15 +203,20 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
   useEffect(() => {
     if (pensionKey === null) return undefined;
     const visible = typeof document === "undefined" || document.visibilityState === "visible";
-    const delay = nextDelayMs({ failures, retryAfterSeconds: null, visible, lastReadAt, now: Date.now() });
+    const delay = nextDelayMs({ failures, retryAfterSeconds: null, visible, lastReadAt, now: Date.now(), reading });
     if (delay === null) return undefined;
     const retryAt = failure?.retryAt ?? null;
     const wait = retryAt === null ? delay : Math.max(delay, retryAt - Date.now());
     const timer = window.setTimeout(() => {
-      void read(false).finally(() => setTick((count) => count + 1));
+      // Only a read that actually RAN re-arms the poll. A call that turned back
+      // at the in-flight guard re-arms nothing: the read already running will,
+      // when it finishes and `reading` falls.
+      void read(false).then((ran) => {
+        if (ran) setTick((count) => count + 1);
+      });
     }, Math.max(0, wait));
     return () => window.clearTimeout(timer);
-  }, [pensionKey, failures, lastReadAt, failure, tick, read]);
+  }, [pensionKey, failures, lastReadAt, failure, tick, read, reading]);
 
   // Coming back to a tab whose numbers are a sweep old reads once, at once.
   useEffect(() => {

@@ -31,6 +31,8 @@ export interface ScheduleInput {
   /** When the last read finished; null when none has. */
   readonly lastReadAt: number | null;
   readonly now: number;
+  /** A read is in flight right now. Nothing is scheduled on top of one. */
+  readonly reading: boolean;
 }
 
 const backoffFor = (failures: number): number => {
@@ -59,6 +61,19 @@ const untilGapFrom = (lastReadAt: number | null, now: number, gap: number, failu
  */
 export function nextDelayMs(input: ScheduleInput): number | null {
   if (!input.visible) return null;
+  /*
+   * A READ IS ALREADY RUNNING, so there is nothing to schedule on top of it.
+   *
+   * This is not an optimisation. The first read starts BEFORE this is first
+   * asked, and with nothing read yet and nothing failed the answer below is 0 —
+   * "the first read happens now". The timer then fires at once, finds the
+   * caller's in-flight guard closed, does nothing, and re-arms itself at 0: a
+   * re-render of the whole dashboard every few milliseconds (the browser's
+   * nested-timeout clamp) for as long as the first round trip takes, and
+   * forever if a request never answers. The read re-arms the poll when it
+   * finishes; until then the answer is that there is nothing to do.
+   */
+  if (input.reading) return null;
   const gap = backoffFor(input.failures);
   const scheduled = untilGapFrom(input.lastReadAt, input.now, gap, input.failures);
   // The server's own retry-after always wins: it knows what it is holding back.

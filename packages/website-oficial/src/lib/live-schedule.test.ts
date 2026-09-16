@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { BACKOFF_MS, MANUAL_FLOOR_MS, POLL_BASE_MS, nextDelayMs, nextManualDelayMs, shouldRefreshOnShow } from "@/lib/live-schedule";
 
 const NOW = 1_789_500_000_000;
-const base = { failures: 0, retryAfterSeconds: null, visible: true, lastReadAt: NOW, now: NOW } as const;
+const base = { failures: 0, retryAfterSeconds: null, visible: true, lastReadAt: NOW, now: NOW, reading: false } as const;
 
 describe("the steady state", () => {
   it("polls at the keeper's sweep, once a minute", () => {
@@ -34,6 +34,28 @@ describe("the steady state", () => {
 
   it("but a retry whose gap HAS passed is due now: that is a retry, not a loop", () => {
     expect(nextDelayMs({ ...base, failures: 1, lastReadAt: NOW - 10 * POLL_BASE_MS, now: NOW })).toBe(0);
+  });
+});
+
+describe("a read that is already in flight", () => {
+  it("schedules NOTHING — the loop this prevents is the first read's own", () => {
+    // The exact shape of it: nothing read yet, nothing failed, and the first
+    // read already started before the poll was first asked. Answering 0 here
+    // arms a timer that fires at once, finds the in-flight guard closed, does
+    // nothing, and re-arms at 0 — for the whole duration of the first read.
+    expect(nextDelayMs({ ...base, reading: true, lastReadAt: null, failures: 0 })).toBeNull();
+
+    // And on the other road into it: a tab taking focus after a long sleep,
+    // whose read has begun and whose gap has long since passed.
+    expect(nextDelayMs({ ...base, reading: true, lastReadAt: NOW - 10 * POLL_BASE_MS })).toBeNull();
+
+    // A request that never answers holds it there rather than spinning.
+    expect(nextDelayMs({ ...base, reading: true, failures: 3, retryAfterSeconds: 30 })).toBeNull();
+  });
+
+  it("…and the ordinary schedule is back the moment that read finishes", () => {
+    expect(nextDelayMs({ ...base, reading: false, lastReadAt: null })).toBe(0);
+    expect(nextDelayMs({ ...base, reading: false })).toBe(POLL_BASE_MS);
   });
 });
 
