@@ -7,6 +7,13 @@
  * and the two strings differ by up to a day — which React reports as a
  * hydration mismatch on every load. Pinning both is what makes the output
  * identical on both sides.
+ *
+ * AND THE ZONE IS SAID OUT LOUD, because these timestamps carry money: the same
+ * rows are grouped into day headings and totalled into a "Today" tile. For an
+ * owner in Lisbon a settlement at 00:30 local renders as 23:30 and files under
+ * the day before, which is not a mistake as long as the page says which day it
+ * means. Hydration needs the formatting to be deterministic; it never needed
+ * the zone to go unnamed.
  */
 
 import type { Side, Ticker } from "@/mocks/types";
@@ -90,10 +97,10 @@ export function dateLabel(iso: string): string {
   return `${dayLabel(iso)}, ${new Date(iso).getUTCFullYear()}`;
 }
 
-/** "14:32" in UTC. */
+/** "14:32 UTC" — the zone is on the label, not only in this file. */
 export function clockLabel(iso: string): string {
   const date = new Date(iso);
-  return `${String(date.getUTCHours()).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")}`;
+  return `${String(date.getUTCHours()).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")} UTC`;
 }
 
 /**

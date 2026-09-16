@@ -110,7 +110,10 @@ export function LiveActivityFeed({
     <div className={className} data-live-feed={id}>
       {groups.map(([day, dayRows]) => (
         <div key={day === "" ? "unknown" : day}>
-          <div className="sticky top-0 z-10 bg-background px-4 py-2 text-xs text-muted-foreground">{day === "" ? ACTIVITY_COPY.timeUnknown : relativeDayLabel(day, now)}</div>
+          {/* The bucket is a UTC day (groupByDay slices the ISO string), and the heading says so. */}
+          <div className="sticky top-0 z-10 bg-background px-4 py-2 text-xs text-muted-foreground">
+            {day === "" ? ACTIVITY_COPY.timeUnknown : ACTIVITY_COPY.dayHeading(relativeDayLabel(day, now))}
+          </div>
           {dayRows.map((row, within) => {
             const first = position === 0;
             position += 1;

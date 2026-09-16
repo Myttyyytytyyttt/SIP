@@ -170,6 +170,23 @@ describe("a row never claims more than the chain said", () => {
   });
 });
 
+describe("the zone the page buckets money by is named", () => {
+  it("the Today tile says which day it means", () => {
+    // statsOf cuts the day at Date.UTC(midnight), so for an owner in Lisbon a
+    // settlement after 01:00 local counts towards the NEXT day's tile.
+    expect(STATS_COPY.today).toBe("Today (UTC)");
+  });
+
+  it("…and This week claims no zone, because it is a rolling seven days and not a calendar week", () => {
+    expect(STATS_COPY.thisWeek).not.toMatch(/UTC/);
+  });
+
+  it("a day heading carries the zone its rows were bucketed in", () => {
+    expect(ACTIVITY_COPY.dayHeading("Today")).toBe("Today · UTC");
+    expect(ACTIVITY_COPY.dayHeading("Sep 5")).toBe("Sep 5 · UTC");
+  });
+});
+
 describe("two different quantities never share a label", () => {
   it("the program's invested counter and the basket's market value are named apart", () => {
     // LivePensionCard shows both at once: policy.lifetimeInvested, which only

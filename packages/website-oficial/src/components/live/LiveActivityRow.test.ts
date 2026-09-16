@@ -58,6 +58,11 @@ describe("where a row goes", () => {
     expect(html).toContain('rel="noopener noreferrer"');
   });
 
+  it("stamps the row's clock with the zone it is in", () => {
+    // The row landed at 11:00 UTC. Unmarked, it reads as the viewer's own 11:00.
+    expect(render(settled("60000000"))).toContain("11:00 UTC");
+  });
+
   it("renders NO link when the signature cannot make one, rather than a URL that goes nowhere", () => {
     const html = render(settled("60000000"), { explorerUrl: null });
     expect(html).not.toContain("<a ");

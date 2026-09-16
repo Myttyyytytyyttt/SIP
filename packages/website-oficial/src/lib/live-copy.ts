@@ -276,6 +276,8 @@ export const ACTIVITY_COPY = {
   hiddenUpkeep: (count: string): string => `${count} account upkeep transactions hidden`,
   hiddenDust: (count: string): string => `${count} dust transfers hidden`,
   unreadableNow: "Activity could not be read just now",
+  /** A day heading over rows bucketed by UTC day: "Today · UTC", "Sep 5 · UTC". */
+  dayHeading: (day: string): string => `${day} · UTC`,
   footer: (transactions: string, settlements: string): string => `${transactions} transactions · ${settlements} settlements`,
   seeAll: "See all activity",
   loadOlder: "Load older",
@@ -308,7 +310,9 @@ export const STATS_COPY = {
   investedSoFar: "Invested so far",
   usedIn30Days: "Used in 30 days",
   usedIn30DaysSub: (cap: string): string => `of ${cap}`,
-  today: "Today",
+  /** A UTC calendar day, so it says so: the model cuts it at Date.UTC(midnight). */
+  today: "Today (UTC)",
+  /** A rolling seven days back from the read, not a calendar week — so no zone is claimed for it. */
   thisWeek: "This week",
   /** The strip's trailing note: it names its own population rather than implying a lifetime. */
   lastSettlements: (count: string): string => `last ${count} ${count === "1" ? "settlement" : "settlements"}`,
