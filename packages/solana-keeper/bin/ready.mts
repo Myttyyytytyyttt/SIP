@@ -25,6 +25,7 @@ import { BROADCAST_ACK, copiedConfigProblems, parsePools, parseSettleKey, privyS
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID, idl } from "../src/idl.js";
 import { pinnedPrivyClient } from "../src/privy-signer.js";
 import { SolanaReadModel } from "../src/read-model.js";
+import { alertWebhookVerdict, crankHeadroom, privyIdCollision, privyIdProblem } from "../src/ready-checks.js";
 import { poolFetch } from "../src/rpc-pool.js";
 
 let failures = 0;
@@ -130,8 +131,22 @@ if (settleRaw === undefined) {
     }
     try {
       const lamports = await connection.getBalance(pubkey, "confirmed");
-      if (lamports < 20_000_000) bad(`le quedan ${lamports} lamports`, "paga las comisiones de cada wrap, convert e invest; fondéala");
-      else ok("saldo para comisiones", `${lamports} lamports`);
+      // LA LÍNEA NO ES LA DE LAS COMISIONES, SINO LA DEL WRAP. La grúa aparta su
+      // reserva ANTES de adelantar nada, así que con 0,021 SOL —que pasaba el
+      // umbral viejo de 0,02— solo podría adelantar 0,001, por debajo del polvo:
+      // todos los wraps salen a cero y nada se envuelve, convierte ni invierte,
+      // mientras crank-low sigue callado porque mira ese mismo 0,02.
+      const crank = crankHeadroom(BigInt(lamports));
+      if (crank.verdict === "CANNOT_WRAP") {
+        bad(
+          `la grúa tiene ${lamports} lamports y solo podría adelantar ${crank.allowance}`,
+          `por debajo de ${crank.minimum} lamports todo wrap sale a cero: nada se envuelve, se convierte ni se invierte. Fondéala`,
+        );
+      } else if (crank.verdict === "THIN") {
+        note(`saldo justo: ${lamports} lamports`, `adelanta ${crank.allowance} por wrap; una liquidación grande se envuelve a trozos en varios barridos`);
+      } else {
+        ok("saldo de la grúa", `${lamports} lamports, ${crank.allowance} adelantables por wrap`);
+      }
     } catch (error) {
       bad(`no pude leer su saldo (${summarizeUpstreamError(error)})`, "reintenta");
     }
@@ -147,7 +162,15 @@ if (authorizationKey !== undefined) {
   sharedRedactor.register(authorizationKey, "privyAuthorizationKey");
   sharedRedactor.register(authorizationKey.replace(/^wallet-auth:/, ""), "privyAuthorizationKey");
 }
-appId ? ok("SIP_SOLANA_PRIVY_APP_ID presente", appId) : bad("SIP_SOLANA_PRIVY_APP_ID vacío", "dashboard de Privy → App settings → Basics");
+// LA FORMA, ANTES QUE EL VALOR: /status sirve estos ids tal cual, y uno
+// equivocado ahí parece configuración correcta hasta que algo falla. Si no tiene
+// forma de id no se imprime: en ese momento lo único que se sabe de él es que no
+// es el id público que debía ser, y la manera más común de tenerlo mal es haber
+// pegado un secreto en la variable.
+const appIdProblem = appId === undefined ? null : privyIdProblem("SIP_SOLANA_PRIVY_APP_ID", appId);
+if (appId === undefined) bad("SIP_SOLANA_PRIVY_APP_ID vacío", "dashboard de Privy → App settings → Basics");
+else if (appIdProblem !== null) bad(appIdProblem, "cópialo del dashboard de Privy → App settings → Basics; su valor no se muestra");
+else ok("SIP_SOLANA_PRIVY_APP_ID presente", appId);
 appSecret ? ok("SIP_SOLANA_PRIVY_APP_SECRET presente") : bad("SIP_SOLANA_PRIVY_APP_SECRET vacío", "dashboard de Privy → App settings → Basics");
 authorizationKey
   ? ok("SIP_SOLANA_PRIVY_AUTHORIZATION_KEY presente")
@@ -168,9 +191,35 @@ if (appId !== undefined && appSecret !== undefined && sdkOverrides.length > 0) {
   }
 }
 
-section("4. signer de Solana");
+section("4. signer de Solana y la política que lo acota");
 const signerId = env("SIP_SOLANA_PRIVY_SIGNER_ID");
-signerId ? ok("SIP_SOLANA_PRIVY_SIGNER_ID", signerId) : bad("SIP_SOLANA_PRIVY_SIGNER_ID vacío", "el key quorum ID; sin él, «no concedido» aparece como un envío rechazado");
+const signerProblem = signerId === undefined ? null : privyIdProblem("SIP_SOLANA_PRIVY_SIGNER_ID", signerId);
+if (signerId === undefined) bad("SIP_SOLANA_PRIVY_SIGNER_ID vacío", "el key quorum ID; sin él, «no concedido» aparece como un envío rechazado");
+else if (signerProblem !== null) bad(signerProblem, "es el key quorum ID del paso 2 de docs/runbooks/PRIVY_SOLANA.md; su valor no se muestra");
+else ok("SIP_SOLANA_PRIVY_SIGNER_ID", signerId);
+
+// OPCIONAL, y el vigilante arranca sin ella. Puesta, se niega a firmar por una
+// wallet cuyo asiento no la lleve exactamente; sin ella firma por cualquier
+// wallet que liste su signer, lleve ese asiento lo que lleve.
+const policyId = env("SIP_SOLANA_PRIVY_POLICY_ID");
+const policyProblem = policyId === undefined ? null : privyIdProblem("SIP_SOLANA_PRIVY_POLICY_ID", policyId);
+if (policyId === undefined) {
+  note(
+    "SIP_SOLANA_PRIVY_POLICY_ID sin poner (opcional)",
+    "el vigilante aceptará una wallet que siente su signer SIN la política, y un signer así no está acotado en Privy",
+  );
+} else if (policyProblem !== null) {
+  bad(policyProblem, "es el policyId que imprimió `privy-policy create`; su valor no se muestra");
+} else {
+  ok("SIP_SOLANA_PRIVY_POLICY_ID", policyId);
+}
+
+const collision = privyIdCollision([
+  ["SIP_SOLANA_PRIVY_APP_ID", appId],
+  ["SIP_SOLANA_PRIVY_SIGNER_ID", signerId],
+  ["SIP_SOLANA_PRIVY_POLICY_ID", policyId],
+]);
+if (collision !== null) bad(collision, "un signer «acotado» por sí mismo no está acotado por nada: revisa qué valor va en cada variable");
 
 section("5. pools de inversión");
 const poolProblems: string[] = [];
@@ -195,9 +244,32 @@ if (databaseUrl === undefined) {
 section("7. armado");
 const flag = process.env["SIP_SOLANA_BROADCAST"];
 const sentence = process.env["SIP_SOLANA_ALLOW_BROADCAST"];
-if (flag === "1" && sentence === BROADCAST_ACK) note("ARMADO", "con la config verificada y el lock, liquidará e invertirá en vivo");
+const isArmed = flag === "1" && sentence === BROADCAST_ACK;
+if (isArmed) note("ARMADO", "con la config verificada y el lock, liquidará e invertirá en vivo");
 else if (flag === "1") bad("SIP_SOLANA_BROADCAST=1 sin la frase exacta", "el keeper se niega a arrancar así");
 else note("dry run", "nada se envía; para armar: SIP_SOLANA_BROADCAST=1 y la frase exacta en SIP_SOLANA_ALLOW_BROADCAST");
+
+// SIN WEBHOOK NO SE ENTERA NADIE. Armado, cada escalada —settle-failed,
+// invest-failed, wrap-short, crank-low, la reclamación perdida, un asiento sin
+// política— es solo una línea de log en Railway, y el fallo característico de
+// este vigilante es una AUSENCIA, que desde fuera se parece al silencio normal.
+// Solo el NOMBRE, nunca la URL: el webhook ES su credencial.
+const webhookRaw = process.env["SIP_SOLANA_ALERT_WEBHOOK"]?.trim();
+if (webhookRaw !== undefined && webhookRaw !== "") sharedRedactor.register(webhookRaw, "alertWebhook");
+switch (alertWebhookVerdict(webhookRaw, isArmed)) {
+  case "OK":
+    ok("SIP_SOLANA_ALERT_WEBHOOK presente", "(no se imprime: quien la tenga escribe en el canal)");
+    break;
+  case "NOT_HTTP":
+    bad("SIP_SOLANA_ALERT_WEBHOOK no es una URL http(s)", "el keeper se niega a arrancar con ella; su valor no se muestra");
+    break;
+  case "MISSING_ARMED":
+    bad("SIP_SOLANA_ALERT_WEBHOOK vacío y esto va armado", "las alertas críticas no llegarían a nadie: ponle el webhook de Slack o Discord");
+    break;
+  case "MISSING_DRY":
+    note("sin SIP_SOLANA_ALERT_WEBHOOK", "en seco vale; para armar hace falta, o las escaladas críticas se quedan en el log");
+    break;
+}
 
 print(
   failures === 0
