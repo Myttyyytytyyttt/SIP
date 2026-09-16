@@ -63,7 +63,9 @@ import {
 } from "@solana/web3.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { usdcRawForLamports } from "@/lib/amounts";
 import { createLiveApi } from "@/lib/live-api";
+import { toLiveDashboard } from "@/lib/live-model";
 import { createVaultApi, type VaultApi } from "@/lib/vault-api";
 import { createVaultFlow, investPolicyFlow, linkWalletFlow, withdrawFlow, withdrawTokenFlow, type FlowResult } from "@/lib/vault-flows";
 
@@ -471,6 +473,42 @@ describe("the live panel on the tested sip_vault", () => {
     // No upkeep in this history: every transaction here did something.
     expect(kinds).not.toContain("upkeep");
 
+    // ── THE VIEW MODEL, over the very same two answers ────────────────────────
+    // Everything above proves the ROUTE. This proves the SCREEN: the same
+    // figures again, after toLiveDashboard has turned them into what a person
+    // reads — which is where a wrong valuation or a wrong curve would appear.
+    const model = toLiveDashboard({ snapshot: body, activity: activity.body, privyWallets: [tradingLKey] });
+    expect(model.stage).toBe("active");
+
+    const perSol = BigInt(body.prices!.usdcRawPerSol);
+    const per1e8 = BigInt(body.prices!.legs[0]!.usdcRawPer1e8);
+    const holding = (symbol: string) => model.holdings.find((row) => row.symbol === symbol);
+    const spyxHeld = SPYX_HOLDING_RAW - WITHDREW_SPYX;
+
+    expect(holding("SOL")!.amountRaw).toBe(BigInt(body.vault.withdrawableLamports!));
+    expect(holding("SOL")!.rentFloor).toBe(rent(125));
+    expect(holding("wSOL")!.valueUsdcRaw).toBe(usdcRawForLamports(WRAPPED, perSol));
+    expect(holding("SPYx")!.amountRaw).toBe(spyxHeld);
+    // RAW units at the pool rate — never the scaled display amount times a price.
+    expect(holding("SPYx")!.valueUsdcRaw).toBe((spyxHeld * per1e8) / 100_000_000n);
+    expect(holding("SPYx")!.uiAmount).toBe(spyxOnChain.value.uiAmountString);
+    // The vault holds no USDC, so there is no USDC row at all.
+    expect(holding("USDC")).toBeUndefined();
+    expect(model.worthNowUsdcRaw).toBe(holding("SOL")!.valueUsdcRaw! + holding("wSOL")!.valueUsdcRaw! + holding("SPYx")!.valueUsdcRaw!);
+
+    // The curve is worked BACKWARDS from lifetimeSaved, so it ends on the hero's
+    // own number: a baseline before the settle, the settle, and now.
+    expect(model.chart!.map((point) => point.totalLamports)).toEqual([0n, SETTLE_PAID, SETTLE_PAID]);
+
+    expect(model.stats).toMatchObject({ settlementsLifetime: 1n, loadedSettlements: 1, cappedCount: 1, biggestPaid: SETTLE_PAID });
+    expect(model.rents).toEqual({ vault: rent(125), walletFloor: rent(0) });
+    expect(model.wallets.map((wallet) => [wallet.label, wallet.linkStatus, wallet.canSettle])).toEqual([["Trading wallet 1", "this_vault", true]]);
+
+    // Every movement a person can see opens the transaction that made it.
+    expect(model.hiddenUpkeep).toBe(0);
+    for (const row of model.rows) expect(row.explorerUrl).toBe(`https://solscan.io/tx/${row.signature}`);
+    expect(model.rows.map((row) => row.event.kind)).toEqual(["withdrew_token", "withdrew_sol", "received_sol", "wrapped", "settled", "policy_signed", "linked", "vault_created"]);
+
     const out = process.env.SIP_LIVE_FIXTURE_OUT;
     if (out !== undefined && out !== "") {
       mkdirSync(out, { recursive: true });
@@ -547,6 +585,13 @@ describe("the live panel on the tested sip_vault", () => {
     // The rent a vault costs is read even when there is no vault: the card quotes it.
     expect(snapshot.body.rents.vault).toBe(rent(125).toString());
     expect(snapshot.body.links?.items).toEqual([]);
+
+    // …and the screen says "no vault yet", never "unreadable", and can quote the cost.
+    const model = toLiveDashboard({ snapshot: snapshot.body, activity: null, privyWallets: [] });
+    expect(model.stage).toBe("no_vault");
+    expect(model.rents.vault).toBe(rent(125));
+    expect(model.vault.exists).toBe(false);
+    expect(model.chart).toBeNull();
 
     const out = process.env.SIP_LIVE_FIXTURE_OUT;
     if (out !== undefined && out !== "") {

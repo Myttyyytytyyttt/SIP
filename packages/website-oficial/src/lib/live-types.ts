@@ -253,4 +253,10 @@ export interface LiveDashboard {
   /** Null until a settlement is loaded: the chart starts with the first one. */
   readonly chart: readonly LiveChartPoint[] | null;
   readonly stats: LiveStatsView;
+  /**
+   * What Solana charges, read in the same batch. `vault` is what creating one
+   * costs and is quoted BEFORE there is a vault; `walletFloor` is rent(0), the
+   * floor settle.rs refuses to leave a trading wallet under.
+   */
+  readonly rents: { readonly vault: bigint | null; readonly walletFloor: bigint | null };
 }

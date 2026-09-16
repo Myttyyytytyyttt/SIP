@@ -32,6 +32,7 @@ import { DashboardSource } from "@/components/DashboardSource";
 import { DashboardWallets } from "@/components/dashboard-wallets";
 import { DataModeToggle } from "@/components/data-mode";
 import { Landing } from "@/components/landing";
+import { LiveBody } from "@/components/live/LiveBody";
 import { LiveConnectCard, LiveKeylessCard, LiveLoading, LivePrivyStalled, LiveUnavailableCard, LiveUnreadable } from "@/components/live/LiveStates";
 import { Num } from "@/components/num";
 import { PensionPanel } from "@/components/pension-panel";
@@ -63,6 +64,8 @@ interface DashboardContextValue {
   readonly state: DashboardState;
   readonly mock: DashboardLoadJson;
   readonly live: LiveDashboardStore | null;
+  /** The connected external Solana wallet, when there is one. The live body is shown ITS pension. */
+  readonly pensionKey: string | null;
   readonly account: ReactNode;
   readonly setMode: (mode: UrlMode) => void;
   readonly onConnect: () => void;
@@ -207,6 +210,7 @@ function UnconfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJso
     state,
     mock,
     live: null,
+    pensionKey: null,
     account: accountSlot(state, null, { onConnect: openSetup, onDisconnect: openSetup, openSetup }),
     setMode,
     onConnect: openSetup,
@@ -294,6 +298,7 @@ function ConfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJson;
     state,
     mock,
     live,
+    pensionKey,
     account: accountSlot(state, pensionKey, { onConnect, onDisconnect, openSetup: () => openWallets?.() }),
     setMode,
     onConnect,
@@ -402,7 +407,7 @@ function PlainBody({
 export function DashboardView({ view }: { readonly view: "pension" | "activity" }) {
   const context = useDashboard();
   if (context === null) return null;
-  const { state, mock, live, account, setMode, onSeeSample } = context;
+  const { state, mock, live, account, pensionKey, setMode, onSeeSample } = context;
 
   const control = state.toggle ? <DataModeToggle mode={toggleModeOf(state.kind)} onModeChange={setMode} /> : null;
   const plain = (sidebar: ReactNode, children: ReactNode) => (
@@ -436,17 +441,36 @@ export function DashboardView({ view }: { readonly view: "pension" | "activity" 
       return plain(LIVE_COPY.unavailableSidebar, <LiveUnavailableCard onConnect={context.onConnect} onSeeSample={onSeeSample} />);
 
     case "live": {
-      // PART 1 ENDS HERE. The panels, the settlement strip, the chart and the
-      // activity feed are part 2; until they land this renders the honest
-      // waiting and failure states and nothing else — never the sample.
-      if (live === null || live.view.kind === "idle" || live.view.kind === "loading") return plain(LIVE_COPY.connectSidebar, <LiveLoading label={LIVE_COPY.reading} />);
-      if (live.view.kind === "unreadable") {
-        return plain(
-          LIVE_COPY.connectSidebar,
-          <LiveUnreadable message={live.view.message} retryAt={live.view.retryAt} now={Date.now()} onRetry={() => live.refresh()} />,
-        );
+      // The first read, still in flight: skeletons, never the example.
+      if (live === null || pensionKey === null || live.view.kind === "idle" || live.view.kind === "loading") {
+        return plain(LIVE_COPY.readingSidebar, <LiveLoading label={LIVE_COPY.reading} />);
       }
-      return plain(LIVE_COPY.connectSidebar, <LiveLoading label={LIVE_COPY.reading} />);
+      // The browser's own clock, and ONLY for countdowns — every label on the
+      // page below is measured against the snapshot's own `readAtMs`.
+      const clock = Date.now();
+      if (live.view.kind === "unreadable") {
+        return plain(LIVE_COPY.readingSidebar, <LiveUnreadable message={live.view.message} retryAt={live.view.retryAt} now={clock} onRetry={() => live.refresh()} />);
+      }
+      // A 200 whose VAULT could not be read is not a vault that does not exist.
+      // It gets the unreadable card, never an offer to create one that may
+      // already be there — that asks for a signature the chain must refuse.
+      if (live.view.data.stage === "vault_unreadable") {
+        return plain(LIVE_COPY.readingSidebar, <LiveUnreadable message={LIVE_COPY.unreadableBody} retryAt={null} now={clock} onRetry={() => live.refresh()} />);
+      }
+      return (
+        <LiveBody
+          view={view}
+          data={live.view.data}
+          stale={live.view.stale}
+          pensionKey={pensionKey}
+          control={control}
+          account={account}
+          older={live.older}
+          onRefresh={() => live.refresh()}
+          onLoadOlder={() => live.loadOlder()}
+          nowMs={clock}
+        />
+      );
     }
   }
 }

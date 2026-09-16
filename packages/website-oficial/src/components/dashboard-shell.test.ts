@@ -11,6 +11,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PENSION_KEY, TRADING_0, embedded, phantom, userWith } from "../../test/fixtures/privy-user";
+import { liveDashboard, liveSnapshot } from "../../test/fixtures/live-dashboard";
 
 const mocked = vi.hoisted(() => ({
   privy: { ready: true, authenticated: false, user: null as unknown },
@@ -18,7 +19,7 @@ const mocked = vi.hoisted(() => ({
   pathname: "/",
   replaced: [] as string[],
   pushed: [] as string[],
-  live: { kind: "loading" } as { kind: string; message?: string; retryAt?: number | null; data?: unknown },
+  live: { kind: "loading" } as { kind: string; message?: string; retryAt?: number | null; data?: unknown; stale?: unknown },
 }));
 
 vi.mock("@privy-io/react-auth", () => ({
@@ -40,10 +41,12 @@ vi.mock("@/hooks/use-live-dashboard", () => ({
 vi.mock("@/components/landing", () => ({ Landing: () => createElement("div", null, "LANDING") }));
 // recharts draws on a ResizeObserver, which node has none of.
 vi.mock("@/components/pension-chart", () => ({ PensionChart: () => createElement("div", null, "CHART") }));
+vi.mock("@/components/live/LiveSavedChart", () => ({ LiveSavedChart: () => createElement("div", null, "LIVECHART") }));
 
 import { DashboardFrame, DashboardView, type DashboardLoadJson } from "@/components/dashboard-shell";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { usd } from "@/lib/format";
+import { LIVE_COPY } from "@/lib/live-copy";
 import { mock } from "@/mocks";
 
 const SAMPLE: DashboardLoadJson = { source: "mock", data: mock, notice: null };
@@ -177,6 +180,48 @@ describe("a connected pension key", () => {
     expect(html).toContain("could not read your pension");
     expect(html).not.toContain("Sample data");
     expect(html).not.toContain(MOCK_FIGURE);
+  });
+});
+
+describe("a connected pension key, once the chain has answered", () => {
+  beforeEach(() => {
+    mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), embedded(TRADING_0, 0, true)]) };
+    mocked.search = new URLSearchParams("mode=live");
+    mocked.live = { kind: "ready", data: liveDashboard(), stale: null };
+  });
+
+  it("shows THEIR pension: the hero, in SOL, and not one figure from the example", () => {
+    const html = render();
+    expect(html).toContain(LIVE_COPY.savedSoFar);
+    expect(html).toContain("0.06 SOL");
+    expect(html).not.toContain("Sample data");
+    expect(html).not.toContain(MOCK_FIGURE);
+    expect(html).not.toContain("Sold HOODx");
+    expect(tablist(html)).toBeNull();
+  });
+
+  it("links every landed movement to Solscan, and shows no invented trade", () => {
+    const html = render();
+    expect(html).toMatch(/href="https:\/\/solscan\.io\/tx\//);
+    expect(html).not.toMatch(/\bSold\b/);
+    expect(html).not.toContain("Funded wallet");
+  });
+
+  it("renders the history full width on /activity, under the same rule", () => {
+    mocked.pathname = "/activity";
+    const html = render(true, "activity");
+    expect(html).toMatch(/href="https:\/\/solscan\.io\/tx\//);
+    expect(tablist(html)).toBeNull();
+    expect(html).not.toContain(MOCK_FIGURE);
+  });
+
+  it("a vault that could not be READ is never offered a Create button", () => {
+    // A 200 whose vault is unreadable says nothing about whether one exists, so
+    // the frame shows the unreadable card rather than an offer to create one.
+    mocked.live = { kind: "ready", data: liveDashboard({ snapshot: liveSnapshot({ vault: { status: "unreadable", address: "v" } }) }), stale: null };
+    const html = render();
+    expect(html).not.toContain(LIVE_COPY.noVault.create);
+    expect(html).toContain("could not read");
   });
 });
 

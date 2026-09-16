@@ -512,6 +512,9 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
     hiddenDust: visible.hiddenDust,
     chart: chartOf(settlements, vault.lifetimeSaved, nowMs),
     stats,
+    // Quoted by the "no vault yet" card, which must name the cost before anyone
+    // is asked to sign for it.
+    rents: { vault: rawFrom(snapshot.rents.vault), walletFloor: rawFrom(snapshot.rents.walletFloor) },
   };
 }
 

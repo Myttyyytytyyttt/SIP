@@ -71,6 +71,7 @@ export const LIVE_COPY = {
 
   // ── connected, reading ─────────────────────────────────────────────────────
   reading: "Reading your pension on Solana",
+  readingSidebar: "Reading your activity on Solana",
 
   // ── connected, and the read failed ─────────────────────────────────────────
   unreadableTitle: "Your pension could not be read",
@@ -87,5 +88,233 @@ export const LIVE_COPY = {
   // ── a later poll failed, with good data still on screen ────────────────────
   /** Never styled as an alarm, and it never falls back to the sample. */
   staleAsOf: (clock: string, seconds: number): string => `Showing Solana as of ${clock}. The last read failed; trying again in ${seconds} s.`,
+  /** The same, when the server named no retry time. */
+  staleAsOfPending: (clock: string): string => `Showing Solana as of ${clock}. The last read failed; trying again shortly.`,
   staleLong: "These numbers may be out of date.",
+
+  // ── the sidebar ────────────────────────────────────────────────────────────
+  pensionKey: "Pension key",
+  tradingWallets: "Trading wallets",
+  activity: "Activity",
+  manageWallets: "Manage wallets",
+  solscanAccount: "Solscan",
+  viewLink: "View link on Solscan",
+  noWalletsYet: "No trading wallet on this account yet.",
+
+  /** A wallet's link, as a badge. Four outcomes, and "unreadable" is its own. */
+  badgeLinked: "Linked",
+  badgeNotLinked: "Not linked",
+  badgeOtherVault: "Saves into another vault",
+  badgeLinkUnreadable: "Link status unreadable",
+  settlementCount: (count: string): string => `${count} ${count === "1" ? "settlement" : "settlements"}`,
+  settlementCountUnknown: "settlements unknown",
+  /** Why a linked wallet still saves nothing: it holds no more than it always keeps. */
+  reserveNote: (reserve: string): string => `Holds no more than the ${reserve} SOL it always keeps, so nothing can be settled from it yet.`,
+  /** The same, where the reserve figure is already on screen beside it. */
+  reserveNoteShort: "Holds no more than the SOL it always keeps, so nothing can be settled from it yet.",
+
+  // ── the pension card ───────────────────────────────────────────────────────
+  savedSoFar: "Saved so far",
+  /** "≈ $X at today's SOL price · Profit · 20 % of trading gains · since Sep 15, 2026". */
+  heroAbout: (usd: string): string => `≈ ${usd} at today’s SOL price`,
+  heroProfit: (rate: string): string => `Profit · ${rate} of trading gains`,
+  heroVolumeNotOffered: (rate: string): string => `Volume · ${rate} · not settled while ${BRAND} cannot measure volume`,
+  heroSince: (date: string): string => `since ${date}`,
+  worthNow: "Worth now",
+  worthNowTooltip: "SOL and SPYx at today’s Raydium pool prices; USDC counted at $1",
+  pricesUnavailable: "Prices unavailable",
+  investedSoFar: "Invested so far",
+  unknownFigure: "—",
+
+  // ── the chart ──────────────────────────────────────────────────────────────
+  chartLabel: "Saved",
+  chartSince: (date: string): string => `Since ${date}`,
+  chartComplete: "Complete history",
+  chartEmpty: "The chart starts with your first settlement.",
+
+  // ── the holdings table ─────────────────────────────────────────────────────
+  holdings: "Holdings",
+  asset: "Asset",
+  shares: "Shares",
+  value: "Value",
+  weightVsTarget: "Weight vs target",
+  target: "target",
+  notInvestedYet: "Not invested yet",
+  invested: "Invested",
+  /** The SOL row: what a withdrawal can take, and what Solana keeps. */
+  solKeptAsRent: (rent: string): string => `withdrawable, ${rent} SOL kept as rent`,
+  holdingsFootnote: "Tokens in other accounts the vault owns are listed under Manage wallets.",
+  tokensUnreadable: `${BRAND} could not read the vault’s tokens just now.`,
+  pricesUnreadableNote: "Today’s prices could not be read, so dollar values are hidden.",
+
+  // ── the rule card ──────────────────────────────────────────────────────────
+  ruleTitle: "Savings rule",
+  ruleDescription: "Read from Solana. Set when your vault was created.",
+  vaultSection: "Vault",
+  mode: "Mode",
+  modeProfit: (rate: string): string => `Profit · ${rate}`,
+  modeVolume: (rate: string): string => `Volume · ${rate}`,
+  mostPerSettlement: (max: string): string => `Most per settlement ${max} SOL (above it is not carried over)`,
+  alwaysLeft: (reserve: string): string => `Always left in the trading wallet ${reserve} SOL`,
+  statusActive: "Active",
+  investingSection: "Investing",
+  investingOn: "Investing is on.",
+  investingPausedBadge: "Investing paused",
+  investingNotSetUp: "Investing is not set up. Savings stay in your vault as SOL; nothing is converted or invested.",
+  setUpInvesting: "Set up investing",
+  policyUnreadable: `${BRAND} could not read your investment policy just now.`,
+  buyingWaits: "Buying waits",
+  floorPassed: "The market moved past a price limit you signed, so buying waits. Sign again with today’s prices.",
+  nextInvestment: "Next investment",
+  solWaitingToConvert: (sol: string): string => `SOL waiting to convert: ${sol} SOL`,
+  progressLabel: "Progress to next investment",
+  lastInvestment: "Last investment",
+  noInvestmentLoaded: "No investment in the loaded history",
+  manageInWallets: "Manage in Wallets",
+  resumeInvesting: "Resume investing",
+
+  // ── the stages, before there is anything to show ───────────────────────────
+  noVault: {
+    title: "No vault yet",
+    body: (shortKey: string, rent: string): string =>
+      `Your pension key ${shortKey} has no ${BRAND} vault on Solana yet. The vault holds what your trading wallets put ` +
+      `aside, and only this key can take money out. Creating it costs ${rent} SOL of rent that does not come back, plus network fees.`,
+    bodyNoRent: (shortKey: string): string =>
+      `Your pension key ${shortKey} has no ${BRAND} vault on Solana yet. The vault holds what your trading wallets put ` +
+      "aside, and only this key can take money out.",
+    create: "Create vault",
+    openWallets: "Open the wallets page",
+    checklist: "What is left to set up",
+    steps: ["Create vault", "Create a trading wallet", "Link it", "Set up investing"],
+    sidebar: "No activity: this pension key has no vault yet.",
+  },
+
+  noTradingWallet: {
+    title: "Your vault is ready",
+    body:
+      `${BRAND} saves from a trading wallet: a wallet created under Manage wallets with the keeper’s permission. ` +
+      "Create one, fund it with SOL and trade from it; export its key to use it in Axiom or any Solana app.",
+    create: "Create trading wallet",
+  },
+
+  notLinked: {
+    title: "No wallet is linked yet",
+    body: (wallets: string, rent: string): string =>
+      `${wallets} trading wallets on this account, none linked to your vault. Until a wallet is linked, nothing it ` +
+      `gains is put aside. Linking takes three signatures and ${rent} SOL of rent, returned if you unlink.`,
+    bodyNoRent: (wallets: string): string =>
+      `${wallets} trading wallets on this account, none linked to your vault. Until a wallet is linked, nothing it gains is put aside.`,
+    link: "Link a wallet",
+    needsConfig: `Linking opens once ${BRAND}’s program is configured on Solana. Withdrawals already work.`,
+    paused: `${BRAND} is paused, so linking waits. Withdrawals still work.`,
+  },
+
+  waiting: {
+    title: "Waiting for the first settlement",
+    body: (rate: string): string =>
+      "The keeper checks your linked trading wallets about once a minute. When a stretch of trading ends with more SOL " +
+      `than it started, ${rate} of the gain moves into your vault. A stretch without a gain moves nothing.`,
+  },
+
+  // ── overlays, alongside any stage ──────────────────────────────────────────
+  vaultPausedBadge: "Vault paused",
+  vaultPaused:
+    "Your vault’s rule is paused: nothing is settled, converted or invested for it. Withdrawals still work. Resuming " +
+    `needs a rule update signed by your pension key, which ${BRAND} does not offer yet.`,
+  investingPausedNote: "Investing is paused. SOL settled into your vault stays as SOL until you resume.",
+  protocolPaused: `${BRAND} is paused for everyone: no settlements, links, conversions or investments run. Your vault and withdrawals are not affected.`,
+  volumeNotOffered: `This vault measures volume, which ${BRAND} cannot settle yet, so nothing is put aside from it.`,
 } as const;
+
+/** One row of the history, per the kind the classifier gave it. */
+export const ACTIVITY_COPY = {
+  settled: (paid: string): string => `Saved ${paid} SOL`,
+  /** A settlement that moved nothing: said as itself, never dressed as a saving. */
+  settledNothing: "Settled, nothing to save",
+  settledFrom: (label: string, rate: string, base: string, measure: string): string => `from ${label} · ${rate} of ${base} SOL ${measure}`,
+  /** The part that did NOT move, said where someone would otherwise wonder. */
+  settledCapped: (owed: string, max: string): string => `${owed} SOL owed, capped at ${max} SOL; the rest is not carried over`,
+  /** What a settlement measures: the vault's own mode, never the other one. */
+  measureProfit: "profit",
+  measureVolume: "volume",
+
+  wrapped: (sol: string): string => `Wrapped ${sol} SOL for investing`,
+  wrappedPlain: "Wrapped SOL for investing",
+  converted: (sol: string, usdc: string): string => `Converted ${sol} SOL to ${usdc} USDC`,
+  convertedPlain: "Converted SOL to USDC",
+  invested: (amount: string, symbol: string, usdc: string): string => `Bought ${amount} ${symbol} for ${usdc} USDC`,
+  investedPlain: (symbol: string): string => `Bought ${symbol}`,
+  withdrewSol: (sol: string): string => `Withdrew ${sol} SOL`,
+  withdrewToken: (amount: string, symbol: string): string => `Withdrew ${amount} ${symbol}`,
+  vaultCreated: (rule: string): string => `Vault created · ${rule}`,
+  vaultCreatedPlain: "Vault created",
+  ruleChanged: "Savings rule changed",
+  policySigned: "Investment policy signed",
+  investingPaused: "Investing paused",
+  linked: (label: string): string => `Linked ${label}`,
+  unlinked: (label: string): string => `Unlinked ${label}`,
+  receivedSol: (sol: string): string => `Received ${sol} SOL`,
+  /** A transfer is a transfer: never counted as something anyone saved. */
+  receivedSub: "a plain transfer, not counted as saved",
+  other: "Vault transaction",
+  failedBadge: "Failed",
+  unreadable: "Transaction could not be read",
+  /** A wallet the loaded record cannot name. */
+  someWallet: "a trading wallet",
+
+  // ── the feed around the rows ───────────────────────────────────────────────
+  empty: "No activity yet. Settlements, conversions and investments appear here, each linked to Solscan.",
+  hiddenUpkeep: (count: string): string => `${count} account upkeep transactions hidden`,
+  hiddenDust: (count: string): string => `${count} dust transfers hidden`,
+  unreadableNow: "Activity could not be read just now",
+  footer: (transactions: string, settlements: string): string => `${transactions} transactions · ${settlements} settlements`,
+  seeAll: "See all activity",
+  loadOlder: "Load older",
+  loadingOlder: "Loading…",
+  showingSince: (date: string): string => `Showing since ${date}`,
+  complete: "Complete history",
+  timeUnknown: "Time unknown",
+  openOnSolscan: "Open on Solscan",
+
+  // ── the /activity page's filters ───────────────────────────────────────────
+  filterAll: "All",
+  filterSavings: "Savings",
+  filterInvesting: "Investing",
+  filterWithdrawals: "Withdrawals",
+  filterLabel: "Filter activity",
+  noneInFilter: "Nothing of that kind in the loaded history.",
+} as const;
+
+/** The tiles under the chart. Only what the chain actually says. */
+export const STATS_COPY = {
+  heading: "Stats",
+  settlements: "Settlements",
+  settlementsSub: (loaded: string): string => `${loaded} in loaded history`,
+  biggest: "Biggest settlement",
+  biggestSub: "put aside by one settlement",
+  capped: "Capped",
+  cappedSub: (max: string): string => `at ${max} SOL each`,
+  lastSettlement: "Last settlement",
+  lastSettlementNever: "none yet",
+  investedSoFar: "Invested so far",
+  usedIn30Days: "Used in 30 days",
+  usedIn30DaysSub: (cap: string): string => `of ${cap}`,
+  today: "Today",
+  thisWeek: "This week",
+  /** The strip's trailing note: it names its own population rather than implying a lifetime. */
+  lastSettlements: (count: string): string => `last ${count} ${count === "1" ? "settlement" : "settlements"}`,
+  settlementStripLabel: "Recent settlements",
+} as const;
+
+/** The settlement strip's chip tooltip: who, how much of what, whether it was capped, and when. */
+export const stripTooltip = (input: {
+  readonly label: string;
+  readonly rate: string;
+  readonly base: string;
+  readonly measure: string;
+  readonly capped: string | null;
+  readonly when: string;
+}): string =>
+  [`${input.label} · ${input.rate} of ${input.base} SOL ${input.measure}`, input.capped === null ? null : `capped at ${input.capped} SOL`, input.when]
+    .filter((part): part is string => part !== null)
+    .join(" · ");

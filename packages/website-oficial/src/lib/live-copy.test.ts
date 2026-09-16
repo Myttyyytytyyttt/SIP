@@ -1,11 +1,27 @@
 // Every sentence the live dashboard says: the public name, and what it promises.
+//
+// The walk below calls every copy FUNCTION as well as reading every literal, so
+// a brand name or a false promise smuggled into a template string fails here
+// rather than reaching a screenshot.
 
+import { DEFAULT_VAULT_POLICY, VOLUME_MODE_OFFERED } from "@sip/solana-core/client";
 import { describe, expect, it } from "vitest";
 
-import { BRAND, LIVE_COPY, MODE_COPY } from "@/lib/live-copy";
+import { ACTIVITY_COPY, BRAND, LIVE_COPY, MODE_COPY, STATS_COPY, stripTooltip } from "@/lib/live-copy";
+import { ratePercent } from "@/lib/vault-copy";
 
 /** Sample arguments for the copy functions, so their OUTPUT is checked too, not just the literals. */
-const SAMPLES: readonly unknown[][] = [[12], [null], ["14:32", 30], [7]];
+const SAMPLES: readonly unknown[][] = [
+  [12],
+  [null],
+  ["14:32", 30],
+  [7],
+  ["0.06"],
+  ["0.06", "0.05"],
+  ["Trading wallet 1", "20 %", "0.5"],
+  ["Trading wallet 1", "20 %", "0.5", "profit"],
+  [{ label: "Trading wallet 1", rate: "20 %", base: "0.5", measure: "profit", capped: "0.06", when: "4m ago" }],
+];
 
 /** Every string this module can produce: the literals, and each function called with sample arguments. */
 function everySentence(): string[] {
@@ -28,7 +44,7 @@ function everySentence(): string[] {
     }
     if (value !== null && typeof value === "object") for (const entry of Object.values(value)) walk(entry);
   };
-  walk({ BRAND, LIVE_COPY, MODE_COPY });
+  walk({ BRAND, LIVE_COPY, MODE_COPY, ACTIVITY_COPY, STATS_COPY, stripTooltip });
   return out;
 }
 
@@ -104,5 +120,80 @@ describe("refusals say when, not just that", () => {
     expect(stale).toContain("14:32");
     expect(stale).toContain("30 s");
     expect(stale).not.toMatch(/sample|example/i);
+    expect(LIVE_COPY.staleAsOfPending("14:32")).toContain("14:32");
+  });
+});
+
+describe("the rate a sentence quotes is the product's own", () => {
+  it("the profit sentences carry ratePercent(DEFAULT_VAULT_POLICY.skimBps)", () => {
+    const rate = ratePercent(DEFAULT_VAULT_POLICY.skimBps);
+    expect(rate).toBe("20 %");
+    expect(LIVE_COPY.heroProfit(rate)).toContain(rate);
+    expect(LIVE_COPY.modeProfit(rate)).toBe(`Profit · ${rate}`);
+    // The keeper's sweep is explained at the vault's OWN rate, not a hardcoded one.
+    expect(LIVE_COPY.waiting.body(rate)).toContain(rate);
+  });
+});
+
+describe("VOLUME is not offered, so nothing here offers it", () => {
+  it("says a volume vault receives nothing, and never invites anyone to choose it", () => {
+    expect(VOLUME_MODE_OFFERED).toBe(false);
+    expect(LIVE_COPY.volumeNotOffered).toMatch(/cannot settle/);
+    const offers = everySentence().filter((sentence) => /switch to volume|choose volume|volume mode is available/i.test(sentence));
+    expect(offers).toEqual([]);
+  });
+});
+
+describe("a row never claims more than the chain said", () => {
+  it("a settlement that moved nothing is said as itself", () => {
+    expect(ACTIVITY_COPY.settledNothing).toMatch(/nothing to save/i);
+  });
+
+  it("a plain transfer is labelled as one, and never counted as saved", () => {
+    expect(ACTIVITY_COPY.receivedSub).toMatch(/not counted as saved/);
+  });
+
+  it("a cap says what was owed and that the rest is gone, not carried", () => {
+    expect(ACTIVITY_COPY.settledCapped("0.1", "0.06")).toMatch(/not carried over/);
+  });
+
+  it("an amount-less form exists for every row whose figures the chain may withhold", () => {
+    expect(ACTIVITY_COPY.convertedPlain).not.toMatch(/\d/);
+    expect(ACTIVITY_COPY.investedPlain("SPYx")).not.toMatch(/\d/);
+    expect(ACTIVITY_COPY.wrappedPlain).not.toMatch(/\d/);
+  });
+
+  it("an empty history says what WILL appear, and an unreadable one says it failed", () => {
+    expect(ACTIVITY_COPY.empty).toMatch(/Solscan/);
+    expect(ACTIVITY_COPY.unreadableNow).toMatch(/could not be read/i);
+    expect(ACTIVITY_COPY.empty).not.toBe(ACTIVITY_COPY.unreadableNow);
+  });
+});
+
+describe("the stats claim only what exists", () => {
+  it("has no tile for anything the chain cannot answer", () => {
+    const labels = Object.values(STATS_COPY).filter((value) => typeof value === "string");
+    for (const banned of ["Avg per trade", "Volume", "Biggest trade", "Streak", "Active days", "At this pace"]) {
+      expect(labels).not.toContain(banned);
+    }
+  });
+
+  it("the settlement strip names its own population rather than implying a lifetime", () => {
+    expect(STATS_COPY.lastSettlements("40")).toBe("last 40 settlements");
+  });
+
+  it("counts one settlement as a settlement, not as `1 settlements`", () => {
+    expect(LIVE_COPY.settlementCount("1")).toBe("1 settlement");
+    expect(LIVE_COPY.settlementCount("3")).toBe("3 settlements");
+    expect(STATS_COPY.lastSettlements("1")).toBe("last 1 settlement");
+  });
+});
+
+describe("the strip's tooltip", () => {
+  it("says who, how much of what, and when — and mentions a cap only when there was one", () => {
+    const capped = stripTooltip({ label: "Trading wallet 1", rate: "20 %", base: "0.5", measure: "profit", capped: "0.06", when: "4m ago" });
+    expect(capped).toBe("Trading wallet 1 · 20 % of 0.5 SOL profit · capped at 0.06 SOL · 4m ago");
+    const plain = stripTooltip({ label: "Trading wallet 1", rate: "20 %", base: "0.5", measure: "profit", capped: null, when: "4m ago" });
+    expect(plain).toBe("Trading wallet 1 · 20 % of 0.5 SOL profit · 4m ago");
   });
 });
