@@ -57,9 +57,10 @@ export const LIGHTHOUSE_ASSERT_TOKEN_ACCOUNT_MULTI = 10;
 
 /**
  * Lighthouse instructions relayed in one transaction. Phantom was seen adding 1
- * to 6 (most often 1 or 2), and SaverFi's largest owner transaction names 6
- * accounts a post-state check could be about (the pension key, the policy and
- * three vault token accounts beside set_invest_policy).
+ * to 6 (most often 1 or 2; at most 5 after the dapp's instructions), and
+ * SaverFi's largest owner transaction names 6 writable accounts a post-state
+ * check could be about (the pension key, the vault, its policy and the three
+ * vault token accounts created beside set_invest_policy).
  */
 export const MAX_WALLET_GUARDS = 6;
 /** Assertions in one Lighthouse instruction. Phantom was seen writing 1 to 4. */
