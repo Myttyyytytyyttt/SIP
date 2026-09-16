@@ -27,6 +27,7 @@ import type {
   LiveActivityJson,
   LiveChartPoint,
   LiveDashboard,
+  LiveDiscoveredLinkJson,
   LiveHoldingRow,
   LivePolicyLegView,
   LivePolicyView,
@@ -283,7 +284,23 @@ function holdingsOf(snapshot: LiveSnapshotJson, vault: LiveVaultView, policy: Li
 
 const walletLabel = (index: number): string => `Trading wallet ${index + 1}`;
 
-function walletsOf(snapshot: LiveSnapshotJson, privyWallets: readonly string[], walletFloor: bigint | null, walletReserve: bigint | null): LiveWalletView[] {
+/** The most wallets one snapshot asks about, and so the most this screen can list. */
+const MAX_WALLET_ROWS = 10;
+
+interface WalletsRead {
+  readonly rows: LiveWalletView[];
+  /**
+   * More wallets than the snapshot can carry were found, so the list is cut.
+   *
+   * A TOTAL OVER A CUT LIST IS NOT THAT TOTAL. The lifetime settlement count is
+   * summed from these links' own nonces, and summing ten of twelve is a smaller
+   * number wearing a complete one's name — the same error an unreadable nonce
+   * makes, and it is answered the same way: unknown, not smaller.
+   */
+  readonly truncated: boolean;
+}
+
+function walletsOf(snapshot: LiveSnapshotJson, privyWallets: readonly string[], walletFloor: bigint | null, walletReserve: bigint | null): WalletsRead {
   const bySnapshot = new Map(snapshot.wallets.map((wallet) => [wallet.wallet, wallet]));
   const canSettleOf = (lamports: bigint | null): boolean | null => {
     if (lamports === null || walletFloor === null || walletReserve === null) return null;
@@ -292,45 +309,50 @@ function walletsOf(snapshot: LiveSnapshotJson, privyWallets: readonly string[], 
     return lamports > walletFloor + walletReserve;
   };
 
-  const out: LiveWalletView[] = [];
+  // EVERY candidate first, and the cap afterwards, so the count of what was left
+  // out is known rather than lost inside the loop that dropped it.
+  //
+  // Privy's HD order leads: these are the wallets this account actually owns.
+  // Then links found on chain for wallets Privy does not list here — the vault
+  // saves from them all the same, so hiding them would understate the pension.
+  interface Candidate {
+    readonly address: string;
+    readonly label: string;
+    readonly source: LiveWalletView["source"];
+    readonly link: LiveDiscoveredLinkJson | null;
+  }
+  const candidates: Candidate[] = [];
   const seen = new Set<string>();
-  // Privy's HD order first: these are the wallets this account actually owns.
   privyWallets.forEach((address, index) => {
     if (seen.has(address)) return;
     seen.add(address);
-    const read = bySnapshot.get(address);
+    candidates.push({ address, label: walletLabel(index), source: "privy", link: null });
+  });
+  for (const link of snapshot.links?.items ?? []) {
+    if (seen.has(link.wallet)) continue;
+    seen.add(link.wallet);
+    candidates.push({ address: link.wallet, label: "Linked wallet", source: "chain", link });
+  }
+
+  const rows = candidates.slice(0, MAX_WALLET_ROWS).map((candidate): LiveWalletView => {
+    const read = bySnapshot.get(candidate.address);
     const lamports = rawFrom(read?.lamports);
-    out.push({
-      address,
-      label: walletLabel(index),
-      source: "privy",
+    const { link } = candidate;
+    return {
+      address: candidate.address,
+      label: candidate.label,
+      source: candidate.source,
       lamports,
-      linkAddress: read?.link.address ?? "",
-      linkStatus: read?.link.status ?? "unreadable",
-      settlementNonce: rawFrom(read?.link.settlementNonce),
+      linkAddress: link?.address ?? read?.link.address ?? "",
+      // A wallet the chain itself reported a link for is linked here; one Privy
+      // named but the snapshot could not read is unreadable, never "not linked".
+      linkStatus: read?.link.status ?? (link === null ? "unreadable" : "this_vault"),
+      settlementNonce: rawFrom(link === null ? read?.link.settlementNonce : link.settlementNonce),
       canSettle: canSettleOf(lamports),
-    });
+    };
   });
 
-  // Then links found on chain for wallets Privy does not list here: the vault
-  // saves from them all the same, so hiding them would understate the pension.
-  for (const link of snapshot.links?.items ?? []) {
-    if (seen.has(link.wallet) || out.length >= 10) continue;
-    seen.add(link.wallet);
-    const read = bySnapshot.get(link.wallet);
-    const lamports = rawFrom(read?.lamports);
-    out.push({
-      address: link.wallet,
-      label: "Linked wallet",
-      source: "chain",
-      lamports,
-      linkAddress: link.address,
-      linkStatus: read?.link.status ?? "this_vault",
-      settlementNonce: rawFrom(link.settlementNonce),
-      canSettle: canSettleOf(lamports),
-    });
-  }
-  return out.slice(0, 10);
+  return { rows, truncated: candidates.length > MAX_WALLET_ROWS };
 }
 
 const isoOf = (blockTime: number | null): string | null => (blockTime === null ? null : new Date(blockTime * 1_000).toISOString());
@@ -429,15 +451,18 @@ function statsOf(
   settlements: readonly LoadedSettlement[],
   activity: LiveActivityJson | null,
   rows: readonly LiveRow[],
-  wallets: readonly LiveWalletView[],
+  wallets: WalletsRead,
   nowMs: number,
 ): LiveStatsView {
   const paid = settlements.map((entry) => entry.paid);
-  const lifetimeNonces = wallets.filter((wallet) => wallet.linkStatus === "this_vault").map((wallet) => wallet.settlementNonce);
-  // One nonce nobody could read makes the LIFETIME count unknown, not smaller.
-  const settlementsLifetime = lifetimeNonces.some((nonce) => nonce === null)
-    ? null
-    : lifetimeNonces.reduce<bigint>((total, nonce) => total + (nonce ?? 0n), 0n);
+  const lifetimeNonces = wallets.rows.filter((wallet) => wallet.linkStatus === "this_vault").map((wallet) => wallet.settlementNonce);
+  // One nonce nobody could read makes the LIFETIME count unknown, not smaller —
+  // and so does a link list the snapshot had to cut, which is the same error
+  // reached by a different road: a sum of ten of twelve links is not a lifetime.
+  const settlementsLifetime =
+    wallets.truncated || lifetimeNonces.some((nonce) => nonce === null)
+      ? null
+      : lifetimeNonces.reduce<bigint>((total, nonce) => total + (nonce ?? 0n), 0n);
 
   // The loaded history covers a window when it is complete, or when it reaches
   // back past the window's start. Otherwise a sum of it is not that window's total.
@@ -495,7 +520,7 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
   const stats = statsOf(settlements, activity, visible.rows, wallets, nowMs);
 
   return {
-    stage: stageOf(vault, wallets, stats.settlementsLifetime, stats.loadedSettlements),
+    stage: stageOf(vault, wallets.rows, stats.settlementsLifetime, stats.loadedSettlements),
     slot: snapshot.slot,
     nowMs,
     vault,
@@ -506,7 +531,7 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
     tokensReadable: snapshot.vaultTokenAccounts.status === "exists",
     worthNowUsdcRaw: holdings.worthNow,
     notInvestedUsdcRaw: holdings.notInvested,
-    wallets,
+    wallets: wallets.rows,
     rows: visible.rows,
     hiddenUpkeep: visible.hiddenUpkeep,
     hiddenDust: visible.hiddenDust,

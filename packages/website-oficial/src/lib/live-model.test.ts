@@ -266,6 +266,29 @@ describe("stats only claim what the loaded history covers", () => {
     expect(model(unreadable).stats.settlementsLifetime).toBeNull();
   });
 
+  it("…and so does a link list the snapshot had to CUT: ten of twelve is not a lifetime", () => {
+    const chainLink = (index: number) => ({
+      wallet: `ChainLink${index}P1aceho1der111111111111111`,
+      address: `link-${index}`,
+      epoch: "1",
+      settlementNonce: "5",
+      frontierSlot: "0",
+    });
+
+    // Nine chain links plus WALLET_A is exactly the ten a snapshot carries: the
+    // whole list is here, so its total is a real one — 3 + 9 × 5.
+    const whole = model(snapshot({ links: { status: "exists", items: Array.from({ length: 9 }, (_, index) => chainLink(index)) } }), null, [WALLET_A]);
+    expect(whole.wallets).toHaveLength(10);
+    expect(whole.stats.settlementsLifetime).toBe(48n);
+
+    // One wallet more than fits. The eleventh's settlements happened and cannot
+    // be read here, so the count is unknown — NOT the 48 the survivors add to,
+    // which would be a smaller number wearing a complete one's name.
+    const cut = model(snapshot({ links: { status: "exists", items: Array.from({ length: 10 }, (_, index) => chainLink(index)) } }), null, [WALLET_A]);
+    expect(cut.wallets).toHaveLength(10);
+    expect(cut.stats.settlementsLifetime).toBeNull();
+  });
+
   it("today and this week are NULL when the loaded page does not reach back that far", () => {
     const partial = activity([entry("sig1", recent, [settledEvent("60000000")])], { nextBefore: "moreP1aceho1der" });
     const stats = model(snapshot(), partial).stats;
