@@ -118,12 +118,22 @@ function Providers({ config, children }: { config: SolanaPublicConfig; children:
             landingHeader: "Connect your pension key",
             loginMessage:
               "Only your pension key can withdraw. The program is upgradeable during the beta.",
-            // THE MARK THE LOADER ALREADY USES (globals.css .landing-loader-mark),
-            // served same-origin from public/. The golden CSP's img-src is
-            // 'self' data: blob: and one WalletConnect host — no Privy origin —
-            // so an off-origin logo would silently fail to paint. It must stay
-            // a /public path, and the CSP must not gain a host for it.
-            logo: "/logo/sip-mark-white.png",
+            // THE MARK, IN THE INK THIS MODAL'S GROUND NEEDS. Privy's
+            // appearance.theme defaults to 'light' and nothing here pins a
+            // theme, so the dialog paints on Privy's standard white: the black
+            // glyph is the one the site itself shows on light surfaces
+            // (site-footer.tsx's SipMark, black under dark:hidden). The white
+            // file is the same shape in white ink and would be invisible here;
+            // the landing loader gets away with it only because globals.css
+            // uses that PNG as a mask, where the alpha is all that is read and
+            // the colour comes from the gradient behind it.
+            //
+            // Served same-origin from public/, which is what makes it paint at
+            // all: the golden CSP's img-src is 'self' data: blob: and one
+            // WalletConnect host — no Privy origin — so an off-origin logo
+            // would silently fail. It must stay a /public path, and the CSP
+            // must not gain a host for it.
+            logo: "/logo/sip-mark-black.png",
             // Solana only: an EVM wallet has nothing to sign here, and Phantom
             // offered through an ethereum path starts SIWE against a Solana
             // account and fails.
