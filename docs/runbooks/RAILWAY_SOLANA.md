@@ -44,8 +44,8 @@ Para saber que el servicio es el vigilante y no la web:
 
 - en *Build Logs* se construye con el Dockerfile y pasa el paso `--preflight`;
 - en *Deploy Logs* sale `heartbeat listening`, nunca `Next.js`;
-- `/health` responde `{"ok":true}` en JSON; solo da `503` si no ha EMPEZADO un barrido desde hace más de
-  `max(3 × sweepMs, 10 min)`.
+- `/health` responde `{"ok":true}` en JSON; solo da `503` cuando el barrido no AVANZA desde hace más de
+  `max(3 × sweepMs, 10 min)`, la regla que explica la sección de la fase A.
 
 ### Fase A — en seco, ya hoy
 
