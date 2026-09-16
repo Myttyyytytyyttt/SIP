@@ -92,6 +92,16 @@ function setup(): { redactor: Redactor; status: KeeperStatus } {
     wallets: {
       [wallet]: { settle: "FAILED", invest: "IDLE", signing: "privy", detail: `webhook ${WEBHOOK} and ${APP_SECRET}`, at: new Date().toISOString() },
     },
+    pendingCarries: [
+      {
+        wallet,
+        link: Keypair.generate().publicKey.toBase58(),
+        state: "300000000:8:300000900",
+        lossLamports: 500_000_000n,
+        walletSignedTxCount: 30,
+        since: new Date().toISOString(),
+      },
+    ],
   };
   return { redactor, status };
 }
@@ -123,6 +133,11 @@ describe("the /status JSON", () => {
     expect(parsed.signing.settleKey).toBe(keypair.publicKey.toBase58());
     expect(parsed.lastSweepError).toContain("<redacted:rpcUrl:0>");
     expect(parsed.history).toContain("<redacted:databaseUrl>");
+    // A pending carry's lamports are a bigint, which JSON.stringify throws on:
+    // the status replacer has to carry them out as a string, or the whole page
+    // would fail to render the moment a zero settle carried a loss.
+    expect(served).toContain('"lossLamports":"500000000"');
+    expect(parsed.pendingCarries).toHaveLength(1);
   });
 
   it("is withheld whole when a registered secret survives the scrub", () => {

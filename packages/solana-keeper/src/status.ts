@@ -49,6 +49,29 @@ export interface SigningStatus {
   readonly wallets: { readonly signable: number; readonly of: number } | null;
 }
 
+/**
+ * One loss a zero settle carried forward and has not yet handed on, as /status
+ * shows it.
+ *
+ * WHY IT IS ON SHOW. The carry book lives in memory and nothing persists it: a
+ * restart forgets every pending carry, and the window above it is then charged
+ * on its own profit, as if the loss had never happened. That is deliberate — it
+ * is the only way a loss is forgiven without the wallet's own signed
+ * transactions — but it was also invisible, so nobody could tell what a deploy
+ * was about to drop. Showing them does not store them.
+ */
+export interface PendingCarry {
+  /** The trading wallet, or null when this sweep no longer discovered that link. */
+  readonly wallet: string | null;
+  readonly link: string;
+  /** The link state the carry belongs to: `epoch:settlementNonce:frontierSlot`. */
+  readonly state: string;
+  readonly lossLamports: bigint;
+  readonly walletSignedTxCount: number;
+  /** When this process first saw this carry. A restart resets it, as it resets the carry. */
+  readonly since: string;
+}
+
 export interface KeeperStatus {
   service: string;
   startedAt: string;
@@ -75,6 +98,8 @@ export interface KeeperStatus {
    * once and then goes quiet, but /status always shows its current condition.
    */
   wallets: Record<string, WalletStatus>;
+  /** Every loss carried forward and not yet handed on — what a restart would drop. */
+  pendingCarries: readonly PendingCarry[];
 }
 
 const bigintSafe = (_key: string, value: unknown): unknown => (typeof value === "bigint" ? value.toString() : value);

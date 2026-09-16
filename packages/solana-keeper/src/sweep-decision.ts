@@ -8,6 +8,8 @@
 import type { Alert } from "./alerts.js";
 import type { WrapReport } from "./invest-decision.js";
 import type { InvestOutcome } from "./invest-tick.js";
+import type { CarryBook } from "./settle-decision.js";
+import type { PendingCarry } from "./status.js";
 
 /**
  * The alerter's key for the sweep's batched vault read.
@@ -96,4 +98,67 @@ export function foldInvestTurn(
     return previous;
   })();
   return { outcome: decided.outcome, detail: decided.detail, wrap };
+}
+
+/** Reads the carry book for /status, and remembers when each carry first appeared. */
+export interface CarryWatch {
+  observe(book: CarryBook, walletFor: (link: string) => string | null, now: number): readonly PendingCarry[];
+}
+
+/**
+ * What the carry book holds right now, for /status, with a "since" of its own.
+ *
+ * IT ONLY READS. carryFor PRUNES as it reads — it deletes every entry no later
+ * state can match — so calling it from a /status projection would let an
+ * operator's poll forget a loss, which is money. This walks the Map and touches
+ * nothing in it; recordCarry and carryFor stay the only writers.
+ *
+ * THE TIMESTAMP IS KEPT HERE, NOT ON LossCarry. A settle that does not land is
+ * re-recorded under the same key every sweep with a fresh object, so a stamp
+ * inside the carry would reset each sweep and "since" would always read as now.
+ * Keyed by link and state, the stamp survives that and means what it says: when
+ * this loss started waiting. Keeping it out of LossCarry also leaves the money
+ * path — recordCarry's positive-loss guard and the settle tests that compare
+ * carries whole — untouched.
+ *
+ * IT CANNOT DRIFT. Every stamp whose carry is no longer in the book is dropped
+ * on each pass, so entries the book prunes cannot accumulate here, and a carry
+ * that comes back is a new wait with a new stamp.
+ *
+ * Oldest first: the longest-waiting loss is the one a restart costs most.
+ */
+export function createCarryWatch(): CarryWatch {
+  const firstSeen = new Map<string, number>();
+  // "|" separates them unambiguously: base58 has no punctuation, and the state
+  // key is digits and colons.
+  const id = (link: string, state: string): string => `${link}|${state}`;
+
+  return {
+    observe(book, walletFor, now) {
+      const live = new Set<string>();
+      const found: { readonly carry: Omit<PendingCarry, "since">; readonly since: number }[] = [];
+      for (const [link, entries] of book) {
+        for (const [state, carry] of entries) {
+          const key = id(link, state);
+          live.add(key);
+          const since = firstSeen.get(key) ?? now;
+          firstSeen.set(key, since);
+          found.push({
+            since,
+            carry: {
+              wallet: walletFor(link),
+              link,
+              state,
+              lossLamports: carry.lossLamports,
+              walletSignedTxCount: carry.walletSignedTxCount,
+            },
+          });
+        }
+      }
+      for (const key of [...firstSeen.keys()]) if (!live.has(key)) firstSeen.delete(key);
+      return found
+        .sort((a, b) => a.since - b.since || a.carry.link.localeCompare(b.carry.link) || a.carry.state.localeCompare(b.carry.state))
+        .map(({ carry, since }) => ({ ...carry, since: new Date(since).toISOString() }));
+    },
+  };
 }

@@ -4,9 +4,11 @@
 import { describe, expect, it } from "vitest";
 import { INVEST_FAILED_CRITICAL_STREAK, investFailedStreak, wrapShortStreak, type WrapReport } from "../src/invest-decision.js";
 import type { InvestOutcome } from "../src/invest-tick.js";
+import type { CarryBook, LossCarry } from "../src/settle-decision.js";
 import {
   VAULT_READ_ALERT_KEY,
   VAULT_READ_CRITICAL_STREAK,
+  createCarryWatch,
   foldInvestTurn,
   vaultReadAlert,
   type VaultInvestSweep,
@@ -89,5 +91,82 @@ describe("a vault's invest turns folded across one sweep", () => {
     const short = { outcome: "INVESTED", detail: "wrapped a slice", wrap: wrap(true) } as const;
     expect(wrapShortStreak(0, fold(short, short, short).wrap?.short === true)).toBe(1);
     expect(wrapShortStreak(2, fold(short, { outcome: "IDLE", detail: "nothing to wrap", wrap: wrap(false) }).wrap?.short === true)).toBe(3);
+  });
+});
+
+describe("the pending carries /status shows", () => {
+  const LINK = "Link1111111111111111111111111111111111111111";
+  const OTHER = "Link2222222222222222222222222222222222222222";
+  const WALLET = "Wa11et11111111111111111111111111111111111111";
+  // The book's own key shape: `epoch:settlementNonce:frontierSlot`. The watch
+  // never parses it — it is shown so an operator can match it to a link.
+  const STATE = "300000000:8:300000900";
+  const carry = (lossLamports: bigint, walletSignedTxCount = 30): LossCarry => ({ lossLamports, walletSignedTxCount });
+  const book = (...links: readonly (readonly [string, string, LossCarry])[]): CarryBook =>
+    links.reduce<CarryBook>((acc, [link, state, value]) => {
+      const entries = acc.get(link) ?? new Map<string, LossCarry>();
+      entries.set(state, value);
+      return acc.set(link, entries);
+    }, new Map());
+
+  const wallets = (pairs: Record<string, string>) => (link: string): string | null => pairs[link] ?? null;
+
+  it("names the wallet, the loss and when the wait started", () => {
+    const watch = createCarryWatch();
+    const at = Date.parse("2026-09-16T00:00:00.000Z");
+    expect(watch.observe(book([LINK, STATE, carry(500_000_000n)]), wallets({ [LINK]: WALLET }), at)).toEqual([
+      {
+        wallet: WALLET,
+        link: LINK,
+        state: STATE,
+        lossLamports: 500_000_000n,
+        walletSignedTxCount: 30,
+        since: "2026-09-16T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("keeps the wait when a settle that did not land re-records the same carry every sweep", () => {
+    const watch = createCarryWatch();
+    const first = Date.parse("2026-09-16T00:00:00.000Z");
+    watch.observe(book([LINK, STATE, carry(500_000_000n)]), wallets({ [LINK]: WALLET }), first);
+    // recordCarry writes a FRESH object under the same key each sweep; the wait
+    // is the loss's, not the object's, so it must not restart.
+    const later = watch.observe(book([LINK, STATE, carry(500_000_000n)]), wallets({ [LINK]: WALLET }), first + 10 * 60_000);
+    expect(later[0]!.since).toBe("2026-09-16T00:00:00.000Z");
+  });
+
+  it("shows the longest wait first", () => {
+    const watch = createCarryWatch();
+    const at = Date.parse("2026-09-16T00:00:00.000Z");
+    watch.observe(book([LINK, STATE, carry(1n)]), wallets({}), at);
+    const both = watch.observe(book([LINK, STATE, carry(1n)], [OTHER, STATE, carry(2n)]), wallets({}), at + 60_000);
+    expect(both.map((pending) => pending.link)).toEqual([LINK, OTHER]);
+  });
+
+  it("forgets the wait of a carry the book no longer holds, so a returning one waits anew", () => {
+    const watch = createCarryWatch();
+    const at = Date.parse("2026-09-16T00:00:00.000Z");
+    watch.observe(book([LINK, STATE, carry(1n)]), wallets({}), at);
+    expect(watch.observe(new Map(), wallets({}), at + 60_000)).toEqual([]);
+    const returned = watch.observe(book([LINK, STATE, carry(1n)]), wallets({}), at + 120_000);
+    expect(returned[0]!.since).toBe(new Date(at + 120_000).toISOString());
+  });
+
+  it("names a null wallet for a link this sweep no longer discovered, rather than hiding the loss", () => {
+    const watch = createCarryWatch();
+    const [pending] = watch.observe(book([LINK, STATE, carry(7n)]), wallets({}), Date.now());
+    expect(pending).toMatchObject({ wallet: null, link: LINK, lossLamports: 7n });
+  });
+
+  it("NEVER touches the book: a poll must not forget a loss the way carryFor prunes one", () => {
+    const watch = createCarryWatch();
+    // Two states under one link, one of them stale — exactly what carryFor deletes.
+    const held = book([LINK, STATE, carry(5n)], [LINK, "300000000:7:300000500", carry(6n)]);
+    const before = [...held].map(([link, entries]) => [link, [...entries]] as const);
+    watch.observe(held, wallets({ [LINK]: WALLET }), Date.now());
+    watch.observe(held, wallets({ [LINK]: WALLET }), Date.now() + 60_000);
+    expect([...held].map(([link, entries]) => [link, [...entries]] as const)).toEqual(before);
+    expect(held.get(LINK)!.size).toBe(2);
   });
 });

@@ -69,10 +69,11 @@ import { activeBps, settleAlert, type CarryBook } from "../src/settle-decision.j
 import { runSettleTick } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KEEPER_LOCK_NAME, KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
-import { decideHealth, httpHandler, renderStatus, type KeeperStatus } from "../src/status.js";
+import { decideHealth, httpHandler, renderStatus, type KeeperStatus, type PendingCarry } from "../src/status.js";
 import {
   VAULT_READ_ALERT_KEY,
   VAULT_READ_CRITICAL_STREAK,
+  createCarryWatch,
   foldInvestTurn,
   vaultReadAlert,
   type VaultInvestSweep,
@@ -189,6 +190,16 @@ const settleRetries = new Map<string, number>();
 const settleCarries: CarryBook = new Map();
 
 /**
+ * What the carry book holds, for /status. The book is keyed by LINK and an
+ * operator thinks in wallets, so each sweep leaves behind the pairing it just
+ * discovered; a carry whose link is gone from the chain shows a null wallet
+ * rather than disappearing. The watch only reads the book — see createCarryWatch.
+ */
+const carryWatch = createCarryWatch();
+const linkWallets = new Map<string, string>();
+const pendingCarries = (): readonly PendingCarry[] => carryWatch.observe(settleCarries, (link) => linkWallets.get(link) ?? null, Date.now());
+
+/**
  * Consecutive invest turns, per vault, that found more free SOL than the crank
  * could front. One large settlement wraps in slices over a few sweeps; a crank
  * that stays short of a vault leaves its savings unwrapped, and one between
@@ -268,6 +279,9 @@ const health: KeeperStatus = {
   },
   history: "not checked yet",
   wallets: {},
+  // Projected from the carry book at each request, below: a sweep in flight can
+  // record one, and a stale copy here would say a restart costs nothing.
+  pendingCarries: [],
 };
 
 // The heartbeat, only when a port is provided (Railway injects PORT; the image
@@ -280,7 +294,7 @@ if (config.port !== null) {
   const port = config.port;
   createServer(
     httpHandler(
-      () => renderStatus(health, sharedRedactor),
+      () => renderStatus({ ...health, pendingCarries: pendingCarries() }, sharedRedactor),
       () => decideHealth({ now: Date.now(), startedAt: startedAtMs, lastSweepStartedAt: sweepStartedAt, sweepMs: config.sweepMs }),
     ),
   )
@@ -569,6 +583,11 @@ async function sweep(): Promise<void> {
     const signingRoutes = new Map<string, string>();
     /** Each vault's invest turns for THIS sweep, folded; the streaks are applied once from it below. */
     const investSweep = new Map<string, VaultInvestSweep>();
+    // THE LINK-TO-WALLET PAIRING /status NEEDS, from the set this sweep just
+    // discovered. The carry book is keyed by link; an operator reads wallets.
+    // Replaced, not merged, so an unlinked wallet stops being named.
+    linkWallets.clear();
+    for (const link of links) linkWallets.set(link.linkAddress.toBase58(), link.wallet.toBase58());
     log.info("sweep", {
       links: links.length,
       localKeypairs: localSigners?.signers.size ?? 0,
