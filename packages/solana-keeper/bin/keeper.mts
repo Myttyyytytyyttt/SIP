@@ -70,7 +70,13 @@ import { runSettleTick } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KEEPER_LOCK_NAME, KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
 import { decideHealth, httpHandler, renderStatus, type KeeperStatus } from "../src/status.js";
-import { VAULT_READ_ALERT_KEY, VAULT_READ_CRITICAL_STREAK, vaultReadAlert } from "../src/sweep-decision.js";
+import {
+  VAULT_READ_ALERT_KEY,
+  VAULT_READ_CRITICAL_STREAK,
+  foldInvestTurn,
+  vaultReadAlert,
+  type VaultInvestSweep,
+} from "../src/sweep-decision.js";
 
 const log = createKeeperLogger();
 
@@ -561,6 +567,8 @@ async function sweep(): Promise<void> {
     health.lastSweepError = null;
     alerter.clear("sweep-failed");
     const signingRoutes = new Map<string, string>();
+    /** Each vault's invest turns for THIS sweep, folded; the streaks are applied once from it below. */
+    const investSweep = new Map<string, VaultInvestSweep>();
     log.info("sweep", {
       links: links.length,
       localKeypairs: localSigners?.signers.size ?? 0,
@@ -741,31 +749,13 @@ async function sweep(): Promise<void> {
         } else {
           changes.change(`invest:${vaultAddr}`, `invest ${invest.outcome.toLowerCase()}`, { vault: vaultAddr, detail: invest.detail });
         }
-        // A CRANK THAT STAYS SHORT OF A VAULT, told on the third turn in a row.
-        // Any turn that did not find it short — nothing to wrap, a crank that
-        // covered it, a pause, conversion off — ends the run and clears it.
-        const shortStreak = wrapShortStreak(wrapShort.get(vaultAddr) ?? 0, invest.wrap?.short === true);
-        const shortAlert = invest.wrap === undefined ? null : wrapShortAlert(vaultAddr, shortStreak, invest.wrap);
-        if (shortStreak === 0) {
-          wrapShort.delete(vaultAddr);
-          alerter.clear(`wrap-short:${vaultAddr}`);
-        } else {
-          wrapShort.set(vaultAddr, shortStreak);
-          if (shortAlert !== null) alerter.fire(shortAlert);
-        }
-        // AN INVESTMENT THAT KEEPS FAILING: warned on the first turn, critical on
-        // the third in a row. The alerter dedupes by key alone, so the warning
-        // standing under the same key is cleared first, or it would swallow the
-        // escalation. REFUSED holds the count; every other outcome ends it.
-        const failedStreak = investFailedStreak(investFailed.get(vaultAddr) ?? 0, invest.outcome);
-        if (invest.outcome === "FAILED") {
-          investFailed.set(vaultAddr, failedStreak);
-          if (failedStreak === INVEST_FAILED_CRITICAL_STREAK) alerter.clear(`invest-failed:${vaultAddr}`);
-          alerter.fire(investFailedAlert(vaultAddr, failedStreak, invest.detail));
-        } else if (failedStreak === 0) {
-          investFailed.delete(vaultAddr);
-          alerter.clear(`invest-failed:${vaultAddr}`);
-        }
+        // COUNTED PER SWEEP, NOT PER TURN. Both streaks are keyed by VAULT and
+        // this loop runs per LINK, so a vault with three linked wallets advanced
+        // them three times in one sweep and paged critical after a single sweep —
+        // the escalation that is meant to say "three sweeps in a row". The turn
+        // above still runs for every link, because it moves money; only the
+        // counting moved, to just after this loop.
+        investSweep.set(vaultAddr, foldInvestTurn(investSweep.get(vaultAddr), invest));
 
         // /status always reflects the latest condition, deduped or not.
         signingRoutes.set(wallet, route);
@@ -779,6 +769,37 @@ async function sweep(): Promise<void> {
       } catch (error) {
         // Contained per wallet: one bad link must not end the sweep.
         log.error("wallet turn threw", { wallet, detail: summarizeUpstreamError(error, { take: 3, maxChars: 500 }) });
+      }
+    }
+
+    // ONE ADVANCE PER VAULT PER SWEEP, however many wallets that vault has linked.
+    // A vault whose turns all threw before investing contributes nothing and its
+    // streak stands, exactly as it did when a throw skipped these lines.
+    for (const [vaultAddr, folded] of investSweep) {
+      // A CRANK THAT STAYS SHORT OF A VAULT, told on the third SWEEP in a row.
+      // Any sweep that did not find it short — nothing to wrap, a crank that
+      // covered it, a pause, conversion off — ends the run and clears it.
+      const shortStreak = wrapShortStreak(wrapShort.get(vaultAddr) ?? 0, folded.wrap?.short === true);
+      const shortAlert = folded.wrap === undefined ? null : wrapShortAlert(vaultAddr, shortStreak, folded.wrap);
+      if (shortStreak === 0) {
+        wrapShort.delete(vaultAddr);
+        alerter.clear(`wrap-short:${vaultAddr}`);
+      } else {
+        wrapShort.set(vaultAddr, shortStreak);
+        if (shortAlert !== null) alerter.fire(shortAlert);
+      }
+      // AN INVESTMENT THAT KEEPS FAILING: warned on the first sweep, critical on
+      // the third in a row. The alerter dedupes by key alone, so the warning
+      // standing under the same key is cleared first, or it would swallow the
+      // escalation. REFUSED holds the count; every other outcome ends it.
+      const failedStreak = investFailedStreak(investFailed.get(vaultAddr) ?? 0, folded.outcome);
+      if (folded.outcome === "FAILED") {
+        investFailed.set(vaultAddr, failedStreak);
+        if (failedStreak === INVEST_FAILED_CRITICAL_STREAK) alerter.clear(`invest-failed:${vaultAddr}`);
+        alerter.fire(investFailedAlert(vaultAddr, failedStreak, folded.detail));
+      } else if (failedStreak === 0) {
+        investFailed.delete(vaultAddr);
+        alerter.clear(`invest-failed:${vaultAddr}`);
       }
     }
 
