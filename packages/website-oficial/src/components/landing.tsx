@@ -566,7 +566,7 @@ export function Landing({
                 <span className="tracking-wide">A pension that builds itself, on Solana</span>
               </p>
               <p className="landing-copy-lede text-[15px] leading-relaxed text-white/70 sm:text-base">
-                SIP puts a slice of your trading — 2% of its volume or 20% of its realized profit, yours to set — into a
+                SaverFi puts a slice of your trading — 2% of its volume or 20% of its realized profit, yours to set — into a
                 pension of your own. Trade wherever you already trade — GMGN, Axiom, your own router — and it grows on
                 its own.
               </p>
@@ -574,7 +574,7 @@ export function Landing({
                   when its upgrade authority moves behind a delay — not by the
                   absolutes it replaced. */}
               <p className="mt-3 text-xs leading-relaxed text-white/45">
-                Beta. The team has no key to your pension, but the SIP program is upgradeable by its upgrade authority —
+                Beta. The team has no key to your pension, but the SaverFi program is upgradeable by its upgrade authority —
                 today a single team key with no timelock.
               </p>
             </div>
@@ -615,7 +615,7 @@ export function Landing({
               <div className="relative aspect-[16/10] w-full">
                 <Image
                   src="/landing/app-dark.png"
-                  alt="The SIP dashboard on example data: what each trade put aside, the pension's growth, and the savings rule"
+                  alt="The SaverFi dashboard on example data: what each trade put aside, the pension's growth, and the savings rule"
                   fill
                   priority
                   sizes="(min-width: 1280px) 1440px, 100vw"
