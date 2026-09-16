@@ -56,6 +56,7 @@ function setup(): { redactor: Redactor; status: KeeperStatus } {
       SIP_SOLANA_PRIVY_APP_ID: "app-id",
       SIP_SOLANA_PRIVY_APP_SECRET: APP_SECRET,
       SIP_SOLANA_PRIVY_AUTHORIZATION_KEY: AUTH_KEY,
+      SIP_SOLANA_PRIVY_POLICY_ID: "policy-id",
       SIP_SOLANA_ALERT_WEBHOOK: WEBHOOK,
       DATABASE_URL: DB,
       PORT: "18080",
@@ -84,6 +85,7 @@ function setup(): { redactor: Redactor; status: KeeperStatus } {
       route: "privy",
       privyAppId: config.privyAppId,
       privySignerId: config.privySignerId,
+      privyPolicyId: config.privyPolicyId,
       secretsRead: true,
       settleKey: config.signing!.settleKey.publicKey.toBase58(),
       wallets: { signable: 1, of: 1 },
@@ -131,6 +133,8 @@ describe("the /status JSON", () => {
     expect(parsed.program).toBe(SIP_PROGRAM_ID);
     expect(parsed.programDeployed).toBe(false);
     expect(parsed.signing.settleKey).toBe(keypair.publicKey.toBase58());
+    // Public ids, and the policy id says whether an unbounded seat is refused.
+    expect(parsed.signing.privyPolicyId).toBe("policy-id");
     expect(parsed.lastSweepError).toContain("<redacted:rpcUrl:0>");
     expect(parsed.history).toContain("<redacted:databaseUrl>");
     // A pending carry's lamports are a bigint, which JSON.stringify throws on:

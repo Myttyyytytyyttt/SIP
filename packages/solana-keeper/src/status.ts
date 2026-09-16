@@ -42,6 +42,12 @@ export interface SigningStatus {
   readonly route: string;
   readonly privyAppId: string | null;
   readonly privySignerId: string | null;
+  /**
+   * The policy that must bound the keeper's seat on each trading wallet. Null
+   * means it is not configured — and then the seat is NOT checked, so an
+   * operator can tell from here whether an unbounded seat would be refused.
+   */
+  readonly privyPolicyId: string | null;
   /** False in dry run, by construction: nothing that can sign was read. */
   readonly secretsRead: boolean;
   /** The settle key's PUBLIC key, when armed. */

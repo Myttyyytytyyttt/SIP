@@ -35,6 +35,7 @@ import { PrivyClient } from "@privy-io/node";
 import { Ed25519Program, PublicKey, Transaction, type TransactionInstruction } from "@solana/web3.js";
 import type { Secret } from "@sip/solana-log";
 import { SIP_PROGRAM_ID, instructionDiscriminator } from "./idl.js";
+import { seatVerdict, seatsFor, type SignerSeat } from "./privy-policy.js";
 
 /** CAIP-2 for Solana mainnet-beta. */
 export const SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
@@ -79,20 +80,37 @@ export interface SolanaWalletSubmitter {
 }
 
 /**
- * What resolving an address against Privy can answer. THREE outcomes, not a
- * nullable — because "not our wallet" and "our wallet, but it never granted the
- * keeper's signer" look identical from the outside and demand different fixes
- * (nothing vs. re-running the onboarding registration).
+ * What resolving an address against Privy can answer. FOUR outcomes, not a
+ * nullable — because "not our wallet", "our wallet, but it never granted the
+ * keeper's signer" and "our signer is seated, bounded by nothing" look identical
+ * from the outside and demand different fixes: nothing, re-running the
+ * onboarding registration, and re-seating the signer WITH its policy.
  */
 export type PrivySolanaResolution =
   | { readonly outcome: "SIGNER"; readonly signer: SolanaWalletSubmitter }
   | { readonly outcome: "NOT_A_PRIVY_WALLET" }
-  | { readonly outcome: "SIGNER_NOT_GRANTED"; readonly granted: readonly string[] };
+  | { readonly outcome: "SIGNER_NOT_GRANTED"; readonly granted: readonly string[] }
+  | {
+      readonly outcome: "SEAT_NOT_BOUNDED";
+      readonly granted: readonly string[];
+      /** What each of this signer's seats carries, in `privy-policy verify`'s own shape. */
+      readonly overridePolicyIds: readonly (readonly string[])[];
+    };
 
-/** One wallet as Privy reports it: its id and the signers granted on it. */
+/** One wallet as Privy reports it: its id, and every signer seated on it with what bounds that seat. */
 export interface PrivyWalletEntry {
   readonly walletId: string;
-  readonly granted: readonly string[];
+  readonly seats: readonly SignerSeat[];
+}
+
+/** The seats of one wallet, keeping only what Privy actually sent as strings. */
+function readSeats(signers: readonly { signer_id?: string; override_policy_ids?: string[] }[] | undefined): readonly SignerSeat[] {
+  return (signers ?? [])
+    .filter((signer): signer is { signer_id: string; override_policy_ids?: string[] } => typeof signer?.signer_id === "string")
+    .map((signer) => ({
+      signerId: signer.signer_id,
+      overridePolicyIds: (signer.override_policy_ids ?? []).filter((id): id is string => typeof id === "string"),
+    }));
 }
 
 export interface PinnedPrivyClientOptions {
@@ -213,14 +231,18 @@ export async function buildPrivySolanaIndex(
   const privy = clientFor(config);
   const index = new Map<string, PrivyWalletEntry>();
   for await (const wallet of privy.wallets().list({ chain_type: "solana" })) {
-    const w = wallet as { id?: string; address?: string; additional_signers?: { signer_id?: string }[] };
+    // override_policy_ids RIDES IN THIS LISTING. It is a field of
+    // WalletAdditionalSignerItem, so what bounds each seat is read here with no
+    // request of its own. The narrowing cast used to leave it out, and every
+    // reader downstream was then structurally unable to tell a seat bounded by
+    // the keeper's policy from one bounded by nothing.
+    const w = wallet as {
+      id?: string;
+      address?: string;
+      additional_signers?: { signer_id?: string; override_policy_ids?: string[] }[];
+    };
     if (typeof w.address !== "string" || typeof w.id !== "string") continue;
-    index.set(w.address, {
-      walletId: w.id,
-      granted: (w.additional_signers ?? [])
-        .map((signer) => signer?.signer_id)
-        .filter((id): id is string => typeof id === "string"),
-    });
+    index.set(w.address, { walletId: w.id, seats: readSeats(w.additional_signers) });
   }
   return index;
 }
@@ -242,6 +264,21 @@ export async function buildPrivySolanaIndex(
  * signable": when given and absent from the wallet's additional_signers, the
  * submit would be refused by Privy anyway, so the keeper learns it here, once,
  * as a reportable fact instead of a failed attempt per sweep forever.
+ *
+ * `expectedPolicyId` turns that into "found, signable AND BOUNDED". A seat is
+ * what makes this keeper's one authorization key able to act as a trading
+ * wallet; the policy attached as that seat's override is the ONLY thing
+ * narrowing it to sip-vault transactions. A seat without it can sign any
+ * message, send any transaction and export the wallet's key, so the keeper
+ * declines to use it at all rather than trusting that nobody else ever holds
+ * the key.
+ *
+ * OMITTED, IT CANNOT REFUSE. The rule is reached only through this parameter,
+ * never read from a config inside: with no policy id configured the caller
+ * passes nothing and the refusal below is unreachable code, which is a stronger
+ * guarantee than a flag someone can default to true later. The same applies
+ * with no `expectedSignerId`: there is then no seat to look for, and the whole
+ * check is skipped rather than guessed at.
  */
 export async function createPrivySolanaSigner(
   config: PrivySolanaConfig,
@@ -249,12 +286,26 @@ export async function createPrivySolanaSigner(
   expectedSignerId?: string,
   /** The sweep's index. Omitted, one is built for this call alone. */
   index?: ReadonlyMap<string, PrivyWalletEntry>,
+  /** The policy that must bound this signer's seat. Omitted, the seat's bound is not examined. */
+  expectedPolicyId?: string,
 ): Promise<PrivySolanaResolution> {
   const resolved = (index ?? (await buildPrivySolanaIndex(config))).get(address.toBase58());
   if (resolved === undefined) return { outcome: "NOT_A_PRIVY_WALLET" };
-  const { walletId, granted } = resolved;
+  const { walletId, seats } = resolved;
+  const granted = seats.map((seat) => seat.signerId);
   if (expectedSignerId !== undefined && !granted.includes(expectedSignerId)) {
     return { outcome: "SIGNER_NOT_GRANTED", granted: [...granted] };
+  }
+  if (expectedSignerId !== undefined && expectedPolicyId !== undefined) {
+    // verify's rule, from the one function both call: exactly one override
+    // policy id, and this one.
+    if (seatVerdict(seats, expectedSignerId, expectedPolicyId) === "NOT_BOUNDED") {
+      return {
+        outcome: "SEAT_NOT_BOUNDED",
+        granted: [...granted],
+        overridePolicyIds: seatsFor(seats, expectedSignerId).map((seat) => [...seat.overridePolicyIds]),
+      };
+    }
   }
 
   const signer: SolanaWalletSubmitter = {

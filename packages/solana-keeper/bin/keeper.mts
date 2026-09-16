@@ -223,6 +223,18 @@ let vaultReadFailures = 0;
 
 const privyConfig: PrivySolanaConfig | null = config.signing?.privy ?? null;
 
+// SAYING WHAT IS NOT BEING CHECKED, once per process rather than once per sweep.
+// With no policy id there is no rule to hold a seat to, so the keeper signs for
+// any wallet that lists its signer id — exactly as it always did. Names only.
+if (privyConfig !== null && config.privyPolicyId === null) {
+  log.warn("SIP_SOLANA_PRIVY_POLICY_ID is not set", {
+    detail:
+      "The keeper accepts a wallet that seats its signer WITHOUT the keeper's policy, and such a seat is an unbounded " +
+      "signer at Privy: it could sign any message, send any transaction and export that wallet's key. Set it and the " +
+      "keeper refuses to sign for those wallets.",
+  });
+}
+
 function signingRoute(): string {
   if (config.signing === null) return "not resolved — a dry run reads no signing secret";
   const routes = [
@@ -273,6 +285,7 @@ const health: KeeperStatus = {
     route: signingRoute(),
     privyAppId: config.privyAppId,
     privySignerId: config.privySignerId,
+    privyPolicyId: config.privyPolicyId,
     secretsRead: config.signing !== null,
     settleKey: config.signing?.settleKey.publicKey.toBase58() ?? null,
     wallets: null,
@@ -611,18 +624,61 @@ async function sweep(): Promise<void> {
           route = walletSigner !== null ? "local-keypair" : "none";
           if (privyConfig !== null) {
             try {
-              const resolution = await createPrivySolanaSigner(privyConfig, link.wallet, config.privySignerId ?? undefined, privyIndex);
+              const resolution = await createPrivySolanaSigner(
+                privyConfig,
+                link.wallet,
+                config.privySignerId ?? undefined,
+                privyIndex,
+                // Undefined when the policy id is not configured, and the
+                // refusal is then unreachable rather than switched off.
+                config.privyPolicyId ?? undefined,
+              );
+              // AN UNBOUNDED SEAT PAGES, unlike the other two refusals. Those
+              // are an unfinished onboarding, and /status showing them is
+              // enough; this one is the credential on Railway being able to do
+              // anything at all with that wallet, which nobody would notice by
+              // reading a status page. Cleared on every other outcome, so a
+              // re-seated wallet alerts again if it ever breaks twice.
+              if (resolution.outcome === "SEAT_NOT_BOUNDED") {
+                alerter.fire({
+                  key: `seat-unbounded:${wallet}`,
+                  severity: "critical",
+                  title: "A trading wallet seats the keeper's signer with no policy of its own",
+                  detail:
+                    "Nothing is signed for it. A seat without exactly the keeper's override policy could sign any " +
+                    "message, send any transaction and export that wallet's key. Re-seat it from the web and check it " +
+                    "with `privy-policy verify`.",
+                  context: { wallet, overridePolicyIds: resolution.overridePolicyIds, expected: config.privyPolicyId },
+                });
+              } else {
+                alerter.clear(`seat-unbounded:${wallet}`);
+              }
               if (resolution.outcome === "SIGNER") {
                 walletSigner = resolution.signer;
                 route = "privy";
               } else if (walletSigner === null) {
-                route = resolution.outcome === "NOT_A_PRIVY_WALLET" ? "none (not a Privy wallet)" : "none (signer not granted)";
+                // EVERY REASON STARTS WITH "none": the signing summary below
+                // counts a wallet unsignable by that prefix.
+                route =
+                  resolution.outcome === "NOT_A_PRIVY_WALLET"
+                    ? "none (not a Privy wallet)"
+                    : resolution.outcome === "SIGNER_NOT_GRANTED"
+                      ? "none (signer not granted)"
+                      : "none (seat not bounded by the keeper's policy)";
                 changes.change(
                   `signer:${wallet}`,
                   resolution.outcome === "NOT_A_PRIVY_WALLET"
                     ? "wallet is not a Privy wallet in this app"
-                    : "wallet has not granted the keeper's signer — re-run the onboarding registration (step 3)",
-                  { wallet, ...(resolution.outcome === "SIGNER_NOT_GRANTED" ? { granted: resolution.granted } : {}) },
+                    : resolution.outcome === "SIGNER_NOT_GRANTED"
+                      ? "wallet has not granted the keeper's signer — re-run the onboarding registration (step 3)"
+                      : "wallet seats the keeper's signer without the keeper's policy — re-seat it with the policy (step 3)",
+                  {
+                    wallet,
+                    ...(resolution.outcome === "SIGNER_NOT_GRANTED" ? { granted: resolution.granted } : {}),
+                    ...(resolution.outcome === "SEAT_NOT_BOUNDED"
+                      ? { overridePolicyIds: resolution.overridePolicyIds, expected: config.privyPolicyId }
+                      : {}),
+                  },
                 );
               }
             } catch (error) {

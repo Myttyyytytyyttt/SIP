@@ -324,6 +324,59 @@ export function diffPolicy(expected: KeeperPolicy, actual: PolicyLike, options: 
 
 // --- the admin key file ----------------------------------------------------------
 
+/**
+ * One additional signer as it sits on a wallet: the key quorum, and the policy
+ * ids that override the wallet's own for it.
+ *
+ * PRIVY ALREADY SENDS THIS. The server API returns it on every wallet it lists
+ * (WalletAdditionalSignerItem: `signer_id`, plus an optional
+ * `override_policy_ids` documented as "a list of up to one policy ID"), so
+ * reading a seat's bound costs no request of its own — the sweep's existing
+ * wallet listing carries it. The browser SDK cannot read it back at all, which
+ * is why only something holding the app secret, this CLI or the keeper, can
+ * tell a bounded seat from an unbounded one.
+ */
+export interface SignerSeat {
+  readonly signerId: string;
+  /**
+   * Empty when the seat carries no override. The signer then falls back to the
+   * WALLET's own policies, which for a trading wallet the web creates means
+   * none at all: an unbounded signer.
+   */
+  readonly overridePolicyIds: readonly string[];
+}
+
+/** What a wallet's seats say about one signer. */
+export type SeatVerdict =
+  /** No seat on this wallet names the signer. */
+  | "NOT_GRANTED"
+  /** The signer is seated, but not bounded by exactly the expected policy. */
+  | "NOT_BOUNDED"
+  | "BOUND";
+
+/** Every seat naming `signerId`. More than one is unusual, and each is held to the same rule. */
+export function seatsFor(seats: readonly SignerSeat[], signerId: string): readonly SignerSeat[] {
+  return seats.filter((seat) => seat.signerId === signerId);
+}
+
+/**
+ * THE ONE RULE deciding whether the keeper's signer is bounded on a wallet,
+ * shared by `privy-policy verify` and by the keeper's own signer so that the
+ * command an operator trusts and the process that signs can never drift apart.
+ *
+ * EXACTLY ONE OVERRIDE POLICY, AND THIS ONE — never `includes`. Privy documents
+ * at most one policy per signer, so a seat carrying a second id carries a second
+ * bound nobody here has examined, and a seat carrying none is an unbounded
+ * credential: the key on Railway could sign any message, send any transaction
+ * and export that wallet's key.
+ */
+export function seatVerdict(seats: readonly SignerSeat[], signerId: string, policyId: string): SeatVerdict {
+  const granted = seatsFor(seats, signerId);
+  if (granted.length === 0) return "NOT_GRANTED";
+  const bounded = granted.every((seat) => seat.overridePolicyIds.length === 1 && seat.overridePolicyIds[0] === policyId);
+  return bounded ? "BOUND" : "NOT_BOUNDED";
+}
+
 export type AdminKeyFileRefusal = "NOT_A_KEY" | "NO_DIRECTORY" | "INSIDE_REPOSITORY" | "EXISTS" | "WRITE_FAILED";
 
 /** Thrown by writeAdminKeyFile. The message names paths and reasons, never the key. */

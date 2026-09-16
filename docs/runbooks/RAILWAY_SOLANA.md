@@ -85,6 +85,17 @@ Añade los secretos. Sigue en seco: sin la fase C no envía nada.
 | `SIP_SOLANA_PRIVY_APP_SECRET` | el app secret de Privy de SIP | **sí** |
 | `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY` | la clave privada `wallet-auth:…` de la llave `sip-solana-keeper` | **sí** |
 | `SIP_SOLANA_PRIVY_SIGNER_ID` | `cbx133itb717vxp3dqwhk808` | no |
+| `SIP_SOLANA_PRIVY_POLICY_ID` | `jsuzcjv6njl0raqjjhzqe9fh` | no |
+
+`SIP_SOLANA_PRIVY_POLICY_ID` es **opcional: el vigilante arranca sin ella**, y es la misma política que la web pone como
+*override* del signer en cada wallet de trading. Puesta, el vigilante se niega a firmar por una wallet cuyo asiento no la
+lleve exactamente: esa wallet sale en `/status` como `none (seat not bounded by the keeper's policy)` y salta una alerta
+crítica, porque un signer sin su política podría firmar cualquier mensaje, enviar cualquier transacción y exportar la
+clave de esa wallet. Sin ella el vigilante firma como siempre y lo dice una vez al arrancar, en una línea del log.
+
+Ponla **después** de comprobar con `privy-policy verify --wallet <id de wallet> --policy jsuzcjv6njl0raqjjhzqe9fh` que
+una wallet real ya está bien asentada. Si el id no fuera el que la web puso, ninguna wallet se podría liquidar, y eso no
+se ve: sin firmante, la liquidación descansa en `NO_SIGNER`.
 
 En `/status` tiene que salir el `config` del programa, con el atestador y el keeper iguales a la dirección de tu
 wallet de cobro. Si no coinciden, el vigilante se niega a arrancar y lo dice.

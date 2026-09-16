@@ -35,10 +35,13 @@ import {
   isP256Pkcs8PrivateKey,
   privyErrorCode,
   privyErrorStatus,
+  seatVerdict,
+  seatsFor,
   writeAdminKeyFile,
   type KeeperPolicy,
   type PolicyLike,
   type PrivyErrorClass,
+  type SignerSeat,
 } from "./privy-policy.js";
 import { SOLANA_MAINNET_CAIP2 } from "./privy-signer.js";
 
@@ -563,7 +566,15 @@ async function verify(walletId: string, policyId: string, config: CommandEnv, de
     out.error("privy verify", { walletId, verdict: "NOT_A_SOLANA_WALLET", chainType: wallet.chain_type });
     return 1;
   }
-  const grants = wallet.additional_signers.filter((signer) => signer.signer_id === signerId);
+  // THE SAME RULE THE KEEPER APPLIES, from the one function both call
+  // (seatVerdict, privy-policy.ts). An operator who runs this command and a
+  // keeper that refuses to sign must be answering the same question, or one of
+  // them is lying about the other.
+  const seats: readonly SignerSeat[] = wallet.additional_signers.map((signer) => ({
+    signerId: signer.signer_id,
+    overridePolicyIds: signer.override_policy_ids ?? [],
+  }));
+  const grants = seatsFor(seats, signerId);
   if (grants.length === 0) {
     out.error("privy verify", {
       walletId,
@@ -575,14 +586,13 @@ async function verify(walletId: string, policyId: string, config: CommandEnv, de
     });
     return 1;
   }
-  const exact = (ids: readonly string[] | undefined): boolean => ids !== undefined && ids.length === 1 && ids[0] === policyId;
-  if (!grants.every((grant) => exact(grant.override_policy_ids))) {
+  if (seatVerdict(seats, signerId, policyId) === "NOT_BOUNDED") {
     out.error("privy verify", {
       walletId,
       address: wallet.address,
       verdict: "OVERRIDE_POLICY_MISMATCH",
       signerId,
-      overridePolicyIds: grants.map((grant) => grant.override_policy_ids ?? []),
+      overridePolicyIds: grants.map((grant) => grant.overridePolicyIds),
       expected: [policyId],
       detail:
         "The signer is on the wallet but not bound by exactly this policy, so nothing was probed: a refusal would prove a " +

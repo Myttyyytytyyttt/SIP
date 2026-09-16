@@ -15,7 +15,7 @@ import { Secret } from "@sip/solana-log";
 import { ComputeBudgetProgram, Keypair, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { instructionDiscriminator } from "../src/idl.js";
-import { COMPUTE_BUDGET_PROGRAM_ID, MEMO_PROGRAM_ID } from "../src/privy-policy.js";
+import { COMPUTE_BUDGET_PROGRAM_ID, MEMO_PROGRAM_ID, type SignerSeat } from "../src/privy-policy.js";
 import {
   PRIVY_API_URL,
   SOLANA_MAINNET_CAIP2,
@@ -60,6 +60,8 @@ function answering(answer: (request: Sent) => Answer): { readonly fetch: typeof 
 const APP_ID = "sipprivyapp0000000000000001";
 const SIGNER_ID = "keeperQuorum000000000001";
 const WALLET_ID = "privyWallet0000000000001";
+/** The policy the web attaches as the keeper signer's override, and the only one that bounds it. */
+const POLICY_ID = "keeperPolicy00000000001";
 /** An idempotency key of the shape settle-tick.ts makes. */
 const KEY = createHash("sha256").update("one settle attempt").digest("hex");
 
@@ -70,10 +72,18 @@ const configFor = (fetch: typeof globalThis.fetch, authorizationKey: string): Pr
   fetch,
 });
 
+/** A one-entry index: the wallet, seated as `seats` says. */
+const indexOf = (address: string, seats: readonly SignerSeat[]): Map<string, { walletId: string; seats: readonly SignerSeat[] }> =>
+  new Map([[address, { walletId: WALLET_ID, seats }]]);
+
+/** The seat the web creates: the keeper's signer, bounded by exactly the keeper's policy. */
+const bounded: readonly SignerSeat[] = [{ signerId: SIGNER_ID, overridePolicyIds: [POLICY_ID] }];
+
 /** The signer for `settle`'s wallet, from a one-entry index: its only requests are its sends. */
 async function signerFor(settle: TestSettle, fetch: typeof globalThis.fetch, authorizationKey: string): Promise<SolanaWalletSubmitter> {
-  const index = new Map([[settle.wallet.toBase58(), { walletId: WALLET_ID, granted: [SIGNER_ID] }]]);
-  const resolution = await createPrivySolanaSigner(configFor(fetch, authorizationKey), settle.wallet, SIGNER_ID, index);
+  const index = indexOf(settle.wallet.toBase58(), bounded);
+  // With the policy expected, so the send path below is the one a bounded seat takes.
+  const resolution = await createPrivySolanaSigner(configFor(fetch, authorizationKey), settle.wallet, SIGNER_ID, index, POLICY_ID);
   if (resolution.outcome !== "SIGNER") throw new Error(`expected a signer, got ${resolution.outcome}`);
   return resolution.signer;
 }
@@ -105,21 +115,108 @@ describe("buildPrivySolanaIndex", () => {
     const second = Keypair.generate().publicKey.toBase58();
     const { fetch, sent } = answering((request) =>
       new URL(request.url).searchParams.get("cursor") === null
-        ? { status: 200, body: { data: [{ id: "wallet-1", address: first, chain_type: "solana", additional_signers: [{ signer_id: SIGNER_ID }] }], next_cursor: "page-2" } }
+        ? {
+            status: 200,
+            body: {
+              data: [{ id: "wallet-1", address: first, chain_type: "solana", additional_signers: [{ signer_id: SIGNER_ID, override_policy_ids: [POLICY_ID] }] }],
+              next_cursor: "page-2",
+            },
+          }
         : { status: 200, body: { data: [{ id: "wallet-2", address: second, chain_type: "solana", additional_signers: [] }], next_cursor: null } },
     );
 
     const index = await buildPrivySolanaIndex(configFor(fetch, "unused"));
 
+    // WHAT BOUNDS EACH SEAT COMES OUT OF THIS SAME LISTING: override_policy_ids
+    // is on the wallets Privy already sends, so no second request is needed to
+    // tell a bounded seat from an unbounded one.
     expect([...index]).toEqual([
-      [first, { walletId: "wallet-1", granted: [SIGNER_ID] }],
-      [second, { walletId: "wallet-2", granted: [] }],
+      [first, { walletId: "wallet-1", seats: [{ signerId: SIGNER_ID, overridePolicyIds: [POLICY_ID] }] }],
+      [second, { walletId: "wallet-2", seats: [] }],
     ]);
     expect(sent.map((request) => [request.method, new URL(request.url).origin, new URL(request.url).pathname])).toEqual([
       ["GET", PRIVY_API_URL, "/v1/wallets"],
       ["GET", PRIVY_API_URL, "/v1/wallets"],
     ]);
     expectNothingLogged();
+  });
+});
+
+describe("the seat's policy", () => {
+  const wallet = Keypair.generate().publicKey;
+  /**
+   * Resolve `seats` for this wallet. `expectedPolicyId` is ALWAYS passed
+   * explicitly — no default — because a default would swallow the `undefined`
+   * that the "not configured" case exists to test.
+   */
+  const resolve = async (seats: readonly SignerSeat[], expectedPolicyId: string | undefined) => {
+    const { fetch, sent } = answering(hashAnswer);
+    const resolution = await createPrivySolanaSigner(
+      configFor(fetch, "unused"),
+      wallet,
+      SIGNER_ID,
+      indexOf(wallet.toBase58(), seats),
+      expectedPolicyId,
+    );
+    return { outcome: resolution.outcome, requests: sent.length };
+  };
+
+  /** The cases `privy-policy verify` pins, asked of the keeper's own signer: one rule, two callers. */
+  const unbounded: [string, readonly SignerSeat[]][] = [
+    ["a seat with no override policy at all", [{ signerId: SIGNER_ID, overridePolicyIds: [] }]],
+    ["a seat bounded by another policy", [{ signerId: SIGNER_ID, overridePolicyIds: ["anotherPolicy"] }]],
+    ["a seat carrying two policies, one of them ours", [{ signerId: SIGNER_ID, overridePolicyIds: [POLICY_ID, "anotherPolicy"] }]],
+    [
+      "one bounded seat and one that is not",
+      [
+        { signerId: SIGNER_ID, overridePolicyIds: [POLICY_ID] },
+        { signerId: SIGNER_ID, overridePolicyIds: [] },
+      ],
+    ],
+  ];
+
+  it("refuses to sign for a wallet whose seat this policy does not bound, and asks Privy nothing more", async () => {
+    for (const [name, seats] of unbounded) {
+      expect(await resolve(seats, POLICY_ID), name).toEqual({ outcome: "SEAT_NOT_BOUNDED", requests: 0 });
+    }
+    // Still told apart from the two conditions that are an unfinished onboarding.
+    expect(await resolve([{ signerId: "someOtherSigner", overridePolicyIds: [POLICY_ID] }], POLICY_ID)).toEqual({
+      outcome: "SIGNER_NOT_GRANTED",
+      requests: 0,
+    });
+    expect(await resolve(bounded, POLICY_ID)).toEqual({ outcome: "SIGNER", requests: 0 });
+  });
+
+  it("reports what the seat actually carries, so the alert says what to repair", async () => {
+    const { fetch } = answering(hashAnswer);
+    const seats: readonly SignerSeat[] = [{ signerId: SIGNER_ID, overridePolicyIds: ["anotherPolicy"] }, { signerId: "someOtherSigner", overridePolicyIds: [] }];
+    const resolution = await createPrivySolanaSigner(configFor(fetch, "unused"), wallet, SIGNER_ID, indexOf(wallet.toBase58(), seats), POLICY_ID);
+
+    expect(resolution).toMatchObject({
+      outcome: "SEAT_NOT_BOUNDED",
+      granted: [SIGNER_ID, "someOtherSigner"],
+      // Per seat, exactly as `privy-policy verify` prints it.
+      overridePolicyIds: [["anotherPolicy"]],
+    });
+  });
+
+  it("CANNOT REFUSE WITH NO POLICY CONFIGURED: the same wallets still resolve to a signer", async () => {
+    // The rule is reached only through the argument the keeper passes when
+    // SIP_SOLANA_PRIVY_POLICY_ID is set. Unset, the keeper passes nothing and
+    // behaves exactly as it did before this check existed.
+    for (const [name, seats] of unbounded) {
+      expect(await resolve(seats, undefined), name).toEqual({ outcome: "SIGNER", requests: 0 });
+    }
+    // And with no signer id there is no seat to look for, so nothing is guessed at.
+    const { fetch } = answering(hashAnswer);
+    const resolution = await createPrivySolanaSigner(
+      configFor(fetch, "unused"),
+      wallet,
+      undefined,
+      indexOf(wallet.toBase58(), [{ signerId: SIGNER_ID, overridePolicyIds: [] }]),
+      POLICY_ID,
+    );
+    expect(resolution.outcome).toBe("SIGNER");
   });
 });
 

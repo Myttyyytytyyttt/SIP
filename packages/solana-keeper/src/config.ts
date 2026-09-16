@@ -74,6 +74,7 @@ const KNOWN_SIP_SOLANA_VARS = new Set<string>([
   "SIP_SOLANA_ALLOW_BROADCAST",
   "SIP_SOLANA_PRIVY_APP_ID",
   "SIP_SOLANA_PRIVY_SIGNER_ID",
+  "SIP_SOLANA_PRIVY_POLICY_ID",
   ...SIGNING_SECRET_VARS,
 ]);
 
@@ -177,6 +178,12 @@ export interface KeeperConfig {
   readonly port: number | null;
   readonly privyAppId: string | null;
   readonly privySignerId: string | null;
+  /**
+   * OPTIONAL, and the keeper starts without it. Set, the keeper refuses to sign
+   * for a wallet whose seat is not bounded by exactly this policy; unset, it
+   * signs as it always has and says so once at startup.
+   */
+  readonly privyPolicyId: string | null;
   /** Null in dry run: nothing in this object can sign anything. */
   readonly signing: SigningConfig | null;
   /** Already scrubbed. */
@@ -453,6 +460,7 @@ export function describeConfig(config: KeeperConfig): Record<string, unknown> {
     port: config.port,
     privyAppId: config.privyAppId,
     privySignerId: config.privySignerId,
+    privyPolicyId: config.privyPolicyId,
     signing:
       config.signing === null
         ? null
@@ -637,6 +645,11 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
   // Public ids. Legible on purpose, like the worker's PRIVY_SIGNER_ID.
   const privyAppId = trimmed(env["SIP_SOLANA_PRIVY_APP_ID"]) ?? null;
   const privySignerId = trimmed(env["SIP_SOLANA_PRIVY_SIGNER_ID"]) ?? null;
+  // OPTIONAL, AND NEVER A PROBLEM. Read like its siblings and never pushed onto
+  // `problems`: a keeper that would not start without it could not be deployed
+  // before the policy exists, and the live service's healthcheck depends on it
+  // starting. Absent, the seat check below simply never runs.
+  const privyPolicyId = trimmed(env["SIP_SOLANA_PRIVY_POLICY_ID"]) ?? null;
 
   // --- signing secrets: ONLY when armed ------------------------------------------
   let signing: SigningConfig | null = null;
@@ -668,6 +681,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
     port,
     privyAppId,
     privySignerId,
+    privyPolicyId,
     signing,
     warnings: Object.freeze(warnings.map(scrub)),
   };

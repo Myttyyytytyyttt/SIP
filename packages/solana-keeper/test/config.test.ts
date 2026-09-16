@@ -403,6 +403,25 @@ describe("endpoints, cadence, pools and credentials", () => {
     expect(refusal(dry({ PORT: "70000" })).message).toContain("PORT");
   });
 
+  it("reads SIP_SOLANA_PRIVY_POLICY_ID as an optional public id, and starts armed without it", () => {
+    // ABSENT IS NOT A PROBLEM: the keeper on Railway must start before the
+    // policy id is ever set, or the phase B deploy could not happen.
+    const without = loadConfig(armed(), new Redactor());
+    expect(without.privyPolicyId).toBeNull();
+    expect(without.armed).toBe(true);
+    expect(without.warnings).toEqual([]);
+
+    const config = loadConfig(armed({ SIP_SOLANA_PRIVY_POLICY_ID: "policy-id" }), new Redactor());
+    expect(config.privyPolicyId).toBe("policy-id");
+    expect(config.warnings).toEqual([]);
+    // Public, like the app id and the signer id: it is in the safe description.
+    expect(JSON.stringify(config)).toContain("policy-id");
+  });
+
+  it("no longer calls SIP_SOLANA_PRIVY_POLICY_ID a name it does not read", () => {
+    expect(loadConfig(dry({ SIP_SOLANA_PRIVY_POLICY_ID: "policy-id" }), new Redactor()).warnings).toEqual([]);
+  });
+
   it("warns about a SIP_SOLANA_* name it does not read, because a typo is a silent setting", () => {
     const config = loadConfig(dry({ SIP_SOLANA_BROADCASTS: "1" }), new Redactor());
     expect(config.warnings.join(" ")).toContain("SIP_SOLANA_BROADCASTS");
