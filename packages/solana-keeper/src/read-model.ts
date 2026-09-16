@@ -240,15 +240,25 @@ export class SolanaReadModel {
     );
   }
 
-  /** Records the vault and its link, so the website can list them without
-   * re-deriving PDAs. Upsert: the chain stays the truth, this is a mirror. */
-  async recordLink(vaultAddr: string, ownerAddr: string, skimBps: number, walletAddr: string): Promise<boolean> {
+  /**
+   * Records the vault and its link, so the website can list them without
+   * re-deriving PDAs. Upsert: the chain stays the truth, this is a mirror.
+   *
+   * `rateBps` IS THE RATE THE SETTLEMENT WAS CHARGED AT — the caller's
+   * activeBps(vault), which is the vault's VOLUME rate in VOLUME mode and its
+   * PROFIT rate otherwise, exactly as the attestation was built. The column is
+   * still called skim_bps, because the schema is applied against a live
+   * database; what changed is that a VOLUME vault no longer mirrors a profit
+   * rate it is never charged. The settlement_event row says which kind of base
+   * it holds in its own `mode` column.
+   */
+  async recordLink(vaultAddr: string, ownerAddr: string, rateBps: number, walletAddr: string): Promise<boolean> {
     return this.#run("link", async (client) => {
       await client.query(
         `INSERT INTO ${READ_MODEL_SCHEMA}.vault (vault_addr, owner_addr, skim_bps)
          VALUES ($1,$2,$3)
          ON CONFLICT (vault_addr) DO UPDATE SET owner_addr = EXCLUDED.owner_addr, skim_bps = EXCLUDED.skim_bps`,
-        [vaultAddr, ownerAddr, skimBps],
+        [vaultAddr, ownerAddr, rateBps],
       );
       await client.query(
         `INSERT INTO ${READ_MODEL_SCHEMA}.trading_link (wallet_addr, vault_addr, active)

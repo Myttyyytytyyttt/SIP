@@ -65,7 +65,7 @@ import {
 } from "../src/privy-signer.js";
 import { SolanaReadModel } from "../src/read-model.js";
 import { poolFetch } from "../src/rpc-pool.js";
-import { settleAlert, type CarryBook } from "../src/settle-decision.js";
+import { activeBps, settleAlert, type CarryBook } from "../src/settle-decision.js";
 import { runSettleTick } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KEEPER_LOCK_NAME, KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
@@ -672,8 +672,14 @@ async function sweep(): Promise<void> {
             // this turn settled against, from the sweep's batched read, so the
             // mirror no longer costs a request of its own. A failed write warns
             // inside the read model and never throws, like recordSettlement's.
+            // THE RATE THIS SETTLEMENT WAS CHARGED AT, not the vault's PROFIT
+            // rate. The row used to take skim_bps whatever the mode, so a VOLUME
+            // vault's mirror claimed the profit rate — at the demo rates, 5000 bps
+            // for a vault actually charged 200. activeBps is the program's own
+            // branch (Vault::active_bps) and the same value the attestation this
+            // settle carried was built from.
             if (vaultState !== null) {
-              void readModel.recordLink(vaultAddr, vaultState.owner.toBase58(), vaultState.skimBps, wallet);
+              void readModel.recordLink(vaultAddr, vaultState.owner.toBase58(), activeBps(vaultState), wallet);
             }
             void readModel.recordSettlement({
               walletAddr: wallet,
