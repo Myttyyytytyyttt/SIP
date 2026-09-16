@@ -33,7 +33,7 @@ import { createServer } from "node:http";
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
-import { readVaults } from "../src/accounts.js";
+import { readVault, readVaults, type VaultState } from "../src/accounts.js";
 import { createAlerter } from "../src/alerts.js";
 import {
   keysForTurn,
@@ -70,6 +70,7 @@ import { runSettleTick } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KEEPER_LOCK_NAME, KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
 import { decideHealth, httpHandler, renderStatus, type KeeperStatus } from "../src/status.js";
+import { VAULT_READ_ALERT_KEY, VAULT_READ_CRITICAL_STREAK, vaultReadAlert } from "../src/sweep-decision.js";
 
 const log = createKeeperLogger();
 
@@ -194,6 +195,14 @@ const wrapShort = new Map<string, number>();
  * vault that had stopped buying logged one warn line per sweep and paged nobody.
  */
 const investFailed = new Map<string, number>();
+
+/**
+ * Consecutive sweeps whose ONE batched vault read failed. A sweep that degrades
+ * to a read per link still settles every link whose vault it can read, so one
+ * refused request is weather; three in a row is an endpoint that cannot serve
+ * this program's accounts, and by then nothing has settled for three sweeps.
+ */
+let vaultReadFailures = 0;
 
 const privyConfig: PrivySolanaConfig | null = config.signing?.privy ?? null;
 
@@ -453,10 +462,44 @@ async function sweep(): Promise<void> {
       links = await discoverLinks(connection, programId, TRADING_LINK_DISC);
     }
     // EVERY VAULT THE LINKS NAME, IN ONE REQUEST. Each settle turn read its own
-    // vault, and the history mirror read it again after every SETTLED. A failed
-    // read fails the sweep loudly, as a failed discovery does; no links, no
-    // request.
-    const vaults = await readVaults(program, links.map((link) => link.vault));
+    // vault, and the history mirror read it again after every SETTLED.
+    //
+    // ONE REFUSED READ NO LONGER ENDS THE SWEEP. A throttled getMultipleAccounts
+    // fell to the sweep's own catch below: nothing settled for anybody, and one
+    // hiccup from a public endpoint paged critical. The sweep now degrades to a
+    // read per link, so every link whose vault IS readable still settles, and the
+    // failure warns — pages only once it keeps happening (vaultReadAlert).
+    //
+    // NOT A READ PER LINK ON A GOOD SWEEP: the batch exists to remove exactly
+    // those requests, and it fails hardest when the endpoint is already
+    // throttling. The fallback is lazy and cached, so a degraded sweep reads each
+    // distinct vault at most once, and only for the links it actually reaches.
+    let vaults: ReadonlyMap<string, VaultState | null> | null = null;
+    try {
+      vaults = await readVaults(program, links.map((link) => link.vault));
+      vaultReadFailures = 0;
+      alerter.clear(VAULT_READ_ALERT_KEY);
+    } catch (error) {
+      vaultReadFailures += 1;
+      const detail = summarizeUpstreamError(error, { take: 3, maxChars: 500 });
+      log.warn("the batched vault read failed; this sweep reads one vault per link instead", { links: links.length, detail });
+      // The alerter dedupes by key alone, so the standing warning is cleared at
+      // the escalation or it would swallow the critical, as invest-failed does.
+      if (vaultReadFailures === VAULT_READ_CRITICAL_STREAK) alerter.clear(VAULT_READ_ALERT_KEY);
+      alerter.fire(vaultReadAlert(vaultReadFailures, detail));
+    }
+    /**
+     * The degraded path's read, cached per distinct vault for this sweep. The
+     * promise is awaited by the turn that creates it, so a rejection is always
+     * handled; links sharing that vault get the same answer without asking again.
+     */
+    const degradedReads = new Map<string, Promise<VaultState>>();
+    const vaultForLink = (link: ManagedLink): Promise<VaultState> => {
+      const key = link.vault.toBase58();
+      const reading = degradedReads.get(key) ?? readVault(program, link.vault);
+      degradedReads.set(key, reading);
+      return reading;
+    };
 
     // THE AUTHORITY'S EMERGENCY SWITCH, from this sweep's config read. While it
     // is on, every turn below rests as PAUSED; said once here, on change.
@@ -568,7 +611,13 @@ async function sweep(): Promise<void> {
         // through a sweep takes the keys away from the next turn, not the next
         // sweep.
         const settleTurn = keysForTurn(isLive, { settleKey: settleKeypair, walletSigner });
-        const vaultState = vaults.get(vaultAddr) ?? null;
+        // NULL MEANS THE CHAIN HAS NO ACCOUNT THERE, never "could not read"
+        // (src/accounts.ts): runSettleTick turns a null vault into a FAILED
+        // settlement and a critical page per wallet. So when the batch is gone,
+        // this link's own read THROWS into the catch below — one "wallet turn
+        // threw" line for the link that could not be read — rather than handing
+        // a null onward and reporting every wallet as a failed settlement.
+        const vaultState = vaults !== null ? (vaults.get(vaultAddr) ?? null) : await vaultForLink(link);
         const settle = await runSettleTick({
           connection,
           program,
