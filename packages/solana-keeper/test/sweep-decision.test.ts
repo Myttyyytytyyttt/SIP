@@ -249,3 +249,24 @@ describe("where a pending carry's wait is stamped", () => {
     expect(readFileSync(fileURLToPath(new URL("../railway.json", import.meta.url)), "utf8")).toContain('"healthcheckPath": "/health"');
   });
 });
+
+describe("what a degraded sweep reads, and what it says when a turn throws", () => {
+  const keeper = readFileSync(fileURLToPath(new URL("../bin/keeper.mts", import.meta.url)), "utf8");
+
+  it("reads each link's vault nullably, so an absent vault pages in either path", () => {
+    // Anchor's fetch() throws "Account does not exist", which at the per-wallet
+    // catch is indistinguishable from a refused request — so a vault that had
+    // genuinely gone away lost its critical page on exactly the sweeps where the
+    // batched read had already failed.
+    expect(keeper).toMatch(/readVaultNullable\(program, link\.vault\)/);
+    expect(keeper, "the throwing reader has no caller left in the sweep").not.toMatch(/\breadVault\(/);
+    expect(keeper).toMatch(/const degradedReads = new Map<string, Promise<VaultState \| null>>\(\);/);
+  });
+
+  it("stops showing a stale row for a wallet whose turn threw", () => {
+    // health.wallets is assigned at the END of a turn, so a throw used to leave
+    // the wallet's LAST GOOD settle on the page with its old timestamp.
+    const catchBlock = keeper.slice(keeper.indexOf('log.error("wallet turn threw"'));
+    expect(catchBlock.slice(0, 800)).toMatch(/health\.wallets\[wallet\] = \{/);
+  });
+});

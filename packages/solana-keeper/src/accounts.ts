@@ -109,6 +109,25 @@ export async function readVault(program: anchor.Program, address: PublicKey): Pr
 }
 
 /**
+ * One vault, with ABSENT told apart from UNREADABLE: null when the chain has no
+ * account at that address, a throw when the request itself failed.
+ *
+ * WHY THE SWEEP NEEDS THIS ONE. Anchor's fetch() above throws "Account does not
+ * exist" for a missing account, and at a catch that is indistinguishable from a
+ * refused request — while the two mean opposite things to this keeper. The
+ * batched read has always made the distinction (null, and runSettleTick reports
+ * FAILED so settleAlert pages for that wallet); the sweep's DEGRADED per-link
+ * path used fetch(), so on exactly the sweeps where the batch had already
+ * failed, a link naming a vault that has genuinely gone away produced one
+ * contained "wallet turn threw" line, no page at all, and a /status row still
+ * showing its last good settle. This gives that path the batched read's answer.
+ */
+export async function readVaultNullable(program: anchor.Program, address: PublicKey): Promise<VaultState | null> {
+  const decoded = await client(program, "vault").fetchNullable(address);
+  return decoded === null || decoded === undefined ? null : vaultState(decoded);
+}
+
+/**
  * Every vault a sweep's links name, in one batched read, keyed by base58.
  *
  * ONE REQUEST, NOT ONE PER LINK. Each settle turn read its own vault, and the

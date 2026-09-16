@@ -33,7 +33,7 @@ import { createServer } from "node:http";
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
-import { readVault, readVaults, type VaultState } from "../src/accounts.js";
+import { readVaultNullable, readVaults, type VaultState } from "../src/accounts.js";
 import { createAlerter } from "../src/alerts.js";
 import {
   keysForTurn,
@@ -567,11 +567,15 @@ async function sweep(): Promise<void> {
      * The degraded path's read, cached per distinct vault for this sweep. The
      * promise is awaited by the turn that creates it, so a rejection is always
      * handled; links sharing that vault get the same answer without asking again.
+     *
+     * NULLABLE, LIKE THE BATCH IT STANDS IN FOR. readVaultNullable answers null
+     * for "the chain has no account there" and throws for "the request failed" —
+     * opposite conditions that Anchor's fetch() collapses into one throw.
      */
-    const degradedReads = new Map<string, Promise<VaultState>>();
-    const vaultForLink = (link: ManagedLink): Promise<VaultState> => {
+    const degradedReads = new Map<string, Promise<VaultState | null>>();
+    const vaultForLink = (link: ManagedLink): Promise<VaultState | null> => {
       const key = link.vault.toBase58();
-      const reading = degradedReads.get(key) ?? readVault(program, link.vault);
+      const reading = degradedReads.get(key) ?? readVaultNullable(program, link.vault);
       degradedReads.set(key, reading);
       return reading;
     };
@@ -741,11 +745,17 @@ async function sweep(): Promise<void> {
         // sweep.
         const settleTurn = keysForTurn(isLive, { settleKey: settleKeypair, walletSigner });
         // NULL MEANS THE CHAIN HAS NO ACCOUNT THERE, never "could not read"
-        // (src/accounts.ts): runSettleTick turns a null vault into a FAILED
-        // settlement and a critical page per wallet. So when the batch is gone,
-        // this link's own read THROWS into the catch below — one "wallet turn
-        // threw" line for the link that could not be read — rather than handing
-        // a null onward and reporting every wallet as a failed settlement.
+        // (src/accounts.ts) — AND BOTH PATHS NOW SAY IT THE SAME WAY.
+        // runSettleTick turns a null vault into a FAILED settlement and
+        // settleAlert pages critical for that wallet. The degraded read used
+        // Anchor's fetch(), which THROWS "Account does not exist" for an absent
+        // account, indistinguishable at a catch from a refused request: a link
+        // whose vault had genuinely gone away therefore produced one contained
+        // log line and NO page, but only on the sweeps where the batch had
+        // already failed — the sweeps where nobody was looking at that wallet.
+        // A failed REQUEST still throws into the catch below, which is the one
+        // line that case deserves: it is weather, and the batch's own alert
+        // already names it.
         const vaultState = vaults !== null ? (vaults.get(vaultAddr) ?? null) : await vaultForLink(link);
         const settle = await runSettleTick({
           connection,
@@ -895,7 +905,21 @@ async function sweep(): Promise<void> {
         };
       } catch (error) {
         // Contained per wallet: one bad link must not end the sweep.
-        log.error("wallet turn threw", { wallet, detail: summarizeUpstreamError(error, { take: 3, maxChars: 500 }) });
+        const detail = summarizeUpstreamError(error, { take: 3, maxChars: 500 });
+        log.error("wallet turn threw", { wallet, detail });
+        // AND SAID ON THE PAGE. health.wallets is assigned at the END of the
+        // turn, so a throw left this wallet's row holding the LAST GOOD settle
+        // and its timestamp: /status read "settled fine, a minute ago" for a
+        // wallet whose turn had been failing for hours. The signing route is
+        // kept from the last turn that got that far, because this throw can come
+        // from before it was resolved.
+        health.wallets[wallet] = {
+          settle: "THREW",
+          invest: "THREW",
+          signing: health.wallets[wallet]?.signing ?? "not resolved",
+          detail,
+          at: new Date().toISOString(),
+        };
       }
     }
 

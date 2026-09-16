@@ -21,6 +21,7 @@ import {
   readInvestmentPolicy,
   readProtocolConfig,
   readVault,
+  readVaultNullable,
   readVaults,
 } from "../src/accounts.js";
 import type { ManagedLink } from "../src/discovery.js";
@@ -288,6 +289,29 @@ describe("the account readers, over bytes laid out as state.rs declares them", (
     const empty = stubChain(new Map());
     expect((await readVaults(empty.program, [])).size).toBe(0);
     expect(empty.calls).toEqual([]);
+  });
+
+  it("tell an absent vault from an unreadable one, for the sweep's degraded per-link read", async () => {
+    const [absent, present] = [key(), key()];
+    const planted = vaultFields();
+    const { program } = stubChain(new Map([[present.toBase58(), vaultBytes(planted)]]));
+
+    // ABSENT is the batched read's own answer, so runSettleTick reports FAILED
+    // and settleAlert pages for that wallet whichever path read the vault. The
+    // degraded path used fetch(), which throws here, and the page was lost.
+    expect(await readVaultNullable(program, absent)).toBeNull();
+    expect(await readVaultNullable(program, present)).toEqual(planted);
+    // Anchor's fetch() is what the degraded path used to call, and this is the
+    // throw that a catch cannot tell from a refused request.
+    await expect(readVault(program, absent)).rejects.toThrow(/Account does not exist/);
+
+    // UNREADABLE still throws: a throttled endpoint is not an empty address, and
+    // calling it a missing vault would page for every wallet on one 429.
+    const client = (program.account as unknown as Record<string, { fetchNullable: (address: PublicKey) => Promise<unknown> }>)["vault"]!;
+    client.fetchNullable = async () => {
+      throw new Error("429 Too Many Requests");
+    };
+    await expect(readVaultNullable(program, present)).rejects.toThrow(/429/);
   });
 
   it("read every ProtocolConfig field, and null when the PDA does not exist", async () => {
