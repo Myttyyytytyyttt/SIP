@@ -243,7 +243,7 @@ describe("refused", () => {
     expectRefusal(legacyTx(owner.publicKey, [transfer], [owner]), "program_not_allowed");
   });
 
-  it("(j) Nuvem's old program, as the program or as any account: old_program", () => {
+  it("(j) the refused program, as the program or as any account: old_program", () => {
     const owner = keypair();
     const asProgram = new TransactionInstruction({ programId: new PublicKey(OLD_NUVEM_PROGRAM_ID), keys: [{ pubkey: owner.publicKey, isSigner: true, isWritable: true }], data: Buffer.from(instructionDiscriminator("link_wallet")) });
     expectRefusal(legacyTx(owner.publicKey, [asProgram], [owner]), "old_program");

@@ -46,7 +46,7 @@ variable, and how to obtain it, is described in [`.env.example`](.env.example).
   budgets `SIP_SOLANA_RELAY_PER_MIN`, `SIP_SOLANA_RELAY_SIGNING_GLOBAL_PER_MIN`,
   `SIP_SOLANA_RELAY_READS_GLOBAL_PER_MIN`, `SIP_SOLANA_SEND_PER_MIN` and
   `SIP_SOLANA_SEND_GLOBAL_PER_MIN`.
-- **Refused:** every `NUVEM_SOLANA_*` name and Nuvem's program id;
+- **Refused:** every `NUVEM_SOLANA_*` name and the program id SaverFi never talks to;
   `SIP_SOLANA_RELAY_GLOBAL_PER_MIN`; the keeper's secrets
   `SIP_SOLANA_SETTLE_KEY`, `SIP_SOLANA_PRIVY_APP_SECRET` and
   `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`; Privy's server credentials

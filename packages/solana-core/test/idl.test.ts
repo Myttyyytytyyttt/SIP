@@ -39,7 +39,7 @@ const sha8 = (text: string): string => createHash("sha256").update(text).digest(
 const key = (): Uint8Array => keypair().publicKey.toBytes();
 
 describe("the program id", () => {
-  it("is the IDL's sip-vault address and never Nuvem's", () => {
+  it("is the IDL's sip-vault address and never the refused one", () => {
     expect(SIP_PROGRAM_ID).toBe("6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J");
     expect(SIP_PROGRAM_ID).not.toBe(OLD_NUVEM_PROGRAM_ID);
     expect(SIP_IDL.address).toBe(SIP_PROGRAM_ID);

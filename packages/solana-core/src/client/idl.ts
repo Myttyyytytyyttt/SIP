@@ -80,7 +80,7 @@ export const SIP_PROGRAM_ID: string = SIP_IDL.address;
 if (SIP_PROGRAM_ID === OLD_NUVEM_PROGRAM_ID) {
   // The one load-time throw: no configuration can make an IDL that names
   // Nuvem's program safe to build or verify with.
-  throw new Error("the sip_vault IDL names Nuvem's old program; refusing to load it");
+  throw new Error("the sip_vault IDL names a program SaverFi does not use; refusing to load it");
 }
 
 /** What an owner (or a linked wallet) signs in the web. The only SIP instructions /api/solana-tx relays. */
@@ -143,7 +143,7 @@ export function idlPartitionProblems(idl: SipVaultIdl = SIP_IDL): string[] {
   for (const name of [...owner, ...forbidden]) {
     if (!names.includes(name)) problems.push(`${name} is classified but the IDL has no such instruction`);
   }
-  if (idl.address === OLD_NUVEM_PROGRAM_ID) problems.push("the IDL names Nuvem's old program");
+  if (idl.address === OLD_NUVEM_PROGRAM_ID) problems.push("the IDL names a program SaverFi does not use");
   return problems;
 }
 

@@ -295,7 +295,7 @@ export function verifySignedTransaction(bytes: Uint8Array, context: { readonly p
     }
   }
 
-  if (keys.includes(OLD_NUVEM_PROGRAM_ID)) return refuse("old_program", "the transaction names Nuvem's old program");
+  if (keys.includes(OLD_NUVEM_PROGRAM_ID)) return refuse("old_program", "the transaction names a program SaverFi does not use");
 
   const compiled = message.compiledInstructions;
   // 8 and 8b: only token-account instructions count past MAX_INSTRUCTIONS; whether they may stand at all waits for the SIP instruction.
@@ -322,9 +322,9 @@ export function verifySignedTransaction(bytes: Uint8Array, context: { readonly p
     const data = instruction.data;
 
     if (program === SIP_PROGRAM_ID) {
-      if (sip !== null) return refuse("instruction_count", "more than one SIP instruction");
+      if (sip !== null) return refuse("instruction_count", "more than one SaverFi instruction");
       const matched = matchInstruction(data);
-      if (matched === null) return refuse("unknown_discriminator", "the SIP instruction's discriminator is not in the IDL");
+      if (matched === null) return refuse("unknown_discriminator", "the SaverFi instruction's discriminator is not in the IDL");
       if (isForbiddenInstruction(matched.name) || !isOwnerInstruction(matched.name)) {
         return refuse("instruction_not_allowed", `${matched.name} is not an owner instruction`);
       }
@@ -382,11 +382,11 @@ export function verifySignedTransaction(bytes: Uint8Array, context: { readonly p
     return refuse("program_not_allowed", `instructions for ${program} are not relayed`);
   }
 
-  if (sip === null) return refuse("instruction_count", "no SIP instruction");
+  if (sip === null) return refuse("instruction_count", "no SaverFi instruction");
 
   // 8b: the vault's token accounts are created beside set_invest_policy, and nowhere else.
   if (tokenAccountCreates.length > 0 && sip.name !== "set_invest_policy") {
-    return refuse("program_not_allowed", `instructions for ${ATA_PROGRAM} are relayed only beside set_invest_policy, and this transaction's SIP instruction is ${sip.name}`);
+    return refuse("program_not_allowed", `instructions for ${ATA_PROGRAM} are relayed only beside set_invest_policy, and this transaction's SaverFi instruction is ${sip.name}`);
   }
 
   // 11: the one place an Ed25519SigVerify may stand.
@@ -396,7 +396,7 @@ export function verifySignedTransaction(bytes: Uint8Array, context: { readonly p
       return refuse(
         "ed25519_misplaced",
         consentAt === null
-          ? `an Ed25519SigVerify instruction is relayed only as the wallet's consent immediately before link_wallet, and this transaction's SIP instruction is ${sip.name}`
+          ? `an Ed25519SigVerify instruction is relayed only as the wallet's consent immediately before link_wallet, and this transaction's SaverFi instruction is ${sip.name}`
           : `the Ed25519SigVerify instruction at position ${entry.position + 1} is not the one immediately before link_wallet`,
       );
     }

@@ -2,7 +2,7 @@
   "name": "@sip/solana-core",
   "private": true,
   "version": "0.1.0",
-  "description": "SIP's Solana web core: the IDL-driven codec and decoders the browser may load, and the server-only relay policy, transaction verifier, RPC pool, builders and readers behind /api/solana-rpc and /api/solana-tx. It never settles, invests, converts or wraps: packages/solana-keeper owns that.",
+  "description": "SaverFi's Solana web core: the IDL-driven codec and decoders the browser may load, and the server-only relay policy, transaction verifier, RPC pool, builders and readers behind /api/solana-rpc and /api/solana-tx. It never settles, invests, converts or wraps: packages/solana-keeper owns that.",
   "type": "module",
   "sideEffects": false,
   "exports": {

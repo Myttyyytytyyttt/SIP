@@ -141,11 +141,11 @@ export function loadSolanaServerSettings(env: Env): SolanaSettingsLoad {
     problems.push({
       variable: name,
       message:
-        `${name} is Nuvem's configuration, not SIP's. Its value was not read: Nuvem's program key leaked, so a ` +
-        "copied environment is refused rather than half-applied.",
+        `${name} is not a SaverFi setting. Its value was not read: the program that name points at has a leaked ` +
+        "upgrade key, so an environment carrying it is refused rather than half-applied.",
       howToFix:
         replacement === undefined || replacement === null
-          ? `Remove ${name}; SIP has no counterpart (the browser's Solana RPC is always the same-origin /api/solana-rpc).`
+          ? `Remove ${name}; SaverFi has no counterpart (the browser's Solana RPC is always the same-origin /api/solana-rpc).`
           : `Remove ${name} and set ${replacement} instead, re-checking the value.`,
     });
   }
@@ -213,8 +213,8 @@ export function loadSolanaServerSettings(env: Env): SolanaSettingsLoad {
     problems.push({
       variable: "SIP_SOLANA_PROGRAM_ID",
       message:
-        "SIP_SOLANA_PROGRAM_ID names Nuvem's old program. Its upgrade authority key leaked, so whoever holds it can " +
-        "rewrite that program: SIP never talks to it.",
+        "SIP_SOLANA_PROGRAM_ID names a program SaverFi does not use. Its upgrade authority key leaked, so whoever holds it can " +
+        "rewrite that program: SaverFi never talks to it.",
       howToFix: `Set SIP_SOLANA_PROGRAM_ID to ${SIP_PROGRAM_ID}.`,
     });
   } else if (program !== SIP_PROGRAM_ID) {

@@ -83,17 +83,17 @@ describe("the configuration", () => {
     expect(load.ok && load.config.solanaRpcUrl).toBe("https://sip.example/api/solana-rpc");
   });
 
-  it("refuses Nuvem's old program by name", () => {
+  it("refuses the program SaverFi does not use, by name", () => {
     const problems = problemsOf({ ...SOLANA_ENV, SIP_SOLANA_PROGRAM_ID: OLD_NUVEM_PROGRAM_ID });
     expect(problems.map((p) => p.variable)).toEqual(["SIP_SOLANA_PROGRAM_ID"]);
-    expect(problems[0]!.message).toContain("Nuvem's old program");
+    expect(problems[0]!.message).toContain("a program SaverFi does not use");
   });
 
   it("refuses a program id that is not the IDL's", () => {
     expect(variables({ ...SOLANA_ENV, SIP_SOLANA_PROGRAM_ID: "11111111111111111111111111111111" })).toEqual(["SIP_SOLANA_PROGRAM_ID"]);
   });
 
-  it("refuses a copied Nuvem Solana variable and names its replacement", () => {
+  it("refuses a copied NUVEM_SOLANA_* variable and names its replacement", () => {
     const problems = problemsOf({ ...SOLANA_ENV, NUVEM_SOLANA_RPC_URL: "https://old.invalid/?api-key=OLD" });
     expect(problems.map((p) => p.variable)).toEqual(["NUVEM_SOLANA_RPC_URL"]);
     expect(problems[0]!.howToFix).toContain("SIP_SOLANA_RPC_URLS");

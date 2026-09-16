@@ -63,7 +63,7 @@ function accountBytes(account: RpcAccount): Uint8Array | null {
 function decodeOwned<T>(account: RpcAccount | null | undefined, decode: (bytes: Uint8Array) => T): ChainRead<{ readonly state: T; readonly lamports: bigint }> {
   if (account === null || account === undefined) return { kind: "missing" };
   if (account.owner !== SIP_PROGRAM_ID) {
-    return { kind: "unreadable", error: `the account is owned by ${account.owner}, not the SIP program; refusing to decode` };
+    return { kind: "unreadable", error: `the account is owned by ${account.owner}, not the SaverFi program; refusing to decode` };
   }
   const bytes = accountBytes(account);
   if (bytes === null) return { kind: "unreadable", error: "the account data is not base64" };

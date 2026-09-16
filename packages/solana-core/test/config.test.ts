@@ -104,9 +104,9 @@ describe("refusals", () => {
     expect(JSON.stringify(found)).not.toContain("keyed.invalid");
   });
 
-  it("names Nuvem's old program explicitly", () => {
+  it("names the refused program explicitly", () => {
     const found = problems({ ...valid, SIP_SOLANA_PROGRAM_ID: OLD_NUVEM_PROGRAM_ID });
-    expect(found[0]!.message).toContain("Nuvem's old program");
+    expect(found[0]!.message).toContain("a program SaverFi does not use");
     expect(found[0]!.message).not.toContain(OLD_NUVEM_PROGRAM_ID);
   });
 

@@ -187,7 +187,7 @@ describe("/api/solana-tx", () => {
     expect(seen).toHaveLength(0);
   });
 
-  it("refuses a transaction to Nuvem's old program (422 old_program) before any upstream call", async () => {
+  it("refuses a transaction to the program SaverFi does not use (422 old_program) before any upstream call", async () => {
     useEnv(SOLANA_ENV);
     const seen = stubUpstream((body) => rpcOk(body, null));
     const payer = Keypair.generate();

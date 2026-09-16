@@ -256,7 +256,7 @@ describe("the order of refusals, before any chain read", () => {
     const calls = upstream.calls.length;
     const refused = await read(await buildRoute.POST(post("build", { action: "createVault", owner: key(), mode: 0 })));
     expect([refused.status, refused.json.error?.code]).toEqual([429, "rate_limited"]);
-    expect(refused.json.error?.message).toMatch(/^SIP is reading Solana for many people right now\./);
+    expect(refused.json.error?.message).toMatch(/^SaverFi is reading Solana for many people right now\./);
     expect(upstream.calls).toHaveLength(calls);
     expect(sharedBuildReadsBudget(capacity)).toBe(sharedBuildReadsBudget(capacity));
   });
@@ -437,7 +437,7 @@ describe("prepareLink and link", () => {
     const otherOwner = key();
     const overAnotherVault = linkConsentMessage({ programId: SIP_PROGRAM_ID, wallet: walletKey, vault: deriveVaultPda(otherOwner).toBase58(), owner: otherOwner });
     const answer = await build({ action: "link", owner, wallet: walletKey, consentSignature: base64Encode(signBytes(wallet, overAnotherVault)) });
-    expect([answer.status, answer.json.error?.code, answer.json.error?.message]).toEqual([422, "link_consent_invalid", "Your trading wallet's signature does not match SIP's link consent."]);
+    expect([answer.status, answer.json.error?.code, answer.json.error?.message]).toEqual([422, "link_consent_invalid", "Your trading wallet's signature does not match SaverFi's link consent."]);
     expect(upstream.calls).toHaveLength(0);
   });
 

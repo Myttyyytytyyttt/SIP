@@ -348,7 +348,7 @@ function createRoute(route: BuildRefusalEvent["route"], options: SolanaBuildHand
             if (client > 0) return limited(client, "Too many requests from this client.");
           }
           const wait = reads.take(GLOBAL, weight, readsAt);
-          return wait > 0 ? limited(wait, "SIP is reading Solana for many people right now.") : null;
+          return wait > 0 ? limited(wait, "SaverFi is reading Solana for many people right now.") : null;
         },
         spendMore: (calls) => {
           if (!(calls > 0)) return null;
@@ -357,14 +357,14 @@ function createRoute(route: BuildRefusalEvent["route"], options: SolanaBuildHand
           const client = own > 0 ? own : aggregate.take(identity.aggregate, calls, moreAt);
           if (client > 0) return limited(client, "Too many requests from this client.");
           const wait = reads.take(GLOBAL, calls, moreAt);
-          return wait > 0 ? limited(wait, "SIP is reading Solana for many people right now.") : null;
+          return wait > 0 ? limited(wait, "SaverFi is reading Solana for many people right now.") : null;
         },
       };
       try {
         return await dispatch(fields.action, fields, served);
       } catch {
         // A reader or builder bug, never a person's mistake: no detail leaves.
-        return refuse(500, "internal_error", "SIP could not prepare this. Nothing was built.");
+        return refuse(500, "internal_error", "SaverFi could not prepare this. Nothing was built.");
       }
     },
 
@@ -390,7 +390,7 @@ function decimalU64(value: unknown): bigint | null {
   return parsed <= U64_MAX ? parsed : null;
 }
 
-const unreadable = (served: Served): Response => served.refuse(502, "unreadable", "SIP could not read Solana just now. Nothing was built.");
+const unreadable = (served: Served): Response => served.refuse(502, "unreadable", "SaverFi could not read Solana just now. Nothing was built.");
 const upstreamUnavailable = (served: Served): Response => served.refuse(502, "upstream_unavailable", "Solana did not answer with a recent blockhash. Nothing was built.");
 
 function costs(rentLamports: bigint, signatures: number, budget: ComputeBudget): Record<string, bigint> {
@@ -470,7 +470,7 @@ async function linkWallet(fields: Readonly<Record<string, unknown>>, served: Ser
     try {
       checkLinkConsent({ owner, wallet, consentSignature: consentSignature as string });
     } catch (error) {
-      if (error instanceof LinkConsentError) return served.refuse(422, "link_consent_invalid", "Your trading wallet's signature does not match SIP's link consent.");
+      if (error instanceof LinkConsentError) return served.refuse(422, "link_consent_invalid", "Your trading wallet's signature does not match SaverFi's link consent.");
       if (error instanceof WalletIsOwnerError) return served.refuse(400, "wallet_is_owner", "A trading wallet cannot be your pension key.");
       throw error;
     }
@@ -482,9 +482,9 @@ async function linkWallet(fields: Readonly<Record<string, unknown>>, served: Ser
   if (reads.vault.kind === "unreadable" || reads.config.kind === "unreadable" || reads.link.kind === "unreadable") return unreadable(served);
   if (reads.vault.kind === "missing") return served.refuse(409, "vault_missing", "Create your vault first.");
   if (reads.config.kind === "missing") {
-    return served.refuse(409, "config_missing", "Linking opens once SIP's program is configured on Solana. Your vault, investing and withdrawals already work.");
+    return served.refuse(409, "config_missing", "Linking opens once SaverFi's program is configured on Solana. Your vault, investing and withdrawals already work.");
   }
-  if (reads.config.value.state.paused) return served.refuse(409, "protocol_paused", "SIP is paused, so linking waits. Withdrawals still work.");
+  if (reads.config.value.state.paused) return served.refuse(409, "protocol_paused", "SaverFi is paused, so linking waits. Withdrawals still work.");
   if (reads.link.kind === "exists") {
     const linkedTo = reads.link.value.state.vault;
     return served.refuse(
@@ -504,7 +504,7 @@ async function linkWallet(fields: Readonly<Record<string, unknown>>, served: Ser
   try {
     built = buildLinkWallet({ owner, wallet, consentSignature: consentSignature as string, ...chain.value.recent, computeBudget });
   } catch (error) {
-    if (error instanceof LinkConsentError) return served.refuse(422, "link_consent_invalid", "Your trading wallet's signature does not match SIP's link consent.");
+    if (error instanceof LinkConsentError) return served.refuse(422, "link_consent_invalid", "Your trading wallet's signature does not match SaverFi's link consent.");
     throw error;
   }
   return json(200, { ...built, costs: costs(chain.value.rents[0]!, 2, computeBudget) });
@@ -587,10 +587,10 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
   const rentFor = (size: number): bigint => chain.rents[sizes.indexOf(size)]!;
 
   const floors = liveFloors(chain.accounts.slice(0, PRICED_POOLS.length), chain.slot);
-  if (floors === null) return served.refuse(502, "price_unavailable", "SIP could not read today's prices from Raydium, so no floor was set. Nothing was built.");
+  if (floors === null) return served.refuse(502, "price_unavailable", "SaverFi could not read today's prices from Raydium, so no floor was set. Nothing was built.");
   for (const [index, entry] of mints.entries()) {
     if (chain.accounts[PRICED_POOLS.length + index]?.owner !== entry.tokenProgram) {
-      return served.refuse(409, "mint_unexpected", "A token this policy names is not held by the token program SIP expects. Nothing was built.", { mint: entry.mint });
+      return served.refuse(409, "mint_unexpected", "A token this policy names is not held by the token program SaverFi expects. Nothing was built.", { mint: entry.mint });
     }
   }
   const statuses = targets.map((target, index) => tokenAccountStatus(chain.accounts[PRICED_POOLS.length + mints.length + index], target.tokenProgram));

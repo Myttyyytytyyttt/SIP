@@ -1,6 +1,6 @@
 # @sip/solana-core
 
-SIP's Solana web core. The web (`packages/website-oficial`) uses it to read the
+SaverFi's Solana web core. The web (`packages/website-oficial`) uses it to read the
 `sip_vault` program, to relay a narrow set of JSON-RPC calls for Privy's signing UI,
 and to verify and broadcast transactions its users sign.
 
@@ -12,7 +12,7 @@ and to verify and broadcast transactions its users sign.
   no instruction names are hashed at runtime.
 - **One program.** `SIP_PROGRAM_ID` is the IDL's `address`
   (`6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J`). `SIP_SOLANA_PROGRAM_ID` must equal
-  it. Nuvem's program `7rtgXTu852M1NTx7PLoJd3bChaCb2hgsgv5o54aFv6Fy` is refused
+  it. The program `7rtgXTu852M1NTx7PLoJd3bChaCb2hgsgv5o54aFv6Fy`, whose upgrade key leaked, is refused
   everywhere: in config, in the verifier, and at IDL load.
 - **Two entries, with no `.` export.**
   - `@sip/solana-core/client` is browser-safe: the IDL codec, decoders, base58 and
