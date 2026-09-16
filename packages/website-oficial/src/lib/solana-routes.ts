@@ -13,6 +13,7 @@ import "server-only";
 
 import {
   createSolanaBuildHandler,
+  createSolanaLiveHandler,
   createSolanaRpcHandler,
   createSolanaTxHandler,
   createSolanaVaultHandler,
@@ -53,4 +54,10 @@ export function solanaBuildRoute(options: WithEnv<SolanaBuildHandlerOptions> = {
 export function solanaVaultRoute(options: WithEnv<SolanaVaultHandlerOptions> = {}): SolanaRouteHandler {
   const { env, ...rest } = options;
   return createSolanaVaultHandler({ ...rest, gate: () => solanaGate(env ?? process.env) });
+}
+
+/** POST /api/solana-live: the connected dashboard's snapshot and its classified history. Its own client buckets, the shared reads budget. */
+export function solanaLiveRoute(options: WithEnv<SolanaVaultHandlerOptions> = {}): SolanaRouteHandler {
+  const { env, ...rest } = options;
+  return createSolanaLiveHandler({ ...rest, gate: () => solanaGate(env ?? process.env) });
 }

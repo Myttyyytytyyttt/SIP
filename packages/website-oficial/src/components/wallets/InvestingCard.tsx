@@ -52,6 +52,8 @@ import { useVaultWrite, type InvestRequest, type WriteProgress } from "@/hooks/u
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { AmountError, USDC_DECIMALS, formatSol, formatUnits, formatUsd, parseUnits, rawFrom } from "@/lib/amounts";
 import { LABEL } from "@/lib/classes";
+import { todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
+import { floorsState } from "@/lib/live-model";
 import type { InvestPolicyBuildJson, InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
 import { INVEST_COPY, VAULT_COPY, ratePercent, shortAddress } from "@/lib/vault-copy";
 
@@ -78,35 +80,10 @@ export function readCaps(perBuyText: string, per30DaysText: string): Caps {
 export const canSignPolicy = (input: { readonly acknowledged: boolean; readonly capsOk: boolean; readonly blocked: boolean }): boolean =>
   input.acknowledged && input.capsOk && !input.blocked;
 
-/** What the policy's 31 day-buckets say it invested in the trailing 31 days, summed as the program sums them. */
-export function usedInLast30Days(bucketDays: readonly number[], bucketAmounts: readonly string[], nowSeconds: number): bigint {
-  const today = Math.floor(nowSeconds / 86_400);
-  return bucketDays.reduce((total, day, index) => (day + 31 > today ? total + (rawFrom(bucketAmounts[index]) ?? 0n) : total), 0n);
-}
-
-export interface TodaysLimits {
-  /** USDC raw per SOL at the convert floor, and at today's rate. */
-  readonly floorPerSol: bigint;
-  readonly todayPerSol: bigint;
-  readonly legs: readonly { readonly mint: string; readonly symbol: string; readonly todayPer1e8: bigint; readonly maxPer1e8: bigint }[];
-}
-
-/** The limits a policy signed now would carry, from the screen's last read of the pools; null when a price is missing. */
-export function todaysLimits(prices: VaultStateJson["prices"]): TodaysLimits | null {
-  if (prices === null) return null;
-  try {
-    const convert = rawFrom(prices.convertWad);
-    if (convert === null) return null;
-    const legs = OFFERED_LEGS.map((leg) => {
-      const wad = rawFrom(prices.legs.find((entry) => entry.mint === leg.mint)?.wad);
-      if (wad === null) throw new RangeError(`no price for ${leg.symbol}`);
-      return { mint: leg.mint, symbol: leg.symbol, todayPer1e8: usdcRawPer1e8LegRaw(wad), maxPer1e8: usdcRawPer1e8LegRaw(floorWad(wad, LEG_FLOOR_MARGIN_BPS)) };
-    });
-    return { floorPerSol: usdcRawPerSol(floorWad(convert, CONVERT_FLOOR_MARGIN_BPS)), todayPerSol: usdcRawPerSol(convert), legs };
-  } catch {
-    return null;
-  }
-}
+// These two moved to src/lib/invest-limits.ts, where the live dashboard's rule
+// card reads the same numbers; re-exported so this card's existing imports and
+// its test are untouched.
+export { todaysLimits, usedInLast30Days, type TodaysLimits } from "@/lib/invest-limits";
 
 /** The rent a first policy costs: the policy account if missing, and each vault token account missing; null when any part is unknown. */
 export function setupRent(state: VaultStateJson): bigint | null {
@@ -123,8 +100,6 @@ export function setupRent(state: VaultStateJson): bigint | null {
   }
   return total;
 }
-
-const legSymbol = (mint: string): string => OFFERED_LEGS.find((leg) => leg.mint === mint)?.symbol ?? shortAddress(mint);
 
 function readinessWords(readiness: InvestmentReadiness): string {
   if (readiness.state === "ready") return INVEST_COPY.ready;
@@ -351,19 +326,9 @@ function PolicySummary({
   readonly progress: ReactNode;
 }) {
   const limits = todaysLimits(state.prices);
-  const storedConvert = rawFrom(policy.minConvertRateWad);
-  const liveConvert = rawFrom(state.prices?.convertWad);
-  const legs = policy.legs.map((leg) => ({
-    mint: leg.mint,
-    symbol: legSymbol(leg.mint),
-    weightBps: leg.weightBps,
-    floor: rawFrom(leg.minOutRateWad),
-    live: rawFrom(state.prices?.legs.find((entry) => entry.mint === leg.mint)?.wad),
-    today: limits?.legs.find((entry) => entry.mint === leg.mint)?.todayPer1e8 ?? null,
-  }));
-  // A stored floor at or under today's rate lets the keeper act: SOL sells above its floor, a leg buys at least its floor's amount.
-  const pricesKnown = storedConvert !== null && liveConvert !== null && legs.every((leg) => leg.floor !== null && leg.live !== null);
-  const belowMarket = pricesKnown && storedConvert! <= liveConvert! && legs.every((leg) => leg.floor! <= leg.live!);
+  // The live rule card reads the same state, so the two cannot disagree about
+  // whether a floor has been passed.
+  const { storedConvert, legs, pricesKnown, belowMarket } = floorsState(policy, state.prices);
 
   const maxPerCall = rawFrom(policy.maxPerCall) ?? 0n;
   const maxRolling30d = rawFrom(policy.maxRolling30d) ?? 0n;

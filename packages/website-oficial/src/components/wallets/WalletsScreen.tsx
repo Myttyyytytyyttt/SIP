@@ -39,10 +39,15 @@ import { VaultScreen } from "@/components/wallets/VaultScreen";
 import { WithdrawCard } from "@/components/wallets/WithdrawCard";
 import { LABEL } from "@/lib/classes";
 import { pensionKeyOf } from "@/lib/pension-key";
+import { PRIVY_PATIENCE_MS } from "@/lib/privy-patience";
 import { privyFailure } from "@/lib/privy-failure";
 
-/** How long Privy may take to become ready before the skeleton stops pretending it is about to. */
-export const PRIVY_PATIENCE_MS = 15_000;
+/**
+ * How long Privy may take to become ready before the skeleton stops pretending
+ * it is about to. It moved to src/lib/privy-patience.ts, where the dashboard
+ * waits on the same number; re-exported so this screen's old import still works.
+ */
+export { PRIVY_PATIENCE_MS } from "@/lib/privy-patience";
 
 export function WalletsScreen() {
   const { ready, authenticated, user, logout } = usePrivy();

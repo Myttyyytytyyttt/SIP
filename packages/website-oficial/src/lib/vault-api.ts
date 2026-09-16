@@ -228,14 +228,33 @@ export interface VaultApi {
 
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
-interface Answer {
+/** One answer from this app's own API, before it is read as a result. */
+export interface Answer {
   readonly status: number;
   readonly json: unknown;
   readonly retryAfterSeconds: number | null;
 }
 
-/** The client, against `origin` (default: this page's own). */
-export function createVaultApi(options: { readonly origin?: string; readonly fetch?: typeof fetch } = {}): VaultApi {
+/** POSTing JSON to this app's own routes, and reading the answer as a result. */
+export interface JsonPoster {
+  /** The raw answer, or null when the request never got one. */
+  post(path: string, body: unknown): Promise<Answer | null>;
+  /** An answer as a typed result: a refusal keeps its code, message, body and retry-after. */
+  result<T>(answer: Answer | null): ApiResult<T>;
+  /** post + result, which is what every action but the JSON-RPC relay does. */
+  request<T>(path: string, body: unknown): Promise<ApiResult<T>>;
+}
+
+/**
+ * The one HTTP shape this app's clients share: same-origin by default, no-store,
+ * a refusal read into words-ready fields, and a request that never got an answer
+ * reported as a network failure rather than thrown.
+ *
+ * Extracted so /api/solana-live's client is the SAME transport as the vault's,
+ * rather than a second copy that drifts on retry-after or on a body that is not
+ * JSON.
+ */
+export function createJsonPoster(options: { readonly origin?: string; readonly fetch?: typeof fetch } = {}): JsonPoster {
   const origin = (options.origin ?? "").replace(/\/+$/, "");
   // Looked up at call time, and never detached from its global: a bare reference throws "Illegal invocation" in browsers.
   const send = options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
@@ -272,10 +291,17 @@ export function createVaultApi(options: { readonly origin?: string; readonly fet
     };
   }
 
+  return { post, result, request: async <T>(path: string, body: unknown) => result<T>(await post(path, body)) };
+}
+
+/** The client, against `origin` (default: this page's own). */
+export function createVaultApi(options: { readonly origin?: string; readonly fetch?: typeof fetch } = {}): VaultApi {
+  const { post, request } = createJsonPoster(options);
+
   return {
-    build: async <T>(body: Readonly<Record<string, unknown>>) => result<T>(await post("/api/solana-build", body)),
-    state: async ({ owner, wallets }) => result<VaultStateJson>(await post("/api/solana-vault", { action: "state", owner, wallets })),
-    send: async (signedTransaction) => result<SendResponseJson>(await post("/api/solana-tx", { action: "send", signedTxBase64: base64Encode(signedTransaction) })),
+    build: <T>(body: Readonly<Record<string, unknown>>) => request<T>("/api/solana-build", body),
+    state: ({ owner, wallets }) => request<VaultStateJson>("/api/solana-vault", { action: "state", owner, wallets }),
+    send: (signedTransaction) => request<SendResponseJson>("/api/solana-tx", { action: "send", signedTxBase64: base64Encode(signedTransaction) }),
     rpc: async <T>(method: string, params: readonly unknown[]): Promise<T> => {
       const answer = await post("/api/solana-rpc", { jsonrpc: "2.0", id: 1, method, params });
       if (answer === null) throw new RpcCallError(FAILURE_COPY.network);

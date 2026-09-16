@@ -1,38 +1,56 @@
 "use client";
 
 /**
- * WHOSE NUMBERS, AND WHETHER THEY ARE REAL. Both questions, answered in one place.
+ * WHOSE NUMBERS, AND WHETHER THEY ARE REAL — decided in one place
+ * (src/lib/dashboard-mode.ts) and rendered here.
  *
- * `/` is a server component and Privy is a browser thing, so the server cannot
- * know who is looking. This component asks Privy in the browser whether there
- * is a session, and decides between the landing and the dashboard by that; the
- * pension key (src/lib/pension-key.ts) says whether the session has one.
+ * THE OWNER'S RULE, IN TWO SENTENCES. With a pension key connected the dashboard
+ * is Live and the Live|Mock control leaves the navbar; a ?mode=mock in the
+ * address bar is normalized away rather than obeyed. With nobody connected the
+ * choice is offered, and Live shows an honest connect card — never the sample
+ * under a label promising somebody their own pension.
  *
- * THERE IS NO LIVE DATA YET. It arrives with the Solana vault screens, and until
- * then nothing is fetched: whoever walks in, connected or not, sees the example
- * under its Sample data badge with Live greyed out, and one note says why. The
- * note never tells anyone to switch to a control they cannot use.
+ * NOTHING IS PAINTED BEFORE PRIVY ANSWERS. `ready` is false on the server, so a
+ * request for /?mode=mock renders a skeleton and the sample HTML is never sent
+ * to a browser that might be a connected user's. The landing is the one
+ * exception, and deliberately so: it holds no numbers.
  *
- * WHY THE MOCK IS RENDERED ON THE SERVER. It arrives as a prop, complete, so the
- * example costs no request and cannot fail. The badge reads the payload actually
- * on screen, never the toggle, so the label and the numbers cannot disagree.
+ * THE FRAME SPLITS ON `walletsConfigured` BEFORE ANY PRIVY HOOK RUNS. Without a
+ * configuration there is no PrivyProvider in the tree, and usePrivy() inside one
+ * would be a hook reaching for a context that is not there. The unconfigured
+ * frame never calls it at all.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
-import { usePrivy } from "@privy-io/react-auth";
+import { useLogin, usePrivy } from "@privy-io/react-auth";
+import { LogOut } from "lucide-react";
+import { usePathname, useSearchParams } from "next/navigation";
 
+import { CopyButton } from "@/components/copy-button";
 import { DashboardSource } from "@/components/DashboardSource";
 import { DashboardWallets } from "@/components/dashboard-wallets";
-import { DataModeToggle, type DataMode } from "@/components/data-mode";
+import { DataModeToggle } from "@/components/data-mode";
 import { Landing } from "@/components/landing";
+import { LiveConnectCard, LiveKeylessCard, LiveLoading, LivePrivyStalled, LiveUnavailableCard, LiveUnreadable } from "@/components/live/LiveStates";
+import { Num } from "@/components/num";
 import { PensionPanel } from "@/components/pension-panel";
 import { SavingsRulePanel } from "@/components/savings-rule-panel";
 import { SavingsStrip } from "@/components/savings-strip";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { WalletActivity } from "@/components/wallet-activity";
+import { useWalletsClosed, useWalletsOpener } from "@/components/wallets-host";
+import { useLiveDashboard, type LiveDashboardStore } from "@/hooks/use-live-dashboard";
+import { decideDashboard, readUrlMode, toggleModeOf, urlWithMode, type DashboardState, type UrlMode } from "@/lib/dashboard-mode";
+import { LIVE_COPY, MODE_COPY } from "@/lib/live-copy";
 import { pensionKeyOf } from "@/lib/pension-key";
+import { privyFailure } from "@/lib/privy-failure";
+import { PRIVY_PATIENCE_MS } from "@/lib/privy-patience";
+import { shortAddress } from "@/lib/vault-copy";
+import { tradingWalletsOf } from "@/lib/trading-wallets";
 import type { DashboardMock } from "@/mocks";
 
 export interface DashboardLoadJson {
@@ -41,135 +59,300 @@ export interface DashboardLoadJson {
   readonly notice: string | null;
 }
 
-/** The one note over the example, for everyone, until there is live data to show. */
-const SAMPLE_NOTICE = "Example data. Nobody’s pension. Your vault is on the Wallets screen; live numbers arrive with the live panel.";
+interface DashboardContextValue {
+  readonly state: DashboardState;
+  readonly mock: DashboardLoadJson;
+  readonly live: LiveDashboardStore | null;
+  readonly account: ReactNode;
+  readonly setMode: (mode: UrlMode) => void;
+  readonly onConnect: () => void;
+  readonly onDisconnect: () => void;
+  /** The way out of a state that holds no numbers, and the 15 s fallback's second button. */
+  readonly onSeeSample: () => void;
+  readonly loginFailure: string | null;
+  readonly stalled: boolean;
+}
 
-/** The note instead, for a session with no pension key: what to do about it. */
-const KEYLESS_NOTICE =
-  "Example data. Nobody’s pension. This session has no Solana wallet: disconnect, then connect Phantom, Backpack, Solflare or another Solana wallet.";
+const DashboardContext = createContext<DashboardContextValue | null>(null);
 
-/** Live is disabled and Mock is already selected, so the control has nothing to change. */
-const keepMock = (): void => undefined;
+/** The frame's decision and data. Null outside a frame. */
+export const useDashboard = (): DashboardContextValue | null => useContext(DashboardContext);
 
-export function DashboardShell({
+const solscanAccountUrl = (address: string): string => `https://solscan.io/account/${address}`;
+
+/** The connected pension key: its short address, a copy button, and a way to look it up. */
+function PensionKeyChip({ address }: { readonly address: string }) {
+  return (
+    <span className="hidden items-center gap-1 rounded-md border px-2 py-1 sm:inline-flex">
+      <Num className="text-xs">{shortAddress(address)}</Num>
+      <CopyButton value={address} />
+      <a
+        href={solscanAccountUrl(address)}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="rounded-sm text-xs text-muted-foreground underline-offset-4 outline-none hover:text-foreground hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+      >
+        Solscan
+      </a>
+    </span>
+  );
+}
+
+function DisconnectButton({ onDisconnect }: { readonly onDisconnect: () => void }) {
+  return (
+    <>
+      <Button size="sm" variant="outline" className="hidden sm:inline-flex" onClick={onDisconnect}>
+        {LIVE_COPY.disconnect}
+      </Button>
+      <Button size="sm" variant="outline" className="sm:hidden" aria-label={LIVE_COPY.disconnect} onClick={onDisconnect}>
+        <LogOut aria-hidden />
+      </Button>
+    </>
+  );
+}
+
+/** What stands at the right of the header, for each state the frame can be in. */
+function accountSlot(
+  state: DashboardState,
+  pensionKey: string | null,
+  actions: { readonly onConnect: () => void; readonly onDisconnect: () => void; readonly openSetup: () => void },
+): ReactNode {
+  switch (state.account) {
+    case "connect-setup":
+      return (
+        <Button size="sm" onClick={actions.openSetup}>
+          {LIVE_COPY.connect}
+        </Button>
+      );
+    case "placeholder":
+      // Never a Connect that cannot act yet: a button that does nothing when
+      // pressed is worse than one that has not arrived.
+      return (
+        <>
+          <Skeleton className="h-8 w-24" aria-hidden />
+          <span className="sr-only">{LIVE_COPY.checking}</span>
+        </>
+      );
+    case "connect":
+      return (
+        <Button size="sm" onClick={actions.onConnect}>
+          {LIVE_COPY.connect}
+        </Button>
+      );
+    case "disconnect":
+      return <DisconnectButton onDisconnect={actions.onDisconnect} />;
+    case "key-and-disconnect":
+      return (
+        <>
+          {pensionKey === null ? null : <PensionKeyChip address={pensionKey} />}
+          <DisconnectButton onDisconnect={actions.onDisconnect} />
+        </>
+      );
+  }
+}
+
+// ── the frame ────────────────────────────────────────────────────────────────
+
+export function DashboardFrame({
   mock,
-  initialMode = "live",
   walletsConfigured,
+  children,
 }: {
-  /** The seeded example, rendered on the server so it never needs the network. */
-  mock: DashboardLoadJson;
-  /** `?mode=mock` opens on the example instead of the landing. */
-  initialMode?: DataMode;
-  /** Whether the wallets modal has a configuration; the landing's Connect depends on it. */
-  walletsConfigured: boolean;
+  readonly mock: DashboardLoadJson;
+  readonly walletsConfigured: boolean;
+  readonly children: ReactNode;
 }) {
-  const { ready, user, login, logout } = usePrivy();
+  return walletsConfigured ? (
+    <ConfiguredFrame mock={mock}>{children}</ConfiguredFrame>
+  ) : (
+    <UnconfiguredFrame mock={mock}>{children}</UnconfiguredFrame>
+  );
+}
 
-  // ENTERED WITHOUT A KEY. The landing lets a visitor walk into the example
-  // without connecting — scroll, or click the screenshot.
-  const [entered, setEntered] = useState(initialMode === "mock");
-  // Entering pushes the URL the links already carry, so the hydrated path and
-  // the no-JS path converge: reload lands on the example, Back returns to the
-  // landing. Next patches pushState itself, so no router round trip is needed.
-  const onEnter = useCallback(() => {
-    setEntered(true);
-    window.history.pushState({}, "", "/?mode=mock");
-  }, []);
-  useEffect(() => {
-    const onPop = () => setEntered(new URLSearchParams(window.location.search).get("mode") === "mock");
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
-  }, []);
+/** The URL is the mode's home, so Back undoes a switch and a reload keeps it. */
+function useMode(): { readonly urlMode: UrlMode | null; readonly pathname: string; readonly setMode: (mode: UrlMode) => void } {
+  const params = useSearchParams();
+  const pathname = usePathname() ?? "/";
+  const urlMode = readUrlMode(params.get("mode"));
+  const setMode = useCallback(
+    (mode: UrlMode) => {
+      // Next keeps useSearchParams in step with pushState, so the decision runs
+      // again and Back undoes the switch without a router round trip.
+      window.history.pushState({}, "", urlWithMode(pathname, mode));
+    },
+    [pathname],
+  );
+  return { urlMode, pathname, setMode };
+}
+
+/** No Solana configuration: Privy never mounts, so no Privy hook is ever called. */
+function UnconfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJson; readonly children: ReactNode }) {
+  const { urlMode, pathname, setMode } = useMode();
+  const openWallets = useWalletsOpener();
+  const openSetup = useCallback(() => openWallets?.(), [openWallets]);
+
+  const state = decideDashboard({
+    walletsConfigured: false,
+    privyGaveUp: false,
+    ready: false,
+    authenticated: false,
+    hasUser: false,
+    pensionKey: null,
+    urlMode,
+    pathname,
+    landingAllowed: pathname === "/",
+  });
+
+  const value: DashboardContextValue = {
+    state,
+    mock,
+    live: null,
+    account: accountSlot(state, null, { onConnect: openSetup, onDisconnect: openSetup, openSetup }),
+    setMode,
+    onConnect: openSetup,
+    onDisconnect: openSetup,
+    onSeeSample: () => setMode("mock"),
+    loginFailure: null,
+    stalled: false,
+  };
+  return (
+    <Body value={value} onEnter={() => setMode("mock")} walletsConfigured={false}>
+      {children}
+    </Body>
+  );
+}
+
+function ConfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJson; readonly children: ReactNode }) {
+  const { ready, authenticated, user, logout } = usePrivy();
+  const { urlMode, pathname, setMode } = useMode();
+  const [loginFailure, setLoginFailure] = useState<string | null>(null);
+  const [gaveUp, setGaveUp] = useState(false);
+  const [stalled, setStalled] = useState(false);
+  const openWallets = useWalletsOpener();
+
+  const { login } = useLogin({
+    onError: (code) => {
+      const described = privyFailure(code);
+      // Closing Privy's dialog is a choice, not an error.
+      setLoginFailure(described.kind === "exited" ? null : described.message);
+    },
+  });
 
   // The pension key is derived, never stored: the app keeps no copy of who you
   // are, so a disconnect is a disconnect.
-  const pensionKey = useMemo(() => (user === null ? null : pensionKeyOf(user)), [user]);
+  const pensionKey = useMemo(() => (user === null || user === undefined ? null : pensionKeyOf(user)), [user]);
+  const privyWallets = useMemo(() => tradingWalletsOf(user ?? null).map((wallet) => wallet.address), [user]);
 
-  // THE FRONT DOOR DOES NOT WAIT FOR PRIVY. Measured in a headless browser,
-  // `ready` never came, and a page gated on it stayed blank — a front door that
-  // depends on a third party's initialisation to open at all. So the landing
-  // renders at once; only its Connect button waits (it shows a placeholder
-  // until Privy can act), and when Privy resolves with a session, this component
-  // simply re-renders into the dashboard.
-  //
-  // BY SESSION, NOT BY KEY. A session with no external Solana wallet (one
-  // restored from the old EVM site on this origin, say) has no pension key. On
-  // the landing it would be stuck: Privy ignores login() for a user who is
-  // already signed in. So it gets the example, a note, and a real Disconnect.
-  if (user === null && !entered) return <Landing onEnter={onEnter} walletsConfigured={walletsConfigured} />;
+  // After the patience runs out, say so rather than pulsing forever.
+  useEffect(() => {
+    if (ready) return undefined;
+    const timer = window.setTimeout(() => setStalled(true), PRIVY_PATIENCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [ready]);
 
-  // Live is impossible until there is live data, connected or not. The control
-  // shows that rather than hiding it.
-  const control = <DataModeToggle mode="mock" onModeChange={keepMock} disabled />;
+  const state = decideDashboard({
+    walletsConfigured: true,
+    privyGaveUp: gaveUp,
+    ready,
+    authenticated,
+    hasUser: user !== null && user !== undefined,
+    pensionKey,
+    urlMode,
+    pathname,
+    landingAllowed: pathname === "/",
+  });
 
-  // The header wears a real Connect or a real Disconnect, never the example's
-  // fake wallet menu: a Privy session exists or it does not. `ready` gates both —
-  // on an incomplete deployment there is no provider.
-  const account =
-    user === null ? (
-      <Button size="sm" onClick={() => login()} disabled={!ready}>
-        Connect
-      </Button>
-    ) : (
-      <Button size="sm" variant="outline" onClick={() => void logout()} disabled={!ready}>
-        Disconnect
-      </Button>
-    );
+  // ?mode=mock with a key connected becomes ?mode=live, once per change, so a
+  // reload of a connected tab can never land on the sample or the landing.
+  useEffect(() => {
+    if (state.replaceUrlWith === null) return;
+    window.history.replaceState({}, "", state.replaceUrlWith);
+  }, [state.replaceUrlWith]);
 
-  const notice = user !== null && pensionKey === null ? KEYLESS_NOTICE : SAMPLE_NOTICE;
+  const live = useLiveDashboard({ pensionKey: state.kind === "live" ? pensionKey : null, privyWallets });
 
-  return <Body load={{ ...mock, notice }} control={control} account={account} />;
+  // Every chain write happens in the wallets modal; read again as it closes
+  // rather than showing the old numbers for up to a minute.
+  useWalletsClosed(
+    useCallback(() => {
+      if (state.kind === "live") live.refresh({ discover: true });
+    }, [state.kind, live]),
+  );
+
+  const onDisconnect = useCallback(() => {
+    // Land on the Live connect card, not back on the landing.
+    window.history.replaceState({}, "", urlWithMode(pathname, "live"));
+    void logout();
+  }, [logout, pathname]);
+
+  const onConnect = useCallback(() => {
+    setLoginFailure(null);
+    login();
+  }, [login]);
+
+  const value: DashboardContextValue = {
+    state,
+    mock,
+    live,
+    account: accountSlot(state, pensionKey, { onConnect, onDisconnect, openSetup: () => openWallets?.() }),
+    setMode,
+    onConnect,
+    onDisconnect,
+    // The 15 s fallback's "View sample data": it must also stop waiting for
+    // Privy, or the skeleton would come straight back.
+    onSeeSample: () => {
+      setGaveUp(true);
+      setMode("mock");
+    },
+    loginFailure,
+    stalled: stalled && !ready && !gaveUp,
+  };
+
+  return (
+    <Body value={value} onEnter={() => setMode("mock")} walletsConfigured>
+      {children}
+    </Body>
+  );
 }
 
-/** The full dashboard for one payload. Every component takes exactly the slice it renders. */
 function Body({
-  load,
-  control,
-  account,
+  value,
+  children,
+  onEnter,
+  walletsConfigured,
 }: {
-  load: DashboardLoadJson;
-  control: React.ReactNode;
-  account?: React.ReactNode;
+  readonly value: DashboardContextValue;
+  readonly children: ReactNode;
+  readonly onEnter: () => void;
+  readonly walletsConfigured: boolean;
 }) {
+  // The front door is its own page: no header, no numbers, and it never waits.
+  if (value.state.kind === "landing") return <Landing onEnter={onEnter} walletsConfigured={walletsConfigured} />;
+  return <DashboardContext.Provider value={value}>{children}</DashboardContext.Provider>;
+}
+
+// ── the view each page renders ───────────────────────────────────────────────
+
+/** The sample, exactly as it was: today's components, today's data, one notice over it. */
+function MockBody({ load, control, account, current }: { readonly load: DashboardLoadJson; readonly control: ReactNode; readonly account: ReactNode; readonly current: "pension" | "activity" }) {
   const { now, wallet, rule, stats, curve, days, holdings, trades, activity } = load.data;
 
   return (
     <div className="flex min-h-dvh flex-col">
-      <SiteHeader wallet={wallet} activity={activity} now={now} control={control} account={account} />
+      <SiteHeader activitySheet={<WalletActivity wallet={wallet} activity={activity} now={now} id="activity-sheet" className="min-h-0 flex-1" />} control={control} account={account} current={current} />
 
       <div className="flex flex-1">
         <aside className="hidden w-80 shrink-0 border-r lg:block xl:w-88">
-          <DashboardWallets
-            wallet={wallet}
-            activity={activity}
-            now={now}
-            className="sticky top-14 h-[calc(100dvh-3.5rem)]"
-          />
+          <DashboardWallets wallet={wallet} activity={activity} now={now} className="sticky top-14 h-[calc(100dvh-3.5rem)]" />
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col gap-4 p-4 lg:gap-6 lg:p-6">
           {/* Reads the payload on screen, never the toggle: the two cannot disagree. */}
           <DashboardSource source={load.source} notice={load.notice} />
-
           <SavingsStrip trades={trades} rule={rule} now={now} />
-
           <div className="grid gap-4 lg:gap-6 md:grid-cols-[minmax(16rem,20rem)_1fr] lg:grid-cols-1 xl:grid-cols-[minmax(16rem,20rem)_1fr]">
-            <SavingsRulePanel
-              rule={rule}
-              stats={stats}
-              activity={activity}
-              now={now}
-              className="order-2 md:order-1 lg:order-2 xl:order-1"
-            />
-            <PensionPanel
-              stats={stats}
-              curve={curve}
-              holdings={holdings}
-              days={days}
-              rule={rule}
-              now={now}
-              className="order-1 md:order-2 lg:order-1 xl:order-2"
-            />
+            <SavingsRulePanel rule={rule} stats={stats} activity={activity} now={now} className="order-2 md:order-1 lg:order-2 xl:order-1" />
+            <PensionPanel stats={stats} curve={curve} holdings={holdings} days={days} rule={rule} now={now} className="order-1 md:order-2 lg:order-1 xl:order-2" />
           </div>
         </main>
       </div>
@@ -177,4 +360,93 @@ function Body({
       <SiteFooter now={now} />
     </div>
   );
+}
+
+/**
+ * Every state that holds no numbers: one card, centred, under the same header.
+ *
+ * `now` is a PROP, never the clock. A `new Date()` here renders one string on
+ * the server and possibly another in the browser, which React reports as a
+ * hydration mismatch on every load — the reason every date on this page comes
+ * from one payload's own `now` (src/lib/format.ts).
+ */
+function PlainBody({
+  control,
+  account,
+  current,
+  sidebar,
+  now,
+  children,
+}: {
+  readonly control: ReactNode;
+  readonly account: ReactNode;
+  readonly current: "pension" | "activity";
+  readonly sidebar: ReactNode;
+  readonly now: string;
+  readonly children: ReactNode;
+}) {
+  return (
+    <div className="flex min-h-dvh flex-col">
+      <SiteHeader activitySheet={sidebar} control={control} account={account} current={current} />
+      <div className="flex flex-1">
+        <aside className="hidden w-80 shrink-0 border-r lg:block xl:w-88">
+          <div className="sticky top-14 p-4 text-sm text-muted-foreground">{sidebar}</div>
+        </aside>
+        <main className="flex min-w-0 flex-1 flex-col">{children}</main>
+      </div>
+      <SiteFooter now={now} />
+    </div>
+  );
+}
+
+export function DashboardView({ view }: { readonly view: "pension" | "activity" }) {
+  const context = useDashboard();
+  if (context === null) return null;
+  const { state, mock, live, account, setMode, onSeeSample } = context;
+
+  const control = state.toggle ? <DataModeToggle mode={toggleModeOf(state.kind)} onModeChange={setMode} /> : null;
+  const plain = (sidebar: ReactNode, children: ReactNode) => (
+    <PlainBody control={control} account={account} current={view} sidebar={sidebar} now={mock.data.now}>
+      {children}
+    </PlainBody>
+  );
+
+  switch (state.kind) {
+    case "landing":
+      return null;
+
+    case "mock": {
+      const notice = state.notice === "keyless" ? MODE_COPY.keyless : MODE_COPY.sample;
+      return <MockBody load={{ ...mock, notice }} control={control} account={account} current={view} />;
+    }
+
+    case "loading":
+      // The 15 s fallback: a skeleton that never resolves is worse than a reason.
+      return context.stalled
+        ? plain(LIVE_COPY.checking, <LivePrivyStalled onSeeSample={onSeeSample} />)
+        : plain(<Skeleton className="h-24 w-full rounded-md" aria-hidden />, <LiveLoading />);
+
+    case "live-connect":
+      return plain(LIVE_COPY.connectSidebar, <LiveConnectCard onConnect={context.onConnect} onSeeSample={onSeeSample} failure={context.loginFailure} />);
+
+    case "live-keyless":
+      return plain(LIVE_COPY.connectSidebar, <LiveKeylessCard onDisconnect={context.onDisconnect} />);
+
+    case "live-unavailable":
+      return plain(LIVE_COPY.unavailableSidebar, <LiveUnavailableCard onConnect={context.onConnect} onSeeSample={onSeeSample} />);
+
+    case "live": {
+      // PART 1 ENDS HERE. The panels, the settlement strip, the chart and the
+      // activity feed are part 2; until they land this renders the honest
+      // waiting and failure states and nothing else — never the sample.
+      if (live === null || live.view.kind === "idle" || live.view.kind === "loading") return plain(LIVE_COPY.connectSidebar, <LiveLoading label={LIVE_COPY.reading} />);
+      if (live.view.kind === "unreadable") {
+        return plain(
+          LIVE_COPY.connectSidebar,
+          <LiveUnreadable message={live.view.message} retryAt={live.view.retryAt} now={Date.now()} onRetry={() => live.refresh()} />,
+        );
+      }
+      return plain(LIVE_COPY.connectSidebar, <LiveLoading label={LIVE_COPY.reading} />);
+    }
+  }
 }

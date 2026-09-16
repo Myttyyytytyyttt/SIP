@@ -6,6 +6,7 @@
 // any of them, because a client component importing a constant must never drag
 // the verifier or the RPC pool into the bundle.
 
+export * from "./activity";
 export * from "./addresses";
 export * from "./base58";
 export * from "./base64";

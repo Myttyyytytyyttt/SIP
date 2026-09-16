@@ -37,7 +37,8 @@
 // text is ever returned: a read that failed is "unreadable", with no detail.
 
 import { RAYDIUM_CLMM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../client/addresses";
-import { isPubkey } from "../client/base58";
+import { classifyVaultEntry } from "../client/activity";
+import { isPubkey, isSignature } from "../client/base58";
 import { tryBase64Decode } from "../client/base64";
 import { PoolPriceError, floorWad, usdcRawPer1e8LegRaw, usdcRawPerSol } from "../client/clmm-price";
 import { SIP_ACCOUNT_SPACE } from "../client/decoders";
@@ -77,6 +78,9 @@ import {
   MAX_WALLET_LINKS,
   PRICED_POOLS,
   listVaultHoldings,
+  listVaultSignatures,
+  readLiveSnapshot,
+  readVaultTransactions,
   poolPricesFromAccounts,
   readBlockhashAndRents,
   readBuildBatch,
@@ -92,6 +96,7 @@ import {
   vaultTokenAccountTargets,
   type AccountSnapshot,
   type ChainRead,
+  type PoolPrices,
 } from "./readers";
 import { createRpcPool, type RpcPool } from "./rpc-pool";
 
@@ -140,7 +145,7 @@ export type SolanaBuildErrorCode =
   | "internal_error";
 
 export interface BuildRefusalEvent {
-  readonly route: "solana-build" | "solana-vault";
+  readonly route: "solana-build" | "solana-vault" | "solana-live";
   readonly status: number;
   readonly code: string;
   readonly action: string | null;
@@ -177,6 +182,21 @@ export const BUILD_REQUEST_WEIGHT = 3;
  * reads budget is charged all of it.
  */
 export const BUILD_READS_WEIGHT = { createVault: 4, prepareLink: 1, link: 3, investPolicy: 7, pauseInvesting: 3, withdraw: 3, withdrawToken: 4, state: 12 } as const;
+
+/**
+ * Upstream JSON-RPC calls /api/solana-live's actions make. A snapshot is one
+ * batch of four members, five when it also lists the vault's links; an activity
+ * page is one getSignaturesForAddress, and then one getTransaction per signature
+ * charged separately (spendMore) once their number is known.
+ */
+export const LIVE_READS_WEIGHT = { snapshot: 4, snapshotDiscover: 5, signatures: 1 } as const;
+
+/**
+ * Signatures one activity page reads. Smaller than MAX_ACTIVITY_PAGE: the page
+ * is charged a token per transaction, and a dashboard polling every minute must
+ * stay well inside one client's 60.
+ */
+export const MAX_LIVE_ACTIVITY_PAGE = 15;
 
 const SHARED_READS_BUDGETS = Symbol.for("@sip/solana-core/build-handler/reads-budgets");
 
@@ -254,6 +274,13 @@ interface Served {
   refuse(status: number, code: SolanaBuildErrorCode, message: string, more?: Record<string, unknown>): Response;
   /** Takes `weight` from the process-wide reads budget: null when taken, otherwise the 429 to answer. */
   spendReads(weight: number): Response | null;
+  /**
+   * Takes `calls` MORE tokens, in full, from the client's own bucket, then its
+   * network's, then the shared reads budget. For a read whose size is only known
+   * after an earlier one answered (a page of N transactions): charging before the
+   * batch means a client out of tokens is refused with no upstream call wasted.
+   */
+  spendMore(calls: number): Response | null;
 }
 
 type Dispatch = (action: string, fields: Readonly<Record<string, unknown>>, served: Served) => Promise<Response>;
@@ -321,6 +348,15 @@ function createRoute(route: BuildRefusalEvent["route"], options: SolanaBuildHand
             if (client > 0) return limited(client, "Too many requests from this client.");
           }
           const wait = reads.take(GLOBAL, weight, readsAt);
+          return wait > 0 ? limited(wait, "SIP is reading Solana for many people right now.") : null;
+        },
+        spendMore: (calls) => {
+          if (!(calls > 0)) return null;
+          const moreAt = now();
+          const own = exact.take(identity.exact, calls, moreAt);
+          const client = own > 0 ? own : aggregate.take(identity.aggregate, calls, moreAt);
+          if (client > 0) return limited(client, "Too many requests from this client.");
+          const wait = reads.take(GLOBAL, calls, moreAt);
           return wait > 0 ? limited(wait, "SIP is reading Solana for many people right now.") : null;
         },
       };
@@ -832,18 +868,171 @@ export function createSolanaVaultHandler(options: SolanaVaultHandlerOptions): So
               legTokenAccounts: Object.fromEntries(OFFERED_LEGS.map((leg, index) => [leg.mint, rents.value[4 + index]])),
             }
           : null,
-      prices:
-        prices.kind === "exists"
-          ? {
-              slot: prices.value.slot,
-              convertWad: prices.value.convertWad,
-              usdcRawPerSol: usdcRawPerSol(prices.value.convertWad),
-              legs: OFFERED_LEGS.map((leg) => {
-                const wad = prices.value.legWads[leg.mint]!;
-                return { symbol: leg.symbol, mint: leg.mint, wad, usdcRawPer1e8: usdcRawPer1e8LegRaw(wad) };
-              }),
-            }
-          : null,
+      // One copy of this shape, shared with /api/solana-live below.
+      prices: pricesView(prices),
     });
+  });
+}
+
+// ── /api/solana-live ─────────────────────────────────────────────────────────
+
+const SNAPSHOT_FIELDS = ["action", "owner", "wallets", "discover"] as const;
+const ACTIVITY_FIELDS = ["action", "owner", "limit", "before", "until"] as const;
+
+/** The pool prices as both /api/solana-vault and /api/solana-live report them. */
+function pricesView(prices: ChainRead<PoolPrices>): Record<string, unknown> | null {
+  if (prices.kind !== "exists") return null;
+  return {
+    slot: prices.value.slot,
+    convertWad: prices.value.convertWad,
+    usdcRawPerSol: usdcRawPerSol(prices.value.convertWad),
+    legs: OFFERED_LEGS.map((leg) => {
+      const wad = prices.value.legWads[leg.mint]!;
+      return { symbol: leg.symbol, mint: leg.mint, wad, usdcRawPer1e8: usdcRawPer1e8LegRaw(wad) };
+    }),
+  };
+}
+
+/** snapshot: the whole live dashboard in one batch. */
+async function liveSnapshot(fields: Readonly<Record<string, unknown>>, served: Served, now: () => number): Promise<Response> {
+  const extra = unexpectedField(fields, SNAPSHOT_FIELDS);
+  if (extra !== null) return served.refuse(400, "bad_request", extra);
+  const { owner, wallets, discover } = fields;
+  if (!isPubkey(owner)) return served.refuse(400, "bad_request", "owner must be a base58 32-byte public key.");
+  if (!Array.isArray(wallets) || wallets.length > MAX_WALLET_LINKS || !wallets.every(isPubkey) || new Set(wallets).size !== wallets.length) {
+    return served.refuse(400, "bad_request", `wallets must list 0 to ${MAX_WALLET_LINKS} distinct base58 32-byte addresses.`);
+  }
+  if ((wallets as string[]).includes(owner)) return served.refuse(400, "bad_request", "A trading wallet cannot be your pension key.");
+  if (typeof discover !== "boolean") return served.refuse(400, "bad_request", "discover must be true or false.");
+
+  const spent = served.spendReads(discover ? LIVE_READS_WEIGHT.snapshotDiscover : LIVE_READS_WEIGHT.snapshot);
+  if (spent !== null) return spent;
+  const snapshot = await readLiveSnapshot(served.pool, { owner, wallets: wallets as string[], discover });
+
+  return json(200, {
+    owner,
+    programId: SIP_PROGRAM_ID,
+    slot: snapshot.slot,
+    readAtMs: now(),
+    vault: readView(snapshot.vaultAddress, snapshot.vault, (vault) => ({
+      lamports: vault.lamports,
+      rentFloor: vault.rentFloor,
+      withdrawableLamports: vault.withdrawableLamports,
+      state: vault.state,
+    })),
+    policy: readView(snapshot.policyAddress, snapshot.policy, (policy) => ({ lamports: policy.lamports, state: policy.state })),
+    config: {
+      address: snapshot.configAddress,
+      status: snapshot.config.kind,
+      exists: snapshot.config.kind === "exists",
+      paused: snapshot.config.kind === "exists" ? snapshot.config.value.state.paused : null,
+    },
+    prices: pricesView(snapshot.prices),
+    vaultTokenAccounts:
+      snapshot.tokenAccounts.kind === "exists" ? { status: "exists", items: snapshot.tokenAccounts.value } : { status: "unreadable", items: [] },
+    rents: { vault: snapshot.rents.vault, walletFloor: snapshot.rents.walletFloor },
+    wallets: snapshot.wallets.map((wallet) => ({
+      wallet: wallet.wallet,
+      lamports: wallet.lamports,
+      link: {
+        address: wallet.link.address,
+        status: wallet.link.status,
+        vault: wallet.link.vault,
+        // Null unless the link itself was read: a count nobody read is not a zero.
+        epoch: wallet.link.state?.epoch ?? null,
+        settlementNonce: wallet.link.state?.settlementNonce ?? null,
+        frontierSlot: wallet.link.state?.frontierSlot ?? null,
+      },
+    })),
+    links:
+      snapshot.links === null
+        ? null
+        : snapshot.links.kind === "exists"
+          ? {
+              status: "exists",
+              items: snapshot.links.value.map((link) => ({
+                wallet: link.state.wallet,
+                address: link.address,
+                epoch: link.state.epoch,
+                settlementNonce: link.state.settlementNonce,
+                frontierSlot: link.state.frontierSlot,
+              })),
+            }
+          : { status: "unreadable", items: [] },
+  });
+}
+
+/** activity: one page of the vault's history, every transaction already classified. */
+async function liveActivity(fields: Readonly<Record<string, unknown>>, served: Served): Promise<Response> {
+  const extra = unexpectedField(fields, ACTIVITY_FIELDS);
+  if (extra !== null) return served.refuse(400, "bad_request", extra);
+  const { owner, before, until } = fields;
+  if (!isPubkey(owner)) return served.refuse(400, "bad_request", "owner must be a base58 32-byte public key.");
+  const limit = fields.limit === undefined ? MAX_LIVE_ACTIVITY_PAGE : fields.limit;
+  if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > MAX_LIVE_ACTIVITY_PAGE) {
+    return served.refuse(400, "bad_request", `limit must be a whole number from 1 to ${MAX_LIVE_ACTIVITY_PAGE}.`);
+  }
+  if (before !== undefined && until !== undefined) return served.refuse(400, "bad_request", "Name before or until, not both.");
+  if (before !== undefined && !isSignature(before)) return served.refuse(400, "bad_request", "before must be a base58 64-byte signature.");
+  if (until !== undefined && !isSignature(until)) return served.refuse(400, "bad_request", "until must be a base58 64-byte signature.");
+
+  const spent = served.spendReads(LIVE_READS_WEIGHT.signatures);
+  if (spent !== null) return spent;
+  const vault = deriveVaultPda(owner).toBase58();
+  const page = await listVaultSignatures(served.pool, vault, {
+    limit,
+    ...(typeof before === "string" ? { before } : {}),
+    ...(typeof until === "string" ? { until } : {}),
+  });
+  if (page.kind !== "exists") return json(200, { vault, status: "unreadable", nextBefore: null, entries: [], gap: false });
+
+  const listed = page.value.listed;
+  // The transactions are charged BEFORE the batch, now that their number is
+  // known: a client without the tokens is refused and nothing upstream is spent.
+  if (listed.length > 0) {
+    const more = served.spendMore(listed.length);
+    if (more !== null) return more;
+  }
+  const read = await readVaultTransactions(served.pool, vault, listed);
+  if (read.kind !== "exists") return json(200, { vault, status: "unreadable", nextBefore: null, entries: [], gap: false });
+
+  return json(200, {
+    vault,
+    status: "exists",
+    nextBefore: page.value.nextBefore,
+    entries: read.value.map((entry) => ({
+      signature: entry.signature,
+      slot: entry.slot,
+      blockTime: entry.blockTime,
+      ok: entry.ok,
+      fee: entry.fee,
+      events: classifyVaultEntry(entry),
+    })),
+    // A full page against `until` means more landed than one page holds: the
+    // client reloads its head rather than stitching a hole it cannot see.
+    gap: typeof until === "string" && listed.length === limit,
+  });
+}
+
+/**
+ * POST /api/solana-live: what the connected dashboard reads, and nothing else.
+ *
+ * Its per-client buckets are its OWN (createRoute builds fresh limiters per
+ * handler), so the Manage wallets modal's /api/solana-vault reads cannot starve
+ * the dashboard or the other way round. Upstream it charges the ONE reads budget
+ * the build and vault routes already share, so the exposure on the Helius key
+ * the keeper shares does not grow.
+ */
+export function createSolanaLiveHandler(options: SolanaVaultHandlerOptions): SolanaRouteHandler {
+  const now = options.now ?? Date.now;
+  return createRoute("solana-live", options, async (action, fields, served) => {
+    switch (action) {
+      case "snapshot":
+        return liveSnapshot(fields, served, now);
+      case "activity":
+        return liveActivity(fields, served);
+      default:
+        return served.refuse(400, "bad_request", 'action must be "snapshot" or "activity".');
+    }
   });
 }

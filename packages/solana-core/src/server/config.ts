@@ -77,6 +77,8 @@ export type Env = Readonly<Record<string, string | undefined>>;
  * budget, and the ONE reads budget /api/solana-build and /api/solana-vault share.
  * Size them together against the Helius plan: with the defaults, 5,400 weighted
  * tokens a minute is at most 90 upstream requests a second.
+ * /api/solana-live charges that same shared reads budget, so the live dashboard's
+ * polling does not widen the exposure on the Helius key the keeper shares.
  */
 export const DEFAULT_RELAY_LIMITS: RelayLimits = { perClientPerMin: 60, signingGlobalPerMin: 1_800, readsGlobalPerMin: 1_800 };
 /** Only a transaction that verified spends the global send budget (handlers.ts), so junk cannot empty it. */

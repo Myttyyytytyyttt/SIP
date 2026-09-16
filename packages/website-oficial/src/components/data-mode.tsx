@@ -24,16 +24,17 @@ export function isDataMode(value: string): value is DataMode {
  * the thing that decides the badge, the two can drift, and the drift is somebody
  * mistaking a seeded example for their pension.
  */
-export function DataModeToggle({
-  mode,
-  onModeChange,
-  disabled = false,
-}: {
-  mode: DataMode;
-  onModeChange: (mode: DataMode) => void;
-  /** Nothing Live could show: no pension key, or no live data yet. */
-  disabled?: boolean;
-}) {
+/**
+ * NEITHER SIDE IS EVER DISABLED NOW. Live is a real destination whether or not a
+ * wallet is connected: without one it shows an honest "connect your pension key"
+ * card. A greyed-out Live was only ever true while there was no live panel at
+ * all, and a control that cannot be used teaches people to stop looking at it.
+ *
+ * When a pension key IS connected this control is not rendered at all — the
+ * dashboard is Live, and offering to switch away from someone's own pension to a
+ * stranger's example is not a choice worth offering (src/lib/dashboard-mode.ts).
+ */
+export function DataModeToggle({ mode, onModeChange }: { mode: DataMode; onModeChange: (mode: DataMode) => void }) {
   return (
     <Tabs
       value={mode}
@@ -42,9 +43,7 @@ export function DataModeToggle({
       }}
     >
       <TabsList aria-label="Data source">
-        <TabsTrigger value="live" disabled={disabled}>
-          Live
-        </TabsTrigger>
+        <TabsTrigger value="live">Live</TabsTrigger>
         <TabsTrigger value="mock">Mock</TabsTrigger>
       </TabsList>
     </Tabs>

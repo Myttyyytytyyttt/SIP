@@ -7,55 +7,49 @@ import Link from "next/link";
 
 import { ModeToggle } from "@/components/mode-toggle";
 import { Button } from "@/components/ui/button";
-import {
-  Sheet,
-  SheetClose,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-  SheetTrigger,
-} from "@/components/ui/sheet";
-import { WalletActivity } from "@/components/wallet-activity";
-import { useWalletsOpener } from "@/components/wallets-host";
-import { WalletMenu } from "@/components/wallet-menu";
+import { Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
-import type { ActivityEvent, Wallet } from "@/mocks";
-
-type NavItem = { label: string; href: string; current: boolean; className?: string };
-
-const NAV: readonly NavItem[] = [
-  { label: "Pension", href: "#", current: true },
-  // Its target is the aside, which exists only from lg; between md and lg the link would go nowhere (the sheet button is the way in there).
-  { label: "Activity", href: "#activity", current: false, className: "hidden lg:inline-flex" },
-  { label: "Docs", href: "#", current: false },
-];
 
 /**
- * The top bar: wordmark, nav, theme toggle, wallet. Below `lg` the sidebar
- * is gone, so the leading button opens the same WalletActivity in a sheet.
+ * The top bar: wordmark, nav, the Live|Mock control, the theme toggle, the
+ * account. Below `lg` the sidebar is gone, so the leading button opens whatever
+ * that state's sidebar is in a sheet.
+ *
+ * THE SIDEBAR ARRIVES AS A SLOT, not as mock data. This header used to take a
+ * `wallet` and an `activity` array and render the example's feed itself, which
+ * meant every state — including a connected person's own pension — had the
+ * sample's wallet wired into the header. Now Mock passes the sample's feed, Live
+ * passes the real one, and the header knows nothing about either.
+ *
+ * `account` IS REQUIRED. It used to fall back to the example's fake wallet menu,
+ * so a page that forgot to pass one showed a made-up address that looked signed
+ * in. There is no fallback: a Privy session exists or it does not.
  */
 export function SiteHeader({
-  wallet,
-  activity,
-  now,
+  activitySheet,
   control = null,
   account,
+  current = "pension",
 }: {
-  wallet: Wallet;
-  activity: readonly ActivityEvent[];
-  now: string;
+  /** This state's sidebar, for the sheet below lg. */
+  activitySheet: React.ReactNode;
   /** The Live/Mock control. A slot, so the header stays ignorant of what it switches. */
   control?: React.ReactNode;
-  /** What stands where the wallet menu does. Defaults to the menu; browse mode passes a real Connect. */
-  account?: React.ReactNode;
+  /** Connect, Disconnect, the pension key, or a placeholder while Privy is asked. */
+  account: React.ReactNode;
+  readonly current?: "pension" | "activity";
 }) {
   // THE SHEET IS CONTROLLED SO IT CAN GET OUT OF THE WAY. Below lg this sheet is
   // where "Manage wallets" lives, and a modal opened from inside a sheet is the
   // nested-overlay problem again — two focus traps, and Escape closing the wrong
   // one. So the sheet closes itself first and the host opens the one modal.
   const [sheetOpen, setSheetOpen] = useState(false);
-  const openWallets = useWalletsOpener();
+
+  const nav = [
+    { label: "Pension", href: "/", current: current === "pension", className: undefined },
+    { label: "Activity", href: "/activity", current: current === "activity", className: undefined },
+    { label: "Docs", href: "#", current: false, className: undefined },
+  ];
 
   return (
     <header className="sticky top-0 z-40 h-14 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -77,22 +71,8 @@ export function SiteHeader({
                 </Button>
               </SheetClose>
             </SheetHeader>
-            <SheetDescription className="sr-only">What the wallet did, newest first.</SheetDescription>
-            <WalletActivity
-              wallet={wallet}
-              activity={activity}
-              now={now}
-              id="activity-sheet"
-              className="min-h-0 flex-1"
-              {...(openWallets === null
-                ? {}
-                : {
-                    onManageWallets: () => {
-                      setSheetOpen(false);
-                      openWallets();
-                    },
-                  })}
-            />
+            <SheetDescription className="sr-only">What this pension did, newest first.</SheetDescription>
+            {activitySheet}
           </SheetContent>
         </Sheet>
 
@@ -102,14 +82,8 @@ export function SiteHeader({
         </div>
 
         <nav aria-label="Main" className="ml-6 hidden items-center gap-1 md:flex">
-          {NAV.map((item) => (
-            <Button
-              key={item.label}
-              variant="ghost"
-              size="sm"
-              asChild
-              className={cn(item.current ? "text-foreground" : "text-muted-foreground", item.className)}
-            >
+          {nav.map((item) => (
+            <Button key={item.label} variant="ghost" size="sm" asChild className={cn(item.current ? "text-foreground" : "text-muted-foreground", item.className)}>
               <Link href={item.href} aria-current={item.current ? "page" : undefined}>
                 {item.label}
               </Link>
@@ -120,7 +94,7 @@ export function SiteHeader({
         <div className="ml-auto flex items-center gap-2">
           {control}
           <ModeToggle />
-          {account ?? <WalletMenu wallet={wallet} />}
+          {account}
         </div>
       </div>
     </header>
