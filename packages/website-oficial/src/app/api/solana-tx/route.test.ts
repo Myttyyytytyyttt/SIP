@@ -7,6 +7,7 @@ import { createPrivateKey, sign } from "node:crypto";
 import {
   ATA_PROGRAM,
   DEFAULT_RATES,
+  LIGHTHOUSE_PROGRAM,
   OLD_NUVEM_PROGRAM_ID,
   RAYDIUM_CLMM,
   SIP_PROGRAM_ID,
@@ -24,7 +25,7 @@ import {
   tryBase64Decode,
 } from "@sip/solana-core/client";
 import { buildCreateVaultV2, buildLinkWallet, buildSetInvestPolicy, deriveAta, deriveInvestPda, deriveVaultPda, prepareLinkWalletConsent } from "@sip/solana-core/server";
-import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, VersionedTransaction } from "@solana/web3.js";
+import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { solanaTxRoute } from "@/lib/solana-routes";
@@ -124,6 +125,36 @@ function signMessage(signer: Keypair, message: Uint8Array): Uint8Array {
     format: "jwk",
   });
   return Uint8Array.from(sign(null, message, privateKey));
+}
+
+/**
+ * A link through both core calls, Phantom's way when `at` is given: its mainnet
+ * check on the pension key (AssertAccountInfoMulti [Lamports >= 1, KnownOwner ==
+ * System, DataLength == 0], log level 4) inserted at instruction `at`, then owner
+ * and wallet sign that message.
+ */
+function signedLinkWithLighthouse(at: number | "end"): { base64: string; signature: string } {
+  const owner = Keypair.generate();
+  const wallet = Keypair.generate();
+  const parties = { owner: owner.publicKey.toBase58(), wallet: wallet.publicKey.toBase58() };
+  const consent = tryBase64Decode(prepareLinkWalletConsent(parties).consentMessageBase64);
+  if (consent === null) throw new Error("the consent is not base64");
+  const built = buildLinkWallet({ ...parties, consentSignature: signMessage(wallet, consent), blockhash: BLOCKHASH, computeBudget: ownerComputeBudget("link_wallet") });
+  const unsigned = tryBase64Decode(built.txBase64);
+  if (unsigned === null) throw new Error("the builder returned something that is not base64");
+  const message = TransactionMessage.decompile(VersionedTransaction.deserialize(unsigned).message);
+  const check = new TransactionInstruction({
+    programId: new PublicKey(LIGHTHOUSE_PROGRAM),
+    keys: [{ pubkey: owner.publicKey, isSigner: false, isWritable: false }],
+    data: Buffer.from([6, 4, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0, 4, 3, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+  });
+  message.instructions.splice(at === "end" ? message.instructions.length : at, 0, check);
+  const tx = new VersionedTransaction(message.compileToLegacyMessage());
+  tx.sign([owner]);
+  tx.sign([wallet]);
+  const signature = tx.signatures[0];
+  if (signature === undefined) throw new Error("no signature");
+  return { base64: base64Encode(tx.serialize()), signature: base58Encode(signature) };
 }
 
 /** A link through both core calls: the trading wallet signs the consent, then owner and wallet sign the transaction. */
@@ -256,6 +287,26 @@ describe("/api/solana-tx", () => {
     const refused = await POST(sendRequest({ action: "send", signedTxBase64: base64Encode(stripped.serialize()) }));
     expect(refused.status).toBe(422);
     expect(((await refused.json()) as { error: { code: string } }).error.code).toBe("link_consent_missing");
+    expect(seen).toHaveLength(2);
+  });
+
+  it("relays a link Phantom rewrote with a Lighthouse check after link_wallet, simulated then sent; the same check between the consent and link_wallet is 422 lighthouse_misplaced before any upstream call", async () => {
+    useEnv(SOLANA_ENV);
+    const rewritten = signedLinkWithLighthouse("end");
+    const seen = stubUpstream((body) =>
+      body.method === "simulateTransaction"
+        ? rpcOk(body, { context: { slot: 323 }, value: { err: null, logs: ["Program log: Instruction: LinkWallet"], unitsConsumed: 11_000 } })
+        : rpcOk(body, rewritten.signature),
+    );
+    const response = await POST(sendRequest({ action: "send", signedTxBase64: rewritten.base64 }));
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { signature: string }).signature).toBe(rewritten.signature);
+    expect(seen.map((body) => body.method)).toEqual(["simulateTransaction", "sendTransaction"]);
+    expect(seen[1]!.params?.[0]).toBe(rewritten.base64);
+
+    const between = await POST(sendRequest({ action: "send", signedTxBase64: signedLinkWithLighthouse(3).base64 }));
+    expect(between.status).toBe(422);
+    expect(((await between.json()) as { error: { code: string } }).error.code).toBe("lighthouse_misplaced");
     expect(seen).toHaveLength(2);
   });
 

@@ -13,6 +13,10 @@
  *   bounded ComputeBudget and, for link_wallet only, that consent immediately
  *   before it: the wallet's key, the SIP_LINK_V1 bytes for this program, wallet,
  *   vault and owner, and a signature that verifies;
+ * - after all of those and nowhere else, at most the Lighthouse checks Phantom
+ *   adds when it signs on mainnet: account assertions only, each about one
+ *   account the transaction already names, adding no signer and no writable key
+ *   (@sip/solana-core client/lighthouse.ts, the same rule the page applies);
  * - discriminators, account order and fixed addresses taken from the IDL;
  * - canonical bytes with no lookup tables, and 1 or 2 signatures, every one valid;
  * - the owner bound to the fee payer, wallet != owner for a link, and the owner

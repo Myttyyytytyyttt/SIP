@@ -341,6 +341,10 @@ const VERIFIER_WORDS: Readonly<Record<string, string>> = {
   link_consent_mismatch: "The consent names another program, wallet, vault or owner. Nothing was sent.",
   link_consent_bad_signature: "The consent signature does not verify. Nothing was sent.",
   vault_account_invalid: "The transaction creates a token account that is not your vault's own for this policy. Nothing was sent.",
+  lighthouse_misplaced: "Your wallet put a Lighthouse safety check before or between SaverFi's own instructions, which SaverFi does not relay. Nothing was sent.",
+  lighthouse_count: "Your wallet added more Lighthouse safety checks than SaverFi relays. Nothing was sent.",
+  lighthouse_instruction: "Your wallet added a Lighthouse instruction that is not an account check SaverFi relays. Nothing was sent.",
+  lighthouse_accounts: "Your wallet's Lighthouse safety check names an account, or changes what an account may do, beyond the transaction SaverFi built. Nothing was sent.",
 };
 
 /** The program's errors, by code, where the IDL's own message is not the person's words. */

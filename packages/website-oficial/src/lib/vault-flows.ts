@@ -19,9 +19,10 @@
  * LINKING, IN ORDER. The consent (the trading wallet's signMessage over
  * SIP_LINK_V1, rebuilt and compared here first) carries no blockhash, so it is
  * signed once, before the transaction, and survives a rebuild. Then the link
- * transaction: Phantom signs FIRST, so any rewrite of the fee happens before the
- * second signature exists; the trading wallet co-signs the bytes Phantom
- * RETURNED, at once and headless; its signature is spliced into Phantom's bytes.
+ * transaction: Phantom signs FIRST, so its rewrite (the Lighthouse checks it adds
+ * on mainnet) happens before the second signature exists; the trading wallet
+ * co-signs the bytes Phantom RETURNED, at once and headless; its signature is
+ * spliced into Phantom's bytes.
  * Two calls, never one variadic signTransaction. If the blockhash is no longer
  * valid, or the simulation says BlockhashNotFound, the transaction is built again
  * with the same consent: at most LINK_MAX_BUILDS builds.

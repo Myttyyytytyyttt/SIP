@@ -6,6 +6,9 @@ import { createPrivateKey, sign } from "node:crypto";
 
 import {
   DEFAULT_VAULT_POLICY,
+  LIGHTHOUSE_PROGRAM,
+  MAX_WALLET_GUARDS,
+  MEMO_PROGRAM,
   OWNER_TX_MICROLAMPORTS,
   RAYDIUM_CLMM,
   SIP_PROGRAM_ID,
@@ -41,11 +44,10 @@ import {
   prepareLinkWalletConsent,
   verifySignedTransaction,
 } from "@sip/solana-core/server";
-import { Keypair, PublicKey, TransactionInstruction, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
+import { ComputeBudgetProgram, Keypair, PublicKey, TransactionInstruction, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import { describe, expect, it, vi } from "vitest";
 
-import { LIGHTHOUSE_PROGRAM } from "@/lib/tx-intent";
-import { WITHDRAW_COPY } from "@/lib/vault-copy";
+import { FAILURE_COPY, WITHDRAW_COPY } from "@/lib/vault-copy";
 import type { ApiFailure, ApiResult, BuiltTransactionJson, InvestmentPolicyJson, SendResponseJson, VaultApi } from "@/lib/vault-api";
 import { LINK_MAX_BUILDS, checkAgainFlow, createVaultFlow, investPolicyFlow, linkWalletFlow, pauseInvestingFlow, withdrawFlow, withdrawTokenFlow, type FlowStep } from "@/lib/vault-flows";
 import { deriveAtaAddress, deriveConfigAddress, deriveInvestAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
@@ -76,15 +78,45 @@ function replaceBytes(haystack: Uint8Array, needle: Uint8Array, replacement: Uin
   throw new Error("the bytes to replace are not there");
 }
 
-/** Phantom's documented rewrite: another priority price, the same length. */
+/** Another priority price, the same length: a rewrite Phantom does not document for a transaction that carries one. */
 const withPrice = (bytes: Uint8Array, microLamports: bigint): Uint8Array => replaceBytes(bytes, encodeSetComputeUnitPrice(OWNER_TX_MICROLAMPORTS), encodeSetComputeUnitPrice(microLamports));
 
-/** A Lighthouse assertion appended to the message, as Phantom may do, signed by the owner. */
-function withLighthouse(bytes: Uint8Array, owner: Keypair): Uint8Array {
+// ── Phantom's mainnet rewrite ────────────────────────────────────────────────
+// Lighthouse checks in the exact shapes Phantom was seen adding on mainnet
+// (packages/solana-core/test/phantom-rewrite.ts cites the transactions), with
+// this test's amounts and accounts.
+
+const LIGHTHOUSE = new PublicKey(LIGHTHOUSE_PROGRAM);
+const u64le = (value: bigint): number[] => [...new Uint8Array(new BigUint64Array([value]).buffer)];
+const GUARD = {
+  /** AssertAccountInfoMulti [Lamports >= min, KnownOwner == System, DataLength == 0]. */
+  payer: (min: bigint): number[] => [6, 4, 3, 0, ...u64le(min), 4, 3, 0, 0, 1, ...u64le(0n), 0],
+  /** AssertAccountInfoMulti [KnownOwner == System, DataLength == 0]. */
+  system: (): number[] => [6, 4, 2, 3, 0, 0, 1, ...u64le(0n), 0],
+  /** AssertTokenAccountMulti [Amount >= min, Delegate == None, DelegatedAmount <= 0, OwnerIsDerived]. */
+  token: (min: bigint): number[] => [10, 4, 4, 2, ...u64le(min), 4, 3, 0, 0, 6, ...u64le(0n), 5, 8],
+  /** AssertAccountInfoMulti [Owner == program]. */
+  owner: (program: string): number[] => [6, 4, 1, 2, ...new PublicKey(program).toBytes(), 0],
+};
+
+/** A Lighthouse instruction checking `account`, read-only and unsigned as Phantom names it, unless `meta` says otherwise. */
+const guard = (data: readonly number[], account: string, meta: { isSigner?: boolean; isWritable?: boolean; programId?: PublicKey } = {}): TransactionInstruction =>
+  new TransactionInstruction({ programId: meta.programId ?? LIGHTHOUSE, keys: [{ pubkey: new PublicKey(account), isSigner: meta.isSigner ?? false, isWritable: meta.isWritable ?? false }], data: Buffer.from(data) });
+
+interface Rewrite {
+  readonly guards: readonly TransactionInstruction[];
+  /** Where the guards go; after every instruction when absent. */
+  readonly at?: number;
+  readonly edit?: (message: TransactionMessage) => void;
+}
+
+/** What Phantom returns for `bytes` on mainnet: the message decompiled, its checks inserted, compiled again, signed by `signer` alone. */
+function phantomRewrite(bytes: Uint8Array, rewrite: Rewrite, signer: Keypair): Uint8Array {
   const message = TransactionMessage.decompile(VersionedTransaction.deserialize(bytes).message);
-  message.instructions.push(new TransactionInstruction({ programId: new PublicKey(LIGHTHOUSE_PROGRAM), keys: [], data: Buffer.from([1]) }));
+  message.instructions.splice(rewrite.at ?? message.instructions.length, 0, ...rewrite.guards);
+  rewrite.edit?.(message);
   const tx = new VersionedTransaction(message.compileToLegacyMessage());
-  tx.sign([owner]);
+  tx.sign([signer]);
   return Uint8Array.from(tx.serialize());
 }
 
@@ -675,17 +707,24 @@ describe("createVaultFlow", () => {
     expect(h.build).not.toHaveBeenCalled();
   });
 
-  it("a fee Phantom rewrote is tolerated; an instruction Phantom added is refused by name before sending; a declined approval sends nothing", async () => {
+  it("Phantom's Lighthouse check on the pension key is sent exactly as Phantom returned it, and verifies", async () => {
+    const h = harness();
+    h.signWithPension.mockImplementationOnce(async (bytes) => phantomRewrite(bytes, { guards: [guard(GUARD.payer(1_000_000n), h.pensionKey)] }, h.owner));
+    const result = await createVaultFlow(h.createDeps, { pensionKey: h.pensionKey, mode: 0 });
+    expect(result.ok).toBe(true);
+    expect(toHex(h.send.mock.calls[0]![0])).toBe(toHex(await h.signWithPension.mock.results[0]!.value));
+    expect(verifySignedTransaction(h.send.mock.calls[0]![0])).toMatchObject({ ok: true, instructions: expect.arrayContaining([{ program: LIGHTHOUSE_PROGRAM, name: "AssertAccountInfoMulti" }]) });
+  });
+
+  it("a fee Phantom rewrote is refused in its own words: Phantom documents no such rewrite of a transaction that carries its budget; a declined approval sends nothing", async () => {
     const rewritten = harness();
     rewritten.signWithPension.mockImplementationOnce(async (bytes) => signWith(withPrice(bytes, 250_000n), rewritten.owner));
-    expect((await createVaultFlow(rewritten.createDeps, { pensionKey: rewritten.pensionKey, mode: 0 })).ok).toBe(true);
-
-    const lighthouse = harness();
-    lighthouse.signWithPension.mockImplementationOnce(async (bytes) => withLighthouse(bytes, lighthouse.owner));
-    const refused = await createVaultFlow(lighthouse.createDeps, { pensionKey: lighthouse.pensionKey, mode: 0 });
-    expect(refused).toMatchObject({ ok: false, kind: "refused" });
-    expect(!refused.ok && refused.message).toContain(`Lighthouse (${LIGHTHOUSE_PROGRAM})`);
-    expect(lighthouse.send).not.toHaveBeenCalled();
+    expect(await createVaultFlow(rewritten.createDeps, { pensionKey: rewritten.pensionKey, mode: 0 })).toEqual({
+      ok: false,
+      kind: "refused",
+      message: FAILURE_COPY.signedMismatch("its compute budget changed"),
+    });
+    expect(rewritten.send).not.toHaveBeenCalled();
 
     const declined = harness();
     declined.signWithPension.mockRejectedValueOnce(new Error("User rejected the request."));
@@ -764,30 +803,44 @@ describe("linkWalletFlow", () => {
     expect(h.signWithPension).not.toHaveBeenCalled();
   });
 
-  it("a fee Phantom rewrote is co-signed as Phantom returned it, and the link verifies", async () => {
+  /** Phantom's checks on a link: the pension key, the new trading link, the trading wallet. */
+  const linkGuards = (h: Harness): TransactionInstruction[] => [
+    guard(GUARD.payer(1_000_000n), h.pensionKey),
+    guard(GUARD.owner(SIP_PROGRAM_ID), deriveLinkPda(h.tradingAddress).toBase58()),
+    guard(GUARD.system(), h.tradingAddress),
+  ];
+
+  it("Phantom's Lighthouse checks are co-signed as Phantom returned them, the consent still right before link_wallet, and the link verifies", async () => {
     const h = harness();
     h.signWithPension.mockImplementationOnce(async (bytes) => {
       h.order.push("pension");
-      return signWith(withPrice(bytes, 200_000n), h.owner);
+      return phantomRewrite(bytes, { guards: linkGuards(h) }, h.owner);
     });
     const result = await linkWalletFlow(h.linkDeps, h.linkInput);
     expect(result.ok).toBe(true);
+    expect(h.order).toEqual(["build:prepareLink", "consent", "build:link", "pension", "trading", "send"]);
     const phantomReturned = (await h.signWithPension.mock.results[0]!.value) as Uint8Array;
     expect(toHex(splitWire(phantomReturned).message)).not.toBe(toHex(splitWire(await builtTx(h, 1)).message));
     expect(toHex(h.signWithTrading.mock.calls[0]![0])).toBe(toHex(phantomReturned));
-  });
-
-  it("a 64-byte answer from the trading wallet is spliced into slot 1 of Phantom's bytes", async () => {
-    const h = harness();
-    h.signWithTrading.mockImplementationOnce(async (bytes) => signBytes(h.trading, splitWire(bytes).message));
-    const result = await linkWalletFlow(h.linkDeps, h.linkInput);
-    expect(result.ok).toBe(true);
     const sent = h.send.mock.calls[0]![0];
-    expect(toHex(splitWire(sent).signatures[1]!)).toBe(toHex(await h.signWithTrading.mock.results[0]!.value));
-    expect(toHex(splitWire(sent).signatures[0]!)).toBe(toHex(splitWire(await h.signWithPension.mock.results[0]!.value).signatures[0]!));
+    expect(toHex(splitWire(sent).message)).toBe(toHex(splitWire(phantomReturned).message));
+    expect(verifySignedTransaction(sent)).toMatchObject({ ok: true, signers: [h.pensionKey, h.tradingAddress] });
   });
 
-  it("a trading wallet that signed another message, or Phantom adding Lighthouse, is refused before anything is sent", async () => {
+  it("a 64-byte answer from the trading wallet is spliced into slot 1 of Phantom's bytes, as Phantom returned them or rewritten", async () => {
+    for (const rewrite of [false, true]) {
+      const h = harness();
+      if (rewrite) h.signWithPension.mockImplementationOnce(async (bytes) => phantomRewrite(bytes, { guards: linkGuards(h) }, h.owner));
+      h.signWithTrading.mockImplementationOnce(async (bytes) => signBytes(h.trading, splitWire(bytes).message));
+      const result = await linkWalletFlow(h.linkDeps, h.linkInput);
+      expect(result.ok).toBe(true);
+      const sent = h.send.mock.calls[0]![0];
+      expect(toHex(splitWire(sent).signatures[1]!)).toBe(toHex(await h.signWithTrading.mock.results[0]!.value));
+      expect(toHex(splitWire(sent).signatures[0]!)).toBe(toHex(splitWire(await h.signWithPension.mock.results[0]!.value).signatures[0]!));
+    }
+  });
+
+  it("a trading wallet that signed another message, or Phantom putting a Lighthouse check between the consent and link_wallet, is refused before anything is sent", async () => {
     const other = harness();
     other.signWithTrading.mockImplementationOnce(async (bytes) => signWith(signWith(withPrice(bytes, 300_000n), other.owner), other.trading));
     expect(await linkWalletFlow(other.linkDeps, other.linkInput)).toMatchObject({ ok: false, kind: "refused", message: "Your trading wallet signed a different transaction than Phantom approved. Nothing was sent." });
@@ -804,9 +857,11 @@ describe("linkWalletFlow", () => {
     expect(alone.send).not.toHaveBeenCalled();
 
     const lighthouse = harness();
-    lighthouse.signWithPension.mockImplementationOnce(async (bytes) => withLighthouse(bytes, lighthouse.owner));
+    lighthouse.signWithPension.mockImplementationOnce(async (bytes) => phantomRewrite(bytes, { guards: [guard(GUARD.payer(1n), lighthouse.pensionKey)], at: 3 }, lighthouse.owner));
     const refused = await linkWalletFlow(lighthouse.linkDeps, lighthouse.linkInput);
-    expect(!refused.ok && refused.message).toContain("Phantom added an instruction for Lighthouse");
+    expect(!refused.ok && refused.message).toBe(
+      FAILURE_COPY.walletGuardRefused("the Lighthouse instruction at position 4 stands before SaverFi's own instruction at position 5; Lighthouse checks are relayed only after all of SaverFi's instructions"),
+    );
     expect(lighthouse.signWithTrading).not.toHaveBeenCalled();
     expect(lighthouse.send).not.toHaveBeenCalled();
   });
@@ -872,5 +927,215 @@ describe("linkWalletFlow", () => {
     const result = await linkWalletFlow({ ...h.linkDeps, trading: { refusal: "This trading wallet is not ready in this session. Reload the page, then try again." } }, h.linkInput);
     expect(result).toMatchObject({ ok: false, kind: "refused" });
     expect(h.build).not.toHaveBeenCalled();
+  });
+});
+
+describe("Phantom's Lighthouse checks, in the browser and at the relay", () => {
+  const holding = Keypair.generate().publicKey.toBase58();
+  const withdrawAnswer = (owner: string, lamports = 150_000_000n) => asJson<Answer>({ ...buildWithdraw({ owner, lamports, ...recent(), computeBudget: ownerComputeBudget("withdraw") }), withdrawableLamports: 200_000_000n });
+  const tokenAnswer = (owner: string) =>
+    asJson<Answer>(buildWithdrawToken({ owner, mint: SPYX_MINT, tokenProgram: TOKEN_2022_PROGRAM, amountRaw: 12_345_678n, vaultToken: holding, ...recent(), computeBudget: ownerComputeBudget("withdraw_token") }));
+  const tokenInput = (h: Harness) => ({ pensionKey: h.pensionKey, mint: SPYX_MINT, amountRaw: 12_345_678n, vaultTokenAccount: holding, tokenProgram: TOKEN_2022_PROGRAM });
+
+  /** Phantom signs with `rewrite` applied to what it was given. */
+  const phantomSigns = (h: Harness, rewrite: (h: Harness) => Rewrite): void => {
+    h.signWithPension.mockImplementationOnce(async (bytes) => {
+      h.order.push("pension");
+      return phantomRewrite(bytes, rewrite(h), h.owner);
+    });
+  };
+
+  /** The flow, run against `h`: every owner flow whose bytes Phantom signs alone. */
+  type Flow = (h: Harness) => Promise<{ ok: boolean; message?: string }>;
+  const flows: Readonly<Record<string, { run: Flow; guards: (h: Harness) => TransactionInstruction[] }>> = {
+    create_vault_v2: {
+      run: (h) => createVaultFlow(h.createDeps, { pensionKey: h.pensionKey, mode: 0 }),
+      guards: (h) => [guard(GUARD.payer(1_000_000n), h.pensionKey)],
+    },
+    "set_invest_policy with three token-account creations": {
+      run: (h) => {
+        h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey)));
+        return investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey });
+      },
+      guards: (h) => {
+        const vault = deriveVaultPda(h.pensionKey);
+        return [guard(GUARD.payer(1_000_000n), h.pensionKey), ...POLICY_TARGETS.map((target) => guard(GUARD.token(0n), deriveAta(vault, target.mint, target.tokenProgram).toBase58()))];
+      },
+    },
+    withdraw: {
+      run: (h) => {
+        h.build.mockImplementationOnce(async () => ok(withdrawAnswer(h.pensionKey)));
+        return withdrawFlow(h.createDeps, { pensionKey: h.pensionKey, lamports: 150_000_000n });
+      },
+      guards: (h) => [guard(GUARD.payer(150_000_000n), h.pensionKey)],
+    },
+    withdraw_token: {
+      run: (h) => {
+        h.build.mockImplementationOnce(async () => ok(tokenAnswer(h.pensionKey)));
+        return withdrawTokenFlow(h.createDeps, tokenInput(h));
+      },
+      guards: (h) => [guard(GUARD.payer(1_000_000n), h.pensionKey), guard(GUARD.token(12_345_678n), deriveAta(h.pensionKey, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58())],
+    },
+  };
+
+  it.each(Object.keys(flows))("%s: Phantom's checks after SaverFi's instructions are accepted by the page, sent as Phantom returned them, and verified by the relay", async (name) => {
+    const flow = flows[name]!;
+    const h = harness();
+    phantomSigns(h, (harnessed) => ({ guards: flow.guards(harnessed) }));
+    const result = await flow.run(h);
+    expect(result.ok, result.message).toBe(true);
+    expect(h.send).toHaveBeenCalledTimes(1);
+    const sent = h.send.mock.calls[0]![0];
+    expect(toHex(sent)).toBe(toHex(await h.signWithPension.mock.results[0]!.value));
+    const verified = verifySignedTransaction(sent);
+    expect(verified.ok).toBe(true);
+    if (verified.ok) expect(verified.instructions.filter((instruction) => instruction.program === LIGHTHOUSE_PROGRAM)).toHaveLength(flow.guards(h).length);
+  });
+
+  /** A refusal before sending, in exactly these words. */
+  async function refusedBeforeSending(run: Flow, h: Harness, message: string | RegExp): Promise<void> {
+    const result = await run(h);
+    expect(result.ok).toBe(false);
+    if (typeof message === "string") expect(result.message).toBe(message);
+    else expect(result.message).toMatch(message);
+    expect(h.send).not.toHaveBeenCalled();
+  }
+
+  it("a check before SaverFi's instructions end — between the budget pair, after it and before create_vault_v2, between a creation and set_invest_policy — is refused with where it stood", async () => {
+    for (const at of [1, 2]) {
+      const h = harness();
+      phantomSigns(h, () => ({ guards: [guard(GUARD.payer(1n), h.pensionKey)], at }));
+      await refusedBeforeSending(flows.create_vault_v2!.run, h, FAILURE_COPY.walletGuardRefused(`the Lighthouse instruction at position ${at + 1} stands before SaverFi's own instruction at position ${at + 2}; Lighthouse checks are relayed only after all of SaverFi's instructions`));
+    }
+    const h = harness();
+    phantomSigns(h, () => ({ guards: [guard(GUARD.payer(1n), h.pensionKey)], at: 5 }));
+    await refusedBeforeSending(flows["set_invest_policy with three token-account creations"]!.run, h, /position 6 stands before SaverFi's own instruction at position 7/);
+  });
+
+  it("a Lighthouse instruction that writes and pays rent, a bare MemoryClose, more checks than the bound, or a check on an account SaverFi does not name, is refused in Lighthouse's words", async () => {
+    const memoryWrite = (h: Harness): TransactionInstruction => {
+      const [memory, bump] = PublicKey.findProgramAddressSync([Buffer.from("memory"), h.owner.publicKey.toBuffer(), Buffer.from([0])], LIGHTHOUSE);
+      return new TransactionInstruction({
+        programId: LIGHTHOUSE,
+        keys: [
+          { pubkey: LIGHTHOUSE, isSigner: false, isWritable: false },
+          { pubkey: new PublicKey("11111111111111111111111111111111"), isSigner: false, isWritable: false },
+          { pubkey: h.owner.publicKey, isSigner: true, isWritable: true },
+          { pubkey: memory, isSigner: false, isWritable: true },
+          { pubkey: h.owner.publicKey, isSigner: false, isWritable: false },
+        ],
+        data: Buffer.from([0, 0, bump, 0, 1, 1]),
+      });
+    };
+    const cases: [string, (h: Harness) => Rewrite, RegExp][] = [
+      ["MemoryWrite", (h) => ({ guards: [memoryWrite(h)] }), /MemoryWrite \(0\), which creates or grows a Lighthouse memory account and pays its rent from a signer/],
+      ["the old bare MemoryClose", () => ({ guards: [new TransactionInstruction({ programId: LIGHTHOUSE, keys: [], data: Buffer.from([1]) })] }), /MemoryClose \(1\)/],
+      ["too many", (h) => ({ guards: Array.from({ length: MAX_WALLET_GUARDS + 1 }, () => guard(GUARD.payer(1n), h.pensionKey)) }), new RegExp(`${MAX_WALLET_GUARDS + 1} Lighthouse instructions; at most ${MAX_WALLET_GUARDS} are relayed`)],
+      ["a stranger's account", () => ({ guards: [guard(GUARD.system(), Keypair.generate().publicKey.toBase58())] }), /which SaverFi's own instructions do not name/],
+    ];
+    for (const [, rewrite, words] of cases) {
+      const h = harness();
+      phantomSigns(h, rewrite);
+      const result = await flows.create_vault_v2!.run(h);
+      expect(result.message).toMatch(/^Phantom added a Lighthouse safety check SaverFi does not relay \(/);
+      expect(result.message).toMatch(words);
+      expect(h.send).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a program one byte away from Lighthouse's id, or Memo after the checks, is named as a foreign program", async () => {
+    const bytes = LIGHTHOUSE.toBytes();
+    bytes[31] = bytes[31]! ^ 1;
+    const lookalike = new PublicKey(bytes);
+    const h = harness();
+    phantomSigns(h, () => ({ guards: [guard(GUARD.payer(1n), h.pensionKey, { programId: lookalike })] }));
+    await refusedBeforeSending(flows.create_vault_v2!.run, h, FAILURE_COPY.foreignProgram(lookalike.toBase58()));
+
+    const memo = harness();
+    phantomSigns(memo, () => ({ guards: [guard(GUARD.payer(1n), memo.pensionKey), new TransactionInstruction({ programId: new PublicKey(MEMO_PROGRAM), keys: [], data: Buffer.from("x") })] }));
+    await refusedBeforeSending(flows.withdraw!.run, memo, FAILURE_COPY.foreignProgram(`Memo (${MEMO_PROGRAM})`));
+  });
+
+  it("beside valid checks: another fee payer, a new signer, another blockhash, another compute budget, a second price, another amount, another account, or a key made writable, each refused in its own words", async () => {
+    const payerCheck = (h: Harness): TransactionInstruction => guard(GUARD.payer(1n), h.pensionKey);
+    const replaceInstruction = (message: TransactionMessage, index: number, change: (instruction: TransactionInstruction) => TransactionInstruction): void => {
+      message.instructions[index] = change(message.instructions[index]!);
+    };
+    const cases: [string, keyof typeof flows, (h: Harness) => Rewrite, (h: Harness) => string][] = [
+      ["a stranger pays", "create_vault_v2", (h) => ({ guards: [payerCheck(h)], edit: (message) => (message.payerKey = Keypair.generate().publicKey) }), () => FAILURE_COPY.signedMismatch("it asks for other signers")],
+      ["a check names a new signer", "create_vault_v2", () => ({ guards: [guard(GUARD.system(), Keypair.generate().publicKey.toBase58(), { isSigner: true })] }), () => FAILURE_COPY.signedMismatch("it asks for other signers")],
+      ["another blockhash", "create_vault_v2", (h) => ({ guards: [payerCheck(h)], edit: (message) => (message.recentBlockhash = recent().blockhash) }), () => FAILURE_COPY.signedMismatch("its blockhash changed")],
+      [
+        "a higher unit limit",
+        "withdraw",
+        (h) => ({ guards: [payerCheck(h)], edit: (message) => replaceInstruction(message, 0, () => ComputeBudgetProgram.setComputeUnitLimit({ units: 60_000 })) }),
+        () => FAILURE_COPY.signedMismatch("its compute budget changed"),
+      ],
+      [
+        "a second unit price after the checks",
+        "withdraw",
+        (h) => ({ guards: [payerCheck(h), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 })] }),
+        () => FAILURE_COPY.signedMismatch("it does not hold the instructions SaverFi built"),
+      ],
+      [
+        "one lamport more",
+        "withdraw",
+        (h) => ({
+          guards: [payerCheck(h)],
+          edit: (message) =>
+            replaceInstruction(message, 2, (withdraw) => {
+              const data = Buffer.from(withdraw.data);
+              data.writeBigUInt64LE(150_000_001n, 8);
+              return new TransactionInstruction({ programId: withdraw.programId, keys: withdraw.keys, data });
+            }),
+        }),
+        () => FAILURE_COPY.signedMismatch("its SaverFi instruction changed"),
+      ],
+      [
+        "another destination token account",
+        "withdraw_token",
+        (h) => ({
+          guards: [payerCheck(h)],
+          edit: (message) =>
+            replaceInstruction(message, 2, (withdraw) => new TransactionInstruction({ programId: withdraw.programId, keys: withdraw.keys.map((meta, at) => (at === 4 ? { ...meta, pubkey: Keypair.generate().publicKey } : meta)), data: withdraw.data })),
+        }),
+        () => FAILURE_COPY.signedMismatch("its SaverFi instruction changed"),
+      ],
+      [
+        "the vault made writable by a check",
+        "withdraw_token",
+        (h) => ({ guards: [guard(GUARD.owner(SIP_PROGRAM_ID), deriveVaultPda(h.pensionKey).toBase58(), { isWritable: true })] }),
+        (h) => FAILURE_COPY.walletGuardRefused(`${deriveVaultPda(h.pensionKey).toBase58()} is writable in the message, and read-only in SaverFi's own instructions`),
+      ],
+    ];
+    for (const [label, flow, rewrite, words] of cases) {
+      const h = harness();
+      phantomSigns(h, rewrite);
+      const result = await flows[flow]!.run(h);
+      expect(result, label).toMatchObject({ ok: false, kind: "refused", message: words(h) });
+      expect(h.send, label).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a key made writable with no check at all is refused by the page's own comparison", async () => {
+    const h = harness();
+    h.signWithPension.mockImplementationOnce(async (bytes) => {
+      const tx = VersionedTransaction.deserialize(bytes);
+      const header = tx.message.header;
+      // One read-only unsigned key fewer: the last read-only key becomes writable, every instruction untouched.
+      const message = new (tx.message.constructor as new (args: unknown) => typeof tx.message)({
+        header: { ...header, numReadonlyUnsignedAccounts: header.numReadonlyUnsignedAccounts - 1 },
+        accountKeys: tx.message.staticAccountKeys,
+        recentBlockhash: tx.message.recentBlockhash,
+        instructions: (tx.message as unknown as { instructions: unknown[] }).instructions,
+      });
+      const rewritten = new VersionedTransaction(message);
+      rewritten.sign([h.owner]);
+      return Uint8Array.from(rewritten.serialize());
+    });
+    const result = await flows.create_vault_v2!.run(h);
+    expect(result).toMatchObject({ ok: false, kind: "refused" });
+    expect(result.message).toMatch(/^Phantom changed the transaction SaverFi built \(it makes .* writable, where SaverFi built it read-only\)/);
+    expect(h.send).not.toHaveBeenCalled();
   });
 });

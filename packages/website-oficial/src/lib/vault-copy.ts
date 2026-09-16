@@ -218,8 +218,10 @@ export const FAILURE_COPY = {
       : `Your pension key needs more SOL: this action costs about ${cost} SOL in rent and fees. Add SOL in Phantom, then try again. Nothing moved.`,
   unknown: "Something went wrong. Nothing was sent.",
   builtMismatch: (detail: string): string => `SaverFi's server sent a transaction that is not what you asked for (${detail}). Nothing was signed.`,
-  signedMismatch: (detail: string): string => `Phantom changed the transaction beyond its fee (${detail}). Nothing was sent.`,
+  signedMismatch: (detail: string): string => `Phantom changed the transaction SaverFi built (${detail}). Nothing was sent.`,
   foreignProgram: (label: string): string => `Phantom added an instruction for ${label}, which SaverFi does not relay. Nothing was sent.`,
+  /** Phantom's Lighthouse checks broke the rule the relay holds them to; `detail` is @sip/solana-core's checkWalletGuards words. */
+  walletGuardRefused: (detail: string): string => `Phantom added a Lighthouse safety check SaverFi does not relay (${detail}). Nothing was sent.`,
   unreadableBuilt: "SaverFi's server sent something that is not a transaction. Nothing was signed.",
   unreadableSigned: "Phantom returned something that is not a transaction SaverFi can read. Nothing was sent.",
 } as const;

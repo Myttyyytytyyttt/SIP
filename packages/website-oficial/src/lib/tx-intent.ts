@@ -8,11 +8,21 @@
  * payer and signers in order, the SIP instruction's accounts and arguments, and
  * for a link the consent the trading wallet just signed.
  *
- * After Phantom signs, the bytes it RETURNED are read again: a wallet may add a
- * priority fee, and that is tolerated, but nothing else. Only SIP, ComputeBudget
- * and Ed25519SigVerify, at most four instructions, the same blockhash, signers,
- * SIP data and consent, and only the pension key's slot signed. A program the
- * relay refuses (Lighthouse, say) is named before anything is sent.
+ * After Phantom signs, the bytes it RETURNED are read again. On mainnet Phantom
+ * adds Lighthouse checks: those pass only as @sip/solana-core's
+ * checkWalletGuards allows, the very function the relay's verifier runs (after
+ * all of SaverFi's instructions, assertion kinds only, bounded, about accounts
+ * SaverFi names). Everything else must be what was built: SaverFi's own
+ * instructions decompiled and compared one by one (program, accounts, data,
+ * the compute budget included), every key with the signer and writable flags it
+ * had, the same blockhash, signers and fee payer, and only the pension key's slot
+ * signed. Any other program is named before anything is sent.
+ *
+ * THE COMPUTE BUDGET MUST COME BACK UNCHANGED. Phantom documents adding a
+ * priority fee only to a transaction with no compute-budget instruction, and
+ * every owner transaction carries both (product.ts); mainnet transactions Phantom
+ * added Lighthouse checks to kept the dapp's own limit and price. So a changed
+ * fee or limit is refused with its own words rather than tolerated.
  *
  * Then, for a link, the trading wallet's co-signature is spliced into Phantom's
  * bytes: its answer must be a 64-byte signature or a transaction over the very
@@ -32,6 +42,7 @@ import {
   ATA_PROGRAM,
   COMPUTE_BUDGET_PROGRAM,
   ED25519_PROGRAM,
+  LIGHTHOUSE_PROGRAM,
   MEMO_PROGRAM,
   OWNER_TX_COMPUTE,
   OWNER_TX_MICROLAMPORTS,
@@ -41,15 +52,18 @@ import {
   TOKEN_PROGRAM,
   WireFormatError,
   bytesEqual,
+  checkWalletGuards,
   decodeArgs,
   isOwnerInstruction,
   isZeroSignature,
   matchInstruction,
+  messagePrivileges,
   parseLegacyMessage,
   readComputeBudget,
   spliceSignature,
   splitWire,
   tryBase58Decode,
+  type KeyPrivileges,
   type OwnerInstructionName,
   type ParsedInstruction,
   type ParsedLegacyMessage,
@@ -60,9 +74,6 @@ import { FAILURE_COPY, LINK_COPY } from "@/lib/vault-copy";
 export class IntentError extends Error {
   override readonly name = "IntentError";
 }
-
-/** Lighthouse's assertion program, which Phantom documents adding to some transactions. */
-export const LIGHTHOUSE_PROGRAM = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
 
 const PROGRAM_NAMES: Readonly<Record<string, string>> = {
   [SIP_PROGRAM_ID]: "SaverFi",
@@ -120,7 +131,22 @@ export interface OwnerIntent {
   readonly tokenAccountCreates?: readonly TokenAccountCreateIntent[];
 }
 
-const sameCreate = (a: ParsedInstruction, b: ParsedInstruction): boolean => bytesEqual(a.data, b.data) && a.accountKeys.join() === b.accountKeys.join();
+/** Each key's privileges, by key. */
+const privilegesByKey = (message: ParsedLegacyMessage): Map<string, KeyPrivileges> => {
+  const privileges = messagePrivileges(message);
+  return new Map(message.keys.map((key, index) => [key, privileges[index]!]));
+};
+
+const describePrivileges = (privileges: KeyPrivileges): string =>
+  privileges.signer ? (privileges.writable ? "a writable signer" : "a read-only signer") : privileges.writable ? "writable" : "read-only";
+
+/** What changed, in words, by the program of the instruction SaverFi built at that position. */
+const CHANGED: Readonly<Record<string, string>> = {
+  [COMPUTE_BUDGET_PROGRAM]: "its compute budget changed",
+  [ED25519_PROGRAM]: "its consent check changed",
+  [ATA_PROGRAM]: "its token account creations changed",
+  [SIP_PROGRAM_ID]: "its SaverFi instruction changed",
+};
 
 function readTransaction(bytes: Uint8Array, unreadable: string): ReadTransaction {
   try {
@@ -256,51 +282,51 @@ export function checkBuiltIntent(bytes: Uint8Array, intent: OwnerIntent): ReadTr
 }
 
 /**
- * The bytes Phantom returned for `built`. A different priority fee or compute
- * limit is tolerated; anything else is refused with words, a foreign program by
- * name. Only the first signature slot may be signed.
+ * The bytes Phantom returned for `built`: Lighthouse checks the relay accepts,
+ * after SaverFi's own instructions exactly as built. Anything else is refused
+ * with words, a foreign program by name. Only the first signature slot may be
+ * signed.
  */
 export function checkSignedIntent(bytes: Uint8Array, built: ReadTransaction, intent: OwnerIntent): ReadTransaction {
   const refuse = (detail: string): IntentError => new IntentError(FAILURE_COPY.signedMismatch(detail));
   const tx = readTransaction(bytes, FAILURE_COPY.unreadableSigned);
   const { parsed } = tx;
-  const creates = intent.tokenAccountCreates ?? [];
-  const relayed = creates.length > 0 ? RELAYED_WITH_TOKEN_ACCOUNTS : RELAYED;
-  const foreign = parsed.instructions.find((instruction) => !relayed.has(instruction.programId));
+  const relayed = (intent.tokenAccountCreates ?? []).length > 0 ? RELAYED_WITH_TOKEN_ACCOUNTS : RELAYED;
+  const foreign = parsed.instructions.find((instruction) => instruction.programId !== LIGHTHOUSE_PROGRAM && !relayed.has(instruction.programId));
   if (foreign !== undefined) throw new IntentError(FAILURE_COPY.foreignProgram(programLabel(foreign.programId)));
-  if (parsed.instructions.length > 4 + creates.length) throw refuse("it holds more instructions than SaverFi relays");
+
   const signers = signersProblem(parsed, tx.signatures, intent.signers);
   if (signers !== null) throw refuse(signers);
   if (parsed.recentBlockhash !== built.parsed.recentBlockhash) throw refuse("its blockhash changed");
   if (isZeroSignature(tx.signatures[0]!)) throw refuse("the pension key's signature is missing");
   if (tx.signatures.slice(1).some((signature) => !isZeroSignature(signature))) throw refuse("another key has already signed");
 
-  const now = readSip(parsed);
-  const before = readSip(built.parsed);
-  if (typeof now === "string") throw refuse(now);
-  if (typeof before === "string") throw refuse(before);
-  if (!bytesEqual(now.instruction.data, before.instruction.data) || now.instruction.accountKeys.join() !== before.instruction.accountKeys.join()) {
-    throw refuse("its SaverFi instruction changed");
-  }
+  // SaverFi's own instructions, decompiled (a key joining the message moves every index), wherever Lighthouse's stand.
+  const own = parsed.instructions.filter((instruction) => instruction.programId !== LIGHTHOUSE_PROGRAM);
+  const expected = built.parsed.instructions;
+  if (own.length !== expected.length) throw refuse("it does not hold the instructions SaverFi built");
+  own.forEach((instruction, position) => {
+    const was = expected[position]!;
+    if (instruction.programId !== was.programId) throw refuse("its instructions are not the ones SaverFi built, in order");
+    if (!bytesEqual(instruction.data, was.data) || instruction.accountKeys.join() !== was.accountKeys.join()) throw refuse(CHANGED[was.programId] ?? "an instruction changed");
+  });
 
-  const createsNow = parsed.instructions.flatMap((instruction, index) => (instruction.programId === ATA_PROGRAM ? [{ instruction, index }] : []));
-  const createsBefore = built.parsed.instructions.filter((instruction) => instruction.programId === ATA_PROGRAM);
-  if (
-    createsNow.length !== createsBefore.length ||
-    createsNow.some((create, at) => create.index > now.index || !sameCreate(create.instruction, createsBefore[at]!))
-  ) {
-    throw refuse("its token account creations changed");
-  }
+  // Phantom's Lighthouse checks, by the relay's own rule: where they stand, what they are, and what they name, against the build's privileges.
+  const builtPrivileges = privilegesByKey(built.parsed);
+  const guards = checkWalletGuards({ keys: parsed.keys, privileges: messagePrivileges(parsed), instructions: parsed.instructions }, builtPrivileges);
+  if (!guards.ok) throw new IntentError(FAILURE_COPY.walletGuardRefused(guards.detail));
 
-  const verifies = parsed.instructions.filter((instruction) => instruction.programId === ED25519_PROGRAM);
-  if (intent.consent === undefined) {
-    if (verifies.length > 0) throw refuse("it gained a signature check");
-  } else {
-    const consentNow = parsed.instructions[now.index - 1];
-    const consentBefore = built.parsed.instructions[before.index - 1];
-    if (verifies.length !== 1 || consentNow?.programId !== ED25519_PROGRAM || consentBefore === undefined || !bytesEqual(consentNow.data, consentBefore.data)) {
-      throw refuse("its consent check changed");
+  // With or without checks, every key keeps what it could do, and none joins but Lighthouse's.
+  const now = privilegesByKey(parsed);
+  for (const [key, privileges] of builtPrivileges) {
+    const signed = now.get(key);
+    if (signed === undefined) throw refuse(`it no longer names ${programLabel(key)}`);
+    if (signed.signer !== privileges.signer || signed.writable !== privileges.writable) {
+      throw refuse(`it makes ${programLabel(key)} ${describePrivileges(signed)}, where SaverFi built it ${describePrivileges(privileges)}`);
     }
+  }
+  for (const key of now.keys()) {
+    if (!builtPrivileges.has(key) && !(key === LIGHTHOUSE_PROGRAM && guards.guards.length > 0)) throw refuse(`it names ${programLabel(key)}, which SaverFi did not`);
   }
   return tx;
 }
