@@ -156,7 +156,7 @@ describe("the /status JSON", () => {
 });
 
 describe("the /health staleness rule", () => {
-  const base: HealthInput = { now: 0, startedAt: 0, lastSweepStartedAt: null, sweepMs: 60_000 };
+  const base: HealthInput = { now: 0, startedAt: 0, lastProgressAt: null, sweepMs: 60_000 };
 
   it("is ten minutes at the default sweep, and three sweeps only above a 200 s one", () => {
     expect(healthStaleAfterMs(5_000)).toBe(HEALTH_STALE_FLOOR_MS);
@@ -167,21 +167,21 @@ describe("the /health staleness rule", () => {
 
   it("stays ok for a keeper that is merely idle or slow within the bound, and for one still starting up", () => {
     // Sweeping every minute for nine minutes: idle is not wedged.
-    expect(decideHealth({ ...base, lastSweepStartedAt: 0, now: 9 * 60_000 })).toEqual({ ok: true });
+    expect(decideHealth({ ...base, lastProgressAt: 0, now: 9 * 60_000 })).toEqual({ ok: true });
     // One millisecond short of the bound: still ok.
-    expect(decideHealth({ ...base, lastSweepStartedAt: 0, now: HEALTH_STALE_FLOOR_MS - 1 })).toEqual({ ok: true });
+    expect(decideHealth({ ...base, lastProgressAt: 0, now: HEALTH_STALE_FLOOR_MS - 1 })).toEqual({ ok: true });
     // Booting. The first sweep is awaited only after the chain read and the read
     // model's preflight, so the process's own start has to be the clock.
     expect(decideHealth({ ...base, now: HEALTH_STALE_FLOOR_MS - 1 })).toEqual({ ok: true });
     // A sweep that started 20 minutes ago at a 10-minute interval is inside 3 × sweepMs.
-    expect(decideHealth({ ...base, sweepMs: 600_000, lastSweepStartedAt: 0, now: 20 * 60_000 })).toEqual({ ok: true });
+    expect(decideHealth({ ...base, sweepMs: 600_000, lastProgressAt: 0, now: 20 * 60_000 })).toEqual({ ok: true });
   });
 
-  it("fails once no sweep has STARTED inside the bound, and says which clock it used", () => {
-    const wedged = decideHealth({ ...base, lastSweepStartedAt: 0, now: HEALTH_STALE_FLOOR_MS });
+  it("fails once the sweep has not MOVED inside the bound, and says which clock it used", () => {
+    const wedged = decideHealth({ ...base, lastProgressAt: 0, now: HEALTH_STALE_FLOOR_MS });
     expect(wedged).toEqual({
       ok: false,
-      detail: "the last sweep started 600s ago",
+      detail: "the sweep last moved 600s ago",
       quietForMs: HEALTH_STALE_FLOOR_MS,
       staleAfterMs: HEALTH_STALE_FLOOR_MS,
     });
@@ -191,13 +191,13 @@ describe("the /health staleness rule", () => {
   });
 
   it("never fails on a clock that went backwards or a sweep interval that is not a number", () => {
-    expect(decideHealth({ ...base, lastSweepStartedAt: 60 * 60_000, now: 0 })).toEqual({ ok: true });
-    expect(decideHealth({ ...base, sweepMs: Number.NaN, lastSweepStartedAt: 0, now: HEALTH_STALE_FLOOR_MS - 1 })).toEqual({ ok: true });
+    expect(decideHealth({ ...base, lastProgressAt: 60 * 60_000, now: 0 })).toEqual({ ok: true });
+    expect(decideHealth({ ...base, sweepMs: Number.NaN, lastProgressAt: 0, now: HEALTH_STALE_FLOOR_MS - 1 })).toEqual({ ok: true });
   });
 });
 
 describe("the heartbeat handler", () => {
-  const healthy = () => decideHealth({ now: 0, startedAt: 0, lastSweepStartedAt: 0, sweepMs: 60_000 });
+  const healthy = () => decideHealth({ now: 0, startedAt: 0, lastProgressAt: 0, sweepMs: 60_000 });
 
   it("answers /health with {ok:true} and /status with the rendered status, and nothing else", () => {
     const { redactor, status } = setup();
@@ -229,14 +229,14 @@ describe("the heartbeat handler", () => {
         renders += 1;
         return renderStatus(status, redactor);
       },
-      () => decideHealth({ now: 30 * 60_000, startedAt: 0, lastSweepStartedAt: 0, sweepMs: 60_000 }),
+      () => decideHealth({ now: 30 * 60_000, startedAt: 0, lastProgressAt: 0, sweepMs: 60_000 }),
     );
 
     const answer = drive(handler, "GET", "/health");
     expect(answer.status).toBe(503);
     expect(JSON.parse(answer.body)).toEqual({
       ok: false,
-      detail: "the last sweep started 1800s ago",
+      detail: "the sweep last moved 1800s ago",
       quietForMs: 1_800_000,
       staleAfterMs: HEALTH_STALE_FLOOR_MS,
     });

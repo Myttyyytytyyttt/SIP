@@ -126,12 +126,50 @@ for (const warning of config.warnings) log.warn("configuration warning", { detai
 const programId = new PublicKey(config.programId);
 const TRADING_LINK_DISC = accountDiscriminator("TradingLink");
 
+/**
+ * WHEN THE SWEEP LAST MOVED, and the only clock /health is allowed to read.
+ *
+ * IT MEANS "STILL WORKING", NOT "STARTED WORKING". This was stamped once at the
+ * top of each sweep, which cannot tell a wedged sweep from one making steady
+ * progress: one backlogged VOLUME wallet against a throttled endpoint spends the
+ * whole ten-minute bound inside a single turn — up to MAX_SIGNATURES
+ * getTransaction reads, each bounded only by the pool's 30 s timeout — so
+ * /health answered 503 mid-sweep, Railway restarted the container, and the fresh
+ * process re-ran the same walk against the same endpoint and 503'd again, losing
+ * every pending carry on each pass. It is now advanced wherever the sweep
+ * demonstrably moves: a sweep begins, a link's turn begins, an RPC call comes
+ * back. A genuinely wedged sweep advances none of them and still answers 503.
+ *
+ * NOT `health.lastSweepAt`, which is written near the END of a sweep, after the
+ * chain read, the discovery and the batched vault read have each succeeded; a
+ * sweep that throws anywhere above it leaves it untouched forever, and a
+ * staleness rule on that clock would read an RPC outage as a wedged process and
+ * hand Railway a restart loop, which has never once fixed an RPC.
+ */
+let lastProgressAt: number | null = null;
+const noteProgress = (): void => {
+  lastProgressAt = Date.now();
+};
+
 // FAILOVER UNDER THE TRANSPORT, not around each call. Connection threads one
 // endpoint through everything it does; replacing its `fetch` gives Anchor, the
 // settle path and the invest path the same failover without a line of their own.
+const rpcFetch = poolFetch(config.rpcUrls, (message, fields) => log.warn(message, fields));
+/**
+ * The same transport, plus the one thing /health needs: AN ANSWER FROM THE CHAIN
+ * IS PROGRESS. Every RPC call this process makes goes through here — Anchor's
+ * reads, the measure walk, the settle sends — so a sweep grinding through a
+ * backlog keeps the clock moving without a progress callback threaded down the
+ * settle path. Only a RETURNED response stamps: a throw leaves the clock alone.
+ */
+const trackedFetch: typeof fetch = async (input, init) => {
+  const response = await rpcFetch(input, init);
+  noteProgress();
+  return response;
+};
 const connection = new Connection(config.rpcUrls[0]!.reveal(), {
   commitment: "confirmed",
-  fetch: poolFetch(config.rpcUrls, (message, fields) => log.warn(message, fields)),
+  fetch: trackedFetch,
 });
 
 /** Armed only. The attester and the crank are this one key during the hackathon. */
@@ -247,18 +285,6 @@ function signingRoute(): string {
 const startedAtMs = Date.now();
 
 /**
- * WHEN THE LAST SWEEP STARTED, and the only clock /health is allowed to read.
- *
- * Stamped at the top of every sweep, so it means "a sweep began", not "a sweep
- * got all the way through". `health.lastSweepAt` below is written near the END
- * of a sweep, after the chain read, the discovery and the batched vault read
- * have each succeeded; a sweep that throws anywhere above it leaves it untouched
- * forever. A staleness rule on that clock would read an RPC outage as a wedged
- * process and hand Railway a restart loop, which has never once fixed an RPC.
- */
-let sweepStartedAt: number | null = null;
-
-/**
  * What /status serves. An operator must be able to tell a HALTED keeper from a
  * WEDGED one without ssh: `lastSweepAt` moving = alive; an old timestamp with
  * the process up = wedged; the rest says what the last sweep actually saw.
@@ -301,14 +327,14 @@ const health: KeeperStatus = {
 // bakes 8080). Started BEFORE the first chain read, so a slow endpoint delays
 // the first sweep and never the probe — and, because the probe answers 503 for
 // a process that has stopped sweeping, the same slow endpoint must not make it
-// answer 503 either: before the first sweep the clock is this process's own
+// answer 503 either: before anything has moved the clock is this process's own
 // start, which gives booting the whole bound (decideHealth, src/status.ts).
 if (config.port !== null) {
   const port = config.port;
   createServer(
     httpHandler(
       () => renderStatus({ ...health, pendingCarries: pendingCarries() }, sharedRedactor),
-      () => decideHealth({ now: Date.now(), startedAt: startedAtMs, lastSweepStartedAt: sweepStartedAt, sweepMs: config.sweepMs }),
+      () => decideHealth({ now: Date.now(), startedAt: startedAtMs, lastProgressAt, sweepMs: config.sweepMs }),
     ),
   )
     .on("error", (error) => {
@@ -445,10 +471,12 @@ async function sweep(): Promise<void> {
     return;
   }
   cycleRunning = true;
-  // /health's clock, stamped HERE and nowhere else: a sweep that throws below
-  // still counts as a sweep that happened, so an endpoint outage is reported by
-  // sweep-failed and /status, never by restarting the container.
-  sweepStartedAt = Date.now();
+  // /health's clock. A sweep that throws below still counts as a sweep that
+  // happened, so an endpoint outage is reported by sweep-failed and /status,
+  // never by restarting the container. Stamped again at every link's turn and
+  // at every RPC answer, so a sweep that is slow is not read as one that is
+  // wedged — the restart that would follow only re-runs the same slow work.
+  noteProgress();
   try {
     const snapshot = await readChainSnapshot(connection, program);
     applySnapshot(snapshot);
@@ -609,6 +637,10 @@ async function sweep(): Promise<void> {
     });
 
     for (const link of links) {
+      // THE SWEEP MOVED: another turn is starting. A pass whose turns keep
+      // beginning is working, however long the whole pass takes; one wedged
+      // inside a turn stops stamping here and /health answers 503, as it should.
+      noteProgress();
       const wallet = link.wallet.toBase58();
       const vaultAddr = link.vault.toBase58();
       try {

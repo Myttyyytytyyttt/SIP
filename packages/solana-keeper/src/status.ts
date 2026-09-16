@@ -118,7 +118,9 @@ const bigintSafe = (_key: string, value: unknown): unknown => (typeof value === 
  * it re-runs the same failing chain read against the same endpoint. Sweeps
  * legitimately overrun: a VOLUME wallet with hundreds of transactions above its
  * frontier costs one getTransaction each, and three such wallets can take longer
- * than the default 60 s interval. So the bound is generous by design.
+ * than the default 60 s interval. So the bound is generous by design, and it is
+ * measured from the last time the sweep MOVED (HealthInput.lastProgressAt), not
+ * from the sweep's start: an overrun is not the condition this rule is for.
  */
 export const HEALTH_STALE_FLOOR_MS = 10 * 60 * 1000;
 
@@ -133,14 +135,26 @@ export interface HealthInput {
   /** When the process came up: the only clock that exists before the first sweep. */
   readonly startedAt: number;
   /**
-   * When the last sweep STARTED, or null until one has.
+   * When the sweep last MOVED, or null until it has moved at all.
    *
-   * THE START, NEVER THE FINISH. `lastSweepAt` is written near the END of a
-   * sweep, after the chain read, the discovery and the batched vault read have
-   * all succeeded, and a sweep that throws above it never writes it at all. A
-   * rule keyed on that clock would turn an RPC outage into a restart loop.
+   * "STILL WORKING", NOT "STARTED WORKING". A stamp taken once at the top of a
+   * sweep cannot tell a wedged sweep from one making steady progress, and the
+   * work per link is real: measure-window walks up to MAX_SIGNATURE_PAGES pages
+   * plus MAX_SIGNATURES getTransaction reads per link, each bounded only by the
+   * pool's 30 s timeout. One backlogged VOLUME wallet against a throttled
+   * endpoint reaches ten minutes on its own, and /health answering 503 mid-sweep
+   * hands Railway a restart that re-runs the same walk against the same endpoint
+   * from scratch — a loop that ends with the keeper down, and that also drops
+   * every pending carry on the way. So bin/keeper.mts advances this whenever the
+   * sweep demonstrably moves: a sweep begins, a link's turn begins, an RPC call
+   * comes back.
+   *
+   * NOT `lastSweepAt`, EITHER. That is written near the END of a sweep, after
+   * the chain read, the discovery and the batched vault read have all succeeded,
+   * and a sweep that throws above it never writes it at all: a rule keyed on it
+   * would turn an RPC outage into a restart loop.
    */
-  readonly lastSweepStartedAt: number | null;
+  readonly lastProgressAt: number | null;
   readonly sweepMs: number;
 }
 
@@ -153,18 +167,26 @@ export interface HealthReport {
 }
 
 /**
- * Whether a sweep has STARTED recently enough for this process to be called
+ * Whether the sweep has MOVED recently enough for this process to be called
  * healthy: the one question a probe can answer without asking the network.
  *
- * WHAT IT CATCHES: a process up and wedged — a sweep that hangs inside a call
- * with no timeout, an interval that stopped firing. Absence is this keeper's
- * characteristic failure, and it is the one thing a restart does fix.
+ * WHAT IT CATCHES: a process up and wedged — a sweep hung inside a call that
+ * never returns, an interval that stopped firing, a turn that will never end.
+ * Nothing advances the clock and nothing ever will, so the restart Railway
+ * performs is the one thing that does fix it. Absence is this keeper's
+ * characteristic failure.
  *
- * WHAT IT MUST NEVER CATCH: a keeper that is merely idle or slow within the
- * bound, and a keeper still starting up. Before the first sweep the clock is the
- * process's own start, so booting gets the same window — the first sweep is only
- * awaited after the chain read and the read model's preflight, both of which can
- * take minutes against a slow endpoint.
+ * WHAT IT MUST NEVER CATCH — three cases, each a restart that makes things
+ * worse:
+ *   * A SWEEP THAT IS SLOW BUT PROGRESSING. A wallet with a long backlog on a
+ *     throttled endpoint can spend the whole bound inside one turn; restarting
+ *     re-does that walk from the beginning, forever. The clock advances on each
+ *     link's turn AND on each RPC answer, so grinding forward reads as healthy.
+ *   * A KEEPER THAT IS MERELY IDLE, with nothing to sweep, inside the bound.
+ *   * A KEEPER STILL STARTING UP. Before anything has moved, the clock is the
+ *     process's own start, so booting gets the same window — the first sweep is
+ *     awaited only after the chain read and the read model's preflight, both of
+ *     which can take minutes against a slow endpoint.
  *
  * NOTHING FROM UPSTREAM GOES IN THE ANSWER. /health does not pass through
  * renderStatus, so it is neither scrubbed nor tripwired: the detail is built
@@ -173,16 +195,16 @@ export interface HealthReport {
  */
 export function decideHealth(input: HealthInput): HealthReport {
   const staleAfterMs = healthStaleAfterMs(input.sweepMs);
-  const since = input.lastSweepStartedAt ?? input.startedAt;
+  const since = input.lastProgressAt ?? input.startedAt;
   const quietForMs = input.now - since;
   if (!(quietForMs >= staleAfterMs)) return { ok: true };
   const seconds = Math.round(quietForMs / 1000);
   return {
     ok: false,
     detail:
-      input.lastSweepStartedAt === null
+      input.lastProgressAt === null
         ? `no sweep has started in the ${seconds}s since this process came up`
-        : `the last sweep started ${seconds}s ago`,
+        : `the sweep last moved ${seconds}s ago`,
     quietForMs,
     staleAfterMs,
   };

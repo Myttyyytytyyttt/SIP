@@ -67,10 +67,13 @@ authorization key) o ninguna; con solo una se niega a arrancar.
 
 Cuando despliegue, abre el dominio del servicio:
 
-- `/health` responde `{"ok":true}`. Contesta `503` —y entonces Railway reinicia— solo cuando no EMPIEZA un barrido
+- `/health` responde `{"ok":true}`. Contesta `503` —y entonces Railway reinicia— solo cuando el barrido no AVANZA
   desde hace más de `max(3 × sweepMs, 10 min)`, que con el barrido por defecto de 60 s son 10 minutos; el cuerpo dice
-  cuánto lleva callado. Un vigilante recién arrancado, uno con un barrido lento o uno que no tiene nada que barrer
-  sigue en `200`, y un fallo de RPC sale por `/status` y por las alertas, nunca reiniciando el contenedor.
+  cuánto lleva quieto. Avanza al empezar un barrido, al empezar el turno de cada wallet y con cada respuesta del RPC,
+  así que un barrido LENTO —una wallet con mucho retraso puede tardar más que los diez minutos ella sola— sigue en
+  `200`: reiniciarlo solo repetiría el mismo trabajo desde cero y perdería las pérdidas pendientes. Un vigilante recién
+  arrancado o uno que no tiene nada que barrer sigue en `200` igual, y un fallo de RPC sale por `/status` y por las
+  alertas, nunca reiniciando el contenedor.
 - `/status` enseña `program` = `6kA9…`, `mode` = `dry-run` y `signing.secretsRead` = `false`. Hasta que se publique el
   programa, `programDeployed` es `false` y `config` es `null`: es lo esperado.
 
