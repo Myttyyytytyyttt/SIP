@@ -370,6 +370,72 @@ describe("investPolicyFlow", () => {
     expect(h.send).not.toHaveBeenCalled();
   });
 
+  /** The pool rates the form showed before the click, as /api/solana-vault answers them. */
+  const shownPrices = (overrides: { readonly convertWad?: bigint; readonly legWad?: bigint } = {}) => ({
+    slot: 1,
+    convertWad: (overrides.convertWad ?? LIVE_CONVERT).toString(),
+    usdcRawPerSol: "100038711",
+    legs: [{ symbol: "SPYx", mint: SPYX_MINT, wad: (overrides.legWad ?? LIVE_SPYX).toString(), usdcRawPer1e8: "761709474" }],
+  });
+
+  /**
+   * A build whose every margin holds and whose floors are worthless:
+   * floorWad(2, 1000) and floorWad(2, 500) are both 1, so a live rate of 2 with
+   * a floor of 1 passes each margin check while the bytes sign a SOL floor of
+   * $0.00 and a SPYx ceiling of 1e20 per 100,000,000 raw units.
+   */
+  const forgedFloors = (h: Harness): Answer =>
+    policyAnswer(h.pensionKey, {
+      convertFloor: 1n,
+      legFloor: 1n,
+      floors: () => ({
+        slot: 1,
+        marginBps: { convert: 1_000, leg: 500 },
+        liveConvertWad: 2n,
+        convertWad: 1n,
+        usdcRawPerSol: 100_038_711n,
+        floorUsdcRawPerSol: 90_034_840n,
+        legs: [{ symbol: "SPYx", mint: SPYX_MINT, liveWad: 2n, wad: 1n, usdcRawPer1e8: 761_709_474n, maxUsdcRawPer1e8: 801_799_446n }],
+      }),
+    });
+
+  it("refuses a build whose rates are nowhere near the prices the form showed, before Phantom is asked", async () => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => ok(forgedFloors(h)));
+    const result = await investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey, shownPrices: shownPrices() });
+    expect(result).toMatchObject({ ok: false, kind: "refused" });
+    expect(!result.ok && result.message).toContain("far from the one this page showed you");
+    expect(h.signWithPension).not.toHaveBeenCalled();
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
+  it("…and that same answer passes every margin, which is why the margins alone were not enough", async () => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => ok(forgedFloors(h)));
+    // WHAT IS NOT FIXED, stated rather than implied: with no prices on screen
+    // there is no second opinion, and the forged floors are signed. The margins
+    // hold a floor to the rate the server REPORTS, never to a real market.
+    const result = await investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey, shownPrices: null });
+    expect(result.ok).toBe(true);
+  });
+
+  it("a pool that moved a little between the form and the build is still signed", async () => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey)));
+    const moved = shownPrices({ convertWad: (LIVE_CONVERT * 102n) / 100n, legWad: (LIVE_SPYX * 98n) / 100n });
+    const result = await investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey, shownPrices: moved });
+    expect(result.ok).toBe(true);
+  });
+
+  it("a SPYx rate far from the screen's is refused too, and says which price it was", async () => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey)));
+    const result = await investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey, shownPrices: shownPrices({ legWad: LIVE_SPYX / 2n }) });
+    expect(result).toMatchObject({ ok: false, kind: "refused" });
+    expect(!result.ok && result.message).toContain("SPYx price it read is far");
+    expect(h.signWithPension).not.toHaveBeenCalled();
+  });
+
   it("Phantom dropping a token account creation is refused before anything is sent", async () => {
     const h = harness();
     h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey)));

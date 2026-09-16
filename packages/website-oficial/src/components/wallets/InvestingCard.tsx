@@ -183,15 +183,36 @@ function Fact({ label, children }: { readonly label: string; readonly children: 
   );
 }
 
-/** What Phantom is asked to sign, from the checked build: its floors, and the caps this card sent; or, for a pause, the policy as it is. */
-function SigningDetail({ progress, request }: { readonly progress: WriteProgress; readonly request: InvestRequest | "pause" | null }) {
+/**
+ * What Phantom is asked to sign, from the checked build: its floors, and the
+ * caps this card sent; or, for a pause, the policy as it is.
+ *
+ * EVERY FIGURE COMES FROM THE WADS THE FLOW CHECKED and the transaction
+ * actually carries — never from the answer's own dollar fields
+ * (floorUsdcRawPerSol, maxUsdcRawPer1e8, symbol). Those ride along beside the
+ * wads and nothing holds them to each other, so a build could print a floor of
+ * $90.03 over bytes that signed $0.00. The basket's names are SaverFi's own
+ * OFFERED_LEGS, in the order the flow pinned them to.
+ */
+export function SigningDetail({ progress, request }: { readonly progress: WriteProgress; readonly request: InvestRequest | "pause" | null }) {
   if (progress.phase !== "running" || progress.built === null || request === null) return null;
   if (request === "pause") return <p className="font-normal text-foreground">{INVEST_COPY.pauseSigning}</p>;
   const floors = (progress.built as Partial<InvestPolicyBuildJson>).floors;
-  const solFloor = rawFrom(floors?.floorUsdcRawPerSol);
-  if (floors === undefined || solFloor === null) return null;
-  const legs = floors.legs.map((leg) => INVEST_COPY.legSigning(leg.symbol, formatUsd(rawFrom(leg.maxUsdcRawPer1e8) ?? 0n))).join("; ");
-  return <p className="font-normal text-foreground">{INVEST_COPY.youAreSigning(formatUsd(solFloor), legs, formatUsd(request.maxPerCall), formatUsd(request.maxRolling30d))}</p>;
+  const convertWad = rawFrom(floors?.convertWad);
+  // A floor nobody can read is not guessed at: the progress says nothing rather
+  // than a figure the bytes may not carry.
+  if (floors === undefined || floors === null || convertWad === null || convertWad <= 0n) return null;
+  const legs: string[] = [];
+  for (const [index, leg] of OFFERED_LEGS.entries()) {
+    const wad = rawFrom(floors.legs?.[index]?.wad);
+    if (wad === null || wad <= 0n) return null;
+    legs.push(INVEST_COPY.legSigning(leg.symbol, formatUsd(usdcRawPer1e8LegRaw(wad))));
+  }
+  return (
+    <p className="font-normal text-foreground">
+      {INVEST_COPY.youAreSigning(formatUsd(usdcRawPerSol(convertWad)), legs.join("; "), formatUsd(request.maxPerCall), formatUsd(request.maxRolling30d))}
+    </p>
+  );
 }
 
 function CapField({ id, label, value, onChange, disabled }: { readonly id: string; readonly label: string; readonly value: string; readonly onChange: (value: string) => void; readonly disabled: boolean }) {

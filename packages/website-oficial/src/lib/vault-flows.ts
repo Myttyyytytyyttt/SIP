@@ -31,7 +31,11 @@
  * each floor to be SIP's margin under its rate and never zero, the basket to be
  * SIP's, the caps and on/off to be what the person chose, and every token
  * account created ahead of the policy to be the vault's own, at an address the
- * page derived itself. The floors are shown again while Phantom asks (onBuilt).
+ * page derived itself. A margin holds a floor to the rate the SERVER reports,
+ * so it cannot tell a real rate from an invented one: the rates the form showed
+ * are the second opinion, and a build further than SHOWN_PRICE_TOLERANCE_BPS
+ * from them is refused. The floors are shown again while Phantom asks (onBuilt),
+ * rendered from those same checked wads.
  *
  * A WITHDRAWAL signs the amount asked and nothing else: SOL to the pension key,
  * or a token from the vault account the screen showed to the pension key's own
@@ -78,6 +82,7 @@ import {
   type PolicyFloorsJson,
   type SendResponseJson,
   type VaultApi,
+  type VaultStateJson,
   type WithdrawBuildJson,
   type WithdrawTokenBuildJson,
 } from "@/lib/vault-api";
@@ -308,10 +313,37 @@ export interface InvestPolicyInput {
   readonly maxRolling30d?: bigint;
   /** Default true. */
   readonly enabled?: boolean;
+  /**
+   * The pool rates the form showed just before the click, as /api/solana-vault
+   * answered them. A build whose own live rates are more than
+   * SHOWN_PRICE_TOLERANCE_BPS away from these is refused before Phantom is
+   * asked. Absent or null when the screen had no prices to show.
+   */
+  readonly shownPrices?: VaultStateJson["prices"] | null;
 }
 
-/** Why the floors a build answered are not SIP's margins under the rates it read, for SIP's basket; null when they are. */
-function floorsProblem(floors: PolicyFloorsJson | undefined): string | null {
+/**
+ * How far a build's live rate may sit from the price the form showed, in basis points.
+ *
+ * The margin check below only holds each floor to the rate the SERVER says it
+ * read; it cannot tell whether that rate is a real one. floorWad(2, 1000) is 1,
+ * so a build answering a live rate of 2 and a floor of 1 passes every margin —
+ * and signs away the floor entirely. The rates the page showed seconds before
+ * the click are the second opinion: a pool moves a little in that time, and a
+ * build answering a rate this far from the screen is answering about a
+ * different market than the one the person agreed to.
+ */
+export const SHOWN_PRICE_TOLERANCE_BPS = 500;
+
+/** Whether `live` sits further than the tolerance from `shown`. False when either is unknown: an unread price refuses nothing. */
+function farFromShown(live: bigint | null, shown: bigint | null): boolean {
+  if (live === null || shown === null || shown <= 0n) return false;
+  const gap = live > shown ? live - shown : shown - live;
+  return gap * 10_000n > shown * BigInt(SHOWN_PRICE_TOLERANCE_BPS);
+}
+
+/** Why the floors a build answered are not SIP's margins under the rates it read, for SIP's basket — or are not about the prices the form showed; null when they are. */
+function floorsProblem(floors: PolicyFloorsJson | undefined, shown: VaultStateJson["prices"] | null | undefined): string | null {
   const margin = (wad: bigint | null, bps: number): bigint | null => {
     try {
       return wad === null ? null : floorWad(wad, bps);
@@ -331,6 +363,19 @@ function floorsProblem(floors: PolicyFloorsJson | undefined): string | null {
     const wad = rawFrom(entry?.wad);
     if (entry?.mint !== leg.mint || wad === null || wad === 0n || wad !== margin(rawFrom(entry.liveWad), LEG_FLOOR_MARGIN_BPS)) {
       return `its ${leg.symbol} floor is not 95 % of the rate it read`;
+    }
+  }
+  // …and the rates it read are about the market the form showed. Skipped when
+  // the screen had no prices: a reading nobody has refuses nothing.
+  if (shown !== undefined && shown !== null) {
+    if (farFromShown(rawFrom(floors.liveConvertWad), rawFrom(shown.convertWad))) {
+      return "the SOL price it read is far from the one this page showed you";
+    }
+    for (const [index, leg] of OFFERED_LEGS.entries()) {
+      const live = rawFrom(floors.legs[index]?.liveWad);
+      if (farFromShown(live, rawFrom(shown.legs.find((price) => price.mint === leg.mint)?.wad))) {
+        return `the ${leg.symbol} price it read is far from the one this page showed you`;
+      }
     }
   }
   return null;
@@ -367,7 +412,7 @@ export async function investPolicyFlow(deps: PensionFlowDeps, input: InvestPolic
   if (input.maxRolling30d !== undefined) request.maxRolling30d = input.maxRolling30d.toString();
   if (input.enabled !== undefined) request.enabled = input.enabled;
   return pensionWrite<InvestPolicyBuildJson>(deps, request, async (body) => {
-    const problem = floorsProblem(body.floors);
+    const problem = floorsProblem(body.floors, input.shownPrices);
     if (problem !== null) throw new IntentError(FAILURE_COPY.builtMismatch(problem));
     const vault = await deriveVaultAddress(input.pensionKey);
     const weights = basketWeightsBps(OFFERED_LEGS.length);

@@ -219,11 +219,16 @@ export function useVaultWrite(key: string) {
     (input: InvestRequest): Promise<void> => {
       if (screen === null) return Promise.resolve();
       lastRequest.current = { kind: "policy", input };
-      const { api, pensionKey } = screen;
+      const { api, pensionKey, view } = screen;
+      // The pool rates THIS SCREEN is showing as the button is pressed: the flow
+      // refuses a build whose own live rates are far from them. Read here rather
+      // than carried in the request, so "Build again" is judged against what is
+      // on screen now and not against a reading from minutes ago.
+      const shownPrices = view.kind === "ready" ? view.state.prices : null;
       return run("policy", ({ onStep, onBuilt }) =>
         investPolicyFlow(
           { api, onStep, onBuilt, signers: pensionSigner({ wallets, pensionKey, signTransaction: signOne }) },
-          { pensionKey, maxPerCall: input.maxPerCall, maxRolling30d: input.maxRolling30d, enabled: input.enabled },
+          { pensionKey, maxPerCall: input.maxPerCall, maxRolling30d: input.maxRolling30d, enabled: input.enabled, shownPrices },
         ),
       );
     },

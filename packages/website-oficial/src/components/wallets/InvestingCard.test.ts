@@ -40,8 +40,8 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 });
 
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { InvestingCard, canSignPolicy, readCaps, setupRent, usedInLast30Days } from "@/components/wallets/InvestingCard";
-import { VaultWriteLock } from "@/hooks/use-vault-actions";
+import { InvestingCard, SigningDetail, canSignPolicy, readCaps, setupRent, usedInLast30Days } from "@/components/wallets/InvestingCard";
+import { VaultWriteLock, type WriteProgress } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
 import type { InvestmentPolicyJson, VaultApi, VaultStateJson } from "@/lib/vault-api";
 
@@ -219,6 +219,61 @@ describe("InvestingCard", () => {
     buttons("Resume investing")[0]?.onClick?.(CLICK);
     await vi.waitFor(() => expect(value.refresh).toHaveBeenCalledTimes(1));
     expect(build.mock.calls).toStrictEqual([[{ action: "investPolicy", owner: PENSION, maxPerCall: "10000000", maxRolling30d: "50000000", enabled: true }]]);
+  });
+
+  /**
+   * A build answer whose dollar fields and whose wads disagree. Nothing holds
+   * the two to each other: the flow checks the WADS (they are what the
+   * transaction carries), while floorUsdcRawPerSol, maxUsdcRawPer1e8 and
+   * symbol ride along unchecked.
+   */
+  const FORGED_BUILD = {
+    txBase64: "",
+    lastValidBlockHeight: 1,
+    floors: {
+      slot: 1,
+      marginBps: { convert: 1_000, leg: 500 },
+      liveConvertWad: "2",
+      convertWad: "1",
+      usdcRawPerSol: "100038711",
+      floorUsdcRawPerSol: "90034840",
+      legs: [{ symbol: "NOTSPYX", mint: SPYX_MINT, liveWad: "2", wad: "1", usdcRawPer1e8: "761709474", maxUsdcRawPer1e8: "801799446" }],
+    },
+  };
+
+  const signingDetail = (built: unknown): string =>
+    renderToStaticMarkup(
+      createElement(SigningDetail, {
+        progress: { phase: "running", kind: "policy", step: "approve_pension", built } as WriteProgress,
+        request: { maxPerCall: 10_000_000n, maxRolling30d: 50_000_000n, enabled: true },
+      }),
+    );
+
+  it("what Phantom is asked to sign is read from the floors the BYTES carry, never from the answer's own dollar fields", () => {
+    const html = signingDetail(FORGED_BUILD);
+    // The unchecked display fields, over bytes that signed neither of them.
+    expect(html).not.toContain("$90.03");
+    expect(html).not.toContain("$801.80");
+    expect(html).not.toContain("NOTSPYX");
+    // What min_convert_rate_wad = 1 actually means, and SaverFi's own basket name.
+    expect(html).toContain("SOL never sold below $0.00");
+    expect(html).toContain("SPYx never bought above");
+    // The caps are this card's own, not the answer's.
+    expect(html).toContain("$10.00");
+    expect(html).toContain("$50.00");
+  });
+
+  it("an honest build is described by its own floors", () => {
+    const honest = { ...FORGED_BUILD, floors: { ...FORGED_BUILD.floors, convertWad: "90034840399943305", legs: [{ ...FORGED_BUILD.floors.legs[0]!, wad: "124719467624105690" }] } };
+    const html = signingDetail(honest);
+    expect(html).toContain("SOL never sold below $90.03");
+    expect(html).toContain("SPYx never bought above $801.80");
+  });
+
+  it("says nothing rather than a figure when a checked floor cannot be read", () => {
+    expect(signingDetail({ ...FORGED_BUILD, floors: { ...FORGED_BUILD.floors, convertWad: "0" } })).toBe("");
+    expect(signingDetail({ ...FORGED_BUILD, floors: { ...FORGED_BUILD.floors, legs: [] } })).toBe("");
+    expect(signingDetail({ txBase64: "", lastValidBlockHeight: 1 })).toBe("");
   });
 
   it("sums the day-buckets of the trailing 31 days as the program does", () => {
