@@ -2,8 +2,10 @@
 //
 //   cd tools/landing-shot && npm i && node live-states.mjs
 //
-// (From a git worktree, playwright lives in the main checkout's copy of this
-// folder: NODE_PATH=<main>/tools/landing-shot/node_modules node live-states.mjs)
+// (From a git worktree, Playwright lives in the main checkout's copy of this
+// folder, and SIP_PLAYWRIGHT_DIR points at it. NODE_PATH cannot: these tools are
+// ESM, and ESM resolution ignores it — see playwright-module.mjs.
+//   SIP_PLAYWRIGHT_DIR=<main checkout>/tools/landing-shot node live-states.mjs)
 //
 // WHY A STUB RATHER THAN A WALLET. Which state the dashboard is in is decided by
 // what Privy reports, and driving the real Privy headlessly means a real wallet
@@ -29,7 +31,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { chromium } from "playwright";
+import { loadPlaywright } from "./playwright-module.mjs";
+
+// Resolved BEFORE anything is spawned, exactly as the bare import used to be: a
+// Playwright that cannot be found must never leave a dev server running behind it.
+const { chromium } = loadPlaywright();
 
 const PORT = 3017;
 const ORIGIN = `http://localhost:${PORT}`;
