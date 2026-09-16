@@ -84,8 +84,12 @@ export interface RowParts {
 
 const mark = (Glyph: typeof PiggyBank, className?: string): ReactNode => <Glyph className={cn("size-4 text-muted-foreground", className)} aria-hidden />;
 
-/** What a settlement measured, in the vault's own terms. */
-const measureOf = (mode: number): string => (mode === 1 ? ACTIVITY_COPY.measureVolume : ACTIVITY_COPY.measureProfit);
+/**
+ * What a settlement measured, from the mode THAT SETTLEMENT carries — never
+ * from the vault's mode today. Exported so the settlement strip says the same
+ * word about the same transaction.
+ */
+export const measureOf = (mode: number): string => (mode === 1 ? ACTIVITY_COPY.measureVolume : ACTIVITY_COPY.measureProfit);
 
 /**
  * One event, in words. A pure switch over the classifier's union, so a kind

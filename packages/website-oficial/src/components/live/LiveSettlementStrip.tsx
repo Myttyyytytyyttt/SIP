@@ -12,6 +12,7 @@
 
 import { Percent } from "lucide-react";
 
+import { measureOf } from "@/components/live/LiveActivityRow";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatSol, rawFrom } from "@/lib/amounts";
@@ -25,10 +26,39 @@ import { ratePercent } from "@/lib/vault-copy";
 /** How many settlements the strip shows. Rows arrive newest first. */
 const SHOWN = 40;
 
-type SettledEvent = Extract<VaultEventJson, { kind: "settled" }>;
+export type SettledEvent = Extract<VaultEventJson, { kind: "settled" }>;
 type SettledRow = LiveRow & { readonly event: SettledEvent };
 
 const isSettled = (row: LiveRow): row is SettledRow => row.event.kind === "settled";
+
+/**
+ * One chip's tooltip: which wallet it came from, how much of what THAT
+ * settlement measured, what a cap kept back, and when.
+ *
+ * THE MEASURE IS THE EVENT'S OWN, never the vault's mode today. set_policy_v2
+ * takes a mode as an argument and validate_policy accepts either, so a vault
+ * can be switched — and every chip in the strip would then describe its whole
+ * history in the new mode's words, while the same transaction's row in the feed
+ * (which reads measureOf(event.mode)) says the other. The rate beside it was
+ * already per-event, so the strip was disagreeing with itself.
+ */
+export function chipDetail(input: {
+  readonly event: SettledEvent;
+  readonly labelOf: (wallet: string | null) => string;
+  readonly maxContribution: bigint | null;
+  /** Already in words: "4m ago", or the time-unknown sentence. */
+  readonly when: string;
+}): string {
+  const { event } = input;
+  return stripTooltip({
+    label: input.labelOf(event.wallet),
+    rate: ratePercent(event.bps),
+    base: formatSol(rawFrom(event.baseLamports) ?? 0n),
+    measure: measureOf(event.mode),
+    capped: event.capped && input.maxContribution !== null ? formatSol(input.maxContribution) : null,
+    when: input.when,
+  });
+}
 
 export function LiveSettlementStrip({
   rows,
@@ -47,8 +77,9 @@ export function LiveSettlementStrip({
   // The strip exists to show settlements. With none loaded there is nothing to show.
   if (shown.length === 0) return null;
 
+  // The BADGE is the vault's rule as it stands today, which is what a badge is
+  // for. Each chip's own words come from its own event, below.
   const rate = vault.rateBps === null ? null : ratePercent(vault.rateBps);
-  const measure = vault.mode === 1 ? ACTIVITY_COPY.measureVolume : ACTIVITY_COPY.measureProfit;
   const badge = rate === null ? null : vault.mode === 1 ? LIVE_COPY.modeVolume(rate) : LIVE_COPY.modeProfit(rate);
 
   return (
@@ -67,7 +98,7 @@ export function LiveSettlementStrip({
       */}
       <div className="-m-px flex min-w-0 flex-1 gap-2 overflow-x-auto p-px [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [mask-image:linear-gradient(to_right,black_calc(100%-2rem),transparent)]">
         {shown.map((row, index) => (
-          <StripChip key={`${row.signature}-${index}`} row={row} now={now} measure={measure} labelOf={labelOf} maxContribution={vault.maxContribution} newest={index === 0} />
+          <StripChip key={`${row.signature}-${index}`} row={row} now={now} labelOf={labelOf} maxContribution={vault.maxContribution} newest={index === 0} />
         ))}
       </div>
 
@@ -79,14 +110,12 @@ export function LiveSettlementStrip({
 function StripChip({
   row,
   now,
-  measure,
   labelOf,
   maxContribution,
   newest,
 }: {
   readonly row: SettledRow;
   readonly now: string;
-  readonly measure: string;
   readonly labelOf: (wallet: string | null) => string;
   readonly maxContribution: bigint | null;
   readonly newest: boolean;
@@ -94,12 +123,10 @@ function StripChip({
   const event = row.event;
   const paid = rawFrom(event.paid) ?? 0n;
   const saved = paid > 0n;
-  const detail = stripTooltip({
-    label: labelOf(event.wallet),
-    rate: ratePercent(event.bps),
-    base: formatSol(rawFrom(event.baseLamports) ?? 0n),
-    measure,
-    capped: event.capped && maxContribution !== null ? formatSol(maxContribution) : null,
+  const detail = chipDetail({
+    event,
+    labelOf,
+    maxContribution,
     when: row.at === null ? ACTIVITY_COPY.timeUnknown : timeAgo(row.at, now),
   });
 
