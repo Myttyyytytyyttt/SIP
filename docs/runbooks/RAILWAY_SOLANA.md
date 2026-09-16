@@ -44,7 +44,8 @@ Para saber que el servicio es el vigilante y no la web:
 
 - en *Build Logs* se construye con el Dockerfile y pasa el paso `--preflight`;
 - en *Deploy Logs* sale `heartbeat listening`, nunca `Next.js`;
-- `/health` responde `{"ok":true}` en JSON.
+- `/health` responde `{"ok":true}` en JSON; solo da `503` si no ha EMPEZADO un barrido desde hace más de
+  `max(3 × sweepMs, 10 min)`.
 
 ### Fase A — en seco, ya hoy
 
@@ -66,7 +67,10 @@ authorization key) o ninguna; con solo una se niega a arrancar.
 
 Cuando despliegue, abre el dominio del servicio:
 
-- `/health` responde `{"ok":true}`.
+- `/health` responde `{"ok":true}`. Contesta `503` —y entonces Railway reinicia— solo cuando no EMPIEZA un barrido
+  desde hace más de `max(3 × sweepMs, 10 min)`, que con el barrido por defecto de 60 s son 10 minutos; el cuerpo dice
+  cuánto lleva callado. Un vigilante recién arrancado, uno con un barrido lento o uno que no tiene nada que barrer
+  sigue en `200`, y un fallo de RPC sale por `/status` y por las alertas, nunca reiniciando el contenedor.
 - `/status` enseña `program` = `6kA9…`, `mode` = `dry-run` y `signing.secretsRead` = `false`. Hasta que se publique el
   programa, `programDeployed` es `false` y `config` es `null`: es lo esperado.
 

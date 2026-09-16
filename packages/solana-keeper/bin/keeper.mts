@@ -69,7 +69,7 @@ import { settleAlert, type CarryBook } from "../src/settle-decision.js";
 import { runSettleTick } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KEEPER_LOCK_NAME, KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
-import { httpHandler, renderStatus, type KeeperStatus } from "../src/status.js";
+import { decideHealth, httpHandler, renderStatus, type KeeperStatus } from "../src/status.js";
 
 const log = createKeeperLogger();
 
@@ -206,6 +206,20 @@ function signingRoute(): string {
   return routes.length === 0 ? "none" : routes.join(" + ");
 }
 
+const startedAtMs = Date.now();
+
+/**
+ * WHEN THE LAST SWEEP STARTED, and the only clock /health is allowed to read.
+ *
+ * Stamped at the top of every sweep, so it means "a sweep began", not "a sweep
+ * got all the way through". `health.lastSweepAt` below is written near the END
+ * of a sweep, after the chain read, the discovery and the batched vault read
+ * have each succeeded; a sweep that throws anywhere above it leaves it untouched
+ * forever. A staleness rule on that clock would read an RPC outage as a wedged
+ * process and hand Railway a restart loop, which has never once fixed an RPC.
+ */
+let sweepStartedAt: number | null = null;
+
 /**
  * What /status serves. An operator must be able to tell a HALTED keeper from a
  * WEDGED one without ssh: `lastSweepAt` moving = alive; an old timestamp with
@@ -213,7 +227,7 @@ function signingRoute(): string {
  */
 const health: KeeperStatus = {
   service: SERVICE,
-  startedAt: new Date().toISOString(),
+  startedAt: new Date(startedAtMs).toISOString(),
   program: programId.toBase58(),
   programDeployed: null,
   config: null,
@@ -243,10 +257,18 @@ const health: KeeperStatus = {
 
 // The heartbeat, only when a port is provided (Railway injects PORT; the image
 // bakes 8080). Started BEFORE the first chain read, so a slow endpoint delays
-// the first sweep and never the probe.
+// the first sweep and never the probe — and, because the probe answers 503 for
+// a process that has stopped sweeping, the same slow endpoint must not make it
+// answer 503 either: before the first sweep the clock is this process's own
+// start, which gives booting the whole bound (decideHealth, src/status.ts).
 if (config.port !== null) {
   const port = config.port;
-  createServer(httpHandler(() => renderStatus(health, sharedRedactor)))
+  createServer(
+    httpHandler(
+      () => renderStatus(health, sharedRedactor),
+      () => decideHealth({ now: Date.now(), startedAt: startedAtMs, lastSweepStartedAt: sweepStartedAt, sweepMs: config.sweepMs }),
+    ),
+  )
     .on("error", (error) => {
       log.error("heartbeat server failed", { port, detail: summarizeUpstreamError(error) });
       process.exit(1);
@@ -381,6 +403,10 @@ async function sweep(): Promise<void> {
     return;
   }
   cycleRunning = true;
+  // /health's clock, stamped HERE and nowhere else: a sweep that throws below
+  // still counts as a sweep that happened, so an endpoint outage is reported by
+  // sweep-failed and /status, never by restarting the container.
+  sweepStartedAt = Date.now();
   try {
     const snapshot = await readChainSnapshot(connection, program);
     applySnapshot(snapshot);
