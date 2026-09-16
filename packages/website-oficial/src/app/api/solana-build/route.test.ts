@@ -285,7 +285,7 @@ describe("/api/solana-build", () => {
     expect(verified.ok).toBe(true);
   });
 
-  it("investPolicy: floors at 90 % and 95 % of the pools SIP prices from, a CreateIdempotent only for each vault account missing, and 502 price_unavailable without a pool", async () => {
+  it("investPolicy: floors at 90 % and 95 % of the pools SaverFi prices from, a CreateIdempotent only for each vault account missing, and 502 price_unavailable without a pool", async () => {
     useEnv(SOLANA_ENV);
     const owner = Keypair.generate();
     const ownerKey = owner.publicKey.toBase58();

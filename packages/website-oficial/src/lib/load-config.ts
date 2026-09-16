@@ -97,7 +97,7 @@ function environmentProblems(env: Env): ConfigProblem[] {
   if (normalized !== "" && normalized !== "solana") {
     problems.push({
       variable: "SIP_CHAIN",
-      message: "SIP_CHAIN is no longer read: SIP is Solana-only.",
+      message: "SIP_CHAIN is no longer read: SaverFi is Solana-only.",
       howToFix: "Remove the variable. Unset, blank or solana is accepted, so deleting it is always safe.",
     });
   }
@@ -145,7 +145,7 @@ function warnRetiredNamesOnce(env: Env): void {
       event: "web.config.retired_names",
       names,
       message:
-        "These variables are no longer read: SIP is Solana-only. Remove them." +
+        "These variables are no longer read: SaverFi is Solana-only. Remove them." +
         (seat ? ` The Privy seat is now ${SIGNER} and ${POLICY}.` : ""),
     }),
   );

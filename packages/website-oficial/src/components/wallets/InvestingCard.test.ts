@@ -126,10 +126,10 @@ describe("InvestingCard", () => {
       render(screen({ kind: "ready", state }));
       expect(buttons("Sign investment policy")).toHaveLength(0);
     }
-    expect(render(screen({ kind: "ready", state: stateWith({ policy: { status: "unreadable", address: account() } }) }))).toContain("SIP could not read your investment policy just now.");
+    expect(render(screen({ kind: "ready", state: stateWith({ policy: { status: "unreadable", address: account() } }) }))).toContain("SaverFi could not read your investment policy just now.");
   });
 
-  it("no policy: SIP's basket and $5 rule, the default caps, today's limits in the owner's words, the rent, and the issuer's powers; Sign waits for the box", () => {
+  it("no policy: SaverFi's basket and $5 rule, the default caps, today's limits in the owner's words, the rent, and the issuer's powers; Sign waits for the box", () => {
     const html = render(screen({ kind: "ready", state: stateWith() }));
     expect(html).toContain("SPYx · 100 %");
     expect(html).toContain("Buys each time $5.00 of USDC is ready");

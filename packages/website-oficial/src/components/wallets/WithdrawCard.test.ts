@@ -92,7 +92,7 @@ describe("WithdrawCard", () => {
     expect(html).toContain("0.15128524 SOL");
     expect(html).toContain("0.15 SOL");
     expect(html).toContain("Kept as rent 0.00128524 SOL");
-    expect(html).toContain("Only your pension key can withdraw, and SIP cannot pause or block a SOL withdrawal. The vault keeps 0.00128524 SOL of rent, which Solana requires, and a vault cannot be closed.");
+    expect(html).toContain("Only your pension key can withdraw, and SaverFi cannot pause or block a SOL withdrawal. The vault keeps 0.00128524 SOL of rent, which Solana requires, and a vault cannot be closed.");
     expect(buttons("Withdraw SOL").map((button) => button.disabled)).toEqual([true]);
     expect(buttons("Max")).toHaveLength(1);
   });
@@ -169,7 +169,7 @@ describe("WithdrawCard", () => {
   it("no vault says to create it first; tokens neither listed nor read by address are never offered", () => {
     expect(render(screen({ kind: "ready", state: stateWith({ vault: { status: "missing", address: VAULT } }) }))).toContain("Create your vault first.");
     const html = render(screen({ kind: "ready", state: stateWith({ holdings: { status: "unreadable", items: [] }, vaultTokenAccounts: { status: "unreadable", items: [] } }) }));
-    expect(html).toContain("SIP could not read the vault&#x27;s tokens just now.");
+    expect(html).toContain("SaverFi could not read the vault&#x27;s tokens just now.");
     expect(buttons("All")).toHaveLength(0);
   });
 
@@ -188,9 +188,9 @@ describe("WithdrawCard", () => {
     const build = vi.fn(async () => ({ ok: false as const, status: 422, code: "not_held", message: "Your vault holds none of this token.", retryAfterSeconds: null, body: {} }));
     const value = screen({ kind: "ready", state }, { build: build as unknown as VaultApi["build"] });
     const html = render(value);
-    expect(html).toContain("SIP could not list every token account your vault owns just now, so only its own wSOL, USDC and SPYx accounts are shown.");
+    expect(html).toContain("SaverFi could not list every token account your vault owns just now, so only its own wSOL, USDC and SPYx accounts are shown.");
     expect(html).toContain("12.5");
-    expect(html).not.toContain("SIP could not read the vault&#x27;s tokens just now.");
+    expect(html).not.toContain("SaverFi could not read the vault&#x27;s tokens just now.");
     expect(buttons("All")).toHaveLength(1);
     buttons("All")[0]?.onClick?.(CLICK);
     await vi.waitFor(() => expect(value.refresh).toHaveBeenCalledTimes(1));

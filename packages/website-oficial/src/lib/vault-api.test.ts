@@ -22,7 +22,7 @@ describe("words", () => {
     [6005, "The vault holds less of this token than that."],
     [6006, "more than zero"],
     [6013, "refused this rule"],
-    [6023, "SIP is paused for settling and investing. Withdrawals are not affected."],
+    [6023, "SaverFi is paused for settling and investing. Withdrawals are not affected."],
     [6035, "A trading wallet cannot be your pension key."],
     [6036, "consent is missing"],
     [6037, "not this trading wallet"],
@@ -37,7 +37,7 @@ describe("words", () => {
     expect(programErrorWords(1)).toContain("error 1");
   });
 
-  it("the token issuers' freeze and pause, read from the logs; SIP's own pause is not the issuer's", () => {
+  it("the token issuers' freeze and pause, read from the logs; SaverFi's own pause is not the issuer's", () => {
     expect(transactionErrorWords(instructionError(0x11), ["Program TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb failed: custom program error: 0x11"])).toBe(
       "The issuer has frozen this token account. SOL withdrawals still work.",
     );
@@ -70,7 +70,7 @@ describe("words", () => {
     expect(vaultFailureWords(failure("simulation_failed", { err: "BlockhashNotFound", logs: [] }))).toBe(FAILURE_COPY.blockhashExpired);
     expect(vaultFailureWords({ ...failure("rate_limited", {}, 429), retryAfterSeconds: 12 })).toBe("Too many requests just now. Try again in 12 s.");
     expect(vaultFailureWords(failure("network", {}, 0))).toBe(FAILURE_COPY.network);
-    expect(vaultFailureWords(failure("unreadable", {}, 502))).toBe("SIP could not read Solana just now. Nothing was offered to sign.");
+    expect(vaultFailureWords(failure("unreadable", {}, 502))).toBe("SaverFi could not read Solana just now. Nothing was offered to sign.");
   });
 
   it.each([
@@ -78,14 +78,14 @@ describe("words", () => {
     ["above_withdrawable", 422, "That is more than the vault can release: it keeps its rent reserve."],
     ["not_held", 422, "Your vault holds none of this token."],
     ["above_holding", 422, "Your vault holds less of this token than that."],
-    ["price_unavailable", 502, "SIP could not read today's prices from Raydium, so no floor was set. Nothing was built."],
-    ["mint_unexpected", 409, "A token this policy names is not held by the token program SIP expects. Nothing was built."],
+    ["price_unavailable", 502, "SaverFi could not read today's prices from Raydium, so no floor was set. Nothing was built."],
+    ["mint_unexpected", 409, "A token this policy names is not held by the token program SaverFi expects. Nothing was built."],
   ])("the build route's %s is shown as its own words", (code, status, message) => {
     expect(vaultFailureWords(failure(code, {}, status, message))).toBe(message);
   });
 
   it("the build route's refusals are shown as its words; an invalid rule lists its problems", () => {
-    expect(vaultFailureWords(failure("config_missing", {}, 409, "Linking opens once SIP's program is configured on Solana."))).toBe("Linking opens once SIP's program is configured on Solana.");
+    expect(vaultFailureWords(failure("config_missing", {}, 409, "Linking opens once SaverFi's program is configured on Solana."))).toBe("Linking opens once SaverFi's program is configured on Solana.");
     expect(vaultFailureWords(failure("invalid_policy", { problems: ["maxContribution must be a u64 greater than zero"] }, 400, "The program would refuse this vault rule."))).toBe(
       "The program would refuse this vault rule. MaxContribution must be a u64 greater than zero.",
     );

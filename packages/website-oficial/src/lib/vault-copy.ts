@@ -32,7 +32,7 @@ export const shortAddress = (address: string): string => (address.length > 10 ? 
 export const VAULT_COPY = {
   title: "Vault",
   loading: "Reading your vault on Solana",
-  unreadable: "SIP could not read Solana just now. Nothing was offered to sign.",
+  unreadable: "SaverFi could not read Solana just now. Nothing was offered to sign.",
   retry: "Retry",
   noVault: "No vault yet",
   noVaultDescription: "Your vault holds what your trading wallets put aside, and only your pension key can take it out.",
@@ -62,7 +62,7 @@ export const VAULT_COPY = {
   volumeRule: (rate: string, maxContribution: string, walletReserve: string): string =>
     `Volume · ${rate} of the SOL value of every buy and sell your trading wallet makes, win or lose. At most ${maxContribution} SOL per settlement, and never leaving less than ${walletReserve} SOL in the trading wallet.`,
   bothModes: (rent: string): string =>
-    `Only your pension key can withdraw from the vault, and SIP cannot pause or block a SOL withdrawal. The keeper can only move SOL from a linked trading wallet into this vault, never out of it. Creating the vault costs ${rent} SOL of rent plus the network fee. Solana keeps that rent in the vault, and a vault cannot be closed, so it does not come back.`,
+    `Only your pension key can withdraw from the vault, and SaverFi cannot pause or block a SOL withdrawal. The keeper can only move SOL from a linked trading wallet into this vault, never out of it. Creating the vault costs ${rent} SOL of rent plus the network fee. Solana keeps that rent in the vault, and a vault cannot be closed, so it does not come back.`,
   cost: (rent: string, fees: string): string => `Cost: ${rent} SOL of rent that does not come back, plus ${fees} SOL of network fees.`,
   costUnknown: "The rent could not be read just now; Phantom shows the total before you approve.",
   aboutUsd: (usd: string): string => `≈ ${usd}`,
@@ -76,10 +76,10 @@ export const LINK_COPY = {
   linkThis: "Link this wallet",
   cancel: "Cancel",
   needsVault: "Create your vault first.",
-  needsConfig: "Linking opens once SIP's program is configured on Solana. Your vault, investing and withdrawals already work.",
-  paused: "SIP is paused, so linking waits. Withdrawals still work.",
+  needsConfig: "Linking opens once SaverFi's program is configured on Solana. Your vault, investing and withdrawals already work.",
+  paused: "SaverFi is paused, so linking waits. Withdrawals still work.",
   busy: "Another signature is in progress on this screen.",
-  unreadable: "SIP could not read whether this wallet is linked. Nothing was offered to sign.",
+  unreadable: "SaverFi could not read whether this wallet is linked. Nothing was offered to sign.",
   noSigner: "Until this wallet has the keeper's signer, nothing is put aside from it.",
   panel: (linkRent: string): string =>
     `Linking takes three signatures. Your trading wallet signs a consent naming this vault. Phantom pays ${linkRent} SOL of rent (returned if you unlink) and approves. Then your trading wallet co-signs. A wallet can be linked to one vault at a time.`,
@@ -87,8 +87,8 @@ export const LINK_COPY = {
   walletIsPension: "A trading wallet cannot be your pension key.",
   tradingNotReady: "This trading wallet is not ready in this session. Reload the page, then try again.",
   consentMismatch: "The server asked your trading wallet to sign something that is not this link's consent. Nothing was signed.",
-  consentTitle: "Link to your SIP vault",
-  consentDescription: (pensionKeyShort: string): string => `Consent for SIP to link this trading wallet to the vault of pension key ${pensionKeyShort}. It moves no funds.`,
+  consentTitle: "Link to your SaverFi vault",
+  consentDescription: (pensionKeyShort: string): string => `Consent for SaverFi to link this trading wallet to the vault of pension key ${pensionKeyShort}. It moves no funds.`,
   consentButton: "Sign consent",
   consentNotSignature: "Your trading wallet did not return a 64-byte signature for the consent. Nothing was linked.",
   approvalPassedTwice: "Solana's approval window passed twice. Try again when ready.",
@@ -98,7 +98,7 @@ export const LINK_COPY = {
 export const INVEST_COPY = {
   title: "Investing",
   needsVault: "Create your vault first.",
-  policyUnreadable: "SIP could not read your investment policy just now. Nothing was offered to sign.",
+  policyUnreadable: "SaverFi could not read your investment policy just now. Nothing was offered to sign.",
   basket: "Basket",
   rule: "Rule",
   buysEach: (usd: string): string => `Buys each time ${usd} of USDC is ready`,
@@ -160,7 +160,7 @@ export const WITHDRAW_COPY = {
   zero: "Enter more than 0 SOL.",
   aboveWithdrawable: (max: string): string => `The vault can release at most ${max} SOL.`,
   solRule: (rentFloor: string): string =>
-    `Only your pension key can withdraw, and SIP cannot pause or block a SOL withdrawal. The vault keeps ${rentFloor} SOL of rent, which Solana requires, and a vault cannot be closed.`,
+    `Only your pension key can withdraw, and SaverFi cannot pause or block a SOL withdrawal. The vault keeps ${rentFloor} SOL of rent, which Solana requires, and a vault cannot be closed.`,
   empty: "Savings arrive from linked trading wallets. To try a withdrawal now, send a little SOL to the vault address from your wallet app.",
   /** Shown beside the SOL section while the vault's investment policy is on. */
   investingOn:
@@ -170,9 +170,9 @@ export const WITHDRAW_COPY = {
   vaultAddress: "Vault address",
   tokens: "Tokens",
   noTokens: "The vault holds no tokens yet.",
-  tokensUnreadable: "SIP could not read the vault's tokens just now. Nothing was offered to sign.",
+  tokensUnreadable: "SaverFi could not read the vault's tokens just now. Nothing was offered to sign.",
   /** When the vault's token listing could not be read and its own accounts, read by address, could: `symbols` is "wSOL, USDC and SPYx". */
-  tokensOwnAccountsOnly: (symbols: string): string => `SIP could not list every token account your vault owns just now, so only its own ${symbols} accounts are shown.`,
+  tokensOwnAccountsOnly: (symbols: string): string => `SaverFi could not list every token account your vault owns just now, so only its own ${symbols} accounts are shown.`,
   ownAccountsEmpty: "Those accounts hold no tokens.",
   share: (percent: number): string => (percent === 100 ? "All" : `${percent} %`),
   wsolNote: "Arrives in your wallet as SOL.",
@@ -201,7 +201,7 @@ export const FAILURE_COPY = {
   phantomNotConnected: "Phantom is not connected to this page. Open Phantom, unlock it, and reload.",
   phantomDeclined: "Phantom did not approve. Nothing was sent.",
   tradingDeclined: "Your trading wallet did not sign. Nothing was sent.",
-  network: "SIP could not be reached. Check your connection, then try again.",
+  network: "SaverFi could not be reached. Check your connection, then try again.",
   unavailable: "Solana is not available on this deployment right now.",
   upstream: "Solana did not answer just now. Nothing was sent. Try again.",
   rateLimited: (seconds: number | null): string =>
@@ -217,9 +217,9 @@ export const FAILURE_COPY = {
       ? "Your pension key does not hold enough SOL for this action's rent and fees. Add SOL in Phantom, then try again. Nothing moved."
       : `Your pension key needs more SOL: this action costs about ${cost} SOL in rent and fees. Add SOL in Phantom, then try again. Nothing moved.`,
   unknown: "Something went wrong. Nothing was sent.",
-  builtMismatch: (detail: string): string => `SIP's server sent a transaction that is not what you asked for (${detail}). Nothing was signed.`,
+  builtMismatch: (detail: string): string => `SaverFi's server sent a transaction that is not what you asked for (${detail}). Nothing was signed.`,
   signedMismatch: (detail: string): string => `Phantom changed the transaction beyond its fee (${detail}). Nothing was sent.`,
-  foreignProgram: (label: string): string => `Phantom added an instruction for ${label}, which SIP does not relay. Nothing was sent.`,
-  unreadableBuilt: "SIP's server sent something that is not a transaction. Nothing was signed.",
-  unreadableSigned: "Phantom returned something that is not a transaction SIP can read. Nothing was sent.",
+  foreignProgram: (label: string): string => `Phantom added an instruction for ${label}, which SaverFi does not relay. Nothing was sent.`,
+  unreadableBuilt: "SaverFi's server sent something that is not a transaction. Nothing was signed.",
+  unreadableSigned: "Phantom returned something that is not a transaction SaverFi can read. Nothing was sent.",
 } as const;

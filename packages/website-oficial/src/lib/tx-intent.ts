@@ -65,7 +65,7 @@ export class IntentError extends Error {
 export const LIGHTHOUSE_PROGRAM = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
 
 const PROGRAM_NAMES: Readonly<Record<string, string>> = {
-  [SIP_PROGRAM_ID]: "SIP",
+  [SIP_PROGRAM_ID]: "SaverFi",
   [COMPUTE_BUDGET_PROGRAM]: "ComputeBudget",
   [ED25519_PROGRAM]: "Ed25519SigVerify",
   [LIGHTHOUSE_PROGRAM]: "Lighthouse",
@@ -157,12 +157,12 @@ interface SipInstruction {
 /** The one SIP instruction, its accounts by IDL name and its decoded arguments; a detail string when it is not one. */
 function readSip(parsed: ParsedLegacyMessage): SipInstruction | string {
   const indexes = parsed.instructions.flatMap((instruction, index) => (instruction.programId === SIP_PROGRAM_ID ? [index] : []));
-  if (indexes.length !== 1) return "it does not hold exactly one SIP instruction";
+  if (indexes.length !== 1) return "it does not hold exactly one SaverFi instruction";
   const index = indexes[0]!;
   const instruction = parsed.instructions[index]!;
   const matched = matchInstruction(instruction.data);
-  if (matched === null || !isOwnerInstruction(matched.name)) return "its SIP instruction is not one your pension key signs";
-  if (instruction.accountKeys.length !== matched.accounts.length) return "its SIP instruction lists the wrong number of accounts";
+  if (matched === null || !isOwnerInstruction(matched.name)) return "its SaverFi instruction is not one your pension key signs";
+  if (instruction.accountKeys.length !== matched.accounts.length) return "its SaverFi instruction lists the wrong number of accounts";
   const accounts: Record<string, string> = {};
   for (const [position, account] of matched.accounts.entries()) {
     const at = instruction.accountKeys[position]!;
@@ -173,7 +173,7 @@ function readSip(parsed: ParsedLegacyMessage): SipInstruction | string {
   try {
     args = decodeArgs(matched.name, instruction.data);
   } catch {
-    return "its SIP instruction's arguments do not decode";
+    return "its SaverFi instruction's arguments do not decode";
   }
   return { name: matched.name, index, accounts, args, instruction };
 }
@@ -225,7 +225,7 @@ export function checkBuiltIntent(bytes: Uint8Array, intent: OwnerIntent): ReadTr
     microLamports?.kind !== "unitPrice" ||
     microLamports.microLamports !== OWNER_TX_MICROLAMPORTS
   ) {
-    throw refuse("its compute budget is not SIP's");
+    throw refuse("its compute budget is not SaverFi's");
   }
 
   const sip = readSip(parsed);
@@ -268,7 +268,7 @@ export function checkSignedIntent(bytes: Uint8Array, built: ReadTransaction, int
   const relayed = creates.length > 0 ? RELAYED_WITH_TOKEN_ACCOUNTS : RELAYED;
   const foreign = parsed.instructions.find((instruction) => !relayed.has(instruction.programId));
   if (foreign !== undefined) throw new IntentError(FAILURE_COPY.foreignProgram(programLabel(foreign.programId)));
-  if (parsed.instructions.length > 4 + creates.length) throw refuse("it holds more instructions than SIP relays");
+  if (parsed.instructions.length > 4 + creates.length) throw refuse("it holds more instructions than SaverFi relays");
   const signers = signersProblem(parsed, tx.signatures, intent.signers);
   if (signers !== null) throw refuse(signers);
   if (parsed.recentBlockhash !== built.parsed.recentBlockhash) throw refuse("its blockhash changed");
@@ -280,7 +280,7 @@ export function checkSignedIntent(bytes: Uint8Array, built: ReadTransaction, int
   if (typeof now === "string") throw refuse(now);
   if (typeof before === "string") throw refuse(before);
   if (!bytesEqual(now.instruction.data, before.instruction.data) || now.instruction.accountKeys.join() !== before.instruction.accountKeys.join()) {
-    throw refuse("its SIP instruction changed");
+    throw refuse("its SaverFi instruction changed");
   }
 
   const createsNow = parsed.instructions.flatMap((instruction, index) => (instruction.programId === ATA_PROGRAM ? [{ instruction, index }] : []));

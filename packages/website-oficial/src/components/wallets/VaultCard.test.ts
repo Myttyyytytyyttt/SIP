@@ -98,7 +98,7 @@ describe("VaultCard", () => {
     for (const view of [{ kind: "unreadable", message: "x" } as const, { kind: "ready", state: stateWith({ vault: { status: "unreadable", address: VAULT } }) } as const]) {
       const value = screen(view);
       const html = render(value);
-      expect(html).toContain("SIP could not read Solana just now. Nothing was offered to sign.");
+      expect(html).toContain("SaverFi could not read Solana just now. Nothing was offered to sign.");
       expect(buttons("Create vault")).toHaveLength(0);
       buttons("Retry")[0]?.onClick?.(CLICK);
       expect(value.refresh.mock.calls).toStrictEqual([[]]);

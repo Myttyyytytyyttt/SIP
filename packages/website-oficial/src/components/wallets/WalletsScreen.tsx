@@ -145,7 +145,7 @@ function PensionKeyCard({ address, onDisconnect }: { address: string; onDisconne
         <CardTitle>Pension key</CardTitle>
         <CardDescription>
           The wallet you connected. It owns your pension and is the only key that can withdraw. It stays in your
-          wallet app: SIP never holds it and never exports it.
+          wallet app: SaverFi never holds it and never exports it.
         </CardDescription>
         <CardAction>
           <Button type="button" variant="outline" size="sm" onClick={onDisconnect}>

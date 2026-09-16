@@ -105,13 +105,13 @@ describe("TradingWalletRow's link control", () => {
   it("the program not configured: Link to vault is disabled and says why", () => {
     const { html } = render({ config: "missing" });
     expect(buttons("Link to vault").map((button) => button.disabled)).toEqual([true]);
-    expect(html).toContain("Linking opens once SIP&#x27;s program is configured on Solana. Your vault, investing and withdrawals already work.");
+    expect(html).toContain("Linking opens once SaverFi&#x27;s program is configured on Solana. Your vault, investing and withdrawals already work.");
   });
 
   it("no vault, or a paused protocol: disabled with its reason", () => {
     expect(render({ vault: "missing" }).html).toContain("Create your vault first.");
     expect(buttons("Link to vault")[0]?.disabled).toBe(true);
-    expect(render({ paused: true }).html).toContain("SIP is paused, so linking waits. Withdrawals still work.");
+    expect(render({ paused: true }).html).toContain("SaverFi is paused, so linking waits. Withdrawals still work.");
     expect(buttons("Link to vault")[0]?.disabled).toBe(true);
   });
 
@@ -130,7 +130,7 @@ describe("TradingWalletRow's link control", () => {
 
   it("an unreadable link is never offered", () => {
     const { html } = render({ link: "unreadable" });
-    expect(html).toContain("SIP could not read whether this wallet is linked.");
+    expect(html).toContain("SaverFi could not read whether this wallet is linked.");
     expect(buttons("Link to vault")).toHaveLength(0);
   });
 

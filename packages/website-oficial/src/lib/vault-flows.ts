@@ -320,12 +320,12 @@ function floorsProblem(floors: PolicyFloorsJson | undefined): string | null {
     }
   };
   if (floors === undefined || floors === null) return "it carries no price floors";
-  if (floors.marginBps?.convert !== CONVERT_FLOOR_MARGIN_BPS || floors.marginBps?.leg !== LEG_FLOOR_MARGIN_BPS) return "its price margins are not SIP's";
+  if (floors.marginBps?.convert !== CONVERT_FLOOR_MARGIN_BPS || floors.marginBps?.leg !== LEG_FLOOR_MARGIN_BPS) return "its price margins are not SaverFi's";
   const convert = rawFrom(floors.convertWad);
   if (convert === null || convert === 0n || convert !== margin(rawFrom(floors.liveConvertWad), CONVERT_FLOOR_MARGIN_BPS)) {
     return "its SOL floor is not 90 % of the price it read";
   }
-  if (!Array.isArray(floors.legs) || floors.legs.length !== OFFERED_LEGS.length) return "its basket is not SIP's";
+  if (!Array.isArray(floors.legs) || floors.legs.length !== OFFERED_LEGS.length) return "its basket is not SaverFi's";
   for (const [index, leg] of OFFERED_LEGS.entries()) {
     const entry = floors.legs[index];
     const wad = rawFrom(entry?.wad);
@@ -347,7 +347,7 @@ async function tokenAccountCreates(pensionKey: string, vault: string, listed: In
     Array.isArray(listed) &&
     listed.length === targets.length &&
     listed.every((entry, index) => entry?.mint === targets[index]!.mint && entry.tokenProgram === targets[index]!.tokenProgram && typeof entry.create === "boolean");
-  if (!matches) throw new IntentError(FAILURE_COPY.builtMismatch("its list of your vault's token accounts is not SIP's"));
+  if (!matches) throw new IntentError(FAILURE_COPY.builtMismatch("its list of your vault's token accounts is not SaverFi's"));
   const creates: TokenAccountCreateIntent[] = [];
   for (const [index, target] of targets.entries()) {
     if (listed[index]!.create !== true) continue;

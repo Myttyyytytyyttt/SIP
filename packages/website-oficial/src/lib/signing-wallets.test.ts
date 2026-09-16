@@ -90,8 +90,8 @@ describe("the trading wallet's signers", () => {
           options: {
             uiOptions: {
               showWalletUIs: false,
-              title: "Link to your SIP vault",
-              description: "Consent for SIP to link this trading wallet to the vault of pension key Pens…1111. It moves no funds.",
+              title: "Link to your SaverFi vault",
+              description: "Consent for SaverFi to link this trading wallet to the vault of pension key Pens…1111. It moves no funds.",
               buttonText: "Sign consent",
             },
           },

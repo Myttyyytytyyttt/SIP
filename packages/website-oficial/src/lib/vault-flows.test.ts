@@ -136,7 +136,7 @@ function harness() {
           ),
         );
       } catch (error) {
-        if (error instanceof LinkConsentError) return failure(422, "link_consent_invalid", { message: "Your trading wallet's signature does not match SIP's link consent." });
+        if (error instanceof LinkConsentError) return failure(422, "link_consent_invalid", { message: "Your trading wallet's signature does not match SaverFi's link consent." });
         throw error;
       }
     }
@@ -322,9 +322,9 @@ describe("investPolicyFlow", () => {
   it.each<[string, (h: Harness) => Answer]>([
     ["a SPYx floor lower than the answer shows", (h) => policyAnswer(h.pensionKey, { legFloor: SPYX_FLOOR - 1n })],
     ["a cap the person did not choose", (h) => policyAnswer(h.pensionKey, { maxPerCall: 2_000_000_000n })],
-    ["floors that are not SIP's margins under the prices read", (h) => policyAnswer(h.pensionKey, { convertFloor: LIVE_CONVERT / 2n, floors: (floors) => ({ ...floors, convertWad: LIVE_CONVERT / 2n }) })],
+    ["floors that are not SaverFi's margins under the prices read", (h) => policyAnswer(h.pensionKey, { convertFloor: LIVE_CONVERT / 2n, floors: (floors) => ({ ...floors, convertWad: LIVE_CONVERT / 2n }) })],
     ["a SOL floor of zero, which would turn conversion off", (h) => policyAnswer(h.pensionKey, { convertFloor: 0n, floors: (floors) => ({ ...floors, convertWad: 0n, liveConvertWad: 0n }) })],
-    ["a basket that is not SIP's", (h) => policyAnswer(h.pensionKey, { floors: (floors) => ({ ...floors, legs: [] }) })],
+    ["a basket that is not SaverFi's", (h) => policyAnswer(h.pensionKey, { floors: (floors) => ({ ...floors, legs: [] }) })],
     [
       "a token account paid by another key",
       (h) => {
