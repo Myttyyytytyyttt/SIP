@@ -432,6 +432,17 @@ function chartOf(settlements: readonly LoadedSettlement[], lifetimeSaved: bigint
   const points: LiveChartPoint[] = [];
   const totalLoaded = oldestFirst.reduce((total, entry) => total + entry.paid, 0n);
 
+  // THE LOADED HISTORY HOLDS MORE THAN THE VAULT'S OWN TOTAL, so working back
+  // from lifetimeSaved would start the curve below zero — a "saved so far" that
+  // is less than nothing. It is reachable whenever the snapshot's slot is
+  // unknown (readers.ts leaves it null when the RPC answer omits context.slot),
+  // because settlementsOf can then leave nothing out: a settlement that landed
+  // between the snapshot and the activity page is counted here while the
+  // vault's lifetimeSaved does not include it yet. Coverage cannot be verified,
+  // so no curve is drawn rather than a wrong one — the stats below still report
+  // every settlement that was loaded, and the feed still lists them.
+  if (lifetimeSaved < totalLoaded) return null;
+
   const oldest = oldestFirst[0]!;
   const baselineAt = oldest.blockTime === null ? new Date(nowMs).toISOString() : new Date((oldest.blockTime - 1) * 1_000).toISOString();
   points.push({ at: baselineAt, totalLamports: lifetimeSaved - totalLoaded });

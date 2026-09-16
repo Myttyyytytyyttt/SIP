@@ -241,6 +241,19 @@ describe("the chart is worked backwards from the vault's own total", () => {
     expect(view.chart!.map((point) => point.totalLamports)).toEqual([40_000_000n, 60_000_000n, 60_000_000n]);
   });
 
+  it("draws NO chart when the loaded settlements exceed the vault's own total: a curve cannot start below zero", () => {
+    // An RPC answer without context.slot leaves the snapshot's slot null, which
+    // turns the coverage guard off — so 0.1 SOL of loaded settlements sit over
+    // a lifetime total of 0.06 SOL, and the baseline would be −0.04 SOL.
+    const history = activity([entry("sigNew", T2, [settledEvent("40000000")], 9_999), entry("sig1", T1, [settledEvent("60000000")])]);
+    const view = model(snapshot({ slot: null }), history);
+    expect(view.chart).toBeNull();
+    // Nothing is hidden by that: both settlements are still counted and listed.
+    expect(view.stats.loadedSettlements).toBe(2);
+    expect(view.stats.loadedSavedLamports).toBe(100_000_000n);
+    expect(view.rows).toHaveLength(2);
+  });
+
   it("is null until a settlement is loaded: the chart starts with the first one", () => {
     expect(model(snapshot(), activity([])).chart).toBeNull();
     expect(model(snapshot(), null).chart).toBeNull();
