@@ -20,10 +20,16 @@
 //      over the message, for EVERY required signer              missing_signature / bad_signature
 //   7  Nuvem's program nowhere in the account keys              old_program
 //   8  1..4 instructions, each for SIP, ComputeBudget or
-//      Ed25519SigVerify                                         instruction_count / program_not_allowed
+//      Ed25519SigVerify, not counting 8c's                      instruction_count / program_not_allowed
 //  8b  the Associated Token Account program only beside
 //      set_invest_policy, and only its instructions may take the
 //      count past 4, to at most 6                               program_not_allowed / instruction_count
+//  8c  Lighthouse only as the wallet's checks, by
+//      client/lighthouse.ts checkWalletGuards: after every other
+//      instruction, at most 6, each one assertion kind Phantom
+//      adds, exactly encoded, about one account the others name,
+//      adding no key but its program and no privilege to any    lighthouse_misplaced / lighthouse_count /
+//                                                               lighthouse_instruction / lighthouse_accounts
 //   9  exactly one SIP instruction, an owner instruction, whose
 //      arguments decode exactly                                 instruction_count / unknown_discriminator /
 //                                                               instruction_not_allowed
@@ -64,6 +70,15 @@
 // an Ed25519 instruction anywhere else is refused because nothing SIP builds
 // puts one there.
 //
+// WHY 8c. Phantom signs on mainnet by appending Lighthouse assertions: each fails
+// the transaction if an account did not end up as Phantom's simulation showed.
+// They are the only instructions relayed that SaverFi did not build, so they are
+// held to what an assertion is. The browser checks Phantom's bytes against the
+// build with the same function; this verifier never saw the build, so its
+// reference for privileges is what SaverFi's own instructions declare (the IDL's
+// metas, CreateIdempotent's, the fee payer's). Without a guard, nothing about
+// rule 8c runs.
+//
 // WHY 8b AND 13b. set_invest_policy creates no token account, and the owner pays
 // for the vault's wSOL, USDC and leg accounts in the same transaction. Bound this
 // way, a CreateIdempotent can only make a token account owned by the signer's own
@@ -71,9 +86,9 @@
 // no token and sends no lamport anywhere but into that account's rent. A mint
 // whose owner is not the named token program fails in simulation.
 
-import { VersionedTransaction } from "@solana/web3.js";
+import { VersionedTransaction, type MessageCompiledInstruction } from "@solana/web3.js";
 
-import { ATA_PROGRAM, COMPUTE_BUDGET_PROGRAM, ED25519_PROGRAM, SYSTEM_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, WSOL_MINT } from "../client/addresses";
+import { ATA_PROGRAM, COMPUTE_BUDGET_PROGRAM, ED25519_PROGRAM, LIGHTHOUSE_PROGRAM, SYSTEM_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, WSOL_MINT } from "../client/addresses";
 import { base58Encode } from "../client/base58";
 import { base64Encode } from "../client/base64";
 import { decodeArgs } from "../client/borsh";
@@ -86,7 +101,9 @@ import {
   matchInstruction,
   type OwnerInstructionName,
 } from "../client/idl";
+import { WALLET_GUARD_REFUSALS, checkWalletGuards, readLighthouseGuard } from "../client/lighthouse";
 import { linkConsentMessage } from "../client/link-consent";
+import type { KeyPrivileges } from "../client/message";
 import { ed25519SignatureValid, readEd25519Verify, type Ed25519Verify } from "./ed25519";
 import { deriveAta, deriveConfigPda, deriveLinkPda, deriveVaultPda } from "./pda";
 import { MAX_TX_BYTES } from "./relay-policy";
@@ -125,6 +142,8 @@ export const VERIFY_REFUSALS = [
   "link_consent_bad_signature",
   /** A token-account instruction beside set_invest_policy that is not CreateIdempotent of the owner's own vault's account for a policy mint. */
   "vault_account_invalid",
+  /** Rule 8c: a Lighthouse instruction that is not a check the wallet may add (client/lighthouse.ts). */
+  ...WALLET_GUARD_REFUSALS,
 ] as const;
 export type VerifyRefusal = (typeof VERIFY_REFUSALS)[number];
 
@@ -216,6 +235,41 @@ function bindAccounts(
   }
 }
 
+const READ_ONLY: KeyPrivileges = { signer: false, writable: false };
+/** CreateIdempotent's accounts: the funder signs and pays, the account is created; wallet, mint, System and token program are read. */
+const CREATE_IDEMPOTENT_PRIVILEGES: readonly KeyPrivileges[] = [
+  { signer: true, writable: true },
+  { signer: false, writable: true },
+];
+
+/**
+ * Rule 8c's reference: the signer and writable flags SaverFi's own instructions
+ * declare for each key they name (the fee payer's, the IDL's metas for the SIP
+ * instruction, CreateIdempotent's for a token-account creation, read-only for
+ * every program), which is what the message carries without the wallet's checks.
+ */
+function declaredPrivileges(keys: readonly string[], compiled: readonly MessageCompiledInstruction[]): Map<string, KeyPrivileges> {
+  const declared = new Map<string, KeyPrivileges>();
+  const add = (key: string, privileges: KeyPrivileges): void => {
+    const was = declared.get(key) ?? READ_ONLY;
+    declared.set(key, { signer: was.signer || privileges.signer, writable: was.writable || privileges.writable });
+  };
+  add(keys[0]!, { signer: true, writable: true });
+  for (const instruction of compiled) {
+    const program = keys[instruction.programIdIndex]!;
+    if (program === LIGHTHOUSE_PROGRAM) continue;
+    add(program, READ_ONLY);
+    const metas: readonly KeyPrivileges[] =
+      program === SIP_PROGRAM_ID
+        ? (matchInstruction(instruction.data)?.accounts ?? []).map((account) => ({ signer: account.signer === true, writable: account.writable === true }))
+        : program === ATA_PROGRAM
+          ? CREATE_IDEMPOTENT_PRIVILEGES
+          : [];
+    instruction.accountKeyIndexes.forEach((index, position) => add(keys[index]!, metas[position] ?? READ_ONLY));
+  }
+  return declared;
+}
+
 interface TokenAccountCreate {
   readonly position: number;
   readonly data: Uint8Array;
@@ -299,11 +353,13 @@ export function verifySignedTransaction(bytes: Uint8Array, context: { readonly p
 
   const compiled = message.compiledInstructions;
   // 8 and 8b: only token-account instructions count past MAX_INSTRUCTIONS; whether they may stand at all waits for the SIP instruction.
+  // The wallet's Lighthouse checks are not counted here: rule 8c bounds them.
   const tokenAccountInstructions = compiled.filter((instruction) => keys[instruction.programIdIndex] === ATA_PROGRAM).length;
-  if (compiled.length < 1 || compiled.length > MAX_INSTRUCTIONS_WITH_VAULT_ACCOUNTS || compiled.length - tokenAccountInstructions > MAX_INSTRUCTIONS) {
+  const own = compiled.length - compiled.filter((instruction) => keys[instruction.programIdIndex] === LIGHTHOUSE_PROGRAM).length;
+  if (own < 1 || own > MAX_INSTRUCTIONS_WITH_VAULT_ACCOUNTS || own - tokenAccountInstructions > MAX_INSTRUCTIONS) {
     return refuse(
       "instruction_count",
-      `${compiled.length} instructions; 1 to ${MAX_INSTRUCTIONS} are accepted, or up to ${MAX_INSTRUCTIONS_WITH_VAULT_ACCOUNTS} when those past ${MAX_INSTRUCTIONS} create the vault's token accounts`,
+      `${own} instructions besides the wallet's Lighthouse checks; 1 to ${MAX_INSTRUCTIONS} are accepted, or up to ${MAX_INSTRUCTIONS_WITH_VAULT_ACCOUNTS} when those past ${MAX_INSTRUCTIONS} create the vault's token accounts`,
     );
   }
 
@@ -379,10 +435,28 @@ export function verifySignedTransaction(bytes: Uint8Array, context: { readonly p
       continue;
     }
 
+    if (program === LIGHTHOUSE_PROGRAM) {
+      // Rule 8c, once every instruction is read.
+      const read = readLighthouseGuard(data);
+      instructions.push({ program, name: read.ok ? read.kind : null });
+      continue;
+    }
+
     return refuse("program_not_allowed", `instructions for ${program} are not relayed`);
   }
 
   if (sip === null) return refuse("instruction_count", "no SaverFi instruction");
+
+  // 8c: the wallet's checks, before the rules that read positions.
+  const guards = checkWalletGuards(
+    {
+      keys,
+      privileges: keys.map((_, index) => ({ signer: message.isAccountSigner(index), writable: message.isAccountWritable(index) })),
+      instructions: compiled.map((instruction) => ({ programId: keys[instruction.programIdIndex]!, accountKeys: instruction.accountKeyIndexes.map((index) => keys[index]!), data: instruction.data })),
+    },
+    declaredPrivileges(keys, compiled),
+  );
+  if (!guards.ok) return refuse(guards.reason, guards.detail);
 
   // 8b: the vault's token accounts are created beside set_invest_policy, and nowhere else.
   if (tokenAccountCreates.length > 0 && sip.name !== "set_invest_policy") {

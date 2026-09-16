@@ -28,6 +28,7 @@ export * from "./confirm";
 export * from "./decoders";
 export * from "./diagnostics-types";
 export * from "./idl";
+export * from "./lighthouse";
 export * from "./link-consent";
 export * from "./message";
 export * from "./pda";

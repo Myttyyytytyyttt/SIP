@@ -12,6 +12,12 @@ export const MEMO_PROGRAM = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 export const INSTRUCTIONS_SYSVAR = "Sysvar1nstructions1111111111111111111111111";
 /** The native Ed25519 signature-verification precompile. link_wallet reads the wallet's consent back from it. */
 export const ED25519_PROGRAM = "Ed25519SigVerify111111111111111111111111111";
+/**
+ * Lighthouse, the assertion program Phantom adds checks for when it signs on
+ * mainnet. Immutable: its ProgramData has no upgrade authority. What SaverFi
+ * relays of it is client/lighthouse.ts.
+ */
+export const LIGHTHOUSE_PROGRAM = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
 
 /** Raydium CLMM: the venue program SIP's invest policy pins. */
 export const RAYDIUM_CLMM = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";

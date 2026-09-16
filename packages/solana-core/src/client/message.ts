@@ -133,6 +133,16 @@ export function isWritableIndex(message: ParsedLegacyMessage, index: number): bo
   return index < message.keys.length - numReadonlyUnsignedAccounts;
 }
 
+/** What the message lets a key do: sign, and be written. */
+export interface KeyPrivileges {
+  readonly signer: boolean;
+  readonly writable: boolean;
+}
+
+/** Every key's privileges, in key order. */
+export const messagePrivileges = (message: ParsedLegacyMessage): readonly KeyPrivileges[] =>
+  message.keys.map((_, index) => ({ signer: isSignerIndex(message, index), writable: isWritableIndex(message, index) }));
+
 export const isZeroSignature = (signature: Uint8Array): boolean => signature.every((byte) => byte === 0);
 
 /** `wire` with signature slot `index` replaced by `signature`; a new array, the input untouched. */
