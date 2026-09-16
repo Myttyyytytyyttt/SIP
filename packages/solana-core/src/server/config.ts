@@ -138,11 +138,16 @@ export function loadSolanaServerSettings(env: Env): SolanaSettingsLoad {
   // --- copied Nuvem configuration, by name ------------------------------------
   for (const name of names.filter((candidate) => candidate.startsWith("NUVEM_SOLANA_")).sort()) {
     const replacement = NUVEM_SOLANA_REPLACEMENTS[name];
+    // Of these names only the program id names a program, so the leaked upgrade key is
+    // said where it has a referent. An RPC URL, a WebSocket URL, a pool list or a signer
+    // id point at no program: those get the reason that holds for every name here.
+    const reason =
+      name === "NUVEM_SOLANA_PROGRAM_ID"
+        ? "the program that name points at has a leaked upgrade key, so an environment carrying it is refused rather than half-applied."
+        : "every NUVEM_SOLANA_* name is refused by name, so a copied environment is never half-applied.";
     problems.push({
       variable: name,
-      message:
-        `${name} is not a SaverFi setting. Its value was not read: the program that name points at has a leaked ` +
-        "upgrade key, so an environment carrying it is refused rather than half-applied.",
+      message: `${name} is not a SaverFi setting. Its value was not read: ${reason}`,
       howToFix:
         replacement === undefined || replacement === null
           ? `Remove ${name}; SaverFi has no counterpart (the browser's Solana RPC is always the same-origin /api/solana-rpc).`
