@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { MAX_STORED_ENTRIES, appendOlder, mergeHead, newestSignature } from "@/lib/live-activity-store";
+import { MAX_STORED_ENTRIES, appendOlder, headCursor, mergeHead, newestSignature } from "@/lib/live-activity-store";
 
 const row = (signature: string, note = "first") => ({ signature, note });
 const signaturesOf = (rows: readonly { signature: string }[]): string[] => rows.map((entry) => entry.signature);
@@ -70,5 +70,30 @@ describe("newestSignature", () => {
   it("is what the next poll asks `until`, and null before anything is held", () => {
     expect(newestSignature([row("c"), row("b")])).toBe("c");
     expect(newestSignature([])).toBeNull();
+  });
+});
+
+describe("headCursor: where the loaded history ends", () => {
+  it("A QUIET POLL KEEPS THE HEAD PAGE'S CURSOR", () => {
+    // The head page stopped at sig15 with more behind it. A minute later the
+    // poll asks `until` and nothing has landed, so the route lists none — and an
+    // under-full list carries nextBefore: null. That null is about the poll's
+    // own window; the history behind sig15 has not moved.
+    expect(headCursor({ polled: true, gap: false, page: null, held: "sig15" })).toBe("sig15");
+  });
+
+  it("…and keeps it even when the poll did find new rows to put on top", () => {
+    expect(headCursor({ polled: true, gap: false, page: "sig20", held: "sig15" })).toBe("sig15");
+  });
+
+  it("but a GAP replaced the head, so the page that replaced it defines the end", () => {
+    expect(headCursor({ polled: true, gap: true, page: "sig30", held: "sig15" })).toBe("sig30");
+    expect(headCursor({ polled: true, gap: true, page: null, held: "sig15" })).toBeNull();
+  });
+
+  it("a first read defines it outright, in both directions", () => {
+    expect(headCursor({ polled: false, gap: false, page: "sig15", held: null })).toBe("sig15");
+    // A complete first page ENDS the history, even against a stale held cursor.
+    expect(headCursor({ polled: false, gap: false, page: null, held: "stale" })).toBeNull();
   });
 });

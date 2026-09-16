@@ -29,7 +29,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { activityWasUnreadable, createLiveApi } from "@/lib/live-api";
-import { appendOlder, mergeHead, newestSignature } from "@/lib/live-activity-store";
+import { appendOlder, headCursor, mergeHead, newestSignature } from "@/lib/live-activity-store";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { toLiveDashboard } from "@/lib/live-model";
 import { MANUAL_FLOOR_MS, nextDelayMs, nextManualDelayMs, shouldRefreshOnShow } from "@/lib/live-schedule";
@@ -105,6 +105,8 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
   entriesRef.current = entries;
   const snapshotRef = useRef<LiveSnapshotJson | null>(null);
   snapshotRef.current = snapshot;
+  const activityMetaRef = useRef<Pick<LiveActivityJson, "status" | "nextBefore"> | null>(null);
+  activityMetaRef.current = activityMeta;
   const readingRef = useRef(false);
   const lastReadRef = useRef<number | null>(null);
   lastReadRef.current = lastReadAt;
@@ -156,9 +158,19 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
           // feed it could not read — never "No activity yet".
           setActivityUnreadable(activityWasUnreadable(page));
           if (page.ok && page.body.status === "exists") {
-            setActivityMeta({ status: page.body.status, nextBefore: page.body.nextBefore });
+            // A POLL DOES NOT REDEFINE WHERE THE HISTORY ENDS. It asked only for
+            // what is new, and its "nothing more to page" is about that window.
+            const cursor = headCursor({
+              polled: until !== null,
+              gap: page.body.gap,
+              page: page.body.nextBefore,
+              held: activityMetaRef.current?.nextBefore ?? null,
+            });
+            setActivityMeta({ status: page.body.status, nextBefore: cursor });
             setEntries((held) => (until === null ? mergeHead([], { entries: page.body.entries, gap: true }) : mergeHead(held, { entries: page.body.entries, gap: page.body.gap })));
-            if (until === null) setOlder((current) => ({ ...current, complete: page.body.nextBefore === null }));
+            // One place decides whether the loaded history is complete, and it
+            // is the same cursor the stats and Load older read.
+            setOlder((current) => ({ ...current, complete: cursor === null }));
           }
         }
         setFailures(0);

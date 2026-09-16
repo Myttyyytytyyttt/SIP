@@ -4,6 +4,7 @@
 import { SPYX_MINT, USDC_MINT, WSOL_MINT, base58Encode } from "@sip/solana-core/client";
 import { describe, expect, it } from "vitest";
 
+import { headCursor } from "@/lib/live-activity-store";
 import { toLiveDashboard } from "@/lib/live-model";
 import type { LiveActivityJson, LiveEntryJson, LiveSnapshotJson, VaultEventJson } from "@/lib/live-types";
 
@@ -292,6 +293,22 @@ describe("stats only claim what the loaded history covers", () => {
   it("today and this week are NULL when the loaded page does not reach back that far", () => {
     const partial = activity([entry("sig1", recent, [settledEvent("60000000")])], { nextBefore: "moreP1aceho1der" });
     const stats = model(snapshot(), partial).stats;
+    expect(stats.savedTodayLamports).toBeNull();
+    expect(stats.savedThisWeekLamports).toBeNull();
+  });
+
+  it("…and a quiet POLL a minute later does not turn that partial history complete", () => {
+    const partial = activity([entry("sig1", recent, [settledEvent("60000000")])], { nextBefore: "moreP1aceho1der" });
+
+    // What the store holds after a poll that found nothing new: the same rows,
+    // and the cursor the HEAD page defined — not the poll's own null.
+    const afterPoll = activity(partial.entries, {
+      nextBefore: headCursor({ polled: true, gap: false, page: null, held: partial.nextBefore }),
+    });
+    expect(afterPoll.nextBefore).toBe("moreP1aceho1der");
+
+    // A minute after loading, the week must not have shrunk to one page of it.
+    const stats = model(snapshot(), afterPoll).stats;
     expect(stats.savedTodayLamports).toBeNull();
     expect(stats.savedThisWeekLamports).toBeNull();
   });
