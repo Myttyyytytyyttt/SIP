@@ -36,6 +36,11 @@
 // page and the relay accept them, and the checks run on Lighthouse cloned from
 // mainnet, each landing within half of its compute limit.
 //
+// Step 18 signs them again for a fresh pension key the way Phantom sometimes
+// opens a transaction: a block of pre-state checks right after the compute
+// budget, one on each account SaverFi writes besides the pension key, before the
+// consent's Ed25519SigVerify for a link, and the usual checks after.
+//
 // NOT PROVABLE HERE: Privy's TEE signMessage and signTransaction, which checks
 // Phantom itself chooses and where, mainnet rent (the local validator charges 6,960
 // lamports per byte, so every rent is read, never typed), and Solscan pages (only
@@ -120,6 +125,9 @@ const tradingC = Keypair.generate();
 /** The pension key and trading wallet whose flows Phantom signs the mainnet way (step 17). */
 const ownerL = Keypair.generate();
 const tradingL = Keypair.generate();
+/** The pension key and trading wallet whose flows Phantom opens with pre-state checks (step 18). */
+const ownerP = Keypair.generate();
+const tradingP = Keypair.generate();
 /** The vault's SPYx holding: a copy of a real Token-2022 account, not the vault's ATA. */
 const spyxHolding = Keypair.generate();
 
@@ -151,11 +159,13 @@ const report = {
     spyxHolding: key(spyxHolding),
     ownerL: key(ownerL),
     tradingL: key(tradingL),
+    ownerP: key(ownerP),
+    tradingP: key(tradingP),
   },
   rents: {} as Record<string, string>,
   signatures: {} as Record<string, string>,
   units: {} as Record<string, { consumed: number; limit: number }>,
-  lighthouse: {} as Record<string, { consumed: number; limit: number; checks: number; signature: string }>,
+  lighthouse: {} as Record<string, { consumed: number; limit: number; checks: number; leading?: number; signature: string }>,
 };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -784,6 +794,96 @@ describe("web-boveda on the tested sip_vault", () => {
       2,
     );
     expect(toHex(dataOf(taken, 2))).toBe(OWNER_INSTRUCTION_DATA_HEX.WITHDRAW_TOKEN_100000000);
+    expect(await tokenAmount(vaultWsol)).toBe(0n);
+  });
+
+  it("18. Phantom's leading block: create, link, withdraw, a first policy and withdraw_token each land with pre-state checks right after the compute budget on every account SaverFi writes besides the pension key, and checks after, run by the cloned Lighthouse program, within half of each compute limit", async () => {
+    earlier(configured || undefined, "init_config");
+    const owner = key(ownerP);
+    const wallet = key(tradingP);
+    const vault = deriveVaultPda(owner).toBase58();
+    const tradingLink = deriveLinkPda(wallet).toBase58();
+    await airdrop(ownerP.publicKey, 20n * SOL);
+
+    const payerCheck = async (): Promise<TransactionInstruction> => lighthouseCheck(PHANTOM_CHECK.payer((await lamports(owner)) - SOL / 10n), owner);
+    const LIGHTHOUSE_SUCCESS = `Program ${LIGHTHOUSE_PROGRAM} success`;
+    const lands = async (label: string, name: OwnerInstructionName, result: FlowResult, own: readonly string[], leading: number, checks: number): Promise<VersionedTransactionResponse> => {
+      const signature = landedSignature(result);
+      const tx = await landed(signature);
+      const [limit, price, ...rest] = own;
+      expect(programsOf(tx), label).toEqual([limit, price, ...new Array<string>(leading).fill(LIGHTHOUSE_PROGRAM), ...rest, ...new Array<string>(checks).fill(LIGHTHOUSE_PROGRAM)]);
+      expect(tx.meta?.logMessages?.filter((line) => line === LIGHTHOUSE_SUCCESS), label).toHaveLength(leading + checks);
+      const consumed = tx.meta?.computeUnitsConsumed;
+      expect(typeof consumed, label).toBe("number");
+      expect(consumed!, label).toBeLessThanOrEqual(OWNER_TX_COMPUTE[name] / 2);
+      report.lighthouse[`leading ${label}`] = { consumed: consumed!, limit: OWNER_TX_COMPUTE[name], checks: leading + checks, leading, signature };
+      return tx;
+    };
+
+    // No lamports yet on the vault create_vault_v2 makes.
+    const create = phantomOnMainnet(ownerP, async () => [await payerCheck()], async () => [lighthouseCheck(PHANTOM_CHECK.created(), vault)]);
+    const created = await lands("create_vault_v2", "create_vault_v2", await createVaultFlow({ api, signers: create.pension }, { pensionKey: owner, mode: 0 }), [COMPUTE_BUDGET, COMPUTE_BUDGET, SIP_PROGRAM_ID], 1, 1);
+    expect(toHex(dataOf(created, 3))).toBe(OWNER_INSTRUCTION_DATA_HEX.CREATE_VAULT_V2_PROFIT_DEFAULTS);
+
+    // SaverFi's two-signer shape: no lamports yet on the trading link, ahead of the consent, which the program still reads at link_wallet's index - 1.
+    const link = phantomOnMainnet(ownerP, async () => [await payerCheck(), lighthouseCheck(PHANTOM_CHECK.owner(SIP_PROGRAM_ID), tradingLink)], async () => [lighthouseCheck(PHANTOM_CHECK.created(), tradingLink)]);
+    const trading = wallets(ownerP, tradingP);
+    const linked = await lands(
+      "link_wallet",
+      "link_wallet",
+      await linkWalletFlow({ api, pension: link.pension, trading: trading.trading }, { pensionKey: owner, tradingAddress: wallet }),
+      [COMPUTE_BUDGET, COMPUTE_BUDGET, ED25519, SIP_PROGRAM_ID],
+      1,
+      2,
+    );
+    expect(toHex(trading.calls.tradingIn[0]!)).toBe(toHex(link.calls.pensionOut[0]!));
+    expect(signersOf(linked)).toEqual([owner, wallet]);
+    expect(toHex(dataOf(linked, 4))).toBe(OWNER_INSTRUCTION_DATA_HEX.LINK_WALLET);
+    expect(toHex(dataOf(linked, 3)).startsWith(ED25519_CONSENT_HEADER_HEX + toHex(tradingP.publicKey.toBytes()))).toBe(true);
+    expect(decodeTradingLink(Uint8Array.from(earlier((await connection.getAccountInfo(new PublicKey(tradingLink), "confirmed")) ?? undefined, "the link account").data))).toMatchObject({ wallet, vault });
+
+    // The vault's owner before withdraw.
+    await direct(new Transaction().add(SystemProgram.transfer({ fromPubkey: ownerP.publicKey, toPubkey: new PublicKey(vault), lamports: 200_000_000 })), ownerP);
+    const withdraw = phantomOnMainnet(ownerP, async () => [await payerCheck()], async () => [lighthouseCheck(PHANTOM_CHECK.owner(SIP_PROGRAM_ID), vault)]);
+    const withdrawn = await lands("withdraw", "withdraw", await withdrawFlow({ api, signers: withdraw.pension }, { pensionKey: owner, lamports: 150_000_000n }), [COMPUTE_BUDGET, COMPUTE_BUDGET, SIP_PROGRAM_ID], 1, 1);
+    expect(toHex(dataOf(withdrawn, 3))).toBe(OWNER_INSTRUCTION_DATA_HEX.WITHDRAW_150000000);
+
+    // A first policy: no lamports yet on the policy and on the three token accounts, the most checks a leading block may hold.
+    const vaultAccounts = [
+      [WSOL_MINT, TOKEN_PROGRAM],
+      [USDC_MINT, TOKEN_PROGRAM],
+      [SPYX_MINT, TOKEN_2022_PROGRAM],
+    ].map(([mint, program]) => deriveAta(vault, mint!, program!).toBase58());
+    const policyAccount = deriveInvestPda(vault).toBase58();
+    const policy = phantomOnMainnet(
+      ownerP,
+      async () => [await payerCheck(), ...vaultAccounts.map((account) => lighthouseCheck(PHANTOM_CHECK.tokenAccount(), account))],
+      async () => [policyAccount, ...vaultAccounts].map((account) => lighthouseCheck(PHANTOM_CHECK.created(), account)),
+    );
+    await lands("set_invest_policy", "set_invest_policy", await investPolicyFlow({ api, signers: policy.pension }, { pensionKey: owner }), [COMPUTE_BUDGET, COMPUTE_BUDGET, ATA_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, SIP_PROGRAM_ID], 4, 4);
+    expect(policy.calls.pensionOut[0]!.length).toBeLessThanOrEqual(1_232);
+
+    // withdraw_token: the vault's wSOL account's delegate and derivation, and no lamports yet on the pension key's wSOL account.
+    const vaultWsol = vaultAccounts[0]!;
+    const ownerWsol = deriveAta(owner, WSOL_MINT, TOKEN_PROGRAM).toBase58();
+    await direct(
+      new Transaction().add(
+        SystemProgram.transfer({ fromPubkey: ownerP.publicKey, toPubkey: new PublicKey(vaultWsol), lamports: 100_000_000 }),
+        new TransactionInstruction({ programId: new PublicKey(TOKEN_PROGRAM), keys: [{ pubkey: new PublicKey(vaultWsol), isSigner: false, isWritable: true }], data: Buffer.from([17]) }),
+      ),
+      ownerP,
+    );
+    expect(await connection.getAccountInfo(new PublicKey(ownerWsol), "confirmed")).toBeNull();
+    const token = phantomOnMainnet(ownerP, async () => [await payerCheck()], async () => [lighthouseCheck(PHANTOM_CHECK.tokenAccount(), vaultWsol), lighthouseCheck(PHANTOM_CHECK.created(), ownerWsol)]);
+    const taken = await lands(
+      "withdraw_token",
+      "withdraw_token",
+      await withdrawTokenFlow({ api, signers: token.pension }, { pensionKey: owner, mint: WSOL_MINT, amountRaw: 100_000_000n, vaultTokenAccount: vaultWsol, tokenProgram: TOKEN_PROGRAM }),
+      [COMPUTE_BUDGET, COMPUTE_BUDGET, SIP_PROGRAM_ID],
+      2,
+      1,
+    );
+    expect(toHex(dataOf(taken, 4))).toBe(OWNER_INSTRUCTION_DATA_HEX.WITHDRAW_TOKEN_100000000);
     expect(await tokenAmount(vaultWsol)).toBe(0n);
   });
 });

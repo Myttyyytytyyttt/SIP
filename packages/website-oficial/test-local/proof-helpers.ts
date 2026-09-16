@@ -53,6 +53,8 @@ export const PHANTOM_CHECK = {
   owner: (program: string): number[] => [6, 4, 1, 2, ...new PublicKey(program).toBytes(), 0],
   /** AssertTokenAccountMulti [Delegate == None, DelegatedAmount <= 0, TokenAccountOwnerIsDerived]. */
   tokenAccount: (): number[] => [10, 4, 3, 3, 0, 0, 6, ...u64le(0n), 5, 8],
+  /** AssertAccountInfoMulti [Lamports == 0]: Phantom's check, ahead of the dapp's instructions, on an account about to be created. */
+  created: (): number[] => [6, 4, 1, 0, ...u64le(0n), 0],
 };
 
 /** A Lighthouse instruction checking `account`, named read-only and unsigned, as Phantom names it. */
@@ -61,10 +63,12 @@ export const lighthouseCheck = (data: readonly number[], account: string): Trans
 
 /**
  * Phantom as it signs on mainnet, replaced: `checks` (read when Phantom is asked)
- * appended after every instruction it was given, the message compiled again,
- * the pension key's slot signed. Every call recorded.
+ * appended after every instruction it was given, and `leading`, when given, put
+ * right after the compute-budget pair (instruction 2) as Phantom sometimes opens
+ * a transaction; the message compiled again, the pension key's slot signed.
+ * Every call recorded.
  */
-export function phantomOnMainnet(owner: Keypair, checks: () => Promise<readonly TransactionInstruction[]>) {
+export function phantomOnMainnet(owner: Keypair, checks: () => Promise<readonly TransactionInstruction[]>, leading: () => Promise<readonly TransactionInstruction[]> = async () => []) {
   const calls = { pensionIn: [] as Uint8Array[], pensionOut: [] as Uint8Array[] };
   return {
     calls,
@@ -73,6 +77,7 @@ export function phantomOnMainnet(owner: Keypair, checks: () => Promise<readonly 
         calls.pensionIn.push(bytes);
         const message = TransactionMessage.decompile(VersionedTransaction.deserialize(bytes).message);
         message.instructions.push(...(await checks()));
+        message.instructions.splice(2, 0, ...(await leading()));
         const tx = new VersionedTransaction(message.compileToLegacyMessage());
         tx.sign([owner]);
         const signed = Uint8Array.from(tx.serialize());
