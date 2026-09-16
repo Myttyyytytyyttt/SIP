@@ -123,7 +123,9 @@ export const LIVE_COPY = {
   worthNow: "Worth now",
   worthNowTooltip: "SOL and SPYx at today’s Raydium pool prices; USDC counted at $1",
   pricesUnavailable: "Prices unavailable",
+  /** The PROGRAM's own counter: USDC that invest() has spent. Not the basket's value below. */
   investedSoFar: "Invested so far",
+  investedSoFarTooltip: "USDC the keeper has spent buying your basket, counted by your vault’s own policy. Tokens that reached the vault any other way are not in it.",
   unknownFigure: "—",
 
   // ── the chart ──────────────────────────────────────────────────────────────
@@ -140,7 +142,14 @@ export const LIVE_COPY = {
   weightVsTarget: "Weight vs target",
   target: "target",
   notInvestedYet: "Not invested yet",
-  invested: "Invested",
+  /**
+   * The leg holdings' worth at today's prices — a VALUATION, not a total of
+   * what was spent. It shared the word "Invested" with the program's
+   * lifetime_invested counter on the same card, which reads $0.00 beside a
+   * basket worth $86.41 whenever SPYx reached the vault by any route other
+   * than invest().
+   */
+  invested: "Basket value",
   /** The SOL row: what a withdrawal can take, and what Solana keeps. */
   solKeptAsRent: (rent: string): string => `withdrawable, ${rent} SOL kept as rent`,
   holdingsFootnote: "Tokens in other accounts the vault owns are listed under Manage wallets.",

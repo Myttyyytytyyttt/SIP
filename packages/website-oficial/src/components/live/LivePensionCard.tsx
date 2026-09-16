@@ -3,6 +3,13 @@
 /**
  * THE BIG PANEL: what has been saved, what it is worth, and what it is held as.
  *
+ * TWO FIGURES THAT ARE NOT THE SAME THING, and no longer share a word.
+ * "Invested so far" is the program's lifetime_invested counter — USDC that
+ * invest() has spent — and the holdings' "Basket value" is what the legs are
+ * worth at today's prices. On mainnet they diverge whenever SPYx reaches the
+ * vault by any other route, and the card used to say "Invested so far $0.00"
+ * directly above "Invested $86.41".
+ *
  * THE HERO IS SOL, NOT DOLLARS. lifetimeSaved is a lamport figure the vault
  * itself records; the dollar beside it is today's pool price applied to that
  * figure and is labelled as such. The mock's "Pension value +unrealized" is
@@ -74,7 +81,13 @@ export function LivePensionCard({
           <div className="space-y-1">
             <dt className="text-xs text-muted-foreground">{LIVE_COPY.investedSoFar}</dt>
             <dd className="font-mono text-sm tabular-nums">
-              <Num>{policy.lifetimeInvested === null ? LIVE_COPY.unknownFigure : formatUsd(policy.lifetimeInvested)}</Num>
+              {/* The program's own counter, which is NOT the basket's value in the holdings below. */}
+              <Tooltip>
+                <TooltipTrigger type="button" className="rounded-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+                  <Num>{policy.lifetimeInvested === null ? LIVE_COPY.unknownFigure : formatUsd(policy.lifetimeInvested)}</Num>
+                </TooltipTrigger>
+                <TooltipContent>{LIVE_COPY.investedSoFarTooltip}</TooltipContent>
+              </Tooltip>
             </dd>
           </div>
         </dl>

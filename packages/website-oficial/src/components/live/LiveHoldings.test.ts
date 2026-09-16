@@ -73,6 +73,15 @@ describe("what the table leaves out", () => {
     expect(html).toContain(LIVE_COPY.solKeptAsRent("0.00128524"));
   });
 
+  it("names the legs' worth as a valuation, never as what was invested", () => {
+    const html = render(liveDashboard());
+    // The sum under the table is $86.42 of SPYx at today's price; the card's
+    // hero shows lifetime_invested beside it. One word for both was the bug.
+    expect(html).toContain(LIVE_COPY.invested);
+    expect(html).toContain("$86.42");
+    expect(LIVE_COPY.invested).toBe("Basket value");
+  });
+
   it("points at Manage wallets for anything held elsewhere", () => {
     expect(render(liveDashboard())).toContain(LIVE_COPY.holdingsFootnote);
   });

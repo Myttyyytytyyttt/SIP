@@ -170,6 +170,23 @@ describe("a row never claims more than the chain said", () => {
   });
 });
 
+describe("two different quantities never share a label", () => {
+  it("the program's invested counter and the basket's market value are named apart", () => {
+    // LivePensionCard shows both at once: policy.lifetimeInvested, which only
+    // invest() advances, and the leg holdings valued at today's prices. They
+    // differ whenever a leg reached the vault by any other route, so a reader
+    // saw "Invested so far $0.00" above "Invested $86.41".
+    expect(LIVE_COPY.invested).not.toBe(LIVE_COPY.investedSoFar);
+    expect(LIVE_COPY.investedSoFar.startsWith(LIVE_COPY.invested)).toBe(false);
+    expect(LIVE_COPY.invested).not.toMatch(/^invested/i);
+  });
+
+  it("and the counter says what it counts, where the figure is", () => {
+    expect(LIVE_COPY.investedSoFarTooltip).toMatch(/spent/i);
+    expect(LIVE_COPY.investedSoFarTooltip).toMatch(/any other way are not/i);
+  });
+});
+
 describe("the stats claim only what exists", () => {
   it("has no tile for anything the chain cannot answer", () => {
     const labels = Object.values(STATS_COPY).filter((value) => typeof value === "string");
