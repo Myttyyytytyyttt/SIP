@@ -117,7 +117,13 @@ function Providers({ config, children }: { config: SolanaPublicConfig; children:
           appearance: {
             landingHeader: "Connect your pension key",
             loginMessage:
-              "SIP is permissionless. Only your pension key can withdraw — the team has no access to your funds.",
+              "Only your pension key can withdraw. The program is upgradeable during the beta.",
+            // THE MARK THE LOADER ALREADY USES (globals.css .landing-loader-mark),
+            // served same-origin from public/. The golden CSP's img-src is
+            // 'self' data: blob: and one WalletConnect host — no Privy origin —
+            // so an off-origin logo would silently fail to paint. It must stay
+            // a /public path, and the CSP must not gain a host for it.
+            logo: "/logo/sip-mark-white.png",
             // Solana only: an EVM wallet has nothing to sign here, and Phantom
             // offered through an ethereum path starts SIWE against a Solana
             // account and fails.
