@@ -492,8 +492,7 @@ export function Landing({
       >
         <span className="flex items-center gap-2.5">
           <Image src="/logo/sip-mark-white.png" alt="" width={22} height={26} priority />
-          <span className="text-sm font-medium uppercase tracking-wide">SIP</span>
-          <span className="hidden text-sm text-white/50 sm:inline">Self Implemented Pension</span>
+          <span className="text-sm font-medium tracking-wide">SaverFi</span>
         </span>
         <span className="flex items-center gap-2">
           <a

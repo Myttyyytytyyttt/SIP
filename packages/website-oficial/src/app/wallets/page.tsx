@@ -26,7 +26,7 @@ import { loadConfig } from "@/lib/load-config";
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
-  title: "Wallets — SIP",
+  title: "Wallets — SaverFi",
   description: "Your pension key, your vault, and the trading wallets linked to it.",
 };
 
@@ -43,7 +43,7 @@ export default function WalletsPage() {
             </Link>
           </Button>
           <div className="flex items-baseline gap-2">
-            <h1 className="font-semibold tracking-tight">SIP</h1>
+            <h1 className="font-semibold tracking-tight">SaverFi</h1>
             <span className="text-xs text-muted-foreground">Wallets</span>
           </div>
           <div className="ml-auto flex items-center gap-2">

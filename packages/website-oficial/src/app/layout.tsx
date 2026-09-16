@@ -13,10 +13,21 @@ import "./globals.css";
 const sans = Geist({ subsets: ["latin"], variable: "--font-sans", display: "swap" });
 const mono = Geist_Mono({ subsets: ["latin"], variable: "--font-mono", display: "swap" });
 
+/**
+ * One sentence, used by the page description and by both social cards, so a
+ * change cannot land in one of the three and not the others.
+ */
+const DESCRIPTION =
+  "A pension you build one trade at a time. A slice of your trading is put aside and invested in the assets you chose.";
+
 export const metadata: Metadata = {
-  title: "SIP — Self Implemented Pension",
-  description:
-    "A pension you build one trade at a time. A slice of your trading is put aside and invested in the assets you chose.",
+  title: "SaverFi — A pension that builds itself, on Solana",
+  description: DESCRIPTION,
+  // NO IMAGES AND NO `url`, so no metadataBase is needed: Next warns only for a
+  // relative image URL. Phantom reads og:title before <title>, so the wallet
+  // prompt says SaverFi; /wallets inherits this openGraph from the root layout.
+  openGraph: { title: "SaverFi", siteName: "SaverFi", description: DESCRIPTION, type: "website" },
+  twitter: { card: "summary", title: "SaverFi", description: DESCRIPTION },
   // NO `icons` KEY ON PURPOSE. Declaring one here overrides Next's file
   // convention, and the icons now come from src/app/{favicon.ico,icon.png,
   // apple-icon.png} — generated from the brand mark, content-hashed, and

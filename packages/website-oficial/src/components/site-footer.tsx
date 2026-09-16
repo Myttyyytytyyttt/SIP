@@ -80,8 +80,7 @@ export function SiteFooter({ now, className }: { now: string; className?: string
             <div className="flex items-center gap-2.5">
               <SipMark className="h-7 w-auto" />
               <div className="flex items-baseline gap-2">
-                <h2 className="font-semibold tracking-tight">SIP</h2>
-                <span className="text-xs text-muted-foreground">Self Implemented Pension</span>
+                <h2 className="font-semibold tracking-tight">SaverFi</h2>
               </div>
             </div>
 
@@ -121,7 +120,7 @@ export function SiteFooter({ now, className }: { now: string; className?: string
 
         <div className="flex flex-col-reverse items-center justify-between gap-x-2 gap-y-5 py-6 text-sm sm:flex-row">
           <span className="text-muted-foreground">
-            © <span className={MONO}>{year}</span> SIP. Your keys, your pension.
+            © <span className={MONO}>{year}</span> SaverFi. Your keys, your pension.
           </span>
 
           <div className="flex items-center gap-5">

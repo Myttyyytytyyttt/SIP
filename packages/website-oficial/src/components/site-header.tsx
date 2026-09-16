@@ -77,8 +77,7 @@ export function SiteHeader({
         </Sheet>
 
         <div className="flex items-baseline gap-2">
-          <h1 className="font-semibold tracking-tight">SIP</h1>
-          <span className="hidden text-xs text-muted-foreground sm:inline">Self Implemented Pension</span>
+          <h1 className="font-semibold tracking-tight">SaverFi</h1>
         </div>
 
         <nav aria-label="Main" className="ml-6 hidden items-center gap-1 md:flex">

@@ -1,6 +1,6 @@
 # @sip/web
 
-**SIP — Self Implemented Pension**, on Solana. A pension you build one trade at a
+**SaverFi**, on Solana. A pension you build one trade at a
 time: a slice of a linked wallet's trading, measured as volume or as realized
 profit, is put aside in its owner's vault and invested in the assets they chose.
 This package is the site: the landing, the example dashboard, the wallets page

@@ -123,7 +123,7 @@ RUN pnpm --filter @sip/web run build
 #
 # The trace root also RELOCATES the entrypoint to
 # standalone/packages/website-oficial/server.js. The script below tolerates both layouts
-# and records the entry path in nuvem-entry.path so the runner need not guess.
+# and records the entry path in web-entry.path so the runner need not guess.
 # It then copies .next/static and public/, which Next deliberately does not
 # put into standalone (the usual cause of an unstyled page with 404ing
 # /_next/static chunks), and finally fails the build on any dangling symlink,
@@ -154,7 +154,7 @@ RUN set -eu; \
       mkdir -p "$sa/$appdir/public"; \
       cp -R /repo/packages/website-oficial/public/. "$sa/$appdir/public/"; \
     fi; \
-    printf '%s\n' "$appdir/server.js" > "$sa/nuvem-entry.path"; \
+    printf '%s\n' "$appdir/server.js" > "$sa/web-entry.path"; \
     echo "[standalone] entrypoint: $appdir/server.js"; \
 # .pnpm/node_modules is pnpm's hoisted-alias directory: convenience links that
 # exist so peer dependencies resolve. Next's tracer can copy such a link without
@@ -204,7 +204,7 @@ COPY --from=builder --chown=nextjs:nodejs /repo/packages/website-oficial/.next/s
 # The ISR / fetch cache is written at runtime and must be owned by the
 # non-root user, or the first cache write throws EACCES.
 RUN set -eu; \
-    entry="$(cat /app/nuvem-entry.path)"; \
+    entry="$(cat /app/web-entry.path)"; \
     appdir="$(dirname "$entry")"; \
     mkdir -p "/app/$appdir/.next/cache"; \
     chown -R nextjs:nodejs "/app/$appdir/.next"
@@ -225,4 +225,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # The entry path is resolved at build time (see the builder stage) because it
 # depends on outputFileTracingRoot. `exec` hands PID 1 to node, so SIGTERM
 # reaches the server and `docker stop` is not a 10-second wait.
-CMD ["/bin/sh", "-c", "exec node \"$(cat /app/nuvem-entry.path)\""]
+CMD ["/bin/sh", "-c", "exec node \"$(cat /app/web-entry.path)\""]
