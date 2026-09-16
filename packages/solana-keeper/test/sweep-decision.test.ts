@@ -1,6 +1,9 @@
 // The sweep's own decisions, pinned where bin/keeper.mts cannot be reached: what
-// a failed batched vault read raises, and when it stops being weather.
+// a failed batched vault read raises, when it stops being weather, and whose
+// clock stamps a pending carry's wait.
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { INVEST_FAILED_CRITICAL_STREAK, investFailedStreak, wrapShortStreak, type WrapReport } from "../src/invest-decision.js";
 import type { InvestOutcome } from "../src/invest-tick.js";
@@ -136,6 +139,56 @@ describe("the pending carries /status shows", () => {
     expect(later[0]!.since).toBe("2026-09-16T00:00:00.000Z");
   });
 
+  it("stamps the wait when the SWEEP records it, not when somebody first opens /status", () => {
+    const watch = createCarryWatch();
+    const carried = Date.parse("2026-09-16T09:00:00.000Z");
+    const opened = Date.parse("2026-09-16T17:00:00.000Z");
+    const held = () => book([LINK, STATE, carry(500_000_000n)]);
+    // A zero settle carries the loss at 09:00, and the keeper sweeps all day.
+    for (let hour = 0; hour <= 8; hour += 1) watch.record(held(), carried + hour * 60 * 60_000);
+
+    // The operator's first page view of the day, before a redeploy: the wait is
+    // the loss's, and it is eight hours.
+    const [pending] = watch.observe(held(), wallets({ [LINK]: WALLET }), opened);
+    expect(pending!.since).toBe("2026-09-16T09:00:00.000Z");
+
+    // THE DEFECT: with the page view as the only observation, that same carry
+    // reported as having just appeared — so the deploy looked free, and the
+    // restart dropped a loss that the next window then forgave.
+    const lazy = createCarryWatch();
+    expect(lazy.observe(held(), wallets({ [LINK]: WALLET }), opened)[0]!.since).toBe("2026-09-16T17:00:00.000Z");
+  });
+
+  it("still stamps a carry recorded by a sweep in flight, so no carry is ever shown with no wait", () => {
+    const watch = createCarryWatch();
+    const at = Date.parse("2026-09-16T00:00:00.000Z");
+    // A render can land mid-pass, after recordCarry and before the sweep's own
+    // record(): the page stamps it rather than showing a wait of nothing.
+    expect(watch.observe(book([LINK, STATE, carry(3n)]), wallets({}), at)[0]!.since).toBe("2026-09-16T00:00:00.000Z");
+  });
+
+  it("forgets the wait of a carry the book no longer holds when the SWEEP records it", () => {
+    const watch = createCarryWatch();
+    const at = Date.parse("2026-09-16T00:00:00.000Z");
+    watch.record(book([LINK, STATE, carry(1n)]), at);
+    watch.record(new Map(), at + 60_000);
+    const returned = watch.observe(book([LINK, STATE, carry(1n)]), wallets({}), at + 120_000);
+    expect(returned[0]!.since).toBe(new Date(at + 120_000).toISOString());
+  });
+
+  it("records without touching the book, exactly as observing does", () => {
+    // record() runs every sweep, so it must be as safe as the projection:
+    // carryFor PRUNES as it reads, and a sweep that pruned here would forget a
+    // loss, which is money.
+    const held = book([LINK, STATE, carry(5n)], [LINK, "300000000:7:300000500", carry(6n)]);
+    const before = [...held].map(([link, entries]) => [link, [...entries]] as const);
+    const watch = createCarryWatch();
+    watch.record(held, Date.now());
+    watch.record(held, Date.now() + 60_000);
+    expect([...held].map(([link, entries]) => [link, [...entries]] as const)).toEqual(before);
+    expect(held.get(LINK)!.size).toBe(2);
+  });
+
   it("shows the longest wait first", () => {
     const watch = createCarryWatch();
     const at = Date.parse("2026-09-16T00:00:00.000Z");
@@ -168,5 +221,31 @@ describe("the pending carries /status shows", () => {
     watch.observe(held, wallets({ [LINK]: WALLET }), Date.now() + 60_000);
     expect([...held].map(([link, entries]) => [link, [...entries]] as const)).toEqual(before);
     expect(held.get(LINK)!.size).toBe(2);
+  });
+});
+
+describe("where a pending carry's wait is stamped", () => {
+  // The stamp lives in bin/keeper.mts's wiring, which no unit test can call, so
+  // the call site is read from the source the way read-model-rate.test.ts reads
+  // its own.
+  const keeper = readFileSync(fileURLToPath(new URL("../bin/keeper.mts", import.meta.url)), "utf8");
+  const lines = keeper.split("\n");
+
+  it("is the keeper's own clock, once per sweep, after the turns that record carries", () => {
+    const records = lines.filter((line) => line.includes("carryWatch.record("));
+    expect(records, "one observation per sweep, storing nothing new").toHaveLength(1);
+    const loop = lines.findIndex((line) => line.includes("for (const link of links) {"));
+    const recorded = lines.findIndex((line) => line.includes("carryWatch.record("));
+    expect(loop).toBeGreaterThan(-1);
+    expect(recorded, "after the link loop: that is where a carry is recorded").toBeGreaterThan(loop);
+  });
+
+  it("is never left to the page that reads it: /status only projects", () => {
+    const observes = lines.filter((line) => line.includes("carryWatch.observe("));
+    expect(observes).toHaveLength(1);
+    expect(observes[0], "the /status projection is the only reader").toContain("pendingCarries");
+    // Railway's probe hits /health (railway.json), which never renders the
+    // status, so an unpolled keeper would otherwise stamp nothing at all.
+    expect(readFileSync(fileURLToPath(new URL("../railway.json", import.meta.url)), "utf8")).toContain('"healthcheckPath": "/health"');
   });
 });

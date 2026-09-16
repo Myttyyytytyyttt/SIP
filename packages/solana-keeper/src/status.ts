@@ -83,7 +83,11 @@ export interface PendingCarry {
   readonly state: string;
   readonly lossLamports: bigint;
   readonly walletSignedTxCount: number;
-  /** When this process first saw this carry. A restart resets it, as it resets the carry. */
+  /**
+   * When the SWEEP first recorded this carry — the keeper's clock, not the
+   * reader's, so a carry first polled hours later still reports the wait it has
+   * actually had. A restart resets it, as it resets the carry.
+   */
   readonly since: string;
 }
 

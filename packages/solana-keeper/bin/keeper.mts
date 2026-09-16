@@ -233,6 +233,10 @@ const settleCarries: CarryBook = new Map();
  * operator thinks in wallets, so each sweep leaves behind the pairing it just
  * discovered; a carry whose link is gone from the chain shows a null wallet
  * rather than disappearing. The watch only reads the book — see createCarryWatch.
+ *
+ * WHEN each carry started waiting is stamped by the SWEEP, through record()
+ * below, not by this projection: a "since" created at the moment of the first
+ * page view is the reader's clock, not the loss's.
  */
 const carryWatch = createCarryWatch();
 const linkWallets = new Map<string, string>();
@@ -894,6 +898,18 @@ async function sweep(): Promise<void> {
         log.error("wallet turn threw", { wallet, detail: summarizeUpstreamError(error, { take: 3, maxChars: 500 }) });
       }
     }
+
+    // THE LOSSES THIS SWEEP LEFT WAITING, STAMPED ON THE KEEPER'S OWN CLOCK.
+    //
+    // The stamp used to be created by the /status projection, which was its only
+    // caller — so it was born on the first human page view. A loss carried at
+    // 09:00 by a keeper that ran all day was reported "since 17:00" to the
+    // operator who opened /status before a redeploy, which is precisely the
+    // reader this was built for: they read an eight-hour wait as something that
+    // had just appeared, deployed, and the restart dropped the carry. Railway
+    // probes /health, which never renders the status, so nothing else was ever
+    // going to stamp it. One observation per sweep, storing nothing new.
+    carryWatch.record(settleCarries, Date.now());
 
     // ONE ADVANCE PER VAULT PER SWEEP, however many wallets that vault has linked.
     // A vault whose turns all threw before investing contributes nothing and its

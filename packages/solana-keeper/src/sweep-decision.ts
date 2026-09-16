@@ -100,8 +100,22 @@ export function foldInvestTurn(
   return { outcome: decided.outcome, detail: decided.detail, wrap };
 }
 
-/** Reads the carry book for /status, and remembers when each carry first appeared. */
+/** Reads the carry book for /status, and remembers when each carry started waiting. */
 export interface CarryWatch {
+  /**
+   * Stamps every carry the book holds, on the KEEPER'S OWN CLOCK, and forgets
+   * the stamps of carries that have left it. CALLED ONCE PER SWEEP.
+   *
+   * WITHOUT IT THE STAMP IS THE READER'S, NOT THE LOSS'S. observe() was the only
+   * caller, and it is the /status projection, so the stamp was born on the first
+   * human page view: a loss carried at 09:00 by a keeper that ran all day was
+   * reported as "since 17:00" to the operator who opened /status before a
+   * redeploy — and that operator is exactly who this was built for. They read a
+   * carry that had waited eight hours as one that had just appeared, deployed,
+   * and the restart dropped it. The wrong stamp then stood for the life of the
+   * carry, because it is memoised.
+   */
+  record(book: CarryBook, now: number): void;
   observe(book: CarryBook, walletFor: (link: string) => string | null, now: number): readonly PendingCarry[];
 }
 
@@ -121,6 +135,13 @@ export interface CarryWatch {
  * path — recordCarry's positive-loss guard and the settle tests that compare
  * carries whole — untouched.
  *
+ * AND IT IS TAKEN ON THE KEEPER'S CLOCK, NOT THE READER'S: the sweep calls
+ * record() every pass, so a carry is stamped within one sweep of being recorded
+ * whether or not anybody ever opens /status. See record() for what the lazy
+ * stamp cost. observe() still stamps anything it finds unstamped — a carry
+ * recorded by a sweep in flight, since a render can land mid-pass — so the page
+ * can never show a carry with no wait at all.
+ *
  * IT CANNOT DRIFT. Every stamp whose carry is no longer in the book is dropped
  * on each pass, so entries the book prunes cannot accumulate here, and a carry
  * that comes back is a new wait with a new stamp.
@@ -133,18 +154,36 @@ export function createCarryWatch(): CarryWatch {
   // key is digits and colons.
   const id = (link: string, state: string): string => `${link}|${state}`;
 
+  /**
+   * Give every carry in the book a stamp if it has none, and drop the stamps of
+   * carries that have left it. The ONE writer of `firstSeen`, so the sweep's
+   * record() and the page's observe() cannot disagree about a wait.
+   */
+  const stamp = (book: CarryBook, now: number): void => {
+    const live = new Set<string>();
+    for (const [link, entries] of book) {
+      for (const state of entries.keys()) {
+        const key = id(link, state);
+        live.add(key);
+        if (!firstSeen.has(key)) firstSeen.set(key, now);
+      }
+    }
+    for (const key of [...firstSeen.keys()]) if (!live.has(key)) firstSeen.delete(key);
+  };
+
   return {
+    record(book, now) {
+      stamp(book, now);
+    },
+
     observe(book, walletFor, now) {
-      const live = new Set<string>();
+      stamp(book, now);
       const found: { readonly carry: Omit<PendingCarry, "since">; readonly since: number }[] = [];
       for (const [link, entries] of book) {
         for (const [state, carry] of entries) {
-          const key = id(link, state);
-          live.add(key);
-          const since = firstSeen.get(key) ?? now;
-          firstSeen.set(key, since);
           found.push({
-            since,
+            // Always present: stamp() has just run over this same book.
+            since: firstSeen.get(id(link, state)) ?? now,
             carry: {
               wallet: walletFor(link),
               link,
@@ -155,7 +194,6 @@ export function createCarryWatch(): CarryWatch {
           });
         }
       }
-      for (const key of [...firstSeen.keys()]) if (!live.has(key)) firstSeen.delete(key);
       return found
         .sort((a, b) => a.since - b.since || a.carry.link.localeCompare(b.carry.link) || a.carry.state.localeCompare(b.carry.state))
         .map(({ carry, since }) => ({ ...carry, since: new Date(since).toISOString() }));
