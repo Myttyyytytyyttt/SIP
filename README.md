@@ -8,6 +8,19 @@ upgradeable during the beta.
 The code name is SIP: the package names, the environment variables, the
 `sip-vault` program and its signed domains all keep it.
 
+To check what still says it — after a rebrand, or before a release — search for
+the whole word:
+
+```bash
+git grep -n -I -w SIP
+```
+
+`-w` is what makes it a word search, and it is the only form to use here.
+**Never `git grep -n -I -E '\bSIP\b'`:** git's regex engine has no `\b`, so that
+pattern matches nothing whatsoever and hands back a silent all-clear on a
+repository full of the word. `packages/website-oficial/src/lib/brand-check.test.ts`
+runs both and fails if the `-E` form is ever the one written down.
+
 ## What a vault does
 
 A vault measures its trading in one of two modes, and carries a rate for each:
