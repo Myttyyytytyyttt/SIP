@@ -610,6 +610,54 @@ describe("set_invest_policy's vault token accounts (rules 8b and 13b)", () => {
     expectRefusal(legacyTx(owner.publicKey, [...budget(), wsolAccount(owner.publicKey, { data }), policyInstruction(owner.publicKey)], [owner]), "vault_account_invalid");
   });
 
+  /**
+   * The builder's wSOL CreateIdempotent with its account list resized.
+   *
+   * The ATA program reads exactly six accounts with next_account_info
+   * (spl-associated-token-account processor.rs) and ignores anything after
+   * them, so a seventh key does nothing on chain and is still write-locked by
+   * the runtime — which is what rule 13b's count refuses to relay.
+   */
+  function wsolWithAccounts(owner: PublicKey, count: number): TransactionInstruction {
+    const built = wsolAccount(owner);
+    const keys = [...built.keys];
+    const stranger = deriveAta(deriveVaultPda(keypair().publicKey), WSOL_MINT, TOKEN_PROGRAM);
+    while (keys.length < count) keys.push({ pubkey: stranger, isSigner: false, isWritable: true });
+    return new TransactionInstruction({ programId: built.programId, keys: keys.slice(0, count), data: Buffer.from(built.data) });
+  }
+
+  // THE DETAIL IS PINNED, NOT ONLY THE REASON. With the count bound gone a
+  // 5-account creation is still refused — by the token program's slot, which is
+  // a different check reading a different account — while a 7-account one is
+  // relayed. Only the count's own words tell the two apart.
+  it.each([[7], [5]])("a CreateIdempotent listing %i accounts instead of 6: vault_account_invalid, by the count itself", (count) => {
+    const owner = keypair();
+    const bytes = legacyTx(owner.publicKey, [...budget(), wsolWithAccounts(owner.publicKey, count), policyInstruction(owner.publicKey)], [owner]);
+    const result = verifySignedTransaction(bytes);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("vault_account_invalid");
+      expect(result.detail).toContain(`lists ${count} accounts; CreateIdempotent takes 6`);
+    }
+  });
+
+  // data [1] means CreateIdempotent and nothing else. The existing cases are []
+  // and [2], which a `data[0] === 1` check alone would also refuse; these two
+  // pin the LENGTH half, whose absence lets [1, 0] through to a simulation.
+  it.each<[string, number[]]>([
+    ["a trailing byte (data [1, 0])", [1, 0]],
+    ["a second byte (data [1, 1])", [1, 1]],
+  ])("CreateIdempotent with %s: vault_account_invalid, by the data bound", (_, data) => {
+    const owner = keypair();
+    const bytes = legacyTx(owner.publicKey, [...budget(), wsolAccount(owner.publicKey, { data }), policyInstruction(owner.publicKey)], [owner]);
+    const result = verifySignedTransaction(bytes);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("vault_account_invalid");
+      expect(result.detail).toContain("is not CreateIdempotent (data [1])");
+    }
+  });
+
   it("a funder that is not the fee payer: vault_account_invalid", () => {
     const owner = keypair();
     const funded = wsolAccount(owner.publicKey, { funder: keypair().publicKey, funderSigns: false });
