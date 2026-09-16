@@ -41,3 +41,15 @@ export function createLiveApi(options: { readonly origin?: string; readonly fetc
 
 /** A live read's failure in words. The same sentences the vault screens use. */
 export const liveFailureWords = (failure: ApiFailure): string => vaultFailureWords(failure);
+
+/**
+ * Whether a history read left the screen with nothing true to say about it.
+ *
+ * TWO DIFFERENT ANSWERS CARRY THE SAME FACT. The POST can fail outright (a 429
+ * from this browser's own bucket, a network drop), and the route can answer 200
+ * with `status: "unreadable"` when the signature listing or the transaction
+ * batch failed upstream. Either way NO history was read — which is a different
+ * fact from a vault that has none, and the difference is the whole of what the
+ * feed is allowed to say next.
+ */
+export const activityWasUnreadable = (page: ApiResult<LiveActivityJson>): boolean => !page.ok || page.body.status === "unreadable";

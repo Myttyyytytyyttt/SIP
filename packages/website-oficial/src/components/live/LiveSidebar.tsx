@@ -98,7 +98,7 @@ export function LiveSidebar({
   inSheet = false,
   onOpenWallets,
   onRetryActivity,
-  activityUnreadable = false,
+  activityUnreadable,
   emptyNote,
   className,
 }: {
@@ -111,7 +111,13 @@ export function LiveSidebar({
   readonly inSheet?: boolean;
   readonly onOpenWallets: () => void;
   readonly onRetryActivity?: () => void;
-  readonly activityUnreadable?: boolean;
+  /**
+   * The history could not be read, so the feed says that instead of "none yet".
+   *
+   * REQUIRED, and deliberately so. It defaulted to false, no caller passed it,
+   * and the honest branch below was dead code for every real failure.
+   */
+  readonly activityUnreadable: boolean;
   readonly emptyNote?: string;
   readonly className?: string;
 }) {

@@ -15,6 +15,12 @@
  * try again. It never falls back to the sample, and it never blanks the screen:
  * numbers that were true a minute ago, labelled as such, beat an empty page.
  *
+ * A HISTORY NOBODY COULD READ IS NOT AN EMPTY ONE. A failed activity page — and
+ * a 200 the route marked unreadable — leaves here as `activityUnreadable`, so
+ * the feed says it could not be read and offers a retry. Dropped, it drew "No
+ * activity yet" beside a Settlements tile reading 3, which is a false statement
+ * about somebody's pension held until the next sweep.
+ *
  * A LATE ANSWER FOR AN OLDER REQUEST IS DROPPED (a request counter, as
  * useVaultState does), and changing pension key resets everything — nothing read
  * for the previous key stays on screen for the next one.
@@ -22,7 +28,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { createLiveApi } from "@/lib/live-api";
+import { activityWasUnreadable, createLiveApi } from "@/lib/live-api";
 import { appendOlder, mergeHead, newestSignature } from "@/lib/live-activity-store";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { toLiveDashboard } from "@/lib/live-model";
@@ -64,6 +70,8 @@ export interface LiveDashboardStore {
   readonly refresh: (options?: { readonly discover?: boolean }) => void;
   readonly loadOlder: () => void;
   readonly older: LiveOlder;
+  /** The last history read failed, or the route could not read it: the feed says so instead of "none yet". */
+  readonly activityUnreadable: boolean;
 }
 
 const wordsFor = (failure: ApiFailure): string =>
@@ -88,6 +96,7 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
   const [failures, setFailures] = useState(0);
   const [lastReadAt, setLastReadAt] = useState<number | null>(null);
   const [older, setOlder] = useState<LiveOlder>({ busy: false, retryAt: null, message: null, complete: false });
+  const [activityUnreadable, setActivityUnreadable] = useState(false);
   const [tick, setTick] = useState(0);
 
   // Everything a late answer must be checked against before it is believed.
@@ -110,6 +119,7 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
     setFailures(0);
     setLastReadAt(null);
     setOlder({ busy: false, retryAt: null, message: null, complete: false });
+    setActivityUnreadable(false);
   }, [pensionKey]);
 
   const read = useCallback(
@@ -141,7 +151,11 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
           const until = newestSignature(entriesRef.current);
           const page = await api.activity({ owner: pensionKey, limit: ACTIVITY_PAGE, ...(until === null ? {} : { until }) });
           if (stale()) return;
-          if (page.ok) {
+          // CARRIED, NOT DROPPED. A page that failed, or one the route marked
+          // unreadable, leaves the rows already on screen alone and tells the
+          // feed it could not read — never "No activity yet".
+          setActivityUnreadable(activityWasUnreadable(page));
+          if (page.ok && page.body.status === "exists") {
             setActivityMeta({ status: page.body.status, nextBefore: page.body.nextBefore });
             setEntries((held) => (until === null ? mergeHead([], { entries: page.body.entries, gap: true }) : mergeHead(held, { entries: page.body.entries, gap: page.body.gap })));
             if (until === null) setOlder((current) => ({ ...current, complete: page.body.nextBefore === null }));
@@ -243,5 +257,5 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
     return { kind: "ready", data, stale };
   }, [pensionKey, snapshot, entries, activityMeta, failure, walletsKey]);
 
-  return { view, refresh, loadOlder, older };
+  return { view, refresh, loadOlder, older, activityUnreadable };
 }

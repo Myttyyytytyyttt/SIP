@@ -2,7 +2,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { createLiveApi, liveFailureWords } from "@/lib/live-api";
+import { activityWasUnreadable, createLiveApi, liveFailureWords } from "@/lib/live-api";
 import { FAILURE_COPY } from "@/lib/vault-copy";
 import type { ApiFailure } from "@/lib/vault-api";
 
@@ -102,6 +102,31 @@ describe("what comes back", () => {
     const { api } = answering(() => new Response("[]", { status: 200 }));
     const answer = await api.snapshot({ owner: OWNER, wallets: [], discover: false });
     expect(answer.ok).toBe(false);
+  });
+});
+
+describe("a history nobody could read", () => {
+  const page = (body: unknown) => JSON.stringify(body);
+
+  it("is the same fact whether the POST was refused or the route said so in a 200", async () => {
+    // A 429 from this browser's own bucket: three dashboard loads in a minute reach it.
+    const refused = answering(() => new Response(JSON.stringify({ error: { code: "rate_limited" } }), { status: 429 }));
+    expect(activityWasUnreadable(await refused.api.activity({ owner: OWNER }))).toBe(true);
+
+    // The route answers 200 and says the read failed upstream.
+    const said = answering(() => new Response(page({ vault: "v", status: "unreadable", nextBefore: null, entries: [], gap: false }), { status: 200 }));
+    expect(activityWasUnreadable(await said.api.activity({ owner: OWNER }))).toBe(true);
+
+    // A request that never got an answer at all.
+    const dropped = answering(() => {
+      throw new Error("network");
+    });
+    expect(activityWasUnreadable(await dropped.api.activity({ owner: OWNER }))).toBe(true);
+  });
+
+  it("…and a page that WAS read is not unreadable, however empty it is", async () => {
+    const empty = answering(() => new Response(page({ vault: "v", status: "exists", nextBefore: null, entries: [], gap: false }), { status: 200 }));
+    expect(activityWasUnreadable(await empty.api.activity({ owner: OWNER }))).toBe(false);
   });
 });
 

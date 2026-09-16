@@ -33,7 +33,13 @@ vi.mock("next/navigation", () => ({
 }));
 
 vi.mock("@/hooks/use-live-dashboard", () => ({
-  useLiveDashboard: () => ({ view: mocked.live, refresh: vi.fn(), loadOlder: vi.fn(), older: { busy: false, retryAt: null, message: null, complete: false } }),
+  useLiveDashboard: () => ({
+    view: mocked.live,
+    refresh: vi.fn(),
+    loadOlder: vi.fn(),
+    older: { busy: false, retryAt: null, message: null, complete: false },
+    activityUnreadable: false,
+  }),
 }));
 
 // The landing is a video-and-scroll page of its own; this test only needs to
