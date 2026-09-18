@@ -28,9 +28,9 @@
 
 import type * as anchor from "@coral-xyz/anchor";
 import { AnchorProvider, Program } from "@coral-xyz/anchor";
-import { Connection, PublicKey, SystemProgram } from "@solana/web3.js";
-import { BN } from "./anchor-interop.js";
+import { Connection, PublicKey } from "@solana/web3.js";
 import { GOLDEN_V2_HEX, GOLDEN_V2_INPUTS } from "./attestation-golden.js";
+import { convertCall, investCall, wrapSolCall } from "./invest-tick.js";
 import { isExternalFlowTx } from "./measure-window.js";
 import {
   OLD_NUVEM_PROGRAM_ID,
@@ -41,8 +41,7 @@ import {
   idl,
   instructionDiscriminator,
 } from "./idl.js";
-import { method } from "./methods.js";
-import { ATTESTATION_MESSAGE_LEN, RAYDIUM_CLMM, attestationMessage, buildSwapV2Data } from "./program-scripts.js";
+import { ATTESTATION_MESSAGE_LEN, attestationMessage } from "./program-scripts.js";
 import { settleInstruction } from "./settle-tick.js";
 
 export interface PreflightResult {
@@ -55,18 +54,18 @@ export interface PreflightResult {
 const ED25519 = "Ed25519SigVerify111111111111111111111111111";
 const SYSTEM = "11111111111111111111111111111111";
 const JUPITER = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
-const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
 /**
  * The four instructions the money paths send, built offline from fixed inputs.
  *
- * The settle case goes through the KEEPER'S OWN settleInstruction — the exact
- * function runSettleTick calls, not a copy — so its four BN arguments are
- * constructed the way production constructs them. The three invest cases mirror
- * runInvestTick's calls, which are written inline around an .rpc()/.instruction()
- * send and cannot be reached without one; they use the same `method()` lookup,
- * the same `BN` and the same `buildSwapV2Data`, so a BN that is not a
- * constructor, or one from a foreign bn.js the coder rejects, fails here.
+ * EVERY ONE OF THEM IS THE KEEPER'S OWN BUILDER, not a copy: settleInstruction
+ * is the exact function runSettleTick calls, and wrapSolCall, convertCall and
+ * investCall are the exact ones runInvestTick calls. The three invest builders
+ * were inline inside investTurn until 2026-09-18 and this file carried copies
+ * of them — which is a gate that proves the copy works: measured, the same
+ * `new anchor.BN` that took the keeper down could be put back at all three
+ * invest sites with tsc and this preflight both green. A copy cannot fail the
+ * way production fails, so there are no copies here any more.
  *
  * Everything is fabricated: the all-zero pubkey for every account, 100 and 200
  * for the invest amounts, and GOLDEN_V2_INPUTS' own slots for the settle. No
@@ -93,22 +92,17 @@ async function buildOffline(): Promise<{ readonly name: string; readonly hex: st
   const swap = { payer: zero, inputTokenAccount: zero, outputTokenAccount: zero, amountIn: 100n, minAmountOut: 200n };
 
   const settle = await settleInstruction(program, { wallet: zero, vault: zero, linkAddress: zero }, GOLDEN_V2_INPUTS);
-  const wrapSol = await method(program, "wrapSol")(new BN("100"))
-    .accountsPartial({
-      crank: zero,
-      vault: zero,
-      policy: zero,
-      vaultWsol: zero,
-      tokenProgram: new PublicKey(TOKEN_PROGRAM),
-      systemProgram: SystemProgram.programId,
-    })
-    .instruction();
-  const convert = await method(program, "convert")(new BN("100"), new BN("200"), buildSwapV2Data(swap))
-    .accountsPartial({ crank: zero, vault: zero, policy: zero, vaultWsol: zero, vaultIn: zero, venueProgram: RAYDIUM_CLMM })
-    .instruction();
-  const invest = await method(program, "invest")(0, new BN("100"), new BN("200"), buildSwapV2Data(swap))
-    .accountsPartial({ crank: zero, vault: zero, policy: zero, vaultIn: zero, vaultTarget: zero, targetMint: zero, venueProgram: RAYDIUM_CLMM })
-    .instruction();
+  const wrapSol = await wrapSolCall(program, { crank: zero, vault: zero, policy: zero, vaultWsol: zero }, 100n).instruction();
+  const convert = await convertCall(
+    program,
+    { crank: zero, vault: zero, policy: zero, vaultWsol: zero, vaultIn: zero },
+    { amountIn: 100n, minOut: 200n, swap },
+  ).instruction();
+  const invest = await investCall(
+    program,
+    { crank: zero, vault: zero, policy: zero, vaultIn: zero, vaultTarget: zero, targetMint: zero },
+    { legIndex: 0, amountIn: 100n, minOut: 200n, swap },
+  ).instruction();
 
   return [
     { name: "settle_v2", hex: settle.data.toString("hex") },

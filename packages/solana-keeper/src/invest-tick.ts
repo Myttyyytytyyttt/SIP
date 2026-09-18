@@ -56,12 +56,119 @@ import {
   type WrapPlan,
   type WrapReport,
 } from "./invest-decision.js";
-import { method } from "./methods.js";
+import { method, type MethodCall } from "./methods.js";
 import { tightenMinOut } from "./min-out.js";
-import { RAYDIUM_CLMM, buildSwapV2AccountMetas, buildSwapV2Data, fetchLiveRoute } from "./program-scripts.js";
+import { RAYDIUM_CLMM, type SwapV2Args, buildSwapV2AccountMetas, buildSwapV2Data, fetchLiveRoute } from "./program-scripts.js";
 
 const USDC = USDC_MINT;
 const WSOL_USDC_POOL = new PublicKey("3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv");
+
+// ── THE INVEST PATH'S THREE INSTRUCTIONS, AS FUNCTIONS A GATE CAN RUN ────────
+//
+// All three used to be written inline in investTurn, wrapped around the .rpc()
+// or .instruction() that sends them, which put them out of reach of anything
+// without a chain, a crank and a funded vault. So the preflight — the one gate
+// that runs in a REAL Node process, and therefore the only kind that can see a
+// CommonJS/ESM interop bug — reached settle_v2 through the keeper's own
+// settleInstruction and reached these three through a hand-written COPY inside
+// preflight.ts. A copy only ever proves the copy works.
+//
+// MEASURED ON THIS BRANCH, both spellings, with the fix reverted here only:
+//   a `new anchor.BN` at the three sites → tsc exits 0, `tsx bin/keeper.mts
+//   --preflight` prints {"preflight":"ok","invariants":14}; the image builds and
+//   the keeper throws "anchor.BN is not a constructor" on the first invest —
+//   2026-09-18's outage, one file over. Only the grep in
+//   test/anchor-interop.test.ts catches it, and only that literal spelling:
+//   written as `const { BN: NumberBN } = anchor`, typecheck, preflight AND the
+//   full 371-test suite are all green, while a real Node process from this
+//   package prints `destructured BN = undefined`.
+//
+// Extracted, the preflight runs THESE functions and compares the bytes they
+// build against fixed vectors. The arguments can no longer throw in production
+// while every gate is green, arrive from a foreign bn.js, or change width
+// unnoticed.
+//
+// THEY RETURN THE CALL, NOT THE INSTRUCTION, deliberately: the wrap is sent
+// with .signers([crank]).rpc() and the other two with .instruction() into
+// sendWithBudget. Handing back the fully-argued call leaves every byte of what
+// production sends exactly as it was — and .instruction(), which is what the
+// preflight calls, is what .rpc() reaches for internally anyway.
+
+/** wrap_sol: `lamports` of the vault's own SOL into the vault's wSOL account. */
+export function wrapSolCall(
+  program: anchor.Program,
+  accounts: {
+    readonly crank: PublicKey;
+    readonly vault: PublicKey;
+    readonly policy: PublicKey;
+    readonly vaultWsol: PublicKey;
+  },
+  lamports: bigint,
+): MethodCall {
+  return method(program, "wrapSol")(new BN(lamports.toString())).accountsPartial({
+    crank: accounts.crank,
+    vault: accounts.vault,
+    policy: accounts.policy,
+    vaultWsol: accounts.vaultWsol,
+    tokenProgram: TOKEN_PROGRAM_ID,
+    systemProgram: SystemProgram.programId,
+  });
+}
+
+/** convert: the vault's wSOL to USDC, at no worse than `minOut`, through the venue the policy names. */
+export function convertCall(
+  program: anchor.Program,
+  accounts: {
+    readonly crank: PublicKey;
+    readonly vault: PublicKey;
+    readonly policy: PublicKey;
+    readonly vaultWsol: PublicKey;
+    readonly vaultIn: PublicKey;
+  },
+  args: { readonly amountIn: bigint; readonly minOut: bigint; readonly swap: SwapV2Args },
+): MethodCall {
+  return method(program, "convert")(
+    new BN(args.amountIn.toString()),
+    new BN(args.minOut.toString()),
+    buildSwapV2Data(args.swap),
+  ).accountsPartial({
+    crank: accounts.crank,
+    vault: accounts.vault,
+    policy: accounts.policy,
+    vaultWsol: accounts.vaultWsol,
+    vaultIn: accounts.vaultIn,
+    venueProgram: RAYDIUM_CLMM,
+  });
+}
+
+/** invest: one leg of the signed basket, by its INDEX — the program prices and bounds the rest. */
+export function investCall(
+  program: anchor.Program,
+  accounts: {
+    readonly crank: PublicKey;
+    readonly vault: PublicKey;
+    readonly policy: PublicKey;
+    readonly vaultIn: PublicKey;
+    readonly vaultTarget: PublicKey;
+    readonly targetMint: PublicKey;
+  },
+  args: { readonly legIndex: number; readonly amountIn: bigint; readonly minOut: bigint; readonly swap: SwapV2Args },
+): MethodCall {
+  return method(program, "invest")(
+    args.legIndex,
+    new BN(args.amountIn.toString()),
+    new BN(args.minOut.toString()),
+    buildSwapV2Data(args.swap),
+  ).accountsPartial({
+    crank: accounts.crank,
+    vault: accounts.vault,
+    policy: accounts.policy,
+    vaultIn: accounts.vaultIn,
+    vaultTarget: accounts.vaultTarget,
+    targetMint: accounts.targetMint,
+    venueProgram: RAYDIUM_CLMM,
+  });
+}
 
 /** PAUSED, like NO_POLICY and IDLE, is a resting state: nothing moved and nothing broke. */
 export type InvestOutcome = "IDLE" | "NO_POLICY" | "PAUSED" | "INVESTED" | "REFUSED" | "FAILED";
@@ -275,11 +382,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         // The policy goes in by name: wrap_sol loads it and refuses a vault
         // whose policy is disabled or names no conversion floor, both of which
         // this turn ruled out before it got here.
-        await method(program, "wrapSol")(new BN(wrap.amount.toString()))
-          .accountsPartial({
-            crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta,
-            tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
-          })
+        await wrapSolCall(program, { crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta }, wrap.amount)
           .signers([crank])
           .rpc();
         found.wrap = wrapReport(wrap, wrap.amount);
@@ -300,8 +403,11 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       const { minOut } = tightenMinOut(toConvert, convertFloor, route.observed);
       const args = { payer: vault, inputTokenAccount: wsolAta, outputTokenAccount: usdcAta, amountIn: toConvert, minAmountOut: minOut };
       await sendWithBudget(program.provider as anchor.AnchorProvider, crank,
-        await method(program, "convert")(new BN(toConvert.toString()), new BN(minOut.toString()), buildSwapV2Data(args))
-          .accountsPartial({ crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta, vaultIn: usdcAta, venueProgram: RAYDIUM_CLMM })
+        await convertCall(
+          program,
+          { crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta, vaultIn: usdcAta },
+          { amountIn: toConvert, minOut, swap: args },
+        )
           .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
           .instruction());
       if (toConvert < held) found.converted = `converted ${toConvert} of ${held} wSOL; ${held - toConvert} left for later sweeps`;
@@ -378,8 +484,11 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       const args = { payer: vault, inputTokenAccount: usdcAta, outputTokenAccount: targetAta, amountIn, minAmountOut: minOut };
       const before = await balanceOf(connection, targetAta);
       const signature = await sendWithBudget(program.provider as anchor.AnchorProvider, crank,
-        await method(program, "invest")(index, new BN(amountIn.toString()), new BN(minOut.toString()), buildSwapV2Data(args))
-          .accountsPartial({ crank: crank.publicKey, vault, policy: policyPda, vaultIn: usdcAta, vaultTarget: targetAta, targetMint: mint, venueProgram: RAYDIUM_CLMM })
+        await investCall(
+          program,
+          { crank: crank.publicKey, vault, policy: policyPda, vaultIn: usdcAta, vaultTarget: targetAta, targetMint: mint },
+          { legIndex: index, amountIn, minOut, swap: args },
+        )
           .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
           .instruction());
       const bought = (await balanceOf(connection, targetAta)) - before;
