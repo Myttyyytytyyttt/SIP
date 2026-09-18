@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 import { buildKeeperPolicy } from "../src/privy-policy.js";
 import { createPrivyPolicyClient } from "../src/privy-policy-client.js";
-import { PRIVY_API_URL } from "../src/privy-signer.js";
+import { PRIVY_API_URL, readPrivyKeyQuorum } from "../src/privy-signer.js";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -74,5 +74,53 @@ describe("createPrivyPolicyClient", () => {
       ["POST", "/v1/policies"],
     ]);
     expect(sent[1]!.headers.get("privy-idempotency-key")).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+});
+
+// THE CLAIM THE WHOLE CHECK RESTS ON: reading a key quorum needs the app
+// credentials and NOTHING ELSE. If this GET ever needed an authorization
+// signature of its own, a broken authorization key could not be diagnosed with
+// it — the check would fail for the same reason the thing it diagnoses fails.
+describe("reading a key quorum", () => {
+  const quorumBody = {
+    id: "keeperSignerQuorum0001",
+    authorization_keys: [{ public_key: "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE", display_name: "sip-solana-keeper" }],
+    authorization_threshold: 1,
+    display_name: "sip-solana-keeper",
+    user_ids: null,
+  };
+
+  it("is a GET that carries the app credentials and no authorization signature", async () => {
+    const { fetch, sent } = answering(200, quorumBody);
+    const quorum = await createPrivyPolicyClient(credentials, { fetch }).getKeyQuorum("keeperSignerQuorum0001");
+
+    expect(quorum).toEqual({ id: "keeperSignerQuorum0001", authorizationKeys: [{ publicKey: quorumBody.authorization_keys[0]!.public_key, displayName: "sip-solana-keeper" }] });
+    expect(sent).toHaveLength(1);
+    expect([sent[0]!.method, new URL(sent[0]!.url).pathname]).toEqual(["GET", "/v1/key_quorums/keeperSignerQuorum0001"]);
+    expect(new URL(sent[0]!.url).origin).toBe(PRIVY_API_URL);
+    expect(sent[0]!.headers.get("authorization")).toMatch(/^Basic /);
+    expect(sent[0]!.headers.get("privy-authorization-signature")).toBeNull();
+  });
+
+  // The keeper's own boot check takes the same route through privy-signer.ts,
+  // where the one PrivyClient in this package is built.
+  it("takes the same route from the keeper, and reveals no authorization key to do it", async () => {
+    const { fetch, sent } = answering(200, quorumBody);
+    const { privateKey } = await generateP256KeyPair();
+    const authorizationKey = new Secret(privateKey, "privyAuthorizationKey");
+
+    const quorum = await readPrivyKeyQuorum({ ...credentials, authorizationKey, fetch }, "keeperSignerQuorum0001");
+
+    expect(quorum.authorizationKeys.map((entry) => entry.publicKey)).toEqual([quorumBody.authorization_keys[0]!.public_key]);
+    expect(sent).toHaveLength(1);
+    expect([sent[0]!.method, new URL(sent[0]!.url).pathname]).toEqual(["GET", "/v1/key_quorums/keeperSignerQuorum0001"]);
+    expect(sent[0]!.headers.get("privy-authorization-signature")).toBeNull();
+  });
+
+  it("propagates Privy's status, so 401, 404 and everything else stay distinguishable", async () => {
+    for (const status of [401, 404, 500]) {
+      const { fetch } = answering(status, { error: "no" });
+      await expect(createPrivyPolicyClient(credentials, { fetch }).getKeyQuorum("keeperSignerQuorum0001")).rejects.toMatchObject({ status });
+    }
   });
 });

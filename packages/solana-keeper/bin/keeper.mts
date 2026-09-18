@@ -57,8 +57,19 @@ import { runInvestTick } from "../src/invest-tick.js";
 import { SERVICE, createChangeLog, createKeeperLogger } from "../src/keeper-log.js";
 import { runPreflight } from "../src/preflight.js";
 import {
+  AUTHORIZATION_KEY_BROKEN,
+  AuthorizationKeyUnreadable,
+  compareWithQuorum,
+  derivePrivyPublicKey,
+  notCheckedVerdict,
+  quorumReadVerdict,
+  unreadableKeyVerdict,
+  type AuthorizationKeyVerdict,
+} from "../src/privy-authorization-key.js";
+import {
   buildPrivySolanaIndex,
   createPrivySolanaSigner,
+  readPrivyKeyQuorum,
   type PrivySolanaConfig,
   type PrivyWalletEntry,
   type SolanaWalletSubmitter,
@@ -286,6 +297,110 @@ if (privyConfig !== null) {
   }
 }
 
+/** One key, so a boot that fixes the pairing resolves what the boot before it raised. */
+const AUTHORIZATION_KEY_ALERT_KEY = "privy-authorization-key";
+
+/**
+ * Establishes, at start-up, whether the configured authorization key belongs to
+ * the configured key quorum — and says so in /status next to seatCheck.
+ *
+ * WHY AT BOOT. Every other signal a keeper emits is healthy when this pairing is
+ * wrong: it arms, it takes the claim, it resolves a Privy signer for each wallet,
+ * it measures the trades correctly. Privy refuses only at the send, with 401 "No
+ * valid authorization signatures were provided" — so without this, the first
+ * thing that ever reveals the fault is a settlement that should have moved a
+ * user's money, and an operator reading /status before that sees nothing wrong.
+ * The check costs one local derivation and one GET, less than the wallet listing
+ * every sweep already does.
+ *
+ * IT ARMS AND REPORTS LOUDLY; IT DOES NOT REFUSE TO ARM. The tempting reading is
+ * "a keeper that cannot sign should not pretend to run", and it is wrong here,
+ * for three reasons that all point the same way:
+ *
+ *   * RAILWAY RESTARTS WHAT CRASHES. A refusal to start is not a stop, it is a
+ *     loop — and each turn of it takes /status and /health down with the process.
+ *     The page an operator would open to read the verdict is the page the
+ *     refusal destroys. bin/keeper.mts already refuses to exit mid-run for
+ *     exactly this reason, and src/status.ts records that a restart has never
+ *     once fixed an upstream.
+ *   * IT WOULD STOP A WORKING MONEY PATH TO REPORT A BROKEN ONE. This key gates
+ *     the settle send alone. The invest half runs on the local crank keypair and
+ *     needs no Privy at all, so a keeper that refuses to arm stops buying
+ *     baskets that it could still buy.
+ *   * THE VERDICT IS ONLY USEFUL WHERE IT CAN BE READ. Armed, the fault is a
+ *     critical alert AND a field on /status AND a line in the start-up banner.
+ *     Crash-looping, it is a line in a log that scrolls past a restart.
+ *
+ * The settle key's own boot refusal (process.exit(2) above) is the opposite
+ * precedent and stays that way: a settle key that is readable and wrong is this
+ * process acting as the wrong attester, which is not a thing to report and carry
+ * on doing.
+ *
+ * A DRY RUN PERFORMS NO CHECK AT ALL, and keeps its promise: privyConfig is null
+ * by construction when no signing secret was read (src/config.ts), so the key is
+ * never revealed and no request is made. With no signer id there is nothing to
+ * compare against, and seatCheck already pages for that on its own.
+ */
+async function establishAuthorizationKey(): Promise<void> {
+  const signerId = config.privySignerId;
+  if (privyConfig === null || signerId === null) return;
+  const { verdict, detail } = await authorizationKeyVerdict(privyConfig, signerId);
+
+  health.signing = { ...health.signing, authorizationKey: verdict.check };
+  const broken = AUTHORIZATION_KEY_BROKEN.has(verdict.check);
+  const context = {
+    signerId,
+    verdict: verdict.check,
+    // PUBLIC KEYS ONLY. This is the comparison an operator has to make by eye,
+    // and the private key is in neither half of it.
+    derivedPublicKey: verdict.derivedPublicKey,
+    registeredPublicKeys: verdict.registered?.map((entry) => entry.publicKey) ?? null,
+    meaning: verdict.meaning,
+    next: verdict.next,
+    ...(detail === null ? {} : { detail }),
+  };
+  if (verdict.check === "matches") {
+    log.info("privy authorization key belongs to the signer quorum", context);
+    alerter.clear(AUTHORIZATION_KEY_ALERT_KEY);
+    return;
+  }
+  log[broken ? "error" : "warn"]("privy authorization key", context);
+  // UNKNOWN IS NOT WRONG: a dropped connection proves nothing about the pairing,
+  // and paging for it would teach an operator to ignore this alert.
+  if (verdict.check === "quorum-unreadable") return;
+  alerter.fire({
+    key: AUTHORIZATION_KEY_ALERT_KEY,
+    severity: broken ? "critical" : "warn",
+    title: broken
+      ? "The keeper's authorization key does not belong to its signer quorum"
+      : "The keeper's authorization key could not be checked against its signer quorum",
+    detail: `${verdict.meaning} ${verdict.next}`,
+    context: { signerId, derivedPublicKey: verdict.derivedPublicKey },
+  });
+}
+
+/** The local derivation, then the quorum read — each failing into its own verdict, neither sending the key. */
+async function authorizationKeyVerdict(
+  privy: PrivySolanaConfig,
+  signerId: string,
+): Promise<{ readonly verdict: AuthorizationKeyVerdict; readonly detail: string | null }> {
+  let derived: string;
+  try {
+    // REVEALED INSIDE THE CALL THAT NEEDS IT, and nowhere else. What comes back
+    // is a PUBLIC key: safe on the status page, and safe in a log line.
+    derived = derivePrivyPublicKey(privy.authorizationKey.reveal());
+  } catch (error) {
+    if (!(error instanceof AuthorizationKeyUnreadable)) throw error;
+    // NOTHING WAS SENT ANYWHERE: a value that is not a key is not a question for Privy.
+    return { verdict: unreadableKeyVerdict(), detail: error.message };
+  }
+  try {
+    return { verdict: compareWithQuorum(derived, await readPrivyKeyQuorum(privy, signerId)), detail: null };
+  } catch (error) {
+    return { verdict: quorumReadVerdict(error, derived), detail: summarizeUpstreamError(error, { take: 3, maxChars: 400 }) };
+  }
+}
+
 function signingRoute(): string {
   if (config.signing === null) return "not resolved — a dry run reads no signing secret";
   const routes = [
@@ -327,6 +442,8 @@ const health: KeeperStatus = {
     privyPolicyId: config.privyPolicyId,
     // Neither id answers "would an unbounded seat be refused?" on its own.
     seatCheck: seatCheck(config.privySignerId, config.privyPolicyId),
+    // Established at start-up, below, before the first sweep: a dry run leaves it "not-checked".
+    authorizationKey: "not-checked",
     secretsRead: config.signing !== null,
     settleKey: config.signing?.settleKey.publicKey.toBase58() ?? null,
     wallets: null,
@@ -1020,6 +1137,10 @@ if (config.armed) {
 health.mode = isLive() ? "live" : "dry-run";
 health.missingLiveCondition = liveBlocker();
 
+// BEFORE THE FIRST SWEEP, so an armed keeper knows whether it can sign before it
+// has any money to move — and the banner below can say so.
+await establishAuthorizationKey();
+
 // ASKED BEFORE THE BANNER, so the banner can tell the truth about it. A mirror
 // that is off, or pointed at a database without the schema, is invisible from
 // every other signal this process emits.
@@ -1044,6 +1165,9 @@ log.info("keeper starting", {
   missingLiveCondition: health.missingLiveCondition,
   settleKey: health.signing.settleKey,
   signing: health.signing.route,
+  // "matches" or nothing else: every other value means a settle Privy will refuse,
+  // or a pairing nobody has established.
+  authorizationKey: health.signing.authorizationKey,
   // The website's calendar and history come from here. "off" and "BROKEN" both
   // mean the site will show an empty past for vaults that really did settle.
   history: history.detail,

@@ -88,6 +88,7 @@ function setup(): { redactor: Redactor; status: KeeperStatus } {
       privySignerId: config.privySignerId,
       privyPolicyId: config.privyPolicyId,
       seatCheck: seatCheck(config.privySignerId, config.privyPolicyId),
+      authorizationKey: "matches",
       secretsRead: true,
       settleKey: config.signing!.settleKey.publicKey.toBase58(),
       wallets: { signable: 1, of: 1 },

@@ -35,6 +35,7 @@ import { PrivyClient } from "@privy-io/node";
 import { Ed25519Program, PublicKey, Transaction, type TransactionInstruction } from "@solana/web3.js";
 import type { Secret } from "@sip/solana-log";
 import { SIP_PROGRAM_ID, instructionDiscriminator } from "./idl.js";
+import type { KeyQuorumLike } from "./privy-authorization-key.js";
 import { seatVerdict, seatsFor, type SignerSeat } from "./privy-policy.js";
 
 /** CAIP-2 for Solana mainnet-beta. */
@@ -245,6 +246,27 @@ export async function buildPrivySolanaIndex(
     index.set(w.address, { walletId: w.id, seats: readSeats(w.additional_signers) });
   }
   return index;
+}
+
+/**
+ * A key quorum's registered PUBLIC keys, by id.
+ *
+ * APP CREDENTIALS ONLY. GET /v1/key_quorums takes no authorization signature —
+ * the SDK threads prepareRequest through update and delete alone — so this reads
+ * the ground truth even when the authorization key is the very thing in doubt.
+ * That is what makes a boot-time check of the pairing possible at all.
+ *
+ * ERRORS PROPAGATE, so the caller can tell 401 from 404 from a dropped
+ * connection (quorumReadVerdict, privy-authorization-key.ts). Nothing here
+ * interprets, and no secret is returned: an authorization key's PUBLIC half is
+ * public by construction.
+ */
+export async function readPrivyKeyQuorum(config: PrivySolanaConfig, keyQuorumId: string): Promise<KeyQuorumLike> {
+  const quorum = await clientFor(config).keyQuorums().get(keyQuorumId);
+  return {
+    id: quorum.id,
+    authorizationKeys: (quorum.authorization_keys ?? []).map((entry) => ({ publicKey: entry.public_key, displayName: entry.display_name })),
+  };
 }
 
 /**
