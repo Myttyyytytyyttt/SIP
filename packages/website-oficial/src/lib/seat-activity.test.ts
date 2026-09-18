@@ -31,7 +31,7 @@ describe("seat activity, by address", () => {
     expect(seatActivity(A).busy).toBe("reseating");
     expect(beginSeatTask(B, "granting")).toBe(true);
     endSeatTask(A, { notice: "Done." });
-    expect(seatActivity(A)).toStrictEqual({ busy: null, failure: null, notice: "Done." });
+    expect(seatActivity(A)).toStrictEqual({ busy: null, failure: null, notice: "Done.", holdGrantUntil: null });
     expect(beginSeatTask(A, "granting")).toBe(true);
   });
 
@@ -40,11 +40,11 @@ describe("seat activity, by address", () => {
     endSeatTask(A, { notice: "Done." });
     beginSeatTask(A, "checking", { keepNotice: true });
     endSeatTask(A);
-    expect(seatActivity(A)).toStrictEqual({ busy: null, failure: null, notice: "Done." });
+    expect(seatActivity(A)).toStrictEqual({ busy: null, failure: null, notice: "Done.", holdGrantUntil: null });
     beginSeatTask(A, "granting");
     expect(seatActivity(A).notice).toBeNull();
     endSeatTask(A, { failure: "Privy said no." });
-    expect(seatActivity(A)).toStrictEqual({ busy: null, failure: "Privy said no.", notice: null });
+    expect(seatActivity(A)).toStrictEqual({ busy: null, failure: "Privy said no.", notice: null, holdGrantUntil: null });
   });
 
   it("hands useSyncExternalStore the same object until something changes, and tells every subscriber when it does", () => {
@@ -57,6 +57,28 @@ describe("seat activity, by address", () => {
     unsubscribe();
     endSeatTask(A);
     expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds Grant back for the time asked, across later operations, and lifts the hold on its own", () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    try {
+      const listener = vi.fn();
+      subscribeSeatActivity(listener);
+      beginSeatTask(A, "granting");
+      endSeatTask(A, { holdGrantFor: 60_000 });
+      expect(seatActivity(A).holdGrantUntil).toBe(1_060_000);
+      beginSeatTask(A, "checking", { keepNotice: true });
+      endSeatTask(A);
+      expect(seatActivity(A).holdGrantUntil).toBe(1_060_000);
+      const calls = listener.mock.calls.length;
+      vi.advanceTimersByTime(59_999);
+      expect(seatActivity(A).holdGrantUntil).toBe(1_060_000);
+      vi.advanceTimersByTime(1);
+      expect(seatActivity(A).holdGrantUntil).toBeNull();
+      expect(listener.mock.calls.length).toBe(calls + 1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reseatRunning is true only while a re-seat runs on some wallet", () => {

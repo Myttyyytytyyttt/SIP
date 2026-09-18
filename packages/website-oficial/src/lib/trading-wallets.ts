@@ -271,6 +271,13 @@ export const GRANT_COPY = {
   addedUnconfirmedNext:
     "Do not press Grant keeper permission: confirm the seat first with the privy-policy verify line on this row, or " +
     "on the keeper's /status after its next sweep.",
+  addedRecordLags:
+    "Privy accepted the keeper's signer with its policy, but its record has not shown it on this wallet after every " +
+    "wait. Do not press Grant keeper permission: it would add the signer a second time. Reload the page in a minute; " +
+    "the wallet should then say Has a signer.",
+  held:
+    "Grant keeper permission is held back for a minute: Privy has just accepted a signer on this wallet, and its " +
+    "record can take a moment to show it. A second grant would add the signer again. Reload the page, then check.",
 } as const;
 
 /**
@@ -303,6 +310,12 @@ export function grantRefusal(renderedUser: User | null, address: string): string
  * it has; that is waited out on GRANT_BACKOFF_MS. Any other refusal is an answer,
  * and asking again does not change it.
  *
+ * A SUCCESS IS CHECKED AGAINST THE RECORD TOO. The row reads Privy's record, so
+ * after an accepted add the record is read on GRANT_BACKOFF_MS until it shows a
+ * signer ("granted"). If it never does, "added-record-lags": Privy accepted the
+ * seat and its record has not caught up, and a Grant pressed now would append the
+ * signer again — the caller says so, and the row holds Grant back (GRANT_HOLD_MS).
+ *
  * A FAILURE IS CHECKED AGAINST THE RECORD. Privy's addSigners writes first and
  * re-reads the user after, so it can throw ("Could not refresh user", a network
  * error) with the seat already on the wallet. The record is read once more: if it
@@ -333,7 +346,7 @@ export async function grantKeeperSeat({
   addSigners: AddSignersFn;
   refreshUser: RefreshUserFn;
   wait?: (ms: number) => Promise<void>;
-}): Promise<"granted" | "has-signer"> {
+}): Promise<"granted" | "has-signer" | "added-record-lags"> {
   const signers = keeperSigners(config);
   if (signers === null) throw new SeatNotConfigured(seatProblem(config) ?? "The keeper's seat is not configured.");
   const refusal = grantRefusal(renderedUser, address);
@@ -359,10 +372,19 @@ export async function grantKeeperSeat({
     }
   }
 
-  // The badge reads Privy's record, so the record is read again. The grant itself has already succeeded.
-  await refreshUser().catch(() => null);
-  return "granted";
+  // Privy has accepted the add. The badge reads Privy's record, and a Grant pressed on a record that has not caught up
+  // would append the keeper's signer a second time, so the record is read until it shows a signer. A failed read is
+  // no answer, and counts as not shown yet.
+  for (let attempt = 0; ; attempt += 1) {
+    if (seatOf(await refreshUser().catch(() => null), address) === "has-signer") return "granted";
+    const delay = GRANT_BACKOFF_MS[attempt];
+    if (delay === undefined) return "added-record-lags";
+    await wait(delay);
+  }
 }
+
+/** How long the row holds Grant keeper permission back after an add Privy's record may not show yet. */
+export const GRANT_HOLD_MS = 60_000;
 
 /** Privy's removeSigners (root @privy-io/react-auth, like addSigners), narrowed. It names no signer: it removes EVERY one. */
 export type RemoveSignersFn = (input: { address: string }) => Promise<unknown>;
@@ -384,6 +406,9 @@ export class ReseatRefused extends Error {
  *   either (or could not be read). Only the owner can sign for the wallet, and
  *   nothing is put aside from it until the seat is back — which the row's own
  *   Grant does while the record reads "missing".
+ * - "added-record-lags": Privy accepted the add, but its record did not show a
+ *   signer after every wait. The seat is most likely there; the message says not
+ *   to press Grant, which would append it again, and to reload in a minute.
  * - "added-unconfirmed": the grant failed, but the record read right after it
  *   shows a signer: Privy's addSigners writes first and can fail on its own
  *   re-read afterwards. The seat was most likely added; the message says to
@@ -403,6 +428,7 @@ export type ReseatStage =
   | "record-still-lists-a-signer"
   | "removed-not-added"
   | "added-unconfirmed"
+  | "added-record-lags"
   | "signer-reappeared"
   | "id-dropped";
 
@@ -465,6 +491,13 @@ export const RESEAT_COPY = {
   addedUnconfirmed:
     "Every signer was removed from this wallet. Privy's reply to adding the keeper's signer then failed, but its " +
     "record now shows a signer on this wallet, so the seat was most likely added.",
+  addedRecordLags:
+    "Every signer was removed from this wallet, and Privy accepted the keeper's signer with its policy, but its record " +
+    "has not shown the seat yet after every wait.",
+  addedRecordLagsNext: (verify: string): string =>
+    "Do not press Grant keeper permission: it would add the signer a second time. Reload the page in a minute; the " +
+    `wallet should say Has a signer. Then confirm the seat: ${verify}.`,
+  idDroppedRecordLags: "Its record has not shown the seat yet either: do not press Grant keeper permission.",
   addedUnconfirmedNext: (verify: string): string =>
     `Do not press Grant keeper permission. Confirm the seat before anything else: ${verify}, or the keeper's /status after its next sweep.`,
   signerReappeared:
@@ -617,7 +650,7 @@ export async function reseatKeeperSeat({
     addSent = true;
     return addSigners(input);
   };
-  let granted: "granted" | "has-signer";
+  let granted: "granted" | "has-signer" | "added-record-lags";
   for (let attempt = 0; ; attempt += 1) {
     try {
       granted = await grantKeeperSeat({ address, config, renderedUser, addSigners: sendAdd, refreshUser, wait });
@@ -638,7 +671,14 @@ export async function reseatKeeperSeat({
     }
   }
   if (granted === "has-signer") throw new ReseatIncomplete("signer-reappeared", RESEAT_COPY.signerReappeared);
-  if (idDropped) throw new ReseatIncomplete("id-dropped", sentences(RESEAT_COPY.idDropped(walletId), RESEAT_COPY.idDroppedAdded(verify)));
+  const lags = granted === "added-record-lags";
+  if (idDropped) {
+    throw new ReseatIncomplete(
+      "id-dropped",
+      sentences(RESEAT_COPY.idDropped(walletId), RESEAT_COPY.idDroppedAdded(verify), lags ? RESEAT_COPY.idDroppedRecordLags : null),
+    );
+  }
+  if (lags) throw new ReseatIncomplete("added-record-lags", sentences(RESEAT_COPY.addedRecordLags, RESEAT_COPY.addedRecordLagsNext(verify)));
   return removing ? "reseated" : "granted";
 }
 

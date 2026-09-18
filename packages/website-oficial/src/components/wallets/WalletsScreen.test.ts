@@ -103,8 +103,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ReseatConfirm } from "@/components/wallets/TradingWalletRow";
 import { WalletsScreen } from "@/components/wallets/WalletsScreen";
 import { useKeeperSeat } from "@/hooks/use-keeper-seat";
-import { clearSeatActivity, reseatRunning } from "@/lib/seat-activity";
-import { GRANT_COPY, RESEAT_COPY } from "@/lib/trading-wallets";
+import { beginSeatTask, clearSeatActivity, endSeatTask, reseatRunning, seatActivity } from "@/lib/seat-activity";
+import { GRANT_BACKOFF_MS, GRANT_COPY, GRANT_HOLD_MS, RESEAT_COPY } from "@/lib/trading-wallets";
 import { CREATE_LINK_COPY } from "@/lib/vault-copy";
 
 /** What a real click hands a handler: an object with a target, which Privy would read as options. */
@@ -242,13 +242,19 @@ describe("WalletsScreen with the seat configured", () => {
 
   it("Grant keeper permission re-reads Privy's record, then adds the signer with its policy to that wallet", async () => {
     const missing = userWith([phantom(), teeWallet(TRADING_0, 0, false)]);
+    const seated = userWith([phantom(), teeWallet(TRADING_0, 0, true)]);
     mocked.privy = { ready: true, authenticated: true, user: missing };
-    mocked.addSigners.mockResolvedValue({ user: missing });
+    // As Privy does: the add refreshes its own record, which then shows the signer.
+    mocked.addSigners.mockImplementation(async () => {
+      mocked.privy = { ...mocked.privy, user: seated };
+      return { user: seated };
+    });
     render();
     const grants = buttons("Grant keeper permission");
     expect(grants).toHaveLength(1);
     grants[0]?.onClick?.(CLICK);
     await vi.waitFor(() => expect(mocked.addSigners).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(seatActivity(TRADING_0).busy).toBeNull());
     expect(mocked.addSigners.mock.calls).toStrictEqual([[{ address: TRADING_0, signers: [{ signerId: SIGNER, policyIds: [POLICY] }] }]]);
     expect(mocked.refreshUser.mock.invocationCallOrder[0]).toBeLessThan(mocked.addSigners.mock.invocationCallOrder[0] ?? 0);
   });
@@ -264,6 +270,41 @@ describe("WalletsScreen with the seat configured", () => {
     grants[0]?.onClick?.(CLICK);
     await flush();
     expect(mocked.addSigners).not.toHaveBeenCalled();
+  });
+
+  it("Grant keeper permission is held back, with the reason, for a minute after an add Privy's record may not show yet", () => {
+    mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), teeWallet(TRADING_0, 0, false)]) };
+    beginSeatTask(TRADING_0, "granting");
+    endSeatTask(TRADING_0, { notice: GRANT_COPY.addedRecordLags, holdGrantFor: GRANT_HOLD_MS });
+    const html = render();
+    expect(buttons("Grant keeper permission").map((grant) => grant.disabled)).toStrictEqual([true]);
+    expect(html).toContain(GRANT_COPY.held.replaceAll("'", "&#x27;"));
+    expect(html).toContain(GRANT_COPY.addedRecordLags.replaceAll("'", "&#x27;"));
+  });
+
+  it("the hook's grant on a record that never shows the signer says so and holds Grant back", async () => {
+    vi.useFakeTimers();
+    try {
+      const missing = userWith([phantom(), teeWallet(TRADING_0, 0, false)]);
+      mocked.privy = { ready: true, authenticated: true, user: missing };
+      mocked.addSigners.mockResolvedValue({ user: missing });
+      let seat: ReturnType<typeof useKeeperSeat> | null = null;
+      function Probe() {
+        seat = useKeeperSeat(TRADING_0, { privySignerId: SIGNER, privyPolicyId: POLICY });
+        return null;
+      }
+      renderToStaticMarkup(createElement(Probe));
+      const granting = (seat as ReturnType<typeof useKeeperSeat> | null)?.grant();
+      await vi.advanceTimersByTimeAsync(GRANT_BACKOFF_MS.reduce((sum, ms) => sum + ms, 0));
+      await granting;
+      expect(mocked.addSigners).toHaveBeenCalledTimes(1);
+      expect(seatActivity(TRADING_0)).toMatchObject({ busy: null, failure: null, notice: GRANT_COPY.addedRecordLags });
+      expect(seatActivity(TRADING_0).holdGrantUntil).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(GRANT_HOLD_MS);
+      expect(seatActivity(TRADING_0).holdGrantUntil).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("Export key opens Privy's export for each trading wallet's own address, and never the pension key's", async () => {

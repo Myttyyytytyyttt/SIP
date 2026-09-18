@@ -6,13 +6,18 @@ import { useCallback, useSyncExternalStore } from "react";
 
 import { beginSeatTask, endSeatTask, seatActivity, subscribeSeatActivity } from "@/lib/seat-activity";
 import {
+  GRANT_COPY,
+  GRANT_HOLD_MS,
+  GrantUnconfirmed,
   RESEAT_COPY,
+  ReseatIncomplete,
   failureText,
   grantKeeperSeat,
   grantRefusal,
   reseatKeeperSeat,
   reseatRefusal,
   seatOf,
+  type ReseatStage,
   type SeatConfig,
 } from "@/lib/trading-wallets";
 
@@ -54,13 +59,16 @@ export function useKeeperSeat(address: string, config: SeatConfig) {
     () => seatActivity(address),
   );
 
+  // After an add Privy accepted, Grant is held back for GRANT_HOLD_MS: its record may not show the seat yet, and a
+  // grant on a record that lags appends the signer a second time.
   const grant = useCallback(async () => {
     if (!beginSeatTask(address, "granting")) return;
     try {
-      await grantKeeperSeat({ address, config, renderedUser: user, addSigners, refreshUser });
-      endSeatTask(address);
+      const outcome = await grantKeeperSeat({ address, config, renderedUser: user, addSigners, refreshUser });
+      if (outcome === "has-signer") endSeatTask(address);
+      else endSeatTask(address, { notice: outcome === "added-record-lags" ? GRANT_COPY.addedRecordLags : null, holdGrantFor: GRANT_HOLD_MS });
     } catch (error) {
-      endSeatTask(address, { failure: failureText(error) });
+      endSeatTask(address, { failure: failureText(error), ...(error instanceof GrantUnconfirmed ? { holdGrantFor: GRANT_HOLD_MS } : {}) });
     }
   }, [address, config, user, addSigners, refreshUser]);
 
@@ -68,9 +76,10 @@ export function useKeeperSeat(address: string, config: SeatConfig) {
     if (!beginSeatTask(address, "reseating")) return;
     try {
       const outcome = await reseatKeeperSeat({ address, config, renderedUser: user, removeSigners, addSigners, refreshUser });
-      endSeatTask(address, { notice: outcome === "reseated" ? RESEAT_COPY.done : RESEAT_COPY.grantedOnly });
+      endSeatTask(address, { notice: outcome === "reseated" ? RESEAT_COPY.done : RESEAT_COPY.grantedOnly, holdGrantFor: GRANT_HOLD_MS });
     } catch (error) {
-      endSeatTask(address, { failure: failureText(error) });
+      const added = error instanceof ReseatIncomplete && ADDED_STAGES.has(error.stage);
+      endSeatTask(address, { failure: failureText(error), ...(added ? { holdGrantFor: GRANT_HOLD_MS } : {}) });
     }
   }, [address, config, user, removeSigners, addSigners, refreshUser]);
 
@@ -94,5 +103,9 @@ export function useKeeperSeat(address: string, config: SeatConfig) {
     busy: activity.busy,
     failure: activity.failure,
     notice: activity.notice,
+    grantHeld: activity.holdGrantUntil !== null,
   } as const;
 }
+
+/** The re-seat stops after which Privy may have the keeper's signer on the wallet while its record does not show it. */
+const ADDED_STAGES: ReadonlySet<ReseatStage> = new Set<ReseatStage>(["added-record-lags", "added-unconfirmed", "id-dropped"]);

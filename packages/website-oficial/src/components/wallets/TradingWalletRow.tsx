@@ -37,7 +37,8 @@
  *
  * THE GRANT IS OFFERED ONLY FOR "missing". Privy's addSigners appends, so a grant
  * on a wallet that already has a signer could seat the keeper twice. An unknown seat
- * gets a re-read instead.
+ * gets a re-read instead. For the same reason it is held back for a minute after an
+ * add Privy accepted (GRANT_HOLD_MS): its record can lag behind the seat.
  *
  * THE LINK is the chain's record, read by the screen, not Privy's: a wallet can be
  * linked with or without a seat, and a seat puts nothing aside until it is linked.
@@ -55,7 +56,7 @@ import { LinkControl } from "@/components/wallets/LinkControl";
 import { useExportTradingWallet } from "@/hooks/use-export-trading-wallet";
 import { useKeeperSeat } from "@/hooks/use-keeper-seat";
 import { LABEL } from "@/lib/classes";
-import { RESEAT_COPY, keeperSigners, seatProblem, type SeatStatus, type TradingWallet } from "@/lib/trading-wallets";
+import { GRANT_COPY, RESEAT_COPY, keeperSigners, seatProblem, type SeatStatus, type TradingWallet } from "@/lib/trading-wallets";
 
 export interface TradingWalletRowData extends TradingWallet {
   /** False only for a wallet createWallet reported that Privy's record does not list yet. */
@@ -150,7 +151,7 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
             type="button"
             size="sm"
             variant="outline"
-            disabled={keeper.busy !== null || refused || keeper.grantBlocked !== null}
+            disabled={keeper.busy !== null || refused || keeper.grantBlocked !== null || keeper.grantHeld}
             aria-busy={keeper.busy === "granting"}
             onClick={() => void keeper.grant()}
           >
@@ -202,6 +203,9 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
       {reseatable && keeper.reseatBlocked !== null && !refused ? <p className="text-xs text-muted-foreground">{keeper.reseatBlocked}</p> : null}
       {keeper.seat === "missing" && keeper.busy !== "reseating" && keeper.grantBlocked !== null && !refused ? (
         <p className="text-xs text-muted-foreground">{keeper.grantBlocked}</p>
+      ) : null}
+      {keeper.seat === "missing" && keeper.busy === null && keeper.grantHeld && keeper.grantBlocked === null && !refused ? (
+        <p className="text-xs text-muted-foreground">{GRANT_COPY.held}</p>
       ) : null}
       {keeper.notice !== null ? (
         <p role="status" className="text-xs text-muted-foreground">

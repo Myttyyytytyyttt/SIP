@@ -29,9 +29,14 @@ export interface SeatActivity {
   readonly failure: string | null;
   /** What the last operation did when the badge alone cannot show it. */
   readonly notice: string | null;
+  /**
+   * Until when (epoch ms) Grant keeper permission is held back on this wallet, or null. Set after an add Privy
+   * accepted and its record may not show yet: a grant on a record that lags appends the signer a second time.
+   */
+  readonly holdGrantUntil: number | null;
 }
 
-export const IDLE_ACTIVITY: SeatActivity = Object.freeze({ busy: null, failure: null, notice: null });
+export const IDLE_ACTIVITY: SeatActivity = Object.freeze({ busy: null, failure: null, notice: null, holdGrantUntil: null });
 
 const activities = new Map<string, SeatActivity>();
 const listeners = new Set<() => void>();
@@ -67,14 +72,29 @@ function write(address: string, next: SeatActivity): void {
 export function beginSeatTask(address: string, busy: SeatBusy, { keepNotice = false }: { keepNotice?: boolean } = {}): boolean {
   const current = seatActivity(address);
   if (current.busy !== null) return false;
-  write(address, { busy, failure: null, notice: keepNotice ? current.notice : null });
+  write(address, { busy, failure: null, notice: keepNotice ? current.notice : null, holdGrantUntil: current.holdGrantUntil });
   return true;
 }
 
-/** End the operation running on this wallet with its outcome. */
-export function endSeatTask(address: string, outcome: { failure?: string | null; notice?: string | null } = {}): void {
+/**
+ * End the operation running on this wallet with its outcome. `holdGrantFor` holds Grant keeper permission back for
+ * that many milliseconds from now; the hold lifts on its own, and the store says so to every subscriber.
+ */
+export function endSeatTask(address: string, outcome: { failure?: string | null; notice?: string | null; holdGrantFor?: number } = {}): void {
   const current = seatActivity(address);
-  write(address, { busy: null, failure: outcome.failure ?? null, notice: outcome.notice === undefined ? current.notice : outcome.notice });
+  const holdGrantUntil = outcome.holdGrantFor === undefined ? current.holdGrantUntil : Date.now() + outcome.holdGrantFor;
+  write(address, {
+    busy: null,
+    failure: outcome.failure ?? null,
+    notice: outcome.notice === undefined ? current.notice : outcome.notice,
+    holdGrantUntil,
+  });
+  if (outcome.holdGrantFor !== undefined) {
+    setTimeout(() => {
+      const now = seatActivity(address);
+      if (now.holdGrantUntil === holdGrantUntil) write(address, { ...now, holdGrantUntil: null });
+    }, outcome.holdGrantFor);
+  }
 }
 
 /** Forget everything. For tests: in the app the store lives as long as the page. */

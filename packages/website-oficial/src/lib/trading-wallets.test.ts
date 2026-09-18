@@ -169,6 +169,12 @@ describe("grantKeeperSeat", () => {
   // A TEE wallet, as this Privy app makes them: the record addSigners reads must show its server id (grantRefusal).
   const missing = userWith([phantom(), teeWallet(TRADING_0, 0, false)]);
   const withSigner = userWith([phantom(), teeWallet(TRADING_0, 0, true)]);
+  /** Privy's record as each read returns it, in order; the last one repeats. */
+  const reads = (...users: User[]) => {
+    const fn = vi.fn<RefreshUserFn>();
+    for (const user of users) fn.mockResolvedValueOnce(user);
+    return fn.mockResolvedValue(users.at(-1) ?? null);
+  };
   const noWait = (_ms: number): Promise<void> => Promise.resolve();
 
   it("re-reads Privy's record, then adds exactly the keeper's signer with its policy", async () => {
@@ -207,7 +213,7 @@ describe("grantKeeperSeat", () => {
   });
 
   it("waits out the propagation race with the same signer and policy each time", async () => {
-    const refreshUser = vi.fn<RefreshUserFn>(async () => missing);
+    const refreshUser = vi.fn<RefreshUserFn>().mockResolvedValueOnce(missing).mockResolvedValue(withSigner);
     const addSigners = vi
       .fn<AddSignersFn>()
       .mockRejectedValueOnce(new Error(NOT_ASSOCIATED))
@@ -239,6 +245,27 @@ describe("grantKeeperSeat", () => {
     await expect(grantKeeperSeat({ address: TRADING_0, renderedUser: missing, config: SEAT, addSigners: neverListed, refreshUser, wait: waits })).rejects.toThrow(NOT_ASSOCIATED);
     expect(neverListed).toHaveBeenCalledTimes(GRANT_BACKOFF_MS.length + 1);
     expect(waits.mock.calls.map(([ms]) => ms)).toStrictEqual([...GRANT_BACKOFF_MS]);
+  });
+
+  it("after the add, waits on GRANT_BACKOFF_MS for the record to show the signer before it answers granted", async () => {
+    const refreshUser = reads(missing, missing, missing, withSigner);
+    const addSigners = vi.fn<AddSignersFn>(async () => ({}));
+    const wait = vi.fn(noWait);
+    await expect(grantKeeperSeat({ address: TRADING_0, renderedUser: missing, config: SEAT, addSigners, refreshUser, wait })).resolves.toBe("granted");
+    expect(wait.mock.calls).toStrictEqual([[GRANT_BACKOFF_MS[0]], [GRANT_BACKOFF_MS[1]]]);
+    expect(addSigners).toHaveBeenCalledTimes(1);
+  });
+
+  it("a record that never shows the added signer answers added-record-lags — and nothing is added twice", async () => {
+    const refreshUser = vi.fn<RefreshUserFn>(async () => missing);
+    const addSigners = vi.fn<AddSignersFn>(async () => ({}));
+    const wait = vi.fn(noWait);
+    await expect(grantKeeperSeat({ address: TRADING_0, renderedUser: missing, config: SEAT, addSigners, refreshUser, wait })).resolves.toBe(
+      "added-record-lags",
+    );
+    expect(wait.mock.calls.map(([ms]) => ms)).toStrictEqual([...GRANT_BACKOFF_MS]);
+    expect(addSigners).toHaveBeenCalledTimes(1);
+    expect(GRANT_COPY.addedRecordLags).toContain("Do not press Grant keeper permission");
   });
 
   it("an add that failed AFTER its write landed is reported as most likely added, never as not added, when the record shows a signer", async () => {
@@ -497,6 +524,23 @@ describe("reseatKeeperSeat", () => {
     expect(seatOf(cleared, TRADING_0)).toBe("missing");
   });
 
+  it("ADDED, RECORD LAGGING: Privy accepted the add but its record never shows it — never done, and never a second Grant", async () => {
+    const refreshUser = reads(seated, cleared);
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const addSigners = vi.fn<AddSignersFn>(async () => ({}));
+    const wait = vi.fn(noWait);
+    const stop = reseatKeeperSeat({ renderedUser: seated, address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait });
+    await expect(stop).rejects.toMatchObject({ stage: "added-record-lags" });
+    const message = failureText(await stop.catch((error: unknown) => error)) ?? "";
+    expect(message.startsWith(RESEAT_COPY.addedRecordLags)).toBe(true);
+    expect(message).toContain("Do not press Grant keeper permission");
+    expect(message).toContain(`privy-policy verify --wallet ${teeWalletId(seated, TRADING_0) ?? ""} --policy ${POLICY}`);
+    expect(message).not.toContain(RESEAT_COPY.done);
+    expect(addSigners).toHaveBeenCalledTimes(1);
+    // The removal's wait found the record cleared at once; the waits are the add's.
+    expect(wait.mock.calls.map(([ms]) => ms)).toStrictEqual([...GRANT_BACKOFF_MS]);
+  });
+
   it("ADDED BUT UNCONFIRMED: an add that failed after landing, with the record showing a signer, is never 'NOT added'", async () => {
     // The mirror of "removeSigners failed AFTER the removal landed", for addSigners.
     const refreshUser = reads(seated, cleared, cleared, seated);
@@ -535,7 +579,7 @@ describe("reseatKeeperSeat", () => {
   });
 
   it("keeps the grant's propagation backoff after the removal", async () => {
-    const refreshUser = reads(seated, cleared);
+    const refreshUser = reads(seated, cleared, cleared, seated);
     const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
     const addSigners = vi.fn<AddSignersFn>().mockRejectedValueOnce(new Error(NOT_ASSOCIATED)).mockResolvedValueOnce({});
     const wait = vi.fn(noWait);
@@ -616,6 +660,17 @@ describe("reseatKeeperSeat", () => {
       expect(addSigners).toHaveBeenCalledTimes(1);
       // The row agrees: on that record Grant is refused before anything is sent.
       expect(grantRefusal(idless, TRADING_0)).toBe(GRANT_COPY.noServerId);
+    });
+
+    it("an accepted add whose record never catches up says so too, after naming the id", async () => {
+      const refreshUser = reads(seated, idless);
+      const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+      const addSigners = vi.fn<AddSignersFn>(async () => ({}));
+      const stop = reseatKeeperSeat({ renderedUser: seated, address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait: noWait });
+      await expect(stop).rejects.toMatchObject({ stage: "id-dropped" });
+      const message = failureText(await stop.catch((error: unknown) => error)) ?? "";
+      expect(message.startsWith(RESEAT_COPY.idDropped(WALLET_ID))).toBe(true);
+      expect(message).toContain(RESEAT_COPY.idDroppedRecordLags);
     });
 
     it("an add that failed after landing: most likely added, never 'NOT added', and still names the id", async () => {
