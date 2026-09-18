@@ -5,7 +5,7 @@ import { SIP_PROGRAM_ID } from "@sip/solana-core/client";
 import { describe, expect, it, vi } from "vitest";
 
 import { PENSION_KEY, POLICY, SIGNER, TRADING_0 } from "../../test/fixtures/privy-user";
-import { READY_BACKOFF_MS, createAndLinkFlow, linkGate, type CreateAndLinkDeps } from "@/lib/create-and-link";
+import { READY_BACKOFF_MS, createAndLinkFlow, linkGate, pressPlan, type CreateAndLinkDeps } from "@/lib/create-and-link";
 import { SIGNER_VARIABLE, POLICY_VARIABLE } from "@/lib/trading-wallets";
 import type { VaultStateJson } from "@/lib/vault-api";
 import { CREATE_LINK_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
@@ -93,6 +93,35 @@ describe("linkGate: what the chain says about linking, in one place", () => {
 
   it("answers the vault before the program: no vault is the owner's next step whatever else is wrong", () => {
     expect(linkGate(stateOf({ vault: "missing", config: "missing", paused: true }))?.code).toBe("needs_vault");
+  });
+});
+
+describe("pressPlan: what the press promises, from the screen's view of the chain", () => {
+  it("a chain that can take a link promises the link, with the rent the chain reports", () => {
+    expect(pressPlan({ kind: "ready", state: stateOf() })).toStrictEqual({ links: true, linkRent: 1_305_560n });
+  });
+
+  it("a read still in flight keeps the whole promise, and invents no rent: the flow reads the chain after the create", () => {
+    expect(pressPlan({ kind: "loading" })).toStrictEqual({ links: true, linkRent: null });
+    expect(pressPlan(null)).toStrictEqual({ links: true, linkRent: null });
+  });
+
+  it("A READ THAT FAILED promises the create alone, in the read's own words: no link, no Phantom, no rent", () => {
+    // The screen knew before the press: the flow would mint a wallet and stop at chain_unknown.
+    expect(pressPlan({ kind: "unreadable", message: VAULT_COPY.unreadable })).toStrictEqual({ links: false, reason: VAULT_COPY.unreadable });
+  });
+
+  it.each<[Chain, string]>([
+    [{ vault: "missing" }, LINK_COPY.needsVault],
+    [{ config: "missing" }, LINK_COPY.needsConfig],
+    [{ paused: true }, LINK_COPY.paused],
+  ])("a chain that refuses the link (%o) promises the create alone, with the gate's words", (chain, reason) => {
+    expect(pressPlan({ kind: "ready", state: stateOf(chain) })).toStrictEqual({ links: false, reason });
+  });
+
+  it("a chain with no rents read promises the link and names no amount", () => {
+    const state = { ...stateOf(), rents: null };
+    expect(pressPlan({ kind: "ready", state })).toStrictEqual({ links: true, linkRent: null });
   });
 });
 

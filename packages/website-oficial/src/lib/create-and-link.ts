@@ -31,6 +31,7 @@
  * link all arrive as arguments, so every state below is testable without a browser.
  */
 
+import { rawFrom } from "@/lib/amounts";
 import { createTradingWallet, failureText, keeperSigners, seatProblem, type CreateWalletFn, type RefreshUserFn, type SeatConfig } from "@/lib/trading-wallets";
 import type { VaultStateJson } from "@/lib/vault-api";
 import { CREATE_LINK_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
@@ -56,6 +57,39 @@ export function linkGate(state: VaultStateJson): LinkGate | null {
   if (state.config.status === "unreadable") return { code: "config_unreadable", message: LINK_COPY.unreadable };
   if (state.config.paused === true) return { code: "paused", message: LINK_COPY.paused };
   return null;
+}
+
+/** The screen's view of the chain, as much of it as one press needs (src/hooks/use-vault-state.ts's VaultView). */
+export type LinkChainView =
+  | { readonly kind: "loading" }
+  | { readonly kind: "unreadable"; readonly message: string }
+  | { readonly kind: "ready"; readonly state: VaultStateJson };
+
+/** What one press will do, and so what may be said before it is pressed. */
+export type PressPlan =
+  /** It will create the wallet and link it. `linkRent` is null when the rent has not been read: no amount may be invented. */
+  | { readonly links: true; readonly linkRent: bigint | null }
+  /** It will only create the wallet, for this reason, in the chain's own words. */
+  | { readonly links: false; readonly reason: string };
+
+/**
+ * WHAT ONE PRESS WILL DO, from the screen's view of the chain.
+ *
+ * THREE CASES, NEVER TWO. A read still in flight is not a read that FAILED. While
+ * it loads, the press may still link — the flow reads the chain again after the
+ * create, and by then it usually has it — so the whole promise stands. A failed
+ * read cannot take a link: the flow would stop at `chain_unknown` after minting a
+ * wallet nobody asked for on its own, so the press promises the create alone,
+ * with the read's own words. Folding the two into one "the chain says nothing
+ * against it" announced Phantom and rent that never came.
+ *
+ * AN AMOUNT THAT WAS NOT READ IS NEVER WRITTEN. `linkRent` is the chain's, or null.
+ */
+export function pressPlan(view: LinkChainView | null): PressPlan {
+  if (view === null || view.kind === "loading") return { links: true, linkRent: null };
+  if (view.kind === "unreadable") return { links: false, reason: view.message };
+  const gate = linkGate(view.state);
+  return gate === null ? { links: true, linkRent: rawFrom(view.state.rents?.link) } : { links: false, reason: gate.message };
 }
 
 /** Where a chained press stopped before the link ran. */

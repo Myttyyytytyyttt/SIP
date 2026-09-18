@@ -22,6 +22,12 @@
  * never claims is the seat: it was asked for at creation, and only the row's
  * badge reads Privy's record — which can say a signer exists, never whose.
  *
+ * A READ THAT FAILED IS NOT A READ IN FLIGHT. While the chain is still being read
+ * the whole press is offered — the flow reads it again after the create. Once the
+ * read has FAILED, the button says "Create wallet" and the card says the read's
+ * own words: promising a link, a Phantom prompt and rent that the flow will not
+ * reach is worse than offering less.
+ *
  * NO VAULT, NO SILENT VAULT. Linking needs a vault, and a vault costs rent that
  * never comes back and carries a mode and limits the owner chooses. With none,
  * the press still creates the wallet and the card says the vault comes first,
@@ -47,7 +53,7 @@ import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
 import { useCreateAndLink } from "@/hooks/use-create-and-link";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { formatSol, rawFrom } from "@/lib/amounts";
-import { linkGate, type CreateAndLinkOutcome } from "@/lib/create-and-link";
+import { pressPlan, type CreateAndLinkOutcome } from "@/lib/create-and-link";
 import { MAX_TRADING_WALLETS, keeperSigners, seatProblem, tradingWalletsOf } from "@/lib/trading-wallets";
 import { CREATE_LINK_COPY, LINK_COPY } from "@/lib/vault-copy";
 
@@ -67,12 +73,13 @@ export function TradingWalletsCard() {
   const seat = keeperSigners(config)?.[0] ?? null;
   const full = rows.length >= MAX_TRADING_WALLETS;
 
-  const state = screen !== null && screen.view.kind === "ready" ? screen.view.state : null;
-  const gate = state === null ? null : linkGate(state);
-  const linkRent = state === null ? null : rawFrom(state.rents?.link);
+  const view = screen?.view ?? null;
+  const state = view !== null && view.kind === "ready" ? view.state : null;
   const vaultRent = state === null ? null : rawFrom(state.rents?.vault);
-  // What the press will do, in one sentence, before it is pressed: Phantom's window comes late, and never unannounced.
-  const ahead = gate === null ? CREATE_LINK_COPY.ahead(linkRent === null ? "some" : formatSol(linkRent)) : `${CREATE_LINK_COPY.aheadCreateOnly} ${gate.message}`;
+  // What the press will do, in one sentence, before it is pressed: Phantom's window comes late, and never
+  // unannounced — and a read that FAILED promises the create alone, since that is all the flow will do.
+  const plan = pressPlan(view);
+  const ahead = plan.links ? CREATE_LINK_COPY.ahead(plan.linkRent === null ? null : formatSol(plan.linkRent)) : `${CREATE_LINK_COPY.aheadCreateOnly} ${plan.reason}`;
   const busy = write.running;
   // A link this screen sent and cannot confirm blocks the chained press too, wherever it was sent from:
   // a second link transaction while the first may still land is exactly what the screen promises not to offer.
@@ -97,7 +104,7 @@ export function TradingWalletsCard() {
             onClick={() => void run()}
           >
             {busy ? <LoaderCircle className="animate-spin" aria-hidden /> : <Plus aria-hidden />}
-            {busy ? CREATE_LINK_COPY.running : gate === null ? CREATE_LINK_COPY.button : CREATE_LINK_COPY.buttonCreateOnly}
+            {busy ? CREATE_LINK_COPY.running : plan.links ? CREATE_LINK_COPY.button : CREATE_LINK_COPY.buttonCreateOnly}
           </Button>
         </CardAction>
       </CardHeader>

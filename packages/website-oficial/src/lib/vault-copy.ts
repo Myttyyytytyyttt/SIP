@@ -110,18 +110,28 @@ export const LINK_COPY = {
  * it, the wallet is real and paid for whatever the link does next, so no refusal
  * may read as "nothing happened".
  */
+/** Defined before the object so `ahead` can end with it. */
+const CREATE_LINK_RENT_UNREAD = "The rent is not on screen yet; Phantom shows it before you approve.";
+
 export const CREATE_LINK_COPY = {
   /** The button, when the chain can take a link. */
   button: "Create wallet and link it",
   /** The button, when the chain cannot: it will only create. */
   buttonCreateOnly: "Create wallet",
   running: "Working…",
-  /** Said before anything is pressed, and again for the whole run: Phantom's prompt must never arrive unannounced. */
-  ahead: (linkRent: string): string =>
+  /**
+   * Said before anything is pressed, and again for the whole run: Phantom's prompt
+   * must never arrive unannounced. `linkRent` is null while the chain's rent has not
+   * been read — the amount is then Phantom's to show, and none is invented here.
+   */
+  ahead: (linkRent: string | null): string =>
     `One press does both. Privy creates the wallet with the keeper's seat, your trading wallet signs a consent naming this vault, ` +
-    `then Phantom asks you to approve and pay ${linkRent} SOL of rent (returned if you unlink), and your trading wallet co-signs. ` +
-    `Phantom's window opens partway through, after the wallet exists.`,
+    (linkRent === null ? `then Phantom asks you to approve and pay the link's rent (returned if you unlink), ` : `then Phantom asks you to approve and pay ${linkRent} SOL of rent (returned if you unlink), `) +
+    `and your trading wallet co-signs. Phantom's window opens partway through, after the wallet exists.` +
+    (linkRent === null ? ` ${CREATE_LINK_RENT_UNREAD}` : ""),
   aheadCreateOnly: "This creates a trading wallet with the keeper's seat. Nothing is signed and nothing is paid.",
+  /** The link's rent is not on screen yet: said instead of an amount, never as well as one. */
+  rentNotRead: CREATE_LINK_RENT_UNREAD,
   done: "Linked",
   /** The head of every stop after the wallet exists. */
   created: "Your trading wallet is created and nothing was lost.",

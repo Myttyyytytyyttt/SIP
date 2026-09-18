@@ -65,7 +65,7 @@ import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hoo
 import type { CreateAndLinkOutcome } from "@/lib/create-and-link";
 import { MAX_TRADING_WALLETS } from "@/lib/trading-wallets";
 import type { VaultApi, VaultStateJson } from "@/lib/vault-api";
-import { CREATE_LINK_COPY, LINK_COPY } from "@/lib/vault-copy";
+import { CREATE_LINK_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
 
 const CLICK = { type: "click", target: {} };
 const VAULT = "Vau1tP1aceho1der111111111111111111111111111";
@@ -161,8 +161,24 @@ describe("the one button, before it is pressed", () => {
   });
 
   it("while the chain is still being read it offers the whole press, and the flow judges the chain after the create", () => {
-    expect(render({ kind: "loading" }).html).toContain("Phantom&#x27;s window opens partway through");
+    const { html } = render({ kind: "loading" });
+    expect(html).toContain("Phantom&#x27;s window opens partway through");
     expect(buttons(CREATE_LINK_COPY.button)).toHaveLength(1);
+    // An amount that has not been read is not written: no "some SOL of rent", and Phantom is named as where it comes from.
+    expect(html).not.toContain("SOL of rent");
+    expect(html).toContain(asHtml(CREATE_LINK_COPY.rentNotRead));
+  });
+
+  it("THE READ FAILED: only the create is offered, in the read's own words, with no Phantom and no rent", () => {
+    // Not the same as a read in flight. The flow would mint a wallet and stop at chain_unknown, so the
+    // press promises exactly that; the card used to announce Phantom's window and "some SOL of rent".
+    const { html } = render({ kind: "unreadable", message: VAULT_COPY.unreadable });
+    expect(buttons(CREATE_LINK_COPY.buttonCreateOnly)).toHaveLength(1);
+    expect(buttons(CREATE_LINK_COPY.button)).toHaveLength(0);
+    expect(html).not.toContain("Phantom&#x27;s window opens partway through");
+    expect(html).not.toContain("SOL of rent");
+    expect(html).toContain(asHtml(VAULT_COPY.unreadable));
+    expect(html).toContain("Nothing is signed and nothing is paid.");
   });
 
   it("the keeper's seat not configured: disabled, the variables named, and pressing it creates nothing", async () => {
