@@ -194,7 +194,15 @@ may be incorrect or expired."}
 ```
 
 Esa frase significa una sola cosa: **la firma que llegó no era de ninguna llave que Privy acepte para esa wallet**. No
-dice cuál de todas las maneras de estar mal es. Este comando sí.
+dice cuál de todas las maneras de estar mal es.
+
+**Mira primero `/status`.** El vigilante comprueba esto solo, al arrancar y cada media hora, y publica el resultado en
+`signing.authorizationKey` — con la fecha en que lo comprobó, en `signing.authorizationKeyAt`. Ese veredicto es **sobre
+la llave que hay puesta en Railway**, que es la que falla. Si dice `matches`, la llave desplegada está bien y el problema
+es otro (paso 6). Si dice cualquier otra cosa, la tabla de más abajo explica cada valor igual.
+
+El comando de aquí abajo sirve para lo otro: **probar una llave concreta antes de ponerla en Railway**, o ver cuál es su
+clave pública para compararla con el dashboard. Juzga exactamente el valor que tú pegas, ni más ni menos.
 
 ```bash
 cd ~/ProyectosCT/SIP
@@ -206,8 +214,16 @@ SIP_SOLANA_PRIVY_APP_ID=cmtrt36tb00080dlbrda5aqam SIP_SOLANA_PRIVY_APP_SECRET="$
 unset SECRETO CLAVE
 ```
 
-En **Terminal.app**, como todo lo demás de esta guía. Pega la llave del gestor de contraseñas cuando te la pida: no se
-ve al escribirla, no queda en el historial y **no sale de tu ordenador**. El comando no se la manda a Privy ni a nadie.
+En **Terminal.app**, como todo lo demás de esta guía. La llave que pegues cuando te la pida no se ve al escribirla, no
+queda en el historial y **no sale de tu ordenador**: el comando no se la manda a Privy ni a nadie.
+
+**El comando juzga esa llave, la que pegas, y ninguna otra.** No lee Railway, no sabe qué hay desplegado. Así que elige
+a conciencia cuál pegas:
+
+- ¿quieres saber si la llave **del gestor de contraseñas** es la buena, antes de ponerla? Pega la del gestor.
+- ¿quieres saber por qué el vigilante desplegado devuelve 401? Eso lo contesta `signing.authorizationKey` en `/status`.
+  Si prefieres comprobarlo a mano, copia el valor **desde la propia variable de Railway** (Variables → el icono del ojo
+  en `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`) y pega ESE.
 
 Lo que hace son dos cosas. Primero calcula, aquí mismo, la **clave pública** que le corresponde a esa llave privada.
 Después le pregunta a Privy qué claves públicas tiene registradas el key quorum `cbx133itb717vxp3dqwhk808` — eso solo
@@ -219,7 +235,7 @@ Mira `verdict`:
 
 | verdict | qué significa | qué haces |
 |---|---|---|
-| `matches` | la llave configurada **sí** está registrada en ese quorum (sale con código 0) | nada con la llave. Si aun así rechaza los cobros, el problema es el asiento o la política: paso 6 |
+| `matches` | **la llave que acabas de pegar** está registrada en ese quorum y basta su firma sola (sale con código 0) | nada con esa llave. Antes de buscar en otro sitio, asegúrate de que es la misma que hay en Railway: mira `signing.authorizationKey` en `/status`. Si ahí también dice `matches`, el problema es el asiento o la política: paso 6 |
 | `not-in-quorum` | la llave es una llave válida, pero **su clave pública no es ninguna de las de ese quorum**. Esta es la causa del 401 | sigue [No coincide](#no-coincide-la-llave-no-es-la-de-ese-quorum) aquí abajo |
 | `key-unreadable` | lo que hay en `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY` no es una llave P-256. No se mandó nada a ningún sitio | vuelve a pegarla entera desde el gestor |
 | `credentials-refused` | Privy rechazó el app id o la app secret, así que no pudo ni leer el quorum. **No dice nada de la llave** | comprueba `SIP_SOLANA_PRIVY_APP_ID` y la app secret en el dashboard, en la app del paso 1 |
@@ -240,7 +256,7 @@ Dos avisos, para que no te manden a arreglar lo que no está roto:
 
 El comando te imprime dos cosas públicas, juntas:
 
-- `derivedPublicKey`: la clave pública de **la llave que hay puesta en Railway**.
+- `derivedPublicKey`: la clave pública de **la llave que acabas de pegar**.
 - `registeredPublicKeys`: las que **tiene registradas el quorum** `cbx133itb717vxp3dqwhk808`.
 
 Con eso en la mano:
@@ -251,8 +267,14 @@ Con eso en la mano:
    `sip-solana-keeper`.
 3. Compara su clave pública con `derivedPublicKey`. Son distintas: por eso Privy rechaza.
 4. La llave privada que va en `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY` es **la de esa llave del dashboard**, no la que hay
-   puesta ahora. Búscala en el gestor de contraseñas por su nombre, ponla en Railway y vuelve a correr el comando hasta
-   que diga `matches`.
+   puesta ahora. Búscala en el gestor de contraseñas por su nombre. Si quieres, pégala en el comando de arriba antes de
+   nada: si dice `matches`, es la buena.
+5. Ponla en Railway, en `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`, y **espera a que el servicio reinicie**. Volver a correr
+   el comando aquí no comprueba nada de lo que acabas de guardar: el comando lee tu ordenador, no Railway.
+6. **Abre `/status` y mira `signing.authorizationKey`. Tiene que decir `matches`.** Esa es la comprobación que mira la
+   llave desplegada, y es la que cierra la incidencia. Al lado, `signing.authorizationKeyAt` dice de cuándo es el
+   veredicto: si la fecha es anterior al reinicio, el vigilante aún no ha vuelto a comprobarlo — espera y recarga. En el
+   log de Railway aparece además `derivedPublicKey`, que tiene que ser la misma clave pública que te imprimió el comando.
 
 Lo más normal es que en Railway esté pegada otra llave tuya: tienes varias, y una de ellas es la de administración de la
 política, que **no** es esta. La de administración está en `~/sip-keys/privy-policy-admin.key` y sirve para otra cosa

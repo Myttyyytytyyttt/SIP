@@ -276,8 +276,10 @@ export const AUTHORIZATION_KEY_MEANING: Readonly<Record<AuthorizationKeyCheck, s
 export const AUTHORIZATION_KEY_NEXT: Readonly<Record<AuthorizationKeyCheck, string>> = {
   "not-checked": "Set SIP_SOLANA_PRIVY_SIGNER_ID to the keeper signer's key quorum id, and run the command again.",
   matches:
-    "Nothing to do about the key. If settles are still refused, the cause is elsewhere: check the seat and its policy " +
-    "with `privy-policy verify`.",
+    "Nothing to do about THIS key — and this verdict is about the value in this process's environment, not about the " +
+    "one a deployed keeper holds. Before looking elsewhere, check that they are the same: /status reports " +
+    "signing.authorizationKey for the deployed value. If that says matches too and settles are still refused, the cause " +
+    "is the seat or its policy: `privy-policy verify`.",
   "not-in-quorum":
     "Open the Privy dashboard, Wallets → Authorization keys, and find the key whose id is this key quorum. Compare the " +
     "public key shown there with the derivedPublicKey printed above. They differ, so the private key in " +

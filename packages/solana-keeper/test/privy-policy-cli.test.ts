@@ -374,6 +374,12 @@ describe("key", () => {
   it("matches, and prints the derived PUBLIC key next to the quorum's", async () => {
     const result = await run(["key"], { env: keyEnv });
     expect(result.code).toBe(0);
+    // AND SAYS WHOSE KEY IT JUDGED. This command reads the environment it was
+    // given, never Railway's, and the incident it exists for is precisely a
+    // Railway value that differs from the one in the password manager: a bare
+    // "nothing to do about the key" sends an operator off to chase the seat
+    // while the deployed keeper keeps 401ing.
+    expect(String(verdict(result)["next"])).toContain("/status");
     expect(verdict(result)).toMatchObject({
       verdict: "matches",
       signerId: SIGNER_ID,
