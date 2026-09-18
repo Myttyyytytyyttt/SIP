@@ -57,6 +57,24 @@ export function embedded(
   };
 }
 
+/**
+ * A trading wallet as this Privy app makes them, in TEE execution: walletClientType privy, a server wallet id, and
+ * recoveryMethod privy-v2 — the SDK's own test (isUnifiedWallet) for a wallet whose signers removeSigners clears one
+ * wallet at a time. The id is set whatever `delegated` says: a TEE wallet is a server wallet from its creation.
+ */
+export function teeWallet(
+  address: string,
+  walletIndex: number | null,
+  delegated: boolean,
+  extra: Partial<WalletWithMetadata> = {},
+): WalletWithMetadata {
+  return embedded(address, walletIndex, delegated, {
+    id: `wallet-id-${address.slice(0, 10).toLowerCase()}`,
+    recoveryMethod: "privy-v2",
+    ...extra,
+  });
+}
+
 /** A user whose first linked wallet is the one they signed in with, the way Privy fills `user.wallet`. */
 export function userWith(linkedAccounts: LinkedAccountWithMetadata[]): User {
   const first = linkedAccounts.find((account) => account.type === "wallet");

@@ -2,18 +2,23 @@
 // and its seat is read from Privy's record. Privy is mocked by handing these functions plain vi.fn()s;
 // the record comes from test/fixtures/privy-user.ts, typed against the installed SDK.
 
-import type { WalletWithMetadata } from "@privy-io/react-auth";
+import type { User, WalletWithMetadata } from "@privy-io/react-auth";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   GRANT_BACKOFF_MS,
   NotATradingWallet,
+  RESEAT_COPY,
+  ReseatIncomplete,
+  ReseatRefused,
   SeatNotConfigured,
   createTradingWallet,
   exportTradingWallet,
   failureText,
   grantKeeperSeat,
   keeperSigners,
+  reseatKeeperSeat,
+  reseatRefusal,
   seatOf,
   seatProblem,
   tradingWalletsOf,
@@ -21,6 +26,7 @@ import {
   type CreateWalletFn,
   type ExportWalletFn,
   type RefreshUserFn,
+  type RemoveSignersFn,
   type SeatConfig,
 } from "@/lib/trading-wallets";
 
@@ -36,6 +42,7 @@ import {
   TRADING_2,
   embedded,
   phantom,
+  teeWallet,
   userWith,
 } from "../../test/fixtures/privy-user";
 
@@ -229,6 +236,223 @@ describe("grantKeeperSeat", () => {
   });
 });
 
+describe("reseatRefusal: whether Privy would remove the signers of THIS wallet only", () => {
+  it("allows a TEE wallet: walletClientType privy, a server id, recoveryMethod privy-v2", () => {
+    expect(reseatRefusal(userWith([phantom(), teeWallet(TRADING_0, 0, true)]), TRADING_0)).toBeNull();
+  });
+
+  it("refuses any other wallet, where Privy's removal would revoke every wallet on the account or find none", () => {
+    // Privy 3.36.0: not isUnifiedWallet -> its legacy revoke, which takes no address; not walletClientType privy -> not found.
+    const cases: WalletWithMetadata[] = [
+      embedded(TRADING_0, 0, true),
+      teeWallet(TRADING_0, 0, true, { recoveryMethod: "privy" }),
+      teeWallet(TRADING_0, 0, true, { id: null }),
+      teeWallet(TRADING_0, 0, true, { id: "" }),
+      teeWallet(TRADING_0, 0, true, { walletClientType: "privy-v2" }),
+    ];
+    for (const wallet of cases) expect(reseatRefusal(userWith([phantom(), wallet]), TRADING_0)).toBe(RESEAT_COPY.notPerWallet);
+  });
+
+  it("refuses the pension key, an EVM wallet, an address the account does not hold, and no user at all", () => {
+    const user = userWith([phantom(), teeWallet(EVM_EMBEDDED, 0, true, { chainType: "ethereum" })]);
+    for (const address of [PENSION_KEY, EVM_EMBEDDED, TRADING_0]) expect(reseatRefusal(user, address)).toBe(RESEAT_COPY.notATradingWallet);
+    expect(reseatRefusal(null, TRADING_0)).toBe(RESEAT_COPY.notATradingWallet);
+  });
+});
+
+describe("reseatKeeperSeat", () => {
+  const seated = userWith([phantom(), teeWallet(TRADING_0, 0, true)]);
+  const cleared = userWith([phantom(), teeWallet(TRADING_0, 0, false)]);
+  const noWait = (_ms: number): Promise<void> => Promise.resolve();
+  /** Privy's record as each read returns it, in order; the last one repeats. */
+  const reads = (...users: User[]) => {
+    const fn = vi.fn<RefreshUserFn>();
+    for (const user of users) fn.mockResolvedValueOnce(user);
+    return fn.mockResolvedValue(users.at(-1) ?? null);
+  };
+
+  it("removes every signer, waits for the record to show none, then seats exactly the keeper's signer with its policy", async () => {
+    const refreshUser = reads(seated, cleared, cleared, seated);
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({ user: cleared }));
+    const addSigners = vi.fn<AddSignersFn>(async () => ({ user: seated }));
+    const wait = vi.fn(noWait);
+
+    await expect(reseatKeeperSeat({ address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait })).resolves.toBe("reseated");
+
+    // Exactly the address, never a click event or anything else Privy might read as options.
+    expect(removeSigners.mock.calls).toStrictEqual([[{ address: TRADING_0 }]]);
+    expect(addSigners.mock.calls).toStrictEqual([[{ address: TRADING_0, signers: EXACT_SIGNERS }]]);
+    expect(removeSigners.mock.invocationCallOrder[0]).toBeLessThan(addSigners.mock.invocationCallOrder[0] ?? 0);
+    // A read before the removal, one after it that shows no signer, the grant's own re-read, and its read after.
+    expect(refreshUser).toHaveBeenCalledTimes(4);
+    expect(refreshUser.mock.invocationCallOrder[1]).toBeGreaterThan(removeSigners.mock.invocationCallOrder[0] ?? 0);
+    expect(refreshUser.mock.invocationCallOrder[1]).toBeLessThan(addSigners.mock.invocationCallOrder[0] ?? 0);
+    expect(wait).not.toHaveBeenCalled();
+  });
+
+  it.each(UNSEATED)("refuses without asking Privy anything when %s: no signer without its policy", async (_, config) => {
+    const refreshUser = reads(seated);
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const addSigners = vi.fn<AddSignersFn>(async () => ({}));
+    await expect(reseatKeeperSeat({ address: TRADING_0, config, removeSigners, addSigners, refreshUser, wait: noWait })).rejects.toBeInstanceOf(
+      SeatNotConfigured,
+    );
+    expect(refreshUser).not.toHaveBeenCalled();
+    expect(removeSigners).not.toHaveBeenCalled();
+    expect(addSigners).not.toHaveBeenCalled();
+  });
+
+  it("removes nothing from a wallet Privy would not clear on its own, or from an address that is not a trading wallet", async () => {
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const addSigners = vi.fn<AddSignersFn>(async () => ({}));
+    const onDevice = reads(userWith([phantom(), embedded(TRADING_0, 0, true)]));
+    await expect(reseatKeeperSeat({ address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser: onDevice, wait: noWait })).rejects.toThrow(
+      RESEAT_COPY.notPerWallet,
+    );
+    for (const address of [PENSION_KEY, TRADING_1]) {
+      await expect(reseatKeeperSeat({ address, config: SEAT, removeSigners, addSigners, refreshUser: reads(seated), wait: noWait })).rejects.toBeInstanceOf(
+        ReseatRefused,
+      );
+    }
+    const flagless = { ...teeWallet(TRADING_0, 0, true), delegated: undefined } as unknown as WalletWithMetadata;
+    await expect(
+      reseatKeeperSeat({ address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser: reads(userWith([phantom(), flagless])), wait: noWait }),
+    ).rejects.toThrow(RESEAT_COPY.notListed);
+    expect(removeSigners).not.toHaveBeenCalled();
+    expect(addSigners).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing when the first read of the record fails", async () => {
+    const refreshUser = vi.fn<RefreshUserFn>(async () => {
+      throw new Error("too_many_requests");
+    });
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const addSigners = vi.fn<AddSignersFn>(async () => ({}));
+    await expect(reseatKeeperSeat({ address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait: noWait })).rejects.toThrow("too_many_requests");
+    expect(removeSigners).not.toHaveBeenCalled();
+    expect(addSigners).not.toHaveBeenCalled();
+  });
+
+  it("waits on the grant's backoff for a record still catching up with the removal, then seats", async () => {
+    const refreshUser = reads(seated, seated, seated, cleared, cleared, seated);
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const addSigners = vi.fn<AddSignersFn>(async () => ({}));
+    const wait = vi.fn(noWait);
+    await expect(reseatKeeperSeat({ address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait })).resolves.toBe("reseated");
+    expect(wait.mock.calls).toStrictEqual([[GRANT_BACKOFF_MS[0]], [GRANT_BACKOFF_MS[1]]]);
+    expect(addSigners).toHaveBeenCalledTimes(1);
+  });
+
+  it("adds nothing while the record still lists a signer after every wait, and says to press again — never done", async () => {
+    const refreshUser = reads(seated);
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const addSigners = vi.fn<AddSignersFn>(async () => ({}));
+    const wait = vi.fn(noWait);
+    const stop = reseatKeeperSeat({ address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait });
+    await expect(stop).rejects.toBeInstanceOf(ReseatIncomplete);
+    await expect(stop).rejects.toMatchObject({ stage: "record-still-lists-a-signer", message: RESEAT_COPY.recordLags });
+    expect(wait.mock.calls.map(([ms]) => ms)).toStrictEqual([...GRANT_BACKOFF_MS]);
+    expect(addSigners).not.toHaveBeenCalled();
+  });
+
+  it("a removal Privy refused, with the signer still on the record: nothing added, Privy's words, no waiting", async () => {
+    const refreshUser = reads(seated);
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => {
+      throw new Error("Wallet proxy not initialized.");
+    });
+    const addSigners = vi.fn<AddSignersFn>(async () => ({}));
+    const wait = vi.fn(noWait);
+    const stop = reseatKeeperSeat({ address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait });
+    await expect(stop).rejects.toMatchObject({ stage: "removal-unconfirmed" });
+    const message = failureText(await stop.catch((error: unknown) => error)) ?? "";
+    expect(message).toContain(RESEAT_COPY.removalUnconfirmed);
+    expect(message).toContain(RESEAT_COPY.recordShowsSigner);
+    expect(message).toContain("auth.privy.io");
+    expect(addSigners).not.toHaveBeenCalled();
+    expect(wait).not.toHaveBeenCalled();
+  });
+
+  it("a removal whose answer failed and whose record cannot be read says it cannot tell, and adds nothing", async () => {
+    const refreshUser = vi
+      .fn<RefreshUserFn>()
+      .mockResolvedValueOnce(seated)
+      .mockRejectedValue(new Error("network down"));
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => {
+      throw new Error("Could not refresh user");
+    });
+    const addSigners = vi.fn<AddSignersFn>(async () => ({}));
+    const stop = reseatKeeperSeat({ address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait: noWait });
+    await expect(stop).rejects.toMatchObject({ stage: "removal-unconfirmed" });
+    expect(failureText(await stop.catch((error: unknown) => error))).toContain(RESEAT_COPY.recordUnreadable);
+    expect(addSigners).not.toHaveBeenCalled();
+  });
+
+  it("goes on to the grant when removeSigners failed AFTER the removal landed — the record is what decides", async () => {
+    // Privy's removeSigners patches the wallet, then re-reads the user and throws "Could not refresh user" if that fails.
+    const refreshUser = reads(seated, cleared, cleared, seated);
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => {
+      throw new Error("Could not refresh user");
+    });
+    const addSigners = vi.fn<AddSignersFn>(async () => ({}));
+    await expect(reseatKeeperSeat({ address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait: noWait })).resolves.toBe("reseated");
+    expect(addSigners.mock.calls).toStrictEqual([[{ address: TRADING_0, signers: EXACT_SIGNERS }]]);
+  });
+
+  it("REMOVED BUT NOT ADDED: says so first, names Grant keeper permission, keeps Privy's words, and is never done", async () => {
+    const refreshUser = reads(seated, cleared);
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const addSigners = vi.fn<AddSignersFn>().mockRejectedValue(new Error("Invalid policy id"));
+    const stop = reseatKeeperSeat({ address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait: noWait });
+    await expect(stop).rejects.toMatchObject({ stage: "removed-not-added" });
+    const message = failureText(await stop.catch((error: unknown) => error)) ?? "";
+    expect(message.startsWith(RESEAT_COPY.removedNotAdded)).toBe(true);
+    expect(message).toContain("Invalid policy id");
+    expect(message).toContain("Grant keeper permission");
+    expect(message).not.toContain(RESEAT_COPY.done);
+    // The record now reads "missing", which is exactly what puts the row's one-press Grant back on screen.
+    expect(seatOf(cleared, TRADING_0)).toBe("missing");
+  });
+
+  it("a stop after the removal is described even when Privy's own answer would say nothing (a closed dialog)", async () => {
+    const refreshUser = reads(seated, cleared);
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const addSigners = vi.fn<AddSignersFn>().mockRejectedValue(new Error("exited_auth_flow"));
+    const stop = reseatKeeperSeat({ address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait: noWait });
+    const message = failureText(await stop.catch((error: unknown) => error));
+    expect(message).toBe(`${RESEAT_COPY.removedNotAdded} ${RESEAT_COPY.removedNotAddedNext}`);
+  });
+
+  it("keeps the grant's propagation backoff after the removal", async () => {
+    const refreshUser = reads(seated, cleared);
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const addSigners = vi.fn<AddSignersFn>().mockRejectedValueOnce(new Error(NOT_ASSOCIATED)).mockResolvedValueOnce({});
+    const wait = vi.fn(noWait);
+    await expect(reseatKeeperSeat({ address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait })).resolves.toBe("reseated");
+    expect(wait.mock.calls).toStrictEqual([[GRANT_BACKOFF_MS[0]]]);
+    expect(addSigners).toHaveBeenCalledTimes(2);
+  });
+
+  it("adds nothing when a signer this page did not add appears between the removal and the grant", async () => {
+    const refreshUser = reads(seated, cleared, seated);
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const addSigners = vi.fn<AddSignersFn>(async () => ({}));
+    await expect(reseatKeeperSeat({ address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait: noWait })).rejects.toMatchObject({
+      stage: "signer-reappeared",
+      message: RESEAT_COPY.signerReappeared,
+    });
+    expect(addSigners).not.toHaveBeenCalled();
+  });
+
+  it("only grants when the record already shows no signer — a previous re-seat's removal — and removes nothing", async () => {
+    const refreshUser = reads(cleared, cleared, seated);
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const addSigners = vi.fn<AddSignersFn>(async () => ({}));
+    await expect(reseatKeeperSeat({ address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait: noWait })).resolves.toBe("granted");
+    expect(removeSigners).not.toHaveBeenCalled();
+    expect(addSigners.mock.calls).toStrictEqual([[{ address: TRADING_0, signers: EXACT_SIGNERS }]]);
+  });
+});
+
 describe("exportTradingWallet", () => {
   it("opens Privy's export for exactly that trading wallet's address", async () => {
     const exportWallet = vi.fn<ExportWalletFn>(async () => undefined);
@@ -252,5 +476,7 @@ describe("failureText", () => {
     expect(failureText(new NotATradingWallet("Only a trading wallet."))).toBe("Only a trading wallet.");
     expect(failureText("exited_auth_flow")).toBeNull();
     expect(failureText(new Error("Wallet proxy not initialized."))).toContain("auth.privy.io");
+    expect(failureText(new ReseatRefused(RESEAT_COPY.notPerWallet))).toBe(RESEAT_COPY.notPerWallet);
+    expect(failureText(new ReseatIncomplete("removed-not-added", "Every signer is off."))).toBe("Every signer is off.");
   });
 });

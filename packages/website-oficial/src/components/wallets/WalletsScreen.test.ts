@@ -21,6 +21,7 @@ import {
   TRADING_2,
   embedded,
   phantom,
+  teeWallet,
   userWith,
 } from "../../../test/fixtures/privy-user";
 
@@ -43,6 +44,7 @@ const mocked = vi.hoisted(() => {
     logout: vi.fn(),
     createWallet: vi.fn(),
     addSigners: vi.fn(),
+    removeSigners: vi.fn(),
     refreshUser: vi.fn(),
     exportWallet: vi.fn(),
   };
@@ -52,7 +54,7 @@ vi.mock("@privy-io/react-auth", () => ({
   usePrivy: () => ({ ...mocked.privy, login: mocked.login, logout: mocked.logout }),
   useLogin: () => ({ login: mocked.login }),
   useUser: () => ({ user: mocked.privy.user, refreshUser: mocked.refreshUser }),
-  useSigners: () => ({ addSigners: mocked.addSigners, removeSigners: vi.fn() }),
+  useSigners: () => ({ addSigners: mocked.addSigners, removeSigners: mocked.removeSigners }),
 }));
 
 vi.mock("@privy-io/react-auth/solana", () => ({
@@ -82,7 +84,10 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 });
 
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ReseatConfirm } from "@/components/wallets/TradingWalletRow";
 import { WalletsScreen } from "@/components/wallets/WalletsScreen";
+import { useKeeperSeat } from "@/hooks/use-keeper-seat";
+import { RESEAT_COPY } from "@/lib/trading-wallets";
 import { CREATE_LINK_COPY } from "@/lib/vault-copy";
 
 /** What a real click hands a handler: an object with a target, which Privy would read as options. */
@@ -108,7 +113,7 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 beforeEach(() => {
   mocked.privy = { ready: true, authenticated: true, user: RECORD };
   mocked.config = { privySignerId: SIGNER, privyPolicyId: POLICY };
-  for (const fn of [mocked.login, mocked.logout, mocked.createWallet, mocked.addSigners, mocked.refreshUser, mocked.exportWallet]) {
+  for (const fn of [mocked.login, mocked.logout, mocked.createWallet, mocked.addSigners, mocked.removeSigners, mocked.refreshUser, mocked.exportWallet]) {
     fn.mockReset();
   }
   mocked.logout.mockResolvedValue(undefined);
@@ -241,5 +246,105 @@ describe("WalletsScreen with the seat configured", () => {
       [{ address: TRADING_2 }],
       [{ address: IMPORTED }],
     ]);
+  });
+});
+
+describe("Re-seat keeper: remove every signer on a wallet, then seat the keeper's current signer", () => {
+  const seated = userWith([phantom(), teeWallet(TRADING_0, 0, true)]);
+  const cleared = userWith([phantom(), teeWallet(TRADING_0, 0, false)]);
+
+  it("is offered on a wallet with a signer, and its first press only asks: nothing is removed or added", async () => {
+    mocked.privy = { ready: true, authenticated: true, user: seated };
+    const html = render();
+    const [row] = rows(html);
+    expect(row?.body).toContain("the signer here is the old one: re-seat it.");
+    const reseats = buttons(RESEAT_COPY.button);
+    expect(reseats).toHaveLength(1);
+    expect(reseats[0]?.disabled).toBe(false);
+    // The confirmation is not on screen until asked for, and nothing in the row removes anything by itself.
+    expect(buttons(RESEAT_COPY.confirm)).toHaveLength(0);
+    reseats[0]?.onClick?.(CLICK);
+    await flush();
+    expect(mocked.removeSigners).not.toHaveBeenCalled();
+    expect(mocked.addSigners).not.toHaveBeenCalled();
+    expect(mocked.refreshUser).not.toHaveBeenCalled();
+  });
+
+  it("is not offered where the grant is (No seat) or where the seat cannot be read (Seat unknown)", () => {
+    const flagless = { ...teeWallet(TRADING_1, 1, true), delegated: undefined } as unknown as WalletWithMetadata;
+    mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), teeWallet(TRADING_0, 0, false), flagless]) };
+    render();
+    expect(buttons(RESEAT_COPY.button)).toHaveLength(0);
+    expect(buttons("Grant keeper permission")).toHaveLength(1);
+    expect(buttons("Check again")).toHaveLength(1);
+  });
+
+  it("is disabled, with the reason on the row, for a wallet Privy would not clear one at a time", () => {
+    mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), embedded(TRADING_1, 1, true)]) };
+    const html = render();
+    expect(buttons(RESEAT_COPY.button).map((button) => button.disabled)).toStrictEqual([true]);
+    expect(html).toContain(RESEAT_COPY.notPerWallet.replaceAll("'", "&#x27;"));
+  });
+
+  it("is disabled when the seat is not configured: it would end in a signer without its policy, or none", () => {
+    mocked.config = { privySignerId: SIGNER, privyPolicyId: null };
+    mocked.privy = { ready: true, authenticated: true, user: seated };
+    render();
+    expect(buttons(RESEAT_COPY.button).map((button) => button.disabled)).toStrictEqual([true]);
+  });
+
+  it("the hook's re-seat removes by address only, then adds exactly the keeper's signer with its policy", async () => {
+    mocked.privy = { ready: true, authenticated: true, user: seated };
+    mocked.refreshUser.mockReset();
+    mocked.refreshUser.mockResolvedValueOnce(seated).mockResolvedValueOnce(cleared).mockResolvedValueOnce(cleared).mockResolvedValue(seated);
+    mocked.removeSigners.mockResolvedValue({ user: cleared });
+    mocked.addSigners.mockResolvedValue({ user: seated });
+    let seat: ReturnType<typeof useKeeperSeat> | null = null;
+    function Probe() {
+      seat = useKeeperSeat(TRADING_0, { privySignerId: SIGNER, privyPolicyId: POLICY });
+      return null;
+    }
+    renderToStaticMarkup(createElement(Probe));
+    const captured = seat as ReturnType<typeof useKeeperSeat> | null;
+    expect(captured?.seat).toBe("has-signer");
+    expect(captured?.reseatBlocked).toBeNull();
+    await captured?.reseat();
+    expect(mocked.removeSigners.mock.calls).toStrictEqual([[{ address: TRADING_0 }]]);
+    expect(mocked.addSigners.mock.calls).toStrictEqual([[{ address: TRADING_0, signers: [{ signerId: SIGNER, policyIds: [POLICY] }] }]]);
+    expect(mocked.removeSigners.mock.invocationCallOrder[0]).toBeLessThan(mocked.addSigners.mock.invocationCallOrder[0] ?? 0);
+  });
+});
+
+describe("ReseatConfirm, the plain confirmation", () => {
+  function confirmWith(busy: boolean, disabled = false) {
+    mocked.buttons.length = 0;
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    const html = renderToStaticMarkup(createElement(ReseatConfirm, { signerId: SIGNER, policyId: POLICY, busy, disabled, onConfirm, onCancel }));
+    return { html, onConfirm, onCancel };
+  }
+
+  it("says it removes EVERY signer on this wallet, what goes back, and what the wallet is if the second step fails", () => {
+    const { html } = confirmWith(false);
+    expect(html).toContain("This removes EVERY signer on this wallet");
+    expect(html).toContain("only you can sign for this wallet");
+    expect(html).toContain("the wallet says No seat, and Grant keeper permission puts the seat back");
+    expect(html).toContain(SIGNER);
+    expect(html).toContain(POLICY);
+  });
+
+  it("only its first button goes ahead; Cancel calls nothing else", () => {
+    const { onConfirm, onCancel } = confirmWith(false);
+    buttons(RESEAT_COPY.cancel)[0]?.onClick?.(CLICK);
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
+    buttons(RESEAT_COPY.confirm)[0]?.onClick?.(CLICK);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("while running it says so, and neither button can be pressed again", () => {
+    confirmWith(true, true);
+    expect(buttons(RESEAT_COPY.running).map((button) => button.disabled)).toStrictEqual([true]);
+    expect(buttons(RESEAT_COPY.cancel).map((button) => button.disabled)).toStrictEqual([true]);
   });
 });
