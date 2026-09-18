@@ -5,7 +5,13 @@
 //   pnpm --dir packages/solana-keeper privy-policy --print
 //   pnpm --dir packages/solana-keeper privy-policy create --admin-key-out ~/sip-keys/privy-policy-admin.key
 //   pnpm --dir packages/solana-keeper privy-policy check --policy <id de la política>
+//   pnpm --dir packages/solana-keeper privy-policy key
 //   pnpm --dir packages/solana-keeper privy-policy verify --wallet <id de la wallet en Privy> --policy <id de la política>
+//
+// `key` es la que se corre cuando Privy contesta 401 al firmar: dice si la clave
+// de autorización configurada pertenece de verdad al key quorum del keeper.
+// Deriva la clave PÚBLICA en este proceso y la compara con las que el quorum
+// tiene registradas; la privada no sale de aquí ni se le manda a nadie.
 //
 // Paso a paso, para el dueño: docs/runbooks/PRIVY_SOLANA.md.
 //

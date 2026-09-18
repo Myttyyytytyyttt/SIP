@@ -42,6 +42,21 @@ export function createPrivyPolicyClient(
       return { id: quorum.id };
     },
 
+    async getKeyQuorum(keyQuorumId) {
+      // A GET takes no authorization signature — only the app id and secret
+      // (the SDK threads prepareRequest through update and delete alone). That
+      // is what makes `key` possible: the credentials already proven good read
+      // the ground truth the questionable credential is measured against.
+      const quorum = await privy.keyQuorums().get(keyQuorumId);
+      return {
+        id: quorum.id,
+        authorizationKeys: (quorum.authorization_keys ?? []).map((entry) => ({
+          publicKey: entry.public_key,
+          displayName: entry.display_name,
+        })),
+      };
+    },
+
     async createPolicy(policy, ownerId) {
       return privy.policies().create({
         // Already one attempt; the key keeps it one policy if anything between here and Privy re-sends it.

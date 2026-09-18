@@ -20,6 +20,16 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { Redactor, Secret, sharedRedactor, summarizeUpstreamError, type Logger } from "@sip/solana-log";
 import { ConfigError, copiedConfigProblems, loadConfig, privySdkOverrideProblems, registerPrivyAuthorizationKey, shape } from "./config.js";
+import {
+  AUTHORIZATION_KEY_BROKEN,
+  AuthorizationKeyUnreadable,
+  compareWithQuorum,
+  derivePrivyPublicKey,
+  quorumReadVerdict,
+  unreadableKeyVerdict,
+  type AuthorizationKeyVerdict,
+  type KeyQuorumLike,
+} from "./privy-authorization-key.js";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "./idl.js";
 import { createKeeperLogger } from "./keeper-log.js";
 import {
@@ -62,6 +72,8 @@ export interface WalletLike {
 /** Every Privy call the command makes, and nothing else. */
 export interface PrivyPolicyClient {
   createKeyQuorum(input: { readonly publicKey: string; readonly displayName: string }): Promise<{ readonly id: string }>;
+  /** Reads a key quorum's registered PUBLIC keys. App credentials only: a GET takes no authorization signature. */
+  getKeyQuorum(keyQuorumId: string): Promise<KeyQuorumLike>;
   createPolicy(policy: KeeperPolicy, ownerId: string): Promise<PolicyLike & { readonly id: string }>;
   getPolicy(policyId: string): Promise<PolicyLike>;
   getWallet(walletId: string): Promise<WalletLike>;
@@ -95,17 +107,22 @@ export const USAGE = [
   "privy-policy --print",
   "privy-policy create --admin-key-out <absolute path outside the repository, e.g. ~/sip-keys/privy-policy-admin.key>",
   "privy-policy check --policy <policy id>",
+  "privy-policy key",
   "privy-policy verify --wallet <privy wallet id> --policy <policy id>",
 ] as const;
 
 /** Below this, a probe's simulation will most likely fail on rent or fees and prove nothing. */
 export const MIN_PROBE_LAMPORTS = 1_000_000;
 
-type Command = "create" | "check" | "verify";
+type Command = "create" | "check" | "key" | "verify";
 
 const FLAGS: Readonly<Record<Command, readonly string[]>> = {
   create: ["--admin-key-out"],
   check: ["--policy"],
+  // Flagless on purpose: it asks about the environment the keeper runs under, so
+  // taking either id as an argument would let it answer about a pairing that is
+  // not the deployed one.
+  key: [],
   verify: ["--wallet", "--policy"],
 };
 
@@ -121,6 +138,8 @@ const PURPOSE: Readonly<Record<string, string>> = {
 const NEEDS: Readonly<Record<Command, readonly string[]>> = {
   create: ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET"],
   check: ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET"],
+  // No RPC: the key is compared with the quorum, and neither is on a chain.
+  key: ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET", "SIP_SOLANA_PRIVY_AUTHORIZATION_KEY", "SIP_SOLANA_PRIVY_SIGNER_ID"],
   verify: [
     "SIP_SOLANA_PRIVY_APP_ID",
     "SIP_SOLANA_PRIVY_APP_SECRET",
@@ -147,12 +166,15 @@ export function parseArguments(argv: readonly string[]): Parsed {
     return { kind: "refused", problems: [`expected one of: ${USAGE.join(" | ")}`] };
   }
   const known = FLAGS[command as Command];
+  // A command with no flags at all still refuses arguments, and has to say so in
+  // words: "takes only " with nothing after it names no rule.
+  const takes = known.length === 0 ? `${command} takes no arguments` : `${command} takes ${known.join(" and ")}`;
   const flags = new Map<string, string>();
   const problems: string[] = [];
   for (let i = 0; i < rest.length; i += 1) {
     const token = rest[i]!;
     if (!token.startsWith("--")) {
-      problems.push(`unexpected argument #${i + 2}: ${command} takes only ${known.join(" and ")}`);
+      problems.push(`unexpected argument #${i + 2}: ${takes}`);
       continue;
     }
     const equals = token.indexOf("=");
@@ -165,7 +187,7 @@ export function parseArguments(argv: readonly string[]): Parsed {
       i += 1;
     }
     if (!known.includes(name)) {
-      problems.push(`${name} is not an option of ${command}; it takes ${known.join(" and ")}`);
+      problems.push(`${name} is not an option of ${command}; ${takes}`);
     } else if (flags.has(name)) {
       problems.push(`${name} is given twice`);
     } else if (value === undefined || value.trim() === "") {
@@ -217,15 +239,17 @@ function readCommandEnv(
   if (appSecretRaw !== undefined && appSecretRaw !== "") redactor.register(appSecretRaw, "privyAppSecret");
   if (appSecret !== undefined) redactor.register(appSecret, "privyAppSecret");
 
+  // WHAT THIS COMMAND DECLARED IT NEEDS, not a command name: `key` reads the
+  // authorization key too, and a list that says so cannot drift from NEEDS.
   let authorizationKey: string | undefined;
   let rpcRaw: string | undefined;
-  if (command === "verify") {
+  if (needs.includes("SIP_SOLANA_PRIVY_AUTHORIZATION_KEY")) {
     const raw = env["SIP_SOLANA_PRIVY_AUTHORIZATION_KEY"];
     authorizationKey = trimmed(raw);
     if (raw !== undefined && raw !== "") registerPrivyAuthorizationKey(redactor, raw);
     if (authorizationKey !== undefined) registerPrivyAuthorizationKey(redactor, authorizationKey);
-    rpcRaw = env["SIP_SOLANA_RPC_URLS"];
   }
+  if (needs.includes("SIP_SOLANA_RPC_URLS")) rpcRaw = env["SIP_SOLANA_RPC_URLS"];
   const problems: string[] = [];
   let rpcUrls: readonly Secret[] = [];
   if (trimmed(rpcRaw) !== undefined) {
@@ -261,7 +285,15 @@ function readCommandEnv(
   if (signerId !== undefined && !ID_SHAPE.test(signerId)) {
     problems.push(`SIP_SOLANA_PRIVY_SIGNER_ID is not a key quorum id: it holds ${shape(signerId)}.`);
   }
-  if (authorizationKey !== undefined && !isP256Pkcs8PrivateKey(authorizationKey.replace(/^wallet-auth:/, ""))) {
+  // EXCEPT FOR `key`, WHOSE WHOLE JOB THIS IS. isP256Pkcs8PrivateKey asks whether
+  // the value is CANONICAL PKCS8, which is stricter than what @privy-io/node
+  // signs with: a quote-wrapped, whitespace-padded, line-wrapped or
+  // tail-truncated paste all fail it and all produce a byte-identical signature.
+  // Refusing those here would answer `key`'s question with "malformed", for a key
+  // whose signature is in fact correct — and send an operator after a paste that
+  // is not the problem. `key` classifies the value itself, the way the SDK does,
+  // and says so in its own verdict.
+  if (command !== "key" && authorizationKey !== undefined && !isP256Pkcs8PrivateKey(authorizationKey.replace(/^wallet-auth:/, ""))) {
     problems.push(
       "SIP_SOLANA_PRIVY_AUTHORIZATION_KEY is not a P-256 private key in base64 PKCS8 (the dashboard shows it once, " +
         "starting with wallet-auth:). Its value is withheld.",
@@ -330,6 +362,8 @@ export async function runPrivyPolicyCli(argv: readonly string[], deps: PrivyPoli
         return await create(parsed.flags.get("--admin-key-out")!, read.config, deps, { out, diag, redactor });
       case "check":
         return await check(parsed.flags.get("--policy")!, read.config, deps, { out, diag, redactor });
+      case "key":
+        return await key(read.config, deps, { out, diag, redactor });
       case "verify":
         return await verify(parsed.flags.get("--wallet")!, parsed.flags.get("--policy")!, read.config, deps, { out, diag, redactor });
     }
@@ -503,6 +537,80 @@ async function check(policyId: string, config: CommandEnv, deps: PrivyPolicyCliD
     programs: allowedPrograms(expected),
   });
   return diff.ok ? 0 : 1;
+}
+
+// --- key ---------------------------------------------------------------------------
+
+/**
+ * "Does the authorization key on Railway belong to the key quorum the keeper is
+ * seated under?" — asked without signing anything, and without the key leaving
+ * this process.
+ *
+ * WHY THIS COMMAND EXISTS. Privy answers a settle signed by the wrong key with
+ * 401 "No valid authorization signatures were provided", which is equally true
+ * of a different key, a key from another Privy app and a paste that lost its
+ * middle — and the keeper only meets that sentence at the moment it is trying to
+ * move a user's money. The pairing is checkable beforehand, and the check costs
+ * one local derivation and one GET.
+ *
+ * TWO HALVES, AND ONLY THE FIRST TOUCHES THE SECRET. The public key is derived
+ * locally from the private one (privy-authorization-key.ts); the quorum's
+ * registered PUBLIC keys are read with the app id and secret, which a GET needs
+ * and an authorization signature does not enter. So a key that cannot be read is
+ * reported without anything being sent anywhere, and the key itself is never
+ * sent at all.
+ *
+ * WHAT IT PRINTS IS PUBLIC AND IS THE POINT: the derived public key, next to the
+ * quorum's registered ones. When they differ, that side-by-side is what an
+ * operator carries to the dashboard — the exit code alone cannot tell a wrong
+ * key from a key damaged near its start, and the eye can.
+ */
+async function key(config: CommandEnv, deps: PrivyPolicyCliDeps, { out, diag, redactor }: Io): Promise<number> {
+  const signerId = config.signerId!;
+  const authorizationKey = config.authorizationKey!;
+
+  // FIRST, LOCALLY. A value that is not a key is a variable to fix, not a
+  // question for Privy, and no request is made for it.
+  let derived: string;
+  try {
+    derived = derivePrivyPublicKey(authorizationKey.reveal());
+  } catch (error) {
+    if (!(error instanceof AuthorizationKeyUnreadable)) throw error;
+    const verdict = unreadableKeyVerdict();
+    out.error("privy authorization key", { signerId, ...report(verdict), reason: error.reason, detail: error.message });
+    return 2;
+  }
+
+  let quorum: KeyQuorumLike;
+  try {
+    quorum = await deps.client({ appId: config.appId, appSecret: config.appSecret }).getKeyQuorum(signerId);
+  } catch (error) {
+    const verdict = quorumReadVerdict(error, derived);
+    out.error("privy authorization key", { signerId, ...report(verdict) });
+    diag.error("key quorum not read", { signerId, ...failureFields(error, redactor) });
+    return 1;
+  }
+
+  const verdict = compareWithQuorum(derived, quorum);
+  out[verdict.check === "matches" ? "info" : "error"]("privy authorization key", { signerId, ...report(verdict) });
+  if (AUTHORIZATION_KEY_BROKEN.has(verdict.check)) {
+    diag.error("the keeper cannot sign for any wallet", {
+      detail: "Every settle Privy is asked for will be refused, and the money the keeper measures will not move.",
+    });
+  }
+  return verdict.check === "matches" ? 0 : 1;
+}
+
+/** A verdict as one result line's fields. PUBLIC KEYS ONLY; the private key is in none of them. */
+function report(verdict: AuthorizationKeyVerdict): Record<string, unknown> {
+  return {
+    verdict: verdict.check,
+    derivedPublicKey: verdict.derivedPublicKey,
+    registeredPublicKeys: verdict.registered?.map((entry) => entry.publicKey) ?? null,
+    registeredNames: verdict.registered?.map((entry) => entry.displayName) ?? null,
+    meaning: verdict.meaning,
+    next: verdict.next,
+  };
 }
 
 // --- verify ------------------------------------------------------------------------
