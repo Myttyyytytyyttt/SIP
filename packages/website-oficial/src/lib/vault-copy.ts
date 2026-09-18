@@ -79,6 +79,8 @@ export const LINK_COPY = {
   needsConfig: "Linking opens once SaverFi's program is configured on Solana. Your vault, investing and withdrawals already work.",
   paused: "SaverFi is paused, so linking waits. Withdrawals still work.",
   busy: "Another signature is in progress on this screen.",
+  /** A link for THIS wallet was sent and not confirmed, from this row or from the card's chained press. */
+  sentNotConfirmed: "A link for this wallet was sent and is not confirmed yet. Check that one before sending another.",
   unreadable: "SaverFi could not read whether this wallet is linked. Nothing was offered to sign.",
   noSigner: "Until this wallet has the keeper's signer, nothing is put aside from it.",
   panel: (linkRent: string): string =>
@@ -93,6 +95,77 @@ export const LINK_COPY = {
   consentNotSignature: "Your trading wallet did not return a 64-byte signature for the consent. Nothing was linked.",
   approvalPassedTwice: "Solana's approval window passed twice. Try again when ready.",
   coSignMismatch: "Your trading wallet signed a different transaction than Phantom approved. Nothing was sent.",
+} as const;
+
+/**
+ * CREATING A TRADING WALLET AND LINKING IT, in one press.
+ *
+ * WHAT THE SEAT SENTENCES MAY CLAIM. A wallet is born seated: the keeper's signer
+ * with its policy goes into Privy's createWallet itself. So these words say the
+ * seat was asked for at creation, which is what happened, and never that Privy's
+ * record has been read back — the row's badge is the only thing that reads it,
+ * and it can only ever say a signer exists (src/lib/trading-wallets.ts).
+ *
+ * EVERY SENTENCE AFTER THE CREATE SAYS THE WALLET IS THERE. Once Privy has made
+ * it, the wallet is real and paid for whatever the link does next, so no refusal
+ * may read as "nothing happened".
+ */
+/** Defined before the object so `ahead` can end with it. */
+const CREATE_LINK_RENT_UNREAD = "The rent is not on screen yet; Phantom shows it before you approve.";
+
+export const CREATE_LINK_COPY = {
+  /** The button, when the chain can take a link. */
+  button: "Create wallet and link it",
+  /** The button, when the chain cannot: it will only create. */
+  buttonCreateOnly: "Create wallet",
+  running: "Working…",
+  /**
+   * Said before anything is pressed, and again for the whole run: Phantom's prompt
+   * must never arrive unannounced. `linkRent` is null while the chain's rent has not
+   * been read — the amount is then Phantom's to show, and none is invented here.
+   */
+  ahead: (linkRent: string | null): string =>
+    `One press does both. Privy creates the wallet with the keeper's seat, your trading wallet signs a consent naming this vault, ` +
+    (linkRent === null ? `then Phantom asks you to approve and pay the link's rent (returned if you unlink), ` : `then Phantom asks you to approve and pay ${linkRent} SOL of rent (returned if you unlink), `) +
+    `and your trading wallet co-signs. Phantom's window opens partway through, after the wallet exists.` +
+    (linkRent === null ? ` ${CREATE_LINK_RENT_UNREAD}` : ""),
+  aheadCreateOnly: "This creates a trading wallet with the keeper's seat. Nothing is signed and nothing is paid.",
+  /** The link's rent is not on screen yet: said instead of an amount, never as well as one. */
+  rentNotRead: CREATE_LINK_RENT_UNREAD,
+  done: "Linked",
+  /** The head of every stop after the wallet exists. */
+  created: "Your trading wallet is created and nothing was lost.",
+  /**
+   * What to do with it, said after `created`. THE LINK IS PROMISED FOR AFTER THE
+   * CHAIN READ, never for now: a wallet created a moment ago is not in Privy's
+   * record yet, so the screen's read has not been asked about it and its row shows
+   * `notReadYet` with a re-read, not this button (LinkControl). The `not_ready`
+   * stop is exactly that moment, so a flat promise was reliably wrong there — and
+   * it named a control the owner could look at and not find.
+   */
+  inTheList: `It is in the list below, with its seat as Privy records it. Once SaverFi has read it on Solana, its row offers ${LINK_COPY.link}.`,
+  /** No vault: the one thing that must happen first, and never done for the user — the rent never comes back. */
+  needsVaultTitle: "Create your vault first",
+  needsVault: (rent: string | null): string =>
+    rent === null
+      ? "A trading wallet can only be linked to a vault, and this pension key has none yet. SaverFi does not create one for you: a vault costs rent that never comes back, and it holds a mode and limits you choose. Create it above, then link this wallet from its row."
+      : `A trading wallet can only be linked to a vault, and this pension key has none yet. SaverFi does not create one for you: a vault costs ${rent} SOL of rent that never comes back, and it holds a mode and limits you choose. Create it above, then link this wallet from its row.`,
+  goToVault: "Create your vault",
+  /** Privy answered without an address. */
+  noAddress:
+    "Privy created a wallet and did not say its address. Nothing is lost: it appears in the list below once Privy's record updates, and it can be linked from there.",
+  /** The chain read is not ready, so no link may be attempted from an unknown state. */
+  chainUnknown: "SaverFi could not read Solana just now, so the link was not attempted and nothing was signed.",
+  /** Privy's record has not reached this session's signer list. */
+  notReady:
+    "This session cannot sign for the new wallet yet, so the link was not attempted. Reload the page, then link it from its row.",
+  /** The link itself stopped. `detail` is the step's own words. */
+  linkStopped: (detail: string): string => `The wallet was created; the link did not finish. ${detail}`,
+  /** Some link on the screen was sent and not confirmed, so a chained press would race it. */
+  linkAwaiting: "A link sent on this screen is not confirmed yet. Check it before starting another.",
+  /** A row for a wallet the chain read has not covered yet. */
+  notReadYet: "SaverFi has not read this wallet on Solana yet.",
+  check: "Check again",
 } as const;
 
 export const INVEST_COPY = {
@@ -180,7 +253,9 @@ export const WITHDRAW_COPY = {
 } as const;
 
 export const PROGRESS_COPY = {
+  creating_wallet: "Creating your trading wallet",
   preparing: "Preparing",
+  consent: "Trading wallet signs the consent",
   approve_pension: "Approve in Phantom",
   trading_signing: "Trading wallet signing",
   sending: "Sending",

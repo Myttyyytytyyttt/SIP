@@ -10,8 +10,19 @@
  * to vault, disabled with the reason while there is no vault, while SIP's program
  * is not configured or is paused, or while another write runs on the screen.
  *
+ * A LINK THIS SCREEN ALREADY SENT IS NEVER OFFERED AGAIN until it is confirmed,
+ * wherever it was sent from: the card's chained press and this row are different
+ * writers, and the wait for confirmation is kept on the screen's lock under the
+ * wallet's own key, so neither can start a second link transaction for it.
+ *
  * THE PENSION KEY IS NEVER OFFERED. Its row gets no control at all: the program,
  * the verifier, the build route and the flow each refuse it as well.
+ *
+ * A WALLET THE READ HAS NOT COVERED IS NEVER DROPPED. A wallet created a moment
+ * ago is not in Privy's record yet, so the chain read has not been asked about it
+ * and nothing can be said about its link. The row still says that, with Check
+ * again, rather than rendering nothing: after a chained create-and-link stops,
+ * this is the row the wallet must be found in.
  *
  * Clicking opens an inline panel, never a dialog (Privy's own dialogs open over
  * this screen, which is sometimes itself a dialog), that says what three
@@ -19,6 +30,7 @@
  */
 
 import { solscanAccount } from "@sip/solana-core/client";
+import { RefreshCw } from "lucide-react";
 import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -27,19 +39,9 @@ import { TxProgress } from "@/components/wallets/TxProgress";
 import { useVaultWrite } from "@/hooks/use-vault-actions";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { formatSol, rawFrom } from "@/lib/amounts";
+import { linkGate } from "@/lib/create-and-link";
 import type { SeatStatus } from "@/lib/trading-wallets";
-import type { VaultStateJson } from "@/lib/vault-api";
-import { LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
-
-/** Why this pension key cannot link a wallet right now, from the chain; null when it can. */
-function chainBlocker(state: VaultStateJson): string | null {
-  if (state.vault.status === "missing") return LINK_COPY.needsVault;
-  if (state.vault.status === "unreadable") return VAULT_COPY.unreadable;
-  if (state.config.status === "missing") return LINK_COPY.needsConfig;
-  if (state.config.status === "unreadable") return LINK_COPY.unreadable;
-  if (state.config.paused === true) return LINK_COPY.paused;
-  return null;
-}
+import { CREATE_LINK_COPY, LINK_COPY } from "@/lib/vault-copy";
 
 export function LinkControl({ address, seat }: { readonly address: string; readonly seat: SeatStatus }) {
   const screen = useVaultScreen();
@@ -68,8 +70,22 @@ export function LinkControl({ address, seat }: { readonly address: string; reado
   }
 
   const link = view.state.walletLinks.find((entry) => entry.wallet === address);
-  // A wallet the read did not ask about (Privy's record does not list it yet): nothing to say about its link.
-  if (link === undefined) return null;
+  // A wallet the read did not ask about (Privy's record does not list it yet): nothing may be
+  // claimed about its link, and nothing may be offered from an unknown state — but the row says so.
+  if (link === undefined) {
+    return (
+      <div className="space-y-2" data-link="unread">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-xs text-muted-foreground">{CREATE_LINK_COPY.notReadYet}</p>
+          <Button type="button" size="xs" variant="ghost" disabled={write.running} onClick={() => screen.refresh()}>
+            <RefreshCw aria-hidden />
+            {CREATE_LINK_COPY.check}
+          </Button>
+        </div>
+        {progress}
+      </div>
+    );
+  }
 
   if (link.status === "this_vault") {
     const explorer = solscanAccount(link.link);
@@ -97,8 +113,11 @@ export function LinkControl({ address, seat }: { readonly address: string; reado
     );
   }
 
-  const blocker = chainBlocker(view.state) ?? (write.busyElsewhere ? LINK_COPY.busy : null);
-  const disabled = blocker !== null || write.running || write.unconfirmed;
+  // A link sent for THIS wallet, from this row or from the card's chained press, and not confirmed yet.
+  // Its own send already says "Not confirmed yet" in the progress below, so the sentence is for the other case.
+  const awaiting = write.awaitingLink(address);
+  const blocker = linkGate(view.state)?.message ?? (awaiting && !write.unconfirmed ? LINK_COPY.sentNotConfirmed : write.busyElsewhere ? LINK_COPY.busy : null);
+  const disabled = blocker !== null || write.running || write.unconfirmed || awaiting;
   const linkRent = rawFrom(view.state.rents?.link);
 
   return (

@@ -16,6 +16,15 @@ import { VaultScreenContext, useVaultState, type VaultScreenValue } from "@/hook
 import { MAX_TRADING_WALLETS, tradingWalletsOf } from "@/lib/trading-wallets";
 import { createVaultApi } from "@/lib/vault-api";
 
+/**
+ * The vault card's anchor. The trading wallets card links to it when a wallet was
+ * created and has no vault to link to: the vault is never created for the user
+ * (its rent never comes back), so the offer has to be the form itself. It sits on
+ * the vault card's section, not on the form, so the link resolves in every state
+ * that card can be in.
+ */
+export const VAULT_CARD_ID = "vault";
+
 export function VaultScreen({ pensionKey, children }: { readonly pensionKey: string; readonly children: ReactNode }) {
   const { user } = usePrivy();
   const api = useMemo(() => createVaultApi(), []);
