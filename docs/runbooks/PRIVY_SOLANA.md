@@ -247,7 +247,7 @@ Mira `verdict`:
 El comando sale con **código 0** si coincide, con **código 2** si hay que cambiar una variable y no se mandó nada a
 ninguna parte, y con **código 1** en los demás casos. Nunca imprime la llave privada.
 
-Dos avisos, para que no te manden a arreglar lo que no está roto:
+Tres avisos, para que no te manden a arreglar lo que no está roto:
 
 - **Pegar la llave con comillas, con espacios o con el prefijo `wallet-auth:` no rompe nada.** Privy firma igual en
   todos esos casos, y el comando también los acepta. Si te dice `matches`, la llave que has pegado está bien pegada.
@@ -300,7 +300,7 @@ No es una catástrofe, pero cuesta, y conviene saber qué cuesta antes de empeza
    `SIP_SOLANA_PRIVY_SIGNER_ID` (el id nuevo). En la web cambia `SIP_SOLANA_PRIVY_SIGNER_ID` **y haz Redeploy en
    Vercel** ([VERCEL_WEB.md](VERCEL_WEB.md)): una variable nueva no se aplica a lo que ya está desplegado, así que sin el
    Redeploy la web seguiría sentando a los usuarios con el signer viejo, que es el que acabas de matar.
-3. **Pruébalo con UNA wallet antes de pedírselo a nadie.** Usa la wallet de prueba del paso 6: siéntala como en el paso
+3. **Pruébalo con UNA wallet antes de pedírselo a nadie.** Usa la wallet de prueba de la sección 6: siéntala como en el paso
    siguiente y mira `/status`. Si esa wallet ya no sale como `none (signer not granted)`, la cadena entera funciona
    (Railway, la web, el signer nuevo) y puedes seguir. Si sigue saliendo así, algo de los pasos 1 y 2 no ha llegado —
    normalmente el Redeploy — y no tiene ningún sentido gastar el favor de los usuarios hasta arreglarlo.
@@ -317,7 +317,8 @@ No es una catástrofe, pero cuesta, y conviene saber qué cuesta antes de empeza
    wallet deja de salir como `none (signer not granted)` en `/status`, y su cobro deja de ser `NO_SIGNER`.
 5. La **política no cambia**: sigue siendo la misma, con el mismo `policy id` y la misma llave de administración. Se
    vuelve a enganchar sola al sentar el signer nuevo, porque va como override del signer.
-6. Cuando todas estén sentadas otra vez, borra la llave vieja en el dashboard y repite el paso 6 con la nueva.
+6. Cuando todas estén sentadas otra vez, borra la llave vieja en el dashboard y repite la **sección 6** de esta guía
+   (*Verifica que rechaza lo que debe*) con la nueva.
 
 Si la llave no se perdió sino que **se expuso** (alguien la vio, se pegó en un sitio que no tocaba), es lo mismo pero
 con prisa y en otro orden: primero quitas el signer viejo de las wallets, luego lo demás, como dice
