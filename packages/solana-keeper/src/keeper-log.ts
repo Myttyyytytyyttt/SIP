@@ -58,6 +58,31 @@ function withoutByteRuns(sink: (line: string) => void): (line: string) => void {
   };
 }
 
+/**
+ * The two nets a log line passes, applied to a string that leaves the process by
+ * some OTHER road — an alert webhook body, say — and returning null when either
+ * still trips.
+ *
+ * WHY IT IS NEEDED AT ALL. Everything this keeper writes to stdout goes through
+ * createKeeperLogger, which scrubs against the redactor and then drops any line
+ * still carrying a run of byte values. The alerter does not: it logs its line
+ * through that logger and then builds a JSON body of its own and POSTs it, so an
+ * alert's `detail` and `context` reach Slack or Discord with neither net under
+ * them. The redactor covers the secrets config.ts registered; BYTE_RUN is the
+ * one that catches a key nobody registered — printed as numbers by a library, or
+ * a number[] copy of a local signer — which is precisely what an exception's
+ * text can carry.
+ *
+ * REFUSED, NOT TRUNCATED. The same trade the logger makes: a line that cannot be
+ * cleaned is replaced rather than sent, because the caller can still say WHICH
+ * condition fired without saying what it held.
+ */
+export function scrubbedForExport(text: string, redactor: Redactor = sharedRedactor): string | null {
+  const scrubbed = redactor.scrub(text);
+  if (redactor.contains(scrubbed)) return null;
+  return BYTE_RUN.test(scrubbed) ? null : scrubbed;
+}
+
 export function createKeeperLogger(options: { readonly sink?: (line: string) => void; readonly redactor?: Redactor } = {}): Logger {
   const sink = options.sink ?? ((line: string): void => void process.stdout.write(`${line}\n`));
   return createLogger({

@@ -56,6 +56,19 @@ export interface AlerterOptions {
   readonly post?: (url: string, body: string) => Promise<void>;
   /** Always called, webhook or not, so alerts are in the log even unconfigured. */
   readonly log: (severity: AlertSeverity, line: string) => void;
+  /**
+   * The last thing applied to the webhook body before it leaves the process:
+   * returns the text to send, or null when it cannot be cleaned.
+   *
+   * WHY THE WEBHOOK NEEDS ITS OWN. `log` above hands the line to the caller's
+   * redacting logger, which scrubs it and drops it if a byte run survives. The
+   * body below is built HERE and POSTed raw, so nothing in that path has ever
+   * seen a redactor — and a `detail` carries whatever an exception's text
+   * carries. The keeper wires this to the same pair its log lines pass
+   * (scrubbedForExport, src/keeper-log.ts). Left out, the body is sent as built,
+   * which is what a caller with no secrets to lose wants.
+   */
+  readonly sanitize?: (text: string) => string | null;
 }
 
 interface FiredState {
@@ -76,6 +89,8 @@ export function createAlerter(options: AlerterOptions): Alerter {
         body,
       });
     });
+
+  const sanitize = options.sanitize ?? ((text: string): string | null => text);
 
   const fired = new Map<string, FiredState>();
 
@@ -107,10 +122,32 @@ export function createAlerter(options: AlerterOptions): Alerter {
         occurrences: count,
         ...alert.context,
       });
+      // THE NETS THE LOG LINE ALREADY PASSED, ON THE WAY OFF THE BOX. `log`
+      // above went through the caller's redacting logger; this body did not, and
+      // `detail` holds whatever an exception's text holds.
+      let payload = sanitize(body);
+      if (payload === null) {
+        // SILENCE IS THE ONE OUTCOME THIS FILE EXISTS TO PREVENT. So the alert
+        // still goes out and only its words stay behind: which condition fired,
+        // how often, and how bad — enough to send a human to /status, where the
+        // detail belongs anyway.
+        log("warn", `[WARN] an alert's text did not pass the redactor and was withheld from the webhook (${alert.key})`);
+        payload = sanitize(
+          JSON.stringify({
+            text: `[${alert.severity.toUpperCase()}] ${alert.key}${repeated} — withheld: this alert's text did not pass the keeper's redactor. Read /status.`,
+            severity: alert.severity,
+            key: alert.key,
+            occurrences: count,
+            withheld: true,
+          }),
+        );
+      }
+      // Not even the key came back clean: nothing leaves, and the log has it.
+      if (payload === null) return;
       // Never awaited and never allowed to throw: an unreachable alerting
       // endpoint must not take down the thing it is monitoring. The failure
       // line carries no detail on purpose — a fetch error names the URL.
-      void post(webhook.reveal(), body).catch(() => {
+      void post(webhook.reveal(), payload).catch(() => {
         log("warn", "[WARN] alert webhook failed; the alert above was logged only");
       });
     },

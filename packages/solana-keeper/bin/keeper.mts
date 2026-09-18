@@ -54,11 +54,23 @@ import {
   wrapShortStreak,
 } from "../src/invest-decision.js";
 import { runInvestTick } from "../src/invest-tick.js";
-import { SERVICE, createChangeLog, createKeeperLogger } from "../src/keeper-log.js";
+import { SERVICE, createChangeLog, createKeeperLogger, scrubbedForExport } from "../src/keeper-log.js";
 import { runPreflight } from "../src/preflight.js";
+import {
+  AUTHORIZATION_KEY_BROKEN,
+  type AuthorizationKeyCheck,
+  AuthorizationKeyUnreadable,
+  compareWithQuorum,
+  derivePrivyPublicKey,
+  notCheckedVerdict,
+  quorumReadVerdict,
+  unreadableKeyVerdict,
+  type AuthorizationKeyVerdict,
+} from "../src/privy-authorization-key.js";
 import {
   buildPrivySolanaIndex,
   createPrivySolanaSigner,
+  readPrivyKeyQuorum,
   type PrivySolanaConfig,
   type PrivyWalletEntry,
   type SolanaWalletSubmitter,
@@ -66,7 +78,7 @@ import {
 import { SolanaReadModel } from "../src/read-model.js";
 import { poolFetch } from "../src/rpc-pool.js";
 import { seatCheck, seatCheckNotice } from "../src/seat-check.js";
-import { activeBps, settleAlert, type CarryBook } from "../src/settle-decision.js";
+import { activeBps, settleAlert, settleThrewAlert, type CarryBook } from "../src/settle-decision.js";
 import { runSettleTick } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KEEPER_LOCK_NAME, KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
@@ -210,6 +222,13 @@ const readModel = SolanaReadModel.create(config.databaseUrl, (message, fields) =
 const alerter = createAlerter({
   webhookUrl: config.alertWebhook,
   log: (severity, line) => log[severity === "critical" ? "error" : "warn"](`alert ${severity}`, { detail: line }),
+  // THE BODY LEAVES THE BOX, SO IT PASSES WHAT A LOG LINE PASSES. alerts.ts
+  // builds its webhook payload itself and POSTs it raw; only the line above goes
+  // through the redacting logger. Every alert `detail` in this file is either a
+  // summarized upstream error or an exception's own text — anchor's, the SDK's,
+  // a driver's — and the byte-run net exists precisely for a key none of them
+  // ever registered.
+  sanitize: (text) => scrubbedForExport(text),
 });
 
 const changes = createChangeLog(log);
@@ -286,6 +305,181 @@ if (privyConfig !== null) {
   }
 }
 
+/** One key, so a boot that fixes the pairing resolves what the boot before it raised. */
+const AUTHORIZATION_KEY_ALERT_KEY = "privy-authorization-key";
+
+/**
+ * Sweeps between re-checks of the pairing. At the default cadence this is about
+ * half an hour.
+ *
+ * ONCE AT BOOT WAS NOT ENOUGH, for two reasons that both end at the same page.
+ * A key removed from the quorum, or a quorum whose keys were rotated, leaves
+ * /status saying "matches" for as long as the process lives — a statement about
+ * a moment that may be days old. And a boot that could not reach Privy leaves
+ * "quorum-unreadable" there forever, with nothing ever retrying: the protection
+ * this check exists to give silently does not exist. Both are exactly the state
+ * an operator opens /status to resolve. One GET per half hour is less than one
+ * sweep already spends.
+ */
+const AUTHORIZATION_KEY_EVERY_SWEEPS = 30;
+
+/**
+ * Consecutive unreadable attempts before the UNKNOWN itself is worth an alert.
+ *
+ * A dropped connection proves nothing about the pairing, and paging for one
+ * would teach an operator to ignore this alert — but a pairing that has gone
+ * unchecked for half a day is its own fault, because the protection is off.
+ */
+const AUTHORIZATION_KEY_UNREADABLE_STREAK = 3;
+
+/** Consecutive quorum-unreadable verdicts; any other verdict ends the run. */
+let authorizationKeyUnreadable = 0;
+
+/** The verdict last reported, so a change re-fires instead of being deduped by the one before it. */
+let lastAuthorizationKeyCheck: AuthorizationKeyCheck | null = null;
+
+/**
+ * Establishes, at start-up, whether the configured authorization key belongs to
+ * the configured key quorum — and says so in /status next to seatCheck.
+ *
+ * WHY AT BOOT. Every other signal a keeper emits is healthy when this pairing is
+ * wrong: it arms, it takes the claim, it resolves a Privy signer for each wallet,
+ * it measures the trades correctly. Privy refuses only at the send, with 401 "No
+ * valid authorization signatures were provided" — so without this, the first
+ * thing that ever reveals the fault is a settlement that should have moved a
+ * user's money, and an operator reading /status before that sees nothing wrong.
+ * The check costs one local derivation and one GET, less than the wallet listing
+ * every sweep already does.
+ *
+ * IT ARMS AND REPORTS LOUDLY; IT DOES NOT REFUSE TO ARM. The tempting reading is
+ * "a keeper that cannot sign should not pretend to run", and it is wrong here,
+ * for three reasons that all point the same way:
+ *
+ *   * RAILWAY RESTARTS WHAT CRASHES. A refusal to start is not a stop, it is a
+ *     loop — and each turn of it takes /status and /health down with the process.
+ *     The page an operator would open to read the verdict is the page the
+ *     refusal destroys. bin/keeper.mts already refuses to exit mid-run for
+ *     exactly this reason, and src/status.ts records that a restart has never
+ *     once fixed an upstream.
+ *   * IT WOULD STOP A WORKING MONEY PATH TO REPORT A BROKEN ONE. This key gates
+ *     the settle send alone. The invest half runs on the local crank keypair and
+ *     needs no Privy at all, so a keeper that refuses to arm stops buying
+ *     baskets that it could still buy.
+ *   * THE VERDICT IS ONLY USEFUL WHERE IT CAN BE READ. Armed, the fault is a
+ *     critical alert AND a field on /status AND a line in the start-up banner.
+ *     Crash-looping, it is a line in a log that scrolls past a restart.
+ *
+ * The settle key's own boot refusal (process.exit(2) above) is the opposite
+ * precedent and stays that way: a settle key that is readable and wrong is this
+ * process acting as the wrong attester, which is not a thing to report and carry
+ * on doing.
+ *
+ * A DRY RUN PERFORMS NO CHECK AT ALL, and keeps its promise: privyConfig is null
+ * by construction when no signing secret was read (src/config.ts), so the key is
+ * never revealed and no request is made. With no signer id there is nothing to
+ * compare against, and seatCheck already pages for that on its own.
+ */
+async function establishAuthorizationKey(): Promise<void> {
+  const signerId = config.privySignerId;
+  if (privyConfig === null || signerId === null) return;
+  const { verdict, detail } = await authorizationKeyVerdict(privyConfig, signerId);
+
+  // STAMPED WITH THE VERDICT, ALWAYS TOGETHER. A verdict with no date is a claim
+  // about an unknown moment, and the one an operator reads mid-outage is exactly
+  // the one where "since when?" decides what it means.
+  health.signing = { ...health.signing, authorizationKey: verdict.check, authorizationKeyAt: new Date().toISOString() };
+  const broken = AUTHORIZATION_KEY_BROKEN.has(verdict.check);
+  // A CHANGED CONDITION IS A NEW CONDITION. The alerter dedupes by key alone, so
+  // without this a warn raised half an hour ago would swallow the critical that
+  // replaces it — the one transition an operator must not miss.
+  const changed = lastAuthorizationKeyCheck !== verdict.check;
+  if (changed && lastAuthorizationKeyCheck !== null) alerter.clear(AUTHORIZATION_KEY_ALERT_KEY);
+  lastAuthorizationKeyCheck = verdict.check;
+  authorizationKeyUnreadable = verdict.check === "quorum-unreadable" ? authorizationKeyUnreadable + 1 : 0;
+  const context = {
+    signerId,
+    verdict: verdict.check,
+    // PUBLIC KEYS ONLY. This is the comparison an operator has to make by eye,
+    // and the private key is in neither half of it.
+    derivedPublicKey: verdict.derivedPublicKey,
+    registeredPublicKeys: verdict.registered?.map((entry) => entry.publicKey) ?? null,
+    nestedKeyQuorumIds: verdict.unresolvedMembers?.keyQuorumIds ?? null,
+    memberUsers: verdict.unresolvedMembers?.users ?? null,
+    authorizationThreshold: verdict.authorizationThreshold,
+    meaning: verdict.meaning,
+    next: verdict.next,
+    ...(detail === null ? {} : { detail }),
+  };
+  if (verdict.check === "matches") {
+    // On a cadence, only when it CHANGED: a healthy pairing restated every half
+    // hour forever is the habit that teaches an operator to skim these lines.
+    if (changed) log.info("privy authorization key belongs to the signer quorum", context);
+    alerter.clear(AUTHORIZATION_KEY_ALERT_KEY);
+    return;
+  }
+  log[broken ? "error" : "warn"]("privy authorization key", context);
+  // UNKNOWN IS NOT WRONG: a dropped connection proves nothing about the pairing,
+  // and paging for the first one would teach an operator to ignore this alert.
+  // BUT AN UNKNOWN THAT PERSISTS IS ITS OWN FAULT: after this many attempts the
+  // protection has simply been off for hours, and that is worth saying once.
+  if (verdict.check === "quorum-unreadable" && authorizationKeyUnreadable < AUTHORIZATION_KEY_UNREADABLE_STREAK) return;
+  const unknown = verdict.check === "quorum-unreadable";
+  alerter.fire({
+    key: AUTHORIZATION_KEY_ALERT_KEY,
+    severity: broken ? "critical" : "warn",
+    title: broken
+      ? "The keeper's authorization key does not belong to its signer quorum"
+      : unknown
+        ? "The keeper has not been able to check its authorization key for hours"
+        : "The keeper's authorization key could not be checked against its signer quorum",
+    detail: `${verdict.meaning} ${verdict.next}`,
+    context: {
+      signerId,
+      derivedPublicKey: verdict.derivedPublicKey,
+      ...(unknown ? { consecutiveAttempts: authorizationKeyUnreadable } : {}),
+    },
+  });
+}
+
+/**
+ * The same check again, on a slow cadence, from inside the sweep.
+ *
+ * A dry run still performs none: establishAuthorizationKey returns before
+ * revealing anything when privyConfig is null, and this adds no path around it.
+ * Failures are swallowed here on purpose — a check that cannot run must not end
+ * a sweep that is moving money, and the next turn of the cadence tries again.
+ */
+async function reestablishAuthorizationKey(): Promise<void> {
+  if (health.sweeps % AUTHORIZATION_KEY_EVERY_SWEEPS !== 0) return;
+  try {
+    await establishAuthorizationKey();
+  } catch (error) {
+    log.warn("the authorization key could not be re-checked this sweep", { detail: summarizeUpstreamError(error, { take: 3, maxChars: 400 }) });
+  }
+}
+
+/** The local derivation, then the quorum read — each failing into its own verdict, neither sending the key. */
+async function authorizationKeyVerdict(
+  privy: PrivySolanaConfig,
+  signerId: string,
+): Promise<{ readonly verdict: AuthorizationKeyVerdict; readonly detail: string | null }> {
+  let derived: string;
+  try {
+    // REVEALED INSIDE THE CALL THAT NEEDS IT, and nowhere else. What comes back
+    // is a PUBLIC key: safe on the status page, and safe in a log line.
+    derived = derivePrivyPublicKey(privy.authorizationKey.reveal());
+  } catch (error) {
+    if (!(error instanceof AuthorizationKeyUnreadable)) throw error;
+    // NOTHING WAS SENT ANYWHERE: a value that is not a key is not a question for Privy.
+    return { verdict: unreadableKeyVerdict(), detail: error.message };
+  }
+  try {
+    return { verdict: compareWithQuorum(derived, await readPrivyKeyQuorum(privy, signerId)), detail: null };
+  } catch (error) {
+    return { verdict: quorumReadVerdict(error, derived), detail: summarizeUpstreamError(error, { take: 3, maxChars: 400 }) };
+  }
+}
+
 function signingRoute(): string {
   if (config.signing === null) return "not resolved — a dry run reads no signing secret";
   const routes = [
@@ -327,6 +521,10 @@ const health: KeeperStatus = {
     privyPolicyId: config.privyPolicyId,
     // Neither id answers "would an unbounded seat be refused?" on its own.
     seatCheck: seatCheck(config.privySignerId, config.privyPolicyId),
+    // Established at start-up, below, before the first sweep, and again on a slow
+    // cadence: a dry run leaves it "not-checked" forever, having read no key.
+    authorizationKey: "not-checked",
+    authorizationKeyAt: null,
     secretsRead: config.signing !== null,
     settleKey: config.signing?.settleKey.publicKey.toBase58() ?? null,
     wallets: null,
@@ -662,6 +860,11 @@ async function sweep(): Promise<void> {
       noteProgress();
       const wallet = link.wallet.toBase58();
       const vaultAddr = link.vault.toBase58();
+      // WHICH HALF OF THE TURN IS RUNNING, for the catch below. One try wraps the
+      // settle AND the invest, so a catch that assumed "settle" would page "a
+      // settlement turn threw" for an exception thrown while buying a basket —
+      // naming the wrong money path, and clearing the other one's alerts.
+      let phase: "settle" | "invest" = "settle";
       try {
         // Prefer Privy (no local key); fall back to a local keypair if present.
         // A resolution FAILURE is logged with its real reason and falls back.
@@ -744,6 +947,13 @@ async function sweep(): Promise<void> {
         // AT THAT TURN (keysForTurn, src/chain-state.ts). A claim lost halfway
         // through a sweep takes the keys away from the next turn, not the next
         // sweep.
+        // RECORDED AS SOON AS IT IS KNOWN, not at the end of the turn. It used to
+        // be the last line of the try, so a wallet whose turn threw was never
+        // counted at all and /status reported signing {signable: 0, of: 0} —
+        // during exactly the incident an operator opens /status to read. The
+        // route is fully resolved here, well before anything is sent.
+        signingRoutes.set(wallet, route);
+
         const settleTurn = keysForTurn(isLive, { settleKey: settleKeypair, walletSigner });
         // NULL MEANS THE CHAIN HAS NO ACCOUNT THERE, never "could not read"
         // (src/accounts.ts) — AND BOTH PATHS NOW SAY IT THE SAME WAY.
@@ -842,6 +1052,7 @@ async function sweep(): Promise<void> {
 
         // Asked again: the settle turn above can take long enough for the claim
         // to go.
+        phase = "invest";
         const investTurn = keysForTurn(isLive, { settleKey: settleKeypair, walletSigner: null });
         const invest = await runInvestTick({
           connection,
@@ -896,7 +1107,6 @@ async function sweep(): Promise<void> {
         investSweep.set(vaultAddr, foldInvestTurn(investSweep.get(vaultAddr), invest));
 
         // /status always reflects the latest condition, deduped or not.
-        signingRoutes.set(wallet, route);
         health.wallets[wallet] = {
           settle: settle.outcome,
           invest: invest.outcome,
@@ -907,7 +1117,37 @@ async function sweep(): Promise<void> {
       } catch (error) {
         // Contained per wallet: one bad link must not end the sweep.
         const detail = summarizeUpstreamError(error, { take: 3, maxChars: 500 });
-        log.error("wallet turn threw", { wallet, detail });
+        log.error("wallet turn threw", { wallet, phase, detail });
+        // AND ESCALATED, WHICH IT NEVER USED TO BE. settleAlert and the invest
+        // streaks are both applied from INSIDE this try, so they were reachable
+        // only by a turn that RETURNED an outcome. An exception unwound past all
+        // of it to here, which wrote a THREW row on /status and logged a line and
+        // fired nothing — so a keeper could sweep for hours settling nobody, with
+        // every escalation intact and none of it reachable. The one failure mode
+        // that paged nobody was the one nobody had written a handler for.
+        //
+        // THE LADDER IS EXTENDED, NOT REPLACED. A throw in the settle half fires
+        // the SAME `settle-failed:<wallet>` key a FAILED settle fires, with its
+        // own title: it is the same condition — this wallet is not being settled —
+        // so a second key would page twice for one fault and would not be cleared
+        // by the SETTLED that eventually fixes it. A throw in the invest half is
+        // folded in as a FAILED invest turn, so the existing per-vault streak
+        // warns on the first and pages critical on the third, exactly as a
+        // returned FAILED does. Which half is which is what `phase` is for.
+        if (phase === "settle") {
+          const threw = settleThrewAlert({ wallet, vault: vaultAddr }, detail);
+          for (const key of threw.clear) alerter.clear(key);
+          if (threw.fire !== null) alerter.fire(threw.fire);
+          // The streak is counted from turns that returned; this one did not.
+          settleRetries.delete(wallet);
+        } else {
+          investSweep.set(vaultAddr, foldInvestTurn(investSweep.get(vaultAddr), { outcome: "FAILED", detail }));
+        }
+        // COUNTED EVEN THOUGH IT THREW: a wallet missing from this map is a
+        // wallet /status does not count at all, which reads as a smaller fleet
+        // rather than a broken one. Set above as soon as the route was resolved;
+        // this covers a throw from before that point.
+        if (!signingRoutes.has(wallet)) signingRoutes.set(wallet, health.wallets[wallet]?.signing ?? "not resolved");
         // AND SAID ON THE PAGE. health.wallets is assigned at the END of the
         // turn, so a throw left this wallet's row holding the LAST GOOD settle
         // and its timestamp: /status read "settled fine, a minute ago" for a
@@ -986,6 +1226,11 @@ async function sweep(): Promise<void> {
             mode: isLive() ? "live" : "dry-run — nothing is sent",
           },
     );
+
+    // AND, EVERY SO OFTEN, WHETHER THIS KEEPER CAN STILL SIGN AT ALL. Last, so a
+    // slow Privy delays nothing that moves money, and after health.sweeps has
+    // been advanced, so the cadence counts sweeps that actually happened.
+    await reestablishAuthorizationKey();
   } catch (error) {
     health.lastSweepError = summarizeUpstreamError(error, { take: 3, maxChars: 500 });
     log.error("sweep cycle failed", { detail: health.lastSweepError });
@@ -1020,6 +1265,10 @@ if (config.armed) {
 health.mode = isLive() ? "live" : "dry-run";
 health.missingLiveCondition = liveBlocker();
 
+// BEFORE THE FIRST SWEEP, so an armed keeper knows whether it can sign before it
+// has any money to move — and the banner below can say so.
+await establishAuthorizationKey();
+
 // ASKED BEFORE THE BANNER, so the banner can tell the truth about it. A mirror
 // that is off, or pointed at a database without the schema, is invisible from
 // every other signal this process emits.
@@ -1044,6 +1293,9 @@ log.info("keeper starting", {
   missingLiveCondition: health.missingLiveCondition,
   settleKey: health.signing.settleKey,
   signing: health.signing.route,
+  // "matches" or nothing else: every other value means a settle Privy will refuse,
+  // or a pairing nobody has established.
+  authorizationKey: health.signing.authorizationKey,
   // The website's calendar and history come from here. "off" and "BROKEN" both
   // mean the site will show an empty past for vaults that really did settle.
   history: history.detail,

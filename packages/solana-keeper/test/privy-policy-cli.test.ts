@@ -25,6 +25,7 @@ import { Redactor, type Secret } from "@sip/solana-log";
 import { afterAll, describe, expect, it } from "vitest";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "../src/idl.js";
 import { SERVICE } from "../src/keeper-log.js";
+import { type KeyQuorumLike } from "../src/privy-authorization-key.js";
 import { runPrivyPolicyCli, type PrivyPolicyClient, type ProbeChain, type WalletLike } from "../src/privy-policy-cli.js";
 import { MEMO_PROGRAM_ID, PROBE_MESSAGE, allowedPrograms, buildKeeperPolicy, type KeeperPolicy, type PolicyLike } from "../src/privy-policy.js";
 
@@ -77,6 +78,7 @@ const grantedWallet = (over: Partial<WalletLike> = {}): WalletLike => ({
 
 interface Behaviour {
   readonly createKeyQuorum?: () => Promise<{ id: string }>;
+  readonly getKeyQuorum?: () => Promise<KeyQuorumLike>;
   readonly createPolicy?: (policy: KeeperPolicy, ownerId: string) => Promise<PolicyLike & { id: string }>;
   readonly getPolicy?: () => Promise<PolicyLike>;
   readonly getWallet?: () => Promise<WalletLike>;
@@ -87,6 +89,7 @@ interface Behaviour {
 
 interface Recorded {
   readonly credentials: { appId: string; appSecret: Secret }[];
+  readonly quorumsRead: string[];
   readonly quorums: { publicKey: string; displayName: string }[];
   readonly policies: { policy: KeeperPolicy; ownerId: string }[];
   readonly messages: Uint8Array[];
@@ -100,6 +103,10 @@ function fakePrivy(behaviour: Behaviour, recorded: Recorded): PrivyPolicyClient 
     async createKeyQuorum(input) {
       recorded.quorums.push({ ...input });
       return behaviour.createKeyQuorum ? behaviour.createKeyQuorum() : { id: ADMIN_QUORUM_ID };
+    },
+    async getKeyQuorum(keyQuorumId) {
+      recorded.quorumsRead.push(keyQuorumId);
+      return behaviour.getKeyQuorum ? behaviour.getKeyQuorum() : { id: keyQuorumId, authorizationKeys: [{ publicKey: signerPair.publicKey, displayName: "sip-solana-keeper" }] };
     },
     async createPolicy(policy, ownerId) {
       recorded.policies.push({ policy, ownerId });
@@ -146,7 +153,7 @@ async function run(
 ): Promise<Run> {
   const out: string[] = [];
   const err: string[] = [];
-  const recorded: Recorded = { credentials: [], quorums: [], policies: [], messages: [], transactions: [], keys: [] };
+  const recorded: Recorded = { credentials: [], quorumsRead: [], quorums: [], policies: [], messages: [], transactions: [], keys: [] };
   let clientBuilt = 0;
   let chainBuilt = 0;
   const code = await runPrivyPolicyCli(argv, {
@@ -357,6 +364,191 @@ describe("check", () => {
     });
     expect(result.code).toBe(1);
     expect(result.stderr.find((line) => line["event"] === "privy policy not read")).toMatchObject({ status: 404, class: "OTHER" });
+  });
+});
+
+describe("key", () => {
+  const keyEnv: NodeJS.ProcessEnv = { ...privyEnv, SIP_SOLANA_PRIVY_AUTHORIZATION_KEY: AUTH_KEY, SIP_SOLANA_PRIVY_SIGNER_ID: SIGNER_ID };
+  const verdict = (result: Run): Record<string, unknown> => result.stdout.find((line) => line["event"] === "privy authorization key")!;
+
+  it("matches, and prints the derived PUBLIC key next to the quorum's", async () => {
+    const result = await run(["key"], { env: keyEnv });
+    expect(result.code).toBe(0);
+    // AND SAYS WHOSE KEY IT JUDGED. This command reads the environment it was
+    // given, never Railway's, and the incident it exists for is precisely a
+    // Railway value that differs from the one in the password manager: a bare
+    // "nothing to do about the key" sends an operator off to chase the seat
+    // while the deployed keeper keeps 401ing.
+    expect(String(verdict(result)["next"])).toContain("/status");
+    expect(verdict(result)).toMatchObject({
+      verdict: "matches",
+      signerId: SIGNER_ID,
+      derivedPublicKey: signerPair.publicKey,
+      registeredPublicKeys: [signerPair.publicKey],
+      registeredNames: ["sip-solana-keeper"],
+    });
+    // THE QUORUM IT ASKED ABOUT IS THE CONFIGURED ONE, not one taken from an argument.
+    expect(result.recorded.quorumsRead).toEqual([SIGNER_ID]);
+    // No RPC is needed to compare two keys.
+    expect(result.chainBuilt).toBe(0);
+    // THE SECRET NEVER LEAVES THE PROCESS: nothing was signed, and no line carries the private key.
+    expect(result.recorded.keys).toEqual([]);
+    expect(result.text).not.toContain(signerPair.privateKey);
+  });
+
+  it("says not-in-quorum when the quorum holds a different key, and names what to compare", async () => {
+    const stranger = await generateP256KeyPair();
+    const result = await run(["key"], {
+      env: keyEnv,
+      privy: { getKeyQuorum: async () => ({ id: SIGNER_ID, authorizationKeys: [{ publicKey: stranger.publicKey, displayName: "someone else" }] }) },
+    });
+    expect(result.code).toBe(1);
+    expect(verdict(result)).toMatchObject({ verdict: "not-in-quorum", derivedPublicKey: signerPair.publicKey, registeredPublicKeys: [stranger.publicKey] });
+    expect(String(verdict(result)["meaning"])).toContain("401");
+    expect(String(verdict(result)["next"])).toContain("Authorization keys");
+    // THE ONE VERDICT THAT MEANS THE KEEPER IS BROKEN SAYS SO IN WORDS.
+    expect(result.stderr.map((line) => line["event"])).toContain("the keeper cannot sign for any wallet");
+  });
+
+  // PRIVY'S OWN EXAMPLES WRAP REGISTERED PUBLIC KEYS AT 64 COLUMNS. Comparing
+  // those against a single-line derived key with === would call the RIGHT key a
+  // mismatch, at 2 a.m., and send an operator to re-seat a working credential.
+  it("matches a registered key that arrives wrapped in newlines", async () => {
+    const result = await run(["key"], {
+      env: keyEnv,
+      privy: {
+        getKeyQuorum: async () => ({
+          id: SIGNER_ID,
+          authorizationKeys: [{ publicKey: signerPair.publicKey.replace(/(.{64})/g, "$1\n"), displayName: null }],
+        }),
+      },
+    });
+    expect(result.code).toBe(0);
+    expect(verdict(result)).toMatchObject({ verdict: "matches", registeredPublicKeys: [signerPair.publicKey] });
+  });
+
+  // EVERY ONE OF THESE SIGNS IDENTICALLY AT PRIVY. `check` and `verify` refuse
+  // them as malformed (isP256Pkcs8PrivateKey asks the stricter question), and
+  // `key` must not: answering "malformed" for a key whose signature is correct
+  // sends an operator after a paste that is not the problem.
+  it("accepts the pastes the SDK accepts, instead of calling a working key malformed", async () => {
+    for (const [what, value] of [
+      ["no prefix", signerPair.privateKey],
+      ["double quotes", `"${AUTH_KEY}"`],
+      ["surrounding whitespace", `  ${AUTH_KEY}\n`],
+      ["64-column wrapping", AUTH_KEY.replace(/(.{64})/g, "$1\n")],
+      ["a tail cut off", AUTH_KEY.slice(0, -20)],
+    ] as const) {
+      const result = await run(["key"], { env: { ...keyEnv, SIP_SOLANA_PRIVY_AUTHORIZATION_KEY: value } });
+      expect([what, result.code]).toEqual([what, 0]);
+      expect(verdict(result)).toMatchObject({ verdict: "matches", derivedPublicKey: signerPair.publicKey });
+    }
+  });
+
+  it("exits 2 for a value that is not a key, without sending anything to Privy", async () => {
+    for (const value of ["not-a-key", `-----BEGIN PRIVATE KEY-----\n${signerPair.privateKey}\n-----END PRIVATE KEY-----`]) {
+      const result = await run(["key"], { env: { ...keyEnv, SIP_SOLANA_PRIVY_AUTHORIZATION_KEY: value } });
+      expect(result.code).toBe(2);
+      expect(verdict(result)).toMatchObject({ verdict: "key-unreadable", derivedPublicKey: null, registeredPublicKeys: null });
+      // NOTHING WAS SENT ANYWHERE: no client was built, no quorum was read.
+      expect([result.clientBuilt, result.recorded.quorumsRead]).toEqual([0, []]);
+      expect(result.text).not.toContain(signerPair.privateKey);
+    }
+  });
+
+  it("separates refused credentials, a missing quorum and an unreadable Privy", async () => {
+    for (const [error, expected] of [
+      [new AuthenticationError(401, { error: "Invalid app credentials" }, undefined, headers), "credentials-refused"],
+      [new NotFoundError(404, { error: "Key quorum not found" }, undefined, headers), "quorum-not-found"],
+      [new APIConnectionError({ message: "socket hang up" }), "quorum-unreadable"],
+    ] as const) {
+      const result = await run(["key"], { env: keyEnv, privy: { getKeyQuorum: async () => Promise.reject(error) } });
+      expect([expected, result.code]).toEqual([expected, 1]);
+      // THE DERIVED KEY IS STILL PRINTED: it is what the operator carries to the dashboard.
+      expect(verdict(result)).toMatchObject({ verdict: expected, derivedPublicKey: signerPair.publicKey, registeredPublicKeys: null });
+      // NOT PROOF OF A MISMATCH, so none of these says the keeper is broken.
+      expect(result.stderr.map((line) => line["event"])).not.toContain("the keeper cannot sign for any wallet");
+      expect(result.stderr.find((line) => line["event"] === "key quorum not read")).toBeDefined();
+    }
+  });
+
+  // "matches" USED TO MEAN "THE KEY IS FINE, LOOK ELSEWHERE" for a quorum that
+  // refuses every settle. The keeper sends one signature; a threshold of 2 wants
+  // two. The old verdict exited 0 and sent the owner to `privy-policy verify`,
+  // which would find the seat and its policy perfectly bound.
+  it("says threshold-above-one when the quorum wants two signatures, even though the key is registered", async () => {
+    const stranger = await generateP256KeyPair();
+    const result = await run(["key"], {
+      env: keyEnv,
+      privy: {
+        getKeyQuorum: async () => ({
+          id: SIGNER_ID,
+          authorizationKeys: [
+            { publicKey: signerPair.publicKey, displayName: "sip-solana-keeper" },
+            { publicKey: stranger.publicKey, displayName: "the second signer" },
+          ],
+          authorizationThreshold: 2,
+        }),
+      },
+    });
+    expect(result.code).toBe(1);
+    expect(verdict(result)).toMatchObject({
+      verdict: "threshold-above-one",
+      derivedPublicKey: signerPair.publicKey,
+      authorizationThreshold: 2,
+    });
+    expect(String(verdict(result)["next"])).toContain("Do not change the key");
+    // A REFUSAL THAT WILL HAPPEN, so it says so in words, as a wrong key does.
+    expect(result.stderr.map((line) => line["event"])).toContain("the keeper cannot sign for any wallet");
+  });
+
+  // A QUORUM CAN HOLD MEMBERS THIS COMMAND CANNOT READ — a nested key quorum or a
+  // user — and a key seated through one of those signs perfectly well. Calling
+  // that not-in-quorum sends the owner down the lost-key path in the runbook:
+  // new key, new signer id, every trading wallet re-seated by its user.
+  it("says members-unresolved, not not-in-quorum, when the quorum has members it cannot read", async () => {
+    const stranger = await generateP256KeyPair();
+    const result = await run(["key"], {
+      env: keyEnv,
+      privy: {
+        getKeyQuorum: async () => ({
+          id: SIGNER_ID,
+          authorizationKeys: [{ publicKey: stranger.publicKey, displayName: "someone else" }],
+          keyQuorumIds: ["cbxnested00000000000001"],
+          userIds: ["did:privy:someuser0000001"],
+        }),
+      },
+    });
+    expect(result.code).toBe(1);
+    expect(verdict(result)).toMatchObject({
+      verdict: "members-unresolved",
+      derivedPublicKey: signerPair.publicKey,
+      nestedKeyQuorumIds: ["cbxnested00000000000001"],
+      memberUsers: 1,
+    });
+    expect(String(verdict(result)["next"])).toContain("Do not regenerate anything yet");
+    // NOT PROOF OF A MISMATCH: the line that means "stop, this is broken" stays quiet.
+    expect(result.stderr.map((line) => line["event"])).not.toContain("the keeper cannot sign for any wallet");
+    // AND IT NAMES NO PERSON: a member user is counted, never identified.
+    expect(result.text).not.toContain("did:privy:");
+  });
+
+  it("takes no arguments, and says so", async () => {
+    const result = await run(["key", "--policy", POLICY_ID], { env: keyEnv });
+    expect(result.code).toBe(2);
+    expect(JSON.stringify(result.stderr[0]!["problems"])).toContain("key takes no arguments");
+    expect(result.clientBuilt).toBe(0);
+  });
+
+  it("names the two variables it cannot run without", async () => {
+    for (const name of ["SIP_SOLANA_PRIVY_AUTHORIZATION_KEY", "SIP_SOLANA_PRIVY_SIGNER_ID"]) {
+      const env = { ...keyEnv };
+      delete env[name];
+      const result = await run(["key"], { env });
+      expect([name, result.code]).toEqual([name, 2]);
+      expect(result.stderr[0]).toMatchObject({ event: "configuration refused", command: "key", missing: [name] });
+      expect(result.clientBuilt).toBe(0);
+    }
   });
 });
 

@@ -42,6 +42,7 @@ import * as anchor from "@coral-xyz/anchor";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { Redactor, Secret, sharedRedactor } from "@sip/solana-log";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "./idl.js";
+import { PRIVY_KEY_PREFIXES, canonicalPrivyAuthorizationKey } from "./privy-authorization-key.js";
 
 /**
  * The literal acknowledgement that arms the keeper. Nothing else does.
@@ -248,15 +249,30 @@ function registerUrl(redactor: Redactor, raw: string, label: string, parsed: URL
 
 /**
  * Registers a Privy authorization key (a P-256 PKCS8 private key, base64) in
- * both forms a line can quote it in.
+ * every form a line can quote it in.
  *
- * The SDK strips Privy's "wallet-auth:" prefix and uses the body, so an error
- * can quote the body alone. Shared by loadConfig and bin/privy-policy.mts, which
- * reads the same variable outside an armed config.
+ * THE VALUE AS PASTED IS NOT THE ONLY FORM. The SDK strips Privy's
+ * "wallet-auth:" prefix and uses the body, so an error can quote the body alone
+ * — and Privy signs identically for a value carrying "wallet-api:", surrounding
+ * quotes or 64-column wrapping, all of which derivePrivyPublicKey deliberately
+ * accepts and the runbook tells the owner are fine to paste. Registering only
+ * the raw value and its wallet-auth:-stripped form left the CANONICAL key — the
+ * string any library, stack trace or `detail` field would actually echo —
+ * unknown to the redactor for exactly those configurations, with no second net
+ * under it: Redactor.contains' reassembly pass rebuilds hex needles only, never
+ * base64. So the canonical form is registered too, and the prefixed canonical
+ * forms with it, because the redactor replaces its longest needle first and a
+ * line should not be left holding a bare "wallet-auth:".
+ *
+ * Shared by loadConfig and bin/privy-policy.mts, which reads the same variable
+ * outside an armed config.
  */
 export function registerPrivyAuthorizationKey(redactor: Redactor, value: string, label = "privyAuthorizationKey"): void {
   redactor.register(value, label);
   redactor.register(value.replace(/^wallet-auth:/, ""), label);
+  const canonical = canonicalPrivyAuthorizationKey(value);
+  for (const prefix of PRIVY_KEY_PREFIXES) redactor.register(`${prefix}${canonical}`, label);
+  redactor.register(canonical, label);
 }
 
 const isLoopback = (host: string): boolean =>

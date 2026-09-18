@@ -17,6 +17,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Redactor } from "@sip/solana-log";
 import { SERVICE } from "./keeper-log.js";
+import type { AuthorizationKeyCheck } from "./privy-authorization-key.js";
 import type { SeatCheck } from "./seat-check.js";
 
 export interface WalletStatus {
@@ -57,6 +58,31 @@ export interface SigningStatus {
    * question the two ids above cannot answer separately (src/seat-check.ts).
    */
   readonly seatCheck: SeatCheck;
+  /**
+   * Whether the configured authorization key is registered in the configured key
+   * quorum — established ONCE, at start-up, before any money is at stake.
+   *
+   * WHY IT IS HERE AND NOT LEFT TO THE FIRST SETTLE. A keeper whose key does not
+   * belong to its quorum looks entirely healthy from every other field on this
+   * page: it is armed, it holds the claim, it resolves a signer for each wallet,
+   * it measures trades correctly. Privy refuses only at the send, with 401 "No
+   * valid authorization signatures were provided" — so the first thing that ever
+   * reveals the fault is a settlement that should have moved a user's money.
+   * "matches" is the only healthy value; "not-checked" means a dry run, or no
+   * signer id to compare against (seatCheck is "unchecked" then too).
+   */
+  readonly authorizationKey: AuthorizationKeyCheck;
+  /**
+   * When that verdict was established, ISO-8601, or null when it never was.
+   *
+   * A VERDICT WITHOUT A DATE IS A CLAIM ABOUT AN UNKNOWN MOMENT. The pairing can
+   * change after boot — a key removed from the quorum, the quorum's keys rotated
+   * — and an operator reading "matches" during an outage cannot otherwise tell
+   * whether it is a statement about this minute or about a process that started
+   * last Tuesday. The keeper re-establishes it on a slow cadence and re-stamps
+   * this, so the two are read together or not at all.
+   */
+  readonly authorizationKeyAt: string | null;
   /** False in dry run, by construction: nothing that can sign was read. */
   readonly secretsRead: boolean;
   /** The settle key's PUBLIC key, when armed. */
