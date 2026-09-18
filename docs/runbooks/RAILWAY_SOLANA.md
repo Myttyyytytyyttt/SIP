@@ -129,6 +129,122 @@ de los dominios permitidos de Privy. Si su clave de Helius es la misma que vas a
 concurso. En la raíz del repositorio ya no hay un `railway.json`: cada servicio de Railway se configura a mano, como el
 vigilante de la sección 1.
 
+## 3. El mismo vigilante en tu Mac, en seco (para depurar)
+
+Es **el mismo programa** que corre en Railway, arrancado con la misma orden que usa la imagen
+(`node_modules/.bin/tsx bin/keeper.mts`, la última línea del `Dockerfile`). Cambia una sola cosa: en tu Mac va **en
+seco**. Lee la cadena de bloques y te cuenta lo que haría, pero no firma nada y no envía nada.
+
+Sirve para ver en tu pantalla, en segundos, lo que en Railway solo se ve en los logs. Así encontramos el fallo del
+18 de septiembre.
+
+### Las dos reglas que lo hacen seguro
+
+1. **No pongas nunca `SIP_SOLANA_BROADCAST` ni `SIP_SOLANA_ALLOW_BROADCAST`.** Esas dos juntas, y solo esas dos, son
+   lo que arma al vigilante. Hacen falta las **dos**, y la segunda tiene que ser la frase exacta. Sin ellas es en seco,
+   y en seco **ni siquiera lee una clave**: las órdenes de abajo no tocan nada de `~/sip-keys`.
+2. **No pongas `DATABASE_URL`.** Sin ella no abre ninguna conexión con Supabase: no escribe historial y no puede
+   disputarle nada al de Railway.
+
+### Por qué esto NO tumba al de Railway
+
+El candado que deja actuar a una sola copia (el de la sección 1, *Scale: 1 réplica*) **solo lo pide un vigilante
+armado**. Un vigilante en seco no lo pide nunca:
+
+- en `src/singleton.ts`, `ensure()` se sale en su primera línea si no está armado, y esa es la única función que
+  llega a pedir el candado a Postgres;
+- y en `bin/keeper.mts` las dos llamadas a `ensure()` están dentro de un `if (config.armed)`, así que ni se intentan.
+
+Con la regla 2 encima, sin `DATABASE_URL` no hay ni conexión donde pedirlo. **Puedes arrancarlo ahora mismo, con el de
+Railway cobrando, sin tocarlo.**
+
+### Una vez: instalar
+
+Desde **Terminal.app**:
+
+```bash
+cd ~/ProyectosCT/SIP && PATH="$HOME/.nvm/versions/node/v22.14.0/bin:$PATH" corepack pnpm install --filter "@sip/solana-keeper..."
+```
+
+### Cada vez: arrancarlo
+
+Primero la **revisión previa**, que es el mismo paso que Railway hace al construir la imagen. No necesita ninguna
+variable y tarda menos de un segundo:
+
+```bash
+cd ~/ProyectosCT/SIP/packages/solana-keeper && PATH="$HOME/.nvm/versions/node/v22.14.0/bin:$PATH" node_modules/.bin/tsx bin/keeper.mts --preflight
+```
+
+Tiene que decir `"preflight":"ok"` y `"invariants":14`. Si dice `preflight failed`, **no despliegues**: la línea
+nombra lo que falla. Desde el 18 de septiembre esas 14 comprobaciones incluyen construir de verdad las cuatro órdenes
+que mueven dinero (`settle_v2`, `wrap_sol`, `convert`, `invest`), que es justo lo que aquel día se rompió.
+
+Y ahora el vigilante:
+
+```bash
+cd ~/ProyectosCT/SIP/packages/solana-keeper && env -u DATABASE_URL -u SIP_SOLANA_BROADCAST -u SIP_SOLANA_ALLOW_BROADCAST PATH="$HOME/.nvm/versions/node/v22.14.0/bin:$PATH" SIP_SOLANA_RPC_URLS="https://api.mainnet-beta.solana.com" SIP_SOLANA_PROGRAM_ID="6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J" SIP_SOLANA_SWEEP_MS=60000 PORT=8099 node_modules/.bin/tsx bin/keeper.mts
+```
+
+Se queda abierto y barre cada minuto. Para pararlo, **Ctrl-C** en esa misma ventana.
+
+Solo necesita esas dos variables con valor: la **URL del RPC** (la pública de Solana vale de sobra para leer) y el
+**id del programa**. `PORT` es opcional y solo sirve para poder mirar `/status` desde otra ventana; `SIP_SOLANA_SWEEP_MS`
+es cada cuánto barre.
+
+### Cómo se ve cuando va bien
+
+La primera línea larga tiene que decir esto (el orden puede cambiar):
+
+```
+"programDeployed":true
+"mode":"dry run — nothing will be sent"
+"settleKey":null
+"signing":"not resolved — a dry run reads no signing secret"
+"history":"off — no DATABASE_URL, so nothing is recorded"
+```
+
+Y unos segundos después, una línea por cada wallet enlazada. Con ganancia pendiente se lee así:
+
+```
+"event":"settle settled" … "detail":"DRY RUN — would settle 36634582 lamports (36634582 owed at 2000 bps) from
+183172913 lamports of measured profit over slots 447945418..447947792"
+```
+
+`DRY RUN — would settle …` es la frase que buscas: significa **«esto es exactamente lo que el de Railway va a
+cobrar»**, sin haber enviado nada. Si en vez de eso sale `"settle":"THREW"`, el texto que va detrás es el fallo, y es
+el mismo que verías en Railway.
+
+Desde otra ventana de Terminal.app:
+
+```bash
+curl -s http://localhost:8099/status
+```
+
+### Cómo distinguir el tuyo del de Railway
+
+Los dos contestan lo mismo en `/status`, así que mira estos campos. **Si el tuyo no dice todo lo de la columna de la
+izquierda, párralo con Ctrl-C:**
+
+| campo | el tuyo, en tu Mac | el de Railway |
+|---|---|---|
+| `mode` | `dry-run` | `live` |
+| `armed` | `false` | `true` |
+| `signing.settleKey` | `null` | una dirección |
+| `signing.secretsRead` | `false` | `true` |
+| `history` | `off — no DATABASE_URL…` | escribiendo |
+| `sweeps` | empieza en 1 y sube despacio | va por miles |
+| dirección | `http://localhost:8099` | tu dominio `*.up.railway.app` |
+
+También sale, en el tuyo, la razón de que esté en seco:
+`"missingLiveCondition":"not armed: SIP_SOLANA_BROADCAST=1 and the exact SIP_SOLANA_ALLOW_BROADCAST sentence are both
+required"`.
+
+### Después, para actualizar el de Railway
+
+Cuando lo de tu Mac se vea bien: sube la rama, únela a `main`, y Railway vuelve a construir sola con esos mismos
+cambios. La construcción pasa otra vez por `--preflight`, así que un fallo de los que se ven aquí **no llega a
+desplegarse**.
+
 ## Si algo falla
 
 - **El vigilante termina de desplegar y se reinicia en bucle**: abre los logs de `sip-solana-keeper` y busca
