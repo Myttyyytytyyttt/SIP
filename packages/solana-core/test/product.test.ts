@@ -2,7 +2,17 @@
 
 import { describe, expect, it } from "vitest";
 
-import { SPYX_MINT, SPYX_USDC_POOL, TOKEN_2022_PROGRAM, USDC_MINT, RAYDIUM_CLMM } from "../src/client/addresses";
+import {
+  ANTHROPIC_MINT,
+  ANTHROPIC_USDC_POOL,
+  FIGUREAI_MINT,
+  FIGUREAI_USDC_POOL,
+  SPYX_MINT,
+  SPYX_USDC_POOL,
+  TOKEN_2022_PROGRAM,
+  USDC_MINT,
+  RAYDIUM_CLMM,
+} from "../src/client/addresses";
 import { OWNER_INSTRUCTIONS } from "../src/client/idl";
 import {
   CLASSIC_TOKEN_ACCOUNT_BYTES,
@@ -18,7 +28,7 @@ import {
   ownerComputeBudget,
   priorityFeeLamports,
 } from "../src/client/product";
-import { DEFAULT_RATES, MODE_PROFIT, defaultInvestPolicy, investPolicyProblems, vaultPolicyProblems } from "../src/client/rules";
+import { DEFAULT_RATES, MAX_LEGS, MODE_PROFIT, defaultInvestPolicy, investPolicyProblems, vaultPolicyProblems } from "../src/client/rules";
 import { MAX_COMPUTE_UNIT_LIMIT, MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS } from "../src/server/verify-tx";
 
 describe("the vault a new pension key is offered", () => {
@@ -49,9 +59,13 @@ describe("the first investment policy", () => {
 
   it("buys every $5 split across the offered legs, and the whole policy passes set_invest_policy's rules", () => {
     const amounts = defaultInvestPolicy(OFFERED_LEGS.length);
+    // Three legs do not divide 10,000 evenly, so the weights come from
+    // basketWeightsBps — the function the build route itself uses — and not from
+    // a division that was only an integer while the basket had one leg.
+    const weights = basketWeightsBps(OFFERED_LEGS.length);
     expect(amounts.minInvestment).toBe(5_000_000n / BigInt(OFFERED_LEGS.length));
     const problems = investPolicyProblems({
-      legs: OFFERED_LEGS.map((leg) => ({ mint: leg.mint, weightBps: 10_000 / OFFERED_LEGS.length, minOutRateWad: 1n })),
+      legs: OFFERED_LEGS.map((leg, index) => ({ mint: leg.mint, weightBps: weights[index]!, minOutRateWad: 1n })),
       venueProgram: RAYDIUM_CLMM,
       inMint: USDC_MINT,
       minConvertRateWad: 1n,
@@ -63,14 +77,35 @@ describe("the first investment policy", () => {
     expect(problems).toEqual([]);
   });
 
-  it("offers SPYx on Token-2022 at 8 decimals, priced from the keeper's pool, with 10 % and 5 % margins", () => {
-    expect(OFFERED_LEGS).toEqual([{ symbol: "SPYx", name: "SP500 xStock", mint: SPYX_MINT, pool: SPYX_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 8, tokenAccountBytes: 179 }]);
+  it("offers SPYx and the two PreStocks legs, all Token-2022, each priced from its own pool, with 10 % and 5 % margins", () => {
+    expect(OFFERED_LEGS).toEqual([
+      { symbol: "SPYx", name: "SP500 xStock", mint: SPYX_MINT, pool: SPYX_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 8, tokenAccountBytes: 179 },
+      { symbol: "ANTHROPIC", name: "Anthropic PreStock", mint: ANTHROPIC_MINT, pool: ANTHROPIC_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 9, tokenAccountBytes: 191 },
+      { symbol: "FIGUREAI", name: "Figure AI PreStock", mint: FIGUREAI_MINT, pool: FIGUREAI_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 9, tokenAccountBytes: 191 },
+    ]);
     expect([CONVERT_FLOOR_MARGIN_BPS, LEG_FLOOR_MARGIN_BPS]).toEqual([1_000, 500]);
   });
 
-  it("sizes the vault's token accounts: 165 bytes classic, and 179 for SPYx (account type, ImmutableOwner, PausableAccount, TransferHookAccount)", () => {
+  it("names each mint, pool and symbol once, and stays a basket the program would take", () => {
+    // A copy-pasted mint or pool would price one leg from another's market and
+    // would be refused on chain as a repeated mint; catch it here instead.
+    for (const field of ["symbol", "mint", "pool"] as const) {
+      expect(new Set(OFFERED_LEGS.map((leg) => leg[field])).size).toBe(OFFERED_LEGS.length);
+    }
+    expect(OFFERED_LEGS.length).toBeGreaterThanOrEqual(1);
+    expect(OFFERED_LEGS.length).toBeLessThanOrEqual(MAX_LEGS);
+  });
+
+  it("sizes the vault's token accounts: 165 classic, 179 for SPYx, 191 for a PreStocks leg (which also withholds a transfer fee)", () => {
     expect(CLASSIC_TOKEN_ACCOUNT_BYTES).toBe(165);
-    expect(OFFERED_LEGS[0]!.tokenAccountBytes).toBe(165 + 1 + 4 + 4 + 5);
+    // 165 base, the account type (1), then a 4-byte header plus its value per
+    // extension: ImmutableOwner (0), PausableAccount (0), TransferHookAccount (1).
+    const SPYX_BYTES = 165 + 1 + 4 + 4 + 5;
+    expect(SPYX_BYTES).toBe(179);
+    expect(OFFERED_LEGS[0]!.tokenAccountBytes).toBe(SPYX_BYTES);
+    // The PreStocks pair add TransferFeeAmount: a header and an 8-byte withheld amount.
+    for (const leg of OFFERED_LEGS.slice(1)) expect(leg.tokenAccountBytes).toBe(SPYX_BYTES + 4 + 8);
+    expect(OFFERED_LEGS[1]!.tokenAccountBytes).toBe(191);
   });
 
   it("weighs a basket's legs to exactly 10,000 bps, the remainder on the first leg", () => {

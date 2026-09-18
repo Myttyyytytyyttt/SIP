@@ -24,7 +24,15 @@
 //    unbounded per call. This overrides "caps at the maximum"; the owner confirms.
 //  * max_rolling_30d = 31 × max_per_call: one maximum buy per day-bucket.
 
-import { SPYX_MINT, SPYX_USDC_POOL, TOKEN_2022_PROGRAM } from "./addresses";
+import {
+  ANTHROPIC_MINT,
+  ANTHROPIC_USDC_POOL,
+  FIGUREAI_MINT,
+  FIGUREAI_USDC_POOL,
+  SPYX_MINT,
+  SPYX_USDC_POOL,
+  TOKEN_2022_PROGRAM,
+} from "./addresses";
 import type { OwnerInstructionName } from "./idl";
 import { DEFAULT_RATES, MODE_PROFIT, type VaultPolicyInput } from "./rules";
 
@@ -64,12 +72,30 @@ export interface OfferedLeg {
 }
 
 /**
- * The stocks a policy can buy from the web. One for now. SPYx's token account is
- * 179 bytes: 165, the account type (1), ImmutableOwner (4), PausableAccount (4)
- * and TransferHookAccount (5), which its mint's extensions require.
+ * The stocks a policy can buy from the web: three, all Token-2022, each priced
+ * from its own Raydium CLMM pool against USDC. bin/check-legs.mts asserts every
+ * number below against mainnet, depth included — a pool can be structurally
+ * perfect and still route nothing.
+ *
+ * THE BYTES, PER LEG. Each is 165 for the base account, the account type (1),
+ * then one header (4) plus its value for every extension the mint requires:
+ *  * SPYx, 179: ImmutableOwner (4), PausableAccount (4), TransferHookAccount (5).
+ *  * ANTHROPIC and FIGUREAI, 191: those same 179, plus TransferFeeAmount
+ *    (4 + an 8-byte withheld amount).
+ *
+ * THE PRESTOCKS PAIR CHARGE 50 BPS TO TRANSFER. Their mints carry a live
+ * transfer-fee extension — 0.5 % of every move, with maximum_fee at u64::MAX, so
+ * nothing caps it — which lands on the amount RECEIVED, not the amount sent. A
+ * leg floor priced from the pool alone does not see it; MAX_LEG_FEE_BPS in
+ * bin/check-legs.mts is what keeps the fee from growing behind our backs. SPYx
+ * has no transfer fee. Both PreStocks mints' transfer_hook program id is null:
+ * a real hook would need transfer_checked_with_transfer_hook, which the program
+ * does not call.
  */
 export const OFFERED_LEGS: readonly OfferedLeg[] = Object.freeze([
   Object.freeze({ symbol: "SPYx", name: "SP500 xStock", mint: SPYX_MINT, pool: SPYX_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 8, tokenAccountBytes: 179 }),
+  Object.freeze({ symbol: "ANTHROPIC", name: "Anthropic PreStock", mint: ANTHROPIC_MINT, pool: ANTHROPIC_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 9, tokenAccountBytes: 191 }),
+  Object.freeze({ symbol: "FIGUREAI", name: "Figure AI PreStock", mint: FIGUREAI_MINT, pool: FIGUREAI_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 9, tokenAccountBytes: 191 }),
 ]);
 
 /** Each of `count` legs' weight, summing to exactly 10,000 bps: equal shares, any remainder on the first leg. */

@@ -22,7 +22,7 @@ import { SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } fr
 import { base58Encode } from "../../src/client/base58";
 import { toHex } from "../../src/client/idl";
 import { parseLegacyMessage, splitWire } from "../../src/client/message";
-import { DEFAULT_INVEST_CAPS, DEFAULT_VAULT_POLICY, OFFERED_LEGS, ownerComputeBudget } from "../../src/client/product";
+import { DEFAULT_INVEST_CAPS, DEFAULT_VAULT_POLICY, ownerComputeBudget } from "../../src/client/product";
 import { defaultInvestPolicy } from "../../src/client/rules";
 import {
   buildCreateVaultV2,
@@ -53,7 +53,21 @@ export const ED25519_CONSENT_HEADER_HEX = "01003000ffff1000ffff70008c00ffff";
 export const GOLDEN_CONVERT_FLOOR_WAD = 90_034_840_399_943_305n;
 export const GOLDEN_SPYX_FLOOR_WAD = 124_719_467_624_105_690n;
 
-/** The vault token accounts a first policy pays for, in the order the build route lists them: wSOL, USDC, SPYx. */
+/**
+ * The min_investment of the ONE-leg policy below, pinned to one leg and NOT read
+ * from OFFERED_LEGS.length. The fixture's basket is a single SPYx leg, so its
+ * amount is the one-leg amount, 5 USDC; sizing it from the catalogue would move
+ * SET_INVEST_POLICY_GOLDEN_FLOORS — and builders.test.ts, verify-tx.test.ts and
+ * lighthouse.test.ts with it — every time the product gains or loses a leg,
+ * which is a change in the product, not in the builders these bytes pin.
+ */
+export const FIXTURE_ONE_LEG_MIN_INVESTMENT = defaultInvestPolicy(1).minInvestment;
+
+/**
+ * The vault token accounts the one-leg fixture policy pays for, in the order the
+ * build route lists them: wSOL, USDC, SPYx. This is the fixture's own basket,
+ * not the catalogue's, for the same reason FIXTURE_ONE_LEG_MIN_INVESTMENT is.
+ */
 export const FIRST_POLICY_VAULT_TOKEN_ACCOUNTS = [
   { mint: WSOL_MINT, tokenProgram: TOKEN_PROGRAM },
   { mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM },
@@ -134,7 +148,7 @@ export function buildOwnerFixtures(): Readonly<Record<OwnerFixtureName, OwnerFix
         owner,
         legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: GOLDEN_SPYX_FLOOR_WAD }],
         minConvertRateWad: GOLDEN_CONVERT_FLOOR_WAD,
-        minInvestment: defaultInvestPolicy(OFFERED_LEGS.length).minInvestment,
+        minInvestment: FIXTURE_ONE_LEG_MIN_INVESTMENT,
         maxPerCall: DEFAULT_INVEST_CAPS.maxPerCall,
         maxRolling30d: DEFAULT_INVEST_CAPS.maxRolling30d,
         enabled: true,

@@ -17,7 +17,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "check:idl": "tsx bin/check-idl.mts"
+    "check:idl": "tsx bin/check-idl.mts",
+    "check:legs": "tsx bin/check-legs.mts"
   },
   "dependencies": {
     "@sip/solana-program": "workspace:*",
