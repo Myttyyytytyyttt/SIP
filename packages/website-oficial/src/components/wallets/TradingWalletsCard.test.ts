@@ -60,7 +60,7 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { CreateAndLinkNote, TradingWalletsCard } from "@/components/wallets/TradingWalletsCard";
 import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
-import { VaultWriteLock } from "@/hooks/use-vault-actions";
+import { VaultWriteLock, WriteLockContext, type WriteLock } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
 import type { CreateAndLinkOutcome } from "@/lib/create-and-link";
 import { MAX_TRADING_WALLETS } from "@/lib/trading-wallets";
@@ -89,13 +89,28 @@ function stateOf(chain: Chain = {}): VaultStateJson {
   };
 }
 
-function render(view: VaultView, build = vi.fn()): { html: string; build: typeof build; refresh: ReturnType<typeof vi.fn> } {
+/** The screen's lock as it is when a link has been sent for `sent` and could not be confirmed. */
+const lockAwaiting = (sent: readonly string[]): WriteLock => ({
+  holder: null,
+  consents: new Map(),
+  unconfirmedLinks: new Set(sent),
+  setUnconfirmedLink: () => {},
+  acquire: () => true,
+  release: () => {},
+});
+
+function render(
+  view: VaultView,
+  build = vi.fn(),
+  /** Links this screen has sent and cannot confirm, as `<pensionKey>:<tradingAddress>`. */
+  sent: readonly string[] = [],
+): { html: string; build: typeof build; refresh: ReturnType<typeof vi.fn> } {
   mocked.buttons.length = 0;
   const refresh = vi.fn();
   const value: VaultScreenValue = { pensionKey: PENSION_KEY, view, refresh, api: { build } as unknown as VaultApi };
-  const html = renderToStaticMarkup(
-    createElement(TooltipProvider, null, createElement(VaultScreenContext.Provider, { value }, createElement(VaultWriteLock, null, createElement(TradingWalletsCard)))),
-  );
+  const card = createElement(TradingWalletsCard);
+  const held = sent.length === 0 ? createElement(VaultWriteLock, null, card) : createElement(WriteLockContext.Provider, { value: lockAwaiting(sent) }, card);
+  const html = renderToStaticMarkup(createElement(TooltipProvider, null, createElement(VaultScreenContext.Provider, { value }, held)));
   return { html, build, refresh };
 }
 
@@ -202,6 +217,14 @@ describe("the press", () => {
     press(CREATE_LINK_COPY.button);
     await vi.waitFor(() => expect(build).toHaveBeenCalled());
     expect(build.mock.calls[0]?.[0]).toMatchObject({ action: "prepareLink", wallet: TRADING_0 });
+  });
+
+  it("a link this screen sent and cannot confirm stops the press that would race it, and says so", () => {
+    // A row sent it; the card is a different writer, so its own `unconfirmed` is false. Offering the whole
+    // press here would sign and send a second link while the first may still land.
+    const { html } = render(ready(), vi.fn(), [`${PENSION_KEY}:${TRADING_1}`]);
+    expect(buttons(CREATE_LINK_COPY.button)[0]?.disabled).toBe(true);
+    expect(html).toContain(CREATE_LINK_COPY.linkAwaiting);
   });
 
   it("another write already holds the screen: the button is disabled and says so", () => {

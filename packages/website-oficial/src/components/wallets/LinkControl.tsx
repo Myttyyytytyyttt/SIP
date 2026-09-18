@@ -10,6 +10,11 @@
  * to vault, disabled with the reason while there is no vault, while SIP's program
  * is not configured or is paused, or while another write runs on the screen.
  *
+ * A LINK THIS SCREEN ALREADY SENT IS NEVER OFFERED AGAIN until it is confirmed,
+ * wherever it was sent from: the card's chained press and this row are different
+ * writers, and the wait for confirmation is kept on the screen's lock under the
+ * wallet's own key, so neither can start a second link transaction for it.
+ *
  * THE PENSION KEY IS NEVER OFFERED. Its row gets no control at all: the program,
  * the verifier, the build route and the flow each refuse it as well.
  *
@@ -108,8 +113,11 @@ export function LinkControl({ address, seat }: { readonly address: string; reado
     );
   }
 
-  const blocker = linkGate(view.state)?.message ?? (write.busyElsewhere ? LINK_COPY.busy : null);
-  const disabled = blocker !== null || write.running || write.unconfirmed;
+  // A link sent for THIS wallet, from this row or from the card's chained press, and not confirmed yet.
+  // Its own send already says "Not confirmed yet" in the progress below, so the sentence is for the other case.
+  const awaiting = write.awaitingLink(address);
+  const blocker = linkGate(view.state)?.message ?? (awaiting && !write.unconfirmed ? LINK_COPY.sentNotConfirmed : write.busyElsewhere ? LINK_COPY.busy : null);
+  const disabled = blocker !== null || write.running || write.unconfirmed || awaiting;
   const linkRent = rawFrom(view.state.rents?.link);
 
   return (

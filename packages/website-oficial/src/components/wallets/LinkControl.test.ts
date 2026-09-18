@@ -53,12 +53,14 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { TradingWalletRow } from "@/components/wallets/TradingWalletRow";
-import { VaultWriteLock } from "@/hooks/use-vault-actions";
+import { VaultWriteLock, WriteLockContext, type WriteLock } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue } from "@/hooks/use-vault-state";
 import type { VaultApi, VaultStateJson, WalletLinkStatus } from "@/lib/vault-api";
+import { LINK_COPY } from "@/lib/vault-copy";
 
 const CLICK = { type: "click", target: {} };
 const LINK = Keypair.generate().publicKey.toBase58();
+const OTHER_WALLET = Keypair.generate().publicKey.toBase58();
 const VAULT = Keypair.generate().publicKey.toBase58();
 
 type Chain = { vault?: "exists" | "missing" | "unreadable"; config?: "exists" | "missing" | "unreadable"; paused?: boolean; link?: WalletLinkStatus | "absent"; wallet?: string };
@@ -82,18 +84,30 @@ function stateOf(chain: Chain): VaultStateJson {
   };
 }
 
-function render(chain: Chain, address: string = TRADING_0, build = vi.fn()): { html: string; build: typeof build; refresh: ReturnType<typeof vi.fn> } {
+/** The screen's lock as it is when a link has been sent for `sent` and could not be confirmed. */
+const lockAwaiting = (sent: readonly string[]): WriteLock => ({
+  holder: null,
+  consents: new Map(),
+  unconfirmedLinks: new Set(sent),
+  setUnconfirmedLink: () => {},
+  acquire: () => true,
+  release: () => {},
+});
+
+function render(
+  chain: Chain,
+  address: string = TRADING_0,
+  build = vi.fn(),
+  /** Links this screen has sent and cannot confirm, as `<pensionKey>:<tradingAddress>`. */
+  sent: readonly string[] = [],
+): { html: string; build: typeof build; refresh: ReturnType<typeof vi.fn> } {
   mocked.buttons.length = 0;
   const refresh = vi.fn();
   const value: VaultScreenValue = { pensionKey: PENSION_KEY, view: { kind: "ready", state: stateOf(chain) }, refresh, api: { build } as unknown as VaultApi };
   const row = { address, id: null, walletIndex: 0, imported: false, listed: true };
-  const html = renderToStaticMarkup(
-    createElement(
-      TooltipProvider,
-      null,
-      createElement(VaultScreenContext.Provider, { value }, createElement(VaultWriteLock, null, createElement("ul", null, createElement(TradingWalletRow, { row })))),
-    ),
-  );
+  const rows = createElement("ul", null, createElement(TradingWalletRow, { row }));
+  const held = sent.length === 0 ? createElement(VaultWriteLock, null, rows) : createElement(WriteLockContext.Provider, { value: lockAwaiting(sent) }, rows);
+  const html = renderToStaticMarkup(createElement(TooltipProvider, null, createElement(VaultScreenContext.Provider, { value }, held)));
   return { html, build, refresh };
 }
 
@@ -169,6 +183,22 @@ describe("TradingWalletRow's link control", () => {
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(build).not.toHaveBeenCalled();
     expect(mocked.signMessage).not.toHaveBeenCalled();
+  });
+
+  it("a link this screen already sent for this wallet is never offered a second time, wherever it was sent from", () => {
+    // The card's chained press sent it and could not confirm it. This row is a DIFFERENT writer, so its own
+    // `unconfirmed` is false and it used to offer a second link for the same wallet: two transactions, one
+    // landing and one burning its fee. The wait lives on the screen's lock, under the wallet's own key.
+    const { html, build } = render({}, TRADING_0, vi.fn(), [`${PENSION_KEY}:${TRADING_0}`]);
+    expect(buttons("Link to vault")[0]?.disabled).toBe(true);
+    expect(html).toContain(LINK_COPY.sentNotConfirmed);
+    expect(build).not.toHaveBeenCalled();
+  });
+
+  it("…and another wallet's unconfirmed link says nothing about this one", () => {
+    const { html } = render({}, TRADING_0, vi.fn(), [`${PENSION_KEY}:${OTHER_WALLET}`]);
+    expect(buttons("Link to vault")[0]?.disabled).toBe(false);
+    expect(html).not.toContain(LINK_COPY.sentNotConfirmed);
   });
 
   it("with the keeper's signer there is no such note", () => {

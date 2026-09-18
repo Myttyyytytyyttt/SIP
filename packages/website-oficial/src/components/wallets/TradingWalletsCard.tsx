@@ -74,7 +74,9 @@ export function TradingWalletsCard() {
   // What the press will do, in one sentence, before it is pressed: Phantom's window comes late, and never unannounced.
   const ahead = gate === null ? CREATE_LINK_COPY.ahead(linkRent === null ? "some" : formatSol(linkRent)) : `${CREATE_LINK_COPY.aheadCreateOnly} ${gate.message}`;
   const busy = write.running;
-  const blocked = busy || write.busyElsewhere || write.unconfirmed;
+  // A link this screen sent and cannot confirm blocks the chained press too, wherever it was sent from:
+  // a second link transaction while the first may still land is exactly what the screen promises not to offer.
+  const blocked = busy || write.busyElsewhere || write.unconfirmed || write.awaitingAnyLink;
 
   return (
     <Card>
@@ -108,6 +110,7 @@ export function TradingWalletsCard() {
         ) : null}
         {problem === null && !full ? <p className="text-xs text-muted-foreground">{ahead}</p> : null}
         {write.busyElsewhere ? <p className="text-xs text-muted-foreground">{LINK_COPY.busy}</p> : null}
+        {write.awaitingAnyLink && !write.unconfirmed ? <p className="text-xs text-muted-foreground">{CREATE_LINK_COPY.linkAwaiting}</p> : null}
         {full && problem === null ? (
           <p className="text-xs text-muted-foreground">
             This page creates at most <Num>{MAX_TRADING_WALLETS}</Num> trading wallets for one account.

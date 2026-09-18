@@ -18,6 +18,7 @@ import {
   pauseInvestingFlow,
   withdrawFlow,
   withdrawTokenFlow,
+  awaitsConfirmation,
   type FlowResult,
   type FlowStep,
   type LinkWalletResult,
@@ -41,6 +42,12 @@ import {
  * pension key and trading wallet, so "Link this wallet" after an expired approval
  * window reuses it — and so does a link that a chained create started and a row
  * finishes. It is dropped once the link lands or the server refuses it.
+ *
+ * AN UNCONFIRMED LINK BELONGS TO THE WALLET, NOT TO THE BUTTON THAT SENT IT, and
+ * is kept on the lock under the same key. The card's chained press and the
+ * wallet's own row are different writers, so each seeing only its own sent-and-
+ * unconfirmed link left the other one offering a second link for the same wallet:
+ * both would be signed and sent, one landing and the other burning its fee.
  *
  * CREATE-AND-LINK IS ONE WRITE. The wallet's creation and its link run under a
  * single hold of the screen's lock, so nothing else can start between them; the
@@ -81,26 +88,46 @@ export interface TokenWithdrawRequest {
   readonly tokenProgram: string;
 }
 
-interface WriteLock {
+export interface WriteLock {
   /** The key of the write in progress, or null. */
   readonly holder: string | null;
   acquire(key: string): boolean;
   release(key: string): void;
   /** Consent signatures this screen already has, by `<pensionKey>:<tradingAddress>`. Shared, so one is signed once however it is retried. */
   readonly consents: Map<string, Uint8Array>;
+  /** The links this screen has sent and cannot confirm, by the same key. Shared, so no second link for one wallet is offered anywhere. */
+  readonly unconfirmedLinks: ReadonlySet<string>;
+  setUnconfirmedLink(target: string, awaiting: boolean): void;
 }
 
-const WriteLockContext = createContext<WriteLock | null>(null);
+/** The lock's own context. Exported so a test can render the screen as it is mid-write; the app always takes it from VaultWriteLock. */
+export const WriteLockContext = createContext<WriteLock | null>(null);
+
+/** The key one trading wallet's link to one pension key's vault is kept under: its consent, and its wait for confirmation. */
+const linkKey = (pensionKey: string, tradingAddress: string): string => `${pensionKey}:${tradingAddress}`;
+
+const NO_LINKS: ReadonlySet<string> = new Set();
 
 /** The screen-wide lock every vault write takes. */
 export function VaultWriteLock({ children }: { readonly children?: ReactNode }) {
   const [holder, setHolder] = useState<string | null>(null);
   const held = useRef<string | null>(null);
   const consents = useRef(new Map<string, Uint8Array>());
+  // State, not a ref: every writer on the screen re-renders when a link starts or stops waiting.
+  const [unconfirmedLinks, setUnconfirmedLinks] = useState<ReadonlySet<string>>(NO_LINKS);
   const lock = useMemo<WriteLock>(
     () => ({
       holder,
       consents: consents.current,
+      unconfirmedLinks,
+      setUnconfirmedLink: (target, awaiting) =>
+        setUnconfirmedLinks((current) => {
+          if (current.has(target) === awaiting) return current;
+          const next = new Set(current);
+          if (awaiting) next.add(target);
+          else next.delete(target);
+          return next;
+        }),
       acquire: (key) => {
         if (held.current !== null) return false;
         held.current = key;
@@ -113,7 +140,7 @@ export function VaultWriteLock({ children }: { readonly children?: ReactNode }) 
         setHolder(null);
       },
     }),
-    [holder],
+    [holder, unconfirmedLinks],
   );
   return createElement(WriteLockContext.Provider, { value: lock }, children);
 }
@@ -183,7 +210,7 @@ export function useVaultWrite(key: string) {
   const signMessageOne = useCallback<SignMessageFn<ConnectedWallet>>((input) => signMessage(input), [signMessage]);
 
   const run = useCallback(
-    async (kind: WriteKind, flow: (hooks: FlowHooks) => Promise<FlowResult | null>): Promise<void> => {
+    async (kind: WriteKind, flow: (hooks: FlowHooks) => Promise<FlowResult | null>, after?: (result: FlowResult | null) => void): Promise<void> => {
       if (screen === null || lock === null || !lock.acquire(key)) return;
       let built: BuiltTransactionJson | null = null;
       setProgress({ phase: "running", kind, step: "preparing", built });
@@ -198,6 +225,7 @@ export function useVaultWrite(key: string) {
         // its link — no transaction was built, and "Refused" would be the wrong word for a wallet
         // that was in fact created). Its card says what happened in its own words instead.
         const result = await flow(hooks);
+        after?.(result);
         if (result === null) {
           setProgress({ phase: "idle" });
           return;
@@ -205,12 +233,30 @@ export function useVaultWrite(key: string) {
         setProgress({ phase: "finished", kind, result });
         if (result.ok || (result.kind === "refused" && result.code !== undefined && REFRESH_AFTER.has(result.code))) screen.refresh();
       } catch {
-        setProgress({ phase: "finished", kind, result: { ok: false, kind: "refused", message: FAILURE_COPY.unknown } });
+        const result: FlowResult = { ok: false, kind: "refused", message: FAILURE_COPY.unknown };
+        after?.(result);
+        setProgress({ phase: "finished", kind, result });
       } finally {
         lock.release(key);
       }
     },
     [screen, lock, key],
+  );
+
+  /**
+   * After any write that may have SENT a link: the screen remembers, under the
+   * wallet's own key, whether that link is still waiting to be confirmed. Read by
+   * the card's chained press and by every row (`awaitingLink`), so a link this
+   * screen sent is never offered a second time from somewhere else while the
+   * first one may still land. "Check again" clears it by resolving it.
+   */
+  const rememberLink = useCallback(
+    (result: FlowResult | null): void => {
+      const last = lastRequest.current;
+      if (screen === null || lock === null || last === null || last.kind !== "link") return;
+      lock.setUnconfirmedLink(linkKey(screen.pensionKey, last.tradingAddress), awaitsConfirmation(result));
+    },
+    [screen, lock],
   );
 
   const createVault = useCallback(
@@ -231,7 +277,7 @@ export function useVaultWrite(key: string) {
   /** One link, from the wallets THIS MOMENT holds and the consent the screen already has. Used alone, and by the chained create. */
   const runLink = useCallback(
     (pensionKey: string, api: VaultApi, tradingAddress: string, hooks: FlowHooks): Promise<LinkWalletResult> => {
-      const cacheKey = `${pensionKey}:${tradingAddress}`;
+      const cacheKey = linkKey(pensionKey, tradingAddress);
       const wallets = walletsRef.current;
       return linkWalletFlow(
         {
@@ -256,9 +302,9 @@ export function useVaultWrite(key: string) {
       if (screen === null) return Promise.resolve();
       lastRequest.current = { kind: "link", tradingAddress };
       const { api, pensionKey } = screen;
-      return run("link", (hooks) => runLink(pensionKey, api, tradingAddress, hooks));
+      return run("link", (hooks) => runLink(pensionKey, api, tradingAddress, hooks), rememberLink);
     },
-    [screen, run, runLink],
+    [screen, run, runLink, rememberLink],
   );
 
   /**
@@ -301,9 +347,9 @@ export function useVaultWrite(key: string) {
         });
         request.onOutcome(outcome);
         return outcome.link;
-      });
+      }, rememberLink);
     },
-    [screen, run, runLink, chainNow],
+    [screen, run, runLink, chainNow, rememberLink],
   );
 
   const investPolicy = useCallback(
@@ -393,13 +439,15 @@ export function useVaultWrite(key: string) {
     if (result.ok || result.kind !== "unconfirmed") return Promise.resolve();
     const { signature, lastValidBlockHeight } = result;
     const { api } = screen;
-    return run(kind, ({ onStep }) => checkAgainFlow({ api, onStep }, { signature, lastValidBlockHeight }));
-  }, [screen, progress, run]);
+    return run(kind, ({ onStep }) => checkAgainFlow({ api, onStep }, { signature, lastValidBlockHeight }), rememberLink);
+  }, [screen, progress, run, rememberLink]);
 
   const dismiss = useCallback(() => setProgress({ phase: "idle" }), []);
 
   const holder = lock?.holder ?? null;
-  const unconfirmed = progress.phase === "finished" && !progress.result.ok && progress.result.kind === "unconfirmed";
+  const unconfirmed = progress.phase === "finished" && awaitsConfirmation(progress.result);
+  const unconfirmedLinks = lock?.unconfirmedLinks ?? NO_LINKS;
+  const pensionKey = screen?.pensionKey ?? null;
   return {
     progress,
     /** This writer's write is in progress. */
@@ -408,6 +456,10 @@ export function useVaultWrite(key: string) {
     busyElsewhere: holder !== null && holder !== key,
     /** A sent transaction awaits confirmation: nothing new is offered until it is checked. */
     unconfirmed,
+    /** This wallet's link was sent from somewhere on this screen and is not confirmed: no second link for it may be offered. */
+    awaitingLink: (address: string): boolean => pensionKey !== null && unconfirmedLinks.has(linkKey(pensionKey, address)),
+    /** Some link on this screen was sent and is not confirmed, so a chained press would race it. */
+    awaitingAnyLink: unconfirmedLinks.size > 0,
     createVault,
     createAndLink,
     link,

@@ -119,6 +119,14 @@ export type FlowResult =
   | { readonly ok: false; readonly kind: "rate_limited"; readonly message: string; readonly retryAfterSeconds: number | null }
   | { readonly ok: false; readonly kind: "unreadable"; readonly message: string };
 
+/**
+ * Whether a finished write left its transaction ON ITS WAY, sent and unconfirmed.
+ * Nothing new is offered for that same thing until it is checked: a second
+ * transaction for one link would race the first, one landing and the other
+ * burning its fee.
+ */
+export const awaitsConfirmation = (result: FlowResult | null): boolean => result !== null && !result.ok && result.kind === "unconfirmed";
+
 export interface FlowDeps {
   readonly api: VaultApi;
   readonly onStep?: (step: FlowStep) => void;

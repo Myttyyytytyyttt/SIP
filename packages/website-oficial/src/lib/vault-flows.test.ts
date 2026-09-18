@@ -49,7 +49,19 @@ import { describe, expect, it, vi } from "vitest";
 
 import { FAILURE_COPY, WITHDRAW_COPY } from "@/lib/vault-copy";
 import type { ApiFailure, ApiResult, BuiltTransactionJson, InvestmentPolicyJson, SendResponseJson, VaultApi } from "@/lib/vault-api";
-import { LINK_MAX_BUILDS, checkAgainFlow, createVaultFlow, investPolicyFlow, linkWalletFlow, pauseInvestingFlow, withdrawFlow, withdrawTokenFlow, type FlowStep } from "@/lib/vault-flows";
+import {
+  LINK_MAX_BUILDS,
+  awaitsConfirmation,
+  checkAgainFlow,
+  createVaultFlow,
+  investPolicyFlow,
+  linkWalletFlow,
+  pauseInvestingFlow,
+  withdrawFlow,
+  withdrawTokenFlow,
+  type FlowResult,
+  type FlowStep,
+} from "@/lib/vault-flows";
 import { deriveAtaAddress, deriveConfigAddress, deriveInvestAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
 
 function signBytes(signer: Keypair, message: Uint8Array): Uint8Array {
@@ -1281,6 +1293,24 @@ describe("Phantom's Lighthouse checks, in the browser and at the relay", () => {
       );
       link.confirm.mockImplementationOnce(async () => ({ status: "failed", slot: 11, err: { InstructionError: [index, { Custom: custom }] } }));
       expect(await linkWalletFlow(link.linkDeps, link.linkInput), `link at ${index}`).toMatchObject({ ok: false, kind: "refused", message });
+    }
+  });
+});
+
+describe("awaitsConfirmation: what leaves a transaction on its way", () => {
+  const SENT: FlowResult = { ok: false, kind: "unconfirmed", message: "not confirmed", signature: "sig", explorerUrl: null, lastValidBlockHeight: 7 };
+
+  it("only a sent-and-unconfirmed result waits: everything else is settled, and null is not a write at all", () => {
+    expect(awaitsConfirmation(SENT)).toBe(true);
+    expect(awaitsConfirmation(null)).toBe(false);
+    for (const result of [
+      { ok: true, signature: "sig", explorerUrl: null, slot: 1, unitsConsumed: null },
+      { ok: false, kind: "refused", message: "no" },
+      { ok: false, kind: "expired", message: "no" },
+      { ok: false, kind: "rate_limited", message: "no", retryAfterSeconds: null },
+      { ok: false, kind: "unreadable", message: "no" },
+    ] satisfies FlowResult[]) {
+      expect(awaitsConfirmation(result), result.ok ? "landed" : result.kind).toBe(false);
     }
   });
 });

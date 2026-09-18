@@ -79,6 +79,8 @@ export const LINK_COPY = {
   needsConfig: "Linking opens once SaverFi's program is configured on Solana. Your vault, investing and withdrawals already work.",
   paused: "SaverFi is paused, so linking waits. Withdrawals still work.",
   busy: "Another signature is in progress on this screen.",
+  /** A link for THIS wallet was sent and not confirmed, from this row or from the card's chained press. */
+  sentNotConfirmed: "A link for this wallet was sent and is not confirmed yet. Check that one before sending another.",
   unreadable: "SaverFi could not read whether this wallet is linked. Nothing was offered to sign.",
   noSigner: "Until this wallet has the keeper's signer, nothing is put aside from it.",
   panel: (linkRent: string): string =>
@@ -142,6 +144,8 @@ export const CREATE_LINK_COPY = {
     "This session cannot sign for the new wallet yet, so the link was not attempted. Reload the page, then link it from its row.",
   /** The link itself stopped. `detail` is the step's own words. */
   linkStopped: (detail: string): string => `The wallet was created; the link did not finish. ${detail}`,
+  /** Some link on the screen was sent and not confirmed, so a chained press would race it. */
+  linkAwaiting: "A link sent on this screen is not confirmed yet. Check it before starting another.",
   /** A row for a wallet the chain read has not covered yet. */
   notReadYet: "SaverFi has not read this wallet on Solana yet.",
   check: "Check again",
