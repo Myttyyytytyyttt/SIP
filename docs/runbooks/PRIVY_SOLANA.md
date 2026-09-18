@@ -247,8 +247,13 @@ ninguna parte, y con **código 1** en los demás casos. Nunca imprime la llave p
 
 Dos avisos, para que no te manden a arreglar lo que no está roto:
 
-- **Pegar la llave con comillas, con espacios, partida en varias líneas o con el prefijo `wallet-auth:` no rompe nada.**
-  Privy firma igual en todos esos casos, y el comando también los acepta. Si te dice `matches`, la llave está bien pegada.
+- **Pegar la llave con comillas, con espacios o con el prefijo `wallet-auth:` no rompe nada.** Privy firma igual en
+  todos esos casos, y el comando también los acepta. Si te dice `matches`, la llave que has pegado está bien pegada.
+- **Pero tiene que ir en UNA sola línea.** Eso no lo decide el comando, lo decide la Terminal: `read` corta en el primer
+  salto de línea y solo le llega el primer trozo, así que el comando diría `key-unreadable` de una llave perfecta. Si el
+  gestor de contraseñas te la devuelve partida en varias líneas, júntala antes de pegarla. Y si al pegar se te cuela un
+  trozo en el prompt como si lo hubieras tecleado, **no lo ejecutes**: borra la línea con Ctrl-U y borra esa entrada del
+  historial (`~/.zsh_history`) antes de seguir.
 - **`key-unreadable` no puede ser la causa de un 401.** Una llave ilegible ni siquiera llega a salir del vigilante: falla
   antes, en su propio proceso. Si has visto un 401, la llave se leyó bien y lo que falla es a quién pertenece.
 
