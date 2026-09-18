@@ -45,6 +45,7 @@ import {
   recordCarry,
   reserveDecision,
   settleAlert,
+  settleThrewAlert,
   type CarryBook,
   type LossCarry,
   type SettleOutcome,
@@ -824,5 +825,40 @@ describe("the alert rule", () => {
     expect(settleAlert("FAILED", where, "d").fire).toMatchObject({ title: "A settlement failed", context: { wallet: "Wallet1111", vault: "Vault1111" } });
     expect(settleAlert("INCOMPLETE", where, "d").fire?.context).toEqual({ wallet: "Wallet1111" });
     expect(settleAlert("NO_SIGNER", where, "d").fire?.context).toEqual({ wallet: "Wallet1111" });
+  });
+
+  // THE HOLE THE LADDER HAD. Every rule above is applied from inside the
+  // per-wallet try in bin/keeper.mts, so a turn that THREW reached none of it:
+  // the catch wrote a THREW row on /status and fired nothing at all.
+  describe("a settle turn that threw", () => {
+    it("pages critical, carrying the exception's detail", () => {
+      const rule = settleThrewAlert(where, "Error: anchor.BN is not a constructor");
+      expect(rule.fire).toEqual({
+        key: failed,
+        severity: "critical",
+        title: "A settlement turn threw",
+        detail: "Error: anchor.BN is not a constructor",
+        context: { wallet: "Wallet1111", vault: "Vault1111" },
+      });
+    });
+
+    // ONE CONDITION, ONE KEY. "This wallet is not being settled" is the same
+    // condition however it arrived, so a throw must not open a second key: that
+    // would page twice for one fault, and the SETTLED that eventually fixes it
+    // clears only what FAILED raised.
+    it("raises the key a failed settle raises, and clears what a failed settle clears", () => {
+      const threw = settleThrewAlert(where, "d");
+      const failedRule = settleAlert("FAILED", where, "d");
+      expect(threw.fire?.key).toBe(failedRule.fire?.key);
+      expect([...threw.clear]).toEqual([...failedRule.clear]);
+      // And the SETTLED that fixes it resolves the key this raised.
+      expect(settleAlert("SETTLED", where, "d").clear).toContain(threw.fire!.key);
+    });
+
+    // The title is the one thing that differs, because what an operator does next
+    // differs: a FAILED names a refusal to read, a throw names a defect to fix.
+    it("says it threw rather than failed", () => {
+      expect(settleThrewAlert(where, "d").fire?.title).not.toBe(settleAlert("FAILED", where, "d").fire?.title);
+    });
   });
 });

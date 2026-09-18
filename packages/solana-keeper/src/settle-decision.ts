@@ -742,6 +742,42 @@ export function settleAlert(
 }
 
 /**
+ * The same ladder, for a settle turn that THREW instead of returning an outcome.
+ *
+ * THE HOLE THIS FILLS. settleAlert is applied from inside the per-wallet try in
+ * bin/keeper.mts, so it is reached only by a turn that RETURNED. An exception —
+ * a bad RPC response, an SDK that throws before it sends, an interop bug like
+ * `anchor.BN is not a constructor` — unwound past it to the catch, which wrote a
+ * THREW row on /status and logged a line, and fired nothing. A keeper could
+ * therefore sweep for hours settling nobody, with every escalation intact and
+ * none of it reachable: the one failure mode that pages nobody was the one
+ * failure mode nobody had written a handler for.
+ *
+ * IT FIRES THE SAME KEY AS A FAILED SETTLE, deliberately. `settle-failed:<wallet>`
+ * is the condition "this wallet is not being settled", and a throw is that
+ * condition however it arrived; a second key would page twice for one fault, and
+ * a key the alerter has not seen before would not be cleared by the SETTLED that
+ * eventually fixes it. The title differs, because what an operator does next
+ * differs: a FAILED names a refusal to read, a throw names a defect to fix.
+ *
+ * IT CLEARS THE RETRY WARNING, as FAILED does: whatever streak was building, the
+ * turn no longer reaches the code that counts it.
+ */
+export function settleThrewAlert(where: { readonly wallet: string; readonly vault: string }, detail: string): SettleAlertRule {
+  const { wallet, vault } = where;
+  return {
+    fire: {
+      key: `settle-failed:${wallet}`,
+      severity: "critical",
+      title: "A settlement turn threw",
+      detail,
+      context: { wallet, vault },
+    },
+    clear: [`settle-retry:${wallet}`],
+  };
+}
+
+/**
  * The rate settle_v2 applies to a vault: its VOLUME rate in VOLUME mode and its
  * PROFIT rate otherwise, exactly as state.rs's `Vault::active_bps` reads it.
  *

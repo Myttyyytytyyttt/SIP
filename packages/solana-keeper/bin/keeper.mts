@@ -77,7 +77,7 @@ import {
 import { SolanaReadModel } from "../src/read-model.js";
 import { poolFetch } from "../src/rpc-pool.js";
 import { seatCheck, seatCheckNotice } from "../src/seat-check.js";
-import { activeBps, settleAlert, type CarryBook } from "../src/settle-decision.js";
+import { activeBps, settleAlert, settleThrewAlert, type CarryBook } from "../src/settle-decision.js";
 import { runSettleTick } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KEEPER_LOCK_NAME, KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
@@ -779,6 +779,11 @@ async function sweep(): Promise<void> {
       noteProgress();
       const wallet = link.wallet.toBase58();
       const vaultAddr = link.vault.toBase58();
+      // WHICH HALF OF THE TURN IS RUNNING, for the catch below. One try wraps the
+      // settle AND the invest, so a catch that assumed "settle" would page "a
+      // settlement turn threw" for an exception thrown while buying a basket —
+      // naming the wrong money path, and clearing the other one's alerts.
+      let phase: "settle" | "invest" = "settle";
       try {
         // Prefer Privy (no local key); fall back to a local keypair if present.
         // A resolution FAILURE is logged with its real reason and falls back.
@@ -861,6 +866,13 @@ async function sweep(): Promise<void> {
         // AT THAT TURN (keysForTurn, src/chain-state.ts). A claim lost halfway
         // through a sweep takes the keys away from the next turn, not the next
         // sweep.
+        // RECORDED AS SOON AS IT IS KNOWN, not at the end of the turn. It used to
+        // be the last line of the try, so a wallet whose turn threw was never
+        // counted at all and /status reported signing {signable: 0, of: 0} —
+        // during exactly the incident an operator opens /status to read. The
+        // route is fully resolved here, well before anything is sent.
+        signingRoutes.set(wallet, route);
+
         const settleTurn = keysForTurn(isLive, { settleKey: settleKeypair, walletSigner });
         // NULL MEANS THE CHAIN HAS NO ACCOUNT THERE, never "could not read"
         // (src/accounts.ts) — AND BOTH PATHS NOW SAY IT THE SAME WAY.
@@ -959,6 +971,7 @@ async function sweep(): Promise<void> {
 
         // Asked again: the settle turn above can take long enough for the claim
         // to go.
+        phase = "invest";
         const investTurn = keysForTurn(isLive, { settleKey: settleKeypair, walletSigner: null });
         const invest = await runInvestTick({
           connection,
@@ -1013,7 +1026,6 @@ async function sweep(): Promise<void> {
         investSweep.set(vaultAddr, foldInvestTurn(investSweep.get(vaultAddr), invest));
 
         // /status always reflects the latest condition, deduped or not.
-        signingRoutes.set(wallet, route);
         health.wallets[wallet] = {
           settle: settle.outcome,
           invest: invest.outcome,
@@ -1024,7 +1036,37 @@ async function sweep(): Promise<void> {
       } catch (error) {
         // Contained per wallet: one bad link must not end the sweep.
         const detail = summarizeUpstreamError(error, { take: 3, maxChars: 500 });
-        log.error("wallet turn threw", { wallet, detail });
+        log.error("wallet turn threw", { wallet, phase, detail });
+        // AND ESCALATED, WHICH IT NEVER USED TO BE. settleAlert and the invest
+        // streaks are both applied from INSIDE this try, so they were reachable
+        // only by a turn that RETURNED an outcome. An exception unwound past all
+        // of it to here, which wrote a THREW row on /status and logged a line and
+        // fired nothing — so a keeper could sweep for hours settling nobody, with
+        // every escalation intact and none of it reachable. The one failure mode
+        // that paged nobody was the one nobody had written a handler for.
+        //
+        // THE LADDER IS EXTENDED, NOT REPLACED. A throw in the settle half fires
+        // the SAME `settle-failed:<wallet>` key a FAILED settle fires, with its
+        // own title: it is the same condition — this wallet is not being settled —
+        // so a second key would page twice for one fault and would not be cleared
+        // by the SETTLED that eventually fixes it. A throw in the invest half is
+        // folded in as a FAILED invest turn, so the existing per-vault streak
+        // warns on the first and pages critical on the third, exactly as a
+        // returned FAILED does. Which half is which is what `phase` is for.
+        if (phase === "settle") {
+          const threw = settleThrewAlert({ wallet, vault: vaultAddr }, detail);
+          for (const key of threw.clear) alerter.clear(key);
+          if (threw.fire !== null) alerter.fire(threw.fire);
+          // The streak is counted from turns that returned; this one did not.
+          settleRetries.delete(wallet);
+        } else {
+          investSweep.set(vaultAddr, foldInvestTurn(investSweep.get(vaultAddr), { outcome: "FAILED", detail }));
+        }
+        // COUNTED EVEN THOUGH IT THREW: a wallet missing from this map is a
+        // wallet /status does not count at all, which reads as a smaller fleet
+        // rather than a broken one. Set above as soon as the route was resolved;
+        // this covers a throw from before that point.
+        if (!signingRoutes.has(wallet)) signingRoutes.set(wallet, health.wallets[wallet]?.signing ?? "not resolved");
         // AND SAID ON THE PAGE. health.wallets is assigned at the END of the
         // turn, so a throw left this wallet's row holding the LAST GOOD settle
         // and its timestamp: /status read "settled fine, a minute ago" for a
