@@ -163,8 +163,14 @@ Railway cobrando, sin tocarlo.**
 Desde **Terminal.app**:
 
 ```bash
-cd ~/ProyectosCT/SIP && PATH="$HOME/.nvm/versions/node/v22.14.0/bin:$PATH" corepack pnpm install --filter "@sip/solana-keeper..."
+cd ~/ProyectosCT/SIP && PATH="$HOME/.nvm/versions/node/v22.14.0/bin:$PATH" CI=true corepack pnpm install --frozen-lockfile --filter "@sip/solana-keeper..."
 ```
+
+`--frozen-lockfile` es la misma orden que usa la imagen de Railway (`Dockerfile`, línea 49). Además de instalar lo
+mismo, **no puede modificar ningún fichero del repositorio**: sin esa palabra, la instalación resuelve las versiones de
+nuevo y puede reescribir `pnpm-lock.yaml`, que está en el repositorio y además es uno de los *Watch Paths* del servicio
+(sección 1) — te dejaría el árbol sucio y un `git add -A` posterior dispararía una reconstrucción del vigilante que tú
+no pediste.
 
 ### Cada vez: arrancarlo
 
