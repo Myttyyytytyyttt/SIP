@@ -297,15 +297,27 @@ No es una catástrofe, pero cuesta, y conviene saber qué cuesta antes de empeza
 1. Creas una llave nueva: **Wallets → Authorization keys → New key**, nombre `sip-solana-keeper-2`. Copia la clave
    privada al gestor **en ese momento**, y apunta su **id**, que es nuevo.
 2. En Railway cambian **dos** variables: `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY` (la privada nueva) y
-   `SIP_SOLANA_PRIVY_SIGNER_ID` (el id nuevo). En la web cambia `SIP_SOLANA_PRIVY_SIGNER_ID`.
-3. **Y hay que volver a sentar al vigilante en cada wallet de trading.** Esto es lo caro. El asiento de una wallet nombra
-   el signer **por su id**, y ese id acaba de cambiar, así que todas las wallets que hoy tienen sentado al vigilante
-   dejan de tenerlo sentado. Lo hace la web al registrar (paso 3 del registro), **con el usuario delante**: no lo puedes
-   hacer tú por ellos desde el dashboard. Mientras una wallet no se vuelva a sentar, el vigilante no la cobra: en
-   `/status` esa wallet sale como `none (signer not granted)` y su cobro como `NO_SIGNER`.
-4. La **política no cambia**: sigue siendo la misma, con el mismo `policy id` y la misma llave de administración. Se
+   `SIP_SOLANA_PRIVY_SIGNER_ID` (el id nuevo). En la web cambia `SIP_SOLANA_PRIVY_SIGNER_ID` **y haz Redeploy en
+   Vercel** ([VERCEL_WEB.md](VERCEL_WEB.md)): una variable nueva no se aplica a lo que ya está desplegado, así que sin el
+   Redeploy la web seguiría sentando a los usuarios con el signer viejo, que es el que acabas de matar.
+3. **Pruébalo con UNA wallet antes de pedírselo a nadie.** Usa la wallet de prueba del paso 6: siéntala como en el paso
+   siguiente y mira `/status`. Si esa wallet ya no sale como `none (signer not granted)`, la cadena entera funciona
+   (Railway, la web, el signer nuevo) y puedes seguir. Si sigue saliendo así, algo de los pasos 1 y 2 no ha llegado —
+   normalmente el Redeploy — y no tiene ningún sentido gastar el favor de los usuarios hasta arreglarlo.
+4. **Ahora sí: hay que volver a sentar al vigilante en cada wallet de trading.** Esto es lo caro. El asiento de una
+   wallet nombra el signer **por su id**, y ese id acaba de cambiar, así que todas las wallets que hoy tienen sentado al
+   vigilante dejan de tenerlo sentado. Lo hace **el usuario, desde la web, con su sesión iniciada**: no lo puedes hacer
+   tú por él desde el dashboard. Lo que tiene que hacer, en la pantalla de wallets, es esto:
+   - su wallet de trading aparece con la etiqueta **No seat**;
+   - debajo tiene el botón **Grant keeper permission**; lo pulsa y acepta lo que le pida Privy;
+   - la etiqueta pasa a **Has a signer**.
+
+   Esa pantalla no está descrita en ninguna guía todavía. Mientras no lo esté, esto es lo que hay que pedirle, con esos
+   nombres tal cual salen en pantalla (la web está en inglés). Y lo compruebas tú, sin depender de lo que te diga: esa
+   wallet deja de salir como `none (signer not granted)` en `/status`, y su cobro deja de ser `NO_SIGNER`.
+5. La **política no cambia**: sigue siendo la misma, con el mismo `policy id` y la misma llave de administración. Se
    vuelve a enganchar sola al sentar el signer nuevo, porque va como override del signer.
-5. Cuando todas estén sentadas otra vez, borra la llave vieja en el dashboard y repite el paso 6 con la nueva.
+6. Cuando todas estén sentadas otra vez, borra la llave vieja en el dashboard y repite el paso 6 con la nueva.
 
 Si la llave no se perdió sino que **se expuso** (alguien la vio, se pegó en un sitio que no tocaba), es lo mismo pero
 con prisa y en otro orden: primero quitas el signer viejo de las wallets, luego lo demás, como dice
