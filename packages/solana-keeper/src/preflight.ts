@@ -53,6 +53,24 @@ export interface PreflightResult {
   readonly failure?: string;
 }
 
+/**
+ * HOW MANY CHECKS A WHOLE PREFLIGHT IS — asserted, not merely reported.
+ *
+ * runPreflight() used to return `invariants: invariants.length` and bin/keeper.mts
+ * only ever tested `result.ok`, so the gate could SHRINK in silence. Measured:
+ * delete the settle_v2 build and its entry from buildOffline — a plausible
+ * refactor — and put the broken BN spelling back in settle-tick.ts, and the
+ * preflight logs {"preflight":"ok","invariants":13} and exits 0. The exact
+ * outage of 2026-09-18 walks back into an image with the whole automatic gate
+ * green, because nothing anywhere said how much the gate was supposed to cover.
+ *
+ * So the number lives here, next to the thing it measures, and a preflight that
+ * does not reach it FAILS. Adding or removing a check means changing this line
+ * on purpose — which is the point. test/attestation-golden.test.ts holds the
+ * second copy, under vitest.
+ */
+export const EXPECTED_INVARIANTS = 17;
+
 const ED25519 = "Ed25519SigVerify111111111111111111111111111";
 const SYSTEM = "11111111111111111111111111111111";
 const JUPITER = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
@@ -215,6 +233,18 @@ export async function runPreflight(): Promise<PreflightResult> {
       failure: `an instruction builder threw: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+  // A BUILDER SILENTLY DROPPED FROM THE RETURNED ARRAY is a vector that is
+  // never compared: `hex === BUILDER_VECTORS.get(name)` is only ever evaluated
+  // for what buildOffline handed back. Counting the two sides against each
+  // other is what makes a missing build a failure instead of a smaller gate.
+  if (built.length !== BUILDER_VECTORS.size) {
+    return {
+      ok: false,
+      program: SIP,
+      invariants: invariants.length + built.length,
+      failure: `the preflight built ${built.length} instructions for ${BUILDER_VECTORS.size} vectors: a money-path builder is not being checked`,
+    };
+  }
   for (const { name, hex } of built) {
     invariants.push([`${name} builds the bytes it has always built`, hex === BUILDER_VECTORS.get(name), true]);
   }
@@ -223,6 +253,16 @@ export async function runPreflight(): Promise<PreflightResult> {
     if (got !== want) {
       return { ok: false, program: SIP, invariants: invariants.length, failure: `invariant "${name}" is ${got}, expected ${want}` };
     }
+  }
+  // EVERY CHECK PASSED — BUT WERE THEY ALL HERE? A gate nobody counts is a gate
+  // that can be refactored down to nothing while still printing "ok".
+  if (invariants.length !== EXPECTED_INVARIANTS) {
+    return {
+      ok: false,
+      program: SIP,
+      invariants: invariants.length,
+      failure: `the preflight checked ${invariants.length} invariants, not ${EXPECTED_INVARIANTS}: the gate itself changed size`,
+    };
   }
   return { ok: true, program: SIP, invariants: invariants.length };
 }

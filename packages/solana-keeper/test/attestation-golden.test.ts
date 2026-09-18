@@ -15,7 +15,7 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it, vi } from "vitest";
 import { GOLDEN_V2_HEX, GOLDEN_V2_INPUTS } from "../src/attestation-golden.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
-import { runPreflight } from "../src/preflight.js";
+import { EXPECTED_INVARIANTS, runPreflight } from "../src/preflight.js";
 import { ATTESTATION_MESSAGE_LEN, MODE_PROFIT, MODE_VOLUME, attestationInstruction, attestationMessage } from "../src/program-scripts.js";
 import { ATTESTATION_VALIDITY_SLOTS, attestationInputs } from "../src/settle-decision.js";
 
@@ -92,6 +92,18 @@ describe("--preflight", () => {
   // This case only holds the count and the vectors steady.
   it("holds all seventeen invariants, the golden vector and the seven builds among them", async () => {
     expect(await runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 17 });
+  });
+
+  // THE SECOND COPY OF THE NUMBER, and the reason it is written as a literal:
+  // the preflight now REFUSES to pass with any other count, so the only way to
+  // add or drop a check is to change EXPECTED_INVARIANTS on purpose — and this
+  // line, which is what makes that a decision instead of a side effect. Before
+  // 2026-09-18 the count was reported and never asserted: deleting the settle_v2
+  // build from buildOffline left {"preflight":"ok","invariants":13} and exit 0,
+  // so the gate could be refactored away under a green light.
+  it("pins its own size, so a gate that shrinks fails instead of quietly reporting a smaller one", async () => {
+    expect(EXPECTED_INVARIANTS).toBe(17);
+    expect((await runPreflight()).invariants).toBe(EXPECTED_INVARIANTS);
   });
 
   it("fails, naming the invariant, when the vector and the mirror disagree by one byte", async () => {
