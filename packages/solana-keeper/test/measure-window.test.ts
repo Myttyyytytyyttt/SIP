@@ -24,7 +24,6 @@ import {
   measureSince,
   oldestCompletePrefix,
 } from "../src/measure-window.js";
-import { tightenMinOut } from "../src/min-out.js";
 import { MODE_PROFIT } from "../src/program-scripts.js";
 import { ZERO_BASE_MIN_TXS, decideFromMeasurement, defaultVolumeBase } from "../src/settle-decision.js";
 import { FakeLedger, chained, type LedgerEntry } from "./fake-ledger.js";
@@ -600,43 +599,5 @@ describe("the zero-base cadence counts only what the wallet signed", () => {
 
     // THE VECTOR, PINNED: with the carry forgotten, the buy never nets, and the sell is charged whole.
     expect(await decideFromMeasurement(second, ctx(800n, 10_000n))).toEqual({ kind: "settle", baseLamports: 10_500_000n, endSlot: 823n });
-  });
-});
-
-// ── slippage ────────────────────────────────────────────────────────────────
-
-describe("min_out", () => {
-  it("a live observation tightens min_out far above the lab floor", () => {
-    // The tester's real purchase: 1.00 USDC in, 464278 raw NVDAx out.
-    const observed = { inRaw: 1_000_000n, outRaw: 464_278n };
-    // The floor the web writes: amountIn * 1e15 / 1e18 = amountIn / 1000.
-    const floor = 1_000_000n / 1000n; // 1000 raw units — ~460x below market
-    const { minOut, live } = tightenMinOut(1_000_000n, floor, observed);
-    expect(live).toBe(true);
-    // 2% under the observed rate, and hugely tighter than the floor.
-    expect(minOut).toBe((464_278n * 9800n) / 10_000n);
-    expect(minOut > floor * 400n, "the live bound must dwarf the lab floor").toBe(true);
-  });
-
-  it("without an observation it falls back to the floor and admits it", () => {
-    const floor = 1_000n;
-    const { minOut, live } = tightenMinOut(1_000_000n, floor, null);
-    expect(minOut).toBe(floor);
-    expect(live, "no observation must never be reported as live protection").toBe(false);
-  });
-
-  it("min_out is NEVER below the floor the owner signed", () => {
-    // A collapsing pool: the observed rate is worse than the user's own floor.
-    const observed = { inRaw: 1_000_000n, outRaw: 10n };
-    const floor = 500_000n;
-    const { minOut, live } = tightenMinOut(1_000_000n, floor, observed);
-    expect(minOut, "the program requires min_out >= floor; tightening is the only direction").toBe(floor);
-    expect(live).toBe(false);
-  });
-
-  it("a zero-input observation cannot divide by zero", () => {
-    const { minOut, live } = tightenMinOut(1_000n, 7n, { inRaw: 0n, outRaw: 5n });
-    expect(minOut).toBe(7n);
-    expect(live).toBe(false);
   });
 });

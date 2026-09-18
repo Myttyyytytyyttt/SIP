@@ -1,15 +1,16 @@
 // One investment turn for one vault: wrap what settled, convert it, buy the leg.
 //
-// Ported from Nuvem's solana-lab keeper (keeper/src/invest-tick.ts). Seven
-// things changed: the policy's in_mint is checked before anything moves, so are
-// either pause switch, the 30-day cap and the owner's conversion floor, a wrap
-// moves no more than the crank can front and a convert no more than convert.rs
-// admits in one call (all six in invest-decision.ts), and the crank is null in
-// a dry run, which never reaches a line that needs it. Everything else is the
-// old behaviour, deliberately: the stranded-wSOL rescue, the refusal before
-// convert on an unroutable basket, the all-or-nothing per-leg minimum, one
-// transaction per leg, the compute budget price, and purchases recorded on
-// FAILED too.
+// Ported from the solana-lab keeper (keeper/src/invest-tick.ts). Eight things
+// changed: the policy's in_mint is checked before anything moves, so are either
+// pause switch, the 30-day cap and the owner's conversion floor, every leg's
+// mint is checked for a token program, a transfer hook and a transfer fee the
+// program cannot buy through, a wrap moves no more than the crank can front and
+// a convert no more than convert.rs admits in one call (all seven in
+// invest-decision.ts), and the crank is null in a dry run, which never reaches a
+// line that needs it. Everything else is the old behaviour, deliberately: the
+// stranded-wSOL rescue, the refusal before convert on an unroutable basket, the
+// all-or-nothing per-leg minimum, one transaction per leg, the compute budget
+// price, and purchases recorded on FAILED too.
 //
 // THE CRANK OWNS NO AUTHORITY. Every bound — the venue, the floors, the caps —
 // lives in policy state the vault owner signed; this only picks the moment and
@@ -49,6 +50,7 @@ import {
   convertDecision,
   inMintDecision,
   investPauseDecision,
+  legAdmissionDecision,
   rollingDecision,
   shouldConvert,
   wrapPlan,
@@ -56,7 +58,7 @@ import {
   type WrapReport,
 } from "./invest-decision.js";
 import { method } from "./methods.js";
-import { tightenMinOut } from "./min-out.js";
+import { NO_TRANSFER_FEE, tightenMinOut } from "./min-out.js";
 import { RAYDIUM_CLMM, buildSwapV2AccountMetas, buildSwapV2Data, fetchLiveRoute } from "./program-scripts.js";
 
 const USDC = USDC_MINT;
@@ -255,6 +257,26 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
     };
   }
 
+  // AND ON THE SAME LINE, FOR THE SAME REASON: a leg whose mint the program
+  // cannot buy safely — not Token-2022, a real transfer hook, or a transfer fee
+  // above MAX_LEG_FEE_BPS — refuses the whole basket here, before the wrap.
+  // Every one of those is knowable from the mint's own bytes, and the fee in
+  // particular is the issuer's to change: these mints have already gone from 0
+  // to 50 bps, and the same key can schedule 10_000. The decision itself is pure
+  // (legAdmissionDecision); this only fetches the bytes and the epoch to judge
+  // them in — the epoch out of the Clock ALREADY READ above, so the fee is
+  // resolved against the very clock Token-2022 charges by.
+  const currentEpoch = clockInfo.data.readBigUInt64LE(16);
+  const mintInfos = await connection.getMultipleAccountsInfo(policy.legs.map((leg) => leg.mint), "confirmed");
+  const admission = legAdmissionDecision({
+    legs: policy.legs.map((leg, index) => {
+      const info = mintInfos[index] ?? null;
+      return { mint: leg.mint, account: info === null ? null : { owner: info.owner, data: info.data } };
+    }),
+    currentEpoch,
+  });
+  if (!admission.admit) return { outcome: admission.outcome, detail: admission.detail };
+
   const purchases: InvestPurchase[] = [];
   try {
     // ── wrap + convert, if conversion is on and there is SOL worth moving ──
@@ -296,7 +318,9 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
 
       const route = await fetchLiveRoute(connection, WSOL_USDC_POOL, NATIVE_MINT, USDC, TOKEN_PROGRAM_ID);
       const convertFloor = (toConvert * policy.minConvertRateWad) / 10n ** 18n;
-      const { minOut } = tightenMinOut(toConvert, convertFloor, route.observed);
+      // USDC is a classic SPL Token mint with no extensions, so the convert's
+      // output is credited in full and the observed rate needs no fee taken off.
+      const { minOut } = tightenMinOut(toConvert, convertFloor, route.observed, NO_TRANSFER_FEE);
       const args = { payer: vault, inputTokenAccount: wsolAta, outputTokenAccount: usdcAta, amountIn: toConvert, minAmountOut: minOut };
       await sendWithBudget(program.provider as anchor.AnchorProvider, crank,
         await method(program, "convert")(new anchor.BN(toConvert.toString()), new anchor.BN(minOut.toString()), buildSwapV2Data(args))
@@ -371,7 +395,11 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
 
       const route = await fetchLiveRoute(connection, pool, USDC, mint, TOKEN_2022_PROGRAM_ID);
       const investFloor = (amountIn * leg.minOutRateWad) / 10n ** 18n;
-      const { minOut, live } = tightenMinOut(amountIn, investFloor, route.observed);
+      // THE OBSERVED PRICE IS THE POOL VAULT'S GROSS OUTFLOW; the vault's ATA is
+      // credited that less this mint's fee, and that net delta is what both
+      // swap_v2 and invest check their thresholds against. The fee comes off
+      // before the slippage bound, so the bound is 2% of what actually arrives.
+      const { minOut, live } = tightenMinOut(amountIn, investFloor, route.observed, admission.fees.get(mint.toBase58())!);
       anyLive = anyLive || live;
 
       const args = { payer: vault, inputTokenAccount: usdcAta, outputTokenAccount: targetAta, amountIn, minAmountOut: minOut };

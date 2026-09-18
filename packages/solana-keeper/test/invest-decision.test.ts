@@ -9,26 +9,36 @@
 // turn. And a convert sells no more than convert.rs admits in one call, dust
 // wSOL is left alone, nothing is sold while the 30-day cap, counted exactly as
 // state.rs counts it, leaves the basket no room, and an investment that keeps
-// failing turns critical on the third turn.
+// failing turns critical on the third turn. And every leg's mint is read out of
+// its own Token-2022 bytes before the basket is bought: a mint the program
+// cannot buy safely — not Token-2022, a real transfer hook, or a transfer fee
+// above the ceiling in the epoch the swap lands in — refuses the WHOLE basket,
+// the sound legs included, because a partial basket is not the basket the owner
+// signed.
 
-import { Keypair } from "@solana/web3.js";
+import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import {
   CONVERT_DUST_LAMPORTS,
   CRANK_WRAP_RESERVE_LAMPORTS,
   INVEST_FAILED_CRITICAL_STREAK,
+  MAX_LEG_FEE_BPS,
   U64_MAX,
   USDC_MINT,
   WRAP_DUST_LAMPORTS,
+  activeTransferFee,
   basketMinimum,
   chainDay,
   convertAmount,
   convertCapLamports,
   convertDecision,
+  decodeMintFacts,
   inMintDecision,
   investFailedAlert,
   investFailedStreak,
   investPauseDecision,
+  legAdmissionDecision,
   rollingDecision,
   rollingTotal,
   shouldConvert,
@@ -270,6 +280,194 @@ describe("the 30-day cap, counted as state.rs counts it", () => {
     const detail = decision.invest ? "" : decision.detail;
     expect(detail).toContain("headroom 9000000 is below the basket minimum 15001501");
     expect(detail).toContain("max_rolling_30d itself is below the basket minimum");
+  });
+});
+
+describe("a leg's mint, before the basket is bought", () => {
+  const key = (): PublicKey => Keypair.generate().publicKey;
+  /** u64::MAX: maximum_fee on both PreStocks mints, i.e. no cap at all. */
+  const UNCAPPED = (1n << 64n) - 1n;
+  /** The epoch the fee these mints charge today was stamped with, and one it is read in. */
+  const FEE_EPOCH = 1_032n;
+  const TODAY = 1_036n;
+
+  interface Extension {
+    readonly type: number;
+    readonly data: Buffer;
+  }
+
+  /** A Token-2022 mint as extension.rs writes one: the 82-byte base, AccountType::Mint, then TLV entries. */
+  function mintBytes(extensions: readonly Extension[]): Buffer {
+    const mint = Buffer.alloc(83 + extensions.reduce((total, extension) => total + 4 + extension.data.length, 0));
+    mint.fill(0xab, 0, 82); // the base fields: noise that must not leak into any extension
+    mint.writeUInt8(1, 82); // AccountType::Mint
+    let offset = 83;
+    for (const extension of extensions) {
+      mint.writeUInt16LE(extension.type, offset);
+      mint.writeUInt16LE(extension.data.length, offset + 2);
+      extension.data.copy(mint, offset + 4);
+      offset += 4 + extension.data.length;
+    }
+    return mint;
+  }
+
+  interface Fee {
+    readonly epoch: bigint;
+    readonly maximumFee: bigint;
+    readonly bps: number;
+  }
+
+  /** TransferFeeConfig (type 1): two authorities, the withheld amount, then older and newer TransferFee. */
+  function transferFeeConfig(older: Fee, newer: Fee): Extension {
+    const data = Buffer.alloc(108);
+    key().toBuffer().copy(data, 0); // transfer_fee_config_authority
+    key().toBuffer().copy(data, 32); // withdraw_withheld_authority
+    data.writeBigUInt64LE(777n, 64); // withheld_amount
+    for (const [offset, fee] of [[72, older], [90, newer]] as const) {
+      data.writeBigUInt64LE(fee.epoch, offset);
+      data.writeBigUInt64LE(fee.maximumFee, offset + 8);
+      data.writeUInt16LE(fee.bps, offset + 16);
+    }
+    return { type: 1, data };
+  }
+
+  /** TransferHook (type 14): an authority, then the program id — all zeroes when the issuer named none. */
+  function transferHook(programId: PublicKey): Extension {
+    const data = Buffer.alloc(64);
+    key().toBuffer().copy(data, 0);
+    programId.toBuffer().copy(data, 32);
+    return { type: 14, data };
+  }
+
+  /** ScaledUiAmountConfig (25) and PausableConfig (26): extensions this gate must step over, not read. */
+  const scaledUiAmount: Extension = { type: 25, data: Buffer.alloc(40) };
+  const pausable: Extension = { type: 26, data: Buffer.alloc(33) };
+
+  /** Both PreStocks mints, as the chain holds them: 50 bps since epoch 1032, uncapped, hook extension with a NULL program id. */
+  const preStocks = (): Buffer =>
+    mintBytes([
+      scaledUiAmount,
+      transferFeeConfig({ epoch: 0n, maximumFee: 0n, bps: 0 }, { epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps: 50 }),
+      transferHook(PublicKey.default),
+      pausable,
+    ]);
+
+  const legOf = (data: Buffer, owner = TOKEN_2022_PROGRAM_ID) => ({ mint: key(), account: { owner, data } });
+
+  it("reads the fee schedule and the null hook out of the live shape, stepping over the extensions it does not need", () => {
+    const facts = decodeMintFacts(preStocks());
+    expect(facts.transferHook, "the extension is present, but its program id is null: nothing is called").toBeNull();
+    expect(facts.transferFee).toEqual({
+      older: { epoch: 0n, maximumFee: 0n, bps: 0n },
+      newer: { epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps: 50n },
+    });
+  });
+
+  it("charges the newer fee only from the epoch it was stamped with", () => {
+    const facts = decodeMintFacts(preStocks());
+    // 0 → 50 bps is exactly the move this issuer made; a keeper that read
+    // `newer` unconditionally would have charged it two epochs early, and one
+    // that read `older` would never see it at all.
+    expect(activeTransferFee(facts, FEE_EPOCH - 1n).bps).toBe(0n);
+    expect(activeTransferFee(facts, FEE_EPOCH).bps).toBe(50n);
+    expect(activeTransferFee(facts, TODAY)).toEqual({ epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps: 50n });
+  });
+
+  it("charges nothing for a mint with no extensions at all", () => {
+    const classic = Buffer.alloc(82);
+    expect(decodeMintFacts(classic)).toEqual({ transferHook: null, transferFee: null });
+    expect(activeTransferFee(decodeMintFacts(classic), TODAY)).toEqual({ bps: 0n, maximumFee: 0n });
+    // And a Token-2022 mint that carries only extensions this gate ignores.
+    expect(activeTransferFee(decodeMintFacts(mintBytes([scaledUiAmount, pausable])), TODAY)).toEqual({ bps: 0n, maximumFee: 0n });
+  });
+
+  it("admits the live basket and hands each leg's epoch-active fee to the bound", () => {
+    const legs = [legOf(preStocks()), legOf(preStocks())];
+    const admission = legAdmissionDecision({ legs, currentEpoch: TODAY });
+    expect(admission.admit).toBe(true);
+    if (!admission.admit) return;
+    for (const leg of legs) {
+      expect(admission.fees.get(leg.mint.toBase58())?.bps).toBe(50n);
+      expect(admission.fees.get(leg.mint.toBase58())?.maximumFee).toBe(UNCAPPED);
+    }
+  });
+
+  it("refuses a mint that is not a Token-2022 mint, naming both programs", () => {
+    const leg = legOf(preStocks(), TOKEN_PROGRAM_ID);
+    const admission = legAdmissionDecision({ legs: [leg], currentEpoch: TODAY });
+    expect(admission.admit).toBe(false);
+    if (admission.admit) return;
+    expect(admission.outcome).toBe("REFUSED");
+    expect(admission.detail).toContain(leg.mint.toBase58());
+    expect(admission.detail).toContain(TOKEN_PROGRAM_ID.toBase58());
+    expect(admission.detail).toContain(TOKEN_2022_PROGRAM_ID.toBase58());
+  });
+
+  it("refuses a REAL transfer hook — the one failure no later transaction can undo", () => {
+    const hook = key();
+    const mint = mintBytes([transferFeeConfig({ epoch: 0n, maximumFee: 0n, bps: 0 }, { epoch: 0n, maximumFee: 0n, bps: 0 }), transferHook(hook)]);
+    expect(decodeMintFacts(mint).transferHook?.equals(hook)).toBe(true);
+    const admission = legAdmissionDecision({ legs: [legOf(mint)], currentEpoch: TODAY });
+    expect(admission.admit).toBe(false);
+    if (admission.admit) return;
+    expect(admission.detail).toContain(hook.toBase58());
+    expect(admission.detail).toContain("without a program upgrade");
+  });
+
+  it("buys through a fee up to the ceiling and refuses the basis point above it", () => {
+    expect(MAX_LEG_FEE_BPS).toBe(100n);
+    const withFee = (bps: number): Buffer =>
+      mintBytes([transferFeeConfig({ epoch: 0n, maximumFee: 0n, bps: 0 }, { epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps })]);
+    expect(legAdmissionDecision({ legs: [legOf(withFee(100))], currentEpoch: TODAY }).admit).toBe(true);
+    const over = legAdmissionDecision({ legs: [legOf(withFee(101))], currentEpoch: TODAY });
+    expect(over.admit).toBe(false);
+    if (over.admit) return;
+    expect(over.detail).toContain("charges a 101 bps transfer fee in epoch 1036, above the 100 bps");
+    // The rate the authority can reach in two epochs, on mints it has already moved once.
+    expect(legAdmissionDecision({ legs: [legOf(withFee(10_000))], currentEpoch: TODAY }).admit).toBe(false);
+  });
+
+  it("refuses only from the epoch a scheduled fee starts in, not before", () => {
+    const scheduled = mintBytes([
+      transferFeeConfig({ epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps: 50 }, { epoch: TODAY + 2n, maximumFee: UNCAPPED, bps: 1_000 }),
+    ]);
+    expect(legAdmissionDecision({ legs: [legOf(scheduled)], currentEpoch: TODAY }).admit).toBe(true);
+    expect(legAdmissionDecision({ legs: [legOf(scheduled)], currentEpoch: TODAY + 1n }).admit).toBe(true);
+    expect(legAdmissionDecision({ legs: [legOf(scheduled)], currentEpoch: TODAY + 2n }).admit).toBe(false);
+  });
+
+  it("refuses a mint account it could not read, and one whose bytes do not decode", () => {
+    const unreadable = legAdmissionDecision({ legs: [{ mint: key(), account: null }], currentEpoch: TODAY });
+    expect(unreadable.admit).toBe(false);
+    if (unreadable.admit) return;
+    expect(unreadable.detail).toContain("has no readable mint account");
+
+    // An extension header whose length runs off the end of the account: decoded
+    // blindly it reads a fee out of whatever follows, so it is a refusal, and a
+    // reason, rather than a throw out of the middle of a turn.
+    const truncated = Buffer.alloc(87);
+    truncated.writeUInt8(1, 82); // AccountType::Mint
+    truncated.writeUInt16LE(1, 83); // TransferFeeConfig…
+    truncated.writeUInt16LE(108, 85); // …108 bytes that are not there
+    const broken = legAdmissionDecision({ legs: [legOf(truncated)], currentEpoch: TODAY });
+    expect(broken.admit).toBe(false);
+    if (broken.admit) return;
+    expect(broken.detail).toContain("could not be decoded");
+    expect(broken.detail).toContain("past the end of a 87-byte mint");
+  });
+
+  it("refuses the WHOLE basket for one bad leg, the sound ones included", () => {
+    // The new all-or-nothing failure this gate introduces, stated as a vector:
+    // a basket of three sound legs and one hooked mint buys nothing at all.
+    const sound = [legOf(preStocks()), legOf(preStocks()), legOf(preStocks())];
+    const hooked = legOf(mintBytes([transferHook(key())]));
+    const admission = legAdmissionDecision({ legs: [...sound, hooked], currentEpoch: TODAY });
+    expect(admission.admit).toBe(false);
+    if (admission.admit) return;
+    expect(admission.detail).toContain(hooked.mint.toBase58());
+    expect(admission.detail).toContain("refusing the whole basket of 4 leg(s), the sound ones included");
+    expect(admission.detail).toContain("drifts from the weights the owner signed");
+    for (const leg of sound) expect(admission.detail).not.toContain(leg.mint.toBase58());
   });
 });
 

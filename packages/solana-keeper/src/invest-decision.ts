@@ -1,8 +1,8 @@
 // Which in-asset this keeper can invest from, whether it may invest at all,
 // whether it may convert the vault's SOL to get there, how much of that SOL one
-// turn may wrap and convert, and whether the 30-day cap leaves the basket room,
-// as pure decisions, with the alerts for a crank or an investment that stays
-// stuck.
+// turn may wrap and convert, whether the 30-day cap leaves the basket room, and
+// whether every leg's mint is one the program can buy at all, as pure
+// decisions, with the alerts for a crank or an investment that stays stuck.
 //
 // NEW IN SIP. sip-vault's InvestmentPolicy pins `in_mint`: the only mint convert
 // may fill into and invest may spend from, chosen by the owner, with every floor
@@ -15,10 +15,12 @@
 // pools per leg), so any other in_mint is refused BEFORE anything moves, naming
 // both mints so the operator can see which side must change.
 
+import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
 import { PublicKey } from "@solana/web3.js";
 import type { InvestmentPolicyState } from "./accounts.js";
 import type { Alert } from "./alerts.js";
 import type { InvestOutcome } from "./invest-tick.js";
+import { NO_TRANSFER_FEE, type TransferFeeTerms } from "./min-out.js";
 
 /** USDC on mainnet: the only in-asset the keeper has routes for. */
 export const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
@@ -338,6 +340,227 @@ export function rollingDecision(input: {
         ? "max_rolling_30d itself is below the basket minimum, so the basket cannot be bought until the owner raises it or lowers min_investment"
         : `headroom next grows on day ${next} (${new Date(next * 86_400_000).toISOString().slice(0, 10)})`) +
       " — nothing is wrapped, converted or bought",
+  };
+}
+
+// ── every leg's mint, before the basket is bought ────────────────────────────
+
+/**
+ * The most an epoch-active transfer fee may be before this keeper refuses to
+ * buy a leg at all: 100 bps, half of SLIPPAGE_BPS.
+ *
+ * SUBTRACTING THE FEE IS NOT THE SAME AS SURVIVING IT. min-out.ts now prices
+ * against what the vault is actually credited, so the bound is honest at any
+ * rate — but honest arithmetic on a 10% fee still buys 10% less stock, and one
+ * key (the same that holds mint, freeze, pause and permanent-delegate authority
+ * over both PreStocks mints) can schedule any rate up to 10_000 bps with about
+ * two epochs' notice. It has already moved these mints from 0 to 50. A ceiling
+ * is what turns "we would have priced it correctly" into "we did not buy it".
+ */
+export const MAX_LEG_FEE_BPS = 100n;
+
+/** One of the two fees a mint's TransferFeeConfig carries, with the epoch it starts in. */
+export interface ScheduledTransferFee extends TransferFeeTerms {
+  /** The first epoch this fee applies in. */
+  readonly epoch: bigint;
+}
+
+/** A mint's TransferFeeConfig: the fee in force and the one scheduled to replace it. */
+export interface TransferFeeSchedule {
+  readonly older: ScheduledTransferFee;
+  readonly newer: ScheduledTransferFee;
+}
+
+/** What a leg's admissibility turns on, read from the mint's own Token-2022 extensions. */
+export interface MintFacts {
+  /**
+   * The transfer hook's program id, or null when the mint names none — the
+   * extension present with a NULL program id included, which is the issuer
+   * keeping the option open rather than a hook: nothing is called today.
+   */
+  readonly transferHook: PublicKey | null;
+  /** The mint's TransferFeeConfig, null when it carries none and so charges nothing, forever. */
+  readonly transferFee: TransferFeeSchedule | null;
+}
+
+/** spl-token's Mint, before any extension. */
+const MINT_BASE_BYTES = 82;
+/** Token-2022's AccountType byte, which follows the base: 1 a mint, 2 a token account. */
+const ACCOUNT_TYPE_MINT = 1;
+/** extension.rs's ExtensionType discriminants, only the two this gate reads. */
+const EXT_UNINITIALIZED = 0;
+const EXT_TRANSFER_FEE_CONFIG = 1;
+const EXT_TRANSFER_HOOK = 14;
+/** TransferFeeConfig: authority(32) withdraw_withheld_authority(32) withheld_amount(8) older(18) newer(18). */
+const TRANSFER_FEE_CONFIG_BYTES = 108;
+/** TransferHook: authority(32) program_id(32). */
+const TRANSFER_HOOK_BYTES = 64;
+
+/** One TransferFee: epoch(8) maximum_fee(8) transfer_fee_basis_points(2), all little-endian. */
+function scheduledFee(data: Buffer, offset: number): ScheduledTransferFee {
+  return {
+    epoch: data.readBigUInt64LE(offset),
+    maximumFee: data.readBigUInt64LE(offset + 8),
+    bps: BigInt(data.readUInt16LE(offset + 16)),
+  };
+}
+
+/**
+ * The two extensions this gate cares about, walked out of a mint account's own
+ * bytes.
+ *
+ * HAND-ROLLED, like discovery.ts's walk over a TradingLink, and for the same
+ * reason: it takes a Buffer, so the gate below it is a pure function a test can
+ * hand a mint laid out byte for byte as extension.rs writes one, with no
+ * connection anywhere.
+ * The walk is Token-2022's own TLV: the 82-byte base, the account type, then
+ * `u16 type, u16 length, length bytes` until the data runs out. An
+ * over-allocated account is zero-padded and type 0 is that padding, so the walk
+ * stops there rather than reading a fee out of zeroes.
+ */
+export function decodeMintFacts(data: Buffer): MintFacts {
+  if (data.length < MINT_BASE_BYTES) {
+    throw new Error(`a mint account is at least ${MINT_BASE_BYTES} bytes; this one is ${data.length}`);
+  }
+  // A classic SPL Token mint is exactly the base, and Token-2022 writes the
+  // account type only once there is an extension to write after it.
+  if (data.length <= MINT_BASE_BYTES + 1) return { transferHook: null, transferFee: null };
+  const accountType = data.readUInt8(MINT_BASE_BYTES);
+  if (accountType !== ACCOUNT_TYPE_MINT) {
+    throw new Error(`the byte after the mint base is ${accountType}, not the ${ACCOUNT_TYPE_MINT} Token-2022 writes for a mint`);
+  }
+
+  let transferHook: PublicKey | null = null;
+  let transferFee: TransferFeeSchedule | null = null;
+  let offset = MINT_BASE_BYTES + 1;
+  while (offset + 4 <= data.length) {
+    const type = data.readUInt16LE(offset);
+    if (type === EXT_UNINITIALIZED) break;
+    const length = data.readUInt16LE(offset + 2);
+    const start = offset + 4;
+    if (start + length > data.length) {
+      throw new Error(`extension ${type} claims ${length} bytes at ${start}, past the end of a ${data.length}-byte mint`);
+    }
+    if (type === EXT_TRANSFER_FEE_CONFIG) {
+      if (length !== TRANSFER_FEE_CONFIG_BYTES) {
+        throw new Error(`TransferFeeConfig is ${TRANSFER_FEE_CONFIG_BYTES} bytes; this mint carries ${length}`);
+      }
+      transferFee = { older: scheduledFee(data, start + 72), newer: scheduledFee(data, start + 90) };
+    } else if (type === EXT_TRANSFER_HOOK) {
+      if (length !== TRANSFER_HOOK_BYTES) {
+        throw new Error(`TransferHook is ${TRANSFER_HOOK_BYTES} bytes; this mint carries ${length}`);
+      }
+      const programId = new PublicKey(data.subarray(start + 32, start + 64));
+      transferHook = programId.equals(PublicKey.default) ? null : programId;
+    }
+    offset = start + length;
+  }
+  return { transferHook, transferFee };
+}
+
+/**
+ * The fee terms in force for a transfer made in `currentEpoch`.
+ *
+ * TWO FEES ARE STORED AND ONE OF THEM IS LIVE. set_transfer_fee writes the new
+ * rate into newer_transfer_fee stamped with the epoch it starts in — two epochs
+ * out, so holders can see it coming — and keeps what it replaced in
+ * older_transfer_fee until then. Reading `newer` unconditionally would charge a
+ * scheduled fee two epochs early; reading `older` would miss it forever. The
+ * PreStocks mints' newer fee is 50 bps stamped epoch 1032, live since.
+ */
+export function activeTransferFee(facts: MintFacts, currentEpoch: bigint): TransferFeeTerms {
+  const schedule = facts.transferFee;
+  if (schedule === null) return NO_TRANSFER_FEE;
+  return currentEpoch >= schedule.newer.epoch ? schedule.newer : schedule.older;
+}
+
+/** One leg's mint, as the chain returned its account. */
+export interface LegMint {
+  readonly mint: PublicKey;
+  /** Null when the chain has no account at that address, or the read came back empty. */
+  readonly account: { readonly owner: PublicKey; readonly data: Buffer } | null;
+}
+
+/** Whether every leg is one this keeper may buy; when it is, each leg's epoch-active fee, by mint. */
+export type LegAdmission =
+  | { readonly admit: true; readonly fees: ReadonlyMap<string, TransferFeeTerms> }
+  | { readonly admit: false; readonly outcome: "REFUSED"; readonly detail: string };
+
+/**
+ * Whether the basket's mints are ones the program can buy safely, decided from
+ * their own bytes before any wrap, convert or swap.
+ *
+ * THE FEE ARITHMETIC ALONE IS A HAZARD, NOT A FIX. Pricing against the net
+ * credit keeps the bound honest at any rate, and the owner's money still buys
+ * whatever the fee leaves. So the rate itself is bounded here (MAX_LEG_FEE_BPS),
+ * not merely accounted for.
+ *
+ * THE HOOK IS THE ONE THAT CANNOT BE UNDONE. sip-vault's invest builds a
+ * swap_v2 with the accounts the route names and nothing else; a mint whose
+ * transfer_hook carries a real program id needs that program's own accounts
+ * appended to every transfer, which this program cannot do without an upgrade.
+ * Both PreStocks mints carry the extension with a NULL program id today — the
+ * authority keeping the option open — and the day it is filled in, every leg
+ * transfer starts calling code this keeper has never seen. Refusing is the only
+ * safe reading.
+ *
+ * ALL OR NOTHING, the same doctrine as the unroutable-leg refusal and the
+ * per-leg minimum: ONE disqualified leg refuses the WHOLE basket, the
+ * well-behaved legs included. A basket bought without one of its legs is not
+ * the basket the owner signed — its weights silently drift onto whatever is
+ * left — so the turn buys every leg or none, and says which leg cost it.
+ */
+export function legAdmissionDecision(input: {
+  readonly legs: readonly LegMint[];
+  readonly currentEpoch: bigint;
+}): LegAdmission {
+  const refusals: string[] = [];
+  const fees = new Map<string, TransferFeeTerms>();
+
+  for (const leg of input.legs) {
+    const name = leg.mint.toBase58();
+    const refuse = (reason: string): number => refusals.push(`${name} ${reason}`);
+    if (leg.account === null) {
+      refuse("has no readable mint account, so nothing about it can be checked");
+      continue;
+    }
+    if (!leg.account.owner.equals(TOKEN_2022_PROGRAM_ID)) {
+      refuse(
+        `is owned by ${leg.account.owner.toBase58()}, not Token-2022 (${TOKEN_2022_PROGRAM_ID.toBase58()}), ` +
+          "which is the token program every leg's account and swap is built for",
+      );
+      continue;
+    }
+    let facts: MintFacts;
+    try {
+      facts = decodeMintFacts(leg.account.data);
+    } catch (error) {
+      refuse(`could not be decoded: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
+    if (facts.transferHook !== null) {
+      refuse(
+        `carries a transfer hook (${facts.transferHook.toBase58()}), and invest cannot append the accounts a real ` +
+          "hook requires without a program upgrade",
+      );
+    }
+    const fee = activeTransferFee(facts, input.currentEpoch);
+    if (fee.bps > MAX_LEG_FEE_BPS) {
+      refuse(
+        `charges a ${fee.bps} bps transfer fee in epoch ${input.currentEpoch}, above the ${MAX_LEG_FEE_BPS} bps ` +
+          "this keeper will buy through",
+      );
+    }
+    fees.set(name, fee);
+  }
+
+  if (refusals.length === 0) return { admit: true, fees };
+  return {
+    admit: false,
+    outcome: "REFUSED",
+    detail:
+      `${refusals.join("; ")} — refusing the whole basket of ${input.legs.length} leg(s), the sound ones included, ` +
+      "and refusing to convert SOL toward it: a partial basket drifts from the weights the owner signed",
   };
 }
 
