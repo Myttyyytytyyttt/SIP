@@ -14,7 +14,17 @@
 // byte-correct.
 
 import { createHash } from "node:crypto";
-import { AccountMeta, PublicKey, TransactionInstruction } from "@solana/web3.js";
+// AccountMeta IS A TYPE, and must be imported as one. @solana/web3.js exports
+// no runtime value by that name (it is absent from the 80-key namespace a real
+// `node --input-type=module` import produces), so a value-position import of it
+// survives only because esbuild/tsx erases bindings it can see are used only in
+// type positions. The day anyone writes AccountMeta in a value position that
+// erasure stops, the import becomes "does not provide an export named
+// 'AccountMeta'", and because the keeper loads THIS FILE through
+// @sip/solana-program/raydium-swap, the failure is the keeper not booting at
+// all. One keyword removes the hazard.
+import type { AccountMeta } from "@solana/web3.js";
+import { PublicKey, TransactionInstruction } from "@solana/web3.js";
 
 const SWAP_V2 = createHash("sha256").update("global:swap_v2").digest().subarray(0, 8);
 // The captured swap's discriminator, from harness/raydium/captured-swap.json.

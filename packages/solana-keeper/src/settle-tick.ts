@@ -25,7 +25,7 @@
 // can reach them.
 
 import { createHash } from "node:crypto";
-import * as anchor from "@coral-xyz/anchor";
+import type * as anchor from "@coral-xyz/anchor";
 import {
   Connection,
   Ed25519Program,
@@ -37,6 +37,7 @@ import {
 } from "@solana/web3.js";
 import { summarizeUpstreamError } from "@sip/solana-log";
 import { readSettlementNonce, type VaultState } from "./accounts.js";
+import { BN } from "./anchor-interop.js";
 import type { ManagedLink } from "./discovery.js";
 import { idl } from "./idl.js";
 import { connectionReader, measureSince } from "./measure-window.js";
@@ -196,10 +197,10 @@ export function settleInstruction(
 ): Promise<TransactionInstruction> {
   return method(program, "settleV2")(
     inputs.mode,
-    new anchor.BN(inputs.sessionStartSlot.toString()),
-    new anchor.BN(inputs.sessionEndSlot.toString()),
-    new anchor.BN(inputs.baseLamports.toString()),
-    new anchor.BN(inputs.validUntilSlot.toString()),
+    new BN(inputs.sessionStartSlot.toString()),
+    new BN(inputs.sessionEndSlot.toString()),
+    new BN(inputs.baseLamports.toString()),
+    new BN(inputs.validUntilSlot.toString()),
   )
     .accountsPartial({ wallet: link.wallet, vault: link.vault, tradingLink: link.linkAddress })
     .instruction();

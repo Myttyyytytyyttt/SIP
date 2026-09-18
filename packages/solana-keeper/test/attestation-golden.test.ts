@@ -15,7 +15,7 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it, vi } from "vitest";
 import { GOLDEN_V2_HEX, GOLDEN_V2_INPUTS } from "../src/attestation-golden.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
-import { runPreflight } from "../src/preflight.js";
+import { EXPECTED_INVARIANTS, runPreflight } from "../src/preflight.js";
 import { ATTESTATION_MESSAGE_LEN, MODE_PROFIT, MODE_VOLUME, attestationInstruction, attestationMessage } from "../src/program-scripts.js";
 import { ATTESTATION_VALIDITY_SLOTS, attestationInputs } from "../src/settle-decision.js";
 
@@ -83,8 +83,27 @@ describe("the attestation golden vector", () => {
 });
 
 describe("--preflight", () => {
-  it("holds all ten invariants, the golden vector among them", () => {
-    expect(runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 10 });
+  // Seventeen, not ten: the last seven BUILD settle_v2, wrap_sol, convert and
+  // invest — settle_v2 and convert three times each, so the vectors cover a
+  // zero argument and a u64 past 2^32 and not only the comfortable middle.
+  // Under vitest they cannot fail the way they failed in production — vitest's
+  // interop hands anchor's BN over and Node's does not — which is the whole
+  // reason the real gate is `tsx bin/keeper.mts --preflight` in the Dockerfile.
+  // This case only holds the count and the vectors steady.
+  it("holds all seventeen invariants, the golden vector and the seven builds among them", async () => {
+    expect(await runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 17 });
+  });
+
+  // THE SECOND COPY OF THE NUMBER, and the reason it is written as a literal:
+  // the preflight now REFUSES to pass with any other count, so the only way to
+  // add or drop a check is to change EXPECTED_INVARIANTS on purpose — and this
+  // line, which is what makes that a decision instead of a side effect. Before
+  // 2026-09-18 the count was reported and never asserted: deleting the settle_v2
+  // build from buildOffline left {"preflight":"ok","invariants":13} and exit 0,
+  // so the gate could be refactored away under a green light.
+  it("pins its own size, so a gate that shrinks fails instead of quietly reporting a smaller one", async () => {
+    expect(EXPECTED_INVARIANTS).toBe(17);
+    expect((await runPreflight()).invariants).toBe(EXPECTED_INVARIANTS);
   });
 
   it("fails, naming the invariant, when the vector and the mirror disagree by one byte", async () => {
@@ -94,10 +113,10 @@ describe("--preflight", () => {
     vi.doMock("../src/attestation-golden.js", () => ({ GOLDEN_V2_HEX: `${GOLDEN_V2_HEX.slice(0, -2)}ff`, GOLDEN_V2_INPUTS }));
     try {
       const { runPreflight: preflightOverADriftedVector } = await import("../src/preflight.js");
-      expect(preflightOverADriftedVector()).toEqual({
+      expect(await preflightOverADriftedVector()).toEqual({
         ok: false,
         program: SIP_PROGRAM_ID,
-        invariants: 10,
+        invariants: 17,
         failure: 'invariant "the attestation mirror matches the program golden vector" is false, expected true',
       });
     } finally {

@@ -83,9 +83,10 @@ import {
 const log = createKeeperLogger();
 
 // --preflight: the module graph above has loaded, which is half the proof. The
-// other half is the invariants, checked with no network, no keys and no env.
+// other half is the invariants and the four money-path instruction builders,
+// checked with no network, no keys and no env.
 if (process.argv.includes("--preflight")) {
-  const result = runPreflight();
+  const result = await runPreflight();
   if (!result.ok) {
     log.error("preflight failed", { program: result.program, invariants: result.invariants, failure: result.failure });
     process.exit(1);
