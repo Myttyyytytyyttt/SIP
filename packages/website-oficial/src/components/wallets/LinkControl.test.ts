@@ -38,7 +38,7 @@ vi.mock("@privy-io/react-auth/solana", () => ({
   useSignMessage: () => ({ signMessage: mocked.signMessage }),
 }));
 
-vi.mock("@/app/providers", () => ({ useSolanaConfig: () => ({ privySignerId: "cbx133itb717vxp3dqwhk808", privyPolicyId: "jsuzcjv6njl0raqjjhzqe9fh" }) }));
+vi.mock("@/app/providers", () => ({ useSolanaConfig: () => ({ privySignerId: "kyio853439oa78qfvmt853i4", privyPolicyId: "jsuzcjv6njl0raqjjhzqe9fh" }) }));
 
 vi.mock("@/components/ui/button", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/components/ui/button")>();

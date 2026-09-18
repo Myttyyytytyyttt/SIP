@@ -1,11 +1,12 @@
 // A Privy user record shaped like @privy-io/react-auth 3.36.0's own types (User, WalletWithMetadata),
 // and typed against them, so a change in the installed SDK's shape fails typecheck here rather than
 // passing tests on a record Privy no longer sends. Every address is a placeholder. SIGNER and POLICY
-// are this deployment's public keeper signer and policy ids: ids, not keys.
+// are this deployment's public keeper signer and policy ids: ids, not keys. SIGNER is sip-solana-keeper-2,
+// the signer since the 18-sep rotation; cbx133itb717vxp3dqwhk808 is retired (its key was lost).
 
 import type { LinkedAccountWithMetadata, User, WalletWithMetadata } from "@privy-io/react-auth";
 
-export const SIGNER = "cbx133itb717vxp3dqwhk808";
+export const SIGNER = "kyio853439oa78qfvmt853i4";
 export const POLICY = "jsuzcjv6njl0raqjjhzqe9fh";
 
 export const PENSION_KEY = "PensionKeyP1aceho1der111111111111111111111";
