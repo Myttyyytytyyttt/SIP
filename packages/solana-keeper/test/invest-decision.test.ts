@@ -14,7 +14,12 @@
 // cannot buy safely — not Token-2022, a real transfer hook, or a transfer fee
 // above the ceiling in the epoch the swap lands in — refuses the WHOLE basket,
 // the sound legs included, because a partial basket is not the basket the owner
-// signed.
+// signed. And the SOL hop is priced against an oracle OUTSIDE the venue as well
+// as against the pool it would trade on: a feed that cannot be read, a pair that
+// has stopped publishing, or a pool that has walked away from the world rests
+// the hop — and rests it the way a zero conversion floor does, so the USDC the
+// vault already holds is still invested and no reading of any oracle can stop
+// the keeper.
 
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { Keypair, PublicKey } from "@solana/web3.js";
@@ -39,13 +44,18 @@ import {
   investFailedStreak,
   investPauseDecision,
   legAdmissionDecision,
+  MAX_PYTH_AGE_SECONDS,
+  MAX_PYTH_DEVIATION_BPS,
+  oracleConvertDecision,
   rollingDecision,
+  routeRateWad,
   rollingTotal,
   shouldConvert,
   wrapPlan,
   wrapShortAlert,
   wrapShortStreak,
 } from "../src/invest-decision.js";
+import { PYTH_SOL_USD_FEED_ID_HEX, PYTH_USDC_USD_FEED_ID_HEX, PYTH_VERIFICATION_FULL, type PythPriceUpdate } from "../src/pyth.js";
 
 describe("the policy's in_mint", () => {
   it("lets USDC through", () => {
@@ -492,5 +502,162 @@ describe("the invest-failed alert", () => {
     for (const outcome of ["INVESTED", "IDLE", "PAUSED", "NO_POLICY"] as const) {
       expect(investFailedStreak(2, outcome)).toBe(0);
     }
+  });
+});
+
+
+// ── the oracle beside the pool ───────────────────────────────────────────────
+
+/** A decoded feed built from numbers: what invest-tick.ts hands the decision after the owner check. */
+function feed(feedIdHex: string, price: bigint, publishTime: bigint, expo = -8): PythPriceUpdate {
+  return {
+    writeAuthority: Keypair.generate().publicKey.toBase58(),
+    verification: { variant: PYTH_VERIFICATION_FULL, numSignatures: null },
+    feedIdHex,
+    price,
+    conf: 1_000n,
+    expo,
+    publishTime,
+    prevPublishTime: publishTime - 1n,
+    emaPrice: price,
+    emaConf: 1_000n,
+    postedSlot: 400_000_000n,
+  };
+}
+
+/** The chain's clock for these tests, and the pair as mainnet quoted it 15 s earlier. */
+const CHAIN_NOW = 1_789_699_401n;
+const PUBLISHED = CHAIN_NOW - 15n;
+const solFeed = (publishTime = PUBLISHED, price = 10_259_321_149n) => feed(PYTH_SOL_USD_FEED_ID_HEX, price, publishTime);
+const usdcFeed = (publishTime = PUBLISHED, price = 99_987_040n) => feed(PYTH_USDC_USD_FEED_ID_HEX, price, publishTime);
+/** $102.59321149 over a USDC at $0.99987040, in USDC raw per lamport x 1e18 — pyth.test.ts pins it from the bytes. */
+const ORACLE_WAD = 102_606_509_293_604_451n;
+/** A route that agrees with the oracle exactly. */
+const ask = (over: Partial<Parameters<typeof oracleConvertDecision>[0]> = {}) =>
+  oracleConvertDecision({ sol: solFeed(), usdc: usdcFeed(), nowUnixSeconds: CHAIN_NOW, routeWad: null, ...over });
+
+describe("the rate a captured route implies", () => {
+  it("is the swap's own realised rate as a WAD, and null when there was no same-direction swap to read", () => {
+    // 1 SOL in, 102.606509 USDC out: the same unit the oracle and the floor speak.
+    expect(routeRateWad({ inRaw: 1_000_000_000n, outRaw: 102_606_509n })).toBe(102_606_509_000_000_000n);
+    expect(routeRateWad({ inRaw: 2_000_000_000n, outRaw: 205_213_018n })).toBe(102_606_509_000_000_000n);
+    // live-route.ts reports nothing for an opposite-direction capture rather
+    // than inverting it across the spread, and the deviation arm falls silent.
+    expect(routeRateWad(null)).toBeNull();
+    expect(routeRateWad({ inRaw: 0n, outRaw: 5n })).toBeNull();
+    expect(routeRateWad({ inRaw: 5n, outRaw: 0n })).toBeNull();
+  });
+});
+
+describe("the oracle gate on the SOL hop", () => {
+  it("lets a fresh, agreeing pair through, with or without a route to compare", () => {
+    expect(ask()).toEqual({ convert: true });
+    expect(ask({ routeWad: ORACLE_WAD })).toEqual({ convert: true });
+  });
+
+  it("rests the hop when a feed could not be read, and names which", () => {
+    // Null is every reason at once: no account, an account the Pyth receiver
+    // does not own, bytes that are not a PriceUpdateV2, or the wrong feed id.
+    const noSol = ask({ sol: null });
+    expect(noSol.convert).toBe(false);
+    expect(noSol.convert === false && noSol.detail).toContain("SOL/USD");
+    expect(noSol.convert === false && noSol.detail).not.toContain("USDC/USD feed");
+
+    const neither = ask({ sol: null, usdc: null });
+    expect(neither.convert === false && neither.detail).toContain("SOL/USD and USDC/USD");
+    expect(neither.convert === false && neither.detail).toContain("not owned by the receiver program");
+  });
+
+  it("rests the hop on a pair that has stopped publishing, at a bound measured against the feeds' own cadence", () => {
+    // 8-10 s cadence, 14-15 s old at the read: the age the keeper sees every turn.
+    expect(ask({ nowUnixSeconds: PUBLISHED + 15n })).toEqual({ convert: true });
+    expect(MAX_PYTH_AGE_SECONDS).toBe(60n);
+    expect(ask({ nowUnixSeconds: PUBLISHED + MAX_PYTH_AGE_SECONDS })).toEqual({ convert: true });
+    const stale = ask({ nowUnixSeconds: PUBLISHED + MAX_PYTH_AGE_SECONDS + 1n });
+    expect(stale.convert).toBe(false);
+    expect(stale.convert === false && stale.detail).toContain(`past the ${MAX_PYTH_AGE_SECONDS} s`);
+    // THE PAIR IS ONLY AS FRESH AS ITS STALEST LEG: a live SOL feed does not
+    // rescue a USDC feed that stopped an hour ago.
+    const oneLegStale = ask({ usdc: usdcFeed(PUBLISHED - 3_600n) });
+    expect(oneLegStale.convert).toBe(false);
+  });
+
+  it("does NOT rest the hop on a publish AHEAD of the chain's clock, which is the chain drifting, not the feed", () => {
+    // The cluster's stake-weighted clock runs behind wall time; the price is
+    // then fresher than this keeper can measure. Refusing it would turn a
+    // chain-wide drift into a product that has stopped converting.
+    expect(ask({ nowUnixSeconds: PUBLISHED - 300n })).toEqual({ convert: true });
+    expect(ask({ nowUnixSeconds: PUBLISHED - 300n, routeWad: ORACLE_WAD })).toEqual({ convert: true });
+  });
+
+  it("rests the hop on a feed that decodes but quotes no usable price", () => {
+    for (const broken of [solFeed(PUBLISHED, 0n), solFeed(PUBLISHED, -1n)]) {
+      const decision = ask({ sol: broken });
+      expect(decision.convert).toBe(false);
+      expect(decision.convert === false && decision.detail).toContain("no usable rate");
+    }
+    // An exponent far enough out to hang 10 ** scale is refused, not computed.
+    const absurd = ask({ sol: feed(PYTH_SOL_USD_FEED_ID_HEX, 10_259_321_149n, PUBLISHED, -40) });
+    expect(absurd.convert).toBe(false);
+  });
+
+  it("rests the hop when the pool has walked away from the oracle, in either direction", () => {
+    // Rounded UP, so the gap really is that many bps: the decision floors the
+    // bps it measures, and a gap built by flooring lands back ON the bound.
+    const offBy = (bps: bigint) => (ORACLE_WAD * bps + 9_999n) / 10_000n;
+    const above = ORACLE_WAD + offBy(MAX_PYTH_DEVIATION_BPS + 1n);
+    const below = ORACLE_WAD - offBy(MAX_PYTH_DEVIATION_BPS + 1n);
+    for (const routeWad of [above, below]) {
+      const decision = ask({ routeWad });
+      expect(decision.convert).toBe(false);
+      expect(decision.convert === false && decision.detail).toContain(`past the ${MAX_PYTH_DEVIATION_BPS} bps`);
+      expect(decision.convert === false && decision.detail).toContain(String(ORACLE_WAD));
+    }
+    // And lets the bound itself through: the guard fires past it, not at it.
+    expect(ask({ routeWad: ORACLE_WAD + (ORACLE_WAD * MAX_PYTH_DEVIATION_BPS) / 10_000n })).toEqual({ convert: true });
+    expect(ask({ routeWad: ORACLE_WAD - (ORACLE_WAD * MAX_PYTH_DEVIATION_BPS) / 10_000n })).toEqual({ convert: true });
+  });
+
+  it("compares RELATIVELY, so the bound means the same thing at every SOL price", () => {
+    // The same pair with SOL ten times dearer. A 3 % gap passes at both prices
+    // and a 7 % gap fails at both — which an absolute USD band could not do.
+    const dear = { sol: solFeed(PUBLISHED, 102_593_211_490n) };
+    const dearWad = ORACLE_WAD * 10n;
+    expect(ask({ ...dear, routeWad: dearWad })).toEqual({ convert: true });
+    for (const bps of [300n, 700n]) {
+      const near = ask({ routeWad: ORACLE_WAD + (ORACLE_WAD * bps) / 10_000n });
+      const nearDear = ask({ ...dear, routeWad: dearWad + (dearWad * bps) / 10_000n });
+      expect(near.convert).toBe(bps < MAX_PYTH_DEVIATION_BPS);
+      expect(nearDear.convert).toBe(near.convert);
+    }
+    // The same ABSOLUTE gap — 3 USDC per SOL — is 2.9 % of a $102 SOL and 0.29 %
+    // of a $1,025 one. A band written once at either price is wrong at the other.
+    const threeUsdcPerSol = 3_000_000_000_000_000n;
+    expect(ask({ routeWad: ORACLE_WAD - threeUsdcPerSol }).convert).toBe(true);
+    expect(ask({ ...dear, routeWad: dearWad - threeUsdcPerSol }).convert).toBe(true);
+  });
+
+  it("is tighter than the convert floor it backs, or it could never fire", () => {
+    // The web signs min_convert_rate_wad 1000 bps under the pool price of the
+    // day (CONVERT_FLOOR_MARGIN_BPS in the web's product.ts). A guard at or
+    // above that margin would only ever fire after the floor already had.
+    expect(MAX_PYTH_DEVIATION_BPS).toBeLessThan(1_000n);
+    expect(MAX_PYTH_DEVIATION_BPS).toBe(500n);
+    // And loose enough that a pool fee, one capture's price impact and a few
+    // minutes of SOL movement — all well inside 1 % — never reach it.
+    expect(ask({ routeWad: (ORACLE_WAD * 9_900n) / 10_000n })).toEqual({ convert: true });
+  });
+
+  it("can rest the SOL hop and NOTHING else: no outcome, no alert, no way to stop the keeper", () => {
+    // THE SAME TAGGED UNION convertDecision RETURNS, which is what makes a bad
+    // reading indistinguishable — to the turn — from an owner who never signed
+    // a conversion floor: the SOL is left alone and the USDC already held is
+    // still invested. Nothing in here can carry a FAILED or a REFUSED.
+    const off = convertDecision({ minConvertRateWad: 0n });
+    const blind = ask({ sol: null, usdc: null });
+    expect(Object.keys(blind).sort()).toEqual(Object.keys(off).sort());
+    expect(Object.keys(blind)).not.toContain("outcome");
+    expect(blind.convert === false && blind.detail).toContain("only the USDC the vault already holds is invested");
+    expect(ask()).toEqual(convertDecision({ minConvertRateWad: 1n }));
   });
 });

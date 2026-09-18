@@ -1,11 +1,12 @@
 // One investment turn for one vault: wrap what settled, convert it, buy the leg.
 //
-// Ported from the solana-lab keeper (keeper/src/invest-tick.ts). Eight things
+// Ported from the solana-lab keeper (keeper/src/invest-tick.ts). Nine things
 // changed: the policy's in_mint is checked before anything moves, so are either
 // pause switch, the 30-day cap and the owner's conversion floor, every leg's
 // mint is checked for a token program, a transfer hook and a transfer fee the
-// program cannot buy through, a wrap moves no more than the crank can front and
-// a convert no more than convert.rs admits in one call (all seven in
+// program cannot buy through, the SOL hop is priced against Pyth as well as
+// against the pool it would trade on, a wrap moves no more than the crank can
+// front and a convert no more than convert.rs admits in one call (all eight in
 // invest-decision.ts), and the crank is null in a dry run, which never reaches a
 // line that needs it. Everything else is the old behaviour, deliberately: the
 // stranded-wSOL rescue, the refusal before convert on an unroutable basket, the
@@ -51,15 +52,27 @@ import {
   inMintDecision,
   investPauseDecision,
   legAdmissionDecision,
+  oracleConvertDecision,
   rollingDecision,
+  routeRateWad,
   shouldConvert,
   wrapPlan,
+  type ConvertDecision,
   type WrapPlan,
   type WrapReport,
 } from "./invest-decision.js";
 import { method } from "./methods.js";
 import { NO_TRANSFER_FEE, tightenMinOut } from "./min-out.js";
 import { RAYDIUM_CLMM, buildSwapV2AccountMetas, buildSwapV2Data, fetchLiveRoute } from "./program-scripts.js";
+import {
+  PYTH_RECEIVER_PROGRAM,
+  PYTH_SOL_USD_FEED,
+  PYTH_SOL_USD_FEED_ID_HEX,
+  PYTH_USDC_USD_FEED,
+  PYTH_USDC_USD_FEED_ID_HEX,
+  decodePythPriceUpdate,
+  type PythPriceUpdate,
+} from "./pyth.js";
 
 const USDC = USDC_MINT;
 const WSOL_USDC_POOL = new PublicKey("3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv");
@@ -118,7 +131,11 @@ export interface InvestDeps {
 /** What a turn learns on its way through, whichever way it then ends. */
 interface TurnFindings {
   wrap?: WrapReport;
-  /** Set once a convert that left wSOL behind has landed, saying how much waits. */
+  /**
+   * What became of the wSOL, once the turn got as far as deciding: a convert
+   * that landed and left some behind, or a convert the oracle would not price,
+   * saying in both cases how much waits for a later sweep.
+   */
   converted?: string;
 }
 
@@ -152,7 +169,18 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
 
   // THE CHAIN'S CLOCK COMES WITH THE VAULT, in the same request: the 30-day cap
   // below is counted in the program's days, never this host's.
-  const [vaultInfo, clockInfo] = await connection.getMultipleAccountsInfo([vault, SYSVAR_CLOCK_PUBKEY]);
+  //
+  // AND SO DO PYTH'S TWO FEEDS, IN THAT SAME REQUEST. The oracle gate below
+  // costs this turn nothing it was not already paying: two more addresses in a
+  // getMultipleAccountsInfo that was being sent anyway, resolved against the
+  // very unix_timestamp that comes back beside them. A gate that cost a round
+  // trip per vault per sweep would be a gate an operator eventually turns off.
+  const [vaultInfo, clockInfo, solFeedInfo, usdcFeedInfo] = await connection.getMultipleAccountsInfo([
+    vault,
+    SYSVAR_CLOCK_PUBKEY,
+    PYTH_SOL_USD_FEED,
+    PYTH_USDC_USD_FEED,
+  ]);
   if (vaultInfo === null || vaultInfo === undefined) return { outcome: "FAILED", detail: "vault account missing" };
   // BEFORE ANY OTHER READ, ANY ATA, ANY WRAP: either pause switch. The vault's
   // own switch is decoded from the read that also gives its lamports, so a
@@ -174,7 +202,8 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   if (clockInfo === null || clockInfo === undefined || clockInfo.data.length < 40) {
     return { outcome: "FAILED", detail: "the Clock sysvar could not be read, so the 30-day cap cannot be checked; nothing was sent" };
   }
-  const rolling = rollingDecision({ policy, today: chainDay(clockInfo.data.readBigInt64LE(32)) });
+  const nowUnixSeconds = clockInfo.data.readBigInt64LE(32);
+  const rolling = rollingDecision({ policy, today: chainDay(nowUnixSeconds) });
   if (!rolling.invest) return { outcome: rolling.outcome, detail: rolling.detail };
 
   // BEFORE ANY ATA, ANY WRAP: whether the owner ever turned conversion on.
@@ -182,7 +211,25 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // looked only at `enabled`, so such a vault had a refused wrap sent for it on
   // every sweep. Its SOL now stays SOL, the USDC it already holds is still
   // invested, and every detail from here on says why the SOL did not move.
-  const conversion = convertDecision(policy);
+  //
+  // AND WHETHER AN ORACLE OUTSIDE THE VENUE STILL SEES THE PRICE. The slippage
+  // bound min-out.ts draws comes from the POOL'S OWN captured swap, so a pool
+  // pushed somewhere absurd prices its own bound, agrees with itself and passes
+  // every check this keeper makes; the floor underneath is the owner's, signed
+  // once at 1000 bps under the pool price of that day. Pyth is the only number
+  // in the turn that does not come from the venue being traded against. The
+  // OWNER of each feed account is checked HERE, at the read — bytes cannot say
+  // who wrote them — and the decision itself is pure (oracleConvertDecision).
+  //
+  // A BAD READING RESTS EXACTLY AS A ZERO FLOOR DOES: no wrap, no convert, and
+  // the USDC the vault already holds still invested below. It cannot fail the
+  // turn and cannot stop the sweep.
+  const solFeed = readPythFeed(solFeedInfo, PYTH_SOL_USD_FEED_ID_HEX);
+  const usdcFeed = readPythFeed(usdcFeedInfo, PYTH_USDC_USD_FEED_ID_HEX);
+  const signed = convertDecision(policy);
+  const conversion: ConvertDecision = signed.convert
+    ? oracleConvertDecision({ sol: solFeed, usdc: usdcFeed, nowUnixSeconds, routeWad: null })
+    : signed;
   const noted = (detail: string): string =>
     conversion.convert ? detail : `${detail.replace(/\.$/, "")} — ${conversion.detail}`;
 
@@ -317,17 +364,36 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       const toConvert = convertAmount(held, policy.maxPerCall);
 
       const route = await fetchLiveRoute(connection, WSOL_USDC_POOL, NATIVE_MINT, USDC, TOKEN_PROGRAM_ID);
-      const convertFloor = (toConvert * policy.minConvertRateWad) / 10n ** 18n;
-      // USDC is a classic SPL Token mint with no extensions, so the convert's
-      // output is credited in full and the observed rate needs no fee taken off.
-      const { minOut } = tightenMinOut(toConvert, convertFloor, route.observed, NO_TRANSFER_FEE);
-      const args = { payer: vault, inputTokenAccount: wsolAta, outputTokenAccount: usdcAta, amountIn: toConvert, minAmountOut: minOut };
-      await sendWithBudget(program.provider as anchor.AnchorProvider, crank,
-        await method(program, "convert")(new anchor.BN(toConvert.toString()), new anchor.BN(minOut.toString()), buildSwapV2Data(args))
-          .accountsPartial({ crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta, vaultIn: usdcAta, venueProgram: RAYDIUM_CLMM })
-          .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
-          .instruction());
-      if (toConvert < held) found.converted = `converted ${toConvert} of ${held} wSOL; ${held - toConvert} left for later sweeps`;
+      // THE SAME DECISION, ASKED AGAIN NOW THAT THERE IS A ROUTE TO COMPARE.
+      // Its freshness arms passed before the wrap and cannot newly fire here —
+      // the clock is the one this turn read — so what this second ask adds is
+      // the deviation arm: what the captured swap REALLY traded at, against
+      // what Pyth says the pair is worth.
+      const priced = oracleConvertDecision({
+        sol: solFeed,
+        usdc: usdcFeed,
+        nowUnixSeconds,
+        routeWad: routeRateWad(route.observed),
+      });
+      if (!priced.convert) {
+        // NOT A FAILURE, AND NOT THE END OF THE TURN. The wSOL stays wSOL, the
+        // stranded-wSOL rescue at the top of this block picks it up on a later
+        // sweep once the two agree again, and the USDC the vault already holds
+        // is invested below exactly as it would have been.
+        found.converted = `${held} wSOL was not converted, and waits for a later sweep: ${priced.detail}`;
+      } else {
+        const convertFloor = (toConvert * policy.minConvertRateWad) / 10n ** 18n;
+        // USDC is a classic SPL Token mint with no extensions, so the convert's
+        // output is credited in full and the observed rate needs no fee taken off.
+        const { minOut } = tightenMinOut(toConvert, convertFloor, route.observed, NO_TRANSFER_FEE);
+        const args = { payer: vault, inputTokenAccount: wsolAta, outputTokenAccount: usdcAta, amountIn: toConvert, minAmountOut: minOut };
+        await sendWithBudget(program.provider as anchor.AnchorProvider, crank,
+          await method(program, "convert")(new anchor.BN(toConvert.toString()), new anchor.BN(minOut.toString()), buildSwapV2Data(args))
+            .accountsPartial({ crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta, vaultIn: usdcAta, venueProgram: RAYDIUM_CLMM })
+            .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
+            .instruction());
+        if (toConvert < held) found.converted = `converted ${toConvert} of ${held} wSOL; ${held - toConvert} left for later sweeps`;
+      }
     }
 
     // ── invest EVERY leg, by the weights the owner signed ─────────────────
@@ -450,6 +516,30 @@ async function balanceOf(connection: Connection, ata: PublicKey): Promise<bigint
     return BigInt(res.value.amount);
   } catch {
     return 0n;
+  }
+}
+
+/**
+ * One Pyth feed account as this turn read it, or null when it is not one this
+ * keeper will price against.
+ *
+ * THE OWNER IS CHECKED HERE AND NOWHERE ELSE. pyth.ts refuses a wrong size, a
+ * wrong discriminator, an unknown verification variant and a feed id it was not
+ * asked for — but bytes cannot say who WROTE them, so an account at the right
+ * address holding the right-looking bytes is only Pyth's if the Pyth RECEIVER
+ * program owns it (not the push program the addresses derive under). Null is
+ * the whole vocabulary: every reason a feed is unusable rests the SOL hop the
+ * same way, and oracleConvertDecision says so in words.
+ */
+function readPythFeed(
+  info: { readonly owner: PublicKey; readonly data: Buffer } | null | undefined,
+  expectedFeedIdHex: string,
+): PythPriceUpdate | null {
+  if (info === null || info === undefined || !info.owner.equals(PYTH_RECEIVER_PROGRAM)) return null;
+  try {
+    return decodePythPriceUpdate(info.data, expectedFeedIdHex);
+  } catch {
+    return null;
   }
 }
 

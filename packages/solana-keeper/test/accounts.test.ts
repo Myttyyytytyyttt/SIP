@@ -28,6 +28,13 @@ import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import { USDC_MINT } from "../src/invest-decision.js";
 import { runInvestTick } from "../src/invest-tick.js";
+import {
+  PYTH_RECEIVER_PROGRAM,
+  PYTH_SOL_USD_FEED,
+  PYTH_SOL_USD_FEED_ID_HEX,
+  PYTH_USDC_USD_FEED,
+  PYTH_USDC_USD_FEED_ID_HEX,
+} from "../src/pyth.js";
 import { runSettleTick } from "../src/settle-tick.js";
 import { FakeLedger, chained } from "./fake-ledger.js";
 
@@ -158,15 +165,48 @@ function clockBytes(unixTimestamp: bigint): Buffer {
   return buf;
 }
 
+/**
+ * A Pyth PriceUpdateV2 account at VerificationLevel::Full: 134 bytes, the body
+ * beginning at 41, laid out field by field as the receiver writes one.
+ *
+ * THE CHAIN CARRIES THESE, SO THE STUB MUST TOO. invest-tick.ts prices its SOL
+ * hop against the oracle as well as against the pool it would trade on, and
+ * reads both feeds in the same request as the vault and the Clock — so a stub
+ * chain that serves no feed is a chain whose vault correctly refuses to wrap or
+ * convert anything, forever. Published one second before the Clock below.
+ */
+function priceUpdateBytes(feedIdHex: string, price: bigint, publishTime: bigint): Buffer {
+  const buf = Buffer.alloc(134);
+  buf.set([0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd], 0); // Anchor's PriceUpdateV2 discriminator
+  buf.set(key().toBytes(), 8); // write_authority, which is nobody's business but the feed's
+  buf.writeUInt8(1, 40); // VerificationLevel::Full, one byte, so the body starts at 41
+  buf.set(Buffer.from(feedIdHex, "hex"), 41);
+  buf.writeBigInt64LE(price, 73);
+  buf.writeBigUInt64LE(1_000n, 81); // conf
+  buf.writeInt32LE(-8, 89); // expo, as both feeds quote
+  buf.writeBigInt64LE(publishTime, 93);
+  buf.writeBigInt64LE(publishTime - 1n, 101); // prev_publish_time
+  buf.writeBigInt64LE(price, 109); // ema_price
+  buf.writeBigUInt64LE(1_000n, 117); // ema_conf
+  buf.writeBigUInt64LE(400_000_000n, 125); // posted_slot
+  return buf;
+}
+
 type Handler = (...args: unknown[]) => unknown;
 
 /** A Program over a stub chain that serves `accounts` and records every RPC method called, with its arguments. */
-function stubChain(accounts: ReadonlyMap<string, Buffer>, extra: Readonly<Record<string, Handler>> = {}) {
+function stubChain(
+  accounts: ReadonlyMap<string, Buffer>,
+  extra: Readonly<Record<string, Handler>> = {},
+  /** Accounts this program does not own — Pyth's feeds, which the receiver owns, and which the tick checks. */
+  owners: ReadonlyMap<string, PublicKey> = new Map(),
+) {
   const calls: string[] = [];
   const callArgs: unknown[][] = [];
   const info = (address: unknown) => {
-    const data = accounts.get((address as PublicKey).toBase58());
-    return data === undefined ? null : { data, executable: false, lamports: 10_000_000_000, owner: programId, rentEpoch: 0 };
+    const name = (address as PublicKey).toBase58();
+    const data = accounts.get(name);
+    return data === undefined ? null : { data, executable: false, lamports: 10_000_000_000, owner: owners.get(name) ?? programId, rentEpoch: 0 };
   };
   const served: Record<string, Handler> = {
     getAccountInfoAndContext: async (address) => ({ context: { slot: 1 }, value: info(address) }),
@@ -384,14 +424,30 @@ describe("the account readers, over bytes laid out as state.rs declares them", (
 });
 
 describe("the ticks' first steps, over the same bytes", () => {
-  function chainWith(vaultOver: Partial<VaultFields>, policyOver: Partial<PolicyFields> | null, extra: Readonly<Record<string, Handler>> = {}) {
+  function chainWith(
+    vaultOver: Partial<VaultFields>,
+    policyOver: Partial<PolicyFields> | null,
+    extra: Readonly<Record<string, Handler>> = {},
+    /** False leaves the chain with no Pyth accounts at all, as a receiver outage would. */
+    feeds = true,
+  ) {
     const vault = key();
     const accounts = new Map([
       [vault.toBase58(), vaultBytes(vaultFields(vaultOver))],
       [SYSVAR_CLOCK_PUBKEY.toBase58(), clockBytes(TODAY_UNIX)],
     ]);
+    const owners = new Map<string, PublicKey>();
+    if (feeds) {
+      // $102.59321149 SOL against a USDC at $0.99987040, the pair as mainnet
+      // quoted it, at the addresses pyth.ts names and owned by the RECEIVER
+      // program — not this one, which is exactly what the tick checks.
+      accounts.set(PYTH_SOL_USD_FEED.toBase58(), priceUpdateBytes(PYTH_SOL_USD_FEED_ID_HEX, 10_259_321_149n, TODAY_UNIX - 1n));
+      accounts.set(PYTH_USDC_USD_FEED.toBase58(), priceUpdateBytes(PYTH_USDC_USD_FEED_ID_HEX, 99_987_040n, TODAY_UNIX - 1n));
+      owners.set(PYTH_SOL_USD_FEED.toBase58(), PYTH_RECEIVER_PROGRAM);
+      owners.set(PYTH_USDC_USD_FEED.toBase58(), PYTH_RECEIVER_PROGRAM);
+    }
     if (policyOver !== null) accounts.set(investmentPolicyAddress(programId, vault).toBase58(), policyBytes(policyFields(vault, policyOver)));
-    return { vault, ...stubChain(accounts, extra) };
+    return { vault, ...stubChain(accounts, extra, owners) };
   }
 
   const pools = new Map<string, PublicKey>();
@@ -457,6 +513,26 @@ describe("the ticks' first steps, over the same bytes", () => {
     expect(unread.outcome).toBe("IDLE");
     expect(unread.detail).toContain("the crank's balance was not read this sweep");
     expect(unread.wrap).toEqual({ free: 9_998_000_000n, allowance: 0n, wrapped: 0n, short: true });
+  });
+
+  it("wrap nothing while Pyth cannot be read, and still not fail the turn", async () => {
+    // The same 10-SOL vault and the same well-funded crank as above, on a chain
+    // that serves no feed accounts at all. The SOL hop rests exactly as it does
+    // for an owner who never signed a conversion floor: no wrap is planned, the
+    // detail says which feeds could not be read, and the outcome is a REST —
+    // never FAILED, never REFUSED. A stalled oracle must not stall the product.
+    const { vault, connection, program } = chainWith({}, {}, {
+      getMinimumBalanceForRentExemption: async () => 2_000_000,
+      getTokenAccountBalance: async () => {
+        throw new Error("could not find account");
+      },
+    }, false);
+    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: 20_000_000_000n, pools, live: false, protocolPaused: false });
+    expect(result.outcome).toBe("IDLE");
+    expect(result.detail).toContain("SOL/USD and USDC/USD");
+    expect(result.detail).toContain("only the USDC the vault already holds is invested");
+    expect(result.detail).not.toContain("would wrap");
+    expect(result.wrap).toBeUndefined();
   });
 
   it("send nothing, live, for a policy with no conversion floor: no ATA, no wrap, and a detail that says why", async () => {

@@ -1,8 +1,10 @@
 // Which in-asset this keeper can invest from, whether it may invest at all,
-// whether it may convert the vault's SOL to get there, how much of that SOL one
-// turn may wrap and convert, whether the 30-day cap leaves the basket room, and
-// whether every leg's mint is one the program can buy at all, as pure
-// decisions, with the alerts for a crank or an investment that stays stuck.
+// whether it may convert the vault's SOL to get there, whether an independent
+// oracle still agrees with the pool that conversion would price against, how
+// much of that SOL one turn may wrap and convert, whether the 30-day cap leaves
+// the basket room, and whether every leg's mint is one the program can buy at
+// all, as pure decisions, with the alerts for a crank or an investment that
+// stays stuck.
 //
 // NEW IN SIP. sip-vault's InvestmentPolicy pins `in_mint`: the only mint convert
 // may fill into and invest may spend from, chosen by the owner, with every floor
@@ -21,6 +23,7 @@ import type { InvestmentPolicyState } from "./accounts.js";
 import type { Alert } from "./alerts.js";
 import type { InvestOutcome } from "./invest-tick.js";
 import { NO_TRANSFER_FEE, type TransferFeeTerms } from "./min-out.js";
+import { olderPublishTime, pythPublishAgeSeconds, solUsdcPythRateWad, type PythPriceUpdate } from "./pyth.js";
 
 /** USDC on mainnet: the only in-asset the keeper has routes for. */
 export const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
@@ -85,6 +88,160 @@ export function convertDecision(policy: { readonly minConvertRateWad: bigint }):
       "conversion is off: the policy's min_convert_rate_wad is 0, which wrap_sol and convert refuse with FloorTooLow, " +
       "so the vault's SOL is not wrapped or converted and only USDC already in the vault is invested",
   };
+}
+
+// ── the oracle beside the pool, before the SOL hop ───────────────────────────
+
+/**
+ * The most seconds a Pyth publish may sit behind the CHAIN's clock before this
+ * keeper stops pricing the SOL hop against it: 60.
+ *
+ * MEASURED, NOT GUESSED. Both feeds publish every 8-10 s, and the pair reads
+ * 14-15 s old at the vault — the receiver posts, and the account is read a slot
+ * or two later — so a 5 s bound would refuse every turn there has ever been and
+ * convert nothing again, ever. 60 s is four times the worst age measured and
+ * about six missed publishes in a row: ordinary jitter, a slow slot, a leader
+ * change and a congested block all pass, and a feed that has genuinely stopped
+ * is caught inside a minute. 120 s is where a bound stops being defensible —
+ * two minutes of unnoticed staleness is already more SOL movement than the
+ * deviation bound below tolerates — so this sits at half of it.
+ *
+ * A PUBLISH AHEAD OF THE CHAIN'S CLOCK IS NOT REFUSED. The age is signed, and
+ * it goes negative when the cluster's stake-weighted clock is the thing that
+ * has drifted, not the feed. That price is FRESHER than this keeper can
+ * measure, and refusing it would turn a chain-wide clock drift into a product
+ * that has stopped converting — the failure this whole guard is written not to
+ * cause. The deviation bound is what catches a wrong price; this catches a
+ * stopped one.
+ */
+export const MAX_PYTH_AGE_SECONDS = 60n;
+
+/**
+ * How far the captured route's realised rate may sit from the oracle's before
+ * the SOL hop is skipped: 500 bps, RELATIVE, in either direction.
+ *
+ * RELATIVE OR NOTHING. An absolute USD band is a claim about today's SOL price,
+ * and the price moves; a band written at $100 is a 1 % guard at $100 and a 10 %
+ * guard at $1,000. The two rates are compared as bps of the ORACLE rate, so the
+ * bound means the same thing at every price this product will ever see.
+ *
+ * TIGHTER THAN THE FLOOR IT BACKS. The convert floor the owner signs sits 1000
+ * bps under the live pool price (CONVERT_FLOOR_MARGIN_BPS in the web's
+ * product.ts), so a guard at or above 1000 bps could never fire before the
+ * floor already had, and would be decoration.
+ *
+ * LOOSER THAN THE HONEST GAP. What is compared is not two mid prices. The route
+ * side is ONE REAL PAST SWAP's realised rate, already below mid by the pool's
+ * own fee and by that swap's price impact, and captured up to a few minutes ago
+ * — live-route.ts walks back pages of signatures to find it. Pool fee, impact
+ * and a few minutes of SOL movement together stay well inside 1 %, so 5 % fires
+ * on a pool that has been moved away from the world and on nothing else.
+ */
+export const MAX_PYTH_DEVIATION_BPS = 500n;
+
+/**
+ * The rate a captured swap actually traded at, as USDC raw per lamport x 1e18 —
+ * the unit both the policy's convert floor and the oracle speak, so the three
+ * numbers compare with no display price entering any of them.
+ *
+ * NULL WHEN THERE IS NOTHING TO IMPLY ONE. live-route.ts reports `observed` only
+ * for a swap that went the SAME WAY as ours (inverting an opposite-direction
+ * swap's rate crosses the spread and flatters us), and min-out.ts already falls
+ * back to the owner's floor in that case. The deviation arm falls silent the
+ * same way rather than comparing against a number nobody measured.
+ */
+export function routeRateWad(observed: { readonly inRaw: bigint; readonly outRaw: bigint } | null): bigint | null {
+  if (observed === null || observed.inRaw <= 0n || observed.outRaw <= 0n) return null;
+  return (observed.outRaw * 10n ** 18n) / observed.inRaw;
+}
+
+/**
+ * Whether the SOL-to-USDC hop may be priced against this pool at all, from the
+ * two Pyth feeds and the rate the captured route implies.
+ *
+ * THE SAME TAGGED UNION convertDecision RETURNS, deliberately: a bad oracle
+ * reading is not a failure and not a refusal of the turn. It is the same rest
+ * as an owner who never signed a conversion floor — the SOL stays SOL, the USDC
+ * the vault already holds is still invested against the basket, nobody is
+ * paged, and the detail says why the SOL did not move. A STALLED ORACLE MUST
+ * NOT BECOME A STALLED PRODUCT: nothing in here can return FAILED, REFUSED, or
+ * anything that stops the sweep, and that is the whole shape of it.
+ *
+ * WHY AN ORACLE AT ALL, WHEN THE POOL IS THE VENUE. min-out.ts draws its
+ * slippage bound from the pool's own captured swap, so a pool whose price has
+ * been pushed somewhere absurd prices its own bound, agrees with itself, and
+ * the swap passes every check this keeper makes. The floor underneath it is the
+ * owner's, and it is deliberately loose — 1000 bps under the pool price the day
+ * it was signed, and untouched since. Pyth is the only number in the turn that
+ * does not come from the venue being traded against.
+ *
+ * `routeWad` IS `null` WHEN THERE IS NOTHING TO COMPARE — the route has not
+ * been captured yet, or the capture was an opposite-direction swap whose rate
+ * live-route.ts refuses to invert. The freshness arms still decide; the
+ * deviation arm cannot, and says nothing rather than guessing. That is what
+ * lets invest-tick.ts ask this the same question twice: once before the wrap,
+ * when only the feeds are known, and once with the route in hand.
+ */
+export function oracleConvertDecision(input: {
+  readonly sol: PythPriceUpdate | null;
+  readonly usdc: PythPriceUpdate | null;
+  /** The CHAIN's unix_timestamp, out of the Clock sysvar — never this host's wall clock. */
+  readonly nowUnixSeconds: bigint;
+  /** USDC raw per lamport x 1e18, as the captured swap actually traded, or null. */
+  readonly routeWad: bigint | null;
+}): ConvertDecision {
+  const { sol, usdc, nowUnixSeconds, routeWad } = input;
+  const rest = "so the SOL hop is skipped this turn and only the USDC the vault already holds is invested";
+
+  if (sol === null || usdc === null) {
+    const missing = [sol === null ? "SOL/USD" : null, usdc === null ? "USDC/USD" : null].filter((feed): feed is string => feed !== null);
+    return {
+      convert: false,
+      detail:
+        `the Pyth ${missing.join(" and ")} feed${missing.length === 1 ? "" : "s"} could not be read — absent, not owned by ` +
+        `the receiver program, or not carrying the feed id it was fetched for — ${rest}`,
+    };
+  }
+
+  const age = pythPublishAgeSeconds(olderPublishTime(sol, usdc), nowUnixSeconds);
+  if (age > MAX_PYTH_AGE_SECONDS) {
+    return {
+      convert: false,
+      detail:
+        `the Pyth pair's stalest publish is ${age} s behind the chain's clock, past the ${MAX_PYTH_AGE_SECONDS} s this ` +
+        `keeper will price a swap on (SOL/USD at ${sol.publishTime}, USDC/USD at ${usdc.publishTime}, chain clock ` +
+        `${nowUnixSeconds}) — ${rest}`,
+    };
+  }
+
+  let oracleWad: bigint;
+  try {
+    oracleWad = solUsdcPythRateWad(sol, usdc);
+  } catch (error) {
+    // A feed that decodes but quotes zero, a negative price or an absurd
+    // exponent is as unusable as one that did not decode at all.
+    return {
+      convert: false,
+      detail: `the Pyth pair carries no usable rate: ${error instanceof Error ? error.message : String(error)} — ${rest}`,
+    };
+  }
+
+  // Nothing to compare against: the deviation arm has no opinion, and the two
+  // arms above have already had theirs.
+  if (routeWad === null || routeWad <= 0n) return { convert: true };
+
+  const gap = routeWad > oracleWad ? routeWad - oracleWad : oracleWad - routeWad;
+  const deviationBps = (gap * 10_000n) / oracleWad;
+  if (deviationBps > MAX_PYTH_DEVIATION_BPS) {
+    return {
+      convert: false,
+      detail:
+        `the pool and the oracle disagree by ${deviationBps} bps, past the ${MAX_PYTH_DEVIATION_BPS} bps this keeper ` +
+        `will sell SOL across: the captured route implies ${routeWad} USDC raw per lamport x 1e18 and Pyth says ` +
+        `${oracleWad} — ${rest}`,
+    };
+  }
+  return { convert: true };
 }
 
 /**
