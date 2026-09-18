@@ -1,11 +1,12 @@
 // A Privy user record shaped like @privy-io/react-auth 3.36.0's own types (User, WalletWithMetadata),
 // and typed against them, so a change in the installed SDK's shape fails typecheck here rather than
 // passing tests on a record Privy no longer sends. Every address is a placeholder. SIGNER and POLICY
-// are this deployment's public keeper signer and policy ids: ids, not keys.
+// are this deployment's public keeper signer and policy ids: ids, not keys. SIGNER is sip-solana-keeper-2,
+// the signer since the 18-sep rotation; cbx133itb717vxp3dqwhk808 is retired (its key was lost).
 
 import type { LinkedAccountWithMetadata, User, WalletWithMetadata } from "@privy-io/react-auth";
 
-export const SIGNER = "cbx133itb717vxp3dqwhk808";
+export const SIGNER = "kyio853439oa78qfvmt853i4";
 export const POLICY = "jsuzcjv6njl0raqjjhzqe9fh";
 
 export const PENSION_KEY = "PensionKeyP1aceho1der111111111111111111111";
@@ -35,7 +36,7 @@ export function phantom(address: string = PENSION_KEY): WalletWithMetadata {
   };
 }
 
-/** A Privy embedded Solana wallet. Privy's server wallet id is null until the wallet has a signer. */
+/** A Privy embedded Solana wallet, as Privy's types describe it: the server wallet id is "Null if the wallet is not delegated". */
 export function embedded(
   address: string,
   walletIndex: number | null,
@@ -55,6 +56,26 @@ export function embedded(
     ...VERIFIED,
     ...extra,
   };
+}
+
+/**
+ * A trading wallet as this Privy app makes them, in TEE execution: walletClientType privy, a server wallet id, and
+ * recoveryMethod privy-v2 — the SDK's own test (isUnifiedWallet) for a wallet whose signers removeSigners clears one
+ * wallet at a time. It keeps its id whatever `delegated` says. That is what Privy's SDK assumes (its first grant on a
+ * wallet with no signer needs the id), not what Privy's types say, and nothing on this app has shown it yet: the
+ * re-seat's tests also run on a record that drops the id with the last signer (`{ id: null }`).
+ */
+export function teeWallet(
+  address: string,
+  walletIndex: number | null,
+  delegated: boolean,
+  extra: Partial<WalletWithMetadata> = {},
+): WalletWithMetadata {
+  return embedded(address, walletIndex, delegated, {
+    id: `wallet-id-${address.slice(0, 10).toLowerCase()}`,
+    recoveryMethod: "privy-v2",
+    ...extra,
+  });
 }
 
 /** A user whose first linked wallet is the one they signed in with, the way Privy fills `user.wallet`. */

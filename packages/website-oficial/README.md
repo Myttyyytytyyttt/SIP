@@ -160,12 +160,35 @@ wallet (step 4 in `.env.example`, and
 
 A trading wallet's badge says **Has a signer**, never "Seated". Privy's browser
 SDK reports that a wallet has a signer (`delegated`), not which signer or which
-policy, and the web holds no app secret to ask Privy's API. The row prints the
-check with its ids, `privy-policy verify --wallet <Privy wallet id> --policy <policy id>`
-(`packages/solana-keeper`, step 6 of the runbook). A wallet whose signer is
-another key quorum, or the keeper's without its policy, is its owner's to fix:
-Privy's `removeSigners`, which removes every signer on the wallet, then Grant
-keeper permission. The page does not offer the removal.
+policy, and the web holds no app secret to ask Privy's API (it refuses one by
+name). The row prints the check with its ids,
+`privy-policy verify --wallet <Privy wallet id> --policy <policy id>`
+(`packages/solana-keeper`, step 6 of the runbook).
+
+A wallet whose signer is wrong — another key quorum, the keeper's without its
+policy, or the keeper's from before its authorization key was replaced — is its
+owner's to fix, signed in, with **Re-seat keeper** on that wallet's row: Privy's
+`removeSigners`, which removes every signer on the wallet, then the same grant
+as Grant keeper permission. Because the page cannot tell a wrong signer from a
+right one, the button is on every row with a signer, behind a confirmation that
+says it removes every signer on this wallet. A re-seat that stops after the
+removal leaves the wallet with no signer — only its owner can sign — and the row
+then reads **No seat** with Grant keeper permission, one press. It is refused,
+before anything is sent, for a wallet Privy would not clear on its own: for any
+wallet but a TEE one with its own wallet id, Privy's removal revokes the signers
+of every wallet on the account.
+
+Privy's `addSigners` and `removeSigners` find the wallet in the user record of
+the render they came from, so that record is the one checked (`teeWalletId`).
+Whether a TEE wallet keeps its server id in Privy's record once its last signer
+is gone is not established — Privy's types say the id is null unless the wallet
+is delegated. So the re-seat sends the add in the same run, through the
+`addSigners` captured before the removal, and if the record dropped the id it
+stops as `id-dropped`, naming the id: a later Grant keeper permission comes from
+a render without it and cannot reach the wallet, and the row disables it with
+the reason. The order of a key rotation, with the rehearsal on a wallet with no
+funds that settles the question, is in
+[docs/runbooks/PRIVY_SOLANA.md](../../docs/runbooks/PRIVY_SOLANA.md), section 7.
 
 ## Deployment
 

@@ -7,7 +7,8 @@
 //
 // THE TRUST MODEL, ported from the EVM keeper's privy-signer.ts. This process
 // never holds a wallet key. It holds ONE authorization key, registered as a
-// signer on each trading wallet during onboarding (addSigners), and Privy acts
+// signer on each trading wallet (at its creation, or by its owner's Grant keeper
+// permission / Re-seat keeper on the web: addSigners), and Privy acts
 // only when a request carries that key's signature AND satisfies the wallet's
 // policy.
 //
@@ -82,10 +83,13 @@ export interface SolanaWalletSubmitter {
 
 /**
  * What resolving an address against Privy can answer. FOUR outcomes, not a
- * nullable — because "not our wallet", "our wallet, but it never granted the
- * keeper's signer" and "our signer is seated, bounded by nothing" look identical
- * from the outside and demand different fixes: nothing, re-running the
- * onboarding registration, and re-seating the signer WITH its policy.
+ * nullable — because "not our wallet", "our wallet, but it does not seat the
+ * keeper's current signer" and "our signer is seated, bounded by nothing" look
+ * identical from the outside and demand different fixes: nothing, the owner
+ * seating the current signer from the web (Re-seat keeper; Grant keeper
+ * permission for a wallet with no signer), and re-seating the signer WITH its
+ * policy (Re-seat keeper). A wallet seated before the keeper's authorization key
+ * was replaced is SIGNER_NOT_GRANTED with the old signer id in `granted`.
  */
 export type PrivySolanaResolution =
   | { readonly outcome: "SIGNER"; readonly signer: SolanaWalletSubmitter }
@@ -97,6 +101,24 @@ export type PrivySolanaResolution =
       /** What each of this signer's seats carries, in `privy-policy verify`'s own shape. */
       readonly overridePolicyIds: readonly (readonly string[])[];
     };
+
+/**
+ * The operator log's line for a wallet the keeper cannot sign for: what is wrong and who fixes it where. Only the
+ * wallet's owner, signed in on the web, can change its signers; the keeper never can.
+ */
+export function unsignableNote(resolution: Exclude<PrivySolanaResolution, { readonly outcome: "SIGNER" }>): string {
+  switch (resolution.outcome) {
+    case "NOT_A_PRIVY_WALLET":
+      return "wallet is not a Privy wallet in this app";
+    case "SIGNER_NOT_GRANTED":
+      return resolution.granted.length === 0
+        ? "wallet has no signer — its owner presses Grant keeper permission on the wallet's row at /wallets"
+        : "wallet does not seat the keeper's current signer (`granted` names the signers it does) — its owner presses " +
+            "Re-seat keeper on the wallet's row at /wallets";
+    case "SEAT_NOT_BOUNDED":
+      return "wallet seats the keeper's signer without the keeper's policy — its owner presses Re-seat keeper on the wallet's row at /wallets";
+  }
+}
 
 /** One wallet as Privy reports it: its id, and every signer seated on it with what bounds that seat. */
 export interface PrivyWalletEntry {
