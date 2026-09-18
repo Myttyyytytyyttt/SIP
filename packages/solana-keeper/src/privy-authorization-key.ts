@@ -58,7 +58,33 @@ import { classifyPrivyError, privyErrorStatus } from "./privy-policy.js";
 const PKCS8_P256_PREFIX = Buffer.from("308141020100301306072a8648ce3d020106082a8648ce3d030107042730250201010420", "hex");
 
 /** The two prefixes @privy-io/node strips before decoding, stripped the same way. */
-const KEY_PREFIXES = ["wallet-auth:", "wallet-api:"] as const;
+export const PRIVY_KEY_PREFIXES = ["wallet-auth:", "wallet-api:"] as const;
+
+/**
+ * The key with every shape the SDK tolerates taken off it: both prefixes, and
+ * every character base64 cannot hold — whitespace (a 64-column wrap, a stray
+ * newline) and the quotes a shell or a JSON paste leaves behind.
+ *
+ * IT IS THE FORM THE REDACTOR MUST KNOW. The needles registered for
+ * SIP_SOLANA_PRIVY_AUTHORIZATION_KEY used to be the raw environment value, its
+ * trimmed form and its wallet-auth:-stripped form — so when Railway held a
+ * quoted, wrapped or wallet-api:-prefixed paste (all of which this module
+ * deliberately blesses, and the runbook tells the owner are fine), the CANONICAL
+ * key was not a needle. Nothing in the process would then redact the string a
+ * library, a stack trace or a `detail` field would actually echo, and the
+ * tripwire could not catch it either: Redactor.contains' reassembly pass
+ * rebuilds hex needles only (HEX_BODY, packages/solana-log/src/log.ts), never
+ * base64. Both last-resort nets were off for exactly the configuration the
+ * runbook recommends. registerPrivyAuthorizationKey (src/config.ts) registers
+ * this form, so whatever shape sits in Railway, the key itself is a needle.
+ */
+export function canonicalPrivyAuthorizationKey(value: string): string {
+  let out = value;
+  for (const prefix of PRIVY_KEY_PREFIXES) out = out.replace(prefix, "");
+  // Base64 holds none of these, so removing them all cannot damage a key and
+  // cannot leave one half-cleaned.
+  return out.replace(/[\s"'`]/g, "");
+}
 
 /** The marker the SDK searches for: an OCTET STRING of 32 bytes, the private scalar. */
 const SCALAR_MARKER = Buffer.from([0x04, 0x20]);
@@ -107,9 +133,11 @@ export class AuthorizationKeyUnreadable extends Error {
  * otherwise, without a network call and without quoting the value.
  */
 export function derivePrivyPublicKey(value: string): string {
-  let stripped = value;
-  for (const prefix of KEY_PREFIXES) stripped = stripped.replace(prefix, "");
-  const der = Buffer.from(stripped, "base64");
+  // THE SAME CANONICALIZATION THE REDACTOR REGISTERS, so the string this derives
+  // from and the string that is a needle cannot drift apart. Node's base64
+  // decoder drops what it does not recognise, so removing the quotes and
+  // whitespace first changes no byte it would have produced.
+  const der = Buffer.from(canonicalPrivyAuthorizationKey(value), "base64");
   const marker = der.indexOf(SCALAR_MARKER);
   if (marker === -1) {
     throw new AuthorizationKeyUnreadable(
