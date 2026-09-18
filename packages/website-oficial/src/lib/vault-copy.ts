@@ -135,8 +135,15 @@ export const CREATE_LINK_COPY = {
   done: "Linked",
   /** The head of every stop after the wallet exists. */
   created: "Your trading wallet is created and nothing was lost.",
-  /** What to do with it, said after `created`. */
-  inTheList: "It is in the list below, with its seat as Privy records it and its own Link to vault.",
+  /**
+   * What to do with it, said after `created`. THE LINK IS PROMISED FOR AFTER THE
+   * CHAIN READ, never for now: a wallet created a moment ago is not in Privy's
+   * record yet, so the screen's read has not been asked about it and its row shows
+   * `notReadYet` with a re-read, not this button (LinkControl). The `not_ready`
+   * stop is exactly that moment, so a flat promise was reliably wrong there — and
+   * it named a control the owner could look at and not find.
+   */
+  inTheList: `It is in the list below, with its seat as Privy records it. Once SaverFi has read it on Solana, its row offers ${LINK_COPY.link}.`,
   /** No vault: the one thing that must happen first, and never done for the user — the rent never comes back. */
   needsVaultTitle: "Create your vault first",
   needsVault: (rent: string | null): string =>

@@ -56,7 +56,7 @@ import { TradingWalletRow } from "@/components/wallets/TradingWalletRow";
 import { VaultWriteLock, WriteLockContext, type WriteLock } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue } from "@/hooks/use-vault-state";
 import type { VaultApi, VaultStateJson, WalletLinkStatus } from "@/lib/vault-api";
-import { LINK_COPY } from "@/lib/vault-copy";
+import { CREATE_LINK_COPY, LINK_COPY } from "@/lib/vault-copy";
 
 const CLICK = { type: "click", target: {} };
 const LINK = Keypair.generate().publicKey.toBase58();
@@ -199,6 +199,17 @@ describe("TradingWalletRow's link control", () => {
     const { html } = render({}, TRADING_0, vi.fn(), [`${PENSION_KEY}:${OTHER_WALLET}`]);
     expect(buttons("Link to vault")[0]?.disabled).toBe(false);
     expect(html).not.toContain(LINK_COPY.sentNotConfirmed);
+  });
+
+  it("the card's sentence about this row promises its link only once the chain has read the wallet", () => {
+    // Same moment, two places: the row of a wallet the read has not covered shows no Link to vault, and
+    // the card's "It is in the list below…" — printed after every stop, including `not_ready`, which fires
+    // precisely because Privy has not listed the wallet yet — must not send the owner looking for it.
+    const { html } = render({ link: "absent" });
+    expect(html).toContain(CREATE_LINK_COPY.notReadYet);
+    expect(buttons(LINK_COPY.link)).toHaveLength(0);
+    expect(CREATE_LINK_COPY.inTheList).toContain(LINK_COPY.link);
+    expect(CREATE_LINK_COPY.inTheList).toContain("Once SaverFi has read it on Solana");
   });
 
   it("with the keeper's signer there is no such note", () => {
