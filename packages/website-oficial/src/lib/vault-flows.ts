@@ -96,8 +96,13 @@ import {
 import { FAILURE_COPY, LINK_COPY, PROGRESS_COPY, WITHDRAW_COPY } from "@/lib/vault-copy";
 import { deriveAtaAddress, deriveConfigAddress, deriveInvestAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
 
-/** TxProgress's steps, in order. "trading_signing" is the link's co-signature only. */
-export type FlowStep = "preparing" | "approve_pension" | "trading_signing" | "sending" | "confirming" | "done";
+/**
+ * TxProgress's steps, in order. "creating_wallet" belongs to the create-and-link
+ * chain alone (src/lib/create-and-link.ts), and "consent" and "trading_signing"
+ * to a link: the consent's signature before the transaction exists, and the
+ * co-signature on the bytes Phantom returned.
+ */
+export type FlowStep = "creating_wallet" | "preparing" | "consent" | "approve_pension" | "trading_signing" | "sending" | "confirming" | "done";
 
 export type FlowResult =
   | { readonly ok: true; readonly signature: string; readonly explorerUrl: string | null; readonly slot: number | null; readonly unitsConsumed: number | null }
@@ -618,6 +623,9 @@ export async function linkWalletFlow(deps: LinkWalletDeps, input: LinkWalletInpu
 
   let consent = input.consentSignature ?? null;
   if (consent === null) {
+    // Its own step: headless, but it is the trading wallet signing, and a chained
+    // create-and-link has to name what is being asked of which wallet.
+    deps.onStep?.("consent");
     try {
       consent = await trading.signMessageWithTrading(expected);
     } catch (error) {

@@ -95,6 +95,58 @@ export const LINK_COPY = {
   coSignMismatch: "Your trading wallet signed a different transaction than Phantom approved. Nothing was sent.",
 } as const;
 
+/**
+ * CREATING A TRADING WALLET AND LINKING IT, in one press.
+ *
+ * WHAT THE SEAT SENTENCES MAY CLAIM. A wallet is born seated: the keeper's signer
+ * with its policy goes into Privy's createWallet itself. So these words say the
+ * seat was asked for at creation, which is what happened, and never that Privy's
+ * record has been read back — the row's badge is the only thing that reads it,
+ * and it can only ever say a signer exists (src/lib/trading-wallets.ts).
+ *
+ * EVERY SENTENCE AFTER THE CREATE SAYS THE WALLET IS THERE. Once Privy has made
+ * it, the wallet is real and paid for whatever the link does next, so no refusal
+ * may read as "nothing happened".
+ */
+export const CREATE_LINK_COPY = {
+  /** The button, when the chain can take a link. */
+  button: "Create wallet and link it",
+  /** The button, when the chain cannot: it will only create. */
+  buttonCreateOnly: "Create wallet",
+  running: "Working…",
+  /** Said before anything is pressed, and again for the whole run: Phantom's prompt must never arrive unannounced. */
+  ahead: (linkRent: string): string =>
+    `One press does both. Privy creates the wallet with the keeper's seat, your trading wallet signs a consent naming this vault, ` +
+    `then Phantom asks you to approve and pay ${linkRent} SOL of rent (returned if you unlink), and your trading wallet co-signs. ` +
+    `Phantom's window opens partway through, after the wallet exists.`,
+  aheadCreateOnly: "This creates a trading wallet with the keeper's seat. Nothing is signed and nothing is paid.",
+  done: "Linked",
+  /** The head of every stop after the wallet exists. */
+  created: "Your trading wallet is created and nothing was lost.",
+  /** What to do with it, said after `created`. */
+  inTheList: "It is in the list below, with its seat as Privy records it and its own Link to vault.",
+  /** No vault: the one thing that must happen first, and never done for the user — the rent never comes back. */
+  needsVaultTitle: "Create your vault first",
+  needsVault: (rent: string | null): string =>
+    rent === null
+      ? "A trading wallet can only be linked to a vault, and this pension key has none yet. SaverFi does not create one for you: a vault costs rent that never comes back, and it holds a mode and limits you choose. Create it above, then link this wallet from its row."
+      : `A trading wallet can only be linked to a vault, and this pension key has none yet. SaverFi does not create one for you: a vault costs ${rent} SOL of rent that never comes back, and it holds a mode and limits you choose. Create it above, then link this wallet from its row.`,
+  goToVault: "Create your vault",
+  /** Privy answered without an address. */
+  noAddress:
+    "Privy created a wallet and did not say its address. Nothing is lost: it appears in the list below once Privy's record updates, and it can be linked from there.",
+  /** The chain read is not ready, so no link may be attempted from an unknown state. */
+  chainUnknown: "SaverFi could not read Solana just now, so the link was not attempted and nothing was signed.",
+  /** Privy's record has not reached this session's signer list. */
+  notReady:
+    "This session cannot sign for the new wallet yet, so the link was not attempted. Reload the page, then link it from its row.",
+  /** The link itself stopped. `detail` is the step's own words. */
+  linkStopped: (detail: string): string => `The wallet was created; the link did not finish. ${detail}`,
+  /** A row for a wallet the chain read has not covered yet. */
+  notReadYet: "SaverFi has not read this wallet on Solana yet.",
+  check: "Check again",
+} as const;
+
 export const INVEST_COPY = {
   title: "Investing",
   needsVault: "Create your vault first.",
@@ -180,7 +232,9 @@ export const WITHDRAW_COPY = {
 } as const;
 
 export const PROGRESS_COPY = {
+  creating_wallet: "Creating your trading wallet",
   preparing: "Preparing",
+  consent: "Trading wallet signs the consent",
   approve_pension: "Approve in Phantom",
   trading_signing: "Trading wallet signing",
   sending: "Sending",

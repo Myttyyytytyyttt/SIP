@@ -776,7 +776,8 @@ describe("linkWalletFlow", () => {
     expect(toHex(h.signMessageWithTrading.mock.calls[0]![0])).toBe(toHex(linkConsentMessage({ programId: SIP_PROGRAM_ID, wallet: h.tradingAddress, vault, owner: h.pensionKey })));
     expect(toHex(h.signWithPension.mock.calls[0]![0])).toBe(toHex(await builtTx(h, 1)));
     expect(toHex(h.signWithTrading.mock.calls[0]![0])).toBe(toHex(await h.signWithPension.mock.results[0]!.value));
-    expect(h.steps).toEqual(["preparing", "approve_pension", "trading_signing", "sending", "confirming", "done"]);
+    // "consent" is its own step: a chained create-and-link has to name which wallet is being asked for what.
+    expect(h.steps).toEqual(["preparing", "consent", "approve_pension", "trading_signing", "sending", "confirming", "done"]);
   });
 
   it.each<[string, (h: Harness) => unknown]>([
