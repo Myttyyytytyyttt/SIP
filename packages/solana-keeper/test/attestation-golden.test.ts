@@ -83,8 +83,13 @@ describe("the attestation golden vector", () => {
 });
 
 describe("--preflight", () => {
-  it("holds all ten invariants, the golden vector among them", () => {
-    expect(runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 10 });
+  // Fourteen, not ten: the last four BUILD settle_v2, wrap_sol, convert and
+  // invest. Under vitest they cannot fail the way they failed in production —
+  // vitest's interop hands anchor's BN over and Node's does not — which is the
+  // whole reason the real gate is `tsx bin/keeper.mts --preflight` in the
+  // Dockerfile. This case only holds the count and the vectors steady.
+  it("holds all fourteen invariants, the golden vector and the four builders among them", async () => {
+    expect(await runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 14 });
   });
 
   it("fails, naming the invariant, when the vector and the mirror disagree by one byte", async () => {
@@ -94,10 +99,10 @@ describe("--preflight", () => {
     vi.doMock("../src/attestation-golden.js", () => ({ GOLDEN_V2_HEX: `${GOLDEN_V2_HEX.slice(0, -2)}ff`, GOLDEN_V2_INPUTS }));
     try {
       const { runPreflight: preflightOverADriftedVector } = await import("../src/preflight.js");
-      expect(preflightOverADriftedVector()).toEqual({
+      expect(await preflightOverADriftedVector()).toEqual({
         ok: false,
         program: SIP_PROGRAM_ID,
-        invariants: 10,
+        invariants: 14,
         failure: 'invariant "the attestation mirror matches the program golden vector" is false, expected true',
       });
     } finally {

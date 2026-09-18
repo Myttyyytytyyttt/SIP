@@ -21,7 +21,7 @@
 // waiting for the next session. The threshold is the policy's own
 // min_investment, read from the chain rather than configured here twice.
 
-import * as anchor from "@coral-xyz/anchor";
+import type * as anchor from "@coral-xyz/anchor";
 import {
   ComputeBudgetProgram,
   Connection,
@@ -40,6 +40,7 @@ import {
 } from "@solana/spl-token";
 import { summarizeUpstreamError } from "@sip/solana-log";
 import { decodeVault, readInvestmentPolicy } from "./accounts.js";
+import { BN } from "./anchor-interop.js";
 import {
   CRANK_WRAP_RESERVE_LAMPORTS,
   USDC_MINT,
@@ -274,7 +275,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         // The policy goes in by name: wrap_sol loads it and refuses a vault
         // whose policy is disabled or names no conversion floor, both of which
         // this turn ruled out before it got here.
-        await method(program, "wrapSol")(new anchor.BN(wrap.amount.toString()))
+        await method(program, "wrapSol")(new BN(wrap.amount.toString()))
           .accountsPartial({
             crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta,
             tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
@@ -299,7 +300,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       const { minOut } = tightenMinOut(toConvert, convertFloor, route.observed);
       const args = { payer: vault, inputTokenAccount: wsolAta, outputTokenAccount: usdcAta, amountIn: toConvert, minAmountOut: minOut };
       await sendWithBudget(program.provider as anchor.AnchorProvider, crank,
-        await method(program, "convert")(new anchor.BN(toConvert.toString()), new anchor.BN(minOut.toString()), buildSwapV2Data(args))
+        await method(program, "convert")(new BN(toConvert.toString()), new BN(minOut.toString()), buildSwapV2Data(args))
           .accountsPartial({ crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta, vaultIn: usdcAta, venueProgram: RAYDIUM_CLMM })
           .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
           .instruction());
@@ -377,7 +378,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       const args = { payer: vault, inputTokenAccount: usdcAta, outputTokenAccount: targetAta, amountIn, minAmountOut: minOut };
       const before = await balanceOf(connection, targetAta);
       const signature = await sendWithBudget(program.provider as anchor.AnchorProvider, crank,
-        await method(program, "invest")(index, new anchor.BN(amountIn.toString()), new anchor.BN(minOut.toString()), buildSwapV2Data(args))
+        await method(program, "invest")(index, new BN(amountIn.toString()), new BN(minOut.toString()), buildSwapV2Data(args))
           .accountsPartial({ crank: crank.publicKey, vault, policy: policyPda, vaultIn: usdcAta, vaultTarget: targetAta, targetMint: mint, venueProgram: RAYDIUM_CLMM })
           .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
           .instruction());
