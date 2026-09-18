@@ -318,45 +318,105 @@ el viejo hay que volver a sentarla. Eso lo hace el dueño de la wallet desde la 
    que el servicio vuelva a arrancar. `SIP_SOLANA_PRIVY_POLICY_ID` **no cambia**.
 3. **Vercel: el signer id, y Redeploy.** En la web cambia `SIP_SOLANA_PRIVY_SIGNER_ID` al id nuevo **y haz Redeploy**
    ([VERCEL_WEB.md](VERCEL_WEB.md)). Una variable nueva no se aplica a lo que ya está desplegado: sin el Redeploy, el
-   botón del paso 5 volvería a sentar el signer viejo, el que ya no sirve. La política (`SIP_SOLANA_PRIVY_POLICY_ID`) no
+   botón del paso 7 volvería a sentar el signer viejo, el que ya no sirve. La política (`SIP_SOLANA_PRIVY_POLICY_ID`) no
    cambia.
 4. **Mira `/status` antes de tocar ninguna wallet.** `signing.authorizationKey` tiene que decir `matches`, con
    `signing.authorizationKeyAt` posterior al arranque, y `signing.privySignerId` tiene que ser el id nuevo. En este
    momento `signing.wallets` dirá `signable: 0`: es lo normal, porque todas las wallets siguen con el signer viejo, y
    cada una sale en `wallets` como `none (signer not granted)`. Si `authorizationKey` no dice `matches`, para aquí: la
    tabla de más arriba dice qué es cada valor. Pulsar botones no arregla una llave que no es la del quorum.
-5. **El botón, en cada wallet de trading.** En la web, con tu sesión iniciada con Phantom, abre la pantalla de wallets
-   (la web está en inglés; los nombres van tal cual salen en pantalla):
-   - la wallet de trading sale con la etiqueta **Has a signer**: Privy solo sabe decir que tiene *un* signer, no cuál, así
-     que el signer viejo se ve igual que uno bueno;
+
+   **Qué signer lleva cada wallet lo dice el log de Railway, no la web.** Busca la línea con `"wallet"` = la dirección
+   de esa wallet y un campo `granted`. Su `event` empieza por *"wallet has not granted the keeper's signer"* (el
+   vigilante de antes) o por *"wallet does not seat the keeper's current signer"* (el de ahora). `granted` son los ids de
+   signer que la wallet lleva **de verdad**, y es lo único que lo dice: la web solo sabe que hay *un* signer, no cuál. En
+   una wallet sentada antes de la rotación sale el id viejo (el 18-sep, `cbx133itb717vxp3dqwhk808`); si ya sale el
+   nuevo, esa wallet no necesita el botón. El vigilante escribe esa línea una vez después de cada arranque, y otra cada
+   vez que cambia; no la repite en cada barrido.
+5. **La web tiene que tener el botón.** **Re-seat keeper** solo existe en una web que lo incluya (la rama
+   `web-reseat-keeper`); el Redeploy del paso 3 vuelve a desplegar lo que ya hubiera en `main`, que puede no tenerlo.
+   Cuando esa rama esté en `main` y Vercel la haya desplegado, comprueba en `/wallets` dos cosas: cada wallet de trading
+   con la etiqueta **Has a signer** tiene el botón **Re-seat keeper**, y el pie de la tarjeta *Trading wallets* dice
+   *"New wallets seat the keeper's signer `kyio853…` with policy `jsuzcjv6…`"* (el id nuevo). Si no sale el botón, no
+   está desplegada; si el pie enseña el id viejo, falta el Redeploy del paso 3.
+6. **Ensaya en una wallet sin fondos antes que en la tuya.** Nadie ha visto todavía qué hace el registro de Privy con
+   una wallet de este tipo cuando se queda sin ningún signer: si sigue enseñando su id de wallet (lo que da por hecho el
+   SDK de Privy) o lo borra (lo que dicen sus tipos: *"Null if the wallet is not delegated"*). La web está hecha para
+   no perder la wallet en ninguno de los dos casos, pero esto se comprueba con una wallet vacía, no con la que tiene el
+   dinero.
+   - En `/wallets` pulsa **Create wallet and link it** (sin bóveda, el botón dice **Create wallet**). Cuando Phantom
+     pida aprobar el enlace, **recházalo**: la wallet queda creada y sin enlazar, y no se paga el alquiler del enlace.
+     Nace ya con el signer nuevo y la política `jsuzcjv6…`, y eso ya prueba que Privy acepta ese par.
+   - Apunta el **Privy wallet id** que sale en su fila.
+   - Pulsa **Re-seat keeper** en **esa** wallet nueva y luego **Remove every signer and re-seat**. Puede tardar algo
+     más de un minuto. Mientras tanto no cierres ni recargues: la ventana de *Manage wallets* no se deja cerrar, y el
+     navegador pregunta antes de recargar.
+   - Tienen que cumplirse las cuatro cosas:
+     1. sale un texto que empieza por **Done:**;
+     2. la etiqueta es **Has a signer**;
+     3. la fila **sigue enseñando la línea *Privy wallet id***, con el mismo id que apuntaste. Esto es lo que zanja la
+        pregunta;
+     4. `privy-policy verify --wallet <ese id> --policy jsuzcjv6njl0raqjjhzqe9fh` (sección 6) saca la línea
+        `signer granted with the override policy`. Con la wallet sin saldo, los tres intentos saldrán `INCONCLUSIVE`:
+        aquí da igual, lo que se ensaya es el asiento.
+   - Si quieres verlo por dentro: en las herramientas de desarrollador del navegador (pestaña *Network*), las
+     respuestas de `GET /api/v1/users/me` entre el quitar y el poner enseñan esa wallet con el mismo `id` y
+     `recovery_method: "privy-v2"` mientras `delegated` es `false`.
+   - **Si el ensayo acaba en cualquier cosa que no sea Done:**, y sobre todo si el mensaje empieza por *"While this
+     wallet had no signer, Privy's record stopped showing its server wallet id"*, **para: no toques tu wallet con
+     fondos** y pásale a Claude el mensaje entero. La wallet del ensayo no tiene nada que perder.
+   - **Opcional, decisión tuya:** antes de pulsar en tu wallet con fondos, pulsa **Export key** en su fila y guarda la
+     clave en el gestor de contraseñas. Mientras Privy tenga la wallet registrada con su id, la exportación funciona; con
+     la clave fuera, el dinero no depende de lo que haga el registro de Privy. A cambio es una copia más de la clave que
+     guardar bien.
+7. **El botón, en tu wallet.** Con el ensayo en **Done:**, en la web, con tu sesión iniciada con Phantom, abre la
+   pantalla de wallets (la web está en inglés; los nombres van tal cual salen en pantalla):
+   - la wallet de trading sale con la etiqueta **Has a signer**: Privy solo sabe decir que tiene *un* signer, no cuál,
+     así que el signer viejo se ve igual que uno bueno;
    - pulsa **Re-seat keeper**. Todavía no pasa nada: sale un aviso que dice que va a quitar **todos** los signers de esa
      wallet y enseña el signer y la política que pondrá después. **Mira que el signer sea el id nuevo.** Si enseña el
      viejo (en la rotación del 18-sep, `cbx133itb717vxp3dqwhk808`), la web no se ha redesplegado: pulsa **Cancel** y
      vuelve al paso 3;
-   - pulsa **Remove every signer and re-seat**. Privy quita los signers, la web espera a que Privy lo refleje y pone el
-     del vigilante con su política. Termina con un texto que empieza por **Done:** y la etiqueta vuelve a **Has a
-     signer**.
+   - pulsa **Remove every signer and re-seat**. Privy quita los signers, la web espera a que Privy lo refleje, pone el
+     del vigilante con su política y espera a que Privy enseñe ese también. Puede tardar algo más de un minuto; no
+     cierres ni recargues mientras tanto. Termina con un texto que empieza por **Done:** y la etiqueta vuelve a
+     **Has a signer**.
 
-   Hazlo primero con **una sola wallet** y mira `/status` (paso 6) antes de seguir con las demás. Si solo tienes una,
-   esa es la prueba.
+   Si tienes más de una wallet, hazlas **de una en una** y mira `/status` (paso 8) antes de pasar a la siguiente.
 
-   **Si se queda a medias**, la wallet sale con la etiqueta **No seat** y un mensaje en rojo que empieza por *"Every
-   signer is off this wallet now, but the keeper's seat was NOT added"*. Pulsa **Grant keeper permission** en esa misma
-   wallet: pone el signer que falta. Mientras tanto la wallet está a salvo, porque solo tú puedes firmar con ella; lo
-   único que pasa es que no se aparta nada de sus operaciones hasta que el asiento vuelva. Si recargas la página, sigue
-   saliendo **No seat** con el mismo botón.
+   **Si se queda a medias**, el mensaje en rojo dice qué pasó. En todos los casos la wallet está a salvo: o sigue con los
+   signers que tenía, o no tiene ninguno y solo tú puedes firmar con ella. Lo único que pasa es que no se aparta nada de
+   sus operaciones hasta que el asiento vuelva. Según cómo empiece el mensaje:
+
+   | empieza por | qué pasó | qué haces |
+   |---|---|---|
+   | *"Privy did not confirm that it removed this wallet's signers"* | no se añadió nada; la wallet puede seguir con el signer viejo | arregla lo que diga el mensaje y pulsa **Re-seat keeper** otra vez. Si para entonces la wallet sale **No seat**, pulsa **Grant keeper permission** |
+   | *"Privy accepted removing this wallet's signers, but its record still shows a signer"* | Privy aceptó quitarlos, pero su registro aún no lo refleja. La wallet puede estar ya sin signers aunque la etiqueta diga **Has a signer** | espera un minuto y pulsa **Re-seat keeper** otra vez |
+   | *"Every signer is off this wallet now, and Privy did not confirm that the keeper's seat was added"* | se quitaron los signers y Privy no confirmó el nuevo. La wallet sale **No seat**, también si recargas | pulsa **Grant keeper permission** en esa wallet |
+   | *"Every signer was removed from this wallet. Privy's reply to adding the keeper's signer then failed, but its record now shows a signer"* | casi seguro que el signer se puso: lo que falló es la respuesta de Privy | **no pulses Grant**. Comprueba con la línea `privy-policy verify` que trae el mensaje, o en `/status` tras el siguiente barrido |
+   | *"Every signer was removed from this wallet, and Privy accepted the keeper's signer with its policy, but its record has not shown the seat yet"* | Privy aceptó el signer, pero su registro va con retraso | **no pulses Grant**: lo añadiría dos veces. La web lo deja gris un minuto. Recarga en un minuto: tiene que salir **Has a signer** |
+   | *"While this wallet had no signer, Privy's record stopped showing its server wallet id"* | justo lo que el ensayo del paso 6 tenía que descartar. El mensaje trae el id y dice si el signer se volvió a poner | si dice que Privy lo aceptó, compruébalo con la línea `privy-policy verify` del mensaje. Si dice *"was NOT added back"*, no pulses nada más en esa wallet: **Grant keeper permission** sale gris mientras la fila no enseñe el *Privy wallet id*. Guarda el id y pásale el mensaje a Claude |
+   | *"Privy's record showed no signer on this wallet, then a signer this page did not add"* | apareció un signer que la web no puso, y la web no añadió nada | pulsa **Re-seat keeper** otra vez |
+   | *"This page's copy of Privy's record and the one just read name different server wallet ids"* | no se tocó nada | recarga la página y vuelve a probar |
 
    **Si el botón sale gris** con *"Re-seat is not available for this wallet"*, no la toques desde la web y avisa: Privy
    solo sabe quitar los signers de una wallet cada vez cuando es una wallet TEE con su propio id, y en cualquier otra
-   quitaría los de todas tus wallets a la vez.
-6. **Confirma en `/status`.** `signing.authorizationKey` sigue en `matches`; `signing.wallets` dice `signable` igual
+   quitaría los de todas tus wallets a la vez. Lo mismo si **Grant keeper permission** sale gris con *"Privy adds the
+   keeper's signer only to a TEE wallet it lists with its own server wallet id"*: el registro de Privy no enseña el id
+   de esa wallet, y desde la web no se le puede poner el signer.
+8. **Confirma en `/status`.** `signing.authorizationKey` sigue en `matches`; `signing.wallets` dice `signable` igual
    que `of` (N de N); y cada wallet sale en `wallets` con `signing` = `privy`, no `none (signer not granted)`. El
    vigilante lo lee en su siguiente barrido, así que puede tardar un poco: recarga. Desde ahí el cobro de esa wallet deja
    de ser `NO_SIGNER`, y el beneficio que estaba pendiente se cobra en los barridos siguientes.
-7. La **política no cambia**: el mismo `policy id` y la misma llave de administración. Va enganchada a cada asiento como
+
+   Si salió **Done:** pero tras varios barridos esa wallet sigue en `none (signer not granted)`, busca otra vez su línea
+   con `granted` en el log de Railway (paso 4). Si `granted` todavía nombra el id viejo, el cambio no llegó a Privy:
+   pasa `privy-policy verify` a esa wallet y pásale a Claude lo que diga. Si ya nombra el nuevo, el signer está y lo que
+   falla es otra cosa: mira qué dice `/status` en `signing` de esa wallet, y la sección 6.
+9. La **política no cambia**: el mismo `policy id` y la misma llave de administración. Va enganchada a cada asiento como
    override, así que el botón la vuelve a poner sola.
-8. Cuando todas estén sentadas otra vez, borra la llave vieja en el dashboard y repite la **sección 6** de esta guía
-   (*Verifica que rechaza lo que debe*) con la nueva.
+10. Cuando todas estén sentadas otra vez, borra la llave vieja en el dashboard y repite la **sección 6** de esta guía
+    (*Verifica que rechaza lo que debe*) con la nueva.
 
 Si la llave no se perdió sino que **se expuso** (alguien la vio, se pegó en un sitio que no tocaba), es el mismo camino
 pero sin esperar, como dice [SECRETS.md](SECRETS.md). Con un cuidado: el botón pone el signer que tenga configurado la
