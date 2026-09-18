@@ -32,6 +32,14 @@
 // AND IT DERIVES, IT DOES NOT ASK. Privy is never asked what our key is; the
 // public key is computed from the private one with node:crypto. @noble/curves,
 // which the SDK uses, is not a dependency of this package.
+//
+// ONE VERDICT IS EXPENSIVE TO GET WRONG. "not-in-quorum" is what sends an
+// operator down the lost-key path: a new key, a new signer id, and every trading
+// wallet re-seated by its user, with each user present. So it is said only about
+// a quorum whose membership is fully known — public keys and nothing else. A
+// quorum that also holds a nested quorum or a user holds keys this check never
+// sees, and an absence from the direct list proves nothing about them
+// (compareWithQuorum).
 
 import { createPrivateKey, createPublicKey } from "node:crypto";
 import { classifyPrivyError, privyErrorStatus } from "./privy-policy.js";
@@ -156,10 +164,27 @@ export interface RegisteredAuthorizationKey {
   readonly displayName: string | null;
 }
 
-/** A Privy key quorum, reduced to what this check reads. */
+/**
+ * A Privy key quorum, reduced to what this check reads.
+ *
+ * MEMBERSHIP IS THREE LISTS, NOT ONE. A KeyQuorum carries `authorization_keys`,
+ * `user_ids` AND `key_quorum_ids` — nested quorums, one level deep
+ * (@privy-io/node resources/key-quorums.d.ts). A key seated through a user or a
+ * nested quorum signs exactly as well as one in the direct list, and Privy
+ * validates a request's signature against what authorizes the WALLET, not
+ * against the id this keeper calls its signer. So the direct list alone is not
+ * the membership, and reading it as the membership turns "I cannot see it" into
+ * "it is not there" — which is the difference between an unproven pairing and
+ * the lost-key procedure, whose price is every trading wallet re-seated by its
+ * user.
+ */
 export interface KeyQuorumLike {
   readonly id: string;
   readonly authorizationKeys: readonly RegisteredAuthorizationKey[];
+  /** Nested key quorums that are members of this one. Their keys are not read here. */
+  readonly keyQuorumIds?: readonly string[];
+  /** Users that are members. Each authorizes with a key this check cannot see. */
+  readonly userIds?: readonly string[];
 }
 
 /**
@@ -173,6 +198,11 @@ export type AuthorizationKeyCheck =
   | "matches"
   /** The key is a key, and its public key is NOT one of the quorum's. Every settle will be refused. */
   | "not-in-quorum"
+  /**
+   * The key is not one of the quorum's OWN public keys, and the quorum has
+   * members this check cannot read. Unproven, not wrong.
+   */
+  | "members-unresolved"
   /** The value is not a P-256 private key at all; nothing was sent anywhere. */
   | "key-unreadable"
   /** Privy refused the app id and secret, so the quorum could not be read. */
@@ -189,6 +219,10 @@ export const AUTHORIZATION_KEY_MEANING: Readonly<Record<AuthorizationKeyCheck, s
   "not-in-quorum":
     "The key is a valid P-256 key, but its public key is not one this key quorum holds. Privy will refuse every " +
     "settle with 401 'No valid authorization signatures were provided' — this is that error's cause.",
+  "members-unresolved":
+    "The key is a valid P-256 key and is not one of this quorum's own public keys — but the quorum also has members " +
+    "this check cannot read (a nested key quorum, or a user), and a key held by one of those signs just as well. The " +
+    "pairing is UNPROVEN, not wrong.",
   "key-unreadable": "SIP_SOLANA_PRIVY_AUTHORIZATION_KEY does not hold a P-256 private key, so nothing could be derived from it.",
   "credentials-refused": "Privy refused the app id and secret, so the key quorum could not be read. This says nothing about the key.",
   "quorum-not-found": "This Privy app has no key quorum with that id. Either the id is wrong or it belongs to another app.",
@@ -205,6 +239,11 @@ export const AUTHORIZATION_KEY_NEXT: Readonly<Record<AuthorizationKeyCheck, stri
     "public key shown there with the derivedPublicKey printed above. They differ, so the private key in " +
     "SIP_SOLANA_PRIVY_AUTHORIZATION_KEY belongs to something else — set the variable to the private key of THAT quorum. " +
     "If that private key is lost, it cannot be recovered: see docs/runbooks/PRIVY_SOLANA.md.",
+  "members-unresolved":
+    "Do not regenerate anything yet, and do not re-seat any wallet. Open the Privy dashboard, Wallets → Authorization " +
+    "keys, and look at this key quorum's members: besides the public keys printed above it holds a nested key quorum or " +
+    "a user, and the keeper's key may well be registered there. Compare derivedPublicKey with the keys of those members " +
+    "by eye. Only a quorum that holds public keys and nothing else can prove a key is missing from it.",
   "key-unreadable": "Paste the key again, whole, from the password manager. Nothing was sent to Privy.",
   "credentials-refused":
     "Check SIP_SOLANA_PRIVY_APP_ID and SIP_SOLANA_PRIVY_APP_SECRET against the dashboard's app settings. Both belong " +
@@ -218,6 +257,19 @@ export const AUTHORIZATION_KEY_NEXT: Readonly<Record<AuthorizationKeyCheck, stri
 /** Which verdicts mean the keeper's signing is broken, as opposed to unproven. */
 export const AUTHORIZATION_KEY_BROKEN: ReadonlySet<AuthorizationKeyCheck> = new Set<AuthorizationKeyCheck>(["not-in-quorum", "key-unreadable"]);
 
+/**
+ * Members of the quorum whose keys this check cannot read, so an operator knows
+ * where to look instead of being told a key is missing.
+ *
+ * THE NESTED QUORUMS ARE NAMED AND THE USERS ARE COUNTED. A key quorum id is
+ * infrastructure an operator opens in the dashboard; a Privy user id names a
+ * person, and the count already says everything this verdict needs it to say.
+ */
+export interface UnresolvedQuorumMembers {
+  readonly keyQuorumIds: readonly string[];
+  readonly users: number;
+}
+
 /** What the check found, with the public data an operator compares by eye. */
 export interface AuthorizationKeyVerdict {
   readonly check: AuthorizationKeyCheck;
@@ -225,6 +277,8 @@ export interface AuthorizationKeyVerdict {
   readonly derivedPublicKey: string | null;
   /** The quorum's registered public keys, whitespace-normalized, or null when the quorum was not read. */
   readonly registered: readonly RegisteredAuthorizationKey[] | null;
+  /** What the quorum holds besides those keys, or null when the quorum was not read. */
+  readonly unresolvedMembers: UnresolvedQuorumMembers | null;
   readonly meaning: string;
   readonly next: string;
 }
@@ -233,10 +287,12 @@ const verdictOf = (
   check: AuthorizationKeyCheck,
   derivedPublicKey: string | null,
   registered: readonly RegisteredAuthorizationKey[] | null,
+  unresolvedMembers: UnresolvedQuorumMembers | null = null,
 ): AuthorizationKeyVerdict => ({
   check,
   derivedPublicKey,
   registered,
+  unresolvedMembers,
   meaning: AUTHORIZATION_KEY_MEANING[check],
   next: AUTHORIZATION_KEY_NEXT[check],
 });
@@ -247,12 +303,23 @@ const verdictOf = (
  * WHITESPACE IS NOT PART OF A KEY: both sides are normalized before they are
  * compared, and the normalized form is what is reported, so what an operator
  * reads is what was actually compared.
+ *
+ * "NOT IN" IS RESERVED FOR A QUORUM WHOSE MEMBERSHIP IS FULLY KNOWN. A quorum
+ * that also holds a nested quorum or a user holds keys this check never sees, so
+ * an absence from the direct list is not evidence of anything: the verdict is
+ * members-unresolved, whose own words say not to regenerate the key. The verdict
+ * this guards is the one that sends an operator down the lost-key path — a new
+ * key, a new signer id, and every trading wallet re-seated by its user — and
+ * spending that on a credential that signs perfectly well is the expensive way
+ * to be wrong.
  */
 export function compareWithQuorum(derivedPublicKey: string, quorum: KeyQuorumLike): AuthorizationKeyVerdict {
   const derived = normalizeSpki(derivedPublicKey);
   const registered = quorum.authorizationKeys.map((key) => ({ publicKey: normalizeSpki(key.publicKey), displayName: key.displayName }));
-  const matches = registered.some((key) => key.publicKey === derived);
-  return verdictOf(matches ? "matches" : "not-in-quorum", derived, registered);
+  const members: UnresolvedQuorumMembers = { keyQuorumIds: [...(quorum.keyQuorumIds ?? [])], users: quorum.userIds?.length ?? 0 };
+  if (registered.some((key) => key.publicKey === derived)) return verdictOf("matches", derived, registered, members);
+  const unresolved = members.keyQuorumIds.length + members.users;
+  return verdictOf(unresolved > 0 ? "members-unresolved" : "not-in-quorum", derived, registered, members);
 }
 
 /** The verdict for a value that could not be read as a key. Nothing was sent anywhere. */

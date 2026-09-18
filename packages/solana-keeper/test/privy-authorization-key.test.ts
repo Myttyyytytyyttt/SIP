@@ -162,10 +162,61 @@ describe("compareWithQuorum", () => {
     expect(verdict.registered).toEqual([]);
   });
 
+  // THE EXPENSIVE VERDICT, GUARDED. A KeyQuorum's membership is three lists —
+  // authorization_keys, user_ids AND key_quorum_ids (nested, one level deep) —
+  // and this check reads only the first. A keeper's key seated through a nested
+  // quorum or a user signs perfectly well and is absent from the direct list, so
+  // calling that not-in-quorum tells an operator the 401's cause has been found
+  // and sends him to regenerate a working credential: new key, new signer id,
+  // every trading wallet re-seated by its user, with each user present.
+  describe("a quorum with members this check cannot read", () => {
+    for (const [what, over] of [
+      ["a nested key quorum", { keyQuorumIds: ["cbxnested00000000000001"] }],
+      ["a member user", { userIds: ["did:privy:someuser0000001"] }],
+      ["both", { keyQuorumIds: ["cbxnested00000000000001"], userIds: ["did:privy:someuser0000001"] }],
+    ] as const) {
+      it(`says members-unresolved, not not-in-quorum, for ${what}`, () => {
+        const verdict = compareWithQuorum(pair.publicKey, { ...quorum(other.publicKey), ...over });
+        expect(verdict.check).toBe("members-unresolved");
+        // UNPROVEN IS NOT BROKEN: this must not page critical, and must not send
+        // anyone to the lost-key procedure.
+        expect(AUTHORIZATION_KEY_BROKEN.has(verdict.check)).toBe(false);
+        expect(verdict.next).toContain("Do not regenerate anything yet");
+        // AND IT SAYS WHERE TO LOOK, without naming a person.
+        expect(verdict.unresolvedMembers).toEqual({
+          keyQuorumIds: over.keyQuorumIds ?? [],
+          users: over.userIds?.length ?? 0,
+        });
+        expect(JSON.stringify(verdict)).not.toContain("did:privy:");
+      });
+    }
+
+    // The key being THERE settles it whatever else the quorum holds.
+    it("still matches when the derived key is one of the direct keys", () => {
+      const verdict = compareWithQuorum(pair.publicKey, {
+        ...quorum(pair.publicKey),
+        keyQuorumIds: ["cbxnested00000000000001"],
+        userIds: ["did:privy:someuser0000001"],
+      });
+      expect(verdict.check).toBe("matches");
+    });
+
+    // A quorum of public keys and nothing else is the only one whose membership
+    // is fully known, and the only one an absence can be proved against.
+    it("keeps not-in-quorum for a quorum whose membership is fully known", () => {
+      for (const over of [{}, { keyQuorumIds: [] }, { userIds: [] }, { keyQuorumIds: [], userIds: [] }]) {
+        const verdict = compareWithQuorum(pair.publicKey, { ...quorum(other.publicKey), ...over });
+        expect(verdict.check).toBe("not-in-quorum");
+        expect(verdict.unresolvedMembers).toEqual({ keyQuorumIds: [], users: 0 });
+      }
+    });
+  });
+
   it("carries a meaning and a next step for every verdict", () => {
     for (const verdict of [
       compareWithQuorum(pair.publicKey, quorum(pair.publicKey)),
       compareWithQuorum(pair.publicKey, quorum(other.publicKey)),
+      compareWithQuorum(pair.publicKey, { ...quorum(other.publicKey), keyQuorumIds: ["cbxnested00000000000001"] }),
       unreadableKeyVerdict(),
       notCheckedVerdict(),
       quorumReadVerdict(new NotFoundError(404, {}, undefined, headers), null),

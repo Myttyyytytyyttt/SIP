@@ -466,6 +466,37 @@ describe("key", () => {
     }
   });
 
+  // A QUORUM CAN HOLD MEMBERS THIS COMMAND CANNOT READ — a nested key quorum or a
+  // user — and a key seated through one of those signs perfectly well. Calling
+  // that not-in-quorum sends the owner down the lost-key path in the runbook:
+  // new key, new signer id, every trading wallet re-seated by its user.
+  it("says members-unresolved, not not-in-quorum, when the quorum has members it cannot read", async () => {
+    const stranger = await generateP256KeyPair();
+    const result = await run(["key"], {
+      env: keyEnv,
+      privy: {
+        getKeyQuorum: async () => ({
+          id: SIGNER_ID,
+          authorizationKeys: [{ publicKey: stranger.publicKey, displayName: "someone else" }],
+          keyQuorumIds: ["cbxnested00000000000001"],
+          userIds: ["did:privy:someuser0000001"],
+        }),
+      },
+    });
+    expect(result.code).toBe(1);
+    expect(verdict(result)).toMatchObject({
+      verdict: "members-unresolved",
+      derivedPublicKey: signerPair.publicKey,
+      nestedKeyQuorumIds: ["cbxnested00000000000001"],
+      memberUsers: 1,
+    });
+    expect(String(verdict(result)["next"])).toContain("Do not regenerate anything yet");
+    // NOT PROOF OF A MISMATCH: the line that means "stop, this is broken" stays quiet.
+    expect(result.stderr.map((line) => line["event"])).not.toContain("the keeper cannot sign for any wallet");
+    // AND IT NAMES NO PERSON: a member user is counted, never identified.
+    expect(result.text).not.toContain("did:privy:");
+  });
+
   it("takes no arguments, and says so", async () => {
     const result = await run(["key", "--policy", POLICY_ID], { env: keyEnv });
     expect(result.code).toBe(2);

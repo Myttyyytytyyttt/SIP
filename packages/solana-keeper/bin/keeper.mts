@@ -355,6 +355,8 @@ async function establishAuthorizationKey(): Promise<void> {
     // and the private key is in neither half of it.
     derivedPublicKey: verdict.derivedPublicKey,
     registeredPublicKeys: verdict.registered?.map((entry) => entry.publicKey) ?? null,
+    nestedKeyQuorumIds: verdict.unresolvedMembers?.keyQuorumIds ?? null,
+    memberUsers: verdict.unresolvedMembers?.users ?? null,
     meaning: verdict.meaning,
     next: verdict.next,
     ...(detail === null ? {} : { detail }),

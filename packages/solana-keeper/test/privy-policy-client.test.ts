@@ -94,7 +94,12 @@ describe("reading a key quorum", () => {
     const { fetch, sent } = answering(200, quorumBody);
     const quorum = await createPrivyPolicyClient(credentials, { fetch }).getKeyQuorum("keeperSignerQuorum0001");
 
-    expect(quorum).toEqual({ id: "keeperSignerQuorum0001", authorizationKeys: [{ publicKey: quorumBody.authorization_keys[0]!.public_key, displayName: "sip-solana-keeper" }] });
+    expect(quorum).toEqual({
+      id: "keeperSignerQuorum0001",
+      authorizationKeys: [{ publicKey: quorumBody.authorization_keys[0]!.public_key, displayName: "sip-solana-keeper" }],
+      keyQuorumIds: [],
+      userIds: [],
+    });
     expect(sent).toHaveLength(1);
     expect([sent[0]!.method, new URL(sent[0]!.url).pathname]).toEqual(["GET", "/v1/key_quorums/keeperSignerQuorum0001"]);
     expect(new URL(sent[0]!.url).origin).toBe(PRIVY_API_URL);
@@ -115,6 +120,28 @@ describe("reading a key quorum", () => {
     expect(sent).toHaveLength(1);
     expect([sent[0]!.method, new URL(sent[0]!.url).pathname]).toEqual(["GET", "/v1/key_quorums/keeperSignerQuorum0001"]);
     expect(sent[0]!.headers.get("privy-authorization-signature")).toBeNull();
+  });
+
+  // MEMBERSHIP IS THREE LISTS. Both mappers used to keep only authorization_keys,
+  // so a quorum with a nested quorum or a user came back looking flat — and the
+  // check then read "I cannot see it" as "it is not there" and paged critical for
+  // a key Privy accepts.
+  it("carries the nested quorums and the member users, through both mappers", async () => {
+    const nested = {
+      ...quorumBody,
+      user_ids: ["did:privy:someuser0000001"],
+      key_quorum_ids: ["cbxnested00000000000001", "cbxnested00000000000002"],
+    };
+    const expected = { keyQuorumIds: nested.key_quorum_ids, userIds: nested.user_ids };
+
+    expect(await createPrivyPolicyClient(credentials, { fetch: answering(200, nested).fetch }).getKeyQuorum("keeperSignerQuorum0001")).toMatchObject(expected);
+
+    const { privateKey } = await generateP256KeyPair();
+    const fromKeeper = await readPrivyKeyQuorum(
+      { ...credentials, authorizationKey: new Secret(privateKey, "privyAuthorizationKey"), fetch: answering(200, nested).fetch },
+      "keeperSignerQuorum0001",
+    );
+    expect(fromKeeper).toMatchObject(expected);
   });
 
   it("propagates Privy's status, so 401, 404 and everything else stay distinguishable", async () => {

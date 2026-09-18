@@ -48,12 +48,18 @@ export function createPrivyPolicyClient(
       // is what makes `key` possible: the credentials already proven good read
       // the ground truth the questionable credential is measured against.
       const quorum = await privy.keyQuorums().get(keyQuorumId);
+      // EVERY KIND OF MEMBER, not only the direct keys. A nested quorum or a
+      // user holds keys that authorize exactly as these do and that this read
+      // cannot see, and compareWithQuorum needs to know they exist before it
+      // calls a key missing.
       return {
         id: quorum.id,
         authorizationKeys: (quorum.authorization_keys ?? []).map((entry) => ({
           publicKey: entry.public_key,
           displayName: entry.display_name,
         })),
+        keyQuorumIds: quorum.key_quorum_ids ?? [],
+        userIds: quorum.user_ids ?? [],
       };
     },
 

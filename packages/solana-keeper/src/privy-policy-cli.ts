@@ -608,6 +608,10 @@ function report(verdict: AuthorizationKeyVerdict): Record<string, unknown> {
     derivedPublicKey: verdict.derivedPublicKey,
     registeredPublicKeys: verdict.registered?.map((entry) => entry.publicKey) ?? null,
     registeredNames: verdict.registered?.map((entry) => entry.displayName) ?? null,
+    // WHAT ELSE THE QUORUM HOLDS, so "not among these keys" is read next to the
+    // members whose keys this command never saw.
+    nestedKeyQuorumIds: verdict.unresolvedMembers?.keyQuorumIds ?? null,
+    memberUsers: verdict.unresolvedMembers?.users ?? null,
     meaning: verdict.meaning,
     next: verdict.next,
   };

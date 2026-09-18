@@ -263,9 +263,14 @@ export async function buildPrivySolanaIndex(
  */
 export async function readPrivyKeyQuorum(config: PrivySolanaConfig, keyQuorumId: string): Promise<KeyQuorumLike> {
   const quorum = await clientFor(config).keyQuorums().get(keyQuorumId);
+  // EVERY KIND OF MEMBER (see createPrivyPolicyClient's getKeyQuorum): a direct
+  // list read as the whole membership makes "I cannot see it" read as "it is not
+  // there", and the boot check would page critical for a key Privy accepts.
   return {
     id: quorum.id,
     authorizationKeys: (quorum.authorization_keys ?? []).map((entry) => ({ publicKey: entry.public_key, displayName: entry.display_name })),
+    keyQuorumIds: quorum.key_quorum_ids ?? [],
+    userIds: quorum.user_ids ?? [],
   };
 }
 
