@@ -201,7 +201,17 @@ es cada cuánto barre.
 
 ### Cómo se ve cuando va bien
 
-La primera línea larga tiene que decir esto (el orden puede cambiar):
+**La primera línea de las dos órdenes (la revisión previa y el vigilante) es siempre este aviso, y no pasa nada:**
+
+```
+"level":"warn" "event":"console" "text":"bigint: Failed to load bindings, pure JS will be used (try npm run rebuild?)"
+```
+
+Es una pieza opcional escrita en C que no está compilada en tu Mac, así que se usa la versión en JavaScript. Railway
+imprime exactamente lo mismo. **Lo único que significa «para»** es `preflight failed` en la revisión previa, o una
+línea con `"level":"error"` en el vigilante.
+
+Después del aviso, la primera línea larga tiene que decir esto (el orden puede cambiar):
 
 ```
 "programDeployed":true
