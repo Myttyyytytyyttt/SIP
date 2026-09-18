@@ -30,6 +30,7 @@ import type { WindowMeasurement } from "../src/measure-window.js";
 import { ATTESTATION_MESSAGE_LEN, MODE_PROFIT, MODE_VOLUME, attestationMessage } from "../src/program-scripts.js";
 import {
   ATTESTATION_VALIDITY_SLOTS,
+  NO_SIGNER_TITLE,
   SETTLE_RETRY_CRITICAL_AFTER,
   ZERO_BASE_MIN_TXS,
   activeBps,
@@ -41,6 +42,7 @@ import {
   expectedContribution,
   measurementStart,
   modeDecision,
+  noSignerDetail,
   pauseDecision,
   recordCarry,
   reserveDecision,
@@ -819,6 +821,21 @@ describe("the alert rule", () => {
         context: { wallet: "Wallet1111", vault: "Vault1111" },
       });
     }
+  });
+
+  it("NO_SIGNER sends the owner to the web's buttons, never to an onboarding step that does not exist", () => {
+    // After a key rotation the wallet DID grant a signer — the keeper's old one — so "never granted" is false, and the
+    // web has no "step 3": the fix is Re-seat keeper on the wallet's row (Grant keeper permission for No seat).
+    const wallet = Keypair.generate().publicKey;
+    const detail = noSignerDetail(wallet);
+    expect(detail).toContain(wallet.toBase58());
+    expect(detail).toContain("Re-seat keeper on the wallet's row at /wallets");
+    expect(detail).toContain("Grant keeper permission");
+    expect(detail).toContain('"none (signer not granted)"');
+    expect(detail).not.toMatch(/onboarding|step 3/i);
+    const rule = settleAlert("NO_SIGNER", where, detail);
+    expect(rule.fire?.title).toBe(NO_SIGNER_TITLE);
+    expect(NO_SIGNER_TITLE).not.toMatch(/never granted/i);
   });
 
   it("names the wallet and the vault on a failed settle, and the wallet on a warning", () => {

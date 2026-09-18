@@ -67,8 +67,10 @@ export type SettleOutcome =
   | "INCOMPLETE"
   /**
    * LIVE ONLY. The wallet has no signer this keeper can use. A RESTING state,
-   * not a failure: it repeats every sweep until the user re-runs onboarding, so
-   * the keeper dedupes it rather than logging a settle FAILED each minute. A dry
+   * not a failure: it repeats every sweep until the wallet's owner seats the
+   * keeper's current signer (Re-seat keeper on the web's wallets screen, or Grant
+   * keeper permission for a wallet with no signer at all), so the keeper dedupes it
+   * rather than logging a settle FAILED each minute. A dry
    * run never reports it, because resolving a signer needs the Privy secrets a
    * dry run does not read.
    */
@@ -190,10 +192,24 @@ export function pauseDecision(
   };
 }
 
+/**
+ * Why a live wallet is not settled, and where the fix is. NO_SIGNER has more than one cause, and this wallet's
+ * signing route on /status names it. The commonest one on a live deployment is a signer the wallet never had or no
+ * longer matches — the keeper's authorization key was replaced, and the wallet still seats the old signer id —
+ * which only the wallet's owner can fix, signed in on the web's wallets screen.
+ */
+/**
+ * The NO_SIGNER alert's title. Not "never granted": after a key rotation the wallet DID grant a signer, the keeper's
+ * old one, and Privy still lists it.
+ */
+export const NO_SIGNER_TITLE = "A linked wallet has no signer the keeper can use";
+
 export function noSignerDetail(wallet: PublicKey): string {
   return (
-    `no signer for trading wallet ${wallet.toBase58()} — settle_v2 is pushed BY the wallet, ` +
-    "so the keeper needs its Privy signer (or, on localnet, a local key); re-run onboarding step 3"
+    `no signer for trading wallet ${wallet.toBase58()} — settle_v2 is pushed BY the wallet, so the keeper needs its ` +
+    "current Privy signer seated on it (or, on localnet, a local key). This wallet's signing route on /status says " +
+    'why. For "none (signer not granted)" or "none (seat not bounded by the keeper\'s policy)", its owner presses ' +
+    "Re-seat keeper on the wallet's row at /wallets (or Grant keeper permission, if the row says No seat)"
   );
 }
 
@@ -669,8 +685,9 @@ export const SETTLE_RETRY_CRITICAL_AFTER = 3;
  * frontier cannot advance until what the walk could not see is fixed (a broken
  * chain, an endpoint that will not serve the span or its transactions, a span
  * past the walk's pages; a span past the read limit is no longer one of them, it
- * settles a prefix at a time), and NO_SIGNER, which repeats until the user re-runs
- * onboarding. Both warn, and each outcome other than itself clears it.
+ * settles a prefix at a time), and NO_SIGNER, which repeats until the wallet's
+ * owner seats the keeper's current signer from the web (Re-seat keeper, or Grant
+ * keeper permission). Both warn, and each outcome other than itself clears it.
  *
  * A PAUSE IS DELIBERATE, NOT MONEY LOST, AND A THIN WALLET IS THE TRADER'S. PAUSED
  * also explains the settles refused with VaultPaused or ProtocolPaused while it
@@ -730,7 +747,7 @@ export function settleAlert(
       };
     case "NO_SIGNER":
       return {
-        fire: { key: noSigner, severity: "warn", title: "A linked wallet never granted the keeper's signer", detail, context: { wallet } },
+        fire: { key: noSigner, severity: "warn", title: NO_SIGNER_TITLE, detail, context: { wallet } },
         clear: [retry, incomplete],
       };
     case "IDLE":

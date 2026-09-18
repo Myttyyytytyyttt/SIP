@@ -71,6 +71,7 @@ import {
   buildPrivySolanaIndex,
   createPrivySolanaSigner,
   readPrivyKeyQuorum,
+  unsignableNote,
   type PrivySolanaConfig,
   type PrivyWalletEntry,
   type SolanaWalletSubmitter,
@@ -888,8 +889,8 @@ async function sweep(): Promise<void> {
                 config.privyPolicyId ?? undefined,
               );
               // AN UNBOUNDED SEAT PAGES, unlike the other two refusals. Those
-              // are an unfinished onboarding, and /status showing them is
-              // enough; this one is the credential on Railway being able to do
+              // are the owner's to fix from the web (Re-seat keeper, Grant
+              // keeper permission), and /status showing them is enough; this one is the credential on Railway being able to do
               // anything at all with that wallet, which nobody would notice by
               // reading a status page. Cleared on every other outcome, so a
               // re-seated wallet alerts again if it ever breaks twice.
@@ -921,11 +922,7 @@ async function sweep(): Promise<void> {
                       : "none (seat not bounded by the keeper's policy)";
                 changes.change(
                   `signer:${wallet}`,
-                  resolution.outcome === "NOT_A_PRIVY_WALLET"
-                    ? "wallet is not a Privy wallet in this app"
-                    : resolution.outcome === "SIGNER_NOT_GRANTED"
-                      ? "wallet has not granted the keeper's signer — re-run the onboarding registration (step 3)"
-                      : "wallet seats the keeper's signer without the keeper's policy — re-seat it with the policy (step 3)",
+                  unsignableNote(resolution),
                   {
                     wallet,
                     ...(resolution.outcome === "SIGNER_NOT_GRANTED" ? { granted: resolution.granted } : {}),

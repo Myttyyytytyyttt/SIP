@@ -22,6 +22,7 @@ import {
   assertSettleShape,
   buildPrivySolanaIndex,
   createPrivySolanaSigner,
+  unsignableNote,
   type PrivySolanaConfig,
   type SolanaWalletSubmitter,
 } from "../src/privy-signer.js";
@@ -347,5 +348,21 @@ describe("assertSettleShape", () => {
     for (const [name, transaction, message] of cases) {
       expect(() => assertSettleShape(transaction, settle.programId, settle.wallet), name).toThrow(message);
     }
+  });
+});
+
+describe("unsignableNote: the operator log's line for a wallet the keeper cannot sign for", () => {
+  it("sends each case to the button on the web that fixes it, and never to an onboarding step", () => {
+    // A wallet seated before a key rotation: it granted a signer, the keeper's OLD one.
+    const rotated = unsignableNote({ outcome: "SIGNER_NOT_GRANTED", granted: ["oldKeeperSigner"] });
+    expect(rotated).toContain("does not seat the keeper's current signer");
+    expect(rotated).toContain("Re-seat keeper on the wallet's row at /wallets");
+    const none = unsignableNote({ outcome: "SIGNER_NOT_GRANTED", granted: [] });
+    expect(none).toContain("Grant keeper permission on the wallet's row at /wallets");
+    const unbounded = unsignableNote({ outcome: "SEAT_NOT_BOUNDED", granted: ["keeper"], overridePolicyIds: [[]] });
+    expect(unbounded).toContain("without the keeper's policy");
+    expect(unbounded).toContain("Re-seat keeper on the wallet's row at /wallets");
+    expect(unsignableNote({ outcome: "NOT_A_PRIVY_WALLET" })).toBe("wallet is not a Privy wallet in this app");
+    for (const note of [rotated, none, unbounded]) expect(note).not.toMatch(/onboarding|step 3|re-run/i);
   });
 });
