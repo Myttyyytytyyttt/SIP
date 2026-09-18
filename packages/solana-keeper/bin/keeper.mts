@@ -54,7 +54,7 @@ import {
   wrapShortStreak,
 } from "../src/invest-decision.js";
 import { runInvestTick } from "../src/invest-tick.js";
-import { SERVICE, createChangeLog, createKeeperLogger } from "../src/keeper-log.js";
+import { SERVICE, createChangeLog, createKeeperLogger, scrubbedForExport } from "../src/keeper-log.js";
 import { runPreflight } from "../src/preflight.js";
 import {
   AUTHORIZATION_KEY_BROKEN,
@@ -221,6 +221,13 @@ const readModel = SolanaReadModel.create(config.databaseUrl, (message, fields) =
 const alerter = createAlerter({
   webhookUrl: config.alertWebhook,
   log: (severity, line) => log[severity === "critical" ? "error" : "warn"](`alert ${severity}`, { detail: line }),
+  // THE BODY LEAVES THE BOX, SO IT PASSES WHAT A LOG LINE PASSES. alerts.ts
+  // builds its webhook payload itself and POSTs it raw; only the line above goes
+  // through the redacting logger. Every alert `detail` in this file is either a
+  // summarized upstream error or an exception's own text — anchor's, the SDK's,
+  // a driver's — and the byte-run net exists precisely for a key none of them
+  // ever registered.
+  sanitize: (text) => scrubbedForExport(text),
 });
 
 const changes = createChangeLog(log);
