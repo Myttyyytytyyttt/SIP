@@ -213,8 +213,17 @@ Y unos segundos después, una línea por cada wallet enlazada. Con ganancia pend
 ```
 
 `DRY RUN — would settle …` es la frase que buscas: significa **«esto es exactamente lo que el de Railway va a
-cobrar»**, sin haber enviado nada. Si en vez de eso sale `"settle":"THREW"`, el texto que va detrás es el fallo, y es
-el mismo que verías en Railway.
+cobrar»**, sin haber enviado nada.
+
+Si una wallet falla, en la **ventana** no verás `"settle":"THREW"` — eso no se escribe nunca en el terminal. Lo que
+sale es una línea roja de error así, y la causa va en `"detail"`:
+
+```
+"level":"error" "event":"wallet turn threw" "wallet":"9QX5…" "detail":"TypeError: anchor.BN is not a constructor"
+```
+
+`"settle":"THREW"` es como se ve ese mismo fallo en `curl -s http://localhost:8099/status` (abajo), no en el terminal.
+Es el mismo fallo que verías en Railway, en los dos sitios.
 
 Desde otra ventana de Terminal.app:
 
