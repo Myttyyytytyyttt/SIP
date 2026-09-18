@@ -236,7 +236,9 @@ Mira `verdict`:
 | verdict | qué significa | qué haces |
 |---|---|---|
 | `matches` | **la llave que acabas de pegar** está registrada en ese quorum y basta su firma sola (sale con código 0) | nada con esa llave. Antes de buscar en otro sitio, asegúrate de que es la misma que hay en Railway: mira `signing.authorizationKey` en `/status`. Si ahí también dice `matches`, el problema es el asiento o la política: paso 6 |
-| `not-in-quorum` | la llave es una llave válida, pero **su clave pública no es ninguna de las de ese quorum**. Esta es la causa del 401 | sigue [No coincide](#no-coincide-la-llave-no-es-la-de-ese-quorum) aquí abajo |
+| `not-in-quorum` | la llave es una llave válida, pero **su clave pública no es ninguna de las de ese quorum**, y el quorum no tiene más miembros que esas claves. Esta es la causa del 401 | sigue [No coincide](#no-coincide-la-llave-no-es-la-de-ese-quorum) aquí abajo |
+| `members-unresolved` | la clave no está entre las del quorum, **pero el quorum tiene además otros miembros que el comando no puede leer** (otro key quorum anidado, o un usuario), y una llave que esté ahí firma igual de bien. No prueba nada | **no cambies ni regeneres nada todavía.** Mira ese quorum en el dashboard: el comando te imprime los ids anidados (`nestedKeyQuorumIds`) y cuántos usuarios tiene. Compara `derivedPublicKey` con las claves de esos miembros |
+| `threshold-above-one` | la llave **sí** está registrada, pero el quorum exige más de una firma y el vigilante manda una sola. Privy rechaza igual | no toques la llave. En **Wallets → Authorization keys**, deja el `threshold` de ese quorum en 1 (o quítale los miembros que ganó) |
 | `key-unreadable` | lo que hay en `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY` no es una llave P-256. No se mandó nada a ningún sitio | vuelve a pegarla entera desde el gestor |
 | `credentials-refused` | Privy rechazó el app id o la app secret, así que no pudo ni leer el quorum. **No dice nada de la llave** | comprueba `SIP_SOLANA_PRIVY_APP_ID` y la app secret en el dashboard, en la app del paso 1 |
 | `quorum-not-found` | esta app de Privy no tiene ningún key quorum con ese id | comprueba `SIP_SOLANA_PRIVY_SIGNER_ID` en **Wallets → Authorization keys**. Un id de otra app aquí se ve como si no existiera |
@@ -311,16 +313,34 @@ con prisa y en otro orden: primero quitas el signer viejo de las wallets, luego 
 
 ### El vigilante ya lo dice solo al arrancar
 
-Desde ahora, un vigilante armado hace esta misma comprobación **al arrancar**, antes del primer barrido, y la enseña en
-`/status`, en `signing.authorizationKey`, al lado de `seatCheck`. Los valores son los mismos de la tabla de arriba.
-`matches` es el único valor sano.
+Un vigilante armado hace esta misma comprobación **al arrancar**, antes del primer barrido, y la repite **cada media
+hora** mientras corre. La enseña en `/status`, en `signing.authorizationKey`, al lado de `seatCheck`, y con la fecha del
+veredicto en `signing.authorizationKeyAt`. Los valores son los mismos de la tabla de arriba, y **son sobre la llave que
+hay puesta en Railway**. `matches` es el único valor sano.
 
-Si sale cualquier otro, el vigilante **arranca igual** y avisa a gritos: una línea de error en el log de Railway y una
-alerta crítica. Arranca a propósito. Si se negase a arrancar, Railway lo reiniciaría en bucle y se llevaría por delante
-la propia página `/status` donde se lee qué pasa — y además pararía de comprar cestas, que se compran con otra llave y
-no dependen de esta. Un ensayo (dry run) no hace la comprobación: no lee ninguna llave de firma, y eso no cambia.
+Mira siempre las dos cosas juntas. Un `matches` con fecha de hace dos días es un veredicto sobre el arranque de hace dos
+días; si la fecha no se mueve, el vigilante lleva desde entonces sin poder preguntárselo a Privy.
 
-Las alertas críticas solo llegan a algún sitio si Railway tiene puesta la variable del webhook de alertas
+Si sale cualquier otro, el vigilante **arranca igual**. Arranca a propósito: si se negase a arrancar, Railway lo
+reiniciaría en bucle y se llevaría por delante la propia página `/status` donde se lee qué pasa — y además pararía de
+comprar cestas, que se compran con otra llave y no dependen de esta. Un ensayo (dry run) no hace la comprobación: no lee
+ninguna llave de firma, y eso no cambia.
+
+Lo que avisa no es igual en todos los casos, y conviene saberlo antes de confiar en que te va a despertar:
+
+| veredicto | en el log de Railway | alerta |
+|---|---|---|
+| `not-in-quorum`, `key-unreadable`, `threshold-above-one` | línea de **error** | **crítica** |
+| `members-unresolved`, `credentials-refused`, `quorum-not-found` | línea de **aviso** (`warn`) | de aviso, no crítica |
+| `quorum-unreadable` | línea de **aviso** | **ninguna las dos primeras veces**; de aviso a partir de la tercera seguida (alrededor de una hora) |
+
+`quorum-unreadable` calla al principio a propósito: que se caiga la red un momento no prueba nada sobre la llave, y una
+alerta que salta por eso es una alerta que se acaba ignorando. Pero si se repite, lo que pasa es que el vigilante lleva
+horas sin poder comprobar nada — la protección está apagada — y eso sí avisa, diciendo cuántos intentos lleva. En ese
+caso no hay nada que arreglar en la llave: mira `status.privy.io`, y mira `signing.authorizationKeyAt` en `/status`
+después de cada reinicio.
+
+Y **ninguna alerta llega a ningún sitio** si Railway no tiene puesta la variable del webhook de alertas
 (`SIP_SOLANA_ALERT_WEBHOOK`, [RAILWAY_SOLANA.md](RAILWAY_SOLANA.md)). Sin ella se escriben solo en el log, que es
 lo que pasó la noche del 18-sep: la alerta saltó cada media hora durante todo el apagón y no la vio nadie. Compruébalo.
 
