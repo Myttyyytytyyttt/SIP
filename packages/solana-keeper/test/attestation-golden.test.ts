@@ -83,13 +83,15 @@ describe("the attestation golden vector", () => {
 });
 
 describe("--preflight", () => {
-  // Fourteen, not ten: the last four BUILD settle_v2, wrap_sol, convert and
-  // invest. Under vitest they cannot fail the way they failed in production —
-  // vitest's interop hands anchor's BN over and Node's does not — which is the
-  // whole reason the real gate is `tsx bin/keeper.mts --preflight` in the
-  // Dockerfile. This case only holds the count and the vectors steady.
-  it("holds all fourteen invariants, the golden vector and the four builders among them", async () => {
-    expect(await runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 14 });
+  // Seventeen, not ten: the last seven BUILD settle_v2, wrap_sol, convert and
+  // invest — settle_v2 and convert three times each, so the vectors cover a
+  // zero argument and a u64 past 2^32 and not only the comfortable middle.
+  // Under vitest they cannot fail the way they failed in production — vitest's
+  // interop hands anchor's BN over and Node's does not — which is the whole
+  // reason the real gate is `tsx bin/keeper.mts --preflight` in the Dockerfile.
+  // This case only holds the count and the vectors steady.
+  it("holds all seventeen invariants, the golden vector and the seven builds among them", async () => {
+    expect(await runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 17 });
   });
 
   it("fails, naming the invariant, when the vector and the mirror disagree by one byte", async () => {
@@ -102,7 +104,7 @@ describe("--preflight", () => {
       expect(await preflightOverADriftedVector()).toEqual({
         ok: false,
         program: SIP_PROGRAM_ID,
-        invariants: 14,
+        invariants: 17,
         failure: 'invariant "the attestation mirror matches the program golden vector" is false, expected true',
       });
     } finally {

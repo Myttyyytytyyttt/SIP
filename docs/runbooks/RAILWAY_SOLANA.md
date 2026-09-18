@@ -175,9 +175,11 @@ variable y tarda menos de un segundo:
 cd ~/ProyectosCT/SIP/packages/solana-keeper && PATH="$HOME/.nvm/versions/node/v22.14.0/bin:$PATH" node_modules/.bin/tsx bin/keeper.mts --preflight
 ```
 
-Tiene que decir `"preflight":"ok"` y `"invariants":14`. Si dice `preflight failed`, **no despliegues**: la línea
-nombra lo que falla. Desde el 18 de septiembre esas 14 comprobaciones incluyen construir de verdad las cuatro órdenes
-que mueven dinero (`settle_v2`, `wrap_sol`, `convert`, `invest`), que es justo lo que aquel día se rompió.
+Tiene que decir `"preflight":"ok"` y `"invariants":17`. Si dice `preflight failed`, **no despliegues**: la línea
+nombra lo que falla. Desde el 18 de septiembre esas 17 comprobaciones incluyen construir de verdad las cuatro órdenes
+que mueven dinero (`settle_v2`, `wrap_sol`, `convert`, `invest`), que es justo lo que aquel día se rompió — y de
+`settle_v2` y `convert` las construye tres veces, también con un cero y con un número enorme, que son los dos casos en
+los que un fallo así no se vería con números normales.
 
 Y ahora el vigilante:
 

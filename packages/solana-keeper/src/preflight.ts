@@ -17,9 +17,11 @@
 // ~25 settle tests drove the very same builder and passed. A lazily-read
 // namespace property is invisible to any gate that does not RUN THE BUILDER IN
 // A REAL NODE PROCESS — which is exactly what the Dockerfile does with this
-// file at image build time. So the last four invariants build the four
+// file at image build time. So the last seven invariants build the four
 // instructions the money paths send (settle_v2, wrap_sol, convert, invest) and
-// compare their encoded bytes against fixed vectors.
+// compare their encoded bytes against fixed vectors — settle_v2 and convert
+// three times over, at a zero argument and past the 4-byte boundary as well as
+// in the comfortable middle, because those are the values production carries.
 //
 // STILL NO NETWORK, NO KEY, NO ENVIRONMENT: the Connection behind the Program
 // carries a `fetch` that throws, so a builder that ever needs an account
@@ -91,12 +93,39 @@ async function buildOffline(): Promise<{ readonly name: string; readonly hex: st
   const zero = PublicKey.default;
   const swap = { payer: zero, inputTokenAccount: zero, outputTokenAccount: zero, amountIn: 100n, minAmountOut: 200n };
 
-  const settle = await settleInstruction(program, { wallet: zero, vault: zero, linkAddress: zero }, GOLDEN_V2_INPUTS);
+  const link = { wallet: zero, vault: zero, linkAddress: zero };
+
+  const settle = await settleInstruction(program, link, GOLDEN_V2_INPUTS);
+  // THE TWO EDGES PRODUCTION ACTUALLY HITS, which GOLDEN_V2_INPUTS does not:
+  // every one of its numbers is non-zero and below 2^32.
+  //
+  // A ZERO BASE IS A SUPPORTED OUTCOME, not an edge case — settle-tick settles
+  // one for a flat span, and for a losing PROFIT prefix whose carry is recorded.
+  // And in VOLUME mode baseLamports is session notional, which passes 2^32
+  // lamports at 4.29 SOL of volume: ordinary for the wallet this keeper watches.
+  // The wide vector also carries 2^53+1 as the deadline, the first integer a
+  // float64 cannot hold, so a builder that ever routes a u64 through Number
+  // encodes 2^53 here and is caught.
+  const settleZero = await settleInstruction(program, link, { ...GOLDEN_V2_INPUTS, baseLamports: 0n });
+  const settleWide = await settleInstruction(program, link, {
+    ...GOLDEN_V2_INPUTS,
+    sessionStartSlot: 4_294_967_295n,
+    sessionEndSlot: 4_294_967_296n,
+    baseLamports: 18_446_744_073_709_551_615n,
+    validUntilSlot: 9_007_199_254_740_993n,
+  });
   const wrapSol = await wrapSolCall(program, { crank: zero, vault: zero, policy: zero, vaultWsol: zero }, 100n).instruction();
   const convert = await convertCall(
     program,
     { crank: zero, vault: zero, policy: zero, vaultWsol: zero, vaultIn: zero },
     { amountIn: 100n, minOut: 200n, swap },
+  ).instruction();
+  // The same range on the invest path's u64s: convert carries session-sized
+  // amounts too, and its two arguments sit either side of a width mistake.
+  const convertWide = await convertCall(
+    program,
+    { crank: zero, vault: zero, policy: zero, vaultWsol: zero, vaultIn: zero },
+    { amountIn: 9_007_199_254_740_993n, minOut: 18_446_744_073_709_551_615n, swap },
   ).instruction();
   const invest = await investCall(
     program,
@@ -106,10 +135,13 @@ async function buildOffline(): Promise<{ readonly name: string; readonly hex: st
 
   return [
     { name: "settle_v2", hex: settle.data.toString("hex") },
+    { name: "settle_v2 zero base", hex: settleZero.data.toString("hex") },
+    { name: "settle_v2 wide u64s", hex: settleWide.data.toString("hex") },
     { name: "wrap_sol", hex: wrapSol.data.toString("hex") },
     // The swap blob that follows the two amounts is pinned by
     // test/shared-modules.test.ts; here only the args the BNs produced matter.
     { name: "convert", hex: convert.data.subarray(0, 24).toString("hex") },
+    { name: "convert wide u64s", hex: convertWide.data.subarray(0, 24).toString("hex") },
     { name: "invest", hex: invest.data.subarray(0, 25).toString("hex") },
   ];
 }
@@ -122,11 +154,25 @@ async function buildOffline(): Promise<{ readonly name: string; readonly hex: st
  * mode 1, then 100, 200, 1_000_000_000 and 300 as little-endian u64s. If a BN
  * ever arrives from a different bn.js than anchor's coder expects, this is
  * where it shows up — as wrong bytes, not as a throw.
+ *
+ * AND THE RANGE, NOT ONLY ONE POINT IN IT. Every number in that vector is
+ * non-zero and below 2^32, so a u64 that misencodes only at zero or only past
+ * the 4-byte boundary would build byte-identical bytes for it and ship. A
+ * settle whose args disagree with the signed attestation is rejected by the
+ * program, which looks like a settle that silently never lands, sweep after
+ * sweep — the outage of 2026-09-18 with a different cause. Hence the zero and
+ * wide vectors: 0, 2^32-1, 2^32, 2^53+1 and u64::MAX, on both money paths.
  */
 const BUILDER_VECTORS: ReadonlyMap<string, string> = new Map([
   ["settle_v2", `${instructionDiscriminator("settle_v2").toString("hex")}016400000000000000c80000000000000000ca9a3b000000002c01000000000000`],
+  // Eight zero bytes where the base goes, and nothing else moved.
+  ["settle_v2 zero base", `${instructionDiscriminator("settle_v2").toString("hex")}016400000000000000c800000000000000${"00".repeat(8)}2c01000000000000`],
+  // 2^32-1, 2^32, u64::MAX, 2^53+1 — computed with Python's int.to_bytes, not
+  // by asking the builder what it produces.
+  ["settle_v2 wide u64s", `${instructionDiscriminator("settle_v2").toString("hex")}01ffffffff000000000000000001000000ffffffffffffffff0100000000002000`],
   ["wrap_sol", `${instructionDiscriminator("wrap_sol").toString("hex")}6400000000000000`],
   ["convert", `${instructionDiscriminator("convert").toString("hex")}6400000000000000c800000000000000`],
+  ["convert wide u64s", `${instructionDiscriminator("convert").toString("hex")}0100000000002000ffffffffffffffff`],
   ["invest", `${instructionDiscriminator("invest").toString("hex")}006400000000000000c800000000000000`],
 ]);
 
