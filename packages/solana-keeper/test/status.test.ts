@@ -89,6 +89,7 @@ function setup(): { redactor: Redactor; status: KeeperStatus } {
       privyPolicyId: config.privyPolicyId,
       seatCheck: seatCheck(config.privySignerId, config.privyPolicyId),
       authorizationKey: "matches",
+      authorizationKeyAt: new Date().toISOString(),
       secretsRead: true,
       settleKey: config.signing!.settleKey.publicKey.toBase58(),
       wallets: { signable: 1, of: 1 },
@@ -140,6 +141,11 @@ describe("the /status JSON", () => {
     // NO signer id, so no seat is examined at all and the page says so.
     expect(parsed.signing.privyPolicyId).toBe("policy-id");
     expect(parsed.signing.seatCheck).toBe("unchecked");
+    // A VERDICT AND ITS DATE ARE READ TOGETHER OR NOT AT ALL. "matches" with no
+    // timestamp is a claim about an unknown moment — possibly a process that
+    // started days ago — and mid-outage that is the whole question.
+    expect(parsed.signing.authorizationKey).toBe("matches");
+    expect(Date.parse(parsed.signing.authorizationKeyAt!)).not.toBeNaN();
     expect(parsed.lastSweepError).toContain("<redacted:rpcUrl:0>");
     expect(parsed.history).toContain("<redacted:databaseUrl>");
     // A pending carry's lamports are a bigint, which JSON.stringify throws on:

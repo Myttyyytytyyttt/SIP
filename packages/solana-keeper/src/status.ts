@@ -72,6 +72,17 @@ export interface SigningStatus {
    * signer id to compare against (seatCheck is "unchecked" then too).
    */
   readonly authorizationKey: AuthorizationKeyCheck;
+  /**
+   * When that verdict was established, ISO-8601, or null when it never was.
+   *
+   * A VERDICT WITHOUT A DATE IS A CLAIM ABOUT AN UNKNOWN MOMENT. The pairing can
+   * change after boot — a key removed from the quorum, the quorum's keys rotated
+   * — and an operator reading "matches" during an outage cannot otherwise tell
+   * whether it is a statement about this minute or about a process that started
+   * last Tuesday. The keeper re-establishes it on a slow cadence and re-stamps
+   * this, so the two are read together or not at all.
+   */
+  readonly authorizationKeyAt: string | null;
   /** False in dry run, by construction: nothing that can sign was read. */
   readonly secretsRead: boolean;
   /** The settle key's PUBLIC key, when armed. */

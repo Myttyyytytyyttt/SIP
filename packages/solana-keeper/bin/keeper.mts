@@ -58,6 +58,7 @@ import { SERVICE, createChangeLog, createKeeperLogger, scrubbedForExport } from 
 import { runPreflight } from "../src/preflight.js";
 import {
   AUTHORIZATION_KEY_BROKEN,
+  type AuthorizationKeyCheck,
   AuthorizationKeyUnreadable,
   compareWithQuorum,
   derivePrivyPublicKey,
@@ -308,6 +309,36 @@ if (privyConfig !== null) {
 const AUTHORIZATION_KEY_ALERT_KEY = "privy-authorization-key";
 
 /**
+ * Sweeps between re-checks of the pairing. At the default cadence this is about
+ * half an hour.
+ *
+ * ONCE AT BOOT WAS NOT ENOUGH, for two reasons that both end at the same page.
+ * A key removed from the quorum, or a quorum whose keys were rotated, leaves
+ * /status saying "matches" for as long as the process lives — a statement about
+ * a moment that may be days old. And a boot that could not reach Privy leaves
+ * "quorum-unreadable" there forever, with nothing ever retrying: the protection
+ * this check exists to give silently does not exist. Both are exactly the state
+ * an operator opens /status to resolve. One GET per half hour is less than one
+ * sweep already spends.
+ */
+const AUTHORIZATION_KEY_EVERY_SWEEPS = 30;
+
+/**
+ * Consecutive unreadable attempts before the UNKNOWN itself is worth an alert.
+ *
+ * A dropped connection proves nothing about the pairing, and paging for one
+ * would teach an operator to ignore this alert — but a pairing that has gone
+ * unchecked for half a day is its own fault, because the protection is off.
+ */
+const AUTHORIZATION_KEY_UNREADABLE_STREAK = 3;
+
+/** Consecutive quorum-unreadable verdicts; any other verdict ends the run. */
+let authorizationKeyUnreadable = 0;
+
+/** The verdict last reported, so a change re-fires instead of being deduped by the one before it. */
+let lastAuthorizationKeyCheck: AuthorizationKeyCheck | null = null;
+
+/**
  * Establishes, at start-up, whether the configured authorization key belongs to
  * the configured key quorum — and says so in /status next to seatCheck.
  *
@@ -353,8 +384,18 @@ async function establishAuthorizationKey(): Promise<void> {
   if (privyConfig === null || signerId === null) return;
   const { verdict, detail } = await authorizationKeyVerdict(privyConfig, signerId);
 
-  health.signing = { ...health.signing, authorizationKey: verdict.check };
+  // STAMPED WITH THE VERDICT, ALWAYS TOGETHER. A verdict with no date is a claim
+  // about an unknown moment, and the one an operator reads mid-outage is exactly
+  // the one where "since when?" decides what it means.
+  health.signing = { ...health.signing, authorizationKey: verdict.check, authorizationKeyAt: new Date().toISOString() };
   const broken = AUTHORIZATION_KEY_BROKEN.has(verdict.check);
+  // A CHANGED CONDITION IS A NEW CONDITION. The alerter dedupes by key alone, so
+  // without this a warn raised half an hour ago would swallow the critical that
+  // replaces it — the one transition an operator must not miss.
+  const changed = lastAuthorizationKeyCheck !== verdict.check;
+  if (changed && lastAuthorizationKeyCheck !== null) alerter.clear(AUTHORIZATION_KEY_ALERT_KEY);
+  lastAuthorizationKeyCheck = verdict.check;
+  authorizationKeyUnreadable = verdict.check === "quorum-unreadable" ? authorizationKeyUnreadable + 1 : 0;
   const context = {
     signerId,
     verdict: verdict.check,
@@ -370,23 +411,51 @@ async function establishAuthorizationKey(): Promise<void> {
     ...(detail === null ? {} : { detail }),
   };
   if (verdict.check === "matches") {
-    log.info("privy authorization key belongs to the signer quorum", context);
+    // On a cadence, only when it CHANGED: a healthy pairing restated every half
+    // hour forever is the habit that teaches an operator to skim these lines.
+    if (changed) log.info("privy authorization key belongs to the signer quorum", context);
     alerter.clear(AUTHORIZATION_KEY_ALERT_KEY);
     return;
   }
   log[broken ? "error" : "warn"]("privy authorization key", context);
   // UNKNOWN IS NOT WRONG: a dropped connection proves nothing about the pairing,
-  // and paging for it would teach an operator to ignore this alert.
-  if (verdict.check === "quorum-unreadable") return;
+  // and paging for the first one would teach an operator to ignore this alert.
+  // BUT AN UNKNOWN THAT PERSISTS IS ITS OWN FAULT: after this many attempts the
+  // protection has simply been off for hours, and that is worth saying once.
+  if (verdict.check === "quorum-unreadable" && authorizationKeyUnreadable < AUTHORIZATION_KEY_UNREADABLE_STREAK) return;
+  const unknown = verdict.check === "quorum-unreadable";
   alerter.fire({
     key: AUTHORIZATION_KEY_ALERT_KEY,
     severity: broken ? "critical" : "warn",
     title: broken
       ? "The keeper's authorization key does not belong to its signer quorum"
-      : "The keeper's authorization key could not be checked against its signer quorum",
+      : unknown
+        ? "The keeper has not been able to check its authorization key for hours"
+        : "The keeper's authorization key could not be checked against its signer quorum",
     detail: `${verdict.meaning} ${verdict.next}`,
-    context: { signerId, derivedPublicKey: verdict.derivedPublicKey },
+    context: {
+      signerId,
+      derivedPublicKey: verdict.derivedPublicKey,
+      ...(unknown ? { consecutiveAttempts: authorizationKeyUnreadable } : {}),
+    },
   });
+}
+
+/**
+ * The same check again, on a slow cadence, from inside the sweep.
+ *
+ * A dry run still performs none: establishAuthorizationKey returns before
+ * revealing anything when privyConfig is null, and this adds no path around it.
+ * Failures are swallowed here on purpose — a check that cannot run must not end
+ * a sweep that is moving money, and the next turn of the cadence tries again.
+ */
+async function reestablishAuthorizationKey(): Promise<void> {
+  if (health.sweeps % AUTHORIZATION_KEY_EVERY_SWEEPS !== 0) return;
+  try {
+    await establishAuthorizationKey();
+  } catch (error) {
+    log.warn("the authorization key could not be re-checked this sweep", { detail: summarizeUpstreamError(error, { take: 3, maxChars: 400 }) });
+  }
 }
 
 /** The local derivation, then the quorum read — each failing into its own verdict, neither sending the key. */
@@ -452,8 +521,10 @@ const health: KeeperStatus = {
     privyPolicyId: config.privyPolicyId,
     // Neither id answers "would an unbounded seat be refused?" on its own.
     seatCheck: seatCheck(config.privySignerId, config.privyPolicyId),
-    // Established at start-up, below, before the first sweep: a dry run leaves it "not-checked".
+    // Established at start-up, below, before the first sweep, and again on a slow
+    // cadence: a dry run leaves it "not-checked" forever, having read no key.
     authorizationKey: "not-checked",
+    authorizationKeyAt: null,
     secretsRead: config.signing !== null,
     settleKey: config.signing?.settleKey.publicKey.toBase58() ?? null,
     wallets: null,
@@ -1155,6 +1226,11 @@ async function sweep(): Promise<void> {
             mode: isLive() ? "live" : "dry-run — nothing is sent",
           },
     );
+
+    // AND, EVERY SO OFTEN, WHETHER THIS KEEPER CAN STILL SIGN AT ALL. Last, so a
+    // slow Privy delays nothing that moves money, and after health.sweeps has
+    // been advanced, so the cadence counts sweeps that actually happened.
+    await reestablishAuthorizationKey();
   } catch (error) {
     health.lastSweepError = summarizeUpstreamError(error, { take: 3, maxChars: 500 });
     log.error("sweep cycle failed", { detail: health.lastSweepError });
