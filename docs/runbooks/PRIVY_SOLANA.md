@@ -119,6 +119,7 @@ qué no, `unknown` lo que no se puede saber (no hubo respuesta o Privy dio un er
 ## 5. Comprueba la política guardada
 
 ```bash
+cd ~/ProyectosCT/SIP
 printf 'App secret de Privy (SIP): ' && read -rs SECRETO && echo
 SIP_SOLANA_PRIVY_APP_ID=<app id> SIP_SOLANA_PRIVY_APP_SECRET="$SECRETO" SIP_SOLANA_PRIVY_SIGNER_ID=<signer id> \
   pnpm --silent --dir packages/solana-keeper privy-policy check --policy <policyId>
@@ -140,6 +141,7 @@ Hazlo **después** de que la web haya registrado el signer en **una wallet de tr
 Necesitas el **id de esa wallet en Privy** (no su dirección), que sale en el dashboard, en Wallets.
 
 ```bash
+cd ~/ProyectosCT/SIP
 printf 'App secret de Privy (SIP): ' && read -rs SECRETO && echo
 printf 'Llave de autorización del vigilante: ' && read -rs CLAVE && echo
 printf 'SIP_SOLANA_RPC_URLS: ' && read -rs RPC && echo
@@ -195,6 +197,7 @@ Esa frase significa una sola cosa: **la firma que llegó no era de ninguna llave
 dice cuál de todas las maneras de estar mal es. Este comando sí.
 
 ```bash
+cd ~/ProyectosCT/SIP
 printf 'App secret de Privy (SIP): ' && read -rs SECRETO && echo
 printf 'Llave de autorización del vigilante: ' && read -rs CLAVE && echo
 SIP_SOLANA_PRIVY_APP_ID=cmtrt36tb00080dlbrda5aqam SIP_SOLANA_PRIVY_APP_SECRET="$SECRETO" \
