@@ -357,6 +357,7 @@ async function establishAuthorizationKey(): Promise<void> {
     registeredPublicKeys: verdict.registered?.map((entry) => entry.publicKey) ?? null,
     nestedKeyQuorumIds: verdict.unresolvedMembers?.keyQuorumIds ?? null,
     memberUsers: verdict.unresolvedMembers?.users ?? null,
+    authorizationThreshold: verdict.authorizationThreshold,
     meaning: verdict.meaning,
     next: verdict.next,
     ...(detail === null ? {} : { detail }),

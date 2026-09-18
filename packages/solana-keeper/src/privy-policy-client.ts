@@ -60,6 +60,7 @@ export function createPrivyPolicyClient(
         })),
         keyQuorumIds: quorum.key_quorum_ids ?? [],
         userIds: quorum.user_ids ?? [],
+        authorizationThreshold: quorum.authorization_threshold,
       };
     },
 

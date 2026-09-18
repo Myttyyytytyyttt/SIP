@@ -99,6 +99,7 @@ describe("reading a key quorum", () => {
       authorizationKeys: [{ publicKey: quorumBody.authorization_keys[0]!.public_key, displayName: "sip-solana-keeper" }],
       keyQuorumIds: [],
       userIds: [],
+      authorizationThreshold: quorumBody.authorization_threshold,
     });
     expect(sent).toHaveLength(1);
     expect([sent[0]!.method, new URL(sent[0]!.url).pathname]).toEqual(["GET", "/v1/key_quorums/keeperSignerQuorum0001"]);
@@ -132,7 +133,7 @@ describe("reading a key quorum", () => {
       user_ids: ["did:privy:someuser0000001"],
       key_quorum_ids: ["cbxnested00000000000001", "cbxnested00000000000002"],
     };
-    const expected = { keyQuorumIds: nested.key_quorum_ids, userIds: nested.user_ids };
+    const expected = { keyQuorumIds: nested.key_quorum_ids, userIds: nested.user_ids, authorizationThreshold: nested.authorization_threshold };
 
     expect(await createPrivyPolicyClient(credentials, { fetch: answering(200, nested).fetch }).getKeyQuorum("keeperSignerQuorum0001")).toMatchObject(expected);
 

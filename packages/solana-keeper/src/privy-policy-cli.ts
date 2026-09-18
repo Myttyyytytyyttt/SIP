@@ -612,6 +612,8 @@ function report(verdict: AuthorizationKeyVerdict): Record<string, unknown> {
     // members whose keys this command never saw.
     nestedKeyQuorumIds: verdict.unresolvedMembers?.keyQuorumIds ?? null,
     memberUsers: verdict.unresolvedMembers?.users ?? null,
+    // HOW MANY SIGNATURES THE QUORUM WANTS, next to the one the keeper gives.
+    authorizationThreshold: verdict.authorizationThreshold,
     meaning: verdict.meaning,
     next: verdict.next,
   };

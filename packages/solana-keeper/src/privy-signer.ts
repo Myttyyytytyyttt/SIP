@@ -271,6 +271,7 @@ export async function readPrivyKeyQuorum(config: PrivySolanaConfig, keyQuorumId:
     authorizationKeys: (quorum.authorization_keys ?? []).map((entry) => ({ publicKey: entry.public_key, displayName: entry.display_name })),
     keyQuorumIds: quorum.key_quorum_ids ?? [],
     userIds: quorum.user_ids ?? [],
+    authorizationThreshold: quorum.authorization_threshold,
   };
 }
 

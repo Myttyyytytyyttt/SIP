@@ -185,6 +185,16 @@ export interface KeyQuorumLike {
   readonly keyQuorumIds?: readonly string[];
   /** Users that are members. Each authorizes with a key this check cannot see. */
   readonly userIds?: readonly string[];
+  /**
+   * How many of the quorum's members must sign for a request to be valid, as
+   * Privy stores it; null when Privy did not say.
+   *
+   * THE KEEPER HAS EXACTLY ONE SIGNATURE TO GIVE. privy-signer.ts sends one key
+   * in authorization_private_keys, so a threshold above 1 refuses every settle
+   * however right the key is — and being registered is then not the same as
+   * being able to sign.
+   */
+  readonly authorizationThreshold?: number | null;
 }
 
 /**
@@ -203,6 +213,8 @@ export type AuthorizationKeyCheck =
    * members this check cannot read. Unproven, not wrong.
    */
   | "members-unresolved"
+  /** The key IS registered, and the quorum wants more signatures than the keeper can give. */
+  | "threshold-above-one"
   /** The value is not a P-256 private key at all; nothing was sent anywhere. */
   | "key-unreadable"
   /** Privy refused the app id and secret, so the quorum could not be read. */
@@ -223,6 +235,10 @@ export const AUTHORIZATION_KEY_MEANING: Readonly<Record<AuthorizationKeyCheck, s
     "The key is a valid P-256 key and is not one of this quorum's own public keys — but the quorum also has members " +
     "this check cannot read (a nested key quorum, or a user), and a key held by one of those signs just as well. The " +
     "pairing is UNPROVEN, not wrong.",
+  "threshold-above-one":
+    "The key IS registered in this key quorum, and the quorum requires more than one signature. The keeper signs with " +
+    "one key and sends one signature, so Privy refuses every settle for want of the others — with the same 401 family " +
+    "a wrong key produces. The key is right; the quorum is not one this keeper can satisfy alone.",
   "key-unreadable": "SIP_SOLANA_PRIVY_AUTHORIZATION_KEY does not hold a P-256 private key, so nothing could be derived from it.",
   "credentials-refused": "Privy refused the app id and secret, so the key quorum could not be read. This says nothing about the key.",
   "quorum-not-found": "This Privy app has no key quorum with that id. Either the id is wrong or it belongs to another app.",
@@ -239,6 +255,10 @@ export const AUTHORIZATION_KEY_NEXT: Readonly<Record<AuthorizationKeyCheck, stri
     "public key shown there with the derivedPublicKey printed above. They differ, so the private key in " +
     "SIP_SOLANA_PRIVY_AUTHORIZATION_KEY belongs to something else — set the variable to the private key of THAT quorum. " +
     "If that private key is lost, it cannot be recovered: see docs/runbooks/PRIVY_SOLANA.md.",
+  "threshold-above-one":
+    "Do not change the key: it is the right one. Open the Privy dashboard, Wallets → Authorization keys, and set this " +
+    "key quorum's threshold back to 1 — or remove the members it gained, so one signature is again enough. A keeper " +
+    "that must collect a second signature is a keeper that cannot settle unattended, which is the whole of its job.",
   "members-unresolved":
     "Do not regenerate anything yet, and do not re-seat any wallet. Open the Privy dashboard, Wallets → Authorization " +
     "keys, and look at this key quorum's members: besides the public keys printed above it holds a nested key quorum or " +
@@ -255,7 +275,13 @@ export const AUTHORIZATION_KEY_NEXT: Readonly<Record<AuthorizationKeyCheck, stri
 };
 
 /** Which verdicts mean the keeper's signing is broken, as opposed to unproven. */
-export const AUTHORIZATION_KEY_BROKEN: ReadonlySet<AuthorizationKeyCheck> = new Set<AuthorizationKeyCheck>(["not-in-quorum", "key-unreadable"]);
+export const AUTHORIZATION_KEY_BROKEN: ReadonlySet<AuthorizationKeyCheck> = new Set<AuthorizationKeyCheck>([
+  "not-in-quorum",
+  "key-unreadable",
+  // REGISTERED AND STILL REFUSED. One signature against a threshold of two is as
+  // certain a refusal as the wrong key, and certainty is what this set means.
+  "threshold-above-one",
+]);
 
 /**
  * Members of the quorum whose keys this check cannot read, so an operator knows
@@ -279,6 +305,8 @@ export interface AuthorizationKeyVerdict {
   readonly registered: readonly RegisteredAuthorizationKey[] | null;
   /** What the quorum holds besides those keys, or null when the quorum was not read. */
   readonly unresolvedMembers: UnresolvedQuorumMembers | null;
+  /** How many signatures the quorum requires; null when the quorum was not read, or did not say. */
+  readonly authorizationThreshold: number | null;
   readonly meaning: string;
   readonly next: string;
 }
@@ -288,11 +316,13 @@ const verdictOf = (
   derivedPublicKey: string | null,
   registered: readonly RegisteredAuthorizationKey[] | null,
   unresolvedMembers: UnresolvedQuorumMembers | null = null,
+  authorizationThreshold: number | null = null,
 ): AuthorizationKeyVerdict => ({
   check,
   derivedPublicKey,
   registered,
   unresolvedMembers,
+  authorizationThreshold,
   meaning: AUTHORIZATION_KEY_MEANING[check],
   next: AUTHORIZATION_KEY_NEXT[check],
 });
@@ -317,9 +347,19 @@ export function compareWithQuorum(derivedPublicKey: string, quorum: KeyQuorumLik
   const derived = normalizeSpki(derivedPublicKey);
   const registered = quorum.authorizationKeys.map((key) => ({ publicKey: normalizeSpki(key.publicKey), displayName: key.displayName }));
   const members: UnresolvedQuorumMembers = { keyQuorumIds: [...(quorum.keyQuorumIds ?? [])], users: quorum.userIds?.length ?? 0 };
-  if (registered.some((key) => key.publicKey === derived)) return verdictOf("matches", derived, registered, members);
+  const threshold = quorum.authorizationThreshold ?? null;
+  if (registered.some((key) => key.publicKey === derived)) {
+    // BEING REGISTERED IS NOT BEING ABLE TO SIGN. The keeper puts exactly one key
+    // in authorization_private_keys, so a quorum that wants two signatures
+    // refuses every settle while this check, reading the key list alone, said
+    // "matches" and sent the operator off to examine the seat and the policy —
+    // both of which he would find perfectly bound. A threshold Privy did not
+    // report (null) is not read as a fault.
+    const short = threshold !== null && threshold > 1;
+    return verdictOf(short ? "threshold-above-one" : "matches", derived, registered, members, threshold);
+  }
   const unresolved = members.keyQuorumIds.length + members.users;
-  return verdictOf(unresolved > 0 ? "members-unresolved" : "not-in-quorum", derived, registered, members);
+  return verdictOf(unresolved > 0 ? "members-unresolved" : "not-in-quorum", derived, registered, members, threshold);
 }
 
 /** The verdict for a value that could not be read as a key. Nothing was sent anywhere. */

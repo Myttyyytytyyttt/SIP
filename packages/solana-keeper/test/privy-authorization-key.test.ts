@@ -162,6 +162,44 @@ describe("compareWithQuorum", () => {
     expect(verdict.registered).toEqual([]);
   });
 
+  // REGISTERED IS NOT THE SAME AS ABLE TO SIGN. privy-signer.ts puts exactly ONE
+  // key in authorization_private_keys, so a quorum of two keys with threshold 2 —
+  // reachable from the same dashboard page the runbook sends the owner to, and
+  // from the key rotation it describes — refuses every settle. Reading the key
+  // list alone said "matches" and told him the cause was elsewhere: the seat and
+  // the policy, both of which he would find perfectly bound.
+  describe("a quorum that wants more signatures than the keeper gives", () => {
+    it("says threshold-above-one even though the key is registered", () => {
+      const verdict = compareWithQuorum(pair.publicKey, { ...quorum(pair.publicKey, other.publicKey), authorizationThreshold: 2 });
+      expect(verdict.check).toBe("threshold-above-one");
+      expect(verdict.authorizationThreshold).toBe(2);
+      // AS CERTAIN A REFUSAL AS THE WRONG KEY, so it pages like one.
+      expect(AUTHORIZATION_KEY_BROKEN.has(verdict.check)).toBe(true);
+      expect(verdict.meaning).toContain("one signature");
+      expect(verdict.next).toContain("Do not change the key");
+      // The key IS there, and the operator can still see that it is.
+      expect(verdict.registered?.map((entry) => entry.publicKey)).toContain(pair.publicKey);
+    });
+
+    // Privy stores the threshold as `number | null`, and a quorum created with one
+    // key has 1. Neither is a fault, and neither may be read as one.
+    for (const threshold of [1, null, undefined] as const) {
+      it(`still matches at threshold ${String(threshold)}`, () => {
+        const verdict = compareWithQuorum(pair.publicKey, { ...quorum(pair.publicKey), authorizationThreshold: threshold });
+        expect(verdict.check).toBe("matches");
+        expect(verdict.authorizationThreshold).toBe(threshold ?? null);
+      });
+    }
+
+    // A missing key is the bigger fault and keeps its own verdict; the threshold
+    // is reported next to it rather than replacing it.
+    it("keeps not-in-quorum when the key is absent as well", () => {
+      const verdict = compareWithQuorum(pair.publicKey, { ...quorum(other.publicKey), authorizationThreshold: 2 });
+      expect(verdict.check).toBe("not-in-quorum");
+      expect(verdict.authorizationThreshold).toBe(2);
+    });
+  });
+
   // THE EXPENSIVE VERDICT, GUARDED. A KeyQuorum's membership is three lists —
   // authorization_keys, user_ids AND key_quorum_ids (nested, one level deep) —
   // and this check reads only the first. A keeper's key seated through a nested
@@ -217,6 +255,7 @@ describe("compareWithQuorum", () => {
       compareWithQuorum(pair.publicKey, quorum(pair.publicKey)),
       compareWithQuorum(pair.publicKey, quorum(other.publicKey)),
       compareWithQuorum(pair.publicKey, { ...quorum(other.publicKey), keyQuorumIds: ["cbxnested00000000000001"] }),
+      compareWithQuorum(pair.publicKey, { ...quorum(pair.publicKey), authorizationThreshold: 2 }),
       unreadableKeyVerdict(),
       notCheckedVerdict(),
       quorumReadVerdict(new NotFoundError(404, {}, undefined, headers), null),
@@ -246,8 +285,11 @@ describe("quorumReadVerdict", () => {
     expect(AUTHORIZATION_KEY_BROKEN.has(verdict.check)).toBe(false);
   });
 
-  it("counts only a mismatch and an unreadable key as broken", () => {
-    expect([...AUTHORIZATION_KEY_BROKEN].sort()).toEqual(["key-unreadable", "not-in-quorum"]);
+  // BROKEN MEANS CERTAIN. Each of these three is a refusal that will happen, not
+  // one that might: a wrong key, a value that is not a key, and one signature
+  // against a threshold that wants more. Everything else is unproven.
+  it("counts only the certain refusals as broken", () => {
+    expect([...AUTHORIZATION_KEY_BROKEN].sort()).toEqual(["key-unreadable", "not-in-quorum", "threshold-above-one"]);
   });
 });
 

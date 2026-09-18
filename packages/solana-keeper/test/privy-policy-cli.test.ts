@@ -466,6 +466,36 @@ describe("key", () => {
     }
   });
 
+  // "matches" USED TO MEAN "THE KEY IS FINE, LOOK ELSEWHERE" for a quorum that
+  // refuses every settle. The keeper sends one signature; a threshold of 2 wants
+  // two. The old verdict exited 0 and sent the owner to `privy-policy verify`,
+  // which would find the seat and its policy perfectly bound.
+  it("says threshold-above-one when the quorum wants two signatures, even though the key is registered", async () => {
+    const stranger = await generateP256KeyPair();
+    const result = await run(["key"], {
+      env: keyEnv,
+      privy: {
+        getKeyQuorum: async () => ({
+          id: SIGNER_ID,
+          authorizationKeys: [
+            { publicKey: signerPair.publicKey, displayName: "sip-solana-keeper" },
+            { publicKey: stranger.publicKey, displayName: "the second signer" },
+          ],
+          authorizationThreshold: 2,
+        }),
+      },
+    });
+    expect(result.code).toBe(1);
+    expect(verdict(result)).toMatchObject({
+      verdict: "threshold-above-one",
+      derivedPublicKey: signerPair.publicKey,
+      authorizationThreshold: 2,
+    });
+    expect(String(verdict(result)["next"])).toContain("Do not change the key");
+    // A REFUSAL THAT WILL HAPPEN, so it says so in words, as a wrong key does.
+    expect(result.stderr.map((line) => line["event"])).toContain("the keeper cannot sign for any wallet");
+  });
+
   // A QUORUM CAN HOLD MEMBERS THIS COMMAND CANNOT READ — a nested key quorum or a
   // user — and a key seated through one of those signs perfectly well. Calling
   // that not-in-quorum sends the owner down the lost-key path in the runbook:
