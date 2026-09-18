@@ -61,7 +61,7 @@ const CLICK = { type: "click", target: {} };
 const LINK = Keypair.generate().publicKey.toBase58();
 const VAULT = Keypair.generate().publicKey.toBase58();
 
-type Chain = { vault?: "exists" | "missing" | "unreadable"; config?: "exists" | "missing" | "unreadable"; paused?: boolean; link?: WalletLinkStatus; wallet?: string };
+type Chain = { vault?: "exists" | "missing" | "unreadable"; config?: "exists" | "missing" | "unreadable"; paused?: boolean; link?: WalletLinkStatus | "absent"; wallet?: string };
 
 function stateOf(chain: Chain): VaultStateJson {
   const config = chain.config ?? "exists";
@@ -71,7 +71,10 @@ function stateOf(chain: Chain): VaultStateJson {
     vault: { status: chain.vault ?? "exists", address: VAULT },
     policy: { status: "missing", address: Keypair.generate().publicKey.toBase58() },
     config: { address: Keypair.generate().publicKey.toBase58(), status: config, exists: config === "exists", paused: config === "exists" ? chain.paused === true : null },
-    walletLinks: [{ wallet: chain.wallet ?? TRADING_0, link: LINK, status: chain.link ?? "missing", vault: chain.link === "this_vault" ? VAULT : null }],
+    walletLinks:
+      chain.link === "absent"
+        ? []
+        : [{ wallet: chain.wallet ?? TRADING_0, link: LINK, status: chain.link ?? "missing", vault: chain.link === "this_vault" ? VAULT : null }],
     holdings: { status: "exists", items: [] },
     vaultTokenAccounts: { status: "exists", items: [] },
     rents: { vault: "1285240", link: "1305560", policy: "5577840", tokenAccount: "1488440", legTokenAccounts: {} },
@@ -79,9 +82,10 @@ function stateOf(chain: Chain): VaultStateJson {
   };
 }
 
-function render(chain: Chain, address: string = TRADING_0, build = vi.fn()): { html: string; build: typeof build } {
+function render(chain: Chain, address: string = TRADING_0, build = vi.fn()): { html: string; build: typeof build; refresh: ReturnType<typeof vi.fn> } {
   mocked.buttons.length = 0;
-  const value: VaultScreenValue = { pensionKey: PENSION_KEY, view: { kind: "ready", state: stateOf(chain) }, refresh: vi.fn(), api: { build } as unknown as VaultApi };
+  const refresh = vi.fn();
+  const value: VaultScreenValue = { pensionKey: PENSION_KEY, view: { kind: "ready", state: stateOf(chain) }, refresh, api: { build } as unknown as VaultApi };
   const row = { address, id: null, walletIndex: 0, imported: false, listed: true };
   const html = renderToStaticMarkup(
     createElement(
@@ -90,7 +94,7 @@ function render(chain: Chain, address: string = TRADING_0, build = vi.fn()): { h
       createElement(VaultScreenContext.Provider, { value }, createElement(VaultWriteLock, null, createElement("ul", null, createElement(TradingWalletRow, { row })))),
     ),
   );
-  return { html, build };
+  return { html, build, refresh };
 }
 
 const buttons = (label: string) => mocked.buttons.filter((button) => button.label === label);
@@ -150,6 +154,21 @@ describe("TradingWalletRow's link control", () => {
     expect(build).not.toHaveBeenCalled();
     expect(mocked.signMessage).not.toHaveBeenCalled();
     expect(mocked.signTransaction).not.toHaveBeenCalled();
+  });
+
+  it("a wallet the chain read did not cover is never dropped from the list: it says so, and offers a re-read", () => {
+    // Exactly where a wallet sits between its create and Privy's record listing it. The old control
+    // rendered nothing here, which is the one place a freshly created wallet could disappear from.
+    const { html, build, refresh } = render({ link: "absent" });
+    expect(html).toContain('data-link="unread"');
+    expect(html).toContain("SaverFi has not read this wallet on Solana yet.");
+    expect(buttons("Link to vault")).toHaveLength(0);
+    const [check] = buttons("Check again");
+    expect(check?.disabled).toBe(false);
+    check?.onClick?.(CLICK);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(build).not.toHaveBeenCalled();
+    expect(mocked.signMessage).not.toHaveBeenCalled();
   });
 
   it("with the keeper's signer there is no such note", () => {
