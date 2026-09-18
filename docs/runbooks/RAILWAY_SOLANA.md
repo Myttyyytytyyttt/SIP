@@ -86,9 +86,16 @@ Añade los secretos. Sigue en seco: sin la fase C no envía nada.
 | `SIP_SOLANA_SETTLE_KEY` | el contenido entero de `~/sip-keys/settle.json` (la lista de números) | **sí** |
 | `SIP_SOLANA_PRIVY_APP_ID` | `cmtrt36tb00080dlbrda5aqam` | no |
 | `SIP_SOLANA_PRIVY_APP_SECRET` | el app secret de Privy de SIP | **sí** |
-| `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY` | la clave privada `wallet-auth:…` de la llave `sip-solana-keeper` | **sí** |
-| `SIP_SOLANA_PRIVY_SIGNER_ID` | `cbx133itb717vxp3dqwhk808` | no |
+| `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY` | la clave privada `wallet-auth:…` de la llave `sip-solana-keeper-2` | **sí** |
+| `SIP_SOLANA_PRIVY_SIGNER_ID` | `kyio853439oa78qfvmt853i4`, el id de esa misma llave | no |
 | `SIP_SOLANA_PRIVY_POLICY_ID` | `jsuzcjv6njl0raqjjhzqe9fh` | no |
+
+La llave y el signer id van **siempre juntos**: la llave privada tiene que ser la del key quorum que nombra el id, y
+`/status` lo comprueba en `signing.authorizationKey` (tiene que decir `matches`). Desde el 18-sep son los de
+`sip-solana-keeper-2` (`kyio853439oa78qfvmt853i4`). Los de antes, `sip-solana-keeper` (`cbx133itb717vxp3dqwhk808`),
+están **retirados**: su llave privada se perdió. **No los pongas nunca.** La web lleva el mismo signer id
+([VERCEL_WEB.md](VERCEL_WEB.md)); si se cambia, es en los dos sitios y en el orden de
+[PRIVY_SOLANA.md](PRIVY_SOLANA.md), sección 7.
 
 `SIP_SOLANA_PRIVY_POLICY_ID` es **opcional: el vigilante arranca sin ella**, y es la misma política que la web pone como
 *override* del signer en cada wallet de trading. Puesta, el vigilante se niega a firmar por una wallet cuyo asiento no la

@@ -39,7 +39,12 @@ Esta guía la sigues tú. Ninguna de estas llaves hace falta que la vea Claude.
 
 ## 2. Crea la llave de autorización del vigilante
 
-1. Ve a **Wallets → Authorization keys** y pulsa **New key**. Ponle de nombre `sip-solana-keeper`.
+> **La llave de hoy es `sip-solana-keeper-2`, id `kyio853439oa78qfvmt853i4`** (desde el 18-sep). La primera,
+> `sip-solana-keeper` (`cbx133itb717vxp3dqwhk808`, 14-sep), está **retirada**: su llave privada se perdió y no se vuelve
+> a configurar nunca. Esta sección cuenta cómo se crea una; si se pierde, la [sección 7](#si-la-llave-privada-de-ese-quorum-se-ha-perdido)
+> dice cómo se cambia.
+
+1. Ve a **Wallets → Authorization keys** y pulsa **New key**. Ponle un nombre que diga lo que es, como `sip-solana-keeper-2`.
 2. Privy te enseña la **clave privada una sola vez** (empieza por `wallet-auth:`). Cópiala directamente a tu gestor de
    contraseñas. Más adelante la pegarás en Railway como `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`.
 3. Apunta el **id** de la llave. Es público: va a `SIP_SOLANA_PRIVY_SIGNER_ID`, en la web y en Railway. Ese id sí se lo
@@ -204,12 +209,15 @@ es otro (paso 6). Si dice cualquier otra cosa, la tabla de más abajo explica ca
 El comando de aquí abajo sirve para lo otro: **probar una llave concreta antes de ponerla en Railway**, o ver cuál es su
 clave pública para compararla con el dashboard. Juzga exactamente el valor que tú pegas, ni más ni menos.
 
+Lleva escrito el signer id de hoy, `kyio853439oa78qfvmt853i4` (`sip-solana-keeper-2`). Antes de usarlo, mira que sea el
+mismo que `signing.privySignerId` en `/status`; si no lo es, pon en el comando el de `/status`.
+
 ```bash
 cd ~/ProyectosCT/SIP
 printf 'App secret de Privy (SIP): ' && read -rs SECRETO && echo
 printf 'Llave de autorización del vigilante: ' && read -rs CLAVE && echo
 SIP_SOLANA_PRIVY_APP_ID=cmtrt36tb00080dlbrda5aqam SIP_SOLANA_PRIVY_APP_SECRET="$SECRETO" \
-  SIP_SOLANA_PRIVY_AUTHORIZATION_KEY="$CLAVE" SIP_SOLANA_PRIVY_SIGNER_ID=cbx133itb717vxp3dqwhk808 \
+  SIP_SOLANA_PRIVY_AUTHORIZATION_KEY="$CLAVE" SIP_SOLANA_PRIVY_SIGNER_ID=kyio853439oa78qfvmt853i4 \
   pnpm --silent --dir packages/solana-keeper privy-policy key
 unset SECRETO CLAVE
 ```
@@ -226,7 +234,8 @@ a conciencia cuál pegas:
   en `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`) y pega ESE.
 
 Lo que hace son dos cosas. Primero calcula, aquí mismo, la **clave pública** que le corresponde a esa llave privada.
-Después le pregunta a Privy qué claves públicas tiene registradas el key quorum `cbx133itb717vxp3dqwhk808` — eso solo
+Después le pregunta a Privy qué claves públicas tiene registradas el key quorum del signer id (hoy
+`kyio853439oa78qfvmt853i4`) — eso solo
 necesita el app id y la app secret — y las compara. La clave pública es pública: se puede leer, copiar y enseñar.
 
 ### Qué te contesta
@@ -264,14 +273,15 @@ Tres avisos, para que no te manden a arreglar lo que no está roto:
 El comando te imprime dos cosas públicas, juntas:
 
 - `derivedPublicKey`: la clave pública de **la llave que acabas de pegar**.
-- `registeredPublicKeys`: las que **tiene registradas el quorum** `cbx133itb717vxp3dqwhk808`.
+- `registeredPublicKeys`: las que **tiene registradas el quorum** del signer id (hoy `kyio853439oa78qfvmt853i4`).
 
 Con eso en la mano:
 
 1. Entra en el dashboard de Privy, comprueba arriba que la app es la del app id `cmtrt36tb00080dlbrda5aqam` (paso 1) y
    ve a **Wallets → Authorization keys**.
-2. Busca la llave cuyo **id** sea `cbx133itb717vxp3dqwhk808` — es la que el vigilante dice ser. Debería llamarse
-   `sip-solana-keeper`.
+2. Busca la llave cuyo **id** sea el signer id (hoy `kyio853439oa78qfvmt853i4`) — es la que el vigilante dice ser.
+   Debería llamarse `sip-solana-keeper-2`. (`cbx133itb717vxp3dqwhk808`, `sip-solana-keeper`, es la retirada: su llave
+   se perdió, y ninguna llave que tengas va a coincidir con ella.)
 3. Compara su clave pública con `derivedPublicKey`. Son distintas: por eso Privy rechaza.
 4. La llave privada que va en `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY` es **la de esa llave del dashboard**, no la que hay
    puesta ahora. Búscala en el gestor de contraseñas por su nombre. Si quieres, pégala en el comando de arriba antes de
@@ -298,9 +308,11 @@ asiento de cada wallet de trading nombra el signer **por su id**; el id nuevo es
 el viejo hay que volver a sentarla. Eso lo hace el dueño de la wallet desde la web, con un botón. El orden importa:
 
 1. **Llave nueva en Privy.** Comprueba arriba que la app es la del app id `cmtrt36tb00080dlbrda5aqam` (paso 1) y ve a
-   **Wallets → Authorization keys → New key**. Nombre: `sip-solana-keeper-2`, con una sola llave (1 de 1). Copia la
-   clave privada al gestor **en ese momento**: no la vuelves a ver. Apunta su **id**, que es nuevo. A partir de aquí,
-   donde esta guía dice `cbx133itb717vxp3dqwhk808`, pon ese id nuevo.
+   **Wallets → Authorization keys → New key**. Nombre: el siguiente de la serie (`sip-solana-keeper-3`, si la que se
+   pierde es `sip-solana-keeper-2`), con una sola llave (1 de 1). Copia la clave privada al gestor **en ese momento**: no
+   la vuelves a ver. Apunta su **id**, que es nuevo: va en los pasos 2 y 3, y en los comandos de esta guía en lugar de
+   `kyio853439oa78qfvmt853i4`. (Así se hizo el 18-sep: `sip-solana-keeper`, `cbx133itb717vxp3dqwhk808`, se perdió, y
+   `sip-solana-keeper-2`, `kyio853439oa78qfvmt853i4`, la sustituyó.)
 2. **Railway: las DOS variables, y Redeploy.** En el servicio del vigilante cambia `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`
    (la privada nueva, en una sola línea) y `SIP_SOLANA_PRIVY_SIGNER_ID` (el id nuevo). Despliega los cambios y espera a
    que el servicio vuelva a arrancar. `SIP_SOLANA_PRIVY_POLICY_ID` **no cambia**.
@@ -318,8 +330,9 @@ el viejo hay que volver a sentarla. Eso lo hace el dueño de la wallet desde la 
    - la wallet de trading sale con la etiqueta **Has a signer**: Privy solo sabe decir que tiene *un* signer, no cuál, así
      que el signer viejo se ve igual que uno bueno;
    - pulsa **Re-seat keeper**. Todavía no pasa nada: sale un aviso que dice que va a quitar **todos** los signers de esa
-     wallet y enseña el signer y la política que pondrá después. **Mira que el signer sea el id nuevo.** Si enseña
-     `cbx133itb717vxp3dqwhk808`, la web no se ha redesplegado: pulsa **Cancel** y vuelve al paso 3;
+     wallet y enseña el signer y la política que pondrá después. **Mira que el signer sea el id nuevo.** Si enseña el
+     viejo (en la rotación del 18-sep, `cbx133itb717vxp3dqwhk808`), la web no se ha redesplegado: pulsa **Cancel** y
+     vuelve al paso 3;
    - pulsa **Remove every signer and re-seat**. Privy quita los signers, la web espera a que Privy lo refleje y pone el
      del vigilante con su política. Termina con un texto que empieza por **Done:** y la etiqueta vuelve a **Has a
      signer**.
