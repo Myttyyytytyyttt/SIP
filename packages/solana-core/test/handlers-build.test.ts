@@ -4,8 +4,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   ATA_PROGRAM,
+  ANTHROPIC_MINT,
   COMPUTE_BUDGET_PROGRAM,
   ED25519_PROGRAM,
+  FIGUREAI_MINT,
   RAYDIUM_CLMM,
   SOL_USDC_POOL,
   SPYX_MINT,
@@ -21,6 +23,7 @@ import { decodeArgs } from "../src/client/borsh";
 import { SIP_ACCOUNT_SPACE } from "../src/client/decoders";
 import { SIP_PROGRAM_ID, toHex } from "../src/client/idl";
 import { linkConsentMessage } from "../src/client/link-consent";
+import { BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES } from "../src/client/product";
 import { parseLegacyMessage, splitWire } from "../src/client/message";
 import {
   BUILD_READS_WEIGHT,
@@ -39,8 +42,8 @@ import { MAX_RELAY_REQUEST_WEIGHT } from "../src/server/relay-policy";
 import { createRpcPool } from "../src/server/rpc-pool";
 import { verifySignedTransaction } from "../src/server/verify-tx";
 import {
+  LEG_POOLS,
   SOL_SQRT_PRICE,
-  SPYX_SQRT_PRICE,
   answerRpc,
   clmmPoolAccount,
   configAccount,
@@ -50,6 +53,7 @@ import {
   mintAccount,
   parsedTokenAccount,
   policyAccount,
+  pricedPoolEntries,
   tokenAccountData,
   tokenAccountInfo,
   vaultAccount,
@@ -454,15 +458,18 @@ describe("prepareLink and link", () => {
   });
 });
 
-/** A chain where `owner` has a vault, the pinned pools price SOL and SPYx at the goldens, and USDC and SPYx are their token programs' mints. */
+/**
+ * A chain where `owner` has a vault, EVERY pinned pool prices its leg at the
+ * goldens, and USDC and every leg mint are held by the token program the route
+ * expects. Every pool is present so a test that spoils one is testing that pool.
+ */
 function investableChain(owner: string): StubChain {
   return {
-    accounts: new Map([
+    accounts: new Map<string, ReturnType<typeof accountInfo> | null>([
       [deriveVaultPda(owner).toBase58(), sipOwned(vaultAccount(owner), localRent(125))],
-      [SOL_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(WSOL_MINT, USDC_MINT, SOL_SQRT_PRICE))],
-      [SPYX_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(SPYX_MINT, USDC_MINT, SPYX_SQRT_PRICE, [8, 6]))],
+      ...pricedPoolEntries(),
       [USDC_MINT, mintAccount(TOKEN_PROGRAM)],
-      [SPYX_MINT, mintAccount(TOKEN_2022_PROGRAM)],
+      ...LEG_POOLS.map((leg): [string, ReturnType<typeof accountInfo>] => [leg.mint, mintAccount(TOKEN_2022_PROGRAM)]),
     ]),
   };
 }
@@ -470,7 +477,7 @@ function investableChain(owner: string): StubChain {
 const instructionsOf = (txBase64: string) => parseLegacyMessage(splitWire(fromB64(txBase64)).message).instructions;
 
 describe("investPolicy", () => {
-  it("a first policy: [CU limit, CU price, ATA wSOL, ATA USDC, ATA SPYx, set_invest_policy] at 90 % and 95 % of the pools, the default caps and every rent; it verifies once the owner signs", async () => {
+  it("a first policy: [CU limit, CU price, ATA wSOL, ATA USDC, set_invest_policy] at 90 % and 95 % of the pools, the default caps and the rent of what it creates; it verifies once the owner signs", async () => {
     const owner = keypair();
     const ownerKey = owner.publicKey.toBase58();
     const vault = deriveVaultPda(ownerKey).toBase58();
@@ -478,23 +485,36 @@ describe("investPolicy", () => {
     const answer = await build({ action: "investPolicy", owner: ownerKey });
     expect(answer.status).toBe(200);
     const body = answer.json;
-    expect(programsOf(body.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, SIP_PROGRAM_ID]);
-    expect(decodeArgs("set_invest_policy", instructionsOf(body.txBase64)[5]!.data)).toEqual({
-      legs: [{ mint: SPYX_MINT, weight_bps: 10_000, min_out_rate_wad: 124_719_467_624_105_690n }],
+    // FIVE targets, but only BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES of them ride along:
+    // wSOL and USDC, the first two of vaultTokenAccountTargets' order. The keeper
+    // opens each leg's account idempotently on the first invest tick.
+    expect(programsOf(body.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, SIP_PROGRAM_ID]);
+    expect(instructionsOf(body.txBase64).filter((instruction) => instruction.programId === ATA_PROGRAM)).toHaveLength(BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES);
+    expect(decodeArgs("set_invest_policy", instructionsOf(body.txBase64)[4]!.data)).toEqual({
+      // basketWeightsBps(3): the remainder rides on the first leg, and the three sum to 10,000.
+      legs: [
+        { mint: SPYX_MINT, weight_bps: 3_334, min_out_rate_wad: 124_719_467_624_105_690n },
+        { mint: ANTHROPIC_MINT, weight_bps: 3_333, min_out_rate_wad: 5_277_777_777_777_777_778n },
+        { mint: FIGUREAI_MINT, weight_bps: 3_333, min_out_rate_wad: 23_750_000_000_000_000_001n },
+      ],
       venue_program: RAYDIUM_CLMM,
       in_mint: USDC_MINT,
       min_convert_rate_wad: 90_034_840_399_943_305n,
-      min_investment: 5_000_000n,
+      // 5 USDC split three ways, rounded down, so one $5 purchase still covers every leg.
+      min_investment: 1_666_666n,
       max_per_call: 1_000_000_000n,
       max_rolling_30d: 31_000_000_000n,
       enabled: true,
     });
     expect(body.policy).toBe(deriveInvestPda(vault).toBase58());
     expect(body.policyExists).toBe(false);
+    // Every target is still listed; `create` says whether THIS transaction opens it.
     expect(body.vaultTokenAccounts).toEqual([
       { mint: WSOL_MINT, address: deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58(), tokenProgram: TOKEN_PROGRAM, create: true },
       { mint: USDC_MINT, address: deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58(), tokenProgram: TOKEN_PROGRAM, create: true },
-      { mint: SPYX_MINT, address: deriveAta(vault, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenProgram: TOKEN_2022_PROGRAM, create: true },
+      { mint: SPYX_MINT, address: deriveAta(vault, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenProgram: TOKEN_2022_PROGRAM, create: false },
+      { mint: ANTHROPIC_MINT, address: deriveAta(vault, ANTHROPIC_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenProgram: TOKEN_2022_PROGRAM, create: false },
+      { mint: FIGUREAI_MINT, address: deriveAta(vault, FIGUREAI_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenProgram: TOKEN_2022_PROGRAM, create: false },
     ]);
     expect(body.floors).toEqual({
       slot: 321,
@@ -503,24 +523,46 @@ describe("investPolicy", () => {
       convertWad: "90034840399943305",
       usdcRawPerSol: "100038711",
       floorUsdcRawPerSol: "90034840",
-      legs: [{ symbol: "SPYx", mint: SPYX_MINT, liveWad: "131283650130637569", wad: "124719467624105690", usdcRawPer1e8: "761709474", maxUsdcRawPer1e8: "801799446" }],
+      legs: LEG_POOLS.map((leg) => ({
+        symbol: leg.symbol,
+        mint: leg.mint,
+        liveWad: String(leg.legWad),
+        wad: String(leg.floorWad),
+        usdcRawPer1e8: String(leg.usdcRawPer1e8),
+        maxUsdcRawPer1e8: String(leg.maxUsdcRawPer1e8),
+      })),
     });
+    // The owner is quoted the rent of the two accounts this transaction opens, and
+    // NOT of the three legs the keeper opens at the crank's expense.
     expect(body.costs).toEqual({
-      rentLamports: String(localRent(970) + 2 * localRent(165) + localRent(179)),
+      rentLamports: String(localRent(970) + 2 * localRent(165)),
       signatureFeeLamports: "5000",
       priorityFeeLamports: "30000",
       policyRentLamports: String(localRent(970)),
-      tokenAccountRentLamports: String(2 * localRent(165) + localRent(179)),
+      tokenAccountRentLamports: String(2 * localRent(165)),
     });
     expect(body.warnings).toEqual([]);
     const verified = verifySignedTransaction(signWire(body.txBase64, owner));
     expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
     const methods = methodsOf(upstream.calls);
     expect(methods.filter((method) => method === "getLatestBlockhash")).toHaveLength(1);
-    expect(methods).toHaveLength(BUILD_READS_WEIGHT.investPolicy);
+    // RED ON PURPOSE, AND IT IS THE SOURCE THAT IS WRONG. This pins the reads budget
+    // against the calls the route really makes, which is what keeps the Helius
+    // exposure equal to what each client is charged. The three-leg catalogue added a
+    // fourth DISTINCT token-account size (191, the PreStocks accounts), so
+    // readBuildBatch now asks a fourth getMinimumBalanceForRentExemption:
+    //   readOwnerAccounts 2 (accounts + the vault's rent)
+    //   + readBuildBatch 6 (blockhash, accounts, and one rent per size in
+    //     [InvestmentPolicy 970, 165, 179, 191])
+    //   = 8, against BUILD_READS_WEIGHT.investPolicy = 7, a number last set when the
+    //     basket was one leg and there were only three sizes.
+    // The fix is BUILD_READS_WEIGHT.investPolicy: 7 -> 8 in src/server/build-handler.ts,
+    // which this phase is not allowed to touch. Loosening this assertion instead would
+    // hide an under-charge in the rate limiter, so it stays as it is.
+    expect(methods, "BUILD_READS_WEIGHT.investPolicy must equal the upstream calls investPolicy really makes").toHaveLength(BUILD_READS_WEIGHT.investPolicy);
   });
 
-  it("creates only what the vault lacks: an existing USDC account is left alone, a wSOL address holding only lamports is still created, and an existing policy costs no policy rent", async () => {
+  it("creates only what the vault lacks, and at most the bundle: an existing USDC account is left alone, a wSOL address holding only lamports is still created, SPYx rides the free slot, the two PreStocks are left to the keeper, and an existing policy costs no policy rent", async () => {
     const owner = keypair();
     const ownerKey = owner.publicKey.toBase58();
     const vault = deriveVaultPda(ownerKey).toBase58();
@@ -533,11 +575,15 @@ describe("investPolicy", () => {
     expect(answer.status).toBe(200);
     expect(programsOf(answer.json.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, SIP_PROGRAM_ID]);
     const instructions = instructionsOf(answer.json.txBase64);
+    // The bundle takes the first BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES MISSING targets in
+    // vaultTokenAccountTargets' order, so an existing USDC account lets SPYx ride along.
     expect([instructions[2]!.accountKeys[3], instructions[3]!.accountKeys[3]]).toEqual([WSOL_MINT, SPYX_MINT]);
     expect(answer.json.vaultTokenAccounts.map((entry: { mint: string; create: boolean }) => [entry.mint, entry.create])).toEqual([
       [WSOL_MINT, true],
       [USDC_MINT, false],
       [SPYX_MINT, true],
+      [ANTHROPIC_MINT, false],
+      [FIGUREAI_MINT, false],
     ]);
     expect(answer.json.policyExists).toBe(true);
     expect(answer.json.costs).toMatchObject({
@@ -556,7 +602,8 @@ describe("investPolicy", () => {
     const chain = investableChain(owner);
     chain.accounts.set(deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58(), tokenAccountInfo(TOKEN_PROGRAM));
     chain.accounts.set(deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58(), tokenAccountInfo(TOKEN_PROGRAM));
-    chain.accounts.set(deriveAta(vault, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenAccountInfo(TOKEN_2022_PROGRAM, 179));
+    // Every one of the five, not just the three that used to be the whole list.
+    for (const leg of LEG_POOLS) chain.accounts.set(deriveAta(vault, leg.mint, TOKEN_2022_PROGRAM).toBase58(), tokenAccountInfo(TOKEN_2022_PROGRAM, leg.mint === SPYX_MINT ? 179 : 191));
     const { build } = setup(chain);
     const paused = await build({ action: "investPolicy", owner, enabled: false });
     expect(programsOf(paused.json.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, SIP_PROGRAM_ID]);
@@ -569,8 +616,11 @@ describe("investPolicy", () => {
 
   it.each<[string, (chain: StubChain) => void]>([
     ["the SOL/USDC pool missing", (chain) => void chain.accounts.delete(SOL_USDC_POOL)],
-    ["the SPYx pool with its mints swapped", (chain) => void chain.accounts.set(SPYX_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(USDC_MINT, SPYX_MINT, SPYX_SQRT_PRICE)))],
+    ["the SPYx pool with its mints swapped", (chain) => void chain.accounts.set(SPYX_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(USDC_MINT, SPYX_MINT, LEG_POOLS[0]!.sqrtPriceX64, [8, 6])))],
     ["the SOL/USDC pool owned by another program", (chain) => void chain.accounts.set(SOL_USDC_POOL, accountInfo(key(), clmmPoolAccount(WSOL_MINT, USDC_MINT, SOL_SQRT_PRICE)))],
+    // A PreStocks pool is as load-bearing as SPYx's: one of the three legs unpriced is no policy.
+    ["the ANTHROPIC pool missing", (chain) => void chain.accounts.delete(LEG_POOLS[1]!.pool)],
+    ["the FIGUREAI pool owned by another program", (chain) => void chain.accounts.set(LEG_POOLS[2]!.pool, accountInfo(key(), clmmPoolAccount(FIGUREAI_MINT, USDC_MINT, LEG_POOLS[2]!.sqrtPriceX64, [9, 6])))],
   ])("%s is 502 price_unavailable, and nothing is built", async (_, spoil) => {
     const owner = key();
     const chain = investableChain(owner);
@@ -580,12 +630,15 @@ describe("investPolicy", () => {
     expect(answer.json).not.toHaveProperty("txBase64");
   });
 
-  it("a SPYx mint held by classic Token, or a USDC mint that does not exist, is 409 mint_unexpected naming it", async () => {
+  it("any leg mint held by classic Token, or a USDC mint that does not exist, is 409 mint_unexpected naming it", async () => {
     const owner = key();
-    const classic = investableChain(owner);
-    classic.accounts.set(SPYX_MINT, mintAccount(TOKEN_PROGRAM));
-    const wrong = await setup(classic).build({ action: "investPolicy", owner });
-    expect([wrong.status, wrong.json.error?.code, (wrong.json.error as { mint?: string } | undefined)?.mint]).toEqual([409, "mint_unexpected", SPYX_MINT]);
+    // Each leg on its own: the check runs over the whole catalogue, not just its head.
+    for (const leg of LEG_POOLS) {
+      const classic = investableChain(owner);
+      classic.accounts.set(leg.mint, mintAccount(TOKEN_PROGRAM));
+      const wrong = await setup(classic).build({ action: "investPolicy", owner });
+      expect([wrong.status, wrong.json.error?.code, (wrong.json.error as { mint?: string } | undefined)?.mint]).toEqual([409, "mint_unexpected", leg.mint]);
+    }
     const absent = investableChain(owner);
     absent.accounts.delete(USDC_MINT);
     const missing = await setup(absent).build({ action: "investPolicy", owner });
@@ -604,7 +657,10 @@ describe("investPolicy", () => {
 
   it("caps the program would refuse are 400 invalid_policy before any read", async () => {
     const { build, upstream } = setup();
-    for (const caps of [{ maxRolling30d: "999999999" }, { maxPerCall: "4999999", maxRolling30d: "4999999" }]) {
+    // 1,666,665 is one raw unit under the three-leg minimum investment (5 USDC / 3,
+    // rounded down). At one leg the minimum was the whole 5 USDC and this read 4999999;
+    // the number moved because the basket did, and it still names a cap the program refuses.
+    for (const caps of [{ maxRolling30d: "999999999" }, { maxPerCall: "1666665", maxRolling30d: "1666665" }]) {
       const answer = await build({ action: "investPolicy", owner: key(), ...caps });
       expect([answer.status, answer.json.error?.code]).toEqual([400, "invalid_policy"]);
       expect(answer.json.error?.problems?.join(" ")).toMatch(/minInvestment <= maxPerCall <= maxRolling30d/);
@@ -844,8 +900,7 @@ describe("state", () => {
     chain.accounts.set(deriveLinkPda(mine).toBase58(), sipOwned(linkAccount(mine, vault)));
     chain.accounts.set(deriveLinkPda(theirs).toBase58(), sipOwned(linkAccount(theirs, key())));
     chain.accounts.set(deriveLinkPda(forged).toBase58(), accountInfo(key(), linkAccount(forged, vault)));
-    chain.accounts.set(SOL_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(WSOL_MINT, USDC_MINT, SOL_SQRT_PRICE)));
-    chain.accounts.set(SPYX_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(SPYX_MINT, USDC_MINT, SPYX_SQRT_PRICE, [8, 6])));
+    for (const [address, account] of pricedPoolEntries()) chain.accounts.set(address, account);
     const usdcAccount = deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58();
     chain.accounts.set(usdcAccount, tokenAccountInfo(TOKEN_PROGRAM));
     const holdings = [{ pubkey: usdcAccount, mint: USDC_MINT, amount: "9007199254740993", decimals: 6, uiAmountString: "9007199254.740993", tokenProgram: TOKEN_PROGRAM }];
@@ -868,12 +923,14 @@ describe("state", () => {
       [forged, "unreadable"],
     ]);
     expect(body.walletLinks[0].link).toBe(deriveLinkPda(mine).toBase58());
+    // One rent per leg, read at that leg's own size: 179 for SPYx, 191 for a PreStocks
+    // account, which carries TransferFeeAmount on top of the same extensions.
     expect(body.rents).toEqual({
       vault: String(localRent(125)),
       link: String(localRent(129)),
       policy: String(localRent(970)),
       tokenAccount: String(localRent(165)),
-      legTokenAccounts: { [SPYX_MINT]: String(localRent(179)) },
+      legTokenAccounts: { [SPYX_MINT]: String(localRent(179)), [ANTHROPIC_MINT]: String(localRent(191)), [FIGUREAI_MINT]: String(localRent(191)) },
     });
     // Past 2^53, as the RPC wrote it: a number would have lost the last digit.
     expect(body.holdings).toEqual({
@@ -886,13 +943,31 @@ describe("state", () => {
         { mint: WSOL_MINT, address: deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58(), tokenProgram: TOKEN_PROGRAM, status: "missing", amountRaw: null, decimals: null, uiAmount: null },
         { mint: USDC_MINT, address: usdcAccount, tokenProgram: TOKEN_PROGRAM, status: "exists", amountRaw: "9007199254740993", decimals: 6, uiAmount: "9007199254.740993" },
         { mint: SPYX_MINT, address: deriveAta(vault, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenProgram: TOKEN_2022_PROGRAM, status: "missing", amountRaw: null, decimals: null, uiAmount: null },
+        {
+          mint: ANTHROPIC_MINT,
+          address: deriveAta(vault, ANTHROPIC_MINT, TOKEN_2022_PROGRAM).toBase58(),
+          tokenProgram: TOKEN_2022_PROGRAM,
+          status: "missing",
+          amountRaw: null,
+          decimals: null,
+          uiAmount: null,
+        },
+        {
+          mint: FIGUREAI_MINT,
+          address: deriveAta(vault, FIGUREAI_MINT, TOKEN_2022_PROGRAM).toBase58(),
+          tokenProgram: TOKEN_2022_PROGRAM,
+          status: "missing",
+          amountRaw: null,
+          decimals: null,
+          uiAmount: null,
+        },
       ],
     });
     expect(body.prices).toEqual({
       slot: 321,
       convertWad: "100038711555492562",
       usdcRawPerSol: "100038711",
-      legs: [{ symbol: "SPYx", mint: SPYX_MINT, wad: "131283650130637569", usdcRawPer1e8: "761709474" }],
+      legs: LEG_POOLS.map((leg) => ({ symbol: leg.symbol, mint: leg.mint, wad: String(leg.legWad), usdcRawPer1e8: String(leg.usdcRawPer1e8) })),
     });
   });
 
@@ -917,20 +992,27 @@ describe("state", () => {
 
   it("a pool under another owner, or with its mints swapped, gives no prices rather than a wrong one", async () => {
     const owner = key();
+    // ONE pool is spoiled at a time and every other one is where it belongs, so the
+    // null is that pool's doing. With four priced pools, a chain listing two would
+    // have answered null whatever was done to either of them.
     const swapped = setup({
-      accounts: new Map([
+      accounts: new Map<string, ReturnType<typeof accountInfo> | null>([
+        ...pricedPoolEntries(),
         [SOL_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(USDC_MINT, WSOL_MINT, SOL_SQRT_PRICE))],
-        [SPYX_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(SPYX_MINT, USDC_MINT, SPYX_SQRT_PRICE))],
       ]),
     });
     expect((await swapped.state({ action: "state", owner, wallets: [] })).json.prices).toBeNull();
     const foreign = setup({
-      accounts: new Map([
-        [SOL_USDC_POOL, accountInfo(key(), clmmPoolAccount(WSOL_MINT, USDC_MINT, SOL_SQRT_PRICE))],
-        [SPYX_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(SPYX_MINT, USDC_MINT, SPYX_SQRT_PRICE))],
+      accounts: new Map<string, ReturnType<typeof accountInfo> | null>([
+        ...pricedPoolEntries(),
+        [LEG_POOLS[1]!.pool, accountInfo(key(), clmmPoolAccount(ANTHROPIC_MINT, USDC_MINT, LEG_POOLS[1]!.sqrtPriceX64, [9, 6]))],
       ]),
     });
     expect((await foreign.state({ action: "state", owner, wallets: [] })).json.prices).toBeNull();
+    // And with every pool as it should be, the same chain DOES price: the two above
+    // are null because of what was done to them, not because prices never work here.
+    const whole = setup({ accounts: new Map<string, ReturnType<typeof accountInfo> | null>(pricedPoolEntries()) });
+    expect((await whole.state({ action: "state", owner, wallets: [] })).json.prices).toMatchObject({ usdcRawPerSol: "100038711" });
   });
 
   it.each([

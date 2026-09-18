@@ -12,12 +12,25 @@
 // browser relay no longer serves (getSignaturesForAddress, getTransaction and
 // getProgramAccounts live here, behind the web's own routes).
 
-import { RAYDIUM_CLMM, SOL_USDC_POOL, SYSTEM_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, TOKEN_PROGRAMS, USDC_MINT, WSOL_MINT } from "../client/addresses";
+import {
+  PYTH_RECEIVER_PROGRAM,
+  PYTH_SOL_USD_FEED,
+  PYTH_USDC_USD_FEED,
+  RAYDIUM_CLMM,
+  SOL_USDC_POOL,
+  SYSTEM_PROGRAM,
+  TOKEN_2022_PROGRAM,
+  TOKEN_PROGRAM,
+  TOKEN_PROGRAMS,
+  USDC_MINT,
+  WSOL_MINT,
+} from "../client/addresses";
 import { base58Encode, isBase58OfLength, isPubkey, isSignature, tryBase58Decode } from "../client/base58";
 import { tryBase64Decode } from "../client/base64";
 import type { ClassifiableEntry, SipInstructionCall, VaultTokenDelta } from "../client/activity";
 import { decodeArgs, fieldOffset } from "../client/borsh";
 import { PoolPriceError, legUsdcWad, solUsdcConvertWad } from "../client/clmm-price";
+import { PythPriceError, solUsdcPythWad, type SolUsdcPythRate } from "../client/pyth-price";
 import { CLASSIC_TOKEN_ACCOUNT_BYTES, OFFERED_LEGS } from "../client/product";
 import {
   SIP_ACCOUNT_SPACE,
@@ -437,6 +450,85 @@ export async function readPoolPrices(pool: RpcPool): Promise<ChainRead<PoolPrice
   }
 }
 
+// ── Pyth: beside the pools, never inside them ────────────────────────────────
+//
+// WHY THESE ARE NOT IN PRICED_POOLS. That constant is an offset basis, not a
+// list of prices: the snapshot hands poolPricesFromAccounts a FIXED slice of one
+// answer — values.slice(3, 3 + PRICED_POOLS.length) — and every index after it
+// is counted from its length. A Pyth account inside PRICED_POOLS would be handed
+// to the Raydium decoder, refused for the right reason, and would take the whole
+// price panel down with it. Appended after the wallets, at the very END of the
+// address array, a feed cannot reach that slice however the RPC answers it, and
+// moves no index the pools, the links or the wallets are read at.
+//
+// WHY THE OWNER IS CHECKED HERE AND NOWHERE ELSE. A feed account is a PDA of the
+// PUSH program, which does NOT own it — the RECEIVER does (addresses.ts spells
+// out the pair). So a correct derivation proves nothing about who may write the
+// bytes, and the bytes cannot say who wrote them: anyone who owns an account can
+// fill it with a valid discriminator and the feed id we are looking for.
+// decodePythPriceUpdate refuses the wrong FEED; only a read can refuse the wrong
+// WRITER, so this one does, before a number is taken from it.
+
+/**
+ * The Clock sysvar, read in the same answer as the feeds so a publish age is
+ * measured against the CHAIN's clock and never this host's: a server whose clock
+ * has drifted must not be able to make a stale oracle look fresh, or a fresh one
+ * stale. The keeper reads it the same way, in the same kind of one batch
+ * (solana-keeper's invest-tick.ts).
+ *
+ * It sits here rather than in addresses.ts beside INSTRUCTIONS_SYSVAR, where it
+ * belongs, only because that file was another session's while this was written.
+ */
+const SYSVAR_CLOCK = "SysvarC1ock11111111111111111111111111111111";
+
+/** Clock is slot, epoch_start_timestamp, epoch and leader_schedule_epoch, THEN unix_timestamp: an i64 at byte 32, never byte 0. */
+const CLOCK_UNIX_TIMESTAMP_AT = 32;
+const CLOCK_BYTES = 40;
+
+/** What the snapshot appends after its wallets, in this order: the chain's clock, then the two feeds. */
+export const PYTH_SNAPSHOT_ADDRESSES: readonly string[] = Object.freeze([SYSVAR_CLOCK, PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED]);
+
+export interface PythRead extends SolUsdcPythRate {
+  /** The chain's unix_timestamp that ageSeconds was measured against, reported so the age can be checked rather than believed. */
+  readonly chainUnixSeconds: bigint;
+}
+
+/** Two's complement over the 8 bytes at `at`, so a clock before 1970 reads negative instead of astronomical. */
+function i64At(bytes: Uint8Array, at: number): bigint {
+  let value = 0n;
+  for (let i = 7; i >= 0; i--) value = (value << 8n) | BigInt(bytes[at + i]!);
+  return value >= 1n << 63n ? value - (1n << 64n) : value;
+}
+
+/**
+ * The oracle rate from PYTH_SNAPSHOT_ADDRESSES' accounts, in that order. Each
+ * feed must exist, be owned by PYTH_RECEIVER_PROGRAM and carry the feed id
+ * addresses.ts names for it, and the clock must be readable; anything else
+ * throws PythPriceError, and the caller reports no oracle rather than a wrong one.
+ *
+ * THE CLOCK IS PART OF THE READ, not a detail of it. An age is the only thing
+ * that separates a price from a number, so a rate whose age cannot be computed
+ * is not published at all — reporting a WAD with no age invites exactly the use
+ * a stale oracle must not have.
+ */
+export function pythFromAccounts(accounts: readonly (AccountSnapshot | null | undefined)[]): PythRead {
+  if (accounts.length !== PYTH_SNAPSHOT_ADDRESSES.length) throw new PythPriceError("the chain's clock and both feeds must be read");
+  const clock = accounts[0];
+  if (clock === null || clock === undefined || clock.data === null || clock.data.length < CLOCK_BYTES) {
+    throw new PythPriceError("the Clock sysvar could not be read, so a publish age would be this host's guess rather than the chain's");
+  }
+  const chainUnixSeconds = i64At(clock.data, CLOCK_UNIX_TIMESTAMP_AT);
+  const feed = (index: number): Uint8Array => {
+    const address = PYTH_SNAPSHOT_ADDRESSES[index]!;
+    const account = accounts[index];
+    if (account === null || account === undefined) throw new PythPriceError(`the feed ${address} does not exist`);
+    if (account.owner !== PYTH_RECEIVER_PROGRAM) throw new PythPriceError(`the feed ${address} is owned by ${account.owner}, not the Pyth receiver ${PYTH_RECEIVER_PROGRAM}`);
+    if (account.data === null) throw new PythPriceError(`the feed ${address}'s data is not base64`);
+    return account.data;
+  };
+  return { ...solUsdcPythWad(feed(1), feed(2), chainUnixSeconds), chainUnixSeconds };
+}
+
 // ── the vault's token accounts ───────────────────────────────────────────────
 
 export interface VaultTokenAccountTarget {
@@ -514,8 +606,8 @@ function parsedBalance(account: unknown, vault: string, mint: string): { readonl
  *
  * READ BY ADDRESS, NEVER LISTED. Anyone can open token accounts whose owner is
  * the vault, and enough of them make listVaultHoldings' answer too large to read.
- * These three addresses stay one small answer, so the wallets screen can always
- * offer the vault's own wSOL, USDC and SPYx.
+ * These few addresses — wSOL, USDC and one per offered leg — stay one small
+ * answer, so the wallets screen can always offer the vault's own.
  */
 export async function readVaultTokenAccounts(pool: RpcPool, vault: string): Promise<ChainRead<readonly VaultTokenAccountRead[]>> {
   const targets = vaultTokenAccountTargets(vault);
@@ -790,6 +882,8 @@ export interface LiveSnapshot {
   readonly policy: ChainRead<AccountRead<InvestmentPolicyState>>;
   readonly config: ChainRead<AccountRead<ProtocolConfigState>>;
   readonly prices: ChainRead<PoolPrices>;
+  /** The oracle, apart from the venue: unreadable whenever a feed is, and never able to make `prices` unreadable. */
+  readonly pyth: ChainRead<PythRead>;
   readonly tokenAccounts: ChainRead<readonly VaultTokenAccountRead[]>;
   readonly rents: {
     readonly vault: bigint | null;
@@ -809,14 +903,14 @@ export interface LiveSnapshotInput {
   readonly discover: boolean;
 }
 
-/** At most this many addresses go into the snapshot's getMultipleAccounts: 3 + 2 pools + 10 links + 10 wallets. */
-export const MAX_LIVE_SNAPSHOT_ADDRESSES = 25;
+/** At most this many addresses go into the snapshot's getMultipleAccounts: 3 + 4 pools + 10 links + 10 wallets + the clock and 2 feeds. */
+export const MAX_LIVE_SNAPSHOT_ADDRESSES = 3 + PRICED_POOLS.length + 2 * MAX_WALLET_LINKS + PYTH_SNAPSHOT_ADDRESSES.length;
 
 /**
  * EVERYTHING THE LIVE DASHBOARD SHOWS, IN ONE ROUND TRIP: the vault, its policy,
- * the protocol config, the pinned pools' prices, the vault's own wSOL, USDC and
- * SPYx accounts, two rents, each trading wallet's balance and link — and, on
- * demand, every link the vault has on chain.
+ * the protocol config, the pinned pools' prices, Pyth's view of SOL/USDC beside
+ * them, the vault's own wSOL, USDC and per-leg accounts, two rents, each trading
+ * wallet's balance and link — and, on demand, every link the vault has on chain.
  *
  * ONE BATCH, FIVE MEMBERS. A dashboard that polls every minute cannot afford a
  * read per fact, and the Helius key is the keeper's too.
@@ -827,9 +921,15 @@ export const MAX_LIVE_SNAPSHOT_ADDRESSES = 25;
  * only its own part. A failed batch makes every part unreadable — never missing,
  * because "no vault" is an invitation to create one the chain would refuse.
  *
- * READ BY ADDRESS, NEVER LISTED: the vault's token accounts are its three
+ * READ BY ADDRESS, NEVER LISTED: the vault's token accounts are its own
  * associated addresses, so no number of accounts anyone opens for the vault can
  * make this unreadable (the reason readVaultTokenAccounts gives).
+ *
+ * THE ORACLE RIDES AT THE TAIL, and costs this batch nothing it was not already
+ * paying: three more addresses in a getMultipleAccounts that was being sent
+ * anyway. Appended AFTER the wallets it can reach neither the pools' fixed slice
+ * nor any wallet's index, so a dead feed degrades to no oracle and leaves every
+ * other part of the answer — the prices above all — exactly as it was.
  */
 export async function readLiveSnapshot(pool: RpcPool, input: LiveSnapshotInput): Promise<LiveSnapshot> {
   const { owner, wallets, discover } = input;
@@ -855,6 +955,7 @@ export async function readLiveSnapshot(pool: RpcPool, input: LiveSnapshotInput):
       policy: unreadable,
       config: unreadable,
       prices: unreadable,
+      pyth: unreadable,
       tokenAccounts: unreadable,
       rents: { vault: null, walletFloor: null },
       wallets: wallets.map((wallet, index) => ({
@@ -866,7 +967,10 @@ export async function readLiveSnapshot(pool: RpcPool, input: LiveSnapshotInput):
     };
   };
 
-  const addresses = [vaultAddress, policyAddress, configAddress, ...PRICED_POOLS, ...linkAddresses, ...wallets];
+  // The tail is the only safe place for an account no existing index expects:
+  // the pools are read from a fixed slice and the wallets from offsets counted
+  // off PRICED_POOLS' length, so nothing appended here can be handed to either.
+  const addresses = [vaultAddress, policyAddress, configAddress, ...PRICED_POOLS, ...linkAddresses, ...wallets, ...PYTH_SNAPSHOT_ADDRESSES];
   const ACCOUNTS = 1;
   const TOKENS = 2;
   const RENT_VAULT = 3;
@@ -931,6 +1035,22 @@ export async function readLiveSnapshot(pool: RpcPool, input: LiveSnapshotInput):
       } catch (error) {
         // A pool that is not the one SIP pins gives NO price, never a wrong one.
         prices = { kind: "unreadable", error: error instanceof PoolPriceError ? error.message : errorText(pool, error) };
+      }
+    }
+
+    // ── the oracle at the tail ────────────────────────────────────────────────
+    // Its OWN outcome, its OWN error handling. A feed that is missing, owned by
+    // somebody else or unreadable answers "no oracle" here and changes not one
+    // byte of `prices` above, which was already decided from its own slice.
+    const pythAt = 3 + PRICED_POOLS.length + 2 * wallets.length;
+    let pyth: ChainRead<PythRead>;
+    if (accountsError !== null) {
+      pyth = accountsUnreadable;
+    } else {
+      try {
+        pyth = { kind: "exists", value: pythFromAccounts(values!.slice(pythAt, pythAt + PYTH_SNAPSHOT_ADDRESSES.length).map(snapshotOf)) };
+      } catch (error) {
+        pyth = { kind: "unreadable", error: error instanceof PythPriceError ? error.message : errorText(pool, error) };
       }
     }
 
@@ -1005,6 +1125,7 @@ export async function readLiveSnapshot(pool: RpcPool, input: LiveSnapshotInput):
       policy: accountsError !== null ? accountsUnreadable : addressed(policyAddress, decodeOwned(values![1], decodeInvestmentPolicy)),
       config: accountsError !== null ? accountsUnreadable : addressed(configAddress, decodeOwned(values![2], decodeProtocolConfig)),
       prices,
+      pyth,
       tokenAccounts,
       rents: { vault: vaultRent, walletFloor },
       wallets: walletReads,

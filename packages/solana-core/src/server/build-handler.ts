@@ -43,7 +43,9 @@ import { tryBase64Decode } from "../client/base64";
 import { PoolPriceError, floorWad, usdcRawPer1e8LegRaw, usdcRawPerSol } from "../client/clmm-price";
 import { SIP_ACCOUNT_SPACE } from "../client/decoders";
 import { SIP_PROGRAM_ID } from "../client/idl";
+import type { PythPriceUpdate } from "../client/pyth-price";
 import {
+  BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES,
   CLASSIC_TOKEN_ACCOUNT_BYTES,
   CONVERT_FLOOR_MARGIN_BPS,
   DEFAULT_INVEST_CAPS,
@@ -97,6 +99,7 @@ import {
   type AccountSnapshot,
   type ChainRead,
   type PoolPrices,
+  type PythRead,
 } from "./readers";
 import { createRpcPool, type RpcPool } from "./rpc-pool";
 
@@ -180,14 +183,27 @@ export const BUILD_REQUEST_WEIGHT = 3;
  * client's buckets are charged what this weight exceeds BUILD_REQUEST_WEIGHT by,
  * so a request costs its client at least the calls it makes; then the shared
  * reads budget is charged all of it.
+ *
+ * investPolicy is EIGHT, not the seven it was while the basket had one leg:
+ * readOwnerAccounts 2 (the accounts, and the vault's rent), then readBuildBatch 6
+ * — the blockhash, the accounts, and ONE RENT PER DISTINCT SIZE, which the three
+ * legs made four: InvestmentPolicy 970, the classic 165, SPYx's 179 and 191 for
+ * each PreStocks account. A weight under the calls made is an under-charge in
+ * the rate limiter, so the next leg with a new account size moves this again;
+ * handlers-build.test.ts pins it against what the route really spends.
  */
-export const BUILD_READS_WEIGHT = { createVault: 4, prepareLink: 1, link: 3, investPolicy: 7, pauseInvesting: 3, withdraw: 3, withdrawToken: 4, state: 12 } as const;
+export const BUILD_READS_WEIGHT = { createVault: 4, prepareLink: 1, link: 3, investPolicy: 8, pauseInvesting: 3, withdraw: 3, withdrawToken: 4, state: 12 } as const;
 
 /**
  * Upstream JSON-RPC calls /api/solana-live's actions make. A snapshot is one
  * batch of four members, five when it also lists the vault's links; an activity
  * page is one getSignaturesForAddress, and then one getTransaction per signature
  * charged separately (spendMore) once their number is known.
+ *
+ * Pyth costs nothing here. Its two feeds and the chain's clock ride at the tail
+ * of a getMultipleAccounts that was already being sent, so the oracle added
+ * addresses to a member rather than a member to the batch, and the dashboard's
+ * upstream cost is what it was.
  */
 export const LIVE_READS_WEIGHT = { snapshot: 4, snapshotDiscover: 5, signatures: 1 } as const;
 
@@ -600,10 +616,18 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
   const problems = investPolicyProblems(policy);
   if (problems.length > 0) return served.refuse(400, "invalid_policy", "The program would refuse this policy.", { problems });
   const missing = targets.filter((_, index) => statuses[index] === "missing");
+  // ONLY THE FIRST FEW MISSING ACCOUNTS RIDE ALONG. A three-leg basket needs
+  // five, and five creations do not fit a signed transaction once Phantom has
+  // added its checks (BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES carries the bytes).
+  // The rest are left to the keeper, which creates every one of them
+  // idempotently at the crank's expense on the first invest tick, so the policy
+  // still works the moment it lands.
+  const bundled = missing.slice(0, BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES);
+  const created = new Set(bundled.map((target) => target.address));
   const computeBudget = ownerComputeBudget("set_invest_policy");
   let built;
   try {
-    built = buildSetInvestPolicy({ owner, ...policy, ...chain.recent, computeBudget, vaultTokenAccounts: missing.map(({ mint, tokenProgram }) => ({ mint, tokenProgram })) });
+    built = buildSetInvestPolicy({ owner, ...policy, ...chain.recent, computeBudget, vaultTokenAccounts: bundled.map(({ mint, tokenProgram }) => ({ mint, tokenProgram })) });
   } catch (error) {
     if (error instanceof BuildError) return served.refuse(400, "invalid_policy", "The program would refuse this policy.", { problems: error.problems });
     throw error;
@@ -611,7 +635,8 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
 
   const policyExists = accounts.policy.kind === "exists";
   const policyRentLamports = policyExists ? 0n : rentFor(SIP_ACCOUNT_SPACE.InvestmentPolicy);
-  const tokenAccountRentLamports = missing.reduce((total, target) => total + rentFor(target.bytes), 0n);
+  // What THIS transaction's creations cost the owner. An unbundled account's rent is the crank's.
+  const tokenAccountRentLamports = bundled.reduce((total, target) => total + rentFor(target.bytes), 0n);
   return json(200, {
     ...built,
     policyExists,
@@ -631,8 +656,10 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
         maxUsdcRawPer1e8: usdcRawPer1e8LegRaw(floors.legFloors[index]!),
       })),
     },
-    // Every account the policy needs, in the builder's order, and whether this transaction creates it.
-    vaultTokenAccounts: targets.map((target, index) => ({ mint: target.mint, address: target.address, tokenProgram: target.tokenProgram, create: statuses[index] === "missing" })),
+    // Every account the policy needs, in the builder's order, and whether this
+    // transaction creates it. A target that is missing and not created here is
+    // the keeper's to open: it lists as create false, like one that already exists.
+    vaultTokenAccounts: targets.map((target) => ({ mint: target.mint, address: target.address, tokenProgram: target.tokenProgram, create: created.has(target.address) })),
     costs: { ...costs(policyRentLamports + tokenAccountRentLamports, 1, computeBudget), policyRentLamports, tokenAccountRentLamports },
     warnings: maxPerCall > CONVERT_TIGHTEST_MAX_PER_CALL ? ["convert_per_call_above_1_sol"] : [],
   });
@@ -893,6 +920,37 @@ function pricesView(prices: ChainRead<PoolPrices>): Record<string, unknown> | nu
   };
 }
 
+/**
+ * Pyth's SOL/USDC as /api/solana-live reports it, BESIDE the pool prices and
+ * never folded into them: the point of a second source is that it is a second
+ * source, and a panel that averaged the two would hide exactly the disagreement
+ * worth showing. null when the oracle could not be read — which the pool prices
+ * above neither cause nor feel.
+ */
+function pythView(pyth: ChainRead<PythRead>): Record<string, unknown> | null {
+  if (pyth.kind !== "exists") return null;
+  const feed = (update: PythPriceUpdate): Record<string, unknown> => ({
+    price: update.price,
+    conf: update.conf,
+    // A number, not a bigint: a decimal exponent of ±18 at the widest.
+    expo: update.expo,
+    publishTime: update.publishTime,
+    postedSlot: update.postedSlot,
+  });
+  return {
+    // USDC raw per lamport × 1e18 — the unit prices.convertWad is in, so the
+    // oracle and the venue can be compared without either becoming a display price.
+    wad: pyth.value.wad,
+    // Measured against the CHAIN's clock, reported here beside it so the reader
+    // can check the subtraction instead of trusting it. The pair is only as
+    // fresh as its staler leg, and a clock the host holds is no part of this.
+    ageSeconds: pyth.value.ageSeconds,
+    chainUnixSeconds: pyth.value.chainUnixSeconds,
+    sol: feed(pyth.value.sol),
+    usdc: feed(pyth.value.usdc),
+  };
+}
+
 /** snapshot: the whole live dashboard in one batch. */
 async function liveSnapshot(fields: Readonly<Record<string, unknown>>, served: Served, now: () => number): Promise<Response> {
   const extra = unexpectedField(fields, SNAPSHOT_FIELDS);
@@ -928,6 +986,9 @@ async function liveSnapshot(fields: Readonly<Record<string, unknown>>, served: S
       paused: snapshot.config.kind === "exists" ? snapshot.config.value.state.paused : null,
     },
     prices: pricesView(snapshot.prices),
+    // A SIBLING of prices, never a field inside it: the pool is what SaverFi
+    // trades against, the oracle is what says so from outside the venue.
+    pyth: pythView(snapshot.pyth),
     vaultTokenAccounts:
       snapshot.tokenAccounts.kind === "exists" ? { status: "exists", items: snapshot.tokenAccounts.value } : { status: "unreadable", items: [] },
     rents: { vault: snapshot.rents.vault, walletFloor: snapshot.rents.walletFloor },

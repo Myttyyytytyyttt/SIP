@@ -16,11 +16,22 @@ import {
   checkWalletGuards,
   readLighthouseGuard,
 } from "../src/client/lighthouse";
+import { BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES, OFFERED_LEGS } from "../src/client/product";
 import { buildWithdrawToken } from "../src/server/builders";
 import { deriveAta } from "../src/server/pda";
 import { MAX_TX_BYTES } from "../src/server/relay-policy";
-import { VERIFY_REFUSALS, verifySignedTransaction, type VerifyRefusal } from "../src/server/verify-tx";
-import { FIRST_POLICY_VAULT_TOKEN_ACCOUNTS, FIXTURE_BLOCKHASH, FIXTURE_OWNER, FIXTURE_WALLET, buildOwnerFixtures, type OwnerFixtureName } from "./fixtures/owner-transactions";
+import { MAX_VAULT_TOKEN_ACCOUNT_CREATES, VERIFY_REFUSALS, verifySignedTransaction, type VerifyRefusal } from "../src/server/verify-tx";
+import {
+  FIRST_POLICY_VAULT_TOKEN_ACCOUNTS,
+  FIXTURE_BLOCKHASH,
+  FIXTURE_OWNER,
+  FIXTURE_WALLET,
+  FULL_CATALOGUE_BUNDLED_TOKEN_ACCOUNTS,
+  FULL_CATALOGUE_TOKEN_ACCOUNT_TARGETS,
+  buildFullCatalogueInvestPolicy,
+  buildOwnerFixtures,
+  type OwnerFixtureName,
+} from "./fixtures/owner-transactions";
 import { GUARD_DATA, LIGHTHOUSE, concat, guard, rewriteAsPhantom, signedAsPhantom, type PhantomRewrite } from "./phantom-rewrite";
 import { fromB64, keypair } from "./helpers";
 
@@ -501,5 +512,56 @@ describe("sizes", () => {
     const signed = signedAsPhantom(fromB64(built.txBase64), { guards: [payerCheck(), guard(GUARD_DATA.token(1n), ownerToken)] }, owner);
     expect(signed.length).toBeLessThan(MAX_TX_BYTES);
     expectVerified(signed);
+  });
+
+  /**
+   * THE CEILING THE NEXT LEG HAS TO PASS. A leg costs 50 bytes on the wire (its
+   * mint, weight and floor in set_invest_policy's data), so this margin is
+   * deliberately wider than one leg: a fourth leg fails here, in CI, and whoever
+   * adds it re-measures and decides — rather than the first owner to sign a
+   * four-leg policy finding out inside Phantom.
+   *
+   * MEASURED HERE, at three legs and BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES = 2:
+   * 1,058 bytes legacy, 1,060 as v0, 1,079 with Phantom's trailing block
+   * saturated — 174, 172 and 153 bytes of headroom under MAX_TX_BYTES = 1,232.
+   * Three creations instead of two measures 1,212, leaving 20: unshippable.
+   */
+  const MIN_CATALOGUE_HEADROOM = 128;
+
+  it(`set_invest_policy for the whole catalogue, ${BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES} creations bundled, keeps at least ${MIN_CATALOGUE_HEADROOM} bytes under Solana's limit through Phantom's rewrite`, () => {
+    // The relay still has to accept what the build route signs.
+    expect(BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES).toBeLessThanOrEqual(MAX_VAULT_TOKEN_ACCOUNT_CREATES);
+    // The bundled accounts are the first of the build route's own order, and the rest are the keeper's.
+    expect(FULL_CATALOGUE_BUNDLED_TOKEN_ACCOUNTS).toEqual(FULL_CATALOGUE_TOKEN_ACCOUNT_TARGETS.slice(0, BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES));
+    expect(FULL_CATALOGUE_TOKEN_ACCOUNT_TARGETS.length).toBe(2 + OFFERED_LEGS.length);
+
+    const built = buildFullCatalogueInvestPolicy();
+    const vault = built.accounts.vault!;
+    const created = FULL_CATALOGUE_BUNDLED_TOKEN_ACCOUNTS.map((target) => target.address);
+    expect(built.vaultTokenAccounts.map((entry) => entry.address)).toEqual(created);
+
+    // Phantom's own blocks for this shape, exactly as the fixture policy's case above builds them.
+    const leading = [built.policy, ...created].map((address) => guard(GUARD_DATA.created(), address));
+    const trailing = [
+      payerCheck(),
+      ...created.map((address) => guard(GUARD_DATA.token(0n), address)),
+      guard(GUARD_DATA.owner(SIP_PROGRAM_ID), built.policy),
+      guard(GUARD_DATA.owner(SIP_PROGRAM_ID), vault),
+    ];
+    expect(leading.length).toBeLessThanOrEqual(MAX_LEADING_WALLET_GUARDS);
+    expect(trailing.length).toBeLessThanOrEqual(MAX_TRAILING_WALLET_GUARDS);
+    // And the widest trailing block the relay would let Phantom add, on an account the transaction already names.
+    const saturated = [...trailing, ...Array.from({ length: MAX_TRAILING_WALLET_GUARDS - trailing.length }, () => guard(GUARD_DATA.pretoken(), created[0]!))];
+    expect(saturated).toHaveLength(MAX_TRAILING_WALLET_GUARDS);
+
+    for (const guards of [trailing, saturated]) {
+      for (const version of ["legacy", 0] as const) {
+        const signed = signedAsPhantom(fromB64(built.txBase64), { leading, guards, version }, owner);
+        expect(signed.length, `${guards.length} trailing checks, ${version}`).toBeLessThanOrEqual(MAX_TX_BYTES - MIN_CATALOGUE_HEADROOM);
+        const result = expectVerified(signed);
+        expect(result.instruction.name).toBe("set_invest_policy");
+        expect(result.instructions.filter((instruction) => instruction.name === "CreateIdempotent")).toHaveLength(BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES);
+      }
+    }
   });
 });

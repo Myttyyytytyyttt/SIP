@@ -2,7 +2,19 @@
 // through the IDL, Raydium pools with a chosen sqrt price, and a JSON-RPC stub
 // that answers from a map. No network; the endpoint is an .invalid host.
 
-import { RAYDIUM_CLMM, SPYX_MINT, TOKEN_2022_PROGRAM, USDC_MINT } from "../src/client/addresses";
+import {
+  ANTHROPIC_MINT,
+  ANTHROPIC_USDC_POOL,
+  FIGUREAI_MINT,
+  FIGUREAI_USDC_POOL,
+  RAYDIUM_CLMM,
+  SOL_USDC_POOL,
+  SPYX_MINT,
+  SPYX_USDC_POOL,
+  TOKEN_2022_PROGRAM,
+  USDC_MINT,
+  WSOL_MINT,
+} from "../src/client/addresses";
 import { tryBase58Decode } from "../src/client/base58";
 import { encodeStruct } from "../src/client/borsh";
 import { CLMM_POOL_STATE_BYTES, CLMM_POOL_STATE_DISCRIMINATOR } from "../src/client/clmm-price";
@@ -56,14 +68,27 @@ export const configAccount = (paused: boolean): Uint8Array =>
     _reserved: new Array(64).fill(0),
   });
 
-/** An InvestmentPolicy for `vault`: SPYx at the golden floors, $10 per buy and $50 per 30 days, as the first mainnet test types them. */
+/**
+ * An InvestmentPolicy for `vault`: the whole catalogue at the golden floors, $10
+ * per buy and $50 per 30 days, as the first mainnet test types them.
+ *
+ * The three legs are OFFERED_LEGS' three, in order, each at LEG_POOLS' 95 %
+ * floor, and the weights are basketWeightsBps(3) written out — 3,334 on the
+ * first leg and 3,333 on the other two, summing to exactly 10,000. Written out
+ * rather than derived: this fixture stands for what an owner already signed, so
+ * it must be able to disagree with today's catalogue.
+ */
 export const policyAccount = (vault: string, fields: Record<string, unknown> = {}): Uint8Array =>
   sipAccount("InvestmentPolicy", {
     vault,
     enabled: true,
     venue_program: RAYDIUM_CLMM,
     in_mint: USDC_MINT,
-    legs: [{ mint: SPYX_MINT, weight_bps: 10_000, min_out_rate_wad: 124_719_467_624_105_690n }],
+    legs: [
+      { mint: SPYX_MINT, weight_bps: 3_334, min_out_rate_wad: 124_719_467_624_105_690n },
+      { mint: ANTHROPIC_MINT, weight_bps: 3_333, min_out_rate_wad: 5_277_777_777_777_777_778n },
+      { mint: FIGUREAI_MINT, weight_bps: 3_333, min_out_rate_wad: 23_750_000_000_000_000_001n },
+    ],
     min_convert_rate_wad: 90_034_840_399_943_305n,
     min_investment: 5_000_000n,
     max_per_call: 10_000_000n,
@@ -93,6 +118,116 @@ export function clmmPoolAccount(mint0: string, mint1: string, sqrtPriceX64: bigi
 /** sqrt_price_x64 of the wSOL/USDC and SPYx/USDC pools at mainnet slot 447313239. */
 export const SOL_SQRT_PRICE = 5_834_501_654_111_004_443n;
 export const SPYX_SQRT_PRICE = 50_911_325_114_989_095_030n;
+
+/**
+ * sqrt_price_x64 of the two PreStocks pools. UNLIKE THE TWO ABOVE, THESE ARE
+ * CHOSEN, NOT OBSERVED: this repo has no recorded mainnet reading of either
+ * pool, so rather than invent a mainnet-looking number they are built from a
+ * round dollar price anyone can redo by hand. A fixture that cannot be checked
+ * is worse than no fixture, and one that decodes to an absurd price is worse still.
+ *
+ * A leg pool holds mint0 = the leg (d decimals) and mint1 = USDC (6), so its
+ * stored price is USDC raw per leg raw, which at P dollars a whole token is
+ * P x 10^(6-d), and sqrt_price_x64 = isqrt(P x 2^128 / 10^(d-6)). Both PreStocks
+ * carry 9 decimals, so the price is P/1000:
+ *   * ANTHROPIC at $180 a token -> 0.18 -> 7,826,290,695,199,669,327
+ *   * FIGUREAI  at  $40 a token -> 0.04 -> 3,689,348,814,741,910,323
+ * The integer square root truncates, so FIGUREAI's rate lands two raw units
+ * above a round 25e18 rather than on it. That is left alone: no real pool sits
+ * on a round number either, and LEG_POOLS writes down exactly what decodes.
+ */
+export const ANTHROPIC_SQRT_PRICE = 7_826_290_695_199_669_327n;
+export const FIGUREAI_SQRT_PRICE = 3_689_348_814_741_910_323n;
+
+/** One offered leg's pool, and every rate a test compares a reader's answer to. */
+export interface LegPoolFixture {
+  readonly symbol: string;
+  readonly mint: string;
+  readonly pool: string;
+  /** The leg's decimals. mint1 is always USDC at 6. */
+  readonly decimals: number;
+  readonly sqrtPriceX64: bigint;
+  /** legUsdcWad: leg raw out per USDC raw in, x 1e18. */
+  readonly legWad: bigint;
+  /** floorWad(legWad, LEG_FLOOR_MARGIN_BPS = 500): the floor set_invest_policy stores. */
+  readonly floorWad: bigint;
+  /** usdcRawPer1e8LegRaw(legWad): what 1e8 raw units cost at today's rate. */
+  readonly usdcRawPer1e8: bigint;
+  /** usdcRawPer1e8LegRaw(floorWad): the most the floor lets be paid for 1e8 raw units. */
+  readonly maxUsdcRawPer1e8: bigint;
+}
+
+/**
+ * Every offered leg's pool, in OFFERED_LEGS' order — which is PRICED_POOLS'
+ * order once the wSOL/USDC pool is taken off the front.
+ *
+ * EVERY RATE HERE IS A LITERAL, worked out once and written down, never
+ * re-derived from sqrtPriceX64 by the same functions the tests exercise. A test
+ * that compares readPoolPrices' answer to `legWad` is therefore still comparing
+ * it to a constant, exactly as it did when the numbers were typed inline; naming
+ * them only stops the same constant being retyped in four files.
+ *
+ * SPYx's four are the mainnet goldens. The PreStocks' follow from the chosen
+ * sqrt prices above: 1e18 x 10^(d-6) / P, then 95 % of it, then
+ * ceil(1e8 x 1e18 / wad) of each.
+ *
+ * Every figure here is a RAW rate, never a display price. SPYx's 761,709,474
+ * USDC raw per 1e8 raw units is what the chain charges; its scaledUiAmount
+ * multiplier moves what a wallet shows without moving this, which is exactly why
+ * no floor in this repo is ever taken from a uiAmount.
+ */
+export const LEG_POOLS: readonly LegPoolFixture[] = Object.freeze([
+  Object.freeze({
+    symbol: "SPYx",
+    mint: SPYX_MINT,
+    pool: SPYX_USDC_POOL,
+    decimals: 8,
+    sqrtPriceX64: SPYX_SQRT_PRICE,
+    legWad: 131_283_650_130_637_569n,
+    floorWad: 124_719_467_624_105_690n,
+    usdcRawPer1e8: 761_709_474n,
+    maxUsdcRawPer1e8: 801_799_446n,
+  }),
+  Object.freeze({
+    symbol: "ANTHROPIC",
+    mint: ANTHROPIC_MINT,
+    pool: ANTHROPIC_USDC_POOL,
+    decimals: 9,
+    sqrtPriceX64: ANTHROPIC_SQRT_PRICE,
+    legWad: 5_555_555_555_555_555_556n,
+    floorWad: 5_277_777_777_777_777_778n,
+    usdcRawPer1e8: 18_000_000n,
+    maxUsdcRawPer1e8: 18_947_369n,
+  }),
+  Object.freeze({
+    symbol: "FIGUREAI",
+    mint: FIGUREAI_MINT,
+    pool: FIGUREAI_USDC_POOL,
+    decimals: 9,
+    sqrtPriceX64: FIGUREAI_SQRT_PRICE,
+    legWad: 25_000_000_000_000_000_002n,
+    floorWad: 23_750_000_000_000_000_001n,
+    usdcRawPer1e8: 4_000_000n,
+    maxUsdcRawPer1e8: 4_210_527n,
+  }),
+]);
+
+/** The wSOL/USDC pool as the chain holds it: Raydium CLMM, mint0 wSOL, at SOL_SQRT_PRICE. */
+const solPoolAccount = (): AccountJson => accountInfo(RAYDIUM_CLMM, clmmPoolAccount(WSOL_MINT, USDC_MINT, SOL_SQRT_PRICE));
+
+/** One leg's pool as the chain holds it: Raydium CLMM, mint0 the leg, mint1 USDC. */
+const legPoolAccount = (leg: LegPoolFixture): AccountJson => accountInfo(RAYDIUM_CLMM, clmmPoolAccount(leg.mint, USDC_MINT, leg.sqrtPriceX64, [leg.decimals, 6]));
+
+/**
+ * PRICED_POOLS' accounts as [address, account] pairs, in that order, for a
+ * StubChain's map. A chain that means to price the whole catalogue spreads these
+ * rather than listing pools by hand: a test meaning to spoil ONE pool must then
+ * say so, instead of passing because two others were never there.
+ */
+export const pricedPoolEntries = (): [string, AccountJson][] => [
+  [SOL_USDC_POOL, solPoolAccount()],
+  ...LEG_POOLS.map((leg): [string, AccountJson] => [leg.pool, legPoolAccount(leg)]),
+];
 
 /** A mint account held by `tokenProgram`: only its owner is read. */
 export const mintAccount = (tokenProgram: string): AccountJson => accountInfo(tokenProgram, new Uint8Array(82), 1_461_600);

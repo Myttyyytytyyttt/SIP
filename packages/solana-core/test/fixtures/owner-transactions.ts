@@ -22,7 +22,7 @@ import { SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } fr
 import { base58Encode } from "../../src/client/base58";
 import { toHex } from "../../src/client/idl";
 import { parseLegacyMessage, splitWire } from "../../src/client/message";
-import { DEFAULT_INVEST_CAPS, DEFAULT_VAULT_POLICY, ownerComputeBudget } from "../../src/client/product";
+import { BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES, DEFAULT_INVEST_CAPS, DEFAULT_VAULT_POLICY, OFFERED_LEGS, basketWeightsBps, ownerComputeBudget } from "../../src/client/product";
 import { defaultInvestPolicy } from "../../src/client/rules";
 import {
   buildCreateVaultV2,
@@ -35,6 +35,8 @@ import {
   prepareLinkWalletConsent,
   type BuiltTransaction,
 } from "../../src/server/builders";
+import { deriveVaultPda } from "../../src/server/pda";
+import { vaultTokenAccountTargets } from "../../src/server/readers";
 import { fromB64, signBytes } from "../helpers";
 
 export const FIXTURE_BLOCKHASH = base58Encode(Uint8Array.from({ length: 32 }, (_, i) => (i * 7 + 1) & 0xff));
@@ -73,6 +75,30 @@ export const FIRST_POLICY_VAULT_TOKEN_ACCOUNTS = [
   { mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM },
   { mint: SPYX_MINT, tokenProgram: TOKEN_2022_PROGRAM },
 ] as const;
+
+/**
+ * THE SAME FIXTURE KEYS, THE WHOLE CATALOGUE: set_invest_policy for every leg
+ * OFFERED_LEGS holds, with the creations the build route now bundles beside it
+ * (BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES, the first of vaultTokenAccountTargets'
+ * order — wSOL and USDC). It stands BESIDE the one-leg golden above and pins no
+ * byte of it.
+ *
+ * IT CARRIES NO HEX, DELIBERATELY. Its wire moves whenever the product gains or
+ * loses a leg, which is not the builders changing, so pinning it would be a
+ * golden that has to be reprinted for a product decision — the same reason
+ * FIXTURE_ONE_LEG_MIN_INVESTMENT exists. What it is for is the size ceiling:
+ * lighthouse.test.ts pushes it through Phantom's real rewrite and measures it.
+ *
+ * Every leg's floor is the SPYx one. min_out_rate_wad is a u128, so the value
+ * changes no byte of the length these bytes are measured for.
+ */
+export const FULL_CATALOGUE_VAULT = deriveVaultPda(FIXTURE_OWNER.publicKey).toBase58();
+
+/** The accounts the build route bundles ahead of the full-catalogue policy, read from the route's own order. */
+export const FULL_CATALOGUE_BUNDLED_TOKEN_ACCOUNTS = vaultTokenAccountTargets(FULL_CATALOGUE_VAULT).slice(0, BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES);
+
+/** Every account that catalogue's policy needs, bundled or left to the keeper: what the build route lists. */
+export const FULL_CATALOGUE_TOKEN_ACCOUNT_TARGETS = vaultTokenAccountTargets(FULL_CATALOGUE_VAULT);
 
 /** The SIP instruction's data, per fixture. It names no key. */
 export const OWNER_INSTRUCTION_DATA_HEX = {
@@ -122,6 +148,23 @@ function fixture(built: BuiltTransaction): OwnerFixture {
   const wire = fromB64(built.txBase64);
   const instructions = parseLegacyMessage(splitWire(wire).message).instructions;
   return { built, wireHex: toHex(wire), dataHex: toHex(instructions[instructions.length - 1]!.data) };
+}
+
+/** The full-catalogue policy, built now by the builder under test, with the creations the build route bundles. */
+export function buildFullCatalogueInvestPolicy(): ReturnType<typeof buildSetInvestPolicy> {
+  const weights = basketWeightsBps(OFFERED_LEGS.length);
+  return buildSetInvestPolicy({
+    owner: FIXTURE_OWNER.publicKey.toBase58(),
+    legs: OFFERED_LEGS.map((leg, index) => ({ mint: leg.mint, weightBps: weights[index]!, minOutRateWad: GOLDEN_SPYX_FLOOR_WAD })),
+    minConvertRateWad: GOLDEN_CONVERT_FLOOR_WAD,
+    minInvestment: defaultInvestPolicy(OFFERED_LEGS.length).minInvestment,
+    maxPerCall: DEFAULT_INVEST_CAPS.maxPerCall,
+    maxRolling30d: DEFAULT_INVEST_CAPS.maxRolling30d,
+    enabled: true,
+    ...recent,
+    computeBudget: ownerComputeBudget("set_invest_policy"),
+    vaultTokenAccounts: FULL_CATALOGUE_BUNDLED_TOKEN_ACCOUNTS.map(({ mint, tokenProgram }) => ({ mint, tokenProgram })),
+  });
 }
 
 /** Every fixture, built now by the builders under test. */

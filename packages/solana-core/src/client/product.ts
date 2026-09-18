@@ -128,6 +128,35 @@ export const OWNER_TX_COMPUTE: Readonly<Record<OwnerInstructionName, number>> = 
   set_invest_policy: 300_000,
 });
 
+/**
+ * How many of a vault's missing token accounts the build route bundles ahead of
+ * set_invest_policy, at the owner's expense: the first two of
+ * vaultTokenAccountTargets' order, wSOL and USDC. The keeper creates every other
+ * one idempotently at the crank's expense on the first invest tick
+ * (solana-keeper/src/invest-tick.ts calls createAssociatedTokenAccountIdempotent
+ * for wSOL, USDC and each leg), so an unbundled leg costs the owner nothing and
+ * delays nothing.
+ *
+ * WHY TWO, MEASURED WITH THIS REPO'S OWN BUILDERS AND THE REAL LIGHTHOUSE
+ * REWRITE (test/lighthouse.test.ts's sizes case re-measures it in CI; legacy
+ * wire, signed, with Phantom's leading and trailing blocks as
+ * test/phantom-rewrite.ts takes them from mainnet):
+ *   * three legs, three creations: 1,212 bytes of MAX_TX_BYTES = 1,232. Twenty
+ *     bytes of headroom is not shippable — a v0 message alone costs two of them,
+ *     and one more Phantom assertion costs ten.
+ *   * three legs, two creations: 1,058 bytes, 174 to spare (1,060 as v0, and
+ *     1,079 with Phantom's trailing block saturated at MAX_TRAILING_WALLET_GUARDS).
+ *
+ * AND RAISING MAX_VAULT_TOKEN_ACCOUNT_CREATES IS NOT THE FIX. Bundling all five
+ * targets measures 1,456 bytes, 224 OVER the limit, because every extra creation
+ * also buys one more leading and one more trailing wallet guard: six leading and
+ * eight trailing, past MAX_LEADING_WALLET_GUARDS (4) and
+ * MAX_TRAILING_WALLET_GUARDS (6), so the relay would refuse it even if it fit.
+ * The wire gets worse with the cap, not better. The verifier's cap stays 3: it
+ * bounds what the relay accepts, and the one-leg golden still creates three.
+ */
+export const BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES = 2;
+
 /** The priority price of every owner transaction. The verifier's cap is 5,000,000. */
 export const OWNER_TX_MICROLAMPORTS = 100_000n;
 

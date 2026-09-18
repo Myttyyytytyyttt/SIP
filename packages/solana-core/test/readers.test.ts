@@ -2,8 +2,26 @@
 
 import { describe, expect, it } from "vitest";
 
-import { RAYDIUM_CLMM, SOL_USDC_POOL, SPYX_MINT, SPYX_USDC_POOL, SYSTEM_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../src/client/addresses";
-import { SOL_SQRT_PRICE, SPYX_SQRT_PRICE, clmmPoolAccount, localRent, parsedTokenAccount, policyAccount, tokenAccountData } from "./chain-fixtures";
+import {
+  ANTHROPIC_MINT,
+  ANTHROPIC_USDC_POOL,
+  FIGUREAI_MINT,
+  FIGUREAI_USDC_POOL,
+  PYTH_PUSH_PROGRAM,
+  PYTH_RECEIVER_PROGRAM,
+  PYTH_SOL_USD_FEED,
+  PYTH_USDC_USD_FEED,
+  RAYDIUM_CLMM,
+  SOL_USDC_POOL,
+  SPYX_MINT,
+  SPYX_USDC_POOL,
+  SYSTEM_PROGRAM,
+  TOKEN_2022_PROGRAM,
+  TOKEN_PROGRAM,
+  USDC_MINT,
+  WSOL_MINT,
+} from "../src/client/addresses";
+import { LEG_POOLS, SOL_SQRT_PRICE, clmmPoolAccount, localRent, parsedTokenAccount, policyAccount, tokenAccountData } from "./chain-fixtures";
 import { base58Encode } from "../src/client/base58";
 import { base64Encode } from "../src/client/base64";
 import { encodeArgs, encodeStruct } from "../src/client/borsh";
@@ -11,7 +29,9 @@ import { SIP_ACCOUNT_SPACE } from "../src/client/decoders";
 import { SIP_PROGRAM_ID, accountDiscriminator, eventDiscriminator, instructionDiscriminator } from "../src/client/idl";
 import { deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
 import {
+  MAX_LIVE_SNAPSHOT_ADDRESSES,
   MAX_WALLET_LINKS,
+  PYTH_SNAPSHOT_ADDRESSES,
   listVaultActivity,
   listVaultSignatures,
   readLiveSnapshot,
@@ -31,6 +51,13 @@ import {
   tokenAccountStatus,
   vaultTokenAccountTargets,
 } from "../src/server/readers";
+import {
+  PYTH_FIXTURE_OWNER,
+  PYTH_FIXTURE_POSTED_SLOT,
+  PYTH_FIXTURE_PUBLISH_TIME,
+  PYTH_SOL_USD_ACCOUNT,
+  PYTH_USDC_USD_ACCOUNT,
+} from "./fixtures/pyth-accounts";
 import { createRpcPool } from "../src/server/rpc-pool";
 import { BLOCKHASH, SECRET_QUERY, UPSTREAM_1, accountInfo, fakeFetch, jsonResponse, keypair, rpcResult, type UpstreamCall } from "./helpers";
 
@@ -282,21 +309,42 @@ describe("listVaultActivity", () => {
 
 describe("readPoolPrices", () => {
   const solPool = (owner = RAYDIUM_CLMM, mints: [string, string] = [WSOL_MINT, USDC_MINT]) => accountInfo(owner, clmmPoolAccount(mints[0], mints[1], SOL_SQRT_PRICE));
-  const spyxPool = (owner = RAYDIUM_CLMM, mints: [string, string] = [SPYX_MINT, USDC_MINT]) => accountInfo(owner, clmmPoolAccount(mints[0], mints[1], SPYX_SQRT_PRICE, [8, 6]));
+  /** Offered leg `index`'s pool, spoilable by owner or by mint order exactly as the SOL pool is. */
+  const legPool = (index: number, owner = RAYDIUM_CLMM, mints?: readonly [string, string]) => {
+    const leg = LEG_POOLS[index]!;
+    const [mint0, mint1] = mints ?? [leg.mint, USDC_MINT];
+    return accountInfo(owner, clmmPoolAccount(mint0, mint1, leg.sqrtPriceX64, [leg.decimals, 6]));
+  };
+  /** Every priced pool as the chain really holds it, in PRICED_POOLS' order. */
+  const allPools = () => [solPool(), ...LEG_POOLS.map((_, index) => legPool(index))];
 
-  it("reads both pinned pools in one call, and their rates are the mainnet goldens", async () => {
-    const { pool: p, upstream } = pool((call) => rpcResult(call, { context: { slot: 99 }, value: [solPool(), spyxPool()] }));
-    expect(await readPoolPrices(p)).toEqual({ kind: "exists", value: { slot: 99, convertWad: 100_038_711_555_492_562n, legWads: { [SPYX_MINT]: 131_283_650_130_637_569n } } });
+  it("reads every pinned pool in ONE call, and each rate is its own golden", async () => {
+    const { pool: p, upstream } = pool((call) => rpcResult(call, { context: { slot: 99 }, value: allPools() }));
+    expect(await readPoolPrices(p)).toEqual({
+      kind: "exists",
+      value: {
+        slot: 99,
+        convertWad: 100_038_711_555_492_562n,
+        // Written out, not read from LEG_POOLS: this is the one place the decoder's
+        // arithmetic is pinned, so it must not compare the fixture against itself.
+        legWads: { [SPYX_MINT]: 131_283_650_130_637_569n, [ANTHROPIC_MINT]: 5_555_555_555_555_555_556n, [FIGUREAI_MINT]: 25_000_000_000_000_000_002n },
+      },
+    });
     expect(upstream.calls).toHaveLength(1);
-    expect((upstream.calls[0]!.body as { params: unknown[] }).params).toEqual([[SOL_USDC_POOL, SPYX_USDC_POOL], { encoding: "base64", commitment: "confirmed" }]);
+    expect((upstream.calls[0]!.body as { params: unknown[] }).params).toEqual([
+      [SOL_USDC_POOL, SPYX_USDC_POOL, ANTHROPIC_USDC_POOL, FIGUREAI_USDC_POOL],
+      { encoding: "base64", commitment: "confirmed" },
+    ]);
   });
 
   it.each([
-    ["the SOL pool owned by another program", () => [solPool(key()), spyxPool()]],
-    ["the SOL pool with its mints swapped", () => [solPool(RAYDIUM_CLMM, [USDC_MINT, WSOL_MINT]), spyxPool()]],
-    ["the SPYx pool with its mints swapped", () => [solPool(), spyxPool(RAYDIUM_CLMM, [USDC_MINT, SPYX_MINT])]],
-    ["a pool that does not exist", () => [solPool(), null]],
-    ["one account where two were asked", () => [solPool()]],
+    ["the SOL pool owned by another program", () => [solPool(key()), legPool(0), legPool(1), legPool(2)]],
+    ["the SOL pool with its mints swapped", () => [solPool(RAYDIUM_CLMM, [USDC_MINT, WSOL_MINT]), legPool(0), legPool(1), legPool(2)]],
+    ["the SPYx pool with its mints swapped", () => [solPool(), legPool(0, RAYDIUM_CLMM, [USDC_MINT, SPYX_MINT]), legPool(1), legPool(2)]],
+    ["the ANTHROPIC pool owned by another program", () => [solPool(), legPool(0), legPool(1, key()), legPool(2)]],
+    ["the FIGUREAI pool with its mints swapped", () => [solPool(), legPool(0), legPool(1), legPool(2, RAYDIUM_CLMM, [USDC_MINT, FIGUREAI_MINT])]],
+    ["a pool that does not exist", () => [solPool(), legPool(0), null, legPool(2)]],
+    ["three accounts where four were asked", () => [solPool(), legPool(0), legPool(1)]],
   ])("%s is unreadable, never a price", async (_, accounts) => {
     const { pool: p } = pool((call) => rpcResult(call, { context: { slot: 1 }, value: accounts() }));
     expect((await readPoolPrices(p)).kind).toBe("unreadable");
@@ -367,12 +415,14 @@ describe("readBuildBatch", () => {
 });
 
 describe("the vault's token accounts", () => {
-  it("wSOL and USDC under SPL Token at 165 bytes, then SPYx under Token-2022 at 179, each at the vault's associated address", () => {
+  it("wSOL and USDC under SPL Token at 165 bytes, then each leg under Token-2022 at its own size — SPYx 179, both PreStocks 191 — each at the vault's associated address", () => {
     const vault = key();
     expect(vaultTokenAccountTargets(vault)).toEqual([
       { mint: WSOL_MINT, tokenProgram: TOKEN_PROGRAM, bytes: 165, address: deriveAta(vault, WSOL_MINT, TOKEN_PROGRAM).toBase58() },
       { mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM, bytes: 165, address: deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58() },
       { mint: SPYX_MINT, tokenProgram: TOKEN_2022_PROGRAM, bytes: 179, address: deriveAta(vault, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58() },
+      { mint: ANTHROPIC_MINT, tokenProgram: TOKEN_2022_PROGRAM, bytes: 191, address: deriveAta(vault, ANTHROPIC_MINT, TOKEN_2022_PROGRAM).toBase58() },
+      { mint: FIGUREAI_MINT, tokenProgram: TOKEN_2022_PROGRAM, bytes: 191, address: deriveAta(vault, FIGUREAI_MINT, TOKEN_2022_PROGRAM).toBase58() },
     ]);
   });
 
@@ -388,13 +438,25 @@ describe("the vault's token accounts", () => {
 
   it("reads all of them in one getMultipleAccounts; a read that fails is unreadable as a whole", async () => {
     const vault = key();
-    const { pool: p, upstream } = pool((call) => rpcResult(call, { value: [accountInfo(TOKEN_PROGRAM, new Uint8Array(165)), null, accountInfo(key(), new Uint8Array(179))] }));
+    const { pool: p, upstream } = pool((call) =>
+      rpcResult(call, {
+        value: [
+          accountInfo(TOKEN_PROGRAM, new Uint8Array(165)),
+          null,
+          accountInfo(key(), new Uint8Array(179)),
+          accountInfo(TOKEN_2022_PROGRAM, new Uint8Array(191)),
+          null,
+        ],
+      }),
+    );
     const read = await readVaultTokenAccounts(p, vault);
     expect(upstream.calls).toHaveLength(1);
     expect(read.kind === "exists" && read.value.map((entry) => [entry.mint, entry.status])).toEqual([
       [WSOL_MINT, "exists"],
       [USDC_MINT, "missing"],
       [SPYX_MINT, "unreadable"],
+      [ANTHROPIC_MINT, "exists"],
+      [FIGUREAI_MINT, "missing"],
     ]);
     const down = pool(() => {
       throw new Error(`boom ${UPSTREAM_1}`);
@@ -412,6 +474,8 @@ describe("the vault's token accounts", () => {
           parsedTokenAccount({ tokenProgram: TOKEN_PROGRAM, mint: WSOL_MINT, owner: vault, amount: "100000000", decimals: 9, uiAmountString: "0.1" }),
           parsedTokenAccount({ tokenProgram: TOKEN_PROGRAM, mint: USDC_MINT, owner: key(), amount: "5", decimals: 6, uiAmountString: "0.000005" }),
           parsedTokenAccount({ tokenProgram: TOKEN_2022_PROGRAM, mint: SPYX_MINT, owner: vault, amount: "12345678", decimals: 8, uiAmountString: "0.1241643", bytes: 179 }),
+          parsedTokenAccount({ tokenProgram: TOKEN_2022_PROGRAM, mint: ANTHROPIC_MINT, owner: vault, amount: "2500000000", decimals: 9, uiAmountString: "2.5", bytes: 191 }),
+          parsedTokenAccount({ tokenProgram: TOKEN_2022_PROGRAM, mint: FIGUREAI_MINT, owner: vault, amount: "0", decimals: 9, uiAmountString: "0", bytes: 191 }),
         ],
       }),
     );
@@ -421,6 +485,9 @@ describe("the vault's token accounts", () => {
       [WSOL_MINT, "exists", 100_000_000n, 9, "0.1"],
       [USDC_MINT, "exists", null, null, null],
       [SPYX_MINT, "exists", 12_345_678n, 8, "0.1241643"],
+      [ANTHROPIC_MINT, "exists", 2_500_000_000n, 9, "2.5"],
+      // An account that exists and holds nothing is 0n, never null: null is "nobody read it".
+      [FIGUREAI_MINT, "exists", 0n, 9, "0"],
     ]);
   });
 });
@@ -495,20 +562,58 @@ describe("readLiveSnapshot", () => {
 
   const sipVault = () => accountInfo(SIP_PROGRAM_ID, vaultBytes(owner), 250_000_000);
   const solPool = (owned = RAYDIUM_CLMM, mints: [string, string] = [WSOL_MINT, USDC_MINT]) => accountInfo(owned, clmmPoolAccount(mints[0], mints[1], SOL_SQRT_PRICE));
-  const spyxPool = () => accountInfo(RAYDIUM_CLMM, clmmPoolAccount(SPYX_MINT, USDC_MINT, SPYX_SQRT_PRICE, [8, 6]));
+  const legPool = (index: number, owned = RAYDIUM_CLMM) => {
+    const leg = LEG_POOLS[index]!;
+    return accountInfo(owned, clmmPoolAccount(leg.mint, USDC_MINT, leg.sqrtPriceX64, [leg.decimals, 6]));
+  };
+  /** Every offered leg's pool, in OFFERED_LEGS' order: the batch asks for them right after the SOL pool. */
+  const legPools = () => LEG_POOLS.map((_, index) => legPool(index));
   /** A link with values that are not zero, so it is visible whether they survive the read. */
   const richLink = (wallet: string, savesInto = vault) =>
     account("TradingLink", { wallet, vault: savesInto, epoch: 12n, settlement_nonce: 5n, frontier_slot: 999n, bump: 254, _reserved: new Array(32).fill(0) });
+
+  // ── the oracle at the tail ──────────────────────────────────────────────────
+  // Mainnet's own two price accounts (fixtures/pyth-accounts.ts) under the
+  // RECEIVER that owns them, and a chain clock chosen so every age asserted below
+  // is a subtraction anyone can redo: 30 seconds after the captured publish.
+  const CHAIN_NOW = PYTH_FIXTURE_PUBLISH_TIME + 30n;
+  /** The sysvar's real owner. Nothing here checks it — the account is the runtime's own — but a fixture should not lie about it. */
+  const SYSVAR_OWNER = "Sysvar1111111111111111111111111111111111111";
+  const clockAccount = (unixSeconds = CHAIN_NOW, bytes = 40) => {
+    const data = new Uint8Array(bytes);
+    let left = BigInt.asUintN(64, unixSeconds);
+    // unix_timestamp is the FIFTH field: an i64 LE at byte 32, after slot, epoch_start_timestamp, epoch and leader_schedule_epoch.
+    for (let i = 0; i < 8 && 32 + i < bytes; i++) {
+      data[32 + i] = Number(left & 0xffn);
+      left >>= 8n;
+    }
+    return accountInfo(SYSVAR_OWNER, data, 1_169_280);
+  };
+  const feedAccount = (data: Uint8Array, owner = PYTH_FIXTURE_OWNER) => accountInfo(owner, data, 5_117_760);
+  /** The three addresses appended after the wallets, all healthy. */
+  const pythTail = (): unknown[] => [clockAccount(), feedAccount(PYTH_SOL_USD_ACCOUNT), feedAccount(PYTH_USDC_USD_ACCOUNT)];
 
   type Member = { readonly rpcError: string } | { readonly result: unknown };
   const answered = (result: unknown): Member => ({ result });
   const broke = (message: string): Member => ({ rpcError: message });
 
-  /** The five members readLiveSnapshot asks for, each answerable or breakable on its own. */
-  function livePool(values: readonly unknown[], plan: { accounts?: Member; tokens?: Member; rentVault?: Member; rentZero?: Member; links?: Member } = {}, slot = 91) {
+  /**
+   * The five members readLiveSnapshot asks for, each answerable or breakable on
+   * its own. `values` is everything up to the wallets; the oracle's three
+   * accounts are appended here, the way the reader appends their addresses, so
+   * every case above stays about what it was about and `pyth` can be spoiled alone.
+   */
+  function livePool(
+    values: readonly unknown[],
+    plan: { accounts?: Member; tokens?: Member; rentVault?: Member; rentZero?: Member; links?: Member; pyth?: readonly unknown[] } = {},
+    slot = 91,
+  ) {
     const byId = new Map<number, Member>([
-      [1, plan.accounts ?? answered({ context: { slot }, value: values })],
-      [2, plan.tokens ?? answered({ value: [null, null, null] })],
+      [1, plan.accounts ?? answered({ context: { slot }, value: [...values, ...(plan.pyth ?? pythTail())] })],
+      // One null per target, so the default stub answers the whole ask rather than
+      // a short list the reader must call unreadable. The addresses themselves are
+      // pinned below, against vaultTokenAccountTargets.
+      [2, plan.tokens ?? answered({ value: vaultTokenAccountTargets(vault).map(() => null) })],
       [3, plan.rentVault ?? answered(localRent(125))],
       [4, plan.rentZero ?? answered(localRent(0))],
       [5, plan.links ?? answered([])],
@@ -525,9 +630,9 @@ describe("readLiveSnapshot", () => {
     );
   }
 
-  it("is ONE batch: the accounts in order, the vault's three token accounts, two rents, and getProgramAccounts only with discover", async () => {
+  it("is ONE batch: the accounts in order, the vault's five token accounts, two rents, and getProgramAccounts only with discover", async () => {
     const [walletA, walletB] = [key(), key()];
-    const { pool: p, upstream } = livePool([sipVault(), null, null, solPool(), spyxPool(), null, null, null, null]);
+    const { pool: p, upstream } = livePool([sipVault(), null, null, solPool(), ...legPools(), null, null, null, null]);
     await readLiveSnapshot(p, { owner, wallets: [walletA, walletB], discover: true });
 
     expect(upstream.calls).toHaveLength(1);
@@ -545,11 +650,24 @@ describe("readLiveSnapshot", () => {
       configAddress,
       SOL_USDC_POOL,
       SPYX_USDC_POOL,
+      ANTHROPIC_USDC_POOL,
+      FIGUREAI_USDC_POOL,
       deriveLinkPda(walletA).toBase58(),
       deriveLinkPda(walletB).toBase58(),
       walletA,
       walletB,
+      // THE TAIL, after everything: the chain's clock and the two feeds. The
+      // pools are read from a fixed slice and the wallets from offsets counted
+      // off it, so nothing here can be handed to the Raydium decoder.
+      "SysvarC1ock11111111111111111111111111111111",
+      PYTH_SOL_USD_FEED,
+      PYTH_USDC_USD_FEED,
     ]);
+    // The digit 1 in C1ock, and the receiver-owned feeds in order.
+    expect(PYTH_SNAPSHOT_ADDRESSES).toEqual(["SysvarC1ock11111111111111111111111111111111", PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED]);
+    // The documented cap still covers the widest ask: ten wallets, ten links, every pool, the tail.
+    expect(MAX_LIVE_SNAPSHOT_ADDRESSES).toBe(3 + 4 + 2 * MAX_WALLET_LINKS + 3);
+    expect(members[0]!.params[0]).toHaveLength(3 + 4 + 2 * 2 + 3);
     expect(members[0]!.params[1]).toEqual({ encoding: "base64", commitment: "confirmed" });
     // Read BY ADDRESS, never listed: no number of accounts anyone opens for the vault can make this unreadable.
     expect(members[1]!.params[0]).toEqual(vaultTokenAccountTargets(vault).map((target) => target.address));
@@ -560,7 +678,7 @@ describe("readLiveSnapshot", () => {
   });
 
   it("without discover it asks four members and reports no link listing at all", async () => {
-    const { pool: p, upstream } = livePool([sipVault(), null, null, solPool(), spyxPool()]);
+    const { pool: p, upstream } = livePool([sipVault(), null, null, solPool(), ...legPools()]);
     const read = await readLiveSnapshot(p, { owner, wallets: [], discover: false });
     expect(batchOf(upstream.calls[0]!).map((member) => member.method)).not.toContain("getProgramAccounts");
     expect(read.links).toBeNull();
@@ -568,7 +686,7 @@ describe("readLiveSnapshot", () => {
   });
 
   it("a member that fails takes down ONLY its own part", async () => {
-    const values = [sipVault(), null, null, solPool(), spyxPool()];
+    const values = [sipVault(), null, null, solPool(), ...legPools()];
     const tokens = await readLiveSnapshot(livePool(values, { tokens: broke("no") }).pool, { owner, wallets: [], discover: false });
     expect([tokens.vault.kind, tokens.prices.kind, tokens.tokenAccounts.kind]).toEqual(["exists", "exists", "unreadable"]);
 
@@ -601,13 +719,106 @@ describe("readLiveSnapshot", () => {
   });
 
   it.each([
-    ["a pool owned by another program", () => [sipVault(), null, null, solPool(key()), spyxPool()]],
-    ["a pool with its mints swapped", () => [sipVault(), null, null, solPool(RAYDIUM_CLMM, [USDC_MINT, WSOL_MINT]), spyxPool()]],
-    ["a pool that does not exist", () => [sipVault(), null, null, null, spyxPool()]],
+    ["the SOL pool owned by another program", () => [sipVault(), null, null, solPool(key()), ...legPools()]],
+    ["the SOL pool with its mints swapped", () => [sipVault(), null, null, solPool(RAYDIUM_CLMM, [USDC_MINT, WSOL_MINT]), ...legPools()]],
+    ["the SOL pool missing", () => [sipVault(), null, null, null, ...legPools()]],
+    // Each spoiled pool is spoiled ALONE, with every other pool where it should be:
+    // a leg's pool must be able to fail this on its own account.
+    ["a leg's pool owned by another program", () => [sipVault(), null, null, solPool(), legPool(0), legPool(1, key()), legPool(2)]],
+    ["a leg's pool missing", () => [sipVault(), null, null, solPool(), legPool(0), legPool(1), null]],
   ])("%s gives NO price rather than a wrong one, and the vault is still read", async (_, values) => {
     const read = await readLiveSnapshot(livePool(values()).pool, { owner, wallets: [], discover: false });
     expect(read.prices.kind).toBe("unreadable");
     expect(read.vault.kind).toBe("exists");
+  });
+
+
+  describe("the oracle at the tail", () => {
+    /** Everything up to the wallets, all of it healthy: livePool appends the oracle's three. */
+    const upToWallets = () => [sipVault(), null, null, solPool(), ...legPools()];
+    const readWith = (pyth?: readonly unknown[]) =>
+      readLiveSnapshot(livePool(upToWallets(), pyth === undefined ? {} : { pyth }).pool, { owner, wallets: [], discover: false });
+    const bothFeeds = () => [feedAccount(PYTH_SOL_USD_ACCOUNT), feedAccount(PYTH_USDC_USD_ACCOUNT)];
+
+    it("reads both feeds in the same batch, and dates them by the CHAIN's clock", async () => {
+      const read = await readWith();
+      expect(read.pyth.kind).toBe("exists");
+      if (read.pyth.kind !== "exists") return;
+      // The rate pyth-price.test.ts pins over these very accounts, in the unit
+      // prices.convertWad is already in: USDC raw per lamport x 1e18.
+      expect(read.pyth.value.wad).toBe(102_606_509_293_604_451n);
+      // 30 seconds after the captured publish, because that is what the CLOCK
+      // ACCOUNT says — no clock of this host's enters the subtraction.
+      expect([read.pyth.value.chainUnixSeconds, read.pyth.value.ageSeconds]).toEqual([CHAIN_NOW, 30n]);
+      expect(read.pyth.value.sol).toMatchObject({
+        price: 10_259_321_149n,
+        conf: 1_384_501n,
+        expo: -8,
+        publishTime: PYTH_FIXTURE_PUBLISH_TIME,
+        postedSlot: PYTH_FIXTURE_POSTED_SLOT,
+      });
+      expect(read.pyth.value.usdc).toMatchObject({ price: 99_987_040n, conf: 87_960n, expo: -8, publishTime: PYTH_FIXTURE_PUBLISH_TIME });
+    });
+
+    it("a different clock is a different age, ahead of the publish or behind it", async () => {
+      const four = await readWith([clockAccount(PYTH_FIXTURE_PUBLISH_TIME + 4n), ...bothFeeds()]);
+      expect(four.pyth.kind === "exists" && four.pyth.value.ageSeconds).toBe(4n);
+      // A chain clock BEHIND the publish is reported as it is, not clamped to zero.
+      const behind = await readWith([clockAccount(PYTH_FIXTURE_PUBLISH_TIME - 9n), ...bothFeeds()]);
+      expect(behind.pyth.kind === "exists" && behind.pyth.value.ageSeconds).toBe(-9n);
+    });
+
+    it("finds the tail whatever the wallet count, because its offset is counted off both the pools and the wallets", async () => {
+      const [a, b] = [key(), key()];
+      const read = await readLiveSnapshot(livePool([...upToWallets(), null, null, null, null]).pool, { owner, wallets: [a, b], discover: false });
+      expect(read.pyth.kind === "exists" && read.pyth.value.ageSeconds).toBe(30n);
+      expect(read.wallets.map((wallet) => wallet.link.status)).toEqual(["missing", "missing"]);
+    });
+
+    it.each([
+      ["a feed owned by a stranger", () => [clockAccount(), feedAccount(PYTH_SOL_USD_ACCOUNT, key()), feedAccount(PYTH_USDC_USD_ACCOUNT)]],
+      // The exact confusion addresses.ts warns about: the address DERIVES under
+      // the push program, so a feed it owned would pass every check but this one.
+      ["a feed owned by the PUSH program its address derives under", () => [clockAccount(), feedAccount(PYTH_SOL_USD_ACCOUNT), feedAccount(PYTH_USDC_USD_ACCOUNT, PYTH_PUSH_PROGRAM)]],
+      ["a feed missing entirely", () => [clockAccount(), null, feedAccount(PYTH_USDC_USD_ACCOUNT)]],
+      ["both feeds missing", () => [clockAccount(), null, null]],
+      ["the two feeds swapped, so each carries the id the other was asked for", () => [clockAccount(), feedAccount(PYTH_USDC_USD_ACCOUNT), feedAccount(PYTH_SOL_USD_ACCOUNT)]],
+      ["the clock missing", () => [null, ...bothFeeds()]],
+      ["a clock too short to hold a timestamp", () => [clockAccount(CHAIN_NOW, 32), ...bothFeeds()]],
+    ])("%s gives NO oracle, and leaves the prices panel untouched", async (_, pyth) => {
+      const good = await readWith();
+      const read = await readWith(pyth());
+      expect(read.pyth.kind).toBe("unreadable");
+      // Not merely still readable: the SAME answer a healthy read gives, to the
+      // last bigint. A dead feed may cost the dashboard its oracle and nothing else.
+      expect(read.prices).toEqual(good.prices);
+      expect(good.prices.kind).toBe("exists");
+      expect([read.vault.kind, read.tokenAccounts.kind, read.rents.vault !== null]).toEqual(["exists", "exists", true]);
+    });
+
+    it("says why a wrong owner was refused, naming both the stranger and the receiver that must own it", async () => {
+      const stranger = key();
+      const read = await readWith([clockAccount(), feedAccount(PYTH_SOL_USD_ACCOUNT, stranger), feedAccount(PYTH_USDC_USD_ACCOUNT)]);
+      const error = read.pyth.kind === "unreadable" ? read.pyth.error : "";
+      expect(error).toContain(stranger);
+      expect(error).toContain(PYTH_RECEIVER_PROGRAM);
+      expect(error).toContain(PYTH_SOL_USD_FEED);
+    });
+
+    it("and the other way round: a pool SaverFi does not pin leaves the oracle standing", async () => {
+      const read = await readLiveSnapshot(livePool([sipVault(), null, null, solPool(key()), ...legPools()]).pool, { owner, wallets: [], discover: false });
+      expect(read.prices.kind).toBe("unreadable");
+      expect(read.pyth.kind === "exists" && read.pyth.value.wad).toBe(102_606_509_293_604_451n);
+    });
+
+    it("a failed batch takes the oracle down with everything else, rather than reporting a price nobody read", async () => {
+      const { pool: p } = pool(() => {
+        throw new Error(`boom ${UPSTREAM_1}`);
+      });
+      const read = await readLiveSnapshot(p, { owner, wallets: [], discover: false });
+      expect([read.prices.kind, read.pyth.kind]).toEqual(["unreadable", "unreadable"]);
+      expect(JSON.stringify(read)).not.toContain(SECRET_QUERY);
+    });
   });
 
   it("a link another program owns, or one naming another wallet, is unreadable — never this wallet's", async () => {
@@ -617,7 +828,7 @@ describe("readLiveSnapshot", () => {
       null,
       null,
       solPool(),
-      spyxPool(),
+      ...legPools(),
       accountInfo(SIP_PROGRAM_ID, richLink(mine)),
       accountInfo(key(), richLink(forged)),
       accountInfo(SIP_PROGRAM_ID, richLink(key())),
@@ -640,7 +851,7 @@ describe("readLiveSnapshot", () => {
       null,
       null,
       solPool(),
-      spyxPool(),
+      ...legPools(),
       accountInfo(SIP_PROGRAM_ID, richLink(wallet)),
       accountInfo(SIP_PROGRAM_ID, richLink(other, deriveVaultPda(key()).toBase58())),
       null,
@@ -659,7 +870,7 @@ describe("readLiveSnapshot", () => {
       { pubkey: deriveLinkPda(theirs).toBase58(), account: accountInfo(SIP_PROGRAM_ID, richLink(theirs, deriveVaultPda(key()).toBase58())) },
       { pubkey: deriveLinkPda(key()).toBase58(), account: accountInfo(key(), richLink(key())) },
     ];
-    const read = await readLiveSnapshot(livePool([sipVault(), null, null, solPool(), spyxPool()], { links: answered(listed) }).pool, { owner, wallets: [], discover: true });
+    const read = await readLiveSnapshot(livePool([sipVault(), null, null, solPool(), ...legPools()], { links: answered(listed) }).pool, { owner, wallets: [], discover: true });
     expect(read.links?.kind).toBe("exists");
     expect(read.links?.kind === "exists" && read.links.value.map((link) => link.state.wallet)).toEqual([mine]);
   });

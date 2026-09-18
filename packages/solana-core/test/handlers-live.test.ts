@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { RAYDIUM_CLMM, SOL_USDC_POOL, SPYX_MINT, SPYX_USDC_POOL, USDC_MINT, WSOL_MINT } from "../src/client/addresses";
+import { PYTH_PUSH_PROGRAM, PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED, SPYX_MINT } from "../src/client/addresses";
 import { base58Encode } from "../src/client/base58";
 import { base64Encode } from "../src/client/base64";
 import { encodeArgs, encodeStruct } from "../src/client/borsh";
@@ -23,7 +23,14 @@ import { loadSolanaServerSettings } from "../src/server/config";
 import type { SolanaGate } from "../src/server/handlers";
 import { deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
 import { createWeightedLimiter, type WeightedLimiter } from "../src/server/rate-limit";
-import { SOL_SQRT_PRICE, SPYX_SQRT_PRICE, clmmPoolAccount, configAccount, linkAccount, localRent, policyAccount, vaultAccount } from "./chain-fixtures";
+import { LEG_POOLS, configAccount, linkAccount, localRent, policyAccount, pricedPoolEntries, vaultAccount } from "./chain-fixtures";
+import {
+  PYTH_FIXTURE_OWNER,
+  PYTH_FIXTURE_POSTED_SLOT,
+  PYTH_FIXTURE_PUBLISH_TIME,
+  PYTH_SOL_USD_ACCOUNT,
+  PYTH_USDC_USD_ACCOUNT,
+} from "./fixtures/pyth-accounts";
 import { SECRET_QUERY, UPSTREAM_1, accountInfo, fakeFetch, keypair, type UpstreamCall } from "./helpers";
 
 const load = loadSolanaServerSettings({ SIP_SOLANA_RPC_URLS: UPSTREAM_1, SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID, SIP_TRUSTED_CLIENT_IP_HEADER: "x-envoy-external-address" });
@@ -164,7 +171,37 @@ function counting(capacity: number): { limiter: WeightedLimiter; spent: () => nu
   };
 }
 
-/** A chain where `owner` has a vault, a policy, the config, both pools and one linked wallet. */
+// ── the oracle, and a clock that is deliberately not this host's ─────────────
+//
+// setup()'s `now` is 1_789_500_000_000 ms, which is 199_386 seconds BEFORE the
+// captured publish time. So if an age is ever taken from the host's clock it
+// comes out NEGATIVE and enormous, and the assertions below say plainly which
+// clock answered. The chain's is 30 seconds after the publish.
+const CHAIN_NOW = PYTH_FIXTURE_PUBLISH_TIME + 30n;
+const HOST_AGE_SECONDS = 1_789_500_000n - PYTH_FIXTURE_PUBLISH_TIME;
+const SYSVAR_CLOCK = "SysvarC1ock11111111111111111111111111111111";
+
+function clockAccount(unixSeconds = CHAIN_NOW): ReturnType<typeof accountInfo> {
+  const data = new Uint8Array(40);
+  let left = BigInt.asUintN(64, unixSeconds);
+  // unix_timestamp is an i64 at byte 32, after slot, epoch_start_timestamp, epoch and leader_schedule_epoch.
+  for (let i = 0; i < 8; i++) {
+    data[32 + i] = Number(left & 0xffn);
+    left >>= 8n;
+  }
+  return accountInfo("Sysvar1111111111111111111111111111111111111", data, 1_169_280);
+}
+
+const feedAccount = (data: Uint8Array, owner = PYTH_FIXTURE_OWNER) => accountInfo(owner, data, 5_117_760);
+
+/** The clock and both feeds, healthy, as the tail of the snapshot's one getMultipleAccounts. */
+const pythAccounts = (): [string, ReturnType<typeof accountInfo> | null][] => [
+  [SYSVAR_CLOCK, clockAccount()],
+  [PYTH_SOL_USD_FEED, feedAccount(PYTH_SOL_USD_ACCOUNT)],
+  [PYTH_USDC_USD_FEED, feedAccount(PYTH_USDC_USD_ACCOUNT)],
+];
+
+/** A chain where `owner` has a vault, a policy, the config, EVERY priced pool, the oracle and one linked wallet. */
 function fullChain(owner: string, wallet: string): LiveChain {
   const vault = deriveVaultPda(owner).toBase58();
   return {
@@ -172,8 +209,10 @@ function fullChain(owner: string, wallet: string): LiveChain {
       [vault, sipOwned(vaultAccount(owner, { lifetime_saved: 9_007_199_254_740_993n }), 250_000_000)],
       [deriveInvestPda(vault).toBase58(), sipOwned(policyAccount(vault))],
       [deriveConfigPda().toBase58(), sipOwned(configAccount(false))],
-      [SOL_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(WSOL_MINT, USDC_MINT, SOL_SQRT_PRICE))],
-      [SPYX_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(SPYX_MINT, USDC_MINT, SPYX_SQRT_PRICE, [8, 6]))],
+      // Every pool PRICED_POOLS names, so a snapshot that quotes a price quotes it
+      // because all four decoded, not because a missing one was never asked about.
+      ...pricedPoolEntries(),
+      ...pythAccounts(),
       [deriveLinkPda(wallet).toBase58(), sipOwned(linkAccount(wallet, vault))],
       [wallet, accountInfo("11111111111111111111111111111111", new Uint8Array(0), 420_000_000)],
     ]),
@@ -249,7 +288,35 @@ describe("snapshot", () => {
     expect(body.policy).toMatchObject({ status: "exists", address: deriveInvestPda(vault).toBase58() });
     expect(body.config).toMatchObject({ status: "exists", exists: true, paused: false });
     expect(body.rents).toEqual({ vault: String(localRent(125)), walletFloor: String(localRent(0)) });
+    // Every leg's rate is quoted, as a string, in the catalogue's order — the whole
+    // dashboard means the whole basket, not just the SOL rate that used to stand for it.
     expect(body.prices).toMatchObject({ usdcRawPerSol: "100038711" });
+    expect(body.prices.legs).toEqual(
+      LEG_POOLS.map((leg) => ({ symbol: leg.symbol, mint: leg.mint, wad: String(leg.legWad), usdcRawPer1e8: String(leg.usdcRawPer1e8) })),
+    );
+
+    // ── the oracle, a SIBLING of prices and never a field inside it ────────────
+    expect(body.prices.pyth).toBeUndefined();
+    expect(body.pyth).toEqual({
+      // The same unit prices.convertWad is in, so the two can be compared.
+      wad: "102606509293604451",
+      ageSeconds: "30",
+      chainUnixSeconds: String(CHAIN_NOW),
+      // expo is a NUMBER: a decimal exponent, not a bigint like every value beside it.
+      sol: { price: "10259321149", conf: "1384501", expo: -8, publishTime: String(PYTH_FIXTURE_PUBLISH_TIME), postedSlot: String(PYTH_FIXTURE_POSTED_SLOT) },
+      usdc: { price: "99987040", conf: "87960", expo: -8, publishTime: String(PYTH_FIXTURE_PUBLISH_TIME), postedSlot: String(PYTH_FIXTURE_POSTED_SLOT) },
+    });
+    // WHICH CLOCK ANSWERED. This host's would have made the price 199_386 seconds
+    // YOUNGER than its own publish, because setup()'s now() is before it; the age
+    // reported is the chain's 30, so no wall clock entered the subtraction.
+    expect(HOST_AGE_SECONDS < 0n).toBe(true);
+    expect(body.pyth.ageSeconds).not.toBe(String(HOST_AGE_SECONDS));
+
+    // The feeds rode in a member that was already being sent — the four methods
+    // above are unchanged — at the very END of its addresses, where the pools'
+    // fixed slice and the wallets' offsets cannot reach them.
+    const asked = ((upstream.calls[0]!.body as RpcRequest[])[0]!.params![0] as string[]).slice(-3);
+    expect(asked).toEqual([SYSVAR_CLOCK, PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED]);
     expect(body.wallets).toEqual([
       { wallet, lamports: "420000000", link: { address: deriveLinkPda(wallet).toBase58(), status: "this_vault", vault, epoch: "7", settlementNonce: "0", frontierSlot: "0" } },
     ]);
@@ -279,12 +346,56 @@ describe("snapshot", () => {
     expect([answer.json.vault.status, answer.json.policy.status, answer.json.config.status]).toEqual(["unreadable", "unreadable", "unreadable"]);
     expect(answer.json.vault.status).not.toBe("missing");
     expect(answer.json.prices).toBeNull();
+    // A price nobody could read is not reported as a price, oracle included.
+    expect(answer.json.pyth).toBeNull();
     expect(answer.json.rents).toEqual({ vault: null, walletFloor: null });
     // A balance nobody could read is null, not "0": "it holds nothing" would be a claim.
     expect(answer.json.wallets).toEqual([{ wallet, lamports: null, link: { address: deriveLinkPda(wallet).toBase58(), status: "unreadable", vault: null, epoch: null, settlementNonce: null, frontierSlot: null } }]);
     expect(answer.json.links).toEqual({ status: "unreadable", items: [] });
     expect(answer.text).not.toContain(SECRET_QUERY);
     expect(answer.text).not.toContain("upstream.invalid");
+  });
+
+
+  it.each([
+    // The address DERIVES under the push program, which does not own it: the one
+    // confusion that makes a spoofed feed look right everywhere but the owner check.
+    ["a feed owned by the push program its address derives under", () => feedAccount(PYTH_SOL_USD_ACCOUNT, PYTH_PUSH_PROGRAM)],
+    ["a feed owned by a stranger", () => feedAccount(PYTH_SOL_USD_ACCOUNT, deriveVaultPda(key()).toBase58())],
+    ["a feed missing entirely", () => null],
+    ["a feed holding somebody else's bytes", () => feedAccount(new Uint8Array(134))],
+  ])("%s answers pyth null, and the prices payload stays byte-identical", async (_, spoil) => {
+    const owner = key();
+    const wallet = key();
+    const healthy = await setup(fullChain(owner, wallet)).live({ action: "snapshot", owner, wallets: [wallet], discover: false });
+
+    const chain = fullChain(owner, wallet);
+    chain.accounts.set(PYTH_SOL_USD_FEED, spoil());
+    const { live, upstream } = setup(chain);
+    const answer = await live({ action: "snapshot", owner, wallets: [wallet], discover: false });
+
+    expect(answer.status).toBe(200);
+    // "Pyth unavailable", which is an answer. A thrown read would have been a 502
+    // for the whole dashboard, and a reported price would have been a lie.
+    expect(answer.json.pyth).toBeNull();
+    // Byte for byte, not merely equivalent: a dead feed costs the dashboard its
+    // own panel and not one character of the prices beside it.
+    expect(JSON.stringify(answer.json.prices)).toBe(JSON.stringify(healthy.json.prices));
+    expect(answer.json.prices.usdcRawPerSol).toBe("100038711");
+    expect(answer.json.vault.status).toBe("exists");
+    // And it still cost the dashboard exactly one request of four members.
+    expect(upstream.calls).toHaveLength(1);
+    expect(methodsOf(upstream.calls)).toEqual(["getMultipleAccounts", "getMultipleAccounts", "getMinimumBalanceForRentExemption", "getMinimumBalanceForRentExemption"]);
+  });
+
+  it("a clock that cannot be read leaves no oracle, because an age nobody can compute is not published beside a price", async () => {
+    const owner = key();
+    const wallet = key();
+    const chain = fullChain(owner, wallet);
+    chain.accounts.set(SYSVAR_CLOCK, null);
+    const answer = await setup(chain).live({ action: "snapshot", owner, wallets: [wallet], discover: false });
+    expect(answer.json.pyth).toBeNull();
+    expect(answer.json.prices.usdcRawPerSol).toBe("100038711");
   });
 
   it("no vault is missing, which is a different answer from unreadable", async () => {
