@@ -290,39 +290,65 @@ política, que **no** es esta. La de administración está en `~/sip-keys/privy-
 ### Si la llave privada de ese quorum se ha perdido
 
 Privy enseña la clave privada **una sola vez**, cuando se crea. No se puede recuperar ni volver a ver: ni tú, ni Privy,
-ni nadie. Si no está en el gestor de contraseñas, no está.
+ni nadie. Si no está en el gestor de contraseñas, no está. Y el quorum viejo no se puede arreglar añadiéndole una llave
+nueva: cambiar un quorum exige la firma de ese mismo quorum, que es justo la llave perdida.
 
-No es una catástrofe, pero cuesta, y conviene saber qué cuesta antes de empezar:
+Así que **sí: se genera una nueva**. No es una catástrofe, pero cuesta, y conviene saber qué cuesta antes de empezar. El
+asiento de cada wallet de trading nombra el signer **por su id**; el id nuevo es otro, así que cada wallet sentada con
+el viejo hay que volver a sentarla. Eso lo hace el dueño de la wallet desde la web, con un botón. El orden importa:
 
-1. Creas una llave nueva: **Wallets → Authorization keys → New key**, nombre `sip-solana-keeper-2`. Copia la clave
-   privada al gestor **en ese momento**, y apunta su **id**, que es nuevo.
-2. En Railway cambian **dos** variables: `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY` (la privada nueva) y
-   `SIP_SOLANA_PRIVY_SIGNER_ID` (el id nuevo). En la web cambia `SIP_SOLANA_PRIVY_SIGNER_ID` **y haz Redeploy en
-   Vercel** ([VERCEL_WEB.md](VERCEL_WEB.md)): una variable nueva no se aplica a lo que ya está desplegado, así que sin el
-   Redeploy la web seguiría sentando a los usuarios con el signer viejo, que es el que acabas de matar.
-3. **Pruébalo con UNA wallet antes de pedírselo a nadie.** Usa la wallet de prueba de la sección 6: siéntala como en el paso
-   siguiente y mira `/status`. Si esa wallet ya no sale como `none (signer not granted)`, la cadena entera funciona
-   (Railway, la web, el signer nuevo) y puedes seguir. Si sigue saliendo así, algo de los pasos 1 y 2 no ha llegado —
-   normalmente el Redeploy — y no tiene ningún sentido gastar el favor de los usuarios hasta arreglarlo.
-4. **Ahora sí: hay que volver a sentar al vigilante en cada wallet de trading.** Esto es lo caro. El asiento de una
-   wallet nombra el signer **por su id**, y ese id acaba de cambiar, así que todas las wallets que hoy tienen sentado al
-   vigilante dejan de tenerlo sentado. Lo hace **el usuario, desde la web, con su sesión iniciada**: no lo puedes hacer
-   tú por él desde el dashboard. Lo que tiene que hacer, en la pantalla de wallets, es esto:
-   - su wallet de trading aparece con la etiqueta **No seat**;
-   - debajo tiene el botón **Grant keeper permission**; lo pulsa y acepta lo que le pida Privy;
-   - la etiqueta pasa a **Has a signer**.
+1. **Llave nueva en Privy.** Comprueba arriba que la app es la del app id `cmtrt36tb00080dlbrda5aqam` (paso 1) y ve a
+   **Wallets → Authorization keys → New key**. Nombre: `sip-solana-keeper-2`, con una sola llave (1 de 1). Copia la
+   clave privada al gestor **en ese momento**: no la vuelves a ver. Apunta su **id**, que es nuevo. A partir de aquí,
+   donde esta guía dice `cbx133itb717vxp3dqwhk808`, pon ese id nuevo.
+2. **Railway: las DOS variables, y Redeploy.** En el servicio del vigilante cambia `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`
+   (la privada nueva, en una sola línea) y `SIP_SOLANA_PRIVY_SIGNER_ID` (el id nuevo). Despliega los cambios y espera a
+   que el servicio vuelva a arrancar. `SIP_SOLANA_PRIVY_POLICY_ID` **no cambia**.
+3. **Vercel: el signer id, y Redeploy.** En la web cambia `SIP_SOLANA_PRIVY_SIGNER_ID` al id nuevo **y haz Redeploy**
+   ([VERCEL_WEB.md](VERCEL_WEB.md)). Una variable nueva no se aplica a lo que ya está desplegado: sin el Redeploy, el
+   botón del paso 5 volvería a sentar el signer viejo, el que ya no sirve. La política (`SIP_SOLANA_PRIVY_POLICY_ID`) no
+   cambia.
+4. **Mira `/status` antes de tocar ninguna wallet.** `signing.authorizationKey` tiene que decir `matches`, con
+   `signing.authorizationKeyAt` posterior al arranque, y `signing.privySignerId` tiene que ser el id nuevo. En este
+   momento `signing.wallets` dirá `signable: 0`: es lo normal, porque todas las wallets siguen con el signer viejo, y
+   cada una sale en `wallets` como `none (signer not granted)`. Si `authorizationKey` no dice `matches`, para aquí: la
+   tabla de más arriba dice qué es cada valor. Pulsar botones no arregla una llave que no es la del quorum.
+5. **El botón, en cada wallet de trading.** En la web, con tu sesión iniciada con Phantom, abre la pantalla de wallets
+   (la web está en inglés; los nombres van tal cual salen en pantalla):
+   - la wallet de trading sale con la etiqueta **Has a signer**: Privy solo sabe decir que tiene *un* signer, no cuál, así
+     que el signer viejo se ve igual que uno bueno;
+   - pulsa **Re-seat keeper**. Todavía no pasa nada: sale un aviso que dice que va a quitar **todos** los signers de esa
+     wallet y enseña el signer y la política que pondrá después. **Mira que el signer sea el id nuevo.** Si enseña
+     `cbx133itb717vxp3dqwhk808`, la web no se ha redesplegado: pulsa **Cancel** y vuelve al paso 3;
+   - pulsa **Remove every signer and re-seat**. Privy quita los signers, la web espera a que Privy lo refleje y pone el
+     del vigilante con su política. Termina con un texto que empieza por **Done:** y la etiqueta vuelve a **Has a
+     signer**.
 
-   Esa pantalla no está descrita en ninguna guía todavía. Mientras no lo esté, esto es lo que hay que pedirle, con esos
-   nombres tal cual salen en pantalla (la web está en inglés). Y lo compruebas tú, sin depender de lo que te diga: esa
-   wallet deja de salir como `none (signer not granted)` en `/status`, y su cobro deja de ser `NO_SIGNER`.
-5. La **política no cambia**: sigue siendo la misma, con el mismo `policy id` y la misma llave de administración. Se
-   vuelve a enganchar sola al sentar el signer nuevo, porque va como override del signer.
-6. Cuando todas estén sentadas otra vez, borra la llave vieja en el dashboard y repite la **sección 6** de esta guía
+   Hazlo primero con **una sola wallet** y mira `/status` (paso 6) antes de seguir con las demás. Si solo tienes una,
+   esa es la prueba.
+
+   **Si se queda a medias**, la wallet sale con la etiqueta **No seat** y un mensaje en rojo que empieza por *"Every
+   signer is off this wallet now, but the keeper's seat was NOT added"*. Pulsa **Grant keeper permission** en esa misma
+   wallet: pone el signer que falta. Mientras tanto la wallet está a salvo, porque solo tú puedes firmar con ella; lo
+   único que pasa es que no se aparta nada de sus operaciones hasta que el asiento vuelva. Si recargas la página, sigue
+   saliendo **No seat** con el mismo botón.
+
+   **Si el botón sale gris** con *"Re-seat is not available for this wallet"*, no la toques desde la web y avisa: Privy
+   solo sabe quitar los signers de una wallet cada vez cuando es una wallet TEE con su propio id, y en cualquier otra
+   quitaría los de todas tus wallets a la vez.
+6. **Confirma en `/status`.** `signing.authorizationKey` sigue en `matches`; `signing.wallets` dice `signable` igual
+   que `of` (N de N); y cada wallet sale en `wallets` con `signing` = `privy`, no `none (signer not granted)`. El
+   vigilante lo lee en su siguiente barrido, así que puede tardar un poco: recarga. Desde ahí el cobro de esa wallet deja
+   de ser `NO_SIGNER`, y el beneficio que estaba pendiente se cobra en los barridos siguientes.
+7. La **política no cambia**: el mismo `policy id` y la misma llave de administración. Va enganchada a cada asiento como
+   override, así que el botón la vuelve a poner sola.
+8. Cuando todas estén sentadas otra vez, borra la llave vieja en el dashboard y repite la **sección 6** de esta guía
    (*Verifica que rechaza lo que debe*) con la nueva.
 
-Si la llave no se perdió sino que **se expuso** (alguien la vio, se pegó en un sitio que no tocaba), es lo mismo pero
-con prisa y en otro orden: primero quitas el signer viejo de las wallets, luego lo demás, como dice
-[SECRETS.md](SECRETS.md).
+Si la llave no se perdió sino que **se expuso** (alguien la vio, se pegó en un sitio que no tocaba), es el mismo camino
+pero sin esperar, como dice [SECRETS.md](SECRETS.md). Con un cuidado: el botón pone el signer que tenga configurado la
+web, así que pulsarlo antes del Redeploy del paso 3 volvería a sentar el signer expuesto. Primero los pasos 1 a 3,
+luego el botón, y mira en el aviso que el signer sea el nuevo.
 
 ### El vigilante ya lo dice solo al arrancar
 
