@@ -115,6 +115,22 @@ export interface CreateAndLinkStop {
   readonly gate: LinkGateCode | null;
 }
 
+/**
+ * Whether a stop is still true of the chain, and so still worth saying.
+ *
+ * A GATE STOP IS A STATEMENT ABOUT THE CHAIN RIGHT NOW — "a trading wallet can
+ * only be linked to a vault, and this pension key has none yet" — so it stops
+ * being true the moment the owner does the thing it asked for. The note that
+ * carries it, and the way to the vault form inside it, go with it rather than
+ * contradicting the screen around them. Every other stop records what happened
+ * during the press, which stays true however the chain moves. A chain that cannot
+ * be read proves nothing, so nothing is taken back on its word.
+ */
+export function stopStillHolds(stop: CreateAndLinkStop | null, state: VaultStateJson | null): boolean {
+  if (stop === null || stop.gate === null || state === null) return true;
+  return linkGate(state)?.code === stop.gate;
+}
+
 export interface CreateAndLinkOutcome {
   /** The address Privy named, or null when nothing was created. A wallet may exist anyway: see `stop`. */
   readonly created: string | null;

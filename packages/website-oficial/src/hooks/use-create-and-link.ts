@@ -24,6 +24,10 @@ import type { SeatConfig } from "@/lib/trading-wallets";
  * from the moment Privy names the address, whatever the link does afterwards, so
  * a wallet is never missing from the list it was just added to.
  *
+ * WHAT THE PRESS ENDED IN IS DROPPED BY `dismiss`, and re-evaluated by the card
+ * against the chain as it is now: a stop that said "create your vault first" is
+ * not to be read a minute later, over a vault that now exists.
+ *
  * Replaces useCreateTradingWallet, which created and stopped.
  */
 export function useCreateAndLink(config: SeatConfig) {
@@ -51,5 +55,7 @@ export function useCreateAndLink(config: SeatConfig) {
     }
   }, [write, createWallet, refreshUser, config]);
 
-  return { run, created, outcome, write } as const;
+  const dismiss = useCallback(() => setOutcome(null), []);
+
+  return { run, created, outcome, dismiss, write } as const;
 }

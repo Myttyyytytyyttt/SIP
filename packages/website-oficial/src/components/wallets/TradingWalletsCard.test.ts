@@ -252,9 +252,11 @@ describe("the press", () => {
 });
 
 describe("what the card says when the press stops", () => {
+  const dismiss = vi.fn();
   const noteOf = (outcome: CreateAndLinkOutcome, vaultRent: bigint | null = 1_285_240n): string => {
     mocked.buttons.length = 0;
-    return renderToStaticMarkup(createElement(TooltipProvider, null, createElement(CreateAndLinkNote, { outcome, vaultRent })));
+    dismiss.mockReset();
+    return renderToStaticMarkup(createElement(TooltipProvider, null, createElement(CreateAndLinkNote, { outcome, vaultRent, onDismiss: dismiss })));
   };
 
   it("no vault: the wallet is created and said to be created, the vault is asked for, and the way there is a link to the form", () => {
@@ -312,6 +314,21 @@ describe("what the card says when the press stops", () => {
     expect(html).toContain(asHtml(CREATE_LINK_COPY.inTheList));
     // Not repeated here: TxProgress already carries the refusal, with its title and its Dismiss.
     expect(html).not.toContain("Phantom did not approve");
+  });
+
+  it("every note the card leaves on screen can be dismissed, whatever it says", () => {
+    // Nothing here outlives what it says: the card drops a gate's note by itself once the chain moves
+    // (stopStillHolds), and the owner can drop any of them at once.
+    for (const stop of [
+      { kind: "gate", message: LINK_COPY.needsVault, gate: "needs_vault" },
+      { kind: "chain_unknown", message: CREATE_LINK_COPY.chainUnknown, gate: null },
+    ] satisfies CreateAndLinkOutcome["stop"][]) {
+      noteOf({ created: TRADING_0, link: null, stop });
+      const [button] = buttons(VAULT_COPY.dismiss);
+      expect(button, stop.kind).toBeDefined();
+      button?.onClick?.(CLICK);
+      expect(dismiss, stop.kind).toHaveBeenCalledTimes(1);
+    }
   });
 
   it("a link that landed says nothing extra: the progress already says Linked", () => {

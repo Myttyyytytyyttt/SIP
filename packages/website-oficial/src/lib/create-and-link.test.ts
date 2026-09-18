@@ -5,7 +5,7 @@ import { SIP_PROGRAM_ID } from "@sip/solana-core/client";
 import { describe, expect, it, vi } from "vitest";
 
 import { PENSION_KEY, POLICY, SIGNER, TRADING_0 } from "../../test/fixtures/privy-user";
-import { READY_BACKOFF_MS, createAndLinkFlow, linkGate, pressPlan, type CreateAndLinkDeps } from "@/lib/create-and-link";
+import { READY_BACKOFF_MS, createAndLinkFlow, linkGate, pressPlan, stopStillHolds, type CreateAndLinkDeps, type CreateAndLinkStop } from "@/lib/create-and-link";
 import { SIGNER_VARIABLE, POLICY_VARIABLE } from "@/lib/trading-wallets";
 import type { VaultStateJson } from "@/lib/vault-api";
 import { CREATE_LINK_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
@@ -122,6 +122,37 @@ describe("pressPlan: what the press promises, from the screen's view of the chai
   it("a chain with no rents read promises the link and names no amount", () => {
     const state = { ...stateOf(), rents: null };
     expect(pressPlan({ kind: "ready", state })).toStrictEqual({ links: true, linkRent: null });
+  });
+});
+
+describe("stopStillHolds: a stop that described the chain is dropped once the chain moves", () => {
+  const needsVault: CreateAndLinkStop = { kind: "gate", message: LINK_COPY.needsVault, gate: "needs_vault" };
+
+  it("THE VAULT THE STOP ASKED FOR NOW EXISTS: the note that asked for it no longer holds", () => {
+    // The designed path for every first-time owner: press, get "Create your vault first", create it.
+    // The note used to stay on screen, a role=alert asserting there is no vault under a button offering the link.
+    expect(stopStillHolds(needsVault, stateOf({ vault: "missing" }))).toBe(true);
+    expect(stopStillHolds(needsVault, stateOf())).toBe(false);
+  });
+
+  it("another gate is another statement: the chain refusing for a different reason does not keep this one", () => {
+    expect(stopStillHolds(needsVault, stateOf({ config: "missing" }))).toBe(false);
+    expect(stopStillHolds({ kind: "gate", message: LINK_COPY.paused, gate: "paused" }, stateOf({ paused: true }))).toBe(true);
+  });
+
+  it("a chain that has not been read proves nothing, so nothing is taken back on its word", () => {
+    expect(stopStillHolds(needsVault, null)).toBe(true);
+  });
+
+  it("a stop that records what happened during the press stays true however the chain moves", () => {
+    for (const stop of [
+      { kind: "chain_unknown", message: CREATE_LINK_COPY.chainUnknown, gate: null },
+      { kind: "not_ready", message: CREATE_LINK_COPY.notReady, gate: null },
+      { kind: "no_address", message: CREATE_LINK_COPY.noAddress, gate: null },
+    ] satisfies CreateAndLinkStop[]) {
+      expect(stopStillHolds(stop, stateOf()), stop.kind).toBe(true);
+    }
+    expect(stopStillHolds(null, stateOf())).toBe(true);
   });
 });
 

@@ -53,15 +53,15 @@ import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
 import { useCreateAndLink } from "@/hooks/use-create-and-link";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { formatSol, rawFrom } from "@/lib/amounts";
-import { pressPlan, type CreateAndLinkOutcome } from "@/lib/create-and-link";
+import { pressPlan, stopStillHolds, type CreateAndLinkOutcome } from "@/lib/create-and-link";
 import { MAX_TRADING_WALLETS, keeperSigners, seatProblem, tradingWalletsOf } from "@/lib/trading-wallets";
-import { CREATE_LINK_COPY, LINK_COPY } from "@/lib/vault-copy";
+import { CREATE_LINK_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
 
 export function TradingWalletsCard() {
   const config = useSolanaConfig();
   const { user } = usePrivy();
   const screen = useVaultScreen();
-  const { run, created, outcome, write } = useCreateAndLink(config);
+  const { run, created, outcome, dismiss, write } = useCreateAndLink(config);
 
   const rows = useMemo<TradingWalletRowData[]>(() => {
     const listed = tradingWalletsOf(user).map((wallet) => ({ ...wallet, listed: true }));
@@ -79,6 +79,10 @@ export function TradingWalletsCard() {
   // What the press will do, in one sentence, before it is pressed: Phantom's window comes late, and never
   // unannounced — and a read that FAILED promises the create alone, since that is all the flow will do.
   const plan = pressPlan(view);
+  // A stop that describes the chain is re-read against the chain as it is NOW: the owner follows
+  // "Create your vault first", creates it, and the note that asked for it must go, not sit there
+  // asserting under a button that has just started offering the link.
+  const note = outcome !== null && stopStillHolds(outcome.stop, state) ? outcome : null;
   const ahead = plan.links ? CREATE_LINK_COPY.ahead(plan.linkRent === null ? null : formatSol(plan.linkRent)) : `${CREATE_LINK_COPY.aheadCreateOnly} ${plan.reason}`;
   const busy = write.running;
   // A link this screen sent and cannot confirm blocks the chained press too, wherever it was sent from:
@@ -129,9 +133,13 @@ export function TradingWalletsCard() {
           successLabel={CREATE_LINK_COPY.done}
           onBuildAgain={() => void write.buildAgain()}
           onCheckAgain={() => void write.checkAgain()}
-          onDismiss={() => write.dismiss()}
+          // The note beside a stopped link says the wallet is safe; dismissing the one dismisses the other.
+          onDismiss={() => {
+            write.dismiss();
+            dismiss();
+          }}
         />
-        {outcome !== null ? <CreateAndLinkNote outcome={outcome} vaultRent={vaultRent} /> : null}
+        {note !== null ? <CreateAndLinkNote outcome={note} vaultRent={vaultRent} onDismiss={dismiss} /> : null}
 
         {rows.length === 0 ? (
           <p className="text-sm text-muted-foreground">
@@ -168,8 +176,19 @@ export function TradingWalletsCard() {
  * real and in the list, with its seat shown there as Privy records it — and the
  * reason the chain stopped comes after it. A link that ran and stopped has its own
  * words in TxProgress already; this only adds that the wallet is there.
+ *
+ * IT IS DISMISSIBLE, and the card drops it on its own once a stop that described
+ * the chain no longer does (stopStillHolds): nothing here outlives what it says.
  */
-export function CreateAndLinkNote({ outcome, vaultRent }: { readonly outcome: CreateAndLinkOutcome; readonly vaultRent: bigint | null }) {
+export function CreateAndLinkNote({
+  outcome,
+  vaultRent,
+  onDismiss,
+}: {
+  readonly outcome: CreateAndLinkOutcome;
+  readonly vaultRent: bigint | null;
+  readonly onDismiss?: () => void;
+}) {
   const { stop, created, link } = outcome;
   if (stop === null) {
     if (link === null || link.ok) return null;
@@ -191,11 +210,18 @@ export function CreateAndLinkNote({ outcome, vaultRent }: { readonly outcome: Cr
       ) : null}
       {needsVault ? <p className="font-medium">{CREATE_LINK_COPY.needsVaultTitle}</p> : null}
       <p className="text-muted-foreground">{needsVault ? CREATE_LINK_COPY.needsVault(vaultRent === null ? null : formatSol(vaultRent)) : stop.message}</p>
-      {needsVault ? (
-        <Button type="button" size="sm" variant="outline" asChild>
-          <a href={`#${VAULT_CARD_ID}`}>{CREATE_LINK_COPY.goToVault}</a>
-        </Button>
-      ) : null}
+      <div className="flex flex-wrap gap-2">
+        {needsVault ? (
+          <Button type="button" size="sm" variant="outline" asChild>
+            <a href={`#${VAULT_CARD_ID}`}>{CREATE_LINK_COPY.goToVault}</a>
+          </Button>
+        ) : null}
+        {onDismiss !== undefined ? (
+          <Button type="button" size="sm" variant="ghost" onClick={() => onDismiss()}>
+            {VAULT_COPY.dismiss}
+          </Button>
+        ) : null}
+      </div>
     </div>
   );
 }

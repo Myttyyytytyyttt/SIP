@@ -43,6 +43,7 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { VaultCard } from "@/components/wallets/VaultCard";
+import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
 import { VaultWriteLock } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
 import type { VaultApi, VaultStateJson } from "@/lib/vault-api";
@@ -88,6 +89,20 @@ beforeEach(() => {
 });
 
 describe("VaultCard", () => {
+  it("carries the #vault anchor in every state, so the trading wallets card's way here is never a dead link", () => {
+    // It used to live on the create form alone, which is rendered only while the vault is missing: the
+    // moment the vault existed — or the read failed — "Create your vault" pointed at nothing.
+    for (const view of [
+      { kind: "loading" } as const,
+      { kind: "unreadable", message: "x" } as const,
+      { kind: "ready", state: stateWith() } as const,
+      { kind: "ready", state: stateWith({ vault: { status: "exists", address: VAULT, lamports: "300000000", rentFloor: "1285240", withdrawableLamports: "298714760" } }) } as const,
+    ]) {
+      const html = render(screen(view));
+      expect(html.match(new RegExp(`id="${VAULT_CARD_ID}"`, "g")), view.kind).toHaveLength(1);
+    }
+  });
+
   it("loading: a skeleton, and no create form", () => {
     const html = render(screen({ kind: "loading" }));
     expect(html).toContain('aria-busy="true"');

@@ -48,7 +48,23 @@ import { PROFIT_RATE, VAULT_COPY, VOLUME_RATE, ratePercent } from "@/lib/vault-c
 
 type VaultWrite = ReturnType<typeof useVaultWrite>;
 
+/**
+ * The anchor sits on the section, not on one state's form: the trading wallets
+ * card sends a wallet with no vault to "#vault", and that link must resolve
+ * whichever of the four states this card is in — a read that failed shows no
+ * form, and a button pointing at nothing does nothing.
+ */
 export function VaultCard({ volumeOffered = VOLUME_MODE_OFFERED }: { readonly volumeOffered?: boolean }) {
+  const screen = useVaultScreen();
+  if (screen === null) return null;
+  return (
+    <section id={VAULT_CARD_ID} className="scroll-mt-4">
+      <VaultCardBody volumeOffered={volumeOffered} />
+    </section>
+  );
+}
+
+function VaultCardBody({ volumeOffered }: { readonly volumeOffered: boolean }) {
   const screen = useVaultScreen();
   const write = useVaultWrite("vault");
   if (screen === null) return null;
@@ -132,8 +148,7 @@ function CreateVault({ state, volumeOffered, write, progress }: { readonly state
   const blocked = write.running || write.busyElsewhere || write.unconfirmed;
 
   return (
-    // The anchor a created-but-unlinkable wallet points at: the form, not a description of it.
-    <Card id={VAULT_CARD_ID} className="scroll-mt-4">
+    <Card>
       <CardHeader>
         <CardTitle>{VAULT_COPY.title}</CardTitle>
         <CardDescription>
