@@ -5,8 +5,10 @@ import { useSignMessage, useSignTransaction, useWallets } from "@privy-io/react-
 import { createContext, createElement, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { useVaultScreen } from "@/hooks/use-vault-state";
+import { createAndLinkFlow, type CreateAndLinkOutcome } from "@/lib/create-and-link";
 import { pensionSigner, tradingSigners, type SignMessageFn, type SignTransactionFn } from "@/lib/signing-wallets";
-import type { BuiltTransactionJson, InvestmentPolicyJson } from "@/lib/vault-api";
+import type { CreateWalletFn, RefreshUserFn, SeatConfig } from "@/lib/trading-wallets";
+import type { BuiltTransactionJson, InvestmentPolicyJson, VaultApi } from "@/lib/vault-api";
 import { FAILURE_COPY } from "@/lib/vault-copy";
 import {
   checkAgainFlow,
@@ -18,6 +20,7 @@ import {
   withdrawTokenFlow,
   type FlowResult,
   type FlowStep,
+  type LinkWalletResult,
 } from "@/lib/vault-flows";
 
 /**
@@ -34,9 +37,14 @@ import {
  * EXPLICIT CALLS ONLY. Every action takes the values it needs and no event; the
  * signers hand Privy explicit objects (src/lib/signing-wallets.ts).
  *
- * A link's consent signature is kept in memory for this row, so "Link this
- * wallet" after an expired approval window reuses it; it is dropped once the
- * link lands or the server refuses it.
+ * A link's consent signature is kept in memory FOR THE WHOLE SCREEN, keyed by
+ * pension key and trading wallet, so "Link this wallet" after an expired approval
+ * window reuses it — and so does a link that a chained create started and a row
+ * finishes. It is dropped once the link lands or the server refuses it.
+ *
+ * CREATE-AND-LINK IS ONE WRITE. The wallet's creation and its link run under a
+ * single hold of the screen's lock, so nothing else can start between them; the
+ * chain itself is src/lib/create-and-link.ts, and only the wiring is here.
  *
  * WHILE PHANTOM ASKS, the checked build answer rides in the progress, so a card
  * can show what is being signed (an investment policy's floors).
@@ -44,7 +52,7 @@ import {
 
 type ConnectedWallet = ReturnType<typeof useWallets>["wallets"][number];
 
-export type WriteKind = "create" | "link" | "policy" | "withdraw" | "withdrawToken";
+export type WriteKind = "create" | "createLink" | "link" | "policy" | "withdraw" | "withdrawToken";
 
 export type WriteProgress =
   | { readonly phase: "idle" }
@@ -78,6 +86,8 @@ interface WriteLock {
   readonly holder: string | null;
   acquire(key: string): boolean;
   release(key: string): void;
+  /** Consent signatures this screen already has, by `<pensionKey>:<tradingAddress>`. Shared, so one is signed once however it is retried. */
+  readonly consents: Map<string, Uint8Array>;
 }
 
 const WriteLockContext = createContext<WriteLock | null>(null);
@@ -86,9 +96,11 @@ const WriteLockContext = createContext<WriteLock | null>(null);
 export function VaultWriteLock({ children }: { readonly children?: ReactNode }) {
   const [holder, setHolder] = useState<string | null>(null);
   const held = useRef<string | null>(null);
+  const consents = useRef(new Map<string, Uint8Array>());
   const lock = useMemo<WriteLock>(
     () => ({
       holder,
+      consents: consents.current,
       acquire: (key) => {
         if (held.current !== null) return false;
         held.current = key;
@@ -136,6 +148,16 @@ interface FlowHooks {
   readonly onBuilt: (body: BuiltTransactionJson) => void;
 }
 
+/** What the trading wallets card hands the chained write: Privy's methods, and where its own answers go. */
+export interface CreateAndLinkRequest {
+  readonly createWallet: CreateWalletFn;
+  readonly config: SeatConfig;
+  readonly refreshUser: RefreshUserFn;
+  /** The address Privy named, the moment it named it: the list shows the wallet before anything else can stop. */
+  readonly onCreated: (address: string) => void;
+  readonly onOutcome: (outcome: CreateAndLinkOutcome) => void;
+}
+
 /** One card's or one row's writes, under the screen's lock. `key` names the writer ("vault", "link:<address>", "policy", "withdraw:sol"…). */
 export function useVaultWrite(key: string) {
   const screen = useVaultScreen();
@@ -144,15 +166,24 @@ export function useVaultWrite(key: string) {
   const { signTransaction } = useSignTransaction();
   const { signMessage } = useSignMessage();
   const [progress, setProgress] = useState<WriteProgress>({ phase: "idle" });
-  const consents = useRef(new Map<string, Uint8Array>());
   const lastRequest = useRef<LastRequest | null>(null);
+  /**
+   * The connected wallets as they are WHEN A FLOW ASKS, not as they were when the
+   * handler was made. A chained create-and-link starts before Privy lists the new
+   * wallet, and the signers must see the list that has it.
+   */
+  const walletsRef = useRef(wallets);
+  walletsRef.current = wallets;
+  /** The screen's chain state as it is WHEN A FLOW ASKS: a chained create reads it after Privy's dialog, not before. */
+  const screenRef = useRef(screen);
+  screenRef.current = screen;
 
   // One input per call, never Privy's variadic form: each input would sign its own bytes.
   const signOne = useCallback<SignTransactionFn<ConnectedWallet>>((input) => signTransaction(input), [signTransaction]);
   const signMessageOne = useCallback<SignMessageFn<ConnectedWallet>>((input) => signMessage(input), [signMessage]);
 
   const run = useCallback(
-    async (kind: WriteKind, flow: (hooks: FlowHooks) => Promise<FlowResult>): Promise<void> => {
+    async (kind: WriteKind, flow: (hooks: FlowHooks) => Promise<FlowResult | null>): Promise<void> => {
       if (screen === null || lock === null || !lock.acquire(key)) return;
       let built: BuiltTransactionJson | null = null;
       setProgress({ phase: "running", kind, step: "preparing", built });
@@ -163,7 +194,14 @@ export function useVaultWrite(key: string) {
         },
       };
       try {
+        // null: the flow has nothing for the progress to show (a chained create that stopped before
+        // its link — no transaction was built, and "Refused" would be the wrong word for a wallet
+        // that was in fact created). Its card says what happened in its own words instead.
         const result = await flow(hooks);
+        if (result === null) {
+          setProgress({ phase: "idle" });
+          return;
+        }
         setProgress({ phase: "finished", kind, result });
         if (result.ok || (result.kind === "refused" && result.code !== undefined && REFRESH_AFTER.has(result.code))) screen.refresh();
       } catch {
@@ -190,29 +228,82 @@ export function useVaultWrite(key: string) {
     [screen, run, wallets, signOne],
   );
 
+  /** One link, from the wallets THIS MOMENT holds and the consent the screen already has. Used alone, and by the chained create. */
+  const runLink = useCallback(
+    (pensionKey: string, api: VaultApi, tradingAddress: string, hooks: FlowHooks): Promise<LinkWalletResult> => {
+      const cacheKey = `${pensionKey}:${tradingAddress}`;
+      const wallets = walletsRef.current;
+      return linkWalletFlow(
+        {
+          api,
+          onStep: hooks.onStep,
+          onBuilt: hooks.onBuilt,
+          pension: pensionSigner({ wallets, pensionKey, signTransaction: signOne }),
+          trading: tradingSigners({ wallets, pensionKey, tradingAddress, signTransaction: signOne, signMessage: signMessageOne }),
+        },
+        { pensionKey, tradingAddress, consentSignature: lock?.consents.get(cacheKey) ?? null },
+      ).then((outcome) => {
+        if (outcome.consentSignature === null) lock?.consents.delete(cacheKey);
+        else lock?.consents.set(cacheKey, outcome.consentSignature);
+        return outcome;
+      });
+    },
+    [lock, signOne, signMessageOne],
+  );
+
   const link = useCallback(
     (tradingAddress: string): Promise<void> => {
       if (screen === null) return Promise.resolve();
       lastRequest.current = { kind: "link", tradingAddress };
       const { api, pensionKey } = screen;
-      const cacheKey = `${pensionKey}:${tradingAddress}`;
-      return run("link", async ({ onStep, onBuilt }) => {
-        const outcome = await linkWalletFlow(
-          {
-            api,
-            onStep,
-            onBuilt,
-            pension: pensionSigner({ wallets, pensionKey, signTransaction: signOne }),
-            trading: tradingSigners({ wallets, pensionKey, tradingAddress, signTransaction: signOne, signMessage: signMessageOne }),
+      return run("link", (hooks) => runLink(pensionKey, api, tradingAddress, hooks));
+    },
+    [screen, run, runLink],
+  );
+
+  /**
+   * ONE PRESS: create a trading wallet, then link it, under one hold of the lock.
+   *
+   * WHAT THE PROGRESS SHOWS is the link's own ladder with the create in front of
+   * it. A stop between the two is NOT rendered as a refused transaction — the
+   * wallet exists, and the card says so in its own words (`onOutcome`), so the
+   * flow answers null and the progress goes back to idle rather than reading
+   * "Refused" over a wallet that was in fact created.
+   *
+   * "BUILD AGAIN" AFTER THIS NEVER CREATES A SECOND WALLET: the last request is
+   * recorded as a plain link on the address Privy named, the moment it names it.
+   */
+  /** The chain as the screen holds it at this instant: the read may have landed while Privy's dialog was open. */
+  const chainNow = useCallback(() => {
+    const view = screenRef.current?.view;
+    if (view === undefined || view.kind === "unreadable") return null;
+    return view.kind === "ready" ? view.state : "loading";
+  }, []);
+
+  const createAndLink = useCallback(
+    (request: CreateAndLinkRequest): Promise<void> => {
+      if (screen === null) return Promise.resolve();
+      lastRequest.current = null;
+      const { api, pensionKey } = screen;
+      return run("createLink", async (hooks) => {
+        const outcome = await createAndLinkFlow({
+          createWallet: request.createWallet,
+          config: request.config,
+          refreshUser: request.refreshUser,
+          chain: chainNow,
+          signable: () => walletsRef.current.map((wallet) => wallet.address),
+          link: (address) => runLink(pensionKey, api, address, hooks),
+          onStep: hooks.onStep,
+          onCreated: (address) => {
+            lastRequest.current = { kind: "link", tradingAddress: address };
+            request.onCreated(address);
           },
-          { pensionKey, tradingAddress, consentSignature: consents.current.get(cacheKey) ?? null },
-        );
-        if (outcome.consentSignature === null) consents.current.delete(cacheKey);
-        else consents.current.set(cacheKey, outcome.consentSignature);
-        return outcome;
+        });
+        request.onOutcome(outcome);
+        return outcome.link;
       });
     },
-    [screen, run, wallets, signOne, signMessageOne],
+    [screen, run, runLink, chainNow],
   );
 
   const investPolicy = useCallback(
@@ -318,6 +409,7 @@ export function useVaultWrite(key: string) {
     /** A sent transaction awaits confirmation: nothing new is offered until it is checked. */
     unconfirmed,
     createVault,
+    createAndLink,
     link,
     investPolicy,
     pauseInvesting,

@@ -37,6 +37,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddressLine } from "@/components/wallets/AddressLine";
 import { TxProgress } from "@/components/wallets/TxProgress";
+import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
 import { useVaultWrite } from "@/hooks/use-vault-actions";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { AmountError, SOL_DECIMALS, formatSol, formatUnits, formatUsd, parseUnits, rawFrom, usdcRawForLamports } from "@/lib/amounts";
@@ -131,7 +132,8 @@ function CreateVault({ state, volumeOffered, write, progress }: { readonly state
   const blocked = write.running || write.busyElsewhere || write.unconfirmed;
 
   return (
-    <Card>
+    // The anchor a created-but-unlinkable wallet points at: the form, not a description of it.
+    <Card id={VAULT_CARD_ID} className="scroll-mt-4">
       <CardHeader>
         <CardTitle>{VAULT_COPY.title}</CardTitle>
         <CardDescription>

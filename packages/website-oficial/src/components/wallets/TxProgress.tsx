@@ -3,8 +3,11 @@
 /**
  * WHERE A WRITE IS, AND WHAT TO DO WHEN IT STOPS.
  *
- * Running: Preparing → Approve in Phantom → (a link only) Trading wallet signing
- * → Sending → Confirming on Solana → Done. Landed: "<what happened> · View on
+ * Running: (a chained create only) Creating your trading wallet → Preparing →
+ * (a link only) Trading wallet signs the consent → Approve in Phantom → (a link
+ * only) Trading wallet signing → Sending → Confirming on Solana → Done. A step
+ * the ladder passes without stopping on it (a consent already signed, reused
+ * after a rebuild) is shown as done. Landed: "<what happened> · View on
  * Solscan", until dismissed. Stopped: "Took too long" offers Build again, since
  * nothing moved; "Not confirmed yet" offers only Check again on the signature
  * that was sent, never re-signing, and cannot be dismissed; a refusal says why.
@@ -20,7 +23,8 @@ import { PROGRESS_COPY, VAULT_COPY } from "@/lib/vault-copy";
 import type { FlowResult, FlowStep } from "@/lib/vault-flows";
 
 const CREATE_STEPS: readonly FlowStep[] = ["preparing", "approve_pension", "sending", "confirming", "done"];
-const LINK_STEPS: readonly FlowStep[] = ["preparing", "approve_pension", "trading_signing", "sending", "confirming", "done"];
+const LINK_STEPS: readonly FlowStep[] = ["preparing", "consent", "approve_pension", "trading_signing", "sending", "confirming", "done"];
+const CREATE_LINK_STEPS: readonly FlowStep[] = ["creating_wallet", ...LINK_STEPS];
 
 function SolscanLink({ href }: { readonly href: string }) {
   return (
@@ -66,7 +70,7 @@ export function TxProgress({
   if (progress.phase === "idle") return null;
 
   if (progress.phase === "running") {
-    const steps = progress.kind === "link" ? LINK_STEPS : CREATE_STEPS;
+    const steps = progress.kind === "createLink" ? CREATE_LINK_STEPS : progress.kind === "link" ? LINK_STEPS : CREATE_STEPS;
     const current = steps.indexOf(progress.step);
     return (
       <div role="status" aria-live="polite" data-progress={progress.step} className="space-y-1 rounded-md border px-3 py-2 text-xs">

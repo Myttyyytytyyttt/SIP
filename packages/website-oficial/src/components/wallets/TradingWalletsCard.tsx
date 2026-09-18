@@ -2,14 +2,32 @@
 
 /**
  * THE TRADING WALLETS: every Privy embedded Solana wallet on this account, and
- * the control that makes another.
+ * the one control that makes another and links it.
+ *
+ * ONE PRESS, END TO END. "Create wallet and link it" creates the wallet inside
+ * Privy with the keeper's seat and goes straight on to the link: the trading
+ * wallet's consent, Phantom's approval, the co-signature, the send. The card says
+ * all of that BEFORE the press, because Phantom's window opens partway through,
+ * long after the click, and an unannounced signature request is not acceptable.
+ * The chain is src/lib/create-and-link.ts; each step shows in TxProgress.
  *
  * THE LIST IS PRIVY'S RECORD OF THE USER, read on every render (tradingWalletsOf).
  * One exception: a wallet createWallet has just reported that the record does not
  * list yet is shown as such, rather than vanishing between the create and Privy's
  * refresh. Each row reads what Privy records of its signer (TradingWalletRow).
  *
- * A REFUSAL IS VISIBLE. With the keeper's seat not configured the create button is
+ * A STOP AFTER THE CREATE IS NOT A FAILURE OF THE CREATE. Once Privy answers, the
+ * wallet is real whatever happens next, so the card says so in the same breath as
+ * what stopped, and the wallet's own row carries Link to vault. What the card
+ * never claims is the seat: it was asked for at creation, and only the row's
+ * badge reads Privy's record — which can say a signer exists, never whose.
+ *
+ * NO VAULT, NO SILENT VAULT. Linking needs a vault, and a vault costs rent that
+ * never comes back and carries a mode and limits the owner chooses. With none,
+ * the press still creates the wallet and the card says the vault comes first,
+ * with the way to it.
+ *
+ * A REFUSAL IS VISIBLE. With the keeper's seat not configured the button is
  * disabled and the card names the missing variables: a trading wallet without the
  * seat cannot put anything aside, and a signer without its policy would be
  * unbounded (src/lib/trading-wallets.ts).
@@ -24,13 +42,20 @@ import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { TradingWalletRow, type TradingWalletRowData } from "@/components/wallets/TradingWalletRow";
-import { useCreateTradingWallet } from "@/hooks/use-create-trading-wallet";
+import { TxProgress } from "@/components/wallets/TxProgress";
+import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
+import { useCreateAndLink } from "@/hooks/use-create-and-link";
+import { useVaultScreen } from "@/hooks/use-vault-state";
+import { formatSol, rawFrom } from "@/lib/amounts";
+import { linkGate, type CreateAndLinkOutcome } from "@/lib/create-and-link";
 import { MAX_TRADING_WALLETS, keeperSigners, seatProblem, tradingWalletsOf } from "@/lib/trading-wallets";
+import { CREATE_LINK_COPY, LINK_COPY } from "@/lib/vault-copy";
 
 export function TradingWalletsCard() {
   const config = useSolanaConfig();
   const { user } = usePrivy();
-  const { create, busy, failure, created } = useCreateTradingWallet(config);
+  const screen = useVaultScreen();
+  const { run, created, outcome, write } = useCreateAndLink(config);
 
   const rows = useMemo<TradingWalletRowData[]>(() => {
     const listed = tradingWalletsOf(user).map((wallet) => ({ ...wallet, listed: true }));
@@ -41,6 +66,15 @@ export function TradingWalletsCard() {
   const problem = seatProblem(config);
   const seat = keeperSigners(config)?.[0] ?? null;
   const full = rows.length >= MAX_TRADING_WALLETS;
+
+  const state = screen !== null && screen.view.kind === "ready" ? screen.view.state : null;
+  const gate = state === null ? null : linkGate(state);
+  const linkRent = state === null ? null : rawFrom(state.rents?.link);
+  const vaultRent = state === null ? null : rawFrom(state.rents?.vault);
+  // What the press will do, in one sentence, before it is pressed: Phantom's window comes late, and never unannounced.
+  const ahead = gate === null ? CREATE_LINK_COPY.ahead(linkRent === null ? "some" : formatSol(linkRent)) : `${CREATE_LINK_COPY.aheadCreateOnly} ${gate.message}`;
+  const busy = write.running;
+  const blocked = busy || write.busyElsewhere || write.unconfirmed;
 
   return (
     <Card>
@@ -55,13 +89,13 @@ export function TradingWalletsCard() {
           <Button
             type="button"
             size="sm"
-            disabled={busy || problem !== null || full}
+            disabled={blocked || problem !== null || full}
             aria-busy={busy}
             // An explicit call: Privy's createWallet drops an argument that looks like a click event, and the wallet would be born without its seat.
-            onClick={() => void create()}
+            onClick={() => void run()}
           >
             {busy ? <LoaderCircle className="animate-spin" aria-hidden /> : <Plus aria-hidden />}
-            {busy ? "Creating…" : "Create wallet"}
+            {busy ? CREATE_LINK_COPY.running : gate === null ? CREATE_LINK_COPY.button : CREATE_LINK_COPY.buttonCreateOnly}
           </Button>
         </CardAction>
       </CardHeader>
@@ -72,16 +106,22 @@ export function TradingWalletsCard() {
             {problem}
           </p>
         ) : null}
-        {failure !== null ? (
-          <p role="alert" className="text-sm text-destructive">
-            {failure}
-          </p>
-        ) : null}
+        {problem === null && !full ? <p className="text-xs text-muted-foreground">{ahead}</p> : null}
+        {write.busyElsewhere ? <p className="text-xs text-muted-foreground">{LINK_COPY.busy}</p> : null}
         {full && problem === null ? (
           <p className="text-xs text-muted-foreground">
             This page creates at most <Num>{MAX_TRADING_WALLETS}</Num> trading wallets for one account.
           </p>
         ) : null}
+
+        <TxProgress
+          progress={write.progress}
+          successLabel={CREATE_LINK_COPY.done}
+          onBuildAgain={() => void write.buildAgain()}
+          onCheckAgain={() => void write.checkAgain()}
+          onDismiss={() => write.dismiss()}
+        />
+        {outcome !== null ? <CreateAndLinkNote outcome={outcome} vaultRent={vaultRent} /> : null}
 
         {rows.length === 0 ? (
           <p className="text-sm text-muted-foreground">
@@ -105,5 +145,47 @@ export function TradingWalletsCard() {
         </CardFooter>
       ) : null}
     </Card>
+  );
+}
+
+/**
+ * What the press ended in, in the card's own words.
+ *
+ * NOTHING IS SAID WHEN PRIVY'S DIALOG WAS SIMPLY CLOSED (message null): that is a
+ * choice, not a failure, and nothing was created.
+ *
+ * WHENEVER A WALLET WAS CREATED, that comes first and in full — the wallet is
+ * real and in the list, with its seat shown there as Privy records it — and the
+ * reason the chain stopped comes after it. A link that ran and stopped has its own
+ * words in TxProgress already; this only adds that the wallet is there.
+ */
+export function CreateAndLinkNote({ outcome, vaultRent }: { readonly outcome: CreateAndLinkOutcome; readonly vaultRent: bigint | null }) {
+  const { stop, created, link } = outcome;
+  if (stop === null) {
+    if (link === null || link.ok) return null;
+    return (
+      <p role="status" data-outcome="link-stopped" className="text-xs text-muted-foreground">
+        {CREATE_LINK_COPY.created} {CREATE_LINK_COPY.inTheList}
+      </p>
+    );
+  }
+  if (stop.message === null) return null;
+
+  const needsVault = stop.gate === "needs_vault";
+  return (
+    <div role="alert" data-outcome={stop.kind} className="space-y-2 rounded-md border px-3 py-2 text-xs">
+      {created !== null ? (
+        <p>
+          {CREATE_LINK_COPY.created} {CREATE_LINK_COPY.inTheList}
+        </p>
+      ) : null}
+      {needsVault ? <p className="font-medium">{CREATE_LINK_COPY.needsVaultTitle}</p> : null}
+      <p className="text-muted-foreground">{needsVault ? CREATE_LINK_COPY.needsVault(vaultRent === null ? null : formatSol(vaultRent)) : stop.message}</p>
+      {needsVault ? (
+        <Button type="button" size="sm" variant="outline" asChild>
+          <a href={`#${VAULT_CARD_ID}`}>{CREATE_LINK_COPY.goToVault}</a>
+        </Button>
+      ) : null}
+    </div>
   );
 }

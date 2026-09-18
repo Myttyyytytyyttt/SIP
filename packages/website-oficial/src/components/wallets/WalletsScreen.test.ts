@@ -83,6 +83,7 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WalletsScreen } from "@/components/wallets/WalletsScreen";
+import { CREATE_LINK_COPY } from "@/lib/vault-copy";
 
 /** What a real click hands a handler: an object with a target, which Privy would read as options. */
 const CLICK = { type: "click", target: {} };
@@ -121,14 +122,14 @@ describe("WalletsScreen states", () => {
     const html = render();
     expect(html).toContain('aria-busy="true"');
     expect(html).not.toContain("Connect pension key");
-    expect(buttons("Create wallet")).toHaveLength(0);
+    expect(buttons(CREATE_LINK_COPY.button)).toHaveLength(0);
   });
 
   it("logged out: Connect opens Privy's login with no arguments, never the click event", () => {
     mocked.privy = { ready: true, authenticated: false, user: null };
     const html = render();
     expect(html).toContain("Connect your pension key");
-    expect(buttons("Create wallet")).toHaveLength(0);
+    expect(buttons(CREATE_LINK_COPY.button)).toHaveLength(0);
     const [connect] = buttons("Connect pension key");
     connect?.onClick?.(CLICK);
     expect(mocked.login.mock.calls).toStrictEqual([[]]);
@@ -139,7 +140,7 @@ describe("WalletsScreen states", () => {
     const html = render();
     expect(html).toContain("This session has no pension key");
     expect(buttons("Disconnect")).toHaveLength(1);
-    expect(buttons("Create wallet")).toHaveLength(0);
+    expect(buttons(CREATE_LINK_COPY.button)).toHaveLength(0);
     expect(rows(html)).toHaveLength(0);
   });
 
@@ -149,7 +150,7 @@ describe("WalletsScreen states", () => {
     const html = render();
     expect(html).toMatch(/role="alert"[^>]*>[^<]*SIP_SOLANA_PRIVY_SIGNER_ID and SIP_SOLANA_PRIVY_POLICY_ID/);
     expect(html).not.toContain(SIGNER);
-    const [create] = buttons("Create wallet");
+    const [create] = buttons(CREATE_LINK_COPY.button);
     expect(create?.disabled).toBe(true);
     create?.onClick?.(CLICK);
     await flush();
@@ -202,11 +203,11 @@ describe("WalletsScreen with the seat configured", () => {
     expect(buttons("Check again")).toHaveLength(0);
   });
 
-  it("Create wallet hands Privy exactly createAdditional and the keeper's signer id with its policy id", async () => {
+  it("Create wallet and link it hands Privy exactly createAdditional and the keeper's signer id with its policy id", async () => {
     mocked.privy = { ready: true, authenticated: true, user: userWith([phantom()]) };
     mocked.createWallet.mockResolvedValue({ wallet: { address: TRADING_0 } });
     render();
-    const [create] = buttons("Create wallet");
+    const [create] = buttons(CREATE_LINK_COPY.button);
     expect(create?.disabled).toBe(false);
     create?.onClick?.(CLICK);
     await vi.waitFor(() => expect(mocked.refreshUser).toHaveBeenCalled());
