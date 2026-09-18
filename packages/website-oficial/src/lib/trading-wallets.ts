@@ -105,7 +105,13 @@ export function seatProblem(config: SeatConfig): string | null {
 /** A trading wallet as Privy's record of the user lists it. */
 export interface TradingWallet {
   readonly address: string;
-  /** Privy's wallet id — what `privy-policy verify --wallet` takes. Privy leaves it null until the wallet has a signer. */
+  /**
+   * Privy's server wallet id — what `privy-policy verify --wallet` takes — or null when the record shows none.
+   * Privy's types say it is null unless the wallet is delegated. Whether a TEE wallet (recoveryMethod privy-v2)
+   * keeps it once its last signer is removed is NOT established: Privy's SDK behaves as if it does (its first
+   * grant on a wallet with no signer needs it), and nothing on this app has shown it yet. reseatKeeperSeat is
+   * written to be safe either way.
+   */
   readonly id: string | null;
   /** The HD index Privy derived it at; null for an imported wallet. */
   readonly walletIndex: number | null;
@@ -203,6 +209,28 @@ function embeddedSolanaAccount(user: User | null, address: string): WalletWithMe
   return null;
 }
 
+/**
+ * The server wallet id Privy's useSigners acts on for this address IN THIS RECORD, or null when it would not act
+ * on the wallet alone.
+ *
+ * It mirrors @privy-io/react-auth 3.36.0 exactly. addSigners and removeSigners look the address up in the `user`
+ * of the render they came from — the first linked wallet with walletClientType "privy" at exactly this address
+ * (privy-context: `"privy"===t.walletClientType&&areAddressesEqual(t.address,i)`, which for a Solana address is
+ * string equality) — and take the per-wallet TEE path only when that entry has a server id and recoveryMethod
+ * "privy-v2" (the SDK's isUnifiedWallet: `!!e.id&&"privy-v2"===e.recoveryMethod`). Otherwise removeSigners calls
+ * Privy's legacy revoke, which takes no address and revokes EVERY delegated wallet on the account, and addSigners
+ * refuses with "only supported for TEE execution". A Solana chainType is required on top.
+ */
+export function teeWalletId(record: User | null, address: string): string | null {
+  const account = record?.linkedAccounts.find(
+    (linked): linked is WalletWithMetadata => linked.type === "wallet" && linked.walletClientType === "privy" && linked.address === address,
+  );
+  if (account === undefined || account.chainType !== "solana") return null;
+  const id: unknown = account.id;
+  const recovery: unknown = account.recoveryMethod;
+  return typeof id === "string" && id !== "" && recovery === "privy-v2" ? id : null;
+}
+
 /** Privy's addSigners (root @privy-io/react-auth: it has no Solana variant), narrowed to the call this page makes. */
 export type AddSignersFn = (input: { address: string; signers: KeeperSigner[] }) => Promise<unknown>;
 
@@ -214,10 +242,40 @@ export const GRANT_BACKOFF_MS: readonly number[] = [1_000, 2_000, 4_000, 6_000, 
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Thrown before Privy is asked to add anything. Its message says why, and that nothing was added. */
+export class GrantRefused extends Error {
+  override readonly name = "GrantRefused";
+}
+
+/** The grant's own words, for a refusal before anything is sent. */
+export const GRANT_COPY = {
+  notListed:
+    "Privy's record on this page does not list this wallet as a trading wallet on this account, so nothing was " +
+    "added. Reload the page and try again.",
+  noServerId:
+    "Privy adds the keeper's signer only to a TEE wallet it lists with its own server wallet id, and its record on " +
+    "this page does not show this wallet that way, so nothing was added. The wallet is safe: only you can sign for " +
+    "it. Reload the page; while this row shows no Privy wallet id, the seat cannot be added from here.",
+} as const;
+
+/**
+ * Why Privy's addSigners would not add the keeper's signer to this wallet, read from `renderedUser` — the record
+ * addSigners itself looks the wallet up in (teeWalletId) — or null when it would. Asking anyway ends in Privy's
+ * "only supported for TEE execution and this app uses On-device execution", which is about the wallet's record,
+ * not the app: this Privy app runs TEE execution.
+ */
+export function grantRefusal(renderedUser: User | null, address: string): string | null {
+  if (embeddedSolanaAccount(renderedUser, address) === null) return GRANT_COPY.notListed;
+  return teeWalletId(renderedUser, address) === null ? GRANT_COPY.noServerId : null;
+}
+
 /**
  * The repair: grant the keeper its seat on a trading wallet whose record shows no signer.
  *
- * REFUSES FIRST, like createTradingWallet: never a signer without its policy.
+ * REFUSES FIRST, like createTradingWallet: never a signer without its policy. And
+ * nothing is sent that Privy would refuse for the record it acts on: `renderedUser`
+ * is the user from the SAME render as `addSigners` (usePrivy and useSigners read one
+ * context), and grantRefusal reads it.
  *
  * RE-READS BEFORE IT ADDS, AND ADDS NOTHING TO A WALLET WITH A SIGNER. Privy's
  * addSigners appends to the wallet's existing signers, so a grant on a wallet that
@@ -242,18 +300,23 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 export async function grantKeeperSeat({
   address,
   config,
+  renderedUser,
   addSigners,
   refreshUser,
   wait = sleep,
 }: {
   address: string;
   config: SeatConfig;
+  /** The user record from the render `addSigners` came from: Privy looks the wallet up in it, not in any later read. */
+  renderedUser: User | null;
   addSigners: AddSignersFn;
   refreshUser: RefreshUserFn;
   wait?: (ms: number) => Promise<void>;
 }): Promise<"granted" | "has-signer"> {
   const signers = keeperSigners(config);
   if (signers === null) throw new SeatNotConfigured(seatProblem(config) ?? "The keeper's seat is not configured.");
+  const refusal = grantRefusal(renderedUser, address);
+  if (refusal !== null) throw new GrantRefused(refusal);
 
   if (seatOf(await refreshUser(), address) === "has-signer") return "has-signer";
 
@@ -293,10 +356,21 @@ export class ReseatRefused extends Error {
  *   aside from it until the seat is back — which the row's own Grant does,
  *   because the record now reads "missing".
  * - "signer-reappeared": the record showed no signer, then one this page did not add.
+ * - "id-dropped": the record showed no signer AND no longer showed the wallet's
+ *   server id (or its privy-v2 recovery). The grant was still sent, in the same
+ *   run, through the addSigners captured before the removal — the only one that
+ *   can reach the wallet then — whatever it answered. The message names the id,
+ *   says whether the seat went back, and never sends the owner to Grant keeper
+ *   permission, which cannot work on such a record (grantRefusal).
  *
  * None of them is ever "done", and each message says what to press next.
  */
-export type ReseatStage = "removal-unconfirmed" | "record-still-lists-a-signer" | "removed-not-added" | "signer-reappeared";
+export type ReseatStage =
+  | "removal-unconfirmed"
+  | "record-still-lists-a-signer"
+  | "removed-not-added"
+  | "signer-reappeared"
+  | "id-dropped";
 
 export class ReseatIncomplete extends Error {
   override readonly name = "ReseatIncomplete";
@@ -316,7 +390,7 @@ export const RESEAT_COPY = {
   confirmBody:
     "This removes EVERY signer on this wallet — the keeper's, if it is there, and any other — and then adds the " +
     "keeper's signer with its policy. Between the two steps only you can sign for this wallet, and nothing is put " +
-    "aside from it. If the second step fails, the wallet says No seat, and Grant keeper permission puts the seat back.",
+    "aside from it. If the second step fails, the wallet says No seat and this row says what to do next.",
   confirm: "Remove every signer and re-seat",
   cancel: "Cancel",
   done:
@@ -331,6 +405,17 @@ export const RESEAT_COPY = {
     "wallet it lists with its own wallet id, and its record does not show this one that way; for other wallets its " +
     "removal revokes the signers of every wallet on your account. Nothing was removed.",
   notListed: "Privy's record does not list this wallet's signers right now, so nothing was removed. Check again in a moment.",
+  recordsDisagree:
+    "This page's copy of Privy's record and the one just read name different server wallet ids for this wallet, so " +
+    "nothing was removed. Reload the page and try again.",
+  idDropped: (walletId: string): string =>
+    `While this wallet had no signer, Privy's record stopped showing its server wallet id, ${walletId}.`,
+  idDroppedAdded: (verify: string): string =>
+    `Privy still accepted the keeper's signer with its policy for that id. Confirm the seat before relying on it: ${verify}.`,
+  idDroppedNotAdded:
+    "The keeper's seat was NOT added back. The wallet is safe: only you can sign for it. Grant keeper permission " +
+    "stays unavailable on this row until Privy's record shows that id again, so keep the id: it is how Privy finds " +
+    "this wallet.",
   removalUnconfirmed: "Privy did not confirm that it removed this wallet's signers, and nothing was added.",
   recordShowsSigner: "Privy's record still shows a signer on this wallet.",
   recordUnreadable: "This page could not read from Privy's record whether the old signer is still there.",
@@ -359,18 +444,12 @@ const sentences = (...parts: readonly (string | null)[]): string => parts.filter
  * "privy", and clears THAT wallet's additional_signers only when it has a server
  * id and recoveryMethod "privy-v2" — the SDK's own isUnifiedWallet. For any other
  * wallet it calls Privy's legacy revoke, which takes no address and revokes EVERY
- * delegated wallet on the account. Those three conditions are read here, from the
- * record, before anything is sent.
+ * delegated wallet on the account. Those conditions are read here (teeWalletId),
+ * from the record, before anything is sent.
  */
 export function reseatRefusal(user: User | null, address: string): string | null {
-  const account = embeddedSolanaAccount(user, address);
-  if (account === null) return RESEAT_COPY.notATradingWallet;
-  const recovery: unknown = account.recoveryMethod;
-  const id: unknown = account.id;
-  if (account.walletClientType !== "privy" || typeof id !== "string" || id === "" || recovery !== "privy-v2") {
-    return RESEAT_COPY.notPerWallet;
-  }
-  return null;
+  if (embeddedSolanaAccount(user, address) === null) return RESEAT_COPY.notATradingWallet;
+  return teeWalletId(user, address) === null ? RESEAT_COPY.notPerWallet : null;
 }
 
 /**
@@ -383,12 +462,29 @@ export function reseatRefusal(user: User | null, address: string): string | null
  * takes only an address and clears every signer, and addSigners appends. Both
  * are, underneath, one owner-signed update of the wallet's additional_signers,
  * but that update is not exposed. So there is a moment with no signer at all. It
- * is the SAFE side — only the owner can sign — and the partial state it can leave
- * is exactly the "missing" seat the row already repairs in one press.
+ * is the SAFE side — only the owner can sign.
  *
- * REFUSES FIRST: never a signer without its policy (keeperSigners), and nothing
- * sent for a wallet Privy would not remove per wallet (reseatRefusal). The record
- * is read afresh first, and a failed read sends nothing.
+ * THE RECORD PRIVY ACTS ON IS THE RENDERED ONE. Privy's removeSigners and
+ * addSigners look the wallet up in the `user` of the render they came from, never
+ * in a record read since (teeWalletId). `renderedUser` is that user: the caller
+ * passes usePrivy().user from the same render as useSigners(). So:
+ *
+ * - REFUSES FIRST, sending nothing: without the seat configured (keeperSigners);
+ *   unless the RENDERED record shows the TEE wallet with its server id — otherwise
+ *   removeSigners would revoke every wallet on the account, and addSigners could
+ *   not put the seat back; unless the record read afresh shows it too, with the
+ *   SAME id; and when that read fails.
+ * - THE ADD RUNS IN THE SAME RUN, ALWAYS, through the addSigners captured with the
+ *   rendered record — which still holds the id, whatever Privy's record shows once
+ *   the last signer is gone. Privy's types say a wallet's id is "Null if the wallet
+ *   is not delegated", and nothing on this app has shown a TEE wallet keeping it. If
+ *   the record drops it, a LATER press (Grant keeper permission, a second re-seat)
+ *   comes from a render without it and cannot reach the wallet. So nothing here
+ *   may hand the add to a later press, nor take addSigners from a newer render (a
+ *   ref, a context read at call time): the add must come from before the removal.
+ *   A record that drops the id stops as "id-dropped", after the add. A grant that
+ *   stopped before reaching Privy (its own read of the record failed) is sent again
+ *   on GRANT_BACKOFF_MS rather than left to a later press.
  *
  * A RECORD THAT ALREADY SHOWS NO SIGNER IS ONLY GRANTED ("granted"): a previous
  * re-seat's removal may be what it shows.
@@ -405,6 +501,7 @@ export function reseatRefusal(user: User | null, address: string): string | null
 export async function reseatKeeperSeat({
   address,
   config,
+  renderedUser,
   removeSigners,
   addSigners,
   refreshUser,
@@ -412,19 +509,29 @@ export async function reseatKeeperSeat({
 }: {
   address: string;
   config: SeatConfig;
+  /** The user record from the render `removeSigners` and `addSigners` came from: Privy looks the wallet up in it. */
+  renderedUser: User | null;
   removeSigners: RemoveSignersFn;
   addSigners: AddSignersFn;
   refreshUser: RefreshUserFn;
   wait?: (ms: number) => Promise<void>;
 }): Promise<"reseated" | "granted"> {
-  if (keeperSigners(config) === null) throw new SeatNotConfigured(seatProblem(config) ?? "The keeper's seat is not configured.");
+  const signers = keeperSigners(config);
+  if (signers === null) throw new SeatNotConfigured(seatProblem(config) ?? "The keeper's seat is not configured.");
+  const renderedRefusal = reseatRefusal(renderedUser, address);
+  if (renderedRefusal !== null) throw new ReseatRefused(renderedRefusal);
+  // Non-null: reseatRefusal has just read it.
+  const walletId = teeWalletId(renderedUser, address) ?? "";
 
   const before = await refreshUser();
   const removing = seatOf(before, address) !== "missing";
+  // The record that shows the wallet with no signer: before itself, or the read after the removal that first does.
+  let cleared = before;
   if (removing) {
     const refusal = reseatRefusal(before, address);
     if (refusal !== null) throw new ReseatRefused(refusal);
     if (seatOf(before, address) === "unknown") throw new ReseatRefused(RESEAT_COPY.notListed);
+    if (teeWalletId(before, address) !== walletId) throw new ReseatRefused(RESEAT_COPY.recordsDisagree);
 
     let refused: unknown = null;
     try {
@@ -436,9 +543,13 @@ export async function reseatKeeperSeat({
 
     for (let attempt = 0; ; attempt += 1) {
       // A failed read is no answer: it counts as "not shown without signers", never as removed.
-      const seen = seatOf(await refreshUser().catch(() => null), address);
+      const read = await refreshUser().catch(() => null);
+      const seen = seatOf(read, address);
       // Removed, whatever removeSigners answered: its own re-read of the user can fail after the removal landed.
-      if (seen === "missing") break;
+      if (seen === "missing") {
+        cleared = read;
+        break;
+      }
       if (refused !== null) {
         throw new ReseatIncomplete(
           "removal-unconfirmed",
@@ -456,13 +567,34 @@ export async function reseatKeeperSeat({
     }
   }
 
+  // Read before the add, acted on after it: the add is sent either way, because nothing later can send it.
+  const idDropped = teeWalletId(cleared, address) !== walletId;
+  const verify = `privy-policy verify --wallet ${walletId} --policy ${signers[0]?.policyIds[0] ?? "<policy id>"}`;
+
+  // Whether the grant got as far as Privy. Until it has, the add is still owed and nothing later can send it, so a
+  // grant that stopped before it (its own read of the record failed: a rate limit after the waits above) is retried.
+  let addSent = false;
+  const sendAdd: AddSignersFn = (input) => {
+    addSent = true;
+    return addSigners(input);
+  };
   let granted: "granted" | "has-signer";
-  try {
-    granted = await grantKeeperSeat({ address, config, addSigners, refreshUser, wait });
-  } catch (error) {
-    throw new ReseatIncomplete("removed-not-added", sentences(RESEAT_COPY.removedNotAdded, failureText(error), RESEAT_COPY.removedNotAddedNext));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      granted = await grantKeeperSeat({ address, config, renderedUser, addSigners: sendAdd, refreshUser, wait });
+      break;
+    } catch (error) {
+      const delay = GRANT_BACKOFF_MS[attempt];
+      if (!addSent && delay !== undefined) {
+        await wait(delay);
+        continue;
+      }
+      if (idDropped) throw new ReseatIncomplete("id-dropped", sentences(RESEAT_COPY.idDropped(walletId), failureText(error), RESEAT_COPY.idDroppedNotAdded));
+      throw new ReseatIncomplete("removed-not-added", sentences(RESEAT_COPY.removedNotAdded, failureText(error), RESEAT_COPY.removedNotAddedNext));
+    }
   }
   if (granted === "has-signer") throw new ReseatIncomplete("signer-reappeared", RESEAT_COPY.signerReappeared);
+  if (idDropped) throw new ReseatIncomplete("id-dropped", sentences(RESEAT_COPY.idDropped(walletId), RESEAT_COPY.idDroppedAdded(verify)));
   return removing ? "reseated" : "granted";
 }
 
@@ -510,7 +642,8 @@ export function failureText(error: unknown): string | null {
     error instanceof SeatNotConfigured ||
     error instanceof NotATradingWallet ||
     error instanceof ReseatRefused ||
-    error instanceof ReseatIncomplete
+    error instanceof ReseatIncomplete ||
+    error instanceof GrantRefused
   ) {
     return error.message;
   }

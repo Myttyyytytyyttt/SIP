@@ -176,7 +176,18 @@ removal leaves the wallet with no signer — only its owner can sign — and the
 then reads **No seat** with Grant keeper permission, one press. It is refused,
 before anything is sent, for a wallet Privy would not clear on its own: for any
 wallet but a TEE one with its own wallet id, Privy's removal revokes the signers
-of every wallet on the account. The order of a key rotation is in
+of every wallet on the account.
+
+Privy's `addSigners` and `removeSigners` find the wallet in the user record of
+the render they came from, so that record is the one checked (`teeWalletId`).
+Whether a TEE wallet keeps its server id in Privy's record once its last signer
+is gone is not established — Privy's types say the id is null unless the wallet
+is delegated. So the re-seat sends the add in the same run, through the
+`addSigners` captured before the removal, and if the record dropped the id it
+stops as `id-dropped`, naming the id: a later Grant keeper permission comes from
+a render without it and cannot reach the wallet, and the row disables it with
+the reason. The order of a key rotation, with the rehearsal on a wallet with no
+funds that settles the question, is in
 [docs/runbooks/PRIVY_SOLANA.md](../../docs/runbooks/PRIVY_SOLANA.md), section 7.
 
 ## Deployment

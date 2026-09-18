@@ -35,7 +35,7 @@ export function phantom(address: string = PENSION_KEY): WalletWithMetadata {
   };
 }
 
-/** A Privy embedded Solana wallet. Privy's server wallet id is null until the wallet has a signer. */
+/** A Privy embedded Solana wallet, as Privy's types describe it: the server wallet id is "Null if the wallet is not delegated". */
 export function embedded(
   address: string,
   walletIndex: number | null,
@@ -60,7 +60,9 @@ export function embedded(
 /**
  * A trading wallet as this Privy app makes them, in TEE execution: walletClientType privy, a server wallet id, and
  * recoveryMethod privy-v2 — the SDK's own test (isUnifiedWallet) for a wallet whose signers removeSigners clears one
- * wallet at a time. The id is set whatever `delegated` says: a TEE wallet is a server wallet from its creation.
+ * wallet at a time. It keeps its id whatever `delegated` says. That is what Privy's SDK assumes (its first grant on a
+ * wallet with no signer needs the id), not what Privy's types say, and nothing on this app has shown it yet: the
+ * re-seat's tests also run on a record that drops the id with the last signer (`{ id: null }`).
  */
 export function teeWallet(
   address: string,

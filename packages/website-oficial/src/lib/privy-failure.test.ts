@@ -15,6 +15,14 @@ const CASES: ReadonlyArray<readonly [string, unknown, PrivyFailureKind]> = [
     ),
     "tee",
   ],
+  [
+    "signers on a wallet whose record is not a TEE wallet",
+    new Error(
+      "Specifying signers in addSessionSigners is only supported for TEE execution and this app uses On-device execution. Pass an empty array for signers instead. Learn more https://docs.privy.io/recipes/tee-wallet-migration-guide",
+    ),
+    "wallet-record",
+  ],
+  ["a wallet with no server id", new Error("Wallet to add signers to must have ID on server"), "wallet-record"],
   ["a wallet the record does not list yet", new Error("Address to add signers too is not associated with current user."), "propagating"],
   ["the SDK's own stale user", new Error("User must be authenticated and have an embedded wallet to add a session signer."), "propagating"],
   ["a missing wallet frame", new Error("Wallet proxy not initialized."), "frame"],
@@ -45,6 +53,16 @@ describe("privyFailure", () => {
     expect(message).toContain("SIP_SOLANA_PRIVY_SIGNER_ID");
     expect(message).toContain("SIP_SOLANA_PRIVY_POLICY_ID");
     expect(message).toContain("Invalid policy ids");
+  });
+
+  it("never tells the owner to turn on TEE, nor blames the seat's variables, for a wallet's record", () => {
+    // Both come from the wallet in the record Privy's signer methods read; this Privy app runs TEE execution.
+    for (const [, error, kind] of CASES) {
+      if (kind !== "wallet-record") continue;
+      const { message } = privyFailure(error);
+      expect(message).not.toMatch(/turn on TEE/i);
+      expect(message).not.toContain("SIP_SOLANA_PRIVY");
+    }
   });
 
   it("shows an unrecognised failure as Privy wrote it, and says so when Privy wrote nothing", () => {

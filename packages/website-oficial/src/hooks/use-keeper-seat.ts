@@ -4,7 +4,16 @@
 import { usePrivy, useSigners, useUser } from "@privy-io/react-auth";
 import { useCallback, useRef, useState } from "react";
 
-import { RESEAT_COPY, failureText, grantKeeperSeat, reseatKeeperSeat, reseatRefusal, seatOf, type SeatConfig } from "@/lib/trading-wallets";
+import {
+  RESEAT_COPY,
+  failureText,
+  grantKeeperSeat,
+  grantRefusal,
+  reseatKeeperSeat,
+  reseatRefusal,
+  seatOf,
+  type SeatConfig,
+} from "@/lib/trading-wallets";
 
 /**
  * The keeper's seat on one trading wallet: what Privy's record says of its signers on
@@ -13,10 +22,19 @@ import { RESEAT_COPY, failureText, grantKeeperSeat, reseatKeeperSeat, reseatRefu
  * signer is there, and a re-read for an unknown one. The rules live in seatOf,
  * grantKeeperSeat and reseatKeeperSeat (src/lib/trading-wallets.ts).
  *
- * `reseatBlocked` is why this wallet cannot be re-seated from here, read from the
- * record on every render, or null. `notice` is what a finished re-seat did: the
+ * `reseatBlocked` and `grantBlocked` are why this wallet cannot be re-seated or
+ * granted from here, read from the record on every render, or null. `notice` is
+ * what a finished re-seat did: the
  * badge reads "Has a signer" before and after one, so without it the page would
  * look as if nothing had happened.
+ *
+ * THE SAME RENDER'S USER GOES WITH THE SAME RENDER'S SIGNER METHODS. Privy's
+ * addSigners and removeSigners look the wallet up in the context user of the render
+ * that produced them, and usePrivy().user is that same context read. Each callback
+ * below closes over both from one render and passes the user as `renderedUser`,
+ * which is what reseatKeeperSeat and grantKeeperSeat check before sending anything.
+ * Never feed either method from a newer render (a ref updated every render, a
+ * lookup at call time): the re-seat's add must come from before its removal.
  *
  * Ported from the EVM web's SeatStatus (968e06c), for Solana.
  */
@@ -36,14 +54,14 @@ export function useKeeperSeat(address: string, config: SeatConfig) {
     setFailure(null);
     setNotice(null);
     try {
-      await grantKeeperSeat({ address, config, addSigners, refreshUser });
+      await grantKeeperSeat({ address, config, renderedUser: user, addSigners, refreshUser });
     } catch (error) {
       setFailure(failureText(error));
     } finally {
       inFlight.current = false;
       setBusy(null);
     }
-  }, [address, config, addSigners, refreshUser]);
+  }, [address, config, user, addSigners, refreshUser]);
 
   const reseat = useCallback(async () => {
     if (inFlight.current) return;
@@ -52,7 +70,7 @@ export function useKeeperSeat(address: string, config: SeatConfig) {
     setFailure(null);
     setNotice(null);
     try {
-      const outcome = await reseatKeeperSeat({ address, config, removeSigners, addSigners, refreshUser });
+      const outcome = await reseatKeeperSeat({ address, config, renderedUser: user, removeSigners, addSigners, refreshUser });
       setNotice(outcome === "reseated" ? RESEAT_COPY.done : RESEAT_COPY.grantedOnly);
     } catch (error) {
       setFailure(failureText(error));
@@ -60,7 +78,7 @@ export function useKeeperSeat(address: string, config: SeatConfig) {
       inFlight.current = false;
       setBusy(null);
     }
-  }, [address, config, removeSigners, addSigners, refreshUser]);
+  }, [address, config, user, removeSigners, addSigners, refreshUser]);
 
   const check = useCallback(async () => {
     if (inFlight.current) return;
@@ -80,6 +98,7 @@ export function useKeeperSeat(address: string, config: SeatConfig) {
   return {
     seat: seatOf(user, address),
     reseatBlocked: reseatRefusal(user, address),
+    grantBlocked: grantRefusal(user, address),
     grant,
     reseat,
     check,

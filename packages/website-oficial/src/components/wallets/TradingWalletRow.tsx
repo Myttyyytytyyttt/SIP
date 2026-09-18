@@ -28,10 +28,12 @@
  * back, and what the wallet is if the second step fails. A wallet Privy would not
  * remove per wallet (reseatRefusal) gets the button disabled, with the reason.
  *
- * THE PARTIAL STATE NEEDS NOTHING NEW. A re-seat stopped after the removal leaves a
- * wallet whose record says no signer: the row reads "No seat", in red, and offers
- * Grant keeper permission — one press — on this render and after any reload. The
- * stop's own message says so, and a stop is never shown as done.
+ * THE PARTIAL STATE. A re-seat stopped after the removal leaves a wallet whose
+ * record says no signer: the row reads "No seat", in red, and offers Grant keeper
+ * permission — one press — on this render and after any reload, as long as Privy's
+ * record still shows the wallet's server id. If it does not, the grant cannot reach
+ * the wallet (grantRefusal): the button is disabled with the reason, and the stop's
+ * own message ("id-dropped") says what happened. A stop is never shown as done.
  *
  * THE GRANT IS OFFERED ONLY FOR "missing". Privy's addSigners appends, so a grant
  * on a wallet that already has a signer could seat the keeper twice. An unknown seat
@@ -148,7 +150,7 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
             type="button"
             size="sm"
             variant="outline"
-            disabled={keeper.busy !== null || refused}
+            disabled={keeper.busy !== null || refused || keeper.grantBlocked !== null}
             aria-busy={keeper.busy === "granting"}
             onClick={() => void keeper.grant()}
           >
@@ -198,6 +200,9 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
       </div>
 
       {reseatable && keeper.reseatBlocked !== null && !refused ? <p className="text-xs text-muted-foreground">{keeper.reseatBlocked}</p> : null}
+      {keeper.seat === "missing" && keeper.busy !== "reseating" && keeper.grantBlocked !== null && !refused ? (
+        <p className="text-xs text-muted-foreground">{keeper.grantBlocked}</p>
+      ) : null}
       {keeper.notice !== null ? (
         <p role="status" className="text-xs text-muted-foreground">
           {keeper.notice}

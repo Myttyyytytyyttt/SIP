@@ -45,6 +45,8 @@ const mocked = vi.hoisted(() => {
     createWallet: vi.fn(),
     addSigners: vi.fn(),
     removeSigners: vi.fn(),
+    /** The record each signer call was made against: Privy's methods read the user of the render they came from. */
+    signerRecords: [] as { method: "add" | "remove"; user: unknown }[],
     refreshUser: vi.fn(),
     exportWallet: vi.fn(),
   };
@@ -54,7 +56,21 @@ vi.mock("@privy-io/react-auth", () => ({
   usePrivy: () => ({ ...mocked.privy, login: mocked.login, logout: mocked.logout }),
   useLogin: () => ({ login: mocked.login }),
   useUser: () => ({ user: mocked.privy.user, refreshUser: mocked.refreshUser }),
-  useSigners: () => ({ addSigners: mocked.addSigners, removeSigners: mocked.removeSigners }),
+  // Privy's own shape (index-*.mjs, the signer hooks): both methods close over the context user of the render that
+  // produced them, and look the wallet up in THAT record whenever they are called.
+  useSigners: () => {
+    const rendered = mocked.privy.user;
+    return {
+      addSigners: (input: unknown) => {
+        mocked.signerRecords.push({ method: "add", user: rendered });
+        return mocked.addSigners(input);
+      },
+      removeSigners: (input: unknown) => {
+        mocked.signerRecords.push({ method: "remove", user: rendered });
+        return mocked.removeSigners(input);
+      },
+    };
+  },
 }));
 
 vi.mock("@privy-io/react-auth/solana", () => ({
@@ -87,7 +103,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ReseatConfirm } from "@/components/wallets/TradingWalletRow";
 import { WalletsScreen } from "@/components/wallets/WalletsScreen";
 import { useKeeperSeat } from "@/hooks/use-keeper-seat";
-import { RESEAT_COPY } from "@/lib/trading-wallets";
+import { GRANT_COPY, RESEAT_COPY } from "@/lib/trading-wallets";
 import { CREATE_LINK_COPY } from "@/lib/vault-copy";
 
 /** What a real click hands a handler: an object with a target, which Privy would read as options. */
@@ -116,6 +132,7 @@ beforeEach(() => {
   for (const fn of [mocked.login, mocked.logout, mocked.createWallet, mocked.addSigners, mocked.removeSigners, mocked.refreshUser, mocked.exportWallet]) {
     fn.mockReset();
   }
+  mocked.signerRecords.length = 0;
   mocked.logout.mockResolvedValue(undefined);
   mocked.refreshUser.mockImplementation(async () => mocked.privy.user);
   mocked.exportWallet.mockResolvedValue(undefined);
@@ -222,7 +239,7 @@ describe("WalletsScreen with the seat configured", () => {
   });
 
   it("Grant keeper permission re-reads Privy's record, then adds the signer with its policy to that wallet", async () => {
-    const missing = userWith([phantom(), embedded(TRADING_0, 0, false)]);
+    const missing = userWith([phantom(), teeWallet(TRADING_0, 0, false)]);
     mocked.privy = { ready: true, authenticated: true, user: missing };
     mocked.addSigners.mockResolvedValue({ user: missing });
     render();
@@ -232,6 +249,19 @@ describe("WalletsScreen with the seat configured", () => {
     await vi.waitFor(() => expect(mocked.addSigners).toHaveBeenCalledTimes(1));
     expect(mocked.addSigners.mock.calls).toStrictEqual([[{ address: TRADING_0, signers: [{ signerId: SIGNER, policyIds: [POLICY] }] }]]);
     expect(mocked.refreshUser.mock.invocationCallOrder[0]).toBeLessThan(mocked.addSigners.mock.invocationCallOrder[0] ?? 0);
+  });
+
+  it("Grant keeper permission is disabled, with the reason, where the record shows no server id: Privy could not add it", async () => {
+    // A wallet Privy lists without its id (a legacy on-device wallet, or a record that dropped it with its last signer).
+    mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), teeWallet(TRADING_0, 0, false, { id: null })]) };
+    const html = render();
+    const grants = buttons("Grant keeper permission");
+    expect(grants.map((grant) => grant.disabled)).toStrictEqual([true]);
+    expect(html).toContain(GRANT_COPY.noServerId.replaceAll("'", "&#x27;"));
+    expect(html).not.toMatch(/turn on TEE/i);
+    grants[0]?.onClick?.(CLICK);
+    await flush();
+    expect(mocked.addSigners).not.toHaveBeenCalled();
   });
 
   it("Export key opens Privy's export for each trading wallet's own address, and never the pension key's", async () => {
@@ -313,6 +343,54 @@ describe("Re-seat keeper: remove every signer on a wallet, then seat the keeper'
     expect(mocked.addSigners.mock.calls).toStrictEqual([[{ address: TRADING_0, signers: [{ signerId: SIGNER, policyIds: [POLICY] }] }]]);
     expect(mocked.removeSigners.mock.invocationCallOrder[0]).toBeLessThan(mocked.addSigners.mock.invocationCallOrder[0] ?? 0);
   });
+
+  it("the hook's re-seat adds through the signer methods of the render it was pressed on, even once the record drops the id", async () => {
+    // After the removal Privy refreshes its own context, and a record without the wallet's server id would leave any
+    // addSigners from a NEWER render unable to reach the wallet. The add must come from before the removal.
+    const idless = userWith([phantom(), teeWallet(TRADING_0, 0, false, { id: null })]);
+    mocked.privy = { ready: true, authenticated: true, user: seated };
+    mocked.refreshUser.mockReset();
+    mocked.refreshUser.mockResolvedValueOnce(seated).mockResolvedValueOnce(idless).mockResolvedValueOnce(idless).mockResolvedValue(seated);
+    mocked.removeSigners.mockImplementation(async () => {
+      mocked.privy = { ...mocked.privy, user: idless };
+      return { user: idless };
+    });
+    mocked.addSigners.mockResolvedValue({ user: seated });
+    let seat: ReturnType<typeof useKeeperSeat> | null = null;
+    function Probe() {
+      seat = useKeeperSeat(TRADING_0, { privySignerId: SIGNER, privyPolicyId: POLICY });
+      return null;
+    }
+    renderToStaticMarkup(createElement(Probe));
+    await (seat as ReturnType<typeof useKeeperSeat> | null)?.reseat();
+    expect(mocked.signerRecords.map(({ method, user }) => [method, user])).toStrictEqual([
+      ["remove", seated],
+      ["add", seated],
+    ]);
+    expect(mocked.addSigners.mock.calls).toStrictEqual([[{ address: TRADING_0, signers: [{ signerId: SIGNER, policyIds: [POLICY] }] }]]);
+  });
+
+  it("the hook checks its own render's record, the one Privy's methods read: an on-device record removes nothing", async () => {
+    // Were a fresh read checked instead, removeSigners would run on a record where Privy takes its legacy revoke of
+    // every wallet on the account.
+    const onDevice = userWith([phantom(), embedded(TRADING_0, 0, true)]);
+    mocked.privy = { ready: true, authenticated: true, user: onDevice };
+    mocked.refreshUser.mockReset();
+    mocked.refreshUser.mockResolvedValue(seated);
+    let seat: ReturnType<typeof useKeeperSeat> | null = null;
+    function Probe() {
+      seat = useKeeperSeat(TRADING_0, { privySignerId: SIGNER, privyPolicyId: POLICY });
+      return null;
+    }
+    renderToStaticMarkup(createElement(Probe));
+    const captured = seat as ReturnType<typeof useKeeperSeat> | null;
+    expect(captured?.reseatBlocked).toBe(RESEAT_COPY.notPerWallet);
+    await captured?.reseat();
+    await captured?.grant();
+    expect(mocked.refreshUser).not.toHaveBeenCalled();
+    expect(mocked.removeSigners).not.toHaveBeenCalled();
+    expect(mocked.addSigners).not.toHaveBeenCalled();
+  });
 });
 
 describe("ReseatConfirm, the plain confirmation", () => {
@@ -328,7 +406,7 @@ describe("ReseatConfirm, the plain confirmation", () => {
     const { html } = confirmWith(false);
     expect(html).toContain("This removes EVERY signer on this wallet");
     expect(html).toContain("only you can sign for this wallet");
-    expect(html).toContain("the wallet says No seat, and Grant keeper permission puts the seat back");
+    expect(html).toContain("If the second step fails, the wallet says No seat and this row says what to do next.");
     expect(html).toContain(SIGNER);
     expect(html).toContain(POLICY);
   });
