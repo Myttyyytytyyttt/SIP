@@ -2,8 +2,9 @@
 
 // useSigners comes from the ROOT package: it has no Solana variant, and the signer it adds is not chain-specific.
 import { usePrivy, useSigners, useUser } from "@privy-io/react-auth";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
+import { beginSeatTask, endSeatTask, seatActivity, subscribeSeatActivity } from "@/lib/seat-activity";
 import {
   RESEAT_COPY,
   failureText,
@@ -24,9 +25,13 @@ import {
  *
  * `reseatBlocked` and `grantBlocked` are why this wallet cannot be re-seated or
  * granted from here, read from the record on every render, or null. `notice` is
- * what a finished re-seat did: the
- * badge reads "Has a signer" before and after one, so without it the page would
- * look as if nothing had happened.
+ * what a finished re-seat did: the badge reads "Has a signer" before and after
+ * one, so without it the page would look as if nothing had happened.
+ *
+ * `busy`, `failure` and `notice` live in src/lib/seat-activity.ts, by address, not
+ * in this hook: a re-seat outlives the row that started it (the modal closed, the
+ * page left), and a row mounted again must show it running, then how it ended, and
+ * must not start another operation on the same wallet meanwhile.
  *
  * THE SAME RENDER'S USER GOES WITH THE SAME RENDER'S SIGNER METHODS. Privy's
  * addSigners and removeSigners look the wallet up in the context user of the render
@@ -42,58 +47,42 @@ export function useKeeperSeat(address: string, config: SeatConfig) {
   const { user } = usePrivy();
   const { refreshUser } = useUser();
   const { addSigners, removeSigners } = useSigners();
-  const [busy, setBusy] = useState<"granting" | "reseating" | "checking" | null>(null);
-  const [failure, setFailure] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const inFlight = useRef(false);
+  // The same function for the server snapshot: nothing runs on the server, so there it is always idle.
+  const activity = useSyncExternalStore(
+    subscribeSeatActivity,
+    () => seatActivity(address),
+    () => seatActivity(address),
+  );
 
   const grant = useCallback(async () => {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setBusy("granting");
-    setFailure(null);
-    setNotice(null);
+    if (!beginSeatTask(address, "granting")) return;
     try {
       await grantKeeperSeat({ address, config, renderedUser: user, addSigners, refreshUser });
+      endSeatTask(address);
     } catch (error) {
-      setFailure(failureText(error));
-    } finally {
-      inFlight.current = false;
-      setBusy(null);
+      endSeatTask(address, { failure: failureText(error) });
     }
   }, [address, config, user, addSigners, refreshUser]);
 
   const reseat = useCallback(async () => {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setBusy("reseating");
-    setFailure(null);
-    setNotice(null);
+    if (!beginSeatTask(address, "reseating")) return;
     try {
       const outcome = await reseatKeeperSeat({ address, config, renderedUser: user, removeSigners, addSigners, refreshUser });
-      setNotice(outcome === "reseated" ? RESEAT_COPY.done : RESEAT_COPY.grantedOnly);
+      endSeatTask(address, { notice: outcome === "reseated" ? RESEAT_COPY.done : RESEAT_COPY.grantedOnly });
     } catch (error) {
-      setFailure(failureText(error));
-    } finally {
-      inFlight.current = false;
-      setBusy(null);
+      endSeatTask(address, { failure: failureText(error) });
     }
   }, [address, config, user, removeSigners, addSigners, refreshUser]);
 
   const check = useCallback(async () => {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setBusy("checking");
-    setFailure(null);
+    if (!beginSeatTask(address, "checking", { keepNotice: true })) return;
     try {
       await refreshUser();
+      endSeatTask(address);
     } catch (error) {
-      setFailure(failureText(error));
-    } finally {
-      inFlight.current = false;
-      setBusy(null);
+      endSeatTask(address, { failure: failureText(error) });
     }
-  }, [refreshUser]);
+  }, [address, refreshUser]);
 
   return {
     seat: seatOf(user, address),
@@ -102,8 +91,8 @@ export function useKeeperSeat(address: string, config: SeatConfig) {
     grant,
     reseat,
     check,
-    busy,
-    failure,
-    notice,
+    busy: activity.busy,
+    failure: activity.failure,
+    notice: activity.notice,
   } as const;
 }

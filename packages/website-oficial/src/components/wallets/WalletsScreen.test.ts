@@ -103,6 +103,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ReseatConfirm } from "@/components/wallets/TradingWalletRow";
 import { WalletsScreen } from "@/components/wallets/WalletsScreen";
 import { useKeeperSeat } from "@/hooks/use-keeper-seat";
+import { clearSeatActivity, reseatRunning } from "@/lib/seat-activity";
 import { GRANT_COPY, RESEAT_COPY } from "@/lib/trading-wallets";
 import { CREATE_LINK_COPY } from "@/lib/vault-copy";
 
@@ -133,6 +134,7 @@ beforeEach(() => {
     fn.mockReset();
   }
   mocked.signerRecords.length = 0;
+  clearSeatActivity();
   mocked.logout.mockResolvedValue(undefined);
   mocked.refreshUser.mockImplementation(async () => mocked.privy.user);
   mocked.exportWallet.mockResolvedValue(undefined);
@@ -368,6 +370,56 @@ describe("Re-seat keeper: remove every signer on a wallet, then seat the keeper'
       ["add", seated],
     ]);
     expect(mocked.addSigners.mock.calls).toStrictEqual([[{ address: TRADING_0, signers: [{ signerId: SIGNER, policyIds: [POLICY] }] }]]);
+  });
+
+  it("a re-seat outlives its row: a row mounted again shows it running, offers no Grant beside it, then shows how it ended", async () => {
+    // The Manage wallets modal closed mid-flow unmounts the row; the re-seat's promise runs on regardless.
+    let release: () => void = () => undefined;
+    const removal = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mocked.privy = { ready: true, authenticated: true, user: seated };
+    mocked.refreshUser.mockReset();
+    mocked.refreshUser.mockResolvedValueOnce(seated).mockResolvedValueOnce(cleared).mockResolvedValueOnce(cleared).mockResolvedValue(seated);
+    mocked.removeSigners.mockImplementation(async () => {
+      await removal;
+      mocked.privy = { ...mocked.privy, user: cleared };
+      return { user: cleared };
+    });
+    mocked.addSigners.mockResolvedValue({ user: seated });
+    const probe = () => {
+      let seat: ReturnType<typeof useKeeperSeat> | null = null;
+      function Probe() {
+        seat = useKeeperSeat(TRADING_0, { privySignerId: SIGNER, privyPolicyId: POLICY });
+        return null;
+      }
+      renderToStaticMarkup(createElement(Probe));
+      return seat as ReturnType<typeof useKeeperSeat> | null;
+    };
+    const running = probe()?.reseat();
+    await flush();
+    expect(reseatRunning()).toBe(true);
+
+    // Mounted again, halfway through: Privy's record already reads no signer, and the row must not offer Grant.
+    mocked.privy = { ...mocked.privy, user: cleared };
+    const midway = render();
+    expect(rows(midway).map((row) => row.seat)).toStrictEqual(["missing"]);
+    expect(buttons(RESEAT_COPY.running).map((button) => button.disabled)).toStrictEqual([true]);
+    expect(buttons("Grant keeper permission")).toHaveLength(0);
+    // And no second operation starts on that wallet from the new row.
+    await probe()?.grant();
+    await probe()?.reseat();
+    expect(mocked.removeSigners).toHaveBeenCalledTimes(1);
+    expect(mocked.addSigners).not.toHaveBeenCalled();
+
+    release();
+    await running;
+    expect(reseatRunning()).toBe(false);
+    mocked.privy = { ...mocked.privy, user: seated };
+    const after = render();
+    expect(after).toContain(RESEAT_COPY.done.replaceAll("'", "&#x27;"));
+    expect(buttons(RESEAT_COPY.running)).toHaveLength(0);
+    expect(mocked.addSigners).toHaveBeenCalledTimes(1);
   });
 
   it("the hook checks its own render's record, the one Privy's methods read: an on-device record removes nothing", async () => {

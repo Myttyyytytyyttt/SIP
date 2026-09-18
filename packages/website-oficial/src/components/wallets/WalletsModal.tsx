@@ -21,20 +21,40 @@
  *
  * Full screen below sm, the shape WalletsSetupModal has, so the two read as one
  * product; from sm up a sheet of at most 85vh whose body scrolls under the header.
+ *
+ * IT DOES NOT CLOSE WHILE A RE-SEAT RUNS (reseatRunning, src/lib/seat-activity.ts).
+ * Between the removal and the add only this page holds the add; closing unmounts
+ * the rows mid-flow. The close button is disabled, and a pointer-down outside, an
+ * Escape, or any other close request is ignored until the re-seat has ended.
  */
 
 import { XIcon } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 import { FocusScope } from "radix-ui/internal";
+import { useSyncExternalStore } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogDescription, DialogHeader, DialogOverlay, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import { WalletsScreen } from "@/components/wallets/WalletsScreen";
+import { reseatRunning, subscribeSeatActivity } from "@/lib/seat-activity";
 import { cn } from "@/lib/utils";
 
 /** Whether one of Privy's flows is on screen: its modal is a headless-ui dialog with this id, present only while open. */
 function privyDialogOpen(): boolean {
   return typeof document !== "undefined" && document.getElementById("privy-dialog") !== null;
+}
+
+/** Whether a close request must be ignored: one of Privy's dialogs is on top, or a re-seat is running. */
+export function closeHeldBack(): boolean {
+  return privyDialogOpen() || reseatRunning();
+}
+
+/** The dialog's onOpenChange, with a close request dropped while a re-seat runs: the close button, and anything else. */
+export function guardedOpenChange(onOpenChange: (open: boolean) => void): (open: boolean) => void {
+  return (open) => {
+    if (!open && reseatRunning()) return;
+    onOpenChange(open);
+  };
 }
 
 /** components/ui/dialog.tsx's DialogContent classes, then the full-screen-below-sm shape. */
@@ -44,20 +64,22 @@ const CONTENT = cn(
 );
 
 export function WalletsModal({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  const reseating = useSyncExternalStore(subscribeSeatActivity, reseatRunning, reseatRunning);
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={guardedOpenChange(onOpenChange)}>
       <DialogPortal>
         <DialogOverlay />
         <FocusScope.Root trapped={false}>
           <DialogPrimitive.Content
             data-slot="dialog-content"
             className={CONTENT}
-            // A pointer-down or an Escape meant for Privy's dialog must not close this one underneath it.
+            // A pointer-down or an Escape meant for Privy's dialog must not close this one underneath it, and
+            // nothing closes it while a re-seat runs.
             onPointerDownOutside={(event) => {
-              if (privyDialogOpen()) event.preventDefault();
+              if (closeHeldBack()) event.preventDefault();
             }}
             onEscapeKeyDown={(event) => {
-              if (privyDialogOpen()) event.preventDefault();
+              if (closeHeldBack()) event.preventDefault();
             }}
           >
             {/* pr-12 keeps the title clear of the close button, which sits absolute in the corner. */}
@@ -71,9 +93,9 @@ export function WalletsModal({ open, onOpenChange }: { open: boolean; onOpenChan
             </div>
 
             <DialogPrimitive.Close data-slot="dialog-close" asChild>
-              <Button variant="ghost" className="absolute top-2 right-2" size="icon-sm">
+              <Button variant="ghost" className="absolute top-2 right-2" size="icon-sm" disabled={reseating}>
                 <XIcon aria-hidden />
-                <span className="sr-only">Close</span>
+                <span className="sr-only">{reseating ? "Close (not while a re-seat runs)" : "Close"}</span>
               </Button>
             </DialogPrimitive.Close>
           </DialogPrimitive.Content>
