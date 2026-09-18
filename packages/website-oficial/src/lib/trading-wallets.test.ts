@@ -9,6 +9,7 @@ import {
   GRANT_BACKOFF_MS,
   GRANT_COPY,
   GrantRefused,
+  GrantUnconfirmed,
   NotATradingWallet,
   RESEAT_COPY,
   ReseatIncomplete,
@@ -238,6 +239,22 @@ describe("grantKeeperSeat", () => {
     await expect(grantKeeperSeat({ address: TRADING_0, renderedUser: missing, config: SEAT, addSigners: neverListed, refreshUser, wait: waits })).rejects.toThrow(NOT_ASSOCIATED);
     expect(neverListed).toHaveBeenCalledTimes(GRANT_BACKOFF_MS.length + 1);
     expect(waits.mock.calls.map(([ms]) => ms)).toStrictEqual([...GRANT_BACKOFF_MS]);
+  });
+
+  it("an add that failed AFTER its write landed is reported as most likely added, never as not added, when the record shows a signer", async () => {
+    // Privy's addSigners sends the owner-signed update, then re-reads the user and throws "Could not refresh user" if
+    // that read fails — with the seat already on the wallet.
+    const refreshUser = vi.fn<RefreshUserFn>().mockResolvedValueOnce(missing).mockResolvedValue(withSigner);
+    const addSigners = vi.fn<AddSignersFn>().mockRejectedValue(new Error("Could not refresh user"));
+    const wait = vi.fn(noWait);
+    const failed = grantKeeperSeat({ address: TRADING_0, renderedUser: missing, config: SEAT, addSigners, refreshUser, wait });
+    await expect(failed).rejects.toBeInstanceOf(GrantUnconfirmed);
+    const message = failureText(await failed.catch((error: unknown) => error)) ?? "";
+    expect(message).toContain(GRANT_COPY.addedUnconfirmed);
+    expect(message).toContain("Could not refresh user");
+    expect(message).toContain("Do not press Grant keeper permission");
+    expect(addSigners).toHaveBeenCalledTimes(1);
+    expect(wait).not.toHaveBeenCalled();
   });
 
   it("refuses, sending nothing, when the record addSigners reads does not show the wallet's server id — and never says to turn on TEE", async () => {
@@ -480,6 +497,34 @@ describe("reseatKeeperSeat", () => {
     expect(seatOf(cleared, TRADING_0)).toBe("missing");
   });
 
+  it("ADDED BUT UNCONFIRMED: an add that failed after landing, with the record showing a signer, is never 'NOT added'", async () => {
+    // The mirror of "removeSigners failed AFTER the removal landed", for addSigners.
+    const refreshUser = reads(seated, cleared, cleared, seated);
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const addSigners = vi.fn<AddSignersFn>().mockRejectedValue(new Error("Could not refresh user"));
+    const stop = reseatKeeperSeat({ renderedUser: seated, address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait: noWait });
+    await expect(stop).rejects.toMatchObject({ stage: "added-unconfirmed" });
+    const message = failureText(await stop.catch((error: unknown) => error)) ?? "";
+    expect(message.startsWith(RESEAT_COPY.addedUnconfirmed)).toBe(true);
+    expect(message).toContain("Could not refresh user");
+    expect(message).toContain(`privy-policy verify --wallet ${teeWalletId(seated, TRADING_0) ?? ""} --policy ${POLICY}`);
+    expect(message).toContain("Do not press Grant keeper permission");
+    expect(message).not.toContain(RESEAT_COPY.removedNotAdded);
+    expect(message).not.toContain(RESEAT_COPY.done);
+    expect(addSigners).toHaveBeenCalledTimes(1);
+  });
+
+  it("an add that failed with the record still showing no signer is removed-not-added: Privy did not confirm it", async () => {
+    const refreshUser = reads(seated, cleared);
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const addSigners = vi.fn<AddSignersFn>().mockRejectedValue(new Error("Could not refresh user"));
+    const stop = reseatKeeperSeat({ renderedUser: seated, address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait: noWait });
+    await expect(stop).rejects.toMatchObject({ stage: "removed-not-added" });
+    const message = failureText(await stop.catch((error: unknown) => error)) ?? "";
+    expect(message).toContain("Privy did not confirm that the keeper's seat was added");
+    expect(message).toContain("press Grant keeper permission on this wallet while it says No seat");
+  });
+
   it("a stop after the removal is described even when Privy's own answer would say nothing (a closed dialog)", async () => {
     const refreshUser = reads(seated, cleared);
     const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
@@ -572,6 +617,18 @@ describe("reseatKeeperSeat", () => {
       // The row agrees: on that record Grant is refused before anything is sent.
       expect(grantRefusal(idless, TRADING_0)).toBe(GRANT_COPY.noServerId);
     });
+
+    it("an add that failed after landing: most likely added, never 'NOT added', and still names the id", async () => {
+      const refreshUser = reads(seated, idless, idless, seated);
+      const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+      const addSigners = vi.fn<AddSignersFn>().mockRejectedValue(new Error("Could not refresh user"));
+      const stop = reseatKeeperSeat({ renderedUser: seated, address: TRADING_0, config: SEAT, removeSigners, addSigners, refreshUser, wait: noWait });
+      await expect(stop).rejects.toMatchObject({ stage: "id-dropped" });
+      const message = failureText(await stop.catch((error: unknown) => error)) ?? "";
+      expect(message).toContain(RESEAT_COPY.idDropped(WALLET_ID));
+      expect(message).toContain(GRANT_COPY.addedUnconfirmed);
+      expect(message).not.toContain(RESEAT_COPY.idDroppedNotAdded);
+    });
   });
 
   it("sends the add again when the grant stopped before reaching Privy — its own read of the record failed — rather than leave it to a later press", async () => {
@@ -637,5 +694,6 @@ describe("failureText", () => {
     expect(failureText(new ReseatRefused(RESEAT_COPY.notPerWallet))).toBe(RESEAT_COPY.notPerWallet);
     expect(failureText(new ReseatIncomplete("removed-not-added", "Every signer is off."))).toBe("Every signer is off.");
     expect(failureText(new GrantRefused(GRANT_COPY.noServerId))).toBe(GRANT_COPY.noServerId);
+    expect(failureText(new GrantUnconfirmed(GRANT_COPY.addedUnconfirmed))).toBe(GRANT_COPY.addedUnconfirmed);
   });
 });

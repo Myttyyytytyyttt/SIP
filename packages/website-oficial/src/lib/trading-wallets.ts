@@ -247,6 +247,15 @@ export class GrantRefused extends Error {
   override readonly name = "GrantRefused";
 }
 
+/**
+ * Thrown when Privy's addSigners failed but Privy's record, read right after, shows a signer on the wallet. Privy's
+ * addSigners sends the owner-signed update FIRST and then re-reads the user, throwing "Could not refresh user" if that
+ * read fails — so a failure can come after the seat landed. `cause` is Privy's own error.
+ */
+export class GrantUnconfirmed extends Error {
+  override readonly name = "GrantUnconfirmed";
+}
+
 /** The grant's own words, for a refusal before anything is sent. */
 export const GRANT_COPY = {
   notListed:
@@ -256,6 +265,12 @@ export const GRANT_COPY = {
     "Privy adds the keeper's signer only to a TEE wallet it lists with its own server wallet id, and its record on " +
     "this page does not show this wallet that way, so nothing was added. The wallet is safe: only you can sign for " +
     "it. Reload the page; while this row shows no Privy wallet id, the seat cannot be added from here.",
+  addedUnconfirmed:
+    "Privy's reply to adding the keeper's signer failed, but its record now shows a signer on this wallet, so the " +
+    "seat was most likely added.",
+  addedUnconfirmedNext:
+    "Do not press Grant keeper permission: confirm the seat first with the privy-policy verify line on this row, or " +
+    "on the keeper's /status after its next sweep.",
 } as const;
 
 /**
@@ -287,6 +302,12 @@ export function grantRefusal(renderedUser: User | null, address: string): string
  * reached Privy's record, and Privy says "not associated with current user" until
  * it has; that is waited out on GRANT_BACKOFF_MS. Any other refusal is an answer,
  * and asking again does not change it.
+ *
+ * A FAILURE IS CHECKED AGAINST THE RECORD. Privy's addSigners writes first and
+ * re-reads the user after, so it can throw ("Could not refresh user", a network
+ * error) with the seat already on the wallet. The record is read once more: if it
+ * shows a signer, the grant throws GrantUnconfirmed, whose message says the seat
+ * was most likely added and not to press Grant again. Otherwise Privy's own error.
  *
  * Only the wallet's owner, signed in here, can add a signer: the keeper can never
  * repair its own seat.
@@ -326,8 +347,15 @@ export async function grantKeeperSeat({
       break;
     } catch (error) {
       const delay = GRANT_BACKOFF_MS[attempt];
-      if (delay === undefined || privyFailure(error).kind !== "propagating") throw error;
-      await wait(delay);
+      if (delay !== undefined && privyFailure(error).kind === "propagating") {
+        await wait(delay);
+        continue;
+      }
+      // A failed read is no answer, and leaves Privy's own error to speak.
+      if (seatOf(await refreshUser().catch(() => null), address) === "has-signer") {
+        throw new GrantUnconfirmed(sentences(GRANT_COPY.addedUnconfirmed, failureText(error), GRANT_COPY.addedUnconfirmedNext), { cause: error });
+      }
+      throw error;
     }
   }
 
@@ -351,10 +379,15 @@ export class ReseatRefused extends Error {
  *   the wallet without signers. Nothing was added.
  * - "record-still-lists-a-signer": Privy accepted the removal, but its record
  *   still lists a signer after every wait. Nothing was added.
- * - "removed-not-added": THE PARTIAL STATE. The record shows no signer and the
- *   grant failed. Only the owner can sign for the wallet, and nothing is put
- *   aside from it until the seat is back — which the row's own Grant does,
- *   because the record now reads "missing".
+ * - "removed-not-added": THE PARTIAL STATE. The record showed no signer, the
+ *   grant failed, and the record read after the failure does not show a signer
+ *   either (or could not be read). Only the owner can sign for the wallet, and
+ *   nothing is put aside from it until the seat is back — which the row's own
+ *   Grant does while the record reads "missing".
+ * - "added-unconfirmed": the grant failed, but the record read right after it
+ *   shows a signer: Privy's addSigners writes first and can fail on its own
+ *   re-read afterwards. The seat was most likely added; the message says to
+ *   confirm it, and not to press Grant.
  * - "signer-reappeared": the record showed no signer, then one this page did not add.
  * - "id-dropped": the record showed no signer AND no longer showed the wallet's
  *   server id (or its privy-v2 recovery). The grant was still sent, in the same
@@ -369,6 +402,7 @@ export type ReseatStage =
   | "removal-unconfirmed"
   | "record-still-lists-a-signer"
   | "removed-not-added"
+  | "added-unconfirmed"
   | "signer-reappeared"
   | "id-dropped";
 
@@ -424,10 +458,15 @@ export const RESEAT_COPY = {
     "Privy accepted removing this wallet's signers, but its record still shows a signer after every wait, so the " +
     "keeper's seat was not added yet: adding it now could seat it next to a signer on its way out. Press Re-seat " +
     "keeper again in a minute.",
-  removedNotAdded: "Every signer is off this wallet now, but the keeper's seat was NOT added.",
+  removedNotAdded: "Every signer is off this wallet now, and Privy did not confirm that the keeper's seat was added.",
   removedNotAddedNext:
     "The wallet is safe: only you can sign for it. But nothing is put aside from it until the seat is back — press " +
-    "Grant keeper permission on this wallet.",
+    "Grant keeper permission on this wallet while it says No seat.",
+  addedUnconfirmed:
+    "Every signer was removed from this wallet. Privy's reply to adding the keeper's signer then failed, but its " +
+    "record now shows a signer on this wallet, so the seat was most likely added.",
+  addedUnconfirmedNext: (verify: string): string =>
+    `Do not press Grant keeper permission. Confirm the seat before anything else: ${verify}, or the keeper's /status after its next sweep.`,
   signerReappeared:
     "Privy's record showed no signer on this wallet, then a signer this page did not add, so the keeper's seat was " +
     "not added. Press Re-seat keeper again.",
@@ -589,6 +628,11 @@ export async function reseatKeeperSeat({
         await wait(delay);
         continue;
       }
+      if (error instanceof GrantUnconfirmed) {
+        const privySaid = failureText(error.cause);
+        if (idDropped) throw new ReseatIncomplete("id-dropped", sentences(RESEAT_COPY.idDropped(walletId), GRANT_COPY.addedUnconfirmed, privySaid, RESEAT_COPY.addedUnconfirmedNext(verify)));
+        throw new ReseatIncomplete("added-unconfirmed", sentences(RESEAT_COPY.addedUnconfirmed, privySaid, RESEAT_COPY.addedUnconfirmedNext(verify)));
+      }
       if (idDropped) throw new ReseatIncomplete("id-dropped", sentences(RESEAT_COPY.idDropped(walletId), failureText(error), RESEAT_COPY.idDroppedNotAdded));
       throw new ReseatIncomplete("removed-not-added", sentences(RESEAT_COPY.removedNotAdded, failureText(error), RESEAT_COPY.removedNotAddedNext));
     }
@@ -643,7 +687,8 @@ export function failureText(error: unknown): string | null {
     error instanceof NotATradingWallet ||
     error instanceof ReseatRefused ||
     error instanceof ReseatIncomplete ||
-    error instanceof GrantRefused
+    error instanceof GrantRefused ||
+    error instanceof GrantUnconfirmed
   ) {
     return error.message;
   }
