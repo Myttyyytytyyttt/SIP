@@ -181,6 +181,25 @@ describe("the one button, before it is pressed", () => {
     expect(html).toContain("Nothing is signed and nothing is paid.");
   });
 
+  it("on a narrow card the action takes its own row, full width, instead of squeezing the title and the description", () => {
+    // CardHeader puts the action in column 2 of a grid-cols-[1fr_auto], and every Button is whitespace-nowrap.
+    // At the modal's 375px the longer label left column 1 about 110px wide — a dozen characters per line for a
+    // three-sentence description — and narrower still it was clipped by the card's overflow-hidden.
+    const { html } = render(ready());
+    const action = html.match(/data-slot="card-action"[^>]*/)?.[0] ?? "";
+    expect(action).toContain("col-start-1");
+    expect(action).toContain("row-start-3");
+    expect(action).toContain("justify-self-stretch");
+    expect(action).toContain("@md/card-header:col-start-2");
+    expect(action).toContain("@md/card-header:row-start-1");
+    expect(action).toContain("@md/card-header:justify-self-end");
+    expect(html).toMatch(/class="[^"]*w-full @md\/card-header:w-auto[^"]*"/);
+    // And the title and the description are pinned to column 1: with row 1's second cell freed by the move,
+    // the grid's own placement puts the description up beside the title, which is the same squeeze again.
+    expect(html.match(/data-slot="card-title"[^>]*/)?.[0]).toContain("col-start-1");
+    expect(html.match(/data-slot="card-description"[^>]*/)?.[0]).toContain("col-start-1");
+  });
+
   it("the keeper's seat not configured: disabled, the variables named, and pressing it creates nothing", async () => {
     mocked.config = { privySignerId: null, privyPolicyId: null };
     const { html, build } = render(ready());

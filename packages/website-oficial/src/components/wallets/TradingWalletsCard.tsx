@@ -92,16 +92,29 @@ export function TradingWalletsCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Trading wallets</CardTitle>
-        <CardDescription>
+        {/* Column 1 explicitly: with the action moved to a row of its own, the header's second cell in row 1
+            is free, and the grid's own placement would put the description up there beside the title. */}
+        <CardTitle className="col-start-1">Trading wallets</CardTitle>
+        <CardDescription className="col-start-1">
           The wallets you trade from. Each is created inside Privy with the keeper&apos;s seat: its permission to put a
           slice of your trading aside, bounded by the keeper&apos;s policy. Export a wallet&apos;s key to trade from Axiom
           or any Solana app; the seat stays.
         </CardDescription>
-        <CardAction>
+        {/*
+         * THE ACTION DROPS BELOW THE DESCRIPTION ON A NARROW CARD. CardHeader is a
+         * grid-cols-[1fr_auto] with the action in column 2, and every Button is
+         * whitespace-nowrap: "Create wallet and link it" is half again as wide as the
+         * "Create wallet" it replaced, so in the Manage wallets modal on a phone the
+         * title and the description were squeezed into a ribbon a dozen characters
+         * wide, and narrower still the button ran past the card's overflow-hidden
+         * edge. Below a 28rem header it takes a row of its own, full width; from
+         * there up it is the top-right action it has always been.
+         */}
+        <CardAction className="col-start-1 row-span-1 row-start-3 justify-self-stretch pt-1 @md/card-header:col-start-2 @md/card-header:row-span-2 @md/card-header:row-start-1 @md/card-header:justify-self-end @md/card-header:pt-0">
           <Button
             type="button"
             size="sm"
+            className="w-full @md/card-header:w-auto"
             disabled={blocked || problem !== null || full}
             aria-busy={busy}
             // An explicit call: Privy's createWallet drops an argument that looks like a click event, and the wallet would be born without its seat.
