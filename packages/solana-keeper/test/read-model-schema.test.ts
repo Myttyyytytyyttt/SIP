@@ -20,6 +20,7 @@ const sql = source("sql/sip_solana.sql");
 const readModel = source("src/read-model.ts");
 const keeper = source("bin/keeper.mts");
 const backfill = source("bin/backfill-settlements.mts");
+const setup = source("bin/setup-read-model.mts");
 
 describe("the settlement mirror's shape", () => {
   it("declares every column the preflight demands", () => {
@@ -51,6 +52,15 @@ describe("the settlement mirror's shape", () => {
     // `at` is absent from the ON CONFLICT SET list on purpose.
     const onConflict = readModel.slice(readModel.indexOf("ON CONFLICT (wallet_addr, nonce) DO UPDATE"), readModel.indexOf("WHERE ${READ_MODEL_SCHEMA}.settlement_event.tx_ref"));
     expect(onConflict).not.toContain("at =");
+  });
+
+  it("makes the setup script verify columns, not only tables", () => {
+    // "read model ready" listing four tables answered a question nobody asked:
+    // the tables have existed since day one, and what an operator needs to know
+    // after running a migration is whether the COLUMN landed.
+    expect(setup).toContain("REQUIRED_SETTLEMENT_COLUMNS");
+    expect(setup).toContain("information_schema.columns");
+    expect(setup).toContain("settlementColumns:");
   });
 
   it("is fed the notional the window actually measured", () => {
