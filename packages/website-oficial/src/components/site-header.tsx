@@ -28,6 +28,7 @@ import { cn } from "@/lib/utils";
 export function SiteHeader({
   activitySheet,
   control = null,
+  contributions = null,
   account,
   current = "pension",
 }: {
@@ -35,6 +36,13 @@ export function SiteHeader({
   activitySheet: React.ReactNode;
   /** The Live/Mock control. A slot, so the header stays ignorant of what it switches. */
   control?: React.ReactNode;
+  /**
+   * The last few contributions, for the bar's spare width. SHOWN ONLY AWAY FROM
+   * THE PENSION: there the same settlements are already on screen in full, and
+   * repeating them in the chrome would be noise. A slot, like everything else
+   * here — the header knows nothing about what is in it.
+   */
+  contributions?: React.ReactNode;
   /** Connect, Disconnect, the pension key, or a placeholder while Privy is asked. */
   account: React.ReactNode;
   readonly current?: "pension" | "activity" | "leaderboard";
@@ -93,7 +101,15 @@ export function SiteHeader({
           ))}
         </nav>
 
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex min-w-0 items-center gap-2">
+          {current === "pension" ? null : contributions}
+          {/*
+            A RULE AND SOME AIR, so the strip reads as its own thing rather than
+            as more buttons. It is drawn only when there is a strip to separate.
+          */}
+          {current === "pension" || contributions === null ? null : (
+            <span aria-hidden className="mx-1 hidden h-5 w-px shrink-0 bg-border md:block" />
+          )}
           {control}
           <ModeToggle />
           {account}

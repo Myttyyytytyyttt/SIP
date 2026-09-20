@@ -46,9 +46,11 @@ import { WalletActivity } from "@/components/wallet-activity";
 import { useWalletsClosed, useWalletsOpener } from "@/components/wallets-host";
 import { useLiveDashboard, type LiveDashboardStore } from "@/hooks/use-live-dashboard";
 import { decideDashboard, readUrlMode, toggleModeOf, urlWithMode, type DashboardState, type UrlMode } from "@/lib/dashboard-mode";
+import { formatUsd } from "@/lib/amounts";
 import { LIVE_COPY, MODE_COPY } from "@/lib/live-copy";
 import { pensionKeyOf } from "@/lib/pension-key";
 import { privyFailure } from "@/lib/privy-failure";
+import { rememberSession } from "@/lib/session-hint";
 import { PRIVY_PATIENCE_MS } from "@/lib/privy-patience";
 import { shortAddress } from "@/lib/vault-copy";
 import { tradingWalletsOf } from "@/lib/trading-wallets";
@@ -83,20 +85,28 @@ export const useDashboard = (): DashboardContextValue | null => useContext(Dashb
 
 const solscanAccountUrl = (address: string): string => `https://solscan.io/account/${address}`;
 
-/** The connected pension key: its short address, a copy button, and a way to look it up. */
-function PensionKeyChip({ address }: { readonly address: string }) {
+/**
+ * The connected pension key: its short address, a copy button, and WHAT THE
+ * PENSION IS WORTH.
+ *
+ * THE BALANCE REPLACED A SOLSCAN LINK. The link was the third way to reach the
+ * same explorer from this screen and answered a question nobody had in the
+ * chrome; the balance is the one number somebody wants following them around.
+ * Null prices show nothing rather than a zero — a pension whose worth could not
+ * be read has not lost its money.
+ */
+function PensionKeyChip({ address, worthUsdcRaw }: { readonly address: string; readonly worthUsdcRaw: bigint | null }) {
   return (
-    <span className="hidden items-center gap-1 rounded-md border px-2 py-1 sm:inline-flex">
+    <span className="hidden items-center gap-1.5 rounded-md border px-2 py-1 sm:inline-flex">
       <Num className="text-xs">{shortAddress(address)}</Num>
       <CopyButton value={address} />
-      <a
-        href={solscanAccountUrl(address)}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="rounded-sm text-xs text-muted-foreground underline-offset-4 outline-none hover:text-foreground hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
-      >
-        Solscan
-      </a>
+      {worthUsdcRaw === null ? null : (
+        <>
+          <span aria-hidden className="h-3.5 w-px bg-border" />
+          <Num className="text-xs font-medium">{formatUsd(worthUsdcRaw)}</Num>
+          <span className="sr-only">{LIVE_COPY.worthNow}</span>
+        </>
+      )}
     </span>
   );
 }
@@ -119,6 +129,7 @@ function accountSlot(
   state: DashboardState,
   pensionKey: string | null,
   actions: { readonly onConnect: () => void; readonly onDisconnect: () => void; readonly openSetup: () => void },
+  worthUsdcRaw: bigint | null = null,
 ): ReactNode {
   switch (state.account) {
     case "connect-setup":
@@ -147,7 +158,7 @@ function accountSlot(
     case "key-and-disconnect":
       return (
         <>
-          {pensionKey === null ? null : <PensionKeyChip address={pensionKey} />}
+          {pensionKey === null ? null : <PensionKeyChip address={pensionKey} worthUsdcRaw={worthUsdcRaw} />}
           <DisconnectButton onDisconnect={actions.onDisconnect} />
         </>
       );
@@ -159,14 +170,19 @@ function accountSlot(
 export function DashboardFrame({
   mock,
   walletsConfigured,
+  knownSession = false,
   children,
 }: {
   readonly mock: DashboardLoadJson;
   readonly walletsConfigured: boolean;
+  /** From the server's cookie read, before the first paint. */
+  readonly knownSession?: boolean;
   readonly children: ReactNode;
 }) {
   return walletsConfigured ? (
-    <ConfiguredFrame mock={mock}>{children}</ConfiguredFrame>
+    <ConfiguredFrame mock={mock} knownSession={knownSession}>
+      {children}
+    </ConfiguredFrame>
   ) : (
     <UnconfiguredFrame mock={mock}>{children}</UnconfiguredFrame>
   );
@@ -196,6 +212,8 @@ function UnconfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJso
 
   const state = decideDashboard({
     walletsConfigured: false,
+    // No provider here, so rule 1 answers before the hint could matter.
+    knownSession: false,
     privyGaveUp: false,
     ready: false,
     authenticated: false,
@@ -226,7 +244,15 @@ function UnconfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJso
   );
 }
 
-function ConfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJson; readonly children: ReactNode }) {
+function ConfiguredFrame({
+  mock,
+  knownSession,
+  children,
+}: {
+  readonly mock: DashboardLoadJson;
+  readonly knownSession: boolean;
+  readonly children: ReactNode;
+}) {
   const { ready, authenticated, user, logout } = usePrivy();
   const { urlMode, pathname, setMode } = useMode();
   const [loginFailure, setLoginFailure] = useState<string | null>(null);
@@ -256,6 +282,7 @@ function ConfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJson;
 
   const state = decideDashboard({
     walletsConfigured: true,
+    knownSession,
     privyGaveUp: gaveUp,
     ready,
     authenticated,
@@ -272,6 +299,14 @@ function ConfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJson;
     if (state.replaceUrlWith === null) return;
     window.history.replaceState({}, "", state.replaceUrlWith);
   }, [state.replaceUrlWith]);
+
+  // THE HINT IS WRITTEN FROM WHAT PRIVY SAYS, never from what a button did: a
+  // session restored on load sets it just as a fresh login does, and a session
+  // that ended anywhere — logout here, expiry, another tab — clears it.
+  useEffect(() => {
+    if (!ready) return;
+    rememberSession(authenticated);
+  }, [ready, authenticated]);
 
   const live = useLiveDashboard({ pensionKey: state.kind === "live" ? pensionKey : null, privyWallets });
 
@@ -299,7 +334,14 @@ function ConfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJson;
     mock,
     live,
     pensionKey,
-    account: accountSlot(state, pensionKey, { onConnect, onDisconnect, openSetup: () => openWallets?.() }),
+    // The worth follows the same read the page below draws from, so the bar and
+    // the card can never disagree about what the pension is holding.
+    account: accountSlot(
+      state,
+      pensionKey,
+      { onConnect, onDisconnect, openSetup: () => openWallets?.() },
+      live.view.kind === "ready" ? live.view.data.worthNowUsdcRaw : null,
+    ),
     setMode,
     onConnect,
     onDisconnect,

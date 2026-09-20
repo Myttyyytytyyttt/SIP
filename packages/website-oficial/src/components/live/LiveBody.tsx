@@ -30,6 +30,7 @@ import { LiveSidebar } from "@/components/live/LiveSidebar";
 import { secondsUntil } from "@/components/live/LiveStates";
 import { DashboardSource } from "@/components/DashboardSource";
 import { SiteFooter } from "@/components/site-footer";
+import { HeaderContributions } from "@/components/header-contributions";
 import { SiteHeader } from "@/components/site-header";
 import { useSolanaConfigOrNull } from "@/app/providers";
 import { useWalletsOpener } from "@/components/wallets-host";
@@ -123,7 +124,15 @@ export function LiveBody({
 
   return (
     <div className="flex min-h-dvh flex-col">
-      <SiteHeader activitySheet={sidebarFor("activity-sheet", true)} control={control} account={account} current={view} />
+      <SiteHeader
+        activitySheet={sidebarFor("activity-sheet", true)}
+        control={control}
+        // The header shows this only away from the pension, where these very
+        // settlements are already on screen in full.
+        contributions={<HeaderContributions rows={data.rows} />}
+        account={account}
+        current={view}
+      />
 
       <div className="flex flex-1">
         <aside className="hidden w-80 shrink-0 border-r lg:block xl:w-88">{sidebarFor("activity-aside", false)}</aside>

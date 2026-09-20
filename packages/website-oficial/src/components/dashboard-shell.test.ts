@@ -167,7 +167,10 @@ describe("a connected pension key", () => {
     const html = render();
     expect(html).toContain("Disconnect");
     expect(html).toContain(PENSION_KEY.slice(0, 4));
-    expect(html).toContain(`https://solscan.io/account/${PENSION_KEY}`);
+    // THE CHIP NO LONGER LINKS TO SOLSCAN. It was the third way to the same
+    // explorer from this screen; its place went to what the pension is worth,
+    // which here is still unread — so the chip shows the key and nothing else.
+    expect(html).not.toContain(`https://solscan.io/account/${PENSION_KEY}`);
     expect(html).not.toContain("Connect pension key");
   });
 
@@ -196,6 +199,15 @@ describe("a connected pension key, once the chain has answered", () => {
     mocked.live = { kind: "ready", data: liveDashboard(), stale: null };
   });
 
+  it("carries what the pension is worth in the bar, from the same read as the card", () => {
+    const html = render();
+    // The header chip and the pension card cannot disagree: both are drawn
+    // from this one snapshot, so the number appears at least twice.
+    const worth = html.match(/\$[\d,]+\.\d\d/g) ?? [];
+    expect(worth.length).toBeGreaterThan(1);
+    expect(new Set(worth).size).toBeLessThan(worth.length + 1);
+  });
+
   it("shows THEIR pension: the hero, in SOL, and not one figure from the example", () => {
     const html = render();
     expect(html).toContain(LIVE_COPY.savedSoFar);
@@ -211,6 +223,20 @@ describe("a connected pension key, once the chain has answered", () => {
     expect(html).toMatch(/href="https:\/\/solscan\.io\/tx\//);
     expect(html).not.toMatch(/\bSold\b/);
     expect(html).not.toContain("Funded wallet");
+  });
+
+  it("wears the last contributions in the bar on /activity, and never on the pension", () => {
+    // AWAY FROM THE PENSION ONLY: there the same settlements are already on
+    // screen in full, and repeating them in the chrome is noise.
+    mocked.pathname = "/";
+    expect(render()).not.toContain('aria-label="Recent contributions"');
+    mocked.pathname = "/activity";
+    const html = render(true, "activity");
+    expect(html).toContain('aria-label="Recent contributions"');
+    // A chip carries what MOVED, and the strip fades at both edges rather than
+    // cutting a half-shown one.
+    expect(html).toMatch(/\+[\d.]+\s*<span[^>]*>SOL<\/span>/);
+    expect(html).toContain("mask-image");
   });
 
   it("renders the history full width on /activity, under the same rule", () => {
