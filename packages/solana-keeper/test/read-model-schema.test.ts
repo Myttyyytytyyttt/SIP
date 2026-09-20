@@ -78,6 +78,17 @@ describe("the leaderboard's wiring in bin/keeper.mts", () => {
     expect(keeper).toContain("setInterval(() => void refreshLeaderboard(), LEADERBOARD_REFRESH_MS);");
   });
 
+  it("re-asks the history verdict instead of serving the one from boot", () => {
+    // /status is read by a human deciding whether to act. The boot snapshot
+    // said "BROKEN — missing volume_raw" for the life of a container whose
+    // writes had started working the moment the migration landed.
+    expect(keeper).toContain("setInterval(() => void refreshHistoryVerdict(), HISTORY_RECHECK_MS);");
+    expect(keeper).toContain("health.history = verdict.detail;");
+    // Announced on the transition, not on every re-check.
+    expect(keeper).toContain("if (verdict.detail === health.history) return;");
+    expect(keeper).not.toContain("await refreshHistoryVerdict()");
+  });
+
   it("keeps the rankings out of the settlement path", () => {
     // The refresher is called detached in both places. An `await` in the sweep
     // would put a page's database query in front of a settlement.

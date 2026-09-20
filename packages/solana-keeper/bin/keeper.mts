@@ -591,7 +591,40 @@ const health: KeeperStatus = {
  * a keeper that has never computed one reports that it has none.
  */
 const LEADERBOARD_REFRESH_MS = 120_000;
+/**
+ * How often the history verdict is asked again. A SNAPSHOT GOES STALE, and this
+ * one is read by a human deciding whether to act: preflight runs once at boot,
+ * so an operator who applies a migration while this process is running reads
+ * "BROKEN — missing volume_raw" for as long as the container lives, although
+ * the writes started working the moment the column existed. It goes wrong in
+ * the other direction too — a column dropped under a running keeper leaves
+ * /status saying "on" while every row is refused. Five minutes of lag on a line
+ * nobody polls per second, against a verdict that is never more than that old.
+ */
+const HISTORY_RECHECK_MS = 300_000;
 let leaderboard: LeaderboardReply = { unavailable: "the rankings have not been computed yet" };
+
+/**
+ * Re-asks whether history can be written, and says so ONLY WHEN THE ANSWER
+ * CHANGES — a line every five minutes repeating what is already on /status is
+ * noise, and the transition is the event: somebody fixed the schema, or
+ * something broke it.
+ */
+async function refreshHistoryVerdict(): Promise<void> {
+  if (!readModel.enabled) return;
+  try {
+    const verdict = await readModel.preflight();
+    if (verdict.detail === health.history) return;
+    const previous = health.history;
+    health.history = verdict.detail;
+    if (verdict.ok) log.info("the read model became usable", { was: previous, now: verdict.detail });
+    else log.warn("the read model stopped being usable", { was: previous, now: verdict.detail });
+  } catch (error) {
+    // NEVER FATAL, like every other thing this file does with the database:
+    // this runs detached, under the process's uncaughtException trap.
+    log.warn("the read model verdict could not be re-checked", { detail: summarizeUpstreamError(error) });
+  }
+}
 
 async function refreshLeaderboard(): Promise<void> {
   if (!readModel.enabled) {
@@ -1427,6 +1460,9 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
 // it does not wait for a page's query; the rankings catch up a moment later.
 void refreshLeaderboard();
 setInterval(() => void refreshLeaderboard(), LEADERBOARD_REFRESH_MS);
+// NO IMMEDIATE CALL: the boot preflight above just answered this, and asking
+// twice in one second would only cost a connection to say the same thing.
+setInterval(() => void refreshHistoryVerdict(), HISTORY_RECHECK_MS);
 
 await sweep();
 setInterval(() => void sweep(), config.sweepMs);
