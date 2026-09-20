@@ -95,6 +95,52 @@ describe("the shape of the rule", () => {
   });
 });
 
+describe("the combined board, which is the one the page shows", () => {
+  it("pays a day once and adds both measures' size on top", () => {
+    const both = rankBoard([day("both", "2026-09-14", SOL, 5n * SOL)], "total")[0]!;
+    expect(both.breakdown.participation).toBe(10);
+    // 5·log10(1+1000) for the SOL saved, 4·log10(1+5000) for the SOL traded.
+    expect(both.breakdown.size).toBe(29.8);
+    expect(both.pointsExact).toBe(39.8);
+    expect(both.points).toBe(40);
+  });
+
+  it("counts a day that only traded, and one that only saved", () => {
+    const rows = [day("a", "2026-09-14", 0n, 5n * SOL), day("a", "2026-09-15", SOL, 0n)];
+    const total = rankBoard(rows, "total")[0]!;
+    expect(total.activeDays).toBe(2);
+    expect(total.bestStreak).toBe(2);
+    // Each single-measure board still sees only its own day.
+    expect(rankBoard(rows, "ahorro")[0]!.activeDays).toBe(1);
+    expect(rankBoard(rows, "volumen")[0]!.activeDays).toBe(1);
+  });
+
+  it("carries what was saved AND what was traded, so one row shows both", () => {
+    const entry = rankBoard([day("a", "2026-09-14", 2n * SOL, 7n * SOL)], "total")[0]!;
+    expect(entry.amountRaw).toBe((2n * SOL).toString());
+    expect(entry.volumeRaw).toBe((7n * SOL).toString());
+  });
+
+  it("caps size per day, so a month of small days is not one huge one", () => {
+    const spread = rankBoard(run("spread", SOL, 5), "total")[0]!;
+    const lumped = rankBoard([day("lumped", "2026-09-14", 5n * SOL)], "total")[0]!;
+    expect(spread.breakdown.size).toBeGreaterThan(lumped.breakdown.size);
+  });
+
+  it("is in the snapshot beside the two it is made of", () => {
+    const snapshot = computeLeaderboard([day("a", "2026-09-15", SOL, SOL)], new Date("2026-09-20T12:00:00Z"));
+    expect(Object.keys(snapshot.boards)).toEqual(["total", "ahorro", "volumen"]);
+    const total = snapshot.boards.total.all[0]!;
+    const savings = snapshot.boards.ahorro.all[0]!;
+    const volume = snapshot.boards.volumen.all[0]!;
+    // The total is not the two scores added — participation is paid once.
+    expect(total.pointsExact).toBeLessThan(savings.pointsExact + volume.pointsExact);
+    expect(total.breakdown.size).toBe(round1(savings.breakdown.size + volume.breakdown.size));
+  });
+});
+
+const round1 = (value: number): number => Math.round(value * 10) / 10;
+
 describe("the tie-break, which is where a fair rule goes wrong quietly", () => {
   it("never hands a place to the bigger wallet when two scores round to the same integer", () => {
     // THE CASE THAT CAUGHT IT. Both display 22. The habit really has 22.4 and
