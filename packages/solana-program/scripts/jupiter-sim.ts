@@ -157,7 +157,14 @@ function decodeSimulatedAccount(
   account: SimulatedTransactionAccountInfo | null,
 ): { readonly amount: bigint; readonly withheld: bigint } {
   if (account === null) return { amount: 0n, withheld: 0n };
-  const data = Buffer.from(account.data[0], "base64");
+  // The RPC returns [payload, encoding]; a node that answered in some other
+  // shape has not told us the balance, and a zero here would read as "the
+  // swap credited nothing" — the exact wrong answer to the exact question.
+  const encoded = account.data[0];
+  if (encoded === undefined) {
+    throw new Error(`the simulator returned ${address.toBase58()} without base64 data`);
+  }
+  const data = Buffer.from(encoded, "base64");
   const unpacked = unpackAccount(
     address,
     { data, owner: new PublicKey(account.owner), lamports: account.lamports, executable: account.executable, rentEpoch: 0 },
