@@ -144,6 +144,27 @@ export async function postJson(url: string, body: string): Promise<void> {
 
 const RANK: Record<AlertSeverity, number> = { warn: 0, critical: 1 };
 
+/**
+ * The /status alert line. PURE, so it can be pinned: the line an operator reads
+ * to decide whether the box works is worth a test, and bin/keeper.mts —
+ * where it is rendered — has none.
+ *
+ * Never the URL and never the chat: /status is public and unauthenticated, and a
+ * webhook URL or a bot token is a posting credential for that channel.
+ */
+export function describeDelivery(
+  channel: "webhook" | "telegram",
+  minSeverity: AlertSeverity,
+  delivery: AlertDelivery,
+): string {
+  const head = `${channel}: ${minSeverity} and above`;
+  if (delivery.consecutiveFailures > 0) {
+    return `${head} — NOT ARRIVING: ${delivery.consecutiveFailures} refused in a row, last: ${delivery.lastError ?? "no answer"}`;
+  }
+  if (delivery.sent > 0) return `${head} — ${delivery.sent} delivered`;
+  return `${head} — nothing sent yet`;
+}
+
 /** Public addresses only. A button is a URL anyone who can read the channel can open. */
 function buttonsFor(alert: Alert, links: AlertLinks): { readonly text: string; readonly url: string }[] {
   const out: { text: string; url: string }[] = [];

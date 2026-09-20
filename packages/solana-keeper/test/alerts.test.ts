@@ -16,7 +16,7 @@
 import { Keypair } from "@solana/web3.js";
 import { Redactor, Secret } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
-import { createAlerter, type Alert, type AlertSeverity } from "../src/alerts.js";
+import { createAlerter, describeDelivery, type Alert, type AlertSeverity } from "../src/alerts.js";
 import { scrubbedForExport } from "../src/keeper-log.js";
 
 /** Throwaway: generated per run, never funded, never used to sign anything. */
@@ -377,5 +377,35 @@ describe("what the box did with what it was handed", () => {
     alerter.fire({ ...critical, key: "k2" });
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(alerter.delivery()).toMatchObject({ sent: 1, failed: 1, consecutiveFailures: 0, lastError: null });
+  });
+});
+
+// THE LINE THE OWNER READS TO DECIDE WHETHER THE BOX WORKS.
+describe("the /status alert line", () => {
+  const quiet = { sent: 0, failed: 0, consecutiveFailures: 0, lastError: null, lastSentAt: null };
+
+  it("does not claim anything before anything has been sent", () => {
+    expect(describeDelivery("telegram", "critical", quiet)).toBe("telegram: critical and above — nothing sent yet");
+  });
+
+  it("says how many got through", () => {
+    expect(describeDelivery("telegram", "critical", { ...quiet, sent: 12, lastSentAt: 1 })).toBe(
+      "telegram: critical and above — 12 delivered",
+    );
+  });
+
+  // THE CASE THE WHOLE FIELD EXISTS FOR: the bot was blocked or never spoken to,
+  // Telegram answers 403 to every critical, and the old line read exactly the
+  // same as a healthy one.
+  it("says it out loud when nothing is arriving, and which refusal it was", () => {
+    expect(describeDelivery("telegram", "critical", { ...quiet, failed: 7, consecutiveFailures: 7, lastError: "webhook answered 403" })).toBe(
+      "telegram: critical and above — NOT ARRIVING: 7 refused in a row, last: webhook answered 403",
+    );
+  });
+
+  it("carries neither the URL nor the chat", () => {
+    const line = describeDelivery("telegram", "critical", { ...quiet, sent: 1, lastSentAt: 1 });
+    expect(line).not.toContain("api.telegram.org");
+    expect(line).not.toMatch(/\d{6,}/);
   });
 });

@@ -34,7 +34,7 @@ import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
 import { readVaultNullable, readVaults, type VaultState } from "../src/accounts.js";
-import { createAlerter } from "../src/alerts.js";
+import { createAlerter, describeDelivery } from "../src/alerts.js";
 import {
   keysForTurn,
   missingLiveCondition,
@@ -244,7 +244,35 @@ const alerter = createAlerter({
   sanitize: (text) => scrubbedForExport(text),
 });
 
+/**
+ * THE ALERT LINE ON /status, AS A FACT RATHER THAN A RESTATEMENT.
+ *
+ * Built from two environment variables, "telegram: critical and above" reads
+ * exactly the same whether every message was accepted or every one was refused
+ * 403 because the bot was blocked or was never spoken to. The owner reads that
+ * line as proof the box works. It never was: it proved the URL parsed.
+ *
+ * So it carries what the alerter actually saw. Refreshed at the end of every
+ * sweep, like health.history — and never the URL, which is a credential, on an
+ * endpoint that is public and unauthenticated.
+ */
+function describeAlerts(): string {
+  if (config.alertWebhook === null) return "log-only";
+  return describeDelivery(config.alertChatId === null ? "webhook" : "telegram", config.alertMinSeverity, alerter.delivery());
+}
+
 const changes = createChangeLog(log);
+
+/**
+ * Sweeps in a row this armed instance has been demoted to dry run because the
+ * claim is held elsewhere. A HANDOVER IS NOT AN OUTAGE: the sweep after a deploy
+ * routinely finds the outgoing instance's lock still held, and it clears itself.
+ * A lock that is STILL held five minutes later is a stale one, and while it
+ * lasts this keeper charges nothing at all — which is exactly the silent failure
+ * the alerts exist for. Same shape as SETTLE_RETRY_CRITICAL_AFTER.
+ */
+let notActingSweeps = 0;
+const NOT_ACTING_CRITICAL_AFTER = 5;
 
 /**
  * Sweeps in a row each wallet's settle came back RETRY. Any other outcome
@@ -543,10 +571,7 @@ const health: KeeperStatus = {
     wallets: null,
   },
   history: "not checked yet",
-  alerts:
-    config.alertWebhook === null
-      ? "log-only"
-      : `${config.alertChatId === null ? "webhook" : "telegram"}: ${config.alertMinSeverity} and above`,
+  alerts: describeAlerts(),
   wallets: {},
   // Projected from the carry book at each request, below: a sweep in flight can
   // record one, and a stale copy here would say a restart costs nothing.
@@ -756,12 +781,20 @@ async function sweep(): Promise<void> {
       if (verification?.kind === "verified") {
         await claim.ensure();
         if (!claim.live) {
+          notActingSweeps += 1;
+          const stale = notActingSweeps >= NOT_ACTING_CRITICAL_AFTER;
           alerter.fire({
             key: "not-acting",
-            severity: "warn",
+            severity: stale ? "critical" : "warn",
             title: "Armed, but another keeper holds the claim",
-            detail: "This instance is sweeping in dry run. If no other instance is running, its lock is stale.",
+            detail: stale
+              ? `This instance has been sweeping in dry run for ${notActingSweeps} sweeps and has charged nothing. ` +
+                "No other instance should be holding the claim for this long: its lock is stale."
+              : "This instance is sweeping in dry run. If no other instance is running, its lock is stale.",
           });
+        } else if (notActingSweeps > 0) {
+          notActingSweeps = 0;
+          alerter.clear("not-acting");
         }
       }
     }
@@ -885,6 +918,7 @@ async function sweep(): Promise<void> {
       }
     }
 
+    health.alerts = describeAlerts();
     health.sweeps += 1;
     health.lastSweepAt = new Date().toISOString();
     health.lastSweepLinks = links.length;
