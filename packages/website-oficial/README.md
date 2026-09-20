@@ -41,7 +41,9 @@ variable, and how to obtain it, is described in [`.env.example`](.env.example).
 
 - **Required:** `PRIVY_APP_ID`, `SIP_SOLANA_RPC_URLS` (server-side only: it
   carries an API key), `SIP_SOLANA_PROGRAM_ID`, `SIP_TRUSTED_CLIENT_IP_HEADER`.
-- **Optional:** `SIP_SOLANA_PUBLIC_WS_URL`; `SIP_SOLANA_PRIVY_SIGNER_ID` and
+- **Optional:** `SIP_SOLANA_KEEPER_URL` (the keeper's public URL; without it
+  `/leaderboard` says the rankings are unavailable and names the variable);
+  `SIP_SOLANA_PUBLIC_WS_URL`; `SIP_SOLANA_PRIVY_SIGNER_ID` and
   `SIP_SOLANA_PRIVY_POLICY_ID`, both or neither; `PRIVY_CLIENT_ID`; and the
   budgets `SIP_SOLANA_RELAY_PER_MIN`, `SIP_SOLANA_RELAY_SIGNING_GLOBAL_PER_MIN`,
   `SIP_SOLANA_RELAY_READS_GLOBAL_PER_MIN`, `SIP_SOLANA_SEND_PER_MIN` and
