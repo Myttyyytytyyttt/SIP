@@ -13,13 +13,15 @@
 
 import type { Metadata } from "next";
 import { cookies } from "next/headers";
-import Link from "next/link";
 
+import { LeaderboardAccountHost } from "@/components/leaderboard-account-host";
+import { OpenPension } from "@/components/open-pension";
 import { LeaderboardView } from "@/components/leaderboard-view";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
-import { Button } from "@/components/ui/button";
+import { toSolanaPublicConfig } from "@/lib/config";
 import { fetchLeaderboard } from "@/lib/leaderboard";
+import { loadConfig } from "@/lib/load-config";
 import { SAMPLE_LEADERBOARD } from "@/lib/leaderboard-sample";
 import { SESSION_HINT_COOKIE, hasSessionHint } from "@/lib/session-hint";
 
@@ -42,12 +44,18 @@ export default async function LeaderboardPage({
   const sample = (await searchParams)["demo"] === "1";
   const result = sample ? ({ ok: true, data: SAMPLE_LEADERBOARD } as const) : await fetchLeaderboard();
   const now = new Date().toISOString();
-  // THIS PAGE MOUNTS NO PRIVY, deliberately: it is public, and loading a wallet
-  // SDK for every anonymous reader to show an address in the corner is a bad
-  // trade. The session hint is enough to stop the bar from talking to somebody
-  // who has connected as though they had just arrived — it says continue, not
-  // connect. It carries no identity and grants nothing.
+  // WHO GETS PRIVY HERE, AND WHO DOES NOT. This page is public and most of its
+  // readers have no session: making every one of them download a wallet SDK to
+  // render a corner of the chrome is a bad trade. So the decision is taken on
+  // the server, before the first paint, from the session hint — a stranger gets
+  // a link and no Privy at all, and somebody coming back gets the same bar they
+  // have inside the app: their key, their balance and their way out.
+  //
+  // A STALE HINT COSTS A MOUNT, NOT A LIE: Privy answers "not authenticated",
+  // the bar falls back to the link, and the hint clears itself.
   const returning = hasSessionHint((await cookies()).get(SESSION_HINT_COOKIE)?.value);
+  const loaded = loadConfig();
+  const config = loaded.ok ? toSolanaPublicConfig(loaded.config) : null;
 
   return (
     <div className="flex min-h-dvh flex-col">
@@ -56,11 +64,7 @@ export default async function LeaderboardPage({
         // NO CONNECT BUTTON HERE. Connecting needs the Privy provider this page
         // deliberately does not mount, so the account slot is a door back to
         // the app rather than a button that would need a second provider.
-        account={
-          <Button asChild size="sm" variant={returning ? "default" : "outline"}>
-            <Link href="/">{returning ? "Back to my pension" : "Open my pension"}</Link>
-          </Button>
-        }
+        account={returning && config !== null ? <LeaderboardAccountHost config={config} /> : <OpenPension returning={returning} />}
         activitySheet={
           <p className="p-4 text-sm text-muted-foreground">
             The pensions that save most often. A day counts when a settlement charged it, or when the window that

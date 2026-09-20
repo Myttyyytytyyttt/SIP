@@ -34,6 +34,7 @@ import { DataModeToggle } from "@/components/data-mode";
 import { Landing } from "@/components/landing";
 import { LiveBody } from "@/components/live/LiveBody";
 import { LiveConnectCard, LiveKeylessCard, LiveLoading, LivePrivyStalled, LiveUnavailableCard, LiveUnreadable } from "@/components/live/LiveStates";
+import { DisconnectButton, PensionKeyChip, worthFrom } from "@/components/account-chip";
 import { Num } from "@/components/num";
 import { PensionPanel } from "@/components/pension-panel";
 import { SavingsRulePanel } from "@/components/savings-rule-panel";
@@ -83,45 +84,6 @@ const DashboardContext = createContext<DashboardContextValue | null>(null);
 export const useDashboard = (): DashboardContextValue | null => useContext(DashboardContext);
 
 const solscanAccountUrl = (address: string): string => `https://solscan.io/account/${address}`;
-
-/**
- * The connected pension key: its short address, a copy button, and WHAT THE
- * PENSION IS WORTH.
- *
- * THE BALANCE REPLACED A SOLSCAN LINK. The link was the third way to reach the
- * same explorer from this screen and answered a question nobody had in the
- * chrome; the balance is the one number somebody wants following them around.
- * Null prices show nothing rather than a zero — a pension whose worth could not
- * be read has not lost its money.
- */
-function PensionKeyChip({ address, worthUsdcRaw }: { readonly address: string; readonly worthUsdcRaw: bigint | null }) {
-  return (
-    <span className="hidden items-center gap-1.5 rounded-md border px-2 py-1 sm:inline-flex">
-      <Num className="text-xs">{shortAddress(address)}</Num>
-      <CopyButton value={address} />
-      {worthUsdcRaw === null ? null : (
-        <>
-          <span aria-hidden className="h-3.5 w-px bg-border" />
-          <Num className="text-xs font-medium">{formatUsd(worthUsdcRaw)}</Num>
-          <span className="sr-only">{LIVE_COPY.worthNow}</span>
-        </>
-      )}
-    </span>
-  );
-}
-
-function DisconnectButton({ onDisconnect }: { readonly onDisconnect: () => void }) {
-  return (
-    <>
-      <Button size="sm" variant="outline" className="hidden sm:inline-flex" onClick={onDisconnect}>
-        {LIVE_COPY.disconnect}
-      </Button>
-      <Button size="sm" variant="outline" className="sm:hidden" aria-label={LIVE_COPY.disconnect} onClick={onDisconnect}>
-        <LogOut aria-hidden />
-      </Button>
-    </>
-  );
-}
 
 /** What stands at the right of the header, for each state the frame can be in. */
 function accountSlot(
@@ -334,7 +296,7 @@ function ConfiguredFrame({
       state,
       pensionKey,
       { onConnect, onDisconnect, openSetup: () => openWallets?.() },
-      live.view.kind === "ready" && live.view.data.stage !== "vault_unreadable" ? live.view.data.worthNowUsdcRaw : null,
+      worthFrom(live.view),
     ),
     setMode,
     onConnect,
