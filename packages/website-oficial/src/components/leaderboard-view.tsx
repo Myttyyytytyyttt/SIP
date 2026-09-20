@@ -105,7 +105,18 @@ function BoardTable({ entries, board, empty }: { readonly entries: readonly Lead
                   {entry.activeDays} {entry.activeDays === 1 ? "day" : "days"} · streak {entry.bestStreak}
                 </div>
               </TableCell>
-              <TableCell className="text-right font-mono font-semibold tabular-nums">{entry.points}</TableCell>
+              <TableCell
+                className="text-right font-mono font-semibold tabular-nums"
+                // WHERE THE NUMBER CAME FROM, on hover: a score nobody can take
+                // apart is a score nobody can argue with.
+                title={
+                  entry.breakdown === undefined
+                    ? undefined
+                    : `${entry.breakdown.participation} for showing up · ${entry.breakdown.size} for size · ${entry.breakdown.streak} for the streak`
+                }
+              >
+                {entry.points}
+              </TableCell>
               <TableCell className="hidden text-right font-mono tabular-nums sm:table-cell">{entry.activeDays}</TableCell>
               <TableCell className="hidden text-right font-mono tabular-nums sm:table-cell">
                 {entry.bestStreak >= 3 ? (

@@ -97,6 +97,24 @@ describe("parsing what came back", () => {
     expect(parseLeaderboard(payload({ boards: { ahorro: { season: [] }, volumen: { season: [], all: [] } } }))).toBeNull();
   });
 
+  it("keeps the breakdown, so a score can be checked by whoever reads the route", () => {
+    const withBreakdown = payload({
+      boards: {
+        ahorro: { season: [entry({ breakdown: { participation: 50, size: 26, streak: 8 } })], all: [] },
+        volumen: { season: [], all: [] },
+      },
+    });
+    expect(parseLeaderboard(withBreakdown)!.boards.ahorro.season[0]!.breakdown).toEqual({ participation: 50, size: 26, streak: 8 });
+    // A keeper too old to send one still ranks, and so does a broken one.
+    expect(parseLeaderboard(payload())!.boards.ahorro.season[0]!.breakdown).toBeUndefined();
+    const broken = payload({
+      boards: { ahorro: { season: [entry({ breakdown: { participation: "ten" } })], all: [] }, volumen: { season: [], all: [] } },
+    });
+    const row = parseLeaderboard(broken)!.boards.ahorro.season[0]!;
+    expect(row.points).toBe(84);
+    expect(row.breakdown).toBeUndefined();
+  });
+
   it("drops a row it cannot read instead of refusing the whole board", () => {
     const data = parseLeaderboard(
       payload({

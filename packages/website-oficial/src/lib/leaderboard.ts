@@ -32,6 +32,13 @@ export interface LeaderboardEntry {
   readonly settles: number;
   /** Lamports as a decimal string — never a number, which would round it. */
   readonly amountRaw: string;
+  /**
+   * The same total, split the way it was earned. KEPT, NOT DROPPED: this route
+   * exists so a score can be checked by somebody who did not compute it, and
+   * "84 points" cannot be checked while "50 for showing up, 26 for size, 8 for
+   * the streak" can. Absent from a keeper too old to send one.
+   */
+  readonly breakdown?: { readonly participation: number; readonly size: number; readonly streak: number };
 }
 
 /** The scoring constants THE SERVICE APPLIED, so the page explains the real rule. */
@@ -127,7 +134,16 @@ function parseEntry(value: unknown): LeaderboardEntry | null {
   const subject = typeof value["subject"] === "string" ? value["subject"] : null;
   if (rank === null || points === null || activeDays === null || bestStreak === null || settles === null) return null;
   if (amountRaw === null || subject === null || subject === "") return null;
-  return { rank, subject, points, activeDays, bestStreak, settles, amountRaw };
+  const entry = { rank, subject, points, activeDays, bestStreak, settles, amountRaw };
+  const raw = value["breakdown"];
+  if (!isRecord(raw)) return entry;
+  const participation = finite(raw["participation"]);
+  const size = finite(raw["size"]);
+  const streak = finite(raw["streak"]);
+  // A MALFORMED BREAKDOWN IS NOT A MALFORMED ROW. The rank still stands; the
+  // page simply has nothing to show beside the total.
+  if (participation === null || size === null || streak === null) return entry;
+  return { ...entry, breakdown: { participation, size, streak } };
 }
 
 function parseRules(value: unknown): BoardRules | null {
