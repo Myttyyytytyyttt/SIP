@@ -5,6 +5,7 @@
 import { createPrivateKey, sign } from "node:crypto";
 
 import {
+  ANTHROPIC_MINT,
   DEFAULT_VAULT_POLICY,
   LIGHTHOUSE_PROGRAM,
   MAX_WALLET_GUARDS,
@@ -275,23 +276,50 @@ describe("the browser's addresses", () => {
 
 // ── the policy and the withdrawals ───────────────────────────────────────────
 
-/** The pools' rates at mainnet slot 447313239, and SIP's floors under them. */
+/**
+ * The pools' rates and SIP's floors under them. SOL's and SPYx's are the mainnet
+ * readings at slot 447313239; ANTHROPIC's is the $180-a-token pool solana-core's
+ * own fixture pins (test/chain-fixtures.ts, LEG_POOLS), written here as literals
+ * so a rate is never re-derived by the functions under test.
+ */
 const LIVE_CONVERT = 100_038_711_555_492_562n;
 const LIVE_SPYX = 131_283_650_130_637_569n;
+const LIVE_ANTHROPIC = 5_555_555_555_555_555_556n;
 const CONVERT_FLOOR = floorWad(LIVE_CONVERT, 1_000);
 const SPYX_FLOOR = floorWad(LIVE_SPYX, 500);
+const ANTHROPIC_FLOOR = floorWad(LIVE_ANTHROPIC, 500);
+
+/**
+ * The vault's own token accounts, in the order the page derives them: wSOL, USDC,
+ * then each offered leg. FOUR, because the basket is SPYx and ANTHROPIC — the
+ * page's tokenAccountCreates holds a build's list to exactly this shape.
+ */
 const POLICY_TARGETS = [
   { mint: WSOL_MINT, tokenProgram: TOKEN_PROGRAM },
   { mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM },
   { mint: SPYX_MINT, tokenProgram: TOKEN_2022_PROGRAM },
+  { mint: ANTHROPIC_MINT, tokenProgram: TOKEN_2022_PROGRAM },
 ] as const;
+
+/** What the build route bundles today: the first BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES missing accounts, the rest left to the keeper. */
+const BUNDLED_CREATES = [true, true, false, false] as const;
+
+/**
+ * Three creations, which the relay still accepts (MAX_VAULT_TOKEN_ACCOUNT_CREATES
+ * is 3) even though the route now bundles two: the wire the Lighthouse cases below
+ * measure Phantom's blocks against.
+ */
+const THREE_CREATES = [true, true, true, false] as const;
+const THREE_CREATED = POLICY_TARGETS.filter((_, index) => THREE_CREATES[index]);
 
 interface PolicyForge {
   readonly maxPerCall?: bigint;
   readonly maxRolling30d?: bigint;
   readonly enabled?: boolean;
-  /** What the transaction carries; the answer's floors stay the honest ones unless `floors` rewrites them. */
+  /** What the transaction carries for SPYx, the first leg; the answer's floors stay the honest ones unless `floors` rewrites them. */
   readonly legFloor?: bigint;
+  /** The same for ANTHROPIC, the second leg. */
+  readonly anthropicFloor?: bigint;
   readonly convertFloor?: bigint;
   readonly create?: readonly boolean[];
   readonly floors?: (floors: Record<string, unknown>) => Record<string, unknown>;
@@ -301,13 +329,18 @@ type Answer = Record<string, unknown> & { readonly txBase64: string };
 
 /** What the build route answers for investPolicy, the transaction from the core builder. */
 function policyAnswer(owner: string, forge: PolicyForge = {}): Answer {
-  const create = forge.create ?? [true, true, true];
+  const create = forge.create ?? BUNDLED_CREATES;
   const vault = deriveVaultPda(owner).toBase58();
   const built = buildSetInvestPolicy({
     owner,
-    legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: forge.legFloor ?? SPYX_FLOOR }],
+    // basketWeightsBps(2), written out: equal halves of SaverFi's two legs.
+    legs: [
+      { mint: SPYX_MINT, weightBps: 5_000, minOutRateWad: forge.legFloor ?? SPYX_FLOOR },
+      { mint: ANTHROPIC_MINT, weightBps: 5_000, minOutRateWad: forge.anthropicFloor ?? ANTHROPIC_FLOOR },
+    ],
     minConvertRateWad: forge.convertFloor ?? CONVERT_FLOOR,
-    minInvestment: 5_000_000n,
+    // defaultInvestPolicy(2).minInvestment: the $5 purchase split across the legs, and enforced per leg.
+    minInvestment: 2_500_000n,
     maxPerCall: forge.maxPerCall ?? 1_000_000_000n,
     maxRolling30d: forge.maxRolling30d ?? 31_000_000_000n,
     enabled: forge.enabled ?? true,
@@ -322,7 +355,10 @@ function policyAnswer(owner: string, forge: PolicyForge = {}): Answer {
     convertWad: CONVERT_FLOOR,
     usdcRawPerSol: 100_038_711n,
     floorUsdcRawPerSol: 90_034_840n,
-    legs: [{ symbol: "SPYx", mint: SPYX_MINT, liveWad: LIVE_SPYX, wad: SPYX_FLOOR, usdcRawPer1e8: 761_709_474n, maxUsdcRawPer1e8: 801_799_446n }],
+    legs: [
+      { symbol: "SPYx", mint: SPYX_MINT, liveWad: LIVE_SPYX, wad: SPYX_FLOOR, usdcRawPer1e8: 761_709_474n, maxUsdcRawPer1e8: 801_799_446n },
+      { symbol: "ANTHROPIC", mint: ANTHROPIC_MINT, liveWad: LIVE_ANTHROPIC, wad: ANTHROPIC_FLOOR, usdcRawPer1e8: 18_000_000n, maxUsdcRawPer1e8: 18_947_369n },
+    ],
   };
   return asJson<Answer>({
     ...built,
@@ -364,7 +400,7 @@ describe("investPolicyFlow", () => {
 
   it("pausing sends enabled false and no caps, and expects the product's caps with no token account to create", async () => {
     const h = harness();
-    h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey, { enabled: false, create: [false, false, false] })));
+    h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey, { enabled: false, create: [false, false, false, false] })));
     const result = await investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey, enabled: false });
     expect(result.ok).toBe(true);
     expect(h.build.mock.calls[0]![0]).toEqual({ action: "investPolicy", owner: h.pensionKey, enabled: false });
@@ -422,11 +458,14 @@ describe("investPolicyFlow", () => {
   });
 
   /** The pool rates the form showed before the click, as /api/solana-vault answers them. */
-  const shownPrices = (overrides: { readonly convertWad?: bigint; readonly legWad?: bigint } = {}) => ({
+  const shownPrices = (overrides: { readonly convertWad?: bigint; readonly legWad?: bigint; readonly anthropicWad?: bigint } = {}) => ({
     slot: 1,
     convertWad: (overrides.convertWad ?? LIVE_CONVERT).toString(),
     usdcRawPerSol: "100038711",
-    legs: [{ symbol: "SPYx", mint: SPYX_MINT, wad: (overrides.legWad ?? LIVE_SPYX).toString(), usdcRawPer1e8: "761709474" }],
+    legs: [
+      { symbol: "SPYx", mint: SPYX_MINT, wad: (overrides.legWad ?? LIVE_SPYX).toString(), usdcRawPer1e8: "761709474" },
+      { symbol: "ANTHROPIC", mint: ANTHROPIC_MINT, wad: (overrides.anthropicWad ?? LIVE_ANTHROPIC).toString(), usdcRawPer1e8: "18000000" },
+    ],
   });
 
   /**
@@ -439,6 +478,7 @@ describe("investPolicyFlow", () => {
     policyAnswer(h.pensionKey, {
       convertFloor: 1n,
       legFloor: 1n,
+      anthropicFloor: 1n,
       floors: () => ({
         slot: 1,
         marginBps: { convert: 1_000, leg: 500 },
@@ -446,7 +486,10 @@ describe("investPolicyFlow", () => {
         convertWad: 1n,
         usdcRawPerSol: 100_038_711n,
         floorUsdcRawPerSol: 90_034_840n,
-        legs: [{ symbol: "SPYx", mint: SPYX_MINT, liveWad: 2n, wad: 1n, usdcRawPer1e8: 761_709_474n, maxUsdcRawPer1e8: 801_799_446n }],
+        legs: [
+          { symbol: "SPYx", mint: SPYX_MINT, liveWad: 2n, wad: 1n, usdcRawPer1e8: 761_709_474n, maxUsdcRawPer1e8: 801_799_446n },
+          { symbol: "ANTHROPIC", mint: ANTHROPIC_MINT, liveWad: 2n, wad: 1n, usdcRawPer1e8: 18_000_000n, maxUsdcRawPer1e8: 18_947_369n },
+        ],
       }),
     });
 
@@ -1007,18 +1050,21 @@ describe("Phantom's Lighthouse checks, in the browser and at the relay", () => {
       guards: (h) => [guard(GUARD.payer(1_000_000n), h.pensionKey)],
       leading: (h) => [guard(GUARD.created(), deriveVaultPda(h.pensionKey).toBase58())],
     },
+    // Phantom checks the accounts the transaction WRITES, so its blocks follow
+    // THREE_CREATED, not every target: an account this build does not create is
+    // not one SaverFi's instructions name.
     "set_invest_policy with three token-account creations": {
       run: (h) => {
-        h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey)));
+        h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey, { create: THREE_CREATES })));
         return investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey });
       },
       guards: (h) => {
         const vault = deriveVaultPda(h.pensionKey);
-        return [guard(GUARD.payer(1_000_000n), h.pensionKey), ...POLICY_TARGETS.map((target) => guard(GUARD.token(0n), deriveAta(vault, target.mint, target.tokenProgram).toBase58()))];
+        return [guard(GUARD.payer(1_000_000n), h.pensionKey), ...THREE_CREATED.map((target) => guard(GUARD.token(0n), deriveAta(vault, target.mint, target.tokenProgram).toBase58()))];
       },
       leading: (h) => {
         const vault = deriveVaultPda(h.pensionKey);
-        return [deriveInvestPda(vault).toBase58(), ...POLICY_TARGETS.map((target) => deriveAta(vault, target.mint, target.tokenProgram).toBase58())].map((address) => guard(GUARD.created(), address));
+        return [deriveInvestPda(vault).toBase58(), ...THREE_CREATED.map((target) => deriveAta(vault, target.mint, target.tokenProgram).toBase58())].map((address) => guard(GUARD.created(), address));
       },
     },
     withdraw: {

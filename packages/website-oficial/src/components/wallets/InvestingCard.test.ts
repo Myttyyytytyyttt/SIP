@@ -1,7 +1,7 @@
 // The investing card rendered to HTML in each state, with Privy mocked, and its buttons pressed: the
 // pattern VaultCard.test.ts uses. Pressing a button runs the real flow against a stub client.
 
-import { SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
+import { ANTHROPIC_MINT, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
 import { Keypair } from "@solana/web3.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -50,12 +50,19 @@ const PENSION = Keypair.generate().publicKey.toBase58();
 const VAULT = Keypair.generate().publicKey.toBase58();
 const account = (): string => Keypair.generate().publicKey.toBase58();
 
-/** The pools at mainnet slot 447313239. */
+/**
+ * The pools: SOL and SPYx at mainnet slot 447313239, ANTHROPIC at the $180-a-token
+ * pool solana-core's fixture pins. ONE PRICE PER OFFERED LEG, because todaysLimits
+ * reads every leg and answers nothing at all when one of them has no price.
+ */
 const PRICES: VaultStateJson["prices"] = {
   slot: 1,
   convertWad: "100038711555492562",
   usdcRawPerSol: "100038711",
-  legs: [{ symbol: "SPYx", mint: SPYX_MINT, wad: "131283650130637569", usdcRawPer1e8: "761709474" }],
+  legs: [
+    { symbol: "SPYx", mint: SPYX_MINT, wad: "131283650130637569", usdcRawPer1e8: "761709474" },
+    { symbol: "ANTHROPIC", mint: ANTHROPIC_MINT, wad: "5555555555555555556", usdcRawPer1e8: "18000000" },
+  ],
 };
 
 const POLICY: InvestmentPolicyJson = {
@@ -63,9 +70,13 @@ const POLICY: InvestmentPolicyJson = {
   enabled: true,
   venueProgram: "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
   inMint: USDC_MINT,
-  legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "124719467624105690" }],
+  legs: [
+    { mint: SPYX_MINT, weightBps: 5_000, minOutRateWad: "124719467624105690" },
+    { mint: ANTHROPIC_MINT, weightBps: 5_000, minOutRateWad: "5277777777777777778" },
+  ],
   minConvertRateWad: "90034840399943305",
-  minInvestment: "5000000",
+  // defaultInvestPolicy(2): the $5 purchase split across the legs, enforced per leg.
+  minInvestment: "2500000",
   maxPerCall: "10000000",
   maxRolling30d: "50000000",
   bucketDays: new Array<number>(31).fill(0),
@@ -89,9 +100,11 @@ function stateWith(overrides: Partial<VaultStateJson> = {}): VaultStateJson {
         { mint: WSOL_MINT, address: account(), tokenProgram: TOKEN_PROGRAM, status: "missing" },
         { mint: USDC_MINT, address: account(), tokenProgram: TOKEN_PROGRAM, status: "missing" },
         { mint: SPYX_MINT, address: account(), tokenProgram: TOKEN_2022_PROGRAM, status: "missing" },
+        { mint: ANTHROPIC_MINT, address: account(), tokenProgram: TOKEN_2022_PROGRAM, status: "missing" },
       ],
     },
-    rents: { vault: "1285240", link: "1305560", policy: "5577840", tokenAccount: "1488440", legTokenAccounts: { [SPYX_MINT]: "1559560" } },
+    // ANTHROPIC's Token-2022 account is 191 bytes to SPYx's 179, so it carries its own rent.
+    rents: { vault: "1285240", link: "1305560", policy: "5577840", tokenAccount: "1488440", legTokenAccounts: { [SPYX_MINT]: "1559560", [ANTHROPIC_MINT]: "1620520" } },
     prices: PRICES,
     ...overrides,
   };
@@ -131,17 +144,22 @@ describe("InvestingCard", () => {
 
   it("no policy: SaverFi's basket and $5 rule, the default caps, today's limits in the owner's words, the rent, and the issuer's powers; Sign waits for the box", () => {
     const html = render(screen({ kind: "ready", state: stateWith() }));
-    expect(html).toContain("SPYx · 100 %");
+    // basketWeightsBps(2): equal halves, one line per offered leg.
+    expect(html).toContain("SPYx · 50 %, ANTHROPIC · 50 %");
     expect(html).toContain("Buys each time $5.00 of USDC is ready");
     expect(html).toContain('value="1000"');
     expect(html).toContain('value="31000"');
     expect(html).toContain("SOL is never sold below $90.03 (90 % of today&#x27;s $100.04)");
     expect(html).toContain("SPYx is never bought above $801.80 per 100,000,000 raw units (5.3 % over today&#x27;s pool price)");
+    expect(html).toContain("ANTHROPIC is never bought above $18.95 per 100,000,000 raw units (5.3 % over today&#x27;s pool price)");
     expect(html).toContain("the keeper converts it to USDC, never below $90.03 per SOL.");
-    expect(html).toContain("never paying more than $801.80 per 100,000,000 raw units. At most $1,000.00 per buy and $31,000.00 per 30 days until you change them.");
-    // Policy 5,577,840 + wSOL and USDC 1,488,440 each + SPYx 1,559,560 lamports, then 5,000 + 30,000 of fees.
-    expect(html).toContain("Setting this up costs 0.01011428 SOL of rent for the policy and the vault&#x27;s token accounts, and none of it comes back.");
-    expect(html).toContain("Cost: 0.01011428 SOL of rent that does not come back, plus 0.000035 SOL of network fees.");
+    // WHAT THIS SENTENCE READS LIKE AT TWO LEGS is the prose's own problem, not
+    // this card's: policyRule takes ONE ceiling, so two legs arrive joined with a
+    // slash. Asserted as it renders, because that is what the owner is shown today.
+    expect(html).toContain("never paying more than $801.80 / $18.95 per 100,000,000 raw units. At most $1,000.00 per buy and $31,000.00 per 30 days until you change them.");
+    // Policy 5,577,840 + wSOL and USDC 1,488,440 each + SPYx 1,559,560 + ANTHROPIC 1,620,520 lamports, then 5,000 + 30,000 of fees.
+    expect(html).toContain("Setting this up costs 0.0117348 SOL of rent for the policy and the vault&#x27;s token accounts, and none of it comes back.");
+    expect(html).toContain("Cost: 0.0117348 SOL of rent that does not come back, plus 0.000035 SOL of network fees.");
     expect(html).toContain("holds a permanent delegate that can move it, including out of your vault.");
     expect(html).toContain("I understand the issuer can freeze, pause or move SPYx");
     const box = html.match(/<input[^>]*name="invest-acknowledge"[^>]*>/)?.[0] ?? "";
@@ -157,10 +175,15 @@ describe("InvestingCard", () => {
     expect(canSignPolicy({ acknowledged: true, capsOk: true, blocked: true })).toBe(false);
   });
 
+  // The bar is the cap at which the LIGHTEST leg's slice clears min_investment,
+  // not min_investment itself: at two equal legs min_investment is $2.50 and a
+  // $2.50 cap gives each leg $1.25, a policy that can never buy.
   it("reads the caps as dollars into USDC raw units, and refuses a per-buy cap under $5 or a month under one buy", () => {
     expect(readCaps("10", "50")).toEqual({ ok: true, maxPerCall: 10_000_000n, maxRolling30d: 50_000_000n });
     expect(readCaps("1000", "31000")).toEqual({ ok: true, maxPerCall: 1_000_000_000n, maxRolling30d: 31_000_000_000n });
     expect(readCaps("4.99", "50")).toMatchObject({ ok: false });
+    expect(readCaps("2.50", "50")).toMatchObject({ ok: false, message: "Most per buy must be at least $5.00, and Most per 30 days at least Most per buy." });
+    expect(readCaps("5", "50")).toEqual({ ok: true, maxPerCall: 5_000_000n, maxRolling30d: 50_000_000n });
     expect(readCaps("10", "9")).toMatchObject({ ok: false, message: "Most per buy must be at least $5.00, and Most per 30 days at least Most per buy." });
     expect(readCaps("", "50")).toMatchObject({ ok: false });
     expect(readCaps("10.0000001", "50")).toMatchObject({ ok: false });
@@ -169,7 +192,7 @@ describe("InvestingCard", () => {
   it("the rent quoted counts the policy and only the vault accounts missing, and says nothing when a part is unknown", () => {
     const partly = stateWith();
     const items = partly.vaultTokenAccounts.items.map((item) => (item.mint === USDC_MINT ? { ...item, status: "exists" as const } : item));
-    expect(setupRent({ ...partly, vaultTokenAccounts: { status: "exists", items } })).toBe(5_577_840n + 1_488_440n + 1_559_560n);
+    expect(setupRent({ ...partly, vaultTokenAccounts: { status: "exists", items } })).toBe(5_577_840n + 1_488_440n + 1_559_560n + 1_620_520n);
     expect(setupRent({ ...partly, rents: null })).toBeNull();
     expect(setupRent({ ...partly, vaultTokenAccounts: { status: "unreadable", items: [] } })).toBeNull();
   });
@@ -179,12 +202,13 @@ describe("InvestingCard", () => {
     const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: POLICY }, holdings }) }));
     expect(html).toContain("Investing is on.");
     expect(html).toContain("Floors below market");
-    expect(html).toContain("SPYx · 100 %");
+    expect(html).toContain("SPYx · 50 %, ANTHROPIC · 50 %");
     expect(html).toContain("$10.00");
     expect(html).toContain("$50.00");
     expect(html).toContain("$25.00");
     expect(html).toContain("SOL floor $90.03, today $100.04");
     expect(html).toContain("SPYx ceiling $801.80 per 100,000,000 raw units, today $761.71");
+    expect(html).toContain("ANTHROPIC ceiling $18.95 per 100,000,000 raw units, today $18.00");
     expect(html).toContain("Waiting: it buys once the vault holds $5.00 of USDC.");
     expect(html).toContain("Signing again does not refill this month&#x27;s cap.");
     expect(buttons("Sign again with today's prices")).toHaveLength(1);
@@ -237,7 +261,10 @@ describe("InvestingCard", () => {
       convertWad: "1",
       usdcRawPerSol: "100038711",
       floorUsdcRawPerSol: "90034840",
-      legs: [{ symbol: "NOTSPYX", mint: SPYX_MINT, liveWad: "2", wad: "1", usdcRawPer1e8: "761709474", maxUsdcRawPer1e8: "801799446" }],
+      legs: [
+        { symbol: "NOTSPYX", mint: SPYX_MINT, liveWad: "2", wad: "1", usdcRawPer1e8: "761709474", maxUsdcRawPer1e8: "801799446" },
+        { symbol: "NOTANTHROPIC", mint: ANTHROPIC_MINT, liveWad: "2", wad: "1", usdcRawPer1e8: "18000000", maxUsdcRawPer1e8: "18947369" },
+      ],
     },
   };
 
@@ -254,25 +281,41 @@ describe("InvestingCard", () => {
     // The unchecked display fields, over bytes that signed neither of them.
     expect(html).not.toContain("$90.03");
     expect(html).not.toContain("$801.80");
+    expect(html).not.toContain("$18.95");
     expect(html).not.toContain("NOTSPYX");
-    // What min_convert_rate_wad = 1 actually means, and SaverFi's own basket name.
+    expect(html).not.toContain("NOTANTHROPIC");
+    // What min_convert_rate_wad = 1 actually means, and SaverFi's own basket names.
     expect(html).toContain("SOL never sold below $0.00");
     expect(html).toContain("SPYx never bought above");
+    expect(html).toContain("ANTHROPIC never bought above");
     // The caps are this card's own, not the answer's.
     expect(html).toContain("$10.00");
     expect(html).toContain("$50.00");
   });
 
   it("an honest build is described by its own floors", () => {
-    const honest = { ...FORGED_BUILD, floors: { ...FORGED_BUILD.floors, convertWad: "90034840399943305", legs: [{ ...FORGED_BUILD.floors.legs[0]!, wad: "124719467624105690" }] } };
+    const honest = {
+      ...FORGED_BUILD,
+      floors: {
+        ...FORGED_BUILD.floors,
+        convertWad: "90034840399943305",
+        legs: [
+          { ...FORGED_BUILD.floors.legs[0]!, wad: "124719467624105690" },
+          { ...FORGED_BUILD.floors.legs[1]!, wad: "5277777777777777778" },
+        ],
+      },
+    };
     const html = signingDetail(honest);
     expect(html).toContain("SOL never sold below $90.03");
     expect(html).toContain("SPYx never bought above $801.80");
+    expect(html).toContain("ANTHROPIC never bought above $18.95");
   });
 
   it("says nothing rather than a figure when a checked floor cannot be read", () => {
     expect(signingDetail({ ...FORGED_BUILD, floors: { ...FORGED_BUILD.floors, convertWad: "0" } })).toBe("");
     expect(signingDetail({ ...FORGED_BUILD, floors: { ...FORGED_BUILD.floors, legs: [] } })).toBe("");
+    // A build that carries only the first leg is one floor short of the basket, and says nothing either.
+    expect(signingDetail({ ...FORGED_BUILD, floors: { ...FORGED_BUILD.floors, legs: [FORGED_BUILD.floors.legs[0]!] } })).toBe("");
     expect(signingDetail({ txBase64: "", lastValidBlockHeight: 1 })).toBe("");
   });
 

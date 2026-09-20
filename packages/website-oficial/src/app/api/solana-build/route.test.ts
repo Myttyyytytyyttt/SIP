@@ -5,6 +5,8 @@
 import { createPrivateKey, sign } from "node:crypto";
 
 import {
+  ANTHROPIC_MINT,
+  ANTHROPIC_USDC_POOL,
   ATA_PROGRAM,
   CLMM_POOL_STATE_BYTES,
   CLMM_POOL_STATE_DISCRIMINATOR,
@@ -294,16 +296,29 @@ describe("/api/solana-build", () => {
       [vault, vaultOf(ownerKey)],
       [SOL_USDC_POOL, poolOf(WSOL_MINT, USDC_MINT, 5_834_501_654_111_004_443n)],
       [SPYX_USDC_POOL, poolOf(SPYX_MINT, USDC_MINT, 50_911_325_114_989_095_030n)],
+      // Both legs are priced, because PRICED_POOLS is one pool per offered leg:
+      // without ANTHROPIC's the route reads no prices at all and refuses.
+      [ANTHROPIC_USDC_POOL, poolOf(ANTHROPIC_MINT, USDC_MINT, 7_826_290_695_199_669_327n)],
       [USDC_MINT, ownedBy(TOKEN_PROGRAM, 82)],
       [SPYX_MINT, ownedBy(TOKEN_2022_PROGRAM, 82)],
+      [ANTHROPIC_MINT, ownedBy(TOKEN_2022_PROGRAM, 82)],
       [deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58(), ownedBy(TOKEN_PROGRAM, 165)],
     ]);
     const methods = stubChain(accounts);
     const built = await answer(await POST(buildRequest({ action: "investPolicy", owner: ownerKey })));
     expect(built.status).toBe(200);
-    expect(built.json.floors).toMatchObject({ convertWad: "90034840399943305", legs: [{ mint: SPYX_MINT, wad: "124719467624105690" }] });
+    expect(built.json.floors).toMatchObject({
+      convertWad: "90034840399943305",
+      legs: [
+        { mint: SPYX_MINT, wad: "124719467624105690" },
+        { mint: ANTHROPIC_MINT, wad: "5277777777777777778" },
+      ],
+    });
+    // Two CreateIdempotent, not three: the vault lacks wSOL, SPYx and ANTHROPIC,
+    // and BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES rides along with the first two,
+    // leaving ANTHROPIC's to the keeper at the crank's expense.
     expect(programsOf(built.json.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, SIP_PROGRAM_ID]);
-    expect(built.json.vaultTokenAccounts.map((entry: { create: boolean }) => entry.create)).toEqual([true, false, true]);
+    expect(built.json.vaultTokenAccounts.map((entry: { create: boolean }) => entry.create)).toEqual([true, false, true, false]);
     expect(built.json.costs.rentLamports).toBe(String(mainnetRent(970) + mainnetRent(165) + mainnetRent(179)));
     expect(verifySignedTransaction(signed(built.json.txBase64, owner)).ok).toBe(true);
     expect(methods.filter((method) => method === "getLatestBlockhash")).toHaveLength(1);

@@ -1,7 +1,7 @@
 // /api/solana-vault as wired in this app: the gate, the environment, and the core
 // state handler behind them (tested in depth in @sip/solana-core). No network.
 
-import { SIP_ACCOUNT_SPACE, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_PROGRAM, USDC_MINT, accountDiscriminator, base64Encode, encodeStruct } from "@sip/solana-core/client";
+import { ANTHROPIC_MINT, SIP_ACCOUNT_SPACE, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_PROGRAM, USDC_MINT, accountDiscriminator, base64Encode, encodeStruct } from "@sip/solana-core/client";
 import { deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "@sip/solana-core/server";
 import { Keypair } from "@solana/web3.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -141,13 +141,16 @@ describe("/api/solana-vault", () => {
       link: String(257 * 5_080),
       policy: String(1_098 * 5_080),
       tokenAccount: String(293 * 5_080),
-      legTokenAccounts: { [SPYX_MINT]: String(307 * 5_080) },
+      // One rent per leg, each at its own size: SPYx's Token-2022 account is 179
+      // bytes, ANTHROPIC's 191, and the vault pays whichever the keeper does not.
+      legTokenAccounts: { [SPYX_MINT]: String(307 * 5_080), [ANTHROPIC_MINT]: String(319 * 5_080) },
     });
     expect(body.holdings).toEqual({
       status: "exists",
       items: [{ tokenAccount: deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58(), mint: USDC_MINT, amountRaw: "12500000", decimals: 6, uiAmount: "12.5", tokenProgram: TOKEN_PROGRAM }],
     });
-    expect(body.vaultTokenAccounts.items.map((entry: { status: string }) => entry.status)).toEqual(["missing", "missing", "missing"]);
+    // wSOL, USDC and one account per leg: four, and none of them in this stub.
+    expect(body.vaultTokenAccounts.items.map((entry: { status: string }) => entry.status)).toEqual(["missing", "missing", "missing", "missing"]);
     // The pools are not in this stub's map, so there is no price rather than a guessed one.
     expect(body.prices).toBeNull();
   });

@@ -62,13 +62,36 @@ type VaultWrite = ReturnType<typeof useVaultWrite>;
 /** The caps a person typed, in USDC raw units, or why they cannot be signed. */
 export type Caps = { readonly ok: true; readonly maxPerCall: bigint; readonly maxRolling30d: bigint } | { readonly ok: false; readonly message: string };
 
-/** The two caps as typed, in dollars: at least the per-buy minimum per buy, and at least one buy per 30 days. */
+/**
+ * THE SMALLEST PER-BUY CAP A POLICY CAN EVER BUY AT, in USDC raw units.
+ *
+ * min_investment is enforced PER LEG: an invest tick gives each leg its weight's
+ * slice of the budget and refuses a slice under the minimum. So the bar is not
+ * min_investment itself but the cap at which the LIGHTEST leg's slice clears it,
+ * minInvestment x 10,000 / lightestWeightBps — the same arithmetic
+ * investmentReadiness does when it calls a policy "reachable", rounded up the
+ * same way, so the form and the summary cannot disagree.
+ *
+ * AT ONE LEG THE TWO NUMBERS COINCIDE, which is why comparing against
+ * min_investment alone was invisible until the basket became two. At today's two
+ * equal legs min_investment is $2.50, and a $2.50 cap hands each leg $1.25: a
+ * policy that can never buy at any balance. The program does not refuse it — its
+ * only rule is 0 < min_investment <= max_per_call — and Sign is gated by these
+ * caps alone, so without this bar the owner pays the rent for a policy that is
+ * dead the moment it lands, and only learns it from the summary afterwards.
+ */
+export const REACHABLE_PER_BUY_RAW: bigint = (() => {
+  const lightest = BigInt(Math.min(...basketWeightsBps(OFFERED_LEGS.length)));
+  const minInvestment = defaultInvestPolicy(OFFERED_LEGS.length).minInvestment;
+  return (minInvestment * 10_000n + lightest - 1n) / lightest;
+})();
+
+/** The two caps as typed, in dollars: at least REACHABLE_PER_BUY_RAW per buy, and at least one buy per 30 days. */
 export function readCaps(perBuyText: string, per30DaysText: string): Caps {
   try {
     const maxPerCall = parseUnits(perBuyText, USDC_DECIMALS, INVEST_COPY.mostPerBuy);
     const maxRolling30d = parseUnits(per30DaysText, USDC_DECIMALS, INVEST_COPY.mostPer30Days);
-    const minimum = defaultInvestPolicy(OFFERED_LEGS.length).minInvestment;
-    if (maxPerCall < minimum || maxRolling30d < maxPerCall) return { ok: false, message: INVEST_COPY.capsProblem(formatUsd(minimum)) };
+    if (maxPerCall < REACHABLE_PER_BUY_RAW || maxRolling30d < maxPerCall) return { ok: false, message: INVEST_COPY.capsProblem(formatUsd(REACHABLE_PER_BUY_RAW)) };
     return { ok: true, maxPerCall, maxRolling30d };
   } catch (error) {
     if (error instanceof AmountError) return { ok: false, message: error.message };

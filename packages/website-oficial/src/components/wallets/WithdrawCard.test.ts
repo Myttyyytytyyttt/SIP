@@ -1,7 +1,7 @@
 // The withdrawal card rendered to HTML with Privy mocked, and its buttons pressed: the pattern
 // VaultCard.test.ts uses. Pressing a share runs the real flow against a stub client.
 
-import { SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
+import { ANTHROPIC_MINT, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
 import { Keypair } from "@solana/web3.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -181,6 +181,7 @@ describe("WithdrawCard", () => {
         { mint: WSOL_MINT, address: account(), tokenProgram: TOKEN_PROGRAM, status: "missing", amountRaw: null, decimals: null, uiAmount: null },
         { mint: USDC_MINT, address: usdc, tokenProgram: TOKEN_PROGRAM, status: "exists", amountRaw: "12500000", decimals: 6, uiAmount: "12.5" },
         { mint: SPYX_MINT, address: account(), tokenProgram: TOKEN_2022_PROGRAM, status: "exists", amountRaw: "0", decimals: 8, uiAmount: "0" },
+        { mint: ANTHROPIC_MINT, address: account(), tokenProgram: TOKEN_2022_PROGRAM, status: "missing", amountRaw: null, decimals: null, uiAmount: null },
       ],
     };
     const state = stateWith({ holdings: { status: "unreadable", items: [] }, vaultTokenAccounts });
@@ -188,7 +189,8 @@ describe("WithdrawCard", () => {
     const build = vi.fn(async () => ({ ok: false as const, status: 422, code: "not_held", message: "Your vault holds none of this token.", retryAfterSeconds: null, body: {} }));
     const value = screen({ kind: "ready", state }, { build: build as unknown as VaultApi["build"] });
     const html = render(value);
-    expect(html).toContain("SaverFi could not list every token account your vault owns just now, so only its own wSOL, USDC and SPYx accounts are shown.");
+    // The names are SaverFi's own four targets, not this listing's rows: one per offered leg.
+    expect(html).toContain("SaverFi could not list every token account your vault owns just now, so only its own wSOL, USDC, SPYx and ANTHROPIC accounts are shown.");
     expect(html).toContain("12.5");
     expect(html).not.toContain("SaverFi could not read the vault&#x27;s tokens just now.");
     expect(buttons("All")).toHaveLength(1);
