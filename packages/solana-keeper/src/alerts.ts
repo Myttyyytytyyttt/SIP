@@ -99,6 +99,24 @@ interface FiredState {
   count: number;
 }
 
+/**
+ * The send itself. EXPORTED so that bin/alert-test.mts proves the destination
+ * with the same call the keeper makes at three in the morning, instead of a
+ * copy of it that can drift.
+ */
+export async function postJson(url: string, body: string): Promise<void> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body,
+  });
+  // A DELETED OR RATE-LIMITED WEBHOOK IS NOT SILENCE. fetch resolves on a 404
+  // and on a 429, so without this the alert vanishes without even the "alert
+  // webhook failed" warning below. The status code is all that leaves: the URL
+  // is a credential and the body may hold anything.
+  if (!response.ok) throw new Error(`webhook answered ${response.status}`);
+}
+
 const RANK: Record<AlertSeverity, number> = { warn: 0, critical: 1 };
 
 /** Public addresses only. A button is a URL anyone who can read the channel can open. */
@@ -121,20 +139,7 @@ export function createAlerter(options: AlerterOptions): Alerter {
   const links = options.links ?? {};
   const now = options.now ?? (() => Date.now());
   const log = options.log;
-  const post =
-    options.post ??
-    (async (url: string, body: string) => {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body,
-      });
-      // A DELETED OR RATE-LIMITED WEBHOOK IS NOT SILENCE. fetch resolves on a
-      // 404 and on a 429, so without this the alert vanishes without even the
-      // "alert webhook failed" warning below. The status code is all that
-      // leaves: the URL is a credential and the body may hold anything.
-      if (!response.ok) throw new Error(`webhook answered ${response.status}`);
-    });
+  const post = options.post ?? postJson;
 
   const sanitize = options.sanitize ?? ((text: string): string | null => text);
 
