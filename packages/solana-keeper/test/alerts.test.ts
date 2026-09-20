@@ -16,7 +16,7 @@
 import { Keypair } from "@solana/web3.js";
 import { Redactor, Secret } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
-import { createAlerter, type AlertSeverity } from "../src/alerts.js";
+import { createAlerter, type Alert, type AlertSeverity } from "../src/alerts.js";
 import { scrubbedForExport } from "../src/keeper-log.js";
 
 /** Throwaway: generated per run, never funded, never used to sign anything. */
@@ -247,5 +247,135 @@ describe("the Telegram body", () => {
     expect(body).not.toHaveProperty("chat_id");
     expect(body["text"]).toContain("t");
     expect(body["links"]).toEqual([{ text: "Keeper status", url: "https://keeper.example.test/status" }]);
+  });
+});
+
+// THE CRANK-LOW BUG, which the threshold work did not cause and did not fix.
+// bin/keeper.mts fires ONE key, "crank-low", whose severity it computes from the
+// balance: warn under 0.02 SOL, critical under 0.005. A crank drains in minutes,
+// so the critical arrived inside the warn's 30-minute window and the dedup — which
+// compared keys and nothing else — dropped it whole. Not sent, and not even logged.
+// clear() could not save it: it only runs when the balance climbs back over 0.02.
+describe("a condition that gets worse", () => {
+  function box(minSeverity: AlertSeverity = "critical") {
+    const posted: string[] = [];
+    const logged: { severity: AlertSeverity; line: string }[] = [];
+    let clock = 1_000;
+    const alerter = createAlerter({
+      webhookUrl: new Secret("https://hooks.example.test/T000/B000/WebhookTokenNeverLogged", "alertWebhook"),
+      minSeverity,
+      log: (severity, line) => logged.push({ severity, line }),
+      post: async (_url, body) => void posted.push(body),
+      now: () => clock,
+    });
+    return { posted, logged, alerter, tick: (ms: number) => void (clock += ms) };
+  }
+
+  const crank = (lamports: bigint): Alert => ({
+    key: "crank-low",
+    severity: lamports < 5_000_000n ? "critical" : "warn",
+    title: "The keeper's crank is running out of SOL",
+    detail: `${lamports} lamports left`,
+    context: { crank: keypair.publicKey.toBase58() },
+  });
+
+  it("breaks through the window its own warn opened", () => {
+    const { posted, logged, alerter, tick } = box();
+    alerter.fire(crank(19_000_000n)); // warn: logged, kept home by the threshold
+    tick(60_000); // one sweep later, still draining
+    alerter.fire(crank(4_000_000n)); // critical: investing is about to stop for every vault
+
+    expect(logged.map((entry) => entry.severity)).toEqual(["warn", "critical"]);
+    expect(posted).toHaveLength(1);
+    expect(JSON.parse(posted[0]!)).toMatchObject({ severity: "critical" });
+  });
+
+  it("still treats a repeat at the same severity as a repeat", () => {
+    const { posted, logged, alerter, tick } = box("warn");
+    alerter.fire(crank(4_000_000n));
+    tick(60_000);
+    alerter.fire(crank(3_000_000n));
+    expect(logged).toHaveLength(1);
+    expect(posted).toHaveLength(1);
+  });
+
+  it("does not page again when a condition gets BETTER", () => {
+    // Nobody needs waking to be told a thing improved. A de-escalation is a repeat.
+    const { posted, logged, alerter, tick } = box("warn");
+    alerter.fire(crank(4_000_000n)); // critical
+    tick(60_000);
+    alerter.fire(crank(19_000_000n)); // warn
+    expect(logged).toHaveLength(1);
+    expect(posted).toHaveLength(1);
+  });
+
+  it("escalates again after the window, like any other repeat", () => {
+    const { posted, alerter, tick } = box();
+    alerter.fire(crank(19_000_000n));
+    tick(60_000);
+    alerter.fire(crank(4_000_000n));
+    tick(31 * 60_000);
+    alerter.fire(crank(3_000_000n));
+    expect(posted).toHaveLength(2);
+  });
+});
+
+// A LABEL BUILT FROM ENV VARS IS NOT EVIDENCE. "telegram: critical and above"
+// reads identically whether every message was accepted or every one was refused
+// 403 because the bot was blocked or never spoken to. Nothing counted, and the
+// catch discarded the status code postJson had already computed.
+describe("what the box did with what it was handed", () => {
+  const webhookUrl = new Secret("https://hooks.example.test/T000/B000/WebhookTokenNeverLogged", "alertWebhook");
+  const critical: Alert = { key: "k", severity: "critical", title: "t", detail: "d" };
+
+  it("starts having neither sent nor failed anything", () => {
+    const alerter = createAlerter({ webhookUrl, log: () => undefined, post: async () => undefined });
+    expect(alerter.delivery()).toEqual({ sent: 0, failed: 0, consecutiveFailures: 0, lastError: null, lastSentAt: null });
+  });
+
+  it("counts a delivery, with when", async () => {
+    const alerter = createAlerter({ webhookUrl, log: () => undefined, post: async () => undefined, now: () => 5_000 });
+    alerter.fire(critical);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(alerter.delivery()).toMatchObject({ sent: 1, failed: 0, consecutiveFailures: 0, lastError: null, lastSentAt: 5_000 });
+  });
+
+  it("remembers the refusal, and says which one it was", async () => {
+    const logged: string[] = [];
+    const alerter = createAlerter({
+      webhookUrl,
+      log: (_severity, line) => logged.push(line),
+      // What postJson throws for a bot that was blocked or never spoken to.
+      post: async () => {
+        throw new Error("webhook answered 403");
+      },
+    });
+    alerter.fire(critical);
+    alerter.fire({ ...critical, key: "k2" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect(alerter.delivery()).toMatchObject({ sent: 0, failed: 2, consecutiveFailures: 2, lastError: "webhook answered 403" });
+    // 403, 401 and 400 are three different mistakes; the old line was identical for all three.
+    expect(logged.join("\n")).toContain("alert webhook failed (webhook answered 403)");
+  });
+
+  it("forgets the streak the moment one gets through", async () => {
+    let refuse = true;
+    const alerter = createAlerter({
+      webhookUrl,
+      log: () => undefined,
+      post: async () => {
+        if (refuse) throw new Error("webhook answered 429");
+        return undefined;
+      },
+    });
+    alerter.fire(critical);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(alerter.delivery().consecutiveFailures).toBe(1);
+
+    refuse = false;
+    alerter.fire({ ...critical, key: "k2" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(alerter.delivery()).toMatchObject({ sent: 1, failed: 1, consecutiveFailures: 0, lastError: null });
   });
 });
