@@ -131,14 +131,16 @@ que es lo que este servicio ya escribía. La web no toca la base de datos: lee e
 
 **El orden importa, y es de un solo sentido:**
 
-1. **Primero la migración**, con la base a mano y **antes** de desplegar el código nuevo:
+1. **Primero la migración**, con la base a mano y **antes** de desplegar el código nuevo. Es exactamente la orden de
+   la sección 0, desde **Terminal.app** — el fichero SQL es idempotente y volver a aplicarlo solo añade lo que falte:
 
    ```bash
-   bash -c '. ~/sip-keys/sip-hackathon.env; pnpm --dir packages/solana-keeper setup-read-model'
+   cd ~/ProyectosCT/SIP/packages/solana-keeper && printf 'DATABASE_URL (puerto 5432): ' && read -rs DB && echo && DATABASE_URL="$DB" PATH="$HOME/.nvm/versions/node/v22.14.0/bin:$PATH" node_modules/.bin/tsx bin/setup-read-model.mts; unset DB
    ```
 
-   Añade `settlement_event.volume_raw` (un `ALTER … ADD COLUMN IF NOT EXISTS`, idempotente: se puede repetir). El
-   `DATABASE_URL` nunca se imprime.
+   Añade `settlement_event.volume_raw` (un `ALTER … ADD COLUMN IF NOT EXISTS`). La URL se teclea y no se imprime.
+   **`~/sip-keys/sip-hackathon.env` NO lleva `DATABASE_URL`** — lleva el RPC y lo de Privy —, así que sourcearlo para
+   esto falla con «DATABASE_URL is not set».
 
 2. **Después el despliegue.** Si se hace al revés, el `INSERT` del vigilante nombra una columna que no existe, Postgres
    rechaza la sentencia entera y **se pierde una fila de historial por cada cobro** — sin tumbar nada, porque escribir
@@ -166,9 +168,14 @@ puede retrasar un cobro.
 **Si al historial le faltan filas** — un parpadeo de la base, un despliegue adelantado a su migración, o un cobro cuya
 firma no volvió — se reconstruye desde la cadena, que es la verdad:
 
+En seco necesita solo un RPC, que ese fichero sí lleva. El `--write` pide además la base, tecleada como arriba:
+
 ```bash
-bash -c '. ~/sip-keys/sip-hackathon.env; pnpm --dir packages/solana-keeper backfill-settlements'            # en seco
-bash -c '. ~/sip-keys/sip-hackathon.env; pnpm --dir packages/solana-keeper backfill-settlements --write'    # ya de verdad
+# en seco: enseña fila por fila lo que escribiría
+cd ~/ProyectosCT/SIP/packages/solana-keeper && bash -c '. ~/sip-keys/sip-hackathon.env; SIP_SOLANA_RPC_URLS="$SIP_SOLANA_RPC_URLS" PATH="$HOME/.nvm/versions/node/v22.14.0/bin:$PATH" node_modules/.bin/tsx bin/backfill-settlements.mts'
+
+# ya de verdad
+cd ~/ProyectosCT/SIP/packages/solana-keeper && printf 'DATABASE_URL (puerto 5432): ' && read -rs DB && echo && export DATABASE_URL="$DB" && bash -c '. ~/sip-keys/sip-hackathon.env; SIP_SOLANA_RPC_URLS="$SIP_SOLANA_RPC_URLS" PATH="$HOME/.nvm/versions/node/v22.14.0/bin:$PATH" node_modules/.bin/tsx bin/backfill-settlements.mts --write'; unset DB DATABASE_URL
 ```
 
 En seco por defecto: enseña fila por fila lo que escribiría y no toca nada hasta `--write`. Repetirlo es seguro (la
