@@ -23,7 +23,15 @@
 // cleanly and runs in a gate that already exists.
 
 import { describe, expect, it } from "vitest";
-import { classify, minOutVerdict, safeMinOut, type LegMeasurement } from "@sip/solana-program/jupiter-sim";
+import {
+  MIN_OUT_TABLE_HEADER,
+  classify,
+  minOutCandidates,
+  minOutVerdict,
+  renderMinOutRow,
+  safeMinOut,
+  type LegMeasurement,
+} from "@sip/solana-program/jupiter-sim";
 import { netOfTransferFee, transferFeeOn, type TransferFeeRate } from "@sip/solana-program/jupiter-route";
 
 /** The two rates the PreStocks mints actually carry, read from their config. */
@@ -355,5 +363,62 @@ describe("epoch 1039, where the fee doubled and the slippage ran out", () => {
     const thresholdAt200 = quotedOut - (quotedOut * 200n) / 10_000n;
     expect(netAt100).toBeGreaterThan(thresholdAt200);
     expect(netAt100 - thresholdAt200).toBe(239_008n);
+  });
+});
+
+describe("what the report PRINTS about each candidate min_out", () => {
+  // THE CLAIM THIS COVERS IS THE ONE THE FILE RETIRED. minOutVerdict encodes
+  // the corrected model — Jupiter checks its threshold against the CREDIT, so
+  // the worst credit invest() is ever shown is the threshold itself — but the
+  // report's own table went on computing "worst credit if GROSS" as
+  // threshold - fee(threshold) and labelling any min_out above it
+  // "REVERTS FillTooSmall". That printed the retired claim for
+  // min_out = threshold, in the same file that says it is wrong.
+  //
+  // The numbers are the cloned one-hop Manifest run of 2026-09-20, slippage
+  // 100 bps against a local fee of 50: a GROSS-quoting venue, which is the
+  // case the old table got wrong.
+  const GROSS_ROW = {
+    leg: "FIGUREAI",
+    usd: 5,
+    quotedOut: 27_147_537n,
+    venueThreshold: 26_876_062n,
+    feeWorstCase: FEE_50,
+  };
+
+  it("names the quote's OUTPUT as the only candidate that reverts with FillTooSmall", () => {
+    expect(minOutCandidates(GROSS_ROW)).toEqual([
+      { name: "outAmount", minOut: 27_147_537n, verdict: "refused-by-invest" },
+      { name: "threshold", minOut: 26_876_062n, verdict: "accepted" },
+      { name: "net(threshold)", minOut: 26_741_681n, verdict: "accepted" },
+    ]);
+  });
+
+  it("prints 'survives' for min_out = threshold, which is what the measurement says", () => {
+    const line = renderMinOutRow(GROSS_ROW);
+    // Exactly one REVERTS on the line, and it is the outAmount column: the
+    // old table printed two, the second one against the threshold.
+    expect(line.match(/REVERTS FillTooSmall/g)).toHaveLength(1);
+    expect(line.indexOf("REVERTS FillTooSmall")).toBeLessThan(line.indexOf("survives"));
+    expect(line.match(/survives/g)).toHaveLength(2);
+    expect(line).toContain("(26741681)");
+    // And the columns still line up under the header the report prints.
+    expect(MIN_OUT_TABLE_HEADER.indexOf("min_out=outAmount")).toBe(line.indexOf("REVERTS FillTooSmall"));
+  });
+
+  it("says the same thing on a NET-quoting venue, because the basis is not what decides it", () => {
+    // The fork run of the same day with default flags: one hop through Raydium
+    // CLMM, which quotes NET. The old table called min_out = threshold a
+    // FillTooSmall here too, for the same wrong reason.
+    const NET_ROW = { leg: "FIGUREAI", usd: 5, quotedOut: 27_409_402n, venueThreshold: 26_861_214n, feeWorstCase: FEE_50 };
+    expect(minOutCandidates(NET_ROW).map((candidate) => candidate.verdict)).toEqual([
+      "refused-by-invest",
+      "accepted",
+      "accepted",
+    ]);
+    // 26,726,907 is the safe min_out that run actually printed, and invest()
+    // accepted it against a measured credit of 27,547,833.
+    expect(renderMinOutRow(NET_ROW)).toContain("(26726907)");
+    expect(renderMinOutRow(NET_ROW).match(/survives/g)).toHaveLength(2);
   });
 });

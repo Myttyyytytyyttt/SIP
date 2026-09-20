@@ -258,16 +258,28 @@ export function classify(row: LegMeasurement): {
 
 /**
  * The largest min_out that cannot reject an honest fill, under BOTH
- * hypotheses at once.
+ * hypotheses at once — and DELIBERATELY BELOW the number the measurements say
+ * is enough.
  *
  * The venue's own guarantee is otherAmountThreshold, and Jupiter enforces it
  * inside the CPI — a fill below it reverts there, before our guard ever runs.
  * So min_out does not have to reproduce the venue's bound; it only has to not
- * fire on a fill the venue accepted. The worst such fill credits the vault:
- *   - threshold - fee(threshold)   if the quote was GROSS,
- *   - threshold                     if the quote was NET.
- * The first is smaller, so it is the one to use — for every leg, whichever
- * basis that leg's route happens to quote in today.
+ * fire on a fill the venue accepted. What the venue accepts depends on where
+ * its check is applied, and only one of the two answers was measured:
+ *
+ *   - against the CREDIT, which is what was measured on a cloned gross route
+ *     (credit one raw unit under the threshold -> Jupiter's 0x1771). Then the
+ *     worst credit our guard can ever see is the threshold itself.
+ *   - against the GROSS the AMM moved, which was NOT observed. Then a
+ *     gross-quoted fill at the threshold credits threshold - fee(threshold),
+ *     and that is smaller.
+ *
+ * This returns the smaller one. Not because the second hypothesis is thought
+ * to be true — the table printed by this file says plainly that min_out =
+ * threshold survives — but because a floor that holds under both costs the
+ * vault nothing real and stops depending on Jupiter's internal check staying
+ * what it is today. That is the whole argument for it: provable by our own
+ * arithmetic, for every leg, whichever basis its route quotes in.
  */
 export function safeMinOut(venueThreshold: bigint, fee: TransferFeeRate): bigint {
   return netOfTransferFee(venueThreshold, fee);
@@ -306,6 +318,72 @@ export function minOutVerdict(
 ): MinOutVerdict {
   if (measured.credit < measured.venueThreshold) return "refused-by-venue";
   return minOut > measured.credit ? "refused-by-invest" : "accepted";
+}
+
+/**
+ * The candidate min_outs a reader is tempted by, and which guard each one runs
+ * into on the WORST fill that still reaches ours.
+ *
+ * AND THAT WORST FILL IS THE THRESHOLD ITSELF, which is the whole correction.
+ * Jupiter checks otherAmountThreshold against what the destination is
+ * CREDITED — measured, see minOutVerdict — so a credit under the threshold is
+ * refused inside the CPI by the venue, whatever min_out says, and the smallest
+ * credit invest() is ever shown is exactly the threshold. The basis the quote
+ * used does not enter: it decides how much GROSS the AMM must move to credit
+ * that much, not what our guard sees.
+ *
+ * WHAT THIS REPLACES. The table below used to compute a "worst credit if
+ * GROSS" of threshold - fee(threshold) and call any min_out above it
+ * "REVERTS FillTooSmall" — which printed that verdict for min_out = threshold,
+ * the exact claim the measurements retired. A credit that low is a credit
+ * Jupiter has already refused.
+ */
+export function minOutCandidates(row: {
+  readonly quotedOut: bigint;
+  readonly venueThreshold: bigint;
+  readonly feeWorstCase: TransferFeeRate;
+}): ReadonlyArray<{ readonly name: string; readonly minOut: bigint; readonly verdict: MinOutVerdict }> {
+  const worst = { credit: row.venueThreshold, venueThreshold: row.venueThreshold };
+  return [
+    { name: "outAmount", minOut: row.quotedOut },
+    { name: "threshold", minOut: row.venueThreshold },
+    { name: "net(threshold)", minOut: safeMinOut(row.venueThreshold, row.feeWorstCase) },
+  ].map((candidate) => ({ ...candidate, verdict: minOutVerdict(worst, candidate.minOut) }));
+}
+
+/** How a verdict reads in the report: whose guard says no, never a bare "reverts". */
+function verdictLabel(verdict: MinOutVerdict): string {
+  if (verdict === "accepted") return "survives";
+  if (verdict === "refused-by-invest") return "REVERTS FillTooSmall";
+  return "the venue refuses first";
+}
+
+/** The header the row below lines up under. */
+export const MIN_OUT_TABLE_HEADER =
+  "  leg / size      threshold   worst credit ours sees    min_out=outAmount      min_out=threshold   min_out=net(threshold)";
+
+/**
+ * One printed row of that table — exported so the verdicts the report prints
+ * are the verdicts a test can pin, rather than a second model living next to
+ * the first.
+ */
+export function renderMinOutRow(row: {
+  readonly leg: string;
+  readonly usd: number;
+  readonly quotedOut: bigint;
+  readonly venueThreshold: bigint;
+  readonly feeWorstCase: TransferFeeRate;
+}): string {
+  const [out, threshold, safe] = minOutCandidates(row) as [
+    { name: string; minOut: bigint; verdict: MinOutVerdict },
+    { name: string; minOut: bigint; verdict: MinOutVerdict },
+    { name: string; minOut: bigint; verdict: MinOutVerdict },
+  ];
+  return (
+    `  ${(row.leg + " " + row.usd).padEnd(15)} ${row.venueThreshold.toString().padStart(12)} ` +
+    `${row.venueThreshold.toString().padStart(22)}   ${verdictLabel(out.verdict).padEnd(22)} ` +
+    `${verdictLabel(threshold.verdict).padEnd(19)} ${verdictLabel(safe.verdict)} (${safe.minOut})`
+  );
 }
 
 async function measureLeg(
@@ -575,24 +653,20 @@ async function main(): Promise<void> {
     );
   }
 
-  // What each candidate min_out does to the venue's OWN worst allowed fill —
-  // which is the question, not what it does to the lucky fill we happened to
-  // simulate. Jupiter reverts inside the CPI below otherAmountThreshold, so a
-  // fill AT the threshold is the worst one our guard will ever be shown.
-  console.log("\nThe worst fill the venue still allows, and what each candidate min_out does to it:");
-  console.log("  leg / size      threshold   worst credit if GROSS   worst credit if NET   min_out=threshold   min_out=net(threshold)");
-  for (const row of rows) {
-    const worstIfGross = netOfTransferFee(row.venueThreshold, row.feeWorstCase);
-    const worstIfNet = row.venueThreshold;
-    const safe = safeMinOut(row.venueThreshold, row.feeWorstCase);
-    const verdictFor = (minOut: bigint): string =>
-      worstIfGross >= minOut && worstIfNet >= minOut ? "survives" : "REVERTS FillTooSmall";
-    console.log(
-      `  ${(row.leg + " " + row.usd).padEnd(15)} ${row.venueThreshold.toString().padStart(12)} ` +
-        `${worstIfGross.toString().padStart(23)} ${worstIfNet.toString().padStart(21)}   ` +
-        `${verdictFor(row.venueThreshold).padEnd(19)} ${verdictFor(safe)} (${safe})`,
-    );
-  }
+  // What each candidate min_out does to the worst fill that still REACHES our
+  // guard — which is the question, not what it does to the lucky fill we
+  // happened to simulate, and not what it does to a fill Jupiter would already
+  // have refused. Every verdict here comes out of minOutVerdict, so the table
+  // and the model cannot drift apart again; see minOutCandidates.
+  console.log("\nThe worst fill that still reaches invest()'s guard, and what each candidate min_out does to it:");
+  console.log(MIN_OUT_TABLE_HEADER);
+  for (const row of rows) console.log(renderMinOutRow(row));
+  console.log(
+    "  min_out = outAmount is the mistake: on a gross-quoting venue it is a whole fee above anything\n" +
+      "  the vault can be credited. min_out = threshold survives — Jupiter enforces that number against the\n" +
+      "  CREDIT, so a fill under it never reaches us — and net(threshold) survives with room to spare, which\n" +
+      "  is why it is the rule: it is a floor OUR arithmetic can prove, not one borrowed from Jupiter's check.",
+  );
   // THE FLOOR UNDER THE SLIPPAGE SETTING, which bites before min_out does.
   // Jupiter checks its own threshold against what the destination is CREDITED
   // — net — while quoting gross on some venues, so the fee comes out of the
