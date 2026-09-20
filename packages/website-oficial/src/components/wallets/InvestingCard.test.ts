@@ -190,7 +190,11 @@ describe("InvestingCard", () => {
     // one and has moved it twice, the day's liquidity sets the other. SPYx is
     // beside it as the proof that this is these tokens, not Solana.
     expect(html).toContain("ANTHROPIC&#x27;s issuer charges 1 % of every transfer of it: once when your vault buys it, and once when it leaves.");
-    expect(html).toContain("it has been nothing, then 0.5 %, and it is 1 % now. SPYx charges nothing to transfer.");
+    // ONE RAISE, NOT TWO: the mint's TransferFeeConfig carries only older{1032,
+    // 50 bps} and newer{1039, 100 bps}, so 50 -> 100 is all that can be read off
+    // it and all the copy may claim.
+    expect(html).toContain("it was 0.5 %, and it became 1 % a few days ago. SPYx charges nothing to transfer.");
+    expect(html).not.toContain("it has been nothing, then 0.5 %");
     expect(html).toContain("measured 0.01 % on SPYx, the same at $5, $25 and $100.");
     expect(html).toContain("about 0.6 % at $5 and at $25, and 1.3 % at $100");
     expect(html).toContain("The difference is these two issuers and these two pools — not Solana, and not SaverFi.");
@@ -199,7 +203,7 @@ describe("InvestingCard", () => {
     // safer leg on every count — he was acknowledging the wrong token.
     expect(html).toContain("move it out of your vault through a permanent delegate");
     expect(html).toContain(
-      "On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used, twice, to raise the fee.",
+      "On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used to raise the fee, from 0.5 % to 1 %, days ago.",
     );
     expect(html).toContain("On SPYx those powers sit with three separate keys and there is no fee to raise.");
     expect(html).toContain("I understand each issuer can freeze, pause or move its own stock out of my vault, and that one key holds all of those powers over ANTHROPIC");

@@ -238,7 +238,11 @@ export const INVEST_COPY = {
   //  * the transfer fees, from the mints' own TransferFeeConfig — ANTHROPIC
   //    older{epoch 1032, 50 bps} newer{epoch 1039, 100 bps}, maximum_fee u64::MAX
   //    so nothing caps it, active 100 bps in the epoch the cluster is in; SPYx
-  //    carries no TransferFeeConfig extension at all.
+  //    carries no TransferFeeConfig extension at all. THE COPY CLAIMS ONE RAISE,
+  //    NOT TWO: a TransferFeeConfig holds exactly two entries, older and newer,
+  //    so 50 -> 100 is the only change this mint can be read to have made. An
+  //    earlier 0 -> 50 may well have happened and is NOT on the account, so it is
+  //    not said here.
   //  * the round trips, from keyless Jupiter quotes at 200 bps slippage, USDC ->
   //    stock -> USDC at $5 / $25 / $100: SPYx 0.01 % / 0.01 % / 0.01 %,
   //    ANTHROPIC 0.60 % / 0.57 % / 1.26 %. These are the BEST route on the day
@@ -246,7 +250,7 @@ export const INVEST_COPY = {
   //    through one Raydium pool per stock, not through Jupiter's multi-hop.
   costTitle: "What this costs you, and who decides it",
   issuerCost:
-    "ANTHROPIC's issuer charges 1 % of every transfer of it: once when your vault buys it, and once when it leaves. Going in and back out therefore gives up about 2 % before the market is involved at all. That figure belongs to the issuer — not to SaverFi and not to Solana — and the issuer moves it: it has been nothing, then 0.5 %, and it is 1 % now. SPYx charges nothing to transfer.",
+    "ANTHROPIC's issuer charges 1 % of every transfer of it: once when your vault buys it, and once when it leaves. Going in and back out therefore gives up about 2 % before the market is involved at all. That figure belongs to the issuer — not to SaverFi and not to Solana — and the issuer moves it: it was 0.5 %, and it became 1 % a few days ago. SPYx charges nothing to transfer.",
   marketCost:
     "Then there is what the market charges, which depends on the day's liquidity and on how much is bought at once. Buying a stock and selling it straight back measured 0.01 % on SPYx, the same at $5, $25 and $100. The same round trip on ANTHROPIC measured about 0.6 % at $5 and at $25, and 1.3 % at $100 — it gets worse as the buy gets bigger, because its pool is small. Read on 20 September 2026; another day reads differently.",
   costTogether:
@@ -292,7 +296,7 @@ export const INVEST_COPY = {
   freezeNotice:
     "Both stocks are Token-2022 tokens, and each issuer keeps powers over its own that SaverFi cannot take away. An issuer can freeze your vault's account for that stock, pause every transfer of it, and move it out of your vault through a permanent delegate. If any of that happens, withdrawing that stock can fail or find less than you hold. USDC's issuer can freeze USDC accounts too. Withdrawing SOL depends on no issuer at all.",
   issuerKeys:
-    "The two are not the same risk. On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used, twice, to raise the fee. On SPYx those powers sit with three separate keys and there is no fee to raise. This deserves more of your attention than the price does: it is not the market moving against you, it is one person's decision.",
+    "The two are not the same risk. On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used to raise the fee, from 0.5 % to 1 %, days ago. On SPYx those powers sit with three separate keys and there is no fee to raise. This deserves more of your attention than the price does: it is not the market moving against you, it is one person's decision.",
   freezeShort:
     "Each issuer can freeze, pause or move its own stock, even inside your vault, and on ANTHROPIC one key holds all of those powers. Withdrawing SOL does not depend on any of them.",
   acknowledge: "I understand each issuer can freeze, pause or move its own stock out of my vault, and that one key holds all of those powers over ANTHROPIC",
