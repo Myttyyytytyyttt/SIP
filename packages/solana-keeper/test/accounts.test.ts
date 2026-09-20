@@ -10,9 +10,25 @@
 // back through the keeper's own readers. No network: the stub throws on any RPC
 // method it was not given, and records every one it was.
 
+import { readFileSync } from "node:fs";
 import * as anchor from "@coral-xyz/anchor";
-import { TOKEN_2022_PROGRAM_ID, getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { Connection, Keypair, PublicKey, SYSVAR_CLOCK_PUBKEY, type Finality } from "@solana/web3.js";
+import {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  NATIVE_MINT,
+  TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
+  getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  SYSVAR_CLOCK_PUBKEY,
+  SystemProgram,
+  type Finality,
+  type Transaction,
+  type VersionedTransaction,
+} from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import {
   configAddress,
@@ -28,6 +44,7 @@ import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import { USDC_MINT } from "../src/invest-decision.js";
 import { runInvestTick } from "../src/invest-tick.js";
+import { MAX_SUPPORTED_TRANSACTION_VERSION } from "../src/measure-window.js";
 import {
   PYTH_RECEIVER_PROGRAM,
   PYTH_SOL_USD_FEED,
@@ -779,6 +796,179 @@ describe("the ticks' first steps, over the same bytes", () => {
     expect(result.detail).toContain(basket.mints[0]!.toBase58());
   });
 
+  // ── the ATA storm ─────────────────────────────────────────────────────────
+  //
+  // createAssociatedTokenAccountIdempotent sends a TRANSACTION of its own on
+  // every call, existing account or not, at 5,000 lamports each. The turn opened
+  // with two and then sent one more per leg, before it knew there was a route to
+  // buy through. Of 27 signatures on the live vault on 2026-09-20, 17 were that,
+  // and they pushed the real settle off the first page of the dashboard.
+
+  /** An anchor Program over the stub chain whose wallet CAPTURES what it is asked to sign, then refuses. */
+  function capturing(connection: Connection) {
+    const signed: Transaction[] = [];
+    const wallet = {
+      publicKey: PublicKey.default,
+      // The turn's transactions are legacy ones; the signature is the generic
+      // shape anchor's Wallet declares, so no cast is needed at the call.
+      signTransaction: async <T extends Transaction | VersionedTransaction>(tx: T): Promise<T> => {
+        signed.push(tx as Transaction);
+        throw new Error("the capturing wallet signs nothing");
+      },
+      signAllTransactions: async <T extends Transaction | VersionedTransaction>(): Promise<T[]> => {
+        throw new Error("the capturing wallet signs nothing");
+      },
+    };
+    return { signed, program: new anchor.Program(idl, new anchor.AnchorProvider(connection, wallet, { commitment: "confirmed" })) };
+  }
+
+  /** Everything a live CONVERTING turn reads before its wrap: a rent floor, no token accounts, and a crank holding 10 SOL. */
+  const convertingAndFunded: Readonly<Record<string, Handler>> = {
+    ...emptyAndPriced,
+    getBalance: async () => 10_000_000_000,
+    getLatestBlockhash: async () => ({ blockhash: key().toBase58(), lastValidBlockHeight: 1_000 }),
+  };
+
+  /**
+   * The chain's own answers, with `present` served as an SPL Token account that
+   * exists and holds nothing (the 165-byte layout, zero at the u64 at 64).
+   *
+   * Through a Proxy rather than through chainWith's account map, because the
+   * vault this account belongs to is generated inside chainWith and the address
+   * does not exist until it returns.
+   */
+  function withAccountPresent(connection: Connection, present: PublicKey): Connection {
+    const served = connection.getMultipleAccountsInfo.bind(connection);
+    const account = { data: Buffer.alloc(165), executable: false, lamports: 2_039_280, owner: TOKEN_PROGRAM_ID, rentEpoch: 0 };
+    return new Proxy(connection, {
+      get(target, prop) {
+        if (prop !== "getMultipleAccountsInfo") return (target as unknown as Record<string | symbol, unknown>)[prop];
+        return async (addresses: PublicKey[], commitment: unknown) => {
+          const answer = (await served(addresses, commitment as never)) as (typeof account | null)[];
+          return answer.map((info, index) => (addresses[index]!.equals(present) ? account : info));
+        };
+      },
+    }) as Connection;
+  }
+
+  it("reads every token account it might need in ONE request, and creates the missing one INSIDE the transaction that uses it", async () => {
+    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    const crank = Keypair.generate();
+    const { vault, connection, calls, callArgs } = chainWith({}, { legs: basket.legs }, convertingAndFunded, true, basket.accounts);
+    const { signed, program } = capturing(connection);
+    const result = await runInvestTick({
+      connection, program, vault, crank, crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+    });
+
+    // The turn dies where the stub refuses to sign — past the point this test is about.
+    expect(result.outcome).toBe("FAILED");
+
+    const wsolAta = getAssociatedTokenAddressSync(NATIVE_MINT, vault, true, TOKEN_PROGRAM_ID);
+    const usdcAta = getAssociatedTokenAddressSync(USDC_MINT, vault, true, TOKEN_PROGRAM_ID);
+    const legAtas = basket.mints.map((mint) => getAssociatedTokenAddressSync(mint, vault, true, TOKEN_2022_PROGRAM_ID));
+
+    // ONE REQUEST, NAMING EVERY CANDIDATE: the vault's wSOL account, its USDC
+    // account and every leg's target, in one getMultipleAccountsInfo — not one
+    // read, and not one transaction, per account.
+    const reads = calls.flatMap((name, index) => (name === "getMultipleAccountsInfo" ? [callArgs[index]![0] as PublicKey[]] : []));
+    expect(reads).toHaveLength(4);
+    expect(reads[3]).toEqual([wsolAta, usdcAta, ...legAtas]);
+
+    // AND IT HAPPENS ONLY ONCE THE TURN HAS DECIDED TO WRAP. getBalance is the
+    // crank's own balance, re-read to size the wrap; the candidates are read
+    // after it, and nothing is signed before either.
+    expect(calls.indexOf("getBalance")).toBeLessThan(calls.lastIndexOf("getMultipleAccountsInfo"));
+    expect(calls.lastIndexOf("getMultipleAccountsInfo")).toBeLessThan(calls.indexOf("getLatestBlockhash"));
+
+    // NOT ONE TRANSACTION OF ITS OWN. Exactly one transaction was built, and the
+    // create rides it: the ATA exists if and only if the wrap_sol it is for was
+    // sent.
+    expect(signed).toHaveLength(1);
+    expect(calls.filter((name) => name === "getLatestBlockhash")).toHaveLength(1);
+    for (const rpc of ["sendTransaction", "sendRawTransaction", "getAccountInfo"]) expect(calls).not.toContain(rpc);
+
+    const [create, wrapSol] = signed[0]!.instructions;
+    expect(signed[0]!.instructions).toHaveLength(2);
+    expect(wrapSol!.programId.equals(programId)).toBe(true);
+    expect(create!.programId.equals(ASSOCIATED_TOKEN_PROGRAM_ID)).toBe(true);
+    // Byte 1 is CreateIdempotent, not Create: a race that creates the account
+    // between the read above and the send is a no-op, never a broken turn.
+    expect([...create!.data]).toEqual([1]);
+    expect(create!.keys.map((meta) => meta.pubkey.toBase58())).toEqual([
+      crank.publicKey.toBase58(),
+      wsolAta.toBase58(),
+      vault.toBase58(),
+      NATIVE_MINT.toBase58(),
+      SystemProgram.programId.toBase58(),
+      TOKEN_PROGRAM_ID.toBase58(),
+    ]);
+  });
+
+  it("creates nothing for an account that already exists: the same turn sends the wrap alone", async () => {
+    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    const crank = Keypair.generate();
+    // The vault's wSOL account is on the chain this time. Everything else about
+    // the turn is identical, so the only thing the assertions can be reading is
+    // the account's existence.
+    const chain = chainWith({}, { legs: basket.legs }, convertingAndFunded, true, basket.accounts);
+    const connection = withAccountPresent(chain.connection, getAssociatedTokenAddressSync(NATIVE_MINT, chain.vault, true, TOKEN_PROGRAM_ID));
+    const { signed, program } = capturing(connection);
+    const result = await runInvestTick({
+      connection, program, vault: chain.vault, crank, crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+    });
+
+    expect(result.outcome).toBe("FAILED");
+    expect(signed).toHaveLength(1);
+    expect(signed[0]!.instructions).toHaveLength(1);
+    expect(signed[0]!.instructions[0]!.programId.equals(programId)).toBe(true);
+    for (const instruction of signed[0]!.instructions) {
+      expect(instruction.programId.equals(ASSOCIATED_TOKEN_PROGRAM_ID)).toBe(false);
+    }
+  });
+
+  it("creates NOTHING for a leg whose route cannot be fetched, and never asks whether its account exists", async () => {
+    // THE ORDER IS THE BUG. The old turn created the leg's associated token
+    // account and only then went looking for a route; a leg with no live swap
+    // left a paid-for account behind on every sweep. Conversion is off here, so
+    // the only thing this turn can do is buy: 250 USDC, three legs, deep pools,
+    // and a pool whose history holds no swap at all.
+    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    let usdcAta: PublicKey | undefined;
+    const { vault, connection, program, calls } = chainWith({}, { legs: basket.legs, minConvertRateWad: 0n }, {
+      getMinimumBalanceForRentExemption: async () => 2_000_000,
+      getTokenAccountBalance: async (address) => {
+        if (usdcAta === undefined || !(address as PublicKey).equals(usdcAta)) throw new Error("could not find account");
+        return { context: { slot: 1 }, value: { amount: "250000000", decimals: 6, uiAmount: 250 } };
+      },
+      getSignaturesForAddress: async () => [],
+    }, true, basket.accounts);
+    usdcAta = getAssociatedTokenAddressSync(USDC_MINT, vault, true, TOKEN_PROGRAM_ID);
+    const result = await runInvestTick({
+      connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+    });
+
+    expect(result.outcome).toBe("FAILED");
+    expect(result.detail).toContain("no recent swap_v2 found on pool");
+    expect(result.purchases).toBeUndefined();
+    // Three reads, and they are the ones that were there before this fix: the
+    // vault + Clock + feeds, the leg mints + pools, and the pools' vaults. The
+    // candidate token accounts were never read, because no account was ever
+    // going to be created for a leg that has nowhere to trade.
+    expect(calls.filter((name) => name === "getMultipleAccountsInfo")).toHaveLength(3);
+    expect(calls.filter((name) => name === "getSignaturesForAddress")).toHaveLength(1);
+    for (const rpc of ["getLatestBlockhash", "sendTransaction", "sendRawTransaction"]) expect(calls).not.toContain(rpc);
+  });
+
+  it("no longer holds the call that sent a transaction per account, whatever else the file grows", () => {
+    // The SHAPE of the fix, pinned in the source the way the wedge is in
+    // measure-window.test.ts. createAssociatedTokenAccountIdempotent is the
+    // ACTION: it builds a transaction and sends it, every call, and nothing
+    // about its name says so. Its instruction is what belongs here.
+    const source = readFileSync(new URL("../src/invest-tick.ts", import.meta.url), "utf8");
+    expect(source).not.toContain("createAssociatedTokenAccountIdempotent(");
+    expect(source).toContain("createAssociatedTokenAccountIdempotentInstruction(");
+  });
+
   function linkTo(vault: PublicKey): ManagedLink {
     return { linkAddress: key(), wallet: key(), vault, epoch: 300_000_000n, settlementNonce: 0n, frontierSlot: 0n };
   }
@@ -965,12 +1155,17 @@ describe("the ticks' first steps, over the same bytes", () => {
       "getBalance",
       "getMinimumBalanceForRentExemption",
     ]);
+    // THE VERSION THE READ ASKS FOR IS THE PACKAGE'S ONE ANSWER, not a literal
+    // repeated here: `maxSupportedTransactionVersion: 0` refuses — with a THROW
+    // — every transaction above version 0, which is what killed a whole walk at
+    // its first versioned transaction (measure-window.test.ts).
     expect(callArgs.slice(3, 7)).toEqual([
-      ["link-0", { maxSupportedTransactionVersion: 0, commitment: "finalized" }],
-      ["trade-5", { maxSupportedTransactionVersion: 0, commitment: "finalized" }],
+      ["link-0", { maxSupportedTransactionVersion: MAX_SUPPORTED_TRANSACTION_VERSION, commitment: "finalized" }],
+      ["trade-5", { maxSupportedTransactionVersion: MAX_SUPPORTED_TRANSACTION_VERSION, commitment: "finalized" }],
       ["confirmed"],
       ["confirmed"],
     ]);
+    expect(MAX_SUPPORTED_TRANSACTION_VERSION).toBeGreaterThan(0);
     expect(callArgs[8]).toEqual([link.wallet, "confirmed"]);
   });
 });

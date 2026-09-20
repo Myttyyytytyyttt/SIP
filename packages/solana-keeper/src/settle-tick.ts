@@ -39,7 +39,7 @@ import { summarizeUpstreamError } from "@sip/solana-log";
 import { readSettlementNonce, type VaultState } from "./accounts.js";
 import type { ManagedLink } from "./discovery.js";
 import { idl } from "./idl.js";
-import { connectionReader, measureSince } from "./measure-window.js";
+import { connectionReader, measureSince, readTransaction } from "./measure-window.js";
 import { method } from "./methods.js";
 import { assertSettleShape, type SolanaWalletSubmitter } from "./privy-signer.js";
 import { MODE_PROFIT, MODE_VOLUME, attestationInstruction, attestationMessage, type AttestationInputs } from "./program-scripts.js";
@@ -528,10 +528,11 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   let settled: bigint | null = null;
   let receiptErr: TransactionError | null = null;
   try {
-    const receipt = await connection.getTransaction(signature, {
-      maxSupportedTransactionVersion: 0,
-      commitment: "confirmed",
-    });
+    // THROUGH THE SHARED READER, so this receipt and the walk agree about which
+    // transaction versions exist. Our own settle is a legacy message and would
+    // have been readable either way — but the version contract belongs in one
+    // place, or the next read added here quietly gets it wrong again.
+    const receipt = await readTransaction(connection, signature, "confirmed");
     // A second, independent read of success: the receipt's own meta.err. If it
     // is set, the tx did NOT settle, even though its status said it did.
     if (receipt?.meta?.err != null) receiptErr = receipt.meta.err;

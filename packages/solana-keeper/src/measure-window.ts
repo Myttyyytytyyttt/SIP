@@ -16,6 +16,7 @@
 // lamports. Pure System/ComputeBudget transfers are external flows; everything
 // else (Jupiter, pump.fun, Raydium, anything) is trading and counts.
 
+import { SolanaJSONRPCErrorCode } from "@solana/web3.js";
 import type { Connection, Finality, PublicKey, VersionedMessage, VersionedTransactionResponse } from "@solana/web3.js";
 
 // Programs whose presence NEVER means trading: the System/ComputeBudget pair,
@@ -146,6 +147,82 @@ export interface LedgerReader {
   transaction(signature: string, commitment: Finality): Promise<VersionedTransactionResponse | null>;
 }
 
+/**
+ * The highest transaction message version this keeper asks the RPC for, and the
+ * highest its own client can decode.
+ *
+ * `maxSupportedTransactionVersion: 0` DOES NOT MEAN "give me what you can". It
+ * is a contract with the node, and a transaction ABOVE the number given is not
+ * degraded and is not returned as null: the node answers JSON-RPC error -32015,
+ * and web3.js turns that into a thrown SolanaJSONRPCError. So one such
+ * transaction anywhere in a window did not cost that transaction — it killed
+ * the whole walk, at the first one, before anything above it was read.
+ *
+ * THAT IS NOT HYPOTHETICAL AND IT IS NOT RARE. Of 84 good transactions measured
+ * against the SPYx pool on 2026-09-20, 71 were version 1, all from one bot. The
+ * exposure that matters is not the pool but the SETTLE path: a linked wallet
+ * that trades against any such venue could not be measured at all, and the
+ * measurement is what a user's contribution is computed from. A wallet like that
+ * would have reported an error every sweep, forever, and saved nothing.
+ *
+ * 1, BECAUSE 1 IS WHAT THIS CLIENT UNDERSTANDS. @solana/web3.js 1.99 builds a
+ * MessageV1 from a version 1 response and a MessageV0 from a version 0 one
+ * (versionedMessageFromResponse); a version 2 response would be handed to the
+ * LEGACY Message constructor, which is quietly wrong and worse than an error. So
+ * the number asked for is exactly the number that can be decoded faithfully, and
+ * raising it is a decision to make when the library can decode more — not before.
+ */
+export const MAX_SUPPORTED_TRANSACTION_VERSION = 1;
+
+/**
+ * Whether an error is the node refusing a transaction NEWER than the version
+ * asked for, rather than anything else that can go wrong in a read.
+ *
+ * TOLD APART ON PURPOSE. Swallowing every error here would turn a throttled or
+ * dead endpoint into "the chain holds transactions we cannot decode", which is a
+ * claim about the USER when the truth is about our RPC — the same confusion the
+ * unfetchable counter exists to prevent. Only this one error is absorbed;
+ * everything else still throws and still reaches the sweep's error path.
+ *
+ * The code is the library's own. The message is checked too because a pooled or
+ * proxied endpoint can re-wrap the error and lose the code, and the node's words
+ * name the very parameter that caused it.
+ */
+export function isUnsupportedTransactionVersion(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  if ((error as { readonly code?: unknown }).code === SolanaJSONRPCErrorCode.JSON_RPC_SERVER_ERROR_UNSUPPORTED_TRANSACTION_VERSION) return true;
+  return error instanceof Error && /maxSupportedTransactionVersion/i.test(error.message);
+}
+
+/**
+ * THE ONE PLACE THIS PACKAGE READS A TRANSACTION. Both readers go through it —
+ * the walk's (connectionReader, below) and the settle's own receipt
+ * (settle-tick.ts) — so the version contract cannot be right in one and wrong in
+ * the other, which is exactly how it was.
+ *
+ * A version even this client cannot decode comes back as NULL, the same answer a
+ * throttling RPC gives. That is deliberate: null is counted as `unfetchable`,
+ * which makes the measurement INCOMPLETE and refuses the settle in words an
+ * operator can act on, instead of throwing this link — and every link behind it
+ * in the sweep — off the turn. A window is never measured from a transaction
+ * nobody read.
+ */
+export async function readTransaction(
+  connection: Connection,
+  signature: string,
+  commitment: Finality,
+): Promise<VersionedTransactionResponse | null> {
+  try {
+    // Written as a literal at the call site: the config object is what selects
+    // web3.js's VERSIONED overload, and a variable would resolve to the legacy
+    // one and type the answer as a transaction that cannot be versioned.
+    return await connection.getTransaction(signature, { maxSupportedTransactionVersion: MAX_SUPPORTED_TRANSACTION_VERSION, commitment });
+  } catch (error) {
+    if (!isUnsupportedTransactionVersion(error)) throw error;
+    return null;
+  }
+}
+
 export function connectionReader(connection: Connection): LedgerReader {
   return {
     signatures: (wallet, options, commitment) =>
@@ -154,7 +231,7 @@ export function connectionReader(connection: Connection): LedgerReader {
         options.before === undefined ? { limit: options.limit } : { before: options.before, limit: options.limit },
         commitment,
       ),
-    transaction: (signature, commitment) => connection.getTransaction(signature, { maxSupportedTransactionVersion: 0, commitment }),
+    transaction: (signature, commitment) => readTransaction(connection, signature, commitment),
   };
 }
 

@@ -17,8 +17,11 @@ import {
   Connection,
   Ed25519Program,
   Keypair,
+  MessageV1,
   PublicKey,
   SendTransactionError,
+  SolanaJSONRPCError,
+  SolanaJSONRPCErrorCode,
   VersionedTransaction,
   type Finality,
   type Message,
@@ -30,6 +33,7 @@ import type { VaultState } from "../src/accounts.js";
 import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import { assertSettleShape, type SolanaWalletSubmitter } from "../src/privy-signer.js";
+import { MAX_SUPPORTED_TRANSACTION_VERSION } from "../src/measure-window.js";
 import { attestationMessage } from "../src/program-scripts.js";
 import { attestationInputs, type CarryBook, type LossCarry } from "../src/settle-decision.js";
 import { CONFIRM_POLL_MS, CONFIRM_TIMEOUT_MS, runSettleTick, type SettleDeps, type SettleResult } from "../src/settle-tick.js";
@@ -396,6 +400,82 @@ describe("a live settle", () => {
     });
     expect(result).toMatchObject({ outcome: "SETTLED", settledLamports: BigInt(PAID - 1), expectedLamports: BigInt(PAID) });
     expect(result.detail).toContain(`WARNING: the vault moved ${PAID - 1} lamports, not the ${PAID}`);
+  });
+
+  // ── the receipt, when the node serves it as a versioned transaction ────────
+  //
+  // This read used to carry maxSupportedTransactionVersion: 0, which is not
+  // "give me what you can" — a transaction above it is refused with JSON-RPC
+  // -32015, and web3.js throws. Our own settle is a legacy message, so this path
+  // was not the one losing money; the walk was. It is pinned here because both
+  // reads now go through one helper, and a test that only covers the walk lets
+  // the next read added here get the contract wrong again.
+
+  /**
+   * The chain's connection with its CONFIRMED receipt served as a version
+   * `version` transaction, honouring the contract the way agave does: a read
+   * asking for less is refused rather than degraded. The finalized reads the
+   * walk makes are passed straight through.
+   */
+  function versionedReceipt(c: ReturnType<typeof chain>, version: number) {
+    const asked: number[] = [];
+    const receiptOf = c.connection.getTransaction.bind(c.connection);
+    const connection = new Proxy(c.connection, {
+      get(target, prop) {
+        if (prop !== "getTransaction") return (target as unknown as Record<string | symbol, unknown>)[prop];
+        return async (signature: string, config: { maxSupportedTransactionVersion: number; commitment: Finality }) => {
+          if (config.commitment === "finalized") return receiptOf(signature, config as never);
+          asked.push(config.maxSupportedTransactionVersion);
+          if (version > config.maxSupportedTransactionVersion) {
+            throw new SolanaJSONRPCError(
+              {
+                code: SolanaJSONRPCErrorCode.JSON_RPC_SERVER_ERROR_UNSUPPORTED_TRANSACTION_VERSION,
+                message:
+                  `Transaction version (${version}) is not supported by the requesting client. Please try the request again ` +
+                  `with the following configuration parameter: "maxSupportedTransactionVersion": ${version}`,
+              },
+              "failed to get transaction",
+            );
+          }
+          const answer = (await receiptOf(signature, config as never))!;
+          const legacy = answer.transaction.message as Message;
+          // The same keys and the same balances, in a version 1 message: what
+          // the turn reads out of a receipt is the vault's pre/post, and it must
+          // read them through whichever message version the node hands back.
+          const message = new MessageV1({
+            header: legacy.header,
+            staticAccountKeys: legacy.staticAccountKeys,
+            recentBlockhash: legacy.recentBlockhash,
+            compiledInstructions: [],
+            transactionConfig: { computeUnitLimit: 200_000, heapSize: null, loadedAccountsDataSizeLimit: null, priorityFee: 5_000 },
+          });
+          return { ...answer, version, transaction: { ...answer.transaction, message } };
+        };
+      },
+    }) as Connection;
+    return { connection, asked };
+  }
+
+  it("reads a version 1 receipt and reports what the vault really moved", async () => {
+    const c = chain();
+    const node = versionedReceipt(c, 1);
+    const result = await runSettleTick(c.deps({ connection: node.connection }));
+    expect(result).toMatchObject({ outcome: "SETTLED", settledLamports: BigInt(PAID), expectedLamports: BigInt(PAID), signature: SIGNATURE });
+    expect(result.detail).toContain(`settled ${PAID} lamports from 1000000000 measured over 1 txs`);
+    expect(result.detail).not.toContain("receipt not read in time");
+    expect(node.asked).toEqual([MAX_SUPPORTED_TRANSACTION_VERSION]);
+  });
+
+  it("never turns a landed settle into a failure over a receipt even this client cannot decode", async () => {
+    const c = chain();
+    const node = versionedReceipt(c, 2);
+    const result = await runSettleTick(c.deps({ connection: node.connection }));
+    // The settle LANDED. Its amount is unknown and said to be unknown; the
+    // outcome is the chain's, not the reader's.
+    expect(result).toMatchObject({ outcome: "SETTLED", expectedLamports: BigInt(PAID), signature: SIGNATURE });
+    expect(result.settledLamports).toBeUndefined();
+    expect(result.detail).toContain("the vault delta is on chain, its receipt not read in time");
+    expect(node.asked).toEqual([MAX_SUPPORTED_TRANSACTION_VERSION]);
   });
 });
 

@@ -32,12 +32,13 @@ import {
   SYSVAR_CLOCK_PUBKEY,
   SystemProgram,
   Transaction,
+  type TransactionInstruction,
 } from "@solana/web3.js";
 import {
   NATIVE_MINT,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
-  createAssociatedTokenAccountIdempotent,
+  createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
 import { summarizeUpstreamError } from "@sip/solana-log";
@@ -391,16 +392,43 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   });
   if (!depth.deep) return { outcome: depth.outcome, detail: depth.detail };
 
+  // ── the token accounts this turn may have to create ────────────────────────
+  //
+  // THE ATA STORM. createAssociatedTokenAccountIdempotent sends a TRANSACTION of
+  // its own on every call: the INSTRUCTION is idempotent on chain, the 5,000
+  // lamports are not, and the call was made whether or not the account already
+  // existed. This turn used to open with two of them and then send one more per
+  // leg — for a three-leg basket, five transactions before a single lamport of
+  // the owner's money moved, every sweep, forever. Of 27 signatures on the live
+  // vault on 2026-09-20, 17 were exactly that, and they pushed the real settle
+  // off the first page of the dashboard's history.
+  //
+  // TWO THINGS WERE WRONG AND BOTH ARE FIXED HERE. Accounts were created that
+  // were not needed: now ONE getMultipleAccountsInfo reads every candidate at
+  // once and only the genuinely absent ones are created. And they were created
+  // before the turn knew it could proceed: now no create is ever sent on its
+  // own — each one rides the very transaction that uses the account, so it
+  // happens if and only if that transaction happens, after the route is in hand
+  // and every refusal gate above has passed. A turn that refuses, or rests on
+  // the per-leg minimum, now creates nothing and reads nothing.
+  //
+  // IDEMPOTENCY IS KEPT, AND IT IS WHAT MAKES THE READ SAFE. The instruction is
+  // still the idempotent one, so an account created by anyone between the read
+  // and the send is a no-op rather than a failed basket.
+  const legAtas = policy.legs.map((leg) => getAssociatedTokenAddressSync(leg.mint, vault, true, TOKEN_2022_PROGRAM_ID));
+  const plan = tokenAccountPlan(connection, crank.publicKey, vault, [
+    { address: wsolAta, mint: NATIVE_MINT, programId: TOKEN_PROGRAM_ID },
+    { address: usdcAta, mint: USDC, programId: TOKEN_PROGRAM_ID },
+    ...policy.legs.map((leg, index) => ({ address: legAtas[index]!, mint: leg.mint, programId: TOKEN_2022_PROGRAM_ID })),
+  ]);
+
   const purchases: InvestPurchase[] = [];
   try {
     // ── wrap + convert, if conversion is on and there is SOL worth moving ──
     if (converts) {
-      await createAssociatedTokenAccountIdempotent(connection, crank, NATIVE_MINT, vault, undefined, TOKEN_PROGRAM_ID, undefined, true);
-      await createAssociatedTokenAccountIdempotent(connection, crank, USDC, vault, undefined, TOKEN_PROGRAM_ID, undefined, true);
       // THE CRANK'S BALANCE NOW, NOT THE SNAPSHOT'S. Every earlier turn in this
-      // sweep paid its fees and token-account rent out of it, and so did the two
-      // accounts just above, so the top of the sweep can promise a wrap the
-      // crank no longer covers.
+      // sweep paid its fees and token-account rent out of it, so the top of the
+      // sweep can promise a wrap the crank no longer covers.
       const wrap = wrapPlan({ free, crankLamports: BigInt(await connection.getBalance(crank.publicKey, "confirmed")) });
       found.wrap = wrapReport(wrap, 0n);
       // Only if there is new SOL worth wrapping and a crank to front it.
@@ -410,11 +438,17 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         // The policy goes in by name: wrap_sol loads it and refuses a vault
         // whose policy is disabled or names no conversion floor, both of which
         // this turn ruled out before it got here.
+        //
+        // AND THE wSOL ACCOUNT IS CREATED IN THIS SAME TRANSACTION when it is
+        // missing, rather than in one of its own beforehand: wrap_sol is the
+        // first instruction that needs it, and an account created here is an
+        // account this turn certainly used.
         await method(program, "wrapSol")(new anchor.BN(wrap.amount.toString()))
           .accountsPartial({
             crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta,
             tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
           })
+          .preInstructions(await plan.createsFor(wsolAta))
           .signers([crank])
           .rpc();
         found.wrap = wrapReport(wrap, wrap.amount);
@@ -454,11 +488,17 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         // output is credited in full and the observed rate needs no fee taken off.
         const { minOut } = tightenMinOut(toConvert, convertFloor, route.observed, NO_TRANSFER_FEE);
         const args = { payer: vault, inputTokenAccount: wsolAta, outputTokenAccount: usdcAta, amountIn: toConvert, minAmountOut: minOut };
-        await sendWithBudget(program.provider as anchor.AnchorProvider, crank,
+        // The USDC account is created HERE when it is missing — inside the swap
+        // that credits it, and only now that the route is in hand and the oracle
+        // has agreed with it. A convert the oracle rested leaves no account
+        // behind, which is the whole point.
+        await sendWithBudget(program.provider as anchor.AnchorProvider, crank, [
+          ...(await plan.createsFor(usdcAta)),
           await method(program, "convert")(new anchor.BN(toConvert.toString()), new anchor.BN(minOut.toString()), buildSwapV2Data(args))
             .accountsPartial({ crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta, vaultIn: usdcAta, venueProgram: RAYDIUM_CLMM })
             .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
-            .instruction());
+            .instruction(),
+        ]);
         if (toConvert < held) found.converted = `converted ${toConvert} of ${held} wSOL; ${held - toConvert} left for later sweeps`;
       }
     }
@@ -528,7 +568,12 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
 
       const mint = leg.mint;
       const pool = deps.pools.get(mint.toBase58())!;
-      const targetAta = await createAssociatedTokenAccountIdempotent(connection, crank, mint, vault, undefined, TOKEN_2022_PROGRAM_ID, undefined, true);
+      // DERIVED, NOT CREATED. The address is arithmetic over the mint and the
+      // vault, so it costs nothing; whether the account EXISTS came out of the
+      // plan's one batched read, and if it does not, the create rides the invest
+      // below rather than a transaction of its own sent before the route was
+      // even fetched.
+      const targetAta = legAtas[index]!;
 
       const route = await fetchLiveRoute(connection, pool, USDC, mint, TOKEN_2022_PROGRAM_ID);
       const investFloor = (amountIn * leg.minOutRateWad) / 10n ** 18n;
@@ -540,12 +585,16 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       anyLive = anyLive || live;
 
       const args = { payer: vault, inputTokenAccount: usdcAta, outputTokenAccount: targetAta, amountIn, minAmountOut: minOut };
+      // An account that does not exist yet holds nothing, which balanceOf already
+      // reports as zero, so the delta below is the purchase either way.
       const before = await balanceOf(connection, targetAta);
-      const signature = await sendWithBudget(program.provider as anchor.AnchorProvider, crank,
+      const signature = await sendWithBudget(program.provider as anchor.AnchorProvider, crank, [
+        ...(await plan.createsFor(targetAta)),
         await method(program, "invest")(index, new anchor.BN(amountIn.toString()), new anchor.BN(minOut.toString()), buildSwapV2Data(args))
           .accountsPartial({ crank: crank.publicKey, vault, policy: policyPda, vaultIn: usdcAta, vaultTarget: targetAta, targetMint: mint, venueProgram: RAYDIUM_CLMM })
           .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
-          .instruction());
+          .instruction(),
+      ]);
       const bought = (await balanceOf(connection, targetAta)) - before;
       filled.push(`${Number(weight) / 100}% ${mint.toBase58().slice(0, 8)}… ${amountIn}→${bought}`);
       purchases.push({
@@ -631,7 +680,12 @@ function shortfall(plan: WrapPlan, crankRead: boolean): string {
 async function sendWithBudget(
   provider: anchor.AnchorProvider,
   crank: Keypair,
-  instruction: anchor.web3.TransactionInstruction,
+  /**
+   * The instructions of one transaction, in order. A list rather than a single
+   * instruction because a missing token account is created INSIDE the
+   * transaction that uses it (tokenAccountPlan) instead of in one of its own.
+   */
+  instructions: readonly anchor.web3.TransactionInstruction[],
 ): Promise<string> {
   // A LIMIT WITHOUT A PRICE IS NOT A BID. Setting only the unit limit told the
   // scheduler how much room to reserve and offered nothing for it, so under
@@ -639,9 +693,67 @@ async function sendWithBudget(
   // no retry anywhere. The price is small in absolute terms (600k units at
   // 10_000 micro-lamports is 6_000 lamports, on top of the 5_000-lamport
   // signature fee) and buys inclusion when it matters.
+  //
+  // 600_000 UNITS COVERS THE CREATE TOO. An idempotent associated-token-account
+  // creation costs on the order of 25k units — under 5% of this budget, and
+  // nothing next to the CLMM swap it rides with.
   const tx = new Transaction()
     .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }))
     .add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10_000 }))
-    .add(instruction);
+    .add(...instructions);
   return provider.sendAndConfirm(tx, [crank]);
+}
+
+/** One token account a turn may need, and what it would take to create it. */
+interface TokenAccountNeed {
+  readonly address: PublicKey;
+  readonly mint: PublicKey;
+  readonly programId: PublicKey;
+}
+
+/**
+ * The token accounts an invest turn may have to create: read ONCE, in one
+ * request, and created only inside the transactions that actually use them.
+ *
+ * THE READ IS LAZY ON PURPOSE. It happens at the first transaction this turn is
+ * about to send, not at the top: a turn that refuses on depth, on admission or
+ * on the per-leg minimum sends nothing, so it should ask the chain nothing
+ * either. It happens exactly once per turn however many accounts are wanted —
+ * one getMultipleAccountsInfo for the vault's wSOL account, its USDC account and
+ * every leg's target.
+ *
+ * AN ACCOUNT NAMED IS AN ACCOUNT SPOKEN FOR. Once its create has been handed to
+ * a transaction it is struck off, so two transactions in the same turn that want
+ * the same account do not both carry a create for it.
+ *
+ * A read that says an account exists when it does not would cost this turn one
+ * failed transaction, and the turn is retried next sweep. A read that says an
+ * account is missing when it exists costs nothing at all: the instruction is the
+ * IDEMPOTENT one, and that is also what makes a race — anyone creating the
+ * account between this read and the send — a no-op rather than a broken basket.
+ */
+function tokenAccountPlan(connection: Connection, payer: PublicKey, owner: PublicKey, needs: readonly TokenAccountNeed[]) {
+  const byAddress = new Map(needs.map((need) => [need.address.toBase58(), need] as const));
+  let missing: Set<string> | null = null;
+  return {
+    /** The create instructions to put in front of the transaction about to use `addresses` — none, once the accounts exist. */
+    async createsFor(...addresses: readonly PublicKey[]): Promise<TransactionInstruction[]> {
+      if (missing === null) {
+        const wanted = [...byAddress.values()];
+        const infos = await connection.getMultipleAccountsInfo(wanted.map((need) => need.address), "confirmed");
+        missing = new Set(
+          wanted.filter((_, index) => infos[index] === null || infos[index] === undefined).map((need) => need.address.toBase58()),
+        );
+      }
+      const creates: TransactionInstruction[] = [];
+      for (const address of addresses) {
+        const name = address.toBase58();
+        if (!missing.has(name)) continue;
+        const need = byAddress.get(name)!;
+        creates.push(createAssociatedTokenAccountIdempotentInstruction(payer, need.address, owner, need.mint, need.programId));
+        missing.delete(name);
+      }
+      return creates;
+    },
+  };
 }

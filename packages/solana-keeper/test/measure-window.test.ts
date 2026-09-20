@@ -13,14 +13,28 @@
 // zero settle, it nets against the win above, and two windows charge what one would.
 
 import { readFileSync } from "node:fs";
-import { Keypair, PublicKey } from "@solana/web3.js";
+import {
+  Keypair,
+  MessageV0,
+  MessageV1,
+  PublicKey,
+  SolanaJSONRPCError,
+  SolanaJSONRPCErrorCode,
+  type Connection,
+  type Finality,
+  type TransactionVersion,
+  type VersionedTransactionResponse,
+} from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 import {
   MAX_SIGNATURES,
   MAX_SIGNATURE_PAGES,
+  MAX_SUPPORTED_TRANSACTION_VERSION,
   SIGNATURE_PAGE_LIMIT,
+  connectionReader,
   isExternalFlowTx,
+  isUnsupportedTransactionVersion,
   measureSince,
   oldestCompletePrefix,
 } from "../src/measure-window.js";
@@ -599,5 +613,200 @@ describe("the zero-base cadence counts only what the wallet signed", () => {
 
     // THE VECTOR, PINNED: with the carry forgotten, the buy never nets, and the sell is charged whole.
     expect(await decideFromMeasurement(second, ctx(800n, 10_000n))).toEqual({ kind: "settle", baseLamports: 10_500_000n, endSlot: 823n });
+  });
+});
+
+// ── versioned transactions ──────────────────────────────────────────────────
+//
+// The fake ledger above serves the walk through its own LedgerReader, which is
+// the right shape for testing the WALK and cannot see this bug at all: the bug
+// is in what connectionReader asks the node for. So these run the real
+// connectionReader against a node that enforces maxSupportedTransactionVersion
+// exactly as a Solana RPC does — a transaction above the number asked for is
+// not degraded and not null, it is JSON-RPC error -32015, which web3.js throws.
+//
+// Measured on 2026-09-20: of 84 good transactions on the SPYx pool, 71 were
+// version 1, all from one bot. A linked wallet trading against a venue like
+// that made the whole measurement throw at the first one — and the measurement
+// is what a user's contribution is computed from.
+
+describe("a window that holds a versioned transaction", () => {
+  const trader = Keypair.generate().publicKey;
+  const JUP = new PublicKey(JUPITER);
+
+  interface NodeEntry {
+    readonly signature: string;
+    readonly slot: number;
+    readonly pre: number;
+    readonly post: number;
+    readonly version: TransactionVersion;
+    readonly programs?: readonly PublicKey[];
+  }
+
+  /** One transaction as a node serves it, at the entry's own message version. */
+  function response(entry: NodeEntry): VersionedTransactionResponse {
+    const programs = entry.programs ?? [JUP];
+    const staticAccountKeys = [trader, ...programs];
+    const header = { numRequiredSignatures: 1, numReadonlySignedAccounts: 0, numReadonlyUnsignedAccounts: programs.length };
+    const recentBlockhash = PublicKey.default.toBase58();
+    const compiledInstructions = programs.map((_, index) => ({ programIdIndex: 1 + index, accountKeyIndexes: [0], data: new Uint8Array() }));
+    const message =
+      entry.version === 1
+        ? new MessageV1({
+            header,
+            staticAccountKeys,
+            recentBlockhash,
+            compiledInstructions,
+            // What a v1 message carries INSTEAD of ComputeBudget instructions,
+            // and the field web3.js refuses to build a MessageV1 without.
+            transactionConfig: { computeUnitLimit: 200_000, heapSize: null, loadedAccountsDataSizeLimit: null, priorityFee: 5_000 },
+          })
+        : new MessageV0({ header, staticAccountKeys, recentBlockhash, compiledInstructions, addressTableLookups: [] });
+    const balances = (lamports: number) => staticAccountKeys.map((key) => (key.equals(trader) ? lamports : 1));
+    return {
+      slot: entry.slot,
+      version: entry.version,
+      blockTime: null,
+      transaction: { message, signatures: [entry.signature] },
+      meta: {
+        err: null,
+        fee: 5_000,
+        preBalances: balances(entry.pre),
+        postBalances: balances(entry.post),
+        innerInstructions: [],
+        loadedAddresses: { writable: [], readonly: [] },
+        logMessages: [],
+      },
+    };
+  }
+
+  /**
+   * A node that honours the version contract the way agave does, and records
+   * what each read asked for. `failWith` replaces the version refusal with
+   * something else, to prove only the version error is absorbed.
+   */
+  function node(entries: readonly NodeEntry[], failWith?: Error) {
+    const asked: { readonly signature: string; readonly maxSupportedTransactionVersion: number; readonly commitment: Finality }[] = [];
+    const newestFirst = [...entries].reverse();
+    const connection = {
+      getSignaturesForAddress: async (_address: PublicKey, options: { readonly before?: string; readonly limit: number }) => {
+        const start = options.before === undefined ? 0 : newestFirst.findIndex((entry) => entry.signature === options.before) + 1;
+        return newestFirst.slice(start, start + options.limit).map(({ signature, slot }) => ({ signature, slot, err: null, memo: null }));
+      },
+      getTransaction: async (signature: string, config: { maxSupportedTransactionVersion: number; commitment: Finality }) => {
+        asked.push({ signature, ...config });
+        const entry = entries.find((candidate) => candidate.signature === signature)!;
+        const version = entry.version === "legacy" ? -1 : entry.version;
+        if (version > config.maxSupportedTransactionVersion) {
+          if (failWith !== undefined) throw failWith;
+          throw new SolanaJSONRPCError(
+            {
+              code: SolanaJSONRPCErrorCode.JSON_RPC_SERVER_ERROR_UNSUPPORTED_TRANSACTION_VERSION,
+              message:
+                `Transaction version (${version}) is not supported by the requesting client. Please try the request again ` +
+                `with the following configuration parameter: "maxSupportedTransactionVersion": ${version}`,
+            },
+            "failed to get transaction",
+          );
+        }
+        return response(entry);
+      },
+    } as unknown as Connection;
+    return { connection, asked };
+  }
+
+  it("is MEASURED, not thrown on: the read asks for the highest version this client can decode", async () => {
+    const chain = node([
+      { signature: "anchor-500", slot: 500, pre: 1_000_000, post: 1_000_000, version: "legacy" },
+      // The bot's own shape: a version 1 message, which under the old config
+      // killed the walk here and took every transaction above it with it.
+      { signature: "trade-505", slot: 505, pre: 1_000_000, post: 1_400_000, version: 1 },
+      { signature: "trade-510", slot: 510, pre: 1_400_000, post: 1_250_000, version: 0 },
+    ]);
+    const measured = await measureSince(connectionReader(chain.connection), trader, 500n, settleProgram);
+
+    expect(measured).toMatchObject({
+      frontierReached: true,
+      txCount: 2,
+      unfetchable: 0,
+      chainBreaks: 0,
+      walletSignedTxCount: 2,
+      successfulTradeCount: 2,
+      firstSlot: 505n,
+      lastSlot: 510n,
+      profitLamports: 250_000n,
+    });
+    // THE CONFIG IS THE FIX. Every read — the anchor's and the window's — asks
+    // for 1, and asks at finalized.
+    expect(chain.asked).toEqual(
+      ["anchor-500", "trade-505", "trade-510"].map((signature) => ({
+        signature,
+        maxSupportedTransactionVersion: MAX_SUPPORTED_TRANSACTION_VERSION,
+        commitment: "finalized",
+      })),
+    );
+    expect(MAX_SUPPORTED_TRANSACTION_VERSION).toBe(1);
+  });
+
+  it("the OLD config would have thrown on the very same window, which is the regression", async () => {
+    const chain = node([
+      { signature: "anchor-500", slot: 500, pre: 1_000_000, post: 1_000_000, version: "legacy" },
+      { signature: "trade-505", slot: 505, pre: 1_000_000, post: 1_400_000, version: 1 },
+    ]);
+    // Exactly what src/measure-window.ts used to send. Not a claim about the
+    // stub: this is the stub's contract, and the assertion above is that the
+    // keeper no longer sends it.
+    await expect(chain.connection.getTransaction("trade-505", { maxSupportedTransactionVersion: 0, commitment: "finalized" })).rejects.toThrow(
+      /maxSupportedTransactionVersion/,
+    );
+  });
+
+  it("counts a version even THIS client cannot decode as unfetchable, refuses the window, and never throws the sweep", async () => {
+    // Version 2 does not exist on mainnet yet. When it does, web3.js 1.99 would
+    // hand its response to the LEGACY Message constructor, so the read asks for
+    // 1 and absorbs the refusal: the window is INCOMPLETE and says so, rather
+    // than throwing this link and every link behind it out of the sweep.
+    const chain = node([
+      { signature: "anchor-500", slot: 500, pre: 1_000_000, post: 1_000_000, version: "legacy" },
+      { signature: "trade-505", slot: 505, pre: 1_000_000, post: 1_400_000, version: 2 as TransactionVersion },
+      { signature: "trade-510", slot: 510, pre: 1_400_000, post: 1_250_000, version: 0 },
+    ]);
+    const measured = await measureSince(connectionReader(chain.connection), trader, 500n, settleProgram);
+
+    expect(measured).toMatchObject({ frontierReached: true, signaturesAbove: 2, unfetchable: 1, txCount: 1 });
+    // The one it COULD read is still read: the refusal costs that transaction,
+    // not the walk.
+    expect(chain.asked.map((read) => read.signature)).toEqual(["anchor-500", "trade-505", "trade-510"]);
+    expect(await decideFromMeasurement(measured, at500)).toMatchObject({ kind: "stop", outcome: "INCOMPLETE" });
+  });
+
+  it("still throws on every OTHER error, so a dead endpoint is never reported as the user's own history", async () => {
+    const dead = node(
+      [
+        { signature: "anchor-500", slot: 500, pre: 1_000_000, post: 1_000_000, version: "legacy" },
+        { signature: "trade-505", slot: 505, pre: 1_000_000, post: 1_400_000, version: 2 as TransactionVersion },
+      ],
+      new SolanaJSONRPCError({ code: SolanaJSONRPCErrorCode.JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY, message: "Node is unhealthy" }, "failed to get transaction"),
+    );
+    await expect(measureSince(connectionReader(dead.connection), trader, 500n, settleProgram)).rejects.toThrow(/unhealthy/i);
+  });
+
+  it("tells the version refusal from everything else, by the node's code and by its words", () => {
+    const versionError = new SolanaJSONRPCError(
+      {
+        code: SolanaJSONRPCErrorCode.JSON_RPC_SERVER_ERROR_UNSUPPORTED_TRANSACTION_VERSION,
+        message: 'Transaction version (1) is not supported by the requesting client.',
+      },
+      "failed to get transaction",
+    );
+    expect(isUnsupportedTransactionVersion(versionError)).toBe(true);
+    // A pool or proxy that re-wraps the error loses the code; the node's words
+    // name the parameter, and they survive.
+    expect(isUnsupportedTransactionVersion(new Error('try again with "maxSupportedTransactionVersion": 1'))).toBe(true);
+
+    expect(isUnsupportedTransactionVersion(new Error("fetch failed"))).toBe(false);
+    expect(isUnsupportedTransactionVersion(new SolanaJSONRPCError({ code: -32005, message: "Node is unhealthy" }))).toBe(false);
+    expect(isUnsupportedTransactionVersion(null)).toBe(false);
+    expect(isUnsupportedTransactionVersion("429 Too Many Requests")).toBe(false);
   });
 });
