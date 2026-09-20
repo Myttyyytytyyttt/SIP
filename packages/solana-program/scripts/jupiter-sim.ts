@@ -157,7 +157,14 @@ function decodeSimulatedAccount(
   address: PublicKey,
   account: SimulatedTransactionAccountInfo | null,
 ): { readonly amount: bigint; readonly withheld: bigint } {
-  if (account === null) return { amount: 0n, withheld: 0n };
+  // AFTER a successful simulation both accounts exist: the source is a funded
+  // ATA and the destination is created idempotently in the same transaction.
+  // A null here is the simulator not telling us the balance, and returning a
+  // zero would read as "the swap credited nothing" — the exact wrong answer to
+  // the exact question this file asks.
+  if (account === null) {
+    throw new Error(`the simulator returned no post-state for ${address.toBase58()}`);
+  }
   // The RPC returns [payload, encoding]; a node that answered in some other
   // shape has not told us the balance, and a zero here would read as "the
   // swap credited nothing" — the exact wrong answer to the exact question.
