@@ -53,6 +53,12 @@ import {
   verifySharedAccountsRoute,
 } from "@sip/solana-program/jupiter-route";
 import { venueFlags } from "@sip/solana-program/jupiter-fork-setup";
+// TYPE-ONLY, AND ON PURPOSE. It is erased at runtime — phase 3 must not run
+// because a unit test imported it — but tsc still pulls the module into this
+// package's program, and the keeper's typecheck is the only gate either fork
+// script is in. Nothing else in the repo imports them: they are run by
+// jupiter-fork.sh through tsx, which typechecks nothing.
+import type { RouteFile } from "@sip/solana-program/jupiter-fork-test";
 
 const VAULT = "EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU";
 const VAULT_USDC = "46zCguSBbuStXvbJ3YdxVCVs72gXtDcKJEoseMFv7uof";
@@ -1129,5 +1135,22 @@ describe("the fork harness's venue flags, because the documented command has to 
   it("refuses a slippage that is not whole basis points", () => {
     expect(() => venueFlags(argv("--slippage", "12.5"))).toThrow(/whole number of bps/);
     expect(() => venueFlags(argv("--slippage", "-1"))).toThrow(/whole number of bps/);
+  });
+
+  it("keeps phase 3 inside a typecheck gate, which nothing else put it in", () => {
+    // The assertion that matters here is the `import type { RouteFile }` at
+    // the top of this file: it is erased at runtime, so phase 3 never runs,
+    // but it puts the module into tsc's program and the keeper's typecheck
+    // becomes the gate neither fork script had. It found four real errors the
+    // first time it ran. This test exists so the import is USED, and so the
+    // fields phase 1 writes into jupiter-route.json are the fields phase 3
+    // declares it will read.
+    const written: Pick<RouteFile, "requestedAmountIn" | "instructionInAmount" | "venueData" | "slippageBps"> = {
+      requestedAmountIn: "5000000",
+      instructionInAmount: "5000000",
+      venueData: "wSCbM0HWnIE=",
+      slippageBps: 200,
+    };
+    expect(written.requestedAmountIn).toBe(written.instructionInAmount);
   });
 });

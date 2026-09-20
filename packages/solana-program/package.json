@@ -5,6 +5,7 @@
   "exports": {
     "./attestation": "./scripts/attestation.ts",
     "./jupiter-fork-setup": "./scripts/jupiter-fork-setup.ts",
+    "./jupiter-fork-test": "./scripts/jupiter-fork-test.ts",
     "./jupiter-route": "./scripts/jupiter-route.ts",
     "./jupiter-sim": "./scripts/jupiter-sim.ts",
     "./link-consent": "./scripts/link-consent.ts",

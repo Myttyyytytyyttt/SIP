@@ -68,7 +68,7 @@ const ERR = { WrongVenue: 6015, FloorTooLow: 6019, FillTooSmall: 6020, Overspent
 /** Jupiter's own slippage refusal, 0x1771 — raised INSIDE the CPI, before our guards. */
 const JUPITER_SLIPPAGE = 6001;
 
-interface RouteFile {
+export interface RouteFile {
   readonly target: { readonly name: string; readonly mint: string };
   /** What phase 1 ASKED FOR. This, and never the route's own number, is amount_in. */
   readonly requestedAmountIn: string;
@@ -151,6 +151,22 @@ async function main(): Promise<void> {
   const program = new anchor.Program(idl, provider);
   const programId = program.programId;
 
+  /**
+   * ONE CHECKED LOOKUP PER INSTRUCTION. Program<Idl> types `methods` as an
+   * index signature, so under noUncheckedIndexedAccess — which the keeper's
+   * typecheck, the only gate this script is in, turns on — every builder reads
+   * as possibly undefined. Written out here rather than imported from the
+   * keeper's own src/methods.ts, which does the same thing: solana-program
+   * cannot depend on the package that depends on it. An instruction missing
+   * from the IDL now fails by name instead of "is not a function" three
+   * transactions into the setup.
+   */
+  const method = (name: string): NonNullable<anchor.Program["methods"][string]> => {
+    const builder = program.methods[name];
+    if (builder === undefined) throw new Error(`the IDL behind this Program has no ${name} instruction`);
+    return builder;
+  };
+
   for (const who of [admin.publicKey, owner.publicKey]) {
     await connection.confirmTransaction(await connection.requestAirdrop(who, 5e9), "confirmed");
   }
@@ -183,14 +199,12 @@ async function main(): Promise<void> {
   // set up, so an iteration costs a simulation and not a fresh mainnet clone.
   const exists = async (key: PublicKey): Promise<boolean> => (await connection.getAccountInfo(key, "confirmed")) !== null;
   if (!(await exists(configPda))) {
-    await program.methods
-      .initConfig(admin.publicKey)
+    await method("initConfig")(admin.publicKey)
       .accountsPartial({ authority: admin.publicKey, config: configPda, program: programId, programData, systemProgram: SystemProgram.programId })
       .rpc();
   }
   if (!(await exists(vault))) {
-    await program.methods
-      .createVaultV2(0, 2_000, 20, new anchor.BN(1_000_000_000), new anchor.BN(0))
+    await method("createVaultV2")(0, 2_000, 20, new anchor.BN(1_000_000_000), new anchor.BN(0))
       .accountsPartial({ owner: owner.publicKey, systemProgram: SystemProgram.programId })
       .signers([owner])
       .rpc();
@@ -212,8 +226,7 @@ async function main(): Promise<void> {
 
   const legs = (rateWad: bigint) => [{ mint: targetMint, weightBps: 10_000, minOutRateWad: new anchor.BN(rateWad.toString()) }];
   const setPolicy = async (rateWad: bigint): Promise<void> => {
-    await program.methods
-      .setInvestPolicy(
+    await method("setInvestPolicy")(
         legs(rateWad), venueProgram, USDC,
         new anchor.BN("30000000000000000"), new anchor.BN("1000000"), new anchor.BN("20000000"), new anchor.BN("60000000"), true,
       )
@@ -244,8 +257,12 @@ async function main(): Promise<void> {
   const build = async (c: Case): Promise<VersionedTransaction> => {
     const metas = [...baseMetas];
     if (c.extraAccount !== undefined) metas.push({ pubkey: c.extraAccount, isSigner: false, isWritable: true });
-    const ix: TransactionInstruction = await program.methods
-      .invest(0, new anchor.BN(amountIn.toString()), new anchor.BN(c.minOut.toString()), Buffer.from(route.venueData, "base64"))
+    const ix: TransactionInstruction = await method("invest")(
+      0,
+      new anchor.BN(amountIn.toString()),
+      new anchor.BN(c.minOut.toString()),
+      Buffer.from(route.venueData, "base64"),
+    )
       .accountsPartial({
         crank: crank.publicKey, config: configPda, vault, policy: policyPda,
         vaultIn, vaultTarget, targetMint, venueProgram: c.venueProgramOverride ?? venueProgram,
