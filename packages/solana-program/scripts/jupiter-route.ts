@@ -584,6 +584,28 @@ export function legacyTransactionBytes(payer: PublicKey, instructions: readonly 
   return 1 + 64 * message.header.numRequiredSignatures + message.serialize().length;
 }
 
+/**
+ * The same measurement for the VERSIONED (v0) message a caller actually sends,
+ * carrying no address lookup tables.
+ *
+ * TWO BYTES MORE THAN THE LEGACY FORM, AND MEASURED RATHER THAN ASSUMED: a v0
+ * message adds the 0x80 version prefix and a compact-u16 count of
+ * address-table lookups, one byte when there are none. It matters because the
+ * fork harness predicted its size from the legacy form and then sent a v0 one:
+ * 951 B predicted against 953 B sent on 2026-09-20, and 1,016 against 1,018 on
+ * the re-run. Two bytes is nothing until the route is two bytes from the
+ * limit, at which point the prediction says it fits and the send says it does
+ * not.
+ */
+export function v0TransactionBytes(payer: PublicKey, instructions: readonly TransactionInstruction[]): number {
+  const message = new TransactionMessage({
+    payerKey: payer,
+    recentBlockhash: PublicKey.default.toBase58(),
+    instructions: [...instructions],
+  }).compileToV0Message();
+  return 1 + 64 * message.header.numRequiredSignatures + message.serialize().length;
+}
+
 /** Does a legacy transaction of this size still fit in one packet? */
 export function fitsLegacyTransaction(bytes: number): boolean {
   return bytes <= PACKET_DATA_SIZE;

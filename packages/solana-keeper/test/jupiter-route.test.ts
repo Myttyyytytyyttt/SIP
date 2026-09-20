@@ -20,7 +20,7 @@
 // vitest — its `test` script is `anchor test` — and a new file here merges
 // cleanly and runs in a gate that already exists.
 
-import { PublicKey, type Connection } from "@solana/web3.js";
+import { PublicKey, TransactionInstruction, type Connection } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -48,6 +48,7 @@ import {
   verifyQuoteAnswersRequest,
   verifyRouteFresh,
   transferFeeOn,
+  v0TransactionBytes,
   venueThresholdFrom,
   verifySharedAccountsRoute,
 } from "@sip/solana-program/jupiter-route";
@@ -478,6 +479,30 @@ describe("how big the route really is, measured rather than inferred from hops",
     expect(route.hops).toBe(1);
     expect(route.legacyBytes).toBeGreaterThan(1_232);
     expect(fitsLegacyTransaction(route.legacyBytes)).toBe(false);
+  });
+
+  it("measures the v0 form the caller really sends, two bytes above the legacy one", () => {
+    // THE HARNESS PREDICTED ONE FORM AND SENT ANOTHER. jupiter-fork-setup.ts
+    // checked the fit with legacyTransactionBytes while phase 3 compiles a v0
+    // message — the version prefix plus an empty address-table-lookup count,
+    // two bytes it never counted. Measured on the runs themselves: 951 B
+    // predicted against 953 B sent, and 1,016 against 1,018 on the re-run.
+    // A payer that is NOT in the route, exactly as the builder's own
+    // measurement uses, so these numbers are the 941 this file already pins.
+    const payer = PublicKey.unique();
+    const ix = new TransactionInstruction({
+      programId: new PublicKey("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"),
+      keys: CAPTURED_ACCOUNTS.map(([pubkey, , isWritable]) => ({
+        pubkey: new PublicKey(pubkey),
+        isSigner: false,
+        isWritable,
+      })),
+      data: Buffer.from(CAPTURED_DATA, "base64"),
+    });
+    expect(v0TransactionBytes(payer, [ix])).toBe(legacyTransactionBytes(payer, [ix]) + 2);
+    // And on the captured route, whose legacy size this file already pins.
+    expect(legacyTransactionBytes(payer, [ix])).toBe(941);
+    expect(v0TransactionBytes(payer, [ix])).toBe(943);
   });
 
   it("leaves the caller to measure its own wrapper, because only the caller knows it", () => {

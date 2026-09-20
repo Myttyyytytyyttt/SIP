@@ -314,7 +314,10 @@ async function main(): Promise<void> {
   const grossDelivered = credit + withheld;
   const spent = usdcBefore - inPost.amount;
 
-  console.log(`\nMEASURED on the cloned route (legacy-equivalent tx ${probe.size} B, ${probe.sim.value.unitsConsumed} CU):`);
+  // "v0 tx", said exactly: this is the serialized VersionedTransaction build()
+  // compiles, which is what phase 1's fit check now predicts. It used to
+  // predict the LEGACY form, two bytes smaller, and call this line its match.
+  console.log(`\nMEASURED on the cloned route (v0 tx ${probe.size} B, ${probe.sim.value.unitsConsumed} CU):`);
   console.log(`  spent        ${spent} USDC raw  (amount_in ${amountIn})`);
   console.log(`  CREDIT       ${credit}   <- what the vault's account gains, and what invest() measures`);
   console.log(`  withheld     ${withheld}   <- Token-2022 fee held inside the destination`);

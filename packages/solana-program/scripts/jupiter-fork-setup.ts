@@ -32,13 +32,7 @@ import { Connection, Keypair, PACKET_DATA_SIZE, PublicKey, TransactionInstructio
 import { getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  buildJupiterRoute,
-  fitsLegacyTransaction,
-  investAmountIn,
-  JupiterRouteRefusal,
-  legacyTransactionBytes,
-} from "./jupiter-route";
+import { buildJupiterRoute, investAmountIn, JupiterRouteRefusal, v0TransactionBytes } from "./jupiter-route";
 
 /**
  * WHERE PHASE 1 WRITES, resolved LAZILY rather than at module load. This file
@@ -254,7 +248,11 @@ async function main(): Promise<void> {
   // is checked, over the instruction phase 3 will really send.
   const [configPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], programId);
   const [policyPda] = PublicKey.findProgramAddressSync([Buffer.from("invest"), vault.toBuffer()], programId);
-  const investBytes = legacyTransactionBytes(owner.publicKey, [
+  // MEASURED IN THE FORM PHASE 3 ACTUALLY SENDS, which is a v0 message: the
+  // legacy form is two bytes smaller (the version prefix and the empty
+  // address-table-lookup count), so predicting from it under-reported every
+  // run — 951 B against 953 B sent, and 1,016 against 1,018 on the re-run.
+  const investBytes = v0TransactionBytes(owner.publicKey, [
     // 5 bytes of SetComputeUnitLimit, as phase 3 sends.
     new TransactionInstruction({
       programId: new PublicKey("ComputeBudget111111111111111111111111111111"),
@@ -276,8 +274,8 @@ async function main(): Promise<void> {
       data: Buffer.alloc(29 + route.venueData.length),
     }),
   ]);
-  console.log(`  invest tx   : ${investBytes} B of ${PACKET_DATA_SIZE} (route alone ${route.legacyBytes} B)`);
-  if (!fitsLegacyTransaction(investBytes)) {
+  console.log(`  invest tx   : ${investBytes} B of ${PACKET_DATA_SIZE} as a v0 message (route alone, legacy, ${route.legacyBytes} B)`);
+  if (investBytes > PACKET_DATA_SIZE) {
     throw new Error(
       `invest() wrapped around this ${route.hops}-hop route (${route.labels.join(" -> ")}) is ${investBytes} B, ` +
         `past the ${PACKET_DATA_SIZE} one transaction carries; phase 3 cannot send it without a lookup table it cannot clone`,
