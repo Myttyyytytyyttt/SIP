@@ -40,7 +40,15 @@ describe("the thin-pool notice", () => {
     // reader a half-basket that cannot happen.
     expect(notice).toContain("a buy takes all of the basket or none");
     expect(notice).toContain("nothing bought, no SOL converted, at any balance");
-    expect(keeper).toContain("refusing to convert SOL toward it");
+    // THE DOCTRINE, PINNED TO AN EXPORTED TYPE RATHER THAN TO A SENTENCE.
+    // This used to grep the runtime refusal "refusing to convert SOL toward
+    // it" -- prose, in a package the web may not edit, so the other session
+    // reflowing a message turned a WEB gate red with only its owner able to
+    // fix it. DepthDecision carries ONE verdict for the whole basket and no
+    // per-leg outcome at all, which is the all-or-nothing rule itself: a
+    // half-basket is unrepresentable. Rewording cannot break this; adding a
+    // per-leg escape hatch is exactly what should.
+    expect(keeper).toMatch(/export type DepthDecision =\s*\|\s*\{ readonly deep: true \}\s*\|\s*\{ readonly deep: false; readonly outcome: "REFUSED"; readonly detail: string \};/);
   });
 });
 
@@ -56,7 +64,10 @@ describe("the transfer-fee ceiling", () => {
     // no margin -- which is ANTHROPIC's position at 100 bps today. If this gate
     // ever became >=, the copy below would be wrong in the owner's favour and
     // this assertion is what would say so.
-    expect(keeper).toMatch(/fee\.bps > MAX_LEG_FEE_BPS/);
+    expect(keeper).toMatch(/fee\.bps\s*>\s*MAX_LEG_FEE_BPS/);
+    // The same all-or-nothing shape on the fee side: one refused leg, one
+    // verdict, no per-leg admission.
+    expect(keeper).toMatch(/export type LegAdmission =\s*\|\s*\{ readonly admit: true;[^}]*\}\s*\|\s*\{ readonly admit: false; readonly outcome: "REFUSED"; readonly detail: string \};/);
 
     const notice = INVEST_COPY.feeCeiling("1 %");
     expect(notice).toContain("will not buy a stock that charges more than 1 % to transfer");
