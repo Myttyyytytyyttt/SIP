@@ -22,12 +22,14 @@ import { decodeArgs } from "../src/client/borsh";
 import { SIP_ACCOUNT_SPACE } from "../src/client/decoders";
 import { SIP_PROGRAM_ID, toHex } from "../src/client/idl";
 import { linkConsentMessage } from "../src/client/link-consent";
-import { BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES } from "../src/client/product";
+import { BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES, OFFERED_LEGS, basketWeightsBps } from "../src/client/product";
 import { parseLegacyMessage, splitWire } from "../src/client/message";
+import { U64_MAX } from "../src/client/rules";
 import {
   BUILD_READS_WEIGHT,
   BUILD_REQUEST_WEIGHT,
   MAX_BUILD_REQUEST_BYTES,
+  OFFERED_VENUES,
   createSolanaBuildHandler,
   createSolanaVaultHandler,
   sharedBuildReadsBudget,
@@ -359,6 +361,150 @@ describe("createVault", () => {
   });
 });
 
+describe("setPolicy", () => {
+  /** A chain where `owner` has a vault, and nothing else: set_policy_v2 reads the vault and a blockhash. */
+  const vaultChain = (owner: string, vault: Record<string, unknown> = {}): StubChain => ({
+    accounts: new Map([[deriveVaultPda(owner).toBase58(), sipOwned(vaultAccount(owner, vault), localRent(125))]]),
+  });
+
+  /** A whole rule, as the panel must send one: set_policy_v2 writes all six fields. */
+  const WHOLE_RULE = { mode: "profit", skimBps: 2_500, volumeBps: 150, paused: false, maxContribution: "30000000000", walletReserve: "25000000" } as const;
+
+  it("builds [CU limit, CU price, set_policy_v2] with the whole rule the request names, and the 30,000-dollar cap survives as an exact u64; it verifies once the owner signs", async () => {
+    const owner = keypair();
+    const ownerKey = owner.publicKey.toBase58();
+    const { build, upstream } = setup(vaultChain(ownerKey));
+    const answer = await build({ action: "setPolicy", owner: ownerKey, ...WHOLE_RULE });
+    expect(answer.status).toBe(200);
+    const body = answer.json;
+    expect(body.instruction).toBe("set_policy_v2");
+    expect(body.vault).toBe(deriveVaultPda(ownerKey).toBase58());
+    expect(body.computeBudget).toEqual({ unitLimit: 40_000, microLamports: "100000" });
+    expect(programsOf(body.txBase64)).toEqual([COMPUTE_BUDGET_PROGRAM, COMPUTE_BUDGET_PROGRAM, SIP_PROGRAM_ID]);
+    // 30,000 SOL-dollars of cap is 30,000,000,000 raw: past 2^53 a double would
+    // have rounded it, which is why the wire carries decimal strings.
+    expect(decodeArgs("set_policy_v2", instructionsOf(body.txBase64)[2]!.data)).toEqual({
+      mode: 0,
+      skim_bps: 2_500,
+      volume_bps: 150,
+      paused: false,
+      max_contribution: 30_000_000_000n,
+      wallet_reserve: 25_000_000n,
+    });
+    // The rule this replaces, so the panel can show both sides of the change.
+    expect(body.current).toEqual({ mode: 0, skimBps: 2_000, volumeBps: 200, paused: false, maxContribution: "60000000", walletReserve: "50000000", policyNonce: "0" });
+    expect(body.costs).toEqual({ rentLamports: "0", signatureFeeLamports: "5000", priorityFeeLamports: "4000" });
+    const verified = verifySignedTransaction(signWire(body.txBase64, owner));
+    expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
+    const methods = methodsOf(upstream.calls);
+    expect(methods.filter((method) => method === "getLatestBlockhash")).toHaveLength(1);
+    // readVault 2 (the account and its rent floor) + readBuildBatch 1 (the blockhash).
+    expect(methods, "BUILD_READS_WEIGHT.setPolicy must equal the upstream calls setPolicy really makes").toHaveLength(BUILD_READS_WEIGHT.setPolicy);
+  });
+
+  it("the answer says the nonce moves and what that costs, which is the whole difference from an investPolicy change", async () => {
+    const owner = key();
+    const { build } = setup(vaultChain(owner, { policy_nonce: 41n }));
+    const answer = await build({ action: "setPolicy", owner, ...WHOLE_RULE });
+    expect(answer.json.policyNonce).toEqual({
+      current: "41",
+      next: "42",
+      invalidatesSettlementsInFlight: true,
+      notice: expect.stringContaining("stops being valid"),
+    });
+    // set_policy.rs bumps vault.policy_nonce and settle.rs signs it into the
+    // attestation; set_invest_policy.rs bumps the POLICY account's own counter,
+    // which no attestation carries. The basket change must not claim otherwise.
+    const invest = await setup(investableChain(owner)).build({ action: "investPolicy", owner });
+    expect(invest.status).toBe(200);
+    expect(invest.json).not.toHaveProperty("policyNonce");
+    expect(invest.text).not.toMatch(/stops being valid/);
+  });
+
+  it.each([
+    ["no mode", { skimBps: 2_500, volumeBps: 150, paused: false, maxContribution: "1", walletReserve: "0" }],
+    ["mode as the number createVault takes", { ...WHOLE_RULE, mode: 0 }],
+    ["mode in the wrong case", { ...WHOLE_RULE, mode: "Profit" }],
+    ["no skimBps", { mode: "profit", volumeBps: 150, paused: false, maxContribution: "1", walletReserve: "0" }],
+    ["no volumeBps", { mode: "profit", skimBps: 2_500, paused: false, maxContribution: "1", walletReserve: "0" }],
+    ["a fractional rate", { ...WHOLE_RULE, skimBps: 2_500.5 }],
+    ["no paused", { mode: "profit", skimBps: 2_500, volumeBps: 150, maxContribution: "1", walletReserve: "0" }],
+    ["paused as text", { ...WHOLE_RULE, paused: "no" }],
+    // NOT DEFAULTED, ON PURPOSE: set_policy_v2 writes every field, so a cap left
+    // out cannot mean "leave mine alone" — it would silently overwrite it.
+    ["no maxContribution", { mode: "profit", skimBps: 2_500, volumeBps: 150, paused: false, walletReserve: "0" }],
+    ["no walletReserve", { mode: "profit", skimBps: 2_500, volumeBps: 150, paused: false, maxContribution: "1" }],
+    ["lamports as a number", { ...WHOLE_RULE, maxContribution: 30_000_000_000 }],
+    ["lamports with a sign", { ...WHOLE_RULE, walletReserve: "-1" }],
+    ["an extra field", { ...WHOLE_RULE, enabled: true }],
+    ["an owner that is not a key", { ...WHOLE_RULE, owner: "not-a-key" }],
+  ])("%s is 400 bad_request with no chain read, and nothing is built", async (_, rule) => {
+    const owner = key();
+    const { build, upstream } = setup(vaultChain(owner));
+    const answer = await build({ action: "setPolicy", owner, ...rule });
+    expect([answer.status, answer.json.error?.code]).toEqual([400, "bad_request"]);
+    expect(answer.json).not.toHaveProperty("txBase64");
+    expect(upstream.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ["a profit rate under the floor", { ...WHOLE_RULE, skimBps: 200 }, /skimBps/],
+    ["a profit rate over 100 %", { ...WHOLE_RULE, skimBps: 10_001 }, /skimBps/],
+    ["a volume rate over its ceiling", { ...WHOLE_RULE, volumeBps: 201 }, /volumeBps/],
+    ["a volume rate of zero", { ...WHOLE_RULE, volumeBps: 0 }, /volumeBps/],
+    ["a per-settlement cap of zero", { ...WHOLE_RULE, maxContribution: "0" }, /maxContribution/],
+  ])("%s is 400 invalid_policy with its problems, before any read", async (_, rule, problem) => {
+    const owner = key();
+    const { build, upstream } = setup(vaultChain(owner));
+    const answer = await build({ action: "setPolicy", owner, ...rule });
+    expect([answer.status, answer.json.error?.code]).toEqual([400, "invalid_policy"]);
+    expect(answer.json.error?.problems?.join(" ")).toMatch(problem);
+    expect(upstream.calls).toHaveLength(0);
+  });
+
+  it("mode volume is 400 volume_not_offered while VOLUME is not offered, before any read; offered, it builds", async () => {
+    const owner = key();
+    const off = setup(vaultChain(owner));
+    const refused = await off.build({ action: "setPolicy", owner, ...WHOLE_RULE, mode: "volume" });
+    expect([refused.status, refused.json.error?.code, refused.json.error?.message]).toEqual([400, "volume_not_offered", "Volume mode is not offered yet."]);
+    expect(off.upstream.calls).toHaveLength(0);
+
+    const on = setup(vaultChain(owner), { volumeOffered: true });
+    const built = await on.build({ action: "setPolicy", owner, ...WHOLE_RULE, mode: "volume" });
+    expect(built.status).toBe(200);
+    expect(decodeArgs("set_policy_v2", instructionsOf(built.json.txBase64)[2]!.data)).toMatchObject({ mode: 1 });
+  });
+
+  it("pausing the vault is the same whole rule with paused true", async () => {
+    const owner = key();
+    const { build } = setup(vaultChain(owner));
+    const answer = await build({ action: "setPolicy", owner, ...WHOLE_RULE, paused: true });
+    expect(decodeArgs("set_policy_v2", instructionsOf(answer.json.txBase64)[2]!.data)).toMatchObject({ paused: true });
+  });
+
+  it("no vault is 409 vault_missing with no blockhash read; an unreadable chain is 502 unreadable and never quotes the endpoint", async () => {
+    const owner = key();
+    const { build, upstream } = setup();
+    const answer = await build({ action: "setPolicy", owner, ...WHOLE_RULE });
+    expect([answer.status, answer.json.error?.code]).toEqual([409, "vault_missing"]);
+    expect(methodsOf(upstream.calls)).not.toContain("getLatestBlockhash");
+    const down = await setup({ accounts: new Map(), down: true }).build({ action: "setPolicy", owner, ...WHOLE_RULE });
+    expect([down.status, down.json.error?.code]).toEqual([502, "unreadable"]);
+    expect(down.text).not.toContain(SECRET_QUERY);
+    expect(down.json).not.toHaveProperty("txBase64");
+  });
+
+  it("a vault whose nonce is already at the u64 maximum is 409 invalid_policy: checked_add in set_policy.rs would refuse it, so nothing is built", async () => {
+    const owner = key();
+    const { build, upstream } = setup(vaultChain(owner, { policy_nonce: U64_MAX }));
+    const answer = await build({ action: "setPolicy", owner, ...WHOLE_RULE });
+    expect([answer.status, answer.json.error?.code]).toEqual([409, "invalid_policy"]);
+    expect(answer.json.error?.problems?.join(" ")).toMatch(/policy_nonce/);
+    expect(methodsOf(upstream.calls)).not.toContain("getLatestBlockhash");
+    expect(answer.json).not.toHaveProperty("txBase64");
+  });
+});
+
 describe("prepareLink and link", () => {
   it("prepareLink answers the SIP_LINK_V1 consent naming the owner's vault, after one read", async () => {
     const owner = key();
@@ -675,6 +821,170 @@ describe("investPolicy", () => {
       expect(answer.json.error?.problems?.join(" ")).toMatch(/minInvestment <= maxPerCall <= maxRolling30d/);
     }
     expect(upstream.calls).toHaveLength(0);
+  });
+
+  // ── what the basket holds and what it may spend ────────────────────────────
+
+  it("a request that names none of minInvestment, weights or venue builds the SAME BYTES as one that names today's values: the three fields are additions, not a new default", async () => {
+    const owner = key();
+    const { build } = setup(investableChain(owner));
+    const implicit = await build({ action: "investPolicy", owner });
+    const explicit = await build({
+      action: "investPolicy",
+      owner,
+      minInvestment: "2500000",
+      weights: OFFERED_LEGS.map((leg, index) => ({ mint: leg.mint, weightBps: basketWeightsBps(OFFERED_LEGS.length)[index]! })),
+      venue: "raydium-clmm",
+    });
+    expect([implicit.status, explicit.status]).toEqual([200, 200]);
+    expect(explicit.json.txBase64).toBe(implicit.json.txBase64);
+    expect(explicit.json.costs).toEqual(implicit.json.costs);
+    expect(explicit.json.floors).toEqual(implicit.json.floors);
+    expect(explicit.json.vaultTokenAccounts).toEqual(implicit.json.vaultTokenAccounts);
+  });
+
+  it("weights are applied BY MINT, not by position: sent in the catalogue's reverse order, each share still lands on its own stock, beside its own floor", async () => {
+    const owner = keypair();
+    const ownerKey = owner.publicKey.toBase58();
+    const { build, upstream } = setup(investableChain(ownerKey));
+    expect(LEG_POOLS.length).toBe(2);
+    const answer = await build({
+      action: "investPolicy",
+      owner: ownerKey,
+      // REVERSED, and deliberately lopsided: read positionally this would put
+      // 7,000 on SPYx and 3,000 on ANTHROPIC, sum to 10,000 all the same, and
+      // the chain would accept the wrong basket without a word.
+      weights: [
+        { mint: ANTHROPIC_MINT, weightBps: 7_000 },
+        { mint: SPYX_MINT, weightBps: 3_000 },
+      ],
+      minInvestment: "1000000",
+    });
+    expect(answer.status).toBe(200);
+    const args = decodeArgs("set_invest_policy", instructionsOf(answer.json.txBase64)[4]!.data) as {
+      legs: { mint: string; weight_bps: number; min_out_rate_wad: bigint }[];
+      min_investment: bigint;
+      venue_program: string;
+    };
+    // The legs keep OFFERED_LEGS' order, because the floors are read in it; only
+    // the shares follow the mints.
+    expect(args.legs).toEqual([
+      { mint: SPYX_MINT, weight_bps: 3_000, min_out_rate_wad: LEG_POOLS[0]!.floorWad },
+      { mint: ANTHROPIC_MINT, weight_bps: 7_000, min_out_rate_wad: LEG_POOLS[1]!.floorWad },
+    ]);
+    expect(args.min_investment).toBe(1_000_000n);
+    expect(args.venue_program).toBe(RAYDIUM_CLMM);
+    const verified = verifySignedTransaction(signWire(answer.json.txBase64, owner));
+    expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
+    // The three fields buy no extra upstream call.
+    expect(methodsOf(upstream.calls)).toHaveLength(BUILD_READS_WEIGHT.investPolicy);
+  });
+
+  it.each([
+    ["weights that are not an array", { weights: { [SPYX_MINT]: 10_000 } }, /must be an array/],
+    ["a weight that is not an object", { weights: [10_000, 0] }, /weights\[0\] must be an object/],
+    ["a weight carrying a field of its own", { weights: [{ mint: SPYX_MINT, weightBps: 5_000, pool: SOL_USDC_POOL }, { mint: ANTHROPIC_MINT, weightBps: 5_000 }] }, /weights\[0\]: Unexpected field pool/],
+    ["a mint that is not a key", { weights: [{ mint: "SPYx", weightBps: 10_000 }] }, /weights\[0\]\.mint must be a base58/],
+    ["a mint named twice", { weights: [{ mint: SPYX_MINT, weightBps: 5_000 }, { mint: SPYX_MINT, weightBps: 5_000 }] }, /names .* again/],
+    ["the in-mint in the basket", { weights: [{ mint: USDC_MINT, weightBps: 5_000 }, { mint: SPYX_MINT, weightBps: 5_000 }] }, /the currency the basket spends/],
+    ["a share of zero", { weights: [{ mint: SPYX_MINT, weightBps: 0 }, { mint: ANTHROPIC_MINT, weightBps: 10_000 }] }, /greater than zero/],
+    ["a negative share", { weights: [{ mint: SPYX_MINT, weightBps: -1 }, { mint: ANTHROPIC_MINT, weightBps: 10_001 }] }, /greater than zero/],
+    ["a fractional share", { weights: [{ mint: SPYX_MINT, weightBps: 33.5 }, { mint: ANTHROPIC_MINT, weightBps: 9_966.5 }] }, /whole number/],
+    ["a share written as a string", { weights: [{ mint: SPYX_MINT, weightBps: "5000" }, { mint: ANTHROPIC_MINT, weightBps: 5_000 }] }, /whole number/],
+    ["a leg with no share at all", { weights: [{ mint: SPYX_MINT, weightBps: 10_000 }] }, /names no share for/],
+    ["an empty basket", { weights: [] }, /names no share for/],
+    ["a stock SaverFi does not offer", { weights: [{ mint: SPYX_MINT, weightBps: 5_000 }, { mint: ANTHROPIC_MINT, weightBps: 4_000 }, { mint: WSOL_MINT, weightBps: 1_000 }] }, /does not offer/],
+    ["shares one short of the whole", { weights: [{ mint: SPYX_MINT, weightBps: 5_000 }, { mint: ANTHROPIC_MINT, weightBps: 4_999 }] }, /add up to exactly 10000 basis points; these add up to 9999/],
+    ["shares one over the whole", { weights: [{ mint: SPYX_MINT, weightBps: 5_000 }, { mint: ANTHROPIC_MINT, weightBps: 5_001 }] }, /add up to exactly 10000/],
+  ])("%s is 400 bad_request naming what was wrong, with no chain read and nothing filled in", async (_, body, problem) => {
+    const owner = key();
+    const { build, upstream } = setup(investableChain(owner));
+    const answer = await build({ action: "investPolicy", owner, ...body });
+    expect([answer.status, answer.json.error?.code]).toEqual([400, "bad_request"]);
+    expect(answer.json.error?.message).toMatch(problem);
+    expect(answer.json).not.toHaveProperty("txBase64");
+    expect(upstream.calls).toHaveLength(0);
+  });
+
+  it("the venue is a NAME from a closed list: a program id is refused however valid, and the list is one long", async () => {
+    const owner = key();
+    expect(OFFERED_VENUES).toEqual(["raydium-clmm"]);
+    const { build, upstream } = setup(investableChain(owner));
+    for (const venue of [RAYDIUM_CLMM, key(), "Raydium CLMM", "raydium", "orca-whirlpool", "", 0, null, { name: "raydium-clmm" }, ["raydium-clmm"]]) {
+      const answer = await build({ action: "investPolicy", owner, venue });
+      expect([answer.status, answer.json.error?.code], `venue ${JSON.stringify(venue)} must be refused`).toEqual([400, "bad_request"]);
+      expect(answer.json.error?.message).toMatch(/venue must be one of: raydium-clmm\./);
+      expect(answer.json.error?.message).toMatch(/never a program address/);
+      expect(answer.json).not.toHaveProperty("txBase64");
+    }
+    // A name the table does not hold, however Object.prototype answers for it.
+    for (const venue of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+      const answer = await build({ action: "investPolicy", owner, venue });
+      expect([answer.status, answer.json.error?.code], `venue ${venue} must be refused`).toEqual([400, "bad_request"]);
+    }
+    expect(upstream.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ["as a number", 5_000_000],
+    ["with a sign", "-1"],
+    ["fractional", "5000000.5"],
+    ["with a thousands separator", "5,000,000"],
+    ["in hex", "0x4c4b40"],
+    ["as null", null],
+    ["over a u64", "18446744073709551616"],
+  ])("minInvestment %s is 400 bad_request with no chain read", async (_, minInvestment) => {
+    const owner = key();
+    const { build, upstream } = setup(investableChain(owner));
+    const answer = await build({ action: "investPolicy", owner, minInvestment });
+    expect([answer.status, answer.json.error?.code]).toEqual([400, "bad_request"]);
+    expect(answer.json.error?.message).toMatch(/minInvestment is a USDC raw amount/);
+    expect(upstream.calls).toHaveLength(0);
+  });
+
+  it("a minimum purchase the program would refuse is 400 invalid_policy before any read: zero, and one above the per-call cap", async () => {
+    const owner = key();
+    const { build, upstream } = setup(investableChain(owner));
+    for (const caps of [{ minInvestment: "0" }, { minInvestment: "2000000000" }]) {
+      const answer = await build({ action: "investPolicy", owner, ...caps });
+      expect([answer.status, answer.json.error?.code]).toEqual([400, "invalid_policy"]);
+      expect(answer.json.error?.problems?.join(" ")).toMatch(/minInvestment <= maxPerCall <= maxRolling30d/);
+    }
+    expect(upstream.calls).toHaveLength(0);
+  });
+
+  it("the three fields travel together: a whole basket the owner chose, with its own minimum and venue", async () => {
+    const owner = keypair();
+    const ownerKey = owner.publicKey.toBase58();
+    const { build } = setup(investableChain(ownerKey));
+    const answer = await build({
+      action: "investPolicy",
+      owner: ownerKey,
+      weights: [
+        { mint: SPYX_MINT, weightBps: 2_500 },
+        { mint: ANTHROPIC_MINT, weightBps: 7_500 },
+      ],
+      minInvestment: "5000000",
+      venue: "raydium-clmm",
+      maxPerCall: "30000000000",
+      maxRolling30d: "30000000000",
+      enabled: true,
+    });
+    expect(answer.status).toBe(200);
+    expect(decodeArgs("set_invest_policy", instructionsOf(answer.json.txBase64)[4]!.data)).toMatchObject({
+      legs: [
+        { mint: SPYX_MINT, weight_bps: 2_500, min_out_rate_wad: LEG_POOLS[0]!.floorWad },
+        { mint: ANTHROPIC_MINT, weight_bps: 7_500, min_out_rate_wad: LEG_POOLS[1]!.floorWad },
+      ],
+      venue_program: RAYDIUM_CLMM,
+      in_mint: USDC_MINT,
+      min_investment: 5_000_000n,
+      max_per_call: 30_000_000_000n,
+      max_rolling_30d: 30_000_000_000n,
+      enabled: true,
+    });
+    const verified = verifySignedTransaction(signWire(answer.json.txBase64, owner));
+    expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
   });
 });
 

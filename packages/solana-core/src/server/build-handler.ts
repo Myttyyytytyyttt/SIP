@@ -59,7 +59,17 @@ import {
   priorityFeeLamports,
   type ComputeBudget,
 } from "../client/product";
-import { MODE_PROFIT, MODE_VOLUME, U64_MAX, defaultInvestPolicy, investPolicyProblems, vaultPolicyProblems, type InvestPolicyInput, type VaultPolicyInput } from "../client/rules";
+import {
+  LEG_WEIGHT_TOTAL_BPS,
+  MODE_PROFIT,
+  MODE_VOLUME,
+  U64_MAX,
+  defaultInvestPolicy,
+  investPolicyProblems,
+  vaultPolicyProblems,
+  type InvestPolicyInput,
+  type VaultPolicyInput,
+} from "../client/rules";
 import {
   BuildError,
   LinkConsentError,
@@ -67,6 +77,7 @@ import {
   buildCreateVaultV2,
   buildLinkWallet,
   buildSetInvestPolicy,
+  buildSetPolicyV2,
   buildWithdraw,
   buildWithdrawToken,
   checkLinkConsent,
@@ -191,8 +202,13 @@ export const BUILD_REQUEST_WEIGHT = 3;
  * each PreStocks account. A weight under the calls made is an under-charge in
  * the rate limiter, so the next leg with a new account size moves this again;
  * handlers-build.test.ts pins it against what the route really spends.
+ *
+ * setPolicy is THREE: readVault 2 (the account and the rent floor its
+ * withdrawable is measured against) + readBuildBatch 1 (the blockhash). It asks
+ * for no rent of its own — set_policy_v2 opens no account — so it costs what
+ * withdraw costs, and the same test pins it.
  */
-export const BUILD_READS_WEIGHT = { createVault: 4, prepareLink: 1, link: 3, investPolicy: 8, pauseInvesting: 3, withdraw: 3, withdrawToken: 4, state: 12 } as const;
+export const BUILD_READS_WEIGHT = { createVault: 4, setPolicy: 3, prepareLink: 1, link: 3, investPolicy: 8, pauseInvesting: 3, withdraw: 3, withdrawToken: 4, state: 12 } as const;
 
 /**
  * Upstream JSON-RPC calls /api/solana-live's actions make. A snapshot is one
@@ -406,6 +422,35 @@ function decimalU64(value: unknown): bigint | null {
   return parsed <= U64_MAX ? parsed : null;
 }
 
+/**
+ * THE VENUES A POLICY MAY NAME, BY NAME, AND THE ONLY PLACE A NAME BECOMES A
+ * PROGRAM. venue_program is the program the vault's invest instruction is told
+ * to CPI into, so a request that could put an arbitrary base58 key there would
+ * be asking the vault to trust a program nobody vetted. The browser therefore
+ * names a venue and this table translates it; a key, even a well-formed one,
+ * even Raydium's own, is not a name and is refused.
+ *
+ * A Map, not an object: `{}["constructor"]` is a function, and a lookup table
+ * reached from request text must not answer for a key it does not hold.
+ *
+ * One entry today. Raydium CLMM is the only venue the keeper can route through
+ * (client/clmm-price.ts prices its pools, and PRICED_POOLS pins them), so the
+ * list is one long on purpose, not by omission.
+ */
+const VENUE_PROGRAMS = new Map<string, string>([["raydium-clmm", RAYDIUM_CLMM]]);
+
+/** The venue names investPolicy accepts. What the panel offers; the programs behind them never leave the server. */
+export const OFFERED_VENUES: readonly string[] = Object.freeze([...VENUE_PROGRAMS.keys()]);
+
+/** The venue a request that names none is built with: today's behaviour, unchanged. */
+const DEFAULT_VENUE = "raydium-clmm";
+
+/** The vault modes setPolicy accepts, by name. createVault's numeric `mode` is untouched. */
+const VAULT_MODES = new Map<string, number>([
+  ["profit", MODE_PROFIT],
+  ["volume", MODE_VOLUME],
+]);
+
 const unreadable = (served: Served): Response => served.refuse(502, "unreadable", "SaverFi could not read Solana just now. Nothing was built.");
 const upstreamUnavailable = (served: Served): Response => served.refuse(502, "upstream_unavailable", "Solana did not answer with a recent blockhash. Nothing was built.");
 
@@ -469,6 +514,96 @@ async function createVault(fields: Readonly<Record<string, unknown>>, served: Se
   return json(200, { ...built, costs: costs(chain.value.rents[0]!, 1, computeBudget) });
 }
 
+const SET_POLICY_FIELDS = ["action", "owner", "mode", "skimBps", "volumeBps", "paused", "maxContribution", "walletReserve"] as const;
+
+/**
+ * The sentence the panel must show before the owner signs a setPolicy, and the
+ * one thing that separates it from an investPolicy change.
+ *
+ * VERIFIED IN THE PROGRAM, NOT ASSUMED. set_policy.rs's handler ends with
+ * `vault.policy_nonce = vault.policy_nonce.checked_add(1)` — on every call, even
+ * one that changes nothing — and settle.rs builds the message it verifies with
+ * `policy_nonce: vault.policy_nonce`, so an attestation the attester signed
+ * against the old nonce is a different byte string after this lands and can no
+ * longer verify. set_invest_policy.rs bumps `policy.policy_nonce`, a counter on
+ * the InvestmentPolicy account that the attestation does not carry, and never
+ * touches the vault's: changing the basket strands nothing.
+ */
+const POLICY_NONCE_NOTICE =
+  "Signing this moves your vault's policy nonce, and every settlement your trading wallets already have in flight stops being valid: the keeper has to sign them again against the new rule, so a saving in progress may be delayed. Changing what your basket buys does not do this.";
+
+/**
+ * setPolicy: set_policy_v2, the vault's OWN rule — its mode, both rates, whether
+ * it is paused, the per-settlement cap and the reserve a trading wallet keeps.
+ * Until now the cap could only be chosen when the vault was created.
+ *
+ * EVERY FIELD IS REQUIRED, and this is the one action where that is the kind
+ * thing to do. set_policy_v2 writes all six, so a field left out of the request
+ * cannot mean "leave it alone" — it would mean "overwrite it with whatever the
+ * server guessed". The stored rule comes back in the answer so the panel can
+ * show what each one is changing from.
+ */
+async function setPolicy(fields: Readonly<Record<string, unknown>>, served: Served): Promise<Response> {
+  const extra = unexpectedField(fields, SET_POLICY_FIELDS);
+  if (extra !== null) return served.refuse(400, "bad_request", extra);
+  const owner = fields.owner;
+  if (!isPubkey(owner)) return served.refuse(400, "bad_request", "owner must be a base58 32-byte public key.");
+  const mode = typeof fields.mode === "string" ? VAULT_MODES.get(fields.mode) : undefined;
+  if (mode === undefined) return served.refuse(400, "bad_request", `mode must be ${[...VAULT_MODES.keys()].join(" or ")}.`);
+  for (const name of ["skimBps", "volumeBps"] as const) {
+    if (!Number.isInteger(fields[name])) return served.refuse(400, "bad_request", `${name} must be an integer number of basis points.`);
+  }
+  if (typeof fields.paused !== "boolean") return served.refuse(400, "bad_request", "paused must be true or false.");
+  const maxContribution = decimalU64(fields.maxContribution);
+  const walletReserve = decimalU64(fields.walletReserve);
+  if (maxContribution === null || walletReserve === null) {
+    return served.refuse(400, "bad_request", "maxContribution and walletReserve are lamports, written as decimal strings. set_policy_v2 writes every field, so both must be named.");
+  }
+  if (mode === MODE_VOLUME && !served.volumeOffered) return served.refuse(400, "volume_not_offered", "Volume mode is not offered yet.");
+  const policy: VaultPolicyInput = { mode, skimBps: fields.skimBps as number, volumeBps: fields.volumeBps as number, maxContribution, walletReserve };
+  // The chain's own rule, through the one model of validate_policy there is.
+  const problems = vaultPolicyProblems(policy);
+  if (problems.length > 0) return served.refuse(400, "invalid_policy", "The program would refuse this vault rule.", { problems });
+
+  const spent = served.spendReads(BUILD_READS_WEIGHT.setPolicy);
+  if (spent !== null) return spent;
+  const vault = await readVault(served.pool, deriveVaultPda(owner).toBase58());
+  if (vault.kind === "unreadable") return unreadable(served);
+  if (vault.kind === "missing") return served.refuse(409, "vault_missing", "Create your vault first.");
+  const stored = vault.value.state;
+  // checked_add in set_policy.rs: at u64 max the program refuses the whole call,
+  // so nothing is offered and the answer never quotes a nonce that cannot exist.
+  if (stored.policyNonce >= U64_MAX) {
+    return served.refuse(409, "invalid_policy", "This vault's policy nonce cannot move again. Nothing was built.", { problems: ["policy_nonce is at its u64 maximum: set_policy_v2 would overflow it"] });
+  }
+
+  const batch = await readBuildBatch(served.pool, { addresses: [], sizes: [] });
+  if (batch.kind !== "exists") return upstreamUnavailable(served);
+  const computeBudget = ownerComputeBudget("set_policy_v2");
+  let built;
+  try {
+    built = buildSetPolicyV2({ owner, ...policy, paused: fields.paused, ...batch.value.recent, computeBudget });
+  } catch (error) {
+    if (error instanceof BuildError) return served.refuse(400, "invalid_policy", "The program would refuse this vault rule.", { problems: error.problems });
+    throw error;
+  }
+  return json(200, {
+    ...built,
+    // What the vault holds now, so the panel can show the rule this replaces.
+    current: {
+      mode: stored.skimMode,
+      skimBps: stored.skimBps,
+      volumeBps: stored.volumeBps,
+      paused: stored.paused,
+      maxContribution: stored.maxContribution,
+      walletReserve: stored.walletReserve,
+      policyNonce: stored.policyNonce,
+    },
+    policyNonce: { current: stored.policyNonce, next: stored.policyNonce + 1n, invalidatesSettlementsInFlight: true, notice: POLICY_NONCE_NOTICE },
+    costs: costs(0n, 1, computeBudget),
+  });
+}
+
 const PREPARE_LINK_FIELDS = ["action", "owner", "wallet"] as const;
 const LINK_FIELDS = ["action", "owner", "wallet", "consentSignature"] as const;
 
@@ -528,7 +663,51 @@ async function linkWallet(fields: Readonly<Record<string, unknown>>, served: Ser
 
 // ── set_invest_policy ────────────────────────────────────────────────────────
 
-const INVEST_POLICY_FIELDS = ["action", "owner", "maxPerCall", "maxRolling30d", "enabled"] as const;
+const INVEST_POLICY_FIELDS = ["action", "owner", "maxPerCall", "maxRolling30d", "enabled", "minInvestment", "weights", "venue"] as const;
+
+/**
+ * WEIGHTS ARE READ BY MINT, NEVER BY POSITION. The catalogue the owner saw and
+ * the catalogue the server builds from are two reads of OFFERED_LEGS separated
+ * by a deploy; if their ORDER ever differed, a positional weight would land on
+ * the wrong stock and nothing would fail — the sum would still be 10,000 and the
+ * chain would accept it. Keyed by mint, the same disagreement is a mint that is
+ * offered and unnamed, or named and not offered, and both are refused here.
+ *
+ * NOTHING IS REPAIRED. A missing leg is not filled in at the share that would
+ * make the sum work, a sum of 9,999 is not normalised, and the entries are not
+ * reordered: each is a different basket from the one the owner asked for, and a
+ * refusal that names what was wrong is the only honest answer. Returns the
+ * weights by mint, or the sentence that says why there are none.
+ */
+function weightsByMint(value: unknown, inMint: string): { readonly ok: true; readonly byMint: ReadonlyMap<string, number> } | { readonly ok: false; readonly problem: string } {
+  const no = (problem: string) => ({ ok: false, problem }) as const;
+  if (!Array.isArray(value)) return no("weights must be an array of { mint, weightBps }, one entry per stock SaverFi offers.");
+  const byMint = new Map<string, number>();
+  let total = 0;
+  for (const [index, entry] of value.entries()) {
+    const at = `weights[${index}]`;
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return no(`${at} must be an object { mint, weightBps }.`);
+    const fields = entry as Record<string, unknown>;
+    const extra = unexpectedField(fields, ["mint", "weightBps"]);
+    if (extra !== null) return no(`${at}: ${extra}`);
+    const { mint, weightBps } = fields;
+    if (!isPubkey(mint)) return no(`${at}.mint must be a base58 32-byte mint address.`);
+    if (byMint.has(mint)) return no(`${at} names ${mint} again: a stock takes one weight.`);
+    if (mint === inMint) return no(`${at} names ${mint}, the currency the basket spends: it cannot also be bought.`);
+    if (!Number.isInteger(weightBps) || (weightBps as number) <= 0) return no(`${at}.weightBps must be a whole number of basis points greater than zero.`);
+    byMint.set(mint, weightBps as number);
+    total += weightBps as number;
+  }
+  const offered = OFFERED_LEGS.map((leg) => leg.mint);
+  const unnamed = offered.filter((mint) => !byMint.has(mint));
+  if (unnamed.length > 0) return no(`weights names no share for ${unnamed.join(", ")}. Every stock SaverFi offers takes a weight; none is filled in for you.`);
+  const unoffered = [...byMint.keys()].filter((mint) => !offered.includes(mint));
+  if (unoffered.length > 0) return no(`weights names ${unoffered.join(", ")}, which SaverFi does not offer.`);
+  // Last, so a basket that is the right stocks but the wrong shares says so
+  // rather than being reported as a shape problem.
+  if (total !== LEG_WEIGHT_TOTAL_BPS) return no(`the weights must add up to exactly ${LEG_WEIGHT_TOTAL_BPS} basis points; these add up to ${total}.`);
+  return { ok: true, byMint };
+}
 
 interface LiveFloors {
   readonly convertWad: bigint;
@@ -558,8 +737,11 @@ function liveFloors(pools: readonly (AccountSnapshot | null)[], slot: number | n
 /**
  * investPolicy: set_invest_policy for the offered basket, with floors read from
  * the pinned pools at build time and every vault token account the vault lacks
- * created ahead of it at the owner's expense. The request names only the caps
- * and whether investing is on: legs, floors, venue and in-mint are SIP's.
+ * created ahead of it at the owner's expense. Floors, legs and in-mint are
+ * SIP's; the request may name the caps, the minimum purchase, the share each
+ * offered stock takes and the venue — by name — and whether investing is on.
+ * Every one of those is optional, and absent it is built exactly as before:
+ * equal shares over the catalogue, the $5-split minimum, Raydium CLMM.
  */
 async function investPolicy(fields: Readonly<Record<string, unknown>>, served: Served): Promise<Response> {
   const extra = unexpectedField(fields, INVEST_POLICY_FIELDS);
@@ -569,16 +751,33 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
   const maxPerCall = fields.maxPerCall === undefined ? DEFAULT_INVEST_CAPS.maxPerCall : decimalU64(fields.maxPerCall);
   const maxRolling30d = fields.maxRolling30d === undefined ? DEFAULT_INVEST_CAPS.maxRolling30d : decimalU64(fields.maxRolling30d);
   if (maxPerCall === null || maxRolling30d === null) return served.refuse(400, "bad_request", "maxPerCall and maxRolling30d are USDC raw units, written as decimal strings.");
+  // The same decimal-string parser the caps use: a $30,000 cap is 30,000,000,000
+  // raw, and a double stops being exact well before a u64 does.
+  const minInvestment = fields.minInvestment === undefined ? defaultInvestPolicy(OFFERED_LEGS.length).minInvestment : decimalU64(fields.minInvestment);
+  if (minInvestment === null) return served.refuse(400, "bad_request", "minInvestment is a USDC raw amount (6 decimals), written as a decimal string: \"5000000\" is $5.00.");
   const enabled = fields.enabled ?? true;
   if (typeof enabled !== "boolean") return served.refuse(400, "bad_request", "enabled must be true or false.");
 
-  const weights = basketWeightsBps(OFFERED_LEGS.length);
+  const equalShares = basketWeightsBps(OFFERED_LEGS.length);
+  const weights =
+    fields.weights === undefined
+      ? { ok: true as const, byMint: new Map(OFFERED_LEGS.map((leg, index) => [leg.mint, equalShares[index]!])) }
+      : weightsByMint(fields.weights, USDC_MINT);
+  if (!weights.ok) return served.refuse(400, "bad_request", weights.problem);
+
+  // A NAME, NEVER A KEY. VENUE_PROGRAMS is the only translation, and it lives here.
+  const venue = fields.venue === undefined ? DEFAULT_VENUE : fields.venue;
+  const venueProgram = typeof venue === "string" ? VENUE_PROGRAMS.get(venue) : undefined;
+  if (venueProgram === undefined) {
+    return served.refuse(400, "bad_request", `venue must be one of: ${OFFERED_VENUES.join(", ")}. It is a venue's name, never a program address.`);
+  }
+
   const policyAt = (convertFloor: bigint, legFloors: readonly bigint[]): InvestPolicyInput => ({
-    legs: OFFERED_LEGS.map((leg, index) => ({ mint: leg.mint, weightBps: weights[index]!, minOutRateWad: legFloors[index]! })),
-    venueProgram: RAYDIUM_CLMM,
+    legs: OFFERED_LEGS.map((leg, index) => ({ mint: leg.mint, weightBps: weights.byMint.get(leg.mint)!, minOutRateWad: legFloors[index]! })),
+    venueProgram,
     inMint: USDC_MINT,
     minConvertRateWad: convertFloor,
-    minInvestment: defaultInvestPolicy(OFFERED_LEGS.length).minInvestment,
+    minInvestment,
     maxPerCall,
     maxRolling30d,
     enabled,
@@ -801,12 +1000,14 @@ async function withdrawToken(fields: Readonly<Record<string, unknown>>, served: 
   });
 }
 
-/** POST /api/solana-build: unsigned owner transactions (createVault, link, investPolicy, pauseInvesting, withdraw, withdrawToken) and the link consent (prepareLink). */
+/** POST /api/solana-build: unsigned owner transactions (createVault, setPolicy, link, investPolicy, pauseInvesting, withdraw, withdrawToken) and the link consent (prepareLink). */
 export function createSolanaBuildHandler(options: SolanaBuildHandlerOptions): SolanaRouteHandler {
   return createRoute("solana-build", options, async (action, fields, served) => {
     switch (action) {
       case "createVault":
         return createVault(fields, served);
+      case "setPolicy":
+        return setPolicy(fields, served);
       case "prepareLink":
         return linkWallet(fields, served, false);
       case "link":
@@ -820,7 +1021,7 @@ export function createSolanaBuildHandler(options: SolanaBuildHandlerOptions): So
       case "withdrawToken":
         return withdrawToken(fields, served);
       default:
-        return served.refuse(400, "bad_request", "action must be createVault, prepareLink, link, investPolicy, pauseInvesting, withdraw or withdrawToken.");
+        return served.refuse(400, "bad_request", "action must be createVault, setPolicy, prepareLink, link, investPolicy, pauseInvesting, withdraw or withdrawToken.");
     }
   });
 }
