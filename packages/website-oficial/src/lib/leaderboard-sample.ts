@@ -5,33 +5,58 @@
  * says nothing about whether the design works — where the eye goes, whether the
  * medals read, whether a streak flame is too loud. This fills it.
  *
- * WHY IT IS SAFE: it is reachable only at /leaderboard?demo=1, it never touches
- * the keeper's payload, and the page that renders it puts "Sample data — not
- * real pensions" on screen beside the numbers. The addresses are not real
- * pensions and are not claimed to be.
+ * THE ADDRESSES ARE NOT ADDRESSES. An earlier version of this file borrowed
+ * base58 strings from test fixtures; two of them turned out to be real mainnet
+ * accounts, one of them THIS PROJECT'S OWN VAULT — so a page reachable by
+ * anyone attributed invented savings, an invented streak and an invented score
+ * to a real account, with a link to Solscan under it. These are placeholders
+ * that say so in their own text and cannot collide with a real account: base58
+ * has no "0", "O", "I" or "l", and no key derives to a pretty word. The page
+ * also refuses to link a sample row to an explorer — see leaderboard-view.tsx.
  *
- * EVERY ROW ADDS UP. participation + size + streak IS pointsExact, and points
- * is that rounded — the same invariant the real scorer holds, so the tooltip
- * tells the truth here too.
+ * EVERY ROW ADDS UP, and its size term is what the RULES in the same payload
+ * actually produce for the amounts on that row: computed here by the same
+ * arithmetic the keeper uses, never typed in. A sample whose numbers the rule
+ * could not have made would teach the wrong thing about the rule.
  */
 
 import type { LeaderboardData, LeaderboardEntry } from "@/lib/leaderboard";
 
 const SOL = 1_000_000_000;
 
+const RULES = {
+  ahorro: { participation: 10, sizeFactor: 5, sizeCap: 25, sizeUnit: 1_000_000, streakPerDay: 2, streakCap: 20 },
+  volumen: { participation: 10, sizeFactor: 4, sizeCap: 20, sizeUnit: 1_000_000, streakPerDay: 2, streakCap: 20 },
+} as const;
+
+const round1 = (value: number): number => Math.round(value * 10) / 10;
+
+/** The keeper's own size term: min(cap, factor · log10(1 + amount / unit)). */
+function sizePoints(lamports: number, rules: { sizeFactor: number; sizeCap: number; sizeUnit: number }): number {
+  if (lamports <= 0) return 0;
+  return Math.min(rules.sizeCap, rules.sizeFactor * Math.log10(1 + lamports / rules.sizeUnit));
+}
+
+/**
+ * One competitor, scored the way the keeper scores: the day's amounts are split
+ * evenly across their active days, each day is scored under its own cap, and
+ * the parts published are the parts summed.
+ */
 function entry(input: {
   readonly rank: number;
   readonly subject: string;
   readonly days: number;
   readonly streak: number;
-  readonly size: number;
   readonly savedSol: number;
   readonly tradedSol: number;
   readonly settles: number;
 }): LeaderboardEntry {
-  const participation = 10 * input.days;
-  const streak = Math.min(20, 2 * Math.max(0, input.streak - 1));
-  const pointsExact = Math.round((participation + input.size + streak) * 10) / 10;
+  const perDaySaved = (input.savedSol * SOL) / input.days;
+  const perDayTraded = (input.tradedSol * SOL) / input.days;
+  const size = round1(input.days * (sizePoints(perDaySaved, RULES.ahorro) + sizePoints(perDayTraded, RULES.volumen)));
+  const participation = RULES.ahorro.participation * input.days;
+  const streak = Math.min(RULES.ahorro.streakCap, RULES.ahorro.streakPerDay * Math.max(0, input.streak - 1));
+  const pointsExact = round1(participation + size + streak);
   return {
     rank: input.rank,
     subject: input.subject,
@@ -42,27 +67,32 @@ function entry(input: {
     settles: input.settles,
     amountRaw: Math.round(input.savedSol * SOL).toString(),
     volumeRaw: Math.round(input.tradedSol * SOL).toString(),
-    breakdown: { participation, size: input.size, streak },
+    breakdown: { participation, size, streak },
   };
 }
 
-const ROWS: readonly LeaderboardEntry[] = [
-  entry({ rank: 1, subject: "7Ldx9vQmA2kR5tYpN3wFgH8sJ4bCzE6uVnMq1XrTaPkD", days: 7, streak: 7, size: 61.4, savedSol: 2.184, tradedSol: 41.7, settles: 19 }),
-  entry({ rank: 2, subject: "4bTqZs8mLpN2vXcR7hYdJ9fE3uGaK5oW6iVbQtXwMzAe", days: 6, streak: 5, size: 52.8, savedSol: 1.472, tradedSol: 33.1, settles: 14 }),
-  entry({ rank: 3, subject: "9QX53J3Kbs8ogQirZq5iN11rucZAvgF4EKWw98QAkUSe", days: 6, streak: 4, size: 44.1, savedSol: 0.961, tradedSol: 18.6, settles: 12 }),
-  entry({ rank: 4, subject: "BnK4rTvC8xWqZ2mLpS6hYdJ9fE3uGaN5oR7iVbQtXwMz", days: 5, streak: 3, size: 39.7, savedSol: 0.744, tradedSol: 15.2, settles: 9 }),
-  entry({ rank: 5, subject: "EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU", days: 4, streak: 4, size: 33.2, savedSol: 0.508, tradedSol: 11.9, settles: 8 }),
-  entry({ rank: 6, subject: "3QfWb8sKpLmNvTz5YhXcRjD2gA7eU9iFoB4tSxMwQnHy", days: 3, streak: 2, size: 36.5, savedSol: 4.310, tradedSol: 96.4, settles: 6 }),
-  entry({ rank: 7, subject: "GkP2mXvR9tLqB6sN4hYcW8dF3jU7aE5oZ1iVbQtXwMzC", days: 3, streak: 3, size: 27.9, savedSol: 0.276, tradedSol: 6.8, settles: 5 }),
-  entry({ rank: 8, subject: "5Y1bpPuG8hatmmUKC86WLJqbMuNfXAQUQAQMwKM3YNMe", days: 2, streak: 2, size: 31.4, savedSol: 1.905, tradedSol: 44.2, settles: 4 }),
-  entry({ rank: 9, subject: "HsW7qYnL2vXcB9gKfT4mRjD6aA8eZuC3oNxS5iQbVtGp", days: 2, streak: 1, size: 24.8, savedSol: 0.383, tradedSol: 9.7, settles: 3 }),
-  entry({ rank: 10, subject: "2mVtL8sQpR5nX9cB4hYdK7fE6uGaW3oZ1iJbNtXwQzMe", days: 1, streak: 1, size: 22.6, savedSol: 8.640, tradedSol: 212.5, settles: 2 }),
+/** Placeholders, and readable as such: no key derives to a word. */
+const SAMPLE = (word: string): string => `Samp1e${word}${"1".repeat(Math.max(0, 43 - 6 - word.length))}`;
+
+const SCORED: readonly LeaderboardEntry[] = [
+  entry({ rank: 0, subject: SAMPLE("Habit"), days: 7, streak: 7, savedSol: 2.184, tradedSol: 41.7, settles: 19 }),
+  entry({ rank: 0, subject: SAMPLE("Daily"), days: 6, streak: 5, savedSol: 1.472, tradedSol: 33.1, settles: 14 }),
+  entry({ rank: 0, subject: SAMPLE("Steady"), days: 6, streak: 4, savedSol: 0.961, tradedSol: 18.6, settles: 12 }),
+  entry({ rank: 0, subject: SAMPLE("Often"), days: 5, streak: 3, savedSol: 0.744, tradedSol: 15.2, settles: 9 }),
+  entry({ rank: 0, subject: SAMPLE("Patient"), days: 4, streak: 4, savedSol: 0.508, tradedSol: 11.9, settles: 8 }),
+  entry({ rank: 0, subject: SAMPLE("Whale"), days: 3, streak: 2, savedSol: 4.31, tradedSol: 96.4, settles: 6 }),
+  entry({ rank: 0, subject: SAMPLE("Small"), days: 3, streak: 3, savedSol: 0.276, tradedSol: 6.8, settles: 5 }),
+  entry({ rank: 0, subject: SAMPLE("Brief"), days: 2, streak: 2, savedSol: 1.905, tradedSol: 44.2, settles: 4 }),
+  entry({ rank: 0, subject: SAMPLE("Sparse"), days: 2, streak: 1, savedSol: 0.383, tradedSol: 9.7, settles: 3 }),
+  entry({ rank: 0, subject: SAMPLE("OneDay"), days: 1, streak: 1, savedSol: 8.64, tradedSol: 212.5, settles: 2 }),
 ];
 
-const RULES = {
-  ahorro: { participation: 10, sizeFactor: 5, sizeCap: 25, sizeUnit: 1_000_000, streakPerDay: 2, streakCap: 20 },
-  volumen: { participation: 10, sizeFactor: 4, sizeCap: 20, sizeUnit: 1_000_000, streakPerDay: 2, streakCap: 20 },
-} as const;
+/** Ranked the way the keeper ranks: exact score, then days, then the streak. */
+const exact = (row: LeaderboardEntry): number => row.pointsExact ?? row.points;
+
+const ROWS: readonly LeaderboardEntry[] = [...SCORED]
+  .sort((a, b) => exact(b) - exact(a) || b.activeDays - a.activeDays || b.bestStreak - a.bestStreak)
+  .map((row, index) => ({ ...row, rank: index + 1 }));
 
 /** The whole payload, in the shape the keeper serves — including a thinner season cut. */
 export const SAMPLE_LEADERBOARD: LeaderboardData = {
@@ -70,10 +100,15 @@ export const SAMPLE_LEADERBOARD: LeaderboardData = {
   seasonStart: "2026-09-14T00:00:00.000Z",
   unit: "lamports",
   rules: RULES,
-  coverage: { subjects: ROWS.length, settlements: ROWS.reduce((total, row) => total + row.settles, 0), firstDay: "2026-09-08", lastDay: "2026-09-20" },
+  coverage: {
+    subjects: ROWS.length,
+    settlements: ROWS.reduce((total, row) => total + row.settles, 0),
+    firstDay: "2026-09-08",
+    lastDay: "2026-09-20",
+  },
   boards: {
-    // The season is the same field of competitors with a couple of the
-    // all-time names missing, which is what a weekly reset actually looks like.
+    // The season is the same field with a couple of the all-time names missing,
+    // which is what a weekly reset actually looks like.
     total: { season: ROWS.slice(0, 8).map((row, index) => ({ ...row, rank: index + 1 })), all: ROWS },
     ahorro: { season: [], all: [] },
     volumen: { season: [], all: [] },
