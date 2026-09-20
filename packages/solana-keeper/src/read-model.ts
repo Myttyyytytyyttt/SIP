@@ -54,6 +54,14 @@ export interface SettlementRow {
   readonly volumeRaw: bigint;
   readonly txRef: string;
   readonly height: bigint;
+  /**
+   * WHEN IT HAPPENED ON CHAIN, for a row not written as it happens. The keeper
+   * omits it and the column defaults to now(), which is within a minute of the
+   * block; a BACKFILL must pass the block time, because the leaderboard groups
+   * by calendar day — rows dated now() would pile months of settlements onto
+   * today and hand whoever was backfilled one enormous day instead of a streak.
+   */
+  readonly at?: Date;
 }
 
 /**
@@ -266,8 +274,8 @@ export class SolanaReadModel {
     return this.#run("settlement", (client) =>
       client.query(
         `INSERT INTO ${READ_MODEL_SCHEMA}.settlement_event
-           (wallet_addr, nonce, vault_addr, mode, base_raw, contribution_raw, volume_raw, tx_ref, height)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+           (wallet_addr, nonce, vault_addr, mode, base_raw, contribution_raw, volume_raw, tx_ref, height, at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10::timestamptz, now()))
          ON CONFLICT (wallet_addr, nonce) DO UPDATE
            SET contribution_raw = EXCLUDED.contribution_raw,
                volume_raw = EXCLUDED.volume_raw,
@@ -284,6 +292,10 @@ export class SolanaReadModel {
           row.volumeRaw.toString(),
           row.txRef,
           row.height.toString(),
+          // NOT UPDATED ON CONFLICT, deliberately: a row written as it happened
+          // already carries the better timestamp, and re-running a backfill
+          // must not be able to move it.
+          row.at?.toISOString() ?? null,
         ],
       ),
     );

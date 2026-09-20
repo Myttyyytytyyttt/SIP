@@ -13,7 +13,8 @@
     "ready": "tsx bin/ready.mts",
     "privy-policy": "tsx bin/privy-policy.mts",
     "setup-read-model": "tsx bin/setup-read-model.mts",
-    "alert-test": "tsx bin/alert-test.mts"
+    "alert-test": "tsx bin/alert-test.mts",
+    "backfill-settlements": "tsx bin/backfill-settlements.mts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",

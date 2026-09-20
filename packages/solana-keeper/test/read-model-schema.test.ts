@@ -19,6 +19,7 @@ const source = (path: string): string => readFileSync(fileURLToPath(new URL(path
 const sql = source("sql/sip_solana.sql");
 const readModel = source("src/read-model.ts");
 const keeper = source("bin/keeper.mts");
+const backfill = source("bin/backfill-settlements.mts");
 
 describe("the settlement mirror's shape", () => {
   it("declares every column the preflight demands", () => {
@@ -35,10 +36,21 @@ describe("the settlement mirror's shape", () => {
   });
 
   it("writes volume_raw on insert and on conflict", () => {
-    expect(readModel).toContain("(wallet_addr, nonce, vault_addr, mode, base_raw, contribution_raw, volume_raw, tx_ref, height)");
-    expect(readModel).toContain("VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)");
+    expect(readModel).toContain("(wallet_addr, nonce, vault_addr, mode, base_raw, contribution_raw, volume_raw, tx_ref, height, at)");
+    expect(readModel).toContain("VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10::timestamptz, now()))");
     // A re-recorded settlement must not keep the old volume beside a new tx.
     expect(readModel).toContain("volume_raw = EXCLUDED.volume_raw");
+  });
+
+  it("dates a row by the block when one is given, and never moves an existing row's date", () => {
+    // The leaderboard groups by calendar day. A backfill that let `at` default
+    // to now() would pile months of settlements onto today and turn one
+    // rebuilt history into one enormous day.
+    expect(backfill).toContain("at,");
+    expect(backfill).toContain("tx.blockTime");
+    // `at` is absent from the ON CONFLICT SET list on purpose.
+    const onConflict = readModel.slice(readModel.indexOf("ON CONFLICT (wallet_addr, nonce) DO UPDATE"), readModel.indexOf("WHERE ${READ_MODEL_SCHEMA}.settlement_event.tx_ref"));
+    expect(onConflict).not.toContain("at =");
   });
 
   it("is fed the notional the window actually measured", () => {

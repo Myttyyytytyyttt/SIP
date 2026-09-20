@@ -163,6 +163,21 @@ Se recalcula cada dos minutos y, además, justo después de cada cobro registrad
 mirar no encuentra una clasificación que no sabe nada de él. Nunca se calcula dentro del barrido: una consulta lenta no
 puede retrasar un cobro.
 
+**Si al historial le faltan filas** — un parpadeo de la base, un despliegue adelantado a su migración, o un cobro cuya
+firma no volvió — se reconstruye desde la cadena, que es la verdad:
+
+```bash
+bash -c '. ~/sip-keys/sip-hackathon.env; pnpm --dir packages/solana-keeper backfill-settlements'            # en seco
+bash -c '. ~/sip-keys/sip-hackathon.env; pnpm --dir packages/solana-keeper backfill-settlements --write'    # ya de verdad
+```
+
+En seco por defecto: enseña fila por fila lo que escribiría y no toca nada hasta `--write`. Repetirlo es seguro (la
+escritura es un upsert por `(wallet_addr, nonce)`, y una fila escrita en su momento conserva su hora y su volumen
+medido). Lo único que **no** se puede recuperar es `volume_raw`: el nocional sale de caminar las transacciones de la
+ventana, y un RPC normal guarda dos o tres días — esas filas quedan a 0 y solo cuentan para el tablero de Ahorro.
+Comprobado el 20-sep contra mainnet: de 12 firmas del programa reconstruye la única liquidación real (19-sep, base
+0,183172913 SOL, cobrado 0,036634582 SOL, `2tE3BMTa…`).
+
 ### Fase B — el martes, después de publicar y configurar el programa
 
 Añade los secretos. Sigue en seco: sin la fase C no envía nada.
