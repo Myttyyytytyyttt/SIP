@@ -310,6 +310,17 @@ export async function fetchJupiterSwapInstructions(params: {
     // Jupiter's own program accounts, and the only vault accounts left in the
     // route are the two we measure. The discriminator check below is what
     // proves the flag was honoured.
+    //
+    // AND IT NARROWS THE VENUE SET, which the caller has to expect. Some
+    // venues have no shared-accounts form at all: on 2026-09-20, quoting
+    // USDC -> FIGUREAI with the CLMM/DLMM venues excluded produced a route
+    // whose /swap-instructions answered HTTP 400 with
+    //   {"error":"Simple AMMs are not supported with shared accounts",
+    //    "errorCode":"NOT_SUPPORTED"}
+    // That is not a refusal of ours and not a bug — it is Jupiter saying this
+    // particular route cannot be built the only way we can use it. A caller
+    // that must trade re-quotes with that venue excluded. It must NOT fall
+    // back to the plain `route` instruction, which guard (1) refuses anyway.
     useSharedAccounts: true,
     // The vault PDA cannot sign the outer transaction, so it cannot pay for
     // an ATA it does not have; the wrap/unwrap helpers would also add
