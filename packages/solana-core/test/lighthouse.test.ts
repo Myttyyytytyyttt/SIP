@@ -515,18 +515,25 @@ describe("sizes", () => {
   });
 
   /**
-   * THE CEILING THE NEXT LEG HAS TO PASS. A leg costs 50 bytes on the wire (its
-   * mint, weight and floor in set_invest_policy's data), so this margin is
-   * deliberately wider than one leg: a fourth leg fails here, in CI, and whoever
-   * adds it re-measures and decides — rather than the first owner to sign a
-   * four-leg policy finding out inside Phantom.
+   * THE CEILING THE NEXT LEG HAS TO PASS. A leg costs about 48 bytes on the wire
+   * (its mint, weight and floor in set_invest_policy's data), so this margin is
+   * deliberately wider than one leg: THE NEXT LEG FAILS HERE, in CI, and whoever
+   * adds it re-measures and decides — rather than the first owner to sign the
+   * wider policy finding out inside Phantom.
    *
-   * MEASURED HERE, at three legs and BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES = 2:
-   * 1,058 bytes legacy, 1,060 as v0, 1,079 with Phantom's trailing block
-   * saturated — 174, 172 and 153 bytes of headroom under MAX_TX_BYTES = 1,232.
-   * Three creations instead of two measures 1,212, leaving 20: unshippable.
+   * RE-MEASURED AT TWO LEGS, BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES = 2 (the loop
+   * below prints these if it is ever doubted): 1,008 bytes legacy, 1,010 as v0,
+   * 1,029 and 1,031 with Phantom's trailing block saturated — 224, 222, 203 and
+   * 201 bytes of headroom under MAX_TX_BYTES = 1,232. The worst case is 201.
+   *
+   * SO THE NUMBER IS 201 MINUS 25, the same 25 bytes of slack the three-leg
+   * catalogue kept when this read 128 against a worst case of 153. A third leg
+   * would measure 153 again and trip this; it was 153 while the catalogue had
+   * three legs, and the ceiling passed then only because it was set for three.
+   * Dropping FIGUREAI bought 48 bytes, and this constant takes them rather than
+   * quietly turning into a bound that four legs could also slip under.
    */
-  const MIN_CATALOGUE_HEADROOM = 128;
+  const MIN_CATALOGUE_HEADROOM = 176;
 
   it(`set_invest_policy for the whole catalogue, ${BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES} creations bundled, keeps at least ${MIN_CATALOGUE_HEADROOM} bytes under Solana's limit through Phantom's rewrite`, () => {
     // The relay still has to accept what the build route signs.

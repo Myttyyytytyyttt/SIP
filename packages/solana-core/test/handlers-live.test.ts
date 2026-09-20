@@ -210,7 +210,7 @@ function fullChain(owner: string, wallet: string): LiveChain {
       [deriveInvestPda(vault).toBase58(), sipOwned(policyAccount(vault))],
       [deriveConfigPda().toBase58(), sipOwned(configAccount(false))],
       // Every pool PRICED_POOLS names, so a snapshot that quotes a price quotes it
-      // because all four decoded, not because a missing one was never asked about.
+      // because all three decoded, not because a missing one was never asked about.
       ...pricedPoolEntries(),
       ...pythAccounts(),
       [deriveLinkPda(wallet).toBase58(), sipOwned(linkAccount(wallet, vault))],
@@ -294,6 +294,9 @@ describe("snapshot", () => {
     expect(body.prices.legs).toEqual(
       LEG_POOLS.map((leg) => ({ symbol: leg.symbol, mint: leg.mint, wad: String(leg.legWad), usdcRawPer1e8: String(leg.usdcRawPer1e8) })),
     );
+    // The catalogue's length is load-bearing here: mapping over LEG_POOLS would
+    // agree with an empty answer if the catalogue ever emptied, so it is pinned.
+    expect(body.prices.legs.map((leg: { symbol: string }) => leg.symbol)).toEqual(["SPYx", "ANTHROPIC"]);
 
     // ── the oracle, a SIBLING of prices and never a field inside it ────────────
     expect(body.prices.pyth).toBeUndefined();

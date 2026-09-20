@@ -5,8 +5,6 @@
 import {
   ANTHROPIC_MINT,
   ANTHROPIC_USDC_POOL,
-  FIGUREAI_MINT,
-  FIGUREAI_USDC_POOL,
   RAYDIUM_CLMM,
   SOL_USDC_POOL,
   SPYX_MINT,
@@ -72,11 +70,13 @@ export const configAccount = (paused: boolean): Uint8Array =>
  * An InvestmentPolicy for `vault`: the whole catalogue at the golden floors, $10
  * per buy and $50 per 30 days, as the first mainnet test types them.
  *
- * The three legs are OFFERED_LEGS' three, in order, each at LEG_POOLS' 95 %
- * floor, and the weights are basketWeightsBps(3) written out — 3,334 on the
- * first leg and 3,333 on the other two, summing to exactly 10,000. Written out
- * rather than derived: this fixture stands for what an owner already signed, so
- * it must be able to disagree with today's catalogue.
+ * The two legs are OFFERED_LEGS' two, in order, each at LEG_POOLS' 95 % floor,
+ * and the weights are basketWeightsBps(2) written out — 5,000 and 5,000,
+ * summing to exactly 10,000. Written out rather than derived: this fixture
+ * stands for what an owner already signed, so it must be able to disagree with
+ * today's catalogue. (It shrank with the catalogue when FIGUREAI's leg was
+ * withdrawn; nothing forces it to, and a test that needs a stale basket passes
+ * its own `legs`, as pauseInvesting's does.)
  */
 export const policyAccount = (vault: string, fields: Record<string, unknown> = {}): Uint8Array =>
   sipAccount("InvestmentPolicy", {
@@ -85,9 +85,8 @@ export const policyAccount = (vault: string, fields: Record<string, unknown> = {
     venue_program: RAYDIUM_CLMM,
     in_mint: USDC_MINT,
     legs: [
-      { mint: SPYX_MINT, weight_bps: 3_334, min_out_rate_wad: 124_719_467_624_105_690n },
-      { mint: ANTHROPIC_MINT, weight_bps: 3_333, min_out_rate_wad: 5_277_777_777_777_777_778n },
-      { mint: FIGUREAI_MINT, weight_bps: 3_333, min_out_rate_wad: 23_750_000_000_000_000_001n },
+      { mint: SPYX_MINT, weight_bps: 5_000, min_out_rate_wad: 124_719_467_624_105_690n },
+      { mint: ANTHROPIC_MINT, weight_bps: 5_000, min_out_rate_wad: 5_277_777_777_777_777_778n },
     ],
     min_convert_rate_wad: 90_034_840_399_943_305n,
     min_investment: 5_000_000n,
@@ -120,24 +119,21 @@ export const SOL_SQRT_PRICE = 5_834_501_654_111_004_443n;
 export const SPYX_SQRT_PRICE = 50_911_325_114_989_095_030n;
 
 /**
- * sqrt_price_x64 of the two PreStocks pools. UNLIKE THE TWO ABOVE, THESE ARE
- * CHOSEN, NOT OBSERVED: this repo has no recorded mainnet reading of either
- * pool, so rather than invent a mainnet-looking number they are built from a
- * round dollar price anyone can redo by hand. A fixture that cannot be checked
- * is worse than no fixture, and one that decodes to an absurd price is worse still.
+ * sqrt_price_x64 of the PreStocks pool. UNLIKE THE TWO ABOVE, THIS IS CHOSEN,
+ * NOT OBSERVED: this repo has no recorded mainnet reading of that pool, so
+ * rather than invent a mainnet-looking number it is built from a round dollar
+ * price anyone can redo by hand. A fixture that cannot be checked is worse than
+ * no fixture, and one that decodes to an absurd price is worse still.
  *
  * A leg pool holds mint0 = the leg (d decimals) and mint1 = USDC (6), so its
  * stored price is USDC raw per leg raw, which at P dollars a whole token is
- * P x 10^(6-d), and sqrt_price_x64 = isqrt(P x 2^128 / 10^(d-6)). Both PreStocks
- * carry 9 decimals, so the price is P/1000:
+ * P x 10^(6-d), and sqrt_price_x64 = isqrt(P x 2^128 / 10^(d-6)). ANTHROPIC
+ * carries 9 decimals, so the price is P/1000:
  *   * ANTHROPIC at $180 a token -> 0.18 -> 7,826,290,695,199,669,327
- *   * FIGUREAI  at  $40 a token -> 0.04 -> 3,689,348,814,741,910,323
- * The integer square root truncates, so FIGUREAI's rate lands two raw units
- * above a round 25e18 rather than on it. That is left alone: no real pool sits
- * on a round number either, and LEG_POOLS writes down exactly what decodes.
+ * The integer square root truncates, so a rate need not land on a round number,
+ * and LEG_POOLS writes down exactly what decodes rather than what was aimed at.
  */
 export const ANTHROPIC_SQRT_PRICE = 7_826_290_695_199_669_327n;
-export const FIGUREAI_SQRT_PRICE = 3_689_348_814_741_910_323n;
 
 /** One offered leg's pool, and every rate a test compares a reader's answer to. */
 export interface LegPoolFixture {
@@ -167,8 +163,8 @@ export interface LegPoolFixture {
  * it to a constant, exactly as it did when the numbers were typed inline; naming
  * them only stops the same constant being retyped in four files.
  *
- * SPYx's four are the mainnet goldens. The PreStocks' follow from the chosen
- * sqrt prices above: 1e18 x 10^(d-6) / P, then 95 % of it, then
+ * SPYx's four are the mainnet goldens. ANTHROPIC's follow from the chosen sqrt
+ * price above: 1e18 x 10^(d-6) / P, then 95 % of it, then
  * ceil(1e8 x 1e18 / wad) of each.
  *
  * Every figure here is a RAW rate, never a display price. SPYx's 761,709,474
@@ -198,17 +194,6 @@ export const LEG_POOLS: readonly LegPoolFixture[] = Object.freeze([
     floorWad: 5_277_777_777_777_777_778n,
     usdcRawPer1e8: 18_000_000n,
     maxUsdcRawPer1e8: 18_947_369n,
-  }),
-  Object.freeze({
-    symbol: "FIGUREAI",
-    mint: FIGUREAI_MINT,
-    pool: FIGUREAI_USDC_POOL,
-    decimals: 9,
-    sqrtPriceX64: FIGUREAI_SQRT_PRICE,
-    legWad: 25_000_000_000_000_000_002n,
-    floorWad: 23_750_000_000_000_000_001n,
-    usdcRawPer1e8: 4_000_000n,
-    maxUsdcRawPer1e8: 4_210_527n,
   }),
 ]);
 

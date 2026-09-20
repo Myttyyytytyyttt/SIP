@@ -24,15 +24,7 @@
 //    unbounded per call. This overrides "caps at the maximum"; the owner confirms.
 //  * max_rolling_30d = 31 × max_per_call: one maximum buy per day-bucket.
 
-import {
-  ANTHROPIC_MINT,
-  ANTHROPIC_USDC_POOL,
-  FIGUREAI_MINT,
-  FIGUREAI_USDC_POOL,
-  SPYX_MINT,
-  SPYX_USDC_POOL,
-  TOKEN_2022_PROGRAM,
-} from "./addresses";
+import { ANTHROPIC_MINT, ANTHROPIC_USDC_POOL, SPYX_MINT, SPYX_USDC_POOL, TOKEN_2022_PROGRAM } from "./addresses";
 import type { OwnerInstructionName } from "./idl";
 import { DEFAULT_RATES, MODE_PROFIT, type VaultPolicyInput } from "./rules";
 
@@ -72,7 +64,7 @@ export interface OfferedLeg {
 }
 
 /**
- * The stocks a policy can buy from the web: three, all Token-2022, each priced
+ * The stocks a policy can buy from the web: two, both Token-2022, each priced
  * from its own Raydium CLMM pool against USDC. bin/check-legs.mts asserts every
  * number below against mainnet, depth included — a pool can be structurally
  * perfect and still route nothing.
@@ -80,22 +72,47 @@ export interface OfferedLeg {
  * THE BYTES, PER LEG. Each is 165 for the base account, the account type (1),
  * then one header (4) plus its value for every extension the mint requires:
  *  * SPYx, 179: ImmutableOwner (4), PausableAccount (4), TransferHookAccount (5).
- *  * ANTHROPIC and FIGUREAI, 191: those same 179, plus TransferFeeAmount
- *    (4 + an 8-byte withheld amount).
+ *  * ANTHROPIC, 191: those same 179, plus TransferFeeAmount (4 + an 8-byte
+ *    withheld amount).
  *
- * THE PRESTOCKS PAIR CHARGE 50 BPS TO TRANSFER. Their mints carry a live
- * transfer-fee extension — 0.5 % of every move, with maximum_fee at u64::MAX, so
- * nothing caps it — which lands on the amount RECEIVED, not the amount sent. A
- * leg floor priced from the pool alone does not see it; MAX_LEG_FEE_BPS in
- * bin/check-legs.mts is what keeps the fee from growing behind our backs. SPYx
- * has no transfer fee. Both PreStocks mints' transfer_hook program id is null:
- * a real hook would need transfer_checked_with_transfer_hook, which the program
- * does not call.
+ * ANTHROPIC CHARGES 50 BPS TO TRANSFER. Its mint carries a live transfer-fee
+ * extension — 0.5 % of every move, with maximum_fee at u64::MAX, so nothing caps
+ * it — which lands on the amount RECEIVED, not the amount sent. A leg floor
+ * priced from the pool alone does not see it; MAX_LEG_FEE_BPS in
+ * bin/check-legs.mts is what keeps the fee from growing behind our backs, and it
+ * is not hypothetical: read on 2026-09-20 (epoch 1038) the mint already carried a
+ * SCHEDULED rise to 100 bps from epoch 1039, which is MAX_LEG_FEE_BPS itself.
+ * SPYx has no transfer fee. ANTHROPIC's transfer_hook program id is null: a real
+ * hook would need transfer_checked_with_transfer_hook, which the program does not
+ * call.
+ *
+ * WHY FIGUREAI IS NOT OFFERED, though addresses.ts still names its mint and pool
+ * and this file deliberately leaves them there. NOTHING IS WRONG WITH THE MINT:
+ * it is the same Token-2022 shape as ANTHROPIC — 9 decimals, null hook, the same
+ * issuer key, the same 191-byte token account. ITS PINNED POOL IS EMPTY. Read on
+ * mainnet 2026-09-20 (epoch 1038), HvpDt2…HduM held 0.110274669 FIGUREAI and
+ * 31.91 USDC — about $51 all told, down from roughly $6,700 two days earlier,
+ * when check:legs last passed it. A buy over about $11 reverts.
+ *
+ * AND A SINGLE-HOP USDC BUY IS ALL SAVERFI CAN DO TODAY. The program pins the
+ * venue PROGRAM and not the route — invest.rs takes the account list from the
+ * crank — and the keeper brings exactly one Raydium CLMM swap_v2 per leg,
+ * through the single pool its registry holds for that mint
+ * (solana-keeper/src/invest-tick.ts: deps.pools.get(mint), then fetchLiveRoute).
+ * No multi-hop, no second venue, and a mint with no configured pool refuses the
+ * WHOLE basket before anything moves. So a leg whose one pool is empty is an
+ * unbuyable leg however good its mint is — and `pool` below is both that route
+ * and where the leg's floor is priced.
+ *
+ * A basket holding it would buy SPYx and ANTHROPIC every sweep, revert on
+ * FIGUREAI, and repeat — and the legs already bought STAY bought, so the basket
+ * drifts off the weights the owner signed while the dashboard reports a failure.
+ * The leg comes back when its pool has depth, and bin/check-legs.mts is the gate
+ * that says so: run it against mainnet before re-adding the entry below.
  */
 export const OFFERED_LEGS: readonly OfferedLeg[] = Object.freeze([
   Object.freeze({ symbol: "SPYx", name: "SP500 xStock", mint: SPYX_MINT, pool: SPYX_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 8, tokenAccountBytes: 179 }),
   Object.freeze({ symbol: "ANTHROPIC", name: "Anthropic PreStock", mint: ANTHROPIC_MINT, pool: ANTHROPIC_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 9, tokenAccountBytes: 191 }),
-  Object.freeze({ symbol: "FIGUREAI", name: "Figure AI PreStock", mint: FIGUREAI_MINT, pool: FIGUREAI_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 9, tokenAccountBytes: 191 }),
 ]);
 
 /** Each of `count` legs' weight, summing to exactly 10,000 bps: equal shares, any remainder on the first leg. */
@@ -140,20 +157,24 @@ export const OWNER_TX_COMPUTE: Readonly<Record<OwnerInstructionName, number>> = 
  * WHY TWO, MEASURED WITH THIS REPO'S OWN BUILDERS AND THE REAL LIGHTHOUSE
  * REWRITE (test/lighthouse.test.ts's sizes case re-measures it in CI; legacy
  * wire, signed, with Phantom's leading and trailing blocks as
- * test/phantom-rewrite.ts takes them from mainnet):
- *   * three legs, three creations: 1,212 bytes of MAX_TX_BYTES = 1,232. Twenty
- *     bytes of headroom is not shippable — a v0 message alone costs two of them,
- *     and one more Phantom assertion costs ten.
- *   * three legs, two creations: 1,058 bytes, 174 to spare (1,060 as v0, and
- *     1,079 with Phantom's trailing block saturated at MAX_TRAILING_WALLET_GUARDS).
+ * test/phantom-rewrite.ts takes them from mainnet). AT TODAY'S TWO LEGS:
+ *   * two creations: 1,008 bytes of MAX_TX_BYTES = 1,232, 224 to spare (1,010 as
+ *     v0, and 1,029/1,031 with Phantom's trailing block saturated at
+ *     MAX_TRAILING_WALLET_GUARDS — a worst case of 201 bytes spare).
+ *   * three creations: 1,162 bytes, 70 to spare, AND Phantom's blocks are already
+ *     full at 4 leading and 6 trailing, so there is no room left for a single
+ *     further assertion. Seventy bytes that cannot absorb one more check is not a
+ *     margin. (At three legs the same two numbers were 1,058 and 1,212, the
+ *     second leaving twenty: this got better with the leg, not safe.)
  *
- * AND RAISING MAX_VAULT_TOKEN_ACCOUNT_CREATES IS NOT THE FIX. Bundling all five
- * targets measures 1,456 bytes, 224 OVER the limit, because every extra creation
- * also buys one more leading and one more trailing wallet guard: six leading and
- * eight trailing, past MAX_LEADING_WALLET_GUARDS (4) and
- * MAX_TRAILING_WALLET_GUARDS (6), so the relay would refuse it even if it fit.
- * The wire gets worse with the cap, not better. The verifier's cap stays 3: it
- * bounds what the relay accepts, and the one-leg golden still creates three.
+ * AND RAISING MAX_VAULT_TOKEN_ACCOUNT_CREATES IS NOT THE FIX. Bundling all four
+ * of today's targets is refused by the builder itself — MAX_VAULT_TOKEN_ACCOUNT_CREATES
+ * is 3 — and it would be refused by the relay anyway, because every extra
+ * creation also buys one more leading and one more trailing wallet guard: five
+ * leading and seven trailing, past MAX_LEADING_WALLET_GUARDS (4) and
+ * MAX_TRAILING_WALLET_GUARDS (6). The wire gets worse with the cap, not better.
+ * The verifier's cap stays 3: it bounds what the relay accepts, and the one-leg
+ * golden still creates three.
  */
 export const BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES = 2;
 

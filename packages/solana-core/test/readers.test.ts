@@ -5,8 +5,6 @@ import { describe, expect, it } from "vitest";
 import {
   ANTHROPIC_MINT,
   ANTHROPIC_USDC_POOL,
-  FIGUREAI_MINT,
-  FIGUREAI_USDC_POOL,
   PYTH_PUSH_PROGRAM,
   PYTH_RECEIVER_PROGRAM,
   PYTH_SOL_USD_FEED,
@@ -327,24 +325,29 @@ describe("readPoolPrices", () => {
         convertWad: 100_038_711_555_492_562n,
         // Written out, not read from LEG_POOLS: this is the one place the decoder's
         // arithmetic is pinned, so it must not compare the fixture against itself.
-        legWads: { [SPYX_MINT]: 131_283_650_130_637_569n, [ANTHROPIC_MINT]: 5_555_555_555_555_555_556n, [FIGUREAI_MINT]: 25_000_000_000_000_000_002n },
+        legWads: { [SPYX_MINT]: 131_283_650_130_637_569n, [ANTHROPIC_MINT]: 5_555_555_555_555_555_556n },
       },
     });
     expect(upstream.calls).toHaveLength(1);
     expect((upstream.calls[0]!.body as { params: unknown[] }).params).toEqual([
-      [SOL_USDC_POOL, SPYX_USDC_POOL, ANTHROPIC_USDC_POOL, FIGUREAI_USDC_POOL],
+      [SOL_USDC_POOL, SPYX_USDC_POOL, ANTHROPIC_USDC_POOL],
       { encoding: "base64", commitment: "confirmed" },
     ]);
   });
 
+  // EVERY POOL IS SPOILED BOTH WAYS. With two legs there is one way to spoil a
+  // pool per leg left over from the three-leg list, so the FIGUREAI cases move
+  // onto ANTHROPIC rather than being dropped: a PreStocks pool under the wrong
+  // owner and one with its mints swapped are different bugs, and both are fatal.
   it.each([
-    ["the SOL pool owned by another program", () => [solPool(key()), legPool(0), legPool(1), legPool(2)]],
-    ["the SOL pool with its mints swapped", () => [solPool(RAYDIUM_CLMM, [USDC_MINT, WSOL_MINT]), legPool(0), legPool(1), legPool(2)]],
-    ["the SPYx pool with its mints swapped", () => [solPool(), legPool(0, RAYDIUM_CLMM, [USDC_MINT, SPYX_MINT]), legPool(1), legPool(2)]],
-    ["the ANTHROPIC pool owned by another program", () => [solPool(), legPool(0), legPool(1, key()), legPool(2)]],
-    ["the FIGUREAI pool with its mints swapped", () => [solPool(), legPool(0), legPool(1), legPool(2, RAYDIUM_CLMM, [USDC_MINT, FIGUREAI_MINT])]],
-    ["a pool that does not exist", () => [solPool(), legPool(0), null, legPool(2)]],
-    ["three accounts where four were asked", () => [solPool(), legPool(0), legPool(1)]],
+    ["the SOL pool owned by another program", () => [solPool(key()), legPool(0), legPool(1)]],
+    ["the SOL pool with its mints swapped", () => [solPool(RAYDIUM_CLMM, [USDC_MINT, WSOL_MINT]), legPool(0), legPool(1)]],
+    ["the SPYx pool with its mints swapped", () => [solPool(), legPool(0, RAYDIUM_CLMM, [USDC_MINT, SPYX_MINT]), legPool(1)]],
+    ["the SPYx pool owned by another program", () => [solPool(), legPool(0, key()), legPool(1)]],
+    ["the ANTHROPIC pool owned by another program", () => [solPool(), legPool(0), legPool(1, key())]],
+    ["the ANTHROPIC pool with its mints swapped", () => [solPool(), legPool(0), legPool(1, RAYDIUM_CLMM, [USDC_MINT, ANTHROPIC_MINT])]],
+    ["a pool that does not exist", () => [solPool(), legPool(0), null]],
+    ["two accounts where three were asked", () => [solPool(), legPool(0)]],
   ])("%s is unreadable, never a price", async (_, accounts) => {
     const { pool: p } = pool((call) => rpcResult(call, { context: { slot: 1 }, value: accounts() }));
     expect((await readPoolPrices(p)).kind).toBe("unreadable");
@@ -422,8 +425,10 @@ describe("the vault's token accounts", () => {
       { mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM, bytes: 165, address: deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58() },
       { mint: SPYX_MINT, tokenProgram: TOKEN_2022_PROGRAM, bytes: 179, address: deriveAta(vault, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58() },
       { mint: ANTHROPIC_MINT, tokenProgram: TOKEN_2022_PROGRAM, bytes: 191, address: deriveAta(vault, ANTHROPIC_MINT, TOKEN_2022_PROGRAM).toBase58() },
-      { mint: FIGUREAI_MINT, tokenProgram: TOKEN_2022_PROGRAM, bytes: 191, address: deriveAta(vault, FIGUREAI_MINT, TOKEN_2022_PROGRAM).toBase58() },
     ]);
+    // Two classic accounts and one per offered leg, and no more: a target that
+    // appeared without a leg behind it would be rent quoted for nothing.
+    expect(vaultTokenAccountTargets(vault)).toHaveLength(2 + 2);
   });
 
   it("held by its token program exists; absent, or only lamports sent to the address, is missing; anything else is unreadable", () => {
@@ -440,23 +445,19 @@ describe("the vault's token accounts", () => {
     const vault = key();
     const { pool: p, upstream } = pool((call) =>
       rpcResult(call, {
-        value: [
-          accountInfo(TOKEN_PROGRAM, new Uint8Array(165)),
-          null,
-          accountInfo(key(), new Uint8Array(179)),
-          accountInfo(TOKEN_2022_PROGRAM, new Uint8Array(191)),
-          null,
-        ],
+        value: [accountInfo(TOKEN_PROGRAM, new Uint8Array(165)), null, accountInfo(key(), new Uint8Array(179)), accountInfo(TOKEN_2022_PROGRAM, new Uint8Array(191))],
       }),
     );
     const read = await readVaultTokenAccounts(p, vault);
     expect(upstream.calls).toHaveLength(1);
+    // All three statuses still appear, on the same kinds of account they did at
+    // three legs: a classic account that is there, an address with nothing at it,
+    // one held by the wrong program, and a 191-byte Token-2022 account that is there.
     expect(read.kind === "exists" && read.value.map((entry) => [entry.mint, entry.status])).toEqual([
       [WSOL_MINT, "exists"],
       [USDC_MINT, "missing"],
       [SPYX_MINT, "unreadable"],
       [ANTHROPIC_MINT, "exists"],
-      [FIGUREAI_MINT, "missing"],
     ]);
     const down = pool(() => {
       throw new Error(`boom ${UPSTREAM_1}`);
@@ -474,8 +475,10 @@ describe("the vault's token accounts", () => {
           parsedTokenAccount({ tokenProgram: TOKEN_PROGRAM, mint: WSOL_MINT, owner: vault, amount: "100000000", decimals: 9, uiAmountString: "0.1" }),
           parsedTokenAccount({ tokenProgram: TOKEN_PROGRAM, mint: USDC_MINT, owner: key(), amount: "5", decimals: 6, uiAmountString: "0.000005" }),
           parsedTokenAccount({ tokenProgram: TOKEN_2022_PROGRAM, mint: SPYX_MINT, owner: vault, amount: "12345678", decimals: 8, uiAmountString: "0.1241643", bytes: 179 }),
-          parsedTokenAccount({ tokenProgram: TOKEN_2022_PROGRAM, mint: ANTHROPIC_MINT, owner: vault, amount: "2500000000", decimals: 9, uiAmountString: "2.5", bytes: 191 }),
-          parsedTokenAccount({ tokenProgram: TOKEN_2022_PROGRAM, mint: FIGUREAI_MINT, owner: vault, amount: "0", decimals: 9, uiAmountString: "0", bytes: 191 }),
+          // The zero-amount case rides on ANTHROPIC now that FIGUREAI carried it
+          // out of the catalogue: it is still a 191-byte Token-2022 account, and
+          // it is still the case that distinguishes "read, and empty" from "not read".
+          parsedTokenAccount({ tokenProgram: TOKEN_2022_PROGRAM, mint: ANTHROPIC_MINT, owner: vault, amount: "0", decimals: 9, uiAmountString: "0", bytes: 191 }),
         ],
       }),
     );
@@ -485,9 +488,8 @@ describe("the vault's token accounts", () => {
       [WSOL_MINT, "exists", 100_000_000n, 9, "0.1"],
       [USDC_MINT, "exists", null, null, null],
       [SPYX_MINT, "exists", 12_345_678n, 8, "0.1241643"],
-      [ANTHROPIC_MINT, "exists", 2_500_000_000n, 9, "2.5"],
       // An account that exists and holds nothing is 0n, never null: null is "nobody read it".
-      [FIGUREAI_MINT, "exists", 0n, 9, "0"],
+      [ANTHROPIC_MINT, "exists", 0n, 9, "0"],
     ]);
   });
 });
@@ -651,7 +653,6 @@ describe("readLiveSnapshot", () => {
       SOL_USDC_POOL,
       SPYX_USDC_POOL,
       ANTHROPIC_USDC_POOL,
-      FIGUREAI_USDC_POOL,
       deriveLinkPda(walletA).toBase58(),
       deriveLinkPda(walletB).toBase58(),
       walletA,
@@ -665,9 +666,13 @@ describe("readLiveSnapshot", () => {
     ]);
     // The digit 1 in C1ock, and the receiver-owned feeds in order.
     expect(PYTH_SNAPSHOT_ADDRESSES).toEqual(["SysvarC1ock11111111111111111111111111111111", PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED]);
-    // The documented cap still covers the widest ask: ten wallets, ten links, every pool, the tail.
-    expect(MAX_LIVE_SNAPSHOT_ADDRESSES).toBe(3 + 4 + 2 * MAX_WALLET_LINKS + 3);
-    expect(members[0]!.params[0]).toHaveLength(3 + 4 + 2 * 2 + 3);
+    // The documented cap still covers the widest ask: ten wallets, ten links, every
+    // pool, the tail. Every count here is WRITTEN OUT and not read from
+    // PRICED_POOLS, which is what the cap is derived from: three SIP accounts,
+    // three priced pools (wSOL/USDC and one per offered leg), two per wallet, and
+    // the oracle's three. A leg gained or lost has to move these literals.
+    expect(MAX_LIVE_SNAPSHOT_ADDRESSES).toBe(3 + 3 + 2 * MAX_WALLET_LINKS + 3);
+    expect(members[0]!.params[0]).toHaveLength(3 + 3 + 2 * 2 + 3);
     expect(members[0]!.params[1]).toEqual({ encoding: "base64", commitment: "confirmed" });
     // Read BY ADDRESS, never listed: no number of accounts anyone opens for the vault can make this unreadable.
     expect(members[1]!.params[0]).toEqual(vaultTokenAccountTargets(vault).map((target) => target.address));
@@ -723,9 +728,12 @@ describe("readLiveSnapshot", () => {
     ["the SOL pool with its mints swapped", () => [sipVault(), null, null, solPool(RAYDIUM_CLMM, [USDC_MINT, WSOL_MINT]), ...legPools()]],
     ["the SOL pool missing", () => [sipVault(), null, null, null, ...legPools()]],
     // Each spoiled pool is spoiled ALONE, with every other pool where it should be:
-    // a leg's pool must be able to fail this on its own account.
-    ["a leg's pool owned by another program", () => [sipVault(), null, null, solPool(), legPool(0), legPool(1, key()), legPool(2)]],
-    ["a leg's pool missing", () => [sipVault(), null, null, solPool(), legPool(0), legPool(1), null]],
+    // a leg's pool must be able to fail this on its own account. Both POSITIONS
+    // in the pools' slice are spoiled, first and last, so neither an off-by-one
+    // at the head of the slice nor one at its tail could pass this.
+    ["a leg's pool owned by another program", () => [sipVault(), null, null, solPool(), legPool(0), legPool(1, key())]],
+    ["the first leg's pool missing", () => [sipVault(), null, null, solPool(), null, legPool(1)]],
+    ["the last leg's pool missing", () => [sipVault(), null, null, solPool(), legPool(0), null]],
   ])("%s gives NO price rather than a wrong one, and the vault is still read", async (_, values) => {
     const read = await readLiveSnapshot(livePool(values()).pool, { owner, wallets: [], discover: false });
     expect(read.prices.kind).toBe("unreadable");
