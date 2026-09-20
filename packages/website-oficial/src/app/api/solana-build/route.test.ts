@@ -330,39 +330,94 @@ describe("/api/solana-build", () => {
   });
 
   /**
-   * WHICH OF THE PANEL FIELDS THIS BRANCH'S SERVER ACTUALLY TAKES, pinned so the
-   * form is never built against a field the route would refuse — and so that
-   * OPENING the whitelist turns this red and says "now wire the form".
+   * WHICH OF THE PANEL FIELDS THE SERVER ACTUALLY TAKES, pinned so the form is
+   * never built against a field the route would refuse — and so that CHANGING
+   * the whitelist turns this red and says "now re-wire the form".
    *
-   * The owner asked for four: minimum per buy, cap per buy, basket weights and
-   * cap per settlement. Today investPolicy takes the caps and nothing else:
-   * min_investment, the weights and the venue are SaverFi's, fixed in the route
-   * from OFFERED_LEGS (build-handler.ts), and there is no action at all that
-   * changes an existing vault's settlement cap — maxContribution is a
-   * createVault field, so it is chosen once, when the vault is made.
+   * THE OWNER ASKED FOR FOUR: minimum per buy, cap per buy, basket weights and
+   * cap per settlement. All four are buildable now. investPolicy takes the two
+   * caps, the minimum, the weights and the venue (INVEST_POLICY_FIELDS in
+   * solana-core/src/server/build-handler.ts); the settlement cap is a VAULT
+   * field and rides on setPolicy, which is a real action and writes all six of
+   * the vault's rule at once.
+   *
+   * SO WHAT THIS PINS IS THE SHAPE, not the refusal. Each field is accepted
+   * only in the one form the panel may send it, and every wrong form is refused
+   * before a single account is read — which is what lets the form send these
+   * without guessing.
    */
-  it("investPolicy takes the two caps and nothing else: the minimum per buy, the weights and the venue are refused, and no action changes a made vault's settlement cap", async () => {
+  it("investPolicy takes the caps, the minimum, the weights by mint and the venue by name, and refuses every other shape before it reads a thing; the settlement cap rides on setPolicy", async () => {
     useEnv(SOLANA_ENV);
     const owner = someKey();
     const methods = stubChain(new Map());
-    const refused = async (body: Record<string, unknown>): Promise<[number, string | undefined, string | undefined]> => {
-      const response = await answer(await POST(buildRequest({ action: "investPolicy", owner, ...body })));
+    const sent = async (action: string, body: Record<string, unknown>): Promise<[number, string | undefined, string | undefined]> => {
+      const response = await answer(await POST(buildRequest({ action, owner, ...body })));
       return [response.status, response.json.error?.code, response.json.error?.message];
     };
+    /** A shape the route must refuse BEFORE it reads anything: pinned per call, not in aggregate. */
+    const refusedAction = async (action: string, body: Record<string, unknown>): Promise<[number, string | undefined, string | undefined]> => {
+      const before = methods.length;
+      const result = await sent(action, body);
+      expect(methods.length, `a refused ${action} shape must not read the chain`).toBe(before);
+      return result;
+    };
+    const refused = (body: Record<string, unknown>) => refusedAction("investPolicy", body);
+    /** A shape the route must ACCEPT: it gets past every check into the chain reads. */
+    const accepted = (body: Record<string, unknown>) => sent("investPolicy", body);
+    // ACCEPTED means the route got past the whitelist and the shape checks into
+    // the chain reads, where this owner has no vault. It is the only "yes" a
+    // build route gives a request it cannot finish.
+    const ACCEPTED: [number, string, string] = [409, "vault_missing", "Create your vault first."];
 
-    // NOT ACCEPTED, so the form builds nothing for them and the defaults stand.
-    expect(await refused({ minInvestment: "2500000" })).toEqual([400, "bad_request", "Unexpected field minInvestment."]);
-    expect(await refused({ weights: [{ mint: SPYX_MINT, weightBps: 5_000 }, { mint: ANTHROPIC_MINT, weightBps: 5_000 }] })).toEqual([
+    // ── THE MINIMUM PER BUY: a USDC raw amount as a decimal string ───────────
+    expect(await accepted({ minInvestment: "2500000" })).toEqual(ACCEPTED);
+    const minWords = 'minInvestment is a USDC raw amount (6 decimals), written as a decimal string: "5000000" is $5.00.';
+    expect(await refused({ minInvestment: 2_500_000 })).toEqual([400, "bad_request", minWords]);
+    expect(await refused({ minInvestment: "2.5" })).toEqual([400, "bad_request", minWords]);
+
+    // ── THE WEIGHTS: {mint, weightBps} pairs, by mint, summing to 10,000 ─────
+    const both = (spyx: number, anthropic: number) => [
+      { mint: SPYX_MINT, weightBps: spyx },
+      { mint: ANTHROPIC_MINT, weightBps: anthropic },
+    ];
+    expect(await accepted({ weights: both(5_000, 5_000) })).toEqual(ACCEPTED);
+    expect(await accepted({ weights: both(7_000, 3_000) })).toEqual(ACCEPTED);
+    // POSITIONAL WEIGHTS ARE REFUSED: the catalogue's order is not a contract.
+    expect(await refused({ weights: [5_000, 5_000] })).toEqual([400, "bad_request", "weights[0] must be an object { mint, weightBps }."]);
+    // A SUM THAT IS NOT 10,000 IS NOT NORMALISED, it is refused by name.
+    expect(await refused({ weights: both(5_000, 4_999) })).toEqual([
       400,
       "bad_request",
-      "Unexpected field weights.",
+      "the weights must add up to exactly 10000 basis points; these add up to 9999.",
     ]);
-    expect(await refused({ venue: "raydium-clmm" })).toEqual([400, "bad_request", "Unexpected field venue."]);
-    // The settlement cap is a vault field, not a policy one, and there is no
-    // setPolicy to carry it: an existing vault's cap cannot be changed here.
+    // A LEG LEFT OUT IS NOT FILLED IN at the share that would make it work.
+    expect(await refused({ weights: [{ mint: SPYX_MINT, weightBps: 10_000 }] })).toEqual([
+      400,
+      "bad_request",
+      `weights names no share for ${ANTHROPIC_MINT}. Every stock SaverFi offers takes a weight; none is filled in for you.`,
+    ]);
+
+    // ── THE VENUE: A NAME, NEVER A PROGRAM ID FROM THE BROWSER ───────────────
+    const venueWords = "venue must be one of: raydium-clmm. It is a venue's name, never a program address.";
+    expect(await accepted({ venue: "raydium-clmm" })).toEqual(ACCEPTED);
+    expect(await refused({ venue: RAYDIUM_CLMM })).toEqual([400, "bad_request", venueWords]);
+    expect(await refused({ venue: "orca-whirlpool" })).toEqual([400, "bad_request", venueWords]);
+
+    // ── THE SETTLEMENT CAP IS NOT AN investPolicy FIELD ──────────────────────
+    // It is the VAULT's rule, and it moves through setPolicy, which exists.
     expect(await refused({ maxContribution: "60000000" })).toEqual([400, "bad_request", "Unexpected field maxContribution."]);
-    const setPolicy = await answer(await POST(buildRequest({ action: "setPolicy", owner, maxContribution: "60000000" })));
-    expect([setPolicy.status, setPolicy.json.error?.code]).toEqual([400, "bad_request"]);
+    // setPolicy WRITES ALL SIX, so a partial call is refused rather than having
+    // the missing fields guessed: the form must send the vault's current values
+    // back alongside the one it is changing.
+    expect(await refusedAction("setPolicy", { maxContribution: "60000000" })).toEqual([400, "bad_request", "mode must be profit or volume."]);
+    expect(await refusedAction("setPolicy", { mode: "profit", skimBps: 2_000, volumeBps: 50, paused: false, maxContribution: "60000000" })).toEqual([
+      400,
+      "bad_request",
+      "maxContribution and walletReserve are lamports, written as decimal strings. set_policy_v2 writes every field, so both must be named.",
+    ]);
+    expect(
+      await sent("setPolicy", { mode: "profit", skimBps: 2_000, volumeBps: 50, paused: false, maxContribution: "60000000", walletReserve: "10000000" }),
+    ).toEqual(ACCEPTED);
 
     // THE CAPS ARE BASE UNITS AS DECIMAL STRINGS, and the route enforces it: a
     // float and a JavaScript number are both refused, so no cap can arrive
@@ -371,9 +426,12 @@ describe("/api/solana-build", () => {
     expect(await refused({ maxPerCall: 1_000_000_000 })).toEqual([400, "bad_request", capWords]);
     expect(await refused({ maxPerCall: "1000.5" })).toEqual([400, "bad_request", capWords]);
     expect(await refused({ maxPerCall: "1e9" })).toEqual([400, "bad_request", capWords]);
-    // Every refusal above happens before a single account is read.
-    expect(methods).toHaveLength(0);
+    // Every refusal above proved, at the point it was made, that it cost no
+    // read; and every ACCEPTED shape reached the chain, which is what "accepted"
+    // means for a build route that cannot finish without a vault.
+    expect(methods.length).toBeGreaterThan(0);
   });
+
 
   it("withdraw past what the vault can release is 422 above_withdrawable; withdrawToken of a mint the vault does not hold is 422 not_held", async () => {
     useEnv(SOLANA_ENV);
