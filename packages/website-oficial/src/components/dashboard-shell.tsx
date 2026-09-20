@@ -50,7 +50,6 @@ import { formatUsd } from "@/lib/amounts";
 import { LIVE_COPY, MODE_COPY } from "@/lib/live-copy";
 import { pensionKeyOf } from "@/lib/pension-key";
 import { privyFailure } from "@/lib/privy-failure";
-import { rememberSession } from "@/lib/session-hint";
 import { PRIVY_PATIENCE_MS } from "@/lib/privy-patience";
 import { shortAddress } from "@/lib/vault-copy";
 import { tradingWalletsOf } from "@/lib/trading-wallets";
@@ -300,14 +299,6 @@ function ConfiguredFrame({
     window.history.replaceState({}, "", state.replaceUrlWith);
   }, [state.replaceUrlWith]);
 
-  // THE HINT IS WRITTEN FROM WHAT PRIVY SAYS, never from what a button did: a
-  // session restored on load sets it just as a fresh login does, and a session
-  // that ended anywhere — logout here, expiry, another tab — clears it.
-  useEffect(() => {
-    if (!ready) return;
-    rememberSession(authenticated);
-  }, [ready, authenticated]);
-
   const live = useLiveDashboard({ pensionKey: state.kind === "live" ? pensionKey : null, privyWallets });
 
   // Every chain write happens in the wallets modal; read again as it closes
@@ -334,13 +325,16 @@ function ConfiguredFrame({
     mock,
     live,
     pensionKey,
-    // The worth follows the same read the page below draws from, so the bar and
-    // the card can never disagree about what the pension is holding.
+    // THE FIGURE FOLLOWS THE BODY THAT IS ACTUALLY DRAWN. A read whose VAULT
+    // failed still carries prices and token accounts, so "ready" alone put a
+    // dollar figure in the bar on the very screen that says the pension could
+    // not be read — two answers to one question, on one screen. The stage the
+    // page branches on is the one this reads.
     account: accountSlot(
       state,
       pensionKey,
       { onConnect, onDisconnect, openSetup: () => openWallets?.() },
-      live.view.kind === "ready" ? live.view.data.worthNowUsdcRaw : null,
+      live.view.kind === "ready" && live.view.data.stage !== "vault_unreadable" ? live.view.data.worthNowUsdcRaw : null,
     ),
     setMode,
     onConnect,

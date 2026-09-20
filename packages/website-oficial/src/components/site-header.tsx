@@ -102,14 +102,15 @@ export function SiteHeader({
         </nav>
 
         <div className="ml-auto flex min-w-0 items-center gap-2">
-          {current === "pension" ? null : contributions}
           {/*
-            A RULE AND SOME AIR, so the strip reads as its own thing rather than
-            as more buttons. It is drawn only when there is a strip to separate.
+            THE RULE THAT SEPARATES IT IS THE STRIP'S OWN. Drawing it here meant
+            testing whether `contributions` was null — but it is a React
+            ELEMENT, always non-null, and it is the COMPONENT that returns
+            nothing when it has no chips. So the rule appeared with nothing
+            beside it. Only the strip knows whether it is empty; it draws both
+            or neither.
           */}
-          {current === "pension" || contributions === null ? null : (
-            <span aria-hidden className="mx-1 hidden h-5 w-px shrink-0 bg-border md:block" />
-          )}
+          {current === "pension" ? null : contributions}
           {control}
           <ModeToggle />
           {account}

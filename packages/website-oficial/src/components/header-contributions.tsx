@@ -50,8 +50,19 @@ export function HeaderContributions({ rows, className }: { readonly rows: readon
   if (chips.length === 0) return null;
 
   return (
-    <div
-      className={cn("hidden min-w-0 items-center gap-1.5 overflow-x-auto md:flex", className)}
+    <>
+      {/* The rule and the air that make this read as its own thing rather than
+          as more buttons — inside the component, so it cannot outlive the chips. */}
+      <span aria-hidden className="mx-1 hidden h-5 w-px shrink-0 bg-border md:block" />
+      <div
+        role="list"
+        // A BARE DIV CANNOT BE NAMED. An element with the generic role drops
+        // aria-label, so the chips were announced as loose text; `list` makes
+        // the group nameable and the chips its items. tabIndex makes the
+        // scrolling region reachable by keyboard, which a scroll container that
+        // holds content must be.
+        tabIndex={0}
+        className={cn("hidden min-w-0 items-center gap-1.5 overflow-x-auto rounded-md outline-none focus-visible:ring-3 focus-visible:ring-ring/50 md:flex", className)}
       style={{
         // Both edges, so the row never ends in a hard cut. The scrollbar is
         // hidden by the utility below; the mask is the only affordance there is.
@@ -59,17 +70,19 @@ export function HeaderContributions({ rows, className }: { readonly rows: readon
         WebkitMaskImage: "linear-gradient(to right, transparent 0, black 14px, black calc(100% - 14px), transparent 100%)",
         scrollbarWidth: "none",
       }}
-      aria-label="Recent contributions"
-    >
-      {chips.map((chip) => (
-        <span
-          key={chip.key}
-          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 font-mono text-xs whitespace-nowrap text-emerald-700 tabular-nums dark:text-emerald-300"
-        >
-          +{formatSol(chip.lamports)}
-          <span className="text-emerald-700/60 dark:text-emerald-300/60">SOL</span>
-        </span>
-      ))}
-    </div>
+        aria-label="Recent contributions"
+      >
+        {chips.map((chip) => (
+          <span
+            key={chip.key}
+            role="listitem"
+            className="inline-flex shrink-0 items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 font-mono text-xs whitespace-nowrap text-emerald-700 tabular-nums dark:text-emerald-300"
+          >
+            +{formatSol(chip.lamports)}
+            <span className="text-emerald-700/60 dark:text-emerald-300/60">SOL</span>
+          </span>
+        ))}
+      </div>
+    </>
   );
 }

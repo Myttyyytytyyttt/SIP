@@ -254,6 +254,11 @@ describe("a connected pension key, once the chain has answered", () => {
     const html = render();
     expect(html).not.toContain(LIVE_COPY.noVault.create);
     expect(html).toContain("could not read");
+    // AND NO FIGURE IN THE BAR. Prices and token accounts still read fine on a
+    // partial failure, so "the snapshot is ready" put a dollar amount in the
+    // header of the very screen that says the pension could not be read — two
+    // answers to one question, on one screen.
+    expect(html).not.toMatch(/\$[\d,]+\.\d\d/);
   });
 });
 
