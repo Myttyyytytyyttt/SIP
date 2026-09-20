@@ -148,11 +148,13 @@ export function ScoringCard({ data, className }: { readonly data: LeaderboardDat
       <CardContent className="space-y-3 text-sm text-muted-foreground">
         <ul className="space-y-2">
           <li>
-            <strong className="text-foreground">{ahorro.participation} points</strong> for every day your pension was actually charged — the
+            <strong className="text-foreground">{ahorro.participation} points</strong>{" "}
+            for every day your pension was actually charged — the
             same whether you saved {unitSol} SOL or fifty.
           </li>
           <li>
-            <strong className="text-foreground">up to {ahorro.sizeCap} more</strong> for that day&apos;s size, on a log scale: 100× the amount
+            <strong className="text-foreground">up to {ahorro.sizeCap} more</strong>{" "}
+            for that day&apos;s size, on a log scale: 100× the amount
             is worth about 2× the points, and past ~100 SOL in a day it is worth nothing.
           </li>
           <li>
