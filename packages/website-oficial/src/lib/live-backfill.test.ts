@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { appendOlder, mergeHead } from "@/lib/live-activity-store";
-import { BACKFILL_PAGES, BACKFILL_ROUNDS, backfillSettlements, chainSaysSettled, holdsSettlement, shouldBackfill } from "@/lib/live-backfill";
+import { BACKFILL_PAGES, BACKFILL_ROUNDS, backfillSettlements, backfillSpend, chainSaysSettled, forgetBackfillSpend, holdsSettlement, shouldBackfill } from "@/lib/live-backfill";
 import { toLiveDashboard } from "@/lib/live-model";
 import type { LiveActivityJson, LiveEntryJson, LiveSnapshotJson, VaultEventJson } from "@/lib/live-types";
 import type { ApiResult } from "@/lib/vault-api";
@@ -66,7 +66,7 @@ describe("the state says a settlement exists and the loaded page holds none", ()
     expect(chainSaysSettled(liveSnapshot())).toBe(true);
     expect(holdsSettlement(HEAD.entries)).toBe(false);
     expect(
-      shouldBackfill({ chainSettled: true, loadedHasSettlement: false, cursor: HEAD.nextBefore, manualBusy: false, rounds: 0, done: false }),
+      shouldBackfill({ chainSettled: true, loadedHasSettlement: false, cursor: HEAD.nextBefore, manualBusy: false, rounds: 0, done: false, retryAt: null, now: NOW_MS }),
     ).toBe(true);
 
     const filled = await backfillSettlements({ cursor: HEAD.nextBefore!, fetchPage });
@@ -117,10 +117,10 @@ describe("what it costs, because reads are rationed", () => {
 
   it("does not pay again on the next poll: a clean round is the answer, found or not", () => {
     // `done` is what the hook sets after a round that came back without failing.
-    expect(shouldBackfill({ chainSettled: true, loadedHasSettlement: false, cursor: signature(60), manualBusy: false, rounds: 1, done: true })).toBe(false);
+    expect(shouldBackfill({ chainSettled: true, loadedHasSettlement: false, cursor: signature(60), manualBusy: false, rounds: 1, done: true, retryAt: null, now: NOW_MS })).toBe(false);
     // …and the rounds themselves are capped whatever `done` says.
     expect(
-      shouldBackfill({ chainSettled: true, loadedHasSettlement: false, cursor: signature(60), manualBusy: false, rounds: BACKFILL_ROUNDS, done: false }),
+      shouldBackfill({ chainSettled: true, loadedHasSettlement: false, cursor: signature(60), manualBusy: false, rounds: BACKFILL_ROUNDS, done: false, retryAt: null, now: NOW_MS }),
     ).toBe(false);
   });
 
@@ -135,7 +135,7 @@ describe("what it costs, because reads are rationed", () => {
     expect(filled.cursor).toBe(signature(40));
     expect(filled.failure?.status).toBe(429);
     expect(filled.found).toBe(false);
-    expect(shouldBackfill({ chainSettled: true, loadedHasSettlement: false, cursor: filled.cursor, manualBusy: false, rounds: 1, done: false })).toBe(true);
+    expect(shouldBackfill({ chainSettled: true, loadedHasSettlement: false, cursor: filled.cursor, manualBusy: false, rounds: 1, done: false, retryAt: null, now: NOW_MS })).toBe(true);
   });
 
   it("stops on a history the route could not read, which is not an empty one", async () => {
@@ -152,7 +152,7 @@ describe("what it costs, because reads are rationed", () => {
 });
 
 describe("when the backfill stands down", () => {
-  const base = { chainSettled: true, loadedHasSettlement: false, cursor: signature(16), manualBusy: false, rounds: 0, done: false };
+  const base = { chainSettled: true, loadedHasSettlement: false, cursor: signature(16), manualBusy: false, rounds: 0, done: false, retryAt: null, now: NOW_MS };
 
   it("never runs when the state records no settlement: there is nothing to go looking for", () => {
     expect(shouldBackfill({ ...base, chainSettled: false })).toBe(false);
@@ -223,7 +223,7 @@ describe("what counts as the state saying a settlement exists", () => {
 
     expect(chainSaysSettled(elsewhere)).toBe(false);
     expect(
-      shouldBackfill({ chainSettled: chainSaysSettled(elsewhere), loadedHasSettlement: false, cursor: signature(16), manualBusy: false, rounds: 0, done: false }),
+      shouldBackfill({ chainSettled: chainSaysSettled(elsewhere), loadedHasSettlement: false, cursor: signature(16), manualBusy: false, rounds: 0, done: false, retryAt: null, now: NOW_MS }),
     ).toBe(false);
   });
 
@@ -259,8 +259,65 @@ describe("what counts as the state saying a settlement exists", () => {
     expect(view.stats.settledOutsideHistory).toBe(false);
     expect(view.stats.loadedSettlements).toBe(0); // the slot filter, still doing its job
     expect(
-      shouldBackfill({ chainSettled: true, loadedHasSettlement: holdsSettlement(page.entries), cursor: signature(16), manualBusy: false, rounds: 0, done: false }),
+      shouldBackfill({ chainSettled: true, loadedHasSettlement: holdsSettlement(page.entries), cursor: signature(16), manualBusy: false, rounds: 0, done: false, retryAt: null, now: NOW_MS }),
     ).toBe(false);
+  });
+});
+
+describe("what a round costs, and how often it is paid", () => {
+  const key = (name: string): string => `PensionKey-${name}`;
+  const decision = (spend: { rounds: number; done: boolean; retryAt: number | null }, now = NOW_MS) => ({
+    chainSettled: true,
+    loadedHasSettlement: false,
+    cursor: signature(16),
+    manualBusy: false,
+    ...spend,
+    now,
+  });
+
+  it("is remembered across mounts, because the hook's refs are not", () => {
+    // The app has separate routes, so /wallets and back remounts the hook. A
+    // round that already answered must not be re-bought out of the same 60
+    // read tokens a minute the activity page is paid from.
+    const mine = key("across-mounts");
+    expect(backfillSpend(mine)).toEqual({ rounds: 0, done: false, retryAt: null });
+    expect(shouldBackfill(decision(backfillSpend(mine)))).toBe(true);
+
+    const spend = backfillSpend(mine);
+    spend.rounds += 1;
+    spend.done = true;
+
+    // The next mount asks the same question and gets the answer already paid for.
+    expect(backfillSpend(mine)).toEqual({ rounds: 1, done: true, retryAt: null });
+    expect(shouldBackfill(decision(backfillSpend(mine)))).toBe(false);
+  });
+
+  it("is a different answer for a different pension key", () => {
+    const mine = key("mine");
+    backfillSpend(mine).done = true;
+    expect(backfillSpend(key("someone-else")).done).toBe(false);
+    expect(shouldBackfill(decision(backfillSpend(key("someone-else"))))).toBe(true);
+  });
+
+  it("is forgotten when a gap page throws the loaded history away", () => {
+    const mine = key("gap");
+    const spend = backfillSpend(mine);
+    spend.rounds = 1;
+    spend.done = true;
+
+    forgetBackfillSpend(mine);
+
+    expect(backfillSpend(mine)).toEqual({ rounds: 0, done: false, retryAt: null });
+    expect(shouldBackfill(decision(backfillSpend(mine)))).toBe(true);
+  });
+
+  it("does not aim its retry at the bucket it just emptied", () => {
+    // The mount round costs ~21 read tokens and this one up to 32, of 60 that
+    // refill at one a second. A 429 that says "12 s" is worth waiting out.
+    const failed = { rounds: 1, done: false, retryAt: NOW_MS + 12_000 };
+    expect(shouldBackfill(decision(failed, NOW_MS))).toBe(false);
+    expect(shouldBackfill(decision(failed, NOW_MS + 11_999))).toBe(false);
+    expect(shouldBackfill(decision(failed, NOW_MS + 12_000))).toBe(true);
   });
 });
 
@@ -310,9 +367,26 @@ describe("the dashboard's own read path calls it", () => {
     expect(source).toMatch(/older\.busy\s*\|\|\s*olderBusyRef\.current/);
   });
 
-  it("forgets what it spent when the pension key changes: a different pension starts again", () => {
-    expect(source).toContain("backfillRounds.current = 0");
-    expect(source).toContain("backfillDone.current = false");
+  it("counts what it spent PER PENSION KEY in this module, not in a ref that dies with the mount", () => {
+    expect(source).toMatch(/import\s*\{[^}]*backfillSpend[^}]*\}\s*from\s*["']@\/lib\/live-backfill["']/);
+    expect(source).toContain("backfillSpend(pensionKey)");
+    // The refs that used to hold it are gone, not merely unread.
+    expect(source).not.toContain("backfillRounds");
+    expect(source).not.toContain("backfillDone");
+  });
+
+  it("lets a gap page buy the round again, because a gap threw the history away", () => {
+    expect(source).toMatch(/page\.body\.gap\)\s*forgetBackfillSpend\(pensionKey\)/);
+  });
+
+  it("keeps its own failure off the control nobody pressed", () => {
+    // From the round's call to the end of the read: no words, and no message
+    // written into `older`, for a page the user never asked for.
+    const round = source.slice(source.search(CALLS_BACKFILL), source.indexOf("const loadOlder"));
+    expect(round).not.toContain("wordsFor(");
+    expect(round).not.toContain("message:");
+    // It is remembered where the rule can read it instead.
+    expect(round).toContain("spend.retryAt =");
   });
 
   it("would still CATCH a hook that stopped calling it: the scan is not toothless", () => {

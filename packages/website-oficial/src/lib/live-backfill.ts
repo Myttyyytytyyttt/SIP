@@ -42,6 +42,64 @@ export const BACKFILL_PAGES = 2;
 /** Rounds one pension key may spend. The second exists only to retry a round a failure cut short. */
 export const BACKFILL_ROUNDS = 2;
 
+/** What a backfill has already spent on one pension key. */
+export interface BackfillSpend {
+  rounds: number;
+  /** A round came back without failing: the answer is known, found or not. */
+  done: boolean;
+  /** When a failed round said it could be retried. Round two waits for it. */
+  retryAt: number | null;
+}
+
+const SPENT = new Map<string, BackfillSpend>();
+
+/**
+ * WHAT THIS TAB HAS ALREADY SPENT ON `pensionKey` — held in the module, not in
+ * the hook, because the hook's refs die with the component and what they were
+ * counting is real read tokens.
+ *
+ * The app has separate routes (/, /activity, /wallets), so walking away and
+ * back REMOUNTS the hook. With the count in a ref, every remount re-paid the
+ * whole round: a mount already costs snapshotDiscover (5) plus a page (1 + up
+ * to 15), and two backfill pages are 32 more — about 53 of the 60 read tokens a
+ * client gets in a minute, refilling at one a second. A second mount ten
+ * seconds later found roughly 17, and it was the ACTIVITY PAGE that got
+ * refused: spendReads(1) passed, spendMore(15) did not, and the feed said the
+ * history could not be read. Two mounts cost 42 before this existed and both
+ * went through.
+ *
+ * So a clean round is paid ONCE per pension key per tab. The rows it fetched do
+ * die with the component, and they are not bought again: the screen says
+ * plainly that the settlement is older than the loaded history, which is true
+ * and costs nothing, and "Load older" is there for anyone who wants them back.
+ *
+ * SAFE AT MODULE SCOPE because the read path only ever runs from an effect —
+ * nothing here is touched while a page is rendered on the server, so one
+ * process's map is never shared between two people's pension keys.
+ */
+export function backfillSpend(pensionKey: string): BackfillSpend {
+  const held = SPENT.get(pensionKey);
+  if (held !== undefined) return held;
+  const fresh: BackfillSpend = { rounds: 0, done: false, retryAt: null };
+  SPENT.set(pensionKey, fresh);
+  return fresh;
+}
+
+/**
+ * Forget what was spent on this key, because the history it bought is gone.
+ *
+ * A head page carrying `gap` REPLACES the whole store (mergeHead), throwing
+ * away every older page underneath it — and on this vault a gap is not exotic:
+ * it is what happens whenever more than fifteen signatures land between two
+ * polls, and most of its signatures are keeper upkeep. Without this the loaded
+ * history holds no settlement again while the state still says one exists, the
+ * card falls back to saying so, and a latched `done` means the two cheap pages
+ * that would fix it are never asked for again until the tab is reloaded.
+ */
+export function forgetBackfillSpend(pensionKey: string): void {
+  SPENT.delete(pensionKey);
+}
+
 const positive = (text: string | null | undefined): boolean => (rawFrom(text) ?? 0n) > 0n;
 
 /**
@@ -88,12 +146,19 @@ export interface BackfillDecision {
   readonly rounds: number;
   /** A round already came back without failing: the answer is known, and asking again buys nothing. */
   readonly done: boolean;
+  /** When the last round's failure said it could be retried, or null. */
+  readonly retryAt: number | null;
+  /** The read's own clock, so the rule stays pure. */
+  readonly now: number;
 }
 
 /** Whether this read should page back for the settlement the state records. */
 export function shouldBackfill(input: BackfillDecision): boolean {
   if (!input.chainSettled || input.loadedHasSettlement) return false;
   if (input.cursor === null || input.manualBusy || input.done) return false;
+  // A round cut short by 429 must not be retried into the same empty bucket:
+  // the limiter refills at one token a second, and the failure said how long.
+  if (input.retryAt !== null && input.now < input.retryAt) return false;
   return input.rounds < BACKFILL_ROUNDS;
 }
 
