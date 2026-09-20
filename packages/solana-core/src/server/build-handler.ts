@@ -1038,8 +1038,9 @@ function readView<T>(address: string, read: ChainRead<T>, view: (value: T) => Re
  * POST /api/solana-vault {"action":"state","owner","wallets":[…]}: the owner's
  * vault, policy and the protocol config, where each trading wallet saves, the
  * vault's token holdings and whether its policy token accounts exist, the rents
- * the forms quote, and the live pool prices. Every read keeps its own outcome,
- * and "unreadable" is never reported as "missing".
+ * the forms quote, the live pool prices, and the venue names investPolicy
+ * accepts. Every read keeps its own outcome, and "unreadable" is never reported
+ * as "missing".
  */
 export function createSolanaVaultHandler(options: SolanaVaultHandlerOptions): SolanaRouteHandler {
   return createRoute("solana-vault", options, async (action, fields, served) => {
@@ -1098,6 +1099,18 @@ export function createSolanaVaultHandler(options: SolanaVaultHandlerOptions): So
           : null,
       // One copy of this shape, shared with /api/solana-live below.
       prices: pricesView(prices),
+      // THE CLOSED SET OF VENUE NAMES, SERVED BY THE SERVER THAT ENFORCES IT.
+      // investPolicy above accepts a venue only if VENUE_PROGRAMS holds its name,
+      // and this list is that Map's keys — the same object, never a copy of it. A
+      // second list, client-side or here, would be a second thing to drift, and the
+      // day it drifted the panel would offer a venue this route refuses. It grows
+      // when the table grows, with nothing to remember.
+      //
+      // NAMES ONLY. The programs behind them stay server-side: what a name buys is
+      // that a request cannot ask the vault to CPI into a key nobody vetted, and a
+      // response that shipped the keys would hand back the vocabulary the check exists
+      // to withhold.
+      offeredVenues: OFFERED_VENUES,
     });
   });
 }

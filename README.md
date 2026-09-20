@@ -196,6 +196,8 @@ The landing and the sample dashboard need **no environment and no keys**. Connec
 
 The program has its own toolchain: `pnpm --dir packages/solana-program test` runs `anchor test` against a local validator, deliberately outside `pnpm test`.
 
+A green run is not by itself evidence. Two bugs here passed the whole suite for weeks, both for the same reason — a fixture that randomised the very field in dispute: [`docs/TESTING_TRAPS.md`](docs/TESTING_TRAPS.md).
+
 <details>
 <summary><b>Repository layout</b></summary>
 

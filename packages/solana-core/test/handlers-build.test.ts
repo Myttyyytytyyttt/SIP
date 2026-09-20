@@ -1327,6 +1327,53 @@ describe("state", () => {
     expect((await whole.state({ action: "state", owner, wallets: [] })).json.prices).toMatchObject({ usdcRawPerSol: "100038711" });
   });
 
+  /**
+   * THE PANEL LEARNS THE CLOSED SET FROM THE ROUTE THAT ENFORCES IT. state offers
+   * the venue names and investPolicy refuses everything outside them; if those two
+   * ever came from different lists, a day would come when the panel offered an
+   * option the server refuses. So this case checks the two halves against each
+   * other rather than against a literal: every name the answer offers is a name
+   * that builds, and the program each one buys is learned from the BYTES the
+   * builder produced, never from a constant written here. One more venue in
+   * VENUE_PROGRAMS and this case covers it without being edited.
+   */
+  it("offers the venue names investPolicy accepts, and leaks no venue program into the answer", async () => {
+    const owner = key();
+    // The FULLEST answer this route gives — vault, pools priced, every mint in
+    // place — so the search for a program below runs over a whole response and
+    // not over a handful of nulls.
+    const { state, build } = setup(investableChain(owner));
+    const answer = await state({ action: "state", owner, wallets: [] });
+    expect(answer.status).toBe(200);
+    expect(answer.json.prices).not.toBeNull();
+    // The set the validator holds, served whole: names, and nothing beside them.
+    expect(answer.json.offeredVenues).toEqual([...OFFERED_VENUES]);
+    const offered = answer.json.offeredVenues as string[];
+    expect(offered.length).toBeGreaterThan(0);
+
+    const venuePrograms: string[] = [];
+    for (const venue of offered) {
+      const built = await build({ action: "investPolicy", owner, venue });
+      // OFFERED ⇒ ACCEPTED. (The other direction — anything else refused — is the
+      // "venue is a NAME from a closed list" case above.)
+      expect([venue, built.status], `venue ${venue} is offered, so it must build`).toEqual([venue, 200]);
+      const args = decodeArgs("set_invest_policy", instructionsOf(built.json.txBase64).at(-1)!.data) as { venue_program: string };
+      venuePrograms.push(args.venue_program);
+    }
+    expect(venuePrograms).toHaveLength(offered.length);
+
+    // NOT ONE PROGRAM ADDRESS ANYWHERE IN THE SERIALISED ANSWER — not beside its
+    // name, not in a field added later, not in a nested object: the whole response
+    // text is searched. A refactor that served VENUE_PROGRAMS instead of its keys,
+    // or that helpfully attached the program each name resolves to, dies here.
+    for (const program of venuePrograms) {
+      expect(answer.text, `the venue program ${program} must never leave the server`).not.toContain(program);
+    }
+    // And the names themselves DO travel, so the assertion above is about an answer
+    // that really carries the venues rather than an empty one.
+    for (const venue of offered) expect(answer.text).toContain(JSON.stringify(venue));
+  });
+
   it.each([
     ["another action", { action: "createVault", owner: key(), wallets: [] }],
     ["no wallets field", { action: "state", owner: key() }],
