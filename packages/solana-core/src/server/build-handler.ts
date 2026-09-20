@@ -99,7 +99,7 @@ import {
   readBuildBatch,
   readLinkPrerequisites,
   readOwnerAccounts,
-  readPoolPrices,
+  readPoolDepth,
   readRents,
   readVault,
   readVaultTokenAccounts,
@@ -110,6 +110,7 @@ import {
   type AccountSnapshot,
   type ChainRead,
   type PoolPrices,
+  type PoolReserves,
   type PythRead,
 } from "./readers";
 import { createRpcPool, type RpcPool } from "./rpc-pool";
@@ -1057,10 +1058,12 @@ export function createSolanaVaultHandler(options: SolanaVaultHandlerOptions): So
     if (spent !== null) return spent;
     const vaultAddress = deriveVaultPda(owner).toBase58();
     const rentSizes = [SIP_ACCOUNT_SPACE.Vault, SIP_ACCOUNT_SPACE.TradingLink, SIP_ACCOUNT_SPACE.InvestmentPolicy, CLASSIC_TOKEN_ACCOUNT_BYTES, ...OFFERED_LEGS.map((leg) => leg.tokenAccountBytes)];
-    const [accounts, links, prices, rents, holdings, tokenAccounts] = await Promise.all([
+    const [accounts, links, depth, rents, holdings, tokenAccounts] = await Promise.all([
       readOwnerAccounts(served.pool, owner),
       readWalletLinks(served.pool, vaultAddress, wallets as string[]),
-      readPoolPrices(served.pool),
+      // The rates AND the reserves beside them, out of the one getMultipleAccounts
+      // the rates already cost: this route makes no more requests than it did.
+      readPoolDepth(served.pool),
       readRents(served.pool, rentSizes),
       listVaultHoldings(served.pool, vaultAddress),
       readVaultTokenAccounts(served.pool, vaultAddress),
@@ -1098,7 +1101,11 @@ export function createSolanaVaultHandler(options: SolanaVaultHandlerOptions): So
             }
           : null,
       // One copy of this shape, shared with /api/solana-live below.
-      prices: pricesView(prices),
+      prices: pricesView(depth.prices),
+      // And its sibling: what each of those pools holds on the side a buy is paid
+      // in, so the card's depth ceiling is arithmetic over a live figure rather
+      // than a literal with a date on it.
+      reserves: reservesView(depth.reserves),
       // THE CLOSED SET OF VENUE NAMES, SERVED BY THE SERVER THAT ENFORCES IT.
       // investPolicy above accepts a venue only if VENUE_PROGRAMS holds its name,
       // and this list is that Map's keys — the same object, never a copy of it. A
@@ -1131,6 +1138,40 @@ function pricesView(prices: ChainRead<PoolPrices>): Record<string, unknown> | nu
       const wad = prices.value.legWads[leg.mint]!;
       return { symbol: leg.symbol, mint: leg.mint, wad, usdcRawPer1e8: usdcRawPer1e8LegRaw(wad) };
     }),
+  };
+}
+
+/**
+ * THE POOLS' IN-SIDE RESERVES as both routes report them, beside the rates and
+ * never inside them.
+ *
+ * WHY A PANEL NEEDS THIS AND NOT A NUMBER. How much one buy may push into a leg
+ * is a fraction of what that leg's pool holds on the side the buy is PAID in —
+ * the keeper's own gate, legDepthDecision, measures exactly that vault and
+ * refuses the whole basket when a leg's share is not covered. That balance
+ * moves by the hour, so a ceiling written down in the client is wrong by the
+ * time anyone reads it; a reserve read at a slot is not.
+ *
+ * `amountRaw` IS NULL, NEVER ZERO, WHEN IT COULD NOT BE READ, and `unreadable`
+ * then says why. Zero is a drained pool and should alarm the owner; null is a
+ * pool nobody reached, and showing it as a ceiling of nothing would tell the
+ * owner their basket is dead when it is only unread.
+ */
+function reservesView(reserves: ChainRead<PoolReserves>): Record<string, unknown> | null {
+  if (reserves.kind !== "exists") return null;
+  return {
+    slot: reserves.value.slot,
+    items: reserves.value.items.map((item) => ({
+      pool: item.pool,
+      // The other side of the pair — an offered leg's mint, or wSOL for the pool
+      // the SOL hop converts through — so a reserve is matched to a leg by mint
+      // and not by this list's order.
+      mint: item.otherMint,
+      inMint: item.inMint,
+      vault: item.vault,
+      amountRaw: item.amountRaw,
+      unreadable: item.unreadable,
+    })),
   };
 }
 
@@ -1203,6 +1244,9 @@ async function liveSnapshot(fields: Readonly<Record<string, unknown>>, served: S
     // A SIBLING of prices, never a field inside it: the pool is what SaverFi
     // trades against, the oracle is what says so from outside the venue.
     pyth: pythView(snapshot.pyth),
+    // The same shape /api/solana-vault answers, from the same one batch: what
+    // each priced pool holds on the side a buy is paid in.
+    reserves: reservesView(snapshot.reserves),
     vaultTokenAccounts:
       snapshot.tokenAccounts.kind === "exists" ? { status: "exists", items: snapshot.tokenAccounts.value } : { status: "unreadable", items: [] },
     rents: { vault: snapshot.rents.vault, walletFloor: snapshot.rents.walletFloor },

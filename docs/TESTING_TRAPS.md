@@ -34,6 +34,24 @@ so the suite stayed green while roughly 2,900 sweeps were missed.
 Same shape: the suite exercised a stand-in for the thing in dispute — here the
 module graph, there the venue — and then reported on the stand-in.
 
+## The minimum that only two legs could reveal
+
+`InvestingCard` checked the owner's per-call cap against the minimum of the
+whole BASKET. `invest.rs:135` requires it PER LEG — `invest` is called once per
+`leg_index`, and each call carries only that leg's share. With one leg the two
+readings give the same number, so the test that existed could not tell them
+apart: it passed by arithmetic coincidence, not because the rule was right.
+
+The moment the basket grew to two, the correct bar became
+`maxPerCall x lightest weight / 10_000 >= minInvestment`, and the form began
+accepting policies that can never buy at any balance — the owner would have paid
+the account rent, signed, and only then found out.
+
+Same shape again, in a third disguise: not a fixture with an arbitrary default
+and not a stand-in runtime, but a TEST CASE in which two different formulas
+collapse into one. Nothing was missing from the coverage. What was missing was a
+case where the two answers differ.
+
 ## The shape
 
 A test is evidence only about the values it pins. When a fixture's default is
@@ -55,3 +73,6 @@ the run goes green, and the next reader trusts the number instead of the fixture
   package; no amount of vitest could have caught it.
 - Before trusting a green run, ask what it would take for the run to be green and
   wrong. The answer is usually one fixture default.
+- When a product constant goes from 1 to N — one leg to two, one venue to two,
+  one anything to many — hunt for every formula where N=1 made two distinct
+  rules agree. Those are the places a passing test was only ever a coincidence.

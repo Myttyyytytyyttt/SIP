@@ -23,6 +23,47 @@
 //    max(max_per_call, 1e9)). rules.ts's default, u64::MAX, leaves convert
 //    unbounded per call. This overrides "caps at the maximum"; the owner confirms.
 //  * max_rolling_30d = 31 × max_per_call: one maximum buy per day-bucket.
+//
+// AND AT max_per_call THE KEEPER BUYS NOTHING. This is a DEFECT, measured
+// 2026-09-21 and still standing in the number below, not a decision. The
+// arithmetic is the keeper's own, in solana-keeper/src/invest-decision.ts:
+//  * a CONVERTING turn is tested at its worst reachable case, because the USDC
+//    the convert will bring in does not exist yet — turnSpendCeiling takes
+//    min(max_per_call, 30-day headroom), which on a fresh vault is the whole
+//    1,000 USDC;
+//  * legShare splits that by weight: at today's two equal legs, 500 USDC into
+//    ONE pool;
+//  * legDepthDecision then requires that pool's in-side reserve to cover the
+//    spend MIN_POOL_DEPTH_MULTIPLE (50) times over — 25,000 USDC for a
+//    500-USDC leg.
+// ANTHROPIC/USDC held 9,541,652,779 raw USDC when it was last read (mainnet
+// 2026-09-20, slot 448864213). That is 18.9x cover against 50x required, so
+// EVERY converting turn is REFUSED at this default: no stock bought, no SOL
+// converted, at any balance. The same pool admits 9,541.65 / 50 = $190.83 a leg,
+// about $381.67 for a two-leg basket. The neck is therefore roughly $380, and a
+// default near $100 would clear it about 3.8x over.
+//
+// WHAT SUCH A NUMBER IS CALIBRATED AGAINST, AND WHAT INVALIDATES IT. ONE pool's
+// reserve, read ONCE, on ONE day. It is not a property of the product and no
+// constant here can make it one: the same kind of reserve fell from about $6,700
+// to $51 in two days on the leg this catalogue no longer offers. A third leg,
+// different weights, a change in MIN_POOL_DEPTH_MULTIPLE, or that pool simply
+// thinning all move the neck, and nothing in this file re-reads it. The gate
+// that is always right is the keeper's, because it measures depth inside the
+// turn against the amount that turn will really spend; a number here only
+// decides whether the product's own default walks into that gate or clears it.
+//
+// WHY IT IS STILL 1,000. The web has already routed around it: InvestingCard's
+// box starts at SUGGESTED_PER_BUY_RAW ($190, half the $380 ceiling) and no
+// longer pre-fills this constant, so nobody signs $1,000 from the form today.
+// Lowering the constant itself is a FOUR-FILE change, which the session that
+// wrote this note was not scoped for — test/fixtures/owner-transactions.ts (the
+// SET_INVEST_POLICY_GOLDEN_FLOORS wire and data hex are built from this value;
+// reprint them with `pnpm --dir packages/solana-core exec tsx
+// bin/print-owner-fixtures.mts`), test/handlers-build.test.ts (a pinned
+// max_per_call, and a boundary case sized against 1,000), test/product.test.ts,
+// and website-oficial/src/lib/vault-flows.test.ts: eleven tests in all. Leaving
+// the number undocumented was the worse of the two options.
 
 import { ANTHROPIC_MINT, ANTHROPIC_USDC_POOL, SPYX_MINT, SPYX_USDC_POOL, TOKEN_2022_PROGRAM } from "./addresses";
 import type { OwnerInstructionName } from "./idl";

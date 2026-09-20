@@ -14,6 +14,7 @@ import {
   RAYDIUM_CLMM,
 } from "../src/client/addresses";
 import { OWNER_INSTRUCTIONS } from "../src/client/idl";
+import { investmentReadiness } from "../src/client/pending";
 import {
   CLASSIC_TOKEN_ACCOUNT_BYTES,
   CONVERT_FLOOR_MARGIN_BPS,
@@ -28,7 +29,15 @@ import {
   ownerComputeBudget,
   priorityFeeLamports,
 } from "../src/client/product";
-import { DEFAULT_RATES, MAX_LEGS, MODE_PROFIT, defaultInvestPolicy, investPolicyProblems, vaultPolicyProblems } from "../src/client/rules";
+import {
+  DEFAULT_PURCHASE_USDC_RAW,
+  DEFAULT_RATES,
+  MAX_LEGS,
+  MODE_PROFIT,
+  defaultInvestPolicy,
+  investPolicyProblems,
+  vaultPolicyProblems,
+} from "../src/client/rules";
 import { MAX_COMPUTE_UNIT_LIMIT, MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS } from "../src/server/verify-tx";
 
 describe("the vault a new pension key is offered", () => {
@@ -80,6 +89,27 @@ describe("the first investment policy", () => {
       enabled: true,
     });
     expect(problems).toEqual([]);
+  });
+
+  it("the shipped caps can buy the catalogue's OWN basket, read per leg and not per basket", () => {
+    // min_investment is enforced once per leg (invest.rs), so the question the
+    // caps have to answer is whether the LIGHTEST leg's slice of max_per_call
+    // clears the minimum — not whether the basket's total does. At ONE leg the
+    // two are the same number, so this only says anything from two legs up, and
+    // it is here so a catalogue that changes length is measured against the rule
+    // rather than against the coincidence. The rule itself lives in
+    // client/pending.ts; test/rules.test.ts pins its divergence cases.
+    const weights = basketWeightsBps(OFFERED_LEGS.length);
+    const minInvestment = defaultInvestPolicy(OFFERED_LEGS.length).minInvestment;
+    const lightest = BigInt(Math.min(...weights));
+    expect((DEFAULT_INVEST_CAPS.maxPerCall * lightest) / 10_000n).toBeGreaterThanOrEqual(minInvestment);
+
+    const readiness = investmentReadiness(DEFAULT_PURCHASE_USDC_RAW, weights.map((weightBps) => ({ weightBps })), minInvestment, DEFAULT_INVEST_CAPS.maxPerCall);
+    expect(readiness?.state).toBe("ready");
+    // The catalogue's two equal legs divide 5 USDC exactly, so the first buy
+    // happens at the 5 USDC the product is sized around and not a unit later.
+    expect(readiness?.investsAtRaw).toBe(DEFAULT_PURCHASE_USDC_RAW);
+    expect(investmentReadiness(DEFAULT_PURCHASE_USDC_RAW - 1n, weights.map((weightBps) => ({ weightBps })), minInvestment, DEFAULT_INVEST_CAPS.maxPerCall)?.state).toBe("waiting");
   });
 
   it("offers SPYx and one PreStocks leg, both Token-2022, each priced from its own pool, with 10 % and 5 % margins", () => {

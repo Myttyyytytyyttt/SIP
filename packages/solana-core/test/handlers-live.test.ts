@@ -1,9 +1,12 @@
 // /api/solana-live through its handler, over a stub chain: what it refuses, what
 // it charges, and that it never reports an unreadable read as a missing one.
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
-import { PYTH_PUSH_PROGRAM, PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED, SPYX_MINT } from "../src/client/addresses";
+import { PYTH_PUSH_PROGRAM, PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED, SOL_USDC_POOL, SPYX_MINT, USDC_MINT, WSOL_MINT } from "../src/client/addresses";
 import { base58Encode } from "../src/client/base58";
 import { base64Encode } from "../src/client/base64";
 import { encodeArgs, encodeStruct } from "../src/client/borsh";
@@ -23,7 +26,18 @@ import { loadSolanaServerSettings } from "../src/server/config";
 import type { SolanaGate } from "../src/server/handlers";
 import { deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
 import { createWeightedLimiter, type WeightedLimiter } from "../src/server/rate-limit";
-import { LEG_POOLS, configAccount, linkAccount, localRent, policyAccount, pricedPoolEntries, vaultAccount } from "./chain-fixtures";
+import {
+  LEG_POOLS,
+  SOL_POOL_USDC_RESERVE,
+  SOL_POOL_USDC_VAULT,
+  configAccount,
+  linkAccount,
+  localRent,
+  policyAccount,
+  pricedPoolEntries,
+  pricedPoolVaultEntries,
+  vaultAccount,
+} from "./chain-fixtures";
 import {
   PYTH_FIXTURE_OWNER,
   PYTH_FIXTURE_POSTED_SLOT,
@@ -212,6 +226,9 @@ function fullChain(owner: string, wallet: string): LiveChain {
       // Every pool PRICED_POOLS names, so a snapshot that quotes a price quotes it
       // because all three decoded, not because a missing one was never asked about.
       ...pricedPoolEntries(),
+      // And each of those pools' in-side vault, so a reserve that comes back
+      // unknown below is unknown because the test spoiled it.
+      ...pricedPoolVaultEntries(),
       ...pythAccounts(),
       [deriveLinkPda(wallet).toBase58(), sipOwned(linkAccount(wallet, vault))],
       [wallet, accountInfo("11111111111111111111111111111111", new Uint8Array(0), 420_000_000)],
@@ -318,8 +335,8 @@ describe("snapshot", () => {
     // The feeds rode in a member that was already being sent — the four methods
     // above are unchanged — at the very END of its addresses, where the pools'
     // fixed slice and the wallets' offsets cannot reach them.
-    const asked = ((upstream.calls[0]!.body as RpcRequest[])[0]!.params![0] as string[]).slice(-3);
-    expect(asked).toEqual([SYSVAR_CLOCK, PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED]);
+    const asked = ((upstream.calls[0]!.body as RpcRequest[])[0]!.params![0] as string[]).slice(-6);
+    expect(asked).toEqual([SYSVAR_CLOCK, PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED, SOL_POOL_USDC_VAULT, LEG_POOLS[0]!.usdcVault, LEG_POOLS[1]!.usdcVault]);
     expect(body.wallets).toEqual([
       { wallet, lamports: "420000000", link: { address: deriveLinkPda(wallet).toBase58(), status: "this_vault", vault, epoch: "7", settlementNonce: "0", frontierSlot: "0" } },
     ]);
@@ -407,6 +424,109 @@ describe("snapshot", () => {
     const answer = await live({ action: "snapshot", owner, wallets: [], discover: false });
     expect([answer.json.vault.status, answer.json.policy.status, answer.json.config.status]).toEqual(["missing", "missing", "missing"]);
     expect(answer.json.rents.vault).toBe(String(localRent(125)));
+  });
+});
+
+describe("the reserve behind the depth ceiling", () => {
+  /** Every getMultipleAccounts' address list, across every upstream call, batches flattened. */
+  const asksOf = (calls: readonly UpstreamCall[]): string[][] =>
+    calls
+      .flatMap((call) => (Array.isArray(call.body) ? (call.body as RpcRequest[]) : [call.body as RpcRequest]))
+      .filter((request) => request.method === "getMultipleAccounts")
+      .map((request) => (request.params?.[0] ?? []) as string[]);
+
+  /** The one ask that carries the priced pools — the read the reserves had to ride on rather than add to. */
+  const poolAsk = (calls: readonly UpstreamCall[]): string[] => asksOf(calls).find((ask) => ask.includes(SOL_USDC_POOL))!;
+
+  const vaultRoute = (chain: LiveChain) => {
+    const upstream = fakeFetch(answerLive(chain));
+    const handler = createSolanaVaultHandler({ gate: () => OK_GATE, fetch: upstream.fetch, now: () => 1_789_500_000_000, onRefusal: () => undefined });
+    return { upstream, state: async (owner: string) => read(await handler.POST(post("vault", { action: "state", owner, wallets: [] }))) };
+  };
+
+  const EXPECTED = [
+    { pool: SOL_USDC_POOL, mint: WSOL_MINT, inMint: USDC_MINT, vault: SOL_POOL_USDC_VAULT, amountRaw: String(SOL_POOL_USDC_RESERVE), unreadable: null },
+    { pool: LEG_POOLS[0]!.pool, mint: LEG_POOLS[0]!.mint, inMint: USDC_MINT, vault: LEG_POOLS[0]!.usdcVault, amountRaw: String(LEG_POOLS[0]!.usdcReserve), unreadable: null },
+    { pool: LEG_POOLS[1]!.pool, mint: LEG_POOLS[1]!.mint, inMint: USDC_MINT, vault: LEG_POOLS[1]!.usdcVault, amountRaw: String(LEG_POOLS[1]!.usdcReserve), unreadable: null },
+  ];
+
+  it.each<[string, (owner: string) => Promise<{ answer: Answer; calls: readonly UpstreamCall[] }>]>([
+    [
+      "/api/solana-live",
+      async (owner) => {
+        const { live, upstream } = setup(fullChain(owner, key()));
+        return { answer: await live({ action: "snapshot", owner, wallets: [], discover: false }), calls: upstream.calls };
+      },
+    ],
+    [
+      "/api/solana-vault",
+      async (owner) => {
+        const { state, upstream } = vaultRoute(fullChain(owner, key()));
+        return { answer: await state(owner), calls: upstream.calls };
+      },
+    ],
+  ])("%s answers each pool's in-side reserve, as strings, WITHOUT a read of its own", async (_, run) => {
+    const { answer, calls } = await run(key());
+    expect(answer.status).toBe(200);
+    expect(answer.json.reserves.items).toEqual(EXPECTED);
+    // A SIBLING of prices, never a field inside it — the same rule the oracle follows.
+    expect(answer.json.prices.reserves).toBeUndefined();
+
+    // NO EXTRA ROUND TRIP. The vault addresses are PDAs of the pool and USDC, so
+    // they ride in the very ask that already carries the pools; the keeper, which
+    // reads pools it learns at run time, has to pay a second request for the same
+    // figures. If one ever split off, this would find it: no OTHER ask may name them.
+    expect(poolAsk(calls)).toEqual(expect.arrayContaining([SOL_POOL_USDC_VAULT, LEG_POOLS[0]!.usdcVault, LEG_POOLS[1]!.usdcVault]));
+    const others = asksOf(calls).filter((ask) => !ask.includes(SOL_USDC_POOL));
+    expect(others.flat()).not.toEqual(expect.arrayContaining([SOL_POOL_USDC_VAULT]));
+  });
+
+  it("is enough to recompute the ceiling the card used to quote as a literal", () => {
+    // Read as text, never imported: solana-core does not depend on the keeper.
+    const keeper = readFileSync(fileURLToPath(new URL("../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
+    const multiple = BigInt(/export const MIN_POOL_DEPTH_MULTIPLE = ([0-9_]+)n;/.exec(keeper)![1]!.replaceAll("_", ""));
+
+    // What the panel does with the payload: a leg may spend at most a fiftieth of
+    // the in-side reserve, and two equal legs double it for the whole buy.
+    const perLeg = LEG_POOLS[1]!.usdcReserve / multiple;
+    expect(perLeg).toBe(191_508_816n);
+    // THE LITERAL IT REPLACES was $190.83 a leg, cut from 9,541,652,779 raw read
+    // on 2026-09-20 — two days and 33,788,036 raw units ago. The gap is small
+    // here and was 5,000 dollars the night before; either way the payload moves
+    // with the pool and the literal does not.
+    expect(perLeg).not.toBe(9_541_652_779n / multiple);
+  });
+
+  it("A RESERVE THAT CANNOT BE READ CHANGES THE RESERVES AND NOTHING ELSE", async () => {
+    const owner = key();
+    const whole = await (async () => {
+      const { live } = setup(fullChain(owner, key()));
+      return (await live({ action: "snapshot", owner, wallets: [], discover: false })).json;
+    })();
+
+    const chain = fullChain(owner, key());
+    // The one mutation this pair exists for: the vault the ceiling is computed
+    // from is gone from the chain.
+    chain.accounts.set(LEG_POOLS[1]!.usdcVault, null);
+    const { live } = setup(chain);
+    const broken = (await live({ action: "snapshot", owner, wallets: [], discover: false })).json;
+
+    // ONLY the new field moved: prices, pyth and the vault are the same answer.
+    expect(broken.prices).toEqual(whole.prices);
+    expect(broken.pyth).toEqual(whole.pyth);
+    expect(broken.vault).toEqual(whole.vault);
+    expect(broken.reserves.items[2].amountRaw).toBeNull();
+    expect(broken.reserves.items[2].unreadable).toMatch(/in-side vault was not read/);
+    // NOT ZERO. A ceiling of nothing would tell the owner their basket is dead.
+    expect(broken.reserves.items[2].amountRaw).not.toBe("0");
+    expect(broken.reserves.items.slice(0, 2)).toEqual(EXPECTED.slice(0, 2));
+  });
+
+  it("an unreadable chain leaves NO reserves block at all, which is not an empty one", async () => {
+    const { live } = setup({ accounts: new Map(), down: true });
+    const answer = await live({ action: "snapshot", owner: key(), wallets: [], discover: false });
+    expect(answer.json.reserves).toBeNull();
+    expect(answer.text).not.toContain(SECRET_QUERY);
   });
 });
 

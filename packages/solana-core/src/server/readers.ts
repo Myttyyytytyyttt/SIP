@@ -12,6 +12,8 @@
 // browser relay no longer serves (getSignaturesForAddress, getTransaction and
 // getProgramAccounts live here, behind the web's own routes).
 
+import { PublicKey } from "@solana/web3.js";
+
 import {
   PYTH_RECEIVER_PROGRAM,
   PYTH_SOL_USD_FEED,
@@ -433,22 +435,231 @@ export function poolPricesFromAccounts(accounts: readonly (AccountSnapshot | nul
   return { slot, convertWad, legWads };
 }
 
+
+// ── the pools' in-side reserves: the depth the keeper's gate measures ────────
+//
+// WHY A NUMBER CANNOT BE WRITTEN DOWN HERE. The panel's depth ceiling is a
+// fraction of what a pool holds on the side a buy is PAID in, and that balance
+// moves under it. The web's InvestingCard carries the last one anybody wrote
+// down — 9,541,652,779 raw USDC in the ANTHROPIC/USDC pool at slot 448864213 —
+// and two days later the same vault held 9,575,440,815, having been thousands of
+// dollars lighter the night before that. A literal captured at a slot reads as
+// current a month later and is wrong by then, so the reserve is read with
+// everything else and the ceiling is arithmetic over it.
+//
+// THE IN SIDE, BECAUSE THAT IS THE SIDE THE KEEPER MEASURES. legDepthDecision
+// (solana-keeper/src/invest-decision.ts) takes the pool's in_mint vault — not
+// the stock vault — and refuses a turn whose per-leg spend is not covered
+// MIN_POOL_DEPTH_MULTIPLE times over by it. The choice is copied here exactly,
+// pair check included: a panel that measured the other side would promise
+// precisely what the keeper then refuses.
+//
+// AND IT COSTS NO ROUND TRIP. The vault addresses live INSIDE the pool account
+// (offsets 137 and 169), which is why the keeper needs a second
+// getMultipleAccountsInfo for them — it reads pools an owner's policy names, at
+// run time. This server reads a FIXED list of pools, and a Raydium CLMM vault is
+// a PDA of ["pool_vault", pool, mint] under the CLMM program, so the address is
+// known before any answer comes back and rides the same request. The derivation
+// is never trusted on its own: the pool's own bytes must NAME the address that
+// was asked for, or the reserve is unknown. A wrong seed cannot produce a wrong
+// number here — only a missing one.
+
+/** SPL Token's Account: mint(32) owner(32) amount(8, little-endian) — the amount at 64, in Token-2022 too. */
+const TOKEN_ACCOUNT_AMOUNT_AT = 64;
+
 /**
- * The live rates behind the floors and the forms' dollar figures: PRICED_POOLS in
- * ONE getMultipleAccounts (poolPricesFromAccounts). Anything but every pool,
- * ours, in order, is unreadable: a floor is never guessed.
+ * Raydium CLMM PoolState, at the offsets the keeper counts over the same bytes:
+ * 8 disc, 1 bump, 32 amm_config, 32 owner, then token_mint_0 at 73, token_mint_1
+ * at 105, token_vault_0 at 137, token_vault_1 at 169.
  */
-export async function readPoolPrices(pool: RpcPool): Promise<ChainRead<PoolPrices>> {
-  try {
-    const result = await pool.call<{ context?: { slot?: unknown }; value?: unknown }>("getMultipleAccounts", [PRICED_POOLS, { encoding: "base64", commitment: COMMITMENT }]);
-    const value = result?.value;
-    if (!Array.isArray(value) || value.length !== PRICED_POOLS.length) return { kind: "unreadable", error: "getMultipleAccounts did not answer every pool" };
-    const slot = typeof result?.context?.slot === "number" ? result.context.slot : null;
-    return { kind: "exists", value: poolPricesFromAccounts(value.map(snapshotOf), slot) };
-  } catch (error) {
-    return { kind: "unreadable", error: error instanceof PoolPriceError ? error.message : errorText(pool, error) };
-  }
+const POOL_TOKEN_MINT_0_AT = 73;
+const POOL_TOKEN_MINT_1_AT = 105;
+const POOL_TOKEN_VAULT_0_AT = 137;
+const POOL_TOKEN_VAULT_1_AT = 169;
+
+/** Raydium CLMM's vault seed: ["pool_vault", pool, mint]. Checked against mainnet's own six vaults, and against each pool's bytes on every read. */
+const POOL_VAULT_SEED = new TextEncoder().encode("pool_vault");
+
+const RAYDIUM_CLMM_KEY = new PublicKey(RAYDIUM_CLMM);
+
+/** Little-endian u64, the way i64At and u128At read their fields. */
+function u64At(bytes: Uint8Array, at: number): bigint {
+  let value = 0n;
+  for (let i = 7; i >= 0; i--) value = (value << 8n) | BigInt(bytes[at + i]!);
+  return value;
 }
+
+/** ["pool_vault", pool, mint] under the Raydium CLMM program: where that pool keeps that mint. */
+export function deriveClmmPoolVault(pool: string, mint: string): string {
+  return PublicKey.findProgramAddressSync([POOL_VAULT_SEED, new PublicKey(pool).toBytes(), new PublicKey(mint).toBytes()], RAYDIUM_CLMM_KEY)[0].toBase58();
+}
+
+/** One priced pool, the pair it must trade, and the vault its in-side reserve is read from. */
+export interface PricedPoolPair {
+  readonly pool: string;
+  /** The side a spend is denominated in: sip-vault's in_mint, which this product pins to USDC. */
+  readonly inMint: string;
+  /** The other side — an offered leg, or wSOL for the pool the SOL hop converts through. */
+  readonly otherMint: string;
+  /** ["pool_vault", pool, inMint]: what the batch ASKS for. What it believes is what the pool's bytes name. */
+  readonly inVault: string;
+}
+
+/**
+ * PRICED_POOLS again, each with its pair and its in-side vault, IN PRICED_POOLS'
+ * ORDER — reserves are matched to pools by index, so the two lists are one list
+ * read twice. readers.test.ts holds them equal.
+ */
+export const PRICED_POOL_PAIRS: readonly PricedPoolPair[] = Object.freeze(
+  [{ pool: SOL_USDC_POOL, otherMint: WSOL_MINT }, ...OFFERED_LEGS.map((leg) => ({ pool: leg.pool, otherMint: leg.mint }))].map((entry) =>
+    Object.freeze({ ...entry, inMint: USDC_MINT, inVault: deriveClmmPoolVault(entry.pool, USDC_MINT) }),
+  ),
+);
+
+/** The in-side vault addresses, in PRICED_POOL_PAIRS' order: what the snapshot appends to the read it was already making. */
+export const PRICED_POOL_IN_VAULTS: readonly string[] = Object.freeze(PRICED_POOL_PAIRS.map((entry) => entry.inVault));
+
+/** One priced pool's in-side reserve, or the reason there is none to report. */
+export interface PoolReserveRead {
+  readonly pool: string;
+  /** The mint the reserve is counted in: USDC, the side a buy is paid in. */
+  readonly inMint: string;
+  /** The other side of the pair, so a caller can match a reserve to a leg without knowing this order. */
+  readonly otherMint: string;
+  /** The vault this read asked for, and the one the pool's own bytes had to name. */
+  readonly vault: string;
+  /**
+   * Raw in_mint units held there, or NULL when it could not be read.
+   *
+   * NULL IS NOT ZERO, and the distinction is the whole point: zero is a pool
+   * that has been drained, which a panel should shout about; null is a pool
+   * nobody managed to ask, which it must not dress up as a dead basket.
+   */
+  readonly amountRaw: bigint | null;
+  /** Why amountRaw is null; null when it was read. */
+  readonly unreadable: string | null;
+}
+
+export interface PoolReserves {
+  /** The slot the pools and their vaults were read at, or null when the RPC did not say. */
+  readonly slot: number | null;
+  /** One entry per priced pool, in PRICED_POOL_PAIRS' order, always the same length. */
+  readonly items: readonly PoolReserveRead[];
+}
+
+/**
+ * Each priced pool's in-side reserve, from the pool accounts and the vault
+ * accounts of the SAME answer, by index.
+ *
+ * TOTAL BY CONSTRUCTION. It throws for nothing: every failure becomes that one
+ * pool's `unreadable`, and the other pools keep their figures. A reserve is the
+ * cheapest fact in the payload and the least allowed to take anything else down
+ * with it — the prices above are decided from their own slice, before this runs.
+ *
+ * FOUR THINGS ARE CHECKED before a number is believed, and any of them failing
+ * gives null rather than zero: the pool is Raydium's; it trades exactly
+ * in_mint against the mint pinned for it (the registry checked against the
+ * chain, which is also the only way these offsets could mean something else);
+ * the vault it names on the in side is the one this read asked for; and that
+ * account is a token account of in_mint under a token program.
+ */
+export function poolReservesFromAccounts(
+  pools: readonly (AccountSnapshot | null | undefined)[],
+  vaults: readonly (AccountSnapshot | null | undefined)[],
+  slot: number | null,
+): PoolReserves {
+  const items = PRICED_POOL_PAIRS.map((pair, index): PoolReserveRead => {
+    const base = { pool: pair.pool, inMint: pair.inMint, otherMint: pair.otherMint, vault: pair.inVault };
+    const unknown = (why: string): PoolReserveRead => ({ ...base, amountRaw: null, unreadable: why });
+    if (pools.length !== PRICED_POOL_PAIRS.length || vaults.length !== PRICED_POOL_PAIRS.length) {
+      return unknown("the read did not answer every priced pool and its vault");
+    }
+
+    const pool = pools[index];
+    if (pool === null || pool === undefined) return unknown("the pool account was not read, and a depth that cannot be measured is not a depth");
+    if (pool.owner !== RAYDIUM_CLMM) return unknown(`the pool is owned by ${pool.owner}, not Raydium CLMM`);
+    if (pool.data === null || pool.data.length < POOL_TOKEN_VAULT_1_AT + 32) {
+      return unknown(`a Raydium CLMM pool state is at least ${POOL_TOKEN_VAULT_1_AT + 32} bytes to reach its vaults; this account is ${pool.data === null ? "not base64" : `${pool.data.length} bytes`}`);
+    }
+    const data = pool.data;
+    const at = (offset: number): string => base58Encode(data.subarray(offset, offset + 32));
+    const [mint0, mint1] = [at(POOL_TOKEN_MINT_0_AT), at(POOL_TOKEN_MINT_1_AT)];
+    // THE KEEPER'S OWN CHOICE, COPIED: legDepthDecision admits the pool only when
+    // it trades in_mint against this leg, either way round, and then measures the
+    // vault on in_mint's side.
+    const inIsZero = mint0 === pair.inMint && mint1 === pair.otherMint;
+    const inIsOne = mint1 === pair.inMint && mint0 === pair.otherMint;
+    if (!inIsZero && !inIsOne) return unknown(`the pool trades ${mint0} against ${mint1}, not ${pair.inMint} against ${pair.otherMint}`);
+    const named = at(inIsZero ? POOL_TOKEN_VAULT_0_AT : POOL_TOKEN_VAULT_1_AT);
+    if (named !== pair.inVault) return unknown(`the pool names ${named} as its ${pair.inMint} vault, and this read asked for ${pair.inVault}`);
+
+    const vault = vaults[index];
+    if (vault === null || vault === undefined) return unknown("the pool's in-side vault was not read, and an unread reserve is not an empty one");
+    if (!TOKEN_PROGRAMS.some((programId) => programId === vault.owner)) return unknown(`the vault is owned by ${vault.owner}, not a token program`);
+    if (vault.data === null || vault.data.length < TOKEN_ACCOUNT_AMOUNT_AT + 8) {
+      return unknown(`a token account is at least ${TOKEN_ACCOUNT_AMOUNT_AT + 8} bytes to reach its amount; this account is ${vault.data === null ? "not base64" : `${vault.data.length} bytes`}`);
+    }
+    const held = base58Encode(vault.data.subarray(0, 32));
+    if (held !== pair.inMint) return unknown(`the vault holds ${held}, not ${pair.inMint}`);
+    return { ...base, amountRaw: u64At(vault.data, TOKEN_ACCOUNT_AMOUNT_AT), unreadable: null };
+  });
+  return { slot, items };
+}
+
+/** What readPoolDepth asks for, in this order: every priced pool, then every priced pool's in-side vault. */
+const POOL_DEPTH_ADDRESSES: readonly string[] = Object.freeze([...PRICED_POOLS, ...PRICED_POOL_IN_VAULTS]);
+
+/** The rates and the reserves of the same pools, at the same slot, each with its OWN outcome. */
+export interface PoolDepth {
+  readonly prices: ChainRead<PoolPrices>;
+  readonly reserves: ChainRead<PoolReserves>;
+}
+
+/**
+ * The live rates behind the floors and the forms' dollar figures, and the
+ * reserves behind the depth ceiling beside them: PRICED_POOLS and their in-side
+ * vaults in ONE getMultipleAccounts.
+ *
+ * TWO OUTCOMES OUT OF ONE ANSWER, AND NEITHER CAN REACH THE OTHER. Anything but
+ * every pool, ours, in order, leaves `prices` unreadable: a floor is never
+ * guessed. A vault that is not what its pool names leaves that one reserve
+ * unknown and nothing else — the prices were already decided, from their own
+ * slice of the same answer, by the same function they always were.
+ */
+export async function readPoolDepth(pool: RpcPool): Promise<PoolDepth> {
+  let value: unknown[] | null = null;
+  let slot: number | null = null;
+  let failure = "getMultipleAccounts did not answer every pool";
+  try {
+    const result = await pool.call<{ context?: { slot?: unknown }; value?: unknown }>("getMultipleAccounts", [POOL_DEPTH_ADDRESSES, { encoding: "base64", commitment: COMMITMENT }]);
+    const answered = result?.value;
+    if (Array.isArray(answered) && answered.length === POOL_DEPTH_ADDRESSES.length) {
+      value = answered as unknown[];
+      slot = typeof result?.context?.slot === "number" ? result.context.slot : null;
+    }
+  } catch (error) {
+    failure = error instanceof PoolPriceError ? error.message : errorText(pool, error);
+  }
+  if (value === null) return { prices: { kind: "unreadable", error: failure }, reserves: { kind: "unreadable", error: failure } };
+
+  const poolAccounts = value.slice(0, PRICED_POOLS.length).map(snapshotOf);
+  let prices: ChainRead<PoolPrices>;
+  try {
+    prices = { kind: "exists", value: poolPricesFromAccounts(poolAccounts, slot) };
+  } catch (error) {
+    prices = { kind: "unreadable", error: error instanceof PoolPriceError ? error.message : errorText(pool, error) };
+  }
+  let reserves: ChainRead<PoolReserves>;
+  try {
+    reserves = { kind: "exists", value: poolReservesFromAccounts(poolAccounts, value.slice(PRICED_POOLS.length).map(snapshotOf), slot) };
+  } catch (error) {
+    reserves = { kind: "unreadable", error: errorText(pool, error) };
+  }
+  return { prices, reserves };
+}
+
+/** Only the rates, for a caller that has no use for the reserves beside them: the same one call. */
+export const readPoolPrices = async (pool: RpcPool): Promise<ChainRead<PoolPrices>> => (await readPoolDepth(pool)).prices;
 
 // ── Pyth: beside the pools, never inside them ────────────────────────────────
 //
@@ -884,6 +1095,13 @@ export interface LiveSnapshot {
   readonly prices: ChainRead<PoolPrices>;
   /** The oracle, apart from the venue: unreadable whenever a feed is, and never able to make `prices` unreadable. */
   readonly pyth: ChainRead<PythRead>;
+  /**
+   * What each priced pool holds on the side a buy is PAID in — the depth the
+   * keeper's gate measures — so a panel can recompute its ceiling instead of
+   * quoting a figure with a date on it. Beside `prices`, never inside it, and
+   * unable to make it unreadable.
+   */
+  readonly reserves: ChainRead<PoolReserves>;
   readonly tokenAccounts: ChainRead<readonly VaultTokenAccountRead[]>;
   readonly rents: {
     readonly vault: bigint | null;
@@ -903,8 +1121,8 @@ export interface LiveSnapshotInput {
   readonly discover: boolean;
 }
 
-/** At most this many addresses go into the snapshot's getMultipleAccounts: 3 + 4 pools + 10 links + 10 wallets + the clock and 2 feeds. */
-export const MAX_LIVE_SNAPSHOT_ADDRESSES = 3 + PRICED_POOLS.length + 2 * MAX_WALLET_LINKS + PYTH_SNAPSHOT_ADDRESSES.length;
+/** At most this many addresses go into the snapshot's getMultipleAccounts: 3 + 4 pools + 10 links + 10 wallets + the clock and 2 feeds + one vault per pool. */
+export const MAX_LIVE_SNAPSHOT_ADDRESSES = 3 + PRICED_POOLS.length + 2 * MAX_WALLET_LINKS + PYTH_SNAPSHOT_ADDRESSES.length + PRICED_POOL_IN_VAULTS.length;
 
 /**
  * EVERYTHING THE LIVE DASHBOARD SHOWS, IN ONE ROUND TRIP: the vault, its policy,
@@ -956,6 +1174,7 @@ export async function readLiveSnapshot(pool: RpcPool, input: LiveSnapshotInput):
       config: unreadable,
       prices: unreadable,
       pyth: unreadable,
+      reserves: unreadable,
       tokenAccounts: unreadable,
       rents: { vault: null, walletFloor: null },
       wallets: wallets.map((wallet, index) => ({
@@ -970,7 +1189,10 @@ export async function readLiveSnapshot(pool: RpcPool, input: LiveSnapshotInput):
   // The tail is the only safe place for an account no existing index expects:
   // the pools are read from a fixed slice and the wallets from offsets counted
   // off PRICED_POOLS' length, so nothing appended here can be handed to either.
-  const addresses = [vaultAddress, policyAddress, configAddress, ...PRICED_POOLS, ...linkAddresses, ...wallets, ...PYTH_SNAPSHOT_ADDRESSES];
+  // The vaults go AFTER the oracle for the same reason the oracle went after the
+  // wallets: the oracle's index is counted off the wallets, so anything past it
+  // moves nothing, and a vault can never be handed to the Raydium decoder.
+  const addresses = [vaultAddress, policyAddress, configAddress, ...PRICED_POOLS, ...linkAddresses, ...wallets, ...PYTH_SNAPSHOT_ADDRESSES, ...PRICED_POOL_IN_VAULTS];
   const ACCOUNTS = 1;
   const TOKENS = 2;
   const RENT_VAULT = 3;
@@ -1026,12 +1248,13 @@ export async function readLiveSnapshot(pool: RpcPool, input: LiveSnapshotInput):
           : withRent(vaultAddress, vaultRead, Number(vaultRent));
 
     // ── the pinned pools ──────────────────────────────────────────────────────
+    const poolAccounts = accountsError !== null ? [] : values!.slice(3, 3 + PRICED_POOLS.length).map(snapshotOf);
     let prices: ChainRead<PoolPrices>;
     if (accountsError !== null) {
       prices = accountsUnreadable;
     } else {
       try {
-        prices = { kind: "exists", value: poolPricesFromAccounts(values!.slice(3, 3 + PRICED_POOLS.length).map(snapshotOf), slot) };
+        prices = { kind: "exists", value: poolPricesFromAccounts(poolAccounts, slot) };
       } catch (error) {
         // A pool that is not the one SIP pins gives NO price, never a wrong one.
         prices = { kind: "unreadable", error: error instanceof PoolPriceError ? error.message : errorText(pool, error) };
@@ -1051,6 +1274,28 @@ export async function readLiveSnapshot(pool: RpcPool, input: LiveSnapshotInput):
         pyth = { kind: "exists", value: pythFromAccounts(values!.slice(pythAt, pythAt + PYTH_SNAPSHOT_ADDRESSES.length).map(snapshotOf)) };
       } catch (error) {
         pyth = { kind: "unreadable", error: error instanceof PythPriceError ? error.message : errorText(pool, error) };
+      }
+    }
+
+    // ── the reserves at the very tail ─────────────────────────────────────────
+    // Read from the SAME pool accounts the prices were decided from and the
+    // vaults appended behind the oracle, in their own outcome. The decode is
+    // total — a spoiled pool or an unreadable vault is that one entry's reason
+    // and nothing else — and the catch is here only so that a reserve could
+    // never, by any route, throw its way out of this function and take the
+    // prices, the vault and the links down with it.
+    const reservesAt = pythAt + PYTH_SNAPSHOT_ADDRESSES.length;
+    let reserves: ChainRead<PoolReserves>;
+    if (accountsError !== null) {
+      reserves = accountsUnreadable;
+    } else {
+      try {
+        reserves = {
+          kind: "exists",
+          value: poolReservesFromAccounts(poolAccounts, values!.slice(reservesAt, reservesAt + PRICED_POOL_IN_VAULTS.length).map(snapshotOf), slot),
+        };
+      } catch (error) {
+        reserves = { kind: "unreadable", error: errorText(pool, error) };
       }
     }
 
@@ -1126,6 +1371,7 @@ export async function readLiveSnapshot(pool: RpcPool, input: LiveSnapshotInput):
       config: accountsError !== null ? accountsUnreadable : addressed(configAddress, decodeOwned(values![2], decodeProtocolConfig)),
       prices,
       pyth,
+      reserves,
       tokenAccounts,
       rents: { vault: vaultRent, walletFloor },
       wallets: walletReads,

@@ -111,6 +111,27 @@ export function investPolicyProblems(input: InvestPolicyInput): string[] {
   if (!isPubkey(input.venueProgram)) problems.push("venueProgram is not a base58 32-byte address");
   else if (input.enabled && input.venueProgram === DEFAULT_PUBKEY) problems.push("an enabled policy needs a venue program");
   if (!inU128(input.minConvertRateWad)) problems.push("minConvertRateWad must be a u128");
+  // THIS COMPARISON IS THE CHAIN'S, AND THE CHAIN'S IS NOT THE WHOLE RULE.
+  // set_invest_policy.rs asks only `min_investment > 0 && min_investment <=
+  // max_per_call && max_per_call <= max_rolling_30d`, at the level of the WHOLE
+  // basket, so that is what is mirrored here — an empty list still means "the
+  // chain would accept this", and nothing below is allowed to make this
+  // function stricter than the program it mirrors.
+  //
+  // BUT min_investment IS ENFORCED PER LEG. invest.rs requires `amount_in >=
+  // policy.min_investment` and invest is called once per leg_index with THAT
+  // LEG'S share of the budget, so a policy the comparison below accepts can
+  // still be one that never buys at any balance: the bar is
+  // minInvestment × 10_000 / lightestWeightBps, not minInvestment.
+  //
+  // AT ONE LEG THE TWO READINGS ARE THE SAME NUMBER, which is exactly how the
+  // gap stayed invisible while the catalogue had a single leg — a basket-level
+  // test passed by arithmetic coincidence, and the form accepted policies that
+  // were dead on arrival. The rule lives in ONE place, investmentReadiness in
+  // client/pending.ts (`state: "unreachable"`), and is pinned for two legs and
+  // for uneven weights in test/rules.test.ts. Callers that must not offer a
+  // dead policy — the investment form does — ask that function; they do not
+  // re-derive it here, and they do not read an empty list as "this can buy".
   if (!inU64(input.minInvestment) || !inU64(input.maxPerCall) || !inU64(input.maxRolling30d)) {
     problems.push("minInvestment, maxPerCall and maxRolling30d must be u64 amounts");
   } else if (!(input.minInvestment > 0n && input.minInvestment <= input.maxPerCall && input.maxPerCall <= input.maxRolling30d)) {

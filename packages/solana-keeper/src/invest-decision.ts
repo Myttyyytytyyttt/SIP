@@ -630,6 +630,41 @@ export function rollingDecision(input: {
  */
 export const MAX_LEG_FEE_BPS = 100n;
 
+/**
+ * The size of the step the fee authority has ACTUALLY used, in bps.
+ *
+ * Both PreStocks mints have been moved 0 -> 50 -> 100 by the same key, twice,
+ * in fifty-bps steps. This is not a promise about the next move: that key can
+ * write any rate up to 10_000 bps whenever it likes, and nothing obliges it to
+ * keep its own rhythm. It is the only EVIDENCE that exists about the size of a
+ * move, and it is what the warning below is spaced by — one observed step of
+ * room, rather than a margin invented here.
+ */
+export const LEG_FEE_STEP_BPS = 50n;
+
+/**
+ * The fee at which a leg starts being REPORTED, in bps: one observed issuer
+ * step under MAX_LEG_FEE_BPS, so 50.
+ *
+ * REPORTED, NOT REFUSED, AND THE DISTINCTION IS THE WHOLE POINT. The refusal
+ * already exists and sits at MAX_LEG_FEE_BPS; firing it earlier would be this
+ * keeper deciding a product question — how much of the owner's money may go to
+ * an issuer — which is the owner's to decide and is argued at MAX_LEG_FEE_BPS.
+ * What is missing is not a stricter bound, it is NOTICE. Today's live fee on
+ * ANTHROPIC is exactly 100 bps, admitted only because the comparison at the
+ * refusal is strictly greater-than, and NOTHING SAYS SO ANYWHERE: the basket is
+ * bought, the turn reports INVESTED, and the single next step by one key stops
+ * SPYx, ANTHROPIC and the SOL conversion together, with no warning before it and
+ * a REFUSED turn after it.
+ *
+ * WHY HALF THE CEILING AND NOT A TIGHTER BAND. A band narrower than one observed
+ * step can be jumped clean over — 50 to 101 in one write — and a warning that the
+ * fee can skip is not a warning. At LEG_FEE_WARN_BPS the operator hears about a
+ * leg from the moment it is one of this issuer's own steps away from stopping
+ * the product, which is the earliest point at which the number means anything.
+ */
+export const LEG_FEE_WARN_BPS = MAX_LEG_FEE_BPS - LEG_FEE_STEP_BPS;
+
 /** One of the two fees a mint's TransferFeeConfig carries, with the epoch it starts in. */
 export interface ScheduledTransferFee extends TransferFeeTerms {
   /** The first epoch this fee applies in. */
@@ -755,6 +790,110 @@ export function activeTransferFee(facts: MintFacts, currentEpoch: bigint): Trans
   return currentEpoch >= schedule.newer.epoch ? schedule.newer : schedule.older;
 }
 
+/**
+ * The warning for a leg whose transfer fee is at or within one issuer step of
+ * the ceiling this keeper buys through, or which already carries a scheduled
+ * rise — or null when the leg's fee is nowhere near it.
+ *
+ * A WARNING, NEVER A REFUSAL. The refusal is legAdmissionDecision's, at
+ * MAX_LEG_FEE_BPS, and it stays exactly where it is. This says the thing the
+ * refusal cannot: that the next move stops the basket. A leg at the ceiling is
+ * bought today and refused tomorrow, and the only difference between the two
+ * days is one transaction signed by somebody who does not answer to us.
+ *
+ * THE SCHEDULED FEE IS THE ONLY EARLY NOTICE ANYONE GETS. set_transfer_fee
+ * writes the new rate into newer_transfer_fee stamped with the epoch it starts
+ * in, about two epochs out — so between the write and the charge, the number
+ * that will stop this basket is sitting in the mint's own bytes, readable, and
+ * every turn until then reads it and says nothing. This turn reads those bytes
+ * anyway (decodeMintFacts, for the refusal beside this), so the notice costs no
+ * request, no round trip and no new dependency: only the decision to look at
+ * the fee that is NOT in force yet.
+ *
+ * THE KEY CARRIES THE RATE, SO A WORSENING FEE IS NOT MUTED BY ITS OWN
+ * WARNING. alerts.ts deduplicates by key and keeps a fired condition quiet for
+ * the repeat window; a key of the mint alone would let 50 bps mute the 100 bps
+ * that replaced it for as long as that window lasts, which is precisely the
+ * move this exists to report. A different rate is a different condition, so it
+ * fires at once, and the same rate stays quiet.
+ *
+ * EVERY VALUE IN `context` IS A STRING. The alerter spreads the context into
+ * JSON.stringify on its way to the webhook, and a bigint throws there — inside
+ * fire(), on the path whose whole purpose is that silence is never the healthy
+ * state.
+ */
+export function legFeeCeilingAlert(input: {
+  readonly mint: PublicKey;
+  readonly facts: MintFacts;
+  readonly currentEpoch: bigint;
+}): Alert | null {
+  const live = activeTransferFee(input.facts, input.currentEpoch);
+  const schedule = input.facts.transferFee;
+  // The fee written for a LATER epoch, which no transfer is charged yet. When
+  // the newer entry's epoch has already arrived it IS the live fee above, and
+  // there is nothing scheduled behind it.
+  const scheduled = schedule !== null && input.currentEpoch < schedule.newer.epoch ? schedule.newer : null;
+  const worst = scheduled !== null && scheduled.bps > live.bps ? scheduled.bps : live.bps;
+  if (worst < LEG_FEE_WARN_BPS) return null;
+
+  const name = input.mint.toBase58();
+  const nextStep = live.bps + LEG_FEE_STEP_BPS;
+  // A rise already written for a later epoch that lands ABOVE the ceiling is not
+  // a risk, it is a date: on that epoch every turn for this basket is REFUSED,
+  // with nothing signed here, nothing deployed, and nothing else to notice it.
+  const dated = scheduled !== null && scheduled.bps > MAX_LEG_FEE_BPS;
+  // THE FEE CAN ALSO HAVE ALREADY GONE. This runs over every leg whose bytes
+  // decoded, admitted or not, so it has to be able to say "this has happened"
+  // and not only "this is close" — a leg over the ceiling is refused by the gate
+  // beside this one, and calling its rate "the last one admitted" would be a
+  // false sentence in the message an operator wakes up to.
+  const stopped = live.bps > MAX_LEG_FEE_BPS;
+  const atCeiling = live.bps === MAX_LEG_FEE_BPS;
+  const position = stopped
+    ? `already ${live.bps - MAX_LEG_FEE_BPS} bps OVER it, which is why this basket is being refused`
+    : atCeiling
+      ? "the last rate that is admitted"
+      : `${MAX_LEG_FEE_BPS - live.bps} bps under it`;
+  const nextStepWords = stopped
+    ? `Every sweep refuses the whole basket while this stands — every other leg and the SOL conversion with it.`
+    : `One more step of the ${LEG_FEE_STEP_BPS} bps this issuer has used takes it to ${nextStep} bps, and ANY rate above ` +
+      `${MAX_LEG_FEE_BPS} refuses the whole basket — every other leg and the SOL conversion with it, on every sweep, ` +
+      `for as long as the fee stands.`;
+
+  const scheduledWords =
+    scheduled === null
+      ? `The mint carries no fee scheduled for a later epoch right now, so the next rise arrives with about two epochs' ` +
+        `notice and this line is where it will appear.`
+      : `A fee of ${scheduled.bps} bps is ALREADY written for epoch ${scheduled.epoch}, ` +
+        `${scheduled.epoch - input.currentEpoch} epoch(s) from now` +
+        (dated
+          ? `: from that epoch this whole basket stops being bought, and nothing needs to be signed or deployed here for that to happen.`
+          : `, still at or under the ceiling.`);
+
+  return {
+    key: `leg-fee:${name}:${worst}`,
+    severity: stopped || dated ? "critical" : "warn",
+    title: stopped
+      ? "A leg's transfer fee is above the ceiling: this basket is not being bought"
+      : dated
+        ? "A leg's scheduled transfer fee will stop this basket"
+        : atCeiling
+          ? "A leg's transfer fee is at the ceiling this keeper buys through"
+          : "A leg's transfer fee is one issuer step under the ceiling",
+    detail:
+      `${name} charges ${live.bps} bps to transfer in epoch ${input.currentEpoch}, against the ${MAX_LEG_FEE_BPS} bps ` +
+      `ceiling this keeper buys through — ${position}. ${nextStepWords} ${scheduledWords}`,
+    context: {
+      mint: name,
+      feeBps: live.bps.toString(),
+      ceilingBps: MAX_LEG_FEE_BPS.toString(),
+      epoch: input.currentEpoch.toString(),
+      nextStepBps: nextStep.toString(),
+      ...(scheduled === null ? {} : { scheduledFeeBps: scheduled.bps.toString(), scheduledFromEpoch: scheduled.epoch.toString() }),
+    },
+  };
+}
+
 /** One leg's mint, as the chain returned its account. */
 export interface LegMint {
   readonly mint: PublicKey;
@@ -790,6 +929,16 @@ export type LegAdmission =
  * well-behaved legs included. A basket bought without one of its legs is not
  * the basket the owner signed — its weights silently drift onto whatever is
  * left — so the turn buys every leg or none, and says which leg cost it.
+ *
+ * WHAT IT DOES NOT REFUSE IS REPORTED NEXT DOOR, NOT HERE. A leg sitting
+ * exactly ON MAX_LEG_FEE_BPS is admitted — deliberately, see that constant —
+ * and a leg carrying a rise already scheduled past it is admitted until the
+ * epoch arrives. Both are bought today and refused later by one signature that
+ * is not ours. legFeeWarnings below says so, as a separate call over the same
+ * legs, so that this verdict stays one verdict for the whole basket and its
+ * type keeps the exact shape the web reads it as text to check
+ * (website-oficial/src/lib/vault-copy.test.ts pins this union's source, so
+ * adding a field here breaks a test in another package).
  */
 export function legAdmissionDecision(input: {
   readonly legs: readonly LegMint[];
@@ -843,6 +992,46 @@ export function legAdmissionDecision(input: {
       `${refusals.join("; ")} — refusing the whole basket of ${input.legs.length} leg(s), the sound ones included, ` +
       "and refusing to convert SOL toward it: a partial basket drifts from the weights the owner signed",
   };
+}
+
+/**
+ * Every fee warning this basket's mints have earned, decided from the same
+ * bytes the admission gate reads and over the same legs.
+ *
+ * A SECOND CALL, NOT A SECOND FIELD, and the reason is worth knowing before
+ * anyone "tidies" it back into LegAdmission. That union is read as TEXT by
+ * website-oficial/src/lib/vault-copy.test.ts, which pins its exact source to
+ * prove the fee gate is one verdict for the whole basket rather than a per-leg
+ * admission — so a field added there fails a test in a package that does not
+ * even import this one. Keeping the notice beside the decision instead of
+ * inside it costs one more walk over a couple of hundred bytes already in
+ * memory, and keeps both statements true.
+ *
+ * IT RUNS WHETHER OR NOT THE BASKET IS ADMITTED. A basket refused today for
+ * leg A's transfer hook must not swallow the notice that leg B's fee is one
+ * step from stopping it forever: the refusal is this turn's problem and the
+ * warning is next month's. Legs whose account is missing, whose owner is not
+ * Token-2022, or whose bytes do not decode are simply skipped — every one of
+ * them is already REFUSED in words by legAdmissionDecision, and a fee read out
+ * of bytes that did not parse would be a number nobody should act on.
+ */
+export function legFeeWarnings(input: {
+  readonly legs: readonly LegMint[];
+  readonly currentEpoch: bigint;
+}): readonly Alert[] {
+  const warnings: Alert[] = [];
+  for (const leg of input.legs) {
+    if (leg.account === null || !leg.account.owner.equals(TOKEN_2022_PROGRAM_ID)) continue;
+    let facts: MintFacts;
+    try {
+      facts = decodeMintFacts(leg.account.data);
+    } catch {
+      continue;
+    }
+    const alert = legFeeCeilingAlert({ mint: leg.mint, facts, currentEpoch: input.currentEpoch });
+    if (alert !== null) warnings.push(alert);
+  }
+  return warnings;
 }
 
 // ── what one turn actually spends, per leg ───────────────────────────────────

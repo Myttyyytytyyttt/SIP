@@ -36,6 +36,8 @@ import {
   CONVERT_DUST_LAMPORTS,
   CRANK_WRAP_RESERVE_LAMPORTS,
   INVEST_FAILED_CRITICAL_STREAK,
+  LEG_FEE_STEP_BPS,
+  LEG_FEE_WARN_BPS,
   MAX_LEG_FEE_BPS,
   MIN_POOL_DEPTH_MULTIPLE,
   RAYDIUM_CLMM_PROGRAM,
@@ -59,6 +61,8 @@ import {
   investPauseDecision,
   legAdmissionDecision,
   legDepthDecision,
+  legFeeCeilingAlert,
+  legFeeWarnings,
   legShare,
   MAX_PYTH_AGE_SECONDS,
   MAX_PYTH_DEVIATION_BPS,
@@ -638,6 +642,187 @@ describe("a leg's mint, before the basket is bought", () => {
     expect(admission.detail).toContain("drifts from the weights the owner signed");
     for (const leg of sound) expect(admission.detail).not.toContain(leg.mint.toBase58());
   });
+
+  // ── the warning before the fee reaches the ceiling ─────────────────────────
+  //
+  // THE REFUSAL IS NOT NOTICE. Everything above pins where the keeper stops
+  // buying. Nothing above fires before it stops, and today's live fee on both
+  // PreStocks mints is EXACTLY the ceiling — admitted only because that
+  // comparison is strictly greater-than. The issuer has already moved these
+  // mints 0 → 50 → 100 with the same key; one more write and the whole basket,
+  // SPYx and the SOL conversion included, is refused on every sweep.
+  describe("the warning before a leg's fee reaches the ceiling", () => {
+    /** A mint whose live fee is `bps` from FEE_EPOCH, with nothing scheduled after it. */
+    const liveFee = (bps: number): Buffer =>
+      mintBytes([transferFeeConfig({ epoch: 0n, maximumFee: 0n, bps: 0 }, { epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps })]);
+    /** A mint charging `now` today and `later` from `from`, which is still ahead. */
+    const scheduledFee = (now: number, later: number, from: bigint): Buffer =>
+      mintBytes([transferFeeConfig({ epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps: now }, { epoch: from, maximumFee: UNCAPPED, bps: later })]);
+    const alertFor = (data: Buffer, currentEpoch = TODAY) => legFeeCeilingAlert({ mint: key(), facts: decodeMintFacts(data), currentEpoch });
+
+    it("is spaced by the step the issuer has actually used: half the ceiling", () => {
+      expect(LEG_FEE_STEP_BPS).toBe(50n);
+      expect(LEG_FEE_WARN_BPS).toBe(MAX_LEG_FEE_BPS - LEG_FEE_STEP_BPS);
+      expect(LEG_FEE_WARN_BPS).toBe(50n);
+      // A band narrower than one observed step could be jumped clean over.
+      expect(LEG_FEE_WARN_BPS + LEG_FEE_STEP_BPS).toBe(MAX_LEG_FEE_BPS);
+    });
+
+    it("says nothing about a mint that charges nothing, or one still under the band", () => {
+      expect(alertFor(mintBytes([pausable]))).toBeNull();
+      expect(alertFor(liveFee(0))).toBeNull();
+      expect(alertFor(liveFee(49))).toBeNull();
+      // One basis point into the band and it speaks: silence has to end somewhere
+      // knowable, and this is the boundary.
+      expect(alertFor(liveFee(50))).not.toBeNull();
+    });
+
+    it("warns one step under the ceiling, naming the leg, the live fee, the ceiling and the next step up", () => {
+      const mint = key();
+      const alert = legFeeCeilingAlert({ mint, facts: decodeMintFacts(liveFee(50)), currentEpoch: TODAY });
+      expect(alert).not.toBeNull();
+      if (alert === null) return;
+      expect(alert.severity).toBe("warn");
+      expect(alert.title).toContain("one issuer step under the ceiling");
+      expect(alert.detail).toContain(mint.toBase58());
+      expect(alert.detail).toContain("charges 50 bps to transfer in epoch 1036");
+      expect(alert.detail).toContain("against the 100 bps ceiling");
+      expect(alert.detail).toContain("50 bps under it");
+      // WHAT HAPPENS AT THE NEXT STEP, in the words an operator has to act on.
+      expect(alert.detail).toContain("takes it to 100 bps");
+      expect(alert.detail).toContain("refuses the whole basket");
+      expect(alert.detail).toContain("the SOL conversion with it");
+      expect(alert.detail).toContain("no fee scheduled for a later epoch");
+    });
+
+    it("warns AT the ceiling — today's live state — and the basket is still bought", () => {
+      // Read on mainnet 2026-09-20: 100 bps from epoch 1039, over 50 from 1032.
+      const legs = [legOf(scheduledFee(50, 100, 1_039n))];
+      // THE REFUSAL DOES NOT MOVE. 100 bps is admitted, deliberately — and the
+      // notice is a separate call over the same legs, not a field on the verdict.
+      expect(legAdmissionDecision({ legs, currentEpoch: 1_039n }).admit).toBe(true);
+      const warnings = legFeeWarnings({ legs, currentEpoch: 1_039n });
+      expect(warnings).toHaveLength(1);
+      const alert = warnings[0]!;
+      expect(alert.severity).toBe("warn");
+      expect(alert.title).toContain("at the ceiling this keeper buys through");
+      expect(alert.detail).toContain("charges 100 bps to transfer in epoch 1039");
+      expect(alert.detail).toContain("the last rate that is admitted");
+      expect(alert.detail).toContain("takes it to 150 bps");
+    });
+
+    it("carries the SCHEDULED fee, which is the only early notice there is, and calls a dated stop critical", () => {
+      // 101 bps written for epoch 1039 while 50 is charged in 1038: the basket
+      // is bought today and refused from a date already on chain, with nothing
+      // signed or deployed here in between.
+      const dated = scheduledFee(50, 101, 1_039n);
+      expect(legAdmissionDecision({ legs: [legOf(dated)], currentEpoch: 1_038n }).admit).toBe(true);
+      const alert = alertFor(dated, 1_038n);
+      expect(alert).not.toBeNull();
+      if (alert === null) return;
+      expect(alert.severity).toBe("critical");
+      expect(alert.title).toContain("will stop this basket");
+      expect(alert.detail).toContain("A fee of 101 bps is ALREADY written for epoch 1039");
+      expect(alert.detail).toContain("1 epoch(s) from now");
+      expect(alert.detail).toContain("this whole basket stops being bought");
+    });
+
+    it("reports a scheduled rise the live fee gives no sign of, and keeps it a warning while it lands inside the ceiling", () => {
+      // 0 bps today, 100 from epoch 1040: nothing about the LIVE fee is
+      // remarkable, and the mint's own bytes already say the product is two
+      // epochs from its last admitted rate.
+      const rising = scheduledFee(0, 100, 1_040n);
+      const alert = alertFor(rising, TODAY);
+      expect(alert).not.toBeNull();
+      if (alert === null) return;
+      expect(alert.severity).toBe("warn");
+      expect(alert.detail).toContain("charges 0 bps to transfer in epoch 1036");
+      expect(alert.detail).toContain("A fee of 100 bps is ALREADY written for epoch 1040");
+      expect(alert.detail).toContain("4 epoch(s) from now");
+      expect(alert.detail).toContain("still at or under the ceiling");
+    });
+
+    it("survives a refusal caused by another leg: the basket's problem today does not eat the notice about next month", () => {
+      const hooked = legOf(mintBytes([transferHook(key())]));
+      const nearCeiling = legOf(liveFee(100));
+      const legs = [hooked, nearCeiling];
+      expect(legAdmissionDecision({ legs, currentEpoch: TODAY }).admit).toBe(false);
+      const warnings = legFeeWarnings({ legs, currentEpoch: TODAY });
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]!.detail).toContain(nearCeiling.mint.toBase58());
+      // The hooked mint carries no fee at all, so it is refused and silent here.
+      expect(warnings[0]!.detail).not.toContain(hooked.mint.toBase58());
+    });
+
+    it("keys on the RATE, so a fee that worsens is not muted by the warning it already sent", () => {
+      const mint = key();
+      const at = (bps: number) => legFeeCeilingAlert({ mint, facts: decodeMintFacts(liveFee(bps)), currentEpoch: TODAY })!;
+      // alerts.ts deduplicates by key and holds a fired condition quiet for its
+      // repeat window. Keyed on the mint alone, the 50 bps warning would mute
+      // the 100 bps one that replaces it — the exact move this watches for.
+      expect(at(50).key).not.toBe(at(100).key);
+      expect(at(50).key).toBe(at(50).key);
+      expect(at(100).key).toContain(mint.toBase58());
+    });
+
+    it("carries a context the alerter can actually send: every value a string, no bigint to throw inside fire()", () => {
+      const alert = alertFor(scheduledFee(50, 101, 1_039n), 1_038n)!;
+      // The alerter spreads context into JSON.stringify on the way to the
+      // webhook, and a bigint throws there — on the one path whose whole purpose
+      // is that silence is never the healthy state.
+      expect(() => JSON.stringify({ ...alert.context })).not.toThrow();
+      for (const value of Object.values(alert.context ?? {})) expect(typeof value).toBe("string");
+      expect(alert.context).toMatchObject({
+        feeBps: "50",
+        ceilingBps: "100",
+        epoch: "1038",
+        nextStepBps: "100",
+        scheduledFeeBps: "101",
+        scheduledFromEpoch: "1039",
+      });
+    });
+
+    it("fires for the live basket as mainnet holds it: two PreStocks legs, one warning each", () => {
+      const legs = [legOf(preStocks()), legOf(preStocks())];
+      expect(legAdmissionDecision({ legs, currentEpoch: TODAY }).admit).toBe(true);
+      const warnings = legFeeWarnings({ legs, currentEpoch: TODAY });
+      expect(warnings).toHaveLength(2);
+      for (const leg of legs) {
+        expect(warnings.some((alert) => alert.detail.includes(leg.mint.toBase58()))).toBe(true);
+      }
+    });
+
+    it("says the fee has ALREADY gone when it has, instead of calling a refused rate the last one admitted", () => {
+      // This runs over every leg whose bytes decoded, admitted or not, so it has
+      // to be able to report a fee that is past the ceiling — and the basket is
+      // genuinely stopped at that point, which is a critical, not a warning.
+      const legs = [legOf(liveFee(150))];
+      expect(legAdmissionDecision({ legs, currentEpoch: TODAY }).admit).toBe(false);
+      const alert = legFeeWarnings({ legs, currentEpoch: TODAY })[0]!;
+      expect(alert.severity).toBe("critical");
+      expect(alert.title).toContain("above the ceiling");
+      expect(alert.detail).toContain("charges 150 bps to transfer in epoch 1036");
+      expect(alert.detail).toContain("already 50 bps OVER it");
+      expect(alert.detail).toContain("Every sweep refuses the whole basket while this stands");
+      // And it never claims a refused rate is one this keeper buys through.
+      expect(alert.detail).not.toContain("the last rate that is admitted");
+      expect(alert.detail).not.toContain("bps under it");
+    });
+
+    it("skips the legs it cannot read rather than guessing a fee out of them — they are already refused in words", () => {
+      const broken = Buffer.alloc(87);
+      broken.writeUInt8(1, 82);
+      broken.writeUInt16LE(1, 83);
+      broken.writeUInt16LE(108, 85); // 108 bytes that are not there
+      const legs = [
+        { mint: key(), account: null },
+        legOf(liveFee(100), TOKEN_PROGRAM_ID), // not Token-2022: the extension means nothing
+        legOf(broken),
+      ];
+      expect(legAdmissionDecision({ legs, currentEpoch: TODAY }).admit).toBe(false);
+      expect(legFeeWarnings({ legs, currentEpoch: TODAY })).toEqual([]);
+    });
+  });
 });
 
 describe("how much of a turn one leg gets", () => {
@@ -875,6 +1060,59 @@ describe("a leg's pool, at the moment the money would move", () => {
   it("judges no pool for a leg whose share rounds to nothing, because the turn sends nothing there", () => {
     const basket = basketOf([{ reserve: 0n, stock: 0n, spend: 0n }]);
     expect(basket.decide()).toEqual({ deep: true });
+  });
+
+  it("REFUSES THE PRODUCT'S OWN SHIPPED DEFAULT: a 1,000-dollar per-call cap over two legs, against the pool that is FINE", () => {
+    // THIS IS NOT THE DRAINED POOL. Every refusal above is a pool that failed;
+    // this one is the healthy leg, at the healthy reading, refusing the cap the
+    // product ships (solana-core client/product.ts, DEFAULT_INVEST_CAPS
+    // .maxPerCall = 1,000 USDC). The turn is a CONVERTING one, so the gate has
+    // to test it at the worst case it can reach — the USDC the convert will
+    // bring in does not exist yet — which is the cap itself.
+    const SHIPPED_CAP = 1_000_000_000n;
+    const TWO_EQUAL_LEGS = [5_000, 5_000] as const;
+    const ceiling = turnSpendCeiling({ held: 0n, converting: true, maxPerCall: SHIPPED_CAP, headroom: U64_MAX });
+    expect(ceiling).toBe(SHIPPED_CAP);
+    const perLeg = legShare(ceiling, TWO_EQUAL_LEGS[0]);
+    expect(perLeg).toBe(500_000_000n);
+    // 50x of 500 dollars is 25,000, against a pool holding 9,389.405679.
+    expect(perLeg * MIN_POOL_DEPTH_MULTIPLE).toBe(25_000_000_000n);
+    expect(LIVE_USDC).toBeLessThan(perLeg * MIN_POOL_DEPTH_MULTIPLE);
+
+    const basket = basketOf(TWO_EQUAL_LEGS.map(() => ({ reserve: LIVE_USDC, stock: LIVE_STOCK, spend: perLeg, pool: LIVE_POOL })));
+    const decision = basket.decide();
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
+    // 18.8x cover, not 50x — so every converting turn at the shipped default is
+    // REFUSED, and the vault's SOL is rightly never sold toward it.
+    expect(decision.detail).toContain("18.8x cover");
+    expect(decision.detail).toContain("it would need 25000000000");
+  });
+
+  it("and admits a hundred-dollar cap with room to spare: the neck is 375 dollars, and it is one pool on one day", () => {
+    const TWO_EQUAL_LEGS = [5_000, 5_000] as const;
+    // THE NECK, derived rather than asserted: a leg may spend at most a
+    // fiftieth of the in-side reserve, and two equal legs make a basket of two
+    // such slices.
+    const perLegCeiling = LIVE_USDC / MIN_POOL_DEPTH_MULTIPLE;
+    expect(perLegCeiling).toBe(187_788_113n);
+    const basketCeiling = perLegCeiling * 2n;
+    expect(basketCeiling).toBe(375_576_226n);
+
+    // A 100-dollar cap sits 3.7x under that neck, and its 50-dollar leg is
+    // covered 187x by the same reserve.
+    const CANDIDATE_CAP = 100_000_000n;
+    expect(basketCeiling / CANDIDATE_CAP).toBe(3n);
+    const perLeg = legShare(turnSpendCeiling({ held: 0n, converting: true, maxPerCall: CANDIDATE_CAP, headroom: U64_MAX }), TWO_EQUAL_LEGS[0]);
+    expect(perLeg).toBe(50_000_000n);
+    expect(basketOf(TWO_EQUAL_LEGS.map(() => ({ reserve: LIVE_USDC, stock: LIVE_STOCK, spend: perLeg, pool: LIVE_POOL }))).decide()).toEqual({ deep: true });
+
+    // AND THE HEADROOM IS NOT A GUARANTEE. The same arithmetic against the pool
+    // that drained refuses even this cap — a constant calibrated against one
+    // reading of one pool is a starting point, and the gate in the turn is what
+    // actually protects the money.
+    const drained = basketOf(TWO_EQUAL_LEGS.map(() => ({ reserve: DRAINED_USDC, stock: DRAINED_STOCK, spend: perLeg, pool: DRAINED_POOL })));
+    expect(drained.decide().deep).toBe(false);
   });
 });
 

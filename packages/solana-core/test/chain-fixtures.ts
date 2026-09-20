@@ -10,6 +10,7 @@ import {
   SPYX_MINT,
   SPYX_USDC_POOL,
   TOKEN_2022_PROGRAM,
+  TOKEN_PROGRAM,
   USDC_MINT,
   WSOL_MINT,
 } from "../src/client/addresses";
@@ -101,12 +102,30 @@ export const policyAccount = (vault: string, fields: Record<string, unknown> = {
     ...fields,
   });
 
-/** A Raydium CLMM PoolState with the fields a price is read from. */
-export function clmmPoolAccount(mint0: string, mint1: string, sqrtPriceX64: bigint, decimals: readonly [number, number] = [9, 6]): Uint8Array {
+/**
+ * A Raydium CLMM PoolState with the fields a price is read from and, when
+ * `vaults` is given, the two token vaults at 137 and 169.
+ *
+ * NO VAULTS BY DEFAULT, which is not an oversight: a pool whose vault fields are
+ * all-zero names the system program as its reserve account, and that is exactly
+ * what a reserve read must refuse. Every caller that means the pool to be whole
+ * passes the pair mainnet really holds.
+ */
+export function clmmPoolAccount(
+  mint0: string,
+  mint1: string,
+  sqrtPriceX64: bigint,
+  decimals: readonly [number, number] = [9, 6],
+  vaults?: readonly [string, string],
+): Uint8Array {
   const bytes = new Uint8Array(CLMM_POOL_STATE_BYTES);
   bytes.set(CLMM_POOL_STATE_DISCRIMINATOR, 0);
   bytes.set(tryBase58Decode(mint0)!, 73);
   bytes.set(tryBase58Decode(mint1)!, 105);
+  if (vaults !== undefined) {
+    bytes.set(tryBase58Decode(vaults[0])!, 137);
+    bytes.set(tryBase58Decode(vaults[1])!, 169);
+  }
   bytes[233] = decimals[0];
   bytes[234] = decimals[1];
   let value = sqrtPriceX64;
@@ -151,6 +170,12 @@ export interface LegPoolFixture {
   readonly usdcRawPer1e8: bigint;
   /** usdcRawPer1e8LegRaw(floorWad): the most the floor lets be paid for 1e8 raw units. */
   readonly maxUsdcRawPer1e8: bigint;
+  /** token_vault_0 at offset 137: the leg's own vault, as mainnet's pool names it. */
+  readonly vault0: string;
+  /** token_vault_1 at offset 169: the USDC vault — the IN side, the one a depth gate measures. */
+  readonly usdcVault: string;
+  /** What that USDC vault held at MAINNET_VAULT_SLOT, in raw USDC. */
+  readonly usdcReserve: bigint;
 }
 
 /**
@@ -183,6 +208,9 @@ export const LEG_POOLS: readonly LegPoolFixture[] = Object.freeze([
     floorWad: 124_719_467_624_105_690n,
     usdcRawPer1e8: 761_709_474n,
     maxUsdcRawPer1e8: 801_799_446n,
+    vault0: "CiQuPAfYp5v82vijk6u7wqFnaZqtGdJfUUSjDKAtT9ML",
+    usdcVault: "3EmW8zJDHrfgwpQJAt1oD6nxgQZLUwrCRSKk8Gr3iKRF",
+    usdcReserve: 2_110_084_527_716n,
   }),
   Object.freeze({
     symbol: "ANTHROPIC",
@@ -194,14 +222,57 @@ export const LEG_POOLS: readonly LegPoolFixture[] = Object.freeze([
     floorWad: 5_277_777_777_777_777_778n,
     usdcRawPer1e8: 18_000_000n,
     maxUsdcRawPer1e8: 18_947_369n,
+    vault0: "FgHMtKqgquroXWykub1XgLBhtH98m7E9QwFWeyDYLEEn",
+    usdcVault: "FZmwQEZqNiSPx1CbATM9uEbAr67iXYV2n2Az6tjGEGmh",
+    usdcReserve: 9_575_440_815n,
   }),
 ]);
 
-/** The wSOL/USDC pool as the chain holds it: Raydium CLMM, mint0 wSOL, at SOL_SQRT_PRICE. */
-const solPoolAccount = (): AccountJson => accountInfo(RAYDIUM_CLMM, clmmPoolAccount(WSOL_MINT, USDC_MINT, SOL_SQRT_PRICE));
+/**
+ * WHERE THE VAULT ADDRESSES AND RESERVES COME FROM: mainnet, at slot 448882962,
+ * read straight out of each pool account's bytes at 137 and 169 and each vault's
+ * amount at 64.
+ *
+ * THEY ARE LITERALS AND NOT DERIVATIONS, for the reason every rate above is one:
+ * readers.ts works the same addresses out as PDAs of ["pool_vault", pool, mint]
+ * under the CLMM program, and a fixture that derived them with that same rule
+ * would be comparing the rule against itself. Written down from the chain, they
+ * pin the rule to what Raydium actually did.
+ */
+export const MAINNET_VAULT_SLOT = 448_882_962;
 
-/** One leg's pool as the chain holds it: Raydium CLMM, mint0 the leg, mint1 USDC. */
-const legPoolAccount = (leg: LegPoolFixture): AccountJson => accountInfo(RAYDIUM_CLMM, clmmPoolAccount(leg.mint, USDC_MINT, leg.sqrtPriceX64, [leg.decimals, 6]));
+/** The wSOL/USDC pool's two vaults: wSOL at 137, USDC at 169. */
+export const SOL_POOL_VAULT_0 = "4ct7br2vTPzfdmY3S5HLtTxcGSBfn6pnw98hsS6v359A";
+export const SOL_POOL_USDC_VAULT = "5it83u57VRrVgc51oNV19TTmAJuffPx5GtGwQr7gQNUo";
+/** What the wSOL/USDC pool's USDC vault held at MAINNET_VAULT_SLOT, in raw USDC. */
+export const SOL_POOL_USDC_RESERVE = 3_539_005_980_271n;
+
+/** The wSOL/USDC pool as the chain holds it: Raydium CLMM, mint0 wSOL, at SOL_SQRT_PRICE, naming its two real vaults. */
+const solPoolAccount = (): AccountJson =>
+  accountInfo(RAYDIUM_CLMM, clmmPoolAccount(WSOL_MINT, USDC_MINT, SOL_SQRT_PRICE, [9, 6], [SOL_POOL_VAULT_0, SOL_POOL_USDC_VAULT]));
+
+/** One leg's pool as the chain holds it: Raydium CLMM, mint0 the leg, mint1 USDC, naming its two real vaults. */
+const legPoolAccount = (leg: LegPoolFixture): AccountJson =>
+  accountInfo(RAYDIUM_CLMM, clmmPoolAccount(leg.mint, USDC_MINT, leg.sqrtPriceX64, [leg.decimals, 6], [leg.vault0, leg.usdcVault]));
+
+/**
+ * A pool's token vault as the chain holds it: classic SPL Token, holding `mint`,
+ * OWNED BY THE POOL ITSELF — which is what mainnet's three really record at byte
+ * 32, and not a detail worth inventing differently.
+ */
+export const poolVaultAccount = (pool: string, mint: string, amount: bigint): AccountJson =>
+  accountInfo(TOKEN_PROGRAM, tokenAccountData({ mint, owner: pool, amount }), localRent(165));
+
+/**
+ * Every priced pool's IN-SIDE vault as [address, account] pairs, in PRICED_POOLS'
+ * order, for a StubChain's map. Spread beside pricedPoolEntries() by any test
+ * that means the reserves to be readable; a test that leaves them out is a test
+ * about a reserve nobody could read, which must come back unknown and not zero.
+ */
+export const pricedPoolVaultEntries = (): [string, AccountJson][] => [
+  [SOL_POOL_USDC_VAULT, poolVaultAccount(SOL_USDC_POOL, USDC_MINT, SOL_POOL_USDC_RESERVE)],
+  ...LEG_POOLS.map((leg): [string, AccountJson] => [leg.usdcVault, poolVaultAccount(leg.pool, USDC_MINT, leg.usdcReserve)]),
+];
 
 /**
  * PRICED_POOLS' accounts as [address, account] pairs, in that order, for a

@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { RAYDIUM_CLMM, SYSTEM_PROGRAM, USDC_MINT } from "../src/client/addresses";
 import { SIP_IDL } from "../src/client/idl";
+import { investmentReadiness } from "../src/client/pending";
 import {
   DEFAULT_PURCHASE_USDC_RAW,
   DEFAULT_RATES,
@@ -31,6 +32,8 @@ const require = createRequire(import.meta.url);
 const SRC = join(dirname(require.resolve("@sip/solana-program/package.json")), "programs/sip-vault/src");
 const STATE_RS = readFileSync(join(SRC, "state.rs"), "utf8");
 const SET_INVEST_RS = readFileSync(join(SRC, "instructions/set_invest_policy.rs"), "utf8");
+/** The instruction that SPENDS the policy: its minimum is checked once per leg, not once per basket. */
+const INVEST_RS = readFileSync(join(SRC, "instructions/invest.rs"), "utf8");
 /** state.rs with its doc-comment line breaks folded, so a sentence reads as one line. */
 const STATE_DOCS = STATE_RS.replace(/\s*\/\/\/\s*/g, " ");
 
@@ -183,5 +186,130 @@ describe("defaultInvestPolicy (the first investment policy)", () => {
 
   it.each([0, 9, 1.5, Number.NaN])("refuses a basket of %s legs", (count) => {
     expect(() => defaultInvestPolicy(count)).toThrow(RangeError);
+  });
+});
+
+// ── the per-leg minimum, which the basket-level caps do not express ──────────
+//
+// THE RULE THAT HID A REAL BUG. set_invest_policy.rs checks min_investment
+// against max_per_call for the WHOLE basket; invest.rs checks it against ONE
+// LEG'S share. So a policy can satisfy every rule investPolicyProblems mirrors
+// and still be unable to buy at any balance — and AT ONE LEG the two readings
+// produce the SAME NUMBER, so a single-leg test passes either way. That
+// coincidence is why the gap survived: the catalogue had one leg, the
+// comparison looked right, and the form accepted dead policies.
+//
+// The rule itself is written ONCE, in client/pending.ts's investmentReadiness
+// (the web's REACHABLE_PER_BUY_RAW is derived from the same function). What is
+// added here is the pinning: TWO legs and UNEVEN weights, the two shapes where
+// a basket-level reading and a per-leg reading disagree.
+describe("min_investment is enforced per leg, not per basket", () => {
+  /** Whether a policy of these weights could EVER buy, asked of the one helper that knows. */
+  const readiness = (minInvestment: bigint, maxPerCall: bigint, weights: readonly number[], heldRaw = 0n) =>
+    investmentReadiness(heldRaw, weights.map((weightBps) => ({ weightBps })), minInvestment, maxPerCall);
+
+  /** The same question asked of the chain's own rules: empty means set_invest_policy would take it. */
+  const chainAccepts = (minInvestment: bigint, maxPerCall: bigint, weights: readonly number[]): boolean =>
+    investPolicyProblems(
+      invest({
+        legs: weights.map((weightBps) => ({ mint: keypair().publicKey.toBase58(), weightBps, minOutRateWad: 1n })),
+        minInvestment,
+        maxPerCall,
+        maxRolling30d: U64_MAX,
+      }),
+    ).length === 0;
+
+  it("is the program's own split: set_invest_policy bounds the basket, invest bounds each leg's amount_in", () => {
+    expect(SET_INVEST_RS).toContain("min_investment > 0 && min_investment <= max_per_call");
+    // invest(leg_index, amount_in): called once per leg, with that leg's share.
+    expect(INVEST_RS).toContain("leg_index: u8");
+    expect(INVEST_RS).toContain("require!(amount_in >= policy.min_investment, NuvemError::BelowMinimum);");
+    expect(INVEST_RS).toContain("require!(amount_in <= policy.max_per_call, NuvemError::AboveMaximum);");
+  });
+
+  it("AT ONE LEG THE TWO READINGS COINCIDE — which is how a test could pass by arithmetic coincidence", () => {
+    // A single leg takes the whole budget, so "the basket clears the minimum"
+    // and "every leg clears the minimum" are the same sentence. Every cap below
+    // is refused by the chain's rule exactly when it is unreachable per leg:
+    // a one-leg suite can therefore never tell the two rules apart.
+    for (const maxPerCall of [999_999n, 1_000_000n, 1_000_001n, 50_000_000n]) {
+      const reachable = readiness(1_000_000n, maxPerCall, [10_000])?.state !== "unreachable";
+      expect([maxPerCall, reachable]).toEqual([maxPerCall, chainAccepts(1_000_000n, maxPerCall, [10_000])]);
+    }
+  });
+
+  it("AT TWO LEGS THEY DIVERGE: the chain accepts a policy that can never buy at any balance", () => {
+    // The catalogue's own numbers. $2.50 minimum, two equal legs, a $2.50 cap:
+    // each leg is handed $1.25 and refused, forever, at every balance.
+    const weights = [5_000, 5_000];
+    expect(chainAccepts(2_500_000n, 2_500_000n, weights)).toBe(true);
+    expect(readiness(2_500_000n, 2_500_000n, weights)?.state).toBe("unreachable");
+    // The bar is twice the minimum here, and it is exact on both sides.
+    expect(readiness(2_500_000n, 4_999_999n, weights)?.state).toBe("unreachable");
+    expect(readiness(2_500_000n, 5_000_000n, weights)?.state).toBe("waiting");
+    // …and with the money actually in hand, that same cap buys.
+    expect(readiness(2_500_000n, 5_000_000n, weights, 5_000_000n)?.state).toBe("ready");
+    expect(readiness(2_500_000n, 5_000_000n, weights, 4_999_999n)?.state).toBe("waiting");
+  });
+
+  it("UNEVEN WEIGHTS ARE GOVERNED BY THE LIGHTEST LEG, not by the total and not by the heaviest", () => {
+    // 90/10. The bar is minInvestment × 10,000 / 1,000 — ten times the minimum,
+    // because the smallest slice has to clear it on its own.
+    const weights = [9_000, 1_000];
+    expect(chainAccepts(1_000_000n, 9_999_999n, weights)).toBe(true);
+    expect(readiness(1_000_000n, 9_999_999n, weights)?.state).toBe("unreachable");
+    expect(readiness(1_000_000n, 10_000_000n, weights)?.state).toBe("waiting");
+    expect(readiness(1_000_000n, 10_000_000n, weights, 10_000_000n)?.state).toBe("ready");
+
+    // AND THE TRAP A "GOOD ENOUGH" READING FALLS INTO. At a $2 cap the HEAVY leg
+    // is handed $1.80 and would qualify on its own; the light leg gets $0.20 and
+    // never will. Buying the leg that clears the bar is a partial basket drifting
+    // off the weights the owner signed, so the answer is unreachable, not ready.
+    const budget = 2_000_000n;
+    expect((budget * 9_000n) / 10_000n).toBeGreaterThanOrEqual(1_000_000n);
+    expect((budget * 1_000n) / 10_000n).toBeLessThan(1_000_000n);
+    expect(readiness(1_000_000n, budget, weights, budget)?.state).toBe("unreachable");
+
+    // The threshold it reports is the one that unblocks EVERY leg, rounded up so
+    // a balance that meets it is never one raw unit short inside the program.
+    expect(readiness(1_000_000n, U64_MAX, weights)?.investsAtRaw).toBe(10_000_000n);
+    expect(readiness(1_000_001n, U64_MAX, weights)?.investsAtRaw).toBe(10_000_010n);
+  });
+
+  it("the shipped first policy can buy at every basket size, because its cap is u64::MAX", () => {
+    // defaultInvestPolicy leaves max_per_call unbounded, so the per-leg bar is
+    // never the thing that blocks it — whatever the catalogue's length. This is
+    // the property that must survive the catalogue changing size.
+    for (let count = 1; count <= MAX_LEGS; count++) {
+      const share = Math.floor(LEG_WEIGHT_TOTAL_BPS / count);
+      const weights = Array.from({ length: count }, (_, index) => (index === 0 ? share + (LEG_WEIGHT_TOTAL_BPS - share * count) : share));
+      expect([count, readiness(defaultInvestPolicy(count).minInvestment, U64_MAX, weights)?.state]).toEqual([count, "waiting"]);
+    }
+  });
+
+  it("and the $5 pile does NOT reach every leg when the weights do not divide evenly: 3, 6 and 7 legs are short", () => {
+    // THE BASKET-LEVEL PROMISE IS TRUE AND THE PER-LEG ONE IS NOT.
+    // defaultInvestPolicy sizes min_investment as DEFAULT_PURCHASE_USDC_RAW /
+    // legCount, so `minInvestment × legs <= 5 USDC` always holds — that is the
+    // assertion the suite already had. But the weights carry their remainder on
+    // the FIRST leg (basketWeightsBps), so every other leg is a hair lighter
+    // than 1/count, and its slice of exactly 5 USDC lands under the minimum.
+    // Nothing ships at these sizes today; this is here so the next leg added to
+    // the catalogue meets a measured fact instead of a surprise.
+    const shortfalls = new Map<number, bigint>([[3, 166n], [6, 333n], [7, 285n]]);
+    for (let count = 1; count <= MAX_LEGS; count++) {
+      const share = Math.floor(LEG_WEIGHT_TOTAL_BPS / count);
+      const lightest = BigInt(count === 1 ? LEG_WEIGHT_TOTAL_BPS : share);
+      const minInvestment = defaultInvestPolicy(count).minInvestment;
+      const slice = (DEFAULT_PURCHASE_USDC_RAW * lightest) / BigInt(LEG_WEIGHT_TOTAL_BPS);
+      const short = shortfalls.get(count) ?? 0n;
+      expect([count, minInvestment - slice]).toEqual([count, short]);
+    }
+    // What it costs, in the number the UI would have to show: at three legs the
+    // first buy waits for $5.000499, not $5.00 — 499 raw units, a twentieth of a
+    // cent, and a threshold nobody would have guessed from the numbers shipped.
+    expect(readiness(defaultInvestPolicy(3).minInvestment, U64_MAX, [3_334, 3_333, 3_333])?.investsAtRaw).toBe(5_000_499n);
+    expect(readiness(defaultInvestPolicy(3).minInvestment, U64_MAX, [3_334, 3_333, 3_333], DEFAULT_PURCHASE_USDC_RAW)?.state).toBe("waiting");
+    expect(readiness(defaultInvestPolicy(2).minInvestment, U64_MAX, [5_000, 5_000], DEFAULT_PURCHASE_USDC_RAW)?.state).toBe("ready");
   });
 });
