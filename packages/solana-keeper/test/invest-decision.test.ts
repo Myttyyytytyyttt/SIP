@@ -1,9 +1,17 @@
-// The in_mint refusal and the pause switches. sip-vault pins the in-asset in the
-// owner's policy; the keeper can only route USDC, so anything else is refused
-// before a lamport moves, naming both mints. And a paused vault or protocol
+// The in_mint refusal, the VENUE refusal and the pause switches. sip-vault pins
+// the in-asset in the owner's policy; the keeper can only route USDC, so
+// anything else is refused before a lamport moves, naming both mints. It pins
+// the VENUE the same way, and the program checks the account the keeper passes
+// against it (WrongVenue), so a venue this keeper cannot build a route for is
+// refused before a lamport moves too — naming the venue asked for, what can
+// actually be routed, and the owner as the only one who can change it. And a
+// paused vault or protocol
 // rests before any wrap, so the owner's pause costs no refused transaction. And
 // a policy that never signed a conversion floor is never wrapped: the program
-// would refuse the wrap, so the turn skips it and invests only USDC already held.
+// would refuse the wrap, so the turn skips it and invests only USDC already
+// held — and says so loudly, because a zero there is a VALID policy nothing
+// validates, it silently switches off the SOL hop, and it leaves the Pyth guard
+// on that hop with nothing to watch.
 // And a wrap moves no more than the crank can front, because wrap_sol has the
 // crank pay the amount in first; a crank that stays short is told on the third
 // turn. And a convert sells no more than convert.rs admits in one call, dust
@@ -30,6 +38,8 @@ import {
   INVEST_FAILED_CRITICAL_STREAK,
   MAX_LEG_FEE_BPS,
   MIN_POOL_DEPTH_MULTIPLE,
+  RAYDIUM_CLMM_PROGRAM,
+  ROUTABLE_VENUES,
   U64_MAX,
   USDC_MINT,
   WRAP_DUST_LAMPORTS,
@@ -59,11 +69,13 @@ import {
   rollingTotal,
   shouldConvert,
   turnSpendCeiling,
+  venueDecision,
   wrapPlan,
   wrapShortAlert,
   wrapShortStreak,
 } from "../src/invest-decision.js";
 import { SLIPPAGE_BPS, netOfTransferFee } from "../src/min-out.js";
+import { RAYDIUM_CLMM } from "../src/program-scripts.js";
 import { PYTH_SOL_USD_FEED_ID_HEX, PYTH_USDC_USD_FEED_ID_HEX, PYTH_VERIFICATION_FULL, type PythPriceUpdate } from "../src/pyth.js";
 
 describe("the policy's in_mint", () => {
@@ -78,6 +90,58 @@ describe("the policy's in_mint", () => {
     expect(decision?.outcome).toBe("REFUSED");
     expect(decision?.detail).toContain(other.toBase58());
     expect(decision?.detail).toContain(USDC_MINT.toBase58());
+  });
+});
+
+describe("the venue the owner signed", () => {
+  it("lets through the venue every policy signed to date names, at the address the keeper really passes", () => {
+    expect(RAYDIUM_CLMM_PROGRAM.toBase58()).toBe("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
+    expect(venueDecision(RAYDIUM_CLMM_PROGRAM)).toBeNull();
+    // TWO SPELLINGS OF ONE ADDRESS, PINNED TOGETHER. The gate compares against
+    // this file's own constant, so it stays a pure decision over a PublicKey
+    // with no CommonJS unwrap behind it; the instruction builders send
+    // program-scripts' RAYDIUM_CLMM, out of @sip/solana-program. If those two
+    // ever drift, the gate admits a venue the keeper does not send — and the
+    // program answers WrongVenue, which is the exact failure this gate exists
+    // to prevent.
+    expect(RAYDIUM_CLMM_PROGRAM.toBase58()).toBe(RAYDIUM_CLMM.toBase58());
+  });
+
+  it("refuses any other venue, naming it, naming what the keeper can route, and naming who can change it", () => {
+    const venue = Keypair.generate().publicKey;
+    const decision = venueDecision(venue);
+    expect(decision?.outcome).toBe("REFUSED");
+    const detail = decision?.detail ?? "";
+    // The venue asked for, and the one this keeper can actually build a route
+    // for: an operator at 3am can act on neither of those alone.
+    expect(detail).toContain(venue.toBase58());
+    expect(detail).toContain("Raydium CLMM");
+    expect(detail).toContain(RAYDIUM_CLMM_PROGRAM.toBase58());
+    // What would otherwise happen, in the program's own vocabulary.
+    expect(detail).toContain("WrongVenue");
+    expect(detail).toContain("every sweep");
+    // And who can fix it: not the operator, not the keeper.
+    expect(detail).toContain("OWNER");
+    expect(detail).toContain("set_invest_policy");
+  });
+
+  it("refuses the default pubkey, which is what an unsigned or half-built policy carries", () => {
+    // set_invest_policy admits Pubkey::default() only on a DISABLED policy, so a
+    // vault can hold one; investing it would revert on every call.
+    expect(venueDecision(PublicKey.default)?.outcome).toBe("REFUSED");
+  });
+
+  it("is a table, not a branch: every venue in it is admitted and every one is named in the refusal", () => {
+    // THE SEAM, PINNED. Adding a venue is adding an entry here (plus a route
+    // builder for it) — never rewriting the gate. One entry today, deliberately:
+    // there is no second venue to add, and a placeholder would be the keeper
+    // claiming a route it cannot build.
+    expect([...ROUTABLE_VENUES.keys()]).toEqual([RAYDIUM_CLMM_PROGRAM.toBase58()]);
+    const detail = venueDecision(Keypair.generate().publicKey)?.detail ?? "";
+    for (const [address, name] of ROUTABLE_VENUES) {
+      expect(venueDecision(new PublicKey(address))).toBeNull();
+      expect(detail).toContain(`${name} (${address})`);
+    }
   });
 });
 
@@ -114,6 +178,44 @@ describe("the conversion floor", () => {
     expect(detail).toContain("min_convert_rate_wad is 0");
     expect(detail).toContain("FloorTooLow");
     expect(detail).toContain("only USDC already in the vault is invested");
+  });
+
+  it("says a zero floor is a policy the PROGRAM accepts, which is what makes it dangerous rather than refusable", () => {
+    // THE TWO CASES ARE DIFFERENT AND THE MESSAGE HAS TO SAY SO. A venue this
+    // keeper cannot route is refused; a zero conversion floor is NOT — the
+    // program stores it, set_invest_policy validates every other field and never
+    // looks at this one, and the owner may have meant exactly this. The alarm is
+    // the whole remedy, so it has to carry why the turn is not refusing.
+    const decision = convertDecision({ minConvertRateWad: 0n });
+    expect(decision.convert).toBe(false);
+    const detail = decision.convert ? "" : decision.detail;
+    expect(detail).toContain("set_invest_policy");
+    expect(detail).toContain("ACCEPTS");
+    expect(detail).toMatch(/SOL-to-USDC hop is\s+switched off|SOL-to-USDC hop/);
+    // NOT the vocabulary of a refusal: this turn goes on and buys what it can.
+    expect(detail).not.toContain("REFUSED");
+    expect(detail).not.toContain("refusing");
+  });
+
+  it("says the Pyth guard on that hop is left with nothing to watch, which is the silence nobody would otherwise notice", () => {
+    // The oracle gate below is the only number in the turn that does not come
+    // from the venue being traded against — and with the hop switched off it
+    // cannot fire, cannot rest anything and cannot warn anybody. A reader who
+    // knows the guard exists would otherwise assume it is still watching.
+    const decision = convertDecision({ minConvertRateWad: 0n });
+    const detail = decision.convert ? "" : decision.detail;
+    expect(detail).toContain("PYTH GUARD ON THAT HOP HAS NOTHING TO WATCH");
+    expect(detail).toContain("no convert for it to price");
+  });
+
+  it("names the one person who can turn conversion back on, because it is not the keeper and not the operator", () => {
+    const decision = convertDecision({ minConvertRateWad: 0n });
+    const detail = decision.convert ? "" : decision.detail;
+    expect(detail).toContain("OWNER");
+    expect(detail).toContain("re-signing the investment policy");
+    expect(detail).toContain("non-zero min_convert_rate_wad");
+    // And that a careless re-sign is how it gets there, since nothing validates it.
+    expect(detail).toContain("careless re-sign");
   });
 
   it("wraps and converts under any non-zero floor, down to one unit of a wad", () => {

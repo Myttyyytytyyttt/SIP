@@ -18,6 +18,16 @@
 // supplies a live route. That is why it needs no Privy signer, unlike settle:
 // the vault PDA signs its own movements inside the program.
 //
+// THAT SENTENCE WAS NOT TRUE OF THE VENUE, and now is. convert and invest both
+// take a venue account the program pins against policy.venue_program, and this
+// tick passed the RAYDIUM_CLMM literal at both — the crank choosing a term of
+// the policy. It matched every policy signed to date and would have matched no
+// other: a venue re-signed anywhere else means WrongVenue on every convert and
+// every invest, every sweep, forever, reported as a failed transaction that
+// names nothing. The venue now comes off the policy this tick already reads, and
+// a venue this keeper cannot build a route for is refused in words, beside the
+// unroutable, inadmissible and too-thin refusals, before anything moves.
+//
 // IT IS DELIBERATELY LAZY. Below a threshold it does nothing: three pool fees
 // and three transaction fees to move dust is a worse outcome for the user than
 // waiting for the next session. The threshold is the policy's own
@@ -64,6 +74,7 @@ import {
   routeRateWad,
   shouldConvert,
   turnSpendCeiling,
+  venueDecision,
   wrapPlan,
   type ConvertDecision,
   type WrapPlan,
@@ -137,7 +148,26 @@ export function wrapSolCall(
   });
 }
 
-/** convert: the vault's wSOL to USDC, at no worse than `minOut`, through the venue the policy names. */
+/**
+ * convert: the vault's wSOL to USDC, at no worse than `minOut`, through the
+ * venue the policy names.
+ *
+ * THE VENUE COMES FROM THE POLICY, and it did not always. This builder and the
+ * one below passed the RAYDIUM_CLMM literal, while convert.rs and invest.rs both
+ * pin the account against `policy.venue_program` (WrongVenue) — so the crank was
+ * sending a venue of its own choosing to a program that checks the owner's. It
+ * agreed with every policy signed to date and would have agreed with no other:
+ * one re-signed venue and every convert and every invest for that vault reverts,
+ * every sweep, with nothing saying why. The caller now passes what it read off
+ * the chain (`policy.venueProgram`), and venueDecision refuses a venue this
+ * keeper cannot route before any of this is reached.
+ *
+ * OPTIONAL, DEFAULTING TO WHAT IT ALWAYS SENT. The preflight and the builder
+ * tests call these three offline, with fabricated accounts and no policy to read
+ * a venue from; leaving the argument out builds exactly the instruction it built
+ * before, so their fixed byte vectors still mean what they meant. Every caller
+ * that HAS a policy passes it.
+ */
 export function convertCall(
   program: anchor.Program,
   accounts: {
@@ -146,6 +176,8 @@ export function convertCall(
     readonly policy: PublicKey;
     readonly vaultWsol: PublicKey;
     readonly vaultIn: PublicKey;
+    /** The venue `policy.venue_program` names; RAYDIUM_CLMM when a caller has no policy in hand. */
+    readonly venueProgram?: PublicKey;
   },
   args: { readonly amountIn: bigint; readonly minOut: bigint; readonly swap: SwapV2Args },
 ): MethodCall {
@@ -159,11 +191,17 @@ export function convertCall(
     policy: accounts.policy,
     vaultWsol: accounts.vaultWsol,
     vaultIn: accounts.vaultIn,
-    venueProgram: RAYDIUM_CLMM,
+    venueProgram: accounts.venueProgram ?? RAYDIUM_CLMM,
   });
 }
 
-/** invest: one leg of the signed basket, by its INDEX — the program prices and bounds the rest. */
+/**
+ * invest: one leg of the signed basket, by its INDEX — the program prices and
+ * bounds the rest.
+ *
+ * `venueProgram` is the policy's, exactly as convertCall's is, and optional for
+ * the same offline callers: see convertCall above.
+ */
 export function investCall(
   program: anchor.Program,
   accounts: {
@@ -173,6 +211,8 @@ export function investCall(
     readonly vaultIn: PublicKey;
     readonly vaultTarget: PublicKey;
     readonly targetMint: PublicKey;
+    /** The venue `policy.venue_program` names; RAYDIUM_CLMM when a caller has no policy in hand. */
+    readonly venueProgram?: PublicKey;
   },
   args: { readonly legIndex: number; readonly amountIn: bigint; readonly minOut: bigint; readonly swap: SwapV2Args },
 ): MethodCall {
@@ -188,7 +228,7 @@ export function investCall(
     vaultIn: accounts.vaultIn,
     vaultTarget: accounts.vaultTarget,
     targetMint: accounts.targetMint,
-    venueProgram: RAYDIUM_CLMM,
+    venueProgram: accounts.venueProgram ?? RAYDIUM_CLMM,
   });
 }
 
@@ -247,6 +287,22 @@ export interface InvestDeps {
 interface TurnFindings {
   wrap?: WrapReport;
   /**
+   * THE ALARM ON A POLICY WHOSE min_convert_rate_wad IS 0 — set the moment the
+   * turn reads the policy, and carried at the FRONT of whatever detail the turn
+   * ends with.
+   *
+   * A ZERO THERE IS VALID AND IS NEVER REFUSED (convertDecision says why), which
+   * is exactly what makes it dangerous: the program accepts the policy, nothing
+   * in set_invest_policy validates the field, and the only symptom is a
+   * SOL-to-USDC hop that silently stops happening. It used to be reported by
+   * `noted` alone, which appends to SOME of the turn's dozen ways out and not to
+   * others — a vault whose basket was also unroutable, inadmissible or too thin
+   * said nothing about it at all. Here it rides EVERY way out from the read
+   * onwards, refusals and failures included, and it leads rather than trails
+   * because a truncated log line has to keep it.
+   */
+  conversionOff?: string;
+  /**
    * What became of the wSOL, once the turn got as far as deciding: a convert
    * that landed and left some behind, or a convert the oracle would not price,
    * saying in both cases how much waits for a later sweep.
@@ -262,9 +318,12 @@ interface TurnFindings {
 export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
   const found: TurnFindings = {};
   const result = await investTurn(deps, found);
+  // In order, and they cannot both be set: a turn with conversion off never
+  // reaches the convert that writes `converted`.
+  const notes = [found.conversionOff, found.converted].filter((note): note is string => note !== undefined);
   return {
     ...result,
-    ...(found.converted === undefined ? {} : { detail: `${found.converted}; ${result.detail}` }),
+    ...(notes.length === 0 ? {} : { detail: `${notes.join("; ")}; ${result.detail}` }),
     ...(found.wrap === undefined ? {} : { wrap: found.wrap }),
   };
 }
@@ -345,8 +404,17 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   const conversion: ConvertDecision = signed.convert
     ? oracleConvertDecision({ sol: solFeed, usdc: usdcFeed, nowUnixSeconds, routeWad: null })
     : signed;
+  // TWO DIFFERENT SILENCES, REPORTED TWO DIFFERENT WAYS. A zero conversion floor
+  // is a standing property of the policy that no sweep will change, so it is a
+  // finding: written once, carried at the front of every way out of this turn.
+  // An oracle that rested the hop is a property of THIS MOMENT — the next sweep
+  // may well convert — so it stays a note appended to the detail of whichever
+  // rest the turn ends in. Keeping them apart is what stops the zero-floor
+  // alarm being appended twice to the same sentence.
+  if (!signed.convert) found.conversionOff = signed.detail;
+  const oracleRested = signed.convert && !conversion.convert ? conversion.detail : null;
   const noted = (detail: string): string =>
-    conversion.convert ? detail : `${detail.replace(/\.$/, "")} — ${conversion.detail}`;
+    oracleRested === null ? detail : `${detail.replace(/\.$/, "")} — ${oracleRested}`;
 
   const rentFloor = await connection.getMinimumBalanceForRentExemption(vaultInfo.data.length);
   const free = BigInt(vaultInfo.lamports - rentFloor);
@@ -403,6 +471,20 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
     // live. Refused rather than guessed at: nothing can be paid for without it.
     return { outcome: "FAILED", detail: "a live invest turn arrived without the crank; nothing was sent" };
   }
+
+  // ── the all-or-nothing gate: nothing below moves money until all of it passes ──
+  //
+  // THE VENUE THE POLICY NAMES COMES FIRST, because it is the cheapest of the
+  // four and the only one that needs nothing from the chain — the policy is
+  // already in hand. convert.rs and invest.rs both pin the venue account against
+  // policy.venue_program (WrongVenue), so a venue this keeper cannot build a
+  // route for is a vault whose every convert and every invest would revert, on
+  // every sweep, forever. Refused here, with the reason in words, rather than
+  // discovered one failed transaction at a time — and refused before the wrap,
+  // so the owner's SOL exposure is not sold toward a basket that cannot be
+  // bought, which is the same doctrine as the three refusals below it.
+  const wrongVenue = venueDecision(policy.venueProgram);
+  if (wrongVenue !== null) return wrongVenue;
 
   // A MISSING POOL REFUSES THE WHOLE BASKET — and it refuses BEFORE the
   // convert, not after. The old order wrapped and market-sold the vault's SOL
@@ -604,9 +686,13 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         // behind, which is the whole point.
         await sendWithBudget(program.provider as anchor.AnchorProvider, crank, [
           ...(await plan.createsFor(usdcAta)),
+          // THE VENUE THE OWNER SIGNED, not a literal: convert.rs pins this
+          // account against policy.venue_program. The gate above has already
+          // refused a venue this keeper cannot route, so what is passed here is
+          // both what the owner signed and something fetchLiveRoute can build.
           await convertCall(
             program,
-            { crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta, vaultIn: usdcAta },
+            { crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta, vaultIn: usdcAta, venueProgram: policy.venueProgram },
             { amountIn: toConvert, minOut, swap: args },
           )
             .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
@@ -708,7 +794,17 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         ...(await plan.createsFor(targetAta)),
         await investCall(
           program,
-          { crank: crank.publicKey, vault, policy: policyPda, vaultIn: usdcAta, vaultTarget: targetAta, targetMint: mint },
+          {
+            crank: crank.publicKey,
+            vault,
+            policy: policyPda,
+            vaultIn: usdcAta,
+            vaultTarget: targetAta,
+            targetMint: mint,
+            // The same venue, from the same policy, for the same reason: invest.rs
+            // pins it byte for byte against policy.venue_program.
+            venueProgram: policy.venueProgram,
+          },
           { legIndex: index, amountIn, minOut, swap: args },
         )
           .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))

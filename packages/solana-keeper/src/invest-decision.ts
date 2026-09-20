@@ -1,10 +1,10 @@
-// Which in-asset this keeper can invest from, whether it may invest at all,
-// whether it may convert the vault's SOL to get there, whether an independent
-// oracle still agrees with the pool that conversion would price against, how
-// much of that SOL one turn may wrap and convert, whether the 30-day cap leaves
-// the basket room, and whether every leg's mint is one the program can buy at
-// all, as pure decisions, with the alerts for a crank or an investment that
-// stays stuck.
+// Which in-asset this keeper can invest from, which VENUE it can build a route
+// for, whether it may invest at all, whether it may convert the vault's SOL to
+// get there, whether an independent oracle still agrees with the pool that
+// conversion would price against, how much of that SOL one turn may wrap and
+// convert, whether the 30-day cap leaves the basket room, and whether every
+// leg's mint is one the program can buy at all, as pure decisions, with the
+// alerts for a crank or an investment that stays stuck.
 //
 // NEW IN SIP. sip-vault's InvestmentPolicy pins `in_mint`: the only mint convert
 // may fill into and invest may spend from, chosen by the owner, with every floor
@@ -16,6 +16,12 @@
 // The keeper has routes for exactly one in-asset (the wSOL/USDC pool and USDC
 // pools per leg), so any other in_mint is refused BEFORE anything moves, naming
 // both mints so the operator can see which side must change.
+//
+// THE SAME IS TRUE OF THE VENUE, and for a while the keeper did not notice.
+// InvestmentPolicy pins `venue_program` too, convert.rs and invest.rs check the
+// account passed against it (WrongVenue), and invest-tick.ts passed a literal.
+// venueDecision below refuses a venue this keeper cannot route, beside the other
+// all-or-nothing basket refusals and before anything moves.
 
 import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
 import { PublicKey } from "@solana/web3.js";
@@ -35,6 +41,82 @@ export function inMintDecision(inMint: PublicKey): { readonly outcome: "REFUSED"
     detail:
       `the policy's in_mint is ${inMint.toBase58()}, but the only in-asset this keeper has routes for is USDC ` +
       `(${USDC_MINT.toBase58()}) — refusing to wrap, convert or invest toward it`,
+  };
+}
+
+// ── the venue the owner signed, before the basket is bought ──────────────────
+//
+// THE POLICY NAMES THE VENUE AND THE PROGRAM PINS IT. convert.rs and invest.rs
+// both `require!(ctx.accounts.venue_program.key() == policy.venue_program,
+// WrongVenue)` before a lamport moves, so the venue account the keeper passes is
+// not a detail of the route: it is a term of the policy the vault owner signed,
+// and the program checks it byte for byte.
+//
+// THE KEEPER USED TO IGNORE IT. invest-tick.ts passed the RAYDIUM_CLMM literal
+// at both sites — the convert and the per-leg invest — and never read
+// policy.venue_program at all, which it already had in hand. That is the crank
+// disobeying what the owner signed, and it is a defect on its own, whatever the
+// policies on chain happen to say today.
+//
+// AND IT IS A TRAP. The day a policy is signed with any other venue_program,
+// EVERY convert and EVERY invest for that vault reverts with WrongVenue, on
+// every sweep, for as long as the policy stands — and the keeper, sending the
+// literal, could never say why: it would report the program's rejection as one
+// more FAILED turn. So the venue is read from the policy (task 1) and a venue
+// this keeper cannot build a route for is refused HERE, loudly, before anything
+// is wrapped, converted or bought (task 2).
+
+/** Raydium CLMM on mainnet: the venue every policy signed to date names. */
+export const RAYDIUM_CLMM_PROGRAM = new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
+
+/**
+ * Every venue this keeper can actually build a route for, by the program id a
+ * policy names, to the name a human uses for it.
+ *
+ * ONE ENTRY, AND THE SEAM IS DELIBERATELY VISIBLE. Today the keeper can build
+ * exactly one route: fetchLiveRoute reads a Raydium CLMM PoolState and
+ * buildSwapV2AccountMetas lays out a Raydium swap_v2. A second venue is a second
+ * entry HERE plus a route builder for it — the gate below neither needs nor
+ * gains a branch, and the refusal names whatever this map holds. No second venue
+ * is invented now: there is none to add, and a placeholder would be a keeper
+ * claiming a route it cannot build, which is the failure this whole gate exists
+ * to prevent.
+ */
+export const ROUTABLE_VENUES: ReadonlyMap<string, string> = new Map([[RAYDIUM_CLMM_PROGRAM.toBase58(), "Raydium CLMM"]]);
+
+/** The routable venues as a refusal names them: "Raydium CLMM (CAMM…rWqK)". */
+function routableVenues(): string {
+  return [...ROUTABLE_VENUES].map(([address, name]) => `${name} (${address})`).join(", ");
+}
+
+/**
+ * Whether this keeper can build a route for the venue the policy names, decided
+ * from the policy alone and beside the unroutable-leg, mint-admission and
+ * pool-depth refusals — before anything is wrapped, converted or bought.
+ *
+ * WRITTEN FOR SOMEONE READING IT AT THREE IN THE MORNING. This message is the
+ * only thing that will ever explain why a vault stopped buying: the alternative
+ * is a WrongVenue revert per leg per sweep, forever, with a keeper that reports
+ * it as a failed transaction and names nothing. So it says which venue the
+ * policy asked for, which venues this keeper can actually route, that the vault
+ * OWNER re-signs the policy to change it, and that adding a venue to the keeper
+ * is a code change rather than a configuration one.
+ */
+export function venueDecision(venueProgram: PublicKey): { readonly outcome: "REFUSED"; readonly detail: string } | null {
+  if (ROUTABLE_VENUES.has(venueProgram.toBase58())) return null;
+  return {
+    outcome: "REFUSED",
+    detail:
+      `the policy's venue_program is ${venueProgram.toBase58()}, and this keeper cannot build a route for it. ` +
+      `The only venue it can route is ${routableVenues()}. ` +
+      "convert.rs and invest.rs both pin the venue account this keeper passes against policy.venue_program " +
+      "(WrongVenue), so were the turn to go on, EVERY convert and EVERY invest for this vault would revert, on " +
+      "every sweep, for as long as this policy stands — refusing here instead, before anything is wrapped, " +
+      "converted or bought, and refusing the whole basket rather than part of it. " +
+      "NOTHING IN THE KEEPER CAN FIX THIS: the venue is a term of the policy the vault owner signed, so only the " +
+      "OWNER can change it, by re-signing the investment policy (set_invest_policy) with a venue this keeper " +
+      "routes. Teaching the keeper a new venue is a code change, not a configuration one: it needs a route builder " +
+      "for that venue as well as an entry in ROUTABLE_VENUES (invest-decision.ts)",
   };
 }
 
@@ -76,17 +158,36 @@ export type ConvertDecision = { readonly convert: true } | { readonly convert: f
  * enabled investing without ever signing a conversion floor had its ATAs
  * re-created and a refused wrap_sol sent on every sweep, reported as FAILED.
  *
- * NOT A REFUSAL. The owner chose to keep the SOL as SOL, and USDC already in
- * the vault is still invested against the legs as usual, so the turn goes on
- * without wrap and convert, says so in its detail, and alerts nobody.
+ * NOT A REFUSAL, AND THAT IS THE POINT OF THE NOISE. A zero here is a VALID
+ * policy: set_invest_policy checks the legs, the weights, the in_mint and the
+ * three amounts, and never once looks at min_convert_rate_wad, so the program
+ * stores whatever arrives and then refuses every call that would use it. The
+ * owner may have meant exactly that — keep the SOL as SOL — and the USDC already
+ * in the vault is still invested against the legs as usual, so the turn goes on,
+ * nobody is paged and nothing is refused. But the same zero is what a bad form
+ * or a careless re-sign leaves behind, and its only symptom is a hop that
+ * silently stops happening. So the detail below is written to be read by
+ * somebody who did not sign this policy and is trying to work out why a vault's
+ * SOL never becomes stock: it names the field, says the program accepts it, says
+ * what stops, says that the Pyth guard on that hop is left with nothing to
+ * watch, and says who can turn it back on. invest-tick.ts carries it at the
+ * FRONT of every detail the turn ends with, not as an afterthought on some of
+ * them.
  */
 export function convertDecision(policy: { readonly minConvertRateWad: bigint }): ConvertDecision {
   if (policy.minConvertRateWad > 0n) return { convert: true };
   return {
     convert: false,
     detail:
-      "conversion is off: the policy's min_convert_rate_wad is 0, which wrap_sol and convert refuse with FloorTooLow, " +
-      "so the vault's SOL is not wrapped or converted and only USDC already in the vault is invested",
+      "CONVERSION IS OFF, DELIBERATELY OR NOT: the policy's min_convert_rate_wad is 0, and the SOL-to-USDC hop is " +
+      "switched off for as long as it stays there. The program ACCEPTS this policy — set_invest_policy validates " +
+      "every other field and never looks at this one — and then wrap_sol and convert refuse every call made under " +
+      "it with FloorTooLow, so the vault's SOL is not wrapped or converted and only USDC already in the vault is " +
+      "invested. THE PYTH GUARD ON THAT HOP HAS NOTHING TO WATCH while this stands: there is no convert for it to " +
+      "price, so neither a stale feed nor a pool that has walked away from the world can be caught here — the hop " +
+      "it protects is not happening at all. If the owner meant to keep the SOL as SOL, this is the policy working; " +
+      "if not, a bad form or a careless re-sign put the 0 there, and NOTHING IN THE KEEPER CAN UNDO IT: only the " +
+      "vault's OWNER can, by re-signing the investment policy with a non-zero min_convert_rate_wad",
   };
 }
 

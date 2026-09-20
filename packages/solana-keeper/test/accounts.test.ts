@@ -42,8 +42,8 @@ import {
 } from "../src/accounts.js";
 import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
-import { USDC_MINT } from "../src/invest-decision.js";
-import { runInvestTick } from "../src/invest-tick.js";
+import { RAYDIUM_CLMM_PROGRAM, USDC_MINT } from "../src/invest-decision.js";
+import { convertCall, investCall, runInvestTick } from "../src/invest-tick.js";
 import { MAX_SUPPORTED_TRANSACTION_VERSION } from "../src/measure-window.js";
 import {
   PYTH_RECEIVER_PROGRAM,
@@ -270,7 +270,14 @@ const vaultFields = (over: Partial<VaultFields> = {}): VaultFields => ({
 const policyFields = (vault: PublicKey, over: Partial<PolicyFields> = {}): PolicyFields => ({
   vault,
   enabled: true,
-  venueProgram: key(),
+  // THE VENUE EVERY POLICY SIGNED TO DATE NAMES. It was a random key here, which
+  // no reader looked at and every tick ignored — the keeper passed the Raydium
+  // literal whatever the policy said. Now that the tick refuses a venue it
+  // cannot route, a random key would refuse every turn below before the gate
+  // each of those tests is actually about. The reader's own test overrides it
+  // with a random key, which is where reading arbitrary bytes at offset 41
+  // belongs.
+  venueProgram: RAYDIUM_CLMM_PROGRAM,
   inMint: USDC_MINT,
   legs: [
     { mint: key(), weightBps: 6_000, minOutRateWad: 3n * 10n ** 18n + (1n << 70n) },
@@ -388,7 +395,9 @@ describe("the account readers, over bytes laid out as state.rs declares them", (
 
   it("read every InvestmentPolicy field, max_rolling_30d included, and null with no policy", async () => {
     const vault = key();
-    const planted = policyFields(vault);
+    // A venue of its own, and a random one: the reader must return the 32 bytes
+    // at offset 41 whatever they are, not the venue the keeper happens to route.
+    const planted = policyFields(vault, { venueProgram: key() });
     const address = investmentPolicyAddress(programId, vault);
     const { program } = stubChain(new Map([[address.toBase58(), policyBytes(planted)]]));
 
@@ -962,6 +971,129 @@ describe("the ticks' first steps, over the same bytes", () => {
     // transaction. Pinning 0 keeps it gone.
     expect(calls.filter((name) => name === "getSignaturesForAddress")).toHaveLength(0);
     for (const rpc of ["getLatestBlockhash", "sendTransaction", "sendRawTransaction"]) expect(calls).not.toContain(rpc);
+  });
+
+  // ── the venue the owner signed, at the moment the money would move ─────────
+  //
+  // InvestmentPolicy pins venue_program, convert.rs and invest.rs both check the
+  // account against it (WrongVenue), and this tick passed the RAYDIUM_CLMM
+  // literal at both sites while holding the policy that names the venue. Against
+  // every policy signed to date the literal happened to be right; against one
+  // re-signed anywhere else, every convert and every invest for that vault
+  // reverts, on every sweep, and the keeper reports it as one more failed
+  // transaction.
+
+  it("refuse a venue this keeper cannot route, before anything is wrapped, converted or bought", async () => {
+    // EVERYTHING ELSE ABOUT THIS TURN IS FINE: 10 SOL free, a crank that can
+    // front it, conversion on, and three pools deep enough to trade in. The only
+    // thing wrong is the venue the owner's policy names, and it is enough.
+    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    const venue = key();
+    const { vault, connection, program, calls } = chainWith({}, { legs: basket.legs, venueProgram: venue }, emptyAndPriced, true, basket.accounts);
+    const result = await runInvestTick({
+      connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+    });
+
+    expect(result.outcome).toBe("REFUSED");
+    // WHAT A READER AT 3AM NEEDS: which venue was asked for, which one the
+    // keeper can actually route, what the program would have answered, and who
+    // can change it.
+    expect(result.detail).toContain(venue.toBase58());
+    expect(result.detail).toContain("Raydium CLMM");
+    expect(result.detail).toContain(RAYDIUM_CLMM_PROGRAM.toBase58());
+    expect(result.detail).toContain("WrongVenue");
+    expect(result.detail).toContain("every sweep");
+    expect(result.detail).toContain("OWNER");
+
+    // AND IT COSTS LESS THAN THE GATES BESIDE IT. The policy is already in hand,
+    // so this refusal needs nothing from the chain: the leg mints, the pools and
+    // the pools' vaults are never read, no balance is fronted and nothing is
+    // signed. Compare the mint/depth refusal above, which reads two more.
+    expect(calls).toEqual([
+      "getAccountInfoAndContext",
+      "getMultipleAccountsInfo",
+      "getMinimumBalanceForRentExemption",
+      "getTokenAccountBalance",
+      "getTokenAccountBalance",
+    ]);
+    for (const rpc of ["getBalance", "getLatestBlockhash", "sendTransaction", "sendRawTransaction"]) expect(calls).not.toContain(rpc);
+    expect(result.wrap?.wrapped).toBe(0n);
+  });
+
+  it("hand convert and invest the venue the POLICY names, at the account the program checks", async () => {
+    const { program } = stubChain(new Map());
+    const zero = PublicKey.default;
+    const venue = key();
+    const swap = { payer: zero, inputTokenAccount: zero, outputTokenAccount: zero, amountIn: 100n, minAmountOut: 200n };
+    const convertAccounts = { crank: zero, vault: zero, policy: zero, vaultWsol: zero, vaultIn: zero };
+    const investAccounts = { crank: zero, vault: zero, policy: zero, vaultIn: zero, vaultTarget: zero, targetMint: zero };
+    const convertArgs = { amountIn: 100n, minOut: 200n, swap };
+    const investArgs = { legIndex: 0, amountIn: 100n, minOut: 200n, swap };
+
+    const convert = await convertCall(program, { ...convertAccounts, venueProgram: venue }, convertArgs).instruction();
+    const invest = await investCall(program, { ...investAccounts, venueProgram: venue }, investArgs).instruction();
+    // venue_program is the LAST account of both instructions in the IDL, and
+    // these calls carry no remaining accounts.
+    expect(convert.keys.at(-1)?.pubkey.toBase58()).toBe(venue.toBase58());
+    expect(invest.keys.at(-1)?.pubkey.toBase58()).toBe(venue.toBase58());
+
+    // LEFT OUT, IT IS WHAT IT ALWAYS WAS. The preflight and the builder vectors
+    // call these offline, with fabricated accounts and no policy to read a venue
+    // from, so the argument is optional and defaults to the literal the keeper
+    // used to hardcode. Every caller that HAS a policy passes it.
+    const convertDefault = await convertCall(program, convertAccounts, convertArgs).instruction();
+    const investDefault = await investCall(program, investAccounts, investArgs).instruction();
+    expect(convertDefault.keys.at(-1)?.pubkey.toBase58()).toBe(RAYDIUM_CLMM_PROGRAM.toBase58());
+    expect(investDefault.keys.at(-1)?.pubkey.toBase58()).toBe(RAYDIUM_CLMM_PROGRAM.toBase58());
+
+    // AND THE ARGUMENT BYTES DID NOT MOVE. The venue is an ACCOUNT, not an
+    // argument, so the fixed vectors the preflight compares against — and the
+    // bytes anything else builds — are the same whichever venue is passed.
+    expect(convert.data.toString("hex")).toBe(convertDefault.data.toString("hex"));
+    expect(invest.data.toString("hex")).toBe(investDefault.data.toString("hex"));
+  });
+
+  it("no longer names a venue of its own at either money site, whatever else the file grows", () => {
+    // The SHAPE of the fix, pinned in the source the way the ATA storm's is
+    // above: the crank owns no authority, so the venue it sends has to be the
+    // one the owner signed, read off the policy this tick already loaded. The
+    // literal survives in exactly one place — the default for offline callers
+    // with no policy in hand.
+    const source = readFileSync(new URL("../src/invest-tick.ts", import.meta.url), "utf8");
+    expect(source).not.toContain("venueProgram: RAYDIUM_CLMM");
+    expect(source.match(/venueProgram: accounts\.venueProgram \?\? RAYDIUM_CLMM/g)).toHaveLength(2);
+    expect(source.match(/venueProgram: policy\.venueProgram/g)).toHaveLength(2);
+  });
+
+  it("lead a REFUSED turn's detail with the conversion-off alarm, which these paths used to drop entirely", async () => {
+    // A ZERO min_convert_rate_wad IS A VALID POLICY and is never refused — but
+    // it silently switches off the SOL hop, so it is said on the way out of
+    // EVERY turn. It used to be appended by `noted`, which some of the turn's
+    // ways out call and the three basket refusals do not: this vault's SOL had
+    // stopped moving and the detail talked only about the missing pool.
+    const mint = key();
+    let usdcAta: PublicKey | undefined;
+    const { vault, connection, program } = chainWith({}, { minConvertRateWad: 0n, legs: [{ mint, weightBps: 10_000, minOutRateWad: 1n }] }, {
+      getMinimumBalanceForRentExemption: async () => 2_000_000,
+      getTokenAccountBalance: async (address) => {
+        if (usdcAta === undefined || !(address as PublicKey).equals(usdcAta)) throw new Error("could not find account");
+        return { context: { slot: 1 }, value: { amount: "250000000", decimals: 6, uiAmount: 250 } };
+      },
+    });
+    usdcAta = getAssociatedTokenAddressSync(USDC_MINT, vault, true, TOKEN_PROGRAM_ID);
+    const result = await runInvestTick({
+      connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: new Map(), live: true, protocolPaused: false,
+    });
+
+    expect(result.outcome).toBe("REFUSED");
+    // FIRST, not last: a truncated log line has to keep it.
+    expect(result.detail.startsWith("CONVERSION IS OFF")).toBe(true);
+    expect(result.detail).toContain("PYTH GUARD ON THAT HOP HAS NOTHING TO WATCH");
+    // And the refusal it leads is still all of itself.
+    expect(result.detail).toContain(`no pool configured for ${mint.toBase58()}`);
+    // SAID ONCE. It was reported by `noted` and is now a turn finding; carrying
+    // both would print the whole alarm twice in one line.
+    expect(result.detail.match(/min_convert_rate_wad is 0/g)).toHaveLength(1);
   });
 
   it("no longer holds the call that sent a transaction per account, whatever else the file grows", () => {
