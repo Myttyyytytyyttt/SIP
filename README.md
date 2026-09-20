@@ -160,10 +160,10 @@ Connect a Solana wallet and every number is read from mainnet through the app's 
 - [x] **Secret redaction on every log line and every alert body**, including a net for key material no one registered
 - [x] **The Docker image gates itself** — typecheck, the whole test suite, and a preflight that really constructs all four money-moving instructions
 - [x] **Critical alerts to Telegram**, with delivery counted and reported on `/status`
+- [x] **[Usage leaderboard](https://sip-website-oficial.vercel.app/leaderboard)** — points come from showing up (participation and streak), with the size term capped and logarithmic, so a large wallet cannot buy the top spot
 
 ### 🔨 In progress
 
-- [ ] **Usage leaderboard** — the code shipped; the live database still needs its migration before it can serve a row
 - [ ] **Volume mode end to end** — the program accepts it; the keeper cannot yet measure volume from real trades
 - [ ] **SaverFi's own landing footage** — the hero still plays the reference template's clip from a third party's CDN
 - [ ] **Settlement at scale** — proven n = 1; the next milestone is many wallets, many windows
@@ -184,7 +184,6 @@ Connect a Solana wallet and every number is read from mainnet through the app's 
 A hackathon README that overclaims is worse than one that claims less, so:
 
 - The money path is **proven once**, on 2026-09-19, for one wallet and one vault. It is real, and it is n = 1.
-- The **leaderboard returns an error in production** until the live database gets the column the keeper writes.
 - The landing's background video **belongs to the reference template**, not to SaverFi.
 - The program is **upgradeable by a single team key** with no timelock. That is a beta posture, stated plainly.
 - `withdraw` and `withdraw_token` are implemented and tested, but **have not yet been exercised on mainnet**.
@@ -256,7 +255,7 @@ Never `git grep -n -I -E '\bSIP\b'`: git's regex engine has no `\b`, so that pat
 
 <div align="center">
 
-**[Open the app](https://sip-website-oficial.vercel.app)** · **[@SaverFi](https://x.com/SaverFi)** · **[The program on Solscan](https://solscan.io/account/6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J)** · **[Keeper status](https://sip-solana-keeper-production.up.railway.app/status)**
+**[Open the app](https://sip-website-oficial.vercel.app)** · **[Leaderboard](https://sip-website-oficial.vercel.app/leaderboard)** · **[@SaverFi](https://x.com/SaverFi)** · **[The program on Solscan](https://solscan.io/account/6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J)** · **[Keeper status](https://sip-solana-keeper-production.up.railway.app/status)**
 
 <sub>Built on Solana. Beta — the program is upgradeable and the vault holds real value.</sub>
 
