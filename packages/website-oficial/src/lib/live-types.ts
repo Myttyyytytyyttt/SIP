@@ -218,6 +218,13 @@ export interface LiveChartPoint {
 export interface LiveStatsView {
   /** Every settlement the links record, not only the loaded ones. */
   readonly settlementsLifetime: bigint | null;
+  /**
+   * THE STATE RECORDS A SETTLEMENT THE LOADED HISTORY DOES NOT HOLD — the
+   * vault's own total moved, or a link's nonce counted one, and not one of them
+   * is in the pages read so far. Nothing on the screen may say "none yet" while
+   * this is true.
+   */
+  readonly settledOutsideHistory: boolean;
   readonly loadedSettlements: number;
   readonly loadedSavedLamports: bigint;
   readonly biggestPaid: bigint | null;
@@ -250,7 +257,11 @@ export interface LiveDashboard {
   /** Account-keeping transactions and dust transfers, counted rather than listed. */
   readonly hiddenUpkeep: number;
   readonly hiddenDust: number;
-  /** Null until a settlement is loaded: the chart starts with the first one. */
+  /**
+   * Null when there is nothing true to draw: nothing saved yet, or not one row
+   * loaded to be flat across. A window holding no settlement is a FLAT line at
+   * the vault's own total, not an empty chart.
+   */
   readonly chart: readonly LiveChartPoint[] | null;
   readonly stats: LiveStatsView;
   /**
