@@ -15,6 +15,14 @@
  *
  * The points are worked BACKWARDS from lifetimeSaved in live-model.ts, so the
  * last point and the hero are the same number by construction.
+ *
+ * NO POINTS IS NOT "NOTHING HAS HAPPENED". A page of signatures can be all
+ * keeper upkeep while the vault's own total says a settlement landed yesterday,
+ * and "The chart starts with your first settlement" over that is false. So the
+ * caller says whether the STATE records a settlement this history does not
+ * hold, and both branches read from it: with no points the empty line says
+ * where the settlements are, and with a flat line the caption says why it is
+ * level.
  */
 
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
@@ -39,15 +47,22 @@ const axisSol = (value: number): string => `${Number(value.toFixed(4))}`;
 export function LiveSavedChart({
   points,
   complete,
+  settledOutsideHistory,
   className,
 }: {
   readonly points: readonly LiveChartPoint[] | null;
   /** The loaded history reaches the beginning: the caption says so instead of a date. */
   readonly complete: boolean;
+  /**
+   * The state records a settlement the loaded history does not hold
+   * (stats.settledOutsideHistory). REQUIRED: forgetting it is exactly how this
+   * chart came to deny a settlement that had already happened.
+   */
+  readonly settledOutsideHistory: boolean;
   readonly className?: string;
 }) {
   if (points === null || points.length === 0) {
-    return <p className="text-sm text-muted-foreground">{LIVE_COPY.chartEmpty}</p>;
+    return <p className="text-sm text-muted-foreground">{settledOutsideHistory ? LIVE_COPY.chartOutsideHistory : LIVE_COPY.chartEmpty}</p>;
   }
 
   // Recharts plots numbers; the exact lamport figure is kept for the tooltip.
@@ -83,7 +98,10 @@ export function LiveSavedChart({
           <Area type="monotone" dataKey="total" stroke="var(--color-total)" fill="var(--color-total)" fillOpacity={0.12} strokeWidth={1.5} dot={false} isAnimationActive={false} />
         </AreaChart>
       </ChartContainer>
-      <p className="text-xs text-muted-foreground">{complete ? LIVE_COPY.chartComplete : LIVE_COPY.chartSince(dateLabel(oldest))}</p>
+      <p className="text-xs text-muted-foreground">
+        {settledOutsideHistory ? `${LIVE_COPY.chartFlat} ` : ""}
+        {complete ? LIVE_COPY.chartComplete : LIVE_COPY.chartSince(dateLabel(oldest))}
+      </p>
     </div>
   );
 }

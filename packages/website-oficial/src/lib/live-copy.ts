@@ -133,6 +133,14 @@ export const LIVE_COPY = {
   chartSince: (date: string): string => `Since ${date}`,
   chartComplete: "Complete history",
   chartEmpty: "The chart starts with your first settlement.",
+  /**
+   * The vault has saved, and not one settlement is in the pages loaded here —
+   * so there is no window to draw a line across, and "starts with your first
+   * settlement" would be a statement the vault's own total contradicts.
+   */
+  chartOutsideHistory: "Your settlements are not in the history loaded here, so there is no line to draw yet. Saved so far above is your vault’s own total.",
+  /** The flat line's caption: it is flat BECAUSE nothing settled in that window. */
+  chartFlat: "No settlement landed in this window, so the line is level at your vault’s own total.",
 
   // ── the holdings table ─────────────────────────────────────────────────────
   holdings: "Holdings",
@@ -309,6 +317,8 @@ export const STATS_COPY = {
   cappedSub: (max: string): string => `at ${max} SOL each`,
   lastSettlement: "Last settlement",
   lastSettlementNever: "none yet",
+  /** Settlements the state counts but the loaded pages do not hold: never "none yet". */
+  lastSettlementOutside: "not in loaded history",
   investedSoFar: "Invested so far",
   usedIn30Days: "Used in 30 days",
   usedIn30DaysSub: (cap: string): string => `of ${cap}`,

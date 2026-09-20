@@ -13,6 +13,12 @@
  * week" are null in the model unless the loaded pages reach back past the start
  * of the window, and a null window is left out instead of being shown as a
  * smaller number wearing a complete one's name.
+ *
+ * AND NOTHING HERE MAY CONTRADICT THE STATE. "Last settlement none yet" is a
+ * statement about the chain, not about this page of signatures: with the vault's
+ * own total saying otherwise it says where the settlement is instead — not in
+ * the history loaded so far — and the tiles appear at all, which they did not
+ * when every link's nonce was unreadable and only lifetimeSaved knew.
  */
 
 import type { ReactNode } from "react";
@@ -46,7 +52,7 @@ export function LiveStats({
   readonly className?: string;
 }) {
   const hasPolicy = policy.status === "exists";
-  const everSettled = stats.loadedSettlements > 0 || (stats.settlementsLifetime ?? 0n) > 0n;
+  const everSettled = stats.loadedSettlements > 0 || (stats.settlementsLifetime ?? 0n) > 0n || stats.settledOutsideHistory;
   // Nothing settled and no policy: there is not one real number to put here.
   if (!everSettled && !hasPolicy) return null;
 
@@ -66,7 +72,15 @@ export function LiveStats({
     }
     tiles.push({
       label: STATS_COPY.lastSettlement,
-      value: <span className="text-base">{stats.lastSettlementAt === null ? STATS_COPY.lastSettlementNever : timeAgo(stats.lastSettlementAt, now)}</span>,
+      value: (
+        <span className="text-base">
+          {stats.lastSettlementAt !== null
+            ? timeAgo(stats.lastSettlementAt, now)
+            : stats.settledOutsideHistory
+              ? STATS_COPY.lastSettlementOutside
+              : STATS_COPY.lastSettlementNever}
+        </span>
+      ),
       sub: "",
     });
   }
