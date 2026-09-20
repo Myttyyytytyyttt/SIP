@@ -65,9 +65,16 @@ export interface SettlementRow {
 }
 
 /**
- * A bounded read. At one settlement per wallet per minute this is years of a
- * crowded system, and a table that somehow grew past it must not turn a public
- * page into an unbounded query.
+ * A bounded read, counted in (vault, UTC day) GROUPS — not in settlements. At
+ * 500 daily-active vaults that is a hundred days, which is why the order it is
+ * applied with matters more than the number.
+ *
+ * DESCENDING, SO THE CAP DROPS THE OLDEST. It used to read `ORDER BY day ASC
+ * LIMIT 50000`, which keeps the FIRST rows in the ordering — the oldest days.
+ * Past the cap the current week would simply not be in the result, and the
+ * season board, the one the page opens on, would go permanently empty while
+ * the all-time board kept showing history nobody could add to. The scorer sorts
+ * the days it is given, so reading them newest-first costs nothing.
  */
 export const LEADERBOARD_DAY_LIMIT = 50_000;
 
@@ -366,7 +373,7 @@ export class SolanaReadModel {
                 sum(volume_raw) AS volume_raw
            FROM ${READ_MODEL_SCHEMA}.settlement_event
           GROUP BY 1, 2
-          ORDER BY 2 ASC
+          ORDER BY 2 DESC
           LIMIT ${LEADERBOARD_DAY_LIMIT}`,
       );
       return result.rows.map((row) => ({

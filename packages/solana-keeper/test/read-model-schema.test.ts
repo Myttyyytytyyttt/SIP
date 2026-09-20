@@ -54,6 +54,14 @@ describe("the settlement mirror's shape", () => {
     expect(onConflict).not.toContain("at =");
   });
 
+  it("reads the NEWEST days when the bound bites, not the oldest", () => {
+    // ORDER BY day ASC LIMIT n keeps the FIRST rows in the ordering. Past the
+    // cap the current week would simply not be in the result, and the season
+    // board — the one the page opens on — would go permanently empty.
+    expect(readModel).toContain("ORDER BY 2 DESC");
+    expect(readModel).not.toContain("ORDER BY 2 ASC");
+  });
+
   it("makes the setup script verify columns, not only tables", () => {
     // "read model ready" listing four tables answered a question nobody asked:
     // the tables have existed since day one, and what an operator needs to know
