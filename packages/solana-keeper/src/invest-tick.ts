@@ -46,16 +46,22 @@ import {
   CRANK_WRAP_RESERVE_LAMPORTS,
   USDC_MINT,
   WRAP_DUST_LAMPORTS,
+  basketBudget,
   chainDay,
   convertAmount,
   convertDecision,
+  decodeTokenAccountAmount,
   inMintDecision,
   investPauseDecision,
   legAdmissionDecision,
+  legDepthDecision,
+  legShare,
   oracleConvertDecision,
+  readPoolPair,
   rollingDecision,
   routeRateWad,
   shouldConvert,
+  turnSpendCeiling,
   wrapPlan,
   type ConvertDecision,
   type WrapPlan,
@@ -313,16 +319,77 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // (legAdmissionDecision); this only fetches the bytes and the epoch to judge
   // them in — the epoch out of the Clock ALREADY READ above, so the fee is
   // resolved against the very clock Token-2022 charges by.
+  //
+  // AND THE POOLS RIDE THAT SAME REQUEST. The depth gate below needs each
+  // pool's own account, and this read was being sent anyway, so the pool
+  // addresses go in beside the mints: the pool states cost this turn NOTHING —
+  // no extra round trip, the same rule the Pyth feeds follow at the vault read.
   const currentEpoch = clockInfo.data.readBigUInt64LE(16);
-  const mintInfos = await connection.getMultipleAccountsInfo(policy.legs.map((leg) => leg.mint), "confirmed");
+  const legPools = policy.legs.map((leg) => deps.pools.get(leg.mint.toBase58())!);
+  const legInfos = await connection.getMultipleAccountsInfo([...policy.legs.map((leg) => leg.mint), ...legPools], "confirmed");
   const admission = legAdmissionDecision({
     legs: policy.legs.map((leg, index) => {
-      const info = mintInfos[index] ?? null;
+      const info = legInfos[index] ?? null;
       return { mint: leg.mint, account: info === null ? null : { owner: info.owner, data: info.data } };
     }),
     currentEpoch,
   });
   if (!admission.admit) return { outcome: admission.outcome, detail: admission.detail };
+
+  // AND ON THE SAME LINE AGAIN: whether those pools can actually serve what
+  // this turn would push into them, RIGHT NOW.
+  //
+  // A BUILD-TIME CHECK CANNOT PROTECT AGAINST A POOL DRAINING. check:legs
+  // passed a leg holding 6,700 dollars; two days later the same pool held 51,
+  // and any buy over about 11 reverts. Nothing about the leg changed — depth is
+  // a property of the moment, so it is measured in the turn, from the pools'
+  // own vaults, against the amount this turn would really spend on each leg.
+  //
+  // THE AMOUNT IS THE ONE THE SWAP LOOP WILL USE, not a default purchase:
+  // max_per_call caps the whole basket and is then split by weight, so a
+  // 1,000-dollar cap over three legs is about 333 dollars into ONE pool. The
+  // convert has not happened yet, so a converting turn is tested at the most it
+  // could reach — and the budget below is clamped to that same ceiling, so what
+  // was tested is what is spent (turnSpendCeiling).
+  //
+  // ONE MORE REQUEST, FOR THE WHOLE BASKET. The reserves live in the pools' two
+  // token vaults, whose addresses are inside the states just read, so they
+  // cannot be fetched in the same request; every leg's vaults go in one
+  // getMultipleAccountsInfo rather than one per leg.
+  const spendCeiling = turnSpendCeiling({
+    held: usdcHeld,
+    converting: converts,
+    maxPerCall: policy.maxPerCall,
+    headroom: rolling.headroom,
+  });
+  const poolReads = policy.legs.map((_leg, index) => readPoolPair(legInfos[policy.legs.length + index]));
+  const vaultAddresses = [
+    ...new Set(poolReads.flatMap((read) => (read.ok ? [read.pair.vault0.toBase58(), read.pair.vault1.toBase58()] : []))),
+  ];
+  const vaultAmounts = new Map<string, bigint>();
+  if (vaultAddresses.length > 0) {
+    const vaultInfos = await connection.getMultipleAccountsInfo(vaultAddresses.map((address) => new PublicKey(address)), "confirmed");
+    for (const [index, info] of vaultInfos.entries()) {
+      if (info === null || info === undefined) continue;
+      try {
+        vaultAmounts.set(vaultAddresses[index]!, decodeTokenAccountAmount(info.data));
+      } catch {
+        // Left out of the map on purpose: the gate refuses a reserve it could
+        // not read rather than treating unreadable bytes as depth.
+      }
+    }
+  }
+  const depth = legDepthDecision({
+    inMint: policy.inMint,
+    vaultAmounts,
+    legs: policy.legs.map((leg, index) => ({
+      mint: leg.mint,
+      pool: legPools[index]!,
+      spend: legShare(spendCeiling, leg.weightBps),
+      read: poolReads[index]!,
+    })),
+  });
+  if (!depth.deep) return { outcome: depth.outcome, detail: depth.detail };
 
   const purchases: InvestPurchase[] = [];
   try {
@@ -409,9 +476,13 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
     // NO MORE THAN THE 30-DAY CAP ADMITS, as well as the per-call cap. Every leg
     // records its spend before the next is checked, and the shares add up to at
     // most the budget, so a budget within the headroom keeps every leg within it.
-    const maxPerCall = policy.maxPerCall;
-    const perCall = usdc > maxPerCall ? maxPerCall : usdc;
-    const budget = perCall > rolling.headroom ? rolling.headroom : perCall;
+    //
+    // AND NEVER MORE THAN THE DEPTH GATE TESTED. The gate above measured each
+    // pool against this turn's ceiling; clamping here is what turns that from a
+    // close estimate into a guarantee, whatever the convert brought in or
+    // whoever deposited into the vault while this turn was running.
+    const spend = basketBudget({ held: usdc, maxPerCall: policy.maxPerCall, headroom: rolling.headroom });
+    const budget = spend > spendCeiling ? spendCeiling : spend;
 
     // THE PROGRAM CHECKS EACH LEG, NOT THE TOTAL.
     //
@@ -425,7 +496,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
     // ALL OR NOTHING, the same doctrine as the unroutable-leg refusal above:
     // buying only the legs that happen to clear the minimum is a partial basket
     // that silently drifts away from the weights the owner signed.
-    const shares = policy.legs.map((leg) => (budget * BigInt(leg.weightBps)) / 10_000n);
+    const shares = policy.legs.map((leg) => legShare(budget, leg.weightBps));
     const short = shares.filter((share) => share < minInvestment).length;
     if (short > 0) {
       // The number that is actually actionable is how much this basket needs,
@@ -449,7 +520,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
     let anyLive = false;
     for (const [index, leg] of policy.legs.entries()) {
       const weight = BigInt(leg.weightBps);
-      const amountIn = (budget * weight) / 10_000n;
+      const amountIn = legShare(budget, leg.weightBps);
       // A leg whose share rounds to nothing is skipped rather than sent: the
       // program refuses a zero min_out, and a zero-amount swap is a fee for
       // nothing.

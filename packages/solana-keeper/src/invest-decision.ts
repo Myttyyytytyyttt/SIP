@@ -513,6 +513,19 @@ export function rollingDecision(input: {
  * over both PreStocks mints) can schedule any rate up to 10_000 bps with about
  * two epochs' notice. It has already moved these mints from 0 to 50. A ceiling
  * is what turns "we would have priced it correctly" into "we did not buy it".
+ *
+ * 100 IS ADMITTED ON PURPOSE, AND IT IS THE LAST RATE THAT IS. The comparison
+ * below is strictly greater-than, so exactly 100 bps passes — that is a
+ * decision, not an accident of the operator, and this is where it is recorded.
+ * A leg is bought and one day sold, so the ceiling is paid TWICE: 100 bps in
+ * and 100 bps out is a 2 % round trip, which is the entire 200 bps
+ * (SLIPPAGE_BPS) tolerance min-out.ts allows a single fill. At the ceiling the
+ * product is already giving away a round trip's worth of the user's money to
+ * the issuer, and the same authority can schedule more whenever it likes. So
+ * the boundary is deliberate, it is tested at exactly 100 and at 101, and
+ * raising the number means accepting a round trip larger than the slippage
+ * bound the keeper enforces against the market — which is a different decision
+ * from this one, and has to be argued on its own.
  */
 export const MAX_LEG_FEE_BPS = 100n;
 
@@ -622,8 +635,18 @@ export function decodeMintFacts(data: Buffer): MintFacts {
  * rate into newer_transfer_fee stamped with the epoch it starts in — two epochs
  * out, so holders can see it coming — and keeps what it replaced in
  * older_transfer_fee until then. Reading `newer` unconditionally would charge a
- * scheduled fee two epochs early; reading `older` would miss it forever. The
- * PreStocks mints' newer fee is 50 bps stamped epoch 1032, live since.
+ * scheduled fee two epochs early; reading `older` would miss it forever.
+ *
+ * THE RULE, NOT TODAY'S NUMBER. The newer fee is in force from the FIRST epoch
+ * it names — `currentEpoch >= newer.epoch`, inclusive, which is the whole of
+ * the branch below — and the older one holds until that epoch arrives. Neither
+ * is "the fee" on its own, and a comment that names a rate has a shelf life:
+ * BOTH PreStocks mints carry a rise ALREADY WRITTEN into newer_transfer_fee, so
+ * the number in force changes the moment the cluster rolls an epoch, with
+ * nothing signed, nothing deployed and nothing to notice it. What this function
+ * promises is only this: the terms it returns are the ones Token-2022 will
+ * charge in the epoch the transfer actually lands in, whatever the fee
+ * authority has scheduled and whenever it scheduled it.
  */
 export function activeTransferFee(facts: MintFacts, currentEpoch: bigint): TransferFeeTerms {
   const schedule = facts.transferFee;
@@ -718,6 +741,314 @@ export function legAdmissionDecision(input: {
     detail:
       `${refusals.join("; ")} — refusing the whole basket of ${input.legs.length} leg(s), the sound ones included, ` +
       "and refusing to convert SOL toward it: a partial basket drifts from the weights the owner signed",
+  };
+}
+
+// ── what one turn actually spends, per leg ───────────────────────────────────
+
+/**
+ * What one turn spends across the WHOLE basket: what the vault holds in the
+ * in-asset, capped by max_per_call and by what the 30-day cap still admits.
+ *
+ * max_per_call CAPS THE BASKET, NOT THE LEG, and that is the surprising half of
+ * it. invest.rs checks amount_in per call, so the name reads like a per-leg
+ * bound; the tick takes min(held, max_per_call) ONCE and then splits it by
+ * weight. A 1,000-dollar cap on a three-leg basket is therefore about 333
+ * dollars into ONE pool in a single turn — two orders of magnitude more than
+ * the 5-dollar purchase the product defaults to, and the figure any gate about
+ * pool depth has to be written against.
+ *
+ * ONE FUNCTION, SO THE GATE AND THE SPEND CANNOT DRIFT. The depth gate below
+ * tests a number; the swap loop sends one. They are the same arithmetic here
+ * precisely so that no later edit can make the tested amount and the spent
+ * amount two different things.
+ */
+export function basketBudget(input: {
+  readonly held: bigint;
+  readonly maxPerCall: bigint;
+  readonly headroom: bigint;
+}): bigint {
+  const perCall = input.held > input.maxPerCall ? input.maxPerCall : input.held;
+  return perCall > input.headroom ? input.headroom : perCall;
+}
+
+/** One leg's share of a budget, exactly as the tick splits it: floor(budget × weight / 10_000). */
+export function legShare(budget: bigint, weightBps: number): bigint {
+  return (budget * BigInt(weightBps)) / 10_000n;
+}
+
+/**
+ * The most a turn could still spend, decided BEFORE the wrap — the figure the
+ * depth gate tests against, because the gate has to run before anything is
+ * wrapped or converted.
+ *
+ * THE ONE UNKNOWN IS REPLACED BY ITS OWN CAP. At the moment of the gate the
+ * USDC that will exist after the convert has not been bought yet, so the exact
+ * budget is unknowable; what IS known is that the budget can never exceed
+ * max_per_call or the 30-day headroom, whatever the convert brings in. So a
+ * converting turn is tested at min(max_per_call, headroom) — the worst case it
+ * can reach — and the tick then clamps the budget it really spends to this same
+ * ceiling, so the gate's guarantee holds exactly rather than approximately.
+ *
+ * AND A RESTING TURN IS NOT PUNISHED FOR IT. When the SOL hop is off or the
+ * oracle rested it, no new in-asset can appear this turn, so the vault's own
+ * holding is the ceiling. Testing such a turn at max_per_call would refuse a
+ * 20-dollar basket because a 1,000-dollar one would have been too big — a gate
+ * that refuses what it was never going to do is a gate an operator turns off.
+ */
+export function turnSpendCeiling(input: {
+  /** The in-asset the vault holds right now, before any wrap or convert. */
+  readonly held: bigint;
+  /** Whether this turn will wrap and convert, and so may hold more by the time it buys. */
+  readonly converting: boolean;
+  readonly maxPerCall: bigint;
+  readonly headroom: bigint;
+}): bigint {
+  const reachable = input.converting ? input.maxPerCall : input.held;
+  return basketBudget({ held: reachable, maxPerCall: input.maxPerCall, headroom: input.headroom });
+}
+
+// ── every leg's pool, at the moment the money would move ─────────────────────
+
+/**
+ * How many times over a pool's in-side reserve must cover what this turn would
+ * push into it before the keeper will trade there: 50.
+ *
+ * A BUILD-TIME CHECK CANNOT PROTECT AGAINST A POOL DRAINING. check:legs proved
+ * every leg's depth against mainnet and passed. Two days later the leg it
+ * passed — 6,700 dollars then — held 51: 0.110274669 of its own token against
+ * 31.91 USDC, with any buy over about 11 dollars reverting (measured
+ * 2026-09-20, three independent ways). Nothing about the leg changed; the
+ * moment did. Depth is not a property of a mint or of a registry entry, it is a
+ * property of the instant the swap lands in, so it is measured here, in the
+ * turn, against the amount that turn is about to spend.
+ *
+ * WHY A MULTIPLE OF OUR OWN SIZE AND NOT AN AMOUNT. min-out.ts draws its 200
+ * bps (SLIPPAGE_BPS) bound around a PAST swap's realised price, and everything
+ * between that capture and our fill has to fit inside it: the drift since, and
+ * OUR OWN impact. Our impact therefore has to be a fraction of that tolerance,
+ * not equal to it. And a depth written as an amount is the check:legs mistake
+ * again, one file further down — the depth that moved here is one market
+ * maker's position, which moved five times in half an hour.
+ *
+ * WHY 50, FROM THE CASE THIS GATE EXISTS FOR. The drained pool holds 31.91
+ * USDC. The product's default purchase is 5 dollars, which across three legs is
+ * 1.67 into that pool — 19x cover. So any bound at or under 19x would have
+ * ADMITTED the drained pool at the product's own default size, and a bound has
+ * to clear that case with room. At 50x the drained pool admits 64 cents: every
+ * spend a real turn can make there is refused, from the default basket up.
+ *
+ * AND WHAT IT COSTS ON A POOL THAT IS FINE. The live pool held 9,389.405679
+ * USDC that night, its 0.5 % impact size measured at 350 dollars and then 598
+ * six minutes later. 50x admits 187.79 there — about half the smaller
+ * measurement, so roughly 27 bps of impact, an eighth of the tolerance. It
+ * still refuses the 333 dollars a 1,000-dollar max_per_call splits three ways
+ * (28x cover), which is exactly the size that pool was measured NOT to absorb
+ * quietly. A gate that refused the 100-dollar leg a 250-dollar cap produces —
+ * 94x cover, a size this venue serves without noticing — would be a gate an
+ * operator turns off, and then none of this runs at all.
+ *
+ * WHAT THIS BOUND IS NOT. Read as flat constant product over the vault balance,
+ * 50x is 196 bps of impact — the whole tolerance. That reading is the wrong
+ * model for a concentrated-liquidity pool, and measurably so: it put the 0.5 %
+ * size here at 47 dollars when the venue served 350. But the honest limit is
+ * the other direction, and no multiple fixes it — a CLMM's vault balance can
+ * sit entirely in ranges far from the current price, so a reserve can be large
+ * while the depth AT the price is nothing. No multiple of a vault balance
+ * bounds that. This gate is the cheap, early one: it refuses a pool that has
+ * been drained BEFORE the owner's SOL is sold toward it. The bound that catches
+ * liquidity which is not where the reserve suggests is min-out.ts's, at
+ * execution, where the fill simply does not happen. Two layers, each doing the
+ * thing the other cannot.
+ */
+export const MIN_POOL_DEPTH_MULTIPLE = 50n;
+
+/**
+ * Raydium CLMM PoolState, at the offsets live-route.ts already counts over the
+ * same bytes: 8 disc, 1 bump, 32 amm_config, 32 owner, then token_mint_0 at 73,
+ * token_mint_1 at 105, token_vault_0 at 137, token_vault_1 at 169. Mainnet
+ * serves 1544 bytes; only these four addresses are read.
+ */
+const POOL_TOKEN_MINT_0 = 73;
+const POOL_TOKEN_MINT_1 = 105;
+const POOL_TOKEN_VAULT_0 = 137;
+const POOL_TOKEN_VAULT_1 = 169;
+
+/** The pair a pool trades, and the two accounts that hold its reserves. */
+export interface PoolPair {
+  readonly mint0: PublicKey;
+  readonly mint1: PublicKey;
+  readonly vault0: PublicKey;
+  readonly vault1: PublicKey;
+}
+
+/**
+ * The pair and the two vaults, walked out of a pool account's own bytes.
+ *
+ * NO LENGTH ORACLE. A length check alone cannot say these offsets mean what we
+ * think — a different account of the right size decodes into four valid-looking
+ * addresses — so the length is checked only as far as the bytes actually read,
+ * and the DECISION below then requires the decoded pair to be the pair the
+ * registry claims. Bytes that are not this pool's pair fail that, whatever
+ * their length.
+ */
+export function decodePoolPair(data: Buffer): PoolPair {
+  const end = POOL_TOKEN_VAULT_1 + 32;
+  if (data.length < end) {
+    throw new Error(`a Raydium CLMM pool state is at least ${end} bytes to reach its vaults; this account is ${data.length}`);
+  }
+  return {
+    mint0: new PublicKey(data.subarray(POOL_TOKEN_MINT_0, POOL_TOKEN_MINT_0 + 32)),
+    mint1: new PublicKey(data.subarray(POOL_TOKEN_MINT_1, POOL_TOKEN_MINT_1 + 32)),
+    vault0: new PublicKey(data.subarray(POOL_TOKEN_VAULT_0, POOL_TOKEN_VAULT_0 + 32)),
+    vault1: new PublicKey(data.subarray(POOL_TOKEN_VAULT_1, POOL_TOKEN_VAULT_1 + 32)),
+  };
+}
+
+/** SPL Token's Account: mint(32) owner(32) amount(8, little-endian) — the balance at 64, in Token-2022 too. */
+const TOKEN_ACCOUNT_AMOUNT = 64;
+
+/** What a token account holds, out of its own bytes — the reserve, with no getTokenAccountBalance of its own. */
+export function decodeTokenAccountAmount(data: Buffer): bigint {
+  if (data.length < TOKEN_ACCOUNT_AMOUNT + 8) {
+    throw new Error(`a token account is at least ${TOKEN_ACCOUNT_AMOUNT + 8} bytes to reach its amount; this account is ${data.length}`);
+  }
+  return data.readBigUInt64LE(TOKEN_ACCOUNT_AMOUNT);
+}
+
+/** A pool account as one turn read it: decoded, or the reason it could not be. */
+export type PoolRead = { readonly ok: true; readonly pair: PoolPair } | { readonly ok: false; readonly why: string };
+
+/**
+ * One pool account as the chain returned it, read once — for the vault
+ * addresses the turn must fetch next AND for the decision below, so the bytes
+ * are decoded exactly once and every refusal string still lives in this file.
+ */
+export function readPoolPair(account: { readonly data: Buffer } | null | undefined): PoolRead {
+  if (account === null || account === undefined) {
+    return { ok: false, why: "has no readable pool account, and a depth that cannot be measured is not a depth" };
+  }
+  try {
+    return { ok: true, pair: decodePoolPair(account.data) };
+  } catch (error) {
+    return { ok: false, why: `could not be read as a Raydium pool: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+/** One leg's pool, and what this turn would really push into it. */
+export interface LegPool {
+  readonly mint: PublicKey;
+  /** The pool the registry routes this leg through. */
+  readonly pool: PublicKey;
+  /** In-asset raw units this turn would spend on THIS leg: its share of the turn's budget. */
+  readonly spend: bigint;
+  readonly read: PoolRead;
+}
+
+/** Whether every leg's pool can serve this turn's share of it with margin. */
+export type DepthDecision =
+  | { readonly deep: true }
+  | { readonly deep: false; readonly outcome: "REFUSED"; readonly detail: string };
+
+/** A reserve's cover of a spend, for a refusal a human has to act on: "6.4x", "0.0x". */
+function cover(reserve: bigint, spend: bigint): string {
+  if (spend <= 0n) return "unbounded";
+  return `${(Number(reserve) / Number(spend)).toFixed(1)}x`;
+}
+
+/**
+ * Whether the pools this turn would trade against can actually serve it,
+ * measured from their own vaults at the moment of the turn and against the
+ * amount this turn would really spend on each leg.
+ *
+ * THE GATE check:legs CANNOT BE. A build-time check proves a pool was deep when
+ * the check ran. This one refuses the turn when the pool is shallow NOW, which
+ * is the only tense in which money moves. It runs beside the unroutable-leg and
+ * mint-admission refusals, before anything is wrapped or converted, so a basket
+ * that cannot be bought never costs the owner their SOL exposure on the way to
+ * finding out.
+ *
+ * ALL OR NOTHING, the same doctrine and the same reason as the two gates beside
+ * it: ONE shallow leg refuses the WHOLE basket, the deep ones included. Buying
+ * only the legs whose pools happen to be deep is a partial basket, and its
+ * weights silently drift onto whatever survived — which is not the basket the
+ * owner signed. The detail names the leg and both figures, because the operator
+ * cannot act on "a pool was thin".
+ *
+ * THE IN-SIDE RESERVE IS WHAT IS TESTED. It is the denominator of the impact
+ * the slippage bound has to absorb, and it is denominated in the same asset as
+ * the spend — so the test needs no price, and no quote from the venue being
+ * traded against can flatter it. The out side can only be checked for the one
+ * thing that needs no price: whether there is anything there at all. A pool
+ * with stock left but no in-asset depth is caught by the reserve arm; a pool
+ * with neither is caught twice.
+ */
+export function legDepthDecision(input: {
+  /** The policy's in_mint — the side the spend is denominated in. */
+  readonly inMint: PublicKey;
+  readonly legs: readonly LegPool[];
+  /** What each pool vault held, by address, from the read that followed the pool accounts. */
+  readonly vaultAmounts: ReadonlyMap<string, bigint>;
+}): DepthDecision {
+  const refusals: string[] = [];
+
+  for (const leg of input.legs) {
+    const name = `${leg.mint.toBase58()} (pool ${leg.pool.toBase58()})`;
+    const refuse = (reason: string): number => refusals.push(`${name} ${reason}`);
+    // A leg whose share rounds to nothing is a leg this turn sends no
+    // transaction for (the swap loop skips it), so there is no spend to serve
+    // and no pool to judge.
+    if (leg.spend <= 0n) continue;
+    if (!leg.read.ok) {
+      refuse(leg.read.why);
+      continue;
+    }
+    const { mint0, mint1, vault0, vault1 } = leg.read.pair;
+    // THE REGISTRY IS CHECKED AGAINST THE CHAIN HERE. deps.pools maps a mint to
+    // a pool by configuration; nothing until now has asked the pool whether it
+    // trades that pair. A pool that does not is both a misconfiguration and the
+    // one way these offsets could mean something else entirely.
+    const inIsZero = mint0.equals(input.inMint) && mint1.equals(leg.mint);
+    const inIsOne = mint1.equals(input.inMint) && mint0.equals(leg.mint);
+    if (!inIsZero && !inIsOne) {
+      refuse(
+        `trades ${mint0.toBase58()} against ${mint1.toBase58()}, not ${input.inMint.toBase58()} against this leg — ` +
+          "the pool this leg is routed through is not this leg's pair",
+      );
+      continue;
+    }
+    const inVault = inIsZero ? vault0 : vault1;
+    const outVault = inIsZero ? vault1 : vault0;
+    const reserve = input.vaultAmounts.get(inVault.toBase58());
+    const stock = input.vaultAmounts.get(outVault.toBase58());
+    if (reserve === undefined || stock === undefined) {
+      refuse(
+        `has a vault this turn could not read (${(reserve === undefined ? inVault : outVault).toBase58()}), ` +
+          "and a depth that cannot be measured is not a depth",
+      );
+      continue;
+    }
+    if (stock === 0n) {
+      refuse(`holds none of the leg at all: its ${outVault.toBase58()} vault is empty, so there is nothing to buy`);
+      continue;
+    }
+    const required = leg.spend * MIN_POOL_DEPTH_MULTIPLE;
+    if (reserve < required) {
+      refuse(
+        `holds ${reserve} in-asset raw against the ${leg.spend} this turn would push into it — ${cover(reserve, leg.spend)} ` +
+          `cover, under the ${MIN_POOL_DEPTH_MULTIPLE}x this keeper trades on (it would need ${required})`,
+      );
+    }
+  }
+
+  if (refusals.length === 0) return { deep: true };
+  return {
+    deep: false,
+    outcome: "REFUSED",
+    detail:
+      `${refusals.join("; ")} — refusing the whole basket of ${input.legs.length} leg(s), the deep ones included, ` +
+      "and refusing to convert SOL toward it: a partial basket drifts from the weights the owner signed. " +
+      "Pool depth is measured in the turn, not at build time: a pool that passed check:legs days ago can be drained now",
   };
 }
 

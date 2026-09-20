@@ -11,7 +11,7 @@
 // method it was not given, and records every one it was.
 
 import * as anchor from "@coral-xyz/anchor";
-import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { TOKEN_2022_PROGRAM_ID, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { Connection, Keypair, PublicKey, SYSVAR_CLOCK_PUBKEY, type Finality } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import {
@@ -430,6 +430,8 @@ describe("the ticks' first steps, over the same bytes", () => {
     extra: Readonly<Record<string, Handler>> = {},
     /** False leaves the chain with no Pyth accounts at all, as a receiver outage would. */
     feeds = true,
+    /** Anything else the turn reads off the chain: leg mints, their pools, and the pools' vaults. */
+    more: ReadonlyMap<string, { readonly data: Buffer; readonly owner?: PublicKey }> = new Map(),
   ) {
     const vault = key();
     const accounts = new Map([
@@ -437,6 +439,10 @@ describe("the ticks' first steps, over the same bytes", () => {
       [SYSVAR_CLOCK_PUBKEY.toBase58(), clockBytes(TODAY_UNIX)],
     ]);
     const owners = new Map<string, PublicKey>();
+    for (const [address, account] of more) {
+      accounts.set(address, account.data);
+      if (account.owner !== undefined) owners.set(address, account.owner);
+    }
     if (feeds) {
       // $102.59321149 SOL against a USDC at $0.99987040, the pair as mainnet
       // quoted it, at the addresses pyth.ts names and owned by the RECEIVER
@@ -604,6 +610,173 @@ describe("the ticks' first steps, over the same bytes", () => {
     expect(result.detail).toContain("headroom next grows on day 20712 (2026-09-16)");
     expect(calls).toEqual(["getAccountInfoAndContext", "getMultipleAccountsInfo"]);
     for (const rpc of ["getTokenAccountBalance", "getBalance", "sendTransaction"]) expect(calls).not.toContain(rpc);
+  });
+
+  // ── the depth of the pools, measured in the turn that would trade on them ──
+  //
+  // A BUILD-TIME CHECK CANNOT PROTECT AGAINST A POOL DRAINING. The numbers here
+  // are the ones mainnet held on 2026-09-20: a pool check:legs passed at 6,700
+  // dollars two days earlier, holding 31.91 USDC against 0.110274669 of its own
+  // token, where a buy over about 11 dollars reverts.
+  const DRAINED_USDC = 31_910_000n;
+  const DRAINED_STOCK = 110_274_669n;
+  const LIVE_USDC = 9_389_405_679n;
+  const LIVE_STOCK = 1_163_416_179n;
+
+  /** A Token-2022 mint with no extensions: the 82-byte base and AccountType::Mint, which charges nothing. */
+  function plainMintBytes(): Buffer {
+    const data = Buffer.alloc(83);
+    data.fill(0xab, 0, 82);
+    data.writeUInt8(1, 82);
+    return data;
+  }
+
+  /** A Raydium CLMM PoolState as mainnet serves one: 1544 bytes, the pair at 73 and 105, the vaults at 137 and 169. */
+  function poolBytes(mint0: PublicKey, mint1: PublicKey, vault0: PublicKey, vault1: PublicKey): Buffer {
+    const data = Buffer.alloc(1_544);
+    data.fill(0xcd, 0, 73);
+    mint0.toBuffer().copy(data, 73);
+    mint1.toBuffer().copy(data, 105);
+    vault0.toBuffer().copy(data, 137);
+    vault1.toBuffer().copy(data, 169);
+    return data;
+  }
+
+  /** An SPL Token account: the balance is a u64 at 64. */
+  function tokenAccountBytes(amount: bigint): Buffer {
+    const data = Buffer.alloc(165);
+    data.writeBigUInt64LE(amount, 64);
+    return data;
+  }
+
+  /**
+   * A three-leg basket as the chain holds it: a mint, a pool and the pool's two
+   * vaults per leg, at the weights of the live basket.
+   */
+  function basketOnChain(reserves: readonly (readonly [bigint, bigint])[]) {
+    const accounts = new Map<string, { data: Buffer; owner?: PublicKey }>();
+    const legs = reserves.map(([usdcReserve, stock], index) => {
+      const mint = key();
+      const pool = key();
+      const usdcVault = key();
+      const stockVault = key();
+      accounts.set(mint.toBase58(), { data: plainMintBytes(), owner: TOKEN_2022_PROGRAM_ID });
+      accounts.set(pool.toBase58(), { data: poolBytes(USDC_MINT, mint, usdcVault, stockVault) });
+      accounts.set(usdcVault.toBase58(), { data: tokenAccountBytes(usdcReserve) });
+      accounts.set(stockVault.toBase58(), { data: tokenAccountBytes(stock) });
+      return { mint, pool, weightBps: [4_000, 3_300, 2_700][index]!, minOutRateWad: 1n };
+    });
+    return {
+      accounts,
+      legs: legs.map((leg) => ({ mint: leg.mint, weightBps: leg.weightBps, minOutRateWad: leg.minOutRateWad })),
+      pools: new Map(legs.map((leg) => [leg.mint.toBase58(), leg.pool] as const)),
+      mints: legs.map((leg) => leg.mint),
+      addresses: legs.map((leg) => leg.pool),
+    };
+  }
+
+  /** What a turn reads before it would wrap: the rent floor and the vault's two token balances, all empty. */
+  const emptyAndPriced: Readonly<Record<string, Handler>> = {
+    getMinimumBalanceForRentExemption: async () => 2_000_000,
+    getTokenAccountBalance: async () => {
+      throw new Error("could not find account");
+    },
+  };
+
+  it("refuse a basket whose pool drained since check:legs passed it, before anything is wrapped or converted", async () => {
+    // 10 SOL free and a funded crank, so this turn WOULD wrap and convert; the
+    // gate runs first, and the SOL never moves. The middle leg's pool is the
+    // drained one; the other two are the live pool as measured.
+    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [DRAINED_USDC, DRAINED_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    const { vault, connection, program, calls, callArgs } = chainWith({}, { legs: basket.legs }, emptyAndPriced, true, basket.accounts);
+    const result = await runInvestTick({
+      connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+    });
+
+    expect(result.outcome).toBe("REFUSED");
+    // THE AMOUNT TESTED IS THE ONE THIS TURN WOULD REALLY SPEND: max_per_call
+    // (250 USDC) caps the BASKET and is split by weight, so the 3,300 bps leg
+    // gets 82.5 USDC — not the 5-dollar default purchase, and not the whole cap.
+    expect(result.detail).toContain("holds 31910000 in-asset raw against the 82500000 this turn would push into it");
+    expect(result.detail).toContain("0.4x cover, under the 50x this keeper trades on (it would need 4125000000)");
+    expect(result.detail).toContain(basket.mints[1]!.toBase58());
+    expect(result.detail).toContain("refusing the whole basket of 3 leg(s), the deep ones included");
+    expect(result.detail).toContain("refusing to convert SOL toward it");
+    for (const index of [0, 2]) expect(result.detail).not.toContain(basket.mints[index]!.toBase58());
+
+    // NOTHING MOVED, AND ALMOST NOTHING WAS ASKED FOR. The pool states ride the
+    // request the mint gate was already sending — no extra round trip — and the
+    // reserves inside them cost exactly one more, for the whole basket.
+    expect(calls).toEqual([
+      "getAccountInfoAndContext",
+      "getMultipleAccountsInfo",
+      "getMinimumBalanceForRentExemption",
+      "getTokenAccountBalance",
+      "getTokenAccountBalance",
+      "getMultipleAccountsInfo",
+      "getMultipleAccountsInfo",
+    ]);
+    expect(callArgs[5]![0]).toEqual([...basket.mints, ...basket.addresses]);
+    expect((callArgs[6]![0] as PublicKey[]).length, "six vaults for three legs, in one request").toBe(6);
+    for (const rpc of ["getBalance", "getAccountInfo", "sendTransaction", "getSignaturesForAddress"]) expect(calls).not.toContain(rpc);
+    expect(result.wrap?.wrapped).toBe(0n);
+  });
+
+  it("let a deep basket through the gate and go on to the turn's own arithmetic", async () => {
+    // The same three legs, none of them drained, and conversion switched off so
+    // the money this turn can spend is exactly the 12 USDC the vault holds: 4.80
+    // to the heaviest leg, under the 5 USDC invest.rs requires of every call.
+    // Reaching that refusal at all is the proof the depth gate passed.
+    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    let usdcAta: PublicKey | undefined;
+    const { vault, connection, program, calls } = chainWith({}, { legs: basket.legs, minConvertRateWad: 0n }, {
+      getMinimumBalanceForRentExemption: async () => 2_000_000,
+      getTokenAccountBalance: async (address) => {
+        if (usdcAta === undefined || !(address as PublicKey).equals(usdcAta)) throw new Error("could not find account");
+        return { context: { slot: 1 }, value: { amount: "12000000", decimals: 6, uiAmount: 12 } };
+      },
+    }, true, basket.accounts);
+    usdcAta = getAssociatedTokenAddressSync(USDC_MINT, vault, true);
+    const result = await runInvestTick({
+      connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+    });
+
+    expect(result.outcome).toBe("IDLE");
+    expect(result.detail).toContain("$12.00 across 3 legs is $4.80-ish each, under the $5.00 per-call minimum");
+    expect(result.detail).toContain("min_convert_rate_wad is 0");
+    // A RESTING TURN IS TESTED AT WHAT IT HOLDS, NOT AT THE CAP. Had the gate
+    // used max_per_call here it would have measured 100 USDC against pools this
+    // vault was never going to push more than 4.80 into.
+    expect(calls).toEqual([
+      "getAccountInfoAndContext",
+      "getMultipleAccountsInfo",
+      "getMinimumBalanceForRentExemption",
+      "getTokenAccountBalance",
+      "getTokenAccountBalance",
+      "getMultipleAccountsInfo",
+      "getMultipleAccountsInfo",
+      "getTokenAccountBalance",
+    ]);
+    for (const rpc of ["getBalance", "sendTransaction"]) expect(calls).not.toContain(rpc);
+  });
+
+  it("refuse a leg routed through a pool that is not its pair, which no build-time check can see change", async () => {
+    // The registry maps a mint to a pool by configuration. Nothing before this
+    // gate asks the pool what it actually trades, so a stale entry sends the
+    // vault's money into a stranger's market at the weights of this one.
+    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    const strangerVaults = [key(), key()];
+    basket.accounts.set(basket.addresses[0]!.toBase58(), {
+      data: poolBytes(USDC_MINT, key(), strangerVaults[0]!, strangerVaults[1]!),
+    });
+    for (const address of strangerVaults) basket.accounts.set(address.toBase58(), { data: tokenAccountBytes(LIVE_USDC) });
+    const { vault, connection, program } = chainWith({}, { legs: basket.legs }, emptyAndPriced, true, basket.accounts);
+    const result = await runInvestTick({
+      connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+    });
+    expect(result.outcome).toBe("REFUSED");
+    expect(result.detail).toContain("is not this leg's pair");
+    expect(result.detail).toContain(basket.mints[0]!.toBase58());
   });
 
   function linkTo(vault: PublicKey): ManagedLink {

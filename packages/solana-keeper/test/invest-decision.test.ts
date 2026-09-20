@@ -29,32 +29,41 @@ import {
   CRANK_WRAP_RESERVE_LAMPORTS,
   INVEST_FAILED_CRITICAL_STREAK,
   MAX_LEG_FEE_BPS,
+  MIN_POOL_DEPTH_MULTIPLE,
   U64_MAX,
   USDC_MINT,
   WRAP_DUST_LAMPORTS,
   activeTransferFee,
+  basketBudget,
   basketMinimum,
   chainDay,
   convertAmount,
   convertCapLamports,
   convertDecision,
   decodeMintFacts,
+  decodePoolPair,
+  decodeTokenAccountAmount,
   inMintDecision,
   investFailedAlert,
   investFailedStreak,
   investPauseDecision,
   legAdmissionDecision,
+  legDepthDecision,
+  legShare,
   MAX_PYTH_AGE_SECONDS,
   MAX_PYTH_DEVIATION_BPS,
   oracleConvertDecision,
+  readPoolPair,
   rollingDecision,
   routeRateWad,
   rollingTotal,
   shouldConvert,
+  turnSpendCeiling,
   wrapPlan,
   wrapShortAlert,
   wrapShortStreak,
 } from "../src/invest-decision.js";
+import { SLIPPAGE_BPS, netOfTransferFee } from "../src/min-out.js";
 import { PYTH_SOL_USD_FEED_ID_HEX, PYTH_USDC_USD_FEED_ID_HEX, PYTH_VERIFICATION_FULL, type PythPriceUpdate } from "../src/pyth.js";
 
 describe("the policy's in_mint", () => {
@@ -437,6 +446,54 @@ describe("a leg's mint, before the basket is bought", () => {
     expect(legAdmissionDecision({ legs: [legOf(withFee(10_000))], currentEpoch: TODAY }).admit).toBe(false);
   });
 
+  it("admits exactly 100 bps on purpose: the ceiling is a whole round trip of the slippage bound", () => {
+    // THE BOUNDARY IS A DECISION, NOT A SIDE EFFECT OF `>`. A leg is bought and
+    // one day sold, so the ceiling is paid twice, and twice 100 bps is the
+    // whole 200 bps tolerance min-out.ts allows a single fill.
+    expect(MAX_LEG_FEE_BPS * 2n).toBe(SLIPPAGE_BPS);
+    const ceiling = { bps: MAX_LEG_FEE_BPS, maximumFee: UNCAPPED };
+    const roundTrip = netOfTransferFee(netOfTransferFee(1_000_000_000n, ceiling), ceiling);
+    expect(roundTrip).toBe(980_100_000n);
+    // 199 bps: a hair under the bound only because the second fee is charged on
+    // what the first one left. At the ceiling the issuer takes as much of a
+    // position as every price movement this keeper will absorb on a fill.
+    expect(((1_000_000_000n - roundTrip) * 10_000n) / 1_000_000_000n).toBe(SLIPPAGE_BPS - 1n);
+
+    const withFee = (bps: number): Buffer =>
+      mintBytes([transferFeeConfig({ epoch: 0n, maximumFee: 0n, bps: 0 }, { epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps })]);
+    expect(legAdmissionDecision({ legs: [legOf(withFee(99))], currentEpoch: TODAY }).admit).toBe(true);
+    expect(legAdmissionDecision({ legs: [legOf(withFee(100))], currentEpoch: TODAY }).admit).toBe(true);
+    expect(legAdmissionDecision({ legs: [legOf(withFee(101))], currentEpoch: TODAY }).admit).toBe(false);
+  });
+
+  it("charges the rise already scheduled on chain from the epoch it names, and not the epoch before", () => {
+    // MEASURED ON MAINNET 2026-09-20, epoch 1038: both mints carry
+    // newer_transfer_fee = 100 bps stamped 1039, over an older 50 bps stamped
+    // 1032. Nothing has to be signed for the live fee to double — the cluster
+    // only has to roll an epoch, which it did within hours of this being read.
+    const scheduled = mintBytes([
+      transferFeeConfig({ epoch: 1_032n, maximumFee: UNCAPPED, bps: 50 }, { epoch: 1_039n, maximumFee: UNCAPPED, bps: 100 }),
+    ]);
+    const facts = decodeMintFacts(scheduled);
+    expect(activeTransferFee(facts, 1_038n).bps).toBe(50n);
+    expect(activeTransferFee(facts, 1_039n).bps).toBe(100n);
+    expect(activeTransferFee(facts, 1_040n).bps).toBe(100n);
+    // The doubled fee is still admitted — it lands exactly on the ceiling, which
+    // is the boundary the test above pins deliberately.
+    expect(legAdmissionDecision({ legs: [legOf(scheduled)], currentEpoch: 1_039n }).admit).toBe(true);
+
+    // One basis point more on the same schedule, and the epoch roll alone turns
+    // a basket this keeper buys into one it refuses, with nothing else changed.
+    const overTheLine = mintBytes([
+      transferFeeConfig({ epoch: 1_032n, maximumFee: UNCAPPED, bps: 50 }, { epoch: 1_039n, maximumFee: UNCAPPED, bps: 101 }),
+    ]);
+    expect(legAdmissionDecision({ legs: [legOf(overTheLine)], currentEpoch: 1_038n }).admit).toBe(true);
+    const refused = legAdmissionDecision({ legs: [legOf(overTheLine)], currentEpoch: 1_039n });
+    expect(refused.admit).toBe(false);
+    if (refused.admit) return;
+    expect(refused.detail).toContain("charges a 101 bps transfer fee in epoch 1039, above the 100 bps");
+  });
+
   it("refuses only from the epoch a scheduled fee starts in, not before", () => {
     const scheduled = mintBytes([
       transferFeeConfig({ epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps: 50 }, { epoch: TODAY + 2n, maximumFee: UNCAPPED, bps: 1_000 }),
@@ -478,6 +535,244 @@ describe("a leg's mint, before the basket is bought", () => {
     expect(admission.detail).toContain("refusing the whole basket of 4 leg(s), the sound ones included");
     expect(admission.detail).toContain("drifts from the weights the owner signed");
     for (const leg of sound) expect(admission.detail).not.toContain(leg.mint.toBase58());
+  });
+});
+
+describe("how much of a turn one leg gets", () => {
+  it("caps the BASKET and then splits it, which is how one leg gets 333 dollars out of a 1,000-dollar cap", () => {
+    // The shape of max_per_call that makes a depth gate necessary: the cap is
+    // not a per-leg bound, and a three-leg basket pushes a third of it into ONE
+    // pool in a single turn — two orders of magnitude over the 5-dollar default.
+    const budget = basketBudget({ held: 5_000_000_000n, maxPerCall: 1_000_000_000n, headroom: U64_MAX });
+    expect(budget).toBe(1_000_000_000n);
+    expect(legShare(budget, 3_333)).toBe(333_300_000n);
+    // And the three shares never add up to more than the cap.
+    const shares = [3_334, 3_333, 3_333].map((weight) => legShare(budget, weight));
+    expect(shares.reduce((total, share) => total + share, 0n)).toBeLessThanOrEqual(budget);
+  });
+
+  it("takes the smallest of the holding, the per-call cap and the 30-day headroom", () => {
+    expect(basketBudget({ held: 40_000_000n, maxPerCall: 250_000_000n, headroom: U64_MAX })).toBe(40_000_000n);
+    expect(basketBudget({ held: 400_000_000n, maxPerCall: 250_000_000n, headroom: U64_MAX })).toBe(250_000_000n);
+    expect(basketBudget({ held: 400_000_000n, maxPerCall: 250_000_000n, headroom: 9_000_000n })).toBe(9_000_000n);
+  });
+
+  it("tests a converting turn at the most it could reach, and a resting one at what the vault actually holds", () => {
+    const caps = { maxPerCall: 250_000_000n, headroom: 900_000_000n };
+    // The convert has not happened yet, so the USDC that will exist is unknown;
+    // what is known is that it cannot buy past the cap or the headroom.
+    expect(turnSpendCeiling({ held: 0n, converting: true, ...caps })).toBe(250_000_000n);
+    expect(turnSpendCeiling({ held: 0n, converting: true, ...caps, headroom: 40_000_000n })).toBe(40_000_000n);
+    // A turn whose SOL hop is off or rested can gain no in-asset this turn, so
+    // its own holding is the ceiling — testing it at the cap would refuse a
+    // 20-dollar basket because a 250-dollar one would have been too big.
+    expect(turnSpendCeiling({ held: 20_000_000n, converting: false, ...caps })).toBe(20_000_000n);
+    expect(turnSpendCeiling({ held: 400_000_000n, converting: false, ...caps })).toBe(250_000_000n);
+  });
+});
+
+describe("a leg's pool, at the moment the money would move", () => {
+  const key = (): PublicKey => Keypair.generate().publicKey;
+
+  /** The two pools measured on mainnet on 2026-09-20, by the addresses the registry routes through. */
+  const DRAINED_POOL = new PublicKey("HvpDt29EdGcKkFMLkUgvAJDP5oDFLaYG4jnVZnRsHduM");
+  const LIVE_POOL = new PublicKey("47MsbowAJnPPt6jgSGLK4hdCtKqRRcKT5pTFHPV7WBPt");
+  /** What each held that night, raw: USDC's six decimals, the stock's nine. */
+  const DRAINED_USDC = 31_910_000n;
+  const DRAINED_STOCK = 110_274_669n;
+  const LIVE_USDC = 9_389_405_679n;
+  const LIVE_STOCK = 1_163_416_179n;
+  /** The default purchase, one leg's share of it, and one leg's share of a 1,000-dollar per-call cap split three ways. */
+  const FIVE_DOLLARS = 5_000_000n;
+  const ONE_LEG_OF_THE_DEFAULT = 1_666_666n;
+  const A_THIRD_OF_A_THOUSAND = 333_300_000n;
+
+  /** A Raydium CLMM PoolState as mainnet serves one: 1544 bytes, the pair at 73 and 105, the vaults at 137 and 169. */
+  function poolBytes(pair: { mint0: PublicKey; mint1: PublicKey; vault0: PublicKey; vault1: PublicKey }): Buffer {
+    const data = Buffer.alloc(1_544);
+    // The discriminator, bump, amm_config and owner ahead of the pair, and
+    // everything after the vaults: noise that must not leak into any address.
+    data.fill(0xcd, 0, 73);
+    data.fill(0xce, 201, 1_544);
+    pair.mint0.toBuffer().copy(data, 73);
+    pair.mint1.toBuffer().copy(data, 105);
+    pair.vault0.toBuffer().copy(data, 137);
+    pair.vault1.toBuffer().copy(data, 169);
+    return data;
+  }
+
+  /** An SPL Token account: 165 bytes, mint(32) owner(32) then the amount, a u64 at 64. */
+  function tokenAccountBytes(amount: bigint): Buffer {
+    const data = Buffer.alloc(165);
+    key().toBuffer().copy(data, 0);
+    key().toBuffer().copy(data, 32);
+    data.writeBigUInt64LE(amount, 64);
+    data.fill(0xaf, 72, 165); // delegate, state, is_native, delegated_amount, close_authority
+    return data;
+  }
+
+  interface LegInput {
+    readonly reserve: bigint;
+    readonly stock: bigint;
+    readonly spend: bigint;
+    readonly pool?: PublicKey;
+    /** True puts the in-asset at token_1 instead of token_0: the order is the pool's, not ours. */
+    readonly flipped?: boolean;
+  }
+
+  /** A basket as the turn hands it to the gate: one pool account and two vault balances per leg. */
+  function basketOf(legs: readonly LegInput[]) {
+    const vaultAmounts = new Map<string, bigint>();
+    const built = legs.map((leg) => {
+      const mint = key();
+      const inVault = key();
+      const outVault = key();
+      vaultAmounts.set(inVault.toBase58(), leg.reserve);
+      vaultAmounts.set(outVault.toBase58(), leg.stock);
+      const pair = leg.flipped === true
+        ? { mint0: mint, mint1: USDC_MINT, vault0: outVault, vault1: inVault }
+        : { mint0: USDC_MINT, mint1: mint, vault0: inVault, vault1: outVault };
+      return {
+        mint,
+        pool: leg.pool ?? key(),
+        spend: leg.spend,
+        read: readPoolPair({ data: poolBytes(pair) }),
+      };
+    });
+    return { legs: built, vaultAmounts, decide: () => legDepthDecision({ inMint: USDC_MINT, legs: built, vaultAmounts }) };
+  }
+
+  it("walks the pair and both vaults out of a pool's own bytes, and a balance out of a token account's", () => {
+    const pair = { mint0: USDC_MINT, mint1: key(), vault0: key(), vault1: key() };
+    expect(decodePoolPair(poolBytes(pair))).toEqual(pair);
+    expect(decodeTokenAccountAmount(tokenAccountBytes(LIVE_USDC))).toBe(LIVE_USDC);
+
+    // Bytes too short to reach the offsets are a refusal with a reason, not a
+    // PublicKey built out of whatever followed.
+    const short = readPoolPair({ data: Buffer.alloc(200) });
+    expect(short.ok).toBe(false);
+    if (short.ok) return;
+    expect(short.why).toContain("could not be read as a Raydium pool");
+    expect(() => decodeTokenAccountAmount(Buffer.alloc(64))).toThrow(/at least 72 bytes/);
+  });
+
+  it("trades against a pool with room, in either token order", () => {
+    // The live pool as measured, against one leg's share of a 250-dollar cap.
+    for (const flipped of [false, true]) {
+      const basket = basketOf([{ reserve: LIVE_USDC, stock: LIVE_STOCK, spend: 83_000_000n, flipped }]);
+      expect(basket.decide()).toEqual({ deep: true });
+    }
+  });
+
+  it("refuses the pool that drained after check:legs passed it — down to the default basket's own share", () => {
+    // 6,700 dollars when the build-time check ran; 51 two days later. This is
+    // the failure the whole gate exists for, stated as a vector — and it is
+    // stated at the SMALLEST spend the product makes as well as the largest,
+    // because a bound that only catches the big ones would have let the default
+    // 5-dollar basket buy into a pool holding 31.91 USDC.
+    for (const spend of [ONE_LEG_OF_THE_DEFAULT, FIVE_DOLLARS, A_THIRD_OF_A_THOUSAND]) {
+      const basket = basketOf([{ reserve: DRAINED_USDC, stock: DRAINED_STOCK, spend, pool: DRAINED_POOL }]);
+      const decision = basket.decide();
+      expect(decision.deep).toBe(false);
+      if (decision.deep) return;
+      expect(decision.outcome).toBe("REFUSED");
+      // Both figures, named: the operator cannot act on "a pool was thin".
+      expect(decision.detail).toContain(`holds ${DRAINED_USDC} in-asset raw against the ${spend} this turn would push into it`);
+      expect(decision.detail).toContain(basket.legs[0]!.mint.toBase58());
+      expect(decision.detail).toContain(DRAINED_POOL.toBase58());
+      expect(decision.detail).toContain("Pool depth is measured in the turn, not at build time");
+    }
+    // 19.1x cover at the default basket's share — the vector that sets the
+    // bound: anything at or under 19x would have admitted this pool there.
+    const smallest = basketOf([{ reserve: DRAINED_USDC, stock: DRAINED_STOCK, spend: ONE_LEG_OF_THE_DEFAULT }]).decide();
+    expect(smallest.deep === false && smallest.detail).toContain("19.1x cover, under the 50x this keeper trades on");
+    const five = basketOf([{ reserve: DRAINED_USDC, stock: DRAINED_STOCK, spend: FIVE_DOLLARS }]).decide();
+    expect(five.deep === false && five.detail).toContain("6.4x cover, under the 50x this keeper trades on");
+  });
+
+  it("admits what the live pool was measured to serve, and refuses the size it was measured not to", () => {
+    // The live pool as mainnet held it on 2026-09-20, with its 0.5 % impact
+    // size measured at 350 dollars and then 598 six minutes later.
+    const against = (spend: bigint) => basketOf([{ reserve: LIVE_USDC, stock: LIVE_STOCK, spend }]).decide();
+    // A 250-dollar per-call cap's heaviest leg: 94x cover, a size this venue
+    // serves without noticing. A gate that refused this is one an operator
+    // turns off, and then none of it runs at all.
+    expect(against(100_000_000n)).toEqual({ deep: true });
+    // 187.79 — half the smaller of the two measurements, and the most 50x admits here.
+    expect(against(187_788_113n)).toEqual({ deep: true });
+    // And the 333 dollars a 1,000-dollar cap splits three ways: 28x cover, at
+    // the size this pool was measured NOT to absorb quietly.
+    const overTheMeasuredSize = against(A_THIRD_OF_A_THOUSAND);
+    expect(overTheMeasuredSize.deep).toBe(false);
+    expect(overTheMeasuredSize.deep === false && overTheMeasuredSize.detail).toContain("28.2x cover, under the 50x");
+  });
+
+  it("puts the boundary exactly at the multiple, and tests it there", () => {
+    expect(MIN_POOL_DEPTH_MULTIPLE).toBe(50n);
+    const spend = 1_000_000n;
+    const exactly = basketOf([{ reserve: spend * MIN_POOL_DEPTH_MULTIPLE, stock: LIVE_STOCK, spend }]).decide();
+    expect(exactly).toEqual({ deep: true });
+    const oneShort = basketOf([{ reserve: spend * MIN_POOL_DEPTH_MULTIPLE - 1n, stock: LIVE_STOCK, spend }]).decide();
+    expect(oneShort.deep).toBe(false);
+    expect(oneShort.deep === false && oneShort.detail).toContain("it would need 50000000");
+  });
+
+  it("refuses the WHOLE basket for one shallow leg, the deep ones included", () => {
+    // The same doctrine as the unroutable-leg and mint-admission refusals, and
+    // for the same reason: a partial basket is not the basket that was signed.
+    const basket = basketOf([
+      { reserve: LIVE_USDC, stock: LIVE_STOCK, spend: 50_000_000n },
+      { reserve: DRAINED_USDC, stock: DRAINED_STOCK, spend: 50_000_000n, pool: DRAINED_POOL },
+      { reserve: LIVE_USDC, stock: LIVE_STOCK, spend: 50_000_000n },
+    ]);
+    const decision = basket.decide();
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
+    expect(decision.detail).toContain(basket.legs[1]!.mint.toBase58());
+    expect(decision.detail).toContain("refusing the whole basket of 3 leg(s), the deep ones included");
+    expect(decision.detail).toContain("drifts from the weights the owner signed");
+    expect(decision.detail).toContain("refusing to convert SOL toward it");
+    for (const index of [0, 2]) expect(decision.detail).not.toContain(basket.legs[index]!.mint.toBase58());
+  });
+
+  it("refuses a pool that is not this leg's pair, which is the registry checked against the chain", () => {
+    // deps.pools maps a mint to a pool by configuration, and nothing until here
+    // asks the pool what it actually trades.
+    const stranger = { mint0: USDC_MINT, mint1: key(), vault0: key(), vault1: key() };
+    const decision = legDepthDecision({
+      inMint: USDC_MINT,
+      vaultAmounts: new Map([[stranger.vault0.toBase58(), LIVE_USDC], [stranger.vault1.toBase58(), LIVE_STOCK]]),
+      legs: [{ mint: key(), pool: LIVE_POOL, spend: FIVE_DOLLARS, read: readPoolPair({ data: poolBytes(stranger) }) }],
+    });
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
+    expect(decision.detail).toContain("is not this leg's pair");
+    expect(decision.detail).toContain(stranger.mint1.toBase58());
+  });
+
+  it("refuses a pool it could not read, a vault it could not read, and a pool with no stock left", () => {
+    const missing = legDepthDecision({
+      inMint: USDC_MINT,
+      vaultAmounts: new Map(),
+      legs: [{ mint: key(), pool: LIVE_POOL, spend: FIVE_DOLLARS, read: readPoolPair(null) }],
+    });
+    expect(missing.deep === false && missing.detail).toContain("has no readable pool account");
+
+    // A pool whose state read fine but whose vault balance did not: an unread
+    // reserve is not a deep one, and the gate says which account went missing.
+    const built = basketOf([{ reserve: LIVE_USDC, stock: LIVE_STOCK, spend: FIVE_DOLLARS }]);
+    const blind = legDepthDecision({ inMint: USDC_MINT, legs: built.legs, vaultAmounts: new Map() });
+    expect(blind.deep === false && blind.detail).toContain("a depth that cannot be measured is not a depth");
+
+    // The one thing the out side can be judged on without a price: whether
+    // there is anything there at all.
+    const empty = basketOf([{ reserve: LIVE_USDC, stock: 0n, spend: FIVE_DOLLARS }]).decide();
+    expect(empty.deep === false && empty.detail).toContain("holds none of the leg at all");
+  });
+
+  it("judges no pool for a leg whose share rounds to nothing, because the turn sends nothing there", () => {
+    const basket = basketOf([{ reserve: 0n, stock: 0n, spend: 0n }]);
+    expect(basket.decide()).toEqual({ deep: true });
   });
 });
 
