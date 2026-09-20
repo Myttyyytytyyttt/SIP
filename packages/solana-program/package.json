@@ -4,6 +4,7 @@
   "license": "ISC",
   "exports": {
     "./attestation": "./scripts/attestation.ts",
+    "./jupiter-route": "./scripts/jupiter-route.ts",
     "./link-consent": "./scripts/link-consent.ts",
     "./live-route": "./scripts/live-route.ts",
     "./raydium-swap": "./scripts/raydium-swap.ts",
