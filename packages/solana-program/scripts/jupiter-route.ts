@@ -267,12 +267,13 @@ export async function fetchJupiterQuote(params: {
    * Venues to keep out of the route, by Jupiter's own label.
    *
    * NOT A PREFERENCE — A PRECONDITION. A venue that cannot execute in
-   * simulation cannot be used by this vault at all: the keeper's signer
-   * simulates before it signs, so such a route is refused upstairs, and if it
-   * ever were signed it would burn the transaction. Measured on 2026-09-20:
-   * every route through `Hadron` reverts with its own error 0x3c under
-   * simulateTransaction, at 5, 25 and 250 USD, on both PreStocks legs, at 400k
-   * and at 1.4M compute units.
+   * simulation cannot be used by this vault at all: Privy simulates before the
+   * policy runs, so such a route is refused upstairs, and if it ever were
+   * signed it would burn the transaction. Measured on 2026-09-20: every route
+   * through `Hadron` reverted with that venue's own error 0x3c under
+   * simulateTransaction — both PreStocks legs at 5, 25 and 250 USD, and again
+   * with the compute limit raised from 400k to 1.4M, with nothing in
+   * otherInstructions that we had dropped.
    */
   readonly excludeDexes?: readonly string[];
 }): Promise<JupiterQuote> {

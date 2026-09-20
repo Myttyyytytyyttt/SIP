@@ -141,12 +141,13 @@ function parseArgs(argv: readonly string[]): Args {
     json: get("--json"),
     onlyDirect: argv.includes("--direct"),
     // EXCLUDED BECAUSE IT CANNOT BE MEASURED, AND CANNOT BE USED. Every route
-    // Jupiter built through Hadron on 2026-09-20 reverted with the venue's own
+    // Jupiter built through Hadron on 2026-09-20 reverted with that venue's own
     // error 0x3c inside simulateTransaction — both fee legs, all three sizes,
-    // at 400k and 1.4M CU, with nothing in otherInstructions that we dropped.
-    // A venue whose swap does not simulate is a venue this vault cannot use at
-    // all, because the keeper's signer simulates before it signs. Pass
-    // `--exclude ""` to put it back and watch the rows fail.
+    // and again with the compute limit raised to 1.4M, with nothing in
+    // otherInstructions that we had dropped. A venue whose swap does not
+    // simulate is a venue this vault cannot use at all, because Privy
+    // simulates before the policy runs. Pass `--exclude ""` to put it back and
+    // watch the rows fail; the failures name the program that said no.
     excludeDexes: (get("--exclude") ?? "Hadron").split(",").map((s) => s.trim()).filter((s) => s.length > 0),
   };
 }
@@ -278,13 +279,18 @@ async function measureLeg(
   const destination = getAssociatedTokenAddressSync(leg.mint, args.user, true, TOKEN_2022_PROGRAM_ID);
 
   // EVERYTHING THAT CAN BE READ BEFORE THE QUOTE IS READ BEFORE THE QUOTE.
-  // Several of the AMMs Jupiter routes these legs through price off an oracle
-  // and refuse a quote that has gone stale by a few slots — measured here as
-  // the AMM's own error 0x3c, on every size, the moment the gap grew to a few
-  // seconds. So the window between the quote and the simulation is kept as
-  // short as the network allows: balances first, lookup tables cached across
-  // rows, and no getLatestBlockhash at all, because replaceRecentBlockhash
-  // makes the simulator supply its own.
+  // A quote describes a market at a moment, and the fill it is compared against
+  // should be as near that moment as the network allows — so the balances are
+  // read first, the lookup tables are cached across rows, and there is no
+  // getLatestBlockhash at all, because replaceRecentBlockhash makes the
+  // simulator supply its own.
+  //
+  // THIS WAS NOT WHAT FIXED HADRON, and the note is here so nobody re-derives
+  // a cause that was already ruled out: shortening this window changed nothing
+  // about that venue's 0x3c, and neither did raising the compute limit from
+  // 400k to 1.4M. Those routes are excluded instead. What the short window
+  // does buy is smaller drift between the quoted number and the credited one,
+  // which is the difference the whole file is measuring.
   const before = await Promise.all([readTokenAccount(connection, destination), readTokenAccount(connection, source)]);
 
   // THE SAME BUILDER, THE SAME REFUSALS, THE SAME FLAGS. A JupiterRouteRefusal
