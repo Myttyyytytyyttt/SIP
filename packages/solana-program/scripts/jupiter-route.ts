@@ -578,8 +578,15 @@ export function pricedAtSlot(age: RouteAge): number | null {
  *
  * PURE, AND THE CLOCK COMES IN AS AN ARGUMENT — both so this is a unit test
  * and so a caller can re-run it immediately before signing, which is the check
- * that actually matters: buildJupiterRoute can only prove the route was fresh
- * when it was built.
+ * that actually matters: a verification can only prove the route was fresh at
+ * the moment it ran.
+ *
+ * AND IT IS NOT OPTIONAL ANY MORE. verifySharedAccountsRoute calls this as its
+ * last step, against the clock and the tolerance its caller supplies, so a
+ * route cannot be verified without being aged — which was the hole: the
+ * context carried quotedAtMs and no tolerance, the age was assembled, and
+ * nothing ever compared it to anything. Only buildJupiterRoute checked, and a
+ * route is verified again when it is about to be SIGNED, which is later.
  *
  * A tolerance that states NEITHER bound is itself refused. "How stale is too
  * stale" is a decision, and a route nobody made it for is the state this
@@ -779,6 +786,19 @@ export interface VerifyContext {
    * was taken, and only the caller was there when it was.
    */
   readonly quotedAtMs: number;
+  /**
+   * The clock, and the chain's slot, AT THE MOMENT OF THIS VERIFICATION —
+   * again read by the caller, because this function still has no clock of its
+   * own. `slot` is only needed when the tolerance states maxAgeSlots.
+   */
+  readonly observed: { readonly nowMs: number; readonly slot?: number };
+  /**
+   * REQUIRED, AND THE POINT OF THE PAIR ABOVE. How old a price this
+   * verification is willing to accept. A verification that states no tolerance
+   * is refused, exactly as verifyRouteFresh refuses one: min_out is derived
+   * from the quote's numbers, so a route nobody aged is a floor nobody sized.
+   */
+  readonly maxAge: AgeTolerance;
   readonly vault: PublicKey;
   readonly vaultIn: PublicKey;
   readonly vaultTarget: PublicKey;
@@ -1005,7 +1025,7 @@ export function verifySharedAccountsRoute(
     new TransactionInstruction({ programId: JUPITER_PROGRAM, keys: remainingAccounts, data }),
   ]);
 
-  return {
+  const route: JupiterRoute = {
     venueProgram: JUPITER_PROGRAM,
     remainingAccounts,
     venueData: data,
@@ -1021,6 +1041,15 @@ export function verifySharedAccountsRoute(
     labels: quote.routePlan.map((step) => step.swapInfo.label ?? "?"),
     legacyBytes,
   };
+
+  // LAST, AND INSIDE THIS FUNCTION RATHER THAN AFTER IT. Everything above is
+  // about shape and is true whenever it was checked; this one is about a
+  // price, and is only true at the instant it runs. It sits here so that no
+  // verification can return a route it never aged — including the verification
+  // a caller runs just before signing, which is the one that decides whether a
+  // min_out sized against this quote is still a floor worth having.
+  verifyRouteFresh(route, context.observed, context.maxAge);
+  return route;
 }
 
 /**
@@ -1177,19 +1206,20 @@ export async function buildJupiterRoute(
     routeMints(quote, params.inputMint, params.targetMint),
   );
 
-  const route = verifySharedAccountsRoute(quote, response, {
+  // The slot is only read when a slot bound was asked for: an RPC round trip
+  // nobody stated a tolerance for is a round trip that buys nothing.
+  const slot = params.maxAge.maxAgeSlots === undefined ? undefined : await connection.getSlot("confirmed");
+  return verifySharedAccountsRoute(quote, response, {
     request,
     quotedAtMs,
+    // The freshness check now happens INSIDE the verification, so the clock is
+    // read here, as late as it can be and still be the clock that check uses.
+    observed: { nowMs: Date.now(), ...(slot === undefined ? {} : { slot }) },
+    maxAge: params.maxAge,
     vault: params.vault,
     vaultIn: params.vaultIn,
     vaultTarget: params.vaultTarget,
     vaultOwnedTokenAccounts,
     transferFee: params.useWorstCaseTransferFee === false ? fee.current : fee.worstCase,
   });
-
-  // The slot is only read when a slot bound was asked for: an RPC round trip
-  // nobody stated a tolerance for is a round trip that buys nothing.
-  const slot = params.maxAge.maxAgeSlots === undefined ? undefined : await connection.getSlot("confirmed");
-  verifyRouteFresh(route, { nowMs: Date.now(), ...(slot === undefined ? {} : { slot }) }, params.maxAge);
-  return route;
 }

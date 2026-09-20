@@ -154,6 +154,10 @@ function context(overrides: Partial<VerifyContext> = {}): VerifyContext {
   return {
     request: request(),
     quotedAtMs: QUOTED_AT_MS,
+    // A verification a second after the quote landed, inside a tolerance wide
+    // enough that the shape tests below are never about the clock.
+    observed: { nowMs: QUOTED_AT_MS + 1_000 },
+    maxAge: { maxAgeMs: 30_000 },
     vault: new PublicKey(VAULT),
     vaultIn: new PublicKey(VAULT_USDC),
     vaultTarget: new PublicKey(VAULT_SPYX),
@@ -815,6 +819,59 @@ describe("the Token-2022 transfer fee, and where each min_out actually lands", (
     const route = verifySharedAccountsRoute(quote(), response(), context({ transferFee: NO_FEE }));
     expect(route.output.netOfQuotedOut).toBe(route.output.quotedOut);
     expect(route.output.netOfVenueThreshold).toBe(route.output.venueThreshold);
+  });
+});
+
+describe("the verification ages the route itself, because signing happens after building", () => {
+  // THE HOLE THIS CLOSES. VerifyContext carried quotedAtMs and no tolerance:
+  // verifySharedAccountsRoute assembled the age, put it on the route and
+  // returned without ever comparing it to anything. Only buildJupiterRoute
+  // aged a route — and a route is verified AGAIN just before it is signed,
+  // which is later, by whatever the caller spent holding it.
+
+  it("refuses a quote older than the tolerance, through the verification itself [route-age]", () => {
+    const { condition, message } = refusal(
+      quote(),
+      response(),
+      context({ observed: { nowMs: QUOTED_AT_MS + 30_001 }, maxAge: { maxAgeMs: 30_000 } }),
+    );
+    expect(condition).toBe("route-age");
+    expect(message).toContain("30001 ms old");
+  });
+
+  it("refuses a verification that states no tolerance at all [route-age]", () => {
+    // Same rule verifyRouteFresh applies, now unskippable: a route nobody aged
+    // is a min_out nobody sized.
+    const { condition, message } = refusal(quote(), response(), context({ maxAge: {} }));
+    expect(condition).toBe("route-age");
+    expect(message).toContain("no freshness tolerance was stated");
+  });
+
+  it("refuses on slots too, and needs the caller's slot to do it [route-age]", () => {
+    expect(
+      refusal(
+        quote(),
+        response(),
+        context({ observed: { nowMs: QUOTED_AT_MS, slot: 448_859_890 }, maxAge: { maxAgeSlots: 19 } }),
+      ).message,
+    ).toContain("PancakeSwap");
+    expect(refusal(quote(), response(), context({ maxAge: { maxAgeSlots: 19 } })).message).toContain(
+      "no current slot was supplied",
+    );
+  });
+
+  it("accepts inside the tolerance, and hands back the age it just checked", () => {
+    const route = verifySharedAccountsRoute(
+      quote(),
+      response(),
+      context({ observed: { nowMs: QUOTED_AT_MS + 30_000 }, maxAge: { maxAgeMs: 30_000 } }),
+    );
+    expect(route.age.quotedAtMs).toBe(QUOTED_AT_MS);
+    // And the same check re-run a millisecond later is the one a caller owes
+    // itself before signing; it is the same function, on the same route.
+    expect(() => verifyRouteFresh(route, { nowMs: QUOTED_AT_MS + 30_001 }, { maxAgeMs: 30_000 })).toThrow(
+      JupiterRouteRefusal,
+    );
   });
 });
 
