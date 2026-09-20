@@ -253,7 +253,11 @@ describe("InvestingCard", () => {
     expect(html).toContain("SPYx&#x27;s round trip, measured the same way, cost between 0.011 % and 0.018 %.");
     expect(html).not.toContain("1.3 % at $100");
     expect(html).not.toContain("because its pool is small");
-    expect(html).not.toContain("0.41 %");
+    // THE OLD CLAIM IN ITS OLD SHAPE, not a bare number: 2.4 - 1.99 = 0.41 is
+    // the market's own central share now, so banning the digits alone would go
+    // red on a future editor writing something true. 0.44 % came only from the
+    // dead reading, so it stays banned outright.
+    expect(html).not.toMatch(/0\.41 %\s*(?:and|to|[-–—])\s*0\.44 %/);
     expect(html).not.toContain("half a percent");
     expect(html).toContain("cost 2.4 % on the day it was measured: 1.99 % of that is the issuer&#x27;s fee, charged whatever the market does");
     expect(html).toContain("SPYx cost under two hundredths of one percent the same day — more than a hundred times less.");
@@ -284,8 +288,22 @@ describe("InvestingCard", () => {
     expect(html).toContain("SaverFi will not buy a stock whose field has been filled in");
     expect(html).toContain("the vault stops buying the whole basket — SPYx along with it — and stops converting your SOL, until the basket itself is changed.");
     expect(html).toContain("It applies from the moment it is written: the next buy is the one that stops.");
-    expect(html).toContain("SPYx carries the same empty field, a different key holds it, and no key at all can put a transfer fee on SPYx.");
-    expect(html).toContain("it is that one stranger&#x27;s key can stop your pension buying anything at all, on any day he chooses.");
+    // THE STOP SPEAKS FOR ITSELF. A bare "Nothing you have already saved is
+    // lost or moved." sat two paragraphs under the permanent delegate IN THIS
+    // SAME BOX, where alone it promises that nothing can ever be taken.
+    expect(html).toContain("That stop takes nothing from you: what you have already saved is neither lost nor moved by it.");
+    expect(html).toContain("The freeze, the pause and the permanent delegate described above are separate powers, and those can reach what your vault already holds.");
+    expect(html).not.toContain("Nothing you have already saved is lost or moved.");
+    // BOTH LEGS CARRY THE STOP; ONLY THE FEE IS ASYMMETRIC. SPYx has a live
+    // hook authority of its own, so the old pairing of "a different key holds
+    // it" with a close on "one stranger's key" read as ANTHROPIC's risk alone.
+    expect(html).toContain("either issuer can fill its own field in and stop the whole basket the same way");
+    expect(html).toContain("The asymmetry that can be proved is the fee, not the stop");
+    expect(html).toContain("SPYx&#x27;s mint carries no fee setting at all and no key able to add one");
+    expect(html).toContain("Nothing here measures which of them is likelier to.");
+    expect(html).toContain("it is that either stranger&#x27;s key can stop your pension buying anything at all, on any day he chooses.");
+    expect(html).not.toContain("SPYx carries the same empty field, a different key holds it");
+    expect(html).not.toContain("one stranger&#x27;s key can stop your pension");
 
     expect(html).toContain(
       "I understand each issuer can freeze, pause or move its own stock out of my vault, that one key holds all of those powers over ANTHROPIC, and that the same key can stop my vault buying anything at all",

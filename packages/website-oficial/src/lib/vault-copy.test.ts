@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { OFFERED_LEGS } from "@sip/solana-core/client";
+
 import { INVEST_COPY, LOSS_DROPPED_AFTER_TXS, MAX_LEG_FEE_BPS, POOL_DEPTH_MULTIPLE, VAULT_COPY } from "@/lib/vault-copy";
 
 describe("the PROFIT rule", () => {
@@ -110,9 +112,36 @@ describe("the transfer-hook switch", () => {
     expect(notice).toContain("the vault stops buying the whole basket — SPYx along with it — and stops converting your SOL");
     // WHAT HE IS ACTUALLY ACCEPTING, in his own terms.
     expect(notice).toContain("stop your pension buying anything at all");
-    // THE ASYMMETRY WITH SPYx, which is the reason the basket's two legs are
-    // not the same risk: SPYx has the same empty field and no fee switch.
-    expect(notice).toContain("SPYx carries the same empty field, a different key holds it, and no key at all can put a transfer fee on SPYx.");
+
+    // THE STOP SPEAKS FOR ITSELF AND FOR NOTHING ELSE. This paragraph used to
+    // end a bare "Nothing you have already saved is lost or moved." — two
+    // paragraphs under freezeNotice's permanent delegate and inside the SAME
+    // amber box, where alone it reads as a promise that nothing can ever be
+    // taken, which that box denies three lines earlier. The qualified form, and
+    // the pointer back at the powers that DO reach the holding, are both pinned.
+    expect(notice).toContain("That stop takes nothing from you: what you have already saved is neither lost nor moved by it.");
+    expect(notice).toContain("The freeze, the pause and the permanent delegate described above are separate powers, and those can reach what your vault already holds.");
+    expect(notice).not.toContain("Nothing you have already saved is lost or moved.");
+
+    // THE STOP IS SYMMETRIC; THE FEE IS NOT. The mainnet read recorded in
+    // vault-copy.ts gives SPYx its own transfer-hook authority (5aMNNLQJ…), so
+    // SPYx's empty field can be filled in by ITS key exactly as ANTHROPIC's can.
+    // "a different key holds it" followed by a close on "one stranger's key"
+    // left the reader believing the stop belonged to ANTHROPIC alone.
+    expect(notice).toContain("either issuer can fill its own field in and stop the whole basket the same way");
+    expect(notice).toContain("either stranger's key can stop your pension buying anything at all");
+    expect(notice).not.toContain("SPYx carries the same empty field, a different key holds it");
+    expect(notice).not.toContain("one stranger's key can stop your pension");
+    // AND THE ASYMMETRY THAT IS PROVABLE, which is the fee and not the stop:
+    // SPYx's mint carries no TransferFeeConfig and no authority for one, while
+    // ANTHROPIC's fee key is the same key that freezes, pauses and moves it.
+    expect(notice).toContain("The asymmetry that can be proved is the fee, not the stop");
+    expect(notice).toContain("SPYx's mint carries no fee setting at all and no key able to add one");
+    expect(notice).toContain("the key that would write the hook in is the same key that sets the fee and can freeze, pause and move the stock");
+    // NOT OVERSTATED THE OTHER WAY EITHER: nothing read here measures which of
+    // the two keys is likelier to act, so no sentence may weigh them.
+    expect(notice).toContain("Nothing here measures which of them is likelier to.");
+    expect(notice).not.toMatch(/equally likely|just as likely|as likely to/);
     // The box he ticks names the stop, not only the freeze.
     expect(INVEST_COPY.acknowledge).toContain("the same key can stop my vault buying anything at all");
   });
@@ -150,11 +179,44 @@ describe("what the position costs", () => {
     expect(INVEST_COPY.marketCost).toContain("between 0.011 % and 0.018 %");
     // THE SUPERSEDED READING, which priced the sell off the quote: gone from
     // every sentence, not only from the one it was written in.
+    //
+    // BANNED IN ITS OWN SHAPE, NOT BY ITS DIGITS. The old claim was ANTHROPIC's
+    // WHOLE round trip "between 0.41 % and 0.44 %". A bare ban on "0.41 %" was
+    // wrong from the day the closed measurement landed: 2.4 - 1.99 = 0.41 is now
+    // the market's own central share, so an editor writing it CORRECTLY would go
+    // red for the wrong reason. The upper figure belongs to the dead reading and
+    // to nothing else, so it stays banned outright, and the pair is banned in
+    // whichever way the two are joined back together.
     for (const line of [INVEST_COPY.issuerCost, INVEST_COPY.marketCost, INVEST_COPY.costTogether]) {
-      expect(line).not.toContain("0.41 %");
+      expect(line).not.toMatch(/0\.41 %\s*(?:and|to|[-–—])\s*0\.44 %/);
       expect(line).not.toContain("0.44 %");
       expect(line).not.toContain("0.01 % on SPYx");
       expect(line).not.toContain("half a percent");
+    }
+    // And the number that is now right is not banned by accident: the market's
+    // share is 2.4 - 1.99, and a sentence saying so must be allowed to.
+    expect(Number((2.4 - (1 - 0.99 ** 2) * 100).toFixed(2))).toBe(0.41);
+  });
+});
+
+describe("the sentences that name the other leg by hand", () => {
+  /**
+   * WRITTEN OUT, SO TRUE ONLY WHILE THE BASKET IS THESE TWO. hookSwitch and
+   * feeCeiling both say "the whole basket — SPYx along with it" to make the
+   * all-or-nothing doctrine concrete, and hookSwitch names SPYx four more times
+   * for the fee asymmetry. None of that is derived from OFFERED_LEGS, so a
+   * third leg, or a swap of either one, would leave the two most dangerous
+   * paragraphs on the screen quietly naming a stock the vault no longer buys —
+   * and "SPYx along with it" would understate what a stop costs.
+   *
+   * OFFERED_LEGS is frozen at two today, so the sentences cannot be false yet.
+   * This is what fails when that changes, and it fails on the basket rather
+   * than on the prose, so the message is "rewrite these" and not "reword this".
+   */
+  it("fails if the basket is no longer exactly SPYx and ANTHROPIC", () => {
+    expect(OFFERED_LEGS.map((leg) => leg.symbol)).toEqual(["SPYx", "ANTHROPIC"]);
+    for (const line of [INVEST_COPY.hookSwitch, INVEST_COPY.feeCeiling(`${MAX_LEG_FEE_BPS / 100} %`)]) {
+      expect(line).toContain("the whole basket — SPYx along with it");
     }
   });
 });

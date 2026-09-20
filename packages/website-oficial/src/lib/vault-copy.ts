@@ -387,10 +387,13 @@ export const INVEST_COPY = {
   // nothing else, and a real hook needs its own accounts on every transfer. So
   // filling that field in is a STOP, not a cost, and by the same all-or-nothing
   // doctrine as the fee ceiling it takes the whole basket — SPYx and the SOL
-  // conversion included. On ANTHROPIC the key that can fill it is the same
-  // WV9PJ… that raised the fee hours earlier; on SPYx it is 5aMNNLQJ…, which is
-  // not the key that can freeze or pause SPYx and cannot put a fee on it at
-  // all. INVEST_COPY.hookSwitch is the sentence that says so, and
+  // conversion included. BOTH LEGS CARRY THAT FIELD AND BOTH AUTHORITIES ARE
+  // SET: on ANTHROPIC the key that can fill it is the same WV9PJ… that raised
+  // the fee hours earlier; on SPYx it is 5aMNNLQJ…, which is not the key that
+  // can freeze or pause SPYx and cannot put a fee on it at all. So the STOP is
+  // symmetric and the FEE is not, and neither side of that may be overstated —
+  // nothing read here measures which key is likelier to use it.
+  // INVEST_COPY.hookSwitch is the sentence that says so, and
   // vault-copy.test.ts pins it to the keeper's CODE — the null-program-id read
   // and the `facts.transferHook !== null` refusal — never to its prose.
   freezeNotice:
@@ -398,17 +401,36 @@ export const INVEST_COPY = {
   issuerKeys:
     "The two are not the same risk. On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used to raise the fee, from 0.5 % to 1 %, on the day this page was written. On SPYx those powers sit with three separate keys and there is no fee to raise. This deserves more of your attention than the price does: it is not the market moving against you, it is one person's decision.",
   /**
-   * THE SWITCH THAT STOPS THE BUYING, held by the same key as the fee.
+   * THE SWITCH THAT STOPS THE BUYING, held on ANTHROPIC by the same key as the
+   * fee — and held on SPYx by a key of its own.
    *
    * Said in the owner's terms on purpose: what he is being asked to accept is
-   * not a fee that might rise by some amount, it is that one stranger can stop
-   * his pension buying anything at all, on a day of that stranger's choosing.
-   * Every clause is a fact of the arrangement rather than of today's number, so
-   * the sentence survives the fee moving again: the field is empty TODAY, the
+   * not a fee that might rise by some amount, it is that a stranger can stop his
+   * pension buying anything at all, on a day of that stranger's choosing. Every
+   * clause is a fact of the arrangement rather than of today's number, so the
+   * sentence survives the fee moving again: the field is empty TODAY, the
    * refusal is what SaverFi does whenever it is not.
+   *
+   * THE STOP SPEAKS ONLY FOR ITSELF. This ended on a bare "Nothing you have
+   * already saved is lost or moved.", two paragraphs under freezeNotice's
+   * permanent delegate and inside the SAME box, where standing alone it reads as
+   * a blanket promise that nothing can ever be taken — which that box denies
+   * three lines earlier. It now says what it always meant, that the STOP takes
+   * nothing, and points back at the powers that do reach the holding.
+   *
+   * AND THE STOP IS NOT ANTHROPIC'S ALONE. The mainnet read recorded above gives
+   * SPYx a transfer-hook authority of its own (5aMNNLQJ…), so SPYx's empty field
+   * can be filled in by ITS key exactly as ANTHROPIC's can by WV9PJ…. Saying
+   * only "a different key holds it" and then closing on "one stranger's key"
+   * left the reader finishing the paragraph believing the stop belonged to
+   * ANTHROPIC. Both legs carry it. The asymmetry that IS on the accounts is the
+   * FEE — SPYx's mint has no TransferFeeConfig and no authority for one, while
+   * ANTHROPIC's fee key is the same key that freezes, pauses and moves its stock
+   * — and nothing here measures which key is likelier to act, so nothing here
+   * says.
    */
   hookSwitch:
-    "The same key holds a second switch, and this one is not about money at all: it stops the buying. Both stocks carry a Token-2022 field where the issuer may name a program that has to run on every transfer of it; on both it is empty today, which is the issuer keeping the option rather than using it. SaverFi will not buy a stock whose field has been filled in, because it cannot carry what a program named there would demand. So on the day ANTHROPIC's key writes one in, the vault stops buying the whole basket — SPYx along with it — and stops converting your SOL, until the basket itself is changed. It applies from the moment it is written: the next buy is the one that stops. Nothing you have already saved is lost or moved. SPYx carries the same empty field, a different key holds it, and no key at all can put a transfer fee on SPYx. So what you are accepting is not only a fee that may rise: it is that one stranger's key can stop your pension buying anything at all, on any day he chooses.",
+    "The same key holds a second switch, and this one is not about money at all: it stops the buying. Both stocks carry a Token-2022 field where the issuer may name a program that has to run on every transfer of it; on both it is empty today, which is the issuer keeping the option rather than using it. SaverFi will not buy a stock whose field has been filled in, because it cannot carry what a program named there would demand. So on the day ANTHROPIC's key writes one in, the vault stops buying the whole basket — SPYx along with it — and stops converting your SOL, until the basket itself is changed. It applies from the moment it is written: the next buy is the one that stops. That stop takes nothing from you: what you have already saved is neither lost nor moved by it. The freeze, the pause and the permanent delegate described above are separate powers, and those can reach what your vault already holds. SPYx is not exempt from this: it carries the same empty field, and the key over that field — not the key that freezes or pauses SPYx — is set exactly as ANTHROPIC's is, so either issuer can fill its own field in and stop the whole basket the same way. Nothing here measures which of them is likelier to. The asymmetry that can be proved is the fee, not the stop: SPYx's mint carries no fee setting at all and no key able to add one, while on ANTHROPIC the key that would write the hook in is the same key that sets the fee and can freeze, pause and move the stock. So what you are accepting is not only a fee that may rise: it is that either stranger's key can stop your pension buying anything at all, on any day he chooses.",
   freezeShort:
     "Each issuer can freeze, pause or move its own stock, even inside your vault, and on ANTHROPIC one key holds all of those powers. Withdrawing SOL does not depend on any of them.",
   acknowledge:
