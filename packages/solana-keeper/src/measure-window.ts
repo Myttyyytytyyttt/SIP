@@ -263,6 +263,23 @@ export interface WindowMeasurement {
   readonly walletSignedTxCount: number;
   /** Trading transactions (not external flows) that succeeded. A failed swap pays its fee and trades nothing. */
   readonly successfulTradeCount: number;
+  /**
+   * The notional this window traded, in lamports: the wallet's own SOL movement
+   * across successful trading transactions, its fee removed, both legs counted —
+   * buy a token with 1 SOL and sell it back for 1.1 and the window traded 2.1.
+   *
+   * MEASURED, NEVER ATTESTED. Nothing is signed or charged from this number.
+   * It exists for the mirror's volume column and the leaderboard's usage
+   * ranking; a VOLUME span's attested base still comes from the volumeBase
+   * seam, which PROVES a notional instead of inferring one from balances.
+   * Reading it as money would be a mistake this comment is here to prevent.
+   *
+   * WHAT IT MISSES, AND WHY THAT IS TOLERABLE FOR A RANKING. A swap with no SOL
+   * leg (USDC to BONK) moves no lamports and counts as nothing; opening a token
+   * account counts its rent as notional, and closing one counts the refund.
+   * Each would be a defect in an accounting figure and is noise in an ordering.
+   */
+  readonly tradedLamports: bigint;
   readonly chainBreaks: number;
   /**
    * Transactions the RPC would not return. NOT the same as a chain break: a
@@ -393,6 +410,7 @@ export async function measureSince(
     settleTxCount: 0,
     walletSignedTxCount: 0,
     successfulTradeCount: 0,
+    tradedLamports: 0n,
     chainBreaks: 0,
     unfetchable: 0,
     cashDelta: 0n,
@@ -432,6 +450,7 @@ export async function measureSince(
   let settleTxCount = 0;
   let walletSignedTxCount = 0;
   let successfulTradeCount = 0;
+  let tradedLamports = 0n;
   let firstSlot = 0n;
   const settleProgramId = settleProgram?.toBase58();
 
@@ -483,6 +502,16 @@ export async function measureSince(
       if (ownSettle) settleTxCount += 1;
     } else if (tx.meta.err === null) {
       successfulTradeCount += 1;
+      // THE FEE IS NOT NOTIONAL, and it is inside this delta: the wallet is the
+      // fee payer for its own swaps, so a buy shows notional + fee leaving and a
+      // sell shows notional - fee arriving. Removing it keeps a wallet that
+      // trades often from being credited for its own costs — and keeps a
+      // fee-only transaction (an approve, a close) at exactly zero rather than
+      // at one fee of phantom volume.
+      const fee = isFeePayer(tx.transaction.message, wallet) ? BigInt(tx.meta.fee) : 0n;
+      const delta = post - pre;
+      const notional = delta < 0n ? -delta - fee : delta + fee;
+      if (notional > 0n) tradedLamports += notional;
     }
     // THE CADENCE COUNTS WHAT THE WALLET SIGNED, AND NOTHING WE SENT. A failed
     // transaction the wallet signed counts: the trader acted, and paid its fee.
@@ -497,6 +526,7 @@ export async function measureSince(
     settleTxCount,
     walletSignedTxCount,
     successfulTradeCount,
+    tradedLamports,
     chainBreaks,
     unfetchable,
     cashDelta,
@@ -510,6 +540,11 @@ export async function measureSince(
     lastSlot: endSlot === null ? from : BigInt(endSlot),
     prefixCut,
   };
+}
+
+/** The fee payer is the first static key, in every message version there is. */
+function isFeePayer(message: VersionedMessage, wallet: PublicKey): boolean {
+  return message.staticAccountKeys[0]?.equals(wallet) === true;
 }
 
 /**

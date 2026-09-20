@@ -37,6 +37,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddressLine } from "@/components/wallets/AddressLine";
 import { TxProgress } from "@/components/wallets/TxProgress";
+import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
 import { useVaultWrite } from "@/hooks/use-vault-actions";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { AmountError, SOL_DECIMALS, formatSol, formatUnits, formatUsd, parseUnits, rawFrom, usdcRawForLamports } from "@/lib/amounts";
@@ -47,7 +48,23 @@ import { PROFIT_RATE, VAULT_COPY, VOLUME_RATE, ratePercent } from "@/lib/vault-c
 
 type VaultWrite = ReturnType<typeof useVaultWrite>;
 
+/**
+ * The anchor sits on the section, not on one state's form: the trading wallets
+ * card sends a wallet with no vault to "#vault", and that link must resolve
+ * whichever of the four states this card is in — a read that failed shows no
+ * form, and a button pointing at nothing does nothing.
+ */
 export function VaultCard({ volumeOffered = VOLUME_MODE_OFFERED }: { readonly volumeOffered?: boolean }) {
+  const screen = useVaultScreen();
+  if (screen === null) return null;
+  return (
+    <section id={VAULT_CARD_ID} className="scroll-mt-4">
+      <VaultCardBody volumeOffered={volumeOffered} />
+    </section>
+  );
+}
+
+function VaultCardBody({ volumeOffered }: { readonly volumeOffered: boolean }) {
   const screen = useVaultScreen();
   const write = useVaultWrite("vault");
   if (screen === null) return null;

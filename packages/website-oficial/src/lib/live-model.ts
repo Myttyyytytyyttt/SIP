@@ -417,6 +417,16 @@ function settlementsOf(activity: LiveActivityJson | null, slot: number | null): 
   return out;
 }
 
+/** The oldest moment the loaded history speaks for. Entries arrive newest first. */
+function loadedSince(activity: LiveActivityJson | null): number | null {
+  const entries = activity?.entries ?? [];
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const blockTime = entries[index]!.blockTime;
+    if (blockTime !== null) return blockTime;
+  }
+  return null;
+}
+
 /**
  * The curve, worked BACKWARDS from the vault's own lifetimeSaved.
  *
@@ -424,9 +434,27 @@ function settlementsOf(activity: LiveActivityJson | null, slot: number | null): 
  * there. So the newest point IS lifetimeSaved, and each earlier point subtracts
  * what landed after it — rather than summing a partial page forward and drawing
  * a curve that ends below the number in the hero.
+ *
+ * A WINDOW WITH NO SETTLEMENT IN IT STILL HAS A TRUE CURVE, and it is FLAT. The
+ * vault's total only moves when a settlement lands, so across a window holding
+ * none it stood exactly where it stands now — which is what the line says,
+ * drawn from the oldest loaded row to the read's own clock. Drawing nothing
+ * there was how "The chart starts with your first settlement" came to sit over
+ * a pension that had settled the day before: the settlement was real, it was
+ * simply older than fifteen signatures of keeper upkeep.
  */
-function chartOf(settlements: readonly LoadedSettlement[], lifetimeSaved: bigint | null, nowMs: number): LiveChartPoint[] | null {
-  if (settlements.length === 0 || lifetimeSaved === null) return null;
+function chartOf(settlements: readonly LoadedSettlement[], lifetimeSaved: bigint | null, nowMs: number, since: number | null): LiveChartPoint[] | null {
+  if (lifetimeSaved === null) return null;
+  if (settlements.length === 0) {
+    // Nothing saved yet: the chart really does start with the first settlement.
+    // And with no loaded row there is no window to be flat across, so the
+    // caption says that instead of claiming one.
+    if (lifetimeSaved <= 0n || since === null || since * 1_000 >= nowMs) return null;
+    return [
+      { at: new Date(since * 1_000).toISOString(), totalLamports: lifetimeSaved },
+      { at: new Date(nowMs).toISOString(), totalLamports: lifetimeSaved },
+    ];
+  }
   // Oldest first, so each point can subtract what came after it.
   const oldestFirst = [...settlements].reverse();
   const points: LiveChartPoint[] = [];
@@ -464,6 +492,7 @@ function statsOf(
   rows: readonly LiveRow[],
   wallets: WalletsRead,
   nowMs: number,
+  lifetimeSaved: bigint | null,
 ): LiveStatsView {
   const paid = settlements.map((entry) => entry.paid);
   const lifetimeNonces = wallets.rows.filter((wallet) => wallet.linkStatus === "this_vault").map((wallet) => wallet.settlementNonce);
@@ -485,13 +514,41 @@ function statsOf(
 
   const startOfToday = Date.UTC(new Date(nowMs).getUTCFullYear(), new Date(nowMs).getUTCMonth(), new Date(nowMs).getUTCDate());
 
+  // WHAT THE STATE SAYS HAPPENED, BESIDE WHAT THE LOADED PAGES HOLD. The
+  // vault's own total only moves on a settlement, and a link's nonce counts
+  // them; either one saying "at least one" while the loaded history holds none
+  // is the case every "none yet" on this screen was wrong about. A nonce nobody
+  // could read does not vote — and a truncated link list cannot hide this,
+  // because one positive nonce is enough.
+  const stateSettled = (lifetimeSaved ?? 0n) > 0n || lifetimeNonces.some((nonce) => nonce !== null && nonce > 0n);
+
+  // WHAT THE FEED IS LISTING, which is not the same list as the one the curve
+  // is drawn from. `settlements` has had the snapshot's slot filter applied —
+  // rightly, because the curve is worked backwards from a lifetimeSaved that
+  // does not include a settlement newer than the snapshot. rowsOf applies no
+  // such filter, so that settlement IS on the screen.
+  //
+  // The two differ by one case, and it is not a rare one: the hook reads the
+  // snapshot first and the activity page second (use-live-dashboard.ts), so a
+  // settle landing between the two reads is ALWAYS newer than snapshot.slot.
+  // Deciding these two fields from the filtered list printed "Last settlement —
+  // none yet" and "No settlement landed in this window" directly above a
+  // settlement row a few seconds old, and cleared only on the next poll.
+  //
+  // So the two statements ABOUT THE HISTORY are made from the history: whether
+  // the screen holds a settlement at all, and when the newest one it holds
+  // landed. It is the same test live-backfill.ts's holdsSettlement makes before
+  // paging back for one, and live-model.test.ts pins that they agree.
+  const shown = settlementsOf(activity, null);
+
   return {
     settlementsLifetime,
+    settledOutsideHistory: stateSettled && shown.length === 0,
     loadedSettlements: settlements.length,
     loadedSavedLamports: paid.reduce((total, amount) => total + amount, 0n),
     biggestPaid: paid.length === 0 ? null : paid.reduce((most, amount) => (amount > most ? amount : most), 0n),
     cappedCount: settlements.filter((entry) => entry.capped).length,
-    lastSettlementAt: settlements[0]?.at ?? null,
+    lastSettlementAt: shown[0]?.at ?? null,
     savedTodayLamports: sumSince(startOfToday),
     savedThisWeekLamports: sumSince(nowMs - 7 * DAY_MS),
     investmentsLoaded: rows.filter((row) => row.event.kind === "invested").length,
@@ -528,7 +585,7 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
   const wallets = walletsOf(snapshot, privyWallets, rawFrom(snapshot.rents.walletFloor), vault.walletReserve);
   const visible = rowsOf(activity);
   const settlements = settlementsOf(activity, snapshot.slot);
-  const stats = statsOf(settlements, activity, visible.rows, wallets, nowMs);
+  const stats = statsOf(settlements, activity, visible.rows, wallets, nowMs, vault.lifetimeSaved);
 
   return {
     stage: stageOf(vault, wallets.rows, stats.settlementsLifetime, stats.loadedSettlements),
@@ -546,7 +603,7 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
     rows: visible.rows,
     hiddenUpkeep: visible.hiddenUpkeep,
     hiddenDust: visible.hiddenDust,
-    chart: chartOf(settlements, vault.lifetimeSaved, nowMs),
+    chart: chartOf(settlements, vault.lifetimeSaved, nowMs, loadedSince(activity)),
     stats,
     // Quoted by the "no vault yet" card, which must name the cost before anyone
     // is asked to sign for it.

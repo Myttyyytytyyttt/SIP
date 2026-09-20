@@ -50,8 +50,9 @@ equipo dejaría la web sin Solana.
 | `SIP_SOLANA_PROGRAM_ID` | `6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J` | no | Production |
 | `SIP_TRUSTED_CLIENT_IP_HEADER` | `x-real-ip` | no | Production |
 | `PRIVY_APP_ID` | `cmtrt36tb00080dlbrda5aqam` | no | Production |
-| `SIP_SOLANA_PRIVY_SIGNER_ID` | `cbx133itb717vxp3dqwhk808` | no | Production |
+| `SIP_SOLANA_PRIVY_SIGNER_ID` | `kyio853439oa78qfvmt853i4` (ver abajo) | no | Production |
 | `SIP_SOLANA_PRIVY_POLICY_ID` | `jsuzcjv6njl0raqjjhzqe9fh` | no | Production |
+| `SIP_SOLANA_KEEPER_URL` | `https://sip-solana-keeper-production.up.railway.app` | no | Production y Preview |
 | `ENABLE_EXPERIMENTAL_COREPACK` | `1` | no | Production y Preview |
 
 - **`x-real-ip`** es la cabecera que Vercel escribe con la IP real de la conexión, y con ella la web limita peticiones por
@@ -59,6 +60,17 @@ equipo dejaría la web sin Solana.
   Railway), la escribe el propio visitante. Quien no la mande comparte un único cupo con todos los demás, y quien la
   mande con una IP inventada estrena cupo en cada petición: los límites por visitante dejan de servir.
   `x-forwarded-for` la rechaza la web y deja las rutas de Solana en 503.
+- **`SIP_SOLANA_PRIVY_SIGNER_ID`** es el id del key quorum cuya llave privada tiene el vigilante en Railway
+  (`SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`), y tiene que ser **el mismo** que `SIP_SOLANA_PRIVY_SIGNER_ID` en Railway: es
+  el signer que la web sienta en cada wallet de trading. Desde el 18-sep es `kyio853439oa78qfvmt853i4`
+  (`sip-solana-keeper-2`); `/status` del vigilante lo enseña en `signing.privySignerId`. El de antes,
+  `cbx133itb717vxp3dqwhk808` (`sip-solana-keeper`), está **retirado**: su llave privada se perdió. **No lo pongas
+  nunca**: la web sentaría en cada wallet nueva, y con Re-seat keeper en las viejas, un signer que nadie puede usar.
+- **`SIP_SOLANA_KEEPER_URL`** es la URL pública del vigilante, sin barra final y **sin credenciales** (la web rechaza una
+  URL con usuario o contraseña en vez de quitárselas). De ahí sale `/leaderboard`, que es lo único que la web le pide:
+  ni base de datos ni cadena de conexión en Vercel. Si falta, `/leaderboard` dice *«The rankings are unavailable»* y
+  nombra esta variable — que es justo lo que tiene que pasar, porque una tabla vacía diría «nadie ha ahorrado nunca».
+  En Preview vale la misma: el tablero es público y no lleva nada sensible.
 - **`ENABLE_EXPERIMENTAL_COREPACK=1`** hace que Vercel use exactamente el pnpm del repositorio (10.18.1).
 - **Preview no lleva la clave de Helius.** Sus URLs cambian en cada despliegue y no están en Privy. Una preview enseña la
   lista de configuración y sus rutas de Solana responden 503, que es lo seguro.

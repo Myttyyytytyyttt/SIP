@@ -57,10 +57,32 @@ WORKDIR /repo
 COPY packages/solana-log/src/log.ts packages/solana-log/src/log.ts
 COPY packages/solana-program/idl packages/solana-program/idl
 COPY packages/solana-program/scripts/attestation.ts packages/solana-program/scripts/live-route.ts packages/solana-program/scripts/raydium-swap.ts packages/solana-program/scripts/
+# AND THE TWO FILES ONLY THE TEST SUITE READS, now that the suite runs here too.
+# attestation.rs is the program's own attestation encoder, which
+# test/attestation-golden.test.ts holds the keeper's mirror against character for
+# character; the root Dockerfile is the copy Railway actually builds, which
+# test/dockerfile-copy.test.ts holds byte-identical to this one. Both BY NAME,
+# like every COPY above: nothing from target/, nothing from .localnet, no key
+# material. Measured: without these two the suite is 373 passed and exactly 2
+# failed, both ENOENT, in a tree holding precisely what these COPYs put here.
+COPY packages/solana-program/programs/sip-vault/src/attestation.rs packages/solana-program/programs/sip-vault/src/attestation.rs
+COPY Dockerfile Dockerfile
 COPY packages/solana-keeper packages/solana-keeper
 # The keeper runs from TypeScript through tsx; typecheck is the build gate, so a
 # type error cannot reach a deployed image.
 RUN pnpm --dir packages/solana-keeper typecheck
+
+# AND THE SUITE, because a typecheck cannot see the class of bug that took the
+# keeper down on 2026-09-18: the broken BN spelling typechecks perfectly and is
+# undefined at runtime under Node ESM. Until now vitest was run by NOTHING
+# automatic — this repository has no .github, no hooks, no CI, and the image
+# built with exactly two checks — so every guard that generalizes beyond the
+# money-path builders (one source of BN, no second bn.js, the two module-system
+# facts, the preflight's own size) protected nothing on a deploy: a push
+# straight to Railway from a branch where nobody typed `pnpm test` shipped
+# whatever they would have caught. No network, no keys, 1.53 s. devDependencies
+# are present in this stage — the typecheck above already depends on that.
+RUN pnpm --dir packages/solana-keeper test
 
 FROM base AS runtime
 WORKDIR /repo

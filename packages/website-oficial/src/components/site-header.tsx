@@ -37,7 +37,7 @@ export function SiteHeader({
   control?: React.ReactNode;
   /** Connect, Disconnect, the pension key, or a placeholder while Privy is asked. */
   account: React.ReactNode;
-  readonly current?: "pension" | "activity";
+  readonly current?: "pension" | "activity" | "leaderboard";
 }) {
   // THE SHEET IS CONTROLLED SO IT CAN GET OUT OF THE WAY. Below lg this sheet is
   // where "Manage wallets" lives, and a modal opened from inside a sheet is the
@@ -48,6 +48,9 @@ export function SiteHeader({
   const nav = [
     { label: "Pension", href: "/", current: current === "pension", className: undefined },
     { label: "Activity", href: "/activity", current: current === "activity", className: undefined },
+    // A REAL PAGE, AND A PUBLIC ONE: /leaderboard mounts no Privy provider, so
+    // this link works for a visitor who has never connected anything.
+    { label: "Leaderboard", href: "/leaderboard", current: current === "leaderboard", className: undefined },
     { label: "Docs", href: "#", current: false, className: undefined },
   ];
 

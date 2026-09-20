@@ -25,7 +25,7 @@
 // can reach them.
 
 import { createHash } from "node:crypto";
-import * as anchor from "@coral-xyz/anchor";
+import type * as anchor from "@coral-xyz/anchor";
 import {
   Connection,
   Ed25519Program,
@@ -37,6 +37,7 @@ import {
 } from "@solana/web3.js";
 import { summarizeUpstreamError } from "@sip/solana-log";
 import { readSettlementNonce, type VaultState } from "./accounts.js";
+import { BN } from "./anchor-interop.js";
 import type { ManagedLink } from "./discovery.js";
 import { idl } from "./idl.js";
 import { connectionReader, measureSince, readTransaction } from "./measure-window.js";
@@ -79,6 +80,12 @@ export interface SettleResult {
   readonly expectedLamports?: bigint;
   /** The node's price for this settle's message: the fee the reserve check counted. */
   readonly feeLamports?: bigint;
+  /**
+   * What this window TRADED, from the same walk that measured it (measureSince).
+   * Recorded in the mirror so the leaderboard can rank by usage; never attested,
+   * never charged, and absent from every outcome that measured nothing.
+   */
+  readonly tradedLamports?: bigint;
   readonly signature?: string;
   /** The nonce this settlement consumed, and the slot it closed. Carried out
    * so the keeper can record history without re-deriving either. */
@@ -196,10 +203,10 @@ export function settleInstruction(
 ): Promise<TransactionInstruction> {
   return method(program, "settleV2")(
     inputs.mode,
-    new anchor.BN(inputs.sessionStartSlot.toString()),
-    new anchor.BN(inputs.sessionEndSlot.toString()),
-    new anchor.BN(inputs.baseLamports.toString()),
-    new anchor.BN(inputs.validUntilSlot.toString()),
+    new BN(inputs.sessionStartSlot.toString()),
+    new BN(inputs.sessionEndSlot.toString()),
+    new BN(inputs.baseLamports.toString()),
+    new BN(inputs.validUntilSlot.toString()),
   )
     .accountsPartial({ wallet: link.wallet, vault: link.vault, tradingLink: link.linkAddress })
     .instruction();
@@ -407,6 +414,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     mode: inputs.mode,
     feeLamports,
     expectedLamports: paid,
+    tradedLamports: measured.tradedLamports,
     ...(decision.carry === undefined ? {} : { carry: decision.carry }),
   };
   if (belowReserve !== null) return { ...belowReserve, ...carried };
@@ -532,7 +540,23 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     // transaction versions exist. Our own settle is a legacy message and would
     // have been readable either way — but the version contract belongs in one
     // place, or the next read added here quietly gets it wrong again.
-    const receipt = await readTransaction(connection, signature, "confirmed");
+    const read = () => readTransaction(connection, signature, "confirmed");
+    // ONE RE-READ, AT NO RISK, AND IT WRAPS THAT SHARED READER RATHER THAN A
+    // SECOND SPELLING OF THE SAME CALL. The pool can route this read to an
+    // endpoint that has not caught up with the one that just confirmed, and a
+    // receipt that never arrives used to cost this settlement its row in the
+    // mirror. Both attempts go through readTransaction, so the retry cannot
+    // drift away from the version contract the walk holds.
+    //
+    // readTransaction ALSO answers null for a version it cannot decode, so such
+    // a receipt is read twice before it is given up on. That costs one extra
+    // read a second apart on a settle that has already landed, and buys the
+    // same null either way — the cheap half of this trade.
+    let receipt = await read();
+    if (receipt === null) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      receipt = await read();
+    }
     // A second, independent read of success: the receipt's own meta.err. If it
     // is set, the tx did NOT settle, even though its status said it did.
     if (receipt?.meta?.err != null) receiptErr = receipt.meta.err;

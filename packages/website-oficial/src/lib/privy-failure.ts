@@ -14,8 +14,10 @@
 export type PrivyFailureKind =
   /** The person closed Privy's dialog. Not a failure, and nothing is shown. */
   | "exited"
-  /** The Privy app runs wallets on the device, and signers exist only in TEE execution. */
+  /** The Privy app runs wallets on the device, and signers exist only in TEE execution (createWallet's refusal). */
   | "tee"
+  /** The record Privy's signer methods read does not show the wallet as a TEE wallet with its server id. */
+  | "wallet-record"
   /** A new wallet has not reached Privy's record of the user yet; asking again shortly works. */
   | "propagating"
   /** Privy's wallet frame on auth.privy.io is not loaded, so no wallet call can run. */
@@ -61,6 +63,22 @@ export function privyFailure(error: unknown): PrivyFailure {
 
   if (/exited_|_exited|exited the|user exited/i.test(raw)) return { kind: "exited", message: "" };
 
+  // Before "tee" and "refused": both messages match those too, and neither is about the app or the seat's ids.
+  // addSigners throws the first when the wallet in the RECORD it reads is not a TEE wallet with a server id (the SDK's
+  // isUnifiedWallet), whatever the app runs. The second cannot be reached in 3.36.0 — addSigners and removeSigners
+  // check isUnifiedWallet, which needs the id, before the helper that throws it — and is matched so a later SDK
+  // throwing it never reads as a refused signer.
+  if (/Specifying signers in addSessionSigners|must have ID on server/i.test(raw)) {
+    return {
+      kind: "wallet-record",
+      message:
+        "Privy's record on this page does not show this wallet as a TEE wallet with its server wallet id, so Privy " +
+        "did not change its signers. Reload the page; while the wallet's row shows no Privy wallet id, its seat " +
+        "cannot be changed from here.",
+    };
+  }
+
+  // createWallet's own refusal, which reads the app's execution mode.
   if (/only supported for TEE execution/i.test(raw)) {
     return {
       kind: "tee",

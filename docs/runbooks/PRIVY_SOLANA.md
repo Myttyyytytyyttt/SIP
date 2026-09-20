@@ -39,7 +39,12 @@ Esta guía la sigues tú. Ninguna de estas llaves hace falta que la vea Claude.
 
 ## 2. Crea la llave de autorización del vigilante
 
-1. Ve a **Wallets → Authorization keys** y pulsa **New key**. Ponle de nombre `sip-solana-keeper`.
+> **La llave de hoy es `sip-solana-keeper-2`, id `kyio853439oa78qfvmt853i4`** (desde el 18-sep). La primera,
+> `sip-solana-keeper` (`cbx133itb717vxp3dqwhk808`, 14-sep), está **retirada**: su llave privada se perdió y no se vuelve
+> a configurar nunca. Esta sección cuenta cómo se crea una; si se pierde, la [sección 7](#si-la-llave-privada-de-ese-quorum-se-ha-perdido)
+> dice cómo se cambia.
+
+1. Ve a **Wallets → Authorization keys** y pulsa **New key**. Ponle un nombre que diga lo que es, como `sip-solana-keeper-2`.
 2. Privy te enseña la **clave privada una sola vez** (empieza por `wallet-auth:`). Cópiala directamente a tu gestor de
    contraseñas. Más adelante la pegarás en Railway como `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`.
 3. Apunta el **id** de la llave. Es público: va a `SIP_SOLANA_PRIVY_SIGNER_ID`, en la web y en Railway. Ese id sí se lo
@@ -119,6 +124,7 @@ qué no, `unknown` lo que no se puede saber (no hubo respuesta o Privy dio un er
 ## 5. Comprueba la política guardada
 
 ```bash
+cd ~/ProyectosCT/SIP
 printf 'App secret de Privy (SIP): ' && read -rs SECRETO && echo
 SIP_SOLANA_PRIVY_APP_ID=<app id> SIP_SOLANA_PRIVY_APP_SECRET="$SECRETO" SIP_SOLANA_PRIVY_SIGNER_ID=<signer id> \
   pnpm --silent --dir packages/solana-keeper privy-policy check --policy <policyId>
@@ -140,6 +146,7 @@ Hazlo **después** de que la web haya registrado el signer en **una wallet de tr
 Necesitas el **id de esa wallet en Privy** (no su dirección), que sale en el dashboard, en Wallets.
 
 ```bash
+cd ~/ProyectosCT/SIP
 printf 'App secret de Privy (SIP): ' && read -rs SECRETO && echo
 printf 'Llave de autorización del vigilante: ' && read -rs CLAVE && echo
 printf 'SIP_SOLANA_RPC_URLS: ' && read -rs RPC && echo
@@ -180,6 +187,274 @@ que ser una llamada que funcione de verdad contra un programa cuya llave se filt
 Si sale con código 2, falta o sobra algo en las variables (también si hay puesta alguna `PRIVY_API_*`: mira
 [Lo que nunca se hace](#lo-que-nunca-se-hace)), o `SIP_SOLANA_RPC_URLS` no es de mainnet. Lo dice nombrando la variable,
 nunca su valor.
+
+## 7. Cuando Privy rechaza la firma: ¿la llave es la del quorum?
+
+Este es el paso que se hace cuando el vigilante mide bien y **Privy no le deja mandar el cobro**. Se reconoce por esta
+frase, en `/status` o en el log de Railway:
+
+```
+401 {"error":"No valid authorization signatures were provided. Your payload may be malformed or your signing keys
+may be incorrect or expired."}
+```
+
+Esa frase significa una sola cosa: **la firma que llegó no era de ninguna llave que Privy acepte para esa wallet**. No
+dice cuál de todas las maneras de estar mal es.
+
+**Mira primero `/status`.** El vigilante comprueba esto solo, al arrancar y cada media hora, y publica el resultado en
+`signing.authorizationKey` — con la fecha en que lo comprobó, en `signing.authorizationKeyAt`. Ese veredicto es **sobre
+la llave que hay puesta en Railway**, que es la que falla. Si dice `matches`, la llave desplegada está bien y el problema
+es otro (paso 6). Si dice cualquier otra cosa, la tabla de más abajo explica cada valor igual.
+
+El comando de aquí abajo sirve para lo otro: **probar una llave concreta antes de ponerla en Railway**, o ver cuál es su
+clave pública para compararla con el dashboard. Juzga exactamente el valor que tú pegas, ni más ni menos.
+
+Lleva escrito el signer id de hoy, `kyio853439oa78qfvmt853i4` (`sip-solana-keeper-2`). Antes de usarlo, mira que sea el
+mismo que `signing.privySignerId` en `/status`; si no lo es, pon en el comando el de `/status`.
+
+```bash
+cd ~/ProyectosCT/SIP
+printf 'App secret de Privy (SIP): ' && read -rs SECRETO && echo
+printf 'Llave de autorización del vigilante: ' && read -rs CLAVE && echo
+SIP_SOLANA_PRIVY_APP_ID=cmtrt36tb00080dlbrda5aqam SIP_SOLANA_PRIVY_APP_SECRET="$SECRETO" \
+  SIP_SOLANA_PRIVY_AUTHORIZATION_KEY="$CLAVE" SIP_SOLANA_PRIVY_SIGNER_ID=kyio853439oa78qfvmt853i4 \
+  pnpm --silent --dir packages/solana-keeper privy-policy key
+unset SECRETO CLAVE
+```
+
+En **Terminal.app**, como todo lo demás de esta guía. La llave que pegues cuando te la pida no se ve al escribirla, no
+queda en el historial y **no sale de tu ordenador**: el comando no se la manda a Privy ni a nadie.
+
+**El comando juzga esa llave, la que pegas, y ninguna otra.** No lee Railway, no sabe qué hay desplegado. Así que elige
+a conciencia cuál pegas:
+
+- ¿quieres saber si la llave **del gestor de contraseñas** es la buena, antes de ponerla? Pega la del gestor.
+- ¿quieres saber por qué el vigilante desplegado devuelve 401? Eso lo contesta `signing.authorizationKey` en `/status`.
+  Si prefieres comprobarlo a mano, copia el valor **desde la propia variable de Railway** (Variables → el icono del ojo
+  en `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`) y pega ESE.
+
+Lo que hace son dos cosas. Primero calcula, aquí mismo, la **clave pública** que le corresponde a esa llave privada.
+Después le pregunta a Privy qué claves públicas tiene registradas el key quorum del signer id (hoy
+`kyio853439oa78qfvmt853i4`) — eso solo
+necesita el app id y la app secret — y las compara. La clave pública es pública: se puede leer, copiar y enseñar.
+
+### Qué te contesta
+
+Mira `verdict`:
+
+| verdict | qué significa | qué haces |
+|---|---|---|
+| `matches` | **la llave que acabas de pegar** está registrada en ese quorum y basta su firma sola (sale con código 0) | nada con esa llave. Antes de buscar en otro sitio, asegúrate de que es la misma que hay en Railway: mira `signing.authorizationKey` en `/status`. Si ahí también dice `matches`, el problema es el asiento o la política: paso 6 |
+| `not-in-quorum` | la llave es una llave válida, pero **su clave pública no es ninguna de las de ese quorum**, y el quorum no tiene más miembros que esas claves. Esta es la causa del 401 | sigue [No coincide](#no-coincide-la-llave-no-es-la-de-ese-quorum) aquí abajo |
+| `members-unresolved` | la clave no está entre las del quorum, **pero el quorum tiene además otros miembros que el comando no puede leer** (otro key quorum anidado, o un usuario), y una llave que esté ahí firma igual de bien. No prueba nada | **no cambies ni regeneres nada todavía.** Mira ese quorum en el dashboard: el comando te imprime los ids anidados (`nestedKeyQuorumIds`) y cuántos usuarios tiene. Compara `derivedPublicKey` con las claves de esos miembros |
+| `threshold-above-one` | la llave **sí** está registrada, pero el quorum exige más de una firma y el vigilante manda una sola. Privy rechaza igual | no toques la llave. En **Wallets → Authorization keys**, deja el `threshold` de ese quorum en 1 (o quítale los miembros que ganó) |
+| `key-unreadable` | lo que hay en `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY` no es una llave P-256. No se mandó nada a ningún sitio | vuelve a pegarla entera desde el gestor |
+| `credentials-refused` | Privy rechazó el app id o la app secret, así que no pudo ni leer el quorum. **No dice nada de la llave** | comprueba `SIP_SOLANA_PRIVY_APP_ID` y la app secret en el dashboard, en la app del paso 1 |
+| `quorum-not-found` | esta app de Privy no tiene ningún key quorum con ese id | comprueba `SIP_SOLANA_PRIVY_SIGNER_ID` en **Wallets → Authorization keys**. Un id de otra app aquí se ve como si no existiera |
+| `quorum-unreadable` | no se pudo leer Privy (se cayó la conexión, un error del servidor). **No dice nada de la llave** | repite dentro de un minuto. Si sigue, mira `status.privy.io` antes de tocar nada |
+
+El comando sale con **código 0** si coincide, con **código 2** si hay que cambiar una variable y no se mandó nada a
+ninguna parte, y con **código 1** en los demás casos. Nunca imprime la llave privada.
+
+Tres avisos, para que no te manden a arreglar lo que no está roto:
+
+- **Pegar la llave con comillas, con espacios o con el prefijo `wallet-auth:` no rompe nada.** Privy firma igual en
+  todos esos casos, y el comando también los acepta. Si te dice `matches`, la llave que has pegado está bien pegada.
+- **Pero tiene que ir en UNA sola línea.** Eso no lo decide el comando, lo decide la Terminal: `read` corta en el primer
+  salto de línea y solo le llega el primer trozo, así que el comando diría `key-unreadable` de una llave perfecta. Si el
+  gestor de contraseñas te la devuelve partida en varias líneas, júntala antes de pegarla. Y si al pegar se te cuela un
+  trozo en el prompt como si lo hubieras tecleado, **no lo ejecutes**: borra la línea con Ctrl-U y borra esa entrada del
+  historial (`~/.zsh_history`) antes de seguir.
+- **`key-unreadable` no puede ser la causa de un 401.** Una llave ilegible ni siquiera llega a salir del vigilante: falla
+  antes, en su propio proceso. Si has visto un 401, la llave se leyó bien y lo que falla es a quién pertenece.
+
+### No coincide: la llave no es la de ese quorum
+
+El comando te imprime dos cosas públicas, juntas:
+
+- `derivedPublicKey`: la clave pública de **la llave que acabas de pegar**.
+- `registeredPublicKeys`: las que **tiene registradas el quorum** del signer id (hoy `kyio853439oa78qfvmt853i4`).
+
+Con eso en la mano:
+
+1. Entra en el dashboard de Privy, comprueba arriba que la app es la del app id `cmtrt36tb00080dlbrda5aqam` (paso 1) y
+   ve a **Wallets → Authorization keys**.
+2. Busca la llave cuyo **id** sea el signer id (hoy `kyio853439oa78qfvmt853i4`) — es la que el vigilante dice ser.
+   Debería llamarse `sip-solana-keeper-2`. (`cbx133itb717vxp3dqwhk808`, `sip-solana-keeper`, es la retirada: su llave
+   se perdió, y ninguna llave que tengas va a coincidir con ella.)
+3. Compara su clave pública con `derivedPublicKey`. Son distintas: por eso Privy rechaza.
+4. La llave privada que va en `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY` es **la de esa llave del dashboard**, no la que hay
+   puesta ahora. Búscala en el gestor de contraseñas por su nombre. Si quieres, pégala en el comando de arriba antes de
+   nada: si dice `matches`, es la buena.
+5. Ponla en Railway, en `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`, y **espera a que el servicio reinicie**. Volver a correr
+   el comando aquí no comprueba nada de lo que acabas de guardar: el comando lee tu ordenador, no Railway.
+6. **Abre `/status` y mira `signing.authorizationKey`. Tiene que decir `matches`.** Esa es la comprobación que mira la
+   llave desplegada, y es la que cierra la incidencia. Al lado, `signing.authorizationKeyAt` dice de cuándo es el
+   veredicto: si la fecha es anterior al reinicio, el vigilante aún no ha vuelto a comprobarlo — espera y recarga. En el
+   log de Railway aparece además `derivedPublicKey`, que tiene que ser la misma clave pública que te imprimió el comando.
+
+Lo más normal es que en Railway esté pegada otra llave tuya: tienes varias, y una de ellas es la de administración de la
+política, que **no** es esta. La de administración está en `~/sip-keys/privy-policy-admin.key` y sirve para otra cosa
+(cambiar la política); si la pegas aquí, sale exactamente este `not-in-quorum`.
+
+### Si la llave privada de ese quorum se ha perdido
+
+Privy enseña la clave privada **una sola vez**, cuando se crea. No se puede recuperar ni volver a ver: ni tú, ni Privy,
+ni nadie. Si no está en el gestor de contraseñas, no está. Y el quorum viejo no se puede arreglar añadiéndole una llave
+nueva: cambiar un quorum exige la firma de ese mismo quorum, que es justo la llave perdida.
+
+Así que **sí: se genera una nueva**. No es una catástrofe, pero cuesta, y conviene saber qué cuesta antes de empezar. El
+asiento de cada wallet de trading nombra el signer **por su id**; el id nuevo es otro, así que cada wallet sentada con
+el viejo hay que volver a sentarla. Eso lo hace el dueño de la wallet desde la web, con un botón. El orden importa:
+
+1. **Llave nueva en Privy.** Comprueba arriba que la app es la del app id `cmtrt36tb00080dlbrda5aqam` (paso 1) y ve a
+   **Wallets → Authorization keys → New key**. Nombre: el siguiente de la serie (`sip-solana-keeper-3`, si la que se
+   pierde es `sip-solana-keeper-2`), con una sola llave (1 de 1). Copia la clave privada al gestor **en ese momento**: no
+   la vuelves a ver. Apunta su **id**, que es nuevo: va en los pasos 2 y 3, y en los comandos de esta guía en lugar de
+   `kyio853439oa78qfvmt853i4`. (Así se hizo el 18-sep: `sip-solana-keeper`, `cbx133itb717vxp3dqwhk808`, se perdió, y
+   `sip-solana-keeper-2`, `kyio853439oa78qfvmt853i4`, la sustituyó.)
+2. **Railway: las DOS variables, y Redeploy.** En el servicio del vigilante cambia `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`
+   (la privada nueva, en una sola línea) y `SIP_SOLANA_PRIVY_SIGNER_ID` (el id nuevo). Despliega los cambios y espera a
+   que el servicio vuelva a arrancar. `SIP_SOLANA_PRIVY_POLICY_ID` **no cambia**.
+3. **Vercel: el signer id, y Redeploy.** En la web cambia `SIP_SOLANA_PRIVY_SIGNER_ID` al id nuevo **y haz Redeploy**
+   ([VERCEL_WEB.md](VERCEL_WEB.md)). Una variable nueva no se aplica a lo que ya está desplegado: sin el Redeploy, el
+   botón del paso 7 volvería a sentar el signer viejo, el que ya no sirve. La política (`SIP_SOLANA_PRIVY_POLICY_ID`) no
+   cambia.
+4. **Mira `/status` antes de tocar ninguna wallet.** `signing.authorizationKey` tiene que decir `matches`, con
+   `signing.authorizationKeyAt` posterior al arranque, y `signing.privySignerId` tiene que ser el id nuevo. En este
+   momento `signing.wallets` dirá `signable: 0`: es lo normal, porque todas las wallets siguen con el signer viejo, y
+   cada una sale en `wallets` como `none (signer not granted)`. Si `authorizationKey` no dice `matches`, para aquí: la
+   tabla de más arriba dice qué es cada valor. Pulsar botones no arregla una llave que no es la del quorum.
+
+   **Qué signer lleva cada wallet lo dice el log de Railway, no la web.** Busca la línea con `"wallet"` = la dirección
+   de esa wallet y un campo `granted`. Su `event` empieza por *"wallet has not granted the keeper's signer"* (el
+   vigilante de antes) o por *"wallet does not seat the keeper's current signer"* (el de ahora). `granted` son los ids de
+   signer que la wallet lleva **de verdad**, y es lo único que lo dice: la web solo sabe que hay *un* signer, no cuál. En
+   una wallet sentada antes de la rotación sale el id viejo (el 18-sep, `cbx133itb717vxp3dqwhk808`); si ya sale el
+   nuevo, esa wallet no necesita el botón. El vigilante escribe esa línea una vez después de cada arranque, y otra cada
+   vez que cambia; no la repite en cada barrido.
+5. **La web tiene que tener el botón.** **Re-seat keeper** solo existe en una web que lo incluya (la rama
+   `web-reseat-keeper`); el Redeploy del paso 3 vuelve a desplegar lo que ya hubiera en `main`, que puede no tenerlo.
+   Cuando esa rama esté en `main` y Vercel la haya desplegado, comprueba en `/wallets` dos cosas: cada wallet de trading
+   con la etiqueta **Has a signer** tiene el botón **Re-seat keeper**, y el pie de la tarjeta *Trading wallets* dice
+   *"New wallets seat the keeper's signer `kyio853…` with policy `jsuzcjv6…`"* (el id nuevo). Si no sale el botón, no
+   está desplegada; si el pie enseña el id viejo, falta el Redeploy del paso 3.
+6. **Ensaya en una wallet sin fondos antes que en la tuya.** Nadie ha visto todavía qué hace el registro de Privy con
+   una wallet de este tipo cuando se queda sin ningún signer: si sigue enseñando su id de wallet (lo que da por hecho el
+   SDK de Privy) o lo borra (lo que dicen sus tipos: *"Null if the wallet is not delegated"*). La web está hecha para
+   no perder la wallet en ninguno de los dos casos, pero esto se comprueba con una wallet vacía, no con la que tiene el
+   dinero.
+   - En `/wallets` pulsa **Create wallet and link it** (sin bóveda, el botón dice **Create wallet**). Cuando Phantom
+     pida aprobar el enlace, **recházalo**: la wallet queda creada y sin enlazar, y no se paga el alquiler del enlace.
+     Nace ya con el signer nuevo y la política `jsuzcjv6…`, y eso ya prueba que Privy acepta ese par.
+   - Apunta el **Privy wallet id** que sale en su fila.
+   - Pulsa **Re-seat keeper** en **esa** wallet nueva y luego **Remove every signer and re-seat**. Puede tardar algo
+     más de un minuto. Mientras tanto no cierres ni recargues: la ventana de *Manage wallets* no se deja cerrar, y el
+     navegador pregunta antes de recargar.
+   - Tienen que cumplirse las cuatro cosas:
+     1. sale un texto que empieza por **Done:**;
+     2. la etiqueta es **Has a signer**;
+     3. la fila **sigue enseñando la línea *Privy wallet id***, con el mismo id que apuntaste. Esto es lo que zanja la
+        pregunta;
+     4. `privy-policy verify --wallet <ese id> --policy jsuzcjv6njl0raqjjhzqe9fh` (sección 6) saca la línea
+        `signer granted with the override policy`. Con la wallet sin saldo, los tres intentos saldrán `INCONCLUSIVE`:
+        aquí da igual, lo que se ensaya es el asiento.
+   - Si quieres verlo por dentro: en las herramientas de desarrollador del navegador (pestaña *Network*), las
+     respuestas de `GET /api/v1/users/me` entre el quitar y el poner enseñan esa wallet con el mismo `id` y
+     `recovery_method: "privy-v2"` mientras `delegated` es `false`.
+   - **Si el ensayo acaba en cualquier cosa que no sea Done:**, y sobre todo si el mensaje empieza por *"While this
+     wallet had no signer, Privy's record stopped showing its server wallet id"*, **para: no toques tu wallet con
+     fondos** y pásale a Claude el mensaje entero. La wallet del ensayo no tiene nada que perder.
+   - **Opcional, decisión tuya:** antes de pulsar en tu wallet con fondos, pulsa **Export key** en su fila y guarda la
+     clave en el gestor de contraseñas. Mientras Privy tenga la wallet registrada con su id, la exportación funciona; con
+     la clave fuera, el dinero no depende de lo que haga el registro de Privy. A cambio es una copia más de la clave que
+     guardar bien.
+7. **El botón, en tu wallet.** Con el ensayo en **Done:**, en la web, con tu sesión iniciada con Phantom, abre la
+   pantalla de wallets (la web está en inglés; los nombres van tal cual salen en pantalla):
+   - la wallet de trading sale con la etiqueta **Has a signer**: Privy solo sabe decir que tiene *un* signer, no cuál,
+     así que el signer viejo se ve igual que uno bueno;
+   - pulsa **Re-seat keeper**. Todavía no pasa nada: sale un aviso que dice que va a quitar **todos** los signers de esa
+     wallet y enseña el signer y la política que pondrá después. **Mira que el signer sea el id nuevo.** Si enseña el
+     viejo (en la rotación del 18-sep, `cbx133itb717vxp3dqwhk808`), la web no se ha redesplegado: pulsa **Cancel** y
+     vuelve al paso 3;
+   - pulsa **Remove every signer and re-seat**. Privy quita los signers, la web espera a que Privy lo refleje, pone el
+     del vigilante con su política y espera a que Privy enseñe ese también. Puede tardar algo más de un minuto; no
+     cierres ni recargues mientras tanto. Termina con un texto que empieza por **Done:** y la etiqueta vuelve a
+     **Has a signer**.
+
+   Si tienes más de una wallet, hazlas **de una en una** y mira `/status` (paso 8) antes de pasar a la siguiente.
+
+   **Si se queda a medias**, el mensaje en rojo dice qué pasó. En todos los casos la wallet está a salvo: o sigue con los
+   signers que tenía, o no tiene ninguno y solo tú puedes firmar con ella. Lo único que pasa es que no se aparta nada de
+   sus operaciones hasta que el asiento vuelva. Según cómo empiece el mensaje:
+
+   | empieza por | qué pasó | qué haces |
+   |---|---|---|
+   | *"Privy did not confirm that it removed this wallet's signers"* | no se añadió nada; la wallet puede seguir con el signer viejo | arregla lo que diga el mensaje y pulsa **Re-seat keeper** otra vez. Si para entonces la wallet sale **No seat**, pulsa **Grant keeper permission** |
+   | *"Privy accepted removing this wallet's signers, but its record still shows a signer"* | Privy aceptó quitarlos, pero su registro aún no lo refleja. La wallet puede estar ya sin signers aunque la etiqueta diga **Has a signer** | espera un minuto y pulsa **Re-seat keeper** otra vez |
+   | *"Every signer is off this wallet now, and Privy did not confirm that the keeper's seat was added"* | se quitaron los signers y Privy no confirmó el nuevo. La wallet sale **No seat**, también si recargas | pulsa **Grant keeper permission** en esa wallet |
+   | *"Every signer was removed from this wallet. Privy's reply to adding the keeper's signer then failed, but its record now shows a signer"* | casi seguro que el signer se puso: lo que falló es la respuesta de Privy | **no pulses Grant**. Comprueba con la línea `privy-policy verify` que trae el mensaje, o en `/status` tras el siguiente barrido |
+   | *"Every signer was removed from this wallet, and Privy accepted the keeper's signer with its policy, but its record has not shown the seat yet"* | Privy aceptó el signer, pero su registro va con retraso | **no pulses Grant**: lo añadiría dos veces. La web lo deja gris un minuto. Recarga en un minuto: tiene que salir **Has a signer** |
+   | *"While this wallet had no signer, Privy's record stopped showing its server wallet id"* | justo lo que el ensayo del paso 6 tenía que descartar. El mensaje trae el id y dice si el signer se volvió a poner | si dice que Privy lo aceptó, compruébalo con la línea `privy-policy verify` del mensaje. Si dice *"was NOT added back"*, no pulses nada más en esa wallet: **Grant keeper permission** sale gris mientras la fila no enseñe el *Privy wallet id*. Guarda el id y pásale el mensaje a Claude |
+   | *"Privy's record showed no signer on this wallet, then a signer this page did not add"* | apareció un signer que la web no puso, y la web no añadió nada | pulsa **Re-seat keeper** otra vez |
+   | *"This page's copy of Privy's record and the one just read name different server wallet ids"* | no se tocó nada | recarga la página y vuelve a probar |
+
+   **Si el botón sale gris** con *"Re-seat is not available for this wallet"*, no la toques desde la web y avisa: Privy
+   solo sabe quitar los signers de una wallet cada vez cuando es una wallet TEE con su propio id, y en cualquier otra
+   quitaría los de todas tus wallets a la vez. Lo mismo si **Grant keeper permission** sale gris con *"Privy adds the
+   keeper's signer only to a TEE wallet it lists with its own server wallet id"*: el registro de Privy no enseña el id
+   de esa wallet, y desde la web no se le puede poner el signer.
+8. **Confirma en `/status`.** `signing.authorizationKey` sigue en `matches`; `signing.wallets` dice `signable` igual
+   que `of` (N de N); y cada wallet sale en `wallets` con `signing` = `privy`, no `none (signer not granted)`. El
+   vigilante lo lee en su siguiente barrido, así que puede tardar un poco: recarga. Desde ahí el cobro de esa wallet deja
+   de ser `NO_SIGNER`, y el beneficio que estaba pendiente se cobra en los barridos siguientes.
+
+   Si salió **Done:** pero tras varios barridos esa wallet sigue en `none (signer not granted)`, busca otra vez su línea
+   con `granted` en el log de Railway (paso 4). Si `granted` todavía nombra el id viejo, el cambio no llegó a Privy:
+   pasa `privy-policy verify` a esa wallet y pásale a Claude lo que diga. Si ya nombra el nuevo, el signer está y lo que
+   falla es otra cosa: mira qué dice `/status` en `signing` de esa wallet, y la sección 6.
+9. La **política no cambia**: el mismo `policy id` y la misma llave de administración. Va enganchada a cada asiento como
+   override, así que el botón la vuelve a poner sola.
+10. Cuando todas estén sentadas otra vez, borra la llave vieja en el dashboard y repite la **sección 6** de esta guía
+    (*Verifica que rechaza lo que debe*) con la nueva.
+
+Si la llave no se perdió sino que **se expuso** (alguien la vio, se pegó en un sitio que no tocaba), es el mismo camino
+pero sin esperar, como dice [SECRETS.md](SECRETS.md). Con un cuidado: el botón pone el signer que tenga configurado la
+web, así que pulsarlo antes del Redeploy del paso 3 volvería a sentar el signer expuesto. Primero los pasos 1 a 3,
+luego el botón, y mira en el aviso que el signer sea el nuevo.
+
+### El vigilante ya lo dice solo al arrancar
+
+Un vigilante armado hace esta misma comprobación **al arrancar**, antes del primer barrido, y la repite **cada media
+hora** mientras corre. La enseña en `/status`, en `signing.authorizationKey`, al lado de `seatCheck`, y con la fecha del
+veredicto en `signing.authorizationKeyAt`. Los valores son los mismos de la tabla de arriba, y **son sobre la llave que
+hay puesta en Railway**. `matches` es el único valor sano.
+
+Mira siempre las dos cosas juntas. Un `matches` con fecha de hace dos días es un veredicto sobre el arranque de hace dos
+días; si la fecha no se mueve, el vigilante lleva desde entonces sin poder preguntárselo a Privy.
+
+Si sale cualquier otro, el vigilante **arranca igual**. Arranca a propósito: si se negase a arrancar, Railway lo
+reiniciaría en bucle y se llevaría por delante la propia página `/status` donde se lee qué pasa — y además pararía de
+comprar cestas, que se compran con otra llave y no dependen de esta. Un ensayo (dry run) no hace la comprobación: no lee
+ninguna llave de firma, y eso no cambia.
+
+Lo que avisa no es igual en todos los casos, y conviene saberlo antes de confiar en que te va a despertar:
+
+| veredicto | en el log de Railway | alerta |
+|---|---|---|
+| `not-in-quorum`, `key-unreadable`, `threshold-above-one` | línea de **error** | **crítica** |
+| `members-unresolved`, `credentials-refused`, `quorum-not-found` | línea de **aviso** (`warn`) | de aviso, no crítica |
+| `quorum-unreadable` | línea de **aviso** | **ninguna las dos primeras veces**; de aviso a partir de la tercera seguida (alrededor de una hora) |
+
+`quorum-unreadable` calla al principio a propósito: que se caiga la red un momento no prueba nada sobre la llave, y una
+alerta que salta por eso es una alerta que se acaba ignorando. Pero si se repite, lo que pasa es que el vigilante lleva
+horas sin poder comprobar nada — la protección está apagada — y eso sí avisa, diciendo cuántos intentos lleva. En ese
+caso no hay nada que arreglar en la llave: mira `status.privy.io`, y mira `signing.authorizationKeyAt` en `/status`
+después de cada reinicio.
+
+Y **ninguna alerta llega a ningún sitio** si Railway no tiene puesta la variable del webhook de alertas
+(`SIP_SOLANA_ALERT_WEBHOOK`, [RAILWAY_SOLANA.md](RAILWAY_SOLANA.md)). Sin ella se escriben solo en el log, que es
+lo que pasó la noche del 18-sep: la alerta saltó cada media hora durante todo el apagón y no la vio nadie. Compruébalo.
 
 ## Por qué la política tiene una llave de administración aparte
 

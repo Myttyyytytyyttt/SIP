@@ -94,7 +94,7 @@ export function LivePensionCard({
       </CardHeader>
 
       <CardContent>
-        <LiveSavedChart points={data.chart} complete={complete} className="h-64 w-full sm:h-72" />
+        <LiveSavedChart points={data.chart} complete={complete} settledOutsideHistory={stats.settledOutsideHistory} className="h-64 w-full sm:h-72" />
       </CardContent>
 
       <CardContent className="space-y-6">

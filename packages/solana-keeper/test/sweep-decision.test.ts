@@ -266,7 +266,15 @@ describe("what a degraded sweep reads, and what it says when a turn throws", () 
   it("stops showing a stale row for a wallet whose turn threw", () => {
     // health.wallets is assigned at the END of a turn, so a throw used to leave
     // the wallet's LAST GOOD settle on the page with its old timestamp.
-    const catchBlock = keeper.slice(keeper.indexOf('log.error("wallet turn threw"'));
-    expect(catchBlock.slice(0, 800)).toMatch(/health\.wallets\[wallet\] = \{/);
+    //
+    // BOUNDED BY THE CATCH, NOT BY A CHARACTER COUNT. This read the first 800
+    // characters after the log line, which is a measure of how much prose sits
+    // between the two statements rather than of whether the row is written —
+    // adding the escalation the catch was missing pushed the assignment past it.
+    const start = keeper.indexOf('log.error("wallet turn threw"');
+    expect(start).toBeGreaterThan(-1);
+    const catchBlock = keeper.slice(start, keeper.indexOf("\n      }\n", start));
+    expect(catchBlock).toMatch(/health\.wallets\[wallet\] = \{/);
+    expect(catchBlock).toMatch(/settle: "THREW"/);
   });
 });

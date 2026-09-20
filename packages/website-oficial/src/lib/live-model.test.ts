@@ -241,6 +241,28 @@ describe("the chart is worked backwards from the vault's own total", () => {
     expect(view.chart!.map((point) => point.totalLamports)).toEqual([40_000_000n, 60_000_000n, 60_000_000n]);
   });
 
+  it("still SAYS it holds that settlement, because the feed is listing it", () => {
+    // The same row, from the other side. The hook reads the snapshot first and
+    // the activity page second (use-live-dashboard.ts), so a settle landing
+    // between the two is ALWAYS newer than snapshot.slot: it is left out of the
+    // curve's arithmetic — which is what keeps the line under lifetimeSaved —
+    // while rowsOf lists it with no slot filter at all.
+    //
+    // Deciding "not in loaded history" from the filtered list put that claim,
+    // and "No settlement landed in this window", directly above a settlement
+    // row seconds old, until the next poll moved the snapshot's slot past it.
+    const newer = activity([entry("sigNew", T2, [settledEvent("40000000")], 9_999), entry("sig1", T1, [{ kind: "upkeep" } as VaultEventJson])]);
+    const view = model(snapshot(), newer);
+
+    expect(view.rows.filter((row) => row.event.kind === "settled")).toHaveLength(1);
+    expect(view.stats.settledOutsideHistory).toBe(false);
+    // And the tile says when, from the row the feed is showing.
+    expect(view.stats.lastSettlementAt).toBe(new Date(T2 * 1_000).toISOString());
+    // The arithmetic is untouched: the curve still cannot rise above the total.
+    expect(view.stats.loadedSettlements).toBe(0);
+    expect(view.chart!.map((point) => point.totalLamports)).toEqual([60_000_000n, 60_000_000n]);
+  });
+
   it("draws NO chart when the loaded settlements exceed the vault's own total: a curve cannot start below zero", () => {
     // An RPC answer without context.slot leaves the snapshot's slot null, which
     // turns the coverage guard off — so 0.1 SOL of loaded settlements sit over
@@ -254,9 +276,39 @@ describe("the chart is worked backwards from the vault's own total", () => {
     expect(view.rows).toHaveLength(2);
   });
 
-  it("is null until a settlement is loaded: the chart starts with the first one", () => {
+  it("is null when there is no window to draw across: no rows loaded at all", () => {
+    // The vault HAS saved here, so this is not "no settlement yet" — it is a
+    // read that came back with nothing to be flat over. LiveSavedChart says
+    // which, from stats.settledOutsideHistory, rather than claiming a first
+    // settlement that already happened.
     expect(model(snapshot(), activity([])).chart).toBeNull();
     expect(model(snapshot(), null).chart).toBeNull();
+    expect(model(snapshot(), activity([])).stats.settledOutsideHistory).toBe(true);
+  });
+
+  it("is FLAT across a window holding no settlement: the total only moves when one lands", () => {
+    // The 2026-09-19 shape: fifteen signatures of keeper upkeep over a vault
+    // whose own lifetimeSaved is 0.06 SOL. Drawing nothing there is what put
+    // "The chart starts with your first settlement" over a settled pension.
+    const upkeepOnly = activity([entry("sig2", T2, [{ kind: "upkeep" } as VaultEventJson]), entry("sig1", T1, [{ kind: "upkeep" } as VaultEventJson])]);
+    const view = model(snapshot(), upkeepOnly);
+
+    expect(view.stats.settledOutsideHistory).toBe(true);
+    expect(view.stats.loadedSettlements).toBe(0);
+    expect(view.chart!.map((point) => point.totalLamports)).toEqual([60_000_000n, 60_000_000n]);
+    // From the oldest loaded row to the read's own clock, and no further.
+    expect(Date.parse(view.chart![0]!.at)).toBe(T1 * 1_000);
+    expect(Date.parse(view.chart![1]!.at)).toBe(NOW_MS);
+  });
+
+  it("really is null when nothing has ever settled: the honest branch is kept", () => {
+    const fresh = snapshot({
+      vault: { ...snapshot().vault, state: { ...snapshot().vault.state!, lifetimeSaved: "0" } },
+      wallets: [{ wallet: WALLET_A, lamports: "420000000", link: { address: `${WALLET_A}-link`, status: "this_vault", vault: VAULT, epoch: "12", settlementNonce: "0", frontierSlot: "0" } }],
+    });
+    const upkeepOnly = activity([entry("sig1", T1, [{ kind: "upkeep" } as VaultEventJson])]);
+    expect(model(fresh, upkeepOnly).chart).toBeNull();
+    expect(model(fresh, upkeepOnly).stats.settledOutsideHistory).toBe(false);
   });
 });
 

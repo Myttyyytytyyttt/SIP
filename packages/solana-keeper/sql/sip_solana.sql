@@ -56,3 +56,22 @@ CREATE INDEX IF NOT EXISTS sip_solana_settle_by_vault
   ON sip_solana.settlement_event (vault_addr, at DESC);
 CREATE INDEX IF NOT EXISTS sip_solana_invest_by_vault
   ON sip_solana.investment_event (vault_addr, at DESC);
+
+-- ─── Added after this schema was already applied to a live database ──────────
+--
+-- AN ALTER, NOT A COLUMN IN THE CREATE ABOVE. `CREATE TABLE IF NOT EXISTS` does
+-- nothing at all to a table that exists, so a column added inside it would be
+-- missing on every database this file has already run against — including the
+-- one the keeper is writing to right now.
+
+-- The notional the settled window traded, from the same walk that measured the
+-- window (measure-window.ts). MEASURED, NEVER ATTESTED: no settlement is
+-- computed from it, and nothing is charged on it — it feeds the usage
+-- leaderboard. Rows written before the column existed read 0, which is the
+-- honest value: nobody measured their volume.
+ALTER TABLE sip_solana.settlement_event
+  ADD COLUMN IF NOT EXISTS volume_raw numeric NOT NULL DEFAULT 0;
+
+-- The leaderboard reads the whole table grouped by day, newest seasons first.
+CREATE INDEX IF NOT EXISTS sip_solana_settle_by_at
+  ON sip_solana.settlement_event (at DESC);

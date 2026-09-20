@@ -49,7 +49,19 @@ import { describe, expect, it, vi } from "vitest";
 
 import { FAILURE_COPY, WITHDRAW_COPY } from "@/lib/vault-copy";
 import type { ApiFailure, ApiResult, BuiltTransactionJson, InvestmentPolicyJson, SendResponseJson, VaultApi } from "@/lib/vault-api";
-import { LINK_MAX_BUILDS, checkAgainFlow, createVaultFlow, investPolicyFlow, linkWalletFlow, pauseInvestingFlow, withdrawFlow, withdrawTokenFlow, type FlowStep } from "@/lib/vault-flows";
+import {
+  LINK_MAX_BUILDS,
+  awaitsConfirmation,
+  checkAgainFlow,
+  createVaultFlow,
+  investPolicyFlow,
+  linkWalletFlow,
+  pauseInvestingFlow,
+  withdrawFlow,
+  withdrawTokenFlow,
+  type FlowResult,
+  type FlowStep,
+} from "@/lib/vault-flows";
 import { deriveAtaAddress, deriveConfigAddress, deriveInvestAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
 
 function signBytes(signer: Keypair, message: Uint8Array): Uint8Array {
@@ -776,7 +788,8 @@ describe("linkWalletFlow", () => {
     expect(toHex(h.signMessageWithTrading.mock.calls[0]![0])).toBe(toHex(linkConsentMessage({ programId: SIP_PROGRAM_ID, wallet: h.tradingAddress, vault, owner: h.pensionKey })));
     expect(toHex(h.signWithPension.mock.calls[0]![0])).toBe(toHex(await builtTx(h, 1)));
     expect(toHex(h.signWithTrading.mock.calls[0]![0])).toBe(toHex(await h.signWithPension.mock.results[0]!.value));
-    expect(h.steps).toEqual(["preparing", "approve_pension", "trading_signing", "sending", "confirming", "done"]);
+    // "consent" is its own step: a chained create-and-link has to name which wallet is being asked for what.
+    expect(h.steps).toEqual(["preparing", "consent", "approve_pension", "trading_signing", "sending", "confirming", "done"]);
   });
 
   it.each<[string, (h: Harness) => unknown]>([
@@ -1280,6 +1293,24 @@ describe("Phantom's Lighthouse checks, in the browser and at the relay", () => {
       );
       link.confirm.mockImplementationOnce(async () => ({ status: "failed", slot: 11, err: { InstructionError: [index, { Custom: custom }] } }));
       expect(await linkWalletFlow(link.linkDeps, link.linkInput), `link at ${index}`).toMatchObject({ ok: false, kind: "refused", message });
+    }
+  });
+});
+
+describe("awaitsConfirmation: what leaves a transaction on its way", () => {
+  const SENT: FlowResult = { ok: false, kind: "unconfirmed", message: "not confirmed", signature: "sig", explorerUrl: null, lastValidBlockHeight: 7 };
+
+  it("only a sent-and-unconfirmed result waits: everything else is settled, and null is not a write at all", () => {
+    expect(awaitsConfirmation(SENT)).toBe(true);
+    expect(awaitsConfirmation(null)).toBe(false);
+    for (const result of [
+      { ok: true, signature: "sig", explorerUrl: null, slot: 1, unitsConsumed: null },
+      { ok: false, kind: "refused", message: "no" },
+      { ok: false, kind: "expired", message: "no" },
+      { ok: false, kind: "rate_limited", message: "no", retryAfterSeconds: null },
+      { ok: false, kind: "unreadable", message: "no" },
+    ] satisfies FlowResult[]) {
+      expect(awaitsConfirmation(result), result.ok ? "landed" : result.kind).toBe(false);
     }
   });
 });

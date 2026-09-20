@@ -948,14 +948,19 @@ describe("the ticks' first steps, over the same bytes", () => {
     });
 
     expect(result.outcome).toBe("FAILED");
-    expect(result.detail).toContain("no recent swap_v2 found on pool");
+    expect(result.detail).toContain("not Raydium CLMM");
     expect(result.purchases).toBeUndefined();
     // Three reads, and they are the ones that were there before this fix: the
     // vault + Clock + feeds, the leg mints + pools, and the pools' vaults. The
     // candidate token accounts were never read, because no account was ever
     // going to be created for a leg that has nowhere to trade.
     expect(calls.filter((name) => name === "getMultipleAccountsInfo")).toHaveLength(3);
-    expect(calls.filter((name) => name === "getSignaturesForAddress")).toHaveLength(1);
+    // ZERO, not one, and that is STRICTER than it was. The route used to be
+    // found by walking a pool's signatures for a recent swap_v2; it now comes
+    // from the pool's own account, so a signature walk here would be a
+    // regression to the read that took 52-72 s and died on a versioned
+    // transaction. Pinning 0 keeps it gone.
+    expect(calls.filter((name) => name === "getSignaturesForAddress")).toHaveLength(0);
     for (const rpc of ["getLatestBlockhash", "sendTransaction", "sendRawTransaction"]) expect(calls).not.toContain(rpc);
   });
 

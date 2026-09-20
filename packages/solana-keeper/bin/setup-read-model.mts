@@ -19,7 +19,7 @@ import { readFileSync } from "node:fs";
 import pg from "pg";
 import { sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
 import { createKeeperLogger } from "../src/keeper-log.js";
-import { READ_MODEL_SCHEMA, READ_MODEL_TABLES, sslFor } from "../src/read-model.js";
+import { READ_MODEL_SCHEMA, READ_MODEL_TABLES, REQUIRED_SETTLEMENT_COLUMNS, sslFor } from "../src/read-model.js";
 
 const log = createKeeperLogger();
 const DRY_RUN = process.argv.includes("--dry-run");
@@ -39,7 +39,11 @@ try {
 }
 
 if (DRY_RUN) {
-  log.info("dry run: would apply sql/sip_solana.sql", { schema: READ_MODEL_SCHEMA, tables: [...READ_MODEL_TABLES] });
+  log.info("dry run: would apply sql/sip_solana.sql", {
+    schema: READ_MODEL_SCHEMA,
+    tables: [...READ_MODEL_TABLES],
+    settlementColumns: [...REQUIRED_SETTLEMENT_COLUMNS],
+  });
   process.exit(0);
 }
 
@@ -51,11 +55,38 @@ try {
     `SELECT t.name FROM unnest($1::text[]) AS t(name) WHERE to_regclass('${READ_MODEL_SCHEMA}.' || t.name) IS NULL`,
     [[...READ_MODEL_TABLES]],
   );
+  // A TABLE EXISTING IS NOT THE SCHEMA BEING CURRENT. This file is applied to a
+  // database that already has the tables, so its real work is usually an ALTER —
+  // and `CREATE TABLE IF NOT EXISTS` would report "ready" for a settlement_event
+  // missing every column added since the day it was created. Checking the
+  // columns is what makes "ready" mean the keeper's INSERT will be accepted.
+  const columns = await client.query<{ name: string }>(
+    `SELECT c.name
+       FROM unnest($1::text[]) AS c(name)
+      WHERE NOT EXISTS (
+        SELECT 1
+          FROM information_schema.columns
+         WHERE table_schema = $2 AND table_name = 'settlement_event' AND column_name = c.name
+      )`,
+    [[...REQUIRED_SETTLEMENT_COLUMNS], READ_MODEL_SCHEMA],
+  );
   if (missing.rows.length > 0) {
     log.error("the schema was applied but tables are still missing", { missing: missing.rows.map((row) => row.name) });
     process.exitCode = 1;
+  } else if (columns.rows.length > 0) {
+    log.error("the schema was applied but settlement_event is missing columns; the keeper's history writes would be refused", {
+      missing: columns.rows.map((row) => row.name),
+      table: `${READ_MODEL_SCHEMA}.settlement_event`,
+    });
+    process.exitCode = 1;
   } else {
-    log.info("read model ready", { schema: READ_MODEL_SCHEMA, tables: [...READ_MODEL_TABLES] });
+    // The columns are listed, not just counted: this line is the answer to
+    // "did the migration actually land?", and a number would not be.
+    log.info("read model ready", {
+      schema: READ_MODEL_SCHEMA,
+      tables: [...READ_MODEL_TABLES],
+      settlementColumns: [...REQUIRED_SETTLEMENT_COLUMNS],
+    });
   }
 } catch (error) {
   log.error("read model setup failed", { detail: summarizeUpstreamError(error, { take: 3 }) });

@@ -133,6 +133,14 @@ export const LIVE_COPY = {
   chartSince: (date: string): string => `Since ${date}`,
   chartComplete: "Complete history",
   chartEmpty: "The chart starts with your first settlement.",
+  /**
+   * The vault has saved, and not one settlement is in the pages loaded here —
+   * so there is no window to draw a line across, and "starts with your first
+   * settlement" would be a statement the vault's own total contradicts.
+   */
+  chartOutsideHistory: "Your settlements are not in the history loaded here, so there is no line to draw yet. Saved so far above is your vault’s own total.",
+  /** The flat line's caption: it is flat BECAUSE nothing settled in that window. */
+  chartFlat: "No settlement landed in this window, so the line is level at your vault’s own total.",
 
   // ── the holdings table ─────────────────────────────────────────────────────
   holdings: "Holdings",
@@ -194,7 +202,9 @@ export const LIVE_COPY = {
     create: "Create vault",
     openWallets: "Open the wallets page",
     checklist: "What is left to set up",
-    steps: ["Create vault", "Create a trading wallet", "Link it", "Set up investing"],
+    // States, not clicks: a trading wallet and its link are two things the chain can be asked about,
+    // and a wallet created before this flow existed, or one whose link stopped, still sits between them.
+    steps: ["Create vault", "Create a trading wallet", "Link it to your vault", "Set up investing"],
     sidebar: "No activity: this pension key has no vault yet.",
   },
 
@@ -202,8 +212,8 @@ export const LIVE_COPY = {
     title: "Your vault is ready",
     body:
       `${BRAND} saves from a trading wallet: a wallet created under Manage wallets with the keeper’s permission. ` +
-      "Create one, fund it with SOL and trade from it; export its key to use it in Axiom or any Solana app.",
-    create: "Create trading wallet",
+      "One press creates it and links it to your vault; then fund it with SOL and trade from it, or export its key to use it in Axiom or any Solana app.",
+    create: "Create and link a trading wallet",
   },
 
   notLinked: {
@@ -307,6 +317,8 @@ export const STATS_COPY = {
   cappedSub: (max: string): string => `at ${max} SOL each`,
   lastSettlement: "Last settlement",
   lastSettlementNever: "none yet",
+  /** Settlements the state counts but the loaded pages do not hold: never "none yet". */
+  lastSettlementOutside: "not in loaded history",
   investedSoFar: "Invested so far",
   usedIn30Days: "Used in 30 days",
   usedIn30DaysSub: (cap: string): string => `of ${cap}`,

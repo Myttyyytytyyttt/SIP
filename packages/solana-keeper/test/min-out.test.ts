@@ -1,27 +1,33 @@
 // The slippage bound, in raw units, over the numbers a real purchase produced.
 //
 // The four zero-fee vectors moved here from measure-window.test.ts UNCHANGED,
-// because the transfer-fee subtraction must not move them: a mint that charges
-// nothing must price exactly as it always did, and the old arithmetic is
-// re-derived below to prove it rather than asserted from memory.
+// because no change to this module may move them: a mint that charges nothing
+// must price exactly as it always did, and the old arithmetic is re-derived
+// below to prove it rather than asserted from memory.
 //
-// The rest is the fee itself. live-route.ts measures the observed price off the
-// pool's OUTPUT VAULT — its gross outflow — while Raydium's swap_v2 and
-// sip-vault's invest both check their thresholds against the NET delta the
-// destination is credited. The gap is the mint's Token-2022 transfer fee: 50
-// bps on both PreStocks mints since epoch 1032, uncapped, set by a key that
-// moved them there from 0 and can schedule 10_000 bps with about two epochs'
-// notice. Taken out of a 200 bps bound, that fee left 150.75 bps of real
-// tolerance; at 200 it would leave none at all, and that is a throw, not a
-// number.
+// THE REST OF THIS FILE GUARDS ONE REGRESSION, described in full at the top of
+// src/min-out.ts. Until 2026-09-20 `observed` was measured by walking real
+// swaps and reading the pool OUTPUT VAULT's outflow — GROSS, before Token-2022
+// withholds the output mint's transfer fee — so this module took that fee off
+// before applying SLIPPAGE_BPS. live-route.ts now derives the rate from the
+// pool's own account and composes BOTH mints' transfer fees into it, so the
+// number arriving here is already the NET credit. Subtracting the fee again
+// would be invisible in every way that normally protects us: no throw, no
+// revert, no red test — just a smaller `expected`, hence a LOWER min_out,
+// hence a keeper that accepts a fill WORSE than its bound claims to guarantee.
+//
+// So the assertions below are written against the ONE quantity that catches it:
+// the tolerance actually left between the credited amount and min_out. It must
+// be SLIPPAGE_BPS and nothing else. At the 50 bps both PreStocks mints have
+// charged since epoch 1032 a second subtraction makes it 249; at the 100 bps
+// scheduled for epoch 1039, 298.
 
 import { describe, expect, it } from "vitest";
+import { MAX_LEG_FEE_BPS } from "../src/invest-decision.js";
 import { NO_TRANSFER_FEE, SLIPPAGE_BPS, netOfTransferFee, tightenMinOut } from "../src/min-out.js";
 
 /** u64::MAX: maximum_fee on both PreStocks mints, i.e. no cap at all. */
 const UNCAPPED = (1n << 64n) - 1n;
-/** What those mints have charged since epoch 1032. */
-const PRESTOCKS_FEE = { bps: 50n, maximumFee: UNCAPPED } as const;
 
 describe("min_out", () => {
   it("a live observation tightens min_out far above the lab floor", () => {
@@ -29,7 +35,7 @@ describe("min_out", () => {
     const observed = { inRaw: 1_000_000n, outRaw: 464_278n };
     // The floor the web writes: amountIn * 1e15 / 1e18 = amountIn / 1000.
     const floor = 1_000_000n / 1000n; // 1000 raw units — ~460x below market
-    const { minOut, live } = tightenMinOut(1_000_000n, floor, observed, NO_TRANSFER_FEE);
+    const { minOut, live } = tightenMinOut(1_000_000n, floor, observed);
     expect(live).toBe(true);
     // 2% under the observed rate, and hugely tighter than the floor.
     expect(minOut).toBe((464_278n * 9800n) / 10_000n);
@@ -38,7 +44,7 @@ describe("min_out", () => {
 
   it("without an observation it falls back to the floor and admits it", () => {
     const floor = 1_000n;
-    const { minOut, live } = tightenMinOut(1_000_000n, floor, null, NO_TRANSFER_FEE);
+    const { minOut, live } = tightenMinOut(1_000_000n, floor, null);
     expect(minOut).toBe(floor);
     expect(live, "no observation must never be reported as live protection").toBe(false);
   });
@@ -47,18 +53,20 @@ describe("min_out", () => {
     // A collapsing pool: the observed rate is worse than the user's own floor.
     const observed = { inRaw: 1_000_000n, outRaw: 10n };
     const floor = 500_000n;
-    const { minOut, live } = tightenMinOut(1_000_000n, floor, observed, NO_TRANSFER_FEE);
+    const { minOut, live } = tightenMinOut(1_000_000n, floor, observed);
     expect(minOut, "the program requires min_out >= floor; tightening is the only direction").toBe(floor);
+    // NOT "no price was observable": the price was read and its bound simply
+    // lost to the floor. invest-tick.ts's log says so in those words.
     expect(live).toBe(false);
   });
 
   it("a zero-input observation cannot divide by zero", () => {
-    const { minOut, live } = tightenMinOut(1_000n, 7n, { inRaw: 0n, outRaw: 5n }, NO_TRANSFER_FEE);
+    const { minOut, live } = tightenMinOut(1_000n, 7n, { inRaw: 0n, outRaw: 5n });
     expect(minOut).toBe(7n);
     expect(live).toBe(false);
   });
 
-  it("a mint that charges nothing prices EXACTLY as it did before the fee was subtracted", () => {
+  it("prices EXACTLY as it did before any transfer fee was ever involved", () => {
     // The arithmetic this module had before the fee existed, re-derived here so
     // the claim is proved against the current code rather than remembered.
     const before = (amountIn: bigint, floor: bigint, o: { inRaw: bigint; outRaw: bigint }): bigint => {
@@ -72,60 +80,104 @@ describe("min_out", () => {
       { amountIn: 500_000_000n, floor: 0n, observed: { inRaw: 1n, outRaw: 1_000_000_000n } },
     ];
     for (const v of vectors) {
-      expect(tightenMinOut(v.amountIn, v.floor, v.observed, NO_TRANSFER_FEE).minOut).toBe(before(v.amountIn, v.floor, v.observed));
+      expect(tightenMinOut(v.amountIn, v.floor, v.observed).minOut).toBe(before(v.amountIn, v.floor, v.observed));
     }
   });
 });
 
-describe("the output mint's transfer fee", () => {
-  const observed = { inRaw: 1_000_000n, outRaw: 464_278n };
+describe("the transfer fee is netted ONCE, in live-route.ts, and never again here", () => {
+  const AMOUNT_IN = 1_000_000n; // 1.00 USDC
+  /** The pool's GROSS outflow for that buy — what the old signature-walk measured. */
+  const GROSS = 464_278n;
   const floor = 1_000n;
-  /** The pool's gross outflow for a 1.00 USDC buy at the observed rate. */
-  const gross = 464_278n;
-  /** What Token-2022 withholds at 50 bps: 2321.39, ROUNDED UP. */
-  const fee = 2_322n;
-  const net = gross - fee;
 
-  it("prices a 50 bps leg against the net the vault is credited, not the vault's gross outflow", () => {
-    expect(netOfTransferFee(gross, PRESTOCKS_FEE)).toBe(net);
-    expect(net).toBe(461_956n);
-    const { minOut, live } = tightenMinOut(1_000_000n, floor, observed, PRESTOCKS_FEE);
-    expect(live).toBe(true);
-    expect(minOut).toBe(452_716n); // 461_956 × 9800 / 10_000
-    // Tighter than the zero-fee bound by exactly the fee's share of it.
-    expect(minOut < tightenMinOut(1_000_000n, floor, observed, NO_TRANSFER_FEE).minOut).toBe(true);
-    // And the tolerance now means what it says: 2% of what actually arrives.
-    expect(((net - minOut) * 10_000n) / net).toBe(SLIPPAGE_BPS);
+  /**
+   * `observed` exactly as live-route.ts's observedRate now builds it: the fee is
+   * a pure multiplication by (10_000 - bps) on outRaw, with the matching scale
+   * left on inRaw so the ratio stays exact. NOT Token-2022's rounding — the
+   * route nets the RATE, and deliberately so; the comment there records that
+   * where maximum_fee binds the quote is low and min_out ends up loose, which
+   * is the safe direction.
+   */
+  const netRate = (feeBps: bigint) => ({ inRaw: AMOUNT_IN * 10_000n, outRaw: GROSS * (10_000n - feeBps) });
+
+  /**
+   * What this module would produce if it ALSO took the fee off — i.e. the exact
+   * shape of the bug, reconstructed so the assertions can name it rather than
+   * gesture at it. This is the code that was here before the merge.
+   */
+  const subtractedTwice = (feeBps: bigint): bigint => {
+    const o = netRate(feeBps);
+    const expected = netOfTransferFee((AMOUNT_IN * o.outRaw) / o.inRaw, { bps: feeBps, maximumFee: UNCAPPED });
+    return (expected * (10_000n - SLIPPAGE_BPS)) / 10_000n;
+  };
+
+  // Real rates on Pren1FvF… (ANTHROPIC) and PreZad18… (FIGUREAI): 50 bps since
+  // epoch 1032, 100 bps scheduled for 1039, and 199 as the last rate the leg
+  // admission gate would ever have let through had its ceiling been SLIPPAGE_BPS.
+  const cases = [
+    { feeBps: 0n, credited: 464_278n, minOut: 454_992n, doubledTolerance: 200n },
+    { feeBps: 50n, credited: 461_956n, minOut: 452_716n, doubledTolerance: 249n },
+    { feeBps: 100n, credited: 459_635n, minOut: 450_442n, doubledTolerance: 298n },
+    { feeBps: 199n, credited: 455_038n, minOut: 445_937n, doubledTolerance: 395n },
+  ] as const;
+
+  it.each(cases)(
+    "at $feeBps bps leaves EXACTLY the slippage bound, not $doubledTolerance bps",
+    ({ feeBps, credited, minOut: expectedMinOut, doubledTolerance }) => {
+      const observed = netRate(feeBps);
+
+      // What the vault's own ATA is credited at this rate — the quantity
+      // invest.rs and swap_v2 compare their thresholds against.
+      expect((AMOUNT_IN * observed.outRaw) / observed.inRaw).toBe(credited);
+
+      const { minOut, live } = tightenMinOut(AMOUNT_IN, floor, observed);
+      expect(live).toBe(true);
+      expect(minOut).toBe(expectedMinOut);
+
+      // THE ASSERTION THAT CATCHES THE REGRESSION. The tolerance the keeper
+      // really leaves itself, measured against the credited amount, is the
+      // bound it names and nothing more.
+      expect(((credited - minOut) * 10_000n) / credited).toBe(SLIPPAGE_BPS);
+
+      // And the same number computed the broken way is strictly looser, so this
+      // test cannot pass with the second subtraction reinstated.
+      const twice = subtractedTwice(feeBps);
+      expect(((credited - twice) * 10_000n) / credited).toBe(doubledTolerance);
+      if (feeBps > 0n) {
+        expect(twice < minOut, "subtracting twice always LOWERS min_out — a weaker demand, not a stricter one").toBe(true);
+      }
+    },
+  );
+
+  it("the fee is not an input at all: same rate, same min_out, whatever the mint charges", () => {
+    // Two mints charging 50 and 100 bps differ ONLY through the rate live-route
+    // hands over. Given the SAME rate, this module cannot tell them apart — which
+    // is the structural reason the fee cannot be applied twice from in here.
+    const same = { inRaw: 1_000_000n, outRaw: 464_278n };
+    expect(tightenMinOut(AMOUNT_IN, floor, same).minOut).toBe(tightenMinOut(AMOUNT_IN, floor, same).minOut);
+    expect(tightenMinOut(AMOUNT_IN, floor, same).minOut).toBe(454_992n);
+    // Pinned so that re-adding a fee parameter is a red test and not a quiet
+    // edit: the signature is (amountIn, floor, observed) and nothing else.
+    expect(tightenMinOut.length, "tightenMinOut must take no fee argument — see the header of src/min-out.ts").toBe(3);
   });
 
-  it("is what the gross-priced bound was silently spending: 150 bps of tolerance left, not 200", () => {
-    // What the old arithmetic demanded, against what the vault can be credited.
-    const grossPriced = tightenMinOut(1_000_000n, floor, observed, NO_TRANSFER_FEE).minOut;
-    expect(grossPriced).toBe(454_992n);
-    expect(grossPriced < net, "it cleared — which is why nobody noticed").toBe(true);
-    expect(((net - grossPriced) * 10_000n) / net).toBe(150n); // 150.75 bps
-
-    // AND IT ABSORBED WHATEVER CAME NEXT. The same gross bound against a 199 bps
-    // fee — one the authority can schedule on these mints in two epochs — leaves
-    // a single basis point between the keeper's demand and the best possible
-    // fill, so every leg fails on a price that moved at all.
-    const nearly = netOfTransferFee(gross, { bps: 199n, maximumFee: UNCAPPED });
-    expect(((nearly - grossPriced) * 10_000n) / nearly).toBe(1n);
-    // Priced against the net, the same fee simply costs what it costs.
-    expect(tightenMinOut(1_000_000n, floor, observed, { bps: 199n, maximumFee: UNCAPPED }).minOut).toBe((nearly * 9800n) / 10_000n);
+  it("a fee big enough to matter is refused before it is priced, by a gate strictly tighter than the old throw", () => {
+    // This module used to throw when the output mint's fee reached SLIPPAGE_BPS,
+    // on the ground that the fee had eaten the whole tolerance. Netting the rate
+    // in live-route.ts removes that ground — the tolerance above is 200 bps at
+    // every rate — and the refusal that actually protects the basket lives in
+    // invest-decision.ts, where it refuses the WHOLE basket before a lamport
+    // moves. It is half the old number, so the old throw could never have fired.
+    expect(MAX_LEG_FEE_BPS).toBe(100n);
+    expect(MAX_LEG_FEE_BPS * 2n).toBe(SLIPPAGE_BPS);
+    expect(MAX_LEG_FEE_BPS < SLIPPAGE_BPS, "the admission ceiling must bind before any bound could be drawn").toBe(true);
   });
+});
 
-  it("REFUSES a fee at or above the slippage bound instead of absorbing it", () => {
-    for (const bps of [SLIPPAGE_BPS, SLIPPAGE_BPS + 1n, 1_000n, 10_000n]) {
-      expect(() => tightenMinOut(1_000_000n, floor, observed, { bps, maximumFee: UNCAPPED })).toThrow(
-        /transfer fee, at or above the 200 bps slippage bound/,
-      );
-      // Not even with no observation to price: the refusal is about the leg, not the route.
-      expect(() => tightenMinOut(1_000_000n, floor, null, { bps, maximumFee: UNCAPPED })).toThrow(/refusing to price/);
-    }
-    // One basis point under it still prices.
-    expect(tightenMinOut(1_000_000n, floor, observed, { bps: SLIPPAGE_BPS - 1n, maximumFee: UNCAPPED }).live).toBe(true);
-  });
+describe("netOfTransferFee still models Token-2022's calculate_fee", () => {
+  /** What those mints have charged since epoch 1032. */
+  const PRESTOCKS_FEE = { bps: 50n, maximumFee: UNCAPPED } as const;
 
   it("rounds the fee UP and honours maximum_fee, as Token-2022's calculate_fee does", () => {
     // 1 raw unit at 50 bps owes 0.005 — and Token-2022 still takes one.
@@ -137,5 +189,105 @@ describe("the output mint's transfer fee", () => {
     // Nothing at all: gross through, whatever the cap says.
     expect(netOfTransferFee(1_000_000n, NO_TRANSFER_FEE)).toBe(1_000_000n);
     expect(netOfTransferFee(0n, PRESTOCKS_FEE)).toBe(0n);
+  });
+});
+
+// ─── THE GUARD THE ARITHMETIC TESTS ABOVE CANNOT BE ───────────────────────────
+//
+// Measured on this branch, 2026-09-20, by reinstating the bug and running
+// everything: give `tightenMinOut` an OPTIONAL fourth `outFee` parameter
+// defaulting to NO_TRANSFER_FEE, call netOfTransferFee on `expected` again, and
+// pass `admission.fees.get(mint)!` from invest-tick.ts — and `tsc --noEmit`
+// exits 0 while all twelve tests above stay green. They must: every one of them
+// calls the function with three arguments, so the default absorbs the change and
+// the second subtraction only ever happens in production, on the leg path, to a
+// real user's money. The `tightenMinOut.length` assertion does not help either;
+// a parameter with a default does not count toward `.length`.
+//
+// So the property is checked where it is actually visible: in the SOURCE. This
+// is the same idiom as test/anchor-interop.test.ts, which greps src/ and bin/
+// for `new anchor.BN(` because the outage it guards cannot be reproduced under
+// vitest either. Comments are stripped first, so prose is free to discuss the
+// rule — as min-out.ts's header does at length — without tripping the guard.
+
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = fileURLToPath(new URL("..", import.meta.url));
+
+function sourceFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const path = join(dir, entry);
+    if (statSync(path).isDirectory()) out.push(...sourceFiles(path));
+    else if (path.endsWith(".ts") || path.endsWith(".mts")) out.push(path);
+  }
+  return out;
+}
+
+/** Block and line comments out, so the guards read code and not prose about code. */
+function codeOnly(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
+}
+
+/** Every `callee(...)` in `source`, as its top-level argument list. */
+function callArgumentLists(source: string, callee: string): string[][] {
+  const calls: string[][] = [];
+  const needle = `${callee}(`;
+  for (let at = source.indexOf(needle); at !== -1; at = source.indexOf(needle, at + needle.length)) {
+    // Not a call if the name is part of a longer identifier (e.g. a rename).
+    const before = source[at - 1];
+    if (before !== undefined && /[A-Za-z0-9_$.]/.test(before)) continue;
+    const args: string[] = [];
+    let arg = "";
+    let depth = 1;
+    let i = at + needle.length;
+    for (; i < source.length && depth > 0; i++) {
+      const c = source[i]!;
+      if (c === "(" || c === "[" || c === "{") depth++;
+      else if (c === ")" || c === "]" || c === "}") depth--;
+      if (depth === 0) break;
+      if (c === "," && depth === 1) {
+        args.push(arg.trim());
+        arg = "";
+      } else arg += c;
+    }
+    if (arg.trim() !== "") args.push(arg.trim());
+    calls.push(args);
+  }
+  return calls;
+}
+
+describe("nothing in src/ may net the transfer fee a second time", () => {
+  const files = sourceFiles(join(here, "src")).concat(sourceFiles(join(here, "bin")));
+
+  it("every tightenMinOut CALL passes exactly three arguments — never a fee", () => {
+    const callSites = files
+      .filter((path) => !path.endsWith("min-out.ts"))
+      .flatMap((path) => callArgumentLists(codeOnly(readFileSync(path, "utf8")), "tightenMinOut").map((args) => ({ path, args })));
+
+    // The convert hop and the leg. If this ever drops, the guard has stopped
+    // looking at anything and the count is what tells us.
+    expect(callSites.length, "expected the convert and the leg call sites to be found").toBe(2);
+    for (const { path, args } of callSites) {
+      expect(
+        args.length,
+        `${path.slice(here.length)} calls tightenMinOut with ${args.length} arguments (${args.join(" | ")}). ` +
+          "The observed rate already has every transfer fee in it — see the header of src/min-out.ts. " +
+          "A fourth argument is the second subtraction, and it lowers min_out.",
+      ).toBe(3);
+    }
+  });
+
+  it("tightenMinOut's own body never calls netOfTransferFee", () => {
+    const source = codeOnly(readFileSync(join(here, "src/min-out.ts"), "utf8"));
+    const body = source.slice(source.indexOf("export function tightenMinOut"));
+    expect(body.length > 0, "tightenMinOut must still exist under that name").toBe(true);
+    expect(
+      body.includes("netOfTransferFee"),
+      "tightenMinOut must not net the transfer fee: live-route.ts's observedRate already did it, " +
+        "and doing it twice lowers min_out below the bound SLIPPAGE_BPS names.",
+    ).toBe(false);
   });
 });

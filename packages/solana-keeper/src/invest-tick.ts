@@ -23,7 +23,7 @@
 // waiting for the next session. The threshold is the policy's own
 // min_investment, read from the chain rather than configured here twice.
 
-import * as anchor from "@coral-xyz/anchor";
+import type * as anchor from "@coral-xyz/anchor";
 import {
   ComputeBudgetProgram,
   Connection,
@@ -43,6 +43,7 @@ import {
 } from "@solana/spl-token";
 import { summarizeUpstreamError } from "@sip/solana-log";
 import { decodeVault, readInvestmentPolicy } from "./accounts.js";
+import { BN } from "./anchor-interop.js";
 import {
   CRANK_WRAP_RESERVE_LAMPORTS,
   USDC_MINT,
@@ -68,9 +69,9 @@ import {
   type WrapPlan,
   type WrapReport,
 } from "./invest-decision.js";
-import { method } from "./methods.js";
-import { NO_TRANSFER_FEE, tightenMinOut } from "./min-out.js";
-import { RAYDIUM_CLMM, buildSwapV2AccountMetas, buildSwapV2Data, fetchLiveRoute } from "./program-scripts.js";
+import { method, type MethodCall } from "./methods.js";
+import { tightenMinOut } from "./min-out.js";
+import { RAYDIUM_CLMM, type SwapV2Args, buildSwapV2AccountMetas, buildSwapV2Data, fetchLiveRoute } from "./program-scripts.js";
 import {
   PYTH_RECEIVER_PROGRAM,
   PYTH_SOL_USD_FEED,
@@ -83,6 +84,113 @@ import {
 
 const USDC = USDC_MINT;
 const WSOL_USDC_POOL = new PublicKey("3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv");
+
+// ── THE INVEST PATH'S THREE INSTRUCTIONS, AS FUNCTIONS A GATE CAN RUN ────────
+//
+// All three used to be written inline in investTurn, wrapped around the .rpc()
+// or .instruction() that sends them, which put them out of reach of anything
+// without a chain, a crank and a funded vault. So the preflight — the one gate
+// that runs in a REAL Node process, and therefore the only kind that can see a
+// CommonJS/ESM interop bug — reached settle_v2 through the keeper's own
+// settleInstruction and reached these three through a hand-written COPY inside
+// preflight.ts. A copy only ever proves the copy works.
+//
+// MEASURED ON THIS BRANCH, both spellings, with the fix reverted here only:
+//   a `new anchor.BN` at the three sites → tsc exits 0, `tsx bin/keeper.mts
+//   --preflight` prints {"preflight":"ok","invariants":14}; the image builds and
+//   the keeper throws "anchor.BN is not a constructor" on the first invest —
+//   2026-09-18's outage, one file over. Only the grep in
+//   test/anchor-interop.test.ts catches it, and only that literal spelling:
+//   written as `const { BN: NumberBN } = anchor`, typecheck, preflight AND the
+//   full 371-test suite are all green, while a real Node process from this
+//   package prints `destructured BN = undefined`.
+//
+// Extracted, the preflight runs THESE functions and compares the bytes they
+// build against fixed vectors. The arguments can no longer throw in production
+// while every gate is green, arrive from a foreign bn.js, or change width
+// unnoticed.
+//
+// THEY RETURN THE CALL, NOT THE INSTRUCTION, deliberately: the wrap is sent
+// with .signers([crank]).rpc() and the other two with .instruction() into
+// sendWithBudget. Handing back the fully-argued call leaves every byte of what
+// production sends exactly as it was — and .instruction(), which is what the
+// preflight calls, is what .rpc() reaches for internally anyway.
+
+/** wrap_sol: `lamports` of the vault's own SOL into the vault's wSOL account. */
+export function wrapSolCall(
+  program: anchor.Program,
+  accounts: {
+    readonly crank: PublicKey;
+    readonly vault: PublicKey;
+    readonly policy: PublicKey;
+    readonly vaultWsol: PublicKey;
+  },
+  lamports: bigint,
+): MethodCall {
+  return method(program, "wrapSol")(new BN(lamports.toString())).accountsPartial({
+    crank: accounts.crank,
+    vault: accounts.vault,
+    policy: accounts.policy,
+    vaultWsol: accounts.vaultWsol,
+    tokenProgram: TOKEN_PROGRAM_ID,
+    systemProgram: SystemProgram.programId,
+  });
+}
+
+/** convert: the vault's wSOL to USDC, at no worse than `minOut`, through the venue the policy names. */
+export function convertCall(
+  program: anchor.Program,
+  accounts: {
+    readonly crank: PublicKey;
+    readonly vault: PublicKey;
+    readonly policy: PublicKey;
+    readonly vaultWsol: PublicKey;
+    readonly vaultIn: PublicKey;
+  },
+  args: { readonly amountIn: bigint; readonly minOut: bigint; readonly swap: SwapV2Args },
+): MethodCall {
+  return method(program, "convert")(
+    new BN(args.amountIn.toString()),
+    new BN(args.minOut.toString()),
+    buildSwapV2Data(args.swap),
+  ).accountsPartial({
+    crank: accounts.crank,
+    vault: accounts.vault,
+    policy: accounts.policy,
+    vaultWsol: accounts.vaultWsol,
+    vaultIn: accounts.vaultIn,
+    venueProgram: RAYDIUM_CLMM,
+  });
+}
+
+/** invest: one leg of the signed basket, by its INDEX — the program prices and bounds the rest. */
+export function investCall(
+  program: anchor.Program,
+  accounts: {
+    readonly crank: PublicKey;
+    readonly vault: PublicKey;
+    readonly policy: PublicKey;
+    readonly vaultIn: PublicKey;
+    readonly vaultTarget: PublicKey;
+    readonly targetMint: PublicKey;
+  },
+  args: { readonly legIndex: number; readonly amountIn: bigint; readonly minOut: bigint; readonly swap: SwapV2Args },
+): MethodCall {
+  return method(program, "invest")(
+    args.legIndex,
+    new BN(args.amountIn.toString()),
+    new BN(args.minOut.toString()),
+    buildSwapV2Data(args.swap),
+  ).accountsPartial({
+    crank: accounts.crank,
+    vault: accounts.vault,
+    policy: accounts.policy,
+    vaultIn: accounts.vaultIn,
+    vaultTarget: accounts.vaultTarget,
+    targetMint: accounts.targetMint,
+    venueProgram: RAYDIUM_CLMM,
+  });
+}
 
 /** PAUSED, like NO_POLICY and IDLE, is a resting state: nothing moved and nothing broke. */
 export type InvestOutcome = "IDLE" | "NO_POLICY" | "PAUSED" | "INVESTED" | "REFUSED" | "FAILED";
@@ -442,12 +550,10 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         // AND THE wSOL ACCOUNT IS CREATED IN THIS SAME TRANSACTION when it is
         // missing, rather than in one of its own beforehand: wrap_sol is the
         // first instruction that needs it, and an account created here is an
-        // account this turn certainly used.
-        await method(program, "wrapSol")(new anchor.BN(wrap.amount.toString()))
-          .accountsPartial({
-            crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta,
-            tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
-          })
+        // account this turn certainly used. The create chains onto the
+        // EXTRACTED builder, which hands back the call and not the
+        // instruction precisely so that it still can.
+        await wrapSolCall(program, { crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta }, wrap.amount)
           .preInstructions(await plan.createsFor(wsolAta))
           .signers([crank])
           .rpc();
@@ -484,9 +590,13 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         found.converted = `${held} wSOL was not converted, and waits for a later sweep: ${priced.detail}`;
       } else {
         const convertFloor = (toConvert * policy.minConvertRateWad) / 10n ** 18n;
-        // USDC is a classic SPL Token mint with no extensions, so the convert's
-        // output is credited in full and the observed rate needs no fee taken off.
-        const { minOut } = tightenMinOut(toConvert, convertFloor, route.observed, NO_TRANSFER_FEE);
+        // `route.observed` is already net of every fee on the way through —
+        // live-route.ts folds the pool's trade fee and both mints' Token-2022
+        // transfer fees into it — so the bound below is 2% of what this vault's
+        // USDC account is actually credited, and nothing is subtracted twice.
+        // (On this hop the transfer-fee factors are both 1 anyway: wSOL and USDC
+        // are classic SPL Token mints with no extensions.)
+        const { minOut } = tightenMinOut(toConvert, convertFloor, route.observed);
         const args = { payer: vault, inputTokenAccount: wsolAta, outputTokenAccount: usdcAta, amountIn: toConvert, minAmountOut: minOut };
         // The USDC account is created HERE when it is missing — inside the swap
         // that credits it, and only now that the route is in hand and the oracle
@@ -494,8 +604,11 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         // behind, which is the whole point.
         await sendWithBudget(program.provider as anchor.AnchorProvider, crank, [
           ...(await plan.createsFor(usdcAta)),
-          await method(program, "convert")(new anchor.BN(toConvert.toString()), new anchor.BN(minOut.toString()), buildSwapV2Data(args))
-            .accountsPartial({ crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta, vaultIn: usdcAta, venueProgram: RAYDIUM_CLMM })
+          await convertCall(
+            program,
+            { crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta, vaultIn: usdcAta },
+            { amountIn: toConvert, minOut, swap: args },
+          )
             .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
             .instruction(),
         ]);
@@ -577,11 +690,14 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
 
       const route = await fetchLiveRoute(connection, pool, USDC, mint, TOKEN_2022_PROGRAM_ID);
       const investFloor = (amountIn * leg.minOutRateWad) / 10n ** 18n;
-      // THE OBSERVED PRICE IS THE POOL VAULT'S GROSS OUTFLOW; the vault's ATA is
-      // credited that less this mint's fee, and that net delta is what both
-      // swap_v2 and invest check their thresholds against. The fee comes off
-      // before the slippage bound, so the bound is 2% of what actually arrives.
-      const { minOut, live } = tightenMinOut(amountIn, investFloor, route.observed, admission.fees.get(mint.toBase58())!);
+      // THE OBSERVED PRICE IS ALREADY WHAT THIS VAULT'S ATA GETS CREDITED, and
+      // that net delta is what both swap_v2 and invest check their thresholds
+      // against. live-route.ts's observedRate takes this mint's Token-2022
+      // transfer fee out of the rate itself, so min-out.ts subtracts only the
+      // slippage tolerance and the bound is 2% of what actually arrives.
+      // Taking `admission.fees` off again HERE would net the same fee twice and
+      // hand the program a LOWER min_out than the bound claims — see min-out.ts.
+      const { minOut, live } = tightenMinOut(amountIn, investFloor, route.observed);
       anyLive = anyLive || live;
 
       const args = { payer: vault, inputTokenAccount: usdcAta, outputTokenAccount: targetAta, amountIn, minAmountOut: minOut };
@@ -590,8 +706,11 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       const before = await balanceOf(connection, targetAta);
       const signature = await sendWithBudget(program.provider as anchor.AnchorProvider, crank, [
         ...(await plan.createsFor(targetAta)),
-        await method(program, "invest")(index, new anchor.BN(amountIn.toString()), new anchor.BN(minOut.toString()), buildSwapV2Data(args))
-          .accountsPartial({ crank: crank.publicKey, vault, policy: policyPda, vaultIn: usdcAta, vaultTarget: targetAta, targetMint: mint, venueProgram: RAYDIUM_CLMM })
+        await investCall(
+          program,
+          { crank: crank.publicKey, vault, policy: policyPda, vaultIn: usdcAta, vaultTarget: targetAta, targetMint: mint },
+          { legIndex: index, amountIn, minOut, swap: args },
+        )
           .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
           .instruction(),
       ]);
@@ -613,9 +732,14 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       outcome: "INVESTED",
       detail: noted(
         `bought ${filled.join(" · ")}` +
+          // `live` is NOT "a price was readable" — an unreadable route throws in
+          // live-route.ts and never gets here. It is "the bound derived from that
+          // price beat the floor". So the false arm means the owner's own signed
+          // floor was the tighter of the two, which is a fact about the policy,
+          // not a missing observation.
           (anyLive
             ? " (min_out from a live observed price)"
-            : " (min_out is the POLICY FLOOR — no live price was observable)"),
+            : " (min_out is the POLICY FLOOR — the live price gave a bound no tighter than it)"),
       ),
       purchases,
     };

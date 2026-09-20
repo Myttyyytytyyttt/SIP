@@ -2,14 +2,38 @@
 
 /**
  * THE TRADING WALLETS: every Privy embedded Solana wallet on this account, and
- * the control that makes another.
+ * the one control that makes another and links it.
+ *
+ * ONE PRESS, END TO END. "Create wallet and link it" creates the wallet inside
+ * Privy with the keeper's seat and goes straight on to the link: the trading
+ * wallet's consent, Phantom's approval, the co-signature, the send. The card says
+ * all of that BEFORE the press, because Phantom's window opens partway through,
+ * long after the click, and an unannounced signature request is not acceptable.
+ * The chain is src/lib/create-and-link.ts; each step shows in TxProgress.
  *
  * THE LIST IS PRIVY'S RECORD OF THE USER, read on every render (tradingWalletsOf).
  * One exception: a wallet createWallet has just reported that the record does not
  * list yet is shown as such, rather than vanishing between the create and Privy's
  * refresh. Each row reads what Privy records of its signer (TradingWalletRow).
  *
- * A REFUSAL IS VISIBLE. With the keeper's seat not configured the create button is
+ * A STOP AFTER THE CREATE IS NOT A FAILURE OF THE CREATE. Once Privy answers, the
+ * wallet is real whatever happens next, so the card says so in the same breath as
+ * what stopped, and the wallet's own row carries Link to vault. What the card
+ * never claims is the seat: it was asked for at creation, and only the row's
+ * badge reads Privy's record — which can say a signer exists, never whose.
+ *
+ * A READ THAT FAILED IS NOT A READ IN FLIGHT. While the chain is still being read
+ * the whole press is offered — the flow reads it again after the create. Once the
+ * read has FAILED, the button says "Create wallet" and the card says the read's
+ * own words: promising a link, a Phantom prompt and rent that the flow will not
+ * reach is worse than offering less.
+ *
+ * NO VAULT, NO SILENT VAULT. Linking needs a vault, and a vault costs rent that
+ * never comes back and carries a mode and limits the owner chooses. With none,
+ * the press still creates the wallet and the card says the vault comes first,
+ * with the way to it.
+ *
+ * A REFUSAL IS VISIBLE. With the keeper's seat not configured the button is
  * disabled and the card names the missing variables: a trading wallet without the
  * seat cannot put anything aside, and a signer without its policy would be
  * unbounded (src/lib/trading-wallets.ts).
@@ -24,13 +48,20 @@ import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { TradingWalletRow, type TradingWalletRowData } from "@/components/wallets/TradingWalletRow";
-import { useCreateTradingWallet } from "@/hooks/use-create-trading-wallet";
+import { TxProgress } from "@/components/wallets/TxProgress";
+import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
+import { useCreateAndLink } from "@/hooks/use-create-and-link";
+import { useVaultScreen } from "@/hooks/use-vault-state";
+import { formatSol, rawFrom } from "@/lib/amounts";
+import { pressPlan, stopStillHolds, type CreateAndLinkOutcome } from "@/lib/create-and-link";
 import { MAX_TRADING_WALLETS, keeperSigners, seatProblem, tradingWalletsOf } from "@/lib/trading-wallets";
+import { CREATE_LINK_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
 
 export function TradingWalletsCard() {
   const config = useSolanaConfig();
   const { user } = usePrivy();
-  const { create, busy, failure, created } = useCreateTradingWallet(config);
+  const screen = useVaultScreen();
+  const { run, created, outcome, dismiss, write } = useCreateAndLink(config);
 
   const rows = useMemo<TradingWalletRowData[]>(() => {
     const listed = tradingWalletsOf(user).map((wallet) => ({ ...wallet, listed: true }));
@@ -42,26 +73,56 @@ export function TradingWalletsCard() {
   const seat = keeperSigners(config)?.[0] ?? null;
   const full = rows.length >= MAX_TRADING_WALLETS;
 
+  const view = screen?.view ?? null;
+  const state = view !== null && view.kind === "ready" ? view.state : null;
+  const vaultRent = state === null ? null : rawFrom(state.rents?.vault);
+  // What the press will do, in one sentence, before it is pressed: Phantom's window comes late, and never
+  // unannounced — and a read that FAILED promises the create alone, since that is all the flow will do.
+  const plan = pressPlan(view);
+  // A stop that describes the chain is re-read against the chain as it is NOW: the owner follows
+  // "Create your vault first", creates it, and the note that asked for it must go, not sit there
+  // asserting under a button that has just started offering the link.
+  const note = outcome !== null && stopStillHolds(outcome.stop, state) ? outcome : null;
+  const ahead = plan.links ? CREATE_LINK_COPY.ahead(plan.linkRent === null ? null : formatSol(plan.linkRent)) : `${CREATE_LINK_COPY.aheadCreateOnly} ${plan.reason}`;
+  const busy = write.running;
+  // A link this screen sent and cannot confirm blocks the chained press too, wherever it was sent from:
+  // a second link transaction while the first may still land is exactly what the screen promises not to offer.
+  const blocked = busy || write.busyElsewhere || write.unconfirmed || write.awaitingAnyLink;
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Trading wallets</CardTitle>
-        <CardDescription>
+        {/* Column 1 explicitly: with the action moved to a row of its own, the header's second cell in row 1
+            is free, and the grid's own placement would put the description up there beside the title. */}
+        <CardTitle className="col-start-1">Trading wallets</CardTitle>
+        <CardDescription className="col-start-1">
           The wallets you trade from. Each is created inside Privy with the keeper&apos;s seat: its permission to put a
           slice of your trading aside, bounded by the keeper&apos;s policy. Export a wallet&apos;s key to trade from Axiom
           or any Solana app; the seat stays.
         </CardDescription>
-        <CardAction>
+        {/*
+         * THE ACTION DROPS BELOW THE DESCRIPTION ON A NARROW CARD. CardHeader is a
+         * grid-cols-[1fr_auto] with the action in column 2, and every Button is
+         * whitespace-nowrap: "Create wallet and link it" is 163px against the ~110px
+         * of the "Create wallet" it replaced, and column 1 gives way rather than the
+         * button. In the Manage wallets modal on a phone that left the description
+         * 89px wide and 340px tall at 320px, 144px and 220px at 375px — measured on
+         * this markup over the built CSS. Below a 28rem header the action takes a row
+         * of its own, full width; from there up it is the top-right action it has
+         * always been, and 768px is unchanged.
+         */}
+        <CardAction className="col-start-1 row-span-1 row-start-3 justify-self-stretch pt-1 @md/card-header:col-start-2 @md/card-header:row-span-2 @md/card-header:row-start-1 @md/card-header:justify-self-end @md/card-header:pt-0">
           <Button
             type="button"
             size="sm"
-            disabled={busy || problem !== null || full}
+            className="w-full @md/card-header:w-auto"
+            disabled={blocked || problem !== null || full}
             aria-busy={busy}
             // An explicit call: Privy's createWallet drops an argument that looks like a click event, and the wallet would be born without its seat.
-            onClick={() => void create()}
+            onClick={() => void run()}
           >
             {busy ? <LoaderCircle className="animate-spin" aria-hidden /> : <Plus aria-hidden />}
-            {busy ? "Creating…" : "Create wallet"}
+            {busy ? CREATE_LINK_COPY.running : plan.links ? CREATE_LINK_COPY.button : CREATE_LINK_COPY.buttonCreateOnly}
           </Button>
         </CardAction>
       </CardHeader>
@@ -72,16 +133,27 @@ export function TradingWalletsCard() {
             {problem}
           </p>
         ) : null}
-        {failure !== null ? (
-          <p role="alert" className="text-sm text-destructive">
-            {failure}
-          </p>
-        ) : null}
+        {problem === null && !full ? <p className="text-xs text-muted-foreground">{ahead}</p> : null}
+        {write.busyElsewhere ? <p className="text-xs text-muted-foreground">{LINK_COPY.busy}</p> : null}
+        {write.awaitingAnyLink && !write.unconfirmed ? <p className="text-xs text-muted-foreground">{CREATE_LINK_COPY.linkAwaiting}</p> : null}
         {full && problem === null ? (
           <p className="text-xs text-muted-foreground">
             This page creates at most <Num>{MAX_TRADING_WALLETS}</Num> trading wallets for one account.
           </p>
         ) : null}
+
+        <TxProgress
+          progress={write.progress}
+          successLabel={CREATE_LINK_COPY.done}
+          onBuildAgain={() => void write.buildAgain()}
+          onCheckAgain={() => void write.checkAgain()}
+          // The note beside a stopped link says the wallet is safe; dismissing the one dismisses the other.
+          onDismiss={() => {
+            write.dismiss();
+            dismiss();
+          }}
+        />
+        {note !== null ? <CreateAndLinkNote outcome={note} vaultRent={vaultRent} onDismiss={dismiss} /> : null}
 
         {rows.length === 0 ? (
           <p className="text-sm text-muted-foreground">
@@ -105,5 +177,65 @@ export function TradingWalletsCard() {
         </CardFooter>
       ) : null}
     </Card>
+  );
+}
+
+/**
+ * What the press ended in, in the card's own words.
+ *
+ * NOTHING IS SAID WHEN PRIVY'S DIALOG WAS SIMPLY CLOSED (message null): that is a
+ * choice, not a failure, and nothing was created.
+ *
+ * WHENEVER A WALLET WAS CREATED, that comes first and in full — the wallet is
+ * real and in the list, with its seat shown there as Privy records it — and the
+ * reason the chain stopped comes after it. A link that ran and stopped has its own
+ * words in TxProgress already; this only adds that the wallet is there.
+ *
+ * IT IS DISMISSIBLE, and the card drops it on its own once a stop that described
+ * the chain no longer does (stopStillHolds): nothing here outlives what it says.
+ */
+export function CreateAndLinkNote({
+  outcome,
+  vaultRent,
+  onDismiss,
+}: {
+  readonly outcome: CreateAndLinkOutcome;
+  readonly vaultRent: bigint | null;
+  readonly onDismiss?: () => void;
+}) {
+  const { stop, created, link } = outcome;
+  if (stop === null) {
+    if (link === null || link.ok) return null;
+    return (
+      <p role="status" data-outcome="link-stopped" className="text-xs text-muted-foreground">
+        {CREATE_LINK_COPY.created} {CREATE_LINK_COPY.inTheList}
+      </p>
+    );
+  }
+  if (stop.message === null) return null;
+
+  const needsVault = stop.gate === "needs_vault";
+  return (
+    <div role="alert" data-outcome={stop.kind} className="space-y-2 rounded-md border px-3 py-2 text-xs">
+      {created !== null ? (
+        <p>
+          {CREATE_LINK_COPY.created} {CREATE_LINK_COPY.inTheList}
+        </p>
+      ) : null}
+      {needsVault ? <p className="font-medium">{CREATE_LINK_COPY.needsVaultTitle}</p> : null}
+      <p className="text-muted-foreground">{needsVault ? CREATE_LINK_COPY.needsVault(vaultRent === null ? null : formatSol(vaultRent)) : stop.message}</p>
+      <div className="flex flex-wrap gap-2">
+        {needsVault ? (
+          <Button type="button" size="sm" variant="outline" asChild>
+            <a href={`#${VAULT_CARD_ID}`}>{CREATE_LINK_COPY.goToVault}</a>
+          </Button>
+        ) : null}
+        {onDismiss !== undefined ? (
+          <Button type="button" size="sm" variant="ghost" onClick={() => onDismiss()}>
+            {VAULT_COPY.dismiss}
+          </Button>
+        ) : null}
+      </div>
+    </div>
   );
 }

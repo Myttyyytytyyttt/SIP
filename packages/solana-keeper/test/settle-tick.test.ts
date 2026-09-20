@@ -475,7 +475,16 @@ describe("a live settle", () => {
     expect(result).toMatchObject({ outcome: "SETTLED", expectedLamports: BigInt(PAID), signature: SIGNATURE });
     expect(result.settledLamports).toBeUndefined();
     expect(result.detail).toContain("the vault delta is on chain, its receipt not read in time");
-    expect(node.asked).toEqual([MAX_SUPPORTED_TRANSACTION_VERSION]);
+    // TWICE, AND BOTH TIMES UNDER THE SAME CONTRACT. The merge put the pooled
+    // RPC's one re-read (a lagging endpoint serving a receipt that has not
+    // reached it yet) around this shared reader, and the reader answers NULL for
+    // a version it cannot decode just as it does for a receipt that is not there
+    // — so this case is asked a second time too, a second later, and gets the
+    // same null. What matters is that NEITHER ask degrades the version it
+    // requests: every entry here is MAX_SUPPORTED_TRANSACTION_VERSION, which is
+    // the contract this test exists to pin.
+    expect(node.asked).toEqual([MAX_SUPPORTED_TRANSACTION_VERSION, MAX_SUPPORTED_TRANSACTION_VERSION]);
+    expect(node.asked.every((asked) => asked === MAX_SUPPORTED_TRANSACTION_VERSION)).toBe(true);
   });
 });
 

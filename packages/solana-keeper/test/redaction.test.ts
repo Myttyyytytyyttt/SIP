@@ -11,12 +11,13 @@
 // byte-run net drops the line instead (test/console-bridge.test.ts drives the
 // console path that produces it).
 
+import { generateKeyPairSync } from "node:crypto";
 import { inspect } from "node:util";
 import * as anchor from "@coral-xyz/anchor";
 import { Keypair } from "@solana/web3.js";
 import { Redactor } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
-import { BROADCAST_ACK, loadConfig } from "../src/config.js";
+import { BROADCAST_ACK, loadConfig, registerPrivyAuthorizationKey } from "../src/config.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 import { SERVICE, createChangeLog, createKeeperLogger } from "../src/keeper-log.js";
 
@@ -57,6 +58,70 @@ function holdsSeed(line: string): boolean {
   const seed = bytes.slice(0, 32);
   return numbers.some((_, start) => seed.every((byte, offset) => numbers[start + offset] === byte));
 }
+
+// THE SHAPES THE KEY IS BLESSED IN ARE THE SHAPES IT MUST BE REDACTED IN.
+// derivePrivyPublicKey deliberately accepts a value carrying the wallet-api:
+// prefix, surrounding quotes or 64-column wrapping, and the runbook tells the
+// owner those pastes are fine. The needles used to be the raw value and its
+// wallet-auth:-stripped form alone, so for those three the CANONICAL key — the
+// string a library or a `detail` field would echo — was not a needle at all,
+// and the tripwire could not catch it either: Redactor.contains reassembles hex
+// needles only, never base64. Both last-resort nets were off for exactly the
+// configurations the runbook recommends.
+describe("a Privy authorization key pasted in any shape the check blesses", () => {
+  // Generated per run, registered with nobody, used against nothing.
+  const canonical = Buffer.from(generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey.export({ format: "der", type: "pkcs8" })).toString(
+    "base64",
+  );
+  const shapes: Readonly<Record<string, string>> = {
+    "as Privy shows it": `wallet-auth:${canonical}`,
+    "the bare key": canonical,
+    "the wallet-api: prefix": `wallet-api:${canonical}`,
+    "double quotes from a paste": `"${canonical}"`,
+    "wrapped at 64 columns": canonical.replace(/(.{64})/g, "$1\n"),
+    "surrounding whitespace": `  ${canonical}\n`,
+  };
+
+  for (const [what, value] of Object.entries(shapes)) {
+    it(`is scrubbed and tripwired when Railway holds it ${what}`, () => {
+      const redactor = new Redactor();
+      loadConfig(
+        {
+          SIP_SOLANA_RPC_URLS: RPC,
+          SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID,
+          SIP_SOLANA_BROADCAST: "1",
+          SIP_SOLANA_ALLOW_BROADCAST: BROADCAST_ACK,
+          SIP_SOLANA_SETTLE_KEY: JSON.stringify(bytes),
+          SIP_SOLANA_PRIVY_APP_ID: "app-id",
+          SIP_SOLANA_PRIVY_APP_SECRET: "privy-app-secret-value-never-logged",
+          SIP_SOLANA_PRIVY_AUTHORIZATION_KEY: value,
+        },
+        redactor,
+      );
+      const lines: string[] = [];
+      const log = createKeeperLogger({ redactor, sink: (line) => lines.push(line) });
+
+      // The single console.log this module's doctrine says the redactor exists
+      // to survive: the key inside prose, in the form the SDK signs with.
+      log.error("privy refused", { detail: `401 while signing with ${canonical} — check the key` });
+      log.warn("console", { text: `wallet-auth:${canonical}` });
+
+      expect(lines).toHaveLength(2);
+      for (const line of lines) expect(line).not.toContain(canonical);
+      expect(lines.join("\n")).toContain("<redacted:privyAuthorizationKey>");
+      // MECHANISM 3, INDEPENDENTLY: the tripwire sees the key even unscrubbed.
+      expect(redactor.contains(`401 while signing with ${canonical}`)).toBe(true);
+    });
+  }
+
+  // The prefixed form is registered too, so the longest needle wins and no line
+  // is left holding a bare "wallet-auth:" where a key used to be.
+  it("replaces the prefix along with the key", () => {
+    const redactor = new Redactor();
+    registerPrivyAuthorizationKey(redactor, `wallet-auth:${canonical}`);
+    expect(redactor.scrub(`key=wallet-auth:${canonical}!`)).toBe("key=<redacted:privyAuthorizationKey>!");
+  });
+});
 
 describe("a line through the keeper's logger", () => {
   it("never carries the registered endpoint or the settle key, in any form", () => {

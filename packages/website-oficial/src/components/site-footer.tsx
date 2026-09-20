@@ -38,6 +38,9 @@ const LINKS = [
   { title: "Pension", href: "/" },
   // A real route now, not an anchor into a sidebar that only exists from lg up.
   { title: "Activity", href: "/activity" },
+  // Public: it needs no session, so it is reachable from the footer of every
+  // page, including the ones a visitor sees before connecting anything.
+  { title: "Leaderboard", href: "/leaderboard" },
   { title: "Docs", href: "#" },
   { title: "Privacy", href: "#" },
   { title: "Terms", href: "#" },

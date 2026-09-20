@@ -20,9 +20,11 @@ import {
   decideHealth,
   healthStaleAfterMs,
   httpHandler,
+  renderLeaderboard,
   renderStatus,
   type HealthInput,
   type KeeperStatus,
+  type LeaderboardReply,
 } from "../src/status.js";
 
 const keypair = Keypair.generate();
@@ -72,6 +74,7 @@ function setup(): { redactor: Redactor; status: KeeperStatus } {
     programDeployed: false,
     config: null,
     mode: "dry-run",
+    alerts: "telegram: critical and above",
     armed: config.armed,
     missingLiveCondition: "the on-chain ProtocolConfig does not exist (program not deployed, or init_config not run); staying dry and re-verifying every sweep",
     sweepMs: config.sweepMs,
@@ -88,6 +91,8 @@ function setup(): { redactor: Redactor; status: KeeperStatus } {
       privySignerId: config.privySignerId,
       privyPolicyId: config.privyPolicyId,
       seatCheck: seatCheck(config.privySignerId, config.privyPolicyId),
+      authorizationKey: "matches",
+      authorizationKeyAt: new Date().toISOString(),
       secretsRead: true,
       settleKey: config.signing!.settleKey.publicKey.toBase58(),
       wallets: { signable: 1, of: 1 },
@@ -110,21 +115,28 @@ function setup(): { redactor: Redactor; status: KeeperStatus } {
   return { redactor, status };
 }
 
-function drive(handler: ReturnType<typeof httpHandler>, method: string, url: string): { status: number; body: string; type: string | undefined } {
+function drive(
+  handler: ReturnType<typeof httpHandler>,
+  method: string,
+  url: string,
+): { status: number; body: string; type: string | undefined; headers: Record<string, string> } {
   let body = "";
-  let type: string | undefined;
+  const headers: Record<string, string> = {};
   const response = {
     statusCode: 200,
     setHeader(name: string, value: string) {
-      if (name.toLowerCase() === "content-type") type = value;
+      headers[name.toLowerCase()] = value;
     },
     end(chunk?: string) {
       body = chunk ?? "";
     },
   };
   handler({ method, url } as IncomingMessage, response as unknown as ServerResponse);
-  return { status: response.statusCode, body, type };
+  return { status: response.statusCode, body, type: headers["content-type"], headers };
 }
+
+/** A keeper whose rankings are not ready: the state every handler test starts in. */
+const noBoard = (): LeaderboardReply => ({ unavailable: "the rankings have not been computed yet" });
 
 describe("the /status JSON", () => {
   it("contains no registered credential, and still says what an operator needs", () => {
@@ -139,6 +151,11 @@ describe("the /status JSON", () => {
     // NO signer id, so no seat is examined at all and the page says so.
     expect(parsed.signing.privyPolicyId).toBe("policy-id");
     expect(parsed.signing.seatCheck).toBe("unchecked");
+    // A VERDICT AND ITS DATE ARE READ TOGETHER OR NOT AT ALL. "matches" with no
+    // timestamp is a claim about an unknown moment — possibly a process that
+    // started days ago — and mid-outage that is the whole question.
+    expect(parsed.signing.authorizationKey).toBe("matches");
+    expect(Date.parse(parsed.signing.authorizationKeyAt!)).not.toBeNaN();
     expect(parsed.lastSweepError).toContain("<redacted:rpcUrl:0>");
     expect(parsed.history).toContain("<redacted:databaseUrl>");
     // A pending carry's lamports are a bigint, which JSON.stringify throws on:
@@ -206,10 +223,14 @@ describe("the heartbeat handler", () => {
   it("answers /health with {ok:true} and /status with the rendered status, and nothing else", () => {
     const { redactor, status } = setup();
     let renders = 0;
-    const handler = httpHandler(() => {
-      renders += 1;
-      return renderStatus(status, redactor);
-    }, healthy);
+    const handler = httpHandler(
+      () => {
+        renders += 1;
+        return renderStatus(status, redactor);
+      },
+      healthy,
+      noBoard,
+    );
 
     const health = drive(handler, "GET", "/health");
     expect(health).toMatchObject({ status: 200, body: '{"ok":true}', type: "application/json" });
@@ -220,6 +241,10 @@ describe("the heartbeat handler", () => {
     expect(renders).toBe(1);
     for (const credential of CREDENTIALS) expect(served.body).not.toContain(credential);
     expect(JSON.parse(served.body)).toMatchObject({ service: SERVICE, program: SIP_PROGRAM_ID });
+    // THE LABEL, NEVER THE URL: /status is unauthenticated and served on a
+    // public domain, and a Discord or Slack webhook is a posting credential.
+    expect(JSON.parse(served.body).alerts).toBe("telegram: critical and above");
+    expect(served.body).not.toContain(WEBHOOK);
 
     expect(drive(handler, "GET", "/").status).toBe(404);
     expect(drive(handler, "POST", "/status").status).toBe(405);
@@ -234,6 +259,7 @@ describe("the heartbeat handler", () => {
         return renderStatus(status, redactor);
       },
       () => decideHealth({ now: 30 * 60_000, startedAt: 0, lastProgressAt: 0, sweepMs: 60_000 }),
+      noBoard,
     );
 
     const answer = drive(handler, "GET", "/health");
@@ -258,11 +284,64 @@ describe("the heartbeat handler", () => {
       () => {
         throw new Error("the probe broke");
       },
+      noBoard,
     );
 
     const answer = drive(handler, "GET", "/health");
     expect(answer.status).toBe(200);
     expect(JSON.parse(answer.body).ok).toBe(true);
     expect(answer.body).not.toContain("the probe broke");
+  });
+});
+
+describe("the /leaderboard route", () => {
+  const healthy = () => decideHealth({ now: 0, startedAt: 0, lastProgressAt: 0, sweepMs: 60_000 });
+
+  it("refuses at 503 rather than serve an empty board, and serves the payload once there is one", () => {
+    const { redactor, status } = setup();
+    let reply: LeaderboardReply = { unavailable: "this keeper has no database, so it keeps no history to rank" };
+    const handler = httpHandler(() => renderStatus(status, redactor), healthy, () => reply);
+
+    // AN EMPTY BOARD AND AN UNREAD ONE ARE DIFFERENT FACTS. A 200 with no rows
+    // would tell a new user that nobody has ever saved anything.
+    const missing = drive(handler, "GET", "/leaderboard");
+    expect(missing.status).toBe(503);
+    expect(JSON.parse(missing.body)).toEqual({
+      error: "the leaderboard is not available",
+      detail: "this keeper has no database, so it keeps no history to rank",
+    });
+
+    const board = JSON.stringify({ computedAt: "2026-09-20T12:00:00.000Z", boards: { ahorro: { season: [] } } });
+    reply = { body: board };
+    const served = drive(handler, "GET", "/leaderboard");
+    expect(served).toMatchObject({ status: 200, body: board, type: "application/json" });
+    // Public data, readable without a proxy, and cheap to serve under load.
+    expect(served.headers["access-control-allow-origin"]).toBe("*");
+    expect(served.headers["cache-control"]).toBe("public, max-age=30");
+    expect(drive(handler, "POST", "/leaderboard").status).toBe(405);
+  });
+
+  it("is named in the 404, so a wrong path says what this service does serve", () => {
+    const { redactor, status } = setup();
+    const handler = httpHandler(() => renderStatus(status, redactor), healthy, noBoard);
+    expect(JSON.parse(drive(handler, "GET", "/leaderboards").body).paths).toEqual(["/health", "/status", "/leaderboard"]);
+  });
+
+  it("scrubs a registered secret that somehow reached the payload", () => {
+    const { redactor } = setup();
+    // Nothing in a ranking should be secret — it is addresses and amounts, all
+    // of them on chain. This asserts what happens if that "should" ever fails:
+    // the value is replaced by its label, and the connection string that a
+    // mis-written query could have put in a subject column is not served.
+    const served = renderLeaderboard({ boards: { ahorro: { season: [{ subject: DB }] } } }, redactor);
+    expect(served).not.toContain(DB);
+    expect(served).not.toContain("DbPassw0rdNeverServed");
+    expect(JSON.parse(served).boards.ahorro.season[0].subject).toBe("<redacted:databaseUrl>");
+  });
+
+  it("serves lamports as strings and numbers as numbers, with no bigint anywhere", () => {
+    const { redactor } = setup();
+    const served = renderLeaderboard({ points: 84, amountRaw: (12_345n * 10n ** 12n).toString(), raw: 7n }, redactor);
+    expect(JSON.parse(served)).toEqual({ points: 84, amountRaw: "12345000000000000", raw: "7" });
   });
 });
