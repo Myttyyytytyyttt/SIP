@@ -94,7 +94,7 @@ import { createHash } from "node:crypto";
 // value-position import of it survives only by erasure, and the day it stops,
 // the keeper does not boot.
 import type { AccountMeta, Connection } from "@solana/web3.js";
-import { PublicKey } from "@solana/web3.js";
+import { PACKET_DATA_SIZE, PublicKey, TransactionInstruction, TransactionMessage } from "@solana/web3.js";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
@@ -495,6 +495,32 @@ export interface RouteOutput {
 }
 
 /**
+ * The exact wire size of a LEGACY transaction carrying these instructions,
+ * signed once per required signer.
+ *
+ * SERIALIZED, NOT ESTIMATED. web3.js's own compiler does the deduplication of
+ * repeated keys, the writable/signer partitioning and the compact-u16 lengths;
+ * an estimate has to reproduce all three and is wrong the first time a route
+ * repeats a program id. PACKET_DATA_SIZE comes from web3.js too rather than
+ * being typed out as 1,232.
+ */
+export function legacyTransactionBytes(payer: PublicKey, instructions: readonly TransactionInstruction[]): number {
+  const message = new TransactionMessage({
+    payerKey: payer,
+    // A PLACEHOLDER: a blockhash is 32 bytes whatever it says, and asking an
+    // RPC for a real one would make a size measurement need a network.
+    recentBlockhash: PublicKey.default.toBase58(),
+    instructions: [...instructions],
+  }).compileToLegacyMessage();
+  return 1 + 64 * message.header.numRequiredSignatures + message.serialize().length;
+}
+
+/** Does a legacy transaction of this size still fit in one packet? */
+export function fitsLegacyTransaction(bytes: number): boolean {
+  return bytes <= PACKET_DATA_SIZE;
+}
+
+/**
  * WHEN THIS ROUTE WAS PRICED. Without it a caller cannot tell a route quoted a
  * second ago from one quoted minutes ago, and the difference is not cosmetic:
  * min_out is derived from the quote's own numbers, so a stale quote is a LOOSE
@@ -636,11 +662,27 @@ export interface JupiterRoute {
   readonly hops: number;
   readonly labels: readonly string[];
   /**
-   * Measured wrapped in our invest: one hop is ~1,130 B and fits a legacy
-   * transaction; two hops are ~1,308-1,400 B against a 1,232 B limit and need
-   * a v0 transaction with `lookupTableAddresses`.
+   * THE ROUTE'S OWN SIZE, MEASURED: the exact wire bytes of a legacy
+   * transaction carrying this one instruction and one signature.
+   *
+   * WHAT THIS REPLACES. The field here used to be a boolean,
+   * `requiresVersionedTransaction`, computed as `hops > 1` and justified by a
+   * single ~1,130 B sample — a hop count standing in for a size. It is not a
+   * size: one-hop builds range 28-32 accounts and 36-40 bytes of data, which
+   * is hundreds of bytes of spread, and nothing about a second hop says the
+   * total crossed a limit. Measured: the captured 32-account, 36-byte SPYx
+   * route is 941 B alone — the old sample was 1,130 — because 32 listed
+   * accounts are only 23 distinct ones once the compiler deduplicates them.
+   *
+   * WHAT A CALLER STILL HAS TO DO. This is the route alone. invest() adds its
+   * program id, its eight named accounts (minus any already here — the venue
+   * program is), its own data, and whatever else the caller sends; only the
+   * caller knows that, so the caller measures it with legacyTransactionBytes()
+   * over its real instruction list and compares with fitsLegacyTransaction().
+   * Measured on the cloned fork run, the whole invest-wrapped transaction with
+   * a compute-budget instruction came to 953 B for a 28-key Manifest route.
    */
-  readonly requiresVersionedTransaction: boolean;
+  readonly legacyBytes: number;
 }
 
 /**
@@ -903,13 +945,25 @@ export function verifySharedAccountsRoute(
   };
 
   const hops = quote.routePlan.length;
+  const remainingAccounts: AccountMeta[] = keys.map((key) => ({
+    pubkey: new PublicKey(key.pubkey),
+    isSigner: false,
+    isWritable: key.isWritable,
+  }));
+
+  // A FEE PAYER THAT IS NOT IN THE ROUTE, because the real one is not either:
+  // a crank key costs its own 32-byte entry and its own signature, and a payer
+  // that happened to collide with a route key would undercount both.
+  const inRoute = new Set(remainingAccounts.map((meta) => meta.pubkey.toBase58()));
+  let probePayer = PublicKey.unique();
+  for (let tries = 0; inRoute.has(probePayer.toBase58()) && tries < 64; tries += 1) probePayer = PublicKey.unique();
+  const legacyBytes = legacyTransactionBytes(probePayer, [
+    new TransactionInstruction({ programId: JUPITER_PROGRAM, keys: remainingAccounts, data }),
+  ]);
+
   return {
     venueProgram: JUPITER_PROGRAM,
-    remainingAccounts: keys.map((key) => ({
-      pubkey: new PublicKey(key.pubkey),
-      isSigner: false,
-      isWritable: key.isWritable,
-    })),
+    remainingAccounts,
     venueData: data,
     lookupTableAddresses: (response.addressLookupTableAddresses ?? []).map((address) => new PublicKey(address)),
     vault: context.vault,
@@ -921,7 +975,7 @@ export function verifySharedAccountsRoute(
     amounts,
     hops,
     labels: quote.routePlan.map((step) => step.swapInfo.label ?? "?"),
-    requiresVersionedTransaction: hops > 1,
+    legacyBytes,
   };
 }
 

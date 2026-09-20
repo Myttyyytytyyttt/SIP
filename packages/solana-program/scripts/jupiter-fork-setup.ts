@@ -32,7 +32,7 @@ import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildJupiterRoute, investAmountIn, JupiterRouteRefusal } from "./jupiter-route";
+import { buildJupiterRoute, fitsLegacyTransaction, investAmountIn, JupiterRouteRefusal } from "./jupiter-route";
 
 const LOCAL = join(__dirname, ".local");
 const MAINNET = process.env["MAINNET_RPC"] ?? "https://api.mainnet-beta.solana.com";
@@ -177,10 +177,18 @@ async function main(): Promise<void> {
     throw error;
   }
 
-  if (route.requiresVersionedTransaction) {
+  // WHAT THIS PROOF CANNOT CLONE, said as the thing itself rather than as a
+  // hop count: an address lookup table would have to be cloned too, and every
+  // address it indexes with it. Size is checked separately, and against a
+  // measurement — the route plus invest()'s wrapper has to fit one packet.
+  if (route.lookupTableAddresses.length > 0) {
     throw new Error(
-      `route came back with ${route.hops} hops (${route.labels.join(" -> ")}); this proof only clones a single-hop route`,
+      `route needs ${route.lookupTableAddresses.length} address lookup table(s) (${route.hops} hops: ` +
+        `${route.labels.join(" -> ")}); this proof clones accounts, not tables`,
     );
+  }
+  if (!fitsLegacyTransaction(route.legacyBytes)) {
+    throw new Error(`the route alone is ${route.legacyBytes} B, past what one transaction carries`);
   }
 
   // Which accounts the local validator has to be given. The vault's own two
@@ -260,6 +268,7 @@ async function main(): Promise<void> {
   );
 
   console.log(`  hops        : ${route.hops} [${route.labels.join(" -> ")}]`);
+  console.log(`  route alone : ${route.legacyBytes} B as a legacy transaction (${route.remainingAccounts.length} keys, ${route.venueData.length} B of data)`);
   console.log(`  quoted out  : ${route.output.quotedOut}`);
   console.log(`  threshold   : ${route.output.venueThreshold}`);
   console.log(`  mainnet fee : ${route.output.transferFee.basisPoints} bps (epoch-dependent; local epoch may differ)`);

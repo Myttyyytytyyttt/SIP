@@ -35,7 +35,9 @@ import {
   SHARED_ACCOUNTS_ROUTE_DISC,
   decodeRouteAmounts,
   findVaultOwnedTokenAccounts,
+  fitsLegacyTransaction,
   investAmountIn,
+  legacyTransactionBytes,
   netOfTransferFee,
   pricedAtSlot,
   routeMints,
@@ -194,9 +196,11 @@ describe("the Jupiter route builder accepts a real mainnet sharedAccountsRoute",
     expect(route.lookupTableAddresses.map((key) => key.toBase58())).toEqual([CAPTURED_LUT]);
     expect(route.hops).toBe(1);
     expect(route.labels).toEqual(["PancakeSwap"]);
-    // One hop is ~1,130 B wrapped in our invest and fits a legacy transaction;
-    // two hops are ~1,308-1,400 B against a 1,232 B limit.
-    expect(route.requiresVersionedTransaction).toBe(false);
+    // A MEASURED SIZE, NOT A HOP COUNT. This field used to be the boolean
+    // `hops > 1`; the number below is what web3.js's own compiler serializes
+    // for this exact instruction and one signature.
+    expect(route.legacyBytes).toBe(941);
+    expect(fitsLegacyTransaction(route.legacyBytes)).toBe(true);
 
     // THE VAULT PDA CANNOT SIGN THE OUTER TRANSACTION. Jupiter marks slot 2 a
     // signer; if that flag survived into remainingAccounts the transaction
@@ -374,6 +378,62 @@ describe("the Jupiter route builder refuses", () => {
     // The idempotent ATA create Jupiter always emits under
     // skipUserAccountsRpcCalls is the one thing that is not a refusal.
     expect(verifySharedAccountsRoute(quote(), response(), context()).hops).toBe(1);
+  });
+});
+
+describe("how big the route really is, measured rather than inferred from hops", () => {
+  it("counts the bytes web3.js serializes, deduplicating repeated keys", () => {
+    const route = verifySharedAccountsRoute(quote(), response(), context());
+    // The captured route lists 32 accounts but only 23 DISTINCT ones — Jupiter
+    // repeats its own program id three times, and both mints, both token
+    // programs and three pool accounts twice. Counting 32 keys at 32 bytes
+    // would be 288 bytes out; the compiler is not, because it is the same
+    // compiler that builds the real message.
+    expect(route.remainingAccounts).toHaveLength(32);
+    expect(new Set(route.remainingAccounts.map((m) => m.pubkey.toBase58())).size).toBe(23);
+    expect(route.legacyBytes).toBe(941);
+  });
+
+  it("does not let a hop count stand in for a size", () => {
+    // THE CLAIM THIS REPLACES: "one hop fits, two hops do not". Here is a
+    // ONE-hop route made too big to send, by nothing but its account list —
+    // padded to 60 keys, which is inside the range Jupiter's own builds reach
+    // on a busy venue.
+    const r = response();
+    const padded = {
+      ...r,
+      swapInstruction: {
+        ...r.swapInstruction,
+        accounts: [
+          ...r.swapInstruction.accounts,
+          ...Array.from({ length: 28 }, () => ({ pubkey: PublicKey.unique().toBase58(), isSigner: false, isWritable: false })),
+        ],
+      },
+    };
+    const route = verifySharedAccountsRoute(quote(), padded, context());
+    expect(route.hops).toBe(1);
+    expect(route.legacyBytes).toBeGreaterThan(1_232);
+    expect(fitsLegacyTransaction(route.legacyBytes)).toBe(false);
+  });
+
+  it("leaves the caller to measure its own wrapper, because only the caller knows it", () => {
+    // The route alone is not the transaction that gets sent. invest() adds its
+    // program id, its named accounts and its data; a second instruction adds
+    // more. legacyTransactionBytes is the same measurement over whatever the
+    // caller actually intends to send.
+    const route = verifySharedAccountsRoute(quote(), response(), context());
+    const alone = legacyTransactionBytes(PublicKey.unique(), [
+      { programId: new PublicKey("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"), keys: [...route.remainingAccounts], data: route.venueData },
+    ]);
+    expect(alone).toBe(route.legacyBytes);
+    // A compute-budget instruction on top is 40 more bytes — its program id,
+    // its own compiled entry and its data — and the caller sees that number
+    // instead of guessing it.
+    const wrapped = legacyTransactionBytes(PublicKey.unique(), [
+      { programId: new PublicKey("ComputeBudget111111111111111111111111111111"), keys: [], data: Buffer.from([2, 0, 0, 0, 0]) },
+      { programId: new PublicKey("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"), keys: [...route.remainingAccounts], data: route.venueData },
+    ]);
+    expect(wrapped - alone).toBe(40);
   });
 });
 
