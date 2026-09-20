@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { INVEST_COPY, LOSS_DROPPED_AFTER_TXS, POOL_DEPTH_MULTIPLE, VAULT_COPY } from "@/lib/vault-copy";
+import { INVEST_COPY, LOSS_DROPPED_AFTER_TXS, MAX_LEG_FEE_BPS, POOL_DEPTH_MULTIPLE, VAULT_COPY } from "@/lib/vault-copy";
 
 describe("the PROFIT rule", () => {
   it("says a loss comes off the next gain only until the trading wallet signs the keeper's own count of transactions, and names that count", () => {
@@ -41,5 +41,30 @@ describe("the thin-pool notice", () => {
     expect(notice).toContain("a buy takes all of the basket or none");
     expect(notice).toContain("nothing bought, no SOL converted, at any balance");
     expect(keeper).toContain("refusing to convert SOL toward it");
+  });
+});
+
+describe("the transfer-fee ceiling", () => {
+  it("says the keeper's own MAX_LEG_FEE_BPS, and warns that the basket is all-or-nothing at it", () => {
+    // Read as text, never imported: the web does not depend on the keeper.
+    const keeper = readFileSync(fileURLToPath(new URL("../../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
+    const max = /export const MAX_LEG_FEE_BPS = ([0-9_]+)n;/.exec(keeper)?.[1];
+    expect(max, "MAX_LEG_FEE_BPS in packages/solana-keeper/src/invest-decision.ts").toBeDefined();
+    expect(Number(max!.replaceAll("_", ""))).toBe(MAX_LEG_FEE_BPS);
+
+    // STRICTLY GREATER, so a leg sitting exactly on the limit is admitted with
+    // no margin -- which is ANTHROPIC's position at 100 bps today. If this gate
+    // ever became >=, the copy below would be wrong in the owner's favour and
+    // this assertion is what would say so.
+    expect(keeper).toMatch(/fee\.bps > MAX_LEG_FEE_BPS/);
+
+    const notice = INVEST_COPY.feeCeiling("1 %");
+    expect(notice).toContain("will not buy a stock that charges more than 1 % to transfer");
+    expect(notice).toContain("ANTHROPIC sits exactly on that limit today");
+    // ALL OR NOTHING, the same doctrine the thin-pool notice is held to: a fee
+    // rise on one leg may not be described as costing the owner only that leg.
+    expect(notice).toContain("the whole basket");
+    expect(notice).toContain("SPYx along with it");
+    expect(notice).toContain("stops converting your SOL at all");
   });
 });

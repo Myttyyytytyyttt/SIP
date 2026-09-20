@@ -86,7 +86,7 @@ import { LABEL } from "@/lib/classes";
 import { todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
 import { floorsState } from "@/lib/live-model";
 import type { InvestPolicyBuildJson, InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
-import { INVEST_COPY, VAULT_COPY, listAnd, ratePercent, shortAddress } from "@/lib/vault-copy";
+import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, shortAddress } from "@/lib/vault-copy";
 
 type VaultWrite = ReturnType<typeof useVaultWrite>;
 
@@ -367,6 +367,7 @@ function PolicySetup({
         <div className="space-y-1 rounded-md border px-3 py-2 text-xs">
           <div className={LABEL}>{INVEST_COPY.costTitle}</div>
           <p>{INVEST_COPY.issuerCost}</p>
+          <p>{INVEST_COPY.feeCeiling(ratePercent(MAX_LEG_FEE_BPS))}</p>
           <p>{INVEST_COPY.marketCost}</p>
           <p>{INVEST_COPY.costTogether}</p>
         </div>

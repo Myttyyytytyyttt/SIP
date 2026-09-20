@@ -183,8 +183,17 @@ describe("InvestingCard", () => {
     // conversion down with it.
     expect(html).toContain("Today, this basket may buy nothing at all");
     expect(html).toContain("The keeper refuses a buy unless the pool it goes into holds at least 50 times that buy");
-    expect(html).toContain("a Most per buy above that stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance.");
-    expect(html).toContain("Most per buy starts at $1,000.00. Set it to about $380 or less");
+    expect(html).toContain("a Most per buy above it stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance.");
+    // THE CEILING IS DATED WHERE THE INSTRUCTION IS, not only in the paragraph
+    // beside it, and the figure the owner is pointed at has real cover: $380 is
+    // the boundary itself (it cleared the measured reserve by 0.44 %), $190
+    // leaves about 2x. Nothing on this page re-reads the pool, and the sentence
+    // now says so.
+    expect(html).toContain("ANTHROPIC&#x27;s pool held about $9,500 when it was read on 20 September 2026");
+    expect(html).toContain("about $380 for the whole buy, and that is the ceiling itself, not a target");
+    expect(html).toContain("about $190 or less left roughly twice the cover the keeper asks for");
+    expect(html).toContain("That figure was true that night and nothing on this page re-reads it");
+    expect(html).not.toContain("Set it to about $380 or less");
 
     // WHAT THE POSITION COSTS, with each number's owner named: the issuer sets
     // one and has moved it twice, the day's liquidity sets the other. SPYx is
@@ -193,17 +202,39 @@ describe("InvestingCard", () => {
     // ONE RAISE, NOT TWO: the mint's TransferFeeConfig carries only older{1032,
     // 50 bps} and newer{1039, 100 bps}, so 50 -> 100 is all that can be read off
     // it and all the copy may claim.
-    expect(html).toContain("it was 0.5 %, and it became 1 % a few days ago. SPYx charges nothing to transfer.");
+    // WHEN, NOT ROUGHLY WHEN. newer{epoch 1039} and a read at slot 448864409
+    // put the rise about 1.8 hours before the reading (1039 x 432,000 =
+    // 448,848,000), and product.ts read the same calendar day in epoch 1038 with
+    // the rise still scheduled. "A few days ago" understated the one thing the
+    // sentence exists to prove: that this key is in use now.
+    expect(html).toContain("it was 0.5 % for about two weeks, and it became 1 % when the current epoch began, hours before this was written on 20 September 2026.");
+    expect(html).not.toContain("a few days ago");
     expect(html).not.toContain("it has been nothing, then 0.5 %");
-    expect(html).toContain("measured 0.01 % on SPYx, the same at $5, $25 and $100.");
-    expect(html).toContain("about 0.6 % at $5 and at $25, and 1.3 % at $100");
+    // THE MEASUREMENT THE WORK WAS GIVEN, and no tighter than it: 0.01 % on
+    // SPYx, 0.41-0.44 % on ANTHROPIC. The earlier 0.60/0.57/1.26 % curve was not
+    // reproducible from this repository and was not monotonic in size, so the
+    // "because its pool is small" claim it carried is gone too -- the pool's
+    // size is argued in thinPool, where it is actually measured.
+    expect(html).toContain("measured 0.01 % on SPYx.");
+    expect(html).toContain("The same round trip on ANTHROPIC measured between 0.41 % and 0.44 %.");
+    expect(html).not.toContain("1.3 % at $100");
+    expect(html).not.toContain("because its pool is small");
+    expect(html).toContain("roughly 2 % to its issuer plus about half a percent to the market");
+
+    // THE LIMIT THE NEXT RAISE CROSSES. Two sentences tell him the issuer moves
+    // this fee and just did; none told him what the next move costs. ANTHROPIC
+    // sits exactly on MAX_LEG_FEE_BPS, and the keeper's refusal is all-or-
+    // nothing -- SPYx and the SOL conversion go down with it.
+    expect(html).toContain("the keeper will not buy a stock that charges more than 1 % to transfer");
+    expect(html).toContain("ANTHROPIC sits exactly on that limit today");
+    expect(html).toContain("the vault stops buying the whole basket — SPYx along with it — and stops converting your SOL at all");
     expect(html).toContain("The difference is these two issuers and these two pools — not Solana, and not SaverFi.");
 
     // THE ISSUER RISK HE TICKS A BOX ABOUT. It named SPYx only, which is the
     // safer leg on every count — he was acknowledging the wrong token.
     expect(html).toContain("move it out of your vault through a permanent delegate");
     expect(html).toContain(
-      "On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used to raise the fee, from 0.5 % to 1 %, days ago.",
+      "On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used to raise the fee, from 0.5 % to 1 %, on the day this page was written.",
     );
     expect(html).toContain("On SPYx those powers sit with three separate keys and there is no fee to raise.");
     expect(html).toContain("I understand each issuer can freeze, pause or move its own stock out of my vault, and that one key holds all of those powers over ANTHROPIC");

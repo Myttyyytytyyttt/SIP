@@ -36,6 +36,21 @@ export const LOSS_DROPPED_AFTER_TXS = 100;
  */
 export const POOL_DEPTH_MULTIPLE = 50;
 
+/**
+ * THE MOST A STOCK MAY CHARGE TO TRANSFER AND STILL BE BOUGHT: the keeper's
+ * MAX_LEG_FEE_BPS (packages/solana-keeper/src/invest-decision.ts), which gates
+ * on `fee.bps > MAX_LEG_FEE_BPS` — strictly greater, so a leg sitting exactly
+ * on the limit is still admitted, with no margin whatsoever.
+ *
+ * THAT IS ANTHROPIC'S POSITION TODAY. Its active fee is 100 bps and this is
+ * 100 bps, so the basket is one issuer instruction away from being refused
+ * entirely — and the refusal is all-or-nothing, taking SPYx and the SOL
+ * conversion with it. INVEST_COPY.feeCeiling is the sentence that says so, and
+ * vault-copy.test.ts reads the keeper's file and holds the two equal, the same
+ * way it does for POOL_DEPTH_MULTIPLE.
+ */
+export const MAX_LEG_FEE_BPS = 100;
+
 /** "SPYx and ANTHROPIC", "SPYx, ANTHROPIC and GLDx", "SPYx" — a list in a sentence. */
 export const listAnd = (items: readonly string[]): string =>
   items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
@@ -243,18 +258,53 @@ export const INVEST_COPY = {
   //    so 50 -> 100 is the only change this mint can be read to have made. An
   //    earlier 0 -> 50 may well have happened and is NOT on the account, so it is
   //    not said here.
-  //  * the round trips, from keyless Jupiter quotes at 200 bps slippage, USDC ->
-  //    stock -> USDC at $5 / $25 / $100: SPYx 0.01 % / 0.01 % / 0.01 %,
-  //    ANTHROPIC 0.60 % / 0.57 % / 1.26 %. These are the BEST route on the day
-  //    and so a floor on what this costs, not a promise: SaverFi itself buys
-  //    through one Raydium pool per stock, not through Jupiter's multi-hop.
+  //  * the round trips, from keyless Jupiter quotes, USDC -> stock -> USDC:
+  //    SPYx 0.01 %, ANTHROPIC 0.41-0.44 %, and FIGUREAI (NOT in the basket)
+  //    2.78-3.26 %. These are the BEST route on the day and so a floor on what
+  //    this costs, not a promise: SaverFi itself buys through one Raydium pool
+  //    per stock, not through Jupiter's multi-hop.
+  //
+  //    THE COPY QUOTES THIS MEASUREMENT AND NO OTHER. An earlier draft of these
+  //    sentences carried 0.60 / 0.57 / 1.26 % for ANTHROPIC at $5 / $25 / $100
+  //    and built a size-dependence claim on it ("it gets worse as the buy gets
+  //    bigger, because its pool is small"). That reading is not reproducible
+  //    from anything in this repository -- no fixture, no script, no recorded
+  //    output -- and its own middle point fell as the buy grew, so it did not
+  //    support the curve it was used to draw. Both are gone. The range below is
+  //    no tighter than the measurement, and the pool's size is argued where it
+  //    IS measured: thinPool, from the pool account's own USDC reserve.
+  //
+  // WHEN THE FEE ROSE, which the copy has to get right because it is the proof
+  // that the key is in use NOW. TransferFeeConfig's newer entry starts at epoch
+  // 1039 and the read at slot 448864409 was inside 1039: mainnet epochs are
+  // 432,000 slots, so 1039 began at slot 448,848,000 and the read was 16,409
+  // slots in -- about 1.8 hours at 400 ms a slot. solana-core's product.ts
+  // records the other side of the same day: read on 2026-09-20 in epoch 1038,
+  // the rise to 100 bps was still SCHEDULED. So the epoch turned over on
+  // 2026-09-20 and the fee rose HOURS before these words, not days. The older
+  // entry starts at epoch 1032, about seven epochs back, so 0.5 % had held for
+  // roughly two weeks.
   costTitle: "What this costs you, and who decides it",
   issuerCost:
-    "ANTHROPIC's issuer charges 1 % of every transfer of it: once when your vault buys it, and once when it leaves. Going in and back out therefore gives up about 2 % before the market is involved at all. That figure belongs to the issuer — not to SaverFi and not to Solana — and the issuer moves it: it was 0.5 %, and it became 1 % a few days ago. SPYx charges nothing to transfer.",
+    "ANTHROPIC's issuer charges 1 % of every transfer of it: once when your vault buys it, and once when it leaves. Going in and back out therefore gives up about 2 % before the market is involved at all. That figure belongs to the issuer — not to SaverFi and not to Solana — and the issuer moves it: it was 0.5 % for about two weeks, and it became 1 % when the current epoch began, hours before this was written on 20 September 2026. SPYx charges nothing to transfer.",
+  /**
+   * THE LIMIT THE NEXT RAISE CROSSES, which no sentence said while two of them
+   * told the owner the issuer moves this number and had just moved it.
+   *
+   * The keeper admits a leg only while `fee.bps <= MAX_LEG_FEE_BPS`
+   * (invest-decision.ts gates on `fee.bps > MAX_LEG_FEE_BPS`, strictly greater),
+   * and ANTHROPIC's active fee is EXACTLY that limit — admitted with no margin
+   * at all. One more raise by the single key described below, and the refusal is
+   * all-or-nothing: the whole basket, SPYx included, and the SOL conversion with
+   * it. `max` is MAX_LEG_FEE_BPS as a percentage, read from the keeper's own
+   * constant by vault-copy.test.ts so this sentence cannot drift from the gate.
+   */
+  feeCeiling: (max: string): string =>
+    `There is a limit built into SaverFi: the keeper will not buy a stock that charges more than ${max} to transfer. ANTHROPIC sits exactly on that limit today, so if that issuer raises the fee once more, the vault stops buying the whole basket — SPYx along with it — and stops converting your SOL at all, until the basket itself is changed. Nothing is lost when that happens; the saving simply stops until someone acts.`,
   marketCost:
-    "Then there is what the market charges, which depends on the day's liquidity and on how much is bought at once. Buying a stock and selling it straight back measured 0.01 % on SPYx, the same at $5, $25 and $100. The same round trip on ANTHROPIC measured about 0.6 % at $5 and at $25, and 1.3 % at $100 — it gets worse as the buy gets bigger, because its pool is small. Read on 20 September 2026; another day reads differently.",
+    "Then there is what the market charges, which depends on the day's liquidity. Buying a stock and selling it straight back measured 0.01 % on SPYx. The same round trip on ANTHROPIC measured between 0.41 % and 0.44 %. Read on 20 September 2026 through the best route quoted that day; SaverFi buys through one pool per stock rather than hunting a route, so treat these as the least it can cost, not a promise. Another day reads differently.",
   costTogether:
-    "So going in and out of ANTHROPIC costs roughly 2 % to its issuer plus something over half a percent to the market, while SPYx costs almost nothing either way. Both are tokenised stocks on the same chain, bought the same way, held in the same vault. The difference is these two issuers and these two pools — not Solana, and not SaverFi.",
+    "So going in and out of ANTHROPIC costs roughly 2 % to its issuer plus about half a percent to the market, while SPYx costs almost nothing either way. Both are tokenised stocks on the same chain, bought the same way, held in the same vault. The difference is these two issuers and these two pools — not Solana, and not SaverFi.",
 
   // ── WHETHER IT CAN BUY AT ALL TODAY ────────────────────────────────────────
   //
@@ -280,7 +330,7 @@ export const INVEST_COPY = {
    * are readings of one night, not values the screen can compute.
    */
   thinPool: (defaultCap: string): string =>
-    `The keeper refuses a buy unless the pool it goes into holds at least ${POOL_DEPTH_MULTIPLE} times that buy, so a small pool sets a small ceiling. ANTHROPIC's pool held about $9,500 on 20 September 2026, which admits about $190 for its share of a buy — about $380 for the whole buy. And because a buy takes all of the basket or none, a Most per buy above that stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance. Most per buy starts at ${defaultCap}. Set it to about $380 or less if you want the vault to invest while ANTHROPIC's pool is this small. SPYx's pool held about $2.4 million the same night and is nowhere near this limit.`,
+    `The keeper refuses a buy unless the pool it goes into holds at least ${POOL_DEPTH_MULTIPLE} times that buy, so a small pool sets a small ceiling. ANTHROPIC's pool held about $9,500 when it was read on 20 September 2026, which admitted about $190 for its share of a buy — about $380 for the whole buy, and that is the ceiling itself, not a target. And because a buy takes all of the basket or none, a Most per buy above it stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance. Most per buy starts at ${defaultCap}. On that night's reading, about $190 or less left roughly twice the cover the keeper asks for; $380 left almost none, so a pool that drains even slightly turns $380 into a cap that buys nothing. That figure was true that night and nothing on this page re-reads it, so treat the smaller number as the safe one while ANTHROPIC's pool is this small. SPYx's pool held about $2.4 million the same night and is nowhere near this limit.`,
 
   // ── THE ISSUERS' POWERS ────────────────────────────────────────────────────
   //
@@ -296,7 +346,7 @@ export const INVEST_COPY = {
   freezeNotice:
     "Both stocks are Token-2022 tokens, and each issuer keeps powers over its own that SaverFi cannot take away. An issuer can freeze your vault's account for that stock, pause every transfer of it, and move it out of your vault through a permanent delegate. If any of that happens, withdrawing that stock can fail or find less than you hold. USDC's issuer can freeze USDC accounts too. Withdrawing SOL depends on no issuer at all.",
   issuerKeys:
-    "The two are not the same risk. On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used to raise the fee, from 0.5 % to 1 %, days ago. On SPYx those powers sit with three separate keys and there is no fee to raise. This deserves more of your attention than the price does: it is not the market moving against you, it is one person's decision.",
+    "The two are not the same risk. On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used to raise the fee, from 0.5 % to 1 %, on the day this page was written. On SPYx those powers sit with three separate keys and there is no fee to raise. This deserves more of your attention than the price does: it is not the market moving against you, it is one person's decision.",
   freezeShort:
     "Each issuer can freeze, pause or move its own stock, even inside your vault, and on ANTHROPIC one key holds all of those powers. Withdrawing SOL does not depend on any of them.",
   acknowledge: "I understand each issuer can freeze, pause or move its own stock out of my vault, and that one key holds all of those powers over ANTHROPIC",
