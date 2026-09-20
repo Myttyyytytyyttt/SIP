@@ -80,6 +80,14 @@ export interface DashboardInput {
   readonly pathname: string;
   /** Only "/" has a landing behind it; /activity never does. */
   readonly landingAllowed: boolean;
+  /**
+   * This browser has connected before (the session hint cookie, read by the
+   * server before the first paint). NOT authentication and not a claim that
+   * the session is still valid — only that the front door is the wrong thing
+   * to show while Privy is still answering. Absent means "not known", which is
+   * the same as false — the field is a hint, and a hint can simply be missing.
+   */
+  readonly knownSession?: boolean;
 }
 
 /** "/?mode=live", "/activity?mode=mock" — the pathname is kept exactly as it was. */
@@ -102,6 +110,7 @@ const state = (
  */
 export function decideDashboard(input: DashboardInput): DashboardState {
   const { walletsConfigured, privyGaveUp, ready, authenticated, hasUser, pensionKey, urlMode, pathname, landingAllowed } = input;
+  const knownSession = input.knownSession === true;
   const onLanding = urlMode === null && landingAllowed;
 
   // 1. No configuration: there is no PrivyProvider, so `ready` never comes.
@@ -114,8 +123,16 @@ export function decideDashboard(input: DashboardInput): DashboardState {
 
   // 2. Privy has not answered. The front door still opens; everything else waits.
   //    On the server `ready` is false, so the sample is never server-rendered.
+  //
+  //    EXCEPT FOR SOMEBODY WHO HAS CONNECTED BEFORE. Showing them the landing
+  //    for the few hundred milliseconds Privy takes meant the front door
+  //    flashed past on every arrival and then threw them into their pension —
+  //    the state was never wrong, only unknowable that early, and a skeleton is
+  //    what an unknowable moment looks like. If the hint turns out to be stale
+  //    the next rule along lands them on the connect card, which is where a
+  //    disconnected visitor belongs anyway.
   if (!ready && !privyGaveUp) {
-    if (onLanding) return state("landing", false, "placeholder");
+    if (onLanding && !knownSession) return state("landing", false, "placeholder");
     return state("loading", false, "placeholder");
   }
 

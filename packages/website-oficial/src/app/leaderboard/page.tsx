@@ -12,6 +12,7 @@
  */
 
 import type { Metadata } from "next";
+import { cookies } from "next/headers";
 import Link from "next/link";
 
 import { LeaderboardView } from "@/components/leaderboard-view";
@@ -20,6 +21,7 @@ import { SiteHeader } from "@/components/site-header";
 import { Button } from "@/components/ui/button";
 import { fetchLeaderboard } from "@/lib/leaderboard";
 import { SAMPLE_LEADERBOARD } from "@/lib/leaderboard-sample";
+import { SESSION_HINT_COOKIE, hasSessionHint } from "@/lib/session-hint";
 
 export const metadata: Metadata = {
   title: "Leaderboard — SaverFi",
@@ -40,6 +42,12 @@ export default async function LeaderboardPage({
   const sample = (await searchParams)["demo"] === "1";
   const result = sample ? ({ ok: true, data: SAMPLE_LEADERBOARD } as const) : await fetchLeaderboard();
   const now = new Date().toISOString();
+  // THIS PAGE MOUNTS NO PRIVY, deliberately: it is public, and loading a wallet
+  // SDK for every anonymous reader to show an address in the corner is a bad
+  // trade. The session hint is enough to stop the bar from talking to somebody
+  // who has connected as though they had just arrived — it says continue, not
+  // connect. It carries no identity and grants nothing.
+  const returning = hasSessionHint((await cookies()).get(SESSION_HINT_COOKIE)?.value);
 
   return (
     <div className="flex min-h-dvh flex-col">
@@ -49,8 +57,8 @@ export default async function LeaderboardPage({
         // deliberately does not mount, so the account slot is a door back to
         // the app rather than a button that would need a second provider.
         account={
-          <Button asChild size="sm">
-            <Link href="/">Open my pension</Link>
+          <Button asChild size="sm" variant={returning ? "default" : "outline"}>
+            <Link href="/">{returning ? "Back to my pension" : "Open my pension"}</Link>
           </Button>
         }
         activitySheet={
