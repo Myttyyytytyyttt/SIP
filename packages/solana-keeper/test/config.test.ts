@@ -459,3 +459,39 @@ describe("endpoints, cadence, pools and credentials", () => {
     expectNoSecret(error.message);
   });
 });
+
+// WHO GETS WOKEN, AND BY WHAT.
+describe("the alert destination", () => {
+  const TELEGRAM = "https://api.telegram.org/bot777:TelegramBotTokenNeverLogged/sendMessage";
+
+  it("wakes nobody for a warn unless the operator asks", () => {
+    // The default is the owner's decision, so an unset variable does not
+    // quietly widen what leaves the box.
+    expect(loadConfig(armed(), new Redactor()).alertMinSeverity).toBe("critical");
+    expect(loadConfig(armed({ SIP_SOLANA_ALERT_MIN_SEVERITY: "WARN" }), new Redactor()).alertMinSeverity).toBe("warn");
+    expect(refusal(armed({ SIP_SOLANA_ALERT_MIN_SEVERITY: "urgent" })).message).toContain("SIP_SOLANA_ALERT_MIN_SEVERITY");
+  });
+
+  it("refuses a Telegram URL with no chat, and reads the chat out of one that has it", () => {
+    // sendMessage without chat_id answers 400 for every alert, for ever. That
+    // is a configuration mistake, and it belongs at boot, not at 3am.
+    expect(refusal(armed({ SIP_SOLANA_ALERT_WEBHOOK: TELEGRAM })).message).toContain("chat_id");
+    const config = loadConfig(armed({ SIP_SOLANA_ALERT_WEBHOOK: `${TELEGRAM}?chat_id=-1001234567890` }), new Redactor());
+    expect(config.alertChatId).toBe("-1001234567890");
+    expect(config.warnings).toEqual([]);
+    // The token is the credential; the chat id is public, like a channel name.
+    expectNoSecret(JSON.stringify(config));
+    expect(JSON.stringify(config)).not.toContain("TelegramBotTokenNeverLogged");
+  });
+
+  it("leaves a Slack or Discord webhook without a chat", () => {
+    expect(loadConfig(armed(), new Redactor()).alertChatId).toBeNull();
+  });
+
+  it("offers /status as a button only where the host has a public name", () => {
+    expect(loadConfig(armed(), new Redactor()).statusUrl).toBeNull();
+    expect(loadConfig(armed({ RAILWAY_PUBLIC_DOMAIN: "sip-keeper.up.railway.app" }), new Redactor()).statusUrl).toBe(
+      "https://sip-keeper.up.railway.app/status",
+    );
+  });
+});

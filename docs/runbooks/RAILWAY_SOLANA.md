@@ -57,7 +57,8 @@ Sin ninguna clave. Sirve para ver que la imagen arranca en Railway antes de que 
 | `SIP_SOLANA_PROGRAM_ID` | `6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J` | no |
 | `SIP_SOLANA_POOLS` | `XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W=6truu3rZuiB9rKQg4VYC3Dt3QwV7DgwGqXrYUcrvnDDE` | no |
 | `DATABASE_URL` | la de Supabase, puerto 5432 (opcional en seco) | **sí** |
-| `SIP_SOLANA_ALERT_WEBHOOK` | opcional: un webhook de Slack o Discord para las alertas | **sí** |
+| `SIP_SOLANA_ALERT_WEBHOOK` | a dónde van las alertas: Telegram, Slack o Discord (ver §1.1) | **sí** |
+| `SIP_SOLANA_ALERT_MIN_SEVERITY` | opcional, `critical` por defecto: qué severidad sale de la caja | no |
 
 `SIP_SOLANA_POOLS` es SPYx y su pool de Raydium con USDC, comprobado en mainnet el 14 de septiembre. Si NVDAx entra en
 la cesta, se añade separado por coma: `Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh=49iMatQtoyabsYAQc8GafVq6aeBFVDxSRH44oiatyyw6`.
@@ -76,6 +77,51 @@ Cuando despliegue, abre el dominio del servicio:
   alertas, nunca reiniciando el contenedor.
 - `/status` enseña `program` = `6kA9…`, `mode` = `dry-run` y `signing.secretsRead` = `false`. Hasta que se publique el
   programa, `programDeployed` es `false` y `config` es `null`: es lo esperado.
+
+### 1.1 Adónde van las alertas (Telegram)
+
+El vigilante distingue dos severidades. **`critical`** es lo que alguien tiene que arreglar —un `settle` que ha
+fallado, la wallet de crank sin SOL para firmar, la base de datos caída, el asiento de Privy rechazando la firma—.
+**`warn`** es una condición en reposo: una wallet saltada este barrido, un margen que se está estrechando. Por
+defecto **solo salen los `critical`**; los avisos se escriben en el log y aparecen en `/status`, que es donde se
+miran a propósito y no a las tres de la mañana. Para recibir también los avisos: `SIP_SOLANA_ALERT_MIN_SEVERITY=warn`.
+
+Una alerta repetida se calla 30 minutos por condición, así que un fallo persistente no se convierte en cien mensajes.
+
+**Telegram** es la mejor caja de las tres: llega al móvil como notificación push sin tener nada abierto, y es la única
+que pinta botones. Tres pasos, cinco minutos:
+
+1. En Telegram, habla con **@BotFather** → `/newbot` → le das un nombre. Te devuelve un token con la forma
+   `7777777777:AAH…`. **Ese token es una credencial**: quien lo tenga puede escribir como el bot.
+2. Escríbele algo a tu bot recién creado (un `hola` basta; un bot no puede iniciar la conversación), y abre
+   `https://api.telegram.org/bot<TOKEN>/getUpdates`. En la respuesta, `message.chat.id` es tu **chat id** — un número,
+   negativo si es un grupo. No es secreto: es como el nombre de un canal.
+3. En Railway, `SIP_SOLANA_ALERT_WEBHOOK` =
+   `https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<CHAT_ID>`
+
+El vigilante reconoce `api.telegram.org` por el host y cambia el formato del mensaje él solo. **Si la URL de Telegram
+no lleva `chat_id`, se niega a arrancar**: sin chat, `sendMessage` contesta 400 a todas las alertas, para siempre, y
+ese es un fallo que hay que ver en el despliegue y no la noche que haga falta.
+
+Para Slack o Discord, la URL del webhook tal cual: el cuerpo genérico (`text` + campos) es el que ya leen.
+
+**Los botones.** Cada alerta de Telegram llega con enlaces a lo que el operador abriría a continuación: el `/status`
+del vigilante (aparece solo si Railway ha dado dominio público, cosa que hace en la variable `RAILWAY_PUBLIC_DOMAIN`),
+y la wallet y la bóveda de la alerta en Solscan. Son enlaces, no mandos: **tocar un botón no ejecuta nada en el
+vigilante**. Un botón que reintentara un `settle` o pausara el barrido necesita un endpoint de control autenticado —
+hoy `/status` y `/health` son públicos y de solo lectura, y abrirle un mando a Internet sin autenticación es peor que
+el problema que resuelve. Se puede hacer después, con un token en la URL del botón; no está hecho.
+
+**Comprueba que la caja recibe**, antes de fiarte de ella:
+
+```bash
+curl -s "https://api.telegram.org/bot<TOKEN>/sendMessage" \
+  -H 'content-type: application/json' \
+  -d '{"chat_id":"<CHAT_ID>","text":"prueba del vigilante SIP"}'
+```
+
+Si no llega, la alerta tampoco llegará. El vigilante, por su parte, ya no se traga un webhook borrado o limitado: una
+respuesta que no sea 2xx se registra como `alert webhook failed; the alert above was logged only`.
 
 ### Fase B — el martes, después de publicar y configurar el programa
 

@@ -138,11 +138,11 @@ export interface KeeperStatus {
   signing: SigningStatus;
   history: string;
   /**
-   * Whether a critical has anywhere to go. A LABEL, NEVER THE URL: /status is
-   * unauthenticated and served on a public domain, and a Discord or Slack
-   * webhook URL is a posting credential for that channel.
+   * Where alerts go and from which severity up. A LABEL, NEVER THE URL:
+   * /status is unauthenticated and served on a public domain, and a webhook URL
+   * or a bot token is a posting credential for that channel.
    */
-  alerts: "webhook" | "log-only";
+  alerts: string;
   /**
    * The latest per-wallet outcome, keyed by wallet. This is where a deduped
    * resting state stays VISIBLE: a wallet stuck INCOMPLETE or NO_SIGNER logs

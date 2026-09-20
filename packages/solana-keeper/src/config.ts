@@ -175,6 +175,12 @@ export interface KeeperConfig {
   /** mint (base58) → Raydium CLMM pool. */
   readonly pools: ReadonlyMap<string, PublicKey>;
   readonly alertWebhook: Secret | null;
+  /** The lowest severity that leaves the box. Below it, alerts are logged only. */
+  readonly alertMinSeverity: "warn" | "critical";
+  /** Telegram needs the chat in the body; it is public, like a channel name. */
+  readonly alertChatId: string | null;
+  /** Where an operator would look next, offered as a button. Railway sets the domain itself. */
+  readonly statusUrl: string | null;
   readonly databaseUrl: Secret | null;
   readonly port: number | null;
   readonly privyAppId: string | null;
@@ -472,6 +478,9 @@ export function describeConfig(config: KeeperConfig): Record<string, unknown> {
     sweepMs: config.sweepMs,
     pools: config.pools.size,
     alertWebhook: config.alertWebhook !== null,
+    alertMinSeverity: config.alertMinSeverity,
+    alertChatId: config.alertChatId,
+    statusUrl: config.statusUrl,
     database: config.databaseUrl !== null,
     port: config.port,
     privyAppId: config.privyAppId,
@@ -633,6 +642,41 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
   // moment the mistake is made: the deploy after the variable was edited, which
   // is exactly how the variable gets dropped (RAILWAY_SOLANA.md warns the same
   // edit can drop RAILWAY_DOCKERFILE_PATH).
+  // TELEGRAM CARRIES THE CHAT IN THE BODY, so the chat id travels in the URL the
+  // operator pastes: .../botTOKEN/sendMessage?chat_id=123. The token is the
+  // credential and stays inside the Secret; the chat id is public, like a
+  // channel name, and is read out here so the body can carry it.
+  let alertChatId: string | null = null;
+  if (alertWebhook !== null) {
+    const url = tryUrl(webhookRaw!);
+    if (url !== null && url.hostname === "api.telegram.org") {
+      const chat = url.searchParams.get("chat_id")?.trim() ?? "";
+      if (chat === "") {
+        problems.push(
+          "SIP_SOLANA_ALERT_WEBHOOK points at api.telegram.org with no chat_id: Telegram needs the chat in " +
+            "the body. Use https://api.telegram.org/bot<token>/sendMessage?chat_id=<id>.",
+        );
+      } else {
+        alertChatId = chat;
+      }
+    }
+  }
+
+  // ONLY WHAT WAKES SOMEBODY LEAVES THE BOX. Warnings stay in the log and in
+  // /status, where a resting condition belongs; criticals are the ones a person
+  // is asked to act on at three in the morning. The default is the owner's
+  // decision, so an unset variable does not quietly widen it.
+  let alertMinSeverity: "warn" | "critical" = "critical";
+  const severityRaw = trimmed(env["SIP_SOLANA_ALERT_MIN_SEVERITY"])?.toLowerCase();
+  if (severityRaw !== undefined) {
+    if (severityRaw === "warn" || severityRaw === "critical") alertMinSeverity = severityRaw;
+    else problems.push(`SIP_SOLANA_ALERT_MIN_SEVERITY must be "warn" or "critical": it holds ${shape(severityRaw)}.`);
+  }
+
+  // Railway sets this itself, so the status button costs no configuration.
+  const publicDomain = trimmed(env["RAILWAY_PUBLIC_DOMAIN"]);
+  const statusUrl = publicDomain === undefined ? null : `https://${publicDomain}/status`;
+
   if (armed && alertWebhook === null) {
     warnings.push(
       "Armed with no alert destination (SIP_SOLANA_ALERT_WEBHOOK): every critical stays in this service's " +
@@ -706,6 +750,9 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
     sweepMs,
     pools,
     alertWebhook,
+    alertMinSeverity,
+    alertChatId,
+    statusUrl,
     databaseUrl,
     port,
     privyAppId,

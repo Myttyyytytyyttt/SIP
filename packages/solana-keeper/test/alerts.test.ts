@@ -121,3 +121,131 @@ describe("scrubbedForExport", () => {
     expect(scrubbedForExport(Array.from(keypair.secretKey).join(", "), redactor)).toBeNull();
   });
 });
+
+// WHAT WAKES SOMEBODY, AND WHAT ONLY GETS WRITTEN DOWN.
+//
+// Every alert used to leave the box: nine criticals and six warns through the
+// same door. A warn is a resting condition — a crank running low, a wallet the
+// keeper skipped this sweep — and at three in the morning it is indistinguishable
+// from the settle that failed. The threshold sits AFTER the dedup on purpose:
+// the log keeps its once-per-window line instead of one per sweep.
+describe("the severity threshold", () => {
+  function box(options: Partial<Parameters<typeof createAlerter>[0]> = {}) {
+    const posted: string[] = [];
+    const logged: string[] = [];
+    const alerter = createAlerter({
+      webhookUrl: new Secret("https://hooks.example.test/T000/B000/WebhookTokenNeverLogged", "alertWebhook"),
+      log: (_severity, line) => logged.push(line),
+      post: async (_url, body) => void posted.push(body),
+      ...options,
+    });
+    return { posted, logged, alerter };
+  }
+
+  it("keeps a warn in the log and lets a critical out", () => {
+    const { posted, logged, alerter } = box({ minSeverity: "critical" });
+    alerter.fire({ key: "crank-low", severity: "warn", title: "Crank running low", detail: "1000000 lamports left" });
+    expect(posted).toHaveLength(0);
+    expect(logged).toHaveLength(1); // NOT SILENT: it is written down and it is in /status.
+
+    alerter.fire({ key: "settle-failed:4T52", severity: "critical", title: "A settle threw", detail: "the RPC refused" });
+    expect(posted).toHaveLength(1);
+    expect(JSON.parse(posted[0]!)).toMatchObject({ severity: "critical" });
+  });
+
+  it("does not turn a held-back warn into one log line per sweep", () => {
+    const { posted, logged, alerter } = box({ minSeverity: "critical" });
+    for (let i = 0; i < 5; i += 1) {
+      alerter.fire({ key: "crank-low", severity: "warn", title: "Crank running low", detail: "1000000 lamports left" });
+    }
+    expect(logged).toHaveLength(1);
+    expect(posted).toHaveLength(0);
+  });
+
+  it("sends everything when the caller asks for warns too", () => {
+    const { posted, alerter } = box({ minSeverity: "warn" });
+    alerter.fire({ key: "crank-low", severity: "warn", title: "Crank running low", detail: "1000000 lamports left" });
+    expect(posted).toHaveLength(1);
+  });
+});
+
+// TELEGRAM CARRIES THE CHAT IN THE BODY and renders buttons only from
+// reply_markup. A generic webhook body posted to sendMessage is a 400.
+describe("the Telegram body", () => {
+  const CHAT = "-1001234567890";
+  function telegram(links: { statusUrl?: string | null } = { statusUrl: "https://keeper.example.test/status" }) {
+    const posted: string[] = [];
+    const alerter = createAlerter({
+      webhookUrl: new Secret(`https://api.telegram.org/bot777:TelegramBotTokenNeverLogged/sendMessage?chat_id=${CHAT}`, "alertWebhook"),
+      destination: { kind: "telegram", chatId: CHAT },
+      links,
+      minSeverity: "critical",
+      log: () => undefined,
+      post: async (_url, body) => void posted.push(body),
+      // Exactly what bin/keeper.mts wires: without it there is no withheld path.
+      sanitize: (text) => scrubbedForExport(text, new Redactor()),
+    });
+    return { posted, alerter };
+  }
+
+  it("names the chat and offers the operator's next stops as buttons", () => {
+    const { posted, alerter } = telegram();
+    alerter.fire({
+      key: "settle-failed:4T52",
+      severity: "critical",
+      title: "A settle threw",
+      detail: "the RPC refused",
+      context: { wallet: "4T52abc", vault: "EFXK995P" },
+    });
+
+    const body = JSON.parse(posted[0]!) as Record<string, unknown>;
+    expect(body["chat_id"]).toBe(CHAT);
+    expect(body["text"]).toContain("A settle threw");
+    const rows = (body["reply_markup"] as { inline_keyboard: { text: string; url: string }[][] }).inline_keyboard;
+    // One per row: a phone renders them as a stack of full-width taps.
+    expect(rows.map((row) => row.length)).toEqual([1, 1, 1]);
+    expect(rows.flat().map((button) => button.url)).toEqual([
+      "https://keeper.example.test/status",
+      "https://solscan.io/account/4T52abc",
+      "https://solscan.io/account/EFXK995P",
+    ]);
+  });
+
+  it("offers no empty keyboard when there is nowhere to send the operator", () => {
+    const { posted, alerter } = telegram({ statusUrl: null });
+    alerter.fire({ key: "k", severity: "critical", title: "t", detail: "d" });
+    expect(JSON.parse(posted[0]!)).not.toHaveProperty("reply_markup");
+  });
+
+  // The withheld fallback is a SECOND body, built on the failure path. It was
+  // the generic shape once; on Telegram that is a 400 and the alert is lost.
+  it("keeps the chat id on the withheld fallback", () => {
+    const { posted, alerter } = telegram();
+    alerter.fire({
+      key: "settle-failed:4T52",
+      severity: "critical",
+      title: "A settle threw",
+      detail: `signer bytes ${Array.from(keypair.secretKey).join(", ")}`,
+      context: { wallet: "4T52abc" },
+    });
+    const body = JSON.parse(posted[0]!) as Record<string, unknown>;
+    expect(body["chat_id"]).toBe(CHAT);
+    expect(body["text"]).toContain("withheld");
+    expect(posted[0]).not.toContain(Array.from(keypair.secretKey).join(", "));
+  });
+
+  it("leaves a plain webhook the shape Slack and Discord read", () => {
+    const posted: string[] = [];
+    const alerter = createAlerter({
+      webhookUrl: new Secret("https://hooks.example.test/T000/B000/WebhookTokenNeverLogged", "alertWebhook"),
+      links: { statusUrl: "https://keeper.example.test/status" },
+      log: () => undefined,
+      post: async (_url, body) => void posted.push(body),
+    });
+    alerter.fire({ key: "k", severity: "critical", title: "t", detail: "d" });
+    const body = JSON.parse(posted[0]!) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("chat_id");
+    expect(body["text"]).toContain("t");
+    expect(body["links"]).toEqual([{ text: "Keeper status", url: "https://keeper.example.test/status" }]);
+  });
+});

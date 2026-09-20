@@ -222,6 +222,9 @@ const readModel = SolanaReadModel.create(config.databaseUrl, (message, fields) =
  */
 const alerter = createAlerter({
   webhookUrl: config.alertWebhook,
+  minSeverity: config.alertMinSeverity,
+  destination: config.alertChatId === null ? { kind: "webhook" } : { kind: "telegram", chatId: config.alertChatId },
+  links: { statusUrl: config.statusUrl },
   log: (severity, line) => log[severity === "critical" ? "error" : "warn"](`alert ${severity}`, { detail: line }),
   // THE BODY LEAVES THE BOX, SO IT PASSES WHAT A LOG LINE PASSES. alerts.ts
   // builds its webhook payload itself and POSTs it raw; only the line above goes
@@ -531,7 +534,10 @@ const health: KeeperStatus = {
     wallets: null,
   },
   history: "not checked yet",
-  alerts: config.alertWebhook !== null ? "webhook" : "log-only",
+  alerts:
+    config.alertWebhook === null
+      ? "log-only"
+      : `${config.alertChatId === null ? "webhook" : "telegram"}: ${config.alertMinSeverity} and above`,
   wallets: {},
   // Projected from the carry book at each request, below: a sweep in flight can
   // record one, and a stale copy here would say a restart costs nothing.

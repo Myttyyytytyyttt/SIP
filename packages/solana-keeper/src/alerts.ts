@@ -36,6 +36,18 @@ export interface Alert {
   readonly context?: Record<string, unknown>;
 }
 
+/**
+ * Where an alert goes, and in what shape. Slack and Discord take the generic
+ * body; Telegram's bot API needs the chat in the body and renders buttons only
+ * from `reply_markup`, so it gets its own envelope.
+ */
+export type AlertDestination = { readonly kind: "webhook" } | { readonly kind: "telegram"; readonly chatId: string };
+
+/** Addresses an operator would open next. Public data only: these become buttons. */
+export interface AlertLinks {
+  readonly statusUrl?: string | null;
+}
+
 export interface Alerter {
   fire(alert: Alert): void;
   /** Marks a condition resolved, so its next occurrence alerts again. */
@@ -51,6 +63,17 @@ export interface AlerterOptions {
   readonly webhookUrl?: Secret | null;
   /** How long a fired condition stays quiet before repeating. */
   readonly repeatAfterMs?: number;
+  /**
+   * The lowest severity that LEAVES THE BOX. Below it an alert is still
+   * deduplicated and still logged — it just does not wake anybody. The filter
+   * sits after the dedup on purpose: a resting warn keeps its once-per-window
+   * line in the log instead of one per sweep.
+   */
+  readonly minSeverity?: AlertSeverity;
+  /** Defaults to the generic webhook shape. */
+  readonly destination?: AlertDestination;
+  /** Turned into buttons on Telegram and into a `links` field elsewhere. */
+  readonly links?: AlertLinks;
   /** Injected for tests. */
   readonly now?: () => number;
   readonly post?: (url: string, body: string) => Promise<void>;
@@ -76,8 +99,26 @@ interface FiredState {
   count: number;
 }
 
+const RANK: Record<AlertSeverity, number> = { warn: 0, critical: 1 };
+
+/** Public addresses only. A button is a URL anyone who can read the channel can open. */
+function buttonsFor(alert: Alert, links: AlertLinks): { readonly text: string; readonly url: string }[] {
+  const out: { text: string; url: string }[] = [];
+  if (typeof links.statusUrl === "string" && links.statusUrl !== "") {
+    out.push({ text: "Keeper status", url: links.statusUrl });
+  }
+  const wallet = alert.context?.["wallet"];
+  const vault = alert.context?.["vault"];
+  if (typeof wallet === "string") out.push({ text: "Trading wallet", url: `https://solscan.io/account/${wallet}` });
+  if (typeof vault === "string") out.push({ text: "Vault", url: `https://solscan.io/account/${vault}` });
+  return out;
+}
+
 export function createAlerter(options: AlerterOptions): Alerter {
   const repeatAfterMs = options.repeatAfterMs ?? 30 * 60 * 1000;
+  const minSeverity = options.minSeverity ?? "warn";
+  const destination: AlertDestination = options.destination ?? { kind: "webhook" };
+  const links = options.links ?? {};
   const now = options.now ?? (() => Date.now());
   const log = options.log;
   const post =
@@ -116,10 +157,23 @@ export function createAlerter(options: AlerterOptions): Alerter {
 
       const webhook = options.webhookUrl;
       if (webhook === undefined || webhook === null) return;
-      const body = JSON.stringify({
+      // BELOW THE THRESHOLD IT STAYS IN THE LOG. Deduplicated above, logged
+      // above, and not sent: the operator asked to be woken by criticals only.
+      if (RANK[alert.severity] < RANK[minSeverity]) return;
+      const buttons = buttonsFor(alert, links);
+      const envelope = (text: string, extra: Record<string, unknown>): string =>
+        destination.kind === "telegram"
+          ? JSON.stringify({
+              chat_id: destination.chatId,
+              text,
+              disable_web_page_preview: true,
+              // One per row: a phone renders them as a stack of full-width taps.
+              ...(buttons.length > 0 ? { reply_markup: { inline_keyboard: buttons.map((b) => [b]) } } : {}),
+            })
+          : JSON.stringify({ text, ...extra, ...(buttons.length > 0 ? { links: buttons } : {}) });
+      const body = envelope(line, {
         // `text` is what Slack and Discord render; the rest is for anything that
         // parses. Both are sent so one payload works everywhere.
-        text: line,
         severity: alert.severity,
         key: alert.key,
         title: alert.title,
@@ -138,13 +192,10 @@ export function createAlerter(options: AlerterOptions): Alerter {
         // detail belongs anyway.
         log("warn", `[WARN] an alert's text did not pass the redactor and was withheld from the webhook (${alert.key})`);
         payload = sanitize(
-          JSON.stringify({
-            text: `[${alert.severity.toUpperCase()}] ${alert.key}${repeated} — withheld: this alert's text did not pass the keeper's redactor. Read /status.`,
-            severity: alert.severity,
-            key: alert.key,
-            occurrences: count,
-            withheld: true,
-          }),
+          envelope(
+            `[${alert.severity.toUpperCase()}] ${alert.key}${repeated} — withheld: this alert's text did not pass the keeper's redactor. Read /status.`,
+            { severity: alert.severity, key: alert.key, occurrences: count, withheld: true },
+          ),
         );
       }
       // Not even the key came back clean: nothing leaves, and the log has it.
