@@ -78,6 +78,12 @@ export interface InvestRequest {
   /** USDC raw units. */
   readonly maxRolling30d: bigint;
   readonly enabled: boolean;
+  /** USDC raw units, the least one LEG may be given; the product's default when absent. */
+  readonly minInvestment?: bigint;
+  /** The basket by mint, in basis points summing to exactly 10,000; equal shares when absent. */
+  readonly weights?: ReadonlyMap<string, number>;
+  /** A venue NAME, never a program id; the product's default when absent. */
+  readonly venue?: string;
 }
 
 export interface TokenWithdrawRequest {
@@ -365,7 +371,16 @@ export function useVaultWrite(key: string) {
       return run("policy", ({ onStep, onBuilt }) =>
         investPolicyFlow(
           { api, onStep, onBuilt, signers: pensionSigner({ wallets, pensionKey, signTransaction: signOne }) },
-          { pensionKey, maxPerCall: input.maxPerCall, maxRolling30d: input.maxRolling30d, enabled: input.enabled, shownPrices },
+          {
+            pensionKey,
+            maxPerCall: input.maxPerCall,
+            maxRolling30d: input.maxRolling30d,
+            enabled: input.enabled,
+            minInvestment: input.minInvestment,
+            weights: input.weights,
+            venue: input.venue,
+            shownPrices,
+          },
         ),
       );
     },

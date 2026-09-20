@@ -354,6 +354,20 @@ export const INVEST_COPY = {
   signing: "Signing…",
   signed: "Policy signed",
   capsProblem: (minimum: string): string => `Most per buy must be at least ${minimum}, and Most per 30 days at least Most per buy.`,
+
+  // ── THE FIELDS THE OWNER ASKED TO SET ──────────────────────────────────────
+  minPerBuy: "Least per stock",
+  minPerBuyHint:
+    "The smallest amount the keeper will put into ONE stock. It is checked per stock, not per buy: with two stocks at equal shares, a buy has to be at least twice this before anything happens.",
+  minimumProblem: "Least per stock must be more than zero.",
+  minimumUnreachable: (minimum: string): string =>
+    `At these settings no buy ever reaches ${minimum} for every stock, so nothing would be bought. Lower this, or raise Most per buy.`,
+  weightsTitle: "What share each stock takes",
+  weightsHint: "Whole percentages that add up to 100. Nothing is rounded or filled in for you: a basket that does not add up is refused rather than adjusted.",
+  weightProblem: (symbol: string): string => `${symbol}'s share must be a whole number of percent, greater than zero.`,
+  weightsSum: (total: string): string => `The shares must add up to exactly 100 %. These add up to ${total}.`,
+  venueLabel: "Where it trades",
+  venueHint: "The exchange the keeper buys through. SaverFi checks the transaction against the one you pick before your wallet is asked to sign it.",
   convertWarning: "Above $1,000.00 per buy, one conversion can sell more than 1 SOL of your savings at the floor.",
   /**
    * SAID BESIDE THE BOX, not only in the notice three boxes above it.
@@ -467,6 +481,15 @@ export const FAILURE_COPY = {
       : `Your pension key needs more SOL: this action costs about ${cost} SOL in rent and fees. Add SOL in Phantom, then try again. Nothing moved.`,
   unknown: "Something went wrong. Nothing was sent.",
   builtMismatch: (detail: string): string => `SaverFi's server sent a transaction that is not what you asked for (${detail}). Nothing was signed.`,
+  /**
+   * A venue this app cannot check the bytes of. The server may offer a name the
+   * web has not learned the program for yet; signing it would mean trusting the
+   * server about which program the vault will call, which is the one thing the
+   * intent check exists to avoid. The panel only offers verifiable names, so
+   * this is a last line rather than something an owner should ever meet.
+   */
+  unverifiableVenue: (venue: string): string =>
+    `SaverFi cannot check a transaction that trades on "${venue}" yet, so it will not ask you to sign one. Nothing was signed. Choose another venue, or update SaverFi.`,
   signedMismatch: (detail: string): string => `Phantom changed the transaction SaverFi built (${detail}). Nothing was sent.`,
   foreignProgram: (label: string): string => `Phantom added an instruction for ${label}, which SaverFi does not relay. Nothing was sent.`,
   /** Phantom's Lighthouse checks broke the rule the relay holds them to; `detail` is @sip/solana-core's checkWalletGuards words. */

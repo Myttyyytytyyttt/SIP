@@ -1,7 +1,7 @@
 // The investing card rendered to HTML in each state, with Privy mocked, and its buttons pressed: the
 // pattern VaultCard.test.ts uses. Pressing a button runs the real flow against a stub client.
 
-import { ANTHROPIC_MINT, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
+import { ANTHROPIC_MINT, RAYDIUM_CLMM, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
 import { Keypair } from "@solana/web3.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -48,6 +48,8 @@ import {
   SigningDetail,
   canSignPolicy,
   readCaps,
+  readMinimum,
+  readWeights,
   setupRent,
   usedInLast30Days,
 } from "@/components/wallets/InvestingCard";
@@ -294,6 +296,76 @@ describe("InvestingCard", () => {
     expect(INVEST_COPY.depthWarning("$380.00")).toContain(
       "This is above the $380.00 that ANTHROPIC's pool allowed when it was last read. If the pool is still that size, a policy at this cap buys nothing and converts no SOL",
     );
+  });
+
+  /**
+   * THE THREE FIELDS THE SERVER OPENED AND THE PANEL NOW OFFERS. route.test.ts
+   * pins the shapes the route takes and vault-flows.test.ts pins what is sent;
+   * this pins that the owner can actually reach them, and that the ones the
+   * server refuses outright can never leave the form.
+   */
+  it("offers the minimum per stock, the basket shares and the venue, and refuses a basket that does not add up rather than adjusting it", () => {
+    const html = render(screen({ kind: "ready", state: stateWith() }));
+    // The minimum starts at defaultInvestPolicy(2).minInvestment, $2.50 a leg.
+    expect(html).toContain('id="invest-min-investment"');
+    expect(html).toContain('value="2.5"');
+    // One share box per offered leg, keyed by MINT and never by position.
+    expect(html).toContain(`id="invest-weight-${SPYX_MINT}"`);
+    expect(html).toContain(`id="invest-weight-${ANTHROPIC_MINT}"`);
+    expect(html).toContain("Whole percentages that add up to 100.");
+
+    // THE SUM IS EXACT, AND NOTHING IS REPAIRED -- the same rule the server
+    // applies, said here so the owner learns it before he spends a build on it.
+    expect(readWeights(["50", "50"])).toEqual({
+      ok: true,
+      byMint: new Map([
+        [SPYX_MINT, 5_000],
+        [ANTHROPIC_MINT, 5_000],
+      ]),
+    });
+    expect(readWeights(["70", "30"])).toMatchObject({ ok: true });
+    expect(readWeights(["50", "49"])).toMatchObject({ ok: false, message: "The shares must add up to exactly 100 %. These add up to 99 %." });
+    expect(readWeights(["50", "51"])).toMatchObject({ ok: false });
+    expect(readWeights(["100", "0"])).toMatchObject({ ok: false });
+    expect(readWeights(["50.5", "49.5"])).toMatchObject({ ok: false });
+    expect(readWeights(["50"])).toMatchObject({ ok: false });
+
+    // THE MINIMUM IS CHECKED PER LEG against the cap beside it: the program's
+    // own rule (0 < min <= max_per_call) would accept a pair that never buys.
+    expect(readMinimum("2.5", 10_000_000n)).toEqual({ ok: true, raw: 2_500_000n });
+    expect(readMinimum("0", 10_000_000n)).toMatchObject({ ok: false, message: "Least per stock must be more than zero." });
+    // $10 a buy, two equal legs, $5 a leg: a $6 minimum can never be reached.
+    expect(readMinimum("6", 10_000_000n)).toMatchObject({ ok: false, message: "At these settings no buy ever reaches $6.00 for every stock, so nothing would be bought. Lower this, or raise Most per buy." });
+    expect(readMinimum("5", 10_000_000n)).toMatchObject({ ok: true });
+
+    // SIGN IS GATED ON ALL OF IT, not only the caps and the box.
+    expect(canSignPolicy({ acknowledged: true, capsOk: true, minimumOk: true, weightsOk: true, blocked: false })).toBe(true);
+    expect(canSignPolicy({ acknowledged: true, capsOk: true, minimumOk: true, weightsOk: false, blocked: false })).toBe(false);
+    expect(canSignPolicy({ acknowledged: true, capsOk: true, minimumOk: false, weightsOk: true, blocked: false })).toBe(false);
+  });
+
+  /**
+   * THE VENUE IS A NAME FROM A CLOSED SET, AND THE PANEL FAILS CLOSED.
+   * The server serves the names it enforces; the web can only SIGN a name whose
+   * program it can check the built bytes against. So the box offers the
+   * intersection, and a server that learns a new venue does not make the panel
+   * offer something it cannot verify.
+   */
+  it("offers only venue names the server serves AND this app can check the bytes of, and never puts a program id in the form", () => {
+    const offered = render(screen({ kind: "ready", state: { ...stateWith(), offeredVenues: ["raydium-clmm"] } }));
+    expect(offered).toContain('id="invest-venue"');
+    expect(offered).toContain('value="raydium-clmm"');
+    // NAMES ONLY: the program id never reaches the browser's form.
+    expect(offered).not.toContain(RAYDIUM_CLMM);
+
+    // A name this app cannot verify is not offered, even when the server does.
+    const unknown = render(screen({ kind: "ready", state: { ...stateWith(), offeredVenues: ["orca-whirlpool"] } }));
+    expect(unknown).not.toContain("orca-whirlpool");
+    expect(unknown).not.toContain('id="invest-venue"');
+
+    // An older server that serves no list at all offers no choice and leaves
+    // the default alone, rather than guessing at one.
+    expect(render(screen({ kind: "ready", state: stateWith() }))).not.toContain('id="invest-venue"');
   });
 
   it("Sign is possible only with the box ticked, valid caps and no other write running", () => {

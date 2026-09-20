@@ -192,6 +192,19 @@ export interface VaultStateJson {
     readonly usdcRawPerSol: string;
     readonly legs: readonly { readonly symbol: string; readonly mint: string; readonly wad: string; readonly usdcRawPer1e8: string }[];
   } | null;
+  /**
+   * THE CLOSED SET OF VENUE NAMES, AS THE SERVER THAT ENFORCES IT SERVES THEM.
+   * investPolicy accepts a venue only if its own VENUE_PROGRAMS map holds the
+   * name, and this list is that map's keys — so the panel offers what the route
+   * takes and cannot drift into offering a venue it would refuse.
+   *
+   * NAMES ONLY, never the programs behind them: the whole point of the check is
+   * that a request cannot ask the vault to CPI into a key nobody vetted, and a
+   * payload carrying the keys would hand back the vocabulary it exists to
+   * withhold. Absent on an older server, which the panel reads as "offer
+   * nothing and leave the default alone".
+   */
+  readonly offeredVenues?: readonly string[];
 }
 
 export interface ApiFailure {

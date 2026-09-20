@@ -337,6 +337,28 @@ export async function createVaultFlow(deps: CreateVaultDeps, input: CreateVaultI
 
 // ── set_invest_policy ────────────────────────────────────────────────────────
 
+/**
+ * THE VENUE NAMES THIS APP CAN VERIFY THE BYTES OF, and the programs it checks
+ * them against.
+ *
+ * The server owns the closed set (VENUE_PROGRAMS in build-handler.ts) and
+ * serves its KEYS as offeredVenues; this map is a different thing and must not
+ * be mistaken for a second copy of it. The web never sends a program id — it
+ * sends a name — but it does have to know which program a name means in order
+ * to check the built transaction against the intent, which is the only reason
+ * signing is safe at all.
+ *
+ * SO IT FAILS CLOSED. The panel offers the INTERSECTION of what the server
+ * offers and what this map can verify: the day the server learns a new venue,
+ * the panel keeps offering only the old one until the web learns the program
+ * too. The alternative — offering a name whose bytes cannot be checked — would
+ * mean signing a CPI target on the server's word alone.
+ */
+export const VERIFIABLE_VENUES: ReadonlyMap<string, string> = new Map([["raydium-clmm", RAYDIUM_CLMM]]);
+
+/** The name of the venue built when none is chosen, matching the route's DEFAULT_VENUE. */
+export const DEFAULT_VENUE_NAME = "raydium-clmm";
+
 export interface InvestPolicyInput {
   readonly pensionKey: string;
   /** USDC raw units; the product's default when absent. */
@@ -345,6 +367,23 @@ export interface InvestPolicyInput {
   readonly maxRolling30d?: bigint;
   /** Default true. */
   readonly enabled?: boolean;
+  /**
+   * USDC raw units, the least one LEG may be given; the route's
+   * defaultInvestPolicy value when absent. Sent as a decimal string, never a
+   * number: decimalU64 refuses a float and a $30,000 figure stops being exact
+   * in a double well before it does in a u64.
+   */
+  readonly minInvestment?: bigint;
+  /**
+   * The basket, BY MINT and never positional, in basis points summing to
+   * exactly LEG_WEIGHT_TOTAL_BPS; equal shares over the catalogue when absent.
+   * The server refuses a sum that is not 10,000 rather than normalising it, and
+   * refuses a mint it does not offer, so this cannot quietly become a different
+   * basket than the one the owner saw.
+   */
+  readonly weights?: ReadonlyMap<string, number>;
+  /** A venue NAME from VERIFIABLE_VENUES; the route's default when absent. */
+  readonly venue?: string;
   /**
    * The pool rates the form showed just before the click, as /api/solana-vault
    * answered them. A build whose own live rates are more than
@@ -443,21 +482,43 @@ export async function investPolicyFlow(deps: PensionFlowDeps, input: InvestPolic
   if (input.maxPerCall !== undefined) request.maxPerCall = input.maxPerCall.toString();
   if (input.maxRolling30d !== undefined) request.maxRolling30d = input.maxRolling30d.toString();
   if (input.enabled !== undefined) request.enabled = input.enabled;
+  // DECIMAL STRINGS OF BASE UNITS, never a JS number: the route's decimalU64
+  // refuses a float and a bare number outright, so nothing can arrive lossy.
+  if (input.minInvestment !== undefined) request.minInvestment = input.minInvestment.toString();
+  // BY MINT, in the catalogue's order for readability only — the server reads
+  // the mint on each entry and ignores the position entirely.
+  if (input.weights !== undefined) {
+    request.weights = OFFERED_LEGS.map((leg) => ({ mint: leg.mint, weightBps: input.weights!.get(leg.mint) }));
+  }
+  // A NAME. The program id is never sent; it is only used below to check the
+  // bytes that come back.
+  if (input.venue !== undefined) request.venue = input.venue;
+  const venueName = input.venue ?? DEFAULT_VENUE_NAME;
+  const venueProgram = VERIFIABLE_VENUES.get(venueName);
+  // A venue this app cannot check the bytes of is not signed, and is refused
+  // BEFORE the server is asked to build anything: there is no point spending a
+  // build on a transaction that could never be checked. The panel offers only
+  // verifiable names, so reaching here means the caller went around it.
+  if (venueProgram === undefined) return refused(FAILURE_COPY.unverifiableVenue(venueName));
   return pensionWrite<InvestPolicyBuildJson>(deps, request, async (body) => {
     const problem = floorsProblem(body.floors, input.shownPrices);
     if (problem !== null) throw new IntentError(FAILURE_COPY.builtMismatch(problem));
     const vault = await deriveVaultAddress(input.pensionKey);
-    const weights = basketWeightsBps(OFFERED_LEGS.length);
+    const equalShares = basketWeightsBps(OFFERED_LEGS.length);
+    // The weights the owner chose, or equal shares — the same fallback the
+    // route applies, so the bytes are checked against what was actually asked
+    // for rather than against the default in every case.
+    const weightOf = (mint: string, index: number): number => input.weights?.get(mint) ?? equalShares[index]!;
     return {
       instruction: "set_invest_policy",
       signers: [input.pensionKey],
       accounts: { owner: input.pensionKey, vault, policy: await deriveInvestAddress(vault) },
       args: {
-        legs: OFFERED_LEGS.map((leg, index) => ({ mint: leg.mint, weight_bps: weights[index]!, min_out_rate_wad: BigInt(body.floors.legs[index]!.wad) })),
-        venue_program: RAYDIUM_CLMM,
+        legs: OFFERED_LEGS.map((leg, index) => ({ mint: leg.mint, weight_bps: weightOf(leg.mint, index), min_out_rate_wad: BigInt(body.floors.legs[index]!.wad) })),
+        venue_program: venueProgram,
         in_mint: USDC_MINT,
         min_convert_rate_wad: BigInt(body.floors.convertWad),
-        min_investment: defaultInvestPolicy(OFFERED_LEGS.length).minInvestment,
+        min_investment: input.minInvestment ?? defaultInvestPolicy(OFFERED_LEGS.length).minInvestment,
         max_per_call: input.maxPerCall ?? DEFAULT_INVEST_CAPS.maxPerCall,
         max_rolling_30d: input.maxRolling30d ?? DEFAULT_INVEST_CAPS.maxRolling30d,
         enabled: input.enabled ?? true,

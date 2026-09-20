@@ -19,9 +19,10 @@
  * the flow checks them against SIP's margins, and they are shown again while
  * Phantom asks.
  *
- * WHAT THE SERVER TAKES, AND IN WHAT SHAPE. All four of the fields the owner
- * asked for are buildable — THIS CARD STILL WIRES ONLY THE TWO CAPS, and the
- * rest land in the commit after this one. investPolicy takes the two caps, the minimum per buy,
+ * WHAT THIS CARD OFFERS, AND IN WHAT SHAPE. All four of the fields the owner
+ * asked for are buildable, and the three that belong to the POLICY are wired
+ * here; the fourth, the cap per settlement, is the VAULT's rule and lives on
+ * VaultCard. investPolicy takes the two caps, the minimum per buy,
  * the basket weights and the venue (INVEST_POLICY_FIELDS in
  * solana-core/src/server/build-handler.ts), and the cap per settlement rides on
  * setPolicy, the vault's own rule. Each has exactly one accepted shape, and the
@@ -36,9 +37,9 @@
  *    filled in for you, so Sign is gated on the sum.
  *  * THE VENUE: a NAME from the closed set the server itself serves
  *    (offeredVenues), never a program id from the browser.
- *  * THE CAP PER SETTLEMENT: setPolicy, which writes all six of the vault's
- *    rule at once — so the form sends the vault's CURRENT mode, rates, paused
- *    and reserve back alongside the one figure it is changing.
+ *  * THE CAP PER SETTLEMENT is NOT here: it is a VAULT field, carried by
+ *    setPolicy, which writes all six of the vault's rule at once. It belongs
+ *    beside the rest of that rule on VaultCard, not on the policy card.
  * route.test.ts pins every one of those shapes, so a change to the whitelist
  * turns it red rather than leaving this comment quietly wrong.
  *
@@ -56,6 +57,7 @@ import {
   DEFAULT_INVEST_CAPS,
   DEFAULT_PURCHASE_USDC_RAW,
   LEG_FLOOR_MARGIN_BPS,
+  LEG_WEIGHT_TOTAL_BPS,
   OFFERED_LEGS,
   SIGNATURE_FEE_LAMPORTS,
   TOKEN_PROGRAM,
@@ -80,6 +82,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TxProgress } from "@/components/wallets/TxProgress";
 import { useVaultWrite, type InvestRequest, type WriteProgress } from "@/hooks/use-vault-actions";
+import { DEFAULT_VENUE_NAME, VERIFIABLE_VENUES } from "@/lib/vault-flows";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { AmountError, USDC_DECIMALS, formatSol, formatUnits, formatUsd, parseUnits, rawFrom } from "@/lib/amounts";
 import { LABEL } from "@/lib/classes";
@@ -165,9 +168,70 @@ export function readCaps(perBuyText: string, per30DaysText: string): Caps {
   }
 }
 
-/** Whether the setup form may ask Phantom: the issuer's powers acknowledged, the caps valid, and no other write in the way. */
-export const canSignPolicy = (input: { readonly acknowledged: boolean; readonly capsOk: boolean; readonly blocked: boolean }): boolean =>
-  input.acknowledged && input.capsOk && !input.blocked;
+/** The least one LEG may be given, as typed, in USDC raw units — or why it cannot be signed. */
+export type Minimum = { readonly ok: true; readonly raw: bigint } | { readonly ok: false; readonly message: string };
+
+/**
+ * THE MINIMUM PER BUY, WHICH IS ENFORCED PER LEG.
+ *
+ * The program's only rule is 0 < min_investment <= max_per_call, so it would
+ * accept a minimum that makes the policy unbuyable at the cap beside it — the
+ * same trap REACHABLE_PER_BUY_RAW closes from the other side. Checked here
+ * against the cap actually typed, so the two boxes cannot disagree.
+ */
+export function readMinimum(text: string, maxPerCall: bigint | null): Minimum {
+  try {
+    const raw = parseUnits(text, USDC_DECIMALS, INVEST_COPY.minPerBuy);
+    if (raw <= 0n) return { ok: false, message: INVEST_COPY.minimumProblem };
+    // Per LEG: the lightest leg's slice of the cap has to clear it.
+    if (maxPerCall !== null) {
+      const lightest = BigInt(Math.min(...basketWeightsBps(OFFERED_LEGS.length)));
+      if ((maxPerCall * lightest) / 10_000n < raw) return { ok: false, message: INVEST_COPY.minimumUnreachable(formatUsd(raw)) };
+    }
+    return { ok: true, raw };
+  } catch (error) {
+    if (error instanceof AmountError) return { ok: false, message: error.message };
+    throw error;
+  }
+}
+
+/** The basket as typed, by mint — or why it cannot be signed. */
+export type Weights = { readonly ok: true; readonly byMint: ReadonlyMap<string, number> } | { readonly ok: false; readonly message: string };
+
+/**
+ * THE BASKET, BY MINT, SUMMING TO EXACTLY LEG_WEIGHT_TOTAL_BPS.
+ *
+ * NOTHING IS REPAIRED HERE, because nothing is repaired on the server either: a
+ * sum of 9,999 is not normalised and a missing leg is not filled in at the
+ * share that would make it work — each is a different basket from the one on
+ * screen. Whole percentages only, which is what the boxes take; the server
+ * takes basis points and this multiplies by 100, so a weight cannot arrive as
+ * a fraction of a point nobody typed.
+ */
+export function readWeights(percents: readonly string[]): Weights {
+  const byMint = new Map<string, number>();
+  let total = 0;
+  for (const [index, leg] of OFFERED_LEGS.entries()) {
+    const text = (percents[index] ?? "").trim();
+    if (!/^[0-9]{1,3}$/.test(text)) return { ok: false, message: INVEST_COPY.weightProblem(leg.symbol) };
+    const bps = Number(text) * 100;
+    if (bps <= 0) return { ok: false, message: INVEST_COPY.weightProblem(leg.symbol) };
+    byMint.set(leg.mint, bps);
+    total += bps;
+  }
+  if (total !== LEG_WEIGHT_TOTAL_BPS) return { ok: false, message: INVEST_COPY.weightsSum(ratePercent(total)) };
+  return { ok: true, byMint };
+}
+
+/** Whether the setup form may ask Phantom: the issuer's powers acknowledged, every field valid, and no other write in the way. */
+export const canSignPolicy = (input: {
+  readonly acknowledged: boolean;
+  readonly capsOk: boolean;
+  readonly blocked: boolean;
+  /** Default true, so the existing two-argument callers keep their meaning. */
+  readonly minimumOk?: boolean;
+  readonly weightsOk?: boolean;
+}): boolean => input.acknowledged && input.capsOk && (input.minimumOk ?? true) && (input.weightsOk ?? true) && !input.blocked;
 
 // These two moved to src/lib/invest-limits.ts, where the live dashboard's rule
 // card reads the same numbers; re-exported so this card's existing imports and
@@ -331,13 +395,23 @@ function PolicySetup({
   const [perBuy, setPerBuy] = useState(() => formatUnits(SUGGESTED_PER_BUY_RAW, USDC_DECIMALS));
   const [per30Days, setPer30Days] = useState(() => formatUnits(DEFAULT_INVEST_CAPS.maxRolling30d, USDC_DECIMALS));
   const [acknowledged, setAcknowledged] = useState(false);
+  // The catalogue's own defaults, as the route would build them when these
+  // fields are left alone: the $5-split minimum and equal shares.
+  const [minimum, setMinimum] = useState(() => formatUnits(defaultInvestPolicy(OFFERED_LEGS.length).minInvestment, USDC_DECIMALS));
+  const [percents, setPercents] = useState<readonly string[]>(() => basketWeightsBps(OFFERED_LEGS.length).map((bps) => String(bps / 100)));
+  // THE INTERSECTION, not the server's list: a name the web cannot check the
+  // bytes of is never offered. See VERIFIABLE_VENUES in vault-flows.ts.
+  const venues = (state.offeredVenues ?? []).filter((name) => VERIFIABLE_VENUES.has(name));
+  const [venue, setVenue] = useState(DEFAULT_VENUE_NAME);
 
   const caps = readCaps(perBuy, per30Days);
+  const minPerLeg = readMinimum(minimum, caps.ok ? caps.maxPerCall : null);
+  const weightsTyped = readWeights(percents);
   const blocked = write.running || write.busyElsewhere || write.unconfirmed;
   const limits = todaysLimits(state.prices);
   const rent = setupRent(state);
   const fees = SIGNATURE_FEE_LAMPORTS + priorityFeeLamports(ownerComputeBudget("set_invest_policy"));
-  const weights = basketWeightsBps(OFFERED_LEGS.length);
+  const weights = OFFERED_LEGS.map((leg, index) => (weightsTyped.ok ? weightsTyped.byMint.get(leg.mint)! : basketWeightsBps(OFFERED_LEGS.length)[index]!));
   const floorText = limits === null ? "today's floor" : formatUsd(limits.floorPerSol);
   // "SPYx at 50 % and ANTHROPIC at 50 %", from the offered legs and their
   // weights — so the prose and the Basket field below cannot say different
@@ -352,7 +426,7 @@ function PolicySetup({
           {INVEST_COPY.policyRule(
             basket,
             floorText,
-            formatUsd(DEFAULT_PURCHASE_USDC_RAW),
+            minPerLeg.ok ? formatUsd(minPerLeg.raw * BigInt(OFFERED_LEGS.length)) : formatUsd(DEFAULT_PURCHASE_USDC_RAW),
             caps.ok ? formatUsd(caps.maxPerCall) : `$${perBuy.trim()}`,
             caps.ok ? formatUsd(caps.maxRolling30d) : `$${per30Days.trim()}`,
             rent === null ? "some" : formatSol(rent),
@@ -362,7 +436,9 @@ function PolicySetup({
       <CardContent className="space-y-4">
         <dl className="grid gap-3 sm:grid-cols-2">
           <Fact label={INVEST_COPY.basket}>{OFFERED_LEGS.map((leg, index) => `${leg.symbol} · ${ratePercent(weights[index]!)}`).join(", ")}</Fact>
-          <Fact label={INVEST_COPY.rule}>{INVEST_COPY.buysEach(formatUsd(DEFAULT_PURCHASE_USDC_RAW))}</Fact>
+          <Fact label={INVEST_COPY.rule}>
+            {INVEST_COPY.buysEach(minPerLeg.ok ? formatUsd(minPerLeg.raw * BigInt(OFFERED_LEGS.length)) : formatUsd(DEFAULT_PURCHASE_USDC_RAW))}
+          </Fact>
         </dl>
 
         <div className="grid gap-3 sm:grid-cols-2">
@@ -383,6 +459,65 @@ function PolicySetup({
             {caps.maxPerCall > 1_000_000_000n ? <p className="text-xs text-destructive">{INVEST_COPY.convertWarning}</p> : null}
           </>
         )}
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <CapField id="invest-min-investment" label={INVEST_COPY.minPerBuy} value={minimum} onChange={setMinimum} disabled={blocked} />
+          {venues.length > 0 ? (
+            <div className="space-y-1">
+              <Label htmlFor="invest-venue">{INVEST_COPY.venueLabel}</Label>
+              <select
+                id="invest-venue"
+                name="invest-venue"
+                value={venue}
+                disabled={blocked}
+                onChange={(event) => setVenue(event.target.value)}
+                className="h-8 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm disabled:opacity-50"
+              >
+                {venues.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground">{INVEST_COPY.venueHint}</p>
+            </div>
+          ) : null}
+        </div>
+        <p className="text-xs text-muted-foreground">{INVEST_COPY.minPerBuyHint}</p>
+        {!minPerLeg.ok ? (
+          <p role="alert" className="text-xs text-destructive">
+            {minPerLeg.message}
+          </p>
+        ) : null}
+
+        <div className="space-y-1">
+          <div className={LABEL}>{INVEST_COPY.weightsTitle}</div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {OFFERED_LEGS.map((leg, index) => (
+              <div key={leg.mint} className="space-y-1">
+                <Label htmlFor={`invest-weight-${leg.mint}`}>{leg.symbol}</Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id={`invest-weight-${leg.mint}`}
+                    inputMode="numeric"
+                    autoComplete="off"
+                    value={percents[index] ?? ""}
+                    disabled={blocked}
+                    onChange={(event) => setPercents((current) => current.map((value, at) => (at === index ? event.target.value : value)))}
+                    className="font-mono"
+                  />
+                  <span className="text-sm text-muted-foreground">%</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground">{INVEST_COPY.weightsHint}</p>
+          {!weightsTyped.ok ? (
+            <p role="alert" className="text-xs text-destructive">
+              {weightsTyped.message}
+            </p>
+          ) : null}
+        </div>
 
         <div className="space-y-1 rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs">
           <div className={LABEL}>{INVEST_COPY.thinPoolTitle}</div>
@@ -432,10 +567,20 @@ function PolicySetup({
 
         <Button
           type="button"
-          disabled={!canSignPolicy({ acknowledged, capsOk: caps.ok, blocked })}
+          disabled={!canSignPolicy({ acknowledged, capsOk: caps.ok, minimumOk: minPerLeg.ok, weightsOk: weightsTyped.ok, blocked })}
           aria-busy={write.running}
           onClick={() => {
-            if (caps.ok && acknowledged) start({ maxPerCall: caps.maxPerCall, maxRolling30d: caps.maxRolling30d, enabled: true });
+            if (caps.ok && minPerLeg.ok && weightsTyped.ok && acknowledged) {
+              start({
+                maxPerCall: caps.maxPerCall,
+                maxRolling30d: caps.maxRolling30d,
+                enabled: true,
+                minInvestment: minPerLeg.raw,
+                weights: weightsTyped.byMint,
+                // A NAME from the closed set, never a program id.
+                venue,
+              });
+            }
           }}
         >
           {write.running ? INVEST_COPY.signing : INVEST_COPY.sign}

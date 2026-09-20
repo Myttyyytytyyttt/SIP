@@ -323,6 +323,10 @@ interface PolicyForge {
   readonly convertFloor?: bigint;
   readonly create?: readonly boolean[];
   readonly floors?: (floors: Record<string, unknown>) => Record<string, unknown>;
+  /** What the transaction carries as each leg's share, in bps: [SPYx, ANTHROPIC]. */
+  readonly weights?: readonly [number, number];
+  /** What the transaction carries as min_investment, per leg. */
+  readonly minInvestment?: bigint;
 }
 
 type Answer = Record<string, unknown> & { readonly txBase64: string };
@@ -335,12 +339,12 @@ function policyAnswer(owner: string, forge: PolicyForge = {}): Answer {
     owner,
     // basketWeightsBps(2), written out: equal halves of SaverFi's two legs.
     legs: [
-      { mint: SPYX_MINT, weightBps: 5_000, minOutRateWad: forge.legFloor ?? SPYX_FLOOR },
-      { mint: ANTHROPIC_MINT, weightBps: 5_000, minOutRateWad: forge.anthropicFloor ?? ANTHROPIC_FLOOR },
+      { mint: SPYX_MINT, weightBps: forge.weights?.[0] ?? 5_000, minOutRateWad: forge.legFloor ?? SPYX_FLOOR },
+      { mint: ANTHROPIC_MINT, weightBps: forge.weights?.[1] ?? 5_000, minOutRateWad: forge.anthropicFloor ?? ANTHROPIC_FLOOR },
     ],
     minConvertRateWad: forge.convertFloor ?? CONVERT_FLOOR,
     // defaultInvestPolicy(2).minInvestment: the $5 purchase split across the legs, and enforced per leg.
-    minInvestment: 2_500_000n,
+    minInvestment: forge.minInvestment ?? 2_500_000n,
     maxPerCall: forge.maxPerCall ?? 1_000_000_000n,
     maxRolling30d: forge.maxRolling30d ?? 31_000_000_000n,
     enabled: forge.enabled ?? true,
@@ -396,6 +400,80 @@ describe("investPolicyFlow", () => {
     expect(shown).toHaveLength(1);
     expect(toHex(h.signWithPension.mock.calls[0]![0])).toBe(toHex(await builtTx(h, 0)));
     expect(h.steps).toEqual(["preparing", "approve_pension", "sending", "confirming", "done"]);
+  });
+
+  /**
+   * THE FOUR FIELDS THE OWNER ASKED FOR, IN THE ONE SHAPE THE ROUTE TAKES.
+   * route.test.ts pins what the SERVER accepts; this pins what the web SENDS,
+   * so the two cannot drift apart without one of them going red.
+   */
+  it("sends the minimum and the caps as decimal strings of base units, the weights BY MINT, and the venue as a name — never a program id", async () => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () =>
+      ok(policyAnswer(h.pensionKey, { maxPerCall: 10_000_000n, maxRolling30d: 50_000_000n, minInvestment: 1_000_000n, weights: [7_000, 3_000] })),
+    );
+    const result = await investPolicyFlow(h.createDeps, {
+      pensionKey: h.pensionKey,
+      maxPerCall: 10_000_000n,
+      maxRolling30d: 50_000_000n,
+      minInvestment: 1_000_000n,
+      weights: new Map([
+        [SPYX_MINT, 7_000],
+        [ANTHROPIC_MINT, 3_000],
+      ]),
+      venue: "raydium-clmm",
+    });
+    expect(result.ok).toBe(true);
+    const sent = h.build.mock.calls[0]![0];
+    expect(sent).toEqual({
+      action: "investPolicy",
+      owner: h.pensionKey,
+      maxPerCall: "10000000",
+      maxRolling30d: "50000000",
+      minInvestment: "1000000",
+      weights: [
+        { mint: SPYX_MINT, weightBps: 7_000 },
+        { mint: ANTHROPIC_MINT, weightBps: 3_000 },
+      ],
+      venue: "raydium-clmm",
+    });
+    // EVERY AMOUNT IS A STRING, so nothing can arrive through a lossy double,
+    // and the venue is a NAME: the program id never leaves this process.
+    for (const key of ["maxPerCall", "maxRolling30d", "minInvestment"] as const) expect(typeof sent[key]).toBe("string");
+    expect(JSON.stringify(sent)).not.toContain(RAYDIUM_CLMM);
+  });
+
+  it("refuses to sign a build whose basket, minimum or venue is not the one asked for", async () => {
+    // A BASKET THE OWNER DID NOT CHOOSE. The bytes carry equal halves while the
+    // request asked for 70/30: the shares would silently drift onto a different
+    // basket, and the sum is 10,000 either way so nothing downstream complains.
+    const drifted = harness();
+    drifted.build.mockImplementationOnce(async () => ok(policyAnswer(drifted.pensionKey, { weights: [5_000, 5_000] })));
+    const wrongBasket = await investPolicyFlow(drifted.createDeps, {
+      pensionKey: drifted.pensionKey,
+      weights: new Map([
+        [SPYX_MINT, 7_000],
+        [ANTHROPIC_MINT, 3_000],
+      ]),
+    });
+    expect(wrongBasket.ok).toBe(false);
+    expect(drifted.signWithPension).not.toHaveBeenCalled();
+
+    // A MINIMUM THE OWNER DID NOT CHOOSE.
+    const minimum = harness();
+    minimum.build.mockImplementationOnce(async () => ok(policyAnswer(minimum.pensionKey, { minInvestment: 2_500_000n })));
+    const wrongMinimum = await investPolicyFlow(minimum.createDeps, { pensionKey: minimum.pensionKey, minInvestment: 1_000_000n });
+    expect(wrongMinimum.ok).toBe(false);
+    expect(minimum.signWithPension).not.toHaveBeenCalled();
+
+    // A VENUE THIS APP CANNOT CHECK THE BYTES OF is refused before anything is
+    // built at all: signing it would mean trusting the server about which
+    // program the vault will CPI into.
+    const unknown = harness();
+    const wrongVenue = await investPolicyFlow(unknown.createDeps, { pensionKey: unknown.pensionKey, venue: "orca-whirlpool" });
+    expect(wrongVenue.ok).toBe(false);
+    expect(unknown.build).not.toHaveBeenCalled();
+    expect(unknown.signWithPension).not.toHaveBeenCalled();
   });
 
   it("pausing sends enabled false and no caps, and expects the product's caps with no token account to create", async () => {
