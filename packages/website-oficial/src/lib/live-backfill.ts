@@ -52,10 +52,22 @@ const positive = (text: string | null | undefined): boolean => (rawFrom(text) ??
  * Either witness is enough: the vault's lifetimeSaved, which only ever moves on
  * a settlement, or a link's settlement nonce, which counts them. A nonce nobody
  * could read is not a zero, so it simply does not vote.
+ *
+ * AND THE LINK HAS TO BE THIS VAULT'S. A Privy wallet seated in an OLDER vault
+ * is read here with status "other_vault" and its own nonce (readers.ts), and
+ * re-seating one is a thing this app does. Counting that nonce would send every
+ * mount of a brand-new vault paging back through two pages — up to 32 of the
+ * client's 60 read tokens a minute, on a read path already spending ~21 — for a
+ * settlement that cannot be in this vault's history at all. live-model.ts
+ * scopes its own claim the same way (`linkStatus === "this_vault"`), so the
+ * screen said "none yet" while the fetch went looking anyway.
+ *
+ * `links.items` needs no such filter: that list is read by a memcmp on the
+ * vault field, so every link in it is this vault's by construction.
  */
 export function chainSaysSettled(snapshot: LiveSnapshotJson): boolean {
   if (positive(snapshot.vault.state?.lifetimeSaved)) return true;
-  if (snapshot.wallets.some((wallet) => positive(wallet.link.settlementNonce))) return true;
+  if (snapshot.wallets.some((wallet) => wallet.link.status === "this_vault" && positive(wallet.link.settlementNonce))) return true;
   return (snapshot.links?.items ?? []).some((link) => positive(link.settlementNonce));
 }
 

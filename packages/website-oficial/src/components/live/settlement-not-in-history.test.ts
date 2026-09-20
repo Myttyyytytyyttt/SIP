@@ -22,7 +22,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
 import type { LiveDashboard, LiveEntryJson, LiveSnapshotJson, VaultEventJson } from "@/lib/live-types";
 
-import { NOW_MS, WALLET_A, liveActivity, liveDashboard, liveEntry, liveSnapshot, seconds, signature } from "../../../test/fixtures/live-dashboard";
+import { NOW_MS, WALLET_A, liveActivity, liveDashboard, liveEntry, liveSnapshot, seconds, settledEvent, signature } from "../../../test/fixtures/live-dashboard";
 
 const UPKEEP = { kind: "upkeep" } as VaultEventJson;
 
@@ -95,6 +95,26 @@ describe("a settlement the state records and the loaded history does not hold", 
     const html = renderToStaticMarkup(createElement(LiveSavedChart, { points: null, complete: false, settledOutsideHistory: true }));
     expect(html).not.toContain(LIVE_COPY.chartEmpty);
     expect(html).toContain(LIVE_COPY.chartOutsideHistory);
+  });
+});
+
+describe("a settlement that landed between the snapshot and the page", () => {
+  it("is not announced as missing while the feed is listing it", () => {
+    // The hook reads the snapshot first and the activity page second, so a
+    // settle in between is always newer than snapshot.slot. The model leaves it
+    // out of the curve's arithmetic — rightly, lifetimeSaved does not include
+    // it yet — and the card used to take that as "no settlement here" and print
+    // it over the row.
+    const justNow = liveEntry(signature(99), seconds(NOW_MS - 30_000), [settledEvent("36600000")], 99_999);
+    const data = liveDashboard({ activity: liveActivity([justNow, ...UPKEEP_PAGE], { nextBefore: signature(16) }) });
+
+    expect(data.stats.settledOutsideHistory).toBe(false);
+    expect(data.stats.lastSettlementAt).not.toBeNull();
+
+    const html = card(data);
+    expect(html).not.toContain(STATS_COPY.lastSettlementNever);
+    expect(html).not.toContain(STATS_COPY.lastSettlementOutside);
+    expect(html).not.toContain(LIVE_COPY.chartFlat);
   });
 });
 

@@ -208,6 +208,60 @@ describe("what counts as the state saying a settlement exists", () => {
     expect(chainSaysSettled(withVault("0", "0"))).toBe(false);
     expect(chainSaysSettled(withVault("0", null))).toBe(false);
   });
+
+  it("NOT a nonce from a wallet still seated in ANOTHER vault", () => {
+    // What commit 0e3c95f is about: a Privy wallet whose TradingLink names an
+    // older vault is read with status "other_vault" and its own nonce
+    // (readers.ts:952). On a NEW vault that has never settled, counting it sent
+    // every mount paging back two pages — up to 32 of the client's 60 read
+    // tokens a minute — for a row that cannot be in this vault's history.
+    const snapshot = withVault("0", "3");
+    const elsewhere: LiveSnapshotJson = {
+      ...snapshot,
+      wallets: [{ ...snapshot.wallets[0]!, link: { ...snapshot.wallets[0]!.link, status: "other_vault", vault: "AnotherVaultP1aceho1der111111111111111111" } }],
+    };
+
+    expect(chainSaysSettled(elsewhere)).toBe(false);
+    expect(
+      shouldBackfill({ chainSettled: chainSaysSettled(elsewhere), loadedHasSettlement: false, cursor: signature(16), manualBusy: false, rounds: 0, done: false }),
+    ).toBe(false);
+  });
+
+  it("decides it the same way the SCREEN does, so the claim and the fetch cannot disagree", () => {
+    // live-model.ts scopes its own "the state says settled" to this_vault
+    // links, and said "none yet" while the fetch went looking anyway.
+    const snapshot = withVault("0", "3");
+    const elsewhere: LiveSnapshotJson = {
+      ...snapshot,
+      wallets: [{ ...snapshot.wallets[0]!, link: { ...snapshot.wallets[0]!.link, status: "other_vault", vault: "AnotherVaultP1aceho1der111111111111111111" } }],
+    };
+    const view = toLiveDashboard({ snapshot: elsewhere, activity: liveActivity(HEAD.entries, { nextBefore: signature(16) }), privyWallets: [WALLET_A] });
+
+    expect(view.stats.settledOutsideHistory).toBe(false);
+    expect(chainSaysSettled(elsewhere)).toBe(false);
+
+    // And where the state DOES say so, both say so, over the same page.
+    const settled = liveSnapshot();
+    const claimed = toLiveDashboard({ snapshot: settled, activity: liveActivity(HEAD.entries, { nextBefore: signature(16) }), privyWallets: [WALLET_A] });
+    expect(claimed.stats.settledOutsideHistory).toBe(true);
+    expect(chainSaysSettled(settled)).toBe(true);
+  });
+
+  it("agrees with the screen about what the LOADED history holds, slot filter and all", () => {
+    // The model drops a settlement newer than the snapshot's slot from the
+    // curve's arithmetic; neither its claim nor this decision may follow it
+    // there, or the backfill goes looking for a row already on the screen.
+    const newer = liveEntry(signature(2), seconds(NOW_MS - 30_000), [settledEvent("36600000")], 99_999);
+    const page = liveActivity([newer, ...HEAD.entries], { nextBefore: signature(16) });
+    const view = toLiveDashboard({ snapshot: liveSnapshot(), activity: page, privyWallets: [WALLET_A] });
+
+    expect(holdsSettlement(page.entries)).toBe(true);
+    expect(view.stats.settledOutsideHistory).toBe(false);
+    expect(view.stats.loadedSettlements).toBe(0); // the slot filter, still doing its job
+    expect(
+      shouldBackfill({ chainSettled: true, loadedHasSettlement: holdsSettlement(page.entries), cursor: signature(16), manualBusy: false, rounds: 0, done: false }),
+    ).toBe(false);
+  });
 });
 
 // ── and it has to be WIRED, which no unit of it can prove on its own ──────────

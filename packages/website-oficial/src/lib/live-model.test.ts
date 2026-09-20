@@ -241,6 +241,28 @@ describe("the chart is worked backwards from the vault's own total", () => {
     expect(view.chart!.map((point) => point.totalLamports)).toEqual([40_000_000n, 60_000_000n, 60_000_000n]);
   });
 
+  it("still SAYS it holds that settlement, because the feed is listing it", () => {
+    // The same row, from the other side. The hook reads the snapshot first and
+    // the activity page second (use-live-dashboard.ts), so a settle landing
+    // between the two is ALWAYS newer than snapshot.slot: it is left out of the
+    // curve's arithmetic — which is what keeps the line under lifetimeSaved —
+    // while rowsOf lists it with no slot filter at all.
+    //
+    // Deciding "not in loaded history" from the filtered list put that claim,
+    // and "No settlement landed in this window", directly above a settlement
+    // row seconds old, until the next poll moved the snapshot's slot past it.
+    const newer = activity([entry("sigNew", T2, [settledEvent("40000000")], 9_999), entry("sig1", T1, [{ kind: "upkeep" } as VaultEventJson])]);
+    const view = model(snapshot(), newer);
+
+    expect(view.rows.filter((row) => row.event.kind === "settled")).toHaveLength(1);
+    expect(view.stats.settledOutsideHistory).toBe(false);
+    // And the tile says when, from the row the feed is showing.
+    expect(view.stats.lastSettlementAt).toBe(new Date(T2 * 1_000).toISOString());
+    // The arithmetic is untouched: the curve still cannot rise above the total.
+    expect(view.stats.loadedSettlements).toBe(0);
+    expect(view.chart!.map((point) => point.totalLamports)).toEqual([60_000_000n, 60_000_000n]);
+  });
+
   it("draws NO chart when the loaded settlements exceed the vault's own total: a curve cannot start below zero", () => {
     // An RPC answer without context.slot leaves the snapshot's slot null, which
     // turns the coverage guard off — so 0.1 SOL of loaded settlements sit over

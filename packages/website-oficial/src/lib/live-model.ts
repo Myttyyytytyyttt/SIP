@@ -522,14 +522,33 @@ function statsOf(
   // because one positive nonce is enough.
   const stateSettled = (lifetimeSaved ?? 0n) > 0n || lifetimeNonces.some((nonce) => nonce !== null && nonce > 0n);
 
+  // WHAT THE FEED IS LISTING, which is not the same list as the one the curve
+  // is drawn from. `settlements` has had the snapshot's slot filter applied —
+  // rightly, because the curve is worked backwards from a lifetimeSaved that
+  // does not include a settlement newer than the snapshot. rowsOf applies no
+  // such filter, so that settlement IS on the screen.
+  //
+  // The two differ by one case, and it is not a rare one: the hook reads the
+  // snapshot first and the activity page second (use-live-dashboard.ts), so a
+  // settle landing between the two reads is ALWAYS newer than snapshot.slot.
+  // Deciding these two fields from the filtered list printed "Last settlement —
+  // none yet" and "No settlement landed in this window" directly above a
+  // settlement row a few seconds old, and cleared only on the next poll.
+  //
+  // So the two statements ABOUT THE HISTORY are made from the history: whether
+  // the screen holds a settlement at all, and when the newest one it holds
+  // landed. It is the same test live-backfill.ts's holdsSettlement makes before
+  // paging back for one, and live-model.test.ts pins that they agree.
+  const shown = settlementsOf(activity, null);
+
   return {
     settlementsLifetime,
-    settledOutsideHistory: stateSettled && settlements.length === 0,
+    settledOutsideHistory: stateSettled && shown.length === 0,
     loadedSettlements: settlements.length,
     loadedSavedLamports: paid.reduce((total, amount) => total + amount, 0n),
     biggestPaid: paid.length === 0 ? null : paid.reduce((most, amount) => (amount > most ? amount : most), 0n),
     cappedCount: settlements.filter((entry) => entry.capped).length,
-    lastSettlementAt: settlements[0]?.at ?? null,
+    lastSettlementAt: shown[0]?.at ?? null,
     savedTodayLamports: sumSince(startOfToday),
     savedThisWeekLamports: sumSince(nowMs - 7 * DAY_MS),
     investmentsLoaded: rows.filter((row) => row.event.kind === "invested").length,
