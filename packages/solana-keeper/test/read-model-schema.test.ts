@@ -49,6 +49,11 @@ describe("the settlement mirror's shape", () => {
     // rebuilt history into one enormous day.
     expect(backfill).toContain("at,");
     expect(backfill).toContain("tx.blockTime");
+    // And the LIVE path passes it too, from the receipt it already reads: a row
+    // written as it happens and the same row rebuilt from the chain must carry
+    // the same date, or a rebuild could move somebody between days.
+    expect(keeper).toContain("at: new Date(settle.blockTimeMs)");
+    expect(source("src/settle-tick.ts")).toContain("blockTimeMs = receipt.blockTime * 1_000;");
     // `at` is absent from the ON CONFLICT SET list on purpose.
     const onConflict = readModel.slice(readModel.indexOf("ON CONFLICT (wallet_addr, nonce) DO UPDATE"), readModel.indexOf("WHERE ${READ_MODEL_SCHEMA}.settlement_event.tx_ref"));
     expect(onConflict).not.toContain("at =");
