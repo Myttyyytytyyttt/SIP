@@ -56,6 +56,7 @@ import {
   transferFeeOn,
   type TransferFeeRate,
 } from "./jupiter-route";
+import { minOutVerdict } from "./jupiter-sim";
 
 const LOCAL = join(__dirname, ".local");
 const RPC = "http://127.0.0.1:8899";
@@ -64,6 +65,8 @@ const USDC = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 /** Anchor error codes this proof asserts on, from idl/sip_vault.json. */
 const ERR = { WrongVenue: 6015, FloorTooLow: 6019, FillTooSmall: 6020, Overspent: 6021, DisallowedVaultAccount: 6034 };
+/** Jupiter's own slippage refusal, 0x1771 — raised INSIDE the CPI, before our guards. */
+const JUPITER_SLIPPAGE = 6001;
 
 interface RouteFile {
   readonly target: { readonly name: string; readonly mint: string };
@@ -78,6 +81,8 @@ interface RouteFile {
   readonly remainingAccounts: readonly { readonly pubkey: string; readonly isSigner: boolean; readonly isWritable: boolean }[];
   readonly quotedOut: string;
   readonly venueThreshold: string;
+  readonly slippageBps: number;
+  readonly dexes: readonly string[];
   readonly mainnetTransferFeeBps: number;
   readonly vault: string;
   readonly vaultIn: string;
@@ -273,8 +278,30 @@ async function main(): Promise<void> {
   // fill rather than against a number we hoped for.
   const probe = await run({ name: "probe", minOut: probeMinOut, expect: "ok", why: "" });
   if (probe.sim.value.err !== null) {
+    const probeErr = probe.sim.value.err;
+    const probeCustom =
+      typeof probeErr === "object" && probeErr !== null && "InstructionError" in probeErr
+        ? ((probeErr as { InstructionError: [number, { Custom?: number }] }).InstructionError[1] ?? {}).Custom
+        : undefined;
+    const jupiterSaidNo = (probe.sim.value.logs ?? []).some((l) => /JUP6Lkb\S* failed: custom program error: 0x1771/.test(l));
+    if (probeCustom === JUPITER_SLIPPAGE && jupiterSaidNo) {
+      // NOT A BROKEN CLONE — A MEASUREMENT, and one this harness exists to
+      // take. On a GROSS-quoting venue Jupiter checks its own threshold
+      // against what the destination is CREDITED, which is net of the mint's
+      // transfer fee. So with slippage at or under that fee the CPI reverts
+      // before invest()'s fill guard is reached, whatever min_out was — the
+      // probe's floor here is deliberately slack and still could not save it.
+      console.log(`\nTHE VENUE REFUSED FIRST, and that is the finding:`);
+      console.log(`  Program JUP6Lkb... failed: custom program error: 0x1771  (${JUPITER_SLIPPAGE}, Jupiter's own slippage)`);
+      console.log(`  slippage ${route.slippageBps} bps against a local transfer fee of ${local.basisPoints} bps.`);
+      console.log(`  quoted out ${quotedOut}, threshold ${threshold}: the credit lands under the threshold because`);
+      console.log(`  Jupiter FLOORS its deduction and Token-2022 CEILS its fee, so equal rates are not a tie.`);
+      console.log(`  invest()'s FillTooSmall was NEVER REACHED — min_out could not have changed this outcome.`);
+      console.log(`  Re-run with --slippage above ${local.basisPoints} to measure the guards themselves.`);
+      process.exit(2);
+    }
     console.error(`\n✗ the cloned route does not execute at all:`);
-    console.error(`  err: ${JSON.stringify(probe.sim.value.err)}`);
+    console.error(`  err: ${JSON.stringify(probeErr)}`);
     (probe.sim.value.logs ?? []).slice(-25).forEach((l) => console.error(`  ${l}`));
     process.exit(1);
   }
@@ -325,6 +352,16 @@ async function main(): Promise<void> {
       why: "venue_program must equal the owner-signed policy.venue_program" },
     { name: "guard 4  GROSS min_out", minOut: grossMinOut, expect: ERR.FillTooSmall,
       why: `min_out from ${grossSource} is a number about money the vault never receives` },
+    // THE CLAIM THIS HARNESS WAS SENT BACK TO CHECK. The header of
+    // jupiter-route.ts used to say min_out = otherAmountThreshold reverts with
+    // FillTooSmall. The expectation here is not hardcoded either way: it is
+    // whatever minOutVerdict predicts from the fill just MEASURED, so a run
+    // that disagrees with the model fails instead of confirming it.
+    { name: "min_out = otherAmountThreshold", minOut: threshold,
+      expect: minOutVerdict({ credit, venueThreshold: threshold }, threshold) === "accepted" ? "ok" : ERR.FillTooSmall,
+      why: threshold > credit
+        ? "the venue's own threshold is above this fill's credit"
+        : "the venue's own threshold is BELOW this fill's credit, so nothing fires — it does not revert" },
     { name: "guard 4  NET min_out", minOut: safeMinOut, expect: "ok",
       why: "min_out = threshold - fee(threshold), the largest fill guard that cannot fire on an honest fill" },
     // THE DELTA, PINNED TO A RAW UNIT. The program never reports `received`,

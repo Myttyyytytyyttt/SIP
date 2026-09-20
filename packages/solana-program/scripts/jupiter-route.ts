@@ -30,17 +30,47 @@
 // which is computed from the quote's own slippageBps.
 //
 // (4) AND THE ONE THE GUARDS CANNOT SEE. Two of the three legs are Token-2022
-// mints with a transfer fee (50 bps now, 100 bps from epoch 1039, maximumFee
-// u64::MAX). The credit a destination account receives is NET of that fee, so
-// the delta the program measures is NET — while Jupiter's outAmount and
-// otherAmountThreshold are GROSS. A min_out copied from the threshold is a
-// number about different money. Worse, the two roundings go opposite ways:
-// Jupiter FLOORS its slippage deduction (threshold = out - floor(out*bps/1e4))
-// and Token-2022 CEILS its fee (net = out - ceil(out*bps/1e4)), so at epoch
-// 1039, where both rates are 100 bps, the net is the threshold MINUS ONE RAW
-// UNIT even at zero slippage. min_out = otherAmountThreshold does not merely
-// have no margin; it reverts. Hence netOfVenueThreshold below, which is the
-// largest min_out the venue's own guarantee actually covers.
+// mints with a transfer fee (100 bps since epoch 1039, 50 before it,
+// maximumFee u64::MAX). The credit a destination account receives is NET of
+// that fee, so the delta the program measures is NET — while on a
+// gross-quoting venue Jupiter's outAmount and otherAmountThreshold are GROSS.
+// A min_out copied from either is then a number about different money. The two
+// roundings also go opposite ways: Jupiter FLOORS its slippage deduction
+// (threshold = out - floor(out*bps/1e4)) and Token-2022 CEILS its fee
+// (net = out - ceil(out*bps/1e4)), so where the two rates are equal the net
+// lands on the threshold MINUS ONE RAW UNIT.
+//
+// WHICH GUARD ACTUALLY FIRES, MEASURED — because an earlier version of this
+// header asserted the wrong one. Run on a local validator with mainnet state
+// cloned for a ONE-HOP Manifest route (a gross-quoting venue: gross drift
+// 0.000 bps, credit drift -50.000 bps), USDC -> FIGUREAI, 5 USDC, local fee
+// 50 bps, on 2026-09-20:
+//
+//   slippage 100 bps (above the fee)
+//     quoted out 27,147,537   threshold 26,876,062   CREDIT 27,011,799
+//     min_out = otherAmountThreshold is BELOW the credit -> ACCEPTED.
+//     min_out = outAmount (27,147,537) is a whole fee above it
+//       -> FillTooSmall 6020, ours, inside invest().
+//     min_out = netOfVenueThreshold (26,741,681) -> accepted, margin 270,118.
+//
+//   slippage 50 bps (equal to the fee)
+//     threshold 27,011,800, credit 27,011,799 — the off-by-one above — and
+//     the transaction never reaches invest()'s fill guard at all:
+//       Program JUP6Lkb... failed: custom program error: 0x1771
+//     JUPITER's own 6001 inside the CPI, with our min_out (a deliberately
+//     slack probe floor) playing no part.
+//
+// SO min_out = otherAmountThreshold DOES NOT REVERT WITH FillTooSmall, and
+// saying it did was wrong in both directions: above the fee it is simply
+// accepted, and at or below it Jupiter has already refused, because Jupiter
+// checks its own threshold against the CREDITED amount. What does revert with
+// FillTooSmall is a min_out taken from outAmount on a gross-quoting venue.
+//
+// netOfVenueThreshold is still the number to hand invest(), and for a reason
+// that does not depend on any of this: it is below the credit under BOTH
+// quoting bases by OUR arithmetic, so it stays right even if Jupiter's
+// internal check stops being what it is today. It is a floor we can prove,
+// not one we are borrowing.
 //
 // (5) AND THE CONSEQUENCE THAT BITES FIRST, MEASURED AT THE EPOCH BOUNDARY.
 // Jupiter quotes gross on some venues but checks its OWN threshold against what
@@ -197,8 +227,10 @@ export function transferFeeForEpoch(
  * calculate_fee: the basis-point product rounded UP, capped at maximumFee.
  *
  * THE ROUNDING IS THE POINT. Jupiter rounds its own slippage deduction down.
- * One up, one down, same 100 bps — and the net lands a raw unit below the
- * venue's threshold.
+ * One up, one down, equal rates — and the net lands a raw unit below the
+ * venue's threshold. Measured on a cloned gross-quoting route at slippage 50
+ * against a 50 bps fee: threshold 27,011,800, credit 27,011,799, and Jupiter
+ * reverted the CPI with 0x1771 before invest()'s guard was reached.
  */
 export function transferFeeOn(gross: bigint, fee: TransferFeeRate): bigint {
   if (fee.basisPoints === 0 || gross <= 0n) return 0n;
@@ -326,6 +358,15 @@ export async function fetchJupiterQuote(params: {
    * otherInstructions that we had dropped.
    */
   readonly excludeDexes?: readonly string[];
+  /**
+   * The ONLY venues the route may use, by Jupiter's own label.
+   *
+   * NOT FOR PRODUCTION ROUTING — for experiments whose subject is the venue.
+   * Whether a quote is gross or net belongs to the AMM that makes the final
+   * transfer, so an experiment about that basis has to be able to say which
+   * AMM, instead of re-quoting until Jupiter happens to pick one.
+   */
+  readonly dexes?: readonly string[];
 }): Promise<JupiterQuote> {
   const query = new URLSearchParams({
     inputMint: params.inputMint.toBase58(),
@@ -341,6 +382,7 @@ export async function fetchJupiterQuote(params: {
     ...(params.excludeDexes !== undefined && params.excludeDexes.length > 0
       ? { excludeDexes: params.excludeDexes.join(",") }
       : {}),
+    ...(params.dexes !== undefined && params.dexes.length > 0 ? { dexes: params.dexes.join(",") } : {}),
   });
   return (await getJson(`${LITE_API}/quote?${query.toString()}`)) as JupiterQuote;
 }
@@ -436,9 +478,15 @@ export interface RouteOutput {
   /** What the vault's delta reads if the venue fills exactly the quote. */
   readonly netOfQuotedOut: bigint;
   /**
-   * What the vault's delta reads in the venue's OWN worst case — and therefore
-   * the largest min_out that cannot revert with FillTooSmall. This is the
-   * number to hand invest(); `venueThreshold` is not.
+   * What the vault's delta reads in the venue's OWN worst case, under the
+   * WORSE of the two quoting bases — and therefore a min_out that cannot fire
+   * on a fill the venue accepted, proved by our own arithmetic rather than by
+   * Jupiter's internal check. This is the number to hand invest().
+   *
+   * `venueThreshold` is not, though not for the reason this file used to give:
+   * measured, min_out = venueThreshold does not revert with FillTooSmall (see
+   * the header). It is simply a floor we would be borrowing from Jupiter
+   * instead of one we can state.
    */
   readonly netOfVenueThreshold: bigint;
 }
@@ -937,6 +985,8 @@ export interface BuildJupiterRouteParams {
   readonly onlyDirectRoutes?: boolean;
   /** Venues to keep out of the route; see fetchJupiterQuote. */
   readonly excludeDexes?: readonly string[];
+  /** The only venues allowed, for experiments about the venue; see fetchJupiterQuote. */
+  readonly dexes?: readonly string[];
   /**
    * Take the transfer fee from the rate that may be in force when the
    * transaction LANDS rather than the one in force now. Default true: the
@@ -972,6 +1022,7 @@ export async function buildJupiterRoute(
     slippageBps: params.slippageBps,
     ...(params.onlyDirectRoutes === true ? { onlyDirectRoutes: true } : {}),
     ...(params.excludeDexes === undefined ? {} : { excludeDexes: params.excludeDexes }),
+    ...(params.dexes === undefined ? {} : { dexes: params.dexes }),
   });
   const quotedAtMs = Date.now();
   // BEFORE THE QUOTE IS USED FOR ANYTHING — including being posted straight

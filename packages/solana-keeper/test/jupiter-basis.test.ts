@@ -23,7 +23,7 @@
 // cleanly and runs in a gate that already exists.
 
 import { describe, expect, it } from "vitest";
-import { classify, safeMinOut, type LegMeasurement } from "@sip/solana-program/jupiter-sim";
+import { classify, minOutVerdict, safeMinOut, type LegMeasurement } from "@sip/solana-program/jupiter-sim";
 import { netOfTransferFee, transferFeeOn, type TransferFeeRate } from "@sip/solana-program/jupiter-route";
 
 /** The two rates the PreStocks mints actually carry, read from their config. */
@@ -195,16 +195,18 @@ describe("the min_out a fill cannot reject", () => {
     expect(threshold).toBeGreaterThanOrEqual(minOut);
   });
 
-  it("REVERTS if min_out is taken from the gross threshold — the whole reason for this task", () => {
+  it("is what the venue's worst allowed fill leaves, if that fill were quoted gross", () => {
+    // ARITHMETIC ONLY, AND SAYING SO. On the gross basis the venue's own worst
+    // allowed fill leaves the vault threshold - fee(threshold), which is below
+    // the threshold — and an earlier version of this file read that gap as
+    // "min_out = threshold reverts with FillTooSmall". It does not; see the
+    // measured cases below. What the gap actually shows is that safeMinOut
+    // clears that worst fill, which is the only thing it was ever computing.
     const threshold = 236_646_472n;
-    // What the vault would actually measure on the venue's worst allowed fill.
-    const measured = worstCreditIfGross(threshold, FEE_100);
-    expect(measured).toBeLessThan(threshold);
-    // invest() requires received >= min_out; this is FillTooSmall.
-    expect(measured >= threshold).toBe(false);
-    expect(threshold - measured).toBe(2_366_465n);
-    // And the rule this file exists to defend does NOT reject that same fill.
-    expect(measured).toBeGreaterThanOrEqual(safeMinOut(threshold, FEE_100));
+    const worst = worstCreditIfGross(threshold, FEE_100);
+    expect(worst).toBeLessThan(threshold);
+    expect(threshold - worst).toBe(2_366_465n);
+    expect(worst).toBeGreaterThanOrEqual(safeMinOut(threshold, FEE_100));
   });
 
   it("is one raw unit below the threshold even at ZERO slippage, once the rates match", () => {
@@ -228,6 +230,65 @@ describe("the min_out a fill cannot reject", () => {
     expect(safeMinOut(threshold, FEE_50)).toBe(1_355_304_669n);
     expect(safeMinOut(threshold, FEE_100)).toBe(1_348_494_093n);
     expect(safeMinOut(threshold, FEE_50)).toBeGreaterThan(safeMinOut(threshold, FEE_100));
+  });
+});
+
+describe("which guard a min_out actually runs into, measured on a cloned gross venue", () => {
+  // THE CLAIM THIS REPLACES. The header of jupiter-route.ts, and a test here,
+  // said flatly that min_out = otherAmountThreshold reverts with FillTooSmall
+  // 6020. Both halves were then run on a local validator with mainnet state
+  // cloned for a ONE-HOP Manifest route — a gross-quoting venue, confirmed in
+  // the run itself by gross drift 0.000 bps against credit drift -50.000 —
+  // USDC -> FIGUREAI, 5 USDC, local epoch 0 so the mint charges its older
+  // 50 bps, on 2026-09-20. Neither half supports the claim.
+
+  /** slippage 100 bps: the whole run, as the harness printed it. */
+  const ABOVE_FEE = { quotedOut: 27_147_537n, venueThreshold: 26_876_062n, credit: 27_011_799n, withheld: 135_738n };
+  /** slippage 50 bps: the same route, the tolerance set at the fee. */
+  const AT_FEE = { quotedOut: 27_147_537n, venueThreshold: 27_011_800n, credit: 27_011_799n };
+
+  it("accepts min_out = otherAmountThreshold when the slippage is above the fee", () => {
+    // The threshold sits a whole fee BELOW the credit here. There is nothing
+    // for FillTooSmall to fire on.
+    expect(ABOVE_FEE.venueThreshold).toBeLessThan(ABOVE_FEE.credit);
+    expect(minOutVerdict(ABOVE_FEE, ABOVE_FEE.venueThreshold)).toBe("accepted");
+    // And the gross decomposition, so the venue's basis is not taken on trust.
+    expect(ABOVE_FEE.credit + ABOVE_FEE.withheld).toBe(ABOVE_FEE.quotedOut);
+  });
+
+  it("names the quote's OUTPUT as the min_out that really reverts with FillTooSmall", () => {
+    // Measured: min_out 27,147,537 against a credit of 27,011,799 -> 6020.
+    // This is the mistake worth guarding — believing the destination is
+    // credited the number the quote reports.
+    expect(minOutVerdict(ABOVE_FEE, ABOVE_FEE.quotedOut)).toBe("refused-by-invest");
+    expect(ABOVE_FEE.quotedOut - ABOVE_FEE.credit).toBe(135_738n);
+    // One raw unit above the credit is the same refusal; the delta is pinned.
+    expect(minOutVerdict(ABOVE_FEE, ABOVE_FEE.credit + 1n)).toBe("refused-by-invest");
+    expect(minOutVerdict(ABOVE_FEE, ABOVE_FEE.credit)).toBe("accepted");
+  });
+
+  it("gives the venue the first word when the credit falls under its threshold", () => {
+    // slippage == fee: Jupiter's floor floors, Token-2022's fee ceils, and the
+    // credit lands one raw unit under the threshold. The run reverted with
+    //   Program JUP6Lkb... failed: custom program error: 0x1771
+    // inside the CPI, with a deliberately slack probe min_out — so invest()'s
+    // fill guard was never reached, and no min_out could have changed it.
+    expect(AT_FEE.credit).toBe(AT_FEE.venueThreshold - 1n);
+    for (const candidate of [0n, AT_FEE.venueThreshold, AT_FEE.quotedOut, safeMinOut(AT_FEE.venueThreshold, FEE_50)]) {
+      expect(minOutVerdict(AT_FEE, candidate)).toBe("refused-by-venue");
+    }
+  });
+
+  it("leaves safeMinOut accepted wherever the venue let the fill through", () => {
+    // The rule the two files defend, against the measured fill rather than
+    // against an argument: it clears the credit on the gross venue above, and
+    // it cleared it on the net one this branch measured first.
+    expect(minOutVerdict(ABOVE_FEE, safeMinOut(ABOVE_FEE.venueThreshold, FEE_50))).toBe("accepted");
+    expect(safeMinOut(ABOVE_FEE.venueThreshold, FEE_50)).toBe(26_741_681n);
+    // FIGUREAI through Raydium CLMM, the NET venue, from the first fork run.
+    const net = { venueThreshold: 27_334_444n, credit: 27_874_454n };
+    expect(minOutVerdict(net, net.venueThreshold)).toBe("accepted");
+    expect(minOutVerdict(net, safeMinOut(net.venueThreshold, FEE_50))).toBe("accepted");
   });
 });
 

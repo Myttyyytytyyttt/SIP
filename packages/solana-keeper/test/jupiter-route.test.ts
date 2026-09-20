@@ -572,7 +572,7 @@ describe("vault-owned-ness is derived, not taken from the API's labels", () => {
   });
 });
 
-describe("the Token-2022 transfer fee, which is why a gross min_out reverts", () => {
+describe("the Token-2022 transfer fee, and where each min_out actually lands", () => {
   const config = { olderTransferFee: FEE_50, newerTransferFee: FEE_100 };
 
   it("picks the epoch's rate the way Token-2022 does, so 50 and 100 are never hardcoded", () => {
@@ -593,7 +593,7 @@ describe("the Token-2022 transfer fee, which is why a gross min_out reverts", ()
     expect(transferFeeOn(1_000_000n, { epoch: 0n, basisPoints: 100, maximumFee: 5n })).toBe(5n);
   });
 
-  it("puts the NET of the venue's own threshold one raw unit BELOW the threshold at 100 bps", () => {
+  it("puts the NET of the quote one raw unit BELOW the threshold once the rates match", () => {
     // The measured quote this whole task exists for: out 1,376,918,399,
     // threshold 1,363,149,216 at slippageBps 100.
     const quotedOut = 1_376_918_399n;
@@ -601,8 +601,11 @@ describe("the Token-2022 transfer fee, which is why a gross min_out reverts", ()
     expect(threshold).toBe(1_363_149_216n);
 
     // Jupiter FLOORS its slippage deduction; Token-2022 CEILS its fee. Same
-    // 100 bps, opposite rounding — so min_out = otherAmountThreshold does not
-    // merely have zero margin, it reverts with FillTooSmall at ZERO slippage.
+    // 100 bps, opposite rounding — so on a GROSS-quoting venue the credit
+    // lands a single raw unit under the venue's own threshold. That gap is
+    // where JUPITER refuses, not where our FillTooSmall does: measured on a
+    // cloned Manifest route at slippage 50 against a 50 bps fee, the CPI
+    // reverted with 0x1771 and invest()'s fill guard was never reached.
     const netOfQuote = netOfTransferFee(quotedOut, FEE_100);
     expect(netOfQuote).toBe(1_363_149_215n);
     expect(netOfQuote).toBe(threshold - 1n);
@@ -623,8 +626,11 @@ describe("the Token-2022 transfer fee, which is why a gross min_out reverts", ()
     expect(route.output.netOfQuotedOut).toBe(route.output.venueThreshold - 1n);
     // 3,221,704 - ceil(3,221,704 * 100/10_000) = 3,221,704 - 32,218.
     expect(route.output.netOfVenueThreshold).toBe(3_189_486n);
-    // A min_out taken from the GROSS threshold is above what the vault will be
-    // credited: that is the FillTooSmall this builder exists to prevent.
+    // The min_out that was MEASURED reverting with FillTooSmall 6020 is the
+    // one taken from the quote's OUTPUT on a gross-quoting venue — it is a
+    // whole fee above the credit. netOfVenueThreshold is below both, by our
+    // own arithmetic rather than by Jupiter's internal check.
+    expect(route.output.netOfQuotedOut).toBeLessThan(route.output.quotedOut);
     expect(route.output.venueThreshold).toBeGreaterThan(route.output.netOfVenueThreshold);
   });
 

@@ -273,6 +273,41 @@ export function safeMinOut(venueThreshold: bigint, fee: TransferFeeRate): bigint
   return netOfTransferFee(venueThreshold, fee);
 }
 
+/** What a candidate min_out runs into, and WHOSE guard says so. */
+export type MinOutVerdict = "accepted" | "refused-by-venue" | "refused-by-invest";
+
+/**
+ * Given a fill that was actually MEASURED, what happens to a candidate min_out
+ * — and in the order the chain applies the two guards.
+ *
+ * THIS EXISTS BECAUSE THE FILE USED TO CLAIM THE WRONG ONE. The header said
+ * flatly that min_out = otherAmountThreshold reverts with FillTooSmall. It
+ * does not, and both halves were measured on 2026-09-20 on a cloned one-hop
+ * Manifest route (gross-quoting), USDC -> FIGUREAI, local fee 50 bps:
+ *
+ *   * JUPITER FIRST, AND AGAINST THE CREDIT. Its threshold is checked inside
+ *     the CPI against what the destination is CREDITED, which is net. So when
+ *     the credit falls below otherAmountThreshold — at slippage 50 bps against
+ *     a 50 bps fee, credit 27,011,799 against threshold 27,011,800 — Jupiter
+ *     reverts with 0x1771 (6001) and invest()'s fill guard is never reached,
+ *     whatever min_out was. That is "refused-by-venue", and no min_out avoids
+ *     it.
+ *   * OTHERWISE OURS, AND ONLY ABOVE THE CREDIT. At slippage 100 bps the same
+ *     route credited 27,011,799 against a threshold of 26,876,062: min_out =
+ *     threshold was ACCEPTED. min_out = outAmount (27,147,537, a whole fee
+ *     higher) is what reverted with FillTooSmall 6020.
+ *
+ * So the mistake worth guarding is a min_out taken from the quote's OUTPUT on
+ * a gross-quoting venue, not one taken from its threshold.
+ */
+export function minOutVerdict(
+  measured: { readonly credit: bigint; readonly venueThreshold: bigint },
+  minOut: bigint,
+): MinOutVerdict {
+  if (measured.credit < measured.venueThreshold) return "refused-by-venue";
+  return minOut > measured.credit ? "refused-by-invest" : "accepted";
+}
+
 async function measureLeg(
   connection: Connection,
   args: Args,

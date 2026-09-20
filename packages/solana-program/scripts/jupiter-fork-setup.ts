@@ -59,7 +59,29 @@ const USDC = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 const TARGET = new PublicKey("PreZad18qfPtbxNpMtMuAuX2zVpvkEU8DnJx56faCWd");
 const TARGET_NAME = "FIGUREAI";
 const AMOUNT_IN = 5_000_000n; // 5 USDC
-const SLIPPAGE_BPS = 200;
+
+/**
+ * The two things the EXPERIMENT varies, taken from argv — not from the
+ * environment, so a run is reproducible from the command line that is printed
+ * with it:
+ *
+ *   --slippage <bps>   default 200
+ *   --dexes <a,b,...>  the only venues allowed; default, Jupiter picks
+ *
+ * WHY THE VENUE HAS TO BE PINNABLE. Whether a quote is gross or net belongs to
+ * the AMM that makes the final transfer, and Jupiter re-picks it per quote. A
+ * claim about a gross-quoting venue therefore cannot be tested by re-quoting
+ * until one turns up; it has to be asked for. Measured 2026-09-20:
+ * USDC -> FIGUREAI with `--dexes Manifest` is a ONE-HOP route on a
+ * gross-quoting venue, which is exactly the leg this harness can clone.
+ */
+function flag(name: string): string | null {
+  const at = process.argv.indexOf(`--${name}`);
+  return at === -1 ? null : process.argv[at + 1] ?? null;
+}
+const SLIPPAGE_BPS = Number(flag("slippage") ?? 200);
+const DEXES: readonly string[] = (flag("dexes") ?? "").split(",").filter((label) => label.length > 0);
+if (!Number.isInteger(SLIPPAGE_BPS) || SLIPPAGE_BPS < 0) throw new Error(`--slippage must be a whole number of bps`);
 
 /** Enough for several invests plus the deliberate failures, which spend nothing. */
 const USDC_FUND = 200_000_000n; // 200 USDC
@@ -123,7 +145,10 @@ async function main(): Promise<void> {
   const vaultIn = getAssociatedTokenAddressSync(USDC, vault, true, TOKEN_PROGRAM_ID);
   const vaultTarget = getAssociatedTokenAddressSync(TARGET, vault, true, TOKEN_2022_PROGRAM_ID);
 
-  console.log(`route: 5 USDC -> ${TARGET_NAME}, slippage ${SLIPPAGE_BPS} bps, via lite-api.jup.ag`);
+  console.log(
+    `route: 5 USDC -> ${TARGET_NAME}, slippage ${SLIPPAGE_BPS} bps, ` +
+      `${DEXES.length === 0 ? "venue picked by Jupiter" : `venue pinned to ${DEXES.join("/")}`}, via lite-api.jup.ag`,
+  );
   let route;
   try {
     route = await buildJupiterRoute(connection, {
@@ -142,6 +167,7 @@ async function main(): Promise<void> {
       // One hop or nothing: a multi-hop route needs lookup tables, and every
       // address they index would have to be cloned as well.
       onlyDirectRoutes: true,
+      ...(DEXES.length === 0 ? {} : { dexes: DEXES }),
     });
   } catch (error) {
     if (error instanceof JupiterRouteRefusal) {
@@ -205,6 +231,7 @@ async function main(): Promise<void> {
         requestedAmountIn: investAmountIn(route).toString(),
         instructionInAmount: route.amounts.inAmount.toString(),
         slippageBps: SLIPPAGE_BPS,
+        dexes: DEXES,
         hops: route.hops,
         labels: route.labels,
         venueProgram: route.venueProgram.toBase58(),
