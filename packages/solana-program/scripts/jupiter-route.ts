@@ -263,6 +263,18 @@ export async function fetchJupiterQuote(params: {
   readonly amountIn: bigint;
   readonly slippageBps: number;
   readonly onlyDirectRoutes?: boolean;
+  /**
+   * Venues to keep out of the route, by Jupiter's own label.
+   *
+   * NOT A PREFERENCE — A PRECONDITION. A venue that cannot execute in
+   * simulation cannot be used by this vault at all: the keeper's signer
+   * simulates before it signs, so such a route is refused upstairs, and if it
+   * ever were signed it would burn the transaction. Measured on 2026-09-20:
+   * every route through `Hadron` reverts with its own error 0x3c under
+   * simulateTransaction, at 5, 25 and 250 USD, on both PreStocks legs, at 400k
+   * and at 1.4M compute units.
+   */
+  readonly excludeDexes?: readonly string[];
 }): Promise<JupiterQuote> {
   const query = new URLSearchParams({
     inputMint: params.inputMint.toBase58(),
@@ -275,6 +287,9 @@ export async function fetchJupiterQuote(params: {
     // one transaction fits.
     restrictIntermediateTokens: "true",
     ...(params.onlyDirectRoutes === true ? { onlyDirectRoutes: "true" } : {}),
+    ...(params.excludeDexes !== undefined && params.excludeDexes.length > 0
+      ? { excludeDexes: params.excludeDexes.join(",") }
+      : {}),
   });
   return (await getJson(`${LITE_API}/quote?${query.toString()}`)) as JupiterQuote;
 }
@@ -623,6 +638,8 @@ export interface BuildJupiterRouteParams {
   readonly amountIn: bigint;
   readonly slippageBps: number;
   readonly onlyDirectRoutes?: boolean;
+  /** Venues to keep out of the route; see fetchJupiterQuote. */
+  readonly excludeDexes?: readonly string[];
   /**
    * Take the transfer fee from the rate that may be in force when the
    * transaction LANDS rather than the one in force now. Default true: the
@@ -649,6 +666,7 @@ export async function buildJupiterRoute(
     amountIn: params.amountIn,
     slippageBps: params.slippageBps,
     ...(params.onlyDirectRoutes === true ? { onlyDirectRoutes: true } : {}),
+    ...(params.excludeDexes === undefined ? {} : { excludeDexes: params.excludeDexes }),
   });
   const response = await fetchJupiterSwapInstructions({
     quote,
