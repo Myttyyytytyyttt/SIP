@@ -355,6 +355,18 @@ export const INVEST_COPY = {
   signed: "Policy signed",
   capsProblem: (minimum: string): string => `Most per buy must be at least ${minimum}, and Most per 30 days at least Most per buy.`,
   convertWarning: "Above $1,000.00 per buy, one conversion can sell more than 1 SOL of your savings at the floor.",
+  /**
+   * SAID BESIDE THE BOX, not only in the notice three boxes above it.
+   *
+   * The thin-pool notice explains the ceiling; this is what the owner sees the
+   * moment he types past it. It is a WARNING and not a refusal on purpose: the
+   * ceiling is a reading of one night that nothing on this page re-reads, so
+   * blocking on it would refuse a cap that a recovered pool would accept. What
+   * must not happen is the old behaviour -- a cap the card itself calls dead,
+   * sitting in the box, with Sign lit and 0.0117 SOL of rent about to be spent.
+   */
+  depthWarning: (ceiling: string): string =>
+    `This is above the ${ceiling} that ANTHROPIC's pool allowed when it was last read. If the pool is still that size, a policy at this cap buys nothing and converts no SOL — and the rent you pay to sign it does not come back.`,
   youAreSigning: (solFloor: string, legs: string, perBuy: string, per30Days: string): string =>
     `You are signing: SOL never sold below ${solFloor}; ${legs}; at most ${perBuy} per buy and ${per30Days} per 30 days.`,
   legSigning: (symbol: string, max: string): string => `${symbol} never bought above ${max} per 100,000,000 raw units`,

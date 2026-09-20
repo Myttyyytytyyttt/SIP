@@ -117,6 +117,41 @@ export const REACHABLE_PER_BUY_RAW: bigint = (() => {
   return (minInvestment * 10_000n + lightest - 1n) / lightest;
 })();
 
+/**
+ * THE CAP ANTHROPIC'S POOL ALLOWED WHEN IT WAS LAST READ, in USDC raw units.
+ *
+ * MIN_POOL_DEPTH_MULTIPLE is 50, so a leg may spend at most a fiftieth of the
+ * pool's in-side reserve. Read 2026-09-20 at slot 448864213, ANTHROPIC/USDC
+ * held 9,541,652,779 raw USDC: $190.83 a leg, and at two equal legs $381.67 for
+ * the whole buy. Rounded DOWN to $380 so the figure is never optimistic.
+ *
+ * THIS IS A CEILING THAT CANNOT BE RE-DERIVED HERE. /api/solana-vault's prices
+ * payload carries pool RATES and, now, the pyth block -- no reserve -- so the
+ * page has nothing to recompute this from and nothing to invalidate it with.
+ * That is why what follows is a warning rather than a refusal, and why the
+ * starting value below is not this number.
+ */
+export const DEPTH_CEILING_PER_BUY_RAW = 380_000_000n;
+
+/**
+ * WHAT THE "Most per buy" BOX STARTS AT, in USDC raw units.
+ *
+ * NOT DEFAULT_INVEST_CAPS.maxPerCall, which is $1,000. The card's own thin-pool
+ * notice tells the owner that at $1,000 the basket buys "nothing bought, no SOL
+ * converted, at any balance" -- and the form pre-filled exactly that, with Sign
+ * lit, over 0.0117348 SOL of rent that does not come back. readCaps enforces
+ * only a LOWER bound (REACHABLE_PER_BUY_RAW), so nothing stopped it: the
+ * failure REACHABLE_PER_BUY_RAW closes at the low end was wide open at the high
+ * end, where the shipped default landed.
+ *
+ * HALF THE CEILING, NOT THE CEILING. $380 cleared the measured reserve by
+ * 0.44 %; $190 leaves about 2x cover, so an ordinary day's drift in that pool
+ * does not turn the starting value into a policy that buys nothing. The owner
+ * can still type anything at or above REACHABLE_PER_BUY_RAW -- this is where
+ * the box starts, not a limit.
+ */
+export const SUGGESTED_PER_BUY_RAW = DEPTH_CEILING_PER_BUY_RAW / 2n;
+
 /** The two caps as typed, in dollars: at least REACHABLE_PER_BUY_RAW per buy, and at least one buy per 30 days. */
 export function readCaps(perBuyText: string, per30DaysText: string): Caps {
   try {
@@ -293,7 +328,7 @@ function PolicySetup({
   readonly start: (input: InvestRequest) => void;
   readonly progress: ReactNode;
 }) {
-  const [perBuy, setPerBuy] = useState(() => formatUnits(DEFAULT_INVEST_CAPS.maxPerCall, USDC_DECIMALS));
+  const [perBuy, setPerBuy] = useState(() => formatUnits(SUGGESTED_PER_BUY_RAW, USDC_DECIMALS));
   const [per30Days, setPer30Days] = useState(() => formatUnits(DEFAULT_INVEST_CAPS.maxRolling30d, USDC_DECIMALS));
   const [acknowledged, setAcknowledged] = useState(false);
 
@@ -338,13 +373,20 @@ function PolicySetup({
           <p role="alert" className="text-xs text-destructive">
             {caps.message}
           </p>
-        ) : caps.maxPerCall > 1_000_000_000n ? (
-          <p className="text-xs text-destructive">{INVEST_COPY.convertWarning}</p>
-        ) : null}
+        ) : (
+          <>
+            {caps.maxPerCall > DEPTH_CEILING_PER_BUY_RAW ? (
+              <p role="alert" className="text-xs text-destructive">
+                {INVEST_COPY.depthWarning(formatUsd(DEPTH_CEILING_PER_BUY_RAW))}
+              </p>
+            ) : null}
+            {caps.maxPerCall > 1_000_000_000n ? <p className="text-xs text-destructive">{INVEST_COPY.convertWarning}</p> : null}
+          </>
+        )}
 
         <div className="space-y-1 rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs">
           <div className={LABEL}>{INVEST_COPY.thinPoolTitle}</div>
-          <p>{INVEST_COPY.thinPool(formatUsd(DEFAULT_INVEST_CAPS.maxPerCall))}</p>
+          <p>{INVEST_COPY.thinPool(formatUsd(SUGGESTED_PER_BUY_RAW))}</p>
         </div>
 
         <div className="space-y-1 rounded-md border px-3 py-2 text-xs">

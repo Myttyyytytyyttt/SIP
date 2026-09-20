@@ -40,9 +40,21 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 });
 
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { InvestingCard, SigningDetail, canSignPolicy, readCaps, setupRent, usedInLast30Days } from "@/components/wallets/InvestingCard";
+import {
+  DEPTH_CEILING_PER_BUY_RAW,
+  InvestingCard,
+  REACHABLE_PER_BUY_RAW,
+  SUGGESTED_PER_BUY_RAW,
+  SigningDetail,
+  canSignPolicy,
+  readCaps,
+  setupRent,
+  usedInLast30Days,
+} from "@/components/wallets/InvestingCard";
 import { VaultWriteLock, type WriteProgress } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
+import { USDC_DECIMALS, formatUnits } from "@/lib/amounts";
+import { INVEST_COPY } from "@/lib/vault-copy";
 import type { InvestmentPolicyJson, VaultApi, VaultStateJson } from "@/lib/vault-api";
 
 const CLICK = { type: "click", target: {} };
@@ -147,8 +159,16 @@ describe("InvestingCard", () => {
     // basketWeightsBps(2): equal halves, one line per offered leg.
     expect(html).toContain("SPYx · 50 %, ANTHROPIC · 50 %");
     expect(html).toContain("Buys each time $5.00 of USDC is ready");
-    expect(html).toContain('value="1000"');
+    // THE BOX DOES NOT START ON A CAP THIS CARD CALLS DEAD. It used to open at
+    // DEFAULT_INVEST_CAPS.maxPerCall ($1,000), which the thin-pool notice three
+    // boxes below describes as "nothing bought, no SOL converted, at any
+    // balance" -- with Sign lit and 0.0117348 SOL of unrecoverable rent behind
+    // it. $190 is half the measured ceiling, so it keeps about 2x cover.
+    expect(html).toContain('value="190"');
+    expect(html).not.toContain('value="1000"');
     expect(html).toContain('value="31000"');
+    // And the notice names the figure the box actually starts at.
+    expect(html).toContain("Most per buy starts at $190.00.");
     expect(html).toContain("SOL is never sold below $90.03 (90 % of today&#x27;s $100.04)");
     expect(html).toContain("SPYx is never bought above $801.80 per 100,000,000 raw units (5.3 % over today&#x27;s pool price)");
     expect(html).toContain("ANTHROPIC is never bought above $18.95 per 100,000,000 raw units (5.3 % over today&#x27;s pool price)");
@@ -161,7 +181,7 @@ describe("InvestingCard", () => {
     );
     expect(html).not.toContain("invests in SPYx (SP500 xStock)");
     expect(html).toContain("the keeper converts it to USDC, never below $90.03 per SOL, then buys once $5.00 of USDC is ready");
-    expect(html).toContain("At most $1,000.00 per buy and $31,000.00 per 30 days until you change them.");
+    expect(html).toContain("At most $190.00 per buy and $31,000.00 per 30 days until you change them.");
     // The per-stock ceilings left the prose: at two legs they were joined by a
     // slash into "$801.80 / $18.95", a figure of no meaning. One line per stock
     // in the limits box above is the whole of it now.
@@ -243,6 +263,37 @@ describe("InvestingCard", () => {
     expect(box).toContain('type="checkbox"');
     expect(box).not.toContain("checked");
     expect(buttons("Sign investment policy").map((button) => button.disabled)).toEqual([true]);
+  });
+
+  /**
+   * THE HIGH END OF THE CAP, which readCaps never guarded. It enforces a lower
+   * bound (REACHABLE_PER_BUY_RAW) and an ordering and no upper bound at all, so
+   * the shipped $1,000 default sat above the depth ceiling with Sign lit --
+   * exactly the failure REACHABLE_PER_BUY_RAW closes at the other end.
+   */
+  it("starts the per-buy cap inside the window the card says can actually buy, and warns rather than refuses above the measured ceiling", () => {
+    // The starting value is buyable at BOTH ends: over the per-leg minimum, and
+    // under the ceiling the thin-pool notice quotes.
+    expect(readCaps(formatUnits(SUGGESTED_PER_BUY_RAW, USDC_DECIMALS), "31000")).toMatchObject({ ok: true, maxPerCall: SUGGESTED_PER_BUY_RAW });
+    expect(SUGGESTED_PER_BUY_RAW).toBeLessThanOrEqual(DEPTH_CEILING_PER_BUY_RAW);
+    expect(SUGGESTED_PER_BUY_RAW).toBeGreaterThanOrEqual(REACHABLE_PER_BUY_RAW);
+    // HALF THE CEILING: about 2x cover, where the ceiling itself cleared the
+    // measured reserve by 0.44 % and one ordinary move would undo it.
+    expect(SUGGESTED_PER_BUY_RAW * 2n).toBe(DEPTH_CEILING_PER_BUY_RAW);
+
+    // A WARNING, NOT A REFUSAL: the ceiling is one night's reading that nothing
+    // on this page re-reads, so a cap above it must still be signable -- it must
+    // just never be silent. readCaps stays the program's rule alone.
+    expect(readCaps("1000", "31000")).toMatchObject({ ok: true, maxPerCall: 1_000_000_000n });
+
+    // At the value the box starts on, neither warning is shown.
+    const html = render(screen({ kind: "ready", state: stateWith() }));
+    expect(html).not.toContain("If the pool is still that size, a policy at this cap buys nothing");
+    expect(html).not.toContain("one conversion can sell more than 1 SOL");
+    // And the words that appear the moment he types past it name the ceiling.
+    expect(INVEST_COPY.depthWarning("$380.00")).toContain(
+      "This is above the $380.00 that ANTHROPIC's pool allowed when it was last read. If the pool is still that size, a policy at this cap buys nothing and converts no SOL",
+    );
   });
 
   it("Sign is possible only with the box ticked, valid caps and no other write running", () => {
