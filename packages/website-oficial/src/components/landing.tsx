@@ -495,6 +495,25 @@ export function Landing({
           <span className="text-sm font-medium tracking-wide">SaverFi</span>
         </span>
         <span className="flex items-center gap-2">
+          {/*
+            A REAL NAVIGATION, NOT THE TRANSITION. Every other way out of this
+            page is `/?mode=mock` through enterFromLink, which is the in-page
+            scroll into the dashboard; the rankings are a different page, public,
+            and must not be intercepted by it — so no onClick.
+
+            FROM sm UP HERE, and in the hero row at every size: on a 375px phone
+            a third item in this bar crowds Connect, and Connect is what this
+            page is for.
+          */}
+          <a
+            href="/leaderboard"
+            className={cn(
+              "hidden rounded-full px-4 py-2 text-sm font-medium text-white/70 transition-colors hover:text-white sm:inline-flex",
+              FOCUS,
+            )}
+          >
+            Leaderboard
+          </a>
           <a
             href="/?mode=mock"
             onClick={enterFromLink}
@@ -551,6 +570,19 @@ export function Landing({
                   )}
                 >
                   See the app
+                  <ArrowUpRight size={14} aria-hidden />
+                </a>
+                {/* Quieter than the two beside it, and shown at EVERY width:
+                    this is the only way to the rankings from a phone, where the
+                    bar above drops its links to leave Connect room. */}
+                <a
+                  href="/leaderboard"
+                  className={cn(
+                    "flex items-center gap-1.5 px-2 py-3 text-sm font-medium text-white/60 transition-colors hover:text-white",
+                    FOCUS,
+                  )}
+                >
+                  Leaderboard
                   <ArrowUpRight size={14} aria-hidden />
                 </a>
               </div>
