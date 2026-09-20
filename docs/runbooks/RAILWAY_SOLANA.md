@@ -123,6 +123,46 @@ curl -s "https://api.telegram.org/bot<TOKEN>/sendMessage" \
 Si no llega, la alerta tampoco llegará. El vigilante, por su parte, ya no se traga un webhook borrado o limitado: una
 respuesta que no sea 2xx se registra como `alert webhook failed; the alert above was logged only`.
 
+### 1.2 El tablero público (`/leaderboard`)
+
+El vigilante sirve, en el mismo puerto que `/health` y `/status`, un tercer camino: `/leaderboard`. Es la clasificación
+— «Ahorro» y «Volumen», por temporada semanal y por histórico — calculada a partir de `sip_solana.settlement_event`,
+que es lo que este servicio ya escribía. La web no toca la base de datos: lee esta URL y la cachea.
+
+**El orden importa, y es de un solo sentido:**
+
+1. **Primero la migración**, con la base a mano y **antes** de desplegar el código nuevo:
+
+   ```bash
+   bash -c '. ~/sip-keys/sip-hackathon.env; pnpm --dir packages/solana-keeper setup-read-model'
+   ```
+
+   Añade `settlement_event.volume_raw` (un `ALTER … ADD COLUMN IF NOT EXISTS`, idempotente: se puede repetir). El
+   `DATABASE_URL` nunca se imprime.
+
+2. **Después el despliegue.** Si se hace al revés, el `INSERT` del vigilante nombra una columna que no existe, Postgres
+   rechaza la sentencia entera y **se pierde una fila de historial por cada cobro** — sin tumbar nada, porque escribir
+   historial nunca puede frenar un cobro. Para que no pase en silencio, el arranque ahora comprueba las columnas y no
+   solo las tablas: si falta, el log y `/status` dicen
+   `BROKEN — sip_solana.settlement_event is missing volume_raw` y el comando que lo arregla.
+
+3. **Y en Vercel**, `SIP_SOLANA_KEEPER_URL` con la URL pública de este servicio (ver `VERCEL_WEB.md`).
+
+**Comprobarlo:**
+
+```bash
+curl -s https://sip-solana-keeper-production.up.railway.app/leaderboard | head -c 300
+```
+
+- **200** con `computedAt`, `rules`, `coverage` y `boards`: está calculado.
+- **503** con `"detail"`: dice por qué — sin base de datos, sin calcular todavía, o el historial no se pudo leer. La web
+  enseña ese mismo motivo. **Nunca sirve un tablero vacío en 200**: «nadie ha ahorrado» y «no se pudo mirar» son dos
+  cosas distintas y solo una de ellas es verdad.
+
+Se recalcula cada dos minutos y, además, justo después de cada cobro registrado — así quien acaba de ahorrar y va a
+mirar no encuentra una clasificación que no sabe nada de él. Nunca se calcula dentro del barrido: una consulta lenta no
+puede retrasar un cobro.
+
 ### Fase B — el martes, después de publicar y configurar el programa
 
 Añade los secretos. Sigue en seco: sin la fase C no envía nada.

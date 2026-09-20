@@ -80,6 +80,12 @@ export interface SettleResult {
   readonly expectedLamports?: bigint;
   /** The node's price for this settle's message: the fee the reserve check counted. */
   readonly feeLamports?: bigint;
+  /**
+   * What this window TRADED, from the same walk that measured it (measureSince).
+   * Recorded in the mirror so the leaderboard can rank by usage; never attested,
+   * never charged, and absent from every outcome that measured nothing.
+   */
+  readonly tradedLamports?: bigint;
   readonly signature?: string;
   /** The nonce this settlement consumed, and the slot it closed. Carried out
    * so the keeper can record history without re-deriving either. */
@@ -408,6 +414,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     mode: inputs.mode,
     feeLamports,
     expectedLamports: paid,
+    tradedLamports: measured.tradedLamports,
     ...(decision.carry === undefined ? {} : { carry: decision.carry }),
   };
   if (belowReserve !== null) return { ...belowReserve, ...carried };

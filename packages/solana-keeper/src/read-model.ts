@@ -17,11 +17,23 @@
 
 import pg from "pg";
 import { summarizeUpstreamError, type Secret } from "@sip/solana-log";
+import type { DayTotals } from "./leaderboard.js";
 
 export const READ_MODEL_SCHEMA = "sip_solana";
 export const READ_MODEL_TABLES = ["vault", "trading_link", "settlement_event", "investment_event"] as const;
 /** What an operator runs when the preflight finds the schema missing. */
 export const SETUP_COMMAND = "pnpm --dir packages/solana-keeper setup-read-model";
+
+/**
+ * The columns settlement_event must have for this keeper's INSERT to be
+ * accepted. THE TABLE EXISTING IS NOT THE SCHEMA BEING CURRENT: a column added
+ * to sql/sip_solana.sql after the schema was applied somewhere is a column that
+ * database does not have, the INSERT names it, Postgres refuses the whole
+ * statement, and recordSettlement turns that refusal into a warning nobody
+ * reads. That is how a deploy that lands before its migration loses every row
+ * of history in silence — and why the boot check reads columns, not tables.
+ */
+export const REQUIRED_SETTLEMENT_COLUMNS = ["mode", "base_raw", "contribution_raw", "volume_raw"] as const;
 
 export interface SettlementRow {
   readonly walletAddr: string;
@@ -31,9 +43,32 @@ export interface SettlementRow {
   readonly mode: number;
   readonly baseRaw: bigint;
   readonly contributionRaw: bigint;
+  /**
+   * What the settled window TRADED, in lamports (measure-window.ts). Required,
+   * so a caller has to decide rather than silently omit it: a settle that
+   * measured no notional passes 0n and says so.
+   *
+   * NOT A MONEY FIELD. Nothing is attested, computed or charged from this
+   * column; the leaderboard ranks on it, and that is its whole purpose.
+   */
+  readonly volumeRaw: bigint;
   readonly txRef: string;
   readonly height: bigint;
 }
+
+/**
+ * A bounded read. At one settlement per wallet per minute this is years of a
+ * crowded system, and a table that somehow grew past it must not turn a public
+ * page into an unbounded query.
+ */
+export const LEADERBOARD_DAY_LIMIT = 50_000;
+
+/**
+ * One (vault, UTC day) of settlement history, summed. It IS leaderboard.ts's
+ * input type, aliased rather than restated: two identical interfaces in two
+ * files agree until the day one of them is edited.
+ */
+export type LeaderboardDayRow = DayTotals;
 
 export interface InvestmentRow {
   readonly vaultAddr: string;
@@ -197,6 +232,26 @@ export class SolanaReadModel {
             "against this database. Settlements are unaffected; only the history is being lost.",
         };
       }
+      const columns = await client.query<{ name: string }>(
+        `SELECT c.name
+           FROM unnest($1::text[]) AS c(name)
+          WHERE NOT EXISTS (
+            SELECT 1
+              FROM information_schema.columns
+             WHERE table_schema = $2 AND table_name = 'settlement_event' AND column_name = c.name
+          )`,
+        [[...REQUIRED_SETTLEMENT_COLUMNS], READ_MODEL_SCHEMA],
+      );
+      const missingColumns = columns.rows.map((row) => row.name);
+      if (missingColumns.length > 0) {
+        return {
+          ok: false,
+          detail:
+            `BROKEN — ${READ_MODEL_SCHEMA}.settlement_event is missing ${missingColumns.join(", ")}. ` +
+            `Run \`${SETUP_COMMAND}\` against this database: until then every settlement row is refused. ` +
+            "Settlements themselves are unaffected; only the history is being lost.",
+        };
+      }
       return { ok: true, detail: `on — ${READ_MODEL_SCHEMA} is reachable and complete` };
     } catch (error) {
       // UNREADABLE IS ITS OWN ANSWER, not "missing": one sends someone to
@@ -211,10 +266,11 @@ export class SolanaReadModel {
     return this.#run("settlement", (client) =>
       client.query(
         `INSERT INTO ${READ_MODEL_SCHEMA}.settlement_event
-           (wallet_addr, nonce, vault_addr, mode, base_raw, contribution_raw, tx_ref, height)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           (wallet_addr, nonce, vault_addr, mode, base_raw, contribution_raw, volume_raw, tx_ref, height)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT (wallet_addr, nonce) DO UPDATE
            SET contribution_raw = EXCLUDED.contribution_raw,
+               volume_raw = EXCLUDED.volume_raw,
                tx_ref = EXCLUDED.tx_ref,
                height = EXCLUDED.height
            WHERE ${READ_MODEL_SCHEMA}.settlement_event.tx_ref IS DISTINCT FROM EXCLUDED.tx_ref`,
@@ -225,6 +281,7 @@ export class SolanaReadModel {
           row.mode,
           row.baseRaw.toString(),
           row.contributionRaw.toString(),
+          row.volumeRaw.toString(),
           row.txRef,
           row.height.toString(),
         ],
@@ -271,6 +328,48 @@ export class SolanaReadModel {
         [walletAddr, vaultAddr],
       );
     });
+  }
+
+  /**
+   * Every (vault, UTC day) the mirror holds, summed: the leaderboard's whole
+   * input. NULL, never [], when there is no database or the read failed —
+   * an empty board and an unread board are different facts, and a page that
+   * cannot tell them apart shows a fresh user "nobody has saved anything"
+   * when the truth is "we could not look".
+   *
+   * GROUPED IN POSTGRES, scored in leaderboard.ts. The sums are returned as
+   * text because numeric does not fit a double and a lamport is not a rounding
+   * error; BigInt parses them exactly.
+   */
+  async leaderboardDays(): Promise<LeaderboardDayRow[] | null> {
+    if (this.#pool === null) return null;
+    let client: pg.PoolClient | undefined;
+    try {
+      client = await this.#pool.connect();
+      const result = await client.query<{ subject: string; day: string; settles: string; contribution_raw: string; volume_raw: string }>(
+        `SELECT vault_addr AS subject,
+                to_char((at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day,
+                count(*) AS settles,
+                sum(contribution_raw) AS contribution_raw,
+                sum(volume_raw) AS volume_raw
+           FROM ${READ_MODEL_SCHEMA}.settlement_event
+          GROUP BY 1, 2
+          ORDER BY 2 ASC
+          LIMIT ${LEADERBOARD_DAY_LIMIT}`,
+      );
+      return result.rows.map((row) => ({
+        subject: row.subject,
+        day: row.day,
+        settles: Number(row.settles),
+        contributionRaw: BigInt(row.contribution_raw),
+        volumeRaw: BigInt(row.volume_raw),
+      }));
+    } catch (error) {
+      this.#warn("read-model leaderboard read failed (settlement unaffected)", { detail: summarizeUpstreamError(error) });
+      return null;
+    } finally {
+      client?.release();
+    }
   }
 
   async close(): Promise<void> {

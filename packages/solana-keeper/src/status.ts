@@ -265,8 +265,34 @@ export function renderStatus(status: KeeperStatus, redactor: Redactor): string {
 }
 
 /**
+ * What /leaderboard has to serve: a rendered payload, or the reason there is
+ * none. AN EMPTY BOARD AND AN UNREAD ONE ARE DIFFERENT FACTS — the first is
+ * "nobody has saved yet", the second is "we could not look" — and only the
+ * second may be served as a failure. A page that cannot tell them apart tells a
+ * new user that the product does not work.
+ */
+export type LeaderboardReply = { readonly body: string } | { readonly unavailable: string };
+
+/**
+ * The leaderboard as served: JSON, scrubbed, withheld whole if the tripwire
+ * finds a registered secret — renderStatus's rule, applied to a payload built
+ * from the database rather than from the configuration.
+ *
+ * NOTHING IN A RANKING SHOULD BE SECRET: it is vault addresses and amounts,
+ * every one of them already public on chain. The scrub is here because "should"
+ * is not "cannot", and this route is unauthenticated.
+ */
+export function renderLeaderboard(snapshot: unknown, redactor: Redactor): string {
+  const scrubbed = redactor.scrub(JSON.stringify(snapshot, bigintSafe));
+  if (redactor.contains(scrubbed)) {
+    return JSON.stringify({ service: SERVICE, status: "withheld: redaction tripwire" });
+  }
+  return scrubbed;
+}
+
+/**
  * GET /health → {"ok":true}, or 503 with the reason when sweeping has stopped;
- * GET /status → the rendered status. Nothing else.
+ * GET /status → the rendered status; GET /leaderboard → the rankings. Nothing else.
  *
  * `probe` is supplied by the keeper because the handler has no clock and no
  * state of its own, and it is REQUIRED: a default would decide the one question
@@ -275,6 +301,13 @@ export function renderStatus(status: KeeperStatus, redactor: Redactor): string {
 export function httpHandler(
   render: () => string,
   probe: () => HealthReport,
+  /**
+   * REQUIRED, like `probe`. A default would be a decision — serve nothing, or
+   * serve something — taken by this file on behalf of a keeper that never said
+   * which, and silently: the route would answer for months without anyone
+   * noticing it had been answered by a default.
+   */
+  leaderboard: () => LeaderboardReply,
 ): (request: IncomingMessage, response: ServerResponse) => void {
   return (request, response) => {
     response.setHeader("content-type", "application/json");
@@ -304,7 +337,28 @@ export function httpHandler(
       response.end(render());
       return;
     }
+    if (path === "/leaderboard") {
+      // CROSS-ORIGIN ON PURPOSE. The website reads this through its own server,
+      // but the payload is public by nature — on-chain addresses and amounts —
+      // and a judge, a dashboard or a second front end should be able to read
+      // it straight from a browser rather than need a proxy of their own.
+      response.setHeader("access-control-allow-origin", "*");
+      // A RANKING IS NOT A BALANCE. Thirty seconds of shared cache in front of
+      // a route that recomputes every couple of minutes costs freshness nobody
+      // can perceive and removes the only way this service can be flooded.
+      response.setHeader("cache-control", "public, max-age=30");
+      const reply = leaderboard();
+      if ("unavailable" in reply) {
+        // 503, NOT AN EMPTY BOARD. The page must be able to say "the rankings
+        // are unavailable" rather than draw a credible, wrong, empty table.
+        response.statusCode = 503;
+        response.end(JSON.stringify({ error: "the leaderboard is not available", detail: reply.unavailable }));
+        return;
+      }
+      response.end(reply.body);
+      return;
+    }
     response.statusCode = 404;
-    response.end(JSON.stringify({ error: "not found", paths: ["/health", "/status"] }));
+    response.end(JSON.stringify({ error: "not found", paths: ["/health", "/status", "/leaderboard"] }));
   };
 }

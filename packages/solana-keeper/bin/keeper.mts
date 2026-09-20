@@ -83,7 +83,16 @@ import { activeBps, settleAlert, settleThrewAlert, type CarryBook } from "../src
 import { runSettleTick } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KEEPER_LOCK_NAME, KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
-import { decideHealth, httpHandler, renderStatus, type KeeperStatus, type PendingCarry } from "../src/status.js";
+import { computeLeaderboard } from "../src/leaderboard.js";
+import {
+  decideHealth,
+  httpHandler,
+  renderLeaderboard,
+  renderStatus,
+  type KeeperStatus,
+  type LeaderboardReply,
+  type PendingCarry,
+} from "../src/status.js";
 import {
   VAULT_READ_ALERT_KEY,
   VAULT_READ_CRITICAL_STREAK,
@@ -544,6 +553,40 @@ const health: KeeperStatus = {
   pendingCarries: [],
 };
 
+/**
+ * THE RANKINGS, ON A CADENCE OF THEIR OWN.
+ *
+ * NOT INSIDE THE SWEEP. A leaderboard is a page and a sweep is money: a slow
+ * database must never be able to delay a settlement by one query. NOT PER
+ * REQUEST either — the route is public and unauthenticated, so what it costs to
+ * answer must not depend on who is asking.
+ *
+ * THE LAST GOOD ONE SURVIVES A BLINKING DATABASE: a failed read leaves the
+ * previous payload in place, whose own computedAt says how old it is, and only
+ * a keeper that has never computed one reports that it has none.
+ */
+const LEADERBOARD_REFRESH_MS = 120_000;
+let leaderboard: LeaderboardReply = { unavailable: "the rankings have not been computed yet" };
+
+async function refreshLeaderboard(): Promise<void> {
+  if (!readModel.enabled) {
+    leaderboard = { unavailable: "this keeper has no database, so it keeps no history to rank" };
+    return;
+  }
+  try {
+    const days = await readModel.leaderboardDays();
+    if (days === null) {
+      if (!("body" in leaderboard)) leaderboard = { unavailable: "the history could not be read" };
+      return;
+    }
+    leaderboard = { body: renderLeaderboard(computeLeaderboard(days, new Date()), sharedRedactor) };
+  } catch (error) {
+    // A PAGE MUST NOT BE ABLE TO KILL THE KEEPER. This runs detached, under the
+    // process's uncaughtException trap — which exits.
+    log.warn("the leaderboard could not be computed (settlement unaffected)", { detail: summarizeUpstreamError(error) });
+  }
+}
+
 // The heartbeat, only when a port is provided (Railway injects PORT; the image
 // bakes 8080). Started BEFORE the first chain read, so a slow endpoint delays
 // the first sweep and never the probe — and, because the probe answers 503 for
@@ -556,6 +599,7 @@ if (config.port !== null) {
     httpHandler(
       () => renderStatus({ ...health, pendingCarries: pendingCarries() }, sharedRedactor),
       () => decideHealth({ now: Date.now(), startedAt: startedAtMs, lastProgressAt, sweepMs: config.sweepMs }),
+      () => leaderboard,
     ),
   )
     .on("error", (error) => {
@@ -1047,9 +1091,20 @@ async function sweep(): Promise<void> {
               // net of any loss an earlier zero settle carried into the window.
               baseRaw: settle.baseLamports,
               contributionRaw: settle.settledLamports ?? settle.expectedLamports,
+              // WHAT THE WINDOW TRADED, not what it saved: the leaderboard's
+              // volume board ranks on this. A turn that measured nothing
+              // records 0 rather than leaving the column to a default nobody
+              // chose — the two are the same number, and only one is a decision.
+              volumeRaw: settle.tradedLamports ?? 0n,
               txRef: settle.signature,
               height: settle.endSlot,
-            });
+            })
+              // THE BOARD CHANGES EXACTLY HERE, so it is recomputed here and
+              // not two minutes later: somebody who just saved and went to look
+              // must not find a ranking that has never heard of them. AFTER the
+              // write resolves, because the write is fire-and-forget and a
+              // refresh racing it would read the row that is not there yet.
+              .then(() => refreshLeaderboard());
           }
         } else {
           changes.change(`settle:${wallet}`, `settle ${settle.outcome.toLowerCase()}`, { wallet, vault: vaultAddr, detail: settle.detail });
@@ -1333,6 +1388,11 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
     process.exit(0);
   });
 }
+
+// DETACHED, BOTH OF THEM. The first sweep is what this process exists for and
+// it does not wait for a page's query; the rankings catch up a moment later.
+void refreshLeaderboard();
+setInterval(() => void refreshLeaderboard(), LEADERBOARD_REFRESH_MS);
 
 await sweep();
 setInterval(() => void sweep(), config.sweepMs);

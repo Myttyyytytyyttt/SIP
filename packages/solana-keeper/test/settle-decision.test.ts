@@ -81,6 +81,9 @@ const measured = (over: Partial<WindowMeasurement> = {}): WindowMeasurement => (
   settleTxCount: 0,
   walletSignedTxCount: 12,
   successfulTradeCount: 12,
+  // Twelve trades that moved a SOL apiece: measured for the mirror's volume
+  // column, and deliberately irrelevant to every decision in this file.
+  tradedLamports: 12_000_000_000n,
   chainBreaks: 0,
   unfetchable: 0,
   cashDelta: 50_000_000n,

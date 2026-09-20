@@ -1,0 +1,65 @@
+// The schema, the writer and the call site have to agree, and no unit test can
+// call bin/keeper.mts — so this reads the sources, the way
+// test/read-model-rate.test.ts and test/privy-client-sites.test.ts do.
+//
+// WHAT IT IS DEFENDING AGAINST, concretely: a column added to the DDL but not
+// to the INSERT records nothing new; a column added to the INSERT but not to
+// the DDL makes Postgres refuse the whole statement, and recordSettlement turns
+// that into a warning nobody reads — every settlement row lost, silently, for
+// as long as the deploy is ahead of its migration.
+
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import { REQUIRED_SETTLEMENT_COLUMNS } from "../src/read-model.js";
+
+const PACKAGE = new URL("..", import.meta.url);
+const source = (path: string): string => readFileSync(fileURLToPath(new URL(path, PACKAGE)), "utf8");
+
+const sql = source("sql/sip_solana.sql");
+const readModel = source("src/read-model.ts");
+const keeper = source("bin/keeper.mts");
+
+describe("the settlement mirror's shape", () => {
+  it("declares every column the preflight demands", () => {
+    for (const column of REQUIRED_SETTLEMENT_COLUMNS) {
+      expect(sql, `${column} is required at boot but absent from the DDL`).toContain(column);
+    }
+  });
+
+  it("adds volume_raw with an ALTER, because the schema is applied to a live database", () => {
+    // CREATE TABLE IF NOT EXISTS does nothing at all to a table that exists, so
+    // a column written into the CREATE would be missing on every database this
+    // file has already run against — including the one in production.
+    expect(sql).toMatch(/ALTER TABLE sip_solana\.settlement_event\s+ADD COLUMN IF NOT EXISTS volume_raw numeric NOT NULL DEFAULT 0;/);
+  });
+
+  it("writes volume_raw on insert and on conflict", () => {
+    expect(readModel).toContain("(wallet_addr, nonce, vault_addr, mode, base_raw, contribution_raw, volume_raw, tx_ref, height)");
+    expect(readModel).toContain("VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)");
+    // A re-recorded settlement must not keep the old volume beside a new tx.
+    expect(readModel).toContain("volume_raw = EXCLUDED.volume_raw");
+  });
+
+  it("is fed the notional the window actually measured", () => {
+    expect(keeper).toContain("volumeRaw: settle.tradedLamports ?? 0n,");
+  });
+});
+
+describe("the leaderboard's wiring in bin/keeper.mts", () => {
+  it("serves the rankings from the same heartbeat server as /health and /status", () => {
+    expect(keeper).toContain("() => leaderboard,");
+  });
+
+  it("recomputes when the history changes, not only on its timer", () => {
+    expect(keeper).toContain(".then(() => refreshLeaderboard());");
+    expect(keeper).toContain("setInterval(() => void refreshLeaderboard(), LEADERBOARD_REFRESH_MS);");
+  });
+
+  it("keeps the rankings out of the settlement path", () => {
+    // The refresher is called detached in both places. An `await` in the sweep
+    // would put a page's database query in front of a settlement.
+    expect(keeper).toContain("void refreshLeaderboard();");
+    expect(keeper).not.toContain("await refreshLeaderboard()");
+  });
+});
