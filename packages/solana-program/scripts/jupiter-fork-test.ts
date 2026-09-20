@@ -67,7 +67,10 @@ const ERR = { WrongVenue: 6015, FloorTooLow: 6019, FillTooSmall: 6020, Overspent
 
 interface RouteFile {
   readonly target: { readonly name: string; readonly mint: string };
-  readonly amountIn: string;
+  /** What phase 1 ASKED FOR. This, and never the route's own number, is amount_in. */
+  readonly requestedAmountIn: string;
+  /** What the route's bytes carry. Recorded to be compared, not to be spent. */
+  readonly instructionInAmount: string;
   readonly hops: number;
   readonly labels: readonly string[];
   readonly venueProgram: string;
@@ -152,7 +155,17 @@ async function main(): Promise<void> {
   const vaultTarget = new PublicKey(route.vaultTarget);
   const targetMint = new PublicKey(route.target.mint);
   const venueProgram = new PublicKey(route.venueProgram);
-  const amountIn = BigInt(route.amountIn);
+  // AMOUNT_IN IS OURS. invest() only refuses a spend ABOVE amount_in, so a
+  // number taken from the route would be a ceiling the API chose for the
+  // vault's own money. Phase 1 already refused a route whose bytes disagreed
+  // with the request; this asserts the artifact on disk still does.
+  const amountIn = BigInt(route.requestedAmountIn);
+  if (BigInt(route.instructionInAmount) !== amountIn) {
+    throw new Error(
+      `the captured route spends ${route.instructionInAmount} but ${amountIn} was requested; ` +
+        "re-run jupiter-fork-setup.ts",
+    );
+  }
   const [configPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], programId);
   const [policyPda] = PublicKey.findProgramAddressSync([Buffer.from("invest"), vault.toBuffer()], programId);
   const [programData] = PublicKey.findProgramAddressSync([programId.toBuffer()], BPF_LOADER_UPGRADEABLE);

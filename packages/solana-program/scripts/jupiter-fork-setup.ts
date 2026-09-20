@@ -32,7 +32,7 @@ import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildJupiterRoute, JupiterRouteRefusal } from "./jupiter-route";
+import { buildJupiterRoute, investAmountIn, JupiterRouteRefusal } from "./jupiter-route";
 
 const LOCAL = join(__dirname, ".local");
 const MAINNET = process.env["MAINNET_RPC"] ?? "https://api.mainnet-beta.solana.com";
@@ -192,7 +192,13 @@ async function main(): Promise<void> {
       {
         capturedAt: new Date().toISOString(),
         target: { name: TARGET_NAME, mint: TARGET.toBase58() },
-        amountIn: AMOUNT_IN.toString(),
+        // WHAT THE VAULT WILL SPEND, AND WHAT THE ROUTE SAYS IT WILL, as two
+        // separate fields. Phase 3 hands the first to invest() as amount_in;
+        // the second is Jupiter's own number, recorded so the proof can show
+        // they agree instead of assuming it. investAmountIn refuses if they
+        // ever do not.
+        requestedAmountIn: investAmountIn(route).toString(),
+        instructionInAmount: route.amounts.inAmount.toString(),
         slippageBps: SLIPPAGE_BPS,
         hops: route.hops,
         labels: route.labels,

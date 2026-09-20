@@ -440,8 +440,16 @@ export interface JupiterRoute {
   readonly vault: PublicKey;
   readonly vaultIn: PublicKey;
   readonly vaultTarget: PublicKey;
-  readonly amountIn: bigint;
+  /**
+   * WHAT WE ASKED FOR, echoed back — and the ONLY amount a caller may hand
+   * invest() as amount_in. There is deliberately no `route.amountIn` field:
+   * one would read like the number to forward while holding Jupiter's, and a
+   * caller forwarding it would let the API decide what the vault spends.
+   * Use investAmountIn(route), which returns this and re-checks it.
+   */
+  readonly request: RouteRequest;
   readonly output: RouteOutput;
+  /** What the INSTRUCTION's own bytes say. Jupiter's numbers, for comparison. */
   readonly amounts: RouteAmounts;
   readonly hops: number;
   readonly labels: readonly string[];
@@ -506,6 +514,29 @@ export function verifyQuoteAnswersRequest(quote: JupiterQuote, request: RouteReq
         "min_out is derived from this number and would be the API's choice, not ours",
     );
   }
+}
+
+/**
+ * The amount to hand invest() as amount_in — the CALLER'S, re-checked here.
+ *
+ * WHY A FUNCTION AND NOT A FIELD. invest() spends up to amount_in out of
+ * vault_in and only refuses ABOVE it (Overspent); a number that arrived from
+ * the API is therefore an API-chosen ceiling on the vault's own money. The
+ * request is ours, so it is what this returns — and the instruction's own tail
+ * is compared to it once more at the moment it becomes an argument, because
+ * this is the last point before the bytes and the number are signed together.
+ * Under a route from verifySharedAccountsRoute the two already agree; this
+ * fires for a JupiterRoute assembled some other way.
+ */
+export function investAmountIn(route: JupiterRoute): bigint {
+  if (route.amounts.inAmount !== route.request.amountIn) {
+    refuse(
+      "request-drift",
+      `the instruction spends ${route.amounts.inAmount} but ${route.request.amountIn} was requested; ` +
+        "amount_in is the caller's number, never the route's",
+    );
+  }
+  return route.request.amountIn;
 }
 
 export interface VerifyContext {
@@ -673,7 +704,7 @@ export function verifySharedAccountsRoute(
     vault: context.vault,
     vaultIn: context.vaultIn,
     vaultTarget: context.vaultTarget,
-    amountIn: amounts.inAmount,
+    request: context.request,
     output,
     amounts,
     hops,

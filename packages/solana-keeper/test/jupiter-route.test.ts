@@ -27,6 +27,7 @@ import {
   type JupiterQuote,
   type JupiterSwapInstructions,
   type RefusalCondition,
+  type JupiterRoute,
   type RouteRequest,
   type TransferFeeRate,
   type VerifyContext,
@@ -34,6 +35,7 @@ import {
   SHARED_ACCOUNTS_ROUTE_DISC,
   decodeRouteAmounts,
   findVaultOwnedTokenAccounts,
+  investAmountIn,
   netOfTransferFee,
   transferFeeForEpoch,
   verifyQuoteAnswersRequest,
@@ -201,7 +203,11 @@ describe("the Jupiter route builder accepts a real mainnet sharedAccountsRoute",
       slippageBps: 100,
       platformFeeBps: 0,
     });
-    expect(route.amountIn).toBe(25_000_000n);
+    // THE AMOUNT THE VAULT SPENDS IS OURS. There is no route.amountIn to
+    // forward by mistake: what the route carries is the request we made, and
+    // Jupiter's own in-amount stays in `amounts`, next to it, for comparison.
+    expect(route.request.amountIn).toBe(25_000_000n);
+    expect(investAmountIn(route)).toBe(25_000_000n);
     expect(route.output.quotedOut).toBe(3_254_246n);
     expect(route.output.venueThreshold).toBe(3_221_704n);
     // SPYx has no transfer fee, so for this leg alone net and gross agree.
@@ -353,6 +359,32 @@ describe("the Jupiter route builder refuses", () => {
     // The idempotent ATA create Jupiter always emits under
     // skipUserAccountsRpcCalls is the one thing that is not a refusal.
     expect(verifySharedAccountsRoute(quote(), response(), context()).hops).toBe(1);
+  });
+});
+
+describe("amount_in is the caller's number, and is re-checked where it becomes one", () => {
+  it("returns the requested amount, not the one read out of the instruction", () => {
+    const route = verifySharedAccountsRoute(quote(), response(), context());
+    expect(investAmountIn(route)).toBe(route.request.amountIn);
+    expect(investAmountIn(route)).toBe(25_000_000n);
+  });
+
+  it("refuses a route whose bytes spend something else [request-drift]", () => {
+    // A JupiterRoute assembled by any path other than verifySharedAccountsRoute
+    // — a cached artifact, a hand-built object, a future builder — can still
+    // hold an in-amount that is not the one asked for. This is the last place
+    // it can be caught: the next thing that happens to these two values is
+    // that they are signed together.
+    const route = verifySharedAccountsRoute(quote(), response(), context());
+    const drifted: JupiterRoute = { ...route, amounts: { ...route.amounts, inAmount: 250_000_000n } };
+    try {
+      investAmountIn(drifted);
+      throw new Error("a route spending 250 USDC answered a request for 25 and was accepted");
+    } catch (error) {
+      expect(error).toBeInstanceOf(JupiterRouteRefusal);
+      expect((error as JupiterRouteRefusal).condition).toBe("request-drift");
+      expect((error as JupiterRouteRefusal).message).toContain("never the route's");
+    }
   });
 });
 
