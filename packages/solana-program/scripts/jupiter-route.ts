@@ -129,6 +129,7 @@ export type RefusalCondition =
   | "amounts-drift"
   | "platform-fee"
   | "venue-threshold"
+  | "route-age"
   | "extra-instructions";
 
 /** A refusal names its condition, so a caller can log which guard said no. */
@@ -257,7 +258,31 @@ export interface JupiterQuote {
   readonly otherAmountThreshold: string;
   readonly swapMode: string;
   readonly slippageBps: number;
-  readonly routePlan: ReadonlyArray<{ readonly swapInfo: { readonly label?: string } }>;
+  /**
+   * The slot Jupiter priced at. Optional in the type because it is the API's
+   * to send; a quote without it is a quote whose age in slots cannot be
+   * stated, and verifyRouteFresh says so rather than assuming zero.
+   */
+  readonly contextSlot?: number;
+  /** Jupiter's own service time for the quote, in SECONDS. */
+  readonly timeTaken?: number;
+  readonly routePlan: ReadonlyArray<{
+    readonly swapInfo: {
+      readonly label?: string;
+      /**
+       * The slot at which Jupiter last refreshed THIS AMM's state — a string
+       * in the JSON. It can sit a long way behind contextSlot: measured on
+       * 2026-09-20, 25 USDC quotes, USDC -> SPYx via Byreal lagged 10 and 17
+       * slots, while USDC -> FIGUREAI's Raydium CLMM hop lagged 1,705 and
+       * 2,176 — about a quarter of an hour. So contextSlot alone UNDERSTATES
+       * how old the priced state is, which is why the slot check below
+       * measures from the oldest hop, and why a TIGHT maxAgeSlots would
+       * refuse routes Jupiter serves every day. It is a knob with a measured
+       * caveat, not a default.
+       */
+      readonly updateContextSlot?: string | number;
+    };
+  }>;
 }
 
 export interface JupiterInstruction {
@@ -418,6 +443,110 @@ export interface RouteOutput {
   readonly netOfVenueThreshold: bigint;
 }
 
+/**
+ * WHEN THIS ROUTE WAS PRICED. Without it a caller cannot tell a route quoted a
+ * second ago from one quoted minutes ago, and the difference is not cosmetic:
+ * min_out is derived from the quote's own numbers, so a stale quote is a LOOSE
+ * MINIMUM — the vault would accept a fill measured against a price that has
+ * since moved.
+ *
+ * THERE IS DELIBERATELY NO "built at" STAMP. A stamp taken when the builder
+ * finished is always younger than the quote it carries, so it would make a
+ * slow build look fresh; what a caller has to know is when JUPITER priced,
+ * which is these fields.
+ */
+export interface RouteAge {
+  /** Date.now() when the quote RESPONSE arrived. Read by the caller; this file has no clock. */
+  readonly quotedAtMs: number;
+  /** The quote's contextSlot, or null if it did not carry one. */
+  readonly quotedAtSlot: number | null;
+  /** The oldest per-hop updateContextSlot: the oldest state the price rests on. */
+  readonly oldestHopSlot: number | null;
+  /** Which hop that was, so a refusal can name it. */
+  readonly oldestHopLabel: string | null;
+  /** Jupiter's own timeTaken, converted to milliseconds. */
+  readonly quoteTimeTakenMs: number | null;
+}
+
+/** How old a caller is willing to let a route be. At least one bound is required. */
+export interface AgeTolerance {
+  /** Wall-clock age of the quote, in milliseconds. */
+  readonly maxAgeMs?: number;
+  /**
+   * Age in slots, measured from the OLDEST state the route rests on.
+   *
+   * READ updateContextSlot ABOVE BEFORE PICKING A NUMBER. A live one-hop route
+   * measured 19 slots behind; a live two-hop one measured 2,177, because one
+   * AMM's cached state was a quarter of an hour old. Anything under a couple
+   * of thousand refuses the second kind.
+   */
+  readonly maxAgeSlots?: number;
+}
+
+/** The oldest slot this route's price rests on: the quote's, or an older hop's. */
+export function pricedAtSlot(age: RouteAge): number | null {
+  const candidates = [age.quotedAtSlot, age.oldestHopSlot].filter((slot): slot is number => slot !== null);
+  return candidates.length === 0 ? null : Math.min(...candidates);
+}
+
+/**
+ * Refuses a route older than the caller's tolerance.
+ *
+ * PURE, AND THE CLOCK COMES IN AS AN ARGUMENT — both so this is a unit test
+ * and so a caller can re-run it immediately before signing, which is the check
+ * that actually matters: buildJupiterRoute can only prove the route was fresh
+ * when it was built.
+ *
+ * A tolerance that states NEITHER bound is itself refused. "How stale is too
+ * stale" is a decision, and a route nobody made it for is the state this
+ * whole type exists to end.
+ */
+export function verifyRouteFresh(
+  route: JupiterRoute,
+  observed: { readonly nowMs: number; readonly slot?: number },
+  tolerance: AgeTolerance,
+): void {
+  if (tolerance.maxAgeMs === undefined && tolerance.maxAgeSlots === undefined) {
+    refuse("route-age", "no freshness tolerance was stated; a route nobody aged is a min_out nobody sized");
+  }
+  const age = route.age;
+  if (observed.nowMs < age.quotedAtMs) {
+    refuse("route-age", `the clock reads ${observed.nowMs}, before the quote arrived at ${age.quotedAtMs}`);
+  }
+  if (tolerance.maxAgeMs !== undefined) {
+    const ageMs = observed.nowMs - age.quotedAtMs;
+    if (ageMs > tolerance.maxAgeMs) {
+      refuse("route-age", `the quote is ${ageMs} ms old, past the ${tolerance.maxAgeMs} ms this caller allows`);
+    }
+  }
+  if (tolerance.maxAgeSlots !== undefined) {
+    const priced = pricedAtSlot(age);
+    if (priced === null) {
+      refuse("route-age", "the quote carried no contextSlot and no hop slot, so its age in slots cannot be stated");
+    }
+    if (observed.slot === undefined) {
+      refuse("route-age", `maxAgeSlots ${tolerance.maxAgeSlots} was asked for but no current slot was supplied`);
+    }
+    // A NEGATIVE AGE IS NOT AN ERROR. Jupiter's contextSlot is read at its own
+    // commitment; a getSlot("confirmed") of ours can legitimately trail it.
+    // Only a route priced too far in the PAST is refused.
+    const ageSlots = observed.slot - priced;
+    if (ageSlots > tolerance.maxAgeSlots) {
+      const which =
+        age.oldestHopSlot !== null && age.oldestHopSlot === priced
+          ? ` (the ${age.oldestHopLabel ?? "?"} hop's own state, ${
+              age.quotedAtSlot === null ? "?" : age.quotedAtSlot - priced
+            } slots behind the quote)`
+          : "";
+      refuse(
+        "route-age",
+        `the route is priced at slot ${priced}${which}, ${ageSlots} slots behind the current ${observed.slot}, ` +
+          `past the ${tolerance.maxAgeSlots} this caller allows`,
+      );
+    }
+  }
+}
+
 export interface JupiterRoute {
   /** Hand to invest/convert as `venue_program`; must equal policy.venue_program. */
   readonly venueProgram: PublicKey;
@@ -448,6 +577,8 @@ export interface JupiterRoute {
    * Use investAmountIn(route), which returns this and re-checks it.
    */
   readonly request: RouteRequest;
+  /** When Jupiter priced this. See RouteAge, and verifyRouteFresh. */
+  readonly age: RouteAge;
   readonly output: RouteOutput;
   /** What the INSTRUCTION's own bytes say. Jupiter's numbers, for comparison. */
   readonly amounts: RouteAmounts;
@@ -542,6 +673,12 @@ export function investAmountIn(route: JupiterRoute): bigint {
 export interface VerifyContext {
   /** What was asked for. The quote is refused unless it answers exactly this. */
   readonly request: RouteRequest;
+  /**
+   * Date.now() the moment the quote response arrived, read by the CALLER.
+   * This function has no clock: a route's age is measured from when its quote
+   * was taken, and only the caller was there when it was.
+   */
+  readonly quotedAtMs: number;
   readonly vault: PublicKey;
   readonly vaultIn: PublicKey;
   readonly vaultTarget: PublicKey;
@@ -691,6 +828,29 @@ export function verifySharedAccountsRoute(
     netOfVenueThreshold: netOfTransferFee(venueThreshold, context.transferFee),
   };
 
+  // THE AGE, ASSEMBLED FROM WHAT THE QUOTE ACTUALLY CARRIES. contextSlot and
+  // timeTaken used to be dropped at the type boundary; the per-hop
+  // updateContextSlot never crossed it at all, and it is the older number.
+  let oldestHopSlot: number | null = null;
+  let oldestHopLabel: string | null = null;
+  for (const step of quote.routePlan) {
+    const raw = step.swapInfo.updateContextSlot;
+    if (raw === undefined) continue;
+    const slot = Number(raw);
+    if (!Number.isFinite(slot)) continue;
+    if (oldestHopSlot === null || slot < oldestHopSlot) {
+      oldestHopSlot = slot;
+      oldestHopLabel = step.swapInfo.label ?? "?";
+    }
+  }
+  const age: RouteAge = {
+    quotedAtMs: context.quotedAtMs,
+    quotedAtSlot: quote.contextSlot ?? null,
+    oldestHopSlot,
+    oldestHopLabel,
+    quoteTimeTakenMs: quote.timeTaken === undefined ? null : Math.round(quote.timeTaken * 1_000),
+  };
+
   const hops = quote.routePlan.length;
   return {
     venueProgram: JUPITER_PROGRAM,
@@ -705,6 +865,7 @@ export function verifySharedAccountsRoute(
     vaultIn: context.vaultIn,
     vaultTarget: context.vaultTarget,
     request: context.request,
+    age,
     output,
     amounts,
     hops,
@@ -766,6 +927,13 @@ export interface BuildJupiterRouteParams {
   readonly targetMint: PublicKey;
   readonly amountIn: bigint;
   readonly slippageBps: number;
+  /**
+   * REQUIRED, AND ON PURPOSE. Every caller has to say how old a quote it is
+   * willing to sign against, because min_out comes off that quote's numbers.
+   * Checked once here, against the clock at build time; a caller that holds a
+   * route for a while re-runs verifyRouteFresh before it signs.
+   */
+  readonly maxAge: AgeTolerance;
   readonly onlyDirectRoutes?: boolean;
   /** Venues to keep out of the route; see fetchJupiterQuote. */
   readonly excludeDexes?: readonly string[];
@@ -795,6 +963,8 @@ export async function buildJupiterRoute(
     amountIn: params.amountIn,
     slippageBps: params.slippageBps,
   };
+  // STAMPED THE INSTANT IT LANDS, before the three round trips below, so the
+  // age a caller reads is the quote's and not the builder's.
   const quote = await fetchJupiterQuote({
     inputMint: params.inputMint,
     outputMint: params.targetMint,
@@ -803,6 +973,7 @@ export async function buildJupiterRoute(
     ...(params.onlyDirectRoutes === true ? { onlyDirectRoutes: true } : {}),
     ...(params.excludeDexes === undefined ? {} : { excludeDexes: params.excludeDexes }),
   });
+  const quotedAtMs = Date.now();
   // BEFORE THE QUOTE IS USED FOR ANYTHING — including being posted straight
   // back to /swap-instructions, which is what turns a drifted quote into an
   // instruction we would otherwise go on to verify against that same quote.
@@ -822,12 +993,19 @@ export async function buildJupiterRoute(
     [params.inputMint, params.targetMint],
   );
 
-  return verifySharedAccountsRoute(quote, response, {
+  const route = verifySharedAccountsRoute(quote, response, {
     request,
+    quotedAtMs,
     vault: params.vault,
     vaultIn: params.vaultIn,
     vaultTarget: params.vaultTarget,
     vaultOwnedTokenAccounts,
     transferFee: params.useWorstCaseTransferFee === false ? fee.current : fee.worstCase,
   });
+
+  // The slot is only read when a slot bound was asked for: an RPC round trip
+  // nobody stated a tolerance for is a round trip that buys nothing.
+  const slot = params.maxAge.maxAgeSlots === undefined ? undefined : await connection.getSlot("confirmed");
+  verifyRouteFresh(route, { nowMs: Date.now(), ...(slot === undefined ? {} : { slot }) }, params.maxAge);
+  return route;
 }

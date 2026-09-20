@@ -312,6 +312,15 @@ async function measureLeg(
     targetMint: leg.mint,
     amountIn,
     slippageBps: args.slippageBps,
+    // A HARNESS THAT MEASURES DRIFT CANNOT ALSO TOLERATE IT. The whole file
+    // compares a quoted number against a simulated fill, so a quote that went
+    // stale in between would show up as drift and be reported as a finding
+    // about the venue. The whole build was measured at 329 and 557 ms on
+    // 2026-09-20, so 5 s is ten times the headroom and still far under the
+    // window any of these rows could hide in. No slot bound: one of these
+    // legs routes through an AMM whose cached state is routinely a quarter of
+    // an hour old, and refusing that would refuse the measurement.
+    maxAge: { maxAgeMs: 5_000 },
     ...(args.onlyDirect ? { onlyDirectRoutes: true } : {}),
     excludeDexes: args.excludeDexes,
     // The current epoch's rate, so the reported prediction is about the fill we

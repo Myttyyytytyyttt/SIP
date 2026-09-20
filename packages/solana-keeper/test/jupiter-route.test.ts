@@ -37,8 +37,10 @@ import {
   findVaultOwnedTokenAccounts,
   investAmountIn,
   netOfTransferFee,
+  pricedAtSlot,
   transferFeeForEpoch,
   verifyQuoteAnswersRequest,
+  verifyRouteFresh,
   transferFeeOn,
   venueThresholdFrom,
   verifySharedAccountsRoute,
@@ -103,7 +105,11 @@ function quote(): JupiterQuote {
     otherAmountThreshold: "3221704",
     swapMode: "ExactIn",
     slippageBps: 100,
-    routePlan: [{ swapInfo: { label: "PancakeSwap" } }],
+    // The age fields the API really sends and this builder used to drop.
+    // updateContextSlot is a STRING in Jupiter's JSON, as captured.
+    contextSlot: 448_859_887,
+    timeTaken: 0.017,
+    routePlan: [{ swapInfo: { label: "PancakeSwap", updateContextSlot: "448859870" } }],
   };
 }
 
@@ -133,9 +139,13 @@ function request(overrides: Partial<RouteRequest> = {}): RouteRequest {
   };
 }
 
+/** A fixed clock, so nothing in this file depends on when it runs. */
+const QUOTED_AT_MS = 1_758_400_000_000;
+
 function context(overrides: Partial<VerifyContext> = {}): VerifyContext {
   return {
     request: request(),
+    quotedAtMs: QUOTED_AT_MS,
     vault: new PublicKey(VAULT),
     vaultIn: new PublicKey(VAULT_USDC),
     vaultTarget: new PublicKey(VAULT_SPYX),
@@ -359,6 +369,95 @@ describe("the Jupiter route builder refuses", () => {
     // The idempotent ATA create Jupiter always emits under
     // skipUserAccountsRpcCalls is the one thing that is not a refusal.
     expect(verifySharedAccountsRoute(quote(), response(), context()).hops).toBe(1);
+  });
+});
+
+describe("a route says when it was priced, and is refused once it is too old", () => {
+  const route = () => verifySharedAccountsRoute(quote(), response(), context());
+
+  it("carries the slot and the timing the API sent, which used to be dropped at the type boundary", () => {
+    expect(route().age).toEqual({
+      quotedAtMs: QUOTED_AT_MS,
+      quotedAtSlot: 448_859_887,
+      // Parsed from the string Jupiter sends per hop.
+      oldestHopSlot: 448_859_870,
+      oldestHopLabel: "PancakeSwap",
+      quoteTimeTakenMs: 17,
+    });
+  });
+
+  it("prices the route at its OLDEST hop, not at the quote's own slot", () => {
+    // Measured on 2026-09-20: one live route's Raydium CLMM hop was priced
+    // 2,176 slots behind the contextSlot next to it. Reading contextSlot alone
+    // would call that route a few seconds old when its price was a quarter of
+    // an hour old.
+    expect(pricedAtSlot(route().age)).toBe(448_859_870);
+    expect(pricedAtSlot(route().age)).toBeLessThan(route().age.quotedAtSlot!);
+  });
+
+  it("refuses a quote older than the caller's millisecond tolerance [route-age]", () => {
+    const r = route();
+    expect(() => verifyRouteFresh(r, { nowMs: QUOTED_AT_MS + 5_000 }, { maxAgeMs: 5_000 })).not.toThrow();
+    try {
+      verifyRouteFresh(r, { nowMs: QUOTED_AT_MS + 5_001 }, { maxAgeMs: 5_000 });
+      throw new Error("a quote 5,001 ms old passed a 5,000 ms tolerance");
+    } catch (error) {
+      expect(error).toBeInstanceOf(JupiterRouteRefusal);
+      expect((error as JupiterRouteRefusal).condition).toBe("route-age");
+      expect((error as JupiterRouteRefusal).message).toContain("5001 ms old");
+    }
+  });
+
+  it("refuses a route priced too many slots back, and names the hop [route-age]", () => {
+    const r = route();
+    const now = { nowMs: QUOTED_AT_MS, slot: 448_859_890 };
+    expect(() => verifyRouteFresh(r, now, { maxAgeSlots: 20 })).not.toThrow();
+    try {
+      verifyRouteFresh(r, now, { maxAgeSlots: 19 });
+      throw new Error("a route priced 20 slots back passed a 19-slot tolerance");
+    } catch (error) {
+      expect((error as JupiterRouteRefusal).condition).toBe("route-age");
+      expect((error as JupiterRouteRefusal).message).toContain("PancakeSwap");
+      expect((error as JupiterRouteRefusal).message).toContain("20 slots behind");
+    }
+  });
+
+  it("refuses to pretend a missing slot is slot zero [route-age]", () => {
+    // A quote with no contextSlot and no hop slot has an age nobody can state.
+    // Treating that as fresh is exactly the silence this task is closing.
+    const ageless = verifySharedAccountsRoute(
+      { ...quote(), contextSlot: undefined, routePlan: [{ swapInfo: { label: "PancakeSwap" } }] },
+      response(),
+      context(),
+    );
+    expect(ageless.age.quotedAtSlot).toBeNull();
+    expect(pricedAtSlot(ageless.age)).toBeNull();
+    expect(() => verifyRouteFresh(ageless, { nowMs: QUOTED_AT_MS, slot: 1 }, { maxAgeSlots: 10 })).toThrow(
+      /cannot be stated/,
+    );
+    // And a slot bound asked for with no slot to check it against.
+    expect(() => verifyRouteFresh(route(), { nowMs: QUOTED_AT_MS }, { maxAgeSlots: 10 })).toThrow(
+      /no current slot was supplied/,
+    );
+  });
+
+  it("refuses a tolerance that states nothing at all [route-age]", () => {
+    // The state this whole type exists to end: a route nobody decided the
+    // freshness of, whose quote sets min_out anyway.
+    try {
+      verifyRouteFresh(route(), { nowMs: QUOTED_AT_MS }, {});
+      throw new Error("a route with no stated tolerance was called fresh");
+    } catch (error) {
+      expect((error as JupiterRouteRefusal).condition).toBe("route-age");
+      expect((error as JupiterRouteRefusal).message).toContain("a min_out nobody sized");
+    }
+  });
+
+  it("does not refuse a slot reading that trails Jupiter's own", () => {
+    // getSlot("confirmed") can legitimately sit behind the commitment Jupiter
+    // priced at. A negative age is not staleness, and refusing it would refuse
+    // honest routes.
+    expect(() => verifyRouteFresh(route(), { nowMs: QUOTED_AT_MS, slot: 448_859_800 }, { maxAgeSlots: 0 })).not.toThrow();
   });
 });
 

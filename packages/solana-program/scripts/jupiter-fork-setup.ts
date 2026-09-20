@@ -134,6 +134,11 @@ async function main(): Promise<void> {
       targetMint: TARGET,
       amountIn: AMOUNT_IN,
       slippageBps: SLIPPAGE_BPS,
+      // This route is not signed against mainnet prices — it is cloned and
+      // replayed on a local validator whose accounts are fetched right after.
+      // The bound that matters here is that the capture is one coherent
+      // moment, not that the price is current.
+      maxAge: { maxAgeMs: 30_000 },
       // One hop or nothing: a multi-hop route needs lookup tables, and every
       // address they index would have to be cloned as well.
       onlyDirectRoutes: true,
