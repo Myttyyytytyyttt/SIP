@@ -72,7 +72,35 @@
 // internal check stops being what it is today. It is a floor we can prove,
 // not one we are borrowing.
 //
-// (5) AND THE CONSEQUENCE THAT BITES FIRST, MEASURED AT THE EPOCH BOUNDARY.
+// (5) WHAT THE REQUEST DOES NOT BOUND, AND IT IS THE PRICE.
+// verifyQuoteAnswersRequest pins the mints, the amount in and the slippage —
+// the three an API could otherwise have answered a different question with. It
+// does not pin quote.outAmount, and nothing else here does either: a quote that
+// answers our exact request at a terrible price is still a quote about our
+// request, and netOfVenueThreshold is computed straight from it, so the vault's
+// own minimum simply moves down with the price. THIS FILE DOES NOT CHECK THAT
+// A ROUTE IS A GOOD DEAL, and it should not try: a route builder holds no
+// independent price, and inventing one here would be a second oracle to trust
+// on the way to the first.
+//
+// WHERE THE PRICE DEFENCE ACTUALLY LIVES — in the program, under a signature
+// that is not ours. invest() computes
+//   floor = amount_in * leg.min_out_rate_wad / 1e18
+// from the policy the VAULT OWNER signed, and refuses any min_out below it
+// with FloorTooLow (6019) BEFORE the CPI runs. A bad-price route therefore
+// costs the vault a failed transaction, never a fill. That floor is per leg,
+// it is the owner's number, and it is not this file's to choose.
+//
+// SO THE ONE THING THIS FILE CAN HONESTLY DO is check the SAME number the
+// program will, when the caller already has it: pass `ownerFloorRateWad` and a
+// route whose net threshold falls under the owner's floor is refused
+// [below-owner-floor] here, before anything is signed, instead of on chain
+// after a transaction has been spent. Leave it out and nothing in this file
+// bounds the price — the route says so itself, with output.ownerFloor null —
+// and the obligation is the caller's, discharged by the owner's policy on
+// chain and nowhere else.
+//
+// (6) AND THE CONSEQUENCE THAT BITES FIRST, MEASURED AT THE EPOCH BOUNDARY.
 // Jupiter quotes gross on some venues but checks its OWN threshold against what
 // the destination is CREDITED, which is net. So on a gross-quoting venue the
 // transfer fee is spent out of the slippage tolerance, and slippage_bps must be
@@ -163,6 +191,7 @@ export type RefusalCondition =
   | "amounts-drift"
   | "platform-fee"
   | "venue-threshold"
+  | "below-owner-floor"
   | "route-age"
   | "extra-instructions";
 
@@ -482,6 +511,25 @@ export function venueThresholdFrom(amounts: RouteAmounts): bigint {
   return amounts.quotedOutAmount - (amounts.quotedOutAmount * BigInt(amounts.slippageBps)) / 10_000n;
 }
 
+/** u64::MAX, the ceiling invest()'s own `u64::try_from` puts on the floor. */
+const U64_MAX = 18_446_744_073_709_551_615n;
+
+/**
+ * The owner-signed floor invest() will compute for this call, to the raw unit:
+ *
+ *   floor = amount_in * leg.min_out_rate_wad / 1e18      (u128, truncating)
+ *
+ * MIRRORED, NOT APPROXIMATED. invest.rs does exactly this and then requires
+ * `min_out >= floor && min_out > 0`, so a number computed any other way here
+ * would refuse routes the program accepts or, worse, pass ones it will not.
+ * BigInt division truncates like Rust's, and the u64 conversion the program
+ * does after it is the reason a rate that overflows is a refusal rather than a
+ * wrapped number.
+ */
+export function ownerFloorFor(amountIn: bigint, minOutRateWad: bigint): bigint {
+  return (amountIn * minOutRateWad) / 1_000_000_000_000_000_000n;
+}
+
 export interface RouteOutput {
   /** Jupiter's outAmount, verbatim. GROSS: before the mint's transfer fee. */
   readonly quotedOut: bigint;
@@ -506,6 +554,13 @@ export interface RouteOutput {
    * instead of one we can state.
    */
   readonly netOfVenueThreshold: bigint;
+  /**
+   * The OWNER'S per-leg floor this route was checked against, or null when the
+   * caller stated no rate — in which case nothing in this file bounded the
+   * price, and the route says so rather than letting a reader assume it did.
+   * See section (5) of the header.
+   */
+  readonly ownerFloor: bigint | null;
 }
 
 /**
@@ -722,6 +777,15 @@ export interface JupiterRoute {
  * So the loop has to be closed at the one place it can be: the request is OURS,
  * it never comes off the wire, and the quote is compared to it the moment it
  * arrives.
+ *
+ * AND THE REQUEST BOUNDS THE QUESTION, NOT THE ANSWER. There is no field here
+ * for a price, and that is deliberate: a quote answering these exact four
+ * things at a terrible rate passes every check in this file, because nothing
+ * in it holds an independent price to judge the answer against. The bound on
+ * the price is the vault owner's signed `min_out_rate_wad`, enforced by
+ * invest() as FloorTooLow — see section (5) of the header, and
+ * VerifyContext.ownerFloorRateWad, which checks that same floor here when the
+ * caller has it.
  */
 export interface RouteRequest {
   readonly inputMint: PublicKey;
@@ -816,6 +880,15 @@ export interface VerifyContext {
    */
   readonly vaultOwnedTokenAccounts: ReadonlySet<string>;
   readonly transferFee: TransferFeeRate;
+  /**
+   * The vault owner's own `leg.min_out_rate_wad` for this leg, if the caller
+   * has it. OPTIONAL, AND THE ONLY PRICE BOUND IN THIS FILE: with it, a route
+   * whose net threshold falls under the floor invest() will compute is refused
+   * here instead of on chain; without it, the price is bounded by the owner's
+   * policy and by nothing else. Section (5) of the header says why it is not
+   * this file's job to hold a price of its own.
+   */
+  readonly ownerFloorRateWad?: bigint;
 }
 
 /**
@@ -984,12 +1057,45 @@ export function verifySharedAccountsRoute(
     );
   }
 
+  const netOfVenueThreshold = netOfTransferFee(venueThreshold, context.transferFee);
+
+  // THE ONLY PRICE BOUND IN THIS FILE, AND IT IS THE OWNER'S NUMBER.
+  // Everything above agrees the answer with the question; none of it asks
+  // whether the answer is a good one, and netOfVenueThreshold comes straight
+  // off quote.outAmount, so a terrible price simply lowers the vault's own
+  // minimum with it. The floor that stops that is signed by the vault owner
+  // and enforced by invest() before the CPI; when the caller has it, the same
+  // number is checked here, where a refusal costs no transaction.
+  let ownerFloor: bigint | null = null;
+  if (context.ownerFloorRateWad !== undefined) {
+    ownerFloor = ownerFloorFor(context.request.amountIn, context.ownerFloorRateWad);
+    if (ownerFloor > U64_MAX) {
+      refuse(
+        "below-owner-floor",
+        `the owner's floor for ${context.request.amountIn} in at rate ${context.ownerFloorRateWad} is ${ownerFloor}, ` +
+          "past u64; invest() refuses that policy outright",
+      );
+    }
+    if (netOfVenueThreshold <= 0n) {
+      refuse("below-owner-floor", "the route's net threshold is zero, and invest() requires min_out > 0");
+    }
+    if (netOfVenueThreshold < ownerFloor) {
+      refuse(
+        "below-owner-floor",
+        `this route's min_out would be ${netOfVenueThreshold}, under the owner's own floor of ${ownerFloor} ` +
+          `(${context.request.amountIn} in at ${context.ownerFloorRateWad} wad); invest() would refuse it with ` +
+          "FloorTooLow after the transaction was spent. The quote answered our question at a price the owner did not sign for",
+      );
+    }
+  }
+
   const output: RouteOutput = {
     quotedOut: amounts.quotedOutAmount,
     venueThreshold,
     transferFee: context.transferFee,
     netOfQuotedOut: netOfTransferFee(amounts.quotedOutAmount, context.transferFee),
-    netOfVenueThreshold: netOfTransferFee(venueThreshold, context.transferFee),
+    netOfVenueThreshold,
+    ownerFloor,
   };
 
   // THE AGE, ASSEMBLED FROM WHAT THE QUOTE ACTUALLY CARRIES. contextSlot and
@@ -1164,6 +1270,12 @@ export interface BuildJupiterRouteParams {
    * reverts after the spend.
    */
   readonly useWorstCaseTransferFee?: boolean;
+  /**
+   * The vault owner's `leg.min_out_rate_wad` for this leg, if the caller has
+   * it. See VerifyContext.ownerFloorRateWad, and section (5) of the header:
+   * this is the only bound in this file on what the route costs.
+   */
+  readonly ownerFloorRateWad?: bigint;
 }
 
 /**
@@ -1249,6 +1361,7 @@ export async function buildJupiterRoute(
       vaultTarget: params.vaultTarget,
       vaultOwnedTokenAccounts,
       transferFee: params.useWorstCaseTransferFee === false ? fee.current : fee.worstCase,
+      ...(params.ownerFloorRateWad === undefined ? {} : { ownerFloorRateWad: params.ownerFloorRateWad }),
     });
   } catch (error) {
     // A ROUTE-AGE REFUSAL FROM A BUILD NAMES THE BUILDER'S OWN SHARE. The age

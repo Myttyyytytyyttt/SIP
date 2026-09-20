@@ -41,6 +41,7 @@ import {
   investAmountIn,
   legacyTransactionBytes,
   netOfTransferFee,
+  ownerFloorFor,
   pricedAtSlot,
   routeMints,
   transferFeeForEpoch,
@@ -874,6 +875,84 @@ describe("the verification ages the route itself, because signing happens after 
     expect(() => verifyRouteFresh(route, { nowMs: QUOTED_AT_MS + 30_001 }, { maxAgeMs: 30_000 })).toThrow(
       JupiterRouteRefusal,
     );
+  });
+});
+
+describe("the price is bounded by the OWNER's floor, and by nothing else in this file", () => {
+  // WHAT THE REQUEST DOES NOT BOUND. verifyQuoteAnswersRequest pins the mints,
+  // the amount in and the slippage. It does not pin outAmount, and
+  // netOfVenueThreshold is computed straight from it — so a quote answering
+  // our exact question at a terrible price still sets the vault's minimum, and
+  // every other check in this file passes it. The bound is the vault owner's
+  // signed min_out_rate_wad, which invest() turns into
+  //   floor = amount_in * min_out_rate_wad / 1e18
+  // and enforces as FloorTooLow BEFORE the CPI. This file can check that same
+  // number when the caller has it, and promises nothing about the price when
+  // it does not.
+
+  /** The rate that makes the captured route land EXACTLY on the owner's floor. */
+  const EXACT_WAD = 128_868_160_000_000_000n; // 3,221,704 out per 25,000,000 in
+
+  it("computes the floor the way invest() does, truncating", () => {
+    expect(ownerFloorFor(25_000_000n, EXACT_WAD)).toBe(3_221_704n);
+    // Rust's u128 division truncates, and 25e6 raw units cannot lift the
+    // quotient by one: the rate has to move by 4e10 wad before the floor does.
+    expect(ownerFloorFor(25_000_000n, EXACT_WAD + 1n)).toBe(3_221_704n);
+    expect(ownerFloorFor(25_000_000n, 128_868_200_000_000_000n)).toBe(3_221_705n);
+  });
+
+  it("accepts a route whose min_out lands exactly on the floor, as invest() does", () => {
+    // invest() requires min_out >= floor, so equality is acceptance there and
+    // must be acceptance here.
+    const route = verifySharedAccountsRoute(quote(), response(), context({ ownerFloorRateWad: EXACT_WAD }));
+    expect(route.output.netOfVenueThreshold).toBe(3_221_704n);
+    expect(route.output.ownerFloor).toBe(3_221_704n);
+  });
+
+  it("refuses a route the owner's own floor would not have [below-owner-floor]", () => {
+    // One raw unit of floor above what this route can promise. On chain this
+    // is FloorTooLow 6019 — after a transaction has been spent.
+    const { condition, message } = refusal(
+      quote(),
+      response(),
+      context({ ownerFloorRateWad: 128_868_200_000_000_000n }),
+    );
+    expect(condition).toBe("below-owner-floor");
+    expect(message).toContain("min_out would be 3221704, under the owner's own floor of 3221705");
+    expect(message).toContain("FloorTooLow");
+  });
+
+  it("measures the floor against a WORSE price, which is the case the request cannot see", () => {
+    // The same request — same mints, same 25 USDC, same 100 bps — answered at
+    // half the output. verifyQuoteAnswersRequest is satisfied by it; the
+    // owner's floor is not.
+    const halved = { ...quote(), outAmount: "1627123", otherAmountThreshold: "1610852" };
+    const bytes = Buffer.from(CAPTURED_DATA, "base64");
+    bytes.writeBigUInt64LE(1_627_123n, bytes.length - 19 + 8);
+    const cheap = { ...response(), swapInstruction: { ...response().swapInstruction, data: bytes.toString("base64") } };
+    // Nothing about the question drifted...
+    expect(() => verifyQuoteAnswersRequest(halved, request())).not.toThrow();
+    // ...and without a floor the builder accepts it and hands back a minimum
+    // half the size, saying plainly that it bounded no price.
+    const unbounded = verifySharedAccountsRoute(halved, cheap, context());
+    expect(unbounded.output.netOfVenueThreshold).toBe(1_610_852n);
+    expect(unbounded.output.ownerFloor).toBeNull();
+    // With the owner's floor, it is refused.
+    expect(refusal(halved, cheap, context({ ownerFloorRateWad: EXACT_WAD })).condition).toBe("below-owner-floor");
+  });
+
+  it("refuses a policy rate that overflows the u64 invest() converts to [below-owner-floor]", () => {
+    const { condition, message } = refusal(
+      quote(),
+      response(),
+      context({ ownerFloorRateWad: 10n ** 30n }),
+    );
+    expect(condition).toBe("below-owner-floor");
+    expect(message).toContain("past u64");
+  });
+
+  it("says out loud that it bounded no price when the caller stated no floor", () => {
+    expect(verifySharedAccountsRoute(quote(), response(), context()).output.ownerFloor).toBeNull();
   });
 });
 
