@@ -16,10 +16,15 @@
  * shape is wrong is refused whole.
  */
 
-export type BoardName = "ahorro" | "volumen";
+/**
+ * `total` is the one the page ranks by — both measures, one score. The two it
+ * is made of stay in the payload: a score has to be decomposable to be
+ * arguable, and they are what the tooltip's split is read from.
+ */
+export type BoardName = "total" | "ahorro" | "volumen";
 export type RangeName = "season" | "all";
 
-export const BOARD_NAMES: readonly BoardName[] = ["ahorro", "volumen"];
+export const BOARD_NAMES: readonly BoardName[] = ["total", "ahorro", "volumen"];
 const RANGE_NAMES: readonly RangeName[] = ["season", "all"];
 
 export interface LeaderboardEntry {
@@ -30,8 +35,10 @@ export interface LeaderboardEntry {
   readonly activeDays: number;
   readonly bestStreak: number;
   readonly settles: number;
-  /** Lamports as a decimal string — never a number, which would round it. */
+  /** What this pension SAVED: lamports as a decimal string — never a number, which would round it. */
   readonly amountRaw: string;
+  /** What it TRADED, same units and same reason. Absent from a keeper too old to send it. */
+  readonly volumeRaw?: string;
   /**
    * The same total, split the way it was earned. KEPT, NOT DROPPED: this route
    * exists so a score can be checked by somebody who did not compute it, and
@@ -39,6 +46,12 @@ export interface LeaderboardEntry {
    * the streak" can. Absent from a keeper too old to send one.
    */
   readonly breakdown?: { readonly participation: number; readonly size: number; readonly streak: number };
+  /**
+   * The unrounded score the parts add up to, and the one the rank was decided
+   * by. Shown beside the breakdown so the sum a reader checks is the sum the
+   * service computed — `points` is that number rounded for the column.
+   */
+  readonly pointsExact?: number;
 }
 
 /** The scoring constants THE SERVICE APPLIED, so the page explains the real rule. */
@@ -55,7 +68,8 @@ export interface LeaderboardData {
   readonly computedAt: string;
   readonly seasonStart: string;
   readonly unit: "lamports";
-  readonly rules: Readonly<Record<BoardName, BoardRules>>;
+  /** Only the two MEASURED boards have rules; `total` is scored from them. */
+  readonly rules: Readonly<Record<Exclude<BoardName, "total">, BoardRules>>;
   readonly coverage: {
     readonly subjects: number;
     readonly settlements: number;
@@ -134,7 +148,11 @@ function parseEntry(value: unknown): LeaderboardEntry | null {
   const subject = typeof value["subject"] === "string" ? value["subject"] : null;
   if (rank === null || points === null || activeDays === null || bestStreak === null || settles === null) return null;
   if (amountRaw === null || subject === null || subject === "") return null;
-  const entry = { rank, subject, points, activeDays, bestStreak, settles, amountRaw };
+  const exact = finite(value["pointsExact"]);
+  const traded = digits(value["volumeRaw"]);
+  const base = { rank, subject, points, activeDays, bestStreak, settles, amountRaw };
+  const withExact = exact === null ? base : { ...base, pointsExact: exact };
+  const entry = traded === null ? withExact : { ...withExact, volumeRaw: traded };
   const raw = value["breakdown"];
   if (!isRecord(raw)) return entry;
   const participation = finite(raw["participation"]);
@@ -170,10 +188,15 @@ export function parseLeaderboard(value: unknown): LeaderboardData | null {
   const rules: Record<string, BoardRules> = {};
   const boards: Record<string, Record<string, readonly LeaderboardEntry[]>> = {};
   for (const board of BOARD_NAMES) {
-    const boardRules = parseRules((value["rules"] as Record<string, unknown>)[board]);
     const cuts = (value["boards"] as Record<string, unknown>)[board];
-    if (boardRules === null || !isRecord(cuts)) return null;
-    rules[board] = boardRules;
+    if (!isRecord(cuts)) return null;
+    // `total` is scored FROM the other two, so it has no rules of its own and
+    // the payload does not carry any for it.
+    if (board !== "total") {
+      const boardRules = parseRules((value["rules"] as Record<string, unknown>)[board]);
+      if (boardRules === null) return null;
+      rules[board] = boardRules;
+    }
     const parsed: Record<string, readonly LeaderboardEntry[]> = {};
     for (const range of RANGE_NAMES) {
       const rows = cuts[range];
@@ -189,7 +212,7 @@ export function parseLeaderboard(value: unknown): LeaderboardData | null {
     computedAt,
     seasonStart,
     unit: "lamports",
-    rules: rules as Record<BoardName, BoardRules>,
+    rules: rules as LeaderboardData["rules"],
     coverage: {
       subjects: finite(coverage["subjects"]) ?? 0,
       settlements: finite(coverage["settlements"]) ?? 0,

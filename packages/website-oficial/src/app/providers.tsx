@@ -18,12 +18,13 @@
  * login, and Privy's Solana RPC pointed at this app's own relay.
  */
 
-import { PrivyProvider } from "@privy-io/react-auth";
+import { PrivyProvider, usePrivy } from "@privy-io/react-auth";
 import { toSolanaWalletConnectors, useSolanaLedgerPlugin } from "@privy-io/react-auth/solana";
 import { createSolanaRpc, createSolanaRpcSubscriptions } from "@solana/kit";
-import { createContext, useContext, useMemo } from "react";
+import { createContext, useContext, useEffect, useMemo } from "react";
 
 import type { SolanaPublicConfig } from "@/lib/config";
+import { rememberSession } from "@/lib/session-hint";
 
 const SolanaConfigContext = createContext<SolanaPublicConfig | null>(null);
 
@@ -146,10 +147,34 @@ function Providers({ config, children }: { config: SolanaPublicConfig; children:
         }}
       >
         <SolanaLedgerSetup />
+        {/*
+          THE SESSION HINT LIVES WHEREVER PRIVY DOES. It used to be maintained
+          by the dashboard frame alone, and /wallets mounts its own provider
+          outside that frame: connecting there wrote no hint (so the front door
+          still flashed past on the way back) and disconnecting there left a
+          stale one (so the next load opened on a skeleton). Here it cannot
+          drift — every mount of Privy is a mount of this.
+        */}
+        <SessionHintKeeper />
         {children}
       </PrivyProvider>
     </SolanaConfigContext.Provider>
   );
+}
+
+/**
+ * Writes the session hint from what Privy says, never from what a button did:
+ * a session restored on load sets it exactly as a fresh login does, and a
+ * session that ended anywhere — logout, expiry, another tab — clears it.
+ * Renders nothing. See src/lib/session-hint.ts for what the hint is and is not.
+ */
+function SessionHintKeeper(): null {
+  const { ready, authenticated } = usePrivy();
+  useEffect(() => {
+    if (!ready) return;
+    rememberSession(authenticated);
+  }, [ready, authenticated]);
+  return null;
 }
 
 export default Providers;

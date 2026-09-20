@@ -2,66 +2,62 @@
 
 import { useState } from "react";
 
-import { ExternalLink, Flame, Info, TriangleAlert } from "lucide-react";
+import { ExternalLink, Flame, TriangleAlert, Trophy } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { dayLabel, timeAgo } from "@/lib/format";
-import { BOARD_NAMES, formatSol, type BoardName, type LeaderboardData, type LeaderboardEntry, type LeaderboardResult, type RangeName } from "@/lib/leaderboard";
+import { formatSol, type LeaderboardData, type LeaderboardEntry, type LeaderboardResult, type RangeName } from "@/lib/leaderboard";
 import { cn } from "@/lib/utils";
 
 const solscanAccountUrl = (address: string): string => `https://solscan.io/account/${address}`;
 
-/** The two boards, in the site's language, with what each one actually measures. */
-const BOARD_COPY: Record<BoardName, { label: string; column: string; blurb: string; empty: string }> = {
-  ahorro: {
-    label: "Savings",
-    column: "Saved",
-    blurb: "Ranked on how often a pension was actually fed — not on how much money arrived with it.",
-    empty: "No pension has been charged yet. The first settlement puts somebody here.",
-  },
-  volumen: {
-    label: "Volume",
-    column: "Traded",
-    blurb: "The notional each settled window traded, measured from the wallet's own SOL movement. Scored more softly than saving, because volume is the easier of the two to manufacture.",
-    empty: "No settled window has traded anything measurable yet.",
-  },
-};
+/** A streak worth a flame: more than three days, so the first run nobody notices does not earn one. */
+const FIRE_FROM = 4;
 
-/** 1, 2 and 3 are worth seeing at a glance; the rest is a number in a column. */
-function RankChip({ rank }: { readonly rank: number }) {
+/**
+ * Gold, silver, bronze — and a plain number below. The trophy is the reference
+ * board's one flourish, and it earns its place by making the top three legible
+ * without reading a digit.
+ */
+function RankCell({ rank }: { readonly rank: number }) {
   const medal =
     rank === 1
-      ? "bg-amber-400/20 text-amber-700 ring-amber-500/30 dark:text-amber-300"
+      ? "bg-amber-400/15 text-amber-600 ring-amber-500/30 dark:text-amber-300"
       : rank === 2
-        ? "bg-zinc-400/20 text-zinc-700 ring-zinc-500/30 dark:text-zinc-300"
-        : rank === 3
-          ? "bg-orange-500/15 text-orange-700 ring-orange-600/30 dark:text-orange-300"
-          : "text-muted-foreground";
+        ? "bg-zinc-400/15 text-zinc-600 ring-zinc-400/30 dark:text-zinc-300"
+        : "bg-orange-500/10 text-orange-700 ring-orange-600/30 dark:text-orange-300";
+  if (rank > 3) return <span className="font-mono text-sm tabular-nums text-muted-foreground">{rank}</span>;
   return (
-    <span
-      className={cn(
-        "inline-flex size-7 items-center justify-center rounded-full font-mono text-xs tabular-nums",
-        rank <= 3 && "font-semibold ring-1",
-        medal,
-      )}
-    >
-      {rank}
+    <span className={cn("inline-flex size-7 items-center justify-center rounded-full ring-1", medal)}>
+      <Trophy aria-hidden className="size-3.5" />
+      <span className="sr-only">{rank}</span>
     </span>
   );
 }
 
-/** An address, short enough to scan and long enough to recognise, linked to Solscan. */
-function SubjectCell({ address }: { readonly address: string }) {
+/**
+ * An address, short enough to scan and long enough to recognise, linked to
+ * Solscan — EXCEPT ON A SAMPLE ROW, which is linked to nothing. A link under an
+ * invented score is the difference between "here is what the page looks like"
+ * and a claim about whatever account that string happens to be.
+ */
+function SubjectCell({ address, sample }: { readonly address: string; readonly sample: boolean }) {
+  if (sample) {
+    return (
+      <span className="font-mono text-sm text-muted-foreground" title="Sample row — not a real account">
+        {address.slice(0, 4)}…{address.slice(-4)}
+      </span>
+    );
+  }
   return (
     <a
       href={solscanAccountUrl(address)}
       target="_blank"
       rel="noreferrer"
-      className="group inline-flex items-center gap-1.5 font-mono text-xs hover:underline"
+      className="group inline-flex items-center gap-1.5 font-mono text-sm hover:underline"
       title={address}
     >
       {address.slice(0, 4)}…{address.slice(-4)}
@@ -71,65 +67,91 @@ function SubjectCell({ address }: { readonly address: string }) {
   );
 }
 
-function BoardTable({ entries, board, empty }: { readonly entries: readonly LeaderboardEntry[]; readonly board: BoardName; readonly empty: string }) {
+function StreakCell({ streak }: { readonly streak: number }) {
+  if (streak < FIRE_FROM) return <span className="font-mono tabular-nums text-muted-foreground">{streak}</span>;
+  return (
+    <span className="inline-flex items-center gap-1 font-mono tabular-nums text-orange-600 dark:text-orange-400">
+      <Flame aria-hidden className="size-3.5" />
+      {streak}
+      <span className="sr-only">days running</span>
+    </span>
+  );
+}
+
+const HEAD = "text-xs font-medium tracking-wide text-muted-foreground uppercase";
+
+function BoardTable({
+  entries,
+  sample,
+  empty,
+}: {
+  readonly entries: readonly LeaderboardEntry[];
+  readonly sample: boolean;
+  /** What an empty cut means, which is not the same thing for a week as for all time. */
+  readonly empty: string;
+}) {
   if (entries.length === 0) {
-    return (
-      <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
-        {/* EMPTY IS NOT AN ERROR, and it is not zeros either: it says what would fill it. */}
-        {empty}
-      </div>
-    );
+    // EMPTY IS NOT AN ERROR, and it is not zeros either: it says what would
+    // fill it. A QUIET WEEK IS NOT AN EMPTY HISTORY, which is what the old
+    // sentence said while the line above it counted a settlement.
+    return <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">{empty}</div>;
   }
   return (
-    <div className="overflow-hidden rounded-md border">
+    <div className="overflow-hidden rounded-lg border">
       <Table>
         <TableHeader>
           <TableRow className="hover:bg-transparent">
-            <TableHead className="w-14 text-center">#</TableHead>
-            <TableHead>Pension</TableHead>
-            <TableHead className="text-right">Points</TableHead>
-            <TableHead className="hidden text-right sm:table-cell">Days</TableHead>
-            <TableHead className="hidden text-right sm:table-cell">Streak</TableHead>
-            <TableHead className="text-right">{BOARD_COPY[board].column}</TableHead>
+            <TableHead className={cn("w-16 pl-4", HEAD)}>Rank</TableHead>
+            <TableHead className={HEAD}>Pension</TableHead>
+            <TableHead className={cn("hidden text-right sm:table-cell", HEAD)}>Days</TableHead>
+            <TableHead className={cn("hidden text-right sm:table-cell", HEAD)}>Streak</TableHead>
+            <TableHead className={cn("hidden text-right md:table-cell", HEAD)}>Saved</TableHead>
+            <TableHead className={cn("hidden text-right lg:table-cell", HEAD)}>Traded</TableHead>
+            <TableHead className={cn("pr-4 text-right", HEAD)}>Points</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {entries.map((entry) => (
-            <TableRow key={entry.subject}>
-              <TableCell className="text-center">
-                <RankChip rank={entry.rank} />
+            <TableRow key={entry.subject} className={cn(entry.rank <= 3 && "bg-muted/30")}>
+              <TableCell className="pl-4">
+                <RankCell rank={entry.rank} />
               </TableCell>
               <TableCell>
-                <SubjectCell address={entry.subject} />
-                <div className="text-xs text-muted-foreground sm:hidden">
-                  {entry.activeDays} {entry.activeDays === 1 ? "day" : "days"} · streak {entry.bestStreak}
+                <SubjectCell address={entry.subject} sample={sample} />
+                {/* What the narrow screens drop, kept as one quiet line. */}
+                <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground sm:hidden">
+                  <span>
+                    {entry.activeDays} {entry.activeDays === 1 ? "day" : "days"}
+                  </span>
+                  <span aria-hidden>·</span>
+                  <StreakCell streak={entry.bestStreak} />
+                  <span aria-hidden>·</span>
+                  <span>{formatSol(entry.amountRaw)} SOL</span>
                 </div>
               </TableCell>
+              <TableCell className="hidden text-right font-mono tabular-nums sm:table-cell">{entry.activeDays}</TableCell>
+              <TableCell className="hidden text-right sm:table-cell">
+                <StreakCell streak={entry.bestStreak} />
+              </TableCell>
+              <TableCell className="hidden text-right font-mono text-sm tabular-nums md:table-cell">
+                {formatSol(entry.amountRaw)} <span className="text-muted-foreground">SOL</span>
+              </TableCell>
+              <TableCell className="hidden text-right font-mono text-sm tabular-nums text-muted-foreground lg:table-cell">
+                {entry.volumeRaw === undefined ? "—" : `${formatSol(entry.volumeRaw)} SOL`}
+              </TableCell>
               <TableCell
-                className="text-right font-mono font-semibold tabular-nums"
-                // WHERE THE NUMBER CAME FROM, on hover: a score nobody can take
-                // apart is a score nobody can argue with.
+                className="pr-4 text-right font-mono text-base font-semibold tabular-nums text-emerald-600 dark:text-emerald-400"
+                // WHERE THE NUMBER CAME FROM, on hover: the parts and the sum
+                // they make. A score nobody can take apart is a score nobody
+                // can argue with.
                 title={
                   entry.breakdown === undefined
                     ? undefined
-                    : `${entry.breakdown.participation} for showing up · ${entry.breakdown.size} for size · ${entry.breakdown.streak} for the streak`
+                    : `${entry.breakdown.participation} for showing up + ${entry.breakdown.size} for size + ${entry.breakdown.streak} for the streak` +
+                      (entry.pointsExact === undefined ? "" : ` = ${entry.pointsExact}`)
                 }
               >
                 {entry.points}
-              </TableCell>
-              <TableCell className="hidden text-right font-mono tabular-nums sm:table-cell">{entry.activeDays}</TableCell>
-              <TableCell className="hidden text-right font-mono tabular-nums sm:table-cell">
-                {entry.bestStreak >= 3 ? (
-                  <span className="inline-flex items-center gap-1 text-orange-600 dark:text-orange-400">
-                    <Flame aria-hidden className="size-3.5" />
-                    {entry.bestStreak}
-                  </span>
-                ) : (
-                  entry.bestStreak
-                )}
-              </TableCell>
-              <TableCell className="text-right font-mono text-sm tabular-nums">
-                {formatSol(entry.amountRaw)} <span className="text-muted-foreground">SOL</span>
               </TableCell>
             </TableRow>
           ))}
@@ -139,51 +161,18 @@ function BoardTable({ entries, board, empty }: { readonly entries: readonly Lead
   );
 }
 
-/**
- * The rule, in words, FROM THE SERVICE'S OWN CONSTANTS. Every number below is
- * read out of the payload rather than typed here, so a page that says "10
- * points a day" is a page whose keeper is giving 10 points a day.
- */
-export function ScoringCard({ data, className }: { readonly data: LeaderboardData; readonly className?: string }) {
+/** The scoring rule in a sentence, built from the constants the service applied. */
+function ruleLine(data: LeaderboardData): string {
   const { ahorro, volumen } = data.rules;
-  const unitSol = formatSol(String(ahorro.sizeUnit), 6);
   return (
-    <Card className={className}>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Info aria-hidden className="size-4" />
-          How points work
-        </CardTitle>
-        <CardDescription>Use beats size, deliberately.</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3 text-sm text-muted-foreground">
-        <ul className="space-y-2">
-          <li>
-            <strong className="text-foreground">{ahorro.participation} points</strong>{" "}
-            for every day your pension was actually charged — the
-            same whether you saved {unitSol} SOL or fifty.
-          </li>
-          <li>
-            <strong className="text-foreground">up to {ahorro.sizeCap} more</strong>{" "}
-            for that day&apos;s size, on a log scale: 100× the amount
-            is worth about 2× the points, and past ~100 SOL in a day it is worth nothing.
-          </li>
-          <li>
-            <strong className="text-foreground">+{ahorro.streakPerDay} per consecutive day</strong>, up to +{ahorro.streakCap}. Coming back
-            beats any single large day.
-          </li>
-          <li>A day that charged nothing does not count, so being swept is not an achievement.</li>
-          <li>
-            Volume is scored more softly — it caps at {volumen.sizeCap} instead of {ahorro.sizeCap} — because a wash trade moves notional and
-            saves nobody anything.
-          </li>
-        </ul>
-        <p className="border-t pt-3 text-xs">
-          One pension is one competitor, however many trading wallets feed it. Nothing stops a person from holding several pensions: this is a
-          ranking of addresses, not of people.
-        </p>
-      </CardContent>
-    </Card>
+    // THE BOARD BELOW IS THE COMBINED ONE, so the sentence has to be too: a
+    // day counts when a settlement charged OR when the window it settled
+    // traded, and the old wording named only the first.
+    `${ahorro.participation} points for every day a pension was charged or its trading measured — the same whether it ` +
+    `saved a thousandth of a SOL or fifty — plus up to ${ahorro.sizeCap + volumen.sizeCap} more for that day's size on ` +
+    `a log scale (${ahorro.sizeCap} of it for saving, ${volumen.sizeCap} for volume), and +${ahorro.streakPerDay} for ` +
+    `each consecutive day up to +${ahorro.streakCap}. Showing up beats showing up with more money. One pension is one ` +
+    `competitor, however many trading wallets feed it.`
   );
 }
 
@@ -207,67 +196,85 @@ function Unavailable({ detail }: { readonly detail: string }) {
   );
 }
 
-export function LeaderboardView({ result, now }: { readonly result: LeaderboardResult; readonly now: string }) {
-  const [board, setBoard] = useState<BoardName>("ahorro");
+/**
+ * ONE BOARD, ONE SCORE. There used to be a Savings tab and a Volume tab, which
+ * asked a visitor to pick which ranking to believe before they had read either;
+ * the score is now both measures together and the split lives in the tooltip.
+ * The week/all-time cut stays — a weekly reset is what gives somebody who joins
+ * on a Thursday a reason to trade.
+ */
+export function LeaderboardView({
+  result,
+  now,
+  sample = false,
+}: {
+  readonly result: LeaderboardResult;
+  readonly now: string;
+  /** Built from example rows, and saying so on screen. */
+  readonly sample?: boolean;
+}) {
   const [range, setRange] = useState<RangeName>("season");
 
   if (!result.ok) return <Unavailable detail={result.detail} />;
   const { data } = result;
-  const entries = data.boards[board][range];
+  const entries = data.boards.total[range];
 
   return (
-    <div className="space-y-4 lg:space-y-6">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        <span>
-          Season began <span className="text-foreground">{dayLabel(data.seasonStart)}</span>
-        </span>
-        <span aria-hidden>·</span>
-        <span>Updated {timeAgo(data.computedAt, now)}</span>
-        <span aria-hidden>·</span>
-        <span>
-          {data.coverage.subjects} {data.coverage.subjects === 1 ? "pension" : "pensions"}, {data.coverage.settlements}{" "}
-          {data.coverage.settlements === 1 ? "settlement" : "settlements"}
-        </span>
-      </div>
-
-      <Tabs value={board} onValueChange={(value) => setBoard(value as BoardName)}>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <TabsList>
-            {BOARD_NAMES.map((name) => (
-              <TabsTrigger key={name} value={name}>
-                {BOARD_COPY[name].label}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-
-          <ToggleGroup
-            type="single"
-            size="sm"
-            variant="outline"
-            value={range}
-            // A toggle group hands back "" when the pressed item is pressed
-            // again; that must not blank the board.
-            onValueChange={(value) => setRange(value === "" ? range : (value as RangeName))}
-            aria-label="Range"
-          >
-            <ToggleGroupItem value="season">This week</ToggleGroupItem>
-            <ToggleGroupItem value="all">All time</ToggleGroupItem>
-          </ToggleGroup>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          <span>
+            Season began <span className="text-foreground">{dayLabel(data.seasonStart)}</span>
+          </span>
+          <span aria-hidden>·</span>
+          <span>Updated {timeAgo(data.computedAt, now)}</span>
+          <span aria-hidden>·</span>
+          <span>
+            {data.coverage.subjects} {data.coverage.subjects === 1 ? "pension" : "pensions"}, {data.coverage.settlements}{" "}
+            {data.coverage.settlements === 1 ? "settlement" : "settlements"}
+          </span>
+          {sample ? (
+            // SAID ON SCREEN, not only in the URL. A board of invented pensions
+            // that looks exactly like the real one is the one thing this page
+            // must never be mistaken for.
+            <Badge variant="secondary" className="font-normal">
+              Sample data — not real pensions
+            </Badge>
+          ) : null}
         </div>
 
-        {BOARD_NAMES.map((name) => (
-          <TabsContent key={name} value={name} className="space-y-3">
-            <p className="text-sm text-muted-foreground">{BOARD_COPY[name].blurb}</p>
-            <BoardTable entries={data.boards[name][range]} board={name} empty={BOARD_COPY[name].empty} />
-          </TabsContent>
-        ))}
-      </Tabs>
+        <ToggleGroup
+          type="single"
+          size="sm"
+          variant="outline"
+          value={range}
+          // A toggle group hands back "" when the pressed item is pressed
+          // again; that must not blank the board.
+          onValueChange={(value) => setRange(value === "" ? range : (value as RangeName))}
+          aria-label="Range"
+        >
+          <ToggleGroupItem value="season">This week</ToggleGroupItem>
+          <ToggleGroupItem value="all">All time</ToggleGroupItem>
+        </ToggleGroup>
+      </div>
 
-      {entries.length > 0 && (
-        <Badge variant="secondary" className="font-normal">
-          Showing {entries.length} {entries.length === 1 ? "pension" : "pensions"} · {range === "season" ? "this week" : "all time"}
-        </Badge>
-      )}
+      <BoardTable
+        entries={entries}
+        sample={sample}
+        empty={
+          range === "season"
+            ? "No pension has been charged this week. All time has the ones that were."
+            : "No pension has been charged yet. The first settlement puts somebody here."
+        }
+      />
+
+      {/*
+        THE RULE, in one line, where the panel used to be — and as ONE string.
+        Written as flowing JSX with {expressions} in it, the compiler drops the
+        space next to a value when the line happens to break there: the page
+        read "up to 45more". A template literal cannot break that way.
+      */}
+      <p className="max-w-prose text-xs text-muted-foreground">{ruleLine(data)}</p>
     </div>
   );
 }

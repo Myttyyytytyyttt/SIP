@@ -26,9 +26,22 @@
  * needs an identity, which this system deliberately never asks for.
  */
 
-/** The two boards: what was SAVED, and what was TRADED. */
+/** The two things measured: what was SAVED, and what was TRADED. */
 export const BOARDS = ["ahorro", "volumen"] as const;
 export type Board = (typeof BOARDS)[number];
+
+/**
+ * THE BOARD THE PAGE SHOWS: one score, both measures.
+ *
+ * Two separate rankings asked a visitor to choose which one to believe before
+ * they had read either. A day now scores its participation ONCE and adds the
+ * size term of each measure on top, so saving and trading both count and
+ * neither is a different league. The two single-measure boards stay in the
+ * payload — they are what the total is made of, and a score has to be
+ * decomposable to be arguable.
+ */
+export type BoardKey = Board | "total";
+export const BOARD_KEYS = ["total", ...BOARDS] as const;
 
 /** At most this many rows per board: a public payload with a bound on its size. */
 export const MAX_ENTRIES = 100;
@@ -77,7 +90,16 @@ export interface LeaderboardEntry {
   readonly rank: number;
   /** The vault: one competitor per pension, however many trading wallets feed it. */
   readonly subject: string;
+  /** The score as a page shows it: `pointsExact`, rounded. */
   readonly points: number;
+  /**
+   * The score the ORDER is decided by, and the exact sum of the three published
+   * parts. Two numbers exist because one of them was doing both jobs and doing
+   * the second one wrong: an integer score manufactures ties between
+   * competitors up to a whole point apart, and a tie is then broken by
+   * something — whatever that something is, it is not the score.
+   */
+  readonly pointsExact: number;
   readonly activeDays: number;
   readonly bestStreak: number;
   readonly settles: number;
@@ -86,13 +108,37 @@ export interface LeaderboardEntry {
    * here would round a real balance — the web formats from this string.
    */
   readonly amountRaw: string;
+  /**
+   * The notional this competitor traded, in lamports as a decimal string. On
+   * the combined board `amountRaw` is what they SAVED and this is what they
+   * TRADED, so one row can show both without a second request.
+   */
+  readonly volumeRaw: string;
   /** The same total, split the way the page explains it. */
   readonly breakdown: { readonly participation: number; readonly size: number; readonly streak: number };
 }
 
-/** What a day contributes to a board: savings for `ahorro`, notional for `volumen`. */
-function amountOf(row: DayTotals, board: Board): bigint {
-  return board === "ahorro" ? row.contributionRaw : row.volumeRaw;
+/** The money column of a board: what was saved, except on the volume-only one. */
+function amountOf(row: DayTotals, board: BoardKey): bigint {
+  return board === "volumen" ? row.volumeRaw : row.contributionRaw;
+}
+
+/**
+ * Whether a day counts at all. A settlement that charged nothing earns no
+ * participation on the savings board — being swept is not an achievement — but
+ * it DID trade, so it counts wherever volume counts.
+ */
+function counts(row: DayTotals, board: BoardKey): boolean {
+  if (board === "ahorro") return row.contributionRaw > 0n;
+  if (board === "volumen") return row.volumeRaw > 0n;
+  return row.contributionRaw > 0n || row.volumeRaw > 0n;
+}
+
+/** The size term of one day, which on the total board is both measures' own. */
+function sizeOf(row: DayTotals, board: BoardKey): number {
+  if (board === "ahorro") return sizePoints(row.contributionRaw, RULES.ahorro);
+  if (board === "volumen") return sizePoints(row.volumeRaw, RULES.volumen);
+  return sizePoints(row.contributionRaw, RULES.ahorro) + sizePoints(row.volumeRaw, RULES.volumen);
 }
 
 /**
@@ -154,21 +200,33 @@ function round1(value: number): number {
  */
 export function rankBoard(
   rows: readonly DayTotals[],
-  board: Board,
+  board: BoardKey,
   options: { readonly fromDay?: string } = {},
 ): LeaderboardEntry[] {
-  const rules = RULES[board];
-  const merged = new Map<string, { subject: string; day: string; settles: number; amount: bigint }>();
+  // The participation and streak numbers are the savings board's on every
+  // board: a day is a day, whichever measure made it one.
+  const rules = board === "volumen" ? RULES.volumen : RULES.ahorro;
+  const merged = new Map<
+    string,
+    { subject: string; day: string; settles: number; contribution: bigint; volume: bigint }
+  >();
   for (const row of rows) {
     if (options.fromDay !== undefined && row.day < options.fromDay) continue;
-    const amount = amountOf(row, board);
-    if (amount <= 0n) continue;
+    if (!counts(row, board)) continue;
     const key = `${row.subject}|${row.day}`;
     const seen = merged.get(key);
-    if (seen === undefined) merged.set(key, { subject: row.subject, day: row.day, settles: row.settles, amount });
-    else {
+    if (seen === undefined) {
+      merged.set(key, {
+        subject: row.subject,
+        day: row.day,
+        settles: row.settles,
+        contribution: row.contributionRaw,
+        volume: row.volumeRaw,
+      });
+    } else {
       seen.settles += row.settles;
-      seen.amount += amount;
+      seen.contribution += row.contributionRaw;
+      seen.volume += row.volumeRaw;
     }
   }
 
@@ -179,13 +237,20 @@ export function rankBoard(
     a.day < b.day ? -1 : a.day > b.day ? 1 : a.subject < b.subject ? -1 : a.subject > b.subject ? 1 : 0,
   );
 
-  const bySubject = new Map<string, { days: string[]; settles: number; amount: bigint; size: number }>();
+  const bySubject = new Map<
+    string,
+    { days: string[]; settles: number; amount: bigint; volume: bigint; size: number }
+  >();
   for (const day of ordered) {
-    const subject = bySubject.get(day.subject) ?? { days: [], settles: 0, amount: 0n, size: 0 };
+    const subject = bySubject.get(day.subject) ?? { days: [], settles: 0, amount: 0n, volume: 0n, size: 0 };
     subject.days.push(day.day);
     subject.settles += day.settles;
-    subject.amount += day.amount;
-    subject.size += sizePoints(day.amount, rules);
+    // THE SIZE TERM IS THE DAY'S, not the total's: it is capped per day, so
+    // adding the amounts first and scoring once would pay for a month at one
+    // day's ceiling.
+    subject.size += sizeOf({ subject: day.subject, day: day.day, settles: day.settles, contributionRaw: day.contribution, volumeRaw: day.volume }, board);
+    subject.amount += amountOf({ subject: day.subject, day: day.day, settles: day.settles, contributionRaw: day.contribution, volumeRaw: day.volume }, board);
+    subject.volume += day.volume;
     bySubject.set(day.subject, subject);
   }
 
@@ -193,24 +258,47 @@ export function rankBoard(
     const participation = rules.participation * totals.days.length;
     const bestStreak = longestStreak(totals.days);
     const streak = Math.min(rules.streakCap, rules.streakPerDay * Math.max(0, bestStreak - 1));
+    // THE PUBLISHED SIZE IS THE SIZE THAT COUNTS. The score used to be rounded
+    // from the raw sum while the breakdown published a size rounded to one
+    // decimal, two independent roundings — so the parts did not add up to the
+    // total they explained. The live board said 10 + 7.9 + 0 = 18. Summing the
+    // PUBLISHED parts makes the arithmetic checkable by whoever reads it, which
+    // is the only reason to publish a breakdown at all.
+    const size = round1(totals.size);
+    const pointsExact = round1(participation + size + streak);
     return {
       subject,
-      points: Math.round(participation + totals.size + streak),
+      pointsExact,
+      points: Math.round(pointsExact),
       activeDays: totals.days.length,
       bestStreak,
       settles: totals.settles,
       amount: totals.amount,
-      breakdown: { participation, size: round1(totals.size), streak },
+      volume: totals.volume,
+      breakdown: { participation, size, streak },
     };
   });
 
-  // POINTS, THEN AMOUNT, THEN ADDRESS. The last is not a tie-break anybody
-  // deserves; it is there so two equal competitors are ordered the same way on
-  // every refresh instead of swapping places at random.
+  // THE EXACT SCORE, THEN USE, THEN THE ADDRESS — and never the amount.
+  //
+  // THIS ORDER USED TO INVERT THE BOARD'S WHOLE POINT. Sorting on the ROUNDED
+  // score put every pair within one point of each other into the same bucket,
+  // and the tie-break inside that bucket was `amount` — who moved more money.
+  // Measured: a habit of two days (22.4 real points, 0.000193 SOL) ranked BELOW
+  // a single whale day (21.5 real points, 0.198 SOL), because both displayed 22
+  // and the whale's wallet was bigger. That is precisely the ranking this file's
+  // header says it exists to prevent.
+  //
+  // Size is already inside the score, through the capped logarithm. Letting it
+  // in a second time as a tie-break is how a board ends up measuring it twice.
+  // A genuine tie now goes to more active days, then to the longer streak: use,
+  // then use again. The address is last, and only so two identical competitors
+  // are ordered the same way on every refresh instead of swapping at random.
   scored.sort(
     (a, b) =>
-      b.points - a.points ||
-      (b.amount > a.amount ? 1 : b.amount < a.amount ? -1 : 0) ||
+      b.pointsExact - a.pointsExact ||
+      b.activeDays - a.activeDays ||
+      b.bestStreak - a.bestStreak ||
       (a.subject < b.subject ? -1 : a.subject > b.subject ? 1 : 0),
   );
 
@@ -218,10 +306,12 @@ export function rankBoard(
     rank: index + 1,
     subject: entry.subject,
     points: entry.points,
+    pointsExact: entry.pointsExact,
     activeDays: entry.activeDays,
     bestStreak: entry.bestStreak,
     settles: entry.settles,
     amountRaw: entry.amount.toString(),
+    volumeRaw: entry.volume.toString(),
     breakdown: entry.breakdown,
   }));
 }
@@ -239,7 +329,7 @@ export interface LeaderboardSnapshot {
     readonly firstDay: string | null;
     readonly lastDay: string | null;
   };
-  readonly boards: Readonly<Record<Board, { readonly season: LeaderboardEntry[]; readonly all: LeaderboardEntry[] }>>;
+  readonly boards: Readonly<Record<BoardKey, { readonly season: LeaderboardEntry[]; readonly all: LeaderboardEntry[] }>>;
 }
 
 /**
@@ -252,7 +342,7 @@ export function computeLeaderboard(rows: readonly DayTotals[], now: Date): Leade
   const fromDay = dayOf(seasonStart(now));
   const days = rows.map((row) => row.day).sort();
   const boards = Object.fromEntries(
-    BOARDS.map((board) => [board, { season: rankBoard(rows, board, { fromDay }), all: rankBoard(rows, board) }]),
+    BOARD_KEYS.map((board) => [board, { season: rankBoard(rows, board, { fromDay }), all: rankBoard(rows, board) }]),
   ) as LeaderboardSnapshot["boards"];
   return {
     computedAt: now.toISOString(),

@@ -26,6 +26,37 @@ function input(overrides: Partial<DashboardInput> = {}): DashboardInput {
 const connected = (overrides: Partial<DashboardInput> = {}): DashboardInput =>
   input({ authenticated: true, hasUser: true, pensionKey: PENSION_KEY, ...overrides });
 
+describe("the front door does not flash past somebody who has been here", () => {
+  it("shows the landing while Privy answers when nothing says a session exists", () => {
+    expect(decideDashboard(input({ ready: false })).kind).toBe("landing");
+  });
+
+  it("shows a skeleton instead when the browser has connected before", () => {
+    // THE BUG THIS FIXES: clicking Pension from another tab rendered the
+    // landing for the few hundred milliseconds Privy takes and then threw the
+    // visitor into their pension.
+    const decided = decideDashboard(input({ ready: false, knownSession: true }));
+    expect(decided.kind).toBe("loading");
+    expect(decided.account).toBe("placeholder");
+    expect(decided.toggle).toBe(false);
+  });
+
+  it("changes nothing once Privy has answered — the hint is not a session", () => {
+    // A stale hint must not keep anybody out of the front door, and must not
+    // pretend a disconnected visitor is connected.
+    expect(decideDashboard(input({ knownSession: true })).kind).toBe("landing");
+    expect(decideDashboard(input({ knownSession: true })).account).toBe("connect");
+    expect(decideDashboard(connected({ knownSession: false })).kind).toBe("live");
+  });
+
+  it("never turns /activity into a landing either way", () => {
+    for (const hint of [true, false]) {
+      const decided = decideDashboard(input({ ready: false, knownSession: hint, pathname: "/activity", landingAllowed: false }));
+      expect(decided.kind).toBe("loading");
+    }
+  });
+});
+
 describe("a connected pension key is always Live", () => {
   it("?mode=mock with a pension key is LIVE, the toggle is gone, and the URL is normalized to ?mode=live", () => {
     const decided = decideDashboard(connected({ urlMode: "mock" }));

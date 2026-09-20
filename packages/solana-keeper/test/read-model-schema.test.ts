@@ -49,9 +49,22 @@ describe("the settlement mirror's shape", () => {
     // rebuilt history into one enormous day.
     expect(backfill).toContain("at,");
     expect(backfill).toContain("tx.blockTime");
+    // And the LIVE path passes it too, from the receipt it already reads: a row
+    // written as it happens and the same row rebuilt from the chain must carry
+    // the same date, or a rebuild could move somebody between days.
+    expect(keeper).toContain("at: new Date(settle.blockTimeMs)");
+    expect(source("src/settle-tick.ts")).toContain("blockTimeMs = receipt.blockTime * 1_000;");
     // `at` is absent from the ON CONFLICT SET list on purpose.
     const onConflict = readModel.slice(readModel.indexOf("ON CONFLICT (wallet_addr, nonce) DO UPDATE"), readModel.indexOf("WHERE ${READ_MODEL_SCHEMA}.settlement_event.tx_ref"));
     expect(onConflict).not.toContain("at =");
+  });
+
+  it("reads the NEWEST days when the bound bites, not the oldest", () => {
+    // ORDER BY day ASC LIMIT n keeps the FIRST rows in the ordering. Past the
+    // cap the current week would simply not be in the result, and the season
+    // board — the one the page opens on — would go permanently empty.
+    expect(readModel).toContain("ORDER BY 2 DESC");
+    expect(readModel).not.toContain("ORDER BY 2 ASC");
   });
 
   it("makes the setup script verify columns, not only tables", () => {

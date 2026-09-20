@@ -28,6 +28,7 @@ import { cn } from "@/lib/utils";
 export function SiteHeader({
   activitySheet,
   control = null,
+  contributions = null,
   account,
   current = "pension",
 }: {
@@ -35,6 +36,13 @@ export function SiteHeader({
   activitySheet: React.ReactNode;
   /** The Live/Mock control. A slot, so the header stays ignorant of what it switches. */
   control?: React.ReactNode;
+  /**
+   * The last few contributions, for the bar's spare width. SHOWN ONLY AWAY FROM
+   * THE PENSION: there the same settlements are already on screen in full, and
+   * repeating them in the chrome would be noise. A slot, like everything else
+   * here — the header knows nothing about what is in it.
+   */
+  contributions?: React.ReactNode;
   /** Connect, Disconnect, the pension key, or a placeholder while Privy is asked. */
   account: React.ReactNode;
   readonly current?: "pension" | "activity" | "leaderboard";
@@ -93,7 +101,16 @@ export function SiteHeader({
           ))}
         </nav>
 
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex min-w-0 items-center gap-2">
+          {/*
+            THE RULE THAT SEPARATES IT IS THE STRIP'S OWN. Drawing it here meant
+            testing whether `contributions` was null — but it is a React
+            ELEMENT, always non-null, and it is the COMPONENT that returns
+            nothing when it has no chips. So the rule appeared with nothing
+            beside it. Only the strip knows whether it is empty; it draws both
+            or neither.
+          */}
+          {current === "pension" ? null : contributions}
           {control}
           <ModeToggle />
           {account}

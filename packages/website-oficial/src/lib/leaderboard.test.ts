@@ -34,6 +34,7 @@ const payload = (over: Record<string, unknown> = {}) => ({
   rules: { ahorro: RULES, volumen: { ...RULES, sizeFactor: 4, sizeCap: 20 } },
   coverage: { subjects: 1, settlements: 7, firstDay: "2026-09-14", lastDay: "2026-09-20" },
   boards: {
+    total: { season: [entry()], all: [entry()] },
     ahorro: { season: [entry()], all: [entry()] },
     volumen: { season: [], all: [] },
   },
@@ -84,7 +85,7 @@ describe("parsing what came back", () => {
   it("accepts the keeper's payload and keeps lamports as a string", () => {
     const data = parseLeaderboard(payload());
     expect(data).not.toBeNull();
-    expect(data!.boards.ahorro.season[0]!.amountRaw).toBe("36600000");
+    expect(data!.boards.total.season[0]!.amountRaw).toBe("36600000");
     expect(data!.rules.volumen.sizeCap).toBe(20);
     expect(data!.coverage.settlements).toBe(7);
   });
@@ -94,23 +95,31 @@ describe("parsing what came back", () => {
     expect(parseLeaderboard("<html>502 Bad Gateway</html>")).toBeNull();
     expect(parseLeaderboard(payload({ unit: "sol" }))).toBeNull();
     expect(parseLeaderboard(payload({ rules: { ahorro: RULES } }))).toBeNull();
-    expect(parseLeaderboard(payload({ boards: { ahorro: { season: [] }, volumen: { season: [], all: [] } } }))).toBeNull();
+    expect(parseLeaderboard(payload({ boards: { total: { season: [] }, ahorro: { season: [], all: [] }, volumen: { season: [], all: [] } } }))).toBeNull();
+    // A keeper too old to serve the combined board is refused whole: the page
+    // ranks by `total`, and there is nothing honest to show without it.
+    expect(parseLeaderboard(payload({ boards: { ahorro: { season: [], all: [] }, volumen: { season: [], all: [] } } }))).toBeNull();
   });
 
   it("keeps the breakdown, so a score can be checked by whoever reads the route", () => {
     const withBreakdown = payload({
       boards: {
-        ahorro: { season: [entry({ breakdown: { participation: 50, size: 26, streak: 8 } })], all: [] },
+        total: { season: [entry({ breakdown: { participation: 50, size: 26, streak: 8 } })], all: [] },
+        ahorro: { season: [], all: [] },
         volumen: { season: [], all: [] },
       },
     });
-    expect(parseLeaderboard(withBreakdown)!.boards.ahorro.season[0]!.breakdown).toEqual({ participation: 50, size: 26, streak: 8 });
+    expect(parseLeaderboard(withBreakdown)!.boards.total.season[0]!.breakdown).toEqual({ participation: 50, size: 26, streak: 8 });
     // A keeper too old to send one still ranks, and so does a broken one.
-    expect(parseLeaderboard(payload())!.boards.ahorro.season[0]!.breakdown).toBeUndefined();
+    expect(parseLeaderboard(payload())!.boards.total.season[0]!.breakdown).toBeUndefined();
     const broken = payload({
-      boards: { ahorro: { season: [entry({ breakdown: { participation: "ten" } })], all: [] }, volumen: { season: [], all: [] } },
+      boards: {
+        total: { season: [entry({ breakdown: { participation: "ten" } })], all: [] },
+        ahorro: { season: [], all: [] },
+        volumen: { season: [], all: [] },
+      },
     });
-    const row = parseLeaderboard(broken)!.boards.ahorro.season[0]!;
+    const row = parseLeaderboard(broken)!.boards.total.season[0]!;
     expect(row.points).toBe(84);
     expect(row.breakdown).toBeUndefined();
   });
@@ -119,14 +128,15 @@ describe("parsing what came back", () => {
     const data = parseLeaderboard(
       payload({
         boards: {
-          ahorro: { season: [entry(), { rank: 2, subject: "x" }, entry({ rank: 3, amountRaw: 12 })], all: [] },
+          total: { season: [entry(), { rank: 2, subject: "x" }, entry({ rank: 3, amountRaw: 12 })], all: [] },
+          ahorro: { season: [], all: [] },
           volumen: { season: [], all: [] },
         },
       }),
     );
     // A number where lamports belong is exactly the bug this rejects: JSON
     // would have rounded it on the way here.
-    expect(data!.boards.ahorro.season).toHaveLength(1);
+    expect(data!.boards.total.season).toHaveLength(1);
   });
 });
 
@@ -136,7 +146,7 @@ describe("fetching it", () => {
   it("returns the parsed board", async () => {
     const answer = await fetchLeaderboard(env, vi.fn().mockResolvedValue(Response.json(payload())) as unknown as typeof fetch);
     expect(answer.ok).toBe(true);
-    expect(answer.ok === true && answer.data.boards.ahorro.all[0]!.points).toBe(84);
+    expect(answer.ok === true && answer.data.boards.total.all[0]!.points).toBe(84);
   });
 
   it("passes the keeper's own reason through when it refuses", async () => {

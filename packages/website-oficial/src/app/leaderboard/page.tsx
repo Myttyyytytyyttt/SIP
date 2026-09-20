@@ -1,12 +1,6 @@
 /**
  * /leaderboard — who is actually using this, ranked.
  *
- * OUTSIDE THE DASHBOARD GROUP, ON PURPOSE. The rankings are public: no Privy
- * session, no live store, no pension key. Mounting this inside the dashboard's
- * frame would put a second PrivyProvider in the tree (the bug that group exists
- * to prevent) and would make a page that is about other people depend on
- * whether you are signed in.
- *
  * THE DATA COMES FROM THE KEEPER, not from a database this app talks to. The
  * site still holds no connection string; it reads one public URL, server side,
  * through a shared cache — see src/lib/leaderboard.ts.
@@ -18,13 +12,18 @@
  */
 
 import type { Metadata } from "next";
-import Link from "next/link";
+import { cookies } from "next/headers";
 
-import { LeaderboardView, ScoringCard } from "@/components/leaderboard-view";
+import { LeaderboardAccountHost } from "@/components/leaderboard-account-host";
+import { OpenPension } from "@/components/open-pension";
+import { LeaderboardView } from "@/components/leaderboard-view";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
-import { Button } from "@/components/ui/button";
+import { toSolanaPublicConfig } from "@/lib/config";
 import { fetchLeaderboard } from "@/lib/leaderboard";
+import { loadConfig } from "@/lib/load-config";
+import { SAMPLE_LEADERBOARD } from "@/lib/leaderboard-sample";
+import { SESSION_HINT_COOKIE, hasSessionHint } from "@/lib/session-hint";
 
 export const metadata: Metadata = {
   title: "Leaderboard — SaverFi",
@@ -35,10 +34,28 @@ export const metadata: Metadata = {
 // costs a cached read rather than a keeper request per visitor.
 export const dynamic = "force-dynamic";
 
-export default async function LeaderboardPage() {
-  const result = await fetchLeaderboard();
+export default async function LeaderboardPage({
+  searchParams,
+}: {
+  readonly searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  // ?demo=1 fills the board with ten invented pensions, for looking at the page
+  // when the chain has one row on it. It is labelled on screen, never silent.
+  const sample = (await searchParams)["demo"] === "1";
+  const result = sample ? ({ ok: true, data: SAMPLE_LEADERBOARD } as const) : await fetchLeaderboard();
   const now = new Date().toISOString();
-  const scoring = result.ok ? <ScoringCard data={result.data} className="border-0 bg-transparent shadow-none" /> : null;
+  // WHO GETS PRIVY HERE, AND WHO DOES NOT. This page is public and most of its
+  // readers have no session: making every one of them download a wallet SDK to
+  // render a corner of the chrome is a bad trade. So the decision is taken on
+  // the server, before the first paint, from the session hint — a stranger gets
+  // a link and no Privy at all, and somebody coming back gets the same bar they
+  // have inside the app: their key, their balance and their way out.
+  //
+  // A STALE HINT COSTS A MOUNT, NOT A LIE: Privy answers "not authenticated",
+  // the bar falls back to the link, and the hint clears itself.
+  const returning = hasSessionHint((await cookies()).get(SESSION_HINT_COOKIE)?.value);
+  const loaded = loadConfig();
+  const config = loaded.ok ? toSolanaPublicConfig(loaded.config) : null;
 
   return (
     <div className="flex min-h-dvh flex-col">
@@ -47,33 +64,38 @@ export default async function LeaderboardPage() {
         // NO CONNECT BUTTON HERE. Connecting needs the Privy provider this page
         // deliberately does not mount, so the account slot is a door back to
         // the app rather than a button that would need a second provider.
-        account={
-          <Button asChild size="sm">
-            <Link href="/">Open my pension</Link>
-          </Button>
-        }
+        account={returning && config !== null ? <LeaderboardAccountHost config={config} /> : <OpenPension returning={returning} />}
         activitySheet={
-          <div className="p-2">{scoring ?? <p className="text-sm text-muted-foreground">Scoring is explained once the rankings load.</p>}</div>
+          <p className="p-4 text-sm text-muted-foreground">
+            The pensions that save most often. A day counts when a settlement charged it, or when the window that
+            settlement closed had traded; showing up beats showing up with more money.
+          </p>
         }
       />
 
-      <div className="flex flex-1">
-        <aside className="hidden w-80 shrink-0 border-r lg:block xl:w-88">
-          <div className="sticky top-14 p-2">{scoring}</div>
-        </aside>
-
-        <main className="flex min-w-0 flex-1 flex-col gap-4 p-4 lg:gap-6 lg:p-6">
-          <header className="space-y-1">
-            <h1 className="text-2xl font-semibold tracking-tight">Leaderboard</h1>
-            <p className="max-w-prose text-sm text-muted-foreground">
-              Every settlement this keeper has recorded, grouped by pension. The ranking rewards saving often over saving big — the whole
-              scoring rule is in the panel, and every number in it comes from the service that applied it.
+      <main className="flex min-w-0 flex-1 flex-col gap-5 p-4 lg:gap-6 lg:p-6">
+        {/*
+          THE BANNER. One wide card that says what this page ranks before any
+          number appears — the reference board's shape, in this site's palette
+          rather than its colours.
+        */}
+        <section className="relative overflow-hidden rounded-xl border bg-gradient-to-br from-emerald-500/10 via-background to-background px-6 py-10 sm:px-10 sm:py-12">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0"
+            style={{ background: "radial-gradient(60% 70% at 85% 30%, rgba(16,185,129,0.12) 0%, transparent 65%)" }}
+          />
+          <div className="relative max-w-prose">
+            <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Leaderboard</h1>
+            <p className="mt-2 text-sm text-muted-foreground sm:text-base">
+              The pensions that feed themselves most often. Every settlement this keeper has recorded, grouped by
+              pension and scored on use rather than size.
             </p>
-          </header>
+          </div>
+        </section>
 
-          <LeaderboardView result={result} now={now} />
-        </main>
-      </div>
+        <LeaderboardView result={result} now={now} sample={sample} />
+      </main>
 
       <SiteFooter now={now} />
     </div>

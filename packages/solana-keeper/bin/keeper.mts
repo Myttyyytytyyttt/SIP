@@ -1165,6 +1165,11 @@ async function sweep(): Promise<void> {
               volumeRaw: settle.tradedLamports ?? 0n,
               txRef: settle.signature,
               height: settle.endSlot,
+              // THE CHAIN'S CLOCK, NOT THIS PROCESS'S, whenever the receipt gave
+              // one: the board groups by UTC day, and a settle either side of
+              // midnight must land on the day it happened — the same day a
+              // rebuild from the chain would give it.
+              ...(settle.blockTimeMs === undefined ? {} : { at: new Date(settle.blockTimeMs) }),
             })
               // THE BOARD CHANGES EXACTLY HERE, so it is recomputed here and
               // not two minutes later: somebody who just saved and went to look

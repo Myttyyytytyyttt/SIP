@@ -19,14 +19,22 @@
 
 import { DashboardFrame, type DashboardLoadJson } from "@/components/dashboard-shell";
 import { WalletsHost } from "@/components/wallets-host";
+import { cookies } from "next/headers";
+
 import { toSolanaPublicConfig } from "@/lib/config";
 import { loadConfig } from "@/lib/load-config";
+import { SESSION_HINT_COOKIE, hasSessionHint } from "@/lib/session-hint";
 import { mock } from "@/mocks";
 
 // The configuration is read at request time, never at build time.
 export const dynamic = "force-dynamic";
 
-export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
+  // READ BEFORE THE FIRST PAINT, which is the whole point: a returning visitor
+  // must not be shown the front door while Privy is still answering. It is a
+  // hint, not a credential — see src/lib/session-hint.ts.
+  const knownSession = hasSessionHint((await cookies()).get(SESSION_HINT_COOKIE)?.value);
+
   // The example, always. The frame adds the one note that goes over it.
   const sample: DashboardLoadJson = { source: "mock", data: mock, notice: null };
 
@@ -41,7 +49,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <WalletsHost config={walletsConfig} problems={walletsProblems}>
-      <DashboardFrame mock={sample} walletsConfigured={walletsConfig !== null}>
+      <DashboardFrame mock={sample} walletsConfigured={walletsConfig !== null} knownSession={knownSession}>
         {children}
       </DashboardFrame>
     </WalletsHost>

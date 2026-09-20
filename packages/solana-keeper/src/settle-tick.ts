@@ -86,6 +86,19 @@ export interface SettleResult {
    * never charged, and absent from every outcome that measured nothing.
    */
   readonly tradedLamports?: bigint;
+  /**
+   * WHEN THE CHAIN SAYS THIS SETTLED — the receipt's blockTime, in ms.
+   *
+   * The mirror's `at` used to default to the writer's clock, seconds later.
+   * Seconds only matter once a year: a settle that lands just before midnight
+   * UTC and is written just after is credited to the WRONG DAY, and the
+   * leaderboard groups by day — a streak breaks, or one it should not have
+   * earned appears. The receipt is already read, one line above, to learn how
+   * much moved; taking its timestamp costs nothing and makes the live row and a
+   * rebuilt one carry the same date. Absent when the receipt could not be read,
+   * where the column's own default is the honest fallback.
+   */
+  readonly blockTimeMs?: number;
   readonly signature?: string;
   /** The nonce this settlement consumed, and the slot it closed. Carried out
    * so the keeper can record history without re-deriving either. */
@@ -534,6 +547,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   // to report HOW MUCH; a failure to read it must never turn a real settlement
   // into a FAILED — so it lives in its own try, outside the broadcast's.
   let settled: bigint | null = null;
+  let blockTimeMs: number | undefined;
   let receiptErr: TransactionError | null = null;
   try {
     // THROUGH THE SHARED READER, so this receipt and the walk agree about which
@@ -559,6 +573,10 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     }
     // A second, independent read of success: the receipt's own meta.err. If it
     // is set, the tx did NOT settle, even though its status said it did.
+    // The chain's own timestamp for this settlement, whatever the receipt says
+    // about its amount: a reverted settle writes no row, so this is only ever
+    // read for one that landed.
+    if (receipt?.blockTime != null) blockTimeMs = receipt.blockTime * 1_000;
     if (receipt?.meta?.err != null) receiptErr = receipt.meta.err;
     else if (receipt?.meta) {
       // pre/postBalances are consensus data about exactly this tx — no racy
@@ -593,6 +611,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
           (settled === paid ? "" : ` — WARNING: the vault moved ${settled} lamports, not the ${paid} settle_v2 computes for this base`),
     ...carried,
     ...(settled === null ? {} : { settledLamports: settled }),
+    ...(blockTimeMs === undefined ? {} : { blockTimeMs }),
     signature,
     nonce: link.settlementNonce,
     endSlot: inputs.sessionEndSlot,

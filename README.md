@@ -23,7 +23,7 @@ No deposit. No decision to save. Trade where you already trade.
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 ![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)
 ![Keeper](https://img.shields.io/badge/keeper-live_on_Railway-0B0D0E?logo=railway&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-1%2C891_passing-2EA043)
+![Tests](https://img.shields.io/badge/tests-1%2C900%2B_passing-2EA043)
 ![Status](https://img.shields.io/badge/status-beta-F5A623)
 
 </div>
@@ -48,7 +48,7 @@ Not a testnet, not a simulation. One real trade, measured, settled and invested 
 |---|---|---|
 | **1. Vault created** | The owner's pension key signed the vault into existence | [`5EMtg7aY…`](https://solscan.io/tx/5EMtg7aYUG7fqN8h9heZ8Ht6dNbmKd1tYkkG7UTA19gMcFaSbG2kzKrs2YaEaiZiyevQ8KV9gojS7wKo1Rk3RVQd) |
 | **2. Trading wallet linked** | A wallet bound to that vault, with its rate | [`55oN6Nxu…`](https://solscan.io/tx/55oN6NxuNViZZJ2g3VJDbu4Vgor2JiCntYqpW1aaZfEWddQxTSnTm7KenwPDXjFmAWzxZ8pLGBsEEZJo1sp2BqyV) |
-| **3. The slice was taken** | `settle_v2` moved **0.036634582 SOL** out of the trading wallet and into the vault | [`2tE3BMTa…`](https://solscan.io/tx/2tE3BMTa6BPUmxaWvxDPEaK4piZ3KKL7pXGpmRHcUy6fHD2AK66rF6XnAKbNADKaarjSNGxTHqxqJpGFZ79vzvpy) |
+| **3. The slice was taken** | `settle_v2` moved **0.036634582 SOL** into the vault — exactly 20 % of the 0.183172913 SOL that trading session made | [`2tE3BMTa…`](https://solscan.io/tx/2tE3BMTa6BPUmxaWvxDPEaK4piZ3KKL7pXGpmRHcUy6fHD2AK66rF6XnAKbNADKaarjSNGxTHqxqJpGFZ79vzvpy) |
 | **4. The slice bought stock** | The vault wrapped, converted, and swapped through Raydium CLMM into **SPYx** | [`2YdLAtx…`](https://solscan.io/tx/2YdLAtxPYSUu4EJJrN9wiqXnPJhiWHEF3F9d14XoJAUD7X9qFLeQB64hmC6wmHbJoaVwCzd6zLzwXM3uux2c2MBw) |
 | **5. And it is still there** | The vault holds **0.00692812 SPYx** today — an S&P 500 position paid for entirely by one trade's profit | [vault `EFXK995P…`](https://solscan.io/account/EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU) |
 
@@ -85,6 +85,8 @@ flowchart LR
 
 **The measurement is attested, not trusted.** The keeper signs an Ed25519 attestation of what it measured; the program verifies that signature against the attester named in its own on-chain config, checks a nonce and a frontier slot so no window is replayed or run backwards, clamps the result to the vault's maximum contribution, and refuses outright if the settlement would push the trading wallet below the reserve its owner set.
 
+**Linking a wallet takes a third signature.** Not just the owner's and the wallet's on the transaction — the wallet also signs a separate 140-byte consent naming this program, this wallet, this vault and this owner, which the program verifies before it will bind anything. It matters because a Privy policy for a custom program can only match the program id: a seat allowed to sign `settle_v2` is also allowed to sign `link_wallet`, and could otherwise bind a fresh wallet to a stranger's vault. What that seat cannot do is sign a *message*. The consent starts with the byte `0xFF`, which no Solana transaction can begin with, so those bytes can never be replayed as one.
+
 **The keeper is dry by default.** A dry run never even reads a signing secret. Moving money takes an explicit arming variable *and* a byte-exact confirmation sentence *and* the on-chain config naming the keeper's key — a conjunction it re-asks on every single sweep.
 
 ---
@@ -92,6 +94,16 @@ flowchart LR
 ## What's on chain
 
 The `sip_vault` program — [`6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J`](https://solscan.io/account/6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J) — is 17 instructions, 4 account types and 39 named errors.
+
+**The bytes running on mainnet are the bytes this repository tests.** Not "built from this source" — the same file. Check it yourself:
+
+```bash
+solana program dump 6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J /tmp/sip_vault.so -u mainnet-beta
+shasum -a 256 /tmp/sip_vault.so
+# 60e94348d7cf841ac4542b356ed1719047c33256a96894e3a12bdf32c63de823
+# …identical to packages/solana-program/target/deploy/sip_vault.so, and to the
+#   hash the keeper's local-validator tests pin their run against.
+```
 
 <details>
 <summary><b>The instruction set</b></summary>
@@ -148,10 +160,10 @@ Connect a Solana wallet and every number is read from mainnet through the app's 
 - [x] **Secret redaction on every log line and every alert body**, including a net for key material no one registered
 - [x] **The Docker image gates itself** — typecheck, the whole test suite, and a preflight that really constructs all four money-moving instructions
 - [x] **Critical alerts to Telegram**, with delivery counted and reported on `/status`
+- [x] **[Usage leaderboard](https://sip-website-oficial.vercel.app/leaderboard)** — points come from showing up (participation and streak), with the size term capped and logarithmic, so a large wallet cannot buy the top spot
 
 ### 🔨 In progress
 
-- [ ] **Usage leaderboard** — the code shipped; the live database still needs its migration before it can serve a row
 - [ ] **Volume mode end to end** — the program accepts it; the keeper cannot yet measure volume from real trades
 - [ ] **SaverFi's own landing footage** — the hero still plays the reference template's clip from a third party's CDN
 - [ ] **Settlement at scale** — proven n = 1; the next milestone is many wallets, many windows
@@ -172,7 +184,6 @@ Connect a Solana wallet and every number is read from mainnet through the app's 
 A hackathon README that overclaims is worse than one that claims less, so:
 
 - The money path is **proven once**, on 2026-09-19, for one wallet and one vault. It is real, and it is n = 1.
-- The **leaderboard returns an error in production** until the live database gets the column the keeper writes.
 - The landing's background video **belongs to the reference template**, not to SaverFi.
 - The program is **upgradeable by a single team key** with no timelock. That is a beta posture, stated plainly.
 - `withdraw` and `withdraw_token` are implemented and tested, but **have not yet been exercised on mainnet**.
@@ -246,7 +257,7 @@ Never `git grep -n -I -E '\bSIP\b'`: git's regex engine has no `\b`, so that pat
 
 <div align="center">
 
-**[Open the app](https://sip-website-oficial.vercel.app)** · **[@SaverFi](https://x.com/SaverFi)** · **[The program on Solscan](https://solscan.io/account/6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J)** · **[Keeper status](https://sip-solana-keeper-production.up.railway.app/status)**
+**[Open the app](https://sip-website-oficial.vercel.app)** · **[Leaderboard](https://sip-website-oficial.vercel.app/leaderboard)** · **[@SaverFi](https://x.com/SaverFi)** · **[The program on Solscan](https://solscan.io/account/6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J)** · **[Keeper status](https://sip-solana-keeper-production.up.railway.app/status)**
 
 <sub>Built on Solana. Beta — the program is upgradeable and the vault holds real value.</sub>
 

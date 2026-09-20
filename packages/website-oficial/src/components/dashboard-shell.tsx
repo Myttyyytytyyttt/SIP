@@ -34,6 +34,7 @@ import { DataModeToggle } from "@/components/data-mode";
 import { Landing } from "@/components/landing";
 import { LiveBody } from "@/components/live/LiveBody";
 import { LiveConnectCard, LiveKeylessCard, LiveLoading, LivePrivyStalled, LiveUnavailableCard, LiveUnreadable } from "@/components/live/LiveStates";
+import { DisconnectButton, PensionKeyChip, worthFrom } from "@/components/account-chip";
 import { Num } from "@/components/num";
 import { PensionPanel } from "@/components/pension-panel";
 import { SavingsRulePanel } from "@/components/savings-rule-panel";
@@ -46,6 +47,7 @@ import { WalletActivity } from "@/components/wallet-activity";
 import { useWalletsClosed, useWalletsOpener } from "@/components/wallets-host";
 import { useLiveDashboard, type LiveDashboardStore } from "@/hooks/use-live-dashboard";
 import { decideDashboard, readUrlMode, toggleModeOf, urlWithMode, type DashboardState, type UrlMode } from "@/lib/dashboard-mode";
+import { formatUsd } from "@/lib/amounts";
 import { LIVE_COPY, MODE_COPY } from "@/lib/live-copy";
 import { pensionKeyOf } from "@/lib/pension-key";
 import { privyFailure } from "@/lib/privy-failure";
@@ -83,42 +85,12 @@ export const useDashboard = (): DashboardContextValue | null => useContext(Dashb
 
 const solscanAccountUrl = (address: string): string => `https://solscan.io/account/${address}`;
 
-/** The connected pension key: its short address, a copy button, and a way to look it up. */
-function PensionKeyChip({ address }: { readonly address: string }) {
-  return (
-    <span className="hidden items-center gap-1 rounded-md border px-2 py-1 sm:inline-flex">
-      <Num className="text-xs">{shortAddress(address)}</Num>
-      <CopyButton value={address} />
-      <a
-        href={solscanAccountUrl(address)}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="rounded-sm text-xs text-muted-foreground underline-offset-4 outline-none hover:text-foreground hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
-      >
-        Solscan
-      </a>
-    </span>
-  );
-}
-
-function DisconnectButton({ onDisconnect }: { readonly onDisconnect: () => void }) {
-  return (
-    <>
-      <Button size="sm" variant="outline" className="hidden sm:inline-flex" onClick={onDisconnect}>
-        {LIVE_COPY.disconnect}
-      </Button>
-      <Button size="sm" variant="outline" className="sm:hidden" aria-label={LIVE_COPY.disconnect} onClick={onDisconnect}>
-        <LogOut aria-hidden />
-      </Button>
-    </>
-  );
-}
-
 /** What stands at the right of the header, for each state the frame can be in. */
 function accountSlot(
   state: DashboardState,
   pensionKey: string | null,
   actions: { readonly onConnect: () => void; readonly onDisconnect: () => void; readonly openSetup: () => void },
+  worthUsdcRaw: bigint | null = null,
 ): ReactNode {
   switch (state.account) {
     case "connect-setup":
@@ -147,7 +119,7 @@ function accountSlot(
     case "key-and-disconnect":
       return (
         <>
-          {pensionKey === null ? null : <PensionKeyChip address={pensionKey} />}
+          {pensionKey === null ? null : <PensionKeyChip address={pensionKey} worthUsdcRaw={worthUsdcRaw} />}
           <DisconnectButton onDisconnect={actions.onDisconnect} />
         </>
       );
@@ -159,14 +131,19 @@ function accountSlot(
 export function DashboardFrame({
   mock,
   walletsConfigured,
+  knownSession = false,
   children,
 }: {
   readonly mock: DashboardLoadJson;
   readonly walletsConfigured: boolean;
+  /** From the server's cookie read, before the first paint. */
+  readonly knownSession?: boolean;
   readonly children: ReactNode;
 }) {
   return walletsConfigured ? (
-    <ConfiguredFrame mock={mock}>{children}</ConfiguredFrame>
+    <ConfiguredFrame mock={mock} knownSession={knownSession}>
+      {children}
+    </ConfiguredFrame>
   ) : (
     <UnconfiguredFrame mock={mock}>{children}</UnconfiguredFrame>
   );
@@ -196,6 +173,8 @@ function UnconfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJso
 
   const state = decideDashboard({
     walletsConfigured: false,
+    // No provider here, so rule 1 answers before the hint could matter.
+    knownSession: false,
     privyGaveUp: false,
     ready: false,
     authenticated: false,
@@ -226,7 +205,15 @@ function UnconfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJso
   );
 }
 
-function ConfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJson; readonly children: ReactNode }) {
+function ConfiguredFrame({
+  mock,
+  knownSession,
+  children,
+}: {
+  readonly mock: DashboardLoadJson;
+  readonly knownSession: boolean;
+  readonly children: ReactNode;
+}) {
   const { ready, authenticated, user, logout } = usePrivy();
   const { urlMode, pathname, setMode } = useMode();
   const [loginFailure, setLoginFailure] = useState<string | null>(null);
@@ -256,6 +243,7 @@ function ConfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJson;
 
   const state = decideDashboard({
     walletsConfigured: true,
+    knownSession,
     privyGaveUp: gaveUp,
     ready,
     authenticated,
@@ -299,7 +287,17 @@ function ConfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJson;
     mock,
     live,
     pensionKey,
-    account: accountSlot(state, pensionKey, { onConnect, onDisconnect, openSetup: () => openWallets?.() }),
+    // THE FIGURE FOLLOWS THE BODY THAT IS ACTUALLY DRAWN. A read whose VAULT
+    // failed still carries prices and token accounts, so "ready" alone put a
+    // dollar figure in the bar on the very screen that says the pension could
+    // not be read — two answers to one question, on one screen. The stage the
+    // page branches on is the one this reads.
+    account: accountSlot(
+      state,
+      pensionKey,
+      { onConnect, onDisconnect, openSetup: () => openWallets?.() },
+      worthFrom(live.view),
+    ),
     setMode,
     onConnect,
     onDisconnect,
