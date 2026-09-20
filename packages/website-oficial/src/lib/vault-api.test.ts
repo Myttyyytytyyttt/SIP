@@ -57,8 +57,10 @@ describe("words", () => {
       "The issuer has frozen this token account. SOL withdrawals still work.",
     );
     expect(transactionErrorWords(null, ["Program log: Error: Account is frozen"])).toBe(FAILURE_COPY.frozen);
+    // The log names no mint, and the basket now holds two stocks with two
+    // different issuers, so the words may not pick one of them.
     expect(transactionErrorWords(instructionError(0x43), ["Program log: Transferring, minting, and burning is paused on this mint"])).toBe(
-      "The issuer has paused SPYx transfers.",
+      "The issuer has paused transfers of that stock.",
     );
     expect(transactionErrorWords(instructionError(6023), ["Program log: AnchorError occurred. Error Message: the protocol is paused."])).toContain(
       "Withdrawals are not affected",

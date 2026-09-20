@@ -55,7 +55,7 @@ import { LABEL } from "@/lib/classes";
 import { todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
 import { floorsState } from "@/lib/live-model";
 import type { InvestPolicyBuildJson, InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
-import { INVEST_COPY, VAULT_COPY, ratePercent, shortAddress } from "@/lib/vault-copy";
+import { INVEST_COPY, VAULT_COPY, listAnd, ratePercent, shortAddress } from "@/lib/vault-copy";
 
 type VaultWrite = ReturnType<typeof useVaultWrite>;
 
@@ -273,7 +273,10 @@ function PolicySetup({
   const fees = SIGNATURE_FEE_LAMPORTS + priorityFeeLamports(ownerComputeBudget("set_invest_policy"));
   const weights = basketWeightsBps(OFFERED_LEGS.length);
   const floorText = limits === null ? "today's floor" : formatUsd(limits.floorPerSol);
-  const ceilingText = limits === null ? "today's ceiling" : limits.legs.map((leg) => formatUsd(leg.maxPer1e8)).join(" / ");
+  // "SPYx at 50 % and ANTHROPIC at 50 %", from the offered legs and their
+  // weights — so the prose and the Basket field below cannot say different
+  // things, which is what they did while this sentence named SPYx alone.
+  const basket = listAnd(OFFERED_LEGS.map((leg, index) => `${leg.symbol} at ${ratePercent(weights[index]!)}`));
 
   return (
     <Card>
@@ -281,8 +284,9 @@ function PolicySetup({
         <CardTitle>{INVEST_COPY.title}</CardTitle>
         <CardDescription>
           {INVEST_COPY.policyRule(
+            basket,
             floorText,
-            ceilingText,
+            formatUsd(DEFAULT_PURCHASE_USDC_RAW),
             caps.ok ? formatUsd(caps.maxPerCall) : `$${perBuy.trim()}`,
             caps.ok ? formatUsd(caps.maxRolling30d) : `$${per30Days.trim()}`,
             rent === null ? "some" : formatSol(rent),
@@ -307,6 +311,11 @@ function PolicySetup({
           <p className="text-xs text-destructive">{INVEST_COPY.convertWarning}</p>
         ) : null}
 
+        <div className="space-y-1 rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs">
+          <div className={LABEL}>{INVEST_COPY.thinPoolTitle}</div>
+          <p>{INVEST_COPY.thinPool(formatUsd(DEFAULT_INVEST_CAPS.maxPerCall))}</p>
+        </div>
+
         <div className="space-y-1 rounded-md border px-3 py-2 text-xs">
           <div className={LABEL}>{INVEST_COPY.floorsTitle}</div>
           {limits === null ? (
@@ -317,14 +326,23 @@ function PolicySetup({
               {limits.legs.map((leg) => (
                 <p key={leg.mint}>{INVEST_COPY.legCeiling(leg.symbol, formatUsd(leg.maxPer1e8))}</p>
               ))}
+              <p className="text-muted-foreground">{INVEST_COPY.convertFloorEffect(ratePercent(CONVERT_FLOOR_MARGIN_BPS))}</p>
             </>
           )}
         </div>
 
         <p className="text-xs">{rent === null ? VAULT_COPY.costUnknown : VAULT_COPY.cost(formatSol(rent), formatSol(fees))}</p>
 
+        <div className="space-y-1 rounded-md border px-3 py-2 text-xs">
+          <div className={LABEL}>{INVEST_COPY.costTitle}</div>
+          <p>{INVEST_COPY.issuerCost}</p>
+          <p>{INVEST_COPY.marketCost}</p>
+          <p>{INVEST_COPY.costTogether}</p>
+        </div>
+
         <div className="space-y-2 rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs">
           <p>{INVEST_COPY.freezeNotice}</p>
+          <p>{INVEST_COPY.issuerKeys}</p>
           <label className="flex items-start gap-2">
             <input
               type="checkbox"

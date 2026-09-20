@@ -142,7 +142,7 @@ describe("InvestingCard", () => {
     expect(render(screen({ kind: "ready", state: stateWith({ policy: { status: "unreadable", address: account() } }) }))).toContain("SaverFi could not read your investment policy just now.");
   });
 
-  it("no policy: SaverFi's basket and $5 rule, the default caps, today's limits in the owner's words, the rent, and the issuer's powers; Sign waits for the box", () => {
+  it("no policy: the whole basket in the prose, what the position costs and who sets it, that today's caps may buy nothing, what the SOL floor is for, and the issuer's powers over BOTH stocks; Sign waits for the box", () => {
     const html = render(screen({ kind: "ready", state: stateWith() }));
     // basketWeightsBps(2): equal halves, one line per offered leg.
     expect(html).toContain("SPYx · 50 %, ANTHROPIC · 50 %");
@@ -152,16 +152,58 @@ describe("InvestingCard", () => {
     expect(html).toContain("SOL is never sold below $90.03 (90 % of today&#x27;s $100.04)");
     expect(html).toContain("SPYx is never bought above $801.80 per 100,000,000 raw units (5.3 % over today&#x27;s pool price)");
     expect(html).toContain("ANTHROPIC is never bought above $18.95 per 100,000,000 raw units (5.3 % over today&#x27;s pool price)");
-    expect(html).toContain("the keeper converts it to USDC, never below $90.03 per SOL.");
-    // WHAT THIS SENTENCE READS LIKE AT TWO LEGS is the prose's own problem, not
-    // this card's: policyRule takes ONE ceiling, so two legs arrive joined with a
-    // slash. Asserted as it renders, because that is what the owner is shown today.
-    expect(html).toContain("never paying more than $801.80 / $18.95 per 100,000,000 raw units. At most $1,000.00 per buy and $31,000.00 per 30 days until you change them.");
+    // THE PROSE NAMES THE WHOLE BASKET, from the offered legs and their weights.
+    // It used to open "Your vault invests in SPYx (SP500 xStock) through Raydium"
+    // while the Basket field directly below already read two legs — the card
+    // contradicted itself on screen.
+    expect(html).toContain(
+      "Your vault invests in SPYx at 50 % and ANTHROPIC at 50 %, each through its own Raydium pool, and a buy takes all of them or none.",
+    );
+    expect(html).not.toContain("invests in SPYx (SP500 xStock)");
+    expect(html).toContain("the keeper converts it to USDC, never below $90.03 per SOL, then buys once $5.00 of USDC is ready");
+    expect(html).toContain("At most $1,000.00 per buy and $31,000.00 per 30 days until you change them.");
+    // The per-stock ceilings left the prose: at two legs they were joined by a
+    // slash into "$801.80 / $18.95", a figure of no meaning. One line per stock
+    // in the limits box above is the whole of it now.
+    expect(html).not.toContain("$801.80 / $18.95");
+    expect(html).toContain("or one of the pools is too small for the buy, nothing is bought and no SOL is converted until you sign again.");
     // Policy 5,577,840 + wSOL and USDC 1,488,440 each + SPYx 1,559,560 + ANTHROPIC 1,620,520 lamports, then 5,000 + 30,000 of fees.
     expect(html).toContain("Setting this up costs 0.0117348 SOL of rent for the policy and the vault&#x27;s token accounts, and none of it comes back.");
     expect(html).toContain("Cost: 0.0117348 SOL of rent that does not come back, plus 0.000035 SOL of network fees.");
-    expect(html).toContain("holds a permanent delegate that can move it, including out of your vault.");
-    expect(html).toContain("I understand the issuer can freeze, pause or move SPYx");
+
+    // WHAT THE SOL FLOOR IS FOR, beside the live price it came from: the program
+    // does not validate min_convert_rate_wad, and zero there silently switches
+    // converting off, so the effect and the zero are both said out loud.
+    expect(html).toContain("That floor is what keeps converting switched on: the keeper sells your vault&#x27;s SOL for USDC only at or above it, and it is set 10 % under the price just read above.");
+    expect(html).toContain("it would mean your SOL sold at any price at all.");
+
+    // WHETHER IT CAN BUY AT ALL TODAY. The keeper's depth gate is all-or-nothing
+    // and tests a converting turn at max_per_call itself, so the shipped $1,000
+    // default is refused against ANTHROPIC's pool and takes SPYx and the SOL
+    // conversion down with it.
+    expect(html).toContain("Today, this basket may buy nothing at all");
+    expect(html).toContain("The keeper refuses a buy unless the pool it goes into holds at least 50 times that buy");
+    expect(html).toContain("a Most per buy above that stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance.");
+    expect(html).toContain("Most per buy starts at $1,000.00. Set it to about $380 or less");
+
+    // WHAT THE POSITION COSTS, with each number's owner named: the issuer sets
+    // one and has moved it twice, the day's liquidity sets the other. SPYx is
+    // beside it as the proof that this is these tokens, not Solana.
+    expect(html).toContain("ANTHROPIC&#x27;s issuer charges 1 % of every transfer of it: once when your vault buys it, and once when it leaves.");
+    expect(html).toContain("it has been nothing, then 0.5 %, and it is 1 % now. SPYx charges nothing to transfer.");
+    expect(html).toContain("measured 0.01 % on SPYx, the same at $5, $25 and $100.");
+    expect(html).toContain("about 0.6 % at $5 and at $25, and 1.3 % at $100");
+    expect(html).toContain("The difference is these two issuers and these two pools — not Solana, and not SaverFi.");
+
+    // THE ISSUER RISK HE TICKS A BOX ABOUT. It named SPYx only, which is the
+    // safer leg on every count — he was acknowledging the wrong token.
+    expect(html).toContain("move it out of your vault through a permanent delegate");
+    expect(html).toContain(
+      "On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used, twice, to raise the fee.",
+    );
+    expect(html).toContain("On SPYx those powers sit with three separate keys and there is no fee to raise.");
+    expect(html).toContain("I understand each issuer can freeze, pause or move its own stock out of my vault, and that one key holds all of those powers over ANTHROPIC");
+    expect(html).not.toContain("I understand the issuer can freeze, pause or move SPYx");
     const box = html.match(/<input[^>]*name="invest-acknowledge"[^>]*>/)?.[0] ?? "";
     expect(box).toContain('type="checkbox"');
     expect(box).not.toContain("checked");

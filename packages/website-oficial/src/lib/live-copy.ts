@@ -121,7 +121,7 @@ export const LIVE_COPY = {
   heroVolumeNotOffered: (rate: string): string => `Volume · ${rate} · not settled while ${BRAND} cannot measure volume`,
   heroSince: (date: string): string => `since ${date}`,
   worthNow: "Worth now",
-  worthNowTooltip: "SOL and SPYx at today’s Raydium pool prices; USDC counted at $1",
+  worthNowTooltip: "SOL and each stock in your basket at today’s Raydium pool prices; USDC counted at $1",
   pricesUnavailable: "Prices unavailable",
   /** The PROGRAM's own counter: USDC that invest() has spent. Not the basket's value below. */
   investedSoFar: "Invested so far",

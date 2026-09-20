@@ -26,6 +26,20 @@ export const VOLUME_RATE = ratePercent(DEFAULT_VAULT_POLICY.volumeBps);
  */
 export const LOSS_DROPPED_AFTER_TXS = 100;
 
+/**
+ * HOW SMALL ONE BUY MUST BE BESIDE THE POOL IT GOES INTO: the keeper's
+ * MIN_POOL_DEPTH_MULTIPLE (packages/solana-keeper/src/invest-decision.ts). A
+ * pool's in-side reserve has to cover the buy this many times over or the turn
+ * is refused, so one buy may be at most a FIFTIETH of what that pool holds.
+ * vault-copy.test.ts reads the keeper's file and holds the two equal, the same
+ * way it does for LOSS_DROPPED_AFTER_TXS.
+ */
+export const POOL_DEPTH_MULTIPLE = 50;
+
+/** "SPYx and ANTHROPIC", "SPYx, ANTHROPIC and GLDx", "SPYx" — a list in a sentence. */
+export const listAnd = (items: readonly string[]): string =>
+  items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+
 /** The first and last four characters of an address. */
 export const shortAddress = (address: string): string => (address.length > 10 ? `${address.slice(0, 4)}…${address.slice(-4)}` : address);
 
@@ -179,15 +193,109 @@ export const INVEST_COPY = {
   mostPer30Days: "Most per 30 days",
   floorsTitle: "Today's price limits",
   solFloor: (floor: string, today: string): string => `SOL is never sold below ${floor} (90 % of today's ${today})`,
+  /**
+   * WHAT THE SOL FLOOR ACTUALLY IS, said in words, beside the live price it was
+   * taken from. It reaches the program as min_convert_rate_wad, and the program
+   * does NOT validate it: a zero there is accepted and silently means "sell this
+   * vault's SOL at any price at all". Nothing on this screen can reach zero — the
+   * web never lets the figure be typed, it is always floorWad(live price,
+   * CONVERT_FLOOR_MARGIN_BPS), and vault-flows.ts refuses to sign a build whose
+   * convertWad is null, zero or not exactly that — but the owner is signing the
+   * number, so he is told what it does and what zero would have meant. `margin`
+   * is how far under the live price it sits, from CONVERT_FLOOR_MARGIN_BPS.
+   */
+  convertFloorEffect: (margin: string): string =>
+    `That floor is what keeps converting switched on: the keeper sells your vault's SOL for USDC only at or above it, and it is set ${margin} under the price just read above. It is never zero, and zero is the one value that would matter — it would mean your SOL sold at any price at all.`,
   legCeiling: (symbol: string, max: string): string => `${symbol} is never bought above ${max} per 100,000,000 raw units (5.3 % over today's pool price)`,
   pricesUnknown: "Today's prices could not be read just now. The build reads them again, and the limits you sign are shown before Phantom asks.",
-  /** The owner's words for what a policy does, at the limits shown. */
-  policyRule: (floorUsdPerSol: string, maxUsdPer1e8: string, maxPerCall: string, maxRolling: string, rent: string): string =>
-    `Your vault invests in SPYx (SP500 xStock) through Raydium. When it holds SOL, the keeper converts it to USDC, never below ${floorUsdPerSol} per SOL. It buys SPYx each time $5.00 of USDC is ready, never paying more than ${maxUsdPer1e8} per 100,000,000 raw units. At most ${maxPerCall} per buy and ${maxRolling} per 30 days until you change them. If prices move past these limits, buying waits until you sign again. Nothing is sold at a worse price. Setting this up costs ${rent} SOL of rent for the policy and the vault's token accounts, and none of it comes back.`,
+  /**
+   * The owner's words for what a policy does, at the limits shown. `basket` is
+   * every offered leg with its weight, so this sentence cannot go on naming one
+   * stock after the basket grows — which is exactly how it came to say "invests
+   * in SPYx" while the Basket field beside it already read "SPYx 50 %,
+   * ANTHROPIC 50 %". The per-stock ceilings are NOT inlined here any more: at
+   * two legs they arrived joined by a slash ("$801.80 / $18.95"), a figure of
+   * no meaning, and the box below already prints one line per stock.
+   */
+  policyRule: (basket: string, floorUsdPerSol: string, purchase: string, maxPerCall: string, maxRolling: string, rent: string): string =>
+    `Your vault invests in ${basket}, each through its own Raydium pool, and a buy takes all of them or none. When the vault holds SOL, the keeper converts it to USDC, never below ${floorUsdPerSol} per SOL, then buys once ${purchase} of USDC is ready and never above the per-stock limits below. At most ${maxPerCall} per buy and ${maxRolling} per 30 days until you change them. If a price moves past a limit, or one of the pools is too small for the buy, nothing is bought and no SOL is converted until you sign again. Nothing is sold at a worse price. Setting this up costs ${rent} SOL of rent for the policy and the vault's token accounts, and none of it comes back.`,
+
+  // ── WHAT THE POSITION COSTS, AND WHO OWNS EACH NUMBER ──────────────────────
+  //
+  // The card said nothing at all about this until now, which was the worst of
+  // the three things wrong with it: a person could read the whole screen, tick
+  // the box and sign, and never meet the 2 % that going in and out of ANTHROPIC
+  // hands its issuer. The two costs are split into two sentences ON PURPOSE,
+  // because they have different owners and different remedies — one is a number
+  // a single key sets and has already moved twice, the other is the day's
+  // liquidity. SPYx sits beside ANTHROPIC in both, because without it the reader
+  // has no way to tell "this is what tokenised stocks cost" from "this is what
+  // THIS token costs", and the honest answer is the second.
+  //
+  // EVERY FIGURE BELOW IS A MEASUREMENT, NOT A CONSTANT OF THE CODE, so each one
+  // carries the day it was read and re-reading it is the only way to change it.
+  // Read on mainnet 2026-09-20, epoch 1039, slot 448864409:
+  //  * the transfer fees, from the mints' own TransferFeeConfig — ANTHROPIC
+  //    older{epoch 1032, 50 bps} newer{epoch 1039, 100 bps}, maximum_fee u64::MAX
+  //    so nothing caps it, active 100 bps in the epoch the cluster is in; SPYx
+  //    carries no TransferFeeConfig extension at all.
+  //  * the round trips, from keyless Jupiter quotes at 200 bps slippage, USDC ->
+  //    stock -> USDC at $5 / $25 / $100: SPYx 0.01 % / 0.01 % / 0.01 %,
+  //    ANTHROPIC 0.60 % / 0.57 % / 1.26 %. These are the BEST route on the day
+  //    and so a floor on what this costs, not a promise: SaverFi itself buys
+  //    through one Raydium pool per stock, not through Jupiter's multi-hop.
+  costTitle: "What this costs you, and who decides it",
+  issuerCost:
+    "ANTHROPIC's issuer charges 1 % of every transfer of it: once when your vault buys it, and once when it leaves. Going in and back out therefore gives up about 2 % before the market is involved at all. That figure belongs to the issuer — not to SaverFi and not to Solana — and the issuer moves it: it has been nothing, then 0.5 %, and it is 1 % now. SPYx charges nothing to transfer.",
+  marketCost:
+    "Then there is what the market charges, which depends on the day's liquidity and on how much is bought at once. Buying a stock and selling it straight back measured 0.01 % on SPYx, the same at $5, $25 and $100. The same round trip on ANTHROPIC measured about 0.6 % at $5 and at $25, and 1.3 % at $100 — it gets worse as the buy gets bigger, because its pool is small. Read on 20 September 2026; another day reads differently.",
+  costTogether:
+    "So going in and out of ANTHROPIC costs roughly 2 % to its issuer plus something over half a percent to the market, while SPYx costs almost nothing either way. Both are tokenised stocks on the same chain, bought the same way, held in the same vault. The difference is these two issuers and these two pools — not Solana, and not SaverFi.",
+
+  // ── WHETHER IT CAN BUY AT ALL TODAY ────────────────────────────────────────
+  //
+  // NOT "only one leg can be bought": the keeper's depth gate is all-or-nothing
+  // by explicit doctrine (legDepthDecision refuses "the whole basket ... the deep
+  // ones included, and refusing to convert SOL toward it"), so one leg alone is
+  // not a thing that can happen. And the gate tests a CONVERTING turn at
+  // max_per_call itself (turnSpendCeiling), not at what the vault holds — so the
+  // shipped $1,000 default is the figure it is judged by, and at two equal legs
+  // that is $500 into ANTHROPIC's pool against the 50x it must clear.
+  //
+  // Measured 2026-09-20, epoch 1039, slot 448864213, from the pools' own token
+  // vaults: ANTHROPIC/USDC held 9,541,652,779 raw USDC ($9,541.65), which admits
+  // $190.83 per leg and $381.67 for the whole buy, and gives a $500 leg only
+  // 19.1x cover where 50x is required. SPYx/USDC held $2,380,319.90 — 4,760x on
+  // the same $500. The words below round those DOWN to "about $190 / $380",
+  // because a reader must not read a ceiling as a target.
+  thinPoolTitle: "Today, this basket may buy nothing at all",
+  /**
+   * `defaultCap` is what the Most per buy box starts at, so the sentence names
+   * the very number it is asking to be lowered. The pool figures stay inline
+   * with the measurement recorded above them rather than being passed in: they
+   * are readings of one night, not values the screen can compute.
+   */
+  thinPool: (defaultCap: string): string =>
+    `The keeper refuses a buy unless the pool it goes into holds at least ${POOL_DEPTH_MULTIPLE} times that buy, so a small pool sets a small ceiling. ANTHROPIC's pool held about $9,500 on 20 September 2026, which admits about $190 for its share of a buy — about $380 for the whole buy. And because a buy takes all of the basket or none, a Most per buy above that stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance. Most per buy starts at ${defaultCap}. Set it to about $380 or less if you want the vault to invest while ANTHROPIC's pool is this small. SPYx's pool held about $2.4 million the same night and is nowhere near this limit.`,
+
+  // ── THE ISSUERS' POWERS ────────────────────────────────────────────────────
+  //
+  // The notice and the box the owner TICKS both named SPYx only — and SPYx is
+  // the safer of the two on every count. He was acknowledging the wrong token.
+  // Read on mainnet 2026-09-20, epoch 1039, slot 448864409:
+  //  * ANTHROPIC (Pren1Fv…Lkhw): mint, freeze, pausable, transfer-fee config,
+  //    withdraw-withheld, transfer hook, confidential transfer and the permanent
+  //    delegate are ALL WV9PJN7XTmTLVwbutCLFxp8TyePee6Xq5mRq6Fti5Wc. One key.
+  //  * SPYx (XsoCS1…BDF2W): mint 7pt9tkct…, freeze and pausable JDq14BWv…,
+  //    permanent delegate, hook and metadata 5aMNNLQJ…. Three separate keys, and
+  //    no transfer fee to raise.
   freezeNotice:
-    "SPYx is a tokenized share on Token-2022. Its issuer can freeze or pause it, and holds a permanent delegate that can move it, including out of your vault. If that happens, withdrawing SPYx can fail or find less than you hold. USDC's issuer can freeze USDC accounts too. Withdrawing SOL does not depend on either issuer.",
-  freezeShort: "Its issuer can freeze, pause or move SPYx, even in your vault. Withdrawing SOL does not depend on it.",
-  acknowledge: "I understand the issuer can freeze, pause or move SPYx",
+    "Both stocks are Token-2022 tokens, and each issuer keeps powers over its own that SaverFi cannot take away. An issuer can freeze your vault's account for that stock, pause every transfer of it, and move it out of your vault through a permanent delegate. If any of that happens, withdrawing that stock can fail or find less than you hold. USDC's issuer can freeze USDC accounts too. Withdrawing SOL depends on no issuer at all.",
+  issuerKeys:
+    "The two are not the same risk. On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used, twice, to raise the fee. On SPYx those powers sit with three separate keys and there is no fee to raise. This deserves more of your attention than the price does: it is not the market moving against you, it is one person's decision.",
+  freezeShort:
+    "Each issuer can freeze, pause or move its own stock, even inside your vault, and on ANTHROPIC one key holds all of those powers. Withdrawing SOL does not depend on any of them.",
+  acknowledge: "I understand each issuer can freeze, pause or move its own stock out of my vault, and that one key holds all of those powers over ANTHROPIC",
   sign: "Sign investment policy",
   signing: "Signing…",
   signed: "Policy signed",
@@ -284,7 +392,7 @@ export const FAILURE_COPY = {
   blockhashExpired: "Solana's approval window passed before the transaction was sent. Build it again.",
   alreadyExists: "It already exists. Refreshing.",
   frozen: "The issuer has frozen this token account. SOL withdrawals still work.",
-  issuerPaused: "The issuer has paused SPYx transfers.",
+  issuerPaused: "The issuer has paused transfers of that stock.",
   simulationRefused: "Solana refused this transaction in simulation. Nothing was sent.",
   /** The pension key cannot pay this action's rent and fees; `cost` is its total in SOL when the build said it, else null. */
   needsSol: (cost: string | null): string =>

@@ -142,7 +142,9 @@ describe("WithdrawCard", () => {
   it("tokens: SPYx with the RPC's own amount, the issuer's powers and the account it may create; wSOL arrives as SOL", () => {
     const html = render(screen({ kind: "ready", state: stateWith() }));
     expect(html).toContain("0.12416212");
-    expect(html).toContain("Its issuer can freeze, pause or move SPYx, even in your vault.");
+    // Two stocks, two issuers: the line may no longer name one of them, and it
+    // carries the fact that separates them — one key holds everything on ANTHROPIC.
+    expect(html).toContain("Each issuer can freeze, pause or move its own stock, even inside your vault, and on ANTHROPIC one key holds all of those powers.");
     expect(html).toContain("Creates your own SPYx token account if you have none (0.00155956 SOL of rent, paid by you and kept by you).");
     expect(html).toContain("Arrives in your wallet as SOL.");
     expect(buttons("25 %")).toHaveLength(2);

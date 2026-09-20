@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { LOSS_DROPPED_AFTER_TXS, VAULT_COPY } from "@/lib/vault-copy";
+import { INVEST_COPY, LOSS_DROPPED_AFTER_TXS, POOL_DEPTH_MULTIPLE, VAULT_COPY } from "@/lib/vault-copy";
 
 describe("the PROFIT rule", () => {
   it("says a loss comes off the next gain only until the trading wallet signs the keeper's own count of transactions, and names that count", () => {
@@ -20,5 +20,26 @@ describe("the PROFIT rule", () => {
       `A losing stretch moves nothing, and its loss comes off the next gain. Once your trading wallet has signed ${LOSS_DROPPED_AFTER_TXS} transactions of its own while still behind, that loss is dropped and later gains count in full.`,
     );
     expect(rule).not.toMatch(/its loss comes off the next gain\. One settlement/);
+  });
+});
+
+describe("the thin-pool notice", () => {
+  it("says the keeper's own depth multiple, not a number of its own, and tells the owner to lower the cap it names", () => {
+    // Read as text, never imported: the web does not depend on the keeper.
+    const keeper = readFileSync(fileURLToPath(new URL("../../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
+    const multiple = /export const MIN_POOL_DEPTH_MULTIPLE = ([0-9_]+)n;/.exec(keeper)?.[1];
+    expect(multiple, "MIN_POOL_DEPTH_MULTIPLE in packages/solana-keeper/src/invest-decision.ts").toBeDefined();
+    expect(Number(multiple!.replaceAll("_", ""))).toBe(POOL_DEPTH_MULTIPLE);
+
+    const notice = INVEST_COPY.thinPool("$1,000.00");
+    expect(notice).toContain(`holds at least ${POOL_DEPTH_MULTIPLE} times that buy`);
+    // The cap it asks to be lowered is the one the box starts at, said back.
+    expect(notice).toContain("Most per buy starts at $1,000.00.");
+    // ALL OR NOTHING, which is the keeper's own doctrine: one thin pool refuses
+    // the whole basket AND the SOL conversion, so the notice may not offer the
+    // reader a half-basket that cannot happen.
+    expect(notice).toContain("a buy takes all of the basket or none");
+    expect(notice).toContain("nothing bought, no SOL converted, at any balance");
+    expect(keeper).toContain("refusing to convert SOL toward it");
   });
 });
