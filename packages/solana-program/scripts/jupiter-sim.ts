@@ -549,6 +549,23 @@ async function main(): Promise<void> {
         `${verdictFor(row.venueThreshold).padEnd(19)} ${verdictFor(safe)} (${safe})`,
     );
   }
+  // THE FLOOR UNDER THE SLIPPAGE SETTING, which bites before min_out does.
+  // Jupiter checks its own threshold against what the destination is CREDITED
+  // — net — while quoting gross on some venues, so the fee comes out of the
+  // tolerance and a setting at or below the fee cannot land on those venues.
+  for (const [name, fee] of fees) {
+    const worst = fee.worstCase.basisPoints;
+    if (worst === 0) continue;
+    const usable = args.slippageBps - worst;
+    console.log(
+      `\nSLIPPAGE  ${name}: fee ${worst} bps against slippage ${args.slippageBps} bps -> ` +
+        (usable > 0
+          ? `${usable} bps of real tolerance left.`
+          : `NO tolerance left. On a venue that quotes GROSS this cannot fill at all: ` +
+            `Jupiter reverts with 0x1771 (6001) before our guards run. Raise slippage above ${worst} bps.`),
+    );
+  }
+
   console.log(
     `\nmin_out RULE  min_out = otherAmountThreshold - ceil(otherAmountThreshold * feeBps / 10_000),` +
       `\n              with feeBps read from the DESTINATION mint at the epoch the transaction will LAND` +

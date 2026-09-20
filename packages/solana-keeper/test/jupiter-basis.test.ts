@@ -230,3 +230,69 @@ describe("the min_out a fill cannot reject", () => {
     expect(safeMinOut(threshold, FEE_50)).toBeGreaterThan(safeMinOut(threshold, FEE_100));
   });
 });
+
+describe("epoch 1039, where the fee doubled and the slippage ran out", () => {
+  // Measured across the boundary itself on 2026-09-20: the mints step from 50
+  // to 100 bps at epoch 1039, and the harness was re-run the minute it landed.
+  // The step does not merely shrink the margin — on a venue that quotes GROSS
+  // it removes the ability to fill at all, because Jupiter checks its own
+  // threshold against the CREDITED (net) amount while quoting gross.
+
+  it("still credits outAmount exactly on a NET venue, now a doubled fee wide", () => {
+    // FIGUREAI 5 USD, epoch 1039, 2 hops ending on Raydium CLMM.
+    const measured = row({
+      leg: "FIGUREAI",
+      usd: 5,
+      lastHop: "Raydium CLMM",
+      quotedOut: 27_610_549n,
+      venueThreshold: 27_334_444n,
+      credit: 27_610_549n,
+      withheld: 278_895n,
+      fee: FEE_100,
+    });
+    const verdict = classify(measured);
+    expect(verdict.basis).toBe("net");
+    expect(verdict.creditDriftBps).toBe(0);
+    // 100 bps withheld from the gross is 101.01 bps ON TOP of the net quote.
+    expect(verdict.grossDriftBps).toBeCloseTo(101.01, 2);
+    expect(transferFeeOn(measured.grossDelivered, FEE_100)).toBe(measured.withheld);
+  });
+
+  it("fills on a GROSS venue only once slippage is raised above the fee", () => {
+    // ANTHROPIC 25 USD, epoch 1039, GoonFi V2 > Manifest, slippage 200 bps.
+    // At 100 bps slippage the same leg reverted with Jupiter's own 0x1771
+    // (6001) at 5, 25 and 250 USD; at 200 bps it fills.
+    const measured = row({
+      leg: "ANTHROPIC",
+      usd: 25,
+      lastHop: "Manifest",
+      quotedOut: 23_900_857n,
+      venueThreshold: 23_422_840n, // out - floor(out * 200 / 1e4)
+      credit: 23_661_848n,
+      withheld: 239_009n,
+      fee: FEE_100,
+    });
+    const verdict = classify(measured);
+    expect(verdict.basis).toBe("gross");
+    expect(verdict.creditDriftBps).toBeCloseTo(-100, 3);
+    expect(measured.grossDelivered).toBe(measured.quotedOut);
+    // 200 bps of tolerance minus a 100 bps fee leaves the fill above Jupiter's
+    // own threshold, which is why this one lands and the 100 bps one did not.
+    expect(measured.credit).toBeGreaterThan(measured.venueThreshold);
+  });
+
+  it("explains the revert: at slippage == fee the net is a raw unit UNDER the threshold", () => {
+    // Jupiter's threshold floors; Token-2022's fee ceils. Equal rates are
+    // therefore not a tie — the net loses by one, and Jupiter reverts before
+    // invest() is ever reached. Shown on the measured quote of that leg.
+    const quotedOut = 23_900_857n;
+    const thresholdAt100 = quotedOut - (quotedOut * 100n) / 10_000n;
+    const netAt100 = netOfTransferFee(quotedOut, FEE_100);
+    expect(netAt100).toBe(thresholdAt100 - 1n);
+    expect(netAt100 < thresholdAt100).toBe(true);
+    // And at 200 bps the same quote clears its threshold with room to spare.
+    const thresholdAt200 = quotedOut - (quotedOut * 200n) / 10_000n;
+    expect(netAt100).toBeGreaterThan(thresholdAt200);
+    expect(netAt100 - thresholdAt200).toBe(239_008n);
+  });
+});

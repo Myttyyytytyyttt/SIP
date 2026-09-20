@@ -34,6 +34,23 @@
 // UNIT even at zero slippage. min_out = otherAmountThreshold does not merely
 // have no margin; it reverts. Hence netOfVenueThreshold below, which is the
 // largest min_out the venue's own guarantee actually covers.
+//
+// (5) AND THE CONSEQUENCE THAT BITES FIRST, MEASURED AT THE EPOCH BOUNDARY.
+// Jupiter quotes gross on some venues but checks its OWN threshold against what
+// the destination is CREDITED, which is net. So on a gross-quoting venue the
+// transfer fee is spent out of the slippage tolerance, and slippage_bps must be
+// strictly GREATER than the fee or the swap cannot land at all — Jupiter itself
+// reverts with 0x1771 (6001, slippage tolerance exceeded) before invest()'s
+// guards ever run. Measured across the 1038 -> 1039 boundary on 2026-09-20,
+// USDC -> ANTHROPIC, whose routes end on Manifest:
+//   epoch 1038, fee  50 bps, slippage 100 bps -> fills, credit drift -50.0 bps
+//   epoch 1039, fee 100 bps, slippage 100 bps -> Jupiter 0x1771 at 5, 25, 250 USD
+//   epoch 1039, fee 100 bps, slippage 200 bps -> fills, credit drift -100.0 bps
+// The usable tolerance is slippage_bps - fee_bps, and at equality it is not
+// zero but negative by one raw unit, because Jupiter floors and Token-2022
+// ceils. A venue that quotes NET is unaffected — FIGUREAI still filled at
+// 100/100 — which is exactly why this cannot be configured per leg: the basis
+// belongs to whichever AMM Jupiter picks for that quote, not to the mint.
 
 import { createHash } from "node:crypto";
 // AccountMeta IS A TYPE (see raydium-swap.ts for the full story): a
