@@ -15,6 +15,7 @@ import {
   createVaultFlow,
   investPolicyFlow,
   linkWalletFlow,
+  setPolicyFlow,
   pauseInvestingFlow,
   withdrawFlow,
   withdrawTokenFlow,
@@ -59,7 +60,7 @@ import {
 
 type ConnectedWallet = ReturnType<typeof useWallets>["wallets"][number];
 
-export type WriteKind = "create" | "createLink" | "link" | "policy" | "withdraw" | "withdrawToken";
+export type WriteKind = "create" | "createLink" | "link" | "rule" | "policy" | "withdraw" | "withdrawToken";
 
 export type WriteProgress =
   | { readonly phase: "idle" }
@@ -168,8 +169,19 @@ const REFRESH_AFTER = new Set([
   "balance_moved",
 ]);
 
+/** The vault's own rule, all six fields, as setPolicy writes them. */
+export interface VaultRuleRequest {
+  readonly mode: number;
+  readonly skimBps: number;
+  readonly volumeBps: number;
+  readonly paused: boolean;
+  readonly maxContribution: bigint;
+  readonly walletReserve: bigint;
+}
+
 type LastRequest =
   | { readonly kind: "create"; readonly input: CreateRequest }
+  | { readonly kind: "rule"; readonly input: VaultRuleRequest }
   | { readonly kind: "link"; readonly tradingAddress: string }
   | { readonly kind: "policy"; readonly input: InvestRequest }
   | { readonly kind: "pause"; readonly policy: InvestmentPolicyJson }
@@ -275,6 +287,23 @@ export function useVaultWrite(key: string) {
           { api, onStep, onBuilt, signers: pensionSigner({ wallets, pensionKey, signTransaction: signOne }) },
           { pensionKey, mode: input.mode, maxContribution: input.maxContribution, walletReserve: input.walletReserve },
         ),
+      );
+    },
+    [screen, run, wallets, signOne],
+  );
+
+  /**
+   * The vault's own rule, signed again. EVERY FIELD TRAVELS because
+   * set_policy_v2 writes all six -- the caller sends the vault's current values
+   * back beside the one it is changing, so nothing is overwritten by a guess.
+   */
+  const setPolicy = useCallback(
+    (input: VaultRuleRequest): Promise<void> => {
+      if (screen === null) return Promise.resolve();
+      lastRequest.current = { kind: "rule", input };
+      const { api, pensionKey } = screen;
+      return run("rule", ({ onStep, onBuilt }) =>
+        setPolicyFlow({ api, onStep, onBuilt, signers: pensionSigner({ wallets, pensionKey, signTransaction: signOne }) }, { pensionKey, ...input }),
       );
     },
     [screen, run, wallets, signOne],
@@ -436,6 +465,8 @@ export function useVaultWrite(key: string) {
         return createVault(last.input);
       case "link":
         return link(last.tradingAddress);
+      case "rule":
+        return setPolicy(last.input);
       case "policy":
         return investPolicy(last.input);
       case "pause":
@@ -445,7 +476,7 @@ export function useVaultWrite(key: string) {
       case "withdrawToken":
         return withdrawToken(last.input);
     }
-  }, [createVault, link, investPolicy, pauseInvesting, withdraw, withdrawToken]);
+  }, [createVault, setPolicy, link, investPolicy, pauseInvesting, withdraw, withdrawToken]);
 
   /** "Check again": confirms the signature the send route already took. It never builds or signs. */
   const checkAgain = useCallback((): Promise<void> => {
@@ -476,6 +507,7 @@ export function useVaultWrite(key: string) {
     /** Some link on this screen was sent and is not confirmed, so a chained press would race it. */
     awaitingAnyLink: unconfirmedLinks.size > 0,
     createVault,
+    setPolicy,
     createAndLink,
     link,
     investPolicy,

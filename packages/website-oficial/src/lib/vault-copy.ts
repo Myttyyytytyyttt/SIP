@@ -73,6 +73,31 @@ export const VAULT_COPY = {
   mostPerSettlement: "Most per settlement",
   alwaysLeft: "Always left in the trading wallet",
   zeroSettlement: "Most per settlement must be more than 0 SOL.",
+
+  // ── CHANGING THE VAULT'S OWN RULE, AFTER IT IS MADE ────────────────────────
+  //
+  // Until now these two could only be chosen when the vault was created. The
+  // route carries them on setPolicy, which writes ALL SIX of the rule, so the
+  // form sends the vault's current mode, rates and paused flag back untouched
+  // beside the figure being changed.
+  changeLimits: "Change these limits",
+  changeLimitsHint:
+    "These were set when your vault was made. Changing them signs your vault's rule again — the way it saves and the rate stay exactly as they are.",
+  /**
+   * THE ONE CONSEQUENCE THE OWNER MUST READ BEFORE SIGNING, not after.
+   *
+   * set_policy.rs bumps vault.policy_nonce on EVERY call, even one that changes
+   * nothing, and settle.rs builds the message it verifies with that nonce — so
+   * a settlement the attester has already signed stops verifying the moment
+   * this lands. Changing the BASKET bumps a different counter the attestation
+   * does not carry and strands nothing; this is the one that does.
+   */
+  nonceNotice:
+    "Signing this makes any saving already on its way stop being valid: the keeper has to sign it again, so a settlement in progress may be delayed by a few minutes. Nothing is lost. Changing what your basket buys does not do this.",
+  saveLimits: "Sign new limits",
+  savingLimits: "Signing…",
+  limitsSaved: "New limits signed",
+  limitsUnchanged: "These are the limits your vault already has.",
   create: "Create vault",
   creating: "Creating…",
   created: "Vault created",

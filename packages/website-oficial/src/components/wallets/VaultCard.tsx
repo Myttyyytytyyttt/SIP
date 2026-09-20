@@ -115,7 +115,7 @@ function VaultCardBody({ volumeOffered }: { readonly volumeOffered: boolean }) {
   return state.vault.status === "missing" ? (
     <CreateVault state={state} volumeOffered={volumeOffered} write={write} progress={progress} />
   ) : (
-    <VaultSummary state={state} progress={progress} />
+    <VaultSummary state={state} write={write} progress={progress} />
   );
 }
 
@@ -268,7 +268,92 @@ function Fact({ label, children }: { readonly label: string; readonly children: 
   );
 }
 
-function VaultSummary({ state, progress }: { readonly state: VaultStateJson; readonly progress: ReactNode }) {
+/**
+ * THE CAP PER SETTLEMENT, AFTER THE VAULT IS MADE.
+ *
+ * It used to be choosable only at creation: maxContribution was a createVault
+ * field and no action changed it afterwards. setPolicy carries it now.
+ *
+ * ALL SIX FIELDS TRAVEL, because set_policy_v2 writes all six. What is NOT
+ * offered here is as deliberate as what is: the mode, the two rates and the
+ * paused flag are read from the vault and sent back EXACTLY as they stand, so
+ * changing a limit cannot quietly change how the vault saves. Only the two
+ * lamport amounts are editable, and only through the same readLimits the
+ * creation form uses — one rule, one place.
+ *
+ * AND THE NONCE IS SAID BEFORE THE BUTTON, not after. Every set_policy_v2 bumps
+ * vault.policy_nonce, which invalidates settlements already in flight; the
+ * owner reads that above the button rather than discovering it as a delay.
+ */
+function ChangeLimits({ state, account, write }: { readonly state: VaultStateJson; readonly account: NonNullable<VaultStateJson["vault"]["state"]>; readonly write: VaultWrite }) {
+  const storedMax = rawFrom(account.maxContribution) ?? 0n;
+  const storedReserve = rawFrom(account.walletReserve) ?? 0n;
+  const [maxText, setMaxText] = useState(() => formatUnits(storedMax, SOL_DECIMALS));
+  const [reserveText, setReserveText] = useState(() => formatUnits(storedReserve, SOL_DECIMALS));
+  const [open, setOpen] = useState(false);
+
+  const limits = readLimits(maxText, reserveText);
+  const blocked = write.running || write.busyElsewhere || write.unconfirmed;
+  const usdcPerSol = rawFrom(state.prices?.usdcRawPerSol);
+  // A rule identical to the stored one still bumps the nonce, so there is
+  // nothing to gain by signing it: the button says so rather than spending a
+  // signature and delaying a settlement for no change at all.
+  const unchanged = limits.ok && limits.maxContribution === storedMax && limits.walletReserve === storedReserve;
+
+  return (
+    <details
+      className="rounded-md border px-3 py-2 text-xs"
+      open={open}
+      onToggle={(event) => setOpen((event.target as HTMLDetailsElement).open)}
+    >
+      <summary className="cursor-pointer text-sm font-medium">{VAULT_COPY.changeLimits}</summary>
+      <div className="mt-3 space-y-3">
+        <p className="text-muted-foreground">{VAULT_COPY.changeLimitsHint}</p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <LimitField
+            id="vault-change-max-contribution"
+            label={VAULT_COPY.mostPerSettlement}
+            value={maxText}
+            onChange={setMaxText}
+            disabled={blocked}
+            hint={limits.ok && usdcPerSol !== null ? VAULT_COPY.aboutUsd(formatUsd(usdcRawForLamports(limits.maxContribution, usdcPerSol))) : null}
+          />
+          <LimitField id="vault-change-wallet-reserve" label={VAULT_COPY.alwaysLeft} value={reserveText} onChange={setReserveText} disabled={blocked} hint={null} />
+        </div>
+        {!limits.ok ? (
+          <p role="alert" className="text-destructive">
+            {limits.message}
+          </p>
+        ) : null}
+        <p className="rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2">{VAULT_COPY.nonceNotice}</p>
+        {unchanged ? <p className="text-muted-foreground">{VAULT_COPY.limitsUnchanged}</p> : null}
+        <Button
+          type="button"
+          disabled={!limits.ok || unchanged || blocked}
+          aria-busy={write.running}
+          onClick={() => {
+            if (!limits.ok || unchanged) return;
+            // THE VAULT'S CURRENT MODE, RATES AND PAUSED FLAG GO BACK UNTOUCHED:
+            // set_policy_v2 writes every field, so leaving one out would mean
+            // overwriting it with a guess.
+            void write.setPolicy({
+              mode: account.skimMode,
+              skimBps: account.skimBps,
+              volumeBps: account.volumeBps,
+              paused: account.paused,
+              maxContribution: limits.maxContribution,
+              walletReserve: limits.walletReserve,
+            });
+          }}
+        >
+          {write.running ? VAULT_COPY.savingLimits : VAULT_COPY.saveLimits}
+        </Button>
+      </div>
+    </details>
+  );
+}
+
+function VaultSummary({ state, write, progress }: { readonly state: VaultStateJson; readonly write: VaultWrite; readonly progress: ReactNode }) {
   const { vault } = state;
   const account = vault.state;
   const volume = account?.skimMode === MODE_VOLUME;
@@ -299,6 +384,7 @@ function VaultSummary({ state, progress }: { readonly state: VaultStateJson; rea
           {created !== null ? <Fact label={VAULT_COPY.createdOn}>{created}</Fact> : null}
         </dl>
         <p className="text-xs text-muted-foreground">{volume ? VAULT_COPY.volumeRule(rate, max, reserve) : VAULT_COPY.profitRule(rate, max, reserve)}</p>
+        {account !== undefined ? <ChangeLimits state={state} account={account} write={write} /> : null}
         {progress}
       </CardContent>
     </Card>

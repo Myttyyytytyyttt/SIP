@@ -35,6 +35,7 @@ import {
   buildCreateVaultV2,
   buildLinkWallet,
   buildSetInvestPolicy,
+  buildSetPolicyV2,
   buildWithdraw,
   buildWithdrawToken,
   deriveAta,
@@ -56,6 +57,7 @@ import {
   checkAgainFlow,
   createVaultFlow,
   investPolicyFlow,
+  setPolicyFlow,
   linkWalletFlow,
   pauseInvestingFlow,
   withdrawFlow,
@@ -384,6 +386,94 @@ function withInstructionKeys(txBase64: string, index: number, edit: (keys: Trans
 
 /** A web3.js key of this package, from a key of the core's copy. */
 const here = (key: { toBase58(): string }): PublicKey => new PublicKey(key.toBase58());
+
+describe("setPolicyFlow", () => {
+  /**
+   * THE FOURTH FIELD THE OWNER ASKED FOR. maxContribution used to be choosable
+   * only at creation; setPolicy carries it now, and writes ALL SIX of the
+   * vault's rule -- so what matters is that the five NOT being changed go back
+   * exactly as the vault holds them.
+   */
+  it("sends all six fields, the lamport amounts as decimal strings and the mode as a name, and signs the bytes", async () => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => {
+      h.order.push("build:setPolicy");
+      return ok(
+        asJson<Answer>({
+          ...buildSetPolicyV2({
+            owner: h.pensionKey,
+            mode: 0,
+            skimBps: 2_000,
+            volumeBps: 50,
+            paused: false,
+            maxContribution: 60_000_000n,
+            walletReserve: 10_000_000n,
+            ...recent(),
+            computeBudget: ownerComputeBudget("set_policy_v2"),
+          }),
+          costs: { rentLamports: 0n, signatureFeeLamports: 5_000n, priorityFeeLamports: 30_000n },
+          warnings: [],
+        }),
+      );
+    });
+    const result = await setPolicyFlow(h.createDeps, {
+      pensionKey: h.pensionKey,
+      mode: 0,
+      skimBps: 2_000,
+      volumeBps: 50,
+      paused: false,
+      maxContribution: 60_000_000n,
+      walletReserve: 10_000_000n,
+    });
+    expect(result.ok).toBe(true);
+    expect(h.build.mock.calls[0]![0]).toEqual({
+      action: "setPolicy",
+      owner: h.pensionKey,
+      mode: "profit",
+      skimBps: 2_000,
+      volumeBps: 50,
+      paused: false,
+      maxContribution: "60000000",
+      walletReserve: "10000000",
+    });
+    expect(toHex(h.signWithPension.mock.calls[0]![0])).toBe(toHex(await builtTx(h, 0)));
+  });
+
+  it("refuses to sign a rule that is not the one asked for: a cap the owner did not type", async () => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () =>
+      ok(
+        asJson<Answer>({
+          ...buildSetPolicyV2({
+            owner: h.pensionKey,
+            mode: 0,
+            skimBps: 2_000,
+            volumeBps: 50,
+            paused: false,
+            // NOT what the caller asked for below.
+            maxContribution: 120_000_000n,
+            walletReserve: 10_000_000n,
+            ...recent(),
+            computeBudget: ownerComputeBudget("set_policy_v2"),
+          }),
+          costs: { rentLamports: 0n, signatureFeeLamports: 5_000n, priorityFeeLamports: 30_000n },
+          warnings: [],
+        }),
+      ),
+    );
+    const result = await setPolicyFlow(h.createDeps, {
+      pensionKey: h.pensionKey,
+      mode: 0,
+      skimBps: 2_000,
+      volumeBps: 50,
+      paused: false,
+      maxContribution: 60_000_000n,
+      walletReserve: 10_000_000n,
+    });
+    expect(result.ok).toBe(false);
+    expect(h.signWithPension).not.toHaveBeenCalled();
+  });
+});
 
 describe("investPolicyFlow", () => {
   it("builds with the caps asked, checks the floors and the vault's own token accounts, shows the checked answer, has Phantom sign the built bytes, and sends", async () => {

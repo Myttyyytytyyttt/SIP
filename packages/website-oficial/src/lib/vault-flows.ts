@@ -335,6 +335,76 @@ export async function createVaultFlow(deps: CreateVaultDeps, input: CreateVaultI
   }));
 }
 
+// ── set_policy_v2 ────────────────────────────────────────────────────────────
+
+/**
+ * The vault's OWN rule, as it stands and as it is being changed.
+ *
+ * EVERY FIELD IS REQUIRED, and that is deliberate on both sides. set_policy_v2
+ * WRITES ALL SIX, so a field left out of the request cannot mean "leave it
+ * alone" — it would mean "overwrite it with whatever the server guessed". The
+ * form therefore sends the vault's CURRENT mode, rates and paused flag back
+ * alongside the figure it is actually changing, and the route refuses the call
+ * outright if any is missing.
+ */
+export interface SetPolicyInput {
+  readonly pensionKey: string;
+  /** 0 profit, 1 volume — the vault's mode as it stands, unless it is being changed. */
+  readonly mode: number;
+  readonly skimBps: number;
+  readonly volumeBps: number;
+  readonly paused: boolean;
+  /** Lamports: the most one settlement may move. */
+  readonly maxContribution: bigint;
+  /** Lamports: what a trading wallet always keeps. */
+  readonly walletReserve: bigint;
+}
+
+/** The mode names set_policy_v2 takes, by the number the vault stores. */
+const MODE_NAMES: ReadonlyMap<number, string> = new Map([
+  [0, "profit"],
+  [1, "volume"],
+]);
+
+/**
+ * Signs the vault's own rule: set_policy_v2 with all six fields.
+ *
+ * THIS MOVES THE VAULT'S policy_nonce, on every call, even one that changes
+ * nothing — set_policy.rs ends with `checked_add(1)` and settle.rs builds the
+ * message it verifies with that nonce, so a settlement the attester already
+ * signed stops verifying the moment this lands. Changing the BASKET
+ * (set_invest_policy) bumps a different counter the attestation does not carry
+ * and strands nothing; this one does. The card says so before the button.
+ */
+export async function setPolicyFlow(deps: PensionFlowDeps, input: SetPolicyInput): Promise<FlowResult> {
+  const mode = MODE_NAMES.get(input.mode);
+  if (mode === undefined) return refused(FAILURE_COPY.builtMismatch("the vault's mode could not be read"));
+  const request: Record<string, unknown> = {
+    action: "setPolicy",
+    owner: input.pensionKey,
+    mode,
+    skimBps: input.skimBps,
+    volumeBps: input.volumeBps,
+    paused: input.paused,
+    // LAMPORTS AS DECIMAL STRINGS, the same rule the caps follow.
+    maxContribution: input.maxContribution.toString(),
+    walletReserve: input.walletReserve.toString(),
+  };
+  return pensionWrite<BuiltTransactionJson>(deps, request, async () => ({
+    instruction: "set_policy_v2",
+    signers: [input.pensionKey],
+    accounts: { owner: input.pensionKey, vault: await deriveVaultAddress(input.pensionKey) },
+    args: {
+      mode: input.mode,
+      skim_bps: input.skimBps,
+      volume_bps: input.volumeBps,
+      paused: input.paused,
+      max_contribution: input.maxContribution,
+      wallet_reserve: input.walletReserve,
+    },
+  }));
+}
+
 // ── set_invest_policy ────────────────────────────────────────────────────────
 
 /**

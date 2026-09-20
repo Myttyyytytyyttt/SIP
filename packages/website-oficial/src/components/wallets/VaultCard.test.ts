@@ -182,4 +182,47 @@ describe("VaultCard", () => {
     expect(html).toContain("One settlement moves at most 0.06 SOL");
     expect(buttons("Create vault")).toHaveLength(0);
   });
+
+  /**
+   * THE FOURTH FIELD THE OWNER ASKED FOR, which used to be choosable only when
+   * the vault was made: maxContribution was a createVault field and no action
+   * changed it afterwards. setPolicy carries it now.
+   */
+  it("a made vault can change its settlement cap and reserve, pre-filled from the chain, with the nonce cost said before the button", () => {
+    const html = render(
+      screen({
+        kind: "ready",
+        state: stateWith({
+          vault: {
+            status: "exists",
+            address: VAULT,
+            lamports: "300000000",
+            rentFloor: "1285240",
+            withdrawableLamports: "298714760",
+            state: { owner: PENSION, paused: false, skimMode: 0, skimBps: 2_000, volumeBps: 200, lifetimeSaved: "0", createdAt: "1789495565", maxContribution: "60000000", walletReserve: "50000000", policyNonce: "7" },
+          },
+        }),
+      }),
+    );
+    expect(html).toContain("Change these limits");
+    // PRE-FILLED FROM WHAT THE CHAIN HOLDS, not from the creation defaults: the
+    // owner edits the rule he actually has.
+    expect(html).toContain('id="vault-change-max-contribution"');
+    expect(html).toContain('value="0.06"');
+    expect(html).toContain('id="vault-change-wallet-reserve"');
+    expect(html).toContain('value="0.05"');
+    // THE ONE CONSEQUENCE HE MUST READ BEFORE SIGNING, not discover as a delay:
+    // every set_policy_v2 bumps vault.policy_nonce, and settle.rs builds the
+    // message it verifies with that nonce.
+    expect(html).toContain("Signing this makes any saving already on its way stop being valid");
+    expect(html).toContain("Changing what your basket buys does not do this.");
+    // Identical limits are not worth a signature, and the button says so rather
+    // than spending one and delaying a settlement for no change.
+    expect(html).toContain("These are the limits your vault already has.");
+    expect(buttons("Sign new limits").map((button) => button.disabled)).toEqual([true]);
+    // THE WAY IT SAVES IS NOT ON OFFER HERE: only the two lamport amounts are
+    // editable, so changing a limit cannot quietly change the mode or the rate.
+    expect(html).not.toContain('id="vault-change-skim-bps"');
+    expect(html).not.toContain('id="vault-change-mode"');
+  });
 });
