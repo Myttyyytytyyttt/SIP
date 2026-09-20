@@ -20,10 +20,12 @@
 // vitest — its `test` script is `anchor test` — and a new file here merges
 // cleanly and runs in a gate that already exists.
 
-import { PublicKey } from "@solana/web3.js";
-import { describe, expect, it } from "vitest";
+import { PublicKey, type Connection } from "@solana/web3.js";
+import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   JupiterRouteRefusal,
+  buildJupiterRoute,
   type JupiterQuote,
   type JupiterSwapInstructions,
   type RefusalCondition,
@@ -872,6 +874,114 @@ describe("the verification ages the route itself, because signing happens after 
     expect(() => verifyRouteFresh(route, { nowMs: QUOTED_AT_MS + 30_001 }, { maxAgeMs: 30_000 })).toThrow(
       JupiterRouteRefusal,
     );
+  });
+});
+
+describe("the builder does not spend the freshness budget on its own round trips", () => {
+  // WHAT maxAgeMs IS FOR. It bounds how stale a PRICE the vault will size a
+  // min_out against. It used to be charged for four round trips: the
+  // /swap-instructions POST and the vault-account read, which genuinely need
+  // the quote, and the mint read and the epoch read, which need only the
+  // target mint and were issued after the quote had already landed. On a slow
+  // RPC the builder refused its own route over two reads it could have made
+  // while the quote was still in flight.
+  //
+  // The whole builder runs here against a stubbed clock and a stubbed RPC, so
+  // "which round trip fell inside the window" is a measurement, not a reading
+  // of the code.
+
+  /** An 82-byte SPL mint with no extensions: decimals 6, initialized. */
+  const mintAccount = () => {
+    const data = Buffer.alloc(82);
+    data.writeUInt8(6, 44);
+    data.writeUInt8(1, 45); // isInitialized
+    return { owner: TOKEN_PROGRAM_ID, data, executable: false, lamports: 1, rentEpoch: 0 };
+  };
+
+  /**
+   * A clock that only moves when a round trip says it did, and a log of the
+   * order those round trips were ISSUED in.
+   */
+  function harness(costMs: { mint: number; quote: number; swap: number; vaultAccounts: number }) {
+    let clock = QUOTED_AT_MS;
+    const issued: string[] = [];
+    const charge = (what: string, ms: number) => {
+      issued.push(what);
+      clock += ms;
+    };
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    vi.stubGlobal("fetch", async (input: unknown) => {
+      const url = String(input);
+      const isQuote = url.includes("/quote?");
+      charge(isQuote ? "quote" : "swap-instructions", isQuote ? costMs.quote : costMs.swap);
+      return new Response(JSON.stringify(isQuote ? quote() : response()), { status: 200 });
+    });
+    const connection = {
+      getAccountInfo: async () => {
+        charge("mint", costMs.mint);
+        return mintAccount();
+      },
+      getEpochInfo: async () => ({ epoch: 1039 }),
+      getMultipleAccountsInfo: async (keys: readonly PublicKey[]) => {
+        charge("vault-accounts", costMs.vaultAccounts);
+        return keys.map(() => null);
+      },
+      getSlot: async () => 448_859_890,
+    } as unknown as Connection;
+    return { connection, issued, now: () => clock };
+  }
+
+  const params = {
+    vault: new PublicKey(VAULT),
+    vaultIn: new PublicKey(VAULT_USDC),
+    vaultTarget: new PublicKey(VAULT_SPYX),
+    inputMint: new PublicKey(USDC),
+    targetMint: new PublicKey(SPYX),
+    amountIn: 25_000_000n,
+    slippageBps: 100,
+  };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("issues the reads that do not need the quote BEFORE it, so a slow mint read costs no budget", async () => {
+    // 40 s of mint read against a 1 s tolerance. Inside the window it is a
+    // refusal; outside it, it is not even measured.
+    const { connection, issued } = harness({ mint: 40_000, quote: 10, swap: 10, vaultAccounts: 10 });
+    const route = await buildJupiterRoute(connection, { ...params, maxAge: { maxAgeMs: 1_000 } });
+    expect(route.hops).toBe(1);
+    // The mint read is issued first — before the quote it does not depend on.
+    expect(issued).toEqual(["mint", "quote", "swap-instructions", "vault-accounts"]);
+    // And only the two round trips that need the quote are charged to the age.
+    expect(route.age.quotedAtMs).toBe(QUOTED_AT_MS + 40_010);
+  });
+
+  it("still refuses when the age is real, and says how much of it was its own", async () => {
+    // Now the POST is the slow one. That age is genuine — the price really is
+    // 40 s older — so the refusal stands; what it must not do is read as a
+    // market that moved.
+    const { connection } = harness({ mint: 10, quote: 10, swap: 40_000, vaultAccounts: 10 });
+    // Here every millisecond of the age WAS the builder's, which is precisely
+    // the case a caller could not tell from a market that moved.
+    await expect(buildJupiterRoute(connection, { ...params, maxAge: { maxAgeMs: 1_000 } })).rejects.toThrow(
+      /the quote is 40010 ms old, past the 1000 ms this caller allows; 40010 ms of that age is this builder's own post-quote round trips/,
+    );
+  });
+
+  it("leaves a refusal that is not about age alone", async () => {
+    const { connection } = harness({ mint: 10, quote: 10, swap: 10, vaultAccounts: 10 });
+    // A request for 1 USDC against a quote that answers 25: request-drift, and
+    // no freshness commentary bolted onto it.
+    const error = await buildJupiterRoute(connection, {
+      ...params,
+      amountIn: 1_000_000n,
+      maxAge: { maxAgeMs: 1_000 },
+    }).catch((e: unknown) => e as JupiterRouteRefusal);
+    expect(error).toBeInstanceOf(JupiterRouteRefusal);
+    expect((error as JupiterRouteRefusal).condition).toBe("request-drift");
+    expect((error as JupiterRouteRefusal).message).not.toContain("post-quote round trips");
   });
 });
 

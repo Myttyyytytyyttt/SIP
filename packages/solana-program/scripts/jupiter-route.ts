@@ -169,10 +169,17 @@ export type RefusalCondition =
 /** A refusal names its condition, so a caller can log which guard said no. */
 export class JupiterRouteRefusal extends Error {
   readonly condition: RefusalCondition;
+  /**
+   * The message WITHOUT the `jupiter route refused [...]` prefix, so a caller
+   * that knows something the refusal could not can extend it rather than
+   * parse it back out of `message`.
+   */
+  readonly reason: string;
   constructor(condition: RefusalCondition, message: string) {
     super(`jupiter route refused [${condition}]: ${message}`);
     this.name = "JupiterRouteRefusal";
     this.condition = condition;
+    this.reason = message;
   }
 }
 
@@ -1175,8 +1182,28 @@ export async function buildJupiterRoute(
     amountIn: params.amountIn,
     slippageBps: params.slippageBps,
   };
-  // STAMPED THE INSTANT IT LANDS, before the three round trips below, so the
-  // age a caller reads is the quote's and not the builder's.
+
+  // THE FRESHNESS WINDOW BELONGS TO THE PRICE, NOT TO US, so nothing that can
+  // be read without the quote is read inside it. The destination mint's
+  // transfer-fee config and the epoch depend on the target mint alone, and
+  // they used to be fetched AFTER the quote had landed — two RPC round trips
+  // charged to the caller's maxAgeMs, on top of the two that genuinely need
+  // the quote. Started here, they overlap the quote's own round trip and cost
+  // the window nothing.
+  //
+  // WHAT IS LEFT INSIDE THE WINDOW, AND WHY IT CANNOT LEAVE: the
+  // /swap-instructions POST, which is the quote being turned into bytes, and
+  // the vault-ownership read, which is over the keys that POST returned.
+  // Those two are the builder's irreducible cost, and on a slow RPC they are
+  // still age — the price really is that much older. A refusal says so
+  // explicitly below, so "our RPC was slow" never reads as "the price moved".
+  const feeRead = readDestinationTransferFee(connection, params.targetMint);
+  // Awaited after the quote, so a rejection here must not surface as an
+  // unhandled one while the quote is still in flight.
+  void feeRead.catch(() => undefined);
+
+  // STAMPED THE INSTANT IT LANDS, before the round trips below, so the age a
+  // caller reads is the quote's and not the builder's.
   const quote = await fetchJupiterQuote({
     inputMint: params.inputMint,
     outputMint: params.targetMint,
@@ -1198,7 +1225,7 @@ export async function buildJupiterRoute(
     vaultTarget: params.vaultTarget,
   });
 
-  const fee = await readDestinationTransferFee(connection, params.targetMint);
+  const fee = await feeRead;
   const vaultOwnedTokenAccounts = await findVaultOwnedTokenAccounts(
     connection,
     params.vault,
@@ -1209,17 +1236,32 @@ export async function buildJupiterRoute(
   // The slot is only read when a slot bound was asked for: an RPC round trip
   // nobody stated a tolerance for is a round trip that buys nothing.
   const slot = params.maxAge.maxAgeSlots === undefined ? undefined : await connection.getSlot("confirmed");
-  return verifySharedAccountsRoute(quote, response, {
-    request,
-    quotedAtMs,
-    // The freshness check now happens INSIDE the verification, so the clock is
-    // read here, as late as it can be and still be the clock that check uses.
-    observed: { nowMs: Date.now(), ...(slot === undefined ? {} : { slot }) },
-    maxAge: params.maxAge,
-    vault: params.vault,
-    vaultIn: params.vaultIn,
-    vaultTarget: params.vaultTarget,
-    vaultOwnedTokenAccounts,
-    transferFee: params.useWorstCaseTransferFee === false ? fee.current : fee.worstCase,
-  });
+  try {
+    return verifySharedAccountsRoute(quote, response, {
+      request,
+      quotedAtMs,
+      // The freshness check happens INSIDE the verification, so the clock is
+      // read here, as late as it can be and still be the clock that check uses.
+      observed: { nowMs: Date.now(), ...(slot === undefined ? {} : { slot }) },
+      maxAge: params.maxAge,
+      vault: params.vault,
+      vaultIn: params.vaultIn,
+      vaultTarget: params.vaultTarget,
+      vaultOwnedTokenAccounts,
+      transferFee: params.useWorstCaseTransferFee === false ? fee.current : fee.worstCase,
+    });
+  } catch (error) {
+    // A ROUTE-AGE REFUSAL FROM A BUILD NAMES THE BUILDER'S OWN SHARE. The age
+    // is real either way, but a caller reading "the quote is 41,000 ms old"
+    // cannot tell a market that moved from an RPC that stalled, and the two
+    // call for opposite responses: re-quote, or fix the endpoint.
+    if (error instanceof JupiterRouteRefusal && error.condition === "route-age") {
+      refuse(
+        "route-age",
+        `${error.reason}; ${Date.now() - quotedAtMs} ms of that age is this builder's own post-quote round ` +
+          "trips (/swap-instructions and the vault-account read), not price movement",
+      );
+    }
+    throw error;
+  }
 }
