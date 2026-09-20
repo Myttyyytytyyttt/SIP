@@ -104,6 +104,45 @@ describe("the basis Jupiter quotes in, measured", () => {
     expect(verdict.grossDriftBps).toBeCloseTo(50.251, 2);
   });
 
+  it("gives the SAME MINT opposite answers when only the venue changes", () => {
+    // THE EXPERIMENT THAT SETTLES IT. ANTHROPIC, 25 USD, the same afternoon,
+    // the same transfer-fee config, the same builder and flags — the only
+    // difference is which AMM makes the final transfer, forced by excluding
+    // Manifest from the route. Through Manifest the vault is credited a whole
+    // fee below outAmount; through Meteora DLMM it is credited outAmount to
+    // the raw unit. So the basis is NOT a property of the mint, and cannot be
+    // configured per leg: Jupiter picks the venue per quote.
+    const viaManifest = row({
+      leg: "ANTHROPIC",
+      usd: 25,
+      lastHop: "Manifest",
+      quotedOut: 23_942_364n,
+      venueThreshold: 23_702_941n,
+      credit: 23_779_749n,
+      withheld: 119_497n,
+      fee: FEE_50,
+    });
+    const viaMeteora = row({
+      leg: "ANTHROPIC",
+      usd: 25,
+      lastHop: "Meteora DLMM",
+      quotedOut: 23_816_857n,
+      venueThreshold: 23_578_689n,
+      credit: 23_816_857n,
+      withheld: 119_683n,
+      fee: FEE_50,
+    });
+    expect(classify(viaManifest).basis).toBe("gross");
+    expect(classify(viaMeteora).basis).toBe("net");
+    expect(classify(viaMeteora).creditDriftBps).toBe(0);
+    // And the one rule that does not have to know which of the two it got.
+    for (const measured of [viaManifest, viaMeteora]) {
+      const worstCredit = netOfTransferFee(measured.venueThreshold, FEE_100);
+      expect(worstCredit).toBeGreaterThanOrEqual(safeMinOut(measured.venueThreshold, FEE_100));
+      expect(measured.venueThreshold).toBeGreaterThanOrEqual(safeMinOut(measured.venueThreshold, FEE_100));
+    }
+  });
+
   it("calls a fee-free mint neither, however the fill lands", () => {
     // SPYx carries no TransferFeeConfig; gross and net are the same number, so
     // a verdict either way would be an artefact of the control, not a finding.
