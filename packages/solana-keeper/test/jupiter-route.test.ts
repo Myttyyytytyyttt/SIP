@@ -48,6 +48,7 @@ import {
   venueThresholdFrom,
   verifySharedAccountsRoute,
 } from "@sip/solana-program/jupiter-route";
+import { venueFlags } from "@sip/solana-program/jupiter-fork-setup";
 
 const VAULT = "EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU";
 const VAULT_USDC = "46zCguSBbuStXvbJ3YdxVCVs72gXtDcKJEoseMFv7uof";
@@ -814,5 +815,48 @@ describe("the Token-2022 transfer fee, and where each min_out actually lands", (
     const route = verifySharedAccountsRoute(quote(), response(), context({ transferFee: NO_FEE }));
     expect(route.output.netOfQuotedOut).toBe(route.output.quotedOut);
     expect(route.output.netOfVenueThreshold).toBe(route.output.venueThreshold);
+  });
+});
+
+describe("the fork harness's venue flags, because the documented command has to still run", () => {
+  // jupiter-fork.sh's header documents the command that produced the measured
+  // gross-venue finding: `--dexes Manifest --slippage 50`. A later commit gave
+  // --exclude a default of Hadron and applied it to every run, so that command
+  // started sending BOTH lists — and Jupiter answers HTTP 400,
+  // {"error":"Cannot set dexes and exclude dexes at the same time"}, measured
+  // against lite-api.jup.ag. The documented proof could no longer be re-run at
+  // all, which is worse than never having taken it.
+  const argv = (...flags: string[]): string[] => ["node", "scripts/jupiter-fork-setup.ts", ...flags];
+
+  it("adds NO default exclusion to a run that pinned its venue", () => {
+    expect(venueFlags(argv("--dexes", "Manifest", "--slippage", "50"))).toEqual({
+      slippageBps: 50,
+      dexes: ["Manifest"],
+      excludeDexes: [],
+    });
+  });
+
+  it("still keeps Hadron out of a run that pinned nothing, which is what the default is for", () => {
+    expect(venueFlags(argv())).toEqual({ slippageBps: 200, dexes: [], excludeDexes: ["Hadron"] });
+    expect(venueFlags(argv("--slippage", "100"))).toEqual({ slippageBps: 100, dexes: [], excludeDexes: ["Hadron"] });
+  });
+
+  it("refuses the two lists together here, with Jupiter's own reason", () => {
+    expect(() => venueFlags(argv("--dexes", "Manifest", "--exclude", "Hadron"))).toThrow(
+      /Cannot set dexes and exclude dexes at the same time/,
+    );
+  });
+
+  it("takes an explicit --exclude when nothing is pinned, and trims it", () => {
+    expect(venueFlags(argv("--exclude", " Hadron , Obric "))).toEqual({
+      slippageBps: 200,
+      dexes: [],
+      excludeDexes: ["Hadron", "Obric"],
+    });
+  });
+
+  it("refuses a slippage that is not whole basis points", () => {
+    expect(() => venueFlags(argv("--slippage", "12.5"))).toThrow(/whole number of bps/);
+    expect(() => venueFlags(argv("--slippage", "-1"))).toThrow(/whole number of bps/);
   });
 });

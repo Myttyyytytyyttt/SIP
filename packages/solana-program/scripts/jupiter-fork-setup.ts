@@ -40,7 +40,16 @@ import {
   legacyTransactionBytes,
 } from "./jupiter-route";
 
-const LOCAL = join(__dirname, ".local");
+/**
+ * WHERE PHASE 1 WRITES, resolved LAZILY rather than at module load. This file
+ * is imported by the keeper's suite — type-only, so the typecheck gate covers
+ * it, and for real by the venueFlags test — and `__dirname` does not exist
+ * under the ESM transform vitest applies. Inside a function it is only touched
+ * when phase 1 actually runs.
+ */
+function localDir(): string {
+  return join(__dirname, ".local");
+}
 const MAINNET = process.env["MAINNET_RPC"] ?? "https://api.mainnet-beta.solana.com";
 
 const USDC = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
@@ -67,7 +76,7 @@ const TARGET_NAME = "FIGUREAI";
 const AMOUNT_IN = 5_000_000n; // 5 USDC
 
 /**
- * The two things the EXPERIMENT varies, taken from argv — not from the
+ * The things the EXPERIMENT varies, taken from argv — not from the
  * environment, so a run is reproducible from the command line that is printed
  * with it:
  *
@@ -78,24 +87,65 @@ const AMOUNT_IN = 5_000_000n; // 5 USDC
  *                      with that venue's own 0x3c under simulation — a route
  *                      that cannot execute is not worth a clone
  *
+ * THE DEFAULT EXCLUSION APPLIES ONLY WHEN NOTHING IS PINNED, and that is not a
+ * nicety — it is what keeps the documented command runnable. Jupiter's quote
+ * endpoint refuses the two lists together, measured today:
+ *
+ *   GET /swap/v1/quote?...&dexes=Manifest&excludeDexes=Hadron
+ *     -> HTTP 400 {"error":"Cannot set dexes and exclude dexes at the same time"}
+ *
+ * An earlier version of this file added the Hadron default unconditionally,
+ * which made every `--dexes` run die at the API before it ever asked its
+ * question — including the one this harness's own header documents. A pinned
+ * allow-list already forecloses Hadron, so there is nothing to add; a run that
+ * states BOTH flags is refused here, by name, instead of turning into
+ * Jupiter's 400.
+ *
  * WHY THE VENUE HAS TO BE PINNABLE. Whether a quote is gross or net belongs to
  * the AMM that makes the final transfer, and Jupiter re-picks it per quote. A
  * claim about a gross-quoting venue therefore cannot be tested by re-quoting
  * until one turns up; it has to be asked for. Measured 2026-09-20:
  * USDC -> FIGUREAI with `--dexes Manifest` is a ONE-HOP route on a
  * gross-quoting venue, which is exactly the leg this harness can clone.
+ *
+ * AND A PIN IS A REQUEST THE MARKET MAY NOT BE ABLE TO ANSWER. Re-run later
+ * the same day, `--dexes Manifest` on that pair answered
+ * {"error":"No routes found"}: Manifest no longer carried a direct
+ * USDC -> FIGUREAI leg at that hour, while the unpinned quote routed through
+ * Raydium CLMM. A NO_ROUTES_FOUND from a pinned run is the market moving, not
+ * this harness breaking — see the note at the head of jupiter-fork.sh.
  */
-function flag(name: string): string | null {
-  const at = process.argv.indexOf(`--${name}`);
-  return at === -1 ? null : process.argv[at + 1] ?? null;
+export interface VenueFlags {
+  readonly slippageBps: number;
+  /** The only venues allowed. Empty means Jupiter picks. */
+  readonly dexes: readonly string[];
+  /** Venues kept out. Empty whenever `dexes` is non-empty; see above. */
+  readonly excludeDexes: readonly string[];
 }
-const SLIPPAGE_BPS = Number(flag("slippage") ?? 200);
-const DEXES: readonly string[] = (flag("dexes") ?? "").split(",").filter((label) => label.length > 0);
-const EXCLUDE_DEXES: readonly string[] = (flag("exclude") ?? "Hadron")
-  .split(",")
-  .map((label) => label.trim())
-  .filter((label) => label.length > 0);
-if (!Number.isInteger(SLIPPAGE_BPS) || SLIPPAGE_BPS < 0) throw new Error(`--slippage must be a whole number of bps`);
+
+/** Pure, and exported, so the command in the header is covered by a test. */
+export function venueFlags(argv: readonly string[]): VenueFlags {
+  const flag = (name: string): string | null => {
+    const at = argv.indexOf(`--${name}`);
+    return at === -1 ? null : argv[at + 1] ?? null;
+  };
+  const slippageBps = Number(flag("slippage") ?? 200);
+  if (!Number.isInteger(slippageBps) || slippageBps < 0) throw new Error(`--slippage must be a whole number of bps`);
+  const split = (value: string): readonly string[] =>
+    value
+      .split(",")
+      .map((label) => label.trim())
+      .filter((label) => label.length > 0);
+  const dexes = split(flag("dexes") ?? "");
+  const exclude = flag("exclude");
+  if (dexes.length > 0 && exclude !== null) {
+    throw new Error(
+      "--dexes and --exclude cannot both be given: Jupiter answers " +
+        '400 "Cannot set dexes and exclude dexes at the same time". An allow-list already excludes everything else.',
+    );
+  }
+  return { slippageBps, dexes, excludeDexes: dexes.length > 0 ? [] : split(exclude ?? "Hadron") };
+}
 
 /** Enough for several invests plus the deliberate failures, which spend nothing. */
 const USDC_FUND = 200_000_000n; // 200 USDC
@@ -115,7 +165,7 @@ const BUILTIN = new Set<string>([
 ]);
 
 function persistedIdentity(name: string): Keypair {
-  const path = join(LOCAL, name);
+  const path = join(localDir(), name);
   if (existsSync(path)) return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(readFileSync(path, "utf8"))));
   const kp = Keypair.generate();
   writeFileSync(path, JSON.stringify([...kp.secretKey]));
@@ -147,7 +197,8 @@ function fabricateUsdcAccount(address: PublicKey, owner: PublicKey, amount: bigi
 }
 
 async function main(): Promise<void> {
-  mkdirSync(LOCAL, { recursive: true });
+  const { slippageBps: SLIPPAGE_BPS, dexes: DEXES, excludeDexes: EXCLUDE_DEXES } = venueFlags(process.argv);
+  mkdirSync(localDir(), { recursive: true });
   const programId = new PublicKey(
     JSON.parse(readFileSync(join(__dirname, "../target/idl/sip_vault.json"), "utf8")).address as string,
   );
@@ -264,11 +315,11 @@ async function main(): Promise<void> {
     else accounts.push(key);
   });
 
-  writeFileSync(join(LOCAL, "jupiter-vault-usdc.json"), JSON.stringify(fabricateUsdcAccount(vaultIn, vault, USDC_FUND), null, 1));
-  writeFileSync(join(LOCAL, "jupiter-clones.txt"), `${accounts.join("\n")}\n`);
-  writeFileSync(join(LOCAL, "jupiter-programs.txt"), `${programs.join("\n")}\n`);
+  writeFileSync(join(localDir(), "jupiter-vault-usdc.json"), JSON.stringify(fabricateUsdcAccount(vaultIn, vault, USDC_FUND), null, 1));
+  writeFileSync(join(localDir(), "jupiter-clones.txt"), `${accounts.join("\n")}\n`);
+  writeFileSync(join(localDir(), "jupiter-programs.txt"), `${programs.join("\n")}\n`);
   writeFileSync(
-    join(LOCAL, "jupiter-route.json"),
+    join(localDir(), "jupiter-route.json"),
     JSON.stringify(
       {
         capturedAt: new Date().toISOString(),
@@ -328,7 +379,12 @@ async function main(): Promise<void> {
   console.log(`VAULT_TARGET=${vaultTarget.toBase58()}`);
 }
 
-main().catch((error) => {
-  console.error(`\n✗ ${error instanceof Error ? error.message : String(error)}`);
-  process.exit(1);
-});
+// Only when run directly: the keeper's suite imports this module (type-only
+// for the typecheck gate, and for real to test venueFlags), and an import must
+// not fire phase 1's network calls.
+if (process.argv[1] !== undefined && process.argv[1].endsWith("jupiter-fork-setup.ts")) {
+  main().catch((error) => {
+    console.error(`\n✗ ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  });
+}

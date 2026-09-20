@@ -4,11 +4,37 @@
 #   ./scripts/jupiter-fork.sh [--slippage <bps>] [--dexes <label,...>]
 #                             [--exclude <label,...>]
 #
-# The two flags are passed straight to phase 1 and pin the experiment: the
+# The flags are passed straight to phase 1 and pin the experiment: the
 # gross-versus-net question is about the AMM that makes the final transfer, so
 # a run that is about a gross-quoting venue has to name it. Measured
 # 2026-09-20: `--dexes Manifest --slippage 50` puts this harness on a one-hop
 # gross-quoting route with the slippage at the mint's local fee.
+#
+# --dexes AND --exclude ARE MUTUALLY EXCLUSIVE, and the default exclusion is
+# skipped whenever a venue is pinned. Jupiter's quote endpoint refuses the two
+# lists together — HTTP 400, "Cannot set dexes and exclude dexes at the same
+# time" — so a default that applied to pinned runs as well, as one did briefly,
+# made the measured command above unrunnable. Phase 1 now refuses the pair
+# itself, with that reason.
+#
+# A PIN IS A REQUEST THE MARKET MAY REFUSE, and re-running this proof has to
+# expect that. Later the same day, `--dexes Manifest --slippage 50` answered
+# {"error":"No routes found"}: Manifest no longer carried a direct
+# USDC -> FIGUREAI leg, while the unpinned quote routed through Raydium CLMM
+# (a NET-quoting venue) as it always had. That is the file's own claim about
+# the basis coming true — the venue belongs to the moment, not to the mint —
+# and not a broken harness. To retake a GROSS measurement, pin whatever venue
+# quotes gross for that pair at that hour; jupiter-sim.ts prints the basis per
+# row, which is how to find one.
+#
+# RE-RUN THE SAME DAY WITH DEFAULT FLAGS (`./scripts/jupiter-fork.sh`: slippage
+# 200, nothing pinned, Hadron excluded) — 8/8 cases as expected, one hop
+# through Raydium CLMM: quoted out 27,409,402, venue threshold 26,861,214,
+# local fee 50 bps (the cloned validator starts at epoch 0), CREDIT 27,547,833,
+# withheld 138,432, safe min_out 26,726,907, margin 820,926. That venue quotes
+# NET — the gross delivered, taken net of mainnet's 100 bps, is the quote to
+# the raw unit — so this run exercises every guard but not the gross-quoting
+# revert, which needs a gross venue to be both pinned and available.
 #
 # Buys real FIGUREAI (Token-2022, transfer fee) with the vault's USDC through a
 # REAL Jupiter sharedAccountsRoute, against mainnet state cloned into a local
