@@ -38,8 +38,20 @@ function RankCell({ rank }: { readonly rank: number }) {
   );
 }
 
-/** An address, short enough to scan and long enough to recognise, linked to Solscan. */
-function SubjectCell({ address }: { readonly address: string }) {
+/**
+ * An address, short enough to scan and long enough to recognise, linked to
+ * Solscan — EXCEPT ON A SAMPLE ROW, which is linked to nothing. A link under an
+ * invented score is the difference between "here is what the page looks like"
+ * and a claim about whatever account that string happens to be.
+ */
+function SubjectCell({ address, sample }: { readonly address: string; readonly sample: boolean }) {
+  if (sample) {
+    return (
+      <span className="font-mono text-sm text-muted-foreground" title="Sample row — not a real account">
+        {address.slice(0, 4)}…{address.slice(-4)}
+      </span>
+    );
+  }
   return (
     <a
       href={solscanAccountUrl(address)}
@@ -68,14 +80,21 @@ function StreakCell({ streak }: { readonly streak: number }) {
 
 const HEAD = "text-xs font-medium tracking-wide text-muted-foreground uppercase";
 
-function BoardTable({ entries }: { readonly entries: readonly LeaderboardEntry[] }) {
+function BoardTable({
+  entries,
+  sample,
+  empty,
+}: {
+  readonly entries: readonly LeaderboardEntry[];
+  readonly sample: boolean;
+  /** What an empty cut means, which is not the same thing for a week as for all time. */
+  readonly empty: string;
+}) {
   if (entries.length === 0) {
-    return (
-      <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">
-        {/* EMPTY IS NOT AN ERROR, and it is not zeros either: it says what would fill it. */}
-        No pension has been charged yet. The first settlement puts somebody here.
-      </div>
-    );
+    // EMPTY IS NOT AN ERROR, and it is not zeros either: it says what would
+    // fill it. A QUIET WEEK IS NOT AN EMPTY HISTORY, which is what the old
+    // sentence said while the line above it counted a settlement.
+    return <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">{empty}</div>;
   }
   return (
     <div className="overflow-hidden rounded-lg border">
@@ -98,7 +117,7 @@ function BoardTable({ entries }: { readonly entries: readonly LeaderboardEntry[]
                 <RankCell rank={entry.rank} />
               </TableCell>
               <TableCell>
-                <SubjectCell address={entry.subject} />
+                <SubjectCell address={entry.subject} sample={sample} />
                 {/* What the narrow screens drop, kept as one quiet line. */}
                 <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground sm:hidden">
                   <span>
@@ -146,10 +165,14 @@ function BoardTable({ entries }: { readonly entries: readonly LeaderboardEntry[]
 function ruleLine(data: LeaderboardData): string {
   const { ahorro, volumen } = data.rules;
   return (
-    `${ahorro.participation} points for every day a pension is actually charged — the same whether it saved a ` +
-    `thousandth of a SOL or fifty — plus up to ${ahorro.sizeCap + volumen.sizeCap} more for that day's size on a log ` +
-    `scale, and +${ahorro.streakPerDay} for each consecutive day up to +${ahorro.streakCap}. Showing up beats showing ` +
-    `up with more money. One pension is one competitor, however many trading wallets feed it.`
+    // THE BOARD BELOW IS THE COMBINED ONE, so the sentence has to be too: a
+    // day counts when a settlement charged OR when the window it settled
+    // traded, and the old wording named only the first.
+    `${ahorro.participation} points for every day a pension was charged or its trading measured — the same whether it ` +
+    `saved a thousandth of a SOL or fifty — plus up to ${ahorro.sizeCap + volumen.sizeCap} more for that day's size on ` +
+    `a log scale (${ahorro.sizeCap} of it for saving, ${volumen.sizeCap} for volume), and +${ahorro.streakPerDay} for ` +
+    `each consecutive day up to +${ahorro.streakCap}. Showing up beats showing up with more money. One pension is one ` +
+    `competitor, however many trading wallets feed it.`
   );
 }
 
@@ -235,7 +258,15 @@ export function LeaderboardView({
         </ToggleGroup>
       </div>
 
-      <BoardTable entries={entries} />
+      <BoardTable
+        entries={entries}
+        sample={sample}
+        empty={
+          range === "season"
+            ? "No pension has been charged this week. All time has the ones that were."
+            : "No pension has been charged yet. The first settlement puts somebody here."
+        }
+      />
 
       {/*
         THE RULE, in one line, where the panel used to be — and as ONE string.

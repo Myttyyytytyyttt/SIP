@@ -63,8 +63,8 @@ export default async function LeaderboardPage({
         }
         activitySheet={
           <p className="p-4 text-sm text-muted-foreground">
-            The pensions that save most often. A day counts when a settlement actually charged; showing up beats showing
-            up with more money.
+            The pensions that save most often. A day counts when a settlement charged it, or when the window that
+            settlement closed had traded; showing up beats showing up with more money.
           </p>
         }
       />
