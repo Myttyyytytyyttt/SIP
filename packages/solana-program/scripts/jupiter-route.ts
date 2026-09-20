@@ -301,6 +301,9 @@ export interface JupiterQuote {
   readonly routePlan: ReadonlyArray<{
     readonly swapInfo: {
       readonly label?: string;
+      /** This hop's own mints. A multi-hop route names its intermediates here and nowhere else. */
+      readonly inputMint?: string;
+      readonly outputMint?: string;
       /**
        * The slot at which Jupiter last refreshed THIS AMM's state — a string
        * in the JSON. It can sit a long way behind contextSlot: measured on
@@ -923,6 +926,34 @@ export function verifySharedAccountsRoute(
 }
 
 /**
+ * EVERY mint the route touches: the two ends, and each hop's own.
+ *
+ * WHY THE ENDS ARE NOT ENOUGH. The vault-ownership pass exists to catch a
+ * token account the vault owns that the program's two deltas do not measure.
+ * It has two halves, and a multi-hop route slips between them: the on-chain
+ * half only sees accounts that ALREADY EXIST, and the derivation half was
+ * given the input and target mints alone, so it built four candidate ATAs and
+ * nothing at all for an intermediate. A vault ATA for an intermediate mint
+ * that does not exist yet was therefore invisible to both — and it is exactly
+ * the account a route could create and then spend, unmeasured.
+ *
+ * The intermediates are only ever named inside routePlan, which is why they
+ * are read out of it here rather than asked of the caller.
+ */
+export function routeMints(quote: JupiterQuote, inputMint: PublicKey, targetMint: PublicKey): PublicKey[] {
+  const seen = new Set<string>([inputMint.toBase58(), targetMint.toBase58()]);
+  const mints = [inputMint, targetMint];
+  for (const step of quote.routePlan) {
+    for (const mint of [step.swapInfo.inputMint, step.swapInfo.outputMint]) {
+      if (mint === undefined || seen.has(mint)) continue;
+      seen.add(mint);
+      mints.push(new PublicKey(mint));
+    }
+  }
+  return mints;
+}
+
+/**
  * Every token account in `keys` that the vault owns.
  *
  * TWO PASSES, BECAUSE NEITHER ALONE IS ENOUGH. The on-chain pass reads the
@@ -931,6 +962,10 @@ export function verifySharedAccountsRoute(
  * exist yet — a route may list an ATA it intends to create, and an account that
  * is empty at read time is not an account the venue cannot fill and then spend.
  * The API's own `pubkey` labels are never consulted; they are the claim under test.
+ *
+ * `mints` MUST BE EVERY MINT THE ROUTE TOUCHES, not just the two ends — see
+ * routeMints above. Both passes are blind to an intermediate the derivation
+ * was never handed.
  */
 export async function findVaultOwnedTokenAccounts(
   connection: Connection,
@@ -1041,7 +1076,7 @@ export async function buildJupiterRoute(
     connection,
     params.vault,
     response.swapInstruction.accounts.map((key) => key.pubkey),
-    [params.inputMint, params.targetMint],
+    routeMints(quote, params.inputMint, params.targetMint),
   );
 
   const route = verifySharedAccountsRoute(quote, response, {

@@ -38,6 +38,7 @@ import {
   investAmountIn,
   netOfTransferFee,
   pricedAtSlot,
+  routeMints,
   transferFeeForEpoch,
   verifyQuoteAnswersRequest,
   verifyRouteFresh,
@@ -52,6 +53,10 @@ const VAULT_SPYX = "FNsKE5tXJU9CaBT5qt4TzuqNbK96ZfLPFJFwLndaRgrR";
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const SPYX = "XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W";
 const ATA_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+/** An intermediate a multi-hop route threads through, and the vault's two ATAs for it. */
+const WSOL = "So11111111111111111111111111111111111111112";
+const VAULT_WSOL_LEGACY = "6uaqMU6exBZVVFj566NNAW7BWCVYP3J7EicYicerHrfb";
+const VAULT_WSOL_2022 = "etvVTW7gDVXnmQ4t1r3hjLdtJpn2xgcoBcBxCLaZynD";
 
 /** The captured instruction's account list: [pubkey, isSigner, isWritable]. */
 const CAPTURED_ACCOUNTS: ReadonlyArray<readonly [string, boolean, boolean]> = [
@@ -557,6 +562,61 @@ describe("vault-owned-ness is derived, not taken from the API's labels", () => {
   const noAccounts = {
     getMultipleAccountsInfo: async (keys: readonly PublicKey[]) => keys.map(() => null),
   } as unknown as Parameters<typeof findVaultOwnedTokenAccounts>[0];
+
+  /** A two-hop quote: USDC -> wSOL -> SPYx, the shape that has intermediates. */
+  const twoHop = (): JupiterQuote => ({
+    ...quote(),
+    routePlan: [
+      { swapInfo: { label: "Whirlpool", inputMint: USDC, outputMint: WSOL, updateContextSlot: "448859870" } },
+      { swapInfo: { label: "Meteora DLMM", inputMint: WSOL, outputMint: SPYX, updateContextSlot: "448859880" } },
+    ],
+  });
+
+  it("reads the intermediate mints out of the route plan, which is the only place they are named", () => {
+    expect(routeMints(twoHop(), new PublicKey(USDC), new PublicKey(SPYX)).map((m) => m.toBase58())).toEqual([
+      USDC,
+      SPYX,
+      WSOL,
+    ]);
+    // A single-hop route adds nothing, and never repeats the two ends.
+    expect(routeMints(quote(), new PublicKey(USDC), new PublicKey(SPYX)).map((m) => m.toBase58())).toEqual([USDC, SPYX]);
+  });
+
+  it("derives the vault's ATA for an INTERMEDIATE mint that does not exist yet", async () => {
+    // THE HOLE THIS CLOSES. The on-chain pass only sees accounts that already
+    // exist, and the derivation used to be handed the two end mints alone — so
+    // a vault ATA for an intermediate, not yet created, was invisible to both
+    // passes. That is precisely the account a route could create and then
+    // spend with nothing measuring it.
+    const found = await findVaultOwnedTokenAccounts(
+      noAccounts,
+      new PublicKey(VAULT),
+      [VAULT_USDC, VAULT_WSOL_LEGACY, VAULT_WSOL_2022, "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"],
+      routeMints(twoHop(), new PublicKey(USDC), new PublicKey(SPYX)),
+    );
+    expect([...found].sort()).toEqual([VAULT_USDC, VAULT_WSOL_LEGACY, VAULT_WSOL_2022].sort());
+  });
+
+  it("and such an account is then refused by name [unmeasured-vault-account]", () => {
+    // The derivation is only half of it: what it buys is that the refusal can
+    // fire at all. A route listing the vault's wSOL ATA is a balance the two
+    // deltas cannot see.
+    const r = response();
+    const withIntermediate = {
+      ...r,
+      swapInstruction: {
+        ...r.swapInstruction,
+        accounts: [...r.swapInstruction.accounts, { pubkey: VAULT_WSOL_LEGACY, isSigner: false, isWritable: true }],
+      },
+    };
+    const said = refusal(
+      quote(),
+      withIntermediate,
+      context({ vaultOwnedTokenAccounts: new Set([VAULT_USDC, VAULT_SPYX, VAULT_WSOL_LEGACY]) }),
+    );
+    expect(said.condition).toBe("unmeasured-vault-account");
+    expect(said.message).toContain(VAULT_WSOL_LEGACY);
+  });
 
   it("finds the vault's ATA under both token programs even when it does not exist yet", async () => {
     const vault = new PublicKey(VAULT);
