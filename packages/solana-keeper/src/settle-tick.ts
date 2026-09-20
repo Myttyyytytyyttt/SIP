@@ -529,10 +529,19 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   let settled: bigint | null = null;
   let receiptErr: TransactionError | null = null;
   try {
-    const receipt = await connection.getTransaction(signature, {
-      maxSupportedTransactionVersion: 0,
-      commitment: "confirmed",
-    });
+    const read = async () =>
+      connection.getTransaction(signature, {
+        maxSupportedTransactionVersion: 0,
+        commitment: "confirmed",
+      });
+    // ONE RE-READ, AT NO RISK. The pool can route this read to an endpoint that
+    // has not caught up with the one that just confirmed, and a receipt that
+    // never arrives used to cost this settlement its row in the mirror.
+    let receipt = await read();
+    if (receipt === null) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      receipt = await read();
+    }
     // A second, independent read of success: the receipt's own meta.err. If it
     // is set, the tx did NOT settle, even though its status said it did.
     if (receipt?.meta?.err != null) receiptErr = receipt.meta.err;

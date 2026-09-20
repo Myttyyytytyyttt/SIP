@@ -47,6 +47,11 @@ const armed = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv =>
     SIP_SOLANA_PRIVY_APP_ID: "app-id",
     SIP_SOLANA_PRIVY_APP_SECRET: APP_SECRET,
     SIP_SOLANA_PRIVY_AUTHORIZATION_KEY: AUTH_KEY,
+    // A COMPLETE armed environment, so `warnings` staying empty keeps meaning
+    // "this configuration warns about nothing". An armed keeper without an
+    // alert destination is warned about on purpose, and its own test below
+    // removes this key to pin that.
+    SIP_SOLANA_ALERT_WEBHOOK: WEBHOOK,
     ...over,
   });
 
@@ -159,6 +164,20 @@ describe("arming", () => {
     expect(config.signing!.localSignersDir).toBeNull();
     expect(config.privySignerId).toBe("signer-id");
     expect(config.warnings).toEqual([]);
+  });
+
+  it("warns an armed keeper that has nowhere to send a critical, and leaves a dry one alone", () => {
+    // THE ESCALATION LADDER POINTED AT NOTHING. Armed without a webhook, every
+    // critical stays in a log nobody watches. The warning fires at the moment
+    // the mistake is made: the deploy after the variable was edited.
+    const env = armed();
+    delete env.SIP_SOLANA_ALERT_WEBHOOK;
+    const config = loadConfig(env, new Redactor());
+    expect(config.armed).toBe(true);
+    expect(config.alertWebhook).toBeNull();
+    expect(config.warnings.join("\n")).toContain("SIP_SOLANA_ALERT_WEBHOOK");
+    // A dry keeper escalates nothing, so it is not nagged.
+    expect(loadConfig(dry(), new Redactor()).warnings).toEqual([]);
   });
 
   it("serializes to its safe description, with the settle key's public key and nothing secret", () => {

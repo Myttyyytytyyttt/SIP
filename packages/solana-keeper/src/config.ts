@@ -626,6 +626,19 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
       alertWebhook = new Secret(webhookRaw, "alertWebhook");
     }
   }
+  // THE ESCALATION LADDER CAN BE POINTED AT NOTHING AND LOOK PERFECT. Armed
+  // without a webhook, every critical this keeper can raise — a lost claim, a
+  // failed settle, an unbounded seat, an authorization key outside its quorum —
+  // becomes a log line in a service nobody is watching. The warning fires at the
+  // moment the mistake is made: the deploy after the variable was edited, which
+  // is exactly how the variable gets dropped (RAILWAY_SOLANA.md warns the same
+  // edit can drop RAILWAY_DOCKERFILE_PATH).
+  if (armed && alertWebhook === null) {
+    warnings.push(
+      "Armed with no alert destination (SIP_SOLANA_ALERT_WEBHOOK): every critical stays in this service's " +
+        "log, where nothing is watching. Set it to a Discord or Slack webhook and fire a test alert.",
+    );
+  }
 
   let databaseUrl: Secret | null = null;
   const databaseRaw = trimmed(env["DATABASE_URL"]);

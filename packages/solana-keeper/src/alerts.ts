@@ -83,11 +83,16 @@ export function createAlerter(options: AlerterOptions): Alerter {
   const post =
     options.post ??
     (async (url: string, body: string) => {
-      await fetch(url, {
+      const response = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body,
       });
+      // A DELETED OR RATE-LIMITED WEBHOOK IS NOT SILENCE. fetch resolves on a
+      // 404 and on a 429, so without this the alert vanishes without even the
+      // "alert webhook failed" warning below. The status code is all that
+      // leaves: the URL is a credential and the body may hold anything.
+      if (!response.ok) throw new Error(`webhook answered ${response.status}`);
     });
 
   const sanitize = options.sanitize ?? ((text: string): string | null => text);

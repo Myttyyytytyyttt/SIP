@@ -531,6 +531,7 @@ const health: KeeperStatus = {
     wallets: null,
   },
   history: "not checked yet",
+  alerts: config.alertWebhook !== null ? "webhook" : "log-only",
   wallets: {},
   // Projected from the carry book at each request, below: a sweep in flight can
   // record one, and a stale copy here would say a restart costs nothing.
@@ -992,15 +993,26 @@ async function sweep(): Promise<void> {
             signature: settle.signature,
           });
           changes.forget(`settle:${wallet}`);
-          // Recorded from what the tick MEASURED, and only when every field is
-          // present: a settle whose receipt was not read in time has no
-          // contribution to record, and a guessed row is worse than no row.
+          // THE RECEIPT SAYS HOW MUCH; THE ATTESTATION SAYS WHAT WAS OWED, and
+          // when the first cannot be read the second is not a guess. A settle
+          // that lands and whose receipt read returns null — routine, because
+          // the pool can route that read to an endpoint behind the one that
+          // just confirmed — used to write NO ROW, and nothing backfills: after
+          // the RPC's history window that settlement is gone from the mirror
+          // forever. `expectedLamports` is expectedContribution(base, bps,
+          // maxContribution), which is settle_v2's own arithmetic over a base, a
+          // rate and a policy nonce the chain verified byte for byte inside the
+          // attestation it accepted. If the settle landed, that is what moved.
+          // STILL UNCOVERED: when Privy signs and broadcasts and then answers
+          // 504, the keeper never learns the signature, and tx_ref is NOT NULL.
+          // Closing that means finding the signature afterwards by the new
+          // nonce, which is a bigger change than this one.
           if (
             settle.outcome === "SETTLED" &&
             settle.signature !== undefined &&
             settle.baseLamports !== undefined &&
             settle.mode !== undefined &&
-            settle.settledLamports !== undefined &&
+            settle.expectedLamports !== undefined &&
             settle.nonce !== undefined &&
             settle.endSlot !== undefined
           ) {
@@ -1028,7 +1040,7 @@ async function sweep(): Promise<void> {
               // THE ATTESTED BASE, as the Settled event records it: in PROFIT mode,
               // net of any loss an earlier zero settle carried into the window.
               baseRaw: settle.baseLamports,
-              contributionRaw: settle.settledLamports,
+              contributionRaw: settle.settledLamports ?? settle.expectedLamports,
               txRef: settle.signature,
               height: settle.endSlot,
             });
@@ -1296,6 +1308,7 @@ log.info("keeper starting", {
   // The website's calendar and history come from here. "off" and "BROKEN" both
   // mean the site will show an empty past for vaults that really did settle.
   history: history.detail,
+  alerts: health.alerts,
 });
 
 /**

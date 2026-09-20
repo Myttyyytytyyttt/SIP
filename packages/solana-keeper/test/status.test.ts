@@ -72,6 +72,7 @@ function setup(): { redactor: Redactor; status: KeeperStatus } {
     programDeployed: false,
     config: null,
     mode: "dry-run",
+    alerts: "webhook",
     armed: config.armed,
     missingLiveCondition: "the on-chain ProtocolConfig does not exist (program not deployed, or init_config not run); staying dry and re-verifying every sweep",
     sweepMs: config.sweepMs,
@@ -227,6 +228,10 @@ describe("the heartbeat handler", () => {
     expect(renders).toBe(1);
     for (const credential of CREDENTIALS) expect(served.body).not.toContain(credential);
     expect(JSON.parse(served.body)).toMatchObject({ service: SERVICE, program: SIP_PROGRAM_ID });
+    // THE LABEL, NEVER THE URL: /status is unauthenticated and served on a
+    // public domain, and a Discord or Slack webhook is a posting credential.
+    expect(JSON.parse(served.body).alerts).toBe("webhook");
+    expect(served.body).not.toContain(WEBHOOK);
 
     expect(drive(handler, "GET", "/").status).toBe(404);
     expect(drive(handler, "POST", "/status").status).toBe(405);

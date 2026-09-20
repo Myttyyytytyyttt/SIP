@@ -213,7 +213,11 @@ export class SolanaReadModel {
         `INSERT INTO ${READ_MODEL_SCHEMA}.settlement_event
            (wallet_addr, nonce, vault_addr, mode, base_raw, contribution_raw, tx_ref, height)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-         ON CONFLICT (wallet_addr, nonce) DO NOTHING`,
+         ON CONFLICT (wallet_addr, nonce) DO UPDATE
+           SET contribution_raw = EXCLUDED.contribution_raw,
+               tx_ref = EXCLUDED.tx_ref,
+               height = EXCLUDED.height
+           WHERE ${READ_MODEL_SCHEMA}.settlement_event.tx_ref IS DISTINCT FROM EXCLUDED.tx_ref`,
         [
           row.walletAddr,
           row.nonce.toString(),
