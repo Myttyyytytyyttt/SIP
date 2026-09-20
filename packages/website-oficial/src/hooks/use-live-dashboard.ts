@@ -24,12 +24,18 @@
  * A LATE ANSWER FOR AN OLDER REQUEST IS DROPPED (a request counter, as
  * useVaultState does), and changing pension key resets everything — nothing read
  * for the previous key stays on screen for the next one.
+ *
+ * A PAGE OF SIGNATURES IS NOT A PAGE OF SETTLEMENTS. When the chain's own state
+ * says a settlement happened and the loaded page holds none — twelve of fifteen
+ * signatures being keeper upkeep is enough — this read pages back for it itself,
+ * bounded, in this same path: live-backfill.ts holds the rule and the cost.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { activityWasUnreadable, createLiveApi } from "@/lib/live-api";
 import { appendOlder, headCursor, mergeHead, newestSignature } from "@/lib/live-activity-store";
+import { backfillSettlements, chainSaysSettled, holdsSettlement, shouldBackfill } from "@/lib/live-backfill";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { toLiveDashboard } from "@/lib/live-model";
 import { MANUAL_FLOOR_MS, nextDelayMs, nextManualDelayMs, shouldRefreshOnShow } from "@/lib/live-schedule";
@@ -113,6 +119,14 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
   const readingRef = useRef(false);
   const lastReadRef = useRef<number | null>(null);
   lastReadRef.current = lastReadAt;
+  // ONE READER OF THE TAIL, in a ref rather than in state: the backfill takes
+  // this before it awaits, so a click arriving in the same tick as the
+  // setOlder below still finds the tail taken.
+  const olderBusyRef = useRef(false);
+  olderBusyRef.current = older.busy;
+  // What the backfill has already spent on THIS pension key.
+  const backfillRounds = useRef(0);
+  const backfillDone = useRef(false);
 
   // A DIFFERENT PENSION KEY IS A DIFFERENT PENSION: nothing carries over.
   useEffect(() => {
@@ -125,6 +139,8 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
     setLastReadAt(null);
     setOlder({ busy: false, retryAt: null, message: null, complete: false });
     setActivityUnreadable(false);
+    backfillRounds.current = 0;
+    backfillDone.current = false;
   }, [pensionKey]);
 
   const read = useCallback(
@@ -178,6 +194,47 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
             // One place decides whether the loaded history is complete, and it
             // is the same cursor the stats and Load older read.
             setOlder((current) => ({ ...current, complete: cursor === null }));
+
+            // THE SETTLEMENT THE STATE RECORDS IS FETCHED, NOT DENIED.
+            //
+            // What is held once this page lands, mergeHead's way: a gap
+            // REPLACED the head, so what was under it is gone. For the decision
+            // only — a manual page appended while this read was in flight can
+            // at worst make it ask for a page it need not have.
+            const loaded = until === null || page.body.gap ? page.body.entries : [...page.body.entries, ...entriesRef.current];
+            if (
+              cursor !== null &&
+              shouldBackfill({
+                chainSettled: chainSaysSettled(answered.body),
+                loadedHasSettlement: holdsSettlement(loaded),
+                cursor,
+                manualBusy: olderBusyRef.current,
+                rounds: backfillRounds.current,
+                done: backfillDone.current,
+              })
+            ) {
+              backfillRounds.current += 1;
+              // The tail is taken for the round's duration, so "Load older"
+              // cannot page from the same cursor at the same time.
+              olderBusyRef.current = true;
+              setOlder((current) => ({ ...current, busy: true, message: null }));
+              const filled = await backfillSettlements({ cursor, fetchPage: (before) => api.activity({ owner: pensionKey, limit: ACTIVITY_PAGE, before }) });
+              olderBusyRef.current = false;
+              // A stale round touches nothing: the pension key that changed
+              // under it already reset `older` and everything else.
+              if (stale()) return true;
+              // A round that came back cleanly is the answer, found or not.
+              // Only one cut short by a failure is worth asking again.
+              backfillDone.current = filled.failure === null && !filled.unreadable;
+              if (filled.entries.length > 0) setEntries((held) => appendOlder(held, filled.entries));
+              setActivityMeta((held) => (held === null ? held : { ...held, nextBefore: filled.cursor }));
+              setOlder({
+                busy: false,
+                retryAt: filled.failure === null || filled.failure.retryAfterSeconds === null ? null : Date.now() + filled.failure.retryAfterSeconds * 1_000,
+                message: filled.failure === null ? null : wordsFor(filled.failure),
+                complete: filled.cursor === null,
+              });
+            }
           }
         }
         setFailures(0);
@@ -243,9 +300,13 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
 
   const loadOlder = useCallback((): void => {
     const before = activityMeta?.nextBefore ?? null;
-    if (pensionKey === null || before === null || older.busy) return;
+    // The ref as well as the state: a backfill holds the tail from inside a
+    // read, before React has re-rendered with its `busy`.
+    if (pensionKey === null || before === null || older.busy || olderBusyRef.current) return;
+    olderBusyRef.current = true;
     setOlder((current) => ({ ...current, busy: true, message: null }));
     void api.activity({ owner: pensionKey, limit: ACTIVITY_PAGE, before }).then((page) => {
+      olderBusyRef.current = false;
       if (page.ok) {
         setEntries((held) => appendOlder(held, page.body.entries));
         setActivityMeta({ status: page.body.status, nextBefore: page.body.nextBefore });
