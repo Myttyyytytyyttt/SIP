@@ -329,6 +329,52 @@ describe("/api/solana-build", () => {
     expect(unpriced.json).not.toHaveProperty("txBase64");
   });
 
+  /**
+   * WHICH OF THE PANEL FIELDS THIS BRANCH'S SERVER ACTUALLY TAKES, pinned so the
+   * form is never built against a field the route would refuse — and so that
+   * OPENING the whitelist turns this red and says "now wire the form".
+   *
+   * The owner asked for four: minimum per buy, cap per buy, basket weights and
+   * cap per settlement. Today investPolicy takes the caps and nothing else:
+   * min_investment, the weights and the venue are SaverFi's, fixed in the route
+   * from OFFERED_LEGS (build-handler.ts), and there is no action at all that
+   * changes an existing vault's settlement cap — maxContribution is a
+   * createVault field, so it is chosen once, when the vault is made.
+   */
+  it("investPolicy takes the two caps and nothing else: the minimum per buy, the weights and the venue are refused, and no action changes a made vault's settlement cap", async () => {
+    useEnv(SOLANA_ENV);
+    const owner = someKey();
+    const methods = stubChain(new Map());
+    const refused = async (body: Record<string, unknown>): Promise<[number, string | undefined, string | undefined]> => {
+      const response = await answer(await POST(buildRequest({ action: "investPolicy", owner, ...body })));
+      return [response.status, response.json.error?.code, response.json.error?.message];
+    };
+
+    // NOT ACCEPTED, so the form builds nothing for them and the defaults stand.
+    expect(await refused({ minInvestment: "2500000" })).toEqual([400, "bad_request", "Unexpected field minInvestment."]);
+    expect(await refused({ weights: [{ mint: SPYX_MINT, weightBps: 5_000 }, { mint: ANTHROPIC_MINT, weightBps: 5_000 }] })).toEqual([
+      400,
+      "bad_request",
+      "Unexpected field weights.",
+    ]);
+    expect(await refused({ venue: "raydium-clmm" })).toEqual([400, "bad_request", "Unexpected field venue."]);
+    // The settlement cap is a vault field, not a policy one, and there is no
+    // setPolicy to carry it: an existing vault's cap cannot be changed here.
+    expect(await refused({ maxContribution: "60000000" })).toEqual([400, "bad_request", "Unexpected field maxContribution."]);
+    const setPolicy = await answer(await POST(buildRequest({ action: "setPolicy", owner, maxContribution: "60000000" })));
+    expect([setPolicy.status, setPolicy.json.error?.code]).toEqual([400, "bad_request"]);
+
+    // THE CAPS ARE BASE UNITS AS DECIMAL STRINGS, and the route enforces it: a
+    // float and a JavaScript number are both refused, so no cap can arrive
+    // through a lossy double.
+    const capWords = "maxPerCall and maxRolling30d are USDC raw units, written as decimal strings.";
+    expect(await refused({ maxPerCall: 1_000_000_000 })).toEqual([400, "bad_request", capWords]);
+    expect(await refused({ maxPerCall: "1000.5" })).toEqual([400, "bad_request", capWords]);
+    expect(await refused({ maxPerCall: "1e9" })).toEqual([400, "bad_request", capWords]);
+    // Every refusal above happens before a single account is read.
+    expect(methods).toHaveLength(0);
+  });
+
   it("withdraw past what the vault can release is 422 above_withdrawable; withdrawToken of a mint the vault does not hold is 422 not_held", async () => {
     useEnv(SOLANA_ENV);
     const owner = someKey();

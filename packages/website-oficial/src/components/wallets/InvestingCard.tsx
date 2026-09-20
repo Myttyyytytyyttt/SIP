@@ -18,6 +18,33 @@
  * WHAT IS SIGNED is the build's floors, not the ones shown here before building:
  * the flow checks them against SIP's margins, and they are shown again while
  * Phantom asks.
+ *
+ * WHAT THIS CARD DELIBERATELY DOES NOT OFFER, and why. Of the four fields the
+ * owner asked for, /api/solana-build's investPolicy accepts exactly two — the
+ * caps — and refuses any other key with 400 bad_request (INVEST_POLICY_FIELDS in
+ * solana-core/src/server/build-handler.ts). So:
+ *  * MOST PER BUY and MOST PER 30 DAYS are here, sent as decimal strings of USDC
+ *    raw units; the route's decimalU64 refuses a float or a JS number outright,
+ *    so no cap can arrive through a lossy double.
+ *  * THE MINIMUM PER BUY is not offered: the route fixes min_investment at
+ *    defaultInvestPolicy(OFFERED_LEGS.length).minInvestment. Note it is enforced
+ *    PER LEG, which is what REACHABLE_PER_BUY_RAW below exists for.
+ *  * THE BASKET WEIGHTS are not offered: the route fixes them with
+ *    basketWeightsBps(OFFERED_LEGS.length), and the venue with RAYDIUM_CLMM. A
+ *    weight or a program id sent from a browser would be refused anyway.
+ *  * THE CAP PER SETTLEMENT is not here at all. It is a VAULT field
+ *    (maxContribution, CREATE_VAULT_FIELDS), chosen once on VaultCard when the
+ *    vault is made; no action in the build route changes it afterwards.
+ * route.test.ts pins all of that, so opening the whitelist turns it red rather
+ * than leaving this comment quietly wrong.
+ *
+ * AND THE ONE FIELD THAT MUST NEVER BECOME AN INPUT: min_convert_rate_wad. The
+ * program does not validate it, and a zero there silently switches the
+ * SOL-to-USDC conversion off. Nothing here can reach it — it is always
+ * floorWad(the live pool price, CONVERT_FLOOR_MARGIN_BPS), and vault-flows.ts
+ * refuses to sign a build whose convertWad is null, zero or not exactly that.
+ * The card states its EFFECT in words beside the live price it came from
+ * (INVEST_COPY.convertFloorEffect), which is as far as this should ever go.
  */
 
 import {
