@@ -12,6 +12,14 @@
 // from a swap could not be checked this way at all; it agreed with its source
 // by construction. This one has to earn it.
 //
+// THE TWO RATES ARE PUT IN THE SAME TERMS FIRST. Our quote is what a TAKER'S
+// OWN ACCOUNT sees: gross in, net out, every Token-2022 transfer fee taken off.
+// A real fill measured at the pool's vaults is the other way round — the input
+// vault gained what survived the fee, the output vault paid before it — so the
+// fee both mints charge is read from chain and the measured pair is converted
+// back to the taker's side of it. Comparing the two raw would show a 50 bps gap
+// on the PreStock pools that is nothing but this.
+//
 // WHY IT READS VERSION 1. The pools SaverFi trades are full of version-1
 // transactions — 51 of 60 on SPYx the night this was written — and web3.js
 // THROWS rather than returning null when asked for one above its stated
@@ -26,7 +34,7 @@ import { createHash } from "node:crypto";
 import bs58 from "bs58";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { RAYDIUM_CLMM } from "./raydium-swap";
-import { fetchLiveRoute, type LiveRoute } from "./live-route";
+import { feeInForce, fetchLiveRoute, transferFeeSchedule, type LiveRoute } from "./live-route";
 
 const RPC = process.env.SIP_SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com";
 const SWAP_V2_DISC = createHash("sha256").update("global:swap_v2").digest().subarray(0, 8).toString("hex");
@@ -156,8 +164,19 @@ async function main(): Promise<void> {
   const only = process.argv[2];
   const connection = new Connection(RPC, "confirmed");
   console.log(`rehearsing routes against ${RPC}`);
-  console.log(`READ-ONLY: no transaction is built or sent.\n`);
+  console.log(`READ-ONLY: no transaction is built or sent.`);
+  // The epoch decides which of a mint's two fee schedules is in force, so it is
+  // read once and printed: a rehearsal run either side of an issuer's change
+  // should say plainly which side it was on.
+  const epoch = BigInt((await connection.getEpochInfo()).epoch);
+  console.log(`epoch ${epoch}\n`);
   const verdicts: string[] = [];
+
+  /** What the mint takes out of a transfer of itself, right now. */
+  const feeBpsOf = (mint: PublicKey, account: { readonly owner: PublicKey; readonly data: Buffer }): number => {
+    const schedule = transferFeeSchedule(mint, account);
+    return schedule === null ? 0 : feeInForce(schedule, epoch);
+  };
 
   for (const entry of POOLS) {
     if (only !== undefined && only !== entry.name) continue;
@@ -169,6 +188,11 @@ async function main(): Promise<void> {
     const outputMintAccount = await connection.getAccountInfo(entry.output, "confirmed");
     if (outputMintAccount === null) throw new Error(`${entry.name}: the output mint does not exist`);
     const outputTokenProgram = outputMintAccount.owner;
+    const outputFeeBps = feeBpsOf(entry.output, outputMintAccount);
+    await sleep(PACE_MS);
+    const inputMintAccount = await connection.getAccountInfo(entry.input, "confirmed");
+    if (inputMintAccount === null) throw new Error(`${entry.name}: the input mint does not exist`);
+    const inputFeeBps = feeBpsOf(entry.input, inputMintAccount);
 
     const started = Date.now();
     let route: LiveRoute;
@@ -183,6 +207,7 @@ async function main(): Promise<void> {
     console.log(`   route built in ${(elapsed / 1000).toFixed(2)} s from ${route.capturedFrom}`);
     console.log(`   in ${short(route.inputMint)} -> out ${short(route.outputMint)}  (output program ${short(outputTokenProgram)})`);
     console.log(`   ammConfig ${short(route.ammConfig)}  inputVault ${short(route.inputVault)}  outputVault ${short(route.outputVault)}  observation ${short(route.observationState)}`);
+    console.log(`   transfer fee at epoch ${epoch}: ${inputFeeBps} bps in, ${outputFeeBps} bps out`);
     console.log(`   remaining accounts: ${route.tickArrays.map(short).join(" ")}`);
 
     // Which way round the pool is, so the real swap can be compared in its own
@@ -262,17 +287,27 @@ async function main(): Promise<void> {
 
     for (const [name, ok, detail] of checks) console.log(`     ${ok ? "OK  " : "FAIL"} ${name.padEnd(17)} ${detail}`);
 
-    // The price: our net quote against what that swap really paid.
+    // The price: our net quote against what that swap's taker really got.
     let priceLine = "no single-swap fill to compare (that transaction held more than one swap on this pool)";
     let priceOk = true;
     if (swap.realized !== null && mine.observed !== null) {
+      // The fees on the direction that swap actually ran, which is the direction
+      // `mine` was built for.
+      const feeIn = BigInt(aligned ? inputFeeBps : outputFeeBps);
+      const feeOut = BigInt(aligned ? outputFeeBps : inputFeeBps);
+      // Back to the taker's own side of both fees: the input vault gained what
+      // survived the fee on the way in, the output vault paid before the fee on
+      // the way out.
+      const takerIn = (swap.realized.inRaw * 10_000n) / (10_000n - feeIn);
+      const takerOut = (swap.realized.outRaw * (10_000n - feeOut)) / 10_000n;
       const ours = per1e9(mine.observed);
-      const theirs = per1e9(swap.realized);
+      const theirs = per1e9({ inRaw: takerIn, outRaw: takerOut });
       const gapBps = theirs === 0n ? 0n : ((ours - theirs) * 10_000n) / theirs;
       priceOk = gapBps > -500n && gapBps < 500n;
       priceLine =
-        `ours ${ours} out-raw per 1e9 in-raw, that fill got ${theirs} — ` +
-        `${gapBps >= 0n ? "+" : ""}${gapBps} bps (ours is a mid price net of fee; a real fill also pays impact)`;
+        `ours ${ours} out-raw per 1e9 in-raw, that fill's taker got ${theirs} ` +
+        `(vaults moved ${per1e9(swap.realized)}, ${feeIn}/${feeOut} bps of transfer fee either side) — ` +
+        `${gapBps >= 0n ? "+" : ""}${gapBps} bps (ours is a mid price net of fees; a real fill also pays impact)`;
     } else if (mine.observed === null) {
       priceOk = false;
       priceLine = "FAIL — the route quoted no rate at all";

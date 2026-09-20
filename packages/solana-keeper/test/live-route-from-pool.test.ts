@@ -93,6 +93,54 @@ function ammConfig(overrides: { tradeFeeRate?: number; tickSpacing?: number } = 
   return data;
 }
 
+/** A classic SPL mint: 82 bytes, no extensions, nothing to charge. */
+const classicMint = (): Buffer => Buffer.alloc(82);
+
+interface FeeSchedule {
+  readonly epoch: number;
+  readonly bps: number;
+}
+
+/**
+ * A Token-2022 mint carrying a TransferFeeConfig, laid out the way the two
+ * PreStock mints really are: account type 1 at byte 165, then TLV entries.
+ * A leading MetadataPointer is written first so the walk has to WALK — both
+ * real mints carry the fee config third, not first.
+ */
+function feeMint(older: FeeSchedule, newer: FeeSchedule, options: { readonly length?: number } = {}): Buffer {
+  const metadataPointer = 4 + 64;
+  const length = options.length ?? 108;
+  const data = Buffer.alloc(166 + metadataPointer + 4 + length);
+  data[165] = 1; // Mint
+  data.writeUInt16LE(18, 166); // MetadataPointer
+  data.writeUInt16LE(64, 168);
+  const at = 166 + metadataPointer;
+  data.writeUInt16LE(1, at); // TransferFeeConfig
+  data.writeUInt16LE(length, at + 2);
+  const body = at + 4;
+  // 32 authority + 32 authority + 8 withheld, then older and newer: epoch u64,
+  // maximum_fee u64, basis points u16.
+  data.writeBigUInt64LE(BigInt(older.epoch), body + 72);
+  data.writeBigUInt64LE(0xffffffffffffffffn, body + 80);
+  data.writeUInt16LE(older.bps, body + 88);
+  data.writeBigUInt64LE(BigInt(newer.epoch), body + 90);
+  data.writeBigUInt64LE(0xffffffffffffffffn, body + 98);
+  data.writeUInt16LE(newer.bps, body + 106);
+  return data;
+}
+
+/** SPYx's real shape: Token-2022, extensions, and no TransferFeeConfig anywhere. */
+function noFeeMint(): Buffer {
+  const data = Buffer.alloc(166 + 4 + 64);
+  data[165] = 1; // Mint
+  data.writeUInt16LE(18, 166); // MetadataPointer
+  data.writeUInt16LE(64, 168);
+  return data;
+}
+
+/** What ANTHROPIC and FIGUREAI both carried on mainnet the day this was written. */
+const PRESTOCK_FEE = { older: { epoch: 1032, bps: 50 }, newer: { epoch: 1039, bps: 100 } } as const;
+
 /** The tick array holding `start`, by the seed Raydium uses (BIG-endian index). */
 function tickArray(start: number): PublicKey {
   const seed = Buffer.alloc(4);
@@ -106,12 +154,17 @@ interface StubOptions {
   readonly config?: Buffer;
   /** Addresses getMultipleAccountsInfo should report as not existing. */
   readonly missing?: readonly PublicKey[];
+  /** Mint accounts by address, for a side that is not a plain SPL mint. */
+  readonly mints?: Readonly<Record<string, { readonly owner: PublicKey; readonly data: Buffer }>>;
+  readonly epoch?: number;
 }
 
 /** Every account this connection serves is one of these; anything else is null. */
-function stubConnection(options: StubOptions = {}): { connection: Connection; asked: string[][] } {
+function stubConnection(options: StubOptions = {}): { connection: Connection; asked: string[][]; epochsAsked: number[] } {
   const asked: string[][] = [];
+  const epochsAsked: number[] = [];
   const missing = new Set((options.missing ?? []).map((key) => key.toBase58()));
+  const mints = options.mints ?? {};
   const connection = {
     getAccountInfoAndContext: async (key: PublicKey) => ({
       context: { slot: 448833176 },
@@ -119,17 +172,25 @@ function stubConnection(options: StubOptions = {}): { connection: Connection; as
         ? { owner: options.poolOwner ?? RAYDIUM_CLMM, data: options.pool ?? poolState(), lamports: 1, executable: false }
         : null,
     }),
+    getEpochInfo: async () => {
+      epochsAsked.push(options.epoch ?? 1038);
+      return { epoch: options.epoch ?? 1038, slotIndex: 1, slotsInEpoch: 432_000, absoluteSlot: 448_833_176 };
+    },
     getMultipleAccountsInfo: async (keys: PublicKey[]) => {
       asked.push(keys.map((key) => key.toBase58()));
       return keys.map((key) => {
         if (missing.has(key.toBase58())) return null;
         if (key.equals(AMM_CONFIG)) return { owner: RAYDIUM_CLMM, data: options.config ?? ammConfig(), lamports: 1, executable: false };
+        const mint = mints[key.toBase58()];
+        if (mint !== undefined) return { owner: mint.owner, data: mint.data, lamports: 1, executable: false };
+        // The pool's own mints, unless a case above replaced one.
+        if (key.equals(WSOL) || key.equals(USDC)) return { owner: TOKEN_PROGRAM, data: classicMint(), lamports: 1, executable: false };
         // The extension and the tick arrays: the route only checks existence.
         return { owner: RAYDIUM_CLMM, data: Buffer.alloc(8), lamports: 1, executable: false };
       });
     },
   } as unknown as Connection;
-  return { connection, asked };
+  return { connection, asked, epochsAsked };
 }
 
 /** Output raw per 1e9 input raw, the readable form of the reference rate. */
@@ -160,9 +221,12 @@ describe("a route derived from the pool account", () => {
       tickArray(-22200).toBase58(),
     ]);
 
-    // TWO RPC CALLS, and the second asks for everything left in one batch.
+    // TWO RPC CALLS, and the second asks for everything left in one batch:
+    // the amm config, the bitmap extension, both mints and the three arrays.
     expect(asked).toHaveLength(1);
-    expect(asked[0]).toHaveLength(5);
+    expect(asked[0]).toHaveLength(7);
+    expect(asked[0]).toContain(WSOL.toBase58());
+    expect(asked[0]).toContain(USDC.toBase58());
   });
 
   it("quotes the pool's own price net of the pool's own fee, and both directions cross the spread", async () => {
@@ -222,5 +286,75 @@ describe("a route derived from the pool account", () => {
   it("refuses the first tick array being absent, rather than sending a swap that cannot start", async () => {
     const { connection } = stubConnection({ missing: [tickArray(-22080)] });
     await expect(fetchLiveRoute(connection, POOL, WSOL, USDC, TOKEN_PROGRAM)).rejects.toThrow(/no initialised tick array/);
+  });
+});
+
+// ── the fee that is taken between the pool and the vault's own account ───────
+//
+// invest.rs checks `received >= min_out` against the vault_target ATA's delta,
+// and a Token-2022 transfer fee comes out of exactly that delta. The two
+// PreStock mints — Pren1FvF… and PreZad18… — held older {epoch 1032, 50 bps}
+// and newer {epoch 1039, 100 bps} on 2026-09-20, with the network at epoch
+// 1038, so the number below doubles on a date that was hours away when this was
+// written. A rate quoted gross of it spends half of min-out.ts's 200 bps of
+// tolerance before the swap has moved a tick.
+describe("the Token-2022 transfer fee the output mint charges", () => {
+  const prestock = (mint: PublicKey, program = TOKEN_2022) => ({
+    [mint.toBase58()]: { owner: program, data: feeMint(PRESTOCK_FEE.older, PRESTOCK_FEE.newer) },
+  });
+
+  it("is netted out of the reference rate, at the schedule in force this epoch", async () => {
+    const { connection, epochsAsked } = stubConnection({ mints: prestock(USDC), epoch: 1038 });
+    const route = await fetchLiveRoute(connection, POOL, WSOL, USDC, TOKEN_2022);
+
+    // 110,347,643 raw out per 1e9 in is the rate net of the pool's own 0,04 %.
+    // 50 bps of transfer fee takes it to 109,795,905 — 551,738 raw units, $0.55
+    // on a $110 swap, which is what min_out was over-demanding by.
+    expect(per1e9(route.observed!)).toBe(109_795_905n);
+    expect(epochsAsked).toEqual([1038]);
+  });
+
+  it("doubles at epoch 1039, the way the issuer's own schedule says it will", async () => {
+    const { connection } = stubConnection({ mints: prestock(USDC), epoch: 1039 });
+    const route = await fetchLiveRoute(connection, POOL, WSOL, USDC, TOKEN_2022);
+    expect(per1e9(route.observed!)).toBe(109_244_167n);
+  });
+
+  it("comes off the INPUT side too, because the pool only swaps what reaches its vault", async () => {
+    const { connection } = stubConnection({ mints: prestock(WSOL), epoch: 1038 });
+    const route = await fetchLiveRoute(connection, POOL, WSOL, USDC, TOKEN_PROGRAM);
+    expect(per1e9(route.observed!)).toBe(109_795_905n);
+    // And the route carries the mint's OWN program rather than a guess.
+    expect(route.inputTokenProgram.toBase58()).toBe(TOKEN_2022.toBase58());
+  });
+
+  it("costs no extra RPC call when no mint has a fee change pending", async () => {
+    // Both SPYx's real shape (Token-2022, many extensions, no fee config) and a
+    // plain SPL mint answer without the epoch, so the convert leg stays at two calls.
+    const { connection, epochsAsked, asked } = stubConnection({
+      mints: { [USDC.toBase58()]: { owner: TOKEN_2022, data: noFeeMint() } },
+    });
+    const route = await fetchLiveRoute(connection, POOL, WSOL, USDC, TOKEN_2022);
+    expect(per1e9(route.observed!)).toBe(110_347_643n);
+    expect(epochsAsked).toEqual([]);
+    expect(asked).toHaveLength(1);
+  });
+
+  it("REFUSES a fee the slippage budget cannot absorb, rather than quoting past it", async () => {
+    const { connection } = stubConnection({ mints: { [USDC.toBase58()]: { owner: TOKEN_2022, data: feeMint({ epoch: 1032, bps: 50 }, { epoch: 1039, bps: 150 }) } }, epoch: 1039 });
+    await expect(fetchLiveRoute(connection, POOL, WSOL, USDC, TOKEN_2022)).rejects.toThrow(/150 bps Token-2022 transfer fee/);
+    // At 100 bps it still quotes: epoch 1039 is meant to go through, tightly.
+    const still = stubConnection({ mints: prestock(USDC), epoch: 1039 });
+    await expect(fetchLiveRoute(still.connection, POOL, WSOL, USDC, TOKEN_2022)).resolves.toBeTruthy();
+  });
+
+  it("refuses an output mint whose own program is not the one the route was asked for", async () => {
+    const { connection } = stubConnection({ mints: { [USDC.toBase58()]: { owner: TOKEN_2022, data: classicMint() } } });
+    await expect(fetchLiveRoute(connection, POOL, WSOL, USDC, TOKEN_PROGRAM)).rejects.toThrow(/not the .* this route was asked to build for/);
+  });
+
+  it("refuses a mint account that does not exist at all", async () => {
+    const { connection } = stubConnection({ missing: [USDC] });
+    await expect(fetchLiveRoute(connection, POOL, WSOL, USDC, TOKEN_PROGRAM)).rejects.toThrow(/output mint .* does not exist/);
   });
 });

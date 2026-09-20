@@ -37,11 +37,24 @@
 // never null and never minutes stale, and those were the two ways the old
 // number failed in practice. min-out.ts keeps the 2 % tolerance around it, and
 // the policy floor is still the hard bound underneath.
+//
+// AND IT HAS TO BE THE RATE THE VAULT'S OWN ACCOUNT WILL SEE. invest.rs checks
+// `received >= min_out` against the vault_target ATA's own delta, and two of the
+// basket's mints are Token-2022 with a TransferFeeConfig: the pool pays out one
+// amount and the ATA is credited a smaller one. Read on mainnet 2026-09-20,
+// Pren1FvF… (ANTHROPIC) and PreZad18… (FIGUREAI) both hold older {epoch 1032,
+// 50 bps} / newer {epoch 1039, 100 bps}, and epoch 1039 was hours away. A quote
+// gross of that fee spends 50 of min-out.ts's 200 bps of tolerance before any
+// price impact, and 100 of 200 from epoch 1039 — on a $500 purchase whose own
+// impact was measured at up to 36 bps. So every transfer fee on the way through
+// is netted out of the reference rate here, and a fee this file cannot absorb
+// is REFUSED rather than quoted around.
 
 import { Connection, PublicKey } from "@solana/web3.js";
 import { RAYDIUM_CLMM, type SwapV2Pool } from "./raydium-swap";
 
 const TOKEN_PROGRAM = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const TOKEN_2022_PROGRAM = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 
 export interface LiveRoute extends SwapV2Pool {
   /** Where the route came from, for logs. Now always the pool's own state. */
@@ -58,13 +71,15 @@ export interface LiveRoute extends SwapV2Pool {
   readonly directionMatched: boolean;
   /**
    * The reference rate, as a raw-in / raw-out pair: the pool's current price
-   * net of its own trade fee. min-out.ts turns it into the keeper's slippage
-   * bound.
+   * net of its own trade fee AND of any Token-2022 transfer fee either mint
+   * charges on the way through. min-out.ts turns it into the keeper's slippage
+   * bound, and the bound is compared on chain against the vault ATA's own
+   * delta — which is what a transfer fee comes out of.
    *
    * Typed nullable because the LiveRoute shape is public and callers already
    * branch on null; this implementation never returns null.
    *
-   * IT IS A MID PRICE, NOT A QUOTE. It ignores the price impact of our own
+   * IT IS STILL A MID PRICE, NOT A QUOTE. It ignores the price impact of our own
    * size, so it is very slightly optimistic — on the pools SaverFi trades, at
    * the $500 per-purchase cap, between 0,002 % and 0,36 %, all of it inside the
    * 2 % tolerance min-out.ts already applies. What it is NOT is a defence
@@ -103,6 +118,38 @@ const AMM_CONFIG_DISCRIMINATOR = "daf42168cbcb2b6f";
 const TRADE_FEE_RATE_AT = 47;
 const CONFIG_TICK_SPACING_AT = 51;
 const FEE_DENOMINATOR = 1_000_000n;
+
+// ── Token-2022, TransferFeeConfig ─────────────────────────────────────────────
+// A mint with extensions is longer than the 82-byte base mint: byte 165 says
+// which kind of account it is (1 = mint) and the TLV entries start at 166, each
+// a u16 type, a u16 length and that many bytes. TransferFeeConfig is type 1 and
+// 108 bytes: two 32-byte authorities, the withheld amount (u64), then the older
+// and newer TransferFee, 18 bytes each — epoch u64, maximum_fee u64, basis
+// points u16. Read off ANTHROPIC and FIGUREAI on mainnet 2026-09-20, where the
+// extension sits at 211 and the two schedules are 50 bps (epoch 1032) and
+// 100 bps (epoch 1039).
+const MINT_ACCOUNT_TYPE_AT = 165;
+const MINT_ACCOUNT_TYPE = 1;
+const EXTENSIONS_AT = 166;
+const TRANSFER_FEE_CONFIG = 1;
+/** older_transfer_fee, past the two authorities and the withheld amount. */
+const OLDER_FEE_AT = 72;
+const TRANSFER_FEE_BYTES = 18;
+const BPS_DENOMINATOR = 10_000n;
+
+/**
+ * The transfer fee this file will quote around, in basis points.
+ *
+ * ABOVE THIS THE ROUTE REFUSES rather than quoting. min-out.ts allows 200 bps
+ * of tolerance in total, and that budget has to cover the price impact of our
+ * own size (measured at up to 36 bps at the $500 per-purchase cap on the
+ * thinnest of these pools) and the drift between this read and the block the
+ * swap lands in. A mint charging more than half of it leaves too little for
+ * both, so the leg stops instead of being sent to fail on chain — which is what
+ * the owner asked for when the PreStock issuer doubled its fee: if it is raised
+ * again, the keeper stops investing.
+ */
+const MAX_TRANSFER_FEE_BPS = 100;
 
 const TICK_ARRAY_SIZE = 60;
 const Q128 = 1n << 128n;
@@ -159,6 +206,60 @@ function decodePoolState(pool: PublicKey, owner: PublicKey, data: Buffer): PoolS
     sqrtPriceX64,
     tickCurrent: data.readInt32LE(TICK_CURRENT_AT),
   };
+}
+
+export interface TransferFeeSchedule {
+  /** In force until `newer.epoch`. */
+  readonly older: { readonly epoch: bigint; readonly bps: number };
+  readonly newer: { readonly epoch: bigint; readonly bps: number };
+}
+
+const feeAt = (data: Buffer, at: number): { readonly epoch: bigint; readonly bps: number } => ({
+  epoch: data.readBigUInt64LE(at),
+  bps: data.readUInt16LE(at + 16),
+});
+
+/**
+ * The mint's Token-2022 transfer fee schedule, or null when it charges none.
+ *
+ * A classic SPL mint is 82 bytes and has no extensions at all; a Token-2022
+ * mint may have many, in any order, so they are WALKED rather than looked up at
+ * a fixed offset — the three SaverFi trades carry between eight and ten, and
+ * the fee config sits third in two of them and nowhere in the other.
+ */
+export function transferFeeSchedule(mint: PublicKey, account: { readonly owner: PublicKey; readonly data: Buffer }): TransferFeeSchedule | null {
+  if (!account.owner.equals(TOKEN_2022_PROGRAM)) return null;
+  const { data } = account;
+  if (data.length <= MINT_ACCOUNT_TYPE_AT) return null;
+  if (data[MINT_ACCOUNT_TYPE_AT]! !== MINT_ACCOUNT_TYPE) {
+    throw new Error(`${mint.toBase58()} is a Token-2022 account of type ${data[MINT_ACCOUNT_TYPE_AT]!}, not a mint`);
+  }
+  for (let at = EXTENSIONS_AT; at + 4 <= data.length; ) {
+    const type = data.readUInt16LE(at);
+    const length = data.readUInt16LE(at + 2);
+    const body = at + 4;
+    if (body + length > data.length) {
+      throw new Error(`mint ${mint.toBase58()} has a Token-2022 extension running past the end of the account`);
+    }
+    if (type === TRANSFER_FEE_CONFIG) {
+      if (length < OLDER_FEE_AT + 2 * TRANSFER_FEE_BYTES) {
+        throw new Error(`mint ${mint.toBase58()} has a ${length}-byte TransferFeeConfig, too short to hold both schedules`);
+      }
+      return { older: feeAt(data, body + OLDER_FEE_AT), newer: feeAt(data, body + OLDER_FEE_AT + TRANSFER_FEE_BYTES) };
+    }
+    // Type 0 is uninitialised padding: nothing past it is an extension.
+    if (type === 0) break;
+    at = body + length;
+  }
+  return null;
+}
+
+/**
+ * The fee in force at `epoch`, by Token-2022's own rule: the newer schedule
+ * from its own epoch onward, the older one before it.
+ */
+export function feeInForce(schedule: TransferFeeSchedule, epoch: bigint): number {
+  return epoch >= schedule.newer.epoch ? schedule.newer.bps : schedule.older.bps;
 }
 
 /**
@@ -294,11 +395,38 @@ export async function fetchLiveRoute(
 
   const extension = bitmapExtensionAddress(pool);
   const arrays = tickArrayAddresses(pool, state, inputIsMint0);
-  const infos = await connection.getMultipleAccountsInfo([state.ammConfig, extension, ...arrays], "confirmed");
-  const [configInfo, extensionInfo, ...arrayInfos] = infos;
+  // The two mints ride along in the batch that was already being sent: their
+  // own programs and their own transfer fees both come out of these bytes.
+  const infos = await connection.getMultipleAccountsInfo([state.ammConfig, extension, inputMint, outputMint, ...arrays], "confirmed");
+  const [configInfo, extensionInfo, inputMintInfo, outputMintInfo, ...arrayInfos] = infos;
 
   if (configInfo == null) throw new Error(`pool ${pool.toBase58()} names an amm config that does not exist`);
   const tradeFeeRate = decodeTradeFeeRate(state, configInfo.owner, configInfo.data);
+
+  if (inputMintInfo == null) throw new Error(`the input mint ${inputMint.toBase58()} does not exist`);
+  if (outputMintInfo == null) throw new Error(`the output mint ${outputMint.toBase58()} does not exist`);
+
+  // EACH SIDE'S TOKEN PROGRAM IS THE MINT'S OWN OWNER, read rather than assumed:
+  // swap_v2 makes its transfers through the program named here, and one that is
+  // not the mint's cannot make them at all. The output side is the caller's
+  // declaration, so it is checked against the chain instead of replacing it —
+  // a keeper asking for the wrong program should hear about it here, not in an
+  // opaque CPI failure.
+  const inputTokenProgram = inputMintInfo.owner;
+  if (!inputTokenProgram.equals(TOKEN_PROGRAM) && !inputTokenProgram.equals(TOKEN_2022_PROGRAM)) {
+    throw new Error(`the input mint ${inputMint.toBase58()} is owned by ${inputTokenProgram.toBase58()}, which is not an SPL token program`);
+  }
+  if (!outputMintInfo.owner.equals(outputTokenProgram)) {
+    throw new Error(
+      `the output mint ${outputMint.toBase58()} is owned by ${outputMintInfo.owner.toBase58()}, ` +
+        `not the ${outputTokenProgram.toBase58()} this route was asked to build for`,
+    );
+  }
+
+  const [inputFeeBps, outputFeeBps] = await transferFeeBps(connection, [
+    { mint: inputMint, account: inputMintInfo },
+    { mint: outputMint, account: outputMintInfo },
+  ]);
 
   const live = liveOf(pool, state, arrays, arrayInfos);
 
@@ -310,13 +438,47 @@ export async function fetchLiveRoute(
     observationState: state.observation,
     inputMint,
     outputMint,
-    inputTokenProgram: TOKEN_PROGRAM,
+    inputTokenProgram,
     outputTokenProgram,
     tickArrays: extensionInfo == null ? live : [extension, ...live],
     capturedFrom: `pool state, slot ${context.slot}`,
     directionMatched: true,
-    observed: observedRate(state.sqrtPriceX64, tradeFeeRate, inputIsMint0),
+    observed: observedRate(state.sqrtPriceX64, tradeFeeRate, inputIsMint0, inputFeeBps!, outputFeeBps!),
   };
+}
+
+/**
+ * What each mint takes out of a transfer of itself, right now, in basis points.
+ *
+ * THE EPOCH IS ONLY ASKED FOR WHEN IT DECIDES SOMETHING. A classic SPL mint, or
+ * a Token-2022 one whose two schedules charge the same, answers without it — so
+ * the SOL/USDC convert still costs exactly two RPC calls, and only a leg whose
+ * issuer has a fee change pending pays for a third.
+ *
+ * A FEE THIS FILE CANNOT QUOTE AROUND STOPS THE ROUTE. Nothing downstream would
+ * notice a quote that is quietly 1 % optimistic: min_out would simply be too
+ * high for the fill, and invest.rs would refuse it on chain, per leg, per sweep,
+ * after the transaction had already been paid for.
+ */
+async function transferFeeBps(
+  connection: Connection,
+  mints: readonly { readonly mint: PublicKey; readonly account: { readonly owner: PublicKey; readonly data: Buffer } }[],
+): Promise<number[]> {
+  const schedules = mints.map(({ mint, account }) => ({ mint, schedule: transferFeeSchedule(mint, account) }));
+  const undecided = schedules.some(({ schedule }) => schedule !== null && schedule.older.bps !== schedule.newer.bps);
+  const epoch = undecided ? BigInt((await connection.getEpochInfo()).epoch) : 0n;
+  return schedules.map(({ mint, schedule }) => {
+    if (schedule === null) return 0;
+    const bps = feeInForce(schedule, epoch);
+    if (bps > MAX_TRANSFER_FEE_BPS) {
+      throw new Error(
+        `mint ${mint.toBase58()} charges a ${bps} bps Token-2022 transfer fee ` +
+          `(${schedule.older.bps} bps until epoch ${schedule.newer.epoch}, ${schedule.newer.bps} bps from it), ` +
+          `over the ${MAX_TRANSFER_FEE_BPS} bps this route will quote around — the leg stops rather than quoting past it`,
+      );
+    }
+    return bps;
+  });
 }
 
 /**
@@ -351,7 +513,8 @@ function decodeTradeFeeRate(state: PoolState, owner: PublicKey, data: Buffer): b
 }
 
 /**
- * The pool's price as a raw-in / raw-out pair, net of the trade fee.
+ * The pool's price as a raw-in / raw-out pair, net of every fee between the
+ * vault's own account and the pool's.
  *
  * sqrt_price_x64 squares to token1-raw per token0-raw times 2^128, so the two
  * directions are that ratio and its inverse; Raydium takes its fee off the
@@ -359,15 +522,31 @@ function decodeTradeFeeRate(state: PoolState, owner: PublicKey, data: Buffer): b
  * Both sides are kept as exact integers rather than reduced to a rate, because
  * min-out.ts multiplies by the amount before it divides and that ordering is
  * what keeps the bound exact.
+ *
+ * THE TWO TRANSFER FEES SIT ON EITHER SIDE OF THAT. What the pool swaps is what
+ * arrives in its vault, so an input fee shrinks the amount that is traded; what
+ * the vault ATA is credited is what survives the way back, so an output fee
+ * shrinks the result again. Both are exact multiplications and both are applied
+ * here, because the number this returns is compared on chain against the ATA's
+ * own delta.
+ *
+ * The maximum_fee ceiling on a TransferFee is deliberately NOT modelled. Where
+ * it binds, the real fee is smaller than the rate netted here, so the quote is
+ * low and min_out ends up loose — the safe direction. Both PreStock mints read
+ * u64::MAX for it today, so it binds nowhere.
  */
 function observedRate(
   sqrtPriceX64: bigint,
   tradeFeeRate: bigint,
   inputIsMint0: boolean,
+  inputFeeBps: number,
+  outputFeeBps: number,
 ): { readonly inRaw: bigint; readonly outRaw: bigint } {
   const priceX128 = sqrtPriceX64 * sqrtPriceX64;
-  const net = FEE_DENOMINATOR - tradeFeeRate;
+  // One scale on each side, so the ratio is exact and the fees compose.
+  const gross = FEE_DENOMINATOR * BPS_DENOMINATOR * BPS_DENOMINATOR;
+  const net = (FEE_DENOMINATOR - tradeFeeRate) * (BPS_DENOMINATOR - BigInt(inputFeeBps)) * (BPS_DENOMINATOR - BigInt(outputFeeBps));
   return inputIsMint0
-    ? { inRaw: Q128 * FEE_DENOMINATOR, outRaw: priceX128 * net }
-    : { inRaw: priceX128 * FEE_DENOMINATOR, outRaw: Q128 * net };
+    ? { inRaw: Q128 * gross, outRaw: priceX128 * net }
+    : { inRaw: priceX128 * gross, outRaw: Q128 * net };
 }
