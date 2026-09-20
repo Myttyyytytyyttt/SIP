@@ -22,6 +22,13 @@
 // file's job, BEFORE anything is signed. That is why every check below is a
 // refusal with a name, not a warning.
 //
+// AND ONE OF THOSE CHECKS FACES THE OTHER WAY. Agreeing the instruction with
+// the quote only proves the API was consistent with itself; both numbers move
+// together if it answered a different question. The request is the only thing
+// in this file that never came off the wire, so verifyQuoteAnswersRequest
+// compares the quote to it before anything is derived — min_out most of all,
+// which is computed from the quote's own slippageBps.
+//
 // (4) AND THE ONE THE GUARDS CANNOT SEE. Two of the three legs are Token-2022
 // mints with a transfer fee (50 bps now, 100 bps from epoch 1039, maximumFee
 // u64::MAX). The credit a destination account receives is NET of that fee, so
@@ -109,6 +116,7 @@ const FIXED_PREFIX_ACCOUNTS = 13;
 const DATA_TAIL_LEN = 19;
 
 export type RefusalCondition =
+  | "request-drift"
   | "quote-mode"
   | "venue-program"
   | "discriminator"
@@ -445,7 +453,64 @@ export interface JupiterRoute {
   readonly requiresVersionedTransaction: boolean;
 }
 
+/**
+ * WHAT THE CALLER ASKED FOR, kept so the answer can be checked against it.
+ *
+ * EVERY OTHER CROSS-CHECK IN THIS FILE CLOSES A LOOP BETWEEN TWO NUMBERS
+ * JUPITER SUPPLIED. `amounts-drift` agrees the instruction's tail with the
+ * quote JSON; `venue-threshold` recomputes otherAmountThreshold from that same
+ * tail. Both would still pass if the API had answered a DIFFERENT question —
+ * a larger amount, a wider slippage, another mint — because both numbers would
+ * have drifted together. And the number that comes out the far end is min_out:
+ * the floor the vault will accept is derived from `slippageBps`, so a quote
+ * answering 900 bps to a request for 50 sets a floor nine times looser than
+ * the one we chose, and nothing downstream would notice.
+ *
+ * So the loop has to be closed at the one place it can be: the request is OURS,
+ * it never comes off the wire, and the quote is compared to it the moment it
+ * arrives.
+ */
+export interface RouteRequest {
+  readonly inputMint: PublicKey;
+  readonly targetMint: PublicKey;
+  readonly amountIn: bigint;
+  readonly slippageBps: number;
+}
+
+/**
+ * Refuses a quote that answers a different question than the one asked.
+ *
+ * Called TWICE on purpose: once in buildJupiterRoute the instant the quote
+ * lands — before it is posted to /swap-instructions, before a fee is read,
+ * before anything is derived from it — and once inside
+ * verifySharedAccountsRoute, so a caller that verifies a route it assembled
+ * some other way cannot skip it. Pure: no network, no clock.
+ */
+export function verifyQuoteAnswersRequest(quote: JupiterQuote, request: RouteRequest): void {
+  if (quote.inputMint !== request.inputMint.toBase58() || quote.outputMint !== request.targetMint.toBase58()) {
+    refuse(
+      "request-drift",
+      `the quote is ${quote.inputMint} -> ${quote.outputMint}, not the requested ` +
+        `${request.inputMint.toBase58()} -> ${request.targetMint.toBase58()}`,
+    );
+  }
+  if (BigInt(quote.inAmount) !== request.amountIn) {
+    refuse("request-drift", `the quote spends ${quote.inAmount}, not the requested amount_in ${request.amountIn}`);
+  }
+  if (quote.slippageBps !== request.slippageBps) {
+    // This one decides min_out. A wider slippage than we asked for is a floor
+    // the API chose for us, and it is the whole reason this check exists.
+    refuse(
+      "request-drift",
+      `the quote came back at ${quote.slippageBps} bps of slippage, not the requested ${request.slippageBps}; ` +
+        "min_out is derived from this number and would be the API's choice, not ours",
+    );
+  }
+}
+
 export interface VerifyContext {
+  /** What was asked for. The quote is refused unless it answers exactly this. */
+  readonly request: RouteRequest;
   readonly vault: PublicKey;
   readonly vaultIn: PublicKey;
   readonly vaultTarget: PublicKey;
@@ -467,6 +532,10 @@ export function verifySharedAccountsRoute(
   response: JupiterSwapInstructions,
   context: VerifyContext,
 ): JupiterRoute {
+  // FIRST, BEFORE ANY OTHER CHECK. Everything below agrees the instruction
+  // with the quote; this is the only check that agrees the quote with us.
+  verifyQuoteAnswersRequest(quote, context.request);
+
   if (quote.swapMode !== "ExactIn") {
     refuse("quote-mode", `swapMode is ${quote.swapMode}; invest() spends an exact amount_in`);
   }
@@ -689,6 +758,12 @@ export async function buildJupiterRoute(
   connection: Connection,
   params: BuildJupiterRouteParams,
 ): Promise<JupiterRoute> {
+  const request: RouteRequest = {
+    inputMint: params.inputMint,
+    targetMint: params.targetMint,
+    amountIn: params.amountIn,
+    slippageBps: params.slippageBps,
+  };
   const quote = await fetchJupiterQuote({
     inputMint: params.inputMint,
     outputMint: params.targetMint,
@@ -697,6 +772,11 @@ export async function buildJupiterRoute(
     ...(params.onlyDirectRoutes === true ? { onlyDirectRoutes: true } : {}),
     ...(params.excludeDexes === undefined ? {} : { excludeDexes: params.excludeDexes }),
   });
+  // BEFORE THE QUOTE IS USED FOR ANYTHING — including being posted straight
+  // back to /swap-instructions, which is what turns a drifted quote into an
+  // instruction we would otherwise go on to verify against that same quote.
+  verifyQuoteAnswersRequest(quote, request);
+
   const response = await fetchJupiterSwapInstructions({
     quote,
     vault: params.vault,
@@ -712,6 +792,7 @@ export async function buildJupiterRoute(
   );
 
   return verifySharedAccountsRoute(quote, response, {
+    request,
     vault: params.vault,
     vaultIn: params.vaultIn,
     vaultTarget: params.vaultTarget,

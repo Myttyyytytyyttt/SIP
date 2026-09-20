@@ -27,6 +27,7 @@ import {
   type JupiterQuote,
   type JupiterSwapInstructions,
   type RefusalCondition,
+  type RouteRequest,
   type TransferFeeRate,
   type VerifyContext,
   ROUTE_DISC,
@@ -35,6 +36,7 @@ import {
   findVaultOwnedTokenAccounts,
   netOfTransferFee,
   transferFeeForEpoch,
+  verifyQuoteAnswersRequest,
   transferFeeOn,
   venueThresholdFrom,
   verifySharedAccountsRoute,
@@ -118,8 +120,20 @@ function response(): JupiterSwapInstructions {
   };
 }
 
+/** Exactly what the captured quote was asked for: 25 USDC of SPYx at 100 bps. */
+function request(overrides: Partial<RouteRequest> = {}): RouteRequest {
+  return {
+    inputMint: new PublicKey(USDC),
+    targetMint: new PublicKey(SPYX),
+    amountIn: 25_000_000n,
+    slippageBps: 100,
+    ...overrides,
+  };
+}
+
 function context(overrides: Partial<VerifyContext> = {}): VerifyContext {
   return {
+    request: request(),
     vault: new PublicKey(VAULT),
     vaultIn: new PublicKey(VAULT_USDC),
     vaultTarget: new PublicKey(VAULT_SPYX),
@@ -295,9 +309,19 @@ describe("the Jupiter route builder refuses", () => {
   });
 
   it("an instruction whose bytes do not carry the amounts we quoted [amounts-drift]", () => {
-    expect(refusal({ ...quote(), outAmount: "3254247" }, response()).condition).toBe("amounts-drift");
-    expect(refusal({ ...quote(), inAmount: "24000000" }, response()).condition).toBe("amounts-drift");
-    expect(refusal({ ...quote(), slippageBps: 50 }, response()).condition).toBe("amounts-drift");
+    // THE DRIFT IS PUT IN THE INSTRUCTION, NOT IN THE QUOTE. Moving the quote
+    // instead would now be caught one check earlier, by [request-drift], and
+    // this test would silently stop covering the thing it is named after.
+    // What it covers is the other half: the JSON we verified and the bytes we
+    // are about to sign disagreeing with each other.
+    const drifted = (mutate: (bytes: Buffer) => void): JupiterSwapInstructions => {
+      const r = response();
+      return { ...r, swapInstruction: { ...r.swapInstruction, data: dataWith(mutate) } };
+    };
+    // The tail is in(u64) out(u64) slippage(u16) platformFee(u8), read backward.
+    expect(refusal(quote(), drifted((b) => b.writeBigUInt64LE(3_254_247n, b.length - 11))).condition).toBe("amounts-drift");
+    expect(refusal(quote(), drifted((b) => b.writeBigUInt64LE(24_000_000n, b.length - 19))).condition).toBe("amounts-drift");
+    expect(refusal(quote(), drifted((b) => b.writeUInt16LE(50, b.length - 3))).condition).toBe("amounts-drift");
   });
 
   it("a route that skims a platform fee out of the vault's fill [platform-fee]", () => {
@@ -329,6 +353,71 @@ describe("the Jupiter route builder refuses", () => {
     // The idempotent ATA create Jupiter always emits under
     // skipUserAccountsRpcCalls is the one thing that is not a refusal.
     expect(verifySharedAccountsRoute(quote(), response(), context()).hops).toBe(1);
+  });
+});
+
+describe("the quote is refused unless it answers the question we asked", () => {
+  // WHY THESE ARE NOT COVERED BY [amounts-drift]. That check agrees the
+  // instruction's tail with the quote JSON — two numbers Jupiter supplied, and
+  // both of them move together when the API answers a different question. Each
+  // case below is therefore built INTERNALLY CONSISTENT: the instruction's own
+  // bytes and the threshold are edited to match the drifted quote, so every
+  // other guard passes and only this one can say no. Delete the check and each
+  // of these routes is ACCEPTED, which is what refusal() reports.
+
+  it("a wider slippage than we asked for, because min_out comes off that number [request-drift]", () => {
+    // 900 bps where 50 was asked: the vault would accept a fill nine tenths of
+    // a percent worse than the floor it chose, and the whole route would still
+    // verify, because the instruction says 900 too.
+    const r = response();
+    const wide = {
+      ...r,
+      swapInstruction: { ...r.swapInstruction, data: dataWith((bytes) => bytes.writeUInt16LE(900, bytes.length - 3)) },
+    };
+    // out - floor(out * 900 / 1e4) = 3,254,246 - 292,882.
+    const q = { ...quote(), slippageBps: 900, otherAmountThreshold: "2961364" };
+    const said = refusal(q, wide, context({ request: request({ slippageBps: 50 }) }));
+    expect(said.condition).toBe("request-drift");
+    expect(said.message).toContain("min_out is derived from this number");
+
+    // And the proof that nothing else would have caught it: with the request
+    // restated as 900, the very same route verifies and its floor IS the loose
+    // one — 292,882 raw units below the quote instead of 32,542.
+    const accepted = verifySharedAccountsRoute(q, wide, context({ request: request({ slippageBps: 900 }) }));
+    expect(accepted.output.venueThreshold).toBe(2_961_364n);
+    expect(accepted.amounts.slippageBps).toBe(900);
+  });
+
+  it("a different amount than we asked for [request-drift]", () => {
+    // The instruction's in-amount is edited to agree, so [amounts-drift] is
+    // silent; only the request knows 25 USDC was asked for.
+    const r = response();
+    const smaller = {
+      ...r,
+      swapInstruction: { ...r.swapInstruction, data: dataWith((bytes) => bytes.writeBigUInt64LE(24_000_000n, bytes.length - 19)) },
+    };
+    const said = refusal({ ...quote(), inAmount: "24000000" }, smaller);
+    expect(said.condition).toBe("request-drift");
+    expect(said.message).toContain("24000000");
+  });
+
+  it("a quote about other mints entirely [request-drift]", () => {
+    // Nothing else in this file reads the quote's mints at all.
+    expect(refusal({ ...quote(), inputMint: SPYX }, response()).condition).toBe("request-drift");
+    expect(refusal({ ...quote(), outputMint: USDC }, response()).condition).toBe("request-drift");
+  });
+
+  it("is a pure check a caller can run the moment a quote lands", () => {
+    // buildJupiterRoute calls exactly this before the quote is posted back to
+    // /swap-instructions — before an instruction exists to verify against it.
+    expect(() => verifyQuoteAnswersRequest(quote(), request())).not.toThrow();
+    expect(() => verifyQuoteAnswersRequest({ ...quote(), slippageBps: 900 }, request())).toThrow(JupiterRouteRefusal);
+    try {
+      verifyQuoteAnswersRequest({ ...quote(), inAmount: "1" }, request());
+      throw new Error("a quote for 1 raw unit answered a request for 25,000,000 and was accepted");
+    } catch (error) {
+      expect((error as JupiterRouteRefusal).condition).toBe("request-drift");
+    }
   });
 });
 
