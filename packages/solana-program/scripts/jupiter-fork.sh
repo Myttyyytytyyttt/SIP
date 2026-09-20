@@ -2,6 +2,7 @@
 # THE JUPITER GUARD PROOF, one command:
 #
 #   ./scripts/jupiter-fork.sh [--slippage <bps>] [--dexes <label,...>]
+#                             [--exclude <label,...>]
 #
 # The two flags are passed straight to phase 1 and pin the experiment: the
 # gross-versus-net question is about the AMM that makes the final transfer, so

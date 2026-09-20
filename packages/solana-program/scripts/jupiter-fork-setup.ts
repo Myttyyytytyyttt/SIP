@@ -28,11 +28,17 @@
 // the two keypairs below are freshly generated local test identities whose
 // only funding is a local airdrop.
 
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import { Connection, Keypair, PACKET_DATA_SIZE, PublicKey, TransactionInstruction } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildJupiterRoute, fitsLegacyTransaction, investAmountIn, JupiterRouteRefusal } from "./jupiter-route";
+import {
+  buildJupiterRoute,
+  fitsLegacyTransaction,
+  investAmountIn,
+  JupiterRouteRefusal,
+  legacyTransactionBytes,
+} from "./jupiter-route";
 
 const LOCAL = join(__dirname, ".local");
 const MAINNET = process.env["MAINNET_RPC"] ?? "https://api.mainnet-beta.solana.com";
@@ -67,6 +73,10 @@ const AMOUNT_IN = 5_000_000n; // 5 USDC
  *
  *   --slippage <bps>   default 200
  *   --dexes <a,b,...>  the only venues allowed; default, Jupiter picks
+ *   --exclude <a,b,..> venues to keep out; default Hadron, as jupiter-sim.ts
+ *                      does, because every route built through it reverted
+ *                      with that venue's own 0x3c under simulation — a route
+ *                      that cannot execute is not worth a clone
  *
  * WHY THE VENUE HAS TO BE PINNABLE. Whether a quote is gross or net belongs to
  * the AMM that makes the final transfer, and Jupiter re-picks it per quote. A
@@ -81,6 +91,10 @@ function flag(name: string): string | null {
 }
 const SLIPPAGE_BPS = Number(flag("slippage") ?? 200);
 const DEXES: readonly string[] = (flag("dexes") ?? "").split(",").filter((label) => label.length > 0);
+const EXCLUDE_DEXES: readonly string[] = (flag("exclude") ?? "Hadron")
+  .split(",")
+  .map((label) => label.trim())
+  .filter((label) => label.length > 0);
 if (!Number.isInteger(SLIPPAGE_BPS) || SLIPPAGE_BPS < 0) throw new Error(`--slippage must be a whole number of bps`);
 
 /** Enough for several invests plus the deliberate failures, which spend nothing. */
@@ -147,7 +161,8 @@ async function main(): Promise<void> {
 
   console.log(
     `route: 5 USDC -> ${TARGET_NAME}, slippage ${SLIPPAGE_BPS} bps, ` +
-      `${DEXES.length === 0 ? "venue picked by Jupiter" : `venue pinned to ${DEXES.join("/")}`}, via lite-api.jup.ag`,
+      `${DEXES.length === 0 ? "venue picked by Jupiter" : `venue pinned to ${DEXES.join("/")}`}` +
+      `${EXCLUDE_DEXES.length === 0 ? "" : ` (excluding ${EXCLUDE_DEXES.join("/")})`}, via lite-api.jup.ag`,
   );
   let route;
   try {
@@ -168,6 +183,7 @@ async function main(): Promise<void> {
       // address they index would have to be cloned as well.
       onlyDirectRoutes: true,
       ...(DEXES.length === 0 ? {} : { dexes: DEXES }),
+      ...(EXCLUDE_DEXES.length === 0 ? {} : { excludeDexes: EXCLUDE_DEXES }),
     });
   } catch (error) {
     if (error instanceof JupiterRouteRefusal) {
@@ -177,18 +193,44 @@ async function main(): Promise<void> {
     throw error;
   }
 
-  // WHAT THIS PROOF CANNOT CLONE, said as the thing itself rather than as a
-  // hop count: an address lookup table would have to be cloned too, and every
-  // address it indexes with it. Size is checked separately, and against a
-  // measurement — the route plus invest()'s wrapper has to fit one packet.
-  if (route.lookupTableAddresses.length > 0) {
+  // WHAT THIS PROOF ACTUALLY NEEDS, MEASURED — and it is not a hop count, and
+  // not the absence of a lookup table either. Phase 3 compiles its own message
+  // with NO tables and the route's accounts written out in full, so a table in
+  // Jupiter's response costs this harness nothing; measured today, the same
+  // one-hop Manifest route came back with a table when Jupiter picked it and
+  // without one when it was pinned, and both would replay identically. What
+  // the harness cannot survive is the transaction not FITTING, so that is what
+  // is checked, over the instruction phase 3 will really send.
+  const [configPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], programId);
+  const [policyPda] = PublicKey.findProgramAddressSync([Buffer.from("invest"), vault.toBuffer()], programId);
+  const investBytes = legacyTransactionBytes(owner.publicKey, [
+    // 5 bytes of SetComputeUnitLimit, as phase 3 sends.
+    new TransactionInstruction({
+      programId: new PublicKey("ComputeBudget111111111111111111111111111111"),
+      keys: [],
+      data: Buffer.alloc(5),
+    }),
+    new TransactionInstruction({
+      programId,
+      keys: [
+        { pubkey: owner.publicKey, isSigner: true, isWritable: true }, // crank
+        ...[configPda, vault, policyPda, vaultIn, vaultTarget, TARGET, route.venueProgram].map((pubkey) => ({
+          pubkey,
+          isSigner: false,
+          isWritable: true,
+        })),
+        ...route.remainingAccounts,
+      ],
+      // 8 discriminator + leg_index u8 + amount_in u64 + min_out u64 + 4-byte vec length.
+      data: Buffer.alloc(29 + route.venueData.length),
+    }),
+  ]);
+  console.log(`  invest tx   : ${investBytes} B of ${PACKET_DATA_SIZE} (route alone ${route.legacyBytes} B)`);
+  if (!fitsLegacyTransaction(investBytes)) {
     throw new Error(
-      `route needs ${route.lookupTableAddresses.length} address lookup table(s) (${route.hops} hops: ` +
-        `${route.labels.join(" -> ")}); this proof clones accounts, not tables`,
+      `invest() wrapped around this ${route.hops}-hop route (${route.labels.join(" -> ")}) is ${investBytes} B, ` +
+        `past the ${PACKET_DATA_SIZE} one transaction carries; phase 3 cannot send it without a lookup table it cannot clone`,
     );
-  }
-  if (!fitsLegacyTransaction(route.legacyBytes)) {
-    throw new Error(`the route alone is ${route.legacyBytes} B, past what one transaction carries`);
   }
 
   // Which accounts the local validator has to be given. The vault's own two
@@ -240,6 +282,7 @@ async function main(): Promise<void> {
         instructionInAmount: route.amounts.inAmount.toString(),
         slippageBps: SLIPPAGE_BPS,
         dexes: DEXES,
+        excludeDexes: EXCLUDE_DEXES,
         hops: route.hops,
         labels: route.labels,
         venueProgram: route.venueProgram.toBase58(),
@@ -269,6 +312,9 @@ async function main(): Promise<void> {
 
   console.log(`  hops        : ${route.hops} [${route.labels.join(" -> ")}]`);
   console.log(`  route alone : ${route.legacyBytes} B as a legacy transaction (${route.remainingAccounts.length} keys, ${route.venueData.length} B of data)`);
+  if (route.lookupTableAddresses.length > 0) {
+    console.log(`  tables      : ${route.lookupTableAddresses.length}, ignored — phase 3 writes every account out in full`);
+  }
   console.log(`  quoted out  : ${route.output.quotedOut}`);
   console.log(`  threshold   : ${route.output.venueThreshold}`);
   console.log(`  mainnet fee : ${route.output.transferFee.basisPoints} bps (epoch-dependent; local epoch may differ)`);

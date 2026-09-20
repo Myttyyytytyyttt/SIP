@@ -124,12 +124,15 @@ if (SHARED_ACCOUNTS_ROUTE_DISC.toString("hex") !== "c1209b3341d69c81") {
  * 30, USDC->ANTHROPIC 2 hops / 48). The prefix is identical in all three; only
  * the per-AMM tail after slot 12 changes.
  *
- * Slot 5 is NOT pinned on purpose: it is Jupiter's programDestinationTokenAccount
- * and it is sometimes Jupiter's own account (SPYx) and sometimes ours
- * (ANTHROPIC, FIGUREAI). Pinning it would refuse honest routes.
+ * Slot 5 is Jupiter's programDestinationTokenAccount, and it is NOT pinned to
+ * one value: it is sometimes Jupiter's own account and sometimes ours. Pinning
+ * it would refuse honest routes. It is not ignored either — see
+ * refuse_unmodelled_fee_path below, which is about what its being Jupiter's
+ * own account MEANS for a mint that charges a transfer fee.
  */
 export const SLOT_USER_TRANSFER_AUTHORITY = 2;
 export const SLOT_SOURCE_TOKEN_ACCOUNT = 3;
+export const SLOT_PROGRAM_DESTINATION_TOKEN_ACCOUNT = 5;
 export const SLOT_DESTINATION_TOKEN_ACCOUNT = 6;
 /** Slots 0..12 are the fixed prefix; anything shorter is not this instruction. */
 const FIXED_PREFIX_ACCOUNTS = 13;
@@ -156,6 +159,7 @@ export type RefusalCondition =
   | "source-account"
   | "destination-account"
   | "unmeasured-vault-account"
+  | "unmodelled-fee-path"
   | "amounts-drift"
   | "platform-fee"
   | "venue-threshold"
@@ -476,7 +480,10 @@ export interface RouteOutput {
   readonly quotedOut: bigint;
   /** Jupiter's otherAmountThreshold, verbatim. Also GROSS. */
   readonly venueThreshold: bigint;
-  /** The rate used for the two net numbers below. */
+  /**
+   * The rate used for the two net numbers below, applied ONCE — which the
+   * route's own shape has to earn; see the unmodelled-fee-path refusal.
+   */
   readonly transferFee: TransferFeeRate;
   /** What the vault's delta reads if the venue fills exactly the quote. */
   readonly netOfQuotedOut: bigint;
@@ -868,6 +875,43 @@ export function verifySharedAccountsRoute(
     refuse(
       "destination-account",
       `slot ${SLOT_DESTINATION_TOKEN_ACCOUNT} delivers to ${destination?.pubkey ?? "absent"}, not the measured vault_target ${context.vaultTarget.toBase58()}`,
+    );
+  }
+
+  // THE NET MODEL HAS A PRECONDITION, AND THIS IS IT.
+  //
+  // netOfVenueThreshold subtracts the mint's transfer fee ONCE. That is right
+  // only when the last Token-2022 transfer into vault_target is the only one
+  // between the AMM's output and the vault's credit. When slot 5 — Jupiter's
+  // programDestinationTokenAccount — is the vault target itself, the AMM pays
+  // straight into the account we measure and there is exactly one such
+  // transfer. When it is JUPITER'S OWN account, the output lands there first
+  // and is forwarded to us, which on a fee-bearing mint is TWO transfers and
+  // TWO fees — and then a min_out modelling one fee sits ABOVE the credit, so
+  // invest() reverts with FillTooSmall after the money has already left.
+  //
+  // NEVER OBSERVED, AND THEREFORE NEVER MEASURED. Every fee-bearing build seen
+  // so far puts the vault target in slot 5: FIGUREAI and ANTHROPIC on
+  // 2026-09-20, and five more builds the same day across both legs, one to
+  // three hops, venue pinned and unpinned. The only route with Jupiter's own
+  // account in slot 5 was SPYx, which carries no transfer fee at all — so the
+  // double-fee case has never actually happened, and the arithmetic for it has
+  // never been checked against a fill.
+  //
+  // So it is refused rather than guessed. To settle it, run jupiter-sim.ts on
+  // a route with this shape: it reports credit, withheld and quoted side by
+  // side, and one fee versus two is the difference between
+  // `credit + withheld == quotedOut` and a whole fee short of it.
+  const programDestination = keys[SLOT_PROGRAM_DESTINATION_TOKEN_ACCOUNT];
+  if (
+    context.transferFee.basisPoints > 0 &&
+    (programDestination === undefined || programDestination.pubkey !== context.vaultTarget.toBase58())
+  ) {
+    refuse(
+      "unmodelled-fee-path",
+      `slot ${SLOT_PROGRAM_DESTINATION_TOKEN_ACCOUNT} is ${programDestination?.pubkey ?? "absent"}, not the vault target ` +
+        `${context.vaultTarget.toBase58()}, and ${context.transferFee.basisPoints} bps of transfer fee would then be ` +
+        "charged twice on the way in; the net model subtracts it once and has never been measured against this shape",
     );
   }
 

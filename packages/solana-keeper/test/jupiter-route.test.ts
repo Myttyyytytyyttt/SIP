@@ -179,6 +179,23 @@ function refusal(
   throw new Error("the route was ACCEPTED — the refusal this test covers is gone");
 }
 
+/**
+ * The same capture with slot 5 set to the vault's own target account — the
+ * shape EVERY fee-bearing build has had (FIGUREAI, ANTHROPIC), as against
+ * SPYx's, where slot 5 is Jupiter's own. The fee tests below need this one,
+ * because a fee mint delivered through Jupiter's account is refused.
+ */
+function responseDeliveringToVault(): JupiterSwapInstructions {
+  const r = response();
+  return {
+    ...r,
+    swapInstruction: {
+      ...r.swapInstruction,
+      accounts: r.swapInstruction.accounts.map((a, i) => (i === 5 ? { ...a, pubkey: VAULT_SPYX } : a)),
+    },
+  };
+}
+
 /** The captured data with one byte replaced, for the tail-field mutations. */
 function dataWith(mutate: (bytes: Buffer) => void): string {
   const bytes = Buffer.from(CAPTURED_DATA, "base64");
@@ -378,6 +395,45 @@ describe("the Jupiter route builder refuses", () => {
     // The idempotent ATA create Jupiter always emits under
     // skipUserAccountsRpcCalls is the one thing that is not a refusal.
     expect(verifySharedAccountsRoute(quote(), response(), context()).hops).toBe(1);
+  });
+});
+
+describe("the net model subtracts one fee, and the route's shape has to earn that", () => {
+  // WHAT SLOT 5 MEANS. It is Jupiter's programDestinationTokenAccount. When it
+  // is the vault's target, the AMM pays straight into the account invest()
+  // measures: one Token-2022 transfer, one fee, and netOfVenueThreshold is
+  // right. When it is Jupiter's OWN account, the output lands there and is
+  // forwarded to us — two transfers, two fees on a fee-bearing mint — and a
+  // min_out modelling one would sit ABOVE the credit, so invest() would revert
+  // with FillTooSmall after the spend.
+  //
+  // That second shape has never been observed on a fee mint: every fee-bearing
+  // build measured on 2026-09-20 put the vault target in slot 5, across one to
+  // three hops and with the venue pinned and unpinned, and the only route with
+  // Jupiter's own account there was SPYx, which has no fee. So it is refused,
+  // not modelled — the arithmetic for it has never been checked against a fill.
+
+  it("refuses a fee mint whose output goes through Jupiter's own account [unmodelled-fee-path]", () => {
+    // The captured SPYx route has Jupiter's account in slot 5. Give that same
+    // shape a mint that charges 100 bps and it is exactly the unmeasured case.
+    const said = refusal(quote(), response(), context({ transferFee: FEE_100 }));
+    expect(said.condition).toBe("unmodelled-fee-path");
+    expect(said.message).toContain("charged twice");
+    expect(response().swapInstruction.accounts[5]!.pubkey).not.toBe(VAULT_SPYX);
+  });
+
+  it("accepts that same route when the mint charges nothing, which is why slot 5 is not pinned", () => {
+    // SPYx really is delivered through Jupiter's account, and really has no
+    // fee. Pinning slot 5 outright would refuse this honest route.
+    const route = verifySharedAccountsRoute(quote(), response(), context({ transferFee: NO_FEE }));
+    expect(route.output.netOfVenueThreshold).toBe(route.output.venueThreshold);
+  });
+
+  it("accepts a fee mint delivered straight into the account invest() measures", () => {
+    const route = verifySharedAccountsRoute(quote(), responseDeliveringToVault(), context({ transferFee: FEE_100 }));
+    expect(route.remainingAccounts[5]!.pubkey.toBase58()).toBe(VAULT_SPYX);
+    // One fee, subtracted once: 3,221,704 - ceil(3,221,704 * 100/10_000).
+    expect(route.output.netOfVenueThreshold).toBe(3_189_486n);
   });
 });
 
@@ -737,7 +793,7 @@ describe("the Token-2022 transfer fee, and where each min_out actually lands", (
   });
 
   it("carries the fee into the route's output numbers, gross and net side by side", () => {
-    const route = verifySharedAccountsRoute(quote(), response(), context({ transferFee: FEE_100 }));
+    const route = verifySharedAccountsRoute(quote(), responseDeliveringToVault(), context({ transferFee: FEE_100 }));
     expect(route.output.quotedOut).toBe(3_254_246n);
     expect(route.output.venueThreshold).toBe(3_221_704n);
     // ceil(3,254,246 * 100/10_000) = 32,543, so the net of the QUOTE already
