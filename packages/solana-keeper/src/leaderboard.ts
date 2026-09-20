@@ -77,7 +77,16 @@ export interface LeaderboardEntry {
   readonly rank: number;
   /** The vault: one competitor per pension, however many trading wallets feed it. */
   readonly subject: string;
+  /** The score as a page shows it: `pointsExact`, rounded. */
   readonly points: number;
+  /**
+   * The score the ORDER is decided by, and the exact sum of the three published
+   * parts. Two numbers exist because one of them was doing both jobs and doing
+   * the second one wrong: an integer score manufactures ties between
+   * competitors up to a whole point apart, and a tie is then broken by
+   * something — whatever that something is, it is not the score.
+   */
+  readonly pointsExact: number;
   readonly activeDays: number;
   readonly bestStreak: number;
   readonly settles: number;
@@ -193,24 +202,46 @@ export function rankBoard(
     const participation = rules.participation * totals.days.length;
     const bestStreak = longestStreak(totals.days);
     const streak = Math.min(rules.streakCap, rules.streakPerDay * Math.max(0, bestStreak - 1));
+    // THE PUBLISHED SIZE IS THE SIZE THAT COUNTS. The score used to be rounded
+    // from the raw sum while the breakdown published a size rounded to one
+    // decimal, two independent roundings — so the parts did not add up to the
+    // total they explained. The live board said 10 + 7.9 + 0 = 18. Summing the
+    // PUBLISHED parts makes the arithmetic checkable by whoever reads it, which
+    // is the only reason to publish a breakdown at all.
+    const size = round1(totals.size);
+    const pointsExact = round1(participation + size + streak);
     return {
       subject,
-      points: Math.round(participation + totals.size + streak),
+      pointsExact,
+      points: Math.round(pointsExact),
       activeDays: totals.days.length,
       bestStreak,
       settles: totals.settles,
       amount: totals.amount,
-      breakdown: { participation, size: round1(totals.size), streak },
+      breakdown: { participation, size, streak },
     };
   });
 
-  // POINTS, THEN AMOUNT, THEN ADDRESS. The last is not a tie-break anybody
-  // deserves; it is there so two equal competitors are ordered the same way on
-  // every refresh instead of swapping places at random.
+  // THE EXACT SCORE, THEN USE, THEN THE ADDRESS — and never the amount.
+  //
+  // THIS ORDER USED TO INVERT THE BOARD'S WHOLE POINT. Sorting on the ROUNDED
+  // score put every pair within one point of each other into the same bucket,
+  // and the tie-break inside that bucket was `amount` — who moved more money.
+  // Measured: a habit of two days (22.4 real points, 0.000193 SOL) ranked BELOW
+  // a single whale day (21.5 real points, 0.198 SOL), because both displayed 22
+  // and the whale's wallet was bigger. That is precisely the ranking this file's
+  // header says it exists to prevent.
+  //
+  // Size is already inside the score, through the capped logarithm. Letting it
+  // in a second time as a tie-break is how a board ends up measuring it twice.
+  // A genuine tie now goes to more active days, then to the longer streak: use,
+  // then use again. The address is last, and only so two identical competitors
+  // are ordered the same way on every refresh instead of swapping at random.
   scored.sort(
     (a, b) =>
-      b.points - a.points ||
-      (b.amount > a.amount ? 1 : b.amount < a.amount ? -1 : 0) ||
+      b.pointsExact - a.pointsExact ||
+      b.activeDays - a.activeDays ||
+      b.bestStreak - a.bestStreak ||
       (a.subject < b.subject ? -1 : a.subject > b.subject ? 1 : 0),
   );
 
@@ -218,6 +249,7 @@ export function rankBoard(
     rank: index + 1,
     subject: entry.subject,
     points: entry.points,
+    pointsExact: entry.pointsExact,
     activeDays: entry.activeDays,
     bestStreak: entry.bestStreak,
     settles: entry.settles,

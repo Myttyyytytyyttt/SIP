@@ -39,6 +39,12 @@ export interface LeaderboardEntry {
    * the streak" can. Absent from a keeper too old to send one.
    */
   readonly breakdown?: { readonly participation: number; readonly size: number; readonly streak: number };
+  /**
+   * The unrounded score the parts add up to, and the one the rank was decided
+   * by. Shown beside the breakdown so the sum a reader checks is the sum the
+   * service computed — `points` is that number rounded for the column.
+   */
+  readonly pointsExact?: number;
 }
 
 /** The scoring constants THE SERVICE APPLIED, so the page explains the real rule. */
@@ -134,7 +140,8 @@ function parseEntry(value: unknown): LeaderboardEntry | null {
   const subject = typeof value["subject"] === "string" ? value["subject"] : null;
   if (rank === null || points === null || activeDays === null || bestStreak === null || settles === null) return null;
   if (amountRaw === null || subject === null || subject === "") return null;
-  const entry = { rank, subject, points, activeDays, bestStreak, settles, amountRaw };
+  const exact = finite(value["pointsExact"]);
+  const entry = exact === null ? { rank, subject, points, activeDays, bestStreak, settles, amountRaw } : { rank, subject, points, pointsExact: exact, activeDays, bestStreak, settles, amountRaw };
   const raw = value["breakdown"];
   if (!isRecord(raw)) return entry;
   const participation = finite(raw["participation"]);

@@ -109,10 +109,13 @@ function BoardTable({ entries, board, empty }: { readonly entries: readonly Lead
                 className="text-right font-mono font-semibold tabular-nums"
                 // WHERE THE NUMBER CAME FROM, on hover: a score nobody can take
                 // apart is a score nobody can argue with.
+                // The sum is shown, not just the parts: a breakdown whose
+                // arithmetic a reader cannot finish is not a breakdown.
                 title={
                   entry.breakdown === undefined
                     ? undefined
-                    : `${entry.breakdown.participation} for showing up · ${entry.breakdown.size} for size · ${entry.breakdown.streak} for the streak`
+                    : `${entry.breakdown.participation} for showing up + ${entry.breakdown.size} for size + ${entry.breakdown.streak} for the streak` +
+                      (entry.pointsExact === undefined ? "" : ` = ${entry.pointsExact}`)
                 }
               >
                 {entry.points}

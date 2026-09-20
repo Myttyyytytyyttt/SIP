@@ -95,6 +95,59 @@ describe("the shape of the rule", () => {
   });
 });
 
+describe("the tie-break, which is where a fair rule goes wrong quietly", () => {
+  it("never hands a place to the bigger wallet when two scores round to the same integer", () => {
+    // THE CASE THAT CAUGHT IT. Both display 22. The habit really has 22.4 and
+    // the whale 21.5, and the whale moved a thousand times more money. Ranking
+    // on the rounded score and breaking the tie on amount put the whale first —
+    // the exact ordering this board exists to prevent.
+    const habit = [day("AAA-habit", "2026-09-14", 96_500n), day("AAA-habit", "2026-09-15", 96_500n)];
+    const whale = [day("ZZZ-whale", "2026-09-14", 198_530_000n)];
+    const board = rankBoard([...habit, ...whale], "ahorro");
+    expect(board.map((entry) => entry.subject)).toEqual(["AAA-habit", "ZZZ-whale"]);
+    expect(board[0]!.points).toBe(board[1]!.points);
+    expect(board[0]!.pointsExact).toBeGreaterThan(board[1]!.pointsExact);
+  });
+
+  it("breaks a true tie on use, and only then on the address", () => {
+    // Same exact score, different habits: more active days wins.
+    const spread = [day("spread", "2026-09-14", 10n * SOL), day("spread", "2026-09-15", 1n)];
+    const single = [day("single", "2026-09-14", 10n * SOL)];
+    const board = rankBoard([...single, ...spread], "ahorro");
+    expect(board[0]!.subject).toBe("spread");
+    expect(board[0]!.activeDays).toBeGreaterThan(board[1]!.activeDays);
+  });
+});
+
+describe("the published arithmetic", () => {
+  it("publishes parts that add up to the score they explain", () => {
+    // The live mainnet row: 0.036634582 SOL on one day. It used to publish
+    // 10 + 7.9 + 0 beside a total of 18.
+    const live = rankBoard([day("vault", "2026-09-19", 36_634_582n)], "ahorro")[0]!;
+    expect(live.breakdown).toEqual({ participation: 10, size: 7.9, streak: 0 });
+    expect(live.pointsExact).toBe(17.9);
+    expect(live.points).toBe(18);
+    expect(live.breakdown.participation + live.breakdown.size + live.breakdown.streak).toBe(live.pointsExact);
+  });
+
+  it("keeps that true across every shape of competitor", () => {
+    const rows = [
+      ...run("streaky", SOL / 100n, 12),
+      ...run("brief", 3n * SOL, 2),
+      day("once", "2026-09-14", 250n * SOL),
+      day("dust", "2026-09-14", 1n),
+      ...["2026-09-14", "2026-09-17", "2026-09-28"].map((d) => day("scattered", d, SOL / 3n)),
+    ];
+    for (const board of BOARDS) {
+      for (const entry of rankBoard(rows, board)) {
+        const sum = entry.breakdown.participation + entry.breakdown.size + entry.breakdown.streak;
+        expect(sum, `${entry.subject} on ${board}`).toBe(entry.pointsExact);
+        expect(entry.points, `${entry.subject} on ${board}`).toBe(Math.round(entry.pointsExact));
+      }
+    }
+  });
+});
+
 describe("what does not count", () => {
   it("ignores a day that saved nothing, so being swept is not an achievement", () => {
     const rows = [day("a", "2026-09-14", 0n, 5n * SOL), day("a", "2026-09-15", SOL / 100n, 5n * SOL)];
