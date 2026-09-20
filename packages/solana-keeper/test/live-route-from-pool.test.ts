@@ -62,7 +62,7 @@ function writeU128LE(data: Buffer, at: number, value: bigint): void {
   }
 }
 
-function poolState(overrides: { tickSpacing?: number } = {}): Buffer {
+function poolState(overrides: { tickSpacing?: number; status?: number } = {}): Buffer {
   const data = Buffer.alloc(1544);
   Buffer.from("f7ede3f5d7c3de46", "hex").copy(data, 0);
   data[8] = 255; // bump
@@ -79,6 +79,7 @@ function poolState(overrides: { tickSpacing?: number } = {}): Buffer {
   writeU128LE(data, 237, 146591640500536n); // liquidity
   writeU128LE(data, 253, SQRT_PRICE_X64);
   data.writeInt32LE(TICK_CURRENT, 269);
+  data[389] = overrides.status ?? 0; // status: every one of the four pools reads 0
   return data;
 }
 
@@ -265,6 +266,19 @@ describe("a route derived from the pool account", () => {
       tickArray(-22080).toBase58(),
       tickArray(-22140).toBase58(),
     ]);
+  });
+
+  it("refuses a pool whose own status byte says swaps are switched off", async () => {
+    // Bit 4 SET is Raydium's "disabled"; the byte is 0 on all four live pools,
+    // so a polarity mistake here would refuse every route rather than none —
+    // which the mainnet rehearsal catches, and this pins without a network.
+    const { connection } = stubConnection({ pool: poolState({ status: 1 << 4 }) });
+    await expect(fetchLiveRoute(connection, POOL, WSOL, USDC, TOKEN_PROGRAM)).rejects.toThrow(/swaps switched off/);
+
+    // The other bits are other permissions — opening a position, collecting a
+    // fee — and none of them stops a swap.
+    const open = stubConnection({ pool: poolState({ status: 0b0000_1111 }) });
+    await expect(fetchLiveRoute(open.connection, POOL, WSOL, USDC, TOKEN_PROGRAM)).resolves.toBeTruthy();
   });
 
   it("refuses a pool account that Raydium does not own", async () => {

@@ -38,6 +38,12 @@
 // number failed in practice. min-out.ts keeps the 2 % tolerance around it, and
 // the policy floor is still the hard bound underneath.
 //
+// WHAT THE WALK PROVED BY ACCIDENT, AND IS NOW PROVED ON PURPOSE. Needing a
+// recent successful swap_v2 to copy meant a pool nobody had traded on could not
+// produce a route at all. Deriving one from state removes that, so the pool's
+// own status byte is read instead: bit 4 set is Raydium's "swaps disabled", and
+// a route is refused rather than built for a venue that will reject it.
+//
 // AND IT HAS TO BE THE RATE THE VAULT'S OWN ACCOUNT WILL SEE. invest.rs checks
 // `received >= min_out` against the vault_target ATA's own delta, and two of the
 // basket's mints are Token-2022 with a TransferFeeConfig: the pool pays out one
@@ -107,6 +113,15 @@ const OBSERVATION_AT = 201;
 const TICK_SPACING_AT = 235;
 const SQRT_PRICE_AT = 253;
 const TICK_CURRENT_AT = 269;
+const STATUS_AT = 389;
+/**
+ * Bit 4 of `status`, SET, is Raydium's own "swaps are disabled here".
+ *
+ * Raydium stores this the other way round from the way it reads: set_status_by_bit
+ * ORs the bit in to DISABLE, and get_status_by_bit answers "normal" when the bit
+ * is clear. All four pools SaverFi trades read status 0 on 2026-09-20.
+ */
+const SWAP_DISABLED_BIT = 1 << 4;
 
 // ── Raydium CLMM AmmConfig, 117 bytes ─────────────────────────────────────────
 // 8 disc, 1 bump, 2 index, 32 owner, 4 protocolFeeRate -> tradeFeeRate at 47,
@@ -190,6 +205,22 @@ function decodePoolState(pool: PublicKey, owner: PublicKey, data: Buffer): PoolS
   }
   if (data.subarray(0, 8).toString("hex") !== POOL_STATE_DISCRIMINATOR) {
     throw new Error(`pool ${pool.toBase58()} is not a Raydium CLMM PoolState`);
+  }
+  // THE VENUE'S OWN SWITCH, which is the one field that says whether this pool
+  // will accept a swap at all. It matters here because the walk this file
+  // replaced needed a recent SUCCESSFUL swap_v2 to copy, which was an accidental
+  // liveness proof: a paused pool made fetchLiveRoute throw before anything was
+  // built. A route derived from state has no such accident in it, so the check
+  // is made on purpose — otherwise a paused pool yields a well-formed route and
+  // the keeper buys an ATA and a reverting invest transaction, per leg, per
+  // sweep, with an opaque Raydium error at the end of it. These are
+  // issuer-controlled pools and the bit is the issuer's to set.
+  const status = data[STATUS_AT]!;
+  if ((status & SWAP_DISABLED_BIT) !== 0) {
+    throw new Error(
+      `pool ${pool.toBase58()} has swaps switched off in its own status byte ` +
+        `(0b${status.toString(2).padStart(8, "0")}) — the venue is not accepting trades`,
+    );
   }
   const tickSpacing = data.readUInt16LE(TICK_SPACING_AT);
   if (tickSpacing === 0) throw new Error(`pool ${pool.toBase58()} reports a zero tick spacing`);
