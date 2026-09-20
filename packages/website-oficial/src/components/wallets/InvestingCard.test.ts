@@ -221,6 +221,14 @@ describe("InvestingCard", () => {
     // one and has moved it twice, the day's liquidity sets the other. SPYx is
     // beside it as the proof that this is these tokens, not Solana.
     expect(html).toContain("ANTHROPIC&#x27;s issuer charges 1 % of every transfer of it: once when your vault buys it, and once when it leaves.");
+    // COMPOUNDED, NOT DOUBLED: 1 - 0.99^2 is 1.99 %, and "about 2 %" rounded
+    // the owner's way past the only arithmetic on this card he could check.
+    expect(html).toContain("gives up 1.99 % before the market is involved at all — not quite two, because the second 1 % is taken from what the first one left.");
+    // A FEE, NOT SLIPPAGE. Nothing here may leave him thinking a smaller buy
+    // escapes it: it is charged on every transfer, and again on every later one.
+    expect(html).toContain("Buying in smaller pieces does not make it smaller");
+    expect(html).toContain("every later buy pays it again");
+    expect(html).toContain("no fee setting at all, and no key with the power to add one");
     // ONE RAISE, NOT TWO: the mint's TransferFeeConfig carries only older{1032,
     // 50 bps} and newer{1039, 100 bps}, so 50 -> 100 is all that can be read off
     // it and all the copy may claim.
@@ -232,16 +240,23 @@ describe("InvestingCard", () => {
     expect(html).toContain("it was 0.5 % for about two weeks, and it became 1 % when the current epoch began, hours before this was written on 20 September 2026.");
     expect(html).not.toContain("a few days ago");
     expect(html).not.toContain("it has been nothing, then 0.5 %");
-    // THE MEASUREMENT THE WORK WAS GIVEN, and no tighter than it: 0.01 % on
-    // SPYx, 0.41-0.44 % on ANTHROPIC. The earlier 0.60/0.57/1.26 % curve was not
-    // reproducible from this repository and was not monotonic in size, so the
-    // "because its pool is small" claim it carried is gone too -- the pool's
-    // size is argued in thinPool, where it is actually measured.
-    expect(html).toContain("measured 0.01 % on SPYx.");
-    expect(html).toContain("The same round trip on ANTHROPIC measured between 0.41 % and 0.44 %.");
+    // THE CLOSED MEASUREMENT, and no tighter than it was read: simulated round
+    // trips on mainnet, the sell chained on the credit the buy really returned
+    // rather than on a quote. ANTHROPIC 2.4 % (2.24-2.63 %), of which 1.99 % is
+    // the fee and 0.25-0.64 % the market; SPYx 1.1-1.8 basis points. The two
+    // earlier readings -- the 0.60/0.57/1.26 % size curve, and the Jupiter
+    // quotes that read this round trip at 0.41-0.44 % before the measurement
+    // finished -- are gone from every sentence, not only from their own.
+    expect(html).toContain("measured on 20 September 2026 on Solana itself — seven round trips, built and run but never signed, each sale priced on what its purchase actually delivered rather than on a quote.");
+    expect(html).toContain("ANTHROPIC&#x27;s round trip cost 2.4 % all told, between 2.24 % and 2.63 %.");
+    expect(html).toContain("the rest, between 0.25 % and 0.64 %, is the market, and it moved by 0.36 % within thirteen minutes that day.");
+    expect(html).toContain("SPYx&#x27;s round trip, measured the same way, cost between 0.011 % and 0.018 %.");
     expect(html).not.toContain("1.3 % at $100");
     expect(html).not.toContain("because its pool is small");
-    expect(html).toContain("roughly 2 % to its issuer plus about half a percent to the market");
+    expect(html).not.toContain("0.41 %");
+    expect(html).not.toContain("half a percent");
+    expect(html).toContain("cost 2.4 % on the day it was measured: 1.99 % of that is the issuer&#x27;s fee, charged whatever the market does");
+    expect(html).toContain("SPYx cost under two hundredths of one percent the same day — more than a hundred times less.");
 
     // THE LIMIT THE NEXT RAISE CROSSES. Two sentences tell him the issuer moves
     // this fee and just did; none told him what the next move costs. ANTHROPIC
@@ -259,7 +274,22 @@ describe("InvestingCard", () => {
       "On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used to raise the fee, from 0.5 % to 1 %, on the day this page was written.",
     );
     expect(html).toContain("On SPYx those powers sit with three separate keys and there is no fee to raise.");
-    expect(html).toContain("I understand each issuer can freeze, pause or move its own stock out of my vault, and that one key holds all of those powers over ANTHROPIC");
+
+    // THE SECOND SWITCH THE SAME KEY HOLDS, which the card never mentioned
+    // while three of its sentences discussed the first. A filled-in transfer
+    // hook is refused by the keeper outright, and the refusal is all-or-
+    // nothing: SPYx and the SOL conversion stop with it.
+    expect(html).toContain("The same key holds a second switch, and this one is not about money at all: it stops the buying.");
+    expect(html).toContain("on both it is empty today, which is the issuer keeping the option rather than using it.");
+    expect(html).toContain("SaverFi will not buy a stock whose field has been filled in");
+    expect(html).toContain("the vault stops buying the whole basket — SPYx along with it — and stops converting your SOL, until the basket itself is changed.");
+    expect(html).toContain("It applies from the moment it is written: the next buy is the one that stops.");
+    expect(html).toContain("SPYx carries the same empty field, a different key holds it, and no key at all can put a transfer fee on SPYx.");
+    expect(html).toContain("it is that one stranger&#x27;s key can stop your pension buying anything at all, on any day he chooses.");
+
+    expect(html).toContain(
+      "I understand each issuer can freeze, pause or move its own stock out of my vault, that one key holds all of those powers over ANTHROPIC, and that the same key can stop my vault buying anything at all",
+    );
     expect(html).not.toContain("I understand the issuer can freeze, pause or move SPYx");
     const box = html.match(/<input[^>]*name="invest-acknowledge"[^>]*>/)?.[0] ?? "";
     expect(box).toContain('type="checkbox"');

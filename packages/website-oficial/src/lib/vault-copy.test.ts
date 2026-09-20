@@ -79,3 +79,82 @@ describe("the transfer-fee ceiling", () => {
     expect(notice).toContain("stops converting your SOL at all");
   });
 });
+
+
+describe("the transfer-hook switch", () => {
+  /**
+   * THE SECOND STOP THE SAME KEY HOLDS. The fee is a number that can rise; this
+   * is a field that, once filled in, refuses the leg outright — and by the same
+   * all-or-nothing doctrine, the whole basket with it.
+   *
+   * PINNED TO THE KEEPER'S CODE AND NEVER TO ITS PROSE, the way the depth
+   * doctrine is: two expressions, both of which would have to be deleted for
+   * the sentence below to become untrue. Rewording the keeper's comments cannot
+   * turn this gate red; giving a filled-in hook a way through is exactly what
+   * should.
+   */
+  it("says the keeper refuses a leg whose hook is filled in, and that the refusal takes the whole basket", () => {
+    // Read as text, never imported: the web does not depend on the keeper.
+    const keeper = readFileSync(fileURLToPath(new URL("../../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
+    // EMPTY MEANS THE DEFAULT PROGRAM ID, which is what "the field is empty
+    // today" rests on: anything else is a hook and is refused.
+    expect(keeper).toMatch(/transferHook = programId\.equals\(PublicKey\.default\) \? null : programId;/);
+    // AND A NON-NULL HOOK IS A REFUSAL, in the same pass that gates the fee.
+    expect(keeper).toMatch(/if \(facts\.transferHook !== null\) \{/);
+
+    const notice = INVEST_COPY.hookSwitch;
+    expect(notice).toContain("on both it is empty today");
+    expect(notice).toContain("SaverFi will not buy a stock whose field has been filled in");
+    // ALL OR NOTHING, the doctrine the thin-pool and fee-ceiling notices are
+    // held to: a hook on one leg may not be described as costing only that leg.
+    expect(notice).toContain("the vault stops buying the whole basket — SPYx along with it — and stops converting your SOL");
+    // WHAT HE IS ACTUALLY ACCEPTING, in his own terms.
+    expect(notice).toContain("stop your pension buying anything at all");
+    // THE ASYMMETRY WITH SPYx, which is the reason the basket's two legs are
+    // not the same risk: SPYx has the same empty field and no fee switch.
+    expect(notice).toContain("SPYx carries the same empty field, a different key holds it, and no key at all can put a transfer fee on SPYx.");
+    // The box he ticks names the stop, not only the freeze.
+    expect(INVEST_COPY.acknowledge).toContain("the same key can stop my vault buying anything at all");
+  });
+});
+
+describe("what the position costs", () => {
+  /**
+   * THE CLOSED FIGURES, from simulated round trips on mainnet (unsigned
+   * transactions through simulateTransaction, the sell chained on the credit
+   * the buy really returned), epoch 1039, 2026-09-20, n=7.
+   *
+   * The structural part is the one thing here that is arithmetic rather than a
+   * reading, so it is computed: a 1 % fee charged once in and once out is
+   * 1 - 0.99^2, which is 1.99 % and NOT "2 x 1 %". If someone rounds it back up
+   * to "about 2 %", this says so.
+   */
+  it("gives up the issuer's fee compounded, not doubled, and quotes the measured round trips with their date", () => {
+    const structural = (1 - 0.99 ** 2) * 100;
+    expect(Number(structural.toFixed(2))).toBe(1.99);
+    expect(INVEST_COPY.issuerCost).toContain(`gives up ${structural.toFixed(2)} % before the market is involved at all`);
+    expect(INVEST_COPY.issuerCost).toContain("because the second 1 % is taken from what the first one left");
+    // A FEE, NOT SLIPPAGE: no sentence may offer a smaller buy as a way out.
+    expect(INVEST_COPY.issuerCost).toContain("Buying in smaller pieces does not make it smaller");
+    expect(INVEST_COPY.issuerCost).toContain("every later buy pays it again");
+    // NO FEE CAN EVER BE PUT ON SPYx: its mint carries no fee setting and no
+    // authority for one, which is stronger than "charges nothing today".
+    expect(INVEST_COPY.issuerCost).toContain("no fee setting at all, and no key with the power to add one");
+
+    // THE MEASUREMENT, no tighter than it was read, and dated.
+    expect(INVEST_COPY.marketCost).toContain("measured on 20 September 2026 on Solana itself");
+    expect(INVEST_COPY.marketCost).toContain("each sale priced on what its purchase actually delivered rather than on a quote");
+    expect(INVEST_COPY.marketCost).toContain("2.4 % all told, between 2.24 % and 2.63 %");
+    expect(INVEST_COPY.marketCost).toContain("between 0.25 % and 0.64 %, is the market");
+    expect(INVEST_COPY.marketCost).toContain("moved by 0.36 % within thirteen minutes");
+    expect(INVEST_COPY.marketCost).toContain("between 0.011 % and 0.018 %");
+    // THE SUPERSEDED READING, which priced the sell off the quote: gone from
+    // every sentence, not only from the one it was written in.
+    for (const line of [INVEST_COPY.issuerCost, INVEST_COPY.marketCost, INVEST_COPY.costTogether]) {
+      expect(line).not.toContain("0.41 %");
+      expect(line).not.toContain("0.44 %");
+      expect(line).not.toContain("0.01 % on SPYx");
+      expect(line).not.toContain("half a percent");
+    }
+  });
+});
