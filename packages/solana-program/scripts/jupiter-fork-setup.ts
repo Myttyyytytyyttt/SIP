@@ -32,7 +32,14 @@ import { Connection, Keypair, PACKET_DATA_SIZE, PublicKey, TransactionInstructio
 import { getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildJupiterRoute, investAmountIn, JupiterRouteRefusal, v0TransactionBytes } from "./jupiter-route";
+import {
+  buildJupiterRoute,
+  investAmountIn,
+  investMinOut,
+  JupiterRouteRefusal,
+  routeWarning,
+  v0TransactionBytes,
+} from "./jupiter-route";
 
 /**
  * WHERE PHASE 1 WRITES, resolved LAZILY rather than at module load. This file
@@ -238,6 +245,14 @@ async function main(): Promise<void> {
     throw error;
   }
 
+  // A CONDITION THE BUILDER SAW AND COULD NOT DECIDE. It is not a refusal —
+  // whether the tolerance left after the transfer fee matters depends on which
+  // AMM fills, which no build-time check knows — but a run that is about to
+  // clone a gross-quoting venue on purpose should be told before it spends the
+  // clone. See section (7) of jupiter-route.ts's header.
+  const tolerance = routeWarning(route, "slippage-not-above-transfer-fee");
+  if (tolerance !== null) console.log(`  WARNING     ${tolerance.condition}: ${tolerance.message}`);
+
   // WHAT THIS PROOF ACTUALLY NEEDS, MEASURED — and it is not a hop count, and
   // not the absence of a lookup table either. Phase 3 compiles its own message
   // with NO tables and the route's accounts written out in full, so a table in
@@ -347,7 +362,11 @@ async function main(): Promise<void> {
         quotedOut: route.output.quotedOut.toString(),
         venueThreshold: route.output.venueThreshold.toString(),
         mainnetTransferFeeBps: route.output.transferFee.basisPoints,
-        mainnetNetOfVenueThreshold: route.output.netOfVenueThreshold.toString(),
+        // THE SIBLING OF requestedAmountIn ABOVE, and the same reasoning:
+        // investMinOut re-derives the number from the instruction's own tail
+        // instead of copying a field, so a route assembled some other way
+        // cannot put a min_out in this file that its bytes do not support.
+        mainnetNetOfVenueThreshold: investMinOut(route).toString(),
         vault: vault.toBase58(),
         vaultIn: vaultIn.toBase58(),
         vaultTarget: vaultTarget.toBase58(),

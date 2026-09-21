@@ -92,7 +92,26 @@ const LEGS: ReadonlyArray<{ readonly name: string; readonly mint: PublicKey }> =
 
 /** USD, converted with USDC's six decimals. */
 const DEFAULT_SIZES = [5, 25, 250];
-const DEFAULT_SLIPPAGE_BPS = 100;
+
+/**
+ * ABOVE THE FEE, AND THAT IS THE WHOLE REQUIREMENT.
+ *
+ * This was 100 for as long as the PreStocks mints charged 50 bps. Since epoch
+ * 1039 they charge exactly 100, so 100 stopped being a comfortable default and
+ * became the EQUALITY case: on a gross-quoting venue Jupiter derives its
+ * threshold from the gross quote and enforces it against the CREDITED amount,
+ * the fee comes out of the tolerance, and at equality the credit lands one raw
+ * unit under the threshold because Jupiter floors its deduction and Token-2022
+ * ceils its fee. Measured on 2026-09-20, the minute epoch 1039 landed:
+ * ANTHROPIC reverted with Jupiter's own 0x1771 at 5, 25 and 250 USD at 100
+ * bps, and filled at 200.
+ *
+ * jupiter-fork-setup.ts was raised to 200 then; this was not, so every default
+ * run of the harness since has been reproducing that revert with no
+ * explanation attached. 200 is the same number the fork harness uses, and
+ * slippageHeadroom() below now says out loud when a setting and a fee meet.
+ */
+const DEFAULT_SLIPPAGE_BPS = 200;
 
 /**
  * A funded mainnet USDC holder, used ONLY as the swap's user in simulation.
@@ -386,6 +405,77 @@ export function renderMinOutRow(row: {
   );
 }
 
+/**
+ * What a slippage setting is really worth once the destination mint's transfer
+ * fee is taken out of it.
+ *
+ * THE SUBTRACTION IS THE FINDING, measured across the 1038 -> 1039 boundary on
+ * 2026-09-20 (USDC -> ANTHROPIC, routes ending on Manifest):
+ *   epoch 1038, fee  50 bps, slippage 100 bps -> fills, credit drift -50.0 bps
+ *   epoch 1039, fee 100 bps, slippage 100 bps -> Jupiter 0x1771 at 5/25/250 USD
+ *   epoch 1039, fee 100 bps, slippage 200 bps -> fills, credit drift -100.0 bps
+ * Jupiter derives its threshold from a GROSS quote on some venues and enforces
+ * it against the CREDITED (net) amount, so the usable tolerance is
+ * slippage_bps - fee_bps — and at equality it is not zero but negative by one
+ * raw unit, because Jupiter floors and Token-2022 ceils.
+ *
+ * A NET-QUOTING VENUE IS UNAFFECTED, which is why this is a headroom and not a
+ * prediction: FIGUREAI filled at 100 against 100. The basis belongs to the AMM
+ * Jupiter picks for the final transfer, so this says what the setting leaves,
+ * not what any particular route will do with it.
+ */
+export interface SlippageHeadroom {
+  readonly slippageBps: number;
+  readonly feeBps: number;
+  /** slippage_bps - fee_bps. */
+  readonly usableBps: number;
+  /** Zero or less against a real fee: a GROSS-quoting venue cannot fill at all. */
+  readonly grossVenueCannotFill: boolean;
+}
+
+export function slippageHeadroom(slippageBps: number, feeBps: number): SlippageHeadroom {
+  const usableBps = slippageBps - feeBps;
+  return { slippageBps, feeBps, usableBps, grossVenueCannotFill: feeBps > 0 && usableBps <= 0 };
+}
+
+/** One printed line, so the report and the failure note cannot drift apart. */
+export function slippageHeadroomLine(leg: string, headroom: SlippageHeadroom): string {
+  return (
+    `SLIPPAGE  ${leg}: fee ${headroom.feeBps} bps against slippage ${headroom.slippageBps} bps -> ` +
+    (headroom.grossVenueCannotFill
+      ? `${headroom.usableBps} bps of tolerance. On a venue that quotes GROSS this cannot fill at all: ` +
+        `Jupiter reverts with 0x1771 (6001) before our guards run. Raise slippage above ${headroom.feeBps} bps.`
+      : `${headroom.usableBps} bps of real tolerance left.`)
+  );
+}
+
+/**
+ * Attaches the reason to a revert that this setting made inevitable.
+ *
+ * WHY THE HARNESS HAS TO SAY IT, rather than leaving it to the SLIPPAGE block
+ * at the end of the run: a row that fails prints
+ * `custom program error: 0x1771` and nothing else, and a reader who did not
+ * set the flag themselves has no way to connect that hex to a transfer fee
+ * they never typed. The note goes on the FIRST line, where the row's own
+ * one-line summary is printed from.
+ *
+ * ONLY WHERE IT IS ACTUALLY THE CAUSE. A 0x1771 with tolerance to spare is the
+ * market moving between the quote and the simulation, which is a different
+ * finding, so the note is withheld unless the headroom is gone.
+ */
+export function explainVenueRefusal(reason: string, headroom: SlippageHeadroom): string {
+  if (!headroom.grossVenueCannotFill) return reason;
+  if (!/0x1771|"Custom":\s*6001|Custom\(6001\)/i.test(reason)) return reason;
+  const note =
+    ` — EXPECTED AT THIS SETTING: slippage ${headroom.slippageBps} bps against a ${headroom.feeBps} bps transfer ` +
+    `fee leaves ${headroom.usableBps} bps of tolerance. Jupiter derives its threshold from a GROSS quote on some ` +
+    "venues and enforces it against the CREDITED (net) amount, so the fee is spent out of the tolerance; at " +
+    "equality the credit lands one raw unit under the threshold, because Jupiter floors its deduction and " +
+    `Token-2022 ceils its fee. Re-run with --slippage above ${headroom.feeBps}.`;
+  const lines = reason.split("\n");
+  return [`${lines[0] ?? reason}${note}`, ...lines.slice(1)].join("\n");
+}
+
 async function measureLeg(
   connection: Connection,
   args: Args,
@@ -586,6 +676,12 @@ async function main(): Promise<void> {
         `fee now ${fee.current.basisPoints} bps` +
         (fee.pending === null ? "" : `, ${fee.pending.basisPoints} bps from epoch ${fee.pending.epoch}`),
     );
+    // SAID BEFORE THE ROWS, NOT ONLY AFTER THEM. When the setting and the fee
+    // meet, every gross-quoting row below is going to revert, and a reader who
+    // only meets 0x1771 at the bottom of a failed run has to work backwards to
+    // a number nobody printed. See slippageHeadroom.
+    const headroom = slippageHeadroom(args.slippageBps, fee.worstCase.basisPoints);
+    if (headroom.grossVenueCannotFill) console.log(`  ${slippageHeadroomLine(leg.name, headroom)}`);
     for (const usd of args.sizes) {
       await sleep(JUPITER_PACING_MS);
       // A leg that reverts is a result, not a crash. A venue can refuse a size
@@ -597,8 +693,9 @@ async function main(): Promise<void> {
       try {
         row = await measureLeg(connection, args, leg, usd, fee, lookupTableCache);
       } catch (error: unknown) {
-        failures.push({ leg: leg.name, usd, reason: error instanceof Error ? error.message : String(error) });
-        console.log(`  ${String(usd).padStart(4)} USD  NOT MEASURED: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`);
+        const reason = explainVenueRefusal(error instanceof Error ? error.message : String(error), headroom);
+        failures.push({ leg: leg.name, usd, reason });
+        console.log(`  ${String(usd).padStart(4)} USD  NOT MEASURED: ${reason.split("\n")[0]}`);
         continue;
       }
       rows.push(row);
@@ -672,16 +769,9 @@ async function main(): Promise<void> {
   // — net — while quoting gross on some venues, so the fee comes out of the
   // tolerance and a setting at or below the fee cannot land on those venues.
   for (const [name, fee] of fees) {
-    const worst = fee.worstCase.basisPoints;
-    if (worst === 0) continue;
-    const usable = args.slippageBps - worst;
-    console.log(
-      `\nSLIPPAGE  ${name}: fee ${worst} bps against slippage ${args.slippageBps} bps -> ` +
-        (usable > 0
-          ? `${usable} bps of real tolerance left.`
-          : `NO tolerance left. On a venue that quotes GROSS this cannot fill at all: ` +
-            `Jupiter reverts with 0x1771 (6001) before our guards run. Raise slippage above ${worst} bps.`),
-    );
+    const headroom = slippageHeadroom(args.slippageBps, fee.worstCase.basisPoints);
+    if (headroom.feeBps === 0) continue;
+    console.log(`\n${slippageHeadroomLine(name, headroom)}`);
   }
 
   console.log(
@@ -716,4 +806,4 @@ if (process.argv[1] !== undefined && process.argv[1].endsWith("jupiter-sim.ts"))
   });
 }
 
-export { measureLeg };
+export { measureLeg, DEFAULT_SLIPPAGE_BPS };
