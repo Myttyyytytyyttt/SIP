@@ -79,11 +79,16 @@ const route = await buildJupiterRoute(connection, {
   maxAge: { maxAgeMs: 60_000 },
 });
 
-const swap = { payer: VAULT, inputTokenAccount: vaultIn, outputTokenAccount: vaultTarget, amountIn: investAmountIn(route), minAmountOut: investMinOut(route) };
+// venue_data IS THE ROUTE'S OWN BLOB, not a hand-assembled swap record. This
+// script passed a `swap` object until 2026-09-21 — a shape investCall stopped
+// taking when the venue moved to Jupiter — and nothing noticed, because
+// tsconfig.json included neither scripts/ nor this file and vitest collects
+// neither. It is in the include list now, so the image's own typecheck is what
+// keeps the advertised tsx proof from rotting again.
 const invest = await investCall(
   program,
   { crank: crank.publicKey, vault: VAULT, policy: POLICY, vaultIn, vaultTarget, targetMint: ANTHROPIC, venueProgram: route.venueProgram },
-  { legIndex: 0, amountIn: investAmountIn(route), minOut: investMinOut(route), swap },
+  { legIndex: 0, amountIn: investAmountIn(route), minOut: investMinOut(route), venueData: route.venueData },
 )
   .remainingAccounts(route.remainingAccounts.map((m) => ({ ...m, isSigner: false })))
   .instruction();
