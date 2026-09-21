@@ -37,7 +37,7 @@
 // text is ever returned: a read that failed is "unreadable", with no detail.
 
 import { RAYDIUM_CLMM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../client/addresses";
-import { classifyVaultEntry } from "../client/activity";
+import { classifyVaultEntry, scopeEntryToVault } from "../client/activity";
 import { isPubkey, isSignature } from "../client/base58";
 import { tryBase64Decode } from "../client/base64";
 import { PoolPriceError, floorWad, usdcRawPer1e8LegRaw, usdcRawPerSol } from "../client/clmm-price";
@@ -85,7 +85,7 @@ import {
 } from "./builders";
 import type { SolanaServerSettings } from "./config";
 import { isCrossSite, isJsonContentType, readBodyCapped, type SolanaGate, type SolanaRouteHandler } from "./handlers";
-import { deriveAta, deriveVaultPda } from "./pda";
+import { deriveAta, deriveLinkPda, deriveVaultPda } from "./pda";
 import { CLIENT_AGGREGATE_FACTOR, clientIdentityFromHeaders, createWeightedLimiter, retryAfterSeconds, type WeightedLimiter } from "./rate-limit";
 import {
   MAX_WALLET_LINKS,
@@ -1125,7 +1125,7 @@ export function createSolanaVaultHandler(options: SolanaVaultHandlerOptions): So
 // ── /api/solana-live ─────────────────────────────────────────────────────────
 
 const SNAPSHOT_FIELDS = ["action", "owner", "wallets", "discover"] as const;
-const ACTIVITY_FIELDS = ["action", "owner", "limit", "before", "until"] as const;
+const ACTIVITY_FIELDS = ["action", "owner", "wallet", "limit", "before", "until"] as const;
 
 /** The pool prices as both /api/solana-vault and /api/solana-live report them. */
 function pricesView(prices: ChainRead<PoolPrices>): Record<string, unknown> | null {
@@ -1281,12 +1281,41 @@ async function liveSnapshot(fields: Readonly<Record<string, unknown>>, served: S
   });
 }
 
-/** activity: one page of the vault's history, every transaction already classified. */
+/**
+ * activity: one page of history, every transaction already classified.
+ *
+ * TWO ADDRESSES, ONE ACTION. Without `wallet` this lists the VAULT PDA's own
+ * signatures, which is the whole history and is what the feed draws. With
+ * `wallet` it lists that wallet's TradingLink PDA instead — seeds ["link",
+ * wallet], and only link_wallet, settle and unlink_wallet ever touch it, so
+ * that stream is nearly pure settlements. It exists because the vault PDA is
+ * the noisiest address in the system: on 2026-09-19 twelve of its fifteen
+ * newest signatures were keeper upkeep and the one real settlement sat at
+ * position 24, so a dashboard that had read a page of history still had to say
+ * it could not find the settlement the vault's own total records.
+ *
+ * EVERY ENTRY IS READ AGAINST THE VAULT EITHER WAY. The deltas a row shows are
+ * the vault's, and a link PDA's own lamport change is rent and nothing else.
+ *
+ * A LINK PAGE IS SCOPED PER ENTRY AND A VAULT PAGE IS NOT, and the asymmetry is
+ * the point: listing the vault's signatures already proved every transaction
+ * touched it, while nothing about a wallet's stream says whose vault a row
+ * belongs to. See scopeEntryToVault.
+ */
 async function liveActivity(fields: Readonly<Record<string, unknown>>, served: Served): Promise<Response> {
   const extra = unexpectedField(fields, ACTIVITY_FIELDS);
   if (extra !== null) return served.refuse(400, "bad_request", extra);
   const { owner, before, until } = fields;
   if (!isPubkey(owner)) return served.refuse(400, "bad_request", "owner must be a base58 32-byte public key.");
+  // The route is unauthenticated, so any wallet may be named. Nothing here READS
+  // the link to check it is seated in this vault: that would cost a read, and it
+  // would prove the link as it stands NOW while the stream it pages spans every
+  // life that address has had. The per-entry scoping below is what protects, and
+  // it is free.
+  const walletField = fields.wallet;
+  if (walletField !== undefined && !isPubkey(walletField)) return served.refuse(400, "bad_request", "wallet must be a base58 32-byte public key.");
+  const wallet: string | null = isPubkey(walletField) ? walletField : null;
+  if (wallet === owner) return served.refuse(400, "bad_request", "A trading wallet cannot be your pension key.");
   const limit = fields.limit === undefined ? MAX_LIVE_ACTIVITY_PAGE : fields.limit;
   if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > MAX_LIVE_ACTIVITY_PAGE) {
     return served.refuse(400, "bad_request", `limit must be a whole number from 1 to ${MAX_LIVE_ACTIVITY_PAGE}.`);
@@ -1298,12 +1327,24 @@ async function liveActivity(fields: Readonly<Record<string, unknown>>, served: S
   const spent = served.spendReads(LIVE_READS_WEIGHT.signatures);
   if (spent !== null) return spent;
   const vault = deriveVaultPda(owner).toBase58();
-  const page = await listVaultSignatures(served.pool, vault, {
+  const address = wallet === null ? vault : deriveLinkPda(wallet).toBase58();
+  const head = wallet === null ? { scope: "vault" as const, vault, address } : { scope: "link" as const, vault, wallet, address };
+
+  // A LINK PAGE'S CURSOR IS NOT CALLED nextBefore, AND nextBefore IS ABSENT
+  // FROM IT. In the web app, `nextBefore === null` means "the VAULT's history
+  // reaches its beginning", which is the whole licence for "Saved today" and
+  // "This week". A wallet's history read to its end is not that. Two different
+  // facts must not arrive under one name — and the client branches on `scope`,
+  // never on a cursor being absent, because absent reads as "there is more".
+  const cursor = wallet === null ? "nextBefore" : "nextBeforeLink";
+  const unread = (): Response => json(200, { ...head, status: "unreadable", [cursor]: null, entries: [], filtered: 0, unread: 0, gap: false });
+
+  const page = await listVaultSignatures(served.pool, address, {
     limit,
     ...(typeof before === "string" ? { before } : {}),
     ...(typeof until === "string" ? { until } : {}),
   });
-  if (page.kind !== "exists") return json(200, { vault, status: "unreadable", nextBefore: null, entries: [], gap: false });
+  if (page.kind !== "exists") return unread();
 
   const listed = page.value.listed;
   // The transactions are charged BEFORE the batch, now that their number is
@@ -1313,13 +1354,24 @@ async function liveActivity(fields: Readonly<Record<string, unknown>>, served: S
     if (more !== null) return more;
   }
   const read = await readVaultTransactions(served.pool, vault, listed);
-  if (read.kind !== "exists") return json(200, { vault, status: "unreadable", nextBefore: null, entries: [], gap: false });
+  if (read.kind !== "exists") return unread();
+
+  // A VAULT PAGE IS NOT FILTERED: the listing already proved every transaction
+  // touched this vault, and filtering would quietly drop the keeper upkeep the
+  // feed is meant to count. A LINK PAGE IS.
+  const kept = wallet === null ? read.value : read.value.flatMap((entry) => (entry.readable ? (scopeEntryToVault(entry, vault) ?? []) : []));
+  // TWO WAYS TO LOSE A ROW, AND THEY ARE NOT THE SAME FACT. `unread` is a
+  // transaction the RPC did not return — nothing is known about whose it was.
+  // `filtered` is one that WAS read and the program did not tie to this vault.
+  // Reporting both as "not yours" would let a page nobody could read look like
+  // a wallet that never settled.
+  const unreadable = wallet === null ? 0 : read.value.filter((entry) => !entry.readable).length;
 
   return json(200, {
-    vault,
+    ...head,
     status: "exists",
-    nextBefore: page.value.nextBefore,
-    entries: read.value.map((entry) => ({
+    [cursor]: page.value.nextBefore,
+    entries: kept.map((entry) => ({
       signature: entry.signature,
       slot: entry.slot,
       blockTime: entry.blockTime,
@@ -1327,8 +1379,12 @@ async function liveActivity(fields: Readonly<Record<string, unknown>>, served: S
       fee: entry.fee,
       events: classifyVaultEntry(entry),
     })),
+    filtered: listed.length - kept.length - unreadable,
+    unread: unreadable,
     // A full page against `until` means more landed than one page holds: the
     // client reloads its head rather than stitching a hole it cannot see.
+    // Measured on what was LISTED, before any scoping: it is a fact about the
+    // address's stream, not about how much of it turned out to be this vault's.
     gap: typeof until === "string" && listed.length === limit,
   });
 }

@@ -128,8 +128,10 @@ export function LiveBody({
         activitySheet={sidebarFor("activity-sheet", true)}
         control={control}
         // The header shows this only away from the pension, where these very
-        // settlements are already on screen in full.
-        contributions={<HeaderContributions rows={data.rows} />}
+        // settlements are already on screen in full. From settlementRows, not
+        // the feed: a settlement read from a wallet's link is not in the
+        // vault's own page and is a contribution all the same.
+        contributions={<HeaderContributions rows={data.settlementRows} />}
         account={account}
         current={view}
       />
@@ -165,7 +167,7 @@ export function LiveBody({
             {panels ? null : (
               <>
                 <LiveSettlementStrip
-                  rows={data.rows}
+                  rows={data.settlementRows}
                   vault={data.vault}
                   now={now}
                   labelOf={labelOf}

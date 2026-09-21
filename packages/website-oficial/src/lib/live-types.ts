@@ -92,6 +92,36 @@ export interface LiveActivityJson {
   readonly gap: boolean;
 }
 
+/**
+ * ONE PAGE OF A WALLET'S LINK, which is a different stream and a different
+ * kind of claim.
+ *
+ * The vault PDA sees everything the vault does, so a page of it is a slice of
+ * the WHOLE history and "this page reached the beginning" licenses a window
+ * total. A wallet's TradingLink sees only that wallet — but every settlement
+ * touches exactly one link, and almost nothing else does, which is why the
+ * dashboard reads settlements here and the feed reads them from the vault.
+ *
+ * ITS CURSOR IS DELIBERATELY NOT CALLED `nextBefore`. The two facts are not
+ * interchangeable and must never arrive under one name; the route enforces it
+ * by leaving `nextBefore` out of this shape entirely.
+ */
+export interface LiveLinkActivityJson {
+  readonly scope: "link";
+  readonly vault: string;
+  readonly wallet: string;
+  /** The link PDA whose signatures were listed. */
+  readonly address: string;
+  readonly status: "exists" | "unreadable";
+  readonly nextBeforeLink: string | null;
+  readonly entries: readonly LiveEntryJson[];
+  /** Read, and the program tied it to another vault. Never counted as "nothing here". */
+  readonly filtered: number;
+  /** The RPC did not return the transaction: nothing is known about whose it was. */
+  readonly unread: number;
+  readonly gap: boolean;
+}
+
 export interface LiveSnapshotRequest {
   readonly owner: string;
   readonly wallets: readonly string[];
@@ -103,6 +133,14 @@ export interface LiveActivityRequest {
   readonly limit?: number;
   readonly before?: string;
   readonly until?: string;
+}
+
+export interface LiveLinkActivityRequest {
+  readonly owner: string;
+  /** The trading wallet whose link PDA is listed. Never the pension key. */
+  readonly wallet: string;
+  readonly limit?: number;
+  readonly before?: string;
 }
 
 // ── the view model: what the dashboard actually draws ────────────────────────
@@ -261,6 +299,16 @@ export interface LiveDashboard {
   readonly rentOnlyLamports: bigint | null;
   readonly wallets: readonly LiveWalletView[];
   readonly rows: readonly LiveRow[];
+  /**
+   * Every settlement the screen holds, newest first, from BOTH streams — the
+   * vault's page and the trading wallets' links.
+   *
+   * Not a subset of `rows`, and that is deliberate. `rows` is the vault's own
+   * contiguous page, which is what the feed's counts, day headings and "since"
+   * all describe; a settlement found on a wallet's link is not part of it. The
+   * strip shows settlements, so it reads this.
+   */
+  readonly settlementRows: readonly LiveRow[];
   /** Account-keeping transactions and dust transfers, counted rather than listed. */
   readonly hiddenUpkeep: number;
   readonly hiddenDust: number;

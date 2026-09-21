@@ -109,9 +109,15 @@ export function LiveStats({
         {STATS_COPY.heading}
       </h3>
       {/* Four-up on the CARD's width, not the viewport's: from md this panel shares its row. */}
+      {/*
+        An odd tile stretches rather than leaving a hole. The grid's own
+        background is the border colour showing through a 1px gap, so a cell
+        with nothing in it is not empty space — it is a grey rectangle the
+        shape of a tile, and it reads as a figure that failed to load.
+      */}
       <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border @xl:grid-cols-4">
-        {tiles.map((tile) => (
-          <div key={tile.label} className="min-w-0 space-y-1 bg-card p-4">
+        {tiles.map((tile, index) => (
+          <div key={tile.label} className={cn("min-w-0 space-y-1 bg-card p-4", index === tiles.length - 1 && tiles.length % 2 === 1 && "col-span-2 @xl:col-span-1", index === tiles.length - 1 && tiles.length % 4 === 1 && "@xl:col-span-4", index === tiles.length - 1 && tiles.length % 4 === 3 && "@xl:col-span-2")}>
             <dt className={LABEL}>{tile.label}</dt>
             <dd className="text-lg font-medium whitespace-nowrap">{tile.value}</dd>
             {tile.sub === "" ? null : <dd className="text-xs text-muted-foreground">{tile.sub}</dd>}

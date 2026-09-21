@@ -355,3 +355,40 @@ export function classifyVaultEntry(entry: ClassifiableEntry): VaultEvent[] {
   }
   return [{ kind: "upkeep" }];
 }
+
+/**
+ * ONE ENTRY, SCOPED TO ONE VAULT BY WHAT THE PROGRAM ITSELF WROTE — or null
+ * when nothing in it is this vault's.
+ *
+ * WHY THIS EXISTS. `settled` comes from the transaction's LOGS, which are
+ * scoped to the SIP program and to nothing else. A page listed for the VAULT
+ * PDA is safe without any of this, because the listing itself proved every
+ * transaction touched that vault. A page listed for a WALLET's link PDA has no
+ * such proof: a link is keyed by the wallet alone (seeds ["link", wallet]) and
+ * unlink_wallet closes it, so one wallet's stream can span two vaults' lives.
+ * Presenting another owner's Settled event as this owner's savings is the one
+ * lie this codebase must not tell.
+ *
+ * TWO PROOFS, BOTH THE PROGRAM'S OWN WORDS, neither inferred: Settled's first
+ * field IS the vault (events.rs emits `vault: vault_key`), and settle_v2,
+ * link_wallet and unlink_wallet each name `vault` among their accounts, which
+ * namedAccounts keys by IDL name.
+ *
+ * WHAT IS DELIBERATELY NOT USED. `vaultLamportsDelta !== null` tests nothing:
+ * it is null when the vault is absent from the keys AND when the balances were
+ * not read AND when the transaction was unreadable. And the vault merely
+ * APPEARING among the account keys proves nothing either — any transaction may
+ * name any account read-only.
+ *
+ * THE INSTRUCTION IS WHAT DECIDES, and a kept entry keeps only the settlements
+ * of the instructions that survived. eventOf emits a `settled` event ONLY from
+ * a settle_v2 call, shifting one event off the list per call, so an entry kept
+ * on its logs alone could never show them — and dropping its instructions while
+ * keeping its logs would push it into classifyVaultEntry's no-instruction
+ * branch and print `received_sol` over somebody else's settlement.
+ */
+export function scopeEntryToVault<T extends ClassifiableEntry>(entry: T, vault: string): T | null {
+  const instructions = entry.instructions.filter((call) => call.accounts.vault === vault);
+  if (instructions.length === 0) return null;
+  return { ...entry, instructions, settled: entry.settled.filter((event) => event.vault === vault) };
+}

@@ -41,7 +41,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { activityWasUnreadable, createLiveApi } from "@/lib/live-api";
 import { appendOlder, headCursor, mergeHead, newestSignature } from "@/lib/live-activity-store";
-import { backfillSettlements, backfillSpend, chainSaysSettled, forgetBackfillSpend, holdsSettlement, shouldBackfill } from "@/lib/live-backfill";
+import { backfillLinkSettlements, backfillSpend, chainSaysSettled, forgetBackfillSpend, holdsSettlement, settlementWallets, shouldBackfill } from "@/lib/live-backfill";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { toLiveDashboard } from "@/lib/live-model";
 import { MANUAL_FLOOR_MS, nextDelayMs, nextManualDelayMs, shouldRefreshOnShow } from "@/lib/live-schedule";
@@ -120,6 +120,18 @@ export function useLiveDashboard(input: {
 
   const [snapshot, setSnapshot] = useState<LiveSnapshotJson | null>(null);
   const [entries, setEntries] = useState<readonly LiveEntryJson[]>([]);
+  /**
+   * ROWS READ FROM THE TRADING WALLETS' LINKS, kept in their OWN list.
+   *
+   * They are never merged into `entries`, and that is the whole safety of this.
+   * Every window total on the screen rests on the vault page being a contiguous
+   * slice of one stream; a wallet's link is a slice of a different one. Poured
+   * into the same list they would move the oldest loaded settlement backwards
+   * while leaving holes above it, `covers()` would start claiming "Saved this
+   * week", and a link page carrying `gap` would make mergeHead throw the
+   * vault's whole loaded history away. The model takes the two apart.
+   */
+  const [linkEntries, setLinkEntries] = useState<readonly LiveEntryJson[]>([]);
   const [activityMeta, setActivityMeta] = useState<Pick<LiveActivityJson, "status" | "nextBefore"> | null>(null);
   const [failure, setFailure] = useState<{ readonly message: string; readonly retryAt: number | null; readonly since: number } | null>(null);
   const [failures, setFailures] = useState(0);
@@ -135,6 +147,8 @@ export function useLiveDashboard(input: {
   const request = useRef(0);
   const entriesRef = useRef<readonly LiveEntryJson[]>([]);
   entriesRef.current = entries;
+  const linkEntriesRef = useRef<readonly LiveEntryJson[]>([]);
+  linkEntriesRef.current = linkEntries;
   const snapshotRef = useRef<LiveSnapshotJson | null>(null);
   snapshotRef.current = snapshot;
   const activityMetaRef = useRef<Pick<LiveActivityJson, "status" | "nextBefore"> | null>(null);
@@ -158,6 +172,7 @@ export function useLiveDashboard(input: {
     request.current += 1;
     setSnapshot(null);
     setEntries([]);
+    setLinkEntries([]);
     setActivityMeta(null);
     setFailure(null);
     setFailures(0);
@@ -230,12 +245,16 @@ export function useLiveDashboard(input: {
             // gone with it and the round may be bought once more.
             if (page.body.gap) forgetBackfillSpend(pensionKey);
             const spend = backfillSpend(pensionKey);
+            // THE SETTLEMENT IS LOOKED FOR WHERE SETTLEMENTS ARE, which is each
+            // trading wallet's own link and not the vault. The round no longer
+            // touches the vault's cursor at all, so it cannot race "Load older"
+            // and no longer takes the tail from it.
+            const links = settlementWallets(answered.body);
             if (
-              cursor !== null &&
               shouldBackfill({
                 chainSettled: chainSaysSettled(answered.body),
-                loadedHasSettlement: holdsSettlement(loaded),
-                cursor,
+                loadedHasSettlement: holdsSettlement(loaded) || holdsSettlement(linkEntriesRef.current),
+                wallets: links.length,
                 manualBusy: olderBusyRef.current,
                 rounds: spend.rounds,
                 done: spend.done,
@@ -244,31 +263,24 @@ export function useLiveDashboard(input: {
               })
             ) {
               spend.rounds += 1;
-              // The tail is taken for the round's duration, so "Load older"
-              // cannot page from the same cursor at the same time. Only `busy`
-              // is touched: the rest of that control's state is the user's.
-              olderBusyRef.current = true;
-              setOlder((current) => ({ ...current, busy: true }));
-              const filled = await backfillSettlements({ cursor, fetchPage: (before) => api.activity({ owner: pensionKey, limit: ACTIVITY_PAGE, before }) });
-              olderBusyRef.current = false;
+              const filled = await backfillLinkSettlements({
+                wallets: links,
+                fetchPage: (wallet, before) =>
+                  api.linkActivity({ owner: pensionKey, wallet, limit: ACTIVITY_PAGE, ...(before === null ? {} : { before }) }),
+              });
               // A stale round touches nothing: the pension key that changed
-              // under it already reset `older` and everything else.
+              // under it already reset everything else.
               if (stale()) return true;
               // A round that came back cleanly is the answer, found or not.
               // Only one cut short by a failure is worth asking again, and not
               // before the bucket it emptied has refilled.
               spend.done = filled.failure === null && !filled.unreadable;
               spend.retryAt = filled.failure === null || filled.failure.retryAfterSeconds === null ? null : Date.now() + filled.failure.retryAfterSeconds * 1_000;
-              if (filled.entries.length > 0) setEntries((held) => appendOlder(held, filled.entries));
-              setActivityMeta((held) => (held === null ? held : { ...held, nextBefore: filled.cursor }));
-              // THE FAILURE OF A READ NOBODY ASKED FOR IS NOT THE BUTTON'S.
-              // Writing it into `older` put a red "too many reads, try again in
-              // 12 s" under the activity list for a page the user never
-              // requested — and the next round was then issued without ever
-              // consulting it. The tail is handed back and the cursor is told
-              // the truth; what went wrong is remembered in `spend.retryAt`,
-              // where the rule above reads it.
-              setOlder((current) => ({ ...current, busy: false, complete: filled.cursor === null }));
+              // INTO THE LINK LIST, NEVER INTO `entries`, and touching neither
+              // `activityMeta` nor `older`: these rows say nothing whatever
+              // about how much of the VAULT's history is loaded, and a failure
+              // of a read nobody asked for is not the Load older button's.
+              if (filled.entries.length > 0) setLinkEntries((held) => appendOlder(held, filled.entries));
             }
           }
         }
@@ -366,6 +378,7 @@ export function useLiveDashboard(input: {
     const data = toLiveDashboard({
       snapshot,
       activity: activityMeta === null ? null : { vault: snapshot.vault.address, status: activityMeta.status, nextBefore: activityMeta.nextBefore, entries, gap: false },
+      linkEntries,
       privyWallets: walletsKey === "" ? [] : walletsKey.split(","),
     });
     const stale =
@@ -377,7 +390,7 @@ export function useLiveDashboard(input: {
             since: failure.since,
           };
     return { kind: "ready", data, stale };
-  }, [pensionKey, snapshot, entries, activityMeta, failure, walletsKey]);
+  }, [pensionKey, snapshot, entries, linkEntries, activityMeta, failure, walletsKey]);
 
   return { view, refresh, loadOlder, older, activityUnreadable };
 }
