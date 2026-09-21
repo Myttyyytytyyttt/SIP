@@ -116,13 +116,22 @@ export interface OfferedLeg {
  *  * ANTHROPIC, 191: those same 179, plus TransferFeeAmount (4 + an 8-byte
  *    withheld amount).
  *
- * ANTHROPIC CHARGES 50 BPS TO TRANSFER. Its mint carries a live transfer-fee
- * extension — 0.5 % of every move, with maximum_fee at u64::MAX, so nothing caps
- * it — which lands on the amount RECEIVED, not the amount sent. A leg floor
- * priced from the pool alone does not see it; MAX_LEG_FEE_BPS in
- * bin/check-legs.mts is what keeps the fee from growing behind our backs, and it
- * is not hypothetical: read on 2026-09-20 (epoch 1038) the mint already carried a
- * SCHEDULED rise to 100 bps from epoch 1039, which is MAX_LEG_FEE_BPS itself.
+ * ANTHROPIC NOW CHARGES 100 BPS TO TRANSFER, AND THIS PARAGRAPH SAID 50 UNTIL
+ * IT WAS WRONG. Its mint carries a live transfer-fee extension — with
+ * maximum_fee at u64::MAX, so nothing caps it — which lands on the amount
+ * RECEIVED, not the amount sent. A leg floor priced from the pool alone does not
+ * see it.
+ *
+ * THE FEE'S HISTORY, AND WHY NO SENTENCE HERE IS THE SOURCE OF IT. The issuer
+ * writes this number whenever it likes, at an epoch boundary, and the mint is
+ * the only place it is true. Read on mainnet 2026-09-21: older{epoch 1032,
+ * 50 bps}, newer{epoch 1039, 100 bps}, and getEpochInfo answers 1039 — so the
+ * scheduled rise the previous version of this comment called "not hypothetical"
+ * HAS FIRED, and the 50 written here outlived its own measurement for a day.
+ * MAX_LEG_FEE_BPS is 100 and invest-decision.ts refuses on `fee.bps > MAX`, so
+ * ANTHROPIC is admitted today with EXACTLY ZERO MARGIN: one more issuer write
+ * refuses the whole basket and the SOL conversion with it, permanently, until
+ * the fee comes back down. Read the fee from the mint, never from this file.
  * SPYx has no transfer fee. ANTHROPIC's transfer_hook program id is null: a real
  * hook would need transfer_checked_with_transfer_hook, which the program does not
  * call.
