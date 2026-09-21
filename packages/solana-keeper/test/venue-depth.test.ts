@@ -10,7 +10,7 @@
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
-import { legDepthDecision, maxTurnImpactBps, type VenueAccount } from "../src/invest-decision.js";
+import { legDepthDecision, maxTurnImpactBps, USDC_MINT, type VenueAccount } from "../src/invest-decision.js";
 import {
   ammKeysOf,
   censusHops,
@@ -393,5 +393,113 @@ describe("the slippage warning, turned into a refusal", () => {
 
   it("says nothing when the builder raised no warning, which is every honest route", () => {
     expect(slippageRefusal(null, { targetMint: target, askedBps: 200n, feeBps: 100n })).toBeNull();
+  });
+});
+
+describe("the drained venue, replayed through the MEASURING half", () => {
+  /**
+   * THE CASE THE GATE EXISTS FOR, END TO END THIS TIME.
+   * invest-decision.test.ts replays it against legDepthDecision with hops
+   * written by hand; what is not covered anywhere else is the composition
+   * measureLegVenue actually performs — a quote as lite-api.jup.ag serves one,
+   * through censusHops, into the gate. A gate that judges correctly and a
+   * censusHops that hands it the wrong hop are the same bought basket.
+   *
+   * FIGUREAI (PreZad18…, nine decimals) on the Raydium CLMM pool
+   * HvpDt29EdGcKkFMLkUgvAJDP5oDFLaYG4jnVZnRsHduM:
+   *  * 2026-09-20, drained: 0.110274669 of the stock against 31.91 USDC, any
+   *    buy over about 11 dollars reverting, mid 289.36 USDC/token — two days
+   *    after check:legs passed the same leg at 6,700 dollars;
+   *  * 2026-09-21, refilled: the same vault (CfLC4dghcYotKZoo7ArRYixjbpRDnEuzxG6sZs5FLvzB)
+   *    read 1.986791366 off mainnet, and lite-api quoted 250 USDC through that
+   *    same pool at 1_368_494_910 raw out. Both numbers measured, an hour apart
+   *    from each other, on the machine this test runs on.
+   */
+  const FIGUREAI = new PublicKey("PreZad18qfPtbxNpMtMuAuX2zVpvkEU8DnJx56faCWd");
+  const DRAINED = 110_274_669n;
+
+  /** One account the census can count: a venue's own, writable, not the vault's. */
+  function venueAccount(mint: PublicKey, amount: bigint): VenueAccount {
+    const data = Buffer.alloc(165);
+    mint.toBuffer().copy(data, 0);
+    key().toBuffer().copy(data, 32);
+    data.writeBigUInt64LE(amount, 64);
+    return { address: key(), owner: TOKEN_2022_PROGRAM_ID, data };
+  }
+
+  /** The composition measureLegVenue performs once the network has answered. */
+  function verdict(input: { readonly take: bigint; readonly inventory: bigint; readonly spend: bigint }): ReturnType<typeof legDepthDecision> {
+    const held = venueAccount(FIGUREAI, input.inventory);
+    const { hops, censusScope } = censusHops({
+      quote: quoteOf([{ label: "Raydium CLMM", amm: "HvpDt29EdG", outputMint: FIGUREAI, outAmount: input.take }], {
+        inAmount: input.spend,
+        outAmount: input.take,
+      }),
+      inputMint: USDC_MINT,
+      targetMint: FIGUREAI,
+      candidates: [held],
+      writable: new Set([held.address.toBase58()]),
+      vaultOwned: new Set(),
+    });
+    return legDepthDecision({
+      inMint: USDC_MINT,
+      legs: [
+        {
+          mint: FIGUREAI,
+          spend: input.spend,
+          venueLabels: ["Raydium CLMM"],
+          hops,
+          censusScope,
+          // ARM 2 ABSTAINS, DELIBERATELY: a sixteenth-sized probe of a drained
+          // venue is exactly the size Jupiter re-routes, so ARM 1 must carry
+          // this alone. A case that let ARM 2 decide would not be this case.
+          impact: { compared: false, why: "the probe routed elsewhere" },
+        },
+      ],
+    });
+  }
+
+  it("REFUSES the drained venue at the product's DEFAULT 5 dollars — ARM 1, 7.4x cover", () => {
+    // $5 is UNDER the ~11 dollar revert threshold measured that night, so this
+    // venue would have FILLED and taken the money. 0.014936 taken against
+    // 0.110274669 held.
+    const decision = verdict({ take: 14_936_000n, inventory: DRAINED, spend: 5_000_000n });
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
+    expect(decision.detail).toContain("7.4x cover");
+    expect(decision.detail).toContain("Raydium CLMM");
+    expect(decision.detail).toContain(`holds ${DRAINED} raw`);
+  });
+
+  it("REFUSES it at the live policy's CAP even if the venue hands over EVERY unit it holds", () => {
+    // AT THE CAP THE QUOTE CANNOT BE TAKEN AT MID. A 1,000-dollar buy at the
+    // measured mid implies 3.45 tokens out of a venue holding 0.110274669, and
+    // no venue pays what it does not have — so the honest worst case for the
+    // GATE (the best for the venue) is a take of everything in it. 1.0x cover,
+    // fifty times under the bar, and the refusal still names both numbers.
+    const decision = verdict({ take: DRAINED, inventory: DRAINED, spend: 1_000_000_000n });
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
+    expect(decision.detail).toContain("1.0x cover");
+    expect(decision.detail).toContain(`it would need ${DRAINED * 50n}`);
+  });
+
+  it("REFUSES the SAME pool a day later at a real 250-dollar quote, refilled — 1.5x cover", () => {
+    // THE TWO ENDS, BOTH MEASURED: the vault's own balance off mainnet and
+    // Jupiter's own out-amount for 250 USDC through that pool, same hour. A
+    // refilled venue is not a deep one, and nothing in a registry says which
+    // it is today.
+    const decision = verdict({ take: 1_368_494_910n, inventory: 1_986_791_366n, spend: 250_000_000n });
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
+    expect(decision.detail).toContain("1.5x cover");
+  });
+
+  it("trades against that pool at the DEFAULT size once it is deep enough, which is what keeps the gate honest", () => {
+    // A gate that refused this too would be a gate that refuses everything.
+    // The same pool, the same real 5-dollar quote (27_434_493 raw out,
+    // lite-api 2026-09-21), against inventory of 50x that take exactly.
+    expect(verdict({ take: 27_434_493n, inventory: 27_434_493n * 50n, spend: 5_000_000n })).toEqual({ deep: true });
+    expect(verdict({ take: 27_434_493n, inventory: 27_434_493n * 50n - 1n, spend: 5_000_000n }).deep).toBe(false);
   });
 });
