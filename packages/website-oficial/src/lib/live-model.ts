@@ -373,6 +373,14 @@ const isoOf = (blockTime: number | null): string | null => (blockTime === null ?
 
 interface Visible {
   readonly rows: LiveRow[];
+  /**
+   * The events the feed leaves out, as rows — not merely counted.
+   *
+   * They were DISCARDED before, so "12 account upkeep transactions hidden" was
+   * a claim nobody could check against Solscan, and a page where every
+   * transaction was upkeep drew "No activity yet" over fifteen real ones.
+   */
+  readonly hidden: LiveRow[];
   readonly hiddenUpkeep: number;
   readonly hiddenDust: number;
 }
@@ -391,30 +399,34 @@ function rowsIn(entries: readonly LiveEntryJson[], keep: (event: VaultEventJson)
 
 function rowsOf(activity: LiveActivityJson | null): Visible {
   const rows: LiveRow[] = [];
+  const hidden: LiveRow[] = [];
   let hiddenUpkeep = 0;
   let hiddenDust = 0;
   for (const entry of activity?.entries ?? []) {
     for (const event of entry.events) {
-      if (event.kind === "upkeep") {
-        hiddenUpkeep += 1;
-        continue;
-      }
-      // A rent top-up is not something anyone saved; it is counted, not listed.
-      if (event.kind === "received_sol" && BigInt(event.lamports) < DUST_LAMPORTS) {
-        hiddenDust += 1;
-        continue;
-      }
-      rows.push({
+      const row: LiveRow = {
         signature: entry.signature,
         at: isoOf(entry.blockTime),
         blockTime: entry.blockTime,
         ok: entry.ok,
         explorerUrl: solscanTx(entry.signature),
         event,
-      });
+      };
+      if (event.kind === "upkeep") {
+        hiddenUpkeep += 1;
+        hidden.push(row);
+        continue;
+      }
+      // A rent top-up is not something anyone saved; it is counted, not listed.
+      if (event.kind === "received_sol" && BigInt(event.lamports) < DUST_LAMPORTS) {
+        hiddenDust += 1;
+        hidden.push(row);
+        continue;
+      }
+      rows.push(row);
     }
   }
-  return { rows, hiddenUpkeep, hiddenDust };
+  return { rows, hidden, hiddenUpkeep, hiddenDust };
 }
 
 type SettledEventJson = Extract<VaultEventJson, { kind: "settled" }>;
@@ -689,6 +701,7 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
     rentOnlyLamports: holdings.rentOnly,
     wallets: wallets.rows,
     rows: visible.rows,
+    hiddenRows: visible.hidden,
     settlementRows,
     hiddenUpkeep: visible.hiddenUpkeep,
     hiddenDust: visible.hiddenDust,

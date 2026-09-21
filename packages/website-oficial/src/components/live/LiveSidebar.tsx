@@ -23,7 +23,7 @@
 
 import { Settings } from "lucide-react";
 
-import { FeedFooter, HiddenCounts, LiveActivityFeed } from "@/components/live/LiveActivityFeed";
+import { FeedFooter, LiveActivityFeed } from "@/components/live/LiveActivityFeed";
 import { CopyButton } from "@/components/copy-button";
 import { Num } from "@/components/num";
 import { Badge } from "@/components/ui/badge";
@@ -137,6 +137,8 @@ export function LiveSidebar({
   onOpenWallets,
   onRetryActivity,
   activityUnreadable,
+  activityRetryAt = null,
+  nowMs,
   emptyNote,
   className,
 }: {
@@ -156,11 +158,20 @@ export function LiveSidebar({
    * and the honest branch below was dead code for every real failure.
    */
   readonly activityUnreadable: boolean;
+  /** When the server said the history may be asked for again. */
+  readonly activityRetryAt?: number | null;
+  /** The BROWSER's clock, for the retry countdown only. */
+  readonly nowMs?: number;
   readonly emptyNote?: string;
   readonly className?: string;
 }) {
   const usdcRawPerSol = rawFrom(data.prices?.usdcRawPerSol);
-  const settlements = data.rows.filter((row) => row.event.kind === "settled").length;
+  // FROM settlementRows, NOT the feed. A settlement read from a wallet's link
+  // is deliberately not in the vault's page, and a footer reading "0
+  // settlements" under a strip showing one is the screen disagreeing with
+  // itself. `transactions` stays the feed's own count; the disclosure below it
+  // counts what the feed leaves out.
+  const settlements = data.settlementRows.length;
   const anchor = anchorOf(data.wallets);
 
   const manage = (
@@ -213,20 +224,26 @@ export function LiveSidebar({
           labelOf={labelOf}
           maxContribution={data.vault.maxContribution}
           id={id}
+          hiddenRows={data.hiddenRows}
+          hiddenUpkeep={data.hiddenUpkeep}
+          hiddenDust={data.hiddenDust}
           unreadable={activityUnreadable}
+          retryAt={activityRetryAt}
+          {...(nowMs === undefined ? {} : { nowMs })}
           {...(onRetryActivity === undefined ? {} : { onRetry: onRetryActivity })}
           {...(emptyNote === undefined ? {} : { emptyNote })}
         />
       </ScrollArea>
 
-      <div className="space-y-1 border-t px-4 py-2.5">
+      {/* The hidden count is no longer a footnote down here: it is the label of
+          the control that opens those very rows, inside the feed. */}
+      <div className="border-t px-4 py-2.5">
         <div className="flex items-center justify-between gap-2">
           <FeedFooter transactions={data.rows.length} settlements={settlements} />
           <a href="/activity" className="rounded-sm text-xs text-muted-foreground underline-offset-4 outline-none hover:text-foreground hover:underline focus-visible:ring-3 focus-visible:ring-ring/50">
             {ACTIVITY_COPY.seeAll}
           </a>
         </div>
-        <HiddenCounts upkeep={data.hiddenUpkeep} dust={data.hiddenDust} />
       </div>
     </div>
   );

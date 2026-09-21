@@ -69,3 +69,35 @@ export const liveFailureWords = (failure: ApiFailure): string => vaultFailureWor
  * feed is allowed to say next.
  */
 export const activityWasUnreadable = (page: ApiResult<LiveActivityJson | LiveLinkActivityJson>): boolean => !page.ok || page.body.status === "unreadable";
+
+/**
+ * WHAT A HISTORY READ THAT FAILED LEAVES BEHIND.
+ *
+ * A boolean said only THAT it failed. The route had already said WHEN this
+ * browser may ask again — build-handler answers retryAfterSeconds beside a
+ * retry-after header — and the hook dropped it on the floor, so the feed waited
+ * out the whole sweep for a bucket that refills at a token a second, and
+ * offered a Retry button that could say nothing about when it would work.
+ */
+export interface LiveActivityTrouble {
+  /** The server's own retry-after, as an instant. Null: it named no time. */
+  readonly retryAt: number | null;
+  /** Early re-reads already spent on this trouble. */
+  readonly attempts: number;
+}
+
+/**
+ * The trouble a page leaves, or null when it was READ — however empty it was.
+ *
+ * A 200 the route marked "unreadable" carries no retry-after: upstream failed,
+ * nothing was refused, and inventing a delay the server did not give would be
+ * a number this screen cannot source.
+ */
+export const activityTroubleFrom = (
+  page: ApiResult<LiveActivityJson | LiveLinkActivityJson>,
+  input: { readonly attempts: number; readonly now: number },
+): LiveActivityTrouble | null => {
+  if (!activityWasUnreadable(page)) return null;
+  const seconds = page.ok ? null : page.retryAfterSeconds;
+  return { retryAt: seconds === null ? null : input.now + seconds * 1_000, attempts: input.attempts };
+};

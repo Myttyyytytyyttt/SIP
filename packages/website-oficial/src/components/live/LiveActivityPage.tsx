@@ -21,7 +21,7 @@
 
 import { useState, type ReactNode } from "react";
 
-import { FeedFooter, HiddenCounts, LiveActivityFeed } from "@/components/live/LiveActivityFeed";
+import { FeedFooter, LiveActivityFeed } from "@/components/live/LiveActivityFeed";
 import { secondsUntil } from "@/components/live/LiveStates";
 import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
@@ -59,6 +59,7 @@ export function LiveActivityPage({
   onLoadOlder,
   onRetryActivity,
   activityUnreadable,
+  activityRetryAt = null,
   nextStep,
   emptyNote,
   className,
@@ -78,6 +79,8 @@ export function LiveActivityPage({
    * and the honest branch in the feed was dead code for every real failure.
    */
   readonly activityUnreadable: boolean;
+  /** When the server said the history may be asked for again. */
+  readonly activityRetryAt?: number | null;
   /** The one thing to do next. Shown INSTEAD of the summary before a vault exists. */
   readonly nextStep: ReactNode;
   readonly emptyNote?: string;
@@ -88,7 +91,9 @@ export function LiveActivityPage({
 
   const oldest = data.rows.at(-1);
   const since = oldest?.at ?? null;
-  const settlements = data.rows.filter((row) => row.event.kind === "settled").length;
+  // From settlementRows, not the feed: a settlement found on a wallet's link
+  // is not in the vault's page, and the footer must not contradict the strip.
+  const settlements = data.settlementRows.length;
   const retryIn = secondsUntil(older.retryAt, nowMs);
 
   const frame = (children: ReactNode) => <div className={cn("flex min-w-0 flex-1 flex-col gap-4 p-4 lg:gap-6 lg:p-6", className)}>{children}</div>;
@@ -148,7 +153,12 @@ export function LiveActivityPage({
               labelOf={labelOf}
               maxContribution={data.vault.maxContribution}
               id="activity-page"
+              hiddenRows={data.hiddenRows}
+              hiddenUpkeep={data.hiddenUpkeep}
+              hiddenDust={data.hiddenDust}
               unreadable={activityUnreadable}
+              retryAt={activityRetryAt}
+              nowMs={nowMs}
               {...(onRetryActivity === undefined ? {} : { onRetry: onRetryActivity })}
               emptyNote={filter === "all" ? emptyNote : ACTIVITY_COPY.noneInFilter}
             />
@@ -170,7 +180,6 @@ export function LiveActivityPage({
               {older.message}
             </p>
           )}
-          <HiddenCounts upkeep={data.hiddenUpkeep} dust={data.hiddenDust} />
         </CardContent>
       </Card>
     </>,

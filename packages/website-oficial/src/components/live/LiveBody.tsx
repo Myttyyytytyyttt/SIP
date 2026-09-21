@@ -55,6 +55,7 @@ export function LiveBody({
   onLoadOlder,
   nowMs,
   activityUnreadable,
+  activityRetryAt = null,
 }: {
   readonly view: "pension" | "activity";
   readonly data: LiveDashboard;
@@ -69,6 +70,8 @@ export function LiveBody({
   readonly nowMs: number;
   /** The history could not be read. REQUIRED, because forgetting it drew an empty feed over a pension with settlements. */
   readonly activityUnreadable: boolean;
+  /** When the server said the history may be asked for again; the retry counts down to it. */
+  readonly activityRetryAt?: number | null;
 }) {
   const openWallets = useWalletsOpener();
   const onOpenWallets = (): void => openWallets?.();
@@ -105,6 +108,8 @@ export function LiveBody({
       onOpenWallets={onOpenWallets}
       onRetryActivity={onRefresh}
       activityUnreadable={activityUnreadable}
+      activityRetryAt={activityRetryAt}
+      nowMs={nowMs}
       {...(emptyNote === undefined ? {} : { emptyNote })}
       className={inSheet ? "min-h-0 flex-1" : "sticky top-14 h-[calc(100dvh-3.5rem)]"}
     />
@@ -149,6 +154,7 @@ export function LiveBody({
             onLoadOlder={onLoadOlder}
             onRetryActivity={onRefresh}
             activityUnreadable={activityUnreadable}
+            activityRetryAt={activityRetryAt}
             nextStep={nextStep}
             {...(emptyNote === undefined ? {} : { emptyNote })}
           />

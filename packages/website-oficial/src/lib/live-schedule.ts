@@ -96,3 +96,41 @@ export function nextManualDelayMs(input: Pick<ScheduleInput, "lastReadAt" | "now
 /** Whether a tab that just became visible should read at once: its numbers are a sweep old. */
 export const shouldRefreshOnShow = (lastReadAt: number | null, now: number): boolean =>
   lastReadAt === null || now - lastReadAt >= POLL_BASE_MS;
+
+/** Early re-reads the HISTORY may buy between one page that WAS read and the next. */
+export const ACTIVITY_RETRIES = 1;
+
+export interface ActivityRetryInput {
+  /** When the server said this browser may ask for the history again. */
+  readonly retryAt: number | null;
+  /** Early re-reads already spent since the last page that was read. */
+  readonly attempts: number;
+  readonly now: number;
+}
+
+/**
+ * HOW LONG UNTIL A READ REFUSED ONLY ITS HISTORY IS WORTH REPEATING EARLY, or
+ * null for "do not: the ordinary poll gets there first".
+ *
+ * The route says WHEN this browser may ask again (a 429's retry-after, often a
+ * second or two on a bucket that refills at one token a second) and the hook
+ * used to throw it away. So the sidebar said "Activity could not be read just
+ * now" for the rest of the minute over a problem that had cleared, and the
+ * Retry button offered no idea when it would help.
+ *
+ * NULL PAST THE SWEEP, because two schedules for one read is one too many, and
+ * the poll is already coming. NULL PAST ACTIVITY_RETRIES, because a refusal
+ * that keeps repeating is a bucket that needs the whole minute, not a faster
+ * question.
+ *
+ * NOTHING HERE BACKS THE PAGE OFF. The snapshot's own leg succeeded — every
+ * figure on the screen is current — and counting this as a dashboard failure
+ * would put all of them on BACKOFF_MS's two-to-five minute clock for a column
+ * of rows.
+ */
+export function nextActivityRetryMs(input: ActivityRetryInput): number | null {
+  if (input.retryAt === null || input.attempts >= ACTIVITY_RETRIES) return null;
+  const wait = input.retryAt - input.now;
+  if (wait >= POLL_BASE_MS) return null;
+  return Math.max(0, wait);
+}

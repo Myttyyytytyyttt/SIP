@@ -309,6 +309,12 @@ export interface LiveDashboard {
    * strip shows settlements, so it reads this.
    */
   readonly settlementRows: readonly LiveRow[];
+  /**
+   * The rows the feed leaves out, newest first: the keeper's own account-keeping
+   * and sub-dust transfers. Counted in `hiddenUpkeep`/`hiddenDust` AND kept, so
+   * the count can be opened and checked rather than merely asserted.
+   */
+  readonly hiddenRows: readonly LiveRow[];
   /** Account-keeping transactions and dust transfers, counted rather than listed. */
   readonly hiddenUpkeep: number;
   readonly hiddenDust: number;

@@ -21,6 +21,15 @@
  * activity yet" beside a Settlements tile reading 3, which is a false statement
  * about somebody's pension held until the next sweep.
  *
+ * AND IT LEAVES ITS RETRY-AFTER WITH IT. The route says WHEN this browser may
+ * ask again, often a second or two on a bucket that refills at a token a
+ * second; collapsing the answer to a boolean threw that away, so the sidebar
+ * said "could not be read" for the rest of the minute over a problem that had
+ * already cleared. The next read is brought forward to the moment the server
+ * named — once, and never earlier than the manual floor — and NOTHING is backed
+ * off, because the snapshot's own leg succeeded and every figure on the screen
+ * is current.
+ *
  * A LATE ANSWER FOR AN OLDER REQUEST IS DROPPED (a request counter, as
  * useVaultState does), and changing pension key resets everything — nothing read
  * for the previous key stays on screen for the next one.
@@ -39,12 +48,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { activityWasUnreadable, createLiveApi } from "@/lib/live-api";
+import { activityTroubleFrom, createLiveApi, type LiveActivityTrouble } from "@/lib/live-api";
 import { appendOlder, headCursor, mergeHead, newestSignature } from "@/lib/live-activity-store";
 import { backfillLinkSettlements, backfillSpend, chainSaysSettled, forgetBackfillSpend, holdsSettlement, settlementWallets, shouldBackfill } from "@/lib/live-backfill";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { toLiveDashboard } from "@/lib/live-model";
-import { MANUAL_FLOOR_MS, nextDelayMs, nextManualDelayMs, shouldRefreshOnShow } from "@/lib/live-schedule";
+import { MANUAL_FLOOR_MS, nextActivityRetryMs, nextDelayMs, nextManualDelayMs, shouldRefreshOnShow } from "@/lib/live-schedule";
 import type { LiveActivityJson, LiveDashboard, LiveEntryJson, LiveSnapshotJson } from "@/lib/live-types";
 import { vaultFailureWords, type ApiFailure } from "@/lib/vault-api";
 
@@ -84,6 +93,8 @@ export interface LiveDashboardStore {
   readonly older: LiveOlder;
   /** The last history read failed, or the route could not read it: the feed says so instead of "none yet". */
   readonly activityUnreadable: boolean;
+  /** When the server said the history may be asked for again; null when it named no time. */
+  readonly activityRetryAt: number | null;
 }
 
 const wordsFor = (failure: ApiFailure): string =>
@@ -137,7 +148,15 @@ export function useLiveDashboard(input: {
   const [failures, setFailures] = useState(0);
   const [lastReadAt, setLastReadAt] = useState<number | null>(null);
   const [older, setOlder] = useState<LiveOlder>({ busy: false, retryAt: null, message: null, complete: false });
-  const [activityUnreadable, setActivityUnreadable] = useState(false);
+  /**
+   * The last history read's trouble, or null when it was read.
+   *
+   * A BOOLEAN THREW AWAY THE ONE USEFUL THING IN IT. The route answers a 429
+   * with retry-after — often a second or two — and the hook collapsed the whole
+   * answer to "unreadable", so the sidebar waited out the full sweep and the
+   * Retry button had nothing to say about when it would help.
+   */
+  const [activityTrouble, setActivityTrouble] = useState<LiveActivityTrouble | null>(null);
   // State, not only the ref below: the poll must re-arm when a read FINISHES,
   // and a ref changing does not re-run the effect that would do it.
   const [reading, setReading] = useState(false);
@@ -178,11 +197,12 @@ export function useLiveDashboard(input: {
     setFailures(0);
     setLastReadAt(null);
     setOlder({ busy: false, retryAt: null, message: null, complete: false });
-    setActivityUnreadable(false);
+    setActivityTrouble(null);
   }, [pensionKey]);
 
   const read = useCallback(
-    async (discover: boolean): Promise<boolean> => {
+    /** `early` marks the extra read a 429's retry-after bought, so it is counted. */
+    async (discover: boolean, early = false): Promise<boolean> => {
       // FALSE means no read happened. The poll re-arms on this answer, and a
       // call that turned back at the guard must not re-arm as though one had
       // just finished — that is the 0 ms loop.
@@ -218,7 +238,10 @@ export function useLiveDashboard(input: {
           // CARRIED, NOT DROPPED. A page that failed, or one the route marked
           // unreadable, leaves the rows already on screen alone and tells the
           // feed it could not read — never "No activity yet".
-          setActivityUnreadable(activityWasUnreadable(page));
+          // CARRIED WITH ITS RETRY-AFTER, not collapsed to a flag. `attempts`
+          // counts only the early re-reads this trouble has already bought, so
+          // one refusal buys one faster question and no more.
+          setActivityTrouble((held) => activityTroubleFrom(page, { attempts: early ? (held?.attempts ?? 0) + 1 : 0, now: Date.now() }));
           if (page.ok && page.body.status === "exists") {
             // A POLL DOES NOT REDEFINE WHERE THE HISTORY ENDS. It asked only for
             // what is new, and its "nothing more to page" is about that window.
@@ -311,16 +334,26 @@ export function useLiveDashboard(input: {
     if (delay === null) return undefined;
     const retryAt = failure?.retryAt ?? null;
     const wait = retryAt === null ? delay : Math.max(delay, retryAt - Date.now());
+
+    // ONE LEG WAS REFUSED AND SAID WHEN TO COME BACK. The snapshot succeeded —
+    // every figure on the screen is current — so nothing is backed off; the
+    // next ordinary read is simply brought forward to the moment the server
+    // named, and only once. Never earlier than the manual floor, because a
+    // retry-after of zero would otherwise spend a page's tokens immediately.
+    const early = nextActivityRetryMs({ retryAt: activityTrouble?.retryAt ?? null, attempts: activityTrouble?.attempts ?? 0, now: Date.now() });
+    const soon = early === null ? null : Math.max(early, MANUAL_FLOOR_MS);
+    const when = soon === null ? Math.max(0, wait) : Math.min(Math.max(0, wait), soon);
+
     const timer = window.setTimeout(() => {
       // Only a read that actually RAN re-arms the poll. A call that turned back
       // at the in-flight guard re-arms nothing: the read already running will,
       // when it finishes and `reading` falls.
-      void read(false).then((ran) => {
+      void read(false, soon !== null && when === soon).then((ran) => {
         if (ran) setTick((count) => count + 1);
       });
-    }, Math.max(0, wait));
+    }, when);
     return () => window.clearTimeout(timer);
-  }, [pensionKey, failures, lastReadAt, failure, tick, read, reading]);
+  }, [pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading]);
 
   // Coming back to a tab whose numbers are a sweep old reads once, at once.
   useEffect(() => {
@@ -392,5 +425,5 @@ export function useLiveDashboard(input: {
     return { kind: "ready", data, stale };
   }, [pensionKey, snapshot, entries, linkEntries, activityMeta, failure, walletsKey]);
 
-  return { view, refresh, loadOlder, older, activityUnreadable };
+  return { view, refresh, loadOlder, older, activityUnreadable: activityTrouble !== null, activityRetryAt: activityTrouble?.retryAt ?? null };
 }

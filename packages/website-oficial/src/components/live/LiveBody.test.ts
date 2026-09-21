@@ -25,7 +25,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ACTIVITY_COPY, LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
 
-import { NOW_MS, OWNER, liveDashboard, liveSnapshot } from "../../../test/fixtures/live-dashboard";
+import { NOW_MS, OWNER, liveActivity, liveDashboard, liveEntry, liveSnapshot, seconds, signature } from "../../../test/fixtures/live-dashboard";
 
 const older = { busy: false, retryAt: null, message: null, complete: false };
 
@@ -96,6 +96,56 @@ describe("an activity read that failed", () => {
     const html = render({ data, activityUnreadable: true });
     expect(html).toContain(STATS_COPY.settlements);
     expect(html).not.toContain(ACTIVITY_COPY.empty);
+  });
+});
+
+/**
+ * A PAGE WHOSE EVERY TRANSACTION WAS KEEPER UPKEEP is the ordinary case on
+ * this vault — twelve of fifteen on 2026-09-19 — and the feed printed "No
+ * activity yet" over all fifteen while the footnote underneath counted them.
+ * They were not hidden, they were discarded: nothing could open the count.
+ */
+describe("a page the feed has nothing to list from", () => {
+  const allUpkeep = (): LiveDashboard => {
+    const upkeep = { kind: "upkeep" } as unknown as LiveDashboard["rows"][number]["event"];
+    const entries = Array.from({ length: 15 }, (_, index) => liveEntry(signature(index + 1), seconds(NOW_MS - (index + 1) * 600_000), [upkeep]));
+    return liveDashboard({ activity: liveActivity(entries, { nextBefore: signature(40) }) });
+  };
+
+  it("keeps the rows instead of discarding them", () => {
+    const data = allUpkeep();
+    expect(data.rows).toHaveLength(0);
+    expect(data.hiddenRows).toHaveLength(15);
+    expect(data.hiddenUpkeep).toBe(15);
+  });
+
+  it("no longer claims there is no history over fifteen transactions it is holding", () => {
+    const html = render({ data: allUpkeep(), activityUnreadable: false });
+    expect(html).not.toContain(ACTIVITY_COPY.empty);
+    expect(html).toContain(ACTIVITY_COPY.onlyHidden);
+  });
+
+  it("offers to show them, and says so to a screen reader", () => {
+    const html = render({ data: allUpkeep(), activityUnreadable: false });
+    expect(html).toContain(ACTIVITY_COPY.hiddenUpkeep("15"));
+    expect(html).toContain(ACTIVITY_COPY.showHidden);
+    expect(html).toContain('aria-expanded="false"');
+  });
+
+  /**
+   * The aside, the header's sheet and /activity each mount a feed, so a
+   * constant panel id would point every control at the first one's rows.
+   * (The sheet's own copy is not in this markup: Radix mounts it on open.)
+   */
+  it("gives the disclosure a panel id of its FEED's, not a shared one", () => {
+    expect(render({ data: allUpkeep(), activityUnreadable: false })).toContain('id="activity-aside-hidden"');
+    expect(render({ view: "activity", data: allUpkeep(), activityUnreadable: false })).toContain('id="activity-page-hidden"');
+  });
+
+  /** The stage's own sentence is about something else, and still wins. */
+  it("still says there is no vault when there is none", () => {
+    const html = render({ view: "activity", data: noVault(), activityUnreadable: false });
+    expect(html).not.toContain(ACTIVITY_COPY.onlyHidden);
   });
 });
 

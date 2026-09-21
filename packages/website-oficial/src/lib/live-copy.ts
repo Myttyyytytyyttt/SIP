@@ -290,6 +290,14 @@ export const ACTIVITY_COPY = {
   hiddenUpkeep: (count: string): string => `${count} account upkeep transactions hidden`,
   hiddenDust: (count: string): string => `${count} dust transfers hidden`,
   unreadableNow: "Activity could not be read just now",
+  // The keeper paying the vault's own account costs. Twelve of these in a
+  // fifteen-signature page is ordinary, and calling them all "Vault
+  // transaction" made twelve identical rows out of one fact.
+  upkeepTitle: "Account upkeep",
+  upkeepSub: "the keeper paying the account's own costs — nothing saved or invested",
+  showHidden: "Show them",
+  hideHidden: "Hide them",
+  onlyHidden: "Nothing to list yet. Every transaction the loaded history holds is account upkeep.",
   /** A day heading over rows bucketed by UTC day: "Today · UTC", "Sep 5 · UTC". */
   dayHeading: (day: string): string => `${day} · UTC`,
   footer: (transactions: string, settlements: string): string => `${transactions} transactions · ${settlements} settlements`,

@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { BACKOFF_MS, MANUAL_FLOOR_MS, POLL_BASE_MS, nextDelayMs, nextManualDelayMs, shouldRefreshOnShow } from "@/lib/live-schedule";
+import { BACKOFF_MS, MANUAL_FLOOR_MS, POLL_BASE_MS, nextDelayMs, nextManualDelayMs, shouldRefreshOnShow, ACTIVITY_RETRIES, nextActivityRetryMs } from "@/lib/live-schedule";
 
 const NOW = 1_789_500_000_000;
 const base = { failures: 0, retryAfterSeconds: null, visible: true, lastReadAt: NOW, now: NOW, reading: false } as const;
@@ -118,5 +118,38 @@ describe("a refresh someone asked for", () => {
 
   it("a retry-after still wins: clicking Refresh does not get past a 429", () => {
     expect(nextManualDelayMs({ lastReadAt: NOW, now: NOW + MANUAL_FLOOR_MS, retryAfterSeconds: 45 })).toBe(45_000);
+  });
+});
+
+/**
+ * A READ REFUSED ONLY ITS HISTORY. The snapshot answered, so every figure on
+ * the screen is current and NOTHING may be backed off — but the route said
+ * when this browser may ask for the page again, and waiting out the whole
+ * sweep for a bucket that refills at a token a second is how "Activity could
+ * not be read just now" came to sit over a problem that had already cleared.
+ */
+describe("when a refused history is worth asking for again early", () => {
+  const now = 1_000_000;
+
+  it("comes back at the moment the server named", () => {
+    expect(nextActivityRetryMs({ retryAt: now + 2_000, attempts: 0, now })).toBe(2_000);
+  });
+
+  it("does nothing when the server named no time: there is nothing to obey", () => {
+    expect(nextActivityRetryMs({ retryAt: null, attempts: 0, now })).toBeNull();
+  });
+
+  it("does nothing past the sweep: the ordinary poll gets there first, and two timers is one too many", () => {
+    expect(nextActivityRetryMs({ retryAt: now + POLL_BASE_MS, attempts: 0, now })).toBeNull();
+    expect(nextActivityRetryMs({ retryAt: now + POLL_BASE_MS - 1, attempts: 0, now })).toBe(POLL_BASE_MS - 1);
+  });
+
+  it("buys ONE early read and no more: a refusal that repeats needs the whole minute, not a faster question", () => {
+    expect(ACTIVITY_RETRIES).toBe(1);
+    expect(nextActivityRetryMs({ retryAt: now + 2_000, attempts: ACTIVITY_RETRIES, now })).toBeNull();
+  });
+
+  it("never asks for a time already past", () => {
+    expect(nextActivityRetryMs({ retryAt: now - 5_000, attempts: 0, now })).toBe(0);
   });
 });
