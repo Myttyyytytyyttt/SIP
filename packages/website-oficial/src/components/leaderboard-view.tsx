@@ -9,7 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { dayLabel, timeAgo } from "@/lib/format";
-import { formatSol, type LeaderboardData, type LeaderboardEntry, type LeaderboardResult, type RangeName } from "@/lib/leaderboard";
+import { formatSol, type LeaderboardEntry, type LeaderboardResult, type RangeName } from "@/lib/leaderboard";
 import { cn } from "@/lib/utils";
 
 const solscanAccountUrl = (address: string): string => `https://solscan.io/account/${address}`;
@@ -161,21 +161,6 @@ function BoardTable({
   );
 }
 
-/** The scoring rule in a sentence, built from the constants the service applied. */
-function ruleLine(data: LeaderboardData): string {
-  const { ahorro, volumen } = data.rules;
-  return (
-    // THE BOARD BELOW IS THE COMBINED ONE, so the sentence has to be too: a
-    // day counts when a settlement charged OR when the window it settled
-    // traded, and the old wording named only the first.
-    `${ahorro.participation} points for every day a pension was charged or its trading measured — the same whether it ` +
-    `saved a thousandth of a SOL or fifty — plus up to ${ahorro.sizeCap + volumen.sizeCap} more for that day's size on ` +
-    `a log scale (${ahorro.sizeCap} of it for saving, ${volumen.sizeCap} for volume), and +${ahorro.streakPerDay} for ` +
-    `each consecutive day up to +${ahorro.streakCap}. Showing up beats showing up with more money. One pension is one ` +
-    `competitor, however many trading wallets feed it.`
-  );
-}
-
 /** When the rankings cannot be read. It says so, and says why — never an empty table. */
 function Unavailable({ detail }: { readonly detail: string }) {
   return (
@@ -269,12 +254,11 @@ export function LeaderboardView({
       />
 
       {/*
-        THE RULE, in one line, where the panel used to be — and as ONE string.
-        Written as flowing JSX with {expressions} in it, the compiler drops the
-        space next to a value when the line happens to break there: the page
-        read "up to 45more". A template literal cannot break that way.
+        NO RULE ON THE PAGE, by the owner's decision: a board that prints its
+        own formula invites somebody to farm it. What the score is made of is
+        still there for anyone who wants to check a number — the points column
+        carries its own breakdown — but the thresholds are not the headline.
       */}
-      <p className="max-w-prose text-xs text-muted-foreground">{ruleLine(data)}</p>
     </div>
   );
 }

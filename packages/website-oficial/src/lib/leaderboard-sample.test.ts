@@ -27,12 +27,25 @@ const REAL = [
 describe("the sample's addresses", () => {
   it("are placeholders that say so, not base58 borrowed from somewhere", () => {
     expect(ROWS.length).toBe(10);
-    for (const row of ROWS) expect(row.subject.startsWith("Samp1e"), row.subject).toBe(true);
+    for (const row of ROWS) expect(row.subject.endsWith("Samp1e"), row.subject).toBe(true);
+  });
+
+  it("are distinguishable where the table truncates them, which is both ends", () => {
+    // Ten rows that all read "Samp…1111" are one row shown ten times, in the
+    // one place whose job is to show what ten different rows look like.
+    const shown = ROWS.map((row) => `${row.subject.slice(0, 4)}…${row.subject.slice(-4)}`);
+    expect(new Set(shown).size).toBe(ROWS.length);
   });
 
   it("are none of this project's real accounts", () => {
     const subjects = new Set(ROWS.map((row) => row.subject));
     for (const address of REAL) expect(subjects.has(address), `${address} is real`).toBe(false);
+  });
+
+  it("cannot encode a key at all, because base58 has no zero", () => {
+    // Impossible rather than unlikely: a string containing a character the
+    // alphabet lacks is not a mis-typed address, it is not an address.
+    for (const row of ROWS) expect(/[0OIl]/.test(row.subject), row.subject).toBe(true);
   });
 
   it("cannot be confused for a key by length", () => {
