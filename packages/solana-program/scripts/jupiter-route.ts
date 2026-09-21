@@ -116,6 +116,33 @@
 // ceils. A venue that quotes NET is unaffected — FIGUREAI still filled at
 // 100/100 — which is exactly why this cannot be configured per leg: the basis
 // belongs to whichever AMM Jupiter picks for that quote, not to the mint.
+//
+// (7) AND THE THING THIS FILE CAN SEE BUT MUST NOT REFUSE.
+// (6) is a fact about two numbers the builder already holds: the slippage the
+// quote was taken at, and the destination mint's transfer fee. Their
+// difference IS the usable tolerance on a gross-quoting venue, and at zero or
+// below such a venue cannot fill at all.
+//
+// WHAT THE BUILDER CANNOT KNOW IS WHETHER THIS ROUTE IS ONE OF THOSE. The
+// quoting basis belongs to whichever AMM makes the final transfer, Jupiter
+// re-picks it per quote, and the instruction does not say which it chose —
+// measured on 2026-09-20, the SAME mint at the SAME size answered gross
+// through Manifest and net through Meteora DLMM, and FIGUREAI filled happily
+// at 100 bps against a 100 bps fee because its route ended somewhere that
+// quotes net. Refusing on the two numbers would therefore refuse routes that
+// land, and this file has no third number to break the tie with.
+//
+// SO IT IS A WARNING WITH A NAME, NOT A REFUSAL. route.warnings carries
+// `slippage-not-above-transfer-fee` with both rates and the tolerance left
+// over, machine-readable, so the caller can re-quote wider, pin a net-quoting
+// venue, or spend the transaction knowingly — a decision that needs more than
+// this file has. WHAT IT KNOWS: the two rates and their difference. WHAT IT
+// DOES NOT: which venue will fill, and so whether the difference bites.
+//
+// AND THE TWO NUMBERS TO HAND invest() BOTH HAVE NAMES NOW: investAmountIn()
+// for amount_in and investMinOut() for min_out, each re-derived at the moment
+// it becomes an argument, so RouteOutput's fields stay numbers to READ rather
+// than a menu to pick a min_out out of.
 
 import { createHash } from "node:crypto";
 // AccountMeta IS A TYPE (see raydium-swap.ts for the full story): a
@@ -169,12 +196,25 @@ const FIXED_PREFIX_ACCOUNTS = 13;
  * sharedAccountsRoute's data ends with a FIXED 19-byte tail:
  *   in_amount(u64) quoted_out_amount(u64) slippage_bps(u16) platform_fee_bps(u8)
  *
- * READ BACKWARD, ALWAYS. Forward parsing would have to walk the route plan,
- * whose Swap enum is variable-width and whose variants change whenever Jupiter
- * integrates an AMM — a layout we would be re-pinning forever. The tail is
- * position-independent, and it is the only part of the data that carries money.
+ * READ BACKWARD, STILL. The tail is position-independent, and it is the only
+ * part of the data that carries money. Decoding the route plan in front of it
+ * would mean a width table for a Swap enum whose variants change whenever
+ * Jupiter integrates an AMM — a layout we would be re-pinning forever.
+ *
+ * BUT `data.length` ALONE MUST NOT DECIDE WHERE IT STARTS. See
+ * decodeRouteAmounts: the plan is WALKED, without being decoded, so that a
+ * trailing byte cannot slide all four numbers at once.
  */
 const DATA_TAIL_LEN = 19;
+
+/** disc(8) + id(u8): where the route_plan vec's u32 length sits. */
+const DATA_PLAN_COUNT_OFFSET = 9;
+/** disc(8) + id(u8) + route_plan len(u32): where the plan's first step starts. */
+const DATA_PLAN_START = 13;
+/** percent(u8) input_index(u8) output_index(u8) close every RoutePlanStep. */
+const ROUTE_PLAN_STEP_TRAILER_LEN = 3;
+/** A Swap variant is at least its own one-byte discriminant. */
+const SWAP_MIN_LEN = 1;
 
 export type RefusalCondition =
   | "request-drift"
@@ -183,6 +223,7 @@ export type RefusalCondition =
   | "discriminator"
   | "account-count"
   | "data-length"
+  | "route-plan"
   | "user-transfer-authority"
   | "source-account"
   | "destination-account"
@@ -210,6 +251,67 @@ export class JupiterRouteRefusal extends Error {
     this.condition = condition;
     this.reason = message;
   }
+}
+
+/**
+ * A condition the builder CAN SEE but MUST NOT DECIDE — so it is attached to
+ * the route instead of thrown.
+ *
+ * `slippage-not-above-transfer-fee`: the quote's slippage is at or below the
+ * destination mint's transfer fee, which leaves zero or negative usable
+ * tolerance ON A GROSS-QUOTING VENUE. Measured across the 1038 -> 1039
+ * boundary: at equality Jupiter reverts the CPI with 0x1771 (6001) before
+ * invest()'s guards run, one raw unit short, because Jupiter floors its
+ * deduction and Token-2022 ceils its fee. A NET-quoting venue is unaffected,
+ * and which one will fill is not knowable at build time — see section (7) of
+ * the header for why this is not a refusal.
+ */
+export type RouteWarningCondition = "slippage-not-above-transfer-fee";
+
+/**
+ * A named, machine-readable signal on the route. BRANCH ON `condition` AND ON
+ * THE NUMBERS; `message` is for the log line, and parsing it back out would be
+ * the same mistake as parsing a refusal's message.
+ */
+export interface RouteWarning {
+  readonly condition: RouteWarningCondition;
+  readonly slippageBps: number;
+  readonly transferFeeBps: number;
+  /** slippage_bps - fee_bps: what is left for price movement on a gross-quoting venue. */
+  readonly usableToleranceBps: number;
+  readonly message: string;
+}
+
+/** The warning of that condition this route carries, or null. */
+export function routeWarning(route: JupiterRoute, condition: RouteWarningCondition): RouteWarning | null {
+  return route.warnings.find((warning) => warning.condition === condition) ?? null;
+}
+
+/**
+ * The warnings a route of this shape carries. Pure, and exported, so a caller
+ * holding a request and a fee can ask the question before it spends a quote on
+ * it — the harness does exactly that before it starts a run.
+ */
+export function routeWarningsFor(request: RouteRequest, transferFee: TransferFeeRate): RouteWarning[] {
+  const warnings: RouteWarning[] = [];
+  const usableToleranceBps = request.slippageBps - transferFee.basisPoints;
+  if (transferFee.basisPoints > 0 && usableToleranceBps <= 0) {
+    warnings.push({
+      condition: "slippage-not-above-transfer-fee",
+      slippageBps: request.slippageBps,
+      transferFeeBps: transferFee.basisPoints,
+      usableToleranceBps,
+      message:
+        `quoted at ${request.slippageBps} bps of slippage against a ${transferFee.basisPoints} bps transfer fee, ` +
+        `leaving ${usableToleranceBps} bps of usable tolerance. On a venue that quotes GROSS, Jupiter derives its ` +
+        "threshold from the gross quote and enforces it against the CREDITED (net) amount, so the fee is spent out " +
+        "of the tolerance and the swap reverts inside the CPI with Jupiter's own 0x1771 (6001) before invest()'s " +
+        "guards run — at equality by a single raw unit, because Jupiter floors its deduction and Token-2022 ceils " +
+        "its fee. A venue that quotes NET is unaffected, and which one this route will fill on belongs to the AMM " +
+        "Jupiter picks, which is not knowable here — so this is a warning and not a refusal",
+    });
+  }
+  return warnings;
 }
 
 // A FUNCTION DECLARATION, deliberately: TypeScript only treats a call as
@@ -244,7 +346,12 @@ export interface DestinationTransferFee {
    * which is why `worstCase` exists and why min_out should be taken from it.
    */
   readonly pending: TransferFeeRate | null;
-  /** max(current, pending) — the rate a min_out must survive. */
+  /**
+   * The schedule a min_out must survive, from worstCaseTransferFee with no
+   * gross to compare at — so an UPPER ENVELOPE of the two when neither is
+   * worse everywhere, not necessarily either one of them. Read that function
+   * before using this field for anything but a min_out.
+   */
   readonly worstCase: TransferFeeRate;
 }
 
@@ -284,6 +391,47 @@ export function netOfTransferFee(gross: bigint, fee: TransferFeeRate): bigint {
 }
 
 /**
+ * Which of two fee schedules a min_out has to survive.
+ *
+ * THE RATE ALONE DOES NOT DECIDE IT, AND THAT IS THE CORRECTION. This used to
+ * be `pending.basisPoints > current.basisPoints ? pending : current`, which is
+ * the worst case only while the cap never binds. Token-2022 caps the
+ * withholding at maximumFee, so a LOWER rate with a HIGHER cap withholds more
+ * on everything past the crossing point: on a gross of 10,000,000, 50 bps
+ * uncapped withholds 50,000 where 100 bps capped at 1,000 withholds 1,000.
+ * Picking 100 there understates the fee by 49,000 raw units.
+ *
+ * WITH A `gross`, IT IS EXACT — the COMPUTED fee for each schedule is
+ * compared, which is the only comparison that answers the question at that
+ * amount.
+ *
+ * WITHOUT ONE, IT IS AN ENVELOPE AND SAYS SO. readDestinationTransferFee runs
+ * before any quote exists, so it has no gross. When one schedule is worse at
+ * every gross — its rate AND its cap at least as large — that schedule is
+ * returned. When neither dominates, the crossing point is a number this
+ * function was not given, so it returns the pair's upper envelope: the higher
+ * rate with the higher cap, which withholds at least as much as either one
+ * everywhere. That is not a schedule the mint carries, and the conservatism
+ * runs in the safe direction: a larger fee makes min_out SMALLER, and a
+ * min_out that is too small costs the vault nothing, while one that is too
+ * large reverts a transaction that was already signed.
+ *
+ * TODAY'S MINTS ARE THE EASY CASE. Both PreStocks schedules set maximumFee to
+ * u64::MAX, so the caps tie, the higher rate dominates, and this returns
+ * exactly what the old line did.
+ */
+export function worstCaseTransferFee(a: TransferFeeRate, b: TransferFeeRate, gross?: bigint): TransferFeeRate {
+  if (gross !== undefined) return transferFeeOn(gross, b) > transferFeeOn(gross, a) ? b : a;
+  if (a.basisPoints >= b.basisPoints && a.maximumFee >= b.maximumFee) return a;
+  if (b.basisPoints >= a.basisPoints && b.maximumFee >= a.maximumFee) return b;
+  return {
+    epoch: a.epoch >= b.epoch ? a.epoch : b.epoch,
+    basisPoints: a.basisPoints >= b.basisPoints ? a.basisPoints : b.basisPoints,
+    maximumFee: a.maximumFee >= b.maximumFee ? a.maximumFee : b.maximumFee,
+  };
+}
+
+/**
  * Reads the destination mint's transfer-fee config from the chain.
  *
  * A mint with no TransferFeeConfig extension (SPYx) reports zero, so callers
@@ -312,7 +460,7 @@ export async function readDestinationTransferFee(
   const newer = rate(config.newerTransferFee);
   const current = transferFeeForEpoch({ olderTransferFee: older, newerTransferFee: newer }, BigInt(epoch));
   const pending = newer.epoch > BigInt(epoch) ? newer : null;
-  const worstCase = pending !== null && pending.basisPoints > current.basisPoints ? pending : current;
+  const worstCase = pending === null ? current : worstCaseTransferFee(current, pending);
   return { mint: mint.toBase58(), epoch, current, pending, worstCase };
 }
 
@@ -487,11 +635,120 @@ export interface RouteAmounts {
   readonly platformFeeBps: number;
 }
 
-export function decodeRouteAmounts(data: Buffer): RouteAmounts {
-  if (data.length < 8 + DATA_TAIL_LEN) {
-    refuse("data-length", `instruction data is ${data.length} bytes, too short to carry the amount tail`);
+/**
+ * Does a plan of `steps` RoutePlanSteps fit the bytes from `planStart` and end
+ * EXACTLY at `planEnd`?
+ *
+ * WHAT IT WALKS, AND WHAT IT REFUSES TO PRETEND TO KNOW. Each step is
+ * `swap: Swap, percent: u8, input_index: u8, output_index: u8`. The three
+ * trailing bytes are fixed width; the Swap in front of them is not, and a
+ * width table for its variants is the thing this file has always refused to
+ * re-pin. So the walk does not decode a single swap. It asks a weaker question
+ * that is still enough to anchor the tail: is there ANY reading of this region
+ * as `steps` steps whose three trailing bytes could each be a real trailer?
+ *
+ *   percent is a split share, 1..=100 — Jupiter's encoder writes neither 0 nor
+ *   more than 100.
+ *   input_index and output_index address the route's own accounts, so both sit
+ *   below the instruction's account count whenever the caller supplies it.
+ *
+ * MEASURED, on the captured mainnet SPYx build (36 B, one step `28 64 00 01`):
+ * the plan ends at byte 17 and that is the only reading. Append one, two,
+ * three or four bytes to that same instruction and every reading of the
+ * shifted region needs a percent of 0, an input_index of 64, an input_index of
+ * 120, or a percent of 125 — all impossible — so the shift is refused instead
+ * of being read as a wider Swap.
+ *
+ * WHAT IT DOES NOT PROVE. A shift whose displaced bytes happen to look like a
+ * trailer still reads, and this says nothing about the swap bytes it stepped
+ * over. It is an anchor, not a decoder: it stops `data.length` from being the
+ * only thing that decides where the money is read.
+ */
+function routePlanEndsExactlyAt(
+  data: Buffer,
+  steps: number,
+  planStart: number,
+  planEnd: number,
+  accountCount: number | undefined,
+): boolean {
+  const trailerAt = (at: number): boolean => {
+    const percent = data.readUInt8(at);
+    if (percent < 1 || percent > 100) return false;
+    if (accountCount === undefined) return true;
+    return data.readUInt8(at + 1) < accountCount && data.readUInt8(at + 2) < accountCount;
+  };
+  // Every byte offset the plan could have reached after `step` steps. The walk
+  // is breadth-first rather than greedy on purpose: the earliest byte that
+  // looks like a trailer is not necessarily the real one, and a greedy walk
+  // that took it would refuse an honest route whose swap payload happens to
+  // contain one.
+  let reachable = new Set<number>([planStart]);
+  for (let step = 0; step < steps; step += 1) {
+    const next = new Set<number>();
+    for (const start of reachable) {
+      for (let swap = SWAP_MIN_LEN; start + swap + ROUTE_PLAN_STEP_TRAILER_LEN <= planEnd; swap += 1) {
+        if (trailerAt(start + swap)) next.add(start + swap + ROUTE_PLAN_STEP_TRAILER_LEN);
+      }
+    }
+    if (next.size === 0) return false;
+    reachable = next;
+  }
+  return reachable.has(planEnd);
+}
+
+/**
+ * The money, read out of the instruction's own bytes — ANCHORED AT BOTH ENDS.
+ *
+ * WHAT `data.length` USED TO BE, AND WHY THAT WAS NOT ENOUGH. It was a lower
+ * bound and nothing else: `tail = data.length - DATA_TAIL_LEN`, with no
+ * statement at all about what sat in front of it. One trailing byte moves all
+ * four numbers together — in_amount, quoted_out_amount, slippage_bps,
+ * platform_fee_bps — and those four are exactly what the request-drift and
+ * venue-threshold checks compare against. A shifted read can therefore AGREE
+ * WITH ITSELF, because the same wrong offset feeds both sides of every
+ * comparison built on it. That is the one failure mode the rest of this file
+ * is constructed to prevent, so it cannot be left to a subtraction.
+ *
+ * SO THE FRONT IS WALKED TOO: discriminator(8), id(u8), the route_plan vec's
+ * u32 length, and then the plan itself — see routePlanEndsExactlyAt, which
+ * walks it without decoding it. The tail is read only when the plan ends
+ * exactly where the tail begins.
+ *
+ * `accountCount` is the instruction's own account count, which bounds each
+ * step's two indices. Optional because the arithmetic here is a unit test with
+ * no account list; every caller inside this file passes it, and it is what
+ * makes a two-byte shift refusable rather than merely unlikely.
+ */
+export function decodeRouteAmounts(data: Buffer, accountCount?: number): RouteAmounts {
+  if (data.length < DATA_PLAN_START + DATA_TAIL_LEN) {
+    refuse(
+      "data-length",
+      `instruction data is ${data.length} bytes, too short to carry the ${DATA_PLAN_START}-byte route-plan header ` +
+        `and the ${DATA_TAIL_LEN}-byte amount tail`,
+    );
   }
   const tail = data.length - DATA_TAIL_LEN;
+  const planLen = tail - DATA_PLAN_START;
+  const steps = data.readUInt32LE(DATA_PLAN_COUNT_OFFSET);
+  if (steps === 0) {
+    refuse("route-plan", "the route plan says it has no steps, so nothing in the data anchors the amount tail");
+  }
+  const smallest = steps * (SWAP_MIN_LEN + ROUTE_PLAN_STEP_TRAILER_LEN);
+  if (smallest > planLen) {
+    refuse(
+      "route-plan",
+      `the route plan says ${steps} step(s), needing at least ${smallest} bytes, but only ${planLen} sit between ` +
+        `the header and the amount tail at byte ${tail}`,
+    );
+  }
+  if (!routePlanEndsExactlyAt(data, steps, DATA_PLAN_START, tail, accountCount)) {
+    refuse(
+      "route-plan",
+      `the route plan's ${steps} step(s) cannot end at byte ${tail}, where the ${DATA_TAIL_LEN}-byte amount tail is ` +
+        `read from; these ${data.length} bytes are not the layout we decode, and every amount below would be read ` +
+        "at an offset the data does not agree with",
+    );
+  }
   return {
     inAmount: data.readBigUInt64LE(tail),
     quotedOutAmount: data.readBigUInt64LE(tail + 8),
@@ -531,16 +788,40 @@ export function ownerFloorFor(amountIn: bigint, minOutRateWad: bigint): bigint {
 }
 
 export interface RouteOutput {
-  /** Jupiter's outAmount, verbatim. GROSS: before the mint's transfer fee. */
+  /**
+   * Jupiter's outAmount, verbatim.
+   *
+   * GROSS ONLY ON A GROSS-QUOTING VENUE, WHICH THIS FILE CANNOT TELL. Measured
+   * on 2026-09-20: ANTHROPIC ending on Manifest was credited a whole transfer
+   * fee BELOW this number, while the same mint at the same size ending on
+   * Meteora DLMM was credited it to the raw unit. The basis belongs to the AMM
+   * that makes the final transfer and Jupiter re-picks it per quote, so the
+   * word that used to sit here without a condition was true of the case that
+   * had been measured and false of the one beside it.
+   *
+   * ON EITHER BASIS THIS IS NOT A min_out: it is the one candidate measured
+   * reverting with FillTooSmall 6020. investMinOut() returns the one to pass.
+   */
   readonly quotedOut: bigint;
-  /** Jupiter's otherAmountThreshold, verbatim. Also GROSS. */
+  /**
+   * Jupiter's otherAmountThreshold, verbatim — the venue's own floor, stated
+   * on the same basis as `quotedOut` above, and therefore on the same unknown.
+   */
   readonly venueThreshold: bigint;
   /**
    * The rate used for the two net numbers below, applied ONCE — which the
    * route's own shape has to earn; see the unmodelled-fee-path refusal.
    */
   readonly transferFee: TransferFeeRate;
-  /** What the vault's delta reads if the venue fills exactly the quote. */
+  /**
+   * `quotedOut` net of that fee.
+   *
+   * WHAT THE VAULT'S DELTA READS ON A GROSS-QUOTING VENUE, if the venue fills
+   * exactly the quote. On a NET-quoting one the identical fill credits
+   * `quotedOut` itself and this number is a whole fee low — measured both ways
+   * on 2026-09-20. It is here to be read and compared against a fill, never to
+   * be passed as min_out.
+   */
   readonly netOfQuotedOut: bigint;
   /**
    * What the vault's delta reads in the venue's OWN worst case, under the
@@ -760,6 +1041,12 @@ export interface JupiterRoute {
   readonly hops: number;
   readonly labels: readonly string[];
   /**
+   * CONDITIONS THIS BUILDER CAN SEE AND CANNOT DECIDE, empty when there are
+   * none. Read them with routeWarning(); see RouteWarningCondition, and
+   * section (7) of the header for why a warning here is not a refusal.
+   */
+  readonly warnings: readonly RouteWarning[];
+  /**
    * THE ROUTE'S OWN SIZE, MEASURED: the exact wire bytes of a legacy
    * transaction carrying this one instruction and one signature.
    *
@@ -868,6 +1155,58 @@ export function investAmountIn(route: JupiterRoute): bigint {
     );
   }
   return route.request.amountIn;
+}
+
+/**
+ * The min_out to hand invest() — RECOMPUTED here, not read off a field.
+ *
+ * WHY A SIBLING OF investAmountIn(). RouteOutput holds four numbers and a
+ * caller has to pick one; the first it meets is `quotedOut`, which carries the
+ * most reassuring name and is the ONE candidate measured reverting with
+ * FillTooSmall 6020 on a gross-quoting venue. Every wrong pick fails closed —
+ * the transaction reverts and the vault keeps its principal — but "it fails
+ * closed" is not an answer to "which number do I pass", and the first caller
+ * to ask was a colleague, not an attacker.
+ *
+ * WHAT THE RE-CHECK IS FOR, and it is the same one investAmountIn does: under
+ * a route from verifySharedAccountsRoute the derivation below already ran and
+ * agreed. This fires for a JupiterRoute assembled some other way, at the last
+ * point before the bytes and the number are signed together — the venue floor
+ * is recomputed from the INSTRUCTION's own tail rather than trusted from
+ * `output`, and the fee is applied to it once more.
+ *
+ * WHY THIS NUMBER. netOfVenueThreshold is below the credit under BOTH quoting
+ * bases by our own arithmetic, so it never depends on Jupiter's internal check
+ * staying what it is today. See section (4) of the header.
+ */
+export function investMinOut(route: JupiterRoute): bigint {
+  const threshold = venueThresholdFrom(route.amounts);
+  if (threshold !== route.output.venueThreshold) {
+    refuse(
+      "venue-threshold",
+      `the instruction's own bytes give a venue floor of ${threshold}, but the route reports ` +
+        `${route.output.venueThreshold}; min_out is derived from that floor and the two do not agree`,
+    );
+  }
+  const minOut = netOfTransferFee(threshold, route.output.transferFee);
+  if (minOut !== route.output.netOfVenueThreshold) {
+    refuse(
+      "venue-threshold",
+      `the venue floor ${threshold} net of ${route.output.transferFee.basisPoints} bps is ${minOut}, but the route ` +
+        `reports ${route.output.netOfVenueThreshold} as its net threshold`,
+    );
+  }
+  if (minOut <= 0n) {
+    refuse("venue-threshold", `the route's net threshold is ${minOut}, and invest() requires min_out > 0`);
+  }
+  if (route.output.ownerFloor !== null && minOut < route.output.ownerFloor) {
+    refuse(
+      "below-owner-floor",
+      `this min_out would be ${minOut}, under the owner's own floor of ${route.output.ownerFloor}; invest() would ` +
+        "refuse it with FloorTooLow after the transaction was spent",
+    );
+  }
+  return minOut;
 }
 
 export interface VerifyContext {
@@ -992,8 +1331,12 @@ export function verifySharedAccountsRoute(
   }
   const destination = keys[SLOT_DESTINATION_TOKEN_ACCOUNT];
   if (destination === undefined || destination.pubkey !== context.vaultTarget.toBase58()) {
-    // A fill that lands anywhere else measures zero and reverts FillTooSmall
-    // after the money has already left — the delta is taken around the CPI.
+    // A fill that lands anywhere else measures zero in the account invest()
+    // watches — the delta is taken around the CPI — so it reverts FillTooSmall.
+    // AND THE REVERT TAKES THE SWAP WITH IT: Solana rolls the whole
+    // transaction back, so what the vault loses is the attempt and the fee
+    // paid for it, not the principal. That is still a signed transaction that
+    // cannot land, which is why it is refused here instead of on chain.
     refuse(
       "destination-account",
       `slot ${SLOT_DESTINATION_TOKEN_ACCOUNT} delivers to ${destination?.pubkey ?? "absent"}, not the measured vault_target ${context.vaultTarget.toBase58()}`,
@@ -1010,7 +1353,11 @@ export function verifySharedAccountsRoute(
   // transfer. When it is JUPITER'S OWN account, the output lands there first
   // and is forwarded to us, which on a fee-bearing mint is TWO transfers and
   // TWO fees — and then a min_out modelling one fee sits ABOVE the credit, so
-  // invest() reverts with FillTooSmall after the money has already left.
+  // invest() reverts with FillTooSmall. THE REVERT UNDOES THE SWAP WITH IT:
+  // Solana rolls the whole transaction back, so the vault loses the attempt
+  // and the fee paid for it, not the principal. It is refused here anyway,
+  // because a transaction that was signed and cannot land is the cost this
+  // file exists to avoid.
   //
   // NEVER OBSERVED, AND THEREFORE NEVER MEASURED. Every fee-bearing build seen
   // so far puts the vault target in slot 5: FIGUREAI and ANTHROPIC on
@@ -1051,7 +1398,8 @@ export function verifySharedAccountsRoute(
     );
   }
 
-  const amounts = decodeRouteAmounts(data);
+  // The account count bounds each step's two indices; see decodeRouteAmounts.
+  const amounts = decodeRouteAmounts(data, keys.length);
   if (
     amounts.inAmount !== BigInt(quote.inAmount) ||
     amounts.quotedOutAmount !== BigInt(quote.outAmount) ||
@@ -1174,6 +1522,10 @@ export function verifySharedAccountsRoute(
     amounts,
     hops,
     labels: quote.routePlan.map((step) => step.swapInfo.label ?? "?"),
+    // SEEN HERE, DECIDED ELSEWHERE. Section (7) of the header: the tolerance
+    // left over after the transfer fee only bites on a gross-quoting venue,
+    // and which venue fills is not in anything this function was handed.
+    warnings: routeWarningsFor(context.request, context.transferFee),
     legacyBytes,
   };
 
