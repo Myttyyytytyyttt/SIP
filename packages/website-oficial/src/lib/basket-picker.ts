@@ -33,7 +33,7 @@ import {
   MAX_PICKED_LEGS,
   isOfferable,
   offerProblems,
-  routeCensusRaw,
+  routeCensusReading,
   type CatalogueAsset,
   type RuleFailure,
 } from "@sip/solana-core/client";
@@ -148,6 +148,14 @@ export interface LegCensus {
   readonly censusRaw: bigint | null;
   readonly venue: string | null;
   readonly readOn: string | null;
+  /**
+   * TRUE WHEN THAT FIGURE WAS WORKED BACK FROM ANOTHER MEASUREMENT rather than
+   * counted (product.ts DepthReading.derived). It changes no arithmetic and one
+   * sentence: the card must not tell the owner a number was counted when the
+   * catalogue's own entry says it was not, because "counted" is the word the
+   * uncounted branch of this same copy turns on.
+   */
+  readonly derived: boolean;
 }
 
 /** The window of caps this basket can be signed at, and which leg closed each end. */
@@ -170,13 +178,19 @@ export interface BasketLimits {
 }
 
 const censusOf = (leg: PickedLeg): LegCensus => {
-  const raw = routeCensusRaw(leg.asset);
+  // ONE READING, NOT A FIELD AT A TIME. routeCensusReading answers the whole
+  // census — its number, its venue, its day and whether it was derived — so the
+  // venue can no longer come from one measurement while the figure comes from
+  // another, which is what reading `routeCensus?.venue ?? depth?.venue` could
+  // do on an asset whose census is its depth.
+  const reading = routeCensusReading(leg.asset);
   return {
     symbol: leg.asset.symbol,
     weightBps: leg.weightBps,
-    censusRaw: raw,
-    venue: leg.asset.routeCensus?.venue ?? (raw === null ? null : (leg.asset.depth?.venue ?? null)),
-    readOn: leg.asset.routeCensus?.readOn ?? (raw === null ? null : (leg.asset.depth?.readOn ?? null)),
+    censusRaw: reading?.usdcRaw ?? null,
+    venue: reading?.venue ?? null,
+    readOn: reading?.readOn ?? null,
+    derived: reading?.derived === true,
   };
 };
 

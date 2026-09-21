@@ -10,7 +10,7 @@ import {
   COMPUTE_BUDGET_PROGRAM,
   ED25519_PROGRAM,
   INSTRUCTIONS_SYSVAR,
-  RAYDIUM_CLMM,
+  JUPITER_V6,
   SPYX_MINT,
   SYSTEM_PROGRAM,
   TOKEN_2022_PROGRAM,
@@ -389,7 +389,7 @@ describe("set_invest_policy", () => {
     const decoded = decodeBuilt(built);
     const expected = anchorCoder.encode("set_invest_policy", {
       legs: legs.map((leg) => ({ mint: new PublicKey(leg.mint), weight_bps: leg.weightBps, min_out_rate_wad: new BN(leg.minOutRateWad.toString()) })),
-      venue_program: new PublicKey(RAYDIUM_CLMM),
+      venue_program: new PublicKey(JUPITER_V6),
       in_mint: new PublicKey(USDC_MINT),
       min_convert_rate_wad: new BN(99),
       min_investment: new BN(1_000_000),
@@ -400,7 +400,10 @@ describe("set_invest_policy", () => {
     expect(toHex(decoded.data)).toBe(toHex(expected));
     expect(toHex(decoded.data.subarray(0, 8))).toBe("3dbdfb587f676d1c");
     const venueAt = 8 + 4 + 50 * legs.length;
-    expect(base58Encode(decoded.data.subarray(venueAt, venueAt + 32))).toBe(RAYDIUM_CLMM);
+    // THE VENUE BYTE THE KEEPER WILL ACCEPT. Raydium here is a policy that
+    // never buys: invest-decision.ts routes Jupiter alone and refuses Raydium
+    // by name before the wrap, on every sweep.
+    expect(base58Encode(decoded.data.subarray(venueAt, venueAt + 32))).toBe(JUPITER_V6);
     expect(base58Encode(decoded.data.subarray(venueAt + 32, venueAt + 64))).toBe(USDC_MINT);
     expect(built.policy).toBe(pda(text.encode("invest"), new PublicKey(built.vault).toBytes()));
     expectIdlShape("set_invest_policy", built);

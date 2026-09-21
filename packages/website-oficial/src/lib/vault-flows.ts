@@ -53,7 +53,7 @@ import {
   DEFAULT_VAULT_POLICY,
   LEG_FLOOR_MARGIN_BPS,
   OFFERED_LEGS,
-  RAYDIUM_CLMM,
+  JUPITER_V6,
   SIP_PROGRAM_ID,
   TOKEN_PROGRAM,
   USDC_MINT,
@@ -424,10 +424,22 @@ export async function setPolicyFlow(deps: PensionFlowDeps, input: SetPolicyInput
  * too. The alternative — offering a name whose bytes cannot be checked — would
  * mean signing a CPI target on the server's word alone.
  */
-export const VERIFIABLE_VENUES: ReadonlyMap<string, string> = new Map([["raydium-clmm", RAYDIUM_CLMM]]);
+export const VERIFIABLE_VENUES: ReadonlyMap<string, string> = new Map([["jupiter-v6", JUPITER_V6]]);
 
-/** The name of the venue built when none is chosen, matching the route's DEFAULT_VENUE. */
-export const DEFAULT_VENUE_NAME = "raydium-clmm";
+/**
+ * The name of the venue built when none is chosen, matching the route's
+ * DEFAULT_VENUE.
+ *
+ * IT WAS "raydium-clmm", AND THAT MADE EVERY POLICY THIS PANEL COULD SIGN A
+ * DEAD ONE. The keeper on this branch routes Jupiter and nothing else
+ * (invest-decision.ts ROUTABLE_VENUES) and refuses Raydium by name before the
+ * wrap, all-or-nothing and forever, so a policy naming it never buys, at any
+ * balance, while the rent that signed it stays spent. The depth window, the
+ * per-leg floor and the picker were all arithmetic over a venue the keeper
+ * would refuse outright — the whole gate was moot and the form said nothing
+ * about it.
+ */
+export const DEFAULT_VENUE_NAME = "jupiter-v6";
 
 export interface InvestPolicyInput {
   readonly pensionKey: string;

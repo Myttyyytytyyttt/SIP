@@ -39,7 +39,7 @@ import {
   ATA_PROGRAM,
   COMPUTE_BUDGET_PROGRAM,
   ED25519_PROGRAM,
-  RAYDIUM_CLMM,
+  JUPITER_V6,
   SYSTEM_PROGRAM,
   TOKEN_2022_PROGRAM,
   TOKEN_PROGRAM,
@@ -548,7 +548,7 @@ export function buildSetInvestPolicy(input: SetInvestPolicyInput): BuiltTransact
   const owner = key(input.owner, "owner");
   const rules = {
     legs: input.legs,
-    venueProgram: input.venueProgram ?? RAYDIUM_CLMM,
+    venueProgram: input.venueProgram ?? JUPITER_V6,
     inMint: input.inMint ?? USDC_MINT,
     minConvertRateWad: input.minConvertRateWad,
     minInvestment: input.minInvestment,

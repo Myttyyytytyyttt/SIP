@@ -158,3 +158,39 @@ export const ALL_OR_NOTHING = Object.freeze({
   stopsSolConversion: true,
   keeperTypes: Object.freeze(["DepthDecision", "LegAdmission"]),
 });
+
+/**
+ * THE VENUE PROGRAM A POLICY MUST NAME, AND THE ONE IT MUST NOT.
+ *
+ * This is the entry whose absence cost the most. The keeper moved the basket to
+ * Jupiter — ROUTABLE_VENUES holds Jupiter v6 alone and venueDecision REFUSES
+ * anything else before the wrap, all-or-nothing and for the life of the policy
+ * — while the website's closed venue set still held raydium-clmm alone, so
+ * every policy the picker could build named a program the keeper had already
+ * retired. Both sides were internally consistent, both sides had tests, both
+ * sides were green, and 100 % of the baskets the owner could sign bought
+ * nothing at any balance while the rent that signed them stayed spent.
+ *
+ * TWO PACKAGES AGREEING ABOUT ONE 32-BYTE VALUE IS EXACTLY WHAT THIS FILE IS
+ * FOR, and the pair below is the assertion: the routed id, and the retired one
+ * that must never be offerable again. Each side asserts against this vector —
+ * the keeper over ROUTABLE_VENUES and RETIRED_VENUES, solana-core over
+ * addresses.ts and build-handler.ts's VENUE_PROGRAMS, the website over
+ * VERIFIABLE_VENUES and DEFAULT_VENUE_NAME — so a venue that moves in one
+ * package goes red in that package.
+ */
+export const ROUTED_VENUE = Object.freeze({
+  /** packages/solana-keeper/src/invest-decision.ts, the only key in ROUTABLE_VENUES. */
+  keeper: Object.freeze({ constant: "JUPITER_V6_PROGRAM", module: "invest-decision.ts", programId: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4" }),
+  /** packages/solana-core/src/client/addresses.ts, translated from the NAME below by build-handler.ts's VENUE_PROGRAMS. */
+  web: Object.freeze({ constant: "JUPITER_V6", programId: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", venueName: "jupiter-v6" }),
+  /**
+   * RETIRED, AND THE POINT IS THAT IT IS STILL REAL. Raydium CLMM is what every
+   * policy signed to date names, including the live mainnet one, and it is
+   * still the PRICE SOURCE the floors are read from (readers.ts PRICED_POOLS).
+   * What it may never be again is a venue a new policy can be signed with.
+   */
+  retired: Object.freeze({ constant: "RAYDIUM_CLMM", programId: "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", venueName: "raydium-clmm", stillAPriceSource: true }),
+  /** One venue, on purpose: a second entry is a second route builder, not a second name. */
+  routableCount: 1,
+});

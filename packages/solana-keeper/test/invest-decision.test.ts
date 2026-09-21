@@ -114,6 +114,31 @@ describe("the policy's in_mint", () => {
 });
 
 describe("the venue the owner signed", () => {
+  /**
+   * THE KEEPER'S HALF OF THE VECTOR THE WEBSITE SIGNS AGAINST
+   * (packages/solana-core/test/fixtures/keeper-policy.ts ROUTED_VENUE).
+   *
+   * Both packages were green while they disagreed: this keeper routed Jupiter
+   * alone and the web's closed venue set held raydium-clmm alone, so every
+   * policy the owner could sign was refused HERE, before the wrap, for the life
+   * of the policy. Nothing in either package could see it, because neither
+   * asserted anything about the other. This is that assertion, from this side.
+   */
+  it("routes exactly the venue the website is allowed to sign, and refuses exactly the one it may not", async () => {
+    const vector = "keeper-policy";
+    const { ROUTED_VENUE } = (await import(`../../solana-core/test/fixtures/${vector}.ts`)) as {
+      ROUTED_VENUE: { keeper: { programId: string }; web: { programId: string }; retired: { programId: string }; routableCount: number };
+    };
+    expect([...ROUTABLE_VENUES.keys()]).toEqual([ROUTED_VENUE.keeper.programId]);
+    expect(ROUTABLE_VENUES.size).toBe(ROUTED_VENUE.routableCount);
+    // The web signs what this keeper routes: one value, asserted from both ends.
+    expect(ROUTED_VENUE.web.programId).toBe(ROUTED_VENUE.keeper.programId);
+    expect(venueDecision(new PublicKey(ROUTED_VENUE.web.programId))).toBeNull();
+    // And the retired one stays refused, whoever offers it.
+    expect(RETIRED_VENUES.has(ROUTED_VENUE.retired.programId)).toBe(true);
+    expect(venueDecision(new PublicKey(ROUTED_VENUE.retired.programId))?.outcome).toBe("REFUSED");
+  });
+
   it("lets through Jupiter v6, at the address the keeper really passes, pinned to a literal", () => {
     // ONE SOURCE, ONE INDEPENDENT PIN. JUPITER_V6_PROGRAM is now program-scripts'
     // JUPITER_PROGRAM — the same object, through the CommonJS/ESM unwrap the

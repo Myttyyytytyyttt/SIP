@@ -37,16 +37,26 @@ import { Label } from "@/components/ui/label";
 import { formatUsd } from "@/lib/amounts";
 import { PICKER_MAX_LEGS, catalogueRows, evenedOut, percentTotal, toggled, withPercent, type PickedRow } from "@/lib/basket-picker";
 import { LABEL } from "@/lib/classes";
-import { INVEST_COPY, PICKER_COPY, ratePercent } from "@/lib/vault-copy";
-import type { CatalogueAsset } from "@sip/solana-core/client";
+import { INVEST_COPY, PICKER_COPY, listAnd, ratePercent } from "@/lib/vault-copy";
+import { XSTOCKS_POWERS, type CatalogueAsset } from "@sip/solana-core/client";
 
-/** What an asset's market was counted at, with the day on its face — or that nobody counted it. */
+/**
+ * What an asset's market was measured at, with the day AND THE KIND OF
+ * MEASUREMENT on its face — or that nobody measured it.
+ *
+ * THE SCOPE TRAVELS WITH THE NUMBER, which it did not before. A route census
+ * and a venue-wide figure were rendered in identical words, so FIGUREAI's
+ * "$50,000.00" — a whole venue's book — read exactly like SPYx's counted route,
+ * under a sentence below calling every line a count. The two differed by
+ * forty-five times on ANTHROPIC on the day both were read, and conflating them
+ * is the failure this whole feature exists to prevent (basket-picker.ts).
+ */
 function depthWords(asset: CatalogueAsset): string {
   // The ROUTE census first, because it is the one a cap is divided by; the
   // shelf's own screening figure only when there is no census to show.
   const reading = asset.routeCensus ?? asset.depth;
   if (reading === null || reading === undefined) return PICKER_COPY.depthUnread;
-  return PICKER_COPY.depthLine(reading.venue, formatUsd(reading.usdcRaw), reading.readOn);
+  return PICKER_COPY.depthLine(reading.venue, formatUsd(reading.usdcRaw), reading.readOn, reading.scope, reading.derived === true);
 }
 
 export function BasketPicker({
@@ -161,7 +171,7 @@ export function BasketPicker({
 
       <p className="text-xs text-muted-foreground">{INVEST_COPY.weightsHint}</p>
       <p className="text-xs text-muted-foreground">{PICKER_COPY.depthMeaning}</p>
-      <p className="text-xs text-muted-foreground">{PICKER_COPY.xstockGroup}</p>
+      <p className="text-xs text-muted-foreground">{PICKER_COPY.xstockGroup(listAnd([...XSTOCKS_POWERS.mintsRead]))}</p>
       <p className="text-xs text-muted-foreground">{PICKER_COPY.prestockGroup}</p>
       {problem === null ? null : (
         <p role="alert" className="text-xs text-destructive">

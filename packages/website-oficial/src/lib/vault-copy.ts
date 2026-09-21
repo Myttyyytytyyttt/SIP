@@ -691,15 +691,34 @@ export const INVEST_COPY = {
   pricesUnknown: "Today's prices could not be read just now. The build reads them again, and the limits you sign are shown before Phantom asks.",
   /**
    * The owner's words for what a policy does, at the limits shown. `basket` is
-   * every offered leg with its weight, so this sentence cannot go on naming one
+   * every CHOSEN leg with its weight, so this sentence cannot go on naming one
    * stock after the basket grows — which is exactly how it came to say "invests
    * in SPYx" while the Basket field beside it already read "SPYx 50 %,
    * ANTHROPIC 50 %". The per-stock ceilings are NOT inlined here any more: at
    * two legs they arrived joined by a slash ("$801.80 / $18.95"), a figure of
    * no meaning, and the box below already prints one line per stock.
+   *
+   * TWO CLAUSES IN IT WERE FALSE ON THIS BRANCH AND ARE FIXED HERE, both left
+   * behind by changes that updated everything except this paragraph — the first
+   * sentence the owner reads.
+   *  * "each through its own Raydium pool". The keeper routes JUPITER and
+   *    nothing else (invest-decision.ts ROUTABLE_VENUES); there is no fixed
+   *    route at all any more, because the router re-picks per quote
+   *    (product.ts: "THERE IS NO FIXED ROUTE — Jupiter picks it"), and a 200
+   *    USDC ANTHROPIC buy has been read routing four different venue pairs in
+   *    one hour. Worse, Raydium was ALSO the only venue this form could then
+   *    sign, and a policy naming it is refused by the keeper before the wrap
+   *    for the life of the policy — so the opening words were false end to end.
+   *  * "one of the pools is too small for the buy". The unit changed on
+   *    2026-09-21 from a pool's in-side reserve to a census of the venue
+   *    inventory the chosen route names, because the venues this basket must
+   *    reach are an order book and a bin market with no reserve to read. See
+   *    POOL_DEPTH_MULTIPLE above: INVEST_COPY.thinPool was rewritten in that
+   *    change and this sentence was not, which is the shape that lets words go
+   *    quietly false while every test stays green.
    */
   policyRule: (basket: string, floorUsdPerSol: string, purchase: string, maxPerCall: string, maxRolling: string, rent: string): string =>
-    `Your vault invests in ${basket}, each through its own Raydium pool, and a buy takes all of them or none. When the vault holds SOL, the keeper converts it to USDC, never below ${floorUsdPerSol} per SOL, then buys once ${purchase} of USDC is ready and never above the per-stock limits below. At most ${maxPerCall} per buy and ${maxRolling} per 30 days until you change them. If a price moves past a limit, or one of the pools is too small for the buy, nothing is bought and no SOL is converted until you sign again. Nothing is sold at a worse price. Setting this up costs ${rent} SOL of rent for the policy and the vault's token accounts, and none of it comes back.`,
+    `Your vault invests in ${basket}, each bought through Jupiter, which picks the route for every buy, and a buy takes all of them or none. When the vault holds SOL, the keeper converts it to USDC, never below ${floorUsdPerSol} per SOL, then buys once ${purchase} of USDC is ready and never above the per-stock limits below. At most ${maxPerCall} per buy and ${maxRolling} per 30 days until you change them. If a price moves past a limit, or the venue a buy would land in is too small for it, nothing is bought and no SOL is converted until you sign again. Nothing is sold at a worse price. Setting this up costs ${rent} SOL of rent for the policy and the vault's token accounts, and none of it comes back.`,
 
   // ── WHAT THE POSITION COSTS, AND WHO OWNS EACH NUMBER ──────────────────────
   //
@@ -767,17 +786,32 @@ export const INVEST_COPY = {
   // solana-core's dated route censuses, and this comment keeps only the history.
   thinPoolTitle: "Today, this basket may buy nothing at all",
   /**
+   * HOW THE CEILING'S OWN NUMBER CAME TO BE, IN THREE WORDS OR SO — and it is
+   * not always "counted".
+   *
+   * The ceiling always divides a ROUTE CENSUS (basket-picker.ts refuses to
+   * divide anything else), but a census is not always a count: ANTHROPIC's is
+   * worked back from the day's own ceiling measurement, which its catalogue
+   * entry has always said in a field nothing rendered. Four sentences on this
+   * card therefore told the owner a derived figure had been counted, while the
+   * sentence for a leg with no census at all opens "SaverFi has not counted" —
+   * so the one distinction the copy leans on was collapsed exactly where it
+   * mattered. One clause, used by all three, so they cannot drift apart again.
+   */
+  censusProvenance: (readOn: string, derived: boolean): string =>
+    derived ? `worked out on ${readOn} from that day's own measurement rather than counted directly` : `counted on ${readOn}`,
+  /**
    * THE CEILING, IN THE OWNER'S TERMS, with every number computed from the
    * basket on screen. `ceiling` is the largest Most per buy every chosen leg's
    * counted route still covers, `suggested` is where the box starts (half of
    * it), `symbol` is the leg that set it and `readOn` the day that leg's route
    * was counted. Nothing here is a constant, because none of it is constant.
    */
-  thinPool: (ceiling: string, suggested: string, symbol: string, readOn: string): string =>
-    `The keeper refuses a buy unless the venue it buys from holds at least ${POOL_DEPTH_MULTIPLE} times that buy, so a thin market sets a small ceiling. On the shares you have chosen, the leg that sets it is ${symbol}: counting what its route held when it was last read, on ${readOn}, the whole buy can be at most ${ceiling}, and that is the ceiling itself, not a target. Because a buy takes all of the basket or none, a Most per buy above it stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance. Most per buy starts at ${suggested}, which is half the ceiling, so an ordinary day's drift in that market does not turn your cap into one that buys nothing. That count was true on the day it was taken and nothing on this page re-reads it. The keeper measures whichever venue it is actually buying through, in the turn itself, so a market that was deep last week does not count for anything today.`,
+  thinPool: (ceiling: string, suggested: string, symbol: string, readOn: string, derived = false): string =>
+    `The keeper refuses a buy unless the venue it buys from holds at least ${POOL_DEPTH_MULTIPLE} times that buy, so a thin market sets a small ceiling. On the shares you have chosen, the leg that sets it is ${symbol}: from what its route held, ${INVEST_COPY.censusProvenance(readOn, derived)}, the whole buy can be at most ${ceiling}, and that is the ceiling itself, not a target. Because a buy takes all of the basket or none, a Most per buy above it stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance. Most per buy starts at ${suggested}, which is half the ceiling, so an ordinary day's drift in that market does not turn your cap into one that buys nothing. That reading was true on the day it was taken and nothing on this page re-reads it. The keeper measures whichever venue it is actually buying through, in the turn itself, so a market that was deep last week does not count for anything today.`,
   /** The same ceiling as a line of facts, above the box it constrains. */
-  capWindow: (floor: string, ceiling: string, symbol: string, readOn: string): string =>
-    `At these shares, Most per buy can be between ${floor} and ${ceiling}. The bottom is arithmetic on what you are signing; the top is ${symbol}'s market as it was counted on ${readOn}, divided by the ${POOL_DEPTH_MULTIPLE}x cover the keeper insists on.`,
+  capWindow: (floor: string, ceiling: string, symbol: string, readOn: string, derived = false): string =>
+    `At these shares, Most per buy can be between ${floor} and ${ceiling}. The bottom is arithmetic on what you are signing; the top is ${symbol}'s market as it was ${INVEST_COPY.censusProvenance(readOn, derived)}, divided by the ${POOL_DEPTH_MULTIPLE}x cover the keeper insists on.`,
   /** No ceiling at all: a chosen leg's route has never been counted. Never rendered as a large ceiling. */
   ceilingUnknown: (symbols: string): string =>
     `SaverFi has not counted what ${symbols} holds where a buy would actually land, so it cannot tell you the largest Most per buy this basket can use. The figure it does have for that market is the venue's whole book, which no single buy reaches, and dividing that would give you a ceiling that is too high — the one direction this number must never be wrong in. Keep Most per buy small, or choose an asset whose route has been counted.`,
@@ -924,8 +958,8 @@ export const INVEST_COPY = {
    * sentence offers TWO ways out and says two. A refusal that promises three
    * and lists two sends the owner looking for a control that is not there.
    */
-  depthWarning: (ceiling: string, symbol: string, readOn: string, lighterShare: string | null): string =>
-    `${ceiling} is the most this basket can buy with, and ${symbol} is what sets it: its market was counted on ${readOn}, and the keeper will not put more than a ${POOL_DEPTH_MULTIPLE}th of what it found there into one leg of one buy. Above this the vault buys nothing and converts no SOL, at any balance, and the rent you pay to sign it does not come back. ${lighterShare === null ? "Two" : "Three"} ways out: lower Most per buy to ${ceiling} or less` +
+  depthWarning: (ceiling: string, symbol: string, readOn: string, lighterShare: string | null, derived = false): string =>
+    `${ceiling} is the most this basket can buy with, and ${symbol} is what sets it: its market was ${INVEST_COPY.censusProvenance(readOn, derived)}, and the keeper will not put more than a ${POOL_DEPTH_MULTIPLE}th of what it found there into one leg of one buy. Above this the vault buys nothing and converts no SOL, at any balance, and the rent you pay to sign it does not come back. ${lighterShare === null ? "Two" : "Three"} ways out: lower Most per buy to ${ceiling} or less` +
     (lighterShare === null ? "" : `, give ${symbol} a smaller share — ${lighterShare} or under works at the cap you typed`) +
     `, or take ${symbol} out of the basket.`,
   /**
@@ -968,6 +1002,34 @@ export const INVEST_COPY = {
   pauseKeeps: "Pausing signs this policy again as it is, with investing off, so it needs no prices. Resuming and signing again read today's prices.",
   pauseSigning: "You are signing: investing paused, with every floor and limit this policy has.",
   noRefill: "Signing again does not refill this month's cap.",
+
+  // ── WHEN "Sign again" AND "Resume" MAY NOT BE PRESSED ─────────────────────
+  //
+  // BOTH BUTTONS RE-SIGN THE STORED BASKET, which is the change these four
+  // sentences belong to. They used to send the two caps and nothing else, and
+  // the build route then filled the rest in with its own defaults: the WHOLE
+  // shelf at equal shares, at the catalogue's split minimum. On a one-stock
+  // policy that meant one press replaced the basket the owner picked with a
+  // basket he never saw — while Pause, three inches away, correctly re-signed
+  // the stored legs, so pause-then-resume was not a round trip.
+  //
+  // AND THE STORED CAP IS JUDGED AGAINST THE STORED BASKET, because the cap
+  // that was inside the window for the basket he signed can be outside it for
+  // any other one. A cap over the ceiling does not buy less: the keeper's depth
+  // gate is all-or-nothing, so the policy buys nothing at any balance for its
+  // whole life, and the rent is spent again. The setup form has refused this
+  // since the picker landed; these two buttons went around it.
+  /** A stored policy whose own fields cannot be read: no re-sign is offered rather than one built on a guess. */
+  resignUnreadable: "SaverFi could not read this policy's own basket and limits just now, so it cannot offer to sign it again. Pausing still works: it re-signs exactly what is stored.",
+  /** A stored basket holding something the shelf no longer offers: re-signing would quietly drop it. */
+  resignUnoffered: (symbols: string): string =>
+    `This policy holds ${symbols}, which SaverFi does not offer today. Signing again would build a basket without it — a different basket from the one you signed — so it is not offered. Pausing still re-signs exactly what is stored.`,
+  /** The stored cap is under the floor its own basket needs: re-signing would rebuild a policy that cannot buy. */
+  resignBelowFloor: (floor: string, symbol: string): string =>
+    `This policy's Most per buy is under ${floor}, the least every stock in it can clear — ${symbol} has the smallest share, so it sets that bar. Signing it again would sign a policy that buys nothing at any balance. Pause it and set it up again with a larger Most per buy.`,
+  /** The stored cap is over the depth ceiling its own basket faces: the same refusal the setup form makes. */
+  resignOverCeiling: (ceiling: string, symbol: string, readOn: string): string =>
+    `This policy's Most per buy is over ${ceiling}, the most ${symbol}'s market covered when it was read on ${readOn} at the share this policy gives it. The keeper refuses a buy the venue cannot cover ${POOL_DEPTH_MULTIPLE} times over, and it refuses the whole basket with it, so signing this again would sign a policy that buys nothing at any balance and spends the rent doing it. Pause it and set it up again with a smaller Most per buy.`,
 } as const;
 
 /**
@@ -1011,13 +1073,36 @@ export const PICKER_COPY = {
   refusedBecause: (why: string): string => why,
   /** The group's standing facts, shown once per group rather than once per asset. */
   prestockGroup: "PreStocks: one issuer key mints, freezes, pauses, sets the transfer fee and holds a permanent delegate over every one of these, and it has used that key. Each charges 1 % to transfer, which is exactly SaverFi's limit — one more raise and the whole basket stops.",
-  xstockGroup: "xStocks: no transfer fee, and no key anywhere able to add one — the mint carries no fee setting at all, and a Token-2022 mint cannot gain one after it is made. The issuer still holds freeze, pause and a permanent delegate, under separate keys.",
-  /** The depth reading a tile carries, dated on its face. */
-  depthLine: (venue: string, usd: string, readOn: string): string => `${venue} held ${usd} when it was read on ${readOn}`,
+  /**
+   * THE GROUP'S FACT, SAID OF THE MINTS SOMEBODY ACTUALLY READ. 929 xStock
+   * mints exist and one was read (XSTOCKS_POWERS.mintsRead), so the plural was
+   * a promise about 928 accounts nobody had opened — harmless today, because
+   * SPYx is the only xStock on the shelf, and applied unchanged to the next one
+   * added. PRESTOCKS_POWERS earns its plural: it was read over all eight mints
+   * it speaks for.
+   */
+  xstockGroup: (read: string): string =>
+    `xStocks (read here: ${read}): no transfer fee, and no key anywhere able to add one — the mint carries no fee setting at all, and a Token-2022 mint cannot gain one after it is made. The issuer still holds freeze, pause and a permanent delegate, under separate keys. Each xStock is its own mint and is read before it is offered; this is not a promise about the rest of the range.`,
+  /**
+   * THE DEPTH READING A TILE CARRIES, DATED AND SCOPED ON ITS FACE.
+   *
+   * `scope` IS NOT DECORATION. A route census counts the accounts one route
+   * names — what the keeper's own gate counts — while a venue-wide figure sums
+   * a book or a set of bins that no single buy reaches, and on ANTHROPIC the
+   * two differed by forty-five times on the day both were read. This line used
+   * to render both in the same words, under a sentence calling them all counts,
+   * so a tile showing a venue's whole book read exactly like a tile showing a
+   * counted route. `derived` is the second half of the same honesty: some of
+   * these figures were worked back from another measurement rather than taken.
+   */
+  depthLine: (venue: string, usd: string, readOn: string, scope: "route-census" | "venue-wide" = "route-census", derived = false): string =>
+    scope === "venue-wide"
+      ? `${venue} held ${usd} across its whole book when it was read on ${readOn} — no single buy reaches all of that`
+      : `${venue} held ${usd} where a buy would land, ${derived ? `worked out on ${readOn} rather than counted directly` : `counted on ${readOn}`}`,
   depthUnread: "Nobody has counted this market where a buy would land.",
-  /** What a count is and is not, said once under the list. */
+  /** What these readings are and are not, said once under the list. */
   depthMeaning:
-    "Those are counts taken on a named day, not promises. The keeper counts again inside every buy, against the amount that buy really spends, and its count is the one that decides.",
+    "Those readings were taken on a named day, not promises — and they are not all the same kind. Some count the route a buy actually took; some are a venue's whole book, which no single buy reaches; one is worked back from another day's measurement rather than counted. Each line says which it is. The keeper counts again inside every buy, against the amount that buy really spends, and its count is the one that decides.",
   remove: (symbol: string): string => `Remove ${symbol}`,
 } as const;
 

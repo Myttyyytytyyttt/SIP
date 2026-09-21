@@ -103,6 +103,7 @@ COPY packages/solana-core/src/client/pyth-price.ts packages/solana-core/src/clie
      packages/solana-core/src/client/rules.ts \
      packages/solana-core/src/client/
 COPY packages/solana-core/test/fixtures/pyth-accounts.ts packages/solana-core/test/fixtures/pyth-accounts.ts
+COPY packages/solana-core/test/fixtures/keeper-policy.ts packages/solana-core/test/fixtures/keeper-policy.ts
 COPY Dockerfile Dockerfile
 COPY packages/solana-keeper packages/solana-keeper
 # The keeper runs from TypeScript through tsx; typecheck is the build gate, so a

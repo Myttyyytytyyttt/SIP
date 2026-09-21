@@ -221,11 +221,78 @@ describe("the first investment policy", () => {
     expect(perLeg).toBe(149_000_000n);
     expect(perLeg * 10_000n / 5_000n).toBe(298_000_000n);
     expect(perLeg * 10_000n / 2_000n).toBe(745_000_000n);
-    // SPYx's own depth reading IS a census, so it answers without a second field.
+    // SPYx'S CENSUS IS SMALLER THAN ITS SCREENING DEPTH, AND THAT IS THE RULE,
+    // NOT AN ODDITY. `depth` pins a pool a 200 USDC buy routed through once;
+    // the census counts the smallest inventory of any pool the router was
+    // actually seen picking, because the ceiling DIVIDES it and an optimistic
+    // ceiling signs a policy that buys nothing. The two were the same number
+    // while the census was pinned to a pool no later reading routed through.
     const spyx = CATALOGUE.find((asset) => asset.symbol === "SPYx")!;
-    expect(routeCensusRaw(spyx)).toBe(spyx.depth!.usdcRaw);
+    expect(routeCensusRaw(spyx)!).toBeLessThanOrEqual(spyx.depth!.usdcRaw);
+    expect(spyx.routeCensus!.scope).toBe("route-census");
+    expect(spyx.routeCensus!.derived ?? false).toBe(false);
+    // The pool the count was taken over is named in FULL, so the reading can be
+    // re-taken; a truncated address is a reading nobody else can run.
+    expect(spyx.routeCensus!.by).toContain("FGdm1Ww1ch138kWjjEigFUFncxzkvfZ6m8Fo1YvM8BMu");
+
+    // A DERIVED FIGURE SAYS SO. ANTHROPIC's census is inverted from that day's
+    // ceiling measurement rather than counted, and until this flag existed the
+    // web called it a count in four separate sentences — beside a null branch
+    // whose meaning is "nobody counted this".
+    expect(anthropic.routeCensus!.derived).toBe(true);
+    expect(anthropic.routeCensus!.by).toContain("not a direct count");
     // An asset nobody counted says so rather than offering its venue's book.
     expect(routeCensusRaw({ ...spyx, routeCensus: null, depth: { ...spyx.depth!, scope: "venue-wide" } })).toBeNull();
+  });
+
+  /**
+   * A SCREENING READING IS RECORDED AT ITS WORST, NOT AT ITS PRETTIEST.
+   *
+   * ANTHROPIC's size penalty was 0.1 bps, cited to "three readings: 0.0, -0.0,
+   * 0.1" — which reads as a settled quantity and is not one. The same figure
+   * has been read at 107 bps (failing the leg outright), at 14, at 9.8 and at
+   * 0 within one day, because the router picks a different route for each
+   * quote and the two sizes rarely take the same one. The bar is 25. An entry
+   * that admits a leg on a number with a spread wider than its own bar has to
+   * record the worst reading it took and say the quantity moves; anything else
+   * is a stable-looking number standing in for a coin flip.
+   */
+  it("records an unstable screening reading at its worst, and says the quantity moves", () => {
+    const anthropic = CATALOGUE.find((asset) => asset.symbol === "ANTHROPIC")!;
+    // Not 0.1: the worst of the five paired readings taken, not the best.
+    expect(anthropic.sizePenalty!.bps).toBeGreaterThanOrEqual(1);
+    expect(anthropic.sizePenalty!.by).toMatch(/107 bps/);
+    // AND THE SCOPE IS STILL STATED. sameVenues false means the keeper's own
+    // ARM 2 would ABSTAIN here rather than compare, so this is a screen.
+    expect(anthropic.sizePenalty!.sameVenues).toBe(false);
+    // The leg still passes its bar on what was recorded; the disclosure is the
+    // change, not the verdict.
+    expect(offerProblems(anthropic)).toEqual([]);
+  });
+
+  /**
+   * A CITATION HAS TO NAME SOMETHING A READER CAN OPEN.
+   *
+   * Seven entries sourced their depth to "this repo's Jupiter migration notes".
+   * No such file exists, in the tree or anywhere in its history, and for
+   * ANTHROPIC that figure is the whole evidence for the rule that ADMITS it.
+   * The numbers stay — they are what somebody measured — but a `by` may not
+   * point at a document that is not there: a reader who cannot find it cannot
+   * tell a reading from an invention, which is the distinction this file's
+   * every dated field exists to draw.
+   */
+  it("cites no source that does not exist: no reading points at a file this repository has not got", () => {
+    const readings = CATALOGUE.flatMap((asset) => [asset.depth, asset.routeCensus, asset.floorPoolUsdc, asset.fee, asset.sizePenalty].filter((reading) => reading !== null));
+    expect(readings.length).toBeGreaterThan(20);
+    for (const reading of readings) {
+      expect(reading!.by, `${reading!.by} cites a notes file that is not in this repository`).not.toMatch(/migration notes/i);
+      expect(reading!.by.length, "a reading with no source is a number somebody typed").toBeGreaterThan(20);
+    }
+    // AND THE ONES WITH NO RE-DERIVABLE SOURCE SAY SO IN THOSE WORDS, rather
+    // than naming a document. There are eight, all venue-wide.
+    const carried = CATALOGUE.filter((asset) => /no notes file, script or commit|THERE IS NO SOURCE FOR IT/.test(asset.depth?.by ?? ""));
+    expect(carried).toHaveLength(8);
+    for (const asset of carried) expect(asset.depth!.scope).toBe("venue-wide");
   });
 
   it("holds the keeper's three numbers as the keeper's, through the committed vector", () => {

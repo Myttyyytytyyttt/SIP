@@ -36,7 +36,7 @@
 // {error:{code, message, ...}}, the shape /api/solana-tx answers with. No upstream
 // text is ever returned: a read that failed is "unreadable", with no detail.
 
-import { RAYDIUM_CLMM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../client/addresses";
+import { JUPITER_V6, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../client/addresses";
 import { classifyVaultEntry } from "../client/activity";
 import { isPubkey, isSignature } from "../client/base58";
 import { tryBase64Decode } from "../client/base64";
@@ -435,17 +435,32 @@ function decimalU64(value: unknown): bigint | null {
  * A Map, not an object: `{}["constructor"]` is a function, and a lookup table
  * reached from request text must not answer for a key it does not hold.
  *
- * One entry today. Raydium CLMM is the only venue the keeper can route through
- * (client/clmm-price.ts prices its pools, and PRICED_POOLS pins them), so the
- * list is one long on purpose, not by omission.
+ * ONE ENTRY, AND IT IS JUPITER — AND THE NAME IT USED TO HOLD WAS WORSE THAN
+ * MISSING. This table named raydium-clmm alone while the keeper on this branch
+ * routes Jupiter alone (invest-decision.ts ROUTABLE_VENUES) and refuses Raydium
+ * by name before the wrap, all-or-nothing, forever (RETIRED_VENUES: "this
+ * keeper deliberately stopped routing it when the basket moved to Jupiter").
+ * Every policy this route could build was therefore dead on arrival: it bought
+ * nothing, at any balance, for the life of the policy, and the rent that signed
+ * it did not come back. A closed set whose only member cannot buy is not a
+ * conservative list, it is a list of one wrong answer.
+ *
+ * RAYDIUM IS NOT GONE FROM THE PRODUCT, it has stopped being a VENUE. The
+ * floors this same transaction signs are still read from its pools
+ * (readers.ts PRICED_POOLS, reached through liveFloors below), which is a
+ * price source and not a counterparty. This table is where that distinction is
+ * spent, so the constant no longer belongs in it.
  */
-const VENUE_PROGRAMS = new Map<string, string>([["raydium-clmm", RAYDIUM_CLMM]]);
+const VENUE_PROGRAMS = new Map<string, string>([["jupiter-v6", JUPITER_V6]]);
 
 /** The venue names investPolicy accepts. What the panel offers; the programs behind them never leave the server. */
 export const OFFERED_VENUES: readonly string[] = Object.freeze([...VENUE_PROGRAMS.keys()]);
 
-/** The venue a request that names none is built with: today's behaviour, unchanged. */
-const DEFAULT_VENUE = "raydium-clmm";
+/**
+ * The venue a request that names none is built with: the one venue the keeper
+ * routes. It was "raydium-clmm", which this branch's keeper refuses outright.
+ */
+const DEFAULT_VENUE = "jupiter-v6";
 
 /** The vault modes setPolicy accepts, by name. createVault's numeric `mode` is untouched. */
 const VAULT_MODES = new Map<string, number>([

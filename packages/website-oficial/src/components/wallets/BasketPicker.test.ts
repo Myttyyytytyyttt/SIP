@@ -7,7 +7,7 @@
 // five is enforced where it is reached, and that "one refused leg stops the
 // whole basket" is beside the ticks and not in the small print underneath.
 
-import { ANDURIL_MINT, ANTHROPIC_MINT, CATALOGUE, FIGUREAI_MINT, OPENAI_MINT, SPYX_MINT, isOfferable, offerProblems } from "@sip/solana-core/client";
+import { ANDURIL_MINT, ANTHROPIC_MINT, CATALOGUE, FIGUREAI_MINT, OPENAI_MINT, PRESTOCKS_POWERS, SPYX_MINT, XSTOCKS_POWERS, isOfferable, offerProblems } from "@sip/solana-core/client";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -77,10 +77,33 @@ describe("BasketPicker", () => {
 
   it("dates every depth figure on the face of the tile, and never rounds a count into a promise", () => {
     const html = render();
-    // The route census first, because it is the one a cap is divided by.
-    expect(html).toContain("when it was read on 2026-09-21");
+    expect(html).toContain("2026-09-21");
     expect(html).toContain(PICKER_COPY.depthMeaning.replaceAll("'", "&#x27;"));
     expect(html).toContain("The keeper counts again inside every buy");
+  });
+
+  /**
+   * THREE KINDS OF NUMBER, THREE DIFFERENT SENTENCES — because they were one
+   * sentence, under a line calling them all counts.
+   *
+   * A route census counts the accounts one route names, which is what the
+   * keeper's own gate counts. A venue-wide figure sums a book no single buy
+   * reaches: on ANTHROPIC the two differed by forty-five times on the day both
+   * were read, and FIGUREAI's "$50,000.00" is a whole venue's book rendered in
+   * the same words as SPYx's counted route. And one census is worked back from
+   * another day's measurement rather than taken at all.
+   */
+  it("says which KIND of reading each figure is, not just its day: a counted route, a whole book, or one worked out", () => {
+    const html = render();
+    // SPYx: a route census, counted over the pool's own USDC account.
+    expect(html).toContain("held $201,151.98 where a buy would land, counted on 2026-09-21");
+    // ANTHROPIC: a route census that was DERIVED, and says so.
+    expect(html).toContain("worked out on 2026-09-21 rather than counted directly");
+    // FIGUREAI: a venue-wide figure, which no single buy reaches.
+    expect(html).toContain("held $50,000.00 across its whole book when it was read on 2026-09-21 — no single buy reaches all of that");
+    // AND THE SENTENCE UNDER THE LIST NO LONGER CALLS THEM ALL COUNTS.
+    expect(html).not.toContain("Those are counts taken on a named day");
+    expect(html).toContain("they are not all the same kind");
   });
 
   it("offers the fix as a press, and only while it is needed", () => {
@@ -155,6 +178,14 @@ describe("BasketPicker", () => {
     // initialisation, so no key anywhere can add a fee later.
     expect(html).toContain("no key anywhere able to add one");
     expect(html).toContain("a Token-2022 mint cannot gain one after it is made");
+    // AND IT IS SAID OF THE MINTS SOMEBODY READ. 929 xStock mints exist and one
+    // was read, so the plural was a promise about 928 unopened accounts — true
+    // today only because SPYx is the sole xStock on the shelf, and applied
+    // unchanged to the next one added. PreStocks earns its plural: all eight.
+    expect(html).toContain("xStocks (read here: SPYx)");
+    expect(html).toContain("this is not a promise about the rest of the range");
+    expect(XSTOCKS_POWERS.mintsRead).toEqual(["SPYx"]);
+    expect(PRESTOCKS_POWERS.by).toContain("the eight PreStocks mints");
     expect(html).toContain("The issuer still holds freeze, pause and a permanent delegate");
     // And the PreStocks fee is at SaverFi's own limit, with what that means.
     expect(html).toContain("one more raise and the whole basket stops");

@@ -7,6 +7,7 @@ import {
   ANTHROPIC_MINT,
   COMPUTE_BUDGET_PROGRAM,
   ED25519_PROGRAM,
+  JUPITER_V6,
   RAYDIUM_CLMM,
   SOL_USDC_POOL,
   SPYX_MINT,
@@ -61,6 +62,7 @@ import {
   type StubChain,
 } from "./chain-fixtures";
 import { SECRET_QUERY, UPSTREAM_1, accountInfo, fakeFetch, fromB64, keypair, signBytes, signWire } from "./helpers";
+import { ROUTED_VENUE } from "./fixtures/keeper-policy";
 
 const load = loadSolanaServerSettings({ SIP_SOLANA_RPC_URLS: UPSTREAM_1, SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID, SIP_TRUSTED_CLIENT_IP_HEADER: "x-envoy-external-address" });
 if (!load.ok) throw new Error("test settings must load");
@@ -642,7 +644,7 @@ describe("investPolicy", () => {
         { mint: SPYX_MINT, weight_bps: 5_000, min_out_rate_wad: 124_719_467_624_105_690n },
         { mint: ANTHROPIC_MINT, weight_bps: 5_000, min_out_rate_wad: 5_277_777_777_777_777_778n },
       ],
-      venue_program: RAYDIUM_CLMM,
+      venue_program: JUPITER_V6,
       in_mint: USDC_MINT,
       min_convert_rate_wad: 90_034_840_399_943_305n,
       // 5 USDC split two ways, rounded down, so one $5 purchase still covers every leg.
@@ -834,7 +836,7 @@ describe("investPolicy", () => {
       owner,
       minInvestment: "2500000",
       weights: OFFERED_LEGS.map((leg, index) => ({ mint: leg.mint, weightBps: basketWeightsBps(OFFERED_LEGS.length)[index]! })),
-      venue: "raydium-clmm",
+      venue: "jupiter-v6",
     });
     expect([implicit.status, explicit.status]).toEqual([200, 200]);
     expect(explicit.json.txBase64).toBe(implicit.json.txBase64);
@@ -873,7 +875,7 @@ describe("investPolicy", () => {
       { mint: ANTHROPIC_MINT, weight_bps: 7_000, min_out_rate_wad: LEG_POOLS[1]!.floorWad },
     ]);
     expect(args.min_investment).toBe(1_000_000n);
-    expect(args.venue_program).toBe(RAYDIUM_CLMM);
+    expect(args.venue_program).toBe(JUPITER_V6);
     const verified = verifySignedTransaction(signWire(answer.json.txBase64, owner));
     expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
     // The three fields buy no extra upstream call.
@@ -907,12 +909,15 @@ describe("investPolicy", () => {
 
   it("the venue is a NAME from a closed list: a program id is refused however valid, and the list is one long", async () => {
     const owner = key();
-    expect(OFFERED_VENUES).toEqual(["raydium-clmm"]);
+    // ONE LONG, AND IT IS THE ONE THE KEEPER ROUTES. While this read
+    // ["raydium-clmm"] every policy this route could build was refused by the
+    // keeper before the wrap, for the life of the policy.
+    expect(OFFERED_VENUES).toEqual(["jupiter-v6"]);
     const { build, upstream } = setup(investableChain(owner));
-    for (const venue of [RAYDIUM_CLMM, key(), "Raydium CLMM", "raydium", "orca-whirlpool", "", 0, null, { name: "raydium-clmm" }, ["raydium-clmm"]]) {
+    for (const venue of [JUPITER_V6, RAYDIUM_CLMM, key(), "raydium-clmm", "Jupiter", "jupiter", "orca-whirlpool", "", 0, null, { name: "jupiter-v6" }, ["jupiter-v6"]]) {
       const answer = await build({ action: "investPolicy", owner, venue });
       expect([answer.status, answer.json.error?.code], `venue ${JSON.stringify(venue)} must be refused`).toEqual([400, "bad_request"]);
-      expect(answer.json.error?.message).toMatch(/venue must be one of: raydium-clmm\./);
+      expect(answer.json.error?.message).toMatch(/venue must be one of: jupiter-v6\./);
       expect(answer.json.error?.message).toMatch(/never a program address/);
       expect(answer.json).not.toHaveProperty("txBase64");
     }
@@ -922,6 +927,36 @@ describe("investPolicy", () => {
       expect([answer.status, answer.json.error?.code], `venue ${venue} must be refused`).toEqual([400, "bad_request"]);
     }
     expect(upstream.calls).toHaveLength(0);
+  });
+
+  /**
+   * THE BYTE THE KEEPER WILL ACCEPT, HELD TO THE VECTOR BOTH PACKAGES ASSERT
+   * AGAINST (test/fixtures/keeper-policy.ts ROUTED_VENUE).
+   *
+   * This is the check that was missing while the one offered name was
+   * raydium-clmm: the route was internally consistent, its tests were green,
+   * and every policy it could build was refused by the keeper before the wrap,
+   * at any balance, for the life of the policy. A venue set is only correct
+   * relative to the keeper, so it is asserted relative to the keeper.
+   */
+  it("offers the one venue the keeper routes, by the vector both packages assert against, and can never offer the retired one again", async () => {
+    expect(JUPITER_V6).toBe(ROUTED_VENUE.web.programId);
+    expect(JUPITER_V6).toBe(ROUTED_VENUE.keeper.programId);
+    expect(OFFERED_VENUES).toEqual([ROUTED_VENUE.web.venueName]);
+    expect(OFFERED_VENUES).toHaveLength(ROUTED_VENUE.routableCount);
+    expect(OFFERED_VENUES).not.toContain(ROUTED_VENUE.retired.venueName);
+    expect(RAYDIUM_CLMM).toBe(ROUTED_VENUE.retired.programId);
+
+    // AND THE BYTES CARRY IT. A name is only worth checking if the transaction
+    // built from it names the program the keeper will route through.
+    const owner = keypair();
+    const ownerKey = owner.publicKey.toBase58();
+    const { build } = setup(investableChain(ownerKey));
+    const answer = await build({ action: "investPolicy", owner: ownerKey, venue: ROUTED_VENUE.web.venueName });
+    expect(answer.status).toBe(200);
+    const args = decodeArgs("set_invest_policy", instructionsOf(answer.json.txBase64)[4]!.data) as { venue_program: string };
+    expect(args.venue_program).toBe(ROUTED_VENUE.keeper.programId);
+    expect(args.venue_program).not.toBe(ROUTED_VENUE.retired.programId);
   });
 
   it.each([
@@ -1003,7 +1038,7 @@ describe("investPolicy", () => {
         { mint: ANTHROPIC_MINT, weightBps: 7_500 },
       ],
       minInvestment: "5000000",
-      venue: "raydium-clmm",
+      venue: "jupiter-v6",
       maxPerCall: "30000000000",
       maxRolling30d: "30000000000",
       enabled: true,
@@ -1014,7 +1049,7 @@ describe("investPolicy", () => {
         { mint: SPYX_MINT, weight_bps: 2_500, min_out_rate_wad: LEG_POOLS[0]!.floorWad },
         { mint: ANTHROPIC_MINT, weight_bps: 7_500, min_out_rate_wad: LEG_POOLS[1]!.floorWad },
       ],
-      venue_program: RAYDIUM_CLMM,
+      venue_program: JUPITER_V6,
       in_mint: USDC_MINT,
       min_investment: 5_000_000n,
       max_per_call: 30_000_000_000n,

@@ -19,8 +19,31 @@ export const ED25519_PROGRAM = "Ed25519SigVerify111111111111111111111111111";
  */
 export const LIGHTHOUSE_PROGRAM = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
 
-/** Raydium CLMM: the venue program SIP's invest policy pins. */
+/**
+ * Raydium CLMM. IT IS NO LONGER A VENUE A POLICY MAY NAME — it is a PRICE
+ * SOURCE. The build route reads a leg's min_out_rate_wad and the convert floor
+ * from Raydium CLMM pools (server/readers.ts PRICED_POOLS), and that is all
+ * this constant is for now. The keeper stopped routing through it when the
+ * basket moved to Jupiter and refuses it outright
+ * (solana-keeper/src/invest-decision.ts RETIRED_VENUES), so a policy naming it
+ * as venue_program buys nothing, at any balance, for the life of the policy.
+ */
 export const RAYDIUM_CLMM = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
+
+/**
+ * Jupiter v6: THE VENUE PROGRAM A POLICY SIGNED ON THIS BRANCH MUST NAME.
+ *
+ * It is the only key in the keeper's ROUTABLE_VENUES
+ * (solana-keeper/src/invest-decision.ts), and the keeper's venue check is
+ * all-or-nothing: a policy whose venue_program is anything else is refused
+ * before the wrap, on every sweep, forever. The web must therefore be able to
+ * BUILD this byte — build-handler.ts VENUE_PROGRAMS translates the name, and
+ * website-oficial's VERIFIABLE_VENUES checks the built bytes against it.
+ *
+ * The same base58 lives in the keeper (JUPITER_V6_PROGRAM) and is asserted
+ * against this one by test, because the browser may not import the keeper.
+ */
+export const JUPITER_V6 = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
 
 export const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";

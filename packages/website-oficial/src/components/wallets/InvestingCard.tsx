@@ -65,6 +65,7 @@ import {
   defaultInvestPolicy,
   floorWad,
   investmentReadiness,
+  isOfferable,
   ownerComputeBudget,
   priorityFeeLamports,
   usdcRawPer1e8LegRaw,
@@ -101,7 +102,7 @@ import {
 import { floorDrift, todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
 import { floorsState } from "@/lib/live-model";
 import type { InvestPolicyBuildJson, InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
-import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, signedLegsOf } from "@/lib/vault-copy";
+import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, shortAddress, signedLegsOf } from "@/lib/vault-copy";
 
 type VaultWrite = ReturnType<typeof useVaultWrite>;
 
@@ -212,6 +213,18 @@ export const SUGGESTED_PER_BUY_RAW: bigint = DEFAULT_WINDOW.suggestedRaw;
 export const atMostUsd = (raw: bigint): string => formatUsd(raw - (raw % 10_000n));
 
 /**
+ * A FLOOR QUOTED IN WORDS HAS TO ROUND THE OTHER WAY, and for the same reason
+ * the ceiling rounds down.
+ *
+ * formatUsd rounds to the NEARER cent, so a floor of $47.571429 prints as
+ * "$47.57" — and readCaps, which compares raw units, then refuses the $47.57
+ * the sentence just asked for. Typing what the message says loops. Rounding UP
+ * to the cent can only ever overstate a floor by less than a cent, which is a
+ * cap that works; rounding down states one that does not.
+ */
+export const atLeastUsd = (raw: bigint): string => formatUsd(raw + ((10_000n - (raw % 10_000n)) % 10_000n));
+
+/**
  * The two caps as typed, in dollars: at least `floorRaw` per buy, and at least
  * one buy per 30 days.
  *
@@ -225,7 +238,10 @@ export function readCaps(perBuyText: string, per30DaysText: string, floorRaw: bi
   try {
     const maxPerCall = parseUnits(perBuyText, USDC_DECIMALS, INVEST_COPY.mostPerBuy);
     const maxRolling30d = parseUnits(per30DaysText, USDC_DECIMALS, INVEST_COPY.mostPer30Days);
-    if (maxPerCall < floorRaw || maxRolling30d < maxPerCall) return { ok: false, message: INVEST_COPY.capsProblem(formatUsd(floorRaw)) };
+    // UP TO THE CENT, never to the nearest one: see atLeastUsd. This sentence
+    // names a cap the owner is going to type, and the check it names is on the
+    // raw units, so a figure a cent short is a refusal that repeats itself.
+    if (maxPerCall < floorRaw || maxRolling30d < maxPerCall) return { ok: false, message: INVEST_COPY.capsProblem(atLeastUsd(floorRaw)) };
     return { ok: true, maxPerCall, maxRolling30d };
   } catch (error) {
     if (error instanceof AmountError) return { ok: false, message: error.message };
@@ -326,10 +342,99 @@ export const canSignPolicy = (input: {
 }): boolean =>
   input.acknowledged && input.capsOk && (input.minimumOk ?? true) && (input.weightsOk ?? true) && (input.depthOk ?? true) && !input.blocked;
 
+/** What "Sign again" and "Resume" would re-sign, or why neither may be pressed. */
+export type Resign =
+  | { readonly ok: true; readonly weights: ReadonlyMap<string, number>; readonly minInvestment: bigint; readonly limits: BasketLimits }
+  | { readonly ok: false; readonly message: string };
+
+/**
+ * WHAT THE TWO BUTTONS ON A SIGNED POLICY MAY DO, AND WHEN THEY MAY NOT.
+ *
+ * BOTH OF THEM RE-SIGN. "Sign again with today's prices" and "Resume investing"
+ * are set_invest_policy, the same instruction the setup form builds, and they
+ * used to send the two caps and NOTHING ELSE. Every other field was then filled
+ * in by the build route's defaults — the WHOLE shelf at equal shares, at the
+ * catalogue's split minimum (vault-flows.ts and build-handler.ts both, so the
+ * server could not catch it either). On the live one-leg policy that is one
+ * press away from a basket the owner never picked, while Pause three inches
+ * away re-signs the stored legs correctly: pause-then-resume was not a round
+ * trip, and nothing on the screen said so.
+ *
+ * SO THE STORED BASKET IS SENT BACK, BY MINT, WITH ITS OWN MINIMUM. And once it
+ * is, the cap has to be judged against IT: the window a cap sits inside is a
+ * function of the basket and the shares, so the $1,000 that was fine for one
+ * SPYx leg hands a half-weighted ANTHROPIC $500 against a route counted at
+ * $7,450, which the keeper's gate refuses — the whole basket, the SOL
+ * conversion included, on every sweep, forever, with the rent spent again. The
+ * setup form has refused exactly this since the picker landed. These two
+ * buttons went around it, so they are held to the same arithmetic here.
+ *
+ * WHAT IT WILL NOT DO IS GUESS. A leg the catalogue no longer offers cannot be
+ * re-signed (the request would silently drop it, which is a different basket),
+ * an unreadable field is not defaulted, and in every refusal Pause still works
+ * — it reads no price and re-signs exactly what is stored.
+ */
+export function resignStoredPolicy(policy: InvestmentPolicyJson): Resign {
+  const minInvestment = rawFrom(policy.minInvestment);
+  const maxPerCall = rawFrom(policy.maxPerCall);
+  if (minInvestment === null || maxPerCall === null || minInvestment <= 0n || maxPerCall <= 0n) return { ok: false, message: INVEST_COPY.resignUnreadable };
+  if (!Array.isArray(policy.legs) || policy.legs.length === 0) return { ok: false, message: INVEST_COPY.resignUnreadable };
+
+  const picked: PickedLeg[] = [];
+  const missing: string[] = [];
+  for (const leg of policy.legs) {
+    const asset = catalogueAsset(leg.mint);
+    // NOT OFFERED IS NOT THE SAME AS NOT KNOWN, and neither may be re-signed:
+    // investPolicyFlow filters the weights to OFFERED_LEGS, so either one would
+    // leave the request naming a shorter basket than the policy on screen.
+    if (asset === null || !isOfferable(asset)) missing.push(asset?.symbol ?? shortAddress(leg.mint));
+    else picked.push({ asset, weightBps: leg.weightBps });
+  }
+  if (missing.length > 0) return { ok: false, message: INVEST_COPY.resignUnoffered(listAnd(missing)) };
+
+  let limits: BasketLimits;
+  try {
+    limits = basketLimits(picked, minInvestment);
+  } catch {
+    // basketLimits throws RangeError on weights the program would refuse. A
+    // stored policy cannot hold any — the program checked them when it was
+    // signed — so this is a policy that could not be read, not one to repair.
+    return { ok: false, message: INVEST_COPY.resignUnreadable };
+  }
+  const weights = new Map(picked.map((leg) => [leg.asset.mint, leg.weightBps]));
+  if (maxPerCall < limits.floorRaw) {
+    return { ok: false, message: INVEST_COPY.resignBelowFloor(atLeastUsd(limits.floorRaw), limits.floorBinding?.symbol ?? picked[0]!.asset.symbol) };
+  }
+  if (limits.ceilingRaw !== null && limits.ceilingBinding !== null && (limits.empty || overCeiling(maxPerCall, limits))) {
+    return {
+      ok: false,
+      message: INVEST_COPY.resignOverCeiling(atMostUsd(limits.ceilingRaw), limits.ceilingBinding.symbol, limits.ceilingBinding.readOn ?? "an unrecorded day"),
+    };
+  }
+  return { ok: true, weights, minInvestment, limits };
+}
+
 // These two moved to src/lib/invest-limits.ts, where the live dashboard's rule
 // card reads the same numbers; re-exported so this card's existing imports and
 // its test are untouched.
 export { todaysLimits, usedInLast30Days, type TodaysLimits } from "@/lib/invest-limits";
+
+/**
+ * TODAY'S PER-STOCK LIMITS, FOR THE STOCKS HE TICKED.
+ *
+ * todaysLimits prices the WHOLE shelf and takes no basket: the build reads
+ * every offered leg's pool in one call and the page checks them all, which is
+ * right. What was wrong was printing them all under a heading that reads as a
+ * description of the policy being signed — a one-stock basket carried a limit
+ * line for a stock that basket does not hold, which is the same defect the
+ * approval paragraph had one screen later.
+ *
+ * IT FOLLOWS THE TICKS, NOT THE SHARES, like the paragraphs below it: a row
+ * whose percentage box is still empty is a stock he has chosen, and its limit
+ * is his to read while he types.
+ */
+export const pickedLegLimits = <T extends { readonly mint: string }>(legs: readonly T[], picked: readonly { readonly mint: string }[]): readonly T[] =>
+  legs.filter((leg) => picked.some((asset) => asset.mint === leg.mint));
 
 /** The rent a first policy costs: the policy account if missing, and each vault token account missing; null when any part is unknown. */
 export function setupRent(state: VaultStateJson): bigint | null {
@@ -439,6 +544,16 @@ function Fact({ label, children }: { readonly label: string; readonly children: 
  * wads and nothing holds them to each other, so a build could print a floor of
  * $90.03 over bytes that signed $0.00. The basket's names are SaverFi's own
  * OFFERED_LEGS, in the order the flow pinned them to.
+ *
+ * AND IT IS THE BASKET HE PICKED, NOT THE SHELF. The answer's `floors` block
+ * prices the WHOLE shelf, in OFFERED_LEGS' order, because that is one pool read
+ * either way — but the policy carries only the legs in `request.weights`
+ * (vault-flows.ts and build-handler.ts both filter to them). This is the last
+ * sentence the owner reads before Phantom, so a line here about a stock his
+ * policy will not contain is a false statement at the worst possible moment:
+ * it named an ANTHROPIC price ceiling over bytes that signed SPYx alone. The
+ * floors are still read by INDEX into that block, and the lines are filtered by
+ * MINT, so a leg cannot be printed against its neighbour's floor either.
  */
 export function SigningDetail({ progress, request }: { readonly progress: WriteProgress; readonly request: InvestRequest | "pause" | null }) {
   if (progress.phase !== "running" || progress.built === null || request === null) return null;
@@ -451,9 +566,16 @@ export function SigningDetail({ progress, request }: { readonly progress: WriteP
   const legs: string[] = [];
   for (const [index, leg] of OFFERED_LEGS.entries()) {
     const wad = rawFrom(floors.legs?.[index]?.wad);
+    // A FLOOR THE BUILD DID NOT PRICE IS STILL FATAL, even for a leg this
+    // policy does not hold: the flow checks the whole block before it signs, so
+    // a missing wad anywhere means the answer is not the one that was checked.
     if (wad === null || wad <= 0n) return null;
+    if (request.weights !== undefined && !request.weights.has(leg.mint)) continue;
     legs.push(INVEST_COPY.legSigning(leg.symbol, formatUsd(usdcRawPer1e8LegRaw(wad))));
   }
+  // A basket with no line at all is not described in half: the weights named
+  // nothing this app offers, and nothing here can say what is being signed.
+  if (legs.length === 0) return null;
   return (
     <p className="font-normal text-foreground">
       {INVEST_COPY.youAreSigning(formatUsd(usdcRawPerSol(convertWad)), legs.join("; "), formatUsd(request.maxPerCall), formatUsd(request.maxRolling30d))}
@@ -550,7 +672,10 @@ function PolicySetup({
   const copyLegs = signedLegsOf(chosenAssets);
   // The whole buy that clears the minimum on every leg: the floor, which is the
   // per-leg minimum multiplied up by the LIGHTEST share and not by the count.
-  const purchaseText = capsWindow === null ? formatUsd(DEFAULT_PURCHASE_USDC_RAW) : formatUsd(capsWindow.floorRaw);
+  // EVERY FLOOR ON THIS CARD IS QUOTED UPWARDS, for atLeastUsd's reason: the
+  // owner reads these three figures as "type this", and a floor a cent short of
+  // itself is a cap readCaps then refuses.
+  const purchaseText = capsWindow === null ? formatUsd(DEFAULT_PURCHASE_USDC_RAW) : atLeastUsd(capsWindow.floorRaw);
 
   return (
     <Card>
@@ -587,7 +712,13 @@ function PolicySetup({
             than as an explanation of a refusal afterwards. */}
         {capsWindow !== null && capsWindow.ceilingRaw !== null && capsWindow.ceilingBinding !== null && !capsWindow.empty ? (
           <p className="text-xs text-muted-foreground">
-            {INVEST_COPY.capWindow(formatUsd(capsWindow.floorRaw), atMostUsd(capsWindow.ceilingRaw), capsWindow.ceilingBinding.symbol, capsWindow.ceilingBinding.readOn ?? "an unrecorded day")}
+            {INVEST_COPY.capWindow(
+              atLeastUsd(capsWindow.floorRaw),
+              atMostUsd(capsWindow.ceilingRaw),
+              capsWindow.ceilingBinding.symbol,
+              capsWindow.ceilingBinding.readOn ?? "an unrecorded day",
+              capsWindow.ceilingBinding.derived,
+            )}
           </p>
         ) : null}
         <div className="grid gap-3 sm:grid-cols-2">
@@ -607,7 +738,7 @@ function PolicySetup({
                 the basket, so no number is offered as one. */}
             {capsWindow !== null && capsWindow.empty && capsWindow.ceilingRaw !== null && capsWindow.ceilingBinding !== null ? (
               <p role="alert" className="text-xs text-destructive">
-                {INVEST_COPY.capWindowEmpty(formatUsd(capsWindow.floorRaw), atMostUsd(capsWindow.ceilingRaw), capsWindow.ceilingBinding.symbol)}
+                {INVEST_COPY.capWindowEmpty(atLeastUsd(capsWindow.floorRaw), atMostUsd(capsWindow.ceilingRaw), capsWindow.ceilingBinding.symbol)}
               </p>
             ) : null}
             {capsWindow !== null && !capsWindow.empty && capsWindow.ceilingRaw !== null && capsWindow.ceilingBinding !== null && overCeiling(caps.maxPerCall, capsWindow) ? (
@@ -618,6 +749,7 @@ function PolicySetup({
                     capsWindow.ceilingBinding.symbol,
                     capsWindow.ceilingBinding.readOn ?? "an unrecorded day",
                     lighter === null ? null : ratePercent(lighter),
+                    capsWindow.ceilingBinding.derived,
                   )}
                 </p>
                 {/* THE FIX AS A PRESS, at the value the card would have started
@@ -676,6 +808,7 @@ function PolicySetup({
                 formatUsd(capsWindow.suggestedRaw),
                 capsWindow.ceilingBinding.symbol,
                 capsWindow.ceilingBinding.readOn ?? "an unrecorded day",
+                capsWindow.ceilingBinding.derived,
               )}
             </p>
           </div>
@@ -688,7 +821,14 @@ function PolicySetup({
           ) : (
             <>
               <p>{INVEST_COPY.solFloor(formatUsd(priceLimits.floorPerSol), formatUsd(priceLimits.todayPerSol))}</p>
-              {priceLimits.legs.map((leg) => (
+              {/* THE TICKED STOCKS, NOT THE SHELF. todaysLimits prices every
+                  offered leg — the build reads them all in one call and the
+                  page checks them all — but a box headed "Today's price limits"
+                  under a basket of one was printing a limit for a stock that
+                  basket does not hold. It follows the TICKS, like the paragraphs
+                  below it, so a row with an empty percentage box still has its
+                  own limit shown. */}
+              {pickedLegLimits(priceLimits.legs, chosenAssets).map((leg) => (
                 <p key={leg.mint}>{INVEST_COPY.legCeiling(leg.symbol, formatUsd(leg.maxPer1e8))}</p>
               ))}
               <p className="text-muted-foreground">{INVEST_COPY.convertFloorEffect(ratePercent(CONVERT_FLOOR_MARGIN_BPS))}</p>
@@ -801,6 +941,11 @@ function PolicySummary({
   // no timestamp (solana-program state.rs), so null is passed and the sentence
   // says so; what IS on the page is the floor and the rate just read, and the
   // drift is arithmetic over those two.
+  // WHAT THE TWO RE-SIGNING BUTTONS WOULD BUILD, or why neither may be pressed:
+  // the stored basket and its own minimum, judged against the same floor and
+  // depth ceiling the setup form judges a new one by.
+  const resign = resignStoredPolicy(policy);
+
   const solDrift = floorDrift(storedConvert, liveConvert, CONVERT_FLOOR_MARGIN_BPS);
   const driftLines: string[] = [];
   if (solDrift !== null && storedConvert !== null && liveConvert !== null) {
@@ -864,16 +1009,40 @@ function PolicySummary({
         </div>
         {readiness !== null ? <p className="text-xs">{readinessWords(readiness)}</p> : null}
         <p className="text-xs text-muted-foreground">{INVEST_COPY.freezeShort(policyLegs)}</p>
+        {/* WHY A REFUSAL CAN SIT HERE AND PAUSE STILL WORK. Both re-signing
+            buttons build set_invest_policy from today's prices and the stored
+            basket, so they are held to the same window the setup form is held
+            to; Pause reads no price and re-signs the stored bytes as they are,
+            so it is never blocked by an arithmetic about buying. */}
+        {!resign.ok ? (
+          <p role="alert" className="text-xs text-destructive">
+            {resign.message}
+          </p>
+        ) : null}
         <div className="flex flex-wrap gap-2">
-          <Button type="button" size="sm" disabled={blocked} aria-busy={write.running} onClick={() => start({ maxPerCall, maxRolling30d, enabled: policy.enabled })}>
+          <Button
+            type="button"
+            size="sm"
+            disabled={blocked || !resign.ok}
+            aria-busy={write.running}
+            onClick={() => {
+              // THE SAME CONDITION AS THE BUTTON'S OWN. And the stored basket
+              // travels with the caps: without weights and minInvestment the
+              // route rebuilds the WHOLE shelf at equal shares.
+              if (resign.ok) start({ maxPerCall, maxRolling30d, enabled: policy.enabled, minInvestment: resign.minInvestment, weights: resign.weights });
+            }}
+          >
             {INVEST_COPY.signAgain}
           </Button>
           <Button
             type="button"
             size="sm"
             variant="outline"
-            disabled={blocked}
-            onClick={() => (policy.enabled ? pause(policy) : start({ maxPerCall, maxRolling30d, enabled: true }))}
+            disabled={blocked || (!policy.enabled && !resign.ok)}
+            onClick={() => {
+              if (policy.enabled) pause(policy);
+              else if (resign.ok) start({ maxPerCall, maxRolling30d, enabled: true, minInvestment: resign.minInvestment, weights: resign.weights });
+            }}
           >
             {policy.enabled ? INVEST_COPY.pause : INVEST_COPY.resume}
           </Button>

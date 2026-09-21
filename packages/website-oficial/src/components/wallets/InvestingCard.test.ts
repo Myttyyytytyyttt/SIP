@@ -1,7 +1,7 @@
 // The investing card rendered to HTML in each state, with Privy mocked, and its buttons pressed: the
 // pattern VaultCard.test.ts uses. Pressing a button runs the real flow against a stub client.
 
-import { ANDURIL_MINT, ANTHROPIC_MINT, CATALOGUE, OFFERED_LEGS, RAYDIUM_CLMM, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT, isOfferable, offerProblems } from "@sip/solana-core/client";
+import { ANDURIL_MINT, ANTHROPIC_MINT, CATALOGUE, JUPITER_V6, OFFERED_LEGS, RAYDIUM_CLMM, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT, isOfferable, offerProblems } from "@sip/solana-core/client";
 import { Keypair } from "@solana/web3.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -47,7 +47,9 @@ import {
   REACHABLE_PER_BUY_RAW,
   SUGGESTED_PER_BUY_RAW,
   SigningDetail,
+  atLeastUsd,
   canSignPolicy,
+  pickedLegLimits,
   readCaps,
   readMinimum,
   readWeights,
@@ -187,17 +189,24 @@ describe("InvestingCard", () => {
     // It used to open "Your vault invests in SPYx (SP500 xStock) through Raydium"
     // while the Basket field directly below already read two legs — the card
     // contradicted itself on screen.
+    // THE ROUTE IS JUPITER'S TO PICK, AND THE SENTENCE SAYS SO. It read "each
+    // through its own Raydium pool" — a venue this branch's keeper refuses by
+    // name before the wrap, and a route nobody pins any more.
     expect(html).toContain(
-      "Your vault invests in SPYx at 50 % and ANTHROPIC at 50 %, each through its own Raydium pool, and a buy takes all of them or none.",
+      "Your vault invests in SPYx at 50 % and ANTHROPIC at 50 %, each bought through Jupiter, which picks the route for every buy, and a buy takes all of them or none.",
     );
     expect(html).not.toContain("invests in SPYx (SP500 xStock)");
+    expect(html).not.toContain("each through its own Raydium pool");
     expect(html).toContain("the keeper converts it to USDC, never below $90.03 per SOL, then buys once $5.00 of USDC is ready");
     expect(html).toContain("At most $149.00 per buy and $31,000.00 per 30 days until you change them.");
     // The per-stock ceilings left the prose: at two legs they were joined by a
     // slash into "$801.80 / $18.95", a figure of no meaning. One line per stock
     // in the limits box above is the whole of it now.
     expect(html).not.toContain("$801.80 / $18.95");
-    expect(html).toContain("or one of the pools is too small for the buy, nothing is bought and no SOL is converted until you sign again.");
+    // THE VENUE, NOT "THE POOL", here too: the same unit change of 2026-09-21
+    // that rewrote thinPool sixteen lines below left this clause behind.
+    expect(html).toContain("or the venue a buy would land in is too small for it, nothing is bought and no SOL is converted until you sign again.");
+    expect(html).not.toContain("one of the pools is too small for the buy");
     // Policy 5,577,840 + wSOL and USDC 1,488,440 each + SPYx 1,559,560 + ANTHROPIC 1,620,520 lamports, then 5,000 + 30,000 of fees.
     expect(html).toContain("Setting this up costs 0.0117348 SOL of rent for the policy and the vault&#x27;s token accounts, and none of it comes back.");
     expect(html).toContain("Cost: 0.0117348 SOL of rent that does not come back, plus 0.000035 SOL of network fees.");
@@ -226,7 +235,12 @@ describe("InvestingCard", () => {
     // all four from the shares on screen, so re-weighting the basket moves the
     // sentence with it.
     expect(html).toContain("the leg that sets it is ANTHROPIC");
-    expect(html).toContain("when it was last read, on 2026-09-21");
+    // AND IT SAYS WHICH KIND OF READING IT IS. ANTHROPIC's census is worked
+    // back from that day's own ceiling measurement, not counted — its entry has
+    // always said so in a field nothing rendered, so the card called a derived
+    // figure a count beside a sentence whose null branch means "not counted".
+    expect(html).toContain("worked out on 2026-09-21 from that day&#x27;s own measurement rather than counted directly");
+    expect(html).not.toContain("counting what its route held when it was last read");
     expect(html).toContain("the whole buy can be at most $298.00, and that is the ceiling itself, not a target");
     expect(html).toContain("Most per buy starts at $149.00, which is half the ceiling");
     expect(html).toContain("The keeper measures whichever venue it is actually buying through, in the turn itself");
@@ -484,7 +498,8 @@ describe("InvestingCard", () => {
     expect(html.indexOf("At these shares, Most per buy can be between")).toBeLessThan(html.indexOf('id="invest-max-per-call"'));
     // Its top is dated and attributed on the same line, so a stale ceiling is
     // visible as a stale one rather than reading as today's.
-    expect(html).toContain("the top is ANTHROPIC&#x27;s market as it was counted on 2026-09-21");
+    expect(html).toContain("the top is ANTHROPIC&#x27;s market as it was worked out on 2026-09-21 from that day&#x27;s own measurement rather than counted directly");
+    expect(html).not.toContain("market as it was counted on 2026-09-21");
 
     // THE FORM OPENS ON THE SHELF, at whole percents that add up exactly.
     expect(DEFAULT_PICKED.map((row) => row.mint)).toEqual(OFFERED_LEGS.map((leg) => leg.mint));
@@ -527,11 +542,18 @@ describe("InvestingCard", () => {
    * offer something it cannot verify.
    */
   it("offers only venue names the server serves AND this app can check the bytes of, and never puts a program id in the form", () => {
-    const offered = render(screen({ kind: "ready", state: { ...stateWith(), offeredVenues: ["raydium-clmm"] } }));
+    const offered = render(screen({ kind: "ready", state: { ...stateWith(), offeredVenues: ["jupiter-v6"] } }));
     expect(offered).toContain('id="invest-venue"');
-    expect(offered).toContain('value="raydium-clmm"');
+    expect(offered).toContain('value="jupiter-v6"');
     // NAMES ONLY: the program id never reaches the browser's form.
-    expect(offered).not.toContain(RAYDIUM_CLMM);
+    expect(offered).not.toContain(JUPITER_V6);
+
+    // AND THE VENUE THE KEEPER REFUSES IS NOT OFFERABLE AT ALL. raydium-clmm
+    // is the name this panel used to sign by default; a policy carrying it is
+    // refused by invest-decision.ts before the wrap, forever.
+    const retired = render(screen({ kind: "ready", state: { ...stateWith(), offeredVenues: ["raydium-clmm"] } }));
+    expect(retired).not.toContain("raydium-clmm");
+    expect(retired).not.toContain('id="invest-venue"');
 
     // A name this app cannot verify is not offered, even when the server does.
     const unknown = render(screen({ kind: "ready", state: { ...stateWith(), offeredVenues: ["orca-whirlpool"] } }));
@@ -650,14 +672,84 @@ describe("InvestingCard", () => {
     expect(mocked.signTransaction).not.toHaveBeenCalled();
   });
 
-  it("Resume hands the flow the stored caps with investing on, which reads today's prices", async () => {
+  /**
+   * RESUME AND SIGN AGAIN RE-SIGN THE STORED BASKET, WHICH IS THE WHOLE POINT
+   * OF THE PAYLOAD BELOW.
+   *
+   * These two used to post the caps alone. The build route then filled the rest
+   * in with its own defaults — the WHOLE shelf at equal shares, at the
+   * catalogue's split minimum — so one press on a one-stock policy signed a
+   * basket the owner never picked, while Pause beside it correctly re-signed
+   * the stored legs. The weights and the minimum below are what makes
+   * pause-then-resume a round trip.
+   */
+  it("Resume hands the flow the stored caps, the stored basket and its own minimum, which reads today's prices", async () => {
     const build = vi.fn(async () => ({ ok: false as const, status: 409, code: "vault_missing", message: "Create your vault first.", retryAfterSeconds: null, body: {} }));
     const value = screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: { ...POLICY, enabled: false } } }) }, { build: build as unknown as VaultApi["build"] });
     const html = render(value);
     expect(html).toContain("Investing is paused.");
     buttons("Resume investing")[0]?.onClick?.(CLICK);
     await vi.waitFor(() => expect(value.refresh).toHaveBeenCalledTimes(1));
-    expect(build.mock.calls).toStrictEqual([[{ action: "investPolicy", owner: PENSION, maxPerCall: "10000000", maxRolling30d: "50000000", enabled: true }]]);
+    expect(build.mock.calls).toStrictEqual([
+      [
+        {
+          action: "investPolicy",
+          owner: PENSION,
+          maxPerCall: "10000000",
+          maxRolling30d: "50000000",
+          enabled: true,
+          minInvestment: "2500000",
+          weights: [
+            { mint: SPYX_MINT, weightBps: 5_000 },
+            { mint: ANTHROPIC_MINT, weightBps: 5_000 },
+          ],
+        },
+      ],
+    ]);
+  });
+
+  it("Sign again re-signs the basket the policy holds, not the whole shelf: a one-stock policy stays one stock", async () => {
+    const build = vi.fn(async () => ({ ok: false as const, status: 409, code: "vault_missing", message: "Create your vault first.", retryAfterSeconds: null, body: {} }));
+    // THE LIVE POLICY'S SHAPE: one leg, SPYx at 10,000 bps, the one-leg minimum.
+    const oneLeg = { ...POLICY, legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "124719467624105690" }], minInvestment: "5000000" };
+    const value = screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: oneLeg } }) }, { build: build as unknown as VaultApi["build"] });
+    render(value);
+    buttons("Sign again with today's prices")[0]?.onClick?.(CLICK);
+    await vi.waitFor(() => expect(value.refresh).toHaveBeenCalledTimes(1));
+    expect(build.mock.calls).toStrictEqual([
+      [
+        {
+          action: "investPolicy",
+          owner: PENSION,
+          maxPerCall: "10000000",
+          maxRolling30d: "50000000",
+          enabled: true,
+          minInvestment: "5000000",
+          weights: [{ mint: SPYX_MINT, weightBps: 10_000 }],
+        },
+      ],
+    ]);
+    // THE STOCK HE DID NOT PICK IS NOT IN THE REQUEST AT ALL — not at a share
+    // of zero, which the program refuses, and not at half, which is what the
+    // route's own default would have made of an absent basket.
+    expect(JSON.stringify(build.mock.calls)).not.toContain(ANTHROPIC_MINT);
+  });
+
+  /**
+   * THE CAP IS JUDGED AGAINST THE STORED BASKET, WHICH IS WHERE THIS USED TO
+   * GO WRONG. The setup form has refused a cap over the depth ceiling since the
+   * picker landed; these two buttons went around it, and a stored $1,000 cap on
+   * a half-weighted ANTHROPIC leg re-signs into a policy that buys NOTHING at
+   * any balance — the whole basket, the SOL conversion included — with the rent
+   * spent again. Pause must stay available, because it reads no price.
+   */
+  it("refuses to re-sign a stored cap its own basket's counted routes cannot cover, and still offers Pause", () => {
+    const overCeiling = { ...POLICY, maxPerCall: "1000000000", maxRolling30d: "31000000000" };
+    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: overCeiling } }) }));
+    expect(html).toContain("ANTHROPIC");
+    expect(html).toContain("buys nothing at any balance");
+    expect(buttons("Sign again with today's prices").map((button) => button.disabled)).toEqual([true]);
+    expect(buttons("Pause investing").map((button) => button.disabled)).toEqual([false]);
   });
 
   /**
@@ -683,13 +775,90 @@ describe("InvestingCard", () => {
     },
   };
 
-  const signingDetail = (built: unknown): string =>
+  const signingDetail = (built: unknown, weights?: ReadonlyMap<string, number>): string =>
     renderToStaticMarkup(
       createElement(SigningDetail, {
         progress: { phase: "running", kind: "policy", step: "approve_pension", built } as WriteProgress,
-        request: { maxPerCall: 10_000_000n, maxRolling30d: 50_000_000n, enabled: true },
+        request: { maxPerCall: 10_000_000n, maxRolling30d: 50_000_000n, enabled: true, weights },
       }),
     );
+
+  /**
+   * THE LAST SENTENCE BEFORE PHANTOM IS ABOUT THE BASKET HE PICKED.
+   *
+   * The build's `floors` block prices the WHOLE shelf — one pool read either
+   * way — but the policy carries only the legs in `weights`, which both
+   * vault-flows.ts and build-handler.ts filter to. This paragraph was built
+   * from OFFERED_LEGS regardless, so a one-stock basket was approved under a
+   * sentence promising a price ceiling for a stock the transaction does not
+   * contain: a false statement at the one moment the owner is reading most
+   * carefully. The floors are still read by INDEX and the lines filtered by
+   * MINT, so a leg cannot inherit its neighbour's floor either.
+   */
+  it("names only the stocks the request actually signs, at each one's own floor", () => {
+    const spyxOnly = signingDetail(FORGED_BUILD, new Map([[SPYX_MINT, 10_000]]));
+    expect(spyxOnly).toContain("SPYx never bought above");
+    expect(spyxOnly).not.toContain("ANTHROPIC never bought above");
+
+    // The other way round, so the filter cannot be passing by position: the
+    // basket is ANTHROPIC alone, and its line must carry ITS OWN floor — the
+    // second entry of the block, not the first.
+    const anthropicOnly = signingDetail(FORGED_BUILD, new Map([[ANTHROPIC_MINT, 10_000]]));
+    expect(anthropicOnly).toContain("ANTHROPIC never bought above");
+    expect(anthropicOnly).not.toContain("SPYx never bought above");
+
+    // A weights map naming nothing this app offers describes nothing at all,
+    // rather than describing the shelf.
+    expect(signingDetail(FORGED_BUILD, new Map([[ANDURIL_MINT, 10_000]]))).toBe("");
+  });
+
+  /**
+   * THE "Today's price limits" BOX IS ABOUT THE TICKED STOCKS.
+   *
+   * todaysLimits prices the whole shelf and takes no basket — the build reads
+   * every offered leg's pool in one call, which is right — but the box was
+   * printing all of them under a heading the owner reads as a description of
+   * the policy he is signing. On a SPYx-only basket it read "ANTHROPIC is never
+   * bought above $18.95", a limit his policy would not contain.
+   */
+  it("shows a price limit for each ticked stock and for no others", () => {
+    const shelf = [
+      { mint: SPYX_MINT, symbol: "SPYx" },
+      { mint: ANTHROPIC_MINT, symbol: "ANTHROPIC" },
+    ];
+    expect(pickedLegLimits(shelf, [{ mint: SPYX_MINT }])).toEqual([{ mint: SPYX_MINT, symbol: "SPYx" }]);
+    expect(pickedLegLimits(shelf, [{ mint: ANTHROPIC_MINT }])).toEqual([{ mint: ANTHROPIC_MINT, symbol: "ANTHROPIC" }]);
+    // A stock nobody ticked contributes nothing, and an empty basket shows no
+    // limits at all rather than the shelf's.
+    expect(pickedLegLimits(shelf, [{ mint: ANDURIL_MINT }])).toEqual([]);
+    expect(pickedLegLimits(shelf, [])).toEqual([]);
+    // The default basket IS the shelf, so the box is unchanged where it was right.
+    expect(pickedLegLimits(shelf, shelf)).toEqual(shelf);
+  });
+
+  /**
+   * A FLOOR QUOTED IN WORDS ROUNDS UP; A CEILING ROUNDS DOWN. Both say "type
+   * this", and both are checked against raw units.
+   *
+   * formatUsd rounds to the NEARER cent, so a floor of $47.571429 printed as
+   * "$47.57" — a cap readCaps then refuses with that same sentence, so typing
+   * what the message says loops. atMostUsd already reasoned this out for the
+   * ceiling and got the other direction.
+   */
+  it("quotes the smallest workable cap upward, so the cap it names is one it accepts", () => {
+    // $3.33 minimum on a 7/93 split: ⌈3_330_000 × 10_000 / 700⌉ = 47_571_429.
+    const floorRaw = 47_571_429n;
+    expect(atLeastUsd(floorRaw)).toBe("$47.58");
+    const refusal = readCaps("1", "31000", floorRaw);
+    expect(refusal).toMatchObject({ ok: false });
+    expect(!refusal.ok && refusal.message).toContain("$47.58");
+    // AND THE FIGURE IN THE SENTENCE IS ACCEPTED, which is the whole point.
+    expect(readCaps("47.58", "31000", floorRaw)).toMatchObject({ ok: true });
+    expect(readCaps("47.57", "31000", floorRaw)).toMatchObject({ ok: false });
+    // A floor already on a cent is not pushed up by one.
+    expect(atLeastUsd(5_000_000n)).toBe("$5.00");
+    expect(readCaps("5", "31000", 5_000_000n)).toMatchObject({ ok: true });
+  });
 
   it("what Phantom is asked to sign is read from the floors the BYTES carry, never from the answer's own dollar fields", () => {
     const html = signingDetail(FORGED_BUILD);

@@ -12,6 +12,7 @@ import {
   CLMM_POOL_STATE_DISCRIMINATOR,
   COMPUTE_BUDGET_PROGRAM,
   ED25519_PROGRAM,
+  JUPITER_V6,
   RAYDIUM_CLMM,
   SIP_ACCOUNT_SPACE,
   SIP_PROGRAM_ID,
@@ -421,8 +422,13 @@ describe("/api/solana-build", () => {
     ]);
 
     // ── THE VENUE: A NAME, NEVER A PROGRAM ID FROM THE BROWSER ───────────────
-    const venueWords = "venue must be one of: raydium-clmm. It is a venue's name, never a program address.";
-    expect(await accepted({ venue: "raydium-clmm" })).toEqual(ACCEPTED);
+    // THE ONE NAME IS THE ONE THE KEEPER ROUTES. While it was "raydium-clmm"
+    // every policy this route could build was refused by the keeper before the
+    // wrap, on every sweep, for the life of the policy.
+    const venueWords = "venue must be one of: jupiter-v6. It is a venue's name, never a program address.";
+    expect(await accepted({ venue: "jupiter-v6" })).toEqual(ACCEPTED);
+    expect(await refused({ venue: JUPITER_V6 })).toEqual([400, "bad_request", venueWords]);
+    expect(await refused({ venue: "raydium-clmm" })).toEqual([400, "bad_request", venueWords]);
     expect(await refused({ venue: RAYDIUM_CLMM })).toEqual([400, "bad_request", venueWords]);
     expect(await refused({ venue: "orca-whirlpool" })).toEqual([400, "bad_request", venueWords]);
 

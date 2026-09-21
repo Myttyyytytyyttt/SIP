@@ -52,7 +52,9 @@ import { describe, expect, it, vi } from "vitest";
 import { FAILURE_COPY, WITHDRAW_COPY } from "@/lib/vault-copy";
 import type { ApiFailure, ApiResult, BuiltTransactionJson, InvestmentPolicyJson, SendResponseJson, VaultApi } from "@/lib/vault-api";
 import {
+  DEFAULT_VENUE_NAME,
   LINK_MAX_BUILDS,
+  VERIFIABLE_VENUES,
   awaitsConfirmation,
   checkAgainFlow,
   createVaultFlow,
@@ -66,6 +68,7 @@ import {
   type FlowStep,
 } from "@/lib/vault-flows";
 import { deriveAtaAddress, deriveConfigAddress, deriveInvestAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
+import { ROUTED_VENUE } from "../../../solana-core/test/fixtures/keeper-policy";
 
 function signBytes(signer: Keypair, message: Uint8Array): Uint8Array {
   const privateKey = createPrivateKey({
@@ -476,6 +479,26 @@ describe("setPolicyFlow", () => {
 });
 
 describe("investPolicyFlow", () => {
+  /**
+   * THE WEB'S HALF OF ROUTED_VENUE, the vector the keeper asserts from its own
+   * side (packages/solana-core/test/fixtures/keeper-policy.ts).
+   *
+   * WHAT THIS CATCHES IS NOT A TYPO. Until this branch, the only name this
+   * panel could sign was raydium-clmm — a venue this repo's keeper refuses by
+   * name before the wrap, all-or-nothing, for the life of the policy. Every
+   * basket the picker let the owner build bought NOTHING at any balance, the
+   * whole depth window was arithmetic about a venue that would never be
+   * reached, and the form said none of it. The set is small enough to assert
+   * whole, so it is asserted whole, against the keeper's own value.
+   */
+  it("can only sign the venue this repo's keeper routes, and cannot sign the retired one at all", () => {
+    expect(DEFAULT_VENUE_NAME).toBe(ROUTED_VENUE.web.venueName);
+    expect([...VERIFIABLE_VENUES.keys()]).toEqual([ROUTED_VENUE.web.venueName]);
+    expect(VERIFIABLE_VENUES.get(DEFAULT_VENUE_NAME)).toBe(ROUTED_VENUE.keeper.programId);
+    expect(VERIFIABLE_VENUES.has(ROUTED_VENUE.retired.venueName)).toBe(false);
+    expect([...VERIFIABLE_VENUES.values()]).not.toContain(ROUTED_VENUE.retired.programId);
+  });
+
   it("builds with the caps asked, checks the floors and the vault's own token accounts, shows the checked answer, has Phantom sign the built bytes, and sends", async () => {
     const h = harness();
     const shown: BuiltTransactionJson[] = [];
@@ -511,7 +534,7 @@ describe("investPolicyFlow", () => {
         [SPYX_MINT, 7_000],
         [ANTHROPIC_MINT, 3_000],
       ]),
-      venue: "raydium-clmm",
+      venue: "jupiter-v6",
     });
     expect(result.ok).toBe(true);
     const sent = h.build.mock.calls[0]![0];
@@ -525,7 +548,7 @@ describe("investPolicyFlow", () => {
         { mint: SPYX_MINT, weightBps: 7_000 },
         { mint: ANTHROPIC_MINT, weightBps: 3_000 },
       ],
-      venue: "raydium-clmm",
+      venue: "jupiter-v6",
     });
     // EVERY AMOUNT IS A STRING, so nothing can arrive through a lossy double,
     // and the venue is a NAME: the program id never leaves this process.
@@ -738,6 +761,12 @@ describe("pauseInvestingFlow", () => {
       ...buildSetInvestPolicy({
         owner,
         legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: forge.legFloor ?? 111n }],
+        // THE VENUE THE SHOWN POLICY CARRIES, not the builder's default. A
+        // pause re-signs the stored policy byte for byte, and the stored one
+        // here is the retired venue on purpose: pausing must work on a policy
+        // the keeper would refuse to buy through, which is exactly the policy
+        // an owner signed before this branch moved the basket to Jupiter.
+        venueProgram: RAYDIUM_CLMM,
         minConvertRateWad: forge.convertFloor ?? 222n,
         minInvestment: 5_000_000n,
         maxPerCall: forge.maxPerCall ?? 10_000_000n,

@@ -177,6 +177,22 @@ export interface DepthReading {
   readonly venue: string;
   readonly readOn: string;
   readonly by: string;
+  /**
+   * TRUE WHEN THE FIGURE WAS WORKED BACK FROM ANOTHER MEASUREMENT RATHER THAN
+   * COUNTED, and the distinction is load-bearing all the way to the owner's
+   * screen. `by` has always said so in prose — ANTHROPIC's census reads
+   * "inverted from that day's ceiling measurement … not a direct count" — but
+   * `by` and `scope` are never rendered, so the web called every one of these a
+   * count. "Counted" is the word the copy leans on: the null branch says
+   * "SaverFi has not counted…", so a derived figure printed as a count
+   * collapses the one distinction the sentence relies on. A flag the UI can
+   * read keeps the prose honest without re-deriving anything.
+   *
+   * ABSENT MEANS COUNTED. A reading that does not say it was derived is one
+   * somebody took directly, which is the safe default for a field being added
+   * to entries that were all written before it existed.
+   */
+  readonly derived?: boolean;
 }
 
 /**
@@ -317,8 +333,19 @@ export const XSTOCKS_POWERS = Object.freeze({
   feeAddableLater: false,
   why: "Token-2022 extensions are fixed at mint initialisation; a mint with no TransferFeeConfig can never gain one",
   stillHolds: Object.freeze(["freeze", "permanent-delegate", "pausable", "default-account-state"]),
+  /**
+   * THE MINTS THIS WAS ACTUALLY READ OVER, because 929 xStock mints exist and
+   * ONE was read. PRESTOCKS_POWERS makes the same kind of group claim and earns
+   * it: it was read over all eight mints it speaks for. This one was not, and
+   * the sentence the picker prints from it is in the plural under a heading
+   * keyed by group — true today only because SPYx is the sole xStock on the
+   * shelf, and a claim the machinery would apply unchanged to the next one
+   * added with no new reading required. Naming the mints read makes the copy
+   * say what it knows, and makes adding an xStock without reading it visible.
+   */
+  mintsRead: Object.freeze(["SPYx"]),
   readOn: "2026-09-21",
-  by: "getMultipleAccounts over the SPYx mint, mainnet, epoch 1039",
+  by: "getMultipleAccounts over the SPYx mint, mainnet, epoch 1039 — SPYx alone, not the xStocks range",
 });
 
 // ── THE SIZE EVERY CATALOGUE RULE IS MEASURED AT ─────────────────────────────
@@ -482,8 +509,10 @@ export const isOfferable = (asset: CatalogueAsset): asset is OfferedLeg => offer
  * Null here means the picker must say it does not know the ceiling. It must not
  * reach for `depth` instead.
  */
-export const routeCensusRaw = (asset: CatalogueAsset): bigint | null =>
-  asset.routeCensus !== null ? asset.routeCensus.usdcRaw : asset.depth !== null && asset.depth.scope === "route-census" ? asset.depth.usdcRaw : null;
+export const routeCensusReading = (asset: CatalogueAsset): DepthReading | null =>
+  asset.routeCensus !== null ? asset.routeCensus : asset.depth !== null && asset.depth.scope === "route-census" ? asset.depth : null;
+
+export const routeCensusRaw = (asset: CatalogueAsset): bigint | null => routeCensusReading(asset)?.usdcRaw ?? null;
 
 // ── THE ASSETS ───────────────────────────────────────────────────────────────
 //
@@ -526,11 +555,41 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPool: SPYX_USDC_POOL,
     floorPoolUsdc: Object.freeze({ usdcRaw: 2_646_541_815_865n, scope: "route-census", venue: "Raydium CLMM 6truu3rZ… (the floor source, USDC vault 3EmW8zJD…)", readOn: "2026-09-21", by: "getMultipleAccounts, mainnet slot 448994132" }),
     fee: Object.freeze({ bps: 0, epoch: 1039, readOn: "2026-09-21", by: "mint extensions, mainnet slot 448993661: no TransferFeeConfig at all" }),
-    depth: Object.freeze({ usdcRaw: 317_640_466_447n, scope: "route-census", venue: "Raydium CLMM 4pCZCVEi… (what a 200 USDC buy actually routed through)", readOn: "2026-09-21", by: "getMultipleAccounts over that pool's USDC vault 92aTAYGn…, mainnet slot 448995444" }),
-    // Its depth reading IS a route census — one pool, counted on its own vault
-    // — so the ceiling divides the same number the shelf was judged on.
-    routeCensus: Object.freeze({ usdcRaw: 317_640_466_447n, scope: "route-census", venue: "Raydium CLMM 4pCZCVEi…", readOn: "2026-09-21", by: "getMultipleAccounts over that pool's USDC vault 92aTAYGn…, mainnet slot 448995444" }),
-    sizePenalty: Object.freeze({ bps: 0.2, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: false, routes: "Raydium CLMM at 200 USDC vs Whirlpool at 12.50", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 0.2" }),
+    depth: Object.freeze({ usdcRaw: 317_640_466_447n, scope: "route-census", venue: "Raydium CLMM 4pCZCVEi… (a pool a 200 USDC buy routed through on 2026-09-21)", readOn: "2026-09-21", by: "getMultipleAccounts over that pool's USDC vault 92aTAYGn…, mainnet slot 448995444" }),
+    // THE CENSUS IS THE SMALLEST INVENTORY ANY POOL THE ROUTER ACTUALLY PICKED
+    // WAS COUNTED TO HOLD, AND IT IS NOT THE POOL ABOVE.
+    //
+    // The ceiling DIVIDES this number, so the only direction it may be wrong in
+    // is downwards — and it was pinned at 317,640, a pool that no reading later
+    // the same day routed through at all. Read again on 2026-09-21 a 200 USDC
+    // buy routed Byreal 27x6aSxc… in one hour and Riptide G9pQE63… in the next,
+    // five readings each. Byreal is a Raydium CLMM fork and names its own USDC
+    // vault, so it can be counted: $201,151.98. Riptide's pool account names no
+    // token account at all, so nothing in it can be counted from chain — the
+    // same wall Hadron puts up.
+    //
+    // So this figure is a BOUND, not the route: the smallest count taken of any
+    // pool observed on the route, which is the conservative reading when the
+    // router re-picks per quote and one of its picks cannot be counted at all.
+    // SPYx is deep enough that no cap this product can sign comes near it; what
+    // the change buys is that the ceiling stops dividing a number no buy has
+    // been seen to touch.
+    routeCensus: Object.freeze({
+      usdcRaw: 201_151_975_426n,
+      scope: "route-census",
+      venue: "Byreal 27x6aSxcAm6SoazoxmmTtFg6fWMQuNmdKJmHagq1DUZy (one of the pools a 200 USDC buy routed through; Riptide G9pQE63etkaFuuX7UNGB8YnvBufNNZMo9GchQNCxrYeD answered the others and cannot be counted)",
+      readOn: "2026-09-21",
+      by: "getAccountInfo on the pool, then getMultipleAccounts over the USDC account it names, FGdm1Ww1ch138kWjjEigFUFncxzkvfZ6m8Fo1YvM8BMu, mainnet slot 449184534",
+    }),
+    sizePenalty: Object.freeze({
+      bps: 0.2,
+      atRaw: 200_000_000n,
+      probeRaw: 12_500_000n,
+      sameVenues: false,
+      routes: "Raydium CLMM at 200 USDC vs Whirlpool at 12.50 (2026-09-21); re-read the same day, Riptide G9pQE63… at BOTH sizes, five readings, 0 bps each",
+      readOn: "2026-09-21",
+      by: "lite-api.jup.ag, three readings, all 0.2; re-read later the same day, five paired readings, all 0.0 — the figure kept here is the worse of the two sets",
+    }),
     quarantinedUntil: null,
     notes: Object.freeze([
       "ITS FLOOR POOL IS NOT ITS MARKET. The pool this entry prices the floor from held $2,646,541.82; the pool a 200 USDC buy actually routed through is a different Raydium CLMM pool holding $317,640.47. The two disagree by 8.3x and both are real — one is where the price is read, the other is where the money goes.",
@@ -549,19 +608,51 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPool: ANTHROPIC_USDC_POOL,
     floorPoolUsdc: Object.freeze({ usdcRaw: 9_204_135_177n, scope: "route-census", venue: "Raydium CLMM 47MsbowA… (the floor source, USDC vault FZmwQEZq…)", readOn: "2026-09-21", by: "getMultipleAccounts, mainnet slot 448994132" }),
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661: newer record, live from epoch 1039" }),
-    depth: Object.freeze({ usdcRaw: 331_617_000_000n, scope: "venue-wide", venue: "Hadron", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes; not re-derivable from this file" }),
+    depth: Object.freeze({ usdcRaw: 331_617_000_000n, scope: "venue-wide", venue: "Hadron", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work. THERE IS NO SOURCE FOR IT IN THIS REPOSITORY: no notes file, no script and no commit records the reading, and it is not re-derivable — the venue names no token account this figure could be counted from. Read it as an undated third-party figure with a date on it" }),
     // 2.2 % OF THE FIGURE ABOVE, AND IT IS THIS ONE THE CAP IS DIVIDED BY. The
     // number is inverted from the day's own ceiling measurement rather than
     // counted directly, and it inverts exactly: a 50 % leg capped the policy at
     // $298.00 and a 20 % leg at $745.00, and ⌊7,450 / 50⌋ = $149 a leg is the
     // only countable inventory that produces both. It is a derived reading and
     // is labelled one; re-deriving it means censusing a live route.
-    routeCensus: Object.freeze({ usdcRaw: 7_450_000_000n, scope: "route-census", venue: "BisonFi + Manifest (the route a 200 USDC buy took that day)", readOn: "2026-09-21", by: "inverted from that day's ceiling measurement — $298.00 at a half share, $745.00 at a fifth — not a direct count" }),
-    sizePenalty: Object.freeze({ bps: 0.1, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: false, routes: "BisonFi + Manifest, or GoonFi V2 + Manifest, at 200 USDC vs a probe that re-routed on every reading", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings: 0.0, -0.0, 0.1" }),
+    routeCensus: Object.freeze({
+      usdcRaw: 7_450_000_000n,
+      scope: "route-census",
+      // DERIVED, AND NOW FLAGGED AS SUCH SO THE OWNER'S SCREEN CAN SAY IT. `by`
+      // has always said "not a direct count", but nothing rendered `by`, so
+      // every sentence in the web called this a count — beside a null branch
+      // whose whole meaning is "SaverFi has not counted this". One flag the
+      // copy can read keeps that distinction alive at the place it matters.
+      derived: true,
+      venue: "the route a 200 USDC buy took on 2026-09-21 (BisonFi + Manifest then; re-read the same day it took Kipseli, AlphaQ, Raydium CLMM, BisonFi and Manifest in five different pairings, never the same one twice)",
+      readOn: "2026-09-21",
+      by: "inverted from that day's ceiling measurement — $298.00 at a half share, $745.00 at a fifth — not a direct count",
+    }),
+    // THE WORST OF EIGHT PAIRED READINGS, NOT THE BEST, AND THE SPREAD IS THE
+    // POINT. The entry recorded 0.1 bps citing "three readings: 0.0, -0.0,
+    // 0.1", which reads as a settled quantity. It is not one: check:legs read
+    // 107 bps on one run on 2026-09-21 and FAILED this leg, then 14 bps minutes
+    // later, then 0 bps on the next run, and five paired probes taken in
+    // between returned 0, 1, 1, 0, 0 with a DIFFERENT route on every single
+    // reading. The bar this is measured against is 25 bps, so the quantity
+    // straddles it. What is recorded here is the worst reading of the ones
+    // taken in the session that wrote this comment; what the entry must not do
+    // is present any of them as stable.
+    sizePenalty: Object.freeze({
+      bps: 1,
+      atRaw: 200_000_000n,
+      probeRaw: 12_500_000n,
+      sameVenues: false,
+      routes: "a route that changed on every reading — Kipseli + Manifest, AlphaQ + Whirlpool + Manifest, Raydium CLMM + Manifest, BisonFi + Meteora DLMM + Manifest, Manifest + Raydium CLMM + Manifest — against a probe that re-routed too",
+      readOn: "2026-09-21",
+      by: "lite-api.jup.ag, five paired readings (0, 1, 1, 0, 0 bps), the worst kept; the same quantity read 107 bps and 14 bps through check:legs earlier the same day, so it is a screen and not a settled number",
+    }),
     quarantinedUntil: null,
     notes: Object.freeze([
       "ITS TRANSFER FEE IS AT THE CEILING WITH ZERO MARGIN. 100 bps from epoch 1039, against MAX_LEG_FEE_BPS of 100, which the keeper compares with `>`. One more write by the issuer key — which it may make at any epoch boundary, and an epoch is hours — refuses this leg, and a refused leg refuses the WHOLE basket and the SOL conversion with it, on every sweep, until the fee comes back down. The fee was 50 bps until epoch 1039 and this file is not its source: read it from the mint.",
       "THE VENUE-WIDE NUMBER ABOVE IS NOT WHAT THE KEEPER COUNTS, and the gap decides whether a buy clears. The keeper censuses only the accounts the chosen route names; the 2026-09-21 ceiling measurement implies about $7,450 of that, 2.2 % of the venue-wide figure, which at 50x cover allows about $149 a leg. That is UNDER the $200 reference leg this catalogue is measured at: at the shipped $1,000 max_per_call split five ways, the keeper refuses ANTHROPIC today. The owner lowers max_per_call and the picker computes the ceiling (basket-limits.ts depthCeiling); nothing in this entry promises otherwise.",
+      "ITS SIZE PENALTY IS NOT A STABLE NUMBER AND THE SHELF RULE IT PASSES IS A COIN FLIP. Readings of the same quantity minutes apart on 2026-09-21 ranged from 0 to 107 bps against a 25 bps bar, because the router picked a different route every time and the two sizes never took the same one (sameVenues false in every reading, so the keeper's own ARM 2 would ABSTAIN here rather than compare). What admits this leg is therefore a screening number with a spread wider than the bar. The gate that decides is the keeper's, in the turn, at the size that turn really spends.",
+      "THE VENUE-WIDE FIGURE THAT PASSES THE DEPTH RULE HAS NO SOURCE IN THIS REPO. 331,617 is cited to the Jupiter migration, and nothing in the tree records the reading — see the note on `by` below. It is load-bearing in the ADMITTING direction: this asset clears DEPTH only because 331,617 >= 10,000. The number the owner's cap is divided by is the route census instead, which is a tenth the size and is derived rather than counted.",
       "It is offered because the track requires a PreStock and this is the deepest venue any of them has — not because it is safe. Everything at PRESTOCKS_POWERS is true of it.",
     ]),
   }),
@@ -576,7 +667,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPool: FIGUREAI_USDC_POOL,
     floorPoolUsdc: Object.freeze({ usdcRaw: 2_786_965_702n, scope: "route-census", venue: "Raydium CLMM HvpDt29E… (the floor source, USDC vault ALfDjAtK…)", readOn: "2026-09-21", by: "getMultipleAccounts, mainnet slot 448994132" }),
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
-    depth: Object.freeze({ usdcRaw: 50_000_000_000n, scope: "venue-wide", venue: "Hadron (though a 200 USDC quote that day routed Manifest E7Mcgg…)", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    depth: Object.freeze({ usdcRaw: 50_000_000_000n, scope: "venue-wide", venue: "Hadron (though a 200 USDC quote that day routed Manifest E7Mcgg…)", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work; no notes file, script or commit in this repository records the reading, and it is not re-derivable from here" }),
     routeCensus: null,
     sizePenalty: Object.freeze({ bps: 0, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest E7Mcgg… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 0.0" }),
     quarantinedUntil: "2026-10-20",
@@ -596,7 +687,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPool: null,
     floorPoolUsdc: null,
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
-    depth: Object.freeze({ usdcRaw: 25_220_000_000n, scope: "venue-wide", venue: "Manifest 6Gi6cz…", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    depth: Object.freeze({ usdcRaw: 25_220_000_000n, scope: "venue-wide", venue: "Manifest 6Gi6cz…", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work; no notes file, script or commit in this repository records the reading, and it is not re-derivable from here" }),
     routeCensus: null,
     sizePenalty: Object.freeze({ bps: 29.8, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest 6Gi6cz… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 29.8" }),
     quarantinedUntil: null,
@@ -615,7 +706,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPool: null,
     floorPoolUsdc: null,
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
-    depth: Object.freeze({ usdcRaw: 8_995_000_000n, scope: "venue-wide", venue: "Manifest G3LHQo…", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    depth: Object.freeze({ usdcRaw: 8_995_000_000n, scope: "venue-wide", venue: "Manifest G3LHQo…", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work; no notes file, script or commit in this repository records the reading, and it is not re-derivable from here" }),
     routeCensus: null,
     sizePenalty: Object.freeze({ bps: 77.9, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest G3LHQo… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 77.9" }),
     quarantinedUntil: null,
@@ -632,7 +723,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPool: null,
     floorPoolUsdc: null,
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
-    depth: Object.freeze({ usdcRaw: 7_542_000_000n, scope: "venue-wide", venue: "Meteora DLMM Chroid…", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    depth: Object.freeze({ usdcRaw: 7_542_000_000n, scope: "venue-wide", venue: "Meteora DLMM Chroid…", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work; no notes file, script or commit in this repository records the reading, and it is not re-derivable from here" }),
     routeCensus: null,
     sizePenalty: Object.freeze({ bps: 27, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Meteora DLMM Chroid… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 27.0" }),
     quarantinedUntil: null,
@@ -649,7 +740,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPool: null,
     floorPoolUsdc: null,
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
-    depth: Object.freeze({ usdcRaw: 7_264_000_000n, scope: "venue-wide", venue: "Manifest J4PjSn…", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    depth: Object.freeze({ usdcRaw: 7_264_000_000n, scope: "venue-wide", venue: "Manifest J4PjSn…", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work; no notes file, script or commit in this repository records the reading, and it is not re-derivable from here" }),
     routeCensus: null,
     sizePenalty: Object.freeze({ bps: 10.8, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest J4PjSn… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 10.8" }),
     quarantinedUntil: null,
@@ -668,7 +759,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPool: null,
     floorPoolUsdc: null,
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
-    depth: Object.freeze({ usdcRaw: 4_229_000_000n, scope: "venue-wide", venue: "Meteora DLMM (reached through a first hop that changed between readings)", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    depth: Object.freeze({ usdcRaw: 4_229_000_000n, scope: "venue-wide", venue: "Meteora DLMM (reached through a first hop that changed between readings)", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work; no notes file, script or commit in this repository records the reading, and it is not re-derivable from here" }),
     routeCensus: null,
     sizePenalty: Object.freeze({ bps: 96.7, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: false, routes: "GoonFi V2 + Meteora DLMM at 200 USDC vs Raydium CLMM + Scorch + Meteora DLMM at 12.50", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings: 96.6, 96.7, 96.7" }),
     quarantinedUntil: null,
@@ -685,7 +776,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPool: null,
     floorPoolUsdc: null,
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
-    depth: Object.freeze({ usdcRaw: 2_016_000_000n, scope: "venue-wide", venue: "Manifest BeUdSs… (a Meteora DLMM answered the probe instead)", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    depth: Object.freeze({ usdcRaw: 2_016_000_000n, scope: "venue-wide", venue: "Manifest BeUdSs… (a Meteora DLMM answered the probe instead)", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work; no notes file, script or commit in this repository records the reading, and it is not re-derivable from here" }),
     routeCensus: null,
     sizePenalty: Object.freeze({ bps: 33.3, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: false, routes: "Manifest BeUdSs… at 200 USDC vs Meteora DLMM Gug9Tr… at 12.50", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 33.3" }),
     quarantinedUntil: null,
