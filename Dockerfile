@@ -56,15 +56,21 @@ WORKDIR /repo
 # deploy directory holds the program's upgrade keypair, and not .localnet/.
 COPY packages/solana-log/src/log.ts packages/solana-log/src/log.ts
 COPY packages/solana-program/idl packages/solana-program/idl
-COPY packages/solana-program/scripts/attestation.ts packages/solana-program/scripts/live-route.ts packages/solana-program/scripts/raydium-swap.ts packages/solana-program/scripts/
+COPY packages/solana-program/scripts/attestation.ts packages/solana-program/scripts/live-route.ts packages/solana-program/scripts/raydium-swap.ts \
+     packages/solana-program/scripts/jupiter-route.ts packages/solana-program/scripts/jupiter-sim.ts \
+     packages/solana-program/scripts/jupiter-fork-setup.ts packages/solana-program/scripts/jupiter-fork-test.ts \
+     packages/solana-program/scripts/
 # AND THE TWO FILES ONLY THE TEST SUITE READS, now that the suite runs here too.
 # attestation.rs is the program's own attestation encoder, which
 # test/attestation-golden.test.ts holds the keeper's mirror against character for
 # character; the root Dockerfile is the copy Railway actually builds, which
 # test/dockerfile-copy.test.ts holds byte-identical to this one. Both BY NAME,
 # like every COPY above: nothing from target/, nothing from .localnet, no key
-# material. Measured: without these two the suite is 373 passed and exactly 2
-# failed, both ENOENT, in a tree holding precisely what these COPYs put here.
+# material. WITHOUT THEM THE SUITE FAILS HERE, WHICH IS THE POINT: the image
+# runs the tests, so a file the COPYs above do not name breaks the BUILD
+# rather than the boot. No count is quoted, because a count written here
+# goes stale the next time a test is added and then reads as a measurement
+# nobody took — test/dockerfile-copies.test.ts checks the coverage instead.
 COPY packages/solana-program/programs/sip-vault/src/attestation.rs packages/solana-program/programs/sip-vault/src/attestation.rs
 COPY Dockerfile Dockerfile
 COPY packages/solana-keeper packages/solana-keeper
