@@ -49,6 +49,7 @@ import {
   MIN_VENUE_INVENTORY_MULTIPLE,
   PROBE_DIVISOR,
   RAYDIUM_CLMM_PROGRAM,
+  RETIRED_VENUES,
   ROUTABLE_VENUES,
   U64_MAX,
   USDC_MINT,
@@ -94,7 +95,7 @@ import {
   type LegVenue,
 } from "../src/invest-decision.js";
 import { SLIPPAGE_BPS, netOfTransferFee } from "../src/min-out.js";
-import { JUPITER_PROGRAM, RAYDIUM_CLMM } from "../src/program-scripts.js";
+import { JUPITER_PROGRAM } from "../src/program-scripts.js";
 import { PYTH_SOL_USD_FEED_ID_HEX, PYTH_USDC_USD_FEED_ID_HEX, PYTH_VERIFICATION_FULL, type PythPriceUpdate } from "../src/pyth.js";
 
 describe("the policy's in_mint", () => {
@@ -113,20 +114,36 @@ describe("the policy's in_mint", () => {
 });
 
 describe("the venue the owner signed", () => {
-  it("lets through the venue every policy signed to date names, at the address the keeper really passes", () => {
-    expect(RAYDIUM_CLMM_PROGRAM.toBase58()).toBe("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
-    expect(venueDecision(RAYDIUM_CLMM_PROGRAM)).toBeNull();
-    // TWO SPELLINGS OF ONE ADDRESS, PINNED TOGETHER. The gate compares against
-    // this file's own constant, so it stays a pure decision over a PublicKey
-    // with no CommonJS unwrap behind it; the instruction builders send
-    // program-scripts' RAYDIUM_CLMM, out of @sip/solana-program. If those two
-    // ever drift, the gate admits a venue the keeper does not send — and the
-    // program answers WrongVenue, which is the exact failure this gate exists
-    // to prevent.
-    expect(RAYDIUM_CLMM_PROGRAM.toBase58()).toBe(RAYDIUM_CLMM.toBase58());
+  it("lets through Jupiter v6, at the address the keeper really passes, pinned to a literal", () => {
+    // ONE SOURCE, ONE INDEPENDENT PIN. JUPITER_V6_PROGRAM is now program-scripts'
+    // JUPITER_PROGRAM — the same object, through the CommonJS/ESM unwrap the
+    // keeper actually loads — so comparing the two would be comparing a value
+    // with itself. The pin that can fail is against this string, typed out from
+    // Jupiter's published program id and from nothing in the tree.
+    expect(JUPITER_V6_PROGRAM.toBase58()).toBe("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
+    expect(JUPITER_V6_PROGRAM).toBe(JUPITER_PROGRAM);
+    expect(venueDecision(JUPITER_V6_PROGRAM)).toBeNull();
   });
 
-  it("refuses any other venue, naming it, naming what the keeper can route, and naming who can change it", () => {
+  it("refuses Raydium CLMM, the venue on chain today, and says first that the migration is expected", () => {
+    // THE REFUSAL THE LIVE VAULT GETS. Raydium CLMM is what the signed policy
+    // names, so this is not a hypothetical: it is the first thing the mainnet
+    // keeper says after this change ships, and it will say it every sweep until
+    // the owner re-signs. What an operator needs from its FIRST clause is
+    // whether to wake somebody, and the answer here is no.
+    expect(RAYDIUM_CLMM_PROGRAM.toBase58()).toBe("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
+    const detail = venueDecision(RAYDIUM_CLMM_PROGRAM)?.detail ?? "";
+    expect(venueDecision(RAYDIUM_CLMM_PROGRAM)?.outcome).toBe("REFUSED");
+    expect(detail.startsWith("This is the EXPECTED first state of the Jupiter migration")).toBe(true);
+    expect(detail).toContain("no SOL has been wrapped");
+    // AND IT IS STILL THE FULL REFUSAL, not a shorter friendlier one.
+    expect(detail).toContain(RAYDIUM_CLMM_PROGRAM.toBase58());
+    expect(detail).toContain(JUPITER_V6_PROGRAM.toBase58());
+    expect(detail).toContain("WrongVenue");
+    expect(detail).toContain("set_invest_policy");
+  });
+
+  it("refuses an UNKNOWN venue without the migration sentence, because that one is not expected", () => {
     const venue = Keypair.generate().publicKey;
     const decision = venueDecision(venue);
     expect(decision?.outcome).toBe("REFUSED");
@@ -134,14 +151,18 @@ describe("the venue the owner signed", () => {
     // The venue asked for, and the one this keeper can actually build a route
     // for: an operator at 3am can act on neither of those alone.
     expect(detail).toContain(venue.toBase58());
-    expect(detail).toContain("Raydium CLMM");
-    expect(detail).toContain(RAYDIUM_CLMM_PROGRAM.toBase58());
+    expect(detail).toContain("Jupiter v6");
+    expect(detail).toContain(JUPITER_V6_PROGRAM.toBase58());
     // What would otherwise happen, in the program's own vocabulary.
     expect(detail).toContain("WrongVenue");
     expect(detail).toContain("every sweep");
     // And who can fix it: not the operator, not the keeper.
     expect(detail).toContain("OWNER");
     expect(detail).toContain("set_invest_policy");
+    // THE TWO REFUSALS MUST NOT READ ALIKE. A retired venue is a planned stop;
+    // an unknown one means somebody signed a policy nobody here understands.
+    expect(detail).not.toContain("EXPECTED first state");
+    expect(detail.startsWith("The policy's venue_program is")).toBe(true);
   });
 
   it("refuses the default pubkey, which is what an unsigned or half-built policy carries", () => {
@@ -152,23 +173,22 @@ describe("the venue the owner signed", () => {
 
   it("is a table, not a branch: every venue in it is admitted and every one is named in the refusal", () => {
     // THE SEAM, PINNED. Adding a venue is adding an entry here (plus a route
-    // builder for it) — never rewriting the gate. Two entries: Raydium CLMM,
-    // which the policy on chain names today and which has been confirming since
-    // 09-19, and Jupiter v6, which the product is moving to because the assets
-    // it must hold have their liquidity elsewhere. A third would be a third
-    // entry, not a branch.
-    expect([...ROUTABLE_VENUES.keys()]).toEqual([RAYDIUM_CLMM_PROGRAM.toBase58(), JUPITER_V6_PROGRAM.toBase58()]);
-    // TWO SPELLINGS OF ONE ADDRESS, PINNED TOGETHER, exactly as Raydium's are:
-    // this gate compares against this file's own constant and the route builder
-    // sends jupiter-route.ts's, and a drift between them admits a venue the
-    // keeper does not send — which the program answers with WrongVenue.
-    expect(JUPITER_V6_PROGRAM.toBase58()).toBe(JUPITER_PROGRAM.toBase58());
-    expect(JUPITER_V6_PROGRAM.toBase58()).toBe("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
+    // builder for it) — never rewriting the gate. ONE entry now: Jupiter v6,
+    // which reaches the venues the product's assets actually trade on. Raydium
+    // CLMM was dropped when invest-tick stopped containing a Raydium route
+    // builder at all — an entry here is a promise the keeper can build a route,
+    // and that promise would have been false.
+    expect([...ROUTABLE_VENUES.keys()]).toEqual([JUPITER_V6_PROGRAM.toBase58()]);
     const detail = venueDecision(Keypair.generate().publicKey)?.detail ?? "";
     for (const [address, name] of ROUTABLE_VENUES) {
       expect(venueDecision(new PublicKey(address))).toBeNull();
       expect(detail).toContain(`${name} (${address})`);
     }
+    // AND A RETIRED VENUE IS NEVER ALSO A ROUTABLE ONE. The two maps answer
+    // opposite questions about the same key, so an address in both would make
+    // venueDecision's first line decide which one wins — silently, in favour of
+    // routing a venue somebody deliberately retired.
+    for (const address of RETIRED_VENUES.keys()) expect(ROUTABLE_VENUES.has(address)).toBe(false);
   });
 });
 
@@ -444,12 +464,26 @@ describe("a leg's mint, before the basket is bought", () => {
     readonly data: Buffer;
   }
 
-  /** A Token-2022 mint as extension.rs writes one: the 82-byte base, AccountType::Mint, then TLV entries. */
+  /**
+   * A Token-2022 mint as extension.rs writes one: the 82-byte base, ZERO
+   * PADDING out to 165, AccountType::Mint at 165, then TLV entries from 166.
+   *
+   * THE PADDING IS THE PART THAT WAS MISSING. This builder wrote the account
+   * type at byte 82 and the TLV at 83 until 2026-09-21, and so did the decoder
+   * it feeds — fixture and code agreeing with each other and with no mint on
+   * any cluster. Token-2022 pads a mint past `Account`'s own 165 bytes so that
+   * a mint and a token account can never be told apart by length, and the
+   * account type goes after that padding. Measured on mainnet the day this was
+   * fixed: ANTHROPIC 911 bytes and SPYx 676, both with byte[82] = 0 and
+   * byte[165] = 1. The real accounts are in test/fixtures/token2022-mints.json
+   * and decoded further down this file.
+   */
+  const MINT_TLV_START = 166;
   function mintBytes(extensions: readonly Extension[]): Buffer {
-    const mint = Buffer.alloc(83 + extensions.reduce((total, extension) => total + 4 + extension.data.length, 0));
+    const mint = Buffer.alloc(MINT_TLV_START + extensions.reduce((total, extension) => total + 4 + extension.data.length, 0));
     mint.fill(0xab, 0, 82); // the base fields: noise that must not leak into any extension
-    mint.writeUInt8(1, 82); // AccountType::Mint
-    let offset = 83;
+    mint.writeUInt8(1, 165); // AccountType::Mint, after the padding at 82..165
+    let offset = MINT_TLV_START;
     for (const extension of extensions) {
       mint.writeUInt16LE(extension.type, offset);
       mint.writeUInt16LE(extension.data.length, offset + 2);
@@ -519,6 +553,75 @@ describe("a leg's mint, before the basket is bought", () => {
     expect(activeTransferFee(facts, FEE_EPOCH - 1n).bps).toBe(0n);
     expect(activeTransferFee(facts, FEE_EPOCH).bps).toBe(50n);
     expect(activeTransferFee(facts, TODAY)).toEqual({ epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps: 50n });
+  });
+
+  // ── the real accounts, which is the only pin that could have caught this ──
+  //
+  // EVERY OTHER MINT IN THIS FILE IS FABRICATED BY mintBytes ABOVE, and until
+  // 2026-09-21 that builder and decodeMintFacts shared the same wrong idea of
+  // where a Token-2022 mint keeps its extensions: AccountType at byte 82, TLV
+  // at 83. They agreed, so all 97 tests were green — and the decoder threw on
+  // every mint the chain has ever served, which means legAdmissionDecision
+  // refused every Token-2022 leg it was shown, the LIVE SPYx one included, and
+  // the fee ceiling had never been evaluated against a real mint in its life.
+  //
+  // docs/TESTING_TRAPS.md calls this the first species: the field under dispute
+  // was supplied by the fixture, so the suite could not tell the two cases
+  // apart. The cure is the same one it prescribes — pin the real value. These
+  // bytes were read off mainnet with getAccountInfo and are checked into
+  // test/fixtures/token2022-mints.json; they are the third party neither the
+  // builder nor the decoder can quietly agree with.
+  describe("the mints mainnet actually serves", () => {
+    const fixture = JSON.parse(
+      readFileSync(fileURLToPath(new URL("./fixtures/token2022-mints.json", import.meta.url)), "utf8"),
+    ) as { readonly mints: Record<string, { readonly address: string; readonly bytes: number; readonly base64: string }> };
+    const bytesOf = (name: string): Buffer => Buffer.from(fixture.mints[name]!.base64, "base64");
+
+    it("puts AccountType at 165 and NOT at 82, which is the whole of the bug", () => {
+      for (const name of ["ANTHROPIC", "SPYx"]) {
+        const data = bytesOf(name);
+        expect(data.length, `${name} is padded well past a token account's 165 bytes`).toBeGreaterThan(165);
+        expect(data.readUInt8(165), `${name} byte 165 is AccountType::Mint`).toBe(1);
+        expect(data.readUInt8(82), `${name} byte 82 is padding, which the old decoder read as the account type`).toBe(0);
+      }
+    });
+
+    it("reads ANTHROPIC's real fee schedule: 50 bps from epoch 1032, 100 from 1039", () => {
+      // THE SCHEDULE THIS PROJECT HAS BEEN QUOTING ALL ALONG — from spl-token's
+      // getTransferFeeConfig, never from this decoder, which until now could
+      // not read it at all.
+      const facts = decodeMintFacts(bytesOf("ANTHROPIC"));
+      expect(facts.transferHook).toBeNull();
+      expect(facts.transferFee?.older).toEqual({ epoch: 1_032n, maximumFee: UNCAPPED, bps: 50n });
+      expect(facts.transferFee?.newer).toEqual({ epoch: 1_039n, maximumFee: UNCAPPED, bps: 100n });
+      // AND THE FEE THE GATE ACTUALLY USES, resolved at the epoch the chain is
+      // in now: exactly MAX_LEG_FEE_BPS, admitted only because the comparison
+      // is strictly greater-than.
+      expect(activeTransferFee(facts, 1_039n).bps).toBe(MAX_LEG_FEE_BPS);
+      expect(activeTransferFee(facts, 1_038n).bps).toBe(50n);
+    });
+
+    it("reads SPYx as carrying no transfer fee, though it is a 676-byte Token-2022 mint with extensions", () => {
+      // THE CASE THAT MAKES THE FIX NON-TRIVIAL. A no-fee answer is also what
+      // the BROKEN decoder would have produced if it had returned instead of
+      // throwing, so "no fee" is only evidence when the bytes are real and the
+      // length proves the extensions were walked.
+      const data = bytesOf("SPYx");
+      expect(data.length).toBe(676);
+      expect(decodeMintFacts(data)).toEqual({ transferHook: null, transferFee: null });
+    });
+
+    it("admits both live mints, which is the thing that was impossible yesterday", () => {
+      const legs = ["SPYx", "ANTHROPIC"].map((name) => ({
+        mint: new PublicKey(fixture.mints[name]!.address),
+        account: { owner: TOKEN_2022_PROGRAM_ID, data: bytesOf(name) },
+      }));
+      const admission = legAdmissionDecision({ legs, currentEpoch: 1_039n });
+      expect(admission.admit, "the real basket, at the real epoch, off the real bytes").toBe(true);
+      if (!admission.admit) return;
+      expect(admission.fees.get(legs[0]!.mint.toBase58())?.bps).toBe(0n);
+      expect(admission.fees.get(legs[1]!.mint.toBase58())?.bps).toBe(100n);
+    });
   });
 
   it("charges nothing for a mint with no extensions at all", () => {
@@ -672,15 +775,15 @@ describe("a leg's mint, before the basket is bought", () => {
     // An extension header whose length runs off the end of the account: decoded
     // blindly it reads a fee out of whatever follows, so it is a refusal, and a
     // reason, rather than a throw out of the middle of a turn.
-    const truncated = Buffer.alloc(87);
-    truncated.writeUInt8(1, 82); // AccountType::Mint
-    truncated.writeUInt16LE(1, 83); // TransferFeeConfig…
-    truncated.writeUInt16LE(108, 85); // …108 bytes that are not there
+    const truncated = Buffer.alloc(170);
+    truncated.writeUInt8(1, 165); // AccountType::Mint
+    truncated.writeUInt16LE(1, 166); // TransferFeeConfig…
+    truncated.writeUInt16LE(108, 168); // …108 bytes that are not there
     const broken = legAdmissionDecision({ legs: [legOf(truncated)], currentEpoch: TODAY });
     expect(broken.admit).toBe(false);
     if (broken.admit) return;
     expect(broken.detail).toContain("could not be decoded");
-    expect(broken.detail).toContain("past the end of a 87-byte mint");
+    expect(broken.detail).toContain("past the end of a 170-byte mint");
   });
 
   it("refuses the WHOLE basket for one bad leg, the sound ones included", () => {
@@ -864,10 +967,10 @@ describe("a leg's mint, before the basket is bought", () => {
     });
 
     it("skips the legs it cannot read rather than guessing a fee out of them — they are already refused in words", () => {
-      const broken = Buffer.alloc(87);
-      broken.writeUInt8(1, 82);
-      broken.writeUInt16LE(1, 83);
-      broken.writeUInt16LE(108, 85); // 108 bytes that are not there
+      const broken = Buffer.alloc(170);
+      broken.writeUInt8(1, 165);
+      broken.writeUInt16LE(1, 166);
+      broken.writeUInt16LE(108, 168); // 108 bytes that are not there
       const legs = [
         { mint: key(), account: null },
         legOf(liveFee(100), TOKEN_PROGRAM_ID), // not Token-2022: the extension means nothing

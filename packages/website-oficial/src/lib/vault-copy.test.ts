@@ -101,7 +101,23 @@ describe("the transfer-fee ceiling", () => {
     expect(LEG_FEE.boundary.refusedAtBps).toBe(LEG_FEE.keeper.value + 1n);
     // The same all-or-nothing shape on the fee side: one refused leg, one
     // verdict, no per-leg admission.
-    expect(keeper).toMatch(/export type LegAdmission =\s*\|\s*\{ readonly admit: true;[^}]*\}\s*\|\s*\{ readonly admit: false; readonly outcome: "REFUSED"; readonly detail: string \};/);
+    // PINNED TO THE DOCTRINE, NOT TO THE KEEPER'S LINE BREAKS. This used to be
+    // one regex over the WHOLE type, including `{ readonly admit: true;` with
+    // its brace and space — so on 2026-09-21 it went red because the keeper
+    // added a second fee map to that arm and prettier wrapped it across lines.
+    // Nothing about all-or-nothing had changed, and the only person who could
+    // see why was in another package (docs/TESTING_TRAPS.md, third species).
+    //
+    // What actually carries the doctrine is the REFUSAL arm: one verdict, one
+    // detail, and no per-leg outcome anywhere — a half-admitted basket is
+    // unrepresentable. That is matched exactly. The admit arm is matched only
+    // for its existence, and separately checked for the thing that would break
+    // the doctrine: a per-leg verdict smuggled into it.
+    expect(keeper).toMatch(/export type LegAdmission =/);
+    expect(keeper).toMatch(/\{ readonly admit: false; readonly outcome: "REFUSED"; readonly detail: string \}/);
+    const admission = keeper.slice(keeper.indexOf("export type LegAdmission ="), keeper.indexOf("readonly admit: false"));
+    expect(admission).toMatch(/readonly admit: true;/);
+    expect(admission, "a per-leg outcome in the admit arm is exactly what all-or-nothing forbids").not.toMatch(/outcome/);
 
     const notice = INVEST_COPY.feeCeiling("1 %");
     expect(notice).toContain("will not buy a stock that charges more than 1 % to transfer");

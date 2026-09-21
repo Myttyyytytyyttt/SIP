@@ -58,6 +58,7 @@ import {
   buildV0Transaction,
   lookupTableCache,
   lookupTablesOf,
+  venueAccountsOf,
   sendWithBudget,
   versionedTransactionBytes,
 } from "../src/invest-tick.js";
@@ -243,12 +244,46 @@ describe("the compute budget", () => {
   });
 });
 
+describe("venueAccountsOf", () => {
+  // THIS GUARD DID NOT EXIST UNTIL 2026-09-21, and it was found by removing it:
+  // deleting the `isSigner: false` re-map left all 18 cases in this file green.
+  //
+  // WHAT IT COSTS TO GET WRONG. Jupiter marks the vault PDA a signer in slot 2
+  // of its own instruction, which is correct for the INNER CPI and impossible
+  // for the outer one — a PDA cannot sign a transaction. A signer flag that
+  // survived into the outer instruction would make the message demand a
+  // signature nobody can produce, so every invest and every convert would fail
+  // to sign, on every sweep. invest.rs and convert.rs re-mark exactly that key
+  // for the CPI themselves; that is the whole authority the program lends.
+  it("clears every signer flag, including the vault's own, which is the one Jupiter sets", () => {
+    const vault = Keypair.generate().publicKey;
+    const route = {
+      remainingAccounts: [
+        { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: false },
+        { pubkey: vault, isSigner: true, isWritable: false },
+        { pubkey: Keypair.generate().publicKey, isSigner: true, isWritable: true },
+      ],
+    } as unknown as Parameters<typeof venueAccountsOf>[0];
+
+    const metas = venueAccountsOf(route);
+    expect(metas.map((meta) => meta.isSigner)).toEqual([false, false, false]);
+    // AND NOTHING ELSE MOVED. Writability is the route's own and the program
+    // mirrors it into the CPI, so flattening it here would change which
+    // accounts the venue may touch.
+    expect(metas.map((meta) => meta.isWritable)).toEqual([false, false, true]);
+    expect(metas.map((meta) => meta.pubkey.toBase58())).toEqual(route.remainingAccounts.map((m) => m.pubkey.toBase58()));
+  });
+});
+
 describe("lookupTablesOf", () => {
-  it("finds none on a Raydium route, which is why that path stays legacy", () => {
-    // The real LiveRoute shape, as live-route.ts returns it: it has no
-    // lookupTableAddresses field at all.
-    const raydium = { pool: {}, observed: 1n } as unknown as Parameters<typeof lookupTablesOf>[0];
-    expect(lookupTablesOf(raydium)).toEqual([]);
+  it("finds none on a route that named none, which is what keeps the legacy send reachable", () => {
+    // THIS CASE USED TO BE "a Raydium route", whose LiveRoute had no
+    // lookupTableAddresses field at all. There is no Raydium route any more —
+    // but the EMPTY answer is still reachable and still load-bearing: Jupiter
+    // returns no tables for plenty of one-hop builds, and sendWithBudget reads
+    // empty as "send this legacy", not as an error.
+    const none = { lookupTableAddresses: [] } as unknown as Parameters<typeof lookupTablesOf>[0];
+    expect(lookupTablesOf(none)).toEqual([]);
   });
 
   it("finds a Jupiter route's, under the field name jupiter-route.ts really uses", () => {
@@ -337,10 +372,12 @@ describe("sendWithBudget", () => {
       },
     }) as unknown as anchor.AnchorProvider;
 
-  it("sends a LEGACY transaction while the venue carries no tables", async () => {
+  it("sends a LEGACY transaction while the route carries no tables", async () => {
     sent.length = 0;
-    // The live policy is Raydium CLMM, and this is the path the vault holding
-    // real money has been buying through since 2026-09-19. It must not move.
+    // NOT "while the venue is Raydium" any more — there is no Raydium path. A
+    // Jupiter route that names no tables takes this branch, and it is the send
+    // that has been confirming on mainnet since 2026-09-19, so it must not move
+    // just because the venue above it did.
     await sendWithBudget(provider(Keypair.generate().publicKey), crank, [investInstruction]);
     const [transaction] = sent;
     expect(transaction).toBeInstanceOf(Transaction);

@@ -29,6 +29,13 @@ import type { InvestmentPolicyState } from "./accounts.js";
 import type { Alert } from "./alerts.js";
 import type { InvestOutcome } from "./invest-tick.js";
 import { NO_TRANSFER_FEE, SLIPPAGE_BPS, type TransferFeeTerms } from "./min-out.js";
+// THROUGH program-scripts.ts, NEVER FROM @sip/solana-program DIRECTLY. That
+// file is the one place the CommonJS/ESM unwrap happens, and JUPITER_PROGRAM is
+// in its import-time loop — so a build where the unwrap stops working fails at
+// startup, in --preflight, rather than as `undefined.equals(...)` inside the
+// venue comparison below on a live turn. Importing the id from the package here
+// would take a SECOND path into the same module and quietly skip that check.
+import { JUPITER_PROGRAM } from "./program-scripts.js";
 import { olderPublishTime, pythPublishAgeSeconds, solUsdcPythRateWad, type PythPriceUpdate } from "./pyth.js";
 
 /** USDC on mainnet: the only in-asset the keeper has routes for. */
@@ -66,52 +73,79 @@ export function inMintDecision(inMint: PublicKey): { readonly outcome: "REFUSED"
 // this keeper cannot build a route for is refused HERE, loudly, before anything
 // is wrapped, converted or bought (task 2).
 
-/** Raydium CLMM on mainnet: the venue every policy signed to date names. */
+/**
+ * Raydium CLMM on mainnet: the venue every policy signed to date names, and the
+ * one this keeper NO LONGER ROUTES.
+ *
+ * KEPT THOUGH IT IS NOT ROUTABLE, and that is the whole reason it is still
+ * here. It is the venue the live policy names RIGHT NOW, so it is the value
+ * venueDecision will actually be handed on the mainnet vault until the owner
+ * re-signs — and a refusal that can name it can say "this is the migration"
+ * instead of "unknown venue". See RETIRED_VENUES.
+ */
 export const RAYDIUM_CLMM_PROGRAM = new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
+
+/**
+ * Jupiter v6 on mainnet: the venue this keeper buys and converts through.
+ *
+ * THE PACKAGE'S OWN VALUE, through program-scripts.ts, rather than a second
+ * literal beside it. It used to be written out here so this file stayed a pure
+ * decision module, with a test comparing the two ends. That test is the thing
+ * that argued against the arrangement: a value that travels wants ONE source,
+ * and program-scripts.ts is the file that already checks at import time that
+ * the unwrap produced a PublicKey. The base58 string is still pinned, once, in
+ * test/invest-decision.test.ts — against a literal written independently of
+ * this line, which is the pin that can actually fail.
+ */
+export const JUPITER_V6_PROGRAM = JUPITER_PROGRAM;
 
 /**
  * Every venue this keeper can actually build a route for, by the program id a
  * policy names, to the name a human uses for it.
  *
- * AN ENTRY HERE IS A PROMISE THIS KEEPER CAN KEEP. Raydium CLMM is
- * fetchLiveRoute reading a PoolState and buildSwapV2AccountMetas laying out a
- * swap_v2; Jupiter v6 is buildJupiterRoute. A third venue is a third entry HERE
- * plus a route builder for it — the gate below neither needs nor gains a
- * branch, and the refusal names whatever this map holds. A placeholder entry
- * would be a keeper claiming a route it cannot build, which is the failure this
- * whole gate exists to prevent.
- */
-/**
- * Jupiter v6 on mainnet: the venue the product is moving to.
+ * AN ENTRY HERE IS A PROMISE THIS KEEPER CAN KEEP. Jupiter v6 is
+ * buildJupiterRoute: a quote, a /swap-instructions build, a verified
+ * shared-accounts route, and a venue_data blob invest.rs and convert.rs CPI
+ * straight through. A second venue is a second entry HERE plus a route builder
+ * for it — the gate below neither needs nor gains a branch, and the refusal
+ * names whatever this map holds. A placeholder entry would be a keeper claiming
+ * a route it cannot build, which is the failure this whole gate exists to
+ * prevent.
  *
- * WRITTEN OUT RATHER THAN IMPORTED, the same way RAYDIUM_CLMM_PROGRAM above is,
- * so this file stays a pure decision module with no dependency on the route
- * builders. test/invest-decision.test.ts pins it against jupiter-route.ts's own
- * JUPITER_PROGRAM — two ends, one assertion, which is the defence
- * docs/TESTING_TRAPS.md prescribes for a value that travels.
- */
-export const JUPITER_V6_PROGRAM = new PublicKey("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
-
-/**
- * WHY THERE ARE TWO NOW, AND WHY BOTH STAY. The assets this product must hold
- * have their liquidity away from Raydium — ANTHROPIC $331,617 on Hadron against
+ * WHY RAYDIUM CLMM IS NOT IN IT ANY MORE. The assets the product must hold have
+ * their liquidity away from Raydium — ANTHROPIC $331,617 on Hadron against
  * $7,458 on Raydium, OPENAI $25,220 on Manifest, SPACEX on Meteora — so the
  * owner has decided the keeper buys through Jupiter, which reaches all of them.
- *
- * Raydium CLMM is KEPT, and not out of sentiment: it is the venue the policy
- * signed on chain today names, and the path that has been confirming on mainnet
- * since 09-19. venue_program is ONE field on the owner-signed InvestmentPolicy
- * (state.rs:212) which both convert.rs:88-91 and invest.rs:119-122 pin the
- * passed account against, so the move to Jupiter is the OWNER re-signing, not
- * the keeper switching. Dropping Raydium here would refuse the live vault every
- * sweep in the window between this code and that signature.
+ * invest-tick.ts no longer contains a Raydium route builder at all: there is no
+ * fetchLiveRoute, no buildSwapV2AccountMetas and no pool read on the money
+ * path. Leaving the entry here would therefore be the lie this doc comment
+ * warns about — the gate would pass, and the turn would then reach a builder
+ * that does not exist.
  */
-export const ROUTABLE_VENUES: ReadonlyMap<string, string> = new Map([
-  [RAYDIUM_CLMM_PROGRAM.toBase58(), "Raydium CLMM"],
-  [JUPITER_V6_PROGRAM.toBase58(), "Jupiter v6"],
+export const ROUTABLE_VENUES: ReadonlyMap<string, string> = new Map([[JUPITER_V6_PROGRAM.toBase58(), "Jupiter v6"]]);
+
+/**
+ * A venue this keeper USED to route, and the sentence its refusal earns.
+ *
+ * THIS EXISTS BECAUSE ONE REFUSAL IS CERTAIN. The policy signed on chain today
+ * (vault EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU) names Raydium CLMM, so
+ * the very first sweep after this code ships refuses — by design, before the
+ * wrap, with the vault's money untouched. Whoever reads that refusal at three
+ * in the morning needs to know in its first clause that it is the planned state
+ * of a migration and not a keeper that broke, because those two call for
+ * opposite reactions: one waits for a signature, the other wakes somebody.
+ */
+export const RETIRED_VENUES: ReadonlyMap<string, string> = new Map([
+  [
+    RAYDIUM_CLMM_PROGRAM.toBase58(),
+    "This is the EXPECTED first state of the Jupiter migration, not a broken keeper: Raydium CLMM is the venue " +
+      "every policy signed to date names, and this keeper deliberately stopped routing it when the basket moved to " +
+      "Jupiter (the assets the product must hold — ANTHROPIC, OPENAI, SPACEX — have their liquidity away from " +
+      "Raydium). Nothing is wrong with the vault, nothing has been spent, and no SOL has been wrapped.",
+  ],
 ]);
 
-/** The routable venues as a refusal names them: "Raydium CLMM (CAMM…rWqK)". */
+/** The routable venues as a refusal names them: "Jupiter v6 (JUP6…TaV4)". */
 function routableVenues(): string {
   return [...ROUTABLE_VENUES].map(([address, name]) => `${name} (${address})`).join(", ");
 }
@@ -127,14 +161,18 @@ function routableVenues(): string {
  * it as a failed transaction and names nothing. So it says which venue the
  * policy asked for, which venues this keeper can actually route, that the vault
  * OWNER re-signs the policy to change it, and that adding a venue to the keeper
- * is a code change rather than a configuration one.
+ * is a code change rather than a configuration one — and, for a venue this
+ * keeper has RETIRED, it opens by saying so, because that refusal is expected
+ * and the others are not.
  */
 export function venueDecision(venueProgram: PublicKey): { readonly outcome: "REFUSED"; readonly detail: string } | null {
   if (ROUTABLE_VENUES.has(venueProgram.toBase58())) return null;
+  const retired = RETIRED_VENUES.get(venueProgram.toBase58());
   return {
     outcome: "REFUSED",
     detail:
-      `the policy's venue_program is ${venueProgram.toBase58()}, and this keeper cannot build a route for it. ` +
+      (retired === undefined ? "" : `${retired} `) +
+      `The policy's venue_program is ${venueProgram.toBase58()}, and this keeper cannot build a route for it. ` +
       `The only venue it can route is ${routableVenues()}. ` +
       "convert.rs and invest.rs both pin the venue account this keeper passes against policy.venue_program " +
       "(WrongVenue), so were the turn to go on, EVERY convert and EVERY invest for this vault would revert, on " +
@@ -716,9 +754,39 @@ export interface MintFacts {
   readonly transferFee: TransferFeeSchedule | null;
 }
 
-/** spl-token's Mint, before any extension. */
+/** spl-token's Mint, before any extension. A mint with none is exactly this long. */
 const MINT_BASE_BYTES = 82;
-/** Token-2022's AccountType byte, which follows the base: 1 a mint, 2 a token account. */
+/**
+ * Token-2022's BASE_ACCOUNT_LENGTH: where a mint's AccountType byte really sits,
+ * with the TLV extensions starting the byte after it.
+ *
+ * THIS WAS 82 UNTIL 2026-09-21, AND IT WAS WRONG ON EVERY REAL MINT. The walk
+ * below assumed Token-2022 wrote the account type immediately after the 82-byte
+ * base. It does not: a mint carrying extensions is zero-padded out past
+ * `Account`'s own 165 bytes — precisely so a mint and a token account can never
+ * be confused by length — and only THEN comes the account type, at 165, with
+ * the TLV from 166.
+ *
+ * MEASURED, against mainnet, the day this was fixed:
+ *   ANTHROPIC Pren1FvF… 911 bytes, byte[82] = 0, byte[165] = 1
+ *   SPYx      XsoCS1Tf… 676 bytes, byte[82] = 0, byte[165] = 1
+ * At the old offset decodeMintFacts threw "the byte after the mint base is 0"
+ * for BOTH — so legAdmissionDecision refused every Token-2022 leg it was ever
+ * shown, the live SPYx one included, and the fee ceiling it exists to enforce
+ * had never once been evaluated against a real mint. spl-token's own
+ * getTransferFeeConfig reads ANTHROPIC's schedule off the same bytes as
+ * older{1032, 50} newer{1039, 100}, which is the schedule this project has been
+ * quoting all along — from that tool, never from this one.
+ *
+ * WHY NO TEST CAUGHT IT, and it is the first species in docs/TESTING_TRAPS.md:
+ * every mint fixture in the suite was BUILT at offset 82 by a helper written
+ * beside this decoder, so the fixture and the code under test agreed with each
+ * other and with nothing else. The fix comes with test/fixtures/token2022-mints.json
+ * — the real accounts, captured from mainnet — so the next disagreement is with
+ * the chain rather than with ourselves.
+ */
+const BASE_ACCOUNT_BYTES = 165;
+/** Token-2022's AccountType byte: 1 a mint, 2 a token account. */
 const ACCOUNT_TYPE_MINT = 1;
 /** extension.rs's ExtensionType discriminants, only the two this gate reads. */
 const EXT_UNINITIALIZED = 0;
@@ -755,17 +823,21 @@ export function decodeMintFacts(data: Buffer): MintFacts {
   if (data.length < MINT_BASE_BYTES) {
     throw new Error(`a mint account is at least ${MINT_BASE_BYTES} bytes; this one is ${data.length}`);
   }
-  // A classic SPL Token mint is exactly the base, and Token-2022 writes the
-  // account type only once there is an extension to write after it.
-  if (data.length <= MINT_BASE_BYTES + 1) return { transferHook: null, transferFee: null };
-  const accountType = data.readUInt8(MINT_BASE_BYTES);
+  // A mint with no extensions is exactly the base — a classic SPL Token mint,
+  // or a Token-2022 one that never needed padding. Anything longer must be
+  // padded past BASE_ACCOUNT_BYTES before the account type, so a length in
+  // between is not a layout this walk understands.
+  if (data.length <= BASE_ACCOUNT_BYTES) return { transferHook: null, transferFee: null };
+  const accountType = data.readUInt8(BASE_ACCOUNT_BYTES);
   if (accountType !== ACCOUNT_TYPE_MINT) {
-    throw new Error(`the byte after the mint base is ${accountType}, not the ${ACCOUNT_TYPE_MINT} Token-2022 writes for a mint`);
+    throw new Error(
+      `byte ${BASE_ACCOUNT_BYTES} of this mint is ${accountType}, not the ${ACCOUNT_TYPE_MINT} Token-2022 writes for a mint`,
+    );
   }
 
   let transferHook: PublicKey | null = null;
   let transferFee: TransferFeeSchedule | null = null;
-  let offset = MINT_BASE_BYTES + 1;
+  let offset = BASE_ACCOUNT_BYTES + 1;
   while (offset + 4 <= data.length) {
     const type = data.readUInt16LE(offset);
     if (type === EXT_UNINITIALIZED) break;
@@ -815,6 +887,39 @@ export function activeTransferFee(facts: MintFacts, currentEpoch: bigint): Trans
   const schedule = facts.transferFee;
   if (schedule === null) return NO_TRANSFER_FEE;
   return currentEpoch >= schedule.newer.epoch ? schedule.newer : schedule.older;
+}
+
+/**
+ * The worst fee a transfer of this mint could be charged: today's, or a rise
+ * already written for a later epoch, whichever is higher.
+ *
+ * WHY THE SLIPPAGE IS SIZED AGAINST THIS AND NOT THE ACTIVE FEE. The route
+ * builder models the destination mint's fee against its own worst case
+ * (jupiter-route.ts, `fee.worstCase`), because a rise that lands between the
+ * quote and the confirmation is charged at the rate in force when the transfer
+ * executes, not when we asked. If the keeper sized its slippage against the
+ * ACTIVE fee while the builder modelled the worst case, the two would disagree
+ * for the two epochs before every scheduled rise — and measureLegVenue refuses
+ * on exactly that disagreement, so a basket that is perfectly buyable today
+ * would stop days early, with a message about a fee nobody is paying yet.
+ * Measured here as a test: a leg with 0 bps now and 300 bps written for epoch
+ * 932, read in epoch 930, refused the whole basket.
+ *
+ * THE COST IS A WIDER ASK, NOT A LOOSER FLOOR. A wider slippage only changes
+ * what we ask Jupiter for; min_out still comes from the route's own bytes and
+ * is still checked against the owner's signed floor.
+ *
+ * NOT THE ADMISSION GATE'S NUMBER. MAX_LEG_FEE_BPS is still judged on the fee
+ * in force TODAY — a rise written for next month refuses nothing now, and
+ * legFeeWarnings is what gives notice of it.
+ */
+export function worstCaseTransferFee(facts: MintFacts, currentEpoch: bigint): TransferFeeTerms {
+  const schedule = facts.transferFee;
+  if (schedule === null) return NO_TRANSFER_FEE;
+  const active = activeTransferFee(facts, currentEpoch);
+  const pending = schedule.newer.epoch > currentEpoch ? schedule.newer : null;
+  if (pending === null) return active;
+  return pending.bps > active.bps ? pending : active;
 }
 
 /**
@@ -930,7 +1035,17 @@ export interface LegMint {
 
 /** Whether every leg is one this keeper may buy; when it is, each leg's epoch-active fee, by mint. */
 export type LegAdmission =
-  | { readonly admit: true; readonly fees: ReadonlyMap<string, TransferFeeTerms> }
+  | {
+      readonly admit: true;
+      /** Each leg's fee IN FORCE NOW, which is what the ceiling was judged on. */
+      readonly fees: ReadonlyMap<string, TransferFeeTerms>;
+      /**
+       * Each leg's fee including a rise already written for a later epoch —
+       * what the SLIPPAGE is sized against, because that is what the route
+       * builder models. See worstCaseTransferFee.
+       */
+      readonly worstCaseFees: ReadonlyMap<string, TransferFeeTerms>;
+    }
   | { readonly admit: false; readonly outcome: "REFUSED"; readonly detail: string };
 
 /**
@@ -973,6 +1088,7 @@ export function legAdmissionDecision(input: {
 }): LegAdmission {
   const refusals: string[] = [];
   const fees = new Map<string, TransferFeeTerms>();
+  const worstCaseFees = new Map<string, TransferFeeTerms>();
 
   for (const leg of input.legs) {
     const name = leg.mint.toBase58();
@@ -1009,9 +1125,12 @@ export function legAdmissionDecision(input: {
       );
     }
     fees.set(name, fee);
+    // THE SAME BYTES AND THE SAME EPOCH, so the two can never be about
+    // different reads of the same mint.
+    worstCaseFees.set(name, worstCaseTransferFee(facts, input.currentEpoch));
   }
 
-  if (refusals.length === 0) return { admit: true, fees };
+  if (refusals.length === 0) return { admit: true, fees, worstCaseFees };
   return {
     admit: false,
     outcome: "REFUSED",

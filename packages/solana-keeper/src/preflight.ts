@@ -32,6 +32,7 @@ import type * as anchor from "@coral-xyz/anchor";
 import { AnchorProvider, Program } from "@coral-xyz/anchor";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { GOLDEN_V2_HEX, GOLDEN_V2_INPUTS } from "./attestation-golden.js";
+import { JUPITER_V6_PROGRAM } from "./invest-decision.js";
 import { convertCall, investCall, wrapSolCall } from "./invest-tick.js";
 import { isExternalFlowTx } from "./measure-window.js";
 import {
@@ -69,7 +70,7 @@ export interface PreflightResult {
  * on purpose — which is the point. test/attestation-golden.test.ts holds the
  * second copy, under vitest.
  */
-export const EXPECTED_INVARIANTS = 17;
+export const EXPECTED_INVARIANTS = 18;
 
 const ED25519 = "Ed25519SigVerify111111111111111111111111111";
 const SYSTEM = "11111111111111111111111111111111";
@@ -93,7 +94,32 @@ const JUPITER = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
  * or are fixed addresses in the IDL — and the Connection's fetch throws if that
  * ever stops being true.
  */
-async function buildOffline(): Promise<{ readonly name: string; readonly hex: string }[]> {
+interface OfflineBuild {
+  readonly vectors: readonly { readonly name: string; readonly hex: string }[];
+  /**
+   * Whether convert and invest BOTH carry, as an account, the venue program
+   * they were handed.
+   *
+   * WHY THIS IS NOT COVERED BY THE VECTORS ABOVE. They compare instruction
+   * DATA, and the venue is an ACCOUNT — so a builder that dropped
+   * `venueProgram` from its accountsPartial would build byte-identical data and
+   * pass every vector here. On chain it is the opposite of a silent failure and
+   * the opposite of a cheap one: convert.rs:88-91 and invest.rs:119-122 both
+   * `require!(venue_program.key() == policy.venue_program)`, so every convert
+   * and every invest for every vault would revert with WrongVenue, on every
+   * sweep, reported by this keeper as one more FAILED turn naming nothing.
+   *
+   * IT IS NEW BECAUSE THE DEFAULT IS GONE. Until 2026-09-21 both builders
+   * defaulted the account to RAYDIUM_CLMM when a caller omitted it, so omitting
+   * it produced a WRONG venue rather than a MISSING one. The default was
+   * removed with the move to Jupiter — a default that names a venue this keeper
+   * refuses is worse than none — and this invariant is what now stands where it
+   * stood.
+   */
+  readonly venueAccountsPresent: boolean;
+}
+
+async function buildOffline(): Promise<OfflineBuild> {
   const refuse = async (): Promise<never> => {
     throw new Error("the preflight builds instructions only: this provider signs nothing");
   };
@@ -109,7 +135,30 @@ async function buildOffline(): Promise<{ readonly name: string; readonly hex: st
   );
   const program = new Program(idl as anchor.Idl, provider);
   const zero = PublicKey.default;
-  const swap = { payer: zero, inputTokenAccount: zero, outputTokenAccount: zero, amountIn: 100n, minAmountOut: 200n };
+  // THE VENUE BLOB, FIXED, AND NO LONGER BUILT HERE.
+  //
+  // This used to be a SwapV2Args that buildSwapV2Data turned into Raydium
+  // swap_v2 bytes, because the venue was always Raydium. convert and invest
+  // take `venue_data: Vec<u8>` and hand it to invoke_signed VERBATIM — they
+  // never look at a byte — so under Jupiter the blob is `route.venueData`,
+  // built by Jupiter's /swap-instructions and verified by
+  // verifySharedAccountsRoute. None of that can happen here: this process has
+  // no network, and it must not get one.
+  //
+  // SO THE BLOB IS A FIXTURE, AND THE VECTOR NOW COVERS IT. The old vectors
+  // stopped at 24 and 25 bytes and let the tail go unchecked, on the grounds
+  // that buildSwapV2Data had its own test. The tail is now the caller's
+  // argument, which means the thing worth proving in THIS process is that
+  // Anchor's coder still writes a Vec<u8> as a 4-byte little-endian length
+  // followed by the bytes: get that wrong and every CPI this keeper makes is
+  // handed a malformed instruction by a builder that threw no error. The
+  // vectors below therefore pin the WHOLE data, blob included.
+  //
+  // The first eight bytes are Jupiter's real shared_accounts_route
+  // discriminator (c1209b3341d69c81), so a reader meets a recognisable value
+  // rather than filler; the four after it are deliberately not a valid route
+  // tail, because nothing here may look like a route that could be sent.
+  const venueData = Buffer.from("c1209b3341d69c81deadbeef", "hex");
 
   const link = { wallet: zero, vault: zero, linkAddress: zero };
 
@@ -135,33 +184,39 @@ async function buildOffline(): Promise<{ readonly name: string; readonly hex: st
   const wrapSol = await wrapSolCall(program, { crank: zero, vault: zero, policy: zero, vaultWsol: zero }, 100n).instruction();
   const convert = await convertCall(
     program,
-    { crank: zero, vault: zero, policy: zero, vaultWsol: zero, vaultIn: zero },
-    { amountIn: 100n, minOut: 200n, swap },
+    { crank: zero, vault: zero, policy: zero, vaultWsol: zero, vaultIn: zero, venueProgram: JUPITER_V6_PROGRAM },
+    { amountIn: 100n, minOut: 200n, venueData },
   ).instruction();
   // The same range on the invest path's u64s: convert carries session-sized
   // amounts too, and its two arguments sit either side of a width mistake.
   const convertWide = await convertCall(
     program,
-    { crank: zero, vault: zero, policy: zero, vaultWsol: zero, vaultIn: zero },
-    { amountIn: 9_007_199_254_740_993n, minOut: 18_446_744_073_709_551_615n, swap },
+    { crank: zero, vault: zero, policy: zero, vaultWsol: zero, vaultIn: zero, venueProgram: JUPITER_V6_PROGRAM },
+    { amountIn: 9_007_199_254_740_993n, minOut: 18_446_744_073_709_551_615n, venueData },
   ).instruction();
   const invest = await investCall(
     program,
-    { crank: zero, vault: zero, policy: zero, vaultIn: zero, vaultTarget: zero, targetMint: zero },
-    { legIndex: 0, amountIn: 100n, minOut: 200n, swap },
+    { crank: zero, vault: zero, policy: zero, vaultIn: zero, vaultTarget: zero, targetMint: zero, venueProgram: JUPITER_V6_PROGRAM },
+    { legIndex: 0, amountIn: 100n, minOut: 200n, venueData },
   ).instruction();
 
-  return [
+  const carriesVenue = (instruction: { readonly keys: readonly { readonly pubkey: PublicKey }[] }): boolean =>
+    instruction.keys.some((key) => key.pubkey.equals(JUPITER_V6_PROGRAM));
+
+  return {
+    venueAccountsPresent: carriesVenue(convert) && carriesVenue(convertWide) && carriesVenue(invest),
+    vectors: [
     { name: "settle_v2", hex: settle.data.toString("hex") },
     { name: "settle_v2 zero base", hex: settleZero.data.toString("hex") },
     { name: "settle_v2 wide u64s", hex: settleWide.data.toString("hex") },
     { name: "wrap_sol", hex: wrapSol.data.toString("hex") },
-    // The swap blob that follows the two amounts is pinned by
-    // test/shared-modules.test.ts; here only the args the BNs produced matter.
-    { name: "convert", hex: convert.data.subarray(0, 24).toString("hex") },
-    { name: "convert wide u64s", hex: convertWide.data.subarray(0, 24).toString("hex") },
-    { name: "invest", hex: invest.data.subarray(0, 25).toString("hex") },
-  ];
+    // WHOLE, NOT TRUNCATED: the tail is the venue blob this keeper now passes
+    // through, and its length prefix is the thing worth checking here.
+    { name: "convert", hex: convert.data.toString("hex") },
+    { name: "convert wide u64s", hex: convertWide.data.toString("hex") },
+    { name: "invest", hex: invest.data.toString("hex") },
+    ],
+  };
 }
 
 /**
@@ -189,9 +244,13 @@ const BUILDER_VECTORS: ReadonlyMap<string, string> = new Map([
   // by asking the builder what it produces.
   ["settle_v2 wide u64s", `${instructionDiscriminator("settle_v2").toString("hex")}01ffffffff000000000000000001000000ffffffffffffffff0100000000002000`],
   ["wrap_sol", `${instructionDiscriminator("wrap_sol").toString("hex")}6400000000000000`],
-  ["convert", `${instructionDiscriminator("convert").toString("hex")}6400000000000000c800000000000000`],
-  ["convert wide u64s", `${instructionDiscriminator("convert").toString("hex")}0100000000002000ffffffffffffffff`],
-  ["invest", `${instructionDiscriminator("invest").toString("hex")}006400000000000000c800000000000000`],
+  // 0c000000 is 12 as a little-endian u32: the Vec<u8> length that must precede
+  // the blob. Written out rather than computed from `venueData.length`, so that
+  // a coder which stopped emitting the prefix — or emitted it at a different
+  // width — is caught instead of being described.
+  ["convert", `${instructionDiscriminator("convert").toString("hex")}6400000000000000c8000000000000000c000000c1209b3341d69c81deadbeef`],
+  ["convert wide u64s", `${instructionDiscriminator("convert").toString("hex")}0100000000002000ffffffffffffffff0c000000c1209b3341d69c81deadbeef`],
+  ["invest", `${instructionDiscriminator("invest").toString("hex")}006400000000000000c8000000000000000c000000c1209b3341d69c81deadbeef`],
 ]);
 
 export async function runPreflight(): Promise<PreflightResult> {
@@ -222,7 +281,7 @@ export async function runPreflight(): Promise<PreflightResult> {
   // THE BUILDERS RUN IN THIS PROCESS. A builder that throws is the failure —
   // caught here so the image build ends on one readable line rather than a
   // stack — and a builder that returns the wrong bytes is a failure too.
-  let built: { readonly name: string; readonly hex: string }[];
+  let built: OfflineBuild;
   try {
     built = await buildOffline();
   } catch (error) {
@@ -237,17 +296,18 @@ export async function runPreflight(): Promise<PreflightResult> {
   // never compared: `hex === BUILDER_VECTORS.get(name)` is only ever evaluated
   // for what buildOffline handed back. Counting the two sides against each
   // other is what makes a missing build a failure instead of a smaller gate.
-  if (built.length !== BUILDER_VECTORS.size) {
+  if (built.vectors.length !== BUILDER_VECTORS.size) {
     return {
       ok: false,
       program: SIP,
-      invariants: invariants.length + built.length,
-      failure: `the preflight built ${built.length} instructions for ${BUILDER_VECTORS.size} vectors: a money-path builder is not being checked`,
+      invariants: invariants.length + built.vectors.length,
+      failure: `the preflight built ${built.vectors.length} instructions for ${BUILDER_VECTORS.size} vectors: a money-path builder is not being checked`,
     };
   }
-  for (const { name, hex } of built) {
+  for (const { name, hex } of built.vectors) {
     invariants.push([`${name} builds the bytes it has always built`, hex === BUILDER_VECTORS.get(name), true]);
   }
+  invariants.push(["convert and invest carry the venue account they were given", built.venueAccountsPresent, true]);
 
   for (const [name, got, want] of invariants) {
     if (got !== want) {

@@ -1235,7 +1235,12 @@ async function sweep(): Promise<void> {
           vault: link.vault,
           crank: investTurn.settleKey,
           crankLamports: snapshot.crankLamports,
-          pools: config.pools,
+          // config.pools NO LONGER GOES IN. The invest path took a mint -> Raydium
+          // pool registry and refused any leg missing from it; under Jupiter there
+          // is no pool to name, and a leg Jupiter cannot route is refused by the
+          // depth gate itself, before the wrap. The setting is still parsed and
+          // still counted in the status line, because operators' environments
+          // carry it and a config key that starts erroring is its own outage.
           live: investTurn.live,
           protocolPaused,
         });
