@@ -51,6 +51,55 @@ function sourceFiles(dir: string): readonly string[] {
   return out;
 }
 
+/**
+ * Every path this package reaches OUTSIDE itself, by either route.
+ *
+ * TWO ROUTES, AND THE SECOND IS THE ONE THAT BIT. A bare specifier resolves
+ * through the other package's exports map; a RELATIVE path (../../solana-core/…)
+ * bypasses the map entirely and is invisible to a check that only looks for
+ * "@sip/". test/pyth.test.ts reaches two solana-core files that way, assembling
+ * part of the specifier at runtime so tsc leaves the sibling alone — so the
+ * literal is a template and has to be expanded before it means anything.
+ *
+ * test-local/ is excluded on purpose: vitest.config.ts includes only
+ * test/** and src/**, so the image's own `pnpm test` never loads it.
+ */
+function reachedOutside(): ReadonlyMap<string, readonly string[]> {
+  const out = new Map<string, string[]>();
+  const CONSTANT = /const\s+([A-Z_][A-Z_0-9]*)\s*=\s*"([^"]+)"/g;
+  const RELATIVE = /["'`](\.\.\/\.\.\/[^"'`]+)["'`]/g;
+  // QUOTED ONLY. A bare mention in prose ("the keeper does not depend on
+  // @sip/solana-core") is not an import, and counting it sends this check
+  // hunting for an exports entry that has no reason to exist.
+  const BARE = /["'`]@sip\/([a-z0-9-]+)(\/[A-Za-z0-9._\/-]+)?["'`]/g;
+  for (const dir of ["src", "bin", "test"]) {
+    for (const file of sourceFiles(resolve(KEEPER, dir))) {
+      const text = readFileSync(file, "utf8");
+      const from = file.slice(KEEPER.length + 1);
+      const constants = new Map([...text.matchAll(CONSTANT)].map(([, k, v]) => [k!, v!]));
+      for (const [, raw] of text.matchAll(RELATIVE)) {
+        let spec = raw!;
+        for (const [k, v] of constants) spec = spec.split("${" + k + "}").join(v);
+        if (spec.includes("${")) continue;
+        const abs = resolve(dirname(file), spec);
+        if (abs.startsWith(`${KEEPER}/`)) continue;
+        out.set(abs.slice(ROOT.length + 1), [...(out.get(abs.slice(ROOT.length + 1)) ?? []), from]);
+      }
+      for (const [, pkg, sub] of text.matchAll(BARE)) {
+        if (pkg === "solana-keeper") continue;
+        const map = JSON.parse(read(`packages/${pkg}/package.json`)).exports as Record<string, unknown> | undefined;
+        expect(map, `packages/${pkg} declares an exports map`).toBeDefined();
+        const entry = map![sub === undefined ? "." : `.${sub}`];
+        const target = typeof entry === "string" ? entry : (entry as { default?: string } | undefined)?.default;
+        expect(target, `@sip/${pkg}${sub ?? ""} has an entry in packages/${pkg}'s exports map`).toBeDefined();
+        const path = `packages/${pkg}/${target!.replace(/^\.\//, "")}`;
+        out.set(path, [...(out.get(path) ?? []), from]);
+      }
+    }
+  }
+  return out;
+}
+
 describe("the keeper's Dockerfile carries every module the keeper imports", () => {
   it("reads a COPY line's last token as its destination, never as a source", () => {
     const paths = copiedPaths("COPY a.ts b.ts dest/\nCOPY solo.ts other/\n");
@@ -58,26 +107,21 @@ describe("the keeper's Dockerfile carries every module the keeper imports", () =
     expect(paths, "a destination read as a source makes a whole directory look copied").not.toContain("dest");
   });
 
-  it("resolves every @sip/solana-program import through the exports map and finds a COPY line naming it", () => {
-    const exportsMap = JSON.parse(read("packages/solana-program/package.json")).exports as Record<string, unknown>;
+  it("names, in a COPY line, every file this package reaches outside itself — bare specifier or relative path", () => {
     const copied = copiedPaths(read("packages/solana-keeper/Dockerfile"));
-
-    const wanted = new Set<string>();
-    for (const dir of ["src", "bin", "test"]) {
-      for (const file of sourceFiles(resolve(KEEPER, dir))) {
-        for (const [, sub] of readFileSync(file, "utf8").matchAll(/@sip\/solana-program\/([A-Za-z0-9._-]+)/g)) wanted.add(sub!);
-      }
-    }
-    expect(wanted.size, "the keeper imports at least one @sip/solana-program module").toBeGreaterThan(0);
+    const reached = reachedOutside();
+    expect(reached.size, "the keeper reaches at least one file outside its own package").toBeGreaterThan(0);
 
     const missing: string[] = [];
-    for (const sub of [...wanted].sort()) {
-      const entry = exportsMap[`./${sub}`];
-      const target = typeof entry === "string" ? entry : (entry as { default?: string; types?: string } | undefined)?.default;
-      expect(target, `@sip/solana-program/${sub} has an entry in the exports map`).toBeDefined();
-      const path = `packages/solana-program/${target!.replace(/^\.\//, "")}`;
-      if (!copied.some((c) => path === c || path.startsWith(`${c}/`))) missing.push(`${sub} -> ${path}`);
+    for (const [path, from] of [...reached].sort()) {
+      if (!copied.some((c) => path === c || path.startsWith(`${c}/`))) missing.push(`${path}  (from ${[...new Set(from)].sort().join(", ")})`);
     }
-    expect(missing, "an import the image does not carry fails the build, not the tests, and only at deploy").toEqual([]);
+    expect(missing, "a file the image does not carry fails the BUILD, not the tests, and only at deploy").toEqual([]);
+  });
+
+  it("sees the relative reaches too, not only the bare specifiers", () => {
+    const reached = [...reachedOutside().keys()];
+    expect(reached, "test/pyth.test.ts reaches these by relative path with a runtime-assembled tail").toContain("packages/solana-core/test/fixtures/pyth-accounts.ts");
+    expect(reached).toContain("packages/solana-core/src/client/pyth-price.ts");
   });
 });

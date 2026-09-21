@@ -72,6 +72,14 @@ COPY packages/solana-program/scripts/attestation.ts packages/solana-program/scri
 # goes stale the next time a test is added and then reads as a measurement
 # nobody took — test/dockerfile-copies.test.ts checks the coverage instead.
 COPY packages/solana-program/programs/sip-vault/src/attestation.rs packages/solana-program/programs/sip-vault/src/attestation.rs
+# AND THE TWO FILES THE MIRROR TEST REACHES ACROSS FOR. test/pyth.test.ts
+# decodes the same committed mainnet vector with BOTH implementations and
+# asserts they agree to the unit — that assertion is the only thing keeping
+# src/pyth.ts honest against the copy it was mirrored from. Named one by one
+# like everything else here: this is two files, NOT a dependency on
+# @sip/solana-core, which src/pyth.ts explains the keeper must never take.
+COPY packages/solana-core/src/client/pyth-price.ts packages/solana-core/src/client/pyth-price.ts
+COPY packages/solana-core/test/fixtures/pyth-accounts.ts packages/solana-core/test/fixtures/pyth-accounts.ts
 COPY Dockerfile Dockerfile
 COPY packages/solana-keeper packages/solana-keeper
 # The keeper runs from TypeScript through tsx; typecheck is the build gate, so a
