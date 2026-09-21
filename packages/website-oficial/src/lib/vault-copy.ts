@@ -267,7 +267,7 @@ export const INVEST_COPY = {
   // the box and sign, and never meet the 2 % that going in and out of ANTHROPIC
   // hands its issuer. The two costs are split into two sentences ON PURPOSE,
   // because they have different owners and different remedies — one is a number
-  // a single key sets and has already moved twice, the other is the day's
+  // a single key sets and has already raised, the other is the day's
   // liquidity. SPYx sits beside ANTHROPIC in both, because without it the reader
   // has no way to tell "this is what tokenised stocks cost" from "this is what
   // THIS token costs", and the honest answer is the second.
@@ -283,21 +283,29 @@ export const INVEST_COPY = {
   //    so 50 -> 100 is the only change this mint can be read to have made. An
   //    earlier 0 -> 50 may well have happened and is NOT on the account, so it is
   //    not said here.
-  //  * the round trips, from keyless Jupiter quotes, USDC -> stock -> USDC:
-  //    SPYx 0.01 %, ANTHROPIC 0.41-0.44 %, and FIGUREAI (NOT in the basket)
-  //    2.78-3.26 %. These are the BEST route on the day and so a floor on what
-  //    this costs, not a promise: SaverFi itself buys through one Raydium pool
-  //    per stock, not through Jupiter's multi-hop.
+  //  * the round trips, from SIMULATED round trips on mainnet: unsigned
+  //    transactions through simulateTransaction, USDC -> stock -> USDC, with
+  //    the sell chained on the REAL credit the buy returned and not on the
+  //    quote. Epoch 1039, n=7. ANTHROPIC 2.4 %, range 2.24-2.63 %. Of that,
+  //    199 bps is STRUCTURAL -- the mint's 1 % charged once going in and once
+  //    coming out, which is 1 - 0.99^2 and NOT "2 x 1 %" -- and the remaining
+  //    25-64 bps is venue spread and impact, which moved by 36 bps in thirteen
+  //    minutes. SPYx on the same harness: 1.1-1.8 BASIS POINTS.
   //
-  //    THE COPY QUOTES THIS MEASUREMENT AND NO OTHER. An earlier draft of these
-  //    sentences carried 0.60 / 0.57 / 1.26 % for ANTHROPIC at $5 / $25 / $100
-  //    and built a size-dependence claim on it ("it gets worse as the buy gets
-  //    bigger, because its pool is small"). That reading is not reproducible
-  //    from anything in this repository -- no fixture, no script, no recorded
-  //    output -- and its own middle point fell as the buy grew, so it did not
-  //    support the curve it was used to draw. Both are gone. The range below is
-  //    no tighter than the measurement, and the pool's size is argued where it
-  //    IS measured: thinPool, from the pool account's own USDC reserve.
+  //    THESE ARE THE CLOSED FIGURES AND THE COPY QUOTES NO OTHER. Two earlier
+  //    readings are gone. 0.60 / 0.57 / 1.26 % for ANTHROPIC at $5 / $25 / $100
+  //    carried a size-dependence claim ("it gets worse as the buy gets bigger,
+  //    because its pool is small") that is not reproducible from anything in
+  //    this repository and whose own middle point fell as the buy grew. And
+  //    SPYx 0.01 % / ANTHROPIC 0.41-0.44 %, from keyless Jupiter quotes, was
+  //    written before the measurement finished: it priced the sell off the
+  //    quote instead of off the credit the buy actually returned, and the
+  //    closed harness reads the same round trip at 2.24-2.63 %. THE COST DOES
+  //    NOT SHRINK BY BUYING SMALLER -- it is a fee on every transfer, not
+  //    slippage, and it is charged again on every rebalance -- so no sentence
+  //    below offers a smaller buy as a way out of it. The pool's size is
+  //    argued where it IS measured: thinPool, from the pool account's own
+  //    USDC reserve.
   //
   // WHEN THE FEE ROSE, which the copy has to get right because it is the proof
   // that the key is in use NOW. TransferFeeConfig's newer entry starts at epoch
@@ -311,7 +319,7 @@ export const INVEST_COPY = {
   // roughly two weeks.
   costTitle: "What this costs you, and who decides it",
   issuerCost:
-    "ANTHROPIC's issuer charges 1 % of every transfer of it: once when your vault buys it, and once when it leaves. Going in and back out therefore gives up about 2 % before the market is involved at all. That figure belongs to the issuer — not to SaverFi and not to Solana — and the issuer moves it: it was 0.5 % for about two weeks, and it became 1 % when the current epoch began, hours before this was written on 20 September 2026. SPYx charges nothing to transfer.",
+    "ANTHROPIC's issuer charges 1 % of every transfer of it: once when your vault buys it, and once when it leaves. Going in and back out therefore gives up 1.99 % before the market is involved at all — not quite two, because the second 1 % is taken from what the first one left. Buying in smaller pieces does not make it smaller: it is a fee on each transfer, not a price that moves with the size of the order, and every later buy pays it again. That figure belongs to the issuer — not to SaverFi and not to Solana — and the issuer moves it: it was 0.5 % for about two weeks, and it became 1 % when the current epoch began, hours before this was written on 20 September 2026. SPYx charges nothing to transfer, and nobody can make it: its mint carries no fee setting at all, and no key with the power to add one.",
   /**
    * THE LIMIT THE NEXT RAISE CROSSES, which no sentence said while two of them
    * told the owner the issuer moves this number and had just moved it.
@@ -327,9 +335,9 @@ export const INVEST_COPY = {
   feeCeiling: (max: string): string =>
     `There is a limit built into SaverFi: the keeper will not buy a stock that charges more than ${max} to transfer. ANTHROPIC sits exactly on that limit today, so if that issuer raises the fee once more, the vault stops buying the whole basket — SPYx along with it — and stops converting your SOL at all, until the basket itself is changed. Nothing is lost when that happens; the saving simply stops until someone acts.`,
   marketCost:
-    "Then there is what the market charges, which depends on the day's liquidity. Buying a stock and selling it straight back measured 0.01 % on SPYx. The same round trip on ANTHROPIC measured between 0.41 % and 0.44 %. Read on 20 September 2026 through the best route quoted that day; SaverFi buys through one pool per stock rather than hunting a route, so treat these as the least it can cost, not a promise. Another day reads differently.",
+    "Then there is what the market charges on top, which depends on the day's liquidity. Buying a stock and selling it straight back was measured on 20 September 2026 on Solana itself — seven round trips, built and run but never signed, each sale priced on what its purchase actually delivered rather than on a quote. ANTHROPIC's round trip cost 2.4 % all told, between 2.24 % and 2.63 %. The issuer's 1.99 % is the part of that which never moves; the rest, between 0.25 % and 0.64 %, is the market, and it moved by 0.36 % within thirteen minutes that day. SPYx's round trip, measured the same way, cost between 0.011 % and 0.018 %. Another day reads differently.",
   costTogether:
-    "So going in and out of ANTHROPIC costs roughly 2 % to its issuer plus about half a percent to the market, while SPYx costs almost nothing either way. Both are tokenised stocks on the same chain, bought the same way, held in the same vault. The difference is these two issuers and these two pools — not Solana, and not SaverFi.",
+    "So going in and out of ANTHROPIC cost 2.4 % on the day it was measured: 1.99 % of that is the issuer's fee, charged whatever the market does, and the remainder is the market. SPYx cost under two hundredths of one percent the same day — more than a hundred times less. Both are tokenised stocks on the same chain, bought the same way, held in the same vault. The difference is these two issuers and these two pools — not Solana, and not SaverFi.",
 
   // ── WHETHER IT CAN BUY AT ALL TODAY ────────────────────────────────────────
   //
@@ -368,13 +376,65 @@ export const INVEST_COPY = {
   //  * SPYx (XsoCS1…BDF2W): mint 7pt9tkct…, freeze and pausable JDq14BWv…,
   //    permanent delegate, hook and metadata 5aMNNLQJ…. Three separate keys, and
   //    no transfer fee to raise.
+  //
+  // THE SECOND SWITCH, which no sentence said while the fee had three of its
+  // own. Both mints carry Token-2022's TRANSFER HOOK extension PRESENT BUT
+  // EMPTY — the authority is set and the program id is the default key, which
+  // invest-decision.ts's decodeMintFacts reads as `transferHook: null` and its
+  // own comment calls "the issuer keeping the option open rather than a hook".
+  // legAdmissionDecision refuses any leg whose transferHook is NOT null,
+  // because sip-vault's invest builds swap_v2 with the route's accounts and
+  // nothing else, and a real hook needs its own accounts on every transfer. So
+  // filling that field in is a STOP, not a cost, and by the same all-or-nothing
+  // doctrine as the fee ceiling it takes the whole basket — SPYx and the SOL
+  // conversion included. BOTH LEGS CARRY THAT FIELD AND BOTH AUTHORITIES ARE
+  // SET: on ANTHROPIC the key that can fill it is the same WV9PJ… that raised
+  // the fee hours earlier; on SPYx it is 5aMNNLQJ…, which is not the key that
+  // can freeze or pause SPYx and cannot put a fee on it at all. So the STOP is
+  // symmetric and the FEE is not, and neither side of that may be overstated —
+  // nothing read here measures which key is likelier to use it.
+  // INVEST_COPY.hookSwitch is the sentence that says so, and
+  // vault-copy.test.ts pins it to the keeper's CODE — the null-program-id read
+  // and the `facts.transferHook !== null` refusal — never to its prose.
   freezeNotice:
     "Both stocks are Token-2022 tokens, and each issuer keeps powers over its own that SaverFi cannot take away. An issuer can freeze your vault's account for that stock, pause every transfer of it, and move it out of your vault through a permanent delegate. If any of that happens, withdrawing that stock can fail or find less than you hold. USDC's issuer can freeze USDC accounts too. Withdrawing SOL depends on no issuer at all.",
   issuerKeys:
     "The two are not the same risk. On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used to raise the fee, from 0.5 % to 1 %, on the day this page was written. On SPYx those powers sit with three separate keys and there is no fee to raise. This deserves more of your attention than the price does: it is not the market moving against you, it is one person's decision.",
+  /**
+   * THE SWITCH THAT STOPS THE BUYING, held on ANTHROPIC by the same key as the
+   * fee — and held on SPYx by a key of its own.
+   *
+   * Said in the owner's terms on purpose: what he is being asked to accept is
+   * not a fee that might rise by some amount, it is that a stranger can stop his
+   * pension buying anything at all, on a day of that stranger's choosing. Every
+   * clause is a fact of the arrangement rather than of today's number, so the
+   * sentence survives the fee moving again: the field is empty TODAY, the
+   * refusal is what SaverFi does whenever it is not.
+   *
+   * THE STOP SPEAKS ONLY FOR ITSELF. This ended on a bare "Nothing you have
+   * already saved is lost or moved.", two paragraphs under freezeNotice's
+   * permanent delegate and inside the SAME box, where standing alone it reads as
+   * a blanket promise that nothing can ever be taken — which that box denies
+   * three lines earlier. It now says what it always meant, that the STOP takes
+   * nothing, and points back at the powers that do reach the holding.
+   *
+   * AND THE STOP IS NOT ANTHROPIC'S ALONE. The mainnet read recorded above gives
+   * SPYx a transfer-hook authority of its own (5aMNNLQJ…), so SPYx's empty field
+   * can be filled in by ITS key exactly as ANTHROPIC's can by WV9PJ…. Saying
+   * only "a different key holds it" and then closing on "one stranger's key"
+   * left the reader finishing the paragraph believing the stop belonged to
+   * ANTHROPIC. Both legs carry it. The asymmetry that IS on the accounts is the
+   * FEE — SPYx's mint has no TransferFeeConfig and no authority for one, while
+   * ANTHROPIC's fee key is the same key that freezes, pauses and moves its stock
+   * — and nothing here measures which key is likelier to act, so nothing here
+   * says.
+   */
+  hookSwitch:
+    "The same key holds a second switch, and this one is not about money at all: it stops the buying. Both stocks carry a Token-2022 field where the issuer may name a program that has to run on every transfer of it; on both it is empty today, which is the issuer keeping the option rather than using it. SaverFi will not buy a stock whose field has been filled in, because it cannot carry what a program named there would demand. So on the day ANTHROPIC's key writes one in, the vault stops buying the whole basket — SPYx along with it — and stops converting your SOL, until the basket itself is changed. It applies from the moment it is written: the next buy is the one that stops. That stop takes nothing from you: what you have already saved is neither lost nor moved by it. The freeze, the pause and the permanent delegate described above are separate powers, and those can reach what your vault already holds. SPYx is not exempt from this: it carries the same empty field, and the key over that field — not the key that freezes or pauses SPYx — is set exactly as ANTHROPIC's is, so either issuer can fill its own field in and stop the whole basket the same way. Nothing here measures which of them is likelier to. The asymmetry that can be proved is the fee, not the stop: SPYx's mint carries no fee setting at all and no key able to add one, while on ANTHROPIC the key that would write the hook in is the same key that sets the fee and can freeze, pause and move the stock. So what you are accepting is not only a fee that may rise: it is that either stranger's key can stop your pension buying anything at all, on any day he chooses.",
   freezeShort:
     "Each issuer can freeze, pause or move its own stock, even inside your vault, and on ANTHROPIC one key holds all of those powers. Withdrawing SOL does not depend on any of them.",
-  acknowledge: "I understand each issuer can freeze, pause or move its own stock out of my vault, and that one key holds all of those powers over ANTHROPIC",
+  acknowledge:
+    "I understand each issuer can freeze, pause or move its own stock out of my vault, that one key holds all of those powers over ANTHROPIC, and that the same key can stop my vault buying anything at all",
   sign: "Sign investment policy",
   signing: "Signing…",
   signed: "Policy signed",
