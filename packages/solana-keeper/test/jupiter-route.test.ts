@@ -39,12 +39,15 @@ import {
   findVaultOwnedTokenAccounts,
   fitsLegacyTransaction,
   investAmountIn,
+  investMinOut,
   legacyTransactionBytes,
   netOfTransferFee,
   ownerFloorFor,
   pricedAtSlot,
   routeMints,
+  routeWarning,
   transferFeeForEpoch,
+  worstCaseTransferFee,
   verifyQuoteAnswersRequest,
   verifyRouteFresh,
   transferFeeOn,
@@ -216,6 +219,51 @@ function dataWith(mutate: (bytes: Buffer) => void): string {
   const bytes = Buffer.from(CAPTURED_DATA, "base64");
   mutate(bytes);
   return bytes.toString("base64");
+}
+
+/**
+ * The amount tail is the LAST 19 bytes of sharedAccountsRoute's data:
+ * in_amount(u64) quoted_out_amount(u64) slippage_bps(u16) platform_fee_bps(u8).
+ * Pinned here rather than imported because the point of the tests below is
+ * that the decoder must not take this length as its only anchor.
+ */
+const DATA_TAIL_LEN = 19;
+
+/** The same capture with `extra` junk bytes AFTER the tail: every amount shifts. */
+function dataWithTrailingBytes(extra: number): string {
+  return Buffer.concat([Buffer.from(CAPTURED_DATA, "base64"), Buffer.alloc(extra, 0)]).toString("base64");
+}
+
+/**
+ * The same capture with `wedge` inserted BETWEEN the route plan and the tail.
+ *
+ * THIS IS THE CASE THAT MATTERS. The tail still sits at the end, so every
+ * amount read backward from `data.length` is the RIGHT number and agrees with
+ * the quote perfectly — amounts-drift and venue-threshold both pass. The only
+ * thing wrong with these bytes is that the plan stops before the tail starts,
+ * which is exactly what a decoder anchored only to `data.length` cannot see.
+ */
+function dataWithBytesBeforeTail(wedge: readonly number[]): string {
+  const bytes = Buffer.from(CAPTURED_DATA, "base64");
+  const tail = bytes.length - DATA_TAIL_LEN;
+  return Buffer.concat([bytes.subarray(0, tail), Buffer.from(wedge), bytes.subarray(tail)]).toString("base64");
+}
+
+/** The captured response carrying some other instruction data. */
+function responseWithData(data: string): JupiterSwapInstructions {
+  const r = response();
+  return { ...r, swapInstruction: { ...r.swapInstruction, data } };
+}
+
+/** The condition a refusal from any thunk names, or a loud failure. */
+function refusedBy(run: () => unknown): RefusalCondition {
+  try {
+    run();
+  } catch (error) {
+    if (error instanceof JupiterRouteRefusal) return error.condition;
+    throw error;
+  }
+  throw new Error("nothing was refused — the check this test covers is gone");
 }
 
 describe("the Jupiter route builder accepts a real mainnet sharedAccountsRoute", () => {
@@ -1152,5 +1200,283 @@ describe("the fork harness's venue flags, because the documented command has to 
       slippageBps: 200,
     };
     expect(written.requestedAmountIn).toBe(written.instructionInAmount);
+  });
+});
+
+describe("the amount tail is anchored to the front of the data, not only to its length", () => {
+  // WHY THIS IS THE FIRST FIX AND NOT THE LAST. `tail = data.length - 19` used
+  // `data.length` as a lower bound and said nothing about what sat in front of
+  // it. One trailing byte moves all four numbers at once — in_amount,
+  // quoted_out_amount, slippage_bps, platform_fee_bps — and those four are the
+  // ones request-drift and venue-threshold compare against, so a shifted read
+  // can AGREE WITH ITSELF: the same wrong offset feeds both sides. Every other
+  // guard in the file is built to stop a wrong number agreeing with itself, so
+  // the decoder underneath them cannot be the one place it can happen.
+  //
+  // The anchor walks disc(8) + id(u8) + route_plan len(u32) + the plan, and
+  // refuses unless the plan ends EXACTLY where the tail is read from. It does
+  // not decode the plan: the Swap enum's widths change whenever Jupiter
+  // integrates an AMM, and a table for them is the treadmill this file has
+  // always refused. It only asks whether each step's three trailing bytes
+  // COULD be a (percent, input_index, output_index).
+
+  it("reads the captured mainnet build, whose one step ends exactly at the tail", () => {
+    const data = Buffer.from(CAPTURED_DATA, "base64");
+    // 36 bytes: 8 disc + 1 id + 4 vec len + 4 of plan (`28 64 00 01`) + 19 tail.
+    expect(data.length).toBe(36);
+    expect(data.readUInt32LE(9)).toBe(1);
+    expect(data.subarray(13, data.length - DATA_TAIL_LEN).toString("hex")).toBe("28640001");
+    expect(decodeRouteAmounts(data, 32)).toEqual({
+      inAmount: 25_000_000n,
+      quotedOutAmount: 3_254_246n,
+      slippageBps: 100,
+      platformFeeBps: 0,
+    });
+  });
+
+  it("refuses bytes WEDGED between the plan and the tail, which every other check passes [route-plan]", () => {
+    // THE CASE THAT PROVES THE ANCHOR IS DOING THE WORK. The tail still sits
+    // at the end, so all four amounts read back correctly and agree with the
+    // quote to the raw unit — amounts-drift and venue-threshold are both
+    // satisfied. Only the plan disagrees about where it stops.
+    const wedged = Buffer.from(dataWithBytesBeforeTail([0xff, 0xff, 0xff, 0xff]), "base64");
+    expect(wedged.length).toBe(40);
+    expect(wedged.readBigUInt64LE(wedged.length - DATA_TAIL_LEN)).toBe(25_000_000n);
+    expect(wedged.readBigUInt64LE(wedged.length - DATA_TAIL_LEN + 8)).toBe(3_254_246n);
+    expect(wedged.readUInt16LE(wedged.length - DATA_TAIL_LEN + 16)).toBe(100);
+
+    const said = refusal(quote(), responseWithData(wedged.toString("base64")));
+    expect(said.condition).toBe("route-plan");
+    expect(said.message).toContain("cannot end at byte 21");
+  });
+
+  it("refuses junk APPENDED after the tail, at every length that shifts it [route-plan]", () => {
+    // One to four bytes. Each one slides the tail read into the middle of the
+    // real amounts, and each displaced trailer is impossible: percent 0,
+    // percent 1 with an input_index of 64, percent 64 with one of 120, and
+    // percent 120.
+    for (const extra of [1, 2, 3, 4]) {
+      expect(refusal(quote(), responseWithData(dataWithTrailingBytes(extra))).condition).toBe("route-plan");
+    }
+  });
+
+  it("refuses a plan that claims no steps at all [route-plan]", () => {
+    // A zero-step vec would make the anchor vacuous: nothing between the
+    // header and the tail, and any length would satisfy it.
+    const empty = dataWith((bytes) => bytes.writeUInt32LE(0, 9));
+    expect(refusal(quote(), responseWithData(empty)).condition).toBe("route-plan");
+    expect(refusedBy(() => decodeRouteAmounts(Buffer.from(empty, "base64"), 32))).toBe("route-plan");
+  });
+
+  it("refuses a plan that claims more steps than the bytes could hold [route-plan]", () => {
+    // Four bytes of plan cannot carry two steps: the smallest step is a
+    // one-byte Swap variant plus its three-byte trailer.
+    const two = dataWith((bytes) => bytes.writeUInt32LE(2, 9));
+    const said = refusal(quote(), responseWithData(two));
+    expect(said.condition).toBe("route-plan");
+    expect(said.message).toContain("needing at least 8 bytes");
+  });
+
+  it("uses the instruction's account count to bound each step's two indices", () => {
+    // A two-byte wedge whose displaced trailer reads percent 1, input_index
+    // 64, output_index 0. The percent is legal; the index is not, because this
+    // instruction lists 32 accounts. Without that bound the shift reads, which
+    // is why verifySharedAccountsRoute hands the count down.
+    const wedged = dataWithBytesBeforeTail([0x40, 0x00]);
+    expect(refusal(quote(), responseWithData(wedged)).condition).toBe("route-plan");
+    expect(refusedBy(() => decodeRouteAmounts(Buffer.from(wedged, "base64"), 32))).toBe("route-plan");
+    // Stated rather than implied: the same bytes with no account count are a
+    // shift this decoder cannot see. It is an anchor, not a decoder.
+    expect(decodeRouteAmounts(Buffer.from(wedged, "base64")).inAmount).toBe(25_000_000n);
+  });
+
+  it("still refuses data too short to carry the header and the tail [data-length]", () => {
+    // 13 + 19: below that there is not even a plan length to read.
+    expect(refusedBy(() => decodeRouteAmounts(Buffer.alloc(31), 32))).toBe("data-length");
+    expect(refusedBy(() => decodeRouteAmounts(Buffer.alloc(8), 32))).toBe("data-length");
+  });
+});
+
+describe("the slippage a route was quoted at, against the fee it will pay [warning, not refusal]", () => {
+  // MEASURED, AND THE BUILDER STILL CANNOT DECIDE IT. Jupiter derives its
+  // threshold from a GROSS quote on some venues and enforces it against the
+  // CREDITED (net) amount, so the usable tolerance is slippage_bps - fee_bps
+  // and at equality it is negative by one raw unit. But WHICH venue fills is
+  // Jupiter's choice per quote — the same mint answered gross through Manifest
+  // and net through Meteora DLMM on the same afternoon — so a refusal here
+  // would refuse routes that land. It is a named signal on the route instead.
+
+  it("names the condition when the slippage does not clear the fee, and still returns the route", () => {
+    // The captured quote asks 100 bps; epoch 1039 charges exactly 100.
+    const route = verifySharedAccountsRoute(quote(), responseDeliveringToVault(), context({ transferFee: FEE_100 }));
+    const warning = routeWarning(route, "slippage-not-above-transfer-fee");
+    expect(warning).not.toBeNull();
+    expect(warning!.slippageBps).toBe(100);
+    expect(warning!.transferFeeBps).toBe(100);
+    expect(warning!.usableToleranceBps).toBe(0);
+    // NOT A REFUSAL. The route is returned, fully verified, warning attached.
+    expect(route.output.netOfVenueThreshold).toBe(3_189_486n);
+  });
+
+  it("warns below the fee too, with the tolerance stated as the negative number it is", () => {
+    // The same capture re-quoted at 50 bps: the instruction's own tail, the
+    // quote's slippageBps and the request all have to move together, or
+    // amounts-drift answers first. 3,254,246 - floor(3,254,246 * 50/1e4).
+    const narrowData = dataWith((bytes) => bytes.writeUInt16LE(50, bytes.length - 3));
+    const r = responseDeliveringToVault();
+    const narrowResponse = { ...r, swapInstruction: { ...r.swapInstruction, data: narrowData } };
+    const narrowQuote = { ...quote(), slippageBps: 50, otherAmountThreshold: "3237975" };
+    const route = verifySharedAccountsRoute(
+      narrowQuote,
+      narrowResponse,
+      context({ transferFee: FEE_100, request: request({ slippageBps: 50 }) }),
+    );
+    expect(route.output.venueThreshold).toBe(3_237_975n);
+    expect(routeWarning(route, "slippage-not-above-transfer-fee")!.usableToleranceBps).toBe(-50);
+  });
+
+  it("says nothing when the slippage clears the fee, which is the epoch-1038 case", () => {
+    const route = verifySharedAccountsRoute(quote(), responseDeliveringToVault(), context({ transferFee: FEE_50 }));
+    expect(route.warnings).toEqual([]);
+    expect(routeWarning(route, "slippage-not-above-transfer-fee")).toBeNull();
+  });
+
+  it("says nothing on a mint that charges nothing, however narrow the slippage", () => {
+    const route = verifySharedAccountsRoute(quote(), response(), context({ transferFee: NO_FEE }));
+    expect(route.warnings).toEqual([]);
+  });
+});
+
+describe("min_out has a name too, so the caller is not picking one of four numbers", () => {
+  const feeRoute = (): JupiterRoute =>
+    verifySharedAccountsRoute(quote(), responseDeliveringToVault(), context({ transferFee: FEE_100 }));
+
+  it("returns the net of the venue's own floor, re-derived from the instruction's bytes", () => {
+    const route = feeRoute();
+    // 3,221,704 - ceil(3,221,704 * 100/10_000) = 3,221,704 - 32,218.
+    expect(investMinOut(route)).toBe(3_189_486n);
+    expect(investMinOut(route)).toBe(route.output.netOfVenueThreshold);
+    // And it is NOT any of the three numbers next to it. quotedOut is the one
+    // measured reverting with FillTooSmall 6020 on a gross-quoting venue.
+    expect(investMinOut(route)).toBeLessThan(route.output.venueThreshold);
+    expect(investMinOut(route)).toBeLessThan(route.output.netOfQuotedOut);
+    expect(investMinOut(route)).toBeLessThan(route.output.quotedOut);
+  });
+
+  it("refuses a route whose reported net threshold its own bytes do not support [venue-threshold]", () => {
+    // A JupiterRoute assembled somewhere other than verifySharedAccountsRoute:
+    // the re-check is the whole reason this is a function and not a field.
+    const route = feeRoute();
+    const lying: JupiterRoute = {
+      ...route,
+      output: { ...route.output, netOfVenueThreshold: route.output.venueThreshold },
+    };
+    expect(refusedBy(() => investMinOut(lying))).toBe("venue-threshold");
+  });
+
+  it("refuses a route whose venue floor is not what its tail recomputes [venue-threshold]", () => {
+    const route = feeRoute();
+    const drifted: JupiterRoute = {
+      ...route,
+      output: { ...route.output, venueThreshold: route.output.venueThreshold + 1n },
+    };
+    expect(refusedBy(() => investMinOut(drifted))).toBe("venue-threshold");
+  });
+
+  it("refuses a min_out under the owner's own floor, as invest() would [below-owner-floor]", () => {
+    const route = feeRoute();
+    const raised: JupiterRoute = {
+      ...route,
+      output: { ...route.output, ownerFloor: route.output.netOfVenueThreshold + 1n },
+    };
+    expect(refusedBy(() => investMinOut(raised))).toBe("below-owner-floor");
+  });
+
+  it("leaves a fee-free leg's min_out at the venue's own floor", () => {
+    const route = verifySharedAccountsRoute(quote(), response(), context({ transferFee: NO_FEE }));
+    expect(investMinOut(route)).toBe(3_221_704n);
+    expect(investMinOut(route)).toBe(route.output.venueThreshold);
+  });
+});
+
+describe("the worse of two fee schedules is the one that WITHHOLDS more, not the one with the higher rate", () => {
+  // 50 bps uncapped against 100 bps capped at 1,000 raw units. Unreachable on
+  // today's PreStocks mints — both schedules set maximumFee to u64::MAX — and
+  // that is exactly why it was never noticed: the old line picked the higher
+  // basisPoints and never read the cap.
+  const UNCAPPED_50: TransferFeeRate = { epoch: 1032n, basisPoints: 50, maximumFee: 18_446_744_073_709_551_615n };
+  const CAPPED_100: TransferFeeRate = { epoch: 1039n, basisPoints: 100, maximumFee: 1_000n };
+
+  it("still returns the higher rate when the caps tie, which is every mint we hold", () => {
+    expect(worstCaseTransferFee(FEE_50, FEE_100)).toEqual(FEE_100);
+    expect(worstCaseTransferFee(FEE_100, FEE_50)).toEqual(FEE_100);
+    expect(worstCaseTransferFee(NO_FEE, FEE_50)).toEqual(FEE_50);
+  });
+
+  it("compares the COMPUTED fee when the gross is known, and the cap changes the answer", () => {
+    // Past the cap's crossing point the LOWER rate withholds fifty times more.
+    expect(transferFeeOn(10_000_000n, UNCAPPED_50)).toBe(50_000n);
+    expect(transferFeeOn(10_000_000n, CAPPED_100)).toBe(1_000n);
+    expect(worstCaseTransferFee(UNCAPPED_50, CAPPED_100, 10_000_000n)).toEqual(UNCAPPED_50);
+    // Under it, the higher rate is worse again — which is why there is no
+    // answer at all without a gross.
+    expect(transferFeeOn(10_000n, UNCAPPED_50)).toBe(50n);
+    expect(transferFeeOn(10_000n, CAPPED_100)).toBe(100n);
+    expect(worstCaseTransferFee(UNCAPPED_50, CAPPED_100, 10_000n)).toEqual(CAPPED_100);
+  });
+
+  it("returns an envelope when neither schedule is worse everywhere, and says so by its numbers", () => {
+    const envelope = worstCaseTransferFee(UNCAPPED_50, CAPPED_100);
+    expect(envelope.basisPoints).toBe(100);
+    expect(envelope.maximumFee).toBe(18_446_744_073_709_551_615n);
+    // The property that makes it safe: at least as much withheld as either
+    // schedule, at every gross — so the min_out derived from it can only be
+    // too small, and a min_out that is too small costs the vault nothing.
+    for (const gross of [1n, 1_000n, 10_000n, 199_999n, 200_001n, 1_000_000n, 10_000_000n, 1_000_000_000n]) {
+      const worst = transferFeeOn(gross, envelope);
+      expect(worst).toBeGreaterThanOrEqual(transferFeeOn(gross, UNCAPPED_50));
+      expect(worst).toBeGreaterThanOrEqual(transferFeeOn(gross, CAPPED_100));
+    }
+    // THE OLD RULE, PINNED AS WRONG: picking by basisPoints alone returns
+    // CAPPED_100 and understates the withholding by 49,000 raw units at
+    // 10,000,000 — a min_out 49,000 too HIGH, which is the direction that
+    // reverts a transaction that was already signed.
+    expect(transferFeeOn(10_000_000n, CAPPED_100)).toBeLessThan(transferFeeOn(10_000_000n, UNCAPPED_50));
+    expect(transferFeeOn(10_000_000n, UNCAPPED_50) - transferFeeOn(10_000_000n, CAPPED_100)).toBe(49_000n);
+  });
+});
+
+describe("what the route's own numbers do and do not claim", () => {
+  // The comments on RouteOutput used to say GROSS with no condition, and
+  // netOfQuotedOut used to be "what the vault's delta reads". Both are true of
+  // the venue that was measured first and false of the one beside it. The
+  // arithmetic below is what the corrected comments now state, pinned.
+
+  it("puts netOfQuotedOut a whole fee below quotedOut, which only one basis credits", () => {
+    const route = verifySharedAccountsRoute(quote(), responseDeliveringToVault(), context({ transferFee: FEE_100 }));
+    // On a GROSS-quoting venue the vault is credited this.
+    expect(route.output.netOfQuotedOut).toBe(3_221_703n);
+    expect(route.output.quotedOut - route.output.netOfQuotedOut).toBe(32_543n);
+    expect(route.output.netOfQuotedOut).toBe(netOfTransferFee(route.output.quotedOut, FEE_100));
+    // On a NET-quoting one the identical fill credits quotedOut itself, and
+    // this field is a whole fee low. No single number is "what the delta
+    // reads", which is why neither comment may say so without its condition.
+    expect(route.output.netOfQuotedOut).toBeLessThan(route.output.quotedOut);
+    expect(route.output.quotedOut).toBe(3_254_246n);
+  });
+
+  it("puts a one-fee min_out ABOVE the credit of a two-fee path, which is why slot 5 is checked", () => {
+    // The unmodelled-fee-path refusal's whole arithmetic: when the output
+    // lands in Jupiter's own account first and is forwarded to us, a
+    // fee-bearing mint charges TWICE, and a min_out modelling one fee sits
+    // above what the vault is credited. A revert, not a loss — Solana rolls
+    // the transaction back — but a signed transaction that cannot land.
+    const oneFee = netOfTransferFee(3_254_246n, FEE_100);
+    const twoFees = netOfTransferFee(oneFee, FEE_100);
+    expect(oneFee).toBe(3_221_703n);
+    expect(twoFees).toBe(3_189_485n);
+    expect(twoFees).toBeLessThan(oneFee);
+    // And the guard that keeps that shape from ever being signed.
+    expect(refusal(quote(), response(), context({ transferFee: FEE_100 })).condition).toBe("unmodelled-fee-path");
   });
 });

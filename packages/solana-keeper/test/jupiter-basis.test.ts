@@ -5,10 +5,31 @@
 // what the builder REFUSES before anything is signed. This one pins the thing
 // the refusals cannot see: whether Jupiter's outAmount is before or after the
 // Token-2022 transfer fee, which is a fact about mainnet, not about our code.
-// It was measured — scripts/jupiter-sim.ts, mainnet simulations on 2026-09-20,
-// epoch 1038 — and every row below is a row that run actually produced, gross
-// and net and withheld, copied whole. A change to classify() or safeMinOut()
-// that stops agreeing with them is a change that stops agreeing with mainnet.
+// WHERE THE NUMBERS COME FROM, AND IT IS NOT ONE RUN. This header used to say
+// "every row below is a row that run actually produced" of a single
+// epoch-1038 mainnet run. That is true of the first two blocks and of nothing
+// after them — three more blocks came from somewhere else, and two of those
+// are the ones that RETIRED a claim this file used to assert, which they could
+// only do because they ran where the epoch and the slippage were ours to set.
+// All on 2026-09-20:
+//
+//   1. "the basis Jupiter quotes in" and "the min_out a fill cannot reject" —
+//      MAINNET simulations through scripts/jupiter-sim.ts at epoch 1038, where
+//      the mints still charged 50 bps, quoted at 100. Rows copied whole.
+//   2. "which guard a min_out actually runs into" — a LOCAL VALIDATOR with
+//      mainnet state cloned for a ONE-HOP Manifest route, local epoch 0 so the
+//      mint charges its older 50 bps, run at slippage 100 and again at 50.
+//      Nothing in it touched mainnet.
+//   3. "epoch 1039, where the fee doubled" — MAINNET again, re-run the minute
+//      epoch 1039 landed: at 100 bps, which reverted, and at 200, which filled.
+//   4. "what the report PRINTS" — the cloned fork runs of 2: the pinned
+//      Manifest one at slippage 100, and the default-flag Raydium CLMM one at
+//      200, which is the fork harness's own default.
+//
+// A change to classify() or safeMinOut() that stops agreeing with any of them
+// is a change that stops agreeing with what was measured. The block below
+// tells the four apart by arithmetic, so the list above cannot quietly rot
+// back into one run.
 //
 // THE ANSWER IS NOT ONE ANSWER, and that is the point of the table: ANTHROPIC
 // filling through Manifest quotes GROSS, FIGUREAI filling through Raydium CLMM
@@ -31,6 +52,12 @@ import {
   renderMinOutRow,
   safeMinOut,
   type LegMeasurement,
+} from "@sip/solana-program/jupiter-sim";
+import {
+  DEFAULT_SLIPPAGE_BPS,
+  explainVenueRefusal,
+  slippageHeadroom,
+  slippageHeadroomLine,
 } from "@sip/solana-program/jupiter-sim";
 import { netOfTransferFee, transferFeeOn, type TransferFeeRate } from "@sip/solana-program/jupiter-route";
 
@@ -420,5 +447,109 @@ describe("what the report PRINTS about each candidate min_out", () => {
     // accepted it against a measured credit of 27,547,833.
     expect(renderMinOutRow(NET_ROW)).toContain("(26726907)");
     expect(renderMinOutRow(NET_ROW).match(/survives/g)).toHaveLength(2);
+  });
+});
+
+describe("the four runs behind this file, told apart by their own arithmetic", () => {
+  // WHY THIS BLOCK EXISTS. The header used to call every row below one
+  // epoch-1038 mainnet run. Three of the five blocks came from elsewhere, and
+  // the giveaway is in the numbers themselves: Jupiter's otherAmountThreshold
+  // is out - floor(out * slippage_bps / 1e4), so each row states the slippage
+  // its run was made at. A row cannot be moved between runs without the
+  // subtraction below stopping.
+  const thresholdAt = (quotedOut: bigint, bps: bigint): bigint => quotedOut - (quotedOut * bps) / 10_000n;
+
+  it("puts the MAINNET epoch-1038 rows at 100 bps against a 50 bps fee", () => {
+    expect(thresholdAt(4_791_352n, 100n)).toBe(4_743_439n); // ANTHROPIC 5 via Manifest
+    expect(thresholdAt(1_376_918_399n, 100n)).toBe(1_363_149_216n); // FIGUREAI 250 via Raydium CLMM
+    expect(thresholdAt(23_942_364n, 100n)).toBe(23_702_941n); // ANTHROPIC 25 via Manifest
+    expect(thresholdAt(23_816_857n, 100n)).toBe(23_578_689n); // ANTHROPIC 25 via Meteora DLMM
+    expect(thresholdAt(32_518_312n, 100n)).toBe(32_193_129n); // SPYx 250, the fee-free control
+    // 100 against 50 leaves real tolerance, which is why these rows exist.
+    expect(slippageHeadroom(100, FEE_50.basisPoints).grossVenueCannotFill).toBe(false);
+  });
+
+  it("puts the CLONED-VALIDATOR rows at 100 and at 50, a pair mainnet was never run as", () => {
+    // The same quote read at two slippages is the whole experiment of block 2,
+    // and it needed a validator whose epoch and fee were ours to pin.
+    expect(thresholdAt(27_147_537n, 100n)).toBe(26_876_062n);
+    expect(thresholdAt(27_147_537n, 50n)).toBe(27_011_800n);
+    // At 50 against a local 50 the tolerance is gone, which is what the run
+    // was FOR: Jupiter's own 0x1771, one raw unit short, before our guards.
+    expect(slippageHeadroom(50, 50).grossVenueCannotFill).toBe(true);
+  });
+
+  it("puts the epoch-1039 rows at 100 and 200, the settings the doubled fee forced", () => {
+    expect(thresholdAt(27_610_549n, 100n)).toBe(27_334_444n); // FIGUREAI, a NET venue, still fills
+    expect(thresholdAt(23_900_857n, 200n)).toBe(23_422_840n); // ANTHROPIC, a GROSS venue, only at 200
+    // And the 100 bps attempt on that same quote is not this row.
+    expect(thresholdAt(23_900_857n, 100n)).not.toBe(23_422_840n);
+    expect(slippageHeadroom(100, FEE_100.basisPoints).grossVenueCannotFill).toBe(true);
+  });
+
+  it("puts the report-rendering rows at two different settings, because they are two runs", () => {
+    expect(thresholdAt(27_147_537n, 100n)).toBe(26_876_062n); // pinned Manifest, --slippage 100
+    expect(thresholdAt(27_409_402n, 200n)).toBe(26_861_214n); // default flags, the harness's 200
+    expect(thresholdAt(27_409_402n, 100n)).not.toBe(26_861_214n);
+  });
+});
+
+describe("the harness default, and what it says when the setting meets the fee", () => {
+  // THE TRAP WITH A CLOCK ON IT. jupiter-sim.ts defaulted to 100 bps for as
+  // long as the mints charged 50. Since epoch 1039 they charge exactly 100, so
+  // the default became the EQUALITY case and every default run reproduced
+  // Jupiter's 0x1771 with nothing attached to explain it. The fork harness was
+  // raised to 200 at the boundary; the sim was not.
+
+  it("defaults above the fee the PreStocks mints charge from epoch 1039", () => {
+    expect(DEFAULT_SLIPPAGE_BPS).toBeGreaterThan(FEE_100.basisPoints);
+    expect(slippageHeadroom(DEFAULT_SLIPPAGE_BPS, FEE_100.basisPoints).grossVenueCannotFill).toBe(false);
+    expect(slippageHeadroom(DEFAULT_SLIPPAGE_BPS, FEE_100.basisPoints).usableBps).toBeGreaterThan(0);
+    // The old default, pinned as the equality case it became: zero usable
+    // tolerance, and on a gross-quoting venue that is not zero but negative by
+    // one raw unit, because Jupiter floors and Token-2022 ceils.
+    expect(slippageHeadroom(100, FEE_100.basisPoints).usableBps).toBe(0);
+    expect(slippageHeadroom(100, FEE_100.basisPoints).grossVenueCannotFill).toBe(true);
+    // And it really was a fine default while the fee was 50.
+    expect(slippageHeadroom(100, FEE_50.basisPoints).usableBps).toBe(50);
+    expect(slippageHeadroom(100, FEE_50.basisPoints).grossVenueCannotFill).toBe(false);
+    // A fee-free mint is never the case this is about.
+    expect(slippageHeadroom(0, NO_FEE.basisPoints).grossVenueCannotFill).toBe(false);
+  });
+
+  it("attaches the reason to Jupiter's bare 0x1771 instead of printing it alone", () => {
+    const bare =
+      'ANTHROPIC 25 USD simulation reverted: {"InstructionError":[2,{"Custom":6001}]} — ' +
+      "JUP6Lkb… failed: custom program error: 0x1771\n    a log line the harness also prints";
+    const explained = explainVenueRefusal(bare, slippageHeadroom(100, 100));
+    // ON THE FIRST LINE, because that is the only one the failed row prints.
+    const first = explained.split("\n")[0]!;
+    expect(first).toContain("EXPECTED AT THIS SETTING");
+    expect(first).toContain("slippage 100 bps against a 100 bps transfer fee");
+    expect(first).toContain("0 bps of tolerance");
+    expect(first).toContain("--slippage above 100");
+    // And the logs under it are left exactly as they were.
+    expect(explained.split("\n").slice(1)).toEqual(["    a log line the harness also prints"]);
+  });
+
+  it("withholds the reason wherever the setting was not the cause", () => {
+    // The same revert with tolerance to spare is the market moving between the
+    // quote and the simulation — a different finding, and labelling it would
+    // be this file's own disease in reverse.
+    const bare = "FIGUREAI 5 USD simulation reverted: custom program error: 0x1771";
+    expect(explainVenueRefusal(bare, slippageHeadroom(200, 100))).toBe(bare);
+    // And a revert that is not Jupiter's slippage error at all: Hadron's 0x3c.
+    const other = "FIGUREAI 5 USD simulation reverted: custom program error: 0x3c";
+    expect(explainVenueRefusal(other, slippageHeadroom(100, 100))).toBe(other);
+  });
+
+  it("prints one line, from the same model the failure note reads", () => {
+    const gone = slippageHeadroomLine("ANTHROPIC", slippageHeadroom(100, 100));
+    expect(gone).toContain("fee 100 bps against slippage 100 bps");
+    expect(gone).toContain("cannot fill at all");
+    expect(gone).toContain("Raise slippage above 100 bps.");
+    const left = slippageHeadroomLine("ANTHROPIC", slippageHeadroom(200, 100));
+    expect(left).toContain("100 bps of real tolerance left.");
+    expect(left).not.toContain("cannot fill");
   });
 });

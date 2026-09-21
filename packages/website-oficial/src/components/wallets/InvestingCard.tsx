@@ -552,6 +552,7 @@ function PolicySetup({
         <div className="space-y-2 rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs">
           <p>{INVEST_COPY.freezeNotice}</p>
           <p>{INVEST_COPY.issuerKeys}</p>
+          <p>{INVEST_COPY.hookSwitch}</p>
           <label className="flex items-start gap-2">
             <input
               type="checkbox"

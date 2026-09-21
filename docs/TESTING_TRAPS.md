@@ -76,3 +76,110 @@ the run goes green, and the next reader trusts the number instead of the fixture
 - When a product constant goes from 1 to N — one leg to two, one venue to two,
   one anything to many — hunt for every formula where N=1 made two distinct
   rules agree. Those are the places a passing test was only ever a coincidence.
+
+## A different species: prose that outruns its measurement
+
+The traps above are all one disease — a *test* that could not tell two cases
+apart. This one has the same root and a different hiding place, so it needs its
+own name and its own defence.
+
+While measuring how Jupiter quotes a Token-2022 mint with a transfer fee, three
+claims went into comments and headers exactly as they had been observed, with
+nothing beside them saying what they had been observed *of*:
+
+- `RouteOutput`'s comments said the quote is **GROSS**. True — on the venues that
+  were sampled. The quoting basis belongs to whichever AMM makes the final
+  transfer, and Jupiter re-picks that per quote, per size, per minute. The same
+  mint quoted both ways in the same hour once the venue changed.
+- A test header said "every row below" came from one epoch-1038 run. Three of the
+  blocks below it did not.
+- Two comments said `FillTooSmall` happens "after the money has already left".
+  The mechanism was described correctly and the consequence was not: Solana
+  reverts the whole transaction, so what is lost is the attempt and its fee, not
+  the principal.
+
+The third is the dangerous one, and it is dangerous in a way the first two are
+not. A reader who trusts the mechanism inherits the consequence without checking
+it, and then designs retries, alarms and limits for a loss that does not happen.
+A comment that is wrong about the *mechanism* gets caught the first time someone
+reads the code beside it. A comment that is right about the mechanism and wrong
+about the consequence never gets read again.
+
+No test was going to catch any of these. Nothing was red, nothing was
+randomised, nothing stood in for anything: the sentences were simply true of
+less than they appeared to be true of.
+
+### What to do instead
+
+- Write the **conditions beside the claim**, in the same sentence where possible:
+  not "the quote is gross" but "the quote is gross on the venues sampled here,
+  and the basis follows the AMM that makes the final transfer". A measurement's
+  scope travels with it, or the next reader supplies a wider one for free.
+- When a measurement **cannot be retaken**, say so where it is stated. The
+  gross-venue run in `jupiter-fork.sh` cannot be reproduced today — Jupiter no
+  longer routes that pair through that AMM — and the header says that, so the
+  next person finds a recorded fact instead of concluding the finding was wrong.
+- Check consequences separately from mechanisms. Ask of every comment that
+  explains a failure: *and therefore what is lost?* That question is not
+  answered by reading the code the comment sits on.
+- The first three traps are caught by writing a case where the two sides differ.
+  This one is caught by writing, next to the assertion, the conditions under
+  which it was measured. Different defence, same root: a thing true in the case
+  at hand, read as true in general.
+
+## A third species: a test that pins another package by its text
+
+`packages/website-oficial/src/lib/vault-copy.test.ts` keeps the words the vault
+owner signs honest by checking them against the keeper's real numbers. It does
+that by **reading the keeper's source as text** — three files, `readFileSync`
+on `../../../solana-keeper/src/settle-decision.ts` and twice on
+`invest-decision.ts` — and pulling `ZERO_BASE_MIN_TXS`, `MIN_POOL_DEPTH_MULTIPLE`
+and `MAX_LEG_FEE_BPS` out with regexes. One of them matched the whole body of a
+type, not a constant.
+
+The intent is good: a signed sentence that quotes a number should break when
+that number changes. The mechanism is not. A regex over another package's source
+pins its **formatting**, not its meaning, so the web suite goes red when the
+keeper reflows a comment, renames a local, or — this is the one that actually
+happened — adds a purely **additive** field to a type. Nothing was broken;
+nothing the web depends on changed; a package that the web does not even import
+was edited, and a web test failed.
+
+That last part is what makes it expensive. The break appears in a package the
+author was not working in, with a message about a string, pointing at no defect.
+The natural fixes under deadline are all bad: loosen the regex until it matches
+nothing useful, delete the case, or — worst — edit the *other* package to keep a
+grep happy.
+
+### What to do instead
+
+- Pin **exported values**, not source text. `import { MAX_LEG_FEE_BPS }` fails
+  loudly and precisely when the constant moves or goes; a regex fails vaguely
+  when anything nearby moves.
+- If the value is not exported, **ask for the export** — or move the constant to
+  the package both sides already share. A number that two packages must agree on
+  is a shared constant, and reading it out of a neighbour's file is a way of
+  pretending it is not.
+- If a cross-package read is genuinely unavoidable, anchor it to the narrowest
+  thing that carries the meaning — the export statement itself, never a type
+  body — and say in the test what will break it.
+- Ask of any cross-package assertion: *which edits in the other package should
+  turn this red?* If the honest answer includes "renaming a local variable" or
+  "adding a field nobody reads", the assertion is pinned to the wrong thing.
+
+## Three species, one question
+
+The five cases fall into three shapes, and each one hides somewhere different:
+
+- **A test that cannot tell two cases apart.** The fixture randomised the field
+  under dispute; the runner substituted the runtime under dispute; a one-leg
+  basket made two different formulas agree. Caught by writing a case where the
+  two sides differ.
+- **Prose whose scope is narrower than its reading.** True of what was measured,
+  read as true in general. Caught by writing the conditions beside the claim.
+- **A test coupled to another package's text.** Red for an edit that broke
+  nothing, far from whoever made it. Caught by pinning exported values.
+
+The question that finds all three is the same one: **what would it take for this
+to be green and wrong?** Ask it of the suite, of the comment, and of the thing
+the assertion is actually pinned to.
