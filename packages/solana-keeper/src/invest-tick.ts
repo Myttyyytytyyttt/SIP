@@ -35,6 +35,7 @@
 
 import type * as anchor from "@coral-xyz/anchor";
 import {
+  type AddressLookupTableAccount,
   ComputeBudgetProgram,
   Connection,
   Keypair,
@@ -42,7 +43,9 @@ import {
   SYSVAR_CLOCK_PUBKEY,
   SystemProgram,
   Transaction,
+  TransactionMessage,
   type TransactionInstruction,
+  VersionedTransaction,
 } from "@solana/web3.js";
 import {
   NATIVE_MINT,
@@ -84,7 +87,15 @@ import {
 } from "./invest-decision.js";
 import { method, type MethodCall } from "./methods.js";
 import { tightenMinOut } from "./min-out.js";
-import { RAYDIUM_CLMM, type SwapV2Args, buildSwapV2AccountMetas, buildSwapV2Data, fetchLiveRoute } from "./program-scripts.js";
+import {
+  type JupiterRoute,
+  type LiveRoute,
+  RAYDIUM_CLMM,
+  type SwapV2Args,
+  buildSwapV2AccountMetas,
+  buildSwapV2Data,
+  fetchLiveRoute,
+} from "./program-scripts.js";
 import {
   PYTH_RECEIVER_PROGRAM,
   PYTH_SOL_USD_FEED,
@@ -667,6 +678,12 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
     ...policy.legs.map((leg, index) => ({ address: legAtas[index]!, mint: leg.mint, programId: TOKEN_2022_PROGRAM_ID })),
   ]);
 
+  // ONE CACHE FOR THE WHOLE TURN, for the reason lookupTableCache gives: the
+  // legs of a basket share Jupiter's tables, and the convert shares them with
+  // the legs. It is built here, beside the token-account plan and for the same
+  // reason — a turn that refuses above reaches neither.
+  const tables = lookupTableCache(connection);
+
   const purchases: InvestPurchase[] = [];
   try {
     // ── wrap + convert, if conversion is on and there is SOL worth moving ──
@@ -752,7 +769,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
           )
             .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
             .instruction(),
-        ]);
+        ], await tables.tablesFor(lookupTablesOf(route)));
         if (toConvert < held) found.converted = `converted ${toConvert} of ${held} wSOL; ${held - toConvert} left for later sweeps`;
       }
     }
@@ -864,7 +881,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         )
           .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
           .instruction(),
-      ]);
+      ], await tables.tablesFor(lookupTablesOf(route)));
       const bought = (await balanceOf(connection, targetAta)) - before;
       filled.push(`${Number(weight) / 100}% ${mint.toBase58().slice(0, 8)}… ${amountIn}→${bought}`);
       purchases.push({
@@ -952,7 +969,181 @@ function shortfall(plan: WrapPlan, crankRead: boolean): string {
   return `${plan.free - plan.amount} free lamports wait for later sweeps, because ${why}`;
 }
 
-async function sendWithBudget(
+/**
+ * The compute budget every money transaction this tick sends carries.
+ *
+ * A LIMIT WITHOUT A PRICE IS NOT A BID. Setting only the unit limit told the
+ * scheduler how much room to reserve and offered nothing for it, so under
+ * congestion these transactions are deprioritised and dropped — and there is
+ * no retry anywhere. The price is small in absolute terms (600k units at
+ * 10_000 micro-lamports is 6_000 lamports, on top of the 5_000-lamport
+ * signature fee) and buys inclusion when it matters.
+ *
+ * 600_000 UNITS COVERS THE CREATE TOO. An idempotent associated-token-account
+ * creation costs on the order of 25k units — under 5% of this budget, and
+ * nothing next to the swap it rides with.
+ *
+ * THE VALUES AND THE ORDER ARE THE CLAIM. They are named here, once, because
+ * the same two instructions now have to be laid down by two different builders
+ * — the legacy one and the v0 one — and a congested slot must price a Jupiter
+ * transaction exactly as it prices a Raydium one. A test pins both builders to
+ * this list rather than to two typed-out copies of it.
+ */
+export const COMPUTE_UNIT_LIMIT = 600_000;
+export const COMPUTE_UNIT_PRICE_MICRO_LAMPORTS = 10_000;
+
+/** The compute-budget pair, in order, in front of the instructions they pay for. */
+export function budgetedInstructions(
+  instructions: readonly TransactionInstruction[],
+): TransactionInstruction[] {
+  return [
+    ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: COMPUTE_UNIT_PRICE_MICRO_LAMPORTS }),
+    ...instructions,
+  ];
+}
+
+/**
+ * One turn's address lookup tables, fetched once each however many legs want them.
+ *
+ * WHY A CACHE AND NOT A FETCH PER LEG. Jupiter hands back its OWN tables, and
+ * the same two or three serve most routes — so an 8-leg basket that fetched
+ * per leg would ask the RPC for the same 32-byte account eight times inside
+ * one turn. The cache is per turn and not per process on purpose: a table is a
+ * mutable account whose addresses can be extended, and a process-lifetime cache
+ * would compile a message against a list the chain no longer has.
+ *
+ * THE PROMISE IS WHAT IS CACHED, not the resolved table, so two legs asking at
+ * the same moment share one round trip instead of racing to start two. A
+ * rejection is evicted: a transient RPC blip must not be remembered as this
+ * table's permanent answer for the rest of the turn.
+ *
+ * A TABLE THE CHAIN DOES NOT HAVE IS A REFUSAL, NOT AN OMISSION. Compiling a
+ * v0 message against a missing table would silently produce a message whose
+ * account indexes resolve to nothing on the validator, which is a transaction
+ * that fails after it has been signed and sent. It throws here instead, before
+ * any of that.
+ */
+export function lookupTableCache(connection: Connection) {
+  const byAddress = new Map<string, Promise<AddressLookupTableAccount>>();
+  return {
+    async tablesFor(addresses: readonly PublicKey[]): Promise<AddressLookupTableAccount[]> {
+      return Promise.all(
+        addresses.map((address) => {
+          const name = address.toBase58();
+          const known = byAddress.get(name);
+          if (known !== undefined) return known;
+          const pending = connection.getAddressLookupTable(address).then(({ value }) => {
+            if (value === null) {
+              throw new Error(`address lookup table ${name} is not on chain; the route that named it cannot be compiled`);
+            }
+            return value;
+          });
+          byAddress.set(name, pending);
+          pending.catch(() => byAddress.delete(name));
+          return pending;
+        }),
+      );
+    },
+  };
+}
+
+/**
+ * A route's own lookup tables, and none for a venue whose routes carry no field
+ * for them.
+ *
+ * THE RAYDIUM ROUTE HAS NO SUCH FIELD AND NEEDS NONE: a CLMM swap fits a legacy
+ * transaction, which is why the live policy still buys through one. A Jupiter
+ * route carries `lookupTableAddresses` (jupiter-route.ts) and a multi-hop one
+ * does not fit without them. Naming BOTH route types here — rather than taking
+ * a lone optional field — is what makes this a question TypeScript can answer:
+ * a weak type with nothing but optional members accepts any object at all, so
+ * it would have gone on returning `[]` for a Jupiter route whose field had been
+ * renamed. The union makes that a compile error; a test pins the JupiterRoute
+ * arm against the real field name as well.
+ */
+export function lookupTablesOf(route: LiveRoute | JupiterRoute): readonly PublicKey[] {
+  return "lookupTableAddresses" in route ? route.lookupTableAddresses : [];
+}
+
+/**
+ * The v0 transaction this tick sends when the route carries lookup tables.
+ *
+ * PURE, AND THAT IS THE POINT: no clock, no network, no key. Everything that
+ * decides the transaction's BYTES is an argument, so the size of a real route
+ * can be measured off exactly the object production sends — see
+ * scripts/measure-route-size.mts and the byte counts pinned in
+ * test/invest-transaction.test.ts.
+ *
+ * ANCHOR SETS NEITHER FIELD ON THIS BRANCH. AnchorProvider.sendAndConfirm
+ * (0.32.1, provider.js) fills in `feePayer` and `recentBlockhash` only when the
+ * transaction is a legacy one; for a VersionedTransaction it signs and sends
+ * what it is handed. Both are therefore supplied here, and a message compiled
+ * without them would be rejected by the cluster as unsigned-for/expired rather
+ * than caught by a type.
+ */
+export function buildV0Transaction(params: {
+  readonly payer: PublicKey;
+  readonly recentBlockhash: string;
+  readonly instructions: readonly TransactionInstruction[];
+  readonly lookupTables: readonly AddressLookupTableAccount[];
+}): VersionedTransaction {
+  const message = new TransactionMessage({
+    payerKey: params.payer,
+    recentBlockhash: params.recentBlockhash,
+    instructions: [...params.instructions],
+  }).compileToV0Message([...params.lookupTables]);
+  return new VersionedTransaction(message);
+}
+
+/**
+ * The exact wire size of a versioned transaction, INCLUDING one that does not fit.
+ *
+ * WHY NOT serialize().length. web3.js encodes a v0 MESSAGE into a buffer of
+ * exactly PACKET_DATA_SIZE, so past a 1,232-byte message
+ * `VersionedTransaction.serialize()` does not return a large number — it
+ * throws "encoding overruns Uint8Array". `v0TransactionBytes()` in
+ * jupiter-route.ts calls it and inherits that. So the one question worth
+ * asking — HOW FAR over the limit is this route without its lookup tables —
+ * is the one question those cannot answer, and "it threw" is not a byte count.
+ * Three of the five ANTHROPIC routes sampled on 2026-09-21 were that big.
+ *
+ * AND THE CAP IS ON THE MESSAGE, NOT THE TRANSACTION, which is its own trap:
+ * the captured route's message is 1,203 bytes, so serialize() succeeds and
+ * returns 1,268 — a transaction already 36 bytes past what the wire accepts.
+ * A serialize() that did not throw is therefore no evidence that a route
+ * fits; only the comparison against PACKET_DATA_SIZE is.
+ *
+ * So the length is computed from the compiled message instead, by the wire
+ * format's own arithmetic: a version prefix, a 3-byte header, the static keys,
+ * the blockhash, the instructions and the address-table lookups, under
+ * compact-u16 counts, plus the signatures. A test asserts this agrees with
+ * `serialize().length` byte for byte on every transaction small enough for
+ * web3.js to serialize at all, which is what keeps the arithmetic honest.
+ */
+export function versionedTransactionBytes(transaction: VersionedTransaction): number {
+  const message = transaction.message;
+  const compact = (count: number): number => (count < 0x80 ? 1 : count < 0x4000 ? 2 : 3);
+  let bytes = 1 + 3; // the 0x80 version prefix, then the three header bytes
+  bytes += compact(message.staticAccountKeys.length) + 32 * message.staticAccountKeys.length;
+  bytes += 32; // recentBlockhash
+  bytes += compact(message.compiledInstructions.length);
+  for (const instruction of message.compiledInstructions) {
+    bytes += 1; // programIdIndex
+    bytes += compact(instruction.accountKeyIndexes.length) + instruction.accountKeyIndexes.length;
+    bytes += compact(instruction.data.length) + instruction.data.length;
+  }
+  bytes += compact(message.addressTableLookups.length);
+  for (const lookup of message.addressTableLookups) {
+    bytes += 32; // the table's own address
+    bytes += compact(lookup.writableIndexes.length) + lookup.writableIndexes.length;
+    bytes += compact(lookup.readonlyIndexes.length) + lookup.readonlyIndexes.length;
+  }
+  const signatures = message.header.numRequiredSignatures;
+  return compact(signatures) + 64 * signatures + bytes;
+}
+
+export async function sendWithBudget(
   provider: anchor.AnchorProvider,
   crank: Keypair,
   /**
@@ -961,22 +1152,60 @@ async function sendWithBudget(
    * transaction that uses it (tokenAccountPlan) instead of in one of its own.
    */
   instructions: readonly anchor.web3.TransactionInstruction[],
+  /**
+   * The route's own lookup tables, already fetched — empty for a venue that
+   * needs none.
+   *
+   * EMPTY MEANS LEGACY, AND LEGACY IS STILL THE LIVE PATH. The policy the owner
+   * has signed names Raydium CLMM, whose routes fit a legacy transaction and
+   * are what the vault holding real money buys through today. A v0 message with
+   * no tables would be two bytes larger and otherwise identical (see
+   * v0TransactionBytes in jupiter-route.ts), so nothing would be gained by
+   * moving that path — and the send that has been confirming on mainnet since
+   * 09-19 would be replaced by one that never has.
+   */
+  lookupTables: readonly AddressLookupTableAccount[] = [],
 ): Promise<string> {
-  // A LIMIT WITHOUT A PRICE IS NOT A BID. Setting only the unit limit told the
-  // scheduler how much room to reserve and offered nothing for it, so under
-  // congestion these transactions are deprioritised and dropped — and there is
-  // no retry anywhere. The price is small in absolute terms (600k units at
-  // 10_000 micro-lamports is 6_000 lamports, on top of the 5_000-lamport
-  // signature fee) and buys inclusion when it matters.
+  const budgeted = budgetedInstructions(instructions);
+  if (lookupTables.length === 0) {
+    return provider.sendAndConfirm(new Transaction().add(...budgeted), [crank]);
+  }
+
+  // THE CRANK PAYS, AND ON THIS BRANCH IT MUST ALSO BE THE PROVIDER'S WALLET.
   //
-  // 600_000 UNITS COVERS THE CREATE TOO. An idempotent associated-token-account
-  // creation costs on the order of 25k units — under 5% of this budget, and
-  // nothing next to the CLMM swap it rides with.
-  const tx = new Transaction()
-    .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }))
-    .add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10_000 }))
-    .add(...instructions);
-  return provider.sendAndConfirm(tx, [crank]);
+  // On the legacy branch Anchor defaults `feePayer` to the provider's wallet,
+  // so the fee payer there is the WALLET and the crank is merely an extra
+  // signer. Here the fee payer is stated, and it is the crank — which is what
+  // the rest of the keeper already believes (`crank-low` stops investing when
+  // the CRANK empties, not when the wallet does).
+  //
+  // The two readings agree today only because bin/keeper.mts passes the settle
+  // keypair as the crank — "the attester and the crank are this one key during
+  // the hackathon". That is exactly the N=1 coincidence docs/TESTING_TRAPS.md
+  // warns about, and it bites here: Anchor signs with its wallet AFTER us, and
+  // VersionedTransaction.sign throws on a key that is not a required signer. So
+  // the day the two keys separate, this branch would die inside web3.js with
+  // "Cannot sign with non signer key". It says so itself instead.
+  const wallet = provider.wallet.publicKey;
+  if (!wallet.equals(crank.publicKey)) {
+    throw new Error(
+      `this transaction is payable by the crank ${crank.publicKey.toBase58()} but the provider's wallet is ${wallet.toBase58()}: ` +
+        "Anchor signs a VersionedTransaction with its own wallet, which is not a signer of this message",
+    );
+  }
+
+  // FRESH, AND READ HERE. Anchor reads a blockhash itself on the legacy branch
+  // and not on this one; reading it as late as possible is also what gives the
+  // transaction its full expiry window rather than one already spent on the
+  // route's own round trips.
+  const { blockhash } = await provider.connection.getLatestBlockhash("confirmed");
+  const transaction = buildV0Transaction({
+    payer: crank.publicKey,
+    recentBlockhash: blockhash,
+    instructions: budgeted,
+    lookupTables,
+  });
+  return provider.sendAndConfirm(transaction, [crank]);
 }
 
 /** One token account a turn may need, and what it would take to create it. */
