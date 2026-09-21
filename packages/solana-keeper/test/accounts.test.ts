@@ -657,6 +657,39 @@ describe("the ticks' first steps, over the same bytes", () => {
     return data;
   }
 
+  /** A Token-2022 mint carrying exactly one TLV extension after the 82-byte base and the AccountType byte. */
+  function mintWithExtension(type: number, body: Buffer): Buffer {
+    const data = Buffer.alloc(87 + body.length);
+    data.fill(0xab, 0, 82);
+    data.writeUInt8(1, 82); // AccountType::Mint
+    data.writeUInt16LE(type, 83);
+    data.writeUInt16LE(body.length, 85);
+    body.copy(data, 87);
+    return data;
+  }
+
+  /**
+   * TransferFeeConfig (type 1): nothing older, `bps` uncapped from `fromEpoch`.
+   *
+   * THE CLOCK THIS STUB SERVES IS EPOCH 930, so a fee stamped below it is the
+   * one in force and a fee stamped above it is the rise that is only written —
+   * which is the difference between a warning and a dated stop.
+   */
+  function feeMintBytes(bps: number, fromEpoch: bigint): Buffer {
+    const config = Buffer.alloc(108); // authority(32) withdraw(32) withheld(8) older(18) newer(18)
+    config.writeBigUInt64LE(fromEpoch, 90);
+    config.writeBigUInt64LE((1n << 64n) - 1n, 98); // maximum_fee: uncapped, as both live mints are
+    config.writeUInt16LE(bps, 106);
+    return mintWithExtension(1, config);
+  }
+
+  /** TransferHook (type 14) naming a REAL program: the one disqualification no later transaction can undo. */
+  function hookMintBytes(hook: PublicKey): Buffer {
+    const config = Buffer.alloc(64); // authority(32) program_id(32)
+    hook.toBuffer().copy(config, 32);
+    return mintWithExtension(14, config);
+  }
+
   /** A Raydium CLMM PoolState as mainnet serves one: 1544 bytes, the pair at 73 and 105, the vaults at 137 and 169. */
   function poolBytes(mint0: PublicKey, mint1: PublicKey, vault0: PublicKey, vault1: PublicKey): Buffer {
     const data = Buffer.alloc(1_544);
@@ -803,6 +836,190 @@ describe("the ticks' first steps, over the same bytes", () => {
     expect(result.outcome).toBe("REFUSED");
     expect(result.detail).toContain("is not this leg's pair");
     expect(result.detail).toContain(basket.mints[0]!.toBase58());
+  });
+
+  // ── the warning the refusal cannot give ───────────────────────────────────
+  //
+  // legFeeWarnings() existed, was covered by eleven tests, AND HAD NO CALLER.
+  // An operator would never have seen one. The live basket's ANTHROPIC leg sits
+  // EXACTLY on MAX_LEG_FEE_BPS today — admitted only because that comparison is
+  // strictly greater-than — and the issuer has already moved these mints
+  // 0 → 50 → 100 with about two epochs' notice. One more step refuses the WHOLE
+  // basket, SPYx and the SOL conversion included, and the only notice anybody
+  // got was a vault that silently stopped buying.
+  //
+  // These are about the WIRING, not the decision: that the warning is computed
+  // over the very legs and the very epoch the refusal judged, that it rides the
+  // turn's result whichever way the turn ends, and that it changes nothing.
+
+  /** The three-leg scenario the assertions below share: deep pools, conversion off, 12 USDC held. */
+  async function restingTurn(mints: (defaults: readonly PublicKey[]) => ReadonlyMap<string, Buffer>) {
+    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    for (const [address, data] of mints(basket.mints)) basket.accounts.set(address, { data, owner: TOKEN_2022_PROGRAM_ID });
+    let usdcAta: PublicKey | undefined;
+    const { vault, connection, program } = chainWith({}, { legs: basket.legs, minConvertRateWad: 0n }, {
+      getMinimumBalanceForRentExemption: async () => 2_000_000,
+      getTokenAccountBalance: async (address) => {
+        if (usdcAta === undefined || !(address as PublicKey).equals(usdcAta)) throw new Error("could not find account");
+        return { context: { slot: 1 }, value: { amount: "12000000", decimals: 6, uiAmount: 12 } };
+      },
+    }, true, basket.accounts);
+    usdcAta = getAssociatedTokenAddressSync(USDC_MINT, vault, true);
+    const run = async () =>
+      runInvestTick({
+        connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+      });
+    return { basket, run, result: await run() };
+  }
+
+  const none = (): ReadonlyMap<string, Buffer> => new Map();
+
+  it("carries a leg's fee warning out on the turn's result, and changes nothing else about the turn", async () => {
+    // TWO IDENTICAL TURNS, one whose middle leg charges EXACTLY the ceiling.
+    // The fee is admitted — deliberately — so both turns must reach the same
+    // outcome by the same words. A warning that moved either is a refusal
+    // wearing a warning's name.
+    const plain = await restingTurn(none);
+    const atCeiling = await restingTurn((mints) => new Map([[mints[1]!.toBase58(), feeMintBytes(100, 900n)]]));
+
+    expect(plain.result.outcome).toBe("IDLE");
+    expect(plain.result.outcome).toBe(atCeiling.result.outcome);
+    expect(atCeiling.result.detail).toBe(plain.result.detail);
+    expect(atCeiling.result.detail).toContain("under the $5.00 per-call minimum");
+    expect(atCeiling.result.purchases).toEqual(plain.result.purchases);
+
+    // AND THE NOTICE IS THERE, where the alerter can reach it. A mint with no
+    // fee extension at all says nothing — but it says it as an EMPTY ARRAY, not
+    // as an absent field: bin/keeper.mts clears a standing alert only on the
+    // evidence that a turn LOOKED.
+    expect(plain.result.feeWarnings).toEqual([]);
+    expect(atCeiling.result.feeWarnings).toHaveLength(1);
+    const alert = atCeiling.result.feeWarnings![0]!;
+    expect(alert.severity).toBe("warn");
+    expect(alert.title).toContain("at the ceiling this keeper buys through");
+    expect(alert.detail).toContain(atCeiling.basket.mints[1]!.toBase58());
+    // THE CHAIN'S OWN EPOCH, not this host's clock and not a second read: the
+    // fee is judged in the epoch Token-2022 would charge it in, which is the
+    // same epoch the admission gate beside it used.
+    expect(alert.detail).toContain("charges 100 bps to transfer in epoch 930");
+    expect(alert.context).toMatchObject({ feeBps: "100", ceilingBps: "100", epoch: "930" });
+    // The other two legs carry no fee, so they are silent.
+    for (const index of [0, 2]) expect(alert.detail).not.toContain(atCeiling.basket.mints[index]!.toBase58());
+  });
+
+  it("raises the SAME key on every sweep, so one condition is one message rather than one a minute", async () => {
+    // alerts.ts deduplicates by key alone and holds a fired condition quiet for
+    // the repeat window. A key that moved between sweeps would defeat that
+    // whole mechanism, and the keeper sweeps about once a minute.
+    const turn = await restingTurn((mints) => new Map([
+      [mints[0]!.toBase58(), feeMintBytes(100, 900n)],
+      [mints[2]!.toBase58(), feeMintBytes(150, 900n)],
+    ]));
+    const again = await turn.run();
+    const keys = (result: { readonly feeWarnings?: readonly { readonly key: string }[] }): readonly string[] =>
+      (result.feeWarnings ?? []).map((warning) => warning.key);
+
+    // SWEEP TO SWEEP, NOTHING MOVES. Same chain, same legs, same keys.
+    expect(keys(turn.result)).toHaveLength(2);
+    expect(keys(again)).toEqual(keys(turn.result));
+
+    // AND THE KEY IS THE MINT AND THE RATE, which is what makes a fee that
+    // WORSENS a different condition: it breaks through the quiet window its own
+    // earlier warning opened, instead of being muted by it for half an hour.
+    const at = (mint: PublicKey): string => keys(turn.result).find((entry) => entry.includes(mint.toBase58()))!;
+    expect(at(turn.basket.mints[0]!)).toBe(`leg-fee:${turn.basket.mints[0]!.toBase58()}:100`);
+    expect(at(turn.basket.mints[2]!)).toBe(`leg-fee:${turn.basket.mints[2]!.toBase58()}:150`);
+    expect(new Set(keys(turn.result)).size).toBe(2);
+  });
+
+  it("still carries the warning out of a basket REFUSED for a different leg", async () => {
+    // This turn's problem is not next month's. A basket refused today for leg
+    // A's transfer hook must not swallow the notice that leg B is one issuer
+    // step from stopping it forever.
+    const hook = key();
+    const turn = await restingTurn((mints) => new Map([
+      [mints[0]!.toBase58(), hookMintBytes(hook)],
+      [mints[2]!.toBase58(), feeMintBytes(100, 900n)],
+    ]));
+
+    expect(turn.result.outcome).toBe("REFUSED");
+    expect(turn.result.detail).toContain(hook.toBase58());
+    expect(turn.result.detail).toContain("without a program upgrade");
+    expect(turn.result.feeWarnings).toHaveLength(1);
+    expect(turn.result.feeWarnings![0]!.detail).toContain(turn.basket.mints[2]!.toBase58());
+    // The hooked mint carries no fee at all, so it is refused in words and
+    // silent here rather than reported twice.
+    expect(turn.result.feeWarnings![0]!.detail).not.toContain(hook.toBase58());
+  });
+
+  it("calls a rise that is only SCHEDULED what it is: a date this basket stops, before it arrives", async () => {
+    // set_transfer_fee writes the new rate stamped with the epoch it starts in,
+    // about two epochs out. Between that write and the charge, the number that
+    // will stop this basket is sitting in the mint's own bytes — and this turn
+    // reads those bytes anyway, so the notice costs no request at all.
+    const turn = await restingTurn((mints) => new Map([[mints[1]!.toBase58(), feeMintBytes(300, 932n)]]));
+    expect(turn.result.outcome).toBe("IDLE");
+    const alert = turn.result.feeWarnings![0]!;
+    expect(alert.severity).toBe("critical");
+    expect(alert.title).toContain("will stop this basket");
+    expect(alert.detail).toContain("A fee of 300 bps is ALREADY written for epoch 932");
+    expect(alert.detail).toContain("2 epoch(s) from now");
+    // AND THE TURN STILL BUYS TODAY, because 0 bps is what a transfer in epoch
+    // 930 is actually charged. The warning is the only thing that changed.
+    expect(turn.result.detail).toContain("under the $5.00 per-call minimum");
+  });
+
+  it("leaves feeWarnings ABSENT on a turn that stopped before it read a single mint", async () => {
+    // The distinction bin/keeper.mts clears on: an EMPTY array is "looked, and
+    // there is nothing to say"; ABSENT is "this turn learned nothing about any
+    // fee". A venue refusal happens off the policy alone, before the leg read,
+    // so a sweep of nothing but these must not clear a standing warning.
+    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    basket.accounts.set(basket.mints[0]!.toBase58(), { data: feeMintBytes(100, 900n), owner: TOKEN_2022_PROGRAM_ID });
+    const { vault, connection, program } = chainWith({}, { legs: basket.legs, venueProgram: key() }, emptyAndPriced, true, basket.accounts);
+    const result = await runInvestTick({
+      connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+    });
+
+    expect(result.outcome).toBe("REFUSED");
+    expect(result.detail).toContain("WrongVenue");
+    expect(result.feeWarnings).toBeUndefined();
+  });
+
+  // ── and the operator actually receiving it ────────────────────────────────
+  //
+  // WHY THE SOURCE IS READ RATHER THAN THE BEHAVIOUR EXERCISED, the same reason
+  // test/wallet-turn-catch.test.ts gives: the sweep is a closure inside a
+  // top-level script that connects to a chain, a database and Privy before it
+  // defines one, so there is no seam to drive a single turn through. What broke
+  // here is structural — a function with no caller — and it reads back from the
+  // text exactly. The DECISION is exercised properly in test/invest-decision.ts
+  // and the tick's carry is exercised above; this is the last link, and it is
+  // the one that was missing.
+
+  const keeperSource = readFileSync(new URL("../bin/keeper.mts", import.meta.url), "utf8");
+
+  it("raises every fee warning the tick carried, on ANY outcome rather than only the refused ones", () => {
+    // OUTSIDE THE OUTCOME BRANCH. `invest-refused` lives inside
+    // `if (invest.outcome === "INVESTED" || ... )`, which excludes IDLE — and
+    // an IDLE turn is exactly how a vault sitting on a 100 bps leg reads on a
+    // quiet day. Eight spaces of indent is the link loop's own level, one
+    // outside that branch, so this pins the placement and not just the call.
+    expect(keeperSource).toMatch(/\n {8}for \(const alert of invest\.feeWarnings \?\? \[\]\) \{\n {10}legFeeRaised\.add\(alert\.key\);\n {10}alerter\.fire\(alert\);\n {8}\}\n/);
+  });
+
+  it("clears a leg-fee key the sweep stopped raising, and only once a turn had actually looked", () => {
+    // AN ALERT THAT IS NEVER CLEARED IS AN ALARM THAT NEVER STOPS RINGING —
+    // and one cleared on no evidence rings once a minute forever, because the
+    // next sweep that reads a mint raises it again from nothing. Both halves
+    // are the deduplication working: the key is the mint AND the rate, so a
+    // worsening fee opens its own condition while the old one is retired here.
+    expect(keeperSource).toMatch(/if \(invest\.feeWarnings !== undefined\) legFeeLooked = true;/);
+    expect(keeperSource).toMatch(/if \(legFeeLooked\) \{\n {6}for \(const key of legFeeStanding\) if \(!legFeeRaised\.has\(key\)\) alerter\.clear\(key\);\n {6}legFeeStanding = legFeeRaised;\n {4}\}/);
+    // Cleared for the SWEEP, not per vault: legFeeCeilingAlert keys on the mint
+    // and the rate with no vault in it, so two vaults holding the same leg are
+    // one condition — and a per-vault clear would silence the other's warning.
+    expect(keeperSource).not.toMatch(/alerter\.clear\(`leg-fee:/);
   });
 
   // ── the ATA storm ─────────────────────────────────────────────────────────

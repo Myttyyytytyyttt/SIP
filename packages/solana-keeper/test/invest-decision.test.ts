@@ -29,6 +29,8 @@
 // vault already holds is still invested and no reading of any oracle can stop
 // the keeper.
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
@@ -821,6 +823,32 @@ describe("a leg's mint, before the basket is bought", () => {
       ];
       expect(legAdmissionDecision({ legs, currentEpoch: TODAY }).admit).toBe(false);
       expect(legFeeWarnings({ legs, currentEpoch: TODAY })).toEqual([]);
+    });
+
+    it("is CALLED over the very legs and the very epoch the refusal judged, which is the whole reason it is a second call", () => {
+      // A WARNING NOBODY RECEIVES IS NOT A WARNING. Every assertion above this
+      // one passed while this function had NO CALLER at all: eleven green tests
+      // over a decision no operator could ever see. What that costs is pinned
+      // here, in the one place where a future tidy-up would look.
+      //
+      // AND ONE ARRAY, NOT TWO. Both calls are pure and both walk the mint's
+      // TLV, so a second `policy.legs.map(...)` — or a second read of the Clock
+      // — would let the notice be about legs the refusal never judged, on an
+      // epoch it never used. The tick hoists `legMints` and passes the same
+      // `currentEpoch` to both, one line apart, and that is what reads back
+      // here. The behaviour itself is exercised in test/accounts.test.ts,
+      // through runInvestTick over a stub chain.
+      const tick = readFileSync(fileURLToPath(new URL("../src/invest-tick.ts", import.meta.url)), "utf8");
+      expect(tick).toMatch(/const admission = legAdmissionDecision\(\{ legs: legMints, currentEpoch \}\);/);
+      expect(tick).toMatch(/found\.feeWarnings = legFeeWarnings\(\{ legs: legMints, currentEpoch \}\);/);
+      // Exactly one array, built once, and one epoch read once.
+      expect(tick.match(/const legMints = policy\.legs\.map\(/g)).toHaveLength(1);
+      expect(tick.match(/const currentEpoch = clockInfo\.data\.readBigUInt64LE\(16\);/g)).toHaveLength(1);
+      // AND THE WARNING IS COMPUTED BEFORE THE REFUSAL RETURNS. A basket
+      // refused today for leg A's hook must still carry the notice about leg B.
+      expect(tick.indexOf("found.feeWarnings = legFeeWarnings(")).toBeLessThan(
+        tick.indexOf("if (!admission.admit) return { outcome: admission.outcome, detail: admission.detail };"),
+      );
     });
   });
 });

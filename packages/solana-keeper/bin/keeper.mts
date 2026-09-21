@@ -318,6 +318,35 @@ const wrapShort = new Map<string, number>();
 const investFailed = new Map<string, number>();
 
 /**
+ * The leg-fee alert keys that are STANDING: raised by the last sweep that
+ * actually read a leg mint, and not yet cleared.
+ *
+ * WHY A SET OF KEYS AND NOT A COUNT PER VAULT. The key legFeeCeilingAlert
+ * builds is `leg-fee:<mint>:<worst bps>` — the MINT and the RATE, with no vault
+ * in it, deliberately (src/invest-decision.ts says why: a key of the mint alone
+ * would let a 50 bps warning mute the 100 bps that replaced it for the whole
+ * repeat window). Two vaults holding the same leg are therefore one condition
+ * and one message, which is what an operator wants; so the bookkeeping that
+ * decides when to CLEAR has to be the same shape — per key, across the sweep —
+ * rather than per vault, where one vault's clear would silence another's.
+ *
+ * WHAT CLEARING IS FOR. alerts.ts holds a fired condition quiet for the repeat
+ * window and re-fires only on an escalation. Without a clear, a fee that drops
+ * back under the band and rises again inside that window would say nothing the
+ * second time. With it, the next occurrence alerts at once — and because the
+ * rate is IN the key, a fee that worsens raises a new key immediately while the
+ * old one is cleared in the same pass, so nothing rings on unchanged.
+ *
+ * ONLY A SWEEP THAT LOOKED MAY CLEAR. A turn that refused on the in_mint, the
+ * venue or an unroutable basket never reads a mint at all, and a sweep of
+ * nothing but those turns has learned nothing about any fee. Treating its
+ * silence as "the condition went away" would clear a standing warning and then
+ * re-raise it on the next sweep that did read — one message per sweep, forever,
+ * which is precisely the alarm this deduplication exists to prevent.
+ */
+let legFeeStanding = new Set<string>();
+
+/**
  * Consecutive sweeps whose ONE batched vault read failed. A sweep that degrades
  * to a read per link still settles every link whose vault it can read, so one
  * refused request is weather; three in a row is an endpoint that cannot serve
@@ -960,6 +989,10 @@ async function sweep(): Promise<void> {
     const signingRoutes = new Map<string, string>();
     /** Each vault's invest turns for THIS sweep, folded; the streaks are applied once from it below. */
     const investSweep = new Map<string, VaultInvestSweep>();
+    /** Every leg-fee alert key raised anywhere in THIS sweep, reconciled against legFeeStanding once below. */
+    const legFeeRaised = new Set<string>();
+    /** Whether ANY turn this sweep got as far as reading a leg mint. Nothing is cleared until one did. */
+    let legFeeLooked = false;
     // THE LINK-TO-WALLET PAIRING /status NEEDS, from the set this sweep just
     // discovered. The carry book is keyed by link; an operator reads wallets.
     // Replaced, not merged, so an unlinked wallet stops being named.
@@ -1240,6 +1273,29 @@ async function sweep(): Promise<void> {
         } else {
           changes.change(`invest:${vaultAddr}`, `invest ${invest.outcome.toLowerCase()}`, { vault: vaultAddr, detail: invest.detail });
         }
+        // A LEG'S TRANSFER FEE WALKING TOWARD THE CEILING, raised beside the
+        // refusal above and in the same shape: a keyed alert the alerter
+        // deduplicates, cleared once the condition goes away.
+        //
+        // OUTSIDE THAT BRANCH, BECAUSE THE WARNING IS NOT ABOUT THE OUTCOME.
+        // `invest-refused` fires only on REFUSED and is one of the three
+        // outcomes that always log. This fires on ANY turn that read the leg
+        // mints — an INVESTED basket whose ANTHROPIC leg sits EXACTLY on
+        // MAX_LEG_FEE_BPS is the live case, and it is the healthiest-looking
+        // outcome there is. A warning only an unhealthy turn can carry is a
+        // warning that arrives the sweep after it was useful.
+        //
+        // AND IT CHANGES NOTHING ELSE. No outcome, no purchase, no detail: the
+        // turn above already decided everything it decides.
+        for (const alert of invest.feeWarnings ?? []) {
+          legFeeRaised.add(alert.key);
+          alerter.fire(alert);
+        }
+        // `undefined` means this turn stopped before the mints and learned
+        // nothing; an EMPTY array means it looked and found nothing to say. Only
+        // the second is evidence that a standing warning has gone.
+        if (invest.feeWarnings !== undefined) legFeeLooked = true;
+
         // COUNTED PER SWEEP, NOT PER TURN. Both streaks are keyed by VAULT and
         // this loop runs per LINK, so a vault with three linked wallets advanced
         // them three times in one sweep and paged critical after a single sweep —
@@ -1347,6 +1403,20 @@ async function sweep(): Promise<void> {
         investFailed.delete(vaultAddr);
         alerter.clear(`invest-failed:${vaultAddr}`);
       }
+    }
+
+    // AND THE LEG-FEE WARNINGS THIS SWEEP NO LONGER RAISES, cleared once for
+    // the whole sweep rather than per vault — the keys are keyed by mint and
+    // rate, not by vault, so two vaults sharing a leg share the condition and
+    // must share the clear (legFeeStanding says why).
+    //
+    // A SWEEP THAT NEVER READ A MINT CLEARS NOTHING. Otherwise a sweep of
+    // nothing but early refusals would drop every standing key and the next
+    // real read would raise them all again: one message per sweep, forever,
+    // which is exactly how an operator learns to ignore this channel.
+    if (legFeeLooked) {
+      for (const key of legFeeStanding) if (!legFeeRaised.has(key)) alerter.clear(key);
+      legFeeStanding = legFeeRaised;
     }
 
     // THE OPERATOR'S FIRST QUESTION, answered once per change: how many of these

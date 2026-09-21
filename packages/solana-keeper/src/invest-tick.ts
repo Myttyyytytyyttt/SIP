@@ -53,6 +53,7 @@ import {
 } from "@solana/spl-token";
 import { summarizeUpstreamError } from "@sip/solana-log";
 import { decodeVault, readInvestmentPolicy } from "./accounts.js";
+import type { Alert } from "./alerts.js";
 import { BN } from "./anchor-interop.js";
 import {
   CRANK_WRAP_RESERVE_LAMPORTS,
@@ -67,6 +68,7 @@ import {
   investPauseDecision,
   legAdmissionDecision,
   legDepthDecision,
+  legFeeWarnings,
   legShare,
   oracleConvertDecision,
   readPoolPair,
@@ -262,6 +264,24 @@ export interface InvestResult {
    * row that found the crank short of the vault.
    */
   readonly wrap?: WrapReport;
+  /**
+   * The fee warnings this turn's own leg read earned, ready for the alerter —
+   * PRESENT (possibly empty) whenever the turn got as far as reading the leg
+   * mints, and ABSENT when it stopped before them.
+   *
+   * WHY THE EMPTY ARRAY IS NOT THE SAME AS `undefined`. bin/keeper.mts clears a
+   * standing leg-fee alert when this sweep no longer raises it, and "no warnings
+   * this turn" is only evidence of that when the turn LOOKED. A turn that
+   * refused on the in_mint, the venue or an unroutable basket never reads a mint
+   * at all, and treating its silence as "the fee came back down" would clear a
+   * standing warning about a condition nobody has checked.
+   *
+   * NEVER AN OUTCOME AND NEVER A DETAIL. Every alert here is a warning about a
+   * LATER sweep — the fee that stops this basket next month — so it rides beside
+   * the verdict and changes none of it. What this turn does today is decided by
+   * legAdmissionDecision alone, exactly as before.
+   */
+  readonly feeWarnings?: readonly Alert[];
 }
 
 export interface InvestDeps {
@@ -308,6 +328,15 @@ interface TurnFindings {
    * saying in both cases how much waits for a later sweep.
    */
   converted?: string;
+  /**
+   * The leg-fee warnings read out of the mint bytes this turn already fetched,
+   * set ONCE at the admission gate and carried out on whatever outcome the turn
+   * then reaches — the same reason `wrap` is a finding rather than a return
+   * value. The gate has a dozen ways out below it, and a notice that only
+   * survived the happy one would be missing from exactly the turns an operator
+   * reads.
+   */
+  feeWarnings?: readonly Alert[];
 }
 
 /**
@@ -325,6 +354,7 @@ export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
     ...result,
     ...(notes.length === 0 ? {} : { detail: `${notes.join("; ")}; ${result.detail}` }),
     ...(found.wrap === undefined ? {} : { wrap: found.wrap }),
+    ...(found.feeWarnings === undefined ? {} : { feeWarnings: found.feeWarnings }),
   };
 }
 
@@ -518,13 +548,38 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   const currentEpoch = clockInfo.data.readBigUInt64LE(16);
   const legPools = policy.legs.map((leg) => deps.pools.get(leg.mint.toBase58())!);
   const legInfos = await connection.getMultipleAccountsInfo([...policy.legs.map((leg) => leg.mint), ...legPools], "confirmed");
-  const admission = legAdmissionDecision({
-    legs: policy.legs.map((leg, index) => {
-      const info = legInfos[index] ?? null;
-      return { mint: leg.mint, account: info === null ? null : { owner: info.owner, data: info.data } };
-    }),
-    currentEpoch,
+  const legMints = policy.legs.map((leg, index) => {
+    const info = legInfos[index] ?? null;
+    return { mint: leg.mint, account: info === null ? null : { owner: info.owner, data: info.data } };
   });
+  const admission = legAdmissionDecision({ legs: legMints, currentEpoch });
+
+  // AND THE NOTICE THE REFUSAL CANNOT GIVE, off the same bytes and the same
+  // clock, one line above the return that can end the turn.
+  //
+  // A WARNING, NOT A SECOND GATE. legFeeWarnings changes no outcome, no
+  // purchase and no detail string: it reports the leg whose fee is at the
+  // ceiling or one issuer step under it, or which carries a rise already
+  // written for a later epoch. Today's live fee on ANTHROPIC is EXACTLY
+  // MAX_LEG_FEE_BPS, admitted only because that comparison is strictly
+  // greater-than, and until this line nothing anywhere said so: the basket was
+  // bought, the turn reported INVESTED, and the single next write by one key
+  // would stop SPYx, ANTHROPIC and the SOL conversion together with no notice
+  // before it. The alerts go out on the result and are raised in bin/keeper.mts.
+  //
+  // THE SAME ARRAY AND THE SAME EPOCH, WHICH IS WHY `legMints` WAS HOISTED.
+  // Both calls are pure and both walk the mint's TLV, so two independently
+  // built arrays — or a second `clockInfo` read — could disagree about what
+  // they looked at, and the warning would then be about a leg the refusal never
+  // judged. There is one array, one epoch, and nothing between the two calls.
+  //
+  // IT RUNS BEFORE THE REFUSAL RETURNS, on purpose. A basket refused today for
+  // leg A's transfer hook must still carry the notice that leg B's fee is one
+  // step from stopping it forever: this turn's problem is not next month's, and
+  // legFeeWarnings skips every leg legAdmissionDecision refused for unreadable
+  // bytes rather than guessing a rate out of them.
+  found.feeWarnings = legFeeWarnings({ legs: legMints, currentEpoch });
+
   if (!admission.admit) return { outcome: admission.outcome, detail: admission.detail };
 
   // AND ON THE SAME LINE AGAIN: whether those pools can actually serve what
