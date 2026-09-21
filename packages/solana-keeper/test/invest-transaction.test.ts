@@ -54,6 +54,7 @@ import { describe, expect, it } from "vitest";
 import {
   COMPUTE_UNIT_LIMIT,
   COMPUTE_UNIT_PRICE_MICRO_LAMPORTS,
+  ROUTE_MAX_AGE_MS,
   budgetedInstructions,
   buildV0Transaction,
   lookupTableCache,
@@ -62,7 +63,7 @@ import {
   sendWithBudget,
   versionedTransactionBytes,
 } from "../src/invest-tick.js";
-import { legacyTransactionBytes } from "../src/program-scripts.js";
+import { legacyTransactionBytes, type JupiterRoute } from "../src/program-scripts.js";
 
 interface RouteFixture {
   readonly hops: number;
@@ -220,8 +221,19 @@ describe("the compute budget", () => {
       value: COMPUTE_UNIT_PRICE_MICRO_LAMPORTS,
     });
     expect(rest).toBe(investInstruction);
-    expect(COMPUTE_UNIT_LIMIT).toBe(600_000);
+    // THE NUMBER IS PINNED WITH ITS REASON BESIDE IT, because the last one was
+    // pinned without: 600_000 was derived for one Raydium CLMM swap plus an
+    // ATA create, the venue moved to Jupiter, and the pin then kept the old
+    // venue's budget alive across the change that retired it. 1_400_000 is what
+    // Jupiter's own /swap-instructions asked for on these routes and is the
+    // per-transaction maximum, so a route one hop longer than expected cannot
+    // revert for compute.
+    expect(COMPUTE_UNIT_LIMIT).toBe(1_400_000);
+    expect(COMPUTE_UNIT_LIMIT, "the runtime's per-transaction ceiling").toBeLessThanOrEqual(1_400_000);
     expect(COMPUTE_UNIT_PRICE_MICRO_LAMPORTS).toBe(10_000);
+    // And what the bid costs, stated rather than left to be inferred: 14_000
+    // lamports of priority on top of the 5_000-lamport signature fee.
+    expect((COMPUTE_UNIT_LIMIT * COMPUTE_UNIT_PRICE_MICRO_LAMPORTS) / 1_000_000).toBe(14_000);
   });
 
   it("rides the v0 transaction exactly as it rides the legacy one", () => {
@@ -359,6 +371,16 @@ describe("lookupTableCache", () => {
 
 describe("sendWithBudget", () => {
   const crank = Keypair.generate();
+  /**
+   * A route as old as the caller says. Only `age` is read by the freshness
+   * check, and stating the age is the whole point of the fixture: a route with
+   * an arbitrary clock would randomise the field under dispute.
+   */
+  const routeAged = (ageMs: number) =>
+    ({
+      age: { quotedAtMs: Date.now() - ageMs, quotedAtSlot: null, oldestHopSlot: null, oldestHopLabel: null, quoteTimeTakenMs: null },
+    }) as unknown as JupiterRoute;
+  const fresh = () => routeAged(0);
   const sent: (Transaction | VersionedTransaction)[] = [];
   const provider = (wallet: PublicKey) =>
     ({
@@ -378,7 +400,7 @@ describe("sendWithBudget", () => {
     // Jupiter route that names no tables takes this branch, and it is the send
     // that has been confirming on mainnet since 2026-09-19, so it must not move
     // just because the venue above it did.
-    await sendWithBudget(provider(Keypair.generate().publicKey), crank, [investInstruction]);
+    await sendWithBudget(provider(Keypair.generate().publicKey), crank, [investInstruction], fresh());
     const [transaction] = sent;
     expect(transaction).toBeInstanceOf(Transaction);
     // ANCHOR FILLS THESE IN on the legacy branch, which is why they are unset here.
@@ -389,7 +411,7 @@ describe("sendWithBudget", () => {
 
   it("sends a VERSIONED transaction once the route names tables, carrying them", async () => {
     sent.length = 0;
-    await sendWithBudget(provider(crank.publicKey), crank, [investInstruction], tables);
+    await sendWithBudget(provider(crank.publicKey), crank, [investInstruction], fresh(), tables);
     const [transaction] = sent;
     expect(transaction).toBeInstanceOf(VersionedTransaction);
     const message = (transaction as VersionedTransaction).message;
@@ -399,13 +421,32 @@ describe("sendWithBudget", () => {
 
   it("supplies the fee payer and the blockhash itself, because Anchor does not", async () => {
     sent.length = 0;
-    await sendWithBudget(provider(crank.publicKey), crank, [investInstruction], tables);
+    await sendWithBudget(provider(crank.publicKey), crank, [investInstruction], fresh(), tables);
     const message = (sent[0] as VersionedTransaction).message;
     // AnchorProvider.sendAndConfirm (0.32.1) sets feePayer and recentBlockhash
     // ONLY on the legacy branch; a v0 message that arrived without them would
     // be sent unsigned-for and expired.
     expect(message.staticAccountKeys[0]!.toBase58()).toBe(crank.publicKey.toBase58());
     expect(message.recentBlockhash).toBe("3Nx5J6yqnGRrZ2mYqPSgDh1ZrmQnrgjSvJnBeCxMwGWk");
+  });
+
+  it("RE-AGES THE ROUTE IMMEDIATELY BEFORE THE SIGNATURE, on both branches", async () => {
+    // jupiter-route.ts says a caller holding a route for a while re-runs
+    // verifyRouteFresh before it signs, and until 2026-09-21 nothing did: the
+    // only enforcement was inside verifySharedAccountsRoute at BUILD time,
+    // with a probe quote, two account reads, a balance, a token-account read,
+    // a lookup-table fetch per table and a blockhash all happening afterwards.
+    // min_out was sized off the quote's own otherAmountThreshold, so a stalled
+    // RPC meant paying for Jupiter's slippage revert instead of refusing for
+    // free.
+    sent.length = 0;
+    const stale = routeAged(ROUTE_MAX_AGE_MS + 1);
+    await expect(sendWithBudget(provider(crank.publicKey), crank, [investInstruction], stale, tables)).rejects.toThrow(/route-age/);
+    await expect(sendWithBudget(provider(crank.publicKey), crank, [investInstruction], stale)).rejects.toThrow(/ms old, past the 30000 ms/);
+    expect(sent, "a route past its window costs a refusal, not a transaction").toHaveLength(0);
+    // And one inside the window still sends, or the check would just be an off switch.
+    await sendWithBudget(provider(crank.publicKey), crank, [investInstruction], routeAged(ROUTE_MAX_AGE_MS - 1_000), tables);
+    expect(sent).toHaveLength(1);
   });
 
   it("refuses in words when the crank is not the provider's wallet", async () => {
@@ -416,7 +457,7 @@ describe("sendWithBudget", () => {
     // payer); this one cannot, because Anchor signs with its wallet after us and
     // VersionedTransaction.sign throws on a key that is not a required signer.
     const stranger = Keypair.generate().publicKey;
-    await expect(sendWithBudget(provider(stranger), crank, [investInstruction], tables)).rejects.toThrow(
+    await expect(sendWithBudget(provider(stranger), crank, [investInstruction], fresh(), tables)).rejects.toThrow(
       /payable by the crank .* but the provider's wallet is/,
     );
   });

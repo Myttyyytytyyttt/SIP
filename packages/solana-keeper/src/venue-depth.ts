@@ -40,6 +40,7 @@ import {
   legSlippageBps,
   maxTurnImpactBps,
   probeAmount,
+  takeAtProbeRate,
   venueImpactBps,
 } from "./invest-decision.js";
 
@@ -126,7 +127,8 @@ export function impactFrom(input: {
 }
 
 /**
- * ARM 1's per-hop censuses, and the scope that describes them.
+ * ARM 1's censuses, ONE PER MINT THE ROUTE PAYS US, and the scope that
+ * describes them.
  *
  * `swapInfo.outAmount` IS WHAT A HOP TAKES OUT OF ITS VENUE, which is the
  * number the cover is measured against. When it is absent, that hop is NOT
@@ -135,6 +137,28 @@ export function impactFrom(input: {
  * infinite cover. THE FINAL HOP IS ALWAYS CENSUSED: without it the leg has no
  * measurement at all, and censusVenueInventory then returns counted:false,
  * which legDepthDecision refuses on.
+ *
+ * ── WHY PER MINT AND NOT PER STEP ───────────────────────────────────────────
+ *
+ * A routePlan IS NOT ALWAYS A CHAIN. Jupiter's other shape is a PARALLEL SPLIT:
+ * every step's outputMint is the target, each carries its own `percent`, and
+ * they are alternatives rather than a sequence. Measured live on 2026-09-21,
+ * USDC -> FIGUREAI at $5,000 came back as Raydium CLMM 4 % + Hadron 94 % +
+ * Manifest 2 %.
+ *
+ * ONE STEP AT A TIME WAS THE WRONG QUESTION FOR THAT SHAPE, AND IT INVERTED THE
+ * GATE. censusVenueInventory counts every writable non-vault account holding
+ * the mint, which on a split is ALL THREE VENUES' payout accounts; asking it
+ * once per sliver compared three venues' inventory against one venue's 4 %
+ * share. Replayed through this very composition, the Raydium hop's real 1.81x
+ * cover of its own pool read as 1,199.77x and the turn spent. Summing the takes
+ * the same way the inventory is summed reads 48.06x on the same route and
+ * refuses it.
+ *
+ * TWO SMALLER THINGS FALL OUT OF THE SAME LINE. censusScope no longer says
+ * "every-hop" about a census nothing hop-wise was taken of, and the "final hop"
+ * is no longer whichever sliver Jupiter happened to list last — on a split that
+ * was a 2 % share standing in for the whole leg.
  */
 export function censusHops(input: {
   readonly quote: JupiterQuote;
@@ -143,10 +167,18 @@ export function censusHops(input: {
   readonly candidates: readonly VenueAccount[];
   readonly writable: ReadonlySet<string>;
   readonly vaultOwned: ReadonlySet<string>;
+  /**
+   * The least this turn may be judged to take of the TARGET mint, whatever the
+   * route quoted: takeAtProbeRate of the probe. Absent when no probe answered.
+   */
+  readonly takeFloorRaw?: bigint;
 }): { readonly hops: LegVenueHop[]; readonly censusScope: "every-hop" | "final-only" } {
   const plan = input.quote.routePlan;
-  const hops: LegVenueHop[] = [];
+  /** One entry per mint the route pays us, in the order the mints first appear. */
+  const groups = new Map<string, { readonly payMint: PublicKey; labels: string[]; take: bigint }>();
   let every = true;
+  let finalUnreadable: string | null = null;
+
   for (const [index, step] of plan.entries()) {
     const last = index === plan.length - 1;
     const label = step.swapInfo.label ?? "an unnamed venue";
@@ -156,27 +188,44 @@ export function censusHops(input: {
     const payMint = last ? input.targetMint : step.swapInfo.outputMint === undefined ? null : new PublicKey(step.swapInfo.outputMint);
     const takeRaw = step.swapInfo.outAmount === undefined ? null : BigInt(step.swapInfo.outAmount);
     if (payMint === null || takeRaw === null) {
-      if (last) {
-        // Unrepresentable as a pass: the final hop always produces a hop entry,
-        // and one that could not be read is one whose census did not count.
-        hops.push({
-          label,
-          payMint: input.targetMint,
-          takeRaw: 0n,
-          census: { counted: false, why: `reported no out-amount for its ${label} hop, so what it would take out of that venue is unknown` },
-        });
-      }
+      // Unrepresentable as a pass: the target mint always produces a hop entry,
+      // and one whose final step could not be read is one whose census did not
+      // count — whatever the other slivers of a split said.
+      if (last) finalUnreadable = `reported no out-amount for its ${label} hop, so what it would take out of that venue is unknown`;
       every = false;
       continue;
     }
+    const name = payMint.toBase58();
+    const group = groups.get(name) ?? { payMint, labels: [], take: 0n };
+    group.labels.push(label);
+    group.take += takeRaw;
+    groups.set(name, group);
+  }
+
+  const target = input.targetMint.toBase58();
+  if (finalUnreadable !== null && !groups.has(target)) groups.set(target, { payMint: input.targetMint, labels: [], take: 0n });
+
+  const hops: LegVenueHop[] = [];
+  for (const [name, group] of groups) {
+    const label = group.labels.length > 0 ? [...new Set(group.labels)].join(" + ") : "an unnamed venue";
+    if (name === target && finalUnreadable !== null) {
+      hops.push({ label, payMint: group.payMint, takeRaw: group.take, census: { counted: false, why: finalUnreadable } });
+      continue;
+    }
+    // THE FLOOR IS THE TARGET MINT'S ALONE. The probe quotes the leg end to
+    // end, so its rate says what the turn should take OUT; it says nothing
+    // about an intermediate mint, and inventing a number for one would be the
+    // stand-in docs/TESTING_TRAPS.md is about.
+    const floored = name === target && input.takeFloorRaw !== undefined && input.takeFloorRaw > group.take;
     hops.push({
       label,
-      payMint,
-      takeRaw,
-      census: censusVenueInventory({ payMint, candidates: input.candidates, writable: input.writable, vaultOwned: input.vaultOwned }),
+      payMint: group.payMint,
+      takeRaw: floored ? input.takeFloorRaw! : group.take,
+      ...(floored ? { quotedTakeRaw: group.take } : {}),
+      census: censusVenueInventory({ payMint: group.payMint, candidates: input.candidates, writable: input.writable, vaultOwned: input.vaultOwned }),
     });
   }
-  return { hops, censusScope: every && hops.length === plan.length ? "every-hop" : "final-only" };
+  return { hops, censusScope: every ? "every-hop" : "final-only" };
 }
 
 /** Every account a route names, read from the chain in pages of 100. */
@@ -300,6 +349,13 @@ export async function measureLegVenue(
   // can never be mistaken for a route.
   const probeIn = probeAmount(params.spend);
   let impact: ImpactProbe;
+  // THE PROBE'S RATE OUTLIVES ARM 2's VERDICT ON IT, deliberately. ARM 2
+  // abstains when the probe took other venues, because two rates off two paths
+  // are not one venue at two sizes. takeAtProbeRate asks a different question —
+  // what this turn should take OUT — and a second opinion from other venues is
+  // a better answer to it, not a worse one. So this is captured whenever the
+  // probe answered at all, and only `impact` depends on the venues matching.
+  let takeFloorRaw: bigint | undefined;
   try {
     const probe = await fetchJupiterQuote({
       inputMint: params.inputMint,
@@ -307,6 +363,7 @@ export async function measureLegVenue(
       amountIn: probeIn,
       slippageBps: Number(slippageBps),
     });
+    takeFloorRaw = takeAtProbeRate(params.spend, BigInt(probe.inAmount), BigInt(probe.outAmount));
     impact = impactFrom({
       turnIn: BigInt(quote.inAmount),
       turnOut: BigInt(quote.outAmount),
@@ -353,6 +410,7 @@ export async function measureLegVenue(
     candidates,
     writable,
     vaultOwned,
+    ...(takeFloorRaw === undefined ? {} : { takeFloorRaw }),
   });
 
   return {

@@ -99,7 +99,7 @@ import { method, type MethodCall } from "./methods.js";
 // money path reaches it any more.
 import { VenueMeasurementRefusal, measureLegVenue } from "./venue-depth.js";
 import type { TransferFeeTerms } from "./min-out.js";
-import { JupiterRouteRefusal, type JupiterRoute, investAmountIn, investMinOut } from "./program-scripts.js";
+import { JupiterRouteRefusal, type JupiterRoute, investAmountIn, investMinOut, verifyRouteFresh } from "./program-scripts.js";
 import {
   PYTH_RECEIVER_PROGRAM,
   PYTH_SOL_USD_FEED,
@@ -674,7 +674,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // convert is no larger, so it takes no more out of the venue.
   const convertCeiling = converts ? convertAmount(wsolHeld + free, policy.maxPerCall) : 0n;
 
-  let measured: { readonly legs: LegVenue[]; readonly routes: (JupiterRoute | null)[]; readonly convertRoute: JupiterRoute | null };
+  let measured: { readonly legs: LegVenue[] };
   try {
     measured = await measureBasketVenues(connection, {
       vault,
@@ -789,12 +789,15 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       // The gate above still did its job: it refused BEFORE the wrap, at the
       // largest size this turn could reach, and both arms are monotone in size.
       //
-      // AND IT IS MEASURED AGAIN, not merely quoted again. measureLegVenue is
-      // the same call the gate made, so this re-build carries its own census
-      // and its own slippage refusal rather than trusting the ceiling's.
+      // AND IT IS MEASURED AGAIN, not merely quoted again — remeasureForSend is
+      // the same measurement the gate made AND the same verdict on it, so this
+      // re-build carries its own census, its own depth refusal and its own
+      // slippage refusal rather than trusting the ceiling's. It kept only the
+      // route until 2026-09-21, which is to say it computed the census and
+      // discarded it.
       let readyConvert: { readonly route: JupiterRoute; readonly amountToSend: bigint; readonly minOut: bigint } | null = null;
       try {
-        const measured = await measureLegVenue(connection, {
+        const route = await remeasureForSend(connection, NATIVE_MINT, {
           vault,
           vaultIn: wsolAta,
           vaultTarget: usdcAta,
@@ -816,9 +819,9 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         // owner's. A refusal from either is the same kind of answer as a
         // refusal from the build, and gets the same rest.
         readyConvert = {
-          route: measured.route,
-          amountToSend: investAmountIn(measured.route),
-          minOut: investMinOut(measured.route),
+          route,
+          amountToSend: investAmountIn(route),
+          minOut: investMinOut(route),
         };
       } catch (error) {
         // THE wSOL IS ALREADY WRAPPED BY NOW, and that is exactly why this is a
@@ -877,7 +880,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
           )
             .remainingAccounts(venueAccountsOf(route))
             .instruction(),
-        ], await tables.tablesFor(lookupTablesOf(route)));
+        ], route, await tables.tablesFor(lookupTablesOf(route)));
         if (toConvert < held) found.converted = `converted ${toConvert} of ${held} wSOL; ${held - toConvert} left for later sweeps`;
       }
       }
@@ -971,26 +974,45 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       // a drained venue. The refusal that protects the owner's SOL is the FIRST
       // one, before the wrap; whoever reads this second run as that one will
       // conclude the SOL is safe when it is not.
-      const { route, venue: legVenue } = await measureLegVenue(connection, {
-        vault,
-        vaultIn: usdcAta,
-        vaultTarget: targetAta,
-        inputMint: policy.inMint,
-        targetMint: mint,
-        spend: amountIn,
-        // The worst case, for the same reason the gate above uses it.
-        feeBps: admission.worstCaseFees.get(mint.toBase58())?.bps ?? 0n,
-        maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
-        ownerFloorRateWad: leg.minOutRateWad,
-      });
-      const stillDeep = legDepthDecision({ inMint: policy.inMint, legs: [legVenue] });
-      if (!stillDeep.deep) {
+      let route: JupiterRoute;
+      try {
+        route = await remeasureForSend(connection, policy.inMint, {
+          vault,
+          vaultIn: usdcAta,
+          vaultTarget: targetAta,
+          inputMint: policy.inMint,
+          targetMint: mint,
+          spend: amountIn,
+          // The worst case, for the same reason the gate above uses it.
+          feeBps: admission.worstCaseFees.get(mint.toBase58())?.bps ?? 0n,
+          maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
+          ownerFloorRateWad: leg.minOutRateWad,
+        });
+      } catch (error) {
+        // THE FIRST REFUSED IN THIS FILE THAT CAN BE REACHED AFTER MONEY HAS
+        // MOVED, AND IT CARRIES THE MONEY WITH IT. Every other REFUSED sits
+        // above the wrap; this one can fire on leg 1 of a three-leg basket with
+        // leg 0 already confirmed — a real signature, real USDC spent, real
+        // stock in the vault's ATA. bin/keeper.mts iterates
+        // `invest.purchases ?? []` and is the only thing that ever writes them,
+        // so returning without them is not a delay, it is a loss: the dashboard
+        // and the vault's history show a turn that bought nothing while the
+        // chain shows a completed buy. The catch below says exactly that about
+        // FAILED, and this return used to be the exception to it.
+        //
+        // BOTH REFUSAL TYPES LAND HERE. VenueMeasurementRefusal is now the
+        // depth verdict's as well as the slippage check's, and either is a
+        // reasoned refusal rather than a fault — so neither is reported as a
+        // FAILED turn naming an exception.
+        if (!(error instanceof VenueMeasurementRefusal)) throw error;
         return {
           outcome: "REFUSED",
-          detail:
-            `${stillDeep.detail} — measured again at this leg's real ${amountIn} raw, after the wrap and convert. ` +
-            "The vault is holding in-asset it did not get to spend; the refusal that keeps the owner's SOL as SOL is " +
-            "the one before the wrap, not this one",
+          detail: noted(
+            `${error.message} — measured again at this leg's real ${amountIn} raw, after the wrap and convert. ` +
+              "The vault is holding in-asset it did not get to spend; the refusal that keeps the owner's SOL as SOL is " +
+              "the one before the wrap, not this one",
+          ),
+          purchases: purchases.length > 0 ? purchases : undefined,
         };
       }
 
@@ -1036,7 +1058,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         )
           .remainingAccounts(venueAccountsOf(route))
           .instruction(),
-      ], await tables.tablesFor(lookupTablesOf(route)));
+      ], route, await tables.tablesFor(lookupTablesOf(route)));
       const bought = (await balanceOf(connection, targetAta)) - before;
       filled.push(`${Number(weight) / 100}% ${mint.toBase58().slice(0, 8)}… ${amountIn}→${bought}`);
       purchases.push({
@@ -1087,16 +1109,63 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
 export const ROUTE_MAX_AGE_MS = 30_000;
 
 /**
+ * THE SECOND MEASUREMENT, for the amount that will really be sent — the route
+ * and the verdict on it, together, or a refusal.
+ *
+ * WHY IT IS ONE FUNCTION AND NOT TWO CALL SITES. It used to be two, and they
+ * drifted: the leg loop measured and then judged, while the CONVERT measured,
+ * kept `measured.route` and never read `measured.venue` at all. The census was
+ * computed and thrown away — under a comment three lines above saying "AND IT
+ * IS MEASURED AGAIN, not merely quoted again ... this re-build carries its own
+ * census". Only the slippage refusal survived there, because that one throws
+ * from inside measureLegVenue. Returning the route ALONE is what makes the
+ * omission unrepresentable: there is no venue left over to forget.
+ *
+ * WHY THE SECOND MEASUREMENT IS NEEDED AT ALL, and what it is not. A route's
+ * instruction data carries the in-amount it was quoted for, so the gate's
+ * route — built at this turn's CEILING — cannot be sent for the smaller amount
+ * the budget or convertAmount settles on. The rebuild is therefore a different
+ * route through possibly different AMMs (measured 2026-09-21: a 25 USD quote
+ * on Kipseli+Manifest, a 1 USD quote of the same instant on Byreal+Manifest),
+ * which is exactly why it has to be measured rather than trusted. It is a
+ * SAFETY NET, not the doctrinal gate: a refusal here comes after the wrap.
+ *
+ * IT THROWS RATHER THAN RETURNING A VERDICT so that a caller cannot spend the
+ * route by ignoring one branch, and so that both callers can give the same
+ * refusal the outcome their own position demands — a rest for the convert, a
+ * REFUSED turn for a leg.
+ */
+export async function remeasureForSend(
+  connection: Connection,
+  /** The mint the spend is denominated in: the policy's in_mint for a leg, wSOL for the convert. */
+  spendMint: PublicKey,
+  params: Parameters<typeof measureLegVenue>[1],
+): Promise<JupiterRoute> {
+  const { route, venue } = await measureLegVenue(connection, params);
+  const stillDeep = legDepthDecision({ inMint: spendMint, legs: [venue] });
+  if (!stillDeep.deep) throw new VenueMeasurementRefusal(stillDeep.detail);
+  return route;
+}
+
+/**
  * Every venue this basket would trade against, measured in one pass, BEFORE the
  * wrap — the convert included.
  *
- * WHY THE ROUTES COME BACK AND ARE NOT RE-FETCHED. What was measured and what
- * is spent have to be the same object, or the gate's guarantee dies on the way
- * to the send: Jupiter re-picks venues per quote, so a route fetched again a
- * second later is a DIFFERENT route through possibly different AMMs, and the
- * depth that was measured was never its depth. The legs are re-measured once
- * more at their real amount inside the swap loop, and that second run is a
- * safety net rather than the doctrinal gate — see there.
+ * THE ROUTES IT BUILDS ARE NOT THE ROUTES THAT ARE SIGNED, and saying so is the
+ * point of this paragraph. It used to return them, under a comment arguing that
+ * "what was measured and what is spent have to be the same object" — and
+ * nothing read them: both money paths rebuilt. They cannot be reused, either.
+ * A route's instruction data carries the in-amount it was quoted for, and the
+ * amount this turn ends up spending is smaller than the ceiling whenever the
+ * convert brought in less than the cap or the 30-day headroom bit, so the blob
+ * and amount_in would disagree and the program would be handed a swap for money
+ * the vault is not spending.
+ *
+ * SO WHAT THIS GATE IS: a refusal BEFORE THE WRAP, taken at the largest size
+ * this turn could reach, on routes that are then thrown away. Both arms are
+ * monotone in size, so passing at the ceiling is passing for anything smaller.
+ * What binds the route actually SIGNED is remeasureForSend, which measures and
+ * judges each rebuild — the legs' and the convert's alike.
  *
  * SEQUENTIAL, NOT PARALLEL. Each leg costs two quotes and two account reads
  * against keyless public endpoints, and lite-api.jup.ag rate-limits; an 8-leg
@@ -1117,9 +1186,8 @@ async function measureBasketVenues(
     /** Each leg's WORST-CASE fee: what the slippage is sized against. */
     readonly admissionFees: ReadonlyMap<string, TransferFeeTerms>;
   },
-): Promise<{ readonly legs: LegVenue[]; readonly routes: (JupiterRoute | null)[]; readonly convertRoute: JupiterRoute | null }> {
+): Promise<{ readonly legs: LegVenue[] }> {
   const legs: LegVenue[] = [];
-  const routes: (JupiterRoute | null)[] = [];
 
   for (const [index, leg] of params.policy.legs.entries()) {
     const spend = legShare(params.spendCeiling, leg.weightBps);
@@ -1129,10 +1197,9 @@ async function measureBasketVenues(
       // judge; legDepthDecision skips it for the same reason. Nothing is
       // quoted for it either, so the measurement costs nothing.
       legs.push({ mint: leg.mint, spend, venueLabels: [], hops: [], censusScope: "every-hop", impact: { compared: false, why: "this leg's share of the budget rounds to nothing, so this turn sends no swap for it" } });
-      routes.push(null);
       continue;
     }
-    const { route, venue } = await measureLegVenue(connection, {
+    const { venue } = await measureLegVenue(connection, {
       vault: params.vault,
       vaultIn: params.usdcAta,
       vaultTarget: target,
@@ -1154,7 +1221,6 @@ async function measureBasketVenues(
       ownerFloorRateWad: leg.minOutRateWad,
     });
     legs.push(venue);
-    routes.push(route);
   }
 
   // THE CONVERT, AS ONE MORE LEG OF THE SAME BASKET. feeBps is 0 because wSOL
@@ -1162,9 +1228,8 @@ async function measureBasketVenues(
   // returns the keeper's plain 200. It feeds the SAME legDepthDecision call, so
   // a shallow convert refuses the whole basket and a shallow leg refuses the
   // convert — one verdict, before the wrap.
-  let convertRoute: JupiterRoute | null = null;
   if (params.convertCeiling > 0n) {
-    const { route, venue } = await measureLegVenue(connection, {
+    const { venue } = await measureLegVenue(connection, {
       vault: params.vault,
       vaultIn: params.wsolAta,
       vaultTarget: params.usdcAta,
@@ -1182,11 +1247,10 @@ async function measureBasketVenues(
       // the floor is applied on the send path below, where missing it rests the
       // conversion and the legs are bought as usual.
     });
-    convertRoute = route;
     legs.push(venue);
   }
 
-  return { legs, routes, convertRoute };
+  return { legs };
 }
 
 async function balanceOf(connection: Connection, ata: PublicKey): Promise<bigint> {
@@ -1242,13 +1306,33 @@ function shortfall(plan: WrapPlan, crankRead: boolean): string {
  * A LIMIT WITHOUT A PRICE IS NOT A BID. Setting only the unit limit told the
  * scheduler how much room to reserve and offered nothing for it, so under
  * congestion these transactions are deprioritised and dropped — and there is
- * no retry anywhere. The price is small in absolute terms (600k units at
- * 10_000 micro-lamports is 6_000 lamports, on top of the 5_000-lamport
+ * no retry anywhere. The price is small in absolute terms (1.4M units at
+ * 10_000 micro-lamports is 14_000 lamports, on top of the 5_000-lamport
  * signature fee) and buys inclusion when it matters.
  *
- * 600_000 UNITS COVERS THE CREATE TOO. An idempotent associated-token-account
- * creation costs on the order of 25k units — under 5% of this budget, and
- * nothing next to the swap it rides with.
+ * ── WHY 1_400_000 AND NOT THE 600_000 THIS WAS ──────────────────────────────
+ *
+ * THE OLD NUMBER WAS DERIVED FOR A SWAP THIS KEEPER NO LONGER BUILDS. Its
+ * comment read "600_000 UNITS COVERS THE CREATE TOO ... nothing next to the
+ * CLMM swap it rides with": one Raydium CLMM swap plus an idempotent ATA
+ * create. The venue moved to Jupiter and the number did not move with it — the
+ * species docs/TESTING_TRAPS.md calls prose that outruns its measurement, here
+ * outliving the thing it was measured of. The routes actually observed are not
+ * one swap: measured 2026-09-21 against lite-api.jup.ag, USDC -> ANTHROPIC is a
+ * 2-hop chain at $5/$25/$250 and 3-to-5-hop routes appear at the same sizes
+ * (Scorch + Raydium CLMM + Manifest; BisonFi + Byreal + Scorch + GoonFi V2 +
+ * Manifest), each hop a CPI of its own out of JUP6..., under the sip_vault
+ * invest wrapper, with an ATA create in front on a leg's first buy.
+ *
+ * WHAT 1_400_000 IS, AND WHAT IT IS NOT. It is Jupiter's own answer: every
+ * /swap-instructions response for these routes carried
+ * computeUnitLimit = 1_400_000, which is also the per-transaction maximum the
+ * runtime allows. It is NOT a consumption measurement — nothing here has
+ * metered what one of these transactions really burns, and this comment does
+ * not pretend otherwise. It is the safe end of an asymmetry: too high costs
+ * 8_000 lamports a transaction over the old bid, while too low reverts with
+ * "exceeded CUs" on EVERY sweep, reporting a compute error for what is really
+ * a route one hop longer than the budget from a retired venue.
  *
  * THE VALUES AND THE ORDER ARE THE CLAIM. They are named here, once, because
  * the same two instructions now have to be laid down by two different builders
@@ -1256,7 +1340,7 @@ function shortfall(plan: WrapPlan, crankRead: boolean): string {
  * transaction exactly as it prices a Raydium one. A test pins both builders to
  * this list rather than to two typed-out copies of it.
  */
-export const COMPUTE_UNIT_LIMIT = 600_000;
+export const COMPUTE_UNIT_LIMIT = 1_400_000;
 export const COMPUTE_UNIT_PRICE_MICRO_LAMPORTS = 10_000;
 
 /** The compute-budget pair, in order, in front of the instructions they pay for. */
@@ -1439,6 +1523,24 @@ export async function sendWithBudget(
    */
   instructions: readonly anchor.web3.TransactionInstruction[],
   /**
+   * THE ROUTE THESE INSTRUCTIONS SPEND, AGED HERE — the last thing that happens
+   * before the signature.
+   *
+   * REQUIRED, AND NOT OPTIONAL, because this is the check jupiter-route.ts
+   * prescribes in words ("a caller that holds a route for a while re-runs
+   * verifyRouteFresh before it signs") and nothing ran. The only enforcement
+   * was the one INSIDE verifySharedAccountsRoute at build time, and the keeper
+   * does a great deal after the build: a probe quote, readRouteAccounts, a
+   * second findVaultOwnedTokenAccounts, balanceOf, the lazy token-account read,
+   * a getAddressLookupTable per table and getLatestBlockhash — none of them
+   * inside any age bound. min_out was sized against the quote's own
+   * otherAmountThreshold, so a slow RPC or a rate-limited lite-api means
+   * signing a floor nobody re-aged, and paying for the revert instead of
+   * refusing for free. An optional parameter would have let a new call site
+   * skip it silently, which is how it came to be skipped everywhere.
+   */
+  route: JupiterRoute,
+  /**
    * The route's own lookup tables, already fetched — empty for a venue that
    * needs none.
    *
@@ -1456,6 +1558,11 @@ export async function sendWithBudget(
    */
   lookupTables: readonly AddressLookupTableAccount[] = [],
 ): Promise<string> {
+  // AND IT IS THE BUILDER'S OWN CHECK, not a second spelling of it: the same
+  // pure function, the same ROUTE_MAX_AGE_MS the build used, so a refusal here
+  // carries the builder's "route-age" message — which distinguishes a market
+  // that moved from an RPC that stalled.
+  verifyRouteFresh(route, { nowMs: Date.now() }, { maxAgeMs: ROUTE_MAX_AGE_MS });
   const budgeted = budgetedInstructions(instructions);
   if (lookupTables.length === 0) {
     return provider.sendAndConfirm(new Transaction().add(...budgeted), [crank]);

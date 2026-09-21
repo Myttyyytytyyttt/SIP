@@ -1268,6 +1268,22 @@ export function turnSpendCeiling(input: {
 //    a floor the owner signed once. This gate does not close that, and must
 //    not be read as closing it.
 //
+// AND THE MOVE TO JUPITER WIDENED WHAT THAT COSTS, which belongs here rather
+// than nowhere. Under Raydium the counterparty was ONE operator-configured pool
+// per mint; under Jupiter it is any venue Jupiter indexes, the pool registry is
+// gone from bin/keeper.mts, and the keeper passes neither `dexes` nor
+// `excludeDexes` to the builder although jupiter-route.ts offers both. The vault
+// PDA's signature now goes to JUP6..., which CPIs onward into whatever the route
+// names. NEITHER ARM SEES THIS: ARM 1 counts the chosen venue's own inventory,
+// so a seeded pool passes by being funded, and ARM 2 divides two quotes from one
+// quoter, so a uniformly bad price divides out. The last bound on a stock leg is
+// the owner's min_out_rate_wad — and that number is derived at policy-signing
+// time from a RAYDIUM pool's mid, 5 % under it
+// (solana-core/src/server/build-handler.ts over PRICED_POOLS, at
+// LEG_FLOOR_MARGIN_BPS = 500), which for ANTHROPIC is the venue this migration
+// exists to stop trading on. Whoever narrows this should narrow it there: an
+// excludeDexes list, or a floor referenced to something the keeper still reads.
+//
 // This paragraph exists because of the species docs/TESTING_TRAPS.md calls
 // "prose whose scope is narrower than its reading": no test catches a comment
 // that is right about the mechanism and wrong about what it protects.
@@ -1442,8 +1458,35 @@ export type InventoryCensus =
   | { readonly counted: false; readonly why: string };
 
 /**
- * ARM 1, over ONE hop: the venue's inventory of the mint that hop pays us,
+ * ARM 1, over one MINT: how much of it the route's own accounts can pay us,
  * summed from the accounts the ROUTE ITSELF names.
+ *
+ * ROUTE-WIDE, NOT VENUE BY VENUE, AND THE DIFFERENCE IS NOT COSMETIC. This
+ * function is handed every account the route resolves to and sums the ones
+ * holding `payMint`. On a multi-venue route those accounts belong to SEVERAL
+ * venues — measured 2026-09-21 on the live 2-hop USDC -> ANTHROPIC route at the
+ * $1,000 cap, the wSOL side counts FOUR writable wSOL accounts totalling
+ * 320,616,245,011 raw, one of which (33.6 SOL) pays us nothing at all. Jupiter's
+ * flat account list carries no attribution of an account to a hop, and deriving
+ * one would mean decoding each venue's own layout — the per-venue reading this
+ * gate was rewritten to stop doing, because a CLOB and a DLMM have no reserve
+ * to read.
+ *
+ * SO THE TAKE IS SUMMED THE SAME WAY, and that is the fix for what this
+ * asymmetry used to allow. censusHops groups a route's hops BY THE MINT THEY
+ * PAY US and judges one summed take against one summed inventory. Before it
+ * did, a PARALLEL SPLIT — Jupiter's other routePlan shape, where every step
+ * outputs the target and carries its own `percent` — was censused once per
+ * sliver: USDC -> FIGUREAI at $5,000 measured live as Raydium CLMM 4 % +
+ * Hadron 94 % + Manifest 2 %, and the Raydium sliver's 1.81x cover of its own
+ * pool read as 1,199.77x because the other two venues' inventory was counted
+ * against one twenty-fifth of the buy. Summed both ways the same route reads
+ * 48.06x and is refused.
+ *
+ * WHAT THIS BOUND THEREFORE CLAIMS, exactly: the writable non-vault accounts
+ * this route names hold at least 50x what this route takes of that mint. It
+ * does NOT claim that each venue separately holds 50x its own share, and a
+ * refusal naming several venues is naming them all, not one.
  *
  * AN ACCOUNT IS COUNTED WHEN, AND ONLY WHEN, all five hold:
  *  1. its program owner is the SPL Token or the Token-2022 program — anything
@@ -1532,6 +1575,33 @@ export function venueImpactBps(turnRateWad: bigint, probeRateWad: bigint): bigin
   return (10_000n * (probeRateWad - turnRateWad)) / probeRateWad;
 }
 
+/**
+ * What this turn would take out of the route at the rate the PROBE quoted:
+ * spend * probeOut / probeIn, floored to a raw unit.
+ *
+ * WHY THE PROBE IS THE RIGHT REFERENCE HERE, AND WHY IT IS USED EVEN WHEN ARM 2
+ * REFUSES TO USE IT. ARM 2 divides two rates to measure IMPACT, so it abstains
+ * the moment the two quotes took different venues — the rates would not be two
+ * sizes of one thing. This is a different question: what SHOULD this turn take
+ * out, in the mint's own units, independently of what the venue we are about to
+ * trade with says. A probe that routed elsewhere answers that BETTER, not
+ * worse, because it is a second opinion rather than the same one at another
+ * size. So the floor applies whenever a probe answered at all.
+ *
+ * SCOPE, BESIDE THE CLAIM. The probe is a sixteenth (never under a dollar) and
+ * comes from the same quoter, so it is an undisturbed rate and NOT an
+ * independent price: a market Jupiter quotes uniformly badly moves this number
+ * with it, and nothing in this gate sees that. What it does close is the venue
+ * that flatters its own cover by quoting the turn worse at size.
+ *
+ * ZERO WHEN THERE IS NOTHING TO GO ON — no probe, no spend — and zero never
+ * lifts anything, because the caller takes the larger of the two.
+ */
+export function takeAtProbeRate(spend: bigint, probeIn: bigint, probeOut: bigint): bigint {
+  if (spend <= 0n || probeIn <= 0n || probeOut <= 0n) return 0n;
+  return (spend * probeOut) / probeIn;
+}
+
 /** The most of ARM 2's impact this leg may show: a quarter of the usable tolerance, never under 5 bps. */
 export function maxTurnImpactBps(slippageBps: bigint, feeBps: bigint): bigint {
   const usable = slippageBps - feeBps;
@@ -1571,7 +1641,10 @@ export type ImpactProbe =
   | { readonly compared: false; readonly why: string };
 
 /**
- * One hop of one leg, as one turn measured it.
+ * ONE MINT A LEG'S ROUTE PAYS US, as one turn measured it — not one step of the
+ * routePlan. A chain gives one of these per intermediate mint plus one for the
+ * target; a parallel SPLIT gives exactly one, whose take is the sum of the
+ * slivers and whose label names every venue that pays it. censusHops says why.
  *
  * WHICH SIDE A HOP IS MEASURED ON, AND WHY EITHER WILL DO. On a Jupiter route
  * `payMint` is the mint the hop PAYS US and `takeRaw` is what it hands over —
@@ -1587,14 +1660,43 @@ export type ImpactProbe =
  * bound at the quoted rate. The refusal therefore says the neutral thing — what
  * this turn would MOVE THROUGH the venue — rather than claiming a direction the
  * reader would then have to check.
+ *
+ * AND THE EQUIVALENCE HOLDS AT ONE PRICE, WHICH IS THE CATCH `quotedTakeRaw`
+ * ANSWERS. `price` in that identity is the price the trade actually gets, and on
+ * a Jupiter route the out-side number IS the venue's own quote — so a venue
+ * quoting us d times worse divides the take by d and multiplies the cover by d.
+ * The in-side reading had no such handle, because the spend is ours. takeRaw is
+ * therefore floored at what the probe's rate implies before any of this is
+ * judged; see takeAtProbeRate for what that does and does not close.
  */
 export interface LegVenueHop {
-  /** The venue's own label, for the refusal text only. */
+  /** The venue labels that pay this mint, joined — for the refusal text only. */
   readonly label: string;
   /** The mint this hop's inventory is counted in. */
   readonly payMint: PublicKey;
-  /** What this turn moves through the venue on that side, in that mint's raw units. */
+  /**
+   * What this turn moves through the route on that side, in that mint's raw
+   * units — the number the cover is measured against, and never smaller than
+   * what the undisturbed rate implies (see quotedTakeRaw and takeAtProbeRate).
+   */
   readonly takeRaw: bigint;
+  /**
+   * What the VENUE'S OWN QUOTE said it would hand over, present only when it
+   * was smaller than takeRaw and a floor lifted it.
+   *
+   * THE PROPERTY THIS FIELD EXISTS TO RESTORE. On main the denominator was the
+   * keeper's own spend — an in-unit nothing on the venue's side of the trade
+   * chose — and the doc said what that bought: "the test needs no price, and no
+   * quote from the venue being traded against can flatter it". Moving to
+   * out-units to reach a CLOB and a DLMM made the denominator `outAmount`,
+   * which IS that venue's quote, so a venue quoting us WORSE measured as
+   * DEEPER: degrade the quote by d and the cover is multiplied by 1/d. Judging
+   * against the larger of the two numbers takes that back. It does not make the
+   * gate price-proof — a market quoted uniformly badly moves both numbers, and
+   * §0 above names the defences for that — but a venue can no longer buy cover
+   * by pricing us badly at size.
+   */
+  readonly quotedTakeRaw?: bigint;
   readonly census: InventoryCensus;
 }
 
@@ -1685,7 +1787,13 @@ export function legDepthDecision(input: {
       if (hop.census.inventory < required) {
         refuse(
           `holds ${hop.census.inventory} raw of ${hop.payMint.toBase58()} across ${hop.census.accounts} account(s) at its ` +
-            `${hop.label} hop, against the ${hop.takeRaw} this turn would move through it — ${cover(hop.census.inventory, hop.takeRaw)} ` +
+            `${hop.label} hop(s) — counted route-wide for that mint, not venue by venue — ` +
+            `against the ${hop.takeRaw} this turn would move through it` +
+            (hop.quotedTakeRaw === undefined
+              ? ""
+              : ` (the route quoted ${hop.quotedTakeRaw}; judged at the undisturbed rate the probe implies, so a venue ` +
+                "cannot read as deeper by quoting us worse)") +
+            ` — ${cover(hop.census.inventory, hop.takeRaw)} ` +
             `cover, under the ${MIN_VENUE_INVENTORY_MULTIPLE}x this keeper trades on (it would need ${required})`,
         );
         hopRefused = true;

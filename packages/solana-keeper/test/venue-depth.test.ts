@@ -201,6 +201,101 @@ describe("ARM 1's per-hop censuses and the scope beside them", () => {
     });
     expect(decision.deep).toBe(false);
   });
+  it("SUMS A PARALLEL SPLIT'S TAKES, because the census it is judged against is already summed", () => {
+    // MEASURED LIVE 2026-09-21, keyless lite-api: USDC -> FIGUREAI at $5,000
+    // comes back not as a chain but as a SPLIT — Raydium CLMM 4 %, Hadron 94 %,
+    // Manifest 2 %, every step's outputMint the target, each with its own
+    // `percent`. /swap-instructions for that quote names all three venues'
+    // payout accounts in ONE list, all writable, so censusVenueInventory counts
+    // all three whichever step is asking.
+    //
+    // ASKING ONCE PER SLIVER WAS THEREFORE THE INVERSION. The Raydium pool
+    // really held 1,986,791,366 raw against the 1,095,282,199 its 4 % share
+    // takes — 1.81x — and the gate read 1,199.77x, because three venues'
+    // inventory was being compared with one venue's twenty-fifth of the buy.
+    const target = key();
+    const slivers = [
+      { label: "Raydium CLMM", amm: "r1", take: 1_095_282_199n, holds: 1_986_791_366n },
+      { label: "Hadron", amm: "h1", take: 25_693_749_079n, holds: 25_693_749_079n * 50n },
+      { label: "Manifest", amm: "m1", take: 548_164_100n, holds: 548_164_100n * 50n },
+    ];
+    const accounts = slivers.map((sliver) => accountOf(target, sliver.holds));
+    const inventory = slivers.reduce((sum, sliver) => sum + sliver.holds, 0n);
+    const take = slivers.reduce((sum, sliver) => sum + sliver.take, 0n);
+    expect(inventory).toBe(1_314_082_450_316n);
+    expect(take).toBe(27_337_195_378n);
+
+    const { hops, censusScope } = censusHops({
+      quote: quoteOf(slivers.map((sliver) => ({ label: sliver.label, amm: sliver.amm, outputMint: target, outAmount: sliver.take }))),
+      inputMint: key(),
+      targetMint: target,
+      candidates: accounts.map((a) => a.account),
+      writable: new Set(accounts.map((a) => a.address.toBase58())),
+      vaultOwned: new Set(),
+    });
+
+    // ONE HOP, because the three steps pay the same mint and are judged
+    // together — and every venue that pays it is named in the refusal.
+    expect(hops).toHaveLength(1);
+    expect(hops[0]!.takeRaw).toBe(take);
+    expect(hops[0]!.census).toEqual({ counted: true, inventory, accounts: 3 });
+    expect(hops[0]!.label).toBe("Raydium CLMM + Hadron + Manifest");
+    expect(censusScope).toBe("every-hop");
+
+    // AND THE VERDICT: 48.1x against the 50x bar, so the turn does not spend.
+    // Per sliver the SAME route passed at 1,199.77x on the Raydium hop and
+    // 2,397x on the Manifest one — the two venues that were given exactly 50x
+    // their own share are the only reason it is this close.
+    const decision = legDepthDecision({
+      inMint: USDC_MINT,
+      legs: [{ mint: target, spend: 5_000_000_000n, venueLabels: slivers.map((s) => s.label), hops, censusScope, impact: { compared: false, why: "a split does not probe the same way" } }],
+    });
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
+    expect(decision.detail).toContain("48.1x cover");
+    expect(decision.detail).toContain(`it would need ${take * 50n}`);
+
+    // THE CONTROL: the same three venues, each genuinely 50x its own share,
+    // still trades. A gate that refused every split would refuse routinely.
+    const deep = slivers.map((sliver) => accountOf(target, sliver.take * 50n));
+    const sound = censusHops({
+      quote: quoteOf(slivers.map((sliver) => ({ label: sliver.label, amm: sliver.amm, outputMint: target, outAmount: sliver.take }))),
+      inputMint: key(),
+      targetMint: target,
+      candidates: deep.map((a) => a.account),
+      writable: new Set(deep.map((a) => a.address.toBase58())),
+      vaultOwned: new Set(),
+    });
+    expect(
+      legDepthDecision({
+        inMint: USDC_MINT,
+        legs: [{ mint: target, spend: 5_000_000_000n, venueLabels: [], hops: sound.hops, censusScope: sound.censusScope, impact: { compared: false, why: "no probe" } }],
+      }),
+    ).toEqual({ deep: true });
+  });
+
+  it("keeps a CHAIN one hop per mint, so the split fix does not merge two different questions", () => {
+    // USDC -> X -> target: two mints, two censuses, two covers. The grouping is
+    // by the mint a step PAYS, so a chain is untouched by it.
+    const intermediate = key();
+    const target = key();
+    const mid = accountOf(intermediate, 500_000_000n);
+    const end = accountOf(target, 900_000_000n);
+    const { hops } = censusHops({
+      quote: quoteOf([
+        { label: "HumidiFi", amm: "a", outputMint: intermediate, outAmount: 1_000_000n },
+        { label: "Manifest", amm: "b", outputMint: target, outAmount: 2_000_000n },
+      ]),
+      inputMint: key(),
+      targetMint: target,
+      candidates: [mid.account, end.account],
+      writable: new Set([mid.address.toBase58(), end.address.toBase58()]),
+      vaultOwned: new Set(),
+    });
+    expect(hops).toHaveLength(2);
+    expect(hops.map((hop) => hop.takeRaw)).toEqual([1_000_000n, 2_000_000n]);
+    expect(hops.map((hop) => hop.label)).toEqual(["HumidiFi", "Manifest"]);
+  });
 });
 
 describe("reading the accounts a route names", () => {
