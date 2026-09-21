@@ -5,9 +5,16 @@
  * keeper can and cannot move, and which rent never comes back. Components and
  * flows import from here, so a claim is changed once and a test can pin it.
  * Client-safe and pure; amounts and rates arrive already written as text.
+ *
+ * AND SINCE THE BASKET BECAME HIS, THE PARAGRAPHS HE SIGNS ARE GENERATED. The
+ * fee, the issuers' powers, the switch that stops the buying and the box he
+ * ticks are built from the legs he chose and their own dated readings — see
+ * "THE PARAGRAPHS THE OWNER SIGNS" below. A sentence that names a stock by hand
+ * is a sentence about somebody else's basket, and this file is where that costs
+ * the most.
  */
 
-import { DEFAULT_VAULT_POLICY } from "@sip/solana-core/client";
+import { DEFAULT_VAULT_POLICY, PRESTOCKS_POWERS, XSTOCKS_POWERS, type AssetGroup, type CatalogueAsset } from "@sip/solana-core/client";
 
 /** Basis points as a percentage: 2000 is "20 %". */
 export const ratePercent = (bps: number): string => `${Number((bps / 100).toFixed(2))} %`;
@@ -22,7 +29,10 @@ export const VOLUME_RATE = ratePercent(DEFAULT_VAULT_POLICY.volumeBps);
  * still behind, before the keeper settles zero and drops that loss: the keeper's
  * ZERO_BASE_MIN_TXS (packages/solana-keeper/src/settle-decision.ts). TradingLink
  * keeps no high-water mark, so a dropped loss is not netted against later gains.
- * vault-copy.test.ts reads the keeper's file and holds the two equal.
+ * vault-copy.test.ts holds this to LOSS_FORGIVEN in solana-core's committed
+ * vector (test/fixtures/keeper-policy.ts), which the KEEPER's own tests hold
+ * its constant and its gate to: the file is not read as text any more, so a
+ * reflow over there cannot turn a web gate red.
  */
 export const LOSS_DROPPED_AFTER_TXS = 100;
 
@@ -41,8 +51,10 @@ export const LOSS_DROPPED_AFTER_TXS = 100;
  * the quoted rate, so the 50 carries over untouched and no test would have
  * caught the words. INVEST_COPY.thinPool below was rewritten in the same change.
  *
- * vault-copy.test.ts reads the keeper's file and holds the two equal, the same
- * way it does for LOSS_DROPPED_AFTER_TXS.
+ * vault-copy.test.ts holds this to POOL_DEPTH in the committed vector, the
+ * same way it does LOSS_DROPPED_AFTER_TXS — and to the vector's OTHER UNIT
+ * too, because two packages can agree on "50" and disagree about whether it
+ * is a multiple or a share.
  */
 export const POOL_DEPTH_MULTIPLE = 50;
 
@@ -52,12 +64,14 @@ export const POOL_DEPTH_MULTIPLE = 50;
  * on `fee.bps > MAX_LEG_FEE_BPS` — strictly greater, so a leg sitting exactly
  * on the limit is still admitted, with no margin whatsoever.
  *
- * THAT IS ANTHROPIC'S POSITION TODAY. Its active fee is 100 bps and this is
- * 100 bps, so the basket is one issuer instruction away from being refused
- * entirely — and the refusal is all-or-nothing, taking SPYx and the SOL
- * conversion with it. INVEST_COPY.feeCeiling is the sentence that says so, and
- * vault-copy.test.ts reads the keeper's file and holds the two equal, the same
- * way it does for POOL_DEPTH_MULTIPLE.
+ * THAT IS EVERY PRESTOCK'S POSITION TODAY: all eight read 100 bps from epoch
+ * 1039 against this 100, so a basket holding one of them is a single issuer
+ * instruction away from being refused entirely — and the refusal is
+ * all-or-nothing, taking the other legs and the SOL conversion with it.
+ * INVEST_COPY.feeCeiling is the sentence that says so, and it names the legs
+ * ON the limit and the legs that go down with them from the basket itself,
+ * rather than from a pair of names written here. vault-copy.test.ts holds
+ * this constant to LEG_FEE in the committed vector.
  */
 export const MAX_LEG_FEE_BPS = 100;
 
@@ -67,6 +81,423 @@ export const listAnd = (items: readonly string[]): string =>
 
 /** The first and last four characters of an address. */
 export const shortAddress = (address: string): string => (address.length > 10 ? `${address.slice(0, 4)}…${address.slice(-4)}` : address);
+
+// ── THE PARAGRAPHS THE OWNER SIGNS, GENERATED FROM HIS OWN BASKET ────────────
+//
+// WHY NONE OF THEM MAY BE WRITTEN BY HAND ANY MORE. Until the picker landed the
+// basket was two frozen legs, so `hookSwitch`, `feeCeiling` and `issuerCost`
+// could name SPYx and ANTHROPIC in prose and be true — and vault-copy.test.ts
+// carried a tripwire that went red the moment OFFERED_LEGS stopped being
+// exactly those two, because the sentences could not follow. The owner now
+// picks up to five assets out of a catalogue of nine. A hand-written paragraph
+// would describe a basket he did not choose: it would name a stock he never
+// ticked, quote a fee no leg of his charges, and — worst — tell him that a stop
+// takes "the whole basket, SPYx along with it" when his basket has no SPYx in
+// it, which understates by however many legs he did pick.
+//
+// So every sentence below is built from the legs on screen and THEIR OWN
+// MEASURED FACTS, and each fact carries the day it was read. A leg whose fee
+// nobody has read says so; it is never given a zero.
+//
+// WHAT THESE SENTENCES MAY NOT DO, which is docs/TESTING_TRAPS.md's fourth
+// species and the reason this file is the dangerous one: claim more than what
+// was measured. Three claims in particular are easy to inherit and false:
+//  * the depth gate measures DEPTH AT THE SIZE OF THE TURN, not price. It can
+//    say a market is too thin to fill a buy; it cannot say a price is fair.
+//  * the stock legs have NO INDEPENDENT PRICE ANCHOR. Pyth anchors the SOL hop
+//    only (invest-decision.ts oracleConvertDecision); ARM 1 counts units and
+//    has no opinion about what a unit is worth, and ARM 2 divides two quotes
+//    from one quoter, so a uniformly bad price divides out of it.
+//  * the owner-signed floor DECAYS. It is derived once, at signing, from one
+//    Raydium CLMM pool's mid at LEG_FLOOR_MARGIN_BPS under it
+//    (solana-core/src/server/build-handler.ts), and then it stands. As the
+//    market moves it becomes either a no-op or a block, and nothing re-signs it.
+// INVEST_COPY.defencesLimits says all three in the owner's words, and the
+// floor-drift block measures the third against the rate the page just read.
+
+/** A chosen leg, as the signed paragraphs need it: what it is called, which product it is, and its own fee reading. */
+export interface SignedLeg {
+  readonly symbol: string;
+  readonly group: AssetGroup;
+  /** Its live transfer fee in basis points, or null when nobody has read it. NULL IS NOT ZERO and no sentence below treats it as zero. */
+  readonly feeBps: number | null;
+  readonly feeEpoch: number | null;
+  readonly feeReadOn: string | null;
+  /**
+   * WHETHER THE MINT HAS NO FEE SETTING AT ALL, which is a much stronger fact
+   * than a fee of zero and is the only ground for "nobody can ever add one".
+   *
+   * Token-2022 extensions are fixed when a mint is initialised, so a mint
+   * without TransferFeeConfig has no authority anywhere able to give it one
+   * (XSTOCKS_POWERS). A fee that merely READS zero could be an extension set to
+   * zero today and to anything tomorrow, and the two must not be printed the
+   * same way. signedLegsOf derives this from the catalogue's own convention —
+   * an xStock entry's zero fee is a reading of the extension's ABSENCE, which
+   * product.ts states in SPYx's `fee.by` and its notes — and vault-copy.test.ts
+   * holds that convention to the shelf, so an xStock whose zero is merely a
+   * zero turns the test red rather than picking up this sentence.
+   */
+  readonly feeSettingAbsent: boolean;
+}
+
+/** The catalogue's entries as the signed paragraphs take them: the same readings, narrowed to what the words use. */
+export const signedLegsOf = (assets: readonly CatalogueAsset[]): readonly SignedLeg[] =>
+  assets.map((asset) => ({
+    symbol: asset.symbol,
+    group: asset.group,
+    feeBps: asset.fee?.bps ?? null,
+    feeEpoch: asset.fee?.epoch ?? null,
+    feeReadOn: asset.fee?.readOn ?? null,
+    feeSettingAbsent: asset.group === "xstock" && asset.fee?.bps === 0,
+  }));
+
+/**
+ * WHAT A FEE COSTS OVER A ROUND TRIP, and it is not twice the fee.
+ *
+ * The issuer charges on the way in and again on the way out, and the second
+ * charge is taken from what the first one left: 1 − (1 − f)², which at 1 % is
+ * 1.99 % and not 2 %. Written as arithmetic rather than as a figure so that a
+ * leg charging anything else is described correctly without anyone re-typing it.
+ */
+export const roundTripPercent = (feeBps: number): string => `${Number((100 * (1 - (1 - feeBps / 10_000) ** 2)).toFixed(2))} %`;
+
+/**
+ * THE TRANSFER-HOOK FIELD, AS IT WAS READ, AND ONLY WHERE IT WAS READ.
+ *
+ * Both groups carry Token-2022's transfer-hook extension with the program id
+ * left at the default key, which invest-decision.ts's decodeMintFacts reads as
+ * `transferHook: null` — the issuer keeping the option rather than using it. A
+ * filled-in field is refused outright (`facts.transferHook !== null`), and by
+ * the keeper's all-or-nothing doctrine that refusal takes the whole basket and
+ * the SOL conversion with it.
+ *
+ * THE PRESTOCKS READING COVERS ALL EIGHT MINTS; THE XSTOCKS ONE COVERS SPYx AND
+ * NOTHING ELSE, which is why it is keyed by symbol. Generalising SPYx's read to
+ * every xStock is exactly the fourth species: a sentence true of what was
+ * measured, printed as true of a mint nobody has looked at. An xStock that is
+ * not in this record is described as unread.
+ *
+ * WHO CAN FILL IT IN IS NOT THE SAME ON BOTH SIDES, and neither side may be
+ * overstated. On a PreStock it is the single issuer key that also sets the fee,
+ * freezes, pauses and holds the permanent delegate (PRESTOCKS_POWERS). On SPYx
+ * the 2026-09-20 mainnet read found the authority set to a key of the issuer's
+ * own (5aMNNLQJ…), which is NOT the key that can freeze it and cannot put a fee
+ * on it at all. So the STOP is symmetric and the FEE is not — and nothing read
+ * on either day measures which key is likelier to be used, so nothing here says.
+ */
+const XSTOCK_HOOK_READS: Readonly<Record<string, string>> = Object.freeze({ SPYx: "2026-09-20" });
+const PRESTOCK_HOOK_KEY = "the same key that sets its fee and can freeze, pause and move it";
+const XSTOCK_HOOK_KEY = "a key of its issuer's own, which is not the key that can freeze it";
+
+/**
+ * WHAT A ROUND TRIP IN ONE STOCK ACTUALLY COST, where anybody has measured one.
+ *
+ * SIMULATED ON MAINNET, 2026-09-20, epoch 1039, n=7: unsigned transactions
+ * through simulateTransaction, USDC → stock → USDC, with the sell chained on the
+ * REAL credit the buy returned and not on the quote. Two earlier readings are
+ * dead and are quoted nowhere: a 0.60/0.57/1.26 % size curve whose own middle
+ * point fell as the buy grew, and a 0.41–0.44 % figure that priced the sell off
+ * a quote instead of off the credit.
+ *
+ * A LEG THAT IS NOT IN HERE HAS NOT BEEN MEASURED, and the paragraph says so
+ * rather than reaching for a neighbour's number. The catalogue has nine assets
+ * and this has two: that ratio is the point.
+ */
+const ROUND_TRIPS: Readonly<Record<string, { readonly all: string | null; readonly low: string; readonly high: string; readonly market: string | null; readonly moved: string | null }>> = Object.freeze({
+  ANTHROPIC: Object.freeze({ all: "2.4 %", low: "2.24 %", high: "2.63 %", market: "between 0.25 % and 0.64 %", moved: "0.36 %" }),
+  SPYx: Object.freeze({ all: null, low: "0.011 %", high: "0.018 %", market: null, moved: null }),
+});
+const ROUND_TRIP_READ_ON = "20 September 2026";
+const ROUND_TRIP_METHOD = "seven round trips, built and run but never signed, each sale priced on what its purchase actually delivered rather than on a quote";
+
+/**
+ * A FEE THAT HAS ALREADY BEEN MOVED, by leg, because it is the proof that a key
+ * is in use rather than merely held.
+ *
+ * ANTHROPIC's TransferFeeConfig carried older{epoch 1032, 50 bps} and
+ * newer{epoch 1039, 100 bps} when it was read at slot 448864409, inside epoch
+ * 1039 — about 1.8 hours in, epochs being 432,000 slots of roughly 400 ms. The
+ * same calendar day, read in epoch 1038, the rise was still scheduled. So the
+ * fee doubled HOURS before those words, not days. ONE RAISE IS CLAIMED AND NOT
+ * TWO: the account holds exactly two records, so an earlier 0 → 50 may well
+ * have happened and is not on it.
+ */
+const FEE_RAISED: Readonly<Record<string, string>> = Object.freeze({
+  ANTHROPIC: "ANTHROPIC's was 0.5 % for about two weeks and became 1 % when the current epoch began, hours before this was written on 20 September 2026",
+});
+
+const symbolsOf = (legs: readonly SignedLeg[]): string => listAnd(legs.map((leg) => leg.symbol));
+const inGroup = (legs: readonly SignedLeg[], group: AssetGroup): readonly SignedLeg[] => legs.filter((leg) => leg.group === group);
+const isOne = (legs: readonly SignedLeg[]): boolean => legs.length === 1;
+
+/**
+ * "the whole basket — SPYx and ANTHROPIC, every one of them —", or at one leg
+ * "the whole basket — which is ANTHROPIC alone —".
+ *
+ * THE ALL-OR-NOTHING DOCTRINE IS WHY THIS PHRASE EXISTS AT ALL. Every keeper
+ * refusal — the depth gate, the fee ceiling, the transfer hook — refuses the
+ * WHOLE basket and the SOL conversion with it; a half-basket is unrepresentable
+ * in DepthDecision and LegAdmission alike. The sentences that carry that have
+ * to name the legs that go down, and until the picker existed they named two by
+ * hand.
+ */
+const wholeBasket = (legs: readonly SignedLeg[]): string =>
+  isOne(legs) ? `the whole basket — which is ${symbolsOf(legs)} alone —` : `the whole basket — ${symbolsOf(legs)}, every one of them —`;
+
+/** "Both of these are", "All three of these are": a count the reader can hold, never "All 2 of these". */
+const COUNT_WORDS = Object.freeze(["", "one", "two", "three", "four", "five", "six", "seven", "eight"]);
+const countWord = (count: number): string => COUNT_WORDS[count] ?? String(count);
+
+/**
+ * WHETHER THIS LEG'S ISSUER HAS A FEE SETTING IT COULD MOVE, and the third
+ * answer is "nobody knows", which is not the same as either.
+ *
+ * A PreStock is known to have one: the 2026-09-21 read found the same key
+ * holding transfer-fee-config on all eight of those mints (PRESTOCKS_POWERS).
+ * A leg whose own fee has been read has one by definition. What is left — a
+ * mint nobody read, in no group with a group-wide reading — is unknown, and a
+ * sentence saying its issuer "can raise it" would be inventing an extension.
+ */
+const feeCanMove = (leg: SignedLeg): boolean => !leg.feeSettingAbsent && (leg.group === "prestock" || leg.feeBps !== null);
+
+/** One leg's transfer fee in the owner's words, with the day it was read. An unread fee is said to be unread; an absent setting is said to be absent. */
+function feeSentence(leg: SignedLeg): string {
+  if (leg.feeBps === null) return `SaverFi has not read ${leg.symbol}'s transfer fee on chain, and an unread fee is not a zero fee.`;
+  if (leg.feeBps === 0)
+    return leg.feeSettingAbsent
+      ? `${leg.symbol} charges nothing to transfer, and nobody can make it: its mint carries no fee setting at all, and no key with the power to add one.`
+      : `${leg.symbol} charged nothing to transfer when it was read on ${leg.feeReadOn}, and its issuer can raise that at the next epoch boundary.`;
+  return (
+    `${leg.symbol}'s issuer charges ${ratePercent(leg.feeBps)} of every transfer of it: once when your vault buys it, and once when it leaves. ` +
+    `Going in and back out therefore gives up ${roundTripPercent(leg.feeBps)} before the market is involved at all — not quite twice the fee, because the second charge is taken from what the first one left. ` +
+    `That was its fee on ${leg.feeReadOn}, in epoch ${leg.feeEpoch}.`
+  );
+}
+
+/** What the issuers charge, leg by leg, and why buying smaller does not escape it. */
+function issuerCostParagraph(legs: readonly SignedLeg[]): string {
+  if (legs.length === 0) return "Choose what your vault buys and SaverFi will tell you what each issuer charges to transfer it.";
+  const parts = legs.map(feeSentence);
+  if (legs.some((leg) => (leg.feeBps ?? 0) > 0)) {
+    parts.push(
+      "Buying in smaller pieces does not make that smaller: it is a fee on each transfer, not a price that moves with the size of the order, and every later buy pays it again.",
+    );
+  }
+  const movable = legs.filter(feeCanMove);
+  if (movable.length === 0) {
+    parts.push(
+      `That is a fact about how ${isOne(legs) ? "that mint was" : "those mints were"} made, not a promise about anybody's behaviour: the setting is not there to be used.`,
+    );
+  } else {
+    const raised = legs.map((leg) => FEE_RAISED[leg.symbol]).filter((line): line is string => line !== undefined);
+    parts.push(
+      `A fee belongs to the issuer — not to SaverFi and not to Solana — and ${symbolsOf(movable)} ${isOne(movable) ? "has" : "have"} a setting the issuer can move at any epoch boundary` +
+        `${raised.length === 0 ? "." : `: ${listAnd(raised)}.`}`,
+    );
+  }
+  return parts.join(" ");
+}
+
+/** The ceiling the keeper refuses above, against the fees this basket actually carries. */
+function feeCeilingParagraph(legs: readonly SignedLeg[], max: string): string {
+  const opening = `There is a limit built into SaverFi: the keeper will not buy a stock that charges more than ${max} to transfer.`;
+  if (legs.length === 0) return `${opening} A basket with nothing in it has nothing to measure against that.`;
+  const atCeiling = legs.filter((leg) => leg.feeBps === MAX_LEG_FEE_BPS);
+  const unread = legs.filter((leg) => leg.feeBps === null);
+  const movable = legs.filter(feeCanMove);
+  const stop = `the vault stops buying ${wholeBasket(legs)} and stops converting your SOL at all, until the basket itself is changed. Nothing is lost when that happens; the saving simply stops until someone acts.`;
+  const parts = [opening];
+  if (atCeiling.length > 0) {
+    parts.push(
+      `${symbolsOf(atCeiling)} ${isOne(atCeiling) ? "sits" : "sit"} exactly on that limit today, with no margin whatsoever, so if ${isOne(atCeiling) ? "that issuer raises its fee" : "any of those issuers raises its fee"} once more, ${stop}`,
+    );
+  } else if (movable.length > 0) {
+    const priced = legs.filter((leg) => leg.feeBps !== null);
+    if (priced.length > 0) {
+      parts.push(`Nothing you have chosen sits on that limit today: ${listAnd(priced.map((leg) => `${leg.symbol} charges ${leg.feeBps === 0 ? "nothing" : ratePercent(leg.feeBps!)}`))}.`);
+    }
+    parts.push(`If ${symbolsOf(movable)} ${isOne(movable) ? "raises its fee" : "raise theirs"} past ${max}, ${stop}`);
+  } else if (legs.every((leg) => leg.feeSettingAbsent)) {
+    parts.push(`Nothing you have chosen can ever reach it: ${symbolsOf(legs)} ${isOne(legs) ? "carries" : "carry"} no fee setting at all, and no key anywhere can add one.`);
+  }
+  if (unread.length > 0) {
+    parts.push(
+      `SaverFi has not read ${symbolsOf(unread)}'s transfer fee, so it cannot tell you where ${isOne(unread) ? "it sits" : "they sit"} against that limit — and an unread fee is not a zero fee.`,
+    );
+  }
+  return parts.join(" ");
+}
+
+/** What a round trip cost where anyone measured one, and plain silence where nobody did. */
+function marketCostParagraph(legs: readonly SignedLeg[]): string {
+  const parts = ["Then there is what the market charges on top, which depends on the day's liquidity."];
+  const measured = legs.filter((leg) => ROUND_TRIPS[leg.symbol] !== undefined);
+  const unmeasured = legs.filter((leg) => ROUND_TRIPS[leg.symbol] === undefined);
+  if (measured.length > 0) {
+    parts.push(`Buying a stock and selling it straight back was measured on ${ROUND_TRIP_READ_ON} on Solana itself — ${ROUND_TRIP_METHOD}.`);
+    for (const leg of measured) {
+      const trip = ROUND_TRIPS[leg.symbol]!;
+      if (trip.all === null) {
+        parts.push(`${leg.symbol}'s round trip cost between ${trip.low} and ${trip.high}.`);
+      } else {
+        parts.push(
+          `${leg.symbol}'s round trip cost ${trip.all} all told, between ${trip.low} and ${trip.high}.` +
+            (trip.market === null
+              ? ""
+              : ` The ${roundTripPercent(leg.feeBps ?? 0)} its issuer charges is the part of that which never moves; the rest, ${trip.market}, is the market` +
+                (trip.moved === null ? "." : `, and it moved by ${trip.moved} within thirteen minutes that day.`)),
+        );
+      }
+    }
+  }
+  if (unmeasured.length > 0) {
+    parts.push(
+      `Nobody has measured a round trip in ${symbolsOf(unmeasured)}, so what ${isOne(unmeasured) ? "it costs" : "they cost"} beyond the transfer ${isOne(unmeasured) ? "fee" : "fees"} above is not a number SaverFi has.`,
+    );
+  }
+  parts.push(
+    isOne(legs)
+      ? "Another day reads differently."
+      : "Another day reads differently, and where two of these cost differently it is their issuers and their markets that differ — not Solana, and not SaverFi.",
+  );
+  return parts.join(" ");
+}
+
+/** Which powers the actual issuers of the actual chosen legs hold, by group, each with the day it was read. */
+function issuerPowersParagraph(legs: readonly SignedLeg[]): string {
+  const prestocks = inGroup(legs, "prestock");
+  const xstocks = inGroup(legs, "xstock");
+  const noFeeSetting = xstocks.filter((leg) => leg.feeSettingAbsent);
+  const otherXstocks = xstocks.filter((leg) => !leg.feeSettingAbsent);
+  const parts: string[] = [];
+  if (prestocks.length > 0) {
+    parts.push(
+      `${symbolsOf(prestocks)} ${isOne(prestocks) ? "is a PreStock" : "are PreStocks"}, and one key — ${shortAddress(PRESTOCKS_POWERS.issuerKey)} — is the mint authority, the freeze authority, ` +
+        `the transfer-fee authority and the permanent delegate of ${isOne(prestocks) ? "it" : "every one of them"}. ${isOne(prestocks) ? "It can also be paused" : "Each of them can also be paused"}, ` +
+        `and the same key can point every transfer at a program of its choosing. That is one person's discretion over what your vault holds, read on ${PRESTOCKS_POWERS.readOn}.`,
+    );
+  }
+  if (noFeeSetting.length > 0) {
+    parts.push(
+      `${symbolsOf(noFeeSetting)} ${isOne(noFeeSetting) ? "is an xStock: its mint carries" : "are xStocks: their mints carry"} no transfer-fee setting at all, and no key anywhere can add one — ` +
+        `${XSTOCKS_POWERS.why}. That is about the fee and nothing else: the issuer still holds ${listAnd(["a freeze authority", "a permanent delegate", "a pause", "a default account state"])}, ` +
+        `under keys separate from each other, read on ${XSTOCKS_POWERS.readOn}.`,
+    );
+  }
+  if (otherXstocks.length > 0) {
+    parts.push(
+      `${symbolsOf(otherXstocks)} ${isOne(otherXstocks) ? "is an xStock" : "are xStocks"} whose fee setting SaverFi has not read as absent, so nothing here says it cannot gain one; ` +
+        "its issuer holds freeze, a pause and a permanent delegate as the others do.",
+    );
+  }
+  if (parts.length === 0) return "Choose what your vault buys and SaverFi will tell you what each issuer can do to it.";
+  parts.push("None of that is SaverFi's to grant or to take away, and none of it is Solana's.");
+  return parts.join(" ");
+}
+
+/** The switch that stops the buying: the transfer-hook field, on the legs chosen, under the keys that were read holding it. */
+function hookSwitchParagraph(legs: readonly SignedLeg[]): string {
+  if (legs.length === 0) return "Choose what your vault buys and SaverFi will tell you who can stop it buying.";
+  const prestocks = inGroup(legs, "prestock");
+  const xstocksRead = inGroup(legs, "xstock").filter((leg) => XSTOCK_HOOK_READS[leg.symbol] !== undefined);
+  const unread = legs.filter((leg) => leg.group !== "prestock" && XSTOCK_HOOK_READS[leg.symbol] === undefined);
+  const read = [...prestocks, ...xstocksRead];
+  const readLines = [
+    prestocks.length === 0 ? null : `${symbolsOf(prestocks)} on ${PRESTOCKS_POWERS.readOn}`,
+    ...xstocksRead.map((leg) => `${leg.symbol} on ${XSTOCK_HOOK_READS[leg.symbol]!}`),
+  ].filter((line): line is string => line !== null);
+
+  const parts = [
+    `There is a second switch, and it is not about money at all: it stops the buying. ${isOne(legs) ? "This stock carries" : "Every stock in this basket carries"} a Token-2022 field where its issuer may name a program that has to run on every transfer of it.`,
+  ];
+  if (read.length > 0) {
+    parts.push(
+      isOne(read)
+        ? `On ${symbolsOf(read)} that field was empty when SaverFi read it, on ${readLines[0]!.split(" on ")[1]!}, which is the issuer keeping the option rather than using it.`
+        : `On ${symbolsOf(read)} that field was empty when SaverFi read it (${listAnd(readLines)}), which is the issuer keeping the option rather than using it.`,
+    );
+  }
+  if (unread.length > 0) {
+    parts.push(`SaverFi has not read that field on ${symbolsOf(unread)}, and an unread field is not an empty one.`);
+  }
+  parts.push(
+    "SaverFi will not buy a stock whose field has been filled in, because it cannot carry what a program named there would demand.",
+    `So on the day ${isOne(legs) ? "that issuer writes one in" : "any of these issuers writes one in"}, the vault stops buying ${wholeBasket(legs)} and stops converting your SOL, until the basket itself is changed. It applies from the moment it is written: the next buy is the one that stops.`,
+    "That stop takes nothing from you: what you have already saved is neither lost nor moved by it. The freeze, the pause and the permanent delegate described above are separate powers, and those can reach what your vault already holds.",
+  );
+  if (prestocks.length > 0 && xstocksRead.length > 0) {
+    parts.push(
+      `Neither side is exempt: on ${symbolsOf(prestocks)} the key over that field is ${PRESTOCK_HOOK_KEY}, and on ${symbolsOf(xstocksRead)} it is ${XSTOCK_HOOK_KEY}, ` +
+        "so either issuer can fill its own field in and stop the whole basket the same way. Nothing here measures which of them is likelier to.",
+    );
+  } else if (prestocks.length > 0) {
+    parts.push(`The key over that field is ${PRESTOCK_HOOK_KEY}, so the stop and the fee are in one hand. Nothing here measures how likely that hand is to use either.`);
+  } else if (xstocksRead.length > 0) {
+    parts.push(`The key over that field is ${XSTOCK_HOOK_KEY}, so the stop is a separate power from the freeze. Nothing here measures how likely that key is to be used.`);
+  }
+  const noFeeSetting = legs.filter((leg) => leg.feeSettingAbsent);
+  const movable = legs.filter(feeCanMove);
+  if (noFeeSetting.length > 0 && movable.length > 0) {
+    parts.push(
+      `The asymmetry that can be proved is the fee, not the stop: ${symbolsOf(noFeeSetting)} ${isOne(noFeeSetting) ? "carries" : "carry"} no fee setting at all and no key able to add one, ` +
+        `while ${symbolsOf(movable)} ${isOne(movable) ? "has one its issuer can raise" : "have one their issuers can raise"}.`,
+    );
+  }
+  parts.push(
+    movable.length > 0
+      ? "So what you are accepting is not only a fee that may rise: it is that a stranger's key can stop your pension buying anything at all, on any day he chooses."
+      : "So what you are accepting is that a stranger's key can stop your pension buying anything at all, on any day he chooses — whatever the fees are.",
+  );
+  return parts.join(" ");
+}
+
+/** Token-2022 powers over the chosen legs, said once for the whole basket. */
+function freezeNoticeParagraph(legs: readonly SignedLeg[]): string {
+  const head =
+    legs.length === 0
+      ? "The stocks a vault buys are Token-2022 tokens"
+      : isOne(legs)
+        ? `${symbolsOf(legs)} is a Token-2022 token`
+        : legs.length === 2
+          ? "Both of these are Token-2022 tokens"
+          : `All ${countWord(legs.length)} of these are Token-2022 tokens`;
+  return (
+    `${head}, and each issuer keeps powers over its own that SaverFi cannot take away. An issuer can freeze your vault's account for that stock, pause every transfer of it, ` +
+    "and move it out of your vault through a permanent delegate. If any of that happens, withdrawing that stock can fail or find less than you hold. " +
+    "USDC's issuer can freeze USDC accounts too. Withdrawing SOL depends on no issuer at all."
+  );
+}
+
+/**
+ * THE HONEST MAP OF THE DEFENCES, and it is short on purpose.
+ *
+ * Every clause here is a limit rather than a promise, because this file is the
+ * one where an over-claim costs the most: the owner reads it, ticks a box and
+ * signs. The three limits are the keeper's own (invest-decision.ts, "THE PRICE
+ * DEFENCES" and "WHY AN ORACLE AT ALL"), said in his words and not in its.
+ */
+function defencesLimitsParagraph(legs: readonly SignedLeg[], marginUnderMarket: string): string {
+  const stocks = legs.length === 0 ? "The stocks" : symbolsOf(legs);
+  const plural = legs.length !== 1;
+  return (
+    `What SaverFi checks before a buy, and what it does not. It measures how much the venue it is buying from can hand over, and refuses unless that venue holds at least ${POOL_DEPTH_MULTIPLE} times the buy. ` +
+    "THAT IS A CHECK ON SIZE, NOT ON PRICE: it can tell you a market is too thin for the buy you have asked for, and it cannot tell you the price you get is a fair one. " +
+    "The SOL-to-USDC conversion has one outside opinion on it — the SOL price Pyth publishes, which is the only number in a buy that does not come from the venue being traded against. " +
+    `${stocks} ${plural ? "have" : "has"} no such anchor today: nothing SaverFi reads publishes an independent price for ${plural ? "them" : "it"} on chain, so the only price bound on ${plural ? "those legs" : "that leg"} is the limit you sign yourself. ` +
+    `And that limit is signed once: it is taken from one pool's price at the moment you sign, ${marginUnderMarket} under it, and it does not follow the market afterwards. ` +
+    "As the market moves, the same number stops protecting you — or starts refusing every honest buy. SaverFi shows you how far it has drifted rather than leaving you to assume it still fits."
+  );
+}
+
+/** The box he ticks, naming the powers his own legs are actually subject to. */
+function acknowledgeSentence(legs: readonly SignedLeg[]): string {
+  const prestocks = inGroup(legs, "prestock");
+  return (
+    "I understand each issuer can freeze, pause or move its own stock out of my vault" +
+    (prestocks.length === 0 ? "" : `, that one key holds all of those powers over ${symbolsOf(prestocks)}`) +
+    ", and that any of these issuers can stop my vault buying anything at all"
+  );
+}
 
 export const VAULT_COPY = {
   title: "Vault",
@@ -272,82 +703,44 @@ export const INVEST_COPY = {
 
   // ── WHAT THE POSITION COSTS, AND WHO OWNS EACH NUMBER ──────────────────────
   //
-  // The card said nothing at all about this until now, which was the worst of
-  // the three things wrong with it: a person could read the whole screen, tick
-  // the box and sign, and never meet the 2 % that going in and out of ANTHROPIC
-  // hands its issuer. The two costs are split into two sentences ON PURPOSE,
-  // because they have different owners and different remedies — one is a number
-  // a single key sets and has already raised, the other is the day's
-  // liquidity. SPYx sits beside ANTHROPIC in both, because without it the reader
-  // has no way to tell "this is what tokenised stocks cost" from "this is what
-  // THIS token costs", and the honest answer is the second.
+  // GENERATED FROM THE LEGS ON SCREEN, WHICH IS THE WHOLE CHANGE. These three
+  // paragraphs used to name SPYx and ANTHROPIC in prose, quote their two fees
+  // as literals and compare their two round trips against each other. Every
+  // word of that was true while the basket was frozen at those two, and every
+  // word of it became a description of somebody else's basket the moment the
+  // owner could pick his own. The fee now comes from each chosen leg's own
+  // mint reading with the epoch it was read in; the round trip comes from the
+  // 2026-09-20 simulation where one exists, and a leg nobody measured is called
+  // unmeasured rather than handed a neighbour's number.
   //
-  // EVERY FIGURE BELOW IS A MEASUREMENT, NOT A CONSTANT OF THE CODE, so each one
-  // carries the day it was read and re-reading it is the only way to change it.
-  // Read on mainnet 2026-09-20, epoch 1039, slot 448864409:
-  //  * the transfer fees, from the mints' own TransferFeeConfig — ANTHROPIC
-  //    older{epoch 1032, 50 bps} newer{epoch 1039, 100 bps}, maximum_fee u64::MAX
-  //    so nothing caps it, active 100 bps in the epoch the cluster is in; SPYx
-  //    carries no TransferFeeConfig extension at all. THE COPY CLAIMS ONE RAISE,
-  //    NOT TWO: a TransferFeeConfig holds exactly two entries, older and newer,
-  //    so 50 -> 100 is the only change this mint can be read to have made. An
-  //    earlier 0 -> 50 may well have happened and is NOT on the account, so it is
-  //    not said here.
-  //  * the round trips, from SIMULATED round trips on mainnet: unsigned
-  //    transactions through simulateTransaction, USDC -> stock -> USDC, with
-  //    the sell chained on the REAL credit the buy returned and not on the
-  //    quote. Epoch 1039, n=7. ANTHROPIC 2.4 %, range 2.24-2.63 %. Of that,
-  //    199 bps is STRUCTURAL -- the mint's 1 % charged once going in and once
-  //    coming out, which is 1 - 0.99^2 and NOT "2 x 1 %" -- and the remaining
-  //    25-64 bps is venue spread and impact, which moved by 36 bps in thirteen
-  //    minutes. SPYx on the same harness: 1.1-1.8 BASIS POINTS.
-  //
-  //    THESE ARE THE CLOSED FIGURES AND THE COPY QUOTES NO OTHER. Two earlier
-  //    readings are gone. 0.60 / 0.57 / 1.26 % for ANTHROPIC at $5 / $25 / $100
-  //    carried a size-dependence claim ("it gets worse as the buy gets bigger,
-  //    because its pool is small") that is not reproducible from anything in
-  //    this repository and whose own middle point fell as the buy grew. And
-  //    SPYx 0.01 % / ANTHROPIC 0.41-0.44 %, from keyless Jupiter quotes, was
-  //    written before the measurement finished: it priced the sell off the
-  //    quote instead of off the credit the buy actually returned, and the
-  //    closed harness reads the same round trip at 2.24-2.63 %. THE COST DOES
-  //    NOT SHRINK BY BUYING SMALLER -- it is a fee on every transfer, not
-  //    slippage, and it is charged again on every rebalance -- so no sentence
-  //    below offers a smaller buy as a way out of it. The pool's size is
-  //    argued where it IS measured: thinPool, from the pool account's own
-  //    USDC reserve.
-  //
-  // WHEN THE FEE ROSE, which the copy has to get right because it is the proof
-  // that the key is in use NOW. TransferFeeConfig's newer entry starts at epoch
-  // 1039 and the read at slot 448864409 was inside 1039: mainnet epochs are
-  // 432,000 slots, so 1039 began at slot 448,848,000 and the read was 16,409
-  // slots in -- about 1.8 hours at 400 ms a slot. solana-core's product.ts
-  // records the other side of the same day: read on 2026-09-20 in epoch 1038,
-  // the rise to 100 bps was still SCHEDULED. So the epoch turned over on
-  // 2026-09-20 and the fee rose HOURS before these words, not days. The older
-  // entry starts at epoch 1032, about seven epochs back, so 0.5 % had held for
-  // roughly two weeks.
+  // THE SIMULATION AND ITS SCOPE live at ROUND_TRIPS above, with the two dead
+  // readings it replaced named there so neither comes back.
   costTitle: "What this costs you, and who decides it",
-  issuerCost:
-    "ANTHROPIC's issuer charges 1 % of every transfer of it: once when your vault buys it, and once when it leaves. Going in and back out therefore gives up 1.99 % before the market is involved at all — not quite two, because the second 1 % is taken from what the first one left. Buying in smaller pieces does not make it smaller: it is a fee on each transfer, not a price that moves with the size of the order, and every later buy pays it again. That figure belongs to the issuer — not to SaverFi and not to Solana — and the issuer moves it: it was 0.5 % for about two weeks, and it became 1 % when the current epoch began, hours before this was written on 20 September 2026. SPYx charges nothing to transfer, and nobody can make it: its mint carries no fee setting at all, and no key with the power to add one.",
+  /** What the issuers charge to move the chosen stocks: compounded over a round trip, never doubled, and never escapable by buying smaller. */
+  issuerCost: (legs: readonly SignedLeg[]): string => issuerCostParagraph(legs),
   /**
-   * THE LIMIT THE NEXT RAISE CROSSES, which no sentence said while two of them
-   * told the owner the issuer moves this number and had just moved it.
+   * THE LIMIT THE NEXT RAISE CROSSES, against the fees THIS basket carries.
    *
-   * The keeper admits a leg only while `fee.bps <= MAX_LEG_FEE_BPS`
-   * (invest-decision.ts gates on `fee.bps > MAX_LEG_FEE_BPS`, strictly greater),
-   * and ANTHROPIC's active fee is EXACTLY that limit — admitted with no margin
-   * at all. One more raise by the single key described below, and the refusal is
-   * all-or-nothing: the whole basket, SPYx included, and the SOL conversion with
-   * it. `max` is MAX_LEG_FEE_BPS as a percentage, read from the keeper's own
-   * constant by vault-copy.test.ts so this sentence cannot drift from the gate.
+   * The keeper admits a leg while `fee.bps <= MAX_LEG_FEE_BPS` (invest-decision.ts
+   * gates on `>`, strictly greater), so a leg sitting exactly on the limit is
+   * admitted with no margin at all — which is every PreStock's position today.
+   * `max` is MAX_LEG_FEE_BPS as a percentage, held to the keeper's own constant
+   * by vault-copy.test.ts so this sentence cannot drift from the gate.
    */
-  feeCeiling: (max: string): string =>
-    `There is a limit built into SaverFi: the keeper will not buy a stock that charges more than ${max} to transfer. ANTHROPIC sits exactly on that limit today, so if that issuer raises the fee once more, the vault stops buying the whole basket — SPYx along with it — and stops converting your SOL at all, until the basket itself is changed. Nothing is lost when that happens; the saving simply stops until someone acts.`,
-  marketCost:
-    "Then there is what the market charges on top, which depends on the day's liquidity. Buying a stock and selling it straight back was measured on 20 September 2026 on Solana itself — seven round trips, built and run but never signed, each sale priced on what its purchase actually delivered rather than on a quote. ANTHROPIC's round trip cost 2.4 % all told, between 2.24 % and 2.63 %. The issuer's 1.99 % is the part of that which never moves; the rest, between 0.25 % and 0.64 %, is the market, and it moved by 0.36 % within thirteen minutes that day. SPYx's round trip, measured the same way, cost between 0.011 % and 0.018 %. Another day reads differently.",
-  costTogether:
-    "So going in and out of ANTHROPIC cost 2.4 % on the day it was measured: 1.99 % of that is the issuer's fee, charged whatever the market does, and the remainder is the market. SPYx cost under two hundredths of one percent the same day — more than a hundred times less. Both are tokenised stocks on the same chain, bought the same way, held in the same vault. The difference is these two issuers and these two pools — not Solana, and not SaverFi.",
+  feeCeiling: (legs: readonly SignedLeg[], max: string = ratePercent(MAX_LEG_FEE_BPS)): string => feeCeilingParagraph(legs, max),
+  /** What a round trip actually cost, where anybody measured one, and silence where nobody did. */
+  marketCost: (legs: readonly SignedLeg[]): string => marketCostParagraph(legs),
+  /**
+   * WHAT SAVERFI CHECKS AND WHAT IT DOES NOT, which no sentence on this card
+   * said while three of them described the checks.
+   *
+   * The depth gate measures DEPTH AT THE SIZE OF THE TURN and has no opinion
+   * about price; Pyth anchors the SOL hop alone; the stock legs' only price
+   * bound is the owner's own floor, and that floor is signed once and decays.
+   * `marginUnderMarket` is LEG_FLOOR_MARGIN_BPS as a percentage, from the
+   * constant the build route actually derives the floor with.
+   */
+  defencesLimits: (legs: readonly SignedLeg[], marginUnderMarket: string): string => defencesLimitsParagraph(legs, marginUnderMarket),
 
   // ── WHETHER IT CAN BUY AT ALL TODAY ────────────────────────────────────────
   //
@@ -389,76 +782,102 @@ export const INVEST_COPY = {
   ceilingUnknown: (symbols: string): string =>
     `SaverFi has not counted what ${symbols} holds where a buy would actually land, so it cannot tell you the largest Most per buy this basket can use. The figure it does have for that market is the venue's whole book, which no single buy reaches, and dividing that would give you a ceiling that is too high — the one direction this number must never be wrong in. Keep Most per buy small, or choose an asset whose route has been counted.`,
 
-  // ── THE ISSUERS' POWERS ────────────────────────────────────────────────────
+  // ── THE ISSUERS' POWERS, OVER THE STOCKS HE ACTUALLY PICKED ────────────────
   //
-  // The notice and the box the owner TICKS both named SPYx only — and SPYx is
-  // the safer of the two on every count. He was acknowledging the wrong token.
-  // Read on mainnet 2026-09-20, epoch 1039, slot 448864409:
-  //  * ANTHROPIC (Pren1Fv…Lkhw): mint, freeze, pausable, transfer-fee config,
-  //    withdraw-withheld, transfer hook, confidential transfer and the permanent
-  //    delegate are ALL WV9PJN7XTmTLVwbutCLFxp8TyePee6Xq5mRq6Fti5Wc. One key.
-  //  * SPYx (XsoCS1…BDF2W): mint 7pt9tkct…, freeze and pausable JDq14BWv…,
-  //    permanent delegate, hook and metadata 5aMNNLQJ…. Three separate keys, and
-  //    no transfer fee to raise.
+  // THESE THREE NAMED TWO STOCKS BY HAND AND CANNOT ANY MORE. The notice, the
+  // powers paragraph and the box he TICKS all described SPYx and ANTHROPIC:
+  // one key over ANTHROPIC, three separate keys over SPYx, and a stop that
+  // takes "SPYx along with it". With a basket of his own choosing every one of
+  // those clauses could be about a stock he never ticked — and the box he ticks
+  // would have him acknowledging powers over something he does not hold while
+  // saying nothing about the ones he does.
   //
-  // THE SECOND SWITCH, which no sentence said while the fee had three of its
-  // own. Both mints carry Token-2022's TRANSFER HOOK extension PRESENT BUT
-  // EMPTY — the authority is set and the program id is the default key, which
-  // invest-decision.ts's decodeMintFacts reads as `transferHook: null` and its
-  // own comment calls "the issuer keeping the option open rather than a hook".
-  // legAdmissionDecision refuses any leg whose transferHook is NOT null,
-  // because sip-vault's invest builds swap_v2 with the route's accounts and
-  // nothing else, and a real hook needs its own accounts on every transfer. So
-  // filling that field in is a STOP, not a cost, and by the same all-or-nothing
-  // doctrine as the fee ceiling it takes the whole basket — SPYx and the SOL
-  // conversion included. BOTH LEGS CARRY THAT FIELD AND BOTH AUTHORITIES ARE
-  // SET: on ANTHROPIC the key that can fill it is the same WV9PJ… that raised
-  // the fee hours earlier; on SPYx it is 5aMNNLQJ…, which is not the key that
-  // can freeze or pause SPYx and cannot put a fee on it at all. So the STOP is
-  // symmetric and the FEE is not, and neither side of that may be overstated —
-  // nothing read here measures which key is likelier to use it.
-  // INVEST_COPY.hookSwitch is the sentence that says so, and
-  // vault-copy.test.ts pins it to the keeper's CODE — the null-program-id read
-  // and the `facts.transferHook !== null` refusal — never to its prose.
-  freezeNotice:
-    "Both stocks are Token-2022 tokens, and each issuer keeps powers over its own that SaverFi cannot take away. An issuer can freeze your vault's account for that stock, pause every transfer of it, and move it out of your vault through a permanent delegate. If any of that happens, withdrawing that stock can fail or find less than you hold. USDC's issuer can freeze USDC accounts too. Withdrawing SOL depends on no issuer at all.",
-  issuerKeys:
-    "The two are not the same risk. On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used to raise the fee, from 0.5 % to 1 %, on the day this page was written. On SPYx those powers sit with three separate keys and there is no fee to raise. This deserves more of your attention than the price does: it is not the market moving against you, it is one person's decision.",
+  // WHAT THEY ARE BUILT FROM: PRESTOCKS_POWERS and XSTOCKS_POWERS in
+  // solana-core's product.ts, each carrying the day it was read and the read
+  // that produced it, plus HOOK_FIELD above for the one fact those two do not
+  // hold. Nothing here is a literal about a particular stock except the
+  // readings themselves, and those are dated.
+  freezeNotice: (legs: readonly SignedLeg[]): string => freezeNoticeParagraph(legs),
+  /** Which powers the actual issuers of the actual chosen legs hold — one key for a PreStock, and for an xStock no fee authority at all. */
+  issuerKeys: (legs: readonly SignedLeg[]): string => issuerPowersParagraph(legs),
   /**
-   * THE SWITCH THAT STOPS THE BUYING, held on ANTHROPIC by the same key as the
-   * fee — and held on SPYx by a key of its own.
+   * THE SWITCH THAT STOPS THE BUYING, on the legs chosen, under the keys that
+   * hold it.
    *
    * Said in the owner's terms on purpose: what he is being asked to accept is
-   * not a fee that might rise by some amount, it is that a stranger can stop his
-   * pension buying anything at all, on a day of that stranger's choosing. Every
-   * clause is a fact of the arrangement rather than of today's number, so the
-   * sentence survives the fee moving again: the field is empty TODAY, the
-   * refusal is what SaverFi does whenever it is not.
+   * not a fee that might rise by some amount, it is that a stranger can stop
+   * his pension buying anything at all, on a day of that stranger's choosing.
+   * Every clause is a fact of the arrangement rather than of today's number, so
+   * it survives a fee moving again: the field is empty TODAY, and the refusal
+   * is what SaverFi does whenever it is not.
    *
-   * THE STOP SPEAKS ONLY FOR ITSELF. This ended on a bare "Nothing you have
-   * already saved is lost or moved.", two paragraphs under freezeNotice's
-   * permanent delegate and inside the SAME box, where standing alone it reads as
-   * a blanket promise that nothing can ever be taken — which that box denies
-   * three lines earlier. It now says what it always meant, that the STOP takes
-   * nothing, and points back at the powers that do reach the holding.
+   * THE STOP SPEAKS ONLY FOR ITSELF. It is said that the stop takes nothing,
+   * and the powers that DO reach the holding are pointed back at, because this
+   * paragraph sits in the same box as the permanent delegate and a bare
+   * "nothing is lost" there reads as a promise that box denies three lines up.
    *
-   * AND THE STOP IS NOT ANTHROPIC'S ALONE. The mainnet read recorded above gives
-   * SPYx a transfer-hook authority of its own (5aMNNLQJ…), so SPYx's empty field
-   * can be filled in by ITS key exactly as ANTHROPIC's can by WV9PJ…. Saying
-   * only "a different key holds it" and then closing on "one stranger's key"
-   * left the reader finishing the paragraph believing the stop belonged to
-   * ANTHROPIC. Both legs carry it. The asymmetry that IS on the accounts is the
-   * FEE — SPYx's mint has no TransferFeeConfig and no authority for one, while
-   * ANTHROPIC's fee key is the same key that freezes, pauses and moves its stock
-   * — and nothing here measures which key is likelier to act, so nothing here
-   * says.
+   * AND NEITHER SIDE OF THE ASYMMETRY IS OVERSTATED. Both groups carry the
+   * field and both authorities are set, so the STOP is symmetric; only the FEE
+   * is not. Nothing anybody read measures which key is likelier to be used, so
+   * no sentence weighs them.
    */
-  hookSwitch:
-    "The same key holds a second switch, and this one is not about money at all: it stops the buying. Both stocks carry a Token-2022 field where the issuer may name a program that has to run on every transfer of it; on both it is empty today, which is the issuer keeping the option rather than using it. SaverFi will not buy a stock whose field has been filled in, because it cannot carry what a program named there would demand. So on the day ANTHROPIC's key writes one in, the vault stops buying the whole basket — SPYx along with it — and stops converting your SOL, until the basket itself is changed. It applies from the moment it is written: the next buy is the one that stops. That stop takes nothing from you: what you have already saved is neither lost nor moved by it. The freeze, the pause and the permanent delegate described above are separate powers, and those can reach what your vault already holds. SPYx is not exempt from this: it carries the same empty field, and the key over that field — not the key that freezes or pauses SPYx — is set exactly as ANTHROPIC's is, so either issuer can fill its own field in and stop the whole basket the same way. Nothing here measures which of them is likelier to. The asymmetry that can be proved is the fee, not the stop: SPYx's mint carries no fee setting at all and no key able to add one, while on ANTHROPIC the key that would write the hook in is the same key that sets the fee and can freeze, pause and move the stock. So what you are accepting is not only a fee that may rise: it is that either stranger's key can stop your pension buying anything at all, on any day he chooses.",
-  freezeShort:
-    "Each issuer can freeze, pause or move its own stock, even inside your vault, and on ANTHROPIC one key holds all of those powers. Withdrawing SOL does not depend on any of them.",
-  acknowledge:
-    "I understand each issuer can freeze, pause or move its own stock out of my vault, that one key holds all of those powers over ANTHROPIC, and that the same key can stop my vault buying anything at all",
+  hookSwitch: (legs: readonly SignedLeg[]): string => hookSwitchParagraph(legs),
+  /**
+   * The short form, for screens that are not the policy form. It takes the legs
+   * when the caller knows them and speaks generally when it does not — the
+   * withdraw screen lists whatever the vault holds, which is not the same set
+   * as the basket being signed.
+   */
+  freezeShort: (legs: readonly SignedLeg[] = []): string =>
+    "Each issuer can freeze, pause or move its own stock, even inside your vault" +
+    (inGroup(legs, "prestock").length === 0 ? "" : `, and on ${symbolsOf(inGroup(legs, "prestock"))} one key holds all of those powers`) +
+    ". Withdrawing SOL does not depend on any of them.",
+  /** The box he ticks, naming the powers HIS legs are subject to and no others. */
+  acknowledge: (legs: readonly SignedLeg[]): string => acknowledgeSentence(legs),
+
+  // ── THE FLOOR HE SIGNED ONCE, AND THE MARKET THAT WALKED AWAY FROM IT ──────
+  //
+  // WHY THIS BLOCK EXISTS. min_out_rate_wad is derived at signing time from one
+  // pool's mid, LEG_FLOOR_MARGIN_BPS under it, and then it stands until the
+  // owner signs again. The keeper's own comment is blunt about what that means:
+  // the floor "DECAYS ... it clears itself as the market rises (a stale floor
+  // stops binding) and blocks every honest buy as the market falls. A floor
+  // that always passes is not a defence."
+  //
+  // THE SCREEN ALREADY SAID ONE HALF OF THAT AND NOT THE OTHER. A floor the
+  // market has PASSED is visible: the badge flips and `marketPast` explains it.
+  // A floor the market has left far behind is invisible, and it is the one that
+  // costs money quietly — the number is still there, still signed, and would
+  // let a buy through at a price nobody would accept today.
+  //
+  // WHAT IT MAY NOT SAY. Not that the drift is dangerous by some threshold of
+  // its own invention, and not when it was signed: THE POLICY ACCOUNT RECORDS
+  // NO SIGNING DATE (state.rs InvestmentPolicy has no timestamp), so the date
+  // is passed in when a caller genuinely knows one and the sentence says
+  // plainly that it is unknown when nobody does. The drift itself is arithmetic
+  // over two numbers on the page: the floor the policy carries and the rate the
+  // screen just read.
+  floorDriftTitle: "The limits you signed do not follow the market",
+  /** The head of the block. `signedOn` is null whenever nobody knows the day, and that is said rather than guessed. */
+  floorDriftSigned: (signedOn: string | null): string =>
+    signedOn === null
+      ? "You signed these limits once and they have stood unchanged since. SaverFi cannot tell you which day that was — the policy on Solana does not record one — so what it shows instead is how far today's prices have moved away from them."
+      : `You signed these limits on ${signedOn} and they have stood unchanged since. Today's prices have not.`,
+  /** A leg whose limit the market has left far below: it still permits a buy nobody would make today. */
+  legFloorSlack: (symbol: string, limit: string, today: string, drift: string): string =>
+    `${symbol} may still be bought at up to ${limit}, while the market is at ${today} — ${drift} above today's price. That limit was set just under the price of the day it was signed, and it has not moved since, so it is no longer stopping much. Sign again to set it from today's prices.`,
+  /** A leg whose limit the market has passed: the all-or-nothing refusal, said as what it stops. */
+  legFloorPassed: (symbol: string, limit: string, today: string): string =>
+    `${symbol} is limited to ${limit} and the market has passed it at ${today}: nothing is bought, and no SOL is converted toward any of it, until you sign again with today's prices.`,
+  /** The SOL floor the market has left far above: your SOL may be sold far under what it is worth. */
+  solFloorSlack: (floor: string, today: string, drift: string): string =>
+    `Your SOL may still be sold for as little as ${floor} per SOL, while it is worth ${today} — ${drift} under today's price. That floor was set just under the price of the day it was signed and has not moved since. Sign again to set it from today's prices.`,
+  /** The SOL floor the market has fallen through: conversion stops, and with it the buying. */
+  solFloorPassed: (floor: string, today: string): string =>
+    `Your SOL floor is ${floor} per SOL and SOL is at ${today}, under it: no SOL is converted, so nothing is bought, until you sign again with today's prices.`,
+  /** Every floor still sits where it was signed, within the margin it was signed at. */
+  floorsInStep: "Every limit still sits close to the prices just read.",
+
   sign: "Sign investment policy",
   signing: "Signing…",
   signed: "Policy signed",

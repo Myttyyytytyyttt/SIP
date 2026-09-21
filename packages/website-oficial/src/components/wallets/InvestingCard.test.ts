@@ -238,16 +238,21 @@ describe("InvestingCard", () => {
     expect(html).not.toContain("about $380 for the whole buy");
     expect(html).not.toContain("Set it to about $380 or less");
 
-    // WHAT THE POSITION COSTS, with each number's owner named: the issuer sets
-    // one and has moved it twice, the day's liquidity sets the other. SPYx is
-    // beside it as the proof that this is these tokens, not Solana.
+    // ── WHAT THE POSITION COSTS, GENERATED FROM THE TICKED LEGS ──────────────
+    //
+    // EVERY SENTENCE BELOW IS NOW BUILT FROM THE BASKET, not written for one.
+    // The card opens on SPYx and ANTHROPIC, so these are the words THAT basket
+    // produces; vault-copy.test.ts holds the same builders against four other
+    // baskets and asserts the property this file cannot: that no paragraph ever
+    // names a stock the owner did not choose.
     expect(html).toContain("ANTHROPIC&#x27;s issuer charges 1 % of every transfer of it: once when your vault buys it, and once when it leaves.");
     // COMPOUNDED, NOT DOUBLED: 1 - 0.99^2 is 1.99 %, and "about 2 %" rounded
-    // the owner's way past the only arithmetic on this card he could check.
-    expect(html).toContain("gives up 1.99 % before the market is involved at all — not quite two, because the second 1 % is taken from what the first one left.");
+    // the owner's way past the only arithmetic on this card he could check. It
+    // is computed from the leg's own fee now, so a different fee reads right.
+    expect(html).toContain("Going in and back out therefore gives up 1.99 % before the market is involved at all — not quite twice the fee, because the second charge is taken from what the first one left.");
     // A FEE, NOT SLIPPAGE. Nothing here may leave him thinking a smaller buy
     // escapes it: it is charged on every transfer, and again on every later one.
-    expect(html).toContain("Buying in smaller pieces does not make it smaller");
+    expect(html).toContain("Buying in smaller pieces does not make that smaller");
     expect(html).toContain("every later buy pays it again");
     expect(html).toContain("no fee setting at all, and no key with the power to add one");
     // ONE RAISE, NOT TWO: the mint's TransferFeeConfig carries only older{1032,
@@ -258,56 +263,55 @@ describe("InvestingCard", () => {
     // 448,848,000), and product.ts read the same calendar day in epoch 1038 with
     // the rise still scheduled. "A few days ago" understated the one thing the
     // sentence exists to prove: that this key is in use now.
-    expect(html).toContain("it was 0.5 % for about two weeks, and it became 1 % when the current epoch began, hours before this was written on 20 September 2026.");
+    expect(html).toContain("ANTHROPIC&#x27;s was 0.5 % for about two weeks and became 1 % when the current epoch began, hours before this was written on 20 September 2026.");
     expect(html).not.toContain("a few days ago");
     expect(html).not.toContain("it has been nothing, then 0.5 %");
     // THE CLOSED MEASUREMENT, and no tighter than it was read: simulated round
     // trips on mainnet, the sell chained on the credit the buy really returned
-    // rather than on a quote. ANTHROPIC 2.4 % (2.24-2.63 %), of which 1.99 % is
-    // the fee and 0.25-0.64 % the market; SPYx 1.1-1.8 basis points. The two
-    // earlier readings -- the 0.60/0.57/1.26 % size curve, and the Jupiter
-    // quotes that read this round trip at 0.41-0.44 % before the measurement
-    // finished -- are gone from every sentence, not only from their own.
+    // rather than on a quote. The two earlier readings -- the 0.60/0.57/1.26 %
+    // size curve, and the Jupiter quotes that read this round trip at
+    // 0.41-0.44 % before the measurement finished -- are gone from every
+    // sentence, not only from their own.
     expect(html).toContain("measured on 20 September 2026 on Solana itself — seven round trips, built and run but never signed, each sale priced on what its purchase actually delivered rather than on a quote.");
     expect(html).toContain("ANTHROPIC&#x27;s round trip cost 2.4 % all told, between 2.24 % and 2.63 %.");
     expect(html).toContain("the rest, between 0.25 % and 0.64 %, is the market, and it moved by 0.36 % within thirteen minutes that day.");
-    expect(html).toContain("SPYx&#x27;s round trip, measured the same way, cost between 0.011 % and 0.018 %.");
+    expect(html).toContain("SPYx&#x27;s round trip cost between 0.011 % and 0.018 %.");
     expect(html).not.toContain("1.3 % at $100");
     expect(html).not.toContain("because its pool is small");
-    // THE OLD CLAIM IN ITS OLD SHAPE, not a bare number: 2.4 - 1.99 = 0.41 is
-    // the market's own central share now, so banning the digits alone would go
-    // red on a future editor writing something true. 0.44 % came only from the
-    // dead reading, so it stays banned outright.
     expect(html).not.toMatch(/0\.41 %\s*(?:and|to|[-–—])\s*0\.44 %/);
     expect(html).not.toContain("half a percent");
-    expect(html).toContain("cost 2.4 % on the day it was measured: 1.99 % of that is the issuer&#x27;s fee, charged whatever the market does");
-    expect(html).toContain("SPYx cost under two hundredths of one percent the same day — more than a hundred times less.");
+    expect(html).toContain("Another day reads differently, and where two of these cost differently it is their issuers and their markets that differ — not Solana, and not SaverFi.");
 
-    // THE LIMIT THE NEXT RAISE CROSSES. Two sentences tell him the issuer moves
-    // this fee and just did; none told him what the next move costs. ANTHROPIC
-    // sits exactly on MAX_LEG_FEE_BPS, and the keeper's refusal is all-or-
-    // nothing -- SPYx and the SOL conversion go down with it.
+    // THE LIMIT THE NEXT RAISE CROSSES, and it names the whole basket that goes
+    // down with it. "SPYx along with it" was true of exactly one basket; this
+    // is the same doctrine said of the legs on screen.
     expect(html).toContain("the keeper will not buy a stock that charges more than 1 % to transfer");
-    expect(html).toContain("ANTHROPIC sits exactly on that limit today");
-    expect(html).toContain("the vault stops buying the whole basket — SPYx along with it — and stops converting your SOL at all");
-    expect(html).toContain("The difference is these two issuers and these two pools — not Solana, and not SaverFi.");
+    expect(html).toContain("ANTHROPIC sits exactly on that limit today, with no margin whatsoever");
+    expect(html).toContain("the vault stops buying the whole basket — SPYx and ANTHROPIC, every one of them — and stops converting your SOL at all");
 
-    // THE ISSUER RISK HE TICKS A BOX ABOUT. It named SPYx only, which is the
-    // safer leg on every count — he was acknowledging the wrong token.
+    // WHAT SAVERFI DOES NOT DO, which nothing on this card said while three
+    // paragraphs described what it does. The depth gate is a size check; Pyth
+    // covers the SOL hop only; the stock legs' one price bound is a floor the
+    // owner signs once and which decays from the moment he signs it.
+    expect(html).toContain("THAT IS A CHECK ON SIZE, NOT ON PRICE");
+    expect(html).toContain("the SOL price Pyth publishes, which is the only number in a buy that does not come from the venue being traded against");
+    expect(html).toContain("SPYx and ANTHROPIC have no such anchor today");
+    expect(html).toContain("it is taken from one pool&#x27;s price at the moment you sign, 5 % under it, and it does not follow the market afterwards");
+    expect(html).not.toMatch(/fair price|best price|guarantee/i);
+
+    // THE ISSUER RISK HE TICKS A BOX ABOUT, enumerated per issuer of per leg.
     expect(html).toContain("move it out of your vault through a permanent delegate");
-    expect(html).toContain(
-      "On ANTHROPIC a single key holds all of it at once — minting, freezing, pausing, the transfer fee, the transfer hook and the permanent delegate — and that key has already been used to raise the fee, from 0.5 % to 1 %, on the day this page was written.",
-    );
-    expect(html).toContain("On SPYx those powers sit with three separate keys and there is no fee to raise.");
+    expect(html).toContain("ANTHROPIC is a PreStock, and one key — WV9P…i5Wc — is the mint authority, the freeze authority, the transfer-fee authority and the permanent delegate of it.");
+    expect(html).toContain("SPYx is an xStock: its mint carries no transfer-fee setting at all, and no key anywhere can add one");
+    expect(html).toContain("That is about the fee and nothing else");
 
-    // THE SECOND SWITCH THE SAME KEY HOLDS, which the card never mentioned
-    // while three of its sentences discussed the first. A filled-in transfer
-    // hook is refused by the keeper outright, and the refusal is all-or-
-    // nothing: SPYx and the SOL conversion stop with it.
-    expect(html).toContain("The same key holds a second switch, and this one is not about money at all: it stops the buying.");
-    expect(html).toContain("on both it is empty today, which is the issuer keeping the option rather than using it.");
+    // THE SECOND SWITCH THE SAME KEY HOLDS. A filled-in transfer hook is
+    // refused by the keeper outright, and the refusal is all-or-nothing: every
+    // other leg and the SOL conversion stop with it.
+    expect(html).toContain("There is a second switch, and it is not about money at all: it stops the buying.");
+    expect(html).toContain("On ANTHROPIC and SPYx that field was empty when SaverFi read it (ANTHROPIC on 2026-09-21 and SPYx on 2026-09-20)");
     expect(html).toContain("SaverFi will not buy a stock whose field has been filled in");
-    expect(html).toContain("the vault stops buying the whole basket — SPYx along with it — and stops converting your SOL, until the basket itself is changed.");
+    expect(html).toContain("the vault stops buying the whole basket — SPYx and ANTHROPIC, every one of them — and stops converting your SOL, until the basket itself is changed.");
     expect(html).toContain("It applies from the moment it is written: the next buy is the one that stops.");
     // THE STOP SPEAKS FOR ITSELF. A bare "Nothing you have already saved is
     // lost or moved." sat two paragraphs under the permanent delegate IN THIS
@@ -315,21 +319,20 @@ describe("InvestingCard", () => {
     expect(html).toContain("That stop takes nothing from you: what you have already saved is neither lost nor moved by it.");
     expect(html).toContain("The freeze, the pause and the permanent delegate described above are separate powers, and those can reach what your vault already holds.");
     expect(html).not.toContain("Nothing you have already saved is lost or moved.");
-    // BOTH LEGS CARRY THE STOP; ONLY THE FEE IS ASYMMETRIC. SPYx has a live
-    // hook authority of its own, so the old pairing of "a different key holds
-    // it" with a close on "one stranger's key" read as ANTHROPIC's risk alone.
+    // BOTH LEGS CARRY THE STOP; ONLY THE FEE IS ASYMMETRIC, and neither side is
+    // weighed, because nothing anybody read measures which key is likelier.
     expect(html).toContain("either issuer can fill its own field in and stop the whole basket the same way");
     expect(html).toContain("The asymmetry that can be proved is the fee, not the stop");
-    expect(html).toContain("SPYx&#x27;s mint carries no fee setting at all and no key able to add one");
+    expect(html).toContain("SPYx carries no fee setting at all and no key able to add one, while ANTHROPIC has one its issuer can raise");
     expect(html).toContain("Nothing here measures which of them is likelier to.");
-    expect(html).toContain("it is that either stranger&#x27;s key can stop your pension buying anything at all, on any day he chooses.");
+    expect(html).toContain("it is that a stranger&#x27;s key can stop your pension buying anything at all, on any day he chooses.");
     expect(html).not.toContain("SPYx carries the same empty field, a different key holds it");
-    expect(html).not.toContain("one stranger&#x27;s key can stop your pension");
 
     expect(html).toContain(
-      "I understand each issuer can freeze, pause or move its own stock out of my vault, that one key holds all of those powers over ANTHROPIC, and that the same key can stop my vault buying anything at all",
+      "I understand each issuer can freeze, pause or move its own stock out of my vault, that one key holds all of those powers over ANTHROPIC, and that any of these issuers can stop my vault buying anything at all",
     );
     expect(html).not.toContain("I understand the issuer can freeze, pause or move SPYx");
+
     const box = html.match(/<input[^>]*name="invest-acknowledge"[^>]*>/)?.[0] ?? "";
     expect(box).toContain('type="checkbox"');
     expect(box).not.toContain("checked");
@@ -586,6 +589,11 @@ describe("InvestingCard", () => {
     expect(buttons("Sign again with today's prices")).toHaveLength(1);
     expect(buttons("Pause investing")).toHaveLength(1);
     expect(buttons("Sign investment policy")).toHaveLength(0);
+    // AND NOTHING ABOUT DRIFT, because these floors are exactly where they were
+    // signed: 90.03 against 100.04 is the 10 % convert margin, and both legs sit
+    // 5 % under today. A notice that fired here would fire on every policy the
+    // moment it was signed, which is a notice nobody would read.
+    expect(html).not.toContain("The limits you signed do not follow the market");
   });
 
   it("a SOL price under the signed floor says buying waits until signing again", () => {
@@ -593,6 +601,41 @@ describe("InvestingCard", () => {
     const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: POLICY }, prices: fallen }) }));
     expect(html).toContain("The market moved past a floor: buying waits until you sign again with today&#x27;s prices.");
     expect(html).not.toContain("Floors below market");
+    // AND WHICH FLOOR, AND WHAT IT STOPS. The badge says a floor has been
+    // passed; this says it was the SOL one, at what price, and that the
+    // conversion stopping stops the buying too.
+    expect(html).toContain("The limits you signed do not follow the market");
+    expect(html).toContain("Your SOL floor is $90.03 per SOL and SOL is at $80.00, under it: no SOL is converted, so nothing is bought, until you sign again with today&#x27;s prices.");
+  });
+
+  /**
+   * THE HALF THAT WAS INVISIBLE. A floor the market has PASSED is loud: the
+   * badge flips and buying stops. A floor the market has walked away FROM is
+   * silent — still signed, still enforced, and now permitting a fill at a price
+   * nobody would take today. The keeper's own comment on min_out_rate_wad says
+   * both halves ("it clears itself as the market rises ... and blocks every
+   * honest buy as the market falls"), and only one of them was on the screen.
+   */
+  it("says how far a signed floor has drifted from the market, and that the day it was signed is not knowable", () => {
+    // SPYx's price fell to a third since signing — min_out_rate_wad is units
+    // per USDC, so a bigger wad is a cheaper stock — and the stored floor still
+    // lets the vault pay $801.80 per 100,000,000 raw units for something the
+    // market is selling at $253.90.
+    const walked = { ...PRICES!, legs: PRICES!.legs.map((leg) => (leg.mint === SPYX_MINT ? { ...leg, wad: "393850950391912707" } : leg)) };
+    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: POLICY }, prices: walked }) }));
+    expect(html).toContain("The limits you signed do not follow the market");
+    // THE DRIFT IS ARITHMETIC OVER TWO NUMBERS ON THE PAGE — the wad the policy
+    // carries and the wad just read — and it is quoted against the floor, which
+    // is what the sentence names.
+    expect(html).toContain("SPYx may still be bought at up to $801.80, while the market is at $253.90 — 215.78 % above today&#x27;s price");
+    expect(html).toContain("it is no longer stopping much");
+    expect(html).toContain("Sign again to set it from today&#x27;s prices.");
+    // THE DATE IS NOT INVENTED. InvestmentPolicy carries no timestamp, so the
+    // page says it cannot date the signature rather than implying freshness.
+    expect(html).toContain("SaverFi cannot tell you which day that was — the policy on Solana does not record one");
+    // AND THE LEG THAT HAS NOT DRIFTED IS NOT LISTED: ANTHROPIC still sits 5 %
+    // under its own market, which is where it was signed.
+    expect(html).not.toContain("ANTHROPIC may still be bought");
   });
 
   it("Pause asks for the policy on screen to be signed again with investing off, and is offered with no prices on screen; it never hands the flow the click event", async () => {

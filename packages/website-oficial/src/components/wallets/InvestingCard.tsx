@@ -98,10 +98,10 @@ import {
   type PickedLeg,
   type PickedRow,
 } from "@/lib/basket-picker";
-import { todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
+import { floorDrift, todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
 import { floorsState } from "@/lib/live-model";
 import type { InvestPolicyBuildJson, InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
-import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent } from "@/lib/vault-copy";
+import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, signedLegsOf } from "@/lib/vault-copy";
 
 type VaultWrite = ReturnType<typeof useVaultWrite>;
 
@@ -543,6 +543,11 @@ function PolicySetup({
   // SPYx alone.
   const basket = legs === null ? listAnd(chosenAssets.map((asset) => asset.symbol)) : listAnd(legs.map((leg) => `${leg.asset.symbol} at ${ratePercent(leg.weightBps)}`));
   const basketField = legs === null ? chosenAssets.map((asset) => asset.symbol).join(", ") : legs.map((leg) => `${leg.asset.symbol} · ${ratePercent(leg.weightBps)}`).join(", ");
+  // WHAT THE SIGNED PARAGRAPHS ARE WRITTEN FROM: the ticked assets themselves,
+  // with their own fee readings — never a hand-written pair of names. It
+  // follows the TICKS and not the shares, so the issuer's powers and the fee
+  // ceiling are described correctly while a percentage box is still empty.
+  const copyLegs = signedLegsOf(chosenAssets);
   // The whole buy that clears the minimum on every leg: the floor, which is the
   // per-leg minimum multiplied up by the LIGHTEST share and not by the count.
   const purchaseText = capsWindow === null ? formatUsd(DEFAULT_PURCHASE_USDC_RAW) : formatUsd(capsWindow.floorRaw);
@@ -695,16 +700,16 @@ function PolicySetup({
 
         <div className="space-y-1 rounded-md border px-3 py-2 text-xs">
           <div className={LABEL}>{INVEST_COPY.costTitle}</div>
-          <p>{INVEST_COPY.issuerCost}</p>
-          <p>{INVEST_COPY.feeCeiling(ratePercent(MAX_LEG_FEE_BPS))}</p>
-          <p>{INVEST_COPY.marketCost}</p>
-          <p>{INVEST_COPY.costTogether}</p>
+          <p>{INVEST_COPY.issuerCost(copyLegs)}</p>
+          <p>{INVEST_COPY.feeCeiling(copyLegs, ratePercent(MAX_LEG_FEE_BPS))}</p>
+          <p>{INVEST_COPY.marketCost(copyLegs)}</p>
+          <p>{INVEST_COPY.defencesLimits(copyLegs, ratePercent(LEG_FLOOR_MARGIN_BPS))}</p>
         </div>
 
         <div className="space-y-2 rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs">
-          <p>{INVEST_COPY.freezeNotice}</p>
-          <p>{INVEST_COPY.issuerKeys}</p>
-          <p>{INVEST_COPY.hookSwitch}</p>
+          <p>{INVEST_COPY.freezeNotice(copyLegs)}</p>
+          <p>{INVEST_COPY.issuerKeys(copyLegs)}</p>
+          <p>{INVEST_COPY.hookSwitch(copyLegs)}</p>
           <label className="flex items-start gap-2">
             <input
               type="checkbox"
@@ -714,7 +719,7 @@ function PolicySetup({
               onChange={(event) => setAcknowledged(event.target.checked)}
               className="mt-0.5 size-4 shrink-0 accent-primary"
             />
-            <span>{INVEST_COPY.acknowledge}</span>
+            <span>{INVEST_COPY.acknowledge(copyLegs)}</span>
           </label>
         </div>
 
@@ -765,7 +770,7 @@ function PolicySummary({
   const limits = todaysLimits(state.prices);
   // The live rule card reads the same state, so the two cannot disagree about
   // whether a floor has been passed.
-  const { storedConvert, legs, pricesKnown, belowMarket } = floorsState(policy, state.prices);
+  const { storedConvert, liveConvert, legs, pricesKnown, belowMarket } = floorsState(policy, state.prices);
 
   const maxPerCall = rawFrom(policy.maxPerCall) ?? 0n;
   const maxRolling30d = rawFrom(policy.maxRolling30d) ?? 0n;
@@ -773,6 +778,44 @@ function PolicySummary({
   const usdcHeld = state.holdings.status === "exists" ? state.holdings.items.filter((item) => item.mint === policy.inMint).reduce((total, item) => total + (rawFrom(item.amountRaw) ?? 0n), 0n) : null;
   const readiness = usdcHeld === null ? null : investmentReadiness(usdcHeld, policy.legs, minInvestment, maxPerCall);
   const blocked = write.running || write.busyElsewhere || write.unconfirmed;
+  // THE PARAGRAPHS ARE ABOUT THIS POLICY'S LEGS, resolved back to their
+  // catalogue readings. A mint the catalogue does not know is left out rather
+  // than described from nothing.
+  const policyLegs = signedLegsOf(
+    legs.flatMap((leg) => {
+      const asset = catalogueAsset(leg.mint);
+      return asset === null ? [] : [asset];
+    }),
+  );
+
+  // ── HOW FAR EACH SIGNED FLOOR HAS DRIFTED ──────────────────────────────────
+  //
+  // Signed once, from one pool's price, and untouched since. The card already
+  // showed the half that is loud — a floor the market has PASSED stops every
+  // buy and flips the badge — and said nothing about the half that is quiet: a
+  // floor the market has left far behind still permits a fill at a price
+  // nobody would take today. Both are listed here, in the owner's terms,
+  // before the caps and the buttons rather than under them.
+  //
+  // THE DAY HE SIGNED IS NOT KNOWN AND IS NOT GUESSED. InvestmentPolicy carries
+  // no timestamp (solana-program state.rs), so null is passed and the sentence
+  // says so; what IS on the page is the floor and the rate just read, and the
+  // drift is arithmetic over those two.
+  const solDrift = floorDrift(storedConvert, liveConvert, CONVERT_FLOOR_MARGIN_BPS);
+  const driftLines: string[] = [];
+  if (solDrift !== null && storedConvert !== null && liveConvert !== null) {
+    if (solDrift.kind === "passed") driftLines.push(INVEST_COPY.solFloorPassed(formatUsd(usdcRawPerSol(storedConvert)), formatUsd(usdcRawPerSol(liveConvert))));
+    else if (solDrift.kind === "slack")
+      driftLines.push(INVEST_COPY.solFloorSlack(formatUsd(usdcRawPerSol(storedConvert)), formatUsd(usdcRawPerSol(liveConvert)), ratePercent(solDrift.driftBps)));
+  }
+  for (const leg of legs) {
+    const drift = floorDrift(leg.floor, leg.live, LEG_FLOOR_MARGIN_BPS);
+    if (drift === null || leg.floor === null || leg.live === null) continue;
+    const limit = formatUsd(usdcRawPer1e8LegRaw(leg.floor));
+    const today = formatUsd(usdcRawPer1e8LegRaw(leg.live));
+    if (drift.kind === "passed") driftLines.push(INVEST_COPY.legFloorPassed(leg.symbol, limit, today));
+    else if (drift.kind === "slack") driftLines.push(INVEST_COPY.legFloorSlack(leg.symbol, limit, today, ratePercent(drift.driftBps)));
+  }
 
   return (
     <Card>
@@ -790,6 +833,17 @@ function PolicySummary({
           <p role="status" className="text-xs text-destructive">
             {INVEST_COPY.marketPast}
           </p>
+        ) : null}
+        {/* BEFORE IT BITES: the drift sits above the caps and the buttons, not
+            under the stored numbers it is about. */}
+        {driftLines.length > 0 ? (
+          <div className="space-y-1 rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs">
+            <div className={LABEL}>{INVEST_COPY.floorDriftTitle}</div>
+            <p>{INVEST_COPY.floorDriftSigned(null)}</p>
+            {driftLines.map((line) => (
+              <p key={line}>{line}</p>
+            ))}
+          </div>
         ) : null}
         <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           <Fact label={INVEST_COPY.basket}>{legs.map((leg) => `${leg.symbol} · ${ratePercent(leg.weightBps)}`).join(", ")}</Fact>
@@ -809,7 +863,7 @@ function PolicySummary({
           )}
         </div>
         {readiness !== null ? <p className="text-xs">{readinessWords(readiness)}</p> : null}
-        <p className="text-xs text-muted-foreground">{INVEST_COPY.freezeShort}</p>
+        <p className="text-xs text-muted-foreground">{INVEST_COPY.freezeShort(policyLegs)}</p>
         <div className="flex flex-wrap gap-2">
           <Button type="button" size="sm" disabled={blocked} aria-busy={write.running} onClick={() => start({ maxPerCall, maxRolling30d, enabled: policy.enabled })}>
             {INVEST_COPY.signAgain}
