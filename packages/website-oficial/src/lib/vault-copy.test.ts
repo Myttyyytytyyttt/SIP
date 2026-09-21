@@ -61,10 +61,25 @@ describe("the thin-pool notice", () => {
     expect(100 / POOL_DEPTH_MULTIPLE).toBe(POOL_DEPTH.largestShareOfReservePercent);
     expect(POOL_DEPTH.worked.spend * POOL_DEPTH.keeper.value).toBe(POOL_DEPTH.worked.requiredReserve);
 
-    const notice = INVEST_COPY.thinPool("$1,000.00");
+    // EVERY FIGURE IS PASSED IN NOW. The notice used to carry one night's
+    // reading of ANTHROPIC's pinned Raydium pool inside the sentence; the
+    // keeper moved to Jupiter and the shares became the owner's, so the
+    // ceiling is a function of the basket on screen and the sentence can only
+    // be handed the answer. A hard-coded dollar figure reappearing in this
+    // string is the regression this argument list exists to make impossible.
+    const notice = INVEST_COPY.thinPool("$298.00", "$149.00", "ANTHROPIC", "2026-09-21");
     expect(notice).toContain(`holds at least ${POOL_DEPTH_MULTIPLE} times that buy`);
-    // The cap it asks to be lowered is the one the box starts at, said back.
-    expect(notice).toContain("Most per buy starts at $1,000.00.");
+    // It names the leg that set the ceiling, and the day that leg was counted:
+    // a ceiling with no date on it is the literal this replaced.
+    expect(notice).toContain("the leg that sets it is ANTHROPIC");
+    expect(notice).toContain("on 2026-09-21");
+    expect(notice).toContain("the whole buy can be at most $298.00");
+    // The cap it asks to be lowered is the one the box starts at, said back —
+    // and it says WHY that is half the ceiling rather than the ceiling.
+    expect(notice).toContain("Most per buy starts at $149.00, which is half the ceiling");
+    // NO FIGURE OF ITS OWN. The old sentence quoted $9,500, $190 and $380 from
+    // a night nothing re-reads; none of them may come back.
+    expect(notice).not.toMatch(/\$9,5|\$190|\$380|20 September/);
     // ALL OR NOTHING, which is the keeper's own doctrine: one thin pool refuses
     // the whole basket AND the SOL conversion, so the notice may not offer the
     // reader a half-basket that cannot happen.

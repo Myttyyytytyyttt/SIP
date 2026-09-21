@@ -891,8 +891,7 @@ describe("investPolicy", () => {
     ["a negative share", { weights: [{ mint: SPYX_MINT, weightBps: -1 }, { mint: ANTHROPIC_MINT, weightBps: 10_001 }] }, /greater than zero/],
     ["a fractional share", { weights: [{ mint: SPYX_MINT, weightBps: 33.5 }, { mint: ANTHROPIC_MINT, weightBps: 9_966.5 }] }, /whole number/],
     ["a share written as a string", { weights: [{ mint: SPYX_MINT, weightBps: "5000" }, { mint: ANTHROPIC_MINT, weightBps: 5_000 }] }, /whole number/],
-    ["a leg with no share at all", { weights: [{ mint: SPYX_MINT, weightBps: 10_000 }] }, /names no share for/],
-    ["an empty basket", { weights: [] }, /names no share for/],
+    ["an empty basket", { weights: [] }, /names no stock at all/],
     ["a stock SaverFi does not offer", { weights: [{ mint: SPYX_MINT, weightBps: 5_000 }, { mint: ANTHROPIC_MINT, weightBps: 4_000 }, { mint: WSOL_MINT, weightBps: 1_000 }] }, /does not offer/],
     ["shares one short of the whole", { weights: [{ mint: SPYX_MINT, weightBps: 5_000 }, { mint: ANTHROPIC_MINT, weightBps: 4_999 }] }, /add up to exactly 10000 basis points; these add up to 9999/],
     ["shares one over the whole", { weights: [{ mint: SPYX_MINT, weightBps: 5_000 }, { mint: ANTHROPIC_MINT, weightBps: 5_001 }] }, /add up to exactly 10000/],
@@ -951,6 +950,45 @@ describe("investPolicy", () => {
       expect(answer.json.error?.problems?.join(" ")).toMatch(/minInvestment <= maxPerCall <= maxRolling30d/);
     }
     expect(upstream.calls).toHaveLength(0);
+  });
+
+  /**
+   * THE BASKET IS A SUBSET NOW. Until the picker existed the route demanded a
+   * share for every offered stock, so "choosing" could only ever mean choosing
+   * the shares. The owner asked to choose the stocks themselves, and the program
+   * has always taken 1..MAX_LEGS distinct mints summing to 10,000 — so what is
+   * pinned here is that ONE stock at 10,000 bps builds, and builds the policy
+   * that names only it, beside its own floor.
+   *
+   * AND THAT THE FLOORS BLOCK IS UNCHANGED BY IT. The answer still prices the
+   * whole shelf: it is one getMultipleAccounts either way, and the page holds
+   * every one of those legs to the rates it showed before it will sign. What
+   * narrows is the POLICY, not the reading.
+   */
+  it("one stock at the whole weight builds a one-leg policy, and still prices the whole shelf", async () => {
+    const owner = keypair();
+    const ownerKey = owner.publicKey.toBase58();
+    const { build } = setup(investableChain(ownerKey));
+    const answer = await build({ action: "investPolicy", owner: ownerKey, weights: [{ mint: SPYX_MINT, weightBps: 10_000 }] });
+    expect(answer.status).toBe(200);
+    expect(decodeArgs("set_invest_policy", instructionsOf(answer.json.txBase64)[4]!.data)).toMatchObject({
+      legs: [{ mint: SPYX_MINT, weight_bps: 10_000, min_out_rate_wad: LEG_POOLS[0]!.floorWad }],
+    });
+    // The floors the page checks are still both legs, in the catalogue's order.
+    expect(answer.json.floors.legs.map((leg: { mint: string }) => leg.mint)).toEqual(OFFERED_LEGS.map((leg) => leg.mint));
+    const verified = verifySignedTransaction(signWire(answer.json.txBase64, owner));
+    expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
+  });
+
+  /** The SECOND stock alone, so a one-leg basket cannot pass by taking the first floor by accident. */
+  it("the leg a one-stock basket carries is its own, not the catalogue's first", async () => {
+    const owner = key();
+    const { build } = setup(investableChain(owner));
+    const answer = await build({ action: "investPolicy", owner, weights: [{ mint: ANTHROPIC_MINT, weightBps: 10_000 }] });
+    expect(answer.status).toBe(200);
+    expect(decodeArgs("set_invest_policy", instructionsOf(answer.json.txBase64)[4]!.data)).toMatchObject({
+      legs: [{ mint: ANTHROPIC_MINT, weight_bps: 10_000, min_out_rate_wad: LEG_POOLS[1]!.floorWad }],
+    });
   });
 
   it("the three fields travel together: a whole basket the owner chose, with its own minimum and venue", async () => {

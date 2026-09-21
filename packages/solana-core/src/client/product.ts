@@ -225,6 +225,25 @@ export interface CatalogueAsset {
   readonly fee: FeeReading | null;
   /** The deepest USDC measurement anybody has taken of where a buy would actually land. */
   readonly depth: DepthReading | null;
+  /**
+   * THE ONE MEASUREMENT A CAP MAY BE DIVIDED BY, and it is not `depth`.
+   *
+   * The picker's ceiling (website-oficial/src/lib/basket-limits.ts depthCeiling)
+   * answers "how large a max_per_call still clears the keeper's cover", and the
+   * keeper's cover is counted over THE ACCOUNTS THE CHOSEN ROUTE NAMES
+   * (invest-decision.ts censusVenueInventory). Divide a venue-wide figure by 50
+   * instead and the answer is optimistic by exactly the factor between the two
+   * — forty-five times, on ANTHROPIC, on the day both were read — and an
+   * optimistic ceiling is the one direction a ceiling may never be wrong in: it
+   * signs a policy that buys nothing, at any balance, with the rent spent.
+   *
+   * So a route census lives in ITS OWN FIELD and null means "nobody counted",
+   * which the picker must render as a ceiling it does not know rather than as a
+   * large one. It is deliberately NOT part of offerProblems: what is on the
+   * shelf is decided by the bars above, and this only decides what the owner
+   * may then type into Most per buy.
+   */
+  readonly routeCensus: DepthReading | null;
   readonly sizePenalty: SizePenaltyReading | null;
   /**
    * The day a HELD refusal may be re-examined, or null when the asset is not
@@ -452,6 +471,20 @@ export function offerProblems(asset: CatalogueAsset): RuleFailure[] {
 /** Whether the rules admit `asset`, with the narrowing the build route and the reserve readers need. */
 export const isOfferable = (asset: CatalogueAsset): asset is OfferedLeg => offerProblems(asset).length === 0;
 
+/**
+ * The USDC a chosen route was counted to hold for `asset`, or NULL when nobody
+ * counted one — never a venue-wide figure standing in for a count.
+ *
+ * `depth` is allowed to be either measurement, because the shelf's DEPTH bar is
+ * a screen and a venue-wide figure that fails it fails decisively. A ceiling is
+ * the other way round: it divides, so the larger number makes the cap larger,
+ * and the direction of the error is the direction that signs a dead policy.
+ * Null here means the picker must say it does not know the ceiling. It must not
+ * reach for `depth` instead.
+ */
+export const routeCensusRaw = (asset: CatalogueAsset): bigint | null =>
+  asset.routeCensus !== null ? asset.routeCensus.usdcRaw : asset.depth !== null && asset.depth.scope === "route-census" ? asset.depth.usdcRaw : null;
+
 // ── THE ASSETS ───────────────────────────────────────────────────────────────
 //
 // READ ON MAINNET 2026-09-21, EPOCH 1039. The mint facts (owner, decimals,
@@ -494,6 +527,9 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPoolUsdc: Object.freeze({ usdcRaw: 2_646_541_815_865n, scope: "route-census", venue: "Raydium CLMM 6truu3rZ… (the floor source, USDC vault 3EmW8zJD…)", readOn: "2026-09-21", by: "getMultipleAccounts, mainnet slot 448994132" }),
     fee: Object.freeze({ bps: 0, epoch: 1039, readOn: "2026-09-21", by: "mint extensions, mainnet slot 448993661: no TransferFeeConfig at all" }),
     depth: Object.freeze({ usdcRaw: 317_640_466_447n, scope: "route-census", venue: "Raydium CLMM 4pCZCVEi… (what a 200 USDC buy actually routed through)", readOn: "2026-09-21", by: "getMultipleAccounts over that pool's USDC vault 92aTAYGn…, mainnet slot 448995444" }),
+    // Its depth reading IS a route census — one pool, counted on its own vault
+    // — so the ceiling divides the same number the shelf was judged on.
+    routeCensus: Object.freeze({ usdcRaw: 317_640_466_447n, scope: "route-census", venue: "Raydium CLMM 4pCZCVEi…", readOn: "2026-09-21", by: "getMultipleAccounts over that pool's USDC vault 92aTAYGn…, mainnet slot 448995444" }),
     sizePenalty: Object.freeze({ bps: 0.2, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: false, routes: "Raydium CLMM at 200 USDC vs Whirlpool at 12.50", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 0.2" }),
     quarantinedUntil: null,
     notes: Object.freeze([
@@ -514,6 +550,13 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPoolUsdc: Object.freeze({ usdcRaw: 9_204_135_177n, scope: "route-census", venue: "Raydium CLMM 47MsbowA… (the floor source, USDC vault FZmwQEZq…)", readOn: "2026-09-21", by: "getMultipleAccounts, mainnet slot 448994132" }),
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661: newer record, live from epoch 1039" }),
     depth: Object.freeze({ usdcRaw: 331_617_000_000n, scope: "venue-wide", venue: "Hadron", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes; not re-derivable from this file" }),
+    // 2.2 % OF THE FIGURE ABOVE, AND IT IS THIS ONE THE CAP IS DIVIDED BY. The
+    // number is inverted from the day's own ceiling measurement rather than
+    // counted directly, and it inverts exactly: a 50 % leg capped the policy at
+    // $298.00 and a 20 % leg at $745.00, and ⌊7,450 / 50⌋ = $149 a leg is the
+    // only countable inventory that produces both. It is a derived reading and
+    // is labelled one; re-deriving it means censusing a live route.
+    routeCensus: Object.freeze({ usdcRaw: 7_450_000_000n, scope: "route-census", venue: "BisonFi + Manifest (the route a 200 USDC buy took that day)", readOn: "2026-09-21", by: "inverted from that day's ceiling measurement — $298.00 at a half share, $745.00 at a fifth — not a direct count" }),
     sizePenalty: Object.freeze({ bps: 0.1, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: false, routes: "BisonFi + Manifest, or GoonFi V2 + Manifest, at 200 USDC vs a probe that re-routed on every reading", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings: 0.0, -0.0, 0.1" }),
     quarantinedUntil: null,
     notes: Object.freeze([
@@ -534,6 +577,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPoolUsdc: Object.freeze({ usdcRaw: 2_786_965_702n, scope: "route-census", venue: "Raydium CLMM HvpDt29E… (the floor source, USDC vault ALfDjAtK…)", readOn: "2026-09-21", by: "getMultipleAccounts, mainnet slot 448994132" }),
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
     depth: Object.freeze({ usdcRaw: 50_000_000_000n, scope: "venue-wide", venue: "Hadron (though a 200 USDC quote that day routed Manifest E7Mcgg…)", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    routeCensus: null,
     sizePenalty: Object.freeze({ bps: 0, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest E7Mcgg… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 0.0" }),
     quarantinedUntil: "2026-10-20",
     notes: Object.freeze([
@@ -553,6 +597,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPoolUsdc: null,
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
     depth: Object.freeze({ usdcRaw: 25_220_000_000n, scope: "venue-wide", venue: "Manifest 6Gi6cz…", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    routeCensus: null,
     sizePenalty: Object.freeze({ bps: 29.8, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest 6Gi6cz… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 29.8" }),
     quarantinedUntil: null,
     notes: Object.freeze([
@@ -571,6 +616,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPoolUsdc: null,
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
     depth: Object.freeze({ usdcRaw: 8_995_000_000n, scope: "venue-wide", venue: "Manifest G3LHQo…", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    routeCensus: null,
     sizePenalty: Object.freeze({ bps: 77.9, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest G3LHQo… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 77.9" }),
     quarantinedUntil: null,
     notes: Object.freeze(["Refused twice over, which is the useful kind of refusal: not enough at the venue, and what is there is not at this price."]),
@@ -587,6 +633,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPoolUsdc: null,
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
     depth: Object.freeze({ usdcRaw: 7_542_000_000n, scope: "venue-wide", venue: "Meteora DLMM Chroid…", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    routeCensus: null,
     sizePenalty: Object.freeze({ bps: 27, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Meteora DLMM Chroid… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 27.0" }),
     quarantinedUntil: null,
     notes: Object.freeze(["A DLMM keeps its liquidity in bins, so a count of units can read deep while the price two bins out is not there. Both of this entry's refusals say the same thing from the two sides the keeper measures it from."]),
@@ -603,6 +650,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPoolUsdc: null,
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
     depth: Object.freeze({ usdcRaw: 7_264_000_000n, scope: "venue-wide", venue: "Manifest J4PjSn…", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    routeCensus: null,
     sizePenalty: Object.freeze({ bps: 10.8, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest J4PjSn… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 10.8" }),
     quarantinedUntil: null,
     notes: Object.freeze([
@@ -621,6 +669,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPoolUsdc: null,
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
     depth: Object.freeze({ usdcRaw: 4_229_000_000n, scope: "venue-wide", venue: "Meteora DLMM (reached through a first hop that changed between readings)", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    routeCensus: null,
     sizePenalty: Object.freeze({ bps: 96.7, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: false, routes: "GoonFi V2 + Meteora DLMM at 200 USDC vs Raydium CLMM + Scorch + Meteora DLMM at 12.50", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings: 96.6, 96.7, 96.7" }),
     quarantinedUntil: null,
     notes: Object.freeze(["Its two quotes never took the same route twice, so the keeper's ARM 2 would abstain here rather than measure — and 96.7 bps is far enough over any ceiling that the coarser reading settles it anyway."]),
@@ -637,6 +686,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     floorPoolUsdc: null,
     fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
     depth: Object.freeze({ usdcRaw: 2_016_000_000n, scope: "venue-wide", venue: "Manifest BeUdSs… (a Meteora DLMM answered the probe instead)", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    routeCensus: null,
     sizePenalty: Object.freeze({ bps: 33.3, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: false, routes: "Manifest BeUdSs… at 200 USDC vs Meteora DLMM Gug9Tr… at 12.50", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 33.3" }),
     quarantinedUntil: null,
     notes: Object.freeze(["The thinnest venue measured: $2,016 covers a $200 leg ten times, not fifty. At the ceiling arithmetic in basket-limits.ts this is the asset that drags a five-leg basket's cap to about $200 all by itself."]),

@@ -37,6 +37,7 @@ import {
   XSTOCKS_POWERS,
   basketWeightsBps,
   offerProblems,
+  routeCensusRaw,
   ownerComputeBudget,
   priorityFeeLamports,
   sizePenaltyCeilingBps,
@@ -186,12 +187,45 @@ describe("the first investment policy", () => {
       dated(asset.depth);
       dated(asset.floorPoolUsdc);
       dated(asset.sizePenalty);
+      dated(asset.routeCensus);
       // A depth figure that does not say WHICH measurement it is can be out by
       // a factor of forty-five: ANTHROPIC's venue-wide reading against the
       // census behind the same day's ceiling.
       if (asset.depth !== null) expect(["route-census", "venue-wide"]).toContain(asset.depth.scope);
       if (asset.sizePenalty !== null) expect(typeof asset.sizePenalty.sameVenues).toBe("boolean");
     }
+  });
+
+  /**
+   * THE FIELD A CAP IS DIVIDED BY. `depth` may be either measurement, because
+   * the shelf's DEPTH bar SCREENS with it and a venue-wide figure that fails a
+   * screen fails decisively. A ceiling DIVIDES, so the larger number makes the
+   * cap larger — and a cap that is too large signs a policy that buys nothing,
+   * at any balance, with the rent already spent. So the ceiling reads its own
+   * field, and null there means "not counted", never "deep".
+   */
+  it("a route census is never a venue-wide figure, and an uncounted route answers null rather than a large number", () => {
+    for (const asset of CATALOGUE) {
+      if (asset.routeCensus !== null) expect(asset.routeCensus.scope).toBe("route-census");
+      // Never read `depth` in its place when that reading is venue-wide.
+      if (asset.depth?.scope === "venue-wide" && asset.routeCensus === null) expect(routeCensusRaw(asset)).toBeNull();
+    }
+    const anthropic = CATALOGUE.find((asset) => asset.symbol === "ANTHROPIC")!;
+    expect(anthropic.depth!.scope).toBe("venue-wide");
+    // The gap this field exists for: forty-five times, on one mint, on one day.
+    expect(anthropic.depth!.usdcRaw / routeCensusRaw(anthropic)!).toBe(44n);
+    // AND IT INVERTS THE MEASUREMENT IT CAME FROM. ⌊census / 50⌋ is what one leg
+    // may take, and that leg at a half share is the $298.00 cap the day's
+    // measurement reported, at a fifth share the $745.00.
+    const perLeg = routeCensusRaw(anthropic)! / CATALOGUE_VENUE_INVENTORY_MULTIPLE;
+    expect(perLeg).toBe(149_000_000n);
+    expect(perLeg * 10_000n / 5_000n).toBe(298_000_000n);
+    expect(perLeg * 10_000n / 2_000n).toBe(745_000_000n);
+    // SPYx's own depth reading IS a census, so it answers without a second field.
+    const spyx = CATALOGUE.find((asset) => asset.symbol === "SPYx")!;
+    expect(routeCensusRaw(spyx)).toBe(spyx.depth!.usdcRaw);
+    // An asset nobody counted says so rather than offering its venue's book.
+    expect(routeCensusRaw({ ...spyx, routeCensus: null, depth: { ...spyx.depth!, scope: "venue-wide" } })).toBeNull();
   });
 
   it("holds the keeper's three numbers as the keeper's, through the committed vector", () => {

@@ -390,11 +390,34 @@ describe("/api/solana-build", () => {
       "bad_request",
       "the weights must add up to exactly 10000 basis points; these add up to 9999.",
     ]);
-    // A LEG LEFT OUT IS NOT FILLED IN at the share that would make it work.
-    expect(await refused({ weights: [{ mint: SPYX_MINT, weightBps: 10_000 }] })).toEqual([
+    // A LEG LEFT OUT IS THE FEATURE NOW, NOT A REFUSAL. The owner asked to
+    // choose — "que el user pueda seleccionar las que quiere y las que no" —
+    // and set_invest_policy has always taken 1..MAX_LEGS legs and known nothing
+    // about a catalogue. So a basket that names ONE of the offered stocks at
+    // the whole 10,000 is a legal basket and gets past the shape checks. This
+    // assertion used to read the other way, which is what made the whole shelf
+    // the only basket anybody could sign.
+    expect(await accepted({ weights: [{ mint: SPYX_MINT, weightBps: 10_000 }] })).toEqual(ACCEPTED);
+
+    // WHAT THE SUBSET RULE STILL REFUSES, and in this order, each before a
+    // single account is read.
+    // An empty basket: the program takes at least one leg, and there is no such
+    // thing as a policy that buys nothing on purpose.
+    expect(await refused({ weights: [] })).toEqual([400, "bad_request", "weights names no stock at all. A basket holds at least one."]);
+    // MORE THAN THE PICKER OFFERS, refused with the PRODUCT's five rather than
+    // the program's eight: a refusal has to be reachable from the screen that
+    // caused it, and a sixth stock cannot come from this form at all. Checked
+    // before the unoffered-mint rule, so the count is answered on its own terms.
+    const six = Array.from({ length: 6 }, () => ({ mint: someKey(), weightBps: 1_000 }));
+    expect(await refused({ weights: six })).toEqual([400, "bad_request", "weights names 6 stocks; a basket holds at most 5."]);
+    // A MINT SAVERFI DOES NOT OFFER, which is the disagreement keying by mint
+    // exists to catch: it needs a floor, a rent and a token program this server
+    // pinned, and an unknown mint has none of them.
+    const stranger = someKey();
+    expect(await refused({ weights: [{ mint: stranger, weightBps: 10_000 }] })).toEqual([
       400,
       "bad_request",
-      `weights names no share for ${ANTHROPIC_MINT}. Every stock SaverFi offers takes a weight; none is filled in for you.`,
+      `weights names ${stranger}, which SaverFi does not offer.`,
     ]);
 
     // ── THE VENUE: A NAME, NEVER A PROGRAM ID FROM THE BROWSER ───────────────

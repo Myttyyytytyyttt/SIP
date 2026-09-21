@@ -74,6 +74,7 @@ import {
 import { useState, type ReactNode } from "react";
 
 import { Num } from "@/components/num";
+import { BasketPicker } from "@/components/wallets/BasketPicker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -86,10 +87,21 @@ import { DEFAULT_VENUE_NAME, VERIFIABLE_VENUES } from "@/lib/vault-flows";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { AmountError, USDC_DECIMALS, formatSol, formatUnits, formatUsd, parseUnits, rawFrom } from "@/lib/amounts";
 import { LABEL } from "@/lib/classes";
+import {
+  PICKER_MAX_LEGS,
+  basketLimits,
+  catalogueAsset,
+  evenPercents,
+  lighterWeightBps,
+  overCeiling,
+  type BasketLimits,
+  type PickedLeg,
+  type PickedRow,
+} from "@/lib/basket-picker";
 import { todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
 import { floorsState } from "@/lib/live-model";
 import type { InvestPolicyBuildJson, InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
-import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, shortAddress } from "@/lib/vault-copy";
+import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent } from "@/lib/vault-copy";
 
 type VaultWrite = ReturnType<typeof useVaultWrite>;
 
@@ -97,71 +109,123 @@ type VaultWrite = ReturnType<typeof useVaultWrite>;
 export type Caps = { readonly ok: true; readonly maxPerCall: bigint; readonly maxRolling30d: bigint } | { readonly ok: false; readonly message: string };
 
 /**
- * THE SMALLEST PER-BUY CAP A POLICY CAN EVER BUY AT, in USDC raw units.
+ * THE BASKET THE FORM OPENS ON: every offered stock, at equal whole percents.
+ *
+ * WHOLE PERCENTS, not basketWeightsBps. That function divides 10,000 and hands
+ * back 33.34 % at three legs, which no box on this card can hold and which the
+ * server would be right to refuse as a fraction of a point nobody typed.
+ * evenPercents divides 100 instead and puts the remainder on the first row, so
+ * the sum is exactly 100 at every count the picker allows.
+ */
+export const DEFAULT_PICKED: readonly PickedRow[] = OFFERED_LEGS.map((leg, index) => ({ mint: leg.mint, percent: String(evenPercents(OFFERED_LEGS.length)[index]!) }));
+
+/** The default basket as the arithmetic takes it: each offered leg at its equal share, in basis points. */
+const defaultLegs = (): PickedLeg[] => OFFERED_LEGS.map((leg, index) => ({ asset: leg, weightBps: evenPercents(OFFERED_LEGS.length)[index]! * 100 }));
+
+/**
+ * THE WINDOW OF CAPS THE FORM OPENS ON, computed once for the default basket.
+ *
+ * The three constants below used to be three DIFFERENT KINDS of number pinned
+ * at three different times, and only one of them could survive a picker:
+ *  * REACHABLE_PER_BUY_RAW was arithmetic over the default basket's weights;
+ *  * DEPTH_CEILING_PER_BUY_RAW was a LITERAL, 380_000_000n, written down from
+ *    one reading of one Raydium pool on 2026-09-20 — a pool the keeper no
+ *    longer trades through at all since the move to Jupiter;
+ *  * SUGGESTED_PER_BUY_RAW was half of that literal.
+ * They are all three the same computation now, run over the same catalogue
+ * readings the picker runs it over, and they exist only as THE STARTING STATE
+ * of a form whose every keystroke recomputes them. Nothing on this card reads
+ * them again after the first render.
+ */
+const DEFAULT_WINDOW: BasketLimits = basketLimits(defaultLegs(), defaultInvestPolicy(OFFERED_LEGS.length).minInvestment);
+
+/**
+ * THE SMALLEST PER-BUY CAP THE DEFAULT BASKET CAN EVER BUY AT, in USDC raw units.
  *
  * min_investment is enforced PER LEG: an invest tick gives each leg its weight's
  * slice of the budget and refuses a slice under the minimum. So the bar is not
  * min_investment itself but the cap at which the LIGHTEST leg's slice clears it,
- * minInvestment x 10,000 / lightestWeightBps — the same arithmetic
+ * ⌈minInvestment × 10,000 / lightestWeightBps⌉ — the same arithmetic
  * investmentReadiness does when it calls a policy "reachable", rounded up the
  * same way, so the form and the summary cannot disagree.
  *
  * AT ONE LEG THE TWO NUMBERS COINCIDE, which is why comparing against
- * min_investment alone was invisible until the basket became two. At today's two
- * equal legs min_investment is $2.50, and a $2.50 cap hands each leg $1.25: a
- * policy that can never buy at any balance. The program does not refuse it — its
- * only rule is 0 < min_investment <= max_per_call — and Sign is gated by these
- * caps alone, so without this bar the owner pays the rent for a policy that is
- * dead the moment it lands, and only learns it from the summary afterwards.
+ * min_investment alone was invisible until the basket became two. At two equal
+ * legs min_investment is $2.50 and a $2.50 cap hands each leg $1.25: a policy
+ * that can never buy at any balance. The program does not refuse it — its only
+ * rule is 0 < min_investment ≤ max_per_call — so without this bar the owner pays
+ * the rent for a policy that is dead the moment it lands.
+ *
+ * IT IS A STARTING VALUE NOW, NOT THE BAR. The bar is recomputed from the
+ * basket on screen, because the lightest weight is the owner's to type.
  */
-export const REACHABLE_PER_BUY_RAW: bigint = (() => {
-  const lightest = BigInt(Math.min(...basketWeightsBps(OFFERED_LEGS.length)));
-  const minInvestment = defaultInvestPolicy(OFFERED_LEGS.length).minInvestment;
-  return (minInvestment * 10_000n + lightest - 1n) / lightest;
-})();
+export const REACHABLE_PER_BUY_RAW: bigint = DEFAULT_WINDOW.floorRaw;
 
 /**
- * THE CAP ANTHROPIC'S POOL ALLOWED WHEN IT WAS LAST READ, in USDC raw units.
+ * THE LARGEST PER-BUY CAP THE DEFAULT BASKET'S COUNTED ROUTES COVER, in USDC
+ * raw units. IT IS NO LONGER A LITERAL.
  *
- * MIN_VENUE_INVENTORY_MULTIPLE is 50, so a leg may spend at most a fiftieth of
- * what the venue can hand over. On a two-sided pool that is the same ratio as a
- * fiftieth of its in-side reserve, which is the figure this one was read as. Read 2026-09-20 at slot 448864213, ANTHROPIC/USDC
- * held 9,541,652,779 raw USDC: $190.83 a leg, and at two equal legs $381.67 for
- * the whole buy. Rounded DOWN to $380 so the figure is never optimistic.
+ * WHAT IT WAS AND WHY THAT COULD NOT STAND. 380_000_000n, being a fiftieth of
+ * ANTHROPIC's pinned Raydium pool as read on 2026-09-20, doubled for two equal
+ * legs and rounded down. Two separate things made it wrong rather than merely
+ * stale. The keeper moved to Jupiter, so the pool it divided is not where a buy
+ * lands — the same mint routed BisonFi + Manifest the next day. And the shares
+ * became the owner's, so the ceiling stopped being a property of the product:
+ * one leg at 50 % and the same leg at 20 % differ by two and a half times.
  *
- * THIS IS A CEILING THAT CANNOT BE RE-DERIVED HERE. /api/solana-vault's prices
- * payload carries pool RATES and, now, the pyth block -- no reserve -- so the
- * page has nothing to recompute this from and nothing to invalidate it with.
- * That is why what follows is a warning rather than a refusal, and why the
- * starting value below is not this number.
+ * WHAT IT IS NOW. min over the chosen legs of the largest cap whose share of
+ * that leg still sits inside a fiftieth of what its ROUTE was counted to hold
+ * (basket-limits.ts depthCeiling, over solana-core's routeCensus readings).
+ * Exact on both sides: this cap passes the keeper's gate on those readings, and
+ * one raw unit more fails the leg that set it.
+ *
+ * AND IT IS STILL A FORECAST. It divides a count taken on a named day against
+ * a route Jupiter re-picks per quote. The gate that decides is the keeper's,
+ * inside the turn, at the size that turn really spends. Null would mean a
+ * chosen leg's route was never counted — impossible for today's shelf, and the
+ * form says so rather than inventing a ceiling if it ever happens.
  */
-export const DEPTH_CEILING_PER_BUY_RAW = 380_000_000n;
+export const DEPTH_CEILING_PER_BUY_RAW: bigint | null = DEFAULT_WINDOW.ceilingRaw;
 
 /**
- * WHAT THE "Most per buy" BOX STARTS AT, in USDC raw units.
+ * WHAT THE "Most per buy" BOX STARTS AT, in USDC raw units: half the ceiling,
+ * never under the floor.
  *
- * NOT DEFAULT_INVEST_CAPS.maxPerCall, which is $1,000. The card's own thin-pool
- * notice tells the owner that at $1,000 the basket buys "nothing bought, no SOL
- * converted, at any balance" -- and the form pre-filled exactly that, with Sign
- * lit, over 0.0117348 SOL of rent that does not come back. readCaps enforces
- * only a LOWER bound (REACHABLE_PER_BUY_RAW), so nothing stopped it: the
- * failure REACHABLE_PER_BUY_RAW closes at the low end was wide open at the high
- * end, where the shipped default landed.
+ * NOT DEFAULT_INVEST_CAPS.maxPerCall, which is $1,000 — a cap this card's own
+ * notice calls "nothing bought, no SOL converted, at any balance", and which
+ * the form once pre-filled with Sign lit over 0.0117348 SOL of rent that does
+ * not come back.
  *
- * HALF THE CEILING, NOT THE CEILING. $380 cleared the measured reserve by
- * 0.44 %; $190 leaves about 2x cover, so an ordinary day's drift in that pool
- * does not turn the starting value into a policy that buys nothing. The owner
- * can still type anything at or above REACHABLE_PER_BUY_RAW -- this is where
- * the box starts, not a limit.
+ * HALF, NOT THE WHOLE. The ceiling itself leaves no cover for an ordinary day's
+ * drift in the market it was counted from, and a ceiling shown as a starting
+ * value is read as a target. The owner can still type anything inside the
+ * capsWindow — this is where the box starts, not what it allows.
  */
-export const SUGGESTED_PER_BUY_RAW = DEPTH_CEILING_PER_BUY_RAW / 2n;
+export const SUGGESTED_PER_BUY_RAW: bigint = DEFAULT_WINDOW.suggestedRaw;
 
-/** The two caps as typed, in dollars: at least REACHABLE_PER_BUY_RAW per buy, and at least one buy per 30 days. */
-export function readCaps(perBuyText: string, per30DaysText: string): Caps {
+/**
+ * A cap quoted in words has to round DOWN. formatUsd rounds to the nearer cent,
+ * so a ceiling of $297.999999 prints as "$298.00" — and a sentence that tells
+ * the owner to type "$298.00 or less" would then be telling him to type a cap
+ * the chain refuses. Truncating to the cent first can only ever understate.
+ */
+export const atMostUsd = (raw: bigint): string => formatUsd(raw - (raw % 10_000n));
+
+/**
+ * The two caps as typed, in dollars: at least `floorRaw` per buy, and at least
+ * one buy per 30 days.
+ *
+ * `floorRaw` DEFAULTS TO THE DEFAULT BASKET'S FLOOR AND IS NOT A CONSTANT. The
+ * smallest cap that can buy is ⌈min_investment × 10,000 / the lightest share⌉,
+ * and with a picker every term of that is the owner's: five equal legs need
+ * five times the minimum, one leg at 5 % needs twenty. The form passes the
+ * floor computed from the basket on screen.
+ */
+export function readCaps(perBuyText: string, per30DaysText: string, floorRaw: bigint = REACHABLE_PER_BUY_RAW): Caps {
   try {
     const maxPerCall = parseUnits(perBuyText, USDC_DECIMALS, INVEST_COPY.mostPerBuy);
     const maxRolling30d = parseUnits(per30DaysText, USDC_DECIMALS, INVEST_COPY.mostPer30Days);
-    if (maxPerCall < REACHABLE_PER_BUY_RAW || maxRolling30d < maxPerCall) return { ok: false, message: INVEST_COPY.capsProblem(formatUsd(REACHABLE_PER_BUY_RAW)) };
+    if (maxPerCall < floorRaw || maxRolling30d < maxPerCall) return { ok: false, message: INVEST_COPY.capsProblem(formatUsd(floorRaw)) };
     return { ok: true, maxPerCall, maxRolling30d };
   } catch (error) {
     if (error instanceof AmountError) return { ok: false, message: error.message };
@@ -180,13 +244,14 @@ export type Minimum = { readonly ok: true; readonly raw: bigint } | { readonly o
  * same trap REACHABLE_PER_BUY_RAW closes from the other side. Checked here
  * against the cap actually typed, so the two boxes cannot disagree.
  */
-export function readMinimum(text: string, maxPerCall: bigint | null): Minimum {
+export function readMinimum(text: string, maxPerCall: bigint | null, weightsBps: readonly number[] = basketWeightsBps(OFFERED_LEGS.length)): Minimum {
   try {
     const raw = parseUnits(text, USDC_DECIMALS, INVEST_COPY.minPerBuy);
     if (raw <= 0n) return { ok: false, message: INVEST_COPY.minimumProblem };
-    // Per LEG: the lightest leg's slice of the cap has to clear it.
-    if (maxPerCall !== null) {
-      const lightest = BigInt(Math.min(...basketWeightsBps(OFFERED_LEGS.length)));
+    // Per LEG: the lightest leg's slice of the cap has to clear it — and the
+    // lightest leg is whatever the picker's boxes say it is.
+    if (maxPerCall !== null && weightsBps.length > 0) {
+      const lightest = BigInt(Math.min(...weightsBps));
       if ((maxPerCall * lightest) / 10_000n < raw) return { ok: false, message: INVEST_COPY.minimumUnreachable(formatUsd(raw)) };
     }
     return { ok: true, raw };
@@ -209,14 +274,23 @@ export type Weights = { readonly ok: true; readonly byMint: ReadonlyMap<string, 
  * takes basis points and this multiplies by 100, so a weight cannot arrive as
  * a fraction of a point nobody typed.
  */
-export function readWeights(percents: readonly string[]): Weights {
+export function readWeights(percents: readonly string[], legs: readonly { readonly mint: string; readonly symbol: string }[] = OFFERED_LEGS): Weights {
   const byMint = new Map<string, number>();
   let total = 0;
-  for (const [index, leg] of OFFERED_LEGS.entries()) {
+  // THE BASKET'S SIZE IS A RULE TOO, and both ends of it are refused here
+  // rather than at Sign: the program takes at least one leg, and this product
+  // offers at most five.
+  if (legs.length === 0) return { ok: false, message: INVEST_COPY.basketEmpty };
+  if (legs.length > PICKER_MAX_LEGS) return { ok: false, message: INVEST_COPY.basketTooMany(PICKER_MAX_LEGS, legs.length) };
+  for (const [index, leg] of legs.entries()) {
     const text = (percents[index] ?? "").trim();
     if (!/^[0-9]{1,3}$/.test(text)) return { ok: false, message: INVEST_COPY.weightProblem(leg.symbol) };
     const bps = Number(text) * 100;
     if (bps <= 0) return { ok: false, message: INVEST_COPY.weightProblem(leg.symbol) };
+    // A mint twice over is a basket the program refuses outright (its BTreeSet
+    // insert fails), and the picker cannot produce one — but nothing else here
+    // would notice, and the sum would still be 10,000.
+    if (byMint.has(leg.mint)) return { ok: false, message: INVEST_COPY.weightProblem(leg.symbol) };
     byMint.set(leg.mint, bps);
     total += bps;
   }
@@ -224,7 +298,23 @@ export function readWeights(percents: readonly string[]): Weights {
   return { ok: true, byMint };
 }
 
-/** Whether the setup form may ask Phantom: the issuer's powers acknowledged, every field valid, and no other write in the way. */
+/**
+ * Whether the setup form may ask Phantom: the issuer's powers acknowledged,
+ * every field valid, the cap inside the capsWindow this basket can buy in, and no
+ * other write in the way.
+ *
+ * WHY THE DEPTH CEILING GATES SIGN NOW, WHERE IT ONLY WARNED BEFORE. It warned
+ * because it was a literal the page could not re-derive, and refusing on a
+ * number you cannot defend is worse than saying it out loud. The page derives
+ * it now, from the basket on screen and solana-core's dated route censuses, and
+ * re-derives it on every keystroke. On those readings a cap above it does not
+ * buy less — the keeper's depth gate is all-or-nothing, so it buys NOTHING, at
+ * any balance, for the life of the policy, and the rent is spent either way.
+ *
+ * WHAT IS STILL NOT A GATE: a ceiling nobody could compute. A chosen leg whose
+ * route has never been counted leaves depthOk true and puts a sentence on the
+ * screen, because a refusal has to rest on a number.
+ */
 export const canSignPolicy = (input: {
   readonly acknowledged: boolean;
   readonly capsOk: boolean;
@@ -232,7 +322,9 @@ export const canSignPolicy = (input: {
   /** Default true, so the existing two-argument callers keep their meaning. */
   readonly minimumOk?: boolean;
   readonly weightsOk?: boolean;
-}): boolean => input.acknowledged && input.capsOk && (input.minimumOk ?? true) && (input.weightsOk ?? true) && !input.blocked;
+  readonly depthOk?: boolean;
+}): boolean =>
+  input.acknowledged && input.capsOk && (input.minimumOk ?? true) && (input.weightsOk ?? true) && (input.depthOk ?? true) && !input.blocked;
 
 // These two moved to src/lib/invest-limits.ts, where the live dashboard's rule
 // card reads the same numbers; re-exported so this card's existing imports and
@@ -399,25 +491,61 @@ function PolicySetup({
   // The catalogue's own defaults, as the route would build them when these
   // fields are left alone: the $5-split minimum and equal shares.
   const [minimum, setMinimum] = useState(() => formatUnits(defaultInvestPolicy(OFFERED_LEGS.length).minInvestment, USDC_DECIMALS));
-  const [percents, setPercents] = useState<readonly string[]>(() => basketWeightsBps(OFFERED_LEGS.length).map((bps) => String(bps / 100)));
+  // THE BASKET IS STATE NOW. The rows the owner ticked, in the order he ticked
+  // them, each holding the percent he typed — not an array positional over the
+  // catalogue, because the catalogue is longer than the basket.
+  const [picked, setPicked] = useState<readonly PickedRow[]>(DEFAULT_PICKED);
   // THE INTERSECTION, not the server's list: a name the web cannot check the
   // bytes of is never offered. See VERIFIABLE_VENUES in vault-flows.ts.
   const venues = (state.offeredVenues ?? []).filter((name) => VERIFIABLE_VENUES.has(name));
   const [venue, setVenue] = useState(DEFAULT_VENUE_NAME);
 
-  const caps = readCaps(perBuy, per30Days);
-  const minPerLeg = readMinimum(minimum, caps.ok ? caps.maxPerCall : null);
-  const weightsTyped = readWeights(percents);
   const blocked = write.running || write.busyElsewhere || write.unconfirmed;
-  const limits = todaysLimits(state.prices);
+  // THE ORDER THESE ARE READ IN IS NOT FREE. The cap's own lower bound depends
+  // on the minimum and on the lightest share, so the shares are read first, the
+  // minimum second (on its own, before any cap), and the caps last, against the
+  // floor those two produce. Reading the caps first was what let a constant
+  // stand in for the floor.
+  //
+  // THE ROWS AND THEIR SHARES ARE CARRIED TOGETHER, never as two arrays read by
+  // the same index. readWeights reads percents[i] against legs[i], so dropping
+  // one row from one array and not the other would hand a stock the share of
+  // the stock beside it — the sum would still be 100 and nothing would fail.
+  const rows = picked.flatMap((row) => {
+    const asset = catalogueAsset(row.mint);
+    return asset === null ? [] : [{ asset, percent: row.percent }];
+  });
+  const chosenAssets = rows.map((row) => row.asset);
+  const weightsTyped = readWeights(
+    rows.map((row) => row.percent),
+    chosenAssets,
+  );
+  const typedMinimum = readMinimum(minimum, null);
+  const minimumRaw = typedMinimum.ok ? typedMinimum : null;
+  const legs: PickedLeg[] | null = weightsTyped.ok ? chosenAssets.map((asset) => ({ asset, weightBps: weightsTyped.byMint.get(asset.mint)! })) : null;
+  const capsWindow: BasketLimits | null = legs !== null && minimumRaw !== null && minimumRaw.ok ? basketLimits(legs, minimumRaw.raw) : null;
+  const caps = readCaps(perBuy, per30Days, capsWindow?.floorRaw ?? REACHABLE_PER_BUY_RAW);
+  const minPerLeg = readMinimum(minimum, caps.ok ? caps.maxPerCall : null, legs?.map((leg) => leg.weightBps));
+  // OVER THE CEILING, OR NO CEILING AT ALL: both stop Sign, and neither is
+  // silent about which leg did it or what would fix it.
+  const overDepth = capsWindow !== null && caps.ok && (capsWindow.empty || overCeiling(caps.maxPerCall, capsWindow));
+  // The third way out of a depth refusal, when the basket has room for one:
+  // lighterWeightBps answers null in a one-stock basket, where the share is
+  // 100 % by arithmetic and cannot be lowered at all.
+  const lighter = capsWindow !== null && caps.ok ? lighterWeightBps(caps.maxPerCall, capsWindow) : null;
+  const priceLimits = todaysLimits(state.prices);
   const rent = setupRent(state);
   const fees = SIGNATURE_FEE_LAMPORTS + priorityFeeLamports(ownerComputeBudget("set_invest_policy"));
-  const weights = OFFERED_LEGS.map((leg, index) => (weightsTyped.ok ? weightsTyped.byMint.get(leg.mint)! : basketWeightsBps(OFFERED_LEGS.length)[index]!));
-  const floorText = limits === null ? "today's floor" : formatUsd(limits.floorPerSol);
-  // "SPYx at 50 % and ANTHROPIC at 50 %", from the offered legs and their
-  // weights — so the prose and the Basket field below cannot say different
-  // things, which is what they did while this sentence named SPYx alone.
-  const basket = listAnd(OFFERED_LEGS.map((leg, index) => `${leg.symbol} at ${ratePercent(weights[index]!)}`));
+  const floorText = priceLimits === null ? "today's floor" : formatUsd(priceLimits.floorPerSol);
+  // "SPYx at 50 % and ANTHROPIC at 50 %", from the CHOSEN legs and their
+  // weights — so the prose, the Basket field and the picker cannot say three
+  // different things, which is what the prose and the field did while it named
+  // SPYx alone.
+  const basket = legs === null ? listAnd(chosenAssets.map((asset) => asset.symbol)) : listAnd(legs.map((leg) => `${leg.asset.symbol} at ${ratePercent(leg.weightBps)}`));
+  const basketField = legs === null ? chosenAssets.map((asset) => asset.symbol).join(", ") : legs.map((leg) => `${leg.asset.symbol} · ${ratePercent(leg.weightBps)}`).join(", ");
+  // The whole buy that clears the minimum on every leg: the floor, which is the
+  // per-leg minimum multiplied up by the LIGHTEST share and not by the count.
+  const purchaseText = capsWindow === null ? formatUsd(DEFAULT_PURCHASE_USDC_RAW) : formatUsd(capsWindow.floorRaw);
 
   return (
     <Card>
@@ -427,7 +555,7 @@ function PolicySetup({
           {INVEST_COPY.policyRule(
             basket,
             floorText,
-            minPerLeg.ok ? formatUsd(minPerLeg.raw * BigInt(OFFERED_LEGS.length)) : formatUsd(DEFAULT_PURCHASE_USDC_RAW),
+            purchaseText,
             caps.ok ? formatUsd(caps.maxPerCall) : `$${perBuy.trim()}`,
             caps.ok ? formatUsd(caps.maxRolling30d) : `$${per30Days.trim()}`,
             rent === null ? "some" : formatSol(rent),
@@ -436,26 +564,63 @@ function PolicySetup({
       </CardHeader>
       <CardContent className="space-y-4">
         <dl className="grid gap-3 sm:grid-cols-2">
-          <Fact label={INVEST_COPY.basket}>{OFFERED_LEGS.map((leg, index) => `${leg.symbol} · ${ratePercent(weights[index]!)}`).join(", ")}</Fact>
-          <Fact label={INVEST_COPY.rule}>
-            {INVEST_COPY.buysEach(minPerLeg.ok ? formatUsd(minPerLeg.raw * BigInt(OFFERED_LEGS.length)) : formatUsd(DEFAULT_PURCHASE_USDC_RAW))}
-          </Fact>
+          <Fact label={INVEST_COPY.basket}>{basketField}</Fact>
+          <Fact label={INVEST_COPY.rule}>{INVEST_COPY.buysEach(purchaseText)}</Fact>
         </dl>
 
+        {/* THE CATALOGUE AND THE SHARES, FIRST, in place of the fixed grid of
+            one box per offered leg — and above the caps rather than below them,
+            because the basket is what sets BOTH ends of the window those boxes
+            have to sit in. Asking for a cap first and then explaining it with
+            a basket further down the page is the wrong way round. The picker
+            owns the rows and their percentages; the arithmetic they drive is
+            rendered below, beside the boxes it binds. */}
+        <BasketPicker picked={picked} onPicked={setPicked} blocked={blocked} problem={weightsTyped.ok ? null : weightsTyped.message} perBuyRaw={caps.ok ? caps.maxPerCall : null} />
+
+        {/* THE WINDOW, ABOVE THE BOX IT CONSTRAINS AND NOT UNDER IT: both ends
+            and whose market set the top, read BEFORE the cap is typed rather
+            than as an explanation of a refusal afterwards. */}
+        {capsWindow !== null && capsWindow.ceilingRaw !== null && capsWindow.ceilingBinding !== null && !capsWindow.empty ? (
+          <p className="text-xs text-muted-foreground">
+            {INVEST_COPY.capWindow(formatUsd(capsWindow.floorRaw), atMostUsd(capsWindow.ceilingRaw), capsWindow.ceilingBinding.symbol, capsWindow.ceilingBinding.readOn ?? "an unrecorded day")}
+          </p>
+        ) : null}
         <div className="grid gap-3 sm:grid-cols-2">
           <CapField id="invest-max-per-call" label={INVEST_COPY.mostPerBuy} value={perBuy} onChange={setPerBuy} disabled={blocked} />
           <CapField id="invest-max-rolling" label={INVEST_COPY.mostPer30Days} value={per30Days} onChange={setPer30Days} disabled={blocked} />
         </div>
+        {capsWindow !== null && capsWindow.uncounted.length > 0 ? (
+          <p className="text-xs text-destructive">{INVEST_COPY.ceilingUnknown(listAnd(capsWindow.uncounted.map((leg) => leg.symbol)))}</p>
+        ) : null}
         {!caps.ok ? (
           <p role="alert" className="text-xs text-destructive">
             {caps.message}
           </p>
         ) : (
           <>
-            {caps.maxPerCall > DEPTH_CEILING_PER_BUY_RAW ? (
+            {/* NO CAP EXISTS AT ALL — the ceiling is under the floor. The fix is
+                the basket, so no number is offered as one. */}
+            {capsWindow !== null && capsWindow.empty && capsWindow.ceilingRaw !== null && capsWindow.ceilingBinding !== null ? (
               <p role="alert" className="text-xs text-destructive">
-                {INVEST_COPY.depthWarning(formatUsd(DEPTH_CEILING_PER_BUY_RAW))}
+                {INVEST_COPY.capWindowEmpty(formatUsd(capsWindow.floorRaw), atMostUsd(capsWindow.ceilingRaw), capsWindow.ceilingBinding.symbol)}
               </p>
+            ) : null}
+            {capsWindow !== null && !capsWindow.empty && capsWindow.ceilingRaw !== null && capsWindow.ceilingBinding !== null && overCeiling(caps.maxPerCall, capsWindow) ? (
+              <div className="space-y-1">
+                <p role="alert" className="text-xs text-destructive">
+                  {INVEST_COPY.depthWarning(
+                    atMostUsd(capsWindow.ceilingRaw),
+                    capsWindow.ceilingBinding.symbol,
+                    capsWindow.ceilingBinding.readOn ?? "an unrecorded day",
+                    lighter === null ? null : ratePercent(lighter),
+                  )}
+                </p>
+                {/* THE FIX AS A PRESS, at the value the card would have started
+                    on: half the ceiling, so it is not a new edge to sit on. */}
+                <Button type="button" size="sm" variant="outline" disabled={blocked} onClick={() => setPerBuy(formatUnits(capsWindow.suggestedRaw, USDC_DECIMALS))}>
+                  {INVEST_COPY.useSuggested(formatUsd(capsWindow.suggestedRaw))}
+                </Button>
+              </div>
             ) : null}
             {caps.maxPerCall > 1_000_000_000n ? <p className="text-xs text-destructive">{INVEST_COPY.convertWarning}</p> : null}
           </>
@@ -491,48 +656,34 @@ function PolicySetup({
           </p>
         ) : null}
 
-        <div className="space-y-1">
-          <div className={LABEL}>{INVEST_COPY.weightsTitle}</div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {OFFERED_LEGS.map((leg, index) => (
-              <div key={leg.mint} className="space-y-1">
-                <Label htmlFor={`invest-weight-${leg.mint}`}>{leg.symbol}</Label>
-                <div className="flex items-center gap-2">
-                  <Input
-                    id={`invest-weight-${leg.mint}`}
-                    inputMode="numeric"
-                    autoComplete="off"
-                    value={percents[index] ?? ""}
-                    disabled={blocked}
-                    onChange={(event) => setPercents((current) => current.map((value, at) => (at === index ? event.target.value : value)))}
-                    className="font-mono"
-                  />
-                  <span className="text-sm text-muted-foreground">%</span>
-                </div>
-              </div>
-            ))}
-          </div>
-          <p className="text-xs text-muted-foreground">{INVEST_COPY.weightsHint}</p>
-          {!weightsTyped.ok ? (
-            <p role="alert" className="text-xs text-destructive">
-              {weightsTyped.message}
+        {/* THE CEILING IN FULL, with every figure computed from the basket
+            above rather than from the night this block used to quote. It is
+            only shown when there IS a ceiling: a basket whose routes nobody
+            counted gets ceilingUnknown beside the caps instead, and inventing a
+            number here would be the one error this whole feature exists to
+            prevent. */}
+        {capsWindow !== null && capsWindow.ceilingRaw !== null && capsWindow.ceilingBinding !== null ? (
+          <div className="space-y-1 rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs">
+            <div className={LABEL}>{INVEST_COPY.thinPoolTitle}</div>
+            <p>
+              {INVEST_COPY.thinPool(
+                atMostUsd(capsWindow.ceilingRaw),
+                formatUsd(capsWindow.suggestedRaw),
+                capsWindow.ceilingBinding.symbol,
+                capsWindow.ceilingBinding.readOn ?? "an unrecorded day",
+              )}
             </p>
-          ) : null}
-        </div>
-
-        <div className="space-y-1 rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs">
-          <div className={LABEL}>{INVEST_COPY.thinPoolTitle}</div>
-          <p>{INVEST_COPY.thinPool(formatUsd(SUGGESTED_PER_BUY_RAW))}</p>
-        </div>
+          </div>
+        ) : null}
 
         <div className="space-y-1 rounded-md border px-3 py-2 text-xs">
           <div className={LABEL}>{INVEST_COPY.floorsTitle}</div>
-          {limits === null ? (
+          {priceLimits === null ? (
             <p>{INVEST_COPY.pricesUnknown}</p>
           ) : (
             <>
-              <p>{INVEST_COPY.solFloor(formatUsd(limits.floorPerSol), formatUsd(limits.todayPerSol))}</p>
-              {limits.legs.map((leg) => (
+              <p>{INVEST_COPY.solFloor(formatUsd(priceLimits.floorPerSol), formatUsd(priceLimits.todayPerSol))}</p>
+              {priceLimits.legs.map((leg) => (
                 <p key={leg.mint}>{INVEST_COPY.legCeiling(leg.symbol, formatUsd(leg.maxPer1e8))}</p>
               ))}
               <p className="text-muted-foreground">{INVEST_COPY.convertFloorEffect(ratePercent(CONVERT_FLOOR_MARGIN_BPS))}</p>
@@ -569,10 +720,13 @@ function PolicySetup({
 
         <Button
           type="button"
-          disabled={!canSignPolicy({ acknowledged, capsOk: caps.ok, minimumOk: minPerLeg.ok, weightsOk: weightsTyped.ok, blocked })}
+          disabled={!canSignPolicy({ acknowledged, capsOk: caps.ok, minimumOk: minPerLeg.ok, weightsOk: weightsTyped.ok, depthOk: !overDepth, blocked })}
           aria-busy={write.running}
           onClick={() => {
-            if (caps.ok && minPerLeg.ok && weightsTyped.ok && acknowledged) {
+            // THE SAME CONDITION AS THE BUTTON'S OWN, depth included. A guard
+            // here that is weaker than the one that greys the button is how a
+            // policy gets signed by a keypress on a disabled control.
+            if (caps.ok && minPerLeg.ok && weightsTyped.ok && !overDepth && acknowledged) {
               start({
                 maxPerCall: caps.maxPerCall,
                 maxRolling30d: caps.maxRolling30d,

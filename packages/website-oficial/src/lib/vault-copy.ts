@@ -359,21 +359,35 @@ export const INVEST_COPY = {
   // shipped $1,000 default is the figure it is judged by, and at two equal legs
   // that is $500 into ANTHROPIC's pool against the 50x it must clear.
   //
-  // Measured 2026-09-20, epoch 1039, slot 448864213, from the pools' own token
-  // vaults: ANTHROPIC/USDC held 9,541,652,779 raw USDC ($9,541.65), which admits
-  // $190.83 per leg and $381.67 for the whole buy, and gives a $500 leg only
-  // 19.1x cover where 50x is required. SPYx/USDC held $2,380,319.90 — 4,760x on
-  // the same $500. The words below round those DOWN to "about $190 / $380",
-  // because a reader must not read a ceiling as a target.
+  // WHAT THE FIGURES USED TO BE, AND WHY THEY ARE NO LONGER WRITTEN DOWN HERE.
+  // This block held one night's reading of ANTHROPIC's PINNED RAYDIUM POOL —
+  // $9,541.65 on 2026-09-20, admitting $190.83 a leg and $381.67 a buy at two
+  // equal legs — and the card printed it as the ceiling. Two things then became
+  // true at once. The keeper moved to Jupiter, so the pinned pool is no longer
+  // where the money goes (a 200 USDC ANTHROPIC buy routed BisonFi + Manifest on
+  // 2026-09-21 and touched that pool not at all). And the owner got a picker,
+  // so the basket and the shares are his: the ceiling is a function of which
+  // assets he chose and what share each takes, and one leg at 50 % against one
+  // at 20 % moved the same asset's cap from $298 to $745 on one day's reading.
+  // A sentence with the number inside it cannot follow either change, so every
+  // figure below is PASSED IN from basket-picker.ts's live computation over
+  // solana-core's dated route censuses, and this comment keeps only the history.
   thinPoolTitle: "Today, this basket may buy nothing at all",
   /**
-   * `defaultCap` is what the Most per buy box starts at, so the sentence names
-   * the very number it is asking to be lowered. The pool figures stay inline
-   * with the measurement recorded above them rather than being passed in: they
-   * are readings of one night, not values the screen can compute.
+   * THE CEILING, IN THE OWNER'S TERMS, with every number computed from the
+   * basket on screen. `ceiling` is the largest Most per buy every chosen leg's
+   * counted route still covers, `suggested` is where the box starts (half of
+   * it), `symbol` is the leg that set it and `readOn` the day that leg's route
+   * was counted. Nothing here is a constant, because none of it is constant.
    */
-  thinPool: (defaultCap: string): string =>
-    `The keeper refuses a buy unless the venue it buys from holds at least ${POOL_DEPTH_MULTIPLE} times that buy, so a thin market sets a small ceiling. ANTHROPIC's pool held about $9,500 when it was read on 20 September 2026, which admitted about $190 for its share of a buy — about $380 for the whole buy, and that is the ceiling itself, not a target. And because a buy takes all of the basket or none, a Most per buy above it stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance. Most per buy starts at ${defaultCap}. On that night's reading, about $190 or less left roughly twice the cover the keeper asks for; $380 left almost none, so a pool that drains even slightly turns $380 into a cap that buys nothing. That figure was true that night and nothing on this page re-reads it, so treat the smaller number as the safe one while ANTHROPIC's pool is this small. SPYx's pool held about $2.4 million the same night and is nowhere near this limit. The keeper measures whichever venue it is actually buying through, in the turn itself, so a market that was deep last week does not count for anything today.`,
+  thinPool: (ceiling: string, suggested: string, symbol: string, readOn: string): string =>
+    `The keeper refuses a buy unless the venue it buys from holds at least ${POOL_DEPTH_MULTIPLE} times that buy, so a thin market sets a small ceiling. On the shares you have chosen, the leg that sets it is ${symbol}: counting what its route held when it was last read, on ${readOn}, the whole buy can be at most ${ceiling}, and that is the ceiling itself, not a target. Because a buy takes all of the basket or none, a Most per buy above it stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance. Most per buy starts at ${suggested}, which is half the ceiling, so an ordinary day's drift in that market does not turn your cap into one that buys nothing. That count was true on the day it was taken and nothing on this page re-reads it. The keeper measures whichever venue it is actually buying through, in the turn itself, so a market that was deep last week does not count for anything today.`,
+  /** The same ceiling as a line of facts, above the box it constrains. */
+  capWindow: (floor: string, ceiling: string, symbol: string, readOn: string): string =>
+    `At these shares, Most per buy can be between ${floor} and ${ceiling}. The bottom is arithmetic on what you are signing; the top is ${symbol}'s market as it was counted on ${readOn}, divided by the ${POOL_DEPTH_MULTIPLE}x cover the keeper insists on.`,
+  /** No ceiling at all: a chosen leg's route has never been counted. Never rendered as a large ceiling. */
+  ceilingUnknown: (symbols: string): string =>
+    `SaverFi has not counted what ${symbols} holds where a buy would actually land, so it cannot tell you the largest Most per buy this basket can use. The figure it does have for that market is the venue's whole book, which no single buy reaches, and dividing that would give you a ceiling that is too high — the one direction this number must never be wrong in. Keep Most per buy small, or choose an asset whose route has been counted.`,
 
   // ── THE ISSUERS' POWERS ────────────────────────────────────────────────────
   //
@@ -461,21 +475,58 @@ export const INVEST_COPY = {
   weightsHint: "Whole percentages that add up to 100. Nothing is rounded or filled in for you: a basket that does not add up is refused rather than adjusted.",
   weightProblem: (symbol: string): string => `${symbol}'s share must be a whole number of percent, greater than zero.`,
   weightsSum: (total: string): string => `The shares must add up to exactly 100 %. These add up to ${total}.`,
+  /** An empty basket. The program takes 1..8 legs and there is no such thing as a policy that buys nothing on purpose. */
+  basketEmpty: "Choose at least one stock for your vault to buy.",
+  /** More than the picker offers. The program would take eight; this product offers five, and the refusal names the number on screen. */
+  basketTooMany: (most: number, chosen: number): string => `A basket holds at most ${most} stocks. This one has ${chosen}: untick one before adding another.`,
   venueLabel: "Where it trades",
   venueHint: "The exchange the keeper buys through. SaverFi checks the transaction against the one you pick before your wallet is asked to sign it.",
   convertWarning: "Above $1,000.00 per buy, one conversion can sell more than 1 SOL of your savings at the floor.",
   /**
-   * SAID BESIDE THE BOX, not only in the notice three boxes above it.
+   * SAID BESIDE THE BOX, the moment he types past the ceiling — AND IT NOW
+   * BLOCKS SIGN RATHER THAN ONLY COLOURING THE TEXT.
    *
-   * The thin-pool notice explains the ceiling; this is what the owner sees the
-   * moment he types past it. It is a WARNING and not a refusal on purpose: the
-   * ceiling is a reading of one night that nothing on this page re-reads, so
-   * blocking on it would refuse a cap that a recovered pool would accept. What
-   * must not happen is the old behaviour -- a cap the card itself calls dead,
-   * sitting in the box, with Sign lit and 0.0117 SOL of rent about to be spent.
+   * THE REASON IT WAS A WARNING IS GONE. It was a warning because the ceiling
+   * was a literal that nothing on the page could re-derive, so refusing on it
+   * would have been refusing on a number the page could not defend. The page
+   * now computes it from the basket on screen, the shares in the boxes and
+   * solana-core's dated route censuses, and re-computes it on every keystroke.
+   * A cap over it is not a risk, it is an arithmetic certainty on the readings
+   * SaverFi has: the keeper's depth gate is all-or-nothing, so the policy buys
+   * NOTHING at any balance, forever, and the rent that signs it does not come
+   * back.
+   *
+   * A REFUSAL THAT DOES NOT SAY WHAT TO DO INSTEAD IS HALF A REFUSAL, so this
+   * names the leg responsible and every way out — the cap, that leg's share,
+   * or that leg.
+   *
+   * AND IT COUNTS THEM HONESTLY. In a one-stock basket the share is 100 % by
+   * arithmetic and cannot be lowered, so `lighterShare` arrives null and the
+   * sentence offers TWO ways out and says two. A refusal that promises three
+   * and lists two sends the owner looking for a control that is not there.
    */
-  depthWarning: (ceiling: string): string =>
-    `This is above the ${ceiling} that ANTHROPIC's pool allowed when it was last read. If the pool is still that size, a policy at this cap buys nothing and converts no SOL — and the rent you pay to sign it does not come back.`,
+  depthWarning: (ceiling: string, symbol: string, readOn: string, lighterShare: string | null): string =>
+    `${ceiling} is the most this basket can buy with, and ${symbol} is what sets it: its market was counted on ${readOn}, and the keeper will not put more than a ${POOL_DEPTH_MULTIPLE}th of what it found there into one leg of one buy. Above this the vault buys nothing and converts no SOL, at any balance, and the rent you pay to sign it does not come back. ${lighterShare === null ? "Two" : "Three"} ways out: lower Most per buy to ${ceiling} or less` +
+    (lighterShare === null ? "" : `, give ${symbol} a smaller share — ${lighterShare} or under works at the cap you typed`) +
+    `, or take ${symbol} out of the basket.`,
+  /**
+   * The button that takes the refusal away in one press.
+   *
+   * IT OFFERS THE SUGGESTED CAP, NOT THE CEILING, and the difference is the
+   * point. Pressing a button labelled with the ceiling would move the owner
+   * from one raw unit above the edge to exactly on it, where an ordinary day's
+   * drift in that market puts him back — a fix that has to be applied twice is
+   * not a fix. Half the ceiling is where the box would have started.
+   */
+  useSuggested: (suggested: string): string => `Use ${suggested}`,
+  /**
+   * NO CAP EXISTS AT ALL: the ceiling has fallen under the per-leg minimum's
+   * floor. This is a real outcome, not an error — a thin market at a heavy
+   * share produces it — and the only honest answer is that the BASKET has to
+   * change, so no number in the caps boxes is offered as a fix.
+   */
+  capWindowEmpty: (floor: string, ceiling: string, symbol: string): string =>
+    `There is no Most per buy that works for this basket. Every buy has to be at least ${floor} for each stock to clear its minimum, and ${symbol}'s market cannot cover more than ${ceiling} at the share you have given it. Give ${symbol} a smaller share, lower Least per stock, or take ${symbol} out.`,
   youAreSigning: (solFloor: string, legs: string, perBuy: string, per30Days: string): string =>
     `You are signing: SOL never sold below ${solFloor}; ${legs}; at most ${perBuy} per buy and ${per30Days} per 30 days.`,
   legSigning: (symbol: string, max: string): string => `${symbol} never bought above ${max} per 100,000,000 raw units`,
@@ -498,6 +549,57 @@ export const INVEST_COPY = {
   pauseKeeps: "Pausing signs this policy again as it is, with investing off, so it needs no prices. Resuming and signing again read today's prices.",
   pauseSigning: "You are signing: investing paused, with every floor and limit this policy has.",
   noRefill: "Signing again does not refill this month's cap.",
+} as const;
+
+/**
+ * THE CATALOGUE AND ITS PICKER.
+ *
+ * WHAT THE OWNER ASKED FOR, in his words: "que el user pueda seleccionar las
+ * que quiere y las que no, maximo como 5 assets y despues el user pone las %
+ * que quiere". So: browse, tick at most five, type a share against each.
+ *
+ * WHAT THE SCREEN OWES HIM BESIDE THE LIST. Two things, and neither may be
+ * buried in a paragraph under the fold:
+ *  * THAT A BUY IS ALL-OR-NOTHING. The keeper's refusals — the depth gate, the
+ *    fee ceiling, the transfer hook — each refuse the WHOLE basket and the SOL
+ *    conversion with it, by explicit doctrine (invest-decision.ts
+ *    legDepthDecision: "the deep ones included, and refusing to convert SOL
+ *    toward it"). Adding a thin asset to a deep basket does not add a little
+ *    risk to one leg; it puts the whole thing on that leg's worst day. The
+ *    sentence therefore lives WHERE HE PICKS, not in the small print.
+ *  * WHY AN ASSET IS NOT ON THE SHELF, with the reading that refused it.
+ *    offerProblems() returns every rule an asset failed and the dated figure
+ *    behind each, so a refusal can be re-run rather than argued with.
+ */
+export const PICKER_COPY = {
+  title: "Choose what your vault buys",
+  hint: (most: number): string =>
+    `Tick up to ${most} and give each one a share. Shares are whole percentages and must add up to exactly 100 — nothing is rounded or filled in for you, because a basket that does not add up is a different basket from the one on screen.`,
+  /** Said beside the ticks, not under them. */
+  allOrNothing:
+    "A buy takes the whole basket or none of it. If one of these cannot be bought on the day — its market too thin for the size, its issuer's fee raised, its transfer hook filled in — then nothing is bought, no SOL is converted, and that stays true on every sweep until you sign a different basket. The thinner the market you add, the more often that day comes.",
+  evenOut: "Even them out",
+  /** The running total, always on screen, so the sum is never news at the end. */
+  total: (total: string): string => `Shares add up to ${total}`,
+  short: (missing: string): string => `${missing} left to give`,
+  over: (excess: string): string => `${excess} too much`,
+  exact: "Adds up to 100 %",
+  /** One line per chosen leg: what it would be handed out of a full buy. */
+  legShare: (symbol: string, share: string, cap: string): string => `${symbol} takes ${share} of every buy — ${cap} out of a full one`,
+  full: (most: number): string => `That is ${most}, the most a basket holds. Untick one to choose another.`,
+  notOffered: "Not available",
+  /** Why an asset is off the shelf, with the dated reading that put it there. */
+  refusedBecause: (why: string): string => why,
+  /** The group's standing facts, shown once per group rather than once per asset. */
+  prestockGroup: "PreStocks: one issuer key mints, freezes, pauses, sets the transfer fee and holds a permanent delegate over every one of these, and it has used that key. Each charges 1 % to transfer, which is exactly SaverFi's limit — one more raise and the whole basket stops.",
+  xstockGroup: "xStocks: no transfer fee, and no key anywhere able to add one — the mint carries no fee setting at all, and a Token-2022 mint cannot gain one after it is made. The issuer still holds freeze, pause and a permanent delegate, under separate keys.",
+  /** The depth reading a tile carries, dated on its face. */
+  depthLine: (venue: string, usd: string, readOn: string): string => `${venue} held ${usd} when it was read on ${readOn}`,
+  depthUnread: "Nobody has counted this market where a buy would land.",
+  /** What a count is and is not, said once under the list. */
+  depthMeaning:
+    "Those are counts taken on a named day, not promises. The keeper counts again inside every buy, against the amount that buy really spends, and its count is the one that decides.",
+  remove: (symbol: string): string => `Remove ${symbol}`,
 } as const;
 
 export const WITHDRAW_COPY = {
