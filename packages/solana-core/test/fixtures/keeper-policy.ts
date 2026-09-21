@@ -63,15 +63,27 @@ export const LOSS_FORGIVEN = Object.freeze({
 });
 
 /**
- * HOW SMALL ONE BUY MUST BE BESIDE THE POOL IT GOES INTO.
+ * HOW SMALL ONE BUY MUST BE BESIDE THE VENUE IT GOES INTO.
  *
- * The pool's in-side reserve must cover the buy this many times over, measured
- * BEFORE the owner's SOL is sold toward it. One thin leg refuses the whole
- * basket and the SOL conversion with it.
+ * The venue must cover the buy this many times over, measured BEFORE the
+ * owner's SOL is sold toward it. One thin leg refuses the whole basket and the
+ * SOL conversion with it.
+ *
+ * WHAT IS COUNTED CHANGED ON 2026-09-21 AND THE NUMBER DID NOT. The keeper used
+ * to require a POOL'S IN-SIDE RESERVE to cover the spend 50 times; it now
+ * counts the VENUE'S INVENTORY of the asset each hop pays it, because the
+ * assets this product must hold trade on a CLOB (Manifest) and a DLMM
+ * (Meteora), neither of which has an in-side reserve to read. The two are the
+ * same ratio at the quoted rate —
+ *     inventory / (spend / price) == (inventory * price) / spend
+ * — so 50 carries over unchanged, and the drained-venue replay gives 20.1x
+ * where the old gate gave 19.1x. The web's own panel still computes its ceiling
+ * from the in-side reserve it can see, which is why that arithmetic below is
+ * untouched.
  */
 export const POOL_DEPTH = Object.freeze({
   /** packages/solana-keeper/src/invest-decision.ts */
-  keeper: Object.freeze({ constant: "MIN_POOL_DEPTH_MULTIPLE", module: "invest-decision.ts", value: 50n }),
+  keeper: Object.freeze({ constant: "MIN_VENUE_INVENTORY_MULTIPLE", module: "invest-decision.ts", value: 50n }),
   /** packages/website-oficial/src/lib/vault-copy.ts, printed by INVEST_COPY.thinPool. */
   web: Object.freeze({ constant: "POOL_DEPTH_MULTIPLE", value: 50 }),
   /**
@@ -84,8 +96,10 @@ export const POOL_DEPTH = Object.freeze({
   /** Worked once by hand, in raw units whatever the mint's decimals: required = spend * multiple. */
   worked: Object.freeze({ spend: 1_000_000n, requiredReserve: 50_000_000n }),
   /**
-   * The gate is `reserve < spend * MIN_POOL_DEPTH_MULTIPLE`, so EXACTLY 50x
-   * cover is deep and one raw unit less is refused. A flip to `<=` moves both.
+   * The gate is `inventory < take * MIN_VENUE_INVENTORY_MULTIPLE`, so EXACTLY
+   * 50x cover is deep and one raw unit less is refused. A flip to `<=` moves
+   * both. (The keeper's own tests run that boundary through the real gate; this
+   * is the vector the two sides' copy is held to.)
    */
   boundary: Object.freeze({ forSpend: 1_000_000n, deepAtReserve: 50_000_000n, refusedAtReserve: 49_999_999n }),
 });

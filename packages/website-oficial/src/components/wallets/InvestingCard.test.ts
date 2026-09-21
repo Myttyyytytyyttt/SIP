@@ -204,7 +204,12 @@ describe("InvestingCard", () => {
     // default is refused against ANTHROPIC's pool and takes SPYx and the SOL
     // conversion down with it.
     expect(html).toContain("Today, this basket may buy nothing at all");
-    expect(html).toContain("The keeper refuses a buy unless the pool it goes into holds at least 50 times that buy");
+    // THE VENUE, NOT "THE POOL", since 2026-09-21: the keeper counts what the
+    // venue can hand over rather than a pool's in-side reserve, because the
+    // assets this basket must hold trade where there is no pool to read. The
+    // ratio and the 50 are unchanged, which is precisely why the WORDS needed
+    // changing in the same commit and no test would have said so.
+    expect(html).toContain("The keeper refuses a buy unless the venue it buys from holds at least 50 times that buy");
     expect(html).toContain("a Most per buy above it stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance.");
     // THE CEILING IS DATED WHERE THE INSTRUCTION IS, not only in the paragraph
     // beside it, and the figure the owner is pointed at has real cover: $380 is

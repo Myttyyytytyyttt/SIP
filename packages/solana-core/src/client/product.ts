@@ -34,7 +34,7 @@
 //  * legShare splits that by weight: at today's two equal legs, 500 USDC into
 //    ONE pool;
 //  * legDepthDecision then requires that pool's in-side reserve to cover the
-//    spend MIN_POOL_DEPTH_MULTIPLE (50) times over — 25,000 USDC for a
+//    spend MIN_VENUE_INVENTORY_MULTIPLE (50) times over — 25,000 USDC for a
 //    500-USDC leg.
 // ANTHROPIC/USDC held 9,541,652,779 raw USDC when it was last read (mainnet
 // 2026-09-20, slot 448864213). That is 18.9x cover against 50x required, so
@@ -47,7 +47,7 @@
 // reserve, read ONCE, on ONE day. It is not a property of the product and no
 // constant here can make it one: the same kind of reserve fell from about $6,700
 // to $51 in two days on the leg this catalogue no longer offers. A third leg,
-// different weights, a change in MIN_POOL_DEPTH_MULTIPLE, or that pool simply
+// different weights, a change in MIN_VENUE_INVENTORY_MULTIPLE, or that pool simply
 // thinning all move the neck, and nothing in this file re-reads it. The gate
 // that is always right is the keeper's, because it measures depth inside the
 // turn against the amount that turn will really spend; a number here only

@@ -23,6 +23,7 @@ import {
   type SolanaVaultHandlerOptions,
 } from "../src/server/build-handler";
 import { loadSolanaServerSettings } from "../src/server/config";
+import { POOL_DEPTH } from "./fixtures/keeper-policy";
 import type { SolanaGate } from "../src/server/handlers";
 import { deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
 import { createWeightedLimiter, type WeightedLimiter } from "../src/server/rate-limit";
@@ -483,8 +484,21 @@ describe("the reserve behind the depth ceiling", () => {
 
   it("is enough to recompute the ceiling the card used to quote as a literal", () => {
     // Read as text, never imported: solana-core does not depend on the keeper.
+    //
+    // THE CONSTANT WAS RENAMED UNDER THIS REGEX ON 2026-09-21, and nothing
+    // warned: the keeper's depth gate stopped comparing a POOL'S IN-SIDE
+    // RESERVE and started counting a VENUE'S INVENTORY, because the assets this
+    // product must hold trade on a CLOB and a DLMM that have no in-side reserve
+    // to read. The multiple is still 50 and this panel still computes its
+    // ceiling from the reserve it can see, so the arithmetic below is unchanged
+    // — but a regex over a neighbour's source pins that neighbour's FORMATTING,
+    // and had the rename gone the other way this would have thrown on `null`
+    // pointing at no defect at all. docs/TESTING_TRAPS.md, third species; the
+    // honest fix is the keeper exporting this number to a package both sides
+    // share, which is filed and not done here.
     const keeper = readFileSync(fileURLToPath(new URL("../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
-    const multiple = BigInt(/export const MIN_POOL_DEPTH_MULTIPLE = ([0-9_]+)n;/.exec(keeper)![1]!.replaceAll("_", ""));
+    const multiple = BigInt(/export const MIN_VENUE_INVENTORY_MULTIPLE = ([0-9_]+)n;/.exec(keeper)![1]!.replaceAll("_", ""));
+    expect(multiple).toBe(POOL_DEPTH.keeper.value);
 
     // What the panel does with the payload: a leg may spend at most a fiftieth of
     // the in-side reserve, and two equal legs double it for the whole buy.

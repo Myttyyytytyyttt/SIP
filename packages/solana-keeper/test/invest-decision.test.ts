@@ -40,8 +40,14 @@ import {
   INVEST_FAILED_CRITICAL_STREAK,
   LEG_FEE_STEP_BPS,
   LEG_FEE_WARN_BPS,
+  IMPACT_TOLERANCE_DIVISOR,
+  JUPITER_V6_PROGRAM,
   MAX_LEG_FEE_BPS,
-  MIN_POOL_DEPTH_MULTIPLE,
+  MIN_IMPACT_CEILING_BPS,
+  MIN_PROBE_RAW,
+  MIN_SLIPPAGE_MARGIN_BPS,
+  MIN_VENUE_INVENTORY_MULTIPLE,
+  PROBE_DIVISOR,
   RAYDIUM_CLMM_PROGRAM,
   ROUTABLE_VENUES,
   U64_MAX,
@@ -54,9 +60,10 @@ import {
   convertAmount,
   convertCapLamports,
   convertDecision,
+  censusVenueInventory,
   decodeMintFacts,
-  decodePoolPair,
-  decodeTokenAccountAmount,
+  decodeTokenAccountFacts,
+  impliedRateWad,
   inMintDecision,
   investFailedAlert,
   investFailedStreak,
@@ -66,10 +73,13 @@ import {
   legFeeCeilingAlert,
   legFeeWarnings,
   legShare,
+  legSlippageBps,
+  maxTurnImpactBps,
+  probeAmount,
+  venueImpactBps,
   MAX_PYTH_AGE_SECONDS,
   MAX_PYTH_DEVIATION_BPS,
   oracleConvertDecision,
-  readPoolPair,
   rollingDecision,
   routeRateWad,
   rollingTotal,
@@ -79,9 +89,12 @@ import {
   wrapPlan,
   wrapShortAlert,
   wrapShortStreak,
+  type DepthDecision,
+  type ImpactProbe,
+  type LegVenue,
 } from "../src/invest-decision.js";
 import { SLIPPAGE_BPS, netOfTransferFee } from "../src/min-out.js";
-import { RAYDIUM_CLMM } from "../src/program-scripts.js";
+import { JUPITER_PROGRAM, RAYDIUM_CLMM } from "../src/program-scripts.js";
 import { PYTH_SOL_USD_FEED_ID_HEX, PYTH_USDC_USD_FEED_ID_HEX, PYTH_VERIFICATION_FULL, type PythPriceUpdate } from "../src/pyth.js";
 
 describe("the policy's in_mint", () => {
@@ -139,10 +152,18 @@ describe("the venue the owner signed", () => {
 
   it("is a table, not a branch: every venue in it is admitted and every one is named in the refusal", () => {
     // THE SEAM, PINNED. Adding a venue is adding an entry here (plus a route
-    // builder for it) — never rewriting the gate. One entry today, deliberately:
-    // there is no second venue to add, and a placeholder would be the keeper
-    // claiming a route it cannot build.
-    expect([...ROUTABLE_VENUES.keys()]).toEqual([RAYDIUM_CLMM_PROGRAM.toBase58()]);
+    // builder for it) — never rewriting the gate. Two entries: Raydium CLMM,
+    // which the policy on chain names today and which has been confirming since
+    // 09-19, and Jupiter v6, which the product is moving to because the assets
+    // it must hold have their liquidity elsewhere. A third would be a third
+    // entry, not a branch.
+    expect([...ROUTABLE_VENUES.keys()]).toEqual([RAYDIUM_CLMM_PROGRAM.toBase58(), JUPITER_V6_PROGRAM.toBase58()]);
+    // TWO SPELLINGS OF ONE ADDRESS, PINNED TOGETHER, exactly as Raydium's are:
+    // this gate compares against this file's own constant and the route builder
+    // sends jupiter-route.ts's, and a drift between them admits a venue the
+    // keeper does not send — which the program answers with WrongVenue.
+    expect(JUPITER_V6_PROGRAM.toBase58()).toBe(JUPITER_PROGRAM.toBase58());
+    expect(JUPITER_V6_PROGRAM.toBase58()).toBe("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
     const detail = venueDecision(Keypair.generate().publicKey)?.detail ?? "";
     for (const [address, name] of ROUTABLE_VENUES) {
       expect(venueDecision(new PublicKey(address))).toBeNull();
@@ -602,6 +623,37 @@ describe("a leg's mint, before the basket is bought", () => {
     expect(refused.detail).toContain("charges a 101 bps transfer fee in epoch 1039, above the 100 bps");
   });
 
+  it("a fee that rises to 150 bps mid-flight refuses the WHOLE basket, at two legs so the two readings differ", () => {
+    // THE ISSUER SCHEDULES 150 FROM A LATER EPOCH and the epoch arrives between
+    // two sweeps. Two verdicts have to hold at once, and this is the first:
+    // ONE leg over the ceiling refuses the whole basket AND the SOL conversion.
+    //
+    // TWO LEGS, DELIBERATELY. At N=1 the basket and the leg collapse into one
+    // number and a per-leg rule and an all-or-nothing rule give the same answer
+    // — docs/TESTING_TRAPS.md's third disguise. The well-behaved leg has to be
+    // there for the refusal to be about the basket at all.
+    const clean = mintBytes([transferFeeConfig({ epoch: 0n, maximumFee: 0n, bps: 0 }, { epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps: 0 })]);
+    const rising = mintBytes([transferFeeConfig({ epoch: 1_032n, maximumFee: UNCAPPED, bps: 100 }, { epoch: 1_040n, maximumFee: UNCAPPED, bps: 150 })]);
+    const spyx = legOf(clean);
+    const anthropic = legOf(rising);
+    // The sweep before the roll buys both legs; the sweep after buys neither.
+    expect(legAdmissionDecision({ legs: [spyx, anthropic], currentEpoch: 1_039n }).admit).toBe(true);
+    const refused = legAdmissionDecision({ legs: [spyx, anthropic], currentEpoch: 1_040n });
+    expect(refused.admit).toBe(false);
+    if (refused.admit) return;
+    expect(refused.detail).toContain("charges a 150 bps transfer fee in epoch 1040, above the 100 bps");
+    // The leg at fault is named; the clean leg is not admitted separately,
+    // because LegAdmission carries one verdict and no per-leg outcome.
+    expect(refused.detail).toContain(anthropic.mint.toBase58());
+
+    // AND THE SECOND VERDICT, which belongs to the quote rather than to the
+    // mint: at 150 bps the keeper would have asked for 250, never the 200 that
+    // is fatal against a 150 bps fee. "the numbers the two arms are drawn from"
+    // holds the rest of that argument.
+    expect(legSlippageBps(150n)).toBe(250n);
+    expect(legSlippageBps(150n)).not.toBe(SLIPPAGE_BPS);
+  });
+
   it("refuses only from the epoch a scheduled fee starts in, not before", () => {
     const scheduled = mintBytes([
       transferFeeConfig({ epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps: 50 }, { epoch: TODAY + 2n, maximumFee: UNCAPPED, bps: 1_000 }),
@@ -886,261 +938,496 @@ describe("how much of a turn one leg gets", () => {
   });
 });
 
-describe("a leg's pool, at the moment the money would move", () => {
+describe("a leg's venue, at the moment the money would move", () => {
   const key = (): PublicKey => Keypair.generate().publicKey;
 
-  /** The two pools measured on mainnet on 2026-09-20, by the addresses the registry routes through. */
-  const DRAINED_POOL = new PublicKey("HvpDt29EdGcKkFMLkUgvAJDP5oDFLaYG4jnVZnRsHduM");
-  const LIVE_POOL = new PublicKey("47MsbowAJnPPt6jgSGLK4hdCtKqRRcKT5pTFHPV7WBPt");
-  /** What each held that night, raw: USDC's six decimals, the stock's nine. */
-  const DRAINED_USDC = 31_910_000n;
+  /**
+   * THE DRAINED VENUE, AS IT WAS MEASURED. FIGUREAI on 2026-09-20: 0.110274669
+   * of the stock (nine decimals) against 31.91 USDC, mid 289.36 USDC/token.
+   * check:legs had passed the same leg at 6,700 dollars two days earlier.
+   */
   const DRAINED_STOCK = 110_274_669n;
-  const LIVE_USDC = 9_389_405_679n;
+  /** The live SPYx venue the same night, for what the bound costs where it is fine. */
   const LIVE_STOCK = 1_163_416_179n;
-  /** The default purchase, one leg's share of it, and one leg's share of a 1,000-dollar per-call cap split three ways. */
+
+  /** The product's default purchase, one leg's share of it, and one leg of a 1,000-dollar cap split three ways. */
   const FIVE_DOLLARS = 5_000_000n;
-  const ONE_LEG_OF_THE_DEFAULT = 1_666_666n;
+  /**
+   * THE WEIGHT'S OWN ARITHMETIC, NOT A THIRD. Three legs at 3333 bps is
+   * legShare(5_000_000, 3333) = 1_666_500 raw, a hundred and sixty-six units
+   * under an exact third: state.rs weights are basis points and the remainder
+   * is not redistributed. Writing 1_666_666 here would be inventing a number
+   * the keeper never spends.
+   */
+  const ONE_LEG_OF_THE_DEFAULT = 1_666_500n;
   const A_THIRD_OF_A_THOUSAND = 333_300_000n;
 
-  /** A Raydium CLMM PoolState as mainnet serves one: 1544 bytes, the pair at 73 and 105, the vaults at 137 and 169. */
-  function poolBytes(pair: { mint0: PublicKey; mint1: PublicKey; vault0: PublicKey; vault1: PublicKey }): Buffer {
-    const data = Buffer.alloc(1_544);
-    // The discriminator, bump, amm_config and owner ahead of the pair, and
-    // everything after the vaults: noise that must not leak into any address.
-    data.fill(0xcd, 0, 73);
-    data.fill(0xce, 201, 1_544);
-    pair.mint0.toBuffer().copy(data, 73);
-    pair.mint1.toBuffer().copy(data, 105);
-    pair.vault0.toBuffer().copy(data, 137);
-    pair.vault1.toBuffer().copy(data, 169);
-    return data;
-  }
+  /**
+   * WHAT THE TURN TAKES OUT OF THE DRAINED VENUE at each of those sizes, at the
+   * measured mid of 289.36 USDC/token, in the stock's nine decimals. These are
+   * the spec's own figures and the whole point of the gate: at $5 the cover is
+   * 7.4x and at $1.67 it is 20.1x, both far under 50 — and $5 is UNDER the ~$11
+   * revert threshold, so this venue would have FILLED and taken the money.
+   */
+  const TAKE_AT_FIVE_DOLLARS = 14_936_000n;
+  const TAKE_AT_ONE_LEG_OF_THE_DEFAULT = 5_473_455n;
 
-  /** An SPL Token account: 165 bytes, mint(32) owner(32) then the amount, a u64 at 64. */
-  function tokenAccountBytes(amount: bigint): Buffer {
+  /** An SPL Token account as the chain serves one: 165 bytes, mint(32) owner(32) amount(u64 at 64). */
+  function tokenAccountBytes(mint: PublicKey, owner: PublicKey, amount: bigint): Buffer {
     const data = Buffer.alloc(165);
-    key().toBuffer().copy(data, 0);
-    key().toBuffer().copy(data, 32);
+    mint.toBuffer().copy(data, 0);
+    owner.toBuffer().copy(data, 32);
     data.writeBigUInt64LE(amount, 64);
-    data.fill(0xaf, 72, 165); // delegate, state, is_native, delegated_amount, close_authority
+    // delegate, state, is_native, delegated_amount, close_authority: noise that
+    // must not leak into a mint, an owner or a balance.
+    data.fill(0xaf, 72, 165);
     return data;
   }
 
-  interface LegInput {
-    readonly reserve: bigint;
-    readonly stock: bigint;
-    readonly spend: bigint;
-    readonly pool?: PublicKey;
-    /** True puts the in-asset at token_1 instead of token_0: the order is the pool's, not ours. */
-    readonly flipped?: boolean;
+  interface Held {
+    readonly mint: PublicKey;
+    readonly amount: bigint;
+    readonly owner?: PublicKey;
+    readonly writable?: boolean;
+    readonly vaultOwned?: boolean;
+    readonly programOwner?: PublicKey;
+    readonly bytes?: number;
   }
 
-  /** A basket as the turn hands it to the gate: one pool account and two vault balances per leg. */
-  function basketOf(legs: readonly LegInput[]) {
-    const vaultAmounts = new Map<string, bigint>();
-    const built = legs.map((leg) => {
-      const mint = key();
-      const inVault = key();
-      const outVault = key();
-      vaultAmounts.set(inVault.toBase58(), leg.reserve);
-      vaultAmounts.set(outVault.toBase58(), leg.stock);
-      const pair = leg.flipped === true
-        ? { mint0: mint, mint1: USDC_MINT, vault0: outVault, vault1: inVault }
-        : { mint0: USDC_MINT, mint1: mint, vault0: inVault, vault1: outVault };
+  /** A census over accounts a route names, built the way a turn builds one. */
+  function censusOf(payMint: PublicKey, held: readonly Held[]): ReturnType<typeof censusVenueInventory> {
+    const writable = new Set<string>();
+    const vaultOwned = new Set<string>();
+    const candidates = held.map((account) => {
+      const address = key();
+      if (account.writable !== false) writable.add(address.toBase58());
+      if (account.vaultOwned === true) vaultOwned.add(address.toBase58());
+      const full = tokenAccountBytes(account.mint, account.owner ?? key(), account.amount);
       return {
-        mint,
-        pool: leg.pool ?? key(),
-        spend: leg.spend,
-        read: readPoolPair({ data: poolBytes(pair) }),
+        address,
+        owner: account.programOwner ?? TOKEN_2022_PROGRAM_ID,
+        data: account.bytes === undefined ? full : full.subarray(0, account.bytes),
       };
     });
-    return { legs: built, vaultAmounts, decide: () => legDepthDecision({ inMint: USDC_MINT, legs: built, vaultAmounts }) };
+    return censusVenueInventory({ payMint, candidates, writable, vaultOwned });
   }
 
-  it("walks the pair and both vaults out of a pool's own bytes, and a balance out of a token account's", () => {
-    const pair = { mint0: USDC_MINT, mint1: key(), vault0: key(), vault1: key() };
-    expect(decodePoolPair(poolBytes(pair))).toEqual(pair);
-    expect(decodeTokenAccountAmount(tokenAccountBytes(LIVE_USDC))).toBe(LIVE_USDC);
+  /** One leg as the turn hands it to the gate: one hop, one venue, ARM 2 silent unless asked. */
+  function legOf(input: {
+    readonly mint?: PublicKey;
+    readonly spend: bigint;
+    readonly take: bigint;
+    readonly held: readonly Held[];
+    readonly label?: string;
+    readonly impact?: ImpactProbe;
+    readonly censusScope?: "every-hop" | "final-only";
+  }): LegVenue {
+    const mint = input.mint ?? key();
+    const label = input.label ?? "Manifest";
+    return {
+      mint,
+      spend: input.spend,
+      venueLabels: [label],
+      hops: [{ label, payMint: mint, takeRaw: input.take, census: censusOf(mint, input.held) }],
+      censusScope: input.censusScope ?? "every-hop",
+      impact: input.impact ?? { compared: false, why: "no probe was taken for this case" },
+    };
+  }
 
-    // Bytes too short to reach the offsets are a refusal with a reason, not a
-    // PublicKey built out of whatever followed.
-    const short = readPoolPair({ data: Buffer.alloc(200) });
-    expect(short.ok).toBe(false);
-    if (short.ok) return;
-    expect(short.why).toContain("could not be read as a Raydium pool");
-    expect(() => decodeTokenAccountAmount(Buffer.alloc(64))).toThrow(/at least 72 bytes/);
+  const decide = (legs: readonly LegVenue[]): DepthDecision => legDepthDecision({ inMint: USDC_MINT, legs });
+
+  it("reads a token account's mint, owner and balance out of its own bytes, and refuses bytes too short to hold them", () => {
+    const mint = key();
+    const owner = key();
+    expect(decodeTokenAccountFacts(tokenAccountBytes(mint, owner, LIVE_STOCK))).toEqual({ mint, owner, amount: LIVE_STOCK });
+    // 164 bytes decode into three valid-looking fields under a laxer minimum;
+    // the 165 is what makes this the SPL layout and not three arbitrary reads.
+    expect(() => decodeTokenAccountFacts(Buffer.alloc(164))).toThrow(/at least 165 bytes/);
   });
 
-  it("trades against a pool with room, in either token order", () => {
-    // The live pool as measured, against one leg's share of a 250-dollar cap.
-    for (const flipped of [false, true]) {
-      const basket = basketOf([{ reserve: LIVE_USDC, stock: LIVE_STOCK, spend: 83_000_000n, flipped }]);
-      expect(basket.decide()).toEqual({ deep: true });
-    }
+  it("REFUSES THE DRAINED VENUE AT THE PRODUCT'S OWN DEFAULT SIZE, one leg — 7.4x cover", () => {
+    // THE CASE THE GATE EXISTS FOR, at the size that would actually have
+    // filled. ARM 1 alone decides it: no probe, no second quote, no guess about
+    // how Jupiter routes a small size.
+    const leg = legOf({ spend: FIVE_DOLLARS, take: TAKE_AT_FIVE_DOLLARS, held: [{ mint: key(), amount: DRAINED_STOCK }] });
+    // The cover the refusal is about, stated before it is asserted on.
+    expect((Number(DRAINED_STOCK) / Number(TAKE_AT_FIVE_DOLLARS)).toFixed(1)).toBe("7.4");
+    const held = legOf({
+      spend: FIVE_DOLLARS,
+      take: TAKE_AT_FIVE_DOLLARS,
+      held: [{ mint: leg.mint, amount: DRAINED_STOCK }],
+      mint: leg.mint,
+    });
+    const decision = decide([held]);
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
+    expect(decision.outcome).toBe("REFUSED");
+    // Both figures and the cover, named: an operator cannot act on "a venue was thin".
+    expect(decision.detail).toContain(`holds ${DRAINED_STOCK} raw`);
+    expect(decision.detail).toContain(`against the ${TAKE_AT_FIVE_DOLLARS} this turn would move through it`);
+    expect(decision.detail).toContain("7.4x cover");
+    expect(decision.detail).toContain(`under the ${MIN_VENUE_INVENTORY_MULTIPLE}x`);
+    expect(decision.detail).toContain(held.mint.toBase58());
   });
 
-  it("refuses the pool that drained after check:legs passed it — down to the default basket's own share", () => {
-    // 6,700 dollars when the build-time check ran; 51 two days later. This is
-    // the failure the whole gate exists for, stated as a vector — and it is
-    // stated at the SMALLEST spend the product makes as well as the largest,
-    // because a bound that only catches the big ones would have let the default
-    // 5-dollar basket buy into a pool holding 31.91 USDC.
-    for (const spend of [ONE_LEG_OF_THE_DEFAULT, FIVE_DOLLARS, A_THIRD_OF_A_THOUSAND]) {
-      const basket = basketOf([{ reserve: DRAINED_USDC, stock: DRAINED_STOCK, spend, pool: DRAINED_POOL }]);
-      const decision = basket.decide();
-      expect(decision.deep).toBe(false);
-      if (decision.deep) return;
-      expect(decision.outcome).toBe("REFUSED");
-      // Both figures, named: the operator cannot act on "a pool was thin".
-      expect(decision.detail).toContain(`holds ${DRAINED_USDC} in-asset raw against the ${spend} this turn would push into it`);
-      expect(decision.detail).toContain(basket.legs[0]!.mint.toBase58());
-      expect(decision.detail).toContain(DRAINED_POOL.toBase58());
-      expect(decision.detail).toContain("Pool depth is measured in the turn, not at build time");
-    }
-    // 19.1x cover at the default basket's share — the vector that sets the
-    // bound: anything at or under 19x would have admitted this pool there.
-    const smallest = basketOf([{ reserve: DRAINED_USDC, stock: DRAINED_STOCK, spend: ONE_LEG_OF_THE_DEFAULT }]).decide();
-    expect(smallest.deep === false && smallest.detail).toContain("19.1x cover, under the 50x this keeper trades on");
-    const five = basketOf([{ reserve: DRAINED_USDC, stock: DRAINED_STOCK, spend: FIVE_DOLLARS }]).decide();
-    expect(five.deep === false && five.detail).toContain("6.4x cover, under the 50x this keeper trades on");
-  });
-
-  it("admits what the live pool was measured to serve, and refuses the size it was measured not to", () => {
-    // The live pool as mainnet held it on 2026-09-20, with its 0.5 % impact
-    // size measured at 350 dollars and then 598 six minutes later.
-    const against = (spend: bigint) => basketOf([{ reserve: LIVE_USDC, stock: LIVE_STOCK, spend }]).decide();
-    // A 250-dollar per-call cap's heaviest leg: 94x cover, a size this venue
-    // serves without noticing. A gate that refused this is one an operator
-    // turns off, and then none of it runs at all.
-    expect(against(100_000_000n)).toEqual({ deep: true });
-    // 187.79 — half the smaller of the two measurements, and the most 50x admits here.
-    expect(against(187_788_113n)).toEqual({ deep: true });
-    // And the 333 dollars a 1,000-dollar cap splits three ways: 28x cover, at
-    // the size this pool was measured NOT to absorb quietly.
-    const overTheMeasuredSize = against(A_THIRD_OF_A_THOUSAND);
-    expect(overTheMeasuredSize.deep).toBe(false);
-    expect(overTheMeasuredSize.deep === false && overTheMeasuredSize.detail).toContain("28.2x cover, under the 50x");
-  });
-
-  it("puts the boundary exactly at the multiple, and tests it there", () => {
-    expect(MIN_POOL_DEPTH_MULTIPLE).toBe(50n);
-    const spend = 1_000_000n;
-    const exactly = basketOf([{ reserve: spend * MIN_POOL_DEPTH_MULTIPLE, stock: LIVE_STOCK, spend }]).decide();
-    expect(exactly).toEqual({ deep: true });
-    const oneShort = basketOf([{ reserve: spend * MIN_POOL_DEPTH_MULTIPLE - 1n, stock: LIVE_STOCK, spend }]).decide();
-    expect(oneShort.deep).toBe(false);
-    expect(oneShort.deep === false && oneShort.detail).toContain("it would need 50000000");
-  });
-
-  it("refuses the WHOLE basket for one shallow leg, the deep ones included", () => {
-    // The same doctrine as the unroutable-leg and mint-admission refusals, and
-    // for the same reason: a partial basket is not the basket that was signed.
-    const basket = basketOf([
-      { reserve: LIVE_USDC, stock: LIVE_STOCK, spend: 50_000_000n },
-      { reserve: DRAINED_USDC, stock: DRAINED_STOCK, spend: 50_000_000n, pool: DRAINED_POOL },
-      { reserve: LIVE_USDC, stock: LIVE_STOCK, spend: 50_000_000n },
+  it("REFUSES THE DRAINED VENUE AT THE DEFAULT SIZE ACROSS THREE LEGS — 20.1x cover, the number 50 was derived from", () => {
+    // $5 across three legs at 3333 bps is $1.6667 each. The OLD in-side-reserve
+    // gate gave 19.1x on this same case and the new inventory census gives
+    // 20.1x, which is the two gates agreeing about the one case both can see —
+    // so the 50x derivation transfers intact rather than being re-guessed.
+    expect(legShare(FIVE_DOLLARS, 3_333)).toBe(ONE_LEG_OF_THE_DEFAULT);
+    expect((Number(DRAINED_STOCK) / Number(TAKE_AT_ONE_LEG_OF_THE_DEFAULT)).toFixed(1)).toBe("20.1");
+    const mint = key();
+    const decision = decide([
+      legOf({ mint, spend: ONE_LEG_OF_THE_DEFAULT, take: TAKE_AT_ONE_LEG_OF_THE_DEFAULT, held: [{ mint, amount: DRAINED_STOCK }] }),
     ]);
-    const decision = basket.decide();
     expect(decision.deep).toBe(false);
     if (decision.deep) return;
-    expect(decision.detail).toContain(basket.legs[1]!.mint.toBase58());
+    expect(decision.detail).toContain("20.1x cover");
+  });
+
+  it("refuses the drained venue AT EVERY BALANCE a real turn can reach, from the per-leg minimum up", () => {
+    // "At any balance" is the doctrine, and a gate that only refuses large
+    // turns is the check:legs mistake one file further down. The three sizes
+    // are the smallest share that clears invest.rs's per-leg bar, the product
+    // default, and one leg of a 1,000-dollar max_per_call split three ways.
+    for (const [spend, take] of [
+      [ONE_LEG_OF_THE_DEFAULT, TAKE_AT_ONE_LEG_OF_THE_DEFAULT],
+      [FIVE_DOLLARS, TAKE_AT_FIVE_DOLLARS],
+      [A_THIRD_OF_A_THOUSAND, (A_THIRD_OF_A_THOUSAND * TAKE_AT_FIVE_DOLLARS) / FIVE_DOLLARS],
+    ] as const) {
+      const mint = key();
+      expect(decide([legOf({ mint, spend, take, held: [{ mint, amount: DRAINED_STOCK }] })]).deep).toBe(false);
+    }
+  });
+
+  it("trades against a venue with room", () => {
+    // The live SPYx venue, against a take it covers better than 50 times over.
+    const mint = key();
+    const take = LIVE_STOCK / 60n;
+    expect(decide([legOf({ mint, spend: 83_000_000n, take, held: [{ mint, amount: LIVE_STOCK }] })])).toEqual({ deep: true });
+    // AND THE BOUNDARY IS WHERE IT IS WRITTEN. Exactly 50x is deep; one raw
+    // unit of inventory less is refused. A flip to `<=` moves both.
+    const exact = 1_000_000n;
+    expect(decide([legOf({ mint, spend: 1n, take: exact, held: [{ mint, amount: exact * MIN_VENUE_INVENTORY_MULTIPLE }] })])).toEqual({ deep: true });
+    expect(decide([legOf({ mint, spend: 1n, take: exact, held: [{ mint, amount: exact * MIN_VENUE_INVENTORY_MULTIPLE - 1n }] })]).deep).toBe(false);
+  });
+
+  it("DOES NOT COUNT THE VAULT'S OWN HOLDINGS as the venue's inventory", () => {
+    // THE FAILURE THAT LOOSENS ITSELF EVERY TURN. vaultTarget is in the route
+    // by construction and the vault accumulates the stock it buys, so counting
+    // it makes a drained venue look deeper the longer the vault has been
+    // running. The two readings have to DIFFER here, or the case proves nothing.
+    const mint = key();
+    const venueHolds = 50_000_000n;
+    const vaultHolds = 40_000_000_000n;
+    const take = 10_000_000n;
+    const held: Held[] = [
+      { mint, amount: venueHolds },
+      { mint, amount: vaultHolds, vaultOwned: true },
+    ];
+    // Counted together the cover is 4005x and the venue is admitted; the
+    // venue's own 0.05 covers the take 5 times and is refused.
+    expect((Number(venueHolds + vaultHolds) / Number(take)).toFixed(0)).toBe("4005");
+    const decision = decide([legOf({ mint, spend: FIVE_DOLLARS, take, held })]);
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
+    expect(decision.detail).toContain(`holds ${venueHolds} raw`);
+    expect(decision.detail).toContain("5.0x cover");
+    // And the census counted ONE account, not two.
+    expect(censusOf(mint, held)).toEqual({ counted: true, inventory: venueHolds, accounts: 1 });
+  });
+
+  it("does not count inventory the route marks READ-ONLY", () => {
+    // A source of funds must be writable. An account holding ten of the target
+    // that the route cannot debit admits a venue that cannot pay us from it.
+    const mint = key();
+    const census = censusOf(mint, [{ mint, amount: 10_000_000_000n, writable: false }]);
+    expect(census.counted).toBe(false);
+    if (census.counted) return;
+    expect(census.why).toContain("no writable, non-vault token account holding");
+    expect(decide([legOf({ mint, spend: FIVE_DOLLARS, take: 1n, held: [{ mint, amount: 10_000_000_000n, writable: false }] })]).deep).toBe(false);
+  });
+
+  it("refuses when no account in the route holds the mint being bought, and does not fall through to ARM 2", () => {
+    // A venue whose payout account is absent, or an account list truncated by a
+    // partial page. An unmeasurable depth is not a depth — and ARM 2 passing
+    // must not rescue it, so this case hands ARM 2 a clean comparison.
+    const mint = key();
+    const clean: ImpactProbe = { compared: true, impactBps: 0n, ceilingBps: 25n };
+    const decision = decide([
+      legOf({ mint, spend: FIVE_DOLLARS, take: 1_000n, held: [{ mint: key(), amount: 10_000_000_000n }], impact: clean }),
+    ]);
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
+    expect(decision.detail).toContain("an unmeasurable depth is not a depth");
+  });
+
+  it("ignores accounts that are not token accounts, and bytes too short to be one", () => {
+    const mint = key();
+    // Right mint at the right offset, wrong program owner: not a token account.
+    expect(censusOf(mint, [{ mint, amount: 10_000_000_000n, programOwner: key() }]).counted).toBe(false);
+    // The classic SPL Token program counts exactly as Token-2022 does.
+    expect(censusOf(mint, [{ mint, amount: 7n, programOwner: TOKEN_PROGRAM_ID }])).toEqual({ counted: true, inventory: 7n, accounts: 1 });
+    // 164 bytes is one short of the layout this gate decodes.
+    expect(censusOf(mint, [{ mint, amount: 10_000_000_000n, bytes: 164 }]).counted).toBe(false);
+  });
+
+  it("ARM 1 PASSES concentrated liquidity sitting away from the price, and ARM 2 catches it", () => {
+    // THE ONE CASE ARM 1 ALONE WOULD SPEND ON, and the reason ARM 2 exists. A
+    // Meteora DLMM reserve holding 1,000 of the target covers the take 1000x —
+    // a count of units cannot see WHERE those units sit — while the turn quotes
+    // 400 bps worse than a sixteenth-sized probe on the SAME ammKey list.
+    const mint = key();
+    const inventory = 1_000_000_000_000n;
+    const take = 1_000_000_000n;
+    expect(decide([legOf({ mint, spend: FIVE_DOLLARS, take, held: [{ mint, amount: inventory }], label: "Meteora DLMM" })])).toEqual({ deep: true });
+
+    const ceiling = maxTurnImpactBps(200n, 100n);
+    expect(ceiling).toBe(25n);
+    const decision = decide([
+      legOf({
+        mint,
+        spend: FIVE_DOLLARS,
+        take,
+        held: [{ mint, amount: inventory }],
+        label: "Meteora DLMM",
+        impact: { compared: true, impactBps: 400n, ceilingBps: ceiling },
+      }),
+    ]);
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
+    expect(decision.detail).toContain("400 bps worse at this turn's size");
+    expect(decision.detail).toContain("the units are there but not at this price");
+  });
+
+  it("ADMITS A UNIFORMLY BAD PRICE, because this gate measures depth at the turn's size and not price", () => {
+    // THE TEST ASSERTS THE ADMISSION ON PURPOSE. Both quotes come from one
+    // source in one instant, so a market quoted 30 % below fair value divides
+    // out of the ratio and a count of units has no opinion about what a unit is
+    // worth. The defences against a bad price are the owner's min_out_rate_wad,
+    // enforced on chain as FloorTooLow, and invest.rs's measured delta. A test
+    // asserting a REFUSAL here would encode the belief this gate must not create.
+    const mint = key();
+    const fairRate = impliedRateWad(1_000_000n, 3_456_000n);
+    const badRate = (fairRate * 70n) / 100n;
+    // Identical implied rates at both sizes: 30 % off, and no impact at all.
+    expect(venueImpactBps(badRate, badRate)).toBe(0n);
+    expect(decide([
+      legOf({
+        mint,
+        spend: FIVE_DOLLARS,
+        take: 1_000_000n,
+        held: [{ mint, amount: 1_000_000_000n }],
+        impact: { compared: true, impactBps: venueImpactBps(badRate, badRate), ceilingBps: 25n },
+      }),
+    ])).toEqual({ deep: true });
+  });
+
+  it("ARM 2 ABSTAINS when the probe re-routes, and ARM 1 alone still refuses the drained venue", () => {
+    // MEASURED 2026-09-21, one instant, USDC -> ANTHROPIC: the 25 USD turn
+    // routed Kipseli + Manifest and the 1 USD probe routed Byreal + Manifest.
+    // Jupiter re-picks constantly, so an abstention must never read as a pass
+    // AND must never refuse on its own — that would be the
+    // fixture-randomises-the-field-under-dispute trap in a new costume.
+    const mint = key();
+    const abstained: ImpactProbe = { compared: false, why: "probe routed through Byreal + Manifest, the turn through Kipseli + Manifest" };
+    const decision = decide([
+      legOf({ mint, spend: FIVE_DOLLARS, take: TAKE_AT_FIVE_DOLLARS, held: [{ mint, amount: DRAINED_STOCK }], impact: abstained }),
+    ]);
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
+    expect(decision.detail).toContain("7.4x cover");
+    // AND A SOUND VENUE IS STILL BOUGHT while ARM 2 is blind: a gate that
+    // refused every re-route would refuse routinely, and a gate that refuses
+    // routinely is a gate an operator turns off.
+    expect(decide([legOf({ mint, spend: FIVE_DOLLARS, take: 1n, held: [{ mint, amount: DRAINED_STOCK }], impact: abstained })])).toEqual({ deep: true });
+  });
+
+  it("refuses a leg that was censused at its FINAL HOP ONLY while ARM 2 also abstained — nothing measured it", () => {
+    // THE ONE COMBINATION NEITHER ARM CATCHES ALONE. An intermediate hop
+    // reported no out-amount, so only the last hop was counted; and the probe
+    // took a different route, so there is no end-to-end number either. Both
+    // arms are individually silent, which is exactly why this needs its own line.
+    const mint = key();
+    const deep: Held[] = [{ mint, amount: 1_000_000_000_000n }];
+    const abstained: ImpactProbe = { compared: false, why: "the probe quote did not answer" };
+    const decision = decide([
+      legOf({ mint, spend: FIVE_DOLLARS, take: 1_000n, held: deep, censusScope: "final-only", impact: abstained }),
+    ]);
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
+    expect(decision.detail).toContain("was measured at its final hop only");
+    expect(decision.detail).toContain("the probe quote did not answer");
+
+    // EITHER ARM ALONE IS ENOUGH, and the case has to show that too or it is
+    // pinning the conjunction by coincidence.
+    expect(decide([legOf({ mint, spend: FIVE_DOLLARS, take: 1_000n, held: deep, censusScope: "final-only", impact: { compared: true, impactBps: 1n, ceilingBps: 25n } })])).toEqual({ deep: true });
+    expect(decide([legOf({ mint, spend: FIVE_DOLLARS, take: 1_000n, held: deep, censusScope: "every-hop", impact: abstained })])).toEqual({ deep: true });
+  });
+
+  it("refuses an INTERMEDIATE hop that is the thin one, on its own cover", () => {
+    // USDC -> X -> ANTHROPIC, where the ANTHROPIC hop is deep and the USDC -> X
+    // venue holds barely enough X. A gate that only censused the leg's final
+    // hop would buy this.
+    const intermediate = key();
+    const target = key();
+    const thinTake = 1_000_000n;
+    const decision = decide([
+      {
+        mint: target,
+        spend: FIVE_DOLLARS,
+        venueLabels: ["Kipseli", "Manifest"],
+        hops: [
+          { label: "Kipseli", payMint: intermediate, takeRaw: thinTake, census: censusOf(intermediate, [{ mint: intermediate, amount: thinTake * 5n }]) },
+          { label: "Manifest", payMint: target, takeRaw: 1_000n, census: censusOf(target, [{ mint: target, amount: 1_000_000_000_000n }]) },
+        ],
+        censusScope: "every-hop",
+        impact: { compared: true, impactBps: 1n, ceilingBps: 25n },
+      },
+    ]);
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
+    expect(decision.detail).toContain("at its Kipseli hop");
+    expect(decision.detail).toContain("5.0x cover");
+    expect(decision.detail).toContain(intermediate.toBase58());
+  });
+
+  it("ONE SHALLOW LEG REFUSES THE WHOLE BASKET, the deep legs and the SOL conversion included", () => {
+    // ALL OR NOTHING IS THE TYPE, NOT A CONVENTION: DepthDecision carries one
+    // verdict and no per-leg outcome, so there is no shape this function could
+    // return that says "buy two of the three". The deep legs are named nowhere
+    // as bought, because they are not.
+    const spyx = key();
+    const anthropic = key();
+    const figureai = key();
+    const decision = decide([
+      legOf({ mint: spyx, spend: FIVE_DOLLARS, take: 1_000n, held: [{ mint: spyx, amount: LIVE_STOCK }], label: "Byreal" }),
+      legOf({ mint: anthropic, spend: FIVE_DOLLARS, take: 1_000n, held: [{ mint: anthropic, amount: LIVE_STOCK }], label: "Manifest" }),
+      legOf({ mint: figureai, spend: FIVE_DOLLARS, take: TAKE_AT_FIVE_DOLLARS, held: [{ mint: figureai, amount: DRAINED_STOCK }], label: "Raydium CLMM" }),
+    ]);
+    expect(decision.deep).toBe(false);
+    if (decision.deep) return;
     expect(decision.detail).toContain("refusing the whole basket of 3 leg(s), the deep ones included");
-    expect(decision.detail).toContain("drifts from the weights the owner signed");
     expect(decision.detail).toContain("refusing to convert SOL toward it");
-    for (const index of [0, 2]) expect(decision.detail).not.toContain(basket.legs[index]!.mint.toBase58());
+    // Only the leg at fault is named as a reason; the other two are not
+    // reported as anything, because there is no per-leg outcome to report.
+    expect(decision.detail).toContain(figureai.toBase58());
+    expect(decision.detail).not.toContain(spyx.toBase58());
+    expect(decision.detail).not.toContain(anthropic.toBase58());
   });
 
-  it("refuses a pool that is not this leg's pair, which is the registry checked against the chain", () => {
-    // deps.pools maps a mint to a pool by configuration, and nothing until here
-    // asks the pool what it actually trades.
-    const stranger = { mint0: USDC_MINT, mint1: key(), vault0: key(), vault1: key() };
-    const decision = legDepthDecision({
-      inMint: USDC_MINT,
-      vaultAmounts: new Map([[stranger.vault0.toBase58(), LIVE_USDC], [stranger.vault1.toBase58(), LIVE_STOCK]]),
-      legs: [{ mint: key(), pool: LIVE_POOL, spend: FIVE_DOLLARS, read: readPoolPair({ data: poolBytes(stranger) }) }],
-    });
+  it("refuses the whole basket when THE wSOL -> USDC CONVERT is the shallow side", () => {
+    // venue_program is ONE owner-signed field, so the convert trades on the same
+    // venue as the legs and is measured by the same function at a zero transfer
+    // fee. A refused convert refuses the basket and vice versa — one verdict,
+    // reached before the wrap, so the owner's SOL stays SOL.
+    const stock = key();
+    const convertTake = 100_000_000n;
+    const decision = decide([
+      legOf({ mint: stock, spend: FIVE_DOLLARS, take: 1_000n, held: [{ mint: stock, amount: LIVE_STOCK }] }),
+      legOf({ mint: USDC_MINT, spend: 1_000_000_000n, take: convertTake, held: [{ mint: USDC_MINT, amount: convertTake * 10n }], label: "Whirlpool" }),
+    ]);
     expect(decision.deep).toBe(false);
     if (decision.deep) return;
-    expect(decision.detail).toContain("is not this leg's pair");
-    expect(decision.detail).toContain(stranger.mint1.toBase58());
+    expect(decision.detail).toContain(USDC_MINT.toBase58());
+    expect(decision.detail).toContain("10.0x cover");
+    expect(decision.detail).toContain("refusing the whole basket of 2 leg(s)");
   });
 
-  it("refuses a pool it could not read, a vault it could not read, and a pool with no stock left", () => {
-    const missing = legDepthDecision({
-      inMint: USDC_MINT,
-      vaultAmounts: new Map(),
-      legs: [{ mint: key(), pool: LIVE_POOL, spend: FIVE_DOLLARS, read: readPoolPair(null) }],
-    });
-    expect(missing.deep === false && missing.detail).toContain("has no readable pool account");
+  it("judges no venue for a leg whose share of the budget rounds to nothing", () => {
+    // The swap loop sends no transaction for it, so there is no spend to serve.
+    const mint = key();
+    expect(decide([legOf({ mint, spend: 0n, take: TAKE_AT_FIVE_DOLLARS, held: [{ mint, amount: DRAINED_STOCK }] })])).toEqual({ deep: true });
+  });
+});
 
-    // A pool whose state read fine but whose vault balance did not: an unread
-    // reserve is not a deep one, and the gate says which account went missing.
-    const built = basketOf([{ reserve: LIVE_USDC, stock: LIVE_STOCK, spend: FIVE_DOLLARS }]);
-    const blind = legDepthDecision({ inMint: USDC_MINT, legs: built.legs, vaultAmounts: new Map() });
-    expect(blind.deep === false && blind.detail).toContain("a depth that cannot be measured is not a depth");
-
-    // The one thing the out side can be judged on without a price: whether
-    // there is anything there at all.
-    const empty = basketOf([{ reserve: LIVE_USDC, stock: 0n, spend: FIVE_DOLLARS }]).decide();
-    expect(empty.deep === false && empty.detail).toContain("holds none of the leg at all");
+describe("the numbers the two arms are drawn from", () => {
+  it("keeps the inventory multiple at 50 and derives it from the incident, in out-units", () => {
+    expect(MIN_VENUE_INVENTORY_MULTIPLE).toBe(50n);
+    // The three-leg replay is the tighter of the two derivations and the one
+    // the bound has to clear with room: 20.1x, so 50x.
+    expect(Number(110_274_669n) / Number(5_473_455n)).toBeCloseTo(20.1, 1);
+    expect(Number(110_274_669n) / Number(14_936_000n)).toBeCloseTo(7.4, 1);
   });
 
-  it("judges no pool for a leg whose share rounds to nothing, because the turn sends nothing there", () => {
-    const basket = basketOf([{ reserve: 0n, stock: 0n, spend: 0n }]);
-    expect(basket.decide()).toEqual({ deep: true });
+  it("probes at a sixteenth, never under a dollar", () => {
+    expect(PROBE_DIVISOR).toBe(16n);
+    expect(MIN_PROBE_RAW).toBe(1_000_000n);
+    // 250 dollars probes at 15.625; 5 dollars probes at the floor, because a
+    // 31-cent quote is one these venues were not observed to answer.
+    expect(probeAmount(250_000_000n)).toBe(15_625_000n);
+    expect(probeAmount(5_000_000n)).toBe(MIN_PROBE_RAW);
+    // A turn already probe-sized leaves nothing to compare; the caller abstains.
+    expect(probeAmount(1_000_000n)).toBe(MIN_PROBE_RAW);
   });
 
-  it("REFUSES THE PRODUCT'S OWN SHIPPED DEFAULT: a 1,000-dollar per-call cap over two legs, against the pool that is FINE", () => {
-    // THIS IS NOT THE DRAINED POOL. Every refusal above is a pool that failed;
-    // this one is the healthy leg, at the healthy reading, refusing the cap the
-    // product ships (solana-core client/product.ts, DEFAULT_INVEST_CAPS
-    // .maxPerCall = 1,000 USDC). The turn is a CONVERTING one, so the gate has
-    // to test it at the worst case it can reach — the USDC the convert will
-    // bring in does not exist yet — which is the cap itself.
-    const SHIPPED_CAP = 1_000_000_000n;
-    const TWO_EQUAL_LEGS = [5_000, 5_000] as const;
-    const ceiling = turnSpendCeiling({ held: 0n, converting: true, maxPerCall: SHIPPED_CAP, headroom: U64_MAX });
-    expect(ceiling).toBe(SHIPPED_CAP);
-    const perLeg = legShare(ceiling, TWO_EQUAL_LEGS[0]);
-    expect(perLeg).toBe(500_000_000n);
-    // 50x of 500 dollars is 25,000, against a pool holding 9,389.405679.
-    expect(perLeg * MIN_POOL_DEPTH_MULTIPLE).toBe(25_000_000_000n);
-    expect(LIVE_USDC).toBeLessThan(perLeg * MIN_POOL_DEPTH_MULTIPLE);
-
-    const basket = basketOf(TWO_EQUAL_LEGS.map(() => ({ reserve: LIVE_USDC, stock: LIVE_STOCK, spend: perLeg, pool: LIVE_POOL })));
-    const decision = basket.decide();
-    expect(decision.deep).toBe(false);
-    if (decision.deep) return;
-    // 18.8x cover, not 50x — so every converting turn at the shipped default is
-    // REFUSED, and the vault's SOL is rightly never sold toward it.
-    expect(decision.detail).toContain("18.8x cover");
-    expect(decision.detail).toContain("it would need 25000000000");
+  it("derives impact from two implied rates and clamps a turn that quotes better than its probe", () => {
+    // 100 out per 1 in against 101 out per 1 in is 99 bps of degradation.
+    const probe = impliedRateWad(1_000_000n, 1_010_000n);
+    const turn = impliedRateWad(100_000_000n, 100_000_000n);
+    expect(venueImpactBps(turn, probe)).toBe(99n);
+    // BETTER IS NOT CREDIT. A fixed per-hop fee is a larger share of a small
+    // size, so a probe can legitimately come back worse than the turn.
+    expect(venueImpactBps(probe, turn)).toBe(0n);
+    // Nothing quoted prices nothing, and neither case may divide by zero.
+    expect(impliedRateWad(0n, 5n)).toBe(0n);
+    expect(venueImpactBps(turn, 0n)).toBe(0n);
   });
 
-  it("and admits a hundred-dollar cap with room to spare: the neck is 375 dollars, and it is one pool on one day", () => {
-    const TWO_EQUAL_LEGS = [5_000, 5_000] as const;
-    // THE NECK, derived rather than asserted: a leg may spend at most a
-    // fiftieth of the in-side reserve, and two equal legs make a basket of two
-    // such slices.
-    const perLegCeiling = LIVE_USDC / MIN_POOL_DEPTH_MULTIPLE;
-    expect(perLegCeiling).toBe(187_788_113n);
-    const basketCeiling = perLegCeiling * 2n;
-    expect(basketCeiling).toBe(375_576_226n);
+  it("gives impact a quarter of the usable tolerance, with a floor", () => {
+    expect(IMPACT_TOLERANCE_DIVISOR).toBe(4n);
+    expect(MIN_IMPACT_CEILING_BPS).toBe(5n);
+    // ANTHROPIC today: 200 bps of slippage over a 100 bps fee leaves 100, of
+    // which impact gets 25 and drift the other 75 — drift dominates, measured
+    // at a 70 % swing in six minutes on the healthy venue.
+    expect(maxTurnImpactBps(200n, 100n)).toBe(25n);
+    // A zero-fee mint: the whole 200 is usable, so 50.
+    expect(maxTurnImpactBps(200n, 0n)).toBe(50n);
+    // CROSS-CHECK against a measurement taken for another purpose: 187.79 USDC
+    // into the healthy venue measured ~27 bps when that mint charged 50 bps.
+    expect(maxTurnImpactBps(200n, 50n)).toBe(37n);
+    expect(27n).toBeLessThan(maxTurnImpactBps(200n, 50n));
+    // A fee that swallows the whole tolerance still gets a finite, non-zero bar.
+    expect(maxTurnImpactBps(200n, 200n)).toBe(MIN_IMPACT_CEILING_BPS);
+    expect(maxTurnImpactBps(100n, 400n)).toBe(MIN_IMPACT_CEILING_BPS);
+  });
 
-    // A 100-dollar cap sits 3.7x under that neck, and its 50-dollar leg is
-    // covered 187x by the same reserve.
-    const CANDIDATE_CAP = 100_000_000n;
-    expect(basketCeiling / CANDIDATE_CAP).toBe(3n);
-    const perLeg = legShare(turnSpendCeiling({ held: 0n, converting: true, maxPerCall: CANDIDATE_CAP, headroom: U64_MAX }), TWO_EQUAL_LEGS[0]);
-    expect(perLeg).toBe(50_000_000n);
-    expect(basketOf(TWO_EQUAL_LEGS.map(() => ({ reserve: LIVE_USDC, stock: LIVE_STOCK, spend: perLeg, pool: LIVE_POOL }))).decide()).toEqual({ deep: true });
+  it("QUOTES STRICTLY ABOVE THE TRANSFER FEE, and by the margin that was measured to fill", () => {
+    expect(MIN_SLIPPAGE_MARGIN_BPS).toBe(100n);
+    // min-out.ts's own bound is untouched: that one is drawn around a captured
+    // rate, this one is a floor under what the keeper asks Jupiter for.
+    expect(SLIPPAGE_BPS).toBe(200n);
+    // THE 100-BPS-FEE CASE, MEASURED ACROSS THE 1038 -> 1039 BOUNDARY.
+    // ANTHROPIC's fee is 100 bps ACTIVE in epoch 1039. At 100 bps of slippage
+    // Jupiter reverts the CPI with 0x1771 at 5, 25 and 250 USD — one raw unit
+    // short, because Jupiter floors its deduction and Token-2022 ceils its fee.
+    // At 200 it fills. So equality is provably fatal and this may never return it.
+    expect(legSlippageBps(100n)).toBe(200n);
+    expect(legSlippageBps(100n)).toBeGreaterThan(100n);
+    // A zero-fee mint — wSOL -> USDC, the convert — keeps the plain 200.
+    expect(legSlippageBps(0n)).toBe(200n);
+    // AND THE DAY THE ISSUER MOVES TO 150, the quote widens by itself instead
+    // of reverting every sweep with no explanation.
+    expect(legSlippageBps(150n)).toBe(250n);
+    expect(legSlippageBps(400n)).toBe(500n);
+    // Whatever the fee, the margin above it is never smaller than the measured one.
+    for (const fee of [0n, 1n, 50n, 99n, 100n, 101n, 150n, 999n]) {
+      expect(legSlippageBps(fee) - fee).toBeGreaterThanOrEqual(MIN_SLIPPAGE_MARGIN_BPS);
+    }
+  });
 
-    // AND THE HEADROOM IS NOT A GUARANTEE. The same arithmetic against the pool
-    // that drained refuses even this cap — a constant calibrated against one
-    // reading of one pool is a starting point, and the gate in the turn is what
-    // actually protects the money.
-    const drained = basketOf(TWO_EQUAL_LEGS.map(() => ({ reserve: DRAINED_USDC, stock: DRAINED_STOCK, spend: perLeg, pool: DRAINED_POOL })));
-    expect(drained.decide().deep).toBe(false);
+  it("would never have quoted a fee rise to 150 bps at the margin that reverts", () => {
+    // HALF OF THE MID-FLIGHT CASE. The other half — that 150 bps refuses the
+    // whole basket through legAdmissionDecision, at TWO legs so the basket and
+    // the leg cannot collapse into one number — is in "a leg's mint, before the
+    // basket is bought", where the Token-2022 mint bytes are built.
+    //
+    // This half is the one that belongs to the quote: the epoch arrives between
+    // two sweeps, and the keeper must never have taken a quote at 200 over 150.
+    expect(legSlippageBps(150n)).toBe(250n);
+    expect(legSlippageBps(150n)).not.toBe(SLIPPAGE_BPS);
+    expect(legSlippageBps(150n) - 150n).toBe(MIN_SLIPPAGE_MARGIN_BPS);
   });
 });
 

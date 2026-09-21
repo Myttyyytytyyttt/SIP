@@ -27,10 +27,20 @@ export const VOLUME_RATE = ratePercent(DEFAULT_VAULT_POLICY.volumeBps);
 export const LOSS_DROPPED_AFTER_TXS = 100;
 
 /**
- * HOW SMALL ONE BUY MUST BE BESIDE THE POOL IT GOES INTO: the keeper's
- * MIN_POOL_DEPTH_MULTIPLE (packages/solana-keeper/src/invest-decision.ts). A
- * pool's in-side reserve has to cover the buy this many times over or the turn
- * is refused, so one buy may be at most a FIFTIETH of what that pool holds.
+ * HOW SMALL ONE BUY MUST BE BESIDE THE VENUE IT BUYS FROM: the keeper's
+ * MIN_VENUE_INVENTORY_MULTIPLE (packages/solana-keeper/src/invest-decision.ts).
+ * The venue has to cover the buy this many times over or the turn is refused,
+ * so one buy may be at most a FIFTIETH of what that venue can hand over.
+ *
+ * WHAT IS COUNTED CHANGED ON 2026-09-21 AND THE NUMBER DID NOT, which is
+ * exactly the shape that lets a sentence go quietly false. The keeper used to
+ * read a Raydium POOL'S IN-SIDE RESERVE; it now counts the VENUE'S INVENTORY of
+ * the stock, because the assets this product must hold trade on a central limit
+ * order book and a dynamic bin market, neither of which has a reserve to read —
+ * and on some of them there is no "pool" at all. The two are the same ratio at
+ * the quoted rate, so the 50 carries over untouched and no test would have
+ * caught the words. INVEST_COPY.thinPool below was rewritten in the same change.
+ *
  * vault-copy.test.ts reads the keeper's file and holds the two equal, the same
  * way it does for LOSS_DROPPED_AFTER_TXS.
  */
@@ -363,7 +373,7 @@ export const INVEST_COPY = {
    * are readings of one night, not values the screen can compute.
    */
   thinPool: (defaultCap: string): string =>
-    `The keeper refuses a buy unless the pool it goes into holds at least ${POOL_DEPTH_MULTIPLE} times that buy, so a small pool sets a small ceiling. ANTHROPIC's pool held about $9,500 when it was read on 20 September 2026, which admitted about $190 for its share of a buy — about $380 for the whole buy, and that is the ceiling itself, not a target. And because a buy takes all of the basket or none, a Most per buy above it stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance. Most per buy starts at ${defaultCap}. On that night's reading, about $190 or less left roughly twice the cover the keeper asks for; $380 left almost none, so a pool that drains even slightly turns $380 into a cap that buys nothing. That figure was true that night and nothing on this page re-reads it, so treat the smaller number as the safe one while ANTHROPIC's pool is this small. SPYx's pool held about $2.4 million the same night and is nowhere near this limit.`,
+    `The keeper refuses a buy unless the venue it buys from holds at least ${POOL_DEPTH_MULTIPLE} times that buy, so a thin market sets a small ceiling. ANTHROPIC's pool held about $9,500 when it was read on 20 September 2026, which admitted about $190 for its share of a buy — about $380 for the whole buy, and that is the ceiling itself, not a target. And because a buy takes all of the basket or none, a Most per buy above it stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance. Most per buy starts at ${defaultCap}. On that night's reading, about $190 or less left roughly twice the cover the keeper asks for; $380 left almost none, so a pool that drains even slightly turns $380 into a cap that buys nothing. That figure was true that night and nothing on this page re-reads it, so treat the smaller number as the safe one while ANTHROPIC's pool is this small. SPYx's pool held about $2.4 million the same night and is nowhere near this limit. The keeper measures whichever venue it is actually buying through, in the turn itself, so a market that was deep last week does not count for anything today.`,
 
   // ── THE ISSUERS' POWERS ────────────────────────────────────────────────────
   //

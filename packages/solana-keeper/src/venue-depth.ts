@@ -1,0 +1,559 @@
+// The impure half of the depth gate: one leg, one route, one measurement.
+//
+// THE SPLIT IS THE POINT. Every VERDICT lives in invest-decision.ts, where it
+// is a pure function of numbers a test can write down — the census, the two
+// implied rates, the ceilings. This file only fetches: it quotes the turn,
+// quotes a probe, reads the accounts the route names, and hands the numbers
+// over. Nothing here decides whether a basket is bought.
+//
+// WHY THAT MATTERS AND IS NOT TIDINESS. The cases this gate exists for are a
+// drained venue at $5 and a re-routed probe, and neither can be produced on
+// demand against a live API. They are written as pure cases against
+// legDepthDecision and censusVenueInventory instead, at exact raw amounts taken
+// from the 2026-09-20 measurement. A gate whose judgement only ran behind a
+// network call would be a gate whose judgement was never tested.
+//
+// ONE REFUSAL DOES LIVE HERE, and only because it is about a disagreement
+// between two reads rather than about a number: see the
+// slippage-not-above-transfer-fee check in measureLegVenue.
+
+import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { Connection, PublicKey } from "@solana/web3.js";
+import {
+  type AgeTolerance,
+  type JupiterQuote,
+  type JupiterRoute,
+  buildJupiterRoute,
+  fetchJupiterQuote,
+  findVaultOwnedTokenAccounts,
+  routeMints,
+  routeWarning,
+} from "./program-scripts.js";
+import {
+  type ImpactProbe,
+  type InventoryCensus,
+  type LegVenue,
+  type LegVenueHop,
+  type VenueAccount,
+  censusVenueInventory,
+  impliedRateWad,
+  legSlippageBps,
+  maxTurnImpactBps,
+  probeAmount,
+  venueImpactBps,
+} from "./invest-decision.js";
+
+/** A leg this turn refuses outright, before any verdict is reached. */
+export class VenueMeasurementRefusal extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "VenueMeasurementRefusal";
+  }
+}
+
+/** The ORDERED list of venue accounts a quote's hops trade against, as Jupiter names them. */
+export function ammKeysOf(quote: JupiterQuote): string[] {
+  return quote.routePlan.map((step) => step.swapInfo.ammKey ?? "");
+}
+
+/** The labels a quote's hops carry, for a refusal a human has to act on. */
+export function labelsOf(quote: JupiterQuote): string[] {
+  return quote.routePlan.map((step) => step.swapInfo.label ?? "an unnamed venue");
+}
+
+/**
+ * Whether two quotes went through the same venues, in the same order.
+ *
+ * ORDERED, NOT A SET. USDC -> X -> Y and USDC -> Y -> X touch the same two AMMs
+ * and are not the same route; comparing sets would let ARM 2 divide a rate
+ * taken on one path by a rate taken on another and call the difference impact.
+ *
+ * AN EMPTY ammKey NEVER MATCHES ANYTHING, including another empty one: a hop
+ * Jupiter did not name is a hop we cannot say is the same hop.
+ */
+export function sameVenues(turn: readonly string[], probe: readonly string[]): boolean {
+  if (turn.length !== probe.length || turn.length === 0) return false;
+  return turn.every((key, index) => key.length > 0 && key === probe[index]);
+}
+
+/**
+ * ARM 2 for one leg: the turn's implied rate against a sixteenth-sized probe's,
+ * both from ONE source in ONE instant.
+ *
+ * WHAT IT CAN AND CANNOT SEE. It sees liquidity that is not where a count of
+ * units suggests — a Meteora DLMM holding 1,000 of the target in bins far from
+ * the price passes ARM 1 at 1000x cover and degrades 400 bps here. It CANNOT
+ * see a uniformly bad price: both numerator and denominator come from the same
+ * quoter in the same instant, so a market quoted 30 % off divides out. That is
+ * the whole reason §0 of invest-decision.ts names the price defences elsewhere.
+ */
+export function impactFrom(input: {
+  readonly turnIn: bigint;
+  readonly turnOut: bigint;
+  readonly probeIn: bigint;
+  readonly probeOut: bigint;
+  readonly turnAmms: readonly string[];
+  readonly probeAmms: readonly string[];
+  readonly turnLabels: readonly string[];
+  readonly probeLabels: readonly string[];
+  readonly slippageBps: bigint;
+  readonly feeBps: bigint;
+}): ImpactProbe {
+  if (!sameVenues(input.turnAmms, input.probeAmms)) {
+    // AN ABSTENTION, NOT A REFUSAL, AND NOT A PASS. Jupiter re-picks venues per
+    // quote: measured 2026-09-21 in one instant, a 25 USD USDC -> ANTHROPIC
+    // turn routed Kipseli + Manifest while the 1 USD probe routed
+    // Byreal + Manifest. A gate that refused on that would refuse routinely,
+    // and a gate that refuses routinely is a gate an operator turns off. ARM 1
+    // then carries the leg alone — and legDepthDecision refuses outright when
+    // ARM 1's scope is partial too, because that is the one case in which
+    // NOTHING measured the turn.
+    return {
+      compared: false,
+      why:
+        `the probe routed through ${input.probeLabels.join(" + ")} and the turn through ` +
+        `${input.turnLabels.join(" + ")}, so the two rates are not two sizes of one venue`,
+    };
+  }
+  if (input.probeIn >= input.turnIn) {
+    return { compared: false, why: `the turn is ${input.turnIn} raw, no larger than the ${input.probeIn} raw probe, so there is no size to compare` };
+  }
+  return {
+    compared: true,
+    impactBps: venueImpactBps(impliedRateWad(input.turnIn, input.turnOut), impliedRateWad(input.probeIn, input.probeOut)),
+    ceilingBps: maxTurnImpactBps(input.slippageBps, input.feeBps),
+  };
+}
+
+/**
+ * ARM 1's per-hop censuses, and the scope that describes them.
+ *
+ * `swapInfo.outAmount` IS WHAT A HOP TAKES OUT OF ITS VENUE, which is the
+ * number the cover is measured against. When it is absent, that hop is NOT
+ * censused and the scope degrades to "final-only" — an honest narrower claim
+ * rather than a hop silently counted as taking nothing, which would read as
+ * infinite cover. THE FINAL HOP IS ALWAYS CENSUSED: without it the leg has no
+ * measurement at all, and censusVenueInventory then returns counted:false,
+ * which legDepthDecision refuses on.
+ */
+export function censusHops(input: {
+  readonly quote: JupiterQuote;
+  readonly inputMint: PublicKey;
+  readonly targetMint: PublicKey;
+  readonly candidates: readonly VenueAccount[];
+  readonly writable: ReadonlySet<string>;
+  readonly vaultOwned: ReadonlySet<string>;
+}): { readonly hops: LegVenueHop[]; readonly censusScope: "every-hop" | "final-only" } {
+  const plan = input.quote.routePlan;
+  const hops: LegVenueHop[] = [];
+  let every = true;
+  for (const [index, step] of plan.entries()) {
+    const last = index === plan.length - 1;
+    const label = step.swapInfo.label ?? "an unnamed venue";
+    // The LAST hop pays us the target mint by definition; an intermediate pays
+    // us whatever its own outputMint says, and a hop that names neither cannot
+    // be censused at all.
+    const payMint = last ? input.targetMint : step.swapInfo.outputMint === undefined ? null : new PublicKey(step.swapInfo.outputMint);
+    const takeRaw = step.swapInfo.outAmount === undefined ? null : BigInt(step.swapInfo.outAmount);
+    if (payMint === null || takeRaw === null) {
+      if (last) {
+        // Unrepresentable as a pass: the final hop always produces a hop entry,
+        // and one that could not be read is one whose census did not count.
+        hops.push({
+          label,
+          payMint: input.targetMint,
+          takeRaw: 0n,
+          census: { counted: false, why: `reported no out-amount for its ${label} hop, so what it would take out of that venue is unknown` },
+        });
+      }
+      every = false;
+      continue;
+    }
+    hops.push({
+      label,
+      payMint,
+      takeRaw,
+      census: censusVenueInventory({ payMint, candidates: input.candidates, writable: input.writable, vaultOwned: input.vaultOwned }),
+    });
+  }
+  return { hops, censusScope: every && hops.length === plan.length ? "every-hop" : "final-only" };
+}
+
+/** Every account a route names, read from the chain in pages of 100. */
+export async function readRouteAccounts(connection: Connection, addresses: readonly PublicKey[]): Promise<VenueAccount[]> {
+  const unique = [...new Map(addresses.map((address) => [address.toBase58(), address])).values()];
+  const found: VenueAccount[] = [];
+  for (let offset = 0; offset < unique.length; offset += 100) {
+    const page = unique.slice(offset, offset + 100);
+    const infos = await connection.getMultipleAccountsInfo(page, "confirmed");
+    infos.forEach((info, index) => {
+      // AN ACCOUNT THAT DID NOT COME BACK IS LEFT OUT, never defaulted to an
+      // empty one: a census over accounts we could not read must come up short
+      // and refuse, not read as a venue holding nothing (which refuses too) or
+      // as one we measured (which does not).
+      if (info === null) return;
+      found.push({ address: page[index]!, owner: info.owner, data: info.data });
+    });
+  }
+  return found;
+}
+
+/**
+ * WHERE THE WARNING BECOMES A REFUSAL.
+ *
+ * legSlippageBps makes this unreachable by construction, and that is exactly
+ * why reaching it is worth refusing on: buildJupiterRoute reads the destination
+ * mint's transfer-fee config ITSELF, so a warning here means THE FEE THE SIZING
+ * USED AND THE FEE THE BUILDER READ DISAGREE. One of the two is about a
+ * different epoch or a different mint, and neither is a basis on which to spend
+ * the owner's money.
+ *
+ * MEASURED ACROSS THE 1038 -> 1039 BOUNDARY: at equality Jupiter reverts the
+ * CPI with its own 0x1771 (6001) at 5, 25 and 250 USD — one raw unit short,
+ * because Jupiter floors its deduction and Token-2022 ceils its fee — and fills
+ * only once the slippage is strictly above the fee. jupiter-route.ts leaves
+ * this a WARNING because it cannot know whether the AMM that makes the final
+ * transfer quotes gross or net; the keeper can refuse, because it would rather
+ * miss a sweep than sign a transaction it has measured reverting.
+ *
+ * PURE, so the refusal can be tested without a route: the network half of this
+ * file cannot be pointed at a 100-over-100 quote on demand.
+ */
+export function slippageRefusal(
+  warning: { readonly slippageBps: number; readonly transferFeeBps: number; readonly usableToleranceBps: number } | null,
+  context: { readonly targetMint: PublicKey; readonly askedBps: bigint; readonly feeBps: bigint },
+): string | null {
+  if (warning === null) return null;
+  return (
+    `${context.targetMint.toBase58()} quoted at ${warning.slippageBps} bps of slippage against a ` +
+    `${warning.transferFeeBps} bps transfer fee, leaving ${warning.usableToleranceBps} bps of usable tolerance. ` +
+    `This keeper asked for ${context.askedBps} bps (legSlippageBps of a ${context.feeBps} bps fee), so the fee the ` +
+    "sizing used and the fee the route builder read DISAGREE — refusing rather than spending on a quote at a margin " +
+    "measured to revert with Jupiter's 0x1771 at 5, 25 and 250 USD"
+  );
+}
+
+/**
+ * One leg's Jupiter route, and everything the depth gate needs to judge it.
+ *
+ * READ-ONLY, ALL OF IT. Two quotes, one /swap-instructions, and account reads.
+ * Nothing is signed, nothing is sent, and the route it returns is the one the
+ * caller will actually use — measured and used are the same object, which is
+ * the only way the gate's guarantee survives the trip to the send.
+ */
+export async function measureLegVenue(
+  connection: Connection,
+  params: {
+    readonly vault: PublicKey;
+    readonly vaultIn: PublicKey;
+    readonly vaultTarget: PublicKey;
+    readonly inputMint: PublicKey;
+    readonly targetMint: PublicKey;
+    readonly spend: bigint;
+    /** The destination mint's live transfer fee, in bps. Zero for the wSOL -> USDC convert. */
+    readonly feeBps: bigint;
+    readonly maxAge: AgeTolerance;
+    readonly ownerFloorRateWad?: bigint;
+  },
+): Promise<{ readonly route: JupiterRoute; readonly venue: LegVenue }> {
+  // STRICTLY ABOVE THE FEE, DECIDED BEFORE THE QUOTE IS ASKED FOR. This is the
+  // single wider re-quote the 100-over-100 revert calls for: the keeper never
+  // takes a quote at a margin measured to be fatal, so there is nothing to
+  // re-quote afterwards.
+  const slippageBps = legSlippageBps(params.feeBps);
+
+  const route = await buildJupiterRoute(connection, {
+    vault: params.vault,
+    vaultIn: params.vaultIn,
+    vaultTarget: params.vaultTarget,
+    inputMint: params.inputMint,
+    targetMint: params.targetMint,
+    amountIn: params.spend,
+    slippageBps: Number(slippageBps),
+    maxAge: params.maxAge,
+    ...(params.ownerFloorRateWad === undefined ? {} : { ownerFloorRateWad: params.ownerFloorRateWad }),
+  });
+
+  // WHERE THE WARNING BECOMES A REFUSAL.
+  //
+  // The line above makes this unreachable by construction, and that is exactly
+  // why reaching it is worth refusing on: the builder reads the destination
+  // mint's transfer-fee config itself, so a warning here means THE FEE THE
+  // SIZING USED AND THE FEE THE BUILDER READ DISAGREE. One of the two is about
+  // a different epoch or a different mint, and neither is a basis on which to
+  // spend the owner's money. Measured across the 1038 -> 1039 boundary: at
+  // equality Jupiter reverts the CPI with 0x1771 at 5, 25 and 250 USD, and
+  // fills only once the slippage is above the fee.
+  const tooTight = slippageRefusal(routeWarning(route, "slippage-not-above-transfer-fee"), {
+    targetMint: params.targetMint,
+    askedBps: slippageBps,
+    feeBps: params.feeBps,
+  });
+  if (tooTight !== null) throw new VenueMeasurementRefusal(tooTight);
+
+  const quote = route.quote;
+  const turnAmms = ammKeysOf(quote);
+  const turnLabels = labelsOf(quote);
+
+  // THE PROBE IS A QUOTE AND NOTHING MORE. It is never posted to
+  // /swap-instructions: nothing is ever built from it, so it costs one GET and
+  // can never be mistaken for a route.
+  const probeIn = probeAmount(params.spend);
+  let impact: ImpactProbe;
+  try {
+    const probe = await fetchJupiterQuote({
+      inputMint: params.inputMint,
+      outputMint: params.targetMint,
+      amountIn: probeIn,
+      slippageBps: Number(slippageBps),
+    });
+    impact = impactFrom({
+      turnIn: BigInt(quote.inAmount),
+      turnOut: BigInt(quote.outAmount),
+      probeIn: BigInt(probe.inAmount),
+      probeOut: BigInt(probe.outAmount),
+      turnAmms,
+      probeAmms: ammKeysOf(probe),
+      turnLabels,
+      probeLabels: labelsOf(probe),
+      slippageBps,
+      feeBps: params.feeBps,
+    });
+  } catch (error) {
+    // A PROBE THAT DID NOT ANSWER IS AN ABSTENTION, NOT A FAILED TURN. ARM 1 is
+    // the load-bearing arm and has already been measured off the turn's own
+    // route; losing ARM 2 to a 429 must not refuse a basket that is fine, and
+    // must not pass one that is not — legDepthDecision's fourth refusal is what
+    // makes the difference when ARM 1's scope is partial as well.
+    impact = { compared: false, why: `the probe quote did not answer: ${error instanceof Error ? error.message : String(error)}` };
+  }
+
+  // THE RESOLVED ACCOUNT LIST, NOT THE MESSAGE'S STATIC KEYS. A v0 message
+  // hides half its accounts in address lookup tables, so compiling first and
+  // reading `staticAccountKeys` would census a route while blind to the very
+  // accounts the tables carry — which on a 2-hop ANTHROPIC route is 18 of 32.
+  // `remainingAccounts` is the full list, with the route's own writability.
+  const metas = route.remainingAccounts;
+  const writable = new Set(metas.filter((meta) => meta.isWritable).map((meta) => meta.pubkey.toBase58()));
+  const candidates = await readRouteAccounts(connection, metas.map((meta) => meta.pubkey));
+  // routeMints, not the two ends: both of findVaultOwnedTokenAccounts' passes
+  // are blind to an intermediate they were never handed, and an intermediate
+  // ATA the vault owns is exactly the account that would inflate the census.
+  const vaultOwned = await findVaultOwnedTokenAccounts(
+    connection,
+    params.vault,
+    metas.map((meta) => meta.pubkey.toBase58()),
+    routeMints(quote, params.inputMint, params.targetMint),
+  );
+
+  const { hops, censusScope } = censusHops({
+    quote,
+    inputMint: params.inputMint,
+    targetMint: params.targetMint,
+    candidates,
+    writable,
+    vaultOwned,
+  });
+
+  return {
+    route,
+    venue: { mint: params.targetMint, spend: params.spend, venueLabels: turnLabels, hops, censusScope, impact },
+  };
+}
+
+// ── the Raydium CLMM adapter ────────────────────────────────────────────────
+//
+// A DEPARTURE FROM THE SPEC, AND WHY. The specification retires the Raydium
+// pool read outright and moves every venue to Jupiter. venue_program is ONE
+// field on the owner-signed InvestmentPolicy that both convert.rs:88-91 and
+// invest.rs:119-122 pin the passed account against, so that move is the OWNER
+// re-signing — and in the window between this code and that signature the vault
+// holding real money is still buying through Raydium CLMM, on the path that has
+// been confirming on mainnet since 09-19. Retiring this WITHOUT an adapter
+// would have left that vault trading with no depth check at all: the exact
+// failure the gate exists for, introduced by the change meant to strengthen it.
+//
+// WHAT IS ACTUALLY RETIRED IS WHAT THE SPEC IS ABOUT. The pool-state decode is
+// no longer THE GATE and no longer lives in invest-decision.ts: the gate there
+// is venue-agnostic and judges a census, and this file holds one adapter per
+// venue that produces one. A third venue is a third adapter, not a third gate.
+//
+// AND IT IS MEASURED ON THE SPEND SIDE, deliberately. A pool state quotes no
+// price this adapter could convert an out-side take with, and a
+// constant-product reading of a CONCENTRATED pool is measurably wrong — it put
+// one venue's 0.5 % size at 47 dollars where the venue served 350. The in-side
+// reserve needs no price at all, and LegVenueHop explains why 50x of it is the
+// same bound as 50x of the out-side inventory.
+
+/**
+ * Raydium CLMM PoolState, at the offsets live-route.ts already counts over the
+ * same bytes: 8 disc, 1 bump, 32 amm_config, 32 owner, then token_mint_0 at 73,
+ * token_mint_1 at 105, token_vault_0 at 137, token_vault_1 at 169. Mainnet
+ * serves 1544 bytes; only these four addresses are read.
+ *
+ * NO LENGTH ORACLE. A length check alone cannot say these offsets mean what we
+ * think — a different account of the right size decodes into four valid-looking
+ * addresses — so the length is checked only as far as the bytes actually read,
+ * and the CALLER then requires the decoded pair to be the pair the registry
+ * claims. Bytes that are not this pool's pair fail that, whatever their length.
+ */
+export interface RaydiumPoolPair {
+  readonly mint0: PublicKey;
+  readonly mint1: PublicKey;
+  readonly vault0: PublicKey;
+  readonly vault1: PublicKey;
+}
+
+const POOL_TOKEN_MINT_0 = 73;
+const POOL_TOKEN_MINT_1 = 105;
+const POOL_TOKEN_VAULT_0 = 137;
+const POOL_TOKEN_VAULT_1 = 169;
+
+export function decodeRaydiumPoolPair(data: Buffer): RaydiumPoolPair {
+  const end = POOL_TOKEN_VAULT_1 + 32;
+  if (data.length < end) {
+    throw new Error(`a Raydium CLMM pool state is at least ${end} bytes to reach its vaults; this account is ${data.length}`);
+  }
+  return {
+    mint0: new PublicKey(data.subarray(POOL_TOKEN_MINT_0, POOL_TOKEN_MINT_0 + 32)),
+    mint1: new PublicKey(data.subarray(POOL_TOKEN_MINT_1, POOL_TOKEN_MINT_1 + 32)),
+    vault0: new PublicKey(data.subarray(POOL_TOKEN_VAULT_0, POOL_TOKEN_VAULT_0 + 32)),
+    vault1: new PublicKey(data.subarray(POOL_TOKEN_VAULT_1, POOL_TOKEN_VAULT_1 + 32)),
+  };
+}
+
+/**
+ * findVaultOwnedTokenAccounts' two passes, over accounts ALREADY READ.
+ *
+ * WHY THIS EXISTS AND WHY IT IS NOT A SECOND IMPLEMENTATION. The Jupiter arm
+ * hands findVaultOwnedTokenAccounts a list of addresses it has not read, so
+ * that function has to fetch them; the Raydium arm has the bytes in hand from
+ * the batched vault read, and fetching them again would be a second round trip
+ * for accounts already on the heap — which is the cost the batching above
+ * exists to avoid.
+ *
+ * SAME TWO PASSES, SAME OFFSETS, SAME BOTH-PROGRAMS DERIVATION: the ATA under
+ * TOKEN_PROGRAM_ID and TOKEN_2022_PROGRAM_ID for every mint the leg touches,
+ * plus owner bytes 32..64 with a 165-byte minimum. test/venue-depth.test.ts
+ * runs both functions over one set of accounts and asserts they agree, which is
+ * the two-ends defence docs/TESTING_TRAPS.md prescribes for a rule that is
+ * stated twice.
+ */
+export function vaultOwnedAmong(
+  vault: PublicKey,
+  candidates: readonly VenueAccount[],
+  mints: readonly PublicKey[],
+): Set<string> {
+  const derived = new Set<string>();
+  for (const mint of mints) {
+    for (const program of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+      // allowOwnerOffCurve: the vault IS a PDA, so the on-curve check would
+      // throw on every single derivation.
+      derived.add(getAssociatedTokenAddressSync(mint, vault, true, program).toBase58());
+    }
+  }
+  const found = new Set<string>();
+  for (const candidate of candidates) {
+    const address = candidate.address.toBase58();
+    if (derived.has(address)) found.add(address);
+    const byToken = candidate.owner.equals(TOKEN_PROGRAM_ID) || candidate.owner.equals(TOKEN_2022_PROGRAM_ID);
+    if (!byToken || candidate.data.length < 165) continue;
+    if (candidate.data.subarray(32, 64).equals(vault.toBuffer())) found.add(address);
+  }
+  return found;
+}
+
+/** The two vaults one Raydium leg would trade through, or why they could not be named. */
+export type RaydiumSides =
+  | { readonly ok: true; readonly inVault: PublicKey; readonly outVault: PublicKey }
+  | { readonly ok: false; readonly why: string };
+
+/**
+ * Which vault holds which side, out of the pool's own bytes and the leg's pair.
+ *
+ * THE REGISTRY IS CHECKED AGAINST THE CHAIN HERE. deps.pools maps a mint to a
+ * pool by configuration; nothing until now has asked the pool whether it trades
+ * that pair. A pool that does not is both a misconfiguration and the one way
+ * these offsets could mean something else entirely.
+ */
+export function raydiumSides(input: {
+  readonly pool: PublicKey;
+  readonly account: { readonly data: Buffer } | null | undefined;
+  readonly inMint: PublicKey;
+  readonly targetMint: PublicKey;
+}): RaydiumSides {
+  if (input.account === null || input.account === undefined) {
+    return { ok: false, why: `has no readable pool account at ${input.pool.toBase58()}` };
+  }
+  let pair: RaydiumPoolPair;
+  try {
+    pair = decodeRaydiumPoolPair(input.account.data);
+  } catch (error) {
+    return { ok: false, why: `could not be read as a Raydium pool: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const inIsZero = pair.mint0.equals(input.inMint) && pair.mint1.equals(input.targetMint);
+  const inIsOne = pair.mint1.equals(input.inMint) && pair.mint0.equals(input.targetMint);
+  if (!inIsZero && !inIsOne) {
+    return {
+      ok: false,
+      why:
+        `trades ${pair.mint0.toBase58()} against ${pair.mint1.toBase58()}, not ${input.inMint.toBase58()} against this ` +
+        "leg — the pool this leg is routed through is not this leg's pair",
+    };
+  }
+  return inIsZero
+    ? { ok: true, inVault: pair.vault0, outVault: pair.vault1 }
+    : { ok: true, inVault: pair.vault1, outVault: pair.vault0 };
+}
+
+/**
+ * One Raydium leg, censused from the pool's own two vaults.
+ *
+ * PURE, AND FED FROM A BATCHED READ. The vaults of every leg in the basket go
+ * into ONE getMultipleAccountsInfo rather than one request per leg — the rule
+ * this turn already follows for the leg mints and the Pyth feeds, and the one
+ * the per-leg version of this function quietly broke.
+ *
+ * ARM 2 ABSTAINS HERE, AND SAYS SO. A Raydium route is priced from the pool's
+ * own state rather than from a quote, so there is no second quote of a
+ * different size to divide by — and inventing one from a different quoter would
+ * be comparing two instruments, not two sizes. censusScope is "every-hop"
+ * because a CLMM swap is one hop and that one hop IS censused, so
+ * legDepthDecision's fourth refusal (nothing measured either way) correctly
+ * does not fire: ARM 1 measured this leg in full.
+ */
+export function raydiumLegVenue(params: {
+  readonly sides: RaydiumSides;
+  readonly inMint: PublicKey;
+  readonly targetMint: PublicKey;
+  readonly spend: bigint;
+  readonly candidates: readonly VenueAccount[];
+  readonly vaultOwned: ReadonlySet<string>;
+}): LegVenue {
+  const label = "Raydium CLMM";
+  const leg = (census: InventoryCensus): LegVenue => ({
+    mint: params.targetMint,
+    spend: params.spend,
+    venueLabels: [label],
+    hops: [{ label, payMint: params.inMint, takeRaw: params.spend, census }],
+    censusScope: "every-hop",
+    impact: {
+      compared: false,
+      why: "a Raydium CLMM route is priced from the pool's own state rather than from a quote, so there is no second quote of a different size to compare it with",
+    },
+  });
+
+  if (!params.sides.ok) return leg({ counted: false, why: params.sides.why });
+  const { inVault, outVault } = params.sides;
+  const writable = new Set([inVault.toBase58(), outVault.toBase58()]);
+  // A POOL WITH NOTHING OF THE LEG IN IT HAS NOTHING TO SELL, whatever its
+  // in-side reserve says, and the spend-side census cannot see that.
+  const stock = censusVenueInventory({ payMint: params.targetMint, candidates: params.candidates, writable, vaultOwned: params.vaultOwned });
+  if (!stock.counted || stock.inventory === 0n) {
+    return leg({ counted: false, why: `holds none of the leg at all: its ${outVault.toBase58()} vault is empty, so there is nothing to buy` });
+  }
+  return leg(censusVenueInventory({ payMint: params.inMint, candidates: params.candidates, writable, vaultOwned: params.vaultOwned }));
+}
+
+/** Re-exported so a caller need not know which half a type came from. */
+export type { InventoryCensus, LegVenue };

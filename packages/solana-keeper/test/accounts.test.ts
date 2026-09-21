@@ -701,9 +701,20 @@ describe("the ticks' first steps, over the same bytes", () => {
     return data;
   }
 
-  /** An SPL Token account: the balance is a u64 at 64. */
-  function tokenAccountBytes(amount: bigint): Buffer {
+  /**
+   * An SPL Token account: mint(32) owner(32) amount(u64 at 64), 165 bytes.
+   *
+   * THE MINT IS WRITTEN, AND IT DID NOT USED TO BE. While the gate compared a
+   * pool's in-side RESERVE against the spend, nothing ever read these thirty-two
+   * bytes, so the fixture left them zero — the field under dispute, arbitrary,
+   * and therefore untested while looking tested (docs/TESTING_TRAPS.md, first
+   * species). The census reads them to decide which side of the pool an account
+   * is on, so they now carry the mint the pool really holds there.
+   */
+  function tokenAccountBytes(mint: PublicKey, amount: bigint): Buffer {
     const data = Buffer.alloc(165);
+    mint.toBuffer().copy(data, 0);
+    key().toBuffer().copy(data, 32); // the pool's authority: not the vault, which is what the exclusion looks for
     data.writeBigUInt64LE(amount, 64);
     return data;
   }
@@ -721,8 +732,11 @@ describe("the ticks' first steps, over the same bytes", () => {
       const stockVault = key();
       accounts.set(mint.toBase58(), { data: plainMintBytes(), owner: TOKEN_2022_PROGRAM_ID });
       accounts.set(pool.toBase58(), { data: poolBytes(USDC_MINT, mint, usdcVault, stockVault) });
-      accounts.set(usdcVault.toBase58(), { data: tokenAccountBytes(usdcReserve) });
-      accounts.set(stockVault.toBase58(), { data: tokenAccountBytes(stock) });
+      // AND THEY ARE OWNED BY A TOKEN PROGRAM, which the census requires before
+      // it will read these offsets at all: bytes at 0..32 mean "a mint" only in
+      // an account the token program owns.
+      accounts.set(usdcVault.toBase58(), { data: tokenAccountBytes(USDC_MINT, usdcReserve), owner: TOKEN_PROGRAM_ID });
+      accounts.set(stockVault.toBase58(), { data: tokenAccountBytes(mint, stock), owner: TOKEN_PROGRAM_ID });
       return { mint, pool, weightBps: [4_000, 3_300, 2_700][index]!, minOutRateWad: 1n };
     });
     return {
@@ -756,7 +770,8 @@ describe("the ticks' first steps, over the same bytes", () => {
     // THE AMOUNT TESTED IS THE ONE THIS TURN WOULD REALLY SPEND: max_per_call
     // (250 USDC) caps the BASKET and is split by weight, so the 3,300 bps leg
     // gets 82.5 USDC — not the 5-dollar default purchase, and not the whole cap.
-    expect(result.detail).toContain("holds 31910000 in-asset raw against the 82500000 this turn would push into it");
+    expect(result.detail).toContain(`holds 31910000 raw of ${USDC_MINT.toBase58()} across 1 account(s) at its Raydium CLMM hop`);
+    expect(result.detail).toContain("against the 82500000 this turn would move through it");
     expect(result.detail).toContain("0.4x cover, under the 50x this keeper trades on (it would need 4125000000)");
     expect(result.detail).toContain(basket.mints[1]!.toBase58());
     expect(result.detail).toContain("refusing the whole basket of 3 leg(s), the deep ones included");
@@ -765,7 +780,9 @@ describe("the ticks' first steps, over the same bytes", () => {
 
     // NOTHING MOVED, AND ALMOST NOTHING WAS ASKED FOR. The pool states ride the
     // request the mint gate was already sending — no extra round trip — and the
-    // reserves inside them cost exactly one more, for the whole basket.
+    // vaults inside them cost exactly one more, for the whole basket. The
+    // exclusion set that keeps the vault's own holdings out of the census is
+    // computed from those same bytes (vaultOwnedAmong), so it costs none.
     expect(calls).toEqual([
       "getAccountInfoAndContext",
       "getMultipleAccountsInfo",
@@ -828,7 +845,9 @@ describe("the ticks' first steps, over the same bytes", () => {
     basket.accounts.set(basket.addresses[0]!.toBase58(), {
       data: poolBytes(USDC_MINT, key(), strangerVaults[0]!, strangerVaults[1]!),
     });
-    for (const address of strangerVaults) basket.accounts.set(address.toBase58(), { data: tokenAccountBytes(LIVE_USDC) });
+    for (const address of strangerVaults) {
+      basket.accounts.set(address.toBase58(), { data: tokenAccountBytes(USDC_MINT, LIVE_USDC), owner: TOKEN_PROGRAM_ID });
+    }
     const { vault, connection, program } = chainWith({}, { legs: basket.legs }, emptyAndPriced, true, basket.accounts);
     const result = await runInvestTick({
       connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,

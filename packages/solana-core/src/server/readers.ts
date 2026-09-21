@@ -450,7 +450,7 @@ export function poolPricesFromAccounts(accounts: readonly (AccountSnapshot | nul
 // THE IN SIDE, BECAUSE THAT IS THE SIDE THE KEEPER MEASURES. legDepthDecision
 // (solana-keeper/src/invest-decision.ts) takes the pool's in_mint vault — not
 // the stock vault — and refuses a turn whose per-leg spend is not covered
-// MIN_POOL_DEPTH_MULTIPLE times over by it. The choice is copied here exactly,
+// MIN_VENUE_INVENTORY_MULTIPLE times over by it. The choice is copied here exactly,
 // pair check included: a panel that measured the other side would promise
 // precisely what the keeper then refuses.
 //

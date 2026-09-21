@@ -1480,3 +1480,50 @@ describe("what the route's own numbers do and do not claim", () => {
     expect(refusal(quote(), response(), context({ transferFee: FEE_100 })).condition).toBe("unmodelled-fee-path");
   });
 });
+
+describe("the two ends of the tsx path", () => {
+  it("re-exports the SAME functions through program-scripts.ts that this file imports directly", async () => {
+    // THIS FILE IMPORTS @sip/solana-program/jupiter-route DIRECTLY, on the
+    // VITEST path. Production imports it through program-scripts.ts, under tsx,
+    // where an ES module reading a CommonJS package can see only `default` —
+    // the shape that took the keeper down for ~2,900 sweeps on 2026-09-18. So a
+    // green run of everything above proves the FUNCTIONS are right and proves
+    // nothing about whether production can reach them.
+    //
+    // TWO ENDS, ONE ASSERTION, which is the defence docs/TESTING_TRAPS.md
+    // prescribes for a value that travels: what this file tested is IDENTICALLY
+    // what the keeper calls, not merely something of the same name. The other
+    // half of the proof cannot be written here at all — it is
+    // `pnpm --filter @sip/solana-keeper preflight`, which imports
+    // program-scripts.ts in a real tsx process and throws at the import-time
+    // loop if any of these unwrapped to undefined.
+    const direct = await import("@sip/solana-program/jupiter-route");
+    const shared = await import("../src/program-scripts.js");
+    const travelled = [
+      "buildJupiterRoute",
+      "fetchJupiterQuote",
+      "findVaultOwnedTokenAccounts",
+      "routeMints",
+      "routeWarning",
+      "verifyRouteFresh",
+      "verifySharedAccountsRoute",
+      "investAmountIn",
+      "investMinOut",
+      "fitsLegacyTransaction",
+      "legacyTransactionBytes",
+      "v0TransactionBytes",
+      "JupiterRouteRefusal",
+    ] as const;
+    for (const name of travelled) {
+      const one = (direct as unknown as Record<string, unknown>)[name];
+      const other = (shared as unknown as Record<string, unknown>)[name];
+      expect(typeof one, name).toBe("function");
+      expect(other, name).toBe(one);
+    }
+    // And the one that is NOT a function, which is why it needs its own check
+    // in program-scripts.ts: put a PublicKey in that typeof-function loop and
+    // the keeper throws at every import and never boots.
+    expect(shared.JUPITER_PROGRAM.toBase58()).toBe(direct.JUPITER_PROGRAM.toBase58());
+    expect(typeof shared.JUPITER_PROGRAM).not.toBe("function");
+  });
+});

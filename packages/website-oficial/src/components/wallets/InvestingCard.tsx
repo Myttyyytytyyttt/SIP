@@ -123,8 +123,9 @@ export const REACHABLE_PER_BUY_RAW: bigint = (() => {
 /**
  * THE CAP ANTHROPIC'S POOL ALLOWED WHEN IT WAS LAST READ, in USDC raw units.
  *
- * MIN_POOL_DEPTH_MULTIPLE is 50, so a leg may spend at most a fiftieth of the
- * pool's in-side reserve. Read 2026-09-20 at slot 448864213, ANTHROPIC/USDC
+ * MIN_VENUE_INVENTORY_MULTIPLE is 50, so a leg may spend at most a fiftieth of
+ * what the venue can hand over. On a two-sided pool that is the same ratio as a
+ * fiftieth of its in-side reserve, which is the figure this one was read as. Read 2026-09-20 at slot 448864213, ANTHROPIC/USDC
  * held 9,541,652,779 raw USDC: $190.83 a leg, and at two equal legs $381.67 for
  * the whole buy. Rounded DOWN to $380 so the figure is never optimistic.
  *
