@@ -36,12 +36,19 @@
 //  * legDepthDecision then requires that pool's in-side reserve to cover the
 //    spend MIN_VENUE_INVENTORY_MULTIPLE (50) times over — 25,000 USDC for a
 //    500-USDC leg.
-// ANTHROPIC/USDC held 9,541,652,779 raw USDC when it was last read (mainnet
-// 2026-09-20, slot 448864213). That is 18.9x cover against 50x required, so
-// EVERY converting turn is REFUSED at this default: no stock bought, no SOL
-// converted, at any balance. The same pool admits 9,541.65 / 50 = $190.83 a leg,
-// about $381.67 for a two-leg basket. The neck is therefore roughly $380, and a
-// default near $100 would clear it about 3.8x over.
+// AND THE POOL THAT PARAGRAPH MEASURES IS NO LONGER THE ONE A BUY GOES THROUGH.
+// It was written against Raydium, where the pinned pool was the route. Under
+// Jupiter the keeper counts the inventory of the accounts the CHOSEN ROUTE
+// names, and on 2026-09-21 a 200 USDC ANTHROPIC buy routed BisonFi + Manifest,
+// touching the pinned pool not at all. The census behind that day's ceiling
+// measurement implies about $7,450 reachable — $149 a leg at 50x cover — while
+// the pinned pool held $9,204.14 (mainnet slot 448994132, down from
+// 9,541,652,779 raw the day before) and the venue-wide figure for the same mint
+// was $331,617. THREE NUMBERS, ALL TRUE, FORTY-FIVE TIMES APART: whoever quotes
+// a depth must say which one it is. What survives of the old paragraph is its
+// conclusion — at a $1,000 default the keeper buys nothing, on any of the three
+// readings — and the picker's live ceiling (website-oficial/src/lib/basket-limits.ts)
+// is what replaces the arithmetic, not another constant.
 //
 // WHAT SUCH A NUMBER IS CALIBRATED AGAINST, AND WHAT INVALIDATES IT. ONE pool's
 // reserve, read ONCE, on ONE day. It is not a property of the product and no
@@ -65,9 +72,23 @@
 // and website-oficial/src/lib/vault-flows.test.ts: eleven tests in all. Leaving
 // the number undocumented was the worse of the two options.
 
-import { ANTHROPIC_MINT, ANTHROPIC_USDC_POOL, SPYX_MINT, SPYX_USDC_POOL, TOKEN_2022_PROGRAM } from "./addresses";
+import {
+  ANDURIL_MINT,
+  ANTHROPIC_MINT,
+  ANTHROPIC_USDC_POOL,
+  FIGUREAI_MINT,
+  FIGUREAI_USDC_POOL,
+  KALSHI_MINT,
+  NEURALINK_MINT,
+  OPENAI_MINT,
+  POLYMARKET_MINT,
+  SPACEX_MINT,
+  SPYX_MINT,
+  SPYX_USDC_POOL,
+  TOKEN_2022_PROGRAM,
+} from "./addresses";
 import type { OwnerInstructionName } from "./idl";
-import { DEFAULT_RATES, MODE_PROFIT, type VaultPolicyInput } from "./rules";
+import { DEFAULT_PURCHASE_USDC_RAW, DEFAULT_RATES, MODE_PROFIT, type VaultPolicyInput } from "./rules";
 
 /** The owner's open decision on VOLUME, off until the keeper can measure volume. Changing it must change a test. */
 export const VOLUME_MODE_OFFERED: boolean = false;
@@ -92,78 +113,544 @@ export const LEG_FLOOR_MARGIN_BPS = 500;
 /** A classic SPL Token account (the vault's wSOL and USDC accounts): 165 bytes. Its rent is read from the chain, never derived. */
 export const CLASSIC_TOKEN_ACCOUNT_BYTES = 165;
 
-export interface OfferedLeg {
+// ── THE CATALOGUE ────────────────────────────────────────────────────────────
+//
+// WHAT AN ENTRY IS NOW. Under Raydium the catalogue could name the route: the
+// keeper brought one swap through the one pool the entry pinned, so `pool` was
+// the market, the floor's price and the depth measurement all at once. Under
+// Jupiter (invest-decision.ts ROUTABLE_VENUES) THERE IS NO FIXED ROUTE — the
+// router re-picks per quote, and it does not pick what this file pins. Measured
+// 2026-09-21 against lite-api.jup.ag, a 200 USDC buy:
+//   * SPYx routed Raydium CLMM pool 4pCZCVEi…, NOT the 6truu3rZ… pinned below;
+//   * ANTHROPIC routed BisonFi + Manifest, touching its pinned pool not at all,
+//     and a 5 USDC buy of the same mint routed GoonFi V2 + Whirlpool + Manifest.
+// So `pool` is gone and `floorPool` has taken its place, meaning ONE thing: the
+// Raydium CLMM/USDC pool the BUILD ROUTE READS A PRICE FROM when it signs a
+// leg's min_out_rate_wad (server/build-handler.ts liveFloors over
+// server/readers.ts PRICED_POOLS). It is a price source. It is not where the
+// money goes, and nothing here may read as if it were.
+//
+// NOTHING BELOW IS CLAIMED WITHOUT A DATE AND A SOURCE. Every number an entry
+// asserts about a market or a mint carries `readOn` and `by`: the day it was
+// read on mainnet and the thing that read it, so a reader can run it again and
+// so a figure that has aged out is visible as an old figure rather than as a
+// fact. A field that was never measured is null, and null is never a pass —
+// offerProblems refuses an unmeasured asset exactly as it refuses a failed one.
+//
+// WHAT THE CATALOGUE CANNOT DO, SAID ONCE HERE SO NO ENTRY HAS TO IMPLY
+// OTHERWISE. It cannot promise a buy will clear. The gate that decides is the
+// keeper's, inside the turn, against the size that turn really spends
+// (invest-decision.ts legDepthDecision: a census of the accounts the chosen
+// route names at MIN_VENUE_INVENTORY_MULTIPLE cover, plus a two-quote impact
+// probe). A list written on a Monday cannot know Thursday's book. What this
+// file does is narrower and still worth doing: it refuses to OFFER an asset
+// that could not be bought at the size this product's own defaults produce on
+// the day it was last measured, and it says on which rule each refusal rests.
+
+/** Which product an asset is. The two groups differ in what their issuer can do to a holder, which is a product fact and is spelled out at PRESTOCKS_POWERS and XSTOCKS_POWERS. */
+export type AssetGroup = "prestock" | "xstock";
+
+/** The live transfer fee read off a mint, with the epoch it was live in: the issuer rewrites it at an epoch boundary, so the epoch is half the reading. */
+export interface FeeReading {
+  readonly bps: number;
+  readonly epoch: number;
+  readonly readOn: string;
+  readonly by: string;
+}
+
+/**
+ * What a venue was measured to hold of USDC, and — crucially — WHICH
+ * measurement it is:
+ *  * "route-census" counts only the accounts a resolved Jupiter route names,
+ *    which is what the keeper's own gate counts (censusVenueInventory);
+ *  * "venue-wide" sums a venue's books or bins, which no single route touches.
+ * They are not the same number and the gap is not small: ANTHROPIC's venue-wide
+ * USDC depth was 331,617 on 2026-09-21 while the census behind that day's
+ * ceiling measurement implies about 7,450 — a factor of 45. A venue-wide figure
+ * is therefore an UPPER BOUND on any census taken inside it: failing a bar with
+ * one is decisive, passing it proves nothing.
+ */
+export interface DepthReading {
+  readonly usdcRaw: bigint;
+  readonly scope: "route-census" | "venue-wide";
+  /** The venue as the router names it, so a reader knows what was counted. */
+  readonly venue: string;
+  readonly readOn: string;
+  readonly by: string;
+}
+
+/**
+ * How much worse a reference-sized buy is quoted than a sixteenth-sized probe,
+ * in basis points — the shape of the keeper's ARM 2 (invest-decision.ts
+ * impactFrom / maxTurnImpactBps), taken at build time.
+ *
+ * `sameVenues` IS THE SCOPE AND MUST BE READ. The keeper compares two quotes
+ * only when both took the same venues in the same order, and abstains
+ * otherwise. A catalogue reading with sameVenues false compared each size's own
+ * best route instead: a coarser number, and a fair one for screening — if even
+ * the best route at the reference size is this much worse than the best route
+ * at a sixteenth of it, the market is thin at the size this product buys — but
+ * it is NOT the keeper's verdict and must never be printed as one.
+ */
+export interface SizePenaltyReading {
+  readonly bps: number;
+  readonly atRaw: bigint;
+  readonly probeRaw: bigint;
+  readonly sameVenues: boolean;
+  /** The venues each quote took, turn first, so the scope can be re-read rather than trusted. */
+  readonly routes: string;
+  readonly readOn: string;
+  readonly by: string;
+}
+
+/** One asset the catalogue knows about, offered or not. */
+export interface CatalogueAsset {
   readonly symbol: string;
   readonly name: string;
+  readonly group: AssetGroup;
   readonly mint: string;
-  /** The Raydium CLMM pool (mint0 = this leg, mint1 = USDC) its floor is read from. */
-  readonly pool: string;
   readonly tokenProgram: string;
   readonly decimals: number;
   /** What the Associated Token Account program allocates for this mint, extensions included: the size its rent is read for. */
   readonly tokenAccountBytes: number;
+  /**
+   * The Raydium CLMM/USDC pool this leg's min_out_rate_wad is PRICED from, or
+   * null when none is pinned — in which case SaverFi cannot sign a floor for
+   * it, whatever its depth. NOT a route: see the note at the top of this block.
+   */
+  readonly floorPool: string | null;
+  /** That pool's USDC-side reserve when it was last read: what it costs to move the price this product signs its floor against. */
+  readonly floorPoolUsdc: DepthReading | null;
+  /** The live transfer fee, or null when nobody has read it. An unread fee is not a zero fee. */
+  readonly fee: FeeReading | null;
+  /** The deepest USDC measurement anybody has taken of where a buy would actually land. */
+  readonly depth: DepthReading | null;
+  readonly sizePenalty: SizePenaltyReading | null;
+  /**
+   * The day a HELD refusal may be re-examined, or null when the asset is not
+   * quarantined. A date, not a clock: a module whose exports change because
+   * time passed is a leg that appears in a basket nobody re-measured, so
+   * clearing this is a human's edit after a fresh reading.
+   */
+  readonly quarantinedUntil: string | null;
+  /** Sentences true of this asset alone. The group's facts live at PRESTOCKS_POWERS and XSTOCKS_POWERS and are not repeated per entry. */
+  readonly notes: readonly string[];
+}
+
+/** An asset the rules admit: a catalogue asset whose floor can be priced, which is what the build route and the reserve readers require. */
+export interface OfferedLeg extends CatalogueAsset {
+  readonly floorPool: string;
+  readonly floorPoolUsdc: DepthReading;
+  readonly fee: FeeReading;
+  readonly depth: DepthReading;
 }
 
 /**
- * The stocks a policy can buy from the web: two, both Token-2022, each priced
- * from its own Raydium CLMM pool against USDC. bin/check-legs.mts asserts every
- * number below against mainnet, depth included — a pool can be structurally
- * perfect and still route nothing.
+ * WHAT ONE ISSUER KEY CAN DO TO A PRESTOCKS HOLDER, and it is one key.
  *
- * THE BYTES, PER LEG. Each is 165 for the base account, the account type (1),
- * then one header (4) plus its value for every extension the mint requires:
- *  * SPYx, 179: ImmutableOwner (4), PausableAccount (4), TransferHookAccount (5).
- *  * ANTHROPIC, 191: those same 179, plus TransferFeeAmount (4 + an 8-byte
- *    withheld amount).
+ * Read on mainnet 2026-09-21 (epoch 1039, slot 448993661) over all eight
+ * PreStocks mints this file names: WV9PJN7XTmTLVwbutCLFxp8TyePee6Xq5mRq6Fti5Wc
+ * is the mint authority AND the freeze authority AND the permanent delegate AND
+ * the transfer-fee config authority of EVERY ONE of them, and each mint also
+ * carries a Pausable extension and a transfer-hook extension (hook program id
+ * null today, which is the only reason the relay can move them at all).
  *
- * ANTHROPIC NOW CHARGES 100 BPS TO TRANSFER, AND THIS PARAGRAPH SAID 50 UNTIL
- * IT WAS WRONG. Its mint carries a live transfer-fee extension — with
- * maximum_fee at u64::MAX, so nothing caps it — which lands on the amount
- * RECEIVED, not the amount sent. A leg floor priced from the pool alone does not
- * see it.
+ * In plain words: one key can mint more, freeze an account, pause the whole
+ * mint, move a holder's tokens without the holder (permanent delegate), point
+ * transfers at a hook program, and rewrite the transfer fee at any epoch
+ * boundary. A vault holding a PreStock holds it at that key's discretion. That
+ * is the product, not a defect, and it is the reason this group is named on the
+ * page rather than folded in beside the equities.
  *
- * THE FEE'S HISTORY, AND WHY NO SENTENCE HERE IS THE SOURCE OF IT. The issuer
- * writes this number whenever it likes, at an epoch boundary, and the mint is
- * the only place it is true. Read on mainnet 2026-09-21: older{epoch 1032,
- * 50 bps}, newer{epoch 1039, 100 bps}, and getEpochInfo answers 1039 — so the
- * scheduled rise the previous version of this comment called "not hypothetical"
- * HAS FIRED, and the 50 written here outlived its own measurement for a day.
- * MAX_LEG_FEE_BPS is 100 and invest-decision.ts refuses on `fee.bps > MAX`, so
- * ANTHROPIC is admitted today with EXACTLY ZERO MARGIN: one more issuer write
- * refuses the whole basket and the SOL conversion with it, permanently, until
- * the fee comes back down. Read the fee from the mint, never from this file.
- * SPYx has no transfer fee. ANTHROPIC's transfer_hook program id is null: a real
- * hook would need transfer_checked_with_transfer_hook, which the program does not
- * call.
- *
- * WHY FIGUREAI IS NOT OFFERED, though addresses.ts still names its mint and pool
- * and this file deliberately leaves them there. NOTHING IS WRONG WITH THE MINT:
- * it is the same Token-2022 shape as ANTHROPIC — 9 decimals, null hook, the same
- * issuer key, the same 191-byte token account. ITS PINNED POOL IS EMPTY. Read on
- * mainnet 2026-09-20 (epoch 1038), HvpDt2…HduM held 0.110274669 FIGUREAI and
- * 31.91 USDC — about $51 all told, down from roughly $6,700 two days earlier,
- * when check:legs last passed it. A buy over about $11 reverts.
- *
- * AND A SINGLE-HOP USDC BUY IS ALL SAVERFI CAN DO TODAY. The program pins the
- * venue PROGRAM and not the route — invest.rs takes the account list from the
- * crank — and the keeper brings exactly one Raydium CLMM swap_v2 per leg,
- * through the single pool its registry holds for that mint
- * (solana-keeper/src/invest-tick.ts: deps.pools.get(mint), then fetchLiveRoute).
- * No multi-hop, no second venue, and a mint with no configured pool refuses the
- * WHOLE basket before anything moves. So a leg whose one pool is empty is an
- * unbuyable leg however good its mint is — and `pool` below is both that route
- * and where the leg's floor is priced.
- *
- * A basket holding it would buy SPYx and ANTHROPIC every sweep, revert on
- * FIGUREAI, and repeat — and the legs already bought STAY bought, so the basket
- * drifts off the weights the owner signed while the dashboard reports a failure.
- * The leg comes back when its pool has depth, and bin/check-legs.mts is the gate
- * that says so: run it against mainnet before re-adding the entry below.
+ * AND THE FEE IS ALREADY AT THE CEILING, ON ALL OF THEM. Every PreStocks mint
+ * read that day charged 100 bps from epoch 1039 — exactly MAX_LEG_FEE_BPS,
+ * which invest-decision.ts compares with `>`, so they are admitted with ZERO
+ * MARGIN. One more issuer write refuses the whole basket, the deep legs and the
+ * SOL conversion with it, until the fee comes back down.
  */
-export const OFFERED_LEGS: readonly OfferedLeg[] = Object.freeze([
-  Object.freeze({ symbol: "SPYx", name: "SP500 xStock", mint: SPYX_MINT, pool: SPYX_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 8, tokenAccountBytes: 179 }),
-  Object.freeze({ symbol: "ANTHROPIC", name: "Anthropic PreStock", mint: ANTHROPIC_MINT, pool: ANTHROPIC_USDC_POOL, tokenProgram: TOKEN_2022_PROGRAM, decimals: 9, tokenAccountBytes: 191 }),
+export const PRESTOCKS_POWERS = Object.freeze({
+  issuerKey: "WV9PJN7XTmTLVwbutCLFxp8TyePee6Xq5mRq6Fti5Wc",
+  oneKeyHolds: Object.freeze(["mint", "freeze", "permanent-delegate", "transfer-fee-config"]),
+  pausable: true,
+  transferHookProgram: null,
+  readOn: "2026-09-21",
+  by: "getMultipleAccounts over the eight PreStocks mints, mainnet, epoch 1039",
+});
+
+/**
+ * WHAT AN XSTOCK ISSUER CAN AND — THIS IS THE STRONGER HALF — CANNOT DO.
+ *
+ * SPYx read on mainnet 2026-09-21: NO TransferFeeConfig extension at all. That
+ * is not "no fee today". A Token-2022 mint's extensions are fixed when the mint
+ * is initialised and cannot be added afterwards, so a mint without that
+ * extension HAS NO AUTHORITY ANYWHERE ABLE TO GIVE IT ONE. The fee is zero for
+ * the life of the mint, and that is a fact about the account layout rather than
+ * a promise about a key's behaviour.
+ *
+ * WHAT IT DOES NOT MEAN, because the sentence is easy to over-read. SPYx still
+ * carries a freeze authority (JDq14BWv…), a permanent delegate (5aMNNLQJ…), a
+ * Pausable extension and a default-account-state extension — under DIFFERENT
+ * keys from each other, unlike the PreStocks single key, but they are real
+ * powers over a holder. The xStocks fact is about the FEE and nothing else.
+ */
+export const XSTOCKS_POWERS = Object.freeze({
+  transferFeeExtension: false,
+  feeAddableLater: false,
+  why: "Token-2022 extensions are fixed at mint initialisation; a mint with no TransferFeeConfig can never gain one",
+  stillHolds: Object.freeze(["freeze", "permanent-delegate", "pausable", "default-account-state"]),
+  readOn: "2026-09-21",
+  by: "getMultipleAccounts over the SPYx mint, mainnet, epoch 1039",
+});
+
+// ── THE SIZE EVERY CATALOGUE RULE IS MEASURED AT ─────────────────────────────
+//
+// A catalogue bar has to be stated at SOME size, and the honest one is the size
+// THIS PRODUCT'S OWN DEFAULTS PRODUCE: max_per_call is a cap on the WHOLE
+// basket and is split by weight, so the share one turn can push into one leg of
+// a full basket is max_per_call over the number of legs the picker allows. That
+// is 1,000 / 5 = 200 USDC, and it is where the 2026-09-21 readings were taken.
+//
+// WHY NOT THE SMALLEST BUY INSTEAD. Because an asset that only works when the
+// owner lowers the cap is a trap in an all-or-nothing basket: one leg that
+// cannot serve its share refuses the whole basket AND the SOL conversion, at
+// any balance, on every sweep. Offering such an asset means offering a basket
+// that silently stops buying. The picker still computes a live ceiling per
+// basket (website-oficial/src/lib/basket-limits.ts depthCeiling) and that
+// remains the number the owner signs against; the bar here decides only whether
+// an asset is on the shelf at all.
+
+/** The most legs the picker offers, which is the owner's "maximo como 5", not the program's MAX_LEGS of 8. The website's PICKER_MAX_LEGS re-exports it. */
+export const MAX_PICKED_LEGS = 5;
+
+/** The leg share every rule below is measured at: max_per_call split across a full basket, 200 USDC at the shipped caps. */
+export const CATALOGUE_REFERENCE_LEG_RAW = DEFAULT_INVEST_CAPS.maxPerCall / BigInt(MAX_PICKED_LEGS);
+
+/**
+ * The keeper's MIN_VENUE_INVENTORY_MULTIPLE, restated here because the browser
+ * may not import the keeper (its package.json is what ships to Railway, and the
+ * repo forbids the dependency in both directions). test/fixtures/keeper-policy.ts
+ * is the committed vector both sides assert against, and product.test.ts holds
+ * this copy to it.
+ */
+export const CATALOGUE_VENUE_INVENTORY_MULTIPLE = 50n;
+
+/** The keeper's MAX_LEG_FEE_BPS, same reason, same vector. Compared with `>`, so a fee sitting exactly on it is admitted with no margin. */
+export const CATALOGUE_MAX_FEE_BPS = 100;
+
+/** The keeper's SLIPPAGE_BPS (min-out.ts), same reason, same vector: the whole budget between a quote and its fill. */
+export const CATALOGUE_SLIPPAGE_BPS = 200;
+
+/** What a venue must hold of USDC for the reference leg to clear the keeper's cover: 50 x 200 USDC = 10,000. */
+export const CATALOGUE_MIN_VENUE_DEPTH_RAW = CATALOGUE_REFERENCE_LEG_RAW * CATALOGUE_VENUE_INVENTORY_MULTIPLE;
+
+/**
+ * What a FLOOR SOURCE must hold of USDC to count as a price: 50 x the smallest
+ * purchase this product makes, 250 USDC.
+ *
+ * WHY A POOL'S DEPTH DECIDES WHETHER ITS PRICE IS A PRICE. A leg's floor is the
+ * only price defence a stock leg has — Pyth anchors the SOL hop and nothing
+ * anchors the stocks — and it is signed ONCE, from this pool's mid, and then
+ * stands until the owner signs again. A mid that costs a few dollars to move is
+ * a mid an attacker sets at the moment of signing, and a floor signed off it is
+ * wrong for the life of the policy. The bar is deliberately the small one: it
+ * asks that the price source be a market at all, not that it be deep.
+ */
+export const CATALOGUE_MIN_FLOOR_POOL_RAW = CATALOGUE_VENUE_INVENTORY_MULTIPLE * DEFAULT_PURCHASE_USDC_RAW;
+
+/** What ARM 2 allows the reference leg to cost in its own impact: a quarter of what the slippage budget has left after the issuer's fee. */
+export const sizePenaltyCeilingBps = (feeBps: number): number => Math.max(0, Math.floor((CATALOGUE_SLIPPAGE_BPS - feeBps) / 4));
+
+// ── THE RULES, WHICH ARE THE CATALOGUE ───────────────────────────────────────
+//
+// The list is not hand-picked and must not become so: OFFERED_LEGS is the
+// subset of CATALOGUE that offerProblems() finds nothing wrong with. To add an
+// asset, measure it and write the readings down; if it then passes, it is
+// offered, and if it does not, the function says which rule refused it in a
+// sentence the entry did not get to write. That is the whole design — a reader
+// who disagrees with an exclusion can re-run its rule instead of arguing with a
+// list.
+
+/** The rules an asset must pass to be offered, in the order they are applied. Every refusal in this file names one of these. */
+export const OFFER_RULES = Object.freeze({
+  /** A USDC route must have been quoted for it. Nothing can be bought that the router will not price. */
+  ROUTED: "a Jupiter USDC route was quoted for it at the reference leg",
+  /** Its live transfer fee must have been read on mainnet and be at or under the keeper's ceiling. An unread fee is not a zero fee. */
+  FEE: `its transfer fee was read on mainnet and is at most ${CATALOGUE_MAX_FEE_BPS} bps`,
+  /** ARM 1's shape: the venue must hold cover for the reference leg. Necessary, never sufficient — the keeper re-counts in the turn. */
+  DEPTH: `the venue it routes through held at least ${CATALOGUE_VENUE_INVENTORY_MULTIPLE}x the reference leg in USDC`,
+  /** ARM 2's shape: the reference leg must not be quoted worse than the keeper's own impact ceiling. */
+  PRICE_AT_SIZE: "the reference leg is not quoted worse than the keeper's impact ceiling against a sixteenth-sized probe",
+  /** The build route can only sign a floor from a Raydium CLMM/USDC pool, and only from one deep enough for its mid to be a price. */
+  FLOOR: "a Raydium CLMM/USDC pool is pinned for it and holds enough USDC for its mid to be a price",
+  /** A standing list needs persistence, not a spot reading. See the constant below. */
+  HELD: "it has not been read under any of these bars inside the quarantine window",
+});
+
+export type OfferRule = keyof typeof OFFER_RULES;
+
+/** One rule an asset failed, and the reading that failed it. */
+export interface RuleFailure {
+  readonly rule: OfferRule;
+  readonly why: string;
+}
+
+/**
+ * Every rule `asset` fails, in OFFER_RULES' order, or an empty array when it is
+ * offerable. EVERY failure, not the first: an asset kept out by two independent
+ * facts is a different case from one kept out by a single reading that could
+ * move tomorrow, and a reader deciding what to fix needs to see both.
+ */
+export function offerProblems(asset: CatalogueAsset): RuleFailure[] {
+  const problems: RuleFailure[] = [];
+  const fail = (rule: OfferRule, why: string): number => problems.push({ rule, why });
+  const dollars = (raw: bigint): string => `$${(Number(raw) / 1e6).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  if (asset.depth === null) fail("ROUTED", "no USDC route has been quoted for it");
+
+  if (asset.fee === null) fail("FEE", "its transfer fee has never been read on mainnet, and an unread fee is not a zero fee");
+  else if (asset.fee.bps > CATALOGUE_MAX_FEE_BPS) fail("FEE", `it charged ${asset.fee.bps} bps in epoch ${asset.fee.epoch}, over the ${CATALOGUE_MAX_FEE_BPS} bps ceiling`);
+
+  if (asset.depth !== null && asset.depth.usdcRaw < CATALOGUE_MIN_VENUE_DEPTH_RAW) {
+    fail(
+      "DEPTH",
+      `${asset.depth.venue} held ${dollars(asset.depth.usdcRaw)} (${asset.depth.scope}, read ${asset.depth.readOn}), under the ` +
+        `${dollars(CATALOGUE_MIN_VENUE_DEPTH_RAW)} that covers a ${dollars(CATALOGUE_REFERENCE_LEG_RAW)} leg ${CATALOGUE_VENUE_INVENTORY_MULTIPLE}x`,
+    );
+  }
+
+  if (asset.sizePenalty === null) fail("PRICE_AT_SIZE", "nobody has quoted it at the reference leg against a probe");
+  else {
+    const ceiling = sizePenaltyCeilingBps(asset.fee?.bps ?? CATALOGUE_MAX_FEE_BPS);
+    if (asset.sizePenalty.bps > ceiling) {
+      fail(
+        "PRICE_AT_SIZE",
+        `a ${dollars(asset.sizePenalty.atRaw)} buy was quoted ${asset.sizePenalty.bps} bps worse than a ${dollars(asset.sizePenalty.probeRaw)} probe ` +
+          `(${asset.sizePenalty.routes}, read ${asset.sizePenalty.readOn}), over the ${ceiling} bps this keeper allows a turn's own impact`,
+      );
+    }
+  }
+
+  if (asset.floorPool === null) {
+    fail("FLOOR", "no Raydium CLMM/USDC pool is pinned for it, and the build route can price a leg's floor from nothing else");
+  } else if (asset.floorPoolUsdc === null) {
+    fail("FLOOR", `its floor pool ${asset.floorPool} has never had its USDC side read, so nobody knows what moving that mid costs`);
+  } else if (asset.floorPoolUsdc.usdcRaw < CATALOGUE_MIN_FLOOR_POOL_RAW) {
+    fail(
+      "FLOOR",
+      `its floor pool held ${dollars(asset.floorPoolUsdc.usdcRaw)} of USDC (read ${asset.floorPoolUsdc.readOn}), under the ` +
+        `${dollars(CATALOGUE_MIN_FLOOR_POOL_RAW)} a mid needs before it is a price rather than a number anyone can set`,
+    );
+  }
+
+  if (asset.quarantinedUntil !== null) {
+    fail("HELD", `it was read under one of these bars recently and is held out until ${asset.quarantinedUntil}, when a fresh reading may clear it`);
+  }
+
+  return problems;
+}
+
+/** Whether the rules admit `asset`, with the narrowing the build route and the reserve readers need. */
+export const isOfferable = (asset: CatalogueAsset): asset is OfferedLeg => offerProblems(asset).length === 0;
+
+// ── THE ASSETS ───────────────────────────────────────────────────────────────
+//
+// READ ON MAINNET 2026-09-21, EPOCH 1039. The mint facts (owner, decimals,
+// extensions, authorities, live fee) come from one getMultipleAccounts over all
+// nine mints at slot 448993661. The floor pools' USDC sides come from a second
+// one at slot 448994132, over ["pool_vault", pool, USDC] derived under Raydium
+// CLMM. The quotes come from lite-api.jup.ag, keyless, at 200 USDC and a
+// 12.50 USDC probe, each read three times to make sure the number was the
+// market and not a moment.
+//
+// THE PRESTOCKS MINTS WERE RESOLVED BY SYMBOL AND THEN PROVED BY ISSUER, which
+// is the only safe order: a Jupiter token search for any of these symbols also
+// answers with half a dozen impostors (ANTHROPIC alone returns ten, several of
+// them pump.fun mints with four-figure liquidity). A symbol is not an identity.
+// What identifies these eight is that all four authorities of every one of them
+// are the single key at PRESTOCKS_POWERS.issuerKey, which is the same key
+// addresses.ts already pinned for ANTHROPIC and FIGUREAI before this catalogue
+// existed. XAI has no entry because that search answered with no PreStocks mint
+// at all on 2026-09-21, and there is nothing to pin.
+//
+// tokenAccountBytes IS DERIVED FROM THE MINT'S EXTENSION SET, not guessed: 165
+// base, 1 account type, then a 4-byte header plus its value per account-side
+// extension — ImmutableOwner (0), PausableAccount (0), TransferHookAccount (1),
+// and for a fee-charging mint TransferFeeAmount (8). Every PreStocks mint read
+// that day carried the same three mint extensions, so every PreStocks entry is
+// 191 and SPYx, which has no fee extension, is 179. Only a created account
+// proves it; check:legs re-derives it from the mint for the offered legs.
+
+/** What this file knows about, offered or not. OFFERED_LEGS is the part of it the rules admit. */
+export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
+  Object.freeze({
+    symbol: "SPYx",
+    name: "SP500 xStock",
+    group: "xstock",
+    mint: SPYX_MINT,
+    tokenProgram: TOKEN_2022_PROGRAM,
+    decimals: 8,
+    tokenAccountBytes: 179,
+    floorPool: SPYX_USDC_POOL,
+    floorPoolUsdc: Object.freeze({ usdcRaw: 2_646_541_815_865n, scope: "route-census", venue: "Raydium CLMM 6truu3rZ… (the floor source, USDC vault 3EmW8zJD…)", readOn: "2026-09-21", by: "getMultipleAccounts, mainnet slot 448994132" }),
+    fee: Object.freeze({ bps: 0, epoch: 1039, readOn: "2026-09-21", by: "mint extensions, mainnet slot 448993661: no TransferFeeConfig at all" }),
+    depth: Object.freeze({ usdcRaw: 317_640_466_447n, scope: "route-census", venue: "Raydium CLMM 4pCZCVEi… (what a 200 USDC buy actually routed through)", readOn: "2026-09-21", by: "getMultipleAccounts over that pool's USDC vault 92aTAYGn…, mainnet slot 448995444" }),
+    sizePenalty: Object.freeze({ bps: 0.2, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: false, routes: "Raydium CLMM at 200 USDC vs Whirlpool at 12.50", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 0.2" }),
+    quarantinedUntil: null,
+    notes: Object.freeze([
+      "ITS FLOOR POOL IS NOT ITS MARKET. The pool this entry prices the floor from held $2,646,541.82; the pool a 200 USDC buy actually routed through is a different Raydium CLMM pool holding $317,640.47. The two disagree by 8.3x and both are real — one is where the price is read, the other is where the money goes.",
+      "The two prices agree even so: the floor pool's mid put 200 USDC at 25,961,743 raw SPYx and the route filled 25,940,466, 8 bps apart, well inside the 500 bps LEG_FLOOR_MARGIN_BPS the floor is signed at.",
+      "Zero transfer fee, permanently: see XSTOCKS_POWERS. Its impact ceiling is therefore the full 50 bps, not the 25 a PreStock is left with.",
+    ]),
+  }),
+  Object.freeze({
+    symbol: "ANTHROPIC",
+    name: "Anthropic PreStock",
+    group: "prestock",
+    mint: ANTHROPIC_MINT,
+    tokenProgram: TOKEN_2022_PROGRAM,
+    decimals: 9,
+    tokenAccountBytes: 191,
+    floorPool: ANTHROPIC_USDC_POOL,
+    floorPoolUsdc: Object.freeze({ usdcRaw: 9_204_135_177n, scope: "route-census", venue: "Raydium CLMM 47MsbowA… (the floor source, USDC vault FZmwQEZq…)", readOn: "2026-09-21", by: "getMultipleAccounts, mainnet slot 448994132" }),
+    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661: newer record, live from epoch 1039" }),
+    depth: Object.freeze({ usdcRaw: 331_617_000_000n, scope: "venue-wide", venue: "Hadron", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes; not re-derivable from this file" }),
+    sizePenalty: Object.freeze({ bps: 0.1, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: false, routes: "BisonFi + Manifest, or GoonFi V2 + Manifest, at 200 USDC vs a probe that re-routed on every reading", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings: 0.0, -0.0, 0.1" }),
+    quarantinedUntil: null,
+    notes: Object.freeze([
+      "ITS TRANSFER FEE IS AT THE CEILING WITH ZERO MARGIN. 100 bps from epoch 1039, against MAX_LEG_FEE_BPS of 100, which the keeper compares with `>`. One more write by the issuer key — which it may make at any epoch boundary, and an epoch is hours — refuses this leg, and a refused leg refuses the WHOLE basket and the SOL conversion with it, on every sweep, until the fee comes back down. The fee was 50 bps until epoch 1039 and this file is not its source: read it from the mint.",
+      "THE VENUE-WIDE NUMBER ABOVE IS NOT WHAT THE KEEPER COUNTS, and the gap decides whether a buy clears. The keeper censuses only the accounts the chosen route names; the 2026-09-21 ceiling measurement implies about $7,450 of that, 2.2 % of the venue-wide figure, which at 50x cover allows about $149 a leg. That is UNDER the $200 reference leg this catalogue is measured at: at the shipped $1,000 max_per_call split five ways, the keeper refuses ANTHROPIC today. The owner lowers max_per_call and the picker computes the ceiling (basket-limits.ts depthCeiling); nothing in this entry promises otherwise.",
+      "It is offered because the track requires a PreStock and this is the deepest venue any of them has — not because it is safe. Everything at PRESTOCKS_POWERS is true of it.",
+    ]),
+  }),
+  Object.freeze({
+    symbol: "FIGUREAI",
+    name: "Figure AI PreStock",
+    group: "prestock",
+    mint: FIGUREAI_MINT,
+    tokenProgram: TOKEN_2022_PROGRAM,
+    decimals: 9,
+    tokenAccountBytes: 191,
+    floorPool: FIGUREAI_USDC_POOL,
+    floorPoolUsdc: Object.freeze({ usdcRaw: 2_786_965_702n, scope: "route-census", venue: "Raydium CLMM HvpDt29E… (the floor source, USDC vault ALfDjAtK…)", readOn: "2026-09-21", by: "getMultipleAccounts, mainnet slot 448994132" }),
+    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
+    depth: Object.freeze({ usdcRaw: 50_000_000_000n, scope: "venue-wide", venue: "Hadron (though a 200 USDC quote that day routed Manifest E7Mcgg…)", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    sizePenalty: Object.freeze({ bps: 0, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest E7Mcgg… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 0.0" }),
+    quarantinedUntil: "2026-10-20",
+    notes: Object.freeze([
+      "THE SENTENCE THAT USED TO KEEP IT OUT IS NO LONGER TRUE, AND IS CORRECTED HERE RATHER THAN LEFT STANDING. This file said its pinned pool was empty — 0.110274669 FIGUREAI and 31.91 USDC, about $51, on 2026-09-20, with a buy over about $11 reverting. Read again on 2026-09-21 the same pool holds $2,786.97 on the USDC side, and Jupiter quotes 200 USDC into Manifest at no measurable penalty against a probe. On today's readings alone it would pass every other rule in this file.",
+      "IT IS STILL OUT, AND THE RULE IS THE POINT. A venue that went from roughly $6,700 to $51 and back to $2,787 inside four days has not got a depth; it has weather. The keeper can afford to judge that in the turn, because it re-measures every sweep; a catalogue cannot, because it is a standing offer a stranger reads on a Tuesday and signs on a Friday. So HELD holds it out until 2026-10-20, a month past the reading that failed, and clearing that date means taking a fresh reading — not deleting the line.",
+    ]),
+  }),
+  Object.freeze({
+    symbol: "OPENAI",
+    name: "OpenAI PreStock",
+    group: "prestock",
+    mint: OPENAI_MINT,
+    tokenProgram: TOKEN_2022_PROGRAM,
+    decimals: 9,
+    tokenAccountBytes: 191,
+    floorPool: null,
+    floorPoolUsdc: null,
+    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
+    depth: Object.freeze({ usdcRaw: 25_220_000_000n, scope: "venue-wide", venue: "Manifest 6Gi6cz…", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    sizePenalty: Object.freeze({ bps: 29.8, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest 6Gi6cz… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 29.8" }),
+    quarantinedUntil: null,
+    notes: Object.freeze([
+      "The deepest PreStock after ANTHROPIC by venue-wide depth, and still refused: at the reference leg its own price impact is 29.8 bps against the 25 the keeper leaves a 100 bps mint, measured on the SAME venue at both sizes — which is the keeper's own ARM 2 scope, so this is not a coarse reading. A cheaper fee or a smaller leg would both move it; neither is this file's to decide.",
+    ]),
+  }),
+  Object.freeze({
+    symbol: "NEURALINK",
+    name: "Neuralink PreStock",
+    group: "prestock",
+    mint: NEURALINK_MINT,
+    tokenProgram: TOKEN_2022_PROGRAM,
+    decimals: 9,
+    tokenAccountBytes: 191,
+    floorPool: null,
+    floorPoolUsdc: null,
+    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
+    depth: Object.freeze({ usdcRaw: 8_995_000_000n, scope: "venue-wide", venue: "Manifest G3LHQo…", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    sizePenalty: Object.freeze({ bps: 77.9, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest G3LHQo… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 77.9" }),
+    quarantinedUntil: null,
+    notes: Object.freeze(["Refused twice over, which is the useful kind of refusal: not enough at the venue, and what is there is not at this price."]),
+  }),
+  Object.freeze({
+    symbol: "SPACEX",
+    name: "SpaceX PreStock",
+    group: "prestock",
+    mint: SPACEX_MINT,
+    tokenProgram: TOKEN_2022_PROGRAM,
+    decimals: 9,
+    tokenAccountBytes: 191,
+    floorPool: null,
+    floorPoolUsdc: null,
+    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
+    depth: Object.freeze({ usdcRaw: 7_542_000_000n, scope: "venue-wide", venue: "Meteora DLMM Chroid…", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    sizePenalty: Object.freeze({ bps: 27, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Meteora DLMM Chroid… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 27.0" }),
+    quarantinedUntil: null,
+    notes: Object.freeze(["A DLMM keeps its liquidity in bins, so a count of units can read deep while the price two bins out is not there. Both of this entry's refusals say the same thing from the two sides the keeper measures it from."]),
+  }),
+  Object.freeze({
+    symbol: "POLYMARKET",
+    name: "Polymarket PreStock",
+    group: "prestock",
+    mint: POLYMARKET_MINT,
+    tokenProgram: TOKEN_2022_PROGRAM,
+    decimals: 9,
+    tokenAccountBytes: 191,
+    floorPool: null,
+    floorPoolUsdc: null,
+    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
+    depth: Object.freeze({ usdcRaw: 7_264_000_000n, scope: "venue-wide", venue: "Manifest J4PjSn…", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    sizePenalty: Object.freeze({ bps: 10.8, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest J4PjSn… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 10.8" }),
+    quarantinedUntil: null,
+    notes: Object.freeze([
+      "THE ONE WORTH RE-READING WHEN THE FLOOR STOPS COMING FROM A RAYDIUM POOL. Its price holds at the reference leg — 10.8 bps against a 25 bps ceiling, same venue at both sizes — and the two rules it fails are both about infrastructure rather than about the asset: its venue is $2,736 short of covering a $200 leg fifty times over, and SaverFi has no way to sign a floor for anything that does not trade on a Raydium CLMM/USDC pool.",
+    ]),
+  }),
+  Object.freeze({
+    symbol: "KALSHI",
+    name: "Kalshi PreStock",
+    group: "prestock",
+    mint: KALSHI_MINT,
+    tokenProgram: TOKEN_2022_PROGRAM,
+    decimals: 9,
+    tokenAccountBytes: 191,
+    floorPool: null,
+    floorPoolUsdc: null,
+    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
+    depth: Object.freeze({ usdcRaw: 4_229_000_000n, scope: "venue-wide", venue: "Meteora DLMM (reached through a first hop that changed between readings)", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    sizePenalty: Object.freeze({ bps: 96.7, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: false, routes: "GoonFi V2 + Meteora DLMM at 200 USDC vs Raydium CLMM + Scorch + Meteora DLMM at 12.50", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings: 96.6, 96.7, 96.7" }),
+    quarantinedUntil: null,
+    notes: Object.freeze(["Its two quotes never took the same route twice, so the keeper's ARM 2 would abstain here rather than measure — and 96.7 bps is far enough over any ceiling that the coarser reading settles it anyway."]),
+  }),
+  Object.freeze({
+    symbol: "ANDURIL",
+    name: "Anduril PreStock",
+    group: "prestock",
+    mint: ANDURIL_MINT,
+    tokenProgram: TOKEN_2022_PROGRAM,
+    decimals: 9,
+    tokenAccountBytes: 191,
+    floorPool: null,
+    floorPoolUsdc: null,
+    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
+    depth: Object.freeze({ usdcRaw: 2_016_000_000n, scope: "venue-wide", venue: "Manifest BeUdSs… (a Meteora DLMM answered the probe instead)", readOn: "2026-09-21", by: "the USDC-side venue census recorded in this repo's Jupiter migration notes" }),
+    sizePenalty: Object.freeze({ bps: 33.3, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: false, routes: "Manifest BeUdSs… at 200 USDC vs Meteora DLMM Gug9Tr… at 12.50", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 33.3" }),
+    quarantinedUntil: null,
+    notes: Object.freeze(["The thinnest venue measured: $2,016 covers a $200 leg ten times, not fifty. At the ceiling arithmetic in basket-limits.ts this is the asset that drags a five-leg basket's cap to about $200 all by itself."]),
+  }),
 ]);
+
+/**
+ * The assets a policy can be signed for: the part of CATALOGUE that
+ * offerProblems() finds nothing wrong with. Today that is SPYx and ANTHROPIC,
+ * and it is a RESULT rather than a list — the seven assets beside them each
+ * fail a named rule with a dated reading behind it, and putting one back means
+ * changing its readings, not this line.
+ */
+export const OFFERED_LEGS: readonly OfferedLeg[] = Object.freeze(CATALOGUE.filter(isOfferable));
 
 /** Each of `count` legs' weight, summing to exactly 10,000 bps: equal shares, any remainder on the first leg. */
 export function basketWeightsBps(count: number): number[] {

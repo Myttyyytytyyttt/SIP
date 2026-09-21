@@ -41,12 +41,18 @@
  * it.
  */
 
-import { LEG_WEIGHT_TOTAL_BPS, MAX_LEGS } from "@sip/solana-core/client";
+import { LEG_WEIGHT_TOTAL_BPS, MAX_LEGS, MAX_PICKED_LEGS } from "@sip/solana-core/client";
 
 import { POOL_DEPTH_MULTIPLE } from "@/lib/vault-copy";
 
-/** The most legs the picker offers, which is the owner's "maximo como 5", not the program's 8. */
-export const PICKER_MAX_LEGS = 5;
+/**
+ * The most legs the picker offers, which is the owner's "maximo como 5", not
+ * the program's 8. ONE COPY, IN CORE: the catalogue measures every one of its
+ * depth rules at max_per_call divided by this number (client/product.ts
+ * CATALOGUE_REFERENCE_LEG_RAW), so a second 5 here would be a second thing to
+ * keep in step with the shelf.
+ */
+export const PICKER_MAX_LEGS = MAX_PICKED_LEGS;
 
 /** One chosen asset and the share of every buy it takes, in basis points. */
 export interface BasketLeg {

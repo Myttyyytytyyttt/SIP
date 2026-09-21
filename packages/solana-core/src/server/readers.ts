@@ -395,8 +395,20 @@ export interface PoolPrices {
   readonly legWads: Readonly<Record<string, bigint>>;
 }
 
-/** The pools prices are read from, in order: SOL_USDC_POOL, then each offered leg's pool. */
-export const PRICED_POOLS: readonly string[] = Object.freeze([SOL_USDC_POOL, ...OFFERED_LEGS.map((leg) => leg.pool)]);
+/**
+ * The pools prices are read from, in order: SOL_USDC_POOL, then each offered
+ * leg's FLOOR POOL.
+ *
+ * A PRICE SOURCE, NOT A ROUTE, and the distinction is new. Until the keeper
+ * moved to Jupiter these were also the pools a buy went through; they are not
+ * any more, and the catalogue measured the gap on 2026-09-21 — a 200 USDC SPYx
+ * buy routed a different Raydium pool, and the same buy of ANTHROPIC touched no
+ * Raydium pool at all. What these pools still are is the only thing the build
+ * route can read a leg's min_out_rate_wad from, and the only rate this server
+ * publishes. The reserves below are theirs, which is why they are NOT the depth
+ * the keeper's gate measures; client/product.ts says so at length.
+ */
+export const PRICED_POOLS: readonly string[] = Object.freeze([SOL_USDC_POOL, ...OFFERED_LEGS.map((leg) => leg.floorPool)]);
 
 /** An account as a read needs it: its owner, its lamports, and its bytes when they came as base64. */
 export interface AccountSnapshot {
@@ -511,7 +523,7 @@ export interface PricedPoolPair {
  * read twice. readers.test.ts holds them equal.
  */
 export const PRICED_POOL_PAIRS: readonly PricedPoolPair[] = Object.freeze(
-  [{ pool: SOL_USDC_POOL, otherMint: WSOL_MINT }, ...OFFERED_LEGS.map((leg) => ({ pool: leg.pool, otherMint: leg.mint }))].map((entry) =>
+  [{ pool: SOL_USDC_POOL, otherMint: WSOL_MINT }, ...OFFERED_LEGS.map((leg) => ({ pool: leg.floorPool, otherMint: leg.mint }))].map((entry) =>
     Object.freeze({ ...entry, inMint: USDC_MINT, inVault: deriveClmmPoolVault(entry.pool, USDC_MINT) }),
   ),
 );
