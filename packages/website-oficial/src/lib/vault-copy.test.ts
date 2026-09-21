@@ -1,4 +1,22 @@
 // The rule texts' numbers, held to the code that acts on them.
+//
+// THROUGH A COMMITTED VECTOR, NOT THROUGH THE KEEPER'S TEXT. Each number below
+// used to be regexed out of a keeper source file, so reflowing a line in a
+// package the web may not edit turned a WEB gate red. The numbers now come from
+// test/fixtures/keeper-policy.ts, which the keeper's own tests assert against
+// too: a constant that moves fails in the keeper, a sentence that moves fails
+// here. The fixture carries each number's MEANING as well as its digits — the
+// unit the website prints, a worked example, the two cases either side of the
+// keeper's comparison — because two packages can agree on "100" and disagree
+// about what it counts. That is the pattern pyth-accounts.ts already uses for
+// the mirrored Pyth decoder, and it is the one remedy that does not break the
+// boundary packages/solana-keeper/src/pyth.ts states in its own words.
+//
+// THE readFileSync CALLS THAT REMAIN pin DOCTRINE, never prose: the shape of
+// two exported types and two expressions, none of which a rewording can touch.
+// They belong on the keeper's side for the same reason the numbers did, and the
+// keeper is adding them; they stay here until that lands, because a documented
+// duplicate is better than a silent hole.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -7,15 +25,21 @@ import { describe, expect, it } from "vitest";
 
 import { OFFERED_LEGS } from "@sip/solana-core/client";
 
+import { LEG_FEE, LOSS_FORGIVEN, POOL_DEPTH } from "../../../solana-core/test/fixtures/keeper-policy";
+
 import { INVEST_COPY, LOSS_DROPPED_AFTER_TXS, MAX_LEG_FEE_BPS, POOL_DEPTH_MULTIPLE, VAULT_COPY } from "@/lib/vault-copy";
 
 describe("the PROFIT rule", () => {
   it("says a loss comes off the next gain only until the trading wallet signs the keeper's own count of transactions, and names that count", () => {
-    // Read as text, never imported: the web does not depend on the keeper.
-    const keeper = readFileSync(fileURLToPath(new URL("../../../solana-keeper/src/settle-decision.ts", import.meta.url)), "utf8");
-    const count = /export const ZERO_BASE_MIN_TXS = ([0-9_]+);/.exec(keeper)?.[1];
-    expect(count, "ZERO_BASE_MIN_TXS in packages/solana-keeper/src/settle-decision.ts").toBeDefined();
-    expect(Number(count!.replaceAll("_", ""))).toBe(LOSS_DROPPED_AFTER_TXS);
+    // THE VECTOR, not the keeper's file: the keeper's own tests hold
+    // ZERO_BASE_MIN_TXS and the gate either side of it to this same entry.
+    expect(LOSS_DROPPED_AFTER_TXS).toBe(LOSS_FORGIVEN.keeper.value);
+    expect(LOSS_DROPPED_AFTER_TXS).toBe(LOSS_FORGIVEN.web.value);
+    // AND THE MEANING, which is a count of transactions and not of anything
+    // else: the loss is still carried one transaction below it and forgotten at
+    // it, so a sentence promising forgiveness A transaction earlier is wrong.
+    expect(LOSS_FORGIVEN.boundary.forgottenAtTxs).toBe(LOSS_DROPPED_AFTER_TXS);
+    expect(LOSS_FORGIVEN.boundary.stillCarriedAtTxs).toBe(LOSS_DROPPED_AFTER_TXS - 1);
 
     const rule = VAULT_COPY.profitRule("20 %", "0.06", "0.05");
     expect(rule).toContain(
@@ -27,11 +51,15 @@ describe("the PROFIT rule", () => {
 
 describe("the thin-pool notice", () => {
   it("says the keeper's own depth multiple, not a number of its own, and tells the owner to lower the cap it names", () => {
-    // Read as text, never imported: the web does not depend on the keeper.
-    const keeper = readFileSync(fileURLToPath(new URL("../../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
-    const multiple = /export const MIN_POOL_DEPTH_MULTIPLE = ([0-9_]+)n;/.exec(keeper)?.[1];
-    expect(multiple, "MIN_POOL_DEPTH_MULTIPLE in packages/solana-keeper/src/invest-decision.ts").toBeDefined();
-    expect(Number(multiple!.replaceAll("_", ""))).toBe(POOL_DEPTH_MULTIPLE);
+    // THE VECTOR, not the keeper's file.
+    expect(BigInt(POOL_DEPTH_MULTIPLE)).toBe(POOL_DEPTH.keeper.value);
+    expect(POOL_DEPTH_MULTIPLE).toBe(POOL_DEPTH.web.value);
+    // AND THE MEANING, which is the half a bare "50" cannot carry: a MULTIPLE
+    // of the pool's reserve, so one buy is at most a fiftieth — 2 % — of it. A
+    // copy that printed the multiple as a share would agree about the digits
+    // and tell the owner the opposite of the rule.
+    expect(100 / POOL_DEPTH_MULTIPLE).toBe(POOL_DEPTH.largestShareOfReservePercent);
+    expect(POOL_DEPTH.worked.spend * POOL_DEPTH.keeper.value).toBe(POOL_DEPTH.worked.requiredReserve);
 
     const notice = INVEST_COPY.thinPool("$1,000.00");
     expect(notice).toContain(`holds at least ${POOL_DEPTH_MULTIPLE} times that buy`);
@@ -50,23 +78,27 @@ describe("the thin-pool notice", () => {
     // per-leg outcome at all, which is the all-or-nothing rule itself: a
     // half-basket is unrepresentable. Rewording cannot break this; adding a
     // per-leg escape hatch is exactly what should.
+    const keeper = readFileSync(fileURLToPath(new URL("../../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
     expect(keeper).toMatch(/export type DepthDecision =\s*\|\s*\{ readonly deep: true \}\s*\|\s*\{ readonly deep: false; readonly outcome: "REFUSED"; readonly detail: string \};/);
   });
 });
 
 describe("the transfer-fee ceiling", () => {
   it("says the keeper's own MAX_LEG_FEE_BPS, and warns that the basket is all-or-nothing at it", () => {
-    // Read as text, never imported: the web does not depend on the keeper.
-    const keeper = readFileSync(fileURLToPath(new URL("../../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
-    const max = /export const MAX_LEG_FEE_BPS = ([0-9_]+)n;/.exec(keeper)?.[1];
-    expect(max, "MAX_LEG_FEE_BPS in packages/solana-keeper/src/invest-decision.ts").toBeDefined();
-    expect(Number(max!.replaceAll("_", ""))).toBe(MAX_LEG_FEE_BPS);
-
+    // THE VECTOR, not the keeper's file.
+    expect(BigInt(MAX_LEG_FEE_BPS)).toBe(LEG_FEE.keeper.value);
+    expect(MAX_LEG_FEE_BPS).toBe(LEG_FEE.web.value);
+    // AND THE MEANING, in the unit this page prints: 100 bps is 1 % per
+    // transfer, which is the conversion the sentence below performs.
+    expect(MAX_LEG_FEE_BPS / 100).toBe(LEG_FEE.percentPerTransfer);
     // STRICTLY GREATER, so a leg sitting exactly on the limit is admitted with
     // no margin -- which is ANTHROPIC's position at 100 bps today. If this gate
-    // ever became >=, the copy below would be wrong in the owner's favour and
-    // this assertion is what would say so.
-    expect(keeper).toMatch(/fee\.bps\s*>\s*MAX_LEG_FEE_BPS/);
+    // ever became >=, the copy below would be wrong in the owner's favour. The
+    // vector carries both cases and the KEEPER'S tests run them through the
+    // real gate; this holds the ceiling the copy names to the admitted one.
+    const keeper = readFileSync(fileURLToPath(new URL("../../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
+    expect(LEG_FEE.boundary.admittedAtBps).toBe(LEG_FEE.keeper.value);
+    expect(LEG_FEE.boundary.refusedAtBps).toBe(LEG_FEE.keeper.value + 1n);
     // The same all-or-nothing shape on the fee side: one refused leg, one
     // verdict, no per-leg admission.
     expect(keeper).toMatch(/export type LegAdmission =\s*\|\s*\{ readonly admit: true;[^}]*\}\s*\|\s*\{ readonly admit: false; readonly outcome: "REFUSED"; readonly detail: string \};/);
