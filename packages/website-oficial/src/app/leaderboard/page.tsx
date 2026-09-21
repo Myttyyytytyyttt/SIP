@@ -67,8 +67,8 @@ export default async function LeaderboardPage({
         account={returning && config !== null ? <LeaderboardAccountHost config={config} /> : <OpenPension returning={returning} />}
         activitySheet={
           <p className="p-4 text-sm text-muted-foreground">
-            The pensions that save most often. A day counts when a settlement charged it, or when the window that
-            settlement closed had traded; showing up beats showing up with more money.
+            Who is actually using SaverFi, ranked. Points are earned by a pension being fed, they are permanent, and
+            they are what SaverFi will recognise its savers by. Nothing to claim yet.
           </p>
         }
       />
@@ -87,9 +87,20 @@ export default async function LeaderboardPage({
           />
           <div className="relative max-w-prose">
             <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Leaderboard</h1>
-            <p className="mt-2 text-sm text-muted-foreground sm:text-base">
-              The pensions that feed themselves most often. Every settlement this keeper has recorded, grouped by
-              pension and scored on use rather than size.
+            {/*
+              WHAT THIS IS AND WHY IT IS WORTH BEING ON IT — and not a word about
+              how the score is computed. The last clause is the honest shape of a
+              promise that has no date: points are being kept and will count,
+              and there is nothing to claim today.
+            */}
+            <p className="mt-2 max-w-prose text-sm text-muted-foreground sm:text-base">
+              The public record of who is actually using SaverFi — every pension here has been fed by its owner&apos;s
+              own trading, on chain, where anyone can check it.
+            </p>
+            <p className="mt-3 max-w-prose text-sm text-muted-foreground sm:text-base">
+              Points are earned by using it and they are permanent: they stack week after week, they cannot be bought,
+              and they are what SaverFi will recognise its earliest savers by. Nothing to claim yet — the board is the
+              receipt.
             </p>
           </div>
         </section>

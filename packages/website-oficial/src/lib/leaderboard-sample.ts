@@ -5,14 +5,17 @@
  * says nothing about whether the design works — where the eye goes, whether the
  * medals read, whether a streak flame is too loud. This fills it.
  *
- * THE ADDRESSES ARE NOT ADDRESSES. An earlier version of this file borrowed
- * base58 strings from test fixtures; two of them turned out to be real mainnet
- * accounts, one of them THIS PROJECT'S OWN VAULT — so a page reachable by
- * anyone attributed invented savings, an invented streak and an invented score
- * to a real account, with a link to Solscan under it. These are placeholders
- * that say so in their own text and cannot collide with a real account: base58
- * has no "0", "O", "I" or "l", and no key derives to a pretty word. The page
- * also refuses to link a sample row to an explorer — see leaderboard-view.tsx.
+ * THE ADDRESSES ARE NOT ADDRESSES, and cannot be. An earlier version of this
+ * file borrowed base58 strings from test fixtures; two of them turned out to be
+ * real mainnet accounts, one of them THIS PROJECT'S OWN VAULT — so a page
+ * anyone can open attributed invented savings, an invented streak and an
+ * invented score to a real account, with a link to Solscan under it.
+ *
+ * Every placeholder now carries a "0", which base58 does not have (nor "O",
+ * "I" or "l"). That is not a convention: it makes each of these strings
+ * something no key can ever encode to, so the collision is impossible rather
+ * than unlikely. The page also refuses to link a sample row to an explorer —
+ * see leaderboard-view.tsx.
  *
  * EVERY ROW ADDS UP, and its size term is what the RULES in the same payload
  * actually produce for the amounts on that row: computed here by the same
@@ -71,8 +74,16 @@ function entry(input: {
   };
 }
 
-/** Placeholders, and readable as such: no key derives to a word. */
-const SAMPLE = (word: string): string => `Samp1e${word}${"1".repeat(Math.max(0, 43 - 6 - word.length))}`;
+/**
+ * Placeholders, and readable as such: no key derives to a word.
+ *
+ * THE WORD GOES FIRST AND THE LABEL LAST because the table shows an address by
+ * its two ends — four characters, an ellipsis, four characters. Padding the
+ * tail made all ten rows render as `Samp…1111`, one indistinguishable column in
+ * the one place whose whole job is to show what ten different rows look like.
+ * Now each row differs where it is visible and every row ends in "mp1e".
+ */
+const SAMPLE = (word: string): string => `${word}${"1".repeat(Math.max(0, 43 - 7 - word.length))}0Samp1e`;
 
 const SCORED: readonly LeaderboardEntry[] = [
   entry({ rank: 0, subject: SAMPLE("Habit"), days: 7, streak: 7, savedSol: 2.184, tradedSol: 41.7, settles: 19 }),
