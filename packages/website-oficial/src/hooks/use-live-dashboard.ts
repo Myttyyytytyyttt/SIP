@@ -95,8 +95,25 @@ const wordsFor = (failure: ApiFailure): string =>
         ? LIVE_COPY.deploymentUnavailable
         : vaultFailureWords(failure);
 
-export function useLiveDashboard(input: { readonly pensionKey: string | null; readonly privyWallets: readonly string[] }): LiveDashboardStore {
+export function useLiveDashboard(input: {
+  readonly pensionKey: string | null;
+  readonly privyWallets: readonly string[];
+  /**
+   * Whether this caller needs the HISTORY as well as the snapshot. Default true.
+   *
+   * FALSE IS NOT AN OPTIMISATION, IT IS A CORRECTION. A caller that wants only
+   * a balance — the leaderboard's header chip — was paying for a page of
+   * signatures and then for the backfill round behind it, and the round's cost
+   * is remembered per pension key in a module map that outlives the component
+   * (live-backfill.ts). So a connected visit to /leaderboard spent the whole
+   * backfill budget on a chip that reads none of it, and the dashboard, mounted
+   * a moment later, found `done` already true and never paged back for the
+   * settlement it then said it could not find.
+   */
+  readonly activity?: boolean;
+}): LiveDashboardStore {
   const { pensionKey } = input;
+  const wantsActivity = input.activity ?? true;
   const api = useMemo(() => createLiveApi(), []);
   // A string, so a new array with the same wallets does not read again.
   const walletsKey = input.privyWallets.join(",");
@@ -178,7 +195,8 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
         setSnapshot(answered.body);
 
         // No vault, no history: the route would answer an empty page, so it is not asked.
-        if (answered.body.vault.status === "exists") {
+        // And a caller that does not draw the history does not buy it either.
+        if (wantsActivity && answered.body.vault.status === "exists") {
           const until = newestSignature(entriesRef.current);
           const page = await api.activity({ owner: pensionKey, limit: ACTIVITY_PAGE, ...(until === null ? {} : { until }) });
           if (stale()) return true;
@@ -263,7 +281,7 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
         setReading(false);
       }
     },
-    [api, pensionKey, walletsKey],
+    [api, pensionKey, walletsKey, wantsActivity],
   );
 
   // The first read, and a fresh one whenever the wallet list changes: a wallet

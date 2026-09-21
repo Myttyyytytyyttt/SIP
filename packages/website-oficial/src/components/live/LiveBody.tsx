@@ -164,7 +164,16 @@ export function LiveBody({
 
             {panels ? null : (
               <>
-                <LiveSettlementStrip rows={data.rows} vault={data.vault} now={now} labelOf={labelOf} />
+                <LiveSettlementStrip
+                  rows={data.rows}
+                  vault={data.vault}
+                  now={now}
+                  labelOf={labelOf}
+                  settledOutsideHistory={data.stats.settledOutsideHistory}
+                  older={older}
+                  onLoadOlder={onLoadOlder}
+                  nowMs={nowMs}
+                />
                 <div className="grid gap-4 lg:gap-6 md:grid-cols-[minmax(16rem,20rem)_1fr] lg:grid-cols-1 xl:grid-cols-[minmax(16rem,20rem)_1fr]">
                   <LiveRuleCard data={data} labelOf={labelOf} onOpenWallets={onOpenWallets} className="order-2 md:order-1 lg:order-2 xl:order-1" />
                   <LivePensionCard data={data} now={now} complete={older.complete} className="order-1 md:order-2 lg:order-1 xl:order-2" />

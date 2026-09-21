@@ -17,6 +17,28 @@ import { ACTIVITY_COPY } from "@/lib/live-copy";
 
 import { WALLET_A, liveDashboard } from "../../../test/fixtures/live-dashboard";
 
+const OLDER = { busy: false, retryAt: null, message: null, complete: false } as const;
+
+/** The strip as the body mounts it. `settledOutsideHistory` is the caller's fact, not the rows'. */
+function render(input: { readonly data: ReturnType<typeof liveDashboard>; readonly settledOutsideHistory?: boolean; readonly complete?: boolean }): string {
+  return renderToStaticMarkup(
+    createElement(
+      TooltipProvider,
+      null,
+      createElement(LiveSettlementStrip, {
+        rows: input.data.rows,
+        vault: input.data.vault,
+        now: new Date(input.data.nowMs).toISOString(),
+        labelOf,
+        settledOutsideHistory: input.settledOutsideHistory ?? false,
+        older: { ...OLDER, complete: input.complete ?? false },
+        onLoadOlder: () => undefined,
+        nowMs: input.data.nowMs,
+      }),
+    ),
+  );
+}
+
 const MAX_CONTRIBUTION = 60_000_000n;
 const labelOf = (wallet: string | null): string => (wallet === WALLET_A ? "Trading wallet 1" : ACTIVITY_COPY.someWallet);
 
@@ -69,14 +91,40 @@ describe("what a chip says that settlement measured", () => {
 
 describe("the strip still draws what it drew", () => {
   it("shows a chip per settlement, with what it put aside", () => {
-    const data = liveDashboard();
-    const html = renderToStaticMarkup(
-      createElement(
-        TooltipProvider,
-        null,
-        createElement(LiveSettlementStrip, { rows: data.rows, vault: data.vault, now: new Date(data.nowMs).toISOString(), labelOf }),
-      ),
-    );
-    expect(html).toContain("+0.06 SOL");
+    expect(render({ data: liveDashboard() })).toContain("+0.06 SOL");
+  });
+});
+
+/**
+ * THE BAND IS NOT THE CHIPS. A settlement the chain records and this page has
+ * not read is the one case where an empty strip was hiding a fact and a
+ * control: the rate badge is about the vault today, and "Load older" is the
+ * one press that fills the strip, the curve and the Biggest tile at once.
+ * Returning null there took the whole top of the main column with it.
+ */
+describe("a settlement the loaded history does not hold", () => {
+  const noRows = () => liveDashboard({ activity: null });
+
+  it("keeps the band, with the rate badge and a way to fetch the settlement", () => {
+    const html = render({ data: noRows(), settledOutsideHistory: true });
+    expect(html).toContain("20 %");
+    expect(html).toContain(ACTIVITY_COPY.loadOlder);
+  });
+
+  it("says nothing about the history there: the chart and the tile already do", () => {
+    const html = render({ data: noRows(), settledOutsideHistory: true });
+    expect(html).not.toContain("loaded history");
+    // "last 0 settlements" is not a fact worth a line.
+    expect(html).not.toContain("last 0");
+  });
+
+  it("drops the button once the history reaches the beginning: there is nothing older to ask for", () => {
+    const html = render({ data: noRows(), settledOutsideHistory: true, complete: true });
+    expect(html).toContain("20 %");
+    expect(html).not.toContain(ACTIVITY_COPY.loadOlder);
+  });
+
+  it("draws no band at all when nothing has ever settled", () => {
+    expect(render({ data: noRows(), settledOutsideHistory: false })).toBe("");
   });
 });

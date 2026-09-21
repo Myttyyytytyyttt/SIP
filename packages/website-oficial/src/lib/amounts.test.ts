@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { AmountError, formatSol, formatUnits, formatUsd, parseUnits, rawFrom, shareOfRaw, solToLamports, usdcRawForLamports, usdcToRaw } from "@/lib/amounts";
+import { AmountError, formatSol, formatUnits, formatUsd, parseUnits, rawFrom, shareOfRaw, solToLamports, usdcRawForLamports, usdcToRaw, splitDecimal } from "@/lib/amounts";
 
 describe("token shares", () => {
   it("25 % and 50 % round down; All is the raw amount itself", () => {
@@ -57,6 +57,25 @@ describe("raw units to text", () => {
     // 0.06 SOL at $100.038711 a SOL.
     expect(usdcRawForLamports(60_000_000n, 100_038_711n)).toBe(6_002_322n);
     expect(formatUsd(usdcRawForLamports(60_000_000n, 100_038_711n))).toBe("$6.00");
+  });
+
+  /**
+   * The hero sets the first four decimals large and the rest small. It may only
+   * do that if the two halves are still the whole figure: a splitter that drops
+   * a digit is a rounding nobody asked for.
+   */
+  it("splits a formatted decimal losslessly, measuring from the point and not the end", () => {
+    expect(splitDecimal(formatSol(36_634_582n))).toEqual(["0.0366", "34582"]);
+    // Grouped, so measuring from the end would cut in the wrong place.
+    expect(splitDecimal("1,234.567890123")).toEqual(["1,234.5678", "90123"]);
+    // Nothing to split: fewer decimals than `keep`, and no point at all.
+    expect(splitDecimal("0.06")).toEqual(["0.06", ""]);
+    expect(splitDecimal("1,234")).toEqual(["1,234", ""]);
+    for (const lamports of [0n, 1n, 60_000_000n, 36_634_582n, 1_234_567_890_123n]) {
+      const text = formatSol(lamports);
+      const [head, tail] = splitDecimal(text);
+      expect(head + tail).toBe(text);
+    }
   });
 
   it("reads the server's decimal strings and nothing else", () => {

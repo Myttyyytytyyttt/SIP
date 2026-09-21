@@ -41,6 +41,46 @@ const chartConfig = {
 
 const LAMPORTS = 1_000_000_000;
 
+/**
+ * The short band the two curve-less states share.
+ *
+ * The `sm:` half is not decoration: the caller passes "h-64 w-full sm:h-72",
+ * and `cn` only drops a class the later one shadows at the SAME breakpoint. A
+ * bare `h-28` would leave `sm:h-72` standing and the band would spring back to
+ * 288px on any screen wider than 640px — which is every screen this was a
+ * complaint on.
+ */
+const BAND = "h-28 sm:h-28";
+
+/**
+ * A WINDOW WITH NO CURVE IN IT, drawn as a deliberate band rather than as a
+ * chart that came back blank.
+ *
+ * Two states use it and they are not the same. With `level` the total stood
+ * still across the window — a true fact, drawn as a rule through the middle
+ * with the figure beside it. Without it there is no line at all to draw yet,
+ * and the band is empty.
+ *
+ * RECHARTS DOES NOT DRAW EITHER OF THESE WELL. It has no domain for an empty
+ * series and renders nothing; and for a one-value series its default
+ * [0, 'auto'] domain fills the plot to the baseline, which painted a pension
+ * that saved nothing this week as a 288px block of solid green. CSS is
+ * deterministic here, needs no measuring pass, and paints the same on the
+ * server as in the browser.
+ */
+function Band({ level, className }: { readonly level: string | null; readonly className?: string }) {
+  return (
+    <div aria-hidden className={cn("relative w-full overflow-hidden rounded-lg border border-dashed bg-muted/20", className, BAND)}>
+      {level === null ? null : (
+        <>
+          <div className="absolute inset-x-4 top-1/2 border-t border-dashed border-emerald-500/70" />
+          <div className="absolute top-1/2 right-4 -translate-y-1/2 bg-card px-1.5 font-mono text-xs tabular-nums text-muted-foreground">{level}</div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /** An axis tick: SOL, to four decimals at most, trailing zeros dropped. */
 const axisSol = (value: number): string => `${Number(value.toFixed(4))}`;
 
@@ -61,13 +101,59 @@ export function LiveSavedChart({
   readonly settledOutsideHistory: boolean;
   readonly className?: string;
 }) {
+  /**
+   * NO CURVE IS STILL A STATE, not a missing element. The sentence used to be
+   * returned bare — dropping the `className` the card had reserved a 288px band
+   * with — so the panel lost a quarter of its height to one grey line and the
+   * page read as half-built. It keeps a frame now, and a SHORT one: the
+   * complaint was empty space, and a full-height dashed box is empty space with
+   * a border round it.
+   *
+   * The frame is ruled with CSS, never with an empty recharts chart. A chart
+   * with no data has no domain to place gridlines from and draws nothing at
+   * all; and a synthesised zero series would draw a line at zero across a window
+   * in which the vault's own total says money WAS saved, which is the exact
+   * falsehood settlement-not-in-history.test.ts exists to forbid.
+   */
   if (points === null || points.length === 0) {
-    return <p className="text-sm text-muted-foreground">{settledOutsideHistory ? LIVE_COPY.chartOutsideHistory : LIVE_COPY.chartEmpty}</p>;
+    return (
+      <div className="flex w-full flex-col gap-3">
+        <Band level={null} {...(className === undefined ? {} : { className })} />
+        <p className="text-sm text-muted-foreground">{settledOutsideHistory ? LIVE_COPY.chartOutsideHistory : LIVE_COPY.chartEmpty}</p>
+      </div>
+    );
   }
 
   // Recharts plots numbers; the exact lamport figure is kept for the tooltip.
   const data = points.map((point) => ({ at: point.at, total: Number(point.totalLamports) / LAMPORTS, lamports: point.totalLamports.toString() }));
   const oldest = points[0]!.at;
+
+  /**
+   * EVERY POINT THE SAME: the window holds no settlement, so the total stood
+   * still across it. Compared on the bigints, not on the plotted floats, which
+   * are lossy above 2^53 lamports.
+   *
+   * It is only drawn as a band when the caption underneath EXPLAINS it
+   * (chartFlat, below). A level line nobody has accounted for keeps the full
+   * chart, axes and all, because the next poll is about to resolve it and a
+   * band with no sentence under it would be a fact nobody can check.
+   */
+  const flat = points.every((point) => point.totalLamports === points[0]!.totalLamports);
+  const caption = (
+    <p className="text-xs text-muted-foreground">
+      {settledOutsideHistory ? `${LIVE_COPY.chartFlat} ` : ""}
+      {complete ? LIVE_COPY.chartComplete : LIVE_COPY.chartSince(dateLabel(oldest))}
+    </p>
+  );
+
+  if (flat && settledOutsideHistory) {
+    return (
+      <div className="flex w-full flex-col gap-3">
+        <Band level={`${formatSol(points[0]!.totalLamports)} SOL`} {...(className === undefined ? {} : { className })} />
+        {caption}
+      </div>
+    );
+  }
 
   return (
     <div className="flex w-full flex-col gap-3">
@@ -95,13 +181,19 @@ export function LiveSavedChart({
               />
             }
           />
-          <Area type="monotone" dataKey="total" stroke="var(--color-total)" fill="var(--color-total)" fillOpacity={0.12} strokeWidth={1.5} dot={false} isAnimationActive={false} />
+          <Area
+            type="monotone"
+            dataKey="total"
+            stroke="var(--color-total)"
+            fill="var(--color-total)"
+            fillOpacity={0.12}
+            strokeWidth={1.5}
+            dot={false}
+            isAnimationActive={false}
+          />
         </AreaChart>
       </ChartContainer>
-      <p className="text-xs text-muted-foreground">
-        {settledOutsideHistory ? `${LIVE_COPY.chartFlat} ` : ""}
-        {complete ? LIVE_COPY.chartComplete : LIVE_COPY.chartSince(dateLabel(oldest))}
-      </p>
+      {caption}
     </div>
   );
 }

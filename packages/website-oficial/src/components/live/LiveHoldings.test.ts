@@ -19,6 +19,7 @@ function render(data: LiveDashboard): string {
       holdings: data.holdings,
       worthNowUsdcRaw: data.worthNowUsdcRaw,
       notInvestedUsdcRaw: data.notInvestedUsdcRaw,
+      rentOnlyLamports: data.rentOnlyLamports,
       tokensReadable: data.tokensReadable,
       pricesKnown: data.prices !== null,
     }),
@@ -84,5 +85,37 @@ describe("what the table leaves out", () => {
 
   it("points at Manage wallets for anything held elsewhere", () => {
     expect(render(liveDashboard())).toContain(LIVE_COPY.holdingsFootnote);
+  });
+});
+
+/**
+ * A ROW OF ZEROES IS NOT A HOLDING. wSOL, USDC and every leg already required a
+ * positive balance; SOL did not, so a vault holding nothing but its own rent
+ * led the table with "SOL — 0 — $0.00" and a line of rent jargon under it. The
+ * rent is a real fact and is still stated — as one sentence, not as a row.
+ */
+describe("a vault whose SOL is all rent", () => {
+  const rentOnly = (): LiveDashboard => {
+    const base = liveSnapshot();
+    return liveDashboard({
+      snapshot: { ...base, vault: { ...base.vault, lamports: "1285240", withdrawableLamports: "0" } },
+    });
+  };
+
+  it("draws no SOL row", () => {
+    const data = rentOnly();
+    expect(data.holdings.some((row) => row.kind === "sol")).toBe(false);
+  });
+
+  it("still says where the SOL went, in prose", () => {
+    const data = rentOnly();
+    expect(data.rentOnlyLamports).toBe(1_285_240n);
+    expect(render(data)).toContain(LIVE_COPY.solRentOnly("0.00128524"));
+  });
+
+  it("keeps the row when there IS SOL to withdraw", () => {
+    const data = liveDashboard();
+    expect(data.holdings.some((row) => row.kind === "sol")).toBe(true);
+    expect(data.rentOnlyLamports).toBeNull();
   });
 });

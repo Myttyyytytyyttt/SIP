@@ -64,9 +64,32 @@ function LinkBadge({ wallet }: { readonly wallet: LiveWalletView }) {
   return <Badge variant="outline">{LIVE_COPY.badgeNotLinked}</Badge>;
 }
 
-function WalletRow({ wallet, usdcRawPerSol }: { readonly wallet: LiveWalletView; readonly usdcRawPerSol: bigint | null }) {
+/**
+ * ONE FIGURE IN THIS COLUMN IS ALLOWED TO BE BIG, and it is the balance of the
+ * wallet that actually saves. Every number here was text-xs muted, so the
+ * sidebar opened with no focal point at all next to a main column that leads
+ * with a 48px hero — which is a good part of why one read as built and the
+ * other as a draft. It is the same figure that was already on the line below;
+ * only its size changed.
+ *
+ * AT MOST ONE ROW IS PROMOTED, and only when it is unambiguous — one wallet,
+ * or exactly one linked to this vault. Several large numbers stacked is not an
+ * anchor, it is a wall, and it would push the feed off the screen.
+ *
+ * A BALANCE NOBODY COULD READ IS NEVER PROMOTED: "—" at 20px is a hole, and
+ * the row keeps its quiet line instead.
+ */
+function anchorOf(wallets: readonly LiveWalletView[]): string | null {
+  const readable = wallets.filter((wallet) => wallet.lamports !== null);
+  if (readable.length === 1) return readable[0]!.address;
+  const linked = readable.filter((wallet) => wallet.linkStatus === "this_vault");
+  return linked.length === 1 ? linked[0]!.address : null;
+}
+
+function WalletRow({ wallet, usdcRawPerSol, anchor }: { readonly wallet: LiveWalletView; readonly usdcRawPerSol: bigint | null; readonly anchor: boolean }) {
   const balance = wallet.lamports === null ? null : formatSol(wallet.lamports);
   const dollars = wallet.lamports === null || usdcRawPerSol === null ? null : formatUsd(usdcRawForLamports(wallet.lamports, usdcRawPerSol));
+  const settlements = wallet.settlementNonce === null ? null : LIVE_COPY.settlementCount(wallet.settlementNonce.toString());
 
   return (
     <li className="space-y-1 rounded-md border p-2.5">
@@ -78,11 +101,26 @@ function WalletRow({ wallet, usdcRawPerSol }: { readonly wallet: LiveWalletView;
         <Num className="text-xs">{shortAddress(wallet.address)}</Num>
         <CopyButton value={wallet.address} />
       </div>
-      <div className="text-xs text-muted-foreground">
-        <Num>{balance === null ? LIVE_COPY.unknownFigure : `${balance} SOL`}</Num>
-        {dollars === null ? null : <> ≈ {dollars}</>}
-        {wallet.settlementNonce === null ? null : <> · {LIVE_COPY.settlementCount(wallet.settlementNonce.toString())}</>}
-      </div>
+      {anchor ? (
+        <div className="space-y-0.5 pt-0.5">
+          <div className={LABEL}>{LIVE_COPY.walletBalance}</div>
+          {/* Num already carries the mono face; `block` gives the figure its own line. */}
+          <Num className="block text-xl font-semibold">{`${balance ?? ""} SOL`}</Num>
+          {dollars === null && settlements === null ? null : (
+            <div className="text-xs text-muted-foreground">
+              {dollars === null ? null : <>≈ {dollars}</>}
+              {dollars !== null && settlements !== null ? <> · </> : null}
+              {settlements}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="text-xs text-muted-foreground">
+          <Num>{balance === null ? LIVE_COPY.unknownFigure : `${balance} SOL`}</Num>
+          {dollars === null ? null : <> ≈ {dollars}</>}
+          {settlements === null ? null : <> · {settlements}</>}
+        </div>
+      )}
       {/* Linked, funded below the floor: nothing can be settled from it yet. */}
       {wallet.canSettle === false && wallet.linkStatus === "this_vault" ? <p className="text-xs text-amber-700 dark:text-amber-400">{LIVE_COPY.reserveNoteShort}</p> : null}
     </li>
@@ -123,6 +161,7 @@ export function LiveSidebar({
 }) {
   const usdcRawPerSol = rawFrom(data.prices?.usdcRawPerSol);
   const settlements = data.rows.filter((row) => row.event.kind === "settled").length;
+  const anchor = anchorOf(data.wallets);
 
   const manage = (
     <Button type="button" variant="link" size="sm" className={MANAGE} onClick={onOpenWallets}>
@@ -160,7 +199,7 @@ export function LiveSidebar({
           ) : (
             <ul className="space-y-2">
               {data.wallets.map((wallet) => (
-                <WalletRow key={wallet.address} wallet={wallet} usdcRawPerSol={usdcRawPerSol} />
+                <WalletRow key={wallet.address} wallet={wallet} usdcRawPerSol={usdcRawPerSol} anchor={wallet.address === anchor} />
               ))}
             </ul>
           )}

@@ -252,6 +252,13 @@ export interface LiveDashboard {
   readonly worthNowUsdcRaw: bigint | null;
   /** SOL, wSOL and USDC: saved but not yet in the basket. */
   readonly notInvestedUsdcRaw: bigint | null;
+  /**
+   * The vault's SOL is rent and nothing else, so there is no SOL row to say so.
+   * Null whenever a row does say it, or there is no vault. The footnote under
+   * the holdings reads it — the fact is never dropped, only moved out of a
+   * table row that would otherwise be entirely zeroes.
+   */
+  readonly rentOnlyLamports: bigint | null;
   readonly wallets: readonly LiveWalletView[];
   readonly rows: readonly LiveRow[];
   /** Account-keeping transactions and dust transfers, counted rather than listed. */

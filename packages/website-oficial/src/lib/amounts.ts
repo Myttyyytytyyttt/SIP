@@ -50,6 +50,23 @@ export function formatUnits(raw: bigint, decimals: number, options: { readonly g
 /** Lamports as SOL text: "0.00128524". */
 export const formatSol = (lamports: bigint): string => formatUnits(lamports, SOL_DECIMALS, { grouped: true });
 
+/**
+ * A formatted decimal split in two for display: `head` keeps at most `keep`
+ * decimals, `tail` is every digit after them. LOSSLESS — `head + tail` is
+ * always the input, so the caller renders the whole figure and only changes
+ * how it is set.
+ *
+ * Measured from the decimal point, never from the end, because formatSol groups
+ * the whole part: "1,234.567890123" must cut after "1,234.5678" whatever the
+ * commas do to the length.
+ */
+export function splitDecimal(text: string, keep = 4): readonly [string, string] {
+  const dot = text.indexOf(".");
+  if (dot === -1) return [text, ""];
+  const cut = dot + 1 + keep;
+  return cut >= text.length ? [text, ""] : [text.slice(0, cut), text.slice(cut)];
+}
+
 /** USDC raw units as dollars to the nearest cent: "$1,000.00". */
 export function formatUsd(usdcRaw: bigint): string {
   const negative = usdcRaw < 0n;

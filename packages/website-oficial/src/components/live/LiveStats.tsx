@@ -73,7 +73,10 @@ export function LiveStats({
     tiles.push({
       label: STATS_COPY.lastSettlement,
       value: (
-        <span className="text-base">
+        // whitespace-normal beats the dd's nowrap for THIS tile only: its value
+        // is prose, not a figure, and "not in loaded history" is wider than a
+        // 4-up cell. The dd keeps nowrap for every mono figure beside it.
+        <span className="text-base leading-snug whitespace-normal">
           {stats.lastSettlementAt !== null
             ? timeAgo(stats.lastSettlementAt, now)
             : stats.settledOutsideHistory

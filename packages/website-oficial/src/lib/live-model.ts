@@ -185,14 +185,23 @@ function tokenOf(snapshot: LiveSnapshotJson, mint: string): TokenHolding | null 
   return amountRaw === null ? null : { amountRaw, uiAmount: account.uiAmount ?? null };
 }
 
-function holdingsOf(snapshot: LiveSnapshotJson, vault: LiveVaultView, policy: LivePolicyView): { rows: LiveHoldingRow[]; worthNow: bigint | null; notInvested: bigint | null } {
+function holdingsOf(
+  snapshot: LiveSnapshotJson,
+  vault: LiveVaultView,
+  policy: LivePolicyView,
+): { rows: LiveHoldingRow[]; worthNow: bigint | null; notInvested: bigint | null; rentOnly: bigint | null } {
   const prices = snapshot.prices;
   const perSol = rawFrom(prices?.usdcRawPerSol);
   const rows: LiveHoldingRow[] = [];
 
   // SOL: what a withdrawal could take. The rent Solana keeps is noted, not counted as spendable.
+  //
+  // ZERO IS NOT A HOLDING. wSOL, USDC and every leg already guard on `> 0n`;
+  // SOL did not, so a vault holding nothing but its own rent led the table with
+  // "SOL — 0 shares — $0.00" and a line of rent jargon. The rent is still said,
+  // once, in prose: `rentOnly` below carries it to the footnotes.
   const withdrawable = vault.withdrawable;
-  if (vault.exists && withdrawable !== null) {
+  if (vault.exists && withdrawable !== null && withdrawable > 0n) {
     rows.push({
       key: "SOL",
       symbol: "SOL",
@@ -279,7 +288,11 @@ function holdingsOf(snapshot: LiveSnapshotJson, vault: LiveVaultView, policy: Li
     return { ...row, weightBps: Number((row.valueUsdcRaw * 10_000n) / invested) };
   });
 
-  return { rows: withWeights, worthNow, notInvested: sum(["sol", "wsol", "usdc"]) };
+  // The vault exists, it holds only the rent, and so there is no SOL row to
+  // carry that fact. Null whenever a row does say it, or there is nothing to say.
+  const rentOnly = vault.exists && withdrawable !== null && withdrawable === 0n ? vault.rentFloor : null;
+
+  return { rows: withWeights, worthNow, notInvested: sum(["sol", "wsol", "usdc"]), rentOnly };
 }
 
 const walletLabel = (index: number): string => `Trading wallet ${index + 1}`;
@@ -599,6 +612,7 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
     tokensReadable: snapshot.vaultTokenAccounts.status === "exists",
     worthNowUsdcRaw: holdings.worthNow,
     notInvestedUsdcRaw: holdings.notInvested,
+    rentOnlyLamports: holdings.rentOnly,
     wallets: wallets.rows,
     rows: visible.rows,
     hiddenUpkeep: visible.hiddenUpkeep,

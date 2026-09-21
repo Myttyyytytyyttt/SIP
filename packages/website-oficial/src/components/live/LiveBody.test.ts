@@ -71,6 +71,22 @@ describe("an activity read that failed", () => {
     expect(html).not.toContain(ACTIVITY_COPY.empty);
   });
 
+  /**
+   * AND IT KEEPS WHAT IT ALREADY HAD. The hook holds on to the rows a failed
+   * poll could not refresh; the feed used to throw every one of them away and
+   * draw a grey sentence in a full-height column, while the footer underneath
+   * went on counting them — "3 transactions" under a feed showing none.
+   */
+  it("keeps the rows already loaded, with the note above them", () => {
+    const data = liveDashboard();
+    expect(data.rows.length).toBeGreaterThan(0);
+
+    const html = render({ data, activityUnreadable: true });
+    expect(html).toContain(ACTIVITY_COPY.unreadableNow);
+    // The settlement that was already on screen is still on screen.
+    expect(html).toContain("+0.06 SOL");
+  });
+
   it("no longer contradicts the tile beside it", () => {
     // The chain says three settlements; the history could not be read. The page
     // may not say both "3 settlements" and "no activity yet".

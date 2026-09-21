@@ -17,7 +17,9 @@
  *
  * IT READS THE CHAIN ONLY FOR THE BALANCE, and only when there is a pension key
  * to read for. That is one snapshot per connected visitor — the same read the
- * dashboard makes, through the same cached route.
+ * dashboard makes, through the same cached route — and the snapshot ALONE
+ * (`activity: false`), because a chip that shows a balance has no use for a
+ * page of signatures and the backfill round that follows it.
  */
 
 import Link from "next/link";
@@ -41,7 +43,13 @@ function Account() {
   const privyWallets = tradingWalletsOf(user ?? null).map((wallet) => wallet.address);
   // NO KEY, NO READ. The hook takes a null pension key as "nothing to read",
   // so a session without an external Solana wallet costs no request.
-  const live = useLiveDashboard({ pensionKey, privyWallets });
+  //
+  // AND NO HISTORY: this bar shows one balance, which is in the snapshot. It
+  // used to buy a page of signatures and the backfill round behind it as well
+  // — and that round's cost is remembered per pension key for the life of the
+  // tab, so walking from here to the pension left the dashboard unable to page
+  // back for the settlement it then reported as missing.
+  const live = useLiveDashboard({ pensionKey, privyWallets, activity: false });
 
   if (!ready) {
     // Never a control that cannot act yet: a button that does nothing when

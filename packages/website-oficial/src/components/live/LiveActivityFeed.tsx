@@ -82,21 +82,34 @@ export function LiveActivityFeed({
   readonly emptyNote?: string;
   readonly className?: string;
 }) {
-  if (unreadable) {
-    return (
-      <div className={cn("space-y-2 px-4 py-6", className)} role="status">
-        <p className="text-sm text-muted-foreground">{ACTIVITY_COPY.unreadableNow}</p>
-        {onRetry === undefined ? null : (
-          <Button type="button" variant="outline" size="sm" onClick={onRetry}>
-            {LIVE_COPY.retry}
-          </Button>
-        )}
-      </div>
-    );
-  }
+  /**
+   * A FAILED READ IS A NOTE ABOVE THE HISTORY, NOT INSTEAD OF IT.
+   *
+   * The hook deliberately keeps the rows it already has when a poll fails
+   * (use-live-dashboard.ts) — and this component then threw every one of them
+   * away and drew a grey sentence in a full-height column. The footer below it
+   * went on counting them, so the sidebar said "3 transactions" under a feed
+   * that showed none. The banner is rendered over the rows now; only a feed
+   * that genuinely holds nothing is the banner alone.
+   */
+  const banner = !unreadable ? null : (
+    <div className="space-y-2 border-b px-4 py-3" role="status">
+      <p className="text-sm text-muted-foreground">{ACTIVITY_COPY.unreadableNow}</p>
+      {onRetry === undefined ? null : (
+        <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+          {LIVE_COPY.retry}
+        </Button>
+      )}
+    </div>
+  );
 
   if (rows.length === 0) {
-    return (
+    // Unreadable and nothing carried: the banner IS the whole message, and it
+    // must never be replaced by "No activity yet" — a read that failed says
+    // nothing about whether there is a history.
+    return banner !== null ? (
+      <div className={className}>{banner}</div>
+    ) : (
       <div className={cn("px-4 py-6", className)}>
         <p className="text-sm text-muted-foreground">{emptyNote ?? ACTIVITY_COPY.empty}</p>
       </div>
@@ -108,6 +121,7 @@ export function LiveActivityFeed({
 
   return (
     <div className={className} data-live-feed={id}>
+      {banner}
       {groups.map(([day, dayRows]) => (
         <div key={day === "" ? "unknown" : day}>
           {/* The bucket is a UTC day (groupByDay slices the ISO string), and the heading says so. */}

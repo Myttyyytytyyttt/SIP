@@ -95,6 +95,7 @@ export const LIVE_COPY = {
   // ── the sidebar ────────────────────────────────────────────────────────────
   pensionKey: "Pension key",
   tradingWallets: "Trading wallets",
+  walletBalance: "Balance",
   activity: "Activity",
   manageWallets: "Manage wallets",
   solscanAccount: "Solscan",
@@ -160,6 +161,9 @@ export const LIVE_COPY = {
   invested: "Basket value",
   /** The SOL row: what a withdrawal can take, and what Solana keeps. */
   solKeptAsRent: (rent: string): string => `withdrawable, ${rent} SOL kept as rent`,
+  // Said in prose because there is no row to say it on: the vault's SOL is all
+  // rent, and a "SOL — 0 — $0.00" row was how that used to reach the screen.
+  solRentOnly: (rent: string): string => `No SOL to withdraw: the ${rent} SOL in the vault is rent Solana keeps.`,
   holdingsFootnote: "Tokens in other accounts the vault owns are listed under Manage wallets.",
   tokensUnreadable: `${BRAND} could not read the vault’s tokens just now.`,
   pricesUnreadableNote: "Today’s prices could not be read, so dollar values are hidden.",
