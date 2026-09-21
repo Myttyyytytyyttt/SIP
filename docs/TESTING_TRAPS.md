@@ -183,3 +183,62 @@ The five cases fall into three shapes, and each one hides somewhere different:
 The question that finds all three is the same one: **what would it take for this
 to be green and wrong?** Ask it of the suite, of the comment, and of the thing
 the assertion is actually pinned to.
+
+## The instrument has no instrument
+
+Every rule above is enforced by something — a test, a check, a script. That
+something is itself code nobody tested, and on the night of 2026-09-21 it failed
+three times in a row while looking healthy.
+
+The question was narrow and mechanical: does the keeper's Docker image contain
+every file the keeper's code reaches? Docker does not run on this machine, so
+each of us wrote a checker.
+
+- **The first checker read the destination as a source.** In `COPY a b c dest/`
+  the last token is where the files land, not a file to copy. Counting it made
+  `packages/solana-program/scripts/` look copied wholesale, and the checker
+  announced that all nine specifiers were present. Four were not, and the image
+  could not build.
+- **The second checker asked about one package.** It resolved every `@sip/*`
+  specifier and passed a tree that still did not build: `pyth.test.ts` reaches
+  two files in a sibling by *relative path*, assembling part of each path from a
+  `const` at runtime so the type-checker never follows it. A scan for `@sip/`
+  sees none of that.
+- **The third checker made the first mistake again, by another door.** Written
+  specifically to close the relative-path hole, it matched the destination
+  `packages/solana-program/scripts/` against a "copied directory" pattern — and
+  once more reported four uncopied scripts as present.
+
+Three instruments, all green, all wrong, each about a question whose true answer
+was already known to somebody.
+
+### What actually caught it
+
+Not a test. Twice, what caught it was **a number remembered from before that the
+new result contradicted**. The first checker's "all nine present" collided with a
+COPY list read minutes earlier that plainly named three scripts. The third
+checker's clean run collided with a *measured* four-missing from the same tree an
+hour before. In both cases the discrepancy was the finding, and the instrument —
+not the tree — was the thing at fault.
+
+That is a habit, not a mechanism, and habits do not survive a tired evening. So
+the habit gets a mechanical first step:
+
+- **Show the detector failing before you trust it passing.** Point it at a case
+  known to be bad and require it to go red *naming the right thing*. A checker
+  that has only ever printed "ok" has been run, not tested. Both broken checkers
+  here would have been caught by one run against a tree whose answer was already
+  known.
+- **Keep the old number, and when a new result disagrees, suspect the
+  instrument first.** A green that contradicts a measurement you already hold is
+  not a green; it is an unexplained discrepancy, and it is cheaper to doubt the
+  tool than the tree.
+- **When a checker answers a question of the form "does X reach anything
+  outside itself?", enumerate the ways out before the ways in.** Here there were
+  two — a package specifier and a relative path — and each checker knew about
+  one. The failure was never in the matching; it was in the list of routes.
+
+This is the same disease as everything above, one level up: an assertion that
+could not fail. The difference is that the suite is watched and the instrument is
+not, so the question has to be asked deliberately: **what would it take for this
+checker to be green and wrong?**
