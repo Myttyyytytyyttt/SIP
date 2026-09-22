@@ -24,7 +24,7 @@
 
 import Image from "next/image";
 
-import { artForMint } from "@/lib/asset-art";
+import { artForMint, issuerBadgeFor } from "@/lib/asset-art";
 import { TICKERS, tickerLogo, type Ticker } from "@/mocks/types";
 import { cn } from "@/lib/utils";
 
@@ -40,27 +40,61 @@ export function AssetMark({
   symbol,
   mint = null,
   size = 20,
+  badge = true,
   className,
 }: {
   readonly symbol: string;
   /** The asset's mint, which is what the artwork is really keyed by. */
   readonly mint?: string | null;
   readonly size?: number;
+  /** The issuer's badge in the corner. Off where the mark is too small to carry one. */
+  readonly badge?: boolean;
   readonly className?: string;
 }) {
   const src = artForMint(mint) ?? (isTicker(symbol) ? tickerLogo(symbol) : null);
-  if (src !== null) {
-    // max-w-none: preflight's percentage max-width counts as 0 in a table's
-    // min-content, and without it the mark overflows into the next column.
-    return <Image src={src} alt="" width={size} height={size} className={cn("shrink-0 max-w-none rounded-full", className)} />;
-  }
+  const issuer = badge && size >= 20 ? issuerBadgeFor(mint) : null;
+
+  const face =
+    src !== null ? (
+      // max-w-none: preflight's percentage max-width counts as 0 in a table's
+      // min-content, and without it the mark overflows into the next column.
+      <Image src={src} alt="" width={size} height={size} className={cn("max-w-none rounded-full", issuer === null && "shrink-0", className)} />
+    ) : (
+      <span
+        aria-hidden
+        style={{ width: size, height: size }}
+        className={cn(
+          "inline-flex items-center justify-center rounded-full bg-muted text-[0.625rem] font-medium text-muted-foreground",
+          issuer === null && "shrink-0",
+          className,
+        )}
+      >
+        {symbol.slice(0, 1).toUpperCase()}
+      </span>
+    );
+
+  if (issuer === null) return face;
+
+  /*
+   * THE COMPANY IS THE FACE, THE ISSUER IS THE CORNER. A person looks for
+   * Anthropic; what decides what can happen to the token is that it is a
+   * PreStocks product — one key that can freeze it, pause it and charge a
+   * transfer fee. Both facts, in the order somebody reads them.
+   *
+   * The badge sits on the page's own background rather than on the logo, so a
+   * mark with a white face and a mark with a black one both keep it legible.
+   */
   return (
-    <span
-      aria-hidden
-      style={{ width: size, height: size }}
-      className={cn("inline-flex shrink-0 items-center justify-center rounded-full bg-muted text-[0.625rem] font-medium text-muted-foreground", className)}
-    >
-      {symbol.slice(0, 1).toUpperCase()}
+    <span className={cn("relative inline-flex shrink-0", className)} style={{ width: size, height: size }}>
+      {face}
+      <span
+        aria-hidden
+        title={issuer.label}
+        style={{ width: Math.round(size * 0.46), height: Math.round(size * 0.46) }}
+        className="absolute -right-0.5 -bottom-0.5 inline-flex items-center justify-center overflow-hidden rounded-full bg-background ring-1 ring-background"
+      >
+        <Image src={issuer.src} alt="" width={16} height={16} className="size-full max-w-none object-contain p-px" />
+      </span>
     </span>
   );
 }

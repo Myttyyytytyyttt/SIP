@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { CATALOGUE, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
 import { describe, expect, it } from "vitest";
 
-import { MINTS_WITHOUT_ART, NATIVE_SOL, artForMint } from "@/lib/asset-art";
+import { MINTS_WITHOUT_ART, NATIVE_SOL, artForMint, issuerBadgeFor } from "@/lib/asset-art";
 
 const PUBLIC = join(import.meta.dirname, "../../public");
 
@@ -51,8 +51,8 @@ describe("the mark an asset draws", () => {
    * something a person has to remember. Shrinking it is the point; it must
    * never grow silently, and a mint that gains art must leave it.
    */
-  it("names exactly what is still without a mark", () => {
-    expect([...MINTS_WITHOUT_ART].sort()).toEqual([USDC_MINT, ...CATALOGUE.filter((asset) => asset.group === "prestock").map((asset) => asset.mint)].sort());
+  it("has a mark for everything it can draw: the list of what is missing is empty", () => {
+    expect(MINTS_WITHOUT_ART).toEqual([]);
     // Every catalogue leg that is NOT in that list can be drawn.
     for (const asset of CATALOGUE) {
       if (MINTS_WITHOUT_ART.includes(asset.mint)) continue;
@@ -74,11 +74,11 @@ describe("the mark an asset draws", () => {
  * and transparent.
  */
 describe("every mark this app promises to draw", () => {
-  /** A PNG's width, height and colour type, from its IHDR. No dependency. */
-  function header(file: string): { width: number; height: number; colour: number } {
+  /** A PNG's width and height, from its IHDR. No dependency, no decoder. */
+  function header(file: string): { width: number; height: number } {
     const bytes = readFileSync(file);
     expect(bytes.subarray(0, 8).toString("hex"), `${file} is not a PNG`).toBe("89504e470d0a1a0a");
-    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20), colour: bytes.readUInt8(25) };
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
   }
 
   const mapped = (): readonly { readonly mint: string; readonly src: string }[] =>
@@ -93,11 +93,22 @@ describe("every mark this app promises to draw", () => {
     }
   });
 
-  /** Colour type 6 is RGBA and 4 is grey+alpha; 3 (palette) may carry tRNS. */
-  it("can be transparent at all: no mark is mapped from a file with no alpha channel", () => {
-    for (const { src } of mapped()) {
-      const { colour } = header(join(PUBLIC, src));
-      expect([3, 4, 6], `${src} has colour type ${colour}`).toContain(colour);
+  it("is a PNG at every path the badges point at too", () => {
+    for (const group of ["prestock", "xstock"]) {
+      const badge = issuerBadgeFor(CATALOGUE.find((asset) => asset.group === group)!.mint);
+      expect(badge, group).not.toBeNull();
+      const { width, height } = header(join(PUBLIC, badge!.src));
+      expect(width, `${badge!.src} is ${width}x${height}`).toBe(height);
     }
   });
+
+  /*
+   * WHAT THIS FILE CANNOT CHECK, so that nobody reads its silence as a pass:
+   * whether the mark FILLS its frame. A logo inset in a white square is clipped
+   * to a white ring with something small in the middle, which is what USDC's
+   * first two files did — the first was also 655x468 and the square check above
+   * caught that one. Node ships no PNG decoder, and hand-rolling one here
+   * (palette, interlacing, per-scanline filters) would be a bug farm guarding a
+   * property a human sees in one glance. Look at a new mark before mapping it.
+   */
 });

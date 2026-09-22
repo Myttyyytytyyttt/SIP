@@ -26,6 +26,7 @@
 
 import {
   ANDURIL_MINT,
+  CATALOGUE,
   ANTHROPIC_MINT,
   FIGUREAI_MINT,
   KALSHI_MINT,
@@ -58,23 +59,51 @@ const ART: Readonly<Record<string, string>> = Object.freeze({
   // (live-model.ts, "Wrapped SOL is SOL: the same price, never a separate
   // one"). Two marks for one asset would say otherwise.
   [WSOL_MINT]: "/stocks/SOL.png",
-  // STILL WANTED. Drop a SQUARE, TRANSPARENT png in public/stocks/ and
-  // uncomment; until then each draws its lettered disc, which is a deliberate
-  // state and not a broken image.
-  //
-  // USDC's file is here but is NOT mapped: it is 655x468 and fully opaque, so
-  // it would render as a squashed logo in a white box clipped to a circle. It
-  // needs a square transparent one. The test below is what refuses it.
-  // [USDC_MINT]: "/stocks/USDC.png",
-  // [ANTHROPIC_MINT]: "/stocks/ANTHROPIC.png",
-  // [FIGUREAI_MINT]: "/stocks/FIGUREAI.png",
-  // [OPENAI_MINT]: "/stocks/OPENAI.png",
-  // [NEURALINK_MINT]: "/stocks/NEURALINK.png",
-  // [SPACEX_MINT]: "/stocks/SPACEX.png",
-  // [POLYMARKET_MINT]: "/stocks/POLYMARKET.png",
-  // [KALSHI_MINT]: "/stocks/KALSHI.png",
-  // [ANDURIL_MINT]: "/stocks/ANDURIL.png",
+  [USDC_MINT]: "/stocks/USDC.png",
+  // THE ISSUER'S OWN, NOT A LOGO OFF THE WEB. Each of these mints carries a
+  // Token-2022 metadata URI pointing at prestocks.com/metadata/<name>.json,
+  // and each of those names its image — so the file under this path is the
+  // one the issuer published FOR THAT MINT. Searching the web for a company
+  // logo would have got a picture of the company, which is a different claim:
+  // these tokens are an issuer's product, not the company's stock.
+  [ANTHROPIC_MINT]: "/stocks/ANTHROPIC.png",
+  [FIGUREAI_MINT]: "/stocks/FIGUREAI.png",
+  [OPENAI_MINT]: "/stocks/OPENAI.png",
+  [NEURALINK_MINT]: "/stocks/NEURALINK.png",
+  [SPACEX_MINT]: "/stocks/SPACEX.png",
+  [POLYMARKET_MINT]: "/stocks/POLYMARKET.png",
+  [KALSHI_MINT]: "/stocks/KALSHI.png",
+  [ANDURIL_MINT]: "/stocks/ANDURIL.png",
 });
+
+/**
+ * THE ISSUER'S MARK, SMALL, IN THE CORNER OF THE ASSET'S OWN.
+ *
+ * ANTHROPIC on this shelf is not Anthropic: it is a PreStocks product that
+ * tracks it, issued by a third party who can freeze it, pause it and charge a
+ * transfer fee. SPYx is not the S&P 500 either. The big mark is the company,
+ * because that is what a person is looking for — and the small one says whose
+ * rails it rides on, which is the part that decides what can happen to it.
+ *
+ * Driven by the CATALOGUE's own `group`, so a leg listed tomorrow is badged
+ * the day it appears and nobody has to remember to add it here.
+ */
+export interface IssuerBadge {
+  readonly src: string;
+  readonly label: string;
+}
+
+const BADGES: Readonly<Record<string, IssuerBadge>> = Object.freeze({
+  prestock: { src: "/stocks/prestock.png", label: "PreStocks" },
+  xstock: { src: "/stocks/xstocks.png", label: "xStocks" },
+});
+
+/** The issuer's badge for this mint, or null when it is not a tokenised equity at all. */
+export function issuerBadgeFor(mint: string | null | undefined): IssuerBadge | null {
+  if (typeof mint !== "string") return null;
+  const asset = CATALOGUE.find((entry) => entry.mint === mint);
+  return asset === undefined ? null : (BADGES[asset.group] ?? null);
+}
 
 /** The mints a mark is still wanted for, so a test can name them rather than a person remembering. */
 export const MINTS_WITHOUT_ART: readonly string[] = Object.freeze(
