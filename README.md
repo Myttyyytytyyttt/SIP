@@ -50,7 +50,8 @@ Not a testnet, not a simulation. One real trade, measured, settled and invested 
 | **2. Trading wallet linked** | A wallet bound to that vault, with its rate | [`55oN6Nxu…`](https://solscan.io/tx/55oN6NxuNViZZJ2g3VJDbu4Vgor2JiCntYqpW1aaZfEWddQxTSnTm7KenwPDXjFmAWzxZ8pLGBsEEZJo1sp2BqyV) |
 | **3. The slice was taken** | `settle_v2` moved **0.036634582 SOL** into the vault — exactly 20 % of the 0.183172913 SOL that trading session made | [`2tE3BMTa…`](https://solscan.io/tx/2tE3BMTa6BPUmxaWvxDPEaK4piZ3KKL7pXGpmRHcUy6fHD2AK66rF6XnAKbNADKaarjSNGxTHqxqJpGFZ79vzvpy) |
 | **4. The slice bought stock** | The vault wrapped, converted, and swapped through Raydium CLMM into **SPYx** | [`2YdLAtx…`](https://solscan.io/tx/2YdLAtxPYSUu4EJJrN9wiqXnPJhiWHEF3F9d14XoJAUD7X9qFLeQB64hmC6wmHbJoaVwCzd6zLzwXM3uux2c2MBw) |
-| **5. And it is still there** | The vault holds **0.00692812 SPYx** today — an S&P 500 position paid for entirely by one trade's profit | [vault `EFXK995P…`](https://solscan.io/account/EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU) |
+| **5. Then it bought again, through an aggregator** | On 2026-09-22 the owner re-signed his policy onto **Jupiter v6**, and the vault wrapped, converted and bought SPYx through it — `invest` CPI'ing Jupiter, Jupiter routing Orca Whirlpool, Token-2022 settling the transfer | [`2KGe82ER…`](https://solscan.io/tx/2KGe82ERi3PJ8wJhXgHoLvMatvM4HhdUd5QrUU6TAPap4QdjdpfdnpCEqo77zRCpgJxSxck8G4z7hwbTmXUodL7S) |
+| **6. And it is still there** | The vault holds **0.01365168 SPYx** today — an S&P 500 position paid for entirely by trading profit | [vault `EFXK995P…`](https://solscan.io/account/EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU) |
 
 The keeper that did it is running right now and says so in public:
 
@@ -68,7 +69,7 @@ flowchart LR
     K["⚙️ Keeper, measuring from the chain"]
     P["📜 sip_vault program"]
     V[("🏦 Your vault")]
-    R["🔁 Raydium CLMM"]
+    R["🔁 Jupiter v6, routing the venues"]
     S["📈 SPYx, tokenized stock"]
     O["🔑 Your pension key"]
 
@@ -84,6 +85,8 @@ flowchart LR
 **Nothing is in your execution path — on purpose.** A Privy policy can allow or deny a transaction, but it cannot add an instruction to one, and a router of ours would only ever see our own trades. So the slice is measured *after* the fact, from the chain itself, and collected by a signed settlement. That is what lets you trade anywhere and still save.
 
 **The measurement is attested, not trusted.** The keeper signs an Ed25519 attestation of what it measured; the program verifies that signature against the attester named in its own on-chain config, checks a nonce and a frontier slot so no window is replayed or run backwards, clamps the result to the vault's maximum contribution, and refuses outright if the settlement would push the trading wallet below the reserve its owner set.
+
+**The venue is yours, and it is pinned.** `invest` will only CPI the program named in the policy you signed, byte for byte. The keeper cannot route anywhere else, and the day it learns a new venue, the only way that venue reaches your vault is you signing for it.
 
 **Linking a wallet takes a third signature.** Not just the owner's and the wallet's on the transaction — the wallet also signs a separate 140-byte consent naming this program, this wallet, this vault and this owner, which the program verifies before it will bind anything. It matters because a Privy policy for a custom program can only match the program id: a seat allowed to sign `settle_v2` is also allowed to sign `link_wallet`, and could otherwise bind a fresh wallet to a stranger's vault. What that seat cannot do is sign a *message*. The consent starts with the byte `0xFF`, which no Solana transaction can begin with, so those bytes can never be replayed as one.
 
@@ -161,19 +164,20 @@ Connect a Solana wallet and every number is read from mainnet through the app's 
 - [x] **The Docker image gates itself** — typecheck, the whole test suite, and a preflight that really constructs all four money-moving instructions
 - [x] **Critical alerts to Telegram**, with delivery counted and reported on `/status`
 - [x] **[Usage leaderboard](https://sip-website-oficial.vercel.app/leaderboard)** — points come from showing up (participation and streak), with the size term capped and logarithmic, so a large wallet cannot buy the top spot
+- [x] **Aggregator routing through Jupiter v6** — the single-pool walk is gone. Proven on mainnet 2026-09-22: `convert` and `invest` both CPI Jupiter, which routed Orca Whirlpool into SPYx. The routes need address lookup tables to fit a packet at all, so the keeper compiles a v0 transaction when there are tables and the legacy one when there are not
+- [x] **The owner picks his own basket and his own limits** — a picker for 1–5 stocks and their shares (the program takes up to 8), the minimum per stock, the per-settlement cap and the venue, all signed in the browser. A policy signed this way is live on mainnet today
 
 ### 🔨 In progress
 
 - [ ] **Volume mode end to end** — the program accepts it; the keeper cannot yet measure volume from real trades
 - [ ] **SaverFi's own landing footage** — the hero still plays the reference template's clip from a third party's CDN
 - [ ] **Settlement at scale** — proven n = 1; the next milestone is many wallets, many windows
+- [ ] **Widening the shelf** — nine tokenized assets are catalogued and read on mainnet, each admitted or refused by six dated rules. Two clear every rule today; the rest are refused in public, with the reading that failed them
 
 ### 🗺️ Next
 
-- [ ] **Aggregator routing (Jupiter)** in place of the single-pool walk, opening the basket beyond one asset
-- [ ] **User-set basket weights and contribution limits** in the dashboard
 - [ ] **Import an existing trading wallet**, not only wallets created here
-- [ ] **A published investable universe** — the full tokenized-stock catalogue, chosen per vault
+- [ ] **Price anchoring for the stock legs** — the SOL hop is anchored to Pyth; a stock leg's only bound today is the floor its owner signed once, which drifts
 - [ ] **Continuous integration** — the suites are green and nothing automatic runs them yet
 - [ ] **Governance over the upgrade authority** — today a single key, no timelock
 
@@ -183,7 +187,10 @@ Connect a Solana wallet and every number is read from mainnet through the app's 
 
 A hackathon README that overclaims is worse than one that claims less, so:
 
-- The money path is **proven once**, on 2026-09-19, for one wallet and one vault. It is real, and it is n = 1.
+- The money path is proven for **one wallet and one vault**. The settlement half has run **once**, on 2026-09-19; the investing half has now filled several times, including through Jupiter on 2026-09-22. It is real, and it is n = 1.
+- **The keeper routes Jupiter v6 and nothing else.** Raydium CLMM is retired by name, so a vault whose signed policy still points at it refuses every sweep — loudly, before any SOL is wrapped — until its owner re-signs. Adding a venue is an entry plus a route builder, not a configuration change.
+- **Two of the nine catalogued assets are offerable today.** The other seven are refused by the catalogue's own rules — a fee over the ceiling, a venue too thin for the reference leg, a floor source too small to be a price, or a recent failure still inside its quarantine window.
+- A stock leg has **no independent price anchor**. The depth gate measures depth at the size of the turn and has no opinion about price; Pyth anchors the SOL hop alone; the only price bound on a stock leg is the floor its owner signed, which is derived once and then stands.
 - The landing's background video **belongs to the reference template**, not to SaverFi.
 - The program is **upgradeable by a single team key** with no timelock. That is a beta posture, stated plainly.
 - `withdraw` and `withdraw_token` are implemented and tested, but **have not yet been exercised on mainnet**.
