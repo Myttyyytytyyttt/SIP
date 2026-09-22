@@ -854,7 +854,20 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
   const policy = policyAt(floors.convertFloor, floors.legFloors);
   const problems = investPolicyProblems(policy);
   if (problems.length > 0) return served.refuse(400, "invalid_policy", "The program would refuse this policy.", { problems });
-  const missing = targets.filter((_, index) => statuses[index] === "missing");
+  // ONLY WHAT THIS POLICY MAY HOLD. buildSetInvestPolicy allows exactly wSOL,
+  // the in-mint and THIS POLICY'S legs (builders.ts allowedMints), so bundling
+  // an account for an offered stock the owner did NOT pick makes this handler
+  // refuse its own build — "neither wSOL, the policy's in-mint nor one of its
+  // legs" — and the owner cannot sign at all.
+  //
+  // IT DID. On 2026-09-22 a vault holding wSOL, USDC and SPYx, re-signing a
+  // stored SPYx-only basket, had ANTHROPIC as its one missing account; it was
+  // bundled, and every attempt to sign died here. Harmless while the basket was
+  // always the whole shelf; a wall the day the picker let an owner take a
+  // subset. The client had the same bug in its own half and fixing that alone
+  // changed nothing, because THIS is the half that builds the bytes.
+  const policyMints = new Set([WSOL_MINT, USDC_MINT, ...chosen.map(({ leg }) => leg.mint)]);
+  const missing = targets.filter((target, index) => statuses[index] === "missing" && policyMints.has(target.mint));
   // ONLY THE FIRST FEW MISSING ACCOUNTS RIDE ALONG. A three-leg basket needs
   // five, and five creations do not fit a signed transaction once Phantom has
   // added its checks (BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES carries the bytes).

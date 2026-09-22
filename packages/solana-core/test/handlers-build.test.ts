@@ -624,6 +624,51 @@ function investableChain(owner: string): StubChain {
 const instructionsOf = (txBase64: string) => parseLegacyMessage(splitWire(fromB64(txBase64)).message).instructions;
 
 describe("investPolicy", () => {
+  /**
+   * THE OWNER COULD NOT RE-SIGN HIS OWN POLICY, 2026-09-22.
+   *
+   * buildSetInvestPolicy allows exactly wSOL, the in-mint and THIS POLICY'S
+   * legs (builders.ts allowedMints). This handler bundled the vault's missing
+   * accounts from the WHOLE SHELF, so a vault holding wSOL, USDC and SPYx, and
+   * re-signing a stored SPYx-only basket, bundled ANTHROPIC — the one account
+   * it lacked — and the handler refused its OWN build with "neither wSOL, the
+   * policy's in-mint nor one of its legs". Every attempt to sign died here.
+   *
+   * Harmless while the basket was always the whole shelf. A wall the day the
+   * picker let an owner take a subset. The web had the same bug in its half,
+   * and fixing that alone changed nothing, because THIS is the half that
+   * builds the bytes.
+   */
+  it("bundles no account for a stock the chosen basket does not name, so a subset basket can be signed at all", async () => {
+    const owner = keypair();
+    const ownerKey = owner.publicKey.toBase58();
+    const vault = deriveVaultPda(ownerKey).toBase58();
+    const chain = investableChain(ownerKey);
+    // The owner's real vault that day: wSOL, USDC and SPYx open, ANTHROPIC not.
+    for (const [mint, program, bytes] of [
+      [WSOL_MINT, TOKEN_PROGRAM, 165],
+      [USDC_MINT, TOKEN_PROGRAM, 165],
+      [SPYX_MINT, TOKEN_2022_PROGRAM, 179],
+    ] as const) {
+      chain.accounts.set(
+        deriveAta(vault, mint, program).toBase58(),
+        accountInfo(program, tokenAccountData({ mint, owner: vault, amount: 0n, bytes }), localRent(bytes)),
+      );
+    }
+    const { build } = setup(chain);
+    const answer = await build({ action: "investPolicy", owner: ownerKey, weights: [{ mint: SPYX_MINT, weightBps: 10_000 }] });
+    expect(answer.status, JSON.stringify(answer.json)).toBe(200);
+    const body = answer.json;
+    // NOTHING IS CREATED: the only missing account belongs to a stock this
+    // policy does not name, and the keeper opens it if it is ever picked.
+    expect(instructionsOf(body.txBase64).filter((instruction) => instruction.programId === ATA_PROGRAM)).toHaveLength(0);
+    expect(body.vaultTokenAccounts.filter((entry: { create: boolean }) => entry.create)).toEqual([]);
+    // And the bytes carry the basket the owner actually chose.
+    expect(decodeArgs("set_invest_policy", instructionsOf(body.txBase64).at(-1)!.data).legs).toEqual([
+      { mint: SPYX_MINT, weight_bps: 10_000, min_out_rate_wad: 124_719_467_624_105_690n },
+    ]);
+  });
+
   it("a first policy: [CU limit, CU price, ATA wSOL, ATA USDC, set_invest_policy] at 90 % and 95 % of the pools, the default caps and the rent of what it creates; it verifies once the owner signs", async () => {
     const owner = keypair();
     const ownerKey = owner.publicKey.toBase58();
