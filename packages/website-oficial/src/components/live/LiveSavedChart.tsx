@@ -141,7 +141,7 @@ export function LiveSavedChart({
   const flat = points.every((point) => point.totalLamports === points[0]!.totalLamports);
   const caption = (
     <p className="text-xs text-muted-foreground">
-      {settledOutsideHistory ? `${LIVE_COPY.chartFlat} ` : ""}
+      {LIVE_COPY.chartUnit} · {settledOutsideHistory ? `${LIVE_COPY.chartFlat} ` : ""}
       {complete ? LIVE_COPY.chartComplete : LIVE_COPY.chartSince(dateLabel(oldest))}
     </p>
   );

@@ -20,11 +20,16 @@
  * between "20 % of your gain" and the number on the row is otherwise invisible.
  *
  * AN AMOUNT THE CHAIN DID NOT GIVE IS LEFT OUT, never guessed: the classifier
- * reports null where a token balance was missing, and the label drops to its
- * amount-less form rather than inventing a figure.
+ * reports null where a token balance was missing, and the amount COLUMN
+ * empties rather than the row inventing a figure. The title does not change —
+ * it carries no figure to lose. Every title used to, and the row then printed
+ * the same number twice: once inside a sentence that ran out of room in a
+ * 320px column and was cut mid-word, and once in full on the right.
  */
 
 import type { FocusEvent, KeyboardEvent, ReactNode } from "react";
+
+import { AssetMark } from "@/components/live/AssetMark";
 
 import {
   ArrowDownToLine,
@@ -48,7 +53,7 @@ import { Badge } from "@/components/ui/badge";
 import { formatSol, formatUsd, rawFrom } from "@/lib/amounts";
 import { SAVED } from "@/lib/classes";
 import { clockLabel, shortHex } from "@/lib/format";
-import { ACTIVITY_COPY } from "@/lib/live-copy";
+import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import { symbolOfMint } from "@/lib/live-symbols";
 import type { LiveRow, VaultEventJson } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
@@ -85,6 +90,19 @@ export interface RowParts {
 const mark = (Glyph: typeof PiggyBank, className?: string): ReactNode => <Glyph className={cn("size-4 text-muted-foreground", className)} aria-hidden />;
 
 /**
+ * A ROW ABOUT AN ASSET WEARS THE ASSET, not a verb.
+ *
+ * A glyph is right for what the vault DID — wrapped, converted, linked, swept —
+ * and wrong for a row whose whole subject is which token was bought. The
+ * sample has always drawn the token's mark on those rows and live drew a grey
+ * shopping cart, which is most of why one column reads as a product and the
+ * other as a log. Keyed by the MINT the event carries, so it is that token's
+ * mark and not whoever else uses those three letters; an asset with no art
+ * falls through to the same lettered disc, which still says which one it was.
+ */
+const assetMark = (symbol: string, mint: string | null): ReactNode => <AssetMark symbol={symbol} mint={mint} size={16} className="shrink-0" />;
+
+/**
  * What a settlement measured, from the mode THAT SETTLEMENT carries — never
  * from the vault's mode today. Exported so the settlement strip says the same
  * word about the same transaction.
@@ -107,8 +125,8 @@ export function partsOf(event: VaultEventJson, labelOf: (wallet: string | null) 
       return {
         ...plain,
         icon: mark(PiggyBank, moved ? SAVED : undefined),
-        title: moved ? ACTIVITY_COPY.settled(formatSol(paid)) : ACTIVITY_COPY.settledNothing,
-        detail: ACTIVITY_COPY.settledFrom(labelOf(event.wallet), ratePercent(event.bps), base, measureOf(event.mode)),
+        title: moved ? ACTIVITY_COPY.settled(labelOf(event.wallet)) : ACTIVITY_COPY.settledNothing(labelOf(event.wallet)),
+        detail: ACTIVITY_COPY.settledFrom(ratePercent(event.bps), base, measureOf(event.mode)),
         // The cap is stated where the shortfall would otherwise be invisible.
         note: event.capped && owed !== null && maxContribution !== null ? ACTIVITY_COPY.settledCapped(formatSol(owed), formatSol(maxContribution)) : null,
         amount: moved ? `+${formatSol(paid)} SOL` : "0 SOL",
@@ -121,7 +139,7 @@ export function partsOf(event: VaultEventJson, labelOf: (wallet: string | null) 
       return {
         ...plain,
         icon: mark(Package),
-        title: amount === null ? ACTIVITY_COPY.wrappedPlain : ACTIVITY_COPY.wrapped(amount),
+        title: ACTIVITY_COPY.wrapped,
         amount: amount === null ? null : `${amount} SOL`,
       };
     }
@@ -132,8 +150,9 @@ export function partsOf(event: VaultEventJson, labelOf: (wallet: string | null) 
       return {
         ...plain,
         icon: mark(ArrowLeftRight),
-        // Both halves or neither: "Converted 0.01 SOL to ? USDC" says less than the plain form.
-        title: spent === null || received === null ? ACTIVITY_COPY.convertedPlain : ACTIVITY_COPY.converted(spent, bare(received)),
+        title: ACTIVITY_COPY.converted,
+        // The SOL side goes where the sample puts the other half of a trade.
+        detail: spent === null ? null : ACTIVITY_COPY.convertedFrom(spent),
         amount: received,
       };
     }
@@ -144,8 +163,14 @@ export function partsOf(event: VaultEventJson, labelOf: (wallet: string | null) 
       const got = event.receivedUi;
       return {
         ...plain,
-        icon: mark(ShoppingCart),
-        title: got === null || spent === null ? ACTIVITY_COPY.investedPlain(symbol) : ACTIVITY_COPY.invested(got, symbol, bare(spent)),
+        icon: assetMark(symbol, event.mint),
+        title: ACTIVITY_COPY.invested(symbol),
+        // The quantity, as the sample puts it. NOT a unit price: usdcSpentRaw
+        // is the WHOLE transaction's USDC delta, so two legs in one
+        // transaction would each silently show twice what they paid. Today's
+        // keeper sends one invest per transaction, which is a property of the
+        // keeper and not of the data.
+        detail: got,
         amount: spent,
       };
     }
@@ -155,7 +180,7 @@ export function partsOf(event: VaultEventJson, labelOf: (wallet: string | null) 
       return {
         ...plain,
         icon: mark(ArrowUpFromLine),
-        title: amount === null ? "Withdrew SOL" : ACTIVITY_COPY.withdrewSol(amount),
+        title: ACTIVITY_COPY.withdrewSol,
         amount: amount === null ? null : `−${amount} SOL`,
       };
     }
@@ -166,8 +191,8 @@ export function partsOf(event: VaultEventJson, labelOf: (wallet: string | null) 
       const shown = event.uiAmount;
       return {
         ...plain,
-        icon: mark(ArrowUpFromLine),
-        title: shown === null ? `Withdrew ${symbol}` : ACTIVITY_COPY.withdrewToken(shown, symbol),
+        icon: assetMark(symbol, event.mint),
+        title: ACTIVITY_COPY.withdrewToken(symbol),
         amount: shown === null ? null : `−${shown} ${symbol}`,
       };
     }
@@ -183,11 +208,29 @@ export function partsOf(event: VaultEventJson, labelOf: (wallet: string | null) 
       };
     }
 
-    case "rule_changed":
-      return { ...plain, icon: mark(Settings2), title: ACTIVITY_COPY.ruleChanged };
+    case "rule_changed": {
+      // BOTH the mode and ITS rate, or nothing. Reading skimBps when the mode
+      // did not decode would print "Profit · 0 %" over a volume vault.
+      const volume = event.mode === 1;
+      const bps = event.mode === null ? null : volume ? event.volumeBps : event.skimBps;
+      return {
+        ...plain,
+        icon: mark(Settings2),
+        title: ACTIVITY_COPY.ruleChanged,
+        detail: bps === null ? null : ACTIVITY_COPY.ruleChangedTo(volume ? LIVE_COPY.modeVolume(ratePercent(bps)) : LIVE_COPY.modeProfit(ratePercent(bps))),
+      };
+    }
 
-    case "policy_signed":
-      return { ...plain, icon: mark(ScrollText), title: event.enabled === false ? ACTIVITY_COPY.investingPaused : ACTIVITY_COPY.policySigned };
+    case "policy_signed": {
+      // A cap `rawFrom` rejects is unread, never "$0.00 per buy".
+      const cap = rawFrom(event.maxPerCall);
+      return {
+        ...plain,
+        icon: mark(ScrollText),
+        title: event.enabled === false ? ACTIVITY_COPY.investingPaused : ACTIVITY_COPY.policySigned,
+        detail: cap === null ? null : ACTIVITY_COPY.policyCaps(formatUsd(cap)),
+      };
+    }
 
     case "linked":
       return { ...plain, icon: mark(Link2), title: ACTIVITY_COPY.linked(labelOf(event.wallet)) };
@@ -196,8 +239,14 @@ export function partsOf(event: VaultEventJson, labelOf: (wallet: string | null) 
       return { ...plain, icon: mark(Link2Off), title: ACTIVITY_COPY.unlinked(labelOf(event.wallet)) };
 
     case "received_sol": {
-      const amount = sol(event.lamports) ?? "?";
-      return { ...plain, icon: mark(ArrowDownToLine), title: ACTIVITY_COPY.receivedSol(amount), detail: ACTIVITY_COPY.receivedSub, amount: `${amount} SOL` };
+      const amount = sol(event.lamports);
+      return {
+        ...plain,
+        icon: mark(ArrowDownToLine),
+        title: ACTIVITY_COPY.receivedSol,
+        detail: ACTIVITY_COPY.receivedSub,
+        amount: amount === null ? null : `${amount} SOL`,
+      };
     }
 
     case "failed":
@@ -258,7 +307,16 @@ export function LiveActivityRow({
 }) {
   const parts = partsOf(row.event, labelOf, maxContribution);
   const clock = row.at === null ? null : clockLabel(row.at);
-  const sub = [parts.detail, clock, shortHex(row.signature)].filter((part): part is string => part !== null && part !== "").join(" · ");
+  /*
+   * THE SIGNATURE LEFT THE SUB LINE. In a 320px column it took most of the
+   * width and pushed the clock — the one part of that line anybody reads — out
+   * of the truncation. The row IS the link to the transaction, so nothing is
+   * lost: the hash is the anchor's title on hover, and its accessible name
+   * carries the whole row so a screen reader's link list still says which one.
+   */
+  const hash = shortHex(row.signature);
+  const sub = [parts.detail, clock].filter((part): part is string => part !== null && part !== "").join(" · ");
+  const label = `${parts.title}${sub === "" ? "" : ` · ${sub}`} · ${ACTIVITY_COPY.openOnSolscan} · ${hash}`;
 
   const className = cn(
     "flex w-full items-start gap-3 px-4 py-2.5 text-left outline-none",
@@ -278,7 +336,8 @@ export function LiveActivityRow({
             </Badge>
           ) : null}
         </span>
-        <span className="block truncate text-xs text-muted-foreground">{sub}</span>
+        {/* Num, so the figures in it are tabular like the sample's. */}
+        <Num className="block truncate text-xs text-muted-foreground">{sub}</Num>
         {parts.note === null ? null : <span className="block truncate text-xs text-muted-foreground">{parts.note}</span>}
       </span>
       {parts.amount === null ? null : <Num className={cn("shrink-0 text-right text-sm", parts.failed ? "text-muted-foreground" : parts.amountClass)}>{parts.amount}</Num>}
@@ -303,6 +362,8 @@ export function LiveActivityRow({
       aria-keyshortcuts="ArrowUp ArrowDown"
       onFocus={rove}
       onKeyDown={step}
+      title={hash}
+      aria-label={label}
       className={className}
     >
       {body}

@@ -24,10 +24,11 @@
 import type { ReactNode } from "react";
 
 import { Num } from "@/components/num";
-import { formatSol, formatUsd } from "@/lib/amounts";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { formatSol, formatUsd, usdcRawForLamports } from "@/lib/amounts";
 import { LABEL } from "@/lib/classes";
 import { timeAgo } from "@/lib/format";
-import { STATS_COPY } from "@/lib/live-copy";
+import { LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
 import type { LivePolicyView, LiveStatsView, LiveVaultView } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
 
@@ -37,16 +38,39 @@ interface Tile {
   readonly sub: ReactNode;
 }
 
+/**
+ * HOW FAR THE LAST TILE STRETCHES, so a part-filled row has no holes in it.
+ *
+ * The grid's own background is the border colour showing through a 1px gap, so
+ * a cell with nothing in it is not empty space: it is a grey rectangle the
+ * shape of a tile, and it reads as a figure that failed to load. How many
+ * tiles there are depends on what the chain answered — a vault with no policy
+ * has four, one with everything has seven — so the remainder cannot be a
+ * constant.
+ *
+ * Spelled out rather than built, because Tailwind reads the classes it emits
+ * out of the source: `col-span-${n}` compiles to nothing at all.
+ */
+function lastSpan(count: number): string {
+  const two = count % 2 === 1 ? "col-span-2" : "";
+  const rest = count % 4;
+  const four = rest === 0 ? "@xl:col-span-1" : rest === 1 ? "@xl:col-span-4" : rest === 2 ? "@xl:col-span-3" : "@xl:col-span-2";
+  return `${two} ${four}`;
+}
+
 export function LiveStats({
   stats,
   vault,
   policy,
+  perSol,
   now,
   className,
 }: {
   readonly stats: LiveStatsView;
   readonly vault: LiveVaultView;
   readonly policy: LivePolicyView;
+  /** Today's USDC per SOL, for the window subs. Null when the pools were not read. */
+  readonly perSol: bigint | null;
   /** The payload's own clock: "4m ago" is measured against it, never Date.now(). */
   readonly now: string;
   readonly className?: string;
@@ -88,13 +112,40 @@ export function LiveStats({
     });
   }
 
-  // Only when the loaded history actually covers the window.
-  if (stats.savedTodayLamports !== null) tiles.push({ label: STATS_COPY.today, value: <Num>{`${formatSol(stats.savedTodayLamports)} SOL`}</Num>, sub: "" });
-  if (stats.savedThisWeekLamports !== null) tiles.push({ label: STATS_COPY.thisWeek, value: <Num>{`${formatSol(stats.savedThisWeekLamports)} SOL`}</Num>, sub: "" });
+  // TODAY IS NOT HERE ANY MORE: it moved into the card's header, where the
+  // sample puts it, and a fact on screen twice is a fact two places can come
+  // to disagree about. This week stays, and only when the loaded history
+  // actually covers the window.
+  if (stats.savedThisWeekLamports !== null) {
+    // THE VALUE STAYS SOL AND THE DOLLAR GOES IN THE SUB, worded. A window SUM
+    // at today's price is not the same claim as a BALANCE at today's price: a
+    // balance says what something is worth now, which is true; "$18.40 saved
+    // this week" says dollars changed hands at rates this app never stored.
+    tiles.push({
+      label: STATS_COPY.thisWeek,
+      value: <Num>{`${formatSol(stats.savedThisWeekLamports)} SOL`}</Num>,
+      sub: perSol === null ? "" : STATS_COPY.windowAbout(formatUsd(usdcRawForLamports(stats.savedThisWeekLamports, perSol))),
+    });
+  }
 
   if (hasPolicy) {
     if (policy.lifetimeInvested !== null) {
-      tiles.push({ label: STATS_COPY.investedSoFar, value: <Num>{formatUsd(policy.lifetimeInvested)}</Num>, sub: `${stats.investmentsLoaded} in loaded history` });
+      tiles.push({
+        label: STATS_COPY.investedSoFar,
+        // THE TOOLTIP CAME DOWN WITH THE TILE. It used to live in the card's
+        // header, and it is the sentence that keeps this figure from being
+        // read as the basket's value a few rows below — they diverge whenever
+        // a token reaches the vault by any other route.
+        value: (
+          <Tooltip>
+            <TooltipTrigger type="button" className="rounded-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+              <Num>{formatUsd(policy.lifetimeInvested)}</Num>
+            </TooltipTrigger>
+            <TooltipContent>{LIVE_COPY.investedSoFarTooltip}</TooltipContent>
+          </Tooltip>
+        ),
+        sub: `${stats.investmentsLoaded} in loaded history`,
+      });
     }
     if (policy.usedLast30d !== null && policy.maxRolling30d !== null) {
       tiles.push({ label: STATS_COPY.usedIn30Days, value: <Num>{formatUsd(policy.usedLast30d)}</Num>, sub: STATS_COPY.usedIn30DaysSub(formatUsd(policy.maxRolling30d)) });
@@ -109,15 +160,10 @@ export function LiveStats({
         {STATS_COPY.heading}
       </h3>
       {/* Four-up on the CARD's width, not the viewport's: from md this panel shares its row. */}
-      {/*
-        An odd tile stretches rather than leaving a hole. The grid's own
-        background is the border colour showing through a 1px gap, so a cell
-        with nothing in it is not empty space — it is a grey rectangle the
-        shape of a tile, and it reads as a figure that failed to load.
-      */}
+      {/* The last tile fills the row rather than leaving holes: see lastSpan. */}
       <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border @xl:grid-cols-4">
         {tiles.map((tile, index) => (
-          <div key={tile.label} className={cn("min-w-0 space-y-1 bg-card p-4", index === tiles.length - 1 && tiles.length % 2 === 1 && "col-span-2 @xl:col-span-1", index === tiles.length - 1 && tiles.length % 4 === 1 && "@xl:col-span-4", index === tiles.length - 1 && tiles.length % 4 === 3 && "@xl:col-span-2")}>
+          <div key={tile.label} className={cn("min-w-0 space-y-1 bg-card p-4", index === tiles.length - 1 && lastSpan(tiles.length))}>
             <dt className={LABEL}>{tile.label}</dt>
             <dd className="text-lg font-medium whitespace-nowrap">{tile.value}</dd>
             {tile.sub === "" ? null : <dd className="text-xs text-muted-foreground">{tile.sub}</dd>}

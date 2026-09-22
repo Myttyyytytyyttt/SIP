@@ -102,17 +102,24 @@ function WalletRow({ wallet, usdcRawPerSol, anchor }: { readonly wallet: LiveWal
         <CopyButton value={wallet.address} />
       </div>
       {anchor ? (
+        /*
+         * DOLLARS LEAD, SOL SITS UNDER THEM — the sample's shape, and the
+         * owner asked for it by name. A balance converted at today's pool
+         * price is a figure this screen can source; both halves are here
+         * either way, and only which one is 20px changed.
+         *
+         * UNLESS THE POOLS WERE NOT READ, and then SOL leads. A hero reading
+         * "—" is worse than a hero in the unit the chain actually records, and
+         * a dollar figure nobody could price is not one to lead with.
+         */
         <div className="space-y-0.5 pt-0.5">
           <div className={LABEL}>{LIVE_COPY.walletBalance}</div>
           {/* Num already carries the mono face; `block` gives the figure its own line. */}
-          <Num className="block text-xl font-semibold">{`${balance ?? ""} SOL`}</Num>
-          {dollars === null && settlements === null ? null : (
-            <div className="text-xs text-muted-foreground">
-              {dollars === null ? null : <>≈ {dollars}</>}
-              {dollars !== null && settlements !== null ? <> · </> : null}
-              {settlements}
-            </div>
-          )}
+          <Num className="block text-xl font-semibold">{dollars ?? `${balance ?? ""} SOL`}</Num>
+          <div className="text-xs text-muted-foreground">
+            <Num className="text-xs">{balance === null ? LIVE_COPY.unknownFigure : `${balance} SOL`}</Num>
+            {settlements === null ? null : <> · {settlements}</>}
+          </div>
         </div>
       ) : (
         <div className="text-xs text-muted-foreground">

@@ -208,10 +208,25 @@ describe("a connected pension key, once the chain has answered", () => {
     expect(new Set(worth).size).toBeLessThan(worth.length + 1);
   });
 
-  it("shows THEIR pension: the hero, in SOL, and not one figure from the example", () => {
+  /**
+   * THE HERO IS THE DOLLAR AND THE CAPTION IS THE SOL, which is the sample's
+   * shape. The dollar is a VALUATION of the lamports the vault records, at the
+   * price read in the same snapshot — never a sum of the dollars that were set
+   * aside, which happened at prices nobody recorded.
+   *
+   * This used to assert only that "0.06 SOL" was somewhere in the markup, and
+   * the stats tiles satisfied that on their own: it would have passed whatever
+   * the hero did. Both halves are named now.
+   */
+  it("shows THEIR pension: the hero in dollars, the exact SOL beside it, and not one figure from the example", () => {
     const html = render();
     expect(html).toContain(LIVE_COPY.savedSoFar);
-    expect(html).toContain("0.06 SOL");
+    // 0.06 SOL at the fixture's $100.038711 a SOL.
+    expect(html).toContain("$6.00");
+    // The chain's own figure, in full, in the caption — not a rounding of it.
+    expect(html).toContain(LIVE_COPY.heroSolAtPrice("0.06"));
+    // And no second dollar beside the hero to be subtracted from it.
+    expect(html).not.toContain(LIVE_COPY.worthNowTooltip);
     expect(html).not.toContain("Sample data");
     expect(html).not.toContain(MOCK_FIGURE);
     expect(html).not.toContain("Sold HOODx");

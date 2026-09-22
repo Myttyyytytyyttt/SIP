@@ -118,6 +118,11 @@ export const LIVE_COPY = {
   savedSoFar: "Saved so far",
   /** "≈ $X at today's SOL price · Profit · 20 % of trading gains · since Sep 15, 2026". */
   heroAbout: (usd: string): string => `≈ ${usd} at today’s SOL price`,
+  // The hero is the dollar now, so the caption carries the chain's own figure —
+  // every digit of it, never splitDecimal's head — and says what turned it into
+  // dollars. It is a VALUATION of what is held, not a sum of the dollars that
+  // were set aside: those were set aside at prices nobody recorded.
+  heroSolAtPrice: (sol: string): string => `${sol} SOL, valued at today’s SOL price`,
   heroProfit: (rate: string): string => `Profit · ${rate} of trading gains`,
   heroVolumeNotOffered: (rate: string): string => `Volume · ${rate} · not settled while ${BRAND} cannot measure volume`,
   heroSince: (date: string): string => `since ${date}`,
@@ -131,6 +136,9 @@ export const LIVE_COPY = {
 
   // ── the chart ──────────────────────────────────────────────────────────────
   chartLabel: "Saved",
+  // The mock's axis says its unit by being in dollars. This one cannot be, so
+  // the caption says it instead — the y-axis ticks are bare numbers otherwise.
+  chartUnit: "SOL saved",
   chartSince: (date: string): string => `Since ${date}`,
   chartComplete: "Complete history",
   chartEmpty: "The chart starts with your first settlement.",
@@ -145,12 +153,15 @@ export const LIVE_COPY = {
 
   // ── the holdings table ─────────────────────────────────────────────────────
   holdings: "Holdings",
+  holdingsCaption: "What the pension holds",
   asset: "Asset",
   shares: "Shares",
   value: "Value",
   weightVsTarget: "Weight vs target",
   target: "target",
   notInvestedYet: "Not invested yet",
+  /** The same figure as a TOTAL under the table, where the sample calls it Pending. */
+  pending: "Pending",
   /**
    * The leg holdings' worth at today's prices — a VALUATION, not a total of
    * what was spent. It shared the word "Invested" with the program's
@@ -251,32 +262,46 @@ export const LIVE_COPY = {
 
 /** One row of the history, per the kind the classifier gave it. */
 export const ACTIVITY_COPY = {
-  settled: (paid: string): string => `Saved ${paid} SOL`,
+  /*
+   * A TITLE SAYS WHAT HAPPENED; THE AMOUNT COLUMN SAYS HOW MUCH.
+   *
+   * Every one of these used to carry its figure, and the row then printed the
+   * same number twice — once inside a title that ran out of room in a 320px
+   * column and was cut mid-word, and once in full on the right. The sample has
+   * always split them, which is why its rows read and these did not. So no
+   * string here takes an amount, and the amount-less twins that existed for
+   * the unreadable case are gone with them: when a figure cannot be read the
+   * COLUMN empties, and the title is the same sentence it always was.
+   */
+  settled: (label: string): string => `Saved from ${label}`,
   /** A settlement that moved nothing: said as itself, never dressed as a saving. */
-  settledNothing: "Settled, nothing to save",
-  settledFrom: (label: string, rate: string, base: string, measure: string): string => `from ${label} · ${rate} of ${base} SOL ${measure}`,
+  settledNothing: (label: string): string => `Settled from ${label}, nothing to save`,
+  settledFrom: (rate: string, base: string, measure: string): string => `${rate} of ${base} SOL ${measure}`,
   /** The part that did NOT move, said where someone would otherwise wonder. */
   settledCapped: (owed: string, max: string): string => `${owed} SOL owed, capped at ${max} SOL; the rest is not carried over`,
   /** What a settlement measures: the vault's own mode, never the other one. */
   measureProfit: "profit",
   measureVolume: "volume",
 
-  wrapped: (sol: string): string => `Wrapped ${sol} SOL for investing`,
-  wrappedPlain: "Wrapped SOL for investing",
-  converted: (sol: string, usdc: string): string => `Converted ${sol} SOL to ${usdc} USDC`,
-  convertedPlain: "Converted SOL to USDC",
-  invested: (amount: string, symbol: string, usdc: string): string => `Bought ${amount} ${symbol} for ${usdc} USDC`,
-  investedPlain: (symbol: string): string => `Bought ${symbol}`,
-  withdrewSol: (sol: string): string => `Withdrew ${sol} SOL`,
-  withdrewToken: (amount: string, symbol: string): string => `Withdrew ${amount} ${symbol}`,
+  wrapped: "Wrapped SOL for investing",
+  converted: "Converted SOL to USDC",
+  /** What the SOL side of a conversion came to, beside the USDC in the amount column. */
+  convertedFrom: (sol: string): string => `${sol} SOL`,
+  invested: (symbol: string): string => `Invested in ${symbol}`,
+  withdrewSol: "Withdrew SOL",
+  withdrewToken: (symbol: string): string => `Withdrew ${symbol}`,
   vaultCreated: (rule: string): string => `Vault created · ${rule}`,
   vaultCreatedPlain: "Vault created",
   ruleChanged: "Savings rule changed",
+  /** What it was changed TO, when the transaction decoded enough to say. */
+  ruleChangedTo: (rule: string): string => `now ${rule}`,
   policySigned: "Investment policy signed",
+  /** The cap a signed policy carries, when it decoded. Never a "$0.00" standing in for unread. */
+  policyCaps: (max: string): string => `up to ${max} per buy`,
   investingPaused: "Investing paused",
   linked: (label: string): string => `Linked ${label}`,
   unlinked: (label: string): string => `Unlinked ${label}`,
-  receivedSol: (sol: string): string => `Received ${sol} SOL`,
+  receivedSol: "Received SOL",
   /** A transfer is a transfer: never counted as something anyone saved. */
   receivedSub: "a plain transfer, not counted as saved",
   other: "Vault transaction",
@@ -324,9 +349,12 @@ export const STATS_COPY = {
   settlements: "Settlements",
   settlementsSub: (loaded: string): string => `${loaded} in loaded history`,
   biggest: "Biggest settlement",
-  biggestSub: "put aside by one settlement",
+  // THE WINDOW MUST BE IN ONE OF THE TWO. biggestPaid is the maximum over the
+  // pages LOADED, not over the pension's life, and a tile that says neither
+  // would be read as a lifetime record.
+  biggestSub: "biggest in the loaded history",
   capped: "Capped",
-  cappedSub: (max: string): string => `at ${max} SOL each`,
+  cappedSub: (max: string): string => `in the loaded history, at ${max} SOL each`,
   lastSettlement: "Last settlement",
   lastSettlementNever: "none yet",
   /** Settlements the state counts but the loaded pages do not hold: never "none yet". */
@@ -336,10 +364,17 @@ export const STATS_COPY = {
   usedIn30DaysSub: (cap: string): string => `of ${cap}`,
   /** A UTC calendar day, so it says so: the model cuts it at Date.UTC(midnight). */
   today: "Today (UTC)",
+  /** A window SUM at today's price is not a balance at today's price, so it goes in the sub, worded. */
+  windowAbout: (usd: string): string => `≈ ${usd} at today’s SOL price`,
   /** A rolling seven days back from the read, not a calendar week — so no zone is claimed for it. */
   thisWeek: "This week",
   /** The strip's trailing note: it names its own population rather than implying a lifetime. */
   lastSettlements: (count: string): string => `last ${count} ${count === "1" ? "settlement" : "settlements"}`,
+  /** The average over the chips SHOWN, as the sample trails its strip. Named so, because it is not a lifetime. */
+  stripAverage: (avg: string, count: string): string => `avg ${avg} SOL · last ${count}`,
+  /** What the badge means, as the sample's has always said on hover. */
+  stripBadgeProfit: (rate: string): string => `${rate} of your realised trading gains is put aside`,
+  stripBadgeVolume: (rate: string): string => `${rate} of your trading volume would be put aside`,
   settlementStripLabel: "Recent settlements",
 } as const;
 

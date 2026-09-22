@@ -146,7 +146,7 @@ describe("VOLUME is not offered, so nothing here offers it", () => {
 
 describe("a row never claims more than the chain said", () => {
   it("a settlement that moved nothing is said as itself", () => {
-    expect(ACTIVITY_COPY.settledNothing).toMatch(/nothing to save/i);
+    expect(ACTIVITY_COPY.settledNothing("a trading wallet")).toMatch(/nothing to save/i);
   });
 
   it("a plain transfer is labelled as one, and never counted as saved", () => {
@@ -157,10 +157,31 @@ describe("a row never claims more than the chain said", () => {
     expect(ACTIVITY_COPY.settledCapped("0.1", "0.06")).toMatch(/not carried over/);
   });
 
-  it("an amount-less form exists for every row whose figures the chain may withhold", () => {
-    expect(ACTIVITY_COPY.convertedPlain).not.toMatch(/\d/);
-    expect(ACTIVITY_COPY.investedPlain("SPYx")).not.toMatch(/\d/);
-    expect(ACTIVITY_COPY.wrappedPlain).not.toMatch(/\d/);
+  /**
+   * NO TITLE CARRIES A FIGURE ANY MORE. Every one used to, so a row printed
+   * the same number twice — once in a title that ran out of room in a 320px
+   * column and was cut mid-word, and once in full on the right. The amount
+   * lives in its own column now, and the amount-less twins that existed for
+   * the unreadable case went with the figures: when a number cannot be read
+   * the COLUMN empties and the title is unchanged.
+   */
+  it("no row title carries a figure, and no amount-less twin is left behind", () => {
+    // A digit-free label, because a wallet's own name may hold one ("Trading
+    // wallet 1") and that is the label, not an amount.
+    const titles = [
+      ACTIVITY_COPY.settled("a trading wallet"),
+      ACTIVITY_COPY.settledNothing("a trading wallet"),
+      ACTIVITY_COPY.wrapped,
+      ACTIVITY_COPY.converted,
+      ACTIVITY_COPY.invested("SPYx"),
+      ACTIVITY_COPY.withdrewSol,
+      ACTIVITY_COPY.withdrewToken("SPYx"),
+      ACTIVITY_COPY.receivedSol,
+    ];
+    for (const title of titles) expect(title, title).not.toMatch(/\d/);
+    expect(ACTIVITY_COPY).not.toHaveProperty("convertedPlain");
+    expect(ACTIVITY_COPY).not.toHaveProperty("investedPlain");
+    expect(ACTIVITY_COPY).not.toHaveProperty("wrappedPlain");
   });
 
   it("an empty history says what WILL appear, and an unreadable one says it failed", () => {
