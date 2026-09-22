@@ -18,6 +18,7 @@
  */
 
 import { AssetMark } from "@/components/live/AssetMark";
+import { NATIVE_SOL } from "@/lib/asset-art";
 import { Num } from "@/components/num";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -85,7 +86,7 @@ export function LiveHoldings({
               <TableRow key={row.key}>
                 <TableCell>
                   <span className="flex items-center gap-2">
-                    <AssetMark symbol={row.symbol} className="size-5" />
+                    <AssetMark symbol={row.symbol} mint={row.kind === "sol" ? NATIVE_SOL : row.mint} className="size-5" />
                     <span>
                       <span className="block font-medium">{row.symbol}</span>
                       <span className="block font-mono text-xs tabular-nums text-muted-foreground sm:hidden">{sharesOf(row)}</span>

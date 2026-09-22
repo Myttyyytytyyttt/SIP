@@ -118,6 +118,11 @@ export const LIVE_COPY = {
   savedSoFar: "Saved so far",
   /** "≈ $X at today's SOL price · Profit · 20 % of trading gains · since Sep 15, 2026". */
   heroAbout: (usd: string): string => `≈ ${usd} at today’s SOL price`,
+  // The hero is the dollar now, so the caption carries the chain's own figure —
+  // every digit of it, never splitDecimal's head — and says what turned it into
+  // dollars. It is a VALUATION of what is held, not a sum of the dollars that
+  // were set aside: those were set aside at prices nobody recorded.
+  heroSolAtPrice: (sol: string): string => `${sol} SOL, valued at today’s SOL price`,
   heroProfit: (rate: string): string => `Profit · ${rate} of trading gains`,
   heroVolumeNotOffered: (rate: string): string => `Volume · ${rate} · not settled while ${BRAND} cannot measure volume`,
   heroSince: (date: string): string => `since ${date}`,
@@ -131,6 +136,9 @@ export const LIVE_COPY = {
 
   // ── the chart ──────────────────────────────────────────────────────────────
   chartLabel: "Saved",
+  // The mock's axis says its unit by being in dollars. This one cannot be, so
+  // the caption says it instead — the y-axis ticks are bare numbers otherwise.
+  chartUnit: "SOL saved",
   chartSince: (date: string): string => `Since ${date}`,
   chartComplete: "Complete history",
   chartEmpty: "The chart starts with your first settlement.",

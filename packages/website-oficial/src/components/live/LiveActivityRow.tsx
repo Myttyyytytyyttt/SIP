@@ -26,6 +26,8 @@
 
 import type { FocusEvent, KeyboardEvent, ReactNode } from "react";
 
+import { AssetMark } from "@/components/live/AssetMark";
+
 import {
   ArrowDownToLine,
   ArrowLeftRight,
@@ -83,6 +85,19 @@ export interface RowParts {
 }
 
 const mark = (Glyph: typeof PiggyBank, className?: string): ReactNode => <Glyph className={cn("size-4 text-muted-foreground", className)} aria-hidden />;
+
+/**
+ * A ROW ABOUT AN ASSET WEARS THE ASSET, not a verb.
+ *
+ * A glyph is right for what the vault DID — wrapped, converted, linked, swept —
+ * and wrong for a row whose whole subject is which token was bought. The
+ * sample has always drawn the token's mark on those rows and live drew a grey
+ * shopping cart, which is most of why one column reads as a product and the
+ * other as a log. Keyed by the MINT the event carries, so it is that token's
+ * mark and not whoever else uses those three letters; an asset with no art
+ * falls through to the same lettered disc, which still says which one it was.
+ */
+const assetMark = (symbol: string, mint: string | null): ReactNode => <AssetMark symbol={symbol} mint={mint} size={16} className="shrink-0" />;
 
 /**
  * What a settlement measured, from the mode THAT SETTLEMENT carries — never
@@ -144,7 +159,7 @@ export function partsOf(event: VaultEventJson, labelOf: (wallet: string | null) 
       const got = event.receivedUi;
       return {
         ...plain,
-        icon: mark(ShoppingCart),
+        icon: assetMark(symbol, event.mint),
         title: got === null || spent === null ? ACTIVITY_COPY.investedPlain(symbol) : ACTIVITY_COPY.invested(got, symbol, bare(spent)),
         amount: spent,
       };
@@ -166,7 +181,7 @@ export function partsOf(event: VaultEventJson, labelOf: (wallet: string | null) 
       const shown = event.uiAmount;
       return {
         ...plain,
-        icon: mark(ArrowUpFromLine),
+        icon: assetMark(symbol, event.mint),
         title: shown === null ? `Withdrew ${symbol}` : ACTIVITY_COPY.withdrewToken(shown, symbol),
         amount: shown === null ? null : `−${shown} ${symbol}`,
       };
