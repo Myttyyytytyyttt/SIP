@@ -68,6 +68,7 @@ import {
   type FlowStep,
   tokenAccountCreates,
 } from "@/lib/vault-flows";
+import { resignStoredPolicy } from "@/components/wallets/InvestingCard";
 import { deriveAtaAddress, deriveConfigAddress, deriveInvestAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
 import { ROUTED_VENUE } from "../../../solana-core/test/fixtures/keeper-policy";
 
@@ -1603,6 +1604,30 @@ describe("the vault token accounts a policy pays to create", () => {
     const vault = deriveVaultPda(owner).toBase58();
     const creates = await tokenAccountCreates(owner, vault, listedFor(vault, MISSING_ANTHROPIC_ONLY), new Set([SPYX_MINT, ANTHROPIC_MINT]));
     expect(creates.map((c) => c.mint), "a picked leg the vault lacks is created").toEqual([ANTHROPIC_MINT]);
+  });
+
+  /**
+   * THE OWNER'S EXACT CASE, 2026-09-22, end to end across the two steps that
+   * decide it. "Sign again with today's prices" reads the STORED policy and
+   * sends its basket; the stored policy was SPYx alone; the vault lacked only
+   * ANTHROPIC. The two steps have to agree, and when they did not the owner
+   * could not re-sign at all.
+   */
+  it("re-signing a stored SPYx-only policy asks to create nothing, on a vault whose only missing account is ANTHROPIC", async () => {
+    const owner = Keypair.generate().publicKey.toBase58();
+    const vault = deriveVaultPda(owner).toBase58();
+    const stored = resignStoredPolicy({
+      legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: SPYX_FLOOR.toString() }],
+      minInvestment: "5000000",
+      maxPerCall: "1000000000",
+      maxRolling30d: "31000000000",
+      enabled: true,
+    } as unknown as Parameters<typeof resignStoredPolicy>[0]);
+    expect(stored.ok, "a one-leg SPYx policy is re-signable").toBe(true);
+    if (!stored.ok) return;
+    expect([...stored.weights.keys()], "the basket it sends is the stored one, not the shelf").toEqual([SPYX_MINT]);
+    const creates = await tokenAccountCreates(owner, vault, listedFor(vault, MISSING_ANTHROPIC_ONLY), new Set(stored.weights.keys()));
+    expect(creates, "nothing to create, so the build has nothing to refuse").toEqual([]);
   });
 
   it("always creates wSOL and the in-mint, which are not legs and are always allowed", async () => {
