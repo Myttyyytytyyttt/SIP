@@ -14,8 +14,30 @@
  * WHAT IS NOT SET UP IS SAID, NOT ZEROED. No policy reads "Investing is not set
  * up", never "$0 of $5"; a policy that could not be read says so and is never
  * treated as missing.
+ *
+ * IT WEARS THE SAMPLE'S CLOTHES ALL THE SAME. A rate with a bar under it, a
+ * basket listed with its marks and its weights — the shape the sample uses,
+ * with the chain's numbers and none of its controls. The gear in the corner is
+ * where every change goes, and it opens the modal that signs one.
+ *
+ * THE BAR'S TRACK IS THE MODE'S OWN RANGE, which is what makes it mean
+ * anything: the program allows a profit rate up to 100 % and a volume rate up
+ * to 2 %, so the same 2 % is a sliver of one track and the whole of the other.
+ * Its far end is printed under it — a bar with no scale is a fraction of
+ * nothing.
+ *
+ * NO THRESHOLD FIGURE UP HERE. The policy's min_investment is enforced PER LEG,
+ * not on the pile, so a basket of two at $5 does not buy at $5; "Next
+ * investment" below reads investsAtRaw, which is the balance that actually
+ * unblocks a buy, and one threshold on a card is the most it can have without
+ * disagreeing with itself.
  */
 
+import { Settings } from "lucide-react";
+
+import { PROFIT_BPS_MAX, VOLUME_BPS_MAX } from "@sip/solana-core/client";
+
+import { AssetMark } from "@/components/live/AssetMark";
 import { LiveActivityRow } from "@/components/live/LiveActivityRow";
 import { Num } from "@/components/num";
 import { Badge } from "@/components/ui/badge";
@@ -24,8 +46,9 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { formatSol, formatUsd } from "@/lib/amounts";
-import { LABEL } from "@/lib/classes";
-import { LIVE_COPY } from "@/lib/live-copy";
+import { LABEL, MONO } from "@/lib/classes";
+import { pct } from "@/lib/format";
+import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import type { LiveDashboard, LiveRow } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
 import { INVEST_COPY, ratePercent } from "@/lib/vault-copy";
@@ -51,8 +74,12 @@ export function LiveRuleCard({
   readonly className?: string;
 }) {
   const { vault, policy, rows } = data;
-  const rate = vault.rateBps === null ? null : ratePercent(vault.rateBps);
-  const modeLabel = rate === null ? LIVE_COPY.unknownFigure : vault.mode === 1 ? LIVE_COPY.modeVolume(rate) : LIVE_COPY.modeProfit(rate);
+  const volume = vault.mode === 1;
+  const rate = vault.rateBps === null ? null : pct(vault.rateBps);
+  const measure = volume ? ACTIVITY_COPY.measureVolume : ACTIVITY_COPY.measureProfit;
+  // The track is what the PROGRAM allows this mode, so the same 2 % is a
+  // sliver of a profit track and the whole of a volume one.
+  const rateMax = volume ? VOLUME_BPS_MAX : PROFIT_BPS_MAX;
   const lastInvested: LiveRow | undefined = rows.find((row) => row.event.kind === "invested");
   const readiness = policy.readiness;
   // A floor the market has passed: buying waits until the owner signs again.
@@ -63,22 +90,41 @@ export function LiveRuleCard({
       <CardHeader>
         <CardTitle>{LIVE_COPY.ruleTitle}</CardTitle>
         <CardDescription>{LIVE_COPY.ruleDescription}</CardDescription>
-        {vault.paused === true ? (
-          <CardAction>
-            <Badge variant="destructive">{LIVE_COPY.vaultPausedBadge}</Badge>
-          </CardAction>
-        ) : null}
+        <CardAction className="flex items-center gap-2">
+          {vault.paused === true ? <Badge variant="destructive">{LIVE_COPY.vaultPausedBadge}</Badge> : null}
+          {/* Every change to any of this is a signed transaction, and they all
+              live in one modal. The gear is the door; nothing on this card
+              pretends to be a control.
+
+              Its name is an aria-label and a title rather than a Tooltip: one
+              icon does not need a provider mounted above it, and a Tooltip's
+              trigger composes the click handler, which put `window` inside a
+              path the server render walks. */}
+          <Button type="button" variant="ghost" size="icon" aria-label={LIVE_COPY.ruleSettings} title={LIVE_COPY.ruleSettings} onClick={onOpenWallets}>
+            <Settings aria-hidden />
+          </Button>
+        </CardAction>
       </CardHeader>
 
       <CardContent className="space-y-5">
-        {/* ── the vault's own rule ─────────────────────────────────────────── */}
-        <dl className="space-y-3">
-          <Fact label={LIVE_COPY.mode}>
-            <Num>{modeLabel}</Num>
-          </Fact>
-          {vault.maxContribution === null ? null : <p className="text-sm text-muted-foreground">{LIVE_COPY.mostPerSettlement(formatSol(vault.maxContribution))}</p>}
+        {/* ── the rate, with the track its own mode allows ──────────────────── */}
+        <div className="space-y-2">
+          <div className="flex items-baseline justify-between gap-2">
+            <p className="text-sm font-medium">{LIVE_COPY.rateOf(measure)}</p>
+            <Num className="text-sm font-medium">{rate ?? LIVE_COPY.unknownFigure}</Num>
+          </div>
+          {vault.rateBps === null ? null : (
+            <>
+              <Progress value={Math.min(100, (vault.rateBps * 100) / rateMax)} aria-label={LIVE_COPY.rateOf(measure)} />
+              <div className={cn("flex justify-between text-xs text-muted-foreground", MONO)}>
+                <span>{LIVE_COPY.rateFloor}</span>
+                <span>{pct(rateMax)}</span>
+              </div>
+            </>
+          )}
+          {vault.maxContribution === null ? null : <p className="pt-1 text-sm text-muted-foreground">{LIVE_COPY.mostPerSettlement(formatSol(vault.maxContribution))}</p>}
           {vault.walletReserve === null ? null : <p className="text-sm text-muted-foreground">{LIVE_COPY.alwaysLeft(formatSol(vault.walletReserve))}</p>}
-        </dl>
+        </div>
 
         {vault.paused === true ? <p className="text-sm text-muted-foreground">{LIVE_COPY.vaultPaused}</p> : null}
         {vault.volumeNotOffered ? <p className="text-sm text-amber-700 dark:text-amber-400">{LIVE_COPY.volumeNotOffered}</p> : null}
@@ -112,11 +158,25 @@ export function LiveRuleCard({
                 </Button>
               ) : null}
 
+              {/* THE BASKET, AS A LIST WITH ITS MARKS — the sample's shape. A
+                  leg with no artwork draws its lettered disc, which is how a
+                  new leg can be listed the day the policy names it. */}
+              {policy.legs.length === 0 ? null : (
+                <div className="space-y-2">
+                  <p className={LABEL}>{LIVE_COPY.investsIn}</p>
+                  <ul className="space-y-1.5">
+                    {policy.legs.map((leg) => (
+                      <li key={leg.mint} className="flex items-center gap-2 text-sm">
+                        <AssetMark symbol={leg.symbol} mint={leg.mint} size={20} />
+                        <span className="min-w-0 flex-1 truncate">{leg.symbol}</span>
+                        <Num className="text-sm">{pct(leg.weightBps)}</Num>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               <dl className="grid grid-cols-2 gap-3">
-                <Fact label={INVEST_COPY.basket}>
-                  <Num>{policy.legs.map((leg) => `${leg.symbol} · ${ratePercent(leg.weightBps)}`).join(", ")}</Num>
-                </Fact>
-                {policy.minInvestment === null ? null : <Fact label={INVEST_COPY.rule}>{INVEST_COPY.buysEach(formatUsd(policy.minInvestment))}</Fact>}
                 {policy.maxPerCall === null ? null : (
                   <Fact label={INVEST_COPY.mostPerBuy}>
                     <Num>{formatUsd(policy.maxPerCall)}</Num>
@@ -180,9 +240,6 @@ export function LiveRuleCard({
           </div>
         ) : null}
 
-        <Button type="button" variant="outline" className="w-full" onClick={onOpenWallets}>
-          {LIVE_COPY.manageInWallets}
-        </Button>
       </CardContent>
     </Card>
   );

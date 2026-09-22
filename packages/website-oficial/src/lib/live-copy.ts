@@ -182,6 +182,13 @@ export const LIVE_COPY = {
   // ── the rule card ──────────────────────────────────────────────────────────
   ruleTitle: "Savings rule",
   ruleDescription: "Read from Solana. Set when your vault was created.",
+  /** The gear that opens the modal where the rule can actually be changed. */
+  ruleSettings: "Vault settings",
+  /** "Rate of profit" / "Rate of volume": WHICH rate, since this vault has two fields and uses one. */
+  rateOf: (measure: string): string => `Rate of ${measure}`,
+  /** The track's far end. A bar with no scale is a fraction of nothing. */
+  rateFloor: "0%",
+  investsIn: "Invests in",
   vaultSection: "Vault",
   mode: "Mode",
   modeProfit: (rate: string): string => `Profit · ${rate}`,

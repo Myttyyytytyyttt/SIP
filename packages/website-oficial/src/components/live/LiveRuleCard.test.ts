@@ -22,14 +22,18 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
   return {
     ...actual,
     Button: (props: Parameters<typeof actual.Button>[0]) => {
-      mocked.buttons.push({ label: mocked.textOf(props.children).trim(), onClick: props.onClick as unknown as ((event: unknown) => void) | undefined });
+      // An icon button has no children to read, so its accessible name stands
+      // in for the label — that is what a person is offered either way.
+      const text = mocked.textOf(props.children).trim();
+      const label = text === "" ? String((props as { "aria-label"?: string })["aria-label"] ?? "") : text;
+      mocked.buttons.push({ label, onClick: props.onClick as unknown as ((event: unknown) => void) | undefined });
       return actual.Button(props);
     },
   };
 });
 
 import { LiveRuleCard } from "@/components/live/LiveRuleCard";
-import { LIVE_COPY } from "@/lib/live-copy";
+import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
 import { INVEST_COPY } from "@/lib/vault-copy";
 
@@ -60,26 +64,71 @@ describe("nothing here pretends to set the rule", () => {
     expect(html).not.toContain("<input");
   });
 
-  it("sends the one control it has to the modal, where the verified flows live", () => {
+  /**
+   * THE GEAR IS THE DOOR, and it is the only one. Every change to any of this
+   * is a signed set_policy_v2 or set_invest_policy, and all of them live in
+   * the wallets modal — so the card carries one control and it opens that.
+   */
+  it("sends its one control to the modal, where the verified flows live", () => {
     render();
-    expect(buttons(LIVE_COPY.manageInWallets)).toHaveLength(1);
-    buttons(LIVE_COPY.manageInWallets)[0]?.onClick?.({ type: "click" });
+    const gear = buttons(LIVE_COPY.ruleSettings);
+    expect(gear).toHaveLength(1);
+    gear[0]?.onClick?.({ type: "click" });
     expect(onOpenWallets).toHaveBeenCalledTimes(1);
+  });
+
+  /** An icon with no words is nothing to a screen reader without one. */
+  it("gives that gear a name, since it has no label", () => {
+    expect(render()).toContain(LIVE_COPY.ruleSettings);
   });
 });
 
 describe("what the chain says the rule is", () => {
-  it("reads the vault's mode, its cap and its reserve", () => {
+  it("reads the vault's rate, which of its two fields it is, its cap and its reserve", () => {
     const html = render();
-    expect(html).toContain(LIVE_COPY.modeProfit("20 %"));
+    expect(html).toContain(LIVE_COPY.rateOf(ACTIVITY_COPY.measureProfit));
+    expect(html).toContain("20%");
     expect(html).toContain(LIVE_COPY.mostPerSettlement("0.06"));
     expect(html).toContain(LIVE_COPY.alwaysLeft("0.05"));
   });
 
-  it("shows the basket and what it buys at", () => {
+  /**
+   * THE TRACK IS THE MODE'S OWN RANGE. The program allows a profit rate up to
+   * 100 % and a volume rate up to 2 %, so the same figure is a sliver of one
+   * track and the whole of the other — and the far end is printed, because a
+   * bar with no scale is a fraction of nothing.
+   */
+  it("scales the bar to what the PROGRAM allows this mode, and says where the track ends", () => {
+    // The indicator is translated by (100 - value)%, so the fill IS the number.
+    const profit = render();
+    expect(profit).toContain("translateX(-80%)");
+    expect(profit).toContain("100%");
+
+    const base = liveSnapshot();
+    const volume = render(
+      liveDashboard({ snapshot: { ...base, vault: { ...base.vault, state: { ...base.vault.state!, skimMode: 1, volumeBps: 200 } } } }),
+    );
+    expect(volume).toContain(LIVE_COPY.rateOf(ACTIVITY_COPY.measureVolume));
+    // 2 % of a 2 % track is the whole of it.
+    expect(volume).toContain("translateX(-0%)");
+  });
+
+  it("lists the basket with a mark and a weight per leg, as the sample does", () => {
     const html = render();
-    expect(html).toContain("SPYx · 100 %");
-    expect(html).toContain(INVEST_COPY.buysEach("$5.00"));
+    expect(html).toContain(LIVE_COPY.investsIn);
+    expect(html).toContain("SPYx");
+    expect(html).toContain("100%");
+  });
+
+  /**
+   * NO THRESHOLD FIGURE ON THIS CARD. min_investment is enforced PER LEG, so a
+   * basket of two at $5 does not buy at $5; "Next investment" reads
+   * investsAtRaw, which is the balance that actually unblocks a buy.
+   */
+  it("states no threshold of its own, so the card cannot disagree with itself", () => {
+    const html = render();
+    expect(html).not.toContain(INVEST_COPY.buysEach("$5.00"));
+    expect(html).toContain(LIVE_COPY.nextInvestment);
   });
 });
 
