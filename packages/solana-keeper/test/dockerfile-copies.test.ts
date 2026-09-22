@@ -59,12 +59,47 @@ function sourceFiles(dir: string): readonly string[] {
  * the literal ["src", "bin", "test"], with a comment arguing that test-local/
  * is excluded because vitest.config.ts collects only test/** and src/**. True
  * of vitest — and the image runs `tsc -p tsconfig.json --noEmit` as well, whose
- * include list ends with "test-local/**\/*.ts". Two files there import
- * @sip/solana-program/link-consent, the one exported script no COPY line named,
- * so the TYPECHECK gate died in the container while this guard stayed green.
- * Reading the include list is what stops the next directory added to it from
- * being invisible here too.
+ * include list ends with "test-local/**\/*.ts". Reading the include list is
+ * what stops the next directory added to it from being invisible here too.
+ *
+ * BUT tsconfig IS NOT THE ONLY SOURCE, AND THIS GUARD LEARNED THAT THE
+ * EXPENSIVE WAY. An earlier version asserted that test-local/ MUST be among
+ * these directories, because the image typechecks it. It does not: .dockerignore
+ * excludes packages/solana-keeper/test-local from the build context — decided in
+ * 63b2466, with its reason written beside it, exactly because those files start
+ * a validator no image runs and import @sip/solana-program/link-consent, which
+ * no COPY line names. So `COPY packages/solana-keeper` never brings that
+ * directory, and this guard died with ENOENT inside the container while every
+ * local run stayed green. A rule that reasons from one source of truth while a
+ * second already contradicts it is the whole subject of docs/TESTING_TRAPS.md.
+ *
+ * SO THE IMAGE'S DIRECTORIES ARE tsconfig's include MINUS .dockerignore's
+ * exclusions, and BOTH halves are asserted below. Delete the .dockerignore line
+ * and test-local comes back into this scan — and then link-consent.ts must be
+ * copied, which is the outcome that line was written to avoid. Self-maintaining
+ * in both directions: neither file can move without the other being consulted.
  */
+function dockerignoredKeeperDirs(): ReadonlySet<string> | null {
+  let text: string;
+  try {
+    text = read(".dockerignore");
+  } catch {
+    // NOT IN THE IMAGE. No COPY line names .dockerignore, so inside the
+    // container this file does not exist — and the first version of this fix
+    // read it unconditionally and died there with ENOENT, which is the very
+    // mistake it was written to repair, committed again one line lower down.
+    return null;
+  }
+  const out = new Set<string>();
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line.length === 0 || line.startsWith("#") || line.startsWith("!")) continue;
+    const match = /^packages\/solana-keeper\/([^/*]+)\/?$/.exec(line);
+    if (match !== null) out.add(match[1]!);
+  }
+  return out;
+}
+
 function includedDirs(): readonly string[] {
   const include = JSON.parse(read("packages/solana-keeper/tsconfig.json")).include as readonly string[] | undefined;
   expect(include, "packages/solana-keeper/tsconfig.json states an include list").toBeDefined();
@@ -74,7 +109,24 @@ function includedDirs(): readonly string[] {
     if (head.length === 0 || head.includes("*")) continue;
     dirs.add(head);
   }
-  expect([...dirs], "the image typechecks test-local/, so this guard reads it too").toContain("test-local");
+  // THIS TEST RUNS IN TWO WORLDS AND MUST BE RIGHT IN BOTH.
+  //   * In the repository, every directory exists, so what the image would
+  //     carry has to be DERIVED — by subtracting .dockerignore's exclusions.
+  //   * Inside the image there is no .dockerignore to read, and none is needed:
+  //     the excluded directories are simply not on disk. What exists IS the
+  //     answer, and it is the stronger of the two readings because it is the
+  //     thing itself rather than a model of it.
+  // Applying both leaves each world checking the same invariant with the
+  // evidence it actually has.
+  const excluded = dockerignoredKeeperDirs();
+  if (excluded !== null) for (const dir of excluded) dirs.delete(dir);
+  for (const dir of [...dirs]) {
+    try {
+      if (!statSync(resolve(KEEPER, dir)).isDirectory()) dirs.delete(dir);
+    } catch {
+      dirs.delete(dir);
+    }
+  }
   return [...dirs].sort();
 }
 
@@ -247,10 +299,28 @@ describe("the keeper's Dockerfile carries every module the keeper imports", () =
     expect(reached, "pyth-accounts.ts imports ../../src/client/base64").toContain("packages/solana-core/src/client/base64.ts");
   });
 
-  it("reads the directories the image typechecks, so test-local's reaches count too", () => {
-    expect(includedDirs(), "tsconfig.json's include is what `tsc -p tsconfig.json` loads in the image").toContain("test-local");
+  it("reads the directories the image typechecks, MINUS the ones .dockerignore keeps out of the context", () => {
+    // BOTH HALVES, so neither file can move without the other being consulted.
+    // tsconfig still includes test-local/ — that is why a naive reading of it
+    // put this guard in the container scanning a directory that is not there.
+    const include = JSON.parse(read("packages/solana-keeper/tsconfig.json")).include as readonly string[];
+    expect(include.some((p) => p.startsWith("test-local/")), "tsconfig.json still typechecks test-local/ OUTSIDE the image").toBe(true);
+    // .dockerignore keeps it out of the build context, with its reason at 63b2466.
+    // Asserted only where the file exists: inside the image it is not copied,
+    // and there the directory's absence from disk carries the same fact.
+    const ignored = dockerignoredKeeperDirs();
+    if (ignored !== null) {
+      expect([...ignored], ".dockerignore excludes test-local from the build context").toContain("test-local");
+    }
+    // So the image's own gates never load it, and this guard must not scan it.
+    expect(includedDirs(), "what the image actually carries is the include list minus the ignored directories").not.toContain("test-local");
+    expect(includedDirs(), "the directories that ARE in the image are still read").toEqual(["bin", "scripts", "src", "test"]);
+    // AND THE CONSEQUENCE THAT LINE BUYS: link-consent.ts is the one exported
+    // script no COPY names, and nothing in the image reaches it. If the
+    // .dockerignore line goes, test-local returns to includedDirs() above and
+    // this expectation flips to a demand that it be copied.
     const reached = reachedOutside();
-    expect([...reached.keys()], "test-local/*.local.test.ts imports @sip/solana-program/link-consent").toContain(
+    expect([...reached.keys()], "nothing the image carries reaches link-consent.ts").not.toContain(
       "packages/solana-program/scripts/link-consent.ts",
     );
   });
