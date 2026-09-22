@@ -52,18 +52,28 @@ export const NATIVE_SOL = "native:SOL";
  */
 const ART: Readonly<Record<string, string>> = Object.freeze({
   [SPYX_MINT]: "/stocks/SPYx.png",
-  // Drop the file in and uncomment. Until then each draws its lettered disc.
-  // [ANTHROPIC_MINT]: "/tokens/ANTHROPIC.png",
-  // [FIGUREAI_MINT]: "/tokens/FIGUREAI.png",
-  // [OPENAI_MINT]: "/tokens/OPENAI.png",
-  // [NEURALINK_MINT]: "/tokens/NEURALINK.png",
-  // [SPACEX_MINT]: "/tokens/SPACEX.png",
-  // [POLYMARKET_MINT]: "/tokens/POLYMARKET.png",
-  // [KALSHI_MINT]: "/tokens/KALSHI.png",
-  // [ANDURIL_MINT]: "/tokens/ANDURIL.png",
-  // [NATIVE_SOL]: "/tokens/SOL.png",
-  // [WSOL_MINT]: "/tokens/wSOL.png",
-  // [USDC_MINT]: "/tokens/USDC.png",
+  [NATIVE_SOL]: "/stocks/SOL.png",
+  // WRAPPED SOL WEARS SOL'S MARK, and that is not a shortcut: this app prices
+  // wSOL at the SOL price precisely because it IS SOL held in a token account
+  // (live-model.ts, "Wrapped SOL is SOL: the same price, never a separate
+  // one"). Two marks for one asset would say otherwise.
+  [WSOL_MINT]: "/stocks/SOL.png",
+  // STILL WANTED. Drop a SQUARE, TRANSPARENT png in public/stocks/ and
+  // uncomment; until then each draws its lettered disc, which is a deliberate
+  // state and not a broken image.
+  //
+  // USDC's file is here but is NOT mapped: it is 655x468 and fully opaque, so
+  // it would render as a squashed logo in a white box clipped to a circle. It
+  // needs a square transparent one. The test below is what refuses it.
+  // [USDC_MINT]: "/stocks/USDC.png",
+  // [ANTHROPIC_MINT]: "/stocks/ANTHROPIC.png",
+  // [FIGUREAI_MINT]: "/stocks/FIGUREAI.png",
+  // [OPENAI_MINT]: "/stocks/OPENAI.png",
+  // [NEURALINK_MINT]: "/stocks/NEURALINK.png",
+  // [SPACEX_MINT]: "/stocks/SPACEX.png",
+  // [POLYMARKET_MINT]: "/stocks/POLYMARKET.png",
+  // [KALSHI_MINT]: "/stocks/KALSHI.png",
+  // [ANDURIL_MINT]: "/stocks/ANDURIL.png",
 });
 
 /** The mints a mark is still wanted for, so a test can name them rather than a person remembering. */

@@ -9,7 +9,7 @@
 // a broken image: that is what lets a leg be listed the day the policy names
 // it, with the artwork following whenever it follows.
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { CATALOGUE, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
@@ -52,13 +52,52 @@ describe("the mark an asset draws", () => {
    * never grow silently, and a mint that gains art must leave it.
    */
   it("names exactly what is still without a mark", () => {
-    expect([...MINTS_WITHOUT_ART].sort()).toEqual(
-      [NATIVE_SOL, WSOL_MINT, USDC_MINT, ...CATALOGUE.filter((asset) => asset.group === "prestock").map((asset) => asset.mint)].sort(),
-    );
+    expect([...MINTS_WITHOUT_ART].sort()).toEqual([USDC_MINT, ...CATALOGUE.filter((asset) => asset.group === "prestock").map((asset) => asset.mint)].sort());
     // Every catalogue leg that is NOT in that list can be drawn.
     for (const asset of CATALOGUE) {
       if (MINTS_WITHOUT_ART.includes(asset.mint)) continue;
       expect(artForMint(asset.mint), asset.symbol).not.toBeNull();
+    }
+  });
+});
+
+/**
+ * WHAT A MARK HAS TO BE, checked against the file rather than against whoever
+ * exported it.
+ *
+ * These are drawn at 16 to 20 px inside `rounded-full`. A file that is not
+ * square is scaled to a square by next/image and comes out squashed; a file
+ * with opaque corners keeps them, and the circle then crops a coloured box
+ * rather than a logo — which is fine for a mark that IS a coloured disc and
+ * wrong for one sitting on white. USDC's file arrived 655x468 and fully
+ * opaque, and this is the test that keeps it off the page until it is square
+ * and transparent.
+ */
+describe("every mark this app promises to draw", () => {
+  /** A PNG's width, height and colour type, from its IHDR. No dependency. */
+  function header(file: string): { width: number; height: number; colour: number } {
+    const bytes = readFileSync(file);
+    expect(bytes.subarray(0, 8).toString("hex"), `${file} is not a PNG`).toBe("89504e470d0a1a0a");
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20), colour: bytes.readUInt8(25) };
+  }
+
+  const mapped = (): readonly { readonly mint: string; readonly src: string }[] =>
+    [NATIVE_SOL, WSOL_MINT, USDC_MINT, ...CATALOGUE.map((asset) => asset.mint)]
+      .map((mint) => ({ mint, src: artForMint(mint) }))
+      .filter((entry): entry is { mint: string; src: string } => entry.src !== null);
+
+  it("is square, so a 20px circle does not squash it", () => {
+    for (const { src } of mapped()) {
+      const { width, height } = header(join(PUBLIC, src));
+      expect(width, `${src} is ${width}x${height}`).toBe(height);
+    }
+  });
+
+  /** Colour type 6 is RGBA and 4 is grey+alpha; 3 (palette) may carry tRNS. */
+  it("can be transparent at all: no mark is mapped from a file with no alpha channel", () => {
+    for (const { src } of mapped()) {
+      const { colour } = header(join(PUBLIC, src));
+      expect([3, 4, 6], `${src} has colour type ${colour}`).toContain(colour);
     }
   });
 });
