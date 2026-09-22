@@ -24,20 +24,21 @@
  * older" is what actually puts the chip, the curve and the Biggest tile back.
  */
 
-import { Percent } from "lucide-react";
-
 import { secondsUntil } from "@/components/live/LiveStates";
 import { measureOf } from "@/components/live/LiveActivityRow";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { formatSol, rawFrom } from "@/lib/amounts";
+import { AssetMark } from "@/components/live/AssetMark";
+import { NATIVE_SOL } from "@/lib/asset-art";
+import { formatSol, formatSolAtMost, rawFrom } from "@/lib/amounts";
 import { SAVED } from "@/lib/classes";
 import { timeAgo } from "@/lib/format";
 import type { LiveOlder } from "@/hooks/use-live-dashboard";
 import { ACTIVITY_COPY, LIVE_COPY, STATS_COPY, stripTooltip } from "@/lib/live-copy";
 import type { LiveRow, LiveVaultView, VaultEventJson } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
+import { pct } from "@/lib/format";
 import { ratePercent } from "@/lib/vault-copy";
 
 /** How many settlements the strip shows. Rows arrive newest first. */
@@ -68,6 +69,10 @@ export function chipDetail(input: {
 }): string {
   const { event } = input;
   return stripTooltip({
+    // THE EXACT AMOUNT LIVES HERE, because the chip's face is rounded to three
+    // places to be readable at a glance. Nothing on this page rounds without
+    // the whole figure staying one hover away.
+    paid: formatSol(rawFrom(event.paid) ?? 0n),
     label: input.labelOf(event.wallet),
     rate: ratePercent(event.bps),
     base: formatSol(rawFrom(event.baseLamports) ?? 0n),
@@ -109,8 +114,11 @@ export function LiveSettlementStrip({
 
   // The BADGE is the vault's rule as it stands today, which is what a badge is
   // for. Each chip's own words come from its own event, below.
-  const rate = vault.rateBps === null ? null : ratePercent(vault.rateBps);
-  const badge = rate === null ? null : vault.mode === 1 ? LIVE_COPY.modeVolume(rate) : LIVE_COPY.modeProfit(rate);
+  // `pct` and not `ratePercent`: this badge reads "Profit: 20%", tight, the way
+  // the sample's does. ratePercent's "20 %" is the spaced form the rule card
+  // and the row details use, and both stay as they are.
+  const rate = vault.rateBps === null ? null : pct(vault.rateBps);
+  const badge = rate === null ? null : vault.mode === 1 ? STATS_COPY.stripModeVolume(rate) : STATS_COPY.stripModeProfit(rate);
 
   // Nothing has ever settled, or there is not even a rule to state: no band.
   // Only a history that falls short of a settlement the chain records earns one.
@@ -124,8 +132,9 @@ export function LiveSettlementStrip({
         // The sample's badge says what it means on hover; this one did not.
         <Tooltip>
           <TooltipTrigger asChild>
-            <Badge variant="secondary" tabIndex={0} className="h-9 shrink-0 rounded-md px-3 font-mono tabular-nums has-data-[icon=inline-start]:pl-2.5">
-              <Percent aria-hidden data-icon="inline-start" />
+            {/* No percent glyph: the badge says "20%" in words now, and the
+                icon beside it read as "% Profit: 20%". */}
+            <Badge variant="secondary" tabIndex={0} className="h-9 shrink-0 rounded-md px-3 font-mono tabular-nums">
               {badge}
             </Badge>
           </TooltipTrigger>
@@ -165,7 +174,9 @@ export function LiveSettlementStrip({
       */}
       {shown.length === 0 ? null : (
         <p className="ml-auto hidden shrink-0 text-xs text-muted-foreground lg:block">
-          {STATS_COPY.stripAverage(formatSol(shown.reduce((total, row) => total + (rawFrom(row.event.paid) ?? 0n), 0n) / BigInt(shown.length)), String(shown.length))}
+          {/* Rounded like the chips it averages: the same figure in two
+              precisions on one line reads as two different numbers. */}
+          {STATS_COPY.stripAverage(formatSolAtMost(shown.reduce((total, row) => total + (rawFrom(row.event.paid) ?? 0n), 0n) / BigInt(shown.length), 3), String(shown.length))}
         </p>
       )}
     </div>
@@ -202,10 +213,19 @@ function StripChip({
     newest && "ring-1 ring-ring/40",
   );
 
-  const label = saved ? `+${formatSol(paid)} SOL` : "0 SOL";
+  /*
+   * THE ASSET'S MARK AND THREE DECIMALS. A settlement is SOL, so the chip
+   * wears SOL's mark and the unit is the mark rather than a repeated word —
+   * that is what buys the room for the figure. Three places because
+   * "+0.036634582" in a pill is a smear; the exact amount is in the tooltip
+   * and in the accessible name, and a settlement too small to show at three
+   * places reads "<0.001" and never "0".
+   */
+  const face = saved ? `+${formatSolAtMost(paid, 3)}` : "0";
   const body = (
     <>
-      {label}
+      <AssetMark symbol="SOL" mint={NATIVE_SOL} size={16} className={saved ? "" : "opacity-60"} />
+      {face}
       {/* A cap kept part of this one back; the tooltip says how much. */}
       {event.capped ? (
         <span aria-hidden className="text-[0.625rem] opacity-70">
@@ -218,10 +238,17 @@ function StripChip({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
+        {/*
+          The face is rounded and the mark is decorative, so the accessible
+          name carries the whole figure with its unit — otherwise a screen
+          reader hears "+0.037" and is told neither of what nor how much.
+        */}
         {row.explorerUrl === null ? (
-          <span className={className}>{body}</span>
+          <span className={className} aria-label={detail}>
+            {body}
+          </span>
         ) : (
-          <a href={row.explorerUrl} target="_blank" rel="noopener noreferrer" className={className}>
+          <a href={row.explorerUrl} target="_blank" rel="noopener noreferrer" className={className} aria-label={detail}>
             {body}
           </a>
         )}

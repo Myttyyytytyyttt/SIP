@@ -245,10 +245,16 @@ describe("the stats claim only what exists", () => {
 });
 
 describe("the strip's tooltip", () => {
-  it("says who, how much of what, and when — and mentions a cap only when there was one", () => {
-    const capped = stripTooltip({ label: "Trading wallet 1", rate: "20 %", base: "0.5", measure: "profit", capped: "0.06", when: "4m ago" });
-    expect(capped).toBe("Trading wallet 1 · 20 % of 0.5 SOL profit · capped at 0.06 SOL · 4m ago");
-    const plain = stripTooltip({ label: "Trading wallet 1", rate: "20 %", base: "0.5", measure: "profit", capped: null, when: "4m ago" });
-    expect(plain).toBe("Trading wallet 1 · 20 % of 0.5 SOL profit · 4m ago");
+  /**
+   * THE EXACT FIGURE LEADS IT. The chip's own face is rounded to three places
+   * so it can be read at a glance, so this is the one place the whole amount
+   * survives — and it is also the chip's accessible name, because the face's
+   * unit is a decorative mark a screen reader never sees.
+   */
+  it("leads with the exact amount, then who, how much of what, and when", () => {
+    const capped = stripTooltip({ paid: "0.036634582", label: "Trading wallet 1", rate: "20 %", base: "0.5", measure: "profit", capped: "0.06", when: "4m ago" });
+    expect(capped).toBe("0.036634582 SOL · Trading wallet 1 · 20 % of 0.5 SOL profit · capped at 0.06 SOL · 4m ago");
+    const plain = stripTooltip({ paid: "0.06", label: "Trading wallet 1", rate: "20 %", base: "0.5", measure: "profit", capped: null, when: "4m ago" });
+    expect(plain).toBe("0.06 SOL · Trading wallet 1 · 20 % of 0.5 SOL profit · 4m ago");
   });
 });

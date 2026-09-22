@@ -370,9 +370,19 @@ export const STATS_COPY = {
   thisWeek: "This week",
   /** The strip's trailing note: it names its own population rather than implying a lifetime. */
   lastSettlements: (count: string): string => `last ${count} ${count === "1" ? "settlement" : "settlements"}`,
-  /** The average over the chips SHOWN, as the sample trails its strip. Named so, because it is not a lifetime. */
-  stripAverage: (avg: string, count: string): string => `avg ${avg} SOL · last ${count}`,
-  /** What the badge means, as the sample's has always said on hover. */
+  /**
+   * The average over the chips SHOWN, as the sample trails its strip.
+   *
+   * IN SOL, BECAUSE THE CHIPS ARE. The sample averages dollars because its
+   * savings are dollars; these are lamports that moved at prices nobody
+   * stored, and an average of them in today's dollars would describe none of
+   * the chips beside it. "Settlement", not "trade": the chain has no trades.
+   */
+  stripAverage: (avg: string, count: string): string => `avg ${avg} SOL / settlement · last ${count}`,
+  /** The badge that opens the strip: the vault's rule as it stands today. */
+  stripModeProfit: (rate: string): string => `Profit: ${rate}`,
+  stripModeVolume: (rate: string): string => `Volume: ${rate}`,
+  /** What that badge means, as the sample's has always said on hover. */
   stripBadgeProfit: (rate: string): string => `${rate} of your realised trading gains is put aside`,
   stripBadgeVolume: (rate: string): string => `${rate} of your trading volume would be put aside`,
   settlementStripLabel: "Recent settlements",
@@ -380,6 +390,8 @@ export const STATS_COPY = {
 
 /** The settlement strip's chip tooltip: who, how much of what, whether it was capped, and when. */
 export const stripTooltip = (input: {
+  /** The EXACT amount, to the lamport. The chip's own face is rounded for reading. */
+  readonly paid: string;
   readonly label: string;
   readonly rate: string;
   readonly base: string;
@@ -387,6 +399,11 @@ export const stripTooltip = (input: {
   readonly capped: string | null;
   readonly when: string;
 }): string =>
-  [`${input.label} · ${input.rate} of ${input.base} SOL ${input.measure}`, input.capped === null ? null : `capped at ${input.capped} SOL`, input.when]
+  [
+    `${input.paid} SOL`,
+    `${input.label} · ${input.rate} of ${input.base} SOL ${input.measure}`,
+    input.capped === null ? null : `capped at ${input.capped} SOL`,
+    input.when,
+  ]
     .filter((part): part is string => part !== null)
     .join(" · ");

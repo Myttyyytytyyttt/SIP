@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { AmountError, formatSol, formatUnits, formatUsd, parseUnits, rawFrom, shareOfRaw, solToLamports, usdcRawForLamports, usdcToRaw, splitDecimal } from "@/lib/amounts";
+import { AmountError, formatSol, formatUnits, formatUsd, parseUnits, rawFrom, shareOfRaw, solToLamports, usdcRawForLamports, usdcToRaw, splitDecimal, formatSolAtMost } from "@/lib/amounts";
 
 describe("token shares", () => {
   it("25 % and 50 % round down; All is the raw amount itself", () => {
@@ -83,5 +83,37 @@ describe("raw units to text", () => {
     expect(rawFrom("12.5")).toBeNull();
     expect(rawFrom(1_285_240)).toBeNull();
     expect(rawFrom(undefined)).toBeNull();
+  });
+});
+
+/**
+ * THE ONE ROUNDING IN THIS MODULE, and it is for a face that has to be read at
+ * a glance — a strip chip, nine characters wide. Everything else here never
+ * rounds, and every caller of this keeps the whole figure within reach.
+ */
+describe("a SOL figure rounded for a glance", () => {
+  it("rounds to the places asked, half up, on the lamports themselves", () => {
+    expect(formatSolAtMost(36_634_582n, 3)).toBe("0.037");
+    expect(formatSolAtMost(60_000_000n, 3)).toBe("0.06");
+    expect(formatSolAtMost(1_723_287_901n, 3)).toBe("1.723");
+    // Exactly half goes up.
+    expect(formatSolAtMost(1_500_000n, 3)).toBe("0.002");
+    expect(formatSolAtMost(1_400_000n, 3)).toBe("0.001");
+  });
+
+  /**
+   * A SETTLEMENT THAT MOVED SOMETHING MUST NEVER READ AS ZERO. 0.0004 SOL
+   * rounded to three places is "0.000", which says the opposite of what
+   * happened.
+   */
+  it("says `<0.001` for an amount too small to show, and `0` only for nothing", () => {
+    expect(formatSolAtMost(400_000n, 3)).toBe("<0.001");
+    expect(formatSolAtMost(1n, 3)).toBe("<0.001");
+    expect(formatSolAtMost(0n, 3)).toBe("0");
+  });
+
+  it("groups the whole part and keeps a sign", () => {
+    expect(formatSolAtMost(1_234_000_000_000n, 3)).toBe("1,234");
+    expect(formatSolAtMost(-36_634_582n, 3)).toBe("-0.037");
   });
 });

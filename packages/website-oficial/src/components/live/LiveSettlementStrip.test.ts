@@ -13,9 +13,9 @@ import { describe, expect, it } from "vitest";
 import { partsOf } from "@/components/live/LiveActivityRow";
 import { LiveSettlementStrip, chipDetail, type SettledEvent } from "@/components/live/LiveSettlementStrip";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { ACTIVITY_COPY } from "@/lib/live-copy";
+import { ACTIVITY_COPY, STATS_COPY } from "@/lib/live-copy";
 
-import { WALLET_A, liveDashboard } from "../../../test/fixtures/live-dashboard";
+import { NOW_MS, WALLET_A, liveActivity, liveDashboard, liveEntry, seconds, settledEvent, signature } from "../../../test/fixtures/live-dashboard";
 
 const OLDER = { busy: false, retryAt: null, message: null, complete: false } as const;
 
@@ -90,8 +90,32 @@ describe("what a chip says that settlement measured", () => {
 });
 
 describe("the strip still draws what it drew", () => {
-  it("shows a chip per settlement, with what it put aside", () => {
-    expect(render({ data: liveDashboard() })).toContain("+0.06 SOL");
+  /**
+   * THE FACE IS ROUNDED, THE FIGURE IS NOT LOST. Three places is what a
+   * nine-character pill can hold — "+0.036634582" is a smear — and the whole
+   * amount is the chip's tooltip and its accessible name, because the unit on
+   * the face is a decorative mark a screen reader never sees.
+   */
+  it("shows a chip per settlement: the asset's mark, and the amount to three places", () => {
+    const html = render({ data: liveDashboard() });
+    expect(html).toContain("+0.06");
+    // The unit is the mark, not a repeated word.
+    expect(html).not.toContain("+0.06 SOL");
+    // …and the exact figure, with its unit, is one hover away and in the name.
+    expect(html).toContain("0.06 SOL · Trading wallet 1");
+  });
+
+  it("never lets a settlement that moved something read as zero", () => {
+    const tiny = liveEntry(signature(9), seconds(NOW_MS - 600_000), [settledEvent("400000")]);
+    const html = render({ data: liveDashboard({ activity: liveActivity([tiny]) }) });
+    // Escaped, because this is the rendered markup: "<" is "&lt;" in it.
+    // Escaped, because this is the rendered markup: "<" is "&lt;" in it.
+    expect(html).toContain("+&lt;0.001");
+    // The FACE never reads as nothing. ("0.000" on its own would match the
+    // exact figure in the tooltip, which legitimately starts that way.)
+    expect(html).not.toContain("+0.000");
+    // And that exact figure is still reachable, to the lamport.
+    expect(html).toContain("0.0004 SOL");
   });
 });
 
@@ -107,7 +131,8 @@ describe("a settlement the loaded history does not hold", () => {
 
   it("keeps the band, with the rate badge and a way to fetch the settlement", () => {
     const html = render({ data: noRows(), settledOutsideHistory: true });
-    expect(html).toContain("20 %");
+    // The badge reads tight, as the sample's does: "Profit: 20%".
+    expect(html).toContain(STATS_COPY.stripModeProfit("20%"));
     expect(html).toContain(ACTIVITY_COPY.loadOlder);
   });
 
@@ -120,7 +145,7 @@ describe("a settlement the loaded history does not hold", () => {
 
   it("drops the button once the history reaches the beginning: there is nothing older to ask for", () => {
     const html = render({ data: noRows(), settledOutsideHistory: true, complete: true });
-    expect(html).toContain("20 %");
+    expect(html).toContain(STATS_COPY.stripModeProfit("20%"));
     expect(html).not.toContain(ACTIVITY_COPY.loadOlder);
   });
 
