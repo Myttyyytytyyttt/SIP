@@ -542,12 +542,22 @@ function floorsProblem(floors: PolicyFloorsJson | undefined, shown: VaultStateJs
 }
 
 /** The token accounts a policy build says it creates, bound to the vault's own associated addresses as this page derives them. */
-async function tokenAccountCreates(pensionKey: string, vault: string, listed: InvestPolicyBuildJson["vaultTokenAccounts"] | undefined): Promise<TokenAccountCreateIntent[]> {
+export async function tokenAccountCreates(
+  pensionKey: string,
+  vault: string,
+  listed: InvestPolicyBuildJson["vaultTokenAccounts"] | undefined,
+  /** The mints of the legs the owner actually picked. wSOL and the in-mint are always allowed. */
+  chosenLegMints: ReadonlySet<string>,
+): Promise<TokenAccountCreateIntent[]> {
   const targets = [
     { mint: WSOL_MINT, tokenProgram: TOKEN_PROGRAM },
     { mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM },
     ...OFFERED_LEGS.map((leg) => ({ mint: leg.mint, tokenProgram: leg.tokenProgram })),
   ];
+  // THE SERVER'S LIST IS ABOUT THE VAULT, NOT ABOUT THE POLICY, so it is still
+  // checked WHOLE: it reports, for every mint SaverFi offers, whether the vault
+  // already holds an account. Shrinking this check to the picked legs would
+  // stop noticing a server that answered about a different shelf.
   const matches =
     Array.isArray(listed) &&
     listed.length === targets.length &&
@@ -556,6 +566,18 @@ async function tokenAccountCreates(pensionKey: string, vault: string, listed: In
   const creates: TokenAccountCreateIntent[] = [];
   for (const [index, target] of targets.entries()) {
     if (listed[index]!.create !== true) continue;
+    // ONLY WHAT THIS POLICY WILL ACTUALLY HOLD, AND THE PROGRAM AGREES.
+    // set_invest_policy's builder allows exactly wSOL, the in-mint and THIS
+    // POLICY'S LEGS (builders.ts allowedMints), so an account for an offered
+    // stock the owner did NOT pick is refused outright — "neither wSOL, the
+    // policy's in-mint nor one of its legs" — and the whole signature dies with
+    // it. This list used to be the entire shelf, which was harmless while the
+    // basket WAS the entire shelf and became a wall the day the picker let an
+    // owner choose a subset: a vault holding SPYx already and asked to sign
+    // SPYx alone still tried to create ANTHROPIC, and could not sign at all.
+    // Rent is the other half of the argument: an account for a stock this
+    // policy never buys is the owner's lamports spent on nothing.
+    if (target.mint !== WSOL_MINT && target.mint !== USDC_MINT && !chosenLegMints.has(target.mint)) continue;
     creates.push({ funder: pensionKey, account: await deriveAtaAddress(vault, target.mint, target.tokenProgram), wallet: vault, mint: target.mint, tokenProgram: target.tokenProgram });
   }
   return creates;
@@ -617,7 +639,12 @@ export async function investPolicyFlow(deps: PensionFlowDeps, input: InvestPolic
         max_rolling_30d: input.maxRolling30d ?? DEFAULT_INVEST_CAPS.maxRolling30d,
         enabled: input.enabled ?? true,
       },
-      tokenAccountCreates: await tokenAccountCreates(input.pensionKey, vault, body.vaultTokenAccounts),
+      tokenAccountCreates: await tokenAccountCreates(
+        input.pensionKey,
+        vault,
+        body.vaultTokenAccounts,
+        new Set(chosen.map(({ leg }) => leg.mint)),
+      ),
     };
   });
 }

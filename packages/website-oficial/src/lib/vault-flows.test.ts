@@ -66,6 +66,7 @@ import {
   withdrawTokenFlow,
   type FlowResult,
   type FlowStep,
+  tokenAccountCreates,
 } from "@/lib/vault-flows";
 import { deriveAtaAddress, deriveConfigAddress, deriveInvestAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
 import { ROUTED_VENUE } from "../../../solana-core/test/fixtures/keeper-policy";
@@ -1555,5 +1556,59 @@ describe("awaitsConfirmation: what leaves a transaction on its way", () => {
     ] satisfies FlowResult[]) {
       expect(awaitsConfirmation(result), result.ok ? "landed" : result.kind).toBe(false);
     }
+  });
+});
+
+describe("the vault token accounts a policy pays to create", () => {
+  /**
+   * THE PROGRAM'S RULE, WHICH THE WEB HAS TO SATISFY BEFORE IT ASKS ANYONE TO
+   * SIGN. set_invest_policy's builder allows exactly wSOL, the in-mint and THIS
+   * POLICY'S LEGS (packages/solana-core/src/server/builders.ts, allowedMints),
+   * and refuses anything else with "neither wSOL, the policy's in-mint nor one
+   * of its legs".
+   *
+   * IT FIRED ON A REAL OWNER, 2026-09-22. The picker had just learned to take a
+   * subset of the shelf; this list had not. A vault already holding wSOL, USDC
+   * and SPYx, asked to sign SPYx ALONE, still offered to create ANTHROPIC —
+   * the one account it lacked — and the build refused the whole signature. The
+   * owner could not re-sign his policy at all, and the only thing that saved it
+   * from being a signed mistake instead of a blocked one is that the refusal
+   * came before the wallet, not after.
+   *
+   * Two reasons this stays pinned: the signature dies without it, and an
+   * account for a stock the policy never buys is the owner's rent spent on
+   * nothing.
+   */
+  /** What the build route answers about a vault holding wSOL, USDC and SPYx, but not ANTHROPIC. */
+  const listedFor = (vault: string, creates: readonly boolean[]) =>
+    POLICY_TARGETS.map((target, index) => ({
+      mint: target.mint,
+      address: deriveAta(vault, target.mint, target.tokenProgram).toBase58(),
+      tokenProgram: target.tokenProgram as string,
+      create: creates[index]!,
+    }));
+  const MISSING_ANTHROPIC_ONLY = [false, false, false, true] as const;
+
+  it("never offers to create an account for a stock the owner did not pick", async () => {
+    const owner = Keypair.generate().publicKey.toBase58();
+    const vault = deriveVaultPda(owner).toBase58();
+    // The owner's real position that day: only ANTHROPIC missing, and a basket
+    // of SPYx alone.
+    const creates = await tokenAccountCreates(owner, vault, listedFor(vault, MISSING_ANTHROPIC_ONLY), new Set([SPYX_MINT]));
+    expect(creates.map((c) => c.mint), "ANTHROPIC is not a leg of this policy, so its account is not created").toEqual([]);
+  });
+
+  it("does create it once the owner picks it", async () => {
+    const owner = Keypair.generate().publicKey.toBase58();
+    const vault = deriveVaultPda(owner).toBase58();
+    const creates = await tokenAccountCreates(owner, vault, listedFor(vault, MISSING_ANTHROPIC_ONLY), new Set([SPYX_MINT, ANTHROPIC_MINT]));
+    expect(creates.map((c) => c.mint), "a picked leg the vault lacks is created").toEqual([ANTHROPIC_MINT]);
+  });
+
+  it("always creates wSOL and the in-mint, which are not legs and are always allowed", async () => {
+    const owner = Keypair.generate().publicKey.toBase58();
+    const vault = deriveVaultPda(owner).toBase58();
+    const creates = await tokenAccountCreates(owner, vault, listedFor(vault, [true, true, true, true]), new Set([SPYX_MINT]));
+    expect(creates.map((c) => c.mint)).toEqual([WSOL_MINT, USDC_MINT, SPYX_MINT]);
   });
 });
