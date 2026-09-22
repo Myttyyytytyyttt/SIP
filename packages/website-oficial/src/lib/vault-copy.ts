@@ -945,11 +945,22 @@ export const INVEST_COPY = {
    * measurement, so the example is gone and the basket's real floor is passed
    * in. `floor` is null while the shares or the minimum are unreadable, and the
    * sentence then says the figure depends on them rather than inventing one.
+   *
+   * AND IT SAYS WHICH OF THE TWO IS MISSING. The floor needs BOTH the shares
+   * and the minimum, and the one sentence used to blame the shares for either
+   * — so clearing this box to type a new figure produced "these do not add up
+   * to 100 % yet" directly underneath it, about shares that were fine, while
+   * the prose two elements above was simultaneously reading them out at
+   * "SPYx at 80 % and ANTHROPIC at 20 %". `pending` names the box that is
+   * actually empty, and this hint sits under the minimum's own box, so that
+   * one is named first when both are unreadable.
    */
-  minPerBuyHint: (floor: string | null, count: number): string =>
+  minPerBuyHint: (floor: string | null, count: number, pending: "shares" | "minimum"): string =>
     "The smallest amount the keeper will put into ONE stock. It is checked per stock, not per buy: a buy has to be big enough for the SMALLEST share in your basket to clear it. " +
     (floor === null || count < 1
-      ? "What that comes to follows the shares you type, and these do not add up to 100 % yet."
+      ? pending === "minimum"
+        ? "What that comes to follows this figure and the shares you have typed, and this box does not hold a figure yet."
+        : "What that comes to follows the shares you type, and these do not add up to 100 % yet."
       : count === 1
         ? `With one stock that is ${floor} a buy.`
         : `With these ${count} stocks at the shares you have typed, that is ${floor} a buy.`),
@@ -1060,7 +1071,32 @@ export const INVEST_COPY = {
    * beforehand that the cap and the basket are one arithmetic.
    */
   editingPolicy:
-    "You are changing a policy that is already signed. Signing replaces it outright: the basket, the shares and the limits on this screen are what your vault uses from then on, and nothing that is not here is carried over. Adding a thinly traded stock lowers the most you can buy with, so Most per buy may have to come down before this can be signed.",
+    "You are changing a policy that is already signed. Signing replaces it outright: the basket, the shares and the limits on this screen are what your vault uses from then on. The one thing not on this screen that is kept is whether investing is on or paused — the button below says which of the two you are signing. Adding a thinly traded stock lowers the most you can buy with, so Most per buy may have to come down before this can be signed.",
+  /**
+   * A STORED STOCK THE SHELF NO LONGER OFFERS, on the form rather than instead
+   * of it.
+   *
+   * The edit form used to be REFUSED in this case, because it shares its
+   * reading of the stored basket with "Sign again" — where a missing leg
+   * really would build a different basket. For the form the opposite is true:
+   * set_invest_policy overwrites, so a fresh basket without that stock is
+   * precisely the remedy, and the owner whose basket has stopped buying
+   * because a venue drained is the one who needs the picker most. What he must
+   * not get is a silent absence: the row is gone from the boxes and the shares
+   * no longer add up to 100, and that has to read as a consequence rather than
+   * as a glitch.
+   */
+  editDropped: (symbols: string): string =>
+    `This policy holds ${symbols}, which SaverFi does not offer today, so it is not in the boxes below and the shares no longer add up to 100 %. Signing from here replaces the policy with the basket on this screen, which is how ${symbols} comes out of it. Give the stocks you are keeping shares that add up to 100 %.`,
+  /**
+   * THE VENUE THE FORM SUBSTITUTED. The select holds NAMES and the policy holds
+   * a program id, and a stored program this app cannot check the bytes of has
+   * no name to show — so the box opens on the default, and signing would write
+   * it. That is a change to the policy made by the form and not by the owner,
+   * which is exactly what editingPolicy promises does not happen silently.
+   */
+  editVenueReplaced: (venue: string): string =>
+    `This policy was signed on a venue SaverFi can no longer check, so Where it buys has opened on ${venue} instead of what is stored. Signing from here moves the policy to ${venue}.`,
   /** Signing an edit of a policy that is ON. */
   signChanges: "Sign these changes",
   /**

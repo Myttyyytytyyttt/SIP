@@ -342,6 +342,51 @@ export const canSignPolicy = (input: {
 }): boolean =>
   input.acknowledged && input.capsOk && (input.minimumOk ?? true) && (input.weightsOk ?? true) && (input.depthOk ?? true) && !input.blocked;
 
+/**
+ * WHAT THE SETUP FORM WOULD SIGN, AS A VALUE — or null when the boxes do not
+ * describe a signable policy.
+ *
+ * IT WAS AN OBJECT LITERAL INSIDE THE Sign HANDLER, and nothing could see it.
+ * The reviewer changed `enabled` to a hardcoded `true` there — the exact defect
+ * signChangesPaused exists to prevent, an owner who paused investing pressing
+ * "Sign these changes, investing stays paused" and turning it back ON with real
+ * money — and the whole suite stayed green, because no case in a DOM-less suite
+ * can tick the acknowledgement box and press the button.
+ *
+ * TWO THINGS FOLLOW FROM IT BEING A VALUE. The handler is `undefined` when this
+ * is null, so a press on a greyed control has nothing to run — which also gives
+ * the depth gate something a static render can SEE, where the button's
+ * `disabled` is true for every seed on account of the unticked box. And the
+ * button's LABEL is read off this object rather than off the flag beside it, so
+ * the payload's `enabled` is on screen: a payload that quietly says `true`
+ * relabels the button and the paused case goes red.
+ *
+ * `acknowledged` IS DELIBERATELY NOT A TERM HERE. It is the owner's assent to
+ * what this object says, not part of what it says, and folding it in would
+ * collapse "you have not ticked the box" and "this basket cannot buy" into one
+ * indistinguishable null — which is the vacuity being repaired.
+ */
+export function policyRequest(input: {
+  readonly caps: Caps;
+  readonly minimum: Minimum;
+  readonly weights: Weights;
+  readonly overDepth: boolean;
+  readonly enabled: boolean;
+  readonly venue: string;
+}): InvestRequest | null {
+  const { caps, minimum, weights } = input;
+  if (!caps.ok || !minimum.ok || !weights.ok || input.overDepth) return null;
+  return {
+    maxPerCall: caps.maxPerCall,
+    maxRolling30d: caps.maxRolling30d,
+    enabled: input.enabled,
+    minInvestment: minimum.raw,
+    weights: weights.byMint,
+    // A NAME from the closed set, never a program id.
+    venue: input.venue,
+  };
+}
+
 /** What "Sign again" and "Resume" would re-sign, or why neither may be pressed. */
 export type Resign =
   | { readonly ok: true; readonly weights: ReadonlyMap<string, number>; readonly minInvestment: bigint; readonly limits: BasketLimits }
@@ -376,7 +421,7 @@ export type Resign =
  */
 /** A stored policy resolved back to catalogue legs, with the three figures it carries; or why it could not be read. */
 type StoredBasket =
-  | { readonly ok: true; readonly picked: readonly PickedLeg[]; readonly minInvestment: bigint; readonly maxPerCall: bigint }
+  | { readonly ok: true; readonly picked: readonly PickedLeg[]; readonly dropped: readonly string[]; readonly minInvestment: bigint; readonly maxPerCall: bigint }
   | { readonly ok: false; readonly message: string };
 
 /**
@@ -390,6 +435,17 @@ type StoredBasket =
  * Extracted rather than reimplemented so there is one answer to "can this
  * policy's basket be put back on a screen": two copies of this would drift on
  * the day the shelf drops an asset, and only one of them would be fixed.
+ *
+ * AND A LEG THE SHELF NO LONGER OFFERS IS REPORTED, NOT REFUSED. It used to
+ * return ok:false here, which is right for ONE of the two callers and was the
+ * whole bug for the other. Re-signing a basket without a stored leg really
+ * would be a different basket, so resignStoredPolicy still refuses it; but
+ * set_invest_policy OVERWRITES, so a fresh basket without that leg is exactly
+ * the remedy the edit form exists to offer — and shutting the form was
+ * shutting the only door out of a basket that has stopped buying. That is the
+ * FIGUREAI case the catalogue exists for: a venue that loses 99 % in two days
+ * takes its asset off the shelf, and the owner holding it needs the picker
+ * MORE than anybody, not less. Each caller now decides for itself.
  */
 function storedBasket(policy: InvestmentPolicyJson): StoredBasket {
   const minInvestment = rawFrom(policy.minInvestment);
@@ -398,17 +454,18 @@ function storedBasket(policy: InvestmentPolicyJson): StoredBasket {
   if (!Array.isArray(policy.legs) || policy.legs.length === 0) return { ok: false, message: INVEST_COPY.resignUnreadable };
 
   const picked: PickedLeg[] = [];
-  const missing: string[] = [];
+  const dropped: string[] = [];
   for (const leg of policy.legs) {
     const asset = catalogueAsset(leg.mint);
-    // NOT OFFERED IS NOT THE SAME AS NOT KNOWN, and neither may be re-signed:
-    // investPolicyFlow filters the weights to OFFERED_LEGS, so either one would
-    // leave the request naming a shorter basket than the policy on screen.
-    if (asset === null || !isOfferable(asset)) missing.push(asset?.symbol ?? shortAddress(leg.mint));
+    // NOT OFFERED IS NOT THE SAME AS NOT KNOWN, and neither can be put in a
+    // box: investPolicyFlow filters the weights to OFFERED_LEGS, so a request
+    // naming either one would name a shorter basket than the policy on screen.
+    // Named, so both callers can say WHICH stock — one to refuse with, one to
+    // tell the owner what is missing from the form he just opened.
+    if (asset === null || !isOfferable(asset)) dropped.push(asset?.symbol ?? shortAddress(leg.mint));
     else picked.push({ asset, weightBps: leg.weightBps });
   }
-  if (missing.length > 0) return { ok: false, message: INVEST_COPY.resignUnoffered(listAnd(missing)) };
-  return { ok: true, picked, minInvestment, maxPerCall };
+  return { ok: true, picked, dropped, minInvestment, maxPerCall };
 }
 
 /** The boxes and ticks an edit form opens on, taken from the policy the chain holds — or why the stored policy cannot be put back on this form. */
@@ -419,6 +476,10 @@ export type PolicySeed = {
   readonly minimum: string;
   readonly venue: string;
   readonly enabled: boolean;
+  /** Stored stocks the shelf no longer offers, so they are NOT in the boxes; the form says so rather than dropping them silently. */
+  readonly dropped: readonly string[];
+  /** The stored venue was a program this app cannot check the bytes of, so `venue` is the default name and not what is stored. */
+  readonly venueReplaced: boolean;
 };
 export type PolicyEdit = ({ readonly ok: true } & PolicySeed) | { readonly ok: false; readonly message: string };
 
@@ -455,15 +516,22 @@ export function policyEditSeed(policy: InvestmentPolicyJson): PolicyEdit {
     if (leg.weightBps % 100 !== 0) return { ok: false, message: INVEST_COPY.editFractionalShare(leg.asset.symbol, ratePercent(leg.weightBps)) };
     picked.push({ mint: leg.asset.mint, percent: String(leg.weightBps / 100) });
   }
-  const venue = [...VERIFIABLE_VENUES.entries()].find(([, program]) => program === policy.venueProgram)?.[0] ?? DEFAULT_VENUE_NAME;
+  const storedVenue = [...VERIFIABLE_VENUES.entries()].find(([, program]) => program === policy.venueProgram)?.[0] ?? null;
   return {
     ok: true,
     picked,
     perBuy: formatUnits(stored.maxPerCall, USDC_DECIMALS),
     per30Days: formatUnits(maxRolling30d, USDC_DECIMALS),
     minimum: formatUnits(stored.minInvestment, USDC_DECIMALS),
-    venue,
+    venue: storedVenue ?? DEFAULT_VENUE_NAME,
     enabled: policy.enabled,
+    dropped: stored.dropped,
+    // THE SUBSTITUTION IS DISCLOSED, because the paragraph above the form says
+    // the screen is the whole policy. The select cannot hold a program this app
+    // cannot check, so it holds the default name instead — which is a CHANGE to
+    // the policy, made by the form and not by the owner, and it is the one
+    // thing on that screen he did not type.
+    venueReplaced: storedVenue === null,
   };
 }
 
@@ -471,6 +539,12 @@ export function resignStoredPolicy(policy: InvestmentPolicyJson): Resign {
   const stored = storedBasket(policy);
   if (!stored.ok) return stored;
   const { picked, minInvestment, maxPerCall } = stored;
+  // THE REFUSAL THAT STAYS HERE AND NOT IN storedBasket. This button re-signs
+  // the stored basket; a stored leg the shelf no longer offers would be
+  // filtered out of the request by investPolicyFlow, so the press would sign a
+  // SHORTER basket than the one on screen. The edit form is the way out of
+  // that, and it is offered beside this refusal rather than shut with it.
+  if (stored.dropped.length > 0) return { ok: false, message: INVEST_COPY.resignUnoffered(listAnd(stored.dropped)) };
 
   let limits: BasketLimits;
   try {
@@ -532,10 +606,32 @@ export function setupRent(state: VaultStateJson): bigint | null {
   return total;
 }
 
-function readinessWords(readiness: InvestmentReadiness): string {
+/**
+ * WHAT THE SUMMARY SAYS ABOUT BUYING, AND THE TWO WAYS IT USED TO LIE.
+ *
+ * THE STATE DECIDES FIRST, AT A KNOWN BALANCE AND AT AN UNKNOWN ONE. When the
+ * holdings cannot be read the card still has a threshold to quote — it is a
+ * fact about the POLICY, not about the balance — but `unreachable` is a fact
+ * about the policy too, and the blind branch used to print the threshold
+ * without reading the state. max_per_call caps the budget, so a basket whose
+ * lightest leg cannot clear the minimum out of a FULL cap buys nothing at any
+ * balance: quoting its threshold sends the owner away to fund a number that
+ * unblocks nothing, for ever. `balanceKnown` therefore drops only the two
+ * sentences that are about the balance.
+ *
+ * AND THE THRESHOLD IS QUOTED UPWARDS, like every other floor on this card.
+ * formatUsd rounds to the NEARER cent, so a bar of $83.333334 printed as
+ * "$83.33" — and at $83.33 a 6 % leg is handed 4,999,800 raw against a
+ * 5,000,000 minimum, so the keeper refuses the whole basket and the SOL
+ * conversion with it. The form beside it has always used atLeastUsd; the two
+ * screens quoted the same quantity two different ways, and the summary's was
+ * the one that does not buy.
+ */
+function readinessWords(readiness: InvestmentReadiness, balanceKnown: boolean): string {
+  if (readiness.state === "unreachable") return INVEST_COPY.unreachable;
+  if (!balanceKnown) return INVEST_COPY.buysEach(atLeastUsd(readiness.investsAtRaw));
   if (readiness.state === "ready") return INVEST_COPY.ready;
-  if (readiness.state === "waiting") return INVEST_COPY.waiting(formatUsd(readiness.investsAtRaw));
-  return INVEST_COPY.unreachable;
+  return INVEST_COPY.waiting(atLeastUsd(readiness.investsAtRaw));
 }
 
 /**
@@ -614,12 +710,51 @@ export function InvestingCard() {
   }
   if (state.policy.status === "missing" || state.policy.state === undefined) return <PolicySetup state={state} write={write} start={start} progress={progress} />;
 
-  // A POLICY EXISTS, SO THERE ARE TWO SCREENS AND ONE FORM. The seed is the
-  // stored policy as the form's opening state; when it cannot be made — a
-  // stored leg the shelf no longer offers, a share no box can hold — the
-  // summary says so and leaves Sign-again and Pause alone.
-  const stored = state.policy.state;
-  const seed = policyEditSeed(stored);
+  // A POLICY EXISTS, SO THERE ARE TWO SCREENS AND ONE FORM.
+  return <PolicyScreens state={state} policy={state.policy.state} write={write} start={start} pause={pause} progress={progress} editing={editing} setEditing={setEditing} />;
+}
+
+/**
+ * THE TWO SCREENS A SIGNED POLICY HAS, AND WHICH OF THEM IS UP.
+ *
+ * SPLIT OUT OF InvestingCard SO THE CHOICE CAN BE RENDERED, not just reasoned
+ * about. `editing` was component state flipped by a press, and this suite has
+ * no DOM to press with: the reviewer replaced `editing` with `false` here —
+ * restoring the original bug, an owner with a policy who can never reach the
+ * picker — and all 910 tests stayed green. editScreen was pinned as a pure
+ * function; its CALL was not, which is the same "+11 tests and none on the one
+ * line that closes the gap" shape the constraints name.
+ *
+ * As a component taking `editing` as a PROP, both screens are reachable from a
+ * static render: the test renders it at editing:true and gets the form, at
+ * editing:false and gets the summary, and presses the button to see setEditing
+ * called with true. What is left untested is the single attribute in
+ * InvestingCard that hands this its useState — and that is as small as a
+ * DOM-less suite can make it.
+ */
+export function PolicyScreens({
+  state,
+  policy,
+  write,
+  start,
+  pause,
+  progress,
+  editing,
+  setEditing,
+}: {
+  readonly state: VaultStateJson;
+  readonly policy: InvestmentPolicyJson;
+  readonly write: VaultWrite;
+  readonly start: (input: InvestRequest) => void;
+  readonly pause: (policy: InvestmentPolicyJson) => void;
+  readonly progress: ReactNode;
+  readonly editing: boolean;
+  readonly setEditing: (editing: boolean) => void;
+}) {
+  // The seed is the stored policy as the form's opening state; when it cannot
+  // be made — a share no box can hold — the summary says so and leaves
+  // Sign-again and Pause alone.
+  const seed = policyEditSeed(policy);
   // The write that just landed replaced this policy, so the form is done with:
   // sitting in an edit form over a policy that no longer exists is how an owner
   // signs the same change twice.
@@ -629,7 +764,7 @@ export function InvestingCard() {
   ) : (
     <PolicySummary
       state={state}
-      policy={stored}
+      policy={policy}
       write={write}
       start={start}
       pause={pause}
@@ -839,6 +974,17 @@ export function PolicySetup({
   // the headline and the Rule fact would both blink back to a one-leg number
   // in the middle of the exact edit that makes it false.
   const purchaseText = capsWindow === null ? null : atLeastUsd(capsWindow.floorRaw);
+  // WHICH OF THE TWO BOXES THE MISSING FIGURE IS IN. purchaseText is null when
+  // EITHER the shares or the minimum cannot be read, and the hint under "Least
+  // per stock" said only one of those things — so clearing that very box to
+  // type a new figure made the sentence directly under it accuse shares that
+  // are fine, while the prose two elements above read "SPYx at 80 % and
+  // ANTHROPIC at 20 %". The minimum is named first because the hint sits under
+  // the minimum's own box.
+  const hintPending: "shares" | "minimum" = minimumRaw === null || !minimumRaw.ok ? "minimum" : "shares";
+  // WHAT THIS FORM WOULD SIGN, read once and used three times: to grey the
+  // button, to label it, and to hand to `start`. See policyRequest.
+  const request = policyRequest({ caps, minimum: minPerLeg, weights: weightsTyped, overDepth, enabled, venue });
 
   return (
     <Card>
@@ -866,6 +1012,22 @@ export function PolicySetup({
             thin stock pulls the cap down, so Sign can grey out the moment he
             ticks one. */}
         {seed === null ? null : <p className="text-xs text-muted-foreground">{INVEST_COPY.editingPolicy}</p>}
+
+        {/* A STORED STOCK THAT IS NOT ON THE SHELF ANY MORE, and therefore not
+            in the boxes below. The form is the REMEDY for this — set_invest_policy
+            overwrites, so signing a fresh basket is how the stock comes out —
+            but a row that is silently absent from a form headed "this screen is
+            your whole policy" is the form lying about itself. */}
+        {seed !== null && seed.dropped.length > 0 ? (
+          <p role="alert" className="text-xs text-destructive">
+            {INVEST_COPY.editDropped(listAnd(seed.dropped))}
+          </p>
+        ) : null}
+
+        {/* THE ONE FIGURE ON THIS SCREEN THE OWNER DID NOT TYPE AND DID NOT
+            STORE. The select cannot hold a venue this app cannot check the
+            bytes of, so it opens on the default — which signing would WRITE. */}
+        {seed !== null && seed.venueReplaced ? <p className="text-xs text-muted-foreground">{INVEST_COPY.editVenueReplaced(seed.venue)}</p> : null}
 
         {/* THE CATALOGUE AND THE SHARES, FIRST, in place of the fixed grid of
             one box per offered leg — and above the caps rather than below them,
@@ -897,19 +1059,27 @@ export function PolicySetup({
         {capsWindow !== null && capsWindow.uncounted.length > 0 ? (
           <p className="text-xs text-destructive">{INVEST_COPY.ceilingUnknown(listAnd(capsWindow.uncounted.map((leg) => leg.symbol)))}</p>
         ) : null}
+        {/* NO CAP EXISTS AT ALL — the ceiling is under the floor. The fix is
+            the basket, so no number is offered as one.
+
+            OUTSIDE THE caps.ok BRANCH, WHICH IS THE WHOLE POINT. It used to sit
+            inside it, so while readCaps was refusing, the only sentence on
+            screen was capsProblem — "Most per buy must be at least $200.00" —
+            naming a floor that is itself over the ceiling. Typing the $200 it
+            asked for produced this refusal instead, and typing less produced
+            capsProblem again: an instruction the owner cannot follow, in a
+            loop. Both are true at once, so both are said at once. */}
+        {capsWindow !== null && capsWindow.empty && capsWindow.ceilingRaw !== null && capsWindow.ceilingBinding !== null ? (
+          <p role="alert" className="text-xs text-destructive">
+            {INVEST_COPY.capWindowEmpty(atLeastUsd(capsWindow.floorRaw), atMostUsd(capsWindow.ceilingRaw), capsWindow.ceilingBinding.symbol)}
+          </p>
+        ) : null}
         {!caps.ok ? (
           <p role="alert" className="text-xs text-destructive">
             {caps.message}
           </p>
         ) : (
           <>
-            {/* NO CAP EXISTS AT ALL — the ceiling is under the floor. The fix is
-                the basket, so no number is offered as one. */}
-            {capsWindow !== null && capsWindow.empty && capsWindow.ceilingRaw !== null && capsWindow.ceilingBinding !== null ? (
-              <p role="alert" className="text-xs text-destructive">
-                {INVEST_COPY.capWindowEmpty(atLeastUsd(capsWindow.floorRaw), atMostUsd(capsWindow.ceilingRaw), capsWindow.ceilingBinding.symbol)}
-              </p>
-            ) : null}
             {capsWindow !== null && !capsWindow.empty && capsWindow.ceilingRaw !== null && capsWindow.ceilingBinding !== null && overCeiling(caps.maxPerCall, capsWindow) ? (
               <div className="space-y-1">
                 <p role="alert" className="text-xs text-destructive">
@@ -960,7 +1130,7 @@ export function PolicySetup({
             legs and for nothing else: at 80/20 the bar is five times the
             minimum. purchaseText is ⌈min × 10,000 / the lightest share⌉ over
             the boxes as they stand. */}
-        <p className="text-xs text-muted-foreground">{INVEST_COPY.minPerBuyHint(purchaseText, legs?.length ?? 0)}</p>
+        <p className="text-xs text-muted-foreground">{INVEST_COPY.minPerBuyHint(purchaseText, legs?.length ?? 0, hintPending)}</p>
         {!minPerLeg.ok ? (
           <p role="alert" className="text-xs text-destructive">
             {minPerLeg.message}
@@ -1042,24 +1212,23 @@ export function PolicySetup({
             type="button"
             disabled={!canSignPolicy({ acknowledged, capsOk: caps.ok, minimumOk: minPerLeg.ok, weightsOk: weightsTyped.ok, depthOk: !overDepth, blocked })}
             aria-busy={write.running}
-            onClick={() => {
-              // THE SAME CONDITION AS THE BUTTON'S OWN, depth included. A guard
-              // here that is weaker than the one that greys the button is how a
-              // policy gets signed by a keypress on a disabled control.
-              if (caps.ok && minPerLeg.ok && weightsTyped.ok && !overDepth && acknowledged) {
-                start({
-                  maxPerCall: caps.maxPerCall,
-                  maxRolling30d: caps.maxRolling30d,
-                  enabled,
-                  minInvestment: minPerLeg.raw,
-                  weights: weightsTyped.byMint,
-                  // A NAME from the closed set, never a program id.
-                  venue,
-                });
-              }
-            }}
+            // NO HANDLER AT ALL WHEN THERE IS NOTHING SIGNABLE, and the same
+            // condition as the button's own for the rest. A guard here that is
+            // weaker than the one that greys the button is how a policy gets
+            // signed by a keypress on a disabled control; `acknowledged` stays
+            // in the guard because it is assent, not arithmetic.
+            onClick={
+              request === null
+                ? undefined
+                : () => {
+                    if (acknowledged && !blocked) start(request);
+                  }
+            }
           >
-            {write.running ? INVEST_COPY.signing : seed === null ? INVEST_COPY.sign : enabled ? INVEST_COPY.signChanges : INVEST_COPY.signChangesPaused}
+            {/* THE LABEL IS READ OFF THE PAYLOAD, not off the flag beside it, so
+                what will be signed is on screen. A payload that says `true`
+                over a paused policy cannot hide behind the paused label. */}
+            {write.running ? INVEST_COPY.signing : seed === null ? INVEST_COPY.sign : (request?.enabled ?? enabled) ? INVEST_COPY.signChanges : INVEST_COPY.signChangesPaused}
           </Button>
           {/* THE WAY BACK. An edit that can only end in a signature is a trap:
               the owner who opened this to look at his shares has to be able to
@@ -1204,11 +1373,7 @@ function PolicySummary({
             ) : null,
           )}
         </div>
-        {readiness !== null ? (
-          <p className="text-xs">{readinessWords(readiness)}</p>
-        ) : basketReadiness !== null ? (
-          <p className="text-xs">{INVEST_COPY.buysEach(formatUsd(basketReadiness.investsAtRaw))}</p>
-        ) : null}
+        {basketReadiness === null ? null : <p className="text-xs">{readinessWords(basketReadiness, readiness !== null)}</p>}
         <p className="text-xs text-muted-foreground">{INVEST_COPY.freezeShort(policyLegs)}</p>
         {/* WHY A REFUSAL CAN SIT HERE AND PAUSE STILL WORK. Both re-signing
             buttons build set_invest_policy from today's prices and the stored

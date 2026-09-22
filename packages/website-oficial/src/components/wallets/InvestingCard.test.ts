@@ -44,6 +44,7 @@ import {
   DEFAULT_PICKED,
   DEPTH_CEILING_PER_BUY_RAW,
   InvestingCard,
+  PolicyScreens,
   PolicySetup,
   REACHABLE_PER_BUY_RAW,
   SUGGESTED_PER_BUY_RAW,
@@ -52,14 +53,18 @@ import {
   canSignPolicy,
   editScreen,
   policyEditSeed,
+  policyRequest,
   pickedLegLimits,
   readCaps,
   readMinimum,
   readWeights,
   setupRent,
   usedInLast30Days,
+  type Caps,
+  type Minimum,
   type PolicySeed,
   type VaultWrite,
+  type Weights,
 } from "@/components/wallets/InvestingCard";
 import { VaultWriteLock, type WriteProgress } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
@@ -941,9 +946,18 @@ describe("InvestingCard", () => {
  * stored figures and does the stored basket's arithmetic.
  */
 describe("InvestingCard: changing a policy that exists", () => {
-  /** The owner's live position on 2026-09-22: one SPYx leg, $1,000 a buy, a $5 minimum, on Jupiter. */
+  /**
+   * The owner's live position on 2026-09-22: one SPYx leg, $1,000 a buy, a $5
+   * minimum, ON JUPITER — policy 8L6ifC8N…, vault EFXK995P…, and the venue his
+   * $5 actually routed through an hour ago (sip_vault Invest → JUP6Lkb…
+   * SharedAccountsRoute, tx 2KGe82ER…). It inherited POLICY's RAYDIUM_CLMM id
+   * until now, so every assertion about his venue passed through the FALLBACK
+   * and none of them touched the look-up. POLICY keeps the retired id, so the
+   * two cases are one fixture apart.
+   */
   const LIVE_ONE_LEG: InvestmentPolicyJson = {
     ...POLICY,
+    venueProgram: JUPITER_V6,
     legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "124719467624105690" }],
     minInvestment: "5000000",
     maxPerCall: "1000000000",
@@ -1006,15 +1020,49 @@ describe("InvestingCard: changing a policy that exists", () => {
       minimum: "5",
       venue: "jupiter-v6",
       enabled: true,
+      dropped: [],
+      venueReplaced: false,
     });
-    // THE VENUE IS A NAME, NEVER THE STORED PROGRAM ID — and the id this
-    // fixture stores is RAYDIUM_CLMM, a venue the keeper refuses by name and
-    // this app cannot check the bytes of, so it falls back to the default name
-    // rather than putting an unverifiable id into the select.
+    // THE VENUE IS A NAME, NEVER THE STORED PROGRAM ID — and the id POLICY
+    // stores is RAYDIUM_CLMM, a venue the keeper refuses by name and this app
+    // cannot check the bytes of, so it falls back to the default name rather
+    // than putting an unverifiable id into the select.
     expect(POLICY.venueProgram).toBe(RAYDIUM_CLMM);
     expect(seedOf(POLICY).venue).toBe("jupiter-v6");
     expect(JSON.stringify(policyEditSeed(POLICY))).not.toContain(RAYDIUM_CLMM);
     expect(JSON.stringify(policyEditSeed(POLICY))).not.toContain(JUPITER_V6);
+  });
+
+  /**
+   * THE SUBSTITUTED VENUE IS NAMED ON THE FORM.
+   *
+   * The select holds NAMES; the policy holds a program id. A stored program
+   * this app cannot check the bytes of has no name to show, so the box opens on
+   * the default — and signing writes it. That is a change to the policy made by
+   * the form, on the one screen whose own paragraph promises the owner that the
+   * limits on it are what his vault uses from then on. It was silent.
+   */
+  it("a stored venue the form could not keep is named, and a venue it kept is not announced", () => {
+    expect(seedOf(POLICY).venueReplaced).toBe(true);
+    const replaced = setupHtml(seedOf(POLICY));
+    expect(replaced).toContain("Where it buys has opened on jupiter-v6 instead of what is stored");
+    // HIS OWN POLICY IS ON JUPITER AND IS LEFT ALONE: no notice, no move.
+    expect(seedOf(LIVE_ONE_LEG).venueReplaced).toBe(false);
+    expect(setupHtml(seedOf(LIVE_ONE_LEG))).not.toContain("instead of what is stored");
+  });
+
+  /**
+   * WHAT THE PARAGRAPH ABOVE THE FORM CLAIMS ABOUT THE FORM.
+   *
+   * It read "nothing that is not here is carried over", and `enabled` is
+   * carried over — from the stored policy, with no control for it anywhere on
+   * the screen. The flag travelling is CORRECT (an edit must not resume a
+   * paused policy); the sentence denying it was the defect.
+   */
+  it("the form does not claim to carry nothing over, because it carries the paused flag", () => {
+    const html = setupHtml(seedOf({ ...LIVE_ONE_LEG, enabled: false }));
+    expect(html).not.toContain("nothing that is not here is carried over");
+    expect(html).toContain("The one thing not on this screen that is kept is whether investing is on or paused");
   });
 
   it("the seeded form carries the stored figures into the boxes instead of the product's starting values", () => {
@@ -1053,6 +1101,22 @@ describe("InvestingCard: changing a policy that exists", () => {
     // THE REFUSAL NAMES THE LEG AND WHAT WOULD FIX IT, and the fix is a press.
     expect(html).toContain("$745.00 is the most this basket can buy with, and ANTHROPIC is what sets it");
     expect(buttons("Use $372.50")).toHaveLength(1);
+    // THE DEPTH GATE, SHOWN BY THE HANDLER AND NOT BY `disabled`.
+    //
+    // `disabled` proves NOTHING here and used to be the whole assertion:
+    // canSignPolicy takes `acknowledged`, which is useState(false) with no DOM
+    // to tick it, so Sign is greyed in EVERY static render and this line could
+    // not tell "blocked because ANTHROPIC's route caps the basket at $745" from
+    // "blocked because the box is unticked". The handler is the term that
+    // varies: over the ceiling there is no request to sign, so there is no
+    // onClick at all.
+    expect(buttons(INVEST_COPY.signChanges)[0]?.onClick).toBeUndefined();
+    // AND THE SAME FORM ONE CAP LOWER, WELL INSIDE THE $25.00–$745.00 WINDOW,
+    // HAS ONE. This is the pair that makes the line above mean something.
+    const inWindow = setupHtml({ ...seedOf(EIGHTY_TWENTY), perBuy: "300" });
+    expect(inWindow).not.toContain("is the most this basket can buy with");
+    expect(buttons(INVEST_COPY.signChanges)[0]?.onClick).toBeTypeOf("function");
+    // …and is still greyed, by the box alone, in both.
     expect(buttons(INVEST_COPY.signChanges).map((button) => button.disabled)).toEqual([true]);
     // THE ONE-LEG ANSWER IS GONE FROM THE SCREEN. $5.00 is what min_investment
     // alone says, and it is what this card said before the basket grew.
@@ -1086,10 +1150,51 @@ describe("InvestingCard: changing a policy that exists", () => {
    */
   it("the hint under the minimum names this basket's own figure, not a worked example of another", () => {
     expect(setupHtml(seedOf(EIGHTY_TWENTY))).not.toContain("twice this");
-    expect(INVEST_COPY.minPerBuyHint("$25.00", 2)).toContain("With these 2 stocks at the shares you have typed, that is $25.00 a buy.");
-    expect(INVEST_COPY.minPerBuyHint("$5.00", 1)).toContain("With one stock that is $5.00 a buy.");
-    expect(INVEST_COPY.minPerBuyHint(null, 0)).toContain("follows the shares you type");
-    expect(INVEST_COPY.minPerBuyHint("$25.00", 2)).not.toContain("twice this");
+    expect(INVEST_COPY.minPerBuyHint("$25.00", 2, "shares")).toContain("With these 2 stocks at the shares you have typed, that is $25.00 a buy.");
+    expect(INVEST_COPY.minPerBuyHint("$5.00", 1, "shares")).toContain("With one stock that is $5.00 a buy.");
+    expect(INVEST_COPY.minPerBuyHint(null, 0, "shares")).toContain("follows the shares you type");
+    expect(INVEST_COPY.minPerBuyHint("$25.00", 2, "shares")).not.toContain("twice this");
+  });
+
+  /**
+   * THE HINT BLAMED THE SHARES FOR AN EMPTY MINIMUM BOX.
+   *
+   * purchaseText is null when EITHER the shares or the minimum cannot be read,
+   * and the one null sentence said only "these do not add up to 100 % yet". So
+   * the ordinary act of clearing "Least per stock" to type a new figure put an
+   * accusation about the shares directly under that box — while the card's own
+   * prose two elements above was reading those same shares out correctly.
+   */
+  it("clearing the minimum box blames the minimum box, not shares that are fine", () => {
+    const html = setupHtml({ ...seedOf(EIGHTY_TWENTY), minimum: "" });
+    expect(html).toContain("this box does not hold a figure yet");
+    expect(html).not.toContain("these do not add up to 100 % yet");
+    // THE SHARES REALLY ARE FINE, and the card says so in the same HTML.
+    expect(html).toContain("SPYx at 80 % and ANTHROPIC at 20 %");
+    // AND A GENUINELY UNBALANCED BASKET STILL BLAMES THE SHARES.
+    const unbalanced = setupHtml({ ...seedOf(EIGHTY_TWENTY), picked: [{ mint: SPYX_MINT, percent: "80" }, { mint: ANTHROPIC_MINT, percent: "5" }] });
+    expect(unbalanced).toContain("these do not add up to 100 % yet");
+    expect(unbalanced).not.toContain("this box does not hold a figure yet");
+  });
+
+  /**
+   * AN INSTRUCTION THE OWNER COULD NOT FOLLOW, IN A LOOP.
+   *
+   * When the window is EMPTY — the depth ceiling has fallen under the per-leg
+   * floor — and the typed cap is below that floor, readCaps refuses first and
+   * the empty-window sentence was rendered inside the `caps.ok` branch, so the
+   * only message on screen was "Most per buy must be at least $200.00": a floor
+   * that is itself over the ceiling. Typing the $200 it asked for produced the
+   * empty-window refusal; typing less produced this one again.
+   */
+  it("says no cap works at all even while the cap box is being refused for being too low", () => {
+    const html = setupHtml({ ...seedOf(LIVE_ONE_LEG), picked: [{ mint: ANTHROPIC_MINT, percent: "100" }], minimum: "200", perBuy: "100" });
+    // floor = ⌈200e6 × 10,000 / 10,000⌉ = $200.00; ceiling = ⌊7,450,000,000/50⌋ = $149.00.
+    expect(html).toContain(INVEST_COPY.capsProblem("$200.00"));
+    expect(html).toContain("There is no Most per buy that works for this basket");
+    expect(html).toContain("ANTHROPIC&#x27;s market cannot cover more than $149.00");
+    // Nothing unbuyable becomes signable by saying so: there is no request.
+    expect(buttons(INVEST_COPY.signChanges)[0]?.onClick).toBeUndefined();
   });
 
   /**
@@ -1166,5 +1271,216 @@ describe("InvestingCard: changing a policy that exists", () => {
       screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: EIGHTY_TWENTY }, holdings: { status: "unreadable", items: [] } }) }),
     );
     expect(blind).toContain("Buys each time $25.00 of USDC is ready");
+  });
+
+  /**
+   * A POLICY THAT CAN NEVER BUY, TOLD IT BUYS.
+   *
+   * max_per_call caps the budget, so a basket whose lightest leg cannot clear
+   * min_investment out of a FULL cap buys nothing at any balance — investmentReadiness
+   * calls that "unreachable" and returns investsAtRaw anyway, because the
+   * threshold is arithmetic and the state is the judgement. The blind-holdings
+   * branch printed the threshold WITHOUT reading the state, so the owner was
+   * sent away to fund $25.00 by a card that would refuse him at $25.00, at
+   * $25,000, and for ever. Its committed test renders this branch only on a
+   * REACHABLE basket, so the state was never varied.
+   */
+  it("a policy that can never buy is never told what it buys at, and the state is read whether or not the balance is", () => {
+    // 80/20 with a $5 minimum and a $10 cap: the 20 % leg is handed $2.00 out
+    // of a full budget, under the $5 bar, at every balance there is.
+    const dead: InvestmentPolicyJson = { ...EIGHTY_TWENTY, minInvestment: "5000000", maxPerCall: "10000000", maxRolling30d: "50000000" };
+    for (const holdings of [{ status: "exists" as const, items: [] }, { status: "unreadable" as const, items: [] }]) {
+      const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: dead }, holdings }) }));
+      expect(html).toContain(INVEST_COPY.unreachable);
+      expect(html).not.toContain("Buys each time");
+      expect(html).not.toContain("$25.00 of USDC");
+    }
+  });
+
+  /**
+   * THE SUMMARY AND THE FORM QUOTED THE SAME BAR TWO DIFFERENT WAYS, and the
+   * summary's was the one at which the vault does not buy.
+   *
+   * The form quotes the floor with atLeastUsd, which rounds UP to the cent for
+   * exactly this reason; the summary quoted the identical quantity with
+   * formatUsd, which rounds to the NEAREST. At 94/6 with a $5 minimum the bar
+   * is ⌈5,000,000 × 10,000 / 600⌉ = 83,333,334 raw = $83.333334, and at the
+   * "$83.33" the summary named, the 6 % leg is handed 4,999,800 raw against a
+   * 5,000,000 minimum — so invest-tick returns IDLE and refuses the whole
+   * basket and the SOL conversion with it. Only reachable through the edit
+   * path, which is what lets unequal whole-percent shares be signed at all.
+   */
+  it("the summary quotes the buy-at bar upwards, like the form, so the figure it names is one that buys", () => {
+    const ninetyFourSix: InvestmentPolicyJson = {
+      ...LIVE_ONE_LEG,
+      legs: [
+        { mint: SPYX_MINT, weightBps: 9_400, minOutRateWad: "124719467624105690" },
+        { mint: ANTHROPIC_MINT, weightBps: 600, minOutRateWad: "5277777777777777778" },
+      ],
+    };
+    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: ninetyFourSix } }) }));
+    expect(html).toContain("it buys once the vault holds $83.34 of USDC");
+    expect(html).not.toContain("$83.33");
+    // AND THE FORM AGREES WITH IT TO THE CENT, which is the whole claim.
+    expect(setupHtml(seedOf(ninetyFourSix))).toContain("Buys each time $83.34 of USDC is ready");
+  });
+
+  /**
+   * THE DOOR SHUT IN EXACTLY THE CASE IT EXISTS FOR.
+   *
+   * policyEditSeed shared its reading of the stored basket with
+   * resignStoredPolicy, which refuses any stored leg the shelf no longer
+   * offers — right for "Sign again", where a shorter basket really would be a
+   * different basket, and the whole bug for the form, whose PURPOSE is to let
+   * the owner drop that leg. set_invest_policy OVERWRITES, so a fresh basket
+   * without it is precisely the remedy. This is the FIGUREAI case the
+   * catalogue exists for: the moment a venue drains and its asset leaves the
+   * shelf, the owner's basket stops buying and the picker became unreachable —
+   * which is the owner's original complaint, back again.
+   */
+  it("a stored stock the shelf dropped opens the form instead of shutting it, and only Sign-again refuses", () => {
+    const stale: InvestmentPolicyJson = {
+      ...LIVE_ONE_LEG,
+      legs: [
+        { mint: SPYX_MINT, weightBps: 5_000, minOutRateWad: "124719467624105690" },
+        { mint: ANDURIL_MINT, weightBps: 5_000, minOutRateWad: "5277777777777777778" },
+      ],
+    };
+    // The premise: ANDURIL is in the catalogue and is NOT on the shelf today.
+    expect(offerProblems(CATALOGUE.find((asset) => asset.mint === ANDURIL_MINT)!).length).toBeGreaterThan(0);
+    const seed = policyEditSeed(stale);
+    expect(seed).toMatchObject({ ok: true, dropped: ["ANDURIL"], picked: [{ mint: SPYX_MINT, percent: "50" }] });
+
+    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: stale } }) }));
+    // THE WAY OUT IS OPEN…
+    expect(buttons(INVEST_COPY.editBasket).map((button) => button.disabled)).toEqual([false]);
+    // …and the button that really would sign a different basket still refuses,
+    // with the copy written for it.
+    expect(buttons("Sign again with today's prices").map((button) => button.disabled)).toEqual([true]);
+    expect(html).toContain(INVEST_COPY.resignUnoffered("ANDURIL"));
+    expect(buttons("Pause investing").map((button) => button.disabled)).toEqual([false]);
+
+    // AND THE FORM SAYS WHY A ROW IS MISSING AND THE SHARES NO LONGER ADD UP,
+    // rather than opening on a silently shorter basket.
+    const form = setupHtml(seed.ok ? seed : undefined!);
+    expect(form).toContain("This policy holds ANDURIL, which SaverFi does not offer today");
+    expect(form).toContain(`id="invest-weight-${SPYX_MINT}" `);
+    expect(form).not.toContain(`id="invest-weight-${ANDURIL_MINT}"`);
+    // Nothing is signable until he gives the stocks he keeps 100 % between them.
+    expect(buttons(INVEST_COPY.signChanges)[0]?.onClick).toBeUndefined();
+  });
+
+  /**
+   * THE SCREEN SEAM, RENDERED RATHER THAN REASONED ABOUT.
+   *
+   * editScreen was pinned as a pure function and its CALL was not: replacing
+   * `editing` with `false` at the call site restored the original bug exactly
+   * — an owner with a policy who can never reach the picker — and all 910
+   * tests stayed green. `editing` is a prop of PolicyScreens now, so both
+   * screens are reachable from a static render and the press is observable as
+   * a callback.
+   */
+  it("the editing flag reaches the screen choice: true renders the form, false renders the summary, and the button sets it", () => {
+    const setEditing = vi.fn();
+    const screens = (editing: boolean): string => {
+      mocked.buttons.length = 0;
+      return renderToStaticMarkup(
+        createElement(
+          TooltipProvider,
+          null,
+          createElement(PolicyScreens, {
+            state: stateWith({ policy: { status: "exists" as const, address: account(), state: LIVE_ONE_LEG } }),
+            policy: LIVE_ONE_LEG,
+            write: stubWrite(),
+            start: vi.fn(),
+            pause: vi.fn(),
+            progress: null,
+            editing,
+            setEditing,
+          }),
+        ),
+      );
+    };
+
+    const form = screens(true);
+    expect(form).toContain("Signing replaces it outright");
+    expect(buttons(INVEST_COPY.signChanges)).toHaveLength(1);
+    expect(buttons(INVEST_COPY.editBasket)).toHaveLength(0);
+
+    const summary = screens(false);
+    expect(summary).not.toContain("Signing replaces it outright");
+    expect(buttons(INVEST_COPY.editBasket)).toHaveLength(1);
+    // AND THE PRESS ASKS FOR THE FORM. The flip itself needs no DOM to observe.
+    buttons(INVEST_COPY.editBasket)[0]?.onClick?.(CLICK);
+    expect(setEditing).toHaveBeenCalledWith(true);
+  });
+
+  /**
+   * WHAT THE EDIT FORM WOULD ACTUALLY SIGN.
+   *
+   * Only the button's LABEL was asserted. Changing `enabled` to a hardcoded
+   * `true` in the Sign handler — the precise defect signChangesPaused exists
+   * to prevent — left the whole suite green, because no case in a DOM-less
+   * suite can tick the acknowledgement box and press. The payload is a value
+   * now, so every field of it is checkable, and the label is read OFF that
+   * value so the two cannot drift.
+   */
+  it("the edit form's signed payload carries the boxes, the basket and the paused flag, and is absent when any of them is unsignable", () => {
+    const weights: Weights = { ok: true, byMint: new Map([[SPYX_MINT, 8_000], [ANTHROPIC_MINT, 2_000]]) };
+    const caps: Caps = { ok: true, maxPerCall: 300_000_000n, maxRolling30d: 31_000_000_000n };
+    const minimum: Minimum = { ok: true, raw: 5_000_000n };
+    const good = { caps, minimum, weights, overDepth: false, venue: "jupiter-v6" };
+
+    // A PAUSED POLICY STAYS PAUSED: the flag travels into the bytes, and a
+    // `true` here is an owner who turns real money back on by pressing a button
+    // that reads "investing stays paused".
+    expect(policyRequest({ ...good, enabled: false })).toEqual({
+      maxPerCall: 300_000_000n,
+      maxRolling30d: 31_000_000_000n,
+      enabled: false,
+      minInvestment: 5_000_000n,
+      weights: weights.ok ? weights.byMint : undefined,
+      venue: "jupiter-v6",
+    });
+    expect(policyRequest({ ...good, enabled: true })?.enabled).toBe(true);
+
+    // EVERY REFUSAL IS A null, so the button has no handler to run.
+    expect(policyRequest({ ...good, enabled: true, caps: { ok: false, message: "x" } })).toBeNull();
+    expect(policyRequest({ ...good, enabled: true, minimum: { ok: false, message: "x" } })).toBeNull();
+    expect(policyRequest({ ...good, enabled: true, weights: { ok: false, message: "x" } })).toBeNull();
+    expect(policyRequest({ ...good, enabled: true, overDepth: true })).toBeNull();
+  });
+
+  /**
+   * THE LABEL AS A WITNESS. The button's text is read off the payload, so a
+   * payload that quietly says `enabled: true` over a paused policy relabels
+   * the button and this case goes red — which is what makes the paused claim
+   * testable at all in a suite with no DOM.
+   */
+  it("the button's label is the payload's own flag, so a payload that resumes a paused policy cannot hide", () => {
+    setupHtml(seedOf({ ...LIVE_ONE_LEG, enabled: false }));
+    expect(buttons(INVEST_COPY.signChangesPaused)).toHaveLength(1);
+    expect(buttons(INVEST_COPY.signChanges)).toHaveLength(0);
+    // The handler exists — this seed is signable — so the label is coming from
+    // the request and not from the `request === null` fallback.
+    expect(buttons(INVEST_COPY.signChangesPaused)[0]?.onClick).toBeTypeOf("function");
+    // AND AN UNTICKED BOX SIGNS NOTHING, even with a handler in place.
+    const start = vi.fn();
+    mocked.buttons.length = 0;
+    renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(PolicySetup, {
+          state: stateWith({ policy: { status: "exists" as const, address: account(), state: LIVE_ONE_LEG } }),
+          write: stubWrite(),
+          start,
+          progress: null,
+          seed: seedOf(LIVE_ONE_LEG),
+        }),
+      ),
+    );
+    buttons(INVEST_COPY.signChanges)[0]?.onClick?.(CLICK);
+    expect(start).not.toHaveBeenCalled();
   });
 });
