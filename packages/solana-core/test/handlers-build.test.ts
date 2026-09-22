@@ -7,6 +7,7 @@ import {
   ANTHROPIC_MINT,
   COMPUTE_BUDGET_PROGRAM,
   ED25519_PROGRAM,
+  JUPITER_V6,
   RAYDIUM_CLMM,
   SOL_USDC_POOL,
   SPYX_MINT,
@@ -61,6 +62,7 @@ import {
   type StubChain,
 } from "./chain-fixtures";
 import { SECRET_QUERY, UPSTREAM_1, accountInfo, fakeFetch, fromB64, keypair, signBytes, signWire } from "./helpers";
+import { ROUTED_VENUE } from "./fixtures/keeper-policy";
 
 const load = loadSolanaServerSettings({ SIP_SOLANA_RPC_URLS: UPSTREAM_1, SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID, SIP_TRUSTED_CLIENT_IP_HEADER: "x-envoy-external-address" });
 if (!load.ok) throw new Error("test settings must load");
@@ -642,7 +644,7 @@ describe("investPolicy", () => {
         { mint: SPYX_MINT, weight_bps: 5_000, min_out_rate_wad: 124_719_467_624_105_690n },
         { mint: ANTHROPIC_MINT, weight_bps: 5_000, min_out_rate_wad: 5_277_777_777_777_777_778n },
       ],
-      venue_program: RAYDIUM_CLMM,
+      venue_program: JUPITER_V6,
       in_mint: USDC_MINT,
       min_convert_rate_wad: 90_034_840_399_943_305n,
       // 5 USDC split two ways, rounded down, so one $5 purchase still covers every leg.
@@ -834,7 +836,7 @@ describe("investPolicy", () => {
       owner,
       minInvestment: "2500000",
       weights: OFFERED_LEGS.map((leg, index) => ({ mint: leg.mint, weightBps: basketWeightsBps(OFFERED_LEGS.length)[index]! })),
-      venue: "raydium-clmm",
+      venue: "jupiter-v6",
     });
     expect([implicit.status, explicit.status]).toEqual([200, 200]);
     expect(explicit.json.txBase64).toBe(implicit.json.txBase64);
@@ -873,7 +875,7 @@ describe("investPolicy", () => {
       { mint: ANTHROPIC_MINT, weight_bps: 7_000, min_out_rate_wad: LEG_POOLS[1]!.floorWad },
     ]);
     expect(args.min_investment).toBe(1_000_000n);
-    expect(args.venue_program).toBe(RAYDIUM_CLMM);
+    expect(args.venue_program).toBe(JUPITER_V6);
     const verified = verifySignedTransaction(signWire(answer.json.txBase64, owner));
     expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
     // The three fields buy no extra upstream call.
@@ -891,8 +893,7 @@ describe("investPolicy", () => {
     ["a negative share", { weights: [{ mint: SPYX_MINT, weightBps: -1 }, { mint: ANTHROPIC_MINT, weightBps: 10_001 }] }, /greater than zero/],
     ["a fractional share", { weights: [{ mint: SPYX_MINT, weightBps: 33.5 }, { mint: ANTHROPIC_MINT, weightBps: 9_966.5 }] }, /whole number/],
     ["a share written as a string", { weights: [{ mint: SPYX_MINT, weightBps: "5000" }, { mint: ANTHROPIC_MINT, weightBps: 5_000 }] }, /whole number/],
-    ["a leg with no share at all", { weights: [{ mint: SPYX_MINT, weightBps: 10_000 }] }, /names no share for/],
-    ["an empty basket", { weights: [] }, /names no share for/],
+    ["an empty basket", { weights: [] }, /names no stock at all/],
     ["a stock SaverFi does not offer", { weights: [{ mint: SPYX_MINT, weightBps: 5_000 }, { mint: ANTHROPIC_MINT, weightBps: 4_000 }, { mint: WSOL_MINT, weightBps: 1_000 }] }, /does not offer/],
     ["shares one short of the whole", { weights: [{ mint: SPYX_MINT, weightBps: 5_000 }, { mint: ANTHROPIC_MINT, weightBps: 4_999 }] }, /add up to exactly 10000 basis points; these add up to 9999/],
     ["shares one over the whole", { weights: [{ mint: SPYX_MINT, weightBps: 5_000 }, { mint: ANTHROPIC_MINT, weightBps: 5_001 }] }, /add up to exactly 10000/],
@@ -908,12 +909,15 @@ describe("investPolicy", () => {
 
   it("the venue is a NAME from a closed list: a program id is refused however valid, and the list is one long", async () => {
     const owner = key();
-    expect(OFFERED_VENUES).toEqual(["raydium-clmm"]);
+    // ONE LONG, AND IT IS THE ONE THE KEEPER ROUTES. While this read
+    // ["raydium-clmm"] every policy this route could build was refused by the
+    // keeper before the wrap, for the life of the policy.
+    expect(OFFERED_VENUES).toEqual(["jupiter-v6"]);
     const { build, upstream } = setup(investableChain(owner));
-    for (const venue of [RAYDIUM_CLMM, key(), "Raydium CLMM", "raydium", "orca-whirlpool", "", 0, null, { name: "raydium-clmm" }, ["raydium-clmm"]]) {
+    for (const venue of [JUPITER_V6, RAYDIUM_CLMM, key(), "raydium-clmm", "Jupiter", "jupiter", "orca-whirlpool", "", 0, null, { name: "jupiter-v6" }, ["jupiter-v6"]]) {
       const answer = await build({ action: "investPolicy", owner, venue });
       expect([answer.status, answer.json.error?.code], `venue ${JSON.stringify(venue)} must be refused`).toEqual([400, "bad_request"]);
-      expect(answer.json.error?.message).toMatch(/venue must be one of: raydium-clmm\./);
+      expect(answer.json.error?.message).toMatch(/venue must be one of: jupiter-v6\./);
       expect(answer.json.error?.message).toMatch(/never a program address/);
       expect(answer.json).not.toHaveProperty("txBase64");
     }
@@ -923,6 +927,36 @@ describe("investPolicy", () => {
       expect([answer.status, answer.json.error?.code], `venue ${venue} must be refused`).toEqual([400, "bad_request"]);
     }
     expect(upstream.calls).toHaveLength(0);
+  });
+
+  /**
+   * THE BYTE THE KEEPER WILL ACCEPT, HELD TO THE VECTOR BOTH PACKAGES ASSERT
+   * AGAINST (test/fixtures/keeper-policy.ts ROUTED_VENUE).
+   *
+   * This is the check that was missing while the one offered name was
+   * raydium-clmm: the route was internally consistent, its tests were green,
+   * and every policy it could build was refused by the keeper before the wrap,
+   * at any balance, for the life of the policy. A venue set is only correct
+   * relative to the keeper, so it is asserted relative to the keeper.
+   */
+  it("offers the one venue the keeper routes, by the vector both packages assert against, and can never offer the retired one again", async () => {
+    expect(JUPITER_V6).toBe(ROUTED_VENUE.web.programId);
+    expect(JUPITER_V6).toBe(ROUTED_VENUE.keeper.programId);
+    expect(OFFERED_VENUES).toEqual([ROUTED_VENUE.web.venueName]);
+    expect(OFFERED_VENUES).toHaveLength(ROUTED_VENUE.routableCount);
+    expect(OFFERED_VENUES).not.toContain(ROUTED_VENUE.retired.venueName);
+    expect(RAYDIUM_CLMM).toBe(ROUTED_VENUE.retired.programId);
+
+    // AND THE BYTES CARRY IT. A name is only worth checking if the transaction
+    // built from it names the program the keeper will route through.
+    const owner = keypair();
+    const ownerKey = owner.publicKey.toBase58();
+    const { build } = setup(investableChain(ownerKey));
+    const answer = await build({ action: "investPolicy", owner: ownerKey, venue: ROUTED_VENUE.web.venueName });
+    expect(answer.status).toBe(200);
+    const args = decodeArgs("set_invest_policy", instructionsOf(answer.json.txBase64)[4]!.data) as { venue_program: string };
+    expect(args.venue_program).toBe(ROUTED_VENUE.keeper.programId);
+    expect(args.venue_program).not.toBe(ROUTED_VENUE.retired.programId);
   });
 
   it.each([
@@ -953,6 +987,45 @@ describe("investPolicy", () => {
     expect(upstream.calls).toHaveLength(0);
   });
 
+  /**
+   * THE BASKET IS A SUBSET NOW. Until the picker existed the route demanded a
+   * share for every offered stock, so "choosing" could only ever mean choosing
+   * the shares. The owner asked to choose the stocks themselves, and the program
+   * has always taken 1..MAX_LEGS distinct mints summing to 10,000 — so what is
+   * pinned here is that ONE stock at 10,000 bps builds, and builds the policy
+   * that names only it, beside its own floor.
+   *
+   * AND THAT THE FLOORS BLOCK IS UNCHANGED BY IT. The answer still prices the
+   * whole shelf: it is one getMultipleAccounts either way, and the page holds
+   * every one of those legs to the rates it showed before it will sign. What
+   * narrows is the POLICY, not the reading.
+   */
+  it("one stock at the whole weight builds a one-leg policy, and still prices the whole shelf", async () => {
+    const owner = keypair();
+    const ownerKey = owner.publicKey.toBase58();
+    const { build } = setup(investableChain(ownerKey));
+    const answer = await build({ action: "investPolicy", owner: ownerKey, weights: [{ mint: SPYX_MINT, weightBps: 10_000 }] });
+    expect(answer.status).toBe(200);
+    expect(decodeArgs("set_invest_policy", instructionsOf(answer.json.txBase64)[4]!.data)).toMatchObject({
+      legs: [{ mint: SPYX_MINT, weight_bps: 10_000, min_out_rate_wad: LEG_POOLS[0]!.floorWad }],
+    });
+    // The floors the page checks are still both legs, in the catalogue's order.
+    expect(answer.json.floors.legs.map((leg: { mint: string }) => leg.mint)).toEqual(OFFERED_LEGS.map((leg) => leg.mint));
+    const verified = verifySignedTransaction(signWire(answer.json.txBase64, owner));
+    expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
+  });
+
+  /** The SECOND stock alone, so a one-leg basket cannot pass by taking the first floor by accident. */
+  it("the leg a one-stock basket carries is its own, not the catalogue's first", async () => {
+    const owner = key();
+    const { build } = setup(investableChain(owner));
+    const answer = await build({ action: "investPolicy", owner, weights: [{ mint: ANTHROPIC_MINT, weightBps: 10_000 }] });
+    expect(answer.status).toBe(200);
+    expect(decodeArgs("set_invest_policy", instructionsOf(answer.json.txBase64)[4]!.data)).toMatchObject({
+      legs: [{ mint: ANTHROPIC_MINT, weight_bps: 10_000, min_out_rate_wad: LEG_POOLS[1]!.floorWad }],
+    });
+  });
+
   it("the three fields travel together: a whole basket the owner chose, with its own minimum and venue", async () => {
     const owner = keypair();
     const ownerKey = owner.publicKey.toBase58();
@@ -965,7 +1038,7 @@ describe("investPolicy", () => {
         { mint: ANTHROPIC_MINT, weightBps: 7_500 },
       ],
       minInvestment: "5000000",
-      venue: "raydium-clmm",
+      venue: "jupiter-v6",
       maxPerCall: "30000000000",
       maxRolling30d: "30000000000",
       enabled: true,
@@ -976,7 +1049,7 @@ describe("investPolicy", () => {
         { mint: SPYX_MINT, weight_bps: 2_500, min_out_rate_wad: LEG_POOLS[0]!.floorWad },
         { mint: ANTHROPIC_MINT, weight_bps: 7_500, min_out_rate_wad: LEG_POOLS[1]!.floorWad },
       ],
-      venue_program: RAYDIUM_CLMM,
+      venue_program: JUPITER_V6,
       in_mint: USDC_MINT,
       min_investment: 5_000_000n,
       max_per_call: 30_000_000_000n,

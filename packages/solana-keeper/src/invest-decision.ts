@@ -23,12 +23,19 @@
 // venueDecision below refuses a venue this keeper cannot route, beside the other
 // all-or-nothing basket refusals and before anything moves.
 
-import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
+import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { PublicKey } from "@solana/web3.js";
 import type { InvestmentPolicyState } from "./accounts.js";
 import type { Alert } from "./alerts.js";
 import type { InvestOutcome } from "./invest-tick.js";
-import { NO_TRANSFER_FEE, type TransferFeeTerms } from "./min-out.js";
+import { NO_TRANSFER_FEE, SLIPPAGE_BPS, type TransferFeeTerms } from "./min-out.js";
+// THROUGH program-scripts.ts, NEVER FROM @sip/solana-program DIRECTLY. That
+// file is the one place the CommonJS/ESM unwrap happens, and JUPITER_PROGRAM is
+// in its import-time loop — so a build where the unwrap stops working fails at
+// startup, in --preflight, rather than as `undefined.equals(...)` inside the
+// venue comparison below on a live turn. Importing the id from the package here
+// would take a SECOND path into the same module and quietly skip that check.
+import { JUPITER_PROGRAM } from "./program-scripts.js";
 import { olderPublishTime, pythPublishAgeSeconds, solUsdcPythRateWad, type PythPriceUpdate } from "./pyth.js";
 
 /** USDC on mainnet: the only in-asset the keeper has routes for. */
@@ -66,25 +73,79 @@ export function inMintDecision(inMint: PublicKey): { readonly outcome: "REFUSED"
 // this keeper cannot build a route for is refused HERE, loudly, before anything
 // is wrapped, converted or bought (task 2).
 
-/** Raydium CLMM on mainnet: the venue every policy signed to date names. */
+/**
+ * Raydium CLMM on mainnet: the venue every policy signed to date names, and the
+ * one this keeper NO LONGER ROUTES.
+ *
+ * KEPT THOUGH IT IS NOT ROUTABLE, and that is the whole reason it is still
+ * here. It is the venue the live policy names RIGHT NOW, so it is the value
+ * venueDecision will actually be handed on the mainnet vault until the owner
+ * re-signs — and a refusal that can name it can say "this is the migration"
+ * instead of "unknown venue". See RETIRED_VENUES.
+ */
 export const RAYDIUM_CLMM_PROGRAM = new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
+
+/**
+ * Jupiter v6 on mainnet: the venue this keeper buys and converts through.
+ *
+ * THE PACKAGE'S OWN VALUE, through program-scripts.ts, rather than a second
+ * literal beside it. It used to be written out here so this file stayed a pure
+ * decision module, with a test comparing the two ends. That test is the thing
+ * that argued against the arrangement: a value that travels wants ONE source,
+ * and program-scripts.ts is the file that already checks at import time that
+ * the unwrap produced a PublicKey. The base58 string is still pinned, once, in
+ * test/invest-decision.test.ts — against a literal written independently of
+ * this line, which is the pin that can actually fail.
+ */
+export const JUPITER_V6_PROGRAM = JUPITER_PROGRAM;
 
 /**
  * Every venue this keeper can actually build a route for, by the program id a
  * policy names, to the name a human uses for it.
  *
- * ONE ENTRY, AND THE SEAM IS DELIBERATELY VISIBLE. Today the keeper can build
- * exactly one route: fetchLiveRoute reads a Raydium CLMM PoolState and
- * buildSwapV2AccountMetas lays out a Raydium swap_v2. A second venue is a second
- * entry HERE plus a route builder for it — the gate below neither needs nor
- * gains a branch, and the refusal names whatever this map holds. No second venue
- * is invented now: there is none to add, and a placeholder would be a keeper
- * claiming a route it cannot build, which is the failure this whole gate exists
- * to prevent.
+ * AN ENTRY HERE IS A PROMISE THIS KEEPER CAN KEEP. Jupiter v6 is
+ * buildJupiterRoute: a quote, a /swap-instructions build, a verified
+ * shared-accounts route, and a venue_data blob invest.rs and convert.rs CPI
+ * straight through. A second venue is a second entry HERE plus a route builder
+ * for it — the gate below neither needs nor gains a branch, and the refusal
+ * names whatever this map holds. A placeholder entry would be a keeper claiming
+ * a route it cannot build, which is the failure this whole gate exists to
+ * prevent.
+ *
+ * WHY RAYDIUM CLMM IS NOT IN IT ANY MORE. The assets the product must hold have
+ * their liquidity away from Raydium — ANTHROPIC $331,617 on Hadron against
+ * $7,458 on Raydium, OPENAI $25,220 on Manifest, SPACEX on Meteora — so the
+ * owner has decided the keeper buys through Jupiter, which reaches all of them.
+ * invest-tick.ts no longer contains a Raydium route builder at all: there is no
+ * fetchLiveRoute, no buildSwapV2AccountMetas and no pool read on the money
+ * path. Leaving the entry here would therefore be the lie this doc comment
+ * warns about — the gate would pass, and the turn would then reach a builder
+ * that does not exist.
  */
-export const ROUTABLE_VENUES: ReadonlyMap<string, string> = new Map([[RAYDIUM_CLMM_PROGRAM.toBase58(), "Raydium CLMM"]]);
+export const ROUTABLE_VENUES: ReadonlyMap<string, string> = new Map([[JUPITER_V6_PROGRAM.toBase58(), "Jupiter v6"]]);
 
-/** The routable venues as a refusal names them: "Raydium CLMM (CAMM…rWqK)". */
+/**
+ * A venue this keeper USED to route, and the sentence its refusal earns.
+ *
+ * THIS EXISTS BECAUSE ONE REFUSAL IS CERTAIN. The policy signed on chain today
+ * (vault EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU) names Raydium CLMM, so
+ * the very first sweep after this code ships refuses — by design, before the
+ * wrap, with the vault's money untouched. Whoever reads that refusal at three
+ * in the morning needs to know in its first clause that it is the planned state
+ * of a migration and not a keeper that broke, because those two call for
+ * opposite reactions: one waits for a signature, the other wakes somebody.
+ */
+export const RETIRED_VENUES: ReadonlyMap<string, string> = new Map([
+  [
+    RAYDIUM_CLMM_PROGRAM.toBase58(),
+    "This is the EXPECTED first state of the Jupiter migration, not a broken keeper: Raydium CLMM is the venue " +
+      "every policy signed to date names, and this keeper deliberately stopped routing it when the basket moved to " +
+      "Jupiter (the assets the product must hold — ANTHROPIC, OPENAI, SPACEX — have their liquidity away from " +
+      "Raydium). Nothing is wrong with the vault, nothing has been spent, and no SOL has been wrapped.",
+  ],
+]);
+
+/** The routable venues as a refusal names them: "Jupiter v6 (JUP6…TaV4)". */
 function routableVenues(): string {
   return [...ROUTABLE_VENUES].map(([address, name]) => `${name} (${address})`).join(", ");
 }
@@ -92,7 +153,7 @@ function routableVenues(): string {
 /**
  * Whether this keeper can build a route for the venue the policy names, decided
  * from the policy alone and beside the unroutable-leg, mint-admission and
- * pool-depth refusals — before anything is wrapped, converted or bought.
+ * venue-depth refusals — before anything is wrapped, converted or bought.
  *
  * WRITTEN FOR SOMEONE READING IT AT THREE IN THE MORNING. This message is the
  * only thing that will ever explain why a vault stopped buying: the alternative
@@ -100,14 +161,18 @@ function routableVenues(): string {
  * it as a failed transaction and names nothing. So it says which venue the
  * policy asked for, which venues this keeper can actually route, that the vault
  * OWNER re-signs the policy to change it, and that adding a venue to the keeper
- * is a code change rather than a configuration one.
+ * is a code change rather than a configuration one — and, for a venue this
+ * keeper has RETIRED, it opens by saying so, because that refusal is expected
+ * and the others are not.
  */
 export function venueDecision(venueProgram: PublicKey): { readonly outcome: "REFUSED"; readonly detail: string } | null {
   if (ROUTABLE_VENUES.has(venueProgram.toBase58())) return null;
+  const retired = RETIRED_VENUES.get(venueProgram.toBase58());
   return {
     outcome: "REFUSED",
     detail:
-      `the policy's venue_program is ${venueProgram.toBase58()}, and this keeper cannot build a route for it. ` +
+      (retired === undefined ? "" : `${retired} `) +
+      `The policy's venue_program is ${venueProgram.toBase58()}, and this keeper cannot build a route for it. ` +
       `The only venue it can route is ${routableVenues()}. ` +
       "convert.rs and invest.rs both pin the venue account this keeper passes against policy.venue_program " +
       "(WrongVenue), so were the turn to go on, EVERY convert and EVERY invest for this vault would revert, on " +
@@ -689,9 +754,39 @@ export interface MintFacts {
   readonly transferFee: TransferFeeSchedule | null;
 }
 
-/** spl-token's Mint, before any extension. */
+/** spl-token's Mint, before any extension. A mint with none is exactly this long. */
 const MINT_BASE_BYTES = 82;
-/** Token-2022's AccountType byte, which follows the base: 1 a mint, 2 a token account. */
+/**
+ * Token-2022's BASE_ACCOUNT_LENGTH: where a mint's AccountType byte really sits,
+ * with the TLV extensions starting the byte after it.
+ *
+ * THIS WAS 82 UNTIL 2026-09-21, AND IT WAS WRONG ON EVERY REAL MINT. The walk
+ * below assumed Token-2022 wrote the account type immediately after the 82-byte
+ * base. It does not: a mint carrying extensions is zero-padded out past
+ * `Account`'s own 165 bytes — precisely so a mint and a token account can never
+ * be confused by length — and only THEN comes the account type, at 165, with
+ * the TLV from 166.
+ *
+ * MEASURED, against mainnet, the day this was fixed:
+ *   ANTHROPIC Pren1FvF… 911 bytes, byte[82] = 0, byte[165] = 1
+ *   SPYx      XsoCS1Tf… 676 bytes, byte[82] = 0, byte[165] = 1
+ * At the old offset decodeMintFacts threw "the byte after the mint base is 0"
+ * for BOTH — so legAdmissionDecision refused every Token-2022 leg it was ever
+ * shown, the live SPYx one included, and the fee ceiling it exists to enforce
+ * had never once been evaluated against a real mint. spl-token's own
+ * getTransferFeeConfig reads ANTHROPIC's schedule off the same bytes as
+ * older{1032, 50} newer{1039, 100}, which is the schedule this project has been
+ * quoting all along — from that tool, never from this one.
+ *
+ * WHY NO TEST CAUGHT IT, and it is the first species in docs/TESTING_TRAPS.md:
+ * every mint fixture in the suite was BUILT at offset 82 by a helper written
+ * beside this decoder, so the fixture and the code under test agreed with each
+ * other and with nothing else. The fix comes with test/fixtures/token2022-mints.json
+ * — the real accounts, captured from mainnet — so the next disagreement is with
+ * the chain rather than with ourselves.
+ */
+const BASE_ACCOUNT_BYTES = 165;
+/** Token-2022's AccountType byte: 1 a mint, 2 a token account. */
 const ACCOUNT_TYPE_MINT = 1;
 /** extension.rs's ExtensionType discriminants, only the two this gate reads. */
 const EXT_UNINITIALIZED = 0;
@@ -728,17 +823,21 @@ export function decodeMintFacts(data: Buffer): MintFacts {
   if (data.length < MINT_BASE_BYTES) {
     throw new Error(`a mint account is at least ${MINT_BASE_BYTES} bytes; this one is ${data.length}`);
   }
-  // A classic SPL Token mint is exactly the base, and Token-2022 writes the
-  // account type only once there is an extension to write after it.
-  if (data.length <= MINT_BASE_BYTES + 1) return { transferHook: null, transferFee: null };
-  const accountType = data.readUInt8(MINT_BASE_BYTES);
+  // A mint with no extensions is exactly the base — a classic SPL Token mint,
+  // or a Token-2022 one that never needed padding. Anything longer must be
+  // padded past BASE_ACCOUNT_BYTES before the account type, so a length in
+  // between is not a layout this walk understands.
+  if (data.length <= BASE_ACCOUNT_BYTES) return { transferHook: null, transferFee: null };
+  const accountType = data.readUInt8(BASE_ACCOUNT_BYTES);
   if (accountType !== ACCOUNT_TYPE_MINT) {
-    throw new Error(`the byte after the mint base is ${accountType}, not the ${ACCOUNT_TYPE_MINT} Token-2022 writes for a mint`);
+    throw new Error(
+      `byte ${BASE_ACCOUNT_BYTES} of this mint is ${accountType}, not the ${ACCOUNT_TYPE_MINT} Token-2022 writes for a mint`,
+    );
   }
 
   let transferHook: PublicKey | null = null;
   let transferFee: TransferFeeSchedule | null = null;
-  let offset = MINT_BASE_BYTES + 1;
+  let offset = BASE_ACCOUNT_BYTES + 1;
   while (offset + 4 <= data.length) {
     const type = data.readUInt16LE(offset);
     if (type === EXT_UNINITIALIZED) break;
@@ -788,6 +887,39 @@ export function activeTransferFee(facts: MintFacts, currentEpoch: bigint): Trans
   const schedule = facts.transferFee;
   if (schedule === null) return NO_TRANSFER_FEE;
   return currentEpoch >= schedule.newer.epoch ? schedule.newer : schedule.older;
+}
+
+/**
+ * The worst fee a transfer of this mint could be charged: today's, or a rise
+ * already written for a later epoch, whichever is higher.
+ *
+ * WHY THE SLIPPAGE IS SIZED AGAINST THIS AND NOT THE ACTIVE FEE. The route
+ * builder models the destination mint's fee against its own worst case
+ * (jupiter-route.ts, `fee.worstCase`), because a rise that lands between the
+ * quote and the confirmation is charged at the rate in force when the transfer
+ * executes, not when we asked. If the keeper sized its slippage against the
+ * ACTIVE fee while the builder modelled the worst case, the two would disagree
+ * for the two epochs before every scheduled rise — and measureLegVenue refuses
+ * on exactly that disagreement, so a basket that is perfectly buyable today
+ * would stop days early, with a message about a fee nobody is paying yet.
+ * Measured here as a test: a leg with 0 bps now and 300 bps written for epoch
+ * 932, read in epoch 930, refused the whole basket.
+ *
+ * THE COST IS A WIDER ASK, NOT A LOOSER FLOOR. A wider slippage only changes
+ * what we ask Jupiter for; min_out still comes from the route's own bytes and
+ * is still checked against the owner's signed floor.
+ *
+ * NOT THE ADMISSION GATE'S NUMBER. MAX_LEG_FEE_BPS is still judged on the fee
+ * in force TODAY — a rise written for next month refuses nothing now, and
+ * legFeeWarnings is what gives notice of it.
+ */
+export function worstCaseTransferFee(facts: MintFacts, currentEpoch: bigint): TransferFeeTerms {
+  const schedule = facts.transferFee;
+  if (schedule === null) return NO_TRANSFER_FEE;
+  const active = activeTransferFee(facts, currentEpoch);
+  const pending = schedule.newer.epoch > currentEpoch ? schedule.newer : null;
+  if (pending === null) return active;
+  return pending.bps > active.bps ? pending : active;
 }
 
 /**
@@ -903,7 +1035,17 @@ export interface LegMint {
 
 /** Whether every leg is one this keeper may buy; when it is, each leg's epoch-active fee, by mint. */
 export type LegAdmission =
-  | { readonly admit: true; readonly fees: ReadonlyMap<string, TransferFeeTerms> }
+  | {
+      readonly admit: true;
+      /** Each leg's fee IN FORCE NOW, which is what the ceiling was judged on. */
+      readonly fees: ReadonlyMap<string, TransferFeeTerms>;
+      /**
+       * Each leg's fee including a rise already written for a later epoch —
+       * what the SLIPPAGE is sized against, because that is what the route
+       * builder models. See worstCaseTransferFee.
+       */
+      readonly worstCaseFees: ReadonlyMap<string, TransferFeeTerms>;
+    }
   | { readonly admit: false; readonly outcome: "REFUSED"; readonly detail: string };
 
 /**
@@ -946,6 +1088,7 @@ export function legAdmissionDecision(input: {
 }): LegAdmission {
   const refusals: string[] = [];
   const fees = new Map<string, TransferFeeTerms>();
+  const worstCaseFees = new Map<string, TransferFeeTerms>();
 
   for (const leg of input.legs) {
     const name = leg.mint.toBase58();
@@ -982,9 +1125,12 @@ export function legAdmissionDecision(input: {
       );
     }
     fees.set(name, fee);
+    // THE SAME BYTES AND THE SAME EPOCH, so the two can never be about
+    // different reads of the same mint.
+    worstCaseFees.set(name, worstCaseTransferFee(facts, input.currentEpoch));
   }
 
-  if (refusals.length === 0) return { admit: true, fees };
+  if (refusals.length === 0) return { admit: true, fees, worstCaseFees };
   return {
     admit: false,
     outcome: "REFUSED",
@@ -1098,235 +1244,579 @@ export function turnSpendCeiling(input: {
   return basketBudget({ held: reachable, maxPerCall: input.maxPerCall, headroom: input.headroom });
 }
 
-// ── every leg's pool, at the moment the money would move ─────────────────────
+// ── every leg's VENUE, at the moment the money would move ────────────────────
+//
+// WHAT THIS GATE IS. DEPTH AT THE TURN'S SIZE. Not price.
+//
+// Both quotes in ARM 2 come from ONE source in ONE instant, so a uniformly bad
+// price — Jupiter quoting the whole market 30 % off — passes the ratio
+// untouched. And a census of inventory is a count of UNITS, which has no
+// opinion about what a unit is worth. Neither arm can tell an expensive market
+// from a cheap one, and neither is trying to.
+//
+// THE PRICE DEFENCES, named here because they live elsewhere and because a
+// reader who inherits a price guarantee nobody wrote will design around it:
+//  * the owner-signed `min_out_rate_wad` floor, enforced on chain as
+//    FloorTooLow. IT DECAYS. Signed once, it clears itself as the market rises
+//    (a stale floor stops binding) and blocks every honest buy as the market
+//    falls. A floor that always passes is not a defence.
+//  * the on-chain measured delta in invest.rs, which bounds the fill against
+//    what actually arrives in the vault's ATA.
+//  * Pyth, via oracleConvertDecision — FOR THE SOL LEG ONLY.
+//  * THE STOCK LEGS HAVE NO INDEPENDENT PRICE ANCHOR TODAY. Plainly: SPYx,
+//    ANTHROPIC and FIGUREAI are priced by the venue we are buying from and by
+//    a floor the owner signed once. This gate does not close that, and must
+//    not be read as closing it.
+//
+// AND THE MOVE TO JUPITER WIDENED WHAT THAT COSTS, which belongs here rather
+// than nowhere. Under Raydium the counterparty was ONE operator-configured pool
+// per mint; under Jupiter it is any venue Jupiter indexes, the pool registry is
+// gone from bin/keeper.mts, and the keeper passes neither `dexes` nor
+// `excludeDexes` to the builder although jupiter-route.ts offers both. The vault
+// PDA's signature now goes to JUP6..., which CPIs onward into whatever the route
+// names. NEITHER ARM SEES THIS: ARM 1 counts the chosen venue's own inventory,
+// so a seeded pool passes by being funded, and ARM 2 divides two quotes from one
+// quoter, so a uniformly bad price divides out. The last bound on a stock leg is
+// the owner's min_out_rate_wad — and that number is derived at policy-signing
+// time from a RAYDIUM pool's mid, 5 % under it
+// (solana-core/src/server/build-handler.ts over PRICED_POOLS, at
+// LEG_FLOOR_MARGIN_BPS = 500), which for ANTHROPIC is the venue this migration
+// exists to stop trading on. Whoever narrows this should narrow it there: an
+// excludeDexes list, or a floor referenced to something the keeper still reads.
+//
+// This paragraph exists because of the species docs/TESTING_TRAPS.md calls
+// "prose whose scope is narrower than its reading": no test catches a comment
+// that is right about the mechanism and wrong about what it protects.
+//
+// WHY THE RAYDIUM POOL READ IS GONE. The gate used to decode a Raydium CLMM
+// PoolState (mints at 73/105, vaults at 137/169) and compare the IN-SIDE
+// RESERVE against the spend. That is structurally unusable for the venues the
+// product must now hold: Hadron, Manifest (a central limit order book, which
+// has no reserve to read) and Meteora DLMM. The one layout that works on all
+// of them is the 165-byte SPL Token account, which every venue's payout
+// account is, whatever the venue is — so the gate counts what the venue can
+// PAY US, over the accounts the route itself names.
 
 /**
- * How many times over a pool's in-side reserve must cover what this turn would
- * push into it before the keeper will trade there: 50.
+ * How many times over the venue's inventory of the asset a hop pays us must
+ * cover what that hop takes before the keeper will trade there: 50.
  *
- * A BUILD-TIME CHECK CANNOT PROTECT AGAINST A POOL DRAINING. check:legs proved
+ * A BUILD-TIME CHECK CANNOT PROTECT AGAINST A VENUE DRAINING. check:legs proved
  * every leg's depth against mainnet and passed. Two days later the leg it
  * passed — 6,700 dollars then — held 51: 0.110274669 of its own token against
  * 31.91 USDC, with any buy over about 11 dollars reverting (measured
  * 2026-09-20, three independent ways). Nothing about the leg changed; the
  * moment did. Depth is not a property of a mint or of a registry entry, it is a
- * property of the instant the swap lands in, so it is measured here, in the
- * turn, against the amount that turn is about to spend.
+ * property of the instant the swap lands in.
  *
- * WHY A MULTIPLE OF OUR OWN SIZE AND NOT AN AMOUNT. min-out.ts draws its 200
- * bps (SLIPPAGE_BPS) bound around a PAST swap's realised price, and everything
- * between that capture and our fill has to fit inside it: the drift since, and
- * OUR OWN impact. Our impact therefore has to be a fraction of that tolerance,
- * not equal to it. And a depth written as an amount is the check:legs mistake
- * again, one file further down — the depth that moved here is one market
- * maker's position, which moved five times in half an hour.
+ * DERIVED FROM THAT INCIDENT, RE-ARGUED IN OUT-UNITS. Mid was 289.36
+ * USDC/token. The product's DEFAULT purchase is $5:
+ *  * one leg at 10000 bps: the turn takes 0.014936 tokens against 0.110274669
+ *    held — 7.4x cover;
+ *  * three legs at 3333 bps: $1.6667 takes 0.005474 — 20.1x cover.
+ * A bound has to clear the WORSE of those with room, so 20.1x becomes 50x.
+ * Both are far under 50, so the drained venue is refused at the size the
+ * product actually buys at — which is the size that matters, because $5 is
+ * UNDER the ~$11 revert threshold: that venue would have FILLED and taken the
+ * owner's money.
  *
- * WHY 50, FROM THE CASE THIS GATE EXISTS FOR. The drained pool holds 31.91
- * USDC. The product's default purchase is 5 dollars, which across three legs is
- * 1.67 into that pool — 19x cover. So any bound at or under 19x would have
- * ADMITTED the drained pool at the product's own default size, and a bound has
- * to clear that case with room. At 50x the drained pool admits 64 cents: every
- * spend a real turn can make there is refused, from the default basket up.
+ * WHY 50 CARRIES OVER FROM THE OLD IN-SIDE-RESERVE BOUND UNCHANGED, and is not
+ * a coincidence. On a two-sided AMM, inventory cover and in-side-reserve cover
+ * are THE SAME RATIO at the quoted rate:
+ *     inventory / (spend / price)  ==  (inventory * price) / spend
+ * so the old derivation transfers exactly, and the three-leg replay gives 20.1x
+ * here where the old gate gave 19.1x — the two gates agree on the case both can
+ * see. It is restated in out-units because a CLOB and a DLMM have no in-side
+ * reserve to count at all.
  *
- * AND WHAT IT COSTS ON A POOL THAT IS FINE. The live pool held 9,389.405679
- * USDC that night, its 0.5 % impact size measured at 350 dollars and then 598
- * six minutes later. 50x admits 187.79 there — about half the smaller
- * measurement, so roughly 27 bps of impact, an eighth of the tolerance. It
- * still refuses the 333 dollars a 1,000-dollar max_per_call splits three ways
- * (28x cover), which is exactly the size that pool was measured NOT to absorb
- * quietly. A gate that refused the 100-dollar leg a 250-dollar cap produces —
- * 94x cover, a size this venue serves without noticing — would be a gate an
- * operator turns off, and then none of this runs at all.
- *
- * WHAT THIS BOUND IS NOT. Read as flat constant product over the vault balance,
- * 50x is 196 bps of impact — the whole tolerance. That reading is the wrong
- * model for a concentrated-liquidity pool, and measurably so: it put the 0.5 %
- * size here at 47 dollars when the venue served 350. But the honest limit is
- * the other direction, and no multiple fixes it — a CLMM's vault balance can
- * sit entirely in ranges far from the current price, so a reserve can be large
- * while the depth AT the price is nothing. No multiple of a vault balance
- * bounds that. This gate is the cheap, early one: it refuses a pool that has
- * been drained BEFORE the owner's SOL is sold toward it. The bound that catches
- * liquidity which is not where the reserve suggests is min-out.ts's, at
- * execution, where the fill simply does not happen. Two layers, each doing the
- * thing the other cannot.
+ * AND WHAT IT COSTS ON A VENUE THAT IS FINE. The live SPYx pool held 9,389.405679
+ * USDC that night, its 0.5 % impact size measured at 350 USD and 598 six minutes
+ * later. 50x admits 187.79 USDC of inventory-equivalent — about half the
+ * SMALLER measurement, so roughly 27 bps of impact. It still refuses the 333 USD
+ * leg a $1,000 max_per_call splits three ways (28x cover), which is exactly the
+ * size that venue was measured NOT to absorb quietly.
  */
-export const MIN_POOL_DEPTH_MULTIPLE = 50n;
+export const MIN_VENUE_INVENTORY_MULTIPLE = 50n;
 
 /**
- * Raydium CLMM PoolState, at the offsets live-route.ts already counts over the
- * same bytes: 8 disc, 1 bump, 32 amm_config, 32 owner, then token_mint_0 at 73,
- * token_mint_1 at 105, token_vault_0 at 137, token_vault_1 at 169. Mainnet
- * serves 1544 bytes; only these four addresses are read.
+ * What ARM 2 allows of the turn's OWN price impact, as a fraction of the
+ * usable slippage tolerance: a quarter.
+ *
+ * DERIVED FROM THE SLIPPAGE BUDGET, NOT FROM ARM 1's INCIDENT — deliberately,
+ * because calibrating both arms off one measurement would make them one gate
+ * wearing two hats.
+ *
+ * Usable tolerance T = slippageBps - feeBps is the WHOLE budget between the
+ * quote and the fill on a gross-quoting venue (measured across the 1038 -> 1039
+ * boundary: 100 bps of slippage against a 100 bps fee reverts with 0x1771 at 5,
+ * 25 and 250 USD; 200 against 100 fills). T has to cover market drift AND our
+ * own impact, and DRIFT DOMINATES — the same SPYx venue's 0.5 % size moved
+ * 350 -> 598 in six minutes, a 70 % swing — so impact gets a quarter and drift
+ * three quarters.
+ *
+ * ANTHROPIC today: (200 - 100) / 4 = 25 bps. A zero-fee mint: 50 bps.
+ *
+ * CROSS-CHECKED AGAINST A MEASUREMENT TAKEN FOR ANOTHER PURPOSE: 187.79 USDC
+ * into the healthy venue measured ~27 bps when that mint charged 50 bps, so
+ * T = 150 and the ceiling 37 bps — 27 passes with room.
  */
-const POOL_TOKEN_MINT_0 = 73;
-const POOL_TOKEN_MINT_1 = 105;
-const POOL_TOKEN_VAULT_0 = 137;
-const POOL_TOKEN_VAULT_1 = 169;
+export const IMPACT_TOLERANCE_DIVISOR = 4n;
 
-/** The pair a pool trades, and the two accounts that hold its reserves. */
-export interface PoolPair {
-  readonly mint0: PublicKey;
-  readonly mint1: PublicKey;
-  readonly vault0: PublicKey;
-  readonly vault1: PublicKey;
+/**
+ * The floor under that ceiling, so a mint whose fee eats the whole tolerance
+ * still gets a finite, non-zero bar rather than "any impact at all refuses".
+ * At 5 bps, a venue moving half a tenth of a percent on our size is admitted.
+ */
+export const MIN_IMPACT_CEILING_BPS = 5n;
+
+/**
+ * The turn's size divided by this is ARM 2's probe: a sixteenth.
+ *
+ * SMALL ENOUGH THAT THE PROBE'S OWN IMPACT IS NOISE. Under any convex impact
+ * curve a 1/16 size contributes at most 1/16 of the turn's impact — under
+ * 1.6 bps against a 25 bps ceiling — so the probe's rate is a fair stand-in for
+ * the undisturbed one.
+ */
+export const PROBE_DIVISOR = 16n;
+
+/**
+ * And never smaller than a dollar (USDC's six decimals).
+ *
+ * LARGE ENOUGH TO BE QUOTED: jupiter-sim.ts's measured sizes are 5, 25 and 250
+ * USD, and $1 is the smallest these venues were observed to answer at all. A
+ * probe nobody answers is an abstention, not a measurement.
+ */
+export const MIN_PROBE_RAW = 1_000_000n;
+
+/**
+ * How far ABOVE the destination mint's transfer fee a leg's slippage must be
+ * quoted: 100 bps.
+ *
+ * STRICTLY ABOVE THE FEE, AND BY A MEASURED MARGIN. 100 over 100 reverts by ONE
+ * RAW UNIT — Jupiter floors its deduction and Token-2022 ceils its fee — and
+ * 200 over 100 fills. So equality is provably fatal and the margin is at least
+ * 100 bps. legSlippageBps() re-quotes automatically the day the issuer moves to
+ * 150 bps, instead of reverting every sweep with no explanation.
+ *
+ * THE COST, STATED WHERE THE TRADE IS MADE: a wider slippage is a LOOSER
+ * per-call floor out of investMinOut. This gate does not compensate for that,
+ * because this gate does not measure price — the owner's min_out_rate_wad and
+ * invest.rs's measured delta do, and both are named at the top of this section.
+ *
+ * min-out.ts's SLIPPAGE_BPS stays 200n: that is the keeper's own bound on a
+ * captured rate, and this is a floor under what we ASK JUPITER FOR.
+ */
+export const MIN_SLIPPAGE_MARGIN_BPS = 100n;
+
+/**
+ * SPL Token's Account, the ONLY layout this gate decodes:
+ *   mint 0..32, owner 32..64, amount 64..72 little-endian.
+ *
+ * 165 bytes is all of an SPL Token account and the PREFIX of every Token-2022
+ * one, so the same three fields sit at the same three offsets under both
+ * programs. Same reasoning and same offsets as venue_route.rs and as
+ * findVaultOwnedTokenAccounts — which is what lets the census and the
+ * vault-ownership pass agree about what they are looking at.
+ */
+export interface TokenAccountFacts {
+  readonly mint: PublicKey;
+  readonly owner: PublicKey;
+  readonly amount: bigint;
 }
 
-/**
- * The pair and the two vaults, walked out of a pool account's own bytes.
- *
- * NO LENGTH ORACLE. A length check alone cannot say these offsets mean what we
- * think — a different account of the right size decodes into four valid-looking
- * addresses — so the length is checked only as far as the bytes actually read,
- * and the DECISION below then requires the decoded pair to be the pair the
- * registry claims. Bytes that are not this pool's pair fail that, whatever
- * their length.
- */
-export function decodePoolPair(data: Buffer): PoolPair {
-  const end = POOL_TOKEN_VAULT_1 + 32;
-  if (data.length < end) {
-    throw new Error(`a Raydium CLMM pool state is at least ${end} bytes to reach its vaults; this account is ${data.length}`);
+const TOKEN_ACCOUNT_BYTES = 165;
+
+/** What a token account is and holds, out of its own bytes. Throws under 165. */
+export function decodeTokenAccountFacts(data: Buffer): TokenAccountFacts {
+  if (data.length < TOKEN_ACCOUNT_BYTES) {
+    throw new Error(`an SPL token account is at least ${TOKEN_ACCOUNT_BYTES} bytes; this account is ${data.length}`);
   }
   return {
-    mint0: new PublicKey(data.subarray(POOL_TOKEN_MINT_0, POOL_TOKEN_MINT_0 + 32)),
-    mint1: new PublicKey(data.subarray(POOL_TOKEN_MINT_1, POOL_TOKEN_MINT_1 + 32)),
-    vault0: new PublicKey(data.subarray(POOL_TOKEN_VAULT_0, POOL_TOKEN_VAULT_0 + 32)),
-    vault1: new PublicKey(data.subarray(POOL_TOKEN_VAULT_1, POOL_TOKEN_VAULT_1 + 32)),
+    mint: new PublicKey(data.subarray(0, 32)),
+    owner: new PublicKey(data.subarray(32, 64)),
+    amount: data.readBigUInt64LE(64),
   };
 }
 
-/** SPL Token's Account: mint(32) owner(32) amount(8, little-endian) — the balance at 64, in Token-2022 too. */
-const TOKEN_ACCOUNT_AMOUNT = 64;
-
-/** What a token account holds, out of its own bytes — the reserve, with no getTokenAccountBalance of its own. */
-export function decodeTokenAccountAmount(data: Buffer): bigint {
-  if (data.length < TOKEN_ACCOUNT_AMOUNT + 8) {
-    throw new Error(`a token account is at least ${TOKEN_ACCOUNT_AMOUNT + 8} bytes to reach its amount; this account is ${data.length}`);
-  }
-  return data.readBigUInt64LE(TOKEN_ACCOUNT_AMOUNT);
+/** One account the route names, as the chain returned it. */
+export interface VenueAccount {
+  readonly address: PublicKey;
+  /** The PROGRAM that owns the account — the SPL Token or Token-2022 program, for one we can read. */
+  readonly owner: PublicKey;
+  readonly data: Buffer;
 }
-
-/** A pool account as one turn read it: decoded, or the reason it could not be. */
-export type PoolRead = { readonly ok: true; readonly pair: PoolPair } | { readonly ok: false; readonly why: string };
 
 /**
- * One pool account as the chain returned it, read once — for the vault
- * addresses the turn must fetch next AND for the decision below, so the bytes
- * are decoded exactly once and every refusal string still lives in this file.
+ * ARM 1's answer for one hop: how much of the asset this hop pays us the venue
+ * can actually hand over, or why that could not be established at all.
+ *
+ * `counted: false` IS NEVER A PASS. An unmeasurable depth is not a depth — the
+ * same sentence the retired readPoolPair used, and for the same reason.
  */
-export function readPoolPair(account: { readonly data: Buffer } | null | undefined): PoolRead {
-  if (account === null || account === undefined) {
-    return { ok: false, why: "has no readable pool account, and a depth that cannot be measured is not a depth" };
+export type InventoryCensus =
+  | { readonly counted: true; readonly inventory: bigint; readonly accounts: number }
+  | { readonly counted: false; readonly why: string };
+
+/**
+ * ARM 1, over one MINT: how much of it the route's own accounts can pay us,
+ * summed from the accounts the ROUTE ITSELF names.
+ *
+ * ROUTE-WIDE, NOT VENUE BY VENUE, AND THE DIFFERENCE IS NOT COSMETIC. This
+ * function is handed every account the route resolves to and sums the ones
+ * holding `payMint`. On a multi-venue route those accounts belong to SEVERAL
+ * venues — measured 2026-09-21 on the live 2-hop USDC -> ANTHROPIC route at the
+ * $1,000 cap, the wSOL side counts FOUR writable wSOL accounts totalling
+ * 320,616,245,011 raw, one of which (33.6 SOL) pays us nothing at all. Jupiter's
+ * flat account list carries no attribution of an account to a hop, and deriving
+ * one would mean decoding each venue's own layout — the per-venue reading this
+ * gate was rewritten to stop doing, because a CLOB and a DLMM have no reserve
+ * to read.
+ *
+ * SO THE TAKE IS SUMMED THE SAME WAY, and that is the fix for what this
+ * asymmetry used to allow. censusHops groups a route's hops BY THE MINT THEY
+ * PAY US and judges one summed take against one summed inventory. Before it
+ * did, a PARALLEL SPLIT — Jupiter's other routePlan shape, where every step
+ * outputs the target and carries its own `percent` — was censused once per
+ * sliver: USDC -> FIGUREAI at $5,000 measured live as Raydium CLMM 4 % +
+ * Hadron 94 % + Manifest 2 %, and the Raydium sliver's 1.81x cover of its own
+ * pool read as 1,199.77x because the other two venues' inventory was counted
+ * against one twenty-fifth of the buy. Summed both ways the same route reads
+ * 48.06x and is refused.
+ *
+ * WHAT THIS BOUND THEREFORE CLAIMS, exactly: the writable non-vault accounts
+ * this route names hold at least 50x what this route takes of that mint. It
+ * does NOT claim that each venue separately holds 50x its own share, and a
+ * refusal naming several venues is naming them all, not one.
+ *
+ * AN ACCOUNT IS COUNTED WHEN, AND ONLY WHEN, all five hold:
+ *  1. its program owner is the SPL Token or the Token-2022 program — anything
+ *     else is not a token account and these offsets mean something else;
+ *  2. it is at least 165 bytes, so the three fields are really there;
+ *  3. its mint is the mint this hop pays us in;
+ *  4. THE ROUTE MARKS IT WRITABLE. A source of funds must be writable; a
+ *     read-only account cannot pay us, and counting one admits a venue that
+ *     has the units but cannot move them;
+ *  5. IT IS NOT VAULT-OWNED. See below — this is the gate, not hygiene.
+ *
+ * THE VAULT-OWNED EXCLUSION IS NOT HYGIENE, IT IS THE GATE. `vaultTarget` (the
+ * destination ATA) is in the route's account list BY CONSTRUCTION, and the
+ * vault accumulates the very stock it buys. Counting it makes the census grow
+ * with our own holdings until a drained venue is admitted — a gate that loosens
+ * itself every turn, and loosens fastest for the vaults that have bought most.
+ * The set comes from findVaultOwnedTokenAccounts, which already derives vault
+ * ATAs under BOTH token programs for every mint in the route and reads owner
+ * bytes 32..64 with a 165-byte minimum. REUSE IT, NEVER RE-DERIVE: two lists
+ * built two ways are two lists that can disagree.
+ */
+export function censusVenueInventory(input: {
+  /** The mint THIS hop pays us in. */
+  readonly payMint: PublicKey;
+  /** Every account the route names, RESOLVED — post address-lookup-table, as the chain returned them. */
+  readonly candidates: readonly VenueAccount[];
+  /** The addresses the route marks writable. */
+  readonly writable: ReadonlySet<string>;
+  /** findVaultOwnedTokenAccounts' answer. EXCLUDED. */
+  readonly vaultOwned: ReadonlySet<string>;
+}): InventoryCensus {
+  let inventory = 0n;
+  let accounts = 0;
+  for (const candidate of input.candidates) {
+    const address = candidate.address.toBase58();
+    if (!candidate.owner.equals(TOKEN_PROGRAM_ID) && !candidate.owner.equals(TOKEN_2022_PROGRAM_ID)) continue;
+    // THE LENGTH IS CHECKED HERE AND NOWHERE ELSE IN THIS LOOP. It used to be
+    // checked here AND caught from decodeTokenAccountFacts, and the second one
+    // could not be made to fire: remove this line and the decoder's own throw
+    // was swallowed, so the census behaved identically and no test could tell
+    // the two versions apart. A guard with no red case is not a guard
+    // (docs/TESTING_TRAPS.md), so there is one check and the decoder below is
+    // reached only when it has passed.
+    if (candidate.data.length < TOKEN_ACCOUNT_BYTES) continue;
+    if (input.vaultOwned.has(address)) continue;
+    if (!input.writable.has(address)) continue;
+    const facts = decodeTokenAccountFacts(candidate.data);
+    if (!facts.mint.equals(input.payMint)) continue;
+    inventory += facts.amount;
+    accounts += 1;
   }
-  try {
-    return { ok: true, pair: decodePoolPair(account.data) };
-  } catch (error) {
-    return { ok: false, why: `could not be read as a Raydium pool: ${error instanceof Error ? error.message : String(error)}` };
+  if (accounts === 0) {
+    return {
+      counted: false,
+      why:
+        `names no writable, non-vault token account holding ${input.payMint.toBase58()}, so there is nothing that ` +
+        "can pay us this hop and no depth to measure — and an unmeasurable depth is not a depth",
+    };
   }
+  return { counted: true, inventory, accounts };
 }
 
-/** One leg's pool, and what this turn would really push into it. */
-export interface LegPool {
+/** ARM 2's probe size for a turn of this size: a sixteenth, never under a dollar. */
+export function probeAmount(spend: bigint): bigint {
+  const sixteenth = spend / PROBE_DIVISOR;
+  return sixteenth > MIN_PROBE_RAW ? sixteenth : MIN_PROBE_RAW;
+}
+
+/** out per in, in wad. Zero in is zero rate: a quote of nothing prices nothing. */
+export function impliedRateWad(inRaw: bigint, outRaw: bigint): bigint {
+  if (inRaw <= 0n) return 0n;
+  return (outRaw * 10n ** 18n) / inRaw;
+}
+
+/**
+ * How much worse the TURN's implied rate is than the PROBE's, in bps.
+ *
+ * Clamped at zero when the turn quotes BETTER than the probe, which happens:
+ * a fixed per-hop fee is a larger share of a small size, so a probe can come
+ * back worse than the turn on a venue that is perfectly deep. A negative
+ * "impact" is not evidence of anything and must not read as credit.
+ */
+export function venueImpactBps(turnRateWad: bigint, probeRateWad: bigint): bigint {
+  if (probeRateWad <= 0n) return 0n;
+  if (turnRateWad >= probeRateWad) return 0n;
+  return (10_000n * (probeRateWad - turnRateWad)) / probeRateWad;
+}
+
+/**
+ * What this turn would take out of the route at the rate the PROBE quoted:
+ * spend * probeOut / probeIn, floored to a raw unit.
+ *
+ * WHY THE PROBE IS THE RIGHT REFERENCE HERE, AND WHY IT IS USED EVEN WHEN ARM 2
+ * REFUSES TO USE IT. ARM 2 divides two rates to measure IMPACT, so it abstains
+ * the moment the two quotes took different venues — the rates would not be two
+ * sizes of one thing. This is a different question: what SHOULD this turn take
+ * out, in the mint's own units, independently of what the venue we are about to
+ * trade with says. A probe that routed elsewhere answers that BETTER, not
+ * worse, because it is a second opinion rather than the same one at another
+ * size. So the floor applies whenever a probe answered at all.
+ *
+ * SCOPE, BESIDE THE CLAIM. The probe is a sixteenth (never under a dollar) and
+ * comes from the same quoter, so it is an undisturbed rate and NOT an
+ * independent price: a market Jupiter quotes uniformly badly moves this number
+ * with it, and nothing in this gate sees that. What it does close is the venue
+ * that flatters its own cover by quoting the turn worse at size.
+ *
+ * ZERO WHEN THERE IS NOTHING TO GO ON — no probe, no spend — and zero never
+ * lifts anything, because the caller takes the larger of the two.
+ */
+export function takeAtProbeRate(spend: bigint, probeIn: bigint, probeOut: bigint): bigint {
+  if (spend <= 0n || probeIn <= 0n || probeOut <= 0n) return 0n;
+  return (spend * probeOut) / probeIn;
+}
+
+/** The most of ARM 2's impact this leg may show: a quarter of the usable tolerance, never under 5 bps. */
+export function maxTurnImpactBps(slippageBps: bigint, feeBps: bigint): bigint {
+  const usable = slippageBps - feeBps;
+  const quarter = usable <= 0n ? 0n : usable / IMPACT_TOLERANCE_DIVISOR;
+  return quarter > MIN_IMPACT_CEILING_BPS ? quarter : MIN_IMPACT_CEILING_BPS;
+}
+
+/**
+ * The slippage a leg with this transfer fee must be QUOTED at: the keeper's own
+ * 200 bps, or strictly above the fee by MIN_SLIPPAGE_MARGIN_BPS, whichever is
+ * larger.
+ *
+ * THIS IS WHERE THE 100-OVER-100 REVERT IS MADE UNREACHABLE. At ANTHROPIC's
+ * live 100 bps this returns 200 — the margin that was measured to fill. The
+ * day the issuer schedules 150 it returns 250 by itself, rather than the keeper
+ * quoting 200 against 150 and reverting every sweep with 0x1771 and no
+ * explanation.
+ */
+export function legSlippageBps(feeBps: bigint): bigint {
+  const floor = feeBps + MIN_SLIPPAGE_MARGIN_BPS;
+  return floor > SLIPPAGE_BPS ? floor : SLIPPAGE_BPS;
+}
+
+/**
+ * ARM 2's answer for one leg.
+ *
+ * `compared: false` IS AN ABSTENTION, NEVER A PASS, AND ALWAYS LOGGED. Jupiter
+ * re-picks venues constantly — measured 2026-09-21, a 25 USD USDC->ANTHROPIC
+ * turn routed Kipseli+Manifest while the $1 probe of the same instant routed
+ * Byreal+Manifest — so a gate that refused on a re-route would refuse routinely,
+ * and a gate that refuses routinely is a gate an operator turns off. When ARM 2
+ * abstains, ARM 1 carries the leg alone; legDepthDecision refuses outright only
+ * when NEITHER arm measured anything.
+ */
+export type ImpactProbe =
+  | { readonly compared: true; readonly impactBps: bigint; readonly ceilingBps: bigint }
+  | { readonly compared: false; readonly why: string };
+
+/**
+ * ONE MINT A LEG'S ROUTE PAYS US, as one turn measured it — not one step of the
+ * routePlan. A chain gives one of these per intermediate mint plus one for the
+ * target; a parallel SPLIT gives exactly one, whose take is the sum of the
+ * slivers and whose label names every venue that pays it. censusHops says why.
+ *
+ * WHICH SIDE A HOP IS MEASURED ON, AND WHY EITHER WILL DO. On a Jupiter route
+ * `payMint` is the mint the hop PAYS US and `takeRaw` is what it hands over —
+ * the only side a CLOB or a DLMM has an account for. On a Raydium CLMM route
+ * the adapter measures the side we SPEND INTO instead, because a pool state
+ * quotes no price the gate could convert with and a constant-product reading of
+ * a concentrated pool is measurably wrong (it put one venue's 0.5 % size at 47
+ * dollars where the venue served 350).
+ *
+ * THE TWO ARE THE SAME RATIO, which is what makes one constant cover both:
+ *     inventory / (spend / price)  ==  (inventory * price) / spend
+ * so 50x of the out-side inventory and 50x of the in-side reserve are the same
+ * bound at the quoted rate. The refusal therefore says the neutral thing — what
+ * this turn would MOVE THROUGH the venue — rather than claiming a direction the
+ * reader would then have to check.
+ *
+ * AND THE EQUIVALENCE HOLDS AT ONE PRICE, WHICH IS THE CATCH `quotedTakeRaw`
+ * ANSWERS. `price` in that identity is the price the trade actually gets, and on
+ * a Jupiter route the out-side number IS the venue's own quote — so a venue
+ * quoting us d times worse divides the take by d and multiplies the cover by d.
+ * The in-side reading had no such handle, because the spend is ours. takeRaw is
+ * therefore floored at what the probe's rate implies before any of this is
+ * judged; see takeAtProbeRate for what that does and does not close.
+ */
+export interface LegVenueHop {
+  /** The venue labels that pay this mint, joined — for the refusal text only. */
+  readonly label: string;
+  /** The mint this hop's inventory is counted in. */
+  readonly payMint: PublicKey;
+  /**
+   * What this turn moves through the route on that side, in that mint's raw
+   * units — the number the cover is measured against, and never smaller than
+   * what the undisturbed rate implies (see quotedTakeRaw and takeAtProbeRate).
+   */
+  readonly takeRaw: bigint;
+  /**
+   * What the VENUE'S OWN QUOTE said it would hand over, present only when it
+   * was smaller than takeRaw and a floor lifted it.
+   *
+   * THE PROPERTY THIS FIELD EXISTS TO RESTORE. On main the denominator was the
+   * keeper's own spend — an in-unit nothing on the venue's side of the trade
+   * chose — and the doc said what that bought: "the test needs no price, and no
+   * quote from the venue being traded against can flatter it". Moving to
+   * out-units to reach a CLOB and a DLMM made the denominator `outAmount`,
+   * which IS that venue's quote, so a venue quoting us WORSE measured as
+   * DEEPER: degrade the quote by d and the cover is multiplied by 1/d. Judging
+   * against the larger of the two numbers takes that back. It does not make the
+   * gate price-proof — a market quoted uniformly badly moves both numbers, and
+   * §0 above names the defences for that — but a venue can no longer buy cover
+   * by pricing us badly at size.
+   */
+  readonly quotedTakeRaw?: bigint;
+  readonly census: InventoryCensus;
+}
+
+/** One leg, as one turn measured it. */
+export interface LegVenue {
   readonly mint: PublicKey;
-  /** The pool the registry routes this leg through. */
-  readonly pool: PublicKey;
-  /** In-asset raw units this turn would spend on THIS leg: its share of the turn's budget. */
+  /** In-asset raw this turn pushes at THIS leg. */
   readonly spend: bigint;
-  readonly read: PoolRead;
+  /** Jupiter's AMM labels, for the refusal text only. */
+  readonly venueLabels: readonly string[];
+  readonly hops: readonly LegVenueHop[];
+  /**
+   * THE SCOPE BESIDE THE CLAIM. "every-hop" means every hop of this route was
+   * censused; "final-only" means at least one intermediate hop was not — its
+   * outAmount was absent — so the verdict is about the last hop alone and SAYS
+   * SO. The final hop is always censused or the leg is refused.
+   */
+  readonly censusScope: "every-hop" | "final-only";
+  readonly impact: ImpactProbe;
 }
 
-/** Whether every leg's pool can serve this turn's share of it with margin. */
+/** Whether every leg's venue can serve this turn's share of it with margin. */
 export type DepthDecision =
   | { readonly deep: true }
   | { readonly deep: false; readonly outcome: "REFUSED"; readonly detail: string };
 
-/** A reserve's cover of a spend, for a refusal a human has to act on: "6.4x", "0.0x". */
-function cover(reserve: bigint, spend: bigint): string {
-  if (spend <= 0n) return "unbounded";
-  return `${(Number(reserve) / Number(spend)).toFixed(1)}x`;
+/** Inventory's cover of what a hop takes, for a refusal a human has to act on: "7.4x", "0.0x". */
+function cover(inventory: bigint, take: bigint): string {
+  if (take <= 0n) return "unbounded";
+  return `${(Number(inventory) / Number(take)).toFixed(1)}x`;
 }
 
 /**
- * Whether the pools this turn would trade against can actually serve it,
- * measured from their own vaults at the moment of the turn and against the
- * amount this turn would really spend on each leg.
+ * Whether the venues this turn would trade against can actually serve it,
+ * measured at the moment of the turn and against the amount this turn would
+ * really spend on each leg.
  *
- * THE GATE check:legs CANNOT BE. A build-time check proves a pool was deep when
- * the check ran. This one refuses the turn when the pool is shallow NOW, which
- * is the only tense in which money moves. It runs beside the unroutable-leg and
- * mint-admission refusals, before anything is wrapped or converted, so a basket
- * that cannot be bought never costs the owner their SOL exposure on the way to
- * finding out.
+ * THE GATE check:legs CANNOT BE. A build-time check proves a venue was deep
+ * when the check ran. This one refuses the turn when the venue is shallow NOW,
+ * which is the only tense in which money moves. It runs beside the unroutable-leg
+ * and mint-admission refusals, BEFORE anything is wrapped or converted, so a
+ * basket that cannot be bought never costs the owner their SOL exposure on the
+ * way to finding out.
  *
- * ALL OR NOTHING, the same doctrine and the same reason as the two gates beside
- * it: ONE shallow leg refuses the WHOLE basket, the deep ones included. Buying
- * only the legs whose pools happen to be deep is a partial basket, and its
- * weights silently drift onto whatever survived — which is not the basket the
- * owner signed. The detail names the leg and both figures, because the operator
- * cannot act on "a pool was thin".
+ * ALL OR NOTHING IS THE TYPE, NOT A CONVENTION. DepthDecision carries ONE
+ * verdict and no per-leg outcome, so a half-basket is UNREPRESENTABLE: there is
+ * no shape this function could return that says "buy two of the three". Buying
+ * only the legs whose venues happen to be deep drifts the weights onto whatever
+ * survived, which is not the basket the owner signed. The SOL conversion is
+ * refused with them, and it is refused before the wrap.
  *
- * THE IN-SIDE RESERVE IS WHAT IS TESTED. It is the denominator of the impact
- * the slippage bound has to absorb, and it is denominated in the same asset as
- * the spend — so the test needs no price, and no quote from the venue being
- * traded against can flatter it. The out side can only be checked for the one
- * thing that needs no price: whether there is anything there at all. A pool
- * with stock left but no in-asset depth is caught by the reserve arm; a pool
- * with neither is caught twice.
+ * (packages/website-oficial/src/lib/vault-copy.test.ts pins that union's SOURCE
+ * TEXT with a regex — deliberately, to make a per-leg escape hatch expensive.
+ * Keep those two lines verbatim; see docs/TESTING_TRAPS.md, third species.)
+ *
+ * THE FOUR REFUSALS, and why the fourth is not redundant:
+ *  1. a hop whose census could not be taken at all;
+ *  2. a hop whose inventory is under MIN_VENUE_INVENTORY_MULTIPLE x what it takes;
+ *  3. ARM 2 compared, and the turn's own impact is over the ceiling;
+ *  4. "final-only" AND ARM 2 abstained — the ONE combination in which nothing
+ *     measured this turn either hop-wise or end-to-end. Neither arm alone fires
+ *     here, which is exactly why it needs its own line.
  */
 export function legDepthDecision(input: {
   /** The policy's in_mint — the side the spend is denominated in. */
   readonly inMint: PublicKey;
-  readonly legs: readonly LegPool[];
-  /** What each pool vault held, by address, from the read that followed the pool accounts. */
-  readonly vaultAmounts: ReadonlyMap<string, bigint>;
+  readonly legs: readonly LegVenue[];
 }): DepthDecision {
   const refusals: string[] = [];
 
   for (const leg of input.legs) {
-    const name = `${leg.mint.toBase58()} (pool ${leg.pool.toBase58()})`;
+    const venues = leg.venueLabels.length > 0 ? leg.venueLabels.join(" + ") : "an unnamed venue";
+    const name = `${leg.mint.toBase58()} (via ${venues})`;
     const refuse = (reason: string): number => refusals.push(`${name} ${reason}`);
     // A leg whose share rounds to nothing is a leg this turn sends no
     // transaction for (the swap loop skips it), so there is no spend to serve
-    // and no pool to judge.
+    // and no venue to judge.
     if (leg.spend <= 0n) continue;
-    if (!leg.read.ok) {
-      refuse(leg.read.why);
-      continue;
+
+    let hopRefused = false;
+    for (const hop of leg.hops) {
+      if (!hop.census.counted) {
+        refuse(`cannot be measured at its ${hop.label} hop: it ${hop.census.why}`);
+        hopRefused = true;
+        continue;
+      }
+      const required = hop.takeRaw * MIN_VENUE_INVENTORY_MULTIPLE;
+      if (hop.census.inventory < required) {
+        refuse(
+          `holds ${hop.census.inventory} raw of ${hop.payMint.toBase58()} across ${hop.census.accounts} account(s) at its ` +
+            `${hop.label} hop(s) — counted route-wide for that mint, not venue by venue — ` +
+            `against the ${hop.takeRaw} this turn would move through it` +
+            (hop.quotedTakeRaw === undefined
+              ? ""
+              : ` (the route quoted ${hop.quotedTakeRaw}; judged at the undisturbed rate the probe implies, so a venue ` +
+                "cannot read as deeper by quoting us worse)") +
+            ` — ${cover(hop.census.inventory, hop.takeRaw)} ` +
+            `cover, under the ${MIN_VENUE_INVENTORY_MULTIPLE}x this keeper trades on (it would need ${required})`,
+        );
+        hopRefused = true;
+      }
     }
-    const { mint0, mint1, vault0, vault1 } = leg.read.pair;
-    // THE REGISTRY IS CHECKED AGAINST THE CHAIN HERE. deps.pools maps a mint to
-    // a pool by configuration; nothing until now has asked the pool whether it
-    // trades that pair. A pool that does not is both a misconfiguration and the
-    // one way these offsets could mean something else entirely.
-    const inIsZero = mint0.equals(input.inMint) && mint1.equals(leg.mint);
-    const inIsOne = mint1.equals(input.inMint) && mint0.equals(leg.mint);
-    if (!inIsZero && !inIsOne) {
+
+    if (leg.impact.compared && leg.impact.impactBps > leg.impact.ceilingBps) {
       refuse(
-        `trades ${mint0.toBase58()} against ${mint1.toBase58()}, not ${input.inMint.toBase58()} against this leg — ` +
-          "the pool this leg is routed through is not this leg's pair",
+        `quotes ${leg.impact.impactBps} bps worse at this turn's size than at a sixteenth of it, over the ` +
+          `${leg.impact.ceilingBps} bps this keeper allows — the units are there but not at this price, which a ` +
+          "count of units cannot see",
       );
       continue;
     }
-    const inVault = inIsZero ? vault0 : vault1;
-    const outVault = inIsZero ? vault1 : vault0;
-    const reserve = input.vaultAmounts.get(inVault.toBase58());
-    const stock = input.vaultAmounts.get(outVault.toBase58());
-    if (reserve === undefined || stock === undefined) {
+
+    // NOTHING MEASURED IT EITHER WAY. Not a hop census (an intermediate hop's
+    // outAmount was absent, so only the final hop was counted) and not an
+    // end-to-end comparison (the probe took a different route). Refusing here
+    // is the difference between "both arms passed" and "neither arm ran".
+    if (!hopRefused && leg.censusScope === "final-only" && !leg.impact.compared) {
       refuse(
-        `has a vault this turn could not read (${(reserve === undefined ? inVault : outVault).toBase58()}), ` +
-          "and a depth that cannot be measured is not a depth",
-      );
-      continue;
-    }
-    if (stock === 0n) {
-      refuse(`holds none of the leg at all: its ${outVault.toBase58()} vault is empty, so there is nothing to buy`);
-      continue;
-    }
-    const required = leg.spend * MIN_POOL_DEPTH_MULTIPLE;
-    if (reserve < required) {
-      refuse(
-        `holds ${reserve} in-asset raw against the ${leg.spend} this turn would push into it — ${cover(reserve, leg.spend)} ` +
-          `cover, under the ${MIN_POOL_DEPTH_MULTIPLE}x this keeper trades on (it would need ${required})`,
+        "was measured at its final hop only — an earlier hop reported no out-amount to census — and the " +
+          `end-to-end probe abstained (${leg.impact.why}), so nothing measured this turn's depth at its own size`,
       );
     }
   }
@@ -1338,10 +1828,10 @@ export function legDepthDecision(input: {
     detail:
       `${refusals.join("; ")} — refusing the whole basket of ${input.legs.length} leg(s), the deep ones included, ` +
       "and refusing to convert SOL toward it: a partial basket drifts from the weights the owner signed. " +
-      "Pool depth is measured in the turn, not at build time: a pool that passed check:legs days ago can be drained now",
+      "Venue depth is measured in the turn, not at build time: a venue that passed check:legs days ago can be " +
+      `drained now, and the spend is denominated in ${input.inMint.toBase58()}`,
   };
 }
-
 /** Consecutive FAILED turns at which a vault's invest-failed alert turns critical. */
 export const INVEST_FAILED_CRITICAL_STREAK = 3;
 

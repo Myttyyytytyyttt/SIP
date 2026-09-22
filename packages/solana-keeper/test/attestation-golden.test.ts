@@ -90,8 +90,8 @@ describe("--preflight", () => {
   // interop hands anchor's BN over and Node's does not — which is the whole
   // reason the real gate is `tsx bin/keeper.mts --preflight` in the Dockerfile.
   // This case only holds the count and the vectors steady.
-  it("holds all seventeen invariants, the golden vector and the seven builds among them", async () => {
-    expect(await runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 17 });
+  it("holds all eighteen invariants: the golden vector, the seven builds, and the venue account", async () => {
+    expect(await runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 18 });
   });
 
   // THE SECOND COPY OF THE NUMBER, and the reason it is written as a literal:
@@ -101,8 +101,16 @@ describe("--preflight", () => {
   // 2026-09-18 the count was reported and never asserted: deleting the settle_v2
   // build from buildOffline left {"preflight":"ok","invariants":13} and exit 0,
   // so the gate could be refactored away under a green light.
+  // THE EIGHTEENTH ARRIVED ON 2026-09-21 WITH THE MOVE TO JUPITER, and it is
+  // the shape this number exists for. convert and invest used to default their
+  // venue account to RAYDIUM_CLMM; that default became a venue the keeper
+  // REFUSES, so it was removed and the argument made required. The venue is an
+  // ACCOUNT, and the seven vectors compare DATA — so a builder that dropped it
+  // would pass all seven and revert on chain with WrongVenue on every sweep.
+  // Raising this line is how that check was added on purpose rather than as a
+  // side effect.
   it("pins its own size, so a gate that shrinks fails instead of quietly reporting a smaller one", async () => {
-    expect(EXPECTED_INVARIANTS).toBe(17);
+    expect(EXPECTED_INVARIANTS).toBe(18);
     expect((await runPreflight()).invariants).toBe(EXPECTED_INVARIANTS);
   });
 
@@ -116,7 +124,7 @@ describe("--preflight", () => {
       expect(await preflightOverADriftedVector()).toEqual({
         ok: false,
         program: SIP_PROGRAM_ID,
-        invariants: 17,
+        invariants: 18,
         failure: 'invariant "the attestation mirror matches the program golden vector" is false, expected true',
       });
     } finally {

@@ -38,7 +38,7 @@ import { useVaultScreen } from "@/hooks/use-vault-state";
 import { AmountError, SOL_DECIMALS, formatSol, formatUnits, parseUnits, rawFrom, shareOfRaw } from "@/lib/amounts";
 import { LABEL } from "@/lib/classes";
 import type { HoldingJson, VaultStateJson } from "@/lib/vault-api";
-import { INVEST_COPY, VAULT_COPY, WITHDRAW_COPY, shortAddress } from "@/lib/vault-copy";
+import { INVEST_COPY, VAULT_COPY, WITHDRAW_COPY, shortAddress, signedLegsOf } from "@/lib/vault-copy";
 
 type VaultWrite = ReturnType<typeof useVaultWrite>;
 
@@ -316,7 +316,11 @@ function TokenRow({
       {holding.mint === WSOL_MINT ? <p className="text-xs text-muted-foreground">{WITHDRAW_COPY.wsolNote}</p> : null}
       {leg !== undefined ? (
         <>
-          <p className="text-xs text-muted-foreground">{INVEST_COPY.freezeShort}</p>
+          {/* ONE ROW, ONE STOCK, ONE ISSUER. The line used to name whichever
+              leg the shelf held the strongest powers over, which on a SPYx row
+              was a sentence about a token that is not in that row. It is now
+              generated from the row's own leg. */}
+          <p className="text-xs text-muted-foreground">{INVEST_COPY.freezeShort(signedLegsOf([leg]))}</p>
           <p className="text-xs text-muted-foreground">{WITHDRAW_COPY.createsLegAccount(leg.symbol, legRent === null ? "some" : formatSol(legRent))}</p>
         </>
       ) : null}

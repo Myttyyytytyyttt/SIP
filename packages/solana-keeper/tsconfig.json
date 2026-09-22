@@ -12,5 +12,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "bin/**/*.mts", "test/**/*.ts", "test-local/**/*.ts"]
+  "include": ["src/**/*.ts", "bin/**/*.mts", "test/**/*.ts", "test-local/**/*.ts", "scripts/**/*.mts"]
 }

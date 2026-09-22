@@ -35,6 +35,8 @@
 
 import type * as anchor from "@coral-xyz/anchor";
 import {
+  type AccountMeta,
+  type AddressLookupTableAccount,
   ComputeBudgetProgram,
   Connection,
   Keypair,
@@ -42,7 +44,9 @@ import {
   SYSVAR_CLOCK_PUBKEY,
   SystemProgram,
   Transaction,
+  TransactionMessage,
   type TransactionInstruction,
+  VersionedTransaction,
 } from "@solana/web3.js";
 import {
   NATIVE_MINT,
@@ -52,7 +56,7 @@ import {
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
 import { summarizeUpstreamError } from "@sip/solana-log";
-import { decodeVault, readInvestmentPolicy } from "./accounts.js";
+import { decodeVault, readInvestmentPolicy, type InvestmentPolicyState } from "./accounts.js";
 import type { Alert } from "./alerts.js";
 import { BN } from "./anchor-interop.js";
 import {
@@ -63,28 +67,39 @@ import {
   chainDay,
   convertAmount,
   convertDecision,
-  decodeTokenAccountAmount,
+  convertCapLamports,
   inMintDecision,
   investPauseDecision,
   legAdmissionDecision,
   legDepthDecision,
   legFeeWarnings,
   legShare,
+  legSlippageBps,
   oracleConvertDecision,
-  readPoolPair,
   rollingDecision,
   routeRateWad,
   shouldConvert,
   turnSpendCeiling,
   venueDecision,
   wrapPlan,
+  JUPITER_V6_PROGRAM,
   type ConvertDecision,
+  type LegVenue,
   type WrapPlan,
   type WrapReport,
 } from "./invest-decision.js";
 import { method, type MethodCall } from "./methods.js";
-import { tightenMinOut } from "./min-out.js";
-import { RAYDIUM_CLMM, type SwapV2Args, buildSwapV2AccountMetas, buildSwapV2Data, fetchLiveRoute } from "./program-scripts.js";
+// FOUR NAMES LEFT WITH THE RAYDIUM ARM. raydiumLegVenue, raydiumSides,
+// readRouteAccounts and vaultOwnedAmong were imported here for the pool-reading
+// branch that no longer exists; the typecheck did not object, because an unused
+// IMPORT is not an unused local. They are gone: an import is a claim about what
+// this file does, and this one claimed a venue the keeper has retired.
+// venue-depth.ts still exports the Raydium adapter — solana-core's readers.test
+// holds the web's pool panel to agreeing with its offsets — but nothing on the
+// money path reaches it any more.
+import { VenueMeasurementRefusal, measureLegVenue } from "./venue-depth.js";
+import type { TransferFeeTerms } from "./min-out.js";
+import { JupiterRouteRefusal, type JupiterRoute, investAmountIn, investMinOut, verifyRouteFresh } from "./program-scripts.js";
 import {
   PYTH_RECEIVER_PROGRAM,
   PYTH_SOL_USD_FEED,
@@ -96,7 +111,14 @@ import {
 } from "./pyth.js";
 
 const USDC = USDC_MINT;
-const WSOL_USDC_POOL = new PublicKey("3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv");
+
+// WSOL_USDC_POOL IS GONE, and its absence is the point. The convert used to
+// read one hardcoded Raydium CLMM pool — 3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv
+// — for the wSOL -> USDC hop. venue_program is ONE field on the owner-signed
+// policy that convert.rs:88-91 and invest.rs:119-122 BOTH pin against, so the
+// conversion cannot stay on Raydium while the basket moves to Jupiter: it is
+// the same signature. The convert is now quoted by Jupiter like any other leg,
+// which is also why it is measured by the same depth gate at the same moment.
 
 // ── THE INVEST PATH'S THREE INSTRUCTIONS, AS FUNCTIONS A GATE CAN RUN ────────
 //
@@ -164,11 +186,22 @@ export function wrapSolCall(
  * the chain (`policy.venueProgram`), and venueDecision refuses a venue this
  * keeper cannot route before any of this is reached.
  *
- * OPTIONAL, DEFAULTING TO WHAT IT ALWAYS SENT. The preflight and the builder
- * tests call these three offline, with fabricated accounts and no policy to read
- * a venue from; leaving the argument out builds exactly the instruction it built
- * before, so their fixed byte vectors still mean what they meant. Every caller
- * that HAS a policy passes it.
+ * AND IT IS NO LONGER OPTIONAL. It used to default to RAYDIUM_CLMM so the
+ * preflight and the builder tests — which have no policy to read a venue from —
+ * could call this offline and still get the bytes production sent. That default
+ * is now a venue this keeper REFUSES, so leaving it in place would mean every
+ * offline caller silently building an instruction the live gate would never
+ * allow: a vector that pins the wrong thing. The offline callers pass
+ * JUPITER_V6_PROGRAM explicitly instead, which is what production passes.
+ *
+ * `venueData` IS THE BLOB THE PROGRAM CPIs WITH, VERBATIM. convert.rs takes it
+ * as `venue_data: Vec<u8>` and hands it to invoke_signed as the inner
+ * instruction's `data` without looking at a byte of it. It used to be built
+ * here, by buildSwapV2Data over a SwapV2Args, because the venue was always
+ * Raydium; under Jupiter the bytes are `route.venueData`, built by Jupiter's own
+ * /swap-instructions and then VERIFIED against the accounts and amounts we asked
+ * for (verifySharedAccountsRoute). Taking the blob rather than the arguments is
+ * what makes this builder venue-agnostic — the program's own shape.
  */
 export function convertCall(
   program: anchor.Program,
@@ -178,22 +211,22 @@ export function convertCall(
     readonly policy: PublicKey;
     readonly vaultWsol: PublicKey;
     readonly vaultIn: PublicKey;
-    /** The venue `policy.venue_program` names; RAYDIUM_CLMM when a caller has no policy in hand. */
-    readonly venueProgram?: PublicKey;
+    /** The venue `policy.venue_program` names. Required: there is no safe default. */
+    readonly venueProgram: PublicKey;
   },
-  args: { readonly amountIn: bigint; readonly minOut: bigint; readonly swap: SwapV2Args },
+  args: { readonly amountIn: bigint; readonly minOut: bigint; readonly venueData: Buffer },
 ): MethodCall {
   return method(program, "convert")(
     new BN(args.amountIn.toString()),
     new BN(args.minOut.toString()),
-    buildSwapV2Data(args.swap),
+    args.venueData,
   ).accountsPartial({
     crank: accounts.crank,
     vault: accounts.vault,
     policy: accounts.policy,
     vaultWsol: accounts.vaultWsol,
     vaultIn: accounts.vaultIn,
-    venueProgram: accounts.venueProgram ?? RAYDIUM_CLMM,
+    venueProgram: accounts.venueProgram,
   });
 }
 
@@ -201,8 +234,8 @@ export function convertCall(
  * invest: one leg of the signed basket, by its INDEX — the program prices and
  * bounds the rest.
  *
- * `venueProgram` is the policy's, exactly as convertCall's is, and optional for
- * the same offline callers: see convertCall above.
+ * `venueProgram` is the policy's and `venueData` is the route's, exactly as
+ * convertCall's are and for the same reasons: see convertCall above.
  */
 export function investCall(
   program: anchor.Program,
@@ -213,16 +246,16 @@ export function investCall(
     readonly vaultIn: PublicKey;
     readonly vaultTarget: PublicKey;
     readonly targetMint: PublicKey;
-    /** The venue `policy.venue_program` names; RAYDIUM_CLMM when a caller has no policy in hand. */
-    readonly venueProgram?: PublicKey;
+    /** The venue `policy.venue_program` names. Required: there is no safe default. */
+    readonly venueProgram: PublicKey;
   },
-  args: { readonly legIndex: number; readonly amountIn: bigint; readonly minOut: bigint; readonly swap: SwapV2Args },
+  args: { readonly legIndex: number; readonly amountIn: bigint; readonly minOut: bigint; readonly venueData: Buffer },
 ): MethodCall {
   return method(program, "invest")(
     args.legIndex,
     new BN(args.amountIn.toString()),
     new BN(args.minOut.toString()),
-    buildSwapV2Data(args.swap),
+    args.venueData,
   ).accountsPartial({
     crank: accounts.crank,
     vault: accounts.vault,
@@ -230,7 +263,7 @@ export function investCall(
     vaultIn: accounts.vaultIn,
     vaultTarget: accounts.vaultTarget,
     targetMint: accounts.targetMint,
-    venueProgram: accounts.venueProgram ?? RAYDIUM_CLMM,
+    venueProgram: accounts.venueProgram,
   });
 }
 
@@ -296,8 +329,6 @@ export interface InvestDeps {
    * says it would wrap; a live wrap reads the balance again first.
    */
   readonly crankLamports: bigint | null;
-  /** Pool for each investable mint, from the operator's registry. */
-  readonly pools: ReadonlyMap<string, PublicKey>;
   readonly live: boolean;
   /** The protocol's emergency switch, from the ProtocolConfig this sweep read. */
   readonly protocolPaused: boolean;
@@ -516,22 +547,29 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   const wrongVenue = venueDecision(policy.venueProgram);
   if (wrongVenue !== null) return wrongVenue;
 
-  // A MISSING POOL REFUSES THE WHOLE BASKET — and it refuses BEFORE the
-  // convert, not after. The old order wrapped and market-sold the vault's SOL
-  // into USDC first and only then noticed the basket was unroutable, so a
-  // policy the keeper's registry could not serve would sell the owner's SOL
-  // exposure on every sweep in service of a purchase that was knowably
-  // impossible before the swap. Nothing below this line moves money until the
-  // whole basket has a route.
-  const unroutable = policy.legs.map((leg) => leg.mint.toBase58()).filter((mint) => !deps.pools.has(mint));
-  if (unroutable.length > 0) {
-    return {
-      outcome: "REFUSED",
-      detail: `no pool configured for ${unroutable.join(", ")} — refusing to guess, refusing a partial basket, and refusing to convert SOL toward it`,
-    };
-  }
+  // THE POOL REGISTRY IS GONE FROM THIS PATH, AND THE DOCTRINE IT SERVED IS NOT.
+  //
+  // WHAT IT USED TO DO. A leg with no entry in the operator's mint -> Raydium
+  // pool registry refused the whole basket here, before the convert, so the
+  // owner's SOL was never sold toward a purchase that was knowably impossible.
+  // That ordering is the doctrine and it is untouched; what changed is which
+  // fact answers the question.
+  //
+  // WHY IT CANNOT STAY. Under Jupiter there is no per-mint pool to configure:
+  // Jupiter finds the route, across venues that have no pool account at all —
+  // ANTHROPIC on Hadron, OPENAI on Manifest (a CLOB), SPACEX on Meteora. A
+  // registry check here would refuse EXACTLY the assets this migration exists
+  // to buy, and it would refuse them for a missing row rather than for anything
+  // true about the market.
+  //
+  // WHAT ANSWERS IT NOW. measureBasketVenues, a few lines below and still
+  // before the wrap: a leg Jupiter cannot route is a route the builder refuses,
+  // and a refusal there returns REFUSED for the WHOLE basket — the convert
+  // included — with nothing wrapped. The guarantee is strictly stronger than
+  // the registry's, because it is a live answer about this leg at this size
+  // rather than a row somebody added once.
 
-  // AND ON THE SAME LINE, FOR THE SAME REASON: a leg whose mint the program
+  // A leg whose mint the program
   // cannot buy safely — not Token-2022, a real transfer hook, or a transfer fee
   // above MAX_LEG_FEE_BPS — refuses the whole basket here, before the wrap.
   // Every one of those is knowable from the mint's own bytes, and the fee in
@@ -541,13 +579,12 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // them in — the epoch out of the Clock ALREADY READ above, so the fee is
   // resolved against the very clock Token-2022 charges by.
   //
-  // AND THE POOLS RIDE THAT SAME REQUEST. The depth gate below needs each
-  // pool's own account, and this read was being sent anyway, so the pool
-  // addresses go in beside the mints: the pool states cost this turn NOTHING —
-  // no extra round trip, the same rule the Pyth feeds follow at the vault read.
+  // THE POOL STATES NO LONGER RIDE THIS REQUEST, because there are no pools to
+  // read: the depth gate censuses the accounts the ROUTE names, which only
+  // Jupiter can tell us and only after a quote. This read is the leg mints and
+  // nothing else.
   const currentEpoch = clockInfo.data.readBigUInt64LE(16);
-  const legPools = policy.legs.map((leg) => deps.pools.get(leg.mint.toBase58())!);
-  const legInfos = await connection.getMultipleAccountsInfo([...policy.legs.map((leg) => leg.mint), ...legPools], "confirmed");
+  const legInfos = await connection.getMultipleAccountsInfo(policy.legs.map((leg) => leg.mint), "confirmed");
   const legMints = policy.legs.map((leg, index) => {
     const info = legInfos[index] ?? null;
     return { mint: leg.mint, account: info === null ? null : { owner: info.owner, data: info.data } };
@@ -582,59 +619,89 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
 
   if (!admission.admit) return { outcome: admission.outcome, detail: admission.detail };
 
-  // AND ON THE SAME LINE AGAIN: whether those pools can actually serve what
-  // this turn would push into them, RIGHT NOW.
+  // AND ON THE SAME LINE AGAIN: whether the VENUES this turn would trade
+  // against can actually serve what it would push at them, RIGHT NOW.
   //
-  // A BUILD-TIME CHECK CANNOT PROTECT AGAINST A POOL DRAINING. check:legs
-  // passed a leg holding 6,700 dollars; two days later the same pool held 51,
-  // and any buy over about 11 reverts. Nothing about the leg changed — depth is
-  // a property of the moment, so it is measured in the turn, from the pools'
-  // own vaults, against the amount this turn would really spend on each leg.
+  // A BUILD-TIME CHECK CANNOT PROTECT AGAINST A VENUE DRAINING. check:legs
+  // passed a leg holding 6,700 dollars; two days later the same venue held 51,
+  // and any buy over about 11 reverts — while the product's own default buy is
+  // 5, which is UNDER that threshold and would have filled. Nothing about the
+  // leg changed; depth is a property of the moment, so it is measured in the
+  // turn, against the amount this turn would really spend on each leg.
+  //
+  // TWO ARMS, ONE VERDICT (invest-decision.ts). ARM 1 counts the venue's
+  // inventory of the asset each hop pays us, over the accounts the ROUTE names,
+  // excluding every vault-owned account. ARM 2 divides the turn's implied rate
+  // by a sixteenth-sized probe's, from one source in one instant. NEITHER
+  // MEASURES PRICE, and the section header in invest-decision.ts says where the
+  // price defences actually live.
   //
   // THE AMOUNT IS THE ONE THE SWAP LOOP WILL USE, not a default purchase:
   // max_per_call caps the whole basket and is then split by weight, so a
-  // 1,000-dollar cap over three legs is about 333 dollars into ONE pool. The
+  // 1,000-dollar cap over three legs is about 333 dollars into ONE venue. The
   // convert has not happened yet, so a converting turn is tested at the most it
   // could reach — and the budget below is clamped to that same ceiling, so what
-  // was tested is what is spent (turnSpendCeiling).
+  // was tested is what is spent (turnSpendCeiling). BOTH ARMS ARE MONOTONE IN
+  // SIZE: a smaller spend takes fewer units (higher cover) and has no more
+  // impact, so a gate passed at the ceiling holds for anything the turn
+  // actually spends.
   //
-  // ONE MORE REQUEST, FOR THE WHOLE BASKET. The reserves live in the pools' two
-  // token vaults, whose addresses are inside the states just read, so they
-  // cannot be fetched in the same request; every leg's vaults go in one
-  // getMultipleAccountsInfo rather than one per leg.
+  // AND THE CONVERT IS ONE OF THE LEGS. venue_program is ONE field on the
+  // owner-signed policy (state.rs:212) that both convert.rs:88-91 and
+  // invest.rs:119-122 pin the passed account against, so wSOL -> USDC trades on
+  // the same venue as the basket and is measured by the same function, at a
+  // zero transfer fee. A refused conversion refuses the basket and a refused
+  // leg refuses the conversion: ONE verdict, as today, and reached before the
+  // wrap so the owner's SOL is never sold toward a basket that cannot be
+  // bought.
   const spendCeiling = turnSpendCeiling({
     held: usdcHeld,
     converting: converts,
     maxPerCall: policy.maxPerCall,
     headroom: rolling.headroom,
   });
-  const poolReads = policy.legs.map((_leg, index) => readPoolPair(legInfos[policy.legs.length + index]));
-  const vaultAddresses = [
-    ...new Set(poolReads.flatMap((read) => (read.ok ? [read.pair.vault0.toBase58(), read.pair.vault1.toBase58()] : []))),
-  ];
-  const vaultAmounts = new Map<string, bigint>();
-  if (vaultAddresses.length > 0) {
-    const vaultInfos = await connection.getMultipleAccountsInfo(vaultAddresses.map((address) => new PublicKey(address)), "confirmed");
-    for (const [index, info] of vaultInfos.entries()) {
-      if (info === null || info === undefined) continue;
-      try {
-        vaultAmounts.set(vaultAddresses[index]!, decodeTokenAccountAmount(info.data));
-      } catch {
-        // Left out of the map on purpose: the gate refuses a reserve it could
-        // not read rather than treating unreadable bytes as depth.
-      }
-    }
+  // DERIVED, NOT CREATED, and hoisted above the gate because the route builder
+  // needs the destination account to refuse an unmeasured vault account: the
+  // address is arithmetic over the mint and the vault, so it costs nothing, and
+  // whether the account EXISTS is still the token-account plan's question.
+  const legAtas = policy.legs.map((leg) => getAssociatedTokenAddressSync(leg.mint, vault, true, TOKEN_2022_PROGRAM_ID));
+
+  // THE MOST wSOL THIS TURN COULD CONVERT, which is what the convert leg is
+  // measured at. The wrap has not happened, so the reachable balance is what is
+  // already stranded as wSOL plus every free lamport the vault holds, capped by
+  // what convert.rs admits in one call. Measuring the ceiling rather than the
+  // eventual amount is the same monotonicity argument as the legs': the real
+  // convert is no larger, so it takes no more out of the venue.
+  const convertCeiling = converts ? convertAmount(wsolHeld + free, policy.maxPerCall) : 0n;
+
+  let measured: { readonly legs: LegVenue[] };
+  try {
+    measured = await measureBasketVenues(connection, {
+      vault,
+      policy,
+      legAtas,
+      usdcAta,
+      wsolAta,
+      spendCeiling,
+      convertCeiling,
+      admissionFees: admission.worstCaseFees,
+    });
+  } catch (error) {
+    // A MEASUREMENT THAT COULD NOT BE TAKEN IS A REFUSAL, NEVER A PASS, and it
+    // is still a refusal BEFORE THE WRAP. A route the builder refused, a quote
+    // that did not answer, an RPC that failed: none of them is evidence that
+    // the venue is deep, and the doctrine is that the owner's SOL is not sold
+    // toward a basket whose depth is unknown.
+    if (error instanceof VenueMeasurementRefusal) return { outcome: "REFUSED", detail: error.message };
+    return {
+      outcome: "REFUSED",
+      detail:
+        `the venues this basket would trade against could not be measured: ${summarizeUpstreamError(error)} — refusing ` +
+        "the whole basket and refusing to convert SOL toward it, because an unmeasurable depth is not a depth",
+    };
   }
-  const depth = legDepthDecision({
-    inMint: policy.inMint,
-    vaultAmounts,
-    legs: policy.legs.map((leg, index) => ({
-      mint: leg.mint,
-      pool: legPools[index]!,
-      spend: legShare(spendCeiling, leg.weightBps),
-      read: poolReads[index]!,
-    })),
-  });
+
+  const depth = legDepthDecision({ inMint: policy.inMint, legs: measured.legs });
   if (!depth.deep) return { outcome: depth.outcome, detail: depth.detail };
 
   // ── the token accounts this turn may have to create ────────────────────────
@@ -660,12 +727,17 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // IDEMPOTENCY IS KEPT, AND IT IS WHAT MAKES THE READ SAFE. The instruction is
   // still the idempotent one, so an account created by anyone between the read
   // and the send is a no-op rather than a failed basket.
-  const legAtas = policy.legs.map((leg) => getAssociatedTokenAddressSync(leg.mint, vault, true, TOKEN_2022_PROGRAM_ID));
   const plan = tokenAccountPlan(connection, crank.publicKey, vault, [
     { address: wsolAta, mint: NATIVE_MINT, programId: TOKEN_PROGRAM_ID },
     { address: usdcAta, mint: USDC, programId: TOKEN_PROGRAM_ID },
     ...policy.legs.map((leg, index) => ({ address: legAtas[index]!, mint: leg.mint, programId: TOKEN_2022_PROGRAM_ID })),
   ]);
+
+  // ONE CACHE FOR THE WHOLE TURN, for the reason lookupTableCache gives: the
+  // legs of a basket share Jupiter's tables, and the convert shares them with
+  // the legs. It is built here, beside the token-account plan and for the same
+  // reason — a turn that refuses above reaches neither.
+  const tables = lookupTableCache(connection);
 
   const purchases: InvestPurchase[] = [];
   try {
@@ -707,7 +779,66 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       }
       const toConvert = convertAmount(held, policy.maxPerCall);
 
-      const route = await fetchLiveRoute(connection, WSOL_USDC_POOL, NATIVE_MINT, USDC, TOKEN_PROGRAM_ID);
+      // THE ROUTE FOR THE AMOUNT THIS CONVERT ACTUALLY SENDS.
+      //
+      // WHY IT IS BUILT AGAIN RATHER THAN REUSED. A Jupiter route's instruction
+      // data carries the in-amount it was quoted for, so a route built at the
+      // gate's CEILING cannot be sent for the smaller amount convertAmount
+      // settles on — the swap blob and amount_in would disagree, and the
+      // program would be handed a swap for money the vault is not spending.
+      // The gate above still did its job: it refused BEFORE the wrap, at the
+      // largest size this turn could reach, and both arms are monotone in size.
+      //
+      // AND IT IS MEASURED AGAIN, not merely quoted again — remeasureForSend is
+      // the same measurement the gate made AND the same verdict on it, so this
+      // re-build carries its own census, its own depth refusal and its own
+      // slippage refusal rather than trusting the ceiling's. It kept only the
+      // route until 2026-09-21, which is to say it computed the census and
+      // discarded it.
+      let readyConvert: { readonly route: JupiterRoute; readonly amountToSend: bigint; readonly minOut: bigint } | null = null;
+      try {
+        const route = await remeasureForSend(connection, NATIVE_MINT, {
+          vault,
+          vaultIn: wsolAta,
+          vaultTarget: usdcAta,
+          inputMint: NATIVE_MINT,
+          targetMint: policy.inMint,
+          spend: toConvert,
+          feeBps: 0n,
+          maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
+          // THE OWNER'S FLOOR, APPLIED WHERE MISSING IT IS SURVIVABLE. The
+          // route builder refuses a quote whose min_out would land under
+          // min_convert_rate_wad — which is exactly what convert.rs would
+          // answer with FloorTooLow, only without the fee.
+          ownerFloorRateWad: policy.minConvertRateWad,
+        });
+        // BOTH NUMBERS INSIDE THE SAME try, because both are derived from this
+        // route's own bytes and both can refuse: investAmountIn if the blob
+        // spends anything other than what we asked for, investMinOut if the
+        // floor it recomputes disagrees with the route or sits under the
+        // owner's. A refusal from either is the same kind of answer as a
+        // refusal from the build, and gets the same rest.
+        readyConvert = {
+          route,
+          amountToSend: investAmountIn(route),
+          minOut: investMinOut(route),
+        };
+      } catch (error) {
+        // THE wSOL IS ALREADY WRAPPED BY NOW, and that is exactly why this is a
+        // rest rather than a failure: the stranded-wSOL rescue at the top of
+        // this block picks the balance up on a later sweep, and the USDC the
+        // vault already holds is still invested below. The refusal that keeps
+        // the owner's SOL as SOL is the one BEFORE the wrap.
+        //
+        // TWO REFUSAL TYPES, ONE OUTCOME. VenueMeasurementRefusal is the depth
+        // gate's; JupiterRouteRefusal is the route builder's, and carries the
+        // owner-floor case. Anything else is a real fault and still throws.
+        if (!(error instanceof VenueMeasurementRefusal) && !(error instanceof JupiterRouteRefusal)) throw error;
+        found.converted = `${held} wSOL was not converted, and waits for a later sweep: ${summarizeUpstreamError(error)}`;
+      }
+      if (readyConvert !== null) {
+      const route = readyConvert.route;
+      const observed = { inRaw: route.request.amountIn, outRaw: route.output.netOfQuotedOut };
       // THE SAME DECISION, ASKED AGAIN NOW THAT THERE IS A ROUTE TO COMPARE.
       // Its freshness arms passed before the wrap and cannot newly fire here —
       // the clock is the one this turn read — so what this second ask adds is
@@ -717,7 +848,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         sol: solFeed,
         usdc: usdcFeed,
         nowUnixSeconds,
-        routeWad: routeRateWad(route.observed),
+        routeWad: routeRateWad(observed),
       });
       if (!priced.convert) {
         // NOT A FAILURE, AND NOT THE END OF THE TURN. The wSOL stays wSOL, the
@@ -726,15 +857,12 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         // is invested below exactly as it would have been.
         found.converted = `${held} wSOL was not converted, and waits for a later sweep: ${priced.detail}`;
       } else {
-        const convertFloor = (toConvert * policy.minConvertRateWad) / 10n ** 18n;
-        // `route.observed` is already net of every fee on the way through —
-        // live-route.ts folds the pool's trade fee and both mints' Token-2022
-        // transfer fees into it — so the bound below is 2% of what this vault's
-        // USDC account is actually credited, and nothing is subtracted twice.
-        // (On this hop the transfer-fee factors are both 1 anyway: wSOL and USDC
-        // are classic SPL Token mints with no extensions.)
-        const { minOut } = tightenMinOut(toConvert, convertFloor, route.observed);
-        const args = { payer: vault, inputTokenAccount: wsolAta, outputTokenAccount: usdcAta, amountIn: toConvert, minAmountOut: minOut };
+        // THE AMOUNT AND THE FLOOR WERE BOTH RE-DERIVED FROM THE
+        // INSTRUCTION'S OWN BYTES, up in the try above. tightenMinOut is gone
+        // from this path: it bounded a rate OBSERVED from a pool we read
+        // ourselves, and under Jupiter the number that must hold is the one the
+        // blob we are about to sign actually guarantees.
+        const { amountToSend, minOut } = readyConvert;
         // The USDC account is created HERE when it is missing — inside the swap
         // that credits it, and only now that the route is in hand and the oracle
         // has agreed with it. A convert the oracle rested leaves no account
@@ -744,16 +872,17 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
           // THE VENUE THE OWNER SIGNED, not a literal: convert.rs pins this
           // account against policy.venue_program. The gate above has already
           // refused a venue this keeper cannot route, so what is passed here is
-          // both what the owner signed and something fetchLiveRoute can build.
+          // both what the owner signed and something buildJupiterRoute built.
           await convertCall(
             program,
             { crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta, vaultIn: usdcAta, venueProgram: policy.venueProgram },
-            { amountIn: toConvert, minOut, swap: args },
+            { amountIn: amountToSend, minOut, venueData: route.venueData },
           )
-            .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
+            .remainingAccounts(venueAccountsOf(route))
             .instruction(),
-        ]);
+        ], route, await tables.tablesFor(lookupTablesOf(route)));
         if (toConvert < held) found.converted = `converted ${toConvert} of ${held} wSOL; ${held - toConvert} left for later sweeps`;
+      }
       }
     }
 
@@ -811,7 +940,6 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
     }
 
     const filled: string[] = [];
-    let anyLive = false;
     for (const [index, leg] of policy.legs.entries()) {
       const weight = BigInt(leg.weightBps);
       const amountIn = legShare(budget, leg.weightBps);
@@ -821,27 +949,93 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       if (amountIn === 0n) continue;
 
       const mint = leg.mint;
-      const pool = deps.pools.get(mint.toBase58())!;
-      // DERIVED, NOT CREATED. The address is arithmetic over the mint and the
-      // vault, so it costs nothing; whether the account EXISTS came out of the
-      // plan's one batched read, and if it does not, the create rides the invest
-      // below rather than a transaction of its own sent before the route was
-      // even fetched.
+      // DERIVED ABOVE THE GATE, NOT CREATED HERE. The address is arithmetic
+      // over the mint and the vault, so it costs nothing and the route builder
+      // already had it; whether the account EXISTS came out of the plan's one
+      // batched read, and if it does not, the create rides the invest below
+      // rather than a transaction of its own sent before the route was even
+      // fetched.
       const targetAta = legAtas[index]!;
 
-      const route = await fetchLiveRoute(connection, pool, USDC, mint, TOKEN_2022_PROGRAM_ID);
-      const investFloor = (amountIn * leg.minOutRateWad) / 10n ** 18n;
-      // THE OBSERVED PRICE IS ALREADY WHAT THIS VAULT'S ATA GETS CREDITED, and
-      // that net delta is what both swap_v2 and invest check their thresholds
-      // against. live-route.ts's observedRate takes this mint's Token-2022
-      // transfer fee out of the rate itself, so min-out.ts subtracts only the
-      // slippage tolerance and the bound is 2% of what actually arrives.
-      // Taking `admission.fees` off again HERE would net the same fee twice and
-      // hand the program a LOWER min_out than the bound claims — see min-out.ts.
-      const { minOut, live } = tightenMinOut(amountIn, investFloor, route.observed);
-      anyLive = anyLive || live;
+      // THE FINAL ROUTE, AT THE REAL amountIn, AND ITS OWN MEASUREMENT.
+      //
+      // WHY IT IS BUILT AGAIN. The first gate tested this turn's CEILING; the
+      // budget can be smaller (the convert brought in less than the cap, or the
+      // 30-day headroom bit), and a Jupiter route's instruction data carries
+      // the in-amount it was quoted for — so the route that is SENT has to be
+      // the route built for the amount that is sent.
+      //
+      // ── the second run, and what it is and is not ────────────────────────
+      //
+      // IT IS A SAFETY NET, NOT THE DOCTRINAL GATE. A refusal HERE leaves the
+      // vault holding USDC it did not want — the wrap and the convert are
+      // separate transactions and have already happened. That is the accepted
+      // cost of them being separate, and it is strictly better than buying into
+      // a drained venue. The refusal that protects the owner's SOL is the FIRST
+      // one, before the wrap; whoever reads this second run as that one will
+      // conclude the SOL is safe when it is not.
+      let route: JupiterRoute;
+      try {
+        route = await remeasureForSend(connection, policy.inMint, {
+          vault,
+          vaultIn: usdcAta,
+          vaultTarget: targetAta,
+          inputMint: policy.inMint,
+          targetMint: mint,
+          spend: amountIn,
+          // The worst case, for the same reason the gate above uses it.
+          feeBps: admission.worstCaseFees.get(mint.toBase58())?.bps ?? 0n,
+          maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
+          ownerFloorRateWad: leg.minOutRateWad,
+        });
+      } catch (error) {
+        // THE FIRST REFUSED IN THIS FILE THAT CAN BE REACHED AFTER MONEY HAS
+        // MOVED, AND IT CARRIES THE MONEY WITH IT. Every other REFUSED sits
+        // above the wrap; this one can fire on leg 1 of a three-leg basket with
+        // leg 0 already confirmed — a real signature, real USDC spent, real
+        // stock in the vault's ATA. bin/keeper.mts iterates
+        // `invest.purchases ?? []` and is the only thing that ever writes them,
+        // so returning without them is not a delay, it is a loss: the dashboard
+        // and the vault's history show a turn that bought nothing while the
+        // chain shows a completed buy. The catch below says exactly that about
+        // FAILED, and this return used to be the exception to it.
+        //
+        // BOTH REFUSAL TYPES LAND HERE. VenueMeasurementRefusal is now the
+        // depth verdict's as well as the slippage check's, and either is a
+        // reasoned refusal rather than a fault — so neither is reported as a
+        // FAILED turn naming an exception.
+        if (!(error instanceof VenueMeasurementRefusal)) throw error;
+        return {
+          outcome: "REFUSED",
+          detail: noted(
+            `${error.message} — measured again at this leg's real ${amountIn} raw, after the wrap and convert. ` +
+              "The vault is holding in-asset it did not get to spend; the refusal that keeps the owner's SOL as SOL is " +
+              "the one before the wrap, not this one",
+          ),
+          purchases: purchases.length > 0 ? purchases : undefined,
+        };
+      }
 
-      const args = { payer: vault, inputTokenAccount: usdcAta, outputTokenAccount: targetAta, amountIn, minAmountOut: minOut };
+      // THE TWO NUMBERS THE PROGRAM WILL CHECK, BOTH RE-DERIVED FROM THE BLOB
+      // ABOUT TO BE SIGNED.
+      //
+      // investAmountIn refuses a route whose instruction spends anything other
+      // than the amount this turn asked for: amount_in is the CALLER's number,
+      // never the API's, and invest.rs bounds the caller's number against
+      // min_investment, max_per_call and the 30-day cap. investMinOut
+      // recomputes the venue's own floor out of that same blob's tail, takes
+      // this mint's Token-2022 transfer fee off it once, and refuses a result
+      // under the owner's signed min_out_rate_wad — which invest.rs would
+      // otherwise reject with FloorTooLow after the fee had been paid.
+      //
+      // tightenMinOut IS GONE FROM THIS PATH, deliberately. It bounded a rate
+      // this keeper OBSERVED by reading a pool itself, which is a thing it can
+      // no longer do and no longer needs to: the number that has to hold is the
+      // one the instruction we are signing actually guarantees, and only the
+      // instruction knows it.
+      const amountToSend = investAmountIn(route);
+      const minOut = investMinOut(route);
+
       // An account that does not exist yet holds nothing, which balanceOf already
       // reports as zero, so the delta below is the purchase either way.
       const before = await balanceOf(connection, targetAta);
@@ -860,11 +1054,11 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
             // pins it byte for byte against policy.venue_program.
             venueProgram: policy.venueProgram,
           },
-          { legIndex: index, amountIn, minOut, swap: args },
+          { legIndex: index, amountIn: amountToSend, minOut, venueData: route.venueData },
         )
-          .remainingAccounts(buildSwapV2AccountMetas(route, args).map((m) => ({ ...m, isSigner: false })))
+          .remainingAccounts(venueAccountsOf(route))
           .instruction(),
-      ]);
+      ], route, await tables.tablesFor(lookupTablesOf(route)));
       const bought = (await balanceOf(connection, targetAta)) - before;
       filled.push(`${Number(weight) / 100}% ${mint.toBase58().slice(0, 8)}… ${amountIn}→${bought}`);
       purchases.push({
@@ -883,14 +1077,16 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       outcome: "INVESTED",
       detail: noted(
         `bought ${filled.join(" · ")}` +
-          // `live` is NOT "a price was readable" — an unreadable route throws in
-          // live-route.ts and never gets here. It is "the bound derived from that
-          // price beat the floor". So the false arm means the owner's own signed
-          // floor was the tighter of the two, which is a fact about the policy,
-          // not a missing observation.
-          (anyLive
-            ? " (min_out from a live observed price)"
-            : " (min_out is the POLICY FLOOR — the live price gave a bound no tighter than it)"),
+          // THE OLD SENTENCE HERE REPORTED WHICH OF TWO BOUNDS WON, and under
+          // Jupiter there are no longer two. tightenMinOut compared a rate this
+          // keeper observed off a pool against the owner's signed floor and
+          // said which was tighter; investMinOut takes the floor the ROUTE'S
+          // OWN BYTES guarantee, nets the transfer fee off it, and REFUSES
+          // outright if the result is under the owner's floor. So by the time a
+          // leg is bought, min_out is the venue's guaranteed floor and it has
+          // already cleared the owner's — there is no "policy floor won" case
+          // left to report, because that case is now a refusal.
+          " (min_out is the route's own guaranteed floor, net of the leg's transfer fee, checked against the owner's)",
       ),
       purchases,
     };
@@ -903,6 +1099,158 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       purchases: purchases.length > 0 ? purchases : undefined,
     };
   }
+}
+
+/**
+ * How old a quote this turn will sign against. Jupiter's own /swap-instructions
+ * round trip and the vault-account read already sit inside this window, so it
+ * is the whole life of a price from quote to compile, not a network budget.
+ */
+export const ROUTE_MAX_AGE_MS = 30_000;
+
+/**
+ * THE SECOND MEASUREMENT, for the amount that will really be sent — the route
+ * and the verdict on it, together, or a refusal.
+ *
+ * WHY IT IS ONE FUNCTION AND NOT TWO CALL SITES. It used to be two, and they
+ * drifted: the leg loop measured and then judged, while the CONVERT measured,
+ * kept `measured.route` and never read `measured.venue` at all. The census was
+ * computed and thrown away — under a comment three lines above saying "AND IT
+ * IS MEASURED AGAIN, not merely quoted again ... this re-build carries its own
+ * census". Only the slippage refusal survived there, because that one throws
+ * from inside measureLegVenue. Returning the route ALONE is what makes the
+ * omission unrepresentable: there is no venue left over to forget.
+ *
+ * WHY THE SECOND MEASUREMENT IS NEEDED AT ALL, and what it is not. A route's
+ * instruction data carries the in-amount it was quoted for, so the gate's
+ * route — built at this turn's CEILING — cannot be sent for the smaller amount
+ * the budget or convertAmount settles on. The rebuild is therefore a different
+ * route through possibly different AMMs (measured 2026-09-21: a 25 USD quote
+ * on Kipseli+Manifest, a 1 USD quote of the same instant on Byreal+Manifest),
+ * which is exactly why it has to be measured rather than trusted. It is a
+ * SAFETY NET, not the doctrinal gate: a refusal here comes after the wrap.
+ *
+ * IT THROWS RATHER THAN RETURNING A VERDICT so that a caller cannot spend the
+ * route by ignoring one branch, and so that both callers can give the same
+ * refusal the outcome their own position demands — a rest for the convert, a
+ * REFUSED turn for a leg.
+ */
+export async function remeasureForSend(
+  connection: Connection,
+  /** The mint the spend is denominated in: the policy's in_mint for a leg, wSOL for the convert. */
+  spendMint: PublicKey,
+  params: Parameters<typeof measureLegVenue>[1],
+): Promise<JupiterRoute> {
+  const { route, venue } = await measureLegVenue(connection, params);
+  const stillDeep = legDepthDecision({ inMint: spendMint, legs: [venue] });
+  if (!stillDeep.deep) throw new VenueMeasurementRefusal(stillDeep.detail);
+  return route;
+}
+
+/**
+ * Every venue this basket would trade against, measured in one pass, BEFORE the
+ * wrap — the convert included.
+ *
+ * THE ROUTES IT BUILDS ARE NOT THE ROUTES THAT ARE SIGNED, and saying so is the
+ * point of this paragraph. It used to return them, under a comment arguing that
+ * "what was measured and what is spent have to be the same object" — and
+ * nothing read them: both money paths rebuilt. They cannot be reused, either.
+ * A route's instruction data carries the in-amount it was quoted for, and the
+ * amount this turn ends up spending is smaller than the ceiling whenever the
+ * convert brought in less than the cap or the 30-day headroom bit, so the blob
+ * and amount_in would disagree and the program would be handed a swap for money
+ * the vault is not spending.
+ *
+ * SO WHAT THIS GATE IS: a refusal BEFORE THE WRAP, taken at the largest size
+ * this turn could reach, on routes that are then thrown away. Both arms are
+ * monotone in size, so passing at the ceiling is passing for anything smaller.
+ * What binds the route actually SIGNED is remeasureForSend, which measures and
+ * judges each rebuild — the legs' and the convert's alike.
+ *
+ * SEQUENTIAL, NOT PARALLEL. Each leg costs two quotes and two account reads
+ * against keyless public endpoints, and lite-api.jup.ag rate-limits; an 8-leg
+ * basket firing sixteen quotes at once is a basket that measures nothing and
+ * refuses itself. The cost is latency on a path that has already decided not to
+ * be in a hurry.
+ */
+async function measureBasketVenues(
+  connection: Connection,
+  params: {
+    readonly vault: PublicKey;
+    readonly policy: InvestmentPolicyState;
+    readonly legAtas: readonly PublicKey[];
+    readonly usdcAta: PublicKey;
+    readonly wsolAta: PublicKey;
+    readonly spendCeiling: bigint;
+    readonly convertCeiling: bigint;
+    /** Each leg's WORST-CASE fee: what the slippage is sized against. */
+    readonly admissionFees: ReadonlyMap<string, TransferFeeTerms>;
+  },
+): Promise<{ readonly legs: LegVenue[] }> {
+  const legs: LegVenue[] = [];
+
+  for (const [index, leg] of params.policy.legs.entries()) {
+    const spend = legShare(params.spendCeiling, leg.weightBps);
+    const target = params.legAtas[index]!;
+    if (spend <= 0n) {
+      // A leg this turn sends no transaction for is a leg with no venue to
+      // judge; legDepthDecision skips it for the same reason. Nothing is
+      // quoted for it either, so the measurement costs nothing.
+      legs.push({ mint: leg.mint, spend, venueLabels: [], hops: [], censusScope: "every-hop", impact: { compared: false, why: "this leg's share of the budget rounds to nothing, so this turn sends no swap for it" } });
+      continue;
+    }
+    const { venue } = await measureLegVenue(connection, {
+      vault: params.vault,
+      vaultIn: params.usdcAta,
+      vaultTarget: target,
+      inputMint: params.policy.inMint,
+      targetMint: leg.mint,
+      spend,
+      // THE FEE THE ADMISSION GATE ALREADY READ, off the mint's own bytes and
+      // the clock this turn read — not a second read that could disagree with
+      // it. legSlippageBps turns it into a slippage strictly above itself, and
+      // measureLegVenue refuses if the route builder's own read disagrees.
+      //
+      // THE WORST CASE, NOT THE ACTIVE FEE, and that is what stops the two from
+      // disagreeing: buildJupiterRoute models the destination mint against its
+      // own `fee.worstCase`, so sizing against today's rate would refuse every
+      // basket for the two epochs before any scheduled rise. See
+      // worstCaseTransferFee.
+      feeBps: params.admissionFees.get(leg.mint.toBase58())?.bps ?? 0n,
+      maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
+      ownerFloorRateWad: leg.minOutRateWad,
+    });
+    legs.push(venue);
+  }
+
+  // THE CONVERT, AS ONE MORE LEG OF THE SAME BASKET. feeBps is 0 because wSOL
+  // and USDC are classic SPL Token mints with no extensions, so legSlippageBps
+  // returns the keeper's plain 200. It feeds the SAME legDepthDecision call, so
+  // a shallow convert refuses the whole basket and a shallow leg refuses the
+  // convert — one verdict, before the wrap.
+  if (params.convertCeiling > 0n) {
+    const { venue } = await measureLegVenue(connection, {
+      vault: params.vault,
+      vaultIn: params.wsolAta,
+      vaultTarget: params.usdcAta,
+      inputMint: NATIVE_MINT,
+      targetMint: params.policy.inMint,
+      spend: params.convertCeiling,
+      feeBps: 0n,
+      maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
+      // NO ownerFloorRateWad HERE, DELIBERATELY. This gate asks whether the
+      // venue is DEEP, and its verdict refuses the whole basket. The owner's
+      // min_convert_rate_wad is a PRICE floor, and a price below it is a
+      // market that moved — a reason to leave the SOL as SOL this sweep, not a
+      // reason to stop buying with the USDC the vault already holds. Passing it
+      // here would turn every dip under the floor into a whole-basket refusal;
+      // the floor is applied on the send path below, where missing it rests the
+      // conversion and the legs are bought as usual.
+    });
+    legs.push(venue);
+  }
+
+  return { legs };
 }
 
 async function balanceOf(connection: Connection, ata: PublicKey): Promise<bigint> {
@@ -952,7 +1300,220 @@ function shortfall(plan: WrapPlan, crankRead: boolean): string {
   return `${plan.free - plan.amount} free lamports wait for later sweeps, because ${why}`;
 }
 
-async function sendWithBudget(
+/**
+ * The compute budget every money transaction this tick sends carries.
+ *
+ * A LIMIT WITHOUT A PRICE IS NOT A BID. Setting only the unit limit told the
+ * scheduler how much room to reserve and offered nothing for it, so under
+ * congestion these transactions are deprioritised and dropped — and there is
+ * no retry anywhere. The price is small in absolute terms (1.4M units at
+ * 10_000 micro-lamports is 14_000 lamports, on top of the 5_000-lamport
+ * signature fee) and buys inclusion when it matters.
+ *
+ * ── WHY 1_400_000 AND NOT THE 600_000 THIS WAS ──────────────────────────────
+ *
+ * THE OLD NUMBER WAS DERIVED FOR A SWAP THIS KEEPER NO LONGER BUILDS. Its
+ * comment read "600_000 UNITS COVERS THE CREATE TOO ... nothing next to the
+ * CLMM swap it rides with": one Raydium CLMM swap plus an idempotent ATA
+ * create. The venue moved to Jupiter and the number did not move with it — the
+ * species docs/TESTING_TRAPS.md calls prose that outruns its measurement, here
+ * outliving the thing it was measured of. The routes actually observed are not
+ * one swap: measured 2026-09-21 against lite-api.jup.ag, USDC -> ANTHROPIC is a
+ * 2-hop chain at $5/$25/$250 and 3-to-5-hop routes appear at the same sizes
+ * (Scorch + Raydium CLMM + Manifest; BisonFi + Byreal + Scorch + GoonFi V2 +
+ * Manifest), each hop a CPI of its own out of JUP6..., under the sip_vault
+ * invest wrapper, with an ATA create in front on a leg's first buy.
+ *
+ * WHAT 1_400_000 IS, AND WHAT IT IS NOT. It is Jupiter's own answer: every
+ * /swap-instructions response for these routes carried
+ * computeUnitLimit = 1_400_000, which is also the per-transaction maximum the
+ * runtime allows. It is NOT a consumption measurement — nothing here has
+ * metered what one of these transactions really burns, and this comment does
+ * not pretend otherwise. It is the safe end of an asymmetry: too high costs
+ * 8_000 lamports a transaction over the old bid, while too low reverts with
+ * "exceeded CUs" on EVERY sweep, reporting a compute error for what is really
+ * a route one hop longer than the budget from a retired venue.
+ *
+ * THE VALUES AND THE ORDER ARE THE CLAIM. They are named here, once, because
+ * the same two instructions now have to be laid down by two different builders
+ * — the legacy one and the v0 one — and a congested slot must price a Jupiter
+ * transaction exactly as it prices a Raydium one. A test pins both builders to
+ * this list rather than to two typed-out copies of it.
+ */
+export const COMPUTE_UNIT_LIMIT = 1_400_000;
+export const COMPUTE_UNIT_PRICE_MICRO_LAMPORTS = 10_000;
+
+/** The compute-budget pair, in order, in front of the instructions they pay for. */
+export function budgetedInstructions(
+  instructions: readonly TransactionInstruction[],
+): TransactionInstruction[] {
+  return [
+    ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: COMPUTE_UNIT_PRICE_MICRO_LAMPORTS }),
+    ...instructions,
+  ];
+}
+
+/**
+ * One turn's address lookup tables, fetched once each however many legs want them.
+ *
+ * WHY A CACHE AND NOT A FETCH PER LEG. Jupiter hands back its OWN tables, and
+ * the same two or three serve most routes — so an 8-leg basket that fetched
+ * per leg would ask the RPC for the same 32-byte account eight times inside
+ * one turn. The cache is per turn and not per process on purpose: a table is a
+ * mutable account whose addresses can be extended, and a process-lifetime cache
+ * would compile a message against a list the chain no longer has.
+ *
+ * THE PROMISE IS WHAT IS CACHED, not the resolved table, so two legs asking at
+ * the same moment share one round trip instead of racing to start two. A
+ * rejection is evicted: a transient RPC blip must not be remembered as this
+ * table's permanent answer for the rest of the turn.
+ *
+ * A TABLE THE CHAIN DOES NOT HAVE IS A REFUSAL, NOT AN OMISSION. Compiling a
+ * v0 message against a missing table would silently produce a message whose
+ * account indexes resolve to nothing on the validator, which is a transaction
+ * that fails after it has been signed and sent. It throws here instead, before
+ * any of that.
+ */
+export function lookupTableCache(connection: Connection) {
+  const byAddress = new Map<string, Promise<AddressLookupTableAccount>>();
+  return {
+    async tablesFor(addresses: readonly PublicKey[]): Promise<AddressLookupTableAccount[]> {
+      return Promise.all(
+        addresses.map((address) => {
+          const name = address.toBase58();
+          const known = byAddress.get(name);
+          if (known !== undefined) return known;
+          const pending = connection.getAddressLookupTable(address).then(({ value }) => {
+            if (value === null) {
+              throw new Error(`address lookup table ${name} is not on chain; the route that named it cannot be compiled`);
+            }
+            return value;
+          });
+          byAddress.set(name, pending);
+          pending.catch(() => byAddress.delete(name));
+          return pending;
+        }),
+      );
+    },
+  };
+}
+
+/**
+ * The accounts one swap's `remainingAccounts` carries.
+ *
+ * EVERY isSigner IS false, AND MUST STAY false. The vault PDA is in the list
+ * and cannot sign the OUTER instruction; invest.rs and convert.rs re-mark
+ * exactly that key as a signer for the inner CPI, which is the whole authority
+ * the program lends. buildJupiterRoute already does this, and the re-map here
+ * is belt and braces over a list that arrives from an HTTP response.
+ *
+ * ONE VENUE, SO ONE ARM. This used to take `LiveRoute | JupiterRoute` and
+ * branch on which it had, because the Raydium arm's metas were built here from
+ * a pool read (buildSwapV2AccountMetas) while Jupiter's arrived whole. Naming
+ * the union was what made the branch a question TypeScript could answer. With
+ * Raydium retired the union is gone and so is the branch — but NOT the naming:
+ * the parameter is still the concrete JupiterRoute rather than a structural
+ * `{ remainingAccounts }`, because a weak type with one member accepts any
+ * object at all and would go on compiling if the field were renamed.
+ */
+export function venueAccountsOf(route: JupiterRoute): AccountMeta[] {
+  return route.remainingAccounts.map((meta) => ({ ...meta, isSigner: false }));
+}
+
+/**
+ * A route's own address lookup tables.
+ *
+ * WHY THIS IS NOT INLINED. A multi-hop Jupiter route does not fit a legacy
+ * transaction — measured 2026-09-21, five live USDC->ANTHROPIC routes ran
+ * 1,268 to 1,938 bytes against a 1,232 limit, and every one of them fit once
+ * its tables were applied. An EMPTY list is still a legitimate answer (a route
+ * that named no tables), which is why sendWithBudget treats empty as legacy
+ * rather than as an error.
+ */
+export function lookupTablesOf(route: JupiterRoute): readonly PublicKey[] {
+  return route.lookupTableAddresses;
+}
+
+
+/**
+ * The v0 transaction this tick sends when the route carries lookup tables.
+ *
+ * PURE, AND THAT IS THE POINT: no clock, no network, no key. Everything that
+ * decides the transaction's BYTES is an argument, so the size of a real route
+ * can be measured off exactly the object production sends — see
+ * scripts/measure-route-size.mts and the byte counts pinned in
+ * test/invest-transaction.test.ts.
+ *
+ * ANCHOR SETS NEITHER FIELD ON THIS BRANCH. AnchorProvider.sendAndConfirm
+ * (0.32.1, provider.js) fills in `feePayer` and `recentBlockhash` only when the
+ * transaction is a legacy one; for a VersionedTransaction it signs and sends
+ * what it is handed. Both are therefore supplied here, and a message compiled
+ * without them would be rejected by the cluster as unsigned-for/expired rather
+ * than caught by a type.
+ */
+export function buildV0Transaction(params: {
+  readonly payer: PublicKey;
+  readonly recentBlockhash: string;
+  readonly instructions: readonly TransactionInstruction[];
+  readonly lookupTables: readonly AddressLookupTableAccount[];
+}): VersionedTransaction {
+  const message = new TransactionMessage({
+    payerKey: params.payer,
+    recentBlockhash: params.recentBlockhash,
+    instructions: [...params.instructions],
+  }).compileToV0Message([...params.lookupTables]);
+  return new VersionedTransaction(message);
+}
+
+/**
+ * The exact wire size of a versioned transaction, INCLUDING one that does not fit.
+ *
+ * WHY NOT serialize().length. web3.js encodes a v0 MESSAGE into a buffer of
+ * exactly PACKET_DATA_SIZE, so past a 1,232-byte message
+ * `VersionedTransaction.serialize()` does not return a large number — it
+ * throws "encoding overruns Uint8Array". `v0TransactionBytes()` in
+ * jupiter-route.ts calls it and inherits that. So the one question worth
+ * asking — HOW FAR over the limit is this route without its lookup tables —
+ * is the one question those cannot answer, and "it threw" is not a byte count.
+ * Three of the five ANTHROPIC routes sampled on 2026-09-21 were that big.
+ *
+ * AND THE CAP IS ON THE MESSAGE, NOT THE TRANSACTION, which is its own trap:
+ * the captured route's message is 1,203 bytes, so serialize() succeeds and
+ * returns 1,268 — a transaction already 36 bytes past what the wire accepts.
+ * A serialize() that did not throw is therefore no evidence that a route
+ * fits; only the comparison against PACKET_DATA_SIZE is.
+ *
+ * So the length is computed from the compiled message instead, by the wire
+ * format's own arithmetic: a version prefix, a 3-byte header, the static keys,
+ * the blockhash, the instructions and the address-table lookups, under
+ * compact-u16 counts, plus the signatures. A test asserts this agrees with
+ * `serialize().length` byte for byte on every transaction small enough for
+ * web3.js to serialize at all, which is what keeps the arithmetic honest.
+ */
+export function versionedTransactionBytes(transaction: VersionedTransaction): number {
+  const message = transaction.message;
+  const compact = (count: number): number => (count < 0x80 ? 1 : count < 0x4000 ? 2 : 3);
+  let bytes = 1 + 3; // the 0x80 version prefix, then the three header bytes
+  bytes += compact(message.staticAccountKeys.length) + 32 * message.staticAccountKeys.length;
+  bytes += 32; // recentBlockhash
+  bytes += compact(message.compiledInstructions.length);
+  for (const instruction of message.compiledInstructions) {
+    bytes += 1; // programIdIndex
+    bytes += compact(instruction.accountKeyIndexes.length) + instruction.accountKeyIndexes.length;
+    bytes += compact(instruction.data.length) + instruction.data.length;
+  }
+  bytes += compact(message.addressTableLookups.length);
+  for (const lookup of message.addressTableLookups) {
+    bytes += 32; // the table's own address
+    bytes += compact(lookup.writableIndexes.length) + lookup.writableIndexes.length;
+    bytes += compact(lookup.readonlyIndexes.length) + lookup.readonlyIndexes.length;
+  }
+  const signatures = message.header.numRequiredSignatures;
+  return compact(signatures) + 64 * signatures + bytes;
+}
+
+export async function sendWithBudget(
   provider: anchor.AnchorProvider,
   crank: Keypair,
   /**
@@ -961,22 +1522,87 @@ async function sendWithBudget(
    * transaction that uses it (tokenAccountPlan) instead of in one of its own.
    */
   instructions: readonly anchor.web3.TransactionInstruction[],
+  /**
+   * THE ROUTE THESE INSTRUCTIONS SPEND, AGED HERE — the last thing that happens
+   * before the signature.
+   *
+   * REQUIRED, AND NOT OPTIONAL, because this is the check jupiter-route.ts
+   * prescribes in words ("a caller that holds a route for a while re-runs
+   * verifyRouteFresh before it signs") and nothing ran. The only enforcement
+   * was the one INSIDE verifySharedAccountsRoute at build time, and the keeper
+   * does a great deal after the build: a probe quote, readRouteAccounts, a
+   * second findVaultOwnedTokenAccounts, balanceOf, the lazy token-account read,
+   * a getAddressLookupTable per table and getLatestBlockhash — none of them
+   * inside any age bound. min_out was sized against the quote's own
+   * otherAmountThreshold, so a slow RPC or a rate-limited lite-api means
+   * signing a floor nobody re-aged, and paying for the revert instead of
+   * refusing for free. An optional parameter would have let a new call site
+   * skip it silently, which is how it came to be skipped everywhere.
+   */
+  route: JupiterRoute,
+  /**
+   * The route's own lookup tables, already fetched — empty for a venue that
+   * needs none.
+   *
+   * EMPTY MEANS LEGACY, AND EMPTY IS STILL REACHABLE. It no longer means
+   * "Raydium": every route this keeper builds is now Jupiter's, and a Jupiter
+   * route that names no lookup tables is an ordinary one-hop answer. A v0
+   * message with no tables would be two bytes LARGER than the legacy encoding
+   * of the same instructions and otherwise identical (v0TransactionBytes in
+   * jupiter-route.ts), so there is nothing to gain by compiling one — and the
+   * legacy send is the path that has been confirming on mainnet since 09-19.
+   *
+   * THIS IS NOT A SIZE CHECK, AND MUST NOT BE READ AS ONE. A route that named
+   * no tables can still be too big; what makes that safe is that the tables a
+   * route DOES name are always applied, never dropped for being inconvenient.
+   */
+  lookupTables: readonly AddressLookupTableAccount[] = [],
 ): Promise<string> {
-  // A LIMIT WITHOUT A PRICE IS NOT A BID. Setting only the unit limit told the
-  // scheduler how much room to reserve and offered nothing for it, so under
-  // congestion these transactions are deprioritised and dropped — and there is
-  // no retry anywhere. The price is small in absolute terms (600k units at
-  // 10_000 micro-lamports is 6_000 lamports, on top of the 5_000-lamport
-  // signature fee) and buys inclusion when it matters.
+  // AND IT IS THE BUILDER'S OWN CHECK, not a second spelling of it: the same
+  // pure function, the same ROUTE_MAX_AGE_MS the build used, so a refusal here
+  // carries the builder's "route-age" message — which distinguishes a market
+  // that moved from an RPC that stalled.
+  verifyRouteFresh(route, { nowMs: Date.now() }, { maxAgeMs: ROUTE_MAX_AGE_MS });
+  const budgeted = budgetedInstructions(instructions);
+  if (lookupTables.length === 0) {
+    return provider.sendAndConfirm(new Transaction().add(...budgeted), [crank]);
+  }
+
+  // THE CRANK PAYS, AND ON THIS BRANCH IT MUST ALSO BE THE PROVIDER'S WALLET.
   //
-  // 600_000 UNITS COVERS THE CREATE TOO. An idempotent associated-token-account
-  // creation costs on the order of 25k units — under 5% of this budget, and
-  // nothing next to the CLMM swap it rides with.
-  const tx = new Transaction()
-    .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }))
-    .add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10_000 }))
-    .add(...instructions);
-  return provider.sendAndConfirm(tx, [crank]);
+  // On the legacy branch Anchor defaults `feePayer` to the provider's wallet,
+  // so the fee payer there is the WALLET and the crank is merely an extra
+  // signer. Here the fee payer is stated, and it is the crank — which is what
+  // the rest of the keeper already believes (`crank-low` stops investing when
+  // the CRANK empties, not when the wallet does).
+  //
+  // The two readings agree today only because bin/keeper.mts passes the settle
+  // keypair as the crank — "the attester and the crank are this one key during
+  // the hackathon". That is exactly the N=1 coincidence docs/TESTING_TRAPS.md
+  // warns about, and it bites here: Anchor signs with its wallet AFTER us, and
+  // VersionedTransaction.sign throws on a key that is not a required signer. So
+  // the day the two keys separate, this branch would die inside web3.js with
+  // "Cannot sign with non signer key". It says so itself instead.
+  const wallet = provider.wallet.publicKey;
+  if (!wallet.equals(crank.publicKey)) {
+    throw new Error(
+      `this transaction is payable by the crank ${crank.publicKey.toBase58()} but the provider's wallet is ${wallet.toBase58()}: ` +
+        "Anchor signs a VersionedTransaction with its own wallet, which is not a signer of this message",
+    );
+  }
+
+  // FRESH, AND READ HERE. Anchor reads a blockhash itself on the legacy branch
+  // and not on this one; reading it as late as possible is also what gives the
+  // transaction its full expiry window rather than one already spent on the
+  // route's own round trips.
+  const { blockhash } = await provider.connection.getLatestBlockhash("confirmed");
+  const transaction = buildV0Transaction({
+    payer: crank.publicKey,
+    recentBlockhash: blockhash,
+    instructions: budgeted,
+    lookupTables,
+  });
+  return provider.sendAndConfirm(transaction, [crank]);
 }
 
 /** One token account a turn may need, and what it would take to create it. */

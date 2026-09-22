@@ -53,7 +53,7 @@ import {
   DEFAULT_VAULT_POLICY,
   LEG_FLOOR_MARGIN_BPS,
   OFFERED_LEGS,
-  RAYDIUM_CLMM,
+  JUPITER_V6,
   SIP_PROGRAM_ID,
   TOKEN_PROGRAM,
   USDC_MINT,
@@ -424,10 +424,22 @@ export async function setPolicyFlow(deps: PensionFlowDeps, input: SetPolicyInput
  * too. The alternative — offering a name whose bytes cannot be checked — would
  * mean signing a CPI target on the server's word alone.
  */
-export const VERIFIABLE_VENUES: ReadonlyMap<string, string> = new Map([["raydium-clmm", RAYDIUM_CLMM]]);
+export const VERIFIABLE_VENUES: ReadonlyMap<string, string> = new Map([["jupiter-v6", JUPITER_V6]]);
 
-/** The name of the venue built when none is chosen, matching the route's DEFAULT_VENUE. */
-export const DEFAULT_VENUE_NAME = "raydium-clmm";
+/**
+ * The name of the venue built when none is chosen, matching the route's
+ * DEFAULT_VENUE.
+ *
+ * IT WAS "raydium-clmm", AND THAT MADE EVERY POLICY THIS PANEL COULD SIGN A
+ * DEAD ONE. The keeper on this branch routes Jupiter and nothing else
+ * (invest-decision.ts ROUTABLE_VENUES) and refuses Raydium by name before the
+ * wrap, all-or-nothing and forever, so a policy naming it never buys, at any
+ * balance, while the rent that signed it stays spent. The depth window, the
+ * per-leg floor and the picker were all arithmetic over a venue the keeper
+ * would refuse outright — the whole gate was moot and the form said nothing
+ * about it.
+ */
+export const DEFAULT_VENUE_NAME = "jupiter-v6";
 
 export interface InvestPolicyInput {
   readonly pensionKey: string;
@@ -446,10 +458,17 @@ export interface InvestPolicyInput {
   readonly minInvestment?: bigint;
   /**
    * The basket, BY MINT and never positional, in basis points summing to
-   * exactly LEG_WEIGHT_TOTAL_BPS; equal shares over the catalogue when absent.
-   * The server refuses a sum that is not 10,000 rather than normalising it, and
-   * refuses a mint it does not offer, so this cannot quietly become a different
-   * basket than the one the owner saw.
+   * exactly LEG_WEIGHT_TOTAL_BPS; equal shares over the WHOLE catalogue when
+   * absent. The server refuses a sum that is not 10,000 rather than normalising
+   * it, and refuses a mint it does not offer, so this cannot quietly become a
+   * different basket than the one the owner saw.
+   *
+   * ITS KEYS ARE THE BASKET, NOT JUST ITS SHARES. A mint the owner did not pick
+   * is ABSENT from this map, and absence is how it stays out of the policy: the
+   * program takes weight_bps as a u16 it requires to be greater than zero, so
+   * there is no such thing as a leg held at 0 %. A picker that "kept" an
+   * unticked row at zero would build a transaction the chain rejects after
+   * Phantom had already asked for the signature.
    */
   readonly weights?: ReadonlyMap<string, number>;
   /** A venue NAME from VERIFIABLE_VENUES; the route's default when absent. */
@@ -556,9 +575,10 @@ export async function investPolicyFlow(deps: PensionFlowDeps, input: InvestPolic
   // refuses a float and a bare number outright, so nothing can arrive lossy.
   if (input.minInvestment !== undefined) request.minInvestment = input.minInvestment.toString();
   // BY MINT, in the catalogue's order for readability only — the server reads
-  // the mint on each entry and ignores the position entirely.
+  // the mint on each entry and ignores the position entirely. ONLY THE CHOSEN
+  // ONES: an unpicked stock is not sent at a weight of any kind.
   if (input.weights !== undefined) {
-    request.weights = OFFERED_LEGS.map((leg) => ({ mint: leg.mint, weightBps: input.weights!.get(leg.mint) }));
+    request.weights = OFFERED_LEGS.filter((leg) => input.weights!.has(leg.mint)).map((leg) => ({ mint: leg.mint, weightBps: input.weights!.get(leg.mint) }));
   }
   // A NAME. The program id is never sent; it is only used below to check the
   // bytes that come back.
@@ -575,16 +595,20 @@ export async function investPolicyFlow(deps: PensionFlowDeps, input: InvestPolic
     if (problem !== null) throw new IntentError(FAILURE_COPY.builtMismatch(problem));
     const vault = await deriveVaultAddress(input.pensionKey);
     const equalShares = basketWeightsBps(OFFERED_LEGS.length);
-    // The weights the owner chose, or equal shares — the same fallback the
-    // route applies, so the bytes are checked against what was actually asked
-    // for rather than against the default in every case.
+    // THE BASKET THE BYTES MUST CARRY. The answer's `floors` block prices the
+    // whole shelf — floorsProblem above has already held every one of its legs
+    // to OFFERED_LEGS, in order, at SaverFi's margin — but the POLICY holds only
+    // the stocks the owner picked, so the legs checked here are the picked ones
+    // with each one's floor taken from that block BY MINT. With no weights at
+    // all this is the whole catalogue at equal shares, exactly as before.
+    const chosen = input.weights === undefined ? OFFERED_LEGS.map((leg, index) => ({ leg, index })) : OFFERED_LEGS.map((leg, index) => ({ leg, index })).filter(({ leg }) => input.weights!.has(leg.mint));
     const weightOf = (mint: string, index: number): number => input.weights?.get(mint) ?? equalShares[index]!;
     return {
       instruction: "set_invest_policy",
       signers: [input.pensionKey],
       accounts: { owner: input.pensionKey, vault, policy: await deriveInvestAddress(vault) },
       args: {
-        legs: OFFERED_LEGS.map((leg, index) => ({ mint: leg.mint, weight_bps: weightOf(leg.mint, index), min_out_rate_wad: BigInt(body.floors.legs[index]!.wad) })),
+        legs: chosen.map(({ leg, index }) => ({ mint: leg.mint, weight_bps: weightOf(leg.mint, index), min_out_rate_wad: BigInt(body.floors.legs[index]!.wad) })),
         venue_program: venueProgram,
         in_mint: USDC_MINT,
         min_convert_rate_wad: BigInt(body.floors.convertWad),

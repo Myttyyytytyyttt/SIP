@@ -52,13 +52,23 @@ FROM deps AS builder
 WORKDIR /repo
 # ONLY WHAT THE KEEPER'S MODULE GRAPH READS. @sip/solana-log contributes one file,
 # its logger, which imports nothing but node:crypto. The program contributes its
-# committed IDL and the three scripts its package exports — not target/, whose
+# committed IDL and the exported scripts the keeper reaches — not target/, whose
 # deploy directory holds the program's upgrade keypair, and not .localnet/.
+#
+# COPY BY NAME IS TRANSITIVE OR IT IS NOTHING. A named file drags in whatever IT
+# imports, and those imports are named by no line of their own. live-route.ts
+# reaches ./raydium-swap and jupiter-fork-test.ts reaches ./jupiter-sim, which
+# are copied here because the keeper itself also reaches them — a coincidence,
+# not a discipline. link-consent.ts is reached by test-local/, which vitest never
+# loads and tsconfig.json's include DOES typecheck, so its absence broke the
+# typecheck gate below and nothing else. test/dockerfile-copies.test.ts now walks
+# the whole closure rather than one level of it.
 COPY packages/solana-log/src/log.ts packages/solana-log/src/log.ts
 COPY packages/solana-program/idl packages/solana-program/idl
 COPY packages/solana-program/scripts/attestation.ts packages/solana-program/scripts/live-route.ts packages/solana-program/scripts/raydium-swap.ts \
      packages/solana-program/scripts/jupiter-route.ts packages/solana-program/scripts/jupiter-sim.ts \
      packages/solana-program/scripts/jupiter-fork-setup.ts packages/solana-program/scripts/jupiter-fork-test.ts \
+     packages/solana-program/scripts/link-consent.ts \
      packages/solana-program/scripts/
 # AND THE TWO FILES ONLY THE TEST SUITE READS, now that the suite runs here too.
 # attestation.rs is the program's own attestation encoder, which
@@ -72,14 +82,28 @@ COPY packages/solana-program/scripts/attestation.ts packages/solana-program/scri
 # goes stale the next time a test is added and then reads as a measurement
 # nobody took — test/dockerfile-copies.test.ts checks the coverage instead.
 COPY packages/solana-program/programs/sip-vault/src/attestation.rs packages/solana-program/programs/sip-vault/src/attestation.rs
-# AND THE TWO FILES THE MIRROR TEST REACHES ACROSS FOR. test/pyth.test.ts
-# decodes the same committed mainnet vector with BOTH implementations and
-# asserts they agree to the unit — that assertion is the only thing keeping
-# src/pyth.ts honest against the copy it was mirrored from. Named one by one
-# like everything else here: this is two files, NOT a dependency on
-# @sip/solana-core, which src/pyth.ts explains the keeper must never take.
-COPY packages/solana-core/src/client/pyth-price.ts packages/solana-core/src/client/pyth-price.ts
+# AND THE FILES THE MIRROR TEST REACHES ACROSS FOR. test/pyth.test.ts decodes the
+# same committed mainnet vector with BOTH implementations and asserts they agree
+# to the unit — that assertion is the only thing keeping src/pyth.ts honest
+# against the copy it was mirrored from. Named one by one like everything else
+# here: these are eight files, NOT a dependency on @sip/solana-core, which
+# src/pyth.ts explains the keeper must never take.
+#
+# EIGHT AND NOT TWO, BECAUSE THE TWO REACH FURTHER. pyth-price.ts imports
+# ./addresses, ./base58, ./clmm-price, ./idl and ./rules; clmm-price and rules
+# import each other's neighbours; pyth-accounts.ts imports ../../src/client/base64.
+# Naming only the two entry points made `RUN pnpm --dir packages/solana-keeper
+# test` die in the image with "Cannot find module './addresses'" while every
+# gate on a developer's machine stayed green, because there the files are simply
+# present. core's idl.ts then reaches @sip/solana-program/idl, which the COPY
+# above already carries, and the closure stops there.
+COPY packages/solana-core/src/client/pyth-price.ts packages/solana-core/src/client/addresses.ts \
+     packages/solana-core/src/client/base58.ts packages/solana-core/src/client/base64.ts \
+     packages/solana-core/src/client/clmm-price.ts packages/solana-core/src/client/idl.ts \
+     packages/solana-core/src/client/rules.ts \
+     packages/solana-core/src/client/
 COPY packages/solana-core/test/fixtures/pyth-accounts.ts packages/solana-core/test/fixtures/pyth-accounts.ts
+COPY packages/solana-core/test/fixtures/keeper-policy.ts packages/solana-core/test/fixtures/keeper-policy.ts
 COPY Dockerfile Dockerfile
 COPY packages/solana-keeper packages/solana-keeper
 # The keeper runs from TypeScript through tsx; typecheck is the build gate, so a

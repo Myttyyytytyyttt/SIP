@@ -30,6 +30,7 @@ import * as anchor from "@coral-xyz/anchor";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import { idl, instructionDiscriminator } from "../src/idl.js";
+import { JUPITER_V6_PROGRAM } from "../src/invest-decision.js";
 import { convertCall, investCall, wrapSolCall } from "../src/invest-tick.js";
 
 const here = fileURLToPath(new URL("..", import.meta.url));
@@ -52,7 +53,12 @@ function offlineProgram(): anchor.Program {
 }
 
 const zero = PublicKey.default;
-const swap = { payer: zero, inputTokenAccount: zero, outputTokenAccount: zero, amountIn: 100n, minAmountOut: 200n };
+// THE SAME FIXTURE BLOB preflight.ts uses, and for the same reason: convert and
+// invest take `venue_data: Vec<u8>` and CPI it verbatim, so what this file has
+// to pin is Anchor's Vec<u8> encoding — a 4-byte little-endian length, then the
+// bytes. The leading eight are Jupiter's real shared_accounts_route
+// discriminator; the four after are deliberately not a sendable tail.
+const venueData = Buffer.from("c1209b3341d69c81deadbeef", "hex");
 
 describe("the money paths' instruction builders", () => {
   it("are looked up in exactly one module each, so there is nowhere for a copy to live", () => {
@@ -79,6 +85,10 @@ describe("the money paths' instruction builders", () => {
   it("are what the preflight imports, so the real-process gate runs production's code", () => {
     const preflight = read("src/preflight.ts");
     expect(preflight).toMatch(/import \{ convertCall, investCall, wrapSolCall \} from "\.\/invest-tick\.js";/);
+    // AND THE VECTORS IT PINS THEM WITH ARE THE ONES ABOVE. The preflight runs
+    // in a real Node process and this file runs under vitest; they are only
+    // each other's second opinion while they compare the same bytes.
+    expect(preflight).toContain("0c000000c1209b3341d69c81deadbeef");
     expect(preflight).toMatch(/import \{ settleInstruction \} from "\.\/settle-tick\.js";/);
   });
 
@@ -87,23 +97,30 @@ describe("the money paths' instruction builders", () => {
     const wrapSol = await wrapSolCall(program, { crank: zero, vault: zero, policy: zero, vaultWsol: zero }, 100n).instruction();
     const convert = await convertCall(
       program,
-      { crank: zero, vault: zero, policy: zero, vaultWsol: zero, vaultIn: zero },
-      { amountIn: 100n, minOut: 200n, swap },
+      { crank: zero, vault: zero, policy: zero, vaultWsol: zero, vaultIn: zero, venueProgram: JUPITER_V6_PROGRAM },
+      { amountIn: 100n, minOut: 200n, venueData },
     ).instruction();
     const invest = await investCall(
       program,
-      { crank: zero, vault: zero, policy: zero, vaultIn: zero, vaultTarget: zero, targetMint: zero },
-      { legIndex: 0, amountIn: 100n, minOut: 200n, swap },
+      { crank: zero, vault: zero, policy: zero, vaultIn: zero, vaultTarget: zero, targetMint: zero, venueProgram: JUPITER_V6_PROGRAM },
+      { legIndex: 0, amountIn: 100n, minOut: 200n, venueData },
     ).instruction();
 
     // 100 and 200 as little-endian u64s, behind each discriminator; invest's
-    // leg index is the single byte between them.
+    // leg index is the single byte between them; then 0c000000 — 12 as a
+    // little-endian u32 — and the blob itself.
+    //
+    // WHOLE, NOT TRUNCATED. These two used to stop at 24 and 25 bytes because
+    // the tail was buildSwapV2Data's and had its own test. The tail is now an
+    // ARGUMENT this keeper forwards to a CPI without the program reading it, so
+    // a length prefix of the wrong width would be a malformed inner instruction
+    // that no builder complained about.
     expect(wrapSol.data.toString("hex")).toBe(`${instructionDiscriminator("wrap_sol").toString("hex")}6400000000000000`);
-    expect(convert.data.subarray(0, 24).toString("hex")).toBe(
-      `${instructionDiscriminator("convert").toString("hex")}6400000000000000c800000000000000`,
+    expect(convert.data.toString("hex")).toBe(
+      `${instructionDiscriminator("convert").toString("hex")}6400000000000000c8000000000000000c000000c1209b3341d69c81deadbeef`,
     );
-    expect(invest.data.subarray(0, 25).toString("hex")).toBe(
-      `${instructionDiscriminator("invest").toString("hex")}006400000000000000c800000000000000`,
+    expect(invest.data.toString("hex")).toBe(
+      `${instructionDiscriminator("invest").toString("hex")}006400000000000000c8000000000000000c000000c1209b3341d69c81deadbeef`,
     );
   });
 });

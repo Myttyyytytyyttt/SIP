@@ -489,9 +489,36 @@ export interface JupiterQuote {
   readonly routePlan: ReadonlyArray<{
     readonly swapInfo: {
       readonly label?: string;
+      /**
+       * The venue account this hop trades against, as Jupiter identifies it.
+       *
+       * WHAT IT IS FOR HERE: comparing the ORDERED list of a turn's hops with
+       * the ordered list of a probe's, so a caller can tell "the same venues,
+       * a different size" from "a different route entirely". The keeper's
+       * ARM 2 abstains on the second, because Jupiter re-picks constantly —
+       * measured 2026-09-21, one instant, USDC -> ANTHROPIC: 25 USD routed
+       * Kipseli + Manifest while 1 USD routed Byreal + Manifest.
+       */
+      readonly ammKey?: string;
       /** This hop's own mints. A multi-hop route names its intermediates here and nowhere else. */
       readonly inputMint?: string;
       readonly outputMint?: string;
+      /**
+       * This hop's own amounts, as decimal strings.
+       *
+       * OPTIONAL BECAUSE THEY ARE THE API'S TO SEND, not because they are rare:
+       * measured against lite-api.jup.ag on 2026-09-21, every hop of every
+       * USDC -> ANTHROPIC quote carried ammKey, inAmount and outAmount beside
+       * label, the mints and updateContextSlot. A caller that needs `outAmount`
+       * (the keeper censuses each hop against it) must still say what it does
+       * when one is absent rather than assume zero — see LegVenue.censusScope.
+       *
+       * `priceImpactPct` is on the quote as well, and is deliberately NOT
+       * declared here: the keeper derives impact from two quotes it took
+       * itself, so that the number it gates on is one whose method it knows.
+       */
+      readonly inAmount?: string;
+      readonly outAmount?: string;
       /**
        * The slot at which Jupiter last refreshed THIS AMM's state — a string
        * in the JSON. It can sit a long way behind contextSlot: measured on
@@ -1041,6 +1068,17 @@ export interface JupiterRoute {
   readonly hops: number;
   readonly labels: readonly string[];
   /**
+   * THE QUOTE THIS ROUTE WAS BUILT FROM, kept whole.
+   *
+   * `hops` and `labels` are summaries of it, and a caller that needs to census
+   * a route hop by hop needs the per-hop `ammKey`, `outputMint` and `outAmount`
+   * that only the quote carries. Re-fetching would hand that caller a DIFFERENT
+   * quote — a different size's route, taken a moment later — and it would then
+   * be measuring one route and spending another. This is the same object every
+   * check in this file ran against.
+   */
+  readonly quote: JupiterQuote;
+  /**
    * CONDITIONS THIS BUILDER CAN SEE AND CANNOT DECIDE, empty when there are
    * none. Read them with routeWarning(); see RouteWarningCondition, and
    * section (7) of the header for why a warning here is not a refusal.
@@ -1522,6 +1560,7 @@ export function verifySharedAccountsRoute(
     amounts,
     hops,
     labels: quote.routePlan.map((step) => step.swapInfo.label ?? "?"),
+    quote,
     // SEEN HERE, DECIDED ELSEWHERE. Section (7) of the header: the tolerance
     // left over after the transfer fee only bites on a gross-quoting venue,
     // and which venue fills is not in anything this function was handed.

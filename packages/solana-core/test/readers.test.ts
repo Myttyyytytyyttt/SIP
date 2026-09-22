@@ -499,12 +499,19 @@ describe("the pools' in-side reserves", () => {
     // Read as text, never imported: solana-core does not depend on the keeper.
     // If the two measured different sides, this panel would promise exactly what
     // the keeper's legDepthDecision then refuses.
-    const keeper = readFileSync(fileURLToPath(new URL("../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
+    //
+    // THE FILE MOVED ON 2026-09-21 AND THE OFFSETS DID NOT. The keeper's depth
+    // gate became venue-agnostic — it judges a census of token accounts, which
+    // is the only layout a CLOB and a DLMM share — and the Raydium pool decode
+    // moved out of invest-decision.ts into venue-depth.ts, which holds one
+    // adapter per venue. This panel still reads a Raydium pool, so it is still
+    // the Raydium adapter it has to agree with.
+    const keeper = readFileSync(fileURLToPath(new URL("../../solana-keeper/src/venue-depth.ts", import.meta.url)), "utf8");
     const offsetOf = (name: string): string | undefined => new RegExp(`const POOL_${name} = (\\d+);`).exec(keeper)?.[1];
     expect([offsetOf("TOKEN_MINT_0"), offsetOf("TOKEN_MINT_1"), offsetOf("TOKEN_VAULT_0"), offsetOf("TOKEN_VAULT_1")]).toEqual(["73", "105", "137", "169"]);
     // The choice itself: in_mint at mint0 means the in-side vault is vault0.
-    expect(keeper).toContain("const inVault = inIsZero ? vault0 : vault1;");
-    expect(keeper).toContain("const inIsZero = mint0.equals(input.inMint) && mint1.equals(leg.mint);");
+    expect(keeper).toContain("? { ok: true, inVault: pair.vault0, outVault: pair.vault1 }");
+    expect(keeper).toContain("const inIsZero = pair.mint0.equals(input.inMint) && pair.mint1.equals(input.targetMint);");
 
     const readers = readFileSync(fileURLToPath(new URL("../src/server/readers.ts", import.meta.url)), "utf8");
     const ourOffset = (name: string): string | undefined => new RegExp(`const POOL_${name}_AT = (\\d+);`).exec(readers)?.[1];

@@ -142,9 +142,14 @@ describe("WithdrawCard", () => {
   it("tokens: SPYx with the RPC's own amount, the issuer's powers and the account it may create; wSOL arrives as SOL", () => {
     const html = render(screen({ kind: "ready", state: stateWith() }));
     expect(html).toContain("0.12416212");
-    // Two stocks, two issuers: the line may no longer name one of them, and it
-    // carries the fact that separates them — one key holds everything on ANTHROPIC.
-    expect(html).toContain("Each issuer can freeze, pause or move its own stock, even inside your vault, and on ANTHROPIC one key holds all of those powers.");
+    // ONE ROW, ONE ISSUER. The line is generated from the leg in the row, so a
+    // SPYx row carries what is true of SPYx: its issuer can freeze, pause and
+    // move it. The PreStocks single-key clause belongs to a PreStock row and
+    // must not appear on this one — it was a sentence about a token this row
+    // does not hold, which is the same fault the policy card's paragraphs had.
+    expect(html).toContain("Each issuer can freeze, pause or move its own stock, even inside your vault. Withdrawing SOL does not depend on any of them.");
+    expect(html).not.toContain("one key holds all of those powers");
+    expect(html).not.toContain("ANTHROPIC");
     expect(html).toContain("Creates your own SPYx token account if you have none (0.00155956 SOL of rent, paid by you and kept by you).");
     expect(html).toContain("Arrives in your wallet as SOL.");
     expect(buttons("25 %")).toHaveLength(2);

@@ -262,22 +262,45 @@ function callArgumentLists(source: string, callee: string): string[][] {
 describe("nothing in src/ may net the transfer fee a second time", () => {
   const files = sourceFiles(join(here, "src")).concat(sourceFiles(join(here, "bin")));
 
-  it("every tightenMinOut CALL passes exactly three arguments — never a fee", () => {
+  // THE GUARD MOVED WITH THE MONEY PATH, 2026-09-21. It used to require both
+  // tightenMinOut call sites — the convert hop and the leg — to pass exactly
+  // three arguments, because a fourth was the second subtraction. There are now
+  // ZERO call sites: the keeper buys through Jupiter, and min_out comes from
+  // investMinOut(route), which derives the venue's own floor from the bytes
+  // about to be signed and nets the fee off it exactly once, inside
+  // jupiter-route.ts.
+  //
+  // SO THE COUNT IS PINNED AT ZERO RATHER THAN THE GUARD DELETED. A call
+  // reappearing means somebody put a keeper-computed bound back on a money path
+  // that no longer observes its own rate, and that is worth stopping to think
+  // about rather than discovering in a diff.
+  it("has no tightenMinOut call sites left on the money path, and says so deliberately", () => {
     const callSites = files
       .filter((path) => !path.endsWith("min-out.ts"))
       .flatMap((path) => callArgumentLists(codeOnly(readFileSync(path, "utf8")), "tightenMinOut").map((args) => ({ path, args })));
+    expect(
+      callSites.map(({ path, args }) => `${path.slice(here.length)} (${args.length} args)`),
+      "the invest and convert paths derive min_out from investMinOut(route) now. A tightenMinOut call here is a " +
+        "second, keeper-computed bound on a route whose own floor is already known — decide it on purpose.",
+    ).toEqual([]);
+  });
 
-    // The convert hop and the leg. If this ever drops, the guard has stopped
-    // looking at anything and the count is what tells us.
-    expect(callSites.length, "expected the convert and the leg call sites to be found").toBe(2);
-    for (const { path, args } of callSites) {
-      expect(
-        args.length,
-        `${path.slice(here.length)} calls tightenMinOut with ${args.length} arguments (${args.join(" | ")}). ` +
-          "The observed rate already has every transfer fee in it — see the header of src/min-out.ts. " +
-          "A fourth argument is the second subtraction, and it lowers min_out.",
-      ).toBe(3);
-    }
+  // AND THE SUBTRACTION ITSELF, WHEREVER IT LIVES. This is what the old
+  // argument-count rule was really protecting: the fee comes off the bound
+  // ONCE. investMinOut does it, in jupiter-route.ts, over the instruction's own
+  // tail. A second application anywhere in the keeper would lower min_out below
+  // what the bound claims and hand the program a floor the owner never agreed
+  // to — and it would do it silently, because a smaller min_out still fills.
+  it("never applies netOfTransferFee itself: the one subtraction lives in the route builder", () => {
+    const callers = files
+      .filter((path) => !path.endsWith("min-out.ts"))
+      .filter((path) => callArgumentLists(codeOnly(readFileSync(path, "utf8")), "netOfTransferFee").length > 0)
+      .map((path) => path.slice(here.length));
+    expect(
+      callers,
+      "investMinOut already took this leg's transfer fee off the venue threshold. Taking it off again halves the " +
+        "margin twice over — see the header of src/min-out.ts.",
+    ).toEqual([]);
   });
 
   it("tightenMinOut's own body never calls netOfTransferFee", () => {

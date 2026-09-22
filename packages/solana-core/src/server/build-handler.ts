@@ -36,7 +36,7 @@
 // {error:{code, message, ...}}, the shape /api/solana-tx answers with. No upstream
 // text is ever returned: a read that failed is "unreadable", with no detail.
 
-import { RAYDIUM_CLMM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../client/addresses";
+import { JUPITER_V6, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../client/addresses";
 import { classifyVaultEntry, scopeEntryToVault } from "../client/activity";
 import { isPubkey, isSignature } from "../client/base58";
 import { tryBase64Decode } from "../client/base64";
@@ -51,6 +51,7 @@ import {
   DEFAULT_INVEST_CAPS,
   DEFAULT_VAULT_POLICY,
   LEG_FLOOR_MARGIN_BPS,
+  MAX_PICKED_LEGS,
   OFFERED_LEGS,
   SIGNATURE_FEE_LAMPORTS,
   VOLUME_MODE_OFFERED,
@@ -434,17 +435,32 @@ function decimalU64(value: unknown): bigint | null {
  * A Map, not an object: `{}["constructor"]` is a function, and a lookup table
  * reached from request text must not answer for a key it does not hold.
  *
- * One entry today. Raydium CLMM is the only venue the keeper can route through
- * (client/clmm-price.ts prices its pools, and PRICED_POOLS pins them), so the
- * list is one long on purpose, not by omission.
+ * ONE ENTRY, AND IT IS JUPITER — AND THE NAME IT USED TO HOLD WAS WORSE THAN
+ * MISSING. This table named raydium-clmm alone while the keeper on this branch
+ * routes Jupiter alone (invest-decision.ts ROUTABLE_VENUES) and refuses Raydium
+ * by name before the wrap, all-or-nothing, forever (RETIRED_VENUES: "this
+ * keeper deliberately stopped routing it when the basket moved to Jupiter").
+ * Every policy this route could build was therefore dead on arrival: it bought
+ * nothing, at any balance, for the life of the policy, and the rent that signed
+ * it did not come back. A closed set whose only member cannot buy is not a
+ * conservative list, it is a list of one wrong answer.
+ *
+ * RAYDIUM IS NOT GONE FROM THE PRODUCT, it has stopped being a VENUE. The
+ * floors this same transaction signs are still read from its pools
+ * (readers.ts PRICED_POOLS, reached through liveFloors below), which is a
+ * price source and not a counterparty. This table is where that distinction is
+ * spent, so the constant no longer belongs in it.
  */
-const VENUE_PROGRAMS = new Map<string, string>([["raydium-clmm", RAYDIUM_CLMM]]);
+const VENUE_PROGRAMS = new Map<string, string>([["jupiter-v6", JUPITER_V6]]);
 
 /** The venue names investPolicy accepts. What the panel offers; the programs behind them never leave the server. */
 export const OFFERED_VENUES: readonly string[] = Object.freeze([...VENUE_PROGRAMS.keys()]);
 
-/** The venue a request that names none is built with: today's behaviour, unchanged. */
-const DEFAULT_VENUE = "raydium-clmm";
+/**
+ * The venue a request that names none is built with: the one venue the keeper
+ * routes. It was "raydium-clmm", which this branch's keeper refuses outright.
+ */
+const DEFAULT_VENUE = "jupiter-v6";
 
 /** The vault modes setPolicy accepts, by name. createVault's numeric `mode` is untouched. */
 const VAULT_MODES = new Map<string, number>([
@@ -671,18 +687,34 @@ const INVEST_POLICY_FIELDS = ["action", "owner", "maxPerCall", "maxRolling30d", 
  * the catalogue the server builds from are two reads of OFFERED_LEGS separated
  * by a deploy; if their ORDER ever differed, a positional weight would land on
  * the wrong stock and nothing would fail — the sum would still be 10,000 and the
- * chain would accept it. Keyed by mint, the same disagreement is a mint that is
- * offered and unnamed, or named and not offered, and both are refused here.
+ * chain would accept it. Keyed by mint, a disagreement is instead a mint that is
+ * named and not offered, which is refused here.
  *
- * NOTHING IS REPAIRED. A missing leg is not filled in at the share that would
- * make the sum work, a sum of 9,999 is not normalised, and the entries are not
+ * THE BASKET IS A SUBSET NOW, AND THAT IS THE WHOLE CHANGE. Until the picker
+ * existed this function also demanded a share for EVERY offered stock, so the
+ * only basket anybody could sign was the whole shelf. The owner asked to choose
+ * — "que el user pueda seleccionar las que quiere y las que no" — and the
+ * program has always allowed it: set_invest_policy takes 1..MAX_LEGS legs with
+ * distinct mints whose weights sum to 10,000, and knows nothing about a
+ * catalogue. So what is checked here is what the PRODUCT adds on top: every
+ * named mint is one SaverFi offers (it needs a floor, a rent and a token
+ * program this server pinned), there is at least one, and there are no more
+ * than MAX_PICKED_LEGS of them.
+ *
+ * WHY THE PICKER'S 5 AND NOT THE PROGRAM'S 8. A refusal has to be reachable
+ * from the screen that caused it: the picker stops at five, so a sixth arriving
+ * here came from somewhere that is not this product's form, and answering it
+ * with the program's limit would describe a basket the owner cannot build.
+ *
+ * NOTHING IS REPAIRED. A sum of 9,999 is not normalised, a missing share is not
+ * filled in at the value that would make it work, and the entries are not
  * reordered: each is a different basket from the one the owner asked for, and a
  * refusal that names what was wrong is the only honest answer. Returns the
  * weights by mint, or the sentence that says why there are none.
  */
 function weightsByMint(value: unknown, inMint: string): { readonly ok: true; readonly byMint: ReadonlyMap<string, number> } | { readonly ok: false; readonly problem: string } {
   const no = (problem: string) => ({ ok: false, problem }) as const;
-  if (!Array.isArray(value)) return no("weights must be an array of { mint, weightBps }, one entry per stock SaverFi offers.");
+  if (!Array.isArray(value)) return no("weights must be an array of { mint, weightBps }, one entry per stock you chose.");
   const byMint = new Map<string, number>();
   let total = 0;
   for (const [index, entry] of value.entries()) {
@@ -700,8 +732,8 @@ function weightsByMint(value: unknown, inMint: string): { readonly ok: true; rea
     total += weightBps as number;
   }
   const offered = OFFERED_LEGS.map((leg) => leg.mint);
-  const unnamed = offered.filter((mint) => !byMint.has(mint));
-  if (unnamed.length > 0) return no(`weights names no share for ${unnamed.join(", ")}. Every stock SaverFi offers takes a weight; none is filled in for you.`);
+  if (byMint.size === 0) return no("weights names no stock at all. A basket holds at least one.");
+  if (byMint.size > MAX_PICKED_LEGS) return no(`weights names ${byMint.size} stocks; a basket holds at most ${MAX_PICKED_LEGS}.`);
   const unoffered = [...byMint.keys()].filter((mint) => !offered.includes(mint));
   if (unoffered.length > 0) return no(`weights names ${unoffered.join(", ")}, which SaverFi does not offer.`);
   // Last, so a basket that is the right stocks but the wrong shares says so
@@ -736,13 +768,14 @@ function liveFloors(pools: readonly (AccountSnapshot | null)[], slot: number | n
 }
 
 /**
- * investPolicy: set_invest_policy for the offered basket, with floors read from
- * the pinned pools at build time and every vault token account the vault lacks
- * created ahead of it at the owner's expense. Floors, legs and in-mint are
- * SIP's; the request may name the caps, the minimum purchase, the share each
- * offered stock takes and the venue — by name — and whether investing is on.
- * Every one of those is optional, and absent it is built exactly as before:
- * equal shares over the catalogue, the $5-split minimum, Raydium CLMM.
+ * investPolicy: set_invest_policy for the basket the owner chose, with floors
+ * read from the pinned pools at build time and every vault token account the
+ * vault lacks created ahead of it at the owner's expense. Floors, the in-mint
+ * and which stocks MAY be chosen are SIP's; the request may name the caps, the
+ * minimum purchase, WHICH offered stocks the basket holds and the share each
+ * takes, and the venue — by name — and whether investing is on. Every one of
+ * those is optional, and absent it is built exactly as before: equal shares
+ * over the whole catalogue, the $5-split minimum, Raydium CLMM.
  */
 async function investPolicy(fields: Readonly<Record<string, unknown>>, served: Served): Promise<Response> {
   const extra = unexpectedField(fields, INVEST_POLICY_FIELDS);
@@ -773,8 +806,14 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
     return served.refuse(400, "bad_request", `venue must be one of: ${OFFERED_VENUES.join(", ")}. It is a venue's name, never a program address.`);
   }
 
+  // THE CHOSEN LEGS, IN THE CATALOGUE'S ORDER, each carrying the index its floor
+  // is read at. The floors are still read for the WHOLE shelf — PRICED_POOLS is
+  // one getMultipleAccounts either way and the answer's `floors` block is a
+  // price reading the page checks against what it showed — but only the chosen
+  // ones reach the policy the program is asked to store.
+  const chosen = OFFERED_LEGS.map((leg, index) => ({ leg, index })).filter(({ leg }) => weights.byMint.has(leg.mint));
   const policyAt = (convertFloor: bigint, legFloors: readonly bigint[]): InvestPolicyInput => ({
-    legs: OFFERED_LEGS.map((leg, index) => ({ mint: leg.mint, weightBps: weights.byMint.get(leg.mint)!, minOutRateWad: legFloors[index]! })),
+    legs: chosen.map(({ leg, index }) => ({ mint: leg.mint, weightBps: weights.byMint.get(leg.mint)!, minOutRateWad: legFloors[index]! })),
     venueProgram,
     inMint: USDC_MINT,
     minConvertRateWad: convertFloor,

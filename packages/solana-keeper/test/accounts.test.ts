@@ -20,6 +20,7 @@ import {
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
 import {
+  AddressLookupTableAccount,
   Connection,
   Keypair,
   PublicKey,
@@ -29,7 +30,7 @@ import {
   type Transaction,
   type VersionedTransaction,
 } from "@solana/web3.js";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   configAddress,
   decodeVault,
@@ -42,7 +43,7 @@ import {
 } from "../src/accounts.js";
 import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
-import { RAYDIUM_CLMM_PROGRAM, USDC_MINT } from "../src/invest-decision.js";
+import { JUPITER_V6_PROGRAM, RAYDIUM_CLMM_PROGRAM, USDC_MINT } from "../src/invest-decision.js";
 import { convertCall, investCall, runInvestTick } from "../src/invest-tick.js";
 import { MAX_SUPPORTED_TRANSACTION_VERSION } from "../src/measure-window.js";
 import {
@@ -52,11 +53,31 @@ import {
   PYTH_USDC_USD_FEED,
   PYTH_USDC_USD_FEED_ID_HEX,
 } from "../src/pyth.js";
+import {
+  SLOT_DESTINATION_TOKEN_ACCOUNT,
+  SLOT_PROGRAM_DESTINATION_TOKEN_ACCOUNT,
+  SLOT_SOURCE_TOKEN_ACCOUNT,
+  SLOT_USER_TRANSFER_AUTHORITY,
+} from "@sip/solana-program/jupiter-route";
 import { runSettleTick } from "../src/settle-tick.js";
 import { FakeLedger, chained } from "./fake-ledger.js";
 
 const programId = new PublicKey(idl.address);
 const key = (): PublicKey => Keypair.generate().publicKey;
+
+/**
+ * The crank every turn test below sends with, and the stub provider's wallet.
+ *
+ * THEY ARE ONE KEY BECAUSE PRODUCTION'S ARE. bin/keeper.mts passes the settle
+ * keypair as the crank, and sendWithBudget's versioned branch REFUSES to build
+ * a transaction whose fee payer is not the provider's wallet — Anchor signs
+ * with its wallet after us, and VersionedTransaction.sign throws on a key that
+ * is not a required signer. Every Jupiter route names lookup tables, so every
+ * turn that sends now takes that branch; a fixture with two different keys
+ * would fail each of these tests on a condition invest-transaction.test.ts
+ * already covers deliberately.
+ */
+const TURN_CRANK = Keypair.generate();
 
 function u128(buf: Buffer, offset: number, value: bigint): void {
   buf.writeBigUInt64LE(value & 0xffff_ffff_ffff_ffffn, offset);
@@ -230,6 +251,29 @@ function stubChain(
     getAccountInfo: async (address) => info(address),
     getMultipleAccountsInfoAndContext: async (addresses) => ({ context: { slot: 1 }, value: (addresses as PublicKey[]).map(info) }),
     getMultipleAccountsInfo: async (addresses) => (addresses as PublicKey[]).map(info),
+    // THE SAME EPOCH THE Clock SYSVAR ABOVE CARRIES, and it has to be: the
+    // admission gate resolves a leg's transfer fee against the epoch it read
+    // out of the Clock, and the route builder resolves the SAME mint's fee
+    // against getEpochInfo. Two different epochs here would make the keeper
+    // refuse its own route for a disagreement this fixture invented — which is
+    // exactly the disagreement measureLegVenue's slippage refusal exists to
+    // catch, so it would look like a real finding.
+    getEpochInfo: async () => ({ epoch: 930, slotIndex: 1, slotsInEpoch: 432_000, absoluteSlot: 400_000_000, blockHeight: 400_000_000 }),
+    // THE TABLES THE ROUTE NAMES. lookupTableCache refuses a table the chain
+    // does not have — compiling a v0 message against a missing one produces
+    // account indexes that resolve to nothing on the validator — so a turn that
+    // reaches the send needs this to answer. An EMPTY address list is honest
+    // here: compileToV0Message simply compresses nothing, and what these tests
+    // are about is that the table was fetched and applied at all, not how much
+    // it saved. The byte counts live in test/invest-transaction.test.ts, off a
+    // captured route and its real on-chain tables.
+    getAddressLookupTable: async (address) => ({
+      context: { slot: 1 },
+      value: new AddressLookupTableAccount({
+        key: address as PublicKey,
+        state: { deactivationSlot: (1n << 64n) - 1n, lastExtendedSlot: 0, lastExtendedSlotStartIndex: 0, addresses: [] },
+      }),
+    }),
     ...extra,
   };
   const connection = new Proxy(
@@ -250,9 +294,190 @@ function stubChain(
   const refuse = async (): Promise<never> => {
     throw new Error("the stub chain signs nothing");
   };
-  const wallet = { publicKey: PublicKey.default, signTransaction: refuse, signAllTransactions: refuse };
+  const wallet = { publicKey: TURN_CRANK.publicKey, signTransaction: refuse, signAllTransactions: refuse };
   const program = new anchor.Program(idl, new anchor.AnchorProvider(connection, wallet, { commitment: "confirmed" }));
   return { program, connection, calls, callArgs };
+}
+
+// ── the venue, stubbed at its own wire and nowhere higher ──────────────────
+//
+// WHY THERE IS A STUB AT ALL. The keeper buys and converts through Jupiter, so
+// every turn below that reaches the depth gate makes two HTTP calls per leg —
+// a quote, and a /swap-instructions build — plus one more for ARM 2's probe.
+// Left alone this file reaches the real lite-api.jup.ag: measured, it did, on
+// the first run after the switch, and it refused a basket because the endpoint
+// answered an error. A suite whose verdicts depend on a public endpoint's mood
+// is not a suite.
+//
+// IT IS STUBBED AT `fetch` AND NOWHERE HIGHER, and that is the whole design.
+// measureLegVenue, buildJupiterRoute and verifySharedAccountsRoute all run for
+// real against these bytes: the shared_accounts_route discriminator, the
+// thirteen fixed slots, the vault in slot 2, vault_in in 3, vault_target in 5
+// and 6, the route plan walked step by step and the 19-byte amount tail are
+// every one of them checked by production code on the way through. A stub one
+// layer higher — a fake measureLegVenue handed to the tick — would have been a
+// tenth of the work and would have proved only that the tick calls what it was
+// given. That is the shape docs/TESTING_TRAPS.md opens with.
+const JUPITER_WIRE = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
+const STUB_LOOKUP_TABLE = "2XPxvU6FHBvq2VmQSRV3YbdJiRdGEvnY3fdafdXQBijN";
+
+/**
+ * SOL against USDC at exactly the price the Pyth feeds in this file carry
+ * ($102.59321149 the SOL, $0.99987040 the USDC).
+ *
+ * NOT AN ARBITRARY RATE. oracleConvertDecision compares the convert hop's own
+ * route rate against those two feeds and rests the hop when they disagree, so a
+ * round number here would rest every conversion test for a reason that has
+ * nothing to do with what the test is about.
+ */
+const SOL_TO_USDC_MICRO = 102_593_211n;
+
+/** Every venue account the stubbed routes name, by the mint that hop pays out in. */
+const venueInventory = new Map<string, PublicKey>();
+
+/** What one stubbed hop pays out: the SOL price on the convert, 1:1 on a leg. */
+function stubbedOut(inputMint: string, amountIn: bigint): bigint {
+  return inputMint === NATIVE_MINT.toBase58() ? (amountIn * SOL_TO_USDC_MICRO) / 1_000_000_000n : amountIn;
+}
+
+/**
+ * The thirteen fixed prefix slots of a shared_accounts_route, then the venue
+ * account ARM 1 censuses.
+ *
+ * THE SLOT NUMBERS ARE jupiter-route.ts's OWN, imported rather than retyped. A
+ * fixture that hardcoded 2, 3, 5 and 6 would go on passing if the verifier
+ * moved to different slots, which is the one thing this layout is here to hold.
+ */
+function stubRouteAccounts(vault: PublicKey, vaultIn: PublicKey, vaultTarget: PublicKey, inventory: PublicKey) {
+  const keys = Array.from({ length: 13 }, () => ({ pubkey: JUPITER_WIRE, isSigner: false, isWritable: false }));
+  keys[SLOT_USER_TRANSFER_AUTHORITY] = { pubkey: vault.toBase58(), isSigner: true, isWritable: false };
+  keys[SLOT_SOURCE_TOKEN_ACCOUNT] = { pubkey: vaultIn.toBase58(), isSigner: false, isWritable: true };
+  // Slot 5 is Jupiter's own programDestinationTokenAccount, and it is the vault
+  // target here on purpose: that is the shape in which exactly ONE Token-2022
+  // transfer lands in the account invest() measures, and the only shape
+  // verifySharedAccountsRoute accepts for a fee-bearing mint.
+  keys[SLOT_PROGRAM_DESTINATION_TOKEN_ACCOUNT] = { pubkey: vaultTarget.toBase58(), isSigner: false, isWritable: true };
+  keys[SLOT_DESTINATION_TOKEN_ACCOUNT] = { pubkey: vaultTarget.toBase58(), isSigner: false, isWritable: true };
+  return [...keys, { pubkey: inventory.toBase58(), isSigner: false, isWritable: true }];
+}
+
+/**
+ * The bytes a shared_accounts_route really carries, laid out the way
+ * decodeRouteAmounts reads them: discriminator(8), id(1), the route plan's u32
+ * count, one plan step, then the 19-byte amount tail.
+ *
+ * THE STEP'S FOUR BYTES ARE THE CAPTURED ROUTE'S OWN (28640001).
+ * routePlanEndsExactlyAt WALKS the plan rather than trusting the count — that
+ * is what makes a two-byte shift refusable — so the step has to be a shape it
+ * can walk, with both of its account indices in range.
+ */
+function stubRouteData(amountIn: bigint, quotedOut: bigint, slippageBps: number): string {
+  const head = Buffer.from("c1209b3341d69c81050100000028640001", "hex");
+  const tail = Buffer.alloc(19);
+  tail.writeBigUInt64LE(amountIn, 0);
+  tail.writeBigUInt64LE(quotedOut, 8);
+  tail.writeUInt16LE(slippageBps, 16);
+  tail.writeUInt8(0, 18);
+  return Buffer.concat([head, tail]).toString("base64");
+}
+
+/** The vault's ATA for a classic SPL mint, derived the way the tick derives it. */
+const classicAta = (mint: PublicKey, vault: PublicKey) => getAssociatedTokenAddressSync(mint, vault, true, TOKEN_PROGRAM_ID);
+
+/**
+ * Serve Jupiter from memory for the duration of one test.
+ *
+ * `fail` makes every call reject, which is how the doctrinal refusals below are
+ * driven: an unmeasurable venue must refuse the WHOLE basket and the conversion
+ * with it, before the wrap.
+ */
+function stubJupiter(options: { readonly fail?: boolean; readonly deliverTo?: PublicKey } = {}): { readonly urls: string[] } {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", async (input: unknown, init?: RequestInit) => {
+    const url = String(input);
+    urls.push(url);
+    if (options.fail === true) throw new Error("lite-api.jup.ag is unreachable in this test");
+
+    if (url.includes("/quote")) {
+      const params = new URL(url).searchParams;
+      const inputMint = params.get("inputMint") ?? "";
+      const outputMint = params.get("outputMint") ?? "";
+      const amountIn = BigInt(params.get("amount") ?? "0");
+      const slippageBps = Number(params.get("slippageBps") ?? "0");
+      const outAmount = stubbedOut(inputMint, amountIn);
+      return new Response(
+        JSON.stringify({
+          inputMint,
+          outputMint,
+          inAmount: amountIn.toString(),
+          outAmount: outAmount.toString(),
+          // The venue's own floor, by the arithmetic venueThresholdFrom uses:
+          // the two are cross-checked, so a different number here is refused.
+          otherAmountThreshold: (outAmount - (outAmount * BigInt(slippageBps)) / 10_000n).toString(),
+          swapMode: "ExactIn",
+          slippageBps,
+          contextSlot: 448_859_887,
+          timeTaken: 0.017,
+          routePlan: [
+            {
+              swapInfo: {
+                label: "Manifest",
+                // ONE ammKey FOR EVERY SIZE, so ARM 2 sees the probe and the
+                // turn on the same venue and actually COMPARES them. A fresh
+                // key per call would abstain, and an abstention that happened
+                // by accident is a gate that was never exercised.
+                ammKey: "MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms",
+                inputMint,
+                outputMint,
+                inAmount: amountIn.toString(),
+                outAmount: outAmount.toString(),
+                updateContextSlot: "448859870",
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    if (url.includes("/swap-instructions")) {
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        quoteResponse: { inputMint: string; outputMint: string; inAmount: string; outAmount: string; slippageBps: number };
+        userPublicKey: string;
+        destinationTokenAccount: string;
+      };
+      const quote = body.quoteResponse;
+      const vault = new PublicKey(body.userPublicKey);
+      // `deliverTo` builds a route that pays somewhere OTHER than the account
+      // the keeper asked for and measures — Jupiter's answer disagreeing with
+      // Jupiter's own request. Nothing on the wire says it is wrong.
+      const vaultTarget = options.deliverTo ?? new PublicKey(body.destinationTokenAccount);
+      // vault_in is not in the POST body — Jupiter infers it — so it is derived
+      // here exactly as the tick derives it: the vault's ATA for the mint being
+      // spent, under the classic token program (USDC and wSOL are both plain
+      // SPL mints with no extensions).
+      const vaultIn = classicAta(new PublicKey(quote.inputMint), vault);
+      const inventory = venueInventory.get(quote.outputMint);
+      if (inventory === undefined) throw new Error(`the test registered no venue inventory for ${quote.outputMint}`);
+      return new Response(
+        JSON.stringify({
+          swapInstruction: {
+            programId: JUPITER_WIRE,
+            accounts: stubRouteAccounts(vault, vaultIn, vaultTarget, inventory),
+            data: stubRouteData(BigInt(quote.inAmount), BigInt(quote.outAmount), quote.slippageBps),
+          },
+          setupInstructions: [],
+          cleanupInstruction: null,
+          tokenLedgerInstruction: null,
+          otherInstructions: [],
+          addressLookupTableAddresses: [STUB_LOOKUP_TABLE],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    throw new Error(`the Jupiter stub was asked for ${url}, which it does not serve`);
+  });
+  return { urls };
 }
 
 const vaultFields = (over: Partial<VaultFields> = {}): VaultFields => ({
@@ -277,13 +502,30 @@ const policyFields = (vault: PublicKey, over: Partial<PolicyFields> = {}): Polic
   // each of those tests is actually about. The reader's own test overrides it
   // with a random key, which is where reading arbitrary bytes at offset 41
   // belongs.
-  venueProgram: RAYDIUM_CLMM_PROGRAM,
+  // THE VENUE THE KEEPER ACTUALLY ROUTES, which is the whole point of a fixture
+  // default (docs/TESTING_TRAPS.md, first species). It was RAYDIUM_CLMM_PROGRAM
+  // while that was the routable venue; it is Jupiter v6 now, so that every turn
+  // test below reaches the gate it means to test instead of stopping at
+  // venueDecision. The Raydium value has its own case, where it is the subject.
+  venueProgram: JUPITER_V6_PROGRAM,
   inMint: USDC_MINT,
   legs: [
     { mint: key(), weightBps: 6_000, minOutRateWad: 3n * 10n ** 18n + (1n << 70n) },
     { mint: key(), weightBps: 4_000, minOutRateWad: 17n },
   ],
-  minConvertRateWad: (1n << 64n) + 12_345n,
+  // A RATE THE SOL HOP CAN ACTUALLY MEET, and it has to be one now. This was
+  // (1n << 64n) + 12_345n — about 18.4 raw USDC per LAMPORT, or roughly
+  // $18,000,000,000 the SOL — chosen to exercise the reader's u128 decode and
+  // harmless while nothing priced a conversion against it. The route builder
+  // checks the owner's floor when it builds, so an impossible floor now rests
+  // every conversion in this file and the convert tests below would pass while
+  // testing nothing. The u128 torture value lives on in the reader's own case,
+  // which is where it belongs.
+  //
+  // 0.1 raw USDC per lamport is $100 the SOL; the Pyth feeds and the Jupiter
+  // stub here both price it at $102.59, so the hop clears this floor with a
+  // little room, which is what a real signed policy looks like.
+  minConvertRateWad: 100_000_000_000_000_000n,
   minInvestment: 5_000_000n,
   maxPerCall: 250_000_000n,
   maxRolling30d: 900_000_000n,
@@ -397,7 +639,11 @@ describe("the account readers, over bytes laid out as state.rs declares them", (
     const vault = key();
     // A venue of its own, and a random one: the reader must return the 32 bytes
     // at offset 41 whatever they are, not the venue the keeper happens to route.
-    const planted = policyFields(vault, { venueProgram: key() });
+    // AND THE u128 THE DEFAULT NO LONGER CARRIES. min_convert_rate_wad is the
+    // policy's only u128, so the reader's own case is where a value past 2^64
+    // has to be planted — the turn tests need a floor their conversions can
+    // actually meet, and a fixture cannot be both.
+    const planted = policyFields(vault, { venueProgram: key(), minConvertRateWad: (1n << 64n) + 12_345n });
     const address = investmentPolicyAddress(programId, vault);
     const { program } = stubChain(new Map([[address.toBase58(), policyBytes(planted)]]));
 
@@ -450,6 +696,13 @@ describe("the account readers, over bytes laid out as state.rs declares them", (
 });
 
 describe("the ticks' first steps, over the same bytes", () => {
+  // EVERY STUB COMES BACK OFF. A `fetch` left stubbed would follow this file
+  // into whatever runs next in the same worker, and the failure would appear
+  // somewhere with no Jupiter in it at all.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   function chainWith(
     vaultOver: Partial<VaultFields>,
     policyOver: Partial<PolicyFields> | null,
@@ -463,6 +716,11 @@ describe("the ticks' first steps, over the same bytes", () => {
     const accounts = new Map([
       [vault.toBase58(), vaultBytes(vaultFields(vaultOver))],
       [SYSVAR_CLOCK_PUBKEY.toBase58(), clockBytes(TODAY_UNIX)],
+      // THE IN-ASSET'S OWN MINT. The route builder reads the DESTINATION mint's
+      // transfer-fee config for every hop it builds, and on the convert hop
+      // (wSOL -> USDC) that destination is USDC. Exactly 82 bytes, which is
+      // what a mint with no extensions really is — USDC is a classic SPL mint.
+      [USDC_MINT.toBase58(), Buffer.alloc(82)],
     ]);
     const owners = new Map<string, PublicKey>();
     for (const [address, account] of more) {
@@ -482,12 +740,10 @@ describe("the ticks' first steps, over the same bytes", () => {
     return { vault, ...stubChain(accounts, extra, owners) };
   }
 
-  const pools = new Map<string, PublicKey>();
-
   it("refuse a non-USDC in_mint in a dry run after reading the policy and nothing else", async () => {
     const inMint = key();
     const { vault, connection, program, calls } = chainWith({}, { inMint });
-    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, pools, live: false, protocolPaused: false });
+    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, live: false, protocolPaused: false });
     expect(result.outcome).toBe("REFUSED");
     expect(result.detail).toContain(inMint.toBase58());
     expect(result.detail).toContain(USDC_MINT.toBase58());
@@ -496,7 +752,7 @@ describe("the ticks' first steps, over the same bytes", () => {
 
   it("rest a paused vault's investment before any balance, ATA or wrap", async () => {
     const { vault, connection, program, calls } = chainWith({ paused: true }, {});
-    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, pools, live: false, protocolPaused: false });
+    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, live: false, protocolPaused: false });
     expect(result.outcome).toBe("PAUSED");
     expect(result.detail).toContain("VaultPaused");
     expect(calls).toEqual(["getAccountInfoAndContext", "getMultipleAccountsInfo"]);
@@ -504,7 +760,7 @@ describe("the ticks' first steps, over the same bytes", () => {
 
   it("rest every investment while the protocol is paused", async () => {
     const { vault, connection, program, calls } = chainWith({}, {});
-    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, pools, live: false, protocolPaused: true });
+    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, live: false, protocolPaused: true });
     expect(result.outcome).toBe("PAUSED");
     expect(result.detail).toContain("ProtocolPaused");
     expect(calls).toEqual(["getAccountInfoAndContext", "getMultipleAccountsInfo"]);
@@ -517,7 +773,7 @@ describe("the ticks' first steps, over the same bytes", () => {
         throw new Error("could not find account");
       },
     });
-    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: 20_000_000_000n, pools, live: false, protocolPaused: false });
+    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: 20_000_000_000n, live: false, protocolPaused: false });
     expect(result.outcome).toBe("INVESTED");
     expect(result.detail).toContain("DRY RUN");
     expect(calls).toContain("getMinimumBalanceForRentExemption");
@@ -534,14 +790,14 @@ describe("the ticks' first steps, over the same bytes", () => {
         throw new Error("could not find account");
       },
     });
-    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: 300_000_000n, pools, live: false, protocolPaused: false });
+    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: 300_000_000n, live: false, protocolPaused: false });
     expect(result.outcome).toBe("INVESTED");
     expect(result.detail).toContain("would wrap 280000000");
     expect(result.detail).not.toContain("9998000000");
     expect(result.wrap).toEqual({ free: 9_998_000_000n, allowance: 280_000_000n, wrapped: 280_000_000n, short: true });
 
     // A balance the snapshot could not read fronts nothing: the turn rests, and says why.
-    const unread = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, pools, live: false, protocolPaused: false });
+    const unread = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, live: false, protocolPaused: false });
     expect(unread.outcome).toBe("IDLE");
     expect(unread.detail).toContain("the crank's balance was not read this sweep");
     expect(unread.wrap).toEqual({ free: 9_998_000_000n, allowance: 0n, wrapped: 0n, short: true });
@@ -559,7 +815,7 @@ describe("the ticks' first steps, over the same bytes", () => {
         throw new Error("could not find account");
       },
     }, false);
-    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: 20_000_000_000n, pools, live: false, protocolPaused: false });
+    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: 20_000_000_000n, live: false, protocolPaused: false });
     expect(result.outcome).toBe("IDLE");
     expect(result.detail).toContain("SOL/USD and USDC/USD");
     expect(result.detail).toContain("only the USDC the vault already holds is invested");
@@ -584,7 +840,7 @@ describe("the ticks' first steps, over the same bytes", () => {
         },
       },
     );
-    const result = await runInvestTick({ connection, program, vault, crank: Keypair.generate(), crankLamports: null, pools: legPools, live: true, protocolPaused: false });
+    const result = await runInvestTick({ connection, program, vault, crank: TURN_CRANK, crankLamports: null, live: true, protocolPaused: false });
     expect(result.outcome).toBe("IDLE");
     expect(result.detail).toContain("0 USDC, below the policy minimum");
     expect(result.detail).toContain("min_convert_rate_wad is 0");
@@ -607,7 +863,7 @@ describe("the ticks' first steps, over the same bytes", () => {
       },
     });
     usdcAta = getAssociatedTokenAddressSync(USDC_MINT, vault, true);
-    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, pools, live: false, protocolPaused: false });
+    const result = await runInvestTick({ connection, program, vault, crank: null, crankLamports: null, live: false, protocolPaused: false });
     expect(result.outcome).toBe("INVESTED");
     expect(result.detail).toContain("DRY RUN — would invest the 7000000 USDC already in the vault");
     expect(result.detail).not.toContain("would wrap");
@@ -629,7 +885,7 @@ describe("the ticks' first steps, over the same bytes", () => {
       bucketDays: Array.from({ length: 31 }, (_, index) => 20_681 + index),
       bucketAmounts: Array.from({ length: 31 }, () => 29_000_000n),
     });
-    const result = await runInvestTick({ connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: legPools, live: true, protocolPaused: false });
+    const result = await runInvestTick({ connection, program, vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false });
     expect(result.outcome).toBe("IDLE");
     expect(result.detail).toContain("RollingCapExhausted: rolling 899000000 of max 900000000");
     expect(result.detail).toContain("headroom 1000000 is below the basket minimum 12500000");
@@ -644,27 +900,58 @@ describe("the ticks' first steps, over the same bytes", () => {
   // are the ones mainnet held on 2026-09-20: a pool check:legs passed at 6,700
   // dollars two days earlier, holding 31.91 USDC against 0.110274669 of its own
   // token, where a buy over about 11 dollars reverts.
-  const DRAINED_USDC = 31_910_000n;
-  const DRAINED_STOCK = 110_274_669n;
-  const LIVE_USDC = 9_389_405_679n;
-  const LIVE_STOCK = 1_163_416_179n;
+  // WHAT THESE NUMBERS NOW MEAN, AND IT CHANGED WITH THE VENUE. They used to be
+  // a Raydium pool's two RESERVES, because the gate read a pool. The gate
+  // censuses a VENUE'S INVENTORY of the asset each hop pays us — the only
+  // layout a CLOB and a DLMM share — so what a leg carries here is how much of
+  // its own stock the venue holds.
+  //
+  // DRAINED IS STILL THE REAL NUMBER: 0.110274669 of its own token, what
+  // mainnet held on 2026-09-20 in a venue check:legs had passed at 6,700
+  // dollars two days earlier. DEEP is sized against this suite's own ceiling —
+  // max_per_call is 250 USDC, the heaviest leg is 4,000 bps of it, and the stub
+  // quotes a leg 1:1 — so a 100,000,000 raw take needs 5,000,000,000 raw of
+  // cover at the keeper's 50x, and this clears it with room.
+  const DRAINED_INVENTORY = 110_274_669n;
+  const DEEP_INVENTORY = 5_000_000_000_000n;
+  /** The convert hop's out-side: USDC, and far past anything this suite converts. */
+  const DEEP_USDC_INVENTORY = 900_000_000_000_000n;
 
-  /** A Token-2022 mint with no extensions: the 82-byte base and AccountType::Mint, which charges nothing. */
+  // ── the mint layout, at the offsets the chain really uses ────────────────
+  //
+  // THESE TWO WERE WRONG UNTIL 2026-09-21, IN THE SAME WAY THE DECODER WAS.
+  // Both wrote AccountType at byte 82 and the TLV at 83, which is what
+  // decodeMintFacts then read — so fixture and code agreed with each other and
+  // with no mint that has ever existed. Measured against mainnet: ANTHROPIC is
+  // 911 bytes with byte[165] = 1, SPYx is 676 bytes with byte[165] = 1, and
+  // byte[82] is zero padding on both.
+  //
+  // test/fixtures/token2022-mints.json holds those real accounts, and
+  // invest-decision.test.ts decodes them directly. These builders stay because
+  // a fabricated mint is the only way to ask for a fee of exactly N bps at
+  // exactly epoch E — but they now fabricate the real shape.
+
+  /** A Token-2022 mint with no extensions: exactly the 82-byte base, which charges nothing. */
   function plainMintBytes(): Buffer {
-    const data = Buffer.alloc(83);
-    data.fill(0xab, 0, 82);
-    data.writeUInt8(1, 82);
+    const data = Buffer.alloc(82);
+    data.fill(0xab);
     return data;
   }
 
-  /** A Token-2022 mint carrying exactly one TLV extension after the 82-byte base and the AccountType byte. */
+  /**
+   * A Token-2022 mint carrying exactly one TLV extension.
+   *
+   * The 82-byte base, then ZERO PADDING out to 165 — Token-2022 pads a mint
+   * past `Account`'s own length precisely so the two can never be told apart by
+   * size — then AccountType::Mint at 165 and the TLV from 166.
+   */
   function mintWithExtension(type: number, body: Buffer): Buffer {
-    const data = Buffer.alloc(87 + body.length);
+    const data = Buffer.alloc(170 + body.length);
     data.fill(0xab, 0, 82);
-    data.writeUInt8(1, 82); // AccountType::Mint
-    data.writeUInt16LE(type, 83);
-    data.writeUInt16LE(body.length, 85);
-    body.copy(data, 87);
+    data.writeUInt8(1, 165); // AccountType::Mint, after the padding
+    data.writeUInt16LE(type, 166);
+    data.writeUInt16LE(body.length, 168);
+    body.copy(data, 170);
     return data;
   }
 
@@ -690,47 +977,61 @@ describe("the ticks' first steps, over the same bytes", () => {
     return mintWithExtension(14, config);
   }
 
-  /** A Raydium CLMM PoolState as mainnet serves one: 1544 bytes, the pair at 73 and 105, the vaults at 137 and 169. */
-  function poolBytes(mint0: PublicKey, mint1: PublicKey, vault0: PublicKey, vault1: PublicKey): Buffer {
-    const data = Buffer.alloc(1_544);
-    data.fill(0xcd, 0, 73);
-    mint0.toBuffer().copy(data, 73);
-    mint1.toBuffer().copy(data, 105);
-    vault0.toBuffer().copy(data, 137);
-    vault1.toBuffer().copy(data, 169);
-    return data;
-  }
-
-  /** An SPL Token account: the balance is a u64 at 64. */
-  function tokenAccountBytes(amount: bigint): Buffer {
+  /**
+   * An SPL Token account: mint(32) owner(32) amount(u64 at 64), 165 bytes.
+   *
+   * THE MINT IS WRITTEN, AND IT DID NOT USED TO BE. While the gate compared a
+   * pool's in-side RESERVE against the spend, nothing ever read these thirty-two
+   * bytes, so the fixture left them zero — the field under dispute, arbitrary,
+   * and therefore untested while looking tested (docs/TESTING_TRAPS.md, first
+   * species). The census reads them to decide which side of the pool an account
+   * is on, so they now carry the mint the pool really holds there.
+   */
+  function tokenAccountBytes(mint: PublicKey, amount: bigint): Buffer {
     const data = Buffer.alloc(165);
+    mint.toBuffer().copy(data, 0);
+    key().toBuffer().copy(data, 32); // the pool's authority: not the vault, which is what the exclusion looks for
     data.writeBigUInt64LE(amount, 64);
     return data;
   }
 
   /**
-   * A three-leg basket as the chain holds it: a mint, a pool and the pool's two
-   * vaults per leg, at the weights of the live basket.
+   * A basket as the chain holds it: one mint per leg at the weights of the live
+   * basket, plus the venue account the stubbed route names for each of them and
+   * one for USDC, which the convert hop is paid in.
+   *
+   * THE POOLS ARE GONE FROM HERE because they are gone from the turn. The tick
+   * used to read a PoolState and its two vaults per leg; it reads the leg mints
+   * and then whatever the ROUTE names, which is why the venue accounts are
+   * registered with the stub rather than derived from a pool.
    */
-  function basketOnChain(reserves: readonly (readonly [bigint, bigint])[]) {
+  function basketOnChain(inventories: readonly bigint[]) {
     const accounts = new Map<string, { data: Buffer; owner?: PublicKey }>();
-    const legs = reserves.map(([usdcReserve, stock], index) => {
+    // FRESH PER BASKET. The registry is module-level so the fetch stub can read
+    // it, and a leftover entry from an earlier test would serve a venue account
+    // this chain has never heard of — which reads as an unmeasurable venue and
+    // refuses, a long way from the test that caused it.
+    venueInventory.clear();
+    const usdcVenue = key();
+    accounts.set(usdcVenue.toBase58(), { data: tokenAccountBytes(USDC_MINT, DEEP_USDC_INVENTORY), owner: TOKEN_PROGRAM_ID });
+    venueInventory.set(USDC_MINT.toBase58(), usdcVenue);
+
+    const legs = inventories.map((inventory, index) => {
       const mint = key();
-      const pool = key();
-      const usdcVault = key();
-      const stockVault = key();
+      const venue = key();
       accounts.set(mint.toBase58(), { data: plainMintBytes(), owner: TOKEN_2022_PROGRAM_ID });
-      accounts.set(pool.toBase58(), { data: poolBytes(USDC_MINT, mint, usdcVault, stockVault) });
-      accounts.set(usdcVault.toBase58(), { data: tokenAccountBytes(usdcReserve) });
-      accounts.set(stockVault.toBase58(), { data: tokenAccountBytes(stock) });
-      return { mint, pool, weightBps: [4_000, 3_300, 2_700][index]!, minOutRateWad: 1n };
+      // AND IT IS OWNED BY A TOKEN PROGRAM, which the census requires before it
+      // will read these offsets at all: bytes at 0..32 mean "a mint" only in an
+      // account the token program owns.
+      accounts.set(venue.toBase58(), { data: tokenAccountBytes(mint, inventory), owner: TOKEN_2022_PROGRAM_ID });
+      venueInventory.set(mint.toBase58(), venue);
+      return { mint, venue, weightBps: [4_000, 3_300, 2_700][index]!, minOutRateWad: 1n };
     });
     return {
       accounts,
       legs: legs.map((leg) => ({ mint: leg.mint, weightBps: leg.weightBps, minOutRateWad: leg.minOutRateWad })),
-      pools: new Map(legs.map((leg) => [leg.mint.toBase58(), leg.pool] as const)),
       mints: legs.map((leg) => leg.mint),
-      addresses: legs.map((leg) => leg.pool),
+      venues: legs.map((leg) => leg.venue),
     };
   }
 
@@ -746,38 +1047,47 @@ describe("the ticks' first steps, over the same bytes", () => {
     // 10 SOL free and a funded crank, so this turn WOULD wrap and convert; the
     // gate runs first, and the SOL never moves. The middle leg's pool is the
     // drained one; the other two are the live pool as measured.
-    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [DRAINED_USDC, DRAINED_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    const basket = basketOnChain([DEEP_INVENTORY, DRAINED_INVENTORY, DEEP_INVENTORY]);
+    stubJupiter();
     const { vault, connection, program, calls, callArgs } = chainWith({}, { legs: basket.legs }, emptyAndPriced, true, basket.accounts);
     const result = await runInvestTick({
-      connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+      connection, program, vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
     });
 
     expect(result.outcome).toBe("REFUSED");
     // THE AMOUNT TESTED IS THE ONE THIS TURN WOULD REALLY SPEND: max_per_call
     // (250 USDC) caps the BASKET and is split by weight, so the 3,300 bps leg
     // gets 82.5 USDC — not the 5-dollar default purchase, and not the whole cap.
-    expect(result.detail).toContain("holds 31910000 in-asset raw against the 82500000 this turn would push into it");
-    expect(result.detail).toContain("0.4x cover, under the 50x this keeper trades on (it would need 4125000000)");
+    // The stub quotes a leg 1:1, so that is also what the hop TAKES out of the
+    // venue, which is the number the cover is measured against.
+    expect(result.detail).toContain(`holds ${DRAINED_INVENTORY} raw of ${basket.mints[1]!.toBase58()} across 1 account(s) at its Manifest hop`);
+    expect(result.detail).toContain("against the 82500000 this turn would move through it");
+    expect(result.detail).toContain("1.3x cover, under the 50x this keeper trades on (it would need 4125000000)");
     expect(result.detail).toContain(basket.mints[1]!.toBase58());
-    expect(result.detail).toContain("refusing the whole basket of 3 leg(s), the deep ones included");
+    // FOUR, NOT THREE: the wSOL -> USDC conversion is one more leg of the same
+    // basket, measured by the same function and judged by the same verdict.
+    // That is the doctrine stated in a number — a shallow leg refuses the
+    // conversion, and a shallow conversion refuses the legs.
+    expect(result.detail).toContain("refusing the whole basket of 4 leg(s), the deep ones included");
     expect(result.detail).toContain("refusing to convert SOL toward it");
     for (const index of [0, 2]) expect(result.detail).not.toContain(basket.mints[index]!.toBase58());
 
-    // NOTHING MOVED, AND ALMOST NOTHING WAS ASKED FOR. The pool states ride the
-    // request the mint gate was already sending — no extra round trip — and the
-    // reserves inside them cost exactly one more, for the whole basket.
-    expect(calls).toEqual([
-      "getAccountInfoAndContext",
-      "getMultipleAccountsInfo",
-      "getMinimumBalanceForRentExemption",
-      "getTokenAccountBalance",
-      "getTokenAccountBalance",
-      "getMultipleAccountsInfo",
-      "getMultipleAccountsInfo",
-    ]);
-    expect(callArgs[5]![0]).toEqual([...basket.mints, ...basket.addresses]);
-    expect((callArgs[6]![0] as PublicKey[]).length, "six vaults for three legs, in one request").toBe(6);
-    for (const rpc of ["getBalance", "getAccountInfo", "sendTransaction", "getSignaturesForAddress"]) expect(calls).not.toContain(rpc);
+    // NOTHING MOVED. The exact RPC sequence is no longer pinned here: a Jupiter
+    // measurement reads the destination mint, the epoch and the accounts the
+    // ROUTE names, so the list is measureLegVenue's shape rather than this
+    // turn's, and pinning it would make a harmless reordering inside that
+    // function fail a test about refusing to wrap (docs/TESTING_TRAPS.md, third
+    // species). What this turn promises is pinned instead: the leg mints in one
+    // request, and not one lamport moved.
+    const sameKeys = (got: unknown, want: readonly PublicKey[]): boolean =>
+      Array.isArray(got) && got.length === want.length && want.every((key, index) => key.equals(got[index] as PublicKey));
+    expect(
+      callArgs.some((args) => sameKeys(args[0], basket.mints)),
+      "the leg mints go in ONE request — the index is not pinned because the route reads around it are measureLegVenue's",
+    ).toBe(true);
+    for (const rpc of ["getBalance", "getLatestBlockhash", "sendTransaction", "sendRawTransaction", "getSignaturesForAddress"]) {
+      expect(calls).not.toContain(rpc);
+    }
     expect(result.wrap?.wrapped).toBe(0n);
   });
 
@@ -786,7 +1096,8 @@ describe("the ticks' first steps, over the same bytes", () => {
     // the money this turn can spend is exactly the 12 USDC the vault holds: 4.80
     // to the heaviest leg, under the 5 USDC invest.rs requires of every call.
     // Reaching that refusal at all is the proof the depth gate passed.
-    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
+    stubJupiter();
     let usdcAta: PublicKey | undefined;
     const { vault, connection, program, calls } = chainWith({}, { legs: basket.legs, minConvertRateWad: 0n }, {
       getMinimumBalanceForRentExemption: async () => 2_000_000,
@@ -797,45 +1108,50 @@ describe("the ticks' first steps, over the same bytes", () => {
     }, true, basket.accounts);
     usdcAta = getAssociatedTokenAddressSync(USDC_MINT, vault, true);
     const result = await runInvestTick({
-      connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+      connection, program, vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
     });
 
     expect(result.outcome).toBe("IDLE");
     expect(result.detail).toContain("$12.00 across 3 legs is $4.80-ish each, under the $5.00 per-call minimum");
     expect(result.detail).toContain("min_convert_rate_wad is 0");
     // A RESTING TURN IS TESTED AT WHAT IT HOLDS, NOT AT THE CAP. Had the gate
-    // used max_per_call here it would have measured 100 USDC against pools this
+    // used max_per_call here it would have measured 100 USDC against venues this
     // vault was never going to push more than 4.80 into.
-    expect(calls).toEqual([
-      "getAccountInfoAndContext",
-      "getMultipleAccountsInfo",
-      "getMinimumBalanceForRentExemption",
-      "getTokenAccountBalance",
-      "getTokenAccountBalance",
-      "getMultipleAccountsInfo",
-      "getMultipleAccountsInfo",
-      "getTokenAccountBalance",
-    ]);
-    for (const rpc of ["getBalance", "sendTransaction"]) expect(calls).not.toContain(rpc);
+    //
+    // ONE MEASUREMENT PER LEG AND NO MORE. Three legs, no conversion (the floor
+    // is 0), so the destination mint is read exactly three times — once per leg
+    // — and never once for the convert hop that is not happening.
+    expect(calls.filter((name) => name === "getEpochInfo")).toHaveLength(3);
+    for (const rpc of ["getBalance", "getLatestBlockhash", "sendTransaction", "sendRawTransaction"]) {
+      expect(calls).not.toContain(rpc);
+    }
   });
 
-  it("refuse a leg routed through a pool that is not its pair, which no build-time check can see change", async () => {
-    // The registry maps a mint to a pool by configuration. Nothing before this
-    // gate asks the pool what it actually trades, so a stale entry sends the
-    // vault's money into a stranger's market at the weights of this one.
-    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
-    const strangerVaults = [key(), key()];
-    basket.accounts.set(basket.addresses[0]!.toBase58(), {
-      data: poolBytes(USDC_MINT, key(), strangerVaults[0]!, strangerVaults[1]!),
-    });
-    for (const address of strangerVaults) basket.accounts.set(address.toBase58(), { data: tokenAccountBytes(LIVE_USDC) });
-    const { vault, connection, program } = chainWith({}, { legs: basket.legs }, emptyAndPriced, true, basket.accounts);
+  it("refuse a route that delivers anywhere but the account invest() measures, whatever the request said", async () => {
+    // THE JUPITER-ERA VERSION OF "a pool that is not its pair". The old gate
+    // could be handed a stale registry row pointing at a stranger's market;
+    // this one asks Jupiter for a route and is handed back an instruction. The
+    // request named the vault's own target account — the stub echoes a
+    // different one, which is what a compromised or simply wrong build looks
+    // like from here, and nothing about the response says so.
+    //
+    // WHY IT MATTERS THAT THIS IS REFUSED RATHER THAN SENT. invest() takes its
+    // delta around vault_target, so a fill landing elsewhere measures ZERO and
+    // reverts with FillTooSmall — the principal survives, the fee does not, and
+    // it happens on every sweep. The keeper refuses before signing instead.
+    const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
+    stubJupiter({ deliverTo: key() });
+    const { vault, connection, program, calls } = chainWith({}, { legs: basket.legs }, emptyAndPriced, true, basket.accounts);
     const result = await runInvestTick({
-      connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+      connection, program, vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
     });
     expect(result.outcome).toBe("REFUSED");
-    expect(result.detail).toContain("is not this leg's pair");
-    expect(result.detail).toContain(basket.mints[0]!.toBase58());
+    expect(result.detail).toContain("delivers to");
+    // AND IT IS STILL A REFUSAL BEFORE THE WRAP. One leg's route being wrong
+    // takes the whole basket and the SOL conversion with it — the doctrine does
+    // not soften because the reason moved from a pool to an API.
+    expect(result.wrap?.wrapped).toBe(0n);
+    for (const rpc of ["getBalance", "sendTransaction", "sendRawTransaction"]) expect(calls).not.toContain(rpc);
   });
 
   // ── the warning the refusal cannot give ───────────────────────────────────
@@ -854,7 +1170,8 @@ describe("the ticks' first steps, over the same bytes", () => {
 
   /** The three-leg scenario the assertions below share: deep pools, conversion off, 12 USDC held. */
   async function restingTurn(mints: (defaults: readonly PublicKey[]) => ReadonlyMap<string, Buffer>) {
-    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
+    stubJupiter();
     for (const [address, data] of mints(basket.mints)) basket.accounts.set(address, { data, owner: TOKEN_2022_PROGRAM_ID });
     let usdcAta: PublicKey | undefined;
     const { vault, connection, program } = chainWith({}, { legs: basket.legs, minConvertRateWad: 0n }, {
@@ -867,7 +1184,7 @@ describe("the ticks' first steps, over the same bytes", () => {
     usdcAta = getAssociatedTokenAddressSync(USDC_MINT, vault, true);
     const run = async () =>
       runInvestTick({
-        connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+        connection, program, vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
       });
     return { basket, run, result: await run() };
   }
@@ -974,11 +1291,12 @@ describe("the ticks' first steps, over the same bytes", () => {
     // there is nothing to say"; ABSENT is "this turn learned nothing about any
     // fee". A venue refusal happens off the policy alone, before the leg read,
     // so a sweep of nothing but these must not clear a standing warning.
-    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
+    stubJupiter();
     basket.accounts.set(basket.mints[0]!.toBase58(), { data: feeMintBytes(100, 900n), owner: TOKEN_2022_PROGRAM_ID });
     const { vault, connection, program } = chainWith({}, { legs: basket.legs, venueProgram: key() }, emptyAndPriced, true, basket.accounts);
     const result = await runInvestTick({
-      connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+      connection, program, vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
     });
 
     expect(result.outcome).toBe("REFUSED");
@@ -1078,12 +1396,13 @@ describe("the ticks' first steps, over the same bytes", () => {
   }
 
   it("reads every token account it might need in ONE request, and creates the missing one INSIDE the transaction that uses it", async () => {
-    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
+    stubJupiter();
     const crank = Keypair.generate();
     const { vault, connection, calls, callArgs } = chainWith({}, { legs: basket.legs }, convertingAndFunded, true, basket.accounts);
     const { signed, program } = capturing(connection);
     const result = await runInvestTick({
-      connection, program, vault, crank, crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+      connection, program, vault, crank, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
     });
 
     // The turn dies where the stub refuses to sign — past the point this test is about.
@@ -1096,9 +1415,19 @@ describe("the ticks' first steps, over the same bytes", () => {
     // ONE REQUEST, NAMING EVERY CANDIDATE: the vault's wSOL account, its USDC
     // account and every leg's target, in one getMultipleAccountsInfo — not one
     // read, and not one transaction, per account.
+    //
+    // FOUND BY ITS CONTENTS, NOT ITS POSITION. It used to be the 4th such read
+    // and the test said so; a Jupiter measurement now reads the accounts every
+    // route names, so the count in front of it belongs to measureLegVenue and
+    // would move for reasons that have nothing to do with the ATA storm. What
+    // must stay true is that these six addresses are asked for TOGETHER, and
+    // exactly once.
     const reads = calls.flatMap((name, index) => (name === "getMultipleAccountsInfo" ? [callArgs[index]![0] as PublicKey[]] : []));
-    expect(reads).toHaveLength(4);
-    expect(reads[3]).toEqual([wsolAta, usdcAta, ...legAtas]);
+    const candidates = [wsolAta, usdcAta, ...legAtas];
+    const candidateReads = reads.filter(
+      (read) => read.length === candidates.length && candidates.every((key, index) => key.equals(read[index]!)),
+    );
+    expect(candidateReads, "the vault's wSOL, USDC and every leg target, in one request and only one").toHaveLength(1);
 
     // AND IT HAPPENS ONLY ONCE THE TURN HAS DECIDED TO WRAP. getBalance is the
     // crank's own balance, re-read to size the wrap; the candidates are read
@@ -1111,7 +1440,24 @@ describe("the ticks' first steps, over the same bytes", () => {
     // sent.
     expect(signed).toHaveLength(1);
     expect(calls.filter((name) => name === "getLatestBlockhash")).toHaveLength(1);
-    for (const rpc of ["sendTransaction", "sendRawTransaction", "getAccountInfo"]) expect(calls).not.toContain(rpc);
+    for (const rpc of ["sendTransaction", "sendRawTransaction"]) expect(calls).not.toContain(rpc);
+
+    // getAccountInfo IS NOW CALLED, AND IT MUST NEVER BE FOR ONE OF THESE.
+    // This used to assert the call did not happen at all, which was the same
+    // claim as "no account is read one at a time". It happens now — the route
+    // builder reads each hop's DESTINATION MINT to price its transfer fee — so
+    // the assertion states what it always meant: a single read is for a mint,
+    // never for a token account, because a token account read one at a time is
+    // the ATA storm coming back.
+    const singles = calls.flatMap((name, index) => (name === "getAccountInfo" ? [callArgs[index]![0] as PublicKey] : []));
+    expect(singles.length, "one per hop: the convert's USDC and each leg's own mint").toBeGreaterThan(0);
+    for (const address of singles) {
+      expect(
+        candidates.some((candidate) => candidate.equals(address)),
+        `${address.toBase58()} is one of the vault's token accounts, read on its own — that is the ATA storm`,
+      ).toBe(false);
+      expect([USDC_MINT.toBase58(), ...basket.mints.map((m) => m.toBase58())]).toContain(address.toBase58());
+    }
 
     const [create, wrapSol] = signed[0]!.instructions;
     expect(signed[0]!.instructions).toHaveLength(2);
@@ -1130,8 +1476,40 @@ describe("the ticks' first steps, over the same bytes", () => {
     ]);
   });
 
+  it("does NOT refuse the basket because the SOL hop is below the owner's floor — that is a rest, not a verdict", async () => {
+    // FOUND BY REMOVAL, 2026-09-21. The convert is measured by the same
+    // function and judged by the same all-or-nothing verdict as the legs, so it
+    // is tempting to hand the gate the owner's min_convert_rate_wad as well.
+    // That is wrong, and nothing was stopping it: passing ownerFloorRateWad at
+    // the gate left all 44 cases in this file green.
+    //
+    // WHY IT MATTERS. The gate's question is whether the VENUE is deep, and its
+    // answer refuses the whole basket before the wrap. The owner's floor is a
+    // PRICE, and a price under it means the market moved — a reason to leave
+    // the SOL as SOL this sweep, not a reason to stop buying with the USDC the
+    // vault already holds. A floor of (1 << 64) wad is about $18 billion the
+    // SOL: unmeetable, deliberately, so that the only thing this test can be
+    // reading is what the gate does with it.
+    const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
+    stubJupiter();
+    const chain = chainWith({}, { legs: basket.legs, minConvertRateWad: 1n << 64n }, convertingAndFunded, true, basket.accounts);
+    const { program } = capturing(chain.connection);
+    const result = await runInvestTick({
+      connection: chain.connection, program, vault: chain.vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
+    });
+
+    // PAST THE GATE. The turn dies later, where the capturing stub refuses to
+    // sign — which is exactly the point: it GOT there. Had the floor been
+    // handed to the gate, this would be REFUSED before a single lamport was
+    // wrapped, and the detail would say the venues could not be measured.
+    expect(result.outcome).toBe("FAILED");
+    expect(result.detail).not.toContain("could not be measured");
+    expect(result.detail).not.toContain("refusing the whole basket");
+  });
+
   it("creates nothing for an account that already exists: the same turn sends the wrap alone", async () => {
-    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
+    stubJupiter();
     const crank = Keypair.generate();
     // The vault's wSOL account is on the chain this time. Everything else about
     // the turn is identical, so the only thing the assertions can be reading is
@@ -1140,7 +1518,7 @@ describe("the ticks' first steps, over the same bytes", () => {
     const connection = withAccountPresent(chain.connection, getAssociatedTokenAddressSync(NATIVE_MINT, chain.vault, true, TOKEN_PROGRAM_ID));
     const { signed, program } = capturing(connection);
     const result = await runInvestTick({
-      connection, program, vault: chain.vault, crank, crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+      connection, program, vault: chain.vault, crank, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
     });
 
     expect(result.outcome).toBe("FAILED");
@@ -1156,9 +1534,10 @@ describe("the ticks' first steps, over the same bytes", () => {
     // THE ORDER IS THE BUG. The old turn created the leg's associated token
     // account and only then went looking for a route; a leg with no live swap
     // left a paid-for account behind on every sweep. Conversion is off here, so
-    // the only thing this turn can do is buy: 250 USDC, three legs, deep pools,
-    // and a pool whose history holds no swap at all.
-    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    // the only thing this turn can do is buy: 250 USDC, three legs, deep
+    // venues, and a Jupiter that will not answer.
+    const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
+    stubJupiter({ fail: true });
     let usdcAta: PublicKey | undefined;
     const { vault, connection, program, calls } = chainWith({}, { legs: basket.legs, minConvertRateWad: 0n }, {
       getMinimumBalanceForRentExemption: async () => 2_000_000,
@@ -1170,22 +1549,26 @@ describe("the ticks' first steps, over the same bytes", () => {
     }, true, basket.accounts);
     usdcAta = getAssociatedTokenAddressSync(USDC_MINT, vault, true, TOKEN_PROGRAM_ID);
     const result = await runInvestTick({
-      connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+      connection, program, vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
     });
 
-    expect(result.outcome).toBe("FAILED");
-    expect(result.detail).toContain("not Raydium CLMM");
+    // REFUSED, NOT FAILED, AND THAT IS THE IMPROVEMENT. A leg with nowhere to
+    // trade used to be discovered at route-fetch time and reported as a failed
+    // transaction; it is now a measurement that could not be taken, which is a
+    // refusal — and an unmeasurable depth is never a pass.
+    expect(result.outcome).toBe("REFUSED");
+    expect(result.detail).toContain("could not be measured");
+    expect(result.detail).toContain("refusing to convert SOL toward it");
     expect(result.purchases).toBeUndefined();
-    // Three reads, and they are the ones that were there before this fix: the
-    // vault + Clock + feeds, the leg mints + pools, and the pools' vaults. The
-    // candidate token accounts were never read, because no account was ever
-    // going to be created for a leg that has nowhere to trade.
-    expect(calls.filter((name) => name === "getMultipleAccountsInfo")).toHaveLength(3);
+    // TWO READS, AND NOT A THIRD. The vault + Clock + feeds, then the leg
+    // mints. The first leg's measurement threw before it named an account, so
+    // nothing was read for the route and — the point of this test — no token
+    // account was ever asked about, because none was going to be created for a
+    // basket that cannot be bought.
+    expect(calls.filter((name) => name === "getMultipleAccountsInfo")).toHaveLength(2);
     // ZERO, not one, and that is STRICTER than it was. The route used to be
-    // found by walking a pool's signatures for a recent swap_v2; it now comes
-    // from the pool's own account, so a signature walk here would be a
-    // regression to the read that took 52-72 s and died on a versioned
-    // transaction. Pinning 0 keeps it gone.
+    // found by walking a pool's signatures for a recent swap_v2, a read that
+    // took 52-72 s and died on a versioned transaction. Pinning 0 keeps it gone.
     expect(calls.filter((name) => name === "getSignaturesForAddress")).toHaveLength(0);
     for (const rpc of ["getLatestBlockhash", "sendTransaction", "sendRawTransaction"]) expect(calls).not.toContain(rpc);
   });
@@ -1204,11 +1587,12 @@ describe("the ticks' first steps, over the same bytes", () => {
     // EVERYTHING ELSE ABOUT THIS TURN IS FINE: 10 SOL free, a crank that can
     // front it, conversion on, and three pools deep enough to trade in. The only
     // thing wrong is the venue the owner's policy names, and it is enough.
-    const basket = basketOnChain([[LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK], [LIVE_USDC, LIVE_STOCK]]);
+    const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
+    stubJupiter();
     const venue = key();
     const { vault, connection, program, calls } = chainWith({}, { legs: basket.legs, venueProgram: venue }, emptyAndPriced, true, basket.accounts);
     const result = await runInvestTick({
-      connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: basket.pools, live: true, protocolPaused: false,
+      connection, program, vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
     });
 
     expect(result.outcome).toBe("REFUSED");
@@ -1216,9 +1600,14 @@ describe("the ticks' first steps, over the same bytes", () => {
     // keeper can actually route, what the program would have answered, and who
     // can change it.
     expect(result.detail).toContain(venue.toBase58());
-    expect(result.detail).toContain("Raydium CLMM");
-    expect(result.detail).toContain(RAYDIUM_CLMM_PROGRAM.toBase58());
+    expect(result.detail).toContain("Jupiter v6");
+    expect(result.detail).toContain(JUPITER_V6_PROGRAM.toBase58());
     expect(result.detail).toContain("WrongVenue");
+    // AND IT DOES NOT OPEN WITH THE MIGRATION SENTENCE. That clause is reserved
+    // for a venue this keeper RETIRED, where the refusal is expected; an
+    // unknown venue is not expected, and telling an operator "nothing is wrong"
+    // about one would be the more expensive half of the mistake.
+    expect(result.detail).not.toContain("EXPECTED first state");
     expect(result.detail).toContain("every sweep");
     expect(result.detail).toContain("OWNER");
 
@@ -1237,15 +1626,43 @@ describe("the ticks' first steps, over the same bytes", () => {
     expect(result.wrap?.wrapped).toBe(0n);
   });
 
+  it("open a RETIRED venue's refusal by saying the migration is expected, and name what the owner must re-sign", async () => {
+    // THE REFUSAL THE LIVE VAULT WILL ACTUALLY GET. The policy signed on chain
+    // names Raydium CLMM, so this is the first thing the mainnet keeper says
+    // after the move to Jupiter — by design, before the wrap, with nothing
+    // spent. Everything else about this turn is fine: 10 SOL free and a crank
+    // that can front it.
+    const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
+    stubJupiter();
+    const { vault, connection, program, calls } = chainWith(
+      {}, { legs: basket.legs, venueProgram: RAYDIUM_CLMM_PROGRAM }, emptyAndPriced, true, basket.accounts,
+    );
+    const result = await runInvestTick({
+      connection, program, vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
+    });
+
+    expect(result.outcome).toBe("REFUSED");
+    // THE FIRST CLAUSE IS THE ONE THAT DECIDES WHETHER SOMEBODY IS WOKEN UP.
+    expect(result.detail.startsWith("This is the EXPECTED first state of the Jupiter migration")).toBe(true);
+    expect(result.detail).toContain("no SOL has been wrapped");
+    // And it still says everything the generic refusal says.
+    expect(result.detail).toContain(RAYDIUM_CLMM_PROGRAM.toBase58());
+    expect(result.detail).toContain(JUPITER_V6_PROGRAM.toBase58());
+    expect(result.detail).toContain("set_invest_policy");
+    // NOTHING WAS WRAPPED, which is the part that costs money if it is wrong.
+    expect(result.wrap?.wrapped).toBe(0n);
+    for (const rpc of ["getBalance", "getLatestBlockhash", "sendTransaction", "sendRawTransaction"]) expect(calls).not.toContain(rpc);
+  });
+
   it("hand convert and invest the venue the POLICY names, at the account the program checks", async () => {
     const { program } = stubChain(new Map());
     const zero = PublicKey.default;
     const venue = key();
-    const swap = { payer: zero, inputTokenAccount: zero, outputTokenAccount: zero, amountIn: 100n, minAmountOut: 200n };
+    const venueData = Buffer.from("c1209b3341d69c81deadbeef", "hex");
     const convertAccounts = { crank: zero, vault: zero, policy: zero, vaultWsol: zero, vaultIn: zero };
     const investAccounts = { crank: zero, vault: zero, policy: zero, vaultIn: zero, vaultTarget: zero, targetMint: zero };
-    const convertArgs = { amountIn: 100n, minOut: 200n, swap };
-    const investArgs = { legIndex: 0, amountIn: 100n, minOut: 200n, swap };
+    const convertArgs = { amountIn: 100n, minOut: 200n, venueData };
+    const investArgs = { legIndex: 0, amountIn: 100n, minOut: 200n, venueData };
 
     const convert = await convertCall(program, { ...convertAccounts, venueProgram: venue }, convertArgs).instruction();
     const invest = await investCall(program, { ...investAccounts, venueProgram: venue }, investArgs).instruction();
@@ -1254,31 +1671,36 @@ describe("the ticks' first steps, over the same bytes", () => {
     expect(convert.keys.at(-1)?.pubkey.toBase58()).toBe(venue.toBase58());
     expect(invest.keys.at(-1)?.pubkey.toBase58()).toBe(venue.toBase58());
 
-    // LEFT OUT, IT IS WHAT IT ALWAYS WAS. The preflight and the builder vectors
-    // call these offline, with fabricated accounts and no policy to read a venue
-    // from, so the argument is optional and defaults to the literal the keeper
-    // used to hardcode. Every caller that HAS a policy passes it.
-    const convertDefault = await convertCall(program, convertAccounts, convertArgs).instruction();
-    const investDefault = await investCall(program, investAccounts, investArgs).instruction();
-    expect(convertDefault.keys.at(-1)?.pubkey.toBase58()).toBe(RAYDIUM_CLMM_PROGRAM.toBase58());
-    expect(investDefault.keys.at(-1)?.pubkey.toBase58()).toBe(RAYDIUM_CLMM_PROGRAM.toBase58());
-
-    // AND THE ARGUMENT BYTES DID NOT MOVE. The venue is an ACCOUNT, not an
-    // argument, so the fixed vectors the preflight compares against — and the
-    // bytes anything else builds — are the same whichever venue is passed.
-    expect(convert.data.toString("hex")).toBe(convertDefault.data.toString("hex"));
-    expect(invest.data.toString("hex")).toBe(investDefault.data.toString("hex"));
+    // THERE IS NO DEFAULT ANY MORE, and the type is what enforces it: both
+    // builders used to fall back to the RAYDIUM_CLMM literal when a caller
+    // omitted the venue, which is now a venue this keeper REFUSES — so the
+    // fallback would have built, for every offline caller, an instruction the
+    // live gate would never allow. `venueProgram` is required; preflight.ts and
+    // money-builders.test.ts pass JUPITER_V6_PROGRAM, the same value production
+    // passes. The compiler is the assertion, so what is left to check here is
+    // that the venue does not leak into the DATA.
+    //
+    // THE ARGUMENT BYTES DO NOT MOVE WITH IT. The venue is an ACCOUNT, so the
+    // fixed vectors the preflight compares against are the same whichever venue
+    // is passed — while venueData, which IS an argument, is carried verbatim.
+    const other = await convertCall(program, { ...convertAccounts, venueProgram: JUPITER_V6_PROGRAM }, convertArgs).instruction();
+    expect(convert.data.toString("hex")).toBe(other.data.toString("hex"));
+    expect(convert.data.toString("hex")).toContain("c1209b3341d69c81deadbeef");
+    expect(invest.data.toString("hex")).toContain("c1209b3341d69c81deadbeef");
   });
 
   it("no longer names a venue of its own at either money site, whatever else the file grows", () => {
     // The SHAPE of the fix, pinned in the source the way the ATA storm's is
     // above: the crank owns no authority, so the venue it sends has to be the
-    // one the owner signed, read off the policy this tick already loaded. The
-    // literal survives in exactly one place — the default for offline callers
-    // with no policy in hand.
+    // one the owner signed, read off the policy this tick already loaded.
+    //
+    // AND THE DEFAULT IS GONE, which this now pins too. There used to be two
+    // `?? RAYDIUM_CLMM` fallbacks here for offline callers; a default naming a
+    // venue the keeper refuses is worse than no default, so the argument is
+    // required and the literal has left this file entirely.
     const source = readFileSync(new URL("../src/invest-tick.ts", import.meta.url), "utf8");
     expect(source).not.toContain("venueProgram: RAYDIUM_CLMM");
-    expect(source.match(/venueProgram: accounts\.venueProgram \?\? RAYDIUM_CLMM/g)).toHaveLength(2);
+    expect(source).not.toContain("?? RAYDIUM_CLMM");
     expect(source.match(/venueProgram: policy\.venueProgram/g)).toHaveLength(2);
   });
 
@@ -1299,15 +1721,20 @@ describe("the ticks' first steps, over the same bytes", () => {
     });
     usdcAta = getAssociatedTokenAddressSync(USDC_MINT, vault, true, TOKEN_PROGRAM_ID);
     const result = await runInvestTick({
-      connection, program, vault, crank: Keypair.generate(), crankLamports: 10_000_000_000n, pools: new Map(), live: true, protocolPaused: false,
+      connection, program, vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
     });
 
     expect(result.outcome).toBe("REFUSED");
     // FIRST, not last: a truncated log line has to keep it.
     expect(result.detail.startsWith("CONVERSION IS OFF")).toBe(true);
     expect(result.detail).toContain("PYTH GUARD ON THAT HOP HAS NOTHING TO WATCH");
-    // And the refusal it leads is still all of itself.
-    expect(result.detail).toContain(`no pool configured for ${mint.toBase58()}`);
+    // AND THE REFUSAL IT LEADS IS STILL ALL OF ITSELF. The refusal underneath
+    // changed with the venue — there is no pool registry to be missing from any
+    // more, so a leg the keeper knows nothing about is one whose MINT it cannot
+    // read — but the alarm's job is the same either way: lead, whatever leads
+    // after it.
+    expect(result.detail).toContain(`${mint.toBase58()} has no readable mint account`);
+    expect(result.detail).toContain("refusing to convert SOL toward it");
     // SAID ONCE. It was reported by `noted` and is now a turn finding; carrying
     // both would print the whole alarm twice in one line.
     expect(result.detail.match(/min_convert_rate_wad is 0/g)).toHaveLength(1);

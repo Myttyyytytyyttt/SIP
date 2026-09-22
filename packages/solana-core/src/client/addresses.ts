@@ -19,13 +19,43 @@ export const ED25519_PROGRAM = "Ed25519SigVerify111111111111111111111111111";
  */
 export const LIGHTHOUSE_PROGRAM = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
 
-/** Raydium CLMM: the venue program SIP's invest policy pins. */
+/**
+ * Raydium CLMM. IT IS NO LONGER A VENUE A POLICY MAY NAME — it is a PRICE
+ * SOURCE. The build route reads a leg's min_out_rate_wad and the convert floor
+ * from Raydium CLMM pools (server/readers.ts PRICED_POOLS), and that is all
+ * this constant is for now. The keeper stopped routing through it when the
+ * basket moved to Jupiter and refuses it outright
+ * (solana-keeper/src/invest-decision.ts RETIRED_VENUES), so a policy naming it
+ * as venue_program buys nothing, at any balance, for the life of the policy.
+ */
 export const RAYDIUM_CLMM = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
+
+/**
+ * Jupiter v6: THE VENUE PROGRAM A POLICY SIGNED ON THIS BRANCH MUST NAME.
+ *
+ * It is the only key in the keeper's ROUTABLE_VENUES
+ * (solana-keeper/src/invest-decision.ts), and the keeper's venue check is
+ * all-or-nothing: a policy whose venue_program is anything else is refused
+ * before the wrap, on every sweep, forever. The web must therefore be able to
+ * BUILD this byte — build-handler.ts VENUE_PROGRAMS translates the name, and
+ * website-oficial's VERIFIABLE_VENUES checks the built bytes against it.
+ *
+ * The same base58 lives in the keeper (JUPITER_V6_PROGRAM) and is asserted
+ * against this one by test, because the browser may not import the keeper.
+ */
+export const JUPITER_V6 = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
 
 export const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
-/** SP500 xStock: Token-2022, 8 decimals. Its issuer holds freeze, pause and a permanent delegate. */
+/**
+ * SP500 xStock: Token-2022, 8 decimals. Read 2026-09-21 it carries NO
+ * TransferFeeConfig extension, and a Token-2022 mint's extensions are fixed at
+ * initialisation — so no authority anywhere can ever give it a transfer fee.
+ * Its issuer does still hold freeze (JDq14BWv…), a permanent delegate
+ * (5aMNNLQJ…), a Pausable and a default-account-state extension, under keys
+ * separate from each other.
+ */
 export const SPYX_MINT = "XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W";
 
 /** Raydium CLMM wSOL/USDC (mint0 wSOL, mint1 USDC): the pool the keeper converts through, and the convert floor's price. */
@@ -38,19 +68,68 @@ export const SPYX_USDC_POOL = "6truu3rZuiB9rKQg4VYC3Dt3QwV7DgwGqXrYUcrvnDDE";
 export const TOKEN_PROGRAMS = [TOKEN_PROGRAM, TOKEN_2022_PROGRAM] as const;
 
 /**
- * PreStocks ANTHROPIC: Token-2022, 9 decimals, with a 50 bps transfer fee whose
- * maximum is u64::MAX, so the fee is uncapped however large the trade. One key
- * (WV9PJN7XTmTLVwbutCLFxp8TyePee6Xq5mRq6Fti5Wc) holds its mint, freeze, fee,
- * transfer-hook, pause AND permanent-delegate authority; the same key holds
- * FIGUREAI's. Its transfer_hook extension carries a null program id.
+ * THE KEY EVERY PRESTOCKS MINT BELOW ANSWERS TO.
+ *
+ * Read on mainnet 2026-09-21 (epoch 1039, slot 448993661): this one key is the
+ * mint authority, the freeze authority, the permanent delegate AND the
+ * transfer-fee config authority of ALL EIGHT PreStocks mints named in this
+ * file, each of which also carries a Pausable extension and a transfer-hook
+ * extension. It can mint, freeze, pause, move a holder's tokens without the
+ * holder, and rewrite the transfer fee at any epoch boundary.
+ *
+ * IT IS ALSO WHAT IDENTIFIES THESE MINTS. A token search by symbol answers with
+ * impostors — ANTHROPIC alone returns ten, several of them pump.fun mints — so
+ * a PreStocks mint is recognised by this authority, never by its ticker.
+ */
+export const PRESTOCKS_ISSUER = "WV9PJN7XTmTLVwbutCLFxp8TyePee6Xq5mRq6Fti5Wc";
+
+/**
+ * PreStocks ANTHROPIC: Token-2022, 9 decimals, with a transfer fee whose
+ * maximum is u64::MAX, so the fee is uncapped however large the trade. Read
+ * 2026-09-21 (epoch 1039) that fee is 100 BPS — it was 50 until the issuer's
+ * scheduled record took effect at that epoch, and 100 is exactly the keeper's
+ * MAX_LEG_FEE_BPS. Never take the number from this comment; read it from the
+ * mint. Everything at PRESTOCKS_ISSUER is true of it, and its transfer_hook
+ * extension carries a null program id.
  */
 export const ANTHROPIC_MINT = "Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw";
 
 /** Raydium CLMM ANTHROPIC/USDC (mint0 ANTHROPIC, mint1 USDC), fee tier 0.25 %, tick spacing 60: the ANTHROPIC floor's price. */
 export const ANTHROPIC_USDC_POOL = "47MsbowAJnPPt6jgSGLK4hdCtKqRRcKT5pTFHPV7WBPt";
 
-/** PreStocks FIGUREAI: Token-2022, 9 decimals, the same 50 bps uncapped fee and the same single authority key as ANTHROPIC. */
+/** PreStocks FIGUREAI: Token-2022, 9 decimals, the same uncapped fee — 100 bps in epoch 1039 — and the same single authority key as ANTHROPIC. */
 export const FIGUREAI_MINT = "PreZad18qfPtbxNpMtMuAuX2zVpvkEU8DnJx56faCWd";
+
+// ── The rest of the PreStocks shelf, pinned 2026-09-21 ──────────────────────
+//
+// Resolved by a Jupiter token search and then PROVED by reading each mint on
+// mainnet: Token-2022, 9 decimals, and all four authorities equal to
+// PRESTOCKS_ISSUER — the same key addresses.ts already pinned for ANTHROPIC and
+// FIGUREAI. Each charged 100 bps from epoch 1039 when it was read.
+//
+// NONE OF THEM IS OFFERED, and being named here does not offer them: the
+// catalogue in client/product.ts decides that by rule, and every one of these
+// fails at least one. They are pinned so that the refusals have an address to
+// be about and so the next measurement has somewhere to land. XAI is absent
+// because that search answered with no PreStocks mint for it at all.
+
+/** PreStocks OPENAI: trades on Manifest; no Raydium CLMM/USDC pool is pinned, so no floor can be signed for it. */
+export const OPENAI_MINT = "PreweJYECqtQwBtpxHL171nL2K6umo692gTm7Q3rpgF";
+
+/** PreStocks NEURALINK. */
+export const NEURALINK_MINT = "PrekqLJvJ3qVdXmBGDiexvwUTF4rLFDa6HWS4HJbw9S";
+
+/** PreStocks SPACEX: trades on a Meteora DLMM. */
+export const SPACEX_MINT = "PreANxuXjsy2pvisWWMNB6YaJNzr7681wJJr2rHsfTh";
+
+/** PreStocks POLYMARKET. */
+export const POLYMARKET_MINT = "Pre8AREmFPtoJFT8mQSXQLh56cwJmM7CFDRuoGBZiUP";
+
+/** PreStocks KALSHI. */
+export const KALSHI_MINT = "PreLWGkkeqG1s4HEfFZSy9moCrJ7btsHuUtfcCeoRua";
+
+/** PreStocks ANDURIL. */
+export const ANDURIL_MINT = "PresTj4Yc2bAR197Er7wz4UUKSfqt6FryBEdAriBoQB";
 
 /** Raydium CLMM FIGUREAI/USDC (mint0 FIGUREAI, mint1 USDC), fee tier 1 %, tick spacing 120: the FIGUREAI floor's price. */
 export const FIGUREAI_USDC_POOL = "HvpDt29EdGcKkFMLkUgvAJDP5oDFLaYG4jnVZnRsHduM";

@@ -43,3 +43,62 @@ export function todaysLimits(prices: VaultStateJson["prices"]): TodaysLimits | n
     return null;
   }
 }
+
+// ── HOW FAR A SIGNED FLOOR HAS DRIFTED FROM THE MARKET ───────────────────────
+//
+// A floor is signed ONCE. build-handler derives min_out_rate_wad from a pool's
+// mid at LEG_FLOOR_MARGIN_BPS under it, and min_convert_rate_wad from the SOL
+// price at CONVERT_FLOOR_MARGIN_BPS under it, and then both numbers stand until
+// the owner signs again. The keeper's own comment states the consequence:
+// the floor "DECAYS ... it clears itself as the market rises (a stale floor
+// stops binding) and blocks every honest buy as the market falls."
+//
+// BOTH ENDS OF THAT ARE FAILURES AND ONLY ONE OF THEM IS VISIBLE. A floor the
+// market has passed shows up immediately — nothing buys, and the card says so.
+// A floor the market has left far behind shows up as nothing at all: it is
+// still signed, still enforced on chain, and it would let a fill through at a
+// price no one would accept today. That is the half this measures.
+//
+// THE ARITHMETIC IS OVER TWO NUMBERS THE PAGE ALREADY HAS: the wad the policy
+// carries, and the wad the screen just read. No reading is taken for it.
+
+/** The margin's own slack, in basis points: a floor signed m bps under the market sits m/(10,000-m) under it as a ratio. At 500 bps that is 526, at 1,000 it is 1,111. */
+export const signedSlackBps = (marginBps: number): number => Math.round((marginBps * 10_000) / (10_000 - marginBps));
+
+/**
+ * HOW MUCH FURTHER THAN ITS OWN MARGIN A FLOOR HAS TO HAVE DRIFTED BEFORE THE
+ * CARD CALLS IT OUT, and it is a display rule and nothing else — no gate, on
+ * chain or in the keeper, cares about this number.
+ *
+ * ONE margin's worth of movement is what the margin was for: the floor was set
+ * that far under the market precisely so an ordinary day does not pass it.
+ * TWICE it is the market having gone somewhere else, and the floor is then
+ * further from today's price than it ever was from the price it was signed at.
+ */
+export const FLOOR_DRIFT_NOTICE_MULTIPLE = 2;
+
+/** Where a signed floor now stands against the rate just read. */
+export type FloorDrift =
+  /** The market has fallen through the floor: the keeper refuses, and by the all-or-nothing doctrine it refuses the whole basket. */
+  | { readonly kind: "passed" }
+  /** The market has left the floor far behind: it still permits a fill at `driftBps` worse than today. */
+  | { readonly kind: "slack"; readonly driftBps: number }
+  /** The floor is still about where it was signed. */
+  | { readonly kind: "in-step"; readonly driftBps: number };
+
+/**
+ * `storedWad` is the floor the policy carries, `liveWad` the same quantity as
+ * the screen just read it, and `marginBps` the margin it was signed at. Null
+ * when either number is missing or not positive — an unread rate is not a
+ * drift of zero, and nothing is said about it.
+ *
+ * THE DRIFT IS MEASURED AGAINST THE FLOOR, not against the market, because the
+ * floor is what the sentence quotes: at driftBps the floor permits a fill that
+ * much worse than the rate just read.
+ */
+export function floorDrift(storedWad: bigint | null, liveWad: bigint | null, marginBps: number): FloorDrift | null {
+  if (storedWad === null || liveWad === null || storedWad <= 0n || liveWad <= 0n) return null;
+  if (storedWad > liveWad) return { kind: "passed" };
+  const driftBps = Number(((liveWad - storedWad) * 10_000n) / storedWad);
+  return { kind: driftBps > signedSlackBps(marginBps) * FLOOR_DRIFT_NOTICE_MULTIPLE ? "slack" : "in-step", driftBps };
+}
