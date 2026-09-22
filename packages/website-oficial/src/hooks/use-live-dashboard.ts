@@ -21,6 +21,15 @@
  * activity yet" beside a Settlements tile reading 3, which is a false statement
  * about somebody's pension held until the next sweep.
  *
+ * AND IT LEAVES ITS RETRY-AFTER WITH IT. The route says WHEN this browser may
+ * ask again, often a second or two on a bucket that refills at a token a
+ * second; collapsing the answer to a boolean threw that away, so the sidebar
+ * said "could not be read" for the rest of the minute over a problem that had
+ * already cleared. The next read is brought forward to the moment the server
+ * named — once, and never earlier than the manual floor — and NOTHING is backed
+ * off, because the snapshot's own leg succeeded and every figure on the screen
+ * is current.
+ *
  * A LATE ANSWER FOR AN OLDER REQUEST IS DROPPED (a request counter, as
  * useVaultState does), and changing pension key resets everything — nothing read
  * for the previous key stays on screen for the next one.
@@ -39,12 +48,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { activityWasUnreadable, createLiveApi } from "@/lib/live-api";
+import { activityTroubleFrom, createLiveApi, type LiveActivityTrouble } from "@/lib/live-api";
 import { appendOlder, headCursor, mergeHead, newestSignature } from "@/lib/live-activity-store";
-import { backfillSettlements, backfillSpend, chainSaysSettled, forgetBackfillSpend, holdsSettlement, shouldBackfill } from "@/lib/live-backfill";
+import { backfillLinkSettlements, backfillSpend, chainSaysSettled, forgetBackfillSpend, holdsSettlement, settlementWallets, shouldBackfill } from "@/lib/live-backfill";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { toLiveDashboard } from "@/lib/live-model";
-import { MANUAL_FLOOR_MS, nextDelayMs, nextManualDelayMs, shouldRefreshOnShow } from "@/lib/live-schedule";
+import { MANUAL_FLOOR_MS, nextActivityRetryMs, nextDelayMs, nextManualDelayMs, shouldRefreshOnShow } from "@/lib/live-schedule";
 import type { LiveActivityJson, LiveDashboard, LiveEntryJson, LiveSnapshotJson } from "@/lib/live-types";
 import { vaultFailureWords, type ApiFailure } from "@/lib/vault-api";
 
@@ -84,6 +93,8 @@ export interface LiveDashboardStore {
   readonly older: LiveOlder;
   /** The last history read failed, or the route could not read it: the feed says so instead of "none yet". */
   readonly activityUnreadable: boolean;
+  /** When the server said the history may be asked for again; null when it named no time. */
+  readonly activityRetryAt: number | null;
 }
 
 const wordsFor = (failure: ApiFailure): string =>
@@ -95,20 +106,57 @@ const wordsFor = (failure: ApiFailure): string =>
         ? LIVE_COPY.deploymentUnavailable
         : vaultFailureWords(failure);
 
-export function useLiveDashboard(input: { readonly pensionKey: string | null; readonly privyWallets: readonly string[] }): LiveDashboardStore {
+export function useLiveDashboard(input: {
+  readonly pensionKey: string | null;
+  readonly privyWallets: readonly string[];
+  /**
+   * Whether this caller needs the HISTORY as well as the snapshot. Default true.
+   *
+   * FALSE IS NOT AN OPTIMISATION, IT IS A CORRECTION. A caller that wants only
+   * a balance — the leaderboard's header chip — was paying for a page of
+   * signatures and then for the backfill round behind it, and the round's cost
+   * is remembered per pension key in a module map that outlives the component
+   * (live-backfill.ts). So a connected visit to /leaderboard spent the whole
+   * backfill budget on a chip that reads none of it, and the dashboard, mounted
+   * a moment later, found `done` already true and never paged back for the
+   * settlement it then said it could not find.
+   */
+  readonly activity?: boolean;
+}): LiveDashboardStore {
   const { pensionKey } = input;
+  const wantsActivity = input.activity ?? true;
   const api = useMemo(() => createLiveApi(), []);
   // A string, so a new array with the same wallets does not read again.
   const walletsKey = input.privyWallets.join(",");
 
   const [snapshot, setSnapshot] = useState<LiveSnapshotJson | null>(null);
   const [entries, setEntries] = useState<readonly LiveEntryJson[]>([]);
+  /**
+   * ROWS READ FROM THE TRADING WALLETS' LINKS, kept in their OWN list.
+   *
+   * They are never merged into `entries`, and that is the whole safety of this.
+   * Every window total on the screen rests on the vault page being a contiguous
+   * slice of one stream; a wallet's link is a slice of a different one. Poured
+   * into the same list they would move the oldest loaded settlement backwards
+   * while leaving holes above it, `covers()` would start claiming "Saved this
+   * week", and a link page carrying `gap` would make mergeHead throw the
+   * vault's whole loaded history away. The model takes the two apart.
+   */
+  const [linkEntries, setLinkEntries] = useState<readonly LiveEntryJson[]>([]);
   const [activityMeta, setActivityMeta] = useState<Pick<LiveActivityJson, "status" | "nextBefore"> | null>(null);
   const [failure, setFailure] = useState<{ readonly message: string; readonly retryAt: number | null; readonly since: number } | null>(null);
   const [failures, setFailures] = useState(0);
   const [lastReadAt, setLastReadAt] = useState<number | null>(null);
   const [older, setOlder] = useState<LiveOlder>({ busy: false, retryAt: null, message: null, complete: false });
-  const [activityUnreadable, setActivityUnreadable] = useState(false);
+  /**
+   * The last history read's trouble, or null when it was read.
+   *
+   * A BOOLEAN THREW AWAY THE ONE USEFUL THING IN IT. The route answers a 429
+   * with retry-after — often a second or two — and the hook collapsed the whole
+   * answer to "unreadable", so the sidebar waited out the full sweep and the
+   * Retry button had nothing to say about when it would help.
+   */
+  const [activityTrouble, setActivityTrouble] = useState<LiveActivityTrouble | null>(null);
   // State, not only the ref below: the poll must re-arm when a read FINISHES,
   // and a ref changing does not re-run the effect that would do it.
   const [reading, setReading] = useState(false);
@@ -118,6 +166,8 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
   const request = useRef(0);
   const entriesRef = useRef<readonly LiveEntryJson[]>([]);
   entriesRef.current = entries;
+  const linkEntriesRef = useRef<readonly LiveEntryJson[]>([]);
+  linkEntriesRef.current = linkEntries;
   const snapshotRef = useRef<LiveSnapshotJson | null>(null);
   snapshotRef.current = snapshot;
   const activityMetaRef = useRef<Pick<LiveActivityJson, "status" | "nextBefore"> | null>(null);
@@ -141,16 +191,18 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
     request.current += 1;
     setSnapshot(null);
     setEntries([]);
+    setLinkEntries([]);
     setActivityMeta(null);
     setFailure(null);
     setFailures(0);
     setLastReadAt(null);
     setOlder({ busy: false, retryAt: null, message: null, complete: false });
-    setActivityUnreadable(false);
+    setActivityTrouble(null);
   }, [pensionKey]);
 
   const read = useCallback(
-    async (discover: boolean): Promise<boolean> => {
+    /** `early` marks the extra read a 429's retry-after bought, so it is counted. */
+    async (discover: boolean, early = false): Promise<boolean> => {
       // FALSE means no read happened. The poll re-arms on this answer, and a
       // call that turned back at the guard must not re-arm as though one had
       // just finished — that is the 0 ms loop.
@@ -178,14 +230,18 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
         setSnapshot(answered.body);
 
         // No vault, no history: the route would answer an empty page, so it is not asked.
-        if (answered.body.vault.status === "exists") {
+        // And a caller that does not draw the history does not buy it either.
+        if (wantsActivity && answered.body.vault.status === "exists") {
           const until = newestSignature(entriesRef.current);
           const page = await api.activity({ owner: pensionKey, limit: ACTIVITY_PAGE, ...(until === null ? {} : { until }) });
           if (stale()) return true;
           // CARRIED, NOT DROPPED. A page that failed, or one the route marked
           // unreadable, leaves the rows already on screen alone and tells the
           // feed it could not read — never "No activity yet".
-          setActivityUnreadable(activityWasUnreadable(page));
+          // CARRIED WITH ITS RETRY-AFTER, not collapsed to a flag. `attempts`
+          // counts only the early re-reads this trouble has already bought, so
+          // one refusal buys one faster question and no more.
+          setActivityTrouble((held) => activityTroubleFrom(page, { attempts: early ? (held?.attempts ?? 0) + 1 : 0, now: Date.now() }));
           if (page.ok && page.body.status === "exists") {
             // A POLL DOES NOT REDEFINE WHERE THE HISTORY ENDS. It asked only for
             // what is new, and its "nothing more to page" is about that window.
@@ -212,12 +268,16 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
             // gone with it and the round may be bought once more.
             if (page.body.gap) forgetBackfillSpend(pensionKey);
             const spend = backfillSpend(pensionKey);
+            // THE SETTLEMENT IS LOOKED FOR WHERE SETTLEMENTS ARE, which is each
+            // trading wallet's own link and not the vault. The round no longer
+            // touches the vault's cursor at all, so it cannot race "Load older"
+            // and no longer takes the tail from it.
+            const links = settlementWallets(answered.body);
             if (
-              cursor !== null &&
               shouldBackfill({
                 chainSettled: chainSaysSettled(answered.body),
-                loadedHasSettlement: holdsSettlement(loaded),
-                cursor,
+                loadedHasSettlement: holdsSettlement(loaded) || holdsSettlement(linkEntriesRef.current),
+                wallets: links.length,
                 manualBusy: olderBusyRef.current,
                 rounds: spend.rounds,
                 done: spend.done,
@@ -226,31 +286,24 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
               })
             ) {
               spend.rounds += 1;
-              // The tail is taken for the round's duration, so "Load older"
-              // cannot page from the same cursor at the same time. Only `busy`
-              // is touched: the rest of that control's state is the user's.
-              olderBusyRef.current = true;
-              setOlder((current) => ({ ...current, busy: true }));
-              const filled = await backfillSettlements({ cursor, fetchPage: (before) => api.activity({ owner: pensionKey, limit: ACTIVITY_PAGE, before }) });
-              olderBusyRef.current = false;
+              const filled = await backfillLinkSettlements({
+                wallets: links,
+                fetchPage: (wallet, before) =>
+                  api.linkActivity({ owner: pensionKey, wallet, limit: ACTIVITY_PAGE, ...(before === null ? {} : { before }) }),
+              });
               // A stale round touches nothing: the pension key that changed
-              // under it already reset `older` and everything else.
+              // under it already reset everything else.
               if (stale()) return true;
               // A round that came back cleanly is the answer, found or not.
               // Only one cut short by a failure is worth asking again, and not
               // before the bucket it emptied has refilled.
               spend.done = filled.failure === null && !filled.unreadable;
               spend.retryAt = filled.failure === null || filled.failure.retryAfterSeconds === null ? null : Date.now() + filled.failure.retryAfterSeconds * 1_000;
-              if (filled.entries.length > 0) setEntries((held) => appendOlder(held, filled.entries));
-              setActivityMeta((held) => (held === null ? held : { ...held, nextBefore: filled.cursor }));
-              // THE FAILURE OF A READ NOBODY ASKED FOR IS NOT THE BUTTON'S.
-              // Writing it into `older` put a red "too many reads, try again in
-              // 12 s" under the activity list for a page the user never
-              // requested — and the next round was then issued without ever
-              // consulting it. The tail is handed back and the cursor is told
-              // the truth; what went wrong is remembered in `spend.retryAt`,
-              // where the rule above reads it.
-              setOlder((current) => ({ ...current, busy: false, complete: filled.cursor === null }));
+              // INTO THE LINK LIST, NEVER INTO `entries`, and touching neither
+              // `activityMeta` nor `older`: these rows say nothing whatever
+              // about how much of the VAULT's history is loaded, and a failure
+              // of a read nobody asked for is not the Load older button's.
+              if (filled.entries.length > 0) setLinkEntries((held) => appendOlder(held, filled.entries));
             }
           }
         }
@@ -263,7 +316,7 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
         setReading(false);
       }
     },
-    [api, pensionKey, walletsKey],
+    [api, pensionKey, walletsKey, wantsActivity],
   );
 
   // The first read, and a fresh one whenever the wallet list changes: a wallet
@@ -281,16 +334,26 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
     if (delay === null) return undefined;
     const retryAt = failure?.retryAt ?? null;
     const wait = retryAt === null ? delay : Math.max(delay, retryAt - Date.now());
+
+    // ONE LEG WAS REFUSED AND SAID WHEN TO COME BACK. The snapshot succeeded —
+    // every figure on the screen is current — so nothing is backed off; the
+    // next ordinary read is simply brought forward to the moment the server
+    // named, and only once. Never earlier than the manual floor, because a
+    // retry-after of zero would otherwise spend a page's tokens immediately.
+    const early = nextActivityRetryMs({ retryAt: activityTrouble?.retryAt ?? null, attempts: activityTrouble?.attempts ?? 0, now: Date.now() });
+    const soon = early === null ? null : Math.max(early, MANUAL_FLOOR_MS);
+    const when = soon === null ? Math.max(0, wait) : Math.min(Math.max(0, wait), soon);
+
     const timer = window.setTimeout(() => {
       // Only a read that actually RAN re-arms the poll. A call that turned back
       // at the in-flight guard re-arms nothing: the read already running will,
       // when it finishes and `reading` falls.
-      void read(false).then((ran) => {
+      void read(false, soon !== null && when === soon).then((ran) => {
         if (ran) setTick((count) => count + 1);
       });
-    }, Math.max(0, wait));
+    }, when);
     return () => window.clearTimeout(timer);
-  }, [pensionKey, failures, lastReadAt, failure, tick, read, reading]);
+  }, [pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading]);
 
   // Coming back to a tab whose numbers are a sweep old reads once, at once.
   useEffect(() => {
@@ -348,6 +411,7 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
     const data = toLiveDashboard({
       snapshot,
       activity: activityMeta === null ? null : { vault: snapshot.vault.address, status: activityMeta.status, nextBefore: activityMeta.nextBefore, entries, gap: false },
+      linkEntries,
       privyWallets: walletsKey === "" ? [] : walletsKey.split(","),
     });
     const stale =
@@ -359,7 +423,7 @@ export function useLiveDashboard(input: { readonly pensionKey: string | null; re
             since: failure.since,
           };
     return { kind: "ready", data, stale };
-  }, [pensionKey, snapshot, entries, activityMeta, failure, walletsKey]);
+  }, [pensionKey, snapshot, entries, linkEntries, activityMeta, failure, walletsKey]);
 
-  return { view, refresh, loadOlder, older, activityUnreadable };
+  return { view, refresh, loadOlder, older, activityUnreadable: activityTrouble !== null, activityRetryAt: activityTrouble?.retryAt ?? null };
 }

@@ -25,6 +25,7 @@ import { OFFERED_LEGS, USDC_MINT, VOLUME_MODE_OFFERED, WSOL_MINT, investmentRead
 import { rawFrom, usdcRawForLamports } from "@/lib/amounts";
 import type {
   LiveActivityJson,
+  LiveEntryJson,
   LiveChartPoint,
   LiveDashboard,
   LiveDiscoveredLinkJson,
@@ -185,14 +186,23 @@ function tokenOf(snapshot: LiveSnapshotJson, mint: string): TokenHolding | null 
   return amountRaw === null ? null : { amountRaw, uiAmount: account.uiAmount ?? null };
 }
 
-function holdingsOf(snapshot: LiveSnapshotJson, vault: LiveVaultView, policy: LivePolicyView): { rows: LiveHoldingRow[]; worthNow: bigint | null; notInvested: bigint | null } {
+function holdingsOf(
+  snapshot: LiveSnapshotJson,
+  vault: LiveVaultView,
+  policy: LivePolicyView,
+): { rows: LiveHoldingRow[]; worthNow: bigint | null; notInvested: bigint | null; rentOnly: bigint | null } {
   const prices = snapshot.prices;
   const perSol = rawFrom(prices?.usdcRawPerSol);
   const rows: LiveHoldingRow[] = [];
 
   // SOL: what a withdrawal could take. The rent Solana keeps is noted, not counted as spendable.
+  //
+  // ZERO IS NOT A HOLDING. wSOL, USDC and every leg already guard on `> 0n`;
+  // SOL did not, so a vault holding nothing but its own rent led the table with
+  // "SOL — 0 shares — $0.00" and a line of rent jargon. The rent is still said,
+  // once, in prose: `rentOnly` below carries it to the footnotes.
   const withdrawable = vault.withdrawable;
-  if (vault.exists && withdrawable !== null) {
+  if (vault.exists && withdrawable !== null && withdrawable > 0n) {
     rows.push({
       key: "SOL",
       symbol: "SOL",
@@ -279,7 +289,11 @@ function holdingsOf(snapshot: LiveSnapshotJson, vault: LiveVaultView, policy: Li
     return { ...row, weightBps: Number((row.valueUsdcRaw * 10_000n) / invested) };
   });
 
-  return { rows: withWeights, worthNow, notInvested: sum(["sol", "wsol", "usdc"]) };
+  // The vault exists, it holds only the rent, and so there is no SOL row to
+  // carry that fact. Null whenever a row does say it, or there is nothing to say.
+  const rentOnly = vault.exists && withdrawable !== null && withdrawable === 0n ? vault.rentFloor : null;
+
+  return { rows: withWeights, worthNow, notInvested: sum(["sol", "wsol", "usdc"]), rentOnly };
 }
 
 const walletLabel = (index: number): string => `Trading wallet ${index + 1}`;
@@ -359,36 +373,60 @@ const isoOf = (blockTime: number | null): string | null => (blockTime === null ?
 
 interface Visible {
   readonly rows: LiveRow[];
+  /**
+   * The events the feed leaves out, as rows — not merely counted.
+   *
+   * They were DISCARDED before, so "12 account upkeep transactions hidden" was
+   * a claim nobody could check against Solscan, and a page where every
+   * transaction was upkeep drew "No activity yet" over fifteen real ones.
+   */
+  readonly hidden: LiveRow[];
   readonly hiddenUpkeep: number;
   readonly hiddenDust: number;
 }
 
+/** One entry's events as feed rows, with its Solscan link. */
+function rowsIn(entries: readonly LiveEntryJson[], keep: (event: VaultEventJson) => boolean): LiveRow[] {
+  const rows: LiveRow[] = [];
+  for (const entry of entries) {
+    for (const event of entry.events) {
+      if (!keep(event)) continue;
+      rows.push({ signature: entry.signature, at: isoOf(entry.blockTime), blockTime: entry.blockTime, ok: entry.ok, explorerUrl: solscanTx(entry.signature), event });
+    }
+  }
+  return rows;
+}
+
 function rowsOf(activity: LiveActivityJson | null): Visible {
   const rows: LiveRow[] = [];
+  const hidden: LiveRow[] = [];
   let hiddenUpkeep = 0;
   let hiddenDust = 0;
   for (const entry of activity?.entries ?? []) {
     for (const event of entry.events) {
-      if (event.kind === "upkeep") {
-        hiddenUpkeep += 1;
-        continue;
-      }
-      // A rent top-up is not something anyone saved; it is counted, not listed.
-      if (event.kind === "received_sol" && BigInt(event.lamports) < DUST_LAMPORTS) {
-        hiddenDust += 1;
-        continue;
-      }
-      rows.push({
+      const row: LiveRow = {
         signature: entry.signature,
         at: isoOf(entry.blockTime),
         blockTime: entry.blockTime,
         ok: entry.ok,
         explorerUrl: solscanTx(entry.signature),
         event,
-      });
+      };
+      if (event.kind === "upkeep") {
+        hiddenUpkeep += 1;
+        hidden.push(row);
+        continue;
+      }
+      // A rent top-up is not something anyone saved; it is counted, not listed.
+      if (event.kind === "received_sol" && BigInt(event.lamports) < DUST_LAMPORTS) {
+        hiddenDust += 1;
+        hidden.push(row);
+        continue;
+      }
+      rows.push(row);
     }
   }
-  return { rows, hiddenUpkeep, hiddenDust };
+  return { rows, hidden, hiddenUpkeep, hiddenDust };
 }
 
 type SettledEventJson = Extract<VaultEventJson, { kind: "settled" }>;
@@ -401,10 +439,10 @@ interface LoadedSettlement {
   readonly slot: number;
 }
 
-/** Every settlement the loaded history holds, newest first, that the snapshot's slot covers. */
-function settlementsOf(activity: LiveActivityJson | null, slot: number | null): LoadedSettlement[] {
+/** Every settlement these entries hold, newest first, that the snapshot's slot covers. */
+function settlementsIn(entries: readonly LiveEntryJson[], slot: number | null): LoadedSettlement[] {
   const out: LoadedSettlement[] = [];
-  for (const entry of activity?.entries ?? []) {
+  for (const entry of entries) {
     // A settlement the snapshot's lifetimeSaved does not yet include would push
     // the curve above the total it is worked back from.
     if (slot !== null && entry.slot > slot) continue;
@@ -417,9 +455,29 @@ function settlementsOf(activity: LiveActivityJson | null, slot: number | null): 
   return out;
 }
 
+/**
+ * The two streams' entries as ONE list, newest first, one row per signature.
+ *
+ * THE VAULT'S COPY WINS. A link page is scoped per entry to this vault
+ * (scopeEntryToVault) and so carries only the instructions the program tied
+ * here; the vault page is unfiltered. For a settlement of this vault the two
+ * are the same row, but preferring the unfiltered one means a signature can
+ * never appear with fewer events than the feed already drew for it.
+ *
+ * SORTED, BECAUSE THE TWO STREAMS INTERLEAVE IN TIME. Everything downstream —
+ * the newest settlement, the curve's order, the oldest loaded moment — reads
+ * this list as newest first, which is free while it is one contiguous page and
+ * false the moment a second stream is poured in. blockTime leads and the slot
+ * breaks its ties; a row the chain gave no block time keeps its place by slot.
+ */
+function mergeStreams(vault: readonly LiveEntryJson[], link: readonly LiveEntryJson[]): LiveEntryJson[] {
+  const seen = new Set(vault.map((entry) => entry.signature));
+  const merged = [...vault, ...link.filter((entry) => !seen.has(entry.signature))];
+  return merged.sort((left, right) => (right.blockTime ?? 0) - (left.blockTime ?? 0) || right.slot - left.slot);
+}
+
 /** The oldest moment the loaded history speaks for. Entries arrive newest first. */
-function loadedSince(activity: LiveActivityJson | null): number | null {
-  const entries = activity?.entries ?? [];
+function loadedSince(entries: readonly LiveEntryJson[]): number | null {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const blockTime = entries[index]!.blockTime;
     if (blockTime !== null) return blockTime;
@@ -489,6 +547,9 @@ const DAY_MS = 86_400_000;
 function statsOf(
   settlements: readonly LoadedSettlement[],
   activity: LiveActivityJson | null,
+  /** The settlements the VAULT page alone holds: the only ones a window may be summed from. */
+  vaultSettlements: readonly LoadedSettlement[],
+  shown: readonly LoadedSettlement[],
   rows: readonly LiveRow[],
   wallets: WalletsRead,
   nowMs: number,
@@ -504,11 +565,25 @@ function statsOf(
       ? null
       : lifetimeNonces.reduce<bigint>((total, nonce) => total + (nonce ?? 0n), 0n);
 
-  // The loaded history covers a window when it is complete, or when it reaches
-  // back past the window's start. Otherwise a sum of it is not that window's total.
+  // WHEN A WINDOW MAY BE SUMMED AT ALL, and the three answers are not
+  // interchangeable.
+  //
+  // EVERY ONE, PROVED BY ARITHMETIC. The vault's lifetimeSaved only ever moves
+  // on a settlement, so when what is loaded adds up to exactly that total,
+  // nothing is missing — from any window, whichever stream the rows came from.
+  // This is the arm the link pages earn: one settlement of 0.0366 SOL beside a
+  // lifetimeSaved of 0.0366 SOL is a complete history and can be said to be.
+  //
+  // OR THE VAULT PAGE REACHED THE BEGINNING, or it reaches back past the
+  // window's start. Both of those rest on the vault page being a CONTIGUOUS
+  // slice of one stream, so they are asked of the VAULT's settlements only. A
+  // link page is one wallet's slice: merging it moves the oldest loaded
+  // settlement backwards while leaving holes above it, and the sum would be
+  // some of the window wearing the whole window's name.
+  const everySettlement = lifetimeSaved !== null && lifetimeSaved > 0n && paid.reduce((total, amount) => total + amount, 0n) === lifetimeSaved;
   const complete = activity !== null && activity.status === "exists" && activity.nextBefore === null;
-  const oldestBlockTime = settlements.length === 0 ? null : settlements[settlements.length - 1]!.blockTime;
-  const covers = (since: number): boolean => complete || (oldestBlockTime !== null && oldestBlockTime * 1_000 <= since);
+  const oldestVault = vaultSettlements.length === 0 ? null : vaultSettlements[vaultSettlements.length - 1]!.blockTime;
+  const covers = (since: number): boolean => everySettlement || complete || (oldestVault !== null && oldestVault * 1_000 <= since);
   const sumSince = (since: number): bigint | null =>
     covers(since) ? settlements.filter((entry) => entry.blockTime !== null && entry.blockTime * 1_000 >= since).reduce((total, entry) => total + entry.paid, 0n) : null;
 
@@ -539,8 +614,6 @@ function statsOf(
   // the screen holds a settlement at all, and when the newest one it holds
   // landed. It is the same test live-backfill.ts's holdsSettlement makes before
   // paging back for one, and live-model.test.ts pins that they agree.
-  const shown = settlementsOf(activity, null);
-
   return {
     settlementsLifetime,
     settledOutsideHistory: stateSettled && shown.length === 0,
@@ -570,6 +643,13 @@ function stageOf(vault: LiveVaultView, wallets: readonly LiveWalletView[], settl
 export interface LiveDashboardInput {
   readonly snapshot: LiveSnapshotJson;
   readonly activity: LiveActivityJson | null;
+  /**
+   * Rows read from the trading wallets' LINK streams, where the settlements
+   * are. Kept apart from `activity` all the way down here, and never merged
+   * into it by the caller, because two of the three arms of a window claim rest
+   * on the vault page being one contiguous slice.
+   */
+  readonly linkEntries?: readonly LiveEntryJson[];
   /** The Privy embedded wallets on this account, in HD order. */
   readonly privyWallets: readonly string[];
 }
@@ -583,9 +663,28 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
   const policy = policyView(snapshot, usdc?.amountRaw ?? null, nowMs);
   const holdings = holdingsOf(snapshot, vault, policy);
   const wallets = walletsOf(snapshot, privyWallets, rawFrom(snapshot.rents.walletFloor), vault.walletReserve);
+
+  // THE FEED IS THE VAULT'S HISTORY AND ONLY THE VAULT'S. A link page is a
+  // wallet's slice, so listing it here would scatter rows into a column whose
+  // counts, day headings and "since" all describe one contiguous page.
   const visible = rowsOf(activity);
-  const settlements = settlementsOf(activity, snapshot.slot);
-  const stats = statsOf(settlements, activity, visible.rows, wallets, nowMs, vault.lifetimeSaved);
+
+  // THE SETTLEMENTS ARE BOTH STREAMS. The vault's own page is mostly keeper
+  // upkeep; the links are where the settlements live. Merged, deduped by
+  // signature and re-sorted, because everything below reads newest-first.
+  const vaultEntries = activity?.entries ?? [];
+  const merged = mergeStreams(vaultEntries, input.linkEntries ?? []);
+  const settlements = settlementsIn(merged, snapshot.slot);
+  const vaultSettlements = settlementsIn(vaultEntries, snapshot.slot);
+  // Unfiltered by the snapshot's slot: what the SCREEN holds, which is what
+  // "last settlement" and "not in the loaded history" are statements about.
+  const shown = settlementsIn(merged, null);
+  // THE STRIP IS NOT THE FEED, and after the links it cannot be. The feed is
+  // the vault's own contiguous page; a settlement read from a wallet's link is
+  // deliberately not in it, and the strip exists to show settlements. So the
+  // chips come from both streams while the column beside them stays one.
+  const settlementRows = rowsIn(merged, (event) => event.kind === "settled");
+  const stats = statsOf(settlements, activity, vaultSettlements, shown, visible.rows, wallets, nowMs, vault.lifetimeSaved);
 
   return {
     stage: stageOf(vault, wallets.rows, stats.settlementsLifetime, stats.loadedSettlements),
@@ -599,11 +698,14 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
     tokensReadable: snapshot.vaultTokenAccounts.status === "exists",
     worthNowUsdcRaw: holdings.worthNow,
     notInvestedUsdcRaw: holdings.notInvested,
+    rentOnlyLamports: holdings.rentOnly,
     wallets: wallets.rows,
     rows: visible.rows,
+    hiddenRows: visible.hidden,
+    settlementRows,
     hiddenUpkeep: visible.hiddenUpkeep,
     hiddenDust: visible.hiddenDust,
-    chart: chartOf(settlements, vault.lifetimeSaved, nowMs, loadedSince(activity)),
+    chart: chartOf(settlements, vault.lifetimeSaved, nowMs, loadedSince(merged)),
     stats,
     // Quoted by the "no vault yet" card, which must name the cost before anyone
     // is asked to sign for it.

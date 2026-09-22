@@ -207,8 +207,9 @@ export function partsOf(event: VaultEventJson, labelOf: (wallet: string | null) 
       return { ...plain, icon: mark(TriangleAlert), title: ACTIVITY_COPY.unreadable };
 
     case "upkeep":
-      // The model hides these; named so the union stays exhaustive.
-      return { ...plain, icon: mark(Coins), title: ACTIVITY_COPY.other };
+      // Behind a disclosure in the feed, not dropped — and with its own words:
+      // twelve of these under one "Vault transaction" was twelve identical rows.
+      return { ...plain, icon: mark(Coins), title: ACTIVITY_COPY.upkeepTitle, detail: ACTIVITY_COPY.upkeepSub };
 
     case "other":
       return { ...plain, icon: mark(FileText), title: ACTIVITY_COPY.other };

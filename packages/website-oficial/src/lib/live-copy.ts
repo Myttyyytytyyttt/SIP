@@ -95,6 +95,7 @@ export const LIVE_COPY = {
   // ── the sidebar ────────────────────────────────────────────────────────────
   pensionKey: "Pension key",
   tradingWallets: "Trading wallets",
+  walletBalance: "Balance",
   activity: "Activity",
   manageWallets: "Manage wallets",
   solscanAccount: "Solscan",
@@ -160,6 +161,9 @@ export const LIVE_COPY = {
   invested: "Basket value",
   /** The SOL row: what a withdrawal can take, and what Solana keeps. */
   solKeptAsRent: (rent: string): string => `withdrawable, ${rent} SOL kept as rent`,
+  // Said in prose because there is no row to say it on: the vault's SOL is all
+  // rent, and a "SOL — 0 — $0.00" row was how that used to reach the screen.
+  solRentOnly: (rent: string): string => `No SOL to withdraw: the ${rent} SOL in the vault is rent Solana keeps.`,
   holdingsFootnote: "Tokens in other accounts the vault owns are listed under Manage wallets.",
   tokensUnreadable: `${BRAND} could not read the vault’s tokens just now.`,
   pricesUnreadableNote: "Today’s prices could not be read, so dollar values are hidden.",
@@ -286,6 +290,14 @@ export const ACTIVITY_COPY = {
   hiddenUpkeep: (count: string): string => `${count} account upkeep transactions hidden`,
   hiddenDust: (count: string): string => `${count} dust transfers hidden`,
   unreadableNow: "Activity could not be read just now",
+  // The keeper paying the vault's own account costs. Twelve of these in a
+  // fifteen-signature page is ordinary, and calling them all "Vault
+  // transaction" made twelve identical rows out of one fact.
+  upkeepTitle: "Account upkeep",
+  upkeepSub: "the keeper paying the account's own costs — nothing saved or invested",
+  showHidden: "Show them",
+  hideHidden: "Hide them",
+  onlyHidden: "Nothing to list yet. Every transaction the loaded history holds is account upkeep.",
   /** A day heading over rows bucketed by UTC day: "Today · UTC", "Sep 5 · UTC". */
   dayHeading: (day: string): string => `${day} · UTC`,
   footer: (transactions: string, settlements: string): string => `${transactions} transactions · ${settlements} settlements`,

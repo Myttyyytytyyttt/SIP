@@ -593,6 +593,99 @@ describe("activity", () => {
     expect(answer.json).toMatchObject({ status: "exists", entries: [], nextBefore: null });
     expect(methodsOf(upstream.calls)).toEqual(["getSignaturesForAddress"]);
   });
+
+  /**
+   * THE VAULT PDA IS THE NOISIEST ADDRESS IN THE SYSTEM, and the wallet's link
+   * is the quietest one that still sees every settlement: only link_wallet,
+   * settle and unlink_wallet ever touch it. On 2026-09-19 twelve of the vault's
+   * fifteen newest signatures were keeper upkeep and the settlement sat at
+   * position 24, so a page of history could not find what the vault's own total
+   * recorded.
+   */
+  describe("a page listed for a wallet's link instead of the vault", () => {
+    const addressesOf = (calls: readonly UpstreamCall[]): unknown[] =>
+      calls.flatMap((call) => {
+        const body = call.body as RpcRequest | RpcRequest[];
+        return (Array.isArray(body) ? body : [body]).filter((entry) => entry.method === "getSignaturesForAddress").map((entry) => (entry.params ?? [])[0]);
+      });
+
+    it("lists the link PDA, and still reads every transaction against the vault", async () => {
+      const { live, upstream } = setup(withHistory([SIGNATURE_A]));
+      const answer = await live({ action: "activity", owner, wallet, limit: 1 });
+
+      expect(addressesOf(upstream.calls)).toEqual([deriveLinkPda(wallet).toBase58()]);
+      expect(answer.json).toMatchObject({ scope: "link", vault, wallet, address: deriveLinkPda(wallet).toBase58() });
+      // Read against the vault, so the row is the same row the vault page draws.
+      expect(answer.json.entries[0].events[0]).toMatchObject({ kind: "settled", wallet, paid: "60000000" });
+    });
+
+    it("carries its cursor under its own name, and NEVER under nextBefore", async () => {
+      const { live } = setup(withHistory([SIGNATURE_A]));
+      const answer = await live({ action: "activity", owner, wallet, limit: 1 });
+      // `nextBefore === null` is the web app's licence to claim "Saved today":
+      // it means the VAULT's history reaches its beginning. A wallet's history
+      // read to its end is a different fact and may not arrive under that name.
+      expect(answer.json.nextBeforeLink).toBe(SIGNATURE_A);
+      expect("nextBefore" in answer.json).toBe(false);
+
+      const vaultPage = await live({ action: "activity", owner, limit: 1 });
+      expect(vaultPage.json.nextBefore).toBe(SIGNATURE_A);
+      expect("nextBeforeLink" in vaultPage.json).toBe(false);
+    });
+
+    /**
+     * A link is keyed by the WALLET alone and unlink_wallet closes it, so one
+     * address's stream can span two vaults' lives. `settled` comes from the
+     * program's logs, which are scoped to the program and to nothing else.
+     */
+    it("drops a settlement the program tied to somebody else's vault, and says it dropped it", async () => {
+      const stranger = deriveVaultPda(key()).toBase58();
+      const { live } = setup({ ...withHistory([SIGNATURE_A]), transactions: new Map([[SIGNATURE_A, settleTransaction(stranger, wallet, 999_000_000n)]]) });
+
+      const answer = await live({ action: "activity", owner, wallet, limit: 1 });
+      expect(answer.json).toMatchObject({ status: "exists", entries: [], filtered: 1, unread: 0 });
+      // Not anywhere in the body, under any name.
+      expect(answer.text).not.toContain("999000000");
+      expect(answer.text).not.toContain(stranger);
+      // And the page does not end here: a cursor, not an empty-looking history.
+      expect(answer.json.nextBeforeLink).toBe(SIGNATURE_A);
+    });
+
+    it("keeps that settlement on the VAULT page, where the listing already proved whose it is", async () => {
+      const { live } = setup(withHistory([SIGNATURE_A]));
+      const answer = await live({ action: "activity", owner, limit: 1 });
+      expect(answer.json.entries).toHaveLength(1);
+      expect(answer.json).toMatchObject({ scope: "vault", filtered: 0, unread: 0 });
+    });
+
+    /**
+     * TWO WAYS TO LOSE A ROW, AND THEY ARE NOT THE SAME FACT. A transaction the
+     * RPC did not return says nothing about whose it was; reporting it as
+     * "not yours" would make a page nobody could read look like a wallet that
+     * never settled.
+     */
+    it("counts a transaction it could not read apart from one that is not this vault's", async () => {
+      // No transaction body comes back for the signature: readable false.
+      const { live } = setup({ ...withHistory([SIGNATURE_A]), transactions: new Map() });
+      const answer = await live({ action: "activity", owner, wallet, limit: 1 });
+      expect(answer.json).toMatchObject({ entries: [], filtered: 0, unread: 1 });
+    });
+
+    it("a wallet that is not a key, and the pension key itself, are refused before any read", async () => {
+      const { live, upstream } = setup(withHistory([SIGNATURE_A]));
+      expect((await live({ action: "activity", owner, wallet: "nope" })).status).toBe(400);
+      const self = await live({ action: "activity", owner, wallet: owner });
+      expect([self.status, self.json.error?.code]).toEqual([400, "bad_request"]);
+      expect(self.json.error?.message).toContain("cannot be your pension key");
+      expect(upstream.calls).toHaveLength(0);
+    });
+
+    it("costs exactly what a vault page costs: one signature read plus one per transaction", async () => {
+      const { live, upstream } = setup(withHistory([SIGNATURE_A, SIGNATURE_B]));
+      await live({ action: "activity", owner, wallet, limit: 2 });
+      expect(methodsOf(upstream.calls)).toEqual(["getSignaturesForAddress", "getTransaction", "getTransaction"]);
+    });
+  });
 });
 
 describe("what a request costs", () => {

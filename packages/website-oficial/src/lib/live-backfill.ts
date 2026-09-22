@@ -11,9 +11,25 @@
  * Two answers to that, and this module is the first: when the CHAIN'S OWN STATE
  * says a settlement happened — the vault's lifetimeSaved moved, or a link's
  * settlement nonce counted one — and the loaded page holds none, the dashboard
- * pages back for it ITSELF instead of waiting for someone to press "Load
+ * goes and gets it ITSELF instead of waiting for someone to press "Load
  * older". (The second answer is in live-model.ts: whatever the history holds,
  * nothing is claimed that the state contradicts.)
+ *
+ * AND IT LOOKS WHERE THE SETTLEMENTS ARE, which is not the vault. Only
+ * link_wallet, settle and unlink_wallet ever touch a wallet's TradingLink, so
+ * that stream is nearly pure settlements while the vault's is mostly the
+ * keeper's own upkeep. The same two pages now buy thirty settlements instead of
+ * thirty rent top-ups, at the identical cost — and the rows come back through
+ * the same route, scoped per entry to this vault by the program's own words
+ * (scopeEntryToVault), because a link is keyed by the wallet and one address's
+ * stream can span two vaults' lives.
+ *
+ * WHAT IT READS IS KEPT APART FROM THE VAULT'S HISTORY, deliberately, and the
+ * hook never merges the two lists. Every window total on the screen rests on
+ * the vault page being a CONTIGUOUS slice of one stream; a wallet-scoped page
+ * is not, and merging it would move the oldest loaded settlement backwards
+ * while leaving holes above it — a sum of some of a window wearing the whole
+ * window's name.
  *
  * BOUNDED, BECAUSE READS ARE RATIONED. A client has 60 read tokens a minute
  * (DEFAULT_RELAY_LIMITS.perClientPerMin); the mount read already spends a
@@ -34,10 +50,14 @@
  */
 
 import { rawFrom } from "@/lib/amounts";
-import type { LiveActivityJson, LiveEntryJson, LiveSnapshotJson } from "@/lib/live-types";
+import type { LiveEntryJson, LiveLinkActivityJson, LiveSnapshotJson } from "@/lib/live-types";
 import type { ApiFailure, ApiResult } from "@/lib/vault-api";
 
-/** Older pages one backfill round may ask for, beyond the page it starts from. */
+/**
+ * Pages one backfill round may ask for, ACROSS ALL WALLETS. Two, because a
+ * client has 60 read tokens a minute and the mount read already spends about
+ * 21 of them; a page is 1 + one per transaction, so two are up to 32 more.
+ */
 export const BACKFILL_PAGES = 2;
 /** Rounds one pension key may spend. The second exists only to retry a round a failure cut short. */
 export const BACKFILL_ROUNDS = 2;
@@ -138,8 +158,16 @@ export interface BackfillDecision {
   readonly chainSettled: boolean;
   /** The loaded history already holds one, so there is nothing to go looking for. */
   readonly loadedHasSettlement: boolean;
-  /** Where the loaded history ends. Null means it reaches the beginning: there is no older page. */
-  readonly cursor: string | null;
+  /**
+   * How many wallets' links there are to page: settlementWallets().length.
+   *
+   * This REPLACED the vault's own `nextBefore` cursor, and the difference is the
+   * point. A link stream starts at its own head with no `before`, so the vault's
+   * cursor says nothing about whether there is anything to ask — and an absent
+   * cursor used to read as "there is more", which sent the round re-fetching the
+   * head page at 18 tokens a time.
+   */
+  readonly wallets: number;
   /** A manual "Load older" is in flight. It owns the tail; the backfill stands down. */
   readonly manualBusy: boolean;
   /** Rounds already spent on this pension key. */
@@ -152,60 +180,87 @@ export interface BackfillDecision {
   readonly now: number;
 }
 
-/** Whether this read should page back for the settlement the state records. */
+/** Whether this read should page the links for the settlement the state records. */
 export function shouldBackfill(input: BackfillDecision): boolean {
   if (!input.chainSettled || input.loadedHasSettlement) return false;
-  if (input.cursor === null || input.manualBusy || input.done) return false;
+  if (input.wallets === 0 || input.manualBusy || input.done) return false;
   // A round cut short by 429 must not be retried into the same empty bucket:
   // the limiter refills at one token a second, and the failure said how long.
   if (input.retryAt !== null && input.now < input.retryAt) return false;
   return input.rounds < BACKFILL_ROUNDS;
 }
 
-export interface BackfillOutcome {
-  /** The rows the round read, newest first, to append under what is already held. */
+/** The wallets whose links this vault's settlements can be in, most useful first. */
+export function settlementWallets(snapshot: LiveSnapshotJson, max = 2): string[] {
+  const out: string[] = [];
+  const add = (wallet: string): void => {
+    if (out.length < max && !out.includes(wallet)) out.push(wallet);
+  };
+  // A link that has counted a settlement leads: it is the one that certainly
+  // has something to find. `links.items` is read by a memcmp on the vault
+  // field, so every link in it is this vault's by construction.
+  for (const link of snapshot.links?.items ?? []) if (positive(link.settlementNonce)) add(link.wallet);
+  for (const wallet of snapshot.wallets) if (wallet.link.status === "this_vault" && positive(wallet.link.settlementNonce)) add(wallet.wallet);
+  // Then any link of this vault at all: a nonce nobody could read is not a zero.
+  for (const link of snapshot.links?.items ?? []) add(link.wallet);
+  for (const wallet of snapshot.wallets) if (wallet.link.status === "this_vault") add(wallet.wallet);
+  return out;
+}
+
+export interface LinkRoundOutcome {
+  /** The rows the round read, newest first within each wallet. */
   readonly entries: readonly LiveEntryJson[];
-  /** Where the history ends now: null when the round reached the beginning. A page that failed does not move it. */
-  readonly cursor: string | null;
   readonly pages: number;
-  /** A settlement was found, so the round stopped there. */
+  /** A settlement was found. */
   readonly found: boolean;
   /** The POST failed. The round is not the answer, and may be retried once. */
   readonly failure: ApiFailure | null;
-  /** The route answered 200 saying it could not read the history — which is not an empty one either. */
+  /** The route answered 200 saying it could not read the history — not an empty one either. */
   readonly unreadable: boolean;
 }
 
 /**
- * Page back from `cursor`, at most `maxPages` pages, stopping at the first page
- * that holds a settlement.
+ * Page each wallet's LINK for the settlements the vault's own total records.
  *
- * EVERY ROW IT READ COMES BACK, even from a round a failure cut short: the
- * pages that did land are history the screen would otherwise have to read
- * again. The cursor moves only for pages that actually arrived, so a manual
- * "Load older" afterwards continues from where this stopped rather than
- * repeating it or skipping past it.
+ * WHY THE LINK AND NOT THE VAULT. Only link_wallet, settle and unlink_wallet
+ * ever touch a TradingLink, so its signature stream is nearly pure
+ * settlements — while the vault PDA's newest fifteen were twelve keeper upkeep
+ * on the day this was written. The same two pages that bought thirty upkeep
+ * rows buy thirty settlements, at the identical cost.
+ *
+ * EACH WALLET STARTS AT ITS OWN HEAD, with no `before`: a link cursor and a
+ * vault cursor are different streams and one may never be handed to the other.
+ *
+ * THE BUDGET IS THE ROUND'S, NOT EACH WALLET'S. `maxPages` is spent across them
+ * in order, so two wallets cost what one did.
  */
-export async function backfillSettlements(input: {
-  readonly cursor: string;
+export async function backfillLinkSettlements(input: {
+  readonly wallets: readonly string[];
   readonly maxPages?: number;
-  readonly fetchPage: (before: string) => Promise<ApiResult<LiveActivityJson>>;
-}): Promise<BackfillOutcome> {
+  readonly fetchPage: (wallet: string, before: string | null) => Promise<ApiResult<LiveLinkActivityJson>>;
+}): Promise<LinkRoundOutcome> {
   const maxPages = input.maxPages ?? BACKFILL_PAGES;
   const entries: LiveEntryJson[] = [];
-  let cursor: string | null = input.cursor;
   let pages = 0;
+  let found = false;
 
-  while (cursor !== null && pages < maxPages) {
-    const page: ApiResult<LiveActivityJson> = await input.fetchPage(cursor);
-    pages += 1;
-    if (!page.ok) return { entries, cursor, pages, found: false, failure: page, unreadable: false };
-    // A history nobody could read is not an empty one: stop, and say which it was.
-    if (page.body.status !== "exists") return { entries, cursor, pages, found: false, failure: null, unreadable: true };
-    entries.push(...page.body.entries);
-    cursor = page.body.nextBefore;
-    if (holdsSettlement(page.body.entries)) return { entries, cursor, pages, found: true, failure: null, unreadable: false };
+  for (const wallet of input.wallets) {
+    let cursor: string | null = null;
+    // eslint-disable-next-line no-constant-condition
+    while (pages < maxPages) {
+      const page: ApiResult<LiveLinkActivityJson> = await input.fetchPage(wallet, cursor);
+      pages += 1;
+      if (!page.ok) return { entries, pages, found, failure: page, unreadable: false };
+      // A history nobody could read is not an empty one: stop, and say which.
+      if (page.body.status !== "exists") return { entries, pages, found, failure: null, unreadable: true };
+      entries.push(...page.body.entries);
+      if (holdsSettlement(page.body.entries)) found = true;
+      cursor = page.body.nextBeforeLink;
+      // This wallet's stream reaches its beginning: nothing older to ask it for.
+      if (cursor === null) break;
+    }
+    if (pages >= maxPages) break;
   }
 
-  return { entries, cursor, pages, found: false, failure: null, unreadable: false };
+  return { entries, pages, found, failure: null, unreadable: false };
 }

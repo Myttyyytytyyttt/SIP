@@ -96,6 +96,48 @@ describe("a settlement the state records and the loaded history does not hold", 
     expect(html).not.toContain(LIVE_COPY.chartEmpty);
     expect(html).toContain(LIVE_COPY.chartOutsideHistory);
   });
+
+  /**
+   * AND IT IS STILL A BAND. The sentence used to be returned bare, dropping the
+   * caller's className, so a panel that had reserved a chart's worth of height
+   * lost it to one grey line and read as half-built.
+   *
+   * The band is deliberately SHORTER than the drawn chart — the complaint was
+   * empty space, and a full-height dashed box is empty space with a border
+   * round it. `cn` resolving "h-64 sm:h-72" down to "h-28 sm:h-28" is the
+   * mechanism, and BOTH breakpoints must go: a bare h-28 would leave sm:h-72
+   * standing and the band would spring back on every screen over 640px.
+   */
+  it("keeps a sized band instead of collapsing to one line, at both breakpoints", () => {
+    const html = renderToStaticMarkup(
+      createElement(LiveSavedChart, { points: null, complete: false, settledOutsideHistory: true, className: "h-64 w-full sm:h-72" }),
+    );
+    expect(html).toContain("border-dashed");
+    expect(html).toContain("h-28");
+    expect(html).toContain("sm:h-28");
+    expect(html).not.toContain("h-64");
+    expect(html).not.toContain("sm:h-72");
+  });
+
+  /**
+   * A LEVEL WINDOW IS TRUE AND MUST NOT SHOUT. recharts' default [0, 'auto']
+   * domain fills a one-value series to the baseline, so a week in which nothing
+   * settled was painted as a solid block of green the height of the card.
+   */
+  it("draws a window with no settlement in it as a rule, not as a filled area", () => {
+    const flat = [
+      { at: new Date(NOW_MS - 86_400_000).toISOString(), totalLamports: 36_634_582n },
+      { at: new Date(NOW_MS).toISOString(), totalLamports: 36_634_582n },
+    ];
+    const html = renderToStaticMarkup(
+      createElement(LiveSavedChart, { points: flat, complete: false, settledOutsideHistory: true, className: "h-64 w-full sm:h-72" }),
+    );
+    // The figure is on screen, and the caption still says why the line is level.
+    expect(html).toContain("0.036634582 SOL");
+    expect(html).toContain(LIVE_COPY.chartFlat);
+    // No chart at all: there is nothing for one to plot.
+    expect(html).not.toContain("recharts");
+  });
 });
 
 describe("a settlement that landed between the snapshot and the page", () => {

@@ -468,6 +468,7 @@ export function DashboardView({ view }: { readonly view: "pension" | "activity" 
           onLoadOlder={() => live.loadOlder()}
           nowMs={clock}
           activityUnreadable={live.activityUnreadable}
+          activityRetryAt={live.activityRetryAt}
         />
       );
     }

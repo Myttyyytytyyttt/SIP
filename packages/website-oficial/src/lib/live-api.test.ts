@@ -2,7 +2,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { activityWasUnreadable, createLiveApi, liveFailureWords } from "@/lib/live-api";
+import { activityWasUnreadable, createLiveApi, liveFailureWords, activityTroubleFrom } from "@/lib/live-api";
 import { FAILURE_COPY } from "@/lib/vault-copy";
 import type { ApiFailure } from "@/lib/vault-api";
 
@@ -135,5 +135,34 @@ describe("liveFailureWords", () => {
     const failure = (code: string, status = 502): ApiFailure => ({ ok: false, status, code, message: "", retryAfterSeconds: null, body: {} });
     expect(liveFailureWords(failure("unreadable"))).toContain("could not read Solana");
     expect(liveFailureWords(failure("upstream_unavailable"))).toBe(FAILURE_COPY.upstream);
+  });
+});
+
+/**
+ * The route already said WHEN this browser may ask again — build-handler
+ * answers retryAfterSeconds beside a retry-after header — and the hook used to
+ * collapse the whole answer to a boolean and drop it.
+ */
+describe("what a history read that failed leaves behind", () => {
+  const now = 5_000_000;
+  const page = <T,>(body: T) => ({ ok: true as const, status: 200, body });
+
+  it("is nothing at all when the page WAS read, however empty it was", () => {
+    expect(activityTroubleFrom(page({ vault: "v", status: "exists" as const, nextBefore: null, entries: [], gap: false }), { attempts: 0, now })).toBeNull();
+  });
+
+  it("carries the server's own retry-after as an instant", () => {
+    const refused = { ok: false as const, status: 429, code: "rate_limited", message: "", retryAfterSeconds: 12, body: {} };
+    expect(activityTroubleFrom(refused, { attempts: 0, now })).toEqual({ retryAt: now + 12_000, attempts: 0 });
+  });
+
+  it("names NO time for a 200 the route could not read: nothing was refused, and a delay nobody gave is invented", () => {
+    const unreadable = page({ vault: "v", status: "unreadable" as const, nextBefore: null, entries: [], gap: false });
+    expect(activityTroubleFrom(unreadable, { attempts: 0, now })).toEqual({ retryAt: null, attempts: 0 });
+  });
+
+  it("carries the attempts through, so one refusal buys one faster question", () => {
+    const refused = { ok: false as const, status: 429, code: "rate_limited", message: "", retryAfterSeconds: 1, body: {} };
+    expect(activityTroubleFrom(refused, { attempts: 1, now })?.attempts).toBe(1);
   });
 });

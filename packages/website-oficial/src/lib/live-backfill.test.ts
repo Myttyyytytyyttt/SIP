@@ -20,9 +20,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { appendOlder, mergeHead } from "@/lib/live-activity-store";
-import { BACKFILL_PAGES, BACKFILL_ROUNDS, backfillSettlements, backfillSpend, chainSaysSettled, forgetBackfillSpend, holdsSettlement, shouldBackfill } from "@/lib/live-backfill";
+import { BACKFILL_PAGES, BACKFILL_ROUNDS, backfillLinkSettlements, backfillSpend, chainSaysSettled, forgetBackfillSpend, holdsSettlement, settlementWallets, shouldBackfill } from "@/lib/live-backfill";
 import { toLiveDashboard } from "@/lib/live-model";
-import type { LiveActivityJson, LiveEntryJson, LiveSnapshotJson, VaultEventJson } from "@/lib/live-types";
+import type { LiveActivityJson, LiveEntryJson, LiveLinkActivityJson, LiveSnapshotJson, VaultEventJson } from "@/lib/live-types";
 import type { ApiResult } from "@/lib/vault-api";
 
 import { NOW_MS, WALLET_A, liveActivity, liveEntry, liveSnapshot, seconds, settledEvent, signature } from "../../test/fixtures/live-dashboard";
@@ -42,52 +42,101 @@ const upkeepPage = (from: number, nextBefore: string | null): LiveActivityJson =
 const settlementPage = (from: number, nextBefore: string | null): LiveActivityJson =>
   liveActivity([upkeep(from), liveEntry(signature(from + 1), seconds(NOW_MS - 19 * 3_600_000), [settledEvent("36600000")])], { nextBefore });
 
-const ok = (body: LiveActivityJson): ApiResult<LiveActivityJson> => ({ ok: true, status: 200, body });
-const rateLimited: ApiResult<LiveActivityJson> = { ok: false, status: 429, code: "rate_limited", message: "", retryAfterSeconds: 12, body: {} };
+/** One page of a WALLET's link, as the route answers it: its own cursor, never `nextBefore`. */
+const linkPage = (entries: readonly LiveEntryJson[], nextBeforeLink: string | null, over: Partial<LiveLinkActivityJson> = {}): LiveLinkActivityJson => ({
+  scope: "link",
+  vault: "VaultP1aceho1der11111111111111111111111111",
+  wallet: WALLET_A,
+  address: "LinkP1aceho1der111111111111111111111111111",
+  status: "exists",
+  nextBeforeLink,
+  entries,
+  filtered: 0,
+  unread: 0,
+  gap: false,
+  ...over,
+});
 
-/** A fake /api/solana-live that answers `before` from a script, and records what was asked. */
-function pages(script: readonly ApiResult<LiveActivityJson>[]): { fetchPage: (before: string) => Promise<ApiResult<LiveActivityJson>>; asked: string[] } {
-  const asked: string[] = [];
+const ok = (body: LiveLinkActivityJson): ApiResult<LiveLinkActivityJson> => ({ ok: true, status: 200, body });
+const rateLimited: ApiResult<LiveLinkActivityJson> = { ok: false, status: 429, code: "rate_limited", message: "", retryAfterSeconds: 12, body: {} };
+
+/** A fake /api/solana-live that answers from a script, and records who was asked for what. */
+function pages(script: readonly ApiResult<LiveLinkActivityJson>[]): {
+  fetchPage: (wallet: string, before: string | null) => Promise<ApiResult<LiveLinkActivityJson>>;
+  asked: { wallet: string; before: string | null }[];
+} {
+  const asked: { wallet: string; before: string | null }[] = [];
   return {
     asked,
-    fetchPage: async (before: string) => {
-      asked.push(before);
-      return script[asked.length - 1] ?? ok(liveActivity([], { nextBefore: null }));
+    fetchPage: async (wallet: string, before: string | null) => {
+      asked.push({ wallet, before });
+      return script[asked.length - 1] ?? ok(linkPage([], null));
     },
   };
 }
 
 const HEAD = upkeepPage(1, signature(16));
 
+/** A page of ONE wallet's link: nearly pure settlements, which is the point of it. */
+const settlements = (from: number, count: number, nextBeforeLink: string | null): LiveLinkActivityJson =>
+  linkPage(
+    Array.from({ length: count }, (_, index) => liveEntry(signature(from + index), seconds(NOW_MS - (19 + index) * 3_600_000), [settledEvent("36600000")])),
+    nextBeforeLink,
+  );
+
 describe("the state says a settlement exists and the loaded page holds none", () => {
-  it("pages back for it ITSELF, and stops at the page that holds it", async () => {
-    const { fetchPage, asked } = pages([ok(upkeepPage(20, signature(40))), ok(settlementPage(40, signature(60)))]);
+  it("goes to the WALLET'S LINK for it, at that stream's own head", async () => {
+    const { fetchPage, asked } = pages([ok(settlements(40, 1, null))]);
+    const snapshot = liveSnapshot();
 
-    expect(chainSaysSettled(liveSnapshot())).toBe(true);
+    expect(chainSaysSettled(snapshot)).toBe(true);
     expect(holdsSettlement(HEAD.entries)).toBe(false);
-    expect(
-      shouldBackfill({ chainSettled: true, loadedHasSettlement: false, cursor: HEAD.nextBefore, manualBusy: false, rounds: 0, done: false, retryAt: null, now: NOW_MS }),
-    ).toBe(true);
+    const links = settlementWallets(snapshot);
+    expect(links).toEqual([WALLET_A]);
+    expect(shouldBackfill({ chainSettled: true, loadedHasSettlement: false, wallets: links.length, manualBusy: false, rounds: 0, done: false, retryAt: null, now: NOW_MS })).toBe(true);
 
-    const filled = await backfillSettlements({ cursor: HEAD.nextBefore!, fetchPage });
+    const filled = await backfillLinkSettlements({ wallets: links, fetchPage });
 
-    // It asked from where the loaded history ended, then from where that page did.
-    expect(asked).toEqual([signature(16), signature(40)]);
-    expect(filled.pages).toBe(2);
+    // A LINK STREAM STARTS AT ITS OWN HEAD. The vault's cursor is a different
+    // stream's and may never be handed to it.
+    expect(asked).toEqual([{ wallet: WALLET_A, before: null }]);
     expect(filled.found).toBe(true);
     expect(filled.failure).toBeNull();
-    expect(filled.cursor).toBe(signature(60));
     expect(holdsSettlement(filled.entries)).toBe(true);
   });
 
-  it("leaves the dashboard holding the settlement, through the store the hook uses", async () => {
-    const { fetchPage } = pages([ok(upkeepPage(20, signature(40))), ok(settlementPage(40, null))]);
-    const filled = await backfillSettlements({ cursor: HEAD.nextBefore!, fetchPage });
+  it("stops asking a wallet once its link reaches the beginning", async () => {
+    const { fetchPage, asked } = pages([ok(settlements(40, 1, null)), ok(settlements(50, 1, null))]);
+    await backfillLinkSettlements({ wallets: [WALLET_A], fetchPage });
+    expect(asked).toHaveLength(1);
+  });
 
-    const held = appendOlder(mergeHead([], { entries: HEAD.entries, gap: true }), filled.entries);
+  it("pages a second wallet out of the SAME budget, not a fresh one", async () => {
+    const other = "OtherWa11etP1aceho1der11111111111111111111";
+    const { fetchPage, asked } = pages([ok(settlements(40, 1, signature(80))), ok(settlements(50, 1, signature(90)))]);
+
+    const filled = await backfillLinkSettlements({ wallets: [WALLET_A, other], fetchPage });
+
+    expect(BACKFILL_PAGES).toBe(2);
+    expect(filled.pages).toBe(BACKFILL_PAGES);
+    // Both pages went to the first wallet, whose stream had not ended: the
+    // bound is the ROUND's, so two wallets cost what one did.
+    expect(asked.map((call) => call.wallet)).toEqual([WALLET_A, WALLET_A]);
+  });
+
+  /**
+   * THE TWO STREAMS ARE KEPT APART, and the model is what puts them back
+   * together: the feed stays the vault's contiguous page, while the
+   * settlements come from both.
+   */
+  it("leaves the dashboard holding the settlement, through the two stores the hook keeps", async () => {
+    const { fetchPage } = pages([ok(settlements(40, 1, null))]);
+    const filled = await backfillLinkSettlements({ wallets: [WALLET_A], fetchPage });
+
     const view = toLiveDashboard({
       snapshot: liveSnapshot(),
-      activity: liveActivity(held, { nextBefore: filled.cursor }),
+      activity: liveActivity(mergeHead([], { entries: HEAD.entries, gap: true }), { nextBefore: HEAD.nextBefore }),
+      linkEntries: appendOlder([], filled.entries),
       privyWallets: [WALLET_A],
     });
 
@@ -96,63 +145,52 @@ describe("the state says a settlement exists and the loaded page holds none", ()
     expect(view.stats.settledOutsideHistory).toBe(false);
     expect(view.stats.lastSettlementAt).not.toBeNull();
     expect(view.chart).not.toBeNull();
+    // The FEED is still the vault's own page, to the row.
+    expect(view.rows).toHaveLength(0);
+    expect(view.hiddenUpkeep).toBe(15);
   });
 });
 
 describe("what it costs, because reads are rationed", () => {
-  it("asks for no more than BACKFILL_PAGES older pages when they still hold none", async () => {
-    const { fetchPage, asked } = pages([ok(upkeepPage(20, signature(40))), ok(upkeepPage(40, signature(60))), ok(settlementPage(60, null))]);
+  it("asks for no more than BACKFILL_PAGES pages when the stream still holds none", async () => {
+    const { fetchPage, asked } = pages([ok(linkPage([upkeep(20)], signature(40))), ok(linkPage([upkeep(40)], signature(60))), ok(settlements(60, 1, null))]);
 
-    const filled = await backfillSettlements({ cursor: HEAD.nextBefore!, fetchPage });
+    const filled = await backfillLinkSettlements({ wallets: [WALLET_A], fetchPage });
 
-    expect(BACKFILL_PAGES).toBe(2);
-    expect(asked).toEqual([signature(16), signature(40)]);
+    expect(asked).toHaveLength(BACKFILL_PAGES);
     expect(filled.pages).toBe(BACKFILL_PAGES);
     expect(filled.found).toBe(false);
-    // The third page was NOT read, even though it held the settlement: at 1 + up
-    // to 15 upstream calls a page, and 60 read tokens a client's minute, the
-    // bound is the point. The cursor it stopped at is what "Load older" reads.
-    expect(filled.cursor).toBe(signature(60));
   });
 
   it("does not pay again on the next poll: a clean round is the answer, found or not", () => {
-    // `done` is what the hook sets after a round that came back without failing.
-    expect(shouldBackfill({ chainSettled: true, loadedHasSettlement: false, cursor: signature(60), manualBusy: false, rounds: 1, done: true, retryAt: null, now: NOW_MS })).toBe(false);
-    // …and the rounds themselves are capped whatever `done` says.
-    expect(
-      shouldBackfill({ chainSettled: true, loadedHasSettlement: false, cursor: signature(60), manualBusy: false, rounds: BACKFILL_ROUNDS, done: false, retryAt: null, now: NOW_MS }),
-    ).toBe(false);
+    expect(shouldBackfill({ chainSettled: true, loadedHasSettlement: false, wallets: 1, manualBusy: false, rounds: 1, done: true, retryAt: null, now: NOW_MS })).toBe(false);
+    expect(shouldBackfill({ chainSettled: true, loadedHasSettlement: false, wallets: 1, manualBusy: false, rounds: BACKFILL_ROUNDS, done: false, retryAt: null, now: NOW_MS })).toBe(false);
   });
 
-  it("keeps the rows a failed round did read, leaves the cursor where the failure found it, and may be retried once", async () => {
-    const { fetchPage, asked } = pages([ok(upkeepPage(20, signature(40))), rateLimited]);
+  it("keeps the rows a failed round did read, and may be retried once", async () => {
+    const { fetchPage, asked } = pages([ok(settlements(40, 1, signature(60))), rateLimited]);
 
-    const filled = await backfillSettlements({ cursor: HEAD.nextBefore!, fetchPage });
+    const filled = await backfillLinkSettlements({ wallets: [WALLET_A], fetchPage });
 
-    expect(asked).toEqual([signature(16), signature(40)]);
-    expect(filled.entries).toHaveLength(15);
-    // The page that failed did not move where the history ends.
-    expect(filled.cursor).toBe(signature(40));
+    expect(asked).toHaveLength(2);
+    expect(filled.entries).toHaveLength(1);
     expect(filled.failure?.status).toBe(429);
-    expect(filled.found).toBe(false);
-    expect(shouldBackfill({ chainSettled: true, loadedHasSettlement: false, cursor: filled.cursor, manualBusy: false, rounds: 1, done: false, retryAt: null, now: NOW_MS })).toBe(true);
+    expect(shouldBackfill({ chainSettled: true, loadedHasSettlement: false, wallets: 1, manualBusy: false, rounds: 1, done: false, retryAt: null, now: NOW_MS })).toBe(true);
   });
 
   it("stops on a history the route could not read, which is not an empty one", async () => {
-    const { fetchPage, asked } = pages([ok(liveActivity([], { status: "unreadable", nextBefore: null }))]);
+    const { fetchPage, asked } = pages([ok(linkPage([], null, { status: "unreadable" }))]);
 
-    const filled = await backfillSettlements({ cursor: HEAD.nextBefore!, fetchPage });
+    const filled = await backfillLinkSettlements({ wallets: [WALLET_A], fetchPage });
 
     expect(asked).toHaveLength(1);
     expect(filled.unreadable).toBe(true);
     expect(filled.found).toBe(false);
-    // An unreadable page moves nothing: the cursor is still where it was asked from.
-    expect(filled.cursor).toBe(signature(16));
   });
 });
 
 describe("when the backfill stands down", () => {
-  const base = { chainSettled: true, loadedHasSettlement: false, cursor: signature(16), manualBusy: false, rounds: 0, done: false, retryAt: null, now: NOW_MS };
+  const base = { chainSettled: true, loadedHasSettlement: false, wallets: 1, manualBusy: false, rounds: 0, done: false, retryAt: null, now: NOW_MS };
 
   it("never runs when the state records no settlement: there is nothing to go looking for", () => {
     expect(shouldBackfill({ ...base, chainSettled: false })).toBe(false);
@@ -162,8 +200,8 @@ describe("when the backfill stands down", () => {
     expect(shouldBackfill({ ...base, loadedHasSettlement: true })).toBe(false);
   });
 
-  it("never runs when the history already reaches the beginning", () => {
-    expect(shouldBackfill({ ...base, cursor: null })).toBe(false);
+  it("never runs when there is no link to page: no wallet, nothing to ask", () => {
+    expect(shouldBackfill({ ...base, wallets: 0 })).toBe(false);
   });
 
   it("stands down while a manual Load older is in flight: one reader of the tail", () => {
@@ -223,7 +261,7 @@ describe("what counts as the state saying a settlement exists", () => {
 
     expect(chainSaysSettled(elsewhere)).toBe(false);
     expect(
-      shouldBackfill({ chainSettled: chainSaysSettled(elsewhere), loadedHasSettlement: false, cursor: signature(16), manualBusy: false, rounds: 0, done: false, retryAt: null, now: NOW_MS }),
+      shouldBackfill({ chainSettled: chainSaysSettled(elsewhere), loadedHasSettlement: false, wallets: 1, manualBusy: false, rounds: 0, done: false, retryAt: null, now: NOW_MS }),
     ).toBe(false);
   });
 
@@ -259,7 +297,7 @@ describe("what counts as the state saying a settlement exists", () => {
     expect(view.stats.settledOutsideHistory).toBe(false);
     expect(view.stats.loadedSettlements).toBe(0); // the slot filter, still doing its job
     expect(
-      shouldBackfill({ chainSettled: true, loadedHasSettlement: holdsSettlement(page.entries), cursor: signature(16), manualBusy: false, rounds: 0, done: false, retryAt: null, now: NOW_MS }),
+      shouldBackfill({ chainSettled: true, loadedHasSettlement: holdsSettlement(page.entries), wallets: 1, manualBusy: false, rounds: 0, done: false, retryAt: null, now: NOW_MS }),
     ).toBe(false);
   });
 });
@@ -269,7 +307,7 @@ describe("what a round costs, and how often it is paid", () => {
   const decision = (spend: { rounds: number; done: boolean; retryAt: number | null }, now = NOW_MS) => ({
     chainSettled: true,
     loadedHasSettlement: false,
-    cursor: signature(16),
+    wallets: 1,
     manualBusy: false,
     ...spend,
     now,
@@ -339,15 +377,16 @@ const code = (source: string): string =>
     .filter((line) => !/^\s*(\/\/|\*)/.test(line))
     .join("\n");
 
-const CALLS_BACKFILL = /await\s+backfillSettlements\s*\(/;
+const CALLS_BACKFILL = /await\s+backfillLinkSettlements\s*\(/;
 
 describe("the dashboard's own read path calls it", () => {
   const source = code(readFileSync(HOOK, "utf8"));
 
   it("imports the rule and the round from this module", () => {
-    expect(source).toMatch(/import\s*\{[^}]*backfillSettlements[^}]*\}\s*from\s*["']@\/lib\/live-backfill["']/);
+    expect(source).toMatch(/import\s*\{[^}]*backfillLinkSettlements[^}]*\}\s*from\s*["']@\/lib\/live-backfill["']/);
     expect(source).toContain("shouldBackfill(");
     expect(source).toContain("chainSaysSettled(");
+    expect(source).toContain("settlementWallets(");
   });
 
   it("runs it inside the read that just loaded the head page, not in some other path", () => {
@@ -355,16 +394,28 @@ describe("the dashboard's own read path calls it", () => {
     // `read` is defined before `loadOlder`: the call belongs to the read path,
     // which is the one the poll and the first mount both go through.
     expect(source.search(CALLS_BACKFILL)).toBeLessThan(source.indexOf("const loadOlder"));
-    // And it pages through the SAME api.activity every other read uses.
-    expect(source).toMatch(/fetchPage:\s*\(before\)\s*=>\s*api\.activity\(/);
   });
 
-  it("takes the tail before it awaits, so a manual Load older cannot page from the same cursor", () => {
-    const took = source.indexOf("olderBusyRef.current = true");
-    expect(took).toBeGreaterThan(-1);
-    expect(took).toBeLessThan(source.search(CALLS_BACKFILL));
-    // The manual button consults the same flag rather than state alone.
-    expect(source).toMatch(/older\.busy\s*\|\|\s*olderBusyRef\.current/);
+  it("pages the LINKS, never the vault, which is the whole point of the round", () => {
+    const round = source.slice(source.search(CALLS_BACKFILL), source.indexOf("const loadOlder"));
+    expect(round).toMatch(/api\.linkActivity\(/);
+    expect(round).not.toContain("api.activity(");
+  });
+
+  /**
+   * THE TWO STREAMS MAY NOT SHARE A STORE, and this is the scan that keeps it
+   * so. Every window total on the screen rests on the vault page being one
+   * contiguous slice; a wallet's link is a slice of a different stream. Poured
+   * into `entries` it would move the oldest loaded settlement backwards while
+   * leaving holes above it, and a link page carrying `gap` would make mergeHead
+   * throw the vault's whole loaded history away.
+   */
+  it("writes what it read into the LINK store, and touches neither the vault's rows nor its cursor", () => {
+    const round = source.slice(source.search(CALLS_BACKFILL), source.indexOf("const loadOlder"));
+    expect(round).toContain("setLinkEntries(");
+    expect(round).not.toContain("setEntries(");
+    expect(round).not.toContain("setActivityMeta(");
+    expect(round).not.toContain("setOlder(");
   });
 
   it("counts what it spent PER PENSION KEY in this module, not in a ref that dies with the mount", () => {
@@ -380,8 +431,6 @@ describe("the dashboard's own read path calls it", () => {
   });
 
   it("keeps its own failure off the control nobody pressed", () => {
-    // From the round's call to the end of the read: no words, and no message
-    // written into `older`, for a page the user never asked for.
     const round = source.slice(source.search(CALLS_BACKFILL), source.indexOf("const loadOlder"));
     expect(round).not.toContain("wordsFor(");
     expect(round).not.toContain("message:");
@@ -390,8 +439,8 @@ describe("the dashboard's own read path calls it", () => {
   });
 
   it("would still CATCH a hook that stopped calling it: the scan is not toothless", () => {
-    expect(CALLS_BACKFILL.test(code("const filled = await backfillSettlements({ cursor, fetchPage });"))).toBe(true);
-    expect(CALLS_BACKFILL.test(code("// await backfillSettlements() used to be called here"))).toBe(false);
+    expect(CALLS_BACKFILL.test(code("const filled = await backfillLinkSettlements({ wallets, fetchPage });"))).toBe(true);
+    expect(CALLS_BACKFILL.test(code("// await backfillLinkSettlements() used to be called here"))).toBe(false);
     expect(CALLS_BACKFILL.test(code("const page = await api.activity({ owner, before });"))).toBe(false);
   });
 });

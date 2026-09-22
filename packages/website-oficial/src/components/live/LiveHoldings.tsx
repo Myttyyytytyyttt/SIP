@@ -35,6 +35,7 @@ export function LiveHoldings({
   holdings,
   worthNowUsdcRaw,
   notInvestedUsdcRaw,
+  rentOnlyLamports,
   tokensReadable,
   pricesKnown,
   className,
@@ -42,6 +43,8 @@ export function LiveHoldings({
   readonly holdings: readonly LiveHoldingRow[];
   readonly worthNowUsdcRaw: bigint | null;
   readonly notInvestedUsdcRaw: bigint | null;
+  /** The vault's SOL is all rent, so no row carries that fact. Said here instead. */
+  readonly rentOnlyLamports: bigint | null;
   readonly tokensReadable: boolean;
   /** Whether the pools answered at all. False hides every dollar rather than showing $0. */
   readonly pricesKnown: boolean;
@@ -127,6 +130,7 @@ export function LiveHoldings({
         ))}
       </dl>
 
+      {rentOnlyLamports === null ? null : <p className="text-xs text-muted-foreground">{LIVE_COPY.solRentOnly(formatSol(rentOnlyLamports))}</p>}
       {!pricesKnown ? <p className="text-xs text-muted-foreground">{LIVE_COPY.pricesUnreadableNote}</p> : null}
       {!tokensReadable ? <p className="text-xs text-muted-foreground">{LIVE_COPY.tokensUnreadable}</p> : null}
       <p className="text-xs text-muted-foreground">{LIVE_COPY.holdingsFootnote}</p>

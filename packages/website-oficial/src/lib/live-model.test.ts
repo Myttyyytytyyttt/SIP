@@ -355,11 +355,43 @@ describe("stats only claim what the loaded history covers", () => {
     expect(cut.stats.settlementsLifetime).toBeNull();
   });
 
+  /**
+   * A vault that saved more than the loaded page accounts for. The gap is the
+   * point: with lifetimeSaved 0.09 and one loaded settlement of 0.06, a third
+   * of this pension's saving is somewhere the screen has not read.
+   */
+  const savedMore = (): LiveSnapshotJson => {
+    const base = snapshot();
+    return { ...base, vault: { ...base.vault, state: { ...base.vault.state!, lifetimeSaved: "90000000" } } };
+  };
+
   it("today and this week are NULL when the loaded page does not reach back that far", () => {
     const partial = activity([entry("sig1", recent, [settledEvent("60000000")])], { nextBefore: "moreP1aceho1der" });
-    const stats = model(snapshot(), partial).stats;
+    const stats = model(savedMore(), partial).stats;
     expect(stats.savedTodayLamports).toBeNull();
     expect(stats.savedThisWeekLamports).toBeNull();
+  });
+
+  /**
+   * THE ONE WAY A PARTIAL PAGE MAY CLAIM A WINDOW: arithmetic, not pagination.
+   * The vault's lifetimeSaved only ever moves on a settlement, so when what is
+   * loaded adds up to exactly that total there is nothing left to be missing —
+   * from this window or any other — whichever stream the rows were read from.
+   * This is the arm that lets a settlement found on a wallet's LINK count.
+   */
+  it("…unless the loaded settlements add up to the vault's whole lifetime total", () => {
+    const partial = activity([entry("sig1", recent, [settledEvent("60000000")])], { nextBefore: "moreP1aceho1der" });
+    expect(snapshot().vault.state!.lifetimeSaved).toBe("60000000");
+
+    const stats = model(snapshot(), partial).stats;
+    expect(stats.savedTodayLamports).toBe(60_000_000n);
+    expect(stats.savedThisWeekLamports).toBe(60_000_000n);
+
+    // One lamport short of the total and the claim is off again: the proof is
+    // equality, not "close enough".
+    const base = snapshot();
+    const short = { ...base, vault: { ...base.vault, state: { ...base.vault.state!, lifetimeSaved: "60000001" } } };
+    expect(model(short, partial).stats.savedTodayLamports).toBeNull();
   });
 
   it("…and a quiet POLL a minute later does not turn that partial history complete", () => {
@@ -373,7 +405,7 @@ describe("stats only claim what the loaded history covers", () => {
     expect(afterPoll.nextBefore).toBe("moreP1aceho1der");
 
     // A minute after loading, the week must not have shrunk to one page of it.
-    const stats = model(snapshot(), afterPoll).stats;
+    const stats = model(savedMore(), afterPoll).stats;
     expect(stats.savedTodayLamports).toBeNull();
     expect(stats.savedThisWeekLamports).toBeNull();
   });

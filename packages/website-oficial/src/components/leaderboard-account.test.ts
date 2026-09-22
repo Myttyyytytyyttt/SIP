@@ -19,6 +19,8 @@ const mocked = vi.hoisted(() => ({
   privy: { ready: true, authenticated: false, user: null as unknown },
   live: { kind: "loading" } as { kind: string; data?: unknown; stale?: unknown },
   logouts: 0,
+  /** What this bar actually asked the store to read. */
+  asked: null as { readonly activity?: boolean } | null,
 }));
 
 vi.mock("@privy-io/react-auth", () => ({
@@ -32,7 +34,8 @@ vi.mock("@privy-io/react-auth", () => ({
 }));
 
 vi.mock("@/hooks/use-live-dashboard", () => ({
-  useLiveDashboard: () => ({
+  useLiveDashboard: (input: { readonly activity?: boolean }) => ({
+    ...((mocked.asked = input), {}),
     view: mocked.live,
     refresh: vi.fn(),
     loadOlder: vi.fn(),
@@ -128,5 +131,23 @@ describe("with a session that has no pension key", () => {
     const html = render();
     expect(html).toContain("Disconnect");
     expect(html).not.toContain(PENSION_KEY.slice(0, 4));
+  });
+});
+
+/**
+ * THE CHIP MUST NOT SPEND THE PENSION'S BACKFILL BUDGET.
+ *
+ * It shows one balance, which is in the snapshot. It used to buy a page of
+ * signatures and the backfill round behind it too — and that round is paid
+ * once per pension key for the life of the tab (live-backfill.ts). So a
+ * connected visit here left the dashboard, mounted a moment later, unable to
+ * page back for the settlement it then reported as not in the loaded history.
+ */
+describe("what this bar reads", () => {
+  it("asks for the snapshot only, never the history", () => {
+    mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(PENSION_KEY), embedded("TradingWa11et1111111111111111111111111111111", 0, true)]) };
+    mocked.live = { kind: "ready", data: liveDashboard({ snapshot: liveSnapshot() }), stale: null };
+    render();
+    expect(mocked.asked?.activity).toBe(false);
   });
 });

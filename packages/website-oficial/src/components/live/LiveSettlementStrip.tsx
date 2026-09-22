@@ -8,16 +8,33 @@
  * every chip opens that transaction on Solscan. A settlement that moved nothing
  * is a muted "0 SOL" rather than being dropped: it happened, and a strip that
  * silently skips the zeroes overstates how often saving happens.
+ *
+ * NO CHIPS IS TWO DIFFERENT FACTS, and only one of them is "nothing to show".
+ * A pension that has never settled has no band, and LiveNextStep is the one
+ * voice there. But a pension whose settlement the loaded page simply does not
+ * hold — twelve of fifteen signatures being keeper upkeep is enough — used to
+ * lose the whole row too, and with it the top of the main column: the rate
+ * badge is a statement about the vault as it stands today and was never about
+ * history at all. So that case keeps the band, and puts the one CONTROL that
+ * can fill it in the space the chips would have taken.
+ *
+ * A BUTTON, NOT A FOURTH SENTENCE. The chart's caption and the Last settlement
+ * tile already say the settlement is outside the loaded history. Saying it once
+ * more here is how a page comes to read as a list of apologies; pressing "Load
+ * older" is what actually puts the chip, the curve and the Biggest tile back.
  */
 
 import { Percent } from "lucide-react";
 
+import { secondsUntil } from "@/components/live/LiveStates";
 import { measureOf } from "@/components/live/LiveActivityRow";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatSol, rawFrom } from "@/lib/amounts";
 import { SAVED } from "@/lib/classes";
 import { timeAgo } from "@/lib/format";
+import type { LiveOlder } from "@/hooks/use-live-dashboard";
 import { ACTIVITY_COPY, LIVE_COPY, STATS_COPY, stripTooltip } from "@/lib/live-copy";
 import type { LiveRow, LiveVaultView, VaultEventJson } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
@@ -65,22 +82,41 @@ export function LiveSettlementStrip({
   vault,
   now,
   labelOf,
+  settledOutsideHistory,
+  older,
+  onLoadOlder,
+  nowMs,
   className,
 }: {
   readonly rows: readonly LiveRow[];
   readonly vault: LiveVaultView;
   readonly now: string;
   readonly labelOf: (wallet: string | null) => string;
+  /**
+   * The state records a settlement the loaded history does not hold
+   * (stats.settledOutsideHistory). REQUIRED: it is the whole difference between
+   * "this pension has never saved" and "this page has not read far enough", and
+   * a default would silently pick one.
+   */
+  readonly settledOutsideHistory: boolean;
+  readonly older: LiveOlder;
+  readonly onLoadOlder: () => void;
+  /** The BROWSER's clock, for the retry countdown only — never for a label. */
+  readonly nowMs: number;
   readonly className?: string;
 }) {
   const shown = rows.filter(isSettled).slice(0, SHOWN);
-  // The strip exists to show settlements. With none loaded there is nothing to show.
-  if (shown.length === 0) return null;
 
   // The BADGE is the vault's rule as it stands today, which is what a badge is
   // for. Each chip's own words come from its own event, below.
   const rate = vault.rateBps === null ? null : ratePercent(vault.rateBps);
   const badge = rate === null ? null : vault.mode === 1 ? LIVE_COPY.modeVolume(rate) : LIVE_COPY.modeProfit(rate);
+
+  // Nothing has ever settled, or there is not even a rule to state: no band.
+  // Only a history that falls short of a settlement the chain records earns one.
+  if (shown.length === 0 && !(settledOutsideHistory && badge !== null)) return null;
+
+  const retryIn = secondsUntil(older.retryAt, nowMs);
 
   return (
     <div className={cn("flex items-center gap-2", className)} role="group" aria-label={STATS_COPY.settlementStripLabel}>
@@ -91,18 +127,32 @@ export function LiveSettlementStrip({
         </Badge>
       )}
 
-      {/*
-        -m-px p-px: one pixel of room so the newest chip's ring and any focus
-        ring are not clipped by the scroll container. The mask fades the right
-        edge — with the scrollbar hidden, it is the only hint there is more.
-      */}
-      <div className="-m-px flex min-w-0 flex-1 gap-2 overflow-x-auto p-px [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [mask-image:linear-gradient(to_right,black_calc(100%-2rem),transparent)]">
-        {shown.map((row, index) => (
-          <StripChip key={`${row.signature}-${index}`} row={row} now={now} labelOf={labelOf} maxContribution={vault.maxContribution} newest={index === 0} />
-        ))}
-      </div>
+      {shown.length === 0 ? (
+        // The chips' own slot, holding the one thing that can fill it. With the
+        // history already at its beginning there is nothing older to ask for,
+        // and a button that cannot help is worse than no button.
+        older.complete ? null : (
+          <Button type="button" size="sm" variant="outline" className="h-9 shrink-0" disabled={older.busy || retryIn !== null} onClick={onLoadOlder}>
+            {older.busy ? ACTIVITY_COPY.loadingOlder : retryIn === null ? ACTIVITY_COPY.loadOlder : LIVE_COPY.retryIn(retryIn)}
+          </Button>
+        )
+      ) : (
+        /*
+          -m-px p-px: one pixel of room so the newest chip's ring and any focus
+          ring are not clipped by the scroll container. The mask fades the right
+          edge — with the scrollbar hidden, it is the only hint there is more.
+        */
+        <div className="-m-px flex min-w-0 flex-1 gap-2 overflow-x-auto p-px [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [mask-image:linear-gradient(to_right,black_calc(100%-2rem),transparent)]">
+          {shown.map((row, index) => (
+            <StripChip key={`${row.signature}-${index}`} row={row} now={now} labelOf={labelOf} maxContribution={vault.maxContribution} newest={index === 0} />
+          ))}
+        </div>
+      )}
 
-      <p className="ml-auto hidden shrink-0 text-xs text-muted-foreground lg:block">{STATS_COPY.lastSettlements(String(shown.length))}</p>
+      {/* "last 0 settlements" is not a fact worth a line. */}
+      {shown.length === 0 ? null : (
+        <p className="ml-auto hidden shrink-0 text-xs text-muted-foreground lg:block">{STATS_COPY.lastSettlements(String(shown.length))}</p>
+      )}
     </div>
   );
 }

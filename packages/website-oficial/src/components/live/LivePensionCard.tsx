@@ -24,7 +24,7 @@ import { LiveStats } from "@/components/live/LiveStats";
 import { Num } from "@/components/num";
 import { Card, CardContent, CardDescription, CardHeader } from "@/components/ui/card";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { formatSol, formatUsd, rawFrom, usdcRawForLamports } from "@/lib/amounts";
+import { formatSol, formatUsd, rawFrom, splitDecimal, usdcRawForLamports } from "@/lib/amounts";
 import { LABEL } from "@/lib/classes";
 import { dateLabel } from "@/lib/format";
 import { LIVE_COPY } from "@/lib/live-copy";
@@ -49,6 +49,10 @@ export function LivePensionCard({
   const saved = vault.lifetimeSaved ?? 0n;
   const perSol = rawFrom(prices?.usdcRawPerSol);
   const rate = vault.rateBps === null ? null : ratePercent(vault.rateBps);
+  // Nine decimals all at 48px is a wall of digits with no figure in it. The
+  // tail steps down in SIZE only — muting real digits would read as a rounding,
+  // and on this page every digit is one the chain actually holds.
+  const [head, tail] = splitDecimal(formatSol(saved));
 
   // "≈ $X at today's SOL price · Profit · 20 % of trading gains · since Sep 15, 2026"
   const description = [
@@ -62,7 +66,11 @@ export function LivePensionCard({
       <CardHeader className="flex flex-col gap-4 @md/panel:flex-row @md/panel:items-start @md/panel:justify-between">
         <div className="space-y-1">
           <p className={LABEL}>{LIVE_COPY.savedSoFar}</p>
-          <p className="font-mono text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl">{formatSol(saved)} SOL</p>
+          <p className="font-mono font-semibold tracking-tight tabular-nums">
+            <span className="text-4xl sm:text-5xl">{head}</span>
+            {tail === "" ? null : <span className="text-2xl sm:text-3xl">{tail}</span>}
+            <span className="ml-2 text-2xl font-normal text-muted-foreground sm:text-3xl">SOL</span>
+          </p>
           <CardDescription>{description.join(" · ")}</CardDescription>
         </div>
 
@@ -97,15 +105,29 @@ export function LivePensionCard({
         <LiveSavedChart points={data.chart} complete={complete} settledOutsideHistory={stats.settledOutsideHistory} className="h-64 w-full sm:h-72" />
       </CardContent>
 
-      <CardContent className="space-y-6">
-        <LiveStats stats={stats} vault={vault} policy={policy} now={now} />
-        <LiveHoldings
-          holdings={holdings}
-          worthNowUsdcRaw={data.worthNowUsdcRaw}
-          notInvestedUsdcRaw={data.notInvestedUsdcRaw}
-          tokensReadable={data.tokensReadable}
-          pricesKnown={prices !== null}
-        />
+      {/*
+        SIDE BY SIDE ONCE THERE IS ROOM FOR BOTH. Stacked, the two sections
+        leave the middle of the card empty twice over — four tiles on one line,
+        then a two-row table — which is most of the "empty space" this panel was
+        complained about for. @4xl (56rem) is measured, not guessed: beside the
+        rule card at xl this panel is about 990px at a 1700px window, so a
+        threshold of 64rem would never fire on the very screen the complaint
+        came from. LiveStats is its own @container, so its 2-up/4-up decision
+        follows the half it lands in without a second breakpoint here, and the
+        holdings table gets the wider half because it carries four columns.
+      */}
+      <CardContent>
+        <div className="grid gap-6 @4xl/panel:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] @4xl/panel:items-start">
+          <LiveStats stats={stats} vault={vault} policy={policy} now={now} />
+          <LiveHoldings
+            holdings={holdings}
+            worthNowUsdcRaw={data.worthNowUsdcRaw}
+            notInvestedUsdcRaw={data.notInvestedUsdcRaw}
+            rentOnlyLamports={data.rentOnlyLamports}
+            tokensReadable={data.tokensReadable}
+            pricesKnown={prices !== null}
+          />
+        </div>
       </CardContent>
     </Card>
   );

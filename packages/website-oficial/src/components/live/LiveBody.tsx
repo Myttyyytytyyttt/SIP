@@ -55,6 +55,7 @@ export function LiveBody({
   onLoadOlder,
   nowMs,
   activityUnreadable,
+  activityRetryAt = null,
 }: {
   readonly view: "pension" | "activity";
   readonly data: LiveDashboard;
@@ -69,6 +70,8 @@ export function LiveBody({
   readonly nowMs: number;
   /** The history could not be read. REQUIRED, because forgetting it drew an empty feed over a pension with settlements. */
   readonly activityUnreadable: boolean;
+  /** When the server said the history may be asked for again; the retry counts down to it. */
+  readonly activityRetryAt?: number | null;
 }) {
   const openWallets = useWalletsOpener();
   const onOpenWallets = (): void => openWallets?.();
@@ -105,6 +108,8 @@ export function LiveBody({
       onOpenWallets={onOpenWallets}
       onRetryActivity={onRefresh}
       activityUnreadable={activityUnreadable}
+      activityRetryAt={activityRetryAt}
+      nowMs={nowMs}
       {...(emptyNote === undefined ? {} : { emptyNote })}
       className={inSheet ? "min-h-0 flex-1" : "sticky top-14 h-[calc(100dvh-3.5rem)]"}
     />
@@ -128,8 +133,10 @@ export function LiveBody({
         activitySheet={sidebarFor("activity-sheet", true)}
         control={control}
         // The header shows this only away from the pension, where these very
-        // settlements are already on screen in full.
-        contributions={<HeaderContributions rows={data.rows} />}
+        // settlements are already on screen in full. From settlementRows, not
+        // the feed: a settlement read from a wallet's link is not in the
+        // vault's own page and is a contribution all the same.
+        contributions={<HeaderContributions rows={data.settlementRows} />}
         account={account}
         current={view}
       />
@@ -147,6 +154,7 @@ export function LiveBody({
             onLoadOlder={onLoadOlder}
             onRetryActivity={onRefresh}
             activityUnreadable={activityUnreadable}
+            activityRetryAt={activityRetryAt}
             nextStep={nextStep}
             {...(emptyNote === undefined ? {} : { emptyNote })}
           />
@@ -164,7 +172,16 @@ export function LiveBody({
 
             {panels ? null : (
               <>
-                <LiveSettlementStrip rows={data.rows} vault={data.vault} now={now} labelOf={labelOf} />
+                <LiveSettlementStrip
+                  rows={data.settlementRows}
+                  vault={data.vault}
+                  now={now}
+                  labelOf={labelOf}
+                  settledOutsideHistory={data.stats.settledOutsideHistory}
+                  older={older}
+                  onLoadOlder={onLoadOlder}
+                  nowMs={nowMs}
+                />
                 <div className="grid gap-4 lg:gap-6 md:grid-cols-[minmax(16rem,20rem)_1fr] lg:grid-cols-1 xl:grid-cols-[minmax(16rem,20rem)_1fr]">
                   <LiveRuleCard data={data} labelOf={labelOf} onOpenWallets={onOpenWallets} className="order-2 md:order-1 lg:order-2 xl:order-1" />
                   <LivePensionCard data={data} now={now} complete={older.complete} className="order-1 md:order-2 lg:order-1 xl:order-2" />
