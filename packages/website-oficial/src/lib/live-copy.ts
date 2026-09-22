@@ -259,32 +259,46 @@ export const LIVE_COPY = {
 
 /** One row of the history, per the kind the classifier gave it. */
 export const ACTIVITY_COPY = {
-  settled: (paid: string): string => `Saved ${paid} SOL`,
+  /*
+   * A TITLE SAYS WHAT HAPPENED; THE AMOUNT COLUMN SAYS HOW MUCH.
+   *
+   * Every one of these used to carry its figure, and the row then printed the
+   * same number twice — once inside a title that ran out of room in a 320px
+   * column and was cut mid-word, and once in full on the right. The sample has
+   * always split them, which is why its rows read and these did not. So no
+   * string here takes an amount, and the amount-less twins that existed for
+   * the unreadable case are gone with them: when a figure cannot be read the
+   * COLUMN empties, and the title is the same sentence it always was.
+   */
+  settled: (label: string): string => `Saved from ${label}`,
   /** A settlement that moved nothing: said as itself, never dressed as a saving. */
-  settledNothing: "Settled, nothing to save",
-  settledFrom: (label: string, rate: string, base: string, measure: string): string => `from ${label} · ${rate} of ${base} SOL ${measure}`,
+  settledNothing: (label: string): string => `Settled from ${label}, nothing to save`,
+  settledFrom: (rate: string, base: string, measure: string): string => `${rate} of ${base} SOL ${measure}`,
   /** The part that did NOT move, said where someone would otherwise wonder. */
   settledCapped: (owed: string, max: string): string => `${owed} SOL owed, capped at ${max} SOL; the rest is not carried over`,
   /** What a settlement measures: the vault's own mode, never the other one. */
   measureProfit: "profit",
   measureVolume: "volume",
 
-  wrapped: (sol: string): string => `Wrapped ${sol} SOL for investing`,
-  wrappedPlain: "Wrapped SOL for investing",
-  converted: (sol: string, usdc: string): string => `Converted ${sol} SOL to ${usdc} USDC`,
-  convertedPlain: "Converted SOL to USDC",
-  invested: (amount: string, symbol: string, usdc: string): string => `Bought ${amount} ${symbol} for ${usdc} USDC`,
-  investedPlain: (symbol: string): string => `Bought ${symbol}`,
-  withdrewSol: (sol: string): string => `Withdrew ${sol} SOL`,
-  withdrewToken: (amount: string, symbol: string): string => `Withdrew ${amount} ${symbol}`,
+  wrapped: "Wrapped SOL for investing",
+  converted: "Converted SOL to USDC",
+  /** What the SOL side of a conversion came to, beside the USDC in the amount column. */
+  convertedFrom: (sol: string): string => `${sol} SOL`,
+  invested: (symbol: string): string => `Invested in ${symbol}`,
+  withdrewSol: "Withdrew SOL",
+  withdrewToken: (symbol: string): string => `Withdrew ${symbol}`,
   vaultCreated: (rule: string): string => `Vault created · ${rule}`,
   vaultCreatedPlain: "Vault created",
   ruleChanged: "Savings rule changed",
+  /** What it was changed TO, when the transaction decoded enough to say. */
+  ruleChangedTo: (rule: string): string => `now ${rule}`,
   policySigned: "Investment policy signed",
+  /** The cap a signed policy carries, when it decoded. Never a "$0.00" standing in for unread. */
+  policyCaps: (max: string): string => `up to ${max} per buy`,
   investingPaused: "Investing paused",
   linked: (label: string): string => `Linked ${label}`,
   unlinked: (label: string): string => `Unlinked ${label}`,
-  receivedSol: (sol: string): string => `Received ${sol} SOL`,
+  receivedSol: "Received SOL",
   /** A transfer is a transfer: never counted as something anyone saved. */
   receivedSub: "a plain transfer, not counted as saved",
   other: "Vault transaction",
@@ -348,6 +362,11 @@ export const STATS_COPY = {
   thisWeek: "This week",
   /** The strip's trailing note: it names its own population rather than implying a lifetime. */
   lastSettlements: (count: string): string => `last ${count} ${count === "1" ? "settlement" : "settlements"}`,
+  /** The average over the chips SHOWN, as the sample trails its strip. Named so, because it is not a lifetime. */
+  stripAverage: (avg: string, count: string): string => `avg ${avg} SOL · last ${count}`,
+  /** What the badge means, as the sample's has always said on hover. */
+  stripBadgeProfit: (rate: string): string => `${rate} of your realised trading gains is put aside`,
+  stripBadgeVolume: (rate: string): string => `${rate} of your trading volume would be put aside`,
   settlementStripLabel: "Recent settlements",
 } as const;
 

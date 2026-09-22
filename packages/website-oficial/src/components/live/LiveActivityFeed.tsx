@@ -133,11 +133,19 @@ function HiddenTransactions({
   );
 }
 
-/** "12 transactions · 3 settlements", under a feed. One of each counts as one. */
+/**
+ * "12 transactions · 3 settlements", under a feed. One of each counts as one.
+ *
+ * THE TWO COUNTS ARE NOT A PART OF A WHOLE. `transactions` is the vault page's
+ * own rows; `settlements` counts both streams, because a settlement found on a
+ * wallet's link is one this pension made even though the vault's page does not
+ * list it. So they are separated rather than joined by "of".
+ */
 export function FeedFooter({ transactions, settlements, className }: { readonly transactions: number; readonly settlements: number; readonly className?: string }) {
   return (
     <span className={cn("text-xs text-muted-foreground", className)}>
-      <Num>{transactions}</Num> {transactions === 1 ? "transaction" : "transactions"} · <Num>{settlements}</Num> {settlements === 1 ? "settlement" : "settlements"}
+      <Num className="text-xs">{transactions}</Num> {transactions === 1 ? "transaction" : "transactions"} · <Num className="text-xs">{settlements}</Num>{" "}
+      {settlements === 1 ? "settlement" : "settlements"}
     </span>
   );
 }

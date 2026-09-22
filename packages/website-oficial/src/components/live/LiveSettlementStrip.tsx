@@ -120,11 +120,17 @@ export function LiveSettlementStrip({
 
   return (
     <div className={cn("flex items-center gap-2", className)} role="group" aria-label={STATS_COPY.settlementStripLabel}>
-      {badge === null ? null : (
-        <Badge variant="secondary" className="h-9 shrink-0 rounded-md px-3 font-mono tabular-nums has-data-[icon=inline-start]:pl-2.5">
-          <Percent aria-hidden data-icon="inline-start" />
-          {badge}
-        </Badge>
+      {badge === null || rate === null ? null : (
+        // The sample's badge says what it means on hover; this one did not.
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant="secondary" tabIndex={0} className="h-9 shrink-0 rounded-md px-3 font-mono tabular-nums has-data-[icon=inline-start]:pl-2.5">
+              <Percent aria-hidden data-icon="inline-start" />
+              {badge}
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent>{vault.mode === 1 ? STATS_COPY.stripBadgeVolume(rate) : STATS_COPY.stripBadgeProfit(rate)}</TooltipContent>
+        </Tooltip>
       )}
 
       {shown.length === 0 ? (
@@ -149,9 +155,18 @@ export function LiveSettlementStrip({
         </div>
       )}
 
-      {/* "last 0 settlements" is not a fact worth a line. */}
+      {/*
+        The sample trails its strip with an average, which says more than a
+        count of the same chips. Over the chips SHOWN, and named so — it is not
+        a lifetime average, and the loaded history is not the whole history.
+
+        GUARDED, because the band renders with zero chips on the
+        settled-outside-history branch and BigInt division by zero throws.
+      */}
       {shown.length === 0 ? null : (
-        <p className="ml-auto hidden shrink-0 text-xs text-muted-foreground lg:block">{STATS_COPY.lastSettlements(String(shown.length))}</p>
+        <p className="ml-auto hidden shrink-0 text-xs text-muted-foreground lg:block">
+          {STATS_COPY.stripAverage(formatSol(shown.reduce((total, row) => total + (rawFrom(row.event.paid) ?? 0n), 0n) / BigInt(shown.length)), String(shown.length))}
+        </p>
       )}
     </div>
   );

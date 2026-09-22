@@ -71,16 +71,18 @@ describe("where a row goes", () => {
 });
 
 describe("only a real saving wears the accent", () => {
-  it("a settlement that paid says so, in the SAVED colour", () => {
+  it("a settlement that paid says so, in the SAVED colour, with the figure in its own column", () => {
     const html = render(settled("60000000"));
-    expect(html).toContain(ACTIVITY_COPY.settled("0.06"));
+    expect(html).toContain(ACTIVITY_COPY.settled("Trading wallet 1"));
+    // The amount is the column's, not the title's, and it is signed.
+    expect(html).toContain("+0.06 SOL");
     expect(html).toContain(SAVED.split(" ")[0]!);
   });
 
   it("a settlement that moved nothing says so, and is muted", () => {
     const html = render(settled("0"));
-    expect(html).toContain(ACTIVITY_COPY.settledNothing);
-    expect(html).not.toContain(ACTIVITY_COPY.settled("0"));
+    expect(html).toContain(ACTIVITY_COPY.settledNothing("Trading wallet 1"));
+    expect(html).not.toContain(ACTIVITY_COPY.settled("Trading wallet 1"));
     // The zero row must not carry the accent that means money was put aside.
     const parts = partsOf(settled("0"), labelOf, MAX_CONTRIBUTION);
     expect(parts.amountClass).toBe("text-muted-foreground");
@@ -104,24 +106,32 @@ describe("only a real saving wears the accent", () => {
 describe("what the chain has no words for", () => {
   it("SOL that merely arrived is a transfer, never a saving", () => {
     const html = render({ kind: "received_sol", lamports: "5000000" } as VaultEventJson);
-    expect(html).toContain(ACTIVITY_COPY.receivedSol("0.005"));
+    expect(html).toContain(ACTIVITY_COPY.receivedSol);
+    expect(html).toContain("0.005 SOL");
     expect(html).toContain(ACTIVITY_COPY.receivedSub);
     expect(html).not.toContain("Saved");
   });
 
   it("names a token from its MINT, because the event carries no symbol", () => {
     const html = render({ kind: "withdrew_token", mint: SPYX_MINT, amountRaw: "1000000", uiAmount: "0.0109" } as VaultEventJson);
-    expect(html).toContain(ACTIVITY_COPY.withdrewToken("0.0109", "SPYx"));
+    expect(html).toContain(ACTIVITY_COPY.withdrewToken("SPYx"));
+    expect(html).toContain("0.0109");
   });
 
   it("says `tokens` for a mint it does not know, rather than inventing a ticker", () => {
     const html = render({ kind: "withdrew_token", mint: "Unknown1111111111111111111111111111111111111", amountRaw: "1", uiAmount: "0.1" } as VaultEventJson);
-    expect(html).toContain(ACTIVITY_COPY.withdrewToken("0.1", "tokens"));
+    expect(html).toContain(ACTIVITY_COPY.withdrewToken("tokens"));
   });
 
-  it("drops to the amount-less label when the chain did not give the amounts, rather than inventing one", () => {
+  /**
+   * THE AMOUNT COLUMN EMPTIES; THE TITLE DOES NOT CHANGE. A title used to
+   * carry the figure and so needed an amount-less twin for the case where the
+   * chain gave none. Splitting the two removed the need for both.
+   */
+  it("empties the amount column when the chain gave no figures, rather than inventing one", () => {
     const html = render({ kind: "converted", lamportsSpent: null, usdcReceivedRaw: null } as VaultEventJson);
-    expect(html).toContain(ACTIVITY_COPY.convertedPlain);
+    expect(html).toContain(ACTIVITY_COPY.converted);
+    expect(html).not.toMatch(/\$\d/);
   });
 
   it("shows no invented trade: there is no fill, and no funded wallet, on this chain", () => {
