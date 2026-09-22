@@ -55,7 +55,6 @@
 import {
   CONVERT_FLOOR_MARGIN_BPS,
   DEFAULT_INVEST_CAPS,
-  DEFAULT_PURCHASE_USDC_RAW,
   LEG_FLOOR_MARGIN_BPS,
   LEG_WEIGHT_TOTAL_BPS,
   OFFERED_LEGS,
@@ -104,7 +103,8 @@ import { floorsState } from "@/lib/live-model";
 import type { InvestPolicyBuildJson, InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
 import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, shortAddress, signedLegsOf } from "@/lib/vault-copy";
 
-type VaultWrite = ReturnType<typeof useVaultWrite>;
+/** The write hook as this card holds it. Exported so a test can render PolicySetup directly with a stub. */
+export type VaultWrite = ReturnType<typeof useVaultWrite>;
 
 /** The caps a person typed, in USDC raw units, or why they cannot be signed. */
 export type Caps = { readonly ok: true; readonly maxPerCall: bigint; readonly maxRolling30d: bigint } | { readonly ok: false; readonly message: string };
@@ -374,7 +374,24 @@ export type Resign =
  * an unreadable field is not defaulted, and in every refusal Pause still works
  * — it reads no price and re-signs exactly what is stored.
  */
-export function resignStoredPolicy(policy: InvestmentPolicyJson): Resign {
+/** A stored policy resolved back to catalogue legs, with the three figures it carries; or why it could not be read. */
+type StoredBasket =
+  | { readonly ok: true; readonly picked: readonly PickedLeg[]; readonly minInvestment: bigint; readonly maxPerCall: bigint }
+  | { readonly ok: false; readonly message: string };
+
+/**
+ * HALF OF resignStoredPolicy, AND THE HALF THE EDIT FORM ALSO NEEDS: resolving
+ * what is stored back to assets the shelf still offers, and reading its
+ * amounts. It judges NOTHING — the floor and the ceiling stay in
+ * resignStoredPolicy, because they are what the edit form exists to let the
+ * owner change, and a cap that is over the ceiling is a thing the form must
+ * SHOW him, not a reason to refuse him the form.
+ *
+ * Extracted rather than reimplemented so there is one answer to "can this
+ * policy's basket be put back on a screen": two copies of this would drift on
+ * the day the shelf drops an asset, and only one of them would be fixed.
+ */
+function storedBasket(policy: InvestmentPolicyJson): StoredBasket {
   const minInvestment = rawFrom(policy.minInvestment);
   const maxPerCall = rawFrom(policy.maxPerCall);
   if (minInvestment === null || maxPerCall === null || minInvestment <= 0n || maxPerCall <= 0n) return { ok: false, message: INVEST_COPY.resignUnreadable };
@@ -391,6 +408,69 @@ export function resignStoredPolicy(policy: InvestmentPolicyJson): Resign {
     else picked.push({ asset, weightBps: leg.weightBps });
   }
   if (missing.length > 0) return { ok: false, message: INVEST_COPY.resignUnoffered(listAnd(missing)) };
+  return { ok: true, picked, minInvestment, maxPerCall };
+}
+
+/** The boxes and ticks an edit form opens on, taken from the policy the chain holds — or why the stored policy cannot be put back on this form. */
+export type PolicySeed = {
+  readonly picked: readonly PickedRow[];
+  readonly perBuy: string;
+  readonly per30Days: string;
+  readonly minimum: string;
+  readonly venue: string;
+  readonly enabled: boolean;
+};
+export type PolicyEdit = ({ readonly ok: true } & PolicySeed) | { readonly ok: false; readonly message: string };
+
+/**
+ * THE STORED POLICY AS THE SETUP FORM'S OPENING STATE — the whole of the edit
+ * path's new arithmetic, and it has none.
+ *
+ * It returns strings and rows, nothing else: the floor, the ceiling, the
+ * window, the warnings and the Sign gate are all recomputed by the form from
+ * these, on every keystroke, in the one place that has always computed them.
+ * If this function did any arithmetic of its own it could disagree with the
+ * form it seeds, which is the defect the single-form decision exists to avoid.
+ *
+ * THREE MISMATCHES BETWEEN WHAT IS STORED AND WHAT A BOX CAN HOLD:
+ *  * WEIGHTS. The policy carries basis points; the boxes hold whole percents.
+ *    A share that is not a multiple of 100 bps is REFUSED, never rounded — a
+ *    rounded share is a basket the owner never chose, re-signed from a screen
+ *    he opened to change something else.
+ *  * THE VENUE. The policy carries a PROGRAM ID; the select holds a NAME. The
+ *    look-up is over VERIFIABLE_VENUES, so a stored program this app cannot
+ *    check the bytes of (the retired raydium-clmm) falls back to the default
+ *    name rather than putting an id in the form.
+ *  * enabled. PolicySetup signed `true` unconditionally, which is right for a
+ *    first policy and would silently resume a PAUSED one. It travels.
+ */
+export function policyEditSeed(policy: InvestmentPolicyJson): PolicyEdit {
+  const stored = storedBasket(policy);
+  if (!stored.ok) return stored;
+  const maxRolling30d = rawFrom(policy.maxRolling30d);
+  if (maxRolling30d === null || maxRolling30d <= 0n) return { ok: false, message: INVEST_COPY.resignUnreadable };
+
+  const picked: PickedRow[] = [];
+  for (const leg of stored.picked) {
+    if (leg.weightBps % 100 !== 0) return { ok: false, message: INVEST_COPY.editFractionalShare(leg.asset.symbol, ratePercent(leg.weightBps)) };
+    picked.push({ mint: leg.asset.mint, percent: String(leg.weightBps / 100) });
+  }
+  const venue = [...VERIFIABLE_VENUES.entries()].find(([, program]) => program === policy.venueProgram)?.[0] ?? DEFAULT_VENUE_NAME;
+  return {
+    ok: true,
+    picked,
+    perBuy: formatUnits(stored.maxPerCall, USDC_DECIMALS),
+    per30Days: formatUnits(maxRolling30d, USDC_DECIMALS),
+    minimum: formatUnits(stored.minInvestment, USDC_DECIMALS),
+    venue,
+    enabled: policy.enabled,
+  };
+}
+
+export function resignStoredPolicy(policy: InvestmentPolicyJson): Resign {
+  const stored = storedBasket(policy);
+  if (!stored.ok) return stored;
+  const { picked, minInvestment, maxPerCall } = stored;
 
   let limits: BasketLimits;
   try {
@@ -458,10 +538,33 @@ function readinessWords(readiness: InvestmentReadiness): string {
   return INVEST_COPY.unreachable;
 }
 
+/**
+ * WHICH OF THE TWO SCREENS A VAULT WITH A POLICY IS SHOWING.
+ *
+ * LIFTED OUT OF THE JSX BECAUSE OF THIS SUITE'S SHAPE. Everything here renders
+ * with renderToStaticMarkup in a node environment: no DOM, no act(), no
+ * re-render, so the press that flips `editing` sets state nothing can observe.
+ * A three-way condition inline would be a rule with a price on it that no case
+ * could reach. As a function it is pinned, even though the click is not.
+ *
+ * THE TWO GUARDS BESIDE `editing`, and neither is decoration. `justSigned`: the
+ * write that just landed REPLACED this policy, so leaving the form open over it
+ * invites signing the same change twice. `seedable`: a stored policy the boxes
+ * cannot hold — a share that is not a whole percent — has no opening state, and
+ * a form opened on the shelf's defaults would offer to overwrite a live policy
+ * with numbers the owner never chose.
+ */
+export const editScreen = (input: { readonly editing: boolean; readonly justSigned: boolean; readonly seedable: boolean }): "form" | "summary" =>
+  input.editing && !input.justSigned && input.seedable ? "form" : "summary";
+
 export function InvestingCard() {
   const screen = useVaultScreen();
   const write = useVaultWrite("policy");
   const [signing, setSigning] = useState<InvestRequest | "pause" | null>(null);
+  // WHETHER THE OWNER IS CHANGING THE POLICY HE HAS. Declared with the other
+  // hooks, above the early return: a hook after a conditional return is a hook
+  // order that changes between renders.
+  const [editing, setEditing] = useState(false);
   if (screen === null) return null;
   const { view } = screen;
 
@@ -481,7 +584,12 @@ export function InvestingCard() {
       successLabel={INVEST_COPY.signed}
       onBuildAgain={() => void write.buildAgain()}
       onCheckAgain={() => void write.checkAgain()}
-      onDismiss={() => write.dismiss()}
+      onDismiss={() => {
+        write.dismiss();
+        // Dismissing a finished write leaves the summary, not the form: the
+        // policy on screen is the one that just landed.
+        setEditing(false);
+      }}
       approveDetail={<SigningDetail progress={write.progress} request={signing} />}
     />
   );
@@ -504,10 +612,31 @@ export function InvestingCard() {
   if (state.policy.status === "unreadable" || (state.policy.status === "exists" && state.policy.state === undefined)) {
     return <Shell description={INVEST_COPY.policyUnreadable} alert>{write.progress.phase !== "idle" ? progress : null}</Shell>;
   }
-  return state.policy.status === "missing" || state.policy.state === undefined ? (
-    <PolicySetup state={state} write={write} start={start} progress={progress} />
+  if (state.policy.status === "missing" || state.policy.state === undefined) return <PolicySetup state={state} write={write} start={start} progress={progress} />;
+
+  // A POLICY EXISTS, SO THERE ARE TWO SCREENS AND ONE FORM. The seed is the
+  // stored policy as the form's opening state; when it cannot be made — a
+  // stored leg the shelf no longer offers, a share no box can hold — the
+  // summary says so and leaves Sign-again and Pause alone.
+  const stored = state.policy.state;
+  const seed = policyEditSeed(stored);
+  // The write that just landed replaced this policy, so the form is done with:
+  // sitting in an edit form over a policy that no longer exists is how an owner
+  // signs the same change twice.
+  const justSigned = write.progress.phase === "finished" && write.progress.result.ok;
+  return editScreen({ editing, justSigned, seedable: seed.ok }) === "form" && seed.ok ? (
+    <PolicySetup state={state} write={write} start={start} progress={progress} seed={seed} onCancel={() => setEditing(false)} />
   ) : (
-    <PolicySummary state={state} policy={state.policy.state} write={write} start={start} pause={pause} progress={progress} />
+    <PolicySummary
+      state={state}
+      policy={stored}
+      write={write}
+      start={start}
+      pause={pause}
+      progress={progress}
+      onEdit={seed.ok ? () => setEditing(true) : null}
+      editProblem={seed.ok ? null : seed.message}
+    />
   );
 }
 
@@ -596,31 +725,57 @@ function CapField({ id, label, value, onChange, disabled }: { readonly id: strin
   );
 }
 
-function PolicySetup({
+/**
+ * THE POLICY FORM — for a vault that has never signed one AND for a vault
+ * changing the one it has. ONE form, two opening states.
+ *
+ * `seed` IS THE ONLY DIFFERENCE, and it reaches nothing but the six useState
+ * initializers below. Everything else in this component is derived from those
+ * six and from `state` on every render, so seeding them seeds the window, the
+ * floor, the ceiling, the warnings, the cost paragraphs and the Sign gate — all
+ * of it, without a second copy of any of it. A second "edit" form would have
+ * drifted from this one at the next arithmetic fix, and only one of the two
+ * would have got it.
+ *
+ * THE INITIALIZERS ARE LAZY, WHICH IS LOAD-BEARING: the seed is read once, at
+ * mount, so a background refresh of the policy cannot overwrite what the owner
+ * is typing. The card mounts this subtree fresh when the edit starts.
+ */
+export function PolicySetup({
   state,
   write,
   start,
   progress,
+  seed = null,
+  onCancel,
 }: {
   readonly state: VaultStateJson;
   readonly write: VaultWrite;
   readonly start: (input: InvestRequest) => void;
   readonly progress: ReactNode;
+  /** The stored policy's own values, when this form was opened to change one; null for a first policy. */
+  readonly seed?: PolicySeed | null;
+  /** Back to the summary without signing. Absent when there is nothing to go back to. */
+  readonly onCancel?: () => void;
 }) {
-  const [perBuy, setPerBuy] = useState(() => formatUnits(SUGGESTED_PER_BUY_RAW, USDC_DECIMALS));
-  const [per30Days, setPer30Days] = useState(() => formatUnits(DEFAULT_INVEST_CAPS.maxRolling30d, USDC_DECIMALS));
+  const [perBuy, setPerBuy] = useState(() => seed?.perBuy ?? formatUnits(SUGGESTED_PER_BUY_RAW, USDC_DECIMALS));
+  const [per30Days, setPer30Days] = useState(() => seed?.per30Days ?? formatUnits(DEFAULT_INVEST_CAPS.maxRolling30d, USDC_DECIMALS));
   const [acknowledged, setAcknowledged] = useState(false);
   // The catalogue's own defaults, as the route would build them when these
   // fields are left alone: the $5-split minimum and equal shares.
-  const [minimum, setMinimum] = useState(() => formatUnits(defaultInvestPolicy(OFFERED_LEGS.length).minInvestment, USDC_DECIMALS));
+  const [minimum, setMinimum] = useState(() => seed?.minimum ?? formatUnits(defaultInvestPolicy(OFFERED_LEGS.length).minInvestment, USDC_DECIMALS));
   // THE BASKET IS STATE NOW. The rows the owner ticked, in the order he ticked
   // them, each holding the percent he typed — not an array positional over the
   // catalogue, because the catalogue is longer than the basket.
-  const [picked, setPicked] = useState<readonly PickedRow[]>(DEFAULT_PICKED);
+  const [picked, setPicked] = useState<readonly PickedRow[]>(() => seed?.picked ?? DEFAULT_PICKED);
   // THE INTERSECTION, not the server's list: a name the web cannot check the
   // bytes of is never offered. See VERIFIABLE_VENUES in vault-flows.ts.
   const venues = (state.offeredVenues ?? []).filter((name) => VERIFIABLE_VENUES.has(name));
-  const [venue, setVenue] = useState(DEFAULT_VENUE_NAME);
+  const [venue, setVenue] = useState(() => seed?.venue ?? DEFAULT_VENUE_NAME);
+  // WHICH OF THE TWO IS BEING SIGNED. A first policy is on; an edit keeps the
+  // policy's own flag, so changing a PAUSED policy's basket does not quietly
+  // turn investing back on — and the button says so.
+  const enabled = seed?.enabled ?? true;
 
   const blocked = write.running || write.busyElsewhere || write.unconfirmed;
   // THE ORDER THESE ARE READ IN IS NOT FREE. The cap's own lower bound depends
@@ -675,7 +830,15 @@ function PolicySetup({
   // EVERY FLOOR ON THIS CARD IS QUOTED UPWARDS, for atLeastUsd's reason: the
   // owner reads these three figures as "type this", and a floor a cent short of
   // itself is a cap readCaps then refuses.
-  const purchaseText = capsWindow === null ? formatUsd(DEFAULT_PURCHASE_USDC_RAW) : atLeastUsd(capsWindow.floorRaw);
+  //
+  // AND NULL WHERE IT USED TO SAY $5.00. The fallback was
+  // formatUsd(DEFAULT_PURCHASE_USDC_RAW), the catalogue's flat $5 — the figure
+  // for ONE leg, correct here only by the arithmetic coincidence that makes one
+  // leg's floor equal the minimum. capsWindow is null whenever the shares or
+  // the minimum are momentarily unreadable, which is most of a re-weight, so
+  // the headline and the Rule fact would both blink back to a one-leg number
+  // in the middle of the exact edit that makes it false.
+  const purchaseText = capsWindow === null ? null : atLeastUsd(capsWindow.floorRaw);
 
   return (
     <Card>
@@ -695,8 +858,14 @@ function PolicySetup({
       <CardContent className="space-y-4">
         <dl className="grid gap-3 sm:grid-cols-2">
           <Fact label={INVEST_COPY.basket}>{basketField}</Fact>
-          <Fact label={INVEST_COPY.rule}>{INVEST_COPY.buysEach(purchaseText)}</Fact>
+          <Fact label={INVEST_COPY.rule}>{purchaseText === null ? INVEST_COPY.buysUnknown : INVEST_COPY.buysEach(purchaseText)}</Fact>
         </dl>
+
+        {/* WHAT SIGNING FROM HERE DOES TO A POLICY THAT ALREADY EXISTS, and the
+            one thing about it that reads as a bug if it is not said first: a
+            thin stock pulls the cap down, so Sign can grey out the moment he
+            ticks one. */}
+        {seed === null ? null : <p className="text-xs text-muted-foreground">{INVEST_COPY.editingPolicy}</p>}
 
         {/* THE CATALOGUE AND THE SHARES, FIRST, in place of the fixed grid of
             one box per offered leg — and above the caps rather than below them,
@@ -786,7 +955,12 @@ function PolicySetup({
             </div>
           ) : null}
         </div>
-        <p className="text-xs text-muted-foreground">{INVEST_COPY.minPerBuyHint}</p>
+        {/* THE BASKET'S OWN FIGURE, not a worked example of a basket he may not
+            have. The hint named "twice this", which is the answer for two EQUAL
+            legs and for nothing else: at 80/20 the bar is five times the
+            minimum. purchaseText is ⌈min × 10,000 / the lightest share⌉ over
+            the boxes as they stand. */}
+        <p className="text-xs text-muted-foreground">{INVEST_COPY.minPerBuyHint(purchaseText, legs?.length ?? 0)}</p>
         {!minPerLeg.ok ? (
           <p role="alert" className="text-xs text-destructive">
             {minPerLeg.message}
@@ -863,29 +1037,39 @@ function PolicySetup({
           </label>
         </div>
 
-        <Button
-          type="button"
-          disabled={!canSignPolicy({ acknowledged, capsOk: caps.ok, minimumOk: minPerLeg.ok, weightsOk: weightsTyped.ok, depthOk: !overDepth, blocked })}
-          aria-busy={write.running}
-          onClick={() => {
-            // THE SAME CONDITION AS THE BUTTON'S OWN, depth included. A guard
-            // here that is weaker than the one that greys the button is how a
-            // policy gets signed by a keypress on a disabled control.
-            if (caps.ok && minPerLeg.ok && weightsTyped.ok && !overDepth && acknowledged) {
-              start({
-                maxPerCall: caps.maxPerCall,
-                maxRolling30d: caps.maxRolling30d,
-                enabled: true,
-                minInvestment: minPerLeg.raw,
-                weights: weightsTyped.byMint,
-                // A NAME from the closed set, never a program id.
-                venue,
-              });
-            }
-          }}
-        >
-          {write.running ? INVEST_COPY.signing : INVEST_COPY.sign}
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            disabled={!canSignPolicy({ acknowledged, capsOk: caps.ok, minimumOk: minPerLeg.ok, weightsOk: weightsTyped.ok, depthOk: !overDepth, blocked })}
+            aria-busy={write.running}
+            onClick={() => {
+              // THE SAME CONDITION AS THE BUTTON'S OWN, depth included. A guard
+              // here that is weaker than the one that greys the button is how a
+              // policy gets signed by a keypress on a disabled control.
+              if (caps.ok && minPerLeg.ok && weightsTyped.ok && !overDepth && acknowledged) {
+                start({
+                  maxPerCall: caps.maxPerCall,
+                  maxRolling30d: caps.maxRolling30d,
+                  enabled,
+                  minInvestment: minPerLeg.raw,
+                  weights: weightsTyped.byMint,
+                  // A NAME from the closed set, never a program id.
+                  venue,
+                });
+              }
+            }}
+          >
+            {write.running ? INVEST_COPY.signing : seed === null ? INVEST_COPY.sign : enabled ? INVEST_COPY.signChanges : INVEST_COPY.signChangesPaused}
+          </Button>
+          {/* THE WAY BACK. An edit that can only end in a signature is a trap:
+              the owner who opened this to look at his shares has to be able to
+              leave with the policy he already has. */}
+          {onCancel === undefined ? null : (
+            <Button type="button" variant="outline" disabled={blocked} onClick={onCancel}>
+              {INVEST_COPY.keepWhatIHave}
+            </Button>
+          )}
+        </div>
         {progress}
       </CardContent>
     </Card>
@@ -899,6 +1083,8 @@ function PolicySummary({
   start,
   pause,
   progress,
+  onEdit,
+  editProblem,
 }: {
   readonly state: VaultStateJson;
   readonly policy: InvestmentPolicyJson;
@@ -906,6 +1092,10 @@ function PolicySummary({
   readonly start: (input: InvestRequest) => void;
   readonly pause: (policy: InvestmentPolicyJson) => void;
   readonly progress: ReactNode;
+  /** Open the form on this policy; null when the stored policy cannot be put back on it. */
+  readonly onEdit: (() => void) | null;
+  /** Why not, when onEdit is null. */
+  readonly editProblem: string | null;
 }) {
   const limits = todaysLimits(state.prices);
   // The live rule card reads the same state, so the two cannot disagree about
@@ -916,7 +1106,14 @@ function PolicySummary({
   const maxRolling30d = rawFrom(policy.maxRolling30d) ?? 0n;
   const minInvestment = rawFrom(policy.minInvestment) ?? 0n;
   const usdcHeld = state.holdings.status === "exists" ? state.holdings.items.filter((item) => item.mint === policy.inMint).reduce((total, item) => total + (rawFrom(item.amountRaw) ?? 0n), 0n) : null;
-  const readiness = usdcHeld === null ? null : investmentReadiness(usdcHeld, policy.legs, minInvestment, maxPerCall);
+  // THE THRESHOLD IS A FACT ABOUT THE POLICY, NOT ABOUT THE BALANCE. It is
+  // ⌈min_investment × 10,000 / the LIGHTEST weight⌉ — $5 for one leg, $25 for
+  // the same $5 minimum at 80/20 — and investmentReadiness is the one place
+  // that computes it, so the summary, the form and the keeper cannot disagree.
+  // Read at a zero balance too, so a vault whose holdings are unreadable is
+  // still told what it buys at rather than told nothing.
+  const basketReadiness = investmentReadiness(usdcHeld ?? 0n, policy.legs, minInvestment, maxPerCall);
+  const readiness = usdcHeld === null ? null : basketReadiness;
   const blocked = write.running || write.busyElsewhere || write.unconfirmed;
   // THE PARAGRAPHS ARE ABOUT THIS POLICY'S LEGS, resolved back to their
   // catalogue readings. A mint the catalogue does not know is left out rather
@@ -1007,7 +1204,11 @@ function PolicySummary({
             ) : null,
           )}
         </div>
-        {readiness !== null ? <p className="text-xs">{readinessWords(readiness)}</p> : null}
+        {readiness !== null ? (
+          <p className="text-xs">{readinessWords(readiness)}</p>
+        ) : basketReadiness !== null ? (
+          <p className="text-xs">{INVEST_COPY.buysEach(formatUsd(basketReadiness.investsAtRaw))}</p>
+        ) : null}
         <p className="text-xs text-muted-foreground">{INVEST_COPY.freezeShort(policyLegs)}</p>
         {/* WHY A REFUSAL CAN SIT HERE AND PAUSE STILL WORK. Both re-signing
             buttons build set_invest_policy from today's prices and the stored
@@ -1019,10 +1220,29 @@ function PolicySummary({
             {resign.message}
           </p>
         ) : null}
+        {/* WHY THE EDIT PATH HAS ITS OWN REFUSAL AND NOT resign's. They ask two
+            different questions: resign asks whether the STORED cap may be
+            re-signed as it stands, which a cap over today's ceiling may not —
+            and that is precisely the owner who most needs the form. This one
+            asks only whether the stored basket can be put back into the boxes
+            at all. */}
+        {editProblem === null ? null : (
+          <p role="alert" className="text-xs text-destructive">
+            {editProblem}
+          </p>
+        )}
         <div className="flex flex-wrap gap-2">
+          {/* THE GAP THIS CLOSES: an owner who had signed could reach neither
+              the picker nor a single one of the four numbers below it. Both
+              buttons beside this one re-sign what is already stored; this is
+              the only one that lets him sign something else. */}
+          <Button type="button" size="sm" disabled={blocked || onEdit === null} onClick={() => onEdit?.()}>
+            {INVEST_COPY.editBasket}
+          </Button>
           <Button
             type="button"
             size="sm"
+            variant="outline"
             disabled={blocked || !resign.ok}
             aria-busy={write.running}
             onClick={() => {

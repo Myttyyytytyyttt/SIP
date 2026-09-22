@@ -670,6 +670,8 @@ export const INVEST_COPY = {
   basket: "Basket",
   rule: "Rule",
   buysEach: (usd: string): string => `Buys each time ${usd} of USDC is ready`,
+  /** The same fact when the basket on screen does not yet fix a figure. Never the one-leg $5. */
+  buysUnknown: "Buys once enough USDC is ready for the smallest share to clear its minimum",
   mostPerBuy: "Most per buy",
   mostPer30Days: "Most per 30 days",
   floorsTitle: "Today's price limits",
@@ -717,8 +719,19 @@ export const INVEST_COPY = {
    *    change and this sentence was not, which is the shape that lets words go
    *    quietly false while every test stays green.
    */
-  policyRule: (basket: string, floorUsdPerSol: string, purchase: string, maxPerCall: string, maxRolling: string, rent: string): string =>
-    `Your vault invests in ${basket}, each bought through Jupiter, which picks the route for every buy, and a buy takes all of them or none. When the vault holds SOL, the keeper converts it to USDC, never below ${floorUsdPerSol} per SOL, then buys once ${purchase} of USDC is ready and never above the per-stock limits below. At most ${maxPerCall} per buy and ${maxRolling} per 30 days until you change them. If a price moves past a limit, or the venue a buy would land in is too small for it, nothing is bought and no SOL is converted until you sign again. Nothing is sold at a worse price. Setting this up costs ${rent} SOL of rent for the policy and the vault's token accounts, and none of it comes back.`,
+  /**
+   * `purchase` MAY BE NULL, AND NULL IS NOT $5.
+   *
+   * It is the whole buy at which the LIGHTEST share clears min_investment, so
+   * it is a function of the basket and of the shares in the boxes. While either
+   * is unreadable — which is every keystroke in the middle of a re-weight —
+   * there is no such figure, and the clause used to fall back on the
+   * catalogue's flat $5 constant: the one-leg answer, correct only by the
+   * arithmetic coincidence TESTING_TRAPS.md is about. It now says it does not
+   * know rather than naming a number that is right for a different basket.
+   */
+  policyRule: (basket: string, floorUsdPerSol: string, purchase: string | null, maxPerCall: string, maxRolling: string, rent: string): string =>
+    `Your vault invests in ${basket}, each bought through Jupiter, which picks the route for every buy, and a buy takes all of them or none. When the vault holds SOL, the keeper converts it to USDC, never below ${floorUsdPerSol} per SOL, then ${purchase === null ? "buys once enough USDC is ready for the smallest share in the basket to clear its minimum" : `buys once ${purchase} of USDC is ready`} and never above the per-stock limits below. At most ${maxPerCall} per buy and ${maxRolling} per 30 days until you change them. If a price moves past a limit, or the venue a buy would land in is too small for it, nothing is bought and no SOL is converted until you sign again. Nothing is sold at a worse price. Setting this up costs ${rent} SOL of rent for the policy and the vault's token accounts, and none of it comes back.`,
 
   // ── WHAT THE POSITION COSTS, AND WHO OWNS EACH NUMBER ──────────────────────
   //
@@ -919,8 +932,27 @@ export const INVEST_COPY = {
 
   // ── THE FIELDS THE OWNER ASKED TO SET ──────────────────────────────────────
   minPerBuy: "Least per stock",
-  minPerBuyHint:
-    "The smallest amount the keeper will put into ONE stock. It is checked per stock, not per buy: with two stocks at equal shares, a buy has to be at least twice this before anything happens.",
+  /**
+   * THE HINT NAMES THIS BASKET'S OWN FIGURE, because the one it used to name
+   * was a worked example of somebody else's.
+   *
+   * It read "with two stocks at equal shares, a buy has to be at least twice
+   * this". True of two equal legs and false of every other basket the picker
+   * can build: at 80/20 the bar is FIVE times the minimum, not twice, because
+   * the rule is ⌈min × 10,000 / the LIGHTEST share⌉ and not min × the count.
+   * A sentence that is right at equal shares and wrong as soon as the owner
+   * moves one box is the species TESTING_TRAPS.md calls prose that outruns its
+   * measurement, so the example is gone and the basket's real floor is passed
+   * in. `floor` is null while the shares or the minimum are unreadable, and the
+   * sentence then says the figure depends on them rather than inventing one.
+   */
+  minPerBuyHint: (floor: string | null, count: number): string =>
+    "The smallest amount the keeper will put into ONE stock. It is checked per stock, not per buy: a buy has to be big enough for the SMALLEST share in your basket to clear it. " +
+    (floor === null || count < 1
+      ? "What that comes to follows the shares you type, and these do not add up to 100 % yet."
+      : count === 1
+        ? `With one stock that is ${floor} a buy.`
+        : `With these ${count} stocks at the shares you have typed, that is ${floor} a buy.`),
   minimumProblem: "Least per stock must be more than zero.",
   minimumUnreachable: (minimum: string): string =>
     `At these settings no buy ever reaches ${minimum} for every stock, so nothing would be bought. Lower this, or raise Most per buy.`,
@@ -999,6 +1031,59 @@ export const INVEST_COPY = {
   signAgain: "Sign again with today's prices",
   pause: "Pause investing",
   resume: "Resume investing",
+
+  // ── CHANGING A POLICY THAT IS ALREADY SIGNED ───────────────────────────────
+  //
+  // THE FORM WAS ALWAYS THERE AND WAS ONLY EVER REACHABLE ONCE. The card sent
+  // every owner WITH a policy to the summary, which renders the stored basket
+  // as text and offers two buttons that both re-sign exactly what is stored. So
+  // the picker, the share boxes, the two caps and the minimum — all built,
+  // tested and correct — could not be reached by anybody who had signed, and
+  // the owner's words for that were "it is not functional".
+  //
+  // set_invest_policy OVERWRITES, so an edit is not a second instruction, a
+  // migration or a second form: it is the SAME form, opened on the values the
+  // chain holds. That is the whole of it, and it is why the arithmetic that
+  // refuses an unbuyable basket lands here too instead of being reimplemented
+  // beside it.
+  /** The way in, on a policy that exists. */
+  editBasket: "Change what your vault buys",
+  /** The way back out without signing anything. */
+  keepWhatIHave: "Keep what I have",
+  /**
+   * WHAT SIGNING FROM THE EDIT FORM DOES, said before he touches a box.
+   *
+   * Two facts, and the second one is why the form can refuse him: the policy is
+   * REPLACED rather than amended, and the largest cap the basket may carry is a
+   * function of the thinnest market in it. An owner who ticks a thin stock and
+   * then finds Sign greyed out reads that as a broken screen unless he was told
+   * beforehand that the cap and the basket are one arithmetic.
+   */
+  editingPolicy:
+    "You are changing a policy that is already signed. Signing replaces it outright: the basket, the shares and the limits on this screen are what your vault uses from then on, and nothing that is not here is carried over. Adding a thinly traded stock lowers the most you can buy with, so Most per buy may have to come down before this can be signed.",
+  /** Signing an edit of a policy that is ON. */
+  signChanges: "Sign these changes",
+  /**
+   * Signing an edit of a PAUSED policy, which must not quietly resume it.
+   *
+   * The setup form hardcoded `enabled: true` — correct for a first policy and
+   * wrong for every edit of a paused one, where it would turn investing back on
+   * without a word. The flag is seeded from the policy and the button says
+   * which of the two is being signed.
+   */
+  signChangesPaused: "Sign these changes, investing stays paused",
+  /**
+   * A STORED SHARE THE BOXES CANNOT HOLD, REFUSED RATHER THAN ROUNDED.
+   *
+   * The picker takes whole percentages and readWeights refuses anything else,
+   * so a stored 33.34 % has no box to sit in. Rounding it would re-sign a
+   * basket the owner never chose — silently, from a screen he opened to change
+   * something else — so the edit is declined and the two buttons that re-sign
+   * what is stored are left alone. No policy on the shelf holds such a share
+   * today: this is a guard, not a repair.
+   */
+  editFractionalShare: (symbol: string, share: string): string =>
+    `This policy gives ${symbol} ${share}, which is not a whole number of percent, and the share boxes take whole percentages only. Changing the basket here would have to round it into a share you never chose, so it is not offered. Signing again and pausing still work on it exactly as it stands.`,
   pauseKeeps: "Pausing signs this policy again as it is, with investing off, so it needs no prices. Resuming and signing again read today's prices.",
   pauseSigning: "You are signing: investing paused, with every floor and limit this policy has.",
   noRefill: "Signing again does not refill this month's cap.",
