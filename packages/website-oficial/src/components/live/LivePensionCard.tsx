@@ -142,7 +142,7 @@ export function LivePensionCard({
       */}
       <CardContent>
         <div className="grid gap-6 @4xl/panel:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] @4xl/panel:items-start">
-          <LiveStats stats={stats} vault={vault} policy={policy} now={now} />
+          <LiveStats stats={stats} vault={vault} policy={policy} perSol={perSol} now={now} />
           <LiveHoldings
             holdings={holdings}
             worthNowUsdcRaw={data.worthNowUsdcRaw}

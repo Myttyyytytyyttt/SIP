@@ -508,3 +508,34 @@ describe("the vault's own rule", () => {
     expect(model(snapshot({ config: { address: "c", status: "unreadable", exists: false, paused: null } })).protocolPaused).toBeNull();
   });
 });
+
+/**
+ * THE RULING THE WHOLE RESTYLE RESTS ON, pinned so it cannot drift back.
+ *
+ * A BALANCE at today's price may be shown in dollars: it is what something is
+ * worth now, and the price was read in the same snapshot. A WINDOW SUM may
+ * not: "saved this week" is lamports that moved at prices nobody stored, and
+ * multiplying them by today's rate is a claim about dollars that never
+ * changed hands. So the model keeps every window in lamports and hands the
+ * conversion to no one.
+ */
+describe("what may be a dollar and what may not", () => {
+  it("keeps every window figure in lamports, and every valuation in USDC raw", () => {
+    const page = activity([entry("sig1", seconds(NOW_MS - 2 * 3_600_000), [settledEvent("60000000")])]);
+    const view = model(snapshot(), page);
+
+    // Windows: lamports, always, whatever the pools said.
+    expect(typeof view.stats.savedThisWeekLamports).toBe("bigint");
+    expect(view.stats.savedTodayLamports).toBe(60_000_000n);
+    expect(view.stats.biggestPaid).toBe(60_000_000n);
+    expect(view.stats.loadedSavedLamports).toBe(60_000_000n);
+
+    // Valuations: USDC raw, and NULL rather than zero when nothing priced them.
+    expect(view.worthNowUsdcRaw).not.toBeNull();
+    const unpriced = model({ ...snapshot(), prices: null }, page);
+    expect(unpriced.worthNowUsdcRaw).toBeNull();
+    expect(unpriced.notInvestedUsdcRaw).toBeNull();
+    // …while the windows are unaffected: they never needed a price.
+    expect(unpriced.stats.savedThisWeekLamports).toBe(60_000_000n);
+  });
+});

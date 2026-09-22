@@ -25,7 +25,7 @@ import type { ReactNode } from "react";
 
 import { Num } from "@/components/num";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { formatSol, formatUsd } from "@/lib/amounts";
+import { formatSol, formatUsd, usdcRawForLamports } from "@/lib/amounts";
 import { LABEL } from "@/lib/classes";
 import { timeAgo } from "@/lib/format";
 import { LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
@@ -62,12 +62,15 @@ export function LiveStats({
   stats,
   vault,
   policy,
+  perSol,
   now,
   className,
 }: {
   readonly stats: LiveStatsView;
   readonly vault: LiveVaultView;
   readonly policy: LivePolicyView;
+  /** Today's USDC per SOL, for the window subs. Null when the pools were not read. */
+  readonly perSol: bigint | null;
   /** The payload's own clock: "4m ago" is measured against it, never Date.now(). */
   readonly now: string;
   readonly className?: string;
@@ -113,7 +116,17 @@ export function LiveStats({
   // sample puts it, and a fact on screen twice is a fact two places can come
   // to disagree about. This week stays, and only when the loaded history
   // actually covers the window.
-  if (stats.savedThisWeekLamports !== null) tiles.push({ label: STATS_COPY.thisWeek, value: <Num>{`${formatSol(stats.savedThisWeekLamports)} SOL`}</Num>, sub: "" });
+  if (stats.savedThisWeekLamports !== null) {
+    // THE VALUE STAYS SOL AND THE DOLLAR GOES IN THE SUB, worded. A window SUM
+    // at today's price is not the same claim as a BALANCE at today's price: a
+    // balance says what something is worth now, which is true; "$18.40 saved
+    // this week" says dollars changed hands at rates this app never stored.
+    tiles.push({
+      label: STATS_COPY.thisWeek,
+      value: <Num>{`${formatSol(stats.savedThisWeekLamports)} SOL`}</Num>,
+      sub: perSol === null ? "" : STATS_COPY.windowAbout(formatUsd(usdcRawForLamports(stats.savedThisWeekLamports, perSol))),
+    });
+  }
 
   if (hasPolicy) {
     if (policy.lifetimeInvested !== null) {

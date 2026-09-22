@@ -153,12 +153,15 @@ export const LIVE_COPY = {
 
   // ── the holdings table ─────────────────────────────────────────────────────
   holdings: "Holdings",
+  holdingsCaption: "What the pension holds",
   asset: "Asset",
   shares: "Shares",
   value: "Value",
   weightVsTarget: "Weight vs target",
   target: "target",
   notInvestedYet: "Not invested yet",
+  /** The same figure as a TOTAL under the table, where the sample calls it Pending. */
+  pending: "Pending",
   /**
    * The leg holdings' worth at today's prices — a VALUATION, not a total of
    * what was spent. It shared the word "Invested" with the program's
@@ -346,9 +349,12 @@ export const STATS_COPY = {
   settlements: "Settlements",
   settlementsSub: (loaded: string): string => `${loaded} in loaded history`,
   biggest: "Biggest settlement",
-  biggestSub: "put aside by one settlement",
+  // THE WINDOW MUST BE IN ONE OF THE TWO. biggestPaid is the maximum over the
+  // pages LOADED, not over the pension's life, and a tile that says neither
+  // would be read as a lifetime record.
+  biggestSub: "biggest in the loaded history",
   capped: "Capped",
-  cappedSub: (max: string): string => `at ${max} SOL each`,
+  cappedSub: (max: string): string => `in the loaded history, at ${max} SOL each`,
   lastSettlement: "Last settlement",
   lastSettlementNever: "none yet",
   /** Settlements the state counts but the loaded pages do not hold: never "none yet". */
@@ -358,6 +364,8 @@ export const STATS_COPY = {
   usedIn30DaysSub: (cap: string): string => `of ${cap}`,
   /** A UTC calendar day, so it says so: the model cuts it at Date.UTC(midnight). */
   today: "Today (UTC)",
+  /** A window SUM at today's price is not a balance at today's price, so it goes in the sub, worded. */
+  windowAbout: (usd: string): string => `≈ ${usd} at today’s SOL price`,
   /** A rolling seven days back from the read, not a calendar week — so no zone is claimed for it. */
   thisWeek: "This week",
   /** The strip's trailing note: it names its own population rather than implying a lifetime. */

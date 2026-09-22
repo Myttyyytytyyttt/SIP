@@ -119,3 +119,22 @@ describe("a vault whose SOL is all rent", () => {
     expect(data.rentOnlyLamports).toBeNull();
   });
 });
+
+/**
+ * A BALANCE AT TODAY'S PRICE MAY LEAD IN DOLLARS; A WINDOW SUM MAY NOT.
+ *
+ * The distinction is the whole of how far the sample's clothes go. What the
+ * vault HOLDS, valued at the price read in this same snapshot, is a fact about
+ * now. What was SAVED across a past week, multiplied by today's price, is a
+ * claim that dollars changed hands at rates nobody stored.
+ */
+describe("the totals under the table", () => {
+  it("reads parts then total, and calls the unspent pile Pending", () => {
+    const html = render(liveDashboard());
+    const order = [LIVE_COPY.invested, LIVE_COPY.pending, LIVE_COPY.worthNow].map((label) => html.indexOf(label));
+    expect(order.every((at) => at > -1)).toBe(true);
+    expect(order).toEqual([...order].sort((left, right) => left - right));
+    // "Not invested yet" belongs to the empty case now, not to a total.
+    expect(html).not.toContain(`>${LIVE_COPY.notInvestedYet}<`);
+  });
+});

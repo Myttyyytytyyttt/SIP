@@ -54,9 +54,13 @@ export function LiveHoldings({
   const legs = holdings.filter((row) => row.kind === "leg");
   const investedUsdcRaw = legs.some((row) => row.valueUsdcRaw === null) ? null : legs.reduce((total, row) => total + (row.valueUsdcRaw ?? 0n), 0n);
 
+  // PARTS, THEN THE TOTAL — the sample's order, and the one that reads. The
+  // first is renamed: "Not invested yet" is a state a whole vault can be in
+  // and belongs to the empty case, while as a total beside two others it is
+  // simply the part of the pile that has not been spent.
   const sums: readonly (readonly [string, bigint | null])[] = [
-    [LIVE_COPY.notInvestedYet, notInvestedUsdcRaw],
     [LIVE_COPY.invested, investedUsdcRaw],
+    [LIVE_COPY.pending, notInvestedUsdcRaw],
     [LIVE_COPY.worthNow, worthNowUsdcRaw],
   ];
 
@@ -66,6 +70,8 @@ export function LiveHoldings({
         <h3 id="live-holdings-heading" className="text-sm font-medium">
           {LIVE_COPY.holdings}
         </h3>
+        {/* The sample captions its table; this one only had footnotes under it. */}
+        <span className="text-xs text-muted-foreground">{LIVE_COPY.holdingsCaption}</span>
       </div>
 
       {holdings.length === 0 ? (
