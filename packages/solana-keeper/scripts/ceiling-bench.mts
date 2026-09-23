@@ -167,6 +167,14 @@ function childEnv(rpcPort: number, statusPort: number, programId: string, window
     "SIP_SOLANA_PRIVY_AUTHORIZATION_KEY",
     "SIP_SOLANA_PRIVY_SIGNER_ID",
     "SIP_SOLANA_PRIVY_POLICY_ID",
+    // THE DOORBELL MEASURES NOTHING HERE, and would only change what is
+    // measured: the bench's number is the cost of a FULL pass, which is also
+    // what a keeper whose doorbell is not trusted pays. A key or a URL left in
+    // the shell must not point a bench at the real Helius account either.
+    "SIP_SOLANA_DOORBELL_SECRET",
+    "SIP_SOLANA_HELIUS_API_KEY",
+    "SIP_SOLANA_DOORBELL_URL",
+    "RAILWAY_PUBLIC_DOMAIN",
     "DATABASE_URL",
   ]) {
     delete env[name];
