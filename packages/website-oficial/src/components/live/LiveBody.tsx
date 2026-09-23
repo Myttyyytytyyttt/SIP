@@ -27,6 +27,7 @@ import { LiveRulePanel } from "@/components/live/LiveRulePanel";
 import { FeedBanner, HiddenRows, LeadNotes, WalletList } from "@/components/live/LiveColumn";
 import { secondsUntil } from "@/components/live/LiveStates";
 import { DashboardSource } from "@/components/DashboardSource";
+import { DashboardMain, PENSION_SLOT, RULE_SLOT } from "@/components/dashboard-main";
 import { PensionPanel } from "@/components/pension-panel";
 import { SavingsStrip } from "@/components/savings-strip";
 import { WalletActivity } from "@/components/wallet-activity";
@@ -123,8 +124,8 @@ export function LiveBody({
       onManageWallets={onOpenWallets}
       className={inSheet ? "min-h-0 flex-1" : "sticky top-14 h-[calc(100dvh-3.5rem)]"}
       live={{
-        below: lead === null ? null : <LeadNotes wallet={lead} pensionKey={pensionKey} />,
-        list: <WalletList wallets={data.wallets} pensionKey={pensionKey} usdcRawPerSol={rawFrom(data.prices?.usdcRawPerSol)} />,
+        below: lead === null ? null : <LeadNotes wallet={lead} />,
+        list: <WalletList wallets={data.wallets} usdcRawPerSol={rawFrom(data.prices?.usdcRawPerSol)} />,
         banner: activityUnreadable ? <FeedBanner onRetry={onRefresh} retryAt={activityRetryAt} nowMs={nowMs} /> : null,
         hidden: <HiddenRows events={page.hidden ?? []} upkeep={data.hiddenUpkeep} dust={data.hiddenDust} now={page.now} id={id} />,
         // A page whose every transaction was upkeep is not an empty history.
@@ -178,19 +179,21 @@ export function LiveBody({
             {...(emptyNote === undefined ? {} : { emptyNote })}
           />
         ) : (
-          <main className="flex min-w-0 flex-1 flex-col gap-4 p-4 lg:gap-6 lg:p-6">
-            {/* Reads the rendered payload's own source, never the toggle. */}
-            <DashboardSource source="live" notice={notice()} />
-            {data.protocolPaused === true ? (
-              <p role="status" className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                {LIVE_COPY.protocolPaused}
-              </p>
-            ) : null}
-
-            {nextStep}
-
-            {panels ? null : (
+          <DashboardMain
+            top={
               <>
+                {/* Reads the rendered payload's own source, never the toggle. */}
+                <DashboardSource source="live" notice={notice()} />
+                {data.protocolPaused === true ? (
+                  <p role="status" className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                    {LIVE_COPY.protocolPaused}
+                  </p>
+                ) : null}
+                {nextStep}
+              </>
+            }
+            strip={
+              panels ? null : (
                 <SavingsStrip
                   trades={page.trades}
                   rule={page.rule}
@@ -200,15 +203,12 @@ export function LiveBody({
                     loadOlder: { busy: older.busy, retryIn: secondsUntil(older.retryAt, nowMs), complete: older.complete, onClick: onLoadOlder },
                   }}
                 />
-                <div className="grid gap-4 lg:gap-6 md:grid-cols-[minmax(16rem,20rem)_1fr] lg:grid-cols-1 xl:grid-cols-[minmax(16rem,20rem)_1fr]">
-                  <LiveRulePanel
-                    rule={page.rule}
-                    stats={page.stats}
-                    activity={page.activity}
-                    now={page.now}
-                    onRefresh={onRefresh}
-                    className="order-2 md:order-1 lg:order-2 xl:order-1"
-                  />
+              )
+            }
+            cards={
+              panels ? null : (
+                <>
+                  <LiveRulePanel rule={page.rule} stats={page.stats} activity={page.activity} now={page.now} onRefresh={onRefresh} className={RULE_SLOT} />
                   <PensionPanel
                     stats={page.stats}
                     curve={page.curve}
@@ -217,12 +217,12 @@ export function LiveBody({
                     rule={page.rule}
                     now={page.now}
                     {...(page.unit === undefined ? {} : { unit: page.unit })}
-                    className="order-1 md:order-2 lg:order-1 xl:order-2"
+                    className={PENSION_SLOT}
                   />
-                </div>
-              </>
-            )}
-          </main>
+                </>
+              )
+            }
+          />
         )}
       </div>
 

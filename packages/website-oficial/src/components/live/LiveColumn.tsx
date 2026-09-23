@@ -9,8 +9,8 @@
  * sample never fills — so the sample renders exactly as it did, and a live
  * page says what it must:
  *
- *   the PENSION KEY, the one account a stranger can check this whole page
- *   against — a line under the balance, with its copy button and its explorer;
+ *   (the PENSION KEY is not here: the navbar's account chip carries it, with
+ *   its copy button, on every page — twice on one screen was once too many);
  *
  *   a wallet that does NOT save here, which is the single most useful thing
  *   this column can say — its link badge, only when it is not the linked one;
@@ -34,15 +34,12 @@ import { Num } from "@/components/num";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatSol, formatUsd, usdcRawForLamports } from "@/lib/amounts";
-import { LABEL, MONO } from "@/lib/classes";
+import { MONO } from "@/lib/classes";
 import { relativeDayLabel } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import type { LiveWalletView } from "@/lib/live-types";
-import { cn } from "@/lib/utils";
 import { shortAddress } from "@/lib/vault-copy";
 import type { ActivityEvent } from "@/mocks/types";
-
-const LINK = "rounded-sm text-xs text-muted-foreground underline-offset-4 outline-none hover:text-foreground hover:underline focus-visible:ring-3 focus-visible:ring-ring/50";
 
 const solscanAccountUrl = (address: string): string => `https://solscan.io/account/${address}`;
 
@@ -63,35 +60,19 @@ export function LinkBadge({ wallet }: { readonly wallet: LiveWalletView }) {
 }
 
 /**
- * The pension key, with the two things that make it useful: a copy button and
- * the explorer. `lead` is the full-size line for the list shape, which it
- * heads; otherwise the same facts sit at 12px under the balance.
- */
-export function PensionKeyLine({ pensionKey, lead = false }: { readonly pensionKey: string; readonly lead?: boolean }) {
-  return (
-    <div className={cn("flex items-center gap-1", lead ? "" : "text-xs text-muted-foreground")}>
-      {lead ? null : <span>{LIVE_COPY.pensionKey}</span>}
-      <Num className={lead ? "text-sm" : "text-xs"}>{shortAddress(pensionKey)}</Num>
-      <CopyButton value={pensionKey} />
-      <a href={solscanAccountUrl(pensionKey)} target="_blank" rel="noopener noreferrer" className={LINK}>
-        {LIVE_COPY.solscanAccount}
-      </a>
-    </div>
-  );
-}
-
-/**
  * UNDER THE LEAD WALLET'S BALANCE: what is true of it that the sample's wallet
  * never needed saying. The badge only when it does NOT save here — a linked
  * wallet saving into this vault is the ordinary case the column already shows
- * — and the reserve note when it cannot settle yet. Then the pension key.
+ * — and the reserve note when it cannot settle yet. Nothing at all otherwise.
  */
-export function LeadNotes({ wallet, pensionKey }: { readonly wallet: LiveWalletView; readonly pensionKey: string }) {
+export function LeadNotes({ wallet }: { readonly wallet: LiveWalletView }) {
+  const unlinked = wallet.linkStatus !== "this_vault";
+  const stuck = wallet.canSettle === false && wallet.linkStatus === "this_vault";
+  if (!unlinked && !stuck) return null;
   return (
     <div className="space-y-1.5">
-      {wallet.linkStatus === "this_vault" ? null : <LinkBadge wallet={wallet} />}
-      {wallet.canSettle === false && wallet.linkStatus === "this_vault" ? <p className="text-xs text-amber-700 dark:text-amber-400">{LIVE_COPY.reserveNoteShort}</p> : null}
-      <PensionKeyLine pensionKey={pensionKey} />
+      {unlinked ? <LinkBadge wallet={wallet} /> : null}
+      {stuck ? <p className="text-xs text-amber-700 dark:text-amber-400">{LIVE_COPY.reserveNoteShort}</p> : null}
     </div>
   );
 }
@@ -99,14 +80,11 @@ export function LeadNotes({ wallet, pensionKey }: { readonly wallet: LiveWalletV
 /**
  * NO SINGLE WALLET TO LEAD WITH — none, several with none uniquely linked, or
  * one whose balance nobody could read — so the column lists them rather than
- * promoting one by guess: the pension key, then a card per wallet.
+ * promoting one by guess: a card per wallet, under the column's own heading.
  */
-export function WalletList({ wallets, pensionKey, usdcRawPerSol }: { readonly wallets: readonly LiveWalletView[]; readonly pensionKey: string; readonly usdcRawPerSol: bigint | null }) {
+export function WalletList({ wallets, usdcRawPerSol }: { readonly wallets: readonly LiveWalletView[]; readonly usdcRawPerSol: bigint | null }) {
   return (
-    <div className="space-y-3">
-      <PensionKeyLine pensionKey={pensionKey} lead />
-      <div className="space-y-2">
-        <span className={LABEL}>{LIVE_COPY.tradingWallets}</span>
+    <div className="space-y-2">
         {wallets.length === 0 ? (
           <p className="text-xs text-muted-foreground">{LIVE_COPY.noWalletsYet}</p>
         ) : (
@@ -138,7 +116,6 @@ export function WalletList({ wallets, pensionKey, usdcRawPerSol }: { readonly wa
             })}
           </ul>
         )}
-      </div>
     </div>
   );
 }

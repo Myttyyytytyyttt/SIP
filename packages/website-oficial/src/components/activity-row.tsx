@@ -49,7 +49,57 @@ const mark = (symbol: string, logo: string | undefined, size: number): ReactNode
   <Image src={logo ?? tickerLogo(symbol)} alt={symbol} width={size} height={size} className="rounded-full" />
 );
 
+/**
+ * WHAT KIND OF THING HAPPENED, AT A GLANCE — the owner's colours (09-23):
+ *
+ *   saved    green   money the rule put aside, from gains or from volume;
+ *   invest   blue    the pension buying what it holds;
+ *   notice   mustard the machinery and every change to it — a conversion, a
+ *                    wrap, a new rule or policy, a link, a withdrawal, SOL that
+ *                    arrived but was not saved;
+ *   failed   red     a transaction that did not land;
+ *   quiet    grey    the keeper's own account-keeping.
+ *
+ * The tint is on the icon's square and on the amount, never on the words: the
+ * row still reads the same in any colour, and nothing is said only by hue.
+ */
+type Tone = "saved" | "invest" | "notice" | "failed" | "quiet";
+
+const TILE: Readonly<Record<Tone, string>> = {
+  saved: "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400",
+  invest: "bg-blue-500/12 text-blue-600 dark:text-blue-400",
+  notice: "bg-amber-500/12 text-amber-700 dark:text-amber-400",
+  failed: "bg-destructive/10 text-destructive",
+  quiet: "bg-muted text-muted-foreground",
+};
+
+const AMOUNT: Readonly<Record<Tone, string | undefined>> = {
+  saved: SAVED,
+  invest: "text-blue-600 dark:text-blue-400",
+  notice: "text-amber-700 dark:text-amber-400",
+  failed: "text-muted-foreground",
+  quiet: undefined,
+};
+
+/** What each `other` row is, by its glyph: the machinery is a notice, a failure is a failure, upkeep is quiet. */
+const TONE_OF_OTHER: Readonly<Record<OtherEvent["icon"], Tone>> = {
+  wrap: "notice",
+  convert: "notice",
+  withdraw: "notice",
+  vault: "notice",
+  rule: "notice",
+  policy: "notice",
+  link: "notice",
+  unlink: "notice",
+  receive: "notice",
+  failed: "failed",
+  upkeep: "quiet",
+  other: "notice",
+};
+
 interface RowParts {
+  /** Which colour the row wears; see Tone. */
+  readonly tone: Tone;
   readonly leading: ReactNode;
   readonly title: string;
   readonly sub: ReactNode;
@@ -83,6 +133,7 @@ function parts(event: ActivityEvent): RowParts {
       // and the accent means money put aside — so that row reads muted "$0.00" on both surfaces.
       const saved = event.savedUsd > 0;
       return {
+        tone: saved ? "saved" : "quiet",
         leading: mark(event.symbol, undefined, 20),
         title: fillLabel(event.side, event.symbol),
         sub: joined(<Num>{usd(event.notionalUsd)}</Num>),
@@ -94,7 +145,8 @@ function parts(event: ActivityEvent): RowParts {
     case "invested":
       return {
         // Money going into the pension.
-        leading: event.logo === undefined ? <PiggyBank className="size-4 text-muted-foreground" aria-hidden /> : mark(event.symbol, event.logo, 20),
+        tone: "invest",
+        leading: event.logo === undefined ? <PiggyBank className="size-4" aria-hidden /> : mark(event.symbol, event.logo, 20),
         title: `Invested in ${event.symbol}`,
         sub: joined(
           <>
@@ -108,21 +160,23 @@ function parts(event: ActivityEvent): RowParts {
           </>,
         ),
         amount: usd(event.amountUsd),
-        amountClass: undefined,
+        amountClass: AMOUNT.invest,
       };
     case "deposit":
       return {
-        leading: <ArrowDownToLine className="size-4 text-muted-foreground" aria-hidden />,
+        tone: "notice",
+        leading: <ArrowDownToLine className="size-4" aria-hidden />,
         title: "Funded wallet",
         sub: clock,
         amount: usdSigned(event.amountUsd),
-        amountClass: undefined,
+        amountClass: AMOUNT.notice,
       };
     case "saved": {
       // The trade row's shape, because this IS what a trade row stood for: the
       // slice put aside. It carries the accent only when something moved.
       const saved = event.savedUsd !== null && event.savedUsd > 0;
       return {
+        tone: saved ? "saved" : "quiet",
         leading: mark("SOL", event.logo, 20),
         title: event.title ?? `Saved from ${event.from}`,
         sub: joined(event.basis),
@@ -134,11 +188,12 @@ function parts(event: ActivityEvent): RowParts {
     case "other": {
       const Glyph = GLYPHS[event.icon];
       return {
-        leading: event.logo === undefined ? <Glyph className="size-4 text-muted-foreground" aria-hidden /> : mark(event.title, event.logo, 20),
+        tone: event.failed ? "failed" : TONE_OF_OTHER[event.icon],
+        leading: event.logo === undefined ? <Glyph className="size-4" aria-hidden /> : mark(event.title, event.logo, 20),
         title: event.title,
         sub: joined(event.sub),
         amount: event.amount ?? "",
-        amountClass: event.failed ? "text-muted-foreground" : undefined,
+        amountClass: AMOUNT[event.failed ? "failed" : TONE_OF_OTHER[event.icon]],
         ...(event.failed ? { failed: true } : {}),
       };
     }
@@ -191,14 +246,14 @@ function step(e: KeyboardEvent<HTMLElement>) {
  * keyboard reachable); the tooltip carries the hash and the relative time.
  */
 export function ActivityRow({ event, now, first = false }: { event: ActivityEvent; now: string; first?: boolean }) {
-  const { leading, title, sub, amount, amountClass, note, failed } = parts(event);
+  const { tone, leading, title, sub, amount, amountClass, note, failed } = parts(event);
   const className =
     // Inset ring: the ScrollArea viewport would clip one drawn outside the row.
     "flex w-full items-start gap-3 px-4 py-2.5 text-left outline-none hover:bg-muted/50 focus-visible:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset";
 
   const body = (
     <>
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted">{leading}</span>
+      <span className={cn("flex size-8 shrink-0 items-center justify-center rounded-md", TILE[tone])}>{leading}</span>
       <span className="min-w-0 flex-1">
         <span className={cn("flex items-center gap-1.5 text-sm", failed && "text-muted-foreground")}>
           <span className="truncate">{title}</span>
@@ -211,7 +266,7 @@ export function ActivityRow({ event, now, first = false }: { event: ActivityEven
         <span className="block truncate text-xs text-muted-foreground">{sub}</span>
         {note === undefined ? null : <span className="block truncate text-xs text-muted-foreground">{note}</span>}
       </span>
-      <span className={cn("shrink-0 text-right text-sm", MONO, amountClass)}>{amount}</span>
+      <span className={cn("shrink-0 text-right text-sm", MONO, amountClass ?? AMOUNT[tone])}>{amount}</span>
     </>
   );
 

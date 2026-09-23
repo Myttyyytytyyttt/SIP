@@ -19,9 +19,6 @@ import type { ActivityEvent, Wallet } from "@/mocks/types";
  */
 const FEED = "min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!";
 
-/** The column's heading when no single wallet leads: the account the whole page belongs to. */
-const LIVE_PENSION_KEY = "Pension key";
-
 /** The one look "Manage wallets" has, whether it navigates or opens the modal. */
 const MANAGE = "h-auto p-0 text-xs text-muted-foreground underline hover:text-foreground";
 
@@ -44,9 +41,9 @@ function groupByDay(activity: readonly ActivityEvent[]): ReadonlyArray<readonly 
  * the column is the sample's exactly.
  */
 export interface LiveColumnSlots {
-  /** Under the lead wallet's balance: the pension key, and whatever about that wallet needs saying. */
+  /** Under the lead wallet's balance: whatever about that wallet needs saying (a link it lacks, a reserve it cannot clear). */
   readonly below: ReactNode;
-  /** In place of the address and balance when no single wallet can lead: the key, and every wallet listed. */
+  /** In place of the address and balance when no single wallet can lead: every wallet, listed. */
   readonly list: ReactNode;
   /** Over the rows: the history could not be read, and the retry. */
   readonly banner: ReactNode;
@@ -100,7 +97,7 @@ export function WalletActivity({
     <div id={id} className={cn("flex h-full flex-col bg-background", className)}>
       <div className="space-y-3 border-b p-4">
         <div className="flex items-center justify-between gap-2">
-          <span className={LABEL}>{wallet?.label ?? (live === undefined ? "Trading wallets" : LIVE_PENSION_KEY)}</span>
+          <span className={LABEL}>{wallet?.label ?? "Trading wallets"}</span>
           {/* The ui Button carries the focus ring either way — link or modal. */}
           {onManageWallets === undefined ? (
             <Button variant="link" size="sm" asChild className={MANAGE}>

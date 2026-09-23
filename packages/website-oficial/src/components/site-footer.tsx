@@ -162,7 +162,7 @@ export function SiteFooter({ now, className }: { now: string; className?: string
  */
 const MARK = { width: 218, height: 256 } as const;
 
-function SipMark({ className }: { className?: string }) {
+export function SipMark({ className }: { className?: string }) {
   return (
     <>
       <Image alt="" className={cn("dark:hidden", className)} src="/logo/sip-mark-black.png" {...MARK} />

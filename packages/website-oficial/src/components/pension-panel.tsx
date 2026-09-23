@@ -1,7 +1,7 @@
 import { Num } from "@/components/num";
 import { PensionChart } from "@/components/pension-chart";
 import { PensionHoldings } from "@/components/pension-holdings";
-import { PensionStats } from "@/components/pension-stats";
+import { PensionStats, SaveCalendar } from "@/components/pension-stats";
 import { Card, CardContent, CardDescription, CardHeader } from "@/components/ui/card";
 import { LABEL, SAVED } from "@/lib/classes";
 import { dateLabel, pct, usd, usdSigned } from "@/lib/format";
@@ -46,12 +46,14 @@ export function PensionPanel({
   // grid can hand this card ~312px while the row needs ~344px. Named, because the
   // stock CardHeader is a container of its own and an unnamed @md would query it.
   return (
-    <Card className={cn("@container/panel overflow-hidden", className)}>
+    // One step tighter on desktop (12px, the card's own "sm" spacing): every
+    // pixel of padding here is a pixel the holdings needed to stay on screen.
+    <Card className={cn("@container/panel overflow-hidden xl:[--card-spacing:--spacing(3)]", className)}>
       <CardHeader className="flex flex-col gap-4 @md/panel:flex-row @md/panel:items-start @md/panel:justify-between">
         <div className="space-y-1">
           <p className={LABEL}>Saved so far</p>
           <p
-            className="font-mono text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl"
+            className="font-mono text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl xl:short:text-4xl"
             // The chain's own figure, in full, and that the dollar is it at one price read now.
             {...(stats.totalSavedSol === undefined || stats.totalSavedSol === null || priced === undefined ? {} : { title: LIVE_COPY.heroSolAtPrice(stats.totalSavedSol) })}
           >
@@ -66,6 +68,16 @@ export function PensionPanel({
               </>
             ) : null}
           </CardDescription>
+        </div>
+
+        {/*
+          THE DAYS A SAVE HAPPENED, beside the figure they add up to — up here
+          where the header had room to spare, rather than a row of its own
+          under the stats that pushed the holdings below the fold. Hidden until
+          the card is wide enough to hold three things in a row.
+        */}
+        <div className="hidden @2xl/panel:flex @2xl/panel:self-center">
+          <SaveCalendar days={days} now={now} />
         </div>
 
         <dl className="grid grid-cols-2 gap-3 @md/panel:shrink-0 @md/panel:grid-cols-1 @md/panel:text-right">
@@ -94,16 +106,17 @@ export function PensionPanel({
         </dl>
       </CardHeader>
 
-      <CardContent>
+      {/* On xl the chart is what grows: the card fills the row, and this takes whatever the figures around it leave. */}
+      <CardContent className="xl:flex xl:min-h-0 xl:flex-1 xl:flex-col">
         <PensionChart
           curve={curve}
           {...(unit === undefined ? {} : { unit })}
           settledOutsideHistory={stats.settledOutsideHistory === true}
-          className="h-64 w-full sm:h-72"
+          className="h-64 w-full sm:h-72 xl:h-auto xl:min-h-32 xl:flex-1 xl:short:min-h-28"
         />
       </CardContent>
 
-      <CardContent className="space-y-6">
+      <CardContent className="space-y-6 xl:space-y-4">
         <PensionStats stats={stats} days={days} now={now} {...(rule.mode === undefined ? {} : { mode: rule.mode })} />
         <PensionHoldings holdings={holdings} rule={rule} stats={stats} />
       </CardContent>

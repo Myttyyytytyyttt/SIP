@@ -97,21 +97,26 @@ export function PensionChart({
   }
 
   return (
-    <div className="flex w-full flex-col gap-3">
-      <div className="flex items-center">
-        <Tabs
-          value={range}
-          onValueChange={(value) => {
-            if (isRange(value)) setRange(value);
-          }}
-          className="ml-auto"
-        >
-          <TabsList aria-label="Range">
-            <TabsTrigger value="30d">30d</TabsTrigger>
-            <TabsTrigger value="90d">90d</TabsTrigger>
-          </TabsList>
-        </Tabs>
-      </div>
+    // The range tabs float in the plot's top-left corner — where a curve that
+    // only ever rises has not reached yet — instead of taking a row of their
+    // own: that row was height the holdings needed to be seen without a scroll.
+    <div className="relative flex w-full flex-col xl:min-h-0 xl:flex-1">
+      <Tabs
+        value={range}
+        onValueChange={(value) => {
+          if (isRange(value)) setRange(value);
+        }}
+        className="absolute top-0 left-0 z-10"
+      >
+        <TabsList aria-label="Range" className="h-7">
+          <TabsTrigger value="30d" className="px-2 text-xs">
+            30d
+          </TabsTrigger>
+          <TabsTrigger value="90d" className="px-2 text-xs">
+            90d
+          </TabsTrigger>
+        </TabsList>
+      </Tabs>
 
       {/* The panel's h-64/h-72 sizes the plot itself; on the column, the tabs row would eat 44px of it. */}
       <ChartContainer config={chartConfig} className={cn("aspect-auto w-full", className)}>

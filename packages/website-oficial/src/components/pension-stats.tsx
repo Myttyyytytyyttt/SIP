@@ -132,7 +132,8 @@ export function PensionStats({
           label: "Biggest",
           value: <Num>{usd(stats.bestTradeSavedUsd)}</Num>,
           // Over what is loaded, unless everything is: a record over a page is not a lifetime's.
-          sub: !live ? "put aside by one trade" : stats.complete === true ? "put aside by one settlement" : "biggest in the loaded history",
+          // Short enough not to wrap: a second line here makes the whole first row of tiles taller.
+          sub: !live ? "put aside by one trade" : stats.complete === true ? "by one settlement" : "in the loaded history",
           ...titled(priced),
         },
     stats.currentStreakDays === null
@@ -183,7 +184,7 @@ export function PensionStats({
   const tiles = candidates.filter((tile): tile is Tile => tile !== null);
 
   return (
-    <section className={cn("@container space-y-3", className)} aria-labelledby="pension-stats-heading">
+    <section className={cn("@container space-y-3 xl:space-y-2", className)} aria-labelledby="pension-stats-heading">
       <div className="flex items-center justify-between">
         <h3 id="pension-stats-heading" className="text-sm font-medium">
           Stats
@@ -193,7 +194,7 @@ export function PensionStats({
       {/* Four-up keys on the card's width, not the viewport: from md the panel shares its row, and under a 576px card four tiles cannot hold "$1,309.78" — overflow-hidden would clip the figure. */}
       <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border @xl:grid-cols-4">
         {tiles.map((tile, index) => (
-          <div key={tile.label} className={cn("min-w-0 space-y-1 bg-card p-4", index === tiles.length - 1 && lastSpan(tiles.length))}>
+          <div key={tile.label} className={cn("min-w-0 space-y-1 bg-card p-4 xl:px-4 xl:py-2.5 xl:short:py-2", index === tiles.length - 1 && lastSpan(tiles.length))}>
             <dt className={LABEL}>{tile.label}</dt>
             <dd className="text-lg font-medium whitespace-nowrap" {...titled(tile.title)}>
               {tile.value}
@@ -203,7 +204,6 @@ export function PensionStats({
         ))}
       </dl>
 
-      <SaveCalendar days={days} now={now} />
     </section>
   );
 }
@@ -258,7 +258,7 @@ function step(e: KeyboardEvent<HTMLButtonElement>) {
  * column. Zero is muted; a save is the accent, stepped by quartile so the
  * strip reads as intensity without a legend.
  */
-function SaveCalendar({ days, now }: { days: readonly SavingsDay[]; now: string }) {
+export function SaveCalendar({ days, now }: { days: readonly SavingsDay[]; now: string }) {
   if (days.length === 0) return null;
 
   const saved = days
@@ -316,7 +316,7 @@ function SaveCalendar({ days, now }: { days: readonly SavingsDay[]; now: string 
         })}
       </div>
       <p className="text-xs text-muted-foreground">
-        Last <Num>{weeks}</Num> weeks
+        Last <Num>{weeks}</Num> {weeks === 1 ? "week" : "weeks"}
       </p>
     </div>
   );

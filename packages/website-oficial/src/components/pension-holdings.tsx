@@ -34,7 +34,7 @@ export function PensionHoldings({
   ] as const;
 
   return (
-    <section className={cn("space-y-3", className)} aria-labelledby="pension-holdings-heading">
+    <section className={cn("space-y-3 xl:space-y-2", className)} aria-labelledby="pension-holdings-heading">
       <div className="flex items-baseline justify-between gap-3">
         <h3 id="pension-holdings-heading" className="text-sm font-medium">
           Holdings
@@ -51,12 +51,12 @@ export function PensionHoldings({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Asset</TableHead>
+              <TableHead className="xl:h-8">Asset</TableHead>
               {/* Below sm the shares figure moves under the symbol: four columns
                   plus the weight bar do not fit a phone without scrolling. */}
-              <TableHead className="hidden text-right sm:table-cell">Shares</TableHead>
-              <TableHead className="text-right">Value</TableHead>
-              <TableHead className="text-right">Weight</TableHead>
+              <TableHead className="hidden text-right sm:table-cell xl:h-8">Shares</TableHead>
+              <TableHead className="text-right xl:h-8">Value</TableHead>
+              <TableHead className="text-right xl:h-8">Weight</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -93,14 +93,19 @@ export function PensionHoldings({
                   {holding.weightBps === null ? (
                     <span className="text-muted-foreground">—</span>
                   ) : (
-                    <div className="ml-auto w-20 space-y-1 sm:w-24">
-                      <div className={MONO}>{pct(holding.weightBps, 0)}</div>
+                    // The target beside the weight, on one line rather than a line of its
+                    // own: a third line per row was the height that pushed the last
+                    // holding below the fold.
+                    <div className="ml-auto w-28 space-y-1 sm:w-32">
+                      <div className="flex items-baseline justify-end gap-1.5">
+                        {holding.targetWeightBps === null ? null : (
+                          <span className="text-xs text-muted-foreground">
+                            <Num>{pct(holding.targetWeightBps, 0)}</Num> target
+                          </span>
+                        )}
+                        <span className={MONO}>{pct(holding.weightBps, 0)}</span>
+                      </div>
                       <Progress value={holding.weightBps / 100} className="h-1" aria-label={`${holding.symbol} weight`} />
-                      {holding.targetWeightBps === null ? null : (
-                        <div className="text-xs text-muted-foreground">
-                          <Num>{pct(holding.targetWeightBps, 0)}</Num> target
-                        </div>
-                      )}
                     </div>
                   )}
                 </TableCell>

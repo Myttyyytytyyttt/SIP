@@ -29,6 +29,7 @@ import { usePathname, useSearchParams } from "next/navigation";
 
 import { CopyButton } from "@/components/copy-button";
 import { DashboardSource } from "@/components/DashboardSource";
+import { DashboardMain, PENSION_SLOT, RULE_SLOT } from "@/components/dashboard-main";
 import { DashboardWallets } from "@/components/dashboard-wallets";
 import { DataModeToggle } from "@/components/data-mode";
 import { Landing } from "@/components/landing";
@@ -349,15 +350,17 @@ function MockBody({ load, control, account, current }: { readonly load: Dashboar
           <DashboardWallets wallet={wallet} activity={activity} now={now} className="sticky top-14 h-[calc(100dvh-3.5rem)]" />
         </aside>
 
-        <main className="flex min-w-0 flex-1 flex-col gap-4 p-4 lg:gap-6 lg:p-6">
-          {/* Reads the payload on screen, never the toggle: the two cannot disagree. */}
-          <DashboardSource source={load.source} notice={load.notice} />
-          <SavingsStrip trades={trades} rule={rule} now={now} />
-          <div className="grid gap-4 lg:gap-6 md:grid-cols-[minmax(16rem,20rem)_1fr] lg:grid-cols-1 xl:grid-cols-[minmax(16rem,20rem)_1fr]">
-            <SavingsRulePanel rule={rule} stats={stats} activity={activity} now={now} className="order-2 md:order-1 lg:order-2 xl:order-1" />
-            <PensionPanel stats={stats} curve={curve} holdings={holdings} days={days} rule={rule} now={now} className="order-1 md:order-2 lg:order-1 xl:order-2" />
-          </div>
-        </main>
+        <DashboardMain
+          // Reads the payload on screen, never the toggle: the two cannot disagree.
+          top={<DashboardSource source={load.source} notice={load.notice} />}
+          strip={<SavingsStrip trades={trades} rule={rule} now={now} />}
+          cards={
+            <>
+              <SavingsRulePanel rule={rule} stats={stats} activity={activity} now={now} className={RULE_SLOT} />
+              <PensionPanel stats={stats} curve={curve} holdings={holdings} days={days} rule={rule} now={now} className={PENSION_SLOT} />
+            </>
+          }
+        />
       </div>
 
       <SiteFooter now={now} />

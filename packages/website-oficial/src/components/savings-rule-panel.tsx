@@ -131,13 +131,16 @@ export function SavingsRulePanel({
   const toGo = ready !== null && stats.thresholdUsd !== null ? Math.max(0, stats.thresholdUsd - ready) : null;
 
   return (
-    <Card className={cn("h-fit", className)}>
+    // The same desktop spacing as the pension card beside it, and one step
+    // tighter again on a short screen: this card is the taller of the two on a
+    // 13" laptop, so its padding decides whether the page needs a scroll.
+    <Card className={cn("h-fit xl:[--card-spacing:--spacing(3)]", className)}>
       <CardHeader>
         <CardTitle>Savings rule</CardTitle>
         <CardDescription>{appliedTo}</CardDescription>
       </CardHeader>
 
-      <CardContent className="space-y-5">
+      <CardContent className="space-y-5 xl:space-y-4 xl:short:space-y-3">
         <div role="group" aria-labelledby={RATE_LABEL_ID} className="space-y-3">
           <div className="flex items-center justify-between">
             <Label id={RATE_LABEL_ID}>Rate</Label>

@@ -218,3 +218,15 @@ describe("how much of the history is loaded", () => {
     expect(html).toContain(LIVE_COPY.unknownFigure);
   });
 });
+
+/**
+ * THE PENSION KEY IS THE NAVBAR'S, NOT THE COLUMN'S (owner, 09-23): the account
+ * chip at the top carries it with its copy button, and the same key under the
+ * balance was the same fact twice on one screen.
+ */
+describe("the column under a linked wallet", () => {
+  it("says nothing of the pension key: the navbar already does", () => {
+    const html = render({ data: liveDashboard(), activityUnreadable: false });
+    expect(html).not.toContain(LIVE_COPY.pensionKey);
+  });
+});

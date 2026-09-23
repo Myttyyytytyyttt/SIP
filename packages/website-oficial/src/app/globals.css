@@ -3,6 +3,12 @@
 @import "shadcn/tailwind.css";
 
 @custom-variant dark (&:is(.dark *));
+/*
+ * A SHORT SCREEN: a 13" laptop's browser leaves ~780px, a 14" ~860. The pension
+ * page tightens one more step below this height so everything still shows
+ * without a scroll (src/components/dashboard-main.tsx); above it, full spacing.
+ */
+@custom-variant short (@media (max-height: 860px));
 
 @theme inline {
     --font-heading: var(--font-sans);

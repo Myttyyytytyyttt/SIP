@@ -6,6 +6,7 @@ import { PanelLeft, X } from "lucide-react";
 import Link from "next/link";
 
 import { ModeToggle } from "@/components/mode-toggle";
+import { SipMark } from "@/components/site-footer";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
@@ -87,7 +88,9 @@ export function SiteHeader({
           </SheetContent>
         </Sheet>
 
-        <div className="flex items-baseline gap-2">
+        {/* The brand's mark before its name, as the footer wears it — in the ink the theme calls for. */}
+        <div className="flex items-center gap-2">
+          <SipMark className="h-5 w-auto" />
           <h1 className="font-semibold tracking-tight">SaverFi</h1>
         </div>
 
