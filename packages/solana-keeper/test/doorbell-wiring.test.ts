@@ -118,3 +118,16 @@ describe("the doorbell's own alerts, and its route", () => {
     expect(keeper).toContain("pendingCarries: pendingCarries(), rpcEndpointInUse, failovers, doorbell: doorbellStatus() }");
   });
 });
+
+describe("the ceiling bench", () => {
+  // Its number is the cost of a FULL pass, and a shell with production
+  // variables exported must neither switch the doorbell on in the child nor
+  // point it at the real Helius account.
+  it("strips every doorbell variable from the keeper it starts", () => {
+    const bench = readFileSync(fileURLToPath(new URL("../scripts/ceiling-bench.mts", import.meta.url)), "utf8");
+    const stripped = bench.slice(bench.indexOf("function childEnv("), bench.indexOf("delete env[name];"));
+    for (const name of ["SIP_SOLANA_DOORBELL_SECRET", "SIP_SOLANA_HELIUS_API_KEY", "SIP_SOLANA_DOORBELL_URL", "RAILWAY_PUBLIC_DOMAIN"]) {
+      expect(stripped, name).toContain(`"${name}",`);
+    }
+  });
+});
