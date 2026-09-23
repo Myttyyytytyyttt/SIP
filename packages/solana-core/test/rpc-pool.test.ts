@@ -47,6 +47,55 @@ describe("failover", () => {
     expect(pool.coolingDown()).toEqual([]);
   });
 
+  // -32015 in the node's own words: a transaction newer than the request's
+  // maxSupportedTransactionVersion. It says "is not supported", and it is about
+  // the REQUEST, so every endpoint gives the same answer.
+  const versionRefused = (id: unknown) => ({
+    jsonrpc: "2.0",
+    id,
+    error: {
+      code: -32015,
+      message: 'Transaction version (2) is not supported by the requesting client. Please try the request again with the following configuration parameter: "maxSupportedTransactionVersion": 2',
+    },
+  });
+
+  it("returns a batch where EVERY member is -32015 as the members' own errors, and benches nobody", async () => {
+    // Measured live on 2026-09-23: a page of one version 1 transaction, asked for
+    // 0, benched mainnet's endpoint for 30 s and failed the whole page.
+    const upstream = fakeFetch((call) => jsonResponse((call.body as { id: number }[]).map((member) => versionRefused(member.id))));
+    const pool = createRpcPool([UPSTREAM_1, UPSTREAM_2], { fetch: upstream.fetch });
+    const members = await pool.batch([
+      { id: 1, method: "getTransaction", params: ["a", { maxSupportedTransactionVersion: 1 }] },
+      { id: 2, method: "getTransaction", params: ["b", { maxSupportedTransactionVersion: 1 }] },
+    ]);
+    expect(members.map((member) => [member.id, member.error?.code])).toEqual([
+      [1, -32015],
+      [2, -32015],
+    ]);
+    expect(upstream.calls).toHaveLength(1);
+    expect(pool.coolingDown()).toEqual([]);
+  });
+
+  it("throws a lone -32015 as the answer it is, without asking the next endpoint", async () => {
+    const upstream = fakeFetch(() => jsonResponse(versionRefused(1)));
+    const pool = createRpcPool([UPSTREAM_1, UPSTREAM_2], { fetch: upstream.fetch });
+    const error = await pool.call("getTransaction", ["a", { maxSupportedTransactionVersion: 1 }]).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(RpcAnswerError);
+    expect((error as RpcAnswerError).code).toBe(-32015);
+    expect(upstream.calls).toHaveLength(1);
+    expect(pool.coolingDown()).toEqual([]);
+  });
+
+  it.each(["Method getProgramAccounts is not supported on this plan", "Unsupported method: getProgramAccounts"])(
+    "still fails over on a method the endpoint does not serve (%s): only -32015 is exempted, and by its code",
+    async (message) => {
+      const upstream = fakeFetch((call) => (call.url === UPSTREAM_1 ? jsonResponse({ jsonrpc: "2.0", id: 1, error: { code: -32601, message } }) : rpcResult(call, [])));
+      const pool = createRpcPool([UPSTREAM_1, UPSTREAM_2], { fetch: upstream.fetch });
+      await expect(pool.call("getProgramAccounts", ["x"])).resolves.toEqual([]);
+      expect(pool.coolingDown()).toEqual([0]);
+    },
+  );
+
   it("names every refusal by position and never by URL, host or key", async () => {
     const upstream = fakeFetch((call) => {
       if (call.url === UPSTREAM_1) throw new TypeError(`connect ECONNREFUSED ${UPSTREAM_1}`);

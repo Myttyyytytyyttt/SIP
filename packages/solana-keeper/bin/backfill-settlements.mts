@@ -30,6 +30,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { Secret, sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 import { createKeeperLogger } from "../src/keeper-log.js";
+import { readTransaction } from "../src/measure-window.js";
 import { SolanaReadModel, type SettlementRow } from "../src/read-model.js";
 import { settledEventsFrom } from "../src/settled-event.js";
 
@@ -139,9 +140,11 @@ for (const entry of signatures) {
   // A REVERTED TRANSACTION SETTLED NOTHING, and its logs may still carry an
   // event from the part that ran before the failure.
   if (entry.err !== null) continue;
-  const tx = await attempt("transaction", () =>
-    connection.getTransaction(entry.signature, { maxSupportedTransactionVersion: 0, commitment: "finalized" }),
-  );
+  // THROUGH readTransaction, for its version contract: the signatures above are
+  // EVERY transaction that touched the program, not only the keeper's own, and
+  // one signed as version 1 (Axiom signs that way) is refused under 0: retried
+  // three times, then reported below as a hole that no re-run fills.
+  const tx = await attempt("transaction", () => readTransaction(connection, entry.signature, "finalized"));
   read += 1;
   if (tx === null || !tx.meta) {
     // A null is not an absence: a throttling RPC returns one without erroring.

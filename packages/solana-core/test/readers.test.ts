@@ -319,7 +319,7 @@ describe("listVaultActivity", () => {
     expect(entry.settled.map((event) => event.paid)).toEqual([1_000_000n]);
     const [history] = upstream.calls;
     expect((history!.body as { params: unknown[] }).params).toEqual([vault, { limit: 1, commitment: "confirmed" }]);
-    expect((batchOf(upstream.calls[1]!)[0]!.params[1] as Record<string, unknown>).maxSupportedTransactionVersion).toBe(0);
+    expect((batchOf(upstream.calls[1]!)[0]!.params[1] as Record<string, unknown>).maxSupportedTransactionVersion).toBe(1);
   });
 
   it("bounds the page size", async () => {
@@ -1306,6 +1306,274 @@ describe("listVaultSignatures and readVaultTransactions", () => {
     if (read.kind !== "exists") throw new Error(read.kind);
     expect(read.value[0]).toMatchObject({ readable: false, fee: null, vaultLamportsDelta: null, blockTime: 7 });
     expect(read.value[0]!.instructions).toEqual([]);
+  });
+
+  it("a page where the node refuses EVERY member (-32015) is still a page: each entry is readable false, and the endpoint stays in service", async () => {
+    // A transaction newer than maxSupportedTransactionVersion is refused member
+    // by member, in the node's words below. A poll with `until` often lists ONE
+    // new signature, so once a refusal happens, an all-refused batch is the
+    // common case, not an edge.
+    // The pool used to read "is not supported" as an endpoint fault: measured
+    // live on 2026-09-23, it benched the endpoint and the WHOLE page came back
+    // unreadable, not even the known signatures with an empty body.
+    const newer = 2;
+    const listed = [11, 12].map((seed) => ({ signature: base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i + seed) % 256)), slot: seed, blockTime: seed * 10, err: null }));
+    const asked: unknown[] = [];
+    const { pool: p, upstream } = pool((call) =>
+      jsonResponse(
+        batchOf(call).map((member) => {
+          asked.push((member.params[1] as { maxSupportedTransactionVersion?: unknown }).maxSupportedTransactionVersion);
+          return {
+            jsonrpc: "2.0",
+            id: member.id,
+            error: {
+              code: -32015,
+              message: `Transaction version (${newer}) is not supported by the requesting client. Please try the request again with the following configuration parameter: "maxSupportedTransactionVersion": ${newer}`,
+            },
+          };
+        }),
+      ),
+    );
+    const read = await readVaultTransactions(p, vault, listed);
+    // The premise: a node refuses only what is newer than it was asked for.
+    expect(asked).toHaveLength(listed.length);
+    for (const version of asked) expect(version).toBeLessThan(newer);
+    if (read.kind !== "exists") throw new Error(`${read.kind}: ${read.kind === "unreadable" ? read.error : ""}`);
+    expect(read.value).toHaveLength(2);
+    read.value.forEach((entry, index) => {
+      expect(entry).toMatchObject({ signature: listed[index]!.signature, readable: false, fee: null, vaultLamportsDelta: null, blockTime: listed[index]!.blockTime });
+      expect(entry.instructions).toEqual([]);
+    });
+    expect(upstream.calls).toHaveLength(1);
+    expect(p.coolingDown()).toEqual([]);
+  });
+
+  // TRANSACTION VERSIONS. maxSupportedTransactionVersion is a contract with the
+  // node, not a hint: a transaction NEWER than the number asked for is neither
+  // degraded nor null, it is that member's JSON-RPC error -32015. The keeper
+  // learned this first (measure-window.ts); this reader asked for 0 until
+  // 2026-09-23, when the owner's Axiom trades turned out to be version 1.
+
+  type TxVersion = "legacy" | 0 | 1 | 2;
+  interface HeldTx {
+    readonly version: TxVersion;
+    readonly slot: number;
+    readonly answer: unknown;
+  }
+
+  /**
+   * A node that enforces the contract as mainnet did on 2026-09-23: a member
+   * newer than asked is refused in the node's own words, and an absent version
+   * serves legacy only. Members come back in REVERSE, because mainnet answered a
+   * two-member batch that way that day: ids, not positions.
+   */
+  function versionEnforcingNode(ledger: ReadonlyMap<string, HeldTx>) {
+    const asked: unknown[] = [];
+    const node = pool((call) => {
+      if (!Array.isArray(call.body)) {
+        return rpcResult(call, [...ledger].map(([signature, held]) => ({ signature, slot: held.slot, blockTime: held.slot * 10, err: null })));
+      }
+      const members = batchOf(call).map((member) => {
+        const [signature, config] = member.params as [string, { maxSupportedTransactionVersion?: number }];
+        asked.push(config.maxSupportedTransactionVersion);
+        const held = ledger.get(signature);
+        if (held === undefined) return { jsonrpc: "2.0", id: member.id, result: null };
+        const version = held.version === "legacy" ? -1 : held.version;
+        if (version > (config.maxSupportedTransactionVersion ?? -1)) {
+          return {
+            jsonrpc: "2.0",
+            id: member.id,
+            error: {
+              code: -32015,
+              message: `Transaction version (${version}) is not supported by the requesting client. Please try the request again with the following configuration parameter: "maxSupportedTransactionVersion": ${version}`,
+            },
+          };
+        }
+        return { jsonrpc: "2.0", id: member.id, result: held.answer };
+      });
+      return jsonResponse(members.reverse());
+    });
+    return { ...node, asked };
+  }
+
+  /**
+   * One getTransaction answer, keyed as mainnet keys each version (read
+   * 2026-09-23 from the owner's trading wallet): legacy is the bare message; v0
+   * adds addressTableLookups and fills loadedAddresses; v1 (3MdiRSsRCu…, an
+   * Axiom trade) has NO lookups, a transactionConfig in their place, and
+   * loadedAddresses present but empty. Every version's instructions carry
+   * stackHeight, and the indexes run over accountKeys then the loaded addresses.
+   */
+  function answerOf(
+    version: TxVersion,
+    tx: {
+      readonly slot: number;
+      readonly keys: readonly string[];
+      readonly loaded?: { readonly writable: readonly string[]; readonly readonly: readonly string[] };
+      readonly instructions: readonly { readonly programIdIndex: number; readonly accounts: readonly number[]; readonly data: string }[];
+      readonly preBalances: readonly number[];
+      readonly postBalances: readonly number[];
+      readonly logMessages?: readonly string[];
+    },
+  ) {
+    const loaded = tx.loaded ?? { writable: [], readonly: [] };
+    return {
+      slot: tx.slot,
+      blockTime: tx.slot * 10,
+      version,
+      meta: {
+        err: null,
+        status: { Ok: null },
+        fee: 5_000,
+        preBalances: tx.preBalances,
+        postBalances: tx.postBalances,
+        preTokenBalances: [],
+        postTokenBalances: [],
+        innerInstructions: [],
+        logMessages: tx.logMessages ?? [],
+        loadedAddresses: loaded,
+        rewards: [],
+      },
+      transaction: {
+        signatures: [SIGNATURE],
+        message: {
+          accountKeys: tx.keys,
+          header: { numRequiredSignatures: 1, numReadonlySignedAccounts: 0, numReadonlyUnsignedAccounts: 1 },
+          instructions: tx.instructions.map((instruction) => ({ ...instruction, stackHeight: 1 })),
+          recentBlockhash: BLOCKHASH,
+          ...(version === 0 ? { addressTableLookups: [{ accountKey: key(), writableIndexes: [0], readonlyIndexes: [1] }] } : {}),
+          ...(version === 1 ? { transactionConfig: { computeUnitLimit: 200_000, heapSize: null, loadedAccountsDataSizeLimit: 67_108_864, priorityFee: 1_000_000 } } : {}),
+        },
+      },
+    };
+  }
+
+  const signatureOf = (seed: number): string => base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i + seed) % 256));
+
+  /** SystemProgram::Transfer, which is all a deposit into a vault is. */
+  const systemTransfer = (lamports: bigint): string => {
+    const bytes = new Uint8Array(12);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, 2, true);
+    view.setBigUint64(4, lamports, true);
+    return base58Encode(bytes);
+  };
+
+  it("reads a version 1 deposit, the version Axiom signs, and leaves the endpoint that served it in service", async () => {
+    // A poll with `until` returns only the new signature, so a page of ONE is the
+    // common case, not an edge. Asked for 0, every member of that batch is -32015.
+    // The pool then read that as an endpoint fault ("is not supported"): measured
+    // live the same day, the endpoint was benched for the cooldown and the WHOLE
+    // page came back unreadable. Since the pool fix, the same page reads as a
+    // known signature with an empty body, which is still not the deposit.
+    const depositor = key();
+    const signature = signatureOf(21);
+    const node = versionEnforcingNode(
+      new Map([
+        [
+          signature,
+          {
+            version: 1,
+            slot: 20,
+            answer: answerOf(1, {
+              slot: 20,
+              keys: [depositor, vault, SYSTEM_PROGRAM],
+              instructions: [{ programIdIndex: 2, accounts: [0, 1], data: systemTransfer(50_000_000n) }],
+              preBalances: [900_000_000, 10_000_000, 1],
+              postBalances: [849_995_000, 60_000_000, 1],
+            }),
+          },
+        ],
+      ]),
+    );
+    const read = await listVaultActivity(node.pool, vault, { limit: 1 });
+    expect(read).toMatchObject({ kind: "exists" });
+    if (read.kind !== "exists") return;
+    expect(read.value.entries[0]).toMatchObject({ signature, readable: true, ok: true, fee: 5_000n, vaultLamportsDelta: 50_000_000n, sipInstructions: [], blockTime: 200 });
+    expect(node.pool.coolingDown()).toEqual([]);
+    expect(node.asked).toEqual([1]);
+  });
+
+  it("a page of every version is read member by member, and a version newer than 1 costs its own entry, not the page", async () => {
+    const [owner, crank, config, policy, vaultWsol, vaultIn, venue, wallet, link, sysvar] = [key(), key(), key(), key(), key(), key(), key(), key(), key(), key()];
+    const [future, withdrawn, converted, settled] = [signatureOf(31), signatureOf(41), signatureOf(51), signatureOf(61)];
+    const ledger = new Map<string, HeldTx>([
+      // No version 2 exists yet; its body never matters, because no node hands it to a client asking for 1.
+      [future, { version: 2, slot: 70, answer: null }],
+      [
+        withdrawn,
+        {
+          version: 1,
+          slot: 60,
+          answer: answerOf(1, {
+            slot: 60,
+            keys: [owner, vault, SIP_PROGRAM_ID],
+            instructions: [{ programIdIndex: 2, accounts: [0, 1], data: base58Encode(encodeArgs("withdraw", { amount: 10_000_000n })) }],
+            preBalances: [1_000_000, 70_000_000, 1],
+            postBalances: [10_995_000, 60_000_000, 1],
+          }),
+        },
+      ],
+      [
+        converted,
+        {
+          version: 0,
+          slot: 50,
+          answer: answerOf(0, {
+            slot: 50,
+            // The vault and its token accounts are LOADED (indexes 3–5), the policy and venue read-only loaded (6–7).
+            keys: [crank, config, SIP_PROGRAM_ID],
+            loaded: { writable: [vault, vaultWsol, vaultIn], readonly: [policy, venue] },
+            instructions: [
+              {
+                programIdIndex: 2,
+                accounts: [0, 1, 3, 6, 4, 5, 7],
+                data: base58Encode(encodeArgs("convert", { amount_in: 10_000_000n, min_out: 900_000n, venue_data: Uint8Array.from([9]) })),
+              },
+            ],
+            preBalances: [1, 1, 1, 60_000_000, 1, 1, 1, 1],
+            postBalances: [1, 1, 1, 60_000_000, 1, 1, 1, 1],
+          }),
+        },
+      ],
+      [
+        settled,
+        {
+          version: "legacy",
+          slot: 40,
+          answer: answerOf("legacy", {
+            slot: 40,
+            keys: [wallet, vault, link, config, sysvar, SYSTEM_PROGRAM, SIP_PROGRAM_ID],
+            instructions: [{ programIdIndex: 6, accounts: [0, 1, 2, 3, 4, 5], data: base58Encode(instructionDiscriminator("settle_v2")) }],
+            preBalances: [500_000_000, 23_400_000, 1, 1, 1, 1, 1],
+            postBalances: [463_395_000, 60_000_000, 1, 1, 1, 1, 1],
+            logMessages: [`Program ${SIP_PROGRAM_ID} invoke [1]`, settledLine(vault, wallet, 36_600_000n), `Program ${SIP_PROGRAM_ID} success`],
+          }),
+        },
+      ],
+    ]);
+    const node = versionEnforcingNode(ledger);
+    const listed = [...ledger].map(([signature, held]) => ({ signature, slot: held.slot, blockTime: held.slot * 10, err: null }));
+    const read = await readVaultTransactions(node.pool, vault, listed);
+    if (read.kind !== "exists") throw new Error(`${read.kind}: ${read.kind === "unreadable" ? read.error : ""}`);
+    const [newer, v1, v0, legacy] = read.value;
+
+    // The one version this reader has not seen the shape of is refused by the
+    // node, and it stays a known signature with an unread body.
+    expect(newer).toMatchObject({ signature: future, readable: false, fee: null, vaultLamportsDelta: null, blockTime: 700 });
+
+    expect(v1).toMatchObject({ signature: withdrawn, readable: true, sipInstructions: ["withdraw"], vaultLamportsDelta: -10_000_000n });
+    expect(v1!.instructions).toEqual([{ name: "withdraw", args: { amount: 10_000_000n }, accounts: { owner, vault } }]);
+
+    expect(v0).toMatchObject({ signature: converted, readable: true, sipInstructions: ["convert"], vaultLamportsDelta: 0n });
+    expect(v0!.instructions[0]!.accounts).toEqual({ crank, config, vault, policy, vault_wsol: vaultWsol, vault_in: vaultIn, venue_program: venue });
+
+    expect(legacy).toMatchObject({ signature: settled, readable: true, sipInstructions: ["settle_v2"], vaultLamportsDelta: 36_600_000n });
+    expect(legacy!.settled.map((event) => event.paid)).toEqual([36_600_000n]);
+
+    // One number for every member: this reader cannot know a version before it reads it.
+    expect(node.asked).toEqual([1, 1, 1, 1]);
+    expect(node.pool.coolingDown()).toEqual([]);
   });
 });
 

@@ -1684,6 +1684,31 @@ export async function listVaultSignatures(
   }
 }
 
+/**
+ * The highest transaction version this reader asks for, and the highest whose
+ * JSON shape entryFrom has been checked against.
+ *
+ * NOT A HINT. A transaction newer than the number asked for is neither degraded
+ * nor null: the node answers that member with error -32015. This was 0 until
+ * 2026-09-23, when the owner's Axiom trades turned out to be version 1 — so a
+ * deposit from any wallet that signs v1 would have been refused. Worse, the pool
+ * then read -32015 as an endpoint fault ("is not supported"), so a page where
+ * EVERY member was refused (a poll that finds one new deposit) benched the
+ * endpoint and failed whole, measured live that day. The pool now takes -32015
+ * as that member's own error (rpc-pool.ts, isEndpointFault), so a version newer
+ * than this costs its own entry and never the page.
+ *
+ * 1, BECAUSE 1 IS THE SHAPE THAT WAS READ. Mainnet's version 1 answer
+ * (3MdiRSsRCu…) keeps accountKeys, instructions[].programIdIndex and
+ * meta.loadedAddresses where entryFrom looks for them: it has no
+ * addressTableLookups, loadedAddresses is present and empty, and the indexes
+ * run over accountKeys alone. Raise this only after reading a newer version's
+ * answer the same way. The keeper's own number (measure-window.ts) is bound to
+ * what web3.js can decode instead; the two agree today by coincidence, not by
+ * construction.
+ */
+const MAX_SUPPORTED_TRANSACTION_VERSION = 1;
+
 /** Every listed transaction in ONE batch. A member that failed is that entry's own `readable: false`, not a failed page. */
 export async function readVaultTransactions(pool: RpcPool, vault: string, listed: readonly VaultSignature[]): Promise<ChainRead<readonly VaultActivityEntry[]>> {
   if (!isPubkey(vault)) return { kind: "unreadable", error: "not a base58 32-byte address" };
@@ -1693,7 +1718,7 @@ export async function readVaultTransactions(pool: RpcPool, vault: string, listed
       listed.map((entry, index) => ({
         id: index + 1,
         method: "getTransaction",
-        params: [entry.signature, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: COMMITMENT }],
+        params: [entry.signature, { encoding: "json", maxSupportedTransactionVersion: MAX_SUPPORTED_TRANSACTION_VERSION, commitment: COMMITMENT }],
       })),
     );
     return {
