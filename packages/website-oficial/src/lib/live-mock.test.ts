@@ -209,6 +209,57 @@ describe("the feed carries the settlements, which is where the greens were missi
   });
 });
 
+/**
+ * BEHIND EACH ROW'S GLYPH, WHAT ITS TRANSACTION TOUCHED (owner, 09-23): SOL on
+ * one side and USDC on the other behind a conversion, the rate a rule change
+ * set — read from the event's own fields, never from today's state.
+ */
+describe("the marks behind a row's glyph come from its own transaction", () => {
+  const rowFor = (event: VaultEventJson, n: number) => {
+    const data = liveDashboard({ activity: liveActivity([...DEFAULT_ENTRIES, liveEntry(signature(n), seconds(NOW_MS - 7_200_000), [event])]) });
+    return adapt(data).activity.find((row) => row.txHash === signature(n));
+  };
+
+  it("puts SOL first and USDC second behind a conversion: what went in, then what came out", () => {
+    const row = rowFor({ kind: "converted", lamportsSpent: "10000000", usdcReceivedRaw: "1000387" } as VaultEventJson, 11);
+    const logos = row?.backdrop?.logos ?? [];
+    expect(logos).toHaveLength(2);
+    expect(logos[0]).toMatch(/sol/i);
+    expect(logos[1]).toMatch(/usdc/i);
+  });
+
+  it("writes the rate a rule change set, in the rule's own mode", () => {
+    const profit = rowFor({ kind: "rule_changed", mode: 0, skimBps: 2_500, volumeBps: 50, paused: false, maxContribution: null, walletReserve: null } as unknown as VaultEventJson, 12);
+    expect(profit?.backdrop?.text).toBe("25%");
+    const volume = rowFor({ kind: "rule_changed", mode: 1, skimBps: 2_500, volumeBps: 50, paused: false, maxContribution: null, walletReserve: null } as unknown as VaultEventJson, 13);
+    expect(volume?.backdrop?.text).toBe("0.5%");
+  });
+
+  it("draws nothing behind a rule change whose rate could not be read", () => {
+    const row = rowFor({ kind: "rule_changed", mode: 0, skimBps: null, volumeBps: null, paused: null, maxContribution: null, walletReserve: null } as unknown as VaultEventJson, 14);
+    expect(row?.backdrop).toBeUndefined();
+  });
+});
+
+/**
+ * A ROW KEEPS ITS KEY FROM ONE READ TO THE NEXT: the feed re-reads every few
+ * seconds, and a row whose key changed would be a new row — rising in again,
+ * every poll, the whole column at once.
+ */
+describe("every row has a key of its own that survives the next read", () => {
+  it("gives two events of one transaction two keys, and the same two on every read", () => {
+    const two: VaultEventJson[] = [
+      { kind: "withdrew_sol", lamports: "10000000" } as VaultEventJson,
+      { kind: "withdrew_sol", lamports: "20000000" } as VaultEventJson,
+    ];
+    const data = liveDashboard({ activity: liveActivity([...DEFAULT_ENTRIES, liveEntry(signature(15), seconds(NOW_MS - 7_200_000), two)]) });
+    const keys = (dashboard: LiveDashboard) => adapt(dashboard).activity.map((row) => row.id);
+    const first = keys(data);
+    expect(new Set(first).size).toBe(first.length);
+    expect(keys(data)).toEqual(first);
+  });
+});
+
 describe("the wallet the column leads with", () => {
   const wallet = (address: string, lamports: bigint | null, linkStatus: LiveWalletView["linkStatus"]): LiveWalletView =>
     ({ address, label: address, source: "privy", lamports, linkAddress: `${address}-link`, linkStatus, settlementNonce: 0n, canSettle: true }) as LiveWalletView;

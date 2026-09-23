@@ -6,6 +6,7 @@ import { PanelLeft, X } from "lucide-react";
 import Link from "next/link";
 
 import { ModeToggle } from "@/components/mode-toggle";
+import { useRouteLoader } from "@/components/route-loader";
 import { SipMark } from "@/components/site-footer";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -53,6 +54,8 @@ export function SiteHeader({
   // nested-overlay problem again — two focus traps, and Escape closing the wrong
   // one. So the sheet closes itself first and the host opens the one modal.
   const [sheetOpen, setSheetOpen] = useState(false);
+  // The loader between tabs, raised as a tab is pressed (route-loader.tsx).
+  const turnTo = useRouteLoader();
 
   const nav = [
     { label: "Pension", href: "/", current: current === "pension", className: undefined },
@@ -97,7 +100,11 @@ export function SiteHeader({
         <nav aria-label="Main" className="ml-6 hidden items-center gap-1 md:flex">
           {nav.map((item) => (
             <Button key={item.label} variant="ghost" size="sm" asChild className={cn(item.current ? "text-foreground" : "text-muted-foreground", item.className)}>
-              <Link href={item.href} aria-current={item.current ? "page" : undefined}>
+              <Link href={item.href} aria-current={item.current ? "page" : undefined} onClick={(event) => {
+                  // A click that opens elsewhere (new tab, new window) turns no page here.
+                  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                  turnTo?.(item.href);
+                }}>
                 {item.label}
               </Link>
             </Button>

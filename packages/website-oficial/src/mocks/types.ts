@@ -114,6 +114,19 @@ interface EventBase {
   readonly txHash: string;
   /** The transaction on the explorer. When set, the row is a link to it. */
   readonly href?: string;
+  /**
+   * What the icon's square shows faintly BEHIND its glyph, so the square says
+   * what this particular transaction touched: SOL on one side and USDC on the
+   * other behind a conversion's arrows, the rate a rule was set to behind its
+   * sliders. Decoration — every fact in it is also in the row's words.
+   */
+  readonly backdrop?: Backdrop;
+}
+
+/** Up to two marks (drawn left and right), or a short figure. */
+export interface Backdrop {
+  readonly logos?: readonly string[];
+  readonly text?: string;
 }
 
 /** A fill and, in the same breath, what it put aside. */

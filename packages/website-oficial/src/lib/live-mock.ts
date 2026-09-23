@@ -34,11 +34,19 @@ import { usd } from "@/lib/format";
 import type { LiveDashboard, LiveRow, LiveWalletView } from "@/lib/live-types";
 import { ratePercent } from "@/lib/vault-copy";
 import { measureOf, partsOf } from "@/components/live/LiveActivityRow";
-import type { ActivityEvent, DashboardMock, Holding, OtherEvent, SavingsDay, SavingsPoint, SavingsStats, Trade, Wallet } from "@/mocks/types";
+import { USDC_MINT } from "@sip/solana-core/client";
+import type { ActivityEvent, Backdrop, DashboardMock, Holding, OtherEvent, SavingsDay, SavingsPoint, SavingsStats, Trade, Wallet } from "@/mocks/types";
 
 const DAY_MS = 86_400_000;
 const USDC_UNIT = 1_000_000;
 const SOL_LOGO = artForMint(NATIVE_SOL) ?? undefined;
+const USDC_LOGO = artForMint(USDC_MINT) ?? undefined;
+
+/** Only the marks that exist: a missing one is left out, never drawn as a broken image. */
+const marks = (...logos: readonly (string | null | undefined)[]): Backdrop | undefined => {
+  const present = logos.filter((logo): logo is string => typeof logo === "string");
+  return present.length === 0 ? undefined : { logos: present };
+};
 
 /**
  * ONE FIGURE IN THE COLUMN IS ALLOWED TO BE BIG, and it is the balance of the
@@ -250,14 +258,29 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
 
   const maxUsd = $(vault.maxContribution);
   const capText = maxUsd !== null ? usd(maxUsd) : vault.maxContribution === null ? "the rule's ceiling" : `${formatSol(vault.maxContribution)} SOL`;
-  const trades: Trade[] = data.settlementRows.flatMap((row, index) => {
+  /*
+   * AN ID THAT OUTLIVES A POLL. The Nth event of a transaction is the same
+   * event on every read, wherever the transaction now sits in the list; its
+   * position in the list is not — a new settlement at the top would shift every
+   * row below it, and every row would remount (and rise in again) on each poll.
+   */
+  const idsFor = () => {
+    const seen = new Map<string, number>();
+    return (signature: string): string => {
+      const n = seen.get(signature) ?? 0;
+      seen.set(signature, n + 1);
+      return `${signature}:${n}`;
+    };
+  };
+  const tradeId = idsFor();
+  const trades: Trade[] = data.settlementRows.flatMap((row) => {
     const detail = savedDetail(row);
     // The strip is a glance at recent slices; one the chain gave no time is
     // still in the feed, under "Time unknown", and never dropped from there.
     if (detail === null || row.at === null || row.event.kind !== "settled") return [];
     return [
       {
-        id: `${row.signature}:${index}`,
+        id: tradeId(row.signature),
         at: row.at,
         symbol: "SOL",
         logo: SOL_LOGO,
@@ -286,8 +309,8 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
   for (const row of union) if (row.event.kind === "invested") investsIn.set(row.signature, (investsIn.get(row.signature) ?? 0) + 1);
 
   /** One row of the vault's history, as the sample's feed draws it. */
-  const eventOf = (row: LiveRow, index: number): ActivityEvent => {
-    const base = { id: `${row.signature}:${index}`, at: row.at, txHash: row.signature, href: row.explorerUrl ?? undefined };
+  const eventOf = (idOf: (signature: string) => string) => (row: LiveRow): ActivityEvent => {
+    const base = { id: idOf(row.signature), at: row.at, txHash: row.signature, href: row.explorerUrl ?? undefined };
     const event = row.event;
 
     if (event.kind === "settled") {
@@ -342,6 +365,28 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
             : event.kind === "received_sol"
               ? `+${usd(dollars)}`
               : usd(dollars);
+    // BEHIND THE GLYPH, what this transaction touched — from the event's own
+    // fields, never from today's state: a policy signed months ago did not buy
+    // today's basket, so it shows the USDC every policy spends, not the legs.
+    const rateOf = (mode: number | null, skim: number | null, volume: number | null): string | null => {
+      const bps = mode === 1 ? volume : skim;
+      return bps === null ? null : ratePercent(bps).replace(" ", "");
+    };
+    const backdrop: Backdrop | undefined =
+      event.kind === "converted"
+        ? marks(SOL_LOGO, USDC_LOGO)
+        : event.kind === "wrapped" || event.kind === "received_sol" || event.kind === "withdrew_sol" || event.kind === "upkeep"
+          ? marks(SOL_LOGO)
+          : event.kind === "withdrew_token"
+            ? marks(artForMint(event.mint))
+            : event.kind === "policy_signed"
+              ? marks(USDC_LOGO)
+              : event.kind === "rule_changed" || event.kind === "vault_created"
+                ? (() => {
+                    const rate = rateOf(event.mode, event.skimBps, event.volumeBps);
+                    return rate === null ? undefined : { text: rate };
+                  })()
+                : undefined;
     return {
       ...base,
       kind: "other" as const,
@@ -349,14 +394,14 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
       sub: words.detail,
       amount,
       icon: ICONS[event.kind] ?? "other",
-      logo: event.kind === "withdrew_token" ? (artForMint(event.mint) ?? undefined) : undefined,
       failed: words.failed || undefined,
+      ...(backdrop === undefined ? {} : { backdrop }),
     };
   };
-  const activity: ActivityEvent[] = [...timed, ...untimed].map(eventOf);
+  const activity: ActivityEvent[] = [...timed, ...untimed].map(eventOf(idsFor()));
   // What the feed leaves out — the keeper's account-keeping and dust — as the
   // same rows, for the disclosure that opens them. Hidden, never dropped.
-  const hidden: ActivityEvent[] = data.hiddenRows.map(eventOf);
+  const hidden: ActivityEvent[] = data.hiddenRows.map(eventOf(idsFor()));
 
   return {
     now,

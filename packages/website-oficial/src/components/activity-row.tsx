@@ -26,7 +26,7 @@ import { MONO, SAVED } from "@/lib/classes";
 import { clockLabel, fillLabel, shares, shortHex, timeAgo, usd, usdSigned } from "@/lib/format";
 import { cn } from "@/lib/utils";
 // The leaf, not the barrel: `@/mocks` also re-exports the seeded dataset, and this file ships to the browser.
-import { tickerLogo, type ActivityEvent, type OtherEvent } from "@/mocks/types";
+import { tickerLogo, type ActivityEvent, type Backdrop, type OtherEvent } from "@/mocks/types";
 
 /** The glyph an `other` row leads with — the same ones the live feed has always used. */
 const GLYPHS: Readonly<Record<OtherEvent["icon"], LucideIcon>> = {
@@ -50,38 +50,70 @@ const mark = (symbol: string, logo: string | undefined, size: number): ReactNode
 );
 
 /**
- * WHAT KIND OF THING HAPPENED, AT A GLANCE — the owner's colours (09-23):
+ * WHAT KIND OF THING HAPPENED, AT A GLANCE — four colours and no others
+ * (owner, 09-23):
  *
- *   saved    green   money the rule put aside, from gains or from volume;
+ *   saved    green   money coming in — a slice the rule put aside (from gains
+ *                    or from volume), and SOL that simply arrived;
  *   invest   blue    the pension buying what it holds;
  *   notice   mustard the machinery and every change to it — a conversion, a
- *                    wrap, a new rule or policy, a link, a withdrawal, SOL that
- *                    arrived but was not saved;
- *   failed   red     a transaction that did not land;
- *   quiet    grey    the keeper's own account-keeping.
+ *                    wrap, a new rule or policy, a link, a withdrawal, the
+ *                    keeper's upkeep, a settlement that found nothing to take;
+ *   failed   red     kept rare on purpose: a transaction that did not land, or
+ *                    one nobody could read. Red that shows up every day stops
+ *                    meaning anything.
  *
  * The tint is on the icon's square and on the amount, never on the words: the
  * row still reads the same in any colour, and nothing is said only by hue.
  */
-type Tone = "saved" | "invest" | "notice" | "failed" | "quiet";
+type Tone = "saved" | "invest" | "notice" | "failed";
 
 const TILE: Readonly<Record<Tone, string>> = {
   saved: "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400",
   invest: "bg-blue-500/12 text-blue-600 dark:text-blue-400",
   notice: "bg-amber-500/12 text-amber-700 dark:text-amber-400",
   failed: "bg-destructive/10 text-destructive",
-  quiet: "bg-muted text-muted-foreground",
 };
 
 const AMOUNT: Readonly<Record<Tone, string | undefined>> = {
   saved: SAVED,
   invest: "text-blue-600 dark:text-blue-400",
   notice: "text-amber-700 dark:text-amber-400",
-  failed: "text-muted-foreground",
-  quiet: undefined,
+  failed: "text-destructive",
 };
 
-/** What each `other` row is, by its glyph: the machinery is a notice, a failure is a failure, upkeep is quiet. */
+/**
+ * WHAT THE SQUARE SHOWS BEHIND ITS GLYPH — the marks of what the transaction
+ * touched, or the figure it set — faint, so the glyph still leads. Two marks
+ * sit at the square's edges, half out of it, with the glyph between them: SOL
+ * going in on the left, USDC coming out on the right. One mark peeks from the
+ * corner: centred, a full disc would cover the square and grey its colour out.
+ * Hovering the row lifts them a little: the square answers the pointer, as the
+ * row does.
+ */
+function BackdropArt({ art }: { readonly art: Backdrop }) {
+  const fade = "opacity-25 transition-opacity duration-300 group-hover/row:opacity-50 group-focus-visible/row:opacity-50";
+  if (art.text !== undefined) {
+    return (
+      <span aria-hidden className={cn("absolute inset-0 grid place-items-center font-mono text-[11px] leading-none font-bold tracking-tighter", fade)}>
+        {art.text}
+      </span>
+    );
+  }
+  const [first, second] = art.logos ?? [];
+  if (first === undefined) return null;
+  if (second === undefined) {
+    return <Image aria-hidden src={first} alt="" width={20} height={20} className={cn("absolute -right-1.5 -bottom-1.5 size-5 rounded-full", fade)} />;
+  }
+  return (
+    <>
+      <Image aria-hidden src={first} alt="" width={20} height={20} className={cn("absolute top-1/2 -left-2 size-5 -translate-y-1/2 rounded-full", fade)} />
+      <Image aria-hidden src={second} alt="" width={20} height={20} className={cn("absolute top-1/2 -right-2 size-5 -translate-y-1/2 rounded-full", fade)} />
+    </>
+  );
+}
+
+/** What each `other` row is, by its glyph: money in is green, the machinery is a notice, a failure is a failure. */
 const TONE_OF_OTHER: Readonly<Record<OtherEvent["icon"], Tone>> = {
   wrap: "notice",
   convert: "notice",
@@ -91,15 +123,18 @@ const TONE_OF_OTHER: Readonly<Record<OtherEvent["icon"], Tone>> = {
   policy: "notice",
   link: "notice",
   unlink: "notice",
-  receive: "notice",
+  // Money coming in, like a slice put aside — though never counted as one.
+  receive: "saved",
   failed: "failed",
-  upkeep: "quiet",
+  upkeep: "notice",
   other: "notice",
 };
 
 interface RowParts {
   /** Which colour the row wears; see Tone. */
   readonly tone: Tone;
+  /** What the square shows behind the glyph; see BackdropArt. */
+  readonly backdrop?: Backdrop;
   readonly leading: ReactNode;
   readonly title: string;
   readonly sub: ReactNode;
@@ -133,7 +168,7 @@ function parts(event: ActivityEvent): RowParts {
       // and the accent means money put aside — so that row reads muted "$0.00" on both surfaces.
       const saved = event.savedUsd > 0;
       return {
-        tone: saved ? "saved" : "quiet",
+        tone: saved ? "saved" : "notice",
         leading: mark(event.symbol, undefined, 20),
         title: fillLabel(event.side, event.symbol),
         sub: joined(<Num>{usd(event.notionalUsd)}</Num>),
@@ -147,6 +182,8 @@ function parts(event: ActivityEvent): RowParts {
         // Money going into the pension.
         tone: "invest",
         leading: event.logo === undefined ? <PiggyBank className="size-4" aria-hidden /> : mark(event.symbol, event.logo, 20),
+        // The sample's buy has no mark of its own in the square, so the asset it bought sits behind the piggy bank.
+        ...(event.logo === undefined ? { backdrop: event.backdrop ?? { logos: [tickerLogo(event.symbol)] } } : {}),
         title: `Invested in ${event.symbol}`,
         sub: joined(
           <>
@@ -164,19 +201,20 @@ function parts(event: ActivityEvent): RowParts {
       };
     case "deposit":
       return {
-        tone: "notice",
+        // A deposit is money coming in, as a receipt is on a live page.
+        tone: "saved",
         leading: <ArrowDownToLine className="size-4" aria-hidden />,
         title: "Funded wallet",
         sub: clock,
         amount: usdSigned(event.amountUsd),
-        amountClass: AMOUNT.notice,
+        amountClass: AMOUNT.saved,
       };
     case "saved": {
       // The trade row's shape, because this IS what a trade row stood for: the
       // slice put aside. It carries the accent only when something moved.
       const saved = event.savedUsd !== null && event.savedUsd > 0;
       return {
-        tone: saved ? "saved" : "quiet",
+        tone: saved ? "saved" : "notice",
         leading: mark("SOL", event.logo, 20),
         title: event.title ?? `Saved from ${event.from}`,
         sub: joined(event.basis),
@@ -189,6 +227,7 @@ function parts(event: ActivityEvent): RowParts {
       const Glyph = GLYPHS[event.icon];
       return {
         tone: event.failed ? "failed" : TONE_OF_OTHER[event.icon],
+        ...(event.backdrop === undefined ? {} : { backdrop: event.backdrop }),
         leading: event.logo === undefined ? <Glyph className="size-4" aria-hidden /> : mark(event.title, event.logo, 20),
         title: event.title,
         sub: joined(event.sub),
@@ -245,15 +284,33 @@ function step(e: KeyboardEvent<HTMLElement>) {
  * One feed row. The whole row is the tooltip trigger (a real button, so it is
  * keyboard reachable); the tooltip carries the hash and the relative time.
  */
-export function ActivityRow({ event, now, first = false }: { event: ActivityEvent; now: string; first?: boolean }) {
-  const { tone, leading, title, sub, amount, amountClass, note, failed } = parts(event);
-  const className =
+export function ActivityRow({
+  event,
+  now,
+  first = false,
+  order,
+}: {
+  event: ActivityEvent;
+  now: string;
+  first?: boolean;
+  /** Its place in the feed's entrance: rows rise in one after another, the first dozen in a short cascade. */
+  order?: number;
+}) {
+  const { tone, leading, title, sub, amount, amountClass, note, failed, backdrop } = parts(event);
+  const className = cn(
     // Inset ring: the ScrollArea viewport would clip one drawn outside the row.
-    "flex w-full items-start gap-3 px-4 py-2.5 text-left outline-none hover:bg-muted/50 focus-visible:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset";
+    "group/row flex w-full items-start gap-3 px-4 py-2.5 text-left outline-none hover:bg-muted/50 focus-visible:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+    order === undefined ? undefined : "rise-in",
+  );
+  const rise = order === undefined ? undefined : ({ ["--rise" as string]: `${Math.min(order, 12) * 35}ms` } as const);
 
   const body = (
     <>
-      <span className={cn("flex size-8 shrink-0 items-center justify-center rounded-md", TILE[tone])}>{leading}</span>
+      <span className={cn("relative flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-md", TILE[tone])}>
+        {backdrop === undefined ? null : <BackdropArt art={backdrop} />}
+        {/* The glyph leads, and leans in a touch when the row is pointed at. */}
+        <span className="relative flex transition-transform duration-300 group-hover/row:scale-110">{leading}</span>
+      </span>
       <span className="min-w-0 flex-1">
         <span className={cn("flex items-center gap-1.5 text-sm", failed && "text-muted-foreground")}>
           <span className="truncate">{title}</span>
@@ -291,6 +348,7 @@ export function ActivityRow({ event, now, first = false }: { event: ActivityEven
         onFocus={rove}
         onKeyDown={step}
         className={className}
+        style={rise}
       >
         {body}
       </a>
@@ -306,6 +364,7 @@ export function ActivityRow({ event, now, first = false }: { event: ActivityEven
         onFocus={rove}
         onKeyDown={step}
         className={className}
+        style={rise}
       >
         {body}
       </TooltipTrigger>

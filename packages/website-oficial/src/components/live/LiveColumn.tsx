@@ -189,8 +189,8 @@ export function HiddenRows({
           ? Array.from(days).map(([day, rows]) => (
               <div key={day === "" ? "unknown" : day}>
                 <div className="sticky top-0 z-10 bg-background px-4 py-2 text-xs text-muted-foreground">{day === "" ? "Time unknown" : relativeDayLabel(day, now)}</div>
-                {rows.map((event) => (
-                  <ActivityRow key={event.id} event={event} now={now} />
+                {rows.map((event, index) => (
+                  <ActivityRow key={event.id} event={event} now={now} order={index} />
                 ))}
               </div>
             ))

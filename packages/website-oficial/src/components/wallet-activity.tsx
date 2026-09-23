@@ -92,10 +92,12 @@ export function WalletActivity({
   const trades = activity.filter((event) => event.kind === (live === undefined ? "trade" : "saved")).length;
   // The first row takes the feed's one Tab stop; the rest are reached with the arrows.
   const firstId = activity[0]?.id;
+  // Each row's place in the list, across the day headings, for the entrance's cascade.
+  const orderOf = new Map(activity.map((event, index) => [event.id, index]));
 
   return (
     <div id={id} className={cn("flex h-full flex-col bg-background", className)}>
-      <div className="space-y-3 border-b p-4">
+      <div className="rise-in space-y-3 border-b p-4">
         <div className="flex items-center justify-between gap-2">
           <span className={LABEL}>{wallet?.label ?? "Trading wallets"}</span>
           {/* The ui Button carries the focus ring either way — link or modal. */}
@@ -153,7 +155,7 @@ export function WalletActivity({
               {date === "" ? "Time unknown" : relativeDayLabel(date, now)}
             </div>
             {events.map((event) => (
-              <ActivityRow key={event.id} event={event} now={now} first={event.id === firstId} />
+              <ActivityRow key={event.id} event={event} now={now} first={event.id === firstId} order={orderOf.get(event.id) ?? 0} />
             ))}
           </div>
         ))}
