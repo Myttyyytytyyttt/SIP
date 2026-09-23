@@ -346,3 +346,21 @@ describe("the sync", () => {
     expect(served).toContain(helius.hooks[0]!.webhookID.slice(-6));
   });
 });
+
+describe("the sync, under a logger that throws", () => {
+  it("still resolves: a rejection would reach the unhandledRejection trap, which exits the keeper", async () => {
+    const failing: typeof fetch = async () => new Response("down", { status: 503 });
+    const engine = new WebhookSync({
+      client: createHeliusWebhookClient({ apiKey: new Secret("HeliusApiKeyNeverInAnError0042", "heliusApiKey"), fetch: failing }),
+      url: "https://keeper.up.railway.app/hooks/helius",
+      secret: new Secret("doorbell-secret-0123456789abcdef0123456789abcdef", "doorbellSecret"),
+      onWatched: () => undefined,
+      log: () => {
+        throw new Error("the logger broke");
+      },
+    });
+    await expect(engine.tick({ acting: true, addresses: ["a"], now: 0 })).resolves.toBeUndefined();
+    // And the guard is released, so the next sweep can try again.
+    expect(engine.tick({ acting: true, addresses: ["a"], now: 60_000 })).not.toBeNull();
+  });
+});

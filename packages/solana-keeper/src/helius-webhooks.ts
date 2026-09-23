@@ -375,9 +375,14 @@ export class WebhookSync {
     if (!this.#status.managed) this.#status = { ...this.#status, managed: true, reason: null };
     if (!due) return null;
     this.#inFlight = true;
-    return this.#run(desired, allowEdit, input.now).finally(() => {
-      this.#inFlight = false;
-    });
+    // NEVER REJECTS. #run catches its own failures, but its log callback is the
+    // caller's; a rejection here would be unhandled, and this process's
+    // unhandledRejection trap exits the keeper.
+    return this.#run(desired, allowEdit, input.now)
+      .catch(() => undefined)
+      .finally(() => {
+        this.#inFlight = false;
+      });
   }
 
   async #run(desired: readonly string[], allowEdit: boolean, now: number): Promise<void> {

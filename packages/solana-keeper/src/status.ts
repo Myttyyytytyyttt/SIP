@@ -14,8 +14,12 @@
 // the shared redactor with the logger's own tripwire: if a registered secret
 // survives, the page is withheld rather than served.
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Redactor } from "@sip/solana-log";
+import type { Redactor, Secret } from "@sip/solana-log";
+import type { HeliusApiKeySource } from "./config.js";
+import type { DoorbellCoreStatus } from "./doorbell.js";
+import type { WebhookStatus } from "./helius-webhooks.js";
 import { SERVICE } from "./keeper-log.js";
 import type { AuthorizationKeyCheck } from "./privy-authorization-key.js";
 import type { SeatCheck } from "./seat-check.js";
@@ -157,6 +161,24 @@ export interface SweepPhaseMs {
   readonly expensiveMs: number;
 }
 
+/**
+ * The doorbell (src/doorbell.ts), as an operator reads it.
+ *
+ * THE QUESTION IT ANSWERS: is the keeper still looking at everybody? `trusted`
+ * false means every sweep is a full pass — today's behaviour, nothing missed —
+ * and `untrustedReason` says why. `lanes` says who the last sweep turned and
+ * why, and `possibleMisses` counts the evidence that the webhook missed
+ * something: a link turned only by the safety rotation that turned out to have
+ * work waiting and no bell for it.
+ *
+ * NEVER THE SECRET AND NEVER THE API KEY: `apiKeySource` says where the key
+ * came from, and the webhook's id is served by its last six characters only.
+ */
+export interface DoorbellStatus extends DoorbellCoreStatus {
+  readonly webhook: WebhookStatus;
+  readonly apiKeySource: HeliusApiKeySource;
+}
+
 export interface KeeperStatus {
   service: string;
   startedAt: string;
@@ -203,6 +225,11 @@ export interface KeeperStatus {
    * WHEN THEY DIFFER, SOMEBODY WAS NOT LOOKED AT — the failure this whole page
    * exists to make visible, and the one `lastSweepLinks` cannot show, because it
    * reports the size of the set and not how much of it was served.
+   *
+   * UNDER THE DOORBELL THEY DIFFER BY DESIGN: a trusted doorbell turns the
+   * links that rang, the busy, the new and a safety slice, and `doorbell.lanes`
+   * adds up to `linksTriaged` and says why each one was turned. When the
+   * doorbell is off or not trusted they are equal again, as they always were.
    */
   linksDiscovered: number | null;
   linksTriaged: number | null;
@@ -248,6 +275,8 @@ export interface KeeperStatus {
   wallets: Record<string, WalletStatus>;
   /** Every loss carried forward and not yet handed on — what a restart would drop. */
   pendingCarries: readonly PendingCarry[];
+  /** Folded in at render from the doorbell and its webhook sync, like pendingCarries. */
+  doorbell: DoorbellStatus;
 }
 
 const bigintSafe = (_key: string, value: unknown): unknown => (typeof value === "bigint" ? value.toString() : value);
@@ -387,9 +416,127 @@ export function renderLeaderboard(snapshot: unknown, redactor: Redactor): string
   return scrubbed;
 }
 
+/** Where Helius delivers. The one route that takes a POST. */
+export const HOOKS_PATH = "/hooks/helius";
+
+/**
+ * The largest delivery read: 4 MiB. A RAW delivery is an array of full
+ * getTransaction results — the owner's convert with its lookup tables is ~12 KB
+ * of JSON — so this is hundreds of transactions in one POST. Past it the body is
+ * refused 413 and the next sweep is a full pass, because what it carried is
+ * unknown.
+ */
+export const HOOK_MAX_BODY_BYTES = 4 * 1024 * 1024;
+
+/** What the keeper hands the receiver. Every callback is guarded: none can throw out of the handler. */
+export interface HooksRoute {
+  /** Whether the Authorization header is the secret. Constant time: see authorizationMatcher. */
+  readonly authorized: (header: string | undefined) => boolean;
+  /** An authenticated body, handed over AFTER the 200 has been written. */
+  readonly accepted: (body: Buffer) => void;
+  /** A delivery refused 403. */
+  readonly rejected: () => void;
+  /** A delivery that could not be read whole: the next sweep turns everyone. */
+  readonly lost: (reason: string) => void;
+}
+
+/**
+ * Compares an Authorization header with the doorbell secret in constant time.
+ *
+ * OVER DIGESTS, NOT OVER THE STRINGS. timingSafeEqual refuses buffers of
+ * different lengths, and checking the length first answers faster for a wrong
+ * length — which tells a caller the secret's length. Both sides are hashed to
+ * 32 bytes first, so every comparison takes the same path. The secret is
+ * revealed once, here, and only its digest is kept.
+ */
+export function authorizationMatcher(secret: Secret): (header: string | undefined) => boolean {
+  const expected = createHash("sha256").update(secret.reveal(), "utf8").digest();
+  return (header) => {
+    if (typeof header !== "string") return false;
+    return timingSafeEqual(createHash("sha256").update(header, "utf8").digest(), expected);
+  };
+}
+
+const guarded = (run: () => void): void => {
+  try {
+    run();
+  } catch {
+    // Swallowed on purpose: see receiveDelivery.
+  }
+};
+
+/**
+ * POST /hooks/helius.
+ *
+ * ANSWERED BEFORE IT IS PROCESSED. Helius wants a 200 within one second and,
+ * after that, retries three times a second apart and then DROPS the delivery;
+ * an endpoint that keeps failing is auto-disabled. So the reply is written the
+ * moment the body is read and authenticated, and the ingest runs after it, on
+ * the next turn of the event loop.
+ *
+ * NOTHING THROWS OUT OF HERE. The process's uncaughtException trap EXITS the
+ * keeper (see /health below), so a malformed delivery must never be able to
+ * stop the money path. That includes the request stream's own 'error' — an
+ * upload aborted mid-body emits one, and with no listener Node rethrows it.
+ */
+function receiveDelivery(request: IncomingMessage, response: ServerResponse, hooks: HooksRoute): void {
+  request.on("error", () => undefined);
+  const header = request.headers?.["authorization"];
+  let authorized = false;
+  try {
+    authorized = hooks.authorized(typeof header === "string" ? header : undefined);
+  } catch {
+    authorized = false;
+  }
+  if (!authorized) {
+    // 403 IS THE ONE 4xx HELIUS DOES NOT RETRY: a wrong secret is not weather.
+    guarded(() => hooks.rejected());
+    response.statusCode = 403;
+    response.setHeader("connection", "close");
+    response.end(JSON.stringify({ error: "forbidden" }));
+    request.resume();
+    return;
+  }
+  let done = false;
+  const refuse = (): void => {
+    done = true;
+    guarded(() => hooks.lost(`a delivery over ${HOOK_MAX_BODY_BYTES} bytes was refused`));
+    response.statusCode = 413;
+    response.setHeader("connection", "close");
+    response.end(JSON.stringify({ error: "payload too large" }));
+    request.resume();
+  };
+  const declared = Number(request.headers?.["content-length"]);
+  if (Number.isFinite(declared) && declared > HOOK_MAX_BODY_BYTES) {
+    refuse();
+    return;
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  request.on("data", (chunk: Buffer) => {
+    if (done) return;
+    size += chunk.length;
+    if (size > HOOK_MAX_BODY_BYTES) {
+      chunks.length = 0;
+      refuse();
+      return;
+    }
+    chunks.push(chunk);
+  });
+  request.on("end", () => {
+    if (done) return;
+    done = true;
+    const body = Buffer.concat(chunks);
+    response.statusCode = 200;
+    response.end("{}");
+    setImmediate(() => guarded(() => hooks.accepted(body)));
+  });
+}
+
 /**
  * GET /health → {"ok":true}, or 503 with the reason when sweeping has stopped;
- * GET /status → the rendered status; GET /leaderboard → the rankings. Nothing else.
+ * GET /status → the rendered status; GET /leaderboard → the rankings; and, when
+ * the doorbell is on, POST /hooks/helius → the Helius receiver. Nothing else.
  *
  * `probe` is supplied by the keeper because the handler has no clock and no
  * state of its own, and it is REQUIRED: a default would decide the one question
@@ -405,10 +552,43 @@ export function httpHandler(
    * noticing it had been answered by a default.
    */
   leaderboard: () => LeaderboardReply,
+  /**
+   * REQUIRED, AND EXPLICITLY NULL when the doorbell is off, for the same reason
+   * as the two above: a default would decide whether a public route accepts
+   * POSTs, and nobody would have decided it.
+   */
+  hooks: HooksRoute | null,
 ): (request: IncomingMessage, response: ServerResponse) => void {
   return (request, response) => {
+    try {
+      route(request, response);
+    } catch {
+      // THE LAST NET: the uncaughtException trap exits the keeper, and a page
+      // that failed to answer is not worth that. Every route above already
+      // guards what it calls; this is for the one nobody thought of.
+      try {
+        if (!response.headersSent) response.statusCode = 500;
+        response.end(JSON.stringify({ error: "internal error" }));
+      } catch {
+        // Nothing left to say, and nowhere safe to say it.
+      }
+    }
+  };
+
+  function route(request: IncomingMessage, response: ServerResponse): void {
     response.setHeader("content-type", "application/json");
     const path = (request.url ?? "/").split("?")[0];
+    // BEFORE THE GET-ONLY RULE: the one route that takes a POST, and only when
+    // the doorbell is on. Off, it does not exist.
+    if (path === HOOKS_PATH && request.method === "POST") {
+      if (hooks === null) {
+        response.statusCode = 404;
+        response.end(JSON.stringify({ error: "not found", paths: ["/health", "/status", "/leaderboard"] }));
+        return;
+      }
+      receiveDelivery(request, response, hooks);
+      return;
+    }
     if (request.method !== "GET" && request.method !== "HEAD") {
       response.statusCode = 405;
       response.end(JSON.stringify({ error: "method not allowed" }));
@@ -457,5 +637,5 @@ export function httpHandler(
     }
     response.statusCode = 404;
     response.end(JSON.stringify({ error: "not found", paths: ["/health", "/status", "/leaderboard"] }));
-  };
+  }
 }

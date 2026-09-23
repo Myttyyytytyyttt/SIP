@@ -13,6 +13,7 @@ import {
   VAULT_READ_CRITICAL_STREAK,
   createCarryWatch,
   foldInvestTurn,
+  reconcileLegFees,
   vaultReadAlert,
   type VaultInvestSweep,
 } from "../src/sweep-decision.js";
@@ -234,7 +235,7 @@ describe("where a pending carry's wait is stamped", () => {
   it("is the keeper's own clock, once per sweep, after the turns that record carries", () => {
     const records = lines.filter((line) => line.includes("carryWatch.record("));
     expect(records, "one observation per sweep, storing nothing new").toHaveLength(1);
-    const loop = lines.findIndex((line) => line.includes("for (const link of links) {"));
+    const loop = lines.findIndex((line) => line.includes("for (const { link: door, lane } of turns) {"));
     const recorded = lines.findIndex((line) => line.includes("carryWatch.record("));
     expect(loop).toBeGreaterThan(-1);
     expect(recorded, "after the link loop: that is where a carry is recorded").toBeGreaterThan(loop);
@@ -276,5 +277,49 @@ describe("what a degraded sweep reads, and what it says when a turn throws", () 
     const catchBlock = keeper.slice(start, keeper.indexOf("\n      }\n", start));
     expect(catchBlock).toMatch(/health\.wallets\[wallet\] = \{/);
     expect(catchBlock).toMatch(/settle: "THREW"/);
+  });
+});
+
+// THE DOORBELL'S AUDIT, one of its findings: the leg-fee reconciliation assumed
+// every sweep turns every vault, and would clear a warning raised by a vault
+// that simply was not turned this sweep.
+describe("the leg-fee warnings that stand", () => {
+  const KEY = "leg-fee:ANTHROPIC:100";
+  const run = (byVault: Map<string, ReadonlySet<string>>, looked: [string, string[]][], standing: string[], discovered = ["v1", "v2"]) =>
+    reconcileLegFees({
+      byVault,
+      looked: new Map(looked.map(([vault, keys]) => [vault, new Set(keys)])),
+      discoveredVaults: new Set(discovered),
+      standing: new Set(standing),
+    });
+
+  it("keeps a warning raised by a vault this sweep did not turn", () => {
+    const byVault = new Map<string, ReadonlySet<string>>();
+    const first = run(byVault, [["v1", [KEY]]], []);
+    expect([...first.standing]).toEqual([KEY]);
+    // v1 is not turned this sweep; v2 is, and looks, and raises nothing.
+    const second = run(byVault, [["v2", []]], [...first.standing]);
+    expect(second.clear).toEqual([]);
+    expect([...second.standing]).toEqual([KEY]);
+  });
+
+  it("clears a key once the vault that raised it looks again and no longer does", () => {
+    const byVault = new Map<string, ReadonlySet<string>>([["v1", new Set([KEY])]]);
+    expect(run(byVault, [["v1", []]], [KEY]).clear).toEqual([KEY]);
+  });
+
+  it("keeps a key two vaults share until neither raises it", () => {
+    const byVault = new Map<string, ReadonlySet<string>>([
+      ["v1", new Set([KEY])],
+      ["v2", new Set([KEY])],
+    ]);
+    expect(run(byVault, [["v1", []]], [KEY]).clear).toEqual([]);
+    expect(run(byVault, [["v2", []]], [KEY]).clear).toEqual([KEY]);
+  });
+
+  it("drops a vault that is no longer discovered, and what only it raised", () => {
+    const byVault = new Map<string, ReadonlySet<string>>([["gone", new Set([KEY])]]);
+    expect(run(byVault, [], [KEY], ["v1"]).clear).toEqual([KEY]);
+    expect(byVault.has("gone")).toBe(false);
   });
 });

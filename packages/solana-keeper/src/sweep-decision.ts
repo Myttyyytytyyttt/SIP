@@ -200,3 +200,36 @@ export function createCarryWatch(): CarryWatch {
     },
   };
 }
+
+/**
+ * The leg-fee warnings that stand after a sweep, and the ones to clear.
+ *
+ * PER VAULT, BECAUSE A SWEEP NO LONGER TURNS EVERY VAULT. The keys are the
+ * mint's and the rate's, never the vault's (invest-decision.ts, legFeeCeilingAlert),
+ * and they used to be reconciled against ONE set raised by the whole sweep:
+ * anything the sweep did not raise was cleared. That was right only while every
+ * sweep turned every vault. Under the doorbell a vault that simply was not
+ * turned this sweep raised nothing, so its standing warning would be cleared —
+ * and raised again the next time the safety lane reached it: one message per
+ * rotation, forever, which is exactly the alarm the deduplication exists to
+ * prevent.
+ *
+ * So each vault keeps the set its own last LOOKING turn raised (`byVault`,
+ * mutated here), a vault whose turns this sweep never read a mint keeps what it
+ * had, a vault that is no longer discovered is dropped, and what stands is the
+ * union. A key is cleared only when no vault still raises it.
+ */
+export function reconcileLegFees(input: {
+  /** vault → the keys its last looking turn raised. Mutated: this sweep's lookers replace their entries. */
+  readonly byVault: Map<string, ReadonlySet<string>>;
+  /** vault → the keys this sweep's turns raised, only for vaults with a turn that READ the leg mints. */
+  readonly looked: ReadonlyMap<string, ReadonlySet<string>>;
+  readonly discoveredVaults: ReadonlySet<string>;
+  readonly standing: ReadonlySet<string>;
+}): { readonly standing: ReadonlySet<string>; readonly clear: readonly string[] } {
+  for (const [vault, raised] of input.looked) input.byVault.set(vault, raised);
+  for (const vault of [...input.byVault.keys()]) if (!input.discoveredVaults.has(vault)) input.byVault.delete(vault);
+  const standing = new Set<string>();
+  for (const raised of input.byVault.values()) for (const key of raised) standing.add(key);
+  return { standing, clear: [...input.standing].filter((key) => !standing.has(key)) };
+}

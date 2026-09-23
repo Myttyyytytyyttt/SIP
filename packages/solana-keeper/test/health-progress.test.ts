@@ -83,7 +83,7 @@ describe("a sweep that is slow but still moving", () => {
 
 describe("where the keeper's health clock is stamped", () => {
   it("advances at the top of every link's turn, before that turn awaits anything", () => {
-    const loop = lines.findIndex((line) => line.includes("for (const link of links) {"));
+    const loop = lines.findIndex((line) => line.includes("for (const { link: door, lane } of turns) {"));
     expect(loop, "the sweep's per-link loop").toBeGreaterThan(-1);
     const turn = lines.slice(loop + 1, loop + 12);
     const stamped = turn.findIndex((line) => line.includes("noteProgress()"));

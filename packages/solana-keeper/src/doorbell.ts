@@ -422,12 +422,26 @@ export class Doorbell {
    */
   lost(reason: string): void {
     this.#eventsLost += 1;
+    this.requestFullPass(reason);
+  }
+
+  /** The next sweep turns every link. For a sweep that failed before it turned what it selected, too. */
+  requestFullPass(reason: string): void {
     this.#fullPassPending = reason;
   }
 
-  /** A transaction the keeper just sent, which must come back through the webhook. */
-  expectEcho(signature: string, now: number): void {
+  /**
+   * A transaction the keeper just sent, which must come back through the
+   * webhook — IF the webhook is known to watch one of the addresses it touched.
+   * A new link's first settle runs before the debounced edit has added its
+   * wallet, and a deafness declared over a transaction nobody was listening for
+   * would page about a webhook that is working. Unmanaged (null), every one is
+   * expected: a webhook made by hand is taken at its word, and held to it.
+   */
+  expectEcho(signature: string, now: number, touched: readonly string[]): void {
     if (this.#echoes.size >= MAX_ECHOES_PENDING) return;
+    const watched = this.#watched;
+    if (watched !== null && !touched.some((address) => watched.has(address))) return;
     this.#echoes.set(signature, now);
   }
 
@@ -577,11 +591,12 @@ export class Doorbell {
    * trusted, that came out busy with no bell for it inside the hold: something
    * happened to it that nothing rang for.
    */
-  recordTurn(link: DoorLink, lane: Lane, rests: boolean, now: number, outcome: string): void {
+  recordTurn(link: DoorLink, lane: Lane, rests: boolean, now: number, outcome: string): boolean {
     this.#rests.set(link.link, rests);
-    if (lane !== "safety" || rests || this.#rang(link, now)) return;
+    if (lane !== "safety" || rests || this.#rang(link, now)) return false;
     this.#possibleMisses += 1;
     this.#lastPossibleMiss = { wallet: link.wallet, at: iso(now), outcome };
+    return true;
   }
 
   status(now: number): DoorbellCoreStatus {

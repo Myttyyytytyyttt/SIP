@@ -1323,7 +1323,11 @@ describe("the ticks' first steps, over the same bytes", () => {
     // an IDLE turn is exactly how a vault sitting on a 100 bps leg reads on a
     // quiet day. Eight spaces of indent is the link loop's own level, one
     // outside that branch, so this pins the placement and not just the call.
-    expect(keeperSource).toMatch(/\n {8}for \(const alert of invest\.feeWarnings \?\? \[\]\) \{\n {10}legFeeRaised\.add\(alert\.key\);\n {10}alerter\.fire\(alert\);\n {8}\}\n/);
+    // (Since the doorbell the keys are collected PER VAULT — a sweep no longer
+    // turns every vault — but the placement pinned here is unchanged.)
+    expect(keeperSource).toMatch(
+      /\n {8}if \(invest\.feeWarnings !== undefined\) \{\n {10}const raised = legFeeLooked\.get\(vaultAddr\) \?\? new Set<string>\(\);\n {10}for \(const alert of invest\.feeWarnings\) \{\n {12}raised\.add\(alert\.key\);\n {12}alerter\.fire\(alert\);\n {10}\}\n {10}legFeeLooked\.set\(vaultAddr, raised\);\n {8}\}\n/,
+    );
   });
 
   it("clears a leg-fee key the sweep stopped raising, and only once a turn had actually looked", () => {
@@ -1332,11 +1336,20 @@ describe("the ticks' first steps, over the same bytes", () => {
     // next sweep that reads a mint raises it again from nothing. Both halves
     // are the deduplication working: the key is the mint AND the rate, so a
     // worsening fee opens its own condition while the old one is retired here.
-    expect(keeperSource).toMatch(/if \(invest\.feeWarnings !== undefined\) legFeeLooked = true;/);
-    expect(keeperSource).toMatch(/if \(legFeeLooked\) \{\n {6}for \(const key of legFeeStanding\) if \(!legFeeRaised\.has\(key\)\) alerter\.clear\(key\);\n {6}legFeeStanding = legFeeRaised;\n {4}\}/);
-    // Cleared for the SWEEP, not per vault: legFeeCeilingAlert keys on the mint
-    // and the rate with no vault in it, so two vaults holding the same leg are
-    // one condition — and a per-vault clear would silence the other's warning.
+    //
+    // "ONLY ONCE A TURN HAD LOOKED" IS NOW PER VAULT. Under the doorbell a sweep
+    // turns a selection, and a vault that was not turned has learned nothing:
+    // clearing its warning because this sweep did not raise it would re-raise it
+    // on the next rotation, forever. So only a vault whose turn read the mints
+    // enters `legFeeLooked`, and reconcileLegFees (test/sweep-decision.test.ts)
+    // keeps every other vault's last word.
+    expect(keeperSource).toMatch(/if \(invest\.feeWarnings !== undefined\) \{/);
+    expect(keeperSource).toMatch(
+      /const legFees = reconcileLegFees\(\{\n {6}byVault: legFeeByVault,\n {6}looked: legFeeLooked,[\s\S]{0,160}\n {4}for \(const key of legFees\.clear\) alerter\.clear\(key\);\n {4}legFeeStanding = legFees\.standing;/,
+    );
+    // Cleared by KEY across vaults, never by a vault's own template: legFeeCeilingAlert
+    // keys on the mint and the rate with no vault in it, so two vaults holding the
+    // same leg are one condition — and a per-vault clear would silence the other's warning.
     expect(keeperSource).not.toMatch(/alerter\.clear\(`leg-fee:/);
   });
 

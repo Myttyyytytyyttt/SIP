@@ -127,12 +127,12 @@ describe("the real deliveries of 2026-09-23", () => {
 
   it("take the keeper's own settle back as its echo", () => {
     const bell = new Doorbell(true);
-    bell.expectEcho(tx("keeperSettle").transaction.signatures[0]!, T0);
+    bell.expectEcho(tx("keeperSettle").transaction.signatures[0]!, T0, [WALLET, VAULT]);
     expect(bell.status(T0).echoesPending).toBe(1);
     expect(bell.ingest(fixtures["keeperSettle"], known([OWNER]), T0 + 2_000).echoes).toBe(1);
     expect(bell.status(T0 + 2_000).echoesPending).toBe(0);
     // And an enhanced-shape delivery's top-level signature counts too.
-    bell.expectEcho("enhanced-signature", T0);
+    bell.expectEcho("enhanced-signature", T0, [VAULT]);
     expect(bell.ingest([{ signature: "enhanced-signature" }], new Set(), T0).echoes).toBe(1);
   });
 
@@ -194,7 +194,7 @@ describe("trust", () => {
   it("is lost when the keeper's own transaction does not come back, and regained at the next event", () => {
     const links = fleet(80);
     const bell = trustedBell(links);
-    bell.expectEcho("sent-and-never-echoed", T0);
+    bell.expectEcho("sent-and-never-echoed", T0, [links[0]!.wallet]);
     expect(bell.trust(T0 + ECHO_DEADLINE_MS).trusted).toBe(true);
     const deaf = bell.trust(T0 + ECHO_DEADLINE_MS + 1);
     expect(deaf.trusted).toBe(false);
@@ -206,6 +206,28 @@ describe("trust", () => {
     // HEARD AGAIN.
     bell.ingest(fixtures["solDepositToVault"], known(links), T0 + ECHO_DEADLINE_MS + 3);
     expect(bell.trust(T0 + ECHO_DEADLINE_MS + 3).trusted).toBe(true);
+  });
+
+  it("expects no echo for a transaction on addresses the managed webhook does not hold yet", () => {
+    const links = fleet(80);
+    const bell = trustedBell(links);
+    const newcomer = fresh();
+    bell.setWatched(known(links));
+    // A new link's first settle, sent before the debounced edit added its wallet.
+    bell.expectEcho("first-settle-of-a-new-link", T0, [newcomer.wallet, newcomer.vault]);
+    expect(bell.status(T0).echoesPending).toBe(0);
+    expect(bell.trust(T0 + ECHO_DEADLINE_MS + 1).trusted).toBe(true);
+    // One of the addresses watched is enough: the transaction touches it, so Helius delivers it.
+    bell.expectEcho("settle-of-a-watched-wallet", T0, [links[3]!.wallet, newcomer.vault]);
+    expect(bell.status(T0).echoesPending).toBe(1);
+  });
+
+  it("turns everyone after a sweep that failed before it turned what it selected, without counting a lost event", () => {
+    const links = fleet(80);
+    const bell = trustedBell(links);
+    bell.requestFullPass("the previous sweep failed before it turned every link it selected");
+    expect(lanesOf(bell, links, T0 + SWEEP).fullReason).toContain("previous sweep failed");
+    expect(bell.status(T0 + SWEEP).eventsLost).toBe(0);
   });
 
   it("is never given to a doorbell that is off", () => {

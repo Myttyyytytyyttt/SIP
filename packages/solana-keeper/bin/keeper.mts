@@ -45,6 +45,16 @@ import {
 } from "../src/chain-state.js";
 import { ConfigError, SIGNING_SECRET_VARS, loadConfig, type KeeperConfig } from "../src/config.js";
 import { discoverLinks, type ManagedLink } from "../src/discovery.js";
+import {
+  DOORBELL_DEAF_ALERT_KEY,
+  Doorbell,
+  doorbellDeafAlert,
+  turnRests,
+  type DoorLink,
+  type TurnInvest,
+  type TurnSettle,
+} from "../src/doorbell.js";
+import { DOORBELL_SYNC_ALERT_KEY, WebhookSync, createHeliusWebhookClient } from "../src/helius-webhooks.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import {
   INVEST_FAILED_CRITICAL_STREAK,
@@ -85,10 +95,13 @@ import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KEEPER_LOCK_NAME, KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
 import { computeLeaderboard } from "../src/leaderboard.js";
 import {
+  authorizationMatcher,
   decideHealth,
   httpHandler,
   renderLeaderboard,
   renderStatus,
+  type DoorbellStatus,
+  type HooksRoute,
   type KeeperStatus,
   type LeaderboardReply,
   type PendingCarry,
@@ -108,6 +121,7 @@ import {
   VAULT_READ_CRITICAL_STREAK,
   createCarryWatch,
   foldInvestTurn,
+  reconcileLegFees,
   vaultReadAlert,
   type VaultInvestSweep,
 } from "../src/sweep-decision.js";
@@ -354,8 +368,8 @@ const wrapShort = new Map<string, number>();
 const investFailed = new Map<string, number>();
 
 /**
- * The leg-fee alert keys that are STANDING: raised by the last sweep that
- * actually read a leg mint, and not yet cleared.
+ * The leg-fee alert keys that are STANDING: raised by the last turn of some
+ * vault that actually read a leg mint, and not yet cleared.
  *
  * WHY A SET OF KEYS AND NOT A COUNT PER VAULT. The key legFeeCeilingAlert
  * builds is `leg-fee:<mint>:<worst bps>` — the MINT and the RATE, with no vault
@@ -380,7 +394,13 @@ const investFailed = new Map<string, number>();
  * re-raise it on the next sweep that did read — one message per sweep, forever,
  * which is precisely the alarm this deduplication exists to prevent.
  */
-let legFeeStanding = new Set<string>();
+// PER VAULT SINCE THE DOORBELL. The paragraphs above were written when every
+// sweep turned every vault, so "the sweep did not raise it" meant "nobody has
+// it". Now a vault can simply not be turned this sweep, and its silence is not
+// evidence of anything: each vault keeps what its own last looking turn raised,
+// and what stands is their union (reconcileLegFees, src/sweep-decision.ts).
+const legFeeByVault = new Map<string, ReadonlySet<string>>();
+let legFeeStanding: ReadonlySet<string> = new Set<string>();
 
 /**
  * Consecutive sweeps whose ONE batched vault read failed. A sweep that degrades
@@ -389,6 +409,50 @@ let legFeeStanding = new Set<string>();
  * this program's accounts, and by then nothing has settled for three sweeps.
  */
 let vaultReadFailures = 0;
+
+/**
+ * WHICH ROUTE CAN SIGN FOR EACH WALLET, across sweeps.
+ *
+ * IT WAS REBUILT EVERY SWEEP, from the wallets that sweep turned — which was
+ * every wallet. Under the doorbell a sweep turns a selection, and /status
+ * "signable of N" would have shrunk to "of the handful that moved". So it
+ * persists: each turn overwrites its wallet's route, and a wallet that is no
+ * longer discovered is dropped.
+ */
+const signingRoutes = new Map<string, string>();
+
+/**
+ * THE DOORBELL (src/doorbell.ts): Helius tells this keeper which wallets and
+ * vaults moved, so a sweep turns those, whatever has not come to rest, anything
+ * new, and a rotating safety slice — instead of every link. Off without
+ * SIP_SOLANA_DOORBELL_SECRET, and then every sweep is a full pass, exactly as
+ * before it existed.
+ */
+const doorbell = new Doorbell(config.doorbellSecret !== null);
+/**
+ * The wallets and vaults of the latest discovery: the only strings a delivery
+ * can ring. Replaced whole each sweep, never grown from a delivery.
+ */
+let knownAddresses: ReadonlySet<string> = new Set<string>();
+const webhookSync = new WebhookSync({
+  client:
+    config.heliusApiKey === null
+      ? null
+      : createHeliusWebhookClient({
+          apiKey: config.heliusApiKey,
+          alsoScrub: config.doorbellSecret === null ? [] : [config.doorbellSecret],
+        }),
+  url: config.doorbellUrl,
+  secret: config.doorbellSecret,
+  onWatched: (addresses) => doorbell.setWatched(addresses),
+  log: (level, message, fields) => log[level](message, fields),
+});
+/** The /status block, folded in at render like pendingCarries: the receiver can change it between sweeps. */
+const doorbellStatus = (): DoorbellStatus => ({
+  ...doorbell.status(Date.now()),
+  webhook: webhookSync.status(),
+  apiKeySource: config.heliusApiKeySource,
+});
 
 const privyConfig: PrivySolanaConfig | null = config.signing?.privy ?? null;
 
@@ -659,6 +723,7 @@ const health: KeeperStatus = {
   // Projected from the carry book at each request, below: a sweep in flight can
   // record one, and a stale copy here would say a restart costs nothing.
   pendingCarries: [],
+  doorbell: doorbellStatus(),
 };
 
 /**
@@ -734,15 +799,46 @@ async function refreshLeaderboard(): Promise<void> {
 // a process that has stopped sweeping, the same slow endpoint must not make it
 // answer 503 either: before anything has moved the clock is this process's own
 // start, which gives booting the whole bound (decideHealth, src/status.ts).
+/**
+ * POST /hooks/helius, when the doorbell is on. Authenticated in constant time
+ * against the secret, answered at once, ingested after the reply
+ * (src/status.ts, receiveDelivery). A delivery it could not read whole makes
+ * the next sweep a full pass; a refused one is only counted, because a flood
+ * of wrong guesses must not become a flood of log lines.
+ */
+const hooks: HooksRoute | null =
+  config.doorbellSecret === null
+    ? null
+    : {
+        authorized: authorizationMatcher(config.doorbellSecret),
+        accepted: (body) => {
+          const report = doorbell.ingestBody(body.toString("utf8"), knownAddresses, Date.now());
+          if (report.lost !== null) log.warn("doorbell: a delivery was not read whole; the next sweep turns every link", { reason: report.lost });
+        },
+        rejected: () => doorbell.rejected(),
+        lost: (reason) => {
+          doorbell.lost(reason);
+          log.warn("doorbell: a delivery was refused; the next sweep turns every link", { reason });
+        },
+      };
+
 if (config.port !== null) {
   const port = config.port;
-  createServer(
+  const server = createServer(
     httpHandler(
-      () => renderStatus({ ...health, pendingCarries: pendingCarries(), rpcEndpointInUse, failovers }, sharedRedactor),
+      () => renderStatus({ ...health, pendingCarries: pendingCarries(), rpcEndpointInUse, failovers, doorbell: doorbellStatus() }, sharedRedactor),
       () => decideHealth({ now: Date.now(), startedAt: startedAtMs, lastProgressAt, sweepMs: config.sweepMs }),
       () => leaderboard,
+      hooks,
     ),
-  )
+  );
+  // A SLOW BODY IS NOT ALLOWED TO HOLD A SOCKET. The server used to answer GETs
+  // only, which have no body; the receiver reads up to 4 MiB from a public
+  // route, and Node's default gives a request five minutes. Helius sends its
+  // payload at once and wants an answer within a second.
+  server.requestTimeout = 15_000;
+  server.headersTimeout = 10_000;
+  server
     .on("error", (error) => {
       log.error("heartbeat server failed", { port, detail: summarizeUpstreamError(error) });
       process.exit(1);
@@ -870,6 +966,8 @@ function verifyLive(snapshot: ChainSnapshot, atStartup: boolean): LiveVerificati
 }
 
 let cycleRunning = false;
+/** Whether the sweep in flight has selected links it has not finished turning. */
+let selectionOutstanding = false;
 /** When the sweep now running began, so a skip can say how long it has been waiting. */
 let cycleStartedAt: number | null = null;
 /**
@@ -1016,7 +1114,45 @@ async function sweep(): Promise<void> {
     // FOUND, WHICH IS NOT THE SAME AS SERVED. `linksTriaged` below counts the
     // ones that actually got a turn; when the two differ somebody was not
     // looked at, and that is the number the owner needs before he has users.
+    // Under the doorbell they differ by design, and /status's doorbell.lanes
+    // says why each turned link was turned.
     health.linksDiscovered = links.length;
+
+    // THE AUTHORITY'S EMERGENCY SWITCH, from this sweep's config read. While it
+    // is on, every turn below rests as PAUSED; said once here, on change. Read
+    // BEFORE the selection, because its release rings no wallet's bell and so
+    // makes the doorbell turn everyone.
+    const protocolPaused = snapshot.config?.paused === true;
+
+    // WHO THIS SWEEP TURNS (src/doorbell.ts). Everything discovered is still
+    // KNOWN — linkWallets, health.linksDiscovered, the addresses a delivery can
+    // ring, the webhook's address list — and only the turns below are a
+    // selection. A full pass when the doorbell is off or not trusted, on the
+    // first sweep, on a takeover, on the protocol's unpause and after a lost
+    // delivery; otherwise the bell, whatever has not come to rest, anything new
+    // or not yet watched, and a rotating safety slice.
+    const doorLinks: (DoorLink & { readonly managed: ManagedLink })[] = links.map((link) => ({
+      link: link.linkAddress.toBase58(),
+      wallet: link.wallet.toBase58(),
+      vault: link.vault.toBase58(),
+      managed: link,
+    }));
+    knownAddresses = new Set(doorLinks.flatMap((link) => [link.wallet, link.vault]));
+    const selection = doorbell.select({ links: doorLinks, now: Date.now(), sweepMs: config.sweepMs, protocolPaused, live: liveAtStart });
+    const turns = selection.turns;
+    // Set until the loop below has turned every selected link; a sweep that
+    // throws before then asks the next one to turn everybody.
+    selectionOutstanding = turns.length > 0;
+    changes.change(
+      "doorbell-pass",
+      selection.fullReason === null ? "doorbell: turning a selection" : "doorbell: full pass",
+      selection.fullReason === null ? {} : { reason: selection.fullReason },
+    );
+    // THE WEBHOOK FOLLOWS THE DISCOVERY, detached and one at a time: a slow
+    // Helius API delays the webhook, never a settle. Only the acting keeper
+    // manages it; with no links there is nothing to watch, and an empty list is
+    // never sent over a full one.
+    if (knownAddresses.size > 0) void webhookSync.tick({ acting: liveAtStart, addresses: [...knownAddresses], now: Date.now() });
     // EVERY VAULT THE LINKS NAME, IN ONE REQUEST. Each settle turn read its own
     // vault, and the history mirror read it again after every SETTLED.
     //
@@ -1033,13 +1169,14 @@ async function sweep(): Promise<void> {
     let vaults: ReadonlyMap<string, VaultState | null> | null = null;
     const vaultReadAt = Date.now();
     try {
-      vaults = await readVaults(program, links.map((link) => link.vault));
+      // ONLY THE VAULTS THIS SWEEP TURNS: a vault nobody is turned for is a read nobody uses.
+      vaults = await readVaults(program, turns.map((turn) => turn.link.managed.vault));
       vaultReadFailures = 0;
       alerter.clear(VAULT_READ_ALERT_KEY);
     } catch (error) {
       vaultReadFailures += 1;
       const detail = summarizeUpstreamError(error, { take: 3, maxChars: 500 });
-      log.warn("the batched vault read failed; this sweep reads one vault per link instead", { links: links.length, detail });
+      log.warn("the batched vault read failed; this sweep reads one vault per link instead", { links: turns.length, detail });
       // The alerter dedupes by key alone, so the standing warning is cleared at
       // the escalation or it would swallow the critical, as invest-failed does.
       if (vaultReadFailures === VAULT_READ_CRITICAL_STREAK) alerter.clear(VAULT_READ_ALERT_KEY);
@@ -1067,9 +1204,7 @@ async function sweep(): Promise<void> {
       return reading;
     };
 
-    // THE AUTHORITY'S EMERGENCY SWITCH, from this sweep's config read. While it
-    // is on, every turn below rests as PAUSED; said once here, on change.
-    const protocolPaused = snapshot.config?.paused === true;
+    // The pause switch itself was read above, before the selection.
     if (snapshot.config !== null) {
       changes.change(
         "protocol-paused",
@@ -1091,7 +1226,7 @@ async function sweep(): Promise<void> {
     // paginated scans for N linked wallets. A failure here is not fatal: each
     // wallet falls back to its own lookup, and a local keypair still works.
     let privyIndex: ReadonlyMap<string, PrivyWalletEntry> | undefined;
-    if (privyConfig !== null && links.length > 0) {
+    if (privyConfig !== null && turns.length > 0) {
       try {
         privyIndex = await buildPrivySolanaIndex(privyConfig);
       } catch (error) {
@@ -1127,13 +1262,18 @@ async function sweep(): Promise<void> {
     health.lastSweepLinks = links.length;
     health.lastSweepError = null;
     alerter.clear("sweep-failed");
-    const signingRoutes = new Map<string, string>();
+    // Routes persist across sweeps (signingRoutes above); a wallet that is no
+    // longer discovered stops being counted.
+    const discoveredWallets = new Set(doorLinks.map((link) => link.wallet));
+    for (const wallet of [...signingRoutes.keys()]) if (!discoveredWallets.has(wallet)) signingRoutes.delete(wallet);
     /** Each vault's invest turns for THIS sweep, folded; the streaks are applied once from it below. */
     const investSweep = new Map<string, VaultInvestSweep>();
-    /** Every leg-fee alert key raised anywhere in THIS sweep, reconciled against legFeeStanding once below. */
-    const legFeeRaised = new Set<string>();
-    /** Whether ANY turn this sweep got as far as reading a leg mint. Nothing is cleared until one did. */
-    let legFeeLooked = false;
+    /**
+     * The leg-fee keys each vault's turns raised THIS sweep — only for vaults
+     * with a turn that got as far as reading a leg mint. Reconciled per vault
+     * once below (reconcileLegFees).
+     */
+    const legFeeLooked = new Map<string, Set<string>>();
     // THE LINK-TO-WALLET PAIRING /status NEEDS, from the set this sweep just
     // discovered. The carry book is keyed by link; an operator reads wallets.
     // Replaced, not merged, so an unlinked wallet stops being named.
@@ -1141,12 +1281,15 @@ async function sweep(): Promise<void> {
     for (const link of links) linkWallets.set(link.linkAddress.toBase58(), link.wallet.toBase58());
     log.info("sweep", {
       links: links.length,
+      turned: turns.length,
+      ...(selection.fullReason === null ? { lanes: selection.lanes } : { fullPass: selection.fullReason }),
       localKeypairs: localSigners?.signers.size ?? 0,
       mode: liveAtStart ? "live" : "dry-run",
       ...(liveAtStart ? {} : { missingLiveCondition: health.missingLiveCondition }),
     });
 
-    for (const link of links) {
+    for (const { link: door, lane } of turns) {
+      const link = door.managed;
       // THE SWEEP MOVED: another turn is starting. A pass whose turns keep
       // beginning is working, however long the whole pass takes; one wedged
       // inside a turn stops stamping here and /health answers 503, as it should.
@@ -1165,6 +1308,11 @@ async function sweep(): Promise<void> {
       // settlement turn threw" for an exception thrown while buying a basket —
       // naming the wrong money path, and clearing the other one's alerts.
       let phase: "settle" | "invest" = "settle";
+      /** What this turn leaves behind for the doorbell: whether it may rest. A turn that threw may not. */
+      let doorTurn: { readonly settle: TurnSettle; readonly invest: TurnInvest | null; readonly wrapShort?: boolean } = {
+        settle: "THREW",
+        invest: null,
+      };
       try {
         // Prefer Privy (no local key); fall back to a local keypair if present.
         // A resolution FAILURE is logged with its real reason and falls back.
@@ -1276,6 +1424,10 @@ async function sweep(): Promise<void> {
           carries: settleCarries,
         });
         settleOutcome = settle.outcome;
+        // EVERY TRANSACTION THIS KEEPER SENDS MUST COME BACK THROUGH THE
+        // WEBHOOK: it touches the wallet and the vault, both watched. One that
+        // does not come back makes the doorbell deaf (src/doorbell.ts).
+        if (settle.signature !== undefined) doorbell.expectEcho(settle.signature, Date.now(), [wallet, vaultAddr]);
         // MONEY EVENTS always log and clear the dedupe key — a SETTLED, a RETRY
         // or a real FAILED is news every time. The resting states each log ONCE
         // on change; they stay visible in /status instead, which never dedupes.
@@ -1441,14 +1593,19 @@ async function sweep(): Promise<void> {
         //
         // AND IT CHANGES NOTHING ELSE. No outcome, no purchase, no detail: the
         // turn above already decided everything it decides.
-        for (const alert of invest.feeWarnings ?? []) {
-          legFeeRaised.add(alert.key);
-          alerter.fire(alert);
-        }
         // `undefined` means this turn stopped before the mints and learned
         // nothing; an EMPTY array means it looked and found nothing to say. Only
-        // the second is evidence that a standing warning has gone.
-        if (invest.feeWarnings !== undefined) legFeeLooked = true;
+        // the second is evidence that a standing warning has gone — for THIS
+        // vault, which is all a turn can speak for.
+        if (invest.feeWarnings !== undefined) {
+          const raised = legFeeLooked.get(vaultAddr) ?? new Set<string>();
+          for (const alert of invest.feeWarnings) {
+            raised.add(alert.key);
+            alerter.fire(alert);
+          }
+          legFeeLooked.set(vaultAddr, raised);
+        }
+        for (const purchase of invest.purchases ?? []) doorbell.expectEcho(purchase.signature, Date.now(), [vaultAddr]);
 
         // COUNTED PER SWEEP, NOT PER TURN. Both streaks are keyed by VAULT and
         // this loop runs per LINK, so a vault with three linked wallets advanced
@@ -1457,6 +1614,8 @@ async function sweep(): Promise<void> {
         // above still runs for every link, because it moves money; only the
         // counting moved, to just after this loop.
         investSweep.set(vaultAddr, foldInvestTurn(investSweep.get(vaultAddr), invest));
+
+        doorTurn = { settle: settle.outcome, invest: invest.outcome, wrapShort: invest.wrap?.short === true };
 
         // /status always reflects the latest condition, deduped or not.
         health.wallets[wallet] = {
@@ -1494,6 +1653,7 @@ async function sweep(): Promise<void> {
           settleRetries.delete(wallet);
         } else {
           investSweep.set(vaultAddr, foldInvestTurn(investSweep.get(vaultAddr), { outcome: "FAILED", detail }));
+          if (settleOutcome !== null) doorTurn = { settle: settleOutcome, invest: "THREW" };
         }
         // COUNTED EVEN THOUGH IT THREW: a wallet missing from this map is a
         // wallet /status does not count at all, which reads as a smaller fleet
@@ -1513,6 +1673,17 @@ async function sweep(): Promise<void> {
           detail,
           at: new Date().toISOString(),
         };
+      }
+      // WHAT THE DOORBELL LEARNS FROM THIS TURN, outside the try so a throw is
+      // recorded too (as busy). A link turned only by the safety rotation that
+      // had work waiting and no bell is the evidence the webhook missed it.
+      if (doorbell.recordTurn(door, lane, turnRests(doorTurn), Date.now(), `${doorTurn.settle}/${doorTurn.invest ?? "none"}`)) {
+        log.warn("doorbell: a link the webhook never rang had work waiting (possible miss)", {
+          wallet,
+          vault: vaultAddr,
+          settle: doorTurn.settle,
+          invest: doorTurn.invest,
+        });
       }
       // OUTSIDE THE TRY AND ITS CATCH, so a turn that threw is still counted as
       // a user who was LOOKED AT — it was, expensively — and its milliseconds
@@ -1577,9 +1748,31 @@ async function sweep(): Promise<void> {
     // nothing but early refusals would drop every standing key and the next
     // real read would raise them all again: one message per sweep, forever,
     // which is exactly how an operator learns to ignore this channel.
-    if (legFeeLooked) {
-      for (const key of legFeeStanding) if (!legFeeRaised.has(key)) alerter.clear(key);
-      legFeeStanding = legFeeRaised;
+    // PER VAULT NOW: a vault this sweep did not turn keeps what its last
+    // looking turn raised, so its warning is neither cleared nor re-raised by
+    // the rotation.
+    const legFees = reconcileLegFees({
+      byVault: legFeeByVault,
+      looked: legFeeLooked,
+      discoveredVaults: new Set(doorLinks.map((link) => link.vault)),
+      standing: legFeeStanding,
+    });
+    for (const key of legFees.clear) alerter.clear(key);
+    legFeeStanding = legFees.standing;
+
+    // EVERY SELECTED LINK HAS HAD ITS TURN.
+    selectionOutstanding = false;
+
+    // THE DOORBELL'S OWN TWO ALERTS. doorbell-deaf: it was trusted and is not
+    // now, so every sweep is a full pass again — nothing is missed, but the
+    // webhook needs a look. doorbell-sync: the webhook cannot be kept in step.
+    if (doorbell.enabled) {
+      const deaf = doorbellDeafAlert(doorbell.trust(Date.now()), doorbell.everTrusted);
+      if (deaf.fire !== null) alerter.fire(deaf.fire);
+      else if (deaf.clear) alerter.clear(DOORBELL_DEAF_ALERT_KEY);
+      const sync = webhookSync.syncAlert();
+      if (sync.fire !== null) alerter.fire(sync.fire);
+      else if (sync.clear) alerter.clear(DOORBELL_SYNC_ALERT_KEY);
     }
 
     // THE OPERATOR'S FIRST QUESTION, answered once per change: how many of these
@@ -1607,6 +1800,11 @@ async function sweep(): Promise<void> {
     // been advanced, so the cadence counts sweeps that actually happened.
     await reestablishAuthorizationKey();
   } catch (error) {
+    // A SELECTION NOBODY FINISHED TURNING is a set of bells nobody answered:
+    // they aged in the hold while the sweep failed, so the next sweep turns
+    // everybody rather than trusting a hold that may have lapsed.
+    if (selectionOutstanding) doorbell.requestFullPass("the previous sweep failed before it turned every link it selected");
+    selectionOutstanding = false;
     health.lastSweepError = summarizeUpstreamError(error, { take: 3, maxChars: 500 });
     log.error("sweep cycle failed", { detail: health.lastSweepError });
     alerter.fire({
@@ -1693,6 +1891,11 @@ log.info("keeper starting", {
   // mean the site will show an empty past for vaults that really did settle.
   history: history.detail,
   alerts: health.alerts,
+  // WHETHER A SWEEP TURNS A SELECTION OR EVERYBODY, and who keeps the webhook.
+  // Never the secret or the key: whether they exist, and where the key came from.
+  doorbell: config.doorbellSecret === null ? "off — every sweep turns every link" : "on — every sweep is a full pass until the first event",
+  doorbellWebhook: webhookSync.status().reason ?? "managed",
+  heliusApiKey: config.heliusApiKeySource,
 });
 
 /**
