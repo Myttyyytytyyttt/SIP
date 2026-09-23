@@ -428,3 +428,79 @@ export const stripTooltip = (input: {
   ]
     .filter((part): part is string => part !== null)
     .join(" · ");
+
+/**
+ * THE NEW-USER SETUP: welcome, create the vault, done — over the dashboard
+ * (src/components/onboarding).
+ *
+ * NO NEW JARGON. Older dashboard sentences say "keeper"; these say SaverFi, and
+ * live-copy.test.ts holds them to it. "Pension key" stays: it is the product's
+ * name for the wallet that owns the vault.
+ *
+ * NOTHING HERE PROMISES MORE THAN THE PROGRAM DOES. The rate is profit only
+ * (volume is not offered), a loss comes off the next gain exactly as
+ * VAULT_COPY.profitRule says, and every cost that exists is named — rent, the
+ * link's rent, the network fee each settlement costs. Every figure arrives as
+ * text from code; one that could not be read is said as such, never as a zero.
+ */
+export const ONBOARDING_COPY = {
+  stepOf: (current: number, total: number): string => `Step ${current} of ${total}`,
+  /** The identity line under every step, and the way out of a wrong wallet. */
+  pensionKey: (shortKey: string): string => `Pension key ${shortKey}`,
+  notThisWallet: "Not this wallet?",
+  /** Said once, on the first screen: closing is allowed, and where it leads. */
+  closeHint: "You can close this and look around with example numbers first. Connect brings you back here.",
+  /** The close button's name while a signature is being asked for. */
+  closeHeld: "Close (not while your wallet is asked to approve)",
+  close: "Close",
+
+  welcome: {
+    title: `Welcome to ${BRAND}`,
+    lede: "A slice of your trading gains, put aside for later.",
+    tradeTitle: "Trade as you do today",
+    trade: `From a ${BRAND} trading wallet linked to your vault. Export its key to use it in Axiom or any Solana app.`,
+    saveTitle: (rate: string): string => `${rate} of each gain is saved`,
+    save: (rate: string, dropAfter: number): string =>
+      `When a stretch of trading ends with more SOL than it started, ${rate} of the gain moves into your vault. ` +
+      `A losing stretch moves nothing, and its loss comes off later gains until your trading wallet has made ${dropAfter} transactions of its own while still behind.`,
+    investTitle: "Your savings can be invested",
+    invest: (examples: string): string => `Choose tokenized stocks for it to buy, such as ${examples}. Each issuer’s powers over its stock are shown before you sign.`,
+    ownTitle: "Only you can take it out",
+    own: `Only your pension key can withdraw from the vault, and ${BRAND} cannot pause or block a SOL withdrawal.`,
+    costTitle: "What it costs",
+    costVault: (rent: string, fees: string): string => `Your vault: ${rent} SOL of rent that does not come back, plus ${fees} SOL of network fees.`,
+    costVaultUnknown: "Your vault: rent that does not come back, plus network fees. The rent could not be read just now; your wallet shows the total before you approve.",
+    costLink: (rent: string): string => `Each trading wallet you link: ${rent} SOL of rent, plus network fees. The program returns the rent on unlink, which ${BRAND} does not offer yet.`,
+    costLinkUnknown: `Each trading wallet you link: rent, plus network fees. The program returns the rent on unlink, which ${BRAND} does not offer yet.`,
+    costSettle: "Each settlement is a Solana transaction, and your trading wallet pays its network fee.",
+    costInvest:
+      "Investing, if you set it up: rent that does not come back. Each buy pays the pool’s fees, may fill up to the price limit you sign, " +
+      "and some stocks charge their issuer’s transfer fee. Every limit is shown before you approve.",
+    continue: "Continue",
+  },
+
+  vault: {
+    title: "Create your vault",
+    modeTitle: (rate: string): string => `Profit · ${rate}`,
+    mode: (rate: string, dropAfter: number): string =>
+      `${rate} of each gain your trading wallet makes moves into this vault. A losing stretch moves nothing, and its loss comes off later gains ` +
+      `until your trading wallet has made ${dropAfter} transactions of its own while still behind.`,
+    advanced: "Advanced",
+    advancedSummary: (max: string, reserve: string): string => `At most ${max} SOL per settlement · ${reserve} SOL always left in the trading wallet`,
+    maxHint: "The most one settlement moves into your vault. Anything above it is not carried over.",
+    reserveHint: `${BRAND} never takes your trading wallet below this, so it keeps SOL for its own fees.`,
+    changeLater: "You can change these limits after the vault is made.",
+    approveOnce: "Your wallet asks you to approve once.",
+    /** A create was sent and not confirmed: the footer says where the way forward is. */
+    checkAbove: "A vault creation was sent and is not confirmed yet. Check it above before trying again.",
+    back: "Back",
+  },
+
+  ready: {
+    title: "Your vault is ready",
+    body: "Nothing is saved until a trading wallet is linked to it. Your dashboard walks you through the rest.",
+    nextTitle: "Next, from your dashboard",
+    next: ["Create and link a trading wallet", "Send it SOL and trade from it", "Choose what your savings buy"],
+    done: "Go to my dashboard",
+  },
+} as const;

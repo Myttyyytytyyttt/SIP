@@ -7,8 +7,8 @@
 import { DEFAULT_VAULT_POLICY, VOLUME_MODE_OFFERED } from "@sip/solana-core/client";
 import { describe, expect, it } from "vitest";
 
-import { ACTIVITY_COPY, BRAND, LIVE_COPY, MODE_COPY, STATS_COPY, stripTooltip } from "@/lib/live-copy";
-import { ratePercent } from "@/lib/vault-copy";
+import { ACTIVITY_COPY, BRAND, LIVE_COPY, MODE_COPY, ONBOARDING_COPY, STATS_COPY, stripTooltip } from "@/lib/live-copy";
+import { LOSS_DROPPED_AFTER_TXS, VAULT_COPY, ratePercent } from "@/lib/vault-copy";
 
 /** Sample arguments for the copy functions, so their OUTPUT is checked too, not just the literals. */
 const SAMPLES: readonly unknown[][] = [
@@ -44,7 +44,7 @@ function everySentence(): string[] {
     }
     if (value !== null && typeof value === "object") for (const entry of Object.values(value)) walk(entry);
   };
-  walk({ BRAND, LIVE_COPY, MODE_COPY, ACTIVITY_COPY, STATS_COPY, stripTooltip });
+  walk({ BRAND, LIVE_COPY, MODE_COPY, ACTIVITY_COPY, STATS_COPY, stripTooltip, ONBOARDING_COPY });
   return out;
 }
 
@@ -256,5 +256,71 @@ describe("the strip's tooltip", () => {
     expect(capped).toBe("0.036634582 SOL · Trading wallet 1 · 20 % of 0.5 SOL profit · capped at 0.06 SOL · 4m ago");
     const plain = stripTooltip({ paid: "0.06", label: "Trading wallet 1", rate: "20 %", base: "0.5", measure: "profit", capped: null, when: "4m ago" });
     expect(plain).toBe("0.06 SOL · Trading wallet 1 · 20 % of 0.5 SOL profit · 4m ago");
+  });
+});
+
+
+// THE NEW-USER SETUP says only what the program does, in plain words.
+describe("the new-user setup's words", () => {
+  /** Every sentence ONBOARDING_COPY can produce, literals and functions alike. */
+  function setupSentences(): string[] {
+    const out: string[] = [];
+    const walk = (value: unknown): void => {
+      if (typeof value === "string") out.push(value);
+      else if (typeof value === "function") {
+        for (const args of SAMPLES) {
+          try {
+            const produced = (value as (...rest: unknown[]) => unknown)(...args);
+            if (typeof produced === "string") out.push(produced);
+          } catch {
+            // Wrong arity for this sample.
+          }
+        }
+      } else if (value !== null && typeof value === "object") for (const entry of Object.values(value)) walk(entry);
+    };
+    walk(ONBOARDING_COPY);
+    return out;
+  }
+  const rate = ratePercent(DEFAULT_VAULT_POLICY.skimBps);
+
+  it("carries no jargon and no other name: SaverFi, never the keeper, SIP or Nuvem", () => {
+    const sentences = setupSentences();
+    expect(sentences.length).toBeGreaterThan(30);
+    expect(sentences.filter((sentence) => /\bkeeper\b|nuvem|\bSIP\b|[áéíóúñ¿¡]/i.test(sentence))).toEqual([]);
+    expect(ONBOARDING_COPY.welcome.title).toContain(BRAND);
+  });
+
+  it("promises profit only — volume is not offered — and says a loss carries only as far as the program carries it", () => {
+    expect(VOLUME_MODE_OFFERED).toBe(false);
+    expect(setupSentences().filter((sentence) => /volume|every trade|every buy/i.test(sentence))).toEqual([]);
+    for (const rule of [ONBOARDING_COPY.welcome.save(rate, LOSS_DROPPED_AFTER_TXS), ONBOARDING_COPY.vault.mode(rate, LOSS_DROPPED_AFTER_TXS)]) {
+      expect(rule).toContain(rate);
+      expect(rule).toMatch(/loss comes off later gains/);
+      // The drop is part of the rule (VAULT_COPY.profitRule): promising the loss forever would be a promise the program does not keep.
+      expect(rule).toContain(`${LOSS_DROPPED_AFTER_TXS} transactions of its own while still behind`);
+    }
+  });
+
+  it("names every cost there is, and an unread rent as unread — never a zero or a placeholder", () => {
+    const { welcome } = ONBOARDING_COPY;
+    expect(welcome.costVault("0.00128524", "0.000011")).toContain("does not come back");
+    // The program returns link rent on unlink, and SaverFi offers no unlink yet: said, not promised.
+    expect(welcome.costLink("0.00130556")).toContain("does not offer yet");
+    expect(welcome.costLinkUnknown).toContain("does not offer yet");
+    expect(welcome.costInvest).toMatch(/pool’s fees/);
+    expect(welcome.costInvest).toMatch(/transfer fee/);
+    expect(welcome.costInvest).toMatch(/price limit/);
+    expect(welcome.costSettle).toMatch(/network fee/);
+    expect(welcome.costInvest).toMatch(/rent/);
+    for (const unread of [welcome.costVaultUnknown, welcome.costLinkUnknown]) expect(unread).not.toMatch(/\d|null|undefined|—/);
+  });
+
+  it("keeps the product's name for the wallet that owns the vault", () => {
+    expect(ONBOARDING_COPY.pensionKey("Pens…1111").toLowerCase()).toContain("pension key");
+  });
+
+  it("the ready screen agrees with the dashboard card behind it", () => {
+    expect(ONBOARDING_COPY.ready.title).toBe(LIVE_COPY.noTradingWallet.title);
+    expect(ONBOARDING_COPY.vault.title).not.toBe(VAULT_COPY.title);
   });
 });

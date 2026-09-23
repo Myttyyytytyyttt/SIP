@@ -37,12 +37,30 @@ import type { ConfigProblem, SolanaPublicConfig } from "@/lib/config";
 /** null only OUTSIDE a host — inside one there is always a modal to open. */
 const OpenerContext = createContext<(() => void) | null>(null);
 
+/** Whether the wallets modal is on screen. The new-user setup waits while it is: two dialogs never stack. */
+const WalletsOpenContext = createContext(false);
+
+export function useWalletsModalOpen(): boolean {
+  return useContext(WalletsOpenContext);
+}
+
 type Unsubscribe = () => void;
 const ClosedContext = createContext<((listener: () => void) => Unsubscribe) | null>(null);
 
 /** The opener, or null when this subtree has no host. Safe to call anywhere. */
 export function useWalletsOpener(): (() => void) | null {
   return useContext(OpenerContext);
+}
+
+/**
+ * Hands this subtree a different opener, or the host's own when `opener` is
+ * null. The dashboard uses it while a connected key has no vault: every way into
+ * the wallets modal then opens the new-user setup instead, so there is one way
+ * to make a vault on the page, not two different forms for the same thing.
+ */
+export function WalletsOpenerOverride({ opener, children }: { readonly opener: (() => void) | null; readonly children: ReactNode }) {
+  const inherited = useContext(OpenerContext);
+  return <OpenerContext.Provider value={opener ?? inherited}>{children}</OpenerContext.Provider>;
 }
 
 /**
@@ -98,6 +116,7 @@ export function WalletsHost({
 
   return (
     <OpenerContext.Provider value={opener}>
+      <WalletsOpenContext.Provider value={open}>
       <ClosedContext.Provider value={subscribe}>
       {config !== null ? (
         // THE PROVIDER WRAPS THE TREE, and does not sit beside it: the shell
@@ -118,6 +137,7 @@ export function WalletsHost({
         </>
       )}
       </ClosedContext.Provider>
+      </WalletsOpenContext.Provider>
     </OpenerContext.Provider>
   );
 }

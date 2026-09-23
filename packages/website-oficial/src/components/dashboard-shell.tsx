@@ -10,6 +10,13 @@
  * choice is offered, and Live shows an honest connect card — never the sample
  * under a label promising somebody their own pension.
  *
+ * AND ITS ONE EXCEPTION, THE NEW-USER SETUP (owner, 09-23). A connected key with
+ * no vault gets the setup over the page (src/components/onboarding): welcome,
+ * then its vault. Closing it puts the visitor's sample on screen, and Connect or
+ * Live reopens it where it was left. The frame owns that: it reads the key's
+ * vault through the shared vault screen, keeps the close per tab, carries it on
+ * Back and Forward, and mounts the setup beside the page so it outlives a close.
+ *
  * NOTHING IS PAINTED BEFORE PRIVY ANSWERS. `ready` is false on the server, so a
  * request for /?mode=mock renders a skeleton and the sample HTML is never sent
  * to a browser that might be a connected user's. The landing is the one
@@ -21,7 +28,7 @@
  * frame never calls it at all.
  */
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { useLogin, usePrivy } from "@privy-io/react-auth";
 import { LogOut } from "lucide-react";
@@ -45,11 +52,16 @@ import { SiteHeader } from "@/components/site-header";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { WalletActivity } from "@/components/wallet-activity";
-import { useWalletsClosed, useWalletsOpener } from "@/components/wallets-host";
+import { OnboardingHost } from "@/components/onboarding/OnboardingHost";
+import { WalletsOpenerOverride, useWalletsClosed, useWalletsModalOpen, useWalletsOpener } from "@/components/wallets-host";
 import { useLiveDashboard, type LiveDashboardStore } from "@/hooks/use-live-dashboard";
+import { useOnboardingClosed } from "@/hooks/use-onboarding-closed";
+import { useVaultScreen } from "@/hooks/use-vault-state";
 import { decideDashboard, readUrlMode, toggleModeOf, urlWithMode, type DashboardState, type UrlMode } from "@/lib/dashboard-mode";
 import { formatUsd } from "@/lib/amounts";
 import { LIVE_COPY, MODE_COPY } from "@/lib/live-copy";
+import { onboardingWanted, setupIsTheDoor, vaultPresenceOf } from "@/lib/onboarding";
+import { ONBOARDING_DONE_KEY, forgetOnboarding, setOnboardingClosed } from "@/lib/onboarding-memory";
 import { pensionKeyOf } from "@/lib/pension-key";
 import { privyFailure } from "@/lib/privy-failure";
 import { PRIVY_PATIENCE_MS } from "@/lib/privy-patience";
@@ -90,7 +102,7 @@ const solscanAccountUrl = (address: string): string => `https://solscan.io/accou
 function accountSlot(
   state: DashboardState,
   pensionKey: string | null,
-  actions: { readonly onConnect: () => void; readonly onDisconnect: () => void; readonly openSetup: () => void },
+  actions: { readonly onConnect: () => void; readonly onDisconnect: () => void; readonly openSetup: () => void; readonly onResume: () => void },
   worthUsdcRaw: bigint | null = null,
 ): ReactNode {
   switch (state.account) {
@@ -124,8 +136,39 @@ function accountSlot(
           <DisconnectButton onDisconnect={actions.onDisconnect} />
         </>
       );
+    case "connect-onboarding":
+      // The visitor's own Connect, word for word: the key is connected already,
+      // so it reopens the setup where it was left instead of asking Privy. The
+      // setup hands focus back here when it closes (OnboardingDialog).
+      return (
+        <Button size="sm" onClick={actions.onResume} data-onboarding-resume="">
+          {LIVE_COPY.connect}
+        </Button>
+      );
   }
 }
+
+/**
+ * The history entries the setup makes carry this tag, so Back and Forward move
+ * the close with them: Back from the sample returns to the setup, Forward to the
+ * sample. Entries it did not make carry nothing and change nothing.
+ */
+const SETUP_ENTRY = "saverfiSetup";
+type SetupEntry = "open" | "closed";
+
+const setupEntryOf = (state: unknown): SetupEntry | null => {
+  const value = typeof state === "object" && state !== null ? (state as Record<string, unknown>)[SETUP_ENTRY] : null;
+  return value === "open" || value === "closed" ? value : null;
+};
+
+/**
+ * The state to hand history.pushState/replaceState: the setup's tag and nothing
+ * else. NEVER Next's own fields — Next's patched history methods treat a state
+ * carrying __NA as its own call and skip syncing the router, so useSearchParams
+ * would keep the old URL and Next would later write that old URL back. Next
+ * copies its fields onto whatever is passed.
+ */
+const setupState = (entry: SetupEntry | null): Record<string, unknown> => (entry === null ? {} : { [SETUP_ENTRY]: entry });
 
 // ── the frame ────────────────────────────────────────────────────────────────
 
@@ -191,7 +234,7 @@ function UnconfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJso
     mock,
     live: null,
     pensionKey: null,
-    account: accountSlot(state, null, { onConnect: openSetup, onDisconnect: openSetup, openSetup }),
+    account: accountSlot(state, null, { onConnect: openSetup, onDisconnect: openSetup, openSetup, onResume: openSetup }),
     setMode,
     onConnect: openSetup,
     onDisconnect: openSetup,
@@ -242,6 +285,15 @@ function ConfiguredFrame({
     return () => window.clearTimeout(timer);
   }, [ready]);
 
+  // THE NEW-USER SETUP'S INPUTS. The key counts as connected only once Privy
+  // has said so; its vault comes from the shared vault screen, which reads it
+  // whatever the page shows (wallets-host.tsx) — the live store reads only
+  // while the page is Live, and the sample is exactly when it is not.
+  const vaultScreen = useVaultScreen();
+  const connectedKey = ready && user !== null && user !== undefined ? pensionKey : null;
+  const vault = vaultPresenceOf(vaultScreen, connectedKey);
+  const closed = useOnboardingClosed(connectedKey);
+
   const state = decideDashboard({
     walletsConfigured: true,
     knownSession,
@@ -253,16 +305,108 @@ function ConfiguredFrame({
     urlMode,
     pathname,
     landingAllowed: pathname === "/",
+    onboarding: { closed, vault },
   });
 
   // ?mode=mock with a key connected becomes ?mode=live, once per change, so a
-  // reload of a connected tab can never land on the sample or the landing.
+  // reload of a connected tab can never land on the sample or the landing —
+  // unless its setup was closed, and then the sample is where it belongs.
+  // The entry's own state rides along (the setup's Back/Forward tag), and a
+  // traversal still committing is left alone: its pathname is not ours yet.
   useEffect(() => {
     if (state.replaceUrlWith === null) return;
-    window.history.replaceState({}, "", state.replaceUrlWith);
-  }, [state.replaceUrlWith]);
+    if (window.location.pathname !== pathname) return;
+    window.history.replaceState(setupState(setupEntryOf(window.history.state)), "", state.replaceUrlWith);
+  }, [state.replaceUrlWith, pathname]);
 
   const live = useLiveDashboard({ pensionKey: state.kind === "live" ? pensionKey : null, privyWallets });
+  const liveStage = live.view.kind === "ready" ? live.view.data.stage : null;
+
+  // Once the setup has been on screen for this key — or was asked for — a read
+  // that fails keeps it up with its own Retry, instead of pulling it away. It
+  // waits while the wallets modal is open: two dialogs never stack.
+  const [engagedKey, setEngagedKey] = useState<string | null>(null);
+  const engaged = connectedKey !== null && engagedKey === connectedKey;
+  const walletsOpen = useWalletsModalOpen();
+  const wanted = !walletsOpen && onboardingWanted({ kind: state.kind, closed, vault, liveStage, engaged });
+  useEffect(() => {
+    if (wanted && connectedKey !== null) setEngagedKey(connectedKey);
+  }, [wanted, connectedKey]);
+
+  // A vault that exists ends the setup, wherever it was made — its memory and
+  // its latch both, so a later failed read can never bring it back. A session
+  // that ends drops the latch too.
+  useEffect(() => {
+    if (connectedKey === null) setEngagedKey(null);
+    else if (vault === "exists") {
+      forgetOnboarding(connectedKey);
+      setEngagedKey(null);
+    }
+  }, [vault, connectedKey]);
+
+  // Whether the setup's own write is running: then nothing may close it, Back included.
+  const setupRunning = useRef(false);
+  const onSetupRunning = useCallback((running: boolean) => {
+    setupRunning.current = running;
+  }, []);
+
+  // The two reads disagree — the vault read says none, the live read shows a
+  // vault's stages — so the vault read is the older one: read it again, once.
+  const vaultOutdated = vault === "missing" && liveStage !== null && liveStage !== "no_vault" && liveStage !== "vault_unreadable";
+  const refreshVaultNow = vaultScreen?.refresh ?? null;
+  useEffect(() => {
+    if (vaultOutdated) refreshVaultNow?.();
+  }, [vaultOutdated, refreshVaultNow]);
+
+  // Back and Forward carry the close with the entries the setup made.
+  useEffect(() => {
+    if (connectedKey === null) return undefined;
+    const onPop = (event: PopStateEvent): void => {
+      const entry = setupEntryOf(event.state);
+      if (entry === null) return;
+      // Back while the wallet is being asked to approve: the setup stays, on an entry of its own again.
+      if (entry === "closed" && setupRunning.current) {
+        window.history.pushState(setupState("open"), "", urlWithMode(window.location.pathname, "live"));
+        return;
+      }
+      setOnboardingClosed(connectedKey, entry === "closed");
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [connectedKey]);
+
+  // Another tab of this browser finished a setup: read the vault again, so a
+  // tab showing the sample moves on rather than waiting for a reload.
+  const refreshVault = vaultScreen?.refresh ?? null;
+  useEffect(() => {
+    if (refreshVault === null) return undefined;
+    const onStorage = (event: StorageEvent): void => {
+      if (event.key === ONBOARDING_DONE_KEY) refreshVault();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [refreshVault]);
+
+  /** The setup's X: the sample, as a visitor sees it, on an entry of its own. */
+  const closeOnboarding = useCallback(() => {
+    if (connectedKey === null) return;
+    window.history.replaceState(setupState("open"), "", window.location.href);
+    window.history.pushState(setupState("closed"), "", urlWithMode(pathname, "mock"));
+    setOnboardingClosed(connectedKey, true);
+  }, [connectedKey, pathname]);
+
+  /** Connect, the Live side of the toggle, or any way into the vault while there is none: the setup, where it was left. */
+  const resumeOnboarding = useCallback(() => {
+    if (connectedKey === null) return;
+    setEngagedKey(connectedKey);
+    const url = urlWithMode(pathname, "live");
+    if (urlMode === "live") window.history.replaceState(setupState("open"), "", url);
+    else window.history.pushState(setupState("open"), "", url);
+    setOnboardingClosed(connectedKey, false);
+  }, [connectedKey, pathname, urlMode]);
+
+  const refreshLive = live.refresh;
+  const onVaultCreated = useCallback(() => refreshLive({ discover: true }), [refreshLive]);
 
   // Every chain write happens in the wallets modal; read again as it closes
   // rather than showing the old numbers for up to a minute.
@@ -296,10 +440,12 @@ function ConfiguredFrame({
     account: accountSlot(
       state,
       pensionKey,
-      { onConnect, onDisconnect, openSetup: () => openWallets?.() },
+      { onConnect, onDisconnect, openSetup: () => openWallets?.(), onResume: resumeOnboarding },
       worthFrom(live.view),
     ),
-    setMode,
+    // On the sample of a key whose setup was closed, the toggle's Live side is
+    // the same door as its Connect.
+    setMode: state.account === "connect-onboarding" ? (mode) => (mode === "live" ? resumeOnboarding() : setMode(mode)) : setMode,
     onConnect,
     onDisconnect,
     // The 15 s fallback's "View sample data": it must also stop waiting for
@@ -312,10 +458,30 @@ function ConfiguredFrame({
     stalled: stalled && !ready && !gaveUp,
   };
 
+  // While this key has no vault, every way into the wallets modal opens the setup
+  // instead — unless it already has trading wallets, which only that modal shows.
+  const door = connectedKey !== null && privyWallets.length === 0 && setupIsTheDoor(vault, liveStage);
+
   return (
-    <Body value={value} onEnter={() => setMode("mock")} walletsConfigured>
-      {children}
-    </Body>
+    <>
+      <WalletsOpenerOverride opener={door ? resumeOnboarding : null}>
+        <Body value={value} onEnter={() => setMode("mock")} walletsConfigured>
+          {children}
+        </Body>
+      </WalletsOpenerOverride>
+      {/* Beside the page, not inside it, so a close — or the landing — never unmounts what it remembers. */}
+      {connectedKey !== null && vaultScreen !== null && vaultScreen.pensionKey === connectedKey ? (
+        <OnboardingHost
+          key={connectedKey}
+          pensionKey={connectedKey}
+          wanted={wanted}
+          onClose={closeOnboarding}
+          onCreated={onVaultCreated}
+          onDisconnect={onDisconnect}
+          onRunningChange={onSetupRunning}
+        />
+      ) : null}
+    </>
   );
 }
 

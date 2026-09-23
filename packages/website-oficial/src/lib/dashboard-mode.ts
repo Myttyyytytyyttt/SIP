@@ -1,11 +1,17 @@
 /**
  * WHOSE NUMBERS THE DASHBOARD SHOWS — decided ONCE, here, and nowhere else.
  *
- * THE OWNER'S RULE. With a pension key connected the dashboard is Live, full
- * stop: the Live/Mock choice leaves the navbar, and a ?mode=mock in the address
- * bar does not bring it back. Without a connection the choice is offered, and
- * Live then shows an honest "connect your pension key" card — never the sample
- * under a label promising someone their own pension.
+ * THE OWNER'S RULE. With a pension key connected the dashboard is Live: the
+ * Live/Mock choice leaves the navbar, and a ?mode=mock in the address bar does
+ * not bring it back. Without a connection the choice is offered, and Live then
+ * shows an honest "connect your pension key" card — never the sample under a
+ * label promising someone their own pension.
+ *
+ * ONE EXCEPTION (owner, 09-23): a connected key with NO VAULT whose new-user
+ * setup was closed. It sees the sample exactly as a visitor does — the badge,
+ * the toggle, a Connect button — and Connect or Live reopens the setup where it
+ * was left (src/components/onboarding). The key has no pension yet, so the
+ * sample cannot be mistaken for one.
  *
  * WHY ONE PURE FUNCTION. The frame, the header, both pages and the tests all ask
  * this function. A component that worked the mode out on its own is how the
@@ -48,7 +54,9 @@ export type DashboardAccount =
   | "connect"
   | "disconnect"
   /** The pension key's short address, then Disconnect. */
-  | "key-and-disconnect";
+  | "key-and-disconnect"
+  /** Connect, which reopens this key's setup where it was left. The key IS connected; it has no vault yet. */
+  | "connect-onboarding";
 
 export type UrlMode = "live" | "mock";
 
@@ -88,6 +96,20 @@ export interface DashboardInput {
    * the same as false — the field is a hint, and a hint can simply be missing.
    */
   readonly knownSession?: boolean;
+  /**
+   * The new-user setup, for a connected key: whether this tab closed it, and
+   * what the vault read says. Absent means today's rule exactly — always Live.
+   */
+  readonly onboarding?: OnboardingInput;
+}
+
+/** What the page knows of a connected key's vault: its one read (src/lib/onboarding.ts, vaultPresenceOf). */
+export type VaultPresence = "reading" | "missing" | "exists" | "unreadable";
+
+export interface OnboardingInput {
+  /** This tab closed the setup for this key (src/lib/onboarding-memory.ts). */
+  readonly closed: boolean;
+  readonly vault: VaultPresence;
 }
 
 /** "/?mode=live", "/activity?mode=mock" — the pathname is kept exactly as it was. */
@@ -139,10 +161,20 @@ export function decideDashboard(input: DashboardInput): DashboardState {
   // 3. Privy reports the session one frame before the user object arrives.
   if (ready && authenticated && !hasUser) return state("loading", false, "placeholder");
 
-  // 4. A CONNECTED PENSION KEY IS ALWAYS LIVE. The toggle is not rendered, and
+  // 4. A CONNECTED PENSION KEY IS LIVE. The toggle is not rendered, and
   //    ?mode=mock is ignored and normalized away, so a reload cannot land on the
-  //    sample or on the landing.
+  //    sample or on the landing — with one exception.
   if (ready && hasUser && pensionKey !== null) {
+    const closed = input.onboarding?.closed === true;
+    const vault = input.onboarding?.vault ?? "reading";
+    // 4a. THE ONE WAY A CONNECTED KEY REACHES THE SAMPLE: no vault, and its
+    //     setup was closed in this tab. Exactly the visitor's sample, and its
+    //     Connect reopens the setup instead of Privy's login.
+    if (closed && vault === "missing") return state("mock", true, "connect-onboarding", "sample", urlMode === "mock" ? null : urlWithMode(pathname, "mock"));
+    // 4b. Closed, but the vault read has not answered: neither the sample nor a
+    //     pension yet. The URL is left alone until it does.
+    if (closed && vault === "reading") return state("loading", false, "placeholder");
+    // 4c. Everything else — a close that is out of date included: Live.
     return state("live", false, "key-and-disconnect", null, urlMode === "live" ? null : urlWithMode(pathname, "live"));
   }
 

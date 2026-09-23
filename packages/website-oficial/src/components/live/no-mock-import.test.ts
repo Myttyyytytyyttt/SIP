@@ -47,6 +47,10 @@ const SHARED = [
   "wallet-activity.tsx",
   "activity-row.tsx",
   "dashboard-wallets.tsx",
+  // The new-user setup sits over a connected key's live page.
+  "onboarding/OnboardingBody.tsx",
+  "onboarding/OnboardingDialog.tsx",
+  "onboarding/OnboardingHost.tsx",
 ];
 
 /** The live surface: every panel, every pure module behind them, and the sample components they share. */

@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { decideDashboard, readUrlMode, toggleModeOf, urlWithMode, type DashboardInput } from "@/lib/dashboard-mode";
+import { decideDashboard, readUrlMode, toggleModeOf, urlWithMode, type DashboardInput, type OnboardingInput, type VaultPresence } from "@/lib/dashboard-mode";
 
 const PENSION_KEY = "PensionKeyP1aceho1der111111111111111111111";
 
@@ -57,7 +57,7 @@ describe("the front door does not flash past somebody who has been here", () => 
   });
 });
 
-describe("a connected pension key is always Live", () => {
+describe("a connected pension key is Live (its one exception is below)", () => {
   it("?mode=mock with a pension key is LIVE, the toggle is gone, and the URL is normalized to ?mode=live", () => {
     const decided = decideDashboard(connected({ urlMode: "mock" }));
     expect(decided.kind).toBe("live");
@@ -81,19 +81,68 @@ describe("a connected pension key is always Live", () => {
     expect(decideDashboard(connected({ urlMode: "live" })).replaceUrlWith).toBeNull();
   });
 
-  it("a connected pension key can NEVER reach the sample, at any URL", () => {
-    for (const urlMode of ["mock", "live", null] as const) {
-      for (const pathname of ["/", "/activity"]) {
-        const decided = decideDashboard(connected({ urlMode, pathname, landingAllowed: pathname === "/" }));
-        expect(decided.kind).toBe("live");
-        expect(decided.notice).toBeNull();
-        expect(decided.toggle).toBe(false);
+  it("a connected pension key can NEVER reach the sample, at any URL — unless it has no vault and closed its setup", () => {
+    // Every setup state that is NOT the exception: none may change today's rule.
+    const notTheException: readonly (OnboardingInput | undefined)[] = [
+      undefined,
+      { closed: false, vault: "missing" },
+      { closed: false, vault: "reading" },
+      { closed: false, vault: "exists" },
+      { closed: false, vault: "unreadable" },
+      { closed: true, vault: "exists" },
+      { closed: true, vault: "unreadable" },
+    ];
+    for (const onboarding of notTheException) {
+      for (const urlMode of ["mock", "live", null] as const) {
+        for (const pathname of ["/", "/activity"]) {
+          const decided = decideDashboard(connected({ urlMode, pathname, landingAllowed: pathname === "/", ...(onboarding === undefined ? {} : { onboarding }) }));
+          expect(decided.kind).toBe("live");
+          expect(decided.notice).toBeNull();
+          expect(decided.toggle).toBe(false);
+          expect(decided.account).toBe("key-and-disconnect");
+        }
       }
     }
   });
 
   it("a Privy that gave up still loses to a pension key that arrived", () => {
     expect(decideDashboard(connected({ privyGaveUp: true, urlMode: "mock" })).kind).toBe("live");
+  });
+});
+
+describe("the one exception: a key with no vault that closed its setup sees the visitor's sample", () => {
+  const closedMissing: OnboardingInput = { closed: true, vault: "missing" };
+
+  it("is the sample, with the sample notice, the toggle, and a Connect that reopens the setup", () => {
+    const decided = decideDashboard(connected({ urlMode: "mock", onboarding: closedMissing }));
+    expect(decided).toEqual({ kind: "mock", toggle: true, notice: "sample", account: "connect-onboarding", replaceUrlWith: null });
+    expect(toggleModeOf(decided.kind)).toBe("mock");
+  });
+
+  it("puts ?mode=mock in the address bar from any other URL, keeping the pathname — never the landing", () => {
+    expect(decideDashboard(connected({ urlMode: null, onboarding: closedMissing })).replaceUrlWith).toBe("/?mode=mock");
+    expect(decideDashboard(connected({ urlMode: "live", onboarding: closedMissing })).replaceUrlWith).toBe("/?mode=mock");
+    const activity = decideDashboard(connected({ urlMode: null, pathname: "/activity", landingAllowed: false, onboarding: closedMissing }));
+    expect([activity.kind, activity.replaceUrlWith]).toEqual(["mock", "/activity?mode=mock"]);
+  });
+
+  it("waits on a skeleton while the vault read has not answered, and leaves the URL alone", () => {
+    for (const urlMode of ["mock", "live", null] as const) {
+      const decided = decideDashboard(connected({ urlMode, onboarding: { closed: true, vault: "reading" } }));
+      expect(decided).toEqual({ kind: "loading", toggle: false, notice: null, account: "placeholder", replaceUrlWith: null });
+    }
+  });
+
+  it("changes nothing before Privy answers, nor for a session without a key, nor for nobody", () => {
+    const presences: readonly VaultPresence[] = ["reading", "missing", "exists", "unreadable"];
+    for (const vault of presences) {
+      const onboarding = { closed: true, vault };
+      for (const base of [input({ ready: false }), input({ ready: false, knownSession: true }), input({ authenticated: true, hasUser: true }), input({ urlMode: "mock" }), input()]) {
+        expect(decideDashboard({ ...base, onboarding })).toEqual(decideDashboard(base));
+      }
+      const unconfigured = input({ walletsConfigured: false, urlMode: "mock" });
+      expect(decideDashboard({ ...unconfigured, onboarding })).toEqual(decideDashboard(unconfigured));
+    }
   });
 });
 
@@ -186,7 +235,7 @@ describe("the toggle's own position", () => {
     expect((["mock", "landing", "loading"] as const).map(toggleModeOf)).toEqual(["mock", "mock", "mock"]);
   });
 
-  it("is only ever rendered when the state says so — and never for a connected key", () => {
+  it("is only ever rendered when the state says so — and never for a connected key outside its closed setup", () => {
     expect(decideDashboard(connected({ urlMode: "live" })).toggle).toBe(false);
     expect(decideDashboard(input({ urlMode: "live" })).toggle).toBe(true);
   });

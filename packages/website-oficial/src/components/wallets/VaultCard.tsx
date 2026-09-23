@@ -16,15 +16,7 @@
  * checks the built transaction carries them before Phantom is asked.
  */
 
-import {
-  DEFAULT_VAULT_POLICY,
-  MODE_PROFIT,
-  MODE_VOLUME,
-  SIGNATURE_FEE_LAMPORTS,
-  VOLUME_MODE_OFFERED,
-  ownerComputeBudget,
-  priorityFeeLamports,
-} from "@sip/solana-core/client";
+import { DEFAULT_VAULT_POLICY, MODE_PROFIT, MODE_VOLUME, VOLUME_MODE_OFFERED } from "@sip/solana-core/client";
 import { RefreshCw } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
@@ -32,18 +24,18 @@ import { Num } from "@/components/num";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddressLine } from "@/components/wallets/AddressLine";
+import { LimitField } from "@/components/wallets/LimitField";
 import { TxProgress } from "@/components/wallets/TxProgress";
 import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
 import { useVaultWrite } from "@/hooks/use-vault-actions";
 import { useVaultScreen } from "@/hooks/use-vault-state";
-import { AmountError, SOL_DECIMALS, formatSol, formatUnits, formatUsd, parseUnits, rawFrom, usdcRawForLamports } from "@/lib/amounts";
+import { SOL_DECIMALS, formatSol, formatUnits, formatUsd, rawFrom, usdcRawForLamports } from "@/lib/amounts";
 import { LABEL } from "@/lib/classes";
 import { cn } from "@/lib/utils";
 import type { VaultStateJson } from "@/lib/vault-api";
+import { CREATE_VAULT_FEE_LAMPORTS, readLimits } from "@/lib/vault-limits";
 import { PROFIT_RATE, VAULT_COPY, VOLUME_RATE, ratePercent } from "@/lib/vault-copy";
 
 type VaultWrite = ReturnType<typeof useVaultWrite>;
@@ -119,20 +111,6 @@ function VaultCardBody({ volumeOffered }: { readonly volumeOffered: boolean }) {
   );
 }
 
-type Limits = { readonly ok: true; readonly maxContribution: bigint; readonly walletReserve: bigint } | { readonly ok: false; readonly message: string };
-
-function readLimits(maxText: string, reserveText: string): Limits {
-  try {
-    const maxContribution = parseUnits(maxText, SOL_DECIMALS, VAULT_COPY.mostPerSettlement);
-    const walletReserve = parseUnits(reserveText, SOL_DECIMALS, VAULT_COPY.alwaysLeft);
-    if (maxContribution === 0n) return { ok: false, message: VAULT_COPY.zeroSettlement };
-    return { ok: true, maxContribution, walletReserve };
-  } catch (error) {
-    if (error instanceof AmountError) return { ok: false, message: error.message };
-    throw error;
-  }
-}
-
 function CreateVault({ state, volumeOffered, write, progress }: { readonly state: VaultStateJson; readonly volumeOffered: boolean; readonly write: VaultWrite; readonly progress: ReactNode }) {
   const [chosen, setChosen] = useState<number>(DEFAULT_VAULT_POLICY.mode);
   const [maxText, setMaxText] = useState(() => formatUnits(DEFAULT_VAULT_POLICY.maxContribution, SOL_DECIMALS));
@@ -144,7 +122,7 @@ function CreateVault({ state, volumeOffered, write, progress }: { readonly state
   const shownReserve = limits.ok ? formatSol(limits.walletReserve) : reserveText.trim();
   const usdcPerSol = rawFrom(state.prices?.usdcRawPerSol);
   const rent = rawFrom(state.rents?.vault);
-  const fees = SIGNATURE_FEE_LAMPORTS + priorityFeeLamports(ownerComputeBudget("create_vault_v2"));
+  const fees = CREATE_VAULT_FEE_LAMPORTS;
   const blocked = write.running || write.busyElsewhere || write.unconfirmed;
 
   return (
@@ -222,33 +200,6 @@ function CreateVault({ state, volumeOffered, write, progress }: { readonly state
         {progress}
       </CardContent>
     </Card>
-  );
-}
-
-function LimitField({
-  id,
-  label,
-  value,
-  onChange,
-  disabled,
-  hint,
-}: {
-  readonly id: string;
-  readonly label: string;
-  readonly value: string;
-  readonly onChange: (value: string) => void;
-  readonly disabled: boolean;
-  readonly hint: string | null;
-}) {
-  return (
-    <div className="space-y-1">
-      <Label htmlFor={id}>{label}</Label>
-      <div className="flex items-center gap-2">
-        <Input id={id} inputMode="decimal" autoComplete="off" value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} className="font-mono" />
-        <span className="text-sm text-muted-foreground">SOL</span>
-      </div>
-      {hint !== null ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
-    </div>
   );
 }
 

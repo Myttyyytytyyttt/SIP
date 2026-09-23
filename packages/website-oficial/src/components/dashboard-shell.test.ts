@@ -1,6 +1,7 @@
 // The dashboard frame rendered to HTML in each state Privy and the URL can put
 // it in — the owner's rule, checked: a connected pension key can never reach the
-// sample, and the Live|Mock choice is gone while one is connected.
+// sample, and the Live|Mock choice is gone while one is connected — except a key
+// with no vault that closed its new-user setup, which sees the visitor's sample.
 //
 // Privy is mocked the way WalletsScreen.test.ts mocks it, next/navigation is
 // mocked for the URL, and the live store is a stub: this test is about WHICH
@@ -20,6 +21,20 @@ const mocked = vi.hoisted(() => ({
   replaced: [] as string[],
   pushed: [] as string[],
   live: { kind: "loading" } as { kind: string; message?: string; retryAt?: number | null; data?: unknown; stale?: unknown },
+  /** Whether this tab closed the setup (the real hook reads sessionStorage, which node has none of). */
+  closed: false,
+  /** What the frame handed the setup's host on the last render. */
+  host: null as { wanted: boolean; pensionKey: string } | null,
+}));
+
+vi.mock("@/hooks/use-onboarding-closed", () => ({ useOnboardingClosed: () => mocked.closed }));
+// The host signs through Privy's wallet hooks; its own screens are OnboardingBody.test.ts's subject.
+// Here only what the frame hands it matters.
+vi.mock("@/components/onboarding/OnboardingHost", () => ({
+  OnboardingHost: (props: { wanted: boolean; pensionKey: string }) => {
+    mocked.host = { wanted: props.wanted, pensionKey: props.pensionKey };
+    return createElement("div", { "data-setup": props.wanted ? "wanted" : "not-wanted" });
+  },
 }));
 
 vi.mock("@privy-io/react-auth", () => ({
@@ -60,6 +75,9 @@ vi.mock("@/components/pension-chart", () => ({ PensionChart: () => createElement
 
 import { DashboardFrame, DashboardView, type DashboardLoadJson } from "@/components/dashboard-shell";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
+import type { VaultApi, VaultStateJson } from "@/lib/vault-api";
+import { shortAddress } from "@/lib/vault-copy";
 import { usd } from "@/lib/format";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { mock } from "@/mocks";
@@ -98,11 +116,27 @@ const trigger = (html: string, label: "Live" | "Mock"): string =>
  */
 const isDisabled = (tag: string): boolean => /\sdisabled[=\s>]/.test(tag.replace(/\sclass="[^"]*"/g, ""));
 
+/** The frame under the page's shared vault screen, as wallets-host mounts it for a connected key. */
+function renderWithVault(view: VaultView, page: "pension" | "activity" = "pension"): string {
+  const screen: VaultScreenValue = { pensionKey: PENSION_KEY, view, refresh: vi.fn(), api: {} as VaultApi };
+  return renderToStaticMarkup(
+    createElement(
+      TooltipProvider,
+      null,
+      createElement(VaultScreenContext.Provider, { value: screen }, createElement(DashboardFrame, { mock: SAMPLE, walletsConfigured: true, children: createElement(DashboardView, { view: page }) })),
+    ),
+  );
+}
+
+const vaultRead = (status: "missing" | "exists" | "unreadable"): VaultView => ({ kind: "ready", state: { owner: PENSION_KEY, vault: { status, address: "v" } } as unknown as VaultStateJson });
+
 beforeEach(() => {
   mocked.privy = { ready: true, authenticated: false, user: null };
   mocked.search = new URLSearchParams();
   mocked.pathname = "/";
   mocked.live = { kind: "loading" };
+  mocked.closed = false;
+  mocked.host = null;
 });
 
 describe("before Privy answers, the sample is never painted", () => {
@@ -283,6 +317,84 @@ describe("a connected pension key, once the chain has answered", () => {
     // header of the very screen that says the pension could not be read — two
     // answers to one question, on one screen.
     expect(html).not.toMatch(/\$[\d,]+\.\d\d/);
+  });
+});
+
+describe("a connected key with no vault: the new-user setup", () => {
+  beforeEach(() => {
+    mocked.privy = { ready: true, authenticated: true, user: userWith([phantom()]) };
+  });
+
+  it("is wanted over the Live page, which stays Live underneath — no sample, no toggle", () => {
+    mocked.search = new URLSearchParams("mode=live");
+    const html = renderWithVault(vaultRead("missing"));
+    expect(mocked.host).toEqual({ wanted: true, pensionKey: PENSION_KEY });
+    expect(html).toContain('data-setup="wanted"');
+    expect(html).not.toContain("Sample data");
+    expect(tablist(html)).toBeNull();
+    expect(html).toContain("Disconnect");
+  });
+
+  it("is not wanted once the live read shows a vault's stages, even if the vault read is behind", () => {
+    mocked.search = new URLSearchParams("mode=live");
+    mocked.live = { kind: "ready", data: liveDashboard({ snapshot: liveSnapshot({ wallets: [] }), privyWallets: [] }), stale: null };
+    renderWithVault(vaultRead("missing"));
+    expect(mocked.host?.wanted).toBe(false);
+  });
+
+  it("is never mounted for a key the vault screen is not reading", () => {
+    mocked.search = new URLSearchParams("mode=live");
+    render();
+    expect(mocked.host).toBeNull();
+  });
+
+  it("once closed, the page is the visitor's sample: its badge, the toggle on Mock, and Connect instead of Disconnect", () => {
+    mocked.closed = true;
+    mocked.search = new URLSearchParams("mode=mock");
+    const html = renderWithVault(vaultRead("missing"));
+    expect(html).toContain("Sample data");
+    expect(html).toContain(MOCK_FIGURE);
+    expect(trigger(html, "Mock")).toContain('data-state="active"');
+    expect(html).toMatch(/<button[^>]*>Connect<\/button>/);
+    expect(html).not.toContain("Disconnect");
+    // No key chip: its short address is nowhere ("Pens…" alone would match the Pension tab).
+    expect(html).not.toContain(shortAddress(PENSION_KEY));
+    expect(mocked.host?.wanted).toBe(false);
+  });
+
+  it("the same on /activity", () => {
+    mocked.closed = true;
+    mocked.pathname = "/activity";
+    mocked.search = new URLSearchParams("mode=mock");
+    const html = renderWithVault(vaultRead("missing"), "activity");
+    expect(html).toContain("Sample data");
+    expect(tablist(html)).not.toBeNull();
+  });
+
+  it("closed, but the vault read has not answered: a skeleton — neither the sample nor a pension", () => {
+    mocked.closed = true;
+    mocked.search = new URLSearchParams("mode=mock");
+    const html = renderWithVault({ kind: "loading" });
+    expect(html).toContain('aria-busy="true"');
+    expect(html).not.toContain("Sample data");
+    expect(tablist(html)).toBeNull();
+    // Rule 4b's own markup, which Live would not have: the account slot is a placeholder, not the key and Disconnect.
+    expect(html).toContain(LIVE_COPY.checking);
+    expect(html).not.toContain("Disconnect");
+  });
+
+  it("a close that is out of date — the vault exists, or its read failed — is Live, never the sample", () => {
+    mocked.closed = true;
+    mocked.search = new URLSearchParams("mode=mock");
+    for (const status of ["exists", "unreadable"] as const) {
+      const html = renderWithVault(vaultRead(status));
+      expect(html).not.toContain("Sample data");
+      expect(html).not.toContain(MOCK_FIGURE);
+      expect(tablist(html)).toBeNull();
+      // Live's own markup, which rule 4b's skeleton would not have: the key and its Disconnect.
+      expect(html).toContain("Disconnect");
+      expect(html).toContain(shortAddress(PENSION_KEY));
+    }
   });
 });
 

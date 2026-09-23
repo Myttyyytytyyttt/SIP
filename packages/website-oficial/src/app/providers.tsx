@@ -24,6 +24,7 @@ import { createSolanaRpc, createSolanaRpcSubscriptions } from "@solana/kit";
 import { createContext, useContext, useEffect, useMemo } from "react";
 
 import type { SolanaPublicConfig } from "@/lib/config";
+import { forgetOnboarding } from "@/lib/onboarding-memory";
 import { rememberSession } from "@/lib/session-hint";
 
 const SolanaConfigContext = createContext<SolanaPublicConfig | null>(null);
@@ -173,6 +174,9 @@ function SessionHintKeeper(): null {
   useEffect(() => {
     if (!ready) return;
     rememberSession(authenticated);
+    // A session that ended takes the new-user setup's memory with it: the next
+    // wallet to connect here starts from its own beginning.
+    if (!authenticated) forgetOnboarding(null);
   }, [ready, authenticated]);
   return null;
 }
