@@ -93,6 +93,16 @@ export interface FleetShape {
 }
 
 /**
+ * How many of `links` are hot at `hotRatio`: the SAME rounding the fleet is built
+ * with, exported so the bench divides each lane by the count that really ran.
+ * At 2 % a 1- or 10-link fleet has none, which is why the bench reads the hot
+ * price off the rows that had one instead of drawing a line through all of them.
+ */
+export function hotCount(links: number, hotRatio: number): number {
+  return Math.round(links * hotRatio);
+}
+
+/**
  * The fleet a sweep discovers.
  *
  * THE HOT ONES ARE FIRST, DELIBERATELY. Real fleets interleave, but the sweep is
@@ -103,7 +113,7 @@ export interface FleetShape {
 export function buildFleet(shape: FleetShape): readonly BenchLink[] {
   if (!Number.isInteger(shape.links) || shape.links < 0) throw new Error(`a fleet holds a whole number of links, not ${shape.links}`);
   if (!(shape.hotRatio >= 0 && shape.hotRatio <= 1)) throw new Error(`hotRatio is a fraction of the fleet in 0..1, not ${shape.hotRatio}`);
-  const hot = Math.round(shape.links * shape.hotRatio);
+  const hot = hotCount(shape.links, shape.hotRatio);
   const links: BenchLink[] = [];
   for (let index = 0; index < shape.links; index++) {
     const wallet = benchKey(`${shape.seed}:wallet:${index}`);

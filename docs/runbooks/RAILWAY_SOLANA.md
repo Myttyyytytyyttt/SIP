@@ -387,6 +387,40 @@ Cuando lo de tu Mac se vea bien: sube la rama, únela a `main`, y Railway vuelve
 cambios. La construcción pasa otra vez por `--preflight`, así que un fallo de los que se ven aquí **no llega a
 desplegarse**.
 
+## 4. ¿Cuántos usuarios caben?
+
+El vigilante barre todas las wallets enlazadas **una detrás de otra** cada `SIP_SOLANA_SWEEP_MS` (60 s). Si una barrida
+tarda más que eso, la siguiente se salta y nadie en ella se cobra (`/status` → `skipped`). Cuántos caben se mide sin
+usuarios reales ni RPC ajeno con:
+
+```bash
+pnpm --dir packages/solana-keeper bench:ceiling                       # la rejilla por defecto
+pnpm --dir packages/solana-keeper bench:ceiling -- --plan-rps 50      # con el límite del plan de Helius, como 429
+```
+
+Arranca el vigilante de verdad contra una cadena falsa en el loopback. **Las cifras de `c6e38d8` (~99 / ~266 / ~698)
+eran demasiado altas** y se corrigieron el 23-sep. Estas son las que valen, todas **"como mucho"**, porque el camino de
+escritura (Privy, confirmación, recibo) se cobra como suelo y no se ejecuta. Son de un Mac, no de Railway:
+
+| latencia RPC (p50/p90) | 2 % activos | 20 % activos | peticiones/s que necesita | tras una caída |
+|---|---|---|---|---|
+| 86/122 ms (endpoint público) | 97 | 54 | ~10,5 | **2** usuarios con 300 tx llenan la barrida |
+| 30/45 ms | 253 | 125 | ~27 | 6 |
+| 10/14 ms | 659 | 257 | ~71–80 | 14 |
+
+- **El plan manda antes que la latencia.** El vigilante no se frena ante un 429: `rpc-pool.ts` lo toma como un fallo
+  y el usuario se queda sin cobrar. Medido: a 10/14 ms con un plan de 50 req/s, desde 50 wallets hay unos 30 × 429 y
+  unos 30 usuarios sin servir por barrida. A 30/45 ms con 25 req/s, desde 50 wallets. Si el plan da menos peticiones
+  por segundo que la columna de arriba, la fila no vale.
+- **La proporción de activos lo cambia todo.** El 2 % supone que 98 de cada 100 no operaron en el último minuto.
+- **Una liquidación que no confirma se come 60 s** (`CONFIRM_TIMEOUT_MS`): una por barrida basta para perderla entera.
+- **Jupiter sin clave** da 30 peticiones/min y una compra gasta unas 12, así que caben unas 2,5 compras por minuto.
+  Con un 2 % de activos que compren todos, eso es 126 wallets; con un 20 %, 13.
+
+**Lo que hay que leer en Railway** para saber el número de verdad: en `/status`, `sweepMsP50`, `sweepMsP90`,
+`lastSweepPhaseMs` (`triageMs` es el precio de los usuarios quietos y `expensiveMs` el de los activos), `skipped` y
+`linksTriaged`. Y el límite de peticiones por segundo del plan de Helius, que solo tú puedes mirar.
+
 ## Si algo falla
 
 - **El vigilante termina de desplegar y se reinicia en bucle**: abre los logs de `sip-solana-keeper` y busca

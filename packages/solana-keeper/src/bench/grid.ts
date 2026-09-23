@@ -12,12 +12,13 @@
 // is a sweep that really ran, the fit below is stated as a fit, and the ceiling
 // it implies is labelled as the extrapolation it is.
 //
-// THE MODEL IS DELIBERATELY THE SIMPLE ONE. A sweep costs a fixed part
-// (readChainSnapshot, one getProgramAccounts, one batched vault read that is
-// nearly free whether it carries 1 address or 100) plus a per-link part that
-// repeats N times in one sequential loop. Straight line, two coefficients, and
-// both of them are quantities an operator can name. Anything curvier would be
-// fitting the bench's own noise.
+// THE STRAIGHT LINE BELOW IS NO LONGER THE HEADLINE. It was c6e38d8's model:
+// a fixed part plus one per-link part, drawn through sweep totals. Those totals
+// came from fleets with different hot shares, and the slope priced a mixture
+// nobody chose, so the published ceiling now comes from src/bench/ceiling.ts,
+// which reads the idle and hot prices off the keeper's own lanes and charges
+// the write floor and the plan. The line is still printed beside it, labelled,
+// so the size of the correction is visible on every run.
 
 import { SWEEP_SLOW_FRACTION } from "../sweep-cost.js";
 import type { LatencyShape } from "./latency.js";
@@ -42,6 +43,22 @@ export function sweepVerdict(sweepMs: number, windowMs: number): SweepVerdict {
   if (!(windowMs > 0)) throw new Error(`a sweep window is a positive number of milliseconds, not ${windowMs}`);
   if (sweepMs >= windowMs) return "overruns";
   return sweepMs >= windowMs * SWEEP_SLOW_FRACTION ? "close" : "fits";
+}
+
+/**
+ * A row's verdict, once refusals are counted: a sweep in which the provider said
+ * 429, or a user was left THREW or FAILED, is "refused" however fast it was.
+ *
+ * THE ONE GRADE ADDED TO THE KEEPER'S THREE, AND WHY IT HAS TO BE. A refused
+ * call is not retried — src/rpc-pool.ts throws on it — so a sweep whose calls
+ * were refused ends EARLY, and graded by time alone it reads as the fastest row
+ * in the table. The review of c6e38d8 found exactly that shape: a fleet the
+ * plan would refuse, reported as "fits".
+ */
+export type RowVerdict = SweepVerdict | "refused";
+
+export function rowVerdict(sweepMs: number, windowMs: number, refusals: number): RowVerdict {
+  return refusals > 0 ? "refused" : sweepVerdict(sweepMs, windowMs);
 }
 
 export interface SweepPoint {

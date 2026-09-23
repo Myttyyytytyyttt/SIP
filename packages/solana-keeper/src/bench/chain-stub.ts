@@ -109,8 +109,6 @@ export class BenchChain {
   private transactions = new Map<string, { readonly link: BenchLink; readonly tx: BenchTx }>();
   private links: readonly BenchLink[] = [];
   private readonly options: BenchChainOptions;
-  /** Called on the one getProgramAccounts that opens every sweep; the bench uses it to step its grid. */
-  onDiscovery: (() => void) | null = null;
 
   constructor(options: BenchChainOptions) {
     this.options = options;
@@ -149,10 +147,10 @@ export class BenchChain {
   /**
    * The fleet the NEXT getProgramAccounts returns.
    *
-   * REPLACED WHOLE, between sweeps. One keeper process walks the entire grid:
-   * the stub is the control plane, and a cell is a fleet size and a latency, not
-   * a new process. Booting a keeper per cell would put a couple of seconds of
-   * tsx startup into every row of the table for nothing.
+   * REPLACED WHOLE, between cells. scripts/ceiling-bench.mts boots ONE keeper
+   * process PER CELL and reads that process's first sweep: a couple of seconds
+   * of tsx startup per row, bought for a table in which every row is exactly one
+   * sweep over exactly one fleet.
    */
   setFleet(links: readonly BenchLink[]): void {
     this.links = links;
@@ -297,7 +295,6 @@ export class BenchChain {
         return { result: this.withContext(address === this.options.crank.toBase58() ? 5_000_000_000 : 2_000_000_000) };
       }
       case "getProgramAccounts": {
-        this.onDiscovery?.();
         return {
           result: this.links.map((link) => ({ pubkey: link.linkAddress.toBase58(), account: this.accountJson(link.linkAddress.toBase58()) })),
         };
