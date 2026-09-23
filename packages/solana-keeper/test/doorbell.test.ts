@@ -106,6 +106,9 @@ describe("the real deliveries of 2026-09-23", () => {
       const report = bell.ingest(fixtures[name], known([OWNER]), T0);
       expect(report.transactions, name).toBe(1);
       expect(report.lost, name).toBeNull();
+      // DISTINCT, NOT OCCURRENCES: the deposit names the vault twice and the
+      // convert five times, and each is still one address (proof, 2026-09-23).
+      expect(report.rung, name).toBe(expected.length);
       expect(bell.status(T0).rungAddresses, name).toBe(expected.length);
       // Which ones, through the only door that matters: the lane a link lands in.
       const onlyWallet: DoorLink = { link: "L1", wallet: WALLET, vault: "unrelated-vault" };

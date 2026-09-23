@@ -156,6 +156,12 @@ export interface Selection<T extends DoorLink> {
 
 export interface IngestReport {
   readonly transactions: number;
+  /**
+   * DISTINCT known addresses this delivery rang — not occurrences. The real
+   * 1 USDC deposit 29z8KboF… names the vault twice (pre- and post-token
+   * balance owner) and the convert bq7ekjmu… five times; a count of strings
+   * read "2 addresses" and "5 addresses" for one vault each (proof, 2026-09-23).
+   */
   readonly rung: number;
   readonly echoes: number;
   /** Set when the delivery could not be read whole; a full pass has been requested. */
@@ -413,7 +419,7 @@ export class Doorbell {
    * is bounded by the links it discovered, not by the sender.
    */
   ingest(payload: unknown, known: ReadonlySet<string>, now: number): IngestReport {
-    let rung = 0;
+    const rung = new Set<string>();
     let lost: string | null = null;
     let strings = 0;
     let nodes = 0;
@@ -437,7 +443,7 @@ export class Doorbell {
             continue;
           }
           this.#ring(value, now);
-          rung += 1;
+          rung.add(value);
         }
         continue;
       }
@@ -482,7 +488,7 @@ export class Doorbell {
       }
     }
     if (lost !== null) this.lost(lost);
-    return { transactions: transactions.length, rung, echoes, lost };
+    return { transactions: transactions.length, rung: rung.size, echoes, lost };
   }
 
   /** The body as it arrived. A body that is not JSON is a delivery lost, never a crash. */
