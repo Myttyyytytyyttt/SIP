@@ -599,7 +599,19 @@ describe("the Helius receiver", () => {
     expect(drive(handler, "PUT", "/hooks/helius").status).toBe(405);
     expect(drive(handler, "GET", "/health").status).toBe(200);
     expect(drive(handler, "GET", "/status").status).toBe(200);
-    expect(drive(handler, "GET", "/hooks/helius").status).toBe(404);
+    // Off, the route does not exist for any method a page would use.
+    expect(drive(off, "GET", "/hooks/helius").status).toBe(404);
+  });
+
+  it("answers any other method on the route with 405 and names POST, not a 404 that says it is not there", () => {
+    // PROOF, 2026-09-23: with the doorbell on, GET /hooks/helius said 404 while
+    // PUT on the same path said 405.
+    const { handler } = receiver();
+    for (const method of ["GET", "HEAD", "PUT", "DELETE"]) {
+      const reply = drive(handler, method, "/hooks/helius");
+      expect(reply.status, method).toBe(405);
+      expect(reply.headers["allow"], method).toBe("POST");
+    }
   });
 });
 

@@ -589,6 +589,16 @@ export function httpHandler(
       receiveDelivery(request, response, hooks);
       return;
     }
+    // THE ROUTE EXISTS, THE METHOD DOES NOT. With the doorbell on, a GET here
+    // answered 404 while a PUT answered 405 — the same resource, two stories
+    // (proof, 2026-09-23). Every other method is 405 and names the one that
+    // works; off, the route does not exist and falls through as before.
+    if (path === HOOKS_PATH && hooks !== null) {
+      response.statusCode = 405;
+      response.setHeader("allow", "POST");
+      response.end(JSON.stringify({ error: "method not allowed" }));
+      return;
+    }
     if (request.method !== "GET" && request.method !== "HEAD") {
       response.statusCode = 405;
       response.end(JSON.stringify({ error: "method not allowed" }));
