@@ -121,6 +121,20 @@ describe("what the chain says the rule is", () => {
   });
 
   /**
+   * THE CAPS, NOT THE SPEND. "Used in the last 30 days" is a figure that moves
+   * on its own, and it has a tile in the stats grid where it is printed over
+   * the cap it is a fraction of. Printed here as well it carried no
+   * denominator, and two places holding one number is two places that can come
+   * to disagree — so the card keeps only what somebody signed.
+   */
+  it("shows the two signed caps and leaves the spend against them to its own tile", () => {
+    const html = render();
+    expect(html).toContain(INVEST_COPY.mostPerBuy);
+    expect(html).toContain(INVEST_COPY.mostPer30Days);
+    expect(html).not.toContain(INVEST_COPY.usedLast30);
+  });
+
+  /**
    * NO THRESHOLD FIGURE ON THIS CARD. min_investment is enforced PER LEG, so a
    * basket of two at $5 does not buy at $5; "Next investment" reads
    * investsAtRaw, which is the balance that actually unblocks a buy.

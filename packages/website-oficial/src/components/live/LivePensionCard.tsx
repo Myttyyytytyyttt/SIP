@@ -3,27 +3,33 @@
 /**
  * THE BIG PANEL: what has been saved, what it is worth, and what it is held as.
  *
- * TWO FIGURES THAT ARE NOT THE SAME THING, and no longer share a word.
- * "Invested so far" is the program's lifetime_invested counter — USDC that
- * invest() has spent — and the holdings' "Basket value" is what the legs are
- * worth at today's prices. On mainnet they diverge whenever SPYx reaches the
- * vault by any other route, and the card used to say "Invested so far $0.00"
- * directly above "Invested $86.41".
+ * ITS HEADER IS THE SAMPLE'S HEADER, word for word wherever the words are still
+ * true: the label, one figure, and one short line under it. The sample reads
+ * "<rate> of every buy and sell, since <date>" — this vault measures profit, so
+ * the same line with this vault's own measure is what it says here.
  *
- * THE HERO IS SOL, NOT DOLLARS. lifetimeSaved is a lamport figure the vault
- * itself records; the dollar beside it is today's pool price applied to that
- * figure and is labelled as such. The mock's "Pension value +unrealized" is
- * gone: there is no cost basis on chain, so there is no unrealized number to
- * show, and inventing one from today's price would be a claim about a profit
- * nobody made.
+ * THE HERO IS THE DOLLAR AND THE LAMPORTS ARE ITS TITLE. lifetimeSaved is a
+ * lamport figure the vault itself records; the dollar beside it is that figure
+ * at the price read in THIS SAME SNAPSHOT, which is a fact about what is held
+ * right now and NOT the sum of the dollars that were set aside — each
+ * settlement happened at a price nobody recorded. That sentence is the only
+ * thing keeping the hero from being read as a history, so it is kept: it moved
+ * off a third clause of the description onto the figure's own title=, which
+ * leaves the line under the hero the sample's one line and puts the chain's
+ * exact figure one hover away rather than one clause of three. The curve below
+ * stays in SOL for the same reason, and no second dollar sits beside this one:
+ * two unrelated dollars on one line are an unrealized profit by subtraction,
+ * and there is no cost basis on chain to make one.
+ *
+ * WHAT THE SAMPLE HAS AND THIS CANNOT. Its right-hand dl leads with "Pension
+ * value +unrealized", and unrealized needs a cost basis this chain does not
+ * keep. "Today" is the entry that survives, in the sample's own markup.
  */
 
 import { LiveHoldings } from "@/components/live/LiveHoldings";
 import { LiveSavedChart } from "@/components/live/LiveSavedChart";
 import { LiveStats } from "@/components/live/LiveStats";
-import { Num } from "@/components/num";
 import { Card, CardContent, CardDescription, CardHeader } from "@/components/ui/card";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatSol, formatUsd, rawFrom, splitDecimal, usdcRawForLamports } from "@/lib/amounts";
 import { LABEL, SAVED } from "@/lib/classes";
 import { dateLabel } from "@/lib/format";
@@ -51,21 +57,11 @@ export function LivePensionCard({
   const rate = vault.rateBps === null ? null : ratePercent(vault.rateBps);
 
   /**
-   * THE HERO IS THE DOLLAR, and the SOL is the caption — the sample's shape,
-   * and what the owner asked for.
-   *
-   * IT IS A VALUATION, NOT A HISTORY. lifetimeSaved is lamports; this is those
-   * lamports at the price read in THIS SAME SNAPSHOT, which is a fact about
-   * what is held right now. It is NOT the sum of the dollars that were set
-   * aside — each settlement happened at a price nobody recorded — and the
-   * caption says "valued at today's SOL price" for exactly that reason. The
-   * curve below stays in SOL for the same reason, and no dollar figure sits
-   * beside this one: two unrelated dollars on one line are an unrealized
-   * profit by subtraction, and there is no cost basis on chain to make one.
-   *
    * NULL IS NOT ZERO. A total nobody could read must not become "$0.00"; it is
    * the dash, as /activity already says of the same figure. `saved` is the
-   * ?? 0n form and may only be used where a zero is harmless.
+   * ?? 0n form and may only be used where a zero is harmless — which is why the
+   * description no longer carries a dollar of its own: the one it used to print
+   * when the total was unreadable was "≈ $0.00", under a dash.
    */
   const usdNow = vault.lifetimeSaved === null || perSol === null ? null : usdcRawForLamports(vault.lifetimeSaved, perSol);
   // Nine decimals all at 48px is a wall of digits with no figure in it. The
@@ -73,12 +69,23 @@ export function LivePensionCard({
   // and on this page every digit is one the chain actually holds.
   const [head, tail] = splitDecimal(formatSol(saved));
 
-  // "0.03669412 SOL, valued at today's SOL price · Profit · 20 % of trading gains · since Sep 15, 2026"
+  const savedToday = stats.savedTodayLamports !== null && stats.savedTodayLamports > 0n;
+
+  /*
+   * "Profit · 20 % of trading gains, since Sep 15, 2026" — the sample's one
+   * line, with this vault's own measure where the sample says "every buy and
+   * sell", and its comma before "since".
+   *
+   * THE VOLUME FORM KEEPS ITS TAIL. A rate quoted over a measure nothing is
+   * ever taken from is the one rate on this page that is misread without it,
+   * and the sentence is three words longer than the profit one.
+   */
   const description = [
-    usdNow !== null ? LIVE_COPY.heroSolAtPrice(formatSol(saved)) : perSol === null ? null : LIVE_COPY.heroAbout(formatUsd(usdcRawForLamports(saved, perSol))),
     rate === null ? null : vault.mode === 1 ? LIVE_COPY.heroVolumeNotOffered(rate) : LIVE_COPY.heroProfit(rate),
     vault.createdAt === null || vault.createdAt === 0n ? null : LIVE_COPY.heroSince(dateLabel(new Date(Number(vault.createdAt) * 1_000).toISOString())),
-  ].filter((part): part is string => part !== null);
+  ]
+    .filter((part): part is string => part !== null)
+    .join(", ");
 
   return (
     <Card className={cn("@container/panel overflow-hidden", className)}>
@@ -88,17 +95,26 @@ export function LivePensionCard({
           {vault.lifetimeSaved === null ? (
             <p className="font-mono text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl">{LIVE_COPY.unknownFigure}</p>
           ) : usdNow !== null ? (
-            <p className="font-mono text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl">{formatUsd(usdNow)}</p>
+            // The caption this figure cannot be read without, on the figure
+            // itself: the chain's own lamports, in full, and the fact that the
+            // dollar is them at one price read now.
+            <p
+              title={LIVE_COPY.heroSolAtPrice(formatSol(vault.lifetimeSaved))}
+              className="font-mono text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl"
+            >
+              {formatUsd(usdNow)}
+            </p>
           ) : (
             // The pools could not be read. The figure the chain records is
-            // still known, so it leads rather than a dash.
+            // still known, so it leads rather than a dash — and it is already
+            // the SOL, so there is no valuation to qualify.
             <p className="font-mono font-semibold tracking-tight tabular-nums">
               <span className="text-4xl sm:text-5xl">{head}</span>
               {tail === "" ? null : <span className="text-2xl sm:text-3xl">{tail}</span>}
               <span className="ml-2 text-2xl font-normal text-muted-foreground sm:text-3xl">SOL</span>
             </p>
           )}
-          <CardDescription>{description.join(" · ")}</CardDescription>
+          {description === "" ? null : <CardDescription>{description}</CardDescription>}
         </div>
 
         {/*
@@ -117,8 +133,8 @@ export function LivePensionCard({
           <dl className="@md/panel:shrink-0 @md/panel:text-right">
             <div className="space-y-1">
               <dt className="text-xs text-muted-foreground">{STATS_COPY.today}</dt>
-              <dd className={cn("font-mono text-sm tabular-nums", stats.savedTodayLamports > 0n ? SAVED : "text-muted-foreground")}>
-                <Num>{stats.savedTodayLamports > 0n ? `+${formatSol(stats.savedTodayLamports)} SOL` : "0 SOL"}</Num>
+              <dd className={cn("font-mono text-sm tabular-nums", savedToday ? SAVED : "text-muted-foreground")}>
+                {savedToday ? `+${formatSol(stats.savedTodayLamports)} SOL` : "0 SOL"}
               </dd>
             </div>
           </dl>

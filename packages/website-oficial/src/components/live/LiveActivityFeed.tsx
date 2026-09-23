@@ -1,13 +1,16 @@
 "use client";
 
 /**
- * THE HISTORY, NEWEST FIRST, grouped by the day it landed.
+ * THE HISTORY, NEWEST FIRST, grouped by the day it landed — the sample's feed
+ * (src/components/wallet-activity.tsx): one sticky heading per day, the rows
+ * under it, and nothing between them.
  *
  * WHAT IS HIDDEN IS COUNTED, NEVER DROPPED. The keeper's own account-keeping
  * transactions name the vault, and a rent top-up arrives as a few thousand
  * lamports; listing either would bury the settlements in noise, and dropping
  * them silently would make this page disagree with Solscan. So they are hidden
- * AND said: "3 account upkeep transactions hidden".
+ * AND said — "3 account upkeep transactions hidden" — as the LABEL of the
+ * control that opens them, never as a footnote nobody can act on.
  *
  * AN EMPTY FEED IS NOT AN UNREADABLE ONE. A vault with no history says what will
  * appear here; a read that failed says it failed and offers a retry. Neither
@@ -15,7 +18,9 @@
  *
  * The day headings come from the payload's own `now` (relativeDayLabel), never
  * the clock: a component that reads Date.now() during render paints one string
- * on the server and another in the browser.
+ * on the server and another in the browser. They say UTC because the bucket is
+ * one — the sample groups the same way and can leave it unsaid, having no
+ * reader who might check a settlement against Solscan.
  */
 
 import { useState } from "react";
@@ -43,11 +48,46 @@ function groupByDay(rows: readonly LiveRow[]): ReadonlyArray<readonly [string, r
   return Array.from(groups);
 }
 
-/** What was left out of the feed, and why. Renders nothing when nothing was. */
-export function HiddenCounts({ upkeep, dust, className }: { readonly upkeep: number; readonly dust: number; readonly className?: string }) {
-  const parts = hiddenWords(upkeep, dust);
-  if (parts === null) return null;
-  return <p className={cn("text-xs text-muted-foreground", className)}>{parts}</p>;
+/**
+ * The rows under their days. Written once and mounted twice — the feed, and
+ * the disclosure that opens what the feed leaves out — so the two can never
+ * grow different headings for the same bucket.
+ *
+ * `ownsTabStop` says whether the roving Tab stop is in THIS list; only the
+ * first row of the first day takes it.
+ */
+function Days({
+  rows,
+  now,
+  labelOf,
+  maxContribution,
+  ownsTabStop,
+}: {
+  readonly rows: readonly LiveRow[];
+  readonly now: string;
+  readonly labelOf: (wallet: string | null) => string;
+  readonly maxContribution: bigint | null;
+  readonly ownsTabStop: boolean;
+}) {
+  let position = 0;
+  return (
+    <>
+      {groupByDay(rows).map(([day, dayRows]) => (
+        <div key={day === "" ? "unknown" : day}>
+          <div className="sticky top-0 z-10 bg-background px-4 py-2 text-xs text-muted-foreground">
+            {day === "" ? ACTIVITY_COPY.timeUnknown : ACTIVITY_COPY.dayHeading(relativeDayLabel(day, now))}
+          </div>
+          {dayRows.map((row, within) => {
+            const first = ownsTabStop && position === 0;
+            position += 1;
+            // A transaction can hold two events (two settlements in one settle),
+            // so the signature alone is not a key.
+            return <LiveActivityRow key={`${row.signature}-${within}-${row.event.kind}`} row={row} labelOf={labelOf} maxContribution={maxContribution} first={first} />;
+          })}
+        </div>
+      ))}
+    </>
+  );
 }
 
 const hiddenWords = (upkeep: number, dust: number): string | null => {
@@ -110,40 +150,38 @@ function HiddenTransactions({
         <span className="shrink-0 underline underline-offset-4">{open ? ACTIVITY_COPY.hideHidden : ACTIVITY_COPY.showHidden}</span>
       </button>
       <div id={panelId} hidden={!open}>
-        {open
-          ? groupByDay(rows).map(([day, dayRows]) => (
-              <div key={day === "" ? "unknown" : day}>
-                <div className="sticky top-0 z-10 bg-background px-4 py-2 text-xs text-muted-foreground">
-                  {day === "" ? ACTIVITY_COPY.timeUnknown : ACTIVITY_COPY.dayHeading(relativeDayLabel(day, now))}
-                </div>
-                {dayRows.map((row, within) => (
-                  <LiveActivityRow
-                    key={`${row.signature}-${within}-${row.event.kind}`}
-                    row={row}
-                    labelOf={labelOf}
-                    maxContribution={maxContribution}
-                    first={ownsTabStop && rows[0] === row}
-                  />
-                ))}
-              </div>
-            ))
-          : null}
+        {open ? <Days rows={rows} now={now} labelOf={labelOf} maxContribution={maxContribution} ownsTabStop={ownsTabStop} /> : null}
       </div>
     </div>
   );
 }
 
 /**
- * "12 transactions · 3 settlements", under a feed. One of each counts as one.
+ * "12 transactions · 3 settlements", under a feed — where the sample counts its
+ * events and its trades. One of each counts as one.
  *
  * THE TWO COUNTS ARE NOT A PART OF A WHOLE. `transactions` is the vault page's
  * own rows; `settlements` counts both streams, because a settlement found on a
  * wallet's link is one this pension made even though the vault's page does not
  * list it. So they are separated rather than joined by "of".
  */
-export function FeedFooter({ transactions, settlements, className }: { readonly transactions: number; readonly settlements: number; readonly className?: string }) {
+export function FeedFooter({
+  transactions,
+  settlements,
+  title,
+  className,
+}: {
+  readonly transactions: number;
+  readonly settlements: number;
+  /** What window these two counts are over, where nothing beside them says it. */
+  readonly title?: string;
+  readonly className?: string;
+}) {
+  // It carries its own size and colour: /activity mounts it outside a bar that
+  // sets either, and a footer that changes face between two screens is two
+  // footers.
   return (
-    <span className={cn("text-xs text-muted-foreground", className)}>
+    <span className={cn("text-xs text-muted-foreground", className)} {...(title === undefined ? {} : { title })}>
       <Num className="text-xs">{transactions}</Num> {transactions === 1 ? "transaction" : "transactions"} · <Num className="text-xs">{settlements}</Num>{" "}
       {settlements === 1 ? "settlement" : "settlements"}
     </span>
@@ -250,27 +288,10 @@ export function LiveActivityFeed({
     );
   }
 
-  const groups = groupByDay(rows);
-  let position = 0;
-
   return (
     <div className={className} data-live-feed={id}>
       {banner}
-      {groups.map(([day, dayRows]) => (
-        <div key={day === "" ? "unknown" : day}>
-          {/* The bucket is a UTC day (groupByDay slices the ISO string), and the heading says so. */}
-          <div className="sticky top-0 z-10 bg-background px-4 py-2 text-xs text-muted-foreground">
-            {day === "" ? ACTIVITY_COPY.timeUnknown : ACTIVITY_COPY.dayHeading(relativeDayLabel(day, now))}
-          </div>
-          {dayRows.map((row, within) => {
-            const first = position === 0;
-            position += 1;
-            // A transaction can hold two events (two settlements in one settle),
-            // so the signature alone is not a key.
-            return <LiveActivityRow key={`${row.signature}-${within}-${row.event.kind}`} row={row} labelOf={labelOf} maxContribution={maxContribution} first={first} />;
-          })}
-        </div>
-      ))}
+      <Days rows={rows} now={now} labelOf={labelOf} maxContribution={maxContribution} ownsTabStop />
       {disclosure}
     </div>
   );

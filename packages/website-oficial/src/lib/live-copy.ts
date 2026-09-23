@@ -189,6 +189,14 @@ export const LIVE_COPY = {
   /** The track's far end. A bar with no scale is a fraction of nothing. */
   rateFloor: "0%",
   investsIn: "Invests in",
+  /*
+   * NOT INVEST_COPY.floorsTitle ("Today's price limits"), which means the
+   * opposite where it is defined: that one heads the limits a policy signed
+   * NOW would carry, computed from today's prices. These are the ones already
+   * signed, on some past day, and they decay as the market moves away from
+   * them — which is the whole reason they are worth showing.
+   */
+  signedPriceLimits: "Price limits you signed",
   vaultSection: "Vault",
   mode: "Mode",
   modeProfit: (rate: string): string => `Profit · ${rate}`,
@@ -333,6 +341,8 @@ export const ACTIVITY_COPY = {
   /** A day heading over rows bucketed by UTC day: "Today · UTC", "Sep 5 · UTC". */
   dayHeading: (day: string): string => `${day} · UTC`,
   footer: (transactions: string, settlements: string): string => `${transactions} transactions · ${settlements} settlements`,
+  /** Both feed counts are over the pages loaded so far, never a lifetime. */
+  countsAreLoaded: "Over the history loaded so far",
   seeAll: "See all activity",
   loadOlder: "Load older",
   loadingOlder: "Loading…",

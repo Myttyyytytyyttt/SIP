@@ -83,7 +83,12 @@ describe("what the table leaves out", () => {
     expect(LIVE_COPY.invested).toBe("Basket value");
   });
 
-  it("points at Manage wallets for anything held elsewhere", () => {
+  /**
+   * The table reads the vault's own associated accounts, so a token held in any
+   * other account is in no row and in none of the three sums. The fact stays;
+   * it is on the heading rather than on a permanent line under the table.
+   */
+  it("says on its heading that a token held elsewhere is in none of these rows", () => {
     expect(render(liveDashboard())).toContain(LIVE_COPY.holdingsFootnote);
   });
 });

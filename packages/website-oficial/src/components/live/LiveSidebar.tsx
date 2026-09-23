@@ -3,10 +3,16 @@
 /**
  * THE SIDEBAR: whose pension this is, what saves into it, and what it did.
  *
- * It replaces the mock's single "Trading wallet / Balance $20,025.58", which was
- * one invented wallet with one invented dollar figure. A real account has a
- * pension key and any number of trading wallets, each with its own balance and
- * its own link — and a wallet that is NOT linked saves nothing, which is the
+ * IT IS THE SAMPLE'S COLUMN (src/components/wallet-activity.tsx), wired to the
+ * chain: the same header block — a label with Manage wallets, the address with
+ * a copy button, one balance in LABEL-over-figure — the same feed under it, and
+ * the same counted bar at its foot. Nothing here says anything the sample's
+ * column does not, except where a real account has something its one invented
+ * wallet could not.
+ *
+ * WHICH IS THIS, AND IT IS WHY THE COLUMN EXISTS: the pension key is not a
+ * trading wallet and gets its own line; there is any number of trading wallets
+ * rather than one; and a wallet that is NOT linked saves nothing, which is the
  * single most useful thing this column can say.
  *
  * A LINK'S STATUS HAS FOUR ANSWERS, not two: linked here, linked to somebody
@@ -31,7 +37,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { SheetClose } from "@/components/ui/sheet";
 import { formatSol, formatUsd, rawFrom, usdcRawForLamports } from "@/lib/amounts";
-import { LABEL } from "@/lib/classes";
+import { LABEL, MONO } from "@/lib/classes";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import type { LiveDashboard, LiveWalletView } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
@@ -44,7 +50,10 @@ import { shortAddress } from "@/lib/vault-copy";
  */
 const FEED = "min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!";
 
+/** The one look "Manage wallets" has, in the aside and in the sheet alike. */
 const MANAGE = "h-auto p-0 text-xs text-muted-foreground underline hover:text-foreground";
+
+const LINK = "rounded-sm text-xs text-muted-foreground underline-offset-4 outline-none hover:text-foreground hover:underline focus-visible:ring-3 focus-visible:ring-ring/50";
 
 const solscanAccountUrl = (address: string): string => `https://solscan.io/account/${address}`;
 
@@ -66,17 +75,16 @@ function LinkBadge({ wallet }: { readonly wallet: LiveWalletView }) {
 
 /**
  * ONE FIGURE IN THIS COLUMN IS ALLOWED TO BE BIG, and it is the balance of the
- * wallet that actually saves. Every number here was text-xs muted, so the
- * sidebar opened with no focal point at all next to a main column that leads
- * with a 48px hero — which is a good part of why one read as built and the
- * other as a draft. It is the same figure that was already on the line below;
- * only its size changed.
+ * wallet that actually saves — the sample's own Balance block, in the row it
+ * belongs to. The sample can put it in the header because it has one wallet;
+ * hoisting a trading wallet's balance under the pension key would say it was
+ * the pension's.
  *
  * AT MOST ONE ROW IS PROMOTED, and only when it is unambiguous — one wallet,
  * or exactly one linked to this vault. Several large numbers stacked is not an
  * anchor, it is a wall, and it would push the feed off the screen.
  *
- * A BALANCE NOBODY COULD READ IS NEVER PROMOTED: "—" at 20px is a hole, and
+ * A BALANCE NOBODY COULD READ IS NEVER PROMOTED: "—" at 24px is a hole, and
  * the row keeps its quiet line instead.
  */
 function anchorOf(wallets: readonly LiveWalletView[]): string | null {
@@ -103,23 +111,25 @@ function WalletRow({ wallet, usdcRawPerSol, anchor }: { readonly wallet: LiveWal
       </div>
       {anchor ? (
         /*
-         * DOLLARS LEAD, SOL SITS UNDER THEM — the sample's shape, and the
-         * owner asked for it by name. A balance converted at today's pool
-         * price is a figure this screen can source; both halves are here
-         * either way, and only which one is 20px changed.
+         * DOLLARS LEAD, SOL SITS UNDER THEM — the sample's shape, and a balance
+         * converted at today's pool price is a figure this screen can source.
          *
-         * UNLESS THE POOLS WERE NOT READ, and then SOL leads. A hero reading
-         * "—" is worse than a hero in the unit the chain actually records, and
-         * a dollar figure nobody could price is not one to lead with.
+         * UNLESS THE POOLS WERE NOT READ, and then SOL leads: a hero reading
+         * "—" is worse than a hero in the unit the chain actually records.
          */
         <div className="space-y-0.5 pt-0.5">
           <div className={LABEL}>{LIVE_COPY.walletBalance}</div>
-          {/* Num already carries the mono face; `block` gives the figure its own line. */}
-          <Num className="block text-xl font-semibold">{dollars ?? `${balance ?? ""} SOL`}</Num>
-          <div className="text-xs text-muted-foreground">
-            <Num className="text-xs">{balance === null ? LIVE_COPY.unknownFigure : `${balance} SOL`}</Num>
-            {settlements === null ? null : <> · {settlements}</>}
-          </div>
+          <div className={cn(MONO, "text-2xl font-semibold")}>{dollars ?? `${balance ?? ""} SOL`}</div>
+          {/* The SOL line exists to keep the chain's own unit under a dollar
+              conversion. With no conversion the figure above IS that line, and
+              it was printing the same thing twice, stacked. */}
+          {dollars === null && settlements === null ? null : (
+            <div className="text-xs text-muted-foreground">
+              {dollars === null ? null : <Num className="text-xs">{balance === null ? LIVE_COPY.unknownFigure : `${balance} SOL`}</Num>}
+              {dollars !== null && settlements !== null ? <> · </> : null}
+              {settlements}
+            </div>
+          )}
         </div>
       ) : (
         <div className="text-xs text-muted-foreground">
@@ -176,8 +186,8 @@ export function LiveSidebar({
   // FROM settlementRows, NOT the feed. A settlement read from a wallet's link
   // is deliberately not in the vault's page, and a footer reading "0
   // settlements" under a strip showing one is the screen disagreeing with
-  // itself. `transactions` stays the feed's own count; the disclosure below it
-  // counts what the feed leaves out.
+  // itself. `transactions` stays the feed's own count; the disclosure inside
+  // the feed counts what it leaves out.
   const settlements = data.settlementRows.length;
   const anchor = anchorOf(data.wallets);
 
@@ -191,23 +201,17 @@ export function LiveSidebar({
   return (
     <div id={id} className={cn("flex h-full flex-col bg-background", className)}>
       <div className="space-y-4 border-b p-4">
-        <div className="space-y-1">
-          <div className="flex items-center justify-between gap-2">
-            <span className={LABEL}>{LIVE_COPY.pensionKey}</span>
-            {inSheet ? <SheetClose asChild>{manage}</SheetClose> : manage}
-          </div>
-          <div className="flex items-center gap-1">
-            <Num className="text-sm">{shortAddress(pensionKey)}</Num>
-            <CopyButton value={pensionKey} />
-            <a
-              href={solscanAccountUrl(pensionKey)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="rounded-sm text-xs text-muted-foreground underline-offset-4 outline-none hover:text-foreground hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
-            >
-              {LIVE_COPY.solscanAccount}
-            </a>
-          </div>
+        <div className="flex items-center justify-between gap-2">
+          <span className={LABEL}>{LIVE_COPY.pensionKey}</span>
+          {inSheet ? <SheetClose asChild>{manage}</SheetClose> : manage}
+        </div>
+        <div className="flex items-center gap-1">
+          <Num className="text-sm">{shortAddress(pensionKey)}</Num>
+          <CopyButton value={pensionKey} />
+          {/* The key is the one account a stranger can check this whole page against. */}
+          <a href={solscanAccountUrl(pensionKey)} target="_blank" rel="noopener noreferrer" className={LINK}>
+            {LIVE_COPY.solscanAccount}
+          </a>
         </div>
 
         <div className="space-y-2">
@@ -242,15 +246,25 @@ export function LiveSidebar({
         />
       </ScrollArea>
 
-      {/* The hidden count is no longer a footnote down here: it is the label of
-          the control that opens those very rows, inside the feed. */}
-      <div className="border-t px-4 py-2.5">
-        <div className="flex items-center justify-between gap-2">
-          <FeedFooter transactions={data.rows.length} settlements={settlements} />
-          <a href="/activity" className="rounded-sm text-xs text-muted-foreground underline-offset-4 outline-none hover:text-foreground hover:underline focus-visible:ring-3 focus-visible:ring-ring/50">
-            {ACTIVITY_COPY.seeAll}
-          </a>
-        </div>
+      {/*
+        The sample's counted bar, with this chain's two counts in it.
+
+        TRANSACTIONS COUNTS WHAT THE PAGE HOLDS, NOT WHAT THE FEED LISTS. On
+        2026-09-19 twelve of fifteen loaded signatures were keeper upkeep, and
+        a bar reading "0 transactions" sat directly under a disclosure reading
+        "15 account upkeep transactions hidden" — the column contradicting
+        itself inside sixty pixels. The hidden rows are transactions; they are
+        behind a control, not absent.
+
+        AND NEITHER COUNT IS A LIFETIME. Both are over the pages loaded so far,
+        which on this page has no neighbour to say so — so the bar says it
+        itself, on its title rather than on a line of its own.
+      */}
+      <div className="flex justify-between gap-2 border-t px-4 py-2.5 text-xs text-muted-foreground">
+        <FeedFooter transactions={data.rows.length + data.hiddenRows.length} settlements={settlements} title={ACTIVITY_COPY.countsAreLoaded} />
+        <a href="/activity" className={LINK}>
+          {ACTIVITY_COPY.seeAll}
+        </a>
       </div>
     </div>
   );

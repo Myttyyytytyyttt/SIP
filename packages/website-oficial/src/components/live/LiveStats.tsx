@@ -1,13 +1,25 @@
 "use client";
 
 /**
- * THE FACTS THE CHAIN ACTUALLY HOLDS, as tiles.
+ * THE FACTS THE CHAIN ACTUALLY HOLDS, in the sample's tile grid.
  *
- * WHAT IS MISSING HERE IS THE POINT. The mock shows Avg per trade, Volume,
- * Biggest trade, Streak, Active days and "At this pace". None of them has a
- * source on chain — there are no trades, no volume and no daily series — so
- * they are not shown at all rather than computed from something that looks
- * similar. A tile that exists must be a number the vault or its links record.
+ * THE GRID IS THE SAMPLE'S, TAKEN AS IT STANDS — the same dl, the same dt/dd
+ * faces, and the same `Word`, which steps a unit word inside a value down to
+ * the sentence face so only the digits carry the number weight. What differs is
+ * WHICH tiles exist and what their subs are allowed to say.
+ *
+ * WHAT IS MISSING HERE IS THE POINT. The sample shows Avg per trade, Volume,
+ * Streak, Active days and "At this pace", and under the tiles a 13-week strip
+ * of the days a save happened. None of them has a source on chain — there are
+ * no trades, no volume and no daily series — so they are not shown at all
+ * rather than computed from something that looks similar. A tile that exists
+ * must be a number the vault or its links record.
+ *
+ * A SUB EARNS ITS LINE BY STOPPING A MISREADING, and the rest are gone. What is
+ * left says the WINDOW a figure covers — the pages loaded here, not a lifetime —
+ * or the denominator a figure is a fraction of. A count of investments under a
+ * lifetime dollar total said neither, and the tooltip on that figure was already
+ * carrying the one thing it could be misread as.
  *
  * A WINDOW IS ONLY CLAIMED WHEN THE LOADED HISTORY COVERS IT. "Today" and "This
  * week" are null in the model unless the loaded pages reach back past the start
@@ -32,9 +44,15 @@ import { LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
 import type { LivePolicyView, LiveStatsView, LiveVaultView } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
 
+/** A word inside a tile value ("SOL") steps down to the sentence face, so only the digits carry the number weight. */
+function Word({ children }: { children: ReactNode }) {
+  return <span className="text-sm font-normal text-muted-foreground">{children}</span>;
+}
+
 interface Tile {
   readonly label: string;
   readonly value: ReactNode;
+  /** "" is a tile with nothing left to qualify, and it renders no line at all. */
   readonly sub: ReactNode;
 }
 
@@ -85,13 +103,27 @@ export function LiveStats({
   if (everSettled) {
     tiles.push({
       label: STATS_COPY.settlements,
-      value: <Num>{stats.settlementsLifetime === null ? "—" : stats.settlementsLifetime.toString()}</Num>,
+      value: <Num>{stats.settlementsLifetime === null ? LIVE_COPY.unknownFigure : stats.settlementsLifetime.toString()}</Num>,
+      // Two different facts, not one restated: the tile is every settlement the
+      // links have ever counted, the sub is how many of them this page holds.
       sub: STATS_COPY.settlementsSub(String(stats.loadedSettlements)),
     });
     if (stats.biggestPaid !== null) {
-      tiles.push({ label: STATS_COPY.biggest, value: <Num>{`${formatSol(stats.biggestPaid)} SOL`}</Num>, sub: STATS_COPY.biggestSub });
+      tiles.push({
+        label: STATS_COPY.biggest,
+        value: (
+          <>
+            <Num>{formatSol(stats.biggestPaid)}</Num> <Word>SOL</Word>
+          </>
+        ),
+        // The maximum over the PAGES LOADED. Without this line it reads as a
+        // lifetime record, which is a claim nothing here can make.
+        sub: STATS_COPY.biggestSub,
+      });
     }
     if (stats.cappedCount > 0 && vault.maxContribution !== null) {
+      // Same window again, and the cap it was measured against: a count of
+      // settlements that hit a limit means nothing without the limit.
       tiles.push({ label: STATS_COPY.capped, value: <Num>{String(stats.cappedCount)}</Num>, sub: STATS_COPY.cappedSub(formatSol(vault.maxContribution)) });
     }
     tiles.push({
@@ -123,7 +155,11 @@ export function LiveStats({
     // this week" says dollars changed hands at rates this app never stored.
     tiles.push({
       label: STATS_COPY.thisWeek,
-      value: <Num>{`${formatSol(stats.savedThisWeekLamports)} SOL`}</Num>,
+      value: (
+        <>
+          <Num>{formatSol(stats.savedThisWeekLamports)}</Num> <Word>SOL</Word>
+        </>
+      ),
       sub: perSol === null ? "" : STATS_COPY.windowAbout(formatUsd(usdcRawForLamports(stats.savedThisWeekLamports, perSol))),
     });
   }
@@ -135,7 +171,10 @@ export function LiveStats({
         // THE TOOLTIP CAME DOWN WITH THE TILE. It used to live in the card's
         // header, and it is the sentence that keeps this figure from being
         // read as the basket's value a few rows below — they diverge whenever
-        // a token reaches the vault by any other route.
+        // a token reaches the vault by any other route. It is also the whole
+        // of what this tile has to qualify, which is why there is no sub under
+        // it: a count of the investments in the loaded history was a fact in
+        // another unit and another window, answering nothing anyone asked.
         value: (
           <Tooltip>
             <TooltipTrigger type="button" className="rounded-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
@@ -144,10 +183,12 @@ export function LiveStats({
             <TooltipContent>{LIVE_COPY.investedSoFarTooltip}</TooltipContent>
           </Tooltip>
         ),
-        sub: `${stats.investmentsLoaded} in loaded history`,
+        sub: "",
       });
     }
     if (policy.usedLast30d !== null && policy.maxRolling30d !== null) {
+      // The denominator, not a restatement: a spend is a fraction of the cap
+      // the policy signed, and the cap is the half nobody can infer.
       tiles.push({ label: STATS_COPY.usedIn30Days, value: <Num>{formatUsd(policy.usedLast30d)}</Num>, sub: STATS_COPY.usedIn30DaysSub(formatUsd(policy.maxRolling30d)) });
     }
   }

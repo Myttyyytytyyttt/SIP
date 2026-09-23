@@ -1,12 +1,13 @@
 "use client";
 
 /**
- * WHAT EACH SETTLEMENT PUT ASIDE, newest at the left.
+ * WHAT EACH SETTLEMENT PUT ASIDE, newest at the left — savings-strip.tsx and
+ * strip-chip.tsx, wired to the chain.
  *
  * The mock's strip shows a chip per FILL. The chain has no fills, so this shows
  * a chip per SETTLEMENT — the only event the program calls a contribution — and
  * every chip opens that transaction on Solscan. A settlement that moved nothing
- * is a muted "0 SOL" rather than being dropped: it happened, and a strip that
+ * is a muted "0" rather than being dropped: it happened, and a strip that
  * silently skips the zeroes overstates how often saving happens.
  *
  * NO CHIPS IS TWO DIFFERENT FACTS, and only one of them is "nothing to show".
@@ -19,8 +20,7 @@
  * can fill it in the space the chips would have taken.
  *
  * A BUTTON, NOT A FOURTH SENTENCE. The chart's caption and the Last settlement
- * tile already say the settlement is outside the loaded history. Saying it once
- * more here is how a page comes to read as a list of apologies; pressing "Load
+ * tile already say the settlement is outside the loaded history; pressing "Load
  * older" is what actually puts the chip, the curve and the Biggest tile back.
  */
 
@@ -33,15 +33,14 @@ import { AssetMark } from "@/components/live/AssetMark";
 import { NATIVE_SOL } from "@/lib/asset-art";
 import { formatSol, formatSolAtMost, rawFrom } from "@/lib/amounts";
 import { SAVED } from "@/lib/classes";
-import { timeAgo } from "@/lib/format";
+import { pct, timeAgo } from "@/lib/format";
 import type { LiveOlder } from "@/hooks/use-live-dashboard";
 import { ACTIVITY_COPY, LIVE_COPY, STATS_COPY, stripTooltip } from "@/lib/live-copy";
 import type { LiveRow, LiveVaultView, VaultEventJson } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
-import { pct } from "@/lib/format";
 import { ratePercent } from "@/lib/vault-copy";
 
-/** How many settlements the strip shows. Rows arrive newest first. */
+/** How many settlements the strip shows. Rows arrive newest first, so these are the latest. */
 const SHOWN = 40;
 
 export type SettledEvent = Extract<VaultEventJson, { kind: "settled" }>;
@@ -55,10 +54,9 @@ const isSettled = (row: LiveRow): row is SettledRow => row.event.kind === "settl
  *
  * THE MEASURE IS THE EVENT'S OWN, never the vault's mode today. set_policy_v2
  * takes a mode as an argument and validate_policy accepts either, so a vault
- * can be switched — and every chip in the strip would then describe its whole
- * history in the new mode's words, while the same transaction's row in the feed
- * (which reads measureOf(event.mode)) says the other. The rate beside it was
- * already per-event, so the strip was disagreeing with itself.
+ * can be switched — and every chip would then describe its whole history in the
+ * new mode's words, while the same transaction's row in the feed (which reads
+ * measureOf(event.mode)) says the other.
  */
 export function chipDetail(input: {
   readonly event: SettledEvent;
@@ -129,11 +127,12 @@ export function LiveSettlementStrip({
   return (
     <div className={cn("flex items-center gap-2", className)} role="group" aria-label={STATS_COPY.settlementStripLabel}>
       {badge === null || rate === null ? null : (
-        // The sample's badge says what it means on hover; this one did not.
+        // h-9 rounded-md px-3: the chips' box, so the rate reads as the row's
+        // header and not a stray pill. No percent glyph, unlike the sample's:
+        // the badge says "20%" in words, and the icon beside it read as
+        // "% Profit: 20%". It says what it means on hover, as the sample's does.
         <Tooltip>
           <TooltipTrigger asChild>
-            {/* No percent glyph: the badge says "20%" in words now, and the
-                icon beside it read as "% Profit: 20%". */}
             <Badge variant="secondary" tabIndex={0} className="h-9 shrink-0 rounded-md px-3 font-mono tabular-nums">
               {badge}
             </Badge>
@@ -165,9 +164,9 @@ export function LiveSettlementStrip({
       )}
 
       {/*
-        The sample trails its strip with an average, which says more than a
-        count of the same chips. Over the chips SHOWN, and named so — it is not
-        a lifetime average, and the loaded history is not the whole history.
+        "last N", as the sample trails its strip: the Settlements tile counts
+        the loaded history, so this one names its own population — the chips
+        shown, which are neither a lifetime nor the whole history.
 
         GUARDED, because the band renders with zero chips on the
         settled-outside-history branch and BigInt division by zero throws.
@@ -183,6 +182,12 @@ export function LiveSettlementStrip({
   );
 }
 
+/**
+ * One settlement on the strip: its mark and what it put aside. Every settlement
+ * normally carries the SAVED accent; the muted "0" only appears when one landed
+ * with nothing to pay. The rest of the story (whose wallet, of what, when)
+ * waits in the tooltip, which the chip reveals on hover or keyboard focus.
+ */
 function StripChip({
   row,
   now,
@@ -207,19 +212,23 @@ function StripChip({
   });
 
   const className = cn(
-    "flex h-9 shrink-0 items-center gap-1.5 rounded-md border px-3 font-mono text-sm tabular-nums outline-none",
+    "flex h-9 shrink-0 items-center gap-2 rounded-md border px-3 font-mono text-sm tabular-nums outline-none",
+    // Focus: 2px and inset, so it reads against the newest chip's resting 1px
+    // ring and needs no room outside the border. scroll-mr-8 keeps a
+    // focus-scrolled chip clear of the strip's 2rem right-edge fade.
     "scroll-mr-8 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+    // The text shade and its contrast reasoning live with SAVED in classes.ts.
     saved ? cn("border-emerald-500/20 bg-emerald-500/10", SAVED) : "text-muted-foreground",
     newest && "ring-1 ring-ring/40",
   );
 
   /*
-   * THE ASSET'S MARK AND THREE DECIMALS. A settlement is SOL, so the chip
-   * wears SOL's mark and the unit is the mark rather than a repeated word —
-   * that is what buys the room for the figure. Three places because
-   * "+0.036634582" in a pill is a smear; the exact amount is in the tooltip
-   * and in the accessible name, and a settlement too small to show at three
-   * places reads "<0.001" and never "0".
+   * THE ASSET'S MARK AND THREE DECIMALS. A settlement is SOL, so the chip wears
+   * SOL's mark — mint-keyed, never the ticker — and the unit is the mark rather
+   * than a repeated word, which is what buys the room for the figure. Three
+   * places because "+0.036634582" in a pill is a smear; the exact amount is in
+   * the tooltip and in the accessible name, and a settlement too small to show
+   * at three places reads "<0.001" and never "0".
    */
   const face = saved ? `+${formatSolAtMost(paid, 3)}` : "0";
   const body = (
