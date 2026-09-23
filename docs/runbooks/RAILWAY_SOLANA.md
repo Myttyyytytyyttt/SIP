@@ -421,6 +421,54 @@ escritura (Privy, confirmación, recibo) se cobra como suelo y no se ejecuta. So
 `lastSweepPhaseMs` (`triageMs` es el precio de los usuarios quietos y `expensiveMs` el de los activos), `skipped` y
 `linksTriaged`. Y el límite de peticiones por segundo del plan de Helius, que solo tú puedes mirar.
 
+## 5. El timbre (Helius avisa quién se movió)
+
+Sin timbre, cada barrida pregunta a **todas** las wallets si hicieron algo, aunque casi ninguna haya hecho nada: unos
+210 ms por usuario quieto, y a partir de unos 280 usuarios las barridas ya no caben en 60 s. Con el timbre, Helius le
+avisa al vigilante (en 1–3 s) de qué wallets y vaults se movieron, y la barrida gira esas, las que tienen algo
+pendiente, las nuevas y una tanda de seguridad que rota (al menos 50 por barrida; todas en 30 minutos). **Con 50
+usuarios o menos se siguen girando todos en cada barrida**: hoy no cambia nada salvo lo que enseña `/status`.
+
+Si el timbre no oye nada, o deja de oír las transacciones que el propio vigilante envía, vuelve solo a girar a todos
+en cada barrida (lo de siempre). No puede dejar a nadie sin cobrar; como mucho, deja de ahorrar trabajo.
+
+### Activarlo (una vez)
+
+1. En **Terminal.app** (no en un chat), genera el secreto y déjalo copiado sin que salga en pantalla:
+
+   ```bash
+   openssl rand -hex 32 | tr -d '\n' | pbcopy
+   ```
+
+2. En Railway → `sip-solana-keeper` → **Variables** → nueva variable `SIP_SOLANA_DOORBELL_SECRET`, pega (Cmd+V) y guarda.
+   **Nunca lo pegues en un chat**: quien lo tenga puede tocar el timbre.
+3. `SIP_SOLANA_HELIUS_API_KEY` **solo si** `SIP_SOLANA_RPC_URLS` no es de Helius. Si ya usas
+   `https://mainnet.helius-rpc.com/?api-key=…`, el vigilante saca la clave de ahí y no hace falta repetirla.
+4. No hace falta nada más: el vigilante usa el dominio público de Railway (`https://<tu-dominio>/hooks/helius`) y **crea
+   él mismo el webhook en Helius** (raw, todas las transacciones), con las wallets y vaults que descubre. Si el
+   servicio no tiene dominio público: Settings → Networking → Generate Domain. Si antes hiciste un webhook de prueba a
+   otra dirección (por ejemplo webhook.site), bórralo en el panel de Helius: cobra créditos por cada evento.
+
+### Qué debe enseñar `/status` → `doorbell`
+
+- Nada más desplegar: `enabled: true`, `trusted: false`, y `untrustedReason` diciendo que aún no ha llegado ningún
+  evento. Es normal: mientras tanto gira a todos.
+- En cuanto haya una operación o un cobro: `trusted: true`, `eventsReceived` subiendo, `lastEventLagMs` de unos
+  1000–3000, `webhook.managed: true`, `webhook.active: true`, y `webhook.addresses` = wallets + vaults enlazadas.
+- `lanes` dice a quién giró la última barrida y por qué (`bell` sonó, `busy` tenía algo pendiente, `new` es nueva o
+  aún no está en el webhook, `safety` es la ronda de seguridad).
+- `possibleMisses` debería quedarse en 0. Si sube, Helius se saltó a alguien y la ronda de seguridad lo pilló:
+  avísame con la hora.
+- `eventsRejected` cuenta llamadas con un secreto equivocado. Nunca aparece ni el secreto ni la clave de Helius.
+
+Dos alertas nuevas, las dos de aviso (solo llegan a Telegram si `SIP_SOLANA_ALERT_MIN_SEVERITY=warn`):
+`doorbell-deaf` (dejó de oír y vuelve a girar a todos) y `doorbell-sync` (no consigue poner al día el webhook).
+
+### Apagarlo
+
+Borra `SIP_SOLANA_DOORBELL_SECRET` en Railway. Tras el redespliegue el vigilante vuelve a girar a todos en cada barrida,
+como antes. Después borra el webhook en el panel de Helius, para que deje de gastar créditos.
+
 ## Si algo falla
 
 - **El vigilante termina de desplegar y se reinicia en bucle**: abre los logs de `sip-solana-keeper` y busca
