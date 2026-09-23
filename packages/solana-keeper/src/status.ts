@@ -117,6 +117,46 @@ export interface PendingCarry {
   readonly since: string;
 }
 
+/**
+ * Where one sweep's milliseconds went.
+ *
+ * WHICH LANE TO WIDEN IS THE WHOLE QUESTION. A sweep that takes 40 s of its 60 s
+ * interval says only that the keeper is close to the edge; these four numbers
+ * say whether the edge is discovery (one getProgramAccounts, shared by every
+ * user), the batched vault read (one request for up to 100 accounts, measured at
+ * 63-68 ms whether it carries 1 address or 100), the cheap per-user triage that
+ * scales linearly with N, or the window walks, which are sequential and cost one
+ * getTransaction per transaction. Only the last two grow with users, and they
+ * grow at completely different rates.
+ *
+ * EVERY FIELD IS A MEASUREMENT OF THIS PROCESS, taken where it runs. The numbers
+ * this keeper was sized on were taken from a laptop against the public endpoint;
+ * production runs elsewhere, against another provider, and only these are about
+ * production.
+ */
+export interface SweepPhaseMs {
+  /** readChainSnapshot: the config, the program account and the crank's balance. */
+  readonly chainReadMs: number;
+  /** discoverLinks: one getProgramAccounts for every TradingLink, shared by every user. */
+  readonly discoveryMs: number;
+  /** The batched vault read (getMultipleAccounts, chunked at 99 by Anchor). */
+  readonly vaultReadMs: number;
+  /**
+   * Turns whose settle rested before the window walk — the cost of a user who
+   * did nothing. IT IS NOT ONE ROUND TRIP: the cheap probe returns IDLE and the
+   * invest turn then runs unconditionally, reading the vault, the policy and the
+   * two token accounts. Divide the sweep interval by this per user to read the
+   * idle ceiling.
+   */
+  readonly triageMs: number;
+  /**
+   * Turns that walked the window, settled, invested, or threw. Sequential and
+   * unbounded-ish: one wallet with a long backlog can hold the whole sweep, and
+   * everyone behind it waits.
+   */
+  readonly expensiveMs: number;
+}
+
 export interface KeeperStatus {
   service: string;
   startedAt: string;
@@ -133,6 +173,63 @@ export interface KeeperStatus {
   lastSweepAt: string | null;
   lastSweepLinks: number | null;
   lastSweepError: string | null;
+  /**
+   * Sweeps dropped because the previous one had not finished, since this process
+   * came up, and how many in a row.
+   *
+   * THE ONE FAILURE THAT WAS INVISIBLE. bin/keeper.mts drops an overlapping
+   * sweep with a log line and nothing else — no counter, no alert, no field
+   * here — and that silence has already happened: a wallet turn threw with the
+   * running flag stuck on, and every later sweep logged the skip while nobody
+   * was settled. From outside, a keeper skipping every sweep and a keeper with
+   * nothing to do look identical: `sweeps` climbs in neither case, `lastSweepAt`
+   * moves in neither, and /health reads the progress clock, which a skip leaves
+   * alone. These two numbers are the difference.
+   */
+  skipped: number;
+  consecutiveSkips: number;
+  /** How long the last completed sweep took, wall clock, and the percentiles over the last SWEEP_TIMES_KEPT of them. */
+  lastSweepMs: number | null;
+  sweepMsP50: number | null;
+  /**
+   * The number to compare against `sweepMs`. Past 100 % the next sweep is
+   * skipped; the keeper warns from 60 % (SWEEP_SLOW_FRACTION), because an alert
+   * that arrives after the skip is an obituary rather than a warning.
+   */
+  sweepMsP90: number | null;
+  /**
+   * Links the last sweep FOUND, and links it actually got a turn for.
+   *
+   * WHEN THEY DIFFER, SOMEBODY WAS NOT LOOKED AT — the failure this whole page
+   * exists to make visible, and the one `lastSweepLinks` cannot show, because it
+   * reports the size of the set and not how much of it was served.
+   */
+  linksDiscovered: number | null;
+  linksTriaged: number | null;
+  /** Where the last sweep's milliseconds went, by phase. Null until one has completed. */
+  lastSweepPhaseMs: SweepPhaseMs | null;
+  /**
+   * Which endpoint answered last, and how many times one has been set aside.
+   *
+   * AN INDEX, NEVER THE URL. SIP_SOLANA_RPC_URLS carries API keys, /status is
+   * unauthenticated and served on a public domain, and a provider URL with its
+   * key in it is a credential for somebody else's bill. `endpointLabel`
+   * (src/rpc-pool.ts) is the only name any of them gets outside the request.
+   */
+  rpcEndpointInUse: string | null;
+  failovers: number;
+  /**
+   * Jupiter requests the last sweep's invest path spent.
+   *
+   * THE BINDING EXTERNAL LIMIT, and it is not the RPC. The keyless tier allows
+   * 30 requests a minute; a route build costs a /quote and a
+   * /swap-instructions, and the depth probe costs another quote, so a turn that
+   * actually buys spends about a dozen. Whatever the architecture does with
+   * threads, that arithmetic caps ACTIVE users per minute at a small single
+   * digit — which is a fact about the product's ceiling, not about this
+   * process's speed.
+   */
+  jupiterCallsPerSweep: number | null;
   /** The chain's crank (config.keeper) and its balance, so an operator sees it emptying before it stops. */
   crank: { pubkey: string | null; lamports: string | null };
   signing: SigningStatus;

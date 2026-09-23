@@ -43,6 +43,7 @@ import {
   takeAtProbeRate,
   venueImpactBps,
 } from "./invest-decision.js";
+import { JUPITER_CALLS_PER_QUOTE, JUPITER_CALLS_PER_ROUTE_BUILD, jupiterCalls } from "./sweep-cost.js";
 
 /** A leg this turn refuses outright, before any verdict is reached. */
 export class VenueMeasurementRefusal extends Error {
@@ -311,6 +312,12 @@ export async function measureLegVenue(
   // re-quote afterwards.
   const slippageBps = legSlippageBps(params.feeBps);
 
+  // COUNTED BEFORE THE CALL, NOT AFTER IT. Jupiter's 30-a-minute keyless limit
+  // is spent by the REQUEST, so a build that throws — a 429, a timeout — has
+  // cost the budget just as surely as one that answered, and a counter that
+  // only counted successes would under-report exactly when the keeper was being
+  // throttled. It counts and decides nothing: see src/sweep-cost.ts.
+  jupiterCalls.count(JUPITER_CALLS_PER_ROUTE_BUILD);
   const route = await buildJupiterRoute(connection, {
     vault: params.vault,
     vaultIn: params.vaultIn,
@@ -357,6 +364,9 @@ export async function measureLegVenue(
   // probe answered at all, and only `impact` depends on the venues matching.
   let takeFloorRaw: bigint | undefined;
   try {
+    // The probe spends the budget too, and it is the call most likely to be the
+    // one refused: it is the last of the three this leg makes.
+    jupiterCalls.count(JUPITER_CALLS_PER_QUOTE);
     const probe = await fetchJupiterQuote({
       inputMint: params.inputMint,
       outputMint: params.targetMint,

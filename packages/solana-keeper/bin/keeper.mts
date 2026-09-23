@@ -80,7 +80,7 @@ import { SolanaReadModel } from "../src/read-model.js";
 import { poolFetch } from "../src/rpc-pool.js";
 import { seatCheck, seatCheckNotice } from "../src/seat-check.js";
 import { activeBps, settleAlert, settleThrewAlert, type CarryBook } from "../src/settle-decision.js";
-import { runSettleTick } from "../src/settle-tick.js";
+import { runSettleTick, type SettleOutcome } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KEEPER_LOCK_NAME, KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
 import { computeLeaderboard } from "../src/leaderboard.js";
@@ -93,6 +93,16 @@ import {
   type LeaderboardReply,
   type PendingCarry,
 } from "../src/status.js";
+import {
+  SWEEP_SKIPPED_ALERT_KEY,
+  SWEEP_SKIPPED_CRITICAL_STREAK,
+  SWEEP_SLOW_ALERT_KEY,
+  createSweepTimes,
+  jupiterCalls,
+  settleWalked,
+  sweepSkippedAlert,
+  sweepSlowAlert,
+} from "../src/sweep-cost.js";
 import {
   VAULT_READ_ALERT_KEY,
   VAULT_READ_CRITICAL_STREAK,
@@ -178,7 +188,33 @@ const noteProgress = (): void => {
 // FAILOVER UNDER THE TRANSPORT, not around each call. Connection threads one
 // endpoint through everything it does; replacing its `fetch` gives Anchor, the
 // settle path and the invest path the same failover without a line of their own.
-const rpcFetch = poolFetch(config.rpcUrls, (message, fields) => log.warn(message, fields));
+/**
+ * WHICH ENDPOINT IS ANSWERING, AND HOW OFTEN ONE HAS BEEN SET ASIDE.
+ *
+ * A failover is silent by design — that is the point of putting the pool under
+ * the transport — and it is also the single change that most moves the numbers
+ * an operator sizes this keeper on: another provider, another latency, another
+ * rate limit. Until now the only record was a warning line in a log that
+ * scrolls. BY LABEL, NEVER BY URL: SIP_SOLANA_RPC_URLS carries API keys and
+ * /status is public (src/rpc-pool.ts, endpointLabel).
+ *
+ * `let`s rather than fields on `health`, because that object is built further
+ * down this file and these callbacks are installed before it exists. They are
+ * folded in where the page is rendered, exactly as pendingCarries is.
+ */
+let failovers = 0;
+let rpcEndpointInUse: string | null = null;
+const rpcFetch = poolFetch(
+  config.rpcUrls,
+  (message, fields) => {
+    failovers += 1;
+    log.warn(message, fields);
+  },
+  undefined,
+  (at) => {
+    rpcEndpointInUse = at;
+  },
+);
 /**
  * The same transport, plus the one thing /health needs: AN ANSWER FROM THE CHAIN
  * IS PROGRESS. Every RPC call this process makes goes through here — Anchor's
@@ -583,6 +619,24 @@ const health: KeeperStatus = {
   lastSweepAt: null,
   lastSweepLinks: null,
   lastSweepError: null,
+  // WHAT A SWEEP COSTS. Every one of these is filled by the sweep below and by
+  // nothing else; they decide nothing and are read by an operator asking how
+  // many users fit in one interval. Null means "no sweep has finished yet",
+  // which is a different fact from zero.
+  skipped: 0,
+  consecutiveSkips: 0,
+  lastSweepMs: null,
+  sweepMsP50: null,
+  sweepMsP90: null,
+  linksDiscovered: null,
+  linksTriaged: null,
+  lastSweepPhaseMs: null,
+  // Folded in at render from the transport's own callbacks, which are installed
+  // before this object exists; these two are the placeholders that keep the
+  // shape whole.
+  rpcEndpointInUse: null,
+  failovers: 0,
+  jupiterCallsPerSweep: null,
   crank: { pubkey: null, lamports: null },
   signing: {
     route: signingRoute(),
@@ -684,7 +738,7 @@ if (config.port !== null) {
   const port = config.port;
   createServer(
     httpHandler(
-      () => renderStatus({ ...health, pendingCarries: pendingCarries() }, sharedRedactor),
+      () => renderStatus({ ...health, pendingCarries: pendingCarries(), rpcEndpointInUse, failovers }, sharedRedactor),
       () => decideHealth({ now: Date.now(), startedAt: startedAtMs, lastProgressAt, sweepMs: config.sweepMs }),
       () => leaderboard,
     ),
@@ -816,13 +870,86 @@ function verifyLive(snapshot: ChainSnapshot, atStartup: boolean): LiveVerificati
 }
 
 let cycleRunning = false;
+/** When the sweep now running began, so a skip can say how long it has been waiting. */
+let cycleStartedAt: number | null = null;
+/**
+ * The last SWEEP_TIMES_KEPT sweep durations, for the percentiles on /status.
+ * BOUNDED: this process runs for weeks, and an unbounded array is a leak in the
+ * one process that must not be restarted to be fixed.
+ */
+const sweepTimes = createSweepTimes();
+
+/**
+ * What the sweep that just ended cost, written to /status and judged against the
+ * interval it has to fit in.
+ *
+ * CALLED FROM THE `finally` AND AFTER `cycleRunning` IS CLEARED. Everything here
+ * is measurement: if any of it threw while the flag was still set, it would
+ * wedge the keeper in exactly the way this instrumentation exists to report.
+ */
+function noteSweepCost(elapsedMs: number, phases: KeeperStatus["lastSweepPhaseMs"], linksTriaged: number | null): void {
+  health.lastSweepMs = elapsedMs;
+  sweepTimes.add(elapsedMs);
+  health.sweepMsP50 = sweepTimes.p50();
+  health.sweepMsP90 = sweepTimes.p90();
+  health.lastSweepPhaseMs = phases;
+  health.linksTriaged = linksTriaged;
+  health.jupiterCallsPerSweep = jupiterCalls.sweepTotal();
+  // A SWEEP FINISHED, so the run of skipped ones is over. The total stands: it
+  // is the count of users that went unserved, and it is not undone by a later
+  // sweep going through.
+  health.consecutiveSkips = 0;
+  alerter.clear(SWEEP_SKIPPED_ALERT_KEY);
+  // AND THE WARNING THAT COMES BEFORE THE SKIP. Fired from p90 rather than from
+  // this one sweep, so a single slow pass does not page and a trend does.
+  const slow = sweepSlowAlert({ p90Ms: health.sweepMsP90, sweepMs: config.sweepMs, samples: sweepTimes.length });
+  if (slow === null) alerter.clear(SWEEP_SLOW_ALERT_KEY);
+  else alerter.fire(slow);
+}
 
 async function sweep(): Promise<void> {
   if (cycleRunning) {
-    log.warn("cycle skipped: the previous one is still running");
+    // COUNTED AND ESCALATED, WHICH IT NEVER USED TO BE. This was one log line:
+    // no counter, no field on /status, no alert. A keeper whose sweeps are all
+    // being dropped looks exactly like a keeper with nothing to do — `sweeps`
+    // stops climbing in both cases, and /health reads the progress clock, which
+    // a skip does not touch. It has already happened once, for hours (see the
+    // per-wallet catch below, where the turn that threw left this flag set).
+    health.skipped += 1;
+    health.consecutiveSkips += 1;
+    const waitingMs = cycleStartedAt === null ? null : Date.now() - cycleStartedAt;
+    log.warn("cycle skipped: the previous one is still running", {
+      skipped: health.skipped,
+      consecutiveSkips: health.consecutiveSkips,
+      runningForMs: waitingMs,
+    });
+    // The alerter dedupes by key alone, so the standing warning is cleared at
+    // the escalation or it would swallow the critical — vaultReadAlert's rule.
+    if (health.consecutiveSkips === SWEEP_SKIPPED_CRITICAL_STREAK) alerter.clear(SWEEP_SKIPPED_ALERT_KEY);
+    alerter.fire(
+      sweepSkippedAlert(
+        health.consecutiveSkips,
+        `the previous sweep has been running for ${waitingMs ?? "an unknown number of"} ms, over a ${config.sweepMs} ms interval; ` +
+          "nobody in this pass was settled",
+      ),
+    );
     return;
   }
   cycleRunning = true;
+  const cycleBeganAt = Date.now();
+  cycleStartedAt = cycleBeganAt;
+  // ZEROED AT THE TOP, READ IN THE `finally`: one sweep runs at a time, so the
+  // count between those two points is this sweep's.
+  jupiterCalls.startSweep();
+  // WHERE THIS SWEEP'S MILLISECONDS WENT. Declared out here so the `finally`
+  // can publish them even when the sweep throws halfway: a failed sweep's
+  // shape is the most interesting one there is.
+  let chainReadMs = 0;
+  let discoveryMs = 0;
+  let vaultReadMs = 0;
+  let triageMs = 0;
+  let expensiveMs = 0;
+  let linksTriaged = 0;
   // /health's clock. A sweep that throws below still counts as a sweep that
   // happened, so an endpoint outage is reported by sweep-failed and /status,
   // never by restarting the container. Stamped again at every link's turn and
@@ -830,7 +957,9 @@ async function sweep(): Promise<void> {
   // wedged — the restart that would follow only re-runs the same slow work.
   noteProgress();
   try {
+    const chainReadAt = Date.now();
     const snapshot = await readChainSnapshot(connection, program);
+    chainReadMs = Date.now() - chainReadAt;
     applySnapshot(snapshot);
     if (snapshot.errors.length > 0) changes.change("chain-read", "chain read incomplete", { errors: snapshot.errors }, "warn");
     else changes.change("chain-read", "chain read complete", {});
@@ -880,8 +1009,14 @@ async function sweep(): Promise<void> {
       changes.change("program", "the program is not deployed on this cluster — nothing to sweep", { program: programId.toBase58() }, "warn");
     } else {
       if (snapshot.programDeployed === true) changes.change("program", "the program is deployed", { program: programId.toBase58() });
+      const discoveryAt = Date.now();
       links = await discoverLinks(connection, programId, TRADING_LINK_DISC);
+      discoveryMs = Date.now() - discoveryAt;
     }
+    // FOUND, WHICH IS NOT THE SAME AS SERVED. `linksTriaged` below counts the
+    // ones that actually got a turn; when the two differ somebody was not
+    // looked at, and that is the number the owner needs before he has users.
+    health.linksDiscovered = links.length;
     // EVERY VAULT THE LINKS NAME, IN ONE REQUEST. Each settle turn read its own
     // vault, and the history mirror read it again after every SETTLED.
     //
@@ -896,6 +1031,7 @@ async function sweep(): Promise<void> {
     // throttling. The fallback is lazy and cached, so a degraded sweep reads each
     // distinct vault at most once, and only for the links it actually reaches.
     let vaults: ReadonlyMap<string, VaultState | null> | null = null;
+    const vaultReadAt = Date.now();
     try {
       vaults = await readVaults(program, links.map((link) => link.vault));
       vaultReadFailures = 0;
@@ -908,6 +1044,11 @@ async function sweep(): Promise<void> {
       // the escalation or it would swallow the critical, as invest-failed does.
       if (vaultReadFailures === VAULT_READ_CRITICAL_STREAK) alerter.clear(VAULT_READ_ALERT_KEY);
       alerter.fire(vaultReadAlert(vaultReadFailures, detail));
+    } finally {
+      // TIMED ON BOTH PATHS. A read that was refused is the expensive one — it
+      // waited for a timeout and then left every link to a read of its own —
+      // and a phase timing that only counted the good case would hide it.
+      vaultReadMs = Date.now() - vaultReadAt;
     }
     /**
      * The degraded path's read, cached per distinct vault for this sweep. The
@@ -1010,8 +1151,15 @@ async function sweep(): Promise<void> {
       // beginning is working, however long the whole pass takes; one wedged
       // inside a turn stops stamping here and /health answers 503, as it should.
       noteProgress();
+      const turnAt = Date.now();
       const wallet = link.wallet.toBase58();
       const vaultAddr = link.vault.toBase58();
+      // WHICH LANE THIS TURN'S TIME BELONGS TO, and it cannot be known until the
+      // settle has answered: the cheap probe and the window walk are the same
+      // call from out here. Null while it is unknown — a turn that threw before
+      // an outcome is charged to the expensive lane, which over-states that lane
+      // and never under-states it.
+      let settleOutcome: SettleOutcome | null = null;
       // WHICH HALF OF THE TURN IS RUNNING, for the catch below. One try wraps the
       // settle AND the invest, so a catch that assumed "settle" would page "a
       // settlement turn threw" for an exception thrown while buying a basket —
@@ -1127,6 +1275,7 @@ async function sweep(): Promise<void> {
           protocolPaused,
           carries: settleCarries,
         });
+        settleOutcome = settle.outcome;
         // MONEY EVENTS always log and clear the dedupe key — a SETTLED, a RETRY
         // or a real FAILED is news every time. The resting states each log ONCE
         // on change; they stay visible in /status instead, which never dedupes.
@@ -1365,6 +1514,15 @@ async function sweep(): Promise<void> {
           at: new Date().toISOString(),
         };
       }
+      // OUTSIDE THE TRY AND ITS CATCH, so a turn that threw is still counted as
+      // a user who was LOOKED AT — it was, expensively — and its milliseconds
+      // are still charged to a lane. A wallet missing from these totals would
+      // read as a smaller fleet rather than a failing one, which is the same
+      // mistake the signing summary already made once.
+      const turnMs = Date.now() - turnAt;
+      if (settleOutcome !== null && !settleWalked(settleOutcome)) triageMs += turnMs;
+      else expensiveMs += turnMs;
+      linksTriaged += 1;
     }
 
     // THE LOSSES THIS SWEEP LEFT WAITING, STAMPED ON THE KEEPER'S OWN CLOCK.
@@ -1458,7 +1616,25 @@ async function sweep(): Promise<void> {
       detail: health.lastSweepError,
     });
   } finally {
+    // THE FLAG FIRST, BEFORE ANY MEASUREMENT. Everything below this line counts
+    // and times; if any of it threw while the flag was still set, every later
+    // sweep would be skipped forever — the precise wedge this instrumentation
+    // was added to report, caused by the instrumentation. For the same reason
+    // the accounting has a catch of its own: /status losing a number is a page
+    // with a gap in it, and a keeper that stops sweeping is an outage.
     cycleRunning = false;
+    cycleStartedAt = null;
+    try {
+      noteSweepCost(
+        Date.now() - cycleBeganAt,
+        { chainReadMs, discoveryMs, vaultReadMs, triageMs, expensiveMs },
+        linksTriaged,
+      );
+    } catch (error) {
+      log.warn("the sweep's own cost could not be recorded (the sweep itself is unaffected)", {
+        detail: summarizeUpstreamError(error),
+      });
+    }
   }
 }
 

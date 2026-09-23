@@ -84,6 +84,21 @@ function setup(): { redactor: Redactor; status: KeeperStatus } {
     lastSweepLinks: 1,
     // Planted: what an upstream message that slipped past its summary looks like.
     lastSweepError: `FetchError: request to ${RPC} failed, reason: ECONNRESET`,
+    // WHAT A SWEEP COST. A skipped sweep, a pass that took two thirds of its
+    // own interval, and a link that was discovered and never served: the three
+    // conditions this page was blind to.
+    skipped: 2,
+    consecutiveSkips: 1,
+    lastSweepMs: 41_000,
+    sweepMsP50: 12_000,
+    sweepMsP90: 41_000,
+    linksDiscovered: 2,
+    linksTriaged: 1,
+    lastSweepPhaseMs: { chainReadMs: 120, discoveryMs: 240, vaultReadMs: 68, triageMs: 520, expensiveMs: 40_000 },
+    // AN INDEX, NEVER A URL: the endpoints carry API keys and this page is public.
+    rpcEndpointInUse: "endpoint 2/2",
+    failovers: 3,
+    jupiterCallsPerSweep: 12,
     crank: { pubkey: null, lamports: null },
     signing: {
       route: "privy",
@@ -163,6 +178,34 @@ describe("the /status JSON", () => {
     // would fail to render the moment a zero settle carried a loss.
     expect(served).toContain('"lossLamports":"500000000"');
     expect(parsed.pendingCarries).toHaveLength(1);
+  });
+
+  // WHAT A SWEEP COSTS, SERVED AS JSON. The owner's question — how many
+  // simultaneous users fit — is sweepMs divided by what a user costs, and until
+  // these fields existed neither side of that division was on the page: a
+  // keeper skipping every sweep looked exactly like one with nothing to do.
+  it("carries the sweep's cost, and names the endpoint by index rather than by URL", () => {
+    const { redactor, status } = setup();
+    const parsed = JSON.parse(renderStatus(status, redactor)) as KeeperStatus;
+    // The skip that used to be a log line and nothing else.
+    expect(parsed.skipped).toBe(2);
+    expect(parsed.consecutiveSkips).toBe(1);
+    // The interval, and how much of it the sweeps are using.
+    expect(parsed.lastSweepMs).toBe(41_000);
+    expect(parsed.sweepMsP50).toBe(12_000);
+    expect(parsed.sweepMsP90).toBe(41_000);
+    // TWO FOUND, ONE SERVED: the difference is a user nobody looked at.
+    expect(parsed.linksDiscovered).toBe(2);
+    expect(parsed.linksTriaged).toBe(1);
+    // Which lane is filling the sweep.
+    expect(parsed.lastSweepPhaseMs).toEqual({ chainReadMs: 120, discoveryMs: 240, vaultReadMs: 68, triageMs: 520, expensiveMs: 40_000 });
+    // The binding external limit, counted rather than assumed.
+    expect(parsed.jupiterCallsPerSweep).toBe(12);
+    expect(parsed.failovers).toBe(3);
+    // AND NEVER THE URL. /status is unauthenticated and the endpoints carry API
+    // keys; a label is the only name they get outside the request itself.
+    expect(parsed.rpcEndpointInUse).toBe("endpoint 2/2");
+    expect(renderStatus(status, redactor)).not.toContain(RPC);
   });
 
   it("is withheld whole when a registered secret survives the scrub", () => {

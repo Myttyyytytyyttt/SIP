@@ -37,11 +37,24 @@ export const endpointLabel = (index: number, total: number): string => `endpoint
  *
  * `onFailover` reports which endpoint was set aside and why, so a silent
  * degradation shows up in the keeper's log rather than only in a latency graph.
+ *
+ * `onAnswer` reports which endpoint ANSWERED, which is the other half of that
+ * question and the half /status needs: after a failover the keeper is quietly
+ * running on a different provider, with different latency and a different rate
+ * limit, and until this existed the only record of which one was a warning line
+ * that had scrolled away. BY LABEL, NEVER BY URL — the URLs carry API keys, and
+ * `endpointLabel` is the only name they get outside the request itself.
+ *
+ * NEITHER CALLBACK DECIDES ANYTHING. They are told what already happened, after
+ * the choice of endpoint has been made and, for `onAnswer`, after the response
+ * is in hand; a caller that throws from one breaks its own request and changes
+ * no routing.
  */
 export function poolFetch(
   urls: readonly Secret[],
   onFailover?: (message: string, fields: Record<string, unknown>) => void,
   timeoutMs = 30_000,
+  onAnswer?: (at: string) => void,
 ): typeof fetch {
   // Per pool and keyed by POSITION, so the cooldown table holds no URL either.
   const downUntil = new Map<number, number>();
@@ -82,6 +95,7 @@ export function poolFetch(
         continue;
       }
       downUntil.delete(index);
+      onAnswer?.(at);
       return response;
     }
     throw new Error(`every Solana endpoint refused (${refusals.join("; ")})`);
