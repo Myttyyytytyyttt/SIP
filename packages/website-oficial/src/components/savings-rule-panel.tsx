@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import { useFlash } from "@/hooks/use-flash";
 import { LABEL, MONO } from "@/lib/classes";
 import { pct, shares, shortHex, timeAgo, usd } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { VAULT_COPY } from "@/lib/vault-copy";
 // The leaf, not the barrel: `@/mocks` also re-exports the seeded dataset, and this file ships to the browser.
 import { tickerLogo, type ActivityEvent, type InvestedEvent, type SavingsRule, type SavingsStats } from "@/mocks/types";
 
@@ -41,6 +42,30 @@ const UPDATED_MS = 2000;
 type Baseline = Pick<SavingsRule, "rateBps" | "thresholdUsd" | "paused">;
 
 /**
+ * WHAT MAKES THE FORM SIGN. The sample's panel is local state — "Update rule"
+ * moves its baseline and says so, nothing more — which on a real pension would
+ * be a control that appears to set someone's savings and silently does not.
+ * So a live page passes this, and "Update rule" hands what changed to it; the
+ * stored rule only moves when the chain says it did (the page reads it again,
+ * and remounts this form on the new values).
+ */
+export interface RuleSigner {
+  /** The vault's own mode's range, in basis points: profit 201–10 000, volume 1–200. */
+  readonly rateMin: number;
+  readonly rateMax: number;
+  readonly presets: readonly number[];
+  /** Why the threshold cannot be changed from here — no policy yet, or one this page cannot re-sign — or null. */
+  readonly thresholdLocked: string | null;
+  /** Why a typed threshold cannot be signed against the stored caps, or null when it can. */
+  readonly thresholdProblem: (usd: number) => string | null;
+  /** A write is running, another holds the page's lock, or a sent one awaits confirmation. */
+  readonly busy: boolean;
+  readonly onUpdate: (next: Baseline, changed: { readonly rule: boolean; readonly threshold: boolean }) => void;
+  /** The signature's own progress, under the button. */
+  readonly progress: ReactNode;
+}
+
+/**
  * The narrow panel where the reference put its bet controls: the rule that
  * makes the pension, editable, and what it is about to do next. Local state
  * only — "Update rule" moves the baseline and says so, nothing more.
@@ -50,16 +75,19 @@ export function SavingsRulePanel({
   stats,
   activity,
   now,
+  signer,
   className,
 }: {
   rule: SavingsRule;
   stats: SavingsStats;
   activity: readonly ActivityEvent[];
   now: string;
+  /** A live page: the controls sign. Absent on the sample. */
+  signer?: RuleSigner;
   className?: string;
 }) {
   const [rate, setRate] = useState(rule.rateBps);
-  const [threshold, setThreshold] = useState(() => String(rule.thresholdUsd));
+  const [threshold, setThreshold] = useState(() => (rule.thresholdUsd === null ? "" : String(rule.thresholdUsd)));
   const [paused, setPaused] = useState(rule.paused);
   const [baseline, setBaseline] = useState<Baseline>({
     rateBps: rule.rateBps,
@@ -68,23 +96,37 @@ export function SavingsRulePanel({
   });
   const [updated, flash] = useFlash(UPDATED_MS);
 
+  const locked = signer?.thresholdLocked ?? null;
   const thresholdUsd = Number(threshold);
-  const thresholdValid = threshold.trim() !== "" && Number.isFinite(thresholdUsd) && thresholdUsd >= 1;
-  const dirty =
-    thresholdValid &&
-    (rate !== baseline.rateBps || thresholdUsd !== baseline.thresholdUsd || paused !== baseline.paused);
+  const thresholdTyped = threshold.trim() !== "" && Number.isFinite(thresholdUsd) && thresholdUsd >= 1;
+  // What the stored caps can buy, on a live page: a threshold they cannot reach is never offered for a signature.
+  const thresholdProblem = signer !== undefined && locked === null && thresholdTyped ? signer.thresholdProblem(thresholdUsd) : null;
+  // A threshold that cannot be edited here is not part of the change at all.
+  const thresholdValid = locked !== null || (thresholdTyped && thresholdProblem === null);
+  const ruleChanged = rate !== baseline.rateBps || paused !== baseline.paused;
+  const thresholdChanged = locked === null && thresholdTyped && thresholdUsd !== baseline.thresholdUsd;
+  const dirty = thresholdValid && (ruleChanged || thresholdChanged) && signer?.busy !== true;
 
   function handleUpdate() {
     if (!dirty) return; // aria-disabled does not stop Enter or Space
+    if (signer !== undefined) {
+      signer.onUpdate({ rateBps: rate, thresholdUsd: thresholdChanged ? thresholdUsd : baseline.thresholdUsd, paused }, { rule: ruleChanged, threshold: thresholdChanged });
+      return;
+    }
     setBaseline({ rateBps: rate, thresholdUsd, paused });
     flash();
   }
 
-  const preset = RATE_PRESETS.some((value) => value === rate) ? String(rate) : "";
+  const rateMin = signer?.rateMin ?? RATE_MIN;
+  const rateMax = signer?.rateMax ?? RATE_MAX;
+  const presets = signer?.presets ?? RATE_PRESETS;
+  const preset = presets.some((value) => value === rate) ? String(rate) : "";
   const lastInvestment = activity.find((event): event is InvestedEvent => event.kind === "invested");
   // What counts toward the threshold: the sample's pending pile, or — on a live
   // vault — only the USDC already converted and ready to buy with.
   const ready = stats.readyToInvestUsd === undefined ? stats.pendingUsd : stats.readyToInvestUsd;
+  // What the rate is taken from, in the vault's own words.
+  const appliedTo = rule.mode === "profit" ? "Applied to your realised trading gains" : "Applied to every buy and sell";
   const progress = ready !== null && stats.thresholdUsd !== null && stats.thresholdUsd > 0 ? Math.min(100, (ready / stats.thresholdUsd) * 100) : 0;
   const toGo = ready !== null && stats.thresholdUsd !== null ? Math.max(0, stats.thresholdUsd - ready) : null;
 
@@ -92,7 +134,7 @@ export function SavingsRulePanel({
     <Card className={cn("h-fit", className)}>
       <CardHeader>
         <CardTitle>Savings rule</CardTitle>
-        <CardDescription>Applied to every buy and sell</CardDescription>
+        <CardDescription>{appliedTo}</CardDescription>
       </CardHeader>
 
       <CardContent className="space-y-5">
@@ -103,8 +145,8 @@ export function SavingsRulePanel({
           </div>
           <Slider
             value={[rate]}
-            min={RATE_MIN}
-            max={RATE_MAX}
+            min={rateMin}
+            max={rateMax}
             step={1}
             onValueChange={(values) => {
               const next = values[0];
@@ -123,7 +165,7 @@ export function SavingsRulePanel({
               if (value) setRate(Number(value));
             }}
           >
-            {RATE_PRESETS.map((value) => (
+            {presets.map((value) => (
               <ToggleGroupItem key={value} value={String(value)} className={MONO}>
                 {pct(value)}
               </ToggleGroupItem>
@@ -150,6 +192,7 @@ export function SavingsRulePanel({
               onChange={(event) => setThreshold(event.target.value)}
               aria-describedby="threshold-help"
               aria-invalid={!thresholdValid}
+              disabled={locked !== null}
               className={cn("pl-7", MONO)}
             />
           </div>
@@ -158,7 +201,7 @@ export function SavingsRulePanel({
             id="threshold-help"
             className={cn("text-xs", thresholdValid ? "text-muted-foreground" : "text-destructive")}
           >
-            {thresholdValid ? "Invests when the pile reaches this" : "Enter at least $1"}
+            {locked ?? thresholdProblem ?? (thresholdValid ? "Invests when the pile reaches this" : "Enter at least $1")}
           </p>
         </div>
 
@@ -169,7 +212,7 @@ export function SavingsRulePanel({
               <li key={target.symbol} className="flex items-center justify-between text-sm">
                 <span className="flex items-center gap-2">
                   <Image
-                    src={tickerLogo(target.symbol)}
+                    src={target.logo ?? tickerLogo(target.symbol)}
                     alt={target.symbol}
                     width={16}
                     height={16}
@@ -189,6 +232,25 @@ export function SavingsRulePanel({
         </div>
 
         {/*
+          WHAT THE SIGNATURE COSTS, said before the button and not discovered
+          after it. The rule's own signature invalidates a settlement already
+          on its way; the threshold's re-signs the investing policy's price
+          limits at today's pools. Only on a live page, and only once something
+          has changed.
+        */}
+        {signer !== undefined && dirty ? (
+          <div className="space-y-2 text-xs">
+            {ruleChanged ? <p className="rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2">{VAULT_COPY.nonceNotice}</p> : null}
+            {thresholdChanged ? (
+              <p className="rounded-md border px-3 py-2 text-muted-foreground">
+                The threshold is part of your investing policy, so it is signed again with its price limits read from today&apos;s pools.
+              </p>
+            ) : null}
+            {ruleChanged && thresholdChanged ? <p className="text-muted-foreground">Two signatures: the rule first, then the threshold once the first has landed.</p> : null}
+          </div>
+        ) : null}
+
+        {/*
           The primary fill is earned by a change; at rest this is a hairline box.
           aria-disabled rather than disabled: the click itself makes the rule
           clean again, and a button that turns `disabled` under focus drops
@@ -204,6 +266,7 @@ export function SavingsRulePanel({
         >
           {updated && !dirty ? "Rule updated" : "Update rule"}
         </Button>
+        {signer?.progress ?? null}
 
         <Separator />
 
@@ -211,7 +274,7 @@ export function SavingsRulePanel({
           <div className="flex items-center justify-between gap-2">
             <p className={LABEL}>Next investment</p>
             <p className={cn(MONO, "text-sm")}>
-              {usd(stats.pendingUsd)} <span className="text-muted-foreground">of</span> {usd(stats.thresholdUsd)}
+              {usd(ready)} <span className="text-muted-foreground">of</span> {usd(stats.thresholdUsd)}
             </p>
           </div>
           <Progress value={progress} aria-label="Progress to next investment" />
@@ -230,7 +293,7 @@ export function SavingsRulePanel({
                 className="flex w-full items-center gap-3 rounded-md border p-3 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
               >
                 <Image
-                  src={tickerLogo(lastInvestment.symbol)}
+                  src={lastInvestment.logo ?? tickerLogo(lastInvestment.symbol)}
                   alt={lastInvestment.symbol}
                   width={20}
                   height={20}
@@ -239,7 +302,7 @@ export function SavingsRulePanel({
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm">Invested in {lastInvestment.symbol}</span>
                   <span className="block truncate text-xs text-muted-foreground">
-                    <Num>{shares(lastInvestment.shares)}</Num> shares ·{" "}
+                    <Num>{lastInvestment.sharesText ?? shares(lastInvestment.shares)}</Num> shares ·{" "}
                     {lastInvestment.at === null ? null : timeAgo(lastInvestment.at, now)}
                   </span>
                 </span>

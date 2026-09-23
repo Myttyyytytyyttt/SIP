@@ -9,7 +9,7 @@
  */
 
 import { usePrivy } from "@privy-io/react-auth";
-import { useMemo, type ReactNode } from "react";
+import { useContext, useMemo, type ReactNode } from "react";
 
 import { VaultWriteLock } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, useVaultState, type VaultScreenValue } from "@/hooks/use-vault-state";
@@ -25,7 +25,21 @@ import { createVaultApi } from "@/lib/vault-api";
  */
 export const VAULT_CARD_ID = "vault";
 
+/**
+ * ONE SCREEN, ONE LOCK. The dashboard's rule card signs too (09-23), and it
+ * sits beside the wallets modal on the same page: two VaultScreens would be two
+ * locks, and a rule signed from the card could run while the modal signs
+ * something else. So the page mounts one (SharedVaultScreen, in wallets-host),
+ * and a VaultScreen that finds one already there for the same key adds nothing
+ * — no second read, no second lock — and hands its children through.
+ */
 export function VaultScreen({ pensionKey, children }: { readonly pensionKey: string; readonly children: ReactNode }) {
+  const outer = useContext(VaultScreenContext);
+  if (outer !== null && outer.pensionKey === pensionKey) return <>{children}</>;
+  return <OwnVaultScreen pensionKey={pensionKey}>{children}</OwnVaultScreen>;
+}
+
+function OwnVaultScreen({ pensionKey, children }: { readonly pensionKey: string; readonly children: ReactNode }) {
   const { user } = usePrivy();
   const api = useMemo(() => createVaultApi(), []);
   // Privy's record of the trading wallets, never the pension key, and at most as many as one read asks about.

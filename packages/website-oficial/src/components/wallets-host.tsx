@@ -24,9 +24,12 @@
  * With a config the modal is WalletsModal: the same WalletsScreen as /wallets.
  */
 
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import { usePrivy } from "@privy-io/react-auth";
 import Providers from "@/app/providers";
+import { VaultScreen } from "@/components/wallets/VaultScreen";
+import { pensionKeyOf } from "@/lib/pension-key";
 import { WalletsModal } from "@/components/wallets/WalletsModal";
 import { WalletsSetupModal } from "@/components/wallets/WalletsSetupModal";
 import type { ConfigProblem, SolanaPublicConfig } from "@/lib/config";
@@ -103,8 +106,10 @@ export function WalletsHost({
         // still lazy, mounted on the first open and kept, so a second open is
         // instant.
         <Providers config={config}>
-          {children}
-          {mounted ? <WalletsModal open={open} onOpenChange={onOpenChange} /> : null}
+          <SharedVaultScreen>
+            {children}
+            {mounted ? <WalletsModal open={open} onOpenChange={onOpenChange} /> : null}
+          </SharedVaultScreen>
         </Providers>
       ) : (
         <>
@@ -115,4 +120,19 @@ export function WalletsHost({
       </ClosedContext.Provider>
     </OpenerContext.Provider>
   );
+}
+
+/**
+ * THE VAULT SCREEN THE WHOLE PAGE SHARES: the dashboard's rule card and the
+ * wallets modal write through the same lock, so one signature at a time runs
+ * on the page wherever it was started. Mounted only for someone connected with
+ * a pension key — the one read it makes is of that key's vault — and it sits
+ * inside Providers because it reads Privy. The modal's own VaultScreen finds it
+ * and adds nothing.
+ */
+function SharedVaultScreen({ children }: { readonly children: ReactNode }) {
+  const { ready, authenticated, user } = usePrivy();
+  const pensionKey = useMemo(() => (user === null ? null : pensionKeyOf(user)), [user]);
+  if (!ready || !authenticated || pensionKey === null) return <>{children}</>;
+  return <VaultScreen pensionKey={pensionKey}>{children}</VaultScreen>;
 }

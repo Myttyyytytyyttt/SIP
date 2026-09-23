@@ -23,7 +23,7 @@ import type { ReactNode } from "react";
 
 import { LiveActivityPage } from "@/components/live/LiveActivityPage";
 import { LiveNextStep } from "@/components/live/LiveNextStep";
-import { LiveRuleCard } from "@/components/live/LiveRuleCard";
+import { LiveRulePanel } from "@/components/live/LiveRulePanel";
 import { LiveSidebar } from "@/components/live/LiveSidebar";
 import { secondsUntil } from "@/components/live/LiveStates";
 import { DashboardSource } from "@/components/DashboardSource";
@@ -188,7 +188,14 @@ export function LiveBody({
                   }}
                 />
                 <div className="grid gap-4 lg:gap-6 md:grid-cols-[minmax(16rem,20rem)_1fr] lg:grid-cols-1 xl:grid-cols-[minmax(16rem,20rem)_1fr]">
-                  <LiveRuleCard data={data} labelOf={labelOf} onOpenWallets={onOpenWallets} className="order-2 md:order-1 lg:order-2 xl:order-1" />
+                  <LiveRulePanel
+                    rule={page.rule}
+                    stats={page.stats}
+                    activity={page.activity}
+                    now={page.now}
+                    onRefresh={onRefresh}
+                    className="order-2 md:order-1 lg:order-2 xl:order-1"
+                  />
                   <PensionPanel
                     stats={page.stats}
                     curve={page.curve}

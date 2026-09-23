@@ -46,6 +46,16 @@ vi.mock("@/hooks/use-live-dashboard", () => ({
 // know WHEN it is chosen.
 vi.mock("@/components/landing", () => ({ Landing: () => createElement("div", null, "LANDING") }));
 // recharts draws on a ResizeObserver, which node has none of.
+// The rule card signs through Privy's wallet hooks, which these tests do not
+// provide; its own signing is LiveRulePanel.test.ts's subject. Here it is the
+// sample's panel with an inert signer, so the page's markup stays real.
+vi.mock("@/components/live/LiveRulePanel", async () => {
+  const { SavingsRulePanel } = await import("@/components/savings-rule-panel");
+  const inert = { rateMin: 201, rateMax: 10_000, presets: [], thresholdLocked: null, thresholdProblem: () => null, busy: true, onUpdate: () => undefined, progress: null };
+  return {
+    LiveRulePanel: (props: Parameters<typeof SavingsRulePanel>[0]) => createElement(SavingsRulePanel, { ...props, signer: inert }),
+  };
+});
 vi.mock("@/components/pension-chart", () => ({ PensionChart: () => createElement("div", null, "CHART") }));
 
 import { DashboardFrame, DashboardView, type DashboardLoadJson } from "@/components/dashboard-shell";
