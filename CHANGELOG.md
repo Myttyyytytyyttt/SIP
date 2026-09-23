@@ -12,11 +12,12 @@ line is not.
 
 ## 2026-09-23
 
-*Partial: written at 06:00 Lisbon from the work up to then. The next run extends this section
-rather than adding a second one.*
+*Partial: written at 06:00 Lisbon and extended at 15:35 Lisbon from the work up to then. The
+next run extends this section rather than adding a second one.*
 
 A night spent on two questions: how many users the keeper can carry, and making the live
-page *be* the sample page rather than resemble it. 11 commits across two sessions by dawn.
+page *be* the sample page rather than resemble it. 13 commits across three sessions by
+mid-afternoon, none after 06:19.
 
 **The decision.** After several rounds of restyling live to look like the sample, the owner
 changed the approach: "cojas y mires el codigo de mock exactamente como esta y lo copies a
@@ -66,9 +67,34 @@ say, which means each one becomes a signature by the pension key.
   sweep that exceeds the RPC plan's requests per second gets no ceiling at all. These are
   still numbers from a laptop, not from Railway, and the runbook says so.
 
-**In progress:** the owner asked (05:00) for colour-coded events, the SaverFi logo in the
-navbar, the pension key removed from the column, and a layout that fits without scrolling.
-That work is uncommitted at the time of writing.
+**Web — the whole dashboard on one screen**
+
+What the owner asked for at 05:00, right after checking the 20 → 25 % signature on chain,
+landed in one commit `db2bb7b`:
+
+- **No scrolling to see the pension.** On wide screens the main column is at least the height
+  of the window and the pension chart is the part that grows, so a laptop gets a short chart
+  and a large monitor a tall one, with the figures around it the same size on both. Measured in
+  a real browser at eight sizes: it fits without scrolling from 1440×780 up to 2560×1300;
+  shorter screens (1366×680, 1280×720) still scroll, because the minimum content does not fit.
+  Nothing was removed to get there — rows were merged and padding tightened instead.
+- **The feed is colour-coded:** green for what the rule set aside, blue for what the pension
+  bought, mustard for the machinery and every change (convert, wrap, rule, policy, link,
+  withdrawal), red for failures, grey for keeper housekeeping. The colour goes on the icon and
+  the amount, never on the words.
+- The SaverFi logo now sits before the name in the navbar; the pension key left the wallet
+  column because the navbar chip already shows it with a copy button; this week's activity
+  moved up beside "Saved so far" (and says "Last 1 week", not "1 weeks").
+- The sample and live pages now share one main-column component, so their layouts can no
+  longer drift apart.
+
+**Process — the owner reviews before anything is published**
+
+- The owner decided (05:15) that this changelog routine runs every day at 11:00, edits the
+  changelog and roadmap, and reports in plain bullets what it changed and what it did not;
+  the owner then decides whether it is pushed. The routine no longer commits on its own.
+- The owner also asked whether several keeper deploys on Railway would carry more users at
+  once. No change followed today; the measured ceiling above is still for one process.
 
 ---
 
