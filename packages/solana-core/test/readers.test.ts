@@ -1307,6 +1307,46 @@ describe("listVaultSignatures and readVaultTransactions", () => {
     expect(read.value[0]).toMatchObject({ readable: false, fee: null, vaultLamportsDelta: null, blockTime: 7 });
     expect(read.value[0]!.instructions).toEqual([]);
   });
+
+  it("a page where the node refuses EVERY member (-32015) is still a page: each entry is readable false, and the endpoint stays in service", async () => {
+    // A transaction newer than maxSupportedTransactionVersion is refused member
+    // by member, in the node's words below. A poll with `until` often lists ONE
+    // new signature, so once a refusal happens, an all-refused batch is the
+    // common case, not an edge.
+    // The pool used to read "is not supported" as an endpoint fault: measured
+    // live on 2026-09-23, it benched the endpoint and the WHOLE page came back
+    // unreadable, not even the known signatures with an empty body.
+    const newer = 2;
+    const listed = [11, 12].map((seed) => ({ signature: base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i + seed) % 256)), slot: seed, blockTime: seed * 10, err: null }));
+    const asked: unknown[] = [];
+    const { pool: p, upstream } = pool((call) =>
+      jsonResponse(
+        batchOf(call).map((member) => {
+          asked.push((member.params[1] as { maxSupportedTransactionVersion?: unknown }).maxSupportedTransactionVersion);
+          return {
+            jsonrpc: "2.0",
+            id: member.id,
+            error: {
+              code: -32015,
+              message: `Transaction version (${newer}) is not supported by the requesting client. Please try the request again with the following configuration parameter: "maxSupportedTransactionVersion": ${newer}`,
+            },
+          };
+        }),
+      ),
+    );
+    const read = await readVaultTransactions(p, vault, listed);
+    // The premise: a node refuses only what is newer than it was asked for.
+    expect(asked).toHaveLength(listed.length);
+    for (const version of asked) expect(version).toBeLessThan(newer);
+    if (read.kind !== "exists") throw new Error(`${read.kind}: ${read.kind === "unreadable" ? read.error : ""}`);
+    expect(read.value).toHaveLength(2);
+    read.value.forEach((entry, index) => {
+      expect(entry).toMatchObject({ signature: listed[index]!.signature, readable: false, fee: null, vaultLamportsDelta: null, blockTime: listed[index]!.blockTime });
+      expect(entry.instructions).toEqual([]);
+    });
+    expect(upstream.calls).toHaveLength(1);
+    expect(p.coolingDown()).toEqual([]);
+  });
 });
 
 describe("readWalletLinks", () => {

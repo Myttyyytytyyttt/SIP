@@ -10,6 +10,12 @@
 //  * "exceeded" AND "disabled" NO LONGER BENCH AN ENDPOINT. A genuine
 //    "Computational budget exceeded" is an answer about the transaction, and
 //    benching every endpoint for 30 s over it took reads down with it.
+//  * -32015 IS NOT AN ENDPOINT FAULT, although its message says "is not
+//    supported". "Transaction version (N) is not supported by the requesting
+//    client" is about the REQUEST's maxSupportedTransactionVersion, and every
+//    endpoint gives the same answer. On 2026-09-23 a page whose only transaction
+//    was version 1, asked for 0, had every batch member refused, benched
+//    mainnet's endpoint and failed whole.
 //  * RESPONSES ARE READ WITH A HARD BYTE CAP, streamed, so one getMultipleAccounts
 //    on large accounts cannot hold hundreds of MB in the only web process.
 //  * NO URL LEAVES. Transport errors are named by `error.name` only (undici's
@@ -84,6 +90,8 @@ export interface JsonRpcMember {
 export function isEndpointFault(error: JsonRpcErrorBody | undefined): boolean {
   if (error === undefined || error === null) return false;
   if (error.code === -32005 || error.code === -32004) return true;
+  // Unsupported transaction version: the request's fault, whatever its message says (see the header).
+  if (error.code === -32015) return false;
   const message = (typeof error.message === "string" ? error.message : "").toLowerCase();
   return (
     message.includes("rate limit") ||
