@@ -464,6 +464,15 @@ en cada barrida (lo de siempre). No puede dejar a nadie sin cobrar; como mucho, 
 Dos alertas nuevas, las dos de aviso (solo llegan a Telegram si `SIP_SOLANA_ALERT_MIN_SEVERITY=warn`):
 `doorbell-deaf` (dejó de oír y vuelve a girar a todos) y `doorbell-sync` (no consigue poner al día el webhook).
 
+### Cambiar el secreto
+
+Si crees que el secreto se ha visto (por ejemplo, se pegó en un chat), genera uno nuevo igual que en el paso 1 y
+reemplaza el valor de `SIP_SOLANA_DOORBELL_SECRET` en Railway. No hay que tocar nada en Helius: al redesplegar, el
+vigilante que queda al mando actualiza el webhook con el secreto nuevo. Mientras tanto Helius sigue llamando con el
+viejo, esas llamadas se rechazan y Helius no las repite; por eso, hasta que el webhook tiene el secreto nuevo, cada
+rechazo hace que la siguiente barrida gire a todos, y así no se pierde a nadie. Es normal ver `eventsRejected` subir un
+poco justo después del cambio y, en `/status`, alguna barrida de más con `lanes.full` igual al total.
+
 ### Apagarlo
 
 Borra `SIP_SOLANA_DOORBELL_SECRET` en Railway. Tras el redespliegue el vigilante vuelve a girar a todos en cada barrida,
