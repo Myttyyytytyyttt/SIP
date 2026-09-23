@@ -248,6 +248,8 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
     };
   };
 
+  const maxUsd = $(vault.maxContribution);
+  const capText = maxUsd !== null ? usd(maxUsd) : vault.maxContribution === null ? "the rule's ceiling" : `${formatSol(vault.maxContribution)} SOL`;
   const trades: Trade[] = data.settlementRows.flatMap((row, index) => {
     const detail = savedDetail(row);
     // The strip is a glance at recent slices; one the chain gave no time is
@@ -262,7 +264,8 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
         notionalUsd: $(detail.base),
         savedUsd: $(detail.paid),
         txHash: row.signature,
-        detail: `${labelOf(row.event.wallet)} · ${detail.basis}`,
+        // A slice the rule's ceiling cut short says so where it is looked at: the rest is not carried over.
+        detail: `${labelOf(row.event.wallet)} · ${detail.basis}${row.event.capped ? ` · capped at ${capText}` : ""}`,
         href: row.explorerUrl ?? undefined,
       },
     ];

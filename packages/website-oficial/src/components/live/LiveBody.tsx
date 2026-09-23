@@ -24,11 +24,11 @@ import type { ReactNode } from "react";
 import { LiveActivityPage } from "@/components/live/LiveActivityPage";
 import { LiveNextStep } from "@/components/live/LiveNextStep";
 import { LiveRuleCard } from "@/components/live/LiveRuleCard";
-import { LiveSettlementStrip } from "@/components/live/LiveSettlementStrip";
 import { LiveSidebar } from "@/components/live/LiveSidebar";
 import { secondsUntil } from "@/components/live/LiveStates";
 import { DashboardSource } from "@/components/DashboardSource";
 import { PensionPanel } from "@/components/pension-panel";
+import { SavingsStrip } from "@/components/savings-strip";
 import { SiteFooter } from "@/components/site-footer";
 import { HeaderContributions } from "@/components/header-contributions";
 import { SiteHeader } from "@/components/site-header";
@@ -178,15 +178,14 @@ export function LiveBody({
 
             {panels ? null : (
               <>
-                <LiveSettlementStrip
-                  rows={data.settlementRows}
-                  vault={data.vault}
-                  now={now}
-                  labelOf={labelOf}
-                  settledOutsideHistory={data.stats.settledOutsideHistory}
-                  older={older}
-                  onLoadOlder={onLoadOlder}
-                  nowMs={nowMs}
+                <SavingsStrip
+                  trades={page.trades}
+                  rule={page.rule}
+                  now={page.now}
+                  live={{
+                    settledOutsideHistory: data.stats.settledOutsideHistory,
+                    loadOlder: { busy: older.busy, retryIn: secondsUntil(older.retryAt, nowMs), complete: older.complete, onClick: onLoadOlder },
+                  }}
                 />
                 <div className="grid gap-4 lg:gap-6 md:grid-cols-[minmax(16rem,20rem)_1fr] lg:grid-cols-1 xl:grid-cols-[minmax(16rem,20rem)_1fr]">
                   <LiveRuleCard data={data} labelOf={labelOf} onOpenWallets={onOpenWallets} className="order-2 md:order-1 lg:order-2 xl:order-1" />
