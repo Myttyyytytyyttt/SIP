@@ -46,12 +46,11 @@ const LINKS = [
   { title: "Terms", href: "#" },
 ] as const;
 
-/** The product in three lines. No numbers — see the note at the top of the file. */
-const STEPS = [
-  "Trade where you already trade — GMGN, Axiom, your own router.",
-  "A slice of that trading — of its volume, or of its realized profit — is set aside.",
-  "When the pile is big enough, it buys your basket.",
-] as const;
+/**
+ * The product in three short lines (owner, 09-23: bullets, simpler and
+ * shorter). No numbers, and no mode — see the note at the top of the file.
+ */
+const STEPS = ["Trade anywhere — GMGN, Axiom, any router.", "A slice of your trading is saved.", "Your savings buy your basket."] as const;
 
 /**
  * One look for every link in here, so the list and the icons cannot drift apart.
@@ -95,7 +94,8 @@ export function SiteFooter({ now, className }: { now: string; className?: string
 
           <div>
             <h3 className={LABEL}>Explore</h3>
-            <ul className="mt-4 space-y-2.5 text-sm">
+            {/* Two short columns rather than one long one (owner, 09-23): the pages, then the fine print. Filled column by column. */}
+            <ul className="mt-4 grid w-fit grid-flow-col grid-rows-3 gap-x-12 gap-y-2.5 text-sm">
               {LINKS.map(({ title, href }) => (
                 <li key={title}>
                   <Link className={QUIET} href={href}>
@@ -108,14 +108,14 @@ export function SiteFooter({ now, className }: { now: string; className?: string
 
           <div>
             <h3 className={LABEL}>How it works</h3>
-            <ol className="mt-4 max-w-sm space-y-3 text-sm">
-              {STEPS.map((step, index) => (
-                <li key={step} className="flex gap-3">
-                  <span className={cn(MONO, "text-xs leading-5 text-muted-foreground")}>{index + 1}</span>
-                  <span className="leading-5 text-muted-foreground">{step}</span>
+            <ul className="mt-4 space-y-2.5 text-sm">
+              {STEPS.map((step) => (
+                <li key={step} className="flex items-center gap-2.5 text-muted-foreground">
+                  <span aria-hidden className="size-1 shrink-0 rounded-full bg-muted-foreground/60" />
+                  {step}
                 </li>
               ))}
-            </ol>
+            </ul>
           </div>
         </div>
 
