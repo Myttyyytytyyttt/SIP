@@ -8,6 +8,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:local": "vitest run -c vitest.local.config.ts",
+    "bench:ceiling": "tsx scripts/ceiling-bench.mts",
     "keeper": "tsx bin/keeper.mts",
     "preflight": "tsx bin/keeper.mts --preflight",
     "ready": "tsx bin/ready.mts",
