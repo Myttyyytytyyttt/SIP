@@ -23,7 +23,6 @@ import type {
   ActivityEvent,
   DashboardMock,
   Holding,
-  SavingsDay,
   SavingsPoint,
   SavingsRule,
   SavingsStats,
@@ -40,7 +39,25 @@ const SEED = 137;
 const ID_SEED = 7919;
 const DAY_MS = 86_400_000;
 
-const RULE: SavingsRule = {
+/**
+ * THE SAMPLE'S OWN SHAPES: the contract without the widening a live pension
+ * needs. The sample never has a null or a ticker outside its list, and keeping
+ * that in the types is what lets the arithmetic below stay plain arithmetic.
+ * What it builds is still a DashboardMock — a narrow value fits the wide type.
+ */
+type SampleRule = Omit<SavingsRule, "thresholdUsd" | "targets"> & {
+  readonly thresholdUsd: number;
+  readonly targets: readonly { readonly symbol: Ticker; readonly weightBps: number }[];
+};
+interface SampleDay {
+  readonly date: string;
+  readonly savedUsd: number;
+  readonly volumeUsd: number;
+  readonly trades: number;
+}
+
+const RULE: SampleRule = {
+  mode: "volume",
   rateBps: 200,
   thresholdUsd: 5,
   targets: [
@@ -172,9 +189,9 @@ function priceAt(symbol: Ticker, day: number): number {
 // ── run the rule forward ────────────────────────────────────────────────────
 
 function buildMock(): DashboardMock {
-  const trades: Trade[] = [];
+  const trades: (Trade & { readonly symbol: Ticker; readonly savedUsd: number })[] = [];
   const activity: ActivityEvent[] = [];
-  const days: SavingsDay[] = [];
+  const days: SampleDay[] = [];
   const held = new Map<Ticker, { shares: number; costUsd: number }>();
 
   let sequence = 0;
@@ -343,8 +360,8 @@ function buildMock(): DashboardMock {
 
   // ── derived: the rest of the stats ───────────────────────────────────────
 
-  const best = trades.reduce<Trade | null>((top, t) => (top === null || t.savedUsd > top.savedUsd ? t : top), null);
-  const sumLast = (n: number, pick: (day: SavingsDay) => number): number =>
+  const best = trades.reduce<(typeof trades)[number] | null>((top, t) => (top === null || t.savedUsd > top.savedUsd ? t : top), null);
+  const sumLast = (n: number, pick: (day: SampleDay) => number): number =>
     round2(days.slice(-n).reduce((sum, d) => sum + pick(d), 0));
   const volumeUsd = round2(days.reduce((sum, d) => sum + d.volumeUsd, 0));
   const firstSave = activity.find((e) => e.kind === "trade");
@@ -383,8 +400,8 @@ function buildMock(): DashboardMock {
     balanceUsd: round2(OPENING_DEPOSIT_USD - totalSavedUsd),
   };
 
-  const newestFirst = <T extends { readonly at: string }>(items: readonly T[]): T[] =>
-    [...items].sort((left, right) => right.at.localeCompare(left.at));
+  const newestFirst = <T extends { readonly at: string | null }>(items: readonly T[]): T[] =>
+    [...items].sort((left, right) => (right.at ?? "").localeCompare(left.at ?? ""));
 
   return {
     now: MOCK_NOW,

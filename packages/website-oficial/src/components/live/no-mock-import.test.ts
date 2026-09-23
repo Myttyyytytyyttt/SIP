@@ -29,17 +29,41 @@ function walk(dir: string): string[] {
   return out;
 }
 
-/** The live surface: every panel, and every pure module behind them. */
+/**
+ * THE SAMPLE'S OWN COMPONENTS, WHICH NOW DRAW A LIVE PENSION TOO. Since 09-23
+ * the live page mounts these very files, fed through src/lib/live-mock.ts, so
+ * the rule this test exists for applies to them exactly as it does to the
+ * panels under live/: one import of the dataset in any of them and a
+ * stranger's invented savings could reach someone's real pension page.
+ */
+const SHARED = [
+  "pension-panel.tsx",
+  "pension-chart.tsx",
+  "pension-stats.tsx",
+  "pension-holdings.tsx",
+  "savings-rule-panel.tsx",
+  "savings-strip.tsx",
+  "strip-chip.tsx",
+  "wallet-activity.tsx",
+  "activity-row.tsx",
+  "dashboard-wallets.tsx",
+];
+
+/** The live surface: every panel, every pure module behind them, and the sample components they share. */
 function liveFiles(): string[] {
   const components = walk(join(SRC, "components", "live"));
   const libs = readdirSync(join(SRC, "lib"))
     .filter((name) => name.startsWith("live-") && (name.endsWith(".ts") || name.endsWith(".tsx")))
     .map((name) => join(SRC, "lib", name));
-  return [...components, ...libs];
+  const shared = SHARED.map((name) => join(SRC, "components", name));
+  return [...components, ...libs, ...shared];
 }
 
-/** `from "@/mocks"` — the barrel — in any import or re-export. '@/mocks/types' is allowed. */
-const BARREL = /from\s*["']@\/mocks["']/;
+/**
+ * `from "@/mocks"` — the barrel — or `from "@/mocks/data"`, the dataset itself,
+ * in any import or re-export. '@/mocks/types' is allowed.
+ */
+const BARREL = /from\s*["']@\/mocks(?:\/data)?["']/;
 
 /**
  * The file's CODE, with its prose removed.
@@ -62,6 +86,9 @@ describe("the live dashboard cannot reach the sample", () => {
     expect(files.length).toBeGreaterThan(10);
     expect(files.some((path) => path.endsWith("LiveBody.tsx"))).toBe(true);
     expect(files.some((path) => path.endsWith("live-model.ts"))).toBe(true);
+    // The adapter that feeds the shared components, and the components themselves.
+    expect(files.some((path) => path.endsWith("live-mock.ts"))).toBe(true);
+    for (const name of SHARED) expect(files.some((path) => path.endsWith(`components/${name}`)), name).toBe(true);
   });
 
   it("imports the seeded dataset's barrel NOWHERE", () => {
@@ -81,6 +108,8 @@ describe("the live dashboard cannot reach the sample", () => {
     const barrel = ["@", "/", "mocks"].join("");
     expect(BARREL.test(code(`import { mock } from "${barrel}";`))).toBe(true);
     expect(BARREL.test(code(`export { mock } from '${barrel}';`))).toBe(true);
+    // …the dataset module reached directly is caught the same way…
+    expect(BARREL.test(code(`import { mock } from "${barrel}/data";`))).toBe(true);
     // …the types leaf is not the barrel, and stays allowed.
     expect(BARREL.test(code(`import { tickerLogo } from "${barrel}/types";`))).toBe(false);
     // …and a sentence that merely mentions it is not an import.

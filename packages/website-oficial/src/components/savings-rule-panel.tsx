@@ -82,8 +82,11 @@ export function SavingsRulePanel({
 
   const preset = RATE_PRESETS.some((value) => value === rate) ? String(rate) : "";
   const lastInvestment = activity.find((event): event is InvestedEvent => event.kind === "invested");
-  const progress = stats.thresholdUsd > 0 ? Math.min(100, (stats.pendingUsd / stats.thresholdUsd) * 100) : 0;
-  const toGo = Math.max(0, stats.thresholdUsd - stats.pendingUsd);
+  // What counts toward the threshold: the sample's pending pile, or — on a live
+  // vault — only the USDC already converted and ready to buy with.
+  const ready = stats.readyToInvestUsd === undefined ? stats.pendingUsd : stats.readyToInvestUsd;
+  const progress = ready !== null && stats.thresholdUsd !== null && stats.thresholdUsd > 0 ? Math.min(100, (ready / stats.thresholdUsd) * 100) : 0;
+  const toGo = ready !== null && stats.thresholdUsd !== null ? Math.max(0, stats.thresholdUsd - ready) : null;
 
   return (
     <Card className={cn("h-fit", className)}>
@@ -237,7 +240,7 @@ export function SavingsRulePanel({
                   <span className="block truncate text-sm">Invested in {lastInvestment.symbol}</span>
                   <span className="block truncate text-xs text-muted-foreground">
                     <Num>{shares(lastInvestment.shares)}</Num> shares ·{" "}
-                    {timeAgo(lastInvestment.at, now)}
+                    {lastInvestment.at === null ? null : timeAgo(lastInvestment.at, now)}
                   </span>
                 </span>
                 <Num className="shrink-0 text-sm">{usd(lastInvestment.amountUsd)}</Num>

@@ -271,6 +271,22 @@ export interface LiveStatsView {
   /** Null unless the LOADED history covers the window: a partial sum would read as a real total. */
   readonly savedTodayLamports: bigint | null;
   readonly savedThisWeekLamports: bigint | null;
+  /** The last thirty days, under the same coverage rule as the week. */
+  readonly savedThisMonthLamports: bigint | null;
+  /**
+   * What the rule measured across every settlement — the trading gains on a
+   * profit vault, the volume on a volume one. Null unless EVERY settlement is
+   * loaded: a partial sum here would be a lifetime figure that is not one.
+   */
+  readonly gainsMeasuredLamports: bigint | null;
+  /** The same over the last thirty days, when those days are covered. */
+  readonly gainsThisMonthLamports: bigint | null;
+  /**
+   * One entry per UTC day the loaded history can vouch for, oldest first,
+   * ending today; at most thirteen weeks. A day that is not whole is absent,
+   * never zero.
+   */
+  readonly dailySaved: readonly { readonly day: string; readonly lamports: bigint }[];
   readonly investmentsLoaded: number;
 }
 

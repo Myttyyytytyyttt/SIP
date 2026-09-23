@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { pct, usd } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { SavingsRule, Trade } from "@/mocks";
+import type { SavingsRule, Trade } from "@/mocks/types";
 
 /** How many trades the strip shows. Trades arrive newest first, so these are the latest. */
 const SHOWN = 40;
@@ -23,7 +23,9 @@ const SHOWN = 40;
 export function SavingsStrip({ trades, rule, now, className }: { trades: readonly Trade[]; rule: SavingsRule; now: string; className?: string }) {
   const shown = trades.slice(0, SHOWN);
   const rate = pct(rule.rateBps);
-  const avg = shown.length > 0 ? shown.reduce((sum, trade) => sum + trade.savedUsd, 0) / shown.length : 0;
+  // Over the chips whose figure is known: a slice nobody could price is not a zero to average in.
+  const priced = shown.map((trade) => trade.savedUsd).filter((value): value is number => value !== null);
+  const avg = priced.length > 0 ? priced.reduce((sum, value) => sum + value, 0) / priced.length : null;
 
   return (
     <div className={cn("flex items-center gap-2", className)}>

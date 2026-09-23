@@ -13,7 +13,7 @@
 
 import { WalletActivity } from "@/components/wallet-activity";
 import { useWalletsOpener } from "@/components/wallets-host";
-import type { ActivityEvent, Wallet } from "@/mocks";
+import type { ActivityEvent, Wallet } from "@/mocks/types";
 
 export function DashboardWallets({
   wallet,
@@ -21,7 +21,7 @@ export function DashboardWallets({
   now,
   className,
 }: {
-  wallet: Wallet;
+  wallet: Wallet | null;
   activity: readonly ActivityEvent[];
   now: string;
   className?: string;

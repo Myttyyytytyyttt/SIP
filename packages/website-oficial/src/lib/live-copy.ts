@@ -292,6 +292,10 @@ export const ACTIVITY_COPY = {
   /** A settlement that moved nothing: said as itself, never dressed as a saving. */
   settledNothing: (label: string): string => `Settled from ${label}, nothing to save`,
   settledFrom: (rate: string, base: string, measure: string): string => `${rate} of ${base} SOL ${measure}`,
+  /** The same in dollars at today's price, for the sample's rows: "20 % of $21.40 profit". */
+  settledFromUsd: (rate: string, base: string, measure: string): string => `${rate} of ${base} ${measure}`,
+  /** A dollar figure made from SOL at the price read now, said where it is shown. */
+  atTodaysPrice: "at today's SOL price",
   /** The part that did NOT move, said where someone would otherwise wonder. */
   settledCapped: (owed: string, max: string): string => `${owed} SOL owed, capped at ${max} SOL; the rest is not carried over`,
   /** What a settlement measures: the vault's own mode, never the other one. */

@@ -39,6 +39,7 @@ import { SheetClose } from "@/components/ui/sheet";
 import { formatSol, formatUsd, rawFrom, usdcRawForLamports } from "@/lib/amounts";
 import { LABEL, MONO } from "@/lib/classes";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
+import { anchorOf } from "@/lib/live-mock";
 import type { LiveDashboard, LiveWalletView } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
 import { shortAddress } from "@/lib/vault-copy";
@@ -74,32 +75,6 @@ function LinkBadge({ wallet }: { readonly wallet: LiveWalletView }) {
 }
 
 /**
- * ONE FIGURE IN THIS COLUMN IS ALLOWED TO BE BIG, and it is the balance of the
- * wallet that actually saves — the sample's own Balance block, in the row it
- * belongs to. The sample can put it in the header because it has one wallet;
- * hoisting a trading wallet's balance under the pension key would say it was
- * the pension's.
- *
- * AT MOST ONE ROW IS PROMOTED, and only when it is unambiguous — one wallet,
- * or exactly one linked to this vault. Several large numbers stacked is not an
- * anchor, it is a wall, and it would push the feed off the screen.
- *
- * A BALANCE NOBODY COULD READ IS NEVER PROMOTED: "—" at 24px is a hole, and
- * the row keeps its quiet line instead.
- */
-function anchorOf(wallets: readonly LiveWalletView[]): string | null {
-  const readable = wallets.filter((wallet) => wallet.lamports !== null);
-  if (readable.length === 1) return readable[0]!.address;
-  const linked = readable.filter((wallet) => wallet.linkStatus === "this_vault");
-  return linked.length === 1 ? linked[0]!.address : null;
-}
-
-/**
- * THE MONEY HALF OF A WALLET: the balance, and what qualifies it. Shared by the
- * flat header and the listed card so the promoted figure cannot come to mean
- * one thing in one shape and another in the other.
- */
-/**
  * The pension key, with the two things that make it useful: a copy button and
  * the explorer. `lead` is the old full-size line, for the shapes that still
  * head the column with it; without it the same facts sit at 12px under the
@@ -119,6 +94,11 @@ function PensionKeyLine({ pensionKey, lead = false }: { readonly pensionKey: str
   );
 }
 
+/**
+ * THE MONEY HALF OF A WALLET: the balance, and what qualifies it. Shared by the
+ * flat header and the listed card so the promoted figure cannot come to mean
+ * one thing in one shape and another in the other.
+ */
 function WalletFigures({ wallet, usdcRawPerSol, anchor }: { readonly wallet: LiveWalletView; readonly usdcRawPerSol: bigint | null; readonly anchor: boolean }) {
   const balance = wallet.lamports === null ? null : formatSol(wallet.lamports);
   const dollars = wallet.lamports === null || usdcRawPerSol === null ? null : formatUsd(usdcRawForLamports(wallet.lamports, usdcRawPerSol));

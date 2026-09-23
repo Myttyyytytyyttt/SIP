@@ -174,15 +174,15 @@ function SaveCalendar({ days, now }: { days: readonly SavingsDay[]; now: string 
 
   const saved = days
     .map((day) => day.savedUsd)
-    .filter((value) => value > 0)
+    .filter((value): value is number => value !== null && value > 0)
     .sort((a, b) => a - b);
   const quartile = (q: number): number => saved[Math.min(saved.length - 1, Math.floor(saved.length * q))] ?? 0;
   const q1 = quartile(0.25);
   const q2 = quartile(0.5);
   const q3 = quartile(0.75);
 
-  const tone = (value: number): string => {
-    if (value <= 0) return "bg-muted";
+  const tone = (value: number | null): string => {
+    if (value === null || value <= 0) return "bg-muted";
     if (value <= q1) return "bg-emerald-500/30";
     if (value <= q2) return "bg-emerald-500/55";
     if (value <= q3) return "bg-emerald-500/80";

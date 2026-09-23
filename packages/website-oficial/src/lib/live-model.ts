@@ -433,6 +433,8 @@ type SettledEventJson = Extract<VaultEventJson, { kind: "settled" }>;
 
 interface LoadedSettlement {
   readonly paid: bigint;
+  /** What the rule measured this settlement against: the profit, or the volume. */
+  readonly base: bigint;
   readonly capped: boolean;
   readonly at: string | null;
   readonly blockTime: number | null;
@@ -449,7 +451,14 @@ function settlementsIn(entries: readonly LiveEntryJson[], slot: number | null): 
     for (const event of entry.events) {
       if (event.kind !== "settled") continue;
       const settled = event as SettledEventJson;
-      out.push({ paid: BigInt(settled.paid), capped: settled.capped, at: isoOf(entry.blockTime), blockTime: entry.blockTime, slot: entry.slot });
+      out.push({
+        paid: BigInt(settled.paid),
+        base: BigInt(settled.baseLamports),
+        capped: settled.capped,
+        at: isoOf(entry.blockTime),
+        blockTime: entry.blockTime,
+        slot: entry.slot,
+      });
     }
   }
   return out;
@@ -543,6 +552,8 @@ function chartOf(settlements: readonly LoadedSettlement[], lifetimeSaved: bigint
 }
 
 const DAY_MS = 86_400_000;
+/** The sample's strip is thirteen weeks; the live series is never longer. */
+const DAILY_DAYS = 91;
 
 function statsOf(
   settlements: readonly LoadedSettlement[],
@@ -554,6 +565,8 @@ function statsOf(
   wallets: WalletsRead,
   nowMs: number,
   lifetimeSaved: bigint | null,
+  /** The vault's own creation, in seconds: where a fully loaded history begins. */
+  createdAt: bigint | null,
 ): LiveStatsView {
   const paid = settlements.map((entry) => entry.paid);
   const lifetimeNonces = wallets.rows.filter((wallet) => wallet.linkStatus === "this_vault").map((wallet) => wallet.settlementNonce);
@@ -588,6 +601,50 @@ function statsOf(
     covers(since) ? settlements.filter((entry) => entry.blockTime !== null && entry.blockTime * 1_000 >= since).reduce((total, entry) => total + entry.paid, 0n) : null;
 
   const startOfToday = Date.UTC(new Date(nowMs).getUTCFullYear(), new Date(nowMs).getUTCMonth(), new Date(nowMs).getUTCDate());
+
+  /*
+   * THE DAYS THE LOADED HISTORY CAN SPEAK FOR, one by one — the series the
+   * sample's 13-week strip, its active days and its streaks are all made of.
+   *
+   * A DAY IS ONLY LISTED WHEN IT IS WHOLE. With every settlement loaded (by
+   * arithmetic, or because the vault page reached its beginning) that is every
+   * day since the vault was made. Otherwise the vault page is contiguous down
+   * to its oldest settlement and no further, so the day that settlement landed
+   * on may have lost its morning: the series starts the day AFTER. A day with
+   * no settlement in a covered span is a true zero; a day outside it is not in
+   * the list at all, which is the difference between "saved nothing" and "not
+   * known".
+   *
+   * THIRTEEN WEEKS AT MOST, which is the sample's own scale.
+   */
+  const whole = everySettlement || complete;
+  const oldestLoaded = settlements.length === 0 ? null : settlements[settlements.length - 1]!.blockTime;
+  const firstWholeDay = (() => {
+    if (whole) {
+      const since = createdAt !== null && createdAt > 0n ? Number(createdAt) * 1_000 : oldestLoaded !== null ? oldestLoaded * 1_000 : null;
+      return since === null ? null : Math.floor(since / DAY_MS) * DAY_MS;
+    }
+    return oldestVault === null ? null : Math.floor((oldestVault * 1_000) / DAY_MS) * DAY_MS + DAY_MS;
+  })();
+  const dailySaved: { readonly day: string; readonly lamports: bigint }[] = [];
+  if (firstWholeDay !== null) {
+    const from = Math.max(firstWholeDay, startOfToday - (DAILY_DAYS - 1) * DAY_MS);
+    const byDay = new Map<number, bigint>();
+    for (const entry of settlements) {
+      if (entry.blockTime === null) continue;
+      const day = Math.floor((entry.blockTime * 1_000) / DAY_MS) * DAY_MS;
+      byDay.set(day, (byDay.get(day) ?? 0n) + entry.paid);
+    }
+    for (let day = from; day <= startOfToday; day += DAY_MS) {
+      dailySaved.push({ day: new Date(day).toISOString().slice(0, 10), lamports: byDay.get(day) ?? 0n });
+    }
+  }
+
+  // WHAT THE RULE MEASURED, which is the sample's "Volume" slot on a vault that
+  // measures profit: the gains a slice was taken from. A LIFETIME figure only
+  // when every settlement is loaded; the month only when the month is covered.
+  const baseSince = (since: number): bigint | null =>
+    covers(since) ? settlements.filter((entry) => entry.blockTime !== null && entry.blockTime * 1_000 >= since).reduce((total, entry) => total + entry.base, 0n) : null;
 
   // WHAT THE STATE SAYS HAPPENED, BESIDE WHAT THE LOADED PAGES HOLD. The
   // vault's own total only moves on a settlement, and a link's nonce counts
@@ -624,6 +681,10 @@ function statsOf(
     lastSettlementAt: shown[0]?.at ?? null,
     savedTodayLamports: sumSince(startOfToday),
     savedThisWeekLamports: sumSince(nowMs - 7 * DAY_MS),
+    savedThisMonthLamports: sumSince(nowMs - 30 * DAY_MS),
+    gainsMeasuredLamports: whole ? settlements.reduce((total, entry) => total + entry.base, 0n) : null,
+    gainsThisMonthLamports: baseSince(nowMs - 30 * DAY_MS),
+    dailySaved,
     investmentsLoaded: rows.filter((row) => row.event.kind === "invested").length,
   };
 }
@@ -684,7 +745,7 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
   // deliberately not in it, and the strip exists to show settlements. So the
   // chips come from both streams while the column beside them stays one.
   const settlementRows = rowsIn(merged, (event) => event.kind === "settled");
-  const stats = statsOf(settlements, activity, vaultSettlements, shown, visible.rows, wallets, nowMs, vault.lifetimeSaved);
+  const stats = statsOf(settlements, activity, vaultSettlements, shown, visible.rows, wallets, nowMs, vault.lifetimeSaved, vault.createdAt);
 
   return {
     stage: stageOf(vault, wallets.rows, stats.settlementsLifetime, stats.loadedSettlements),

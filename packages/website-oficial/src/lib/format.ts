@@ -16,7 +16,7 @@
  * the zone to go unnamed.
  */
 
-import type { Side, Ticker } from "@/mocks/types";
+import type { Side } from "@/mocks/types";
 
 const USD = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -38,31 +38,40 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 
 const COUNT = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 
+/**
+ * WHAT A FIGURE NOBODY COULD READ PRINTS AS. The same components render the
+ * sample and a live pension, and live has figures that are genuinely unknown —
+ * prices unread, a window the loaded history does not cover. They are null, and
+ * null is a dash, never $0.00: "unreadable" and "nothing" are different claims.
+ */
+export const UNKNOWN = "—";
+
 /** "1,234" — a whole count, grouped like every other number on the page. */
-export function count(value: number): string {
-  return COUNT.format(value);
+export function count(value: number | null): string {
+  return value === null ? UNKNOWN : COUNT.format(value);
 }
 
 /** "Bought NVDAx" / "Sold TSLAx" — the one way a fill is named, everywhere. */
-export function fillLabel(side: Side, symbol: Ticker): string {
+export function fillLabel(side: Side, symbol: string): string {
   return `${side === "buy" ? "Bought" : "Sold"} ${symbol}`;
 }
 
 /** "$1,234.56" */
-export function usd(value: number): string {
-  return USD.format(value);
+export function usd(value: number | null): string {
+  return value === null ? UNKNOWN : USD.format(value);
 }
 
 /** "+$1.24" / "-$0.80" / "$0.00" — for anything that can go either way. */
-export function usdSigned(value: number): string {
+export function usdSigned(value: number | null): string {
+  if (value === null) return UNKNOWN;
   if (value > 0) return `+${USD.format(value)}`;
   if (value < 0) return `-${USD.format(-value)}`;
   return USD.format(0);
 }
 
 /** "$1.2K" — for axes and tight chips. */
-export function usdCompact(value: number): string {
-  return USD_COMPACT.format(value);
+export function usdCompact(value: number | null): string {
+  return value === null ? UNKNOWN : USD_COMPACT.format(value);
 }
 
 const PERCENT = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
@@ -72,7 +81,8 @@ const PERCENT = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
  * because a rate is a setting, not a column; pass `digits` where a column
  * needs a fixed width.
  */
-export function pct(bps: number, digits?: number): string {
+export function pct(bps: number | null, digits?: number): string {
+  if (bps === null) return UNKNOWN;
   return digits === undefined ? `${PERCENT.format(bps / 100)}%` : `${(bps / 100).toFixed(digits)}%`;
 }
 

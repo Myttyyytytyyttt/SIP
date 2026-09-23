@@ -7,7 +7,7 @@ import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } f
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { dateLabel, dayLabel, usd, usdCompact } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { SavingsPoint } from "@/mocks";
+import type { SavingsPoint } from "@/mocks/types";
 
 /** The one accent on the page: money put aside. */
 const chartConfig = {

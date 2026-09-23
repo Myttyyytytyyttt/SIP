@@ -58,7 +58,7 @@ import { mock } from "@/mocks";
 const SAMPLE: DashboardLoadJson = { source: "mock", data: mock, notice: null };
 
 /** A figure that exists only in the seeded example, and is rendered without a chart. */
-const MOCK_FIGURE = usd(mock.wallet.balanceUsd);
+const MOCK_FIGURE = usd(mock.wallet!.balanceUsd);
 
 function render(walletsConfigured = true, view: "pension" | "activity" = "pension"): string {
   return renderToStaticMarkup(

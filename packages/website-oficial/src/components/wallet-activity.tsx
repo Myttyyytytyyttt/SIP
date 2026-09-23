@@ -8,7 +8,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { LABEL, MONO } from "@/lib/classes";
 import { relativeDayLabel, shortHex, usd } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { ActivityEvent, Wallet } from "@/mocks";
+import type { ActivityEvent, Wallet } from "@/mocks/types";
 
 /**
  * Radix wraps the viewport's children in an inline `display:table` div, so
@@ -24,7 +24,8 @@ const MANAGE = "h-auto p-0 text-xs text-muted-foreground underline hover:text-fo
 function groupByDay(activity: readonly ActivityEvent[]): ReadonlyArray<readonly [string, readonly ActivityEvent[]]> {
   const groups = new Map<string, ActivityEvent[]>();
   for (const event of activity) {
-    const date = event.at.slice(0, 10);
+    // No block time, no day: its own bucket, headed "Time unknown", rather than filed under today.
+    const date = event.at === null ? "" : event.at.slice(0, 10);
     const bucket = groups.get(date);
     if (bucket) bucket.push(event);
     else groups.set(date, [event]);
@@ -46,7 +47,8 @@ export function WalletActivity({
   id = "activity",
   onManageWallets,
 }: {
-  wallet: Wallet;
+  /** Null when there is no single wallet to lead with; the header then names no address and no balance. */
+  wallet: Wallet | null;
   activity: readonly ActivityEvent[];
   now: string;
   className?: string;
@@ -67,7 +69,7 @@ export function WalletActivity({
     <div id={id} className={cn("flex h-full flex-col bg-background", className)}>
       <div className="space-y-3 border-b p-4">
         <div className="flex items-center justify-between gap-2">
-          <span className={LABEL}>{wallet.label}</span>
+          <span className={LABEL}>{wallet?.label ?? "Trading wallets"}</span>
           {/* The ui Button carries the focus ring either way — link or modal. */}
           {onManageWallets === undefined ? (
             <Button variant="link" size="sm" asChild className={MANAGE}>
@@ -83,21 +85,25 @@ export function WalletActivity({
             </Button>
           )}
         </div>
-        <div className="flex items-center gap-1">
-          <Num className="text-sm">{shortHex(wallet.address)}</Num>
-          <CopyButton value={wallet.address} />
-        </div>
-        <div className="space-y-0.5">
-          <div className={LABEL}>Balance</div>
-          <div className={cn(MONO, "text-2xl font-semibold")}>{usd(wallet.balanceUsd)}</div>
-        </div>
+        {wallet === null ? null : (
+          <>
+            <div className="flex items-center gap-1">
+              <Num className="text-sm">{shortHex(wallet.address)}</Num>
+              <CopyButton value={wallet.address} />
+            </div>
+            <div className="space-y-0.5">
+              <div className={LABEL}>Balance</div>
+              <div className={cn(MONO, "text-2xl font-semibold")}>{usd(wallet.balanceUsd)}</div>
+            </div>
+          </>
+        )}
       </div>
 
       <ScrollArea className={FEED}>
         {groups.map(([date, events]) => (
-          <div key={date}>
+          <div key={date === "" ? "unknown" : date}>
             <div className="sticky top-0 z-10 bg-background px-4 py-2 text-xs text-muted-foreground">
-              {relativeDayLabel(date, now)}
+              {date === "" ? "Time unknown" : relativeDayLabel(date, now)}
             </div>
             {events.map((event) => (
               <ActivityRow key={event.id} event={event} now={now} />

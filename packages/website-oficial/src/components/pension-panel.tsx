@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader } from "@/components/ui/
 import { LABEL, SAVED } from "@/lib/classes";
 import { dateLabel, pct, usd, usdSigned } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { Holding, SavingsDay, SavingsPoint, SavingsRule, SavingsStats } from "@/mocks";
+import type { Holding, SavingsDay, SavingsPoint, SavingsRule, SavingsStats } from "@/mocks/types";
 
 /**
  * The big panel — where the reference played its round. The figure, its
@@ -30,7 +30,7 @@ export function PensionPanel({
   now: string;
   className?: string;
 }) {
-  const savedToday = stats.savedTodayUsd > 0;
+  const savedToday = stats.savedTodayUsd !== null && stats.savedTodayUsd > 0;
 
   // The hero row switches on the card's width, not the viewport's: at lg the page
   // grid can hand this card ~312px while the row needs ~344px. Named, because the
@@ -57,10 +57,14 @@ export function PensionPanel({
           <div className="space-y-1">
             <dt className="text-xs text-muted-foreground">Pension value</dt>
             <dd className="font-mono text-sm tabular-nums">
-              {usd(stats.pensionValueUsd)}{" "}
-              <span className={stats.unrealizedUsd >= 0 ? SAVED : "text-muted-foreground"}>
-                {usdSigned(stats.unrealizedUsd)}
-              </span>
+              {usd(stats.pensionValueUsd)}
+              {/* No cost basis, no gain: a live pension never has this figure, and a "+$0.00" would be a claim. */}
+              {stats.unrealizedUsd === null ? null : (
+                <>
+                  {" "}
+                  <span className={stats.unrealizedUsd >= 0 ? SAVED : "text-muted-foreground"}>{usdSigned(stats.unrealizedUsd)}</span>
+                </>
+              )}
             </dd>
           </div>
           <div className="space-y-1">

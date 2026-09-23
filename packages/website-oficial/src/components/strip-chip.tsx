@@ -16,8 +16,12 @@ import { tickerLogo, type Trade } from "@/mocks/types";
  * that is why it renders as a button.
  */
 export function StripChip({ trade, now, newest = false }: { trade: Trade; now: string; newest?: boolean }) {
-  const saved = trade.savedUsd > 0;
-  const detail = `${fillLabel(trade.side, trade.symbol)} · ${usd(trade.notionalUsd)} · ${timeAgo(trade.at, now)}`;
+  const saved = trade.savedUsd !== null && trade.savedUsd > 0;
+  // A fill names its side and size; a live chip is a settlement and brings its own words.
+  const detail =
+    trade.detail !== undefined
+      ? `${trade.detail} · ${timeAgo(trade.at, now)}`
+      : `${trade.side === undefined ? trade.symbol : fillLabel(trade.side, trade.symbol)} · ${usd(trade.notionalUsd)} · ${timeAgo(trade.at, now)}`;
 
   return (
     <Tooltip>

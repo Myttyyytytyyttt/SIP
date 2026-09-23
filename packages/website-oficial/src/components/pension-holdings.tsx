@@ -78,21 +78,24 @@ export function PensionHoldings({
                   </span>
                 </TableCell>
                 <TableCell className={cn(MONO, "hidden text-right sm:table-cell")}>
-                  {shares(holding.shares)}
+                  {holding.sharesText ?? shares(holding.shares)}
                 </TableCell>
                 <TableCell className={cn(MONO, "text-right")}>{usd(holding.valueUsd)}</TableCell>
                 <TableCell className="text-right">
-                  <div className="ml-auto w-20 space-y-1 sm:w-24">
-                    <div className={MONO}>{pct(holding.weightBps, 0)}</div>
-                    <Progress
-                      value={holding.weightBps / 100}
-                      className="h-1"
-                      aria-label={`${holding.symbol} weight`}
-                    />
-                    <div className="text-xs text-muted-foreground">
-                      <Num>{pct(holding.targetWeightBps, 0)}</Num> target
+                  {/* A weight nobody can work out (a leg with no price) is a dash and no bar — never an empty bar reading 0 %. */}
+                  {holding.weightBps === null ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : (
+                    <div className="ml-auto w-20 space-y-1 sm:w-24">
+                      <div className={MONO}>{pct(holding.weightBps, 0)}</div>
+                      <Progress value={holding.weightBps / 100} className="h-1" aria-label={`${holding.symbol} weight`} />
+                      {holding.targetWeightBps === null ? null : (
+                        <div className="text-xs text-muted-foreground">
+                          <Num>{pct(holding.targetWeightBps, 0)}</Num> target
+                        </div>
+                      )}
                     </div>
-                  </div>
+                  )}
                 </TableCell>
               </TableRow>
             ))}
