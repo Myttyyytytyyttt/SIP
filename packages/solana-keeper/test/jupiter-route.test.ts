@@ -20,8 +20,8 @@
 // vitest — its `test` script is `anchor test` — and a new file here merges
 // cleanly and runs in a gate that already exists.
 
-import { PublicKey, TransactionInstruction, type Connection } from "@solana/web3.js";
-import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { Keypair, PublicKey, SystemProgram, TransactionInstruction, type Connection } from "@solana/web3.js";
+import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   JupiterRouteRefusal,
@@ -832,6 +832,50 @@ describe("vault-owned-ness is derived, not taken from the API's labels", () => {
       [new PublicKey(USDC), new PublicKey(SPYX)],
     );
     expect([...found].sort()).toEqual([VAULT_USDC, VAULT_SPYX].sort());
+  });
+
+  it("finds a vault-owned account NO derivation can name, by its owner bytes, and nothing else by them", async () => {
+    // THE OTHER PASS, AND UNTIL 2026-09-23 ITS ONLY POSITIVE CASE LIVED ELSEWHERE.
+    // Every case above hands the function a connection that reports nothing, so
+    // they exercise the derivation pass alone. The on-chain pass — owner bytes
+    // 32..64 of an account a token program owns — was proven only by a
+    // two-ends test against the keeper's vaultOwnedAmong, which went with the
+    // retired Raydium adapter. Both callers on the money path lean on this
+    // pass: buildJupiterRoute's unmeasured-vault-account refusal, and the
+    // census's exclusion set in venue-depth.ts. Without a case here, reading
+    // the mint bytes (0..32) instead, or dropping the pass, stayed green.
+    const vault = new PublicKey(VAULT);
+    const tokenAccount = (owner: PublicKey, mint: PublicKey, holder: PublicKey, length = 165) => {
+      const data = Buffer.alloc(length);
+      mint.toBuffer().copy(data, 0);
+      holder.toBuffer().copy(data, 32);
+      return { owner, data };
+    };
+    const key = (): PublicKey => Keypair.generate().publicKey;
+    const [classic, extended, stranger, notToken, short, mintIsVault] = [key(), key(), key(), key(), key(), key()];
+    const mint = key();
+    const accounts = new Map<string, { owner: PublicKey; data: Buffer }>([
+      // Found: a non-ATA account of the vault's, under each token program. A
+      // Token-2022 account can be longer than 165 bytes; its owner is still at 32.
+      [classic.toBase58(), tokenAccount(TOKEN_PROGRAM_ID, mint, vault)],
+      [extended.toBase58(), tokenAccount(TOKEN_2022_PROGRAM_ID, mint, vault, 182)],
+      // Not found: the venue's own account, which is the census's to count.
+      [stranger.toBase58(), tokenAccount(TOKEN_PROGRAM_ID, mint, key())],
+      // Not found: the vault's bytes at 32..64 of an account no token program owns.
+      [notToken.toBase58(), tokenAccount(SystemProgram.programId, mint, vault)],
+      // Not found: too short to be a token account, whatever it holds at 32.
+      [short.toBase58(), tokenAccount(TOKEN_PROGRAM_ID, mint, vault, 164)],
+      // Not found: the vault's bytes where the MINT goes — the wrong field.
+      [mintIsVault.toBase58(), tokenAccount(TOKEN_PROGRAM_ID, vault, key())],
+    ]);
+    const connection = {
+      getMultipleAccountsInfo: async (keys: readonly PublicKey[]) => keys.map((k) => accounts.get(k.toBase58()) ?? null),
+    } as unknown as Parameters<typeof findVaultOwnedTokenAccounts>[0];
+
+    // No mints: the derivation pass is handed nothing, so whatever is found
+    // was found by its owner bytes and by nothing else.
+    const found = await findVaultOwnedTokenAccounts(connection, vault, [...accounts.keys()], []);
+    expect([...found].sort()).toEqual([classic.toBase58(), extended.toBase58()].sort());
   });
 });
 

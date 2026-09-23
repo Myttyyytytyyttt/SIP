@@ -1197,12 +1197,14 @@ function pricesView(prices: ChainRead<PoolPrices>): Record<string, unknown> | nu
  * THE POOLS' IN-SIDE RESERVES as both routes report them, beside the rates and
  * never inside them.
  *
- * WHY A PANEL NEEDS THIS AND NOT A NUMBER. How much one buy may push into a leg
- * is a fraction of what that leg's pool holds on the side the buy is PAID in —
- * the keeper's own gate, legDepthDecision, measures exactly that vault and
- * refuses the whole basket when a leg's share is not covered. That balance
- * moves by the hour, so a ceiling written down in the client is wrong by the
- * time anyone reads it; a reserve read at a slot is not.
+ * WHAT THIS IS, AND WHAT IT IS NOT. What each pinned pool holds on the side a
+ * buy is PAID in: that pool's own depth. It is not the keeper's gate, which
+ * since the move to Jupiter censuses the accounts a route names (readers.ts,
+ * the reserve section, says so at length), and it is not the web picker's
+ * per-buy ceiling, which divides each leg's venueInventoryRaw
+ * (basket-limits.ts, depthCeiling). That balance moves by the hour, so a
+ * figure written down in the client is wrong by the time anyone reads it; a
+ * reserve read at a slot is not.
  *
  * `amountRaw` IS NULL, NEVER ZERO, WHEN IT COULD NOT BE READ, and `unreadable`
  * then says why. Zero is a drained pool and should alarm the owner; null is a

@@ -99,11 +99,22 @@ FROM deps AS builder
 
 # The Solana core: TypeScript source that next build compiles (transpilePackages),
 # plus the bin/ that prebuild's check:idl runs. From the program package, ONLY its
-# manifest and the committed IDL. Never programs/, scripts/, tests/ or target/,
-# where Anchor keeps the program's upgrade keypair (.dockerignore excludes it too).
+# manifest, the committed IDL, and clmm-layout.ts BY NAME. Never programs/,
+# tests/, target/ — where Anchor keeps the program's upgrade keypair
+# (.dockerignore excludes it too) — or the rest of scripts/.
+#
+# clmm-layout.ts IS HERE BECAUSE core's server reads it. src/server/readers.ts
+# imports the Raydium CLMM PoolState offsets from @sip/solana-program/clmm-layout
+# (2026-09-23), and every /api/solana-* route reaches readers.ts through
+# @sip/solana-core/server, so next build cannot resolve that import without the
+# file. It has no imports of its own and holds four offsets and one length
+# derived from them, so copying it drags nothing else in. Only this stage needs
+# it: next build compiles it into the server bundle, and the runner never reads
+# the source.
 COPY packages/solana-core packages/solana-core
 COPY packages/solana-program/package.json packages/solana-program/package.json
 COPY packages/solana-program/idl packages/solana-program/idl
+COPY packages/solana-program/scripts/clmm-layout.ts packages/solana-program/scripts/clmm-layout.ts
 
 COPY packages/website-oficial packages/website-oficial
 

@@ -474,9 +474,8 @@ describe("the reserve behind the depth ceiling", () => {
     expect(answer.json.prices.reserves).toBeUndefined();
 
     // NO EXTRA ROUND TRIP. The vault addresses are PDAs of the pool and USDC, so
-    // they ride in the very ask that already carries the pools; the keeper, which
-    // reads pools it learns at run time, has to pay a second request for the same
-    // figures. If one ever split off, this would find it: no OTHER ask may name them.
+    // they ride in the very ask that already carries the pools. If one ever split
+    // off, this would find it: no OTHER ask may name them.
     expect(poolAsk(calls)).toEqual(expect.arrayContaining([SOL_POOL_USDC_VAULT, LEG_POOLS[0]!.usdcVault, LEG_POOLS[1]!.usdcVault]));
     const others = asksOf(calls).filter((ask) => !ask.includes(SOL_USDC_POOL));
     expect(others.flat()).not.toEqual(expect.arrayContaining([SOL_POOL_USDC_VAULT]));

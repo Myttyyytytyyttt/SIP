@@ -74,13 +74,14 @@ export function inMintDecision(inMint: PublicKey): { readonly outcome: "REFUSED"
 // is wrapped, converted or bought (task 2).
 
 /**
- * Raydium CLMM on mainnet: the venue every policy signed to date names, and the
- * one this keeper NO LONGER ROUTES.
+ * Raydium CLMM on mainnet: the venue every policy signed before 2026-09-22
+ * names, and the one this keeper NO LONGER ROUTES.
  *
  * KEPT THOUGH IT IS NOT ROUTABLE, and that is the whole reason it is still
- * here. It is the venue the live policy names RIGHT NOW, so it is the value
- * venueDecision will actually be handed on the mainnet vault until the owner
- * re-signs — and a refusal that can name it can say "this is the migration"
+ * here. It was the venue the live policy named until the owner re-signed onto
+ * Jupiter v6 on 2026-09-22 (CHANGELOG.md), and it is what any policy signed
+ * before that still names — so it is a value venueDecision can still be
+ * handed, and a refusal that can name it can say "this is the migration"
  * instead of "unknown venue". See RETIRED_VENUES.
  */
 export const RAYDIUM_CLMM_PROGRAM = new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
@@ -127,10 +128,12 @@ export const ROUTABLE_VENUES: ReadonlyMap<string, string> = new Map([[JUPITER_V6
 /**
  * A venue this keeper USED to route, and the sentence its refusal earns.
  *
- * THIS EXISTS BECAUSE ONE REFUSAL IS CERTAIN. The policy signed on chain today
- * (vault EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU) names Raydium CLMM, so
- * the very first sweep after this code ships refuses — by design, before the
- * wrap, with the vault's money untouched. Whoever reads that refusal at three
+ * THIS EXISTED BECAUSE ONE REFUSAL WAS EXPECTED. When this code shipped, the
+ * policy on chain (vault EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU) named
+ * Raydium CLMM, so any sweep that found enough to invest would refuse — by
+ * design, before the wrap, with the vault's money untouched — until the owner
+ * re-signed onto Jupiter v6 on 2026-09-22 (CHANGELOG.md). It stays for any vault
+ * whose policy still names Raydium. Whoever reads that refusal at three
  * in the morning needs to know in its first clause that it is the planned state
  * of a migration and not a keeper that broke, because those two call for
  * opposite reactions: one waits for a signature, the other wakes somebody.
@@ -1648,11 +1651,13 @@ export type ImpactProbe =
  *
  * WHICH SIDE A HOP IS MEASURED ON, AND WHY EITHER WILL DO. On a Jupiter route
  * `payMint` is the mint the hop PAYS US and `takeRaw` is what it hands over —
- * the only side a CLOB or a DLMM has an account for. On a Raydium CLMM route
- * the adapter measures the side we SPEND INTO instead, because a pool state
- * quotes no price the gate could convert with and a constant-product reading of
- * a concentrated pool is measurably wrong (it put one venue's 0.5 % size at 47
- * dollars where the venue served 350).
+ * the only side a CLOB or a DLMM has an account for. The Raydium CLMM adapter
+ * — unreachable since the move to Jupiter on 2026-09-21, deleted on 2026-09-23
+ * (venue-depth.ts says why) — measured the side we SPEND INTO instead, because
+ * a pool state quotes no price the gate could convert with and a
+ * constant-product reading of a concentrated pool is measurably wrong (it put
+ * one venue's 0.5 % size at 47 dollars where the venue served 350). The type
+ * still admits both sides, and the ratio below is why.
  *
  * THE TWO ARE THE SAME RATIO, which is what makes one constant cover both:
  *     inventory / (spend / price)  ==  (inventory * price) / spend

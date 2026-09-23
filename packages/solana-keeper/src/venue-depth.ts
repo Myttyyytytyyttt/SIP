@@ -16,8 +16,42 @@
 // ONE REFUSAL DOES LIVE HERE, and only because it is about a disagreement
 // between two reads rather than about a number: see the
 // slippage-not-above-transfer-fee check in measureLegVenue.
+//
+// THE RAYDIUM ADAPTER IS GONE, 2026-09-23, and this is where it was. It read a
+// CLMM PoolState at four offsets, worked out which vault held the side a buy is
+// paid in, and censused it: raydiumLegVenue, raydiumSides, decodeRaydiumPoolPair,
+// the four POOL_TOKEN_* offsets, and vaultOwnedAmong. It existed to carry the
+// vault across a migration it could not skip: venue_program is ONE field on the
+// owner-signed InvestmentPolicy, so moving to Jupiter takes the OWNER's
+// signature, and retiring the Raydium read before that would have left real
+// money trading with no depth check at all.
+//
+// THAT WINDOW IS SHUT. The owner re-signed onto Jupiter v6 on 2026-09-22
+// (CHANGELOG.md), but the adapter would be unreachable whatever a policy names:
+// ROUTABLE_VENUES holds Jupiter v6 alone, and a Raydium venue_program hits
+// RETIRED_VENUES and is REFUSED, with the vault's money untouched, before
+// anything is measured. Refused under a Raydium policy, bypassed under a
+// Jupiter one — which is what makes it dead rather than dormant. An adapter
+// with no possible caller is not a spare tyre; it is a second description of
+// how to trade that no test of the real path can ever contradict. If Raydium
+// is ever routed directly again, the census it fed is venue-agnostic and the
+// offsets are in clmm-layout: what comes back is one adapter, not this file's
+// whole other half.
+//
+// WHAT KEPT IT ALIVE WAS A TEST IN ANOTHER PACKAGE, from the move to Jupiter on
+// 2026-09-21 until this deletion two days later. The web's pool panel
+// (solana-core/src/server/readers.ts) genuinely still reads Raydium pools — for
+// one venue's own depth, published beside the price it takes from the same
+// pool — and solana-core's readers.test.ts held its offsets against this
+// file's by READING THIS FILE AS TEXT: a regex pulled the four offsets out, and
+// two expressions had to appear verbatim. So the live reader was pinned to the
+// dead one, and deleting dead code broke a green test in a package that does
+// not import this one. The offsets now live in @sip/solana-program/clmm-layout,
+// which solana-core and this package both already depend on, and readers.ts
+// and live-route.ts both import them — the fix docs/TESTING_TRAPS.md files
+// under "a test that pins another package by its text". Nothing here needs
+// them, so nothing here has them.
 
-import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { Connection, PublicKey } from "@solana/web3.js";
 import {
   type AgeTolerance,
@@ -427,200 +461,6 @@ export async function measureLegVenue(
     route,
     venue: { mint: params.targetMint, spend: params.spend, venueLabels: turnLabels, hops, censusScope, impact },
   };
-}
-
-// ── the Raydium CLMM adapter ────────────────────────────────────────────────
-//
-// A DEPARTURE FROM THE SPEC, AND WHY. The specification retires the Raydium
-// pool read outright and moves every venue to Jupiter. venue_program is ONE
-// field on the owner-signed InvestmentPolicy that both convert.rs:88-91 and
-// invest.rs:119-122 pin the passed account against, so that move is the OWNER
-// re-signing — and in the window between this code and that signature the vault
-// holding real money is still buying through Raydium CLMM, on the path that has
-// been confirming on mainnet since 09-19. Retiring this WITHOUT an adapter
-// would have left that vault trading with no depth check at all: the exact
-// failure the gate exists for, introduced by the change meant to strengthen it.
-//
-// WHAT IS ACTUALLY RETIRED IS WHAT THE SPEC IS ABOUT. The pool-state decode is
-// no longer THE GATE and no longer lives in invest-decision.ts: the gate there
-// is venue-agnostic and judges a census, and this file holds one adapter per
-// venue that produces one. A third venue is a third adapter, not a third gate.
-//
-// AND IT IS MEASURED ON THE SPEND SIDE, deliberately. A pool state quotes no
-// price this adapter could convert an out-side take with, and a
-// constant-product reading of a CONCENTRATED pool is measurably wrong — it put
-// one venue's 0.5 % size at 47 dollars where the venue served 350. The in-side
-// reserve needs no price at all, and LegVenueHop explains why 50x of it is the
-// same bound as 50x of the out-side inventory.
-
-/**
- * Raydium CLMM PoolState, at the offsets live-route.ts already counts over the
- * same bytes: 8 disc, 1 bump, 32 amm_config, 32 owner, then token_mint_0 at 73,
- * token_mint_1 at 105, token_vault_0 at 137, token_vault_1 at 169. Mainnet
- * serves 1544 bytes; only these four addresses are read.
- *
- * NO LENGTH ORACLE. A length check alone cannot say these offsets mean what we
- * think — a different account of the right size decodes into four valid-looking
- * addresses — so the length is checked only as far as the bytes actually read,
- * and the CALLER then requires the decoded pair to be the pair the registry
- * claims. Bytes that are not this pool's pair fail that, whatever their length.
- */
-export interface RaydiumPoolPair {
-  readonly mint0: PublicKey;
-  readonly mint1: PublicKey;
-  readonly vault0: PublicKey;
-  readonly vault1: PublicKey;
-}
-
-const POOL_TOKEN_MINT_0 = 73;
-const POOL_TOKEN_MINT_1 = 105;
-const POOL_TOKEN_VAULT_0 = 137;
-const POOL_TOKEN_VAULT_1 = 169;
-
-export function decodeRaydiumPoolPair(data: Buffer): RaydiumPoolPair {
-  const end = POOL_TOKEN_VAULT_1 + 32;
-  if (data.length < end) {
-    throw new Error(`a Raydium CLMM pool state is at least ${end} bytes to reach its vaults; this account is ${data.length}`);
-  }
-  return {
-    mint0: new PublicKey(data.subarray(POOL_TOKEN_MINT_0, POOL_TOKEN_MINT_0 + 32)),
-    mint1: new PublicKey(data.subarray(POOL_TOKEN_MINT_1, POOL_TOKEN_MINT_1 + 32)),
-    vault0: new PublicKey(data.subarray(POOL_TOKEN_VAULT_0, POOL_TOKEN_VAULT_0 + 32)),
-    vault1: new PublicKey(data.subarray(POOL_TOKEN_VAULT_1, POOL_TOKEN_VAULT_1 + 32)),
-  };
-}
-
-/**
- * findVaultOwnedTokenAccounts' two passes, over accounts ALREADY READ.
- *
- * WHY THIS EXISTS AND WHY IT IS NOT A SECOND IMPLEMENTATION. The Jupiter arm
- * hands findVaultOwnedTokenAccounts a list of addresses it has not read, so
- * that function has to fetch them; the Raydium arm has the bytes in hand from
- * the batched vault read, and fetching them again would be a second round trip
- * for accounts already on the heap — which is the cost the batching above
- * exists to avoid.
- *
- * SAME TWO PASSES, SAME OFFSETS, SAME BOTH-PROGRAMS DERIVATION: the ATA under
- * TOKEN_PROGRAM_ID and TOKEN_2022_PROGRAM_ID for every mint the leg touches,
- * plus owner bytes 32..64 with a 165-byte minimum. test/venue-depth.test.ts
- * runs both functions over one set of accounts and asserts they agree, which is
- * the two-ends defence docs/TESTING_TRAPS.md prescribes for a rule that is
- * stated twice.
- */
-export function vaultOwnedAmong(
-  vault: PublicKey,
-  candidates: readonly VenueAccount[],
-  mints: readonly PublicKey[],
-): Set<string> {
-  const derived = new Set<string>();
-  for (const mint of mints) {
-    for (const program of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
-      // allowOwnerOffCurve: the vault IS a PDA, so the on-curve check would
-      // throw on every single derivation.
-      derived.add(getAssociatedTokenAddressSync(mint, vault, true, program).toBase58());
-    }
-  }
-  const found = new Set<string>();
-  for (const candidate of candidates) {
-    const address = candidate.address.toBase58();
-    if (derived.has(address)) found.add(address);
-    const byToken = candidate.owner.equals(TOKEN_PROGRAM_ID) || candidate.owner.equals(TOKEN_2022_PROGRAM_ID);
-    if (!byToken || candidate.data.length < 165) continue;
-    if (candidate.data.subarray(32, 64).equals(vault.toBuffer())) found.add(address);
-  }
-  return found;
-}
-
-/** The two vaults one Raydium leg would trade through, or why they could not be named. */
-export type RaydiumSides =
-  | { readonly ok: true; readonly inVault: PublicKey; readonly outVault: PublicKey }
-  | { readonly ok: false; readonly why: string };
-
-/**
- * Which vault holds which side, out of the pool's own bytes and the leg's pair.
- *
- * THE REGISTRY IS CHECKED AGAINST THE CHAIN HERE. deps.pools maps a mint to a
- * pool by configuration; nothing until now has asked the pool whether it trades
- * that pair. A pool that does not is both a misconfiguration and the one way
- * these offsets could mean something else entirely.
- */
-export function raydiumSides(input: {
-  readonly pool: PublicKey;
-  readonly account: { readonly data: Buffer } | null | undefined;
-  readonly inMint: PublicKey;
-  readonly targetMint: PublicKey;
-}): RaydiumSides {
-  if (input.account === null || input.account === undefined) {
-    return { ok: false, why: `has no readable pool account at ${input.pool.toBase58()}` };
-  }
-  let pair: RaydiumPoolPair;
-  try {
-    pair = decodeRaydiumPoolPair(input.account.data);
-  } catch (error) {
-    return { ok: false, why: `could not be read as a Raydium pool: ${error instanceof Error ? error.message : String(error)}` };
-  }
-  const inIsZero = pair.mint0.equals(input.inMint) && pair.mint1.equals(input.targetMint);
-  const inIsOne = pair.mint1.equals(input.inMint) && pair.mint0.equals(input.targetMint);
-  if (!inIsZero && !inIsOne) {
-    return {
-      ok: false,
-      why:
-        `trades ${pair.mint0.toBase58()} against ${pair.mint1.toBase58()}, not ${input.inMint.toBase58()} against this ` +
-        "leg — the pool this leg is routed through is not this leg's pair",
-    };
-  }
-  return inIsZero
-    ? { ok: true, inVault: pair.vault0, outVault: pair.vault1 }
-    : { ok: true, inVault: pair.vault1, outVault: pair.vault0 };
-}
-
-/**
- * One Raydium leg, censused from the pool's own two vaults.
- *
- * PURE, AND FED FROM A BATCHED READ. The vaults of every leg in the basket go
- * into ONE getMultipleAccountsInfo rather than one request per leg — the rule
- * this turn already follows for the leg mints and the Pyth feeds, and the one
- * the per-leg version of this function quietly broke.
- *
- * ARM 2 ABSTAINS HERE, AND SAYS SO. A Raydium route is priced from the pool's
- * own state rather than from a quote, so there is no second quote of a
- * different size to divide by — and inventing one from a different quoter would
- * be comparing two instruments, not two sizes. censusScope is "every-hop"
- * because a CLMM swap is one hop and that one hop IS censused, so
- * legDepthDecision's fourth refusal (nothing measured either way) correctly
- * does not fire: ARM 1 measured this leg in full.
- */
-export function raydiumLegVenue(params: {
-  readonly sides: RaydiumSides;
-  readonly inMint: PublicKey;
-  readonly targetMint: PublicKey;
-  readonly spend: bigint;
-  readonly candidates: readonly VenueAccount[];
-  readonly vaultOwned: ReadonlySet<string>;
-}): LegVenue {
-  const label = "Raydium CLMM";
-  const leg = (census: InventoryCensus): LegVenue => ({
-    mint: params.targetMint,
-    spend: params.spend,
-    venueLabels: [label],
-    hops: [{ label, payMint: params.inMint, takeRaw: params.spend, census }],
-    censusScope: "every-hop",
-    impact: {
-      compared: false,
-      why: "a Raydium CLMM route is priced from the pool's own state rather than from a quote, so there is no second quote of a different size to compare it with",
-    },
-  });
-
-  if (!params.sides.ok) return leg({ counted: false, why: params.sides.why });
-  const { inVault, outVault } = params.sides;
-  const writable = new Set([inVault.toBase58(), outVault.toBase58()]);
-  // A POOL WITH NOTHING OF THE LEG IN IT HAS NOTHING TO SELL, whatever its
-  // in-side reserve says, and the spend-side census cannot see that.
-  const stock = censusVenueInventory({ payMint: params.targetMint, candidates: params.candidates, writable, vaultOwned: params.vaultOwned });
-  if (!stock.counted || stock.inventory === 0n) {
-    return leg({ counted: false, why: `holds none of the leg at all: its ${outVault.toBase58()} vault is empty, so there is nothing to buy` });
-  }
-  return leg(censusVenueInventory({ payMint: params.inMint, candidates: params.candidates, writable, vaultOwned: params.vaultOwned }));
 }
 
 /** Re-exported so a caller need not know which half a type came from. */

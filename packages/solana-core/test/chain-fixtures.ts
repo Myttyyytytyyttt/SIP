@@ -3,6 +3,13 @@
 // that answers from a map. No network; the endpoint is an .invalid host.
 
 import {
+  CLMM_TOKEN_MINT_0_AT,
+  CLMM_TOKEN_MINT_1_AT,
+  CLMM_TOKEN_VAULT_0_AT,
+  CLMM_TOKEN_VAULT_1_AT,
+} from "@sip/solana-program/clmm-layout";
+
+import {
   ANTHROPIC_MINT,
   ANTHROPIC_USDC_POOL,
   RAYDIUM_CLMM,
@@ -120,11 +127,16 @@ export function clmmPoolAccount(
 ): Uint8Array {
   const bytes = new Uint8Array(CLMM_POOL_STATE_BYTES);
   bytes.set(CLMM_POOL_STATE_DISCRIMINATOR, 0);
-  bytes.set(tryBase58Decode(mint0)!, 73);
-  bytes.set(tryBase58Decode(mint1)!, 105);
+  // THE WRITER USES THE READER'S OWN OFFSETS, from @sip/solana-program/clmm-layout,
+  // so the two cannot drift apart. The price of that is that they can drift
+  // TOGETHER: move the shared layout and every reserve test still agrees with
+  // itself over bytes mainnet does not have. readers.test.ts is what catches
+  // that, by asserting the constants, and what this writes, against typed literals.
+  bytes.set(tryBase58Decode(mint0)!, CLMM_TOKEN_MINT_0_AT);
+  bytes.set(tryBase58Decode(mint1)!, CLMM_TOKEN_MINT_1_AT);
   if (vaults !== undefined) {
-    bytes.set(tryBase58Decode(vaults[0])!, 137);
-    bytes.set(tryBase58Decode(vaults[1])!, 169);
+    bytes.set(tryBase58Decode(vaults[0])!, CLMM_TOKEN_VAULT_0_AT);
+    bytes.set(tryBase58Decode(vaults[1])!, CLMM_TOKEN_VAULT_1_AT);
   }
   bytes[233] = decimals[0];
   bytes[234] = decimals[1];
@@ -172,7 +184,7 @@ export interface LegPoolFixture {
   readonly maxUsdcRawPer1e8: bigint;
   /** token_vault_0 at offset 137: the leg's own vault, as mainnet's pool names it. */
   readonly vault0: string;
-  /** token_vault_1 at offset 169: the USDC vault — the IN side, the one a depth gate measures. */
+  /** token_vault_1 at offset 169: the USDC vault — the IN side, the one the reserve panel reads. */
   readonly usdcVault: string;
   /** What that USDC vault held at MAINNET_VAULT_SLOT, in raw USDC. */
   readonly usdcReserve: bigint;

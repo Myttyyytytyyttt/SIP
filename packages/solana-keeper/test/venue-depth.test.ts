@@ -7,24 +7,19 @@
 // into a drained venue, and they fail differently: next door the rule is wrong,
 // here the rule is right and was handed the wrong numbers.
 
-import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import { legDepthDecision, maxTurnImpactBps, USDC_MINT, type VenueAccount } from "../src/invest-decision.js";
 import {
   ammKeysOf,
   censusHops,
-  decodeRaydiumPoolPair,
   impactFrom,
   labelsOf,
-  raydiumLegVenue,
-  raydiumSides,
   readRouteAccounts,
   sameVenues,
   slippageRefusal,
-  vaultOwnedAmong,
 } from "../src/venue-depth.js";
-import { findVaultOwnedTokenAccounts } from "../src/program-scripts.js";
 import type { JupiterQuote } from "../src/program-scripts.js";
 
 const key = (): PublicKey => Keypair.generate().publicKey;
@@ -320,141 +315,6 @@ describe("reading the accounts a route names", () => {
       expect(found).toHaveLength(249);
       expect(found.map((account) => account.address.toBase58())).not.toContain(missing);
     });
-  });
-});
-
-describe("the Raydium adapter, which is the live policy's venue until the owner re-signs", () => {
-  /** A Raydium CLMM PoolState: 1544 bytes, the pair at 73 and 105, the vaults at 137 and 169. */
-  function poolBytes(mint0: PublicKey, mint1: PublicKey, vault0: PublicKey, vault1: PublicKey): Buffer {
-    const data = Buffer.alloc(1_544);
-    data.fill(0xcd, 0, 73);
-    data.fill(0xce, 201, 1_544);
-    mint0.toBuffer().copy(data, 73);
-    mint1.toBuffer().copy(data, 105);
-    vault0.toBuffer().copy(data, 137);
-    vault1.toBuffer().copy(data, 169);
-    return data;
-  }
-
-  function vaultAccount(address: PublicKey, mint: PublicKey, owner: PublicKey, amount: bigint): VenueAccount {
-    const data = Buffer.alloc(165);
-    mint.toBuffer().copy(data, 0);
-    owner.toBuffer().copy(data, 32);
-    data.writeBigUInt64LE(amount, 64);
-    return { address, owner: TOKEN_PROGRAM_ID, data };
-  }
-
-  const inMint = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
-
-  it("walks the pair and both vaults out of the pool's own bytes, in either token order", () => {
-    const pair = { mint0: inMint, mint1: key(), vault0: key(), vault1: key() };
-    expect(decodeRaydiumPoolPair(poolBytes(pair.mint0, pair.mint1, pair.vault0, pair.vault1))).toEqual(pair);
-    // Bytes too short to reach the offsets are a refusal with a reason, not a
-    // PublicKey built out of whatever followed.
-    expect(() => decodeRaydiumPoolPair(Buffer.alloc(200))).toThrow(/at least 201 bytes/);
-    const short = raydiumSides({ pool: key(), account: { data: Buffer.alloc(200) }, inMint, targetMint: key() });
-    expect(short.ok).toBe(false);
-
-    // THE IN SIDE IS WHICHEVER SIDE THE POOL PUT IT ON, not slot zero.
-    const target = key();
-    const a = key();
-    const b = key();
-    expect(raydiumSides({ pool: key(), account: { data: poolBytes(inMint, target, a, b) }, inMint, targetMint: target })).toEqual({ ok: true, inVault: a, outVault: b });
-    expect(raydiumSides({ pool: key(), account: { data: poolBytes(target, inMint, a, b) }, inMint, targetMint: target })).toEqual({ ok: true, inVault: b, outVault: a });
-  });
-
-  it("refuses a pool that does not trade this leg's pair, which no build-time check can see change", () => {
-    const target = key();
-    const sides = raydiumSides({ pool: key(), account: { data: poolBytes(inMint, key(), key(), key()) }, inMint, targetMint: target });
-    expect(sides.ok).toBe(false);
-    if (sides.ok) return;
-    expect(sides.why).toContain("is not this leg's pair");
-    // And a missing account is its own reason, not the same one.
-    const absent = raydiumSides({ pool: key(), account: null, inMint, targetMint: target });
-    expect(absent.ok).toBe(false);
-    if (absent.ok) return;
-    expect(absent.why).toContain("has no readable pool account");
-  });
-
-  it("censuses the SPEND side, refuses a pool holding none of the leg, and abstains on ARM 2 saying why", () => {
-    const target = key();
-    const inVault = key();
-    const outVault = key();
-    const authority = key();
-    const sides = raydiumSides({ pool: key(), account: { data: poolBytes(inMint, target, inVault, outVault) }, inMint, targetMint: target });
-    const build = (reserve: bigint, stock: bigint) =>
-      raydiumLegVenue({
-        sides,
-        inMint,
-        targetMint: target,
-        spend: 1_000_000n,
-        candidates: [vaultAccount(inVault, inMint, authority, reserve), vaultAccount(outVault, target, authority, stock)],
-        vaultOwned: new Set(),
-      });
-
-    // 50x of the in-side reserve is the same bound as 50x of the out-side
-    // inventory at the quoted rate — see LegVenueHop — and it needs no price.
-    const deep = build(50_000_000n, 1n);
-    expect(deep.hops[0]!.payMint).toEqual(inMint);
-    expect(deep.hops[0]!.takeRaw).toBe(1_000_000n);
-    expect(deep.hops[0]!.census).toEqual({ counted: true, inventory: 50_000_000n, accounts: 1 });
-    expect(legDepthDecision({ inMint, legs: [deep] })).toEqual({ deep: true });
-    expect(legDepthDecision({ inMint, legs: [build(49_999_999n, 1n)] }).deep).toBe(false);
-
-    // A POOL WITH NOTHING OF THE LEG IN IT HAS NOTHING TO SELL, however deep
-    // its in-side reserve is — the arm that reads the spend side cannot see it.
-    const empty = build(50_000_000_000n, 0n);
-    expect(empty.hops[0]!.census.counted).toBe(false);
-    expect(legDepthDecision({ inMint, legs: [empty] }).deep).toBe(false);
-
-    // ARM 2 ABSTAINS AND SAYS WHY, and the scope is every-hop, so the "nothing
-    // measured it" refusal correctly does not fire on a sound Raydium leg.
-    expect(deep.censusScope).toBe("every-hop");
-    expect(deep.impact.compared).toBe(false);
-    if (deep.impact.compared) return;
-    expect(deep.impact.why).toContain("priced from the pool's own state");
-  });
-
-  it("derives the vault-owned exclusion set EXACTLY as findVaultOwnedTokenAccounts does, from bytes already read", async () => {
-    // TWO ENDS, ONE ASSERTION. The Jupiter arm calls
-    // findVaultOwnedTokenAccounts (which fetches); the Raydium arm has the
-    // bytes in hand and must not pay for a second round trip. Two statements of
-    // one rule are two statements that can drift, so they are run over the same
-    // accounts and required to agree.
-    const vault = key();
-    const mint = key();
-    const other = key();
-    const ata = getAssociatedTokenAddressSync(mint, vault, true, TOKEN_2022_PROGRAM_ID);
-    const byOwnerBytes = key();
-    const stranger = key();
-    const candidates: VenueAccount[] = [
-      // Derived: the vault's ATA under Token-2022, as a route may list one it
-      // intends to create — empty here, which is exactly the case the
-      // derivation pass exists for.
-      { address: ata, owner: TOKEN_PROGRAM_ID, data: Buffer.alloc(165) },
-      // Found by its owner bytes: a non-ATA account the derivation cannot guess.
-      vaultAccount(byOwnerBytes, mint, vault, 5n),
-      // Neither: the venue's own account.
-      vaultAccount(stranger, mint, other, 9n),
-    ];
-    const mine = vaultOwnedAmong(vault, candidates, [mint]);
-    expect([...mine].sort()).toEqual([ata.toBase58(), byOwnerBytes.toBase58()].sort());
-
-    const byAddress = new Map(candidates.map((account) => [account.address.toBase58(), account] as const));
-    const connection = {
-      getMultipleAccountsInfo: async (page: readonly PublicKey[]) =>
-        page.map((address) => {
-          const account = byAddress.get(address.toBase58());
-          return account === undefined ? null : { owner: account.owner, data: account.data };
-        }),
-    };
-    const theirs = await findVaultOwnedTokenAccounts(
-      connection as never,
-      vault,
-      candidates.map((account) => account.address.toBase58()),
-      [mint],
-    );
-    expect([...mine].sort()).toEqual([...theirs].sort());
   });
 });
 

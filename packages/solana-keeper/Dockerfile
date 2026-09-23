@@ -66,6 +66,7 @@ WORKDIR /repo
 COPY packages/solana-log/src/log.ts packages/solana-log/src/log.ts
 COPY packages/solana-program/idl packages/solana-program/idl
 COPY packages/solana-program/scripts/attestation.ts packages/solana-program/scripts/live-route.ts packages/solana-program/scripts/raydium-swap.ts \
+     packages/solana-program/scripts/clmm-layout.ts \
      packages/solana-program/scripts/jupiter-route.ts packages/solana-program/scripts/jupiter-sim.ts \
      packages/solana-program/scripts/jupiter-fork-setup.ts packages/solana-program/scripts/jupiter-fork-test.ts \
      packages/solana-program/scripts/link-consent.ts \

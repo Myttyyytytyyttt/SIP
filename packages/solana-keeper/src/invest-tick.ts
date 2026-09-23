@@ -94,9 +94,10 @@ import { method, type MethodCall } from "./methods.js";
 // branch that no longer exists; the typecheck did not object, because an unused
 // IMPORT is not an unused local. They are gone: an import is a claim about what
 // this file does, and this one claimed a venue the keeper has retired.
-// venue-depth.ts still exports the Raydium adapter — solana-core's readers.test
-// holds the web's pool panel to agreeing with its offsets — but nothing on the
-// money path reaches it any more.
+// Three of the four are gone from venue-depth.ts too: the adapter itself went
+// on 2026-09-23, and its header says what held it there and what replaced it.
+// readRouteAccounts stays, because measureLegVenue reads the route's accounts
+// with it; it only stopped being called from here.
 import { VenueMeasurementRefusal, measureLegVenue } from "./venue-depth.js";
 import type { TransferFeeTerms } from "./min-out.js";
 import { JupiterRouteRefusal, type JupiterRoute, investAmountIn, investMinOut, verifyRouteFresh } from "./program-scripts.js";

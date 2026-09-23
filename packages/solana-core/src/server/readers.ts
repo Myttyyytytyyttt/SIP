@@ -12,6 +12,13 @@
 // browser relay no longer serves (getSignaturesForAddress, getTransaction and
 // getProgramAccounts live here, behind the web's own routes).
 
+import {
+  CLMM_POOL_PAIR_BYTES,
+  CLMM_TOKEN_MINT_0_AT,
+  CLMM_TOKEN_MINT_1_AT,
+  CLMM_TOKEN_VAULT_0_AT,
+  CLMM_TOKEN_VAULT_1_AT,
+} from "@sip/solana-program/clmm-layout";
 import { PublicKey } from "@solana/web3.js";
 
 import {
@@ -448,7 +455,7 @@ export function poolPricesFromAccounts(accounts: readonly (AccountSnapshot | nul
 }
 
 
-// ── the pools' in-side reserves: the depth the keeper's gate measures ────────
+// ── the pools' in-side reserves: this pool's own depth, and nobody else's ────
 //
 // WHY A NUMBER CANNOT BE WRITTEN DOWN HERE. The panel's depth ceiling is a
 // fraction of what a pool holds on the side a buy is PAID in, and that balance
@@ -459,35 +466,46 @@ export function poolPricesFromAccounts(accounts: readonly (AccountSnapshot | nul
 // current a month later and is wrong by then, so the reserve is read with
 // everything else and the ceiling is arithmetic over it.
 //
-// THE IN SIDE, BECAUSE THAT IS THE SIDE THE KEEPER MEASURES. legDepthDecision
-// (solana-keeper/src/invest-decision.ts) takes the pool's in_mint vault — not
-// the stock vault — and refuses a turn whose per-leg spend is not covered
-// MIN_VENUE_INVENTORY_MULTIPLE times over by it. The choice is copied here exactly,
-// pair check included: a panel that measured the other side would promise
-// precisely what the keeper then refuses.
+// THE IN SIDE, BECAUSE THAT IS THE SIDE A BUY IS PAID IN. A USDC buy has to fit
+// into the USDC the pool is holding; the stock vault is what it would be paid
+// OUT of, and reading that one would report the leg's own balance as the room a
+// USDC buy has. The pair is checked rather than assumed for the same reason the
+// side is: a pool that does not trade this pair is both a misconfiguration and
+// the one way these offsets could be pointing at something else entirely.
 //
-// AND IT COSTS NO ROUND TRIP. The vault addresses live INSIDE the pool account
-// (offsets 137 and 169), which is why the keeper needs a second
-// getMultipleAccountsInfo for them — it reads pools an owner's policy names, at
-// run time. This server reads a FIXED list of pools, and a Raydium CLMM vault is
-// a PDA of ["pool_vault", pool, mint] under the CLMM program, so the address is
-// known before any answer comes back and rides the same request. The derivation
-// is never trusted on its own: the pool's own bytes must NAME the address that
-// was asked for, or the reserve is unknown. A wrong seed cannot produce a wrong
+// AND IT IS NO LONGER THE KEEPER'S NUMBER. The keeper moved to Jupiter on
+// 2026-09-21, and until 2026-09-23 this comment still called it "the side the
+// keeper measures": the keeper's Raydium adapter decoded a pool's PoolState,
+// took its in_mint vault the same way, and legDepthDecision refused a turn the
+// reserve did not cover MIN_VENUE_INVENTORY_MULTIPLE times over, so the panel
+// was copying a rule it had to agree with. That adapter is gone. The keeper's
+// gate now censuses whatever token accounts Jupiter's ROUTE names — which can
+// include a Raydium pool's vaults, when Jupiter routes a hop there — and never
+// decodes a PoolState or reads a pool pinned in advance. So this is the pinned
+// pool's own depth, published beside a price that comes from the same pool
+// (PRICED_POOLS says so above), and it is NOT the ceiling the keeper applies.
+// client/product.ts is where that distinction is written out for the reader.
+//
+// AND IT COSTS NO ROUND TRIP. The vault addresses live INSIDE the pool account,
+// so naively they can only be known after it has been read. This server reads a
+// FIXED list of pools, though, and a Raydium CLMM vault is a PDA of
+// ["pool_vault", pool, mint] under the CLMM program — so the address is known
+// before any answer comes back and rides the same request. The derivation is
+// never trusted on its own: the pool's own bytes must NAME the address that was
+// asked for, or the reserve is unknown. A wrong seed cannot produce a wrong
 // number here — only a missing one.
 
 /** SPL Token's Account: mint(32) owner(32) amount(8, little-endian) — the amount at 64, in Token-2022 too. */
 const TOKEN_ACCOUNT_AMOUNT_AT = 64;
 
-/**
- * Raydium CLMM PoolState, at the offsets the keeper counts over the same bytes:
- * 8 disc, 1 bump, 32 amm_config, 32 owner, then token_mint_0 at 73, token_mint_1
- * at 105, token_vault_0 at 137, token_vault_1 at 169.
- */
-const POOL_TOKEN_MINT_0_AT = 73;
-const POOL_TOKEN_MINT_1_AT = 105;
-const POOL_TOKEN_VAULT_0_AT = 137;
-const POOL_TOKEN_VAULT_1_AT = 169;
+// The PoolState's pair and vaults are located by @sip/solana-program/clmm-layout,
+// imported above. THIS FILE USED TO KEEP ITS OWN FOUR LITERALS, and a test held
+// them against the keeper's copy by reading the keeper's source as text. Both
+// are gone: this reader, the route builder in live-route.ts and the fixture
+// that writes these bytes for the tests share one definition. NOT YET the price
+// decode this file also leans on: client/clmm-price.ts still keeps its own two
+// mint offsets, because it sits in the browser-safe client entry, whose only
+// permitted package import is the IDL (test/client-entry.test.ts).
 
 /** Raydium CLMM's vault seed: ["pool_vault", pool, mint]. Checked against mainnet's own six vaults, and against each pool's bytes on every read. */
 const POOL_VAULT_SEED = new TextEncoder().encode("pool_vault");
@@ -590,19 +608,19 @@ export function poolReservesFromAccounts(
     const pool = pools[index];
     if (pool === null || pool === undefined) return unknown("the pool account was not read, and a depth that cannot be measured is not a depth");
     if (pool.owner !== RAYDIUM_CLMM) return unknown(`the pool is owned by ${pool.owner}, not Raydium CLMM`);
-    if (pool.data === null || pool.data.length < POOL_TOKEN_VAULT_1_AT + 32) {
-      return unknown(`a Raydium CLMM pool state is at least ${POOL_TOKEN_VAULT_1_AT + 32} bytes to reach its vaults; this account is ${pool.data === null ? "not base64" : `${pool.data.length} bytes`}`);
+    if (pool.data === null || pool.data.length < CLMM_POOL_PAIR_BYTES) {
+      return unknown(`a Raydium CLMM pool state is at least ${CLMM_POOL_PAIR_BYTES} bytes to reach its vaults; this account is ${pool.data === null ? "not base64" : `${pool.data.length} bytes`}`);
     }
     const data = pool.data;
     const at = (offset: number): string => base58Encode(data.subarray(offset, offset + 32));
-    const [mint0, mint1] = [at(POOL_TOKEN_MINT_0_AT), at(POOL_TOKEN_MINT_1_AT)];
-    // THE KEEPER'S OWN CHOICE, COPIED: legDepthDecision admits the pool only when
-    // it trades in_mint against this leg, either way round, and then measures the
-    // vault on in_mint's side.
+    const [mint0, mint1] = [at(CLMM_TOKEN_MINT_0_AT), at(CLMM_TOKEN_MINT_1_AT)];
+    // EITHER WAY ROUND IS ADMITTED, AND ONLY THOSE TWO: Raydium orders a pair by
+    // the mints' own bytes, so in_mint is mint0 in some pools and mint1 in others
+    // and the read has to follow the MINT, never the offset.
     const inIsZero = mint0 === pair.inMint && mint1 === pair.otherMint;
     const inIsOne = mint1 === pair.inMint && mint0 === pair.otherMint;
     if (!inIsZero && !inIsOne) return unknown(`the pool trades ${mint0} against ${mint1}, not ${pair.inMint} against ${pair.otherMint}`);
-    const named = at(inIsZero ? POOL_TOKEN_VAULT_0_AT : POOL_TOKEN_VAULT_1_AT);
+    const named = at(inIsZero ? CLMM_TOKEN_VAULT_0_AT : CLMM_TOKEN_VAULT_1_AT);
     if (named !== pair.inVault) return unknown(`the pool names ${named} as its ${pair.inMint} vault, and this read asked for ${pair.inVault}`);
 
     const vault = vaults[index];
@@ -1108,9 +1126,9 @@ export interface LiveSnapshot {
   /** The oracle, apart from the venue: unreadable whenever a feed is, and never able to make `prices` unreadable. */
   readonly pyth: ChainRead<PythRead>;
   /**
-   * What each priced pool holds on the side a buy is PAID in — the depth the
-   * keeper's gate measures — so a panel can recompute its ceiling instead of
-   * quoting a figure with a date on it. Beside `prices`, never inside it, and
+   * What each priced pool holds on the side a buy is PAID in — that pool's own
+   * depth, not the keeper's ceiling (see the reserve section above) — read at a
+   * slot rather than quoted as a figure with a date on it. Beside `prices`, never inside it, and
    * unable to make it unreadable.
    */
   readonly reserves: ChainRead<PoolReserves>;

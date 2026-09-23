@@ -186,8 +186,9 @@ export const ROUTED_VENUE = Object.freeze({
   web: Object.freeze({ constant: "JUPITER_V6", programId: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", venueName: "jupiter-v6" }),
   /**
    * RETIRED, AND THE POINT IS THAT IT IS STILL REAL. Raydium CLMM is what every
-   * policy signed to date names, including the live mainnet one, and it is
-   * still the PRICE SOURCE the floors are read from (readers.ts PRICED_POOLS).
+   * policy signed before 2026-09-22 names — the live mainnet one was re-signed
+   * onto Jupiter v6 that day (CHANGELOG.md) — and it is still the PRICE SOURCE
+   * the floors are read from (readers.ts PRICED_POOLS).
    * What it may never be again is a venue a new policy can be signed with.
    */
   retired: Object.freeze({ constant: "RAYDIUM_CLMM", programId: "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", venueName: "raydium-clmm", stillAPriceSource: true }),

@@ -57,6 +57,12 @@
 // is REFUSED rather than quoted around.
 
 import { Connection, PublicKey } from "@solana/web3.js";
+import {
+  CLMM_TOKEN_MINT_0_AT,
+  CLMM_TOKEN_MINT_1_AT,
+  CLMM_TOKEN_VAULT_0_AT,
+  CLMM_TOKEN_VAULT_1_AT,
+} from "./clmm-layout";
 import { RAYDIUM_CLMM, type SwapV2Pool } from "./raydium-swap";
 
 const TOKEN_PROGRAM = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -105,10 +111,13 @@ export interface LiveRoute extends SwapV2Pool {
 export const POOL_STATE_BYTES = 1544;
 const POOL_STATE_DISCRIMINATOR = "f7ede3f5d7c3de46";
 const AMM_CONFIG_AT = 9;
-const MINT0_AT = 73;
-const MINT1_AT = 105;
-const VAULT0_AT = 137;
-const VAULT1_AT = 169;
+// The pair and the vaults come from ./clmm-layout, the definition this route
+// builder shares with solana-core's reserve panel, which reads the same bytes
+// and used to keep its own copy of them.
+const MINT0_AT = CLMM_TOKEN_MINT_0_AT;
+const MINT1_AT = CLMM_TOKEN_MINT_1_AT;
+const VAULT0_AT = CLMM_TOKEN_VAULT_0_AT;
+const VAULT1_AT = CLMM_TOKEN_VAULT_1_AT;
 const OBSERVATION_AT = 201;
 const TICK_SPACING_AT = 235;
 const SQRT_PRICE_AT = 253;

@@ -1,7 +1,12 @@
 // Server-side readers over a stub pool: the ownership gate, tri-state results, history.
 
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import {
+  CLMM_POOL_PAIR_BYTES,
+  CLMM_TOKEN_MINT_0_AT,
+  CLMM_TOKEN_MINT_1_AT,
+  CLMM_TOKEN_VAULT_0_AT,
+  CLMM_TOKEN_VAULT_1_AT,
+} from "@sip/solana-program/clmm-layout";
 
 import { describe, expect, it } from "vitest";
 
@@ -360,8 +365,8 @@ describe("readPoolPrices", () => {
     });
     expect(upstream.calls).toHaveLength(1);
     // STILL ONE CALL, three addresses longer: each pool's in-side vault is a PDA
-    // of the pool and USDC, so it is known before the answer comes back and does
-    // not cost the round trip the keeper has to pay for the same figures.
+    // of the pool and USDC, so it is known before the answer comes back and
+    // rides the same request instead of costing a second one.
     expect((upstream.calls[0]!.body as { params: unknown[] }).params).toEqual([
       [SOL_USDC_POOL, SPYX_USDC_POOL, ANTHROPIC_USDC_POOL, SOL_POOL_USDC_VAULT, LEG_POOLS[0]!.usdcVault, LEG_POOLS[1]!.usdcVault],
       { encoding: "base64", commitment: "confirmed" },
@@ -489,34 +494,52 @@ describe("the pools' in-side reserves", () => {
 
     // AND THE CONTROL: a pool that names the STOCK vault where the USDC vault
     // belongs. Reading the wrong side would report the leg's own balance as the
-    // depth a USDC buy has to fit into — the number the keeper never measures.
+    // depth a USDC buy has to fit into, which is not what this panel reports.
     const wrongSide = reserveOf(1, { pool: poolSnap([leg.mint, USDC_MINT], [leg.usdcVault, leg.vault0], leg.sqrtPriceX64) });
     expect(wrongSide.amountRaw).toBeNull();
     expect(wrongSide.unreadable).toContain(`names ${leg.vault0} as its ${USDC_MINT} vault`);
   });
 
-  it("matches the keeper's own gate: the same four offsets, and the same side of the pair", () => {
-    // Read as text, never imported: solana-core does not depend on the keeper.
-    // If the two measured different sides, this panel would promise exactly what
-    // the keeper's legDepthDecision then refuses.
-    //
-    // THE FILE MOVED ON 2026-09-21 AND THE OFFSETS DID NOT. The keeper's depth
-    // gate became venue-agnostic — it judges a census of token accounts, which
-    // is the only layout a CLOB and a DLMM share — and the Raydium pool decode
-    // moved out of invest-decision.ts into venue-depth.ts, which holds one
-    // adapter per venue. This panel still reads a Raydium pool, so it is still
-    // the Raydium adapter it has to agree with.
-    const keeper = readFileSync(fileURLToPath(new URL("../../solana-keeper/src/venue-depth.ts", import.meta.url)), "utf8");
-    const offsetOf = (name: string): string | undefined => new RegExp(`const POOL_${name} = (\\d+);`).exec(keeper)?.[1];
-    expect([offsetOf("TOKEN_MINT_0"), offsetOf("TOKEN_MINT_1"), offsetOf("TOKEN_VAULT_0"), offsetOf("TOKEN_VAULT_1")]).toEqual(["73", "105", "137", "169"]);
-    // The choice itself: in_mint at mint0 means the in-side vault is vault0.
-    expect(keeper).toContain("? { ok: true, inVault: pair.vault0, outVault: pair.vault1 }");
-    expect(keeper).toContain("const inIsZero = pair.mint0.equals(input.inMint) && pair.mint1.equals(input.targetMint);");
+  it("locates the pair and the vaults where mainnet puts them, at offsets nothing here is free to choose", () => {
+    // THE SHARED DEFINITION, HELD TO THE NUMBERS IT CLAIMS. They describe
+    // somebody else's account layout, counted off a Raydium CLMM PoolState: 8
+    // discriminator, 1 bump, 32 amm_config, 32 owner, then the pair and the two
+    // vaults. Read at the wrong offset, 32 bytes of a neighbouring field decode
+    // into a perfectly well-formed address that is not a vault, so this is
+    // asserted rather than assumed. It is not the only pin on these numbers —
+    // the keeper's live-route-from-pool.test.ts holds them too, through
+    // live-route.ts, and clmm-price.test.ts writes its own — but it is the one
+    // that asserts @sip/solana-program/clmm-layout's exports directly.
+    expect([CLMM_TOKEN_MINT_0_AT, CLMM_TOKEN_MINT_1_AT, CLMM_TOKEN_VAULT_0_AT, CLMM_TOKEN_VAULT_1_AT]).toEqual([73, 105, 137, 169]);
+    expect(CLMM_POOL_PAIR_BYTES).toBe(201);
 
-    const readers = readFileSync(fileURLToPath(new URL("../src/server/readers.ts", import.meta.url)), "utf8");
-    const ourOffset = (name: string): string | undefined => new RegExp(`const POOL_${name}_AT = (\\d+);`).exec(readers)?.[1];
-    expect([ourOffset("TOKEN_MINT_0"), ourOffset("TOKEN_MINT_1"), ourOffset("TOKEN_VAULT_0"), ourOffset("TOKEN_VAULT_1")]).toEqual(["73", "105", "137", "169"]);
-    expect(readers).toContain("const inIsZero = mint0 === pair.inMint && mint1 === pair.otherMint;");
+    // AND THE PIN IS NOT CIRCULAR, which is the part that took some doing. Every
+    // reserve case above reads bytes that chain-fixtures.ts WROTE, and the
+    // fixture now writes through the same constants the reader reads with — so
+    // moving the shared layout moves writer and reader together, and every one
+    // of those cases would stay green over bytes mainnet's real pools do not
+    // have. Only a case that types the numbers out can see that move. The read
+    // below is asserted against NUMBERS TYPED OUT HERE rather than against the
+    // constants: if the shared layout moves, the fixture follows it and these
+    // four literals do not.
+    const [mint0, mint1, vault0, vault1] = [WSOL_MINT, USDC_MINT, SOL_POOL_VAULT_0, SOL_POOL_USDC_VAULT];
+    const bytes = clmmPoolAccount(mint0, mint1, SOL_SQRT_PRICE, [9, 6], [vault0, vault1]);
+    const at = (offset: number): string => base58Encode(bytes.subarray(offset, offset + 32));
+    expect([at(73), at(105), at(137), at(169)]).toEqual([mint0, mint1, vault0, vault1]);
+    expect(bytes.length).toBeGreaterThanOrEqual(CLMM_POOL_PAIR_BYTES);
+
+    // WHAT THIS CASE USED TO BE, AND WHY IT IS NOT THAT ANY MORE. Until
+    // 2026-09-23 it read solana-keeper/src/venue-depth.ts AS TEXT and pulled
+    // the keeper's four offsets out with a regex, plus two expressions matched
+    // verbatim, because the keeper's depth gate decoded a Raydium pool the same
+    // way and the panel would otherwise have promised what the gate then
+    // refused. Both halves of that are gone: the keeper buys through Jupiter,
+    // its gate censuses the accounts a ROUTE names and never decodes a
+    // PoolState, and its Raydium adapter was deleted as unreachable. A regex
+    // over a neighbouring package pins its FORMATTING, not its meaning —
+    // docs/TESTING_TRAPS.md, third species — and this one had started pinning a
+    // dead copy, so deleting dead keeper code turned this package's suite red.
+    // The offsets moved to the package both packages already depend on instead.
   });
 
   it("a vault that is genuinely EMPTY reads zero, and nothing is wrong with it", () => {
@@ -872,8 +895,8 @@ describe("readLiveSnapshot", () => {
       "SysvarC1ock11111111111111111111111111111111",
       PYTH_SOL_USD_FEED,
       PYTH_USDC_USD_FEED,
-      // AND BEHIND THE ORACLE, one in-side vault per priced pool: the depth the
-      // keeper's gate measures, in the batch that was being sent anyway. Written
+      // AND BEHIND THE ORACLE, one in-side vault per priced pool: that pool's
+      // own depth, in the batch that was being sent anyway. Written
       // out rather than spread from PRICED_POOL_IN_VAULTS, so a pool gained or
       // lost has to move these literals too.
       SOL_POOL_USDC_VAULT,
@@ -1064,7 +1087,7 @@ describe("readLiveSnapshot", () => {
         [ANTHROPIC_USDC_POOL, LEG_POOLS[1]!.usdcVault, LEG_POOLS[1]!.usdcReserve],
       ]);
       // The same one batch the snapshot always was: four members, no fifth read
-      // for the vaults the keeper has to fetch separately.
+      // for the vaults.
       expect(read.prices.kind).toBe("exists");
     });
 

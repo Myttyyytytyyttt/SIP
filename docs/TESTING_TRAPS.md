@@ -167,9 +167,72 @@ grep happy.
   turn this red?* If the honest answer includes "renaming a local variable" or
   "adding a field nobody reads", the assertion is pinned to the wrong thing.
 
+### Another instance, and what it cost (2026-09-23)
+
+`solana-core/test/readers.test.ts` had the same shape against a different file:
+it read `solana-keeper/src/venue-depth.ts` as text, pulled the four Raydium
+CLMM PoolState offsets out with a regex, and required two expressions to appear
+**verbatim** — the keeper's depth gate decoded a Raydium pool the same way the
+web's reserve panel does, so a panel measuring the other side of the pair would
+have promised exactly what the gate then refused. A real invariant, pinned to
+formatting.
+
+Then the keeper moved to Jupiter (2026-09-21) and retired Raydium by name —
+`ROUTABLE_VENUES` holds Jupiter v6 alone, and a Raydium policy hits
+`RETIRED_VENUES` and is refused — so the Raydium adapter that fed the
+venue-agnostic census lost its last caller. The gate now censuses whatever
+token accounts a Jupiter *route* names and never decodes a PoolState. **Deleting
+that dead code in the keeper broke a green test in a package that does not
+import the keeper**, and the cheapest way to keep the suite green was to keep
+the dead adapter; for two days, it was. A text pin does not just fail vaguely;
+it can make the neighbour's code undeletable.
+
+The prescribed fix was the one taken. The four offsets are one fact about
+somebody else's account layout, and they now live in
+`@sip/solana-program/clmm-layout` — the package both sides already depend on —
+imported by `live-route.ts`, `readers.ts` and `test/chain-fixtures.ts`, and
+asserted by `readers.test.ts`. The
+keeper's copy went with the adapter. Three things worth copying from it:
+
+- **Count the copies before choosing where to put the constant.** There were
+  seven, not two: the keeper's `venue-depth.ts`; core's `readers.ts`,
+  `clmm-price.ts` (the mints only), `bin/check-legs.mts` (the vaults only) and
+  `test/chain-fixtures.ts`; and the program package's `live-route.ts` and
+  `rehearse-route.ts` (mint0 only). That is not counting the tests that write
+  the offsets as literals on purpose, as pins — besides `readers.test.ts`'s own,
+  three remain: `clmm-price.test.ts`, the web's `solana-build/route.test.ts` and
+  the keeper's `live-route-from-pool.test.ts`. Three copies are still their own —
+  `clmm-price.ts` sits in the browser-safe client entry, whose only permitted
+  package import is the IDL, and the other two are operator scripts — and the
+  shared module's header says so rather than claiming a single definition it
+  does not have. The copy that matters most is `chain-fixtures.ts`: it
+  *writes* the bytes the reader reads. Sharing one constant between them means
+  they can no longer drift apart, and also that they now drift *together* —
+  move the constant and every reserve case stays green over bytes mainnet
+  would not recognise. Which is why the next point is not optional.
+- **Assert the number against literals, somewhere that is not the
+  definition.** `readers.test.ts` builds a pool through the fixture and reads it
+  back at `73/105/137/169` typed out in the test. Change the shared constant and
+  that case goes red — which is the whole job the regex was hired for.
+- **A two-ends test has two ends to lose.** The keeper's deleted Raydium cases
+  included one that ran its dead `vaultOwnedAmong` against the LIVE
+  `findVaultOwnedTokenAccounts` over the same accounts. It was also, it turned
+  out, the only case anywhere that fed the live function an account found by its
+  owner bytes: every other stub either reported the accounts missing or served
+  only accounts the vault does not own, so the on-chain pass could have been
+  deleted, or read the mint instead of the owner, and stayed green. Before
+  deleting one end, ask what the test proved about the other; here it needed a
+  case of its own in `jupiter-route.test.ts`.
+
+Not every instance is gone. `solana-keeper/src/invest-decision.ts` is still
+read as text from two other packages: `solana-core/test/handlers-live.test.ts`
+pulls `MIN_VENUE_INVENTORY_MULTIPLE` out of it, and the web's `vault-copy.test.ts`
+— this section's first case — still reads it three times. The same shape, the
+same fix waiting.
+
 ## Three species, one question
 
-The five cases fall into three shapes, and each one hides somewhere different:
+The six cases fall into three shapes, and each one hides somewhere different:
 
 - **A test that cannot tell two cases apart.** The fixture randomised the field
   under dispute; the runner substituted the runtime under dispute; a one-leg
