@@ -16,9 +16,13 @@
 //
 // WHAT IT COSTS. 100 credits per create, edit or delete, 1 per delivered
 // event; a webhook holds at most 100,000 addresses and the Developer plan
-// allows 50 webhooks. Hence the debounce: at most one address edit per
-// MIN_EDIT_INTERVAL_MS, the first after boot excepted, and a new link waits in
-// the doorbell's "new" lane — turned every sweep — until the edit lands.
+// allows 50 webhooks. Hence the debounce: at most one edit ATTEMPT per
+// MIN_EDIT_INTERVAL_MS, the first after boot excepted — a refused PUT counts,
+// or it is sent every sweep — and a new link waits in the doorbell's "new"
+// lane, turned every sweep, until the edit lands. And no edit is paid for
+// twice: the sync finds its own webhook by id when the URL comes back in
+// another form, trusts the header it wrote when the list leaves it out, and
+// stops (and warns) when Helius does not keep an edit it answered 200.
 
 import type { Secret } from "@sip/solana-log";
 
@@ -204,9 +208,47 @@ export interface EnsureResult {
   readonly reactivated: boolean;
   /** What Helius holds NOW: the desired set after a create or an update, the old one when the edit was held. */
   readonly watched: readonly string[];
+  /** The addresses this call put on the webhook that it did not hold before: every one on a create. */
+  readonly added: readonly string[];
+  /**
+   * Why deliveries before this call were certainly DROPPED, or null. The webhook
+   * did not exist, was auto-disabled, or sent another Authorization header
+   * (refused 403, which Helius never resends) or another shape. The doorbell
+   * answers with a full pass (review, 2026-09-23).
+   */
+  readonly gap: string | null;
+  /** Whether Helius now sends spec.authHeader: seen in the list, or written by this call or this process. */
+  readonly authConfirmed: boolean;
+  /** The edit this call made (create or PUT), as a fingerprint the next call compares; null when none. */
+  readonly edit: string | null;
+  /** Set when the edit needed is the one this process already made and Helius did not keep; nothing was sent. */
+  readonly stuck: string | null;
   readonly active: boolean;
   /** Other webhooks on the same URL, left alone: never created by this code, never deleted by it. */
   readonly duplicates: number;
+}
+
+/** What this process remembers between two ensureWebhook calls. All optional: a bare call is a first one. */
+export interface EnsureContext {
+  /**
+   * The id this process created or last edited. Looked up by id when no
+   * webhook matches the URL exactly: a list that returns the URL in another
+   * form (a trailing slash) made the sync create a NEW webhook every ten
+   * minutes, each one delivering every event again (review, 2026-09-23).
+   */
+  readonly knownId?: string | null;
+  /**
+   * The Authorization header this process last wrote to knownId. It stands in
+   * for a list that leaves authHeader out, which otherwise reads as "differs"
+   * on every look — a 100-credit PUT every ten minutes, forever.
+   */
+  readonly writtenAuth?: string | null;
+  /** The fingerprint of this process's last successful edit (EnsureResult.edit). */
+  readonly lastEdit?: string | null;
+  /** Whether a create or a reactivation may be sent. Default true. */
+  readonly allowCreate?: boolean;
+  /** Called right before every create, PUT or PATCH: the attempt, whatever its answer. */
+  readonly onAttempt?: () => void;
 }
 
 /**
@@ -225,7 +267,10 @@ export async function ensureWebhook(
   client: HeliusWebhookClient,
   spec: { readonly url: string; readonly authHeader: string; readonly addresses: readonly string[] },
   allowEdit: boolean,
+  context: EnsureContext = {},
 ): Promise<EnsureResult> {
+  const allowCreate = context.allowCreate ?? true;
+  const attempt = context.onAttempt ?? (() => undefined);
   const desired = canonicalAddresses(spec.addresses);
   if (desired.length > MAX_WEBHOOK_ADDRESSES) {
     throw new Error(
@@ -241,40 +286,105 @@ export async function ensureWebhook(
     authHeader: spec.authHeader,
     txnStatus: "all",
   };
-  const matches = (await client.list()).filter((webhook) => webhook.webhookURL === spec.url);
+  const listed = await client.list();
+  const byUrl = listed.filter((webhook) => webhook.webhookURL === spec.url);
+  const knownId = context.knownId ?? null;
+  const matches = byUrl.length > 0 ? byUrl : listed.filter((webhook) => knownId !== null && webhook.webhookID === knownId);
   const found = matches[0];
+  const fingerprint = (id: string): string => `${id}:${JSON.stringify(body)}`;
   if (found === undefined) {
+    if (!allowCreate) {
+      throw new Error("the webhook is missing, and the last attempt to change it failed less than ten minutes ago; it is not created again yet");
+    }
+    attempt();
     const created = await client.create(body);
-    return { webhookID: created.webhookID, action: "created", reactivated: false, watched: desired, active: created.active !== false, duplicates: 0 };
+    return {
+      webhookID: created.webhookID,
+      action: "created",
+      reactivated: false,
+      watched: desired,
+      added: desired,
+      gap: "the webhook did not exist; nothing was delivered before it was created",
+      authConfirmed: true,
+      edit: fingerprint(created.webhookID),
+      stuck: null,
+      active: created.active !== false,
+      duplicates: 0,
+    };
   }
   const held = canonicalAddresses(found.accountAddresses ?? []);
-  const differs =
-    !sameList(held, desired) ||
-    found.authHeader !== spec.authHeader ||
+  // THE HEADER HELIUS SENDS, when it can be known: the list's, or the one this
+  // process wrote to this very webhook. Undefined = unknown, which differs.
+  const auth = found.authHeader ?? (found.webhookID === knownId ? (context.writtenAuth ?? undefined) : undefined);
+  const wrongShape =
     (found.webhookType !== undefined && found.webhookType !== "raw") ||
     (found.transactionTypes !== undefined && !sameList([...found.transactionTypes], ["ANY"])) ||
     (found.txnStatus !== undefined && found.txnStatus !== "all");
+  const differs = !sameList(held, desired) || auth !== spec.authHeader || wrongShape;
+  const gaps: string[] = [];
   let action: EnsureResult["action"] = "unchanged";
   let watched = held;
-  if (differs && allowEdit) {
+  let added: readonly string[] = [];
+  let edit: string | null = null;
+  let stuck: string | null = null;
+  let authConfirmed = auth === spec.authHeader;
+  // THE SAME EDIT, NEEDED AGAIN, IS AN EDIT HELIUS DID NOT KEEP. Sending it a
+  // second time buys nothing but 100 credits; it is reported instead, as a
+  // failed sync, until the discovered addresses or the secret change.
+  if (differs && context.lastEdit !== undefined && context.lastEdit !== null && context.lastEdit === fingerprint(found.webhookID)) {
+    stuck =
+      "Helius did not keep the last edit of the webhook (the list still differs from what was sent); it is not sent again " +
+      "until the discovered addresses or the secret change";
+  } else if (differs && allowEdit) {
+    attempt();
     await client.update(found.webhookID, body);
     action = "updated";
     watched = desired;
+    const before = new Set(held);
+    added = desired.filter((address) => !before.has(address));
+    edit = fingerprint(found.webhookID);
+    authConfirmed = true;
+    if (auth !== undefined && auth !== spec.authHeader) {
+      gaps.push("Helius held another Authorization header, and every delivery until now was refused 403, which it never resends");
+    }
+    if (wrongShape) gaps.push("the webhook was not a raw webhook for every transaction, failed ones included");
   } else if (differs) {
     action = "held";
   }
   let reactivated = false;
   if (found.active === false) {
+    if (!allowCreate) {
+      throw new Error("the webhook is disabled, and the last attempt to change it failed less than ten minutes ago; it is not switched on yet");
+    }
+    attempt();
     await client.setActive(found.webhookID, true);
     reactivated = true;
+    gaps.push("the webhook was disabled (Helius switches off an endpoint that fails too often), and nothing was delivered meanwhile");
   }
-  return { webhookID: found.webhookID, action, reactivated, watched, active: true, duplicates: matches.length - 1 };
+  return {
+    webhookID: found.webhookID,
+    action,
+    reactivated,
+    watched,
+    added,
+    gap: gaps.length === 0 ? null : gaps.join("; "),
+    authConfirmed,
+    edit,
+    stuck,
+    active: true,
+    duplicates: matches.length - 1,
+  };
 }
 
 /** Whether a sync is due this sweep, and whether it may edit. Pure, so the debounce is tested as a rule. */
 export function syncDue(input: {
   readonly now: number;
   readonly lastCheckAt: number | null;
+  /**
+   * When the last create, PUT or PATCH was ATTEMPTED — answered or not. It was
+   * the last SUCCESS, and a PUT Helius refused every time was sent again every
+   * sweep: 60 an hour at 100 credits each (review, 2026-09-23).
+   */
   readonly lastEditAt: number | null;
   readonly lastFailed: boolean;
   /** The discovered addresses differ from what Helius was last seen holding. */
@@ -301,13 +411,26 @@ export interface WebhookStatus {
   readonly consecutiveFailures: number;
 }
 
+/** What a successful sync tells the doorbell. */
+export interface SyncReport {
+  /** What Helius holds now (Doorbell.setWatched). */
+  readonly watched: ReadonlySet<string>;
+  /** Addresses this sync put on the webhook: they ring, so their links are turned after the edit landed. */
+  readonly added: readonly string[];
+  /** Deliveries were certainly dropped before this sync (EnsureResult.gap): the next sweep is a full pass. */
+  readonly gap: string | null;
+  /** Helius is known to send the secret: a 403 from now on is a stranger, not a lost delivery. */
+  readonly authConfirmed: boolean;
+  readonly now: number;
+}
+
 export interface WebhookSyncOptions {
   /** Null when there is no API key: nothing is managed, and /status says why. */
   readonly client: HeliusWebhookClient | null;
   readonly url: string | null;
   readonly secret: Secret | null;
-  /** Told the confirmed set after every successful sync (Doorbell.setWatched). */
-  readonly onWatched: (addresses: ReadonlySet<string>) => void;
+  /** Told after every successful sync (src/doorbell-wiring.ts hands it to the doorbell). */
+  readonly onSynced: (report: SyncReport) => void;
   readonly log: (level: "info" | "warn", message: string, fields: Record<string, unknown>) => void;
 }
 
@@ -326,10 +449,21 @@ export class WebhookSync {
   readonly #options: WebhookSyncOptions;
   #inFlight = false;
   #lastCheckAt: number | null = null;
-  #lastEditAt: number | null = null;
+  /** When the last create, PUT or PATCH was attempted, and whether that attempt failed. */
+  #lastAttemptAt: number | null = null;
+  #lastAttemptFailed = false;
   #lastFailed = false;
   #confirmedKey: string | null = null;
+  /** What this process knows about the webhook between syncs (EnsureContext). */
+  #knownId: string | null = null;
+  #writtenAuth: string | null = null;
+  #lastEdit: string | null = null;
   #status: WebhookStatus;
+
+  /** Whether the webhook is managed at all here: a key, a URL and a secret. The acting keeper then runs it. */
+  get manageable(): boolean {
+    return this.#options.secret !== null && this.#options.client !== null && this.#options.url !== null;
+  }
 
   constructor(options: WebhookSyncOptions) {
     this.#options = options;
@@ -367,10 +501,16 @@ export class WebhookSync {
     const { due, allowEdit } = syncDue({
       now: input.now,
       lastCheckAt: this.#lastCheckAt,
-      lastEditAt: this.#lastEditAt,
+      lastEditAt: this.#lastAttemptAt,
       lastFailed: this.#lastFailed,
       differs: key !== this.#confirmedKey,
     });
+    // URGENT CHANGES — a missing webhook, a disabled one — are not held for the
+    // debounce, except after an attempt that FAILED inside it, and except a
+    // webhook this process already made: one that vanished is re-created at
+    // most once per interval, so a list that lags a create cannot breed copies.
+    const recentFailure = this.#lastAttemptFailed && this.#lastAttemptAt !== null && input.now - this.#lastAttemptAt < MIN_EDIT_INTERVAL_MS;
+    const allowCreate = !recentFailure && (this.#knownId === null || allowEdit);
     // An unmanaged reason no longer applies; a managed one stands until the next sync says otherwise.
     if (!this.#status.managed) this.#status = { ...this.#status, managed: true, reason: null };
     if (!due) return null;
@@ -378,22 +518,42 @@ export class WebhookSync {
     // NEVER REJECTS. #run catches its own failures, but its log callback is the
     // caller's; a rejection here would be unhandled, and this process's
     // unhandledRejection trap exits the keeper.
-    return this.#run(desired, allowEdit, input.now)
+    return this.#run(desired, allowEdit, allowCreate, input.now)
       .catch(() => undefined)
       .finally(() => {
         this.#inFlight = false;
       });
   }
 
-  async #run(desired: readonly string[], allowEdit: boolean, now: number): Promise<void> {
+  async #run(desired: readonly string[], allowEdit: boolean, allowCreate: boolean, now: number): Promise<void> {
     const client = this.#options.client!;
+    let attempted = false;
     try {
-      const result = await ensureWebhook(client, { url: this.#options.url!, authHeader: this.#options.secret!.reveal(), addresses: desired }, allowEdit);
+      const authHeader = this.#options.secret!.reveal();
+      const result = await ensureWebhook(client, { url: this.#options.url!, authHeader, addresses: desired }, allowEdit, {
+        knownId: this.#knownId,
+        writtenAuth: this.#writtenAuth,
+        lastEdit: this.#lastEdit,
+        allowCreate,
+        onAttempt: () => {
+          attempted = true;
+          this.#lastAttemptAt = now;
+        },
+      });
+      if (attempted) this.#lastAttemptFailed = false;
       this.#lastCheckAt = now;
       this.#lastFailed = false;
-      if (result.action === "created" || result.action === "updated") this.#lastEditAt = now;
+      this.#knownId = result.webhookID;
+      if (result.edit !== null) {
+        this.#writtenAuth = authHeader;
+        this.#lastEdit = result.edit;
+      } else if (result.action === "unchanged" && result.stuck === null) {
+        // CONVERGED: whatever was last sent is what Helius holds.
+        this.#lastEdit = null;
+      }
       this.#confirmedKey = canonicalAddresses(result.watched).join(",");
-      this.#options.onWatched(new Set(result.watched));
+      this.#options.onSynced({ watched: new Set(result.watched), added: result.added, gap: result.gap, authConfirmed: result.authConfirmed, now });
+      if (result.stuck !== null) throw new Error(result.stuck);
       const held =
         result.action === "held"
           ? `the webhook holds ${result.watched.length} addresses and ${desired.length} are discovered; the edit waits for the debounce, and the links it lacks are turned every sweep`
@@ -419,6 +579,7 @@ export class WebhookSync {
       }
     } catch (error) {
       this.#lastFailed = true;
+      if (attempted) this.#lastAttemptFailed = true;
       // HeliusWebhookError carries no URL by construction; anything else is
       // reduced to its name, so nothing unexpected can carry one out either.
       const detail = error instanceof HeliusWebhookError || (error instanceof Error && error.name === "Error") ? error.message : `${(error as Error)?.name ?? "error"}`;

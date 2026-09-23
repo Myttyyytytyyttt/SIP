@@ -85,12 +85,12 @@ function setup(): { redactor: Redactor; status: KeeperStatus } {
   // THE DOORBELL BLOCK, BUILT BY THE REAL OBJECTS with both credentials in
   // hand, and one of them planted where an upstream error would put it.
   const bell = new Doorbell(config.doorbellSecret !== null);
-  bell.ingest([{ blockTime: 1, transaction: { signatures: ["sig"] } }], new Set(), Date.now());
+  bell.ingest([{ blockTime: 1, slot: 1, transaction: { signatures: ["sig"] } }], new Set(), Date.now());
   const sync = new WebhookSync({
     client: createHeliusWebhookClient({ apiKey: config.heliusApiKey!, fetch: async () => new Response("", { status: 500 }) }),
     url: config.doorbellUrl,
     secret: config.doorbellSecret,
-    onWatched: () => undefined,
+    onSynced: () => undefined,
     log: () => undefined,
   });
   const webhook = { ...sync.status(), lastSyncError: `Helius said: bad key ${HELIUS_API_KEY} for header ${DOORBELL_SECRET}` };
@@ -600,5 +600,14 @@ describe("the Helius receiver", () => {
     expect(drive(handler, "GET", "/health").status).toBe(200);
     expect(drive(handler, "GET", "/status").status).toBe(200);
     expect(drive(handler, "GET", "/hooks/helius").status).toBe(404);
+  });
+});
+
+describe("the receiver's body cap", () => {
+  // Every other test uses the constant by name, so a tuning edit to 40 MiB kept
+  // them all green while the public route buffered ten times more (review,
+  // 2026-09-23). The value is the argument: hundreds of full transactions.
+  it("is 4 MiB", () => {
+    expect(HOOK_MAX_BODY_BYTES).toBe(4 * 1024 * 1024);
   });
 });

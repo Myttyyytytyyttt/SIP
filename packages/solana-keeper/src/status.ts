@@ -15,7 +15,7 @@
 // survives, the page is withheld rather than served.
 
 import { createHash, timingSafeEqual } from "node:crypto";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Redactor, Secret } from "@sip/solana-log";
 import type { HeliusApiKeySource } from "./config.js";
 import type { DoorbellCoreStatus } from "./doorbell.js";
@@ -638,4 +638,26 @@ export function httpHandler(
     response.statusCode = 404;
     response.end(JSON.stringify({ error: "not found", paths: ["/health", "/status", "/leaderboard"] }));
   }
+}
+
+/** How long a request may take in all, and its headers alone, on the heartbeat server. */
+export const HEARTBEAT_REQUEST_TIMEOUT_MS = 15_000;
+export const HEARTBEAT_HEADERS_TIMEOUT_MS = 10_000;
+
+/**
+ * The heartbeat server around httpHandler, with its timeouts SET.
+ *
+ * A SLOW BODY IS NOT ALLOWED TO HOLD A SOCKET. The server used to answer GETs
+ * only, which have no body; the receiver reads up to 4 MiB from a public
+ * route, and Node's default gives a request five minutes — on the same server
+ * that answers Railway's /health probe. Helius sends its payload at once and
+ * wants an answer within a second. Built here rather than in the script, so a
+ * test reads the timeouts off the real object: a pin on the script's text
+ * passed with both lines commented out (review, 2026-09-23).
+ */
+export function createHeartbeatServer(handler: (request: IncomingMessage, response: ServerResponse) => void): Server {
+  const server = createServer(handler);
+  server.requestTimeout = HEARTBEAT_REQUEST_TIMEOUT_MS;
+  server.headersTimeout = HEARTBEAT_HEADERS_TIMEOUT_MS;
+  return server;
 }

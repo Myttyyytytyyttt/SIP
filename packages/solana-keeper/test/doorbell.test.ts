@@ -13,10 +13,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  BELL_ANSWER_MARGIN_MS,
   Doorbell,
   ECHO_DEADLINE_MS,
   HOLD_MS,
   MAX_WALK_DEPTH,
+  MAX_WALK_NODES,
   MAX_WALK_STRINGS,
   SAFETY_MIN_PER_SWEEP,
   SAFETY_PASS_MS,
@@ -68,7 +70,7 @@ function trustedBell(links: readonly DoorLink[], now = T0): Doorbell {
   const bell = new Doorbell(true);
   const first = bell.select({ links, now, sweepMs: SWEEP, protocolPaused: false, live: true });
   expect(first.fullReason).toBe("the first sweep after boot");
-  for (const turn of first.turns) bell.recordTurn(turn.link, turn.lane, true, now, "IDLE");
+  for (const turn of first.turns) bell.recordTurn(turn.link, turn.lane, true, now, "IDLE", now);
   bell.ingest(fixtures["solDepositToVault"], new Set(), now);
   expect(bell.trust(now).trusted).toBe(true);
   return bell;
@@ -111,7 +113,7 @@ describe("the real deliveries of 2026-09-23", () => {
       bell.ingest(fixtures["axiomTradeV1"], new Set(), T0); // trust, ringing nothing new
       const links = [onlyWallet, onlyVault];
       const booted = lanesOf(bell, links, T0);
-      for (const turn of booted.turns) bell.recordTurn(turn.link, turn.lane, true, T0, "IDLE");
+      for (const turn of booted.turns) bell.recordTurn(turn.link, turn.lane, true, T0, "IDLE", T0);
       const lanes = new Map(lanesOf(bell, links, T0 + SWEEP).turns.map((turn) => [turn.link.link, turn.lane]));
       expect(lanes.get("L1") === "bell", `${name} rings the wallet`).toBe(expected.includes(WALLET));
       expect(lanes.get("L2") === "bell", `${name} rings the vault`).toBe(expected.includes(VAULT));
@@ -133,7 +135,7 @@ describe("the real deliveries of 2026-09-23", () => {
     expect(bell.status(T0 + 2_000).echoesPending).toBe(0);
     // And an enhanced-shape delivery's top-level signature counts too.
     bell.expectEcho("enhanced-signature", T0, [VAULT]);
-    expect(bell.ingest([{ signature: "enhanced-signature" }], new Set(), T0).echoes).toBe(1);
+    expect(bell.ingest([{ signature: "enhanced-signature", slot: 449756519 }], new Set(), T0).echoes).toBe(1);
   });
 
   it("report the lag from the block to the delivery", () => {
@@ -256,7 +258,7 @@ describe("the selection", () => {
       const sweep = lanesOf(bell, links, T0 + i * SWEEP);
       expect(sweep.fullReason).toBeNull();
       expect(sweep.turns).toHaveLength(SAFETY_MIN_PER_SWEEP);
-      for (const turn of sweep.turns) bell.recordTurn(turn.link, turn.lane, true, T0 + i * SWEEP, "IDLE");
+      for (const turn of sweep.turns) bell.recordTurn(turn.link, turn.lane, true, T0 + i * SWEEP, "IDLE", T0 + i * SWEEP);
     }
   });
 
@@ -273,7 +275,7 @@ describe("the selection", () => {
       expect(sweep.lanes).toEqual({ full: 0, bell: 0, busy: 0, new: 0, safety: k });
       for (const turn of sweep.turns) {
         seen.add(turn.link.link);
-        bell.recordTurn(turn.link, turn.lane, true, now, "IDLE");
+        bell.recordTurn(turn.link, turn.lane, true, now, "IDLE", now);
       }
     }
     expect(seen.size).toBe(10_000);
@@ -283,15 +285,15 @@ describe("the selection", () => {
     const links = fleet(200);
     const bell = trustedBell(links);
     const stuck = links[7]!;
-    bell.recordTurn(stuck, "full", false, T0, "PENDING_FINALITY");
+    bell.recordTurn(stuck, "full", false, T0, "PENDING_FINALITY", T0);
     for (let i = 1; i <= 10; i += 1) {
       const sweep = lanesOf(bell, links, T0 + i * SWEEP);
       expect(sweep.turns.find((turn) => turn.link.link === stuck.link)?.lane).toBe("busy");
-      bell.recordTurn(stuck, "busy", false, T0 + i * SWEEP, "RETRY");
+      bell.recordTurn(stuck, "busy", false, T0 + i * SWEEP, "RETRY", T0 + i * SWEEP);
     }
   });
 
-  it("rings every link of a rung vault, and lets the bell go after the hold", () => {
+  it("rings every link of a rung vault, and lets the bell go after the hold once a turn has answered it", () => {
     const links = fleet(200);
     const shared = links[0]!.vault;
     const second: DoorLink = { link: "zzSecondLinkOfSameVault", wallet: "wallet-of-the-second-link", vault: shared };
@@ -301,6 +303,8 @@ describe("the selection", () => {
     const rung = lanesOf(bell, all, T0 + SWEEP);
     const bellLane = rung.turns.filter((turn) => turn.lane === "bell").map((turn) => turn.link.link).sort();
     expect(bellLane).toEqual([links[0]!.link, second.link].sort());
+    // Both turns began 50 s after the ring and rested: the ring is answered.
+    for (const turn of rung.turns.filter((turn) => turn.lane === "bell")) bell.recordTurn(turn.link, "bell", true, T0 + SWEEP, "IDLE", T0 + SWEEP);
     expect(lanesOf(bell, all, T0 + 10_000 + HOLD_MS).turns.filter((turn) => turn.lane === "bell")).toHaveLength(2);
     expect(lanesOf(bell, all, T0 + 10_000 + HOLD_MS + 1).turns.filter((turn) => turn.lane === "bell")).toHaveLength(0);
   });
@@ -311,7 +315,7 @@ describe("the selection", () => {
     const newcomer = fresh();
     const withNew = [...links, newcomer];
     expect(lanesOf(bell, withNew, T0 + SWEEP).turns.find((turn) => turn.link.link === newcomer.link)?.lane).toBe("new");
-    bell.recordTurn(newcomer, "new", true, T0 + SWEEP, "IDLE");
+    bell.recordTurn(newcomer, "new", true, T0 + SWEEP, "IDLE", T0 + SWEEP);
     // RESTING, AND UNWATCHED: the managed webhook has not taken its addresses yet.
     bell.setWatched(known(links));
     for (let i = 2; i <= 4; i += 1) {
@@ -338,13 +342,13 @@ describe("the selection", () => {
     const bell = trustedBell(links);
     const sweep = lanesOf(bell, links, T0 + SWEEP);
     const [first, second] = sweep.turns.filter((turn) => turn.lane === "safety");
-    bell.recordTurn(first!.link, "safety", false, T0 + SWEEP, "SETTLED");
+    bell.recordTurn(first!.link, "safety", false, T0 + SWEEP, "SETTLED", T0 + SWEEP);
     expect(bell.status(T0 + SWEEP)).toMatchObject({ possibleMisses: 1, lastPossibleMiss: { wallet: first!.link.wallet, outcome: "SETTLED" } });
     // The bell arrived while the turn ran: late, not missed.
     bell.ingest([{ transaction: { signatures: ["late"], message: { accountKeys: [second!.link.wallet] } } }], known(links), T0 + SWEEP);
-    bell.recordTurn(second!.link, "safety", false, T0 + SWEEP, "PENDING_FINALITY");
+    bell.recordTurn(second!.link, "safety", false, T0 + SWEEP, "PENDING_FINALITY", T0 + SWEEP);
     // A resting safety turn is the net doing its job quietly.
-    bell.recordTurn(first!.link, "safety", true, T0 + SWEEP, "IDLE");
+    bell.recordTurn(first!.link, "safety", true, T0 + SWEEP, "IDLE", T0 + SWEEP);
     expect(bell.status(T0 + SWEEP).possibleMisses).toBe(1);
   });
 
@@ -404,5 +408,187 @@ describe("which finished turns may rest", () => {
     expect(turnRests({ settle: "IDLE", invest: null })).toBe(false);
     // A CRANK TOO SHORT TO WRAP comes back IDLE, and a crank refill rings no bell.
     expect(turnRests({ settle: "IDLE", invest: "IDLE", wrapShort: true })).toBe(false);
+  });
+});
+
+// ── what the review of 2026-09-23 found ──────────────────────────────────────
+
+describe("a bell is answered by a turn, not by the clock", () => {
+  // THE INCIDENT: a bell pruned 180 s after it rang, whatever had happened in
+  // between. Three sweeps that threw in readChainSnapshot (or one full pass that
+  // took longer than the hold, which at the measured 210 ms per idle user is
+  // any fleet past ~850 links) and the trade's bell was gone before any select
+  // could act on it; the link had rested IDLE, so it waited for the safety lane.
+  it("still turns a rung link at the first select after an outage longer than the hold", () => {
+    const links = fleet(1_000);
+    const bell = trustedBell(links);
+    const traded = links[500]!;
+    bell.ingest([{ slot: 1, transaction: { signatures: ["trade"], message: { accountKeys: [traded.wallet] } } }], known(links), T0 + 10_000);
+    // The sweeps at +60, +120 and +180 threw before select; this is the next one.
+    const after = lanesOf(bell, links, T0 + 10_000 + HOLD_MS + 50_000);
+    expect(after.turns.find((turn) => turn.link.link === traded.link)?.lane).toBe("bell");
+  });
+
+  it("keeps the bell through a turn that started before it rang, or too soon after it to see the trade", () => {
+    const links = fleet(200);
+    const bell = trustedBell(links);
+    const traded = links[42]!;
+    const rungAt = T0 + 30_000;
+    bell.ingest([{ slot: 1, transaction: { signatures: ["trade"], message: { accountKeys: [traded.wallet] } } }], known(links), rungAt);
+    // A turn that began before the ring and came out IDLE: it cannot have seen the trade.
+    bell.recordTurn(traded, "safety", true, rungAt + 5_000, "IDLE", rungAt - 1_000);
+    // One that began a moment after the ring, before the keeper's endpoint could show it.
+    bell.recordTurn(traded, "bell", true, rungAt + 6_000, "IDLE", rungAt + 1_000);
+    const later = lanesOf(bell, links, rungAt + HOLD_MS + 60_000);
+    expect(later.turns.find((turn) => turn.link.link === traded.link)?.lane).toBe("bell");
+    // A resting turn that began well after the ring answers it; past the hold, it is let go.
+    const answeredAt = rungAt + HOLD_MS + 60_000;
+    bell.recordTurn(traded, "bell", true, answeredAt + 2_000, "IDLE", answeredAt);
+    const next = lanesOf(bell, links, answeredAt + SWEEP);
+    expect(next.turns.find((turn) => turn.link.link === traded.link)?.lane === "bell").toBe(false);
+  });
+
+  it("keeps the bell for at least the hold even when answered at once", () => {
+    const links = fleet(200);
+    const bell = trustedBell(links);
+    const traded = links[9]!;
+    bell.ingest([{ slot: 1, transaction: { signatures: ["trade"], message: { accountKeys: [traded.wallet] } } }], known(links), T0);
+    bell.recordTurn(traded, "bell", true, T0 + 45_000, "IDLE", T0 + 40_000);
+    expect(lanesOf(bell, links, T0 + HOLD_MS).turns.find((turn) => turn.link.link === traded.link)?.lane).toBe("bell");
+    expect(lanesOf(bell, links, T0 + HOLD_MS + 1).turns.find((turn) => turn.link.link === traded.link)?.lane === "bell").toBe(false);
+  });
+
+  it("forgets the bell of an address no longer discovered", () => {
+    const links = fleet(200);
+    const bell = trustedBell(links);
+    const leaving = links[3]!;
+    bell.ingest([{ slot: 1, transaction: { signatures: ["x"], message: { accountKeys: [leaving.wallet] } } }], known(links), T0);
+    lanesOf(bell, links.filter((link) => link !== leaving), T0 + SWEEP);
+    expect(bell.status(T0 + SWEEP).rungAddresses).toBe(0);
+  });
+});
+
+describe("the safety lane's thirty minutes are real minutes", () => {
+  // THE INCIDENT: k was sized from the CONFIGURED interval. Sweeps that overran
+  // (a thousand NO_SIGNER links in the busy lane) had their ticks skipped, ran
+  // every 240 s, and the rotation that should take 30 min took 120.
+  it("sizes the slice from the time since the last select, so 4-minute sweeps still reach everyone within thirty minutes", () => {
+    const links = fleet(10_000);
+    const bell = trustedBell(links);
+    const interval = 4 * SWEEP;
+    const last = new Map(links.map((link) => [link.link, T0]));
+    for (let now = T0 + interval; now <= T0 + 3 * SAFETY_PASS_MS; now += interval) {
+      const sweep = bell.select({ links, now, sweepMs: SWEEP, protocolPaused: false, live: true });
+      expect(sweep.lanes.safety).toBe(Math.ceil((10_000 * interval) / SAFETY_PASS_MS));
+      for (const turn of sweep.turns) {
+        bell.recordTurn(turn.link, turn.lane, true, now, "IDLE", now);
+        last.set(turn.link.link, now);
+      }
+      for (const [link, at] of last) expect(now - at, link).toBeLessThanOrEqual(SAFETY_PASS_MS);
+    }
+  });
+});
+
+describe("an echo that arrives before the keeper says it expects one", () => {
+  // THE INCIDENT: runSettleTick returns only after it has polled the signature
+  // to confirmed and read the receipt; Helius delivers 200-500 ms after
+  // confirmation. The real settle 5nGb2hqz…, delivered at T0 and expected at
+  // T0 + 1.5 s, made a working webhook "deaf" five minutes later.
+  it("is still an echo: the doorbell stays trusted past the deadline", () => {
+    const links = fleet(80);
+    const bell = trustedBell(links);
+    const settle = tx("keeperSettle");
+    bell.ingest(fixtures["keeperSettle"], known([...links, OWNER]), T0 + 10_000);
+    bell.expectEcho(settle.transaction.signatures[0]!, T0 + 11_500, [WALLET, VAULT]);
+    expect(bell.status(T0 + 11_500).echoesPending).toBe(0);
+    const trust = bell.trust(T0 + 11_500 + ECHO_DEADLINE_MS + 1);
+    expect(trust).toEqual({ trusted: true, reason: null });
+    expect(bell.status(T0 + 11_500 + ECHO_DEADLINE_MS + 1).echoesMissed).toBe(0);
+  });
+});
+
+describe("what a delivery must look like to count", () => {
+  // THE INCIDENT (with the secret in hand): `[{}]` made the doorbell trusted and
+  // cleared deafness while naming no transaction at all, and 4 MiB of empty
+  // objects walked 1.4 million nodes without being called lost.
+  it("counts as a transaction only an item with a signature and a slot", () => {
+    const bell = new Doorbell(true);
+    expect(bell.ingest([{}, [], 1, { transaction: {} }, { signature: "no-slot" }], new Set(), T0).transactions).toBe(0);
+    expect(bell.trust(T0).trusted).toBe(false);
+    expect(bell.ingest([{ slot: 7, signature: "enhanced" }], new Set(), T0).transactions).toBe(1);
+    expect(bell.trust(T0).trusted).toBe(true);
+  });
+
+  it("is lost past MAX_WALK_NODES nodes of any kind, not only strings", () => {
+    const links = fleet(80);
+    const bell = trustedBell(links);
+    const empties = Array.from({ length: MAX_WALK_NODES }, () => ({}));
+    expect(bell.ingest(empties, known(links), T0).lost).toContain("nodes");
+    expect(lanesOf(bell, links, T0 + SWEEP).fullReason).toContain("nodes");
+  });
+});
+
+describe("a refused delivery before the webhook is known to hold the secret", () => {
+  // THE INCIDENT: the secret rotated in Railway; Helius kept sending the old
+  // header until the new instance's sync PUT the new one. Every delivery in
+  // between was refused 403 — the one 4xx Helius never resends — and counted,
+  // nothing more. The first good delivery then trusted a doorbell that had
+  // silently lost those trades.
+  it("makes the sweep after the first good delivery a full pass, not a selection", () => {
+    const links = fleet(80);
+    const bell = new Doorbell(true);
+    const boot = lanesOf(bell, links, T0);
+    for (const turn of boot.turns) bell.recordTurn(turn.link, turn.lane, true, T0, "IDLE", T0);
+    // The boot pass has turned everyone; a trade's delivery is refused with the old header.
+    bell.rejected();
+    // The sync writes the new header; the first delivery with it arrives.
+    bell.ingest(fixtures["solDepositToVault"], new Set(), T0 + 30_000);
+    expect(bell.trust(T0 + SWEEP).trusted).toBe(true);
+    const next = lanesOf(bell, links, T0 + SWEEP);
+    expect(next.fullReason).toContain("refused 403");
+    expect(next.turns).toHaveLength(80);
+  });
+
+  it("is noise once the header is confirmed, by an authenticated delivery or by a sync", () => {
+    const links = fleet(80);
+    const byDelivery = trustedBell(links);
+    byDelivery.rejected();
+    expect(lanesOf(byDelivery, links, T0 + SWEEP).fullReason).toBeNull();
+    expect(byDelivery.status(T0).eventsRejected).toBe(1);
+
+    const bySync = new Doorbell(true);
+    lanesOf(bySync, links, T0);
+    bySync.confirmAuthorization();
+    bySync.rejected();
+    bySync.ingest(fixtures["solDepositToVault"], new Set(), T0 + 30_000);
+    expect(lanesOf(bySync, links, T0 + SWEEP).fullReason).toBeNull();
+  });
+});
+
+describe("addresses the webhook starts watching", () => {
+  // A new link was turned in the "new" lane until the edit landed; a trade
+  // between its last turn and the landing was never delivered, and the sweep
+  // after the landing let it rest. The addresses an edit ADDS ring at once.
+  it("ring when the edit lands, so the link is turned after it", () => {
+    const links = fleet(200);
+    const bell = trustedBell(links);
+    const newcomer = links[77]!;
+    bell.setWatched(known(links.filter((link) => link !== newcomer)), [], T0);
+    bell.setWatched(known(links), [newcomer.wallet, newcomer.vault], T0 + 30_000);
+    const next = lanesOf(bell, links, T0 + SWEEP);
+    expect(next.turns.find((turn) => turn.link.link === newcomer.link)?.lane).toBe("bell");
+  });
+});
+
+describe("the constants the design is argued from", () => {
+  // A tuning edit to any of these passes every relative test; these hold the values.
+  it("holds a bell three minutes: a 60 s sweep, ~13 s of finality and a margin", () => {
+    expect(HOLD_MS).toBe(180_000);
+    expect(HOLD_MS).toBeGreaterThanOrEqual(2 * SWEEP + 13_000);
+  });
+
+  it("gives an echo five minutes, and answers a bell only from a turn started 20 s after it", () => {
+    expect(ECHO_DEADLINE_MS).toBe(300_000);
+    expect(BELL_ANSWER_MARGIN_MS).toBe(20_000);
   });
 });

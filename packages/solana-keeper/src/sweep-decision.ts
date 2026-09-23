@@ -233,3 +233,57 @@ export function reconcileLegFees(input: {
   for (const raised of input.byVault.values()) for (const key of raised) standing.add(key);
   return { standing, clear: [...input.standing].filter((key) => !standing.has(key)) };
 }
+
+/**
+ * The leg-fee book across sweeps: each vault's last looking turn, and the keys
+ * that stand. reconcileLegFees is the rule; this OWNS its state, so a caller
+ * cannot fold a sweep against the wrong `standing` — passing a fresh empty set
+ * there silently cleared nothing, ever, with every test green (review,
+ * 2026-09-23).
+ */
+export class LegFeeBook {
+  readonly #byVault = new Map<string, ReadonlySet<string>>();
+  #standing: ReadonlySet<string> = new Set<string>();
+
+  /** Folds one sweep's lookers in; returns the keys no vault raises any longer, to be cleared. */
+  fold(looked: ReadonlyMap<string, ReadonlySet<string>>, discoveredVaults: ReadonlySet<string>): readonly string[] {
+    const result = reconcileLegFees({ byVault: this.#byVault, looked, discoveredVaults, standing: this.#standing });
+    this.#standing = result.standing;
+    return result.clear;
+  }
+
+  get standing(): ReadonlySet<string> {
+    return this.#standing;
+  }
+}
+
+/**
+ * WHICH ROUTE CAN SIGN FOR EACH WALLET, across sweeps.
+ *
+ * IT WAS REBUILT EVERY SWEEP, from the wallets that sweep turned — which was
+ * every wallet. Under the doorbell a sweep turns a selection, and /status
+ * "signable of N" would have shrunk to "of the handful that moved". So it
+ * persists: each turn overwrites its wallet's route, and a wallet that is no
+ * longer discovered is dropped. There is no way to empty it wholesale: the one
+ * edit that would bring the shrinking back.
+ */
+export class SigningRoutes {
+  readonly #routes = new Map<string, string>();
+
+  /** A new discovery: wallets no longer linked stop being counted. */
+  prune(discoveredWallets: ReadonlySet<string>): void {
+    for (const wallet of [...this.#routes.keys()]) if (!discoveredWallets.has(wallet)) this.#routes.delete(wallet);
+  }
+
+  set(wallet: string, route: string): void {
+    this.#routes.set(wallet, route);
+  }
+
+  has(wallet: string): boolean {
+    return this.#routes.has(wallet);
+  }
+
+  values(): string[] {
+    return [...this.#routes.values()];
+  }
+}

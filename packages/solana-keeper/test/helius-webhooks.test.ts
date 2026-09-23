@@ -17,6 +17,7 @@ import {
   ensureWebhook,
   syncDue,
   type HeliusWebhook,
+  type SyncReport,
 } from "../src/helius-webhooks.js";
 
 const API_KEY = "HeliusApiKeyNeverInAnError0042";
@@ -261,7 +262,7 @@ describe("the sync", () => {
       client: over.client === false ? null : client(fetchImpl),
       url: over.url === undefined ? URL_ : over.url,
       secret: over.secret === undefined ? secret : over.secret,
-      onWatched: (set) => watched.push(set),
+      onSynced: (report) => watched.push(report.watched),
       log: quiet,
     });
     return { engine, watched };
@@ -354,7 +355,7 @@ describe("the sync, under a logger that throws", () => {
       client: createHeliusWebhookClient({ apiKey: new Secret("HeliusApiKeyNeverInAnError0042", "heliusApiKey"), fetch: failing }),
       url: "https://keeper.up.railway.app/hooks/helius",
       secret: new Secret("doorbell-secret-0123456789abcdef0123456789abcdef", "doorbellSecret"),
-      onWatched: () => undefined,
+      onSynced: () => undefined,
       log: () => {
         throw new Error("the logger broke");
       },
@@ -362,5 +363,173 @@ describe("the sync, under a logger that throws", () => {
     await expect(engine.tick({ acting: true, addresses: ["a"], now: 0 })).resolves.toBeUndefined();
     // And the guard is released, so the next sweep can try again.
     expect(engine.tick({ acting: true, addresses: ["a"], now: 60_000 })).not.toBeNull();
+  });
+});
+
+// ── what the review of 2026-09-23 found ──────────────────────────────────────
+
+/** A fetch in front of the fake Helius that can rewrite its list, or refuse a method. */
+function shaped(
+  helius: ReturnType<typeof fakeHelius>,
+  over: { list?: (hooks: HeliusWebhook[]) => unknown[]; refuse?: string; freezePut?: boolean },
+): typeof fetch {
+  return async (input, init) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    if (over.refuse === method) {
+      helius.calls.push({ method, path: url.pathname, key: url.searchParams.get("api-key"), body: undefined });
+      return new Response(JSON.stringify({ error: "refused" }), { status: 400 });
+    }
+    if (method === "GET" && url.pathname === "/v0/webhooks" && over.list !== undefined) {
+      helius.calls.push({ method, path: url.pathname, key: url.searchParams.get("api-key"), body: undefined });
+      return new Response(JSON.stringify(over.list(helius.hooks)), { status: 200 });
+    }
+    if (method === "PUT" && over.freezePut === true) {
+      // ANSWERED 200, AND NOT KEPT: the list will go on showing the old object.
+      helius.calls.push({ method, path: url.pathname, key: url.searchParams.get("api-key"), body: JSON.parse(String(init!.body)) });
+      const id = decodeURIComponent(url.pathname.split("/")[3] ?? "");
+      return new Response(JSON.stringify(helius.hooks.find((hook) => hook.webhookID === id)), { status: 200 });
+    }
+    return helius.fetchImpl(input, init);
+  };
+}
+
+/** One tick per 60 s sweep for an hour, each awaited; what was asked of Helius. */
+async function anHour(engine: WebhookSync, addresses: readonly string[], helius: ReturnType<typeof fakeHelius>, start = 1_800_000_000_000) {
+  for (let i = 0; i < 60; i += 1) await engine.tick({ acting: true, addresses, now: start + i * 60_000 });
+  const count = (method: string) => helius.calls.filter((call) => call.method === method).length;
+  return { list: count("GET"), create: count("POST"), update: count("PUT"), setActive: count("PATCH") };
+}
+
+const handMadeEnhanced: HeliusWebhook = {
+  webhookID: "wh-hand-made-123456",
+  webhookURL: URL_,
+  webhookType: "enhanced",
+  accountAddresses: ["someone-else"],
+  transactionTypes: ["SWAP"],
+  authHeader: "another-header",
+  txnStatus: "success",
+  active: true,
+};
+
+describe("the sync does not pay for the same edit twice", () => {
+  const syncOver = (fetchImpl: typeof fetch, reports: SyncReport[] = []) =>
+    new WebhookSync({ client: client(fetchImpl), url: URL_, secret, onSynced: (report) => reports.push(report), log: () => undefined });
+
+  // THE INCIDENT: a PUT Helius refused (a hand-made "enhanced" webhook it would
+  // not turn into "raw") was sent again EVERY SWEEP — 60 an hour, 100 credits a
+  // request — because only a SUCCESSFUL edit started the ten-minute debounce.
+  it("debounces a failing PUT by its attempt: at most one per ten minutes", async () => {
+    const helius = fakeHelius([handMadeEnhanced]);
+    const counts = await anHour(syncOver(shaped(helius, { refuse: "PUT" })), ["w1", "v1"], helius);
+    expect(counts.update).toBeLessThanOrEqual(60 / (MIN_EDIT_INTERVAL_MS / 60_000));
+    expect(counts.update).toBeGreaterThanOrEqual(1);
+  });
+
+  // (a) A list that does not echo authHeader made every look "differs": a PUT
+  // every RECHECK_MS, forever, each reported as a success.
+  it("never PUTs a header it wrote itself when the list leaves authHeader out, and stays healthy", async () => {
+    const helius = fakeHelius();
+    const withoutHeader = shaped(helius, { list: (hooks) => hooks.map(({ authHeader: _omitted, ...rest }) => rest) });
+    const engine = syncOver(withoutHeader);
+    const counts = await anHour(engine, ["w1", "v1"], helius);
+    expect(counts.create).toBe(1);
+    // This process created it with the secret: nothing to change, nothing to warn about.
+    expect(counts.update).toBe(0);
+    expect(engine.status().consecutiveFailures).toBe(0);
+    expect(engine.syncAlert()).toEqual({ fire: null, clear: true });
+  });
+
+  it("PUTs a header it cannot see once per process, and then stays healthy", async () => {
+    const helius = fakeHelius([{ ...handMadeEnhanced, webhookType: "raw", transactionTypes: ["ANY"], txnStatus: "all", accountAddresses: ["v1", "w1"] }]);
+    const withoutHeader = shaped(helius, { list: (hooks) => hooks.map(({ authHeader: _omitted, ...rest }) => rest) });
+    const engine = syncOver(withoutHeader);
+    const counts = await anHour(engine, ["w1", "v1"], helius);
+    expect(counts.update).toBe(1);
+    expect(helius.hooks[0]!.authHeader).toBe(SECRET);
+    expect(engine.status().consecutiveFailures).toBe(0);
+  });
+
+  // (b) A list that stores the URL in another form (a trailing slash) never
+  // matched: a NEW webhook every ten minutes, each delivering every event.
+  it("finds the webhook it created by its id when the URL comes back in another form, and never creates a second", async () => {
+    const helius = fakeHelius();
+    const slashed = shaped(helius, { list: (hooks) => hooks.map((hook) => ({ ...hook, webhookURL: `${hook.webhookURL}/` })) });
+    const counts = await anHour(syncOver(slashed), ["w1", "v1"], helius);
+    expect(counts.create).toBe(1);
+    expect(helius.hooks).toHaveLength(1);
+  });
+
+  // (c) A PUT answered 200 whose change the list never shows: the same edit,
+  // every ten minutes, forever, with no alert.
+  it("stops sending an edit Helius did not keep, and warns doorbell-sync instead", async () => {
+    const helius = fakeHelius();
+    const engine = syncOver(shaped(helius, { freezePut: true }));
+    await engine.tick({ acting: true, addresses: ["w1", "v1"], now: 1_800_000_000_000 });
+    const counts = await anHour(engine, ["w1", "v1", "w2", "v2"], helius, 1_800_000_000_000 + MIN_EDIT_INTERVAL_MS);
+    expect(counts.update).toBe(1);
+    expect(engine.syncAlert().fire).toMatchObject({ key: "doorbell-sync" });
+    expect(engine.status().lastSyncError).toContain("did not keep");
+  });
+});
+
+describe("what a sync tells the doorbell", () => {
+  const T = 1_800_000_000_000;
+  const run = async (initial: HeliusWebhook[], addresses: readonly string[], fetchOver?: (helius: ReturnType<typeof fakeHelius>) => typeof fetch) => {
+    const helius = fakeHelius(initial);
+    const reports: SyncReport[] = [];
+    const engine = new WebhookSync({
+      client: client(fetchOver === undefined ? helius.fetchImpl : fetchOver(helius)),
+      url: URL_,
+      secret,
+      onSynced: (report) => reports.push(report),
+      log: () => undefined,
+    });
+    await engine.tick({ acting: true, addresses, now: T });
+    return { reports, helius, engine };
+  };
+  const good = (over: Partial<HeliusWebhook> = {}): HeliusWebhook => ({
+    webhookID: "wh-good-000000-abcdef",
+    webhookURL: URL_,
+    webhookType: "raw",
+    accountAddresses: ["v1", "w1"],
+    transactionTypes: ["ANY"],
+    authHeader: SECRET,
+    txnStatus: "all",
+    active: true,
+    ...over,
+  });
+
+  // A WINDOW IN WHICH HELIUS KNOWINGLY DROPPED DELIVERIES must end in a full
+  // pass: auto-disabled, missing, or sending another header (403, never resent).
+  it("reports a gap when it switches a disabled webhook back on", async () => {
+    const { reports } = await run([good({ active: false })], ["w1", "v1"]);
+    expect(reports.at(-1)!.gap).toContain("disabled");
+  });
+
+  it("reports a gap when it has to create the webhook", async () => {
+    const { reports } = await run([], ["w1", "v1"]);
+    expect(reports.at(-1)!.gap).toContain("did not exist");
+    expect([...reports.at(-1)!.added].sort()).toEqual(["v1", "w1"]);
+  });
+
+  it("reports a gap when Helius held another Authorization header, and confirms the header once written", async () => {
+    const { reports } = await run([good({ authHeader: "the-old-secret" })], ["w1", "v1"]);
+    expect(reports.at(-1)!.gap).toContain("Authorization");
+    expect(reports.at(-1)!.authConfirmed).toBe(true);
+  });
+
+  it("reports no gap, and only the addresses it added, for an ordinary address edit", async () => {
+    const { reports } = await run([good()], ["w1", "v1", "w2", "v2"]);
+    expect(reports.at(-1)!.gap).toBeNull();
+    expect([...reports.at(-1)!.added].sort()).toEqual(["v2", "w2"]);
+    expect(reports.at(-1)!.authConfirmed).toBe(true);
+  });
+
+  it("does not confirm a header it could not see and did not write", async () => {
+    const { reports } = await run([good({ authHeader: "the-old-secret" })], ["w1", "v1"], (helius) => shaped(helius, { refuse: "PUT" }));
+    expect(reports).toHaveLength(0);
+    const held = await run([good({ authHeader: "the-old-secret", accountAddresses: ["v1", "w1"] })], ["w1", "v1"]);
+    expect(held.reports.at(-1)!.authConfirmed).toBe(true);
   });
 });

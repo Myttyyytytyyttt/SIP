@@ -1344,8 +1344,10 @@ describe("the ticks' first steps, over the same bytes", () => {
     // enters `legFeeLooked`, and reconcileLegFees (test/sweep-decision.test.ts)
     // keeps every other vault's last word.
     expect(keeperSource).toMatch(/if \(invest\.feeWarnings !== undefined\) \{/);
+    // The fold itself — per vault, `standing` owned by the book — is driven in
+    // test/doorbell-wiring.test.ts over two sweeps (LegFeeBook).
     expect(keeperSource).toMatch(
-      /const legFees = reconcileLegFees\(\{\n {6}byVault: legFeeByVault,\n {6}looked: legFeeLooked,[\s\S]{0,160}\n {4}for \(const key of legFees\.clear\) alerter\.clear\(key\);\n {4}legFeeStanding = legFees\.standing;/,
+      /\n {4}for \(const key of legFeeBook\.fold\(legFeeLooked, new Set\(doorLinks\.map\(\(link\) => link\.vault\)\)\)\) alerter\.clear\(key\);\n/,
     );
     // Cleared by KEY across vaults, never by a vault's own template: legFeeCeilingAlert
     // keys on the mint and the rate with no vault in it, so two vaults holding the

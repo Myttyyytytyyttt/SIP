@@ -27,7 +27,12 @@
 //     "deaf", and a deaf doorbell is a FULL pass every sweep until an event
 //     arrives again.
 //   * A FULL PASS on boot, on a takeover of the claim, on the protocol being
-//     unpaused, and after any delivery it could not read whole.
+//     unpaused, after any delivery it could not read whole, and after any
+//     window in which Helius is KNOWN to have dropped deliveries: a webhook the
+//     sync had to create, switch back on or give the right header, and a 403
+//     before the header was confirmed (src/doorbell-wiring.ts).
+//   * A BELL IS ANSWERED BY A TURN, NOT BY THE CLOCK: it holds its links in the
+//     bell lane until a turn that began after it comes out resting (HOLD_MS).
 //   * A LINK THAT IS NOT RESTING IS TURNED EVERY SWEEP (the "busy" lane), so
 //     everything that time alone resolves — finality, a retry, a backlog, a
 //     refused basket — never waits on a bell.
@@ -40,7 +45,9 @@ import type { InvestOutcome } from "./invest-tick.js";
 import type { SettleOutcome } from "./settle-decision.js";
 
 /**
- * How long a rung address keeps its links in the "bell" lane: three minutes.
+ * The LEAST time a rung address keeps its links in the "bell" lane: three
+ * minutes. A bell is let go only once this has passed AND a turn has answered
+ * it (BELL_ANSWER_MARGIN_MS) — never by the clock alone.
  *
  * FINALITY TRAILS CONFIRMED BY ~13 s, AND THE TURN READS BOTH. The settle's
  * cheap probe reads the confirmed tip, while the walk reads finalized history
@@ -49,8 +56,27 @@ import type { SettleOutcome } from "./settle-decision.js";
  * one is busy and would be turned anyway; the hold covers the other order — a
  * bell that arrives, a turn that runs a moment too early to see anything at all
  * — with one full 60 s sweep and a margin on top.
+ *
+ * WHY NOT THE CLOCK ALONE (review, 2026-09-23). A bell that lapsed after 180 s
+ * whatever had happened lapsed unanswered whenever no select ran in between:
+ * three sweeps that threw in readChainSnapshot, or ONE full pass longer than the
+ * hold — which at the measured 210 ms per idle user is any fleet past ~850
+ * links, and ~35 min at 10,000. Every trade made during a boot, takeover or
+ * unpause pass then waited for the safety lane, and was logged as the webhook's
+ * "possible miss" when the webhook had delivered it in 1-3 s.
  */
 export const HOLD_MS = 180_000;
+
+/**
+ * How long after a bell a turn must have STARTED to answer it: twenty seconds.
+ *
+ * Helius delivers once the transaction is confirmed; the keeper's own endpoint
+ * can trail that by a few slots, and a turn that began before it could see the
+ * trade comes out IDLE — resting — having seen nothing. Twenty seconds covers
+ * the measured 1-3 s delivery, ~13 s of finality and endpoint lag with room to
+ * spare; a turn that began sooner leaves the bell ringing for the next sweep.
+ */
+export const BELL_ANSWER_MARGIN_MS = 20_000;
 
 /**
  * How long a transaction the keeper sent may take to come back through the
@@ -77,9 +103,23 @@ export const SAFETY_PASS_MS = 30 * 60_000;
  */
 export const MAX_RUNG = 200_000;
 
-/** How deep and how wide one delivery is walked. Past either, it was not read whole. */
+/** How deep and how wide one delivery is walked. Past any of these, it was not read whole. */
 export const MAX_WALK_DEPTH = 32;
 export const MAX_WALK_STRINGS = 500_000;
+/**
+ * Every value visited, of any kind. Strings alone were bounded, and 4 MiB of
+ * `[{},{},…]` walked 1.4 million empty objects (~210 ms of one event loop the
+ * money path shares) without being called lost. A real delivery of 4 MiB — a
+ * few hundred full getTransaction results — is well under half of this.
+ */
+export const MAX_WALK_NODES = 1_000_000;
+
+/**
+ * Signatures delivered and not (yet) expected, kept so an echo that arrives
+ * BEFORE the keeper registers it still counts. Held ECHO_DEADLINE_MS, at most
+ * this many; the oldest go first.
+ */
+export const MAX_SEEN_SIGNATURES = 100_000;
 
 /** Sent-and-not-yet-echoed signatures kept at most; a sweep sends a handful. */
 export const MAX_ECHOES_PENDING = 10_000;
@@ -270,10 +310,27 @@ export function turnRests(turn: { readonly settle: TurnSettle; readonly invest: 
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 
-/** The transactions a delivery carries: a RAW payload is an array of getTransaction results. */
-function transactionsOf(payload: unknown): readonly Record<string, unknown>[] {
+/**
+ * The transactions a delivery carries: a RAW payload is an array of
+ * getTransaction results.
+ *
+ * ONLY WHAT LOOKS LIKE ONE: a signature and a numeric slot. Any object used to
+ * count, so an authenticated `[{}]` made the doorbell trusted and cleared a
+ * deafness while naming no transaction at all. Every real delivery of
+ * 2026-09-23 carries both (test/fixtures/helius-raw-2026-09-23.json).
+ */
+function transactionsOf(payload: unknown): readonly { readonly signature: string; readonly blockTime: unknown }[] {
   const items = Array.isArray(payload) ? payload : [payload];
-  return items.filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null && !Array.isArray(item));
+  const out: { signature: string; blockTime: unknown }[] = [];
+  for (const item of items) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+    const tx = item as Record<string, unknown>;
+    const signature = signatureOf(tx);
+    const slot = tx["slot"];
+    if (signature === null || typeof slot !== "number" || !Number.isFinite(slot)) continue;
+    out.push({ signature, blockTime: tx["blockTime"] });
+  }
+  return out;
 }
 
 /** transaction.signatures[0], or an enhanced payload's top-level `signature`. */
@@ -287,14 +344,30 @@ function signatureOf(tx: Record<string, unknown>): string | null {
   return typeof flat === "string" ? flat : null;
 }
 
+/** A rung address: when it last rang, and whether a turn has answered that ring. */
+interface Bell {
+  at: number;
+  answered: boolean;
+}
+
 export class Doorbell {
   readonly enabled: boolean;
-  /** address → when its bell last rang. Only addresses of discovered links are ever put here. */
-  readonly #rung = new Map<string, number>();
+  /** address → its bell. Only addresses of discovered links are ever put here, and undiscovered ones are dropped. */
+  readonly #rung = new Map<string, Bell>();
   /** signature → when the keeper sent it. */
   readonly #echoes = new Map<string, number>();
+  /** signature → when it was delivered, for the echoes not expected yet. Insertion order is arrival order. */
+  readonly #seen = new Map<string, number>();
   /** link → whether its last turn may rest. Absent = never turned = busy. */
   readonly #rests = new Map<string, boolean>();
+  /** When the last select ran: the safety slice is sized from the real interval, not the configured one. */
+  #lastSelectAt: number | null = null;
+  /**
+   * Whether the webhook is known to send this secret: an authenticated delivery
+   * arrived, or a sync confirmed or wrote the header. Until then a 403 may be
+   * Helius with an old header, and is a delivery lost.
+   */
+  #authConfirmed = false;
   #eventsReceived = 0;
   #eventsRejected = 0;
   #eventsLost = 0;
@@ -343,9 +416,15 @@ export class Doorbell {
     let rung = 0;
     let lost: string | null = null;
     let strings = 0;
+    let nodes = 0;
     const stack: { readonly value: unknown; readonly depth: number }[] = [{ value: payload, depth: 0 }];
     while (stack.length > 0) {
       const { value, depth } = stack.pop()!;
+      nodes += 1;
+      if (nodes > MAX_WALK_NODES) {
+        lost = `a delivery with more than ${MAX_WALK_NODES} nodes was not read whole`;
+        break;
+      }
       if (typeof value === "string") {
         strings += 1;
         if (strings > MAX_WALK_STRINGS) {
@@ -357,7 +436,7 @@ export class Doorbell {
             lost = `more than ${MAX_RUNG} addresses rang at once`;
             continue;
           }
-          this.#rung.set(value, now);
+          this.#ring(value, now);
           rung += 1;
         }
         continue;
@@ -374,16 +453,24 @@ export class Doorbell {
     const transactions = transactionsOf(payload);
     let echoes = 0;
     let newestBlockTime: number | null = null;
+    this.#forgetSeen(now);
     for (const tx of transactions) {
-      const signature = signatureOf(tx);
-      if (signature !== null && this.#echoes.delete(signature)) echoes += 1;
-      const blockTime = tx["blockTime"];
+      if (this.#echoes.delete(tx.signature)) echoes += 1;
+      // DELIVERED BEFORE IT WAS EXPECTED, which is the usual order: runSettleTick
+      // returns only after it has polled its signature to confirmed and read the
+      // receipt, and Helius delivers 200-500 ms after confirmation. The real
+      // settle 5nGb2hqz…, delivered at T and expected at T + 1.5 s, made a
+      // working webhook "deaf" five minutes later (review, 2026-09-23).
+      else this.#remember(tx.signature, now);
+      const blockTime = tx.blockTime;
       if (typeof blockTime === "number" && Number.isFinite(blockTime) && (newestBlockTime === null || blockTime > newestBlockTime)) {
         newestBlockTime = blockTime;
       }
     }
     if (transactions.length > 0) {
       this.#eventsReceived += transactions.length;
+      // AN AUTHENTICATED TRANSACTION IS PROOF the webhook sends this secret.
+      this.#authConfirmed = true;
       this.#lastEventAt = now;
       this.#lastEventLagMs = newestBlockTime === null ? null : Math.max(0, now - newestBlockTime * 1000);
       // HEARD AGAIN: the pipe that went deaf delivers, so it is trusted again.
@@ -411,9 +498,28 @@ export class Doorbell {
     return this.ingest(payload, known, now);
   }
 
-  /** A delivery refused 403. Counted; it proves nothing about the webhook. */
+  /**
+   * A delivery refused 403. Always counted; a delivery LOST while the webhook is
+   * not yet known to send this secret.
+   *
+   * THE ROTATION (review, 2026-09-23). A new secret in Railway reaches Helius
+   * only when the acting instance's sync writes it; until then Helius sends the
+   * old header, every delivery is refused, and 403 is the one 4xx Helius never
+   * resends. Those trades rang nothing, and the first good delivery then
+   * trusted a doorbell that had lost them. Once an authenticated delivery or a
+   * sync has confirmed the header, a 403 is a stranger guessing, and a flood of
+   * guesses must not become a flood of full passes.
+   */
   rejected(): void {
     this.#eventsRejected += 1;
+    if (this.enabled && !this.#authConfirmed) {
+      this.requestFullPass("a delivery was refused 403 before the webhook was known to send this secret; Helius does not resend it");
+    }
+  }
+
+  /** The webhook's Authorization header is known to be this secret (a sync confirmed or wrote it). */
+  confirmAuthorization(): void {
+    this.#authConfirmed = true;
   }
 
   /**
@@ -439,15 +545,56 @@ export class Doorbell {
    * expected: a webhook made by hand is taken at its word, and held to it.
    */
   expectEcho(signature: string, now: number, touched: readonly string[]): void {
+    this.#forgetSeen(now);
+    // ALREADY BACK: delivered while the turn that sent it was still reading its receipt.
+    if (this.#seen.delete(signature)) return;
     if (this.#echoes.size >= MAX_ECHOES_PENDING) return;
     const watched = this.#watched;
     if (watched !== null && !touched.some((address) => watched.has(address))) return;
     this.#echoes.set(signature, now);
   }
 
-  /** The addresses the managed webhook is confirmed to watch; null when unmanaged. */
-  setWatched(addresses: ReadonlySet<string> | null): void {
+  /**
+   * The addresses the managed webhook is confirmed to watch; null when
+   * unmanaged. An EMPTY set is "managed, nothing confirmed yet": every link is
+   * then not watched, so none rests on a bell that cannot ring (review,
+   * 2026-09-23 — unmanaged and unconfirmed used to be the same null).
+   *
+   * `added` are the addresses the edit that just landed put on the webhook.
+   * They RING, now: a link turned in the "new" lane until the edit landed could
+   * have traded after its last turn and before the landing — a transaction
+   * Helius never delivered — and would then rest. Ringing keeps it turning
+   * until a turn that began after the landing answers.
+   */
+  setWatched(addresses: ReadonlySet<string> | null, added: readonly string[] = [], now = 0): void {
     this.#watched = addresses;
+    for (const address of added) {
+      if (!this.#rung.has(address) && this.#rung.size >= MAX_RUNG) {
+        this.requestFullPass(`more than ${MAX_RUNG} addresses rang at once`);
+        return;
+      }
+      this.#ring(address, now);
+    }
+  }
+
+  #ring(address: string, now: number): void {
+    this.#rung.set(address, { at: now, answered: false });
+  }
+
+  #remember(signature: string, now: number): void {
+    this.#seen.delete(signature);
+    this.#seen.set(signature, now);
+    while (this.#seen.size > MAX_SEEN_SIGNATURES) {
+      const oldest = this.#seen.keys().next().value as string;
+      this.#seen.delete(oldest);
+    }
+  }
+
+  #forgetSeen(now: number): void {
+    for (const [signature, at] of this.#seen) {
+      if (now - at <= ECHO_DEADLINE_MS) break;
+      this.#seen.delete(signature);
+    }
   }
 
   /**
@@ -511,8 +658,13 @@ export class Doorbell {
     this.#lastPaused = input.protocolPaused;
     this.#lastLive = input.live;
 
-    // Bells older than the hold ring nothing, and links that are gone rest nowhere.
-    for (const [address, at] of this.#rung) if (now - at > HOLD_MS) this.#rung.delete(address);
+    // A BELL GOES ONLY ONCE IT IS ANSWERED AND THE HOLD HAS PASSED — never by
+    // the clock alone (HOLD_MS says why) — and with the address, when that is
+    // no longer discovered. Links that are gone rest nowhere.
+    const addresses = new Set(links.flatMap((link) => [link.wallet, link.vault]));
+    for (const [address, bell] of this.#rung) {
+      if (!addresses.has(address) || (bell.answered && now - bell.at > HOLD_MS)) this.#rung.delete(address);
+    }
     const discovered = new Set(links.map((link) => link.link));
     for (const link of this.#rests.keys()) if (!discovered.has(link)) this.#rests.delete(link);
 
@@ -521,12 +673,21 @@ export class Doorbell {
 
     if (fullReason !== null) {
       this.#fullPassPending = null;
+      this.#lastSelectAt = now;
       const lanes = { full: links.length, bell: 0, busy: 0, new: 0, safety: 0 };
       this.#lanes = { ...lanes, total: links.length };
       return { fullReason, turns: links.map((link) => ({ link, lane: "full" as const })), lanes };
     }
 
-    const safety = this.#safetySlice(links, input.sweepMs);
+    // THE REAL INTERVAL, NOT THE CONFIGURED ONE (review, 2026-09-23). A sweep
+    // that overruns has its ticks skipped, so selects can be 240 s apart with
+    // sweepMs at 60 s; a slice sized from sweepMs then takes 120 min to come
+    // round. Sized from the time since the last select, the rotation keeps to
+    // SAFETY_PASS_MS of wall time whatever the sweeps cost.
+    const previousSelectAt = this.#lastSelectAt;
+    this.#lastSelectAt = now;
+    const intervalMs = Math.max(input.sweepMs, previousSelectAt === null ? 0 : now - previousSelectAt);
+    const safety = this.#safetySlice(links, intervalMs);
     const watched = this.#watched;
     const lanes = { full: 0, bell: 0, busy: 0, new: 0, safety: 0 };
     const turns: Turn<T>[] = [];
@@ -577,11 +738,13 @@ export class Doorbell {
     return slice;
   }
 
+  /** Whether the link's wallet or vault holds a bell: unanswered, or answered inside the hold. */
   #rang(link: DoorLink, now: number): boolean {
-    const wallet = this.#rung.get(link.wallet);
-    if (wallet !== undefined && now - wallet <= HOLD_MS) return true;
-    const vault = this.#rung.get(link.vault);
-    return vault !== undefined && now - vault <= HOLD_MS;
+    return this.#holds(this.#rung.get(link.wallet), now) || this.#holds(this.#rung.get(link.vault), now);
+  }
+
+  #holds(bell: Bell | undefined, now: number): boolean {
+    return bell !== undefined && (!bell.answered || now - bell.at <= HOLD_MS);
   }
 
   /**
@@ -590,9 +753,19 @@ export class Doorbell {
    * something. A link turned ONLY by the safety lane, while the bell was
    * trusted, that came out busy with no bell for it inside the hold: something
    * happened to it that nothing rang for.
+   *
+   * `startedAt` is when the turn BEGAN. A resting turn answers the link's bells
+   * only when it began BELL_ANSWER_MARGIN_MS after they rang: one that began
+   * before, or too soon after, cannot have seen what rang them.
    */
-  recordTurn(link: DoorLink, lane: Lane, rests: boolean, now: number, outcome: string): boolean {
+  recordTurn(link: DoorLink, lane: Lane, rests: boolean, now: number, outcome: string, startedAt: number): boolean {
     this.#rests.set(link.link, rests);
+    if (rests) {
+      for (const address of [link.wallet, link.vault]) {
+        const bell = this.#rung.get(address);
+        if (bell !== undefined && startedAt >= bell.at + BELL_ANSWER_MARGIN_MS) bell.answered = true;
+      }
+    }
     if (lane !== "safety" || rests || this.#rang(link, now)) return false;
     this.#possibleMisses += 1;
     this.#lastPossibleMiss = { wallet: link.wallet, at: iso(now), outcome };
@@ -602,7 +775,7 @@ export class Doorbell {
   status(now: number): DoorbellCoreStatus {
     const trust = this.trust(now);
     let rung = 0;
-    for (const at of this.#rung.values()) if (now - at <= HOLD_MS) rung += 1;
+    for (const bell of this.#rung.values()) if (this.#holds(bell, now)) rung += 1;
     return {
       enabled: this.enabled,
       trusted: trust.trusted,

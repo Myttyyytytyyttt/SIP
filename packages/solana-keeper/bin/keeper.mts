@@ -29,7 +29,6 @@
 
 // FIRST, so every library that prints while loading prints through the redactor.
 import "../src/console-bridge.js";
-import { createServer } from "node:http";
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
@@ -54,7 +53,8 @@ import {
   type TurnInvest,
   type TurnSettle,
 } from "../src/doorbell.js";
-import { DOORBELL_SYNC_ALERT_KEY, WebhookSync, createHeliusWebhookClient } from "../src/helius-webhooks.js";
+import { createDoorbellWebhookSync, createHooksRoute } from "../src/doorbell-wiring.js";
+import { DOORBELL_SYNC_ALERT_KEY } from "../src/helius-webhooks.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import {
   INVEST_FAILED_CRITICAL_STREAK,
@@ -95,13 +95,12 @@ import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KEEPER_LOCK_NAME, KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
 import { computeLeaderboard } from "../src/leaderboard.js";
 import {
-  authorizationMatcher,
+  createHeartbeatServer,
   decideHealth,
   httpHandler,
   renderLeaderboard,
   renderStatus,
   type DoorbellStatus,
-  type HooksRoute,
   type KeeperStatus,
   type LeaderboardReply,
   type PendingCarry,
@@ -121,7 +120,8 @@ import {
   VAULT_READ_CRITICAL_STREAK,
   createCarryWatch,
   foldInvestTurn,
-  reconcileLegFees,
+  LegFeeBook,
+  SigningRoutes,
   vaultReadAlert,
   type VaultInvestSweep,
 } from "../src/sweep-decision.js";
@@ -398,9 +398,10 @@ const investFailed = new Map<string, number>();
 // sweep turned every vault, so "the sweep did not raise it" meant "nobody has
 // it". Now a vault can simply not be turned this sweep, and its silence is not
 // evidence of anything: each vault keeps what its own last looking turn raised,
-// and what stands is their union (reconcileLegFees, src/sweep-decision.ts).
-const legFeeByVault = new Map<string, ReadonlySet<string>>();
-let legFeeStanding: ReadonlySet<string> = new Set<string>();
+// and what stands is their union (LegFeeBook and reconcileLegFees,
+// src/sweep-decision.ts, which own that state so no call site can fold a sweep
+// against the wrong one).
+const legFeeBook = new LegFeeBook();
 
 /**
  * Consecutive sweeps whose ONE batched vault read failed. A sweep that degrades
@@ -410,16 +411,8 @@ let legFeeStanding: ReadonlySet<string> = new Set<string>();
  */
 let vaultReadFailures = 0;
 
-/**
- * WHICH ROUTE CAN SIGN FOR EACH WALLET, across sweeps.
- *
- * IT WAS REBUILT EVERY SWEEP, from the wallets that sweep turned — which was
- * every wallet. Under the doorbell a sweep turns a selection, and /status
- * "signable of N" would have shrunk to "of the handful that moved". So it
- * persists: each turn overwrites its wallet's route, and a wallet that is no
- * longer discovered is dropped.
- */
-const signingRoutes = new Map<string, string>();
+/** WHICH ROUTE CAN SIGN FOR EACH WALLET, across sweeps (SigningRoutes, src/sweep-decision.ts, says why). */
+const signingRoutes = new SigningRoutes();
 
 /**
  * THE DOORBELL (src/doorbell.ts): Helius tells this keeper which wallets and
@@ -434,17 +427,12 @@ const doorbell = new Doorbell(config.doorbellSecret !== null);
  * can ring. Replaced whole each sweep, never grown from a delivery.
  */
 let knownAddresses: ReadonlySet<string> = new Set<string>();
-const webhookSync = new WebhookSync({
-  client:
-    config.heliusApiKey === null
-      ? null
-      : createHeliusWebhookClient({
-          apiKey: config.heliusApiKey,
-          alsoScrub: config.doorbellSecret === null ? [] : [config.doorbellSecret],
-        }),
-  url: config.doorbellUrl,
+/** The webhook kept in step with discovery, reporting into the doorbell (src/doorbell-wiring.ts). */
+const webhookSync = createDoorbellWebhookSync({
+  apiKey: config.heliusApiKey,
   secret: config.doorbellSecret,
-  onWatched: (addresses) => doorbell.setWatched(addresses),
+  url: config.doorbellUrl,
+  doorbell,
   log: (level, message, fields) => log[level](message, fields),
 });
 /** The /status block, folded in at render like pendingCarries: the receiver can change it between sweeps. */
@@ -806,25 +794,16 @@ async function refreshLeaderboard(): Promise<void> {
  * the next sweep a full pass; a refused one is only counted, because a flood
  * of wrong guesses must not become a flood of log lines.
  */
-const hooks: HooksRoute | null =
-  config.doorbellSecret === null
-    ? null
-    : {
-        authorized: authorizationMatcher(config.doorbellSecret),
-        accepted: (body) => {
-          const report = doorbell.ingestBody(body.toString("utf8"), knownAddresses, Date.now());
-          if (report.lost !== null) log.warn("doorbell: a delivery was not read whole; the next sweep turns every link", { reason: report.lost });
-        },
-        rejected: () => doorbell.rejected(),
-        lost: (reason) => {
-          doorbell.lost(reason);
-          log.warn("doorbell: a delivery was refused; the next sweep turns every link", { reason });
-        },
-      };
+const hooks = createHooksRoute({
+  secret: config.doorbellSecret,
+  doorbell,
+  known: () => knownAddresses,
+  log: (level, message, fields) => log[level](message, fields),
+});
 
 if (config.port !== null) {
   const port = config.port;
-  const server = createServer(
+  const server = createHeartbeatServer(
     httpHandler(
       () => renderStatus({ ...health, pendingCarries: pendingCarries(), rpcEndpointInUse, failovers, doorbell: doorbellStatus() }, sharedRedactor),
       () => decideHealth({ now: Date.now(), startedAt: startedAtMs, lastProgressAt, sweepMs: config.sweepMs }),
@@ -832,12 +811,8 @@ if (config.port !== null) {
       hooks,
     ),
   );
-  // A SLOW BODY IS NOT ALLOWED TO HOLD A SOCKET. The server used to answer GETs
-  // only, which have no body; the receiver reads up to 4 MiB from a public
-  // route, and Node's default gives a request five minutes. Helius sends its
-  // payload at once and wants an answer within a second.
-  server.requestTimeout = 15_000;
-  server.headersTimeout = 10_000;
+  // Its request and header timeouts are set by createHeartbeatServer: a slow
+  // body must not hold a socket on the server that answers /health.
   server
     .on("error", (error) => {
       log.error("heartbeat server failed", { port, detail: summarizeUpstreamError(error) });
@@ -1265,13 +1240,13 @@ async function sweep(): Promise<void> {
     // Routes persist across sweeps (signingRoutes above); a wallet that is no
     // longer discovered stops being counted.
     const discoveredWallets = new Set(doorLinks.map((link) => link.wallet));
-    for (const wallet of [...signingRoutes.keys()]) if (!discoveredWallets.has(wallet)) signingRoutes.delete(wallet);
+    signingRoutes.prune(discoveredWallets);
     /** Each vault's invest turns for THIS sweep, folded; the streaks are applied once from it below. */
     const investSweep = new Map<string, VaultInvestSweep>();
     /**
      * The leg-fee keys each vault's turns raised THIS sweep — only for vaults
      * with a turn that got as far as reading a leg mint. Reconciled per vault
-     * once below (reconcileLegFees).
+     * once below (legFeeBook.fold).
      */
     const legFeeLooked = new Map<string, Set<string>>();
     // THE LINK-TO-WALLET PAIRING /status NEEDS, from the set this sweep just
@@ -1677,7 +1652,7 @@ async function sweep(): Promise<void> {
       // WHAT THE DOORBELL LEARNS FROM THIS TURN, outside the try so a throw is
       // recorded too (as busy). A link turned only by the safety rotation that
       // had work waiting and no bell is the evidence the webhook missed it.
-      if (doorbell.recordTurn(door, lane, turnRests(doorTurn), Date.now(), `${doorTurn.settle}/${doorTurn.invest ?? "none"}`)) {
+      if (doorbell.recordTurn(door, lane, turnRests(doorTurn), Date.now(), `${doorTurn.settle}/${doorTurn.invest ?? "none"}`, turnAt)) {
         log.warn("doorbell: a link the webhook never rang had work waiting (possible miss)", {
           wallet,
           vault: vaultAddr,
@@ -1742,7 +1717,7 @@ async function sweep(): Promise<void> {
     // AND THE LEG-FEE WARNINGS THIS SWEEP NO LONGER RAISES, cleared once for
     // the whole sweep rather than per vault — the keys are keyed by mint and
     // rate, not by vault, so two vaults sharing a leg share the condition and
-    // must share the clear (legFeeStanding says why).
+    // must share the clear (the legFeeBook comment says why).
     //
     // A SWEEP THAT NEVER READ A MINT CLEARS NOTHING. Otherwise a sweep of
     // nothing but early refusals would drop every standing key and the next
@@ -1751,14 +1726,7 @@ async function sweep(): Promise<void> {
     // PER VAULT NOW: a vault this sweep did not turn keeps what its last
     // looking turn raised, so its warning is neither cleared nor re-raised by
     // the rotation.
-    const legFees = reconcileLegFees({
-      byVault: legFeeByVault,
-      looked: legFeeLooked,
-      discoveredVaults: new Set(doorLinks.map((link) => link.vault)),
-      standing: legFeeStanding,
-    });
-    for (const key of legFees.clear) alerter.clear(key);
-    legFeeStanding = legFees.standing;
+    for (const key of legFeeBook.fold(legFeeLooked, new Set(doorLinks.map((link) => link.vault)))) alerter.clear(key);
 
     // EVERY SELECTED LINK HAS HAD ITS TURN.
     selectionOutstanding = false;
@@ -1777,7 +1745,7 @@ async function sweep(): Promise<void> {
 
     // THE OPERATOR'S FIRST QUESTION, answered once per change: how many of these
     // wallets can this process settle WITHOUT a human?
-    const routes = [...signingRoutes.values()];
+    const routes = signingRoutes.values();
     const signable = routes.filter((r) => r === "privy" || r === "local-keypair").length;
     health.signing = { ...health.signing, wallets: config.signing === null ? null : { signable, of: routes.length } };
     changes.change(
