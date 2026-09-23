@@ -302,4 +302,10 @@ export interface DashboardMock {
   readonly trades: readonly Trade[];
   /** Newest first. */
   readonly activity: readonly ActivityEvent[];
+  /**
+   * What a live feed leaves out of the list and keeps behind a disclosure —
+   * the keeper's own account-keeping, dust transfers. Hidden, never dropped.
+   * The sample has none.
+   */
+  readonly hidden?: readonly ActivityEvent[];
 }

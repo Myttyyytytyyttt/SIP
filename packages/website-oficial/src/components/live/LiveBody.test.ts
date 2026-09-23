@@ -45,6 +45,9 @@ const older = { busy: false, retryAt: null, message: null, complete: false };
  */
 const settledButNoRows = (): LiveDashboard => liveDashboard({ activity: null });
 
+/** What a person reads: the markup without its tags. A count and its word sit in two spans. */
+const seen = (html: string): string => html.replace(/<[^>]*>/g, "");
+
 function render(input: { readonly view?: "pension" | "activity"; readonly activityUnreadable: boolean; readonly data?: LiveDashboard }): string {
   return renderToStaticMarkup(
     createElement(
@@ -93,8 +96,9 @@ describe("an activity read that failed", () => {
 
     const html = render({ data, activityUnreadable: true });
     expect(html).toContain(ACTIVITY_COPY.unreadableNow);
-    // The settlement that was already on screen is still on screen.
-    expect(html).toContain("+0.06 SOL");
+    // The settlement that was already on screen is still on screen — in
+    // today's dollars, as the owner chose for every amount in the column.
+    expect(html).toContain("+$6.00");
   });
 
   it("no longer contradicts the tile beside it", () => {
@@ -105,7 +109,7 @@ describe("an activity read that failed", () => {
 
     const html = render({ data, activityUnreadable: true });
     // The sample's "Avg per trade" tile, counting what this chain records.
-    expect(html).toContain("3 settlements");
+    expect(seen(html)).toContain("3 settlements");
     expect(html).not.toContain(ACTIVITY_COPY.empty);
   });
 });

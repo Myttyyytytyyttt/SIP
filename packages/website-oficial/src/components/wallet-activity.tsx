@@ -1,10 +1,12 @@
 import { Settings } from "lucide-react";
+import type { ReactNode } from "react";
 
 import { ActivityRow } from "@/components/activity-row";
 import { CopyButton } from "@/components/copy-button";
 import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { SheetClose } from "@/components/ui/sheet";
 import { LABEL, MONO } from "@/lib/classes";
 import { relativeDayLabel, shortHex, usd } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -16,6 +18,9 @@ import type { ActivityEvent, Wallet } from "@/mocks/types";
  * block — the trailing `!` is what beats the inline style.
  */
 const FEED = "min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!";
+
+/** The column's heading when no single wallet leads: the account the whole page belongs to. */
+const LIVE_PENSION_KEY = "Pension key";
 
 /** The one look "Manage wallets" has, whether it navigates or opens the modal. */
 const MANAGE = "h-auto p-0 text-xs text-muted-foreground underline hover:text-foreground";
@@ -34,6 +39,26 @@ function groupByDay(activity: readonly ActivityEvent[]): ReadonlyArray<readonly 
 }
 
 /**
+ * WHAT ONLY A LIVE PAGE PUTS IN THIS COLUMN (src/components/live/LiveColumn.tsx
+ * builds each piece). Every slot is one the sample never fills, so without this
+ * the column is the sample's exactly.
+ */
+export interface LiveColumnSlots {
+  /** Under the lead wallet's balance: the pension key, and whatever about that wallet needs saying. */
+  readonly below: ReactNode;
+  /** In place of the address and balance when no single wallet can lead: the key, and every wallet listed. */
+  readonly list: ReactNode;
+  /** Over the rows: the history could not be read, and the retry. */
+  readonly banner: ReactNode;
+  /** Under the rows: what the feed leaves out, counted, and the control that opens it. */
+  readonly hidden: ReactNode;
+  /** What a feed with nothing to list says instead — never nothing. */
+  readonly empty: string;
+  /** Inside the header's sheet: pressing Manage wallets closes the sheet before the modal opens. */
+  readonly inSheet: boolean;
+}
+
+/**
  * What the wallet did, newest first. Mounted in the desktop aside and in the
  * mobile sheet alike, so it assumes nothing about its container beyond a
  * height to fill — and paints its own surface, since the sticky day headers
@@ -46,6 +71,7 @@ export function WalletActivity({
   className,
   id = "activity",
   onManageWallets,
+  live,
 }: {
   /** Null when there is no single wallet to lead with; the header then names no address and no balance. */
   wallet: Wallet | null;
@@ -61,15 +87,20 @@ export function WalletActivity({
    * Absent, it stays a link to /wallets — the same screen, one navigation away.
    */
   onManageWallets?: () => void;
+  /** A live page's own pieces. Absent on the sample. */
+  live?: LiveColumnSlots;
 }) {
   const groups = groupByDay(activity);
-  const trades = activity.filter((event) => event.kind === "trade").length;
+  // What the right of the bar counts: the sample's trades, or — on a live page — the settlements that stand for them.
+  const trades = activity.filter((event) => event.kind === (live === undefined ? "trade" : "saved")).length;
+  // The first row takes the feed's one Tab stop; the rest are reached with the arrows.
+  const firstId = activity[0]?.id;
 
   return (
     <div id={id} className={cn("flex h-full flex-col bg-background", className)}>
       <div className="space-y-3 border-b p-4">
         <div className="flex items-center justify-between gap-2">
-          <span className={LABEL}>{wallet?.label ?? "Trading wallets"}</span>
+          <span className={LABEL}>{wallet?.label ?? (live === undefined ? "Trading wallets" : LIVE_PENSION_KEY)}</span>
           {/* The ui Button carries the focus ring either way — link or modal. */}
           {onManageWallets === undefined ? (
             <Button variant="link" size="sm" asChild className={MANAGE}>
@@ -78,6 +109,15 @@ export function WalletActivity({
                 <Settings className="size-3.5" aria-hidden />
               </a>
             </Button>
+          ) : live?.inSheet === true ? (
+            // A modal opened from inside an overlay is two focus traps and an
+            // Escape that closes the wrong one: the sheet goes first.
+            <SheetClose asChild>
+              <Button type="button" variant="link" size="sm" className={MANAGE} onClick={onManageWallets}>
+                Manage wallets
+                <Settings className="size-3.5" aria-hidden />
+              </Button>
+            </SheetClose>
           ) : (
             <Button type="button" variant="link" size="sm" className={MANAGE} onClick={onManageWallets}>
               Manage wallets
@@ -85,7 +125,9 @@ export function WalletActivity({
             </Button>
           )}
         </div>
-        {wallet === null ? null : (
+        {wallet === null ? (
+          (live?.list ?? null)
+        ) : (
           <>
             <div className="flex items-center gap-1">
               <Num className="text-sm">{shortHex(wallet.address)}</Num>
@@ -95,21 +137,30 @@ export function WalletActivity({
               <div className={LABEL}>Balance</div>
               <div className={cn(MONO, "text-2xl font-semibold")}>{usd(wallet.balanceUsd)}</div>
             </div>
+            {live?.below ?? null}
           </>
         )}
       </div>
 
       <ScrollArea className={FEED}>
+        {live?.banner ?? null}
+        {/* Nothing to list is a sentence, never an empty column — and never "no activity yet" over a read that failed. */}
+        {live !== undefined && activity.length === 0 && live.banner === null ? (
+          <div className="px-4 py-6">
+            <p className="text-sm text-muted-foreground">{live.empty}</p>
+          </div>
+        ) : null}
         {groups.map(([date, events]) => (
           <div key={date === "" ? "unknown" : date}>
             <div className="sticky top-0 z-10 bg-background px-4 py-2 text-xs text-muted-foreground">
               {date === "" ? "Time unknown" : relativeDayLabel(date, now)}
             </div>
             {events.map((event) => (
-              <ActivityRow key={event.id} event={event} now={now} />
+              <ActivityRow key={event.id} event={event} now={now} first={event.id === firstId} />
             ))}
           </div>
         ))}
+        {live?.hidden ?? null}
       </ScrollArea>
 
       <div className="flex justify-between border-t px-4 py-2.5 text-xs text-muted-foreground">
@@ -117,7 +168,7 @@ export function WalletActivity({
           <Num>{activity.length}</Num> events
         </span>
         <span>
-          <Num>{trades}</Num> trades
+          <Num>{trades}</Num> {live === undefined ? "trades" : trades === 1 ? "settlement" : "settlements"}
         </span>
       </div>
     </div>

@@ -285,7 +285,8 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
   const investsIn = new Map<string, number>();
   for (const row of union) if (row.event.kind === "invested") investsIn.set(row.signature, (investsIn.get(row.signature) ?? 0) + 1);
 
-  const activity: ActivityEvent[] = [...timed, ...untimed].map((row, index) => {
+  /** One row of the vault's history, as the sample's feed draws it. */
+  const eventOf = (row: LiveRow, index: number): ActivityEvent => {
     const base = { id: `${row.signature}:${index}`, at: row.at, txHash: row.signature, href: row.explorerUrl ?? undefined };
     const event = row.event;
 
@@ -351,7 +352,11 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
       logo: event.kind === "withdrew_token" ? (artForMint(event.mint) ?? undefined) : undefined,
       failed: words.failed || undefined,
     };
-  });
+  };
+  const activity: ActivityEvent[] = [...timed, ...untimed].map(eventOf);
+  // What the feed leaves out — the keeper's account-keeping and dust — as the
+  // same rows, for the disclosure that opens them. Hidden, never dropped.
+  const hidden: ActivityEvent[] = data.hiddenRows.map(eventOf);
 
   return {
     now,
@@ -369,6 +374,7 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
     holdings,
     trades,
     activity,
+    hidden,
     ...(unit === undefined ? {} : { unit }),
   };
 }

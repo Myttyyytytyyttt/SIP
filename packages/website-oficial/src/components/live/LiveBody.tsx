@@ -24,11 +24,12 @@ import type { ReactNode } from "react";
 import { LiveActivityPage } from "@/components/live/LiveActivityPage";
 import { LiveNextStep } from "@/components/live/LiveNextStep";
 import { LiveRulePanel } from "@/components/live/LiveRulePanel";
-import { LiveSidebar } from "@/components/live/LiveSidebar";
+import { FeedBanner, HiddenRows, LeadNotes, WalletList } from "@/components/live/LiveColumn";
 import { secondsUntil } from "@/components/live/LiveStates";
 import { DashboardSource } from "@/components/DashboardSource";
 import { PensionPanel } from "@/components/pension-panel";
 import { SavingsStrip } from "@/components/savings-strip";
+import { WalletActivity } from "@/components/wallet-activity";
 import { SiteFooter } from "@/components/site-footer";
 import { HeaderContributions } from "@/components/header-contributions";
 import { SiteHeader } from "@/components/site-header";
@@ -37,7 +38,8 @@ import { useWalletsOpener } from "@/components/wallets-host";
 import type { LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
 import { clockLabel } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
-import { toDashboardMock } from "@/lib/live-mock";
+import { rawFrom } from "@/lib/amounts";
+import { anchorOf, toDashboardMock } from "@/lib/live-mock";
 import type { LiveDashboard } from "@/lib/live-types";
 import { seatProblem } from "@/lib/trading-wallets";
 
@@ -103,21 +105,32 @@ export function LiveBody({
 
   // No vault means no history was even requested; say that rather than "none yet".
   const emptyNote = data.stage === "no_vault" ? LIVE_COPY.noVault.sidebar : undefined;
+  // The wallet the column leads with — the same rule the adapter used to pick `page.wallet`.
+  const anchor = anchorOf(data.wallets);
+  const lead = anchor === null ? null : (data.wallets.find((wallet) => wallet.address === anchor) ?? null);
+  /*
+   * THE SAMPLE'S COLUMN, mounted twice — in the aside from lg up, and inside
+   * the header's sheet below it — with a live page's own pieces in its slots
+   * (LiveColumn.tsx). The two never share a DOM id: the roving Tab stop and the
+   * hidden-rows panel of one would walk the other's.
+   */
   const sidebarFor = (id: string, inSheet: boolean): ReactNode => (
-    <LiveSidebar
-      data={data}
-      pensionKey={pensionKey}
-      now={now}
-      labelOf={labelOf}
+    <WalletActivity
+      wallet={page.wallet}
+      activity={page.activity}
+      now={page.now}
       id={id}
-      inSheet={inSheet}
-      onOpenWallets={onOpenWallets}
-      onRetryActivity={onRefresh}
-      activityUnreadable={activityUnreadable}
-      activityRetryAt={activityRetryAt}
-      nowMs={nowMs}
-      {...(emptyNote === undefined ? {} : { emptyNote })}
+      onManageWallets={onOpenWallets}
       className={inSheet ? "min-h-0 flex-1" : "sticky top-14 h-[calc(100dvh-3.5rem)]"}
+      live={{
+        below: lead === null ? null : <LeadNotes wallet={lead} pensionKey={pensionKey} />,
+        list: <WalletList wallets={data.wallets} pensionKey={pensionKey} usdcRawPerSol={rawFrom(data.prices?.usdcRawPerSol)} />,
+        banner: activityUnreadable ? <FeedBanner onRetry={onRefresh} retryAt={activityRetryAt} nowMs={nowMs} /> : null,
+        hidden: <HiddenRows events={page.hidden ?? []} upkeep={data.hiddenUpkeep} dust={data.hiddenDust} now={page.now} id={id} />,
+        // A page whose every transaction was upkeep is not an empty history.
+        empty: emptyNote ?? (data.hiddenRows.length > 0 ? ACTIVITY_COPY.onlyHidden : ACTIVITY_COPY.empty),
+        inSheet,
+      }}
     />
   );
 
