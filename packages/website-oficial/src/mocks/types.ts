@@ -264,6 +264,22 @@ export interface SavingsStats {
    * and the biggest is over what is loaded — true when every settlement is.
    */
   readonly complete?: boolean;
+  /**
+   * WHAT ONLY A LIVE PAGE HAS TO SAY ABOUT ITS FIGURES. Absent on the sample,
+   * whose numbers need no qualifying.
+   *
+   * `pricedToday`: every dollar here is SOL at the one price this read — true
+   * when that price was read, false when it was not (and the dollars are null).
+   * `totalSavedSol`: the hero's exact figure in the chain's own unit, for its
+   * tooltip and for when there is no price to show it in dollars.
+   * `settledOutsideHistory`: the vault's state records a settlement the loaded
+   * history does not hold, so nothing may say "none yet".
+   * `holdingsUnreadable`: the token list could not be read — not "holds nothing".
+   */
+  readonly pricedToday?: boolean;
+  readonly totalSavedSol?: string | null;
+  readonly settledOutsideHistory?: boolean;
+  readonly holdingsUnreadable?: boolean;
 }
 
 export interface DashboardMock {

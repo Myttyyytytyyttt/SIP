@@ -278,7 +278,7 @@ describe("the chart is worked backwards from the vault's own total", () => {
 
   it("is null when there is no window to draw across: no rows loaded at all", () => {
     // The vault HAS saved here, so this is not "no settlement yet" — it is a
-    // read that came back with nothing to be flat over. LiveSavedChart says
+    // read that came back with nothing to be flat over. the chart (pension-chart.tsx) says
     // which, from stats.settledOutsideHistory, rather than claiming a first
     // settlement that already happened.
     expect(model(snapshot(), activity([])).chart).toBeNull();

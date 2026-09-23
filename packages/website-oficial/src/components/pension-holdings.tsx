@@ -1,10 +1,12 @@
 import Image from "next/image";
 
+import { Figure } from "@/components/live/Figure";
 import { Num } from "@/components/num";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { MONO } from "@/lib/classes";
 import { pct, shares, usd } from "@/lib/format";
+import { LIVE_COPY } from "@/lib/live-copy";
 import { cn } from "@/lib/utils";
 // The leaf, not the barrel: `@/mocks` also re-exports the seeded dataset.
 import { tickerLogo, type Holding, type SavingsRule, type SavingsStats } from "@/mocks/types";
@@ -40,7 +42,10 @@ export function PensionHoldings({
         <p className="text-xs text-muted-foreground">What the pension holds</p>
       </div>
 
-      {holdings.length === 0 ? (
+      {/* A token list nobody could read is not an empty one: never "No investments yet" over it. */}
+      {stats.holdingsUnreadable === true ? (
+        <p className="text-sm text-muted-foreground">{LIVE_COPY.tokensUnreadable}</p>
+      ) : holdings.length === 0 ? (
         <p className="text-sm text-muted-foreground">No investments yet</p>
       ) : (
         <Table>
@@ -55,15 +60,16 @@ export function PensionHoldings({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {holdings.map((holding) => (
-              <TableRow key={holding.symbol}>
+            {holdings.map((holding, index) => (
+              // Two unknown mints can share a symbol; the position keeps the key unique.
+              <TableRow key={`${holding.symbol}-${index}`}>
                 <TableCell>
                   <span className="flex items-center gap-2">
                     {/* max-w-none: preflight's percentage max-width counts as 0 in
                         the table's min-content, so without it the logo overflows
                         into the next column instead of widening this one. */}
                     <Image
-                      src={tickerLogo(holding.symbol)}
+                      src={holding.logo ?? tickerLogo(holding.symbol)}
                       alt={holding.symbol}
                       width={20}
                       height={20}
@@ -72,13 +78,14 @@ export function PensionHoldings({
                     <span>
                       <span className="block font-medium">{holding.symbol}</span>
                       <span className="block font-mono text-xs tabular-nums text-muted-foreground sm:hidden">
-                        {shares(holding.shares)}
+                        {holding.sharesText ?? shares(holding.shares)}
                       </span>
                     </span>
                   </span>
                 </TableCell>
                 <TableCell className={cn(MONO, "hidden text-right sm:table-cell")}>
-                  {holding.sharesText ?? shares(holding.shares)}
+                  {/* A live row's quantity exactly as the RPC wrote it: its tail steps down, it is never re-rounded. */}
+                  {holding.sharesText === undefined ? shares(holding.shares) : <Figure>{holding.sharesText}</Figure>}
                 </TableCell>
                 <TableCell className={cn(MONO, "text-right")}>{usd(holding.valueUsd)}</TableCell>
                 <TableCell className="text-right">
@@ -114,6 +121,9 @@ export function PensionHoldings({
           </div>
         ))}
       </dl>
+
+      {/* Why every dollar above is a dash: said once, never left for the reader to guess. */}
+      {stats.pricedToday === false ? <p className="text-xs text-muted-foreground">{LIVE_COPY.pricesUnreadableNote}</p> : null}
     </section>
   );
 }

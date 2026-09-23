@@ -23,12 +23,12 @@ import type { ReactNode } from "react";
 
 import { LiveActivityPage } from "@/components/live/LiveActivityPage";
 import { LiveNextStep } from "@/components/live/LiveNextStep";
-import { LivePensionCard } from "@/components/live/LivePensionCard";
 import { LiveRuleCard } from "@/components/live/LiveRuleCard";
 import { LiveSettlementStrip } from "@/components/live/LiveSettlementStrip";
 import { LiveSidebar } from "@/components/live/LiveSidebar";
 import { secondsUntil } from "@/components/live/LiveStates";
 import { DashboardSource } from "@/components/DashboardSource";
+import { PensionPanel } from "@/components/pension-panel";
 import { SiteFooter } from "@/components/site-footer";
 import { HeaderContributions } from "@/components/header-contributions";
 import { SiteHeader } from "@/components/site-header";
@@ -37,6 +37,7 @@ import { useWalletsOpener } from "@/components/wallets-host";
 import type { LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
 import { clockLabel } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
+import { toDashboardMock } from "@/lib/live-mock";
 import type { LiveDashboard } from "@/lib/live-types";
 import { seatProblem } from "@/lib/trading-wallets";
 
@@ -79,6 +80,11 @@ export function LiveBody({
 
   // The payload's own clock: every relative label is measured against it.
   const now = new Date(data.nowMs).toISOString();
+  // THE SAMPLE'S SHAPE, FILLED WITH THIS PENSION. The panels below are the
+  // sample's own components (src/components/pension-*.tsx); this is what they
+  // draw instead of the seeded example — real figures, today's dollars, and a
+  // dash wherever the chain has no answer (src/lib/live-mock.ts).
+  const page = toDashboardMock(data, { complete: older.complete });
 
   /** A wallet's own label, so a settlement says which one it came from. */
   const labelOf = (wallet: string | null): string => {
@@ -184,7 +190,16 @@ export function LiveBody({
                 />
                 <div className="grid gap-4 lg:gap-6 md:grid-cols-[minmax(16rem,20rem)_1fr] lg:grid-cols-1 xl:grid-cols-[minmax(16rem,20rem)_1fr]">
                   <LiveRuleCard data={data} labelOf={labelOf} onOpenWallets={onOpenWallets} className="order-2 md:order-1 lg:order-2 xl:order-1" />
-                  <LivePensionCard data={data} now={now} complete={older.complete} className="order-1 md:order-2 lg:order-1 xl:order-2" />
+                  <PensionPanel
+                    stats={page.stats}
+                    curve={page.curve}
+                    holdings={page.holdings}
+                    days={page.days}
+                    rule={page.rule}
+                    now={page.now}
+                    {...(page.unit === undefined ? {} : { unit: page.unit })}
+                    className="order-1 md:order-2 lg:order-1 xl:order-2"
+                  />
                 </div>
               </>
             )}

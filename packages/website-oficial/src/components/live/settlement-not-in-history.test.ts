@@ -9,16 +9,17 @@
 // Paging back for the settlement (live-backfill.ts) is the other half of the
 // fix, and it can fail, be rate-limited, or simply not reach far enough. So this
 // is the half that must hold WHATEVER the history turns out to hold: the card is
-// rendered from the real model, the way LivePensionCard assembles it, and asked
-// what it says.
+// rendered from the real model, through the adapter, into the sample's own
+// panel — exactly as LiveBody mounts it — and asked what it says.
 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { LivePensionCard } from "@/components/live/LivePensionCard";
-import { LiveSavedChart } from "@/components/live/LiveSavedChart";
+import { PensionChart } from "@/components/pension-chart";
+import { PensionPanel } from "@/components/pension-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { toDashboardMock } from "@/lib/live-mock";
 import { LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
 import type { LiveDashboard, LiveEntryJson, LiveSnapshotJson, VaultEventJson } from "@/lib/live-types";
 
@@ -45,10 +46,16 @@ function neverSettled(): LiveDashboard {
   });
 }
 
-const card = (data: LiveDashboard): string =>
-  renderToStaticMarkup(
-    createElement(TooltipProvider, null, createElement(LivePensionCard, { data, now: new Date(NOW_MS).toISOString(), complete: false })),
+const card = (data: LiveDashboard): string => {
+  const page = toDashboardMock(data, { complete: false });
+  return renderToStaticMarkup(
+    createElement(
+      TooltipProvider,
+      null,
+      createElement(PensionPanel, { stats: page.stats, curve: page.curve, holdings: page.holdings, days: page.days, rule: page.rule, now: page.now }),
+    ),
   );
+};
 
 describe("a settlement the state records and the loaded history does not hold", () => {
   it("is what the model says, rather than a pension with nothing in it", () => {
@@ -61,10 +68,13 @@ describe("a settlement the state records and the loaded history does not hold", 
   });
 
   it("NEVER says the last settlement is none yet", () => {
+    // The sample's panel has no "last settlement" tile to be wrong in; what it
+    // must not do is say, anywhere, that there has been none.
     const html = card(settledButNotHere());
     expect(html).not.toContain(STATS_COPY.lastSettlementNever);
-    expect(html).toContain(STATS_COPY.lastSettlement);
-    expect(html).toContain(STATS_COPY.lastSettlementOutside);
+    expect(html).not.toContain(LIVE_COPY.chartEmpty);
+    // The hero is the vault's own total, whatever the page held: 0.06 SOL at the fixture's price.
+    expect(html).toContain("$6.00");
   });
 
   it("NEVER says the chart starts with a first settlement that already happened", () => {
@@ -92,7 +102,9 @@ describe("a settlement the state records and the loaded history does not hold", 
     expect(data.stats.settledOutsideHistory).toBe(true);
     expect(data.chart).toBeNull();
 
-    const html = renderToStaticMarkup(createElement(LiveSavedChart, { points: null, complete: false, settledOutsideHistory: true }));
+    // …and through the adapter that is an empty curve, which the chart draws as a band.
+    expect(toDashboardMock(data, { complete: false }).curve).toEqual([]);
+    const html = renderToStaticMarkup(createElement(PensionChart, { curve: [], settledOutsideHistory: true }));
     expect(html).not.toContain(LIVE_COPY.chartEmpty);
     expect(html).toContain(LIVE_COPY.chartOutsideHistory);
   });
@@ -109,9 +121,7 @@ describe("a settlement the state records and the loaded history does not hold", 
    * standing and the band would spring back on every screen over 640px.
    */
   it("keeps a sized band instead of collapsing to one line, at both breakpoints", () => {
-    const html = renderToStaticMarkup(
-      createElement(LiveSavedChart, { points: null, complete: false, settledOutsideHistory: true, className: "h-64 w-full sm:h-72" }),
-    );
+    const html = renderToStaticMarkup(createElement(PensionChart, { curve: [], settledOutsideHistory: true, className: "h-64 w-full sm:h-72" }));
     expect(html).toContain("border-dashed");
     expect(html).toContain("h-28");
     expect(html).toContain("sm:h-28");
@@ -126,14 +136,12 @@ describe("a settlement the state records and the loaded history does not hold", 
    */
   it("draws a window with no settlement in it as a rule, not as a filled area", () => {
     const flat = [
-      { at: new Date(NOW_MS - 86_400_000).toISOString(), totalLamports: 36_634_582n },
-      { at: new Date(NOW_MS).toISOString(), totalLamports: 36_634_582n },
+      { date: new Date(NOW_MS - 86_400_000).toISOString().slice(0, 10), total: 3.66 },
+      { date: new Date(NOW_MS).toISOString().slice(0, 10), total: 3.66 },
     ];
-    const html = renderToStaticMarkup(
-      createElement(LiveSavedChart, { points: flat, complete: false, settledOutsideHistory: true, className: "h-64 w-full sm:h-72" }),
-    );
+    const html = renderToStaticMarkup(createElement(PensionChart, { curve: flat, settledOutsideHistory: true, className: "h-64 w-full sm:h-72" }));
     // The figure is on screen, and the caption still says why the line is level.
-    expect(html).toContain("0.036634582 SOL");
+    expect(html).toContain("$3.66");
     expect(html).toContain(LIVE_COPY.chartFlat);
     // No chart at all: there is nothing for one to plot.
     expect(html).not.toContain("recharts");
@@ -155,7 +163,7 @@ describe("a settlement that landed between the snapshot and the page", () => {
 
     const html = card(data);
     expect(html).not.toContain(STATS_COPY.lastSettlementNever);
-    expect(html).not.toContain(STATS_COPY.lastSettlementOutside);
+    expect(html).not.toContain(LIVE_COPY.chartOutsideHistory);
     expect(html).not.toContain(LIVE_COPY.chartFlat);
   });
 });
@@ -169,7 +177,7 @@ describe("a pension that genuinely has not settled yet", () => {
     const html = card(data);
     expect(html).toContain(LIVE_COPY.chartEmpty);
     expect(html).not.toContain(LIVE_COPY.chartFlat);
-    expect(html).not.toContain(STATS_COPY.lastSettlementOutside);
+    expect(html).not.toContain(LIVE_COPY.chartOutsideHistory);
   });
 
   it("keeps the wallets it has: the fixture's own link is what the two cases differ by", () => {

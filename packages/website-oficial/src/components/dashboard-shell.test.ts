@@ -47,7 +47,6 @@ vi.mock("@/hooks/use-live-dashboard", () => ({
 vi.mock("@/components/landing", () => ({ Landing: () => createElement("div", null, "LANDING") }));
 // recharts draws on a ResizeObserver, which node has none of.
 vi.mock("@/components/pension-chart", () => ({ PensionChart: () => createElement("div", null, "CHART") }));
-vi.mock("@/components/live/LiveSavedChart", () => ({ LiveSavedChart: () => createElement("div", null, "LIVECHART") }));
 
 import { DashboardFrame, DashboardView, type DashboardLoadJson } from "@/components/dashboard-shell";
 import { TooltipProvider } from "@/components/ui/tooltip";

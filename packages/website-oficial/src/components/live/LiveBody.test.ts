@@ -18,7 +18,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@/app/providers", () => ({ useSolanaConfigOrNull: () => null }));
 vi.mock("@/components/wallets-host", () => ({ useWalletsOpener: () => null }));
 // recharts draws on a ResizeObserver, which node has none of.
-vi.mock("@/components/live/LiveSavedChart", () => ({ LiveSavedChart: () => createElement("div", null, "LIVECHART") }));
+vi.mock("@/components/pension-chart", () => ({ PensionChart: () => createElement("div", null, "LIVECHART") }));
 
 import { LiveBody } from "@/components/live/LiveBody";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -94,7 +94,8 @@ describe("an activity read that failed", () => {
     expect(data.stats.settlementsLifetime).toBe(3n);
 
     const html = render({ data, activityUnreadable: true });
-    expect(html).toContain(STATS_COPY.settlements);
+    // The sample's "Avg per trade" tile, counting what this chain records.
+    expect(html).toContain("3 settlements");
     expect(html).not.toContain(ACTIVITY_COPY.empty);
   });
 });

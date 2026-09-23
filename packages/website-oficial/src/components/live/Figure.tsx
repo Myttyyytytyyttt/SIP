@@ -15,9 +15,8 @@
  * the text handed in. The eye lands on the head, the whole figure stays on the
  * page, and no tooltip has to be opened to see what was actually saved.
  *
- * This is the treatment the hero figure already used (LivePensionCard); it
- * lives here so the tiles, the feed and the holdings cannot drift away from it
- * one file at a time.
+ * One treatment, kept in one place so the shares column and the feed's amount
+ * column cannot drift apart one file at a time.
  *
  * WHERE IT BELONGS, AND WHERE IT IS A LIE ABOUT ITSELF. A tail is a SIZE, so
  * it needs a size to step down FROM. At the 12px of a sub-line the step is a

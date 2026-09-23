@@ -188,6 +188,10 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
     projectedYearUsd: $(projected),
     vocabulary: "settlements",
     complete,
+    pricedToday: perSol !== null,
+    totalSavedSol: vault.lifetimeSaved === null ? null : formatSol(vault.lifetimeSaved),
+    settledOutsideHistory: stats.settledOutsideHistory,
+    holdingsUnreadable: !data.tokensReadable,
   };
 
   // ── the curve and the days ─────────────────────────────────────────────

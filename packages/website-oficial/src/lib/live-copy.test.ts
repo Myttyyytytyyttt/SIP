@@ -210,7 +210,7 @@ describe("the zone the page buckets money by is named", () => {
 
 describe("two different quantities never share a label", () => {
   it("the program's invested counter and the basket's market value are named apart", () => {
-    // LivePensionCard shows both at once: policy.lifetimeInvested, which only
+    // The old live card showed both at once: policy.lifetimeInvested, which only
     // invest() advances, and the leg holdings valued at today's prices. They
     // differ whenever a leg reached the vault by any other route, so a reader
     // saw "Invested so far $0.00" above "Invested $86.41".
