@@ -246,7 +246,15 @@ export function partsOf(event: VaultEventJson, labelOf: (wallet: string | null) 
         icon: mark(ArrowDownToLine),
         title: ACTIVITY_COPY.receivedSol,
         detail: ACTIVITY_COPY.receivedSub,
-        amount: amount === null ? null : `${amount} SOL`,
+        /*
+         * SIGNED, BECAUSE SOL ARRIVED. The sample signs its own deposit the
+         * same way ("+$500.00") and leaves it uncoloured, which is exactly the
+         * distinction this row needs: money came IN, and it is NOT savings.
+         * The green on this page is the SAVED accent and it means one thing —
+         * a slice the rule put aside — so a plain transfer may take the plus
+         * and must not take the colour.
+         */
+        amount: amount === null ? null : `+${amount} SOL`,
       };
     }
 
@@ -317,6 +325,20 @@ export function LiveActivityRow({
    */
   const hash = shortHex(row.signature);
   const sub = [parts.detail, clock].filter((part): part is string => part !== null && part !== "").join(" · ");
+  /*
+   * MONO IS FOR FIGURES, NOT FOR SENTENCES.
+   *
+   * The sample sets this line in the page's ordinary face and puts <Num> round
+   * each NUMBER in it — `<Num>{shares}</Num> @ <Num>{price}</Num> · {clock}`.
+   * Live wrapped the whole joined string instead, so "a plain transfer, not
+   * counted as saved" came out in a typewriter face: prose pretending to be a
+   * quantity, and the one obvious typographic difference between the two
+   * columns at a glance.
+   *
+   * `detail` is a bare quantity on some rows and a sentence on others, and only
+   * the first is a figure. The clock always is.
+   */
+  const detailIsFigure = parts.detail !== null && /^[\d.,]+$/.test(parts.detail);
 
   const label = `${parts.title}${sub === "" ? "" : ` · ${sub}`} · ${ACTIVITY_COPY.openOnSolscan} · ${hash}`;
 
@@ -338,13 +360,15 @@ export function LiveActivityRow({
             </Badge>
           ) : null}
         </span>
-        {/* Num, so the figures in it are tabular like the sample's. */}
-        {/* NO Figure HERE. The tail is a SIZE step, and this line is already
+        {/* NO Figure HERE either. Its tail is a SIZE step, and this is already
             the smallest face on the page: 0.85em of 12px is a difference
-            nobody sees, so it would be markup pretending to do something. A
-            quantity that is too long for this line is too long, full stop —
-            which is a different fix from setting it. */}
-        <Num className="block truncate text-xs text-muted-foreground">{sub}</Num>
+            nobody sees. A quantity too long for this line is too long, full
+            stop — a different fix from setting it. */}
+        <span className="block truncate text-xs text-muted-foreground">
+          {parts.detail === null || parts.detail === "" ? null : detailIsFigure ? <Num>{parts.detail}</Num> : parts.detail}
+          {parts.detail !== null && parts.detail !== "" && clock !== null ? " · " : null}
+          {clock === null ? null : <Num>{clock}</Num>}
+        </span>
         {parts.note === null ? null : <span className="block truncate text-xs text-muted-foreground">{parts.note}</span>}
       </span>
       {/* The column the sample keeps as an even ladder of "$48.62"s. Ours are

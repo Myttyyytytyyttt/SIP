@@ -94,21 +94,38 @@ function anchorOf(wallets: readonly LiveWalletView[]): string | null {
   return linked.length === 1 ? linked[0]!.address : null;
 }
 
-function WalletRow({ wallet, usdcRawPerSol, anchor }: { readonly wallet: LiveWalletView; readonly usdcRawPerSol: bigint | null; readonly anchor: boolean }) {
+/**
+ * THE MONEY HALF OF A WALLET: the balance, and what qualifies it. Shared by the
+ * flat header and the listed card so the promoted figure cannot come to mean
+ * one thing in one shape and another in the other.
+ */
+/**
+ * The pension key, with the two things that make it useful: a copy button and
+ * the explorer. `lead` is the old full-size line, for the shapes that still
+ * head the column with it; without it the same facts sit at 12px under the
+ * balance, which is where they go once the wallet owns the heading.
+ */
+function PensionKeyLine({ pensionKey, lead = false }: { readonly pensionKey: string; readonly lead?: boolean }) {
+  return (
+    <div className={cn("flex items-center gap-1", lead ? "" : "text-xs text-muted-foreground")}>
+      {lead ? null : <span>{LIVE_COPY.pensionKey}</span>}
+      <Num className={lead ? "text-sm" : "text-xs"}>{shortAddress(pensionKey)}</Num>
+      <CopyButton value={pensionKey} />
+      {/* The one account a stranger can check this whole page against. */}
+      <a href={solscanAccountUrl(pensionKey)} target="_blank" rel="noopener noreferrer" className={LINK}>
+        {LIVE_COPY.solscanAccount}
+      </a>
+    </div>
+  );
+}
+
+function WalletFigures({ wallet, usdcRawPerSol, anchor }: { readonly wallet: LiveWalletView; readonly usdcRawPerSol: bigint | null; readonly anchor: boolean }) {
   const balance = wallet.lamports === null ? null : formatSol(wallet.lamports);
   const dollars = wallet.lamports === null || usdcRawPerSol === null ? null : formatUsd(usdcRawForLamports(wallet.lamports, usdcRawPerSol));
   const settlements = wallet.settlementNonce === null ? null : LIVE_COPY.settlementCount(wallet.settlementNonce.toString());
 
   return (
-    <li className="space-y-1 rounded-md border p-2.5">
-      <div className="flex items-center justify-between gap-2">
-        <span className="truncate text-sm font-medium">{wallet.label}</span>
-        <LinkBadge wallet={wallet} />
-      </div>
-      <div className="flex items-center gap-1 text-xs text-muted-foreground">
-        <Num className="text-xs">{shortAddress(wallet.address)}</Num>
-        <CopyButton value={wallet.address} />
-      </div>
+    <>
       {anchor ? (
         /*
          * DOLLARS LEAD, SOL SITS UNDER THEM — the sample's shape, and a balance
@@ -125,10 +142,9 @@ function WalletRow({ wallet, usdcRawPerSol, anchor }: { readonly wallet: LiveWal
               it was printing the same thing twice, stacked. */}
           {dollars === null && settlements === null ? null : (
             <div className="text-xs text-muted-foreground">
-              {/* Exact, and at one weight: see LiveActivityRow — a tail that
-                  steps down 15 % of 12px steps down nowhere. This line's job
-                  is to carry the chain's own unit under the dollar figure, so
-                  it keeps every lamport of it. */}
+              {/* Exact, and at one weight: a tail that steps down 15 % of 12px
+                  steps down nowhere. This line carries the chain's own unit
+                  under the dollar, so it keeps every lamport of it. */}
               {dollars === null ? null : <Num className="text-xs">{balance === null ? LIVE_COPY.unknownFigure : `${balance} SOL`}</Num>}
               {dollars !== null && settlements !== null ? <> · </> : null}
               {settlements}
@@ -144,6 +160,22 @@ function WalletRow({ wallet, usdcRawPerSol, anchor }: { readonly wallet: LiveWal
       )}
       {/* Linked, funded below the floor: nothing can be settled from it yet. */}
       {wallet.canSettle === false && wallet.linkStatus === "this_vault" ? <p className="text-xs text-amber-700 dark:text-amber-400">{LIVE_COPY.reserveNoteShort}</p> : null}
+    </>
+  );
+}
+
+function WalletRow({ wallet, usdcRawPerSol, anchor }: { readonly wallet: LiveWalletView; readonly usdcRawPerSol: bigint | null; readonly anchor: boolean }) {
+  return (
+    <li className="space-y-1 rounded-md border p-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-sm font-medium">{wallet.label}</span>
+        <LinkBadge wallet={wallet} />
+      </div>
+      <div className="flex items-center gap-1 text-xs text-muted-foreground">
+        <Num className="text-xs">{shortAddress(wallet.address)}</Num>
+        <CopyButton value={wallet.address} />
+      </div>
+      <WalletFigures wallet={wallet} usdcRawPerSol={usdcRawPerSol} anchor={anchor} />
     </li>
   );
 }
@@ -194,6 +226,12 @@ export function LiveSidebar({
   // the feed counts what it leaves out.
   const settlements = data.settlementRows.length;
   const anchor = anchorOf(data.wallets);
+  /*
+   * THE HEADER TAKES THE SAMPLE'S SHAPE ONLY WHEN IT IS TRUE OF THE DATA: one
+   * wallet, and it is the one `anchorOf` was willing to promote. Anything else
+   * — none, several, or a balance that could not be read — keeps the list.
+   */
+  const solo = data.wallets.length === 1 && data.wallets[0]!.address === anchor ? data.wallets[0]! : null;
 
   const manage = (
     <Button type="button" variant="link" size="sm" className={MANAGE} onClick={onOpenWallets}>
@@ -205,31 +243,59 @@ export function LiveSidebar({
   return (
     <div id={id} className={cn("flex h-full flex-col bg-background", className)}>
       <div className="space-y-4 border-b p-4">
-        <div className="flex items-center justify-between gap-2">
-          <span className={LABEL}>{LIVE_COPY.pensionKey}</span>
-          {inSheet ? <SheetClose asChild>{manage}</SheetClose> : manage}
-        </div>
-        <div className="flex items-center gap-1">
-          <Num className="text-sm">{shortAddress(pensionKey)}</Num>
-          <CopyButton value={pensionKey} />
-          {/* The key is the one account a stranger can check this whole page against. */}
-          <a href={solscanAccountUrl(pensionKey)} target="_blank" rel="noopener noreferrer" className={LINK}>
-            {LIVE_COPY.solscanAccount}
-          </a>
-        </div>
+        {solo === null ? (
+          <>
+            <div className="flex items-center justify-between gap-2">
+              <span className={LABEL}>{LIVE_COPY.pensionKey}</span>
+              {inSheet ? <SheetClose asChild>{manage}</SheetClose> : manage}
+            </div>
+            <PensionKeyLine pensionKey={pensionKey} lead />
 
-        <div className="space-y-2">
-          <span className={LABEL}>{LIVE_COPY.tradingWallets}</span>
-          {data.wallets.length === 0 ? (
-            <p className="text-xs text-muted-foreground">{LIVE_COPY.noWalletsYet}</p>
-          ) : (
-            <ul className="space-y-2">
-              {data.wallets.map((wallet) => (
-                <WalletRow key={wallet.address} wallet={wallet} usdcRawPerSol={usdcRawPerSol} anchor={wallet.address === anchor} />
-              ))}
-            </ul>
-          )}
-        </div>
+            <div className="space-y-2">
+              <span className={LABEL}>{LIVE_COPY.tradingWallets}</span>
+              {data.wallets.length === 0 ? (
+                <p className="text-xs text-muted-foreground">{LIVE_COPY.noWalletsYet}</p>
+              ) : (
+                <ul className="space-y-2">
+                  {data.wallets.map((wallet) => (
+                    <WalletRow key={wallet.address} wallet={wallet} usdcRawPerSol={usdcRawPerSol} anchor={wallet.address === anchor} />
+                  ))}
+                </ul>
+              )}
+            </div>
+          </>
+        ) : (
+          /*
+           * ONE WALLET, SO THE HEADER IS THAT WALLET — the sample's own block:
+           * its name, its address, Balance, the figure. Nothing is nested and
+           * nothing is boxed, because a list of one is not a list.
+           *
+           * THE PENSION KEY DOES NOT LEAVE, IT STEPS BACK. It is the single
+           * account a stranger can check this whole page against, so it keeps
+           * its address, its copy button and its Solscan link — one 12px line
+           * under the figure instead of a heading over it. The sample has no
+           * counterpart because the sample has nothing to check.
+           *
+           * WHY THE SHAPE FOLLOWS THE DATA. The sample is typed with exactly
+           * one wallet; this reads between zero and ten, and `anchor` is null
+           * whenever promoting one of them would be a guess (two readable, none
+           * uniquely linked) or a hole ("—" at 24px). Both of those fall back
+           * to the list, which is the shape that can say "these are several".
+           */
+          <>
+            <div className="flex items-center justify-between gap-2">
+              <span className={cn(LABEL, "truncate")}>{solo.label}</span>
+              {inSheet ? <SheetClose asChild>{manage}</SheetClose> : manage}
+            </div>
+            <div className="flex items-center gap-1">
+              <Num className="text-sm">{shortAddress(solo.address)}</Num>
+              <CopyButton value={solo.address} />
+              <LinkBadge wallet={solo} />
+            </div>
+            <WalletFigures wallet={solo} usdcRawPerSol={usdcRawPerSol} anchor />
+            <PensionKeyLine pensionKey={pensionKey} />
+          </>
+        )}
       </div>
 
       <ScrollArea className={FEED}>

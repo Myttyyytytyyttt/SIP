@@ -149,3 +149,54 @@ describe("what the chain has no words for", () => {
     expect(html).not.toContain("Funded wallet");
   });
 });
+
+/**
+ * HOW THE SECOND LINE IS SET, which was the one typographic difference the two
+ * columns could be told apart by at a glance. The sample wraps each NUMBER in
+ * <Num> and leaves the sentence around it in the page's ordinary face; live
+ * wrapped the whole joined string, so prose came out in a typewriter face.
+ */
+describe("mono is for figures, not for sentences", () => {
+  it("leaves a prose sub line in the ordinary face", () => {
+    const html = render({ kind: "received_sol", lamports: "100000000" } as VaultEventJson);
+    // The disclaimer is prose and must not be set as a quantity.
+    const line = html.slice(html.indexOf(ACTIVITY_COPY.receivedSub) - 200, html.indexOf(ACTIVITY_COPY.receivedSub));
+    expect(line).not.toContain("font-mono");
+  });
+
+  it("still sets the clock as a figure, inside that line", () => {
+    const html = render({ kind: "received_sol", lamports: "100000000" } as VaultEventJson);
+    expect(html).toMatch(/<span class="font-mono tabular-nums">\d\d:\d\d UTC<\/span>/);
+  });
+
+  it("sets a bare quantity as a figure and a sentence as words, in the same slot", () => {
+    const quantity = render({ kind: "invested", mint: SPYX_MINT, symbol: "SPYx", usdcSpentRaw: "5000000", receivedRaw: "1", receivedUi: "0.4821" } as VaultEventJson);
+    expect(quantity).toContain('<span class="font-mono tabular-nums">0.4821</span>');
+  });
+});
+
+/**
+ * MONEY IN IS SIGNED; ONLY SAVINGS ARE GREEN.
+ *
+ * The sample signs its deposit "+$500.00" and leaves it uncoloured, and that is
+ * exactly the line this page needs: SOL really did arrive, and it is NOT a
+ * slice the rule put aside. The emerald accent means one thing here, and a
+ * plain transfer wearing it would make the hero's total unaccountable.
+ */
+describe("a plain transfer takes the plus and not the colour", () => {
+  it("signs a receipt", () => {
+    expect(render({ kind: "received_sol", lamports: "100000000" } as VaultEventJson)).toContain("+0.1 SOL");
+  });
+
+  it("does not paint it with the saved accent", () => {
+    const html = render({ kind: "received_sol", lamports: "100000000" } as VaultEventJson);
+    const amount = html.slice(html.indexOf("+0.1 SOL") - 200, html.indexOf("+0.1 SOL"));
+    expect(amount).not.toContain(SAVED);
+  });
+
+  it("and the settlement, which IS savings, keeps both", () => {
+    const html = render(settled("60000000"));
+    expect(html).toContain(SAVED);
+    expect(html).toMatch(/\+0\.06/);
+  });
+});
