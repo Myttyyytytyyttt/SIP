@@ -457,8 +457,10 @@ en cada barrida (lo de siempre). No puede dejar a nadie sin cobrar; como mucho, 
   1000–3000, `webhook.managed: true`, `webhook.active: true`, y `webhook.addresses` = wallets + vaults enlazadas.
 - `lanes` dice a quién giró la última barrida y por qué (`bell` sonó, `busy` tenía algo pendiente, `new` es nueva o
   aún no está en el webhook, `safety` es la ronda de seguridad).
-- `possibleMisses` debería quedarse en 0. Si sube, Helius se saltó a alguien y la ronda de seguridad lo pilló:
-  avísame con la hora.
+- `possibleMisses` cuenta las veces que la ronda de seguridad encontró trabajo que el timbre no había anunciado. Con
+  50 usuarios o menos puede subir de vez en cuando sin que Helius falle: la ronda gira a todos cada minuto y a veces
+  ve una operación en los 1–3 s antes de que llegue su aviso. Solo es mala señal si sube a menudo mientras
+  `eventsReceived` se queda quieto: entonces avísame con la hora.
 - `eventsRejected` cuenta llamadas con un secreto equivocado. Nunca aparece ni el secreto ni la clave de Helius.
 
 Dos alertas nuevas, las dos de aviso (solo llegan a Telegram si `SIP_SOLANA_ALERT_MIN_SEVERITY=warn`):
