@@ -22,6 +22,7 @@
  */
 
 import { AssetMark } from "@/components/live/AssetMark";
+import { Figure } from "@/components/live/Figure";
 import { NATIVE_SOL } from "@/lib/asset-art";
 import { Num } from "@/components/num";
 import { Progress } from "@/components/ui/progress";
@@ -44,6 +45,19 @@ import { cn } from "@/lib/utils";
  * back.
  */
 const sharesOf = (row: LiveHoldingRow): string => (row.kind === "sol" ? formatSol(row.amountRaw) : (row.uiAmount ?? "—"));
+
+/**
+ * The Shares cell. The sample's column is an even ladder because its figures
+ * are `shares()` — Intl over a JS number, at most four decimals — and that
+ * helper cannot come over: Number("0.1241643") on a scaledUiAmount mint is the
+ * float error amounts.ts exists to prevent. So the ladder is made the other
+ * way, by SETTING the figure rather than by shortening it: four decimals at
+ * full size, the rest one step down, nothing dropped.
+ */
+function Shares({ row }: { readonly row: LiveHoldingRow }) {
+  const text = sharesOf(row);
+  return text === "—" ? <>{text}</> : <Figure>{text}</Figure>;
+}
 
 export function LiveHoldings({
   holdings,
@@ -137,7 +151,9 @@ export function LiveHoldings({
                     </span>
                   </span>
                 </TableCell>
-                <TableCell className={cn(MONO, "hidden text-right sm:table-cell")}>{sharesOf(row)}</TableCell>
+                <TableCell className={cn(MONO, "hidden text-right sm:table-cell")}>
+                  <Shares row={row} />
+                </TableCell>
                 <TableCell className={cn(MONO, "text-right")}>{row.valueUsdcRaw === null ? "—" : formatUsd(row.valueUsdcRaw)}</TableCell>
                 <TableCell className="text-right">
                   {/* SOL, wSOL and USDC are not in the basket, so they have no

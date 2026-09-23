@@ -48,6 +48,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 
+import { Figure } from "@/components/live/Figure";
 import { Num } from "@/components/num";
 import { Badge } from "@/components/ui/badge";
 import { formatSol, formatUsd, rawFrom } from "@/lib/amounts";
@@ -316,6 +317,7 @@ export function LiveActivityRow({
    */
   const hash = shortHex(row.signature);
   const sub = [parts.detail, clock].filter((part): part is string => part !== null && part !== "").join(" · ");
+
   const label = `${parts.title}${sub === "" ? "" : ` · ${sub}`} · ${ACTIVITY_COPY.openOnSolscan} · ${hash}`;
 
   const className = cn(
@@ -337,10 +339,22 @@ export function LiveActivityRow({
           ) : null}
         </span>
         {/* Num, so the figures in it are tabular like the sample's. */}
+        {/* NO Figure HERE. The tail is a SIZE step, and this line is already
+            the smallest face on the page: 0.85em of 12px is a difference
+            nobody sees, so it would be markup pretending to do something. A
+            quantity that is too long for this line is too long, full stop —
+            which is a different fix from setting it. */}
         <Num className="block truncate text-xs text-muted-foreground">{sub}</Num>
         {parts.note === null ? null : <span className="block truncate text-xs text-muted-foreground">{parts.note}</span>}
       </span>
-      {parts.amount === null ? null : <Num className={cn("shrink-0 text-right text-sm", parts.failed ? "text-muted-foreground" : parts.amountClass)}>{parts.amount}</Num>}
+      {/* The column the sample keeps as an even ladder of "$48.62"s. Ours are
+          nine-decimal lamports, so the digits past the fourth step down and the
+          eye gets a ladder back without a single digit leaving the page. */}
+      {parts.amount === null ? null : (
+        <Num className={cn("shrink-0 text-right text-sm", parts.failed ? "text-muted-foreground" : parts.amountClass)}>
+          <Figure>{parts.amount}</Figure>
+        </Num>
+      )}
     </>
   );
 

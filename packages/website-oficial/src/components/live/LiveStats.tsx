@@ -35,6 +35,7 @@
 
 import type { ReactNode } from "react";
 
+import { Figure } from "@/components/live/Figure";
 import { Num } from "@/components/num";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatSol, formatUsd, usdcRawForLamports } from "@/lib/amounts";
@@ -113,7 +114,10 @@ export function LiveStats({
         label: STATS_COPY.biggest,
         value: (
           <>
-            <Num>{formatSol(stats.biggestPaid)}</Num> <Word>SOL</Word>
+            <Num>
+              <Figure>{formatSol(stats.biggestPaid)}</Figure>
+            </Num>{" "}
+            <Word>SOL</Word>
           </>
         ),
         // The maximum over the PAGES LOADED. Without this line it reads as a
@@ -157,7 +161,10 @@ export function LiveStats({
       label: STATS_COPY.thisWeek,
       value: (
         <>
-          <Num>{formatSol(stats.savedThisWeekLamports)}</Num> <Word>SOL</Word>
+          <Num>
+            <Figure>{formatSol(stats.savedThisWeekLamports)}</Figure>
+          </Num>{" "}
+          <Word>SOL</Word>
         </>
       ),
       sub: perSol === null ? "" : STATS_COPY.windowAbout(formatUsd(usdcRawForLamports(stats.savedThisWeekLamports, perSol))),

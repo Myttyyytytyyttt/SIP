@@ -125,6 +125,10 @@ function WalletRow({ wallet, usdcRawPerSol, anchor }: { readonly wallet: LiveWal
               it was printing the same thing twice, stacked. */}
           {dollars === null && settlements === null ? null : (
             <div className="text-xs text-muted-foreground">
+              {/* Exact, and at one weight: see LiveActivityRow — a tail that
+                  steps down 15 % of 12px steps down nowhere. This line's job
+                  is to carry the chain's own unit under the dollar figure, so
+                  it keeps every lamport of it. */}
               {dollars === null ? null : <Num className="text-xs">{balance === null ? LIVE_COPY.unknownFigure : `${balance} SOL`}</Num>}
               {dollars !== null && settlements !== null ? <> · </> : null}
               {settlements}

@@ -13,6 +13,16 @@ import type { LiveDashboard } from "@/lib/live-types";
 
 import { liveDashboard, liveSnapshot, tokenAccount } from "../../../test/fixtures/live-dashboard";
 
+/**
+ * WHAT A PERSON READS, not what React wrote. A shares figure is set in two
+ * spans now — four decimals at full size, the rest one step down — so a digit
+ * of it is real, on the page and checkable, but it no longer sits in the
+ * markup as one unbroken run. Asserting on the visible text is the stronger
+ * statement anyway: it is what somebody comparing this row against Solscan
+ * actually sees.
+ */
+const seen = (html: string): string => html.replace(/<[^>]*>/g, "");
+
 function render(data: LiveDashboard): string {
   return renderToStaticMarkup(
     createElement(LiveHoldings, {
@@ -29,10 +39,10 @@ function render(data: LiveDashboard): string {
 describe("shares and value come from different places, on purpose", () => {
   it("shows SPYx's shares as the RPC wrote them, never recomputed from raw units", () => {
     const html = render(liveDashboard());
-    // The scaled display amount…
-    expect(html).toContain("0.1241643");
+    // The scaled display amount, every digit of it…
+    expect(seen(html)).toContain("0.1241643");
     // …and NOT amountRaw / 10^decimals, which is what recomputing would give.
-    expect(html).not.toContain("0.11345678");
+    expect(seen(html)).not.toContain("0.11345678");
   });
 
   it("values SPYx from its raw units at the pool rate: 11,345,678 x 761,709,474 / 1e8", () => {
@@ -49,7 +59,7 @@ describe("a dollar column that cannot be trusted is not shown at all", () => {
     expect(html).not.toContain("$86.42");
     expect(html).not.toContain("$20.00");
     // The amounts themselves are still known, and still shown.
-    expect(html).toContain("0.1241643");
+    expect(seen(html)).toContain("0.1241643");
   });
 
   it("says the tokens could not be read, rather than showing a vault holding nothing", () => {

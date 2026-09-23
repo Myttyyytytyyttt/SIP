@@ -26,11 +26,12 @@
  * keep. "Today" is the entry that survives, in the sample's own markup.
  */
 
+import { Figure } from "@/components/live/Figure";
 import { LiveHoldings } from "@/components/live/LiveHoldings";
 import { LiveSavedChart } from "@/components/live/LiveSavedChart";
 import { LiveStats } from "@/components/live/LiveStats";
 import { Card, CardContent, CardDescription, CardHeader } from "@/components/ui/card";
-import { formatSol, formatUsd, rawFrom, splitDecimal, usdcRawForLamports } from "@/lib/amounts";
+import { formatSol, formatUsd, rawFrom, usdcRawForLamports } from "@/lib/amounts";
 import { LABEL, SAVED } from "@/lib/classes";
 import { dateLabel } from "@/lib/format";
 import { LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
@@ -64,10 +65,6 @@ export function LivePensionCard({
    * when the total was unreadable was "≈ $0.00", under a dash.
    */
   const usdNow = vault.lifetimeSaved === null || perSol === null ? null : usdcRawForLamports(vault.lifetimeSaved, perSol);
-  // Nine decimals all at 48px is a wall of digits with no figure in it. The
-  // tail steps down in SIZE only — muting real digits would read as a rounding,
-  // and on this page every digit is one the chain actually holds.
-  const [head, tail] = splitDecimal(formatSol(saved));
 
   const savedToday = stats.savedTodayLamports !== null && stats.savedTodayLamports > 0n;
 
@@ -109,8 +106,12 @@ export function LivePensionCard({
             // still known, so it leads rather than a dash — and it is already
             // the SOL, so there is no valuation to qualify.
             <p className="font-mono font-semibold tracking-tight tabular-nums">
-              <span className="text-4xl sm:text-5xl">{head}</span>
-              {tail === "" ? null : <span className="text-2xl sm:text-3xl">{tail}</span>}
+              {/* Nine decimals all at 48px is a wall of digits with no figure
+                  in it. Same device as the tiles and the holdings, one step
+                  wider because there is more size here to step down from. */}
+              <Figure className="text-4xl sm:text-5xl" tailClassName="text-2xl sm:text-3xl">
+                {formatSol(saved)}
+              </Figure>
               <span className="ml-2 text-2xl font-normal text-muted-foreground sm:text-3xl">SOL</span>
             </p>
           )}
