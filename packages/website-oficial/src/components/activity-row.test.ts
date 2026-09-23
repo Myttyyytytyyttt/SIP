@@ -1,10 +1,12 @@
-// The feed's colours (owner, 09-23): four and no others. Green for money coming
-// in — a slice the rule put aside, SOL that arrived; blue for the pension buying
-// what it holds; mustard for the machinery and every change to it; red, kept
-// rare, for what did not land. The tint sits on the icon's square and on the
-// amount — never on the words, so a row reads the same to someone who cannot
-// tell the colours apart. Behind the glyph, faintly, the marks of what the
-// transaction touched.
+// The feed's colours (owner, 09-23). Green for money coming in — a slice the
+// rule put aside, SOL that arrived; blue for the pension buying what it holds;
+// mustard ONLY for a change to how the pension behaves (a rule, a policy, a
+// link, the vault itself); grey for the system doing its job (a conversion, a
+// wrap, the keeper's upkeep, a settlement that found nothing); red, kept rare,
+// for what did not land. The tint sits on the icon's square and on the amount —
+// never on the words, so a row reads the same to someone who cannot tell the
+// colours apart. Behind the glyph, faintly, the marks of what the transaction
+// touched.
 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -35,10 +37,16 @@ describe("what happened, by colour", () => {
     expect(html).toContain("+$4.38");
   });
 
-  it("paints a settlement that moved nothing mustard, not green: green means money put aside", () => {
-    const html = tile(render({ ...BASE, kind: "saved", from: "Trading wallet 1", basis: "25 % of $0.00 profit", savedUsd: 0 }));
-    expect(html).toContain("amber");
-    expect(html).not.toContain("emerald");
+  it("leaves a settlement that moved nothing grey: green means money put aside", () => {
+    const html = render({ ...BASE, kind: "saved", from: "Trading wallet 1", basis: "25 % of $0.00 profit", savedUsd: 0 });
+    expect(tile(html)).toContain("bg-muted");
+    expect(tile(html)).not.toContain("emerald");
+    expect(html).toMatch(/text-muted-foreground">\+?\$0\.00</);
+  });
+
+  it("leaves a sample fill that put nothing aside grey too", () => {
+    const html = tile(render({ ...BASE, kind: "trade", tradeId: "t1", side: "buy", symbol: "SOL", notionalUsd: 100, savedUsd: 0, rateBps: 2_000 }));
+    expect(html).toContain("bg-muted");
   });
 
   it("paints SOL that arrived green: money coming in", () => {
@@ -53,9 +61,21 @@ describe("what happened, by colour", () => {
     expect(html).toMatch(/text-blue-600[^"]*">\$5\.88</);
   });
 
-  it("paints the machinery, every change to it and the keeper's upkeep mustard", () => {
-    for (const icon of ["convert", "wrap", "rule", "policy", "link", "unlink", "withdraw", "vault", "upkeep", "other"] as const) {
-      expect(tile(render(other(icon))), icon).toContain("amber");
+  it("paints a change to how the pension behaves mustard, and only that", () => {
+    for (const icon of ["rule", "policy", "link", "unlink", "vault"] as const) {
+      const html = render(other(icon));
+      expect(tile(html), icon).toContain("amber");
+      expect(html, icon).toMatch(/text-amber-700[^"]*">\$1\.00</);
+    }
+  });
+
+  it("leaves the system doing its job grey: conversions, wraps, withdrawals, upkeep", () => {
+    for (const icon of ["convert", "wrap", "withdraw", "upkeep", "other"] as const) {
+      const html = render(other(icon));
+      expect(tile(html), icon).toContain("bg-muted");
+      expect(tile(html), icon).not.toContain("amber");
+      // Muted, never the page's ink: plain white would be the loudest figure in a dark column.
+      expect(html, icon).toMatch(/text-muted-foreground">\$1\.00</);
     }
   });
 
@@ -64,7 +84,7 @@ describe("what happened, by colour", () => {
     expect(tile(render(other("convert", { failed: true })))).toContain("destructive");
   });
 
-  it("uses four colours and no grey square", () => {
+  it("uses those five tones and no others", () => {
     const events: ActivityEvent[] = [
       { ...BASE, kind: "saved", from: "w", basis: "b", savedUsd: 0 },
       { ...BASE, kind: "saved", from: "w", basis: "b", savedUsd: 1 },
@@ -74,8 +94,7 @@ describe("what happened, by colour", () => {
     ];
     for (const event of events) {
       const cls = tile(render(event));
-      expect(cls, event.kind).not.toContain("bg-muted");
-      expect(/emerald|blue|amber|destructive/.test(cls), `${event.kind}: ${cls}`).toBe(true);
+      expect(/emerald|blue|amber|bg-muted|destructive/.test(cls), `${event.kind}: ${cls}`).toBe(true);
     }
   });
 

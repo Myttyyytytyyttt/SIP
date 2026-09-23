@@ -50,15 +50,18 @@ const mark = (symbol: string, logo: string | undefined, size: number): ReactNode
 );
 
 /**
- * WHAT KIND OF THING HAPPENED, AT A GLANCE — four colours and no others
- * (owner, 09-23):
+ * WHAT KIND OF THING HAPPENED, AT A GLANCE (owner, 09-23):
  *
  *   saved    green   money coming in — a slice the rule put aside (from gains
  *                    or from volume), and SOL that simply arrived;
  *   invest   blue    the pension buying what it holds;
- *   notice   mustard the machinery and every change to it — a conversion, a
- *                    wrap, a new rule or policy, a link, a withdrawal, the
- *                    keeper's upkeep, a settlement that found nothing to take;
+ *   setting  mustard a change to how the pension behaves, and only that — a
+ *                    new rule, a signed policy, a wallet linked or unlinked,
+ *                    the vault itself created;
+ *   quiet    grey    the system doing its job — a conversion, a wrap, the
+ *                    keeper's upkeep, a settlement that found nothing to take,
+ *                    a withdrawal whose minus sign already says it. Correct
+ *                    and expected, so it steps back and lets the rest be seen;
  *   failed   red     kept rare on purpose: a transaction that did not land, or
  *                    one nobody could read. Red that shows up every day stops
  *                    meaning anything.
@@ -66,19 +69,23 @@ const mark = (symbol: string, logo: string | undefined, size: number): ReactNode
  * The tint is on the icon's square and on the amount, never on the words: the
  * row still reads the same in any colour, and nothing is said only by hue.
  */
-type Tone = "saved" | "invest" | "notice" | "failed";
+type Tone = "saved" | "invest" | "setting" | "quiet" | "failed";
 
 const TILE: Readonly<Record<Tone, string>> = {
   saved: "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400",
   invest: "bg-blue-500/12 text-blue-600 dark:text-blue-400",
-  notice: "bg-amber-500/12 text-amber-700 dark:text-amber-400",
+  setting: "bg-amber-500/12 text-amber-700 dark:text-amber-400",
+  quiet: "bg-muted text-muted-foreground",
   failed: "bg-destructive/10 text-destructive",
 };
 
-const AMOUNT: Readonly<Record<Tone, string | undefined>> = {
+const AMOUNT: Readonly<Record<Tone, string>> = {
   saved: SAVED,
   invest: "text-blue-600 dark:text-blue-400",
-  notice: "text-amber-700 dark:text-amber-400",
+  setting: "text-amber-700 dark:text-amber-400",
+  // Muted, not the page's ink: in the dark theme plain white would be the
+  // loudest figure in the column, on the rows that matter least.
+  quiet: "text-muted-foreground",
   failed: "text-destructive",
 };
 
@@ -113,21 +120,23 @@ function BackdropArt({ art }: { readonly art: Backdrop }) {
   );
 }
 
-/** What each `other` row is, by its glyph: money in is green, the machinery is a notice, a failure is a failure. */
+/** What each `other` row is, by its glyph: money in is green, a setting is mustard, the machinery is quiet, a failure is a failure. */
 const TONE_OF_OTHER: Readonly<Record<OtherEvent["icon"], Tone>> = {
-  wrap: "notice",
-  convert: "notice",
-  withdraw: "notice",
-  vault: "notice",
-  rule: "notice",
-  policy: "notice",
-  link: "notice",
-  unlink: "notice",
+  // A change to how the pension behaves.
+  vault: "setting",
+  rule: "setting",
+  policy: "setting",
+  link: "setting",
+  unlink: "setting",
+  // The system doing its job.
+  wrap: "quiet",
+  convert: "quiet",
+  withdraw: "quiet",
+  upkeep: "quiet",
+  other: "quiet",
   // Money coming in, like a slice put aside — though never counted as one.
   receive: "saved",
   failed: "failed",
-  upkeep: "notice",
-  other: "notice",
 };
 
 interface RowParts {
@@ -168,13 +177,13 @@ function parts(event: ActivityEvent): RowParts {
       // and the accent means money put aside — so that row reads muted "$0.00" on both surfaces.
       const saved = event.savedUsd > 0;
       return {
-        tone: saved ? "saved" : "notice",
+        tone: saved ? "saved" : "quiet",
         leading: mark(event.symbol, undefined, 20),
         title: fillLabel(event.side, event.symbol),
         sub: joined(<Num>{usd(event.notionalUsd)}</Num>),
         // The slice is the row's number — it is what the product does; the size sits in the sub line.
         amount: usdSigned(event.savedUsd),
-        amountClass: saved ? SAVED : "text-muted-foreground",
+        amountClass: AMOUNT[saved ? "saved" : "quiet"],
       };
     }
     case "invested":
@@ -214,12 +223,12 @@ function parts(event: ActivityEvent): RowParts {
       // slice put aside. It carries the accent only when something moved.
       const saved = event.savedUsd !== null && event.savedUsd > 0;
       return {
-        tone: saved ? "saved" : "notice",
+        tone: saved ? "saved" : "quiet",
         leading: mark("SOL", event.logo, 20),
         title: event.title ?? `Saved from ${event.from}`,
         sub: joined(event.basis),
         amount: usdSigned(event.savedUsd),
-        amountClass: saved ? SAVED : "text-muted-foreground",
+        amountClass: AMOUNT[saved ? "saved" : "quiet"],
         ...(event.note === undefined ? {} : { note: event.note }),
       };
     }
