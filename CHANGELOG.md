@@ -10,6 +10,126 @@ line is not.
 
 ---
 
+## 2026-09-23
+
+*Partial: written at 06:00 Lisbon from the work up to then. The next run extends this section
+rather than adding a second one.*
+
+A night spent on two questions: how many users the keeper can carry, and making the live
+page *be* the sample page rather than resemble it. 11 commits across two sessions by dawn.
+
+**The decision.** After several rounds of restyling live to look like the sample, the owner
+changed the approach: "cojas y mires el codigo de mock exactamente como esta y lo copies a
+LIVE pero lo cableas correctamente en todo" — take the sample's own component files as they
+are and feed them real data. He also chose that the sample's controls should *do* what they
+say, which means each one becomes a signature by the pension key.
+
+**Web — live is now the sample's components with chain data (five phases)**
+
+- An adapter turns the live dashboard into the sample's data contract, in dollars at today's
+  price `2f30360`. Where a real pension can't know something (an unread price, a window the
+  loaded history doesn't cover) the field is `null` and prints as a dash, never `$0`. Where
+  the sample counts something the chain doesn't record, the tile says what the real
+  equivalent is — settlements where the sample says trades.
+- The big panel `1771cd5`, the strip of settlement chips `c9ddb70`, the rule card `4b4b6ae`
+  and the wallet column `c740cbd` are each now the sample's own file. The old live-only
+  components are deleted; the rules they enforced moved into tests on the new ones. Each
+  phase was checked against the sample page and changed 0 pixels of it.
+- **The rule card signs.** Changing the rate or pausing sends `set_policy_v2`; changing the
+  threshold sends `set_invest_policy` with only the minimum changed, carrying the stored
+  caps, basket and `enabled` flag so a paused investment can't be silently resumed
+  `4b4b6ae`. The card and the wallets modal share one signing lock, so nothing can be signed
+  twice by two screens. **Verified on mainnet:** the owner changed his vault from 20 % to
+  25 % of profit from this card at 04:52Z
+  ([`4X6uaSry…`](https://solscan.io/tx/4X6uaSryqBgGHudJQCdtkxd7CFi3wRKBaii3nXhhMQwKL7eNqGvA9oCAcPfW3ZkhkRFhjpWP4boKHh13zMSVd1RK));
+  the vault account now stores `skim_bps = 2500`.
+- Before the switch, the old panel was tightened: long figures shrink their tail instead of
+  being cut `4d3478f`, and a single wallet becomes the column's header instead of a list of
+  one `df8ae05` `8ae9c9d`.
+
+**Keeper — measuring the user ceiling instead of guessing it**
+
+- The sweep now reports what it costs on `/status`: skipped sweeps (warned on the first,
+  critical on the third in a row), sweep duration p50/p90, links discovered vs. actually
+  looked at, per-phase timings, which RPC endpoint is answering (by index — URLs carry API
+  keys and `/status` is public) and Jupiter calls per sweep `5d7e72c`. A skipped sweep used to
+  be one log line; it once stalled settlement for hours unnoticed. **Deployed and visible on
+  the live `/status` this morning.**
+- A bench boots the *real* keeper against a fake Solana RPC over a synthetic fleet, so the
+  ceiling can be measured before the users exist `c6e38d8`. Nothing in the money path moved,
+  and the bench refuses any request that leaves the loopback.
+- Its first headline (~99 users at the public endpoint's latency) was too flattering, and was
+  corrected the same night `121d62d` after an adversarial review found three ways it overstated
+  production: it mixed fleets with different shares of active traders, priced active users on
+  their reads only, and treated a rate limit as a slowdown when it is a refusal. The corrected
+  ceiling is a curve — at most 97 wallets when 2 % trade in a minute, 54 when 20 % do — and a
+  sweep that exceeds the RPC plan's requests per second gets no ceiling at all. These are
+  still numbers from a laptop, not from Railway, and the runbook says so.
+
+**In progress:** the owner asked (05:00) for colour-coded events, the SaverFi logo in the
+navbar, the pension key removed from the column, and a layout that fits without scrolling.
+That work is uncommitted at the time of writing.
+
+---
+
+## 2026-09-22
+
+The day the Jupiter move reached mainnet, a two-stock basket bought both its legs for real,
+and the owner's own basket became editable after he had signed it. 19 commits across four
+sessions.
+
+**On-chain — the aggregator route, proven with real money**
+
+- The Jupiter branch was merged to main `e54199c`, and it also fixed the keeper image that
+  Railway had failed to build that morning: the Dockerfile copied two `solana-core` files but
+  none of the six they import. A follow-up `2ff2863` fixed the guard itself, which read
+  `tsconfig` but ignored `.dockerignore` and died in the image on a directory Docker never
+  sends.
+- The owner re-signed his policy onto Jupiter (19:05Z) and sent $5; the vault wrapped,
+  converted and bought SPYx through Jupiter → Orca Whirlpool within three minutes.
+- **The first PreStocks purchase.** After the owner signed a new SPYx + ANTHROPIC basket
+  (20:53Z), the next deposit bought *both* legs through Jupiter at 21:16Z — each leg on its own
+  venue ([`2w5Uwo6X…`](https://solscan.io/tx/2w5Uwo6XonpG8s1epuoHtbPF7V5pnjNXDK6jch2k5pJDXmu9dyKYT1rFGFy9XiffTr7Lw8JZENfipYvXwF4h8SRS)
+  SPYx, [`43S4uAxY…`](https://solscan.io/tx/43S4uAxYbAUQApfwBkybtG3DLMMeoXsPqrg3qYhTRWCiBqCnQTPupcwmYn7d6vtPf2TQ4gUHLCQcLnzT47LBh12C)
+  ANTHROPIC). Verified by reading the vault's token accounts.
+- When the keeper seemed stuck after that deposit, the owner moved it onto three RPC
+  endpoints with failover, the public one last.
+
+**Web — the owner could not sign, then could not edit**
+
+- The owner could not re-sign his own policy: the browser asked to create an account for
+  ANTHROPIC, a stock his basket no longer held, and the program refused the whole signature.
+  The same mistake sat on both sides of the wire — the web's list `5a3c73a` and the server's
+  build handler `8846cb7` — and the first fix passed every test unchanged while fixing nothing
+  he could see. His exact position is now a test on each side `1695885`.
+- The basket picker existed but was unreachable for anyone who had already signed: the card
+  sent them to a summary whose two buttons both re-signed what was stored `2f5f337`. The same
+  form now opens on the chain's values; a stored share that isn't a whole percent is refused
+  rather than rounded, and a paused policy stays paused. Six more repairs followed `15cacd3`,
+  including a policy that could never buy being told a threshold at which it would.
+- Live took the sample's presentation with the chain's numbers `b58e717` `0122578` `50a84e2`
+  `d3a9362`. The rule that came out of it: a **balance** at today's price may lead in dollars;
+  a **window sum** ("saved this week") may not, because nobody stored the price at each
+  moment; and the curve is never in dollars.
+- The live panel had looked half-built because the settlement never reached it — settlements
+  live on the wallet's link, not in the vault's noise `9c2381b`.
+- Every asset now has its own mark `616ce9d` `1cb2840`. The eight PreStocks images are the ones
+  the issuer publishes for each mint (read from the Token-2022 metadata, not found by search),
+  and each carries a small PreStocks or xStocks badge — **owner's call**: the company is the
+  face, the issuer is the corner mark, because the issuer decides what can happen to the token.
+- The settlement strip shows three decimals with the SOL mark and "Profit: 20%" / "Volume: 2%"
+  in words `7819c80`; the rule card lost its threshold figure and gained a single gear that
+  opens every change `967dbf8` — both as the owner asked that evening.
+
+**Process**
+
+- A daily digest script and this changelog began `aa860be` `8f22560`.
+- The owner asked for a full resilience audit of the keeper. It reported (among others) that
+  nothing outside the process ever asks `/health`, so a wedged keeper would go unnoticed; that
+  finding is not fixed yet.
+
+---
+
 ## 2026-09-21
 
 The day the product stopped being two frozen stocks bought through one pool, and became a
