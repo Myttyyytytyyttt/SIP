@@ -495,3 +495,107 @@ describe("the alert destination", () => {
     );
   });
 });
+
+// THE DOORBELL (src/doorbell.ts): three optional settings, none of which can
+// stop the money keeper, and two of which are credentials for public routes.
+describe("the doorbell's settings", () => {
+  const DOORBELL_SECRET = "a5f0c1d2e3b4a5f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+  const HELIUS_RPC = "https://mainnet.helius-rpc.com/?api-key=HeliusRpcKeyNeverServed42";
+
+  it("is off by default and warns about nothing", () => {
+    const config = loadConfig(armed(), new Redactor());
+    expect(config.doorbellSecret).toBeNull();
+    expect(config.heliusApiKey).toBeNull();
+    expect(config.heliusApiKeySource).toBe("none");
+    expect(config.doorbellUrl).toBeNull();
+    expect(config.warnings).toEqual([]);
+  });
+
+  it("takes a secret of 32 characters or more, registers it, and never serializes it", () => {
+    const redactor = new Redactor();
+    const config = loadConfig(armed({ SIP_SOLANA_DOORBELL_SECRET: `${DOORBELL_SECRET}\n` }), redactor);
+    expect(config.doorbellSecret?.reveal()).toBe(DOORBELL_SECRET);
+    expect(config.warnings).toEqual([]);
+    expect(redactor.scrub(`Authorization: ${DOORBELL_SECRET}`)).not.toContain(DOORBELL_SECRET);
+    expect(JSON.stringify(config)).not.toContain(DOORBELL_SECRET);
+    expect(inspect(config, { depth: 8 })).not.toContain(DOORBELL_SECRET);
+    expect(JSON.parse(JSON.stringify(config)).doorbell).toBe(true);
+  });
+
+  it("switches the doorbell OFF for a short secret and warns — it never refuses to start", () => {
+    const short = "short-doorbell-secret-31-chars!";
+    expect(short).toHaveLength(31);
+    const redactor = new Redactor();
+    const config = loadConfig(armed({ SIP_SOLANA_DOORBELL_SECRET: short }), redactor);
+    expect(config.doorbellSecret).toBeNull();
+    expect(config.armed).toBe(true);
+    expect(config.warnings.join(" ")).toContain("SIP_SOLANA_DOORBELL_SECRET");
+    expect(config.warnings.join(" ")).toContain("OFF");
+    // A secret too short to use is still a secret.
+    expect(config.warnings.join(" ")).not.toContain(short);
+    expect(redactor.scrub(short)).not.toContain(short);
+  });
+
+  it("derives the Helius API key from a helius-rpc.com endpoint, and reports only where it came from", () => {
+    const redactor = new Redactor();
+    const config = loadConfig(armed({ SIP_SOLANA_RPC_URLS: `https://rpc.example.test/,${HELIUS_RPC}` }), redactor);
+    expect(config.heliusApiKeySource).toBe("rpc-url");
+    expect(config.heliusApiKey?.reveal()).toBe("HeliusRpcKeyNeverServed42");
+    // The bare key is a needle of its own: the webhook API carries it in another
+    // URL, under another path, and an error there can quote the key alone.
+    expect(redactor.scrub('{"error":"invalid api key HeliusRpcKeyNeverServed42"}')).not.toContain("HeliusRpcKeyNeverServed42");
+    const served = JSON.stringify(config);
+    expect(served).not.toContain("HeliusRpcKeyNeverServed42");
+    expect(JSON.parse(served).heliusApiKeySource).toBe("rpc-url");
+  });
+
+  it("reads a key from a lookalike host as nobody's, and prefers SIP_SOLANA_HELIUS_API_KEY when it is set", () => {
+    const lookalike = loadConfig(
+      armed({ SIP_SOLANA_RPC_URLS: "https://mainnet.helius-rpc.com.evil.example.test/?api-key=NotHeliusAtAll123" }),
+      new Redactor(),
+    );
+    expect(lookalike.heliusApiKeySource).toBe("none");
+    expect(lookalike.heliusApiKey).toBeNull();
+
+    const redactor = new Redactor();
+    const config = loadConfig(armed({ SIP_SOLANA_RPC_URLS: HELIUS_RPC, SIP_SOLANA_HELIUS_API_KEY: "ExplicitHeliusKey0099" }), redactor);
+    expect(config.heliusApiKeySource).toBe("env");
+    expect(config.heliusApiKey?.reveal()).toBe("ExplicitHeliusKey0099");
+    expect(redactor.scrub("ExplicitHeliusKey0099")).not.toContain("ExplicitHeliusKey0099");
+    expect(config.warnings).toEqual([]);
+  });
+
+  it("defaults the receiver URL to Railway's public domain, takes an explicit https one, and warns on anything else", () => {
+    expect(loadConfig(armed({ RAILWAY_PUBLIC_DOMAIN: "keeper.up.railway.app" }), new Redactor()).doorbellUrl).toBe(
+      "https://keeper.up.railway.app/hooks/helius",
+    );
+    expect(
+      loadConfig(armed({ RAILWAY_PUBLIC_DOMAIN: "keeper.up.railway.app", SIP_SOLANA_DOORBELL_URL: "https://hooks.example.test/hooks/helius" }), new Redactor())
+        .doorbellUrl,
+    ).toBe("https://hooks.example.test/hooks/helius");
+    const plain = loadConfig(armed({ SIP_SOLANA_DOORBELL_URL: "http://hooks.example.test/hooks/helius" }), new Redactor());
+    expect(plain.doorbellUrl).toBeNull();
+    expect(plain.armed).toBe(true);
+    expect(plain.warnings.join(" ")).toContain("SIP_SOLANA_DOORBELL_URL");
+  });
+
+  it("lists every doorbell name, and the alert severity, as names it reads", () => {
+    const config = loadConfig(
+      armed({
+        SIP_SOLANA_DOORBELL_SECRET: DOORBELL_SECRET,
+        SIP_SOLANA_HELIUS_API_KEY: "ExplicitHeliusKey0099",
+        SIP_SOLANA_DOORBELL_URL: "https://hooks.example.test/hooks/helius",
+        SIP_SOLANA_ALERT_MIN_SEVERITY: "warn",
+      }),
+      new Redactor(),
+    );
+    expect(config.warnings).toEqual([]);
+  });
+
+  it("reads the doorbell in a dry run too, and still no signing secret", () => {
+    const { env, reads } = recording(dry({ SIP_SOLANA_DOORBELL_SECRET: DOORBELL_SECRET, SIP_SOLANA_SETTLE_KEY: SETTLE_KEY }));
+    const config = loadConfig(env, new Redactor());
+    expect(config.doorbellSecret).not.toBeNull();
+    for (const name of SIGNING_SECRET_VARS) expect(reads.has(name)).toBe(false);
+  });
+});

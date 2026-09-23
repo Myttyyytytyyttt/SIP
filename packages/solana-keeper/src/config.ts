@@ -76,8 +76,34 @@ const KNOWN_SIP_SOLANA_VARS = new Set<string>([
   "SIP_SOLANA_PRIVY_APP_ID",
   "SIP_SOLANA_PRIVY_SIGNER_ID",
   "SIP_SOLANA_PRIVY_POLICY_ID",
+  // READ SINCE THE ALERT LADDER WAS SPLIT BY SEVERITY, AND NEVER LISTED HERE: an
+  // operator who set it was told it was "not a variable this keeper reads" on
+  // every boot, while it was in fact deciding who gets woken.
+  "SIP_SOLANA_ALERT_MIN_SEVERITY",
+  // THE DOORBELL (src/doorbell.ts). Readable in a dry run, like the alert
+  // webhook: none of them can sign, and a dry run still answers the receiver.
+  "SIP_SOLANA_DOORBELL_SECRET",
+  "SIP_SOLANA_HELIUS_API_KEY",
+  "SIP_SOLANA_DOORBELL_URL",
   ...SIGNING_SECRET_VARS,
 ]);
+
+/**
+ * The shortest SIP_SOLANA_DOORBELL_SECRET that switches the doorbell on.
+ *
+ * THE SECRET IS THE WHOLE AUTHENTICATION of POST /hooks/helius, a route on a
+ * public domain: whoever holds it can ring any bell and make the keeper think
+ * the webhook is alive. 32 characters is the floor under a guess; the runbook
+ * asks for `openssl rand -hex 32`, which is 64. SHORTER SWITCHES THE DOORBELL
+ * OFF AND WARNS — it never refuses to start, because the doorbell only decides
+ * who is turned FIRST, and a keeper without it polls everyone exactly as it
+ * always has. Refusing to start over it would take the money path and /status
+ * down to protect an optimisation.
+ */
+export const DOORBELL_SECRET_MIN_LENGTH = 32;
+
+/** Where the Helius API key came from. The SOURCE is safe on /status; the value never is. */
+export type HeliusApiKeySource = "env" | "rpc-url" | "none";
 
 /** The unprefixed names Nuvem's keeper read, and what SIP reads in their place. */
 const COPIED_BARE_NAMES: Readonly<Record<string, string>> = {
@@ -191,6 +217,24 @@ export interface KeeperConfig {
    * signs as it always has and says so once at startup.
    */
   readonly privyPolicyId: string | null;
+  /**
+   * The exact Authorization header Helius sends to POST /hooks/helius, or null
+   * when the doorbell is off (absent, or shorter than DOORBELL_SECRET_MIN_LENGTH).
+   * A secret: registered with the redactor the moment it is read.
+   */
+  readonly doorbellSecret: Secret | null;
+  /**
+   * The key the webhook is managed with (src/helius-webhooks.ts), or null. A
+   * secret: it is a credential for the Helius account's bill.
+   */
+  readonly heliusApiKey: Secret | null;
+  readonly heliusApiKeySource: HeliusApiKeySource;
+  /**
+   * The public URL Helius delivers to, or null — and then nothing manages the
+   * webhook, although the receiver still answers one made by hand. Public: it
+   * is this service's own domain.
+   */
+  readonly doorbellUrl: string | null;
   /** Null in dry run: nothing in this object can sign anything. */
   readonly signing: SigningConfig | null;
   /** Already scrubbed. */
@@ -486,6 +530,10 @@ export function describeConfig(config: KeeperConfig): Record<string, unknown> {
     privyAppId: config.privyAppId,
     privySignerId: config.privySignerId,
     privyPolicyId: config.privyPolicyId,
+    // WHETHER, AND FROM WHERE — never the secret and never the key.
+    doorbell: config.doorbellSecret !== null,
+    heliusApiKeySource: config.heliusApiKeySource,
+    doorbellUrl: config.doorbellUrl,
     signing:
       config.signing === null
         ? null
@@ -724,6 +772,9 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
   // starting. Absent, the seat check below simply never runs.
   const privyPolicyId = trimmed(env["SIP_SOLANA_PRIVY_POLICY_ID"]) ?? null;
 
+  // --- the doorbell: every value optional, none of them a problem ----------------
+  const doorbell = readDoorbell(env, { rpcEntries, publicDomain, redactor, warnings });
+
   // --- signing secrets: ONLY when armed ------------------------------------------
   let signing: SigningConfig | null = null;
   if (armed && copied.length === 0) {
@@ -758,12 +809,100 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
     privyAppId,
     privySignerId,
     privyPolicyId,
+    ...doorbell,
     signing,
     warnings: Object.freeze(warnings.map(scrub)),
   };
   Object.defineProperty(config, "toJSON", { value: () => describeConfig(config), enumerable: false });
   Object.defineProperty(config, Symbol.for("nodejs.util.inspect.custom"), { value: () => describeConfig(config), enumerable: false });
   return Object.freeze(config);
+}
+
+/**
+ * The doorbell's three settings (src/doorbell.ts).
+ *
+ * NONE OF THEM CAN STOP THE KEEPER. An invalid value is a WARNING and switches
+ * off only the part it configures, the file's rule for an optional setting
+ * (SIP_SOLANA_PRIVY_POLICY_ID): the doorbell decides who is turned first, and a
+ * keeper without it polls every link every sweep, which is what it did the day
+ * before it existed.
+ *
+ * THE API KEY IS USUALLY ALREADY HERE. A Helius RPC endpoint carries it as
+ * ?api-key=, and asking the owner to paste the same credential twice is asking
+ * for the copy that is not rotated. Only a helius-rpc.com hostname is read that
+ * way — a lookalike host is somebody else's key — and only the SOURCE is ever
+ * reported.
+ */
+function readDoorbell(
+  env: NodeJS.ProcessEnv,
+  context: {
+    readonly rpcEntries: readonly string[];
+    readonly publicDomain: string | undefined;
+    readonly redactor: Redactor;
+    readonly warnings: string[];
+  },
+): Pick<KeeperConfig, "doorbellSecret" | "heliusApiKey" | "heliusApiKeySource" | "doorbellUrl"> {
+  const { redactor, warnings } = context;
+
+  let doorbellSecret: Secret | null = null;
+  const secretRaw = env["SIP_SOLANA_DOORBELL_SECRET"];
+  const secret = trimmed(secretRaw);
+  if (secretRaw !== undefined) redactor.register(secretRaw, "doorbellSecret");
+  if (secret !== undefined) {
+    // REGISTERED BEFORE IT IS JUDGED: a secret too short to use is still a
+    // secret, and the next line that fails could quote it.
+    redactor.register(secret, "doorbellSecret");
+    if (secret.length < DOORBELL_SECRET_MIN_LENGTH) {
+      warnings.push(
+        `SIP_SOLANA_DOORBELL_SECRET holds ${shape(secret)}; at least ${DOORBELL_SECRET_MIN_LENGTH} characters are needed, ` +
+          "so the doorbell is OFF and the keeper polls every link every sweep. Generate one with `openssl rand -hex 32`.",
+      );
+    } else {
+      doorbellSecret = new Secret(secret, "doorbellSecret");
+    }
+  }
+
+  let heliusApiKey: Secret | null = null;
+  let heliusApiKeySource: HeliusApiKeySource = "none";
+  const keyRaw = trimmed(env["SIP_SOLANA_HELIUS_API_KEY"]);
+  if (keyRaw !== undefined) {
+    redactor.register(keyRaw, "heliusApiKey");
+    heliusApiKey = new Secret(keyRaw, "heliusApiKey");
+    heliusApiKeySource = "env";
+  } else {
+    for (const entry of context.rpcEntries) {
+      const parsed = tryUrl(entry);
+      if (parsed === null || !/(^|\.)helius-rpc\.com$/.test(parsed.hostname)) continue;
+      const key = parsed.searchParams.get("api-key")?.trim() ?? "";
+      if (key === "") continue;
+      // THE BARE KEY IS A NEEDLE OF ITS OWN. The RPC URL is registered whole
+      // and by its query, but the webhook API is a different URL carrying the
+      // same key, and an error there can quote the key alone.
+      redactor.register(key, "heliusApiKey");
+      heliusApiKey = new Secret(key, "heliusApiKey");
+      heliusApiKeySource = "rpc-url";
+      break;
+    }
+  }
+
+  let doorbellUrl: string | null = null;
+  const urlRaw = trimmed(env["SIP_SOLANA_DOORBELL_URL"]);
+  if (urlRaw !== undefined) {
+    const parsed = tryUrl(urlRaw);
+    if (parsed === null || !(parsed.protocol === "https:" || (parsed.protocol === "http:" && isLoopback(parsed.hostname)))) {
+      warnings.push(
+        `SIP_SOLANA_DOORBELL_URL is not an https URL (it holds ${shape(urlRaw)}), so nothing manages the Helius webhook; ` +
+          "the receiver still answers a webhook made by hand.",
+      );
+    } else {
+      doorbellUrl = parsed.href;
+    }
+  } else if (context.publicDomain !== undefined) {
+    // RAILWAY NAMES THE DOMAIN ITSELF, as it does for the /status button.
+    doorbellUrl = `https://${context.publicDomain}/hooks/helius`;
+  }
+
+  return { doorbellSecret, heliusApiKey, heliusApiKeySource, doorbellUrl };
 }
 
 function readSigning(
