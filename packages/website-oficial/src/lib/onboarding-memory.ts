@@ -139,18 +139,25 @@ export function forgetOnboarding(pensionKey: string | null, options: { readonly 
  *
  * IT OUTLIVES THE SETUP. forgetOnboarding clears the step and the close when
  * the vault lands; this stays, because the dashboard reads it after. Stored in
- * localStorage under the key's tag, so it is per browser: on another device the
- * dashboard simply asks again.
+ * localStorage under the key's tag, so it is per browser: on another device,
+ * or once a browser has cleared the site's storage, the dashboard does NOT ask —
+ * it has no choice to ask about — and buying is set up from Manage wallets →
+ * Investing, as for any vault.
  */
 export type BasketChoice = { readonly kind: "sol" } | { readonly kind: "stocks"; readonly mints: readonly string[] };
 
 const BASKET_KEY = "saverfi.basket";
 
-export function readBasketChoice(pensionKey: string): BasketChoice | null {
+/** The stored value when it is this key's, else null: a string, so a store snapshot of it is stable. */
+export function readBasketStored(pensionKey: string): string | null {
   const stored = read("local", BASKET_KEY);
-  const tag = keyTag(pensionKey);
-  if (stored === null || !stored.startsWith(`${tag}:`)) return null;
-  const rest = stored.slice(tag.length + 1);
+  return stored !== null && stored.startsWith(`${keyTag(pensionKey)}:`) ? stored : null;
+}
+
+export function readBasketChoice(pensionKey: string): BasketChoice | null {
+  const stored = readBasketStored(pensionKey);
+  if (stored === null) return null;
+  const rest = stored.slice(keyTag(pensionKey).length + 1);
   if (rest === "sol") return { kind: "sol" };
   const mints = rest.split(",").filter((mint) => mint.length > 0);
   return mints.length === 0 ? null : { kind: "stocks", mints };

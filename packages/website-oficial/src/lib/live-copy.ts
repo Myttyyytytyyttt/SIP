@@ -515,3 +515,40 @@ export const ONBOARDING_COPY = {
     done: "Go to my dashboard",
   },
 } as const;
+
+/**
+ * THE DASHBOARD'S "START BUYING" CARD: the approval the setup promised, asked
+ * for once the first savings have arrived, with that day's prices (owner,
+ * 09-24: choose on the setup, sign later).
+ *
+ * SHORT, NOT PARTIAL. Three lines say what changes, what can stop it and what
+ * the price limits do; everything the full investing form says before the same
+ * signature is one click away under "What exactly am I signing?", and the box
+ * to tick is the investing form's own sentence, word for word.
+ */
+export const START_BUYING_COPY = {
+  title: "Your first savings arrived",
+  /** `basket` is "SPYx and ANTHROPIC, 50 % each" or "SPYx". */
+  lede: (basket: string): string => `Start buying ${basket}? You chose this when you made your vault.`,
+  /** `floor` is today's SOL floor in dollars; `purchase` the whole buy that clears every leg's minimum. */
+  convert: (floor: string | null, purchase: string | null): string =>
+    `Your SOL savings, now and later, are sold for USDC${floor === null ? "" : `, never below ${floor} per SOL`}, and bought in ${purchase === null ? "once enough is ready" : `once ${purchase} is ready`}.`,
+  /** One line per leg whose issuer charges to move it. */
+  fee: (symbol: string, fee: string): string => `${symbol}’s issuer takes ${fee} each time it moves, in and out; if it raises that, buying stops until you change the basket.`,
+  /** `feeSymbols` names the legs whose issuer fee comes off what arrives, or is empty. */
+  limits: (solMargin: string, stockMargin: string, feeSymbols: string): string =>
+    `Price limits are set from today’s prices: if SOL falls more than ${solMargin}, or a stock costs more than about ${stockMargin} over today’s price` +
+    `${feeSymbols === "" ? "" : ` (less for ${feeSymbols}, whose fee comes off what arrives)`}, buying waits until prices come back or you sign again.`,
+  /** The depth ceiling, for a cap this card fixes rather than one the owner types. */
+  depth: (ceiling: string, cap: string, symbol: string, provenance: string): string =>
+    `${BRAND} buys only where the market can take the whole buy: on the shares chosen, ${symbol} sets the ceiling at ${ceiling} per buy, from what its route held ${provenance}. ` +
+    `This signs ${cap} per buy, under it. A buy takes all of the basket or none, so on a day ${symbol}’s market is thinner than that, nothing is bought and no SOL is converted until it recovers.`,
+  details: "What exactly am I signing?",
+  cost: (rent: string, fees: string): string => `Cost: ${rent} SOL of rent, not refundable, + ${fees} SOL of network fees`,
+  start: "Start buying",
+  starting: "Signing…",
+  keepSol: "Keep as SOL",
+  started: "Buying set up",
+  /** The basket's own arithmetic refused it (a thin route, a leg no longer counted): said, and nothing offered to sign. */
+  cannotPlan: "This basket cannot be set up from here today. Nothing was offered to sign; Manage wallets → Investing shows why.",
+} as const;

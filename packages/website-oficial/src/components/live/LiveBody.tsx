@@ -23,6 +23,7 @@ import type { ReactNode } from "react";
 
 import { LiveActivityPage } from "@/components/live/LiveActivityPage";
 import { LiveNextStep } from "@/components/live/LiveNextStep";
+import { LiveStartBuying } from "@/components/live/LiveStartBuying";
 import { LiveRulePanel } from "@/components/live/LiveRulePanel";
 import { FeedBanner, HiddenRows, LeadNotes, WalletList } from "@/components/live/LiveColumn";
 import { secondsUntil } from "@/components/live/LiveStates";
@@ -190,6 +191,8 @@ export function LiveBody({
                   </p>
                 ) : null}
                 {nextStep}
+                {/* The buying approval the setup promised, once the first savings have landed. */}
+                <LiveStartBuying data={data} pensionKey={pensionKey} onRefresh={onRefresh} />
               </>
             }
             strip={

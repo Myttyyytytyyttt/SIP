@@ -7,7 +7,7 @@
 import { DEFAULT_VAULT_POLICY, VOLUME_MODE_OFFERED } from "@sip/solana-core/client";
 import { describe, expect, it } from "vitest";
 
-import { ACTIVITY_COPY, BRAND, LIVE_COPY, MODE_COPY, ONBOARDING_COPY, STATS_COPY, stripTooltip } from "@/lib/live-copy";
+import { ACTIVITY_COPY, BRAND, LIVE_COPY, MODE_COPY, ONBOARDING_COPY, START_BUYING_COPY, STATS_COPY, stripTooltip } from "@/lib/live-copy";
 import { LOSS_DROPPED_AFTER_TXS, VAULT_COPY, ratePercent } from "@/lib/vault-copy";
 
 /** Sample arguments for the copy functions, so their OUTPUT is checked too, not just the literals. */
@@ -44,7 +44,7 @@ function everySentence(): string[] {
     }
     if (value !== null && typeof value === "object") for (const entry of Object.values(value)) walk(entry);
   };
-  walk({ BRAND, LIVE_COPY, MODE_COPY, ACTIVITY_COPY, STATS_COPY, stripTooltip, ONBOARDING_COPY });
+  walk({ BRAND, LIVE_COPY, MODE_COPY, ACTIVITY_COPY, STATS_COPY, stripTooltip, ONBOARDING_COPY, START_BUYING_COPY });
   return out;
 }
 
@@ -320,5 +320,28 @@ describe("the new-user setup's words", () => {
   it("the ready screen agrees with the dashboard card behind it", () => {
     expect(ONBOARDING_COPY.ready.title).toBe(LIVE_COPY.noTradingWallet.title);
     expect(ONBOARDING_COPY.vault.title).not.toBe(VAULT_COPY.title);
+  });
+});
+
+describe("the start-buying card's own words", () => {
+  it("say SaverFi, never the keeper, and always say the SOL is converted", () => {
+    const sentences = [
+      START_BUYING_COPY.title,
+      START_BUYING_COPY.lede("SPYx and ANTHROPIC, 50 % each"),
+      START_BUYING_COPY.convert(null, null),
+      START_BUYING_COPY.convert("$180.00", "$5.00"),
+      START_BUYING_COPY.fee("ANTHROPIC", "1 %"),
+      START_BUYING_COPY.limits("10 %", "5 %", "ANTHROPIC"),
+      START_BUYING_COPY.limits("10 %", "5 %", ""),
+      START_BUYING_COPY.depth("$298.00", "$25.00", "ANTHROPIC", "as counted on 2026-09-21"),
+      START_BUYING_COPY.cost("0.0118", "0.000035"),
+      START_BUYING_COPY.cannotPlan,
+    ];
+    expect(sentences.filter((sentence) => /\bkeeper\b|\bSIP\b|nuvem/i.test(sentence))).toEqual([]);
+    expect(START_BUYING_COPY.convert(null, null)).toMatch(/sold for USDC/);
+    expect(START_BUYING_COPY.convert(null, null)).not.toMatch(/null|undefined/);
+    expect(START_BUYING_COPY.limits("10 %", "5 %", "ANTHROPIC")).toMatch(/less for ANTHROPIC/);
+    expect(START_BUYING_COPY.limits("10 %", "5 %", "")).not.toMatch(/less for/);
+    expect(START_BUYING_COPY.cost("0.0118", "0.000035")).toMatch(/not refundable/);
   });
 });

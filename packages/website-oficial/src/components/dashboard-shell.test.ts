@@ -27,7 +27,8 @@ const mocked = vi.hoisted(() => ({
   host: null as { wanted: boolean; pensionKey: string } | null,
 }));
 
-vi.mock("@/hooks/use-onboarding-closed", () => ({ useOnboardingClosed: () => mocked.closed }));
+// No stocks choice in this browser: the start-buying card (its own test's subject) never mounts here.
+vi.mock("@/hooks/use-onboarding-closed", () => ({ useOnboardingClosed: () => mocked.closed, useBasketChoice: () => null }));
 // The host signs through Privy's wallet hooks; its own screens are OnboardingBody.test.ts's subject.
 // Here only what the frame hands it matters.
 vi.mock("@/components/onboarding/OnboardingHost", () => ({
