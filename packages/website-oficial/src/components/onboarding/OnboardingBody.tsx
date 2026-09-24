@@ -42,7 +42,7 @@ import { LIVE_COPY, ONBOARDING_COPY } from "@/lib/live-copy";
 import { SETUP_RATE, setupRate, type OnboardingBodyStep, type VaultStepRead } from "@/lib/onboarding";
 import { MONO } from "@/lib/classes";
 import { cn } from "@/lib/utils";
-import { LINK_COPY, LOSS_DROPPED_AFTER_TXS, PROFIT_RATE, VAULT_COPY, ratePercent, shortAddress } from "@/lib/vault-copy";
+import { LINK_COPY, PROFIT_RATE, VAULT_COPY, ratePercent, shortAddress } from "@/lib/vault-copy";
 
 /** The setup has two steps before the vault exists; the third screen is its result. */
 const STEPS = 2;
@@ -378,7 +378,7 @@ function VaultStep(props: OnboardingBodyProps) {
                 </ToggleGroupItem>
               ))}
             </ToggleGroup>
-            <p className="text-xs leading-snug text-muted-foreground">{copy.mode(pct(rate), LOSS_DROPPED_AFTER_TXS, formatSol(DEFAULT_VAULT_POLICY.maxContribution))}</p>
+            <p className="text-xs text-muted-foreground">{copy.ruleLine(formatSol(DEFAULT_VAULT_POLICY.maxContribution))}</p>
           </div>
 
           {ladder}
@@ -387,8 +387,7 @@ function VaultStep(props: OnboardingBodyProps) {
       footer={
         <>
           <div className="space-y-0.5 text-xs">
-            <p>{vaultRent === null ? VAULT_COPY.costUnknown : VAULT_COPY.cost(formatSol(vaultRent), formatSol(fees))}</p>
-            <p className="text-muted-foreground">{copy.approveOnce}</p>
+            <p>{vaultRent === null ? VAULT_COPY.costUnknown : copy.cost(formatSol(vaultRent), formatSol(fees))}</p>
             {busyElsewhere ? <p className="text-muted-foreground">{LINK_COPY.busy}</p> : null}
             {unconfirmed ? <p className="font-medium text-amber-700 dark:text-amber-400">{copy.checkAbove}</p> : null}
           </div>

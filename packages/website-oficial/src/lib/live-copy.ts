@@ -482,11 +482,15 @@ export const ONBOARDING_COPY = {
     /** The subtitle, with the share as it is chosen on this step. */
     points: (rate: string): readonly string[] => [`Keeps ${rate} of each gain`, "Only you withdraw", "One approval", "Change it later"],
     rateLabel: "Share of each gain saved",
-    /** The rule being signed, at the share chosen, with its two limits: the loss's and the settlement's. */
-    mode: (rate: string, dropAfter: number, max: string): string =>
-      `${rate} of each gain your trading wallet makes moves into this vault. A losing stretch moves nothing, and its loss comes off later gains ` +
-      `until your trading wallet has made ${dropAfter} transactions of its own while still behind. One settlement moves at most ${max} SOL.`,
-    approveOnce: "Your wallet asks you to approve once.",
+    /**
+     * Under the bar, one line (owner, 09-24): what is true of every share, and
+     * the cap that limits what is saved. It promises nothing about a loss being
+     * carried forward — that rule has a limit (LOSS_DROPPED_AFTER_TXS) and is
+     * said in full on the vault card.
+     */
+    ruleLine: (max: string): string => `Only gains count · at most ${max} SOL per settlement`,
+    /** The cost, as short as it can be said: the rent, then the fees. */
+    cost: (rent: string, fees: string): string => `Cost: ${rent} SOL + ${fees} SOL of network fees`,
     /** A create was sent and not confirmed: the footer says where the way forward is. */
     checkAbove: "A vault creation was sent and is not confirmed yet. Check it above before trying again.",
     back: "Back",

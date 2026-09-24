@@ -37,7 +37,7 @@ import { OnboardingBody, onboardingHeading, type OnboardingBodyProps } from "@/c
 import type { WriteProgress } from "@/hooks/use-vault-actions";
 import { formatSol } from "@/lib/amounts";
 import { LIVE_COPY, ONBOARDING_COPY } from "@/lib/live-copy";
-import { LINK_COPY, LOSS_DROPPED_AFTER_TXS, PROFIT_RATE, VAULT_COPY, shortAddress } from "@/lib/vault-copy";
+import { LINK_COPY, PROFIT_RATE, VAULT_COPY, shortAddress } from "@/lib/vault-copy";
 import { SETUP_RATE } from "@/lib/onboarding";
 import { CREATE_VAULT_FEE_LAMPORTS } from "@/lib/vault-limits";
 
@@ -177,8 +177,9 @@ describe("the vault step", () => {
     for (const preset of ["10", "15", "20", "30"]) expect(html).toMatch(new RegExp(`data-slot="toggle-group-item"[^>]*>${preset}\u00a0%<`));
     // 20 % is the product's start, so its preset is the one pressed.
     expect(html).toMatch(/aria-checked="true"[^>]*>20\u00a0%<|data-state="on"[^>]*>20\u00a0%</);
-    // The rule said before the signature carries the share and its two limits.
-    expect(textOf(html)).toContain(ONBOARDING_COPY.vault.mode(PROFIT_RATE, LOSS_DROPPED_AFTER_TXS, formatSol(DEFAULT_VAULT_POLICY.maxContribution)));
+    // Under the bar, one line: the settlement cap, and no promise about losses carried forward.
+    expect(textOf(html)).toContain(ONBOARDING_COPY.vault.ruleLine(formatSol(DEFAULT_VAULT_POLICY.maxContribution)));
+    expect(textOf(html)).not.toMatch(/loss comes off/);
   });
 
   it("says the cost above the button, and Create sends the share chosen with the product's limits, never the click", () => {
@@ -186,6 +187,8 @@ describe("the vault step", () => {
     const html = render(value);
     expect(html.indexOf("Cost:")).toBeGreaterThan(-1);
     expect(html.indexOf("Cost:")).toBeLessThan(html.lastIndexOf(">Create vault<"));
+    // The short form (owner, 09-24): the rent, then the fees.
+    expect(textOf(html)).toContain(ONBOARDING_COPY.vault.cost(formatSol(1_285_240n), formatSol(CREATE_VAULT_FEE_LAMPORTS)));
     expect(textOf(html)).toContain("15 %");
     const create = button(VAULT_COPY.create);
     expect(create.primary).toBe(true);

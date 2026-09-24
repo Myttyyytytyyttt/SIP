@@ -295,12 +295,15 @@ describe("the new-user setup's words", () => {
     expect(setupSentences().filter((sentence) => /volume|every trade|every buy/i.test(sentence))).toEqual([]);
     // The rule said right before the signature carries the loss AND its limit (VAULT_COPY.profitRule):
     // promising the loss forever would be a promise the program does not keep.
-    const rule = ONBOARDING_COPY.vault.mode(rate, LOSS_DROPPED_AFTER_TXS, "0.06");
-    expect(rule).toContain(rate);
-    expect(rule).toMatch(/loss comes off later gains/);
-    expect(rule).toContain(`${LOSS_DROPPED_AFTER_TXS} transactions of its own while still behind`);
-    // The settlement cap is a real limit on what is saved: said, since the setup no longer shows the field.
-    expect(rule).toContain("at most 0.06 SOL");
+    // Under the bar, one line: it promises nothing about a loss carried forward (that rule has a limit,
+    // LOSS_DROPPED_AFTER_TXS, said in full on the vault card), and says the settlement cap, a real limit
+    // on what is saved, since the setup shows no field for it.
+    const rule = ONBOARDING_COPY.vault.ruleLine("0.06");
+    expect(rule).not.toMatch(/loss comes off|carried/);
+    expect(rule).toMatch(/Only gains count/);
+    expect(rule).toContain("at most 0.06 SOL per settlement");
+    expect(LOSS_DROPPED_AFTER_TXS).toBeGreaterThan(0);
+    expect(ONBOARDING_COPY.vault.cost("0.00128524", "0.000011")).toBe("Cost: 0.00128524 SOL + 0.000011 SOL of network fees");
     // The welcome's summary promises nothing about losses at all, rather than half the rule, and no fixed
     // share: the share is chosen on the next step.
     expect(ONBOARDING_COPY.welcome.save(rate)).toContain(rate);
