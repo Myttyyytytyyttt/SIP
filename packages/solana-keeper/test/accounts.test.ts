@@ -495,13 +495,12 @@ const vaultFields = (over: Partial<VaultFields> = {}): VaultFields => ({
 const policyFields = (vault: PublicKey, over: Partial<PolicyFields> = {}): PolicyFields => ({
   vault,
   enabled: true,
-  // THE VENUE EVERY POLICY SIGNED TO DATE NAMES. It was a random key here, which
-  // no reader looked at and every tick ignored — the keeper passed the Raydium
-  // literal whatever the policy said. Now that the tick refuses a venue it
-  // cannot route, a random key would refuse every turn below before the gate
-  // each of those tests is actually about. The reader's own test overrides it
-  // with a random key, which is where reading arbitrary bytes at offset 41
-  // belongs.
+  // NOT A RANDOM KEY. It was one here, which no reader looked at and every tick
+  // ignored — the keeper passed the Raydium literal whatever the policy said.
+  // Now that the tick refuses a venue it cannot route, a random key would
+  // refuse every turn below before the gate each of those tests is actually
+  // about. The reader's own test overrides it with a random key, which is where
+  // reading arbitrary bytes at offset 41 belongs.
   // THE VENUE THE KEEPER ACTUALLY ROUTES, which is the whole point of a fixture
   // default (docs/TESTING_TRAPS.md, first species). It was RAYDIUM_CLMM_PROGRAM
   // while that was the routable venue; it is Jupiter v6 now, so that every turn
@@ -1642,11 +1641,11 @@ describe("the ticks' first steps, over the same bytes", () => {
   });
 
   it("open a RETIRED venue's refusal by saying the migration is expected, and name what the owner must re-sign", async () => {
-    // THE REFUSAL THE LIVE VAULT WILL ACTUALLY GET. The policy signed on chain
-    // names Raydium CLMM, so this is the first thing the mainnet keeper says
-    // after the move to Jupiter — by design, before the wrap, with nothing
-    // spent. Everything else about this turn is fine: 10 SOL free and a crank
-    // that can front it.
+    // THE REFUSAL A NOT-YET-MIGRATED VAULT GETS. The live vault got it until
+    // the owner re-signed onto Jupiter v6 on 2026-09-22 (CHANGELOG.md); any
+    // vault whose policy still names Raydium CLMM gets it — by design, before
+    // the wrap, with nothing spent. Everything else about this turn is fine: 10
+    // SOL free and a crank that can front it.
     const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
     stubJupiter();
     const { vault, connection, program, calls } = chainWith(

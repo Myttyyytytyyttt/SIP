@@ -142,9 +142,10 @@ export const RETIRED_VENUES: ReadonlyMap<string, string> = new Map([
   [
     RAYDIUM_CLMM_PROGRAM.toBase58(),
     "This is the EXPECTED first state of the Jupiter migration, not a broken keeper: Raydium CLMM is the venue " +
-      "every policy signed to date names, and this keeper deliberately stopped routing it when the basket moved to " +
-      "Jupiter (the assets the product must hold — ANTHROPIC, OPENAI, SPACEX — have their liquidity away from " +
-      "Raydium). Nothing is wrong with the vault, nothing has been spent, and no SOL has been wrapped.",
+      "policies were signed with until 2026-09-22 and the one this policy still names, and this keeper deliberately " +
+      "stopped routing it when the basket moved to Jupiter (the assets the product must hold — ANTHROPIC, OPENAI, " +
+      "SPACEX — have their liquidity away from Raydium). Nothing is wrong with the vault, nothing has been spent, " +
+      "and no SOL has been wrapped.",
   ],
 ]);
 

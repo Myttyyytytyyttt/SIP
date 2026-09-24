@@ -469,8 +469,10 @@ describe("the pools' in-side reserves", () => {
       [ANTHROPIC_USDC_POOL, ANTHROPIC_MINT, LEG_POOLS[1]!.usdcReserve, null],
     ]);
     // THE FIGURE THE FROZEN LITERAL WAS CUT FROM, still moving: 9,541,652,779 raw
-    // on 2026-09-20, 9,575,440,815 two days later. A ceiling divided out of the
-    // first is wrong by the second, which is the whole reason this is read.
+    // on 2026-09-20, 9,575,440,815 some two hours later. A ceiling divided out
+    // of the first was wrong by the second, which is why a depth is read at a
+    // slot and not written down (the web's ceiling now divides a route census
+    // instead).
     expect(read.items[2]!.amountRaw).toBe(9_575_440_815n);
     expect(read.items.every((item) => item.inMint === USDC_MINT)).toBe(true);
   });
@@ -566,8 +568,8 @@ describe("the pools' in-side reserves", () => {
     if ("vault" in change) vs[2] = change.vault!;
     const read = poolReservesFromAccounts(ps, vs, 7);
     const spoiled = read.items[2]!;
-    // NULL, NOT 0n. A zero reserve tells the owner their basket is dead; this one
-    // was only unread, and the panel must be able to tell the difference.
+    // NULL, NOT 0n. A zero reserve is a drained pool; this one was only unread,
+    // and whoever reads the payload must be able to tell the difference.
     expect(spoiled.amountRaw).toBeNull();
     expect(spoiled.amountRaw).not.toBe(0n);
     expect(spoiled.unreadable).toMatch(why);
@@ -1113,14 +1115,14 @@ describe("readLiveSnapshot", () => {
       const good = await readWith();
       const read = await readWith(reserves());
       // Not merely still readable: the SAME answer a healthy read gives, to the
-      // last bigint. A vault nobody could read costs the panel its ceiling and
+      // last bigint. A vault nobody could read costs that pool's reserve and
       // nothing else.
       expect(read.prices).toEqual(good.prices);
       expect(read.pyth).toEqual(good.pyth);
       expect(good.prices.kind).toBe("exists");
       expect(amountsOf(read)![0]).toBeNull();
-      // NULL, NOT ZERO: a reserve of nothing would have the panel tell the owner
-      // their basket is dead when it was only unread.
+      // NULL, NOT ZERO: a reserve of nothing would report a drained pool when it
+      // was only unread.
       expect(amountsOf(read)![0]).not.toBe(0n);
       expect([read.vault.kind, read.tokenAccounts.kind]).toEqual(["exists", "exists"]);
     });

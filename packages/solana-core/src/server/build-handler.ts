@@ -1155,8 +1155,8 @@ export function createSolanaVaultHandler(options: SolanaVaultHandlerOptions): So
       // One copy of this shape, shared with /api/solana-live below.
       prices: pricesView(depth.prices),
       // And its sibling: what each of those pools holds on the side a buy is paid
-      // in, so the card's depth ceiling is arithmetic over a live figure rather
-      // than a literal with a date on it.
+      // in, read at a slot rather than quoted with a date on it. The card's
+      // per-buy ceiling does not come from here (reservesView says where it does).
       reserves: reservesView(depth.reserves),
       // THE CLOSED SET OF VENUE NAMES, SERVED BY THE SERVER THAT ENFORCES IT.
       // investPolicy above accepts a venue only if VENUE_PROGRAMS holds its name,

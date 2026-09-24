@@ -61,8 +61,10 @@
 // decides whether the product's own default walks into that gate or clears it.
 //
 // WHY IT IS STILL 1,000. The web has already routed around it: InvestingCard's
-// box starts at SUGGESTED_PER_BUY_RAW ($190, half the $380 ceiling) and no
-// longer pre-fills this constant, so nobody signs $1,000 from the form today.
+// box starts at SUGGESTED_PER_BUY_RAW (half the default basket's census ceiling
+// from basket-limits.ts — $149 of $298 as InvestingCard.test.ts pins them, no
+// longer $190 of a $380 literal cut from the pinned pool) and no longer
+// pre-fills this constant, so nobody signs $1,000 from the form today.
 // Lowering the constant itself is a FOUR-FILE change, which the session that
 // wrote this note was not scoped for — test/fixtures/owner-transactions.ts (the
 // SET_INVEST_POLICY_GOLDEN_FLOORS wire and data hex are built from this value;

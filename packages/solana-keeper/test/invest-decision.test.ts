@@ -150,12 +150,12 @@ describe("the venue the owner signed", () => {
     expect(venueDecision(JUPITER_V6_PROGRAM)).toBeNull();
   });
 
-  it("refuses Raydium CLMM, the venue on chain today, and says first that the migration is expected", () => {
-    // THE REFUSAL THE LIVE VAULT GETS. Raydium CLMM is what the signed policy
-    // names, so this is not a hypothetical: it is the first thing the mainnet
-    // keeper says after this change ships, and it will say it every sweep until
-    // the owner re-signs. What an operator needs from its FIRST clause is
-    // whether to wake somebody, and the answer here is no.
+  it("refuses Raydium CLMM, the venue policies named until 2026-09-22, and says first that the migration is expected", () => {
+    // THE REFUSAL A NOT-YET-MIGRATED VAULT GETS. It was the live vault's until
+    // the owner re-signed onto Jupiter v6 on 2026-09-22 (CHANGELOG.md), and any
+    // vault whose policy still names Raydium gets it every sweep until its owner
+    // re-signs. What an operator needs from its FIRST clause is whether to wake
+    // somebody, and the answer here is no.
     expect(RAYDIUM_CLMM_PROGRAM.toBase58()).toBe("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
     const detail = venueDecision(RAYDIUM_CLMM_PROGRAM)?.detail ?? "";
     expect(venueDecision(RAYDIUM_CLMM_PROGRAM)?.outcome).toBe("REFUSED");

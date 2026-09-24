@@ -77,9 +77,11 @@ export const LOSS_FORGIVEN = Object.freeze({
  * same ratio at the quoted rate —
  *     inventory / (spend / price) == (inventory * price) / spend
  * — so 50 carries over unchanged, and the drained-venue replay gives 20.1x
- * where the old gate gave 19.1x. The web's own panel still computes its ceiling
- * from the in-side reserve it can see, which is why that arithmetic below is
- * untouched.
+ * where the old gate gave 19.1x. The web's picker divides each leg's
+ * venueInventoryRaw (route census) by the same 50 (basket-limits.ts
+ * depthCeiling), not a pinned pool's in-side reserve, so the arithmetic below
+ * holds for it unchanged. The field names still say "reserve", after what the
+ * keeper counted before 2026-09-21.
  */
 export const POOL_DEPTH = Object.freeze({
   /** packages/solana-keeper/src/invest-decision.ts */

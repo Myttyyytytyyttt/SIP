@@ -488,25 +488,32 @@ describe("the reserve behind the depth ceiling", () => {
     // warned: the keeper's depth gate stopped comparing a POOL'S IN-SIDE
     // RESERVE and started counting a VENUE'S INVENTORY, because the assets this
     // product must hold trade on a CLOB and a DLMM that have no in-side reserve
-    // to read. The multiple is still 50 and this panel still computes its
-    // ceiling from the reserve it can see, so the arithmetic below is unchanged
+    // to read. The multiple is still 50, so the arithmetic below is unchanged
     // — but a regex over a neighbour's source pins that neighbour's FORMATTING,
     // and had the rename gone the other way this would have thrown on `null`
     // pointing at no defect at all. docs/TESTING_TRAPS.md, third species; the
     // honest fix is the keeper exporting this number to a package both sides
     // share, which is filed and not done here.
+    //
+    // AND NO PANEL DOES THIS ARITHMETIC. The web's per-buy ceiling never came to
+    // divide this reserve: the literal went when the basket picker came, and the
+    // picker divides each leg's venueInventoryRaw instead
+    // (website-oficial/src/lib/basket-limits.ts, depthCeiling); no web source
+    // reads `reserves`. What this case still proves is that the payload is enough
+    // to recompute the old literal, and that the pool has moved since.
     const keeper = readFileSync(fileURLToPath(new URL("../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
     const multiple = BigInt(/export const MIN_VENUE_INVENTORY_MULTIPLE = ([0-9_]+)n;/.exec(keeper)![1]!.replaceAll("_", ""));
     expect(multiple).toBe(POOL_DEPTH.keeper.value);
 
-    // What the panel does with the payload: a leg may spend at most a fiftieth of
-    // the in-side reserve, and two equal legs double it for the whole buy.
+    // The old literal's arithmetic, over the payload: a leg may spend at most a
+    // fiftieth of the in-side reserve, and two equal legs double it for the whole buy.
     const perLeg = LEG_POOLS[1]!.usdcReserve / multiple;
     expect(perLeg).toBe(191_508_816n);
-    // THE LITERAL IT REPLACES was $190.83 a leg, cut from 9,541,652,779 raw read
-    // on 2026-09-20 — two days and 33,788,036 raw units ago. The gap is small
-    // here and was 5,000 dollars the night before; either way the payload moves
-    // with the pool and the literal does not.
+    // THE LITERAL WAS CUT FROM $190.83 a leg — a fiftieth of 9,541,652,779 raw
+    // read on 2026-09-20, doubled and rounded down to $380 — some two hours and
+    // 33,788,036 raw units before this fixture's reading. The gap is small here
+    // and was 5,000 dollars the night before; either way the payload moves with
+    // the pool and the literal does not.
     expect(perLeg).not.toBe(9_541_652_779n / multiple);
   });
 
@@ -518,8 +525,8 @@ describe("the reserve behind the depth ceiling", () => {
     })();
 
     const chain = fullChain(owner, key());
-    // The one mutation this pair exists for: the vault the ceiling is computed
-    // from is gone from the chain.
+    // The one mutation this pair exists for: a pinned pool's in-side vault is
+    // gone from the chain.
     chain.accounts.set(LEG_POOLS[1]!.usdcVault, null);
     const { live } = setup(chain);
     const broken = (await live({ action: "snapshot", owner, wallets: [], discover: false })).json;
@@ -530,7 +537,7 @@ describe("the reserve behind the depth ceiling", () => {
     expect(broken.vault).toEqual(whole.vault);
     expect(broken.reserves.items[2].amountRaw).toBeNull();
     expect(broken.reserves.items[2].unreadable).toMatch(/in-side vault was not read/);
-    // NOT ZERO. A ceiling of nothing would tell the owner their basket is dead.
+    // NOT ZERO. Zero is a drained pool; this one was only unread.
     expect(broken.reserves.items[2].amountRaw).not.toBe("0");
     expect(broken.reserves.items.slice(0, 2)).toEqual(EXPECTED.slice(0, 2));
   });

@@ -457,14 +457,20 @@ export function poolPricesFromAccounts(accounts: readonly (AccountSnapshot | nul
 
 // ── the pools' in-side reserves: this pool's own depth, and nobody else's ────
 //
-// WHY A NUMBER CANNOT BE WRITTEN DOWN HERE. The panel's depth ceiling is a
-// fraction of what a pool holds on the side a buy is PAID in, and that balance
-// moves under it. The web's InvestingCard carries the last one anybody wrote
-// down — 9,541,652,779 raw USDC in the ANTHROPIC/USDC pool at slot 448864213 —
-// and two days later the same vault held 9,575,440,815, having been thousands of
-// dollars lighter the night before that. A literal captured at a slot reads as
-// current a month later and is wrong by then, so the reserve is read with
-// everything else and the ceiling is arithmetic over it.
+// WHY A NUMBER CANNOT BE WRITTEN DOWN HERE. What a pool holds on the side a buy
+// is PAID in moves under it. The web's InvestingCard once carried a per-buy
+// ceiling cut from one such reading — 9,541,652,779 raw USDC in the
+// ANTHROPIC/USDC pool at slot 448864213 — and some two hours later (slot
+// 448882962) the same vault held 9,575,440,815, having been thousands of
+// dollars lighter the night before. A literal captured at a slot reads as current a month later and is
+// wrong by then, so the reserve is read with everything else, at a slot.
+//
+// AND THE WEB'S CEILING NEVER CAME TO DIVIDE IT. This read was added so the
+// card could compute that ceiling live; the card never did. The literal went
+// when the basket picker came, and the picker's per-buy ceiling
+// (website-oficial/src/lib/basket-limits.ts, depthCeiling) divides each leg's
+// venueInventoryRaw — the route census product.ts records — while no web source
+// reads `reserves` at all.
 //
 // THE IN SIDE, BECAUSE THAT IS THE SIDE A BUY IS PAID IN. A USDC buy has to fit
 // into the USDC the pool is holding; the stock vault is what it would be paid
@@ -646,9 +652,10 @@ export interface PoolDepth {
 }
 
 /**
- * The live rates behind the floors and the forms' dollar figures, and the
- * reserves behind the depth ceiling beside them: PRICED_POOLS and their in-side
- * vaults in ONE getMultipleAccounts.
+ * The live rates behind the floors and the forms' dollar figures, and each
+ * pinned pool's own in-side reserve beside them (no per-buy ceiling divides it;
+ * see the reserve section): PRICED_POOLS and their in-side vaults in ONE
+ * getMultipleAccounts.
  *
  * TWO OUTCOMES OUT OF ONE ANSWER, AND NEITHER CAN REACH THE OTHER. Anything but
  * every pool, ours, in order, leaves `prices` unreadable: a floor is never
