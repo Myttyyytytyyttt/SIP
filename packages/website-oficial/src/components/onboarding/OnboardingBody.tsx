@@ -7,8 +7,11 @@
  * it the shared vault read and the one create-vault writer; the tests and the
  * preview feed it fixtures, which is how every state is seen without a login.
  *
- * THREE SCREENS. Welcome: what SaverFi does, in four short points, and every
- * cost that exists before anyone is asked to sign. Vault: profit at the product's
+ * THREE SCREENS. Welcome: the brand, a line of four points, the motion, and what
+ * SaverFi does — nothing to read before moving on (owner, 09-24: as little
+ * friction as possible). Every cost is said where it is paid: the vault's rent
+ * above Create vault, the link's and investing's in their own cards before
+ * their signatures. Vault: profit at the product's
  * rate (the only mode offered), the two limits folded under Advanced at their
  * defaults, the cost above the button, one approval. Ready: the vault landed,
  * and what the dashboard does next.
@@ -196,7 +199,7 @@ function WelcomeMotion() {
   );
 }
 
-function Welcome({ pensionKey, vaultRent, linkRent, fees, onContinue, onDisconnect }: OnboardingBodyProps) {
+function Welcome({ pensionKey, onContinue, onDisconnect }: OnboardingBodyProps) {
   const copy = ONBOARDING_COPY.welcome;
   return (
     <Frame
@@ -218,22 +221,6 @@ function Welcome({ pensionKey, vaultRent, linkRent, fees, onContinue, onDisconne
               {copy.own}
             </Point>
           </ul>
-
-          {/* Folded, with the one figure the next step asks for beside it: the motion and the points lead. */}
-          <details className="group rounded-lg border bg-muted/30 px-3 py-2">
-            <summary className="flex cursor-pointer flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 text-xs">
-              <span className="font-medium tracking-wide text-muted-foreground uppercase">{copy.costTitle}</span>
-              {vaultRent === null ? null : <span className="text-muted-foreground">{copy.costFrom(formatSol(vaultRent))}</span>}
-            </summary>
-            <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-muted-foreground marker:text-muted-foreground/60">
-              <li>{vaultRent === null ? copy.costVaultUnknown : copy.costVault(formatSol(vaultRent), formatSol(fees))}</li>
-              <li>{linkRent === null ? copy.costLinkUnknown : copy.costLink(formatSol(linkRent))}</li>
-              <li>{copy.costSettle}</li>
-              <li>{copy.costInvest}</li>
-            </ul>
-          </details>
-
-          <p className="text-xs text-muted-foreground">{ONBOARDING_COPY.closeHint}</p>
         </div>
       }
       footer={

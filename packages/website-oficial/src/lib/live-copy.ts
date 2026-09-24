@@ -448,8 +448,6 @@ export const ONBOARDING_COPY = {
   /** The identity line under every step, and the way out of a wrong wallet. */
   pensionKey: (shortKey: string): string => `Pension key ${shortKey}`,
   notThisWallet: "Not this wallet?",
-  /** Said once, on the first screen: closing is allowed, and where it leads. */
-  closeHint: "You can close this and look around with example numbers first. Connect brings you back here.",
   /** The close button's name while a signature is being asked for. */
   closeHeld: "Close (not while your wallet is asked to approve)",
   close: "Close",
@@ -474,17 +472,6 @@ export const ONBOARDING_COPY = {
     invest: (examples: string): string => `Choose tokenized stocks for it to buy, such as ${examples}. Each issuer’s powers over its stock are shown before you sign.`,
     ownTitle: "Only you can take it out",
     own: `Only your pension key can withdraw from the vault, and ${BRAND} cannot pause or block a SOL withdrawal.`,
-    costTitle: "What it costs",
-    /** Beside the folded costs: the one figure the next step asks for. */
-    costFrom: (rent: string): string => `Your vault: ${rent} SOL + fees`,
-    costVault: (rent: string, fees: string): string => `Your vault: ${rent} SOL of rent that does not come back, plus ${fees} SOL of network fees.`,
-    costVaultUnknown: "Your vault: rent that does not come back, plus network fees. The rent could not be read just now; your wallet shows the total before you approve.",
-    costLink: (rent: string): string => `Each trading wallet you link: ${rent} SOL of rent, plus network fees. The program returns the rent on unlink, which ${BRAND} does not offer yet.`,
-    costLinkUnknown: `Each trading wallet you link: rent, plus network fees. The program returns the rent on unlink, which ${BRAND} does not offer yet.`,
-    costSettle: "Each settlement is a Solana transaction, and your trading wallet pays its network fee.",
-    costInvest:
-      "Investing, if you set it up: rent that does not come back. Each buy pays the pool’s fees, may fill up to the price limit you sign, " +
-      "and some stocks charge their issuer’s transfer fee. Every limit is shown before you approve.",
     continue: "Continue",
   },
 

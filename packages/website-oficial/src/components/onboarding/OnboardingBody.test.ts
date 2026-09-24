@@ -131,20 +131,10 @@ describe("welcome", () => {
     expect(html.indexOf("<video")).toBeLessThan(html.indexOf(ONBOARDING_COPY.welcome.tradeTitle));
   });
 
-  it("says what it costs with the figures read, before anything is signed", () => {
+  it("asks nothing of the reader before Continue: no cost list, no fine print (owner, 09-24)", () => {
     const text = textOf(render(props()));
-    expect(text).toContain(ONBOARDING_COPY.welcome.costVault(formatSol(1_285_240n), formatSol(CREATE_VAULT_FEE_LAMPORTS)));
-    expect(text).toContain(ONBOARDING_COPY.welcome.costLink(formatSol(1_305_560n)));
-    expect(text).toContain(ONBOARDING_COPY.welcome.costSettle);
+    expect(text).not.toMatch(/What it costs|rent|network fee|close this/i);
     expect(text).toContain(ONBOARDING_COPY.pensionKey(shortAddress(KEY)));
-    expect(text).toContain(ONBOARDING_COPY.closeHint);
-  });
-
-  it("says a rent it could not read is unread, never a figure", () => {
-    const text = textOf(render(props({ vaultRent: null, linkRent: null })));
-    expect(text).toContain(ONBOARDING_COPY.welcome.costVaultUnknown);
-    expect(text).toContain(ONBOARDING_COPY.welcome.costLinkUnknown);
-    expect(text).not.toContain("— SOL");
   });
 
   it("Continue is the primary button and moves on; Disconnect is there, and is not", () => {

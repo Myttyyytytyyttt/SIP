@@ -67,10 +67,22 @@ export interface OnboardingHeading {
   readonly hero?: boolean;
 }
 
-/** The brand mark, drawn in the text's own colour so it follows the theme. */
-function BrandMark() {
+/**
+ * THE MARK IS THE WORD'S "S". Sized in em to the font's cap height (Geist,
+ * ~0.72em) and sitting on the baseline, at the mark's own 218:256 proportion,
+ * with the tight gap a real letter would leave — so "S" + "averFi" reads as one
+ * word. Drawn in the text's colour, so it follows the theme.
+ */
+function BrandWord({ word }: { readonly word: string }) {
   const mask = 'url("/logo/sip-mark-white.png") center / contain no-repeat';
-  return <span aria-hidden className="inline-block size-7 shrink-0 bg-current sm:size-8" style={{ mask, WebkitMask: mask }} />;
+  // Only a word that starts with the mark's letter can lend it its first letter.
+  if (!word.startsWith("S")) return <>{word}</>;
+  return (
+    <>
+      <span className="mr-[0.03em] inline-block h-[0.72em] w-[0.613em] bg-current align-baseline" style={{ mask, WebkitMask: mask }} />
+      {word.slice(1)}
+    </>
+  );
 }
 
 export function OnboardingDialog({
@@ -129,11 +141,20 @@ export function OnboardingDialog({
             <DialogHeader className={cn("border-b p-4 text-left sm:px-6 sm:pt-5", heading.hero === true && "gap-2 sm:pb-5")}>
               <DialogTitle className="pr-10 text-lg leading-snug">
                 {heading.eyebrow !== null ? <span className="mb-1 block text-xs font-medium tracking-wide text-muted-foreground uppercase">{heading.eyebrow}</span> : null}
-                <span className={cn(heading.hero === true && "flex items-center gap-2.5 text-3xl font-semibold tracking-tight sm:text-4xl")}>
-                  {heading.hero === true ? <BrandMark /> : null}
-                  {heading.titleLead !== undefined ? <span className="sr-only">{heading.titleLead} </span> : null}
-                  {heading.title}
-                </span>
+                {heading.hero === true ? (
+                  <>
+                    {/* Heard whole; seen as the brand word, its "S" the mark. */}
+                    <span className="sr-only">{heading.titleLead === undefined ? heading.title : `${heading.titleLead} ${heading.title}`}</span>
+                    <span aria-hidden className="block text-4xl font-semibold tracking-tight sm:text-[2.75rem]">
+                      <BrandWord word={heading.title} />
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    {heading.titleLead !== undefined ? <span className="sr-only">{heading.titleLead} </span> : null}
+                    {heading.title}
+                  </>
+                )}
               </DialogTitle>
               {heading.points !== undefined ? (
                 <DialogDescription asChild>

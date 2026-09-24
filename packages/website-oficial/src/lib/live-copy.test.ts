@@ -305,20 +305,6 @@ describe("the new-user setup's words", () => {
     expect(ONBOARDING_COPY.welcome.points(rate)).toContain(`${rate} of each gain saved`);
   });
 
-  it("names every cost there is, and an unread rent as unread — never a zero or a placeholder", () => {
-    const { welcome } = ONBOARDING_COPY;
-    expect(welcome.costVault("0.00128524", "0.000011")).toContain("does not come back");
-    // The program returns link rent on unlink, and SaverFi offers no unlink yet: said, not promised.
-    expect(welcome.costLink("0.00130556")).toContain("does not offer yet");
-    expect(welcome.costLinkUnknown).toContain("does not offer yet");
-    expect(welcome.costInvest).toMatch(/pool’s fees/);
-    expect(welcome.costInvest).toMatch(/transfer fee/);
-    expect(welcome.costInvest).toMatch(/price limit/);
-    expect(welcome.costSettle).toMatch(/network fee/);
-    expect(welcome.costInvest).toMatch(/rent/);
-    for (const unread of [welcome.costVaultUnknown, welcome.costLinkUnknown]) expect(unread).not.toMatch(/\d|null|undefined|—/);
-  });
-
   it("keeps the product's name for the wallet that owns the vault", () => {
     expect(ONBOARDING_COPY.pensionKey("Pens…1111").toLowerCase()).toContain("pension key");
   });
