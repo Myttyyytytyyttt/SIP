@@ -10,14 +10,87 @@ line is not.
 
 ---
 
+## 2026-09-24
+
+*Partial: written at 17:00 Lisbon from the work up to then. The next run extends this section
+rather than adding a second one.*
+
+A morning spent on the first thing a new user sees. The welcome modal that landed the evening
+before was reworked with the owner, one layer at a time and with the owner's own motion clips,
+until the setup asks two questions — how much of each gain to keep, and what the savings
+become — and takes one signature, the vault's. Linking a trading wallet comes next, from the
+dashboard; a signature to start buying stocks waits until there are savings to buy with.
+8 commits written by 07:00 across several sessions, plus one from the night before that
+landed on main this morning. All of the web work is live on the site (checked in the
+production build); no vault has been created through the new setup on mainnet yet — the
+program still holds one vault.
+
+**Web — onboarding, rebuilt step by step with the owner**
+
+- **A welcome that asks nothing of you.** The screen is now a large "SaverFi" whose "S" is the
+  brand mark, one line of four points, the owner's own motion clip, four short explanations
+  under it, and Continue `d00f0e3` `299f0e0`. The list of costs and the small print left this
+  screen at the owner's request: the vault's rent is now stated above "Create vault", and the
+  link's and investing's on their own cards before those signatures `299f0e0`. The network fee
+  each settlement costs the trading wallet, which the old list named, is no longer stated
+  anywhere in the setup.
+- **The owner's clips play everywhere.** They arrived as 10-bit HEVC, which Chrome on Windows
+  and Firefox cannot play, so they ship re-encoded as H.264 at 423 KB and 307 KB, each with a
+  still frame for anyone who asked for reduced motion `d00f0e3` `b0d9233`.
+- **The vault step got the same treatment** — a large "Create your vault", its four points on
+  one line, and its own clip, which stays on screen while the vault is being read and if that
+  read fails `b0d9233`.
+- **You choose how much of each gain to keep.** A bar from 5 % to 50 % with 10, 15, 20 and 30 %
+  presets, starting at 20 % `dc24ad9`. The chosen rate travels inside the signature, and a build
+  carrying any other rate is refused before the wallet is even asked. The "Advanced" limits are
+  gone from the first vault: everyone starts with the product's limits (at most 0.06 SOL per
+  settlement, and a settlement never takes the trading wallet below 0.05 SOL) and can change
+  them later from the vault card. Under the bar, a single line — "Only gains count · at most
+  0.06 SOL per settlement" — and the cost, above the button, in one sentence `bef6eb4`.
+- **What the savings become — choose now, sign later.** The owner's decision: the setup offers
+  SOL (the default), the stocks the catalogue admits today — SPYx and ANTHROPIC, read from the
+  catalogue rather than written by hand — and USDC, greyed out as "Not available yet" `82ee567`.
+  It is SOL *or* stocks, not a mix, because the investing policy has no setting for keeping part
+  of the savings as SOL: once buying is on, the keeper converts all the SOL the vault holds above
+  its rent, a capped amount per sweep. Nothing extra is signed at setup; the vault's signature
+  is still the only one, and the choice is remembered in that browser for that key.
+- **"Your first savings arrived."** When the first settlement lands, the vault has no investing
+  policy yet, and stocks were chosen at setup in that browser, the dashboard shows a card that
+  asks to start buying them, and says plainly what that signature does: the SOL is sold for
+  USDC, what an issuer that charges a fee takes, and what the price limits are for `ea675b8`.
+  It signs the same policy the investing card would, with one named difference — at most $25
+  per buy. "Keep as SOL" dismisses it. An adversarial review before merging found that the card
+  could show vault prices hours old, which the build then refused, on every retry too, and
+  that its buttons stayed live while the wallet was signing; both were fixed.
+- **Known limit:** the choice lives in the browser. On another device, or after site data is
+  cleared, the card does not appear and the savings stay in SOL until the vault's owner signs a
+  policy from the investing card.
+
+**Keeper and core — the last of Raydium**
+
+- The keeper's Raydium adapter had had no caller since the move to Jupiter on 2026-09-21, but
+  could not be deleted because a test in another package read its source as text and matched
+  byte offsets in it `a9ff3f1` (written late on the 23rd, on main since 05:21 on the 24th). The
+  pool layout's offsets moved into a shared module that core, its test fixture and the route
+  script the keeper uses now import; three copies remain on purpose (the web's in-browser price
+  reader and two operator scripts), and the shared module's header names them. The adapter is
+  gone. One of its deleted tests was the only one proving a money-path check — which token
+  accounts the vault owns — so that check got a new test of its own.
+- Comments that still described the web's per-buy ceiling as a slice of a Raydium pool's
+  reserve were corrected — it never was — and the keeper's refusal for a retired venue no
+  longer claims that every policy signed to date names Raydium, since the owner re-signed onto
+  Jupiter on 2026-09-22 `08b0cf7`.
+
+---
+
 ## 2026-09-23
 
-*Partial: written at 06:00 Lisbon and extended at 15:35 Lisbon from the work up to then. The
-next run extends this section rather than adding a second one.*
+*Written at 06:00 and 15:35 Lisbon, completed on 2026-09-24 from the rest of the day.*
 
-A night spent on two questions: how many users the keeper can carry, and making the live
-page *be* the sample page rather than resemble it. 13 commits across three sessions by
-mid-afternoon, none after 06:19.
+A day spent on four questions: how many users the keeper can carry, how to stop checking
+every user every minute, what a new user sees first, and making the live page *be* the sample
+page rather than resemble it. 34 commits (two of them this changelog's own, one a merge) across several parallel
+sessions, and the second real settlement on mainnet.
 
 **The decision.** After several rounds of restyling live to look like the sample, the owner
 changed the approach: "cojas y mires el codigo de mock exactamente como esta y lo copies a
@@ -87,6 +160,91 @@ landed in one commit `db2bb7b`:
   moved up beside "Saved so far" (and says "Last 1 week", not "1 weeks").
 - The sample and live pages now share one main-column component, so their layouts can no
   longer drift apart.
+
+**On-chain — the second real settlement**
+
+- At 16:24Z the keeper settled the owner's trading wallet again: `settle_v2` moved
+  **0.028372759 SOL** into the vault, at the 25 % rate signed that morning
+  ([`5nGb2hqz…`](https://solscan.io/tx/5nGb2hqzdwko4ocpPvKaUKFZ7qnhpVET9Kf9xoVvtM4c1K5wVxgXP19CjoXZg1bTdjRmuryXqisiDSokR3953zc6)).
+  Verified by reading the transaction: `SettleV2` succeeded and the vault's balance rose by
+  exactly that amount. Settlement has now run twice, on 2026-09-19 and 2026-09-23 — still
+  one wallet and one vault.
+
+**Keeper — the doorbell: check the wallets that moved, not every wallet every minute**
+
+The owner's idea (15:02–15:49): instead of asking the chain about each user every minute,
+have something watch the trading wallets and ring when one of them moves, so the sweep only
+looks at those. The owner upgraded the Helius RPC to the Developer plan for it (15:03) and
+asked to start by activating it.
+
+- A live test first: the owner made real trades and sent 1 USDC to the vault, and a Helius
+  webhook rang for them within 1–3 s — including the deposit, which names the vault only as
+  the owner of a token account. Those real payloads are now the tests' fixtures
+  `9839554`.
+- The keeper now receives Helius at `POST /hooks/helius`, checked against a shared secret in
+  constant time `b8139c0`. Each sweep turns only the wallets that rang, the ones still busy,
+  new ones, and a safety rotation that still reaches everyone within 30 minutes. It does a
+  full pass on boot, on taking the lock, after an unpause, after any lost event, and for as
+  long as the webhook is not yet trusted `9839554` `eb110f8`.
+- The keeper creates and keeps its own webhook in sync with the linked wallets `6601ff0`;
+  neither the API key nor the secret can reach a log, an alert or `/status`. None of the
+  three new settings can stop the keeper: a missing or short secret just leaves the doorbell
+  off `f45a310`.
+- An adversarial review the same evening changed how a ring ends — when a turn has handled
+  it, not after a fixed 180 s — and made anything Helius may have missed force a full pass
+  `eb110f8`. The owner's runbook explains how to turn it on and off and how to rotate the
+  secret without losing anyone `a98c06b` `14d78c0` `08374a2`.
+- The ceiling bench always measures the full pass and strips the doorbell's variables, so a
+  key left in a shell cannot point a bench at the real Helius account `d1262fa` `4f698f9`.
+- **Activated** late that evening, when the owner set the secret in Railway; the keeper created its
+  webhook on Helius itself. With one user, the doorbell changes nothing yet — its purpose is
+  the day there are hundreds.
+
+**Reading version-1 transactions**
+
+- The owner's Axiom trades turned out to be Solana transaction **version 1**. Asking a node
+  for version 0 got every one refused, and the web's RPC pool took that refusal for a dead
+  endpoint, so a whole page of history came back unreadable. The refusal is now treated as
+  the answer to that one request `85701c2`, and the vault history reads version 1 `d020832`.
+- The keeper's settlement backfill read transactions on its own and would have counted
+  every v1 trade as a hole; it now goes through the keeper's one reader, and a test fails if
+  anything else in the keeper reads a transaction directly `32a01ce`. A dry run on mainnet
+  read all 27 program transactions and found both real settlements.
+
+**Web — polish, and a welcome for a wallet with no vault**
+
+- Moving between tabs shows the app's loader briefly; on load, blocks rise and fade in
+  gently, with nothing for anyone who asked for reduced motion `c5d10af`.
+- Behind each feed icon, faintly, what the transaction touched — SOL on one side and USDC on
+  the other for a conversion, the % for a rule change `c5d10af`.
+- The feed colours were narrowed the same afternoon at the owner's request: mustard now means
+  only a change to how the pension behaves (rule, policy, link, vault creation); conversions,
+  wraps, withdrawals and keeper housekeeping are grey, "the system working as it should"
+  `d75fdfa`. Green, blue and red are unchanged.
+- The footer's Explore list is two columns and "How it works" is three short lines `4c3ca50`.
+- **Onboarding — a welcome for a key with no vault.** Connecting a pension key that has no
+  vault now opens a modal by itself, in two steps and no more `2beb9fc`. The owner chose to leave
+  linking a trading wallet and setting up investing to the dashboard rather than add steps here.
+  1. *Welcome* — what SaverFi does, in four points, and everything it costs.
+  2. *Create your vault* — profit at 20 %, the default limits folded away, the cost above the
+     button, and one signature, through the same signing path and the same lock as the vault
+     card, so the two can never sign at the same time on one page. Then "Your vault is ready",
+     and the dashboard's cards take over.
+
+  It can be closed, except while a signature is in progress. Closed, the page shows the sample a
+  visitor sees, and Connect or the Live toggle reopens the modal at the step where it was
+  left. That memory is kept in the browser under a hash of the key, never the address itself.
+  It was checked in a browser with a stubbed login at desktop and phone widths; the next
+  morning it was reworked again (see 2026-09-24).
+
+**Decisions the owner made**
+
+- The web now has its own RPC endpoint on Vercel, separate from the keeper's (15:43), after an
+  audit found the live page and the keeper were drawing on the same Helius key.
+- The owner asked to delete the archived EVM code, then chose to leave it as it is for now rather
+  than risk breaking something before the deadline (15:53).
+- Onboarding moved to its own session (16:15); a UI/UX audit ranked what to fix before
+  Friday's demo, starting with navbar tabs that take a judge out of the sample page.
 
 **Process — the owner reviews before anything is published**
 

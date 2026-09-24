@@ -42,7 +42,7 @@ You keep trading wherever you like. GMGN, Axiom, your own router — it makes no
 
 ## It already happened on mainnet
 
-Not a testnet, not a simulation. One real trade, measured, settled and invested by this code. Every line below is a link you can open right now.
+Not a testnet, not a simulation. Real trades, measured, settled and invested by this code. Every line below is a link you can open right now.
 
 | Step | What happened | Proof |
 |---|---|---|
@@ -50,9 +50,10 @@ Not a testnet, not a simulation. One real trade, measured, settled and invested 
 | **2. Trading wallet linked** | A wallet bound to that vault, with its rate | [`55oN6Nxu…`](https://solscan.io/tx/55oN6NxuNViZZJ2g3VJDbu4Vgor2JiCntYqpW1aaZfEWddQxTSnTm7KenwPDXjFmAWzxZ8pLGBsEEZJo1sp2BqyV) |
 | **3. The slice was taken** | `settle_v2` moved **0.036634582 SOL** into the vault — exactly 20 % of the 0.183172913 SOL that trading session made | [`2tE3BMTa…`](https://solscan.io/tx/2tE3BMTa6BPUmxaWvxDPEaK4piZ3KKL7pXGpmRHcUy6fHD2AK66rF6XnAKbNADKaarjSNGxTHqxqJpGFZ79vzvpy) |
 | **4. The slice bought stock** | The vault wrapped, converted, and swapped through Raydium CLMM into **SPYx** | [`2YdLAtx…`](https://solscan.io/tx/2YdLAtxPYSUu4EJJrN9wiqXnPJhiWHEF3F9d14XoJAUD7X9qFLeQB64hmC6wmHbJoaVwCzd6zLzwXM3uux2c2MBw) |
-| **5. Then it bought again, through an aggregator** | On 2026-09-22 the owner re-signed his policy onto **Jupiter v6**, and the vault wrapped, converted and bought SPYx through it — `invest` CPI'ing Jupiter, Jupiter routing Orca Whirlpool, Token-2022 settling the transfer | [`2KGe82ER…`](https://solscan.io/tx/2KGe82ERi3PJ8wJhXgHoLvMatvM4HhdUd5QrUU6TAPap4QdjdpfdnpCEqo77zRCpgJxSxck8G4z7hwbTmXUodL7S) |
+| **5. Then it bought again, through an aggregator** | On 2026-09-22 the owner re-signed the vault's policy onto **Jupiter v6**, and the vault wrapped, converted and bought SPYx through it — `invest` CPI'ing Jupiter, Jupiter routing Orca Whirlpool, Token-2022 settling the transfer | [`2KGe82ER…`](https://solscan.io/tx/2KGe82ERi3PJ8wJhXgHoLvMatvM4HhdUd5QrUU6TAPap4QdjdpfdnpCEqo77zRCpgJxSxck8G4z7hwbTmXUodL7S) |
 | **6. Then a basket of two** | The owner signed SPYx + ANTHROPIC, and the next deposit bought **both legs**, each through Jupiter on its own venue — the first PreStocks leg this vault has held | [`2w5Uwo6X…`](https://solscan.io/tx/2w5Uwo6XonpG8s1epuoHtbPF7V5pnjNXDK6jch2k5pJDXmu9dyKYT1rFGFy9XiffTr7Lw8JZENfipYvXwF4h8SRS) · [`43S4uAxY…`](https://solscan.io/tx/43S4uAxYbAUQApfwBkybtG3DLMMeoXsPqrg3qYhTRWCiBqCnQTPupcwmYn7d6vtPf2TQ4gUHLCQcLnzT47LBh12C) |
-| **7. And it is still there** | On 2026-09-23 the vault holds **0.0212 SPYx** and **0.0056 ANTHROPIC** (PreStocks) — positions paid for by trading profit and the owner's own test deposits | [vault `EFXK995P…`](https://solscan.io/account/EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU) |
+| **7. And it saved again** | On 2026-09-23 a second trading session was settled: `settle_v2` moved **0.028372759 SOL** into the vault, at the 25 % rate the owner had signed from the live page that morning | [`5nGb2hqz…`](https://solscan.io/tx/5nGb2hqzdwko4ocpPvKaUKFZ7qnhpVET9Kf9xoVvtM4c1K5wVxgXP19CjoXZg1bTdjRmuryXqisiDSokR3953zc6) |
+| **8. And it is still there** | On 2026-09-23 the vault holds **0.0212 SPYx** and **0.0056 ANTHROPIC** (PreStocks) — positions paid for by trading profit and the owner's own test deposits | [vault `EFXK995P…`](https://solscan.io/account/EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU) |
 
 The keeper that did it is running right now and says so in public:
 
@@ -166,14 +167,16 @@ Connect a Solana wallet and every number is read from mainnet through the app's 
 - [x] **Critical alerts to Telegram**, with delivery counted and reported on `/status`
 - [x] **[Usage leaderboard](https://sip-website-oficial.vercel.app/leaderboard)** — points come from showing up (participation and streak), with the size term capped and logarithmic, so a large wallet cannot buy the top spot
 - [x] **Aggregator routing through Jupiter v6** — the single-pool walk is gone. Proven on mainnet 2026-09-22: `convert` and `invest` both CPI Jupiter, which routed Orca Whirlpool into SPYx. The routes need address lookup tables to fit a packet at all, so the keeper compiles a v0 transaction when there are tables and the legacy one when there are not
-- [x] **The owner picks his own basket and his own limits** — a picker for 1–5 stocks and their shares (the program takes up to 8), the minimum per stock, the per-settlement cap and the venue, all signed in the browser, and editable after the first signature. A two-stock basket (SPYx + ANTHROPIC) signed this way bought both its legs on mainnet on 2026-09-22
+- [x] **The owner picks the basket and the limits** — a picker for 1–5 stocks and their shares (the program takes up to 8), the minimum per stock, the per-settlement cap and the venue, all signed in the browser, and editable after the first signature. A two-stock basket (SPYx + ANTHROPIC) signed this way bought both its legs on mainnet on 2026-09-22
+- [x] **A first-run setup for a new pension key** — a key with no vault is walked through two steps: what SaverFi does, then create the vault, choosing how much of each gain to keep (5–50 %) and whether the savings stay in SOL or buy stocks. The vault takes one signature; linking a trading wallet follows on the dashboard, and if stocks were chosen, buying them is asked for once the first savings arrive (in the same browser). Live on the site since 2026-09-24, checked in the production build — no vault has been created through it on mainnet yet
 - [x] **The rate and pause are changed from the live page itself** — the rule card signs `set_policy_v2` with the pension key. Proven on mainnet 2026-09-23: the owner's vault went from 20 % to 25 % of profit
 
 ### 🔨 In progress
 
 - [ ] **Volume mode end to end** — the program accepts it; the keeper cannot yet measure volume from real trades
 - [ ] **SaverFi's own landing footage** — the hero still plays the reference template's clip from a third party's CDN
-- [ ] **Settlement at scale** — proven n = 1; the next milestone is many wallets, many windows. A bench that boots the real keeper against a fake chain now measures how many wallets one sweep can carry, so that number is measured rather than guessed
+- [ ] **Only check the wallets that moved** — a Helius webhook rings the keeper when a linked wallet or vault transacts, so each sweep turns only those, plus a safety rotation that still reaches everyone within 30 minutes. Built, deployed and switched on 2026-09-23; `/status` shows it has not yet received an event since its last restart and its webhook sync is failing, so until it earns trust every sweep is still a full pass
+- [ ] **Settlement at scale** — proven twice, for one wallet; the next milestone is many wallets, many windows. A bench that boots the real keeper against a fake chain now measures how many wallets one sweep can carry, so that number is measured rather than guessed
 - [ ] **Widening the shelf** — nine tokenized assets are catalogued and read on mainnet, each admitted or refused by six dated rules. Two clear every rule today; the rest are refused in public, with the reading that failed them
 
 ### 🗺️ Next
@@ -189,8 +192,8 @@ Connect a Solana wallet and every number is read from mainnet through the app's 
 
 A hackathon README that overclaims is worse than one that claims less, so:
 
-- The money path is proven for **one wallet and one vault**. The settlement half has run **once**, on 2026-09-19; the investing half has now filled several times, including through Jupiter and into a two-stock basket on 2026-09-22. Most of what the vault holds came from the owner's own test deposits, not from settlement. It is real, and it is n = 1.
-- **One keeper process sweeps every wallet, one after another, once a minute.** A bench run on a laptop (not on Railway) puts the ceiling at **at most ~97 linked wallets** at the public RPC's latency when 2 % of them trade in a given minute, and fewer as more of them do (54 at 20 %). Faster RPC raises it only as far as the provider plan's requests per second allow, and nothing outside the process polls `/health` yet, so a stalled keeper would not page anyone.
+- The money path is proven for **one wallet and one vault**. The settlement half has run **twice**, on 2026-09-19 and 2026-09-23; the investing half has now filled several times, including through Jupiter and into a two-stock basket on 2026-09-22. Most of what the vault holds came from the owner's own test deposits, not from settlement. It is real, and it is one wallet: on 2026-09-24 the program holds exactly one vault, so the new-user setup has not yet created a vault for anyone.
+- **One keeper process sweeps every wallet, one after another, once a minute.** A webhook "doorbell" meant to limit each sweep to the wallets that moved is switched on, but it has not earned the keeper's trust yet, so every sweep is still a full pass. A bench run on a laptop (not on Railway) puts the ceiling at **at most ~97 linked wallets** at the public RPC's latency when 2 % of them trade in a given minute, and fewer as more of them do (54 at 20 %). Faster RPC raises it only as far as the provider plan's requests per second allow, and nothing outside the process polls `/health` yet, so a stalled keeper would not page anyone.
 - **The keeper routes Jupiter v6 and nothing else.** Raydium CLMM is retired by name, so a vault whose signed policy still points at it refuses every sweep — loudly, before any SOL is wrapped — until its owner re-signs. Adding a venue is an entry plus a route builder, not a configuration change.
 - **Two of the nine catalogued assets are offerable today.** The other seven are refused by the catalogue's own rules — a fee over the ceiling, a venue too thin for the reference leg, a floor source too small to be a price, or a recent failure still inside its quarantine window.
 - A stock leg has **no independent price anchor**. The depth gate measures depth at the size of the turn and has no opinion about price; Pyth anchors the SOL hop alone; the only price bound on a stock leg is the floor its owner signed, which is derived once and then stands.
