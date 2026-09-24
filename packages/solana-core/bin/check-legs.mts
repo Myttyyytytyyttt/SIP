@@ -80,10 +80,12 @@ import {
   CATALOGUE_MIN_FLOOR_POOL_RAW,
   CATALOGUE_MIN_VENUE_DEPTH_RAW,
   CATALOGUE_REFERENCE_LEG_RAW,
+  CATALOGUE_SLIPPAGE_BPS,
   CATALOGUE_VENUE_INVENTORY_MULTIPLE,
   DEFAULT_PUBKEY,
   OFFERED_LEGS,
   RAYDIUM_CLMM,
+  judgedFeeBps,
   USDC_MINT,
   base58Encode,
   decodeClmmPoolPrice,
@@ -100,8 +102,9 @@ const COMMITMENT = "confirmed";
 /** The probe is a sixteenth of the turn, as invest-decision.ts probeAmount takes it. */
 const PROBE_DIVISOR = 16n;
 
-/** What the keeper's min-out.ts allows between a quote and its fill, and the budget sizePenaltyCeilingBps divides. */
-const SLIPPAGE_BPS = 200;
+/** The slippage the two quotes are asked at: the keeper's plain 200 (CATALOGUE_SLIPPAGE_BPS). It does not move a quote's outAmount, which is all this reads. */
+const SLIPPAGE_BPS = CATALOGUE_SLIPPAGE_BPS;
+
 
 // Token-2022 mint: decimals sit after mint_authority (COption<Pubkey>, 36) and
 // supply (u64, 8). Every mint is padded to the 165-byte base account, then one
@@ -304,6 +307,11 @@ for (const [index, asset] of CATALOGUE.entries()) {
   // ── A. THE MINT ────────────────────────────────────────────────────────────
   const mint = mintAccounts[index]!;
   let liveFeeBps: number | null = null;
+  // THE FEE THE LEG WILL PAY: live, or a rise already written for a later
+  // epoch, whichever is higher — what the catalogue's rules and the keeper's
+  // slippage are both judged on since 2026-09-24.
+  let judgedLiveBps: number | null = null;
+  let pendingOnChain: TransferFee | null = null;
   if (mint === null) say(`its mint ${asset.mint} does not exist`);
   else {
     if (mint.owner !== asset.tokenProgram) say(`its mint is owned by ${mint.owner}, not the declared token program ${asset.tokenProgram}`);
@@ -328,6 +336,7 @@ for (const [index, asset] of CATALOGUE.entries()) {
     const feeConfig = extensions.find((extension) => extension.type === EXT_TRANSFER_FEE_CONFIG);
     if (feeConfig === undefined) {
       liveFeeBps = 0;
+      judgedLiveBps = 0;
       // THE STRONGER FACT, AND THE ONLY PLACE IT CAN BE CHECKED. A Token-2022
       // mint's extensions are fixed at initialisation, so a mint with no
       // TransferFeeConfig cannot be given one by anybody, ever. That is what
@@ -341,10 +350,16 @@ for (const [index, asset] of CATALOGUE.entries()) {
       else note.push(`fee ${fee.bps} bps (${which}, from epoch ${fee.epoch}, epoch now ${currentEpoch})`);
       // A FEE RISE THE ISSUER HAS ALREADY WRITTEN DOWN, printed so the rise is
       // read here rather than discovered by a sweep. The ceiling is compared
-      // with >, so a scheduled fee EQUAL to it is still admitted.
+      // with >, so a scheduled fee EQUAL to it is still admitted — and one
+      // over it is a FAILURE on an offered leg, not a note: from its epoch the
+      // keeper refuses the whole basket.
       const scheduled = transferFeeAt(feeConfig.value, NEWER_FEE_AT);
+      judgedLiveBps = fee.bps;
       if (currentEpoch < scheduled.epoch) {
-        note.push(`SCHEDULED ${scheduled.bps} bps from epoch ${scheduled.epoch}${scheduled.bps >= CATALOGUE_MAX_FEE_BPS ? ` — AT OR OVER THE ${CATALOGUE_MAX_FEE_BPS} BPS CEILING` : ""}`);
+        pendingOnChain = scheduled;
+        judgedLiveBps = Math.max(fee.bps, scheduled.bps);
+        if (scheduled.bps > CATALOGUE_MAX_FEE_BPS) say(`its mint has ${scheduled.bps} bps already written for epoch ${scheduled.epoch}; the ceiling is ${CATALOGUE_MAX_FEE_BPS}`);
+        else note.push(`SCHEDULED ${scheduled.bps} bps from epoch ${scheduled.epoch}${scheduled.bps === CATALOGUE_MAX_FEE_BPS ? ` — EXACTLY THE ${CATALOGUE_MAX_FEE_BPS} BPS CEILING, zero margin` : ""}`);
       }
     }
 
@@ -359,10 +374,26 @@ for (const [index, asset] of CATALOGUE.entries()) {
       say(`its mint's extensions imply a ${derivedBytes}-byte token account, the catalogue says ${asset.tokenAccountBytes}: the owner would be quoted the wrong rent`);
     }
 
-    if (asset.fee !== null && liveFeeBps !== null && liveFeeBps !== asset.fee.bps) {
-      const drift = `the catalogue recorded ${asset.fee.bps} bps on ${asset.fee.readOn} (epoch ${asset.fee.epoch}) and the mint now charges ${liveFeeBps}`;
-      if (offered) say(drift);
-      else notices.push(`${asset.symbol}: ${drift}`);
+    // THE READING HAS TWO HALVES AND EITHER CAN GO STALE. The recorded rate
+    // in force must match the chain's, and so must what is written for later:
+    // a catalogue that still says "nothing scheduled" while the mint carries a
+    // rise is judging the shelf on a fee the leg will not pay. A scheduled rate
+    // whose epoch has since ARRIVED shows up here as the live fee instead, and
+    // is compared as that.
+    if (asset.fee !== null && liveFeeBps !== null && judgedLiveBps !== null) {
+      const recordedPending = asset.fee.scheduled !== null && BigInt(asset.fee.scheduled.epoch) > currentEpoch ? asset.fee.scheduled : null;
+      const recordedLive = asset.fee.scheduled !== null && BigInt(asset.fee.scheduled.epoch) <= currentEpoch ? asset.fee.scheduled.bps : asset.fee.bps;
+      const drifts: string[] = [];
+      if (recordedLive !== liveFeeBps) drifts.push(`the catalogue implies ${recordedLive} bps in force now and the mint charges ${liveFeeBps}`);
+      const chainPending = pendingOnChain === null ? "nothing" : `${pendingOnChain.bps} bps for epoch ${pendingOnChain.epoch}`;
+      const bookPending = recordedPending === null ? "nothing" : `${recordedPending.bps} bps for epoch ${recordedPending.epoch}`;
+      if (chainPending !== bookPending) drifts.push(`the catalogue records ${bookPending} written for later and the mint carries ${chainPending}`);
+      if (judgedLiveBps !== judgedFeeBps(asset.fee) && drifts.length === 0) drifts.push(`the fee it will pay is ${judgedLiveBps} bps and the catalogue judges ${judgedFeeBps(asset.fee)}`);
+      for (const drift of drifts) {
+        const line = `${drift} (read ${asset.fee.readOn}, epoch ${asset.fee.epoch})`;
+        if (offered) say(line);
+        else notices.push(`${asset.symbol}: ${line}`);
+      }
     }
   }
 
@@ -413,7 +444,7 @@ for (const [index, asset] of CATALOGUE.entries()) {
   else if (!isQuote(probe)) detail.push(`          the ${usd(probeRaw)} probe found no route (${probe.problem}), so the turn's own impact could not be measured`);
   else {
     const penalty = sizePenaltyBps(CATALOGUE_REFERENCE_LEG_RAW, turn, probeRaw, probe);
-    const ceiling = sizePenaltyCeilingBps(liveFeeBps ?? CATALOGUE_MAX_FEE_BPS);
+    const ceiling = sizePenaltyCeilingBps(judgedLiveBps ?? CATALOGUE_MAX_FEE_BPS);
     const scope = sameVenues(turn.ammKeys, probe.ammKeys) ? "same venues, the keeper's own ARM 2 scope" : "DIFFERENT venues, so the keeper's ARM 2 would abstain and this is the coarser screening number";
     detail.push(`          ${usd(CATALOGUE_REFERENCE_LEG_RAW)} routes ${turn.labels.join(" + ")}, the ${usd(probeRaw)} probe routes ${probe.labels.join(" + ")}`);
     detail.push(`          size penalty ${penalty} bps against a ceiling of ${ceiling} (${scope})`);

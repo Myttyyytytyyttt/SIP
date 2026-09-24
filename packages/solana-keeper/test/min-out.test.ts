@@ -162,16 +162,24 @@ describe("the transfer fee is netted ONCE, in live-route.ts, and never again her
     expect(tightenMinOut.length, "tightenMinOut must take no fee argument — see the header of src/min-out.ts").toBe(3);
   });
 
-  it("a fee big enough to matter is refused before it is priced, by a gate strictly tighter than the old throw", () => {
+  it("a fee is bounded by invest-decision.ts's ceiling, which since 2026-09-24 sits ABOVE the old throw — so the throw must stay gone", () => {
     // This module used to throw when the output mint's fee reached SLIPPAGE_BPS,
     // on the ground that the fee had eaten the whole tolerance. Netting the rate
-    // in live-route.ts removes that ground — the tolerance above is 200 bps at
-    // every rate — and the refusal that actually protects the basket lives in
+    // in live-route.ts removed that ground — the tolerance here is 200 bps at
+    // every rate — and the refusal that protects the basket lives in
     // invest-decision.ts, where it refuses the WHOLE basket before a lamport
-    // moves. It is half the old number, so the old throw could never have fired.
-    expect(MAX_LEG_FEE_BPS).toBe(100n);
-    expect(MAX_LEG_FEE_BPS * 2n).toBe(SLIPPAGE_BPS);
-    expect(MAX_LEG_FEE_BPS < SLIPPAGE_BPS, "the admission ceiling must bind before any bound could be drawn").toBe(true);
+    // moves. While that ceiling was 100 the old throw could never have fired.
+    // THE OWNER RAISED IT TO 300 ON 2026-09-24: a leg the keeper now buys
+    // charges MORE than SLIPPAGE_BPS, so the old throw would refuse it. This is
+    // the test that says the throw is not coming back.
+    expect(MAX_LEG_FEE_BPS).toBe(300n);
+    expect(MAX_LEG_FEE_BPS > SLIPPAGE_BPS, "the ceiling is above the old throw's threshold").toBe(true);
+    // A rate observed net of a 300 bps fee prices exactly like any other: the
+    // tolerance between the credit and min_out is SLIPPAGE_BPS, not less.
+    const net300 = { inRaw: 1_000_000n, outRaw: netOfTransferFee(464_278n, { bps: MAX_LEG_FEE_BPS, maximumFee: UNCAPPED }) };
+    const { minOut, live } = tightenMinOut(1_000_000n, 1_000n, net300);
+    expect(live).toBe(true);
+    expect(minOut).toBe((net300.outRaw * (10_000n - SLIPPAGE_BPS)) / 10_000n);
   });
 });
 

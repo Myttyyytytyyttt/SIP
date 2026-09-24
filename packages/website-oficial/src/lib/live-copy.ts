@@ -536,8 +536,15 @@ export const START_BUYING_COPY = {
   /** `floor` is today's SOL floor in dollars; `purchase` the whole buy that clears every leg's minimum. */
   convert: (floor: string | null, purchase: string | null): string =>
     `Your SOL savings, now and later, are sold for USDC${floor === null ? "" : `, never below ${floor} per SOL`}, and bought in ${purchase === null ? "once enough is ready" : `once ${purchase} is ready`}.`,
-  /** One line per leg whose issuer charges to move it. */
-  fee: (symbol: string, fee: string): string => `${symbol}’s issuer takes ${fee} each time it moves, in and out; if it raises that, buying stops until you change the basket.`,
+  /**
+   * One line per leg whose issuer charges to move it. `written` is a fee the
+   * issuer has already set for later ("3 % from around 26 September 2026"), or
+   * null; `max` is the keeper's limit. NOT "if it raises that, buying stops":
+   * since the limit moved to 3 % on 2026-09-24 a leg charging 1 % can be raised
+   * and still be bought — what stops the basket is a fee ABOVE the limit.
+   */
+  fee: (symbol: string, fee: string, written: string | null, max: string): string =>
+    `${symbol}’s issuer takes ${fee} each time it moves, in and out${written === null ? "" : `, and has already set ${written}`}; above ${max}, buying stops until you change the basket.`,
   /** `feeSymbols` names the legs whose issuer fee comes off what arrives, or is empty. */
   limits: (solMargin: string, stockMargin: string, feeSymbols: string): string =>
     `Price limits are set from today’s prices: if SOL falls more than ${solMargin}, or a stock costs more than about ${stockMargin} over today’s price` +

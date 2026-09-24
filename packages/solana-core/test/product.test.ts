@@ -22,6 +22,7 @@ import {
   CATALOGUE_MIN_VENUE_DEPTH_RAW,
   CATALOGUE_REFERENCE_LEG_RAW,
   CATALOGUE_SLIPPAGE_BPS,
+  CATALOGUE_SLIPPAGE_MARGIN_BPS,
   CATALOGUE_VENUE_INVENTORY_MULTIPLE,
   CLASSIC_TOKEN_ACCOUNT_BYTES,
   CONVERT_FLOOR_MARGIN_BPS,
@@ -41,6 +42,7 @@ import {
   ownerComputeBudget,
   priorityFeeLamports,
   sizePenaltyCeilingBps,
+  judgedFeeBps,
 } from "../src/client/product";
 import {
   DEFAULT_PURCHASE_USDC_RAW,
@@ -303,14 +305,21 @@ describe("the first investment policy", () => {
     expect(CATALOGUE_VENUE_INVENTORY_MULTIPLE).toBe(POOL_DEPTH.keeper.value);
     expect(BigInt(CATALOGUE_MAX_FEE_BPS)).toBe(LEG_FEE.keeper.value);
     expect(BigInt(CATALOGUE_SLIPPAGE_BPS)).toBe(LEG_FEE.slippageBps);
-    // ARM 2's ceiling is a QUARTER of what the slippage budget has left after
-    // the issuer's fee — so a mint at the fee ceiling is allowed 25 bps of its
-    // own impact and a zero-fee mint 50. Both written out: a formula that
+    expect(BigInt(CATALOGUE_SLIPPAGE_MARGIN_BPS)).toBe(LEG_FEE.slippageMarginBps);
+    // ARM 2's ceiling is a QUARTER of what the slippage the keeper ASKS leaves
+    // over the issuer's fee, never under 5 — the keeper's own
+    // maxTurnImpactBps(legSlippageBps(fee), fee), whose numbers the keeper's
+    // tests hold to the same pairs. Written out as numbers: a formula that
     // agreed with the keeper's arithmetic and not with its numbers would pass a
     // derivation-only test.
+    for (const [fee, ceiling] of LEG_FEE.impactCeilingBps) {
+      expect(sizePenaltyCeilingBps(Number(fee)), `impact ceiling at a ${fee} bps fee`).toBe(Number(ceiling));
+    }
+    // THE CASE THAT BROKE THE OLD FORMULA: (200 - 300) / 4 floored at 0 would
+    // have refused ANTHROPIC on PRICE_AT_SIZE from the day 300 was written,
+    // while the keeper asks 400 and allows 25.
     expect(sizePenaltyCeilingBps(CATALOGUE_MAX_FEE_BPS)).toBe(25);
     expect(sizePenaltyCeilingBps(0)).toBe(50);
-    expect(sizePenaltyCeilingBps(CATALOGUE_SLIPPAGE_BPS)).toBe(0);
   });
 
   it("measures every rule at the share one turn can push into one leg of a full basket", () => {
@@ -324,18 +333,48 @@ describe("the first investment policy", () => {
     expect(CATALOGUE_MIN_FLOOR_POOL_RAW).toBe(250_000_000n);
   });
 
-  it("says out loud that ANTHROPIC sits ON the fee ceiling, and one basis point more refuses the basket", () => {
+  it("says out loud that ANTHROPIC lands ON the fee ceiling at epoch 1043, and one basis point more refuses the basket", () => {
     const anthropic = CATALOGUE.find((asset) => asset.symbol === "ANTHROPIC")!;
-    expect(anthropic.fee!.bps).toBe(CATALOGUE_MAX_FEE_BPS);
+    // TWO RATES, AS THE CHAIN HOLDS THEM ON 2026-09-24: 100 charged in epoch
+    // 1041, 300 already written for 1043. The rules judge the 300.
+    expect(anthropic.fee!.bps).toBe(100);
+    expect(anthropic.fee!.epoch).toBe(1041);
+    expect(anthropic.fee!.scheduled).toEqual({ bps: CATALOGUE_MAX_FEE_BPS, epoch: 1043 });
+    expect(judgedFeeBps(anthropic.fee!)).toBe(CATALOGUE_MAX_FEE_BPS);
     expect(offerProblems(anthropic)).toEqual([]);
     // The gate is `>`, so exactly the ceiling is admitted with NO margin. The
     // boundary is asserted from both sides because a flip to `>=` would take
-    // the basket the website promises off the shelf.
+    // the basket the website promises off the shelf — and from BOTH readings,
+    // because a rule that judged only the live 100 would offer a leg the
+    // keeper refuses from epoch 1043 on.
+    const scheduledAt = (bps: number) => ({ ...anthropic, fee: { ...anthropic.fee!, scheduled: { bps, epoch: 1043 } } });
+    expect(offerProblems(scheduledAt(CATALOGUE_MAX_FEE_BPS))).toEqual([]);
+    expect(offerProblems(scheduledAt(CATALOGUE_MAX_FEE_BPS + 1)).map((problem) => problem.rule)).toEqual(["FEE"]);
+    expect(offerProblems(scheduledAt(CATALOGUE_MAX_FEE_BPS + 1))[0]!.why).toContain("already written for epoch 1043");
     expect(offerProblems({ ...anthropic, fee: { ...anthropic.fee!, bps: CATALOGUE_MAX_FEE_BPS + 1 } }).map((problem) => problem.rule)).toEqual(["FEE"]);
     // AND THE ENTRY SAYS IT IN WORDS, because a number in a field is not a
     // warning to anybody reading the shelf.
     expect(anthropic.notes.join(" ")).toMatch(/ZERO MARGIN/);
     expect(anthropic.notes.join(" ")).toMatch(/whole basket/i);
+    expect(anthropic.notes.join(" ")).toContain("5.91 %");
+  });
+
+  it("judges the price-at-size bar at the fee the leg WILL pay, so a scheduled 300 keeps the keeper's 25 and not the old formula's 0", () => {
+    const anthropic = CATALOGUE.find((asset) => asset.symbol === "ANTHROPIC")!;
+    // A penalty just over the bar refuses at 300, the bar the keeper keeps;
+    // just under it passes. Under the old (200 - fee) / 4 even 1 bps refused.
+    const penalty = (bps: number) => ({ ...anthropic, sizePenalty: { ...anthropic.sizePenalty!, bps } });
+    expect(offerProblems(penalty(25))).toEqual([]);
+    expect(offerProblems(penalty(26)).map((problem) => problem.rule)).toEqual(["PRICE_AT_SIZE"]);
+    expect(offerProblems(penalty(26))[0]!.why).toContain("over the 25 bps");
+    // AND THE WRITTEN FEE IS WHAT DECIDES IT, where the two fees give two bars:
+    // 50 charged today is a bar of 37, and 300 written for later is a bar of
+    // 25. A leg measured at 30 bps passes the first and fails the second — and
+    // the keeper will judge it at 25 from the day the 300 was written.
+    const writtenOver = { ...penalty(30), fee: { ...anthropic.fee!, bps: 50, scheduled: { bps: 300, epoch: 1043 } } };
+    expect(sizePenaltyCeilingBps(50)).toBe(37);
+    expect(offerProblems(writtenOver).map((problem) => problem.rule)).toEqual(["PRICE_AT_SIZE"]);
+    expect(offerProblems({ ...writtenOver, fee: { ...writtenOver.fee, scheduled: null } })).toEqual([]);
   });
 
   it("keeps FIGUREAI out on the quarantine ALONE, which is the rule doing the work and not an old sentence", () => {
@@ -369,11 +408,15 @@ describe("the first investment policy", () => {
     expect(PRESTOCKS_POWERS.issuerKey).toBe(PRESTOCKS_ISSUER);
     expect(PRESTOCKS_POWERS.oneKeyHolds).toEqual(["mint", "freeze", "permanent-delegate", "transfer-fee-config"]);
     expect(PRESTOCKS_POWERS.pausable).toBe(true);
-    // AND EVERY PRESTOCK IS AT THE CEILING TODAY, which is a group fact and not
-    // an ANTHROPIC quirk: the issuer moved all of them to 100 bps at epoch 1039.
+    // AND THE FEE IS A GROUP FACT, NOT AN ANTHROPIC QUIRK. Read 2026-09-24 in
+    // epoch 1041: every PreStock charges 100 bps, and the same key had already
+    // written 300 — exactly the ceiling — for epoch 1043 on every one of them
+    // but SPACEX, which has nothing newer.
     for (const asset of CATALOGUE.filter((entry) => entry.group === "prestock")) {
-      expect(asset.fee!.bps).toBe(CATALOGUE_MAX_FEE_BPS);
-      expect(asset.fee!.epoch).toBe(1039);
+      expect(asset.fee!.bps).toBe(100);
+      expect(asset.fee!.epoch).toBe(1041);
+      expect(asset.fee!.readOn).toBe("2026-09-24");
+      expect(asset.fee!.scheduled, asset.symbol).toEqual(asset.symbol === "SPACEX" ? null : { bps: CATALOGUE_MAX_FEE_BPS, epoch: 1043 });
       expect(asset.tokenAccountBytes).toBe(191);
     }
     // THE STRONGER FACT, AND THE REASON IT IS STRONGER: a Token-2022 mint's

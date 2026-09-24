@@ -46,6 +46,7 @@ import {
   pricedAtSlot,
   routeMints,
   routeWarning,
+  routeWarningsFor,
   transferFeeForEpoch,
   worstCaseTransferFee,
   verifyQuoteAnswersRequest,
@@ -1383,6 +1384,23 @@ describe("the slippage a route was quoted at, against the fee it will pay [warni
     const route = verifySharedAccountsRoute(quote(), responseDeliveringToVault(), context({ transferFee: FEE_50 }));
     expect(route.warnings).toEqual([]);
     expect(routeWarning(route, "slippage-not-above-transfer-fee")).toBeNull();
+  });
+
+  it("at the 300 bps ceiling, says nothing for the 400 the keeper asks and names the 300 it must never ask", () => {
+    // THE OWNER RAISED THE CEILING TO 300 ON 2026-09-24 (invest-decision.ts
+    // MAX_LEG_FEE_BPS), because the issuer had written 300 for epoch 1043.
+    // legSlippageBps(300) is 400, so the usable tolerance on a gross-quoting
+    // venue is 100 bps — the same as 200 over 100 — and the builder stays
+    // silent. Asked at 300 against 300 it is the 100-over-100 revert again,
+    // and it says so.
+    const fee300: TransferFeeRate = { epoch: 1043n, basisPoints: 300, maximumFee: 18446744073709551615n };
+    const ask = (slippageBps: number) => routeWarningsFor({ inputMint: PublicKey.default, targetMint: PublicKey.default, amountIn: 5_000_000n, slippageBps }, fee300);
+    expect(ask(400)).toEqual([]);
+    const equal = ask(300);
+    expect(equal).toHaveLength(1);
+    expect(equal[0]).toMatchObject({ condition: "slippage-not-above-transfer-fee", slippageBps: 300, transferFeeBps: 300, usableToleranceBps: 0 });
+    // The old ask, 200, against the new fee: 100 bps short.
+    expect(ask(200)[0]!.usableToleranceBps).toBe(-100);
   });
 
   it("says nothing on a mint that charges nothing, however narrow the slippage", () => {

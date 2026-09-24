@@ -674,63 +674,82 @@ export function rollingDecision(input: {
 
 /**
  * The most an epoch-active transfer fee may be before this keeper refuses to
- * buy a leg at all: 100 bps, half of SLIPPAGE_BPS.
+ * buy a leg at all: 300 bps.
  *
  * SUBTRACTING THE FEE IS NOT THE SAME AS SURVIVING IT. min-out.ts now prices
  * against what the vault is actually credited, so the bound is honest at any
  * rate — but honest arithmetic on a 10% fee still buys 10% less stock, and one
  * key (the same that holds mint, freeze, pause and permanent-delegate authority
- * over both PreStocks mints) can schedule any rate up to 10_000 bps with about
- * two epochs' notice. It has already moved these mints from 0 to 50. A ceiling
+ * over every PreStocks mint) can schedule any rate up to 10_000 bps with about
+ * two epochs' notice. It has moved these mints 0 -> 50 -> 100 -> 300. A ceiling
  * is what turns "we would have priced it correctly" into "we did not buy it".
  *
- * 100 IS ADMITTED ON PURPOSE, AND IT IS THE LAST RATE THAT IS. The comparison
- * below is strictly greater-than, so exactly 100 bps passes — that is a
- * decision, not an accident of the operator, and this is where it is recorded.
- * A leg is bought and one day sold, so the ceiling is paid TWICE: 100 bps in
- * and 100 bps out is a 2 % round trip, which is the entire 200 bps
- * (SLIPPAGE_BPS) tolerance min-out.ts allows a single fill. At the ceiling the
- * product is already giving away a round trip's worth of the user's money to
- * the issuer, and the same authority can schedule more whenever it likes. So
- * the boundary is deliberate, it is tested at exactly 100 and at 101, and
- * raising the number means accepting a round trip larger than the slippage
- * bound the keeper enforces against the market — which is a different decision
- * from this one, and has to be argued on its own.
+ * RAISED FROM 100 TO 300 ON 2026-09-24, BY THE OWNER, KNOWING THE COST. Read on
+ * mainnet that day (epoch 1041): the issuer key WV9PJN7X… had ALREADY WRITTEN
+ * newer_transfer_fee = 300 bps from epoch 1043 into ANTHROPIC, FIGUREAI, OPENAI,
+ * NEURALINK, POLYMARKET, KALSHI and ANDURIL (older record 100 bps from 1039,
+ * maximum_fee u64::MAX); SPACEX stayed at 100 from 1039 with nothing newer, and
+ * SPYx carries no fee extension at all. At the old ceiling of 100 this keeper
+ * raised a CRITICAL alert — 300 scheduled against 100 — because from epoch 1043
+ * (around Sat 26 Sep 2026, 05:00Z, from 265.7 ms/slot measured over epoch 1041)
+ * every basket holding a PreStock would have been REFUSED whole, SPYx and the
+ * SOL conversion with it, with nothing signed or deployed here. The owner chose
+ * to keep buying through it rather than drop the PreStock the track requires.
+ *
+ * WHAT HE ACCEPTED, SAID WHERE THE NUMBER IS. A leg is bought and one day sold,
+ * so the fee is paid TWICE: 3 % in and 3 % out is 1 - 0.97^2 = 5.91 % of a
+ * PreStock position gone to the issuer before the market is involved at all
+ * (at 100 it was 1.99 %). That is almost three times the whole 200 bps
+ * (SLIPPAGE_BPS) min-out.ts allows a single fill against the market, and the
+ * ceiling existed to stop exactly this; accepting it is a product decision and
+ * it is his. What it does NOT cost is the market budget: legSlippageBps(300)
+ * asks Jupiter for 400 bps, strictly 100 over the fee as the 0x1771 revert
+ * demands, so the usable tolerance is still 100 bps and maxTurnImpactBps(400,
+ * 300) is still 25 bps — the same impact bar as at 100 over 200.
+ *
+ * 300 IS ADMITTED ON PURPOSE, AND IT IS AGAIN THE LAST RATE THAT IS. The
+ * comparison below is strictly greater-than, so exactly 300 bps passes and 301
+ * refuses; both are tested. One more step by the same key — it has stepped by
+ * 50, 50 and then 200 — refuses the WHOLE basket and the SOL conversion again, on every
+ * sweep, until the fee comes back down or the basket is re-signed without the
+ * leg. Raising this again is the same decision over again, and is the owner's.
  */
-export const MAX_LEG_FEE_BPS = 100n;
+export const MAX_LEG_FEE_BPS = 300n;
 
 /**
- * The size of the step the fee authority has ACTUALLY used, in bps.
+ * The SMALLEST step the fee authority has actually used, in bps.
  *
- * Both PreStocks mints have been moved 0 -> 50 -> 100 by the same key, twice,
- * in fifty-bps steps. This is not a promise about the next move: that key can
- * write any rate up to 10_000 bps whenever it likes, and nothing obliges it to
- * keep its own rhythm. It is the only EVIDENCE that exists about the size of a
- * move, and it is what the warning below is spaced by — one observed step of
- * room, rather than a margin invented here.
+ * The PreStocks mints were moved 0 -> 50 -> 100 by the same key in fifty-bps
+ * steps, and then — read 2026-09-24 — 100 -> 300 in ONE write of 200. This is
+ * not a promise about the next move: that key can write any rate up to 10_000
+ * bps whenever it likes, and the 200 step is the proof that it does not keep
+ * its own rhythm. Fifty is kept because it is the smallest move on record, and
+ * the band below is spaced by it — one observed step of room under the ceiling
+ * rather than a margin invented here.
  */
 export const LEG_FEE_STEP_BPS = 50n;
 
 /**
  * The fee at which a leg starts being REPORTED, in bps: one observed issuer
- * step under MAX_LEG_FEE_BPS, so 50.
+ * step under MAX_LEG_FEE_BPS, so 250.
  *
  * REPORTED, NOT REFUSED, AND THE DISTINCTION IS THE WHOLE POINT. The refusal
  * already exists and sits at MAX_LEG_FEE_BPS; firing it earlier would be this
  * keeper deciding a product question — how much of the owner's money may go to
  * an issuer — which is the owner's to decide and is argued at MAX_LEG_FEE_BPS.
- * What is missing is not a stricter bound, it is NOTICE. Today's live fee on
- * ANTHROPIC is exactly 100 bps, admitted only because the comparison at the
- * refusal is strictly greater-than, and NOTHING SAYS SO ANYWHERE: the basket is
- * bought, the turn reports INVESTED, and the single next step by one key stops
- * SPYx, ANTHROPIC and the SOL conversion together, with no warning before it and
- * a REFUSED turn after it.
+ * What the band adds is NOTICE: a leg at the ceiling is admitted only because
+ * the comparison at the refusal is strictly greater-than, and without this the
+ * basket is bought, the turn reports INVESTED, and the single next step by one
+ * key stops every leg and the SOL conversion together, with no warning before
+ * it and a REFUSED turn after it.
  *
- * WHY HALF THE CEILING AND NOT A TIGHTER BAND. A band narrower than one observed
- * step can be jumped clean over — 50 to 101 in one write — and a warning that the
- * fee can skip is not a warning. At LEG_FEE_WARN_BPS the operator hears about a
- * leg from the moment it is one of this issuer's own steps away from stopping
- * the product, which is the earliest point at which the number means anything.
+ * THE BAND IS NOT WHAT CAUGHT THE 200-BPS STEP, AND CANNOT BE. A write can jump
+ * clean over any band — 100 to 300 did, over the old 50..100 one. What caught
+ * it is legFeeCeilingAlert reading the SCHEDULED fee out of the same bytes: a
+ * rise is written into newer_transfer_fee about two epochs before it is
+ * charged, so a jump past the ceiling is a dated CRITICAL long before it is a
+ * refusal. The band only decides which LIVE or scheduled rates under the
+ * ceiling are close enough to say out loud.
  */
 export const LEG_FEE_WARN_BPS = MAX_LEG_FEE_BPS - LEG_FEE_STEP_BPS;
 
@@ -973,7 +992,12 @@ export function legFeeCeilingAlert(input: {
   if (worst < LEG_FEE_WARN_BPS) return null;
 
   const name = input.mint.toBase58();
-  const nextStep = live.bps + LEG_FEE_STEP_BPS;
+  // THE NEXT STEP IS MEASURED FROM THE FEE THIS LEG WILL PAY, NOT THE ONE IT
+  // PAYS NOW. Read 2026-09-24: 100 live, 300 written for epoch 1043. Measured
+  // from the live 100, "one more step takes it to 150" is a sentence about a
+  // rate nobody will ever charge; the rate that matters is what lands after
+  // the write already on chain, and one step past THAT is what stops the basket.
+  const nextStep = worst + LEG_FEE_STEP_BPS;
   // A rise already written for a later epoch that lands ABOVE the ceiling is not
   // a risk, it is a date: on that epoch every turn for this basket is REFUSED,
   // with nothing signed here, nothing deployed, and nothing else to notice it.
@@ -985,6 +1009,13 @@ export function legFeeCeilingAlert(input: {
   // false sentence in the message an operator wakes up to.
   const stopped = live.bps > MAX_LEG_FEE_BPS;
   const atCeiling = live.bps === MAX_LEG_FEE_BPS;
+  // A SCHEDULED RATE EXACTLY ON THE CEILING IS A WARNING, NOT A DATE. It is
+  // admitted — the gate is strictly greater-than — so the basket keeps being
+  // bought from that epoch; what it loses is every basis point of margin. This
+  // is the state the owner accepted on 2026-09-24 (MAX_LEG_FEE_BPS), and
+  // calling it critical would page an operator every repeat window for a
+  // decision that has already been taken.
+  const scheduledAtCeiling = scheduled !== null && scheduled.bps === MAX_LEG_FEE_BPS;
   const position = stopped
     ? `already ${live.bps - MAX_LEG_FEE_BPS} bps OVER it, which is why this basket is being refused`
     : atCeiling
@@ -992,9 +1023,13 @@ export function legFeeCeilingAlert(input: {
       : `${MAX_LEG_FEE_BPS - live.bps} bps under it`;
   const nextStepWords = stopped
     ? `Every sweep refuses the whole basket while this stands — every other leg and the SOL conversion with it.`
-    : `One more step of the ${LEG_FEE_STEP_BPS} bps this issuer has used takes it to ${nextStep} bps, and ANY rate above ` +
-      `${MAX_LEG_FEE_BPS} refuses the whole basket — every other leg and the SOL conversion with it, on every sweep, ` +
-      `for as long as the fee stands.`;
+    : dated
+      ? `ANY rate above ${MAX_LEG_FEE_BPS} refuses the whole basket — every other leg and the SOL conversion with it, on every ` +
+        `sweep, for as long as the fee stands.`
+      : `One more step of ${LEG_FEE_STEP_BPS} bps — the smallest this issuer has used — past the ${worst} bps it ` +
+        `${worst === live.bps ? "charges" : "is scheduled to charge"} takes it to ${nextStep} bps, and ANY rate above ` +
+        `${MAX_LEG_FEE_BPS} refuses the whole basket — every other leg and the SOL conversion with it, on every sweep, ` +
+        `for as long as the fee stands.`;
 
   const scheduledWords =
     scheduled === null
@@ -1004,7 +1039,10 @@ export function legFeeCeilingAlert(input: {
         `${scheduled.epoch - input.currentEpoch} epoch(s) from now` +
         (dated
           ? `: from that epoch this whole basket stops being bought, and nothing needs to be signed or deployed here for that to happen.`
-          : `, still at or under the ceiling.`);
+          : scheduledAtCeiling
+            ? `: EXACTLY the ceiling, the last rate that is admitted, so from that epoch this basket is still bought with no margin ` +
+              `left at all, and the next write by the same key stops it.`
+            : `, still under the ceiling.`);
 
   return {
     key: `leg-fee:${name}:${worst}`,
@@ -1015,7 +1053,9 @@ export function legFeeCeilingAlert(input: {
         ? "A leg's scheduled transfer fee will stop this basket"
         : atCeiling
           ? "A leg's transfer fee is at the ceiling this keeper buys through"
-          : "A leg's transfer fee is one issuer step under the ceiling",
+          : scheduledAtCeiling
+            ? "A leg's scheduled transfer fee lands exactly on the ceiling this keeper buys through"
+            : "A leg's transfer fee is one issuer step under the ceiling",
     detail:
       `${name} charges ${live.bps} bps to transfer in epoch ${input.currentEpoch}, against the ${MAX_LEG_FEE_BPS} bps ` +
       `ceiling this keeper buys through — ${position}. ${nextStepWords} ${scheduledWords}`,
@@ -1358,7 +1398,10 @@ export const MIN_VENUE_INVENTORY_MULTIPLE = 50n;
  * 350 -> 598 in six minutes, a 70 % swing — so impact gets a quarter and drift
  * three quarters.
  *
- * ANTHROPIC today: (200 - 100) / 4 = 25 bps. A zero-fee mint: 50 bps.
+ * ANTHROPIC at a 100 bps fee: (200 - 100) / 4 = 25 bps. At the 300 bps the
+ * issuer wrote for epoch 1043 (read 2026-09-24): legSlippageBps(300) = 400, so
+ * (400 - 300) / 4 = 25 bps again — the slippage moves with the fee and the
+ * impact bar does not. A zero-fee mint: 50 bps.
  *
  * CROSS-CHECKED AGAINST A MEASUREMENT TAKEN FOR ANOTHER PURPOSE: 187.79 USDC
  * into the healthy venue measured ~27 bps when that mint charged 50 bps, so
@@ -1399,8 +1442,10 @@ export const MIN_PROBE_RAW = 1_000_000n;
  * STRICTLY ABOVE THE FEE, AND BY A MEASURED MARGIN. 100 over 100 reverts by ONE
  * RAW UNIT — Jupiter floors its deduction and Token-2022 ceils its fee — and
  * 200 over 100 fills. So equality is provably fatal and the margin is at least
- * 100 bps. legSlippageBps() re-quotes automatically the day the issuer moves to
- * 150 bps, instead of reverting every sweep with no explanation.
+ * 100 bps. legSlippageBps() re-quotes automatically the day the issuer moves the
+ * fee, instead of reverting every sweep with no explanation — and it already
+ * has: from the moment 300 bps was written for epoch 1043 (read 2026-09-24),
+ * a PreStock leg's worst-case fee is 300 and it is quoted at 400.
  *
  * THE COST, STATED WHERE THE TRADE IS MADE: a wider slippage is a LOOSER
  * per-call floor out of investMinOut. This gate does not compensate for that,
@@ -1618,11 +1663,11 @@ export function maxTurnImpactBps(slippageBps: bigint, feeBps: bigint): bigint {
  * 200 bps, or strictly above the fee by MIN_SLIPPAGE_MARGIN_BPS, whichever is
  * larger.
  *
- * THIS IS WHERE THE 100-OVER-100 REVERT IS MADE UNREACHABLE. At ANTHROPIC's
- * live 100 bps this returns 200 — the margin that was measured to fill. The
- * day the issuer schedules 150 it returns 250 by itself, rather than the keeper
- * quoting 200 against 150 and reverting every sweep with 0x1771 and no
- * explanation.
+ * THIS IS WHERE THE 100-OVER-100 REVERT IS MADE UNREACHABLE. At a 100 bps fee
+ * this returns 200 — the margin that was measured to fill. At the ceiling of
+ * 300 it returns 400 by itself (ANTHROPIC's worst-case fee since 300 was
+ * written for epoch 1043), rather than the keeper quoting 200 against 300 and
+ * reverting every sweep with 0x1771 and no explanation.
  */
 export function legSlippageBps(feeBps: bigint): bigint {
   const floor = feeBps + MIN_SLIPPAGE_MARGIN_BPS;

@@ -574,8 +574,9 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // cannot buy safely — not Token-2022, a real transfer hook, or a transfer fee
   // above MAX_LEG_FEE_BPS — refuses the whole basket here, before the wrap.
   // Every one of those is knowable from the mint's own bytes, and the fee in
-  // particular is the issuer's to change: these mints have already gone from 0
-  // to 50 bps, and the same key can schedule 10_000. The decision itself is pure
+  // particular is the issuer's to change: these mints have gone 0 -> 50 -> 100
+  // -> 300 bps (the last written for epoch 1043, read 2026-09-24), and the same
+  // key can schedule 10_000. The decision itself is pure
   // (legAdmissionDecision); this only fetches the bytes and the epoch to judge
   // them in — the epoch out of the Clock ALREADY READ above, so the fee is
   // resolved against the very clock Token-2022 charges by.
@@ -598,12 +599,13 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // A WARNING, NOT A SECOND GATE. legFeeWarnings changes no outcome, no
   // purchase and no detail string: it reports the leg whose fee is at the
   // ceiling or one issuer step under it, or which carries a rise already
-  // written for a later epoch. Today's live fee on ANTHROPIC is EXACTLY
-  // MAX_LEG_FEE_BPS, admitted only because that comparison is strictly
-  // greater-than, and until this line nothing anywhere said so: the basket was
-  // bought, the turn reported INVESTED, and the single next write by one key
-  // would stop SPYx, ANTHROPIC and the SOL conversion together with no notice
-  // before it. The alerts go out on the result and are raised in bin/keeper.mts.
+  // written for a later epoch. From epoch 1043 ANTHROPIC's fee is EXACTLY
+  // MAX_LEG_FEE_BPS (300, already written on chain when read 2026-09-24),
+  // admitted only because that comparison is strictly greater-than — and
+  // before this line nothing anywhere said so: the basket was bought, the turn
+  // reported INVESTED, and the single next write by one key would stop every
+  // leg and the SOL conversion together with no notice before it. The alerts
+  // go out on the result and are raised in bin/keeper.mts.
   //
   // THE SAME ARRAY AND THE SAME EPOCH, WHICH IS WHY `legMints` WAS HOISTED.
   // Both calls are pure and both walk the mint's TLV, so two independently

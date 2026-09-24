@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
 
 import { BasketPicker } from "@/components/wallets/BasketPicker";
 import { PICKER_MAX_LEGS, type PickedRow } from "@/lib/basket-picker";
-import { PICKER_COPY } from "@/lib/vault-copy";
+import { MAX_LEG_FEE_BPS, PICKER_COPY } from "@/lib/vault-copy";
 
 const rows = (...picks: readonly (readonly [string, string])[]): PickedRow[] => picks.map(([mint, percent]) => ({ mint, percent }));
 
@@ -187,10 +187,19 @@ describe("BasketPicker", () => {
     expect(XSTOCKS_POWERS.mintsRead).toEqual(["SPYx"]);
     expect(PRESTOCKS_POWERS.by).toContain("the eight PreStocks mints");
     expect(html).toContain("The issuer still holds freeze, pause and a permanent delegate");
-    // And the PreStocks fee is at SaverFi's own limit, with what that means.
-    expect(html).toContain("one more raise and the whole basket stops");
+    // And the PreStocks fee reaches SaverFi's own limit, with when and what that
+    // means: 1 % charged today, 3 % — the limit — already written for epoch
+    // 1043 on every PreStock but SPACEX (read 2026-09-24).
+    expect(html).toContain("Each charges 1 % to transfer today, and on all but SPACEX it has already written 3 % from epoch 1043");
+    expect(html).toContain("one more raise after that and the whole basket stops");
     // Once each, however many stocks share the fact.
-    expect(html.split("one more raise and the whole basket stops")).toHaveLength(2);
+    expect(html.split("one more raise after that and the whole basket stops")).toHaveLength(2);
+    // AND THE GROUP SENTENCE IS HELD TO THE READINGS IT SUMMARISES, so a re-read
+    // that changes either half turns this red instead of leaving it standing.
+    const prestocks = CATALOGUE.filter((asset) => asset.group === "prestock");
+    expect(prestocks.every((asset) => asset.fee?.bps === 100)).toBe(true);
+    expect(prestocks.filter((asset) => asset.fee?.scheduled === null).map((asset) => asset.symbol)).toEqual(["SPACEX"]);
+    for (const asset of prestocks.filter((entry) => entry.symbol !== "SPACEX")) expect(asset.fee?.scheduled).toEqual({ bps: MAX_LEG_FEE_BPS, epoch: 1043 });
     expect(CATALOGUE.filter((asset) => !isOfferable(asset)).length).toBeGreaterThan(1);
   });
 });

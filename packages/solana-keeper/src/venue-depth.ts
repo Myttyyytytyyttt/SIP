@@ -334,7 +334,13 @@ export async function measureLegVenue(
     readonly inputMint: PublicKey;
     readonly targetMint: PublicKey;
     readonly spend: bigint;
-    /** The destination mint's live transfer fee, in bps. Zero for the wSOL -> USDC convert. */
+    /**
+     * The destination mint's WORST-CASE transfer fee, in bps — the live one or a
+     * rise already written for a later epoch, whichever is higher (the tick
+     * passes LegAdmission.worstCaseFees). Zero for the wSOL -> USDC convert. Up to
+     * MAX_LEG_FEE_BPS = 300, where legSlippageBps asks 400 and the usable
+     * tolerance below is still 100.
+     */
     readonly feeBps: bigint;
     readonly maxAge: AgeTolerance;
     readonly ownerFloorRateWad?: bigint;

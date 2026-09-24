@@ -86,18 +86,20 @@ export const PRESTOCKS_ISSUER = "WV9PJN7XTmTLVwbutCLFxp8TyePee6Xq5mRq6Fti5Wc";
 /**
  * PreStocks ANTHROPIC: Token-2022, 9 decimals, with a transfer fee whose
  * maximum is u64::MAX, so the fee is uncapped however large the trade. Read
- * 2026-09-21 (epoch 1039) that fee is 100 BPS — it was 50 until the issuer's
- * scheduled record took effect at that epoch, and 100 is exactly the keeper's
- * MAX_LEG_FEE_BPS. Never take the number from this comment; read it from the
- * mint. Everything at PRESTOCKS_ISSUER is true of it, and its transfer_hook
- * extension carries a null program id.
+ * 2026-09-21 (epoch 1039) that fee was 100 BPS — it was 50 until the issuer's
+ * scheduled record took effect at that epoch. Read 2026-09-24 (epoch 1041) it
+ * still charged 100 and 300 BPS was already written for epoch 1043, which is
+ * exactly the keeper's MAX_LEG_FEE_BPS since the owner raised it that day.
+ * Never take the number from this comment; read it from the mint. Everything at
+ * PRESTOCKS_ISSUER is true of it, and its transfer_hook extension carries a
+ * null program id.
  */
 export const ANTHROPIC_MINT = "Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw";
 
 /** Raydium CLMM ANTHROPIC/USDC (mint0 ANTHROPIC, mint1 USDC), fee tier 0.25 %, tick spacing 60: the ANTHROPIC floor's price. */
 export const ANTHROPIC_USDC_POOL = "47MsbowAJnPPt6jgSGLK4hdCtKqRRcKT5pTFHPV7WBPt";
 
-/** PreStocks FIGUREAI: Token-2022, 9 decimals, the same uncapped fee — 100 bps in epoch 1039 — and the same single authority key as ANTHROPIC. */
+/** PreStocks FIGUREAI: Token-2022, 9 decimals, the same uncapped fee — 100 bps in epoch 1039, 300 written for epoch 1043 (read 2026-09-24) — and the same single authority key as ANTHROPIC. */
 export const FIGUREAI_MINT = "PreZad18qfPtbxNpMtMuAuX2zVpvkEU8DnJx56faCWd";
 
 // ── The rest of the PreStocks shelf, pinned 2026-09-21 ──────────────────────

@@ -1562,7 +1562,8 @@ async function sweep(): Promise<void> {
         // `invest-refused` fires only on REFUSED and is one of the three
         // outcomes that always log. This fires on ANY turn that read the leg
         // mints — an INVESTED basket whose ANTHROPIC leg sits EXACTLY on
-        // MAX_LEG_FEE_BPS is the live case, and it is the healthiest-looking
+        // MAX_LEG_FEE_BPS (300 from epoch 1043, already written on chain) is
+        // the live case, and it is the healthiest-looking
         // outcome there is. A warning only an unhealthy turn can carry is a
         // warning that arrives the sweep after it was useful.
         //

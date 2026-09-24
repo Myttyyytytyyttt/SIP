@@ -30,8 +30,9 @@
 // which is computed from the quote's own slippageBps.
 //
 // (4) AND THE ONE THE GUARDS CANNOT SEE. Two of the three legs are Token-2022
-// mints with a transfer fee (100 bps since epoch 1039, 50 before it,
-// maximumFee u64::MAX). The credit a destination account receives is NET of
+// mints with a transfer fee (100 bps since epoch 1039, 50 before it, and 300
+// already written for epoch 1043 when read on 2026-09-24; maximumFee
+// u64::MAX). The credit a destination account receives is NET of
 // that fee, so the delta the program measures is NET — while on a
 // gross-quoting venue Jupiter's outAmount and otherAmountThreshold are GROSS.
 // A min_out copied from either is then a number about different money. The two
@@ -340,8 +341,9 @@ export interface DestinationTransferFee {
   /** The rate in force RIGHT NOW. */
   readonly current: TransferFeeRate;
   /**
-   * A rate scheduled for a LATER epoch, if one is pending. Both PreStocks legs
-   * carry one: 50 bps until epoch 1038, 100 bps from 1039. An epoch boundary
+   * A rate scheduled for a LATER epoch, if one is pending. The PreStocks legs
+   * have carried one twice: 50 -> 100 bps at epoch 1039, and 100 -> 300 bps
+   * written for epoch 1043 (read 2026-09-24; SPACEX alone has no 300). An epoch boundary
    * is roughly two days, so a route quoted today can land under the new rate —
    * which is why `worstCase` exists and why min_out should be taken from it.
    */

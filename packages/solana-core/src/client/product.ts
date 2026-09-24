@@ -109,7 +109,11 @@ export const DEFAULT_INVEST_CAPS = Object.freeze({ maxPerCall: 1_000_000_000n, m
 
 /** The convert floor sits this far under the live SOL/USDC pool price: 10 %. */
 export const CONVERT_FLOOR_MARGIN_BPS = 1_000;
-/** A leg's floor sits this far under the live pool rate: 5 %, so at most about 5.3 % over today's price is paid. */
+/**
+ * A leg's floor sits this far under the live pool rate NET OF THE LEG'S
+ * TRANSFER FEE: 5 %, so at most about 5.3 % over today's price after the fee is
+ * paid. server/build-handler.ts says why the fee is taken off first.
+ */
 export const LEG_FLOOR_MARGIN_BPS = 500;
 
 /** A classic SPL Token account (the vault's wSOL and USDC accounts): 165 bytes. Its rent is read from the chain, never derived. */
@@ -152,13 +156,46 @@ export const CLASSIC_TOKEN_ACCOUNT_BYTES = 165;
 /** Which product an asset is. The two groups differ in what their issuer can do to a holder, which is a product fact and is spelled out at PRESTOCKS_POWERS and XSTOCKS_POWERS. */
 export type AssetGroup = "prestock" | "xstock";
 
-/** The live transfer fee read off a mint, with the epoch it was live in: the issuer rewrites it at an epoch boundary, so the epoch is half the reading. */
+/**
+ * A mint's transfer fee as it was read: the rate in force, the epoch it was
+ * read in, and any rate ALREADY WRITTEN for a later epoch. The issuer rewrites
+ * the fee at an epoch boundary, so the epoch is half the reading.
+ *
+ * TWO RATES, BECAUSE THE CHAIN STORES TWO AND ONE OF THEM IS THE FUTURE.
+ * Token-2022 keeps older_transfer_fee (in force now) and newer_transfer_fee
+ * (stamped with the epoch it starts in, about two epochs out). Until
+ * 2026-09-24 this carried only the first, and that day it was the wrong half:
+ * seven PreStocks mints charged 100 bps while 300 was already written for epoch
+ * 1043. A shelf judged on the 100 would have offered a leg at a rate it will
+ * not be bought at; a shelf that wrote 300 into `bps` would have told the owner
+ * he pays 3 % today when he pays 1 %. So both are kept, each for its reader:
+ * the offer rules judge judgedFeeBps (the higher of the two), and the words the
+ * owner signs say what is charged now and what is written for when.
+ */
 export interface FeeReading {
+  /** The rate IN FORCE when read: what a transfer in `epoch` was charged. */
   readonly bps: number;
+  /** The epoch the reading was taken in. */
   readonly epoch: number;
+  /**
+   * The rate already written into newer_transfer_fee for a LATER epoch, and
+   * that epoch — or null when nothing was pending. NULL IS A READING, not an
+   * absence of one: every entry states it.
+   */
+  readonly scheduled: { readonly bps: number; readonly epoch: number } | null;
   readonly readOn: string;
   readonly by: string;
 }
+
+/**
+ * The fee a leg WILL pay, as far as the reading can see: the rate in force or
+ * the one already written for a later epoch, whichever is higher. This is what
+ * every offer rule judges, for the same reason the keeper sizes its slippage
+ * against worstCaseTransferFee: a rise already on chain arrives with nothing
+ * signed, and a shelf that ignored it would offer a leg the keeper refuses two
+ * epochs later.
+ */
+export const judgedFeeBps = (fee: FeeReading): number => Math.max(fee.bps, fee.scheduled?.bps ?? 0);
 
 /**
  * What a venue was measured to hold of USDC, and — crucially — WHICH
@@ -299,11 +336,14 @@ export interface OfferedLeg extends CatalogueAsset {
  * is the product, not a defect, and it is the reason this group is named on the
  * page rather than folded in beside the equities.
  *
- * AND THE FEE IS ALREADY AT THE CEILING, ON ALL OF THEM. Every PreStocks mint
- * read that day charged 100 bps from epoch 1039 — exactly MAX_LEG_FEE_BPS,
- * which invest-decision.ts compares with `>`, so they are admitted with ZERO
- * MARGIN. One more issuer write refuses the whole basket, the deep legs and the
- * SOL conversion with it, until the fee comes back down.
+ * AND THE KEY HAS USED THE FEE, TWICE. Every PreStocks mint read on 2026-09-21
+ * charged 100 bps from epoch 1039 (it was 50 before). Read again on 2026-09-24
+ * (epoch 1041), seven of the eight already had 300 bps written for epoch 1043 —
+ * all but SPACEX, which stays at 100 with nothing newer. 300 is exactly the
+ * keeper's MAX_LEG_FEE_BPS since the owner raised it that day, compared with
+ * `>`, so from epoch 1043 those seven are admitted with ZERO MARGIN. One more
+ * issuer write refuses the whole basket, the deep legs and the SOL conversion
+ * with it, until the fee comes back down.
  */
 export const PRESTOCKS_POWERS = Object.freeze({
   issuerKey: "WV9PJN7XTmTLVwbutCLFxp8TyePee6Xq5mRq6Fti5Wc",
@@ -382,11 +422,28 @@ export const CATALOGUE_REFERENCE_LEG_RAW = DEFAULT_INVEST_CAPS.maxPerCall / BigI
  */
 export const CATALOGUE_VENUE_INVENTORY_MULTIPLE = 50n;
 
-/** The keeper's MAX_LEG_FEE_BPS, same reason, same vector. Compared with `>`, so a fee sitting exactly on it is admitted with no margin. */
-export const CATALOGUE_MAX_FEE_BPS = 100;
+/**
+ * The keeper's MAX_LEG_FEE_BPS, same reason, same vector. Compared with `>`, so
+ * a fee sitting exactly on it is admitted with no margin. 300 SINCE 2026-09-24,
+ * when the owner raised the keeper's ceiling from 100 rather than lose every
+ * PreStock at epoch 1043; invest-decision.ts records the decision and its cost.
+ */
+export const CATALOGUE_MAX_FEE_BPS = 300;
 
-/** The keeper's SLIPPAGE_BPS (min-out.ts), same reason, same vector: the whole budget between a quote and its fill. */
+/** The keeper's SLIPPAGE_BPS (min-out.ts), same reason, same vector: the plain ask, and the budget a zero-fee leg is quoted at. */
 export const CATALOGUE_SLIPPAGE_BPS = 200;
+
+/** The keeper's MIN_SLIPPAGE_MARGIN_BPS (invest-decision.ts), same vector: how far strictly above its fee a leg's slippage is asked. */
+export const CATALOGUE_SLIPPAGE_MARGIN_BPS = 100;
+
+/** The keeper's IMPACT_TOLERANCE_DIVISOR: impact gets a quarter of the usable tolerance. */
+export const CATALOGUE_IMPACT_TOLERANCE_DIVISOR = 4;
+
+/** The keeper's MIN_IMPACT_CEILING_BPS: the impact bar never drops under this. */
+export const CATALOGUE_MIN_IMPACT_CEILING_BPS = 5;
+
+/** The keeper's legSlippageBps: the plain ask, or strictly the margin above the fee, whichever is larger — 400 at a 300 bps fee. */
+export const catalogueLegSlippageBps = (feeBps: number): number => Math.max(CATALOGUE_SLIPPAGE_BPS, feeBps + CATALOGUE_SLIPPAGE_MARGIN_BPS);
 
 /** What a venue must hold of USDC for the reference leg to clear the keeper's cover: 50 x 200 USDC = 10,000. */
 export const CATALOGUE_MIN_VENUE_DEPTH_RAW = CATALOGUE_REFERENCE_LEG_RAW * CATALOGUE_VENUE_INVENTORY_MULTIPLE;
@@ -405,8 +462,25 @@ export const CATALOGUE_MIN_VENUE_DEPTH_RAW = CATALOGUE_REFERENCE_LEG_RAW * CATAL
  */
 export const CATALOGUE_MIN_FLOOR_POOL_RAW = CATALOGUE_VENUE_INVENTORY_MULTIPLE * DEFAULT_PURCHASE_USDC_RAW;
 
-/** What ARM 2 allows the reference leg to cost in its own impact: a quarter of what the slippage budget has left after the issuer's fee. */
-export const sizePenaltyCeilingBps = (feeBps: number): number => Math.max(0, Math.floor((CATALOGUE_SLIPPAGE_BPS - feeBps) / 4));
+/**
+ * What ARM 2 allows the reference leg to cost in its own impact: the keeper's
+ * maxTurnImpactBps(legSlippageBps(fee), fee), exactly — a quarter of what the
+ * slippage it ASKS leaves over the fee, never under 5 bps.
+ *
+ * IT WAS (200 - fee) / 4 UNTIL 2026-09-24, AND AT A 300 BPS FEE THAT IS ZERO.
+ * The old formula divided the keeper's plain 200, which the keeper stopped
+ * asking for any leg whose fee is 100 or more: it asks fee + 100. Harmless at a
+ * 100 bps fee, where both give 25; at the 300 the issuer wrote for epoch 1043
+ * the old one gave 0 and would have taken ANTHROPIC off the shelf on
+ * PRICE_AT_SIZE while the keeper went on buying it at a bar of 25. So this now
+ * mirrors the keeper's arithmetic step for step, and product.test.ts holds it
+ * to the keeper's own numbers through LEG_FEE.impactCeilingBps in the vector.
+ */
+export function sizePenaltyCeilingBps(feeBps: number): number {
+  const usable = catalogueLegSlippageBps(feeBps) - feeBps;
+  const quarter = usable <= 0 ? 0 : Math.floor(usable / CATALOGUE_IMPACT_TOLERANCE_DIVISOR);
+  return Math.max(quarter, CATALOGUE_MIN_IMPACT_CEILING_BPS);
+}
 
 // ── THE RULES, WHICH ARE THE CATALOGUE ───────────────────────────────────────
 //
@@ -422,8 +496,8 @@ export const sizePenaltyCeilingBps = (feeBps: number): number => Math.max(0, Mat
 export const OFFER_RULES = Object.freeze({
   /** A USDC route must have been quoted for it. Nothing can be bought that the router will not price. */
   ROUTED: "a Jupiter USDC route was quoted for it at the reference leg",
-  /** Its live transfer fee must have been read on mainnet and be at or under the keeper's ceiling. An unread fee is not a zero fee. */
-  FEE: `its transfer fee was read on mainnet and is at most ${CATALOGUE_MAX_FEE_BPS} bps`,
+  /** Its transfer fee — in force or already written for a later epoch — must have been read on mainnet and be at or under the keeper's ceiling. An unread fee is not a zero fee. */
+  FEE: `its transfer fee, including any rise already written for a later epoch, was read on mainnet and is at most ${CATALOGUE_MAX_FEE_BPS} bps`,
   /** ARM 1's shape: the venue must hold cover for the reference leg. Necessary, never sufficient — the keeper re-counts in the turn. */
   DEPTH: `the venue it routes through held at least ${CATALOGUE_VENUE_INVENTORY_MULTIPLE}x the reference leg in USDC`,
   /** ARM 2's shape: the reference leg must not be quoted worse than the keeper's own impact ceiling. */
@@ -457,6 +531,9 @@ export function offerProblems(asset: CatalogueAsset): RuleFailure[] {
 
   if (asset.fee === null) fail("FEE", "its transfer fee has never been read on mainnet, and an unread fee is not a zero fee");
   else if (asset.fee.bps > CATALOGUE_MAX_FEE_BPS) fail("FEE", `it charged ${asset.fee.bps} bps in epoch ${asset.fee.epoch}, over the ${CATALOGUE_MAX_FEE_BPS} bps ceiling`);
+  else if (asset.fee.scheduled !== null && asset.fee.scheduled.bps > CATALOGUE_MAX_FEE_BPS) {
+    fail("FEE", `${asset.fee.scheduled.bps} bps is already written for epoch ${asset.fee.scheduled.epoch} (read ${asset.fee.readOn}), over the ${CATALOGUE_MAX_FEE_BPS} bps ceiling`);
+  }
 
   if (asset.depth !== null && asset.depth.usdcRaw < CATALOGUE_MIN_VENUE_DEPTH_RAW) {
     fail(
@@ -468,7 +545,8 @@ export function offerProblems(asset: CatalogueAsset): RuleFailure[] {
 
   if (asset.sizePenalty === null) fail("PRICE_AT_SIZE", "nobody has quoted it at the reference leg against a probe");
   else {
-    const ceiling = sizePenaltyCeilingBps(asset.fee?.bps ?? CATALOGUE_MAX_FEE_BPS);
+    // JUDGED AT THE FEE THE LEG WILL PAY, as the keeper sizes its slippage.
+    const ceiling = sizePenaltyCeilingBps(asset.fee === null ? CATALOGUE_MAX_FEE_BPS : judgedFeeBps(asset.fee));
     if (asset.sizePenalty.bps > ceiling) {
       fail(
         "PRICE_AT_SIZE",
@@ -520,7 +598,9 @@ export const routeCensusRaw = (asset: CatalogueAsset): bigint | null => routeCen
 //
 // READ ON MAINNET 2026-09-21, EPOCH 1039. The mint facts (owner, decimals,
 // extensions, authorities, live fee) come from one getMultipleAccounts over all
-// nine mints at slot 448993661. The floor pools' USDC sides come from a second
+// nine mints at slot 448993661. THE PRESTOCKS FEES WERE RE-READ ON 2026-09-24
+// (slot 450109271, epoch 1041), the day the 300 bps written for epoch 1043 was
+// found, and each `fee` says which read it is. The floor pools' USDC sides come from a second
 // one at slot 448994132, over ["pool_vault", pool, USDC] derived under Raydium
 // CLMM. The quotes come from lite-api.jup.ag, keyless, at 200 USDC and a
 // 12.50 USDC probe, each read three times to make sure the number was the
@@ -556,7 +636,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     tokenAccountBytes: 179,
     floorPool: SPYX_USDC_POOL,
     floorPoolUsdc: Object.freeze({ usdcRaw: 2_646_541_815_865n, scope: "route-census", venue: "Raydium CLMM 6truu3rZ… (the floor source, USDC vault 3EmW8zJD…)", readOn: "2026-09-21", by: "getMultipleAccounts, mainnet slot 448994132" }),
-    fee: Object.freeze({ bps: 0, epoch: 1039, readOn: "2026-09-21", by: "mint extensions, mainnet slot 448993661: no TransferFeeConfig at all" }),
+    fee: Object.freeze({ bps: 0, epoch: 1039, scheduled: null, readOn: "2026-09-21", by: "mint extensions, mainnet slot 448993661: no TransferFeeConfig at all" }),
     depth: Object.freeze({ usdcRaw: 317_640_466_447n, scope: "route-census", venue: "Raydium CLMM 4pCZCVEi… (a pool a 200 USDC buy routed through on 2026-09-21)", readOn: "2026-09-21", by: "getMultipleAccounts over that pool's USDC vault 92aTAYGn…, mainnet slot 448995444" }),
     // THE CENSUS IS THE SMALLEST INVENTORY ANY POOL THE ROUTER ACTUALLY PICKED
     // WAS COUNTED TO HOLD, AND IT IS NOT THE POOL ABOVE.
@@ -609,7 +689,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     tokenAccountBytes: 191,
     floorPool: ANTHROPIC_USDC_POOL,
     floorPoolUsdc: Object.freeze({ usdcRaw: 9_204_135_177n, scope: "route-census", venue: "Raydium CLMM 47MsbowA… (the floor source, USDC vault FZmwQEZq…)", readOn: "2026-09-21", by: "getMultipleAccounts, mainnet slot 448994132" }),
-    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661: newer record, live from epoch 1039" }),
+    fee: Object.freeze({ bps: 100, epoch: 1041, scheduled: Object.freeze({ bps: 300, epoch: 1043 }), readOn: "2026-09-24", by: "mint TransferFeeConfig, getMultipleAccounts over the nine catalogue mints, mainnet slot 450109271, epoch 1041 (slot index 397,270 of 432,000): older record 100 bps from epoch 1039, newer record 300 bps from epoch 1043, maximum_fee u64::MAX" }),
     depth: Object.freeze({ usdcRaw: 331_617_000_000n, scope: "venue-wide", venue: "Hadron", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work. THERE IS NO SOURCE FOR IT IN THIS REPOSITORY: no notes file, no script and no commit records the reading, and it is not re-derivable — the venue names no token account this figure could be counted from. Read it as an undated third-party figure with a date on it" }),
     // 2.2 % OF THE FIGURE ABOVE, AND IT IS THIS ONE THE CAP IS DIVIDED BY. The
     // number is inverted from the day's own ceiling measurement rather than
@@ -651,7 +731,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     }),
     quarantinedUntil: null,
     notes: Object.freeze([
-      "ITS TRANSFER FEE IS AT THE CEILING WITH ZERO MARGIN. 100 bps from epoch 1039, against MAX_LEG_FEE_BPS of 100, which the keeper compares with `>`. One more write by the issuer key — which it may make at any epoch boundary, and an epoch is hours — refuses this leg, and a refused leg refuses the WHOLE basket and the SOL conversion with it, on every sweep, until the fee comes back down. The fee was 50 bps until epoch 1039 and this file is not its source: read it from the mint.",
+      "FROM EPOCH 1043 ITS TRANSFER FEE IS AT THE CEILING WITH ZERO MARGIN. Read on 2026-09-24 (epoch 1041) it charges 100 bps, and the issuer key has ALREADY WRITTEN 300 bps for epoch 1043 — around 26 September 2026, estimated from 265.7 ms a slot over epoch 1041. 300 is the keeper's MAX_LEG_FEE_BPS since the owner raised it from 100 that day, and the keeper compares with `>`, so the leg stays bought at 300 and one more write by the same key — at any epoch boundary, and an epoch is hours — refuses it, and a refused leg refuses the WHOLE basket and the SOL conversion with it, on every sweep, until the fee comes back down. At 300 a round trip in and out of this leg gives the issuer 1 - 0.97^2 = 5.91 % before the market is involved. The fee was 50 bps until epoch 1039 and 100 until 1043; this file is not its source: read it from the mint.",
       "THE VENUE-WIDE NUMBER ABOVE IS NOT WHAT THE KEEPER COUNTS, and the gap decides whether a buy clears. The keeper censuses only the accounts the chosen route names; the 2026-09-21 ceiling measurement implies about $7,450 of that, 2.2 % of the venue-wide figure, which at 50x cover allows about $149 a leg. That is UNDER the $200 reference leg this catalogue is measured at: at the shipped $1,000 max_per_call split five ways, the keeper refuses ANTHROPIC today. The owner lowers max_per_call and the picker computes the ceiling (basket-limits.ts depthCeiling); nothing in this entry promises otherwise.",
       "ITS SIZE PENALTY IS NOT A STABLE NUMBER AND THE SHELF RULE IT PASSES IS A COIN FLIP. Readings of the same quantity minutes apart on 2026-09-21 ranged from 0 to 107 bps against a 25 bps bar, because the router picked a different route every time and the two sizes never took the same one (sameVenues false in every reading, so the keeper's own ARM 2 would ABSTAIN here rather than compare). What admits this leg is therefore a screening number with a spread wider than the bar. The gate that decides is the keeper's, in the turn, at the size that turn really spends.",
       "THE VENUE-WIDE FIGURE THAT PASSES THE DEPTH RULE HAS NO SOURCE IN THIS REPO. 331,617 is cited to the Jupiter migration, and nothing in the tree records the reading — see the note on `by` below. It is load-bearing in the ADMITTING direction: this asset clears DEPTH only because 331,617 >= 10,000. The number the owner's cap is divided by is the route census instead, which is a tenth the size and is derived rather than counted.",
@@ -668,7 +748,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     tokenAccountBytes: 191,
     floorPool: FIGUREAI_USDC_POOL,
     floorPoolUsdc: Object.freeze({ usdcRaw: 2_786_965_702n, scope: "route-census", venue: "Raydium CLMM HvpDt29E… (the floor source, USDC vault ALfDjAtK…)", readOn: "2026-09-21", by: "getMultipleAccounts, mainnet slot 448994132" }),
-    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
+    fee: Object.freeze({ bps: 100, epoch: 1041, scheduled: Object.freeze({ bps: 300, epoch: 1043 }), readOn: "2026-09-24", by: "mint TransferFeeConfig, getMultipleAccounts over the nine catalogue mints, mainnet slot 450109271, epoch 1041 (slot index 397,270 of 432,000): older record 100 bps from epoch 1039, newer record 300 bps from epoch 1043, maximum_fee u64::MAX" }),
     depth: Object.freeze({ usdcRaw: 50_000_000_000n, scope: "venue-wide", venue: "Hadron (though a 200 USDC quote that day routed Manifest E7Mcgg…)", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work; no notes file, script or commit in this repository records the reading, and it is not re-derivable from here" }),
     routeCensus: null,
     sizePenalty: Object.freeze({ bps: 0, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest E7Mcgg… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 0.0" }),
@@ -688,13 +768,13 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     tokenAccountBytes: 191,
     floorPool: null,
     floorPoolUsdc: null,
-    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
+    fee: Object.freeze({ bps: 100, epoch: 1041, scheduled: Object.freeze({ bps: 300, epoch: 1043 }), readOn: "2026-09-24", by: "mint TransferFeeConfig, getMultipleAccounts over the nine catalogue mints, mainnet slot 450109271, epoch 1041 (slot index 397,270 of 432,000): older record 100 bps from epoch 1039, newer record 300 bps from epoch 1043, maximum_fee u64::MAX" }),
     depth: Object.freeze({ usdcRaw: 25_220_000_000n, scope: "venue-wide", venue: "Manifest 6Gi6cz…", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work; no notes file, script or commit in this repository records the reading, and it is not re-derivable from here" }),
     routeCensus: null,
     sizePenalty: Object.freeze({ bps: 29.8, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest 6Gi6cz… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 29.8" }),
     quarantinedUntil: null,
     notes: Object.freeze([
-      "The deepest PreStock after ANTHROPIC by venue-wide depth, and still refused: at the reference leg its own price impact is 29.8 bps against the 25 the keeper leaves a 100 bps mint, measured on the SAME venue at both sizes — which is the keeper's own ARM 2 scope, so this is not a coarse reading. A cheaper fee or a smaller leg would both move it; neither is this file's to decide.",
+      "The deepest PreStock after ANTHROPIC by venue-wide depth, and still refused: at the reference leg its own price impact is 29.8 bps against the 25 the keeper leaves a mint charging anywhere from 100 to 300 bps (the ask widens with the fee), measured on the SAME venue at both sizes — which is the keeper's own ARM 2 scope, so this is not a coarse reading. A smaller leg would move it; that is not this file's to decide.",
     ]),
   }),
   Object.freeze({
@@ -707,7 +787,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     tokenAccountBytes: 191,
     floorPool: null,
     floorPoolUsdc: null,
-    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
+    fee: Object.freeze({ bps: 100, epoch: 1041, scheduled: Object.freeze({ bps: 300, epoch: 1043 }), readOn: "2026-09-24", by: "mint TransferFeeConfig, getMultipleAccounts over the nine catalogue mints, mainnet slot 450109271, epoch 1041 (slot index 397,270 of 432,000): older record 100 bps from epoch 1039, newer record 300 bps from epoch 1043, maximum_fee u64::MAX" }),
     depth: Object.freeze({ usdcRaw: 8_995_000_000n, scope: "venue-wide", venue: "Manifest G3LHQo…", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work; no notes file, script or commit in this repository records the reading, and it is not re-derivable from here" }),
     routeCensus: null,
     sizePenalty: Object.freeze({ bps: 77.9, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest G3LHQo… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 77.9" }),
@@ -724,7 +804,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     tokenAccountBytes: 191,
     floorPool: null,
     floorPoolUsdc: null,
-    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
+    fee: Object.freeze({ bps: 100, epoch: 1041, scheduled: null, readOn: "2026-09-24", by: "mint TransferFeeConfig, getMultipleAccounts over the nine catalogue mints, mainnet slot 450109271, epoch 1041 (slot index 397,270 of 432,000): newer record 100 bps from epoch 1039 (older 50 from 1032), nothing written for a later epoch — the one PreStock of the eight without the 300" }),
     depth: Object.freeze({ usdcRaw: 7_542_000_000n, scope: "venue-wide", venue: "Meteora DLMM Chroid…", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work; no notes file, script or commit in this repository records the reading, and it is not re-derivable from here" }),
     routeCensus: null,
     sizePenalty: Object.freeze({ bps: 27, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Meteora DLMM Chroid… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 27.0" }),
@@ -741,7 +821,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     tokenAccountBytes: 191,
     floorPool: null,
     floorPoolUsdc: null,
-    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
+    fee: Object.freeze({ bps: 100, epoch: 1041, scheduled: Object.freeze({ bps: 300, epoch: 1043 }), readOn: "2026-09-24", by: "mint TransferFeeConfig, getMultipleAccounts over the nine catalogue mints, mainnet slot 450109271, epoch 1041 (slot index 397,270 of 432,000): older record 100 bps from epoch 1039, newer record 300 bps from epoch 1043, maximum_fee u64::MAX" }),
     depth: Object.freeze({ usdcRaw: 7_264_000_000n, scope: "venue-wide", venue: "Manifest J4PjSn…", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work; no notes file, script or commit in this repository records the reading, and it is not re-derivable from here" }),
     routeCensus: null,
     sizePenalty: Object.freeze({ bps: 10.8, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest J4PjSn… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 10.8" }),
@@ -760,7 +840,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     tokenAccountBytes: 191,
     floorPool: null,
     floorPoolUsdc: null,
-    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
+    fee: Object.freeze({ bps: 100, epoch: 1041, scheduled: Object.freeze({ bps: 300, epoch: 1043 }), readOn: "2026-09-24", by: "mint TransferFeeConfig, getMultipleAccounts over the nine catalogue mints, mainnet slot 450109271, epoch 1041 (slot index 397,270 of 432,000): older record 100 bps from epoch 1039, newer record 300 bps from epoch 1043, maximum_fee u64::MAX" }),
     depth: Object.freeze({ usdcRaw: 4_229_000_000n, scope: "venue-wide", venue: "Meteora DLMM (reached through a first hop that changed between readings)", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work; no notes file, script or commit in this repository records the reading, and it is not re-derivable from here" }),
     routeCensus: null,
     sizePenalty: Object.freeze({ bps: 96.7, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: false, routes: "GoonFi V2 + Meteora DLMM at 200 USDC vs Raydium CLMM + Scorch + Meteora DLMM at 12.50", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings: 96.6, 96.7, 96.7" }),
@@ -777,7 +857,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     tokenAccountBytes: 191,
     floorPool: null,
     floorPoolUsdc: null,
-    fee: Object.freeze({ bps: 100, epoch: 1039, readOn: "2026-09-21", by: "mint TransferFeeConfig, mainnet slot 448993661" }),
+    fee: Object.freeze({ bps: 100, epoch: 1041, scheduled: Object.freeze({ bps: 300, epoch: 1043 }), readOn: "2026-09-24", by: "mint TransferFeeConfig, getMultipleAccounts over the nine catalogue mints, mainnet slot 450109271, epoch 1041 (slot index 397,270 of 432,000): older record 100 bps from epoch 1039, newer record 300 bps from epoch 1043, maximum_fee u64::MAX" }),
     depth: Object.freeze({ usdcRaw: 2_016_000_000n, scope: "venue-wide", venue: "Manifest BeUdSs… (a Meteora DLMM answered the probe instead)", readOn: "2026-09-21", by: "carried over from the 2026-09-21 Jupiter migration work; no notes file, script or commit in this repository records the reading, and it is not re-derivable from here" }),
     routeCensus: null,
     sizePenalty: Object.freeze({ bps: 33.3, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: false, routes: "Manifest BeUdSs… at 200 USDC vs Meteora DLMM Gug9Tr… at 12.50", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 33.3" }),
@@ -788,7 +868,8 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
 
 /**
  * The assets a policy can be signed for: the part of CATALOGUE that
- * offerProblems() finds nothing wrong with. Today that is SPYx and ANTHROPIC,
+ * offerProblems() finds nothing wrong with. Today that is SPYx and ANTHROPIC —
+ * the same two before and after the fee ceiling moved to 300 on 2026-09-24 —
  * and it is a RESULT rather than a list — the seven assets beside them each
  * fail a named rule with a dated reading behind it, and putting one back means
  * changing its readings, not this line.

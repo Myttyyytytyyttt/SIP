@@ -1157,9 +1157,9 @@ describe("the ticks' first steps, over the same bytes", () => {
   //
   // legFeeWarnings() existed, was covered by eleven tests, AND HAD NO CALLER.
   // An operator would never have seen one. The live basket's ANTHROPIC leg sits
-  // EXACTLY on MAX_LEG_FEE_BPS today — admitted only because that comparison is
-  // strictly greater-than — and the issuer has already moved these mints
-  // 0 → 50 → 100 with about two epochs' notice. One more step refuses the WHOLE
+  // EXACTLY on MAX_LEG_FEE_BPS (300) from epoch 1043 — admitted only because
+  // that comparison is strictly greater-than — and the issuer has moved these
+  // mints 0 → 50 → 100 → 300 with about two epochs' notice. One more step refuses the WHOLE
   // basket, SPYx and the SOL conversion included, and the only notice anybody
   // got was a vault that silently stopped buying.
   //
@@ -1196,7 +1196,7 @@ describe("the ticks' first steps, over the same bytes", () => {
     // outcome by the same words. A warning that moved either is a refusal
     // wearing a warning's name.
     const plain = await restingTurn(none);
-    const atCeiling = await restingTurn((mints) => new Map([[mints[1]!.toBase58(), feeMintBytes(100, 900n)]]));
+    const atCeiling = await restingTurn((mints) => new Map([[mints[1]!.toBase58(), feeMintBytes(300, 900n)]]));
 
     expect(plain.result.outcome).toBe("IDLE");
     expect(plain.result.outcome).toBe(atCeiling.result.outcome);
@@ -1217,8 +1217,8 @@ describe("the ticks' first steps, over the same bytes", () => {
     // THE CHAIN'S OWN EPOCH, not this host's clock and not a second read: the
     // fee is judged in the epoch Token-2022 would charge it in, which is the
     // same epoch the admission gate beside it used.
-    expect(alert.detail).toContain("charges 100 bps to transfer in epoch 930");
-    expect(alert.context).toMatchObject({ feeBps: "100", ceilingBps: "100", epoch: "930" });
+    expect(alert.detail).toContain("charges 300 bps to transfer in epoch 930");
+    expect(alert.context).toMatchObject({ feeBps: "300", ceilingBps: "300", epoch: "930" });
     // The other two legs carry no fee, so they are silent.
     for (const index of [0, 2]) expect(alert.detail).not.toContain(atCeiling.basket.mints[index]!.toBase58());
   });
@@ -1228,8 +1228,8 @@ describe("the ticks' first steps, over the same bytes", () => {
     // the repeat window. A key that moved between sweeps would defeat that
     // whole mechanism, and the keeper sweeps about once a minute.
     const turn = await restingTurn((mints) => new Map([
-      [mints[0]!.toBase58(), feeMintBytes(100, 900n)],
-      [mints[2]!.toBase58(), feeMintBytes(150, 900n)],
+      [mints[0]!.toBase58(), feeMintBytes(250, 900n)],
+      [mints[2]!.toBase58(), feeMintBytes(300, 900n)],
     ]));
     const again = await turn.run();
     const keys = (result: { readonly feeWarnings?: readonly { readonly key: string }[] }): readonly string[] =>
@@ -1243,8 +1243,8 @@ describe("the ticks' first steps, over the same bytes", () => {
     // WORSENS a different condition: it breaks through the quiet window its own
     // earlier warning opened, instead of being muted by it for half an hour.
     const at = (mint: PublicKey): string => keys(turn.result).find((entry) => entry.includes(mint.toBase58()))!;
-    expect(at(turn.basket.mints[0]!)).toBe(`leg-fee:${turn.basket.mints[0]!.toBase58()}:100`);
-    expect(at(turn.basket.mints[2]!)).toBe(`leg-fee:${turn.basket.mints[2]!.toBase58()}:150`);
+    expect(at(turn.basket.mints[0]!)).toBe(`leg-fee:${turn.basket.mints[0]!.toBase58()}:250`);
+    expect(at(turn.basket.mints[2]!)).toBe(`leg-fee:${turn.basket.mints[2]!.toBase58()}:300`);
     expect(new Set(keys(turn.result)).size).toBe(2);
   });
 
@@ -1255,7 +1255,7 @@ describe("the ticks' first steps, over the same bytes", () => {
     const hook = key();
     const turn = await restingTurn((mints) => new Map([
       [mints[0]!.toBase58(), hookMintBytes(hook)],
-      [mints[2]!.toBase58(), feeMintBytes(100, 900n)],
+      [mints[2]!.toBase58(), feeMintBytes(300, 900n)],
     ]));
 
     expect(turn.result.outcome).toBe("REFUSED");
@@ -1273,16 +1273,24 @@ describe("the ticks' first steps, over the same bytes", () => {
     // about two epochs out. Between that write and the charge, the number that
     // will stop this basket is sitting in the mint's own bytes — and this turn
     // reads those bytes anyway, so the notice costs no request at all.
-    const turn = await restingTurn((mints) => new Map([[mints[1]!.toBase58(), feeMintBytes(300, 932n)]]));
+    const turn = await restingTurn((mints) => new Map([[mints[1]!.toBase58(), feeMintBytes(350, 932n)]]));
     expect(turn.result.outcome).toBe("IDLE");
     const alert = turn.result.feeWarnings![0]!;
     expect(alert.severity).toBe("critical");
     expect(alert.title).toContain("will stop this basket");
-    expect(alert.detail).toContain("A fee of 300 bps is ALREADY written for epoch 932");
+    expect(alert.detail).toContain("A fee of 350 bps is ALREADY written for epoch 932");
     expect(alert.detail).toContain("2 epoch(s) from now");
     // AND THE TURN STILL BUYS TODAY, because 0 bps is what a transfer in epoch
     // 930 is actually charged. The warning is the only thing that changed.
     expect(turn.result.detail).toContain("under the $5.00 per-call minimum");
+
+    // A SCHEDULED 300 IS THE CEILING THE OWNER ACCEPTED ON 2026-09-24, NOT A
+    // DATE: through the same wiring it is a warning, and the basket is bought
+    // from that epoch too.
+    const atCeiling = await restingTurn((mints) => new Map([[mints[1]!.toBase58(), feeMintBytes(300, 932n)]]));
+    const notice = atCeiling.result.feeWarnings![0]!;
+    expect(notice.severity).toBe("warn");
+    expect(notice.detail).toContain("A fee of 300 bps is ALREADY written for epoch 932, 2 epoch(s) from now: EXACTLY the ceiling");
   });
 
   it("leaves feeWarnings ABSENT on a turn that stopped before it read a single mint", async () => {

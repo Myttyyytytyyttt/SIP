@@ -69,9 +69,9 @@ const SPYX = signedLegsOf([asset("SPYx")])[0]!;
 const ANTHROPIC = signedLegsOf([asset("ANTHROPIC")])[0]!;
 
 /** INVENTED: a second xStock, to prove the xStock sentences are about a group and not about SPYx. No reading of a real GLDx mint is claimed. */
-const GLDX_SHAPED: SignedLeg = { symbol: "GLDx", group: "xstock", feeBps: 0, feeEpoch: 1039, feeReadOn: "2026-09-21", feeSettingAbsent: true };
+const GLDX_SHAPED: SignedLeg = { symbol: "GLDx", group: "xstock", feeBps: 0, feeEpoch: 1039, feeReadOn: "2026-09-21", scheduledFeeBps: null, scheduledFeeEpoch: null, feeSettingAbsent: true };
 /** INVENTED: a PreStock whose fee nobody has read. Every catalogue PreStock has been read, so this shape has to be built to be tested. */
-const UNREAD_PRESTOCK: SignedLeg = { symbol: "ANDURIL", group: "prestock", feeBps: null, feeEpoch: null, feeReadOn: null, feeSettingAbsent: false };
+const UNREAD_PRESTOCK: SignedLeg = { symbol: "ANDURIL", group: "prestock", feeBps: null, feeEpoch: null, feeReadOn: null, scheduledFeeBps: null, scheduledFeeEpoch: null, feeSettingAbsent: false };
 
 const BASKETS = {
   /** What the form opens on today. */
@@ -155,11 +155,16 @@ describe("the transfer-fee ceiling", () => {
     // THE VECTOR, not the keeper's file.
     expect(BigInt(MAX_LEG_FEE_BPS)).toBe(LEG_FEE.keeper.value);
     expect(MAX_LEG_FEE_BPS).toBe(LEG_FEE.web.value);
-    // AND THE MEANING, in the unit this page prints: 100 bps is 1 % per transfer.
+    // AND THE MEANING, in the unit this page prints: 300 bps is 3 % per transfer.
     expect(MAX_LEG_FEE_BPS / 100).toBe(LEG_FEE.percentPerTransfer);
+    expect(ratePercent(MAX_LEG_FEE_BPS)).toBe("3 %");
+    // AND THE ROUND TRIP THE OWNER ACCEPTED ON 2026-09-24, derived here and
+    // held to the vector's own figure: 1 - 0.97^2, not 6 %.
+    expect(roundTripPercent(MAX_LEG_FEE_BPS)).toBe(`${LEG_FEE.roundTripPercent} %`);
+    expect(roundTripPercent(MAX_LEG_FEE_BPS)).toBe("5.91 %");
     // STRICTLY GREATER, so a leg sitting exactly on the limit is admitted with
-    // no margin -- which is every PreStock's position today. If this gate ever
-    // became >=, the copy would be wrong in the owner's favour.
+    // no margin -- which is seven PreStocks' position from epoch 1043. If this
+    // gate ever became >=, the copy would be wrong in the owner's favour.
     expect(LEG_FEE.boundary.admittedAtBps).toBe(LEG_FEE.keeper.value);
     expect(LEG_FEE.boundary.refusedAtBps).toBe(LEG_FEE.keeper.value + 1n);
     // The same all-or-nothing shape on the fee side: one refused leg, one
@@ -173,14 +178,21 @@ describe("the transfer-fee ceiling", () => {
     expect(admission, "a per-leg outcome in the admit arm is exactly what all-or-nothing forbids").not.toMatch(/outcome/);
   });
 
-  it("names the legs sitting ON the limit, and the whole basket their raise would stop", () => {
+  it("names the legs that land ON the limit, when, and the whole basket their next raise would stop", () => {
     const notice = INVEST_COPY.feeCeiling(BASKETS.both);
     expect(notice).toContain(`will not buy a stock that charges more than ${ratePercent(MAX_LEG_FEE_BPS)} to transfer`);
-    // ANTHROPIC's fee IS the ceiling, read from its own mint, so the sentence
-    // is generated rather than remembered: it is the leg's reading that puts it
-    // here, not a name in a string.
-    expect(ANTHROPIC.feeBps).toBe(MAX_LEG_FEE_BPS);
-    expect(notice).toContain("ANTHROPIC sits exactly on that limit today, with no margin whatsoever");
+    // ANTHROPIC's WRITTEN fee IS the ceiling, read from its own mint, so the
+    // sentence is generated rather than remembered: it is the leg's reading
+    // that puts it here, not a name in a string. And it is the written one,
+    // not the one charged today — so the sentence says both, and when.
+    expect(ANTHROPIC.feeBps).toBe(100);
+    expect(ANTHROPIC.scheduledFeeBps).toBe(MAX_LEG_FEE_BPS);
+    expect(notice).toContain(
+      "ANTHROPIC charges 1 % today, and its issuer has already written 3 % for epoch 1043, around 26 September 2026: from then it sits exactly on that limit, with no margin whatsoever.",
+    );
+    // NEVER "sits on that limit today": on 2026-09-24 it charged 1 %.
+    expect(notice).not.toContain("sits exactly on that limit today");
+    expect(notice).toContain("If that issuer raises its fee once more after that");
     // ALL OR NOTHING, and it NAMES the legs that go down with it — which is
     // what "SPYx along with it" used to say, in a sentence that could only ever
     // be true of one basket.
@@ -204,7 +216,7 @@ describe("the transfer-fee ceiling", () => {
     // A PreStock is known to HAVE a fee setting (the 2026-09-21 read found the
     // one key holding transfer-fee-config on all eight), so a raise is a thing
     // that can be described even while the current fee is unread.
-    expect(notice).toContain("If ANDURIL raises its fee past 1 %");
+    expect(notice).toContain("If ANDURIL raises its fee past 3 %");
   });
 });
 
@@ -222,6 +234,8 @@ describe("what the position costs", () => {
     const structural = (1 - 0.99 ** 2) * 100;
     expect(Number(structural.toFixed(2))).toBe(1.99);
     expect(roundTripPercent(100)).toBe(`${Number(structural.toFixed(2))} %`);
+    // At the 3 % written for epoch 1043: 1 - 0.97^2, still not twice the fee.
+    expect(roundTripPercent(300)).toBe("5.91 %");
     // AND IT IS ARITHMETIC OVER THE LEG'S OWN FEE, not a figure typed once: half
     // the fee gives a different answer, and the same formula produces it.
     expect(roundTripPercent(50)).toBe("1 %");
@@ -236,9 +250,25 @@ describe("what the position costs", () => {
     // NO FEE CAN EVER BE PUT ON SPYx, which is stronger than "charges nothing
     // today" and is the reason feeSettingAbsent exists as a separate field.
     expect(cost).toContain("its mint carries no fee setting at all, and no key with the power to add one");
-    // THE RAISE THAT HAS ALREADY HAPPENED, dated, because it is the proof the
-    // key is in use rather than merely held.
-    expect(cost).toContain("ANTHROPIC's was 0.5 % for about two weeks and became 1 % when the current epoch began, hours before this was written on 20 September 2026");
+    // WHAT IS CHARGED TODAY AND WHAT IS ALREADY WRITTEN, both, in that order:
+    // on 2026-09-24 ANTHROPIC charged 1 % and had 3 % written for epoch 1043.
+    expect(cost).toContain("ANTHROPIC's issuer charges 1 % of every transfer of it");
+    expect(cost).toContain("That was its fee on 2026-09-24, in epoch 1041. Its issuer has already written 3 % for epoch 1043, around 26 September 2026; from then the same round trip gives up 5.91 %.");
+    expect(cost).not.toContain("ANTHROPIC's issuer charges 3 %");
+    // THE RAISES THAT HAVE ALREADY HAPPENED, dated, because they are the proof
+    // the key is in use rather than merely held.
+    expect(cost).toContain(
+      "ANTHROPIC's was 0.5 % until it became 1 % on 20 September 2026, and on 24 September its issuer was found to have already written 3 % for epoch 1043",
+    );
+    expect(cost).not.toContain("when the current epoch began");
+  });
+
+  it("splits the measured round trip at the fee it was MEASURED at, not the one written for later", () => {
+    // 2.4 % was measured at a 1 % fee. Split with the 3 % written for epoch
+    // 1043 the issuer's "share" would be 5.91 % of a 2.4 % whole.
+    const measured = INVEST_COPY.marketCost(BASKETS.both);
+    expect(measured).toContain("The 1.99 % its issuer charged that day is the part of that which never moves");
+    expect(measured).not.toContain("5.91 %");
   });
 
   it("quotes the measured round trips with their date, and says plainly where nobody measured one", () => {

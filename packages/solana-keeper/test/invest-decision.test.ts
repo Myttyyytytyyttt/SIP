@@ -90,6 +90,7 @@ import {
   wrapPlan,
   wrapShortAlert,
   wrapShortStreak,
+  worstCaseTransferFee,
   type DepthDecision,
   type ImpactProbe,
   type LegVenue,
@@ -619,11 +620,42 @@ describe("a leg's mint, before the basket is bought", () => {
       expect(facts.transferHook).toBeNull();
       expect(facts.transferFee?.older).toEqual({ epoch: 1_032n, maximumFee: UNCAPPED, bps: 50n });
       expect(facts.transferFee?.newer).toEqual({ epoch: 1_039n, maximumFee: UNCAPPED, bps: 100n });
-      // AND THE FEE THE GATE ACTUALLY USES, resolved at the epoch the chain is
-      // in now: exactly MAX_LEG_FEE_BPS, admitted only because the comparison
-      // is strictly greater-than.
-      expect(activeTransferFee(facts, 1_039n).bps).toBe(MAX_LEG_FEE_BPS);
+      // AND THE FEE THE GATE ACTUALLY USES, resolved at the epoch the chain was
+      // in then: 100, which was the ceiling that day and is under the 300 the
+      // owner raised it to on 2026-09-24.
+      expect(activeTransferFee(facts, 1_039n).bps).toBe(100n);
       expect(activeTransferFee(facts, 1_038n).bps).toBe(50n);
+    });
+
+    it("reads ANTHROPIC as mainnet held it on 2026-09-24: 100 from epoch 1039, 300 ALREADY WRITTEN for 1043", () => {
+      // THE READ THAT RAISED THE CRITICAL ALERT, kept as bytes. The issuer key
+      // wrote 300 bps for epoch 1043 over the 100 of 1039; at the old ceiling
+      // of 100 this keeper paged "will stop this basket" from epoch 1041.
+      const entry = fixture.mints["ANTHROPIC_2026_09_24"]!;
+      expect(entry.address).toBe(fixture.mints["ANTHROPIC"]!.address);
+      const facts = decodeMintFacts(bytesOf("ANTHROPIC_2026_09_24"));
+      expect(facts.transferHook).toBeNull();
+      expect(facts.transferFee?.older).toEqual({ epoch: 1_039n, maximumFee: UNCAPPED, bps: 100n });
+      expect(facts.transferFee?.newer).toEqual({ epoch: 1_043n, maximumFee: UNCAPPED, bps: 300n });
+      expect(activeTransferFee(facts, 1_041n).bps).toBe(100n);
+      expect(activeTransferFee(facts, 1_043n).bps).toBe(MAX_LEG_FEE_BPS);
+      // The slippage is sized against the 300 from the day it was written, so
+      // the keeper already asks 400 in epoch 1041 and the impact bar stays 25.
+      expect(worstCaseTransferFee(facts, 1_041n).bps).toBe(300n);
+      expect(legSlippageBps(worstCaseTransferFee(facts, 1_041n).bps)).toBe(400n);
+      expect(maxTurnImpactBps(400n, 300n)).toBe(25n);
+
+      // THE OWNER'S DECISION, ON THE REAL BYTES: bought before epoch 1043 and
+      // from it, and the notice is a warning — at the ceiling, no margin — not
+      // the critical this read raised at the old ceiling.
+      const leg = { mint: new PublicKey(entry.address), account: { owner: TOKEN_2022_PROGRAM_ID, data: bytesOf("ANTHROPIC_2026_09_24") } };
+      for (const epoch of [1_041n, 1_042n, 1_043n, 1_044n]) {
+        expect(legAdmissionDecision({ legs: [leg], currentEpoch: epoch }).admit, `epoch ${epoch}`).toBe(true);
+      }
+      const [notice] = legFeeWarnings({ legs: [leg], currentEpoch: 1_041n });
+      expect(notice?.severity).toBe("warn");
+      expect(notice?.detail).toContain("A fee of 300 bps is ALREADY written for epoch 1043, 2 epoch(s) from now: EXACTLY the ceiling");
+      expect(notice?.detail).not.toContain("stops being bought");
     });
 
     it("reads SPYx as carrying no transfer fee, though it is a 676-byte Token-2022 mint with extensions", () => {
@@ -691,68 +723,104 @@ describe("a leg's mint, before the basket is bought", () => {
   });
 
   it("buys through a fee up to the ceiling and refuses the basis point above it", () => {
-    expect(MAX_LEG_FEE_BPS).toBe(100n);
+    expect(MAX_LEG_FEE_BPS).toBe(300n);
     const withFee = (bps: number): Buffer =>
       mintBytes([transferFeeConfig({ epoch: 0n, maximumFee: 0n, bps: 0 }, { epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps })]);
-    expect(legAdmissionDecision({ legs: [legOf(withFee(100))], currentEpoch: TODAY }).admit).toBe(true);
-    const over = legAdmissionDecision({ legs: [legOf(withFee(101))], currentEpoch: TODAY });
+    expect(legAdmissionDecision({ legs: [legOf(withFee(300))], currentEpoch: TODAY }).admit).toBe(true);
+    const over = legAdmissionDecision({ legs: [legOf(withFee(301))], currentEpoch: TODAY });
     expect(over.admit).toBe(false);
     if (over.admit) return;
-    expect(over.detail).toContain("charges a 101 bps transfer fee in epoch 1036, above the 100 bps");
+    expect(over.detail).toContain("charges a 301 bps transfer fee in epoch 1036, above the 300 bps");
     // The rate the authority can reach in two epochs, on mints it has already moved once.
     expect(legAdmissionDecision({ legs: [legOf(withFee(10_000))], currentEpoch: TODAY }).admit).toBe(false);
   });
 
-  it("admits exactly 100 bps on purpose: the ceiling is a whole round trip of the slippage bound", () => {
+  it("admits exactly 300 bps on purpose: the owner's 2026-09-24 decision, a 5.91 % round trip, and the impact bar unchanged", () => {
     // THE BOUNDARY IS A DECISION, NOT A SIDE EFFECT OF `>`. A leg is bought and
-    // one day sold, so the ceiling is paid twice, and twice 100 bps is the
-    // whole 200 bps tolerance min-out.ts allows a single fill.
-    expect(MAX_LEG_FEE_BPS * 2n).toBe(SLIPPAGE_BPS);
+    // one day sold, so the ceiling is paid twice. At 300 that is no longer the
+    // 200 bps min-out.ts allows a fill — it is almost three times it — and the
+    // owner accepted that knowingly when the issuer wrote 300 for epoch 1043.
     const ceiling = { bps: MAX_LEG_FEE_BPS, maximumFee: UNCAPPED };
     const roundTrip = netOfTransferFee(netOfTransferFee(1_000_000_000n, ceiling), ceiling);
-    expect(roundTrip).toBe(980_100_000n);
-    // 199 bps: a hair under the bound only because the second fee is charged on
-    // what the first one left. At the ceiling the issuer takes as much of a
-    // position as every price movement this keeper will absorb on a fill.
-    expect(((1_000_000_000n - roundTrip) * 10_000n) / 1_000_000_000n).toBe(SLIPPAGE_BPS - 1n);
+    // 1 - 0.97^2 = 5.91 %: compounded, because the second 3 % is charged on
+    // what the first one left.
+    expect(roundTrip).toBe(940_900_000n);
+    expect(((1_000_000_000n - roundTrip) * 10_000n) / 1_000_000_000n).toBe(591n);
+    expect(((1_000_000_000n - roundTrip) * 10_000n) / 1_000_000_000n).toBeGreaterThan(SLIPPAGE_BPS);
+
+    // WHAT THE RAISE DOES NOT COST: the market budget. The ask moves with the
+    // fee (strictly 100 over it, the 0x1771 margin), so the usable tolerance
+    // and the impact bar at 300 are what they were at 100.
+    expect(legSlippageBps(MAX_LEG_FEE_BPS)).toBe(400n);
+    expect(maxTurnImpactBps(legSlippageBps(MAX_LEG_FEE_BPS), MAX_LEG_FEE_BPS)).toBe(25n);
+    expect(maxTurnImpactBps(legSlippageBps(MAX_LEG_FEE_BPS), MAX_LEG_FEE_BPS)).toBe(maxTurnImpactBps(legSlippageBps(100n), 100n));
 
     const withFee = (bps: number): Buffer =>
       mintBytes([transferFeeConfig({ epoch: 0n, maximumFee: 0n, bps: 0 }, { epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps })]);
-    expect(legAdmissionDecision({ legs: [legOf(withFee(99))], currentEpoch: TODAY }).admit).toBe(true);
-    expect(legAdmissionDecision({ legs: [legOf(withFee(100))], currentEpoch: TODAY }).admit).toBe(true);
-    expect(legAdmissionDecision({ legs: [legOf(withFee(101))], currentEpoch: TODAY }).admit).toBe(false);
+    expect(legAdmissionDecision({ legs: [legOf(withFee(299))], currentEpoch: TODAY }).admit).toBe(true);
+    expect(legAdmissionDecision({ legs: [legOf(withFee(300))], currentEpoch: TODAY }).admit).toBe(true);
+    expect(legAdmissionDecision({ legs: [legOf(withFee(301))], currentEpoch: TODAY }).admit).toBe(false);
+  });
+
+  it("holds the ceiling, its boundary and the impact bar to the committed vector the website signs against", async () => {
+    // THE KEEPER'S HALF OF LEG_FEE (packages/solana-core/test/fixtures/keeper-policy.ts).
+    // The vector's own header says the keeper's tests hold its constants AND
+    // its gate to `keeper` and `boundary`; until 2026-09-24 nothing here did,
+    // so the web and the catalogue could agree with the vector about a
+    // ceiling this keeper no longer enforced.
+    const vector = "keeper-policy";
+    const { LEG_FEE } = (await import(`../../solana-core/test/fixtures/${vector}.ts`)) as {
+      LEG_FEE: {
+        keeper: { value: bigint };
+        slippageBps: bigint;
+        slippageMarginBps: bigint;
+        boundary: { admittedAtBps: bigint; refusedAtBps: bigint };
+        impactCeilingBps: readonly (readonly [bigint, bigint])[];
+      };
+    };
+    expect(MAX_LEG_FEE_BPS).toBe(LEG_FEE.keeper.value);
+    expect(SLIPPAGE_BPS).toBe(LEG_FEE.slippageBps);
+    expect(MIN_SLIPPAGE_MARGIN_BPS).toBe(LEG_FEE.slippageMarginBps);
+    const withFee = (bps: bigint): Buffer =>
+      mintBytes([transferFeeConfig({ epoch: 0n, maximumFee: 0n, bps: 0 }, { epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps: Number(bps) })]);
+    expect(legAdmissionDecision({ legs: [legOf(withFee(LEG_FEE.boundary.admittedAtBps))], currentEpoch: TODAY }).admit).toBe(true);
+    expect(legAdmissionDecision({ legs: [legOf(withFee(LEG_FEE.boundary.refusedAtBps))], currentEpoch: TODAY }).admit).toBe(false);
+    // The catalogue's sizePenaltyCeilingBps mirrors THIS, fee by fee.
+    for (const [fee, ceilingBps] of LEG_FEE.impactCeilingBps) {
+      expect(maxTurnImpactBps(legSlippageBps(fee), fee), `impact ceiling at a ${fee} bps fee`).toBe(ceilingBps);
+    }
   });
 
   it("charges the rise already scheduled on chain from the epoch it names, and not the epoch before", () => {
-    // MEASURED ON MAINNET 2026-09-20, epoch 1038: both mints carry
-    // newer_transfer_fee = 100 bps stamped 1039, over an older 50 bps stamped
-    // 1032. Nothing has to be signed for the live fee to double — the cluster
-    // only has to roll an epoch, which it did within hours of this being read.
+    // MEASURED ON MAINNET 2026-09-24, epoch 1041: seven PreStocks mints carry
+    // newer_transfer_fee = 300 bps stamped 1043, over an older 100 bps stamped
+    // 1039. Nothing has to be signed for the live fee to triple — the cluster
+    // only has to roll two epochs.
     const scheduled = mintBytes([
-      transferFeeConfig({ epoch: 1_032n, maximumFee: UNCAPPED, bps: 50 }, { epoch: 1_039n, maximumFee: UNCAPPED, bps: 100 }),
+      transferFeeConfig({ epoch: 1_039n, maximumFee: UNCAPPED, bps: 100 }, { epoch: 1_043n, maximumFee: UNCAPPED, bps: 300 }),
     ]);
     const facts = decodeMintFacts(scheduled);
-    expect(activeTransferFee(facts, 1_038n).bps).toBe(50n);
-    expect(activeTransferFee(facts, 1_039n).bps).toBe(100n);
-    expect(activeTransferFee(facts, 1_040n).bps).toBe(100n);
-    // The doubled fee is still admitted — it lands exactly on the ceiling, which
-    // is the boundary the test above pins deliberately.
-    expect(legAdmissionDecision({ legs: [legOf(scheduled)], currentEpoch: 1_039n }).admit).toBe(true);
+    expect(activeTransferFee(facts, 1_042n).bps).toBe(100n);
+    expect(activeTransferFee(facts, 1_043n).bps).toBe(300n);
+    expect(activeTransferFee(facts, 1_044n).bps).toBe(300n);
+    // The tripled fee is still admitted — it lands exactly on the ceiling, which
+    // is the boundary the tests above pin deliberately.
+    expect(legAdmissionDecision({ legs: [legOf(scheduled)], currentEpoch: 1_043n }).admit).toBe(true);
 
     // One basis point more on the same schedule, and the epoch roll alone turns
     // a basket this keeper buys into one it refuses, with nothing else changed.
     const overTheLine = mintBytes([
-      transferFeeConfig({ epoch: 1_032n, maximumFee: UNCAPPED, bps: 50 }, { epoch: 1_039n, maximumFee: UNCAPPED, bps: 101 }),
+      transferFeeConfig({ epoch: 1_039n, maximumFee: UNCAPPED, bps: 100 }, { epoch: 1_043n, maximumFee: UNCAPPED, bps: 301 }),
     ]);
-    expect(legAdmissionDecision({ legs: [legOf(overTheLine)], currentEpoch: 1_038n }).admit).toBe(true);
-    const refused = legAdmissionDecision({ legs: [legOf(overTheLine)], currentEpoch: 1_039n });
+    expect(legAdmissionDecision({ legs: [legOf(overTheLine)], currentEpoch: 1_042n }).admit).toBe(true);
+    const refused = legAdmissionDecision({ legs: [legOf(overTheLine)], currentEpoch: 1_043n });
     expect(refused.admit).toBe(false);
     if (refused.admit) return;
-    expect(refused.detail).toContain("charges a 101 bps transfer fee in epoch 1039, above the 100 bps");
+    expect(refused.detail).toContain("charges a 301 bps transfer fee in epoch 1043, above the 300 bps");
   });
 
-  it("a fee that rises to 150 bps mid-flight refuses the WHOLE basket, at two legs so the two readings differ", () => {
-    // THE ISSUER SCHEDULES 150 FROM A LATER EPOCH and the epoch arrives between
+  it("a fee that rises to 350 bps mid-flight refuses the WHOLE basket, at two legs so the two readings differ", () => {
+    // THE ISSUER SCHEDULES 350 FROM A LATER EPOCH and the epoch arrives between
     // two sweeps. Two verdicts have to hold at once, and this is the first:
     // ONE leg over the ceiling refuses the whole basket AND the SOL conversion.
     //
@@ -761,25 +829,25 @@ describe("a leg's mint, before the basket is bought", () => {
     // — docs/TESTING_TRAPS.md's third disguise. The well-behaved leg has to be
     // there for the refusal to be about the basket at all.
     const clean = mintBytes([transferFeeConfig({ epoch: 0n, maximumFee: 0n, bps: 0 }, { epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps: 0 })]);
-    const rising = mintBytes([transferFeeConfig({ epoch: 1_032n, maximumFee: UNCAPPED, bps: 100 }, { epoch: 1_040n, maximumFee: UNCAPPED, bps: 150 })]);
+    const rising = mintBytes([transferFeeConfig({ epoch: 1_043n, maximumFee: UNCAPPED, bps: 300 }, { epoch: 1_045n, maximumFee: UNCAPPED, bps: 350 })]);
     const spyx = legOf(clean);
     const anthropic = legOf(rising);
     // The sweep before the roll buys both legs; the sweep after buys neither.
-    expect(legAdmissionDecision({ legs: [spyx, anthropic], currentEpoch: 1_039n }).admit).toBe(true);
-    const refused = legAdmissionDecision({ legs: [spyx, anthropic], currentEpoch: 1_040n });
+    expect(legAdmissionDecision({ legs: [spyx, anthropic], currentEpoch: 1_044n }).admit).toBe(true);
+    const refused = legAdmissionDecision({ legs: [spyx, anthropic], currentEpoch: 1_045n });
     expect(refused.admit).toBe(false);
     if (refused.admit) return;
-    expect(refused.detail).toContain("charges a 150 bps transfer fee in epoch 1040, above the 100 bps");
+    expect(refused.detail).toContain("charges a 350 bps transfer fee in epoch 1045, above the 300 bps");
     // The leg at fault is named; the clean leg is not admitted separately,
     // because LegAdmission carries one verdict and no per-leg outcome.
     expect(refused.detail).toContain(anthropic.mint.toBase58());
 
     // AND THE SECOND VERDICT, which belongs to the quote rather than to the
-    // mint: at 150 bps the keeper would have asked for 250, never the 200 that
-    // is fatal against a 150 bps fee. "the numbers the two arms are drawn from"
-    // holds the rest of that argument.
-    expect(legSlippageBps(150n)).toBe(250n);
-    expect(legSlippageBps(150n)).not.toBe(SLIPPAGE_BPS);
+    // mint: at 350 bps the keeper would have asked for 450, never the 400 that
+    // is fatal against it one epoch after 300 was. "the numbers the two arms
+    // are drawn from" holds the rest of that argument.
+    expect(legSlippageBps(350n)).toBe(450n);
+    expect(legSlippageBps(350n)).not.toBe(legSlippageBps(MAX_LEG_FEE_BPS));
   });
 
   it("refuses only from the epoch a scheduled fee starts in, not before", () => {
@@ -828,10 +896,10 @@ describe("a leg's mint, before the basket is bought", () => {
   // ── the warning before the fee reaches the ceiling ─────────────────────────
   //
   // THE REFUSAL IS NOT NOTICE. Everything above pins where the keeper stops
-  // buying. Nothing above fires before it stops, and today's live fee on both
-  // PreStocks mints is EXACTLY the ceiling — admitted only because that
-  // comparison is strictly greater-than. The issuer has already moved these
-  // mints 0 → 50 → 100 with the same key; one more write and the whole basket,
+  // buying. Nothing above fires before it stops, and from epoch 1043 the live
+  // fee on seven PreStocks mints is EXACTLY the ceiling — admitted only because
+  // that comparison is strictly greater-than. The issuer has moved these mints
+  // 0 → 50 → 100 → 300 with the same key; one more write and the whole basket,
   // SPYx and the SOL conversion included, is refused on every sweep.
   describe("the warning before a leg's fee reaches the ceiling", () => {
     /** A mint whose live fee is `bps` from FEE_EPOCH, with nothing scheduled after it. */
@@ -842,10 +910,10 @@ describe("a leg's mint, before the basket is bought", () => {
       mintBytes([transferFeeConfig({ epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps: now }, { epoch: from, maximumFee: UNCAPPED, bps: later })]);
     const alertFor = (data: Buffer, currentEpoch = TODAY) => legFeeCeilingAlert({ mint: key(), facts: decodeMintFacts(data), currentEpoch });
 
-    it("is spaced by the step the issuer has actually used: half the ceiling", () => {
+    it("is spaced by the smallest step the issuer has used: one step under the ceiling", () => {
       expect(LEG_FEE_STEP_BPS).toBe(50n);
       expect(LEG_FEE_WARN_BPS).toBe(MAX_LEG_FEE_BPS - LEG_FEE_STEP_BPS);
-      expect(LEG_FEE_WARN_BPS).toBe(50n);
+      expect(LEG_FEE_WARN_BPS).toBe(250n);
       // A band narrower than one observed step could be jumped clean over.
       expect(LEG_FEE_WARN_BPS + LEG_FEE_STEP_BPS).toBe(MAX_LEG_FEE_BPS);
     });
@@ -853,80 +921,111 @@ describe("a leg's mint, before the basket is bought", () => {
     it("says nothing about a mint that charges nothing, or one still under the band", () => {
       expect(alertFor(mintBytes([pausable]))).toBeNull();
       expect(alertFor(liveFee(0))).toBeNull();
-      expect(alertFor(liveFee(49))).toBeNull();
+      // SPACEX as read on 2026-09-24: 100 live, nothing newer. Under a 300
+      // ceiling that is two hundred bps of room, and nothing to say.
+      expect(alertFor(liveFee(100))).toBeNull();
+      expect(alertFor(liveFee(249))).toBeNull();
       // One basis point into the band and it speaks: silence has to end somewhere
       // knowable, and this is the boundary.
-      expect(alertFor(liveFee(50))).not.toBeNull();
+      expect(alertFor(liveFee(250))).not.toBeNull();
     });
 
     it("warns one step under the ceiling, naming the leg, the live fee, the ceiling and the next step up", () => {
       const mint = key();
-      const alert = legFeeCeilingAlert({ mint, facts: decodeMintFacts(liveFee(50)), currentEpoch: TODAY });
+      const alert = legFeeCeilingAlert({ mint, facts: decodeMintFacts(liveFee(250)), currentEpoch: TODAY });
       expect(alert).not.toBeNull();
       if (alert === null) return;
       expect(alert.severity).toBe("warn");
       expect(alert.title).toContain("one issuer step under the ceiling");
       expect(alert.detail).toContain(mint.toBase58());
-      expect(alert.detail).toContain("charges 50 bps to transfer in epoch 1036");
-      expect(alert.detail).toContain("against the 100 bps ceiling");
+      expect(alert.detail).toContain("charges 250 bps to transfer in epoch 1036");
+      expect(alert.detail).toContain("against the 300 bps ceiling");
       expect(alert.detail).toContain("50 bps under it");
       // WHAT HAPPENS AT THE NEXT STEP, in the words an operator has to act on.
-      expect(alert.detail).toContain("takes it to 100 bps");
+      expect(alert.detail).toContain("past the 250 bps it charges takes it to 300 bps");
       expect(alert.detail).toContain("refuses the whole basket");
       expect(alert.detail).toContain("the SOL conversion with it");
       expect(alert.detail).toContain("no fee scheduled for a later epoch");
     });
 
-    it("warns AT the ceiling — today's live state — and the basket is still bought", () => {
-      // Read on mainnet 2026-09-20: 100 bps from epoch 1039, over 50 from 1032.
-      const legs = [legOf(scheduledFee(50, 100, 1_039n))];
-      // THE REFUSAL DOES NOT MOVE. 100 bps is admitted, deliberately — and the
+    it("warns AT the ceiling — the live state from epoch 1043 — and the basket is still bought", () => {
+      // Read on mainnet 2026-09-24: 300 bps from epoch 1043, over 100 from 1039.
+      const legs = [legOf(scheduledFee(100, 300, 1_043n))];
+      // THE REFUSAL DOES NOT MOVE. 300 bps is admitted, deliberately — and the
       // notice is a separate call over the same legs, not a field on the verdict.
-      expect(legAdmissionDecision({ legs, currentEpoch: 1_039n }).admit).toBe(true);
-      const warnings = legFeeWarnings({ legs, currentEpoch: 1_039n });
+      expect(legAdmissionDecision({ legs, currentEpoch: 1_043n }).admit).toBe(true);
+      const warnings = legFeeWarnings({ legs, currentEpoch: 1_043n });
       expect(warnings).toHaveLength(1);
       const alert = warnings[0]!;
       expect(alert.severity).toBe("warn");
       expect(alert.title).toContain("at the ceiling this keeper buys through");
-      expect(alert.detail).toContain("charges 100 bps to transfer in epoch 1039");
+      expect(alert.detail).toContain("charges 300 bps to transfer in epoch 1043");
       expect(alert.detail).toContain("the last rate that is admitted");
-      expect(alert.detail).toContain("takes it to 150 bps");
+      expect(alert.detail).toContain("takes it to 350 bps");
+    });
+
+    it("warns — does NOT page — for 100 live and 300 written for epoch 1043: the alert that fired on 2026-09-24, after the owner's decision", () => {
+      // THE MESSAGE THAT ARRIVED IN TELEGRAM, at the old ceiling of 100:
+      // "[CRITICAL] A leg's scheduled transfer fee will stop this basket …
+      // A fee of 300 bps is ALREADY written for epoch 1043". The owner then
+      // raised the ceiling to 300, so the same bytes read in the same epoch
+      // are a basket that keeps being bought with no margin left — a warning.
+      const legs = [legOf(scheduledFee(100, 300, 1_043n))];
+      expect(legAdmissionDecision({ legs, currentEpoch: 1_041n }).admit).toBe(true);
+      const [alert] = legFeeWarnings({ legs, currentEpoch: 1_041n });
+      expect(alert).toBeDefined();
+      expect(alert!.severity).toBe("warn");
+      expect(alert!.title).toContain("scheduled transfer fee lands exactly on the ceiling");
+      expect(alert!.detail).toContain("charges 100 bps to transfer in epoch 1041, against the 300 bps ceiling this keeper buys through — 200 bps under it");
+      expect(alert!.detail).toContain("A fee of 300 bps is ALREADY written for epoch 1043, 2 epoch(s) from now: EXACTLY the ceiling, the last rate that is admitted");
+      // THE NEXT STEP IS COUNTED FROM THE 300 ALREADY WRITTEN, not from the 100
+      // charged today: "takes it to 150" would name a rate nobody will charge.
+      expect(alert!.detail).toContain("past the 300 bps it is scheduled to charge takes it to 350 bps");
+      expect(alert!.detail).not.toContain("takes it to 150 bps");
+      expect(alert!.detail).not.toContain("stops being bought");
+      expect(alert!.context).toMatchObject({ feeBps: "100", ceilingBps: "300", epoch: "1041", nextStepBps: "350", scheduledFeeBps: "300", scheduledFromEpoch: "1043" });
     });
 
     it("carries the SCHEDULED fee, which is the only early notice there is, and calls a dated stop critical", () => {
-      // 101 bps written for epoch 1039 while 50 is charged in 1038: the basket
-      // is bought today and refused from a date already on chain, with nothing
-      // signed or deployed here in between.
-      const dated = scheduledFee(50, 101, 1_039n);
-      expect(legAdmissionDecision({ legs: [legOf(dated)], currentEpoch: 1_038n }).admit).toBe(true);
-      const alert = alertFor(dated, 1_038n);
+      // 350 bps written for epoch 1043 while 100 is charged in 1041 — the
+      // 2026-09-24 schedule, one issuer step worse: the basket is bought today
+      // and refused from a date already on chain, with nothing signed or
+      // deployed here in between.
+      const dated = scheduledFee(100, 350, 1_043n);
+      expect(legAdmissionDecision({ legs: [legOf(dated)], currentEpoch: 1_041n }).admit).toBe(true);
+      const alert = alertFor(dated, 1_041n);
       expect(alert).not.toBeNull();
       if (alert === null) return;
       expect(alert.severity).toBe("critical");
       expect(alert.title).toContain("will stop this basket");
-      expect(alert.detail).toContain("A fee of 101 bps is ALREADY written for epoch 1039");
-      expect(alert.detail).toContain("1 epoch(s) from now");
+      expect(alert.detail).toContain("A fee of 350 bps is ALREADY written for epoch 1043");
+      expect(alert.detail).toContain("2 epoch(s) from now");
       expect(alert.detail).toContain("this whole basket stops being bought");
+      expect(alert.detail).toContain("ANY rate above 300 refuses the whole basket");
+      // AND THE BOUNDARY OF THE PAGE IS THE BOUNDARY OF THE GATE: 300 written is
+      // a warning, 301 written is a date.
+      expect(alertFor(scheduledFee(100, 300, 1_043n), 1_041n)!.severity).toBe("warn");
+      expect(alertFor(scheduledFee(100, 301, 1_043n), 1_041n)!.severity).toBe("critical");
     });
 
     it("reports a scheduled rise the live fee gives no sign of, and keeps it a warning while it lands inside the ceiling", () => {
-      // 0 bps today, 100 from epoch 1040: nothing about the LIVE fee is
+      // 0 bps today, 250 from epoch 1040: nothing about the LIVE fee is
       // remarkable, and the mint's own bytes already say the product is two
-      // epochs from its last admitted rate.
-      const rising = scheduledFee(0, 100, 1_040n);
+      // epochs from one issuer step under its last admitted rate.
+      const rising = scheduledFee(0, 250, 1_040n);
       const alert = alertFor(rising, TODAY);
       expect(alert).not.toBeNull();
       if (alert === null) return;
       expect(alert.severity).toBe("warn");
       expect(alert.detail).toContain("charges 0 bps to transfer in epoch 1036");
-      expect(alert.detail).toContain("A fee of 100 bps is ALREADY written for epoch 1040");
+      expect(alert.detail).toContain("A fee of 250 bps is ALREADY written for epoch 1040");
       expect(alert.detail).toContain("4 epoch(s) from now");
-      expect(alert.detail).toContain("still at or under the ceiling");
+      expect(alert.detail).toContain("still under the ceiling");
     });
 
     it("survives a refusal caused by another leg: the basket's problem today does not eat the notice about next month", () => {
       const hooked = legOf(mintBytes([transferHook(key())]));
-      const nearCeiling = legOf(liveFee(100));
+      const nearCeiling = legOf(liveFee(300));
       const legs = [hooked, nearCeiling];
       expect(legAdmissionDecision({ legs, currentEpoch: TODAY }).admit).toBe(false);
       const warnings = legFeeWarnings({ legs, currentEpoch: TODAY });
@@ -940,34 +1039,35 @@ describe("a leg's mint, before the basket is bought", () => {
       const mint = key();
       const at = (bps: number) => legFeeCeilingAlert({ mint, facts: decodeMintFacts(liveFee(bps)), currentEpoch: TODAY })!;
       // alerts.ts deduplicates by key and holds a fired condition quiet for its
-      // repeat window. Keyed on the mint alone, the 50 bps warning would mute
-      // the 100 bps one that replaces it — the exact move this watches for.
-      expect(at(50).key).not.toBe(at(100).key);
-      expect(at(50).key).toBe(at(50).key);
-      expect(at(100).key).toContain(mint.toBase58());
+      // repeat window. Keyed on the mint alone, the 250 bps warning would mute
+      // the 300 bps one that replaces it — the exact move this watches for.
+      expect(at(250).key).not.toBe(at(300).key);
+      expect(at(250).key).toBe(at(250).key);
+      expect(at(300).key).toContain(mint.toBase58());
     });
 
     it("carries a context the alerter can actually send: every value a string, no bigint to throw inside fire()", () => {
-      const alert = alertFor(scheduledFee(50, 101, 1_039n), 1_038n)!;
+      const alert = alertFor(scheduledFee(100, 301, 1_043n), 1_041n)!;
       // The alerter spreads context into JSON.stringify on the way to the
       // webhook, and a bigint throws there — on the one path whose whole purpose
       // is that silence is never the healthy state.
       expect(() => JSON.stringify({ ...alert.context })).not.toThrow();
       for (const value of Object.values(alert.context ?? {})) expect(typeof value).toBe("string");
       expect(alert.context).toMatchObject({
-        feeBps: "50",
-        ceilingBps: "100",
-        epoch: "1038",
-        nextStepBps: "100",
-        scheduledFeeBps: "101",
-        scheduledFromEpoch: "1039",
+        feeBps: "100",
+        ceilingBps: "300",
+        epoch: "1041",
+        nextStepBps: "351",
+        scheduledFeeBps: "301",
+        scheduledFromEpoch: "1043",
       });
     });
 
     it("fires for the live basket as mainnet holds it: two PreStocks legs, one warning each", () => {
-      const legs = [legOf(preStocks()), legOf(preStocks())];
-      expect(legAdmissionDecision({ legs, currentEpoch: TODAY }).admit).toBe(true);
-      const warnings = legFeeWarnings({ legs, currentEpoch: TODAY });
+      // As read 2026-09-24 in epoch 1041: 100 live, 300 written for 1043.
+      const legs = [legOf(scheduledFee(100, 300, 1_043n)), legOf(scheduledFee(100, 300, 1_043n))];
+      expect(legAdmissionDecision({ legs, currentEpoch: 1_041n }).admit).toBe(true);
+      const warnings = legFeeWarnings({ legs, currentEpoch: 1_041n });
       expect(warnings).toHaveLength(2);
       for (const leg of legs) {
         expect(warnings.some((alert) => alert.detail.includes(leg.mint.toBase58()))).toBe(true);
@@ -978,12 +1078,12 @@ describe("a leg's mint, before the basket is bought", () => {
       // This runs over every leg whose bytes decoded, admitted or not, so it has
       // to be able to report a fee that is past the ceiling — and the basket is
       // genuinely stopped at that point, which is a critical, not a warning.
-      const legs = [legOf(liveFee(150))];
+      const legs = [legOf(liveFee(350))];
       expect(legAdmissionDecision({ legs, currentEpoch: TODAY }).admit).toBe(false);
       const alert = legFeeWarnings({ legs, currentEpoch: TODAY })[0]!;
       expect(alert.severity).toBe("critical");
       expect(alert.title).toContain("above the ceiling");
-      expect(alert.detail).toContain("charges 150 bps to transfer in epoch 1036");
+      expect(alert.detail).toContain("charges 350 bps to transfer in epoch 1036");
       expect(alert.detail).toContain("already 50 bps OVER it");
       expect(alert.detail).toContain("Every sweep refuses the whole basket while this stands");
       // And it never claims a refused rate is one this keeper buys through.
@@ -998,7 +1098,7 @@ describe("a leg's mint, before the basket is bought", () => {
       broken.writeUInt16LE(108, 168); // 108 bytes that are not there
       const legs = [
         { mint: key(), account: null },
-        legOf(liveFee(100), TOKEN_PROGRAM_ID), // not Token-2022: the extension means nothing
+        legOf(liveFee(300), TOKEN_PROGRAM_ID), // not Token-2022: the extension means nothing
         legOf(broken),
       ];
       expect(legAdmissionDecision({ legs, currentEpoch: TODAY }).admit).toBe(false);
@@ -1506,10 +1606,13 @@ describe("the numbers the two arms are drawn from", () => {
   it("gives impact a quarter of the usable tolerance, with a floor", () => {
     expect(IMPACT_TOLERANCE_DIVISOR).toBe(4n);
     expect(MIN_IMPACT_CEILING_BPS).toBe(5n);
-    // ANTHROPIC today: 200 bps of slippage over a 100 bps fee leaves 100, of
+    // ANTHROPIC at 100 bps: 200 bps of slippage over the fee leaves 100, of
     // which impact gets 25 and drift the other 75 — drift dominates, measured
     // at a 70 % swing in six minutes on the healthy venue.
     expect(maxTurnImpactBps(200n, 100n)).toBe(25n);
+    // AND AT THE 300 THE ISSUER WROTE FOR EPOCH 1043: the ask is 400, so the
+    // usable tolerance is the same 100 and so is the bar.
+    expect(maxTurnImpactBps(400n, 300n)).toBe(25n);
     // A zero-fee mint: the whole 200 is usable, so 50.
     expect(maxTurnImpactBps(200n, 0n)).toBe(50n);
     // CROSS-CHECK against a measurement taken for another purpose: 187.79 USDC
@@ -1538,9 +1641,12 @@ describe("the numbers the two arms are drawn from", () => {
     // AND THE DAY THE ISSUER MOVES TO 150, the quote widens by itself instead
     // of reverting every sweep with no explanation.
     expect(legSlippageBps(150n)).toBe(250n);
+    // AT THE CEILING the owner accepted on 2026-09-24, and one past it.
+    expect(legSlippageBps(300n)).toBe(400n);
+    expect(legSlippageBps(301n)).toBe(401n);
     expect(legSlippageBps(400n)).toBe(500n);
     // Whatever the fee, the margin above it is never smaller than the measured one.
-    for (const fee of [0n, 1n, 50n, 99n, 100n, 101n, 150n, 999n]) {
+    for (const fee of [0n, 1n, 50n, 99n, 100n, 101n, 150n, 299n, 300n, 301n, 999n]) {
       expect(legSlippageBps(fee) - fee).toBeGreaterThanOrEqual(MIN_SLIPPAGE_MARGIN_BPS);
     }
   });

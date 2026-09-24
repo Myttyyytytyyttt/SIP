@@ -61,7 +61,7 @@ import { basketOnShelf } from "@/lib/onboarding";
 import { saveBasketChoice } from "@/lib/onboarding-memory";
 import type { VaultStateJson } from "@/lib/vault-api";
 import { DEFAULT_VENUE_NAME } from "@/lib/vault-flows";
-import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, signedLegsOf } from "@/lib/vault-copy";
+import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, signedLegsOf, writtenFeeWords } from "@/lib/vault-copy";
 
 /**
  * THE MOST ONE BUY MAY SPEND for a basket started here: $25.
@@ -271,7 +271,7 @@ function StartBuyingCard({
           <li>{START_BUYING_COPY.convert(limits === null ? null : formatUsd(limits.floorPerSol), purchase)}</li>
           {limits === null ? <li>{INVEST_COPY.pricesUnknown}</li> : null}
           {feeLegs.map((leg) => (
-            <li key={leg.symbol}>{START_BUYING_COPY.fee(leg.symbol, ratePercent(leg.feeBps ?? 0))}</li>
+            <li key={leg.symbol}>{START_BUYING_COPY.fee(leg.symbol, ratePercent(leg.feeBps ?? 0), writtenFeeWords(leg), ratePercent(MAX_LEG_FEE_BPS))}</li>
           ))}
           <li>{START_BUYING_COPY.limits(ratePercent(CONVERT_FLOOR_MARGIN_BPS), ratePercent(LEG_FLOOR_MARGIN_BPS), listAnd(feeLegs.map((leg) => leg.symbol)))}</li>
         </ul>

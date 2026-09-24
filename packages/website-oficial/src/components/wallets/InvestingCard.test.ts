@@ -279,15 +279,13 @@ describe("InvestingCard", () => {
     expect(html).toContain("Buying in smaller pieces does not make that smaller");
     expect(html).toContain("every later buy pays it again");
     expect(html).toContain("no fee setting at all, and no key with the power to add one");
-    // ONE RAISE, NOT TWO: the mint's TransferFeeConfig carries only older{1032,
-    // 50 bps} and newer{1039, 100 bps}, so 50 -> 100 is all that can be read off
-    // it and all the copy may claim.
-    // WHEN, NOT ROUGHLY WHEN. newer{epoch 1039} and a read at slot 448864409
-    // put the rise about 1.8 hours before the reading (1039 x 432,000 =
-    // 448,848,000), and product.ts read the same calendar day in epoch 1038 with
-    // the rise still scheduled. "A few days ago" understated the one thing the
-    // sentence exists to prove: that this key is in use now.
-    expect(html).toContain("ANTHROPIC&#x27;s was 0.5 % for about two weeks and became 1 % when the current epoch began, hours before this was written on 20 September 2026.");
+    // TWO RAISES, EACH SEEN ON THE ACCOUNT: 50 -> 100 bps across the epoch
+    // 1038 -> 1039 boundary (read 2026-09-20), and 100 -> 300 written for epoch
+    // 1043 (read 2026-09-24). Nothing earlier is on a record read here.
+    // WHAT IS WRITTEN FOR LATER IS SAID AFTER WHAT IS CHARGED NOW, never
+    // instead of it: 3 % is not what the owner pays on the day he reads this.
+    expect(html).toContain("Its issuer has already written 3 % for epoch 1043, around 26 September 2026; from then the same round trip gives up 5.91 %.");
+    expect(html).toContain("ANTHROPIC&#x27;s was 0.5 % until it became 1 % on 20 September 2026, and on 24 September its issuer was found to have already written 3 % for epoch 1043.");
     expect(html).not.toContain("a few days ago");
     expect(html).not.toContain("it has been nothing, then 0.5 %");
     // THE CLOSED MEASUREMENT, and no tighter than it was read: simulated round
@@ -298,7 +296,7 @@ describe("InvestingCard", () => {
     // sentence, not only from their own.
     expect(html).toContain("measured on 20 September 2026 on Solana itself — seven round trips, built and run but never signed, each sale priced on what its purchase actually delivered rather than on a quote.");
     expect(html).toContain("ANTHROPIC&#x27;s round trip cost 2.4 % all told, between 2.24 % and 2.63 %.");
-    expect(html).toContain("the rest, between 0.25 % and 0.64 %, is the market, and it moved by 0.36 % within thirteen minutes that day.");
+    expect(html).toContain("The 1.99 % its issuer charged that day is the part of that which never moves; the rest, between 0.25 % and 0.64 %, is the market, and it moved by 0.36 % within thirteen minutes that day.");
     expect(html).toContain("SPYx&#x27;s round trip cost between 0.011 % and 0.018 %.");
     expect(html).not.toContain("1.3 % at $100");
     expect(html).not.toContain("because its pool is small");
@@ -309,8 +307,9 @@ describe("InvestingCard", () => {
     // THE LIMIT THE NEXT RAISE CROSSES, and it names the whole basket that goes
     // down with it. "SPYx along with it" was true of exactly one basket; this
     // is the same doctrine said of the legs on screen.
-    expect(html).toContain("the keeper will not buy a stock that charges more than 1 % to transfer");
-    expect(html).toContain("ANTHROPIC sits exactly on that limit today, with no margin whatsoever");
+    expect(html).toContain("the keeper will not buy a stock that charges more than 3 % to transfer");
+    expect(html).toContain("ANTHROPIC charges 1 % today, and its issuer has already written 3 % for epoch 1043, around 26 September 2026: from then it sits exactly on that limit, with no margin whatsoever.");
+    expect(html).not.toContain("sits exactly on that limit today");
     expect(html).toContain("the vault stops buying the whole basket — SPYx and ANTHROPIC, every one of them — and stops converting your SOL at all");
 
     // WHAT SAVERFI DOES NOT DO, which nothing on this card said while three

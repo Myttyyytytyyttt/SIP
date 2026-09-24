@@ -64,16 +64,19 @@ export const POOL_DEPTH_MULTIPLE = 50;
  * on `fee.bps > MAX_LEG_FEE_BPS` — strictly greater, so a leg sitting exactly
  * on the limit is still admitted, with no margin whatsoever.
  *
- * THAT IS EVERY PRESTOCK'S POSITION TODAY: all eight read 100 bps from epoch
- * 1039 against this 100, so a basket holding one of them is a single issuer
- * instruction away from being refused entirely — and the refusal is
- * all-or-nothing, taking the other legs and the SOL conversion with it.
- * INVEST_COPY.feeCeiling is the sentence that says so, and it names the legs
- * ON the limit and the legs that go down with them from the basket itself,
- * rather than from a pair of names written here. vault-copy.test.ts holds
- * this constant to LEG_FEE in the committed vector.
+ * 300 SINCE 2026-09-24, WHEN IT WAS 100. That day the PreStocks issuer had
+ * already written 300 bps for epoch 1043 on seven of its eight mints, over the
+ * 100 they charge now; the owner raised the keeper's limit to 300 rather than
+ * have every basket holding one refused from that epoch. So from epoch 1043
+ * those seven sit EXACTLY on the limit: a single issuer instruction away from
+ * being refused entirely — and the refusal is all-or-nothing, taking the other
+ * legs and the SOL conversion with it. INVEST_COPY.feeCeiling is the sentence
+ * that says so, and it names the legs ON the limit (now, or from the epoch a
+ * written rise lands in) and the legs that go down with them from the basket
+ * itself, rather than from a pair of names written here. vault-copy.test.ts
+ * holds this constant to LEG_FEE in the committed vector.
  */
-export const MAX_LEG_FEE_BPS = 100;
+export const MAX_LEG_FEE_BPS = 300;
 
 /** "SPYx and ANTHROPIC", "SPYx, ANTHROPIC and GLDx", "SPYx" — a list in a sentence. */
 export const listAnd = (items: readonly string[]): string =>
@@ -119,10 +122,24 @@ export const shortAddress = (address: string): string => (address.length > 10 ? 
 export interface SignedLeg {
   readonly symbol: string;
   readonly group: AssetGroup;
-  /** Its live transfer fee in basis points, or null when nobody has read it. NULL IS NOT ZERO and no sentence below treats it as zero. */
+  /** Its transfer fee IN FORCE when read, in basis points, or null when nobody has read it. NULL IS NOT ZERO and no sentence below treats it as zero. */
   readonly feeBps: number | null;
+  /** The epoch that reading was taken in. */
   readonly feeEpoch: number | null;
   readonly feeReadOn: string | null;
+  /**
+   * A rate the issuer has ALREADY WRITTEN for a later epoch, and that epoch —
+   * or null when the reading found nothing pending (or nobody read the fee).
+   *
+   * THE TWO ARE NEVER MERGED INTO ONE NUMBER HERE, because the owner is owed
+   * both: what he pays today and what he will pay from a date already on
+   * chain. Read on 2026-09-24, ANTHROPIC charged 1 % and had 3 % written for
+   * epoch 1043; a sentence saying "charges 3 %" would have been false for two
+   * more days, and one saying "charges 1 %" and stopping would have hidden a
+   * tripling nobody needs to sign for.
+   */
+  readonly scheduledFeeBps: number | null;
+  readonly scheduledFeeEpoch: number | null;
   /**
    * WHETHER THE MINT HAS NO FEE SETTING AT ALL, which is a much stronger fact
    * than a fee of zero and is the only ground for "nobody can ever add one".
@@ -148,16 +165,50 @@ export const signedLegsOf = (assets: readonly CatalogueAsset[]): readonly Signed
     feeBps: asset.fee?.bps ?? null,
     feeEpoch: asset.fee?.epoch ?? null,
     feeReadOn: asset.fee?.readOn ?? null,
+    scheduledFeeBps: asset.fee?.scheduled?.bps ?? null,
+    scheduledFeeEpoch: asset.fee?.scheduled?.epoch ?? null,
     feeSettingAbsent: asset.group === "xstock" && asset.fee?.bps === 0,
   }));
+
+/**
+ * The fee a leg WILL pay as far as its reading can see: in force now, or
+ * already written for later, whichever is higher. The limit is judged on this,
+ * as the keeper and the catalogue judge it. Null when the fee was never read.
+ */
+export const judgedFeeOf = (leg: SignedLeg): number | null =>
+  leg.feeBps === null ? null : Math.max(leg.feeBps, leg.scheduledFeeBps ?? 0);
+
+/**
+ * WHEN AN EPOCH A WRITTEN FEE NAMES IS EXPECTED TO BEGIN — AN ESTIMATE, AND
+ * SAID AS ONE. Epoch 1041 began 2026-09-23 13:06Z and ran at 265.7 ms a slot
+ * (measured 2026-09-24, 397,270 slots in); at 432,000 slots an epoch that puts
+ * 1043 at about 05:00Z on Saturday 26 September 2026, give or take hours,
+ * because slot times drift. An epoch not listed here is named by its number
+ * alone rather than given a date nobody worked out.
+ */
+const EPOCH_EXPECTED: Readonly<Record<number, string>> = Object.freeze({ 1043: "around 26 September 2026" });
+
+/** "epoch 1043, around 26 September 2026" — or "epoch 1050" when nobody estimated its date. */
+const epochWords = (epoch: number): string => (EPOCH_EXPECTED[epoch] === undefined ? `epoch ${epoch}` : `epoch ${epoch}, ${EPOCH_EXPECTED[epoch]}`);
+
+/**
+ * "3 % from around 26 September 2026" for a leg with a fee already written for
+ * later, or null when nothing different is pending. The short form the
+ * start-buying card lists beside what the leg charges today.
+ */
+export const writtenFeeWords = (leg: SignedLeg): string | null =>
+  leg.scheduledFeeBps === null || leg.scheduledFeeEpoch === null || leg.scheduledFeeBps === leg.feeBps
+    ? null
+    : `${ratePercent(leg.scheduledFeeBps)} from ${EPOCH_EXPECTED[leg.scheduledFeeEpoch] ?? `epoch ${leg.scheduledFeeEpoch}`}`;
 
 /**
  * WHAT A FEE COSTS OVER A ROUND TRIP, and it is not twice the fee.
  *
  * The issuer charges on the way in and again on the way out, and the second
  * charge is taken from what the first one left: 1 − (1 − f)², which at 1 % is
- * 1.99 % and not 2 %. Written as arithmetic rather than as a figure so that a
- * leg charging anything else is described correctly without anyone re-typing it.
+ * 1.99 % and not 2 %, and at the 3 % limit 5.91 % and not 6 %. Written as
+ * arithmetic rather than as a figure so that a leg charging anything else is
+ * described correctly without anyone re-typing it.
  */
 export const roundTripPercent = (feeBps: number): string => `${Number((100 * (1 - (1 - feeBps / 10_000) ** 2)).toFixed(2))} %`;
 
@@ -203,9 +254,17 @@ const XSTOCK_HOOK_KEY = "a key of its issuer's own, which is not the key that ca
  * rather than reaching for a neighbour's number. The catalogue has nine assets
  * and this has two: that ratio is the point.
  */
-const ROUND_TRIPS: Readonly<Record<string, { readonly all: string | null; readonly low: string; readonly high: string; readonly market: string | null; readonly moved: string | null }>> = Object.freeze({
-  ANTHROPIC: Object.freeze({ all: "2.4 %", low: "2.24 %", high: "2.63 %", market: "between 0.25 % and 0.64 %", moved: "0.36 %" }),
-  SPYx: Object.freeze({ all: null, low: "0.011 %", high: "0.018 %", market: null, moved: null }),
+//
+// THE FEE IT WAS MEASURED AT IS PART OF THE MEASUREMENT (`feeBps`). ANTHROPIC's
+// 2.4 % was taken at a 1 % fee; the sentence that splits it into the issuer's
+// share and the market's must use THAT fee, not whatever the leg charges on
+// the day the page is read — at the 3 % written for epoch 1043 the "issuer's
+// part" would come out larger than the whole.
+const ROUND_TRIPS: Readonly<
+  Record<string, { readonly feeBps: number; readonly all: string | null; readonly low: string; readonly high: string; readonly market: string | null; readonly moved: string | null }>
+> = Object.freeze({
+  ANTHROPIC: Object.freeze({ feeBps: 100, all: "2.4 %", low: "2.24 %", high: "2.63 %", market: "between 0.25 % and 0.64 %", moved: "0.36 %" }),
+  SPYx: Object.freeze({ feeBps: 0, all: null, low: "0.011 %", high: "0.018 %", market: null, moved: null }),
 });
 const ROUND_TRIP_READ_ON = "20 September 2026";
 const ROUND_TRIP_METHOD = "seven round trips, built and run but never signed, each sale priced on what its purchase actually delivered rather than on a quote";
@@ -216,14 +275,16 @@ const ROUND_TRIP_METHOD = "seven round trips, built and run but never signed, ea
  *
  * ANTHROPIC's TransferFeeConfig carried older{epoch 1032, 50 bps} and
  * newer{epoch 1039, 100 bps} when it was read at slot 448864409, inside epoch
- * 1039 — about 1.8 hours in, epochs being 432,000 slots of roughly 400 ms. The
- * same calendar day, read in epoch 1038, the rise was still scheduled. So the
- * fee doubled HOURS before those words, not days. ONE RAISE IS CLAIMED AND NOT
- * TWO: the account holds exactly two records, so an earlier 0 → 50 may well
- * have happened and is not on it.
+ * 1039 — about 1.8 hours in. The same calendar day, read in epoch 1038, the
+ * rise was still scheduled. Read again on 2026-09-24 (slot 450109271, epoch
+ * 1041) it carried older{epoch 1039, 100 bps} and newer{epoch 1043, 300 bps}.
+ * TWO RAISES ARE CLAIMED, each seen on the account: 0.5 % -> 1 % at epoch 1039,
+ * and 1 % -> 3 % written for epoch 1043. An earlier 0 -> 50 may well have
+ * happened and is on no record read here, so it is not claimed.
  */
 const FEE_RAISED: Readonly<Record<string, string>> = Object.freeze({
-  ANTHROPIC: "ANTHROPIC's was 0.5 % for about two weeks and became 1 % when the current epoch began, hours before this was written on 20 September 2026",
+  ANTHROPIC:
+    "ANTHROPIC's was 0.5 % until it became 1 % on 20 September 2026, and on 24 September its issuer was found to have already written 3 % for epoch 1043",
 });
 
 const symbolsOf = (legs: readonly SignedLeg[]): string => listAnd(legs.map((leg) => leg.symbol));
@@ -263,14 +324,22 @@ const feeCanMove = (leg: SignedLeg): boolean => !leg.feeSettingAbsent && (leg.gr
 /** One leg's transfer fee in the owner's words, with the day it was read. An unread fee is said to be unread; an absent setting is said to be absent. */
 function feeSentence(leg: SignedLeg): string {
   if (leg.feeBps === null) return `SaverFi has not read ${leg.symbol}'s transfer fee on chain, and an unread fee is not a zero fee.`;
+  // WHAT IS ALREADY WRITTEN FOR LATER, said after what is charged now and
+  // never instead of it: the owner pays the first today and the second from a
+  // date that needs nobody's signature.
+  const written =
+    leg.scheduledFeeBps === null || leg.scheduledFeeEpoch === null || leg.scheduledFeeBps === leg.feeBps
+      ? ""
+      : ` Its issuer has already written ${leg.scheduledFeeBps === 0 ? "a fee of nothing" : ratePercent(leg.scheduledFeeBps)} for ${epochWords(leg.scheduledFeeEpoch)}` +
+        (leg.scheduledFeeBps > 0 ? `; from then the same round trip gives up ${roundTripPercent(leg.scheduledFeeBps)}.` : ".");
   if (leg.feeBps === 0)
     return leg.feeSettingAbsent
       ? `${leg.symbol} charges nothing to transfer, and nobody can make it: its mint carries no fee setting at all, and no key with the power to add one.`
-      : `${leg.symbol} charged nothing to transfer when it was read on ${leg.feeReadOn}, and its issuer can raise that at the next epoch boundary.`;
+      : `${leg.symbol} charged nothing to transfer when it was read on ${leg.feeReadOn}, and its issuer can raise that at the next epoch boundary.${written}`;
   return (
     `${leg.symbol}'s issuer charges ${ratePercent(leg.feeBps)} of every transfer of it: once when your vault buys it, and once when it leaves. ` +
     `Going in and back out therefore gives up ${roundTripPercent(leg.feeBps)} before the market is involved at all — not quite twice the fee, because the second charge is taken from what the first one left. ` +
-    `That was its fee on ${leg.feeReadOn}, in epoch ${leg.feeEpoch}.`
+    `That was its fee on ${leg.feeReadOn}, in epoch ${leg.feeEpoch}.${written}`
   );
 }
 
@@ -302,15 +371,41 @@ function issuerCostParagraph(legs: readonly SignedLeg[]): string {
 function feeCeilingParagraph(legs: readonly SignedLeg[], max: string): string {
   const opening = `There is a limit built into SaverFi: the keeper will not buy a stock that charges more than ${max} to transfer.`;
   if (legs.length === 0) return `${opening} A basket with nothing in it has nothing to measure against that.`;
+  // ON THE LIMIT NOW, OR ON IT FROM THE EPOCH A RISE ALREADY WRITTEN LANDS IN.
+  // Both are the same position — admitted, with no margin — and neither may be
+  // described as the other: on 2026-09-24 ANTHROPIC was the second kind, 1 %
+  // charged and 3 % written for epoch 1043.
   const atCeiling = legs.filter((leg) => leg.feeBps === MAX_LEG_FEE_BPS);
+  const reachesCeiling = legs.filter((leg) => leg.feeBps !== MAX_LEG_FEE_BPS && leg.scheduledFeeBps === MAX_LEG_FEE_BPS);
   const unread = legs.filter((leg) => leg.feeBps === null);
   const movable = legs.filter(feeCanMove);
   const stop = `the vault stops buying ${wholeBasket(legs)} and stops converting your SOL at all, until the basket itself is changed. Nothing is lost when that happens; the saving simply stops until someone acts.`;
+  // AND PAST IT, which the shelf no longer offers but a policy signed earlier
+  // can still hold: a leg whose fee — in force or written for later — is over
+  // the limit is refused from that epoch, and the owner is told the date.
+  const overCeiling = legs.filter((leg) => (judgedFeeOf(leg) ?? 0) > MAX_LEG_FEE_BPS);
   const parts = [opening];
-  if (atCeiling.length > 0) {
-    parts.push(
-      `${symbolsOf(atCeiling)} ${isOne(atCeiling) ? "sits" : "sit"} exactly on that limit today, with no margin whatsoever, so if ${isOne(atCeiling) ? "that issuer raises its fee" : "any of those issuers raises its fee"} once more, ${stop}`,
-    );
+  if (overCeiling.length > 0) {
+    for (const leg of overCeiling) {
+      parts.push(
+        leg.feeBps !== null && leg.feeBps > MAX_LEG_FEE_BPS
+          ? `${leg.symbol} charged ${ratePercent(leg.feeBps)} when it was read on ${leg.feeReadOn}, over that limit, so ${stop}`
+          : `${leg.symbol}'s issuer has already written ${ratePercent(leg.scheduledFeeBps ?? 0)} for ${epochWords(leg.scheduledFeeEpoch ?? 0)}, over that limit: from then ${stop}`,
+      );
+    }
+  } else if (atCeiling.length > 0 || reachesCeiling.length > 0) {
+    if (atCeiling.length > 0) {
+      parts.push(`${symbolsOf(atCeiling)} ${isOne(atCeiling) ? "sits" : "sit"} exactly on that limit today, with no margin whatsoever.`);
+    }
+    for (const epoch of [...new Set(reachesCeiling.map((leg) => leg.scheduledFeeEpoch!))]) {
+      const landing = reachesCeiling.filter((leg) => leg.scheduledFeeEpoch === epoch);
+      parts.push(
+        `${symbolsOf(landing)} ${isOne(landing) ? "charges" : "charge"} ${listAnd([...new Set(landing.map((leg) => ratePercent(leg.feeBps ?? 0)))])} today, and ${isOne(landing) ? "its issuer has" : "their issuers have"} already written ${max} for ${epochWords(epoch)}: ` +
+          `from then ${isOne(landing) ? "it sits" : "they sit"} exactly on that limit, with no margin whatsoever.`,
+      );
+    }
+    const onIt = [...atCeiling, ...reachesCeiling];
+    parts.push(`If ${isOne(onIt) ? "that issuer raises its fee" : "any of those issuers raises its fee"} once more after that, ${stop}`);
   } else if (movable.length > 0) {
     const priced = legs.filter((leg) => leg.feeBps !== null);
     if (priced.length > 0) {
@@ -344,7 +439,7 @@ function marketCostParagraph(legs: readonly SignedLeg[]): string {
           `${leg.symbol}'s round trip cost ${trip.all} all told, between ${trip.low} and ${trip.high}.` +
             (trip.market === null
               ? ""
-              : ` The ${roundTripPercent(leg.feeBps ?? 0)} its issuer charges is the part of that which never moves; the rest, ${trip.market}, is the market` +
+              : ` The ${roundTripPercent(trip.feeBps)} its issuer charged that day is the part of that which never moves; the rest, ${trip.market}, is the market` +
                 (trip.moved === null ? "." : `, and it moved by ${trip.moved} within thirteen minutes that day.`)),
         );
       }
@@ -756,7 +851,9 @@ export const INVEST_COPY = {
    *
    * The keeper admits a leg while `fee.bps <= MAX_LEG_FEE_BPS` (invest-decision.ts
    * gates on `>`, strictly greater), so a leg sitting exactly on the limit is
-   * admitted with no margin at all — which is every PreStock's position today.
+   * admitted with no margin at all — which is the position of seven PreStocks
+   * from epoch 1043, the 3 % their issuer had already written when read on
+   * 2026-09-24.
    * `max` is MAX_LEG_FEE_BPS as a percentage, held to the keeper's own constant
    * by vault-copy.test.ts so this sentence cannot drift from the gate.
    */
@@ -1194,7 +1291,15 @@ export const PICKER_COPY = {
   /** Why an asset is off the shelf, with the dated reading that put it there. */
   refusedBecause: (why: string): string => why,
   /** The group's standing facts, shown once per group rather than once per asset. */
-  prestockGroup: "PreStocks: one issuer key mints, freezes, pauses, sets the transfer fee and holds a permanent delegate over every one of these, and it has used that key. Each charges 1 % to transfer, which is exactly SaverFi's limit — one more raise and the whole basket stops.",
+  /**
+   * A GROUP SENTENCE, SO IT MUST BE TRUE OF EVERY PRESTOCK THE PICKER LISTS.
+   * Read 2026-09-24: all eight charge 1 %, and seven have 3 % — exactly the
+   * limit — already written for epoch 1043; SPACEX alone has nothing newer.
+   * vault-copy.test.ts holds this sentence to those readings, so a re-read
+   * that changes either half turns it red instead of leaving it standing.
+   */
+  prestockGroup:
+    "PreStocks: one issuer key mints, freezes, pauses, sets the transfer fee and holds a permanent delegate over every one of these, and it has used that key. Each charges 1 % to transfer today, and on all but SPACEX it has already written 3 % from epoch 1043, around 26 September 2026 — exactly SaverFi's limit, so one more raise after that and the whole basket stops.",
   /**
    * THE GROUP'S FACT, SAID OF THE MINTS SOMEBODY ACTUALLY READ. 929 xStock
    * mints exist and one was read (XSTOCKS_POWERS.mintsRead), so the plural was

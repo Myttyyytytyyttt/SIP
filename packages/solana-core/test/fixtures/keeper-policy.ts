@@ -111,34 +111,71 @@ export const POOL_DEPTH = Object.freeze({
  *
  * Charged on the way in and again on the way out, so the ceiling is paid twice.
  * One refused leg refuses the whole basket and the SOL conversion with it.
+ *
+ * 300 SINCE 2026-09-24, AND IT WAS 100. The PreStocks issuer key had written
+ * 300 bps for epoch 1043 into seven of the eight PreStocks mints (read on
+ * mainnet that day, epoch 1041), and at 100 the keeper would have refused every
+ * basket holding one from that epoch on. The owner raised the ceiling to 300
+ * knowing the cost below; invest-decision.ts MAX_LEG_FEE_BPS records the
+ * decision where it is enforced.
  */
 export const LEG_FEE = Object.freeze({
   /** packages/solana-keeper/src/invest-decision.ts */
-  keeper: Object.freeze({ constant: "MAX_LEG_FEE_BPS", module: "invest-decision.ts", value: 100n }),
+  keeper: Object.freeze({ constant: "MAX_LEG_FEE_BPS", module: "invest-decision.ts", value: 300n }),
   /** packages/website-oficial/src/lib/vault-copy.ts, printed by INVEST_COPY.feeCeiling. */
-  web: Object.freeze({ constant: "MAX_LEG_FEE_BPS", value: 100 }),
-  /** THE UNIT THE WEBSITE PRINTS: 100 bps is 1 % of every transfer. Off by a factor of ten in either direction, this disagrees. */
-  percentPerTransfer: 1,
+  web: Object.freeze({ constant: "MAX_LEG_FEE_BPS", value: 300 }),
+  /** THE UNIT THE WEBSITE PRINTS: 300 bps is 3 % of every transfer. Off by a factor of ten in either direction, this disagrees. */
+  percentPerTransfer: 3,
   /**
-   * COMPOUNDED, NOT DOUBLED. In and out at the ceiling is 1 - 0.99^2 = 1.99 %,
-   * not 2 %, because the second 1 % is taken from what the first one left. Both
-   * sides derive this rather than copy it; INVEST_COPY.issuerCost prints it.
+   * COMPOUNDED, NOT TRIPLED-AND-DOUBLED. In and out at the ceiling is
+   * 1 - 0.97^2 = 5.91 %, not 6 %, because the second 3 % is taken from what
+   * the first one left. Both sides derive this rather than copy it;
+   * INVEST_COPY.issuerCost prints it.
    */
-  roundTripPercent: 1.99,
+  roundTripPercent: 5.91,
   /**
-   * packages/solana-keeper/src/min-out.ts SLIPPAGE_BPS, here because it is what
-   * makes the ceiling a decision rather than a number: at 100 bps the issuer's
-   * round trip is the ENTIRE tolerance a single fill is allowed against the
-   * market. Raising one without arguing the other is the mistake this records.
+   * packages/solana-keeper/src/min-out.ts SLIPPAGE_BPS, the tolerance one fill
+   * is allowed against the market, and solana-core's CATALOGUE_SLIPPAGE_BPS.
+   * UNCHANGED BY THE RAISE, and that is the point of keeping it here: at 100
+   * the issuer's round trip (1.99 %) was the whole of it; at 300 the round trip
+   * (5.91 %) is almost three times it. The owner accepted that on 2026-09-24;
+   * this number records what he accepted it against.
    */
   slippageBps: 200n,
   /**
+   * packages/solana-keeper/src/invest-decision.ts MIN_SLIPPAGE_MARGIN_BPS: how
+   * far STRICTLY above a leg's transfer fee its slippage is asked, because at
+   * equality Jupiter reverts with 0x1771 (measured across epoch 1038 -> 1039).
+   * legSlippageBps(fee) = max(slippageBps, fee + this) — 400 at the ceiling.
+   * solana-core's catalogue mirrors the same arithmetic, so it is here.
+   */
+  slippageMarginBps: 100n,
+  /**
+   * THE IMPACT BAR, FEE BY FEE, worked once by hand:
+   *   maxTurnImpactBps(legSlippageBps(fee), fee) = max(5, (slippage - fee) / 4)
+   * — the keeper's ARM 2 ceiling, which solana-core's sizePenaltyCeilingBps
+   * must return for the same fee or the catalogue offers a leg the keeper
+   * refuses (or refuses one it buys). At 300 the old catalogue formula,
+   * (200 - fee) / 4, gave 0 while the keeper allows 25: ANTHROPIC would have
+   * left the shelf on PRICE_AT_SIZE while the keeper went on buying it.
+   * [fee, ceiling] pairs, in bps: 0 -> 50, 50 -> 37, 100 -> 25, 250 -> 25,
+   * 300 -> 25, and one past the ceiling, 301 -> 25 (the ask widens with it).
+   */
+  impactCeilingBps: Object.freeze([
+    Object.freeze([0n, 50n] as const),
+    Object.freeze([50n, 37n] as const),
+    Object.freeze([100n, 25n] as const),
+    Object.freeze([250n, 25n] as const),
+    Object.freeze([300n, 25n] as const),
+    Object.freeze([301n, 25n] as const),
+  ]),
+  /**
    * The gate is `fee.bps > MAX_LEG_FEE_BPS` — STRICTLY greater — so a leg
    * sitting exactly on the limit is admitted with no margin at all. That is
-   * ANTHROPIC's position today, and a flip to `>=` would refuse the basket the
-   * website promises. Both cases are asserted so the flip cannot pass.
+   * ANTHROPIC's position from epoch 1043, and a flip to `>=` would refuse the
+   * basket the website promises. Both cases are asserted so the flip cannot pass.
    */
-  boundary: Object.freeze({ admittedAtBps: 100n, refusedAtBps: 101n }),
+  boundary: Object.freeze({ admittedAtBps: 300n, refusedAtBps: 301n }),
 });
 
 /**
