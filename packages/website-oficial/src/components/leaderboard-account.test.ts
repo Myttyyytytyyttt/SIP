@@ -39,7 +39,7 @@ vi.mock("@/hooks/use-live-dashboard", () => ({
     view: mocked.live,
     refresh: vi.fn(),
     loadOlder: vi.fn(),
-    older: { busy: false, retryAt: null, message: null, complete: false },
+    older: { busy: false, retryAt: null, message: null, complete: false, available: false },
     activityUnreadable: false,
   }),
 }));

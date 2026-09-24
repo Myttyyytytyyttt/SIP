@@ -22,10 +22,11 @@
 
 import { Mail } from "lucide-react";
 import Image from "next/image";
-import Link from "next/link";
 
+import { AppLink } from "@/components/app-link";
 import { Separator } from "@/components/ui/separator";
 import { LABEL, MONO } from "@/lib/classes";
+import { urlWithMode, type UrlMode } from "@/lib/dashboard-mode";
 import { cn } from "@/lib/utils";
 
 /**
@@ -61,9 +62,11 @@ const STEPS = ["Trade anywhere — GMGN, Axiom, any router.", "A slice of your t
 const QUIET =
   "rounded-sm text-muted-foreground transition-colors outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50";
 
-export function SiteFooter({ now, className }: { now: string; className?: string }) {
+export function SiteFooter({ now, className, mode = null }: { now: string; className?: string; /** The mode the app's own links carry; see SiteHeader. */ mode?: UrlMode | null }) {
   // ISO 8601, always `YYYY-…` — the same string the rest of the page dates from.
   const year = now.slice(0, 4);
+  // Only the app's own pages take the mode; an anchor or anywhere else is left as it is.
+  const hrefOf = (href: string): string => (mode !== null && href.startsWith("/") ? urlWithMode(href, mode) : href);
 
   return (
     <footer className={cn("border-t", className)}>
@@ -98,9 +101,9 @@ export function SiteFooter({ now, className }: { now: string; className?: string
             <ul className="mt-4 grid w-fit grid-flow-col grid-rows-3 gap-x-12 gap-y-2.5 text-sm">
               {LINKS.map(({ title, href }) => (
                 <li key={title}>
-                  <Link className={QUIET} href={href}>
+                  <AppLink className={QUIET} href={hrefOf(href)}>
                     {title}
-                  </Link>
+                  </AppLink>
                 </li>
               ))}
             </ul>

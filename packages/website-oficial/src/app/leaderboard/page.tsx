@@ -20,6 +20,7 @@ import { LeaderboardView } from "@/components/leaderboard-view";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { toSolanaPublicConfig } from "@/lib/config";
+import { readUrlMode } from "@/lib/dashboard-mode";
 import { fetchLeaderboard } from "@/lib/leaderboard";
 import { loadConfig } from "@/lib/load-config";
 import { SAMPLE_LEADERBOARD } from "@/lib/leaderboard-sample";
@@ -42,6 +43,10 @@ export default async function LeaderboardPage({
   // ?demo=1 fills the board with ten invented pensions, for looking at the page
   // when the chain has one row on it. It is labelled on screen, never silent.
   const sample = (await searchParams)["demo"] === "1";
+  // The mode the visitor came from (the sample, or Live), carried by every link
+  // back into the app — without it, "Pension" from here was the landing.
+  const requested = (await searchParams)["mode"];
+  const mode = readUrlMode(typeof requested === "string" ? requested : null);
   const result = sample ? ({ ok: true, data: SAMPLE_LEADERBOARD } as const) : await fetchLeaderboard();
   const now = new Date().toISOString();
   // WHO GETS PRIVY HERE, AND WHO DOES NOT. This page is public and most of its
@@ -61,10 +66,11 @@ export default async function LeaderboardPage({
     <div className="flex min-h-dvh flex-col">
       <SiteHeader
         current="leaderboard"
+        mode={mode}
         // NO CONNECT BUTTON HERE. Connecting needs the Privy provider this page
         // deliberately does not mount, so the account slot is a door back to
         // the app rather than a button that would need a second provider.
-        account={returning && config !== null ? <LeaderboardAccountHost config={config} /> : <OpenPension returning={returning} />}
+        account={returning && config !== null ? <LeaderboardAccountHost config={config} /> : <OpenPension returning={returning} mode={mode} />}
         activitySheet={
           <p className="p-4 text-sm text-muted-foreground italic">
             Points are earned by using it and they are permanent: they stack week after week, they cannot be bought,
@@ -103,7 +109,7 @@ export default async function LeaderboardPage({
         <LeaderboardView result={result} now={now} sample={sample} />
       </main>
 
-      <SiteFooter now={now} />
+      <SiteFooter now={now} mode={mode} />
     </div>
   );
 }

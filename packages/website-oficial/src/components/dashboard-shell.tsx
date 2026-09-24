@@ -34,6 +34,7 @@ import { useLogin, usePrivy } from "@privy-io/react-auth";
 import { LogOut } from "lucide-react";
 import { usePathname, useSearchParams } from "next/navigation";
 
+import { ActivityMain } from "@/components/activity-main";
 import { CopyButton } from "@/components/copy-button";
 import { DashboardSource } from "@/components/DashboardSource";
 import { DashboardMain, PENSION_SLOT, RULE_SLOT } from "@/components/dashboard-main";
@@ -59,7 +60,8 @@ import { useOnboardingClosed } from "@/hooks/use-onboarding-closed";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { decideDashboard, readUrlMode, toggleModeOf, urlWithMode, type DashboardState, type UrlMode } from "@/lib/dashboard-mode";
 import { formatUsd } from "@/lib/amounts";
-import { LIVE_COPY, MODE_COPY } from "@/lib/live-copy";
+import { usd } from "@/lib/format";
+import { ACTIVITY_COPY, LIVE_COPY, MODE_COPY } from "@/lib/live-copy";
 import { onboardingWanted, setupIsTheDoor, vaultPresenceOf } from "@/lib/onboarding";
 import { ONBOARDING_DONE_KEY, forgetOnboarding, setOnboardingClosed } from "@/lib/onboarding-memory";
 import { pensionKeyOf } from "@/lib/pension-key";
@@ -503,33 +505,77 @@ function Body({
 
 // ── the view each page renders ───────────────────────────────────────────────
 
-/** The sample, exactly as it was: today's components, today's data, one notice over it. */
+/**
+ * The sample: today's components, today's data, one notice over it.
+ *
+ * EVERY LINK KEEPS THE SAMPLE (owner, 09-24): the header's tabs and the
+ * footer's pages carry ?mode=mock, so a visitor moves around the example
+ * instead of being thrown out of it by the first tab they press.
+ *
+ * AND /activity IS AN ACTIVITY PAGE: the history full width (activity-main.tsx),
+ * under the same notice — not the pension page with a different tab underlined.
+ */
 function MockBody({ load, control, account, current }: { readonly load: DashboardLoadJson; readonly control: ReactNode; readonly account: ReactNode; readonly current: "pension" | "activity" }) {
   const { now, wallet, rule, stats, curve, days, holdings, trades, activity } = load.data;
+  // Reads the payload on screen, never the toggle: the two cannot disagree.
+  const source = <DashboardSource source={load.source} notice={load.notice} />;
+  // The phone's sheet opens the same modal the desktop sidebar does. Without
+  // it, its Manage wallets was a link to /wallets, whose way back is the bare
+  // landing: the one door on a phone that still threw a visitor out of the sample.
+  const openWallets = useWalletsOpener();
 
   return (
     <div className="flex min-h-dvh flex-col">
-      <SiteHeader activitySheet={<WalletActivity wallet={wallet} activity={activity} now={now} id="activity-sheet" className="min-h-0 flex-1" />} control={control} account={account} current={current} />
+      <SiteHeader
+        activitySheet={
+          <WalletActivity
+            wallet={wallet}
+            activity={activity}
+            now={now}
+            id="activity-sheet"
+            className="min-h-0 flex-1"
+            {...(openWallets === null ? {} : { onManageWallets: openWallets, inSheet: true })}
+          />
+        }
+        control={control}
+        account={account}
+        current={current}
+        mode="mock"
+      />
 
       <div className="flex flex-1">
         <aside className="hidden w-80 shrink-0 border-r lg:block xl:w-88">
           <DashboardWallets wallet={wallet} activity={activity} now={now} className="sticky top-14 h-[calc(100dvh-3.5rem)]" />
         </aside>
 
-        <DashboardMain
-          // Reads the payload on screen, never the toggle: the two cannot disagree.
-          top={<DashboardSource source={load.source} notice={load.notice} />}
-          strip={<SavingsStrip trades={trades} rule={rule} now={now} />}
-          cards={
-            <>
-              <SavingsRulePanel rule={rule} stats={stats} activity={activity} now={now} className={RULE_SLOT} />
-              <PensionPanel stats={stats} curve={curve} holdings={holdings} days={days} rule={rule} now={now} className={PENSION_SLOT} />
-            </>
-          }
-        />
+        {current === "activity" ? (
+          <ActivityMain
+            activity={activity}
+            now={now}
+            top={source}
+            summary={[
+              { label: LIVE_COPY.savedSoFar, value: usd(stats.totalSavedUsd) },
+              { label: "Trades", value: <Num>{stats.trades === null ? "—" : String(stats.trades)}</Num> },
+              { label: "Investments", value: <Num>{String(stats.investments)}</Num> },
+              // Every row the sample has is here — Show more only pages the drawing — so this is the live page's "complete" wording, not a date.
+              { label: LIVE_COPY.activity, value: ACTIVITY_COPY.complete, quiet: true },
+            ]}
+          />
+        ) : (
+          <DashboardMain
+            top={source}
+            strip={<SavingsStrip trades={trades} rule={rule} now={now} />}
+            cards={
+              <>
+                <SavingsRulePanel rule={rule} stats={stats} activity={activity} now={now} className={RULE_SLOT} />
+                <PensionPanel stats={stats} curve={curve} holdings={holdings} days={days} rule={rule} now={now} className={PENSION_SLOT} />
+              </>
+            }
+          />
+        )}
       </div>
 
-      <SiteFooter now={now} />
+      <SiteFooter now={now} mode="mock" />
     </div>
   );
 }
@@ -548,6 +594,7 @@ function PlainBody({
   current,
   sidebar,
   now,
+  mode,
   children,
 }: {
   readonly control: ReactNode;
@@ -555,30 +602,42 @@ function PlainBody({
   readonly current: "pension" | "activity";
   readonly sidebar: ReactNode;
   readonly now: string;
+  /** The mode the links carry: Live on the connect cards, so a tab does not drop the visitor on the landing. */
+  readonly mode: UrlMode | null;
   readonly children: ReactNode;
 }) {
   return (
     <div className="flex min-h-dvh flex-col">
-      <SiteHeader activitySheet={sidebar} control={control} account={account} current={current} />
+      <SiteHeader activitySheet={sidebar} control={control} account={account} current={current} mode={mode} />
       <div className="flex flex-1">
         <aside className="hidden w-80 shrink-0 border-r lg:block xl:w-88">
           <div className="sticky top-14 p-4 text-sm text-muted-foreground">{sidebar}</div>
         </aside>
         <main className="flex min-w-0 flex-1 flex-col">{children}</main>
       </div>
-      <SiteFooter now={now} />
+      <SiteFooter now={now} mode={mode} />
     </div>
   );
 }
 
+/**
+ * Which mode a page's links carry: the one on screen, for the states that have
+ * a URL mode to lose, and the URL's own while the skeleton waits for Privy (a
+ * visitor who pressed "See the app" is in the sample before it has painted).
+ * Nothing for a connected pension: it is Live whatever the URL says.
+ */
+const linkModeOf = (kind: DashboardState["kind"], urlMode: UrlMode | null): UrlMode | null =>
+  kind === "mock" ? "mock" : kind === "live-connect" || kind === "live-keyless" || kind === "live-unavailable" ? "live" : kind === "loading" ? urlMode : null;
+
 export function DashboardView({ view }: { readonly view: "pension" | "activity" }) {
   const context = useDashboard();
+  const urlMode = readUrlMode(useSearchParams().get("mode"));
   if (context === null) return null;
   const { state, mock, live, account, pensionKey, setMode, onSeeSample } = context;
 
   const control = state.toggle ? <DataModeToggle mode={toggleModeOf(state.kind)} onModeChange={setMode} /> : null;
   const plain = (sidebar: ReactNode, children: ReactNode) => (
-    <PlainBody control={control} account={account} current={view} sidebar={sidebar} now={mock.data.now}>
+    <PlainBody control={control} account={account} current={view} sidebar={sidebar} now={mock.data.now} mode={linkModeOf(state.kind, urlMode)}>
       {children}
     </PlainBody>
   );
@@ -638,6 +697,7 @@ export function DashboardView({ view }: { readonly view: "pension" | "activity" 
           nowMs={clock}
           activityUnreadable={live.activityUnreadable}
           activityRetryAt={live.activityRetryAt}
+          activityPending={live.activityPending}
         />
       );
     }

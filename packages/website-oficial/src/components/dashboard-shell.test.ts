@@ -53,7 +53,7 @@ vi.mock("@/hooks/use-live-dashboard", () => ({
     view: mocked.live,
     refresh: vi.fn(),
     loadOlder: vi.fn(),
-    older: { busy: false, retryAt: null, message: null, complete: false },
+    older: { busy: false, retryAt: null, message: null, complete: false, available: false },
     activityUnreadable: false,
   }),
 }));
@@ -80,7 +80,7 @@ import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hoo
 import type { VaultApi, VaultStateJson } from "@/lib/vault-api";
 import { shortAddress } from "@/lib/vault-copy";
 import { usd } from "@/lib/format";
-import { LIVE_COPY } from "@/lib/live-copy";
+import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import { mock } from "@/mocks";
 
 const SAMPLE: DashboardLoadJson = { source: "mock", data: mock, notice: null };
@@ -185,6 +185,65 @@ describe("nobody connected", () => {
     expect(html).not.toContain("Sold HOODx");
     // …and the choice is still offered, so Mock is one click away.
     expect(trigger(html, "Live")).toContain('data-state="active"');
+  });
+});
+
+/**
+ * MOVING AROUND THE SAMPLE (owner, 09-24). A bare "/" is the landing and a bare
+ * "/activity" is Live's connect card, so a tab without the mode threw a visitor
+ * out of the example on their first click.
+ */
+describe("the sample keeps the visitor in it", () => {
+  /** Every href on the page that points at one of the app's own pages. */
+  const hrefsTo = (html: string, pathname: string): string[] => [...html.matchAll(new RegExp(`href="(${pathname.replace("/", "\\/")}(?:\\?[^"]*)?)"`, "g"))].map((m) => m[1]!);
+
+  it("carries ?mode=mock on every tab and footer link to the app's pages", () => {
+    mocked.search = new URLSearchParams("mode=mock");
+    const html = render();
+    for (const pathname of ["/activity", "/leaderboard"]) {
+      const hrefs = hrefsTo(html, pathname);
+      expect(hrefs.length, pathname).toBeGreaterThan(0);
+      for (const href of hrefs) expect(href, pathname).toBe(`${pathname}?mode=mock`);
+    }
+    expect(html).toContain('href="/?mode=mock"');
+    expect(html).not.toMatch(/href="\/"/);
+  });
+
+  it("carries ?mode=live from Live's connect card, so Pension is not the landing", () => {
+    mocked.search = new URLSearchParams("mode=live");
+    const html = render();
+    expect(html).toContain('href="/?mode=live"');
+    expect(html).toContain('href="/activity?mode=live"');
+  });
+
+  it("on /activity shows the history full width — not the pension page with another tab underlined", () => {
+    mocked.pathname = "/activity";
+    mocked.search = new URLSearchParams("mode=mock");
+    const html = render(true, "activity");
+    // Still the sample, still labelled as one.
+    expect(html).toContain("Sample data");
+    // The activity page: its filters and its full-width list, with the sample's own rows.
+    expect(html).toContain(`aria-label="${ACTIVITY_COPY.filterLabel}"`);
+    expect(html).toContain('id="activity-page"');
+    // The pension page's cards are not drawn under it.
+    expect(html).not.toContain("Savings rule");
+    expect(html).not.toContain("CHART");
+    // Every row the sample has is on this page: its coverage is the live page's "complete", not a date.
+    expect(html).toContain(ACTIVITY_COPY.complete);
+  });
+
+  it("keeps the mode on the links while the skeleton waits for Privy", () => {
+    mocked.privy = { ready: false, authenticated: false, user: null };
+    mocked.search = new URLSearchParams("mode=mock");
+    const html = render();
+    expect(html).toContain('href="/activity?mode=mock"');
+  });
+
+  it("on / is still the pension page", () => {
+    mocked.search = new URLSearchParams("mode=mock");
+    const html = render();
+    expect(html).toContain("Savings rule");
+    expect(html).not.toContain('id="activity-page"');
   });
 });
 

@@ -20,7 +20,7 @@ import type { LiveDashboard, VaultEventJson } from "@/lib/live-types";
 import { NOW_MS, liveActivity, liveDashboard, liveEntry, seconds, settledEvent, signature } from "../../test/fixtures/live-dashboard";
 
 /** The strip as LiveBody mounts it. `settledOutsideHistory` is the caller's fact, not the rows'. */
-function render(input: { readonly data: LiveDashboard; readonly settledOutsideHistory?: boolean; readonly complete?: boolean }): string {
+function render(input: { readonly data: LiveDashboard; readonly settledOutsideHistory?: boolean; readonly complete?: boolean; readonly available?: boolean }): string {
   const page = toDashboardMock(input.data, { complete: input.complete ?? false });
   return renderToStaticMarkup(
     createElement(
@@ -32,7 +32,7 @@ function render(input: { readonly data: LiveDashboard; readonly settledOutsideHi
         now: page.now,
         live: {
           settledOutsideHistory: input.settledOutsideHistory ?? input.data.stats.settledOutsideHistory,
-          loadOlder: { busy: false, retryIn: null, complete: input.complete ?? false, onClick: () => undefined },
+          loadOlder: { busy: false, retryIn: null, complete: input.complete ?? false, available: input.available ?? true, onClick: () => undefined },
         },
       }),
     ),
@@ -125,6 +125,12 @@ describe("a settlement the loaded history does not hold", () => {
 
   it("drops the button once the history reaches the beginning: there is nothing older to ask for", () => {
     const html = render({ data: noRows(), settledOutsideHistory: true, complete: true });
+    expect(html).toContain(STATS_COPY.stripModeProfit("20%"));
+    expect(html).not.toContain(ACTIVITY_COPY.loadOlder);
+  });
+
+  it("draws no Load older before a head page has named an older one: it would press on nothing", () => {
+    const html = render({ data: noRows(), settledOutsideHistory: true, available: false });
     expect(html).toContain(STATS_COPY.stripModeProfit("20%"));
     expect(html).not.toContain(ACTIVITY_COPY.loadOlder);
   });

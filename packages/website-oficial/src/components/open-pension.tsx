@@ -11,11 +11,13 @@
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
+import { urlWithMode, type UrlMode } from "@/lib/dashboard-mode";
 
-export function OpenPension({ returning }: { readonly returning: boolean }) {
+/** `mode`: the one the visitor came from, so a stranger who was in the sample goes back to it rather than to the landing. */
+export function OpenPension({ returning, mode = null }: { readonly returning: boolean; readonly mode?: UrlMode | null }) {
   return (
     <Button asChild size="sm" variant={returning ? "default" : "outline"}>
-      <Link href="/">{returning ? "Back to my pension" : "Open my pension"}</Link>
+      <Link href={mode === null ? "/" : urlWithMode("/", mode)}>{returning ? "Back to my pension" : "Open my pension"}</Link>
     </Button>
   );
 }

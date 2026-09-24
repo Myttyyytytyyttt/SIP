@@ -31,7 +31,8 @@ const SHOWN = 40;
  */
 export interface LiveStrip {
   readonly settledOutsideHistory: boolean;
-  readonly loadOlder: { readonly busy: boolean; readonly retryIn: number | null; readonly complete: boolean; readonly onClick: () => void };
+  /** `available`: a head page named an older one. Without it the button would press on nothing (use-live-dashboard.ts). */
+  readonly loadOlder: { readonly busy: boolean; readonly retryIn: number | null; readonly complete: boolean; readonly available: boolean; readonly onClick: () => void };
 }
 
 export function SavingsStrip({
@@ -80,8 +81,9 @@ export function SavingsStrip({
       {shown.length === 0 && live !== undefined ? (
         // The chips' own slot, holding the one thing that can fill it. With the
         // history already at its beginning there is nothing older to ask for,
-        // and a button that cannot help is worse than no button.
-        live.loadOlder.complete ? null : (
+        // and a button that cannot help is worse than no button — nor is there
+        // one to press before a head page has said where the older one starts.
+        live.loadOlder.complete || !live.loadOlder.available ? null : (
           <Button
             type="button"
             size="sm"

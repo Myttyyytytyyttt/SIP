@@ -360,6 +360,9 @@ export const ACTIVITY_COPY = {
   filterSavings: "Savings",
   filterInvesting: "Investing",
   filterWithdrawals: "Withdrawals",
+  filterOther: "Other",
+  /** The page is drawn and the history has not answered yet: never "No activity yet" in the meantime. */
+  readingHistory: "Reading this pension's history…",
   filterLabel: "Filter activity",
   noneInFilter: "Nothing of that kind in the loaded history.",
 } as const;

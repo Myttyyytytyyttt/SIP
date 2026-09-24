@@ -37,7 +37,7 @@ import type { LiveDashboard } from "@/lib/live-types";
 
 import { NOW_MS, OWNER, liveActivity, liveDashboard, liveEntry, liveSnapshot, seconds, signature } from "../../../test/fixtures/live-dashboard";
 
-const older = { busy: false, retryAt: null, message: null, complete: false };
+const older = { busy: false, retryAt: null, message: null, complete: false, available: true };
 
 /**
  * A pension with settlements on chain and NO rows loaded — exactly what a failed

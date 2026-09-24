@@ -168,7 +168,7 @@ export function LiveActivityPage({
             <FeedFooter transactions={data.rows.length} settlements={settlements} />
             {older.complete ? (
               <span className="text-xs text-muted-foreground">{ACTIVITY_COPY.complete}</span>
-            ) : (
+            ) : !older.available ? null : (
               <Button type="button" size="sm" variant="outline" disabled={older.busy || retryIn !== null} onClick={onLoadOlder}>
                 {older.busy ? ACTIVITY_COPY.loadingOlder : retryIn === null ? ACTIVITY_COPY.loadOlder : LIVE_COPY.retryIn(retryIn)}
               </Button>

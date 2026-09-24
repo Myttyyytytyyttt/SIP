@@ -30,6 +30,19 @@
  * off, because the snapshot's own leg succeeded and every figure on the screen
  * is current.
  *
+ * THE FIRST PAINT WAITS FOR THE HISTORY (owner, 09-24). The snapshot answers
+ * first, and committing it alone drew half a second of "No activity yet", "0
+ * events · 0 settlements", a chart saying the savings are "not in the history
+ * loaded here" and a Load older that could do nothing — a pension that looked
+ * as though it had lost its past. So the FIRST snapshot of a pension is held
+ * until its head page and the settlement round below have answered (or
+ * failed) — but never longer than FIRST_PAINT_WAIT_MS after the snapshot
+ * itself answered (lib/first-paint.ts): a slow history must not keep the
+ * balances, the rule and the next step behind a skeleton. If the bound comes
+ * first, the feed says the history is still being read (`activityPending`),
+ * never "No activity yet". Every later read commits its snapshot at once, over
+ * rows that are already on screen.
+ *
  * A LATE ANSWER FOR AN OLDER REQUEST IS DROPPED (a request counter, as
  * useVaultState does), and changing pension key resets everything — nothing read
  * for the previous key stays on screen for the next one.
@@ -52,6 +65,7 @@ import { activityTroubleFrom, createLiveApi, type LiveActivityTrouble } from "@/
 import { appendOlder, headCursor, mergeHead, newestSignature } from "@/lib/live-activity-store";
 import { backfillLinkSettlements, backfillSpend, chainSaysSettled, forgetBackfillSpend, holdsSettlement, settlementWallets, shouldBackfill } from "@/lib/live-backfill";
 import { LIVE_COPY } from "@/lib/live-copy";
+import { firstPaintGate } from "@/lib/first-paint";
 import { toLiveDashboard } from "@/lib/live-model";
 import { MANUAL_FLOOR_MS, nextActivityRetryMs, nextDelayMs, nextManualDelayMs, shouldRefreshOnShow } from "@/lib/live-schedule";
 import type { LiveActivityJson, LiveDashboard, LiveEntryJson, LiveSnapshotJson } from "@/lib/live-types";
@@ -63,6 +77,13 @@ export const ACTIVITY_PAGE = 15;
 const MAX_WALLETS = 10;
 /** After this long without a good read, the stale note adds that the numbers may be out of date. */
 export const STALE_WARNING_MS = 5 * 60_000;
+/**
+ * The longest the first paint waits for the history, counted from the moment
+ * the snapshot answered. A healthy head page and one wallet's link page answer
+ * in about a second together; a slow RPC, or ten wallets paged twice each, must
+ * not hold the whole page behind a skeleton.
+ */
+export const FIRST_PAINT_WAIT_MS = 1_500;
 
 export interface LiveStale {
   readonly message: string;
@@ -83,7 +104,16 @@ export interface LiveOlder {
   readonly message: string | null;
   /** No older page to load: the whole history is here. */
   readonly complete: boolean;
+  /**
+   * There IS an older page to ask for: a head page came back and named where
+   * the next one starts. False before any history was read, and after a read
+   * that failed — then "Load older" would press on nothing, so it is not drawn.
+   */
+  readonly available: boolean;
 }
+
+/** What the hook holds; `available` is worked out from the cursor, never stored beside it. */
+type OlderState = Omit<LiveOlder, "available">;
 
 export interface LiveDashboardStore {
   readonly view: LiveView;
@@ -95,6 +125,11 @@ export interface LiveDashboardStore {
   readonly activityUnreadable: boolean;
   /** When the server said the history may be asked for again; null when it named no time. */
   readonly activityRetryAt: number | null;
+  /**
+   * The page is drawn and its history has not answered yet — the first paint's
+   * bound came first. The feed says it is reading, never "No activity yet".
+   */
+  readonly activityPending: boolean;
 }
 
 const wordsFor = (failure: ApiFailure): string =>
@@ -147,7 +182,7 @@ export function useLiveDashboard(input: {
   const [failure, setFailure] = useState<{ readonly message: string; readonly retryAt: number | null; readonly since: number } | null>(null);
   const [failures, setFailures] = useState(0);
   const [lastReadAt, setLastReadAt] = useState<number | null>(null);
-  const [older, setOlder] = useState<LiveOlder>({ busy: false, retryAt: null, message: null, complete: false });
+  const [older, setOlder] = useState<OlderState>({ busy: false, retryAt: null, message: null, complete: false });
   /**
    * The last history read's trouble, or null when it was read.
    *
@@ -227,85 +262,102 @@ export function useLiveDashboard(input: {
           setLastReadAt(Date.now());
           return true;
         }
-        setSnapshot(answered.body);
+        // THE FIRST PAINT WAITS FOR THE HISTORY — see the top of the file.
+        // Drawn once, whichever way this read goes on: at once for every later
+        // read, and for the first when its history settles or the bound runs out.
+        const holdFirstPaint = snapshotRef.current === null && wantsActivity && answered.body.vault.status === "exists";
+        // A good answer ends the previous failure NOW: held, it would otherwise
+        // leave "could not be read" and a live Retry over an answer already in.
+        if (holdFirstPaint) {
+          setFailures(0);
+          setFailure(null);
+        }
+        const gate = firstPaintGate({ hold: holdFirstPaint, commit: () => setSnapshot(answered.body), stale, waitMs: FIRST_PAINT_WAIT_MS });
 
-        // No vault, no history: the route would answer an empty page, so it is not asked.
-        // And a caller that does not draw the history does not buy it either.
-        if (wantsActivity && answered.body.vault.status === "exists") {
-          const until = newestSignature(entriesRef.current);
-          const page = await api.activity({ owner: pensionKey, limit: ACTIVITY_PAGE, ...(until === null ? {} : { until }) });
-          if (stale()) return true;
-          // CARRIED, NOT DROPPED. A page that failed, or one the route marked
-          // unreadable, leaves the rows already on screen alone and tells the
-          // feed it could not read — never "No activity yet".
-          // CARRIED WITH ITS RETRY-AFTER, not collapsed to a flag. `attempts`
-          // counts only the early re-reads this trouble has already bought, so
-          // one refusal buys one faster question and no more.
-          setActivityTrouble((held) => activityTroubleFrom(page, { attempts: early ? (held?.attempts ?? 0) + 1 : 0, now: Date.now() }));
-          if (page.ok && page.body.status === "exists") {
-            // A POLL DOES NOT REDEFINE WHERE THE HISTORY ENDS. It asked only for
-            // what is new, and its "nothing more to page" is about that window.
-            const cursor = headCursor({
-              polled: until !== null,
-              gap: page.body.gap,
-              page: page.body.nextBefore,
-              held: activityMetaRef.current?.nextBefore ?? null,
-            });
-            setActivityMeta({ status: page.body.status, nextBefore: cursor });
-            setEntries((held) => (until === null ? mergeHead([], { entries: page.body.entries, gap: true }) : mergeHead(held, { entries: page.body.entries, gap: page.body.gap })));
-            // One place decides whether the loaded history is complete, and it
-            // is the same cursor the stats and Load older read.
-            setOlder((current) => ({ ...current, complete: cursor === null }));
-
-            // THE SETTLEMENT THE STATE RECORDS IS FETCHED, NOT DENIED.
-            //
-            // What is held once this page lands, mergeHead's way: a gap
-            // REPLACED the head, so what was under it is gone. For the decision
-            // only — a manual page appended while this read was in flight can
-            // at worst make it ask for a page it need not have.
-            const loaded = until === null || page.body.gap ? page.body.entries : [...page.body.entries, ...entriesRef.current];
-            // A GAP THREW THE HISTORY AWAY, so what a round already bought is
-            // gone with it and the round may be bought once more.
-            if (page.body.gap) forgetBackfillSpend(pensionKey);
-            const spend = backfillSpend(pensionKey);
-            // THE SETTLEMENT IS LOOKED FOR WHERE SETTLEMENTS ARE, which is each
-            // trading wallet's own link and not the vault. The round no longer
-            // touches the vault's cursor at all, so it cannot race "Load older"
-            // and no longer takes the tail from it.
-            const links = settlementWallets(answered.body);
-            if (
-              shouldBackfill({
-                chainSettled: chainSaysSettled(answered.body),
-                loadedHasSettlement: holdsSettlement(loaded) || holdsSettlement(linkEntriesRef.current),
-                wallets: links.length,
-                manualBusy: olderBusyRef.current,
-                rounds: spend.rounds,
-                done: spend.done,
-                retryAt: spend.retryAt,
-                now: Date.now(),
-              })
-            ) {
-              spend.rounds += 1;
-              const filled = await backfillLinkSettlements({
-                wallets: links,
-                fetchPage: (wallet, before) =>
-                  api.linkActivity({ owner: pensionKey, wallet, limit: ACTIVITY_PAGE, ...(before === null ? {} : { before }) }),
+        try {
+          // No vault, no history: the route would answer an empty page, so it is not asked.
+          // And a caller that does not draw the history does not buy it either.
+          if (wantsActivity && answered.body.vault.status === "exists") {
+            const until = newestSignature(entriesRef.current);
+            const page = await api.activity({ owner: pensionKey, limit: ACTIVITY_PAGE, ...(until === null ? {} : { until }) });
+            if (stale()) return true;
+            // CARRIED, NOT DROPPED. A page that failed, or one the route marked
+            // unreadable, leaves the rows already on screen alone and tells the
+            // feed it could not read — never "No activity yet".
+            // CARRIED WITH ITS RETRY-AFTER, not collapsed to a flag. `attempts`
+            // counts only the early re-reads this trouble has already bought, so
+            // one refusal buys one faster question and no more.
+            setActivityTrouble((held) => activityTroubleFrom(page, { attempts: early ? (held?.attempts ?? 0) + 1 : 0, now: Date.now() }));
+            if (page.ok && page.body.status === "exists") {
+              // A POLL DOES NOT REDEFINE WHERE THE HISTORY ENDS. It asked only for
+              // what is new, and its "nothing more to page" is about that window.
+              const cursor = headCursor({
+                polled: until !== null,
+                gap: page.body.gap,
+                page: page.body.nextBefore,
+                held: activityMetaRef.current?.nextBefore ?? null,
               });
-              // A stale round touches nothing: the pension key that changed
-              // under it already reset everything else.
-              if (stale()) return true;
-              // A round that came back cleanly is the answer, found or not.
-              // Only one cut short by a failure is worth asking again, and not
-              // before the bucket it emptied has refilled.
-              spend.done = filled.failure === null && !filled.unreadable;
-              spend.retryAt = filled.failure === null || filled.failure.retryAfterSeconds === null ? null : Date.now() + filled.failure.retryAfterSeconds * 1_000;
-              // INTO THE LINK LIST, NEVER INTO `entries`, and touching neither
-              // `activityMeta` nor `older`: these rows say nothing whatever
-              // about how much of the VAULT's history is loaded, and a failure
-              // of a read nobody asked for is not the Load older button's.
-              if (filled.entries.length > 0) setLinkEntries((held) => appendOlder(held, filled.entries));
+              setActivityMeta({ status: page.body.status, nextBefore: cursor });
+              setEntries((held) => (until === null ? mergeHead([], { entries: page.body.entries, gap: true }) : mergeHead(held, { entries: page.body.entries, gap: page.body.gap })));
+              // One place decides whether the loaded history is complete, and it
+              // is the same cursor the stats and Load older read.
+              setOlder((current) => ({ ...current, complete: cursor === null }));
+
+              // THE SETTLEMENT THE STATE RECORDS IS FETCHED, NOT DENIED.
+              //
+              // What is held once this page lands, mergeHead's way: a gap
+              // REPLACED the head, so what was under it is gone. For the decision
+              // only — a manual page appended while this read was in flight can
+              // at worst make it ask for a page it need not have.
+              const loaded = until === null || page.body.gap ? page.body.entries : [...page.body.entries, ...entriesRef.current];
+              // A GAP THREW THE HISTORY AWAY, so what a round already bought is
+              // gone with it and the round may be bought once more.
+              if (page.body.gap) forgetBackfillSpend(pensionKey);
+              const spend = backfillSpend(pensionKey);
+              // THE SETTLEMENT IS LOOKED FOR WHERE SETTLEMENTS ARE, which is each
+              // trading wallet's own link and not the vault. The round no longer
+              // touches the vault's cursor at all, so it cannot race "Load older"
+              // and no longer takes the tail from it.
+              const links = settlementWallets(answered.body);
+              if (
+                shouldBackfill({
+                  chainSettled: chainSaysSettled(answered.body),
+                  loadedHasSettlement: holdsSettlement(loaded) || holdsSettlement(linkEntriesRef.current),
+                  wallets: links.length,
+                  manualBusy: olderBusyRef.current,
+                  rounds: spend.rounds,
+                  done: spend.done,
+                  retryAt: spend.retryAt,
+                  now: Date.now(),
+                })
+              ) {
+                spend.rounds += 1;
+                const filled = await backfillLinkSettlements({
+                  wallets: links,
+                  fetchPage: (wallet, before) =>
+                    api.linkActivity({ owner: pensionKey, wallet, limit: ACTIVITY_PAGE, ...(before === null ? {} : { before }) }),
+                });
+                // A stale round touches nothing: the pension key that changed
+                // under it already reset everything else.
+                if (stale()) return true;
+                // A round that came back cleanly is the answer, found or not.
+                // Only one cut short by a failure is worth asking again, and not
+                // before the bucket it emptied has refilled.
+                spend.done = filled.failure === null && !filled.unreadable;
+                spend.retryAt = filled.failure === null || filled.failure.retryAfterSeconds === null ? null : Date.now() + filled.failure.retryAfterSeconds * 1_000;
+                // INTO THE LINK LIST, NEVER INTO `entries`, and touching neither
+                // `activityMeta` nor `older`: these rows say nothing whatever
+                // about how much of the VAULT's history is loaded, and a failure
+                // of a read nobody asked for is not the Load older button's.
+                if (filled.entries.length > 0) setLinkEntries((held) => appendOlder(held, filled.entries));
+              }
             }
           }
+        } finally {
+          // Whatever the history did — answered, failed, or needed no round —
+          // the page is drawn with it. Only an answer overtaken by a newer read
+          // draws nothing (the gate asks).
+          gate.release();
         }
         setFailures(0);
         setFailure(null);
@@ -425,5 +477,19 @@ export function useLiveDashboard(input: {
     return { kind: "ready", data, stale };
   }, [pensionKey, snapshot, entries, linkEntries, activityMeta, failure, walletsKey]);
 
-  return { view, refresh, loadOlder, older, activityUnreadable: activityTrouble !== null, activityRetryAt: activityTrouble?.retryAt ?? null };
+  const cursor = activityMeta?.nextBefore ?? null;
+  const olderView = useMemo((): LiveOlder => ({ ...older, available: cursor !== null }), [older, cursor]);
+
+  // Drawn, a history to read, and neither an answer nor a failure yet.
+  const activityPending = wantsActivity && snapshot !== null && snapshot.vault.status === "exists" && activityMeta === null && activityTrouble === null;
+
+  return {
+    view,
+    refresh,
+    loadOlder,
+    older: olderView,
+    activityUnreadable: activityTrouble !== null,
+    activityRetryAt: activityTrouble?.retryAt ?? null,
+    activityPending,
+  };
 }

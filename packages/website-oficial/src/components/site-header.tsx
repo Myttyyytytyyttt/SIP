@@ -3,13 +3,14 @@
 import { useState } from "react";
 
 import { PanelLeft, X } from "lucide-react";
-import Link from "next/link";
 
+import { AppLink } from "@/components/app-link";
 import { ModeToggle } from "@/components/mode-toggle";
 import { useRouteLoader } from "@/components/route-loader";
 import { SipMark } from "@/components/site-footer";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { urlWithMode, type UrlMode } from "@/lib/dashboard-mode";
 import { cn } from "@/lib/utils";
 
 /**
@@ -33,6 +34,7 @@ export function SiteHeader({
   contributions = null,
   account,
   current = "pension",
+  mode = null,
 }: {
   /** This state's sidebar, for the sheet below lg. */
   activitySheet: React.ReactNode;
@@ -48,6 +50,15 @@ export function SiteHeader({
   /** Connect, Disconnect, the pension key, or a placeholder while Privy is asked. */
   account: React.ReactNode;
   readonly current?: "pension" | "activity" | "leaderboard";
+  /**
+   * THE MODE THE TABS CARRY (owner, 09-24). A bare "/" is the landing to a
+   * visitor and a bare "/activity" is Live's connect card, so a tab pressed in
+   * the sample used to throw the visitor out of it — the first click a judge
+   * makes. The page that knows what it is showing says so here; null leaves
+   * the links bare, which is right for a connected pension (it is Live
+   * whatever the URL says).
+   */
+  readonly mode?: UrlMode | null;
 }) {
   // THE SHEET IS CONTROLLED SO IT CAN GET OUT OF THE WAY. Below lg this sheet is
   // where "Manage wallets" lives, and a modal opened from inside a sheet is the
@@ -56,13 +67,14 @@ export function SiteHeader({
   const [sheetOpen, setSheetOpen] = useState(false);
   // The loader between tabs, raised as a tab is pressed (route-loader.tsx).
   const turnTo = useRouteLoader();
+  const tab = (pathname: string): string => (mode === null ? pathname : urlWithMode(pathname, mode));
 
   const nav = [
-    { label: "Pension", href: "/", current: current === "pension", className: undefined },
-    { label: "Activity", href: "/activity", current: current === "activity", className: undefined },
+    { label: "Pension", href: tab("/"), current: current === "pension", className: undefined },
+    { label: "Activity", href: tab("/activity"), current: current === "activity", className: undefined },
     // A REAL PAGE, AND A PUBLIC ONE: /leaderboard mounts no Privy provider, so
     // this link works for a visitor who has never connected anything.
-    { label: "Leaderboard", href: "/leaderboard", current: current === "leaderboard", className: undefined },
+    { label: "Leaderboard", href: tab("/leaderboard"), current: current === "leaderboard", className: undefined },
     { label: "Docs", href: "#", current: false, className: undefined },
   ];
 
@@ -100,13 +112,13 @@ export function SiteHeader({
         <nav aria-label="Main" className="ml-6 hidden items-center gap-1 md:flex">
           {nav.map((item) => (
             <Button key={item.label} variant="ghost" size="sm" asChild className={cn(item.current ? "text-foreground" : "text-muted-foreground", item.className)}>
-              <Link href={item.href} aria-current={item.current ? "page" : undefined} onClick={(event) => {
+              <AppLink href={item.href} aria-current={item.current ? "page" : undefined} onClick={(event) => {
                   // A click that opens elsewhere (new tab, new window) turns no page here.
                   if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
                   turnTo?.(item.href);
                 }}>
                 {item.label}
-              </Link>
+              </AppLink>
             </Button>
           ))}
         </nav>

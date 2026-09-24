@@ -22,8 +22,8 @@ const FEED = "min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!";
 /** The one look "Manage wallets" has, whether it navigates or opens the modal. */
 const MANAGE = "h-auto p-0 text-xs text-muted-foreground underline hover:text-foreground";
 
-/** Newest first in, newest first out — one bucket per UTC day, in arrival order. */
-function groupByDay(activity: readonly ActivityEvent[]): ReadonlyArray<readonly [string, readonly ActivityEvent[]]> {
+/** Newest first in, newest first out — one bucket per UTC day, in arrival order. Shared with the full-width page (activity-main.tsx). */
+export function groupByDay(activity: readonly ActivityEvent[]): ReadonlyArray<readonly [string, readonly ActivityEvent[]]> {
   const groups = new Map<string, ActivityEvent[]>();
   for (const event of activity) {
     // No block time, no day: its own bucket, headed "Time unknown", rather than filed under today.
@@ -68,6 +68,7 @@ export function WalletActivity({
   className,
   id = "activity",
   onManageWallets,
+  inSheet = false,
   live,
 }: {
   /** Null when there is no single wallet to lead with; the header then names no address and no balance. */
@@ -84,6 +85,11 @@ export function WalletActivity({
    * Absent, it stays a link to /wallets — the same screen, one navigation away.
    */
   onManageWallets?: () => void;
+  /**
+   * Mounted inside the header's sheet: Manage wallets closes the sheet before
+   * the modal opens. The sample's own flag; a live page says it in its slots.
+   */
+  inSheet?: boolean;
   /** A live page's own pieces. Absent on the sample. */
   live?: LiveColumnSlots;
 }) {
@@ -108,7 +114,7 @@ export function WalletActivity({
                 <Settings className="size-3.5" aria-hidden />
               </a>
             </Button>
-          ) : live?.inSheet === true ? (
+          ) : (live?.inSheet ?? inSheet) ? (
             // A modal opened from inside an overlay is two focus traps and an
             // Escape that closes the wrong one: the sheet goes first.
             <SheetClose asChild>

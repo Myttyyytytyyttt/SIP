@@ -61,6 +61,7 @@ export function LiveBody({
   nowMs,
   activityUnreadable,
   activityRetryAt = null,
+  activityPending = false,
 }: {
   readonly view: "pension" | "activity";
   readonly data: LiveDashboard;
@@ -77,6 +78,8 @@ export function LiveBody({
   readonly activityUnreadable: boolean;
   /** When the server said the history may be asked for again; the retry counts down to it. */
   readonly activityRetryAt?: number | null;
+  /** Drawn before the history answered (use-live-dashboard.ts, FIRST_PAINT_WAIT_MS): the feed says it is reading. */
+  readonly activityPending?: boolean;
 }) {
   const openWallets = useWalletsOpener();
   const onOpenWallets = (): void => openWallets?.();
@@ -106,7 +109,8 @@ export function LiveBody({
   };
 
   // No vault means no history was even requested; say that rather than "none yet".
-  const emptyNote = data.stage === "no_vault" ? LIVE_COPY.noVault.sidebar : undefined;
+  // And a history still on its way is not an empty one either.
+  const emptyNote = data.stage === "no_vault" ? LIVE_COPY.noVault.sidebar : activityPending ? ACTIVITY_COPY.readingHistory : undefined;
   // The wallet the column leads with — the same rule the adapter used to pick `page.wallet`.
   const anchor = anchorOf(data.wallets);
   const lead = anchor === null ? null : (data.wallets.find((wallet) => wallet.address === anchor) ?? null);
@@ -203,7 +207,7 @@ export function LiveBody({
                   now={page.now}
                   live={{
                     settledOutsideHistory: data.stats.settledOutsideHistory,
-                    loadOlder: { busy: older.busy, retryIn: secondsUntil(older.retryAt, nowMs), complete: older.complete, onClick: onLoadOlder },
+                    loadOlder: { busy: older.busy, retryIn: secondsUntil(older.retryAt, nowMs), complete: older.complete, available: older.available, onClick: onLoadOlder },
                   }}
                 />
               )
