@@ -23,17 +23,20 @@
 // keeper's comparison — because two packages can agree on "100" and disagree
 // about what it counts.
 //
-// THE readFileSync CALLS THAT REMAIN pin DOCTRINE, never prose: the shape of
-// two exported types and two expressions, none of which a rewording can touch.
-
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+// AND THE DOCTRINE THE SAME WAY. The last readFileSync calls here pinned the
+// keeper's all-or-nothing rule and its transfer-hook switch by regexing two
+// exported types and two expressions out of invest-decision.ts. They went on
+// 2026-09-24: the sentences are now held to ALL_OR_NOTHING and TRANSFER_HOOK in
+// the same vector, and the keeper's invest-decision.test.ts holds its types and
+// its gates to those entries. A per-leg escape hatch fails in the keeper; an
+// entry flipped to let one through fails here, beside the sentence it would
+// make false.
 
 import { describe, expect, it } from "vitest";
 
 import { CATALOGUE, CONVERT_FLOOR_MARGIN_BPS, LEG_FLOOR_MARGIN_BPS, OFFERED_LEGS, PRESTOCKS_POWERS, type CatalogueAsset } from "@sip/solana-core/client";
 
-import { LEG_FEE, LOSS_FORGIVEN, POOL_DEPTH } from "../../../solana-core/test/fixtures/keeper-policy";
+import { ALL_OR_NOTHING, LEG_FEE, LOSS_FORGIVEN, POOL_DEPTH, TRANSFER_HOOK } from "../../../solana-core/test/fixtures/keeper-policy";
 
 import { FLOOR_DRIFT_NOTICE_MULTIPLE, floorDrift, signedSlackBps } from "@/lib/invest-limits";
 import {
@@ -141,12 +144,14 @@ describe("the thin-pool notice", () => {
     // ALL OR NOTHING, which is the keeper's own doctrine.
     expect(notice).toContain("a buy takes all of the basket or none");
     expect(notice).toContain("nothing bought, no SOL converted, at any balance");
-    // THE DOCTRINE, PINNED TO AN EXPORTED TYPE RATHER THAN TO A SENTENCE.
-    // DepthDecision carries ONE verdict for the whole basket and no per-leg
-    // outcome at all: a half-basket is unrepresentable. Rewording cannot break
-    // this; adding a per-leg escape hatch is exactly what should.
-    const keeper = readFileSync(fileURLToPath(new URL("../../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
-    expect(keeper).toMatch(/export type DepthDecision =\s*\|\s*\{ readonly deep: true \}\s*\|\s*\{ readonly deep: false; readonly outcome: "REFUSED"; readonly detail: string \};/);
+    // THE DOCTRINE, THROUGH THE VECTOR. The keeper's DepthDecision carries ONE
+    // verdict for the whole basket and no per-leg outcome, so a half-basket is
+    // unrepresentable; the keeper's own test holds that type, and what the gate
+    // returns for a basket with one drained leg, to this entry. Rewording
+    // cannot break this; a per-leg escape hatch breaks it in the keeper, and
+    // flipping the entry to allow one breaks it here.
+    expect(ALL_OR_NOTHING.keeperTypes).toContain("DepthDecision");
+    expect(ALL_OR_NOTHING).toMatchObject({ perLegOutcomes: false, refusesHealthyLegsToo: true, stopsSolConversion: true });
   });
 });
 
@@ -169,13 +174,9 @@ describe("the transfer-fee ceiling", () => {
     expect(LEG_FEE.boundary.refusedAtBps).toBe(LEG_FEE.keeper.value + 1n);
     // The same all-or-nothing shape on the fee side: one refused leg, one
     // verdict, no per-leg admission. PINNED TO THE DOCTRINE, NOT TO THE
-    // KEEPER'S LINE BREAKS.
-    const keeper = readFileSync(fileURLToPath(new URL("../../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
-    expect(keeper).toMatch(/export type LegAdmission =/);
-    expect(keeper).toMatch(/\{ readonly admit: false; readonly outcome: "REFUSED"; readonly detail: string \}/);
-    const admission = keeper.slice(keeper.indexOf("export type LegAdmission ="), keeper.indexOf("readonly admit: false"));
-    expect(admission).toMatch(/readonly admit: true;/);
-    expect(admission, "a per-leg outcome in the admit arm is exactly what all-or-nothing forbids").not.toMatch(/outcome/);
+    // KEEPER'S LINE BREAKS: the keeper's test holds LegAdmission to this entry.
+    expect(ALL_OR_NOTHING.keeperTypes).toContain("LegAdmission");
+    expect(ALL_OR_NOTHING).toMatchObject({ perLegOutcomes: false, refusesHealthyLegsToo: true });
   });
 
   it("names the legs that land ON the limit, when, and the whole basket their next raise would stop", () => {
@@ -350,15 +351,15 @@ describe("the transfer-hook switch", () => {
    * once filled in, refuses the leg outright — and by the same all-or-nothing
    * doctrine, the whole basket with it.
    *
-   * PINNED TO THE KEEPER'S CODE AND NEVER TO ITS PROSE: two expressions, both
-   * of which would have to be deleted for the sentence to become untrue.
+   * PINNED TO THE KEEPER'S BEHAVIOUR AND NEVER TO ITS PROSE, through
+   * TRANSFER_HOOK: the keeper's test decodes a hook of 32 zero bytes as empty
+   * and buys it, and refuses any other, against that entry.
    */
   it("says the keeper refuses a leg whose hook is filled in, and that the refusal takes the whole basket by name", () => {
-    const keeper = readFileSync(fileURLToPath(new URL("../../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
-    // EMPTY MEANS THE DEFAULT PROGRAM ID, which is what "the field is empty
-    // today" rests on: anything else is a hook and is refused.
-    expect(keeper).toMatch(/transferHook = programId\.equals\(PublicKey\.default\) \? null : programId;/);
-    expect(keeper).toMatch(/if \(facts\.transferHook !== null\) \{/);
+    // EMPTY MEANS 32 ZERO BYTES, which is what "the field is empty today"
+    // rests on: anything else is a hook and is refused, the basket with it.
+    expect(TRANSFER_HOOK).toMatchObject({ emptyProgramId: "11111111111111111111111111111111", emptyIsAdmitted: true, filledIsRefused: true });
+    expect(ALL_OR_NOTHING).toMatchObject({ refusesHealthyLegsToo: true, stopsSolConversion: true });
 
     const notice = INVEST_COPY.hookSwitch(BASKETS.both);
     expect(notice).toContain("SaverFi will not buy a stock whose field has been filled in");

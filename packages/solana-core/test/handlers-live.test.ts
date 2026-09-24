@@ -1,9 +1,6 @@
 // /api/solana-live through its handler, over a stub chain: what it refuses, what
 // it charges, and that it never reports an unreadable read as a missing one.
 
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
 import { describe, expect, it } from "vitest";
 
 import { PYTH_PUSH_PROGRAM, PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED, SOL_USDC_POOL, SPYX_MINT, USDC_MINT, WSOL_MINT } from "../src/client/addresses";
@@ -482,18 +479,20 @@ describe("the reserve behind the depth ceiling", () => {
   });
 
   it("is enough to recompute the ceiling the card used to quote as a literal", () => {
-    // Read as text, never imported: solana-core does not depend on the keeper.
+    // THE VECTOR, NOT THE KEEPER'S SOURCE. solana-core does not depend on the
+    // keeper, so the multiple comes from test/fixtures/keeper-policy.ts, and
+    // the keeper's own invest-decision.test.ts holds MIN_VENUE_INVENTORY_MULTIPLE
+    // and its boundary to the same entry: a multiple that moves there fails
+    // there.
     //
-    // THE CONSTANT WAS RENAMED UNDER THIS REGEX ON 2026-09-21, and nothing
-    // warned: the keeper's depth gate stopped comparing a POOL'S IN-SIDE
-    // RESERVE and started counting a VENUE'S INVENTORY, because the assets this
-    // product must hold trade on a CLOB and a DLMM that have no in-side reserve
-    // to read. The multiple is still 50, so the arithmetic below is unchanged
-    // — but a regex over a neighbour's source pins that neighbour's FORMATTING,
-    // and had the rename gone the other way this would have thrown on `null`
-    // pointing at no defect at all. docs/TESTING_TRAPS.md, third species; the
-    // honest fix is the keeper exporting this number to a package both sides
-    // share, which is filed and not done here.
+    // UNTIL 2026-09-24 THIS WAS A REGEX over invest-decision.ts, and the
+    // constant was renamed under it on 2026-09-21 with nothing warning: the
+    // keeper's depth gate stopped comparing a POOL'S IN-SIDE RESERVE and
+    // started counting a VENUE'S INVENTORY. The multiple is still 50, so the
+    // arithmetic below is unchanged. The regex was also, it turned out, the
+    // only thing tying the keeper's 50 to this vector at all — the keeper
+    // pinned it as a bare literal — so it could not simply be deleted.
+    // docs/TESTING_TRAPS.md, third species.
     //
     // AND NO PANEL DOES THIS ARITHMETIC. The web's per-buy ceiling never came to
     // divide this reserve: the literal went when the basket picker came, and the
@@ -501,9 +500,7 @@ describe("the reserve behind the depth ceiling", () => {
     // (website-oficial/src/lib/basket-limits.ts, depthCeiling); no web source
     // reads `reserves`. What this case still proves is that the payload is enough
     // to recompute the old literal, and that the pool has moved since.
-    const keeper = readFileSync(fileURLToPath(new URL("../../solana-keeper/src/invest-decision.ts", import.meta.url)), "utf8");
-    const multiple = BigInt(/export const MIN_VENUE_INVENTORY_MULTIPLE = ([0-9_]+)n;/.exec(keeper)![1]!.replaceAll("_", ""));
-    expect(multiple).toBe(POOL_DEPTH.keeper.value);
+    const multiple = POOL_DEPTH.keeper.value;
 
     // The old literal's arithmetic, over the payload: a leg may spend at most a
     // fiftieth of the in-side reserve, and two equal legs double it for the whole buy.

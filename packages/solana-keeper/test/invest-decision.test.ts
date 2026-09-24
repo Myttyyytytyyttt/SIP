@@ -33,7 +33,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { Keypair, PublicKey } from "@solana/web3.js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   CONVERT_DUST_LAMPORTS,
   CRANK_WRAP_RESERVE_LAMPORTS,
@@ -97,9 +97,10 @@ import {
   type DepthDecision,
   type MintFacts,
   type ImpactProbe,
+  type LegAdmission,
   type LegVenue,
 } from "../src/invest-decision.js";
-import { SLIPPAGE_BPS, netOfTransferFee } from "../src/min-out.js";
+import { SLIPPAGE_BPS, netOfTransferFee, type TransferFeeTerms } from "../src/min-out.js";
 import { JUPITER_PROGRAM, LANDING_WINDOW_SLOTS, feeRiseCanLand, resolveDestinationTransferFee } from "../src/program-scripts.js";
 import { PYTH_SOL_USD_FEED_ID_HEX, PYTH_USDC_USD_FEED_ID_HEX, PYTH_VERIFICATION_FULL, type PythPriceUpdate } from "../src/pyth.js";
 
@@ -109,6 +110,46 @@ import { PYTH_SOL_USD_FEED_ID_HEX, PYTH_USDC_USD_FEED_ID_HEX, PYTH_VERIFICATION_
  * is about the landing window itself.
  */
 const MID_EPOCH = 216_000n;
+
+/**
+ * THE KEEPER'S HALF OF THE VECTOR THE WEBSITE SIGNS AGAINST:
+ * packages/solana-core/test/fixtures/keeper-policy.ts, which vault-copy.test.ts
+ * and solana-core's own tests hold their copies and sentences to. Neither of
+ * them may import this package, so this is where "the keeper's number" and "the
+ * keeper's doctrine" stop being claims about the keeper and become assertions.
+ *
+ * A runtime-built specifier, as the ROUTED_VENUE case below and pyth.test.ts
+ * load theirs, so this package's NodeNext tsc never follows it into solana-core.
+ * The shape is written out by hand for the same reason, so tsc cannot see a
+ * field renamed over there: it arrives here as undefined. Each case therefore
+ * compares the fields it uses with each other or with a literal BEFORE feeding
+ * them to a gate, because a gate can swallow an undefined quietly (a fee of
+ * Number(undefined) is written into the mint as 0 bps, and admitted).
+ */
+interface KeeperPolicyVector {
+  readonly POOL_DEPTH: {
+    readonly keeper: { readonly value: bigint };
+    readonly boundary: { readonly forSpend: bigint; readonly deepAtReserve: bigint; readonly refusedAtReserve: bigint };
+  };
+  readonly LEG_FEE: {
+    readonly keeper: { readonly value: bigint };
+    readonly slippageBps: bigint;
+    readonly slippageMarginBps: bigint;
+    readonly boundary: { readonly admittedAtBps: bigint; readonly refusedAtBps: bigint };
+    readonly impactCeilingBps: readonly (readonly [bigint, bigint])[];
+  };
+  readonly ALL_OR_NOTHING: {
+    readonly perLegOutcomes: boolean;
+    readonly refusesHealthyLegsToo: boolean;
+    readonly stopsSolConversion: boolean;
+    readonly keeperTypes: readonly string[];
+  };
+  readonly TRANSFER_HOOK: { readonly emptyProgramId: string; readonly emptyIsAdmitted: boolean; readonly filledIsRefused: boolean };
+}
+const keeperPolicyVector = async (): Promise<KeeperPolicyVector> => {
+  const vector = "keeper-policy";
+  return (await import(`../../solana-core/test/fixtures/${vector}.ts`)) as KeeperPolicyVector;
+};
 
 describe("the policy's in_mint", () => {
   it("lets USDC through", () => {
@@ -781,25 +822,23 @@ describe("a leg's mint, before the basket is bought", () => {
     expect(legAdmissionDecision({ legs: [legOf(withFee(301))], currentEpoch: TODAY, slotsLeftInEpoch: MID_EPOCH }).admit).toBe(false);
   });
 
-  it("holds the ceiling, its boundary and the impact bar to the committed vector the website signs against", async () => {
-    // THE KEEPER'S HALF OF LEG_FEE (packages/solana-core/test/fixtures/keeper-policy.ts).
-    // The vector's own header says the keeper's tests hold its constants AND
-    // its gate to `keeper` and `boundary`; until 2026-09-24 nothing here did,
-    // so the web and the catalogue could agree with the vector about a
-    // ceiling this keeper no longer enforced.
-    const vector = "keeper-policy";
-    const { LEG_FEE } = (await import(`../../solana-core/test/fixtures/${vector}.ts`)) as {
-      LEG_FEE: {
-        keeper: { value: bigint };
-        slippageBps: bigint;
-        slippageMarginBps: bigint;
-        boundary: { admittedAtBps: bigint; refusedAtBps: bigint };
-        impactCeilingBps: readonly (readonly [bigint, bigint])[];
-      };
-    };
+  it("THE KEEPER'S HALF OF LEG_FEE: the ceiling, its boundary and the impact bar, held to the committed vector the website signs against", async () => {
+    // (packages/solana-core/test/fixtures/keeper-policy.ts.) The literals above
+    // pin the number; this pins it to the vector the website's copy and
+    // solana-core's catalogue are held to. The vector's own header says the
+    // keeper's tests hold its constants AND its gate to `keeper` and
+    // `boundary`; until 2026-09-24 nothing here did, so the web and the
+    // catalogue could agree with the vector about a ceiling this keeper no
+    // longer enforced.
+    const { LEG_FEE } = await keeperPolicyVector();
     expect(MAX_LEG_FEE_BPS).toBe(LEG_FEE.keeper.value);
     expect(SLIPPAGE_BPS).toBe(LEG_FEE.slippageBps);
     expect(MIN_SLIPPAGE_MARGIN_BPS).toBe(LEG_FEE.slippageMarginBps);
+    // THE BOUNDARY SITS ON THE CEILING. Held to it first: a boundary that
+    // drifted off the ceiling (or went missing) would still pass the gate runs
+    // below.
+    expect(LEG_FEE.boundary.admittedAtBps).toBe(LEG_FEE.keeper.value);
+    expect(LEG_FEE.boundary.refusedAtBps).toBe(LEG_FEE.keeper.value + 1n);
     const withFee = (bps: bigint): Buffer =>
       mintBytes([transferFeeConfig({ epoch: 0n, maximumFee: 0n, bps: 0 }, { epoch: FEE_EPOCH, maximumFee: UNCAPPED, bps: Number(bps) })]);
     expect(legAdmissionDecision({ legs: [legOf(withFee(LEG_FEE.boundary.admittedAtBps))], currentEpoch: TODAY, slotsLeftInEpoch: MID_EPOCH }).admit).toBe(true);
@@ -910,6 +949,56 @@ describe("a leg's mint, before the basket is bought", () => {
     expect(admission.detail).toContain("refusing the whole basket of 4 leg(s), the sound ones included");
     expect(admission.detail).toContain("drifts from the weights the owner signed");
     for (const leg of sound) expect(admission.detail).not.toContain(leg.mint.toBase58());
+  });
+
+  it("THE KEEPER'S HALF OF TRANSFER_HOOK AND ALL_OR_NOTHING: an empty field is 32 zero bytes and bought; a filled one refuses, and takes the sound leg with it in one verdict", async () => {
+    const { TRANSFER_HOOK, ALL_OR_NOTHING } = await keeperPolicyVector();
+    expect(TRANSFER_HOOK).toMatchObject({ emptyIsAdmitted: true, filledIsRefused: true });
+    expect(ALL_OR_NOTHING).toMatchObject({ perLegOutcomes: false, refusesHealthyLegsToo: true, stopsSolConversion: true });
+    expect(ALL_OR_NOTHING.keeperTypes).toContain("LegAdmission");
+
+    // EMPTY IS A VALUE, NOT AN ABSENCE. The vector types the empty program id
+    // out, so "empty" is checked against bytes that neither this decoder nor
+    // web3.js's PublicKey.default supplied.
+    const empty = new PublicKey(TRANSFER_HOOK.emptyProgramId);
+    expect(empty.toBuffer().equals(Buffer.alloc(32))).toBe(true);
+    const emptyField = legOf(mintBytes([transferHook(empty)]));
+    expect(decodeMintFacts(emptyField.account.data).transferHook).toBeNull();
+    const sound = legOf(preStocks());
+    const bought = legAdmissionDecision({ legs: [sound, emptyField], currentEpoch: TODAY, slotsLeftInEpoch: MID_EPOCH });
+    // The admit arm carries each leg's fee and NO outcome: no leg is admitted
+    // or refused on its own, and every leg the basket names is in it.
+    expect(bought).toEqual({ admit: true, fees: expect.any(Map), worstCaseFees: expect.any(Map) });
+    if (!bought.admit) return;
+    expect([...bought.fees.keys()].sort()).toEqual([sound.mint.toBase58(), emptyField.mint.toBase58()].sort());
+
+    // FILLED IN, alone: refused.
+    const hook = key();
+    expect(legAdmissionDecision({ legs: [legOf(mintBytes([transferHook(hook)]))], currentEpoch: TODAY, slotsLeftInEpoch: MID_EPOCH }).admit).toBe(false);
+    // AND BESIDE A SOUND LEG — two legs, so a per-leg rule and all-or-nothing
+    // give different answers — the sound leg is refused with it, in exactly one
+    // verdict of three fields, none of them about a leg.
+    const refused = legAdmissionDecision({ legs: [legOf(preStocks()), legOf(mintBytes([transferHook(hook)]))], currentEpoch: TODAY, slotsLeftInEpoch: MID_EPOCH });
+    expect(refused).toEqual({ admit: false, outcome: "REFUSED", detail: expect.any(String) });
+    if (refused.admit) return;
+    expect(refused.detail).toContain(hook.toBase58());
+    expect(refused.detail).toContain("refusing the whole basket of 2 leg(s), the sound ones included");
+    expect(refused.detail).toContain("refusing to convert SOL toward it");
+
+    // AND THE TYPE, which no return value can show: an arm or a field that is
+    // never populated here. The WHOLE union, both arms exactly, as DepthDecision
+    // is pinned below — so a third arm, a per-leg field under any name, or even
+    // a harmless one goes red HERE, where whoever adds it can judge whether it
+    // is an escape hatch. Fails tsc (this package's typecheck, and the Docker
+    // image's build gate), not vitest.
+    expectTypeOf<LegAdmission>().toEqualTypeOf<
+      | {
+          readonly admit: true;
+          readonly fees: ReadonlyMap<string, TransferFeeTerms>;
+          readonly worstCaseFees: ReadonlyMap<string, TransferFeeTerms>;
+        }
+      | { readonly admit: false; readonly outcome: "REFUSED"; readonly detail: string }
+    >();
   });
 
   // ── the warning before the fee reaches the ceiling ─────────────────────────
@@ -1652,6 +1741,47 @@ describe("a leg's venue, at the moment the money would move", () => {
     expect(decision.detail).toContain(figureai.toBase58());
     expect(decision.detail).not.toContain(spyx.toBase58());
     expect(decision.detail).not.toContain(anthropic.toBase58());
+  });
+
+  it("THE KEEPER'S HALF OF POOL_DEPTH AND ALL_OR_NOTHING: the multiple the website prints, its boundary, and one verdict for a basket with one drained leg", async () => {
+    // THE NUMBER solana-core's handlers-live.test.ts and the website's copy
+    // take from the vector, because neither may import this package. The
+    // literal in "the numbers the two arms are drawn from" pins the number;
+    // this pins it to what the other side prints.
+    const { POOL_DEPTH, ALL_OR_NOTHING } = await keeperPolicyVector();
+    expect(MIN_VENUE_INVENTORY_MULTIPLE).toBe(POOL_DEPTH.keeper.value);
+    // THE VECTOR'S OWN BOUNDARY, typed there rather than derived here from the
+    // constant under test — and held to its own multiple first, because a
+    // boundary loosened on either side would still pass the gate runs below.
+    // (A missing one would not: these fields are bigints, and undefined throws
+    // on the way into the gate.) One hop that hands back what it takes, so the
+    // vector's "reserve" is exactly the inventory counted against the take.
+    const { forSpend, deepAtReserve, refusedAtReserve } = POOL_DEPTH.boundary;
+    expect(deepAtReserve).toBe(forSpend * POOL_DEPTH.keeper.value);
+    expect(refusedAtReserve).toBe(deepAtReserve - 1n);
+    const mint = key();
+    expect(decide([legOf({ mint, spend: forSpend, take: forSpend, held: [{ mint, amount: deepAtReserve }] })])).toEqual({ deep: true });
+    expect(decide([legOf({ mint, spend: forSpend, take: forSpend, held: [{ mint, amount: refusedAtReserve }] })]).deep).toBe(false);
+
+    // ONE VERDICT. A deep leg beside a drained one is refused with it, in
+    // exactly one refusal of three fields, none of them about a leg.
+    expect(ALL_OR_NOTHING).toMatchObject({ perLegOutcomes: false, refusesHealthyLegsToo: true, stopsSolConversion: true });
+    expect(ALL_OR_NOTHING.keeperTypes).toContain("DepthDecision");
+    const deep = key();
+    const drained = key();
+    const decision = decide([
+      legOf({ mint: deep, spend: FIVE_DOLLARS, take: 1_000n, held: [{ mint: deep, amount: LIVE_STOCK }] }),
+      legOf({ mint: drained, spend: FIVE_DOLLARS, take: TAKE_AT_FIVE_DOLLARS, held: [{ mint: drained, amount: DRAINED_STOCK }] }),
+    ]);
+    expect(decision).toEqual({ deep: false, outcome: "REFUSED", detail: expect.any(String) });
+    if (decision.deep) return;
+    expect(decision.detail).toContain("refusing the whole basket of 2 leg(s), the deep ones included");
+    expect(decision.detail).toContain("refusing to convert SOL toward it");
+
+    // AND THE TYPE, which no return value can show. Fails tsc, not vitest.
+    expectTypeOf<DepthDecision>().toEqualTypeOf<
+      { readonly deep: true } | { readonly deep: false; readonly outcome: "REFUSED"; readonly detail: string }
+    >();
   });
 
   it("refuses the whole basket when THE wSOL -> USDC CONVERT is the shallow side", () => {

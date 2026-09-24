@@ -224,11 +224,95 @@ keeper's copy went with the adapter. Three things worth copying from it:
   deleting one end, ask what the test proved about the other; here it needed a
   case of its own in `jupiter-route.test.ts`.
 
-Not every instance is gone. `solana-keeper/src/invest-decision.ts` is still
-read as text from two other packages: `solana-core/test/handlers-live.test.ts`
-pulls `MIN_VENUE_INVENTORY_MULTIPLE` out of it, and the web's `vault-copy.test.ts`
-— this section's first case — still reads it three times. The same shape, the
-same fix waiting.
+### The last two, and the gap one of them was hiding (2026-09-24)
+
+`solana-keeper/src/invest-decision.ts` was still read as text from two
+packages. `solana-core/test/handlers-live.test.ts` regexed
+`MIN_VENUE_INVENTORY_MULTIPLE` out of it, and the web's `vault-copy.test.ts`
+(this section's first case) read it three times. One of those reads matched
+`DepthDecision`'s whole type body. One pinned `LegAdmission`'s refusal arm and
+forbade the word `outcome` anywhere in its admit arm, comments included. The
+third required two expressions of the transfer-hook switch verbatim. No core
+or web test reads the keeper's source now. (Tests that read
+`@sip/solana-program`'s files as text remain. Much of that package is Rust,
+which no TypeScript test can import, so they are a different trade and are not
+touched here.) What replaced the keeper reads, and why the obvious fix was not
+taken:
+
+- **The shared module was the wrong home for this one.** `clmm-layout` worked
+  because the offsets are one fact read by two modules in two packages (core's
+  `readers.ts`, the program's `live-route.ts`) and written by the fixture that
+  builds their bytes. The multiple has one executable reader, the keeper's
+  `legDepthDecision`. Moving it into `@sip/solana-program` would route a number
+  the depth gate multiplies by through `program-scripts.ts`'s CommonJS unwrap,
+  one more value on the money path that has to survive it, to serve a single
+  core test. Neither other copy takes the multiple from there today: core's
+  `product.ts` sits in the browser-safe entry, whose only permitted package
+  import is the IDL (`test/client-entry.test.ts`), and the web does not
+  list that package as a dependency: its app code (`src/`) reaches it only
+  through `@sip/solana-core`. Those copies already meet in
+  `solana-core/test/fixtures/keeper-policy.ts`, so the vector was the place.
+  The doctrine pins stayed in the keeper for a different reason: the ones
+  that matter most run the gates themselves (a basket with one bad leg, a
+  mint whose hook is filled in), and no other package depends on the
+  keeper. The two unions could also have moved to the shared
+  package type-only, the way `program-scripts.ts` re-exports
+  `AttestationInputs`; that would have added a second place to pin their
+  shape, not a pin on what the gates do.
+- **A vector asserted from one side is a vector in name only.** The fixture's
+  header said the keeper's tests held its constants to it. For the venue
+  entry they did. For the multiple, none did: the keeper pinned `50n` as a
+  bare literal, and what actually tied the keeper's 50 to the vector was the
+  regex in `handlers-live.test.ts`. Delete that regex alone, and a keeper
+  that moved to 40 and updated its own literal would have gone green
+  everywhere while the web still printed "50 times". (The fee ceiling had
+  the same gap, a bare `100n`, until the same day's 300 bps raise added a
+  keeper case holding `MAX_LEG_FEE_BPS` to `LEG_FEE`, now titled "THE
+  KEEPER'S HALF OF LEG_FEE".) So the keeper's half came first:
+  `invest-decision.test.ts` now holds `MIN_VENUE_INVENTORY_MULTIPLE` to
+  `POOL_DEPTH`, holds the `POOL_DEPTH` and `LEG_FEE` boundaries each to its
+  own number, and runs both through the real gates. Before deleting a text
+  pin, ask what else binds its two ends. Here the answer was nothing.
+- **A field renamed in the vector arrives as `undefined`, and a gate can
+  swallow it.** The keeper loads the vector through a runtime-built specifier,
+  so `tsc` never sees its shape. A fee of `Number(undefined)` written into a
+  mint is 0 bps, and admitted, so a boundary run through the gate stayed green
+  with the field gone. Each case now compares the fields it uses with each
+  other before any gate sees them.
+- **Doctrine is pinned where the type lives, twice.** `DepthDecision` and
+  `LegAdmission` are held to `ALL_OR_NOTHING` as whole unions, both arms
+  exactly (`expectTypeOf`, so `tsc` goes red, which is also the keeper image's
+  build gate). They are also held as return values: a two-leg basket with one
+  bad leg must come back as exactly one refusal of three fields, and, for
+  `LegAdmission`, whose admit arm carries each leg's fees, a sound two-leg
+  basket as one admission naming both legs. Each catches what the other
+  cannot. An optional per-leg field that nothing fills is caught by the type
+  pin alone, and a gate that quietly buys the good legs is caught by the
+  return value alone. The first draft pinned `LegAdmission`'s admit arm only
+  for the absence of `outcome`. On a union, `keyof` keeps only the keys every
+  member shares, so a second admit arm carrying one passed, and so did a
+  per-leg field under any other name. An independent review caught it before
+  it shipped.
+- **One pin was already a duplicate.** The keeper's own suite already proved
+  both hook expressions by behaviour: the real ANTHROPIC mint, whose hook
+  field is empty, is decoded and bought, and a real hook is refused. The web's
+  regex was a weaker second copy. It would have gone red for an equivalent
+  rewrite, such as comparing the 32 bytes to zero instead of to
+  `PublicKey.default`. The new `TRANSFER_HOOK` entry adds one thing that was
+  missing: "empty" written out as 32 zero bytes, so neither side's library
+  supplies it.
+
+Each new pin was mutation-checked: the keeper's constant moved with its
+literal, a per-leg field in either union, a second admit arm, either gate
+buying a partial basket, each vector entry flipped, and each vector boundary
+loosened. Each goes red in the package that caused it. An equivalent
+rewording of the hook check stays green. A harmless field added to either
+union goes red in the keeper, on purpose, because that is where whoever adds
+it can judge whether it is an escape hatch.
+
+`LOSS_FORGIVEN` still has the gap the multiple had. `settle-decision.test.ts`
+pins `ZERO_BASE_MIN_TXS` to a literal 100, and nothing holds that literal to
+the vector the web's copy is held to.
 
 ## Three species, one question
 

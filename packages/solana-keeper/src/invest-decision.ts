@@ -1206,9 +1206,10 @@ export type LegAdmission =
  * epoch arrives. Both are bought today and refused later by one signature that
  * is not ours. legFeeWarnings below says so, as a separate call over the same
  * legs, so that this verdict stays one verdict for the whole basket and its
- * type keeps the exact shape the web reads it as text to check
- * (website-oficial/src/lib/vault-copy.test.ts pins this union's source, so
- * adding a field here breaks a test in another package).
+ * type keeps its exact shape. test/invest-decision.test.ts pins that shape —
+ * both arms, exactly — as the keeper's half of ALL_OR_NOTHING in
+ * solana-core's test/fixtures/keeper-policy.ts, the entry the website's
+ * all-or-nothing sentences are held to from the other side.
  */
 export function legAdmissionDecision(input: {
   readonly legs: readonly LegMint[];
@@ -1275,13 +1276,15 @@ export function legAdmissionDecision(input: {
  * bytes the admission gate reads and over the same legs.
  *
  * A SECOND CALL, NOT A SECOND FIELD, and the reason is worth knowing before
- * anyone "tidies" it back into LegAdmission. That union is read as TEXT by
- * website-oficial/src/lib/vault-copy.test.ts, which pins its exact source to
- * prove the fee gate is one verdict for the whole basket rather than a per-leg
- * admission — so a field added there fails a test in a package that does not
- * even import this one. Keeping the notice beside the decision instead of
- * inside it costs one more walk over a couple of hundred bytes already in
- * memory, and keeps both statements true.
+ * anyone "tidies" it back into LegAdmission. That union is ONE verdict with
+ * no per-leg outcome, and test/invest-decision.test.ts pins both its arms
+ * exactly, as the keeper's half of the all-or-nothing rule the website promises
+ * — so per-leg warnings riding inside either arm would fail there, and in the
+ * refusal they would be the very per-leg field the rule forbids. (Until 2026-09-24 the pin was a
+ * regex over this file in the website's vault-copy.test.ts; docs/TESTING_TRAPS.md,
+ * third species.) Keeping the notice beside the decision instead of inside it
+ * costs one more walk over a couple of hundred bytes already in memory, and
+ * keeps both statements true.
  *
  * IT RUNS WHETHER OR NOT THE BASKET IS ADMITTED. A basket refused today for
  * leg A's transfer hook must not swallow the notice that leg B's fee is one
@@ -1891,9 +1894,13 @@ function cover(inventory: bigint, take: bigint): string {
  * survived, which is not the basket the owner signed. The SOL conversion is
  * refused with them, and it is refused before the wrap.
  *
- * (packages/website-oficial/src/lib/vault-copy.test.ts pins that union's SOURCE
- * TEXT with a regex — deliberately, to make a per-leg escape hatch expensive.
- * Keep those two lines verbatim; see docs/TESTING_TRAPS.md, third species.)
+ * (test/invest-decision.test.ts pins that union exactly — as a type, and as
+ * what this returns for a basket with one drained leg — as the keeper's half of
+ * ALL_OR_NOTHING in solana-core's test/fixtures/keeper-policy.ts, the entry the
+ * website's "all of the basket or none" is held to. A per-leg escape hatch
+ * fails in this package. Until 2026-09-24 the pin was a regex over this file's
+ * text in the website's suite; docs/TESTING_TRAPS.md, third species, says why
+ * it moved.)
  *
  * THE FOUR REFUSALS, and why the fourth is not redundant:
  *  1. a hop whose census could not be taken at all;

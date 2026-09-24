@@ -35,6 +35,15 @@
 //     fails in the website.
 // One vector, two assertions, each failing in the package that caused it.
 //
+// THE FIRST BULLET WAS A CLAIM BEFORE IT WAS A TEST. Until 2026-09-24 no keeper
+// test imported POOL_DEPTH or LEG_FEE: the keeper pinned 50n and 100n as bare
+// literals, and what actually tied its constant to this vector was a regex over
+// invest-decision.ts in solana-core's handlers-live.test.ts. The keeper's half
+// of those two, and of ALL_OR_NOTHING and TRANSFER_HOOK below, now lives in
+// packages/solana-keeper/test/invest-decision.test.ts. LOSS_FORGIVEN's keeper
+// half is STILL MISSING: settle-decision.test.ts pins ZERO_BASE_MIN_TXS to a
+// literal 100, and nothing holds that literal to this entry.
+//
 // NOTHING IS IMPORTED HERE, deliberately: the keeper resolves this file through
 // a runtime-built specifier so its NodeNext tsc never follows it, and the web
 // imports it directly under Bundler resolution. A dependency-free module is
@@ -185,17 +194,57 @@ export const LEG_FEE = Object.freeze({
  * per-leg outcome anywhere in it.
  *
  * THIS FIXTURE CANNOT PROVE IT, and says so rather than implying otherwise.
- * Each side proves its own half: the keeper against its own types (DepthDecision
- * and LegAdmission carry ONE verdict and no per-leg result, so a half-basket is
- * unrepresentable), the website against the sentences that must not offer the
- * reader a half-basket that cannot happen. What this entry buys is that the two
- * halves cite the same rule by name instead of each describing it privately.
+ * Each side proves its own half, and each half asserts this entry, so flipping
+ * a field here fails both:
+ *   * the keeper, in test/invest-decision.test.ts: DepthDecision and
+ *     LegAdmission held to their exact shapes as TYPES (tsc — its typecheck and
+ *     its image's build gate), and each gate run over a two-leg basket with one
+ *     bad leg, where it must return exactly one refusal of three fields with the
+ *     sound leg refused too. stopsSolConversion is the refusal's own words there
+ *     ("refusing to convert SOL toward it"); invest-tick.ts calls both gates
+ *     before its first wrap.
+ *   * the website, in vault-copy.test.ts: the sentences that must not offer the
+ *     reader a half-basket that cannot happen.
+ * The types are named rather than their text copied. Until 2026-09-24 the
+ * website regexed both unions out of invest-decision.ts (docs/TESTING_TRAPS.md,
+ * third species); the pin now sits in the package that owns them.
  */
 export const ALL_OR_NOTHING = Object.freeze({
   perLegOutcomes: false,
   refusesHealthyLegsToo: true,
   stopsSolConversion: true,
   keeperTypes: Object.freeze(["DepthDecision", "LegAdmission"]),
+});
+
+/**
+ * THE SECOND STOP: A FIELD THE ISSUER CAN FILL IN.
+ *
+ * Token-2022's TransferHook extension names a program that every transfer of
+ * the mint must call. sip-vault's invest cannot append that program's accounts
+ * without an upgrade, so the keeper refuses a leg whose hook names one, and by
+ * ALL_OR_NOTHING the whole basket goes with it.
+ *
+ * "EMPTY" IS THE HALF THAT NEEDS ITS MEANING WRITTEN DOWN. Every PreStocks mint
+ * CARRIES the extension, with a program id of 32 zero bytes: the issuer keeping
+ * the option, not using it. A keeper that read "extension present" as "hooked"
+ * would refuse the live basket; one that read a filled-in id as empty would buy
+ * into code it has never seen. So the empty value is typed out here, as the
+ * base58 of 32 zero bytes, rather than left to each side's library to supply.
+ *
+ * WHICH SIDE GOES RED: the keeper's invest-decision.test.ts decodes a mint whose
+ * hook is `emptyProgramId` and one whose hook is anything else, through
+ * decodeMintFacts and legAdmissionDecision; vault-copy.test.ts holds
+ * INVEST_COPY.hookSwitch ("empty when SaverFi read it", "will not buy a stock
+ * whose field has been filled in") to this entry. Until 2026-09-24 the website
+ * held that sentence to two expressions regexed out of invest-decision.ts.
+ */
+export const TRANSFER_HOOK = Object.freeze({
+  /** packages/solana-keeper/src/invest-decision.ts */
+  keeper: Object.freeze({ decoder: "decodeMintFacts", gate: "legAdmissionDecision", module: "invest-decision.ts" }),
+  /** 32 zero bytes: what an unfilled field holds on chain, and what the keeper decodes as no hook at all. */
+  emptyProgramId: "11111111111111111111111111111111",
+  emptyIsAdmitted: true,
+  filledIsRefused: true,
 });
 
 /**
