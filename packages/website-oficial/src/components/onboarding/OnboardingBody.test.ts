@@ -110,9 +110,13 @@ describe("every screen", () => {
 
   it("has a header for each step, the step counted in the first two", () => {
     const welcome = onboardingHeading("welcome");
-    expect(welcome).toMatchObject({ eyebrow: "Step 1 of 2", title: "SaverFi", titleLead: "Welcome to", hero: true });
+    expect(welcome).toMatchObject({ eyebrow: "Step 1 of 2", title: "SaverFi", titleLead: "Welcome to", hero: true, brand: true });
     expect(welcome.points).toHaveLength(4);
-    expect(onboardingHeading("vault")).toEqual({ eyebrow: "Step 2 of 2", title: "Create your vault", description: VAULT_COPY.noVaultDescription });
+    const vault = onboardingHeading("vault");
+    // Led by its motion like the welcome, but its title is not the brand's name: no mark in it.
+    expect(vault).toMatchObject({ eyebrow: "Step 2 of 2", title: "Create your vault", description: VAULT_COPY.noVaultDescription, hero: true });
+    expect(vault.brand).toBeUndefined();
+    expect(vault.points).toHaveLength(4);
     expect(onboardingHeading("ready").eyebrow).toBeNull();
   });
 });
@@ -152,6 +156,15 @@ describe("welcome", () => {
 });
 
 describe("the vault step", () => {
+  it("leads with its own motion in every read state: the form, a read in flight, a read that failed", () => {
+    for (const read of ["form", "reading", "unreadable"] as const) {
+      const html = render(props({ step: "vault", read }));
+      expect(html).toMatch(/<video[^>]*src="\/motion\/onboarding-vault.mp4"/);
+      expect(html).toMatch(/<video[^>]*poster="\/motion\/onboarding-vault.jpg"/);
+      expect(html).not.toContain("onboarding-welcome");
+    }
+  });
+
   it("offers profit only, with no mode choice, and the limits folded at their defaults", () => {
     const html = render(props({ step: "vault" }));
     // textOf folds the rate's no-break space into a plain one, as a reader sees it.

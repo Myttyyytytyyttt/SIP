@@ -46,7 +46,7 @@ export function focusPrimary(root: HTMLElement | null | undefined): void {
 }
 
 /** components/ui/dialog.tsx's DialogContent classes, then the full-screen-below-sm shape. */
-/** The welcome is wider than the steps after it: its motion and its line of points lead. */
+/** A step led by its motion is wider: the motion and its line of points lead. */
 const HERO_WIDTH = "sm:max-w-2xl";
 
 const CONTENT = cn(
@@ -63,8 +63,10 @@ export interface OnboardingHeading {
   readonly description: string;
   /** Short points in one running line, "·" between them, in place of the sentence. */
   readonly points?: readonly string[];
-  /** The welcome: the brand mark beside a bigger title. */
+  /** A step led by its motion: a bigger title, and a wider sheet. */
   readonly hero?: boolean;
+  /** The title is the brand's name, and the mark takes the place of its "S". */
+  readonly brand?: boolean;
 }
 
 /**
@@ -145,8 +147,8 @@ export function OnboardingDialog({
                   <>
                     {/* Heard whole; seen as the brand word, its "S" the mark. */}
                     <span className="sr-only">{heading.titleLead === undefined ? heading.title : `${heading.titleLead} ${heading.title}`}</span>
-                    <span aria-hidden className="block text-4xl font-semibold tracking-tight sm:text-[2.75rem]">
-                      <BrandWord word={heading.title} />
+                    <span aria-hidden className={cn("block font-semibold tracking-tight", heading.brand === true ? "text-4xl sm:text-[2.75rem]" : "text-3xl sm:text-4xl")}>
+                      {heading.brand === true ? <BrandWord word={heading.title} /> : heading.title}
                     </span>
                   </>
                 ) : (

@@ -477,6 +477,8 @@ export const ONBOARDING_COPY = {
 
   vault: {
     title: "Create your vault",
+    /** The subtitle: what the vault is, in one running line. */
+    points: (rate: string): readonly string[] => [`Keeps ${rate} of each gain`, "Only you withdraw", "One approval", "Change limits later"],
     modeTitle: (rate: string): string => `Profit · ${rate}`,
     mode: (rate: string, dropAfter: number): string =>
       `${rate} of each gain your trading wallet makes moves into this vault. A losing stretch moves nothing, and its loss comes off later gains ` +

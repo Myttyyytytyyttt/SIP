@@ -65,9 +65,16 @@ export function onboardingHeading(step: OnboardingBodyStep): OnboardingHeading {
         description: ONBOARDING_COPY.welcome.lede,
         points: ONBOARDING_COPY.welcome.points(RATE),
         hero: true,
+        brand: true,
       };
     case "vault":
-      return { eyebrow: ONBOARDING_COPY.stepOf(2, STEPS), title: ONBOARDING_COPY.vault.title, description: VAULT_COPY.noVaultDescription };
+      return {
+        eyebrow: ONBOARDING_COPY.stepOf(2, STEPS),
+        title: ONBOARDING_COPY.vault.title,
+        description: VAULT_COPY.noVaultDescription,
+        points: ONBOARDING_COPY.vault.points(RATE),
+        hero: true,
+      };
     case "ready":
       return { eyebrow: null, title: ONBOARDING_COPY.ready.title, description: ONBOARDING_COPY.ready.body };
   }
@@ -169,8 +176,16 @@ function Point({ icon: Icon, tone, title, children }: { readonly icon: LucideIco
   );
 }
 
-/** The welcome's motion: H.264 so every browser plays it, and its still frame when motion is reduced. */
-export const WELCOME_MOTION = { video: "/motion/onboarding-welcome.mp4", poster: "/motion/onboarding-welcome.jpg" } as const;
+/**
+ * Each step's motion (the owner's clips, public/motion/onboarding{1,2}.mp4,
+ * re-encoded to H.264 so every browser plays them — the originals are 10-bit
+ * HEVC, which Chrome on Windows and Firefox do not), and its still frame for
+ * someone who asked for less motion.
+ */
+export const STEP_MOTION = {
+  welcome: { video: "/motion/onboarding-welcome.mp4", poster: "/motion/onboarding-welcome.jpg" },
+  vault: { video: "/motion/onboarding-vault.mp4", poster: "/motion/onboarding-vault.jpg" },
+} as const;
 
 const REDUCED = "(prefers-reduced-motion: reduce)";
 const subscribeReduced = (onChange: () => void): (() => void) => {
@@ -184,16 +199,16 @@ function useReducedMotion(): boolean {
   return useSyncExternalStore(subscribeReduced, () => window.matchMedia(REDUCED).matches, () => false);
 }
 
-/** The motion says with pictures what the points below say in words, so it is hidden from screen readers. */
-function WelcomeMotion() {
+/** The motion says with pictures what the words around it say, so it is hidden from screen readers. */
+function StepMotion({ motion }: { readonly motion: (typeof STEP_MOTION)[keyof typeof STEP_MOTION] }) {
   const reduced = useReducedMotion();
   return (
     <div className="aspect-video overflow-hidden rounded-xl bg-[#1d1d1d] ring-1 ring-foreground/10">
       {reduced ? (
         // eslint-disable-next-line @next/next/no-img-element -- a fixed still in public/, no optimisation to gain
-        <img src={WELCOME_MOTION.poster} alt="" aria-hidden className="size-full object-cover" />
+        <img src={motion.poster} alt="" aria-hidden className="size-full object-cover" />
       ) : (
-        <video src={WELCOME_MOTION.video} poster={WELCOME_MOTION.poster} autoPlay muted loop playsInline preload="auto" aria-hidden className="size-full object-cover" />
+        <video key={motion.video} src={motion.video} poster={motion.poster} autoPlay muted loop playsInline preload="auto" aria-hidden className="size-full object-cover" />
       )}
     </div>
   );
@@ -206,7 +221,7 @@ function Welcome({ pensionKey, onContinue, onDisconnect }: OnboardingBodyProps) 
       label={copy.title}
       body={
         <div className="space-y-5">
-          <WelcomeMotion />
+          <StepMotion motion={STEP_MOTION.welcome} />
           <ul className="grid gap-x-5 gap-y-3.5 sm:grid-cols-2">
             <Point icon={ArrowLeftRight} tone="quiet" title={copy.tradeTitle}>
               {copy.trade}
@@ -279,6 +294,7 @@ function VaultStep(props: OnboardingBodyProps) {
         label={copy.title}
         body={
           <div className="space-y-4">
+            <StepMotion motion={STEP_MOTION.vault} />
             {reading ? (
               <div aria-busy="true" aria-label={VAULT_COPY.loading} className="space-y-3">
                 <Skeleton className="h-20 w-full rounded-lg" />
@@ -293,8 +309,9 @@ function VaultStep(props: OnboardingBodyProps) {
           </div>
         }
         footer={
-          <>
-            <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <Identity pensionKey={pensionKey} onDisconnect={props.onDisconnect} disabled={running} />
+            <div className="ml-auto flex items-center gap-2">
               {back}
               {reading ? null : (
                 <Button type="button" variant="outline" onClick={() => props.onRetryRead()} {...primary}>
@@ -303,8 +320,7 @@ function VaultStep(props: OnboardingBodyProps) {
                 </Button>
               )}
             </div>
-            <Identity pensionKey={pensionKey} onDisconnect={props.onDisconnect} disabled={running} />
-          </>
+          </div>
         }
       />
     );
@@ -315,18 +331,21 @@ function VaultStep(props: OnboardingBodyProps) {
       label={copy.title}
       body={
         <div className="space-y-4">
-          <div className="rounded-lg border px-3 py-2.5">
-            <div className="flex items-center gap-2">
-              <span className={cn("flex size-7 shrink-0 items-center justify-center rounded-md", TILE.saved)}>
-                <PiggyBank className="size-4" aria-hidden />
-              </span>
-              <span className="text-sm font-medium">{copy.modeTitle(RATE)}</span>
-            </div>
-            <p className="mt-1.5 text-sm text-muted-foreground">{copy.mode(RATE, LOSS_DROPPED_AFTER_TXS)}</p>
+          <StepMotion motion={STEP_MOTION.vault} />
+
+          {/* The rule it will sign, then its limits: second to the motion, so smaller than it. */}
+          <div className="flex items-start gap-2.5">
+            <span className={cn("flex size-7 shrink-0 items-center justify-center rounded-md", TILE.saved)}>
+              <PiggyBank className="size-3.5" aria-hidden />
+            </span>
+            <span className="min-w-0 space-y-0.5">
+              <span className="block text-[0.8rem] font-medium">{copy.modeTitle(RATE)}</span>
+              <span className="block text-xs leading-relaxed text-muted-foreground">{copy.mode(RATE, LOSS_DROPPED_AFTER_TXS)}</span>
+            </span>
           </div>
 
           <details className="group rounded-lg border px-3 py-2">
-            <summary className="cursor-pointer text-sm font-medium">
+            <summary className="cursor-pointer text-[0.8rem] font-medium">
               {copy.advanced}
               <span className="mt-0.5 block text-xs font-normal text-muted-foreground">
                 {copy.advancedSummary(shownMax, shownReserve)}
@@ -364,22 +383,24 @@ function VaultStep(props: OnboardingBodyProps) {
             {busyElsewhere ? <p className="text-muted-foreground">{LINK_COPY.busy}</p> : null}
             {unconfirmed ? <p className="font-medium text-amber-700 dark:text-amber-400">{copy.checkAbove}</p> : null}
           </div>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            {back}
-            <Button
-              type="button"
-              disabled={blocked || request === null}
-              aria-busy={running}
-              // An explicit object: the flow gets the limits shown, never a click event.
-              onClick={() => {
-                if (request !== null) props.onCreate(request);
-              }}
-              {...primary}
-            >
-              {running ? VAULT_COPY.creating : VAULT_COPY.create}
-            </Button>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <Identity pensionKey={pensionKey} onDisconnect={props.onDisconnect} disabled={running} />
+            <div className="ml-auto flex items-center gap-2">
+              {back}
+              <Button
+                type="button"
+                disabled={blocked || request === null}
+                aria-busy={running}
+                // An explicit object: the flow gets the limits shown, never a click event.
+                onClick={() => {
+                  if (request !== null) props.onCreate(request);
+                }}
+                {...primary}
+              >
+                {running ? VAULT_COPY.creating : VAULT_COPY.create}
+              </Button>
+            </div>
           </div>
-          <Identity pensionKey={pensionKey} onDisconnect={props.onDisconnect} disabled={running} />
         </>
       }
     />
