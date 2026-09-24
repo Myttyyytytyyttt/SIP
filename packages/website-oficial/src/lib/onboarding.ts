@@ -10,6 +10,8 @@
  * or has not answered — a vault that may exist is never offered for creation.
  */
 
+import { DEFAULT_VAULT_POLICY } from "@sip/solana-core/client";
+
 import type { WriteProgress } from "@/hooks/use-vault-actions";
 import type { VaultScreenValue, VaultView } from "@/hooks/use-vault-state";
 import type { DashboardKind, VaultPresence } from "@/lib/dashboard-mode";
@@ -93,3 +95,25 @@ export function vaultStepRead(view: VaultView, pensionKey: string): VaultStepRea
 }
 
 export type OnboardingBodyStep = "welcome" | "vault" | "ready";
+
+/**
+ * THE RATE THE SETUP OFFERS, in basis points (owner, 09-24): a bar from 5 % to
+ * 50 % in whole percents, and four presets under it. The program takes any
+ * profit rate from 2.01 % to 100 % (PROFIT_BPS_MIN..MAX); this is the part of
+ * that a first vault is offered, and the dashboard's rule card can move it
+ * anywhere in the program's range later. It starts at the product's 20 %.
+ */
+export const SETUP_RATE = {
+  min: 500,
+  max: 5_000,
+  step: 100,
+  presets: [1_000, 1_500, 2_000, 3_000],
+  initial: DEFAULT_VAULT_POLICY.skimBps,
+} as const;
+
+/** A rate from the bar, held to the setup's range and its whole-percent steps. */
+export function setupRate(bps: number): number {
+  if (!Number.isFinite(bps)) return SETUP_RATE.initial;
+  const stepped = Math.round(bps / SETUP_RATE.step) * SETUP_RATE.step;
+  return Math.min(SETUP_RATE.max, Math.max(SETUP_RATE.min, stepped));
+}

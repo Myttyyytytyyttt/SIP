@@ -5,7 +5,7 @@
  * and what this browser remembers of where the setup was left.
  *
  * ALWAYS MOUNTED FOR A CONNECTED KEY, whether the dialog is open or not. Radix
- * unmounts a closed dialog's content, and the step, the typed limits and a
+ * unmounts a closed dialog's content, and the step, the chosen share and a
  * write's progress must survive a close and a reopen — so they live here, and
  * the dialog is only their window. The frame keys it by the pension key, so
  * another wallet starts from its own memory.
@@ -27,15 +27,14 @@
  * step shows its skeleton until the answer is fresh — never the form.
  */
 
-import { DEFAULT_VAULT_POLICY } from "@sip/solana-core/client";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { OnboardingBody, onboardingHeading } from "@/components/onboarding/OnboardingBody";
 import { OnboardingDialog, focusPrimary } from "@/components/onboarding/OnboardingDialog";
 import { useVaultWrite } from "@/hooks/use-vault-actions";
 import { useVaultScreen, type VaultView } from "@/hooks/use-vault-state";
-import { SOL_DECIMALS, formatUnits, rawFrom } from "@/lib/amounts";
-import { landedCreate, onboardingOpen, vaultStepRead, type OnboardingBodyStep, type OnboardingCreated } from "@/lib/onboarding";
+import { rawFrom } from "@/lib/amounts";
+import { SETUP_RATE, landedCreate, onboardingOpen, vaultStepRead, type OnboardingBodyStep, type OnboardingCreated } from "@/lib/onboarding";
 import { forgetOnboarding, readOnboardingStep, saveOnboardingStep, type OnboardingStep } from "@/lib/onboarding-memory";
 import { CREATE_VAULT_FEE_LAMPORTS } from "@/lib/vault-limits";
 
@@ -64,8 +63,8 @@ export function OnboardingHost({
   const screen = useVaultScreen();
   const write = useVaultWrite("onboarding");
   const [step, setStep] = useState<OnboardingStep>(() => readOnboardingStep(pensionKey));
-  const [maxText, setMaxText] = useState(() => formatUnits(DEFAULT_VAULT_POLICY.maxContribution, SOL_DECIMALS));
-  const [reserveText, setReserveText] = useState(() => formatUnits(DEFAULT_VAULT_POLICY.walletReserve, SOL_DECIMALS));
+  /** The share chosen on the vault step: kept here, so a close and a reopen find it as it was left. */
+  const [rateBps, setRateBps] = useState<number>(SETUP_RATE.initial);
   const [created, setCreated] = useState<OnboardingCreated>(null);
   /** The read that was out of date when the setup reopened: until another arrives, the vault step waits. */
   const [staleView, setStaleView] = useState<VaultView | null>(null);
@@ -146,7 +145,7 @@ export function OnboardingHost({
     <OnboardingDialog
       open={open}
       holdClose={running}
-      heading={onboardingHeading(bodyStep)}
+      heading={onboardingHeading(bodyStep, rateBps)}
       onOpenChange={(next) => {
         if (next) return;
         if (created === "celebrating") finish();
@@ -159,12 +158,9 @@ export function OnboardingHost({
         vaultRent={rawFrom(chain?.rents?.vault)}
         linkRent={rawFrom(chain?.rents?.link)}
         fees={CREATE_VAULT_FEE_LAMPORTS}
-        usdcPerSol={rawFrom(chain?.prices?.usdcRawPerSol)}
         read={read}
-        maxText={maxText}
-        reserveText={reserveText}
-        onMaxText={setMaxText}
-        onReserveText={setReserveText}
+        rateBps={rateBps}
+        onRate={setRateBps}
         progress={write.progress}
         running={write.running}
         busyElsewhere={write.busyElsewhere}

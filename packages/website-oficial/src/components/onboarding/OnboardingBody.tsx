@@ -25,28 +25,33 @@
  * the progress ladder and anything long live in the scrolling part.
  */
 
-import { MODE_PROFIT, OFFERED_LEGS } from "@sip/solana-core/client";
+import { DEFAULT_VAULT_POLICY, MODE_PROFIT, OFFERED_LEGS } from "@sip/solana-core/client";
 import { ArrowLeftRight, ArrowRight, ChartLine, Circle, PiggyBank, RefreshCw, ShieldCheck, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PRIMARY_ATTRIBUTE, type OnboardingHeading } from "@/components/onboarding/OnboardingDialog";
-import { LimitField } from "@/components/wallets/LimitField";
+import { Label } from "@/components/ui/label";
+import { Slider } from "@/components/ui/slider";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { TxProgress } from "@/components/wallets/TxProgress";
 import type { CreateRequest, WriteProgress } from "@/hooks/use-vault-actions";
-import { formatSol, formatUsd, usdcRawForLamports } from "@/lib/amounts";
+import { formatSol } from "@/lib/amounts";
 import { LIVE_COPY, ONBOARDING_COPY } from "@/lib/live-copy";
-import type { OnboardingBodyStep, VaultStepRead } from "@/lib/onboarding";
+import { SETUP_RATE, setupRate, type OnboardingBodyStep, type VaultStepRead } from "@/lib/onboarding";
+import { MONO } from "@/lib/classes";
 import { cn } from "@/lib/utils";
-import { LINK_COPY, LOSS_DROPPED_AFTER_TXS, PROFIT_RATE, VAULT_COPY, shortAddress } from "@/lib/vault-copy";
-import { readLimits } from "@/lib/vault-limits";
+import { LINK_COPY, LOSS_DROPPED_AFTER_TXS, PROFIT_RATE, VAULT_COPY, ratePercent, shortAddress } from "@/lib/vault-copy";
 
 /** The setup has two steps before the vault exists; the third screen is its result. */
 const STEPS = 2;
 
 /** "20 %", kept on one line: a rate split across two lines reads as two numbers. */
-const RATE = PROFIT_RATE.replace(" ", "\u00a0");
+const onOneLine = (rate: string): string => rate.replace(" ", "\u00a0");
+const RATE = onOneLine(PROFIT_RATE);
+/** A rate in basis points, as the setup writes it: "15 %", on one line. */
+const pct = (bps: number): string => onOneLine(ratePercent(bps));
 
 /** "SPYx and ANTHROPIC": the first two things the vault can really buy (OFFERED_LEGS). */
 export const INVEST_EXAMPLES: string = (() => {
@@ -54,8 +59,8 @@ export const INVEST_EXAMPLES: string = (() => {
   return symbols.length < 2 ? (symbols[0] ?? "SPYx") : `${symbols[0]} and ${symbols[1]}`;
 })();
 
-/** The dialog's header for each screen. */
-export function onboardingHeading(step: OnboardingBodyStep): OnboardingHeading {
+/** The dialog's header for each screen; the vault step's points carry the share being chosen. */
+export function onboardingHeading(step: OnboardingBodyStep, rateBps: number = SETUP_RATE.initial): OnboardingHeading {
   switch (step) {
     case "welcome":
       return {
@@ -63,7 +68,7 @@ export function onboardingHeading(step: OnboardingBodyStep): OnboardingHeading {
         title: ONBOARDING_COPY.welcome.title,
         titleLead: ONBOARDING_COPY.welcome.titleLead,
         description: ONBOARDING_COPY.welcome.lede,
-        points: ONBOARDING_COPY.welcome.points(RATE),
+        points: ONBOARDING_COPY.welcome.points,
         hero: true,
         brand: true,
       };
@@ -72,7 +77,7 @@ export function onboardingHeading(step: OnboardingBodyStep): OnboardingHeading {
         eyebrow: ONBOARDING_COPY.stepOf(2, STEPS),
         title: ONBOARDING_COPY.vault.title,
         description: VAULT_COPY.noVaultDescription,
-        points: ONBOARDING_COPY.vault.points(RATE),
+        points: ONBOARDING_COPY.vault.points(pct(rateBps)),
         hero: true,
       };
     case "ready":
@@ -87,12 +92,10 @@ export interface OnboardingBodyProps {
   readonly vaultRent: bigint | null;
   readonly linkRent: bigint | null;
   readonly fees: bigint;
-  readonly usdcPerSol: bigint | null;
   readonly read: VaultStepRead;
-  readonly maxText: string;
-  readonly reserveText: string;
-  readonly onMaxText: (value: string) => void;
-  readonly onReserveText: (value: string) => void;
+  /** The profit share being chosen, in basis points (SETUP_RATE's range). */
+  readonly rateBps: number;
+  readonly onRate: (bps: number) => void;
   readonly progress: WriteProgress;
   /** This setup's own write is in progress. */
   readonly running: boolean;
@@ -226,7 +229,7 @@ function Welcome({ pensionKey, onContinue, onDisconnect }: OnboardingBodyProps) 
             <Point icon={ArrowLeftRight} tone="quiet" title={copy.tradeTitle}>
               {copy.trade}
             </Point>
-            <Point icon={PiggyBank} tone="saved" title={copy.saveTitle(RATE)}>
+            <Point icon={PiggyBank} tone="saved" title={copy.saveTitle}>
               {copy.save(RATE)}
             </Point>
             <Point icon={ChartLine} tone="invest" title={copy.investTitle}>
@@ -252,13 +255,14 @@ function Welcome({ pensionKey, onContinue, onDisconnect }: OnboardingBodyProps) 
 }
 
 function VaultStep(props: OnboardingBodyProps) {
-  const { pensionKey, vaultRent, fees, usdcPerSol, read, maxText, reserveText, onMaxText, onReserveText, progress, running, busyElsewhere, unconfirmed } = props;
+  const { pensionKey, vaultRent, fees, read, rateBps, onRate, progress, running, busyElsewhere, unconfirmed } = props;
   const copy = ONBOARDING_COPY.vault;
-  const limits = readLimits(maxText, reserveText);
   const blocked = running || busyElsewhere || unconfirmed;
-  const shownMax = limits.ok ? formatSol(limits.maxContribution) : maxText.trim();
-  const shownReserve = limits.ok ? formatSol(limits.walletReserve) : reserveText.trim();
-  const request: CreateRequest | null = limits.ok ? { mode: MODE_PROFIT, maxContribution: limits.maxContribution, walletReserve: limits.walletReserve } : null;
+  const rate = setupRate(rateBps);
+  // THE LIMITS ARE THE PRODUCT'S (owner, 09-24): no Advanced, nothing else to decide on a first vault.
+  // They can be changed later from the vault card, and the rule below says the one that matters.
+  const request: CreateRequest = { mode: MODE_PROFIT, skimBps: rate, maxContribution: DEFAULT_VAULT_POLICY.maxContribution, walletReserve: DEFAULT_VAULT_POLICY.walletReserve };
+  const preset = SETUP_RATE.presets.some((value) => value === rate) ? String(rate) : "";
 
   // The ladder sits in the scrolling part; each time it moves it is brought into
   // view, so a stop and its one way forward are never below the fold.
@@ -333,50 +337,55 @@ function VaultStep(props: OnboardingBodyProps) {
         <div className="space-y-4">
           <StepMotion motion={STEP_MOTION.vault} />
 
-          {/* The rule it will sign, then its limits: second to the motion, so smaller than it. */}
-          <div className="flex items-start gap-2.5">
-            <span className={cn("flex size-7 shrink-0 items-center justify-center rounded-md", TILE.saved)}>
-              <PiggyBank className="size-3.5" aria-hidden />
-            </span>
-            <span className="min-w-0 space-y-0.5">
-              <span className="block text-[0.8rem] font-medium">{copy.modeTitle(RATE)}</span>
-              <span className="block text-xs leading-relaxed text-muted-foreground">{copy.mode(RATE, LOSS_DROPPED_AFTER_TXS)}</span>
-            </span>
-          </div>
-
-          <details className="group rounded-lg border px-3 py-2">
-            <summary className="cursor-pointer text-[0.8rem] font-medium">
-              {copy.advanced}
-              <span className="mt-0.5 block text-xs font-normal text-muted-foreground">
-                {copy.advancedSummary(shownMax, shownReserve)}
-              </span>
-            </summary>
-            <div className="mt-3 space-y-3">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <LimitField
-                  id="onboarding-max-contribution"
-                  label={VAULT_COPY.mostPerSettlement}
-                  value={maxText}
-                  onChange={onMaxText}
-                  disabled={blocked}
-                  hint={limits.ok && usdcPerSol !== null ? `${VAULT_COPY.aboutUsd(formatUsd(usdcRawForLamports(limits.maxContribution, usdcPerSol)))}. ${copy.maxHint}` : copy.maxHint}
-                />
-                <LimitField id="onboarding-wallet-reserve" label={VAULT_COPY.alwaysLeft} value={reserveText} onChange={onReserveText} disabled={blocked} hint={copy.reserveHint} />
-              </div>
-              <p className="text-xs text-muted-foreground">{copy.changeLater}</p>
+          {/* The one choice: how much of each gain the vault keeps. The same bar and presets as the rule card. */}
+          <div role="group" aria-labelledby="onboarding-rate" className="space-y-2.5 rounded-lg border px-3 py-2.5">
+            <div className="flex items-center justify-between gap-3">
+              <Label id="onboarding-rate" className="flex items-center gap-2 text-[0.8rem]">
+                <span className={cn("flex size-6 shrink-0 items-center justify-center rounded-md", TILE.saved)}>
+                  <PiggyBank className="size-3.5" aria-hidden />
+                </span>
+                {copy.rateLabel}
+              </Label>
+              <span className={cn(MONO, "text-xl font-semibold")}>{pct(rate)}</span>
             </div>
-          </details>
+            <Slider
+              value={[rate]}
+              min={SETUP_RATE.min}
+              max={SETUP_RATE.max}
+              step={SETUP_RATE.step}
+              disabled={blocked}
+              onValueChange={(values) => {
+                const next = values[0];
+                if (next !== undefined) onRate(setupRate(next));
+              }}
+              // The thumb is what a screen reader lands on: name it, and speak the percent rather than the basis points.
+              thumbProps={{ "aria-labelledby": "onboarding-rate", "aria-valuetext": pct(rate) }}
+            />
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              size="sm"
+              value={preset}
+              disabled={blocked}
+              onValueChange={(value) => {
+                if (value) onRate(setupRate(Number(value)));
+              }}
+              className="w-full"
+            >
+              {SETUP_RATE.presets.map((value) => (
+                <ToggleGroupItem key={value} value={String(value)} className={cn(MONO, "flex-1")}>
+                  {pct(value)}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+            <p className="text-xs leading-snug text-muted-foreground">{copy.mode(pct(rate), LOSS_DROPPED_AFTER_TXS, formatSol(DEFAULT_VAULT_POLICY.maxContribution))}</p>
+          </div>
 
           {ladder}
         </div>
       }
       footer={
         <>
-          {!limits.ok ? (
-            <p role="alert" className="text-xs text-destructive">
-              {limits.message}
-            </p>
-          ) : null}
           <div className="space-y-0.5 text-xs">
             <p>{vaultRent === null ? VAULT_COPY.costUnknown : VAULT_COPY.cost(formatSol(vaultRent), formatSol(fees))}</p>
             <p className="text-muted-foreground">{copy.approveOnce}</p>
@@ -389,12 +398,10 @@ function VaultStep(props: OnboardingBodyProps) {
               {back}
               <Button
                 type="button"
-                disabled={blocked || request === null}
+                disabled={blocked}
                 aria-busy={running}
                 // An explicit object: the flow gets the limits shown, never a click event.
-                onClick={() => {
-                  if (request !== null) props.onCreate(request);
-                }}
+                onClick={() => props.onCreate(request)}
                 {...primary}
               >
                 {running ? VAULT_COPY.creating : VAULT_COPY.create}

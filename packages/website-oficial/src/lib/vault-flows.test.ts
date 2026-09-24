@@ -172,12 +172,13 @@ function harness() {
   const order: string[] = [];
   const steps: FlowStep[] = [];
 
-  const createVault = (fields: { owner?: string; maxContribution?: bigint; computeBudget?: ComputeBudget | undefined } = {}) =>
+  const createVault = (fields: { owner?: string; maxContribution?: bigint; skimBps?: number; computeBudget?: ComputeBudget | undefined } = {}) =>
     asJson(
       buildCreateVaultV2({
         ...DEFAULT_VAULT_POLICY,
         owner: fields.owner ?? pensionKey,
         maxContribution: fields.maxContribution ?? DEFAULT_VAULT_POLICY.maxContribution,
+        skimBps: fields.skimBps ?? DEFAULT_VAULT_POLICY.skimBps,
         ...recent(),
         ...("computeBudget" in fields ? (fields.computeBudget === undefined ? {} : { computeBudget: fields.computeBudget }) : { computeBudget: ownerComputeBudget("create_vault_v2") }),
       }),
@@ -915,6 +916,23 @@ describe("createVaultFlow", () => {
     const result = await createVaultFlow(h.createDeps, { pensionKey: h.pensionKey, mode: 0, maxContribution: 70_000_000n });
     expect(result.ok).toBe(true);
     expect(h.build.mock.calls[0]![0]).toEqual({ action: "createVault", owner: h.pensionKey, mode: 0, maxContribution: "70000000" });
+  });
+
+  it("sends a chosen profit rate and checks the build carries it", async () => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => ok(h.createVault({ skimBps: 1_500 })));
+    const result = await createVaultFlow(h.createDeps, { pensionKey: h.pensionKey, mode: 0, skimBps: 1_500 });
+    expect(result.ok).toBe(true);
+    expect(h.build.mock.calls[0]![0]).toEqual({ action: "createVault", owner: h.pensionKey, mode: 0, skimBps: 1_500 });
+  });
+
+  it("refuses a build whose rate is not the one chosen, before Phantom is asked", async () => {
+    const h = harness();
+    // The server answers with the default 20 % while 15 % was chosen.
+    const result = await createVaultFlow(h.createDeps, { pensionKey: h.pensionKey, mode: 0, skimBps: 1_500 });
+    expect(result.ok).toBe(false);
+    expect(h.signWithPension).not.toHaveBeenCalled();
+    expect(h.send).not.toHaveBeenCalled();
   });
 
   it.each<[string, (h: Harness) => unknown]>([

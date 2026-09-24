@@ -8,7 +8,9 @@ import type { WriteProgress } from "@/hooks/use-vault-actions";
 import type { VaultScreenValue, VaultView } from "@/hooks/use-vault-state";
 import type { DashboardKind, VaultPresence } from "@/lib/dashboard-mode";
 import type { LiveStage } from "@/lib/live-types";
-import { landedCreate, onboardingOpen, onboardingWanted, setupIsTheDoor, vaultPresenceOf, vaultStepRead } from "@/lib/onboarding";
+import { DEFAULT_VAULT_POLICY, PROFIT_BPS_MAX, PROFIT_BPS_MIN } from "@sip/solana-core/client";
+
+import { SETUP_RATE, landedCreate, onboardingOpen, onboardingWanted, setupIsTheDoor, setupRate, vaultPresenceOf, vaultStepRead } from "@/lib/onboarding";
 import type { VaultApi, VaultStateJson } from "@/lib/vault-api";
 
 const KEY = "PensionKeyP1aceho1der111111111111111111111";
@@ -126,5 +128,27 @@ describe("vaultStepRead", () => {
     expect(vaultStepRead({ kind: "ready", state: stateOf("exists") }, KEY)).toBe("reading");
     // Another key's "missing" is no answer about this key: never the form on it.
     expect(vaultStepRead({ kind: "ready", state: stateOf("missing", OTHER) }, KEY)).toBe("reading");
+  });
+});
+
+describe("the share the setup offers", () => {
+  it("sits inside what the program accepts, starts at the product's rate, and its presets are on the bar", () => {
+    expect(SETUP_RATE.min).toBeGreaterThanOrEqual(PROFIT_BPS_MIN);
+    expect(SETUP_RATE.max).toBeLessThanOrEqual(PROFIT_BPS_MAX);
+    expect(SETUP_RATE.initial).toBe(DEFAULT_VAULT_POLICY.skimBps);
+    expect(SETUP_RATE.presets).toEqual([1_000, 1_500, 2_000, 3_000]);
+    for (const value of [...SETUP_RATE.presets, SETUP_RATE.initial]) {
+      expect(value).toBeGreaterThanOrEqual(SETUP_RATE.min);
+      expect(value).toBeLessThanOrEqual(SETUP_RATE.max);
+      expect(value % SETUP_RATE.step).toBe(0);
+    }
+  });
+
+  it("holds any value to the range, in whole percents", () => {
+    expect(setupRate(1_530)).toBe(1_500);
+    expect(setupRate(1_550)).toBe(1_600);
+    expect(setupRate(0)).toBe(SETUP_RATE.min);
+    expect(setupRate(99_999)).toBe(SETUP_RATE.max);
+    expect(setupRate(Number.NaN)).toBe(SETUP_RATE.initial);
   });
 });

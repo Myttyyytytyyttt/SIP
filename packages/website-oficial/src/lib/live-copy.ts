@@ -458,16 +458,18 @@ export const ONBOARDING_COPY = {
     titleLead: "Welcome to",
     lede: "A slice of your trading gains, put aside for later.",
     /** The subtitle: the whole product in one running line. */
-    points: (rate: string): readonly string[] => ["Trade as usual", `${rate} of each gain saved`, "Invested in tokenized stocks", "Only you withdraw"],
+    points: ["Trade as usual", "Save a share of each gain", "Invested in tokenized stocks", "Only you withdraw"],
     tradeTitle: "Trade as you do today",
     trade: `From a ${BRAND} trading wallet linked to your vault. Export its key to use it in Axiom or any Solana app.`,
-    saveTitle: (rate: string): string => `${rate} of each gain is saved`,
+    saveTitle: "A share of each gain is saved",
     /**
      * The summary, and deliberately nothing about losses carried forward: that
      * rule has a limit (a loss is dropped after LOSS_DROPPED_AFTER_TXS), and it
-     * is said in full on the vault step, right before the signature.
+     * is said in full on the vault step, right before the signature. The share
+     * is chosen there too; `rate` is where it starts.
      */
-    save: (rate: string): string => `When a stretch of trading ends with more SOL than it started, ${rate} of the gain moves into your vault. A losing stretch moves nothing.`,
+    save: (rate: string): string =>
+      `You choose how much, ${rate} to start. When a stretch of trading ends with more SOL than it started, that share of the gain moves into your vault. A losing stretch moves nothing.`,
     investTitle: "Your savings can be invested",
     invest: (examples: string): string => `Choose tokenized stocks for it to buy, such as ${examples}. Each issuer’s powers over its stock are shown before you sign.`,
     ownTitle: "Only you can take it out",
@@ -477,17 +479,13 @@ export const ONBOARDING_COPY = {
 
   vault: {
     title: "Create your vault",
-    /** The subtitle: what the vault is, in one running line. */
-    points: (rate: string): readonly string[] => [`Keeps ${rate} of each gain`, "Only you withdraw", "One approval", "Change limits later"],
-    modeTitle: (rate: string): string => `Profit · ${rate}`,
-    mode: (rate: string, dropAfter: number): string =>
+    /** The subtitle, with the share as it is chosen on this step. */
+    points: (rate: string): readonly string[] => [`Keeps ${rate} of each gain`, "Only you withdraw", "One approval", "Change it later"],
+    rateLabel: "Share of each gain saved",
+    /** The rule being signed, at the share chosen, with its two limits: the loss's and the settlement's. */
+    mode: (rate: string, dropAfter: number, max: string): string =>
       `${rate} of each gain your trading wallet makes moves into this vault. A losing stretch moves nothing, and its loss comes off later gains ` +
-      `until your trading wallet has made ${dropAfter} transactions of its own while still behind.`,
-    advanced: "Advanced",
-    advancedSummary: (max: string, reserve: string): string => `At most ${max} SOL per settlement · ${reserve} SOL always left in the trading wallet`,
-    maxHint: "The most one settlement moves into your vault. Anything above it is not carried over.",
-    reserveHint: `${BRAND} never takes your trading wallet below this, so it keeps SOL for its own fees.`,
-    changeLater: "You can change these limits after the vault is made.",
+      `until your trading wallet has made ${dropAfter} transactions of its own while still behind. One settlement moves at most ${max} SOL.`,
     approveOnce: "Your wallet asks you to approve once.",
     /** A create was sent and not confirmed: the footer says where the way forward is. */
     checkAbove: "A vault creation was sent and is not confirmed yet. Check it above before trying again.",

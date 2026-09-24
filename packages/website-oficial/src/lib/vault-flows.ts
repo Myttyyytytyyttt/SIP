@@ -314,6 +314,8 @@ export interface CreateVaultInput {
   readonly maxContribution?: bigint;
   /** Lamports; the product's default when absent. */
   readonly walletReserve?: bigint;
+  /** The profit rate in basis points (201..=10000); the product's default when absent. */
+  readonly skimBps?: number;
 }
 
 /** Creates the pension key's vault: one build, Phantom's one signature, one send. */
@@ -321,13 +323,15 @@ export async function createVaultFlow(deps: CreateVaultDeps, input: CreateVaultI
   const request: Record<string, unknown> = { action: "createVault", owner: input.pensionKey, mode: input.mode };
   if (input.maxContribution !== undefined) request.maxContribution = input.maxContribution.toString();
   if (input.walletReserve !== undefined) request.walletReserve = input.walletReserve.toString();
+  if (input.skimBps !== undefined) request.skimBps = input.skimBps;
   return pensionWrite<BuiltTransactionJson>(deps, request, async () => ({
     instruction: "create_vault_v2",
     signers: [input.pensionKey],
     accounts: { owner: input.pensionKey, vault: await deriveVaultAddress(input.pensionKey) },
     args: {
       mode: input.mode,
-      skim_bps: DEFAULT_VAULT_POLICY.skimBps,
+      // The rate chosen is the rate signed: a build carrying any other is refused before Phantom is asked.
+      skim_bps: input.skimBps ?? DEFAULT_VAULT_POLICY.skimBps,
       volume_bps: DEFAULT_VAULT_POLICY.volumeBps,
       max_contribution: input.maxContribution ?? DEFAULT_VAULT_POLICY.maxContribution,
       wallet_reserve: input.walletReserve ?? DEFAULT_VAULT_POLICY.walletReserve,

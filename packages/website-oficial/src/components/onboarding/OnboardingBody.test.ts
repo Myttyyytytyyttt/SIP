@@ -37,7 +37,8 @@ import { OnboardingBody, onboardingHeading, type OnboardingBodyProps } from "@/c
 import type { WriteProgress } from "@/hooks/use-vault-actions";
 import { formatSol } from "@/lib/amounts";
 import { LIVE_COPY, ONBOARDING_COPY } from "@/lib/live-copy";
-import { LINK_COPY, PROFIT_RATE, VAULT_COPY, shortAddress } from "@/lib/vault-copy";
+import { LINK_COPY, LOSS_DROPPED_AFTER_TXS, PROFIT_RATE, VAULT_COPY, shortAddress } from "@/lib/vault-copy";
+import { SETUP_RATE } from "@/lib/onboarding";
 import { CREATE_VAULT_FEE_LAMPORTS } from "@/lib/vault-limits";
 
 const KEY = "PensionKeyP1aceho1der111111111111111111111";
@@ -50,12 +51,9 @@ function props(overrides: Partial<OnboardingBodyProps> = {}): OnboardingBodyProp
     vaultRent: 1_285_240n,
     linkRent: 1_305_560n,
     fees: CREATE_VAULT_FEE_LAMPORTS,
-    usdcPerSol: 100_038_711n,
     read: "form",
-    maxText: "0.06",
-    reserveText: "0.05",
-    onMaxText: vi.fn(),
-    onReserveText: vi.fn(),
+    rateBps: 2_000,
+    onRate: vi.fn(),
     progress: { phase: "idle" },
     running: false,
     busyElsewhere: false,
@@ -95,9 +93,9 @@ describe("every screen", () => {
   it("never says keeper, SIP or Nuvem, nor prints a missing value", () => {
     const states: Partial<OnboardingBodyProps>[] = [
       { step: "welcome" },
-      { step: "welcome", vaultRent: null, linkRent: null, usdcPerSol: null },
+      { step: "welcome", vaultRent: null, linkRent: null },
       { step: "vault" },
-      { step: "vault", vaultRent: null, usdcPerSol: null },
+      { step: "vault", vaultRent: null },
       { step: "vault", read: "reading" },
       { step: "vault", read: "unreadable" },
       { step: "ready", progress: { phase: "finished", kind: "create", result: { ok: true, signature: "sig", explorerUrl: "https://solscan.io/tx/sig", slot: 1, unitsConsumed: null } } as WriteProgress },
@@ -117,6 +115,7 @@ describe("every screen", () => {
     expect(vault).toMatchObject({ eyebrow: "Step 2 of 2", title: "Create your vault", description: VAULT_COPY.noVaultDescription, hero: true });
     expect(vault.brand).toBeUndefined();
     expect(vault.points).toHaveLength(4);
+    expect(onboardingHeading("vault", 1_500).points?.[0]).toBe("Keeps 15\u00a0% of each gain");
     expect(onboardingHeading("ready").eyebrow).toBeNull();
   });
 });
@@ -165,39 +164,51 @@ describe("the vault step", () => {
     }
   });
 
-  it("offers profit only, with no mode choice, and the limits folded at their defaults", () => {
+  it("offers one choice — the share of each gain — as a bar and four presets, and no limits to fill in", () => {
     const html = render(props({ step: "vault" }));
-    // textOf folds the rate's no-break space into a plain one, as a reader sees it.
-    expect(textOf(html)).toContain(ONBOARDING_COPY.vault.modeTitle(PROFIT_RATE));
-    expect(html).toContain(ONBOARDING_COPY.vault.modeTitle(PROFIT_RATE.replace(" ", "\u00a0")));
     expect(html).not.toContain('type="radio"');
-    expect(html).toMatch(/<details(?![^>]*\sopen)[^>]*>/);
-    expect(html).toMatch(/id="onboarding-max-contribution"[^>]*value="0.06"|value="0.06"[^>]*id="onboarding-max-contribution"/);
-    expect(html).toMatch(/id="onboarding-wallet-reserve"[^>]*value="0.05"|value="0.05"[^>]*id="onboarding-wallet-reserve"/);
+    expect(html).not.toContain("<details");
+    // No field to fill in (the slider's own hidden form input aside): the limits are the product's.
+    expect(html).not.toMatch(/inputmode="decimal"|type="number"/i);
+    expect(html).not.toContain("onboarding-max-contribution");
+    expect(html).toContain('data-slot="slider"');
+    // The thumb speaks the percent, not the basis points.
+    expect(html).toMatch(/aria-valuetext="20\u00a0%"/);
+    for (const preset of ["10", "15", "20", "30"]) expect(html).toMatch(new RegExp(`data-slot="toggle-group-item"[^>]*>${preset}\u00a0%<`));
+    // 20 % is the product's start, so its preset is the one pressed.
+    expect(html).toMatch(/aria-checked="true"[^>]*>20\u00a0%<|data-state="on"[^>]*>20\u00a0%</);
+    // The rule said before the signature carries the share and its two limits.
+    expect(textOf(html)).toContain(ONBOARDING_COPY.vault.mode(PROFIT_RATE, LOSS_DROPPED_AFTER_TXS, formatSol(DEFAULT_VAULT_POLICY.maxContribution)));
   });
 
-  it("says the cost above the button, and Create sends exactly the limits shown, never the click", () => {
-    const value = props({ step: "vault" });
+  it("says the cost above the button, and Create sends the share chosen with the product's limits, never the click", () => {
+    const value = props({ step: "vault", rateBps: 1_500 });
     const html = render(value);
     expect(html.indexOf("Cost:")).toBeGreaterThan(-1);
     expect(html.indexOf("Cost:")).toBeLessThan(html.lastIndexOf(">Create vault<"));
+    expect(textOf(html)).toContain("15 %");
     const create = button(VAULT_COPY.create);
     expect(create.primary).toBe(true);
     expect(create.disabled).toBe(false);
     create.onClick?.(CLICK);
     expect(value.onCreate).toHaveBeenCalledTimes(1);
-    expect(value.onCreate).toHaveBeenCalledWith({ mode: MODE_PROFIT, maxContribution: DEFAULT_VAULT_POLICY.maxContribution, walletReserve: DEFAULT_VAULT_POLICY.walletReserve });
+    expect(value.onCreate).toHaveBeenCalledWith({
+      mode: MODE_PROFIT,
+      skimBps: 1_500,
+      maxContribution: DEFAULT_VAULT_POLICY.maxContribution,
+      walletReserve: DEFAULT_VAULT_POLICY.walletReserve,
+    });
+  });
+
+  it("holds a share from outside the bar's range to the range before it can be signed", () => {
+    const value = props({ step: "vault", rateBps: 90_000 });
+    render(value);
+    button(VAULT_COPY.create).onClick?.(CLICK);
+    expect(value.onCreate).toHaveBeenCalledWith(expect.objectContaining({ skimBps: SETUP_RATE.max }));
   });
 
   it("names an unread rent in the existing flow's own words", () => {
     expect(textOf(render(props({ step: "vault", vaultRent: null })))).toContain(VAULT_COPY.costUnknown);
-  });
-
-  it("refuses a zero limit out loud, outside the folded section, and disables Create", () => {
-    const html = render(props({ step: "vault", maxText: "0" }));
-    expect(textOf(html)).toContain(VAULT_COPY.zeroSettlement);
-    expect(html.indexOf(VAULT_COPY.zeroSettlement)).toBeGreaterThan(html.indexOf("</details>"));
-    expect(button(VAULT_COPY.create).disabled).toBe(true);
   });
 
   it("never offers Create on a read in flight or failed — the button is not there at all", () => {

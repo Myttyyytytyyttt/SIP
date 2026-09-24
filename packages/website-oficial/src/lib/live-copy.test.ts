@@ -295,14 +295,19 @@ describe("the new-user setup's words", () => {
     expect(setupSentences().filter((sentence) => /volume|every trade|every buy/i.test(sentence))).toEqual([]);
     // The rule said right before the signature carries the loss AND its limit (VAULT_COPY.profitRule):
     // promising the loss forever would be a promise the program does not keep.
-    const rule = ONBOARDING_COPY.vault.mode(rate, LOSS_DROPPED_AFTER_TXS);
+    const rule = ONBOARDING_COPY.vault.mode(rate, LOSS_DROPPED_AFTER_TXS, "0.06");
     expect(rule).toContain(rate);
     expect(rule).toMatch(/loss comes off later gains/);
     expect(rule).toContain(`${LOSS_DROPPED_AFTER_TXS} transactions of its own while still behind`);
-    // The welcome's summary promises nothing about losses at all, rather than half the rule.
+    // The settlement cap is a real limit on what is saved: said, since the setup no longer shows the field.
+    expect(rule).toContain("at most 0.06 SOL");
+    // The welcome's summary promises nothing about losses at all, rather than half the rule, and no fixed
+    // share: the share is chosen on the next step.
     expect(ONBOARDING_COPY.welcome.save(rate)).toContain(rate);
+    expect(ONBOARDING_COPY.welcome.save(rate)).toMatch(/You choose how much/);
     expect(ONBOARDING_COPY.welcome.save(rate)).not.toMatch(/loss comes off/);
-    expect(ONBOARDING_COPY.welcome.points(rate)).toContain(`${rate} of each gain saved`);
+    expect(ONBOARDING_COPY.welcome.points.join(" ")).not.toMatch(/\d/);
+    expect(ONBOARDING_COPY.vault.points("15 %")[0]).toBe("Keeps 15 % of each gain");
   });
 
   it("keeps the product's name for the wallet that owns the vault", () => {
