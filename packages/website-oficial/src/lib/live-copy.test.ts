@@ -293,12 +293,16 @@ describe("the new-user setup's words", () => {
   it("promises profit only — volume is not offered — and says a loss carries only as far as the program carries it", () => {
     expect(VOLUME_MODE_OFFERED).toBe(false);
     expect(setupSentences().filter((sentence) => /volume|every trade|every buy/i.test(sentence))).toEqual([]);
-    for (const rule of [ONBOARDING_COPY.welcome.save(rate, LOSS_DROPPED_AFTER_TXS), ONBOARDING_COPY.vault.mode(rate, LOSS_DROPPED_AFTER_TXS)]) {
-      expect(rule).toContain(rate);
-      expect(rule).toMatch(/loss comes off later gains/);
-      // The drop is part of the rule (VAULT_COPY.profitRule): promising the loss forever would be a promise the program does not keep.
-      expect(rule).toContain(`${LOSS_DROPPED_AFTER_TXS} transactions of its own while still behind`);
-    }
+    // The rule said right before the signature carries the loss AND its limit (VAULT_COPY.profitRule):
+    // promising the loss forever would be a promise the program does not keep.
+    const rule = ONBOARDING_COPY.vault.mode(rate, LOSS_DROPPED_AFTER_TXS);
+    expect(rule).toContain(rate);
+    expect(rule).toMatch(/loss comes off later gains/);
+    expect(rule).toContain(`${LOSS_DROPPED_AFTER_TXS} transactions of its own while still behind`);
+    // The welcome's summary promises nothing about losses at all, rather than half the rule.
+    expect(ONBOARDING_COPY.welcome.save(rate)).toContain(rate);
+    expect(ONBOARDING_COPY.welcome.save(rate)).not.toMatch(/loss comes off/);
+    expect(ONBOARDING_COPY.welcome.points(rate)).toContain(`${rate} of each gain saved`);
   });
 
   it("names every cost there is, and an unread rent as unread — never a zero or a placeholder", () => {

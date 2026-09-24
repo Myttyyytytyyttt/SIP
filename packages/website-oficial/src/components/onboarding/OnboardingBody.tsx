@@ -24,7 +24,7 @@
 
 import { MODE_PROFIT, OFFERED_LEGS } from "@sip/solana-core/client";
 import { ArrowLeftRight, ArrowRight, ChartLine, Circle, PiggyBank, RefreshCw, ShieldCheck, type LucideIcon } from "lucide-react";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -55,7 +55,14 @@ export const INVEST_EXAMPLES: string = (() => {
 export function onboardingHeading(step: OnboardingBodyStep): OnboardingHeading {
   switch (step) {
     case "welcome":
-      return { eyebrow: ONBOARDING_COPY.stepOf(1, STEPS), title: ONBOARDING_COPY.welcome.title, description: ONBOARDING_COPY.welcome.lede };
+      return {
+        eyebrow: ONBOARDING_COPY.stepOf(1, STEPS),
+        title: ONBOARDING_COPY.welcome.title,
+        titleLead: ONBOARDING_COPY.welcome.titleLead,
+        description: ONBOARDING_COPY.welcome.lede,
+        points: ONBOARDING_COPY.welcome.points(RATE),
+        hero: true,
+      };
     case "vault":
       return { eyebrow: ONBOARDING_COPY.stepOf(2, STEPS), title: ONBOARDING_COPY.vault.title, description: VAULT_COPY.noVaultDescription };
     case "ready":
@@ -144,17 +151,48 @@ const TILE = {
   invest: "bg-blue-500/12 text-blue-600 dark:text-blue-400",
 } as const;
 
+/** One of the four things SaverFi does: second to the motion, so smaller than it. */
 function Point({ icon: Icon, tone, title, children }: { readonly icon: LucideIcon; readonly tone: keyof typeof TILE; readonly title: string; readonly children: ReactNode }) {
   return (
-    <li className="flex items-start gap-3">
-      <span className={cn("flex size-9 shrink-0 items-center justify-center rounded-md", TILE[tone])}>
-        <Icon className="size-4.5" aria-hidden />
+    <li className="flex items-start gap-2.5">
+      <span className={cn("flex size-7 shrink-0 items-center justify-center rounded-md", TILE[tone])}>
+        <Icon className="size-3.5" aria-hidden />
       </span>
       <span className="min-w-0 space-y-0.5">
-        <span className="block text-sm font-medium">{title}</span>
-        <span className="block text-sm text-muted-foreground">{children}</span>
+        <span className="block text-[0.8rem] font-medium">{title}</span>
+        <span className="block text-xs leading-relaxed text-muted-foreground">{children}</span>
       </span>
     </li>
+  );
+}
+
+/** The welcome's motion: H.264 so every browser plays it, and its still frame when motion is reduced. */
+export const WELCOME_MOTION = { video: "/motion/onboarding-welcome.mp4", poster: "/motion/onboarding-welcome.jpg" } as const;
+
+const REDUCED = "(prefers-reduced-motion: reduce)";
+const subscribeReduced = (onChange: () => void): (() => void) => {
+  const query = window.matchMedia(REDUCED);
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
+};
+
+/** Whether the person asked for less motion. False on the server: the setup is never server-rendered anyway. */
+function useReducedMotion(): boolean {
+  return useSyncExternalStore(subscribeReduced, () => window.matchMedia(REDUCED).matches, () => false);
+}
+
+/** The motion says with pictures what the points below say in words, so it is hidden from screen readers. */
+function WelcomeMotion() {
+  const reduced = useReducedMotion();
+  return (
+    <div className="aspect-video overflow-hidden rounded-xl bg-[#1d1d1d] ring-1 ring-foreground/10">
+      {reduced ? (
+        // eslint-disable-next-line @next/next/no-img-element -- a fixed still in public/, no optimisation to gain
+        <img src={WELCOME_MOTION.poster} alt="" aria-hidden className="size-full object-cover" />
+      ) : (
+        <video src={WELCOME_MOTION.video} poster={WELCOME_MOTION.poster} autoPlay muted loop playsInline preload="auto" aria-hidden className="size-full object-cover" />
+      )}
+    </div>
   );
 }
 
@@ -164,13 +202,14 @@ function Welcome({ pensionKey, vaultRent, linkRent, fees, onContinue, onDisconne
     <Frame
       label={copy.title}
       body={
-        <div className="space-y-4">
-          <ul className="space-y-3.5">
+        <div className="space-y-5">
+          <WelcomeMotion />
+          <ul className="grid gap-x-5 gap-y-3.5 sm:grid-cols-2">
             <Point icon={ArrowLeftRight} tone="quiet" title={copy.tradeTitle}>
               {copy.trade}
             </Point>
             <Point icon={PiggyBank} tone="saved" title={copy.saveTitle(RATE)}>
-              {copy.save(RATE, LOSS_DROPPED_AFTER_TXS)}
+              {copy.save(RATE)}
             </Point>
             <Point icon={ChartLine} tone="invest" title={copy.investTitle}>
               {copy.invest(INVEST_EXAMPLES)}
@@ -180,17 +219,19 @@ function Welcome({ pensionKey, vaultRent, linkRent, fees, onContinue, onDisconne
             </Point>
           </ul>
 
-          <section aria-labelledby="onboarding-costs" className="rounded-lg border bg-muted/30 px-3 py-2.5">
-            <h3 id="onboarding-costs" className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-              {copy.costTitle}
-            </h3>
+          {/* Folded, with the one figure the next step asks for beside it: the motion and the points lead. */}
+          <details className="group rounded-lg border bg-muted/30 px-3 py-2">
+            <summary className="flex cursor-pointer flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 text-xs">
+              <span className="font-medium tracking-wide text-muted-foreground uppercase">{copy.costTitle}</span>
+              {vaultRent === null ? null : <span className="text-muted-foreground">{copy.costFrom(formatSol(vaultRent))}</span>}
+            </summary>
             <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-muted-foreground marker:text-muted-foreground/60">
               <li>{vaultRent === null ? copy.costVaultUnknown : copy.costVault(formatSol(vaultRent), formatSol(fees))}</li>
               <li>{linkRent === null ? copy.costLinkUnknown : copy.costLink(formatSol(linkRent))}</li>
               <li>{copy.costSettle}</li>
               <li>{copy.costInvest}</li>
             </ul>
-          </section>
+          </details>
 
           <p className="text-xs text-muted-foreground">{ONBOARDING_COPY.closeHint}</p>
         </div>

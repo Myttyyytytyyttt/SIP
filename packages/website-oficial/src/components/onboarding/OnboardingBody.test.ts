@@ -109,13 +109,28 @@ describe("every screen", () => {
   });
 
   it("has a header for each step, the step counted in the first two", () => {
-    expect(onboardingHeading("welcome")).toEqual({ eyebrow: "Step 1 of 2", title: "Welcome to SaverFi", description: ONBOARDING_COPY.welcome.lede });
+    const welcome = onboardingHeading("welcome");
+    expect(welcome).toMatchObject({ eyebrow: "Step 1 of 2", title: "SaverFi", titleLead: "Welcome to", hero: true });
+    expect(welcome.points).toHaveLength(4);
     expect(onboardingHeading("vault")).toEqual({ eyebrow: "Step 2 of 2", title: "Create your vault", description: VAULT_COPY.noVaultDescription });
     expect(onboardingHeading("ready").eyebrow).toBeNull();
   });
 });
 
 describe("welcome", () => {
+  it("leads with the motion, in H.264 with its still frame, hidden from screen readers", () => {
+    const html = render(props());
+    expect(html).toMatch(/<video[^>]*src="\/motion\/onboarding-welcome.mp4"/);
+    expect(html).toMatch(/<video[^>]*poster="\/motion\/onboarding-welcome.jpg"/);
+    expect(html).toMatch(/<video[^>]*aria-hidden="true"/);
+    // Read inside the <video> tag alone ("muted" is also in every text-muted-foreground class). React sets
+    // `muted` as a property, never as markup, so the browser check (not this one) covers it.
+    const tag = html.match(/<video[^>]*>/)?.[0] ?? "";
+    for (const attribute of ["autoplay", "loop", "playsinline"]) expect(tag.toLowerCase()).toContain(attribute);
+    // The motion comes before the four points and the costs.
+    expect(html.indexOf("<video")).toBeLessThan(html.indexOf(ONBOARDING_COPY.welcome.tradeTitle));
+  });
+
   it("says what it costs with the figures read, before anything is signed", () => {
     const text = textOf(render(props()));
     expect(text).toContain(ONBOARDING_COPY.welcome.costVault(formatSol(1_285_240n), formatSol(CREATE_VAULT_FEE_LAMPORTS)));

@@ -455,19 +455,28 @@ export const ONBOARDING_COPY = {
   close: "Close",
 
   welcome: {
-    title: `Welcome to ${BRAND}`,
+    /** The big word is the brand; a screen reader hears "Welcome to" before it. */
+    title: BRAND,
+    titleLead: "Welcome to",
     lede: "A slice of your trading gains, put aside for later.",
+    /** The subtitle: the whole product in one running line. */
+    points: (rate: string): readonly string[] => ["Trade as usual", `${rate} of each gain saved`, "Invested in tokenized stocks", "Only you withdraw"],
     tradeTitle: "Trade as you do today",
     trade: `From a ${BRAND} trading wallet linked to your vault. Export its key to use it in Axiom or any Solana app.`,
     saveTitle: (rate: string): string => `${rate} of each gain is saved`,
-    save: (rate: string, dropAfter: number): string =>
-      `When a stretch of trading ends with more SOL than it started, ${rate} of the gain moves into your vault. ` +
-      `A losing stretch moves nothing, and its loss comes off later gains until your trading wallet has made ${dropAfter} transactions of its own while still behind.`,
+    /**
+     * The summary, and deliberately nothing about losses carried forward: that
+     * rule has a limit (a loss is dropped after LOSS_DROPPED_AFTER_TXS), and it
+     * is said in full on the vault step, right before the signature.
+     */
+    save: (rate: string): string => `When a stretch of trading ends with more SOL than it started, ${rate} of the gain moves into your vault. A losing stretch moves nothing.`,
     investTitle: "Your savings can be invested",
     invest: (examples: string): string => `Choose tokenized stocks for it to buy, such as ${examples}. Each issuer’s powers over its stock are shown before you sign.`,
     ownTitle: "Only you can take it out",
     own: `Only your pension key can withdraw from the vault, and ${BRAND} cannot pause or block a SOL withdrawal.`,
     costTitle: "What it costs",
+    /** Beside the folded costs: the one figure the next step asks for. */
+    costFrom: (rent: string): string => `Your vault: ${rent} SOL + fees`,
     costVault: (rent: string, fees: string): string => `Your vault: ${rent} SOL of rent that does not come back, plus ${fees} SOL of network fees.`,
     costVaultUnknown: "Your vault: rent that does not come back, plus network fees. The rent could not be read just now; your wallet shows the total before you approve.",
     costLink: (rent: string): string => `Each trading wallet you link: ${rent} SOL of rent, plus network fees. The program returns the rent on unlink, which ${BRAND} does not offer yet.`,

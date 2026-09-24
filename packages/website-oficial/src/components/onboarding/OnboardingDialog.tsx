@@ -46,6 +46,9 @@ export function focusPrimary(root: HTMLElement | null | undefined): void {
 }
 
 /** components/ui/dialog.tsx's DialogContent classes, then the full-screen-below-sm shape. */
+/** The welcome is wider than the steps after it: its motion and its line of points lead. */
+const HERO_WIDTH = "sm:max-w-2xl";
+
 const CONTENT = cn(
   "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
   "h-dvh max-h-dvh w-dvw max-w-none grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden rounded-none p-0 sm:h-auto sm:max-h-[88vh] sm:w-full sm:max-w-xl sm:rounded-xl",
@@ -55,7 +58,19 @@ export interface OnboardingHeading {
   /** "Step 1 of 2", or null on the last screen. Read as part of the title. */
   readonly eyebrow: string | null;
   readonly title: string;
+  /** Read before the title by a screen reader only ("Welcome to"), so the big word can be the brand alone. */
+  readonly titleLead?: string;
   readonly description: string;
+  /** Short points in one running line, "·" between them, in place of the sentence. */
+  readonly points?: readonly string[];
+  /** The welcome: the brand mark beside a bigger title. */
+  readonly hero?: boolean;
+}
+
+/** The brand mark, drawn in the text's own colour so it follows the theme. */
+function BrandMark() {
+  const mask = 'url("/logo/sip-mark-white.png") center / contain no-repeat';
+  return <span aria-hidden className="inline-block size-7 shrink-0 bg-current sm:size-8" style={{ mask, WebkitMask: mask }} />;
 }
 
 export function OnboardingDialog({
@@ -90,7 +105,7 @@ export function OnboardingDialog({
           <DialogPrimitive.Content
             data-slot="dialog-content"
             data-onboarding="open"
-            className={CONTENT}
+            className={cn(CONTENT, heading.hero === true && HERO_WIDTH)}
             onOpenAutoFocus={(event) => {
               event.preventDefault();
               focusPrimary(event.currentTarget as HTMLElement | null);
@@ -110,13 +125,30 @@ export function OnboardingDialog({
               if (holdClose || closeHeldBack()) event.preventDefault();
             }}
           >
-            {/* pr-12 keeps the title clear of the close button, which sits absolute in the corner. */}
-            <DialogHeader className="border-b p-4 pr-12 text-left sm:px-6 sm:pt-5">
-              <DialogTitle className="text-lg leading-snug">
+            {/* The title keeps clear of the close button in the corner; the line of points may run under it. */}
+            <DialogHeader className={cn("border-b p-4 text-left sm:px-6 sm:pt-5", heading.hero === true && "gap-2 sm:pb-5")}>
+              <DialogTitle className="pr-10 text-lg leading-snug">
                 {heading.eyebrow !== null ? <span className="mb-1 block text-xs font-medium tracking-wide text-muted-foreground uppercase">{heading.eyebrow}</span> : null}
-                {heading.title}
+                <span className={cn(heading.hero === true && "flex items-center gap-2.5 text-3xl font-semibold tracking-tight sm:text-4xl")}>
+                  {heading.hero === true ? <BrandMark /> : null}
+                  {heading.titleLead !== undefined ? <span className="sr-only">{heading.titleLead} </span> : null}
+                  {heading.title}
+                </span>
               </DialogTitle>
-              <DialogDescription>{heading.description}</DialogDescription>
+              {heading.points !== undefined ? (
+                <DialogDescription asChild>
+                  <ul className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
+                    {heading.points.map((point, index) => (
+                      <li key={point} className="flex items-center gap-2">
+                        {index > 0 ? <span aria-hidden className="size-1 rounded-full bg-muted-foreground/50" /> : null}
+                        {point}
+                      </li>
+                    ))}
+                  </ul>
+                </DialogDescription>
+              ) : (
+                <DialogDescription>{heading.description}</DialogDescription>
+              )}
             </DialogHeader>
 
             {children}
