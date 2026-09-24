@@ -265,7 +265,7 @@ describe("grantKeeperSeat", () => {
     );
     expect(wait.mock.calls.map(([ms]) => ms)).toStrictEqual([...GRANT_BACKOFF_MS]);
     expect(addSigners).toHaveBeenCalledTimes(1);
-    expect(GRANT_COPY.addedRecordLags).toContain("Do not press Grant keeper permission");
+    expect(GRANT_COPY.addedRecordLags).toContain("Do not press Grant SaverFi permission");
   });
 
   it("an add that failed AFTER its write landed is reported as most likely added, never as not added, when the record shows a signer", async () => {
@@ -279,7 +279,7 @@ describe("grantKeeperSeat", () => {
     const message = failureText(await failed.catch((error: unknown) => error)) ?? "";
     expect(message).toContain(GRANT_COPY.addedUnconfirmed);
     expect(message).toContain("Could not refresh user");
-    expect(message).toContain("Do not press Grant keeper permission");
+    expect(message).toContain("Do not press Grant SaverFi permission");
     expect(addSigners).toHaveBeenCalledTimes(1);
     expect(wait).not.toHaveBeenCalled();
   });
@@ -509,7 +509,7 @@ describe("reseatKeeperSeat", () => {
     expect(addSigners.mock.calls).toStrictEqual([[{ address: TRADING_0, signers: EXACT_SIGNERS }]]);
   });
 
-  it("REMOVED BUT NOT ADDED: says so first, names Grant keeper permission, keeps Privy's words, and is never done", async () => {
+  it("REMOVED BUT NOT ADDED: says so first, names Grant SaverFi permission, keeps Privy's words, and is never done", async () => {
     const refreshUser = reads(seated, cleared);
     const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
     const addSigners = vi.fn<AddSignersFn>().mockRejectedValue(new Error("Invalid policy id"));
@@ -518,7 +518,7 @@ describe("reseatKeeperSeat", () => {
     const message = failureText(await stop.catch((error: unknown) => error)) ?? "";
     expect(message.startsWith(RESEAT_COPY.removedNotAdded)).toBe(true);
     expect(message).toContain("Invalid policy id");
-    expect(message).toContain("Grant keeper permission");
+    expect(message).toContain("Grant SaverFi permission");
     expect(message).not.toContain(RESEAT_COPY.done);
     // The record now reads "missing", which is exactly what puts the row's one-press Grant back on screen.
     expect(seatOf(cleared, TRADING_0)).toBe("missing");
@@ -533,7 +533,7 @@ describe("reseatKeeperSeat", () => {
     await expect(stop).rejects.toMatchObject({ stage: "added-record-lags" });
     const message = failureText(await stop.catch((error: unknown) => error)) ?? "";
     expect(message.startsWith(RESEAT_COPY.addedRecordLags)).toBe(true);
-    expect(message).toContain("Do not press Grant keeper permission");
+    expect(message).toContain("Do not press Grant SaverFi permission");
     expect(message).toContain(`privy-policy verify --wallet ${teeWalletId(seated, TRADING_0) ?? ""} --policy ${POLICY}`);
     expect(message).not.toContain(RESEAT_COPY.done);
     expect(addSigners).toHaveBeenCalledTimes(1);
@@ -552,7 +552,7 @@ describe("reseatKeeperSeat", () => {
     expect(message.startsWith(RESEAT_COPY.addedUnconfirmed)).toBe(true);
     expect(message).toContain("Could not refresh user");
     expect(message).toContain(`privy-policy verify --wallet ${teeWalletId(seated, TRADING_0) ?? ""} --policy ${POLICY}`);
-    expect(message).toContain("Do not press Grant keeper permission");
+    expect(message).toContain("Do not press Grant SaverFi permission");
     expect(message).not.toContain(RESEAT_COPY.removedNotAdded);
     expect(message).not.toContain(RESEAT_COPY.done);
     expect(addSigners).toHaveBeenCalledTimes(1);
@@ -566,7 +566,7 @@ describe("reseatKeeperSeat", () => {
     await expect(stop).rejects.toMatchObject({ stage: "removed-not-added" });
     const message = failureText(await stop.catch((error: unknown) => error)) ?? "";
     expect(message).toContain("Privy did not confirm that the keeper's seat was added");
-    expect(message).toContain("press Grant keeper permission on this wallet while it says No seat");
+    expect(message).toContain("press Grant SaverFi permission on this wallet while it says Needs permission");
   });
 
   it("a stop after the removal is described even when Privy's own answer would say nothing (a closed dialog)", async () => {
@@ -640,7 +640,7 @@ describe("reseatKeeperSeat", () => {
         expect(message).toContain(RESEAT_COPY.idDropped(WALLET_ID));
         expect(message).toContain(`privy-policy verify --wallet ${WALLET_ID} --policy ${POLICY}`);
         expect(message).not.toContain(RESEAT_COPY.done);
-        expect(message).not.toMatch(/press Grant keeper permission/i);
+        expect(message).not.toMatch(/press Grant SaverFi permission/i);
         expect(addSigners.mock.calls).toStrictEqual([[{ address: TRADING_0, signers: EXACT_SIGNERS }]]);
         expect(removeSigners.mock.invocationCallOrder[0]).toBeLessThan(addSigners.mock.invocationCallOrder[0] ?? 0);
       }
@@ -656,7 +656,7 @@ describe("reseatKeeperSeat", () => {
       expect(message.startsWith(RESEAT_COPY.idDropped(WALLET_ID))).toBe(true);
       expect(message).toContain(RESEAT_COPY.idDroppedNotAdded);
       expect(message).toContain("Invalid policy id");
-      expect(message).not.toMatch(/press Grant keeper permission/i);
+      expect(message).not.toMatch(/press Grant SaverFi permission/i);
       expect(addSigners).toHaveBeenCalledTimes(1);
       // The row agrees: on that record Grant is refused before anything is sent.
       expect(grantRefusal(idless, TRADING_0)).toBe(GRANT_COPY.noServerId);

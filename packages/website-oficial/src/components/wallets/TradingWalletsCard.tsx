@@ -54,8 +54,16 @@ import { useCreateAndLink } from "@/hooks/use-create-and-link";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { formatSol, rawFrom } from "@/lib/amounts";
 import { pressPlan, stopStillHolds, type CreateAndLinkOutcome } from "@/lib/create-and-link";
-import { MAX_TRADING_WALLETS, keeperSigners, seatProblem, tradingWalletsOf } from "@/lib/trading-wallets";
+import { MAX_TRADING_WALLETS, ROW_COPY, keeperSigners, seatProblem, tradingWalletsOf } from "@/lib/trading-wallets";
 import { CREATE_LINK_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
+
+/** The card's own words for a first look; the ids behind them stay under Advanced. */
+const CARD_COPY = {
+  description:
+    "The wallets you trade from. SaverFi's permission on them is bounded to moving SOL into your vault; each move's " +
+    "small network fee is paid from the wallet. Export a wallet's key to trade from Axiom or any Solana app.",
+  advanced: ROW_COPY.advanced,
+} as const;
 
 export function TradingWalletsCard() {
   const config = useSolanaConfig();
@@ -95,11 +103,7 @@ export function TradingWalletsCard() {
         {/* Column 1 explicitly: with the action moved to a row of its own, the header's second cell in row 1
             is free, and the grid's own placement would put the description up there beside the title. */}
         <CardTitle className="col-start-1">Trading wallets</CardTitle>
-        <CardDescription className="col-start-1">
-          The wallets you trade from. Each is created inside Privy with the keeper&apos;s seat: its permission to put a
-          slice of your trading aside, bounded by the keeper&apos;s policy. Export a wallet&apos;s key to trade from Axiom
-          or any Solana app; the seat stays.
-        </CardDescription>
+        <CardDescription className="col-start-1">{CARD_COPY.description}</CardDescription>
         {/*
          * THE ACTION DROPS BELOW THE DESCRIPTION ON A NARROW CARD. CardHeader is a
          * grid-cols-[1fr_auto] with the action in column 2, and every Button is
@@ -169,11 +173,17 @@ export function TradingWalletsCard() {
       </CardContent>
 
       {seat !== null ? (
-        <CardFooter className="flex-wrap gap-x-1.5 gap-y-1 text-xs text-muted-foreground">
-          <span>New wallets seat the keeper&apos;s signer</span>
-          <Num className="break-all">{seat.signerId}</Num>
-          <span>with policy</span>
-          <Num className="break-all">{seat.policyIds[0]}</Num>
+        <CardFooter className="text-xs text-muted-foreground">
+          {/* The operator's ids, folded away from a first look like each row's. */}
+          <details className="w-full">
+            <summary className="cursor-pointer">{CARD_COPY.advanced}</summary>
+            <div className="mt-2 flex flex-wrap gap-x-1.5 gap-y-1">
+              <span>New wallets seat the keeper&apos;s signer</span>
+              <Num className="break-all">{seat.signerId}</Num>
+              <span>with policy</span>
+              <Num className="break-all">{seat.policyIds[0]}</Num>
+            </div>
+          </details>
         </CardFooter>
       ) : null}
     </Card>

@@ -6,8 +6,8 @@
  * an unknown one, export the key — and whether it saves into the vault (LinkControl).
  *
  * WHAT THE BADGE CAN KNOW. Privy's browser SDK says whether a wallet has a signer
- * (`delegated`), never which signer or which policy. So the badge says "Has a
- * signer" and never "Seated": another key quorum, the keeper's signer without its
+ * (`delegated`), never which signer or which policy. So the row says "Linked" (a
+ * signer, and a link) and never "Seated" or "can save": another key quorum, the keeper's signer without its
  * policy, or a legacy on-device delegation all look exactly like the keeper's seat
  * in Privy's record. This page never adds a signer without its policy, but the
  * Privy dashboard, an earlier build or another client of the same Privy app can.
@@ -29,7 +29,7 @@
  * remove per wallet (reseatRefusal) gets the button disabled, with the reason.
  *
  * THE PARTIAL STATE. A re-seat stopped after the removal leaves a wallet whose
- * record says no signer: the row reads "No seat", in red, and offers Grant keeper
+ * record says no signer: the row reads "Needs permission", in red, and offers Grant SaverFi
  * permission — one press — on this render and after any reload, as long as Privy's
  * record still shows the wallet's server id. If it does not, the grant cannot reach
  * the wallet (grantRefusal): the button is disabled with the reason, and the stop's
@@ -42,10 +42,23 @@
  *
  * THE LINK is the chain's record, read by the screen, not Privy's: a wallet can be
  * linked with or without a seat, and a seat puts nothing aside until it is linked.
+ *
+ * WHAT A NEW USER SEES, AND WHAT IS UNDER "ADVANCED" (09-24). The row leads with
+ * one plain status — Ready, Not linked, Needs permission, Checking — built from
+ * the seat and the link together, and only the controls that move it forward:
+ * Grant, Link, Check again, Export key. The operator's tools — the Privy wallet
+ * id, the privy-policy verify line, the signer's own note and Re-seat — sit in a
+ * collapsed "Advanced" section: nothing is removed, because Re-seat is how a
+ * wallet seated under a rotated key is recovered, but none of it reads like a
+ * warning to someone who has just created their first wallet. The section opens
+ * by itself while a re-seat is being confirmed or runs, so its progress is
+ * never hidden.
  */
 
 import { KeyRound, LoaderCircle, RefreshCw, RotateCcw } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+import { useVaultScreen } from "@/hooks/use-vault-state";
 
 import { useSolanaConfig } from "@/app/providers";
 import { Num } from "@/components/num";
@@ -56,38 +69,65 @@ import { LinkControl } from "@/components/wallets/LinkControl";
 import { useExportTradingWallet } from "@/hooks/use-export-trading-wallet";
 import { useKeeperSeat } from "@/hooks/use-keeper-seat";
 import { LABEL } from "@/lib/classes";
-import { GRANT_COPY, RESEAT_COPY, keeperSigners, seatProblem, type SeatStatus, type TradingWallet } from "@/lib/trading-wallets";
+import { GRANT_COPY, RESEAT_COPY, ROW_COPY, keeperSigners, seatProblem, type SeatStatus, type TradingWallet } from "@/lib/trading-wallets";
 
 export interface TradingWalletRowData extends TradingWallet {
   /** False only for a wallet createWallet reported that Privy's record does not list yet. */
   readonly listed: boolean;
 }
 
-const SEAT: Record<SeatStatus, { readonly badge: string; readonly variant: "outline" | "destructive" | "secondary"; readonly note: string }> = {
-  "has-signer": {
-    badge: "Has a signer",
-    variant: "outline",
-    note:
-      "Privy records a signer on this wallet, but not whose it is or which policy bounds it. If the keeper's key has " +
-      "been replaced since this wallet got its signer, the signer here is the old one: re-seat it.",
-  },
-  missing: {
-    badge: "No seat",
-    variant: "destructive",
-    note: "Privy records no signer on this wallet, so nothing can be put aside from it.",
-  },
-  unknown: {
-    badge: "Seat unknown",
-    variant: "secondary",
-    note: "Privy's record does not list this wallet yet, so its seat cannot be read.",
-  },
+/** The seat as Privy records it, in the operator's own words: shown under Advanced. */
+const SEAT_NOTE: Record<SeatStatus, string> = {
+  "has-signer":
+    "Privy records a signer on this wallet, but not whose it is or which policy bounds it. If the keeper's key has " +
+    "been replaced since this wallet got its signer, the signer here is the old one: re-seat it.",
+  missing: "Privy records no signer on this wallet, so nothing can be put aside from it.",
+  unknown: "Privy's record does not list this wallet yet, so its seat cannot be read.",
+};
+
+/** What the chain read says of this wallet's link, as the row's status needs it: "unknown" makes no claim either way. */
+export type RowLink = "this_vault" | "missing" | "other_vault" | "unknown";
+
+/** The one status a person reads first: the seat, the link and the pause together. */
+export type RowStatus = "linked" | "not-linked" | "elsewhere" | "paused" | "needs-permission" | "checking";
+
+/**
+ * NOTHING HERE CLAIMS MORE THAN THE READS SAY. Privy's record proves a signer
+ * exists, never whose, so a linked wallet with one is "Linked", never "can save".
+ * A link the chain read has not answered — loading, unreadable, not asked about
+ * yet — is "Checking", never "Not linked". And a pause, of SaverFi or of the
+ * vault, stops every settlement, so a linked wallet then says so.
+ */
+export function rowStatus(seat: SeatStatus, link: RowLink, paused: boolean): RowStatus {
+  if (seat === "missing") return "needs-permission";
+  if (seat === "unknown" || link === "unknown") return "checking";
+  if (link === "other_vault") return "elsewhere";
+  if (link === "missing") return "not-linked";
+  return paused ? "paused" : "linked";
+}
+
+const STATUS: Record<RowStatus, { readonly badge: string; readonly variant: "outline" | "destructive" | "secondary"; readonly note: string | null; readonly className?: string }> = {
+  linked: { badge: ROW_COPY.linked, variant: "outline", note: ROW_COPY.linkedNote, className: "border-emerald-600/40 text-emerald-700 dark:text-emerald-400" },
+  "not-linked": { badge: ROW_COPY.notLinked, variant: "outline", note: null },
+  elsewhere: { badge: ROW_COPY.elsewhere, variant: "secondary", note: null },
+  paused: { badge: ROW_COPY.paused, variant: "secondary", note: ROW_COPY.pausedNote },
+  "needs-permission": { badge: ROW_COPY.needsPermission, variant: "destructive", note: ROW_COPY.needsPermissionNote },
+  checking: { badge: ROW_COPY.checking, variant: "secondary", note: null },
 };
 
 export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
   const config = useSolanaConfig();
   const keeper = useKeeperSeat(row.address, config);
   const exporter = useExportTradingWallet(row.address);
-  const seat = SEAT[keeper.seat];
+  const screen = useVaultScreen();
+  const chain = screen?.view.kind === "ready" ? screen.view.state : null;
+  const entry = chain?.walletLinks.find((link) => link.wallet === row.address);
+  const link: RowLink = entry === undefined || entry.status === "unreadable" ? "unknown" : entry.status;
+  const paused = chain?.config.paused === true || chain?.vault.state?.paused === true;
+  const statusKey = rowStatus(keeper.seat, link, paused);
+  const status = STATUS[statusKey];
+  // "Checking" says why: Privy's record, when that is what is missing; the chain read says its own words in the link control.
+  const note = statusKey === "checking" && keeper.seat === "unknown" ? ROW_COPY.checkingNote : status.note;
   const refused = seatProblem(config) !== null;
   const keeperSeat = keeperSigners(config)?.[0] ?? null;
   // The re-seat's first press only asks: the confirmation below is what removes anything.
@@ -96,8 +136,16 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
   // One string, so the command renders as one piece of text.
   const verify = `privy-policy verify --wallet ${row.id ?? "<Privy wallet id>"} --policy ${keeperSigners(config)?.[0]?.policyIds[0] ?? "<policy id>"}`;
 
+  // The operator's section OPENS by itself while a re-seat is confirmed or runs, and when one stops with a
+  // way forward — and never closes by itself: a stop's message names Re-seat keeper, which lives in it.
+  const advancedRef = useRef<HTMLDetailsElement>(null);
+  const advancedWanted = confirming || keeper.busy === "reseating" || (reseatable && keeper.failure !== null);
+  useEffect(() => {
+    if (advancedWanted && advancedRef.current !== null) advancedRef.current.open = true;
+  }, [advancedWanted]);
+
   return (
-    <li className="space-y-2 py-3 first:pt-0 last:pb-0" data-seat={keeper.seat}>
+    <li className="space-y-2 py-3 first:pt-0 last:pb-0" data-seat={keeper.seat} data-status={statusKey}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className={LABEL}>
           {row.walletIndex !== null ? (
@@ -110,65 +158,26 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
             "New trading wallet"
           )}
         </div>
-        <Badge variant={seat.variant}>{seat.badge}</Badge>
+        <Badge variant={status.variant} className={status.className}>
+          {status.badge}
+        </Badge>
       </div>
 
       <AddressLine address={row.address} />
 
-      {row.id !== null ? (
-        <div className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
-          <span>Privy wallet id</span>
-          <Num className="break-all">{row.id}</Num>
-        </div>
-      ) : null}
-
-      <p className="text-xs text-muted-foreground">{seat.note}</p>
-      {keeper.seat === "has-signer" ? (
-        <p className="text-xs text-muted-foreground">
-          To confirm it is the keeper&apos;s signer, bounded by its policy, run <Num className="break-all">{verify}</Num>
-        </p>
-      ) : null}
-
-      <LinkControl address={row.address} seat={keeper.seat} />
-
-      {/* Kept up for the whole re-seat: the badge turns No seat halfway through, and the spinner must not go with it. */}
-      {((reseatable && confirming) || keeper.busy === "reseating") && keeperSeat !== null ? (
-        <ReseatConfirm
-          signerId={keeperSeat.signerId}
-          policyId={keeperSeat.policyIds[0] ?? ""}
-          busy={keeper.busy === "reseating"}
-          disabled={keeper.busy !== null || refused || keeper.reseatBlocked !== null}
-          onConfirm={() => {
-            void keeper.reseat().finally(() => setConfirming(false));
-          }}
-          onCancel={() => setConfirming(false)}
-        />
-      ) : null}
+      {note !== null ? <p className="text-xs text-muted-foreground">{note}</p> : null}
 
       <div className="flex flex-wrap items-center gap-2">
         {keeper.seat === "missing" && keeper.busy !== "reseating" ? (
           <Button
             type="button"
             size="sm"
-            variant="outline"
             disabled={keeper.busy !== null || refused || keeper.grantBlocked !== null || keeper.grantHeld}
             aria-busy={keeper.busy === "granting"}
             onClick={() => void keeper.grant()}
           >
             {keeper.busy === "granting" ? <LoaderCircle className="animate-spin" aria-hidden /> : null}
-            {keeper.busy === "granting" ? "Granting…" : "Grant keeper permission"}
-          </Button>
-        ) : null}
-        {reseatable && !confirming ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={keeper.busy !== null || refused || keeper.reseatBlocked !== null}
-            onClick={() => setConfirming(true)}
-          >
-            <RotateCcw aria-hidden />
-            {RESEAT_COPY.button}
+            {keeper.busy === "granting" ? ROW_COPY.granting : ROW_COPY.grant}
           </Button>
         ) : null}
         {keeper.seat === "unknown" ? (
@@ -200,9 +209,9 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
         ) : null}
       </div>
 
-      {reseatable && keeper.reseatBlocked !== null && !refused ? <p className="text-xs text-muted-foreground">{keeper.reseatBlocked}</p> : null}
       {keeper.seat === "missing" && keeper.busy !== "reseating" && keeper.grantBlocked !== null && !refused ? (
-        <p className="text-xs text-muted-foreground">{keeper.grantBlocked}</p>
+        // The short form on a first look; Privy's full reason, in the operator's words, under Advanced.
+        <p className="text-xs text-muted-foreground">{ROW_COPY.grantBlocked}</p>
       ) : null}
       {keeper.seat === "missing" && keeper.busy === null && keeper.grantHeld && keeper.grantBlocked === null && !refused ? (
         <p className="text-xs text-muted-foreground">{GRANT_COPY.held}</p>
@@ -222,6 +231,57 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
           {exporter.failure}
         </p>
       ) : null}
+
+      {/* The link comes after the permission: a seat is what makes a link save anything. */}
+      <LinkControl address={row.address} seat={keeper.seat} />
+
+      {/* The operator's tools: all still here, folded away from a first look. */}
+      <details ref={advancedRef} className="group rounded-md border px-3 py-1.5 text-xs" data-advanced={advancedWanted ? "wanted" : undefined}>
+        <summary className="cursor-pointer text-muted-foreground">{ROW_COPY.advanced}</summary>
+        <div className="mt-2 space-y-2 text-muted-foreground">
+          {row.id !== null ? (
+            <div className="flex flex-wrap items-center gap-x-1.5">
+              <span>Privy wallet id</span>
+              <Num className="break-all">{row.id}</Num>
+            </div>
+          ) : null}
+          <p>{SEAT_NOTE[keeper.seat]}</p>
+          {keeper.seat === "has-signer" ? (
+            <p>
+              To confirm it is the keeper&apos;s signer, bounded by its policy, run <Num className="break-all">{verify}</Num>
+            </p>
+          ) : null}
+
+          {/* Kept up for the whole re-seat: the badge turns Needs permission halfway through, and the spinner must not go with it. */}
+          {((reseatable && confirming) || keeper.busy === "reseating") && keeperSeat !== null ? (
+            <ReseatConfirm
+              signerId={keeperSeat.signerId}
+              policyId={keeperSeat.policyIds[0] ?? ""}
+              busy={keeper.busy === "reseating"}
+              disabled={keeper.busy !== null || refused || keeper.reseatBlocked !== null}
+              onConfirm={() => {
+                void keeper.reseat().finally(() => setConfirming(false));
+              }}
+              onCancel={() => setConfirming(false)}
+            />
+          ) : null}
+          {reseatable && !confirming ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={keeper.busy !== null || refused || keeper.reseatBlocked !== null}
+              onClick={() => setConfirming(true)}
+            >
+              <RotateCcw aria-hidden />
+              {RESEAT_COPY.button}
+            </Button>
+          ) : null}
+          {reseatable && keeper.reseatBlocked !== null && !refused ? <p>{keeper.reseatBlocked}</p> : null}
+          {/* Never mid re-seat: "nothing was added… reload" there would send the owner away while the add is in flight. */}
+          {keeper.seat === "missing" && keeper.busy !== "reseating" && keeper.grantBlocked !== null && !refused ? <p>{keeper.grantBlocked}</p> : null}
+        </div>
+      </details>
     </li>
   );
 }

@@ -43,7 +43,7 @@ import { linkGate } from "@/lib/create-and-link";
 import type { SeatStatus } from "@/lib/trading-wallets";
 import { CREATE_LINK_COPY, LINK_COPY } from "@/lib/vault-copy";
 
-export function LinkControl({ address, seat }: { readonly address: string; readonly seat: SeatStatus }) {
+export function LinkControl({ address }: { readonly address: string; readonly seat?: SeatStatus }) {
   const screen = useVaultScreen();
   const write = useVaultWrite(`link:${address}`);
   const [open, setOpen] = useState(false);
@@ -122,7 +122,7 @@ export function LinkControl({ address, seat }: { readonly address: string; reado
 
   return (
     <div className="space-y-2" data-link="missing">
-      {seat !== "has-signer" ? <p className="text-xs text-muted-foreground">{LINK_COPY.noSigner}</p> : null}
+      {/* Without a seat the row itself says nothing is saved yet (its status note); said once, not twice. */}
       {open && blocker === null ? (
         <div className="space-y-2 rounded-md border px-3 py-2">
           <p className="text-xs">{LINK_COPY.panel(linkRent === null ? "some" : formatSol(linkRent))}</p>

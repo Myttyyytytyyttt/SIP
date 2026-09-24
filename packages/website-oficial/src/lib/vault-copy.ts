@@ -577,7 +577,7 @@ export const LINK_COPY = {
   /** A link for THIS wallet was sent and not confirmed, from this row or from the card's chained press. */
   sentNotConfirmed: "A link for this wallet was sent and is not confirmed yet. Check that one before sending another.",
   unreadable: "SaverFi could not read whether this wallet is linked. Nothing was offered to sign.",
-  noSigner: "Until this wallet has the keeper's signer, nothing is put aside from it.",
+  noSigner: "Until SaverFi has permission on this wallet, nothing is saved from it.",
   panel: (linkRent: string): string =>
     `Linking takes three signatures. Your trading wallet signs a consent naming this vault. Phantom pays ${linkRent} SOL of rent (returned if you unlink) and approves. Then your trading wallet co-signs. A wallet can be linked to one vault at a time.`,
   done: "Linked",
@@ -620,11 +620,12 @@ export const CREATE_LINK_COPY = {
    * been read — the amount is then Phantom's to show, and none is invented here.
    */
   ahead: (linkRent: string | null): string =>
-    `One press does both. Privy creates the wallet with the keeper's seat, your trading wallet signs a consent naming this vault, ` +
-    (linkRent === null ? `then Phantom asks you to approve and pay the link's rent (returned if you unlink), ` : `then Phantom asks you to approve and pay ${linkRent} SOL of rent (returned if you unlink), `) +
-    `and your trading wallet co-signs. Phantom's window opens partway through, after the wallet exists.` +
+    `One press: SaverFi creates the wallet with its permission to save from it, then links it to your vault in three steps — ` +
+    `1 your new wallet agrees to save into this vault, ` +
+    (linkRent === null ? `2 Phantom asks you to approve and pay the link's rent, ` : `2 Phantom asks you to approve and pay ${linkRent} SOL of rent, `) +
+    `3 your new wallet confirms. Phantom's window opens partway through, after the wallet exists.` +
     (linkRent === null ? ` ${CREATE_LINK_RENT_UNREAD}` : ""),
-  aheadCreateOnly: "This creates a trading wallet with the keeper's seat. Nothing is signed and nothing is paid.",
+  aheadCreateOnly: "This creates a trading wallet, with SaverFi's permission to save from it. Nothing is signed and nothing is paid.",
   /** The link's rent is not on screen yet: said instead of an amount, never as well as one. */
   rentNotRead: CREATE_LINK_RENT_UNREAD,
   done: "Linked",

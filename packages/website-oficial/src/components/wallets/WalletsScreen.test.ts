@@ -104,7 +104,7 @@ import { ReseatConfirm } from "@/components/wallets/TradingWalletRow";
 import { WalletsScreen } from "@/components/wallets/WalletsScreen";
 import { useKeeperSeat } from "@/hooks/use-keeper-seat";
 import { beginSeatTask, clearSeatActivity, endSeatTask, reseatRunning, seatActivity } from "@/lib/seat-activity";
-import { GRANT_BACKOFF_MS, GRANT_COPY, GRANT_HOLD_MS, RESEAT_COPY } from "@/lib/trading-wallets";
+import { GRANT_BACKOFF_MS, GRANT_COPY, GRANT_HOLD_MS, RESEAT_COPY, ROW_COPY } from "@/lib/trading-wallets";
 import { CREATE_LINK_COPY } from "@/lib/vault-copy";
 
 /** What a real click hands a handler: an object with a target, which Privy would read as options. */
@@ -194,10 +194,17 @@ describe("WalletsScreen with the seat configured", () => {
       ["has-signer", [TRADING_2]],
       ["missing", [IMPORTED]],
     ]);
-    expect(html).toContain("Has a signer");
+    // A first look reads the plain status, never the seat's operator words; those are under Advanced.
+    // This screen's chain read has not answered, so no row claims a link either way: "Checking", never "Not linked".
+    expect(html).toContain(ROW_COPY.needsPermission);
+    expect(html).toContain(ROW_COPY.checking);
+    expect(html).not.toContain(`>${ROW_COPY.notLinked}<`);
+    expect(html).not.toContain(`>${ROW_COPY.linked}<`);
     expect(html).not.toContain("Seated");
-    expect(html).toContain("No seat");
-    // The ids a new wallet is seated with, for the owner to match in the Privy dashboard.
+    expect(html).not.toContain(">Has a signer<");
+    expect(html).not.toContain(">No seat<");
+    expect(html).toContain(`<summary class="cursor-pointer text-muted-foreground">${ROW_COPY.advanced}</summary>`);
+    // The ids a new wallet is seated with, for the owner to match in the Privy dashboard: still there, under Advanced.
     expect(html).toContain(SIGNER);
     expect(html).toContain(POLICY);
   });
@@ -207,8 +214,8 @@ describe("WalletsScreen with the seat configured", () => {
     mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), flagless, embedded(TRADING_1, 1, true)]) };
     const html = render();
     expect(rows(html).map((row) => row.seat)).toStrictEqual(["unknown", "has-signer"]);
-    expect(html).toContain("Seat unknown");
-    expect(buttons("Grant keeper permission")).toHaveLength(0);
+    expect(html).toContain(ROW_COPY.checking);
+    expect(buttons(ROW_COPY.grant)).toHaveLength(0);
     expect(buttons("Check again")).toHaveLength(1);
   });
 
@@ -220,10 +227,13 @@ describe("WalletsScreen with the seat configured", () => {
     const [row, ...others] = rows(html);
     expect(others).toHaveLength(0);
     expect(row?.seat).toBe("has-signer");
-    expect(row?.body).toContain("Has a signer");
+    // Its first look: the chain read has not answered, so "Checking" — never "Linked", "Not linked" or "Seated".
+    expect(row?.body).toContain(ROW_COPY.checking);
+    expect(row?.body).not.toContain(`>${ROW_COPY.linked}<`);
     expect(row?.body).not.toMatch(/seated|seats only/i);
+    // The operator's words and command, under Advanced.
     expect(row?.body).toContain(`privy-policy verify --wallet wallet-id-tradingone --policy ${POLICY}`);
-    expect(buttons("Grant keeper permission")).toHaveLength(0);
+    expect(buttons(ROW_COPY.grant)).toHaveLength(0);
     expect(buttons("Check again")).toHaveLength(0);
   });
 
@@ -240,7 +250,7 @@ describe("WalletsScreen with the seat configured", () => {
     ]);
   });
 
-  it("Grant keeper permission re-reads Privy's record, then adds the signer with its policy to that wallet", async () => {
+  it("Grant SaverFi permission re-reads Privy's record, then adds the signer with its policy to that wallet", async () => {
     const missing = userWith([phantom(), teeWallet(TRADING_0, 0, false)]);
     const seated = userWith([phantom(), teeWallet(TRADING_0, 0, true)]);
     mocked.privy = { ready: true, authenticated: true, user: missing };
@@ -250,7 +260,7 @@ describe("WalletsScreen with the seat configured", () => {
       return { user: seated };
     });
     render();
-    const grants = buttons("Grant keeper permission");
+    const grants = buttons(ROW_COPY.grant);
     expect(grants).toHaveLength(1);
     grants[0]?.onClick?.(CLICK);
     await vi.waitFor(() => expect(mocked.addSigners).toHaveBeenCalledTimes(1));
@@ -259,25 +269,28 @@ describe("WalletsScreen with the seat configured", () => {
     expect(mocked.refreshUser.mock.invocationCallOrder[0]).toBeLessThan(mocked.addSigners.mock.invocationCallOrder[0] ?? 0);
   });
 
-  it("Grant keeper permission is disabled, with the reason, where the record shows no server id: Privy could not add it", async () => {
+  it("Grant SaverFi permission is disabled, with the reason, where the record shows no server id: Privy could not add it", async () => {
     // A wallet Privy lists without its id (a legacy on-device wallet, or a record that dropped it with its last signer).
     mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), teeWallet(TRADING_0, 0, false, { id: null })]) };
     const html = render();
-    const grants = buttons("Grant keeper permission");
+    const grants = buttons(ROW_COPY.grant);
     expect(grants.map((grant) => grant.disabled)).toStrictEqual([true]);
     expect(html).toContain(GRANT_COPY.noServerId.replaceAll("'", "&#x27;"));
+    // On a first look, one short line; the reason above sits under Advanced.
+    expect(html).toContain(ROW_COPY.grantBlocked.replaceAll("'", "&#x27;"));
+    expect(html.indexOf(ROW_COPY.grantBlocked.replaceAll("'", "&#x27;"))).toBeLessThan(html.indexOf(`>${ROW_COPY.advanced}</summary>`));
     expect(html).not.toMatch(/turn on TEE/i);
     grants[0]?.onClick?.(CLICK);
     await flush();
     expect(mocked.addSigners).not.toHaveBeenCalled();
   });
 
-  it("Grant keeper permission is held back, with the reason, for a minute after an add Privy's record may not show yet", () => {
+  it("Grant SaverFi permission is held back, with the reason, for a minute after an add Privy's record may not show yet", () => {
     mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), teeWallet(TRADING_0, 0, false)]) };
     beginSeatTask(TRADING_0, "granting");
     endSeatTask(TRADING_0, { notice: GRANT_COPY.addedRecordLags, holdGrantFor: GRANT_HOLD_MS });
     const html = render();
-    expect(buttons("Grant keeper permission").map((grant) => grant.disabled)).toStrictEqual([true]);
+    expect(buttons(ROW_COPY.grant).map((grant) => grant.disabled)).toStrictEqual([true]);
     expect(html).toContain(GRANT_COPY.held.replaceAll("'", "&#x27;"));
     expect(html).toContain(GRANT_COPY.addedRecordLags.replaceAll("'", "&#x27;"));
   });
@@ -343,12 +356,12 @@ describe("Re-seat keeper: remove every signer on a wallet, then seat the keeper'
     expect(mocked.refreshUser).not.toHaveBeenCalled();
   });
 
-  it("is not offered where the grant is (No seat) or where the seat cannot be read (Seat unknown)", () => {
+  it("is not offered where the grant is (Needs permission) or where the seat cannot be read (Checking)", () => {
     const flagless = { ...teeWallet(TRADING_1, 1, true), delegated: undefined } as unknown as WalletWithMetadata;
     mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), teeWallet(TRADING_0, 0, false), flagless]) };
     render();
     expect(buttons(RESEAT_COPY.button)).toHaveLength(0);
-    expect(buttons("Grant keeper permission")).toHaveLength(1);
+    expect(buttons(ROW_COPY.grant)).toHaveLength(1);
     expect(buttons("Check again")).toHaveLength(1);
   });
 
@@ -446,7 +459,10 @@ describe("Re-seat keeper: remove every signer on a wallet, then seat the keeper'
     const midway = render();
     expect(rows(midway).map((row) => row.seat)).toStrictEqual(["missing"]);
     expect(buttons(RESEAT_COPY.running).map((button) => button.disabled)).toStrictEqual([true]);
-    expect(buttons("Grant keeper permission")).toHaveLength(0);
+    expect(buttons(ROW_COPY.grant)).toHaveLength(0);
+    // Nor, mid re-seat, the "nothing was added… reload" of a refused grant: the add is still in flight.
+    expect(midway).not.toContain(GRANT_COPY.noServerId.replaceAll("'", "&#x27;"));
+    expect(midway).not.toContain(ROW_COPY.grantBlocked.replaceAll("'", "&#x27;"));
     // And no second operation starts on that wallet from the new row.
     await probe()?.grant();
     await probe()?.reseat();
@@ -499,7 +515,7 @@ describe("ReseatConfirm, the plain confirmation", () => {
     const { html } = confirmWith(false);
     expect(html).toContain("This removes EVERY signer on this wallet");
     expect(html).toContain("only you can sign for this wallet");
-    expect(html).toContain("If the second step fails, the wallet says No seat and this row says what to do next.");
+    expect(html).toContain("If the second step fails, the wallet says Needs permission and this row says what to do next.");
     expect(html).toContain(SIGNER);
     expect(html).toContain(POLICY);
   });

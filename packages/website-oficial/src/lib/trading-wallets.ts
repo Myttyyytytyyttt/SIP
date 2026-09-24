@@ -257,6 +257,34 @@ export class GrantUnconfirmed extends Error {
 }
 
 /** The grant's own words, for a refusal before anything is sent. */
+/**
+ * A trading wallet row's first look (09-24): one plain status and the controls
+ * that move it forward. The operator's words stay under "Advanced".
+ */
+export const ROW_COPY = {
+  /**
+   * NOT "Ready — SaverFi can save from this wallet". Privy's record says a signer
+   * exists, never whose: a wallet seated under a rotated key looks exactly the
+   * same and saves nothing. So the row says what it knows, and where to look if
+   * a gain is not saved.
+   */
+  linked: "Linked",
+  linkedNote: "Linked to your vault, with a permission on it. If a winning trade saves nothing, open Advanced.",
+  notLinked: "Not linked",
+  elsewhere: "Linked elsewhere",
+  paused: "Paused",
+  pausedNote: "SaverFi or your vault is paused, so nothing is saved from this wallet until it resumes.",
+  needsPermission: "Needs permission",
+  needsPermissionNote: "SaverFi has no permission on this wallet yet, so nothing can be saved from it.",
+  checking: "Checking",
+  checkingNote: "Privy has not listed this wallet yet. Check again in a moment.",
+  grant: "Grant SaverFi permission",
+  /** Why the grant is greyed, in one line; Privy's full reason is under Advanced. */
+  grantBlocked: "SaverFi can't add its permission to this wallet from here. The reason is under Advanced.",
+  granting: "Granting…",
+  advanced: "Advanced",
+} as const;
+
 export const GRANT_COPY = {
   notListed:
     "Privy's record on this page does not list this wallet as a trading wallet on this account, so nothing was " +
@@ -264,19 +292,19 @@ export const GRANT_COPY = {
   noServerId:
     "Privy adds the keeper's signer only to a TEE wallet it lists with its own server wallet id, and its record on " +
     "this page does not show this wallet that way, so nothing was added. The wallet is safe: only you can sign for " +
-    "it. Reload the page; while this row shows no Privy wallet id, the seat cannot be added from here.",
+    "it. Reload the page; while this row's Advanced section shows no Privy wallet id, the seat cannot be added from here.",
   addedUnconfirmed:
     "Privy's reply to adding the keeper's signer failed, but its record now shows a signer on this wallet, so the " +
     "seat was most likely added.",
   addedUnconfirmedNext:
-    "Do not press Grant keeper permission: confirm the seat first with the privy-policy verify line on this row, or " +
+    "Do not press Grant SaverFi permission: confirm the seat first with the privy-policy verify line under Advanced on this row, or " +
     "on the keeper's /status after its next sweep.",
   addedRecordLags:
     "Privy accepted the keeper's signer with its policy, but its record has not shown it on this wallet after every " +
-    "wait. Do not press Grant keeper permission: it would add the signer a second time. Reload the page in a minute; " +
-    "the wallet should then say Has a signer.",
+    "wait. Do not press Grant SaverFi permission: it would add the signer a second time. Reload the page in a minute; " +
+    "the wallet should then no longer say Needs permission.",
   held:
-    "Grant keeper permission is held back for a minute: Privy has just accepted a signer on this wallet, and its " +
+    "Grant SaverFi permission is held back for a minute: Privy has just accepted a signer on this wallet, and its " +
     "record can take a moment to show it. A second grant would add the signer again. Reload the page, then check.",
 } as const;
 
@@ -383,7 +411,7 @@ export async function grantKeeperSeat({
   }
 }
 
-/** How long the row holds Grant keeper permission back after an add Privy's record may not show yet. */
+/** How long the row holds Grant SaverFi permission back after an add Privy's record may not show yet. */
 export const GRANT_HOLD_MS = 60_000;
 
 /** Privy's removeSigners (root @privy-io/react-auth, like addSigners), narrowed. It names no signer: it removes EVERY one. */
@@ -450,7 +478,7 @@ export const RESEAT_COPY = {
   confirmBody:
     "This removes EVERY signer on this wallet — the keeper's, if it is there, and any other — and then adds the " +
     "keeper's signer with its policy. Between the two steps only you can sign for this wallet, and nothing is put " +
-    "aside from it. If the second step fails, the wallet says No seat and this row says what to do next.",
+    "aside from it. If the second step fails, the wallet says Needs permission and this row says what to do next.",
   confirm: "Remove every signer and re-seat",
   cancel: "Cancel",
   done:
@@ -473,21 +501,21 @@ export const RESEAT_COPY = {
   idDroppedAdded: (verify: string): string =>
     `Privy still accepted the keeper's signer with its policy for that id. Confirm the seat before relying on it: ${verify}.`,
   idDroppedNotAdded:
-    "The keeper's seat was NOT added back. The wallet is safe: only you can sign for it. Grant keeper permission " +
+    "The keeper's seat was NOT added back. The wallet is safe: only you can sign for it. Grant SaverFi permission " +
     "stays unavailable on this row until Privy's record shows that id again, so keep the id: it is how Privy finds " +
     "this wallet.",
   removalUnconfirmed: "Privy did not confirm that it removed this wallet's signers, and nothing was added.",
   recordShowsSigner: "Privy's record still shows a signer on this wallet.",
   recordUnreadable: "This page could not read from Privy's record whether the old signer is still there.",
-  pressAgain: "Press Re-seat keeper again when that is fixed; if the wallet says No seat by then, press Grant keeper permission instead.",
+  pressAgain: "Press Re-seat keeper again, under Advanced on this row, when that is fixed; if the wallet says Needs permission by then, press Grant SaverFi permission instead.",
   recordLags:
     "Privy accepted removing this wallet's signers, but its record still shows a signer after every wait, so the " +
     "keeper's seat was not added yet: adding it now could seat it next to a signer on its way out. Press Re-seat " +
-    "keeper again in a minute.",
+    "keeper again, under Advanced on this row, in a minute.",
   removedNotAdded: "Every signer is off this wallet now, and Privy did not confirm that the keeper's seat was added.",
   removedNotAddedNext:
     "The wallet is safe: only you can sign for it. But nothing is put aside from it until the seat is back — press " +
-    "Grant keeper permission on this wallet while it says No seat.",
+    "Grant SaverFi permission on this wallet while it says Needs permission.",
   addedUnconfirmed:
     "Every signer was removed from this wallet. Privy's reply to adding the keeper's signer then failed, but its " +
     "record now shows a signer on this wallet, so the seat was most likely added.",
@@ -495,14 +523,14 @@ export const RESEAT_COPY = {
     "Every signer was removed from this wallet, and Privy accepted the keeper's signer with its policy, but its record " +
     "has not shown the seat yet after every wait.",
   addedRecordLagsNext: (verify: string): string =>
-    "Do not press Grant keeper permission: it would add the signer a second time. Reload the page in a minute; the " +
-    `wallet should say Has a signer. Then confirm the seat: ${verify}.`,
-  idDroppedRecordLags: "Its record has not shown the seat yet either: do not press Grant keeper permission.",
+    "Do not press Grant SaverFi permission: it would add the signer a second time. Reload the page in a minute; the " +
+    `wallet should no longer say Needs permission. Then confirm the seat: ${verify}.`,
+  idDroppedRecordLags: "Its record has not shown the seat yet either: do not press Grant SaverFi permission.",
   addedUnconfirmedNext: (verify: string): string =>
-    `Do not press Grant keeper permission. Confirm the seat before anything else: ${verify}, or the keeper's /status after its next sweep.`,
+    `Do not press Grant SaverFi permission. Confirm the seat before anything else: ${verify}, or the keeper's /status after its next sweep.`,
   signerReappeared:
     "Privy's record showed no signer on this wallet, then a signer this page did not add, so the keeper's seat was " +
-    "not added. Press Re-seat keeper again.",
+    "not added. Press Re-seat keeper again, under Advanced on this row.",
 } as const;
 
 /** Sentences joined with one space, the blank ones dropped. */
@@ -550,7 +578,7 @@ export function reseatRefusal(user: User | null, address: string): string | null
  *   rendered record — which still holds the id, whatever Privy's record shows once
  *   the last signer is gone. Privy's types say a wallet's id is "Null if the wallet
  *   is not delegated", and nothing on this app has shown a TEE wallet keeping it. If
- *   the record drops it, a LATER press (Grant keeper permission, a second re-seat)
+ *   the record drops it, a LATER press (Grant SaverFi permission, a second re-seat)
  *   comes from a render without it and cannot reach the wallet. So nothing here
  *   may hand the add to a later press, nor take addSigners from a newer render (a
  *   ref, a context read at call time): the add must come from before the removal.

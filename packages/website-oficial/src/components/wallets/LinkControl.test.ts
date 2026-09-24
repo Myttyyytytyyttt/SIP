@@ -52,10 +52,11 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 });
 
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { TradingWalletRow } from "@/components/wallets/TradingWalletRow";
+import { TradingWalletRow, rowStatus } from "@/components/wallets/TradingWalletRow";
 import { VaultWriteLock, WriteLockContext, type WriteLock } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue } from "@/hooks/use-vault-state";
 import type { VaultApi, VaultStateJson, WalletLinkStatus } from "@/lib/vault-api";
+import { ROW_COPY } from "@/lib/trading-wallets";
 import { CREATE_LINK_COPY, LINK_COPY } from "@/lib/vault-copy";
 
 const CLICK = { type: "click", target: {} };
@@ -163,7 +164,9 @@ describe("TradingWalletRow's link control", () => {
     const { html, build } = render({});
     const [link] = buttons("Link to vault");
     expect(link?.disabled).toBe(false);
-    expect(html).toContain("Until this wallet has the keeper&#x27;s signer, nothing is put aside from it.");
+    // Said once, by the row's own status note — not a second time by the link control.
+    expect(html).toContain(ROW_COPY.needsPermissionNote);
+    expect(html).not.toContain(LINK_COPY.noSigner);
     link?.onClick?.(CLICK);
     expect(build).not.toHaveBeenCalled();
     expect(mocked.signMessage).not.toHaveBeenCalled();
@@ -216,5 +219,41 @@ describe("TradingWalletRow's link control", () => {
     const { html } = render({});
     expect(html).not.toContain("nothing is put aside from it");
     expect([SIGNER, POLICY]).toHaveLength(2);
+  });
+});
+
+describe("the row's first-look status: nothing claimed beyond the reads", () => {
+  const badge = (html: string): string => html.match(/data-status="([a-z-]+)"/)?.[1] ?? "";
+
+  it("a signer and a link: Linked — never a promise that it saves, with where to look if it does not", () => {
+    mocked.user = userWith([phantom(), embedded(TRADING_0, 0, true)]);
+    const { html } = render({ link: "this_vault" });
+    expect(badge(html)).toBe("linked");
+    expect(html).toContain(`>${ROW_COPY.linked}<`);
+    expect(html).toContain(ROW_COPY.linkedNote);
+    expect(html).not.toMatch(/can save from this wallet/i);
+  });
+
+  it("each link state says its own thing: not linked, linked elsewhere, and no claim while unread", () => {
+    mocked.user = userWith([phantom(), embedded(TRADING_0, 0, true)]);
+    expect(badge(render({ link: "missing" }).html)).toBe("not-linked");
+    expect(badge(render({ link: "other_vault" }).html)).toBe("elsewhere");
+    expect(badge(render({ link: "absent" }).html)).toBe("checking");
+    expect(badge(render({ link: "unreadable" }).html)).toBe("checking");
+  });
+
+  it("a pause stops every settlement, so a linked wallet says Paused", () => {
+    mocked.user = userWith([phantom(), embedded(TRADING_0, 0, true)]);
+    const { html } = render({ link: "this_vault", paused: true });
+    expect(badge(html)).toBe("paused");
+    expect(html).toContain(ROW_COPY.pausedNote);
+  });
+
+  it("no signer: Needs permission, whatever the link", () => {
+    mocked.user = userWith([phantom(), embedded(TRADING_0, 0, false)]);
+    expect(badge(render({ link: "this_vault" }).html)).toBe("needs-permission");
+    expect(rowStatus("missing", "this_vault", false)).toBe("needs-permission");
+    expect(rowStatus("unknown", "this_vault", false)).toBe("checking");
+    expect(rowStatus("has-signer", "unknown", false)).toBe("checking");
   });
 });
