@@ -30,9 +30,11 @@ export const VOLUME_RATE = ratePercent(DEFAULT_VAULT_POLICY.volumeBps);
  * ZERO_BASE_MIN_TXS (packages/solana-keeper/src/settle-decision.ts). TradingLink
  * keeps no high-water mark, so a dropped loss is not netted against later gains.
  * vault-copy.test.ts holds this to LOSS_FORGIVEN in solana-core's committed
- * vector (test/fixtures/keeper-policy.ts), which the KEEPER's own tests hold
- * its constant and its gate to: the file is not read as text any more, so a
- * reflow over there cannot turn a web gate red.
+ * vector (test/fixtures/keeper-policy.ts), and the KEEPER's settle-decision.test.ts
+ * ("THE KEEPER'S HALF OF LOSS_FORGIVEN") holds ZERO_BASE_MIN_TXS and its gate
+ * to the same entry: the keeper's count cannot move unless this one moves with
+ * it, or one of the two suites goes red. The file is not read as text any
+ * more, so a reflow over there cannot turn a web gate red.
  */
 export const LOSS_DROPPED_AFTER_TXS = 100;
 

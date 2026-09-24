@@ -310,9 +310,17 @@ rewording of the hook check stays green. A harmless field added to either
 union goes red in the keeper, on purpose, because that is where whoever adds
 it can judge whether it is an escape hatch.
 
-`LOSS_FORGIVEN` still has the gap the multiple had. `settle-decision.test.ts`
-pins `ZERO_BASE_MIN_TXS` to a literal 100, and nothing holds that literal to
-the vector the web's copy is held to.
+`LOSS_FORGIVEN` had the gap the multiple had, and it closed the same day. Two
+keeper tests pinned `ZERO_BASE_MIN_TXS` to a literal 100, and nothing held it
+to the vector the web's copy is held to. There, "updated its own literal"
+undersells what the mover has to do: moved to 90 with both pins, nine keeper
+cases went red, because their detail strings and span lengths count to 100.
+With all of
+them moved too, every keeper and website case was green while the owner was
+still promised 100. `settle-decision.test.ts` now holds the constant to the
+vector ("THE KEEPER'S HALF OF LOSS_FORGIVEN"). With the keeper consistently
+at 90 it is the only red case, and with its equality line removed it still
+goes red, at the boundary it runs through the settle gate.
 
 ## Three species, one question
 

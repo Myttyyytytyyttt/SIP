@@ -352,6 +352,38 @@ describe("the base, and when a zero base is worth a transaction", () => {
     if (foreign.kind === "stop") expect(foreign.detail).toContain("0 so far, 100 to go");
   });
 
+  /**
+   * THE KEEPER'S HALF OF THE VECTOR THE WEBSITE SIGNS AGAINST
+   * (packages/solana-core/test/fixtures/keeper-policy.ts LOSS_FORGIVEN), which
+   * vault-copy.test.ts holds LOSS_DROPPED_AFTER_TXS and the PROFIT sentence to.
+   *
+   * The literal 100 above catches a constant that moves on its own, and so do
+   * the cases here and in measure-window.test.ts that count to it. None of them
+   * can catch the change that moves the constant AND them: moved to 90 that way,
+   * every keeper case stayed green, and so did the website, still promising the
+   * owner 100. This case is the only one whose numbers come from the other side.
+   *
+   * VECTOR IN CAPITALS, as pyth.test.ts spells its tails: dockerfile-copies.test.ts
+   * expands only upper-case constants, and a lower-case one hides this reach from
+   * the check that the image carries keeper-policy.ts.
+   */
+  it("THE KEEPER'S HALF OF LOSS_FORGIVEN: the count the website prints, and its boundary through this gate", async () => {
+    const VECTOR = "keeper-policy";
+    const { LOSS_FORGIVEN } = (await import(`../../solana-core/test/fixtures/${VECTOR}.ts`)) as {
+      LOSS_FORGIVEN: { keeper: { value: number }; boundary: { stillCarriedAtTxs: number; forgottenAtTxs: number } };
+    };
+    expect(ZERO_BASE_MIN_TXS).toBe(LOSS_FORGIVEN.keeper.value);
+    // THE VECTOR'S OWN BOUNDARY, typed there rather than derived here from the
+    // constant under test. A losing span, our settle and a stranger's transfers
+    // among its 250, so only the count the wallet signed decides.
+    const { stillCarriedAtTxs, forgottenAtTxs } = LOSS_FORGIVEN.boundary;
+    const losing = (walletSignedTxCount: number) => measured({ txCount: 250, settleTxCount: 1, walletSignedTxCount, profitLamports: -5n });
+    const carried = await profit(losing(stillCarriedAtTxs));
+    expect(carried).toMatchObject({ kind: "stop", outcome: "NO_PROFIT", baseLamports: -5n });
+    if (carried.kind === "stop") expect(carried.detail).toContain(`${stillCarriedAtTxs} so far, ${forgottenAtTxs - stillCarriedAtTxs} to go`);
+    expect(await profit(losing(forgottenAtTxs))).toEqual({ kind: "settle", baseLamports: 0n, endSlot: 300_000_900n });
+  });
+
   it("positive profit settles whatever the span's size, and never asks the VOLUME seam", async () => {
     let asked = 0;
     const seam: VolumeBase = async () => {

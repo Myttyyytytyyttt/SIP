@@ -36,13 +36,17 @@
 // One vector, two assertions, each failing in the package that caused it.
 //
 // THE FIRST BULLET WAS A CLAIM BEFORE IT WAS A TEST. Until 2026-09-24 no keeper
-// test imported POOL_DEPTH or LEG_FEE: the keeper pinned 50n and 100n as bare
-// literals, and what actually tied its constant to this vector was a regex over
-// invest-decision.ts in solana-core's handlers-live.test.ts. The keeper's half
-// of those two, and of ALL_OR_NOTHING and TRANSFER_HOOK below, now lives in
-// packages/solana-keeper/test/invest-decision.test.ts. LOSS_FORGIVEN's keeper
-// half is STILL MISSING: settle-decision.test.ts pins ZERO_BASE_MIN_TXS to a
-// literal 100, and nothing holds that literal to this entry.
+// test imported POOL_DEPTH, LEG_FEE or LOSS_FORGIVEN: the keeper pinned 50n,
+// 100n and 100 as bare literals, and what actually tied its multiple to this
+// vector was a regex over invest-decision.ts in solana-core's
+// handlers-live.test.ts. The keeper's half of POOL_DEPTH and LEG_FEE, and of
+// ALL_OR_NOTHING and TRANSFER_HOOK below, now lives in
+// packages/solana-keeper/test/invest-decision.test.ts. LOSS_FORGIVEN's is
+// "THE KEEPER'S HALF OF LOSS_FORGIVEN" in settle-decision.test.ts, which holds
+// ZERO_BASE_MIN_TXS to `keeper` and runs `boundary` through the settle gate.
+// Nothing tied that 100 here before it: a keeper moved to 90 together with
+// every literal of its own that counts to it was green in every package while
+// the website still printed 100.
 //
 // NOTHING IS IMPORTED HERE, deliberately: the keeper resolves this file through
 // a runtime-built specifier so its NodeNext tsc never follows it, and the web

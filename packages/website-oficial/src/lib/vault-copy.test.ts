@@ -104,8 +104,12 @@ const paragraphsFor = (legs: readonly SignedLeg[]): Record<string, string> => ({
 
 describe("the PROFIT rule", () => {
   it("says a loss comes off the next gain only until the trading wallet signs the keeper's own count of transactions, and names that count", () => {
-    // THE VECTOR, not the keeper's file: the keeper's own tests hold
-    // ZERO_BASE_MIN_TXS and the gate either side of it to this same entry.
+    // THE VECTOR, not the keeper's file: the keeper's settle-decision.test.ts
+    // ("THE KEEPER'S HALF OF LOSS_FORGIVEN") holds ZERO_BASE_MIN_TXS to this
+    // same entry and runs its boundary through the settle gate. Until
+    // 2026-09-24 nothing did: the keeper pinned its count to a bare 100, so a
+    // keeper moved to 90 with its own literals left this case green, and the
+    // sentence below promising 100.
     expect(LOSS_DROPPED_AFTER_TXS).toBe(LOSS_FORGIVEN.keeper.value);
     expect(LOSS_DROPPED_AFTER_TXS).toBe(LOSS_FORGIVEN.web.value);
     // AND THE MEANING, which is a count of transactions and not of anything
