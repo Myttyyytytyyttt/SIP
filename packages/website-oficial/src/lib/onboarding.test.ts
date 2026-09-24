@@ -10,7 +10,23 @@ import type { DashboardKind, VaultPresence } from "@/lib/dashboard-mode";
 import type { LiveStage } from "@/lib/live-types";
 import { DEFAULT_VAULT_POLICY, PROFIT_BPS_MAX, PROFIT_BPS_MIN } from "@sip/solana-core/client";
 
-import { SETUP_RATE, landedCreate, onboardingOpen, onboardingWanted, setupIsTheDoor, setupRate, vaultPresenceOf, vaultStepRead } from "@/lib/onboarding";
+import { OFFERED_LEGS } from "@sip/solana-core/client";
+
+import {
+  SETUP_RATE,
+  SETUP_STOCKS,
+  SOL_CHOICE,
+  basketOnShelf,
+  basketSplit,
+  landedCreate,
+  onboardingOpen,
+  onboardingWanted,
+  setupIsTheDoor,
+  setupRate,
+  toggleBasket,
+  vaultPresenceOf,
+  vaultStepRead,
+} from "@/lib/onboarding";
 import type { VaultApi, VaultStateJson } from "@/lib/vault-api";
 
 const KEY = "PensionKeyP1aceho1der111111111111111111111";
@@ -150,5 +166,42 @@ describe("the share the setup offers", () => {
     expect(setupRate(0)).toBe(SETUP_RATE.min);
     expect(setupRate(99_999)).toBe(SETUP_RATE.max);
     expect(setupRate(Number.NaN)).toBe(SETUP_RATE.initial);
+  });
+});
+
+describe("what the savings become", () => {
+  const [first, second] = SETUP_STOCKS.map((stock) => stock.mint);
+
+  it("offers exactly the shelf the catalogue admits, never a hand-written list", () => {
+    expect(SETUP_STOCKS.map((stock) => stock.mint)).toEqual(OFFERED_LEGS.map((leg) => leg.mint));
+    expect(SETUP_STOCKS.length).toBeGreaterThan(0);
+  });
+
+  it("keeps SOL and stocks apart: SOL clears the stocks, a stock clears SOL, the last stock off brings SOL back", () => {
+    const one = toggleBasket(SOL_CHOICE, first!);
+    expect(one).toEqual({ kind: "stocks", mints: [first] });
+    const both = second === undefined ? one : toggleBasket(one, second);
+    if (second !== undefined) expect(both).toEqual({ kind: "stocks", mints: [first, second] });
+    expect(toggleBasket(both, "sol")).toEqual(SOL_CHOICE);
+    expect(toggleBasket(one, first!)).toEqual(SOL_CHOICE);
+  });
+
+  it("keeps the shelf's order whatever order the stocks were pressed in, and ignores a stock not on the shelf", () => {
+    if (second !== undefined) expect(toggleBasket(toggleBasket(SOL_CHOICE, second), first!)).toEqual({ kind: "stocks", mints: [first, second] });
+    expect(toggleBasket(SOL_CHOICE, "NotOnTheShelf1111111111111111111111111111")).toEqual(SOL_CHOICE);
+  });
+
+  it("holds a stored choice to today's shelf", () => {
+    expect(basketOnShelf(null)).toEqual(SOL_CHOICE);
+    expect(basketOnShelf({ kind: "stocks", mints: ["Gone111111111111111111111111111111111111111"] })).toEqual(SOL_CHOICE);
+    expect(basketOnShelf({ kind: "stocks", mints: ["Gone111111111111111111111111111111111111111", first!] })).toEqual({ kind: "stocks", mints: [first] });
+  });
+
+  it("splits the chosen stocks equally, in whole percents that add up to 100", () => {
+    expect(basketSplit(SOL_CHOICE)).toEqual([]);
+    const all = basketSplit({ kind: "stocks", mints: SETUP_STOCKS.map((stock) => stock.mint) });
+    expect(all.reduce((total, leg) => total + leg.percent, 0)).toBe(100);
+    expect(new Set(all.map((leg) => leg.percent)).size).toBeLessThanOrEqual(2);
+    expect(basketSplit({ kind: "stocks", mints: [first!] })).toEqual([{ mint: first, symbol: SETUP_STOCKS[0]!.symbol, percent: 100 }]);
   });
 });

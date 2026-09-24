@@ -458,7 +458,7 @@ export const ONBOARDING_COPY = {
     titleLead: "Welcome to",
     lede: "A slice of your trading gains, put aside for later.",
     /** The subtitle: the whole product in one running line. */
-    points: ["Trade as usual", "Save a share of each gain", "Invested in tokenized stocks", "Only you withdraw"],
+    points: ["Trade as usual", "Save a share of each gain", "Kept as SOL or stocks", "Only you withdraw"],
     tradeTitle: "Trade as you do today",
     trade: `From a ${BRAND} trading wallet linked to your vault. Export its key to use it in Axiom or any Solana app.`,
     saveTitle: "A share of each gain is saved",
@@ -489,6 +489,14 @@ export const ONBOARDING_COPY = {
      * said in full on the vault card.
      */
     ruleLine: (max: string): string => `Only gains count · at most ${max} SOL per settlement`,
+    /** The second card: what the savings become. Chosen here, signed on the dashboard when the first savings arrive. */
+    basketTitle: "What your savings become",
+    solSub: "Stays as SOL",
+    usdcSub: "Not available yet",
+    basketSol: "Your savings stay as SOL. Nothing is converted.",
+    /** `split` is "SPYx 50 % · ANTHROPIC 50 %". */
+    basketStocks: (split: string): string => `${split}. You approve buying when your first savings arrive.`,
+    noMix: "SOL and stocks can’t be mixed yet.",
     /** The cost, as short as it can be said: the rent, then the fees. */
     cost: (rent: string, fees: string): string => `Cost: ${rent} SOL + ${fees} SOL of network fees`,
     /** A create was sent and not confirmed: the footer says where the way forward is. */
@@ -500,7 +508,10 @@ export const ONBOARDING_COPY = {
     title: "Your vault is ready",
     body: "Nothing is saved until a trading wallet is linked to it. Your dashboard walks you through the rest.",
     nextTitle: "Next, from your dashboard",
-    next: ["Create and link a trading wallet", "Send it SOL and trade from it", "Choose what your savings buy"],
+    next: ["Create and link a trading wallet", "Send it SOL and trade from it"],
+    /** The third line follows what was chosen on the vault step. */
+    nextStocks: (names: string): string => `Approve buying ${names} when your first savings arrive`,
+    nextSol: "Your savings stay as SOL until you choose stocks",
     done: "Go to my dashboard",
   },
 } as const;

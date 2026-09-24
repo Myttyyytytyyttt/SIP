@@ -129,6 +129,38 @@ export function forgetOnboarding(pensionKey: string | null, options: { readonly 
   if (changed) notify();
 }
 
+// ── what the savings become ──────────────────────────────────────────────────
+
+/**
+ * What a key chose on the setup's vault step (owner, 09-24): its savings kept
+ * as SOL, or bought as these stocks at an equal split. NOTHING IS SIGNED FOR
+ * IT THERE — the vault's one approval is only the vault. The dashboard asks for
+ * the buying approval once the first savings arrive, with that day's prices.
+ *
+ * IT OUTLIVES THE SETUP. forgetOnboarding clears the step and the close when
+ * the vault lands; this stays, because the dashboard reads it after. Stored in
+ * localStorage under the key's tag, so it is per browser: on another device the
+ * dashboard simply asks again.
+ */
+export type BasketChoice = { readonly kind: "sol" } | { readonly kind: "stocks"; readonly mints: readonly string[] };
+
+const BASKET_KEY = "saverfi.basket";
+
+export function readBasketChoice(pensionKey: string): BasketChoice | null {
+  const stored = read("local", BASKET_KEY);
+  const tag = keyTag(pensionKey);
+  if (stored === null || !stored.startsWith(`${tag}:`)) return null;
+  const rest = stored.slice(tag.length + 1);
+  if (rest === "sol") return { kind: "sol" };
+  const mints = rest.split(",").filter((mint) => mint.length > 0);
+  return mints.length === 0 ? null : { kind: "stocks", mints };
+}
+
+export function saveBasketChoice(pensionKey: string, choice: BasketChoice): void {
+  const value = `${keyTag(pensionKey)}:${choice.kind === "sol" ? "sol" : choice.mints.join(",")}`;
+  if (write("local", BASKET_KEY, value)) notify();
+}
+
 export function subscribeOnboarding(listener: () => void): () => void {
   listeners.add(listener);
   return () => {

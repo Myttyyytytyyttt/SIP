@@ -34,8 +34,16 @@ import { OnboardingDialog, focusPrimary } from "@/components/onboarding/Onboardi
 import { useVaultWrite } from "@/hooks/use-vault-actions";
 import { useVaultScreen, type VaultView } from "@/hooks/use-vault-state";
 import { rawFrom } from "@/lib/amounts";
-import { SETUP_RATE, landedCreate, onboardingOpen, vaultStepRead, type OnboardingBodyStep, type OnboardingCreated } from "@/lib/onboarding";
-import { forgetOnboarding, readOnboardingStep, saveOnboardingStep, type OnboardingStep } from "@/lib/onboarding-memory";
+import { SETUP_RATE, basketOnShelf, landedCreate, onboardingOpen, vaultStepRead, type OnboardingBodyStep, type OnboardingCreated } from "@/lib/onboarding";
+import {
+  forgetOnboarding,
+  readBasketChoice,
+  readOnboardingStep,
+  saveBasketChoice,
+  saveOnboardingStep,
+  type BasketChoice,
+  type OnboardingStep,
+} from "@/lib/onboarding-memory";
 import { CREATE_VAULT_FEE_LAMPORTS } from "@/lib/vault-limits";
 
 /** How old the vault read may be when the setup reopens before it is read again. */
@@ -65,6 +73,15 @@ export function OnboardingHost({
   const [step, setStep] = useState<OnboardingStep>(() => readOnboardingStep(pensionKey));
   /** The share chosen on the vault step: kept here, so a close and a reopen find it as it was left. */
   const [rateBps, setRateBps] = useState<number>(SETUP_RATE.initial);
+  /** What the savings become: remembered for this key as it is picked, and read by the dashboard later. */
+  const [basket, setBasket] = useState<BasketChoice>(() => basketOnShelf(readBasketChoice(pensionKey)));
+  const chooseBasket = useCallback(
+    (choice: BasketChoice) => {
+      setBasket(choice);
+      saveBasketChoice(pensionKey, choice);
+    },
+    [pensionKey],
+  );
   const [created, setCreated] = useState<OnboardingCreated>(null);
   /** The read that was out of date when the setup reopened: until another arrives, the vault step waits. */
   const [staleView, setStaleView] = useState<VaultView | null>(null);
@@ -161,6 +178,8 @@ export function OnboardingHost({
         read={read}
         rateBps={rateBps}
         onRate={setRateBps}
+        basket={basket}
+        onBasket={chooseBasket}
         progress={write.progress}
         running={write.running}
         busyElsewhere={write.busyElsewhere}

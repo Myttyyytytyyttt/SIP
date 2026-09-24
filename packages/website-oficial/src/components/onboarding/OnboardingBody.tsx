@@ -25,13 +25,15 @@
  * the progress ladder and anything long live in the scrolling part.
  */
 
-import { DEFAULT_VAULT_POLICY, MODE_PROFIT, OFFERED_LEGS } from "@sip/solana-core/client";
+import { DEFAULT_VAULT_POLICY, MODE_PROFIT, OFFERED_LEGS, USDC_MINT } from "@sip/solana-core/client";
 import { ArrowLeftRight, ArrowRight, ChartLine, Circle, PiggyBank, RefreshCw, ShieldCheck, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PRIMARY_ATTRIBUTE, type OnboardingHeading } from "@/components/onboarding/OnboardingDialog";
+import { AssetMark } from "@/components/live/AssetMark";
+import { NATIVE_SOL } from "@/lib/asset-art";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -39,10 +41,11 @@ import { TxProgress } from "@/components/wallets/TxProgress";
 import type { CreateRequest, WriteProgress } from "@/hooks/use-vault-actions";
 import { formatSol } from "@/lib/amounts";
 import { LIVE_COPY, ONBOARDING_COPY } from "@/lib/live-copy";
-import { SETUP_RATE, setupRate, type OnboardingBodyStep, type VaultStepRead } from "@/lib/onboarding";
+import { SETUP_RATE, SETUP_STOCKS, basketSplit, setupRate, toggleBasket, type OnboardingBodyStep, type VaultStepRead } from "@/lib/onboarding";
+import type { BasketChoice } from "@/lib/onboarding-memory";
 import { MONO } from "@/lib/classes";
 import { cn } from "@/lib/utils";
-import { LINK_COPY, PROFIT_RATE, VAULT_COPY, ratePercent, shortAddress } from "@/lib/vault-copy";
+import { LINK_COPY, PROFIT_RATE, VAULT_COPY, listAnd, ratePercent, shortAddress } from "@/lib/vault-copy";
 
 /** The setup has two steps before the vault exists; the third screen is its result. */
 const STEPS = 2;
@@ -96,6 +99,9 @@ export interface OnboardingBodyProps {
   /** The profit share being chosen, in basis points (SETUP_RATE's range). */
   readonly rateBps: number;
   readonly onRate: (bps: number) => void;
+  /** What the savings become: kept as SOL, or these stocks at an equal split. Chosen here, signed later. */
+  readonly basket: BasketChoice;
+  readonly onBasket: (choice: BasketChoice) => void;
   readonly progress: WriteProgress;
   /** This setup's own write is in progress. */
   readonly running: boolean;
@@ -203,16 +209,95 @@ function useReducedMotion(): boolean {
 }
 
 /** The motion says with pictures what the words around it say, so it is hidden from screen readers. */
-function StepMotion({ motion }: { readonly motion: (typeof STEP_MOTION)[keyof typeof STEP_MOTION] }) {
+function StepMotion({ motion, wide = false }: { readonly motion: (typeof STEP_MOTION)[keyof typeof STEP_MOTION]; readonly wide?: boolean }) {
   const reduced = useReducedMotion();
   return (
-    <div className="aspect-video overflow-hidden rounded-xl bg-[#1d1d1d] ring-1 ring-foreground/10">
+    // `wide` crops the clip to 12:5 around its centre, where the subject is, so a step with more to choose
+    // still fits one screen without scrolling past its choices.
+    <div className={cn("overflow-hidden rounded-xl bg-[#1d1d1d] ring-1 ring-foreground/10", wide ? "aspect-[12/5]" : "aspect-video")}>
       {reduced ? (
         // eslint-disable-next-line @next/next/no-img-element -- a fixed still in public/, no optimisation to gain
         <img src={motion.poster} alt="" aria-hidden className="size-full object-cover" />
       ) : (
         <video key={motion.video} src={motion.video} poster={motion.poster} autoPlay muted loop playsInline preload="auto" aria-hidden className="size-full object-cover" />
       )}
+    </div>
+  );
+}
+
+/** One asset tile: its mark, its name, one line under it. Pressed shows the choice; disabled says why. */
+function AssetTile({
+  mint,
+  symbol,
+  sub,
+  pressed,
+  disabled = false,
+  onPress,
+}: {
+  readonly mint: string;
+  readonly symbol: string;
+  readonly sub: string;
+  readonly pressed: boolean;
+  readonly disabled?: boolean;
+  readonly onPress: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={disabled ? undefined : pressed}
+      disabled={disabled}
+      onClick={() => onPress()}
+      className={cn(
+        "flex min-w-0 items-center gap-2 rounded-lg border px-2 py-1.5 text-left transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
+        pressed ? "border-primary bg-muted ring-1 ring-primary" : "hover:bg-muted/60",
+        disabled && "cursor-not-allowed opacity-45 hover:bg-transparent",
+      )}
+    >
+      <AssetMark symbol={symbol} mint={mint} size={24} badge={false} className="shrink-0" />
+      <span className="min-w-0">
+        <span className="block text-[0.8rem] leading-tight font-medium">{symbol}</span>
+        <span className="block truncate text-[0.7rem] leading-tight text-muted-foreground">{sub}</span>
+      </span>
+    </button>
+  );
+}
+
+/**
+ * WHAT THE SAVINGS BECOME (owner, 09-24): SOL, the offered stocks, and USDC
+ * greyed until the chain can hold it. Picking stocks splits them equally.
+ * Nothing here is signed: the choice is remembered for this key, and the
+ * dashboard asks for the buying approval when the first savings arrive.
+ */
+function BasketCard({ basket, onBasket, disabled }: { readonly basket: BasketChoice; readonly onBasket: (choice: BasketChoice) => void; readonly disabled: boolean }) {
+  const copy = ONBOARDING_COPY.vault;
+  const split = basketSplit(basket);
+  const line = basket.kind === "sol" ? copy.basketSol : copy.basketStocks(split.map((leg) => `${leg.symbol} ${pct(leg.percent * 100)}`).join(" · "));
+  return (
+    <div role="group" aria-labelledby="onboarding-basket" className="space-y-2 rounded-lg border px-3 py-2.5">
+      <div className="flex items-baseline justify-between gap-3">
+        <Label id="onboarding-basket" className="text-[0.8rem]">
+          {copy.basketTitle}
+        </Label>
+        <span className="text-[0.7rem] text-muted-foreground">{copy.noMix}</span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <AssetTile mint={NATIVE_SOL} symbol="SOL" sub={copy.solSub} pressed={basket.kind === "sol"} disabled={disabled} onPress={() => onBasket(toggleBasket(basket, "sol"))} />
+        {SETUP_STOCKS.map((stock) => (
+          <AssetTile
+            key={stock.mint}
+            mint={stock.mint}
+            symbol={stock.symbol}
+            sub={stock.name}
+            pressed={basket.kind === "stocks" && basket.mints.includes(stock.mint)}
+            disabled={disabled}
+            onPress={() => onBasket(toggleBasket(basket, stock.mint))}
+          />
+        ))}
+        <AssetTile mint={USDC_MINT} symbol="USDC" sub={copy.usdcSub} pressed={false} disabled onPress={() => undefined} />
+      </div>
+      <p aria-live="polite" className="text-xs text-muted-foreground">
+        {line}
+      </p>
     </div>
   );
 }
@@ -298,7 +383,7 @@ function VaultStep(props: OnboardingBodyProps) {
         label={copy.title}
         body={
           <div className="space-y-4">
-            <StepMotion motion={STEP_MOTION.vault} />
+            <StepMotion motion={STEP_MOTION.vault} wide />
             {reading ? (
               <div aria-busy="true" aria-label={VAULT_COPY.loading} className="space-y-3">
                 <Skeleton className="h-20 w-full rounded-lg" />
@@ -335,7 +420,7 @@ function VaultStep(props: OnboardingBodyProps) {
       label={copy.title}
       body={
         <div className="space-y-4">
-          <StepMotion motion={STEP_MOTION.vault} />
+          <StepMotion motion={STEP_MOTION.vault} wide />
 
           {/* The one choice: how much of each gain the vault keeps. The same bar and presets as the rule card. */}
           <div role="group" aria-labelledby="onboarding-rate" className="space-y-2.5 rounded-lg border px-3 py-2.5">
@@ -381,6 +466,8 @@ function VaultStep(props: OnboardingBodyProps) {
             <p className="text-xs text-muted-foreground">{copy.ruleLine(formatSol(DEFAULT_VAULT_POLICY.maxContribution))}</p>
           </div>
 
+          <BasketCard basket={props.basket} onBasket={props.onBasket} disabled={blocked} />
+
           {ladder}
         </div>
       }
@@ -413,8 +500,10 @@ function VaultStep(props: OnboardingBodyProps) {
   );
 }
 
-function Ready({ progress, onDone }: OnboardingBodyProps) {
+function Ready({ progress, onDone, basket }: OnboardingBodyProps) {
   const copy = ONBOARDING_COPY.ready;
+  const chosen = basketSplit(basket).map((leg) => leg.symbol);
+  const next = [...copy.next, chosen.length === 0 ? copy.nextSol : copy.nextStocks(listAnd(chosen))];
   return (
     <Frame
       label={copy.title}
@@ -426,7 +515,7 @@ function Ready({ progress, onDone }: OnboardingBodyProps) {
               {copy.nextTitle}
             </h3>
             <ol className="space-y-1.5">
-              {copy.next.map((line) => (
+              {next.map((line) => (
                 <li key={line} className="flex items-center gap-2 text-sm">
                   <Circle className="size-4 text-muted-foreground" aria-hidden />
                   {line}

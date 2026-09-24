@@ -10,9 +10,11 @@
  * or has not answered — a vault that may exist is never offered for creation.
  */
 
-import { DEFAULT_VAULT_POLICY } from "@sip/solana-core/client";
+import { DEFAULT_VAULT_POLICY, OFFERED_LEGS } from "@sip/solana-core/client";
 
 import type { WriteProgress } from "@/hooks/use-vault-actions";
+import { evenPercents } from "@/lib/basket-picker";
+import type { BasketChoice } from "@/lib/onboarding-memory";
 import type { VaultScreenValue, VaultView } from "@/hooks/use-vault-state";
 import type { DashboardKind, VaultPresence } from "@/lib/dashboard-mode";
 import type { LiveStage } from "@/lib/live-types";
@@ -116,4 +118,51 @@ export function setupRate(bps: number): number {
   if (!Number.isFinite(bps)) return SETUP_RATE.initial;
   const stepped = Math.round(bps / SETUP_RATE.step) * SETUP_RATE.step;
   return Math.min(SETUP_RATE.max, Math.max(SETUP_RATE.min, stepped));
+}
+
+// ── what the savings become ──────────────────────────────────────────────────
+
+/**
+ * THE STOCKS THE SETUP OFFERS: the shelf exactly as the catalogue admits it
+ * today (OFFERED_LEGS — SPYx and ANTHROPIC on 09-24), never a hand-written
+ * list, so the setup cannot offer a stock the build route would refuse.
+ */
+export const SETUP_STOCKS: readonly { readonly mint: string; readonly symbol: string; readonly name: string }[] = OFFERED_LEGS.map((leg) => ({
+  mint: leg.mint,
+  symbol: leg.symbol,
+  name: leg.name,
+}));
+
+export const SOL_CHOICE: BasketChoice = { kind: "sol" };
+
+/**
+ * A press on one tile. SOL IS ONE OR THE OTHER WITH STOCKS, because that is
+ * what the chain can do today: once a vault has an investing policy the keeper
+ * converts all of its SOL, so "some SOL, some stocks" cannot be honoured.
+ * Pressing SOL keeps SOL; pressing a stock adds or removes it; removing the
+ * last stock goes back to SOL. The stocks keep the shelf's order.
+ */
+export function toggleBasket(choice: BasketChoice, target: "sol" | string): BasketChoice {
+  if (target === "sol") return SOL_CHOICE;
+  if (!SETUP_STOCKS.some((stock) => stock.mint === target)) return choice;
+  const current = choice.kind === "stocks" ? choice.mints : [];
+  const next = current.includes(target) ? current.filter((mint) => mint !== target) : [...current, target];
+  const ordered = SETUP_STOCKS.map((stock) => stock.mint).filter((mint) => next.includes(mint));
+  return ordered.length === 0 ? SOL_CHOICE : { kind: "stocks", mints: ordered };
+}
+
+/** A stored choice held to today's shelf: a stock no longer offered is dropped, and nothing left is SOL. */
+export function basketOnShelf(choice: BasketChoice | null): BasketChoice {
+  if (choice === null || choice.kind === "sol") return SOL_CHOICE;
+  const mints = SETUP_STOCKS.map((stock) => stock.mint).filter((mint) => choice.mints.includes(mint));
+  return mints.length === 0 ? SOL_CHOICE : { kind: "stocks", mints };
+}
+
+/** The chosen stocks at their equal whole-percent shares (evenPercents, the settings form's own split). */
+export function basketSplit(choice: BasketChoice): readonly { readonly mint: string; readonly symbol: string; readonly percent: number }[] {
+  if (choice.kind === "sol") return [];
+  const stocks = SETUP_STOCKS.filter((stock) => choice.mints.includes(stock.mint));
+  if (stocks.length === 0) return [];
+  const percents = evenPercents(stocks.length);
+  return stocks.map((stock, index) => ({ mint: stock.mint, symbol: stock.symbol, percent: percents[index]! }));
 }

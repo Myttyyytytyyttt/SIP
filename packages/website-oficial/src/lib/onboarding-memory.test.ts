@@ -8,8 +8,10 @@ import {
   clearOnboardingMirror,
   forgetOnboarding,
   keyTag,
+  readBasketChoice,
   readOnboardingClosed,
   readOnboardingStep,
+  saveBasketChoice,
   saveOnboardingStep,
   setOnboardingClosed,
   subscribeOnboarding,
@@ -162,5 +164,22 @@ describe("blocked storage", () => {
     vi.unstubAllGlobals();
     expect(readOnboardingStep(A)).toBe("welcome");
     expect(readOnboardingClosed(A)).toBe(false);
+  });
+});
+
+describe("what the savings become", () => {
+  it("is remembered per key in localStorage, and outlives the setup and the session", () => {
+    expect(readBasketChoice(A)).toBeNull();
+    saveBasketChoice(A, { kind: "stocks", mints: ["MintOne", "MintTwo"] });
+    expect(readBasketChoice(A)).toEqual({ kind: "stocks", mints: ["MintOne", "MintTwo"] });
+    expect(readBasketChoice(B)).toBeNull();
+    // The vault landing, and a session ending, forget the setup — not this: the dashboard reads it after.
+    forgetOnboarding(A);
+    forgetOnboarding(null);
+    expect(readBasketChoice(A)).toEqual({ kind: "stocks", mints: ["MintOne", "MintTwo"] });
+    saveBasketChoice(A, { kind: "sol" });
+    clearOnboardingMirror();
+    expect(readBasketChoice(A)).toEqual({ kind: "sol" });
+    expect(local.items.get("saverfi.basket")).toBe(`${keyTag(A)}:sol`);
   });
 });

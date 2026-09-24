@@ -38,7 +38,7 @@ import type { WriteProgress } from "@/hooks/use-vault-actions";
 import { formatSol } from "@/lib/amounts";
 import { LIVE_COPY, ONBOARDING_COPY } from "@/lib/live-copy";
 import { LINK_COPY, PROFIT_RATE, VAULT_COPY, shortAddress } from "@/lib/vault-copy";
-import { SETUP_RATE } from "@/lib/onboarding";
+import { SETUP_RATE, SETUP_STOCKS, basketSplit } from "@/lib/onboarding";
 import { CREATE_VAULT_FEE_LAMPORTS } from "@/lib/vault-limits";
 
 const KEY = "PensionKeyP1aceho1der111111111111111111111";
@@ -54,6 +54,8 @@ function props(overrides: Partial<OnboardingBodyProps> = {}): OnboardingBodyProp
     read: "form",
     rateBps: 2_000,
     onRate: vi.fn(),
+    basket: { kind: "sol" },
+    onBasket: vi.fn(),
     progress: { phase: "idle" },
     running: false,
     busyElsewhere: false,
@@ -182,6 +184,29 @@ describe("the vault step", () => {
     expect(textOf(html)).not.toMatch(/loss comes off/);
   });
 
+  it("offers what the savings become: SOL pressed by default, the offered stocks, and USDC greyed as not available", () => {
+    const html = render(props({ step: "vault" }));
+    expect(textOf(html)).toContain(ONBOARDING_COPY.vault.basketTitle);
+    const tile = (symbol: string): string => html.match(new RegExp(`<button[^>]*>(?:(?!</button>).)*?>${symbol}</span>(?:(?!</button>).)*</button>`, "s"))?.[0] ?? "";
+    expect(tile("SOL")).toContain('aria-pressed="true"');
+    for (const stock of SETUP_STOCKS) expect(tile(stock.symbol)).toContain('aria-pressed="false"');
+    expect(tile("USDC")).toMatch(/\sdisabled=""/);
+    expect(tile("USDC")).toContain(ONBOARDING_COPY.vault.usdcSub);
+    expect(textOf(html)).toContain(ONBOARDING_COPY.vault.basketSol);
+    // The choice is not signed on this step: the one approval, said in the header, stays the vault's.
+    expect(onboardingHeading("vault").points).toContain("One approval");
+  });
+
+  it("with stocks chosen, says the equal split and that buying is approved later", () => {
+    const mints = SETUP_STOCKS.map((stock) => stock.mint);
+    const html = render(props({ step: "vault", basket: { kind: "stocks", mints } }));
+    const tile = (symbol: string): string => html.match(new RegExp(`<button[^>]*>(?:(?!</button>).)*?>${symbol}</span>(?:(?!</button>).)*</button>`, "s"))?.[0] ?? "";
+    expect(tile("SOL")).toContain('aria-pressed="false"');
+    for (const stock of SETUP_STOCKS) expect(tile(stock.symbol)).toContain('aria-pressed="true"');
+    const split = basketSplit({ kind: "stocks", mints }).map((leg) => `${leg.symbol} ${leg.percent} %`).join(" · ");
+    expect(textOf(html)).toContain(ONBOARDING_COPY.vault.basketStocks(split));
+  });
+
   it("says the cost above the button, and Create sends the share chosen with the product's limits, never the click", () => {
     const value = props({ step: "vault", rateBps: 1_500 });
     const html = render(value);
@@ -262,10 +287,27 @@ describe("ready", () => {
     expect(textOf(html)).toContain(VAULT_COPY.created);
     expect(html).toContain('href="https://solscan.io/tx/sig"');
     for (const line of ONBOARDING_COPY.ready.next) expect(textOf(html)).toContain(line);
+    // The last line follows the choice: SOL by default here.
+    expect(textOf(html)).toContain(ONBOARDING_COPY.ready.nextSol);
     expect(buttons(VAULT_COPY.dismiss)).toHaveLength(0);
     const done = button(ONBOARDING_COPY.ready.done);
     expect(done.primary).toBe(true);
     done.onClick?.(CLICK);
     expect(value.onDone).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ready, after stocks were chosen", () => {
+  it("names the approval still to come", () => {
+    const mints = SETUP_STOCKS.map((stock) => stock.mint);
+    const html = render(
+      props({
+        step: "ready",
+        basket: { kind: "stocks", mints },
+        progress: { phase: "finished", kind: "create", result: { ok: true, signature: "sig", explorerUrl: null, slot: 1, unitsConsumed: null } } as WriteProgress,
+      }),
+    );
+    expect(textOf(html)).toContain("Approve buying SPYx and ANTHROPIC when your first savings arrive");
+    expect(textOf(html)).not.toContain(ONBOARDING_COPY.ready.nextSol);
   });
 });
