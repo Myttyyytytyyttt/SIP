@@ -11,6 +11,7 @@ import { SIP_PROGRAM_ID } from "../src/idl.js";
 import { tradeNotional } from "../src/measure-volume.js";
 import { measureSince, readTransaction, type LedgerReader } from "../src/measure-window.js";
 import { KEEPER_LOCK_NAME, VOLUME_KEEPER_LOCK_NAME, advisoryKeyFor, lockNameFor } from "../src/singleton.js";
+import { FakeLedger, chained } from "./fake-ledger.js";
 import { FIXTURES, fixtureConnection } from "./volume-fixtures.js";
 
 const RPC = "https://rpc.example.test";
@@ -113,5 +114,23 @@ describe("a walk over the owner's real trades", () => {
     // The profit keeper's own figures on this span, as they were before the probe existed.
     expect(without.successfulTradeCount).toBe(4);
     expect(without.tradedLamports).toBe(4_059_833_580n);
+  });
+});
+
+describe("the walk records only what the probe counted", () => {
+  it("leaves a deposit and a transfer out of the volume trades, though it measures both", async () => {
+    const wallet = new PublicKey(FIXTURES["owner-buy-1"]!.wallet);
+    const SYSTEM = "11111111111111111111111111111111";
+    const ledger = new FakeLedger(
+      wallet,
+      chained(1_000_000_000, [
+        { signature: "anchor", slot: 100, programs: [SYSTEM], delta: 0 },
+        { signature: "deposit", slot: 150, programs: [SYSTEM], delta: 500_000_000 },
+        { signature: "transfer-out", slot: 160, programs: [SYSTEM], delta: -200_000_000 },
+      ]),
+    );
+    const measured = await measureSince(ledger, wallet, 100n, new PublicKey(SIP_PROGRAM_ID), tradeNotional);
+    expect(measured.txCount).toBe(2);
+    expect(measured.volumeTrades).toEqual([]);
   });
 });

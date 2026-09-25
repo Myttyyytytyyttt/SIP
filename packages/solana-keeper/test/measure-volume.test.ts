@@ -64,6 +64,23 @@ describe("the owner's four trades of 2026-09-23", () => {
   });
 });
 
+describe("other real trades, found on mainnet on 2026-09-25", () => {
+  // A Jupiter buy in a VERSION 0 transaction with three address lookup tables: the
+  // wallet wraps 165 808 841 lamports into a temporary wSOL account that the same
+  // transaction closes (so it appears in no token balance), tips 6 776, and pays the
+  // rent of the new token account it bought into, 1 574 800, which is taken out.
+  it.skipIf(FIXTURES["jupiter-v0-buy"] === undefined)("a Jupiter v0 buy through lookup tables counts what the wallet put into the trade", async () => {
+    expect(await measure("jupiter-v0-buy")).toEqual({ counted: true, lamports: 165_815_617n });
+  });
+
+  // A pump.fun sell that closes the token account it sold from: 851 802 lamports of
+  // proceeds, less a 2 129 forwarder fee and a 5 002 transfer, while the account's
+  // 1 513 840 rent comes back. Counting the raw delta would say 2 358 511.
+  it.skipIf(FIXTURES["sell-close-ata"] === undefined)("a sell that closes its token account does not count the rent it got back", async () => {
+    expect(await measure("sell-close-ata")).toEqual({ counted: true, lamports: 844_671n });
+  });
+});
+
 describe("what is not volume", () => {
   it("our own settle is an external flow", async () => {
     expect(await measure("owner-settle-2026-09-19")).toEqual({ counted: false, skip: "flow" });

@@ -116,6 +116,23 @@ describe("--preflight", () => {
     expect((await runPreflight()).invariants).toBe(EXPECTED_INVARIANTS);
   });
 
+  it("fails, naming the invariant, when the volume rule measures the owner's first buy wrong", async () => {
+    // A fresh module graph whose volume rule is off by everything: proof the
+    // invariant compares the measured lamports, not something always true.
+    vi.resetModules();
+    vi.doMock("../src/measure-volume.js", () => ({ tradeNotional: () => ({ counted: true, lamports: 1n }) }));
+    try {
+      const { runPreflight: preflightOverAWrongRule } = await import("../src/preflight.js");
+      expect(await preflightOverAWrongRule()).toMatchObject({
+        ok: false,
+        failure: expect.stringContaining("the volume rule measures the owner's first buy at 1 010 000 000 lamports"),
+      });
+    } finally {
+      vi.doUnmock("../src/measure-volume.js");
+      vi.resetModules();
+    }
+  });
+
   it("fails, naming the invariant, when the vector and the mirror disagree by one byte", async () => {
     // A fresh module graph whose copy of the vector ends in ff instead of 00:
     // proof the invariant compares bytes, not something that is always true.
