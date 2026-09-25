@@ -324,6 +324,16 @@ export interface DashboardMock {
   readonly stats: SavingsStats;
   readonly curve: readonly SavingsPoint[];
   readonly days: readonly SavingsDay[];
+  /**
+   * THE WEEK SQUARES' OWN DAYS, when they are not `days` (a live page, 09-25):
+   * always the last thirteen weeks, so the squares never vanish because the
+   * loaded history is one busy day. A day the history cannot vouch for is null
+   * (drawn apart, never as a zero); `days` stays the covered span the stats
+   * count, so "Active days … of N" never counts a day nobody could read.
+   */
+  readonly calendar?: readonly SavingsDay[];
+  /** The vault's own account, shown under the total on a live page. The sample has none. */
+  readonly vault?: { readonly address: string; readonly href: string };
   readonly holdings: readonly Holding[];
   /** Newest first. */
   readonly trades: readonly Trade[];

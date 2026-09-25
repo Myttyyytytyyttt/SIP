@@ -38,6 +38,8 @@ import { USDC_MINT } from "@sip/solana-core/client";
 import type { ActivityEvent, Backdrop, DashboardMock, Holding, OtherEvent, SavingsDay, SavingsPoint, SavingsStats, Trade, Wallet } from "@/mocks/types";
 
 const DAY_MS = 86_400_000;
+/** The week squares: thirteen weeks, as the sample draws them. */
+const CALENDAR_DAYS = 13 * 7;
 const USDC_UNIT = 1_000_000;
 const SOL_LOGO = artForMint(NATIVE_SOL) ?? undefined;
 const USDC_LOGO = artForMint(USDC_MINT) ?? undefined;
@@ -412,6 +414,25 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
   // same rows, for the disclosure that opens them. Hidden, never dropped.
   const hidden: ActivityEvent[] = data.hiddenRows.map(eventOf(idsFor()));
 
+  // THE WEEK SQUARES: the last thirteen weeks, whatever the loaded history
+  // covers. A covered day carries its exact total; a day outside it carries the
+  // settlements this page does hold for it (read from a wallet's link, say) —
+  // real money, if possibly not all of that day's — and otherwise nothing: null,
+  // drawn apart, never a zero nobody measured.
+  const covered = new Map(days.map((day) => [day.date, day.savedUsd]));
+  const known = new Map<string, number>();
+  for (const trade of trades) {
+    if (trade.savedUsd === null || trade.savedUsd <= 0) continue;
+    const date = trade.at.slice(0, 10);
+    known.set(date, (known.get(date) ?? 0) + trade.savedUsd);
+  }
+  const today = Math.floor(data.nowMs / DAY_MS) * DAY_MS;
+  const calendar: SavingsDay[] = Array.from({ length: CALENDAR_DAYS }, (_, index) => {
+    const date = new Date(today - (CALENDAR_DAYS - 1 - index) * DAY_MS).toISOString().slice(0, 10);
+    const savedUsd = covered.has(date) ? (covered.get(date) ?? null) : (known.get(date) ?? null);
+    return { date, savedUsd, volumeUsd: null, trades: null };
+  });
+
   return {
     now,
     wallet,
@@ -425,6 +446,8 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
     stats: statsOut,
     curve,
     days,
+    calendar,
+    ...(vault.exists ? { vault: { address: vault.address, href: `https://solscan.io/account/${vault.address}` } } : {}),
     holdings,
     trades,
     activity,

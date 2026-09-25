@@ -1,3 +1,4 @@
+import { CopyButton } from "@/components/copy-button";
 import { Num } from "@/components/num";
 import { PensionChart } from "@/components/pension-chart";
 import { PensionHoldings } from "@/components/pension-holdings";
@@ -7,7 +8,8 @@ import { LABEL, SAVED } from "@/lib/classes";
 import { dateLabel, pct, usd, usdSigned } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import { cn } from "@/lib/utils";
-import type { Holding, SavingsDay, SavingsPoint, SavingsRule, SavingsStats } from "@/mocks/types";
+import { shortAddress } from "@/lib/vault-copy";
+import type { Holding, SavingsDay, SavingsPoint, SavingsRule, SavingsStats, Trade } from "@/mocks/types";
 
 /**
  * The big panel — where the reference played its round. The figure, its
@@ -22,12 +24,21 @@ export function PensionPanel({
   rule,
   now,
   unit,
+  calendar,
+  vault,
+  trades,
   className,
 }: {
   stats: SavingsStats;
   curve: readonly SavingsPoint[];
   holdings: readonly Holding[];
   days: readonly SavingsDay[];
+  /** The week squares' own days (a live page): the last thirteen weeks, unknown days null. Absent: `days`. */
+  calendar?: readonly SavingsDay[];
+  /** The vault's account, under the total — a live page. */
+  vault?: { readonly address: string; readonly href: string };
+  /** Every save with its time, for the chart's hourly view. */
+  trades?: readonly Trade[];
   rule: SavingsRule;
   now: string;
   /** The curve's unit when it is not dollars: a live page that could not read a price. */
@@ -75,6 +86,16 @@ export function PensionPanel({
               </>
             ) : null}
           </CardDescription>
+          {/* THE VAULT ITSELF, under what it holds (owner, 09-25): its address, a copy, and the explorer. */}
+          {vault === undefined ? null : (
+            <p className="flex items-center gap-1 text-xs text-muted-foreground">
+              Vault{" "}
+              <a href={vault.href} target="_blank" rel="noopener noreferrer" title={LIVE_COPY.solscanAccount} className="font-mono underline-offset-4 hover:text-foreground hover:underline">
+                {shortAddress(vault.address)}
+              </a>
+              <CopyButton value={vault.address} />
+            </p>
+          )}
         </div>
 
         {/*
@@ -84,7 +105,7 @@ export function PensionPanel({
           the card is wide enough to hold three things in a row.
         */}
         <div className="hidden @2xl/panel:flex @2xl/panel:self-center">
-          <SaveCalendar days={days} now={now} />
+          <SaveCalendar days={calendar ?? days} now={now} />
         </div>
 
         <dl className="grid grid-cols-2 gap-3 @md/panel:shrink-0 @md/panel:grid-cols-1 @md/panel:text-right">
@@ -117,6 +138,8 @@ export function PensionPanel({
       <CardContent className="xl:flex xl:min-h-0 xl:flex-1 xl:flex-col">
         <PensionChart
           curve={curve}
+          now={now}
+          {...(trades === undefined ? {} : { saves: trades })}
           {...(unit === undefined ? {} : { unit })}
           settledOutsideHistory={stats.settledOutsideHistory === true}
           className="h-64 w-full sm:h-72 xl:h-auto xl:min-h-32 xl:flex-1 xl:short:min-h-28"

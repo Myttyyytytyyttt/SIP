@@ -5,22 +5,70 @@ import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
 
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { dateLabel, dayLabel, usd, usdCompact } from "@/lib/format";
+import { clockLabel, dateLabel, dayLabel, usd, usdCompact } from "@/lib/format";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { cn } from "@/lib/utils";
-import type { SavingsPoint } from "@/mocks/types";
+import type { SavingsPoint, Trade } from "@/mocks/types";
 
 /** The one accent on the page: money put aside. */
 const chartConfig = {
   total: { label: "Saved", color: "var(--color-emerald-500)" },
 } satisfies ChartConfig;
 
-const RANGES = { "30d": 30, "90d": 90 } as const;
-type Range = keyof typeof RANGES;
+/*
+ * WHAT EACH BUTTON IS: WHAT ONE POINT OF THE LINE STANDS FOR (owner, 09-25).
+ *   1h — a point an hour, over the last 7 days;
+ *   1d — a point a day, over the last 30 days;
+ *   7d — a point a week, over the last 6 months.
+ * The daily curve is the one both pages already build; the weekly line is
+ * read off it, and the hourly one is rebuilt from each save's own time,
+ * working back from the curve's last figure — so all three end on the same
+ * total the hero shows.
+ */
+const RANGES = ["1h", "1d", "7d"] as const;
+type Range = (typeof RANGES)[number];
 
 function isRange(value: string): value is Range {
-  return value in RANGES;
+  return (RANGES as readonly string[]).includes(value);
 }
+
+const HOUR_MS = 3_600_000;
+const HOURS = 7 * 24;
+const DAYS = 30;
+const WEEKS = 26;
+
+/** A point a day, the last 30 days — and the one before them, so the line has somewhere to start from. */
+export const daily = (curve: readonly SavingsPoint[]): readonly SavingsPoint[] => curve.slice(-(DAYS + 1));
+
+/** A point a week, the last 26 weeks, each the total at the end of its week. */
+export function weekly(curve: readonly SavingsPoint[]): readonly SavingsPoint[] {
+  const window = curve.slice(-(WEEKS * 7 + 1));
+  const out: SavingsPoint[] = [];
+  for (let index = window.length - 1; index >= 0; index -= 7) out.unshift(window[index]!);
+  return out;
+}
+
+/**
+ * A point an hour, the last 7 days, or null when a save's amount is unknown
+ * (prices unread: the curve is then in SOL, and no dollar can be taken off it).
+ * Each hour ends on the total less every save made after it.
+ */
+export function hourly(curve: readonly SavingsPoint[], saves: readonly Trade[], now: string): readonly SavingsPoint[] | null {
+  const total = curve.at(-1)?.total;
+  if (total === undefined || saves.some((save) => save.savedUsd === null)) return null;
+  const times = saves.map((save) => ({ at: Date.parse(save.at), usd: save.savedUsd ?? 0 }));
+  const current = Math.floor(Date.parse(now) / HOUR_MS) * HOUR_MS;
+  const points: SavingsPoint[] = [];
+  for (let back = HOURS - 1; back >= 0; back -= 1) {
+    const start = current - back * HOUR_MS;
+    const later = times.reduce((sum, save) => (save.at >= start + HOUR_MS ? sum + save.usd : sum), 0);
+    points.push({ date: new Date(start).toISOString(), total: Math.max(0, Math.round((total - later) * 100) / 100) });
+  }
+  return points;
+}
+
+/** "Sep 25 14h" on the axis; the tooltip carries the full date and the clock. */
+const hourTick = (iso: string): string => `${dayLabel(iso)} ${String(new Date(iso).getUTCHours()).padStart(2, "0")}h`;
 
 /** A SOL figure for an axis or a tooltip: four places at most, trailing zeros dropped. */
 const solShort = (value: number): string => `${Number(value.toFixed(4))} SOL`;
@@ -63,11 +111,17 @@ function Band({ level, caption, className }: { readonly level: string | null; re
  */
 export function PensionChart({
   curve,
+  now,
+  saves,
   unit,
   settledOutsideHistory = false,
   className,
 }: {
   curve: readonly SavingsPoint[];
+  /** The page's own clock, for the hourly view's last hour. */
+  now: string;
+  /** Every save with its time: the hourly view is rebuilt from them. Absent, there is no 1h view. */
+  saves?: readonly Trade[];
   /** The curve's unit when it is not dollars: a live page that could not read a price. */
   unit?: "SOL";
   /**
@@ -77,10 +131,10 @@ export function PensionChart({
   settledOutsideHistory?: boolean;
   className?: string;
 }) {
-  const [range, setRange] = useState<Range>("90d");
-  // The curve opens with a baseline point on the day before the first save.
-  // A window keeps one point before its first day for the same reason.
-  const points = curve.slice(-(RANGES[range] + 1));
+  const [range, setRange] = useState<Range>("1d");
+  const hours = saves === undefined || unit === "SOL" ? null : hourly(curve, saves, now);
+  const shown: Range = range === "1h" && hours === null ? "1d" : range;
+  const points = shown === "1h" ? hours! : shown === "7d" ? weekly(curve) : daily(curve);
   const money = unit === "SOL" ? solShort : usd;
   const moneyAxis = unit === "SOL" ? solShort : usdCompact;
 
@@ -102,18 +156,23 @@ export function PensionChart({
     // own: that row was height the holdings needed to be seen without a scroll.
     <div className="relative flex w-full flex-col xl:min-h-0 xl:flex-1">
       <Tabs
-        value={range}
+        value={shown}
         onValueChange={(value) => {
           if (isRange(value)) setRange(value);
         }}
         className="absolute top-0 left-0 z-10"
       >
-        <TabsList aria-label="Range" className="h-7">
-          <TabsTrigger value="30d" className="px-2 text-xs">
-            30d
+        <TabsList aria-label="One point per" className="h-7">
+          {hours === null ? null : (
+            <TabsTrigger value="1h" className="px-2 text-xs" title="A point an hour, the last 7 days">
+              1h
+            </TabsTrigger>
+          )}
+          <TabsTrigger value="1d" className="px-2 text-xs" title="A point a day, the last 30 days">
+            1d
           </TabsTrigger>
-          <TabsTrigger value="90d" className="px-2 text-xs">
-            90d
+          <TabsTrigger value="7d" className="px-2 text-xs" title="A point a week, the last 6 months">
+            7d
           </TabsTrigger>
         </TabsList>
       </Tabs>
@@ -128,14 +187,14 @@ export function PensionChart({
             axisLine={false}
             tickMargin={8}
             minTickGap={40}
-            tickFormatter={dayLabel}
+            tickFormatter={shown === "1h" ? hourTick : dayLabel}
           />
           {/* "0.045 SOL" needs the room "$4.5K" does not, or it wraps onto two lines. */}
           <YAxis orientation="right" tickLine={false} axisLine={false} width={unit === "SOL" ? 76 : 56} tickFormatter={moneyAxis} />
           <ChartTooltip
             content={
               <ChartTooltipContent
-                labelFormatter={(label) => dateLabel(String(label))}
+                labelFormatter={(label) => (shown === "1h" ? `${dateLabel(String(label))} · ${clockLabel(String(label))}` : dateLabel(String(label)))}
                 // The stock row formats with toLocaleString(), which the hydration rule forbids.
                 formatter={(value, _name, item) => (
                   <>

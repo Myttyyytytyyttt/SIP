@@ -355,3 +355,35 @@ describe("a buy older than the loaded history is still a buy", () => {
     expect(stats.lastInvestedDay).toBeNull();
   });
 });
+
+/**
+ * THE WEEK SQUARES AND THE VAULT (owner, 09-25): the squares vanished when the
+ * loaded history was one busy day. They now always span thirteen weeks, and a
+ * day nobody could read is null — never a zero.
+ */
+describe("the week squares and the vault", () => {
+  it("always gives the squares thirteen weeks, ending today", () => {
+    const page = adapt();
+    expect(page.calendar).toHaveLength(91);
+    expect(page.calendar!.at(-1)!.date).toBe(new Date(NOW_MS).toISOString().slice(0, 10));
+  });
+
+  it("never draws a day outside the loaded history as a zero", () => {
+    const page = adapt();
+    const covered = new Set(page.days.map((day) => day.date));
+    const outside = page.calendar!.filter((day) => !covered.has(day.date));
+    expect(outside.length).toBeGreaterThan(0);
+    for (const day of outside) expect(day.savedUsd === null || day.savedUsd > 0).toBe(true);
+  });
+
+  it("keeps the stats' own days to the covered span", () => {
+    const page = adapt();
+    expect(page.days.length).toBeLessThanOrEqual(page.calendar!.length);
+  });
+
+  it("names the vault and links it to the explorer", () => {
+    const page = adapt();
+    expect(page.vault?.href).toMatch(/^https:\/\/solscan\.io\/account\//);
+    expect(page.vault?.address).toBeTruthy();
+  });
+});
