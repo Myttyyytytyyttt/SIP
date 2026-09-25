@@ -31,11 +31,11 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { CATALOGUE, CONVERT_FLOOR_MARGIN_BPS, LEG_FLOOR_MARGIN_BPS, OFFERED_LEGS, PRESTOCKS_POWERS, floorWad, legFloorWad, type CatalogueAsset } from "@sip/solana-core/client";
+import { CATALOGUE, CONVERT_FLOOR_MARGIN_BPS, LEG_FLOOR_MARGIN_BPS, OFFERED_LEGS, PRESTOCKS_POWERS, floorWad, keeperInvestMinOutFor, legFloorWad, type CatalogueAsset } from "@sip/solana-core/client";
 
 import { LEG_FEE, LOSS_FORGIVEN, OWNER_FLOOR_MIN_OUT, POOL_DEPTH } from "../../../solana-core/test/fixtures/keeper-policy";
 
-import { FLOOR_DRIFT_NOTICE_MULTIPLE, ROUTE_COST_UNDER_MID_BPS, floorDrift, floorRoom, keeperVenueThresholdWad, legFloorUnderMidBps, signedSlackBps } from "@/lib/invest-limits";
+import { FLOOR_DRIFT_NOTICE_MULTIPLE, ROUTE_COST_UNDER_MID_BPS, ROUTE_OVER_MID_BPS, floorDrift, floorRoom, keeperVenueThresholdWad, legFloorUnderMidBps, signedSlackBps } from "@/lib/invest-limits";
 import {
   INVEST_COPY,
   LOSS_DROPPED_AFTER_TXS,
@@ -577,22 +577,57 @@ describe("the floor the owner signed, and the market that moved away from it", (
     expect(floorRoom(oldBestAsk + 1n, mid, 300)).not.toBe("no-route");
   });
 
-  it("draws the three states at the keeper's own boundaries: at the threshold it buys, one unit over it does not", () => {
+  it("draws the three states at the keeper's own boundaries: every route at the costliest net one, no route only past the kindest gross one", () => {
     for (const fee of [100, 300]) {
       const net = keeperVenueThresholdWad(mid, fee, "net");
       const gross = keeperVenueThresholdWad(mid, fee, "gross");
+      const kindest = keeperVenueThresholdWad(mid, fee, "gross", "over-mid");
       expect(floorRoom(net, mid, fee), `at the net threshold, fee ${fee}`).toBe("every-route");
       expect(floorRoom(net + 1n, mid, fee), `one over the net threshold, fee ${fee}`).toBe("some-routes");
-      expect(floorRoom(gross, mid, fee), `at the gross threshold, fee ${fee}`).toBe("some-routes");
-      expect(floorRoom(gross + 1n, mid, fee), `one over the gross threshold, fee ${fee}`).toBe("no-route");
+      expect(floorRoom(gross + 1n, mid, fee), `one over the costly gross threshold, fee ${fee}`).toBe("some-routes");
+      expect(floorRoom(kindest, mid, fee), `at the kindest gross threshold, fee ${fee}`).toBe("some-routes");
+      expect(floorRoom(kindest + 1n, mid, fee), `one over the kindest gross threshold, fee ${fee}`).toBe("no-route");
     }
-    // With no fee there is no middle: gross and net are one route.
+    // With no fee, gross and net are one route, and only the route's own
+    // price against the mid splits every route from some.
     const only = keeperVenueThresholdWad(mid, 0, "gross");
+    const kindest = keeperVenueThresholdWad(mid, 0, "gross", "over-mid");
     expect(floorRoom(only, mid, 0)).toBe("every-route");
-    expect(floorRoom(only + 1n, mid, 0)).toBe("no-route");
+    expect(floorRoom(only + 1n, mid, 0)).toBe("some-routes");
+    expect(floorRoom(kindest, mid, 0)).toBe("some-routes");
+    expect(floorRoom(kindest + 1n, mid, 0)).toBe("no-route");
     // An unread number says nothing.
     expect(floorRoom(null, mid, 300)).toBeNull();
     expect(floorRoom(ownerFloor, null, 300)).toBeNull();
+  });
+
+  /**
+   * A ROUTE CAN COME BACK OVER THE FLOOR POOL'S MID, so "no-route" — the one
+   * state that flips the badge and says SaverFi does not buy — is judged at a
+   * route ROUTE_OVER_MID_BPS over it, never at the 25 bps under it that splits
+   * every route from some. Measured read-only 2026-09-25, slot 450236314:
+   * SPYx's floor pool (Raydium CLMM 6truu3rZ…) at mid 129732643720761089;
+   * Jupiter for 2,752,188 USDC raw in at slippage 200 answered 357,268 out,
+   * otherAmountThreshold 350,123, on PancakeSwap — 6.16 bps OVER the mid
+   * (and 74.5 USDC in, on Byreal, 5.97 bps over). SPYx has no transfer fee.
+   */
+  it("keeps a SPYx floor the keeper was measured buying under off \"Sign again\" — the route came back over the pool's mid", () => {
+    const spyxMid = 129_732_643_720_761_089n;
+    const amountIn = 2_752_188n;
+    const outAmount = 357_268n;
+    const venueThreshold = 350_123n;
+    // The highest floor wad whose leg floor is at or under what Jupiter enforced.
+    const floor = (venueThreshold * 10n ** 18n) / amountIn;
+    const ownerFloor = (amountIn * floor) / 10n ** 18n;
+    // The keeper's own rule buys it: with no fee its min_out is Jupiter's threshold itself.
+    expect(keeperInvestMinOutFor({ venueThreshold, netOfVenueThreshold: venueThreshold, ownerFloor })).toBe(venueThreshold);
+    // It sits past the costly model's threshold — the case the old rule called "no-route".
+    expect(floor > keeperVenueThresholdWad(spyxMid, 0, "gross")).toBe(true);
+    expect(floorRoom(floor, spyxMid, 0)).toBe("some-routes");
+    // And the allowance covers the reading: over the mid by 6.16 bps, under 25.
+    const atMid = (amountIn * spyxMid) / 10n ** 18n;
+    expect(outAmount > atMid).toBe(true);
+    expect((outAmount - atMid) * 10_000n).toBeLessThanOrEqual(BigInt(ROUTE_OVER_MID_BPS) * atMid);
   });
 
   it("puts every floor a policy signed today carries on every route, at the fee it was netted of", () => {
@@ -609,6 +644,10 @@ describe("the floor the owner signed, and the market that moved away from it", (
     );
     expect(some).not.toMatch(/Sign again|refuse|will not buy|does not buy/);
     expect(INVEST_COPY.legFloorSomeRoutes("ANTHROPIC", "$2.68", 300, null)).toMatch(/^At the 3 % ANTHROPIC's issuer charges on every transfer, your ANTHROPIC limit of \$2\.68 lets SaverFi buy on some/);
+    // A leg with no fee (SPYx) is never told about one: its routes differ by their own price alone.
+    const someNoFee = INVEST_COPY.legFloorSomeRoutes("SPYx", "$740.00", 0, null);
+    expect(someNoFee).toMatch(/^Your SPYx limit of \$740\.00 lets SaverFi buy on some of the routes/);
+    expect(someNoFee).not.toMatch(/fee|issuer|%/);
 
     const none = INVEST_COPY.legFloorNoRoute("ANTHROPIC", "$2.75", "$2.82", 300, 1043);
     expect(none).toBe(
@@ -621,7 +660,7 @@ describe("the floor the owner signed, and the market that moved away from it", (
     expect(noFee).not.toMatch(/fee|issuer/);
     expect(INVEST_COPY.floorNoRoute).toBe("Sign again");
     // The public name, and no engine-room words.
-    for (const line of [some, none, noFee, INVEST_COPY.roomTitle]) expect(line).not.toMatch(/keeper|min_out|bps|Nuvem|\bSIP\b|Jupiter|gross|net\b/i);
+    for (const line of [some, someNoFee, none, noFee, INVEST_COPY.roomTitle]) expect(line).not.toMatch(/keeper|min_out|bps|Nuvem|\bSIP\b|Jupiter|gross|net\b/i);
   });
 
   it("measures the slack against the floor, and calls it out only past twice the margin it was signed at", () => {

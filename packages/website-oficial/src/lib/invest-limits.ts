@@ -181,44 +181,59 @@ export function floorDrift(storedWad: bigint | null, liveWad: bigint | null, mar
 // So a floor sits in one of three places, at the fee that matters for the
 // owner's future — the HIGHEST WRITTEN one, the catalogue's judged fee, which
 // is the one in force once its epoch arrives:
-//   "every-route" the net case clears it, and so does the gross one;
-//   "some-routes" only the gross case clears it: a sweep whose best route
-//                 quotes net refuses the basket and waits, one that quotes
-//                 gross buys;
-//   "no-route"    neither clears it: the keeper refuses the whole basket, and
-//                 the SOL conversion with it, on every sweep.
+//   "every-route" the costliest case clears it: a net last hop, on a route
+//                 ROUTE_COST_UNDER_MID_BPS under the mid;
+//   "some-routes" between the two: whether a sweep buys depends on the route
+//                 it gets — its last hop's basis, and its own price against
+//                 the mid. A note, and buying goes on;
+//   "no-route"    not even the kindest case clears it: a gross last hop on a
+//                 route ROUTE_OVER_MID_BPS OVER the mid. The keeper refuses
+//                 the whole basket, and the SOL conversion with it, on every
+//                 sweep. The only state that flips the badge, so it is judged
+//                 at the route most favourable to buying.
 //
-// THE ROUTE'S OWN COST IS A MODEL, NOT A READING: ROUTE_COST_UNDER_MID_BPS.
-// Measured 2026-09-25 (epoch 1042, slot 450231345) for the owner's $2.75
-// ANTHROPIC leg at slippage 400, against the floor pool's mid: Jupiter's
-// default route (Quantum > Manifest, gross) came back 18.95 bps under it; held
-// to Raydium CLMM, 99.79 bps under and held to Meteora DLMM, 105.83 bps under,
-// both with the 100 bps fee then in force already off. So 25 — the floor
-// pool's own tier — covers the route's cost on every reading that day, with
-// 0 to 25 bps to spare. A bigger buy or a thinner book costs more and moves the
-// real edge up; this is a screen, and no gate reads it.
+// THE ROUTE'S OWN PRICE IS A MODEL, NOT A READING, AND IT RUNS BOTH WAYS.
+// Under the mid — measured 2026-09-25 (epoch 1042, slot 450231345) for the
+// owner's $2.75 ANTHROPIC leg at slippage 400, against the floor pool's mid:
+// Jupiter's default route (Quantum > Manifest, gross) came back 18.95 bps
+// under it; held to Raydium CLMM, 99.79 bps under and held to Meteora DLMM,
+// 105.83 bps under, both with the 100 bps fee then in force already off. So
+// 25 — the floor pool's own tier — covers the route's cost on every reading
+// that day. Over the mid — measured the same day for SPYx against its floor
+// pool: 3.64 and 3.40 bps over at $2.75 and $74.50 (Whirlpool, slot
+// 450234502), 6.16 and 5.97 bps over (PancakeSwap and Byreal, slot 450236314).
+// A route through another pool can beat the floor pool's mid, so "no-route"
+// is judged with the route 25 bps over it, which covers every such reading.
+// A bigger buy or a thinner book moves the real edges; this is a screen, and
+// no gate reads it.
 
-/** What a route is modelled to cost under the floor pool's mid, before any transfer fee: 25 bps (measured above). */
+/** What a route is modelled to cost under the floor pool's mid, before any transfer fee: 25 bps (measured above). The "every-route" line. */
 export const ROUTE_COST_UNDER_MID_BPS = 25;
+
+/** How far over the floor pool's mid a route is allowed to come back when judging "no-route": 25 bps (measured above, readings up to 6.16). */
+export const ROUTE_OVER_MID_BPS = 25;
 
 /** Whether the route's last hop quotes before the transfer fee (gross) or after it (net). */
 export type LastHopQuote = "gross" | "net";
 
+/** Which side of the floor pool's mid the modelled route's price sits: the costly case, or the kind one. */
+export type RoutePrice = "under-mid" | "over-mid";
+
 /**
  * The venue threshold the keeper compares the owner's floor against, per 1e18
  * USDC raw, for a route quoting on `lastHop` at a `feeBps` transfer fee: the
- * mid less ROUTE_COST_UNDER_MID_BPS, less the fee on a net last hop, then less
- * catalogueLegSlippageBps(fee).
+ * mid less ROUTE_COST_UNDER_MID_BPS (or plus ROUTE_OVER_MID_BPS, `over-mid`),
+ * less the fee on a net last hop, then less catalogueLegSlippageBps(fee).
  */
-export function keeperVenueThresholdWad(midWad: bigint, feeBps: number, lastHop: LastHopQuote): bigint {
-  const quote = floorWad(midWad, ROUTE_COST_UNDER_MID_BPS);
+export function keeperVenueThresholdWad(midWad: bigint, feeBps: number, lastHop: LastHopQuote, route: RoutePrice = "under-mid"): bigint {
+  const quote = route === "under-mid" ? floorWad(midWad, ROUTE_COST_UNDER_MID_BPS) : (midWad * BigInt(10_000 + ROUTE_OVER_MID_BPS)) / 10_000n;
   const quoted = lastHop === "net" ? netOfTransferFeeWad(quote, feeBps) : quote;
   return floorWad(quoted, catalogueLegSlippageBps(feeBps));
 }
 
-/** Whether the keeper would buy under `storedWad` on a route quoting on `lastHop`: its own rule, run through the mirror. */
-function keeperBuys(storedWad: bigint, midWad: bigint, feeBps: number, lastHop: LastHopQuote): boolean {
-  const venueThreshold = keeperVenueThresholdWad(midWad, feeBps, lastHop);
+/** Whether the keeper would buy under `storedWad` on the modelled route: its own rule, run through the mirror. */
+function keeperBuys(storedWad: bigint, midWad: bigint, feeBps: number, lastHop: LastHopQuote, route: RoutePrice): boolean {
+  const venueThreshold = keeperVenueThresholdWad(midWad, feeBps, lastHop, route);
   return keeperInvestMinOutFor({ venueThreshold, netOfVenueThreshold: netOfTransferFeeWad(venueThreshold, feeBps), ownerFloor: storedWad }) !== null;
 }
 
@@ -228,7 +243,7 @@ export type FloorRoom = "every-route" | "some-routes" | "no-route";
 /** The three states above, or null when either number is missing. */
 export function floorRoom(storedWad: bigint | null, liveWad: bigint | null, feeBps: number): FloorRoom | null {
   if (storedWad === null || liveWad === null || storedWad <= 0n || liveWad <= 0n) return null;
-  if (keeperBuys(storedWad, liveWad, feeBps, "net")) return "every-route";
-  if (keeperBuys(storedWad, liveWad, feeBps, "gross")) return "some-routes";
+  if (keeperBuys(storedWad, liveWad, feeBps, "net", "under-mid")) return "every-route";
+  if (keeperBuys(storedWad, liveWad, feeBps, "gross", "over-mid")) return "some-routes";
   return "no-route";
 }

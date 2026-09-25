@@ -722,8 +722,9 @@ describe("InvestingCard", () => {
 
   it("tells the owner to sign again when a limit leaves SaverFi no route at all once ANTHROPIC's 3 % is in force, and dates it", () => {
     const mid = BigInt(PRICES!.legs[1]!.wad);
-    // One unit over what even a route quoting before the fee leaves at 300.
-    const tooClose = keeperVenueThresholdWad(mid, 300, "gross") + 1n;
+    // One unit over what even the kindest route quoting before the fee — one
+    // that comes back over the pool's mid — leaves at 300.
+    const tooClose = keeperVenueThresholdWad(mid, 300, "gross", "over-mid") + 1n;
     expect(floorRoom(tooClose, mid, 300)).toBe("no-route");
     expect(floorRoom(tooClose, mid, 100)).toBe("every-route");
     const policy = { ...POLICY, legs: POLICY.legs.map((leg) => (leg.mint === ANTHROPIC_MINT ? { ...leg, minOutRateWad: String(tooClose) } : leg)) };
@@ -736,6 +737,24 @@ describe("InvestingCard", () => {
     expect(html).not.toContain(`>${INVEST_COPY.floorsBelowMarket}<`);
     // The market has NOT passed it: this is not the "Floor passed" refusal.
     expect(html).not.toContain(`>${INVEST_COPY.floorPassed}<`);
+  });
+
+  /**
+   * THE FALSE ALARM THIS GUARDS AGAINST: a floor just past what a route 25 bps
+   * under the mid leaves, which the keeper still buys under whenever the route
+   * comes back at or over the mid (measured 2026-09-25 for SPYx, 6.16 bps
+   * over). The card gives it the note and keeps the ordinary badge.
+   */
+  it("does not say \"Sign again\" over a limit only a costly route refuses — a route at the mid still buys", () => {
+    const mid = BigInt(PRICES!.legs[1]!.wad);
+    const pastCostly = keeperVenueThresholdWad(mid, 300, "gross") + 1n;
+    expect(floorRoom(pastCostly, mid, 300)).toBe("some-routes");
+    const policy = { ...POLICY, legs: POLICY.legs.map((leg) => (leg.mint === ANTHROPIC_MINT ? { ...leg, minOutRateWad: String(pastCostly) } : leg)) };
+    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: policy } }) }));
+    expect(html).toContain(INVEST_COPY.legFloorSomeRoutes("ANTHROPIC", formatUsd(usdcRawPer1e8LegRaw(pastCostly)), 300, 1043).replaceAll("'", "&#x27;"));
+    expect(html).toContain(`>${INVEST_COPY.floorsBelowMarket}<`);
+    expect(html).not.toContain(`>${INVEST_COPY.floorNoRoute}<`);
+    expect(html).not.toMatch(/will not buy|does not buy/);
   });
 
   it("Pause asks for the policy on screen to be signed again with investing off, and is offered with no prices on screen; it never hands the flow the click event", async () => {

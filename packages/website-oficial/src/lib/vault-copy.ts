@@ -1068,9 +1068,12 @@ export const INVEST_COPY = {
   // "no-route" for each leg, at the highest transfer fee its issuer has
   // written; these are the words for the last two. Neither may say more than
   // the keeper does: under "some-routes" it still buys whenever a sweep's best
-  // route quotes before the fee, so the sentence must not say it refuses; under
-  // "no-route" it refuses the whole basket and the SOL conversion on every
-  // sweep (invest-tick.ts, before the wrap), and the sentence says exactly that.
+  // route quotes before the fee or comes back close enough to the pool's price,
+  // so the sentence must not say it refuses; under "no-route" not even a route
+  // 25 bps over the pool's price clears the limit, the keeper refuses the whole
+  // basket and the SOL conversion on every sweep (invest-tick.ts, before the
+  // wrap), and the sentence says exactly that. A leg with no fee reaches
+  // "some-routes" only through the route's own price, and is never told of a fee.
   //
   // `fromEpoch` is the epoch a written rise takes effect in, when the limit is
   // still fine at the fee charged today and only that rise moves it; null when
@@ -1079,9 +1082,11 @@ export const INVEST_COPY = {
   /** "some-routes": a note, not an alarm — buying goes on, on some routes. */
   legFloorSomeRoutes: (symbol: string, limit: string, feeBps: number, fromEpoch: number | null): string =>
     `${
-      fromEpoch === null
-        ? `At the ${ratePercent(feeBps)} ${symbol}'s issuer charges on every transfer, your ${symbol} limit of ${limit} lets`
-        : `From ${epochWords(fromEpoch)}, ${symbol}'s issuer charges ${ratePercent(feeBps)} on every transfer. Your ${symbol} limit of ${limit} will still let`
+      fromEpoch !== null
+        ? `From ${epochWords(fromEpoch)}, ${symbol}'s issuer charges ${ratePercent(feeBps)} on every transfer. Your ${symbol} limit of ${limit} will still let`
+        : feeBps > 0
+          ? `At the ${ratePercent(feeBps)} ${symbol}'s issuer charges on every transfer, your ${symbol} limit of ${limit} lets`
+          : `Your ${symbol} limit of ${limit} lets`
     } SaverFi buy on some of the routes the market offers, but not on every one: when a sweep's best route is one of the others, SaverFi waits for a later sweep instead of buying. Signing again with today's prices keeps every route open.`,
   /** "no-route": nothing is bought until the owner signs again. The badge says "Sign again" beside it. */
   legFloorNoRoute: (symbol: string, limit: string, today: string, feeBps: number, fromEpoch: number | null): string =>
