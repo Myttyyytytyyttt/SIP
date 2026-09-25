@@ -492,8 +492,9 @@ Es **otro servicio**, con el mismo código y la misma imagen que el de la secci�
 - **No usa el timbre de Helius**: gira todos los vínculos en cada barrida. Si le pones `SIP_SOLANA_DOORBELL_SECRET`, lo
   ignora y lo avisa.
 - **Sus alertas empiezan por `[volume]`** en el mismo Telegram.
-- En los vaults de beneficio no cobra nada: su fila de `/status` enseña cuánto volumen lleva el tramo sin cobrar y lo
-  que costaría en modo volumen.
+- En los vaults de beneficio no cobra nada. **En seco**, su fila de `/status` enseña cuánto volumen lleva el tramo sin
+  cobrar y lo que costaría en modo volumen; armado ya no lo calcula, para no gastar lecturas de Helius en vaults que
+  cobra el otro.
 
 Qué cuenta como volumen, la frecuencia de cobro y el cambio de modo: `reports/VOLUME_KEEPER_PLAN_2026-09-25.md`.
 

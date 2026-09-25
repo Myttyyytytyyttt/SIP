@@ -1567,7 +1567,10 @@ async function sweep(): Promise<void> {
         investing: {
         if (config.role === "volume") {
           let detail = settle.detail;
-          if (vaultState !== null && vaultState.skimMode === MODE_PROFIT && settle.outcome === "UNSUPPORTED_MODE") {
+          // THE PREVIEW IS A DRY RUN'S ONLY. It walks a span the profit keeper
+          // settles, on the same Helius account; an acting volume keeper's job is to
+          // settle VOLUME vaults, and it does not spend reads describing the others.
+          if (!settleTurn.live && vaultState !== null && vaultState.skimMode === MODE_PROFIT && settle.outcome === "UNSUPPORTED_MODE") {
             try {
               detail = await previewVolume({ connection, program, link, vault: vaultState, book: volumePreviews });
             } catch (error) {
