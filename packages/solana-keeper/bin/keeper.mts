@@ -892,7 +892,7 @@ const claim: KeeperClaim = new KeeperClaim({
 });
 
 const liveBlocker = (): string | null =>
-  missingLiveCondition({ armed: config.armed, verification, claimLive: claim.live });
+  missingLiveCondition({ armed: config.armed, verification, claimLive: claim.live, lockName: lockNameFor(config.role) });
 /** Never cached by a caller — always asked. */
 const isLive = (): boolean => liveBlocker() === null;
 
@@ -1436,6 +1436,7 @@ async function sweep(): Promise<void> {
                       vault: link.vault,
                       owner: vaultState.owner,
                       from: measurementStart(link),
+                      current: { mode: vaultState.skimMode, volumeBps: vaultState.volumeBps },
                     }),
                   nowSeconds: () => Date.now() / 1000,
                 }),

@@ -10,6 +10,7 @@ import { loadConfig, readRole } from "../src/config.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 import { tradeNotional } from "../src/measure-volume.js";
 import { measureSince, readTransaction, type LedgerReader } from "../src/measure-window.js";
+import { missingLiveCondition } from "../src/chain-state.js";
 import { KEEPER_LOCK_NAME, VOLUME_KEEPER_LOCK_NAME, advisoryKeyFor, lockNameFor } from "../src/singleton.js";
 import { FakeLedger, chained } from "./fake-ledger.js";
 import { FIXTURES, fixtureConnection } from "./volume-fixtures.js";
@@ -59,6 +60,12 @@ describe("the two locks", () => {
     expect(lockNameFor("profit")).toBe("sip-solana-keeper");
     expect(lockNameFor("volume")).toBe(VOLUME_KEEPER_LOCK_NAME);
     expect(advisoryKeyFor(lockNameFor("volume"))).not.toBe(advisoryKeyFor(lockNameFor("profit")));
+  });
+
+  it("are named on /status as the lock this keeper waits for, not the other one's", () => {
+    const waiting = (lockName: string) => missingLiveCondition({ armed: true, verification: { kind: "verified" }, claimLive: false, lockName });
+    expect(waiting(lockNameFor("volume"))).toBe("another keeper holds the sip-solana-volume-keeper claim; retrying every sweep");
+    expect(waiting(lockNameFor("profit"))).toBe("another keeper holds the sip-solana-keeper claim; retrying every sweep");
   });
 });
 

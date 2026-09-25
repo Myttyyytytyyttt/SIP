@@ -18,13 +18,14 @@
 //
 // READ FROM THE OWNER'S OWN HISTORY. set_policy_v2 and create_vault_v2 are both
 // signed by the vault's owner (the vault is a PDA of that key), so every policy
-// this vault ever had is in getSignaturesForAddress(owner). The walk stops at the
-// span's start unless a change sits above it; then it goes on to the newest policy
-// at or below the start, the rule the span began under.
+// this vault ever had is in getSignaturesForAddress(owner). The walk reads back
+// past the span's start to the newest policy at or below it, the rule the span
+// began under, and must end on the rule the vault holds now.
 //
 // WHEN IT CANNOT KNOW, IT FORGIVES. A change the walk cannot decode (the program
 // reached through another program's CPI) or a start it cannot find within its
-// pages counts as a boundary: that charges less, never more. A transaction it
+// pages counts as a boundary, and a history that does not end on the vault's rule
+// forgives the whole span this turn: both charge less, never more. A transaction it
 // cannot READ is different: the answer would be a guess, so it throws, and nothing
 // is attested this turn.
 
@@ -107,8 +108,18 @@ export function policyWrites(tx: VersionedTransactionResponse, programId: string
   return writes;
 }
 
+/** Charges nothing: every trade of the span is at or below it (u64::MAX). */
+export const FORGIVE_ALL_SLOT = 18_446_744_073_709_551_615n;
+
 /**
  * The boundary for a span of `vault` that starts at `from`. See the head of this file.
+ *
+ * IT MUST END ON THE RULE THE VAULT HOLDS. The attestation is built from the vault
+ * this turn read (`current`), and an endpoint whose signature index lags its
+ * account state can serve a history without the write that produced it. A walk
+ * that ends on another rule, or cannot say which rule it ends on, has missed a
+ * change it cannot place: it forgives the whole span this turn (FORGIVE_ALL_SLOT,
+ * `verified` false), and the next turn asks again.
  */
 export async function findPolicyBoundary(args: {
   readonly reader: OwnerHistoryReader;
@@ -116,8 +127,15 @@ export async function findPolicyBoundary(args: {
   readonly vault: PublicKey;
   readonly owner: PublicKey;
   readonly from: bigint;
-}): Promise<PolicyBoundary> {
-  const { reader, programId, vault, owner, from } = args;
+  /** The vault's mode and volume rate as this turn read them. */
+  readonly current: { readonly mode: number; readonly volumeBps: number };
+  /**
+   * Writes already decoded, by signature (PolicyBoundaryBook): a landed
+   * transaction's writes never change, so each is read at most once.
+   */
+  readonly known?: Map<string, readonly PolicyWrite[]>;
+}): Promise<PolicyBoundary & { readonly verified: boolean }> {
+  const { reader, programId, vault, owner, from, current, known } = args;
   /** Newest first, as the walk meets them. */
   const above: PolicyWrite[] = [];
   let startRule: PolicyWrite["rule"] | undefined;
@@ -131,23 +149,25 @@ export async function findPolicyBoundary(args: {
     );
     for (const info of signatures) {
       const atOrBelowStart = BigInt(info.slot) <= from;
-      if (atOrBelowStart && !reachedStart) {
-        reachedStart = true;
-        // NO CHANGE ABOVE THE START: the span has had one rule throughout.
-        if (above.length === 0) break walk;
-      }
+      if (atOrBelowStart) reachedStart = true;
       if (info.err !== null && info.err !== undefined) continue;
-      const tx = await reader.transaction(info.signature, POLICY_WALK_COMMITMENT);
-      if (tx === null) {
-        throw new Error(
-          `the owner's transaction ${info.signature} could not be read, so whether it changed this vault's policy is unknown; nothing is attested`,
-        );
+      let writes = known?.get(info.signature);
+      if (writes === undefined) {
+        const tx = await reader.transaction(info.signature, POLICY_WALK_COMMITMENT);
+        // A MISSING META IS AN UNREAD TRANSACTION, not one that wrote nothing.
+        if (tx === null || !tx.meta) {
+          throw new Error(
+            `the owner's transaction ${info.signature} could not be read, so whether it changed this vault's policy is unknown; nothing is attested`,
+          );
+        }
+        writes = policyWrites(tx, programId, vault, info.signature).reverse();
+        known?.set(info.signature, writes);
       }
-      const writes = policyWrites(tx, programId, vault, info.signature).reverse();
       if (!atOrBelowStart) {
         above.push(...writes);
       } else if (writes.length > 0) {
-        // The last write of the newest policy transaction at or below the start.
+        // The last write of the newest policy transaction at or below the start:
+        // the rule the span began under.
         startRule = writes[0]!.rule;
         break walk;
       }
@@ -161,7 +181,18 @@ export async function findPolicyBoundary(args: {
         "so a policy change inside the span cannot be ruled out; nothing is attested",
     );
   }
-  if (above.length === 0) return { slot: null, detail: `no policy change since slot ${from}` };
+
+  const ends = above.length > 0 ? above[0]!.rule : (startRule ?? null);
+  if (ends === null || ends.mode !== current.mode || ends.volumeBps !== current.volumeBps) {
+    return {
+      slot: FORGIVE_ALL_SLOT,
+      verified: false,
+      detail:
+        `the owner's history as read does not end on the rule this vault holds (mode ${current.mode}, ${current.volumeBps} bps), ` +
+        "so a change it cannot place is missing; nothing is charged this turn",
+    };
+  }
+  if (above.length === 0) return { slot: null, verified: true, detail: `no policy change since slot ${from}` };
 
   // OLDEST FIRST FROM THE RULE THE SPAN BEGAN UNDER. Unknown when the walk did not
   // find it, and then the first change counts: that forgives more, never less.
@@ -172,9 +203,12 @@ export async function findPolicyBoundary(args: {
     if (changed) boundary = write;
     rule = write.rule;
   }
-  if (boundary === null) return { slot: null, detail: `the owner rewrote the policy since slot ${from} without changing the mode or the volume rate` };
+  if (boundary === null) {
+    return { slot: null, verified: true, detail: `the owner rewrote the policy since slot ${from} without changing the mode or the volume rate` };
+  }
   return {
     slot: boundary.slot,
+    verified: true,
     detail: `the owner changed the mode or the volume rate at slot ${boundary.slot} (${boundary.signature}); trades at or before it are not charged`,
   };
 }
@@ -187,15 +221,23 @@ export async function findPolicyBoundary(args: {
  */
 export class PolicyBoundaryBook {
   readonly #byVault = new Map<string, { readonly key: string; readonly boundary: PolicyBoundary }>();
+  /** Every owner transaction decoded so far, per vault and then by signature: what it wrote to THAT vault. */
+  readonly #known = new Map<string, Map<string, readonly PolicyWrite[]>>();
 
-  async boundary(args: Parameters<typeof findPolicyBoundary>[0]): Promise<PolicyBoundary> {
+  async boundary(args: Omit<Parameters<typeof findPolicyBoundary>[0], "known">): Promise<PolicyBoundary> {
     const [newest] = await args.reader.signatures(args.owner, { limit: 1 }, POLICY_WALK_COMMITMENT);
-    const key = `${args.from}:${newest?.signature ?? "none"}`;
+    // THE RULE THE VAULT HOLDS IS IN THE KEY: a policy write the history had not
+    // shown yet changes the vault first, and must not be answered from before it.
+    const key = `${args.from}:${newest?.signature ?? "none"}:${args.current.mode}:${args.current.volumeBps}`;
     const vault = args.vault.toBase58();
     const cached = this.#byVault.get(vault);
     if (cached !== undefined && cached.key === key) return cached.boundary;
-    const boundary = await findPolicyBoundary(args);
-    this.#byVault.set(vault, { key, boundary });
+    const known = this.#known.get(vault) ?? new Map<string, readonly PolicyWrite[]>();
+    this.#known.set(vault, known);
+    const boundary = await findPolicyBoundary({ ...args, known });
+    // AN UNVERIFIED ANSWER IS NOT KEPT: the next turn asks the history again.
+    if (boundary.verified) this.#byVault.set(vault, { key, boundary });
+    else this.#byVault.delete(vault);
     return boundary;
   }
 }

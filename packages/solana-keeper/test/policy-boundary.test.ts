@@ -5,7 +5,7 @@
 import { Keypair, PublicKey, TransactionInstruction, TransactionMessage, type Finality, type VersionedTransactionResponse } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import { idl, SIP_PROGRAM_ID } from "../src/idl.js";
-import { MAX_OWNER_PAGES, OWNER_PAGE_LIMIT, PolicyBoundaryBook, findPolicyBoundary, policyWrites, type OwnerHistoryReader } from "../src/policy-boundary.js";
+import { FORGIVE_ALL_SLOT, MAX_OWNER_PAGES, OWNER_PAGE_LIMIT, PolicyBoundaryBook, findPolicyBoundary, policyWrites, type OwnerHistoryReader } from "../src/policy-boundary.js";
 import { MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
 
 const PROGRAM = new PublicKey(SIP_PROGRAM_ID);
@@ -102,8 +102,11 @@ function history(oldestFirst: readonly Entry[], unreadable: ReadonlySet<string> 
   return { reader, reads };
 }
 
-const boundary = (entries: readonly Entry[], from: bigint, unreadable?: ReadonlySet<string>) =>
-  findPolicyBoundary({ reader: history(entries, unreadable).reader, programId: SIP_PROGRAM_ID, vault, owner, from });
+type Rule = { readonly mode: number; readonly volumeBps: number };
+const boundary = (entries: readonly Entry[], from: bigint, current: Rule, unreadable?: ReadonlySet<string>) =>
+  findPolicyBoundary({ reader: history(entries, unreadable).reader, programId: SIP_PROGRAM_ID, vault, owner, from, current });
+const VOLUME_200: Rule = { mode: MODE_VOLUME, volumeBps: 200 };
+const VOLUME_50: Rule = { mode: MODE_VOLUME, volumeBps: 50 };
 
 const created = (slot: number, mode = MODE_PROFIT, volumeBps = 200): Entry => ({ signature: `create-${slot}`, slot, data: createVaultData(mode, volumeBps) });
 const policy = (slot: number, mode: number, volumeBps = 200, paused = false): Entry => ({ signature: `policy-${slot}`, slot, data: setPolicyData(mode, volumeBps, paused) });
@@ -127,49 +130,67 @@ describe("policyWrites", () => {
 });
 
 describe("findPolicyBoundary", () => {
-  it("charges the whole span when nothing changed above its start, and reads no transaction to know it", async () => {
-    const { reader, reads } = history([created(10, MODE_VOLUME), other(50), other(90)]);
-    expect(await findPolicyBoundary({ reader, programId: SIP_PROGRAM_ID, vault, owner, from: 100n })).toMatchObject({ slot: null });
-    expect(reads).toEqual([]);
+  it("charges the whole span when nothing changed above its start and the rule there is the vault's", async () => {
+    const { reader, reads } = history([created(10, MODE_VOLUME), other(50), other(90), other(150)]);
+    expect(await findPolicyBoundary({ reader, programId: SIP_PROGRAM_ID, vault, owner, from: 100n, current: VOLUME_200 })).toMatchObject({ slot: null, verified: true });
+    // Back to the rule the span began under, and no further.
+    expect(reads).toEqual(["other-150", "other-90", "other-50", "create-10"]);
+  });
+
+  // THE INDEX CAN LAG THE ACCOUNT: the vault already holds VOLUME, and the history
+  // served does not show the write that put it there.
+  it("forgives the whole span when the history does not end on the rule the vault holds", async () => {
+    expect(await boundary([created(10, MODE_PROFIT), other(150)], 100n, VOLUME_200)).toMatchObject({ slot: FORGIVE_ALL_SLOT, verified: false });
+    expect(await boundary([created(10, MODE_VOLUME, 50), policy(130, MODE_VOLUME, 100)], 100n, VOLUME_50)).toMatchObject({ slot: FORGIVE_ALL_SLOT, verified: false });
+  });
+
+  it("refuses a transaction the node returned without its meta", async () => {
+    const entries = [created(10, MODE_VOLUME)];
+    const { reader } = history(entries);
+    const bare: OwnerHistoryReader = { ...reader, transaction: async (signature) => ({ ...(await reader.transaction(signature, "confirmed"))!, meta: null }) };
+    await expect(findPolicyBoundary({ reader: bare, programId: SIP_PROGRAM_ID, vault, owner, from: 100n, current: VOLUME_200 })).rejects.toThrow(/could not be read/);
   });
 
   it("starts a span switched from PROFIT to VOLUME at the switch", async () => {
-    expect(await boundary([created(10, MODE_PROFIT), other(120), policy(150, MODE_VOLUME)], 100n)).toMatchObject({ slot: 150n });
+    expect(await boundary([created(10, MODE_PROFIT), other(120), policy(150, MODE_VOLUME)], 100n, VOLUME_200)).toMatchObject({ slot: 150n });
   });
 
   it("starts it at the last change of the volume rate", async () => {
-    expect(await boundary([created(10, MODE_VOLUME, 50), policy(130, MODE_VOLUME, 100), policy(160, MODE_VOLUME, 50)], 100n)).toMatchObject({ slot: 160n });
+    expect(await boundary([created(10, MODE_VOLUME, 50), policy(130, MODE_VOLUME, 100), policy(160, MODE_VOLUME, 50)], 100n, VOLUME_50)).toMatchObject({ slot: 160n });
   });
 
   it("forgives nothing for a pause and an unpause", async () => {
-    expect(await boundary([created(10, MODE_VOLUME, 50), policy(130, MODE_VOLUME, 50, true), policy(160, MODE_VOLUME, 50, false)], 100n)).toMatchObject({ slot: null });
+    expect(await boundary([created(10, MODE_VOLUME, 50), policy(130, MODE_VOLUME, 50, true), policy(160, MODE_VOLUME, 50, false)], 100n, VOLUME_50)).toMatchObject({ slot: null });
   });
 
   it("judges the first change against the rule in force at the start, not against nothing", async () => {
     // Written below the start as VOLUME 50: a later write of VOLUME 50 is no change.
-    expect(await boundary([created(10, MODE_PROFIT), policy(80, MODE_VOLUME, 50), policy(130, MODE_VOLUME, 50, true)], 100n)).toMatchObject({ slot: null });
+    expect(await boundary([created(10, MODE_PROFIT), policy(80, MODE_VOLUME, 50), policy(130, MODE_VOLUME, 50, true)], 100n, VOLUME_50)).toMatchObject({ slot: null });
     // Written below the start as PROFIT: the first VOLUME write above it is the switch.
-    expect(await boundary([created(10, MODE_PROFIT), policy(130, MODE_VOLUME, 50), policy(140, MODE_VOLUME, 50, true)], 100n)).toMatchObject({ slot: 130n });
+    expect(await boundary([created(10, MODE_PROFIT), policy(130, MODE_VOLUME, 50), policy(140, MODE_VOLUME, 50, true)], 100n, VOLUME_50)).toMatchObject({ slot: 130n });
   });
 
   it("forgives up to a change it could not decode", async () => {
-    expect(await boundary([created(10, MODE_VOLUME), { ...policy(140, MODE_VOLUME), inner: true }], 100n)).toMatchObject({ slot: 140n });
+    // The unknown change is followed by a known write of the vault's rule.
+    expect(await boundary([created(10, MODE_VOLUME), { ...policy(140, MODE_VOLUME), inner: true }, policy(150, MODE_VOLUME)], 100n, VOLUME_200)).toMatchObject({ slot: 150n });
+    // Ending on it, the walk cannot say which rule the vault is under, and forgives everything.
+    expect(await boundary([created(10, MODE_VOLUME), { ...policy(140, MODE_VOLUME), inner: true }], 100n, VOLUME_200)).toMatchObject({ slot: FORGIVE_ALL_SLOT });
   });
 
   it("refuses when a transaction above the start cannot be read", async () => {
-    await expect(boundary([created(10, MODE_VOLUME), policy(140, MODE_VOLUME, 20)], 100n, new Set(["policy-140"]))).rejects.toThrow(/could not be read/);
+    await expect(boundary([created(10, MODE_VOLUME), policy(140, MODE_VOLUME, 20)], 100n, { mode: MODE_VOLUME, volumeBps: 20 }, new Set(["policy-140"]))).rejects.toThrow(/could not be read/);
   });
 
   const FULL = MAX_OWNER_PAGES * OWNER_PAGE_LIMIT;
 
   it("refuses when its pages run out above the start without a single write", async () => {
     const busy = Array.from({ length: FULL }, (_, i) => other(200 + i));
-    await expect(boundary([created(10, MODE_VOLUME), ...busy], 100n)).rejects.toThrow(/was not read back/);
+    await expect(boundary([created(10, MODE_VOLUME), ...busy], 100n, VOLUME_200)).rejects.toThrow(/was not read back/);
   });
 
   it("counts the first change as a boundary when its pages run out before the rule at the start", async () => {
     const busy = Array.from({ length: FULL - 1 }, (_, i) => other(200 + i));
-    expect(await boundary([created(10, MODE_VOLUME, 50), ...busy, policy(20_000, MODE_VOLUME, 50, true)], 100n)).toMatchObject({ slot: 20_000n });
+    expect(await boundary([created(10, MODE_VOLUME, 50), ...busy, policy(20_000, MODE_VOLUME, 50, true)], 100n, VOLUME_50)).toMatchObject({ slot: 20_000n });
   });
 });
 
@@ -177,10 +198,39 @@ describe("PolicyBoundaryBook", () => {
   it("walks once while nothing new reaches the owner's history", async () => {
     const book = new PolicyBoundaryBook();
     const { reader, reads } = history([created(10, MODE_PROFIT), policy(150, MODE_VOLUME)]);
-    const args = { reader, programId: SIP_PROGRAM_ID, vault, owner, from: 100n };
+    const args = { reader, programId: SIP_PROGRAM_ID, vault, owner, from: 100n, current: VOLUME_200 };
     expect(await book.boundary(args)).toMatchObject({ slot: 150n });
     const after = reads.length;
     expect(await book.boundary(args)).toMatchObject({ slot: 150n });
     expect(reads.length).toBe(after);
+  });
+
+  it("reads each owner transaction once, however often the history grows", async () => {
+    const book = new PolicyBoundaryBook();
+    const entries: Entry[] = [created(10, MODE_PROFIT), policy(150, MODE_VOLUME), other(160)];
+    const first = history(entries);
+    await book.boundary({ reader: first.reader, programId: SIP_PROGRAM_ID, vault, owner, from: 100n, current: VOLUME_200 });
+    const grown = history([...entries, other(170)]);
+    expect(await book.boundary({ reader: grown.reader, programId: SIP_PROGRAM_ID, vault, owner, from: 100n, current: VOLUME_200 })).toMatchObject({ slot: 150n });
+    expect(grown.reads).toEqual(["other-170"]);
+  });
+
+  it("does not answer from before a rule change the history has not shown yet", async () => {
+    const book = new PolicyBoundaryBook();
+    const { reader } = history([created(10, MODE_VOLUME, 50), other(150)]);
+    const args = { reader, programId: SIP_PROGRAM_ID, vault, owner, from: 100n };
+    expect(await book.boundary({ ...args, current: VOLUME_50 })).toMatchObject({ slot: null, verified: true });
+    // The vault now holds 200 bps; the owner's history still ends where it did.
+    expect(await book.boundary({ ...args, current: VOLUME_200 })).toMatchObject({ slot: FORGIVE_ALL_SLOT });
+  });
+
+  it("does not keep an answer that forgave the whole span for want of the vault's rule", async () => {
+    const book = new PolicyBoundaryBook();
+    const { reader } = history([created(10, MODE_PROFIT), other(150)]);
+    const args = { reader, programId: SIP_PROGRAM_ID, vault, owner, from: 100n, current: VOLUME_200 };
+    expect(await book.boundary(args)).toMatchObject({ slot: FORGIVE_ALL_SLOT });
+    // The history catches up: the same newest signature, and now the write is there.
+    const caught = history([created(10, MODE_PROFIT), policy(120, MODE_VOLUME), other(150)]);
+    expect(await book.boundary({ ...args, reader: caught.reader })).toMatchObject({ slot: 120n });
   });
 });
