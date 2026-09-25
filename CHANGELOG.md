@@ -10,6 +10,157 @@ line is not.
 
 ---
 
+## 2026-09-25
+
+*Partial: written at 20:00 Lisbon from the commits on main up to `50d0d51` and the chain up to
+18:45 UTC. The rest of the day will be added tomorrow.*
+
+The day SaverFi started saving by volume. Early in the morning the owner asked for a keeper that
+charges on trading volume alone, with a report first; by the evening a second keeper service was
+live on Railway, Volume was offered across the web, and the owner's own vault had switched to
+1 % and saved three times from real trades on mainnet. Overnight, before any of that, the
+follow-ups to the PreStocks issuer's 3 % fee were finished, and in the evening a public page
+began showing the vault's prices beside Pyth's and PreStocks'. 40 commits reached main between
+01:16 and 19:42 Lisbon (four of them merges, one the previous day's changelog). Every volume
+settlement so far is the owner's: the program still holds exactly one vault.
+
+**Volume mode — from a report in the morning to three settlements in the evening**
+
+- **The owner's decision.** The plan report `25474d0` recommended one keeper, tried first as a
+  dry shadow, with real charging only after the hackathon's close. The owner approved its rules
+  and overruled that part: start straight away with a separate keeper, so that what already
+  works stays apart from what is still being proven. The owner's rules for it: low rates,
+  because both legs of a round trip count; measured in SOL; a plain transfer is never charged.
+  The landing's volume line stays as the owner decided that morning `d5a77d5`.
+- **A second keeper service** `80bea12` `0ff6dac`. It is built from the same keeper package and
+  told apart by a single role setting; it runs under its own Postgres lock, never invests and
+  has no doorbell. Each keeper settles exactly one mode and leaves the other mode's vaults to the
+  other keeper; the profit keeper still invests every vault, volume vaults included. A volume
+  keeper refuses to start on a service that holds the doorbell's secret, so a role set on the
+  wrong service fails the deploy instead of silently stopping profit settlements `7e86007`. It
+  reached main at 17:27 UTC (18:27 Lisbon) through `a34e90c`, on the owner's "push"; the owner
+  set up the Railway service, dry first and then armed, and the runbook has a new section for
+  it `f1d82f8`. At 18:00 UTC the two `/status` pages showed the profit keeper restarted as
+  `role: profit` at 17:29:56 UTC and the volume keeper live and armed since 17:32:58 UTC.
+- **What counts as volume.** A transaction the trading wallet signed, that succeeded, that is
+  not a plain transfer or one of SaverFi's own settlements, and in which the wallet's SOL
+  (wrapped SOL included) moved one way and another token the other. Its size is how far the
+  wallet's SOL moved, not counting the network fee or the rent of the wallet's token accounts
+  opened or closed, and both legs of a round trip count. Wraps, unwraps, a transfer carrying a
+  memo and failed swaps count as nothing; a swap with no SOL leg counts only the SOL the wallet
+  pays beside it, such as a tip. Each gap charges less, never more. The rules are pinned to
+  real mainnet transactions — a failed swap, a USDC-to-token swap, a memo transfer, a wrap and
+  an unwrap among them `f236410` `aa96312` `2484812`.
+- **When it charges.** A volume slice settles once it owes 0.001 SOL, or an hour after its
+  oldest trade. Only trades after the vault's last change of mode or volume rate are charged;
+  those before are forgiven, and a pause forgives nothing. Where the keeper cannot tell when
+  that change was — an index that lags, an owner history too long to read — it forgives rather
+  than charges `8b68e9a` `6d786b1`. Each settlement still moves at most the vault's cap
+  (0.06 SOL by default, 6 SOL of trading at 1 %), and what is owed above it is not carried over.
+- **The switch and the first volume settlements.** At 17:41:26 UTC the owner's pension key moved
+  the vault from 25 % of profit to 1 % of volume
+  ([`4iyqFNcx…`](https://solscan.io/tx/4iyqFNcx1N6dGPX8sGQGiiDcEdYqwUxRYuNnFQBiiprCWinkXCJBNRLzMGBVzbADt547YK2nxgp6ECzxFuXeo5Ki));
+  the profit rate stays stored on the vault. The owner then made five trades, and the volume
+  keeper settled at 17:45, 17:46 and 17:47 UTC: 0.009261436 + 0.005122619 + 0.029371596 =
+  **0.043755651 SOL**, 1 % of the 4.375565225 SOL they bought and sold
+  ([`5JYcviq5…`](https://solscan.io/tx/5JYcviq52S49mXuHT3iVi9ritB55uyLcjcvLk2xUXYCVgsEG3q8HdmQuHJsBr6irwBxG8aqvfRjbGzAjMCLaWHxT) ·
+  [`3NwEBhhy…`](https://solscan.io/tx/3NwEBhhy426ABfpqb9CHwap3GNBsHXkjQr4e94H6LmhUPKvACz5i2cyWM1YR5YK6Nct6TQsyJtCJ6s4o2bjuvqoS) ·
+  [`2u5bR3CL…`](https://solscan.io/tx/2u5bR3CLCvMQCE8M2JbY5uiztsmLBmzJR4tD7qqSSQHZQXJoVVs7mSbvuFdV5nMYJiLf7d5iR34EZw4LBJNUpTEB)).
+  Re-running the keeper's measurement over those five trades gives each base to the lamport,
+  and none reached the cap. The wallet made no trade between its last profit settlement and the
+  switch, so the switch's forgiveness has not been exercised on mainnet yet.
+- **Where the savings went.** Earlier that afternoon, still on profit, the vault had saved
+  0.022141459 SOL at 25 %. The keeper wrapped and converted all four settlements into USDC; the
+  vault holds 7.975313 USDC, under the $10 its two-stock basket needs before it buys ($5 a
+  leg), so nothing saved on volume has bought stock yet. Settlement has now run six times on
+  this vault — three at profit, three at volume — and the six payments add up exactly to its
+  `lifetime_saved`, 0.130904451 SOL.
+
+**Web — Volume across the site**
+
+- **Vault settings** `3c21aa4`. What the owner asked for that morning: a gear on the Savings
+  rule card that holds everything that changes the vault — how it saves (profit or volume, a
+  rate bar with presets, pause) and what it buys (assets by category and their shares, and an
+  investment threshold that starts at $10 whatever the number of assets) — with a "?" on every
+  title that explains it. It can also re-sign the stored basket at today's prices ("Refresh
+  price limits").
+- **Volume can be chosen** `22b5dc0` `e92e663`. A Profit | Volume toggle in Vault settings, and
+  a Volume option when creating a vault from the vault card, both starting at 1 % — the owner's
+  choice, 1 % of the buy and 1 % of the sell — with 0.5, 1 and 2 % presets. Before the wallet
+  asks, the switch says what it means: every buy and every sell counts, in SOL, win or lose;
+  plain transfers never do; what the profit rule had not charged yet is forgiven; nothing above
+  the per-settlement cap is carried over. The first-run setup still starts on Profit.
+- **"In buys and sells"** `8ed069e`. On a first look at the feed the owner saw what read like a
+  trade of more than $300 that the owner had never made. It was a wording problem, not a
+  counting one: the third settlement's row showed about $355 of "volume", which was a buy and a
+  sell 4 s apart, added together. Rows now read "1 % of $X in buys and sells", and the savings
+  panel says "Now 1% of every buy and sell · saving since Sep 18, 2026" instead of crediting the
+  whole total to today's rule.
+- **Also on the dashboard.** The savings chart reads 1h · 1d · 7d — a point an hour over 7
+  days, a day over 30, a week over six months — each ending at the hero's total; the weeks'
+  squares always show 13 weeks; and the vault's address, copyable and linked to Solscan, sits
+  under the total, as the owner asked `fa7d3a3`. The logo now leads to `/welcome`, which shows
+  the landing to anyone: a connected key at the site's root goes straight to its pension, so
+  the owner had stopped seeing the landing `ea91df0`. The onboarding's two clips were remade as
+  5 s loops in the launch film's look — six trading terminals sending "+0.04 SOL" to SaverFi,
+  then SaverFi sending it into a vault only your key opens `66c3633`.
+- All of it is live: the production site is built from `50d0d51`, which contains every commit
+  in this entry.
+
+**Prices anyone can check, without a wallet**
+
+- A public page sets what the vault buys beside what Pyth and PreStocks say, so a judge with no
+  wallet can see both `73ec97c`. `/prices` answers as JSON and `/prices/view` is the page for a
+  reader, both built by the same loader so they cannot disagree `50d0d51`. The SOL pool's price
+  stands beside Pyth's SOL/USD over USDC/USD, SPYx beside Pyth's own SPYx feed, and ANTHROPIC
+  beside PreStocks' own API, with the fee in force and the one written for epoch 1043. Every
+  figure carries its age or its source. Both answer on the production site (checked at 18:46
+  UTC).
+- The keeper's oracle gate, on main, now also reads the confidence Pyth publishes beside each
+  price: while either feed's band is wider than 50 bps of its own price, no SOL is converted
+  `73ec97c`. It already held back on a price more than 60 s old or 5 % away from the route it
+  captured. Neither keeper's `/status` names the commit it runs, so whether the live keepers
+  have this yet is not established.
+
+**The 3 % fee, finished overnight**
+
+- Through the night the keeper refused the owner's basket on every sweep and Telegram kept
+  repeating "A basket cannot be bought": with 3 % written for a coming epoch, the keeper priced
+  its minimum out as if that fee were already charged, and landed under the floor the owner had
+  signed. **Keeper:** the fee that counts is the one in force in the epoch the transaction lands
+  in, and a rise written for the next epoch counts only in the current epoch's last 9,000 slots
+  `3378b4e`; when the figure still falls under the owner's floor but the route covers that
+  floor, the minimum drops to the floor instead of refusing, and the fee warning is sent once,
+  not every sweep `df6ca67`. **Web and core:** each leg's floor is signed net of that leg's fee,
+  5 % under the price, 7 % when the fee is 3 % `bea18cf`; the investing card tells a floor some
+  routes can fill from one none can, and asks to sign again only for the second; the fee ceiling
+  binds only the stocks chosen `986b8be` `adb294b` `f777f61`, merged `6964044` and published at
+  05:01 Lisbon. Two commits that touch only tests, comments and docs hold numbers that core and
+  the web quote from the keeper to one shared vector, instead of reading the keeper's source as
+  text `31d7361` `6e4dc6a`.
+- No buy could have followed overnight in any case: since 16:35 UTC on 2026-09-23 the vault had
+  held 5.504376 USDC and no SOL beyond its rent, under the $10 its two-stock basket needs at $5
+  a leg. At 16:46 UTC the owner re-signed the vault's investing policy
+  ([`8memxAEd…`](https://solscan.io/tx/8memxAEdbhpFNupyYfVWLyzR8SBZwd8UKzzdZgta9kUMWPvvLgaAVCfBg9yqDWN9jZVS8EBULrURKL4MwDHJR17)),
+  at 16:47:08 sent 7 USDC straight into the vault
+  ([`4Ax3gKfZ…`](https://solscan.io/tx/4Ax3gKfZfmN8Hj3o2yYJ97KsmW4jPzXKNR23KbXhRT8FRy538GJ5y14fZKsTnPjy3Mg8U79H3Lm9cEWPkkHVq6Hy)),
+  and 40 s later the keeper bought both legs, 6.25 USDC each
+  ([`4Kam49yG…`](https://solscan.io/tx/4Kam49yGYiJpKtNbt6LoBqJqVdfUmrBJW2cXCkKTo85eoNZo1ndjxQv8W1jhSKm3egtBs2kHMunRmpwSZNKxzU7C) ·
+  [`4KFyPXtC…`](https://solscan.io/tx/4KFyPXtC7S83C19s8JHah5KiFbR3HEKY2pTDQtsHY6wi7tMjF12AGd8sjiGjZ232wK1gTjQwPWcwu4voQHnfxsQj)).
+  Whether the re-signed floors were also needed is not established. ANTHROPIC's 3 % takes
+  effect with epoch 1043, around 05:00 UTC on Saturday 26 at today's slot rate.
+
+**Docs**
+
+- The README opens with a moving demo, the launch film at 1.2× as the owner asked `63376ed`,
+  and, also at the owner's request, shows the newest changelog day folded under "Latest update"
+  `70bacb3`; the 24th's evening was added to this file `e186296`.
+
+**Dropped.** Vanity addresses for trading wallets and vaults, the owner's idea in the small
+hours, were set aside at 04:30 UTC so the day could go to what is most useful.
+
+---
+
 ## 2026-09-24
 
 *Written at 17:00 Lisbon, completed on 2026-09-25 from the evening's work.*
@@ -97,8 +248,8 @@ program still holds one vault.
   the rate in force and the rate already written for a later epoch, and the rules judge the
   higher one. The offerable stocks stay SPYx and ANTHROPIC `0b31682`. The web says exactly that:
   ANTHROPIC charges 1 % today and has 3 % written for epoch 1043 — never "charges 3 %" early.
-- Written on its own branch that evening and merged into main at 04:57 on 2026-09-25 `6964044`,
-  together with follow-ups made that night (those belong to the 25th).
+- Written on its own branch that evening and on main by itself, ahead of the follow-ups made
+  that night, which were merged later as `6964044` (those belong to the 25th).
 
 **Web — the sample stays a sample, and the wallets modal stops looking like an error**
 
