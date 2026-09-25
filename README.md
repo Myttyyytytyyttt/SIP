@@ -158,6 +158,125 @@ Connect a Solana wallet and every number is read from mainnet through the app's 
 
 ---
 
+## Latest update
+
+The newest day of the [changelog](CHANGELOG.md), copied here each morning. Every earlier day is in the full file.
+
+<!-- latest-changelog:start -->
+<details>
+<summary><b>2026-09-24</b> — the new-user setup rebuilt with the owner, and the owner accepts the PreStocks issuer's 3 % fee</summary>
+
+<br>
+
+A morning spent on the first thing a new user sees. The welcome modal that landed the evening
+before was reworked with the owner, one layer at a time and with the owner's own motion clips,
+until the setup asks two questions — how much of each gain to keep, and what the savings
+become — and takes one signature, the vault's. Linking a trading wallet comes next, from the
+dashboard; a signature to start buying stocks waits until there are savings to buy with.
+8 commits written by 07:00 across several sessions, plus one from the night before that
+landed on main this morning. All of the web work is live on the site (checked in the
+production build); no vault has been created through the new setup on mainnet yet — the
+program still holds one vault.
+
+**Web — onboarding, rebuilt step by step with the owner**
+
+- **A welcome that asks nothing of you.** The screen is now a large "SaverFi" whose "S" is the
+  brand mark, one line of four points, the owner's own motion clip, four short explanations
+  under it, and Continue `d00f0e3` `299f0e0`. The list of costs and the small print left this
+  screen at the owner's request: the vault's rent is now stated above "Create vault", and the
+  link's and investing's on their own cards before those signatures `299f0e0`. The network fee
+  each settlement costs the trading wallet, which the old list named, is no longer stated
+  anywhere in the setup.
+- **The owner's clips play everywhere.** They arrived as 10-bit HEVC, which Chrome on Windows
+  and Firefox cannot play, so they ship re-encoded as H.264 at 423 KB and 307 KB, each with a
+  still frame for anyone who asked for reduced motion `d00f0e3` `b0d9233`.
+- **The vault step got the same treatment** — a large "Create your vault", its four points on
+  one line, and its own clip, which stays on screen while the vault is being read and if that
+  read fails `b0d9233`.
+- **You choose how much of each gain to keep.** A bar from 5 % to 50 % with 10, 15, 20 and 30 %
+  presets, starting at 20 % `dc24ad9`. The chosen rate travels inside the signature, and a build
+  carrying any other rate is refused before the wallet is even asked. The "Advanced" limits are
+  gone from the first vault: everyone starts with the product's limits (at most 0.06 SOL per
+  settlement, and a settlement never takes the trading wallet below 0.05 SOL) and can change
+  them later from the vault card. Under the bar, a single line — "Only gains count · at most
+  0.06 SOL per settlement" — and the cost, above the button, in one sentence `bef6eb4`.
+- **What the savings become — choose now, sign later.** The owner's decision: the setup offers
+  SOL (the default), the stocks the catalogue admits today — SPYx and ANTHROPIC, read from the
+  catalogue rather than written by hand — and USDC, greyed out as "Not available yet" `82ee567`.
+  It is SOL *or* stocks, not a mix, because the investing policy has no setting for keeping part
+  of the savings as SOL: once buying is on, the keeper converts all the SOL the vault holds above
+  its rent, a capped amount per sweep. Nothing extra is signed at setup; the vault's signature
+  is still the only one, and the choice is remembered in that browser for that key.
+- **"Your first savings arrived."** When the first settlement lands, the vault has no investing
+  policy yet, and stocks were chosen at setup in that browser, the dashboard shows a card that
+  asks to start buying them, and says plainly what that signature does: the SOL is sold for
+  USDC, what an issuer that charges a fee takes, and what the price limits are for `ea675b8`.
+  It signs the same policy the investing card would, with one named difference — at most $25
+  per buy. "Keep as SOL" dismisses it. An adversarial review before merging found that the card
+  could show vault prices hours old, which the build then refused, on every retry too, and
+  that its buttons stayed live while the wallet was signing; both were fixed.
+- **Known limit:** the choice lives in the browser. On another device, or after site data is
+  cleared, the card does not appear and the savings stay in SOL until the vault's owner signs a
+  policy from the investing card.
+
+**Keeper and core — the last of Raydium**
+
+- The keeper's Raydium adapter had had no caller since the move to Jupiter on 2026-09-21, but
+  could not be deleted because a test in another package read its source as text and matched
+  byte offsets in it `a9ff3f1` (written late on the 23rd, on main since 05:21 on the 24th). The
+  pool layout's offsets moved into a shared module that core, its test fixture and the route
+  script the keeper uses now import; three copies remain on purpose (the web's in-browser price
+  reader and two operator scripts), and the shared module's header names them. The adapter is
+  gone. One of its deleted tests was the only one proving a money-path check — which token
+  accounts the vault owns — so that check got a new test of its own.
+- Comments that still described the web's per-buy ceiling as a slice of a Raydium pool's
+  reserve were corrected — it never was — and the keeper's refusal for a retired venue no
+  longer claims that every policy signed to date names Raydium, since the owner re-signed onto
+  Jupiter on 2026-09-22 `08b0cf7`.
+
+**The evening — the issuer raises its fee, and the owner accepts it**
+
+- **The keeper's alert did its job.** At 18:11 the owner received a CRITICAL on Telegram from the
+  keeper: the PreStocks issuer had already written a 300 bps (3 %) transfer fee for epoch 1043 —
+  around Saturday 26 September, 05:00 UTC — on seven of its eight tokens, ANTHROPIC included
+  (SPACEX stays at 1 %; SPYx has no transfer fee at all). With the keeper's fee ceiling at 1 %,
+  from that epoch every basket holding a PreStock would have been refused whole, SPYx and the
+  SOL conversion with it, with nothing to sign or deploy on SaverFi's side to stop it.
+- **Decision: accept the 3 %.** The ceiling rises from 100 to 300 bps in the keeper, the
+  catalogue and the web together, held to one shared number `0b31682`. The cost is written where
+  the number lives: 3 % in and 3 % out is a 5.91 % round trip, up from 1.99 %. The market budget
+  does not change — the per-turn impact ceiling stays at 25 bps. A fee written *above* 300 is
+  still a dated CRITICAL; exactly 300 is now a warning that there is no margin left.
+- **The catalogue now judges the fee that is coming, not only today's.** Each fee reading keeps
+  the rate in force and the rate already written for a later epoch, and the rules judge the
+  higher one. The offerable stocks stay SPYx and ANTHROPIC `0b31682`. The web says exactly that:
+  ANTHROPIC charges 1 % today and has 3 % written for epoch 1043 — never "charges 3 %" early.
+- Written on its own branch that evening and merged into main at 04:57 on 2026-09-25 `6964044`,
+  together with follow-ups made that night (those belong to the 25th).
+
+**Web — the sample stays a sample, and the wallets modal stops looking like an error**
+
+- **The sample no longer throws you out.** The tabs, footer and leaderboard carry the sample mode,
+  so "Activity" in the sample no longer shows the connect card, nor "Pension" the landing. The
+  sample's Activity is now a page of its own: totals, filters, rows grouped by day and "Show
+  more" fifty at a time `0a48b49`.
+- **The live dashboard arrives whole.** The first load waits for the history — at most 1.5 s
+  after the snapshot answers — instead of flashing "No activity yet", "0 events" and an empty
+  chart for half a second `0a48b49`.
+- **One plain state per trading wallet.** From the UI audit, the point the owner picked: right
+  after creating a wallet, a new user saw Privy ids, a verification command and a re-seat
+  warning, and read it as an error. Each wallet now shows one state — Linked, Not linked, Linked
+  elsewhere, Paused, Needs permission or Checking — and only the controls that move it forward;
+  everything technical is kept, folded under "Advanced" `c346632`. "Grant keeper permission"
+  became "Grant SaverFi permission". It never says "Not linked" while the chain read is still
+  loading or has failed.
+- The owner decided the footer's Docs, Privacy, Terms and social links stay as they are for now.
+
+</details>
+<!-- latest-changelog:end -->
+
+---
+
 ## Roadmap
 
 ### ✅ Shipped
