@@ -217,6 +217,10 @@ export const LIVE_COPY = {
   progressLabel: "Progress to next investment",
   lastInvestment: "Last investment",
   noInvestmentLoaded: "No investment in the loaded history",
+  // The chain's counters record a buy the loaded page does not hold. The
+  // amount is the whole UTC day's, and there is no transaction to link to.
+  olderThanHistory: "Older than the history loaded here",
+  lastBuyOutsideHistory: (day: string, amount: string): string => `Last buy ${day} (UTC) · ${amount} that day`,
   manageInWallets: "Manage in Wallets",
   resumeInvesting: "Resume investing",
 

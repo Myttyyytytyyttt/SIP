@@ -228,6 +228,12 @@ export interface LivePolicyView {
   readonly maxRolling30d: bigint | null;
   readonly usedLast30d: bigint | null;
   readonly lifetimeInvested: bigint | null;
+  /**
+   * The newest UTC day the policy's own day-buckets record a buy on, and the
+   * USDC that whole day spent (invest-limits.ts lastInvestedDay). Null when no
+   * bucket holds a buy, or there is no readable policy.
+   */
+  readonly lastInvestedDay: { readonly day: string; readonly usdcRaw: bigint } | null;
   readonly storedSolFloorPerSol: bigint | null;
   readonly todayPerSol: bigint | null;
   /** Both floors readable, and each still on the right side of today's price. */

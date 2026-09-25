@@ -1,7 +1,7 @@
 // The dashboard's "Your first savings arrived" card: what it would sign for a
 // basket chosen on the setup, and when it may stand at all.
 
-import { DEFAULT_INVEST_CAPS, OFFERED_LEGS, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT, defaultInvestPolicy } from "@sip/solana-core/client";
+import { DEFAULT_INVEST_CAPS, OFFERED_LEGS, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -28,13 +28,14 @@ import { liveDashboard, liveSnapshot, OWNER, VAULT } from "../../../test/fixture
 const [SPYX, ANTHROPIC] = OFFERED_LEGS.map((leg) => leg.mint);
 
 describe("startBuyingPlan: what the card would sign", () => {
-  it("one stock: all of it, the form's own minimum and 30-day cap, $25 per buy, investing on, the default venue", () => {
+  it("one stock: all of it, the $10 base as its minimum, the form's 30-day cap, $25 per buy, investing on, the default venue", () => {
     const { request } = startBuyingPlan([SPYX!]);
     expect(request).not.toBeNull();
     expect([...request!.weights!.entries()]).toEqual([[SPYX, 10_000]]);
     expect(request!.maxPerCall).toBe(START_BUYING_PER_BUY_RAW);
     expect(request!.maxRolling30d).toBe(DEFAULT_INVEST_CAPS.maxRolling30d);
-    expect(request!.minInvestment).toBe(defaultInvestPolicy(OFFERED_LEGS.length).minInvestment);
+    // THE $10 BASE (owner, 09-25): a one-stock basket buys when $10 is ready, not at a share of the shelf's $5.
+    expect(request!.minInvestment).toBe(10_000_000n);
     expect(request!.enabled).toBe(true);
     expect(request!.venue).toBe(DEFAULT_VENUE_NAME);
   });
@@ -48,8 +49,9 @@ describe("startBuyingPlan: what the card would sign", () => {
       [ANTHROPIC, 5_000],
     ]);
     expect(legs.map((leg) => leg.weightBps)).toEqual([5_000, 5_000]);
-    // Nothing is bought before the whole buy clears each leg's minimum: $2.50 a leg, $5 in all.
-    expect(purchaseRaw).toBe(5_000_000n);
+    // Nothing is bought before the whole buy clears each leg's minimum: $5 a leg, the $10 base in all.
+    expect(request!.minInvestment).toBe(5_000_000n);
+    expect(purchaseRaw).toBe(10_000_000n);
     expect(request!.maxPerCall).toBeGreaterThanOrEqual(purchaseRaw!);
   });
 

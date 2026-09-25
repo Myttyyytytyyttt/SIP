@@ -6,9 +6,11 @@
 // zero; dollars are today's price on the chain's own lamports; and the rows the
 // sample fills with trades are filled with what the chain actually records.
 
+import { SPYX_MINT } from "@sip/solana-core/client";
 import { describe, expect, it } from "vitest";
 
 import { usdcRawForLamports } from "@/lib/amounts";
+import { usd } from "@/lib/format";
 import { anchorOf, toDashboardMock } from "@/lib/live-mock";
 import { toLiveDashboard } from "@/lib/live-model";
 import type { LiveDashboard, LiveWalletView, VaultEventJson } from "@/lib/live-types";
@@ -22,6 +24,7 @@ import {
   liveDashboard,
   liveEntry,
   liveSnapshot,
+  policyState,
   seconds,
   settledEvent,
   signature,
@@ -293,5 +296,62 @@ describe("a window the loaded history does not cover has no total", () => {
     // lost its morning, so not one whole day is vouched for — none, not zeros.
     expect(days).toEqual([]);
     expect(stats.activeDays).toBeNull();
+  });
+});
+
+/**
+ * "NO INVESTMENTS YET" BESIDE HELD SPYx (owner, 09-25). The loaded history is
+ * one short page; once upkeep pushes the buys off it, the card used to say no
+ * buy ever happened. Whether one did is the policy's own counter, and when is
+ * its day-buckets — never the page, and never Holdings, which list a leg the
+ * vault holds none of as a row.
+ */
+describe("a buy older than the loaded history is still a buy", () => {
+  /** The owner's policy on 09-25: 22.249567 USDC invested, the newest bucket 2026-09-22 at 16.964637. */
+  const ownersPolicy = () => {
+    const bucketDays = Array.from({ length: 31 }, () => 0);
+    const bucketAmounts = Array.from({ length: 31 }, () => "0");
+    bucketDays.splice(0, 2, 20_715, 20_718);
+    bucketAmounts.splice(0, 2, "5284930", "16964637");
+    return policyState({ lifetimeInvested: "22249567", bucketDays, bucketAmounts });
+  };
+  const withPolicy = (policy: ReturnType<typeof liveSnapshot>["policy"]) => liveSnapshot({ policy });
+  const invested = (): VaultEventJson =>
+    ({ kind: "invested", mint: SPYX_MINT, symbol: "SPYx", usdcSpentRaw: "5000000", receivedRaw: "1", receivedUi: "0.01" }) as unknown as VaultEventJson;
+
+  it("is said, with the day and that day's dollars, when the page holds no buy and the chain records one", () => {
+    const { stats } = adapt(liveDashboard({ snapshot: withPolicy({ status: "exists", address: "policy", state: ownersPolicy() }) }));
+    expect(stats.investments).toBe(0);
+    expect(stats.investedOutsideHistory).toBe(true);
+    expect(stats.lastInvestedDay).toEqual({ day: "2026-09-22", spentUsd: 16.964637 });
+    expect(usd(stats.lastInvestedDay!.spentUsd)).toBe("$16.96");
+  });
+
+  it("is not claimed when the page itself holds a buy", () => {
+    const { stats } = adapt(
+      liveDashboard({
+        snapshot: withPolicy({ status: "exists", address: "policy", state: ownersPolicy() }),
+        activity: liveActivity([...DEFAULT_ENTRIES, liveEntry(signature(9), seconds(NOW_MS - 7_200_000), [invested()])]),
+      }),
+    );
+    expect(stats.investments).toBe(1);
+    expect(stats.investedOutsideHistory).toBe(false);
+    // The day is still the chain's, whatever the page holds.
+    expect(stats.lastInvestedDay).toEqual({ day: "2026-09-22", spentUsd: 16.964637 });
+  });
+
+  it("is false when there is no policy to have bought with, or it never bought", () => {
+    const missing = adapt(liveDashboard({ snapshot: withPolicy({ status: "missing", address: "policy" }) })).stats;
+    expect(missing.investedOutsideHistory).toBe(false);
+    expect(missing.lastInvestedDay).toBeNull();
+    const never = adapt(liveDashboard({ snapshot: withPolicy({ status: "exists", address: "policy", state: policyState() }) })).stats;
+    expect(never.investedOutsideHistory).toBe(false);
+    expect(never.lastInvestedDay).toBeNull();
+  });
+
+  it("is unknown — null, never false — when the policy could not be read and the page holds no buy", () => {
+    const { stats } = adapt(liveDashboard({ snapshot: withPolicy({ status: "unreadable", address: "policy" }) }));
+    expect(stats.investedOutsideHistory).toBeNull();
+    expect(stats.lastInvestedDay).toBeNull();
   });
 });

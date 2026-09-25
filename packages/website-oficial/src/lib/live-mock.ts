@@ -167,6 +167,12 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
     vault.lifetimeSaved === null || createdMs === null || data.nowMs - createdMs < DAY_MS
       ? null
       : (vault.lifetimeSaved * BigInt(365 * DAY_MS)) / BigInt(data.nowMs - createdMs);
+  // "NO INVESTMENTS YET" IS A CLAIM ABOUT THE CHAIN, NOT ABOUT THE PAGE. The
+  // loaded history is one short page, and upkeep pushes the buys off it; the
+  // policy's own lifetime counter and day-buckets say whether, and when, it
+  // bought. Never Holdings: they list a leg the vault holds none of as a row.
+  const everInvested = policy.status === "missing" ? false : policy.lifetimeInvested === null ? null : policy.lifetimeInvested > 0n;
+  const lastBuy = policy.lastInvestedDay;
 
   const statsOut: SavingsStats = {
     totalSavedUsd: $(vault.lifetimeSaved),
@@ -200,6 +206,9 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
     totalSavedSol: vault.lifetimeSaved === null ? null : formatSol(vault.lifetimeSaved),
     settledOutsideHistory: stats.settledOutsideHistory,
     holdingsUnreadable: !data.tokensReadable,
+    investedOutsideHistory: stats.investmentsLoaded > 0 ? false : everInvested,
+    // USDC is a dollar: the same rule the USDC holding row is valued by.
+    lastInvestedDay: lastBuy === null ? null : { day: lastBuy.day, spentUsd: dollarsOf(lastBuy.usdcRaw) ?? 0 },
   };
 
   // ── the curve and the days ─────────────────────────────────────────────

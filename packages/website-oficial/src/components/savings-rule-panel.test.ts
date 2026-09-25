@@ -1,33 +1,29 @@
-// The sample's rule card, which is now also the live one. Two faces, one file:
-// with no signer it is the sample's exactly — local state, "Update rule" moves
-// its own baseline — and with one, its controls reach a signature and say what
-// that costs before the button is pressed.
+// The Savings rule card (owner, 09-25): read-only on both pages, with a gear in
+// its corner that opens "Vault settings". The sample hosts that dialog over its
+// own state; a live page hands the card a door to its signing one. The card
+// also says honestly when the last buy is older than the history on screen.
 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { SavingsRulePanel, type RuleSigner } from "@/components/savings-rule-panel";
+import { SavingsRulePanel, type RuleSettingsDoor } from "@/components/savings-rule-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import type { SavingsRule, SavingsStats } from "@/mocks/types";
+import { LIVE_COPY } from "@/lib/live-copy";
+import { SETTINGS_COPY } from "@/lib/settings-copy";
+import type { ActivityEvent, SavingsRule, SavingsStats } from "@/mocks/types";
 
-const STATS = { pendingUsd: 3, thresholdUsd: 5 } as SavingsStats;
+const NOW = "2026-09-24T12:00:00.000Z";
+const STATS = { pendingUsd: 3, thresholdUsd: 10 } as SavingsStats;
 const VOLUME: SavingsRule = { mode: "volume", rateBps: 200, thresholdUsd: 5, targets: [{ symbol: "SPYx", weightBps: 10_000 }], paused: false };
 const PROFIT: SavingsRule = { ...VOLUME, mode: "profit", rateBps: 2_000 };
 
-const signer = (overrides: Partial<RuleSigner> = {}): RuleSigner => ({
-  rateMin: 201,
-  rateMax: 10_000,
-  presets: [1_000, 2_000, 5_000],
-  thresholdLocked: null,
-  thresholdProblem: () => null,
-  busy: false,
-  onUpdate: () => undefined,
-  progress: null,
-  ...overrides,
-});
+const door = (overrides: Partial<RuleSettingsDoor> = {}): RuleSettingsDoor => ({ open: false, onOpen: () => undefined, attention: false, ...overrides });
 
-function render(rule: SavingsRule, options: { readonly signer?: RuleSigner; readonly stats?: SavingsStats } = {}): string {
+function render(
+  rule: SavingsRule,
+  options: { readonly settings?: RuleSettingsDoor; readonly stats?: SavingsStats; readonly activity?: readonly ActivityEvent[] } = {},
+): string {
   return renderToStaticMarkup(
     createElement(
       TooltipProvider,
@@ -35,52 +31,91 @@ function render(rule: SavingsRule, options: { readonly signer?: RuleSigner; read
       createElement(SavingsRulePanel, {
         rule,
         stats: options.stats ?? STATS,
-        activity: [],
-        now: "2026-09-16T12:00:00.000Z",
-        ...(options.signer === undefined ? {} : { signer: options.signer }),
+        activity: options.activity ?? [],
+        now: NOW,
+        ...(options.settings === undefined ? {} : { settings: options.settings }),
       }),
     ),
   );
 }
 
-describe("the sample's own card, untouched", () => {
-  it("names the sample's measure and its volume presets", () => {
-    const html = render(VOLUME);
-    expect(html).toContain("Applied to every buy and sell");
-    for (const preset of ["0.5%", "1%", "2%"]) expect(html).toContain(`>${preset}<`);
+/** The gear's own button. */
+const gear = (html: string): string => html.match(/<button[^>]*aria-haspopup="dialog"[^>]*>/)?.[0] ?? "";
+
+describe("the card shows the rule; the gear changes it", () => {
+  it("has a gear in its corner, on the sample and on a live page", () => {
+    expect(gear(render(VOLUME))).toContain(`aria-label="${SETTINGS_COPY.gear}"`);
+    expect(gear(render(PROFIT, { settings: door() }))).toContain(`aria-label="${SETTINGS_COPY.gear}"`);
   });
 
-  it("carries no signature notice: nothing it does reaches a chain", () => {
-    expect(render(VOLUME)).not.toMatch(/sign/i);
+  it("holds no control of its own: no slider, no presets, no threshold box, no Update button", () => {
+    for (const html of [render(VOLUME), render(PROFIT, { settings: door() })]) {
+      expect(html).not.toContain('role="slider"');
+      expect(html).not.toContain('role="radio"');
+      expect(html).not.toContain('id="threshold"');
+      expect(html).not.toContain("Update rule");
+    }
   });
-});
 
-describe("the live card", () => {
-  it("names the vault's own measure and offers that mode's presets", () => {
-    const html = render(PROFIT, { signer: signer() });
+  it("shows the rate, what it is taken from, and what the savings buy", () => {
+    const html = render(PROFIT, { settings: door() });
     expect(html).toContain("Applied to your realised trading gains");
-    for (const preset of ["10%", "20%", "50%"]) expect(html).toContain(`>${preset}<`);
-    expect(html).not.toContain(">0.5%<");
+    expect(html).toContain(">20%<");
+    expect(html).toContain(">SPYx<");
+    expect(render(VOLUME)).toContain("Applied to every buy and sell");
   });
 
-  it("offers no update while a signature is under way anywhere on the page", () => {
-    expect(render(PROFIT, { signer: signer({ busy: true }) })).toMatch(/aria-disabled="true"[^>]*>Update rule</);
+  it("says a paused rule is paused, next to its rate", () => {
+    expect(render({ ...PROFIT, paused: true }, { settings: door() })).toContain(`>${SETTINGS_COPY.paused}<`);
   });
 
-  it("locks the threshold with its reason, rather than offering a box that cannot be signed", () => {
-    const html = render(PROFIT, { signer: signer({ thresholdLocked: "Investing is not set up." }) });
-    expect(html).toContain("Investing is not set up.");
-    expect(html).toMatch(/id="threshold"[^>]*disabled=""/);
+  it("says nothing is picked rather than an empty list", () => {
+    expect(render({ ...PROFIT, targets: [] }, { settings: door() })).toContain(SETTINGS_COPY.nothingPicked);
+  });
+
+  it("marks the gear when something behind it needs the owner, and says so to a screen reader", () => {
+    const html = gear(render(PROFIT, { settings: door({ attention: true }) }));
+    expect(html).toContain(`aria-label="${SETTINGS_COPY.gearAttention}"`);
+  });
+
+  it("carries no signature wording on the sample: nothing it does reaches a chain", () => {
+    expect(render(VOLUME)).not.toMatch(/sign/i);
   });
 
   it("measures the next investment by what is ready to buy with, not by everything pending", () => {
-    const html = render(PROFIT, { signer: signer(), stats: { ...STATS, pendingUsd: 26, readyToInvestUsd: 4 } });
+    const html = render(PROFIT, { settings: door(), stats: { ...STATS, pendingUsd: 26, readyToInvestUsd: 4 } });
     expect(html).toContain("$4.00");
     expect(html).not.toContain("$26.00");
   });
+});
 
-  it("shows the signature's own progress under the button", () => {
-    const html = render(PROFIT, { signer: signer({ progress: createElement("div", { "data-testid": "tx" }, "Waiting for Phantom") }) });
-    expect(html).toContain("Waiting for Phantom");
+/**
+ * THE LAST BUY, TOLD HONESTLY. The feed is one page of the newest
+ * transactions; a buy older than that page is not "no investments yet" — the
+ * vault's own counters record it.
+ */
+describe("last investment", () => {
+  it("is 'No investments yet' on the sample, which sets none of the live fields", () => {
+    expect(render(VOLUME)).toContain("No investments yet");
+  });
+
+  it("names the day and the spend of a buy older than the history on screen", () => {
+    const html = render(PROFIT, {
+      settings: door(),
+      stats: { ...STATS, investedOutsideHistory: true, lastInvestedDay: { day: "2026-09-22", spentUsd: 16.964637 } },
+    });
+    expect(html).toContain(LIVE_COPY.olderThanHistory);
+    expect(html).toContain("$16.96");
+    expect(html).not.toContain("No investments yet");
+  });
+
+  it("says none is in the loaded history when the chain could not say whether it ever bought", () => {
+    const html = render(PROFIT, { settings: door(), stats: { ...STATS, investedOutsideHistory: null } });
+    expect(html).toContain(LIVE_COPY.noInvestmentLoaded);
+    expect(html).not.toContain("No investments yet");
+  });
+
+  it("is 'No investments yet' only when the chain says it never bought", () => {
+    expect(render(PROFIT, { settings: door(), stats: { ...STATS, investedOutsideHistory: false } })).toContain("No investments yet");
   });
 });

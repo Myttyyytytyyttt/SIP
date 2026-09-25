@@ -11,6 +11,7 @@
  * Solscan", until dismissed. Stopped: "Took too long" offers Build again, since
  * nothing moved; "Not confirmed yet" offers only Check again on the signature
  * that was sent, never re-signing, and cannot be dismissed; a refusal says why.
+ * Cancelled in the wallet (code "declined"): a neutral "Cancelled", not a refusal.
  */
 
 import { Check, ExternalLink, LoaderCircle, RefreshCw } from "lucide-react";
@@ -20,7 +21,7 @@ import { Button } from "@/components/ui/button";
 import type { WriteProgress } from "@/hooks/use-vault-actions";
 import { cn } from "@/lib/utils";
 import { PROGRESS_COPY, VAULT_COPY } from "@/lib/vault-copy";
-import type { FlowResult, FlowStep } from "@/lib/vault-flows";
+import { DECLINED_CODE, type FlowResult, type FlowStep } from "@/lib/vault-flows";
 
 const CREATE_STEPS: readonly FlowStep[] = ["preparing", "approve_pension", "sending", "confirming", "done"];
 const LINK_STEPS: readonly FlowStep[] = ["preparing", "consent", "approve_pension", "trading_signing", "sending", "confirming", "done"];
@@ -97,6 +98,23 @@ export function TxProgress({
             <SolscanLink href={result.explorerUrl} />
           </>
         ) : null}
+        {onDismiss !== undefined ? (
+          <Button type="button" variant="ghost" size="xs" className="ml-auto" onClick={() => onDismiss()}>
+            {VAULT_COPY.dismiss}
+          </Button>
+        ) : null}
+      </div>
+    );
+  }
+
+  // CANCELLED IN THE WALLET IS NOT AN ERROR (owner, 09-25): the person said no,
+  // nothing was sent, and the red "Refused" read as SaverFi having failed. A
+  // neutral status, the same shape as the landed one, with its Dismiss.
+  if (result.kind === "refused" && result.code === DECLINED_CODE) {
+    return (
+      <div role="status" data-progress="cancelled" className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border px-3 py-2 text-sm">
+        <span className="font-medium">{PROGRESS_COPY.cancelled}</span>
+        <span className="text-xs text-muted-foreground">{result.message}</span>
         {onDismiss !== undefined ? (
           <Button type="button" variant="ghost" size="xs" className="ml-auto" onClick={() => onDismiss()}>
             {VAULT_COPY.dismiss}

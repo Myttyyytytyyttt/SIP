@@ -54,6 +54,7 @@ import { describe, expect, it, vi } from "vitest";
 import { FAILURE_COPY, WITHDRAW_COPY } from "@/lib/vault-copy";
 import type { ApiFailure, ApiResult, BuiltTransactionJson, InvestmentPolicyJson, SendResponseJson, VaultApi } from "@/lib/vault-api";
 import {
+  DECLINED_CODE,
   DEFAULT_VENUE_NAME,
   LINK_MAX_BUILDS,
   VERIFIABLE_VENUES,
@@ -1138,8 +1139,41 @@ describe("createVaultFlow", () => {
 
     const declined = harness();
     declined.signWithPension.mockRejectedValueOnce(new Error("User rejected the request."));
-    expect(await createVaultFlow(declined.createDeps, { pensionKey: declined.pensionKey, mode: 0 })).toEqual({ ok: false, kind: "refused", message: "Phantom did not approve. Nothing was sent." });
+    expect(await createVaultFlow(declined.createDeps, { pensionKey: declined.pensionKey, mode: 0 })).toEqual({
+      ok: false,
+      kind: "refused",
+      message: "Phantom did not approve. Nothing was sent.",
+      code: DECLINED_CODE,
+    });
     expect(declined.send).not.toHaveBeenCalled();
+  });
+
+  /**
+   * CANCELLING IS NOT A REFUSAL (owner, 09-25): both ways a wallet says no — a
+   * reject/cancel message, and Privy's dialog closed ("exited") — carry the code
+   * "declined", which TxProgress draws as a neutral "Cancelled". A signer that
+   * failed for any other reason is still a plain refusal, with no code.
+   */
+  it("a wallet the person cancelled in is 'declined' on both paths; any other signer failure carries no code", async () => {
+    expect(DECLINED_CODE).toBe("declined");
+    for (const error of [new Error("User cancelled the request"), new Error("Transaction declined"), "exited_link_flow", new Error("User exited the signing flow")]) {
+      const h = harness();
+      h.signWithPension.mockRejectedValueOnce(error);
+      expect(await createVaultFlow(h.createDeps, { pensionKey: h.pensionKey, mode: 0 }), String(error)).toEqual({
+        ok: false,
+        kind: "refused",
+        message: FAILURE_COPY.phantomDeclined,
+        code: DECLINED_CODE,
+      });
+      expect(h.send).not.toHaveBeenCalled();
+    }
+
+    const broken = harness();
+    broken.signWithPension.mockRejectedValueOnce(new Error("Wallet proxy not initialized."));
+    const result = await createVaultFlow(broken.createDeps, { pensionKey: broken.pensionKey, mode: 0 });
+    expect(result).toMatchObject({ ok: false, kind: "refused" });
+    expect(result.ok === false && result.kind === "refused" ? result.code : "unexpected").toBeUndefined();
+    expect(broken.send).not.toHaveBeenCalled();
   });
 
   it("an expired blockhash is 'took too long'; a refusal from the verifier is words; a confirmation that cannot finish is 'not confirmed yet' with the signature", async () => {

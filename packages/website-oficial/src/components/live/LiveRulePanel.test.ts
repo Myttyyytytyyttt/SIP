@@ -1,22 +1,25 @@
-// THE RULE CARD SIGNS, AND WHAT IT SIGNS IS PINNED HERE.
+// THE GEAR SIGNS, AND WHAT IT SIGNS IS PINNED HERE (owner, 09-25).
 //
-// Every control on the sample's card now reaches the pension key: rate and
-// pause through set_policy_v2, the threshold through set_invest_policy. Both
-// writes put EVERY field of their account on chain, so the one thing that must
-// never happen is a field this card does not show going out as a guess — a
-// stored limit overwritten, a basket reset to equal shares, a paused policy
-// quietly un-paused. These tests drive the card's signer directly and read
-// exactly what each press asks the wallet to sign.
+// The Savings rule card is read-only; its gear opens "Vault settings", and on a
+// live page one Save there signs set_policy_v2 (mode, rate, pause) and/or
+// set_invest_policy (assets, shares, threshold). Both write EVERY field of their
+// account, so the one thing that must never happen is a field the dialog does
+// not show going out as a guess. The arithmetic is rule-settings-plan.test.ts's;
+// these tests drive the HOST — the form it hands the dialog, and what each Save
+// actually asks the wallet for — through the same writers the page uses.
 
-import { PROFIT_BPS_MAX, PROFIT_BPS_MIN, VOLUME_BPS_MAX, VOLUME_BPS_MIN } from "@sip/solana-core/client";
-import { createElement } from "react";
+import { ANTHROPIC_MINT, JUPITER_V6, PROFIT_BPS_MAX, PROFIT_BPS_MIN, SPYX_MINT, VOLUME_BPS_MAX, VOLUME_BPS_MIN } from "@sip/solana-core/client";
+import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RuleSigner } from "@/components/savings-rule-panel";
+import type { RuleSettingsFormProps } from "@/components/rule-settings-dialog";
+import type { RuleSettingsDoor } from "@/components/savings-rule-panel";
 import type { InvestRequest, VaultRuleRequest } from "@/hooks/use-vault-actions";
+import type { SettingsDraft } from "@/lib/rule-settings";
 import { LIVE_COPY } from "@/lib/live-copy";
-import type { InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
+import { SETTINGS_COPY } from "@/lib/settings-copy";
+import type { InvestmentPolicyJson, VaultAccountJson, VaultStateJson } from "@/lib/vault-api";
 import type { SavingsRule, SavingsStats } from "@/mocks/types";
 
 import { liveSnapshot, policyState } from "../../../test/fixtures/live-dashboard";
@@ -24,18 +27,29 @@ import { liveSnapshot, policyState } from "../../../test/fixtures/live-dashboard
 const calls = vi.hoisted(() => ({
   rule: [] as unknown[],
   policy: [] as unknown[],
-  signer: null as RuleSigner | null,
+  choices: [] as unknown[],
+  form: null as unknown,
+  status: null as unknown,
+  door: null as unknown,
+  card: null as unknown,
   state: null as unknown,
+  running: false,
 }));
 
 vi.mock("@/hooks/use-vault-state", () => ({
   useVaultScreen: () => (calls.state === null ? null : { pensionKey: "owner", view: { kind: "ready", state: calls.state }, refresh: () => undefined, api: {} }),
 }));
 
+vi.mock("@/hooks/use-onboarding-closed", () => ({ useBasketChoice: () => null }));
+vi.mock("@/lib/onboarding-memory", async (original) => ({
+  ...(await original<typeof import("@/lib/onboarding-memory")>()),
+  saveBasketChoice: (_key: string, choice: unknown) => calls.choices.push(choice),
+}));
+
 vi.mock("@/hooks/use-vault-actions", () => {
   const writer = (sink: unknown[]) => ({
     progress: { phase: "idle" },
-    running: false,
+    running: calls.running,
     busyElsewhere: false,
     unconfirmed: false,
     setPolicy: (input: unknown) => {
@@ -53,10 +67,22 @@ vi.mock("@/hooks/use-vault-actions", () => {
   return { useVaultWrite: (key: string) => (key === "vault" ? writer(calls.rule) : writer(calls.policy)) };
 });
 
-// The panel itself is the sample's and has its own test; here only what the card hands it matters.
+// The card and the dialog have their own tests; here only what the host hands them matters.
 vi.mock("@/components/savings-rule-panel", () => ({
-  SavingsRulePanel: (props: { signer: RuleSigner }) => {
-    calls.signer = props.signer;
+  SavingsRulePanel: (props: { settings: RuleSettingsDoor; rule: SavingsRule }) => {
+    calls.door = props.settings;
+    calls.card = props.rule;
+    return null;
+  },
+}));
+vi.mock("@/components/rule-settings-dialog", () => ({
+  RuleSettingsDialog: ({ children }: { children: ReactNode }) => children,
+  RuleSettingsStatus: ({ children }: { children: ReactNode }) => {
+    calls.status = children;
+    return null;
+  },
+  RuleSettingsForm: (props: unknown) => {
+    calls.form = props;
     return null;
   },
 }));
@@ -64,143 +90,208 @@ vi.mock("@/components/savings-rule-panel", () => ({
 import { LiveRulePanel, RATE_RANGES, minimumFor } from "@/components/live/LiveRulePanel";
 
 /** The vault account as the chain stores it: profit at 20 %, limits 0.06 / 0.05 SOL. */
-const account = liveSnapshot().vault.state!;
+const ACCOUNT = liveSnapshot().vault.state! as unknown as VaultAccountJson;
+
+const leg = (mint: string, weightBps: number) => ({ mint, weightBps, minOutRateWad: "1" });
+
+/** SPYx and ANTHROPIC at 50/50, $5 a leg — $10 in all — on Jupiter. */
+const POLICY = policyState({
+  venueProgram: JUPITER_V6,
+  legs: [leg(SPYX_MINT, 5_000), leg(ANTHROPIC_MINT, 5_000)],
+  minInvestment: "5000000",
+  maxPerCall: "149000000",
+  maxRolling30d: "4619000000",
+});
 
 function vaultState(policy: InvestmentPolicyJson | null, status: "exists" | "missing" | "unreadable" = policy === null ? "missing" : "exists"): VaultStateJson {
   return {
     owner: "owner",
     programId: "program",
-    vault: { status: "exists", address: "vault", state: account as never },
+    vault: { status: "exists", address: "vault", state: ACCOUNT },
     policy: { status, address: "policy", ...(policy === null ? {} : { state: policy }) },
     config: { address: "config", status: "exists", exists: true, paused: false },
     walletLinks: [],
     holdings: { status: "exists", items: [] },
     vaultTokenAccounts: { status: "exists", items: [] },
+    rents: null,
+    prices: null,
   } as unknown as VaultStateJson;
 }
 
-const RULE: SavingsRule = { mode: "profit", rateBps: 2_000, thresholdUsd: 5, targets: [], paused: false };
+const RULE: SavingsRule = { mode: "profit", rateBps: 2_000, thresholdUsd: 10, targets: [], paused: false };
 const STATS = {} as SavingsStats;
 
-/** Mounts the card and returns the signer it built. */
-function signerFor(state: VaultStateJson | null): RuleSigner {
+/** Mounts the host and returns the form it built (null when it shows a status instead). */
+function mount(state: VaultStateJson | null): RuleSettingsFormProps | null {
   calls.state = state;
-  calls.signer = null;
+  calls.form = null;
+  calls.status = null;
+  calls.door = null;
   renderToStaticMarkup(createElement(LiveRulePanel, { rule: RULE, stats: STATS, activity: [], now: "2026-09-16T12:00:00.000Z", onRefresh: () => undefined }));
-  return calls.signer!;
+  return calls.form as RuleSettingsFormProps | null;
+}
+
+const edit = (form: RuleSettingsFormProps, change: Partial<SettingsDraft>): SettingsDraft => ({ ...form.initial, ...change });
+
+/** The refresh block as the form would draw it, with or without unsaved basket edits. */
+const refreshOf = (form: RuleSettingsFormProps, buyingChanged: boolean): ReactNode =>
+  typeof form.refresh === "function" ? form.refresh({ buyingChanged }) : form.refresh;
+
+/** The first element in a tree with an onClick whose text includes `label`. */
+function button(node: ReactNode, label: string): ReactElement<{ onClick: () => void; disabled?: boolean }> | null {
+  if (!isValidElement(node)) return Array.isArray(node) ? (node.map((child) => button(child, label)).find(Boolean) ?? null) : null;
+  const props = node.props as { onClick?: () => void; children?: ReactNode };
+  if (typeof props.onClick === "function" && renderToStaticMarkup(node as ReactElement).includes(label)) return node as ReactElement<{ onClick: () => void }>;
+  return button(props.children, label);
 }
 
 beforeEach(() => {
   calls.rule.length = 0;
   calls.policy.length = 0;
+  calls.choices.length = 0;
+  calls.running = false;
 });
 
 describe("the ranges are the program's", () => {
-  it("offers exactly the rates the vault's own mode accepts", () => {
+  it("offers exactly the rates each mode accepts", () => {
     expect(RATE_RANGES.profit.min).toBe(PROFIT_BPS_MIN);
     expect(RATE_RANGES.profit.max).toBe(PROFIT_BPS_MAX);
     expect(RATE_RANGES.volume.min).toBe(VOLUME_BPS_MIN);
     expect(RATE_RANGES.volume.max).toBe(VOLUME_BPS_MAX);
-    for (const mode of ["profit", "volume"] as const) {
-      for (const preset of RATE_RANGES[mode].presets) expect(preset >= RATE_RANGES[mode].min && preset <= RATE_RANGES[mode].max, `${mode} ${preset}`).toBe(true);
-    }
   });
 
-  it("gives a profit vault the profit range, not the sample's volume one", () => {
-    const signer = signerFor(vaultState(policyState()));
-    expect([signer.rateMin, signer.rateMax]).toEqual([PROFIT_BPS_MIN, PROFIT_BPS_MAX]);
+  it("is still the chain's inverse for the threshold: minimum × 10 000 ÷ the lightest leg", () => {
+    expect(minimumFor(10_000_000n, [5_000, 5_000])).toBe(5_000_000n);
   });
 });
 
-describe("rate and pause sign the vault's rule — every other field as stored", () => {
-  it("changes the active mode's rate and sends the other five exactly as the chain holds them", () => {
-    signerFor(vaultState(policyState())).onUpdate({ rateBps: 3_000, thresholdUsd: 5, paused: false }, { rule: true, threshold: false });
+describe("the form the gear opens", () => {
+  it("opens on the vault's stored rule and basket, live, with Volume not offered", () => {
+    const form = mount(vaultState(POLICY))!;
+    expect(form.live).toBe(true);
+    expect(form.initial.mode).toBe("profit");
+    expect(form.initial.rateBps).toBe(ACCOUNT.skimBps);
+    expect(form.initial.picked.map((pick) => pick.id).sort()).toEqual([ANTHROPIC_MINT, SPYX_MINT].sort());
+    expect(form.initial.threshold).toMatch(/^10(\.0+)?$/);
+    expect(form.volume).toEqual({ selectable: false, note: SETTINGS_COPY.volumeComing });
+    expect(form.weightsEditable).toBe(true);
+  });
+
+  it("shows the vault being read, never a form over a guess", () => {
+    expect(mount(null)).toBeNull();
+    expect(renderToStaticMarkup(createElement("div", null, calls.status as ReactNode))).toContain(SETTINGS_COPY.loading);
+  });
+
+  it("without a policy: an even split and the $10 base, applied when buying starts", () => {
+    const form = mount(vaultState(null))!;
+    expect(form.weightsEditable).toBe(false);
+    expect(form.thresholdNote).toBe(SETTINGS_COPY.appliesWhenBuyingStarts);
+    expect(form.initial.threshold).toBe("10");
+  });
+
+  it("locks the buying half, with the reason, when the policy cannot be read", () => {
+    expect(mount(vaultState(null, "unreadable"))!.buyingLocked).not.toBeNull();
+  });
+
+  it("freezes everything while a signature is under way", () => {
+    calls.running = true;
+    expect(mount(vaultState(POLICY))!.frozen).toBe(true);
+  });
+});
+
+describe("one Save", () => {
+  it("a new rate signs the vault's rule — every other field exactly as the chain holds it", () => {
+    const form = mount(vaultState(POLICY))!;
+    form.onSave(edit(form, { rateBps: 3_000 }));
     const [sent] = calls.rule as VaultRuleRequest[];
     expect(sent).toEqual({
-      mode: account.skimMode,
+      mode: ACCOUNT.skimMode,
       skimBps: 3_000,
-      volumeBps: account.volumeBps,
-      paused: account.paused,
-      maxContribution: BigInt(account.maxContribution),
-      walletReserve: BigInt(account.walletReserve),
+      volumeBps: ACCOUNT.volumeBps,
+      paused: ACCOUNT.paused,
+      maxContribution: BigInt(ACCOUNT.maxContribution),
+      walletReserve: BigInt(ACCOUNT.walletReserve),
     });
     expect(calls.policy).toEqual([]);
   });
 
-  it("pauses without touching the rate", () => {
-    signerFor(vaultState(policyState())).onUpdate({ rateBps: account.skimBps, thresholdUsd: 5, paused: true }, { rule: true, threshold: false });
-    const [sent] = calls.rule as VaultRuleRequest[];
-    expect(sent!.paused).toBe(true);
-    expect(sent!.skimBps).toBe(account.skimBps);
-  });
-});
-
-describe("the threshold signs the investing policy — only its minimum changed", () => {
-  /**
-   * AN OMITTED FIELD IS A DEFAULT, and the defaults are not neutral: equal
-   * weights over the whole shelf, the product's caps, and `enabled: true`. So
-   * the stored caps, basket and pause travel with every threshold change.
-   */
-  it("sends the stored caps, basket and enabled with the new minimum", () => {
-    const stored = policyState({ enabled: false });
-    signerFor(vaultState(stored)).onUpdate({ rateBps: account.skimBps, thresholdUsd: 12, paused: false }, { rule: false, threshold: true });
+  it("a new threshold signs the investing policy, stored caps and pause travelling with it", () => {
+    const paused = policyState({ ...POLICY, enabled: false });
+    const form = mount(vaultState(paused))!;
+    form.onSave(edit(form, { threshold: "12" }));
     const [sent] = calls.policy as InvestRequest[];
-    expect(sent!.maxPerCall).toBe(BigInt(stored.maxPerCall));
-    expect(sent!.maxRolling30d).toBe(BigInt(stored.maxRolling30d));
-    // A paused policy stays paused: the threshold is not a resume button.
     expect(sent!.enabled).toBe(false);
-    expect([...(sent!.weights ?? new Map())]).toEqual(stored.legs.map((leg) => [leg.mint, leg.weightBps]));
-    // One leg at 100 %: the basket invests at $12 when that leg's minimum is $12.
-    expect(sent!.minInvestment).toBe(12_000_000n);
+    expect(sent!.maxPerCall).toBe(149_000_000n);
+    // 50/50: the basket buys at $12 when each leg's minimum is $6.
+    expect(sent!.minInvestment).toBe(6_000_000n);
     expect(calls.rule).toEqual([]);
   });
 
-  it("never signs the threshold in the same breath as the rule: the second waits for the first to land", () => {
-    signerFor(vaultState(policyState())).onUpdate({ rateBps: 3_000, thresholdUsd: 12, paused: false }, { rule: true, threshold: true });
+  it("both at once: the rule first, the policy only once the rule has landed", () => {
+    const form = mount(vaultState(POLICY))!;
+    form.onSave(edit(form, { rateBps: 3_000, threshold: "12" }));
     expect(calls.rule).toHaveLength(1);
     expect(calls.policy).toEqual([]);
   });
 
-  it("refuses a threshold the stored cap per buy cannot reach", () => {
-    // $1,000 per buy on one leg: a $2,000 basket threshold asks one leg for $2,000.
-    expect(signerFor(vaultState(policyState())).thresholdProblem(2_000)).not.toBeNull();
-    expect(signerFor(vaultState(policyState())).thresholdProblem(10)).toBeNull();
-  });
-});
-
-describe("the basket's one threshold, made true", () => {
-  it("is the inverse of the chain's own: minimum × 10 000 ÷ the lightest leg", () => {
-    expect(minimumFor(10_000_000n, [10_000])).toBe(10_000_000n);
-    expect(minimumFor(10_000_000n, [5_000, 5_000])).toBe(5_000_000n);
-    // …and signing it gives back a basket threshold no higher than the one typed.
-    for (const weights of [[10_000], [5_000, 5_000], [3_334, 3_333, 3_333], [7_000, 3_000]]) {
-      const minimum = minimumFor(25_000_000n, weights);
-      const lightest = BigInt(Math.min(...weights));
-      const investsAt = (minimum * 10_000n + lightest - 1n) / lightest;
-      expect(investsAt <= 25_000_000n, weights.join("/")).toBe(true);
-    }
-  });
-});
-
-describe("what cannot be signed is not offered", () => {
-  it("offers nothing while the vault's own state has not been read", () => {
-    const signer = signerFor(null);
-    expect(signer.busy).toBe(true);
-    expect(signer.thresholdLocked).toBe(LIVE_COPY.reading);
-  });
-
-  it("locks the threshold, with the reason, when investing is not set up", () => {
-    expect(signerFor(vaultState(null)).thresholdLocked).toBe(LIVE_COPY.investingNotSetUp);
-  });
-
-  it("never treats a policy it could not read as a missing one", () => {
-    expect(signerFor(vaultState(null, "unreadable")).thresholdLocked).toBe(LIVE_COPY.policyUnreadable);
-  });
-
-  it("signs nothing when there is no vault account to send back", () => {
-    const signer = signerFor(null);
-    signer.onUpdate({ rateBps: 3_000, thresholdUsd: 12, paused: false }, { rule: true, threshold: true });
+  it("nothing is signed while the form is frozen, whatever it hands back", () => {
+    calls.running = true;
+    const form = mount(vaultState(POLICY))!;
+    form.onSave(edit(form, { rateBps: 3_000 }));
     expect(calls.rule).toEqual([]);
+  });
+
+  it("without a policy, a new basket is kept on this device and nothing is signed", () => {
+    const form = mount(vaultState(null))!;
+    form.onSave(edit(form, { picked: [{ id: SPYX_MINT, percent: "100" }] }));
+    expect(calls.choices).toEqual([{ kind: "stocks", mints: [SPYX_MINT] }]);
     expect(calls.policy).toEqual([]);
+    expect(calls.rule).toEqual([]);
+  });
+});
+
+describe("refresh price limits", () => {
+  it("re-signs the stored basket as it stands, at today's prices", () => {
+    const form = mount(vaultState(POLICY))!;
+    const press = button(refreshOf(form, false), SETTINGS_COPY.refresh);
+    expect(press).not.toBeNull();
+    press!.props.onClick();
+    const [sent] = calls.policy as InvestRequest[];
+    expect(sent!.maxPerCall).toBe(149_000_000n);
+    expect(sent!.minInvestment).toBe(5_000_000n);
+    expect(sent!.enabled).toBe(POLICY.enabled);
+    expect([...(sent!.weights ?? new Map())].sort()).toEqual([
+      [ANTHROPIC_MINT, 5_000],
+      [SPYX_MINT, 5_000],
+    ].sort());
+  });
+
+  it("is not offered without a signed basket", () => {
+    expect(mount(vaultState(null))!.refresh).toBeNull();
+  });
+
+  it("is held while the basket has unsaved edits: it would re-sign the stored one under them", () => {
+    const form = mount(vaultState(POLICY))!;
+    expect(button(refreshOf(form, true), SETTINGS_COPY.refresh)).toBeNull();
+    expect(renderToStaticMarkup(createElement("div", null, refreshOf(form, true)))).toContain(SETTINGS_COPY.refreshBlocked);
+  });
+});
+
+describe("the basket the card shows", () => {
+  it("says a policy nobody could read could not be read — never 'nothing picked'", () => {
+    mount(vaultState(null, "unreadable"));
+    expect((calls.card as SavingsRule).targetsNote).toBe(LIVE_COPY.policyUnreadable);
+  });
+
+  it("is the chain's own when a policy is signed", () => {
+    mount(vaultState(POLICY));
+    expect((calls.card as SavingsRule).targetsNote).toBeUndefined();
+  });
+});
+
+describe("the gear on the card", () => {
+  it("is handed to the card closed, with no dot over a basket whose limits are current", () => {
+    mount(vaultState(POLICY));
+    expect(calls.door).toMatchObject({ open: false, attention: false });
   });
 });

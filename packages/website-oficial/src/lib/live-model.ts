@@ -20,7 +20,18 @@
  *    complete one's name, so it is null instead.
  */
 
-import { OFFERED_LEGS, USDC_MINT, VOLUME_MODE_OFFERED, WSOL_MINT, investmentReadiness, solscanTx, usdcRawPer1e8LegRaw, usdcRawPerSol } from "@sip/solana-core/client";
+import {
+  CATALOGUE,
+  OFFERED_LEGS,
+  USDC_MINT,
+  VOLUME_MODE_OFFERED,
+  WSOL_MINT,
+  investmentReadiness,
+  judgedFeeBps,
+  solscanTx,
+  usdcRawPer1e8LegRaw,
+  usdcRawPerSol,
+} from "@sip/solana-core/client";
 
 import { rawFrom, usdcRawForLamports } from "@/lib/amounts";
 import type {
@@ -40,7 +51,7 @@ import type {
   LiveWalletView,
   VaultEventJson,
 } from "@/lib/live-types";
-import { todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
+import { type FloorRoom, floorRoom, lastInvestedDay, todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
 import type { InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
 
 /** A plain SOL transfer under this is dust — a rent top-up or a dusting, not a saving worth a row. */
@@ -95,6 +106,44 @@ export function floorsState(policy: InvestmentPolicyJson, prices: VaultStateJson
   return { storedConvert, liveConvert, legs, pricesKnown, belowMarket };
 }
 
+/** Where a stored policy's price limits stand as a whole: a floor the market passed, or the worst leg's floorRoom. */
+export type PolicyRoom = "passed" | FloorRoom;
+
+const ROOM_RANK: Readonly<Record<FloorRoom, number>> = { "every-route": 0, "some-routes": 1, "no-route": 2 };
+
+/**
+ * WHETHER THE STORED PRICE LIMITS STILL LET SAVERFI BUY, AS ONE WORD — the
+ * wallets screen's InvestingCard reasoning (its badge and its room notes),
+ * without its sentences, so the Vault settings gear can say whether "Refresh
+ * price limits" is needed without importing a `"use client"` card.
+ *
+ *   "passed"       the market fell through a floor — the SOL conversion's or a
+ *                  leg's, each read against its own rate (floorsState's
+ *                  belowMarket, and the card's per-leg floorDrift "passed"):
+ *                  nothing buys until the owner approves again;
+ *   the worst leg  of floorRoom at the leg's JUDGED fee — the highest one its
+ *                  issuer has written, the one in force once its epoch comes
+ *                  (ANTHROPIC's 3 % from epoch 1043): "no-route" beats
+ *                  "some-routes" beats "every-route".
+ *
+ * Null when nothing could be judged (a floor or a rate unread). A leg the
+ * catalogue does not know is judged at no fee, as the card judges it.
+ */
+export function policyRoom(policy: InvestmentPolicyJson, prices: VaultStateJson["prices"]): PolicyRoom | null {
+  const floors = floorsState(policy, prices);
+  if (floors.pricesKnown && !floors.belowMarket) return "passed";
+  // A floor over its rate is passed even when some OTHER number was unread.
+  const over = (floor: bigint | null, live: bigint | null): boolean => floor !== null && live !== null && floor > 0n && live > 0n && floor > live;
+  if (over(floors.storedConvert, floors.liveConvert) || floors.legs.some((leg) => over(leg.floor, leg.live))) return "passed";
+  let worst: FloorRoom | null = null;
+  for (const leg of floors.legs) {
+    const fee = CATALOGUE.find((asset) => asset.mint === leg.mint)?.fee ?? null;
+    const room = floorRoom(leg.floor, leg.live, fee === null ? 0 : judgedFeeBps(fee));
+    if (room !== null && (worst === null || ROOM_RANK[room] > ROOM_RANK[worst])) worst = room;
+  }
+  return worst;
+}
+
 // ── the pieces ───────────────────────────────────────────────────────────────
 
 function vaultView(snapshot: LiveSnapshotJson): LiveVaultView {
@@ -135,6 +184,7 @@ function policyView(snapshot: LiveSnapshotJson, usdcHeld: bigint | null, nowMs: 
     maxRolling30d: null,
     usedLast30d: null,
     lifetimeInvested: null,
+    lastInvestedDay: null,
     storedSolFloorPerSol: null,
     todayPerSol: limits?.todayPerSol ?? null,
     pricesKnown: false,
@@ -164,6 +214,7 @@ function policyView(snapshot: LiveSnapshotJson, usdcHeld: bigint | null, nowMs: 
     maxRolling30d: rawFrom(state.maxRolling30d),
     usedLast30d: usedInLast30Days(state.bucketDays, state.bucketAmounts, nowMs / 1_000),
     lifetimeInvested: rawFrom(state.lifetimeInvested),
+    lastInvestedDay: lastInvestedDay(state.bucketDays, state.bucketAmounts),
     storedSolFloorPerSol: floors.storedConvert === null || floors.storedConvert <= 0n ? null : usdcRawPerSol(floors.storedConvert),
     pricesKnown: floors.pricesKnown,
     belowMarket: floors.belowMarket,

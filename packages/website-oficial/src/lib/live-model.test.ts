@@ -1,12 +1,15 @@
 // The chain's answer turned into a screen: what each number on the live
 // dashboard is, and what it becomes when the chain did not say.
 
-import { SPYX_MINT, USDC_MINT, WSOL_MINT, base58Encode } from "@sip/solana-core/client";
+import { ANTHROPIC_MINT, SPYX_MINT, USDC_MINT, WSOL_MINT, base58Encode, floorWad, legFloorWad } from "@sip/solana-core/client";
 import { describe, expect, it } from "vitest";
 
 import { headCursor } from "@/lib/live-activity-store";
-import { toLiveDashboard } from "@/lib/live-model";
+import { floorRoom, keeperVenueThresholdWad } from "@/lib/invest-limits";
+import { policyRoom, toLiveDashboard } from "@/lib/live-model";
 import type { LiveActivityJson, LiveEntryJson, LiveSnapshotJson, VaultEventJson } from "@/lib/live-types";
+
+import { policyState } from "../../test/fixtures/live-dashboard";
 
 const OWNER = "PensionKeyP1aceho1der111111111111111111111";
 const VAULT = "VaultP1aceho1der11111111111111111111111111";
@@ -537,5 +540,79 @@ describe("what may be a dollar and what may not", () => {
     expect(unpriced.notInvestedUsdcRaw).toBeNull();
     // …while the windows are unaffected: they never needed a price.
     expect(unpriced.stats.savedThisWeekLamports).toBe(60_000_000n);
+  });
+});
+
+/**
+ * WHEN THE POLICY LAST BOUGHT, FROM ITS OWN DAY-BUCKETS (owner, 09-25). The
+ * loaded page is one short page of history, and upkeep pushes the buys off it;
+ * the buckets keep the day whatever the page holds.
+ */
+describe("the policy's last buy", () => {
+  it("is the newest bucket holding a buy, as a UTC day and that whole day's USDC", () => {
+    const days = Array.from({ length: 31 }, () => 0);
+    const amounts = Array.from({ length: 31 }, () => "0");
+    days.splice(0, 2, 20_715, 20_718);
+    amounts.splice(0, 2, "5284930", "16964637");
+    const view = model(snapshot({ policy: { status: "exists", address: `${VAULT}-policy`, state: policyState({ lifetimeInvested: "22249567", bucketDays: days, bucketAmounts: amounts }) } }));
+    expect(view.policy.lastInvestedDay).toEqual({ day: "2026-09-22", usdcRaw: 16_964_637n });
+  });
+
+  it("is null for a policy that never bought, and when there is no policy to read", () => {
+    expect(model(snapshot({ policy: { status: "exists", address: `${VAULT}-policy`, state: policyState() } })).policy.lastInvestedDay).toBeNull();
+    expect(model().policy.lastInvestedDay).toBeNull();
+    expect(model(snapshot({ policy: { status: "unreadable", address: `${VAULT}-policy` } })).policy.lastInvestedDay).toBeNull();
+  });
+});
+
+/**
+ * THE GEAR'S ONE WORD FOR THE STORED PRICE LIMITS (policyRoom): InvestingCard's
+ * badge and room notes without their sentences. "passed" when the market fell
+ * through a floor; otherwise the WORST leg's floorRoom at its judged fee —
+ * ANTHROPIC's 3 % written for epoch 1043.
+ */
+describe("policyRoom", () => {
+  const ANTHROPIC_MID = 5_555_555_555_555_555_556n;
+  const TWO_LEG_PRICES: LiveSnapshotJson["prices"] = {
+    ...PRICES!,
+    legs: [...PRICES!.legs, { symbol: "ANTHROPIC", mint: ANTHROPIC_MINT, wad: String(ANTHROPIC_MID), usdcRawPer1e8: "18000000" }],
+  };
+  const twoLegs = (anthropicFloor: bigint) =>
+    policyState({
+      legs: [
+        { mint: SPYX_MINT, weightBps: 5_000, minOutRateWad: "124000000000000000" },
+        { mint: ANTHROPIC_MINT, weightBps: 5_000, minOutRateWad: String(anthropicFloor) },
+      ],
+    });
+
+  it("is every-route when each floor leaves room on the costliest route", () => {
+    expect(policyRoom(policyState(), PRICES)).toBe("every-route");
+    expect(policyRoom(twoLegs(legFloorWad(ANTHROPIC_MID, 300)), TWO_LEG_PRICES)).toBe("every-route");
+  });
+
+  it("is passed when a leg's floor is above today's rate, whatever the other legs say", () => {
+    expect(policyRoom(policyState({ legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "131283650130637570" }] }), PRICES)).toBe("passed");
+    // A leg over its rate is passed even when the SOL rate could not be read.
+    const noConvert = { ...PRICES!, convertWad: "" };
+    expect(policyRoom(policyState({ legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "131283650130637570" }] }), noConvert)).toBe("passed");
+  });
+
+  it("is passed when the SOL conversion's floor is above today's rate", () => {
+    expect(policyRoom(policyState({ minConvertRateWad: "100038711555492563" }), PRICES)).toBe("passed");
+  });
+
+  it("is the WORST leg's room otherwise: some-routes, then no-route, at ANTHROPIC's judged 3 %", () => {
+    // Signed at 95 % of the gross mid before floors were netted (the owner's own case).
+    const signedGross = floorWad(ANTHROPIC_MID, 500);
+    expect(floorRoom(signedGross, ANTHROPIC_MID, 300)).toBe("some-routes");
+    expect(policyRoom(twoLegs(signedGross), TWO_LEG_PRICES)).toBe("some-routes");
+    // One unit over what even the kindest gross route over the mid leaves at 300.
+    const tooClose = keeperVenueThresholdWad(ANTHROPIC_MID, 300, "gross", "over-mid") + 1n;
+    expect(tooClose <= ANTHROPIC_MID).toBe(true);
+    expect(policyRoom(twoLegs(tooClose), TWO_LEG_PRICES)).toBe("no-route");
+  });
+
+  it("is null when nothing could be judged: no prices read", () => {
+    expect(policyRoom(policyState(), null)).toBeNull();
   });
 });

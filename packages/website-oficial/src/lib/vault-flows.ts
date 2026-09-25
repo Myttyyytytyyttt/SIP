@@ -143,6 +143,9 @@ export const LINK_MAX_BUILDS = 2;
 
 const refused = (message: string, code?: string): FlowResult => (code === undefined ? { ok: false, kind: "refused", message } : { ok: false, kind: "refused", message, code });
 
+/** The code of a write the person cancelled in their wallet (signingFailure): nothing was sent. */
+export const DECLINED_CODE = "declined";
+
 /** A flow's own words for a transaction the chain refused, by its error, with a code the screen acts on; null for the general words. */
 type Explain = (err: unknown) => { readonly message: string; readonly code: string } | null;
 
@@ -187,13 +190,20 @@ function intentFailure(error: unknown): FlowResult {
   throw error;
 }
 
+/**
+ * A SIGNER THAT SAID NO IS NOT A REFUSAL (owner, 09-25). Cancelling in Phantom,
+ * or closing Privy's dialog, is the person changing their mind: nothing was
+ * sent and nothing is wrong, so it carries the code "declined" and TxProgress
+ * draws it as a neutral "Cancelled" rather than the red box. The code is not in
+ * use-vault-actions' REFRESH_AFTER: nothing on chain moved, so nothing re-reads.
+ */
 function signingFailure(error: unknown, who: "phantom" | "trading"): FlowResult {
   if (error instanceof SigningError) return refused(error.message);
   const declined = who === "phantom" ? FAILURE_COPY.phantomDeclined : FAILURE_COPY.tradingDeclined;
   const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
-  if (/reject|denied|declin|cancel|closed/i.test(raw)) return refused(declined);
+  if (/reject|denied|declin|cancel|closed/i.test(raw)) return refused(declined, DECLINED_CODE);
   const described = privyFailure(error);
-  return refused(described.kind === "exited" ? declined : described.message);
+  return described.kind === "exited" ? refused(declined, DECLINED_CODE) : refused(described.message);
 }
 
 async function confirmed(deps: FlowDeps, signature: string, lastValidBlockHeight: number, unitsConsumed: number | null, refusal: Refusal = {}): Promise<FlowResult> {
