@@ -777,10 +777,12 @@ async function main(): Promise<void> {
   console.log(
     `\nmin_out RULE  min_out = otherAmountThreshold - ceil(otherAmountThreshold * feeBps / 10_000),` +
       `\n              with feeBps read from the DESTINATION mint at the epoch the transaction will LAND` +
-      `\n              (worst case of current and pending). That is jupiter-route.ts's` +
-      `\n              output.netOfVenueThreshold. It survives both bases, so it never depends on which` +
-      `\n              AMM Jupiter picked, and it gives up nothing real: Jupiter already enforces the` +
-      `\n              threshold inside the CPI, so our guard is a backstop, not the slippage bound.`,
+      `\n              (the rate in force, or a next-epoch rise inside LANDING_WINDOW_SLOTS). That is` +
+      `\n              jupiter-route.ts's output.netOfVenueThreshold. It survives both bases, so it never` +
+      `\n              depends on which AMM Jupiter picked, and it gives up nothing real: Jupiter already` +
+      `\n              enforces the threshold inside the CPI, so our guard is a backstop, not the slippage` +
+      `\n              bound. Where it falls under the owner's floor and the threshold does not, invest()` +
+      `\n              is handed the owner's floor instead (investMinOutFor).`,
   );
 
   if (args.json !== null) {

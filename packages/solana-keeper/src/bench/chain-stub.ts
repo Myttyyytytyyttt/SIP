@@ -25,7 +25,7 @@
 // the keeper asked for that the bench had no answer to. A stub that invented a
 // plausible reply would move the measurement without telling anyone.
 
-import { PublicKey, SYSVAR_CLOCK_PUBKEY } from "@solana/web3.js";
+import { PublicKey, SYSVAR_CLOCK_PUBKEY, SYSVAR_EPOCH_SCHEDULE_PUBKEY } from "@solana/web3.js";
 import { configAddress } from "../accounts.js";
 import { PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_FEED, PYTH_SOL_USD_FEED_ID_HEX, PYTH_USDC_USD_FEED, PYTH_USDC_USD_FEED_ID_HEX } from "../pyth.js";
 import {
@@ -35,6 +35,7 @@ import {
   benchKey,
   buildHistory,
   clockBytes,
+  epochScheduleBytes,
   investmentPolicyBytes,
   priceUpdateBytes,
   protocolConfigBytes,
@@ -126,6 +127,12 @@ export class BenchChain {
     });
     this.accounts.set(SYSVAR_CLOCK_PUBKEY.toBase58(), {
       data: clockBytes(CHAIN_UNIX_SECONDS, BigInt(CURRENT_SLOT), CHAIN_EPOCH),
+      owner: new PublicKey("Sysvar1111111111111111111111111111111111111"),
+      lamports: 1,
+      executable: false,
+    });
+    this.accounts.set(SYSVAR_EPOCH_SCHEDULE_PUBKEY.toBase58(), {
+      data: epochScheduleBytes(),
       owner: new PublicKey("Sysvar1111111111111111111111111111111111111"),
       lamports: 1,
       executable: false,

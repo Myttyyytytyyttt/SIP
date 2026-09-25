@@ -120,6 +120,7 @@ import {
   VAULT_READ_CRITICAL_STREAK,
   createCarryWatch,
   foldInvestTurn,
+  legFeeAlert,
   LegFeeBook,
   SigningRoutes,
   vaultReadAlert,
@@ -1556,7 +1557,9 @@ async function sweep(): Promise<void> {
         }
         // A LEG'S TRANSFER FEE WALKING TOWARD THE CEILING, raised beside the
         // refusal above and in the same shape: a keyed alert the alerter
-        // deduplicates, cleared once the condition goes away.
+        // deduplicates, cleared once the condition goes away. A WARN is sent
+        // once per condition rather than every 30 minutes, a critical keeps
+        // repeating (legFeeAlert, src/sweep-decision.ts, says why).
         //
         // OUTSIDE THAT BRANCH, BECAUSE THE WARNING IS NOT ABOUT THE OUTCOME.
         // `invest-refused` fires only on REFUSED and is one of the three
@@ -1577,7 +1580,7 @@ async function sweep(): Promise<void> {
           const raised = legFeeLooked.get(vaultAddr) ?? new Set<string>();
           for (const alert of invest.feeWarnings) {
             raised.add(alert.key);
-            alerter.fire(alert);
+            alerter.fire(legFeeAlert(alert));
           }
           legFeeLooked.set(vaultAddr, raised);
         }

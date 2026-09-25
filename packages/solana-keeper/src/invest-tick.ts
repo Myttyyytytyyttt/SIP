@@ -42,6 +42,7 @@ import {
   Keypair,
   PublicKey,
   SYSVAR_CLOCK_PUBKEY,
+  SYSVAR_EPOCH_SCHEDULE_PUBKEY,
   SystemProgram,
   Transaction,
   TransactionMessage,
@@ -68,6 +69,7 @@ import {
   convertAmount,
   convertDecision,
   convertCapLamports,
+  decodeEpochSchedule,
   inMintDecision,
   investPauseDecision,
   legAdmissionDecision,
@@ -78,6 +80,7 @@ import {
   oracleConvertDecision,
   rollingDecision,
   routeRateWad,
+  slotsLeftInEpoch,
   shouldConvert,
   turnSpendCeiling,
   venueDecision,
@@ -100,7 +103,7 @@ import { method, type MethodCall } from "./methods.js";
 // with it; it only stopped being called from here.
 import { VenueMeasurementRefusal, measureLegVenue } from "./venue-depth.js";
 import type { TransferFeeTerms } from "./min-out.js";
-import { JupiterRouteRefusal, type JupiterRoute, investAmountIn, investMinOut, verifyRouteFresh } from "./program-scripts.js";
+import { JupiterRouteRefusal, type JupiterRoute, type LandingEpoch, investAmountIn, investMinOut, verifyRouteFresh } from "./program-scripts.js";
 import {
   PYTH_RECEIVER_PROGRAM,
   PYTH_SOL_USD_FEED,
@@ -411,11 +414,16 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // getMultipleAccountsInfo that was being sent anyway, resolved against the
   // very unix_timestamp that comes back beside them. A gate that cost a round
   // trip per vault per sweep would be a gate an operator eventually turns off.
-  const [vaultInfo, clockInfo, solFeedInfo, usdcFeedInfo] = await connection.getMultipleAccountsInfo([
+  //
+  // AND THE EPOCHSCHEDULE, LAST, for the same reason: the landing-window rule
+  // (worstCaseTransferFee) needs where this epoch ENDS, which the Clock does not
+  // carry, and a fifth address in a request already being sent costs nothing.
+  const [vaultInfo, clockInfo, solFeedInfo, usdcFeedInfo, epochScheduleInfo] = await connection.getMultipleAccountsInfo([
     vault,
     SYSVAR_CLOCK_PUBKEY,
     PYTH_SOL_USD_FEED,
     PYTH_USDC_USD_FEED,
+    SYSVAR_EPOCH_SCHEDULE_PUBKEY,
   ]);
   if (vaultInfo === null || vaultInfo === undefined) return { outcome: "FAILED", detail: "vault account missing" };
   // BEFORE ANY OTHER READ, ANY ATA, ANY WRAP: either pause switch. The vault's
@@ -586,12 +594,38 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // Jupiter can tell us and only after a quote. This read is the leg mints and
   // nothing else.
   const currentEpoch = clockInfo.data.readBigUInt64LE(16);
+  // HOW FAR THIS EPOCH HAS TO RUN, from the Clock's slot (byte 0) and the
+  // EpochSchedule read beside it. It decides one thing only: whether a fee rise
+  // written for the NEXT epoch can reach a transaction this turn sends, and so
+  // whether the slippage and min_out are sized against it (worstCaseTransferFee).
+  // The admission verdict and the warnings never read it. Unreadable, it fails
+  // the turn before anything is sent, exactly as an unreadable Clock does: a
+  // guess here is either a revert after the spend or a refusal with no cause.
+  let slotsLeft: bigint;
+  try {
+    if (epochScheduleInfo === null || epochScheduleInfo === undefined) throw new Error("the account came back empty");
+    slotsLeft = slotsLeftInEpoch(decodeEpochSchedule(epochScheduleInfo.data), { slot: clockInfo.data.readBigUInt64LE(0), epoch: currentEpoch });
+  } catch (error) {
+    return {
+      outcome: "FAILED",
+      detail:
+        `the EpochSchedule sysvar could not be read (${error instanceof Error ? error.message : String(error)}), so ` +
+        "whether a scheduled fee rise can land this turn cannot be decided; nothing was sent",
+    };
+  }
   const legInfos = await connection.getMultipleAccountsInfo(policy.legs.map((leg) => leg.mint), "confirmed");
   const legMints = policy.legs.map((leg, index) => {
     const info = legInfos[index] ?? null;
     return { mint: leg.mint, account: info === null ? null : { owner: info.owner, data: info.data } };
   });
-  const admission = legAdmissionDecision({ legs: legMints, currentEpoch });
+  const admission = legAdmissionDecision({ legs: legMints, currentEpoch, slotsLeftInEpoch: slotsLeft });
+  // THE SAME DECISION, HANDED TO EVERY ROUTE BUILD THIS TURN MAKES. The builder
+  // would otherwise re-decide it from its own getEpochInfo minutes later, and in
+  // the one turn that crosses the landing window's start the two split: the
+  // slippage sized for today's fee, the route modelled with tomorrow's, and
+  // measureLegVenue refusing — at the send-time re-measure, after the wrap and
+  // the convert had already confirmed (review of fee-landing-epoch, 2026-09-25).
+  const landing = { currentEpoch, slotsLeftInEpoch: slotsLeft };
 
   // AND THE NOTICE THE REFUSAL CANNOT GIVE, off the same bytes and the same
   // clock, one line above the return that can end the turn.
@@ -688,6 +722,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       spendCeiling,
       convertCeiling,
       admissionFees: admission.worstCaseFees,
+      landing,
     });
   } catch (error) {
     // A MEASUREMENT THAT COULD NOT BE TAKEN IS A REFUSAL, NEVER A PASS, and it
@@ -986,10 +1021,11 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
           inputMint: policy.inMint,
           targetMint: mint,
           spend: amountIn,
-          // The worst case, for the same reason the gate above uses it.
+          // The landing-epoch worst case, for the same reason the gate above uses it.
           feeBps: admission.worstCaseFees.get(mint.toBase58())?.bps ?? 0n,
           maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
           ownerFloorRateWad: leg.minOutRateWad,
+          landing,
         });
       } catch (error) {
         // THE FIRST REFUSED IN THIS FILE THAT CAN BE REACHED AFTER MONEY HAS
@@ -1027,9 +1063,12 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       // never the API's, and invest.rs bounds the caller's number against
       // min_investment, max_per_call and the 30-day cap. investMinOut
       // recomputes the venue's own floor out of that same blob's tail, takes
-      // this mint's Token-2022 transfer fee off it once, and refuses a result
-      // under the owner's signed min_out_rate_wad — which invest.rs would
-      // otherwise reject with FloorTooLow after the fee had been paid.
+      // this mint's Token-2022 transfer fee off it once, and, when that lands
+      // under the owner's signed min_out_rate_wad, hands invest() the owner's
+      // floor itself if the venue's own floor still clears it — refusing only
+      // when it does not, which invest.rs would otherwise reject with
+      // FloorTooLow after the fee had been paid (jupiter-route.ts,
+      // investMinOutFor, has the 2026-09-25 refusal that rule replaced).
       //
       // tightenMinOut IS GONE FROM THIS PATH, deliberately. It bounded a rate
       // this keeper OBSERVED by reading a pool itself, which is a thing it can
@@ -1084,12 +1123,12 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
           // Jupiter there are no longer two. tightenMinOut compared a rate this
           // keeper observed off a pool against the owner's signed floor and
           // said which was tighter; investMinOut takes the floor the ROUTE'S
-          // OWN BYTES guarantee, nets the transfer fee off it, and REFUSES
-          // outright if the result is under the owner's floor. So by the time a
-          // leg is bought, min_out is the venue's guaranteed floor and it has
-          // already cleared the owner's — there is no "policy floor won" case
-          // left to report, because that case is now a refusal.
-          " (min_out is the route's own guaranteed floor, net of the leg's transfer fee, checked against the owner's)",
+          // OWN BYTES guarantee and nets the transfer fee off it. Since
+          // 2026-09-25, when that net lands under the owner's floor and the
+          // venue's own floor does not, min_out IS the owner's floor
+          // (jupiter-route.ts, investMinOutFor); under the venue's floor too,
+          // the leg is refused before it gets here.
+          " (min_out is the route's own guaranteed floor net of the leg's transfer fee, or the owner's floor where that net falls under it)",
       ),
       purchases,
     };
@@ -1188,6 +1227,8 @@ async function measureBasketVenues(
     readonly convertCeiling: bigint;
     /** Each leg's WORST-CASE fee: what the slippage is sized against. */
     readonly admissionFees: ReadonlyMap<string, TransferFeeTerms>;
+    /** The turn's epoch and slots-left, the read admissionFees was decided from. */
+    readonly landing: LandingEpoch;
   },
 ): Promise<{ readonly legs: LegVenue[] }> {
   const legs: LegVenue[] = [];
@@ -1214,14 +1255,16 @@ async function measureBasketVenues(
       // it. legSlippageBps turns it into a slippage strictly above itself, and
       // measureLegVenue refuses if the route builder's own read disagrees.
       //
-      // THE WORST CASE, NOT THE ACTIVE FEE, and that is what stops the two from
-      // disagreeing: buildJupiterRoute models the destination mint against its
-      // own `fee.worstCase`, so sizing against today's rate would refuse every
-      // basket for the two epochs before any scheduled rise. See
+      // THE LANDING-EPOCH WORST CASE, NOT THE ACTIVE FEE, and that is what
+      // stops the two from disagreeing: buildJupiterRoute models the
+      // destination mint against its own `fee.worstCase`, decided by the same
+      // feeRiseCanLand over the same window. A rise at the next epoch within
+      // LANDING_WINDOW_SLOTS counts; one further out counts in neither. See
       // worstCaseTransferFee.
       feeBps: params.admissionFees.get(leg.mint.toBase58())?.bps ?? 0n,
       maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
       ownerFloorRateWad: leg.minOutRateWad,
+      landing: params.landing,
     });
     legs.push(venue);
   }

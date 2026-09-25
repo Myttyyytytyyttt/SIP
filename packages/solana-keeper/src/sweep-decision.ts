@@ -202,6 +202,26 @@ export function createCarryWatch(): CarryWatch {
 }
 
 /**
+ * How a leg-fee warning goes to the alerter: a WARN is announced once, a
+ * CRITICAL keeps its 30-minute repeat.
+ *
+ * WHY. The keeper fires every warning on every turn that reads the leg mints,
+ * and the alerter repeats a standing key every 30 minutes. For ANTHROPIC's 300
+ * bps written for epoch 1043 — exactly the ceiling, a rate the owner accepted
+ * on 2026-09-24 — that was one "[WARN] A leg's scheduled transfer fee lands
+ * exactly on the ceiling…" message every half hour to Telegram, with nothing
+ * left to act on (measured on the branch's probe: this warning, severity warn,
+ * on an IDLE turn). A WARN here is news: the rate is admitted and the basket is
+ * bought. It is sent when first raised, logged and on /status after that, and
+ * sent again only once the condition has cleared and come back. A CRITICAL — a
+ * fee above the ceiling, bought or scheduled — stops the basket and still
+ * repeats until someone acts; a rise from warn to critical breaks through.
+ */
+export function legFeeAlert(alert: Alert): Alert {
+  return alert.severity === "critical" ? alert : { ...alert, once: true };
+}
+
+/**
  * The leg-fee warnings that stand after a sweep, and the ones to clear.
  *
  * PER VAULT, BECAUSE A SWEEP NO LONGER TURNS EVERY VAULT. The keys are the

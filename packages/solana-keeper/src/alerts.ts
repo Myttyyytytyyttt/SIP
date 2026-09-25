@@ -34,6 +34,12 @@ export interface Alert {
   readonly title: string;
   readonly detail: string;
   readonly context?: Record<string, unknown>;
+  /**
+   * A NOTICE, NOT A CONDITION TO CHASE: sent the first time its key fires and
+   * not again while the key stands — no 30-minute repeat. clear() rearms it, and
+   * an escalation to a higher severity still breaks through.
+   */
+  readonly once?: boolean;
 }
 
 /**
@@ -213,7 +219,7 @@ export function createAlerter(options: AlerterOptions): Alerter {
       // through; a de-escalation is still a repeat, because nobody needs paging
       // to be told a thing got better.
       const escalated = previous !== undefined && RANK[alert.severity] > RANK[previous.severity];
-      if (previous !== undefined && !escalated && at - previous.firedAt < repeatAfterMs) {
+      if (previous !== undefined && !escalated && (alert.once === true || at - previous.firedAt < repeatAfterMs)) {
         previous.count += 1;
         return;
       }
