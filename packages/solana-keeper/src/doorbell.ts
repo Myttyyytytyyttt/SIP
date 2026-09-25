@@ -551,6 +551,9 @@ export class Doorbell {
    * expected: a webhook made by hand is taken at its word, and held to it.
    */
   expectEcho(signature: string, now: number, touched: readonly string[]): void {
+    // A DOORBELL THAT IS OFF LISTENS FOR NOTHING, so it waits for no echo: the
+    // volume keeper's is off, and every settle it sent was held as pending for good.
+    if (!this.enabled) return;
     this.#forgetSeen(now);
     // ALREADY BACK: delivered while the turn that sent it was still reading its receipt.
     if (this.#seen.delete(signature)) return;

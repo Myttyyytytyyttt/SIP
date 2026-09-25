@@ -1328,7 +1328,12 @@ async function sweep(): Promise<void> {
         // inferred from a total, so "can this thing settle on its own yet?" has
         // an answer in /status.
         let route = "not resolved (dry run)";
-        if (config.signing !== null) {
+        // THE VOLUME KEEPER RESOLVES NO SIGNER FOR A VAULT IT DOES NOT SETTLE: it would
+        // only repeat the profit keeper's seat alerts for the same wallet and spend
+        // Privy calls on a turn that stops at the mode. Unread vaults are resolved.
+        const settlesThisVault = config.role === "profit" || vaults === null || vaults.get(vaultAddr)?.skimMode === MODE_VOLUME;
+        if (config.signing !== null && !settlesThisVault) route = "not resolved (the profit keeper settles this vault)";
+        if (config.signing !== null && settlesThisVault) {
           walletSigner = localSigners?.signers.get(wallet) ?? null;
           route = walletSigner !== null ? "local-keypair" : "none";
           if (privyConfig !== null) {

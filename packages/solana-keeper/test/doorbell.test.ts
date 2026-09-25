@@ -235,6 +235,12 @@ describe("trust", () => {
     expect(bell.status(T0 + SWEEP).eventsLost).toBe(0);
   });
 
+  it("holds no echo on a doorbell that is off, which nothing will ever ring", () => {
+    const bell = new Doorbell(false);
+    for (let i = 0; i < 5; i += 1) bell.expectEcho(`volume-settle-${i}`, T0 + i, [WALLET, VAULT]);
+    expect(bell.status(T0 + 10).echoesPending).toBe(0);
+  });
+
   it("is never given to a doorbell that is off", () => {
     const links = fleet(80);
     const bell = new Doorbell(false);
