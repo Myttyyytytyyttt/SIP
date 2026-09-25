@@ -65,6 +65,19 @@ const Gap = ({ label, gap, from }: { label: string; gap: Comparison; from: React
     <Figure label={label} value={formatBps(gap.bps)} from={from} tone={gap.bps > 500n || gap.bps < -500n ? "warn" : "plain"} />
   );
 
+/**
+ * The two publishes against each other, in words. A gap is symmetric and gets no
+ * tone: the account trailing Hermes is the ordinary case — somebody pays to
+ * refresh those bytes and they do it on their own schedule — and Hermes trailing
+ * the account is equally a fact about two moments.
+ */
+const publishGap = (seconds: bigint): string =>
+  seconds > 0n
+    ? `the account's publish is ${formatAge(seconds)} behind Hermes's`
+    : seconds < 0n
+      ? `the account's publish is ${formatAge(-seconds)} ahead of Hermes's`
+      : "both readings carry the same publish second";
+
 const ShelfCard = ({ row }: { row: ShelfRow }) => (
   <li className="rounded-lg border border-border/60 bg-card/50 p-4">
     <div className="flex items-baseline justify-between gap-3">
@@ -463,35 +476,93 @@ export function PricesView({ model }: { model: PricesModel }) {
 
       <Section
         id="underlying"
-        eyebrow="the seam"
-        title="What this page still cannot tell you"
+        eyebrow="5 · the second path to the same oracle"
+        title="Pyth's own service, beside the account the keeper trusts"
         blurb={
-          <p>
-            A PreStock&apos;s <em>underlying</em> has no on-chain oracle here. SPYx above has a Pyth push account; {HERMES_EQUITY_SYMBOL}{" "}does not, and
-            no figure on this page is the underlying company&apos;s price.
-          </p>
+          <>
+            <p>
+              Section 1 reads a Pyth <em>push account</em>: bytes on Solana, refreshed by whoever chooses to refresh them, and the reading the
+              keeper&apos;s gate actually consults before it converts a vault&apos;s saved SOL. Pyth answers for the same feed id directly too, over its
+              Hermes service, as of now. Two independent paths to one oracle — so the figure worth printing is not the second price, it is the{" "}
+              <strong>drift</strong> between them: how far the reading a money decision rests on sits from what Pyth publishes at this instant.
+            </p>
+            <p className="mt-2">
+              A drift is a fact about two readings taken at two moments, not an accusation, and neither path is the corrected version of the other. The
+              account is what the chain can see; Hermes is what Pyth says now. Read the gap and the two publish times together.
+            </p>
+          </>
         }
       >
+        {model.hermes.kind === "read" ? (
+          <Grid>
+            {model.hermes.feeds.map((feed) => (
+              <div key={feed.feedIdHex} className="space-y-4">
+                <Read
+                  label={`Hermes ${feed.symbol}`}
+                  reading={feed.hermes}
+                  render={(read) => (
+                    <Figure
+                      label={`Hermes ${feed.symbol}`}
+                      value={formatUsd(read.microUsd, 4)}
+                      from={
+                        <>
+                          Published {isoFromUnix(read.publishTime)}, confidence ±{formatUsd(read.confMicroUsd, 4)}. Read on the server from Pyth&apos;s
+                          Hermes service for feed id <Mono>{feed.feedIdHex}</Mono>, and shown only because the id in the answer is the id this page
+                          asked for — the same check the push account gets.
+                        </>
+                      }
+                    />
+                  )}
+                />
+                <Read
+                  label={`Drift, Hermes against the ${feed.label} account`}
+                  reading={feed.drift}
+                  render={(drift) => (
+                    <Figure
+                      label={`Drift, Hermes against the ${feed.label} account`}
+                      value={formatBps(drift.bps)}
+                      from={
+                        <>
+                          Signed, as bps of the push account&apos;s own price ({formatUsd(drift.onChainMicroUsd, 4)}, published{" "}
+                          {isoFromUnix(drift.onChainPublishTime)}), taken in integers. {publishGap(drift.publishGapSeconds)}. The account is{" "}
+                          <Mono>{feed.account}</Mono>; it is not wrong for being older, it is older.
+                        </>
+                      }
+                    />
+                  )}
+                />
+              </div>
+            ))}
+          </Grid>
+        ) : model.hermes.kind === "unread" ? (
+          <Unread
+            label="Pyth Hermes"
+            why={`${model.hermes.why}. The push-account figures above are unaffected: this page waits at most two and a half seconds on Hermes and then renders without it.`}
+          />
+        ) : (
+          <div className="rounded-lg border border-dashed border-border bg-muted/30 p-5">
+            <p className="text-sm font-semibold text-foreground">Hermes — not read in this deployment</p>
+            <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+              Pyth&apos;s Hermes service is behind a credential and this deployment has none: <Mono>{model.hermes.variable}</Mono>{" "}is not set. So there
+              is one path to the oracle here rather than two, and no drift is shown — the push-account figures in section 1 are complete on their own,
+              and every other number on this page is what it was.
+            </p>
+          </div>
+        )}
+
+        <p className="text-xs leading-relaxed text-muted-foreground">{model.hermes.entitlement}</p>
+
         <div className="rounded-lg border border-dashed border-border bg-muted/30 p-5">
-          <p className="text-sm font-semibold text-foreground">{HERMES_EQUITY_SYMBOL} — not read</p>
+          <p className="text-sm font-semibold text-foreground">{HERMES_EQUITY_SYMBOL} — still not read</p>
           <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-            {model.hermes.kind === "absent" ? (
-              <>
-                Pyth&apos;s Hermes service serves equity feeds behind a credential, and this deployment has none: <Mono>{model.hermes.variable}</Mono>{" "}
-                is not set. So the block that would sit here is empty on purpose, and the page is correct without it — the issuer&apos;s own marks
-                above are the issuer&apos;s, not an independent price for the company.
-              </>
-            ) : (
-              <>
-                <Mono>{model.hermes.variable}</Mono> is set in this environment, but this build deliberately contains no Hermes request: the seam is
-                marked and not filled. Until the fetch is written, server-side, with a publish age like every other figure here, nothing on this page
-                is the underlying&apos;s price.
-              </>
-            )}
+            A PreStock&apos;s <em>underlying</em> has no feed this page can reach. SPYx above has a Pyth push account; the equity index behind a
+            PreStock has neither that nor an entitled Hermes feed on this credential, so no figure anywhere on this page is the underlying
+            company&apos;s price. The issuer&apos;s own marks are the issuer&apos;s.
           </p>
           <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-            Where it goes: <Mono>src/lib/prices-data.ts</Mono>, beside the reads above. Server-side — the app&apos;s pinned Content-Security-Policy
-            lists no such origin for the browser, and a credential has no business in a bundle.
+            Both readings above are taken in <Mono>src/lib/prices-data.ts</Mono>, on the server. The app&apos;s pinned Content-Security-Policy lists no
+            Hermes origin for the browser, and a credential has no business in a bundle: it travels in an <Mono>Authorization</Mono> header from this
+            server and appears in nothing this page returns.
           </p>
         </div>
       </Section>

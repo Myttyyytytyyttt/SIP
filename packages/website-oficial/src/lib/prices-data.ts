@@ -86,35 +86,240 @@ export const PRESTOCKS_API_URL = "https://prestocks.com/api/prestocks";
 const PRESTOCKS_TIMEOUT_MS = 6_000;
 
 /**
- * THE MARKED SEAM — Pyth Hermes, equity feeds, deliberately NOT wired.
+ * THE SECOND PATH TO THE SAME ORACLE — Pyth Hermes, read on the server.
  *
- * Hermes serves Pyth's off-chain feeds, including the equity indices this
- * product would want for a PreStock's underlying (Equity.Index.ANTHROPIC/USD is
- * the shape of the symbol), behind a credential. This build reads the NAME of
- * the variable that credential would arrive in and nothing else: it makes no
- * request, holds no token, and has no code path that could send one. When the
- * variable is absent — which is every environment today, including production —
- * the page states that the underlying is not read, which is the honest reading
- * of an index nobody here has a feed for.
+ * WHY A SECOND PRICE IS NOT THE POINT. The push account above is what the
+ * KEEPER trusts: it is the account its oracle gate reads before it converts a
+ * vault's saved SOL, and it is refreshed by whoever chooses to refresh it. So it
+ * can be stale, and stale is not wrong — it is a fact about the moment those
+ * bytes were last written. Hermes is Pyth's own service answering for the SAME
+ * feed id right now. Two independent paths to one oracle, and the number worth
+ * printing is the DRIFT between them: how far the reading a money decision rests
+ * on has fallen behind what Pyth publishes at this instant. The second price on
+ * its own is decoration.
  *
- * TO FILL IT: set the variable in the deployment, then implement the fetch HERE,
- * server-side, returning a Reading with a publish age like every other figure on
- * the page. Do not reach for it from the browser: the CSP's connect-src would
- * refuse the origin, and it would put the credential in the bundle.
+ * WHAT THIS CREDENTIAL REACHES, MEASURED RATHER THAN ASSUMED. On 2026-09-25 it
+ * answered 200 for the crypto majors — Crypto.SOL/USD and Crypto.USDC/USD, which
+ * are exactly the two feeds the keeper's gate reads — and 403 "Not entitled:
+ * feed" for every tokenised-stock and equity symbol tried. So this page asks for
+ * those two and for none of the others: a request known to fail is waste on
+ * every page load, and the limit is worth stating plainly.
+ *
+ * THE CREDENTIAL GOES IN A HEADER AND NOWHERE ELSE. `Authorization: Bearer
+ * <value>` authenticates; a query parameter does not — it answers 401 — so no
+ * code path here could put it in a URL. Nothing here returns, logs or serialises
+ * the value: every reason string this seam can produce goes through `redacting`
+ * first, so even a third party that echoed the token back could not get it into
+ * the model.
+ *
+ * AND IT CANNOT BLOCK THE PAGE. One request, hard-stopped at
+ * HERMES_TIMEOUT_MS. An absent credential, a timeout, a non-200, a body that
+ * will not parse or an id that came back wrong each become a named reason, and
+ * every other figure on the page still stands.
  */
 export const HERMES_EQUITY_CREDENTIAL_VARIABLE = "SIP_PYTH_HERMES_CREDENTIAL";
 
-/** The equity symbol this seam is for, shown on the page as the thing that is missing. */
+/** The equity symbol this page still has no feed for, shown as the thing that is missing. */
 export const HERMES_EQUITY_SYMBOL = "Equity.Index.ANTHROPIC/USD";
 
-export type HermesEquitySeam =
-  | { readonly kind: "absent"; readonly variable: string; readonly symbol: string }
-  | { readonly kind: "configured-not-wired"; readonly variable: string; readonly symbol: string };
+/** Hermes's latest-price endpoint. `ids[]` repeats, one per feed, and `parsed=true` is what makes the answer readable without a binary decoder. */
+export const HERMES_LATEST_URL = "https://hermes.pyth.network/v2/updates/price/latest";
 
-/** The seam's state from an environment that may not hold the variable. Never returns the value, only whether there is one. */
-export function hermesEquitySeam(env: Readonly<Record<string, string | undefined>> = process.env): HermesEquitySeam {
-  const present = (env[HERMES_EQUITY_CREDENTIAL_VARIABLE] ?? "").trim() !== "";
-  return { kind: present ? "configured-not-wired" : "absent", variable: HERMES_EQUITY_CREDENTIAL_VARIABLE, symbol: HERMES_EQUITY_SYMBOL };
+/** Hermes gets less time than prestocks.com, because it is an extra: the page must paint without it. */
+const HERMES_TIMEOUT_MS = 2_500;
+
+/** What this credential reaches and what it does not. Dated, because an entitlement is a fact with a date on it. */
+export const HERMES_ENTITLEMENT_NOTE =
+  'Measured 2026-09-25 against this deployment’s own credential: the free tier reaches the crypto majors — Crypto.SOL/USD and Crypto.USDC/USD, the two feeds the keeper’s gate reads — and answers 403 "Not entitled: feed" for the tokenised-stock and equity feeds (Crypto.SPYX/USD, Crypto.NVDAX/USD, Equity.US.SPY/USD, Equity.Index.ANTHROPIC/USD). So this page asks Hermes for those two feeds and for nothing else.';
+
+/** The feeds this credential is entitled to, each paired with the label of the on-chain reading its drift is taken against. */
+export const HERMES_ENTITLED_FEEDS: readonly {
+  readonly label: string;
+  readonly symbol: string;
+  readonly feedIdHex: string;
+  readonly account: string;
+}[] = Object.freeze([
+  { label: "SOL/USD", symbol: "Crypto.SOL/USD", feedIdHex: PYTH_SOL_USD_FEED_ID_HEX, account: PYTH_SOL_USD_FEED },
+  { label: "USDC/USD", symbol: "Crypto.USDC/USD", feedIdHex: PYTH_USDC_USD_FEED_ID_HEX, account: PYTH_USDC_USD_FEED },
+]);
+
+/** One Hermes reading, in the same units the push account's reading already carries. */
+export interface HermesFeedRead {
+  /** The price in MICRO_USD. */
+  readonly microUsd: bigint;
+  /** The confidence interval, same unit. */
+  readonly confMicroUsd: bigint;
+  readonly publishTime: bigint;
+  /** The raw integer and exponent, so a reader can re-derive the price from Hermes's own answer. */
+  readonly price: bigint;
+  readonly expo: number;
+}
+
+/** The two readings of one feed against each other. Signed, in bps of the reading the keeper trusts. */
+export interface HermesDrift {
+  /** Hermes against the push account, bps of the ACCOUNT's price, signed: positive when Hermes quotes the higher one. */
+  readonly bps: bigint;
+  /** Hermes's publish minus the account's publish, in seconds: positive when Hermes is the newer of the two. */
+  readonly publishGapSeconds: bigint;
+  readonly onChainMicroUsd: bigint;
+  readonly onChainPublishTime: bigint;
+}
+
+export interface HermesFeedRow {
+  /** The label of the on-chain reading this row is drifted against, as the rest of the page names it. */
+  readonly label: string;
+  /** Pyth's own symbol for the feed, as Hermes names it. */
+  readonly symbol: string;
+  readonly feedIdHex: string;
+  /** The push account the same feed id is read from on chain. */
+  readonly account: string;
+  readonly hermes: Reading<HermesFeedRead>;
+  readonly drift: Reading<HermesDrift>;
+}
+
+/**
+ * The seam in each of its three states. `absent` is every deployment without the
+ * variable; `unread` is a credential that is set and a service that did not
+ * answer, with the reason; `read` carries one row per entitled feed, and a row
+ * may itself have failed without costing the other one.
+ */
+export type HermesSeam =
+  | { readonly kind: "absent"; readonly variable: string; readonly symbol: string; readonly entitlement: string }
+  | { readonly kind: "unread"; readonly variable: string; readonly symbol: string; readonly entitlement: string; readonly endpoint: string; readonly why: string }
+  | { readonly kind: "read"; readonly variable: string; readonly symbol: string; readonly entitlement: string; readonly endpoint: string; readonly feeds: readonly HermesFeedRow[] };
+
+/** Whether this environment holds a credential. Returns whether, never what: the value has exactly one destination and it is a header. */
+export const hermesCredentialPresent = (env: Readonly<Record<string, string | undefined>> = process.env): boolean =>
+  (env[HERMES_EQUITY_CREDENTIAL_VARIABLE] ?? "").trim() !== "";
+
+/**
+ * Every reason string this seam produces passes through here first.
+ *
+ * A 403's body and a thrown message both come from outside this process, so
+ * neither is trusted not to contain the token that was just sent. This is cheap,
+ * and it makes "the credential cannot reach the model" a property of the code
+ * rather than a habit of whoever writes the next error message.
+ */
+const redacting = (credential: string) => (text: string): string => (credential === "" ? text : text.split(credential).join("[credential redacted]"));
+
+/** Hermes quotes integers as strings or as numbers, and both are the same integer. Anything else is not one. */
+function hermesInteger(value: unknown, what: string): bigint {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) throw new Error(`${what} came back as ${value}, which is not an integer a price is read from`);
+    return BigInt(value);
+  }
+  if (typeof value === "string" && /^-?\d+$/.test(value.trim())) return BigInt(value.trim());
+  throw new Error(`${what} is not an integer in Hermes's answer`);
+}
+
+/** A feed id as this repository pins them: lower case hex, no 0x. */
+const hermesFeedId = (id: string): string => (id.startsWith("0x") ? id.slice(2) : id).toLowerCase();
+
+/**
+ * One feed out of Hermes's answer, for the id the caller ASKED FOR.
+ *
+ * THE ID IS CHECKED THE SAME WAY THE ACCOUNT'S IS. feedFrom above refuses a push
+ * account whose bytes carry a feed id this repository did not pin; an answer over
+ * HTTP gets no more benefit of the doubt. A feed that was not requested is not
+ * this feed, whatever it is named.
+ */
+export function hermesFeedFrom(body: unknown, expectedFeedIdHex: string, label: string): Reading<HermesFeedRead> {
+  const parsed = (body as { parsed?: unknown } | null | undefined)?.parsed;
+  if (!Array.isArray(parsed)) return failed(`Hermes's answer carries no parsed[] list, so nothing in it is a ${label} price`);
+  const idOf = (item: unknown): string | null => {
+    const id = (item as { id?: unknown } | null)?.id;
+    return typeof id === "string" ? hermesFeedId(id) : null;
+  };
+  const entry = parsed.find((item) => idOf(item) === hermesFeedId(expectedFeedIdHex));
+  if (entry === undefined) {
+    const answered = parsed.map((item) => idOf(item) ?? "an entry with no id").join(", ");
+    return failed(
+      `this page asked Hermes for ${label} (${expectedFeedIdHex}) and the answer holds ${answered === "" ? "no entry at all" : answered}: a feed id that was not requested is not this feed, and it is refused here exactly as it is on the push account`,
+    );
+  }
+  return attempt(`Hermes's ${label} entry could not be read`, () => {
+    const price = (entry as { price?: unknown }).price;
+    if (typeof price !== "object" || price === null) throw new Error("the entry carries no price object");
+    const fields = price as Record<string, unknown>;
+    const raw = hermesInteger(fields["price"], "price.price");
+    const conf = hermesInteger(fields["conf"], "price.conf");
+    const expo = Number(hermesInteger(fields["expo"], "price.expo"));
+    return {
+      microUsd: pythMicroUsd(raw, expo),
+      confMicroUsd: pythMicroUsd(conf === 0n ? 1n : conf, expo),
+      publishTime: hermesInteger(fields["publish_time"], "price.publish_time"),
+      price: raw,
+      expo,
+    };
+  });
+}
+
+/** The two readings against each other, in integers, through the same signed-bps helper every other gap on this page uses. */
+export function hermesDriftFrom(hermes: HermesFeedRead, onChain: FeedRead): Reading<HermesDrift> {
+  return attempt("the drift between Hermes and the push account could not be taken", () => ({
+    bps: deviationBps(hermes.microUsd, onChain.microUsd),
+    publishGapSeconds: hermes.publishTime - onChain.publishTime,
+    onChainMicroUsd: onChain.microUsd,
+    onChainPublishTime: onChain.publishTime,
+  }));
+}
+
+/**
+ * The one Hermes request, or null when there is no credential to make it with.
+ *
+ * Returns the BODY, not the model: the drift needs the on-chain readings, which
+ * are still in flight when this is called, so this runs beside the chain read
+ * and the two are put together afterwards.
+ */
+export async function fetchHermesLatest(fetchImpl: typeof fetch, env: Readonly<Record<string, string | undefined>>): Promise<Reading<unknown> | null> {
+  if (!hermesCredentialPresent(env)) return null;
+  const credential = (env[HERMES_EQUITY_CREDENTIAL_VARIABLE] ?? "").trim();
+  const redact = redacting(credential);
+  const url = `${HERMES_LATEST_URL}?parsed=true&${HERMES_ENTITLED_FEEDS.map((feed) => `ids[]=${feed.feedIdHex}`).join("&")}`;
+  try {
+    const response = await fetchImpl(url, {
+      cache: "no-store",
+      headers: { accept: "application/json", authorization: `Bearer ${credential}` },
+      signal: AbortSignal.timeout(HERMES_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      const body = redact((await response.text().catch(() => "")).replace(/\s+/g, " ").trim()).slice(0, 200);
+      return failed(`Pyth's Hermes answered HTTP ${response.status}${body === "" ? "" : `: ${body}`}`);
+    }
+    return reads(await response.json());
+  } catch (error) {
+    return failed(`Pyth's Hermes could not be read, and it is given at most ${HERMES_TIMEOUT_MS} ms: ${redact(error instanceof Error ? error.message : String(error))}`);
+  }
+}
+
+/** The seam's whole model: the fetch's outcome, each entitled feed, and its drift against the on-chain reading of the same feed id. */
+export function hermesSeamFrom(fetched: Reading<unknown> | null, onChain: Readonly<Record<string, Reading<FeedRead>>>): HermesSeam {
+  const variable = HERMES_EQUITY_CREDENTIAL_VARIABLE;
+  const symbol = HERMES_EQUITY_SYMBOL;
+  const entitlement = HERMES_ENTITLEMENT_NOTE;
+  if (fetched === null) return { kind: "absent", variable, symbol, entitlement };
+  if (!fetched.ok) return { kind: "unread", variable, symbol, entitlement, endpoint: HERMES_LATEST_URL, why: fetched.why };
+  const body = fetched.value;
+  return {
+    kind: "read",
+    variable,
+    symbol,
+    entitlement,
+    endpoint: HERMES_LATEST_URL,
+    feeds: HERMES_ENTITLED_FEEDS.map((feed) => {
+      const hermes = hermesFeedFrom(body, feed.feedIdHex, feed.symbol);
+      const account = onChain[feed.label] ?? failed(`this page took no on-chain reading of ${feed.label}, so there is nothing for Hermes to be drifted against`);
+      return {
+        label: feed.label,
+        symbol: feed.symbol,
+        feedIdHex: feed.feedIdHex,
+        account: feed.account,
+        hermes,
+        drift: !hermes.ok ? failed(hermes.why) : !account.ok ? failed(account.why) : hermesDriftFrom(hermes.value, account.value),
+      };
+    }),
+  };
 }
 
 // ── the chain's own clock and epoch ──────────────────────────────────────────
@@ -381,7 +586,8 @@ export interface PricesModel {
   readonly spyx: EquityBlock;
   readonly anthropic: AnthropicBlock;
   readonly shelf: readonly ShelfRow[];
-  readonly hermes: HermesEquitySeam;
+  /** The second path to the same oracle, in whichever of its three states this deployment is in. */
+  readonly hermes: HermesSeam;
   readonly reference: {
     readonly legRaw: bigint;
     readonly venueMultiple: bigint;
@@ -458,19 +664,22 @@ export async function loadPrices(options: PricesLoadOptions = {}): Promise<Price
   const builtAt = new Date().toISOString();
   const env = options.env ?? process.env;
   const fetchImpl = options.fetch ?? fetch;
-  const hermes = hermesEquitySeam(env);
   const gate = solanaGate(env);
 
   if (options.pool === undefined && gate.kind !== "ok") {
     const why = "this deployment's Solana settings are incomplete, so no chain read was attempted (SIP_SOLANA_RPC_URLS)";
-    return degraded({ builtAt, why, hermes, api: await fetchPreStocks(fetchImpl, "ANTHROPIC", ANTHROPIC_MINT) });
+    // Hermes is still asked, because it is a different service: it can answer
+    // when the chain read was never attempted. With no push account to compare
+    // it against, each drift carries that as its reason and the price stands.
+    const [api, hermesBody] = await Promise.all([fetchPreStocks(fetchImpl, "ANTHROPIC", ANTHROPIC_MINT), fetchHermesLatest(fetchImpl, env)]);
+    return degraded({ builtAt, why, hermes: hermesSeamFrom(hermesBody, {}), api });
   }
   const pool = options.pool ?? createRpcPool(gate.kind === "ok" ? gate.settings.rpcEndpoints : [], { fetch: options.fetch, redactor: gate.kind === "ok" ? gate.settings.redactor : undefined });
 
   // THREE SOURCES, ONE ROUND TRIP EACH, IN PARALLEL: the app's existing pool
   // read, this page's own account batch, and the issuer's API. None can delay
   // the others, and none can fail the others.
-  const [depth, batch, api] = await Promise.all([
+  const [depth, batch, api, hermesBody] = await Promise.all([
     readPoolDepth(pool).catch((error: unknown) => {
       const why = `the pinned pools could not be read: ${pool.scrub(error instanceof Error ? error.message : String(error))}`;
       return { prices: { kind: "unreadable" as const, error: why }, reserves: { kind: "unreadable" as const, error: why } };
@@ -486,6 +695,9 @@ export async function loadPrices(options: PricesLoadOptions = {}): Promise<Price
       }
     })(),
     fetchPreStocks(fetchImpl, "ANTHROPIC", ANTHROPIC_MINT),
+    // The fourth source, and the only one with a credential: Pyth's own service,
+    // answering for the same two feed ids the batch above reads off the chain.
+    fetchHermesLatest(fetchImpl, env),
   ]);
 
   const prices = depth.prices;
@@ -506,6 +718,10 @@ export async function loadPrices(options: PricesLoadOptions = {}): Promise<Price
   const unread = blockedBy(batch, chain);
   const solFeed = batch.ok && unread === null ? feedFrom("SOL/USD", PYTH_SOL_USD_FEED, PYTH_SOL_USD_FEED_ID_HEX, batch.value[1], chainUnix) : failed(unread ?? "the read did not answer");
   const usdcFeed = batch.ok && unread === null ? feedFrom("USDC/USD", PYTH_USDC_USD_FEED, PYTH_USDC_USD_FEED_ID_HEX, batch.value[2], chainUnix) : failed(unread ?? "the read did not answer");
+
+  // THE DRIFT, now that both paths have landed: Hermes against the account the
+  // keeper's gate reads, per feed, in bps of the account's own price.
+  const hermes = hermesSeamFrom(hermesBody, { "SOL/USD": solFeed, "USDC/USD": usdcFeed });
 
   const oracle: SolBlock["oracle"] =
     solFeed.ok && usdcFeed.ok
@@ -648,7 +864,7 @@ export async function loadPrices(options: PricesLoadOptions = {}): Promise<Price
 }
 
 /** Every chain figure unread, for the same reason, with whatever the third party did answer. The page still renders. */
-function degraded(input: { builtAt: string; why: string; hermes: HermesEquitySeam; api: Reading<PreStocksMark> }): PricesModel {
+function degraded(input: { builtAt: string; why: string; hermes: HermesSeam; api: Reading<PreStocksMark> }): PricesModel {
   const why = failed(input.why);
   return {
     builtAt: input.builtAt,
