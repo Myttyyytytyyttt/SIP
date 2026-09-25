@@ -67,11 +67,14 @@
 // checks its own threshold against the CREDITED amount. What does revert with
 // FillTooSmall is a min_out taken from outAmount on a gross-quoting venue.
 //
-// netOfVenueThreshold is still the number to hand invest(), and for a reason
-// that does not depend on any of this: it is below the credit under BOTH
-// quoting bases by OUR arithmetic, so it stays right even if Jupiter's
-// internal check stops being what it is today. It is a floor we can prove,
-// not one we are borrowing.
+// netOfVenueThreshold is still the number to hand invest() whenever it
+// clears the owner's floor, and for a reason that does not depend on any of
+// this: it is below the credit under BOTH quoting bases by OUR arithmetic, so
+// it stays right even if Jupiter's internal check stops being what it is
+// today. It is a floor we can prove, not one we are borrowing. Where it does
+// NOT clear the owner's floor but the venue's own threshold does, min_out is
+// the owner's floor itself — borrowing Jupiter's check for liveness only, never
+// for the vault's minimum; measured why at investMinOutFor().
 //
 // (5) WHAT THE REQUEST DOES NOT BOUND, AND IT IS THE PRICE.
 // verifyQuoteAnswersRequest pins the mints, the amount in and the slippage —
@@ -340,8 +343,10 @@ export interface DestinationTransferFee {
   readonly epoch: number;
   /**
    * Slots from the slot the read was taken at to the first slot of the next
-   * epoch (getEpochInfo's slotsInEpoch - slotIndex). What decides whether
-   * `pending` can reach a transaction built now; see feeRiseCanLand.
+   * epoch (getEpochInfo's slotsInEpoch - slotIndex), or the caller's own
+   * `landing.slotsLeftInEpoch` when it passed one for this same epoch. What
+   * decides whether `pending` can reach a transaction built now; see
+   * feeRiseCanLand and readDestinationTransferFee.
    */
   readonly slotsLeftInEpoch: bigint;
   /** The rate in force RIGHT NOW. */
@@ -530,14 +535,37 @@ export function resolveDestinationTransferFee(input: {
 }
 
 /**
+ * Where a caller's turn stands in its epoch, from ITS OWN clock read: the
+ * epoch and the slots from that read to the next epoch's first slot.
+ */
+export interface LandingEpoch {
+  readonly currentEpoch: bigint;
+  readonly slotsLeftInEpoch: bigint;
+}
+
+/**
  * Reads the destination mint's transfer-fee config from the chain.
  *
  * A mint with no TransferFeeConfig extension (SPYx) reports zero, so callers
  * never branch on "is this leg a fee mint" — they just apply the rate.
+ *
+ * `landing`: THE CALLER'S DECISION, WHEN IT HAS ALREADY MADE ONE. The keeper
+ * reads its Clock once, at the top of an invest turn, sizes every leg's
+ * slippage from it, and LANDING_WINDOW_SLOTS is measured from that read to
+ * the last landing. Deciding again here, off a getEpochInfo taken minutes
+ * later, let the two disagree in the one turn that crosses the window's start:
+ * the keeper asked 200 for 100 bps, this read counted the 300 and modelled
+ * it, and measureLegVenue refused — at the send-time re-measure too, after the
+ * wrap and the convert had confirmed. So while the chain is still in the
+ * caller's epoch, the caller's slots-left decides. Once the chain has moved to
+ * a later epoch the caller's read is about a fee that may no longer be the one
+ * in force, and this read's own answer stands; a disagreement then refuses,
+ * which is the direction that cannot revert after a spend.
  */
 export async function readDestinationTransferFee(
   connection: Connection,
   mint: PublicKey,
+  landing?: LandingEpoch,
 ): Promise<DestinationTransferFee> {
   const [info, epochInfo] = await Promise.all([
     connection.getAccountInfo(mint, "confirmed"),
@@ -548,7 +576,9 @@ export async function readDestinationTransferFee(
   // THE SAME QUANTITY THE KEEPER DERIVES FROM THE CLOCK AND EPOCHSCHEDULE
   // SYSVARS (invest-decision.ts, slotsLeftInEpoch): slots from the slot read to
   // the next epoch's first slot. getEpochInfo already states both halves.
-  const slotsLeftInEpoch = BigInt(epochInfo.slotsInEpoch) - BigInt(epochInfo.slotIndex);
+  const ownSlotsLeft = BigInt(epochInfo.slotsInEpoch) - BigInt(epochInfo.slotIndex);
+  const slotsLeftInEpoch =
+    landing !== undefined && landing.currentEpoch === BigInt(epoch) ? landing.slotsLeftInEpoch : ownSlotsLeft;
   const config = getTransferFeeConfig(unpackMint(mint, info, info.owner));
   if (config === null) {
     return { mint: mint.toBase58(), epoch, slotsLeftInEpoch, current: NO_FEE, pending: null, worstCase: NO_FEE };
@@ -917,6 +947,56 @@ export function ownerFloorFor(amountIn: bigint, minOutRateWad: bigint): bigint {
   return (amountIn * minOutRateWad) / 1_000_000_000_000_000_000n;
 }
 
+/**
+ * The min_out to hand invest(), from the three numbers a route carries — or
+ * null when the owner's floor is out of this route's reach.
+ *
+ *   no owner floor                                   -> netOfVenueThreshold
+ *   netOfVenueThreshold >= ownerFloor                -> netOfVenueThreshold
+ *   netOfVenueThreshold <  ownerFloor <= venueThreshold -> ownerFloor
+ *   venueThreshold < ownerFloor                      -> null (below-owner-floor)
+ *
+ * WHY THE MIDDLE BAND EXISTS, MEASURED. Until 2026-09-25 that band was a
+ * refusal: min_out was always netOfVenueThreshold, which takes the slippage
+ * AND the transfer fee off the quote. With the fee at 300 bps the keeper asks
+ * legSlippageBps(300) = 400, so min_out lands near out * 0.96 * 0.97, and the
+ * owner's ANTHROPIC floor sits at 5 % under a gross pool mid. Measured by a
+ * send-blocked runInvestTick of vault EFXK995P… on 0b31682:
+ *   [below-owner-floor]: this route's min_out would be 2427695, under the
+ *   owner's own floor of 2483089 (2752188 in at 902223869744110771 wad)
+ * while that quote's own otherAmountThreshold cleared the same floor, and what
+ * the vault would be credited on that gross last hop cleared it too. With a
+ * 300 bps fee on a gross-quoting venue the old rule needs slippage over 300 to
+ * fill and, for this floor, under about 206 to pass — no slippage does both,
+ * so it could never buy the leg the owner accepted the 300 for.
+ *
+ * WHY ownerFloor IS SAFE THERE. invest() refuses any min_out under the owner's
+ * floor (FloorTooLow) and any fill under min_out (FillTooSmall), so the vault
+ * is never credited less than the floor its owner signed, whatever this
+ * function returns. What the band borrows is LIVENESS from Jupiter's own
+ * check, which was measured on 2026-09-20 to compare otherAmountThreshold to
+ * the CREDITED amount (header, sections 4 and 6): a swap Jupiter lets through
+ * credited at least venueThreshold >= ownerFloor = min_out. Were that check to
+ * change, the cost is an invest() that reverts with FillTooSmall — failed
+ * closed, the same way every wrong min_out in this file fails — never a fill
+ * under the owner's number.
+ *
+ * WHY NOT ALWAYS venueThreshold. Above the owner's floor the provable number
+ * stays: netOfVenueThreshold is under the credit on either quoting basis by our
+ * own arithmetic. The borrowed guarantee is used only where the provable one
+ * would refuse a price the owner signed for.
+ */
+export function investMinOutFor(numbers: {
+  readonly venueThreshold: bigint;
+  readonly netOfVenueThreshold: bigint;
+  readonly ownerFloor: bigint | null;
+}): bigint | null {
+  const { venueThreshold, netOfVenueThreshold, ownerFloor } = numbers;
+  if (ownerFloor === null || netOfVenueThreshold >= ownerFloor) return netOfVenueThreshold;
+  if (venueThreshold >= ownerFloor) return ownerFloor;
+  return null;
+}
+
 export interface RouteOutput {
   /**
    * Jupiter's outAmount, verbatim.
@@ -957,7 +1037,9 @@ export interface RouteOutput {
    * What the vault's delta reads in the venue's OWN worst case, under the
    * WORSE of the two quoting bases — and therefore a min_out that cannot fire
    * on a fill the venue accepted, proved by our own arithmetic rather than by
-   * Jupiter's internal check. This is the number to hand invest().
+   * Jupiter's internal check. This is the number to hand invest() whenever
+   * it clears `ownerFloor`; between it and `venueThreshold` the owner's floor
+   * itself is handed instead (investMinOutFor()). investMinOut() picks.
    *
    * `venueThreshold` is not, though not for the reason this file used to give:
    * measured, min_out = venueThreshold does not revert with FillTooSmall (see
@@ -1318,7 +1400,10 @@ export function investAmountIn(route: JupiterRoute): bigint {
  *
  * WHY THIS NUMBER. netOfVenueThreshold is below the credit under BOTH quoting
  * bases by our own arithmetic, so it never depends on Jupiter's internal check
- * staying what it is today. See section (4) of the header.
+ * staying what it is today. See section (4) of the header. When that number
+ * falls under the owner's floor and the venue's own threshold does not, the
+ * owner's floor is returned instead — investMinOutFor() says why, with the
+ * refusal it replaced.
  */
 export function investMinOut(route: JupiterRoute): bigint {
   const threshold = venueThresholdFrom(route.amounts);
@@ -1340,14 +1425,16 @@ export function investMinOut(route: JupiterRoute): bigint {
   if (minOut <= 0n) {
     refuse("venue-threshold", `the route's net threshold is ${minOut}, and invest() requires min_out > 0`);
   }
-  if (route.output.ownerFloor !== null && minOut < route.output.ownerFloor) {
+  const chosen = investMinOutFor({ venueThreshold: threshold, netOfVenueThreshold: minOut, ownerFloor: route.output.ownerFloor });
+  if (chosen === null) {
     refuse(
       "below-owner-floor",
-      `this min_out would be ${minOut}, under the owner's own floor of ${route.output.ownerFloor}; invest() would ` +
-        "refuse it with FloorTooLow after the transaction was spent",
+      `the venue's own floor ${threshold} is under the owner's own floor of ${route.output.ownerFloor}; no min_out ` +
+        "invest() accepts can be promised by this route, and invest() would refuse a lower one with FloorTooLow " +
+        "after the transaction was spent",
     );
   }
-  return minOut;
+  return chosen;
 }
 
 export interface VerifyContext {
@@ -1590,12 +1677,16 @@ export function verifySharedAccountsRoute(
     if (netOfVenueThreshold <= 0n) {
       refuse("below-owner-floor", "the route's net threshold is zero, and invest() requires min_out > 0");
     }
-    if (netOfVenueThreshold < ownerFloor) {
+    // THE SAME RULE investMinOut() APPLIES — see investMinOutFor() for why a
+    // route whose NET threshold falls under the floor while its venue floor
+    // clears it is bought at min_out = the owner's floor instead of refused.
+    if (investMinOutFor({ venueThreshold, netOfVenueThreshold, ownerFloor }) === null) {
       refuse(
         "below-owner-floor",
-        `this route's min_out would be ${netOfVenueThreshold}, under the owner's own floor of ${ownerFloor} ` +
-          `(${context.request.amountIn} in at ${context.ownerFloorRateWad} wad); invest() would refuse it with ` +
-          "FloorTooLow after the transaction was spent. The quote answered our question at a price the owner did not sign for",
+        `this route's venue floor ${venueThreshold} is under the owner's own floor of ${ownerFloor} ` +
+          `(${context.request.amountIn} in at ${context.ownerFloorRateWad} wad); invest() would refuse any min_out ` +
+          "this route can promise with FloorTooLow after the transaction was spent. The quote answered our question " +
+          "at a price the owner did not sign for",
       );
     }
   }
@@ -1788,6 +1879,13 @@ export interface BuildJupiterRouteParams {
    */
   readonly useWorstCaseTransferFee?: boolean;
   /**
+   * The caller's own epoch and slots-left, read once for its whole turn. See
+   * readDestinationTransferFee: while the chain is still in that epoch it
+   * decides whether a next-epoch rise is modelled, so the builder and the
+   * caller's slippage sizing cannot split across the window's start mid-turn.
+   */
+  readonly landing?: LandingEpoch;
+  /**
    * The vault owner's `leg.min_out_rate_wad` for this leg, if the caller has
    * it. See VerifyContext.ownerFloorRateWad, and section (5) of the header:
    * this is the only bound in this file on what the route costs.
@@ -1826,7 +1924,7 @@ export async function buildJupiterRoute(
   // Those two are the builder's irreducible cost, and on a slow RPC they are
   // still age — the price really is that much older. A refusal says so
   // explicitly below, so "our RPC was slow" never reads as "the price moved".
-  const feeRead = readDestinationTransferFee(connection, params.targetMint);
+  const feeRead = readDestinationTransferFee(connection, params.targetMint, params.landing);
   // Awaited after the quote, so a rejection here must not surface as an
   // unhandled one while the quote is still in flight.
   void feeRead.catch(() => undefined);

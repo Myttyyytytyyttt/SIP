@@ -40,6 +40,7 @@ import {
   fitsLegacyTransaction,
   investAmountIn,
   investMinOut,
+  investMinOutFor,
   legacyTransactionBytes,
   netOfTransferFee,
   ownerFloorFor,
@@ -1042,7 +1043,7 @@ describe("the price is bounded by the OWNER's floor, and by nothing else in this
       context({ ownerFloorRateWad: 128_868_200_000_000_000n }),
     );
     expect(condition).toBe("below-owner-floor");
-    expect(message).toContain("min_out would be 3221704, under the owner's own floor of 3221705");
+    expect(message).toContain("venue floor 3221704 is under the owner's own floor of 3221705");
     expect(message).toContain("FloorTooLow");
   });
 
@@ -1446,19 +1447,93 @@ describe("min_out has a name too, so the caller is not picking one of four numbe
     expect(refusedBy(() => investMinOut(drifted))).toBe("venue-threshold");
   });
 
-  it("refuses a min_out under the owner's own floor, as invest() would [below-owner-floor]", () => {
+  it("refuses once the owner's floor is above even the venue's own floor, as invest() would [below-owner-floor]", () => {
+    const route = feeRoute();
+    const raised: JupiterRoute = {
+      ...route,
+      output: { ...route.output, ownerFloor: route.output.venueThreshold + 1n },
+    };
+    expect(refusedBy(() => investMinOut(raised))).toBe("below-owner-floor");
+  });
+
+  it("hands invest() the owner's floor when only the NET threshold falls under it (2026-09-25)", () => {
+    // Until 2026-09-25 this was a refusal: netOfVenueThreshold + 1 is one raw
+    // unit over the provable number. The venue's own floor still clears it, so
+    // min_out is the owner's floor — the lowest number invest() accepts.
     const route = feeRoute();
     const raised: JupiterRoute = {
       ...route,
       output: { ...route.output, ownerFloor: route.output.netOfVenueThreshold + 1n },
     };
-    expect(refusedBy(() => investMinOut(raised))).toBe("below-owner-floor");
+    expect(investMinOut(raised)).toBe(route.output.netOfVenueThreshold + 1n);
+    const atVenue: JupiterRoute = { ...route, output: { ...route.output, ownerFloor: route.output.venueThreshold } };
+    expect(investMinOut(atVenue)).toBe(3_221_704n);
   });
 
   it("leaves a fee-free leg's min_out at the venue's own floor", () => {
     const route = verifySharedAccountsRoute(quote(), response(), context({ transferFee: NO_FEE }));
     expect(investMinOut(route)).toBe(3_221_704n);
     expect(investMinOut(route)).toBe(route.output.venueThreshold);
+  });
+});
+
+describe("min_out under the owner's floor: the provable number, else the owner's own, else a refusal", () => {
+  // THE REFUSAL THIS REPLACES, measured 2026-09-25 by a send-blocked
+  // runInvestTick of vault EFXK995P... on 0b31682:
+  //   [below-owner-floor]: this route's min_out would be 2427695, under the
+  //   owner's own floor of 2483089 (2752188 in at 902223869744110771 wad)
+  // min_out was the quote less 4 % slippage AND 3 % fee; the venue's own
+  // floor (less the slippage only) cleared the owner's number.
+
+  it("keeps the provable number whenever it clears the floor, or no floor was stated", () => {
+    expect(investMinOutFor({ venueThreshold: 100n, netOfVenueThreshold: 97n, ownerFloor: null })).toBe(97n);
+    expect(investMinOutFor({ venueThreshold: 100n, netOfVenueThreshold: 97n, ownerFloor: 97n })).toBe(97n);
+    expect(investMinOutFor({ venueThreshold: 100n, netOfVenueThreshold: 97n, ownerFloor: 50n })).toBe(97n);
+  });
+
+  it("returns the owner's floor between the net threshold and the venue's, both ends included", () => {
+    expect(investMinOutFor({ venueThreshold: 100n, netOfVenueThreshold: 97n, ownerFloor: 98n })).toBe(98n);
+    expect(investMinOutFor({ venueThreshold: 100n, netOfVenueThreshold: 97n, ownerFloor: 100n })).toBe(100n);
+  });
+
+  it("refuses one raw unit past the venue's own floor", () => {
+    expect(investMinOutFor({ venueThreshold: 100n, netOfVenueThreshold: 97n, ownerFloor: 101n })).toBeNull();
+  });
+
+  it("buys the measured ANTHROPIC turn at the 300 bps fee the owner accepted, at min_out = his floor", () => {
+    // Measured 2026-09-25 ~03:02Z on the branch: 2,752,188 USDC raw in, out
+    // 2,611,435 on a Manifest (gross-quoting) last hop. At the 300 bps from
+    // epoch 1043 the keeper asks legSlippageBps(300) = 400.
+    const ownerFloor = ownerFloorFor(2_752_188n, 902_223_869_744_110_771n);
+    expect(ownerFloor).toBe(2_483_089n);
+    const venueThreshold = venueThresholdFrom({ inAmount: 2_752_188n, quotedOutAmount: 2_611_435n, slippageBps: 400, platformFeeBps: 0 });
+    const netOfVenueThreshold = netOfTransferFee(venueThreshold, { epoch: 1_043n, basisPoints: 300, maximumFee: 18_446_744_073_709_551_615n });
+    // The old rule's number, under the floor: the refusal's shape.
+    expect(netOfVenueThreshold).toBe(2_431_768n);
+    expect(netOfVenueThreshold).toBeLessThan(ownerFloor);
+    expect(investMinOutFor({ venueThreshold, netOfVenueThreshold, ownerFloor })).toBe(2_483_089n);
+  });
+
+  it("accepts a fee route whose venue floor meets the owner's exactly, and hands invest() that floor", () => {
+    const EXACT_WAD = 128_868_160_000_000_000n; // floor 3,221,704 = this route's venue floor
+    const route = verifySharedAccountsRoute(
+      quote(),
+      responseDeliveringToVault(),
+      context({ transferFee: FEE_100, ownerFloorRateWad: EXACT_WAD }),
+    );
+    expect(route.output.netOfVenueThreshold).toBe(3_189_486n);
+    expect(route.output.ownerFloor).toBe(3_221_704n);
+    expect(investMinOut(route)).toBe(3_221_704n);
+  });
+
+  it("still refuses a fee route whose venue floor is one raw unit under the owner's [below-owner-floor]", () => {
+    const { condition, message } = refusal(
+      quote(),
+      responseDeliveringToVault(),
+      context({ transferFee: FEE_100, ownerFloorRateWad: 128_868_200_000_000_000n }),
+    );
+    expect(condition).toBe("below-owner-floor");
+    expect(message).toContain("venue floor 3221704 is under the owner's own floor of 3221705");
   });
 });
 

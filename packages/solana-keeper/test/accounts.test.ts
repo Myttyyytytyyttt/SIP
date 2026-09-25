@@ -1189,17 +1189,21 @@ describe("the ticks' first steps, over the same bytes", () => {
     mints: (defaults: readonly PublicKey[]) => ReadonlyMap<string, Buffer>,
     /** Slots from the chain's slot to epoch 931, for the Clock AND getEpochInfo alike; default: all but one of 930. */
     slotsLeftInEpoch?: bigint,
+    /** What getEpochInfo answers instead, for a chain that moved on after the turn read its Clock. */
+    laterSlotsLeftInEpoch?: bigint,
   ) {
     const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
     const jupiter = stubJupiter();
     for (const [address, data] of mints(basket.mints)) basket.accounts.set(address, { data, owner: TOKEN_2022_PROGRAM_ID });
     const slot = slotsLeftInEpoch === undefined ? FIXTURE_SLOT : 931n * 432_000n - slotsLeftInEpoch;
+    const laterSlot = laterSlotsLeftInEpoch === undefined ? slot : 931n * 432_000n - laterSlotsLeftInEpoch;
+    const laterEpoch = laterSlot / 432_000n;
     if (slotsLeftInEpoch !== undefined) basket.accounts.set(SYSVAR_CLOCK_PUBKEY.toBase58(), { data: clockBytes(TODAY_UNIX, slot) });
     let usdcAta: PublicKey | undefined;
     const { vault, connection, program } = chainWith({}, { legs: basket.legs, minConvertRateWad: 0n }, {
       ...(slotsLeftInEpoch === undefined
         ? {}
-        : { getEpochInfo: async () => ({ epoch: 930, slotIndex: Number(slot - 930n * 432_000n), slotsInEpoch: 432_000, absoluteSlot: Number(slot), blockHeight: Number(slot) }) }),
+        : { getEpochInfo: async () => ({ epoch: Number(laterEpoch), slotIndex: Number(laterSlot - laterEpoch * 432_000n), slotsInEpoch: 432_000, absoluteSlot: Number(laterSlot), blockHeight: Number(laterSlot) }) }),
       getMinimumBalanceForRentExemption: async () => 2_000_000,
       getTokenAccountBalance: async (address) => {
         if (usdcAta === undefined || !(address as PublicKey).equals(usdcAta)) throw new Error("could not find account");
@@ -1359,6 +1363,31 @@ describe("the ticks' first steps, over the same bytes", () => {
       expect(askedFor(turn.urls, turn.basket.mints[0]!)).toEqual(["200", "200"]);
     });
 
+    it("keeps the turn's own decision when the chain crosses into the window after the Clock was read (review, 2026-09-25)", async () => {
+      // The Clock says one slot outside the window; by the time the builder asks
+      // getEpochInfo the next epoch is inside it. Before the builder took the
+      // turn's decision, the keeper asked 200 for 100 bps, the builder modelled
+      // the 300, and measureLegVenue refused the basket on the disagreement —
+      // on the send-time re-measure, that is after the wrap and the convert.
+      const turn = await restingTurn(rise(931n), LANDING_WINDOW_SLOTS + 1n, LANDING_WINDOW_SLOTS - 100n);
+      expect(turn.result.outcome).toBe("IDLE");
+      expect(turn.result.detail).toContain("under the $5.00 per-call minimum");
+      expect(askedFor(turn.urls, turn.basket.mints[1]!)).toEqual(["200", "200"]);
+    });
+
+    it("but once the chain is IN a later epoch, the turn's slots-left no longer decide anything", async () => {
+      // The turn's Clock is ONE slot from the end of 930, and the 300 is written
+      // for 932 — two epochs out for the turn, so it asks 200. The chain the
+      // builder reads is already 100 slots into 931, where 932 is a whole epoch
+      // away. Carrying the turn's "one slot left" into 931 would make the 932
+      // rise look one slot away and refuse the basket on a fee no transaction
+      // can land under; the builder's own slots-left says it is far, and agrees.
+      const turn = await restingTurn(rise(932n), 1n, -100n);
+      expect(turn.result.outcome).toBe("IDLE");
+      expect(turn.result.detail).toContain("under the $5.00 per-call minimum");
+      expect(askedFor(turn.urls, turn.basket.mints[1]!)).toEqual(["200", "200"]);
+    });
+
     it("fails the turn before anything is sent when the EpochSchedule cannot be read, rather than guess where the epoch ends", async () => {
       const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
       const jupiter = stubJupiter();
@@ -1422,9 +1451,11 @@ describe("the ticks' first steps, over the same bytes", () => {
     // quiet day. Eight spaces of indent is the link loop's own level, one
     // outside that branch, so this pins the placement and not just the call.
     // (Since the doorbell the keys are collected PER VAULT — a sweep no longer
-    // turns every vault — but the placement pinned here is unchanged.)
+    // turns every vault — but the placement pinned here is unchanged. Since
+    // 2026-09-25 each goes through legFeeAlert, which makes a WARN announce
+    // once instead of every 30 minutes; test/alerts.test.ts drives that.)
     expect(keeperSource).toMatch(
-      /\n {8}if \(invest\.feeWarnings !== undefined\) \{\n {10}const raised = legFeeLooked\.get\(vaultAddr\) \?\? new Set<string>\(\);\n {10}for \(const alert of invest\.feeWarnings\) \{\n {12}raised\.add\(alert\.key\);\n {12}alerter\.fire\(alert\);\n {10}\}\n {10}legFeeLooked\.set\(vaultAddr, raised\);\n {8}\}\n/,
+      /\n {8}if \(invest\.feeWarnings !== undefined\) \{\n {10}const raised = legFeeLooked\.get\(vaultAddr\) \?\? new Set<string>\(\);\n {10}for \(const alert of invest\.feeWarnings\) \{\n {12}raised\.add\(alert\.key\);\n {12}alerter\.fire\(legFeeAlert\(alert\)\);\n {10}\}\n {10}legFeeLooked\.set\(vaultAddr, raised\);\n {8}\}\n/,
     );
   });
 

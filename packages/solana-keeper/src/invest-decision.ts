@@ -939,16 +939,25 @@ export function activeTransferFee(facts: MintFacts, currentEpoch: bigint): Trans
  * builder modelled, measureLegVenue would refuse on that disagreement
  * (slippageRefusal); if against a larger one, the ask would be wider than the
  * min_out it pays for. One predicate, imported by both, is what keeps them
- * equal. The builder reads its own epoch later in the turn, so at the very
- * edge of the window it may see the rise when this read did not; that edge
- * refuses one turn rather than sending one.
+ * equal. And the SAME READ: the invest turn hands its own epoch and slots-left
+ * to every route build (BuildJupiterRouteParams.landing), because a builder
+ * that re-read the epoch minutes later could count the rise when this read did
+ * not, in the one turn that crosses the window's start, and refuse that turn
+ * at the send-time re-measure — after the wrap and the convert had confirmed
+ * (review of this branch, 2026-09-25). The builder falls back to its own read
+ * only once the chain has left the turn's epoch.
  *
  * `slotsLeftInEpoch` is slots from the Clock's slot to the next epoch's first
  * slot (slotsLeftInEpoch below, from the EpochSchedule sysvar).
  *
- * THE COST IS A WIDER ASK, NOT A LOOSER FLOOR. A wider slippage only changes
- * what we ask Jupiter for; min_out still comes from the route's own bytes and
- * is still checked against the owner's signed floor.
+ * THE COST IS A WIDER ASK, NOT A LOOSER FLOOR THAN THE OWNER SIGNED. A wider
+ * slippage lowers the route's own threshold, and with it the net min_out; where
+ * that net falls under the owner's floor while the venue's threshold clears
+ * it, min_out is the owner's floor itself (jupiter-route.ts, investMinOutFor).
+ * This rule alone did not end the refusal for good: from the window before
+ * 1043 the 300 counts, the ask is 400, and the net min_out on the measured
+ * quote is 2431768 against the 2483089 floor — that is what investMinOutFor
+ * is for.
  *
  * NOT THE ADMISSION GATE'S NUMBER. MAX_LEG_FEE_BPS is still judged on the fee
  * in force TODAY — a rise written for next month refuses nothing now, and
@@ -1520,12 +1529,17 @@ export const MIN_PROBE_RAW = 1_000_000n;
  * RAW UNIT — Jupiter floors its deduction and Token-2022 ceils its fee — and
  * 200 over 100 fills. So equality is provably fatal and the margin is at least
  * 100 bps. legSlippageBps() re-quotes automatically the day the issuer moves the
- * fee, instead of reverting every sweep with no explanation — and it already
- * has: from the moment 300 bps was written for epoch 1043 (read 2026-09-24),
- * a PreStock leg's worst-case fee is 300 and it is quoted at 400.
+ * fee, instead of reverting every sweep with no explanation. The fee it is
+ * handed is worstCaseTransferFee's: the one in force, or a rise written for the
+ * NEXT epoch once that epoch starts within LANDING_WINDOW_SLOTS. So a PreStock
+ * leg is quoted at 200 while 100 bps is in force and 300 is written for epoch
+ * 1043 further away than that (measured 2026-09-25: 200 asked in epoch 1042),
+ * and at 400 from the window before 1043 on.
  *
  * THE COST, STATED WHERE THE TRADE IS MADE: a wider slippage is a LOOSER
- * per-call floor out of investMinOut. This gate does not compensate for that,
+ * per-call floor out of investMinOut — never looser than the owner's own
+ * floor, which investMinOut hands invest() itself when the net threshold falls
+ * under it (jupiter-route.ts, investMinOutFor). This gate does not compensate for that,
  * because this gate does not measure price — the owner's min_out_rate_wad and
  * invest.rs's measured delta do, and both are named at the top of this section.
  *
@@ -1742,9 +1756,10 @@ export function maxTurnImpactBps(slippageBps: bigint, feeBps: bigint): bigint {
  *
  * THIS IS WHERE THE 100-OVER-100 REVERT IS MADE UNREACHABLE. At a 100 bps fee
  * this returns 200 — the margin that was measured to fill. At the ceiling of
- * 300 it returns 400 by itself (ANTHROPIC's worst-case fee since 300 was
- * written for epoch 1043), rather than the keeper quoting 200 against 300 and
- * reverting every sweep with 0x1771 and no explanation.
+ * 300 it returns 400 by itself (ANTHROPIC's fee once epoch 1043, for which 300
+ * is written, is within LANDING_WINDOW_SLOTS or in force), rather than the
+ * keeper quoting 200 against 300 and reverting every sweep with 0x1771 and no
+ * explanation.
  */
 export function legSlippageBps(feeBps: bigint): bigint {
   const floor = feeBps + MIN_SLIPPAGE_MARGIN_BPS;

@@ -18,6 +18,9 @@ import { Redactor, Secret } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
 import { createAlerter, describeDelivery, type Alert, type AlertSeverity } from "../src/alerts.js";
 import { scrubbedForExport } from "../src/keeper-log.js";
+import { legFeeAlert } from "../src/sweep-decision.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 /** Throwaway: generated per run, never funded, never used to sign anything. */
 const keypair = Keypair.generate();
@@ -317,6 +320,86 @@ describe("a condition that gets worse", () => {
     tick(31 * 60_000);
     alerter.fire(crank(3_000_000n));
     expect(posted).toHaveLength(2);
+  });
+});
+
+describe("a notice is announced once, not every half hour", () => {
+  // THE MESSAGE THE OWNER KEPT GETTING, 2026-09-25: the leg-fee warning for
+  // ANTHROPIC's 300 bps (exactly the ceiling, accepted 2026-09-24) fired on
+  // every turn and went to Telegram again each time the 30-minute window ran
+  // out. legFeeAlert marks a WARN leg-fee alert `once`; this is what that does.
+  function box() {
+    const posted: string[] = [];
+    const logged: { severity: AlertSeverity; line: string }[] = [];
+    let clock = 1_000;
+    const alerter = createAlerter({
+      webhookUrl: new Secret("https://hooks.example.test/T000/B000/WebhookTokenNeverLogged", "alertWebhook"),
+      minSeverity: "warn",
+      log: (severity, line) => logged.push({ severity, line }),
+      post: async (_url, body) => void posted.push(body),
+      now: () => clock,
+    });
+    return { posted, logged, alerter, tick: (ms: number) => void (clock += ms) };
+  }
+  const ANTHROPIC = "Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw";
+  const atCeiling: Alert = {
+    key: `leg-fee:${ANTHROPIC}:300`,
+    severity: "warn",
+    title: "A leg's scheduled transfer fee lands exactly on the ceiling this keeper buys through",
+    detail: "A fee of 300 bps is ALREADY written for epoch 1043",
+  };
+
+  it("sends a once-alert one time across many repeat windows", () => {
+    const { posted, logged, alerter, tick } = box();
+    for (let sweep = 0; sweep < 10; sweep += 1) {
+      alerter.fire(legFeeAlert(atCeiling));
+      tick(31 * 60_000);
+    }
+    expect(posted).toHaveLength(1);
+    expect(logged).toHaveLength(1);
+  });
+
+  it("while the same alert without `once` is sent again every window, which is the old behaviour", () => {
+    const { posted, alerter, tick } = box();
+    for (let sweep = 0; sweep < 3; sweep += 1) {
+      alerter.fire(atCeiling);
+      tick(31 * 60_000);
+    }
+    expect(posted).toHaveLength(3);
+  });
+
+  it("announces again after the condition cleared and came back", () => {
+    const { posted, alerter, tick } = box();
+    alerter.fire(legFeeAlert(atCeiling));
+    tick(60_000);
+    alerter.clear(atCeiling.key);
+    alerter.fire(legFeeAlert(atCeiling));
+    expect(posted).toHaveLength(2);
+  });
+
+  it("still lets an escalation under the same key break through", () => {
+    const { posted, alerter, tick } = box();
+    alerter.fire({ ...atCeiling, once: true });
+    tick(60_000);
+    alerter.fire({ ...atCeiling, severity: "critical", once: true });
+    expect(posted).toHaveLength(2);
+  });
+
+  it("leaves a CRITICAL leg-fee alert repeating: a fee that stops the basket keeps asking for action", () => {
+    const critical: Alert = { ...atCeiling, key: `leg-fee:${ANTHROPIC}:350`, severity: "critical" };
+    expect(legFeeAlert(critical)).toBe(critical);
+    expect(legFeeAlert(atCeiling)).toEqual({ ...atCeiling, once: true });
+    const { posted, alerter, tick } = box();
+    alerter.fire(legFeeAlert(critical));
+    tick(31 * 60_000);
+    alerter.fire(legFeeAlert(critical));
+    expect(posted).toHaveLength(2);
+  });
+
+  it("is what bin/keeper.mts fires the turn's fee warnings through", () => {
+    const keeper = readFileSync(fileURLToPath(new URL("../bin/keeper.mts", import.meta.url)), "utf8");
+    expect(keeper).toMatch(/alerter\.fire\(legFeeAlert\(alert\)\);/);
+    expect(keeper).not.toMatch(/alerter\.fire\(alert\);/);
   });
 });
 

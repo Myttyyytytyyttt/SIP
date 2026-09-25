@@ -46,6 +46,7 @@ export type {
   BuildJupiterRouteParams,
   JupiterQuote,
   JupiterRoute,
+  LandingEpoch,
   RouteWarning,
   RouteWarningCondition,
 } from "@sip/solana-program/jupiter-route";

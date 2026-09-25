@@ -57,6 +57,7 @@ import {
   type AgeTolerance,
   type JupiterQuote,
   type JupiterRoute,
+  type LandingEpoch,
   buildJupiterRoute,
   fetchJupiterQuote,
   findVaultOwnedTokenAccounts,
@@ -335,15 +336,23 @@ export async function measureLegVenue(
     readonly targetMint: PublicKey;
     readonly spend: bigint;
     /**
-     * The destination mint's WORST-CASE transfer fee, in bps — the live one or a
-     * rise already written for a later epoch, whichever is higher (the tick
-     * passes LegAdmission.worstCaseFees). Zero for the wSOL -> USDC convert. Up to
-     * MAX_LEG_FEE_BPS = 300, where legSlippageBps asks 400 and the usable
+     * The destination mint's WORST-CASE transfer fee, in bps — the one in force
+     * now, or a rise written for the NEXT epoch when that epoch starts within
+     * LANDING_WINDOW_SLOTS of the turn's clock read, whichever is higher (the
+     * tick passes LegAdmission.worstCaseFees; see worstCaseTransferFee). A rise
+     * two or more epochs out is not in it. Zero for the wSOL -> USDC convert.
+     * Up to MAX_LEG_FEE_BPS = 300, where legSlippageBps asks 400 and the usable
      * tolerance below is still 100.
      */
     readonly feeBps: bigint;
     readonly maxAge: AgeTolerance;
     readonly ownerFloorRateWad?: bigint;
+    /**
+     * The turn's own epoch and slots-left, the same read `feeBps` was decided
+     * from. Handed to the builder so it models the fee under the SAME decision
+     * (readDestinationTransferFee) instead of re-deciding it minutes later.
+     */
+    readonly landing?: LandingEpoch;
   },
 ): Promise<{ readonly route: JupiterRoute; readonly venue: LegVenue }> {
   // STRICTLY ABOVE THE FEE, DECIDED BEFORE THE QUOTE IS ASKED FOR. This is the
@@ -368,6 +377,7 @@ export async function measureLegVenue(
     slippageBps: Number(slippageBps),
     maxAge: params.maxAge,
     ...(params.ownerFloorRateWad === undefined ? {} : { ownerFloorRateWad: params.ownerFloorRateWad }),
+    ...(params.landing === undefined ? {} : { landing: params.landing }),
   });
 
   // WHERE THE WARNING BECOMES A REFUSAL.
