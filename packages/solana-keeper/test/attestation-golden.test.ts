@@ -90,8 +90,10 @@ describe("--preflight", () => {
   // interop hands anchor's BN over and Node's does not — which is the whole
   // reason the real gate is `tsx bin/keeper.mts --preflight` in the Dockerfile.
   // This case only holds the count and the vectors steady.
-  it("holds all eighteen invariants: the golden vector, the seven builds, and the venue account", async () => {
-    expect(await runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 18 });
+  // AND SINCE 2026-09-25, TWENTY: the volume keeper's rule, measured on two of the
+  // owner's real mainnet transactions in the image that will charge on it.
+  it("holds all twenty invariants: the golden vector, the seven builds, the venue account and the volume rule", async () => {
+    expect(await runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 20 });
   });
 
   // THE SECOND COPY OF THE NUMBER, and the reason it is written as a literal:
@@ -110,7 +112,7 @@ describe("--preflight", () => {
   // Raising this line is how that check was added on purpose rather than as a
   // side effect.
   it("pins its own size, so a gate that shrinks fails instead of quietly reporting a smaller one", async () => {
-    expect(EXPECTED_INVARIANTS).toBe(18);
+    expect(EXPECTED_INVARIANTS).toBe(20);
     expect((await runPreflight()).invariants).toBe(EXPECTED_INVARIANTS);
   });
 
@@ -124,7 +126,7 @@ describe("--preflight", () => {
       expect(await preflightOverADriftedVector()).toEqual({
         ok: false,
         program: SIP_PROGRAM_ID,
-        invariants: 18,
+        invariants: 20,
         failure: 'invariant "the attestation mirror matches the program golden vector" is false, expected true',
       });
     } finally {

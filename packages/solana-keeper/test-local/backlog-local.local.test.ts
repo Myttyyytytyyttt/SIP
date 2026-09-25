@@ -55,10 +55,14 @@ import { discoverLinks, type ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import { MAX_SIGNATURES } from "../src/measure-window.js";
 import { method } from "../src/methods.js";
-import { MODE_PROFIT } from "../src/program-scripts.js";
+import { MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
 import { carryFor, expectedContribution, type CarryBook } from "../src/settle-decision.js";
 import { runSettleTick, type SettleResult } from "../src/settle-tick.js";
 import { LOCAL_PORTS, SIP_VAULT_PROGRAM_ID, startLocalValidator, type LocalValidator } from "./local-validator.js";
+
+// THE SETTLE TICK ITSELF, NOT ONE KEEPER'S SHARE OF IT: these turns settle both modes, as one keeper did before
+// SIP_SOLANA_ROLE split them (keeperModes pins that split on its own).
+const BOTH_MODES: readonly number[] = [MODE_PROFIT, MODE_VOLUME];
 
 const SOL = BigInt(LAMPORTS_PER_SOL);
 /** The market's one payment into the wallet: the second window's profit, before the carried loss nets against it. */
@@ -275,7 +279,7 @@ async function keeperTurn({ live = true, book = carries }: { readonly live?: boo
   const vaults = await readVaults(program, links.map((candidate) => candidate.vault));
   const link = links.find((candidate) => candidate.wallet.equals(wallet.publicKey));
   if (link === undefined) throw new Error("discovery found no link for the buried wallet");
-  return runSettleTick({
+  return runSettleTick({ settles: BOTH_MODES,
     connection,
     program,
     link,

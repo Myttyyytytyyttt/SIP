@@ -41,6 +41,7 @@ import { BN } from "./anchor-interop.js";
 import type { ManagedLink } from "./discovery.js";
 import { idl } from "./idl.js";
 import { connectionReader, measureSince, readTransaction } from "./measure-window.js";
+import type { VolumeProbe } from "./measure-volume.js";
 import { method } from "./methods.js";
 import { assertSettleShape, type SolanaWalletSubmitter } from "./privy-signer.js";
 import { MODE_PROFIT, MODE_VOLUME, attestationInstruction, attestationMessage, type AttestationInputs } from "./program-scripts.js";
@@ -86,6 +87,12 @@ export interface SettleResult {
    * never charged, and absent from every outcome that measured nothing.
    */
   readonly tradedLamports?: bigint;
+  /**
+   * What this window traded BY THE VOLUME RULE (measure-volume.ts): the sum over
+   * every transaction the volume probe counted, before any cadence or policy
+   * boundary. Present only on a volume keeper's turns, which pass the probe.
+   */
+  readonly volumeLamports?: bigint;
   /**
    * WHEN THE CHAIN SAYS THIS SETTLED — the receipt's blockTime, in ms.
    *
@@ -136,6 +143,18 @@ export interface SettleDeps {
    * False when there is no config, and then there are no links either.
    */
   readonly protocolPaused: boolean;
+  /**
+   * The modes THIS keeper settles, keeperModes(role) in production: exactly one.
+   * REQUIRED, like the mode in MeasurementContext: a default could hand a VOLUME
+   * vault to the profit keeper, and two keepers would settle one link.
+   */
+  readonly settles: readonly number[];
+  /**
+   * The volume keeper's probe (measure-volume.ts), handed to the walk so each
+   * measured transaction carries what it traded. Absent on the profit keeper,
+   * whose walk then runs no volume code.
+   */
+  readonly volumeProbe?: VolumeProbe;
   /**
    * Where a VOLUME span's notional comes from. Absent — as keeper.mts always
    * leaves it — it is defaultVolumeBase: zero for a span with no successful
@@ -310,7 +329,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   // wallet, every sweep, over a switch someone turned on deliberately.
   const paused = pauseDecision(vault, deps.protocolPaused);
   if (paused !== null) return paused;
-  const unsupported = modeDecision(vault);
+  const unsupported = modeDecision(vault, deps.settles);
   if (unsupported !== null) return unsupported;
 
   if (deps.live && deps.walletSigner === null) {
@@ -330,7 +349,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   }
   // BEFORE THE WALK, NOT AFTER: see MeasurementContext.finalizedSlot.
   const finalizedSlot = BigInt(await connection.getSlot("finalized"));
-  const measured = await measureSince(connectionReader(connection), link.wallet, from, program.programId);
+  const measured = await measureSince(connectionReader(connection), link.wallet, from, program.programId, deps.volumeProbe);
   // THE CARRY FOR THIS LINK'S EXACT STATE, read after the walk and before the base.
   // Only a zero settle that landed leaves a link in the state a carry was recorded
   // for, so a loss is netted once, by the window right above that settle.
@@ -428,6 +447,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     feeLamports,
     expectedLamports: paid,
     tradedLamports: measured.tradedLamports,
+    ...(measured.volumeTrades === undefined ? {} : { volumeLamports: measured.volumeTrades.reduce((sum, trade) => sum + trade.lamports, 0n) }),
     ...(decision.carry === undefined ? {} : { carry: decision.carry }),
   };
   if (belowReserve !== null) return { ...belowReserve, ...carried };

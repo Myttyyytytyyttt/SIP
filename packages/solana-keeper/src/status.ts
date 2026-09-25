@@ -273,6 +273,8 @@ export interface KeeperStatus {
    * once and then goes quiet, but /status always shows its current condition.
    */
   wallets: Record<string, WalletStatus>;
+  /** Which keeper this is (SIP_SOLANA_ROLE): "profit" or "volume". */
+  role?: "profit" | "volume";
   /** Every loss carried forward and not yet handed on — what a restart would drop. */
   pendingCarries: readonly PendingCarry[];
   /** Folded in at render from the doorbell and its webhook sync, like pendingCarries. */

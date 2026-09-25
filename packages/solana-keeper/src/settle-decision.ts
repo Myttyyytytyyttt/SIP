@@ -146,22 +146,52 @@ export function measurementStart(link: Pick<ManagedLink, "epoch" | "frontierSlot
  * Whether this keeper can settle the vault's mode at all. Decided BEFORE
  * measuring, in dry run too.
  *
- * BOTH MODES ARE MEASURED; ONLY AN UNDEFINED ONE STOPS HERE. A VOLUME vault used
- * to end at this line, and its frontier never moved: a quiet VOLUME link grew
- * toward the walk's read limit like any flat span. It is walked now, with every
- * completeness stop a PROFIT span has, and baseDecision takes its base from the
- * volumeBase seam, which attests a notional only where one is proven. The
+ * EACH KEEPER MEASURES ITS OWN MODE; AN UNDEFINED ONE STOPS EVERY KEEPER HERE.
+ * `settles` is keeperModes(role): the profit keeper settles PROFIT vaults and the
+ * volume keeper VOLUME ones, so exactly one service settles each link. A vault of
+ * the other mode rests here before any RPC call. A VOLUME span is walked with
+ * every completeness stop a PROFIT span has, and baseDecision takes its base from
+ * the volumeBase seam, which attests a notional only where one is proven. The
  * attestation takes the vault's own mode and rate (attestationInputs), so
  * nothing on chain would refuse a PROFIT number signed for a VOLUME vault: it
  * would verify and be charged at the volume rate. The seam is the only place a
  * VOLUME base comes from.
  */
-export function modeDecision(vault: Pick<VaultState, "skimMode">): { readonly outcome: "UNSUPPORTED_MODE"; readonly detail: string } | null {
-  if (vault.skimMode === MODE_PROFIT || vault.skimMode === MODE_VOLUME) return null;
-  return {
-    outcome: "UNSUPPORTED_MODE",
-    detail: `this vault reports skim_mode ${vault.skimMode}, which no sip-vault version defines; nothing is attested`,
-  };
+export function modeDecision(
+  vault: Pick<VaultState, "skimMode">,
+  settles: readonly number[],
+): { readonly outcome: "UNSUPPORTED_MODE"; readonly detail: string } | null {
+  if (vault.skimMode !== MODE_PROFIT && vault.skimMode !== MODE_VOLUME) {
+    return {
+      outcome: "UNSUPPORTED_MODE",
+      detail: `this vault reports skim_mode ${vault.skimMode}, which no sip-vault version defines; nothing is attested`,
+    };
+  }
+  // ONE KEEPER SETTLES EACH MODE (keeperModes). The other mode's vault is not
+  // this keeper's to measure or attest, and it rests here before any RPC call; its
+  // savings are still invested by the profit keeper, which invests every vault.
+  if (!settles.includes(vault.skimMode)) {
+    return {
+      outcome: "UNSUPPORTED_MODE",
+      detail:
+        vault.skimMode === MODE_VOLUME
+          ? "this vault saves in VOLUME mode, which the volume keeper settles; this keeper does not measure or attest it"
+          : "this vault saves in PROFIT mode, which the profit keeper settles; this keeper does not measure or attest it",
+    };
+  }
+  return null;
+}
+
+/** Which keeper this process is: SIP_SOLANA_ROLE (config.ts). */
+export type KeeperRole = "profit" | "volume";
+
+/**
+ * The modes a keeper of this role settles: EXACTLY ONE EACH, so exactly one
+ * service settles each link. The profit keeper also invests every vault; the
+ * volume keeper never invests.
+ */
+export function keeperModes(role: KeeperRole): readonly number[] {
+  return role === "volume" ? [MODE_VOLUME] : [MODE_PROFIT];
 }
 
 /**
@@ -240,11 +270,22 @@ export type MeasurementDecision =
     };
 
 /**
- * The notional a complete VOLUME span is charged on, in lamports, or null when
- * this keeper cannot measure it. Called only for a span every completeness stop
- * has passed, and never for our own settles alone.
+ * A VOLUME span whose notional is known and not yet worth a settlement: what it
+ * would be charged on, and why it waits (the volume keeper's cadence,
+ * volume-base.ts). A span that is only the oldest prefix of a backlog never waits.
  */
-export type VolumeBase = (measured: WindowMeasurement) => Promise<bigint | null>;
+export interface VolumeWait {
+  readonly waitLamports: bigint;
+  readonly detail: string;
+}
+
+/**
+ * The notional a complete VOLUME span is charged on, in lamports; a VolumeWait
+ * when it is known and should wait; or null when this keeper cannot measure it.
+ * Called only for a span every completeness stop has passed, and never for our
+ * own settles alone.
+ */
+export type VolumeBase = (measured: WindowMeasurement) => Promise<bigint | VolumeWait | null>;
 
 /**
  * The production VOLUME base until keeper-medir-volumen: zero for a span with no
@@ -600,14 +641,22 @@ export async function baseDecision({
     base = measured.profitLamports - (carry?.lossLamports ?? 0n);
     signed = measured.walletSignedTxCount + (carry?.walletSignedTxCount ?? 0);
   } else if (mode === MODE_VOLUME) {
-    const notional = await volumeBase(measured);
-    if (notional === null) {
+    const answer = await volumeBase(measured);
+    if (answer === null) {
       return {
         kind: "stop",
         outcome: "UNSUPPORTED_MODE",
         detail: `${measured.successfulTradeCount} successful trade(s) await keeper-medir-volumen; nothing attested`,
       };
     }
+    // A WAIT RESTS AT NO_PROFIT, the resting state of a span "too small to spend a
+    // transaction on" — EXCEPT A PREFIX, WHICH NEVER WAITS: resting would leave
+    // the same prefix above the frontier every sweep.
+    if (typeof answer !== "bigint" && !measured.prefixCut) {
+      if (answer.waitLamports <= 0n) throw new Error(`the VOLUME base seam asked to wait on ${answer.waitLamports} lamports; only a positive notional waits`);
+      return { kind: "stop", outcome: "NO_PROFIT", detail: answer.detail, baseLamports: answer.waitLamports };
+    }
+    const notional = typeof answer === "bigint" ? answer : answer.waitLamports;
     // A u64 on chain. A negative notional is a broken seam, and resting would
     // dress it up as a quiet span.
     if (notional < 0n) throw new Error(`the VOLUME base seam returned ${notional} lamports; a notional is never negative`);
@@ -646,7 +695,9 @@ export async function baseDecision({
   }
   const what =
     mode === MODE_VOLUME
-      ? `no successful trade over ${measured.txCount} txs, so the notional is zero`
+      ? measured.volumeTrades === undefined
+        ? `no successful trade over ${measured.txCount} txs, so the notional is zero`
+        : `nothing charged as volume over ${measured.txCount} txs, so the notional is zero`
       : carry === null
         ? `measured ${base} lamports over ${measured.txCount} txs — a losing or flat span`
         : `measured ${measured.profitLamports} lamports over ${measured.txCount} txs, ` +

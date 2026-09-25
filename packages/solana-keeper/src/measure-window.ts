@@ -18,6 +18,7 @@
 
 import { SolanaJSONRPCErrorCode } from "@solana/web3.js";
 import type { Connection, Finality, PublicKey, VersionedMessage, VersionedTransactionResponse } from "@solana/web3.js";
+import type { VolumeProbe } from "./measure-volume.js";
 
 // Programs whose presence NEVER means trading: the System/ComputeBudget pair,
 // plus the Ed25519 precompile that a settle carries for its attestation. A
@@ -280,6 +281,13 @@ export interface WindowMeasurement {
    * Each would be a defect in an accounting figure and is noise in an ordering.
    */
   readonly tradedLamports: bigint;
+  /**
+   * Every transaction of the window that COUNTS AS VOLUME, oldest first, with what
+   * it traded (measure-volume.ts). Present only when the walk was given a volume
+   * probe, which only the volume keeper passes: the profit keeper's walk runs no
+   * volume code at all, and this field is absent from its measurements.
+   */
+  readonly volumeTrades?: readonly VolumeTrade[];
   readonly chainBreaks: number;
   /**
    * Transactions the RPC would not return. NOT the same as a chain break: a
@@ -320,6 +328,15 @@ export interface WindowMeasurement {
   readonly prefixCut: boolean;
 }
 
+/** One transaction the volume probe counted: where it sits, when, and what it traded. */
+export interface VolumeTrade {
+  readonly signature: string;
+  readonly slot: bigint;
+  /** The block's unix time in seconds, or null when the node gave none. */
+  readonly blockTime: number | null;
+  readonly lamports: bigint;
+}
+
 export async function measureSince(
   reader: LedgerReader,
   wallet: PublicKey,
@@ -343,6 +360,13 @@ export async function measureSince(
    * settle really did change the balance, and the chain must show it.
    */
   settleProgram?: PublicKey,
+  /**
+   * The volume keeper's probe (measure-volume.ts, tradeNotional). Called once for
+   * every transaction of the window that names the wallet, AFTER everything the
+   * profit figures read from it, and changing none of them. Absent — as the
+   * profit keeper leaves it — nothing is probed and `volumeTrades` is absent.
+   */
+  volumeProbe?: VolumeProbe,
 ): Promise<WindowMeasurement> {
   // Collect signatures newest-first until one sits at or below the frontier.
   const collected: { signature: string; slot: number }[] = [];
@@ -453,6 +477,7 @@ export async function measureSince(
   let tradedLamports = 0n;
   let firstSlot = 0n;
   const settleProgramId = settleProgram?.toBase58();
+  const volumeTrades: VolumeTrade[] = [];
 
   // THE ANCHOR SEEDS THE CHAIN. Each walk used to start its chain at null, so
   // the first transaction of a window was checked against nothing, and a hole
@@ -517,6 +542,12 @@ export async function measureSince(
     // transaction the wallet signed counts: the trader acted, and paid its fee.
     // Our own settle does not, although the wallet signed it too.
     if (!ownSettle && isSignedByWallet(tx.transaction.message, wallet)) walletSignedTxCount += 1;
+    if (volumeProbe !== undefined) {
+      const traded = volumeProbe(tx, wallet, settleProgramId);
+      if (traded.counted) {
+        volumeTrades.push({ signature: entry.signature, slot: BigInt(tx.slot), blockTime: tx.blockTime ?? null, lamports: traded.lamports });
+      }
+    }
   }
 
   const cashDelta = firstPre === null ? 0n : lastPost - firstPre;
@@ -539,11 +570,12 @@ export async function measureSince(
     // settle can move the frontier to without skipping or rereading anything.
     lastSlot: endSlot === null ? from : BigInt(endSlot),
     prefixCut,
+    ...(volumeProbe === undefined ? {} : { volumeTrades }),
   };
 }
 
 /** The fee payer is the first static key, in every message version there is. */
-function isFeePayer(message: VersionedMessage, wallet: PublicKey): boolean {
+export function isFeePayer(message: VersionedMessage, wallet: PublicKey): boolean {
   return message.staticAccountKeys[0]?.equals(wallet) === true;
 }
 
@@ -558,7 +590,7 @@ function isFeePayer(message: VersionedMessage, wallet: PublicKey): boolean {
  * signature list is not read: a response gives it as bare strings, with no key
  * beside any of them.
  */
-function isSignedByWallet(message: VersionedMessage, wallet: PublicKey): boolean {
+export function isSignedByWallet(message: VersionedMessage, wallet: PublicKey): boolean {
   const index = message.staticAccountKeys.findIndex((key) => key.equals(wallet));
   return index >= 0 && index < message.header.numRequiredSignatures;
 }

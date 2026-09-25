@@ -43,6 +43,7 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import { Redactor, Secret, sharedRedactor } from "@sip/solana-log";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "./idl.js";
 import { PRIVY_KEY_PREFIXES, canonicalPrivyAuthorizationKey } from "./privy-authorization-key.js";
+import type { KeeperRole } from "./settle-decision.js";
 
 /**
  * The literal acknowledgement that arms the keeper. Nothing else does.
@@ -85,8 +86,25 @@ const KNOWN_SIP_SOLANA_VARS = new Set<string>([
   "SIP_SOLANA_DOORBELL_SECRET",
   "SIP_SOLANA_HELIUS_API_KEY",
   "SIP_SOLANA_DOORBELL_URL",
+  // WHICH KEEPER THIS SERVICE IS (readRole): unset for the profit keeper, "volume"
+  // for the volume keeper, a separate Railway service with its own lock.
+  "SIP_SOLANA_ROLE",
   ...SIGNING_SECRET_VARS,
 ]);
+
+/**
+ * SIP_SOLANA_ROLE, read strictly: unset, empty or "profit" is the profit keeper
+ * (every deployment before the volume keeper existed), "volume" is the volume
+ * keeper, and anything else refuses to start. A misspelt role is not a default: a volume
+ * service that silently started as a second profit keeper would compete for the
+ * profit keeper's lock and invest.
+ */
+export function readRole(raw: string | undefined): { readonly role: KeeperRole } | { readonly problem: string } {
+  const value = raw?.trim();
+  if (value === undefined || value === "" || value === "profit") return { role: "profit" };
+  if (value === "volume") return { role: "volume" };
+  return { problem: `SIP_SOLANA_ROLE must be unset or "profit" (the profit keeper), or exactly "volume"; it holds ${shape(value)}.` };
+}
 
 /**
  * The shortest SIP_SOLANA_DOORBELL_SECRET that switches the doorbell on.
@@ -192,6 +210,12 @@ export interface SigningConfig {
 }
 
 export interface KeeperConfig {
+  /**
+   * Which keeper this is (readRole). The profit keeper settles PROFIT vaults and
+   * invests every vault; the volume keeper settles VOLUME vaults only, never
+   * invests and never runs the doorbell (keeperModes, settle-decision.ts).
+   */
+  readonly role: KeeperRole;
   /** SIP_SOLANA_BROADCAST=1 AND the exact sentence. Necessary for live, not sufficient: see bin/keeper.mts. */
   readonly armed: boolean;
   /** In failover order. Secrets, because endpoints carry API keys. */
@@ -516,6 +540,7 @@ export function parseSettleKey(raw: string, redactor: Redactor): SettleKey | nul
 /** Fields of the config that are safe in a log line or a status page. */
 export function describeConfig(config: KeeperConfig): Record<string, unknown> {
   return {
+    role: config.role,
     armed: config.armed,
     rpcEndpoints: config.rpcUrls.length,
     programId: config.programId,
@@ -772,8 +797,21 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
   // starting. Absent, the seat check below simply never runs.
   const privyPolicyId = trimmed(env["SIP_SOLANA_PRIVY_POLICY_ID"]) ?? null;
 
+  // --- which keeper this is ------------------------------------------------------
+  const roleRead = readRole(env["SIP_SOLANA_ROLE"]);
+  const role: KeeperRole = "role" in roleRead ? roleRead.role : "profit";
+  if ("problem" in roleRead) problems.push(roleRead.problem);
+
   // --- the doorbell: every value optional, none of them a problem ----------------
-  const doorbell = readDoorbell(env, { rpcEntries, publicDomain, redactor, warnings });
+  // THE VOLUME KEEPER RUNS NONE OF IT. The doorbell manages a Helius webhook for
+  // this service's own URL, and one per deployment is the profit keeper's; the
+  // volume keeper turns every link every sweep, as the profit keeper did before it.
+  const doorbellRead = readDoorbell(env, { rpcEntries, publicDomain, redactor, warnings });
+  const doorbell: typeof doorbellRead =
+    role === "volume" ? { doorbellSecret: null, heliusApiKey: null, heliusApiKeySource: "none", doorbellUrl: null } : doorbellRead;
+  if (role === "volume" && doorbellRead.doorbellSecret !== null) {
+    warnings.push("SIP_SOLANA_DOORBELL_SECRET is set on the volume keeper, which does not run the doorbell: ignored. Delete it from this service.");
+  }
 
   // --- signing secrets: ONLY when armed ------------------------------------------
   let signing: SigningConfig | null = null;
@@ -795,6 +833,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
   if (problems.length > 0) throw new ConfigError(problems.map(scrub));
 
   const config: KeeperConfig = {
+    role,
     armed,
     rpcUrls: Object.freeze(rpcUrls),
     programId: SIP_PROGRAM_ID,
