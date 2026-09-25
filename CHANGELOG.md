@@ -12,8 +12,7 @@ line is not.
 
 ## 2026-09-24
 
-*Partial: written at 17:00 Lisbon from the work up to then. The next run extends this section
-rather than adding a second one.*
+*Written at 17:00 Lisbon, completed on 2026-09-25 from the evening's work.*
 
 A morning spent on the first thing a new user sees. The welcome modal that landed the evening
 before was reworked with the owner, one layer at a time and with the owner's own motion clips,
@@ -80,6 +79,44 @@ program still holds one vault.
   reserve were corrected — it never was — and the keeper's refusal for a retired venue no
   longer claims that every policy signed to date names Raydium, since the owner re-signed onto
   Jupiter on 2026-09-22 `08b0cf7`.
+
+**The evening — the issuer raises its fee, and the owner accepts it**
+
+- **The keeper's alert did its job.** At 18:11 the owner received a CRITICAL on Telegram from the
+  keeper: the PreStocks issuer had already written a 300 bps (3 %) transfer fee for epoch 1043 —
+  around Saturday 26 September, 05:00 UTC — on seven of its eight tokens, ANTHROPIC included
+  (SPACEX stays at 1 %; SPYx has no transfer fee at all). With the keeper's fee ceiling at 1 %,
+  from that epoch every basket holding a PreStock would have been refused whole, SPYx and the
+  SOL conversion with it, with nothing to sign or deploy on SaverFi's side to stop it.
+- **Decision: accept the 3 %.** The ceiling rises from 100 to 300 bps in the keeper, the
+  catalogue and the web together, held to one shared number `0b31682`. The cost is written where
+  the number lives: 3 % in and 3 % out is a 5.91 % round trip, up from 1.99 %. The market budget
+  does not change — the per-turn impact ceiling stays at 25 bps. A fee written *above* 300 is
+  still a dated CRITICAL; exactly 300 is now a warning that there is no margin left.
+- **The catalogue now judges the fee that is coming, not only today's.** Each fee reading keeps
+  the rate in force and the rate already written for a later epoch, and the rules judge the
+  higher one. The offerable stocks stay SPYx and ANTHROPIC `0b31682`. The web says exactly that:
+  ANTHROPIC charges 1 % today and has 3 % written for epoch 1043 — never "charges 3 %" early.
+- Written on its own branch that evening and merged into main at 04:57 on 2026-09-25 `6964044`,
+  together with follow-ups made that night (those belong to the 25th).
+
+**Web — the sample stays a sample, and the wallets modal stops looking like an error**
+
+- **The sample no longer throws you out.** The tabs, footer and leaderboard carry the sample mode,
+  so "Activity" in the sample no longer shows the connect card, nor "Pension" the landing. The
+  sample's Activity is now a page of its own: totals, filters, rows grouped by day and "Show
+  more" fifty at a time `0a48b49`.
+- **The live dashboard arrives whole.** The first load waits for the history — at most 1.5 s
+  after the snapshot answers — instead of flashing "No activity yet", "0 events" and an empty
+  chart for half a second `0a48b49`.
+- **One plain state per trading wallet.** From the UI audit, the point the owner picked: right
+  after creating a wallet, a new user saw Privy ids, a verification command and a re-seat
+  warning, and read it as an error. Each wallet now shows one state — Linked, Not linked, Linked
+  elsewhere, Paused, Needs permission or Checking — and only the controls that move it forward;
+  everything technical is kept, folded under "Advanced" `c346632`. "Grant keeper permission"
+  became "Grant SaverFi permission". It never says "Not linked" while the chain read is still
+  loading or has failed.
+- The owner decided the footer's Docs, Privacy, Terms and social links stay as they are for now.
 
 ---
 
