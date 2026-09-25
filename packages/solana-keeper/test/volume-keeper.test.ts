@@ -37,14 +37,19 @@ describe("SIP_SOLANA_ROLE", () => {
     expect(loadConfig(dry({ SIP_SOLANA_ROLE: "volume" }), new Redactor()).warnings.join(" ")).not.toMatch(/not a variable this keeper reads/);
   });
 
-  it("switches the doorbell off on the volume keeper, and says so when its secret is set", () => {
-    const secret = "d".repeat(64);
-    const profit = loadConfig(dry({ SIP_SOLANA_DOORBELL_SECRET: secret }), new Redactor());
-    const volume = loadConfig(dry({ SIP_SOLANA_ROLE: "volume", SIP_SOLANA_DOORBELL_SECRET: secret }), new Redactor());
-    expect(profit.doorbellSecret).not.toBeNull();
+  it("runs no doorbell on the volume keeper", () => {
+    const volume = loadConfig(dry({ SIP_SOLANA_ROLE: "volume", RAILWAY_PUBLIC_DOMAIN: "volume.example.test" }), new Redactor());
     expect(volume.doorbellSecret).toBeNull();
     expect(volume.doorbellUrl).toBeNull();
-    expect(volume.warnings.join(" ")).toMatch(/volume keeper, which does not run the doorbell/);
+    expect(volume.heliusApiKey).toBeNull();
+  });
+
+  // THE PROFIT KEEPER HOLDS THE DOORBELL SECRET, so a volume role beside it is the
+  // role set on the wrong service: refused, and the deploy before it keeps running.
+  it("refuses to start as the volume keeper where the doorbell secret is set", () => {
+    const secret = "d".repeat(64);
+    expect(loadConfig(dry({ SIP_SOLANA_DOORBELL_SECRET: secret }), new Redactor()).doorbellSecret).not.toBeNull();
+    expect(() => loadConfig(dry({ SIP_SOLANA_ROLE: "volume", SIP_SOLANA_DOORBELL_SECRET: secret }), new Redactor())).toThrow(/only the profit keeper holds that secret/);
   });
 });
 

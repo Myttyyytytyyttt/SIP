@@ -809,8 +809,16 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
   const doorbellRead = readDoorbell(env, { rpcEntries, publicDomain, redactor, warnings });
   const doorbell: typeof doorbellRead =
     role === "volume" ? { doorbellSecret: null, heliusApiKey: null, heliusApiKeySource: "none", doorbellUrl: null } : doorbellRead;
-  if (role === "volume" && doorbellRead.doorbellSecret !== null) {
-    warnings.push("SIP_SOLANA_DOORBELL_SECRET is set on the volume keeper, which does not run the doorbell: ignored. Delete it from this service.");
+  // A DOORBELL SECRET ON A VOLUME KEEPER REFUSES TO START. The profit keeper is the
+  // service that holds one; SIP_SOLANA_ROLE=volume set on IT by mistake would stop
+  // every PROFIT settle and every purchase quietly, each vault resting where no
+  // alert fires. Refused, the new deploy fails its healthcheck and Railway keeps
+  // the one before it running.
+  if (role === "volume" && env["SIP_SOLANA_DOORBELL_SECRET"] !== undefined) {
+    problems.push(
+      "SIP_SOLANA_ROLE is volume but SIP_SOLANA_DOORBELL_SECRET is set, and only the profit keeper holds that secret: " +
+        "if this is the profit keeper, delete SIP_SOLANA_ROLE; if it is the volume keeper, delete SIP_SOLANA_DOORBELL_SECRET.",
+    );
   }
 
   // --- signing secrets: ONLY when armed ------------------------------------------

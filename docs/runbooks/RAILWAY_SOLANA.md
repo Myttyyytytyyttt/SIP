@@ -489,8 +489,9 @@ Es **otro servicio**, con el mismo código y la misma imagen que el de la secci�
   cada vínculo tiene exactamente un servicio que lo cobra.
 - **Nunca invierte.** El vigilante de siempre sigue invirtiendo los ahorros de todos los vaults, sean del modo que sean.
 - **Tiene su propio candado** (`sip-solana-volume-keeper`): nunca espera al de siempre ni le quita el suyo.
-- **No usa el timbre de Helius**: gira todos los vínculos en cada barrida. Si le pones `SIP_SOLANA_DOORBELL_SECRET`, lo
-  ignora y lo avisa.
+- **No usa el timbre de Helius**: gira todos los vínculos en cada barrida. Con `SIP_SOLANA_DOORBELL_SECRET` puesto **no
+  arranca**: ese secreto solo lo tiene el vigilante de siempre, así que un `SIP_SOLANA_ROLE=volume` puesto en ese servicio
+  por error falla el despliegue y Railway deja funcionando el anterior.
 - **Sus alertas empiezan por `[volume]`** en el mismo Telegram.
 - En los vaults de beneficio no cobra nada. **En seco**, su fila de `/status` enseña cuánto volumen lleva el tramo sin
   cobrar y lo que costaría en modo volumen; armado ya no lo calcula, para no gastar lecturas de Helius en vaults que
