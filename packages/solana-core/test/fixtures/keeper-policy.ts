@@ -192,6 +192,52 @@ export const LEG_FEE = Object.freeze({
 });
 
 /**
+ * WHEN THE KEEPER BUYS A LEG UNDER THE OWNER'S FLOOR, AND WHAT min_out IT HANDS invest().
+ *
+ * packages/solana-program/scripts/jupiter-route.ts investMinOutFor, deployed
+ * with origin/main df6ca67 on 2026-09-25. Three numbers per route, in the
+ * destination mint's raw units:
+ *   venueThreshold      = quotedOut - floor(quotedOut * slippageBps / 1e4)
+ *                         (Jupiter's otherAmountThreshold; slippageBps is
+ *                         legSlippageBps(fee) = max(200, fee + 100))
+ *   netOfVenueThreshold = venueThreshold less the destination's transfer fee
+ *   ownerFloor          = amount_in * min_out_rate_wad / 1e18
+ * and the rule:
+ *   netOfVenueThreshold >= ownerFloor                    -> min_out = netOfVenueThreshold
+ *   netOfVenueThreshold <  ownerFloor <= venueThreshold  -> min_out = ownerFloor (it BUYS)
+ *   venueThreshold      <  ownerFloor                    -> refused [below-owner-floor]
+ * So the keeper buys a leg exactly when venueThreshold >= ownerFloor. The fee
+ * is NOT taken off before that comparison — that was the rule until df6ca67,
+ * and on it the owner's ANTHROPIC floor was refused every sweep.
+ *
+ * The cases below were run through the keeper's own investMinOutFor on
+ * 2026-09-25 (tsx, from packages/solana-keeper, against this branch merged with
+ * df6ca67) and returned exactly these answers. `measured` is the owner's
+ * ANTHROPIC leg as the keeper's header records it: 2,752,188 USDC raw in,
+ * quotedOut 2,612,063 at slippage 400, a Manifest last hop that quotes gross.
+ *
+ * WHICH SIDE ASSERTS IT: solana-core's product.test.ts holds its mirror
+ * (keeperInvestMinOutFor) to every case, and the website's floor check is
+ * built on that mirror. THE KEEPER'S OWN TESTS DO NOT READ THIS ENTRY YET: a
+ * change to investMinOutFor goes red here only once someone adds that half.
+ */
+export const OWNER_FLOOR_MIN_OUT = Object.freeze({
+  keeper: Object.freeze({ function: "investMinOutFor", module: "jupiter-route.ts", deployedAt: "df6ca67" }),
+  measured: Object.freeze({ amountIn: 2_752_188n, quotedOut: 2_612_063n, slippageBps: 400n, venueThreshold: 2_507_581n, netOfVenueThreshold: 2_432_353n }),
+  /** [ownerFloor, min_out the keeper hands invest() or null for a refusal], at the measured venueThreshold and netOfVenueThreshold. */
+  cases: Object.freeze([
+    Object.freeze([null, 2_432_353n] as const),
+    Object.freeze([2_432_353n, 2_432_353n] as const),
+    Object.freeze([2_432_354n, 2_432_354n] as const),
+    Object.freeze([2_483_089n, 2_483_089n] as const),
+    Object.freeze([2_507_581n, 2_507_581n] as const),
+    Object.freeze([2_507_582n, null] as const),
+  ]),
+  /** The owner's signed floor for that leg (902223869744110771 wad) and the verdict: the keeper buys, at min_out = his floor. */
+  ownersLeg: Object.freeze({ ownerFloor: 2_483_089n, minOut: 2_483_089n, buys: true }),
+});
+
+/**
  * THE DOCTRINE BOTH GATES OBEY, named here so the two sides are visibly talking
  * about one rule: a single refused leg refuses the WHOLE basket, the healthy
  * legs included, and stops the SOL conversion at any balance. There is no

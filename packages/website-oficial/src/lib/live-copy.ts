@@ -545,10 +545,30 @@ export const START_BUYING_COPY = {
    */
   fee: (symbol: string, fee: string, written: string | null, max: string): string =>
     `${symbol}’s issuer takes ${fee} each time it moves, in and out${written === null ? "" : `, and has already set ${written}`}; above ${max}, buying stops until you change the basket.`,
-  /** `feeSymbols` names the legs whose issuer fee comes off what arrives, or is empty. */
-  limits: (solMargin: string, stockMargin: string, feeSymbols: string): string =>
-    `Price limits are set from today’s prices: if SOL falls more than ${solMargin}, or a stock costs more than about ${stockMargin} over today’s price` +
-    `${feeSymbols === "" ? "" : ` (less for ${feeSymbols}, whose fee comes off what arrives)`}, buying waits until prices come back or you sign again.`,
+  /**
+   * `feeLegs` are the legs whose issuer fee comes off what arrives, each with
+   * the margin its limit is set at, or none. SINCE 2026-09-24 THE STOCK LIMIT
+   * IS SET AFTER THAT FEE (the build nets the highest fee the issuer has set
+   * before taking the margin) — it used to read "less for ANTHROPIC", because
+   * the fee was eating the margin. AND AT A FEE OVER 1 % THE MARGIN IS WIDER
+   * (solana-core legFloorMarginBps: 7 % at 3 %), because each buy then asks the
+   * market for more room and a limit that did not leave it would stop every
+   * buy; the sentence names that margin rather than let "about 5 %" stand for
+   * a leg it is not true of.
+   */
+  limits: (solMargin: string, stockMargin: string, feeLegs: readonly { readonly symbol: string; readonly margin: string }[]): string => {
+    const named = feeLegs.map((leg) => (leg.margin === stockMargin ? leg.symbol : `${leg.symbol} about ${leg.margin}`));
+    const wider = feeLegs.some((leg) => leg.margin !== stockMargin);
+    const list = named.length <= 1 ? (named[0] ?? "") : `${named.slice(0, -1).join(", ")} and ${named.at(-1)}`;
+    return (
+      `Price limits are set from today’s prices: if SOL falls more than ${solMargin}, or a stock costs more than about ${stockMargin} over today’s price` +
+      `${
+        feeLegs.length === 0
+          ? ""
+          : ` (for ${list}, after the highest transfer fee its issuer has set${wider ? ", because at that fee each buy asks the market for more room and the limit has to leave it" : ""})`
+      }, buying waits until prices come back or you sign again.`
+    );
+  },
   /** The depth ceiling, for a cap this card fixes rather than one the owner types. */
   depth: (ceiling: string, cap: string, symbol: string, provenance: string): string =>
     `${BRAND} buys only where the market can take the whole buy: on the shares chosen, ${symbol} sets the ceiling at ${ceiling} per buy, from what its route held ${provenance}. ` +

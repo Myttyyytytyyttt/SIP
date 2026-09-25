@@ -132,6 +132,9 @@ describe("LiveStartBuying", () => {
     // The fee line for the leg whose issuer charges, and none for the one that cannot.
     expect(html).toContain("ANTHROPIC’s issuer takes");
     expect(html).not.toContain("SPYx’s issuer takes");
+    // ANTHROPIC's issuer has 3 % written, so its limit is the wider 7 % the
+    // build signs at that fee (legFloorMarginBps), named on the card itself.
+    expect(html).toContain("(for ANTHROPIC about 7 %, after the highest transfer fee its issuer has set, because at that fee each buy asks the market for more room and the limit has to leave it)");
     // The conversion is said whether or not today's prices could be read: this fixture has none for the legs.
     expect(html).toContain("Your SOL savings, now and later, are sold for USDC");
     // The depth risk the full form puts in an amber box is under the details too.

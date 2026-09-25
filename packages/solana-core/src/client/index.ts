@@ -36,4 +36,5 @@ export * from "./pending";
 export * from "./product";
 export * from "./pyth-price";
 export * from "./rules";
+export * from "./transfer-fee";
 export { DEFAULT_PUBLIC_WS_URL, checkPublicWsUrl, type PublicWsUrlCheck } from "../shared/public-ws-url.mjs";

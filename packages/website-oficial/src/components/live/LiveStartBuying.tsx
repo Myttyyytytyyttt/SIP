@@ -39,6 +39,7 @@ import {
   USDC_MINT,
   WSOL_MINT,
   defaultInvestPolicy,
+  legFloorMarginBps,
   ownerComputeBudget,
   priorityFeeLamports,
 } from "@sip/solana-core/client";
@@ -61,7 +62,7 @@ import { basketOnShelf } from "@/lib/onboarding";
 import { saveBasketChoice } from "@/lib/onboarding-memory";
 import type { VaultStateJson } from "@/lib/vault-api";
 import { DEFAULT_VENUE_NAME } from "@/lib/vault-flows";
-import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, signedLegsOf, writtenFeeWords } from "@/lib/vault-copy";
+import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, judgedFeeOf, listAnd, ratePercent, signedLegsOf, writtenFeeWords } from "@/lib/vault-copy";
 
 /**
  * THE MOST ONE BUY MAY SPEND for a basket started here: $25.
@@ -273,7 +274,13 @@ function StartBuyingCard({
           {feeLegs.map((leg) => (
             <li key={leg.symbol}>{START_BUYING_COPY.fee(leg.symbol, ratePercent(leg.feeBps ?? 0), writtenFeeWords(leg), ratePercent(MAX_LEG_FEE_BPS))}</li>
           ))}
-          <li>{START_BUYING_COPY.limits(ratePercent(CONVERT_FLOOR_MARGIN_BPS), ratePercent(LEG_FLOOR_MARGIN_BPS), listAnd(feeLegs.map((leg) => leg.symbol)))}</li>
+          <li>
+            {START_BUYING_COPY.limits(
+              ratePercent(CONVERT_FLOOR_MARGIN_BPS),
+              ratePercent(LEG_FLOOR_MARGIN_BPS),
+              feeLegs.map((leg) => ({ symbol: leg.symbol, margin: ratePercent(legFloorMarginBps(judgedFeeOf(leg) ?? 0)) })),
+            )}
+          </li>
         </ul>
 
         {/* Everything the investing form says before this same signature, one click away. */}
@@ -300,7 +307,7 @@ function StartBuyingCard({
                 <>
                   <p>{INVEST_COPY.solFloor(formatUsd(limits.floorPerSol), formatUsd(limits.todayPerSol))}</p>
                   {pickedLegLimits(limits.legs, assets).map((leg) => (
-                    <p key={leg.mint}>{INVEST_COPY.legCeiling(leg.symbol, formatUsd(leg.maxPer1e8))}</p>
+                    <p key={leg.mint}>{INVEST_COPY.legCeiling(leg.symbol, formatUsd(leg.maxPer1e8), leg.feeBps > 0 ? ratePercent(leg.feeBps) : null, leg.marginBps)}</p>
                   ))}
                   <p>{INVEST_COPY.convertFloorEffect(ratePercent(CONVERT_FLOOR_MARGIN_BPS))}</p>
                 </>

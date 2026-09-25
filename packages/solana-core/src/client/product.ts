@@ -110,9 +110,12 @@ export const DEFAULT_INVEST_CAPS = Object.freeze({ maxPerCall: 1_000_000_000n, m
 /** The convert floor sits this far under the live SOL/USDC pool price: 10 %. */
 export const CONVERT_FLOOR_MARGIN_BPS = 1_000;
 /**
- * A leg's floor sits this far under the live pool rate NET OF THE LEG'S
- * TRANSFER FEE: 5 %, so at most about 5.3 % over today's price after the fee is
- * paid. server/build-handler.ts says why the fee is taken off first.
+ * A leg's floor sits AT LEAST this far under the live pool rate NET OF THE
+ * LEG'S TRANSFER FEE: 5 %, the whole of it at a fee of 100 bps or less. A
+ * dearer fee widens it (legFloorMarginBps below: 700 at 300 bps), because the
+ * keeper widens its own ask with the fee and the threshold it compares the
+ * floor with falls with it.
+ * server/build-handler.ts says why the fee is taken off first.
  */
 export const LEG_FLOOR_MARGIN_BPS = 500;
 
@@ -444,6 +447,64 @@ export const CATALOGUE_MIN_IMPACT_CEILING_BPS = 5;
 
 /** The keeper's legSlippageBps: the plain ask, or strictly the margin above the fee, whichever is larger — 400 at a 300 bps fee. */
 export const catalogueLegSlippageBps = (feeBps: number): number => Math.max(CATALOGUE_SLIPPAGE_BPS, feeBps + CATALOGUE_SLIPPAGE_MARGIN_BPS);
+
+/**
+ * How far under the net-of-fee mid a leg's floor is signed, in bps:
+ * LEG_FLOOR_MARGIN_BPS plus whatever the keeper asks Jupiter for over its plain
+ * CATALOGUE_SLIPPAGE_BPS — 500 at a fee of 0 to 100 bps, 550 at 150, 700 at
+ * the 300 ceiling.
+ *
+ * WHY THE FLOOR MOVES WITH THE KEEPER'S ASK. The keeper buys a leg exactly
+ * when the venue's own threshold — the quote less legSlippageBps(fee), Jupiter's
+ * otherAmountThreshold — clears the signed floor (jupiter-route.ts
+ * investMinOutFor, deployed with df6ca67; keeperInvestMinOutFor below mirrors
+ * it and test/fixtures/keeper-policy.ts OWNER_FLOOR_MIN_OUT holds the two
+ * together). Which quote that is depends on the route's LAST hop: a venue that
+ * quotes GROSS (Manifest) answers about the mid less its own cost, and one that
+ * quotes NET (Raydium CLMM, Meteora DLMM) answers that less the transfer fee as
+ * well. The net case is the tight one: its threshold is about
+ * mid x (1 - fee) x (1 - ask). At a fee of 100 the ask is 200 and a floor 5 %
+ * under the net mid leaves 0.98 / 0.95, about 3.2 %, for the route's own cost
+ * and a day's drift. At 300 the ask is 400; a flat 5 % would leave
+ * 0.96 / 0.95, about 1 %, and widening the floor by the same 200 bps the ask
+ * widened gives back 0.96 / 0.93, about 3.2 %. On a gross last hop the room is
+ * wider by the fee.
+ *
+ * WHAT IS MEASURED AND WHAT IS DERIVED. Measured 2026-09-25 (epoch 1042, slot
+ * 450231345, live Jupiter quotes for the owner's $2.75 ANTHROPIC leg at
+ * slippage 400): the default route ended on Manifest 18.95 bps under the floor
+ * pool's mid, and routes held to Raydium CLMM or Meteora DLMM came back 99.79
+ * and 105.83 bps under it with 100 bps of fee already off. The 300 bps cases
+ * are derived from those readings; 300 is not in force before epoch 1043.
+ * (The rule before df6ca67 took the fee off the threshold a second time and
+ * refused whatever that left under the floor; the "min_out 2,427,695 under his
+ * floor 2,483,089" refusal recorded in the keeper was that rule.)
+ *
+ * THE COST, AND IT IS PAID HERE. A lower floor is less protection against a bad
+ * price: at 300 bps a leg may now be filled up to 7 % under the net mid (about
+ * 9.8 % under the gross one) before invest() refuses it, where the flat margin
+ * stopped at 5 %. The fee itself is not the protection's to argue with — the
+ * issuer takes it whatever the floor says — but the extra 2 % is price the
+ * owner gives up so that the keeper's own ask does not refuse his basket.
+ */
+export const legFloorMarginBps = (feeBps: number): number => LEG_FLOOR_MARGIN_BPS + (catalogueLegSlippageBps(feeBps) - CATALOGUE_SLIPPAGE_BPS);
+
+/**
+ * The keeper's investMinOutFor (jupiter-route.ts), restated because the browser
+ * may not import the keeper: the min_out it hands invest() for a route with
+ * this venueThreshold and netOfVenueThreshold under this ownerFloor, or null
+ * when it refuses the route [below-owner-floor]. All three in the destination
+ * mint's raw units — or all three as wads per 1e18 USDC raw, which compare the
+ * same way. It buys exactly when venueThreshold >= ownerFloor.
+ * test/fixtures/keeper-policy.ts OWNER_FLOOR_MIN_OUT holds this copy to the
+ * keeper's own answers.
+ */
+export function keeperInvestMinOutFor(numbers: { readonly venueThreshold: bigint; readonly netOfVenueThreshold: bigint; readonly ownerFloor: bigint | null }): bigint | null {
+  const { venueThreshold, netOfVenueThreshold, ownerFloor } = numbers;
+  if (ownerFloor === null || netOfVenueThreshold >= ownerFloor) return netOfVenueThreshold;
+  if (venueThreshold >= ownerFloor) return ownerFloor;
+  return null;
+}
 
 /** What a venue must hold of USDC for the reference leg to clear the keeper's cover: 50 x 200 USDC = 10,000. */
 export const CATALOGUE_MIN_VENUE_DEPTH_RAW = CATALOGUE_REFERENCE_LEG_RAW * CATALOGUE_VENUE_INVENTORY_MULTIPLE;

@@ -42,15 +42,18 @@ import { isPubkey, isSignature } from "../client/base58";
 import { tryBase64Decode } from "../client/base64";
 import { PoolPriceError, floorWad, usdcRawPer1e8LegRaw, usdcRawPerSol } from "../client/clmm-price";
 import { SIP_ACCOUNT_SPACE } from "../client/decoders";
+import { TransferFeeReadError, decodeMintTransferFee, feeToNetBps, legFloorWad } from "../client/transfer-fee";
 import { SIP_PROGRAM_ID } from "../client/idl";
 import type { PythPriceUpdate } from "../client/pyth-price";
 import {
   BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES,
+  CATALOGUE_MAX_FEE_BPS,
   CLASSIC_TOKEN_ACCOUNT_BYTES,
   CONVERT_FLOOR_MARGIN_BPS,
   DEFAULT_INVEST_CAPS,
   DEFAULT_VAULT_POLICY,
   LEG_FLOOR_MARGIN_BPS,
+  legFloorMarginBps,
   MAX_PICKED_LEGS,
   OFFERED_LEGS,
   SIGNATURE_FEE_LAMPORTS,
@@ -91,6 +94,8 @@ import { CLIENT_AGGREGATE_FACTOR, clientIdentityFromHeaders, createWeightedLimit
 import {
   MAX_WALLET_LINKS,
   PRICED_POOLS,
+  SYSVAR_CLOCK,
+  clockEpochOf,
   listVaultHoldings,
   listVaultSignatures,
   readLiveSnapshot,
@@ -150,6 +155,10 @@ export type SolanaBuildErrorCode =
   | "price_unavailable"
   /** A mint the policy names is not held by the token program SIP expects; `mint` names it. */
   | "mint_unexpected"
+  /** A leg's transfer fee, or the epoch it is resolved in, could not be read: no floor is guessed. `mint` names the leg when one is at fault. */
+  | "fee_unavailable"
+  /** A CHOSEN leg's fee — in force or already written for a later epoch — is over the keeper's ceiling; `mint` and `feeBps` name it. */
+  | "fee_over_ceiling"
   /** pauseInvesting: the vault has no investment policy to pause. */
   | "policy_missing"
   /** pauseInvesting: the stored policy is already paused. */
@@ -745,26 +754,106 @@ function weightsByMint(value: unknown, inMint: string): { readonly ok: true; rea
 interface LiveFloors {
   readonly convertWad: bigint;
   readonly convertFloor: bigint;
-  /** In OFFERED_LEGS' order. */
+  /** In OFFERED_LEGS' order: each leg's pool mid, GROSS of its transfer fee. */
   readonly legWads: readonly bigint[];
+  /** In OFFERED_LEGS' order: the fee each floor was netted of (feeToNetBps), in bps. */
+  readonly legFeeBps: readonly number[];
+  /** In OFFERED_LEGS' order: the margin each floor was taken at, legFloorMarginBps(fee). */
+  readonly legMarginBps: readonly number[];
+  /** In OFFERED_LEGS' order: legFloorWad(legWad, fee) = floorWad(netOfTransferFeeWad(legWad, fee), legFloorMarginBps(fee)). */
   readonly legFloors: readonly bigint[];
 }
 
-/** Today's rates from PRICED_POOLS' accounts and the floors under them, or null when a pool is not what SIP pins. */
-function liveFloors(pools: readonly (AccountSnapshot | null)[], slot: number | null): LiveFloors | null {
+/** Today's rates from PRICED_POOLS' accounts, or null when a pool is not what SIP pins. */
+function livePrices(pools: readonly (AccountSnapshot | null)[], slot: number | null): PoolPrices | null {
   try {
-    const prices = poolPricesFromAccounts(pools, slot);
-    const legWads = OFFERED_LEGS.map((leg) => prices.legWads[leg.mint]!);
-    return {
-      convertWad: prices.convertWad,
-      convertFloor: floorWad(prices.convertWad, CONVERT_FLOOR_MARGIN_BPS),
-      legWads,
-      legFloors: legWads.map((wad) => floorWad(wad, LEG_FLOOR_MARGIN_BPS)),
-    };
+    return poolPricesFromAccounts(pools, slot);
   } catch (error) {
     if (error instanceof PoolPriceError) return null;
     throw error;
   }
+}
+
+/**
+ * The floors under today's rates, each leg's taken AFTER ITS TRANSFER FEE.
+ *
+ * THE MID IS GROSS AND THE CHECK IS NET, AND UNTIL 2026-09-24 THE FLOOR WAS
+ * DRAWN BETWEEN THEM. legWads is a Raydium CLMM pool's sqrt_price squared
+ * (clmm-price.ts legWadFromSqrtPrice): what the pool prices out of its vault,
+ * with no fee in it anywhere. invest.rs checks the floor against `received`,
+ * the vault account's balance DELTA — what Token-2022 credits after withholding
+ * the mint's fee. MEASURED 2026-09-24 (slot 450109719), $5 into ANTHROPIC: the
+ * floor pool's mid said 4,783,107 raw, and Jupiter quoting that same pool alone
+ * answered 4,723,099, 125.45 bps under — the pool's 25 bps tier plus the mint's
+ * 100 bps fee. So a floor at 95 % of the mid left the market 5 % MINUS THE FEE:
+ * about 4 % at 100 bps, about 2 % at the 300 the issuer wrote for epoch 1043,
+ * and the owner's own ANTHROPIC floor measured +2.66 % over a live $5 credit at
+ * 300. A floor that thin fails FillTooSmall on an ordinary day's drift, and by
+ * the all-or-nothing doctrine that stops the whole basket.
+ *
+ * SO THE FEE COMES OFF FIRST, AND IT IS THE HIGHER OF THE LIVE AND THE WRITTEN
+ * ONE (feeToNetBps): the full LEG_FLOOR_MARGIN_BPS is then left for the MARKET
+ * for the life of the policy, including after a rise already on chain lands.
+ *
+ * AND THE MARGIN WIDENS WITH THE KEEPER'S ASK (product.ts legFloorMarginBps).
+ * Netting the fee is not enough on its own, because the keeper buys a leg only
+ * when the venue's threshold — the quote less legSlippageBps(fee) — clears the
+ * signed floor (jupiter-route.ts investMinOutFor), and on a route whose last
+ * hop quotes net that quote already has the fee off. At 300 bps the keeper
+ * asks 400, not 200, so that threshold drops about 2 % further, and a flat 5 %
+ * under the net mid left it about 1 % of room: 700 bps under the net mid at a
+ * 300 bps fee gives back the ~3 % the market had at 100.
+ *
+ * THE COST, stated where it is paid: at 300 bps the floor is 3 % lower for the
+ * fee and 2 % lower for the ask, so a fill may land up to 7 % under the net mid
+ * (about 9.8 % under the gross one) before invest() refuses it — 2 % less
+ * protection against a bad price than the flat margin gave, and before epoch
+ * 1043, while ANTHROPIC still charges 1 %, 2 % more room than the fee alone
+ * needs as well. The owner accepted the 3 % fee on 2026-09-24; a floor that did
+ * not make room for it and for the keeper's ask would sign policies that stop
+ * buying.
+ *
+ * The convert floor is not touched: wSOL and USDC are classic SPL mints and
+ * carry no fee.
+ */
+function liveFloors(prices: PoolPrices, legFeeBps: readonly number[]): LiveFloors {
+  const legWads = OFFERED_LEGS.map((leg) => prices.legWads[leg.mint]!);
+  return {
+    convertWad: prices.convertWad,
+    convertFloor: floorWad(prices.convertWad, CONVERT_FLOOR_MARGIN_BPS),
+    legWads,
+    legFeeBps,
+    legMarginBps: legFeeBps.map((fee) => legFloorMarginBps(fee)),
+    legFloors: legWads.map((wad, index) => legFloorWad(wad, legFeeBps[index]!)),
+  };
+}
+
+/**
+ * Each OFFERED leg's fee to net, in OFFERED_LEGS' order, out of the leg mints'
+ * own bytes and the chain's own epoch — or the leg that could not be read.
+ *
+ * REFUSED RATHER THAN GUESSED. A floor netted of a fee nobody read is a floor
+ * about different money; a missing epoch cannot say whether a written rise has
+ * landed. Either way nothing is built, exactly as an unpriceable pool builds
+ * nothing (price_unavailable).
+ */
+function legFeesToNet(
+  mints: readonly (AccountSnapshot | null)[],
+  epoch: bigint | null,
+): { readonly ok: true; readonly bps: readonly number[] } | { readonly ok: false; readonly mint: string | null; readonly why: string } {
+  if (epoch === null) return { ok: false, mint: null, why: "the chain's clock could not be read, so which transfer fee is in force is unknown" };
+  const bps: number[] = [];
+  for (const [index, leg] of OFFERED_LEGS.entries()) {
+    const data = mints[index]?.data ?? null;
+    if (data === null) return { ok: false, mint: leg.mint, why: `${leg.symbol}'s mint bytes were not returned` };
+    try {
+      bps.push(feeToNetBps(decodeMintTransferFee(data), epoch));
+    } catch (error) {
+      if (error instanceof TransferFeeReadError) return { ok: false, mint: leg.mint, why: `${leg.symbol}'s mint does not decode: ${error.message}` };
+      throw error;
+    }
+  }
+  return { ok: true, bps };
 }
 
 /**
@@ -836,13 +925,16 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
   const targets = vaultTokenAccountTargets(accounts.vaultAddress);
   const mints = [{ mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM }, ...OFFERED_LEGS.map((leg) => ({ mint: leg.mint, tokenProgram: leg.tokenProgram }))];
   const sizes = [...new Set([SIP_ACCOUNT_SPACE.InvestmentPolicy, ...targets.map((target) => target.bytes)])];
-  const batch = await readBuildBatch(served.pool, { addresses: [...PRICED_POOLS, ...mints.map((entry) => entry.mint), ...targets.map((target) => target.address)], sizes });
+  // THE CLOCK RIDES LAST, in the same getMultipleAccounts: every index above it
+  // is unchanged, and the epoch a fee is resolved in is the chain's own, read
+  // at the same slot as the mints it is resolved against.
+  const batch = await readBuildBatch(served.pool, { addresses: [...PRICED_POOLS, ...mints.map((entry) => entry.mint), ...targets.map((target) => target.address), SYSVAR_CLOCK], sizes });
   if (batch.kind !== "exists") return unreadable(served);
   const chain = batch.value;
   const rentFor = (size: number): bigint => chain.rents[sizes.indexOf(size)]!;
 
-  const floors = liveFloors(chain.accounts.slice(0, PRICED_POOLS.length), chain.slot);
-  if (floors === null) return served.refuse(502, "price_unavailable", "SaverFi could not read today's prices from Raydium, so no floor was set. Nothing was built.");
+  const prices = livePrices(chain.accounts.slice(0, PRICED_POOLS.length), chain.slot);
+  if (prices === null) return served.refuse(502, "price_unavailable", "SaverFi could not read today's prices from Raydium, so no floor was set. Nothing was built.");
   for (const [index, entry] of mints.entries()) {
     if (chain.accounts[PRICED_POOLS.length + index]?.owner !== entry.tokenProgram) {
       return served.refuse(409, "mint_unexpected", "A token this policy names is not held by the token program SaverFi expects. Nothing was built.", { mint: entry.mint });
@@ -850,6 +942,27 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
   }
   const statuses = targets.map((target, index) => tokenAccountStatus(chain.accounts[PRICED_POOLS.length + mints.length + index], target.tokenProgram));
   if (statuses.includes("unreadable")) return unreadable(served);
+
+  // mints[0] is USDC; the offered legs follow it in OFFERED_LEGS' order.
+  const epoch = clockEpochOf(chain.accounts[PRICED_POOLS.length + mints.length + targets.length]);
+  const fees = legFeesToNet(chain.accounts.slice(PRICED_POOLS.length + 1, PRICED_POOLS.length + 1 + OFFERED_LEGS.length), epoch);
+  if (!fees.ok) {
+    return served.refuse(502, "fee_unavailable", "SaverFi could not read a stock's transfer fee from Solana, so no floor was set. Nothing was built.", fees.mint === null ? {} : { mint: fees.mint });
+  }
+  // A CHOSEN LEG OVER THE CEILING IS A POLICY THAT BUYS NOTHING. The keeper
+  // refuses the whole basket from the epoch such a fee lands in; signing it
+  // would spend the owner's rent on a basket that stops. An offered leg the
+  // owner did NOT pick does not stop his basket, so it does not stop the build.
+  const over = chosen.find(({ index }) => fees.bps[index]! > CATALOGUE_MAX_FEE_BPS);
+  if (over !== undefined) {
+    return served.refuse(
+      409,
+      "fee_over_ceiling",
+      `${over.leg.symbol} charges, or has already set for a later epoch, a transfer fee of ${fees.bps[over.index]} basis points — over the ${CATALOGUE_MAX_FEE_BPS} SaverFi's keeper buys through — so a basket holding it would buy nothing. Nothing was built.`,
+      { mint: over.leg.mint, feeBps: fees.bps[over.index]! },
+    );
+  }
+  const floors = liveFloors(prices, fees.bps);
 
   const policy = policyAt(floors.convertFloor, floors.legFloors);
   const problems = investPolicyProblems(policy);
@@ -894,6 +1007,8 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
     policyExists,
     floors: {
       slot: chain.slot,
+      // The epoch each leg's fee was resolved in, from the chain's own clock.
+      epoch: epoch!,
       marginBps: { convert: CONVERT_FLOOR_MARGIN_BPS, leg: LEG_FLOOR_MARGIN_BPS },
       liveConvertWad: floors.convertWad,
       convertWad: floors.convertFloor,
@@ -903,6 +1018,13 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
         symbol: leg.symbol,
         mint: leg.mint,
         liveWad: floors.legWads[index]!,
+        // THE FEE THE FLOOR WAS NETTED OF, so the page can redo the arithmetic
+        // rather than believe it: wad = floorWad(netOfTransferFeeWad(liveWad,
+        // transferFeeBps), marginBps) — legFloorWad(liveWad, transferFeeBps).
+        transferFeeBps: floors.legFeeBps[index]!,
+        // The margin under the net mid this leg's floor was taken at:
+        // marginBps.leg, plus what the keeper's ask widens by at this fee.
+        marginBps: floors.legMarginBps[index]!,
         wad: floors.legFloors[index]!,
         usdcRawPer1e8: usdcRawPer1e8LegRaw(floors.legWads[index]!),
         maxUsdcRawPer1e8: usdcRawPer1e8LegRaw(floors.legFloors[index]!),

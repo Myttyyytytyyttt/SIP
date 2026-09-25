@@ -297,8 +297,29 @@ export const pricedPoolEntries = (): [string, AccountJson][] => [
   ...LEG_POOLS.map((leg): [string, AccountJson] => [leg.pool, legPoolAccount(leg)]),
 ];
 
-/** A mint account held by `tokenProgram`: only its owner is read. */
+/** A mint account held by `tokenProgram`: 82 zero bytes, a mint with no extension and so no transfer fee. */
 export const mintAccount = (tokenProgram: string): AccountJson => accountInfo(tokenProgram, new Uint8Array(82), 1_461_600);
+
+/** The Clock sysvar's address, and the program that owns it on every cluster. */
+export const SYSVAR_CLOCK_ADDRESS = "SysvarC1ock11111111111111111111111111111111";
+export const SYSVAR_PROGRAM_ADDRESS = "Sysvar1111111111111111111111111111111111111";
+
+/**
+ * The epoch a build is read in, unless a test says otherwise: 1041, the epoch
+ * ANTHROPIC's 300 bps for 1043 was found already written (2026-09-24).
+ */
+export const BUILD_EPOCH = 1_041n;
+
+/** The Clock sysvar as the chain holds it: slot, epoch_start_timestamp, EPOCH at byte 16, leader_schedule_epoch, unix_timestamp. */
+export function clockSysvarAccount(epoch: bigint = BUILD_EPOCH, owner = SYSVAR_PROGRAM_ADDRESS): AccountJson {
+  const data = new Uint8Array(40);
+  let left = epoch;
+  for (let i = 0; i < 8; i++) {
+    data[16 + i] = Number(left & 0xffn);
+    left >>= 8n;
+  }
+  return accountInfo(owner, data, 1_169_280);
+}
 
 /** A token account held by `tokenProgram`: only its owner is read. */
 export const tokenAccountInfo = (tokenProgram: string, bytes = 165): AccountJson => accountInfo(tokenProgram, new Uint8Array(bytes), localRent(bytes));
