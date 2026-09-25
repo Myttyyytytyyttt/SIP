@@ -89,7 +89,7 @@ import {
 import { SolanaReadModel } from "../src/read-model.js";
 import { poolFetch } from "../src/rpc-pool.js";
 import { seatCheck, seatCheckNotice } from "../src/seat-check.js";
-import { activeBps, keeperModes, settleAlert, settleThrewAlert, type CarryBook } from "../src/settle-decision.js";
+import { activeBps, keeperModes, measurementStart, settleAlert, settleThrewAlert, type CarryBook } from "../src/settle-decision.js";
 import { runSettleTick, type SettleOutcome } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KeeperClaim, advisoryKeyFor, lockNameFor } from "../src/singleton.js";
@@ -97,9 +97,8 @@ import { tradeNotional } from "../src/measure-volume.js";
 import { PolicyBoundaryBook, type OwnerHistoryReader } from "../src/policy-boundary.js";
 import { readTransaction } from "../src/measure-window.js";
 import { MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
-import { measurementStart } from "../src/settle-decision.js";
 import { createVolumeBase } from "../src/volume-base.js";
-import { previewVolume } from "../src/volume-preview.js";
+import { previewVolume, type PreviewBook } from "../src/volume-preview.js";
 import { computeLeaderboard } from "../src/leaderboard.js";
 import {
   createHeartbeatServer,
@@ -430,6 +429,8 @@ const signingRoutes = new SigningRoutes();
  * and kept while nothing new reaches it. The profit keeper never asks.
  */
 const policyBoundaries = new PolicyBoundaryBook();
+/** The volume keeper's last preview per PROFIT link (src/volume-preview.ts). */
+const volumePreviews: PreviewBook = new Map();
 const ownerHistoryReader: OwnerHistoryReader = {
   signatures: (owner, options, commitment) =>
     connection.getSignaturesForAddress(
@@ -1568,7 +1569,7 @@ async function sweep(): Promise<void> {
           let detail = settle.detail;
           if (vaultState !== null && vaultState.skimMode === MODE_PROFIT && settle.outcome === "UNSUPPORTED_MODE") {
             try {
-              detail = await previewVolume({ connection, program, link, vault: vaultState });
+              detail = await previewVolume({ connection, program, link, vault: vaultState, book: volumePreviews });
             } catch (error) {
               detail = `${settle.detail}; the volume preview could not be read: ${summarizeUpstreamError(error, { take: 2, maxChars: 300 })}`;
             }
