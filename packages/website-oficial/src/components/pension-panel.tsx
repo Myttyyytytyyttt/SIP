@@ -60,11 +60,18 @@ export function PensionPanel({
             {/* No price read: the chain's own figure leads rather than a dash — it is already SOL, so there is nothing to qualify. */}
             {stats.totalSavedUsd === null && stats.totalSavedSol !== undefined && stats.totalSavedSol !== null ? `${stats.totalSavedSol} SOL` : usd(stats.totalSavedUsd)}
           </p>
+          {/*
+            THE RULE IS TODAY'S; THE TOTAL IS SINCE THE FIRST SAVE. A vault that
+            switched mode (09-25: profit, then volume at 1 %) saved under both,
+            and "1 % of every buy and sell, since Sep 18" claimed the whole total
+            for today's rule. So the rule says "now" and the date stands apart.
+          */}
           <CardDescription>
-            <Num>{pct(rule.rateBps)}</Num> {measure}
+            Now <Num>{pct(rule.rateBps)}</Num> {measure}
             {stats.firstSaveAt ? (
               <>
-                , since <Num>{dateLabel(stats.firstSaveAt)}</Num>
+                {" "}
+                · saving since <Num>{dateLabel(stats.firstSaveAt)}</Num>
               </>
             ) : null}
           </CardDescription>

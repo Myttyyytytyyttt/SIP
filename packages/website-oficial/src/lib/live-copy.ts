@@ -304,7 +304,10 @@ export const ACTIVITY_COPY = {
   settledCapped: (owed: string, max: string): string => `${owed} SOL owed, capped at ${max} SOL; the rest is not carried over`,
   /** What a settlement measures: the vault's own mode, never the other one. */
   measureProfit: "profit",
-  measureVolume: "volume",
+  // "1 % of $355.09 in buys and sells", never "… volume": one settlement is
+  // every buy AND sell since the last one, and "$355 volume" read as one trade
+  // counted twice (owner, 09-25, on his first volume settles).
+  measureVolume: "in buys and sells",
 
   wrapped: "Wrapped SOL for investing",
   converted: "Converted SOL to USDC",
