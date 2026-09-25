@@ -25,6 +25,7 @@ import {
   Keypair,
   PublicKey,
   SYSVAR_CLOCK_PUBKEY,
+  SYSVAR_EPOCH_SCHEDULE_PUBKEY,
   SystemProgram,
   type Finality,
   type Transaction,
@@ -44,6 +45,7 @@ import {
 import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import { JUPITER_V6_PROGRAM, RAYDIUM_CLMM_PROGRAM, USDC_MINT } from "../src/invest-decision.js";
+import { LANDING_WINDOW_SLOTS } from "../src/program-scripts.js";
 import { convertCall, investCall, runInvestTick } from "../src/invest-tick.js";
 import { MAX_SUPPORTED_TRANSACTION_VERSION } from "../src/measure-window.js";
 import {
@@ -192,10 +194,24 @@ function policyBytes(p: PolicyFields): Buffer {
 /** 2026-09-15 00:00 UTC, chain day 20_711. */
 const TODAY_UNIX = 1_789_430_400n;
 
+/**
+ * Mainnet's EpochSchedule sysvar, byte for byte as read 2026-09-25: 432,000
+ * slots per epoch, no warmup. The invest turn reads it beside the Clock.
+ */
+const MAINNET_EPOCH_SCHEDULE = Buffer.from("gJcGAAAAAACAlwYAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "base64");
+
+/**
+ * Epoch 930's first slot plus one — slotIndex 1, which is what the fixture's
+ * getEpochInfo answers too. The Clock and getEpochInfo must describe the same
+ * slot, or the keeper and the route builder would disagree about how far the
+ * epoch has to run: the landing-window rule reads both (feeRiseCanLand).
+ */
+const FIXTURE_SLOT = 930n * 432_000n + 1n;
+
 /** The Clock sysvar: 40 bytes, unix_timestamp an i64 at byte 32, after four fields that must not be read as it. */
-function clockBytes(unixTimestamp: bigint): Buffer {
+function clockBytes(unixTimestamp: bigint, slot: bigint = FIXTURE_SLOT): Buffer {
   const buf = Buffer.alloc(40);
-  buf.writeBigUInt64LE(400_000_000n, 0); // slot
+  buf.writeBigUInt64LE(slot, 0); // slot
   buf.writeBigInt64LE(unixTimestamp - 172_800n, 8); // epoch_start_timestamp
   buf.writeBigUInt64LE(930n, 16); // epoch
   buf.writeBigUInt64LE(931n, 24); // leader_schedule_epoch
@@ -258,7 +274,7 @@ function stubChain(
     // refuse its own route for a disagreement this fixture invented — which is
     // exactly the disagreement measureLegVenue's slippage refusal exists to
     // catch, so it would look like a real finding.
-    getEpochInfo: async () => ({ epoch: 930, slotIndex: 1, slotsInEpoch: 432_000, absoluteSlot: 400_000_000, blockHeight: 400_000_000 }),
+    getEpochInfo: async () => ({ epoch: 930, slotIndex: 1, slotsInEpoch: 432_000, absoluteSlot: Number(FIXTURE_SLOT), blockHeight: Number(FIXTURE_SLOT) }),
     // THE TABLES THE ROUTE NAMES. lookupTableCache refuses a table the chain
     // does not have — compiling a v0 message against a missing one produces
     // account indexes that resolve to nothing on the validator — so a turn that
@@ -715,6 +731,7 @@ describe("the ticks' first steps, over the same bytes", () => {
     const accounts = new Map([
       [vault.toBase58(), vaultBytes(vaultFields(vaultOver))],
       [SYSVAR_CLOCK_PUBKEY.toBase58(), clockBytes(TODAY_UNIX)],
+      [SYSVAR_EPOCH_SCHEDULE_PUBKEY.toBase58(), MAINNET_EPOCH_SCHEDULE],
       // THE IN-ASSET'S OWN MINT. The route builder reads the DESTINATION mint's
       // transfer-fee config for every hop it builds, and on the convert hop
       // (wSOL -> USDC) that destination is USDC. Exactly 82 bytes, which is
@@ -1168,12 +1185,21 @@ describe("the ticks' first steps, over the same bytes", () => {
   // turn's result whichever way the turn ends, and that it changes nothing.
 
   /** The three-leg scenario the assertions below share: deep pools, conversion off, 12 USDC held. */
-  async function restingTurn(mints: (defaults: readonly PublicKey[]) => ReadonlyMap<string, Buffer>) {
+  async function restingTurn(
+    mints: (defaults: readonly PublicKey[]) => ReadonlyMap<string, Buffer>,
+    /** Slots from the chain's slot to epoch 931, for the Clock AND getEpochInfo alike; default: all but one of 930. */
+    slotsLeftInEpoch?: bigint,
+  ) {
     const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
-    stubJupiter();
+    const jupiter = stubJupiter();
     for (const [address, data] of mints(basket.mints)) basket.accounts.set(address, { data, owner: TOKEN_2022_PROGRAM_ID });
+    const slot = slotsLeftInEpoch === undefined ? FIXTURE_SLOT : 931n * 432_000n - slotsLeftInEpoch;
+    if (slotsLeftInEpoch !== undefined) basket.accounts.set(SYSVAR_CLOCK_PUBKEY.toBase58(), { data: clockBytes(TODAY_UNIX, slot) });
     let usdcAta: PublicKey | undefined;
     const { vault, connection, program } = chainWith({}, { legs: basket.legs, minConvertRateWad: 0n }, {
+      ...(slotsLeftInEpoch === undefined
+        ? {}
+        : { getEpochInfo: async () => ({ epoch: 930, slotIndex: Number(slot - 930n * 432_000n), slotsInEpoch: 432_000, absoluteSlot: Number(slot), blockHeight: Number(slot) }) }),
       getMinimumBalanceForRentExemption: async () => 2_000_000,
       getTokenAccountBalance: async (address) => {
         if (usdcAta === undefined || !(address as PublicKey).equals(usdcAta)) throw new Error("could not find account");
@@ -1185,7 +1211,7 @@ describe("the ticks' first steps, over the same bytes", () => {
       runInvestTick({
         connection, program, vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
       });
-    return { basket, run, result: await run() };
+    return { basket, run, result: await run(), urls: jupiter.urls };
   }
 
   const none = (): ReadonlyMap<string, Buffer> => new Map();
@@ -1291,6 +1317,71 @@ describe("the ticks' first steps, over the same bytes", () => {
     const notice = atCeiling.result.feeWarnings![0]!;
     expect(notice.severity).toBe("warn");
     expect(notice.detail).toContain("A fee of 300 bps is ALREADY written for epoch 932, 2 epoch(s) from now: EXACTLY the ceiling");
+  });
+
+  describe("a written fee rise reaches the slippage only in the epoch a transaction can land in", () => {
+    // THE REFUSAL THIS REPLACES, measured 2026-09-25 on the owner's vault in
+    // epoch 1042, ~355,000 slots before 1043: 300 bps written for 1043 made the
+    // keeper ask 400 and take min_out net of 300, under the owner's floor, on
+    // every sweep. The turn below asks Jupiter directly, so the slippage in the
+    // quote URL is the keeper's sizing and the builder's agreement at once — a
+    // disagreement would REFUSE instead of reaching the per-call minimum.
+    const askedFor = (urls: readonly string[], mint: PublicKey): readonly string[] =>
+      urls
+        .filter((url) => url.includes("/quote") && new URL(url).searchParams.get("outputMint") === mint.toBase58())
+        .map((url) => new URL(url).searchParams.get("slippageBps") ?? "");
+    const rise = (from: bigint) => (mints: readonly PublicKey[]) => new Map([[mints[1]!.toBase58(), feeMintBytes(300, from)]]);
+
+    it("asks 200, not 400, for a 300 written two epochs out, even in the last slot of this one", async () => {
+      const turn = await restingTurn(rise(932n), 1n);
+      expect(turn.result.outcome).toBe("IDLE");
+      expect(turn.result.detail).toContain("under the $5.00 per-call minimum");
+      expect(askedFor(turn.urls, turn.basket.mints[1]!)).toEqual(["200", "200"]);
+      // AND THE NOTICE IS UNCHANGED: the rise is announced the day it is written.
+      expect(turn.result.feeWarnings![0]!.detail).toContain("A fee of 300 bps is ALREADY written for epoch 932, 2 epoch(s) from now");
+    });
+
+    it("asks 200 for a 300 written for the next epoch while that epoch is still outside the landing window", async () => {
+      const turn = await restingTurn(rise(931n), LANDING_WINDOW_SLOTS + 1n);
+      expect(turn.result.detail).toContain("under the $5.00 per-call minimum");
+      expect(askedFor(turn.urls, turn.basket.mints[1]!)).toEqual(["200", "200"]);
+    });
+
+    it("asks 400 for the same rise once the next epoch starts inside the landing window, and the builder agrees", async () => {
+      const turn = await restingTurn(rise(931n), LANDING_WINDOW_SLOTS);
+      // REACHING THE PER-CALL MINIMUM IS THE AGREEMENT: had the builder
+      // modelled 0 while the keeper asked 400, or 300 while it asked 200, the
+      // route or measureLegVenue would have refused the basket first.
+      expect(turn.result.outcome).toBe("IDLE");
+      expect(turn.result.detail).toContain("under the $5.00 per-call minimum");
+      expect(askedFor(turn.urls, turn.basket.mints[1]!)).toEqual(["400", "400"]);
+      // The other legs carry no fee and are asked the floor, whatever the window.
+      expect(askedFor(turn.urls, turn.basket.mints[0]!)).toEqual(["200", "200"]);
+    });
+
+    it("fails the turn before anything is sent when the EpochSchedule cannot be read, rather than guess where the epoch ends", async () => {
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
+      const jupiter = stubJupiter();
+      basket.accounts.set(SYSVAR_EPOCH_SCHEDULE_PUBKEY.toBase58(), { data: MAINNET_EPOCH_SCHEDULE.subarray(0, 32) });
+      let usdcAta: PublicKey | undefined;
+      const { vault, connection, program, calls } = chainWith({}, { legs: basket.legs, minConvertRateWad: 0n }, {
+        getMinimumBalanceForRentExemption: async () => 2_000_000,
+        getTokenAccountBalance: async (address) => {
+          if (usdcAta === undefined || !(address as PublicKey).equals(usdcAta)) throw new Error("could not find account");
+          return { context: { slot: 1 }, value: { amount: "12000000", decimals: 6, uiAmount: 12 } };
+        },
+      }, true, basket.accounts);
+      usdcAta = getAssociatedTokenAddressSync(USDC_MINT, vault, true);
+      const result = await runInvestTick({
+        connection, program, vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
+      });
+      expect(result.outcome).toBe("FAILED");
+      expect(result.detail).toContain("the EpochSchedule sysvar could not be read");
+      expect(result.detail).toContain("33 bytes");
+      expect(result.detail).toContain("nothing was sent");
+      expect(jupiter.urls).toEqual([]);
+      for (const rpc of ["getLatestBlockhash", "sendTransaction", "sendRawTransaction"]) expect(calls).not.toContain(rpc);
+    });
   });
 
   it("leaves feeWarnings ABSENT on a turn that stopped before it read a single mint", async () => {

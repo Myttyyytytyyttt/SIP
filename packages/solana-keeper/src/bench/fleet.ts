@@ -281,6 +281,20 @@ export function investmentPolicyBytes(vault: PublicKey): Buffer {
   return buf;
 }
 
+/**
+ * The EpochSchedule sysvar as mainnet holds it: 33 bytes, 432,000 slots per
+ * epoch, no warmup. Read 2026-09-25 as base64 gJcGAAAAAACAlwYAAAAAAAAA... —
+ * slots_per_epoch u64, leader_schedule_slot_offset u64, warmup bool,
+ * first_normal_epoch u64, first_normal_slot u64. The invest turn reads it
+ * beside the Clock to know where the epoch ends.
+ */
+export function epochScheduleBytes(slotsPerEpoch = 432_000n): Buffer {
+  const buf = Buffer.alloc(33);
+  buf.writeBigUInt64LE(slotsPerEpoch, 0);
+  buf.writeBigUInt64LE(slotsPerEpoch, 8);
+  return buf;
+}
+
 /** The Clock sysvar: 40 bytes, unix_timestamp an i64 at byte 32, epoch a u64 at 16. */
 export function clockBytes(unixSeconds: bigint, slot: bigint, epoch: bigint): Buffer {
   const buf = Buffer.alloc(40);

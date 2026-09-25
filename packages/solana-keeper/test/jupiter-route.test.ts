@@ -1124,7 +1124,8 @@ describe("the builder does not spend the freshness budget on its own round trips
         charge("mint", costMs.mint);
         return mintAccount();
       },
-      getEpochInfo: async () => ({ epoch: 1039 }),
+      // Every field a real getEpochInfo returns: the builder reads slotsInEpoch - slotIndex for the landing window.
+      getEpochInfo: async () => ({ epoch: 1039, slotIndex: 1, slotsInEpoch: 432_000, absoluteSlot: 1039 * 432_000 + 1, blockHeight: 1 }),
       getMultipleAccountsInfo: async (keys: readonly PublicKey[]) => {
         charge("vault-accounts", costMs.vaultAccounts);
         return keys.map(() => null);

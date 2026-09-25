@@ -35,7 +35,7 @@ import { NO_TRANSFER_FEE, SLIPPAGE_BPS, type TransferFeeTerms } from "./min-out.
 // startup, in --preflight, rather than as `undefined.equals(...)` inside the
 // venue comparison below on a live turn. Importing the id from the package here
 // would take a SECOND path into the same module and quietly skip that check.
-import { JUPITER_PROGRAM } from "./program-scripts.js";
+import { JUPITER_PROGRAM, feeRiseCanLand } from "./program-scripts.js";
 import { olderPublishTime, pythPublishAgeSeconds, solUsdcPythRateWad, type PythPriceUpdate } from "./pyth.js";
 
 /** USDC on mainnet: the only in-asset the keeper has routes for. */
@@ -913,20 +913,38 @@ export function activeTransferFee(facts: MintFacts, currentEpoch: bigint): Trans
 }
 
 /**
- * The worst fee a transfer of this mint could be charged: today's, or a rise
- * already written for a later epoch, whichever is higher.
+ * The worst fee a transfer of this mint could be charged BY A TRANSACTION BUILT
+ * NOW: today's, or a rise written for the NEXT epoch when that epoch starts
+ * within LANDING_WINDOW_SLOTS (jupiter-route.ts) of the slot this turn read —
+ * whichever is higher. A rise two or more epochs out changes nothing.
+ *
+ * WHY THE LANDING EPOCH AND NOT "ANY PENDING RISE". Token-2022 charges the fee
+ * in force in the epoch the transfer LANDS, and nothing this turn sends can
+ * land more than LANDING_WINDOW_SLOTS after its clock read. This used to take
+ * any rise already written, however many epochs away, and that stopped buying
+ * from the moment one was: ANTHROPIC charged 100 bps with 300 written for epoch
+ * 1043, so from the write the keeper asked Jupiter for legSlippageBps(300) =
+ * 400 bps and the builder took min_out net of 300. Measured 2026-09-25 with a
+ * send-blocked run of runInvestTick for vault EFXK995P... in epoch 1042, about
+ * 355,000 slots before 1043, on 0b31682 and on c346632 alike:
+ *   JupiterRouteRefusal: jupiter route refused [below-owner-floor]: this
+ *   route's min_out would be 2427695, under the owner's own floor of 2483089
+ *   (2752188 in at 902223869744110771 wad)
+ * — every sweep refused, over a fee no transaction it could send would pay.
  *
  * WHY THE SLIPPAGE IS SIZED AGAINST THIS AND NOT THE ACTIVE FEE. The route
- * builder models the destination mint's fee against its own worst case
- * (jupiter-route.ts, `fee.worstCase`), because a rise that lands between the
- * quote and the confirmation is charged at the rate in force when the transfer
- * executes, not when we asked. If the keeper sized its slippage against the
- * ACTIVE fee while the builder modelled the worst case, the two would disagree
- * for the two epochs before every scheduled rise — and measureLegVenue refuses
- * on exactly that disagreement, so a basket that is perfectly buyable today
- * would stop days early, with a message about a fee nobody is paying yet.
- * Measured here as a test: a leg with 0 bps now and 300 bps written for epoch
- * 932, read in epoch 930, refused the whole basket.
+ * builder derives min_out from `fee.worstCase`, which is
+ * resolveDestinationTransferFee under the SAME feeRiseCanLand and the same
+ * window. If the keeper sized its slippage against a smaller fee than the
+ * builder modelled, measureLegVenue would refuse on that disagreement
+ * (slippageRefusal); if against a larger one, the ask would be wider than the
+ * min_out it pays for. One predicate, imported by both, is what keeps them
+ * equal. The builder reads its own epoch later in the turn, so at the very
+ * edge of the window it may see the rise when this read did not; that edge
+ * refuses one turn rather than sending one.
+ *
+ * `slotsLeftInEpoch` is slots from the Clock's slot to the next epoch's first
+ * slot (slotsLeftInEpoch below, from the EpochSchedule sysvar).
  *
  * THE COST IS A WIDER ASK, NOT A LOOSER FLOOR. A wider slippage only changes
  * what we ask Jupiter for; min_out still comes from the route's own bytes and
@@ -934,15 +952,72 @@ export function activeTransferFee(facts: MintFacts, currentEpoch: bigint): Trans
  *
  * NOT THE ADMISSION GATE'S NUMBER. MAX_LEG_FEE_BPS is still judged on the fee
  * in force TODAY — a rise written for next month refuses nothing now, and
- * legFeeWarnings is what gives notice of it.
+ * legFeeWarnings, which is unchanged by this, still announces every written
+ * rise the day it is written.
  */
-export function worstCaseTransferFee(facts: MintFacts, currentEpoch: bigint): TransferFeeTerms {
+export function worstCaseTransferFee(facts: MintFacts, currentEpoch: bigint, slotsLeftInEpoch: bigint): TransferFeeTerms {
   const schedule = facts.transferFee;
   if (schedule === null) return NO_TRANSFER_FEE;
   const active = activeTransferFee(facts, currentEpoch);
   const pending = schedule.newer.epoch > currentEpoch ? schedule.newer : null;
   if (pending === null) return active;
+  if (!feeRiseCanLand({ currentEpoch, slotsLeftInEpoch, riseEpoch: pending.epoch })) return active;
   return pending.bps > active.bps ? pending : active;
+}
+
+/** The EpochSchedule sysvar, as bincode lays it out: 33 bytes. */
+export interface EpochScheduleFacts {
+  readonly slotsPerEpoch: bigint;
+  readonly warmup: boolean;
+  readonly firstNormalEpoch: bigint;
+  readonly firstNormalSlot: bigint;
+}
+
+/** Agave's MINIMUM_SLOTS_PER_EPOCH: the first warmup epoch's length, doubling each epoch after. */
+const MINIMUM_SLOTS_PER_EPOCH = 32n;
+const EPOCH_SCHEDULE_BYTES = 33;
+
+/**
+ * Decodes SysvarEpochSchedu1e111111111111111111111111: slots_per_epoch u64,
+ * leader_schedule_slot_offset u64, warmup bool, first_normal_epoch u64,
+ * first_normal_slot u64. Mainnet's bytes, read 2026-09-25, are 432000 /
+ * 432000 / false / 0 / 0 — the same as getEpochSchedule answered that day.
+ *
+ * READ, NOT PINNED. The epoch's end is the one number the landing-window rule
+ * needs that the Clock does not carry, and it rides in the same request as the
+ * Clock, so reading it costs no round trip and cannot be wrong on a cluster
+ * whose schedule is not mainnet's.
+ */
+export function decodeEpochSchedule(data: Buffer): EpochScheduleFacts {
+  if (data.length < EPOCH_SCHEDULE_BYTES) {
+    throw new Error(`the EpochSchedule sysvar is ${EPOCH_SCHEDULE_BYTES} bytes; this read returned ${data.length}`);
+  }
+  const slotsPerEpoch = data.readBigUInt64LE(0);
+  if (slotsPerEpoch === 0n) throw new Error("the EpochSchedule sysvar says 0 slots per epoch");
+  return {
+    slotsPerEpoch,
+    warmup: data.readUInt8(16) !== 0,
+    firstNormalEpoch: data.readBigUInt64LE(17),
+    firstNormalSlot: data.readBigUInt64LE(25),
+  };
+}
+
+/** Agave's EpochSchedule::get_first_slot_in_epoch, warmup included. */
+export function firstSlotOfEpoch(schedule: EpochScheduleFacts, epoch: bigint): bigint {
+  if (epoch <= schedule.firstNormalEpoch) return ((1n << epoch) - 1n) * MINIMUM_SLOTS_PER_EPOCH;
+  return (epoch - schedule.firstNormalEpoch) * schedule.slotsPerEpoch + schedule.firstNormalSlot;
+}
+
+/**
+ * Slots from `slot` to the first slot of the epoch after `epoch` — the number
+ * feeRiseCanLand compares with LANDING_WINDOW_SLOTS, and the same quantity
+ * the route builder reads as getEpochInfo's slotsInEpoch - slotIndex.
+ * Mainnet, measured 2026-09-25: slot 450,220,830 in epoch 1042 leaves
+ * 1043 x 432,000 - 450,220,830 = 355,170. Zero or less means the slot and the
+ * epoch disagree, and feeRiseCanLand reads that as inside the window.
+ */
+export function slotsLeftInEpoch(schedule: EpochScheduleFacts, clock: { readonly slot: bigint; readonly epoch: bigint }): bigint {
+  return firstSlotOfEpoch(schedule, clock.epoch + 1n) - clock.slot;
 }
 
 /**
@@ -1084,9 +1159,9 @@ export type LegAdmission =
       /** Each leg's fee IN FORCE NOW, which is what the ceiling was judged on. */
       readonly fees: ReadonlyMap<string, TransferFeeTerms>;
       /**
-       * Each leg's fee including a rise already written for a later epoch —
-       * what the SLIPPAGE is sized against, because that is what the route
-       * builder models. See worstCaseTransferFee.
+       * Each leg's worst fee in any epoch this turn's transactions can land
+       * in — what the SLIPPAGE is sized against, because that is what the
+       * route builder models. See worstCaseTransferFee.
        */
       readonly worstCaseFees: ReadonlyMap<string, TransferFeeTerms>;
     }
@@ -1129,6 +1204,8 @@ export type LegAdmission =
 export function legAdmissionDecision(input: {
   readonly legs: readonly LegMint[];
   readonly currentEpoch: bigint;
+  /** Slots from the Clock's slot to the next epoch; sizes worstCaseFees only, never the verdict. */
+  readonly slotsLeftInEpoch: bigint;
 }): LegAdmission {
   const refusals: string[] = [];
   const fees = new Map<string, TransferFeeTerms>();
@@ -1171,7 +1248,7 @@ export function legAdmissionDecision(input: {
     fees.set(name, fee);
     // THE SAME BYTES AND THE SAME EPOCH, so the two can never be about
     // different reads of the same mint.
-    worstCaseFees.set(name, worstCaseTransferFee(facts, input.currentEpoch));
+    worstCaseFees.set(name, worstCaseTransferFee(facts, input.currentEpoch, input.slotsLeftInEpoch));
   }
 
   if (refusals.length === 0) return { admit: true, fees, worstCaseFees };

@@ -42,6 +42,7 @@ import {
   Keypair,
   PublicKey,
   SYSVAR_CLOCK_PUBKEY,
+  SYSVAR_EPOCH_SCHEDULE_PUBKEY,
   SystemProgram,
   Transaction,
   TransactionMessage,
@@ -68,6 +69,7 @@ import {
   convertAmount,
   convertDecision,
   convertCapLamports,
+  decodeEpochSchedule,
   inMintDecision,
   investPauseDecision,
   legAdmissionDecision,
@@ -78,6 +80,7 @@ import {
   oracleConvertDecision,
   rollingDecision,
   routeRateWad,
+  slotsLeftInEpoch,
   shouldConvert,
   turnSpendCeiling,
   venueDecision,
@@ -411,11 +414,16 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // getMultipleAccountsInfo that was being sent anyway, resolved against the
   // very unix_timestamp that comes back beside them. A gate that cost a round
   // trip per vault per sweep would be a gate an operator eventually turns off.
-  const [vaultInfo, clockInfo, solFeedInfo, usdcFeedInfo] = await connection.getMultipleAccountsInfo([
+  //
+  // AND THE EPOCHSCHEDULE, LAST, for the same reason: the landing-window rule
+  // (worstCaseTransferFee) needs where this epoch ENDS, which the Clock does not
+  // carry, and a fifth address in a request already being sent costs nothing.
+  const [vaultInfo, clockInfo, solFeedInfo, usdcFeedInfo, epochScheduleInfo] = await connection.getMultipleAccountsInfo([
     vault,
     SYSVAR_CLOCK_PUBKEY,
     PYTH_SOL_USD_FEED,
     PYTH_USDC_USD_FEED,
+    SYSVAR_EPOCH_SCHEDULE_PUBKEY,
   ]);
   if (vaultInfo === null || vaultInfo === undefined) return { outcome: "FAILED", detail: "vault account missing" };
   // BEFORE ANY OTHER READ, ANY ATA, ANY WRAP: either pause switch. The vault's
@@ -586,12 +594,31 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // Jupiter can tell us and only after a quote. This read is the leg mints and
   // nothing else.
   const currentEpoch = clockInfo.data.readBigUInt64LE(16);
+  // HOW FAR THIS EPOCH HAS TO RUN, from the Clock's slot (byte 0) and the
+  // EpochSchedule read beside it. It decides one thing only: whether a fee rise
+  // written for the NEXT epoch can reach a transaction this turn sends, and so
+  // whether the slippage and min_out are sized against it (worstCaseTransferFee).
+  // The admission verdict and the warnings never read it. Unreadable, it fails
+  // the turn before anything is sent, exactly as an unreadable Clock does: a
+  // guess here is either a revert after the spend or a refusal with no cause.
+  let slotsLeft: bigint;
+  try {
+    if (epochScheduleInfo === null || epochScheduleInfo === undefined) throw new Error("the account came back empty");
+    slotsLeft = slotsLeftInEpoch(decodeEpochSchedule(epochScheduleInfo.data), { slot: clockInfo.data.readBigUInt64LE(0), epoch: currentEpoch });
+  } catch (error) {
+    return {
+      outcome: "FAILED",
+      detail:
+        `the EpochSchedule sysvar could not be read (${error instanceof Error ? error.message : String(error)}), so ` +
+        "whether a scheduled fee rise can land this turn cannot be decided; nothing was sent",
+    };
+  }
   const legInfos = await connection.getMultipleAccountsInfo(policy.legs.map((leg) => leg.mint), "confirmed");
   const legMints = policy.legs.map((leg, index) => {
     const info = legInfos[index] ?? null;
     return { mint: leg.mint, account: info === null ? null : { owner: info.owner, data: info.data } };
   });
-  const admission = legAdmissionDecision({ legs: legMints, currentEpoch });
+  const admission = legAdmissionDecision({ legs: legMints, currentEpoch, slotsLeftInEpoch: slotsLeft });
 
   // AND THE NOTICE THE REFUSAL CANNOT GIVE, off the same bytes and the same
   // clock, one line above the return that can end the turn.
@@ -986,7 +1013,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
           inputMint: policy.inMint,
           targetMint: mint,
           spend: amountIn,
-          // The worst case, for the same reason the gate above uses it.
+          // The landing-epoch worst case, for the same reason the gate above uses it.
           feeBps: admission.worstCaseFees.get(mint.toBase58())?.bps ?? 0n,
           maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
           ownerFloorRateWad: leg.minOutRateWad,
@@ -1214,10 +1241,11 @@ async function measureBasketVenues(
       // it. legSlippageBps turns it into a slippage strictly above itself, and
       // measureLegVenue refuses if the route builder's own read disagrees.
       //
-      // THE WORST CASE, NOT THE ACTIVE FEE, and that is what stops the two from
-      // disagreeing: buildJupiterRoute models the destination mint against its
-      // own `fee.worstCase`, so sizing against today's rate would refuse every
-      // basket for the two epochs before any scheduled rise. See
+      // THE LANDING-EPOCH WORST CASE, NOT THE ACTIVE FEE, and that is what
+      // stops the two from disagreeing: buildJupiterRoute models the
+      // destination mint against its own `fee.worstCase`, decided by the same
+      // feeRiseCanLand over the same window. A rise at the next epoch within
+      // LANDING_WINDOW_SLOTS counts; one further out counts in neither. See
       // worstCaseTransferFee.
       feeBps: params.admissionFees.get(leg.mint.toBase58())?.bps ?? 0n,
       maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },

@@ -87,6 +87,13 @@ export const findVaultOwnedTokenAccounts = jupiterRoute.findVaultOwnedTokenAccou
 export const routeMints = jupiterRoute.routeMints;
 export const verifyRouteFresh = jupiterRoute.verifyRouteFresh;
 export const verifySharedAccountsRoute = jupiterRoute.verifySharedAccountsRoute;
+// THE LANDING-EPOCH RULE, added 2026-09-25. The keeper sizes its slippage and
+// the builder derives min_out from the SAME predicate and the SAME window, so
+// the two cannot disagree about whether a written fee rise can reach a
+// transaction built now (invest-decision.ts, worstCaseTransferFee).
+export const LANDING_WINDOW_SLOTS = jupiterRoute.LANDING_WINDOW_SLOTS;
+export const feeRiseCanLand = jupiterRoute.feeRiseCanLand;
+export const resolveDestinationTransferFee = jupiterRoute.resolveDestinationTransferFee;
 export const RAYDIUM_CLMM = raydiumSwap.RAYDIUM_CLMM;
 export const buildSwapV2AccountMetas = raydiumSwap.buildSwapV2AccountMetas;
 export const buildSwapV2Data = raydiumSwap.buildSwapV2Data;
@@ -119,6 +126,8 @@ for (const [name, value] of Object.entries({
   routeMints,
   verifyRouteFresh,
   verifySharedAccountsRoute,
+  feeRiseCanLand,
+  resolveDestinationTransferFee,
 })) {
   if (typeof value !== "function") {
     throw new Error(`@sip/solana-program did not provide ${name}: the CommonJS/ESM unwrap in program-scripts.ts no longer matches how it loads`);
@@ -136,4 +145,11 @@ for (const [name, value] of Object.entries({ RAYDIUM_CLMM, JUPITER_PROGRAM })) {
   if (typeof value?.toBase58 !== "function") {
     throw new Error(`@sip/solana-program did not provide ${name} as a PublicKey: the CommonJS/ESM unwrap in program-scripts.ts no longer matches how it loads`);
   }
+}
+
+// AND THE WINDOW, A BIGINT: an unwrap that lost it would compare every
+// slotsLeftInEpoch against undefined, which is false, and silently never let a
+// rise at the next epoch reach min_out — the direction that reverts.
+if (typeof LANDING_WINDOW_SLOTS !== "bigint") {
+  throw new Error("@sip/solana-program did not provide LANDING_WINDOW_SLOTS as a bigint: the CommonJS/ESM unwrap in program-scripts.ts no longer matches how it loads");
 }

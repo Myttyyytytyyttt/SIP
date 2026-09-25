@@ -338,19 +338,27 @@ export interface DestinationTransferFee {
   readonly mint: string;
   /** The epoch the read was taken in. */
   readonly epoch: number;
+  /**
+   * Slots from the slot the read was taken at to the first slot of the next
+   * epoch (getEpochInfo's slotsInEpoch - slotIndex). What decides whether
+   * `pending` can reach a transaction built now; see feeRiseCanLand.
+   */
+  readonly slotsLeftInEpoch: bigint;
   /** The rate in force RIGHT NOW. */
   readonly current: TransferFeeRate;
   /**
-   * A rate scheduled for a LATER epoch, if one is pending. The PreStocks legs
-   * have carried one twice: 50 -> 100 bps at epoch 1039, and 100 -> 300 bps
-   * written for epoch 1043 (read 2026-09-24; SPACEX alone has no 300). An epoch boundary
-   * is roughly two days, so a route quoted today can land under the new rate —
-   * which is why `worstCase` exists and why min_out should be taken from it.
+   * A rate WRITTEN for a later epoch, if one is. The PreStocks legs have
+   * carried one twice: 50 -> 100 bps at epoch 1039, and 100 -> 300 bps written
+   * for epoch 1043 (read 2026-09-24; SPACEX alone has no 300). Reported
+   * whatever its distance, because it is news; it reaches `worstCase` only when
+   * a transaction built now can land in the epoch it starts in.
    */
   readonly pending: TransferFeeRate | null;
   /**
-   * The schedule a min_out must survive, from worstCaseTransferFee with no
-   * gross to compare at — so an UPPER ENVELOPE of the two when neither is
+   * The schedule a min_out must survive: the worst fee in force in ANY epoch a
+   * transaction built now can land in (resolveDestinationTransferFee). With a
+   * pending rise inside the landing window that is worstCaseTransferFee of the
+   * two with no gross to compare at — so an UPPER ENVELOPE when neither is
    * worse everywhere, not necessarily either one of them. Read that function
    * before using this field for anything but a min_out.
    */
@@ -434,6 +442,94 @@ export function worstCaseTransferFee(a: TransferFeeRate, b: TransferFeeRate, gro
 }
 
 /**
+ * How many slots after the slot a turn READ can one of that turn's
+ * transactions still land. Measured in slots because the epoch boundary is.
+ *
+ * WHY 9,000. A transaction's own lifetime is its blockhash's: 150 blocks past
+ * the one it names (lastValidBlockHeight), and a block per slot unless slots
+ * are skipped — 394 slots gave 394 blocks on mainnet 2026-09-25 (measured), so
+ * call it at most ~160 slots with a few percent skipped. But the keeper reads
+ * its clock ONCE, at the top of a turn, and that turn then sends in sequence:
+ * the wrap, the convert and one invest per leg (token-account creates ride as
+ * pre-instructions, not sends) — up to MAX_LEGS = 8 legs (state.rs), so at
+ * most 10 sends, each confirmed or expired within one blockhash lifetime.
+ * Before the first send it builds and measures up to 9 routes, and before each
+ * convert or invest it builds one again, every build held to ROUTE_MAX_AGE_MS
+ * = 30 s: 18 builds. Pessimistically, 10 x 160 = 1,600 slots of lifetimes plus
+ * 18 x 30 s = 540 s of building, which is ~2,000 slots at the 268 ms per slot
+ * measured on mainnet 2026-09-25 (getRecentPerformanceSamples, 2,235 slots in
+ * 600 s) — about 3,600 slots from the clock read to the last landing, for a
+ * basket four times larger than any live one. 9,000 is 2.5 times that: about
+ * 40 minutes at the measured slot time, an hour at the nominal 400 ms, and 2 %
+ * of a 432,000-slot epoch.
+ *
+ * WHAT IT COSTS TO BE GENEROUS: in the last 9,000 slots before a rise, min_out
+ * is taken net of the rise a little early. Being short would cost a reverted
+ * transaction after the spend. That asymmetry is why the margin is on this side.
+ */
+export const LANDING_WINDOW_SLOTS = 9_000n;
+
+/**
+ * Whether a fee rise WRITTEN for `riseEpoch` can be the fee charged on a
+ * transaction built now — the one rule the route builder and the keeper both
+ * apply, so that the slippage the keeper sizes and the min_out this file
+ * derives are about the same fee.
+ *
+ * ONLY THE NEXT EPOCH, AND ONLY AT ITS DOOR. Token-2022 charges the fee in
+ * force in the epoch the transfer LANDS, and a transaction lands at most
+ * LANDING_WINDOW_SLOTS after the slot read. A rise at the next epoch is
+ * reachable exactly when that epoch starts inside the window: slotsLeftInEpoch
+ * (slots from the slot read to the next epoch's first slot) is at most the
+ * window. A rise two or more epochs out cannot be reached by anything built
+ * today — an epoch is 432,000 slots on mainnet — and changes nothing.
+ *
+ * A NON-POSITIVE slotsLeftInEpoch means the slot and the epoch disagree; it
+ * reads as "inside the window", which is the direction that cannot revert.
+ */
+export function feeRiseCanLand(input: {
+  readonly currentEpoch: bigint;
+  readonly slotsLeftInEpoch: bigint;
+  readonly riseEpoch: bigint;
+}): boolean {
+  return input.riseEpoch === input.currentEpoch + 1n && input.slotsLeftInEpoch <= LANDING_WINDOW_SLOTS;
+}
+
+/**
+ * The current, pending and worst-case fee of a destination mint, decided from
+ * its two configured rates, the epoch and how far that epoch has to run.
+ *
+ * THE WORST CASE IS THE WORST FEE IN FORCE IN ANY EPOCH A TRANSACTION BUILT NOW
+ * CAN LAND IN — the current rate, and a pending rise only when feeRiseCanLand.
+ * It used to be the worst of the current rate and ANY pending rise, however
+ * many epochs away, and that stopped buying from the moment a rise was
+ * written. Measured 2026-09-25 (epoch 1042, ~355,000 slots from 1043), with
+ * ANTHROPIC at 100 bps in force and 300 written for 1043: the keeper asked
+ * Jupiter for 400 bps and this file took min_out net of 300, and the owner's
+ * vault EFXK995P... was refused on every sweep with
+ *   [below-owner-floor]: this route's min_out would be 2427695, under the
+ *   owner's own floor of 2483089 (2752188 in at 902223869744110771 wad)
+ * — a floor the owner signed 5 % under a gross mid, cleared by what the vault
+ * would actually have been credited at the 100 bps in force. Nothing the
+ * transaction could land in charged 300.
+ *
+ * PURE, so the rule can be tested at every boundary without a chain.
+ */
+export function resolveDestinationTransferFee(input: {
+  readonly olderTransferFee: TransferFeeRate;
+  readonly newerTransferFee: TransferFeeRate;
+  readonly currentEpoch: bigint;
+  readonly slotsLeftInEpoch: bigint;
+}): { readonly current: TransferFeeRate; readonly pending: TransferFeeRate | null; readonly worstCase: TransferFeeRate } {
+  const current = transferFeeForEpoch(input, input.currentEpoch);
+  const pending = input.newerTransferFee.epoch > input.currentEpoch ? input.newerTransferFee : null;
+  const reachable =
+    pending !== null &&
+    feeRiseCanLand({ currentEpoch: input.currentEpoch, slotsLeftInEpoch: input.slotsLeftInEpoch, riseEpoch: pending.epoch });
+  const worstCase = reachable ? worstCaseTransferFee(current, pending) : current;
+  return { current, pending, worstCase };
+}
+
+/**
  * Reads the destination mint's transfer-fee config from the chain.
  *
  * A mint with no TransferFeeConfig extension (SPYx) reports zero, so callers
@@ -449,21 +545,26 @@ export async function readDestinationTransferFee(
   ]);
   if (info === null) throw new Error(`mint ${mint.toBase58()} does not exist`);
   const epoch = epochInfo.epoch;
+  // THE SAME QUANTITY THE KEEPER DERIVES FROM THE CLOCK AND EPOCHSCHEDULE
+  // SYSVARS (invest-decision.ts, slotsLeftInEpoch): slots from the slot read to
+  // the next epoch's first slot. getEpochInfo already states both halves.
+  const slotsLeftInEpoch = BigInt(epochInfo.slotsInEpoch) - BigInt(epochInfo.slotIndex);
   const config = getTransferFeeConfig(unpackMint(mint, info, info.owner));
   if (config === null) {
-    return { mint: mint.toBase58(), epoch, current: NO_FEE, pending: null, worstCase: NO_FEE };
+    return { mint: mint.toBase58(), epoch, slotsLeftInEpoch, current: NO_FEE, pending: null, worstCase: NO_FEE };
   }
   const rate = (fee: { epoch: bigint; transferFeeBasisPoints: number; maximumFee: bigint }): TransferFeeRate => ({
     epoch: BigInt(fee.epoch),
     basisPoints: fee.transferFeeBasisPoints,
     maximumFee: BigInt(fee.maximumFee),
   });
-  const older = rate(config.olderTransferFee);
-  const newer = rate(config.newerTransferFee);
-  const current = transferFeeForEpoch({ olderTransferFee: older, newerTransferFee: newer }, BigInt(epoch));
-  const pending = newer.epoch > BigInt(epoch) ? newer : null;
-  const worstCase = pending === null ? current : worstCaseTransferFee(current, pending);
-  return { mint: mint.toBase58(), epoch, current, pending, worstCase };
+  const resolved = resolveDestinationTransferFee({
+    olderTransferFee: rate(config.olderTransferFee),
+    newerTransferFee: rate(config.newerTransferFee),
+    currentEpoch: BigInt(epoch),
+    slotsLeftInEpoch,
+  });
+  return { mint: mint.toBase58(), epoch, slotsLeftInEpoch, ...resolved };
 }
 
 // ---------------------------------------------------------------------------
@@ -1678,11 +1779,12 @@ export interface BuildJupiterRouteParams {
   /** The only venues allowed, for experiments about the venue; see fetchJupiterQuote. */
   readonly dexes?: readonly string[];
   /**
-   * Take the transfer fee from the rate that may be in force when the
+   * Take the transfer fee from the worst rate that may be in force when the
    * transaction LANDS rather than the one in force now. Default true: the
-   * PreStocks legs step 50 -> 100 bps at epoch 1039, an epoch is about two
-   * days, and a min_out that was right at build time and wrong at land time
-   * reverts after the spend.
+   * PreStocks legs stepped 50 -> 100 bps at epoch 1039, and a min_out that was
+   * right at build time and wrong at land time reverts after the spend. "May
+   * be in force" is feeRiseCanLand's: a rise in the next epoch, inside
+   * LANDING_WINDOW_SLOTS of it — never one written for further out.
    */
   readonly useWorstCaseTransferFee?: boolean;
   /**
