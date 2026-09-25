@@ -494,8 +494,9 @@ Es **otro servicio**, con el mismo código y la misma imagen que el de la secci�
   por error falla el despliegue y Railway deja funcionando el anterior.
 - **Sus alertas empiezan por `[volume]`** en el mismo Telegram.
 - En los vaults de beneficio no cobra nada. **En seco**, su fila de `/status` enseña cuánto volumen lleva el tramo sin
-  cobrar y lo que costaría en modo volumen; armado ya no lo calcula, para no gastar lecturas de Helius en vaults que
-  cobra el otro.
+  cobrar y lo que costaría en modo volumen, y lo mismo del **último tramo ya cobrado** (ese no se vacía cuando el
+  vigilante de siempre cobra un trade ganador al minuto). Armado ya no lo calcula, para no gastar lecturas de Helius en
+  vaults que cobra el otro.
 
 Qué cuenta como volumen, la frecuencia de cobro y el cambio de modo: `reports/VOLUME_KEEPER_PLAN_2026-09-25.md`.
 

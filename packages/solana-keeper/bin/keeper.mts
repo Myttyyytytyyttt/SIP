@@ -98,7 +98,7 @@ import { PolicyBoundaryBook, type OwnerHistoryReader } from "../src/policy-bound
 import { readTransaction } from "../src/measure-window.js";
 import { MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
 import { createVolumeBase } from "../src/volume-base.js";
-import { previewVolume, type PreviewBook } from "../src/volume-preview.js";
+import { previewLastSettled, previewVolume, type PreviewBook } from "../src/volume-preview.js";
 import { computeLeaderboard } from "../src/leaderboard.js";
 import {
   createHeartbeatServer,
@@ -1574,6 +1574,10 @@ async function sweep(): Promise<void> {
           if (!settleTurn.live && vaultState !== null && vaultState.skimMode === MODE_PROFIT && settle.outcome === "UNSUPPORTED_MODE") {
             try {
               detail = await previewVolume({ connection, program, link, vault: vaultState, book: volumePreviews });
+              // AND THE LAST SETTLED WINDOW: the pending span is usually empty, because
+              // the profit keeper settles a win within a minute.
+              const last = await previewLastSettled({ connection, program, link, vault: vaultState, book: volumePreviews });
+              if (last !== null) detail = `${detail} ${last}`;
             } catch (error) {
               detail = `${settle.detail}; the volume preview could not be read: ${summarizeUpstreamError(error, { take: 2, maxChars: 300 })}`;
             }

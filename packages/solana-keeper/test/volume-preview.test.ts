@@ -6,8 +6,9 @@ import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import type { VaultState } from "../src/accounts.js";
 import type { ManagedLink } from "../src/discovery.js";
-import { idl } from "../src/idl.js";
-import { previewVolume, type PreviewBook } from "../src/volume-preview.js";
+import { SIP_PROGRAM_ID, idl } from "../src/idl.js";
+import { settledEventsFrom } from "../src/settled-event.js";
+import { previewLastSettled, previewVolume, type PreviewBook } from "../src/volume-preview.js";
 import { FIXTURES } from "./volume-fixtures.js";
 
 const ORDER = ["owner-settle-2026-09-19", "owner-buy-1", "owner-sell-1", "owner-buy-2", "owner-sell-2"];
@@ -79,5 +80,76 @@ describe("previewVolume", () => {
     const after = reads.length;
     await previewVolume({ connection, program, link, vault, book });
     expect(reads.length).toBeGreaterThan(after);
+  });
+});
+
+describe("previewLastSettled", () => {
+  // The owner's history as the chain holds it on 2026-09-25, newest first: today's
+  // settle, the round trip it settled, the settle of 09-23 and the trades before it.
+  const WALLET_HISTORY = [
+    "owner-settle-2026-09-25",
+    "owner-sell-2026-09-25",
+    "owner-buy-2026-09-25",
+    "owner-settle-2026-09-23",
+    "owner-sell-2",
+    "owner-buy-2",
+    "owner-sell-1",
+    "owner-buy-1",
+    "owner-settle-2026-09-19",
+  ];
+  const SETTLES = ["owner-settle-2026-09-25", "owner-settle-2026-09-23", "owner-settle-2026-09-19"];
+  const linkAddress = Keypair.generate().publicKey;
+  const [event] = settledEventsFrom((FIXTURES["owner-settle-2026-09-25"]!.result as unknown as { readonly meta: { readonly logMessages: string[] } }).meta.logMessages, SIP_PROGRAM_ID);
+
+  function chain() {
+    const reads: string[] = [];
+    const listed = (names: readonly string[]) => names.map((name) => ({ signature: FIXTURES[name]!.signature, slot: FIXTURES[name]!.result.slot }));
+    const fetch: typeof globalThis.fetch = async (_input, init) => {
+      const request = JSON.parse(String(init?.body)) as { readonly id: unknown; readonly method: string; readonly params: readonly unknown[] };
+      const reply = (result: unknown) => new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }), { status: 200 });
+      if (request.method === "getSignaturesForAddress") {
+        const list = request.params[0] === linkAddress.toBase58() ? listed(SETTLES) : listed(WALLET_HISTORY);
+        const options = (request.params[1] ?? {}) as { readonly before?: string; readonly limit?: number };
+        const start = options.before === undefined ? 0 : list.findIndex((e) => e.signature === options.before) + 1;
+        return reply(list.slice(start, start + (options.limit ?? 1000)).map((e) => ({ ...e, err: null, memo: null, blockTime: null, confirmationStatus: "finalized" })));
+      }
+      if (request.method === "getTransaction") {
+        reads.push(String(request.params[0]));
+        return reply(Object.values(FIXTURES).find((entry) => entry.signature === request.params[0])?.result ?? null);
+      }
+      throw new Error(`unexpected ${request.method}`);
+    };
+    const connection = new Connection("http://last.invalid", { commitment: "confirmed", fetch });
+    const refuse = async (): Promise<never> => {
+      throw new Error("signs nothing");
+    };
+    const program = new anchor.Program(idl, new anchor.AnchorProvider(connection, { publicKey: PublicKey.default, signTransaction: refuse, signAllTransactions: refuse }, {}));
+    return { connection, program, reads };
+  }
+
+  const settledLink: ManagedLink = { linkAddress, wallet, vault: Keypair.generate().publicKey, epoch: event!.linkEpoch, settlementNonce: 3n, frontierSlot: event!.sessionEndSlot };
+
+  it("measures the owner's round trip of 2026-09-25, which the profit keeper settled 19 s after the sell", async () => {
+    const { connection, program } = chain();
+    expect(await previewLastSettled({ connection, program, link: settledLink, vault })).toBe(
+      "Last settlement (nonce 2, slots 449756435..450411368): 2 trade(s), 2.112562992 SOL of volume. " +
+        "In VOLUME mode at 200 bps it would have owed 0.042251259 SOL (0.042251259 paid under the cap); " +
+        "it was charged 0.022141459 SOL in PROFIT mode at 2500 bps.",
+    );
+  });
+
+  it("is computed once per settle", async () => {
+    const { connection, program, reads } = chain();
+    const book: PreviewBook = new Map();
+    await previewLastSettled({ connection, program, link: settledLink, vault, book });
+    const after = reads.length;
+    await previewLastSettled({ connection, program, link: settledLink, vault, book });
+    expect(reads.length).toBe(after);
+  });
+
+  it("says nothing for a link that never settled, or whose last settle is not among the link's newest", async () => {
+    const { connection, program } = chain();
+    expect(await previewLastSettled({ connection, program, link: { ...settledLink, settlementNonce: 0n }, vault })).toBeNull();
+    expect(await previewLastSettled({ connection, program, link: { ...settledLink, settlementNonce: 9n }, vault })).toBeNull();
   });
 });
