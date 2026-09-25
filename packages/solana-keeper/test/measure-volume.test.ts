@@ -81,6 +81,15 @@ describe("other real trades, found on mainnet on 2026-09-25", () => {
   });
 });
 
+describe("a swap paid from a persistent wSOL account", () => {
+  // A Jupiter swap whose SOL leg is the wallet's own wSOL account, open before and
+  // after: its lamports move only by the 11 244-lamport fee, while its wSOL falls by
+  // 43 563 346 and its USDC rises. The wSOL is the SOL leg.
+  it.skipIf(FIXTURES["wsol-persistent-swap"] === undefined)("counts the wSOL that left, though the wallet's lamports moved only by the fee", async () => {
+    expect(await measure("wsol-persistent-swap")).toEqual({ counted: true, lamports: 43_563_346n });
+  });
+});
+
 describe("what is not volume", () => {
   it("our own settle is an external flow", async () => {
     expect(await measure("owner-settle-2026-09-19")).toEqual({ counted: false, skip: "flow" });
