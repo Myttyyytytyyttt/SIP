@@ -164,3 +164,23 @@ export const PYTH_SOL_USD_FEED_ID_HEX = "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8
 
 /** USDC/USD's 32-byte feed id, hex. */
 export const PYTH_USDC_USD_FEED_ID_HEX = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a";
+
+/**
+ * The Crypto.SPYX/USD price account (shard 0): 134 bytes, owned by the receiver.
+ *
+ * READ ON MAINNET 2026-09-25 and pinned by BOTH facts this section demands:
+ * getMultipleAccounts returned owner rec2HHDD… (the receiver) and 134 bytes, and
+ * findProgramAddress([u16 LE 0, the feed id below], PYTH_PUSH_PROGRAM) is this
+ * address, so the id in the bytes is the id the address commits to.
+ *
+ * IT IS NOT A KEEPER INPUT. Nothing in the money path reads it: the keeper's
+ * oracle gate is the SOL hop's (solana-keeper/src/invest-decision.ts), and this
+ * feed exists for the public /prices page, which shows an xStock's pool mid
+ * against it and the AGE of each. An equity push account is refreshed by a third
+ * party on its own schedule and is regularly hours old, which is exactly why the
+ * page that reads it never shows the price without the age.
+ */
+export const PYTH_SPYX_USD_FEED = "27Tv3HxU34AKxZ8MgfFAA1gCbWa96msMG5BvSWAHkBfj";
+
+/** Crypto.SPYX/USD's 32-byte feed id, hex: the derivation seed above, and what the account carries after its verification level. */
+export const PYTH_SPYX_USD_FEED_ID_HEX = "2817b78438c769357182c04346fddaad1178c82f4048828fe0997c3c64624e14";

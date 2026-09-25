@@ -310,6 +310,57 @@ export const MAX_PYTH_AGE_SECONDS = 60n;
 export const MAX_PYTH_DEVIATION_BPS = 500n;
 
 /**
+ * How wide a feed's OWN confidence band may be, as bps of that feed's price,
+ * before the SOL hop is left alone: 50 bps, half a percent, per feed.
+ *
+ * PYTH PUBLISHES A NUMBER AND ITS UNCERTAINTY, and a guard that reads the first
+ * and ignores the second is half a guard. The age arm catches a feed that
+ * STOPPED; the deviation arm catches a pool that WALKED AWAY from the world.
+ * Neither catches the oracle saying, in the field printed beside the price,
+ * that it does not know the price to better than a few percent — which is
+ * exactly what conf does when its publishers disagree, in the minutes that
+ * matter most. Pyth's own guidance is to pause activity when the
+ * confidence-to-price ratio exceeds your threshold, "e.g. conf/price > 2%".
+ *
+ * MEASURED, NOT COPIED OUT OF THE DOC. Both accounts read read-only off
+ * mainnet on 2026-09-25: one read at 17:49Z (slot 450424606, both Full, both
+ * owned by the receiver program, both 3 s behind the chain clock), then 9 more
+ * over 64 s to 17:52Z, slot 450424951:
+ *   SOL/USD   $120.79-$120.92  conf $0.0067-$0.0159      ->  0.55-1.31 bps
+ *   USDC/USD  $0.99990         conf $0.000238-$0.000265  ->  2.38-2.65 bps
+ * The pair lives under 3 bps. Pyth's 2 % example is 200 bps — 75x the widest
+ * USDC reading and 150x the widest SOL one — a ceiling written to cover any feed
+ * on the network, including the thin ones. On these two, which publish every
+ * 8-10 s and never left 3 bps across the sample, 200 bps is a line that cannot
+ * fire: theatre.
+ *
+ * WHY 50 AND NOT 5. 50 bps is ~19x the widest USDC reading and ~38x the widest
+ * SOL one, so a feed must widen by more than an order of magnitude — publishers
+ * genuinely disagreeing, a depeg, a venue-wide halt — before this fires, and no
+ * amount of ordinary movement gets there. A 5 bps ceiling would sit under twice
+ * the USDC/USD reading of a calm Friday and refuse the first busy minute; that
+ * is the alarm an operator switches off, and then nothing guards anything.
+ *
+ * AND IT IS A TENTH OF WHAT IT BACKS. The deviation arm tolerates a 500 bps gap
+ * and the owner's convert floor sits 1000 bps under the pool price of the day
+ * (CONVERT_FLOOR_MARGIN_BPS in the web's product.ts). At 50 bps the pair's own
+ * uncertainty is a tenth of both: the mid the deviation arm compares still
+ * means something, and the defensive rate reported below — about 100 bps under
+ * mid with BOTH feeds at the ceiling at once — still clears the floor the owner
+ * signed, so a turn that converts today keeps converting. A ceiling at 500 bps
+ * would admit a pair whose band alone is as wide as that whole floor margin.
+ *
+ * PER FEED, NOT ON THE PAIR'S COMBINED BAND. A USDC/USD that has come apart is
+ * its own reason to stop even while SOL/USD is calm, and naming the feed that
+ * widened is what makes the refusal answerable by somebody who did not build
+ * this. The live conf is what is gated, as the doc says; emaConf is the smoothed
+ * one and lags the minute this arm exists to catch — across the same 64 s it
+ * moved 1.088 to 1.092 bps on SOL/USD while conf itself swung 0.55 to 1.31 — so
+ * it is left to the reading below, reported and not gated.
+ */
+export const MAX_PYTH_CONF_BPS = 50n;
+
+/**
  * The rate a captured swap actually traded at, as USDC raw per lamport x 1e18 —
  * the unit both the policy's convert floor and the oracle speak, so the three
  * numbers compare with no display price entering any of them.
@@ -326,8 +377,136 @@ export function routeRateWad(observed: { readonly inRaw: bigint; readonly outRaw
 }
 
 /**
+ * A feed's confidence as bps of its own price, truncated like every other bound
+ * in this file, or null when the price is not positive to divide by — a feed
+ * quoting zero or below is refused by the arm above this one, which says so in
+ * better words than a ratio could.
+ *
+ * IT LIVES HERE AND NOT IN pyth.ts DELIBERATELY. That file's header says core's
+ * pythConfBps was left out of the keeper's mirror because nothing here called
+ * it. Something does now — but a ratio only exists to be compared with
+ * MAX_PYTH_CONF_BPS, and the comparison is a policy, not a decode. The decoder
+ * stays a decoder; the judgement stays beside the ceiling it is judged against.
+ */
+export function pythConfBps(update: PythPriceUpdate): bigint | null {
+  if (update.price <= 0n) return null;
+  return (update.conf * 10_000n) / update.price;
+}
+
+/**
+ * A feed's own i64-and-expo as the decimal a human reads: 12087258518 at expo -8
+ * is "120.87258518". For a refusal's prose only — every number the code COMPARES
+ * stays raw, because a display price in an arithmetic path is how a guard ends
+ * up off by a factor of ten.
+ */
+function feedPriceText(value: bigint, expo: number): string {
+  if (expo >= 0 || expo < -18) return `${value}e${expo}`;
+  const scale = 10n ** BigInt(-expo);
+  const sign = value < 0n ? "-" : "";
+  const magnitude = value < 0n ? -value : value;
+  return `${sign}${magnitude / scale}.${(magnitude % scale).toString().padStart(-expo, "0")}`;
+}
+
+/** Each feed's conf/price in bps; null for a feed with no positive price to divide by. */
+export interface PythConfidenceRatios {
+  readonly sol: bigint | null;
+  readonly usdc: bigint | null;
+}
+
+/**
+ * What the two confidence bands imply for this hop, in the WAD unit every rate
+ * in the turn is quoted in: USDC raw per lamport x 1e18.
+ *
+ * PYTH'S CONSERVATIVE PRICING, REPORTED AND NOT YET ENFORCED. The doc's rule
+ * for a lender is to value collateral at price - confidence and debt at
+ * price + confidence, so that every number acted on is the one that flatters
+ * you least. A swap has two sides and no single defensive end, so both ends are
+ * reported and each is named for what it is: what the vault GIVES UP priced at
+ * the bottom of its band, and what it RECEIVES priced at the top of its.
+ *
+ * NOTHING IN THE DECISION COMPARES AGAINST THESE. The deviation arm still
+ * compares mid to mid, deliberately: which end a pool's rate should be held to
+ * is a separate judgement with a separate blast radius, and half-making it
+ * would tighten a bound the keeper has converted real money under. This is data
+ * for the page — what the guard WOULD have used had it priced defensively —
+ * and the honest way to ship the first half.
+ */
+export interface PythConservativeBounds {
+  /** SOL/USD at price - conf, in that feed's own expo: what the vault gives up, at the bottom of its band. */
+  readonly solLowerPrice: bigint;
+  /** USDC/USD at price + conf: what the vault receives, at the top of its band. */
+  readonly usdcUpperPrice: bigint;
+  /** SOL/USD at price + conf, the other end of the same band. */
+  readonly solUpperPrice: bigint;
+  /** USDC/USD at price - conf. */
+  readonly usdcLowerPrice: bigint;
+  /** The rate the age and deviation arms use, from the two mid prices. */
+  readonly midWad: bigint;
+  /** The FEWEST USDC raw a lamport can be worth inside the bands: SOL at its floor over USDC at its ceiling. */
+  readonly giveUpLowerWad: bigint;
+  /** The MOST it can be worth: SOL at its ceiling over USDC at its floor — what a defensive min-out would demand to see. */
+  readonly receiveUpperWad: bigint;
+  /** How wide that span is as bps of the mid: the uncertainty MAX_PYTH_DEVIATION_BPS sits on top of. */
+  readonly bandBps: bigint;
+}
+
+/**
+ * The bands as rates, or null when this pair has no usable rate to take bands
+ * around — a non-positive price, an absurd exponent, a conf so wide it eats the
+ * price. Never throws: a reading is reported beside every decision, including
+ * the decisions that refuse, and a report that can throw is a report that takes
+ * the sweep down with it.
+ */
+export function pythConservativeBounds(sol: PythPriceUpdate, usdc: PythPriceUpdate): PythConservativeBounds | null {
+  const solLowerPrice = sol.price - sol.conf;
+  const solUpperPrice = sol.price + sol.conf;
+  const usdcLowerPrice = usdc.price - usdc.conf;
+  const usdcUpperPrice = usdc.price + usdc.conf;
+  if (solLowerPrice <= 0n || usdcLowerPrice <= 0n) return null;
+  try {
+    const midWad = solUsdcPythRateWad(sol, usdc);
+    const giveUpLowerWad = solUsdcPythRateWad({ ...sol, price: solLowerPrice }, { ...usdc, price: usdcUpperPrice });
+    const receiveUpperWad = solUsdcPythRateWad({ ...sol, price: solUpperPrice }, { ...usdc, price: usdcLowerPrice });
+    return {
+      solLowerPrice,
+      usdcUpperPrice,
+      solUpperPrice,
+      usdcLowerPrice,
+      midWad,
+      giveUpLowerWad,
+      receiveUpperWad,
+      bandBps: ((receiveUpperWad - giveUpLowerWad) * 10_000n) / midWad,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** A decision with the oracle reading that produced it: the same tagged union, plus what the feeds said. */
+interface OracleReading {
+  /** Each feed's conf/price in bps; null when a feed could not be read at all. */
+  readonly confBps: PythConfidenceRatios | null;
+  /** Pyth's conservative pricing of this hop, or null when the pair carries no usable rate. */
+  readonly conservative: PythConservativeBounds | null;
+}
+export type OracleConvertReading =
+  | ({ readonly convert: true } & OracleReading)
+  | ({ readonly convert: false; readonly detail: string } & OracleReading);
+
+/**
  * Whether the SOL-to-USDC hop may be priced against this pool at all, from the
  * two Pyth feeds and the rate the captured route implies.
+ *
+ * THREE ARMS, AND NONE OF THEM IS THE OTHER. The age arm catches a feed that
+ * STOPPED, against the chain's own clock. The confidence arm catches a feed that
+ * is still publishing and SAYS IT DOES NOT KNOW — conf wide against its own
+ * price, which is Pyth telling the caller so in the field beside the number, and
+ * which a guard reading only the price cannot see. The deviation arm catches a
+ * POOL that walked away from both. A reading is returned beside every verdict,
+ * including the refusals: the two conf ratios, and Pyth's conservative pricing
+ * of the hop, so a page can show what the guard would have used had it priced
+ * defensively. Nothing in here compares against those bounds — see
+ * PythConservativeBounds for why that is deliberate and not half-done.
  *
  * THE SAME TAGGED UNION convertDecision RETURNS, deliberately: a bad oracle
  * reading is not a failure and not a refusal of the turn. It is the same rest
@@ -352,16 +531,18 @@ export function routeRateWad(observed: { readonly inRaw: bigint; readonly outRaw
  * lets invest-tick.ts ask this the same question twice: once before the wrap,
  * when only the feeds are known, and once with the route in hand.
  */
-export function oracleConvertDecision(input: {
+export function oracleConvertReading(input: {
   readonly sol: PythPriceUpdate | null;
   readonly usdc: PythPriceUpdate | null;
   /** The CHAIN's unix_timestamp, out of the Clock sysvar — never this host's wall clock. */
   readonly nowUnixSeconds: bigint;
   /** USDC raw per lamport x 1e18, as the captured swap actually traded, or null. */
   readonly routeWad: bigint | null;
-}): ConvertDecision {
+}): OracleConvertReading {
   const { sol, usdc, nowUnixSeconds, routeWad } = input;
   const rest = "so the SOL hop is skipped this turn and only the USDC the vault already holds is invested";
+  /** A pair that could not be read has no ratio and no bands: nothing was decoded to take them from. */
+  const unread = { confBps: null, conservative: null } as const;
 
   if (sol === null || usdc === null) {
     const missing = [sol === null ? "SOL/USD" : null, usdc === null ? "USDC/USD" : null].filter((feed): feed is string => feed !== null);
@@ -370,8 +551,16 @@ export function oracleConvertDecision(input: {
       detail:
         `the Pyth ${missing.join(" and ")} feed${missing.length === 1 ? "" : "s"} could not be read — absent, not owned by ` +
         `the receiver program, or not carrying the feed id it was fetched for — ${rest}`,
+      ...unread,
     };
   }
+
+  // Both feeds decoded, so the reading exists whatever the arms below decide —
+  // an operator reading a refusal gets the numbers that caused it, not a hole.
+  const read = {
+    confBps: { sol: pythConfBps(sol), usdc: pythConfBps(usdc) },
+    conservative: pythConservativeBounds(sol, usdc),
+  } as const;
 
   const age = pythPublishAgeSeconds(olderPublishTime(sol, usdc), nowUnixSeconds);
   if (age > MAX_PYTH_AGE_SECONDS) {
@@ -381,6 +570,7 @@ export function oracleConvertDecision(input: {
         `the Pyth pair's stalest publish is ${age} s behind the chain's clock, past the ${MAX_PYTH_AGE_SECONDS} s this ` +
         `keeper will price a swap on (SOL/USD at ${sol.publishTime}, USDC/USD at ${usdc.publishTime}, chain clock ` +
         `${nowUnixSeconds}) — ${rest}`,
+      ...read,
     };
   }
 
@@ -393,12 +583,49 @@ export function oracleConvertDecision(input: {
     return {
       convert: false,
       detail: `the Pyth pair carries no usable rate: ${error instanceof Error ? error.message : String(error)} — ${rest}`,
+      ...read,
+    };
+  }
+
+  // ── the confidence arm: what Pyth says about how well it knows the price ──
+  //
+  // AFTER the rate, never before: solUsdcPythRateWad is what proves both prices
+  // are positive, and a ratio over a zero or negative price is not a ratio.
+  const wide = (
+    [
+      ["SOL/USD", sol, read.confBps.sol],
+      ["USDC/USD", usdc, read.confBps.usdc],
+    ] as const
+  )
+    .filter(([, , bps]) => bps !== null && bps > MAX_PYTH_CONF_BPS)
+    .map(
+      ([name, update, bps]) =>
+        `the ${name} feed quotes $${feedPriceText(update.price, update.expo)} give or take ` +
+        `$${feedPriceText(update.conf, update.expo)} — raw price ${update.price}, raw conf ${update.conf} at expo ` +
+        `${update.expo}, a confidence ${bps} bps of its own price`,
+    );
+  if (wide.length > 0) {
+    const band =
+      read.conservative === null
+        ? ""
+        : `, and priced defensively the pair is worth between ${read.conservative.giveUpLowerWad} and ` +
+          `${read.conservative.receiveUpperWad} USDC raw per lamport x 1e18 — a ${read.conservative.bandBps} bps span ` +
+          `around the ${oracleWad} this keeper would otherwise have converted at`;
+    return {
+      convert: false,
+      detail:
+        `PYTH IS SAYING IT DOES NOT KNOW THIS PRICE WELL ENOUGH TO TRADE ON: ${wide.join(" and ")}, past the ` +
+        `${MAX_PYTH_CONF_BPS} bps ceiling this keeper will sell SOL inside (SOL/USD ${read.confBps.sol} bps, USDC/USD ` +
+        `${read.confBps.usdc} bps, each against its own price, where both feeds normally read under 3)${band}. A band ` +
+        `that wide is Pyth's own publishers disagreeing — not a stale feed, not a pool that walked away — so NOTHING IS ` +
+        `BROKEN AND NOBODY NEEDS PAGING: ${rest}, and no turn converts this pair until the band closes again`,
+      ...read,
     };
   }
 
   // Nothing to compare against: the deviation arm has no opinion, and the two
   // arms above have already had theirs.
-  if (routeWad === null || routeWad <= 0n) return { convert: true };
+  if (routeWad === null || routeWad <= 0n) return { convert: true, ...read };
 
   const gap = routeWad > oracleWad ? routeWad - oracleWad : oracleWad - routeWad;
   const deviationBps = (gap * 10_000n) / oracleWad;
@@ -409,9 +636,32 @@ export function oracleConvertDecision(input: {
         `the pool and the oracle disagree by ${deviationBps} bps, past the ${MAX_PYTH_DEVIATION_BPS} bps this keeper ` +
         `will sell SOL across: the captured route implies ${routeWad} USDC raw per lamport x 1e18 and Pyth says ` +
         `${oracleWad} — ${rest}`,
+      ...read,
     };
   }
-  return { convert: true };
+  return { convert: true, ...read };
+}
+
+/**
+ * The same gate, narrowed to the ConvertDecision every caller of it takes.
+ *
+ * A DELIBERATE NARROWING, not a leftover. invest-tick.ts carries this decision
+ * beside convertDecision's and the two must stay INDISTINGUISHABLE to the turn —
+ * same keys, same shape, no outcome, no alert, nothing that can stop a sweep —
+ * which is the property test/invest-decision.test.ts asserts by comparing their
+ * key sets. The reading above is for a caller that wants the numbers as well;
+ * this is for the caller that only wants the verdict.
+ */
+export function oracleConvertDecision(input: {
+  readonly sol: PythPriceUpdate | null;
+  readonly usdc: PythPriceUpdate | null;
+  /** The CHAIN's unix_timestamp, out of the Clock sysvar — never this host's wall clock. */
+  readonly nowUnixSeconds: bigint;
+  /** USDC raw per lamport x 1e18, as the captured swap actually traded, or null. */
+  readonly routeWad: bigint | null;
+}): ConvertDecision {
+  const reading = oracleConvertReading(input);
+  return reading.convert ? { convert: true } : { convert: false, detail: reading.detail };
 }
 
 /**
