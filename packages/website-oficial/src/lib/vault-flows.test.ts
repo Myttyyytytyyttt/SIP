@@ -1820,3 +1820,15 @@ describe("the vault token accounts a policy pays to create", () => {
     expect(creates.map((c) => c.mint)).toEqual([WSOL_MINT, USDC_MINT, SPYX_MINT]);
   });
 });
+
+describe("a vault created on Volume (owner, 09-25)", () => {
+  it("sends the chosen volume rate, and signs only a build that carries it", async () => {
+    const requests: Record<string, unknown>[] = [];
+    const build = vi.fn(async (body: Record<string, unknown>) => {
+      requests.push(body);
+      return { ok: false as const, status: 409, code: "vault_exists", message: "exists", retryAfterSeconds: null, body: {} };
+    });
+    await createVaultFlow({ api: { build } as never, onStep: () => undefined, onBuilt: () => undefined, signers: [] as never }, { pensionKey: "owner", mode: 1, volumeBps: 100 });
+    expect(requests[0]).toMatchObject({ action: "createVault", mode: 1, volumeBps: 100 });
+  });
+});
