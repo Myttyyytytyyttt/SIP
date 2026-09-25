@@ -65,6 +65,7 @@ import {
   floorWad,
   investmentReadiness,
   isOfferable,
+  judgedFeeBps,
   ownerComputeBudget,
   priorityFeeLamports,
   usdcRawPer1e8LegRaw,
@@ -98,7 +99,7 @@ import {
   type PickedLeg,
   type PickedRow,
 } from "@/lib/basket-picker";
-import { floorDrift, todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
+import { floorDrift, legFloorUnderMidBps, todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
 import { floorsState } from "@/lib/live-model";
 import type { InvestPolicyBuildJson, InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
 import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, shortAddress, signedLegsOf } from "@/lib/vault-copy";
@@ -1173,7 +1174,7 @@ export function PolicySetup({
                   below it, so a row with an empty percentage box still has its
                   own limit shown. */}
               {pickedLegLimits(priceLimits.legs, chosenAssets).map((leg) => (
-                <p key={leg.mint}>{INVEST_COPY.legCeiling(leg.symbol, formatUsd(leg.maxPer1e8))}</p>
+                <p key={leg.mint}>{INVEST_COPY.legCeiling(leg.symbol, formatUsd(leg.maxPer1e8), leg.feeBps > 0 ? ratePercent(leg.feeBps) : null, leg.marginBps)}</p>
               ))}
               <p className="text-muted-foreground">{INVEST_COPY.convertFloorEffect(ratePercent(CONVERT_FLOOR_MARGIN_BPS))}</p>
             </>
@@ -1320,7 +1321,11 @@ function PolicySummary({
       driftLines.push(INVEST_COPY.solFloorSlack(formatUsd(usdcRawPerSol(storedConvert)), formatUsd(usdcRawPerSol(liveConvert)), ratePercent(solDrift.driftBps)));
   }
   for (const leg of legs) {
-    const drift = floorDrift(leg.floor, leg.live, LEG_FLOOR_MARGIN_BPS);
+    // The margin a floor is signed at under the GROSS mid the screen reads: the
+    // leg's fee and legFloorMarginBps compounded (979 bps at 300), so a floor
+    // rightly signed that far under is not called slack the day it is signed.
+    const asset = catalogueAsset(leg.mint);
+    const drift = floorDrift(leg.floor, leg.live, legFloorUnderMidBps(asset === null || asset.fee === null ? 0 : judgedFeeBps(asset.fee)));
     if (drift === null || leg.floor === null || leg.live === null) continue;
     const limit = formatUsd(usdcRawPer1e8LegRaw(leg.floor));
     const today = formatUsd(usdcRawPer1e8LegRaw(leg.live));

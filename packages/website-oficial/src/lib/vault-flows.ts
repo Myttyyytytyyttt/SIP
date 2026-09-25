@@ -48,6 +48,7 @@
  */
 
 import {
+  CATALOGUE_MAX_FEE_BPS,
   CONVERT_FLOOR_MARGIN_BPS,
   DEFAULT_INVEST_CAPS,
   DEFAULT_VAULT_POLICY,
@@ -65,6 +66,7 @@ import {
   defaultInvestPolicy,
   floorWad,
   linkConsentMessage,
+  legFloorWad,
   solscanTx,
   tryBase64Decode,
   type ConfirmOutcome,
@@ -525,8 +527,35 @@ function floorsProblem(floors: PolicyFloorsJson | undefined, shown: VaultStateJs
   for (const [index, leg] of OFFERED_LEGS.entries()) {
     const entry = floors.legs[index];
     const wad = rawFrom(entry?.wad);
-    if (entry?.mint !== leg.mint || wad === null || wad === 0n || wad !== margin(rawFrom(entry.liveWad), LEG_FLOOR_MARGIN_BPS)) {
-      return `its ${leg.symbol} floor is not 95 % of the rate it read`;
+    // THE FLOOR IS NET OF THE LEG'S TRANSFER FEE SINCE 2026-09-24, and the
+    // server says which fee it netted so this page can redo the arithmetic
+    // rather than believe it. BOUNDED BY THE KEEPER'S CEILING: a fee is the
+    // one input here the page cannot compare with a price it showed, so a
+    // build claiming more than CATALOGUE_MAX_FEE_BPS — which would lower the
+    // floor by as much as it claims — is refused. Inside the bound the most a
+    // wrong fee can loosen a floor is about 5 %: a leg with no fee signed as if
+    // it paid 300 would sit at 0.97 x 0.93 = 90.2 % of the mid instead of 95 %
+    // (the 3 % fee, plus the 200 bps legFloorMarginBps widens by at 300), and
+    // a leg charging more than 300 is one the keeper refuses to buy at all.
+    //
+    // THE MARGIN IS THE CORE'S legFloorWad, not a number this page keeps: 95 %
+    // of the net rate at a fee of 100 bps or less, 93 % at 300, because the
+    // keeper asks the market for more room at a dearer fee and the floor has to
+    // leave its min_out that room (solana-core product.ts legFloorMarginBps).
+    const fee = entry?.transferFeeBps;
+    if (typeof fee !== "number" || !Number.isInteger(fee) || fee < 0 || fee > CATALOGUE_MAX_FEE_BPS) {
+      return `its ${leg.symbol} floor names a transfer fee SaverFi's keeper would not buy through`;
+    }
+    const mid = rawFrom(entry.liveWad);
+    const expected = (() => {
+      try {
+        return mid === null ? null : legFloorWad(mid, fee);
+      } catch {
+        return null;
+      }
+    })();
+    if (entry.mint !== leg.mint || wad === null || wad === 0n || expected === null || wad !== expected) {
+      return `its ${leg.symbol} floor is not SaverFi's margin under the rate it read, after the transfer fee it named`;
     }
   }
   // …and the rates it read are about the market the form showed. Skipped when

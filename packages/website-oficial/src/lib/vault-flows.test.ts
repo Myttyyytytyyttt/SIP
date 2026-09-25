@@ -22,7 +22,9 @@ import {
   base64Encode,
   encodeSetComputeUnitPrice,
   floorWad,
+  legFloorWad,
   linkConsentMessage,
+  netOfTransferFeeWad,
   ownerComputeBudget,
   splitWire,
   toHex,
@@ -368,8 +370,8 @@ function policyAnswer(owner: string, forge: PolicyForge = {}): Answer {
     usdcRawPerSol: 100_038_711n,
     floorUsdcRawPerSol: 90_034_840n,
     legs: [
-      { symbol: "SPYx", mint: SPYX_MINT, liveWad: LIVE_SPYX, wad: SPYX_FLOOR, usdcRawPer1e8: 761_709_474n, maxUsdcRawPer1e8: 801_799_446n },
-      { symbol: "ANTHROPIC", mint: ANTHROPIC_MINT, liveWad: LIVE_ANTHROPIC, wad: ANTHROPIC_FLOOR, usdcRawPer1e8: 18_000_000n, maxUsdcRawPer1e8: 18_947_369n },
+      { symbol: "SPYx", mint: SPYX_MINT, liveWad: LIVE_SPYX, transferFeeBps: 0, wad: SPYX_FLOOR, usdcRawPer1e8: 761_709_474n, maxUsdcRawPer1e8: 801_799_446n },
+      { symbol: "ANTHROPIC", mint: ANTHROPIC_MINT, liveWad: LIVE_ANTHROPIC, transferFeeBps: 0, wad: ANTHROPIC_FLOOR, usdcRawPer1e8: 18_000_000n, maxUsdcRawPer1e8: 18_947_369n },
     ],
   };
   return asJson<Answer>({
@@ -681,8 +683,8 @@ describe("investPolicyFlow", () => {
         usdcRawPerSol: 100_038_711n,
         floorUsdcRawPerSol: 90_034_840n,
         legs: [
-          { symbol: "SPYx", mint: SPYX_MINT, liveWad: 2n, wad: 1n, usdcRawPer1e8: 761_709_474n, maxUsdcRawPer1e8: 801_799_446n },
-          { symbol: "ANTHROPIC", mint: ANTHROPIC_MINT, liveWad: 2n, wad: 1n, usdcRawPer1e8: 18_000_000n, maxUsdcRawPer1e8: 18_947_369n },
+          { symbol: "SPYx", mint: SPYX_MINT, liveWad: 2n, transferFeeBps: 0, wad: 1n, usdcRawPer1e8: 761_709_474n, maxUsdcRawPer1e8: 801_799_446n },
+          { symbol: "ANTHROPIC", mint: ANTHROPIC_MINT, liveWad: 2n, transferFeeBps: 0, wad: 1n, usdcRawPer1e8: 18_000_000n, maxUsdcRawPer1e8: 18_947_369n },
         ],
       }),
     });
@@ -713,6 +715,62 @@ describe("investPolicyFlow", () => {
     const moved = shownPrices({ convertWad: (LIVE_CONVERT * 102n) / 100n, legWad: (LIVE_SPYX * 98n) / 100n });
     const result = await investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey, shownPrices: moved });
     expect(result.ok).toBe(true);
+  });
+
+  // ── THE FLOOR NET OF THE TRANSFER FEE THE BUILD NAMED (2026-09-24) ────────
+  //
+  // The server nets each leg's fee before the margin, widens the margin by
+  // what the keeper's ask widens by at that fee, and says which fee; this page
+  // redoes that arithmetic, and bounds the fee by the keeper's ceiling,
+  // because a fee is the one input it cannot compare with a price it showed.
+  const netAnthropic = (feeBps: number, floor: bigint) => (h: Harness): Answer =>
+    policyAnswer(h.pensionKey, {
+      anthropicFloor: floor,
+      floors: (floors) => {
+        const legs = floors.legs as Record<string, unknown>[];
+        return { ...floors, legs: [legs[0], { ...legs[1], transferFeeBps: feeBps, wad: floor }] };
+      },
+    });
+
+  it("signs a floor netted of the 300 bps ANTHROPIC's issuer wrote for epoch 1043, redoing the arithmetic over the fee the build named", async () => {
+    const h = harness();
+    // x 0.97 for the fee, then 700 bps under: the 500 margin plus the 200 the
+    // keeper's ask (400, not 200) widens by at a 300 bps fee.
+    const floor = floorWad(netOfTransferFeeWad(LIVE_ANTHROPIC, 300), 700);
+    expect(floor).toBe(5_011_666_666_666_666_666n);
+    expect(legFloorWad(LIVE_ANTHROPIC, 300)).toBe(floor);
+    h.build.mockImplementationOnce(async () => ok(netAnthropic(300, floor)(h)));
+    const result = await investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey, shownPrices: shownPrices() });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+  });
+
+  it.each<[string, bigint]>([
+    ["the gross 95 %", ANTHROPIC_FLOOR],
+    // THE FLAT 95 % OF THE NET RATE, which the keeper's own min_out at a 400
+    // bps ask sits under by less than 1 % — the floor this change replaced.
+    ["95 % of the net rate, with no room for the keeper's wider ask", floorWad(netOfTransferFeeWad(LIVE_ANTHROPIC, 300), 500)],
+  ])("refuses a floor that does not match the fee the build named — %s beside a 300 bps fee", async (_, floor) => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => ok(netAnthropic(300, floor)(h)));
+    const result = await investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey, shownPrices: shownPrices() });
+    expect(result).toMatchObject({ ok: false, kind: "refused" });
+    expect(!result.ok && result.message).toContain("its ANTHROPIC floor is not SaverFi's margin under the rate it read, after the transfer fee it named");
+    expect(h.signWithPension).not.toHaveBeenCalled();
+  });
+
+  it("refuses a build that names a fee over the keeper's 300 — which would lower the floor by as much as it claims — however consistent its arithmetic", async () => {
+    const h = harness();
+    // 9,000 bps netted: a floor at 4.75 % of the mid, arithmetically "right".
+    h.build.mockImplementationOnce(async () => ok(netAnthropic(9_000, floorWad(netOfTransferFeeWad(LIVE_ANTHROPIC, 9_000), 500))(h)));
+    const result = await investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey, shownPrices: shownPrices() });
+    expect(result).toMatchObject({ ok: false, kind: "refused" });
+    expect(!result.ok && result.message).toContain("its ANTHROPIC floor names a transfer fee SaverFi's keeper would not buy through");
+    // One basis point over the ceiling is over it.
+    const h2 = harness();
+    h2.build.mockImplementationOnce(async () => ok(netAnthropic(301, floorWad(netOfTransferFeeWad(LIVE_ANTHROPIC, 301), 500))(h2)));
+    expect(await investPolicyFlow(h2.createDeps, { pensionKey: h2.pensionKey, shownPrices: shownPrices() })).toMatchObject({ ok: false, kind: "refused" });
+    expect(h.signWithPension).not.toHaveBeenCalled();
+    expect(h2.signWithPension).not.toHaveBeenCalled();
   });
 
   it("a SPYx rate far from the screen's is refused too, and says which price it was", async () => {

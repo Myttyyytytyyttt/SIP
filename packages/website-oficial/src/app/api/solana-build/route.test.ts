@@ -176,6 +176,14 @@ const programsOf = (txBase64: string): string[] => parseLegacyMessage(splitWire(
 /** An account some program other than SIP holds: only its owner and size matter here. */
 const ownedBy = (owner: string, size: number): AccountJson => ({ data: [base64Encode(new Uint8Array(size)), "base64"], lamports: 1_000_000, owner, executable: false, rentEpoch: 0, space: size });
 
+const SYSVAR_CLOCK = "SysvarC1ock11111111111111111111111111111111";
+/** The Clock sysvar as the chain holds it: 40 bytes, the epoch a u64 at byte 16, owned by the sysvar program. */
+function clockAt(epoch: bigint): AccountJson {
+  const bytes = new Uint8Array(40);
+  new DataView(bytes.buffer).setBigUint64(16, epoch, true);
+  return { data: [base64Encode(bytes), "base64"], lamports: 1_169_280, owner: "Sysvar1111111111111111111111111111111111111", executable: false, rentEpoch: 0, space: 40 };
+}
+
 /** A Raydium CLMM PoolState with the fields SIP prices from: the mints at 73 and 105, sqrt_price_x64 at 253. */
 function poolOf(mint0: string, mint1: string, sqrtPriceX64: bigint): AccountJson {
   const bytes = new Uint8Array(CLMM_POOL_STATE_BYTES);
@@ -288,7 +296,7 @@ describe("/api/solana-build", () => {
     expect(verified.ok).toBe(true);
   });
 
-  it("investPolicy: floors at 90 % and 95 % of the pools SaverFi prices from, a CreateIdempotent only for each vault account missing, and 502 price_unavailable without a pool", async () => {
+  it("investPolicy: floors at 90 % and, for legs with no transfer fee, 95 % of the pools SaverFi prices from, a CreateIdempotent only for each vault account missing, and 502 price_unavailable without a pool", async () => {
     useEnv(SOLANA_ENV);
     const owner = Keypair.generate();
     const ownerKey = owner.publicKey.toBase58();
@@ -304,10 +312,15 @@ describe("/api/solana-build", () => {
       [SPYX_MINT, ownedBy(TOKEN_2022_PROGRAM, 82)],
       [ANTHROPIC_MINT, ownedBy(TOKEN_2022_PROGRAM, 82)],
       [deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58(), ownedBy(TOKEN_PROGRAM, 165)],
+      // THE CHAIN'S CLOCK, which each leg's transfer fee is resolved against.
+      // These mints are 82 bare bytes — no fee — so the epoch changes nothing
+      // here and the floors are the plain 95 %; the fee cases are solana-core's
+      // (handlers-build.test.ts, "net of each leg's transfer fee").
+      [SYSVAR_CLOCK, clockAt(1_041n)],
     ]);
     const methods = stubChain(accounts);
     const built = await answer(await POST(buildRequest({ action: "investPolicy", owner: ownerKey })));
-    expect(built.status).toBe(200);
+    expect(built.status, JSON.stringify(built.json)).toBe(200);
     expect(built.json.floors).toMatchObject({
       convertWad: "90034840399943305",
       legs: [

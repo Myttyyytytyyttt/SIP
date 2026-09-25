@@ -14,7 +14,13 @@
  * the most.
  */
 
-import { DEFAULT_VAULT_POLICY, PRESTOCKS_POWERS, XSTOCKS_POWERS, type AssetGroup, type CatalogueAsset } from "@sip/solana-core/client";
+import { DEFAULT_VAULT_POLICY, LEG_FLOOR_MARGIN_BPS, PRESTOCKS_POWERS, XSTOCKS_POWERS, legFloorMarginBps, type AssetGroup, type CatalogueAsset } from "@sip/solana-core/client";
+
+/**
+ * How far over today's price a floor `marginBps` under it lets a stock be
+ * bought, to one decimal: 500 is "5.3 %" (1 / 0.95 - 1), 700 is "7.5 %".
+ */
+export const overTodayPercent = (marginBps: number): string => `${((marginBps * 100) / (10_000 - marginBps)).toFixed(1)} %`;
 
 /** Basis points as a percentage: 2000 is "20 %". */
 export const ratePercent = (bps: number): string => `${Number((bps / 100).toFixed(2))} %`;
@@ -112,8 +118,10 @@ export const shortAddress = (address: string): string => (address.length > 10 ? 
 //    has no opinion about what a unit is worth, and ARM 2 divides two quotes
 //    from one quoter, so a uniformly bad price divides out of it.
 //  * the owner-signed floor DECAYS. It is derived once, at signing, from one
-//    Raydium CLMM pool's mid at LEG_FLOOR_MARGIN_BPS under it
-//    (solana-core/src/server/build-handler.ts), and then it stands. As the
+//    Raydium CLMM pool's mid, net of the leg's transfer fee, at
+//    legFloorMarginBps(fee) under it — LEG_FLOOR_MARGIN_BPS, widened at a fee
+//    over 1 % (solana-core/src/server/build-handler.ts),
+//    and then it stands. As the
 //    market moves it becomes either a no-op or a block, and nothing re-signs it.
 // INVEST_COPY.defencesLimits says all three in the owner's words, and the
 // floor-drift block measures the third against the rate the page just read.
@@ -564,6 +572,23 @@ function freezeNoticeParagraph(legs: readonly SignedLeg[]): string {
 }
 
 /**
+ * The legs whose limit is signed further under the market than the usual
+ * margin, said with their own margin — or nothing. At a fee over 1 % the
+ * build widens the margin by what each buy asks the market for over the plain
+ * 2 % (solana-core legFloorMarginBps), and "5 % under it" is then not true of
+ * that leg: the owner is owed the number he actually signs.
+ */
+function widerMarginClause(legs: readonly SignedLeg[]): string {
+  const wider = legs
+    .map((leg) => ({ symbol: leg.symbol, margin: legFloorMarginBps(judgedFeeOf(leg) ?? 0) }))
+    .filter((leg) => leg.margin > LEG_FLOOR_MARGIN_BPS);
+  if (wider.length === 0) return "";
+  const named = wider.map((leg) => `${ratePercent(leg.margin)} for ${leg.symbol}`);
+  const list = named.length === 1 ? named[0]! : `${named.slice(0, -1).join(", ")} and ${named.at(-1)}`;
+  return ` (${list}, whose fee makes each buy ask the market for more room — a lower limit, and so less protection against a bad price)`;
+}
+
+/**
  * THE HONEST MAP OF THE DEFENCES, and it is short on purpose.
  *
  * Every clause here is a limit rather than a promise, because this file is the
@@ -579,7 +604,9 @@ function defencesLimitsParagraph(legs: readonly SignedLeg[], marginUnderMarket: 
     "THAT IS A CHECK ON SIZE, NOT ON PRICE: it can tell you a market is too thin for the buy you have asked for, and it cannot tell you the price you get is a fair one. " +
     "The SOL-to-USDC conversion has one outside opinion on it — the SOL price Pyth publishes, which is the only number in a buy that does not come from the venue being traded against. " +
     `${stocks} ${plural ? "have" : "has"} no such anchor today: nothing SaverFi reads publishes an independent price for ${plural ? "them" : "it"} on chain, so the only price bound on ${plural ? "those legs" : "that leg"} is the limit you sign yourself. ` +
-    `And that limit is signed once: it is taken from one pool's price at the moment you sign, ${marginUnderMarket} under it, and it does not follow the market afterwards. ` +
+    `And that limit is signed once: it is taken from one pool's price at the moment you sign${
+      legs.some((leg) => (judgedFeeOf(leg) ?? 0) > 0) ? ", less the highest transfer fee each stock's issuer has set," : ","
+    } ${marginUnderMarket} under it${widerMarginClause(legs)}, and it does not follow the market afterwards. ` +
     "As the market moves, the same number stops protecting you — or starts refusing every honest buy. SaverFi shows you how far it has drifted rather than leaving you to assume it still fits."
   );
 }
@@ -785,7 +812,25 @@ export const INVEST_COPY = {
    */
   convertFloorEffect: (margin: string): string =>
     `That floor is what keeps converting switched on: the keeper sells your vault's SOL for USDC only at or above it, and it is set ${margin} under the price just read above. It is never zero, and zero is the one value that would matter — it would mean your SOL sold at any price at all.`,
-  legCeiling: (symbol: string, max: string): string => `${symbol} is never bought above ${max} per 100,000,000 raw units (5.3 % over today's pool price)`,
+  /**
+   * `fee` is the transfer fee the floor is netted of, as a percentage, or null
+   * for a leg with none; `marginBps` is how far under the net price the floor
+   * sits (solana-core legFloorMarginBps: 500, or 700 at a 3 % fee). WITH A FEE
+   * THE LIMIT IS PER UNIT THAT ARRIVES: the floor is checked against what the
+   * vault is credited, after the issuer's cut, so the percentage over today's
+   * price is true only once that cut is counted — and the page says so rather
+   * than letting a bigger number look like a looser limit. AND A WIDER MARGIN
+   * IS SAID AS ONE: at 700 the limit is 7.5 % over, not 5.3 %, and the sentence
+   * says why the room is there.
+   */
+  legCeiling: (symbol: string, max: string, fee: string | null, marginBps: number): string => {
+    const over = overTodayPercent(marginBps);
+    if (fee === null) return `${symbol} is never bought above ${max} per 100,000,000 raw units (${over} over today's pool price)`;
+    return (
+      `${symbol} is never bought above ${max} per 100,000,000 raw units that reach your vault (${over} over today's pool price once a ${fee} transfer fee is counted — the highest its issuer has set` +
+      `${marginBps > LEG_FLOOR_MARGIN_BPS ? `; wider than the usual ${overTodayPercent(LEG_FLOOR_MARGIN_BPS)} because at that fee each buy asks the market for more room, and the limit has to leave it` : ""})`
+    );
+  },
   pricesUnknown: "Today's prices could not be read just now. The build reads them again, and the limits you sign are shown before Phantom asks.",
   /**
    * The owner's words for what a policy does, at the limits shown. `basket` is
@@ -868,7 +913,8 @@ export const INVEST_COPY = {
    * about price; Pyth anchors the SOL hop alone; the stock legs' only price
    * bound is the owner's own floor, and that floor is signed once and decays.
    * `marginUnderMarket` is LEG_FLOOR_MARGIN_BPS as a percentage, from the
-   * constant the build route actually derives the floor with.
+   * constant the build route actually derives the floor with; a leg whose fee
+   * widens it (legFloorMarginBps) is named with its own margin.
    */
   defencesLimits: (legs: readonly SignedLeg[], marginUnderMarket: string): string => defencesLimitsParagraph(legs, marginUnderMarket),
 
@@ -983,7 +1029,8 @@ export const INVEST_COPY = {
   // ── THE FLOOR HE SIGNED ONCE, AND THE MARKET THAT WALKED AWAY FROM IT ──────
   //
   // WHY THIS BLOCK EXISTS. min_out_rate_wad is derived at signing time from one
-  // pool's mid, LEG_FLOOR_MARGIN_BPS under it, and then it stands until the
+  // pool's mid (net of the leg's fee since 2026-09-24), legFloorMarginBps(fee)
+  // under it, and then it stands until the
   // owner signs again. The keeper's own comment is blunt about what that means:
   // the floor "DECAYS ... it clears itself as the market rises (a stale floor
   // stops binding) and blocks every honest buy as the market falls. A floor

@@ -36,6 +36,8 @@ export interface BuiltTransactionJson {
 /** The floors an investPolicy build signs, with the rates they were read from. Bigints as decimal strings. */
 export interface PolicyFloorsJson {
   readonly slot: number | null;
+  /** The epoch each leg's transfer fee was resolved in, from the chain's own clock. */
+  readonly epoch: string;
   readonly marginBps: { readonly convert: number; readonly leg: number };
   /** USDC raw per lamport × 1e18, read from the SOL/USDC pool. */
   readonly liveConvertWad: string;
@@ -46,9 +48,11 @@ export interface PolicyFloorsJson {
   readonly legs: readonly {
     readonly symbol: string;
     readonly mint: string;
-    /** Leg raw per USDC raw × 1e18, read from the leg's pool. */
+    /** Leg raw per USDC raw × 1e18, read from the leg's pool: a mid, GROSS of the leg's transfer fee. */
     readonly liveWad: string;
-    /** min_out_rate_wad: liveWad less the leg margin. */
+    /** The transfer fee the floor was netted of, in bps: the higher of the one in force and one already written for a later epoch. */
+    readonly transferFeeBps: number;
+    /** min_out_rate_wad: liveWad less transferFeeBps, then less the leg margin. */
     readonly wad: string;
     readonly usdcRawPer1e8: string;
     readonly maxUsdcRawPer1e8: string;
@@ -389,6 +393,8 @@ const BUILD_REFUSALS = new Set([
   "above_holding",
   "price_unavailable",
   "mint_unexpected",
+  "fee_unavailable",
+  "fee_over_ceiling",
   "policy_missing",
   "already_paused",
   "bad_request",

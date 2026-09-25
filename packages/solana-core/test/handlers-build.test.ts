@@ -1,5 +1,7 @@
 // /api/solana-build and /api/solana-vault through their handlers, over a stub chain.
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -53,6 +55,9 @@ import {
   localRent,
   methodsOf,
   mintAccount,
+  clockSysvarAccount,
+  SYSVAR_CLOCK_ADDRESS,
+  BUILD_EPOCH,
   parsedTokenAccount,
   policyAccount,
   pricedPoolEntries,
@@ -617,6 +622,8 @@ function investableChain(owner: string): StubChain {
       ...pricedPoolEntries(),
       [USDC_MINT, mintAccount(TOKEN_PROGRAM)],
       ...LEG_POOLS.map((leg): [string, ReturnType<typeof accountInfo>] => [leg.mint, mintAccount(TOKEN_2022_PROGRAM)]),
+      // THE CHAIN'S OWN EPOCH, which every leg's transfer fee is resolved in.
+      [SYSVAR_CLOCK_ADDRESS, clockSysvarAccount()],
     ]),
   };
 }
@@ -709,6 +716,7 @@ describe("investPolicy", () => {
     ]);
     expect(body.floors).toEqual({
       slot: 321,
+      epoch: String(BUILD_EPOCH),
       marginBps: { convert: 1_000, leg: 500 },
       liveConvertWad: "100038711555492562",
       convertWad: "90034840399943305",
@@ -720,6 +728,10 @@ describe("investPolicy", () => {
         symbol: leg.symbol,
         mint: leg.mint,
         liveWad: String(leg.legWad),
+        // These mints are 82 bare bytes — no TransferFeeConfig — so nothing is
+        // netted and the floor is the plain 95 %. The fee cases are below.
+        transferFeeBps: 0,
+        marginBps: 500,
         wad: String(leg.floorWad),
         usdcRawPer1e8: String(leg.usdcRawPer1e8),
         maxUsdcRawPer1e8: String(leg.maxUsdcRawPer1e8),
@@ -826,6 +838,131 @@ describe("investPolicy", () => {
     const answer = await setup(chain).build({ action: "investPolicy", owner });
     expect([answer.status, answer.json.error?.code]).toEqual([502, "price_unavailable"]);
     expect(answer.json).not.toHaveProperty("txBase64");
+  });
+
+  // ── THE FLOORS ARE NET OF EACH LEG'S TRANSFER FEE ──────────────────────────
+  //
+  // invest.rs checks a leg's floor against what the vault is CREDITED, which is
+  // after Token-2022 withholds the mint's fee; the rate the floor comes from is
+  // a pool mid, before it. From 2026-09-24 the build nets the fee first — the
+  // higher of the one in force and one already written for later — and widens
+  // the margin by what the keeper's ask widens by at that fee, so the room the
+  // market had at 100 bps survives the keeper's own min_out at 300
+  // (server/build-handler.ts liveFloors says why, with the measurement).
+  describe("the floor a new policy signs, net of each leg's transfer fee", () => {
+    const realMints = JSON.parse(
+      readFileSync(fileURLToPath(new URL("../../solana-keeper/test/fixtures/token2022-mints.json", import.meta.url)), "utf8"),
+    ) as { readonly mints: Record<string, { readonly base64: string }> };
+    /** ANTHROPIC's mint as mainnet held it on 2026-09-24: 100 bps from epoch 1039, 300 written for 1043. */
+    const anthropic0924 = (): ReturnType<typeof accountInfo> =>
+      accountInfo(TOKEN_2022_PROGRAM, new Uint8Array(Buffer.from(realMints.mints["ANTHROPIC_2026_09_24"]!.base64, "base64")), 1_461_600);
+    const UNCAPPED = (1n << 64n) - 1n;
+    /** A Token-2022 mint carrying only a TransferFeeConfig with these two records. */
+    const feeMint = (older: readonly [bigint, number], newer: readonly [bigint, number]): ReturnType<typeof accountInfo> => {
+      const data = new Uint8Array(166 + 4 + 108);
+      data[165] = 1;
+      const view = new DataView(data.buffer);
+      view.setUint16(166, 1, true);
+      view.setUint16(168, 108, true);
+      for (const [at, [epoch, bps]] of [[170 + 72, older], [170 + 90, newer]] as const) {
+        view.setBigUint64(at, epoch, true);
+        view.setBigUint64(at + 8, UNCAPPED, true);
+        view.setUint16(at + 16, bps, true);
+      }
+      return accountInfo(TOKEN_2022_PROGRAM, data, 1_461_600);
+    };
+    const anthropicFloor = async (chain: StubChain, owner: string) => {
+      const answer = await setup(chain).build({ action: "investPolicy", owner });
+      expect(answer.status, JSON.stringify(answer.json)).toBe(200);
+      const legs = decodeArgs("set_invest_policy", instructionsOf(answer.json.txBase64).at(-1)!.data).legs as { mint: string; min_out_rate_wad: bigint }[];
+      return { answer, floor: legs.find((leg) => leg.mint === ANTHROPIC_MINT)!.min_out_rate_wad, spyx: legs.find((leg) => leg.mint === SPYX_MINT)!.min_out_rate_wad };
+    };
+
+    it("nets the 300 bps ALREADY WRITTEN for epoch 1043 from a build in epoch 1041, on ANTHROPIC's real bytes, and leaves SPYx alone", async () => {
+      const owner = key();
+      const chain = investableChain(owner);
+      chain.accounts.set(ANTHROPIC_MINT, anthropic0924());
+      const { answer, floor, spyx } = await anthropicFloor(chain, owner);
+      // legWad 5,555,555,555,555,555,556 -> x 0.97 = 5,388,888,888,888,888,889
+      // -> x 0.93 = 5,011,666,666,666,666,666: 700 bps under the net mid, the
+      // 500 of LEG_FLOOR_MARGIN_BPS plus the 200 the keeper's ask widens by at
+      // 300 (product.ts legFloorMarginBps). A flat 95 % would have been
+      // 5,119,444,444,444,444,444, and the gross floor 5,277,777,777,777,777,778.
+      expect(floor).toBe(5_011_666_666_666_666_666n);
+      expect(floor).toBeLessThan(LEG_POOLS[1]!.floorWad);
+      expect(spyx).toBe(LEG_POOLS[0]!.floorWad);
+      // The answer says what it netted, and in which epoch, so the page can redo it.
+      expect(answer.json.floors.epoch).toBe("1041");
+      expect(answer.json.floors.legs.map((leg: { transferFeeBps: number }) => leg.transferFeeBps)).toEqual([0, 300]);
+      expect(answer.json.floors.legs.map((leg: { marginBps: number }) => leg.marginBps)).toEqual([500, 700]);
+      expect(answer.json.floors.legs[1].wad).toBe("5011666666666666666");
+    });
+
+    it("nets the same 300 from epoch 1043 on, when it is the fee in force", async () => {
+      const owner = key();
+      for (const epoch of [1_043n, 1_044n]) {
+        const chain = investableChain(owner);
+        chain.accounts.set(ANTHROPIC_MINT, anthropic0924());
+        chain.accounts.set(SYSVAR_CLOCK_ADDRESS, clockSysvarAccount(epoch));
+        expect((await anthropicFloor(chain, owner)).floor, `epoch ${epoch}`).toBe(5_011_666_666_666_666_666n);
+      }
+    });
+
+    it("nets a cut only once it has landed: the higher live fee until then, the cut from its epoch", async () => {
+      const owner = key();
+      const cut = feeMint([1_039n, 300], [1_043n, 100]);
+      const before = investableChain(owner);
+      before.accounts.set(ANTHROPIC_MINT, cut);
+      before.accounts.set(SYSVAR_CLOCK_ADDRESS, clockSysvarAccount(1_042n));
+      expect((await anthropicFloor(before, owner)).floor).toBe(5_011_666_666_666_666_666n);
+      const after = investableChain(owner);
+      after.accounts.set(ANTHROPIC_MINT, cut);
+      after.accounts.set(SYSVAR_CLOCK_ADDRESS, clockSysvarAccount(1_043n));
+      // x 0.99 = 5,500,000,000,000,000,000 -> x 0.95 = 5,225,000,000,000,000,000:
+      // at 100 bps the keeper asks its plain 200, so the margin is the plain 500.
+      expect((await anthropicFloor(after, owner)).floor).toBe(5_225_000_000_000_000_000n);
+    });
+
+    it.each<[string, (chain: StubChain) => void, string | null]>([
+      ["no Clock account", (chain) => void chain.accounts.delete(SYSVAR_CLOCK_ADDRESS), null],
+      ["a Clock account not owned by the sysvar program", (chain) => void chain.accounts.set(SYSVAR_CLOCK_ADDRESS, clockSysvarAccount(1_041n, key())), null],
+      [
+        "an ANTHROPIC mint whose TransferFeeConfig runs off its end",
+        (chain) => {
+          const data = new Uint8Array(170);
+          data[165] = 1;
+          data[166] = 1;
+          data[168] = 108;
+          chain.accounts.set(ANTHROPIC_MINT, accountInfo(TOKEN_2022_PROGRAM, data, 1_461_600));
+        },
+        ANTHROPIC_MINT,
+      ],
+    ])("%s is 502 fee_unavailable, and nothing is built — a fee is never guessed", async (_, spoil, mint) => {
+      const owner = key();
+      const chain = investableChain(owner);
+      spoil(chain);
+      const answer = await setup(chain).build({ action: "investPolicy", owner });
+      expect([answer.status, answer.json.error?.code]).toEqual([502, "fee_unavailable"]);
+      expect((answer.json.error as { mint?: string } | undefined)?.mint).toBe(mint ?? undefined);
+      expect(answer.json).not.toHaveProperty("txBase64");
+    });
+
+    it("refuses a CHOSEN leg whose written fee is over the keeper's 300, and builds a basket that does not hold it", async () => {
+      const owner = key();
+      const over = investableChain(owner);
+      over.accounts.set(ANTHROPIC_MINT, feeMint([1_039n, 100], [1_043n, 301]));
+      const refused = await setup(over).build({ action: "investPolicy", owner });
+      expect([refused.status, refused.json.error?.code]).toEqual([409, "fee_over_ceiling"]);
+      expect(refused.json.error).toMatchObject({ mint: ANTHROPIC_MINT, feeBps: 301 });
+      expect(refused.json).not.toHaveProperty("txBase64");
+      // EXACTLY THE CEILING IS BUILT: the keeper admits 300.
+      const at = investableChain(owner);
+      at.accounts.set(ANTHROPIC_MINT, feeMint([1_039n, 100], [1_043n, 300]));
+      expect((await setup(at).build({ action: "investPolicy", owner })).status).toBe(200);
+      // A basket that does not hold ANTHROPIC is not stopped by ANTHROPIC's fee.
+      const spyxOnly = await setup(over).build({ action: "investPolicy", owner, weights: [{ mint: SPYX_MINT, weightBps: 10_000 }] });
+      expect(spyxOnly.status, JSON.stringify(spyxOnly.json)).toBe(200);
+    });
   });
 
   it("any leg mint held by classic Token, or a USDC mint that does not exist, is 409 mint_unexpected naming it", async () => {

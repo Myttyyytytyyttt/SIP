@@ -1,7 +1,7 @@
 // The investing card rendered to HTML in each state, with Privy mocked, and its buttons pressed: the
 // pattern VaultCard.test.ts uses. Pressing a button runs the real flow against a stub client.
 
-import { ANDURIL_MINT, ANTHROPIC_MINT, CATALOGUE, JUPITER_V6, OFFERED_LEGS, RAYDIUM_CLMM, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT, isOfferable, offerProblems } from "@sip/solana-core/client";
+import { ANDURIL_MINT, ANTHROPIC_MINT, CATALOGUE, JUPITER_V6, OFFERED_LEGS, RAYDIUM_CLMM, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT, isOfferable, legFloorWad, offerProblems } from "@sip/solana-core/client";
 import { Keypair } from "@solana/web3.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -194,7 +194,12 @@ describe("InvestingCard", () => {
     expect(html).toContain("the whole buy can be at most $298.00");
     expect(html).toContain("SOL is never sold below $90.03 (90 % of today&#x27;s $100.04)");
     expect(html).toContain("SPYx is never bought above $801.80 per 100,000,000 raw units (5.3 % over today&#x27;s pool price)");
-    expect(html).toContain("ANTHROPIC is never bought above $18.95 per 100,000,000 raw units (5.3 % over today&#x27;s pool price)");
+    // ANTHROPIC's issuer has 3 % written for epoch 1043, so its limit is per
+    // unit that ARRIVES, net of that 3 %, and 700 bps under that — $18.00 /
+    // (0.97 x 0.93) = $19.95 — and the sentence says why the room is wider.
+    expect(html).toContain(
+      "ANTHROPIC is never bought above $19.95 per 100,000,000 raw units that reach your vault (7.5 % over today&#x27;s pool price once a 3 % transfer fee is counted — the highest its issuer has set; wider than the usual 5.3 % because at that fee each buy asks the market for more room, and the limit has to leave it)",
+    );
     // THE PROSE NAMES THE WHOLE BASKET, from the offered legs and their weights.
     // It used to open "Your vault invests in SPYx (SP500 xStock) through Raydium"
     // while the Basket field directly below already read two legs — the card
@@ -319,7 +324,10 @@ describe("InvestingCard", () => {
     expect(html).toContain("THAT IS A CHECK ON SIZE, NOT ON PRICE");
     expect(html).toContain("the SOL price Pyth publishes, which is the only number in a buy that does not come from the venue being traded against");
     expect(html).toContain("SPYx and ANTHROPIC have no such anchor today");
-    expect(html).toContain("it is taken from one pool&#x27;s price at the moment you sign, 5 % under it, and it does not follow the market afterwards");
+    expect(html).toContain(
+      "it is taken from one pool&#x27;s price at the moment you sign, less the highest transfer fee each stock&#x27;s issuer has set, 5 % under it " +
+        "(7 % for ANTHROPIC, whose fee makes each buy ask the market for more room — a lower limit, and so less protection against a bad price), and it does not follow the market afterwards",
+    );
     expect(html).not.toMatch(/fair price|best price|guarantee/i);
 
     // THE ISSUER RISK HE TICKS A BOX ABOUT, enumerated per issuer of per leg.
@@ -667,6 +675,17 @@ describe("InvestingCard", () => {
     // AND THE LEG THAT HAS NOT DRIFTED IS NOT LISTED: ANTHROPIC still sits 5 %
     // under its own market, which is where it was signed.
     expect(html).not.toContain("ANTHROPIC may still be bought");
+  });
+
+  it("does not call a floor slack the day it is signed netted of ANTHROPIC's 3 % and at the wider 7 % the keeper's ask needs", () => {
+    // Signed today from the same mid the screen reads: 0.97 x 0.93 of it, 1,085
+    // bps under — past the 1,052 edge of a flat 5 % margin, and inside the
+    // 2,170 of the 979 bps it was actually signed at (legFloorUnderMidBps).
+    const signedToday = legFloorWad(BigInt(PRICES!.legs[1]!.wad), 300);
+    const policy = { ...POLICY, legs: POLICY.legs.map((leg) => (leg.mint === ANTHROPIC_MINT ? { ...leg, minOutRateWad: String(signedToday) } : leg)) };
+    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: policy } }) }));
+    expect(html).not.toContain("ANTHROPIC may still be bought");
+    expect(html).not.toContain("The limits you signed do not follow the market");
   });
 
   it("Pause asks for the policy on screen to be signed again with investing off, and is offered with no prices on screen; it never hands the flow the click event", async () => {

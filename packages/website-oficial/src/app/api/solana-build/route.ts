@@ -12,7 +12,9 @@
  *   first and the trading wallet second.
  * - {"action":"investPolicy","owner","maxPerCall"?,"maxRolling30d"?,"enabled"?} →
  *   set_invest_policy for SPYx at floors read from the pools right now (90 % of
- *   SOL's price, 95 % of SPYx's rate), behind a CreateIdempotent for each of the
+ *   SOL's price, 95 % of SPYx's rate; a leg with a transfer fee is floored under
+ *   its rate net of that fee, 93 % of it at 300 bps — solana-core
+ *   legFloorWad), behind a CreateIdempotent for each of the
  *   vault's wSOL, USDC and SPYx accounts it lacks, paid by the owner; the floors,
  *   those accounts and every rent come with it.
  * - {"action":"pauseInvesting","owner"} → set_invest_policy re-signing the

@@ -110,9 +110,11 @@ export const DEFAULT_INVEST_CAPS = Object.freeze({ maxPerCall: 1_000_000_000n, m
 /** The convert floor sits this far under the live SOL/USDC pool price: 10 %. */
 export const CONVERT_FLOOR_MARGIN_BPS = 1_000;
 /**
- * A leg's floor sits this far under the live pool rate NET OF THE LEG'S
- * TRANSFER FEE: 5 %, so at most about 5.3 % over today's price after the fee is
- * paid. server/build-handler.ts says why the fee is taken off first.
+ * A leg's floor sits AT LEAST this far under the live pool rate NET OF THE
+ * LEG'S TRANSFER FEE: 5 %, the whole of it at a fee of 100 bps or less. A
+ * dearer fee widens it (legFloorMarginBps below: 700 at 300 bps), because the
+ * keeper widens its own ask with the fee and its min_out falls with it.
+ * server/build-handler.ts says why the fee is taken off first.
  */
 export const LEG_FLOOR_MARGIN_BPS = 500;
 
@@ -444,6 +446,47 @@ export const CATALOGUE_MIN_IMPACT_CEILING_BPS = 5;
 
 /** The keeper's legSlippageBps: the plain ask, or strictly the margin above the fee, whichever is larger — 400 at a 300 bps fee. */
 export const catalogueLegSlippageBps = (feeBps: number): number => Math.max(CATALOGUE_SLIPPAGE_BPS, feeBps + CATALOGUE_SLIPPAGE_MARGIN_BPS);
+
+/**
+ * How far under the net-of-fee mid a leg's floor is signed, in bps:
+ * LEG_FLOOR_MARGIN_BPS plus whatever the keeper asks Jupiter for over its plain
+ * CATALOGUE_SLIPPAGE_BPS — 500 at a fee of 0 to 100 bps, 550 at 150, 700 at
+ * the 300 ceiling.
+ *
+ * WHY THE FLOOR MOVES WITH THE KEEPER'S ASK. The keeper's min_out is the quote
+ * less legSlippageBps(fee), then less the fee (jupiter-route.ts
+ * netOfVenueThreshold), and the route builder refuses it [below-owner-floor]
+ * when that sits under the signed floor. At 300 bps it asks 400, so min_out is
+ * about 0.96 x 0.97 = 93.1 % of a gross quote, where at 100 it was 0.98 x 0.99 =
+ * 97.0 %. A floor at a flat 95 % of the net mid (92.2 % of the gross one) left
+ * that min_out under 1 % of room for pool fees, impact and a day's drift
+ * together, and the whole basket stops on the first leg that uses it up
+ * (measured 2026-09-25 on the owner's vault: min_out 2,427,695 under his floor
+ * 2,483,089 — a floor signed 5 % under the GROSS mid, before this function).
+ * Widening the floor by the same 200 bps the ask widened keeps the room the
+ * market had at 100: about 3 % for a gross-quoting last hop. MEASURED
+ * 2026-09-25 (epoch 1042, slot 450223212, live Jupiter quotes, $2.75 and $5
+ * into ANTHROPIC, Jupiter's own pick ending on Manifest, which quotes gross):
+ * the keeper's min_out sat 296 and 297 bps over this floor at fee 100 / ask
+ * 200, and 303 and 305 bps over it at fee 300 / ask 400.
+ *
+ * WHAT IT DOES NOT COVER, measured the same minute: a route whose LAST hop
+ * quotes NET (Raydium CLMM, Meteora DLMM). Its quote already has the fee off,
+ * the route builder takes it off again, and at 300 that min_out sat 13 bps
+ * UNDER this floor (Raydium CLMM direct, its net-at-100 quote scaled to 300 —
+ * derived, since 300 is not in force before epoch 1043). The keeper refuses
+ * such a route [below-owner-floor] and the turn waits; closing it here would
+ * cost another ~3 % of price protection on every route to buy back one the
+ * keeper double-counts, so it is left to the keeper's side.
+ *
+ * THE COST, AND IT IS PAID HERE. A lower floor is less protection against a bad
+ * price: at 300 bps a leg may now be filled up to 7 % under the net mid (about
+ * 9.8 % under the gross one) before invest() refuses it, where the flat margin
+ * stopped at 5 %. The fee itself is not the protection's to argue with — the
+ * issuer takes it whatever the floor says — but the extra 2 % is price the
+ * owner gives up so that the keeper's own ask does not refuse his basket.
+ */
+export const legFloorMarginBps = (feeBps: number): number => LEG_FLOOR_MARGIN_BPS + (catalogueLegSlippageBps(feeBps) - CATALOGUE_SLIPPAGE_BPS);
 
 /** What a venue must hold of USDC for the reference leg to clear the keeper's cover: 50 x 200 USDC = 10,000. */
 export const CATALOGUE_MIN_VENUE_DEPTH_RAW = CATALOGUE_REFERENCE_LEG_RAW * CATALOGUE_VENUE_INVENTORY_MULTIPLE;

@@ -727,11 +727,29 @@ export const readPoolPrices = async (pool: RpcPool): Promise<ChainRead<PoolPrice
  * It sits here rather than in addresses.ts beside INSTRUCTIONS_SYSVAR, where it
  * belongs, only because that file was another session's while this was written.
  */
-const SYSVAR_CLOCK = "SysvarC1ock11111111111111111111111111111111";
+export const SYSVAR_CLOCK = "SysvarC1ock11111111111111111111111111111111";
 
 /** Clock is slot, epoch_start_timestamp, epoch and leader_schedule_epoch, THEN unix_timestamp: an i64 at byte 32, never byte 0. */
 const CLOCK_UNIX_TIMESTAMP_AT = 32;
+/** The epoch: a u64 at byte 16, after slot (8) and epoch_start_timestamp (8) — the offset the keeper reads (invest-tick.ts). */
+const CLOCK_EPOCH_AT = 16;
 const CLOCK_BYTES = 40;
+
+/** The program that owns every sysvar account. */
+const SYSVAR_PROGRAM = "Sysvar1111111111111111111111111111111111111";
+
+/**
+ * The chain's epoch out of a Clock sysvar account as a read returned it, or
+ * null when the account is missing, is not base64, is too short, or is not
+ * owned by the sysvar program — an epoch nobody can vouch for is not one a
+ * transfer fee may be resolved against.
+ */
+export function clockEpochOf(account: AccountSnapshot | null | undefined): bigint | null {
+  if (account === null || account === undefined || account.owner !== SYSVAR_PROGRAM || account.data === null || account.data.length < CLOCK_BYTES) return null;
+  let value = 0n;
+  for (let i = 7; i >= 0; i--) value = (value << 8n) | BigInt(account.data[CLOCK_EPOCH_AT + i]!);
+  return value;
+}
 
 /** What the snapshot appends after its wallets, in this order: the chain's clock, then the two feeds. */
 export const PYTH_SNAPSHOT_ADDRESSES: readonly string[] = Object.freeze([SYSVAR_CLOCK, PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED]);

@@ -31,16 +31,17 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { CATALOGUE, CONVERT_FLOOR_MARGIN_BPS, LEG_FLOOR_MARGIN_BPS, OFFERED_LEGS, PRESTOCKS_POWERS, type CatalogueAsset } from "@sip/solana-core/client";
+import { CATALOGUE, CONVERT_FLOOR_MARGIN_BPS, LEG_FLOOR_MARGIN_BPS, OFFERED_LEGS, PRESTOCKS_POWERS, legFloorWad, type CatalogueAsset } from "@sip/solana-core/client";
 
 import { LEG_FEE, LOSS_FORGIVEN, POOL_DEPTH } from "../../../solana-core/test/fixtures/keeper-policy";
 
-import { FLOOR_DRIFT_NOTICE_MULTIPLE, floorDrift, signedSlackBps } from "@/lib/invest-limits";
+import { FLOOR_DRIFT_NOTICE_MULTIPLE, floorDrift, legFloorUnderMidBps, signedSlackBps } from "@/lib/invest-limits";
 import {
   INVEST_COPY,
   LOSS_DROPPED_AFTER_TXS,
   MAX_LEG_FEE_BPS,
   POOL_DEPTH_MULTIPLE,
+  overTodayPercent,
   VAULT_COPY,
   ratePercent,
   roundTripPercent,
@@ -493,7 +494,16 @@ describe("what the defences do not do", () => {
     expect(limits).toContain("THAT IS A CHECK ON SIZE, NOT ON PRICE");
     expect(limits).toContain("the SOL price Pyth publishes, which is the only number in a buy that does not come from the venue being traded against");
     expect(limits).toContain("SPYx and ANTHROPIC have no such anchor today");
-    expect(limits).toContain(`it is taken from one pool's price at the moment you sign, ${ratePercent(LEG_FLOOR_MARGIN_BPS)} under it, and it does not follow the market afterwards`);
+    // THE FEE COMES OFF FIRST, AND A 3 % FEE WIDENS THE MARGIN — said with the
+    // leg's own number and its cost, because "5 % under it" is not true of it.
+    expect(limits).toContain(
+      `it is taken from one pool's price at the moment you sign, less the highest transfer fee each stock's issuer has set, ${ratePercent(LEG_FLOOR_MARGIN_BPS)} under it ` +
+        "(7 % for ANTHROPIC, whose fee makes each buy ask the market for more room — a lower limit, and so less protection against a bad price), and it does not follow the market afterwards",
+    );
+    // With no fee in the basket, the plain margin is the whole sentence.
+    expect(INVEST_COPY.defencesLimits(BASKETS.spyxOnly, ratePercent(LEG_FLOOR_MARGIN_BPS))).toContain(
+      `it is taken from one pool's price at the moment you sign, ${ratePercent(LEG_FLOOR_MARGIN_BPS)} under it, and it does not follow the market afterwards`,
+    );
     expect(limits).toContain("the same number stops protecting you — or starts refusing every honest buy");
     // AND IT PROMISES NOTHING IT CANNOT DO. These are the readings a reader
     // would otherwise supply for free.
@@ -546,6 +556,32 @@ describe("the floor the owner signed, and the market that moved away from it", (
     expect(floorDrift(null, 10_000n, LEG_FLOOR_MARGIN_BPS)).toBeNull();
     expect(floorDrift(10_000n, null, LEG_FLOOR_MARGIN_BPS)).toBeNull();
     expect(floorDrift(0n, 10_000n, LEG_FLOOR_MARGIN_BPS)).toBeNull();
+  });
+
+  it("measures a floor netted of a 3 % fee against the gross mid at its own margin, so a floor just signed is not called slack", () => {
+    // The fee and legFloorMarginBps compounded, under the GROSS mid the screen
+    // reads: 500 with no fee, 595 at 100 bps, 979 at 300 (0.97 x 0.93 = 0.9021).
+    expect([0, 100, 300].map(legFloorUnderMidBps)).toEqual([500, 595, 979]);
+    const mid = 10n ** 18n;
+    const signedAt300 = legFloorWad(mid, 300);
+    expect(signedAt300).toBe(902_100_000_000_000_000n);
+    // JUST SIGNED, IN STEP at its own margin — and at the plain 500 the same
+    // floor would already read as slack (1,085 bps past a 1,052 edge), which is
+    // the false alarm this margin exists to prevent.
+    expect(floorDrift(signedAt300, mid, legFloorUnderMidBps(300))).toEqual({ kind: "in-step", driftBps: 1_085 });
+    expect(floorDrift(signedAt300, mid, LEG_FLOOR_MARGIN_BPS)).toEqual({ kind: "slack", driftBps: 1_085 });
+  });
+
+  it("states the limit over today's price from the margin it was signed at, and says why a fee leg's is wider", () => {
+    expect(overTodayPercent(500)).toBe("5.3 %");
+    expect(overTodayPercent(700)).toBe("7.5 %");
+    expect(INVEST_COPY.legCeiling("SPYx", "$801.80", null, 500)).toBe("SPYx is never bought above $801.80 per 100,000,000 raw units (5.3 % over today's pool price)");
+    expect(INVEST_COPY.legCeiling("ANTHROPIC", "$19.95", "3 %", 700)).toBe(
+      "ANTHROPIC is never bought above $19.95 per 100,000,000 raw units that reach your vault (7.5 % over today's pool price once a 3 % transfer fee is counted — the highest its issuer has set; " +
+        "wider than the usual 5.3 % because at that fee each buy asks the market for more room, and the limit has to leave it)",
+    );
+    // At a 1 % fee the margin is the plain one, and no wider room is claimed.
+    expect(INVEST_COPY.legCeiling("ANTHROPIC", "$18.95", "1 %", 500)).not.toMatch(/wider/);
   });
 
   it("says the date it was signed, or says plainly that nobody knows it", () => {
