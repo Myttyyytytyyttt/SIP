@@ -140,6 +140,8 @@ export async function findPolicyBoundary(args: {
   const above: PolicyWrite[] = [];
   let startRule: PolicyWrite["rule"] | undefined;
   let reachedStart = false;
+  /** The oldest slot the walk has seen: no write it missed sits above it. */
+  let oldestSeen: bigint | null = null;
   let before: string | undefined;
   walk: for (let page = 0; page < MAX_OWNER_PAGES; page++) {
     const signatures = await reader.signatures(
@@ -150,6 +152,7 @@ export async function findPolicyBoundary(args: {
     for (const info of signatures) {
       const atOrBelowStart = BigInt(info.slot) <= from;
       if (atOrBelowStart) reachedStart = true;
+      oldestSeen = BigInt(info.slot);
       if (info.err !== null && info.err !== undefined) continue;
       let writes = known?.get(info.signature);
       if (writes === undefined) {
@@ -175,11 +178,23 @@ export async function findPolicyBoundary(args: {
     if (signatures.length < OWNER_PAGE_LIMIT) break;
     before = signatures[signatures.length - 1]!.signature;
   }
+  // A HISTORY TOO LONG TO READ BACK TO THE START FORGIVES WHAT IT COULD NOT SEE.
+  // Anyone can name the owner in a transaction for a fraction of a cent, so a
+  // refusal here would let a stranger wedge the vault's saving for good. Nothing the
+  // walk read wrote a policy, so the vault's rule has held since the oldest slot it
+  // saw: what traded after that is charged, and what traded at or before it is
+  // forgiven. Not kept, so each turn looks again.
   if (!reachedStart && above.length === 0) {
-    throw new Error(
-      `the owner's history was not read back to slot ${from} within ${MAX_OWNER_PAGES * OWNER_PAGE_LIMIT} signatures, ` +
-        "so a policy change inside the span cannot be ruled out; nothing is attested",
-    );
+    if (oldestSeen === null) {
+      throw new Error(`the owner's history came back empty above slot ${from}; a policy change inside the span cannot be ruled out; nothing is attested`);
+    }
+    return {
+      slot: oldestSeen,
+      verified: false,
+      detail:
+        `the owner's newest ${MAX_OWNER_PAGES * OWNER_PAGE_LIMIT} signatures reach back only to slot ${oldestSeen} and write no policy; ` +
+        "trades at or before it are not charged",
+    };
   }
 
   const ends = above.length > 0 ? above[0]!.rule : (startRule ?? null);

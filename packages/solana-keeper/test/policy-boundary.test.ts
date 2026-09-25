@@ -183,9 +183,16 @@ describe("findPolicyBoundary", () => {
 
   const FULL = MAX_OWNER_PAGES * OWNER_PAGE_LIMIT;
 
-  it("refuses when its pages run out above the start without a single write", async () => {
+  // A STRANGER CAN NAME THE OWNER FOR A FRACTION OF A CENT: a flood must not wedge the vault.
+  it("forgives only what it could not see when its pages run out above the start without a single write", async () => {
     const busy = Array.from({ length: FULL }, (_, i) => other(200 + i));
-    await expect(boundary([created(10, MODE_VOLUME), ...busy], 100n, VOLUME_200)).rejects.toThrow(/was not read back/);
+    const answer = await boundary([created(10, MODE_VOLUME), ...busy], 100n, VOLUME_200);
+    // The oldest signature read is the 5 000th newest, at slot 200.
+    expect(answer).toMatchObject({ slot: 200n, verified: false });
+  });
+
+  it("refuses an owner history that comes back empty above the start", async () => {
+    await expect(boundary([], 100n, VOLUME_200)).rejects.toThrow(/came back empty/);
   });
 
   it("counts the first change as a boundary when its pages run out before the rule at the start", async () => {
