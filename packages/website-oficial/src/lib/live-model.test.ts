@@ -502,8 +502,8 @@ describe("the vault's own rule", () => {
     const volume = snapshot({ vault: { ...snapshot().vault, state: { ...snapshot().vault.state!, skimMode: 1 } } });
     const view = model(volume);
     expect(view.vault.rateBps).toBe(200);
-    // A volume vault receives nothing while the keeper cannot measure volume, and says so.
-    expect(view.vault.volumeNotOffered).toBe(true);
+    // Volume is offered since 09-25 (the volume keeper settles it): a volume vault is not flagged as unserved.
+    expect(view.vault.volumeNotOffered).toBe(false);
   });
 
   it("claims no protocol pause either way when the config could not be read", () => {

@@ -25,6 +25,14 @@ export const RATE_RANGES = {
 export type RuleMode = keyof typeof RATE_RANGES;
 
 /**
+ * WHERE THE BAR STARTS WHEN A PROFIT VAULT SWITCHES TO VOLUME (owner, 09-25):
+ * 1 % — "1 % ida y 1 % vuelta", 1 % of every buy and 1 % of every sell. The
+ * vault's stored volume rate is whatever it was created with (the program's 2 %
+ * product rate, rules.ts DEFAULT_RATES, pinned to state.rs), never a choice.
+ */
+export const VOLUME_START_BPS = 100;
+
+/**
  * THE INVESTMENT THRESHOLD EVERY BASKET STARTS AT (owner, 09-25): $10,
  * whatever the number of assets. It is a BASKET figure — the pile at which
  * the whole buy happens — and the chain stores the per-leg minimum that makes

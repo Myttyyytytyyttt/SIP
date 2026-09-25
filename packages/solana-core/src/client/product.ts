@@ -5,11 +5,13 @@
 // test/product.test.ts pins every value here to rules.ts and to the verifier's
 // caps, so a changed default fails a test before it reaches a wallet.
 //
-// THE VOLUME DECISION IS ONE CONSTANT. The keeper cannot yet settle VOLUME from
-// real trades (settle-decision.ts UNSUPPORTED_MODE), so a volume vault would
-// receive nothing. Until the owner decides to build the volume meter, the web
-// offers PROFIT only: the build route refuses mode 1 and the form greys it out.
-// The program itself accepts VOLUME vaults from any client, which is intended.
+// THE VOLUME DECISION IS ONE CONSTANT. Off until 09-25: the keeper could not
+// settle VOLUME from real trades (settle-decision.ts UNSUPPORTED_MODE), so the
+// web offered PROFIT only — the build route refused mode 1 and the form greyed
+// it out. On 09-25 the owner had the volume keeper built (it settles VOLUME
+// vaults only; the profit keeper leaves them alone) and asked for the switch:
+// the build route now builds mode 1, and the gear's Profit | Volume toggle
+// signs it. The program itself accepts VOLUME vaults from any client.
 //
 // WHY THESE CAPS (review findings 1 and 2 on the program):
 //  * max_contribution 0.06 SOL bounds one settlement. At about $100 a SOL it is
@@ -92,8 +94,8 @@ import {
 import type { OwnerInstructionName } from "./idl";
 import { DEFAULT_PURCHASE_USDC_RAW, DEFAULT_RATES, MODE_PROFIT, type VaultPolicyInput } from "./rules";
 
-/** The owner's open decision on VOLUME, off until the keeper can measure volume. Changing it must change a test. */
-export const VOLUME_MODE_OFFERED: boolean = false;
+/** The owner's decision on VOLUME: on since 09-25, with the volume keeper. Changing it must change a test. */
+export const VOLUME_MODE_OFFERED: boolean = true;
 
 /** What create_vault_v2 is built with when the request names nothing else. Both rates travel in both modes. */
 export const DEFAULT_VAULT_POLICY: Readonly<VaultPolicyInput> = Object.freeze({

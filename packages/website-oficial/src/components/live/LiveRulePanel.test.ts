@@ -166,14 +166,16 @@ describe("the ranges are the program's", () => {
 });
 
 describe("the form the gear opens", () => {
-  it("opens on the vault's stored rule and basket, live, with Volume not offered", () => {
+  it("opens on the vault's stored rule and basket, live, with Volume offered (09-25)", () => {
     const form = mount(vaultState(POLICY))!;
     expect(form.live).toBe(true);
     expect(form.initial.mode).toBe("profit");
     expect(form.initial.rateBps).toBe(ACCOUNT.skimBps);
     expect(form.initial.picked.map((pick) => pick.id).sort()).toEqual([ANTHROPIC_MINT, SPYX_MINT].sort());
     expect(form.initial.threshold).toMatch(/^10(\.0+)?$/);
-    expect(form.volume).toEqual({ selectable: false, note: SETTINGS_COPY.volumeComing });
+    expect(form.volume).toEqual({ selectable: true, note: null });
+    // Switching starts the bar at 1 %, not at the vault's creation leftover.
+    expect(form.rates.volume).toBe(100);
     expect(form.weightsEditable).toBe(true);
   });
 

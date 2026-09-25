@@ -8,6 +8,7 @@ import { DEFAULT_VAULT_POLICY, VOLUME_MODE_OFFERED } from "@sip/solana-core/clie
 import { describe, expect, it } from "vitest";
 
 import { ACTIVITY_COPY, BRAND, LIVE_COPY, MODE_COPY, ONBOARDING_COPY, START_BUYING_COPY, STATS_COPY, stripTooltip } from "@/lib/live-copy";
+import { SETTINGS_COPY } from "@/lib/settings-copy";
 import { LOSS_DROPPED_AFTER_TXS, VAULT_COPY, ratePercent } from "@/lib/vault-copy";
 
 /** Sample arguments for the copy functions, so their OUTPUT is checked too, not just the literals. */
@@ -135,12 +136,18 @@ describe("the rate a sentence quotes is the product's own", () => {
   });
 });
 
-describe("VOLUME is not offered, so nothing here offers it", () => {
-  it("says a volume vault receives nothing, and never invites anyone to choose it", () => {
-    expect(VOLUME_MODE_OFFERED).toBe(false);
-    expect(LIVE_COPY.volumeNotOffered).toMatch(/cannot settle/);
+describe("VOLUME is offered through the gear, and the switch says what it means (09-25)", () => {
+  it("is on, and the dashboard's own words never push anyone onto it — the gear's toggle is the one door", () => {
+    expect(VOLUME_MODE_OFFERED).toBe(true);
     const offers = everySentence().filter((sentence) => /switch to volume|choose volume|volume mode is available/i.test(sentence));
     expect(offers).toEqual([]);
+  });
+
+  it("tells the owner, before the wallet asks, that volume saves on every buy AND every sell, win or lose", () => {
+    expect(SETTINGS_COPY.volumeSwitch.join(" ")).toMatch(/every buy AND every sell/);
+    expect(SETTINGS_COPY.volumeSwitch.join(" ")).toMatch(/win or lose/);
+    expect(SETTINGS_COPY.volumeSwitch.join(" ")).toMatch(/transfers/);
+    expect(SETTINGS_COPY.volumeSwitch.join(" ")).toMatch(/forgiven/);
   });
 });
 
@@ -290,8 +297,7 @@ describe("the new-user setup's words", () => {
     expect(ONBOARDING_COPY.welcome.title).toContain(BRAND);
   });
 
-  it("promises profit only — volume is not offered — and says a loss carries only as far as the program carries it", () => {
-    expect(VOLUME_MODE_OFFERED).toBe(false);
+  it("starts every new pension on profit — volume is the gear's to switch to — and says a loss carries only as far as the program carries it", () => {
     expect(setupSentences().filter((sentence) => /volume|every trade|every buy/i.test(sentence))).toEqual([]);
     // The rule said right before the signature carries the loss AND its limit (VAULT_COPY.profitRule):
     // promising the loss forever would be a promise the program does not keep.

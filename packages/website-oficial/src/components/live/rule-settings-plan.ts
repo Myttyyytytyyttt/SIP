@@ -32,7 +32,7 @@
  * PURE. No React, no hook is called: the host runs these on every render.
  */
 
-import { DEFAULT_INVEST_CAPS, DEFAULT_RATES, MODE_PROFIT, MODE_VOLUME, OFFERED_LEGS, investmentReadiness, isOfferable, type CatalogueAsset } from "@sip/solana-core/client";
+import { DEFAULT_INVEST_CAPS, MODE_PROFIT, MODE_VOLUME, OFFERED_LEGS, investmentReadiness, isOfferable, type CatalogueAsset } from "@sip/solana-core/client";
 
 import { START_BUYING_PER_BUY_RAW } from "@/components/live/LiveStartBuying";
 import { atLeastUsd, atMostUsd, policyEditSeed, policyRequest, readCaps, readMinimum, readWeights, resignStoredPolicy } from "@/components/wallets/InvestingCard";
@@ -43,7 +43,7 @@ import { basketLimits, catalogueAsset, catalogueRows, overCeiling, type BasketLi
 import { LIVE_COPY } from "@/lib/live-copy";
 import { basketOnShelf, basketSplit } from "@/lib/onboarding";
 import type { BasketChoice } from "@/lib/onboarding-memory";
-import { BASE_THRESHOLD_RAW, RATE_RANGES, minimumFor, type RuleMode, type SettingsCategory, type SettingsDraft, type SettingsPick } from "@/lib/rule-settings";
+import { BASE_THRESHOLD_RAW, RATE_RANGES, VOLUME_START_BPS, minimumFor, type RuleMode, type SettingsCategory, type SettingsDraft, type SettingsPick } from "@/lib/rule-settings";
 import { SETTINGS_COPY } from "@/lib/settings-copy";
 import type { InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
 import { INVEST_COPY, VAULT_COPY, listAnd, ratePercent, shortAddress, signedLegsOf } from "@/lib/vault-copy";
@@ -124,7 +124,7 @@ export function liveSeed(state: VaultStateJson, choice: BasketChoice | null): Li
   // vault was created with — so switching to Volume starts at the product's
   // default (1 %, owner 09-25), not at that leftover. A volume vault's own
   // rate is its owner's choice and is kept.
-  const rates = { profit: account.skimBps, volume: mode === "volume" ? account.volumeBps : DEFAULT_RATES.volumeBps };
+  const rates = { profit: account.skimBps, volume: mode === "volume" ? account.volumeBps : VOLUME_START_BPS };
   const saving = { mode, rateBps: rates[mode], paused: account.paused };
   const savingKey = `${mode}:${account.skimBps}:${account.volumeBps}:${account.paused}`;
 

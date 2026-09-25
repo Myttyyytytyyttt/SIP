@@ -7,7 +7,7 @@
 // cap left outside the window of the basket it now caps. Each case reads
 // exactly what would be handed to the wallet.
 
-import { ANTHROPIC_MINT, DEFAULT_INVEST_CAPS, DEFAULT_RATES, FIGUREAI_MINT, JUPITER_V6, MODE_PROFIT, MODE_VOLUME, SPYX_MINT, investmentReadiness } from "@sip/solana-core/client";
+import { ANTHROPIC_MINT, DEFAULT_INVEST_CAPS, FIGUREAI_MINT, JUPITER_V6, MODE_PROFIT, MODE_VOLUME, SPYX_MINT, investmentReadiness } from "@sip/solana-core/client";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -25,7 +25,7 @@ import { formatUsd, rawFrom } from "@/lib/amounts";
 import { basketLimits, catalogueAsset } from "@/lib/basket-picker";
 import { LIVE_COPY } from "@/lib/live-copy";
 import type { BasketChoice } from "@/lib/onboarding-memory";
-import { BASE_THRESHOLD_RAW, minimumFor, type SettingsDraft } from "@/lib/rule-settings";
+import { BASE_THRESHOLD_RAW, VOLUME_START_BPS, minimumFor, type SettingsDraft } from "@/lib/rule-settings";
 import { SETTINGS_COPY } from "@/lib/settings-copy";
 import type { InvestmentPolicyJson, VaultAccountJson, VaultStateJson } from "@/lib/vault-api";
 import { INVEST_COPY, VAULT_COPY, ratePercent } from "@/lib/vault-copy";
@@ -95,7 +95,8 @@ describe("liveSeed: what the dialog opens on", () => {
       ],
       threshold: "10",
     });
-    expect(seed.rates).toEqual({ profit: 2_000, volume: 200 });
+    // A profit vault's stored volume rate is its creation leftover: the bar would start at 1 % (VOLUME_START_BPS).
+    expect(seed.rates).toEqual({ profit: 2_000, volume: VOLUME_START_BPS });
     expect(seed.buying).toMatchObject({ kind: "policy", thresholdRaw: 10_000_000n, caps: { maxPerCall: 149_000_000n, maxRolling30d: 4_619_000_000n }, venue: "jupiter-v6", enabled: true, notices: [] });
   });
 
@@ -483,10 +484,11 @@ describe("a stored leg the shelf no longer offers", () => {
 });
 
 describe("switching a profit vault to Volume", () => {
-  it("starts the bar at the product's default volume rate, not the leftover the vault was created with", () => {
-    const seed = seedOf(vaultState(OWNERS_POLICY, { account: { volumeBps: 150 } }));
+  it("starts the bar at 1 %, not at the leftover volume rate the vault was created with", () => {
+    const seed = seedOf(vaultState(OWNERS_POLICY, { account: { volumeBps: 200 } }));
     expect(seed.draft.mode).toBe("profit");
-    expect(seed.rates.volume).toBe(DEFAULT_RATES.volumeBps);
+    expect(seed.rates.volume).toBe(VOLUME_START_BPS);
+    expect(VOLUME_START_BPS).toBe(100);
   });
 
   it("keeps a volume vault's own chosen rate", () => {
