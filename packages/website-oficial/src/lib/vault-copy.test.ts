@@ -31,11 +31,11 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { CATALOGUE, CONVERT_FLOOR_MARGIN_BPS, LEG_FLOOR_MARGIN_BPS, OFFERED_LEGS, PRESTOCKS_POWERS, legFloorWad, type CatalogueAsset } from "@sip/solana-core/client";
+import { CATALOGUE, CONVERT_FLOOR_MARGIN_BPS, LEG_FLOOR_MARGIN_BPS, OFFERED_LEGS, PRESTOCKS_POWERS, floorWad, legFloorWad, type CatalogueAsset } from "@sip/solana-core/client";
 
-import { LEG_FEE, LOSS_FORGIVEN, POOL_DEPTH } from "../../../solana-core/test/fixtures/keeper-policy";
+import { LEG_FEE, LOSS_FORGIVEN, OWNER_FLOOR_MIN_OUT, POOL_DEPTH } from "../../../solana-core/test/fixtures/keeper-policy";
 
-import { FLOOR_DRIFT_NOTICE_MULTIPLE, floorDrift, floorOverKeeperAsk, keeperBestMinOutWad, legFloorUnderMidBps, signedSlackBps } from "@/lib/invest-limits";
+import { FLOOR_DRIFT_NOTICE_MULTIPLE, ROUTE_COST_UNDER_MID_BPS, floorDrift, floorRoom, keeperVenueThresholdWad, legFloorUnderMidBps, signedSlackBps } from "@/lib/invest-limits";
 import {
   INVEST_COPY,
   LOSS_DROPPED_AFTER_TXS,
@@ -530,36 +530,98 @@ describe("the floor the owner signed, and the market that moved away from it", (
    * floor means nothing buys at all.
    */
   /**
-   * THE KEEPER'S BEST ASK, FROM THE SHARED VECTOR. The keeper's min_out is the
-   * quote less legSlippageBps(fee) = max(slippageBps, fee + slippageMarginBps),
-   * less the fee; from a quote exactly at the mid that is its ceiling. Derived
-   * here from LEG_FEE rather than from catalogueLegSlippageBps, so a drift in
-   * either the keeper's vector or the page's arithmetic goes red.
+   * THE KEEPER'S RULE, FROM THE SHARED VECTOR, AND THE THREE STATES IT GIVES.
+   * The keeper (jupiter-route.ts investMinOutFor, deployed with df6ca67) buys a
+   * leg exactly when the venue's threshold — the quote less legSlippageBps(fee)
+   * — is at or over the owner's floor. Derived here from LEG_FEE rather than
+   * from catalogueLegSlippageBps, so a drift in either the keeper's vector or
+   * the page's arithmetic goes red.
    */
-  it("says a signed floor is over the keeper's ask exactly when the keeper's best min_out cannot reach it — the owner's own ANTHROPIC floor, measured 2026-09-25", () => {
-    const legSlippage = (fee: bigint): bigint => (LEG_FEE.slippageBps > fee + LEG_FEE.slippageMarginBps ? LEG_FEE.slippageBps : fee + LEG_FEE.slippageMarginBps);
-    const bestAsk = (mid: bigint, fee: bigint): bigint => {
-      const afterSlippage = (mid * (10_000n - legSlippage(fee))) / 10_000n;
-      return (afterSlippage * (10_000n - fee)) / 10_000n;
-    };
-    // Measured at slot 450224399: the owner's signed floor, and the pool mid.
-    const ownerFloor = 902_223_869_744_110_771n;
-    const mid = 950_870_892_320_522_646n;
-    for (const fee of [0n, 100n, 300n]) expect(keeperBestMinOutWad(mid, Number(fee))).toBe(bestAsk(mid, fee));
-    // At 300 the keeper's best is 0.96 x 0.97 = 93.12 % of the mid, and the
-    // owner's floor (94.88 % of it) sits about 189 bps above: refused every sweep.
-    expect(floorOverKeeperAsk(ownerFloor, mid, 300)).toBe(true);
-    expect(Number(((ownerFloor - keeperBestMinOutWad(mid, 300)) * 10_000n) / keeperBestMinOutWad(mid, 300))).toBe(189);
-    // At the 100 in force before epoch 1043 the same floor clears (0.98 x 0.99 = 97.02 %).
-    expect(floorOverKeeperAsk(ownerFloor, mid, 100)).toBe(false);
-    // A floor signed under today's rule clears at 300.
-    expect(floorOverKeeperAsk(legFloorWad(mid, 300), mid, 300)).toBe(false);
-    // THE BOUNDARY: at the ask it clears, one unit over it does not.
-    expect(floorOverKeeperAsk(keeperBestMinOutWad(mid, 300), mid, 300)).toBe(false);
-    expect(floorOverKeeperAsk(keeperBestMinOutWad(mid, 300) + 1n, mid, 300)).toBe(true);
+  const legSlippage = (fee: bigint): bigint => (LEG_FEE.slippageBps > fee + LEG_FEE.slippageMarginBps ? LEG_FEE.slippageBps : fee + LEG_FEE.slippageMarginBps);
+  const lessBps = (wad: bigint, bps: bigint): bigint => (wad * (10_000n - bps)) / 10_000n;
+  // Measured at slot 450231345 (and unchanged since slot 450224399): the owner's signed ANTHROPIC floor, and its floor pool's mid.
+  const ownerFloor = 902_223_869_744_110_771n;
+  const mid = 950_870_892_320_522_646n;
+
+  it("models the keeper's threshold as the quote less its ask — the fee comes off the quote only where the last hop quotes net", () => {
+    const cost = BigInt(ROUTE_COST_UNDER_MID_BPS);
+    for (const fee of [0n, 100n, 300n]) {
+      expect(keeperVenueThresholdWad(mid, Number(fee), "gross")).toBe(lessBps(lessBps(mid, cost), legSlippage(fee)));
+      expect(keeperVenueThresholdWad(mid, Number(fee), "net")).toBe(lessBps(lessBps(lessBps(mid, cost), fee), legSlippage(fee)));
+    }
+    // With no fee the two routes are the same route.
+    expect(keeperVenueThresholdWad(mid, 0, "net")).toBe(keeperVenueThresholdWad(mid, 0, "gross"));
+    // AND THE MODEL IS UNDER WHAT JUPITER ACTUALLY ANSWERED for the owner's leg
+    // (the vector's measured Manifest route, 2,752,188 USDC raw in at slippage
+    // 400): a screen that erred the other way would promise buys the keeper refuses.
+    const { amountIn, venueThreshold } = OWNER_FLOOR_MIN_OUT.measured;
+    expect((amountIn * keeperVenueThresholdWad(mid, 300, "gross")) / 10n ** 18n).toBeLessThanOrEqual(venueThreshold);
+    // And the owner's floor, in raw units for that leg, is the vector's.
+    expect((amountIn * ownerFloor) / 10n ** 18n).toBe(OWNER_FLOOR_MIN_OUT.ownersLeg.ownerFloor);
+  });
+
+  it("puts the owner's own ANTHROPIC floor, measured 2026-09-25, on some routes at 3 % and on every route at 1 % — not \"Sign again\"", () => {
+    // 94.88 % of the gross mid. At 300 a gross last hop leaves 0.9975 x 0.96 =
+    // 95.76 % and the keeper buys; a net one leaves 0.9975 x 0.97 x 0.96 =
+    // 92.89 % and that sweep waits.
+    expect(floorRoom(ownerFloor, mid, 300)).toBe("some-routes");
+    expect(floorRoom(ownerFloor, mid, 100)).toBe("every-route");
+    // THE OLD RULE, WHICH THIS MUST NOT GO BACK TO: min_out = the quote less the
+    // ask, less the fee, compared with the floor. From a quote AT the mid it put
+    // this floor 189 bps over and said "Sign again", while the deployed keeper
+    // buys under it on a gross last hop (OWNER_FLOOR_MIN_OUT.ownersLeg). Any
+    // model that takes the fee off before the gross comparison lands here.
+    const oldBestAsk = lessBps(lessBps(mid, legSlippage(300n)), 300n);
+    expect(ownerFloor > oldBestAsk).toBe(true);
+    expect(OWNER_FLOOR_MIN_OUT.ownersLeg.buys).toBe(true);
+    expect(floorRoom(oldBestAsk + 1n, mid, 300)).not.toBe("no-route");
+  });
+
+  it("draws the three states at the keeper's own boundaries: at the threshold it buys, one unit over it does not", () => {
+    for (const fee of [100, 300]) {
+      const net = keeperVenueThresholdWad(mid, fee, "net");
+      const gross = keeperVenueThresholdWad(mid, fee, "gross");
+      expect(floorRoom(net, mid, fee), `at the net threshold, fee ${fee}`).toBe("every-route");
+      expect(floorRoom(net + 1n, mid, fee), `one over the net threshold, fee ${fee}`).toBe("some-routes");
+      expect(floorRoom(gross, mid, fee), `at the gross threshold, fee ${fee}`).toBe("some-routes");
+      expect(floorRoom(gross + 1n, mid, fee), `one over the gross threshold, fee ${fee}`).toBe("no-route");
+    }
+    // With no fee there is no middle: gross and net are one route.
+    const only = keeperVenueThresholdWad(mid, 0, "gross");
+    expect(floorRoom(only, mid, 0)).toBe("every-route");
+    expect(floorRoom(only + 1n, mid, 0)).toBe("no-route");
     // An unread number says nothing.
-    expect(floorOverKeeperAsk(null, mid, 300)).toBe(false);
-    expect(floorOverKeeperAsk(ownerFloor, null, 300)).toBe(false);
+    expect(floorRoom(null, mid, 300)).toBeNull();
+    expect(floorRoom(ownerFloor, null, 300)).toBeNull();
+  });
+
+  it("puts every floor a policy signed today carries on every route, at the fee it was netted of", () => {
+    for (const fee of [0, 100, 300]) expect(floorRoom(legFloorWad(mid, fee), mid, fee), `signed today at ${fee}`).toBe("every-route");
+    // And the flat 5 % under the gross mid the owner signed before 2026-09-24
+    // is fine with no fee at all.
+    expect(floorRoom(floorWad(mid, 500), mid, 0)).toBe("every-route");
+  });
+
+  it("words the soft note as a note and the refusal as a refusal, dated only when the written rise is what moves it", () => {
+    const some = INVEST_COPY.legFloorSomeRoutes("ANTHROPIC", "$2.68", 300, 1043);
+    expect(some).toBe(
+      "From epoch 1043, around 26 September 2026, ANTHROPIC's issuer charges 3 % on every transfer. Your ANTHROPIC limit of $2.68 will still let SaverFi buy on some of the routes the market offers, but not on every one: when a sweep's best route is one of the others, SaverFi waits for a later sweep instead of buying. Signing again with today's prices keeps every route open.",
+    );
+    expect(some).not.toMatch(/Sign again|refuse|will not buy|does not buy/);
+    expect(INVEST_COPY.legFloorSomeRoutes("ANTHROPIC", "$2.68", 300, null)).toMatch(/^At the 3 % ANTHROPIC's issuer charges on every transfer, your ANTHROPIC limit of \$2\.68 lets SaverFi buy on some/);
+
+    const none = INVEST_COPY.legFloorNoRoute("ANTHROPIC", "$2.75", "$2.82", 300, 1043);
+    expect(none).toBe(
+      "From epoch 1043, around 26 September 2026, when ANTHROPIC's issuer starts charging 3 % on every transfer, SaverFi will not buy this basket — no stock in it, and no SOL converted toward it — until you sign again. Your ANTHROPIC limit of $2.75 is too close to today's price of $2.82 to leave room for that fee and the market's movement on any route. The market has not passed your limit; signing again with today's prices sets it with that room.",
+    );
+    expect(INVEST_COPY.legFloorNoRoute("ANTHROPIC", "$2.75", "$2.82", 300, null)).toMatch(/^At the 3 % ANTHROPIC's issuer charges on every transfer, SaverFi does not buy this basket/);
+    // A leg with no fee is never told about one.
+    const noFee = INVEST_COPY.legFloorNoRoute("SPYx", "$740.00", "$750.00", 0, null);
+    expect(noFee).toMatch(/^SaverFi does not buy this basket/);
+    expect(noFee).not.toMatch(/fee|issuer/);
+    expect(INVEST_COPY.floorNoRoute).toBe("Sign again");
+    // The public name, and no engine-room words.
+    for (const line of [some, none, noFee, INVEST_COPY.roomTitle]) expect(line).not.toMatch(/keeper|min_out|bps|Nuvem|\bSIP\b|Jupiter|gross|net\b/i);
   });
 
   it("measures the slack against the floor, and calls it out only past twice the margin it was signed at", () => {

@@ -43,6 +43,7 @@ import {
   priorityFeeLamports,
   sizePenaltyCeilingBps,
   judgedFeeBps,
+  keeperInvestMinOutFor,
 } from "../src/client/product";
 import {
   DEFAULT_PURCHASE_USDC_RAW,
@@ -53,7 +54,7 @@ import {
   investPolicyProblems,
   vaultPolicyProblems,
 } from "../src/client/rules";
-import { LEG_FEE, POOL_DEPTH } from "./fixtures/keeper-policy";
+import { LEG_FEE, OWNER_FLOOR_MIN_OUT, POOL_DEPTH } from "./fixtures/keeper-policy";
 import { MAX_COMPUTE_UNIT_LIMIT, MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS } from "../src/server/verify-tx";
 
 describe("the vault a new pension key is offered", () => {
@@ -320,6 +321,20 @@ describe("the first investment policy", () => {
     // while the keeper asks 400 and allows 25.
     expect(sizePenaltyCeilingBps(CATALOGUE_MAX_FEE_BPS)).toBe(25);
     expect(sizePenaltyCeilingBps(0)).toBe(50);
+  });
+
+  it("answers the keeper's own min_out under the owner's floor, case for case, through the committed vector", () => {
+    const { venueThreshold, netOfVenueThreshold, quotedOut, slippageBps } = OWNER_FLOOR_MIN_OUT.measured;
+    // The threshold is Jupiter's: out less floor(out x slippage / 1e4).
+    expect(quotedOut - (quotedOut * slippageBps) / 10_000n).toBe(venueThreshold);
+    for (const [ownerFloor, minOut] of OWNER_FLOOR_MIN_OUT.cases) {
+      expect(keeperInvestMinOutFor({ venueThreshold, netOfVenueThreshold, ownerFloor }), `owner floor ${ownerFloor}`).toBe(minOut);
+    }
+    // THE MIDDLE BAND IS A BUY, NOT A REFUSAL: the owner's ANTHROPIC floor sits
+    // between the two thresholds and the keeper hands invest() the floor itself.
+    const { ownerFloor, minOut } = OWNER_FLOOR_MIN_OUT.ownersLeg;
+    expect(ownerFloor > netOfVenueThreshold && ownerFloor <= venueThreshold).toBe(true);
+    expect(keeperInvestMinOutFor({ venueThreshold, netOfVenueThreshold, ownerFloor })).toBe(minOut);
   });
 
   it("measures every rule at the share one turn can push into one leg of a full basket", () => {

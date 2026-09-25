@@ -99,7 +99,7 @@ import {
   type PickedLeg,
   type PickedRow,
 } from "@/lib/basket-picker";
-import { floorDrift, floorOverKeeperAsk, keeperBestMinOutWad, legFloorUnderMidBps, todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
+import { type FloorRoom, floorDrift, floorRoom, legFloorUnderMidBps, todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
 import { floorsState } from "@/lib/live-model";
 import type { InvestPolicyBuildJson, InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
 import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, shortAddress, signedLegsOf } from "@/lib/vault-copy";
@@ -1320,10 +1320,16 @@ function PolicySummary({
     else if (solDrift.kind === "slack")
       driftLines.push(INVEST_COPY.solFloorSlack(formatUsd(usdcRawPerSol(storedConvert)), formatUsd(usdcRawPerSol(liveConvert)), ratePercent(solDrift.driftBps)));
   }
-  // A LIMIT THE KEEPER'S OWN ASK HAS FALLEN THROUGH (invest-limits.ts
-  // floorOverKeeperAsk): the market still stands above it, so the badge would
-  // say "Floors below market" over a basket the keeper refuses every sweep.
-  let overAsk = false;
+  // WHETHER SAVERFI CAN STILL BUY UNDER EACH SIGNED LIMIT (invest-limits.ts
+  // floorRoom), at the highest fee the leg's issuer has written — the fee in
+  // force once its epoch arrives. "some-routes" is a note and buying goes on;
+  // only "no-route" flips the badge, because only then does the keeper refuse
+  // every sweep. `fromEpoch` names the written rise only when today's fee still
+  // leaves the limit in a better state, so the sentence dates the change it is
+  // about rather than a change that has nothing to do with it.
+  const roomRank: Record<FloorRoom, number> = { "every-route": 0, "some-routes": 1, "no-route": 2 };
+  const roomLines: string[] = [];
+  let noRoute = false;
   for (const leg of legs) {
     // The margin a floor is signed at under the GROSS mid the screen reads: the
     // leg's fee and legFloorMarginBps compounded (979 bps at 300), so a floor
@@ -1334,11 +1340,20 @@ function PolicySummary({
     if (drift === null || leg.floor === null || leg.live === null) continue;
     const limit = formatUsd(usdcRawPer1e8LegRaw(leg.floor));
     const today = formatUsd(usdcRawPer1e8LegRaw(leg.live));
-    if (drift.kind === "passed") driftLines.push(INVEST_COPY.legFloorPassed(leg.symbol, limit, today));
-    else if (floorOverKeeperAsk(leg.floor, leg.live, feeBps)) {
-      overAsk = true;
-      driftLines.push(INVEST_COPY.legFloorOverKeeperAsk(leg.symbol, limit, today, formatUsd(usdcRawPer1e8LegRaw(keeperBestMinOutWad(leg.live, feeBps))), ratePercent(feeBps)));
-    } else if (drift.kind === "slack") driftLines.push(INVEST_COPY.legFloorSlack(leg.symbol, limit, today, ratePercent(drift.driftBps)));
+    if (drift.kind === "passed") {
+      driftLines.push(INVEST_COPY.legFloorPassed(leg.symbol, limit, today));
+      continue;
+    }
+    if (drift.kind === "slack") driftLines.push(INVEST_COPY.legFloorSlack(leg.symbol, limit, today, ratePercent(drift.driftBps)));
+    const room = floorRoom(leg.floor, leg.live, feeBps);
+    if (room === null || room === "every-route") continue;
+    const scheduled = asset?.fee?.scheduled ?? null;
+    const roomToday = asset === null || asset.fee === null ? room : floorRoom(leg.floor, leg.live, asset.fee.bps);
+    const fromEpoch = scheduled !== null && scheduled.bps === feeBps && roomToday !== null && roomRank[roomToday] < roomRank[room] ? scheduled.epoch : null;
+    if (room === "no-route") {
+      noRoute = true;
+      roomLines.push(INVEST_COPY.legFloorNoRoute(leg.symbol, limit, today, feeBps, fromEpoch));
+    } else roomLines.push(INVEST_COPY.legFloorSomeRoutes(leg.symbol, limit, feeBps, fromEpoch));
   }
 
   return (
@@ -1348,8 +1363,8 @@ function PolicySummary({
         <CardDescription>{policy.enabled ? INVEST_COPY.enabled : INVEST_COPY.paused}</CardDescription>
         {pricesKnown ? (
           <CardAction>
-            <Badge variant={belowMarket && !overAsk ? "outline" : "destructive"}>
-              {!belowMarket ? INVEST_COPY.floorPassed : overAsk ? INVEST_COPY.floorOverAsk : INVEST_COPY.floorsBelowMarket}
+            <Badge variant={belowMarket && !noRoute ? "outline" : "destructive"}>
+              {!belowMarket ? INVEST_COPY.floorPassed : noRoute ? INVEST_COPY.floorNoRoute : INVEST_COPY.floorsBelowMarket}
             </Badge>
           </CardAction>
         ) : null}
@@ -1367,6 +1382,14 @@ function PolicySummary({
             <div className={LABEL}>{INVEST_COPY.floorDriftTitle}</div>
             <p>{INVEST_COPY.floorDriftSigned(null)}</p>
             {driftLines.map((line) => (
+              <p key={line}>{line}</p>
+            ))}
+          </div>
+        ) : null}
+        {roomLines.length > 0 ? (
+          <div className={`space-y-1 rounded-md border px-3 py-2 text-xs ${noRoute ? "border-destructive/40 bg-destructive/5" : "border-amber-600/30 bg-amber-600/5"}`}>
+            <div className={LABEL}>{INVEST_COPY.roomTitle}</div>
+            {roomLines.map((line) => (
               <p key={line}>{line}</p>
             ))}
           </div>

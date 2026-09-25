@@ -69,7 +69,7 @@ import {
 import { VaultWriteLock, type WriteProgress } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
 import { USDC_DECIMALS, formatUnits, formatUsd } from "@/lib/amounts";
-import { keeperBestMinOutWad } from "@/lib/invest-limits";
+import { floorRoom, keeperVenueThresholdWad } from "@/lib/invest-limits";
 import { PICKER_MAX_LEGS } from "@/lib/basket-picker";
 import { INVEST_COPY } from "@/lib/vault-copy";
 import type { InvestmentPolicyJson, VaultApi, VaultStateJson } from "@/lib/vault-api";
@@ -696,32 +696,43 @@ describe("InvestingCard", () => {
   });
 
   /**
-   * THE REFUSAL THE CARD USED TO HIDE. Measured 2026-09-25: the owner's
-   * ANTHROPIC floor, signed at 95 % of the gross mid before the floor was netted
-   * of the fee, sat above the keeper's min_out at the 300 bps its issuer wrote
-   * for epoch 1043, and the keeper refused the basket [below-owner-floor] every
-   * sweep — while this card called the floor in step and the badge said
-   * "Floors below market". Here: the same 95 % of the gross mid the screen reads.
+   * THE OWNER'S OWN CASE, AND WHAT THE CARD USED TO GET WRONG ABOUT IT. His
+   * ANTHROPIC floor was signed at 95 % of the GROSS mid, before floors were
+   * netted of the fee. Until this change the card modelled the keeper's
+   * min_out as the quote less its ask, less the fee, and told him "Sign
+   * again" — while the keeper deployed with df6ca67 buys under that floor on a
+   * route that quotes gross. Here: the same 95 % of the gross mid the screen
+   * reads, at the 3 % written for epoch 1043.
    */
-  it("tells the owner to sign again when a limit signed at 95 % of the gross price sits above what the keeper asks once ANTHROPIC's 3 % counts", () => {
+  it("gives a limit signed at 95 % of the gross price a soft note, not \"Sign again\" — SaverFi still buys on some routes once ANTHROPIC's 3 % is in force", () => {
     const mid = BigInt(PRICES!.legs[1]!.wad);
     const signedGross = floorWad(mid, 500);
-    // The keeper's best case at 300 bps: the mid less its 400 bps ask, less the 3 %.
-    expect(keeperBestMinOutWad(mid, 300)).toBe(netOfTransferFeeWad(floorWad(mid, 400), 300));
-    expect(signedGross > keeperBestMinOutWad(mid, 300)).toBe(true);
+    expect(floorRoom(signedGross, mid, 300)).toBe("some-routes");
+    expect(floorRoom(signedGross, mid, 100)).toBe("every-route");
     const policy = { ...POLICY, legs: POLICY.legs.map((leg) => (leg.mint === ANTHROPIC_MINT ? { ...leg, minOutRateWad: String(signedGross) } : leg)) };
     const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: policy } }) }));
-    expect(html).toContain("The limits you signed do not follow the market");
+    expect(html).toContain(INVEST_COPY.roomTitle);
+    expect(html).toContain(INVEST_COPY.legFloorSomeRoutes("ANTHROPIC", formatUsd(usdcRawPer1e8LegRaw(signedGross)), 300, 1043).replaceAll("'", "&#x27;"));
+    expect(html).toContain("From epoch 1043, around 26 September 2026, ANTHROPIC&#x27;s issuer charges 3 % on every transfer.");
+    // Buying goes on: the badge is the ordinary one, and nothing says refuse.
+    expect(html).toContain(`>${INVEST_COPY.floorsBelowMarket}<`);
+    expect(html).not.toContain(`>${INVEST_COPY.floorNoRoute}<`);
+    expect(html).not.toMatch(/will not buy|refuse/);
+  });
+
+  it("tells the owner to sign again when a limit leaves SaverFi no route at all once ANTHROPIC's 3 % is in force, and dates it", () => {
+    const mid = BigInt(PRICES!.legs[1]!.wad);
+    // One unit over what even a route quoting before the fee leaves at 300.
+    const tooClose = keeperVenueThresholdWad(mid, 300, "gross") + 1n;
+    expect(floorRoom(tooClose, mid, 300)).toBe("no-route");
+    expect(floorRoom(tooClose, mid, 100)).toBe("every-route");
+    const policy = { ...POLICY, legs: POLICY.legs.map((leg) => (leg.mint === ANTHROPIC_MINT ? { ...leg, minOutRateWad: String(tooClose) } : leg)) };
+    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: policy } }) }));
     expect(html).toContain(
-      INVEST_COPY.legFloorOverKeeperAsk(
-        "ANTHROPIC",
-        formatUsd(usdcRawPer1e8LegRaw(signedGross)),
-        formatUsd(usdcRawPer1e8LegRaw(mid)),
-        formatUsd(usdcRawPer1e8LegRaw(keeperBestMinOutWad(mid, 300))),
-        "3 %",
-      ).replaceAll("'", "&#x27;"),
+      INVEST_COPY.legFloorNoRoute("ANTHROPIC", formatUsd(usdcRawPer1e8LegRaw(tooClose)), formatUsd(usdcRawPer1e8LegRaw(mid)), 300, 1043).replaceAll("'", "&#x27;"),
     );
-    expect(html).toContain(`>${INVEST_COPY.floorOverAsk}<`);
+    expect(html).toContain("From epoch 1043, around 26 September 2026, when ANTHROPIC&#x27;s issuer starts charging 3 % on every transfer, SaverFi will not buy this basket");
+    expect(html).toContain(`>${INVEST_COPY.floorNoRoute}<`);
     expect(html).not.toContain(`>${INVEST_COPY.floorsBelowMarket}<`);
     // The market has NOT passed it: this is not the "Floor passed" refusal.
     expect(html).not.toContain(`>${INVEST_COPY.floorPassed}<`);

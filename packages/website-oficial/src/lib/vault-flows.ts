@@ -555,7 +555,7 @@ function floorsProblem(
     // THE MARGIN IS THE CORE'S legFloorWad, not a number this page keeps: 95 %
     // of the net rate at a fee of 100 bps or less, 93 % at 300, because the
     // keeper asks the market for more room at a dearer fee and the floor has to
-    // leave its min_out that room (solana-core product.ts legFloorMarginBps).
+    // leave the keeper's threshold that room (solana-core product.ts legFloorMarginBps).
     const fee = entry?.transferFeeBps;
     if (typeof fee !== "number" || !Number.isInteger(fee) || fee < 0 || fee > (chosenMints.has(leg.mint) ? CATALOGUE_MAX_FEE_BPS : 10_000)) {
       return `its ${leg.symbol} floor names a transfer fee SaverFi's keeper would not buy through`;

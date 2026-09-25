@@ -15,6 +15,7 @@ import {
   catalogueLegSlippageBps,
   floorWad,
   judgedFeeBps,
+  keeperInvestMinOutFor,
   legFloorMarginBps,
   legFloorWad,
   netOfTransferFeeWad,
@@ -157,37 +158,77 @@ export function floorDrift(storedWad: bigint | null, liveWad: bigint | null, mar
   return { kind: driftBps > signedSlackBps(marginBps) * FLOOR_DRIFT_NOTICE_MULTIPLE ? "slack" : "in-step", driftBps };
 }
 
-// ── A SIGNED FLOOR THE KEEPER'S OWN ASK CAN NO LONGER CLEAR ──────────────────
+// ── WHETHER THE KEEPER STILL BUYS UNDER A SIGNED FLOOR ───────────────────────
 //
-// THE THIRD WAY A FLOOR STOPS BUYING, AND THE ONE NOTHING ON THE PAGE SHOWED.
-// "passed" is the market falling through a floor; this is the KEEPER's ask
-// falling through it while the market stands still. The keeper hands invest()
-// a min_out of the quote less legSlippageBps(fee), less the leg's transfer fee
-// (jupiter-route.ts netOfVenueThreshold), and refuses the whole basket
-// [below-owner-floor] when that sits under the signed floor. When the issuer
-// raises a fee, that ask falls — at 300 bps it is 0.96 x 0.97 = 93.1 % of the
-// quote, where at 100 it was 0.98 x 0.99 = 97.0 % — and a floor signed at 95 %
-// of the GROSS mid before 2026-09-24 is then above it on every route. Measured
-// 2026-09-25 (slot 450224399): the owner's own ANTHROPIC floor, 902223869744110771
-// wad, against a pool mid of 950870892320522646 wad, stood about 190 bps above
-// this ceiling at 300 bps, and the keeper refused every sweep. The floor looks
-// in step with the market; only signing again fixes it.
+// THE THIRD WAY A FLOOR CAN STOP BUYING, AND THE ONE NOTHING ELSE ON THE PAGE
+// SHOWS. "passed" is the market falling through a floor. This is the room the
+// keeper asks of the market falling through it while the market stands still,
+// because the issuer's transfer fee rose.
 //
-// THE CEILING IS THE KEEPER'S BEST CASE: its min_out from a quote exactly AT
-// the pool mid the screen reads. A real quote pays the pool's tier and its
-// impact and lands under the mid (about 19 bps under on a $2.75 leg, measured
-// the same morning), so a floor above this line is refused on any ordinary
-// route. The fee is the catalogue's judged one — the higher of the rate in
-// force and a rate already written — the same reading the build nets and the
-// page previews. A DISPLAY RULE: no gate reads it.
+// THE KEEPER'S RULE, AS DEPLOYED (origin/main df6ca67, jupiter-route.ts
+// investMinOutFor, mirrored by solana-core's keeperInvestMinOutFor and held to
+// the keeper's own answers by test/fixtures/keeper-policy.ts
+// OWNER_FLOOR_MIN_OUT): it BUYS a leg exactly when the venue's threshold —
+// the quote less legSlippageBps(fee), Jupiter's otherAmountThreshold — is at or
+// over the signed floor. The fee is not taken off before that comparison. (It
+// was until df6ca67, and that rule had this card saying "Sign again" over a
+// floor the deployed keeper buys under.)
+//
+// WHICH QUOTE, AND THAT IS WHERE THE FEE COMES IN. Jupiter re-picks the route
+// per quote, and the quote's basis belongs to its LAST hop:
+//   * GROSS (Manifest): about the mid less the route's own cost;
+//   * NET (Raydium CLMM, Meteora DLMM): that, less the transfer fee too.
+// So a floor sits in one of three places, at the fee that matters for the
+// owner's future — the HIGHEST WRITTEN one, the catalogue's judged fee, which
+// is the one in force once its epoch arrives:
+//   "every-route" the net case clears it, and so does the gross one;
+//   "some-routes" only the gross case clears it: a sweep whose best route
+//                 quotes net refuses the basket and waits, one that quotes
+//                 gross buys;
+//   "no-route"    neither clears it: the keeper refuses the whole basket, and
+//                 the SOL conversion with it, on every sweep.
+//
+// THE ROUTE'S OWN COST IS A MODEL, NOT A READING: ROUTE_COST_UNDER_MID_BPS.
+// Measured 2026-09-25 (epoch 1042, slot 450231345) for the owner's $2.75
+// ANTHROPIC leg at slippage 400, against the floor pool's mid: Jupiter's
+// default route (Quantum > Manifest, gross) came back 18.95 bps under it; held
+// to Raydium CLMM, 99.79 bps under and held to Meteora DLMM, 105.83 bps under,
+// both with the 100 bps fee then in force already off. So 25 — the floor
+// pool's own tier — covers the route's cost on every reading that day, with
+// 0 to 25 bps to spare. A bigger buy or a thinner book costs more and moves the
+// real edge up; this is a screen, and no gate reads it.
 
-/** The keeper's min_out per 1e18 USDC raw from a quote at `midWad` exactly, at a `feeBps` transfer fee: the mid less catalogueLegSlippageBps(fee), then less the fee. */
-export function keeperBestMinOutWad(midWad: bigint, feeBps: number): bigint {
-  return netOfTransferFeeWad(floorWad(midWad, catalogueLegSlippageBps(feeBps)), feeBps);
+/** What a route is modelled to cost under the floor pool's mid, before any transfer fee: 25 bps (measured above). */
+export const ROUTE_COST_UNDER_MID_BPS = 25;
+
+/** Whether the route's last hop quotes before the transfer fee (gross) or after it (net). */
+export type LastHopQuote = "gross" | "net";
+
+/**
+ * The venue threshold the keeper compares the owner's floor against, per 1e18
+ * USDC raw, for a route quoting on `lastHop` at a `feeBps` transfer fee: the
+ * mid less ROUTE_COST_UNDER_MID_BPS, less the fee on a net last hop, then less
+ * catalogueLegSlippageBps(fee).
+ */
+export function keeperVenueThresholdWad(midWad: bigint, feeBps: number, lastHop: LastHopQuote): bigint {
+  const quote = floorWad(midWad, ROUTE_COST_UNDER_MID_BPS);
+  const quoted = lastHop === "net" ? netOfTransferFeeWad(quote, feeBps) : quote;
+  return floorWad(quoted, catalogueLegSlippageBps(feeBps));
 }
 
-/** Whether a signed leg floor sits above what the keeper's own min_out can reach at today's mid — the keeper then refuses the basket every sweep. False when either number is missing. */
-export function floorOverKeeperAsk(storedWad: bigint | null, liveWad: bigint | null, feeBps: number): boolean {
-  if (storedWad === null || liveWad === null || storedWad <= 0n || liveWad <= 0n) return false;
-  return storedWad > keeperBestMinOutWad(liveWad, feeBps);
+/** Whether the keeper would buy under `storedWad` on a route quoting on `lastHop`: its own rule, run through the mirror. */
+function keeperBuys(storedWad: bigint, midWad: bigint, feeBps: number, lastHop: LastHopQuote): boolean {
+  const venueThreshold = keeperVenueThresholdWad(midWad, feeBps, lastHop);
+  return keeperInvestMinOutFor({ venueThreshold, netOfVenueThreshold: netOfTransferFeeWad(venueThreshold, feeBps), ownerFloor: storedWad }) !== null;
+}
+
+/** Where a signed leg floor sits against the keeper's rule at today's mid and a `feeBps` fee. */
+export type FloorRoom = "every-route" | "some-routes" | "no-route";
+
+/** The three states above, or null when either number is missing. */
+export function floorRoom(storedWad: bigint | null, liveWad: bigint | null, feeBps: number): FloorRoom | null {
+  if (storedWad === null || liveWad === null || storedWad <= 0n || liveWad <= 0n) return null;
+  if (keeperBuys(storedWad, liveWad, feeBps, "net")) return "every-route";
+  if (keeperBuys(storedWad, liveWad, feeBps, "gross")) return "some-routes";
+  return "no-route";
 }

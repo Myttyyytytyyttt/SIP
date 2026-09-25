@@ -1062,15 +1062,38 @@ export const INVEST_COPY = {
   /** A leg whose limit the market has left far below: it still permits a buy nobody would make today. */
   legFloorSlack: (symbol: string, limit: string, today: string, drift: string): string =>
     `${symbol} may still be bought at up to ${limit}, while the market is at ${today} — ${drift} above today's price. That limit was set just under the price of the day it was signed, and it has not moved since, so it is no longer stopping much. Sign again to set it from today's prices.`,
-  /**
-   * A leg whose signed limit sits above the price the keeper asks the vault to
-   * accept once the leg's transfer fee counts (invest-limits.ts
-   * floorOverKeeperAsk). The market has not passed the limit — the fee moved
-   * the keeper's ask past it — so the card must say so, or a policy that buys
-   * nothing looks healthy.
-   */
-  legFloorOverKeeperAsk: (symbol: string, limit: string, today: string, ask: string, fee: string): string =>
-    `${symbol} is limited to ${limit}, but SaverFi's keeper leaves every buy room for the market and for the ${fee} transfer fee ${symbol}'s issuer has set. Once it counts that fee, even at today's ${today} the price it asks your vault to accept is ${ask} — over your limit — and from then it refuses the whole basket rather than send a buy your vault would reject. Sign again with today's prices to set the limit with that room.`,
+  // ── WHETHER SAVERFI CAN STILL BUY UNDER A SIGNED LIMIT ────────────────────
+  //
+  // invest-limits.ts floorRoom answers "every-route", "some-routes" or
+  // "no-route" for each leg, at the highest transfer fee its issuer has
+  // written; these are the words for the last two. Neither may say more than
+  // the keeper does: under "some-routes" it still buys whenever a sweep's best
+  // route quotes before the fee, so the sentence must not say it refuses; under
+  // "no-route" it refuses the whole basket and the SOL conversion on every
+  // sweep (invest-tick.ts, before the wrap), and the sentence says exactly that.
+  //
+  // `fromEpoch` is the epoch a written rise takes effect in, when the limit is
+  // still fine at the fee charged today and only that rise moves it; null when
+  // the state already holds at today's fee (or no rise is written).
+  roomTitle: "Whether SaverFi can still buy under your limits",
+  /** "some-routes": a note, not an alarm — buying goes on, on some routes. */
+  legFloorSomeRoutes: (symbol: string, limit: string, feeBps: number, fromEpoch: number | null): string =>
+    `${
+      fromEpoch === null
+        ? `At the ${ratePercent(feeBps)} ${symbol}'s issuer charges on every transfer, your ${symbol} limit of ${limit} lets`
+        : `From ${epochWords(fromEpoch)}, ${symbol}'s issuer charges ${ratePercent(feeBps)} on every transfer. Your ${symbol} limit of ${limit} will still let`
+    } SaverFi buy on some of the routes the market offers, but not on every one: when a sweep's best route is one of the others, SaverFi waits for a later sweep instead of buying. Signing again with today's prices keeps every route open.`,
+  /** "no-route": nothing is bought until the owner signs again. The badge says "Sign again" beside it. */
+  legFloorNoRoute: (symbol: string, limit: string, today: string, feeBps: number, fromEpoch: number | null): string =>
+    `${
+      fromEpoch !== null
+        ? `From ${epochWords(fromEpoch)}, when ${symbol}'s issuer starts charging ${ratePercent(feeBps)} on every transfer, SaverFi will not buy`
+        : feeBps > 0
+          ? `At the ${ratePercent(feeBps)} ${symbol}'s issuer charges on every transfer, SaverFi does not buy`
+          : "SaverFi does not buy"
+    } this basket — no stock in it, and no SOL converted toward it — until you sign again. Your ${symbol} limit of ${limit} is too close to today's price of ${today} to leave room for ${
+      feeBps > 0 ? "that fee and " : ""
+    }the market's movement on any route. The market has not passed your limit; signing again with today's prices sets it with that room.`,
   /** A leg whose limit the market has passed: the all-or-nothing refusal, said as what it stops. */
   legFloorPassed: (symbol: string, limit: string, today: string): string =>
     `${symbol} is limited to ${limit} and the market has passed it at ${today}: nothing is bought, and no SOL is converted toward any of it, until you sign again with today's prices.`,
@@ -1188,8 +1211,8 @@ export const INVEST_COPY = {
   paused: "Investing is paused.",
   floorsBelowMarket: "Floors below market",
   floorPassed: "Floor passed",
-  /** The badge when a leg's signed limit sits above the keeper's own ask: nothing is wrong with the market, the limit has to be signed again. */
-  floorOverAsk: "Sign again",
+  /** The badge when a leg's signed limit leaves SaverFi no route to buy on (invest-limits.ts floorRoom "no-route"): nothing is wrong with the market, the limit has to be signed again. */
+  floorNoRoute: "Sign again",
   marketPast: "The market moved past a floor: buying waits until you sign again with today's prices.",
   storedSolFloor: (floor: string, today: string | null): string => (today === null ? `SOL floor ${floor}` : `SOL floor ${floor}, today ${today}`),
   storedLegCeiling: (symbol: string, max: string, today: string | null): string =>

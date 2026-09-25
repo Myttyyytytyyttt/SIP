@@ -796,13 +796,13 @@ function livePrices(pools: readonly (AccountSnapshot | null)[], slot: number | n
  * for the life of the policy, including after a rise already on chain lands.
  *
  * AND THE MARGIN WIDENS WITH THE KEEPER'S ASK (product.ts legFloorMarginBps).
- * Netting the fee is not enough on its own, because the floor is not what the
- * keeper checks against first: its route builder derives min_out from the
- * quote less legSlippageBps(fee) and less the fee, and refuses the route
- * [below-owner-floor] when that min_out sits under the signed floor. At 300 bps
- * the keeper asks 400, not 200, so its min_out drops about 2 % further, and a
- * flat 5 % under the net mid left it under 1 % of room: 700 bps under the net
- * mid at a 300 bps fee gives back the ~3 % the market had at 100.
+ * Netting the fee is not enough on its own, because the keeper buys a leg only
+ * when the venue's threshold — the quote less legSlippageBps(fee) — clears the
+ * signed floor (jupiter-route.ts investMinOutFor), and on a route whose last
+ * hop quotes net that quote already has the fee off. At 300 bps the keeper
+ * asks 400, not 200, so that threshold drops about 2 % further, and a flat 5 %
+ * under the net mid left it about 1 % of room: 700 bps under the net mid at a
+ * 300 bps fee gives back the ~3 % the market had at 100.
  *
  * THE COST, stated where it is paid: at 300 bps the floor is 3 % lower for the
  * fee and 2 % lower for the ask, so a fill may land up to 7 % under the net mid
