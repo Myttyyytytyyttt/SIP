@@ -186,10 +186,19 @@ function Point({ icon: Icon, tone, title, children }: { readonly icon: LucideIco
 }
 
 /**
- * Each step's motion (the owner's clips, public/motion/onboarding{1,2}.mp4,
- * re-encoded to H.264 so every browser plays them — the originals are 10-bit
- * HEVC, which Chrome on Windows and Firefox do not), and its still frame for
- * someone who asked for less motion.
+ * Each step's motion, and its still frame for someone who asked for less motion.
+ *
+ * Made in the launch films' own Remotion project (owner, 09-25), so the setup
+ * looks like the films — shadcn dark, Geist, #0A0B11 with an emerald glow:
+ * launch-video/src/onboarding/OnbTrade.tsx → welcome (six terminals send SOL
+ * into SaverFi) and OnbVault.tsx → vault (SaverFi sends it into a vault only
+ * the owner's key opens), rebuilt by launch-video/scripts/render-onboarding.sh.
+ *
+ * Both are 1440×810 H.264 (yuv420p, so every browser plays them), 60 fps,
+ * exactly 5 s, silent, and loop seamlessly with one keyframe per loop. The
+ * poster IS frame 0, so the reduced-motion image and the first frame of the
+ * video are the same picture. The vault clip keeps everything inside the centre
+ * 12:5 band, which is all StepMotion's `wide` crop shows.
  */
 export const STEP_MOTION = {
   welcome: { video: "/motion/onboarding-welcome.mp4", poster: "/motion/onboarding-welcome.jpg" },
