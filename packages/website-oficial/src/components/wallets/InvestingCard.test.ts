@@ -1,7 +1,7 @@
 // The investing card rendered to HTML in each state, with Privy mocked, and its buttons pressed: the
 // pattern VaultCard.test.ts uses. Pressing a button runs the real flow against a stub client.
 
-import { ANDURIL_MINT, ANTHROPIC_MINT, CATALOGUE, JUPITER_V6, OFFERED_LEGS, RAYDIUM_CLMM, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT, isOfferable, legFloorWad, offerProblems } from "@sip/solana-core/client";
+import { ANDURIL_MINT, ANTHROPIC_MINT, CATALOGUE, JUPITER_V6, OFFERED_LEGS, RAYDIUM_CLMM, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT, floorWad, isOfferable, legFloorWad, netOfTransferFeeWad, offerProblems, usdcRawPer1e8LegRaw } from "@sip/solana-core/client";
 import { Keypair } from "@solana/web3.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -68,7 +68,8 @@ import {
 } from "@/components/wallets/InvestingCard";
 import { VaultWriteLock, type WriteProgress } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
-import { USDC_DECIMALS, formatUnits } from "@/lib/amounts";
+import { USDC_DECIMALS, formatUnits, formatUsd } from "@/lib/amounts";
+import { keeperBestMinOutWad } from "@/lib/invest-limits";
 import { PICKER_MAX_LEGS } from "@/lib/basket-picker";
 import { INVEST_COPY } from "@/lib/vault-copy";
 import type { InvestmentPolicyJson, VaultApi, VaultStateJson } from "@/lib/vault-api";
@@ -198,7 +199,7 @@ describe("InvestingCard", () => {
     // unit that ARRIVES, net of that 3 %, and 700 bps under that — $18.00 /
     // (0.97 x 0.93) = $19.95 — and the sentence says why the room is wider.
     expect(html).toContain(
-      "ANTHROPIC is never bought above $19.95 per 100,000,000 raw units that reach your vault (7.5 % over today&#x27;s pool price once a 3 % transfer fee is counted — the highest its issuer has set; wider than the usual 5.3 % because at that fee each buy asks the market for more room, and the limit has to leave it)",
+      "ANTHROPIC is never bought above $19.95 per 100,000,000 raw units that reach your vault (7.5 % over today&#x27;s pool price once a 3 % transfer fee is counted — the highest its issuer has set, in force now or written for a later epoch, so while a lower fee applies a buy may land further over today&#x27;s price; wider than the usual 5.3 % because at that fee each buy asks the market for more room, and the limit has to leave it)",
     );
     // THE PROSE NAMES THE WHOLE BASKET, from the offered legs and their weights.
     // It used to open "Your vault invests in SPYx (SP500 xStock) through Raydium"
@@ -613,7 +614,12 @@ describe("InvestingCard", () => {
 
   it("a policy: on, the basket, its floors against today's prices below market, the caps, what it used and invested, and whether it can buy", () => {
     const holdings: VaultStateJson["holdings"] = { status: "exists", items: [{ tokenAccount: account(), mint: USDC_MINT, amountRaw: "3000000", decimals: 6, uiAmount: "3", tokenProgram: TOKEN_PROGRAM }] };
-    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: POLICY }, holdings }) }));
+    // SIGNED TODAY, UNDER TODAY'S RULE: ANTHROPIC's floor net of the 3 % its
+    // issuer wrote and 700 bps under that (legFloorWad). POLICY's own 95 % of
+    // the gross mid is the pre-2026-09-24 floor the keeper can no longer clear
+    // at that fee — the "sign again" case, pinned in its own test below.
+    const signedNow = { ...POLICY, legs: POLICY.legs.map((leg) => (leg.mint === ANTHROPIC_MINT ? { ...leg, minOutRateWad: String(legFloorWad(BigInt(PRICES!.legs[1]!.wad), 300)) } : leg)) };
+    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: signedNow }, holdings }) }));
     expect(html).toContain("Investing is on.");
     expect(html).toContain("Floors below market");
     expect(html).toContain("SPYx · 50 %, ANTHROPIC · 50 %");
@@ -622,15 +628,15 @@ describe("InvestingCard", () => {
     expect(html).toContain("$25.00");
     expect(html).toContain("SOL floor $90.03, today $100.04");
     expect(html).toContain("SPYx ceiling $801.80 per 100,000,000 raw units, today $761.71");
-    expect(html).toContain("ANTHROPIC ceiling $18.95 per 100,000,000 raw units, today $18.00");
+    expect(html).toContain("ANTHROPIC ceiling $19.95 per 100,000,000 raw units, today $18.00");
     expect(html).toContain("Waiting: it buys once the vault holds $5.00 of USDC.");
     expect(html).toContain("Signing again does not refill this month&#x27;s cap.");
     expect(buttons("Sign again with today's prices")).toHaveLength(1);
     expect(buttons("Pause investing")).toHaveLength(1);
     expect(buttons("Sign investment policy")).toHaveLength(0);
     // AND NOTHING ABOUT DRIFT, because these floors are exactly where they were
-    // signed: 90.03 against 100.04 is the 10 % convert margin, and both legs sit
-    // 5 % under today. A notice that fired here would fire on every policy the
+    // signed: 90.03 against 100.04 is the 10 % convert margin, SPYx sits 5 %
+    // under today and ANTHROPIC its 979 bps (the 3 % fee, then 7 %). A notice that fired here would fire on every policy the
     // moment it was signed, which is a notice nobody would read.
     expect(html).not.toContain("The limits you signed do not follow the market");
   });
@@ -686,6 +692,39 @@ describe("InvestingCard", () => {
     const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: policy } }) }));
     expect(html).not.toContain("ANTHROPIC may still be bought");
     expect(html).not.toContain("The limits you signed do not follow the market");
+    expect(html).not.toContain("over your limit");
+  });
+
+  /**
+   * THE REFUSAL THE CARD USED TO HIDE. Measured 2026-09-25: the owner's
+   * ANTHROPIC floor, signed at 95 % of the gross mid before the floor was netted
+   * of the fee, sat above the keeper's min_out at the 300 bps its issuer wrote
+   * for epoch 1043, and the keeper refused the basket [below-owner-floor] every
+   * sweep — while this card called the floor in step and the badge said
+   * "Floors below market". Here: the same 95 % of the gross mid the screen reads.
+   */
+  it("tells the owner to sign again when a limit signed at 95 % of the gross price sits above what the keeper asks once ANTHROPIC's 3 % counts", () => {
+    const mid = BigInt(PRICES!.legs[1]!.wad);
+    const signedGross = floorWad(mid, 500);
+    // The keeper's best case at 300 bps: the mid less its 400 bps ask, less the 3 %.
+    expect(keeperBestMinOutWad(mid, 300)).toBe(netOfTransferFeeWad(floorWad(mid, 400), 300));
+    expect(signedGross > keeperBestMinOutWad(mid, 300)).toBe(true);
+    const policy = { ...POLICY, legs: POLICY.legs.map((leg) => (leg.mint === ANTHROPIC_MINT ? { ...leg, minOutRateWad: String(signedGross) } : leg)) };
+    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: policy } }) }));
+    expect(html).toContain("The limits you signed do not follow the market");
+    expect(html).toContain(
+      INVEST_COPY.legFloorOverKeeperAsk(
+        "ANTHROPIC",
+        formatUsd(usdcRawPer1e8LegRaw(signedGross)),
+        formatUsd(usdcRawPer1e8LegRaw(mid)),
+        formatUsd(usdcRawPer1e8LegRaw(keeperBestMinOutWad(mid, 300))),
+        "3 %",
+      ).replaceAll("'", "&#x27;"),
+    );
+    expect(html).toContain(`>${INVEST_COPY.floorOverAsk}<`);
+    expect(html).not.toContain(`>${INVEST_COPY.floorsBelowMarket}<`);
+    // The market has NOT passed it: this is not the "Floor passed" refusal.
+    expect(html).not.toContain(`>${INVEST_COPY.floorPassed}<`);
   });
 
   it("Pause asks for the policy on screen to be signed again with investing off, and is offered with no prices on screen; it never hands the flow the click event", async () => {

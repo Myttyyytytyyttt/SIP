@@ -821,13 +821,17 @@ export const INVEST_COPY = {
    * price is true only once that cut is counted — and the page says so rather
    * than letting a bigger number look like a looser limit. AND A WIDER MARGIN
    * IS SAID AS ONE: at 700 the limit is 7.5 % over, not 5.3 %, and the sentence
-   * says why the room is there.
+   * says why the room is there. AND THE FEE MAY NOT BE IN FORCE YET: the build
+   * nets the higher of the live and the written fee, so on 2026-09-25 (epoch
+   * 1042, 100 bps in force, 300 written for 1043) the floor 0.97 x 0.93 = 90.2 %
+   * of the mid let a unit that arrives at 0.99 of it cost up to 9.7 % over
+   * today's price, not 7.5 %. The sentence says the room is larger until then.
    */
   legCeiling: (symbol: string, max: string, fee: string | null, marginBps: number): string => {
     const over = overTodayPercent(marginBps);
     if (fee === null) return `${symbol} is never bought above ${max} per 100,000,000 raw units (${over} over today's pool price)`;
     return (
-      `${symbol} is never bought above ${max} per 100,000,000 raw units that reach your vault (${over} over today's pool price once a ${fee} transfer fee is counted — the highest its issuer has set` +
+      `${symbol} is never bought above ${max} per 100,000,000 raw units that reach your vault (${over} over today's pool price once a ${fee} transfer fee is counted — the highest its issuer has set, in force now or written for a later epoch, so while a lower fee applies a buy may land further over today's price` +
       `${marginBps > LEG_FLOOR_MARGIN_BPS ? `; wider than the usual ${overTodayPercent(LEG_FLOOR_MARGIN_BPS)} because at that fee each buy asks the market for more room, and the limit has to leave it` : ""})`
     );
   },
@@ -1058,6 +1062,15 @@ export const INVEST_COPY = {
   /** A leg whose limit the market has left far below: it still permits a buy nobody would make today. */
   legFloorSlack: (symbol: string, limit: string, today: string, drift: string): string =>
     `${symbol} may still be bought at up to ${limit}, while the market is at ${today} — ${drift} above today's price. That limit was set just under the price of the day it was signed, and it has not moved since, so it is no longer stopping much. Sign again to set it from today's prices.`,
+  /**
+   * A leg whose signed limit sits above the price the keeper asks the vault to
+   * accept once the leg's transfer fee counts (invest-limits.ts
+   * floorOverKeeperAsk). The market has not passed the limit — the fee moved
+   * the keeper's ask past it — so the card must say so, or a policy that buys
+   * nothing looks healthy.
+   */
+  legFloorOverKeeperAsk: (symbol: string, limit: string, today: string, ask: string, fee: string): string =>
+    `${symbol} is limited to ${limit}, but SaverFi's keeper leaves every buy room for the market and for the ${fee} transfer fee ${symbol}'s issuer has set. Once it counts that fee, even at today's ${today} the price it asks your vault to accept is ${ask} — over your limit — and from then it refuses the whole basket rather than send a buy your vault would reject. Sign again with today's prices to set the limit with that room.`,
   /** A leg whose limit the market has passed: the all-or-nothing refusal, said as what it stops. */
   legFloorPassed: (symbol: string, limit: string, today: string): string =>
     `${symbol} is limited to ${limit} and the market has passed it at ${today}: nothing is bought, and no SOL is converted toward any of it, until you sign again with today's prices.`,
@@ -1175,6 +1188,8 @@ export const INVEST_COPY = {
   paused: "Investing is paused.",
   floorsBelowMarket: "Floors below market",
   floorPassed: "Floor passed",
+  /** The badge when a leg's signed limit sits above the keeper's own ask: nothing is wrong with the market, the limit has to be signed again. */
+  floorOverAsk: "Sign again",
   marketPast: "The market moved past a floor: buying waits until you sign again with today's prices.",
   storedSolFloor: (floor: string, today: string | null): string => (today === null ? `SOL floor ${floor}` : `SOL floor ${floor}, today ${today}`),
   storedLegCeiling: (symbol: string, max: string, today: string | null): string =>

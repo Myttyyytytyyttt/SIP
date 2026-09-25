@@ -35,7 +35,7 @@ import { CATALOGUE, CONVERT_FLOOR_MARGIN_BPS, LEG_FLOOR_MARGIN_BPS, OFFERED_LEGS
 
 import { LEG_FEE, LOSS_FORGIVEN, POOL_DEPTH } from "../../../solana-core/test/fixtures/keeper-policy";
 
-import { FLOOR_DRIFT_NOTICE_MULTIPLE, floorDrift, legFloorUnderMidBps, signedSlackBps } from "@/lib/invest-limits";
+import { FLOOR_DRIFT_NOTICE_MULTIPLE, floorDrift, floorOverKeeperAsk, keeperBestMinOutWad, legFloorUnderMidBps, signedSlackBps } from "@/lib/invest-limits";
 import {
   INVEST_COPY,
   LOSS_DROPPED_AFTER_TXS,
@@ -529,6 +529,39 @@ describe("the floor the owner signed, and the market that moved away from it", (
    * permits a fill that much worse than today); the rate falling THROUGH the
    * floor means nothing buys at all.
    */
+  /**
+   * THE KEEPER'S BEST ASK, FROM THE SHARED VECTOR. The keeper's min_out is the
+   * quote less legSlippageBps(fee) = max(slippageBps, fee + slippageMarginBps),
+   * less the fee; from a quote exactly at the mid that is its ceiling. Derived
+   * here from LEG_FEE rather than from catalogueLegSlippageBps, so a drift in
+   * either the keeper's vector or the page's arithmetic goes red.
+   */
+  it("says a signed floor is over the keeper's ask exactly when the keeper's best min_out cannot reach it — the owner's own ANTHROPIC floor, measured 2026-09-25", () => {
+    const legSlippage = (fee: bigint): bigint => (LEG_FEE.slippageBps > fee + LEG_FEE.slippageMarginBps ? LEG_FEE.slippageBps : fee + LEG_FEE.slippageMarginBps);
+    const bestAsk = (mid: bigint, fee: bigint): bigint => {
+      const afterSlippage = (mid * (10_000n - legSlippage(fee))) / 10_000n;
+      return (afterSlippage * (10_000n - fee)) / 10_000n;
+    };
+    // Measured at slot 450224399: the owner's signed floor, and the pool mid.
+    const ownerFloor = 902_223_869_744_110_771n;
+    const mid = 950_870_892_320_522_646n;
+    for (const fee of [0n, 100n, 300n]) expect(keeperBestMinOutWad(mid, Number(fee))).toBe(bestAsk(mid, fee));
+    // At 300 the keeper's best is 0.96 x 0.97 = 93.12 % of the mid, and the
+    // owner's floor (94.88 % of it) sits about 189 bps above: refused every sweep.
+    expect(floorOverKeeperAsk(ownerFloor, mid, 300)).toBe(true);
+    expect(Number(((ownerFloor - keeperBestMinOutWad(mid, 300)) * 10_000n) / keeperBestMinOutWad(mid, 300))).toBe(189);
+    // At the 100 in force before epoch 1043 the same floor clears (0.98 x 0.99 = 97.02 %).
+    expect(floorOverKeeperAsk(ownerFloor, mid, 100)).toBe(false);
+    // A floor signed under today's rule clears at 300.
+    expect(floorOverKeeperAsk(legFloorWad(mid, 300), mid, 300)).toBe(false);
+    // THE BOUNDARY: at the ask it clears, one unit over it does not.
+    expect(floorOverKeeperAsk(keeperBestMinOutWad(mid, 300), mid, 300)).toBe(false);
+    expect(floorOverKeeperAsk(keeperBestMinOutWad(mid, 300) + 1n, mid, 300)).toBe(true);
+    // An unread number says nothing.
+    expect(floorOverKeeperAsk(null, mid, 300)).toBe(false);
+    expect(floorOverKeeperAsk(ownerFloor, null, 300)).toBe(false);
+  });
+
   it("measures the slack against the floor, and calls it out only past twice the margin it was signed at", () => {
     // At signing, a floor set m bps under the market sits m/(10,000-m) under it
     // as a ratio: 526 bps at the 500 the legs are signed with, 1,111 at the
@@ -577,7 +610,7 @@ describe("the floor the owner signed, and the market that moved away from it", (
     expect(overTodayPercent(700)).toBe("7.5 %");
     expect(INVEST_COPY.legCeiling("SPYx", "$801.80", null, 500)).toBe("SPYx is never bought above $801.80 per 100,000,000 raw units (5.3 % over today's pool price)");
     expect(INVEST_COPY.legCeiling("ANTHROPIC", "$19.95", "3 %", 700)).toBe(
-      "ANTHROPIC is never bought above $19.95 per 100,000,000 raw units that reach your vault (7.5 % over today's pool price once a 3 % transfer fee is counted — the highest its issuer has set; " +
+      "ANTHROPIC is never bought above $19.95 per 100,000,000 raw units that reach your vault (7.5 % over today's pool price once a 3 % transfer fee is counted — the highest its issuer has set, in force now or written for a later epoch, so while a lower fee applies a buy may land further over today's price; " +
         "wider than the usual 5.3 % because at that fee each buy asks the market for more room, and the limit has to leave it)",
     );
     // At a 1 % fee the margin is the plain one, and no wider room is claimed.

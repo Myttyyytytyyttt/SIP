@@ -509,7 +509,12 @@ function farFromShown(live: bigint | null, shown: bigint | null): boolean {
 }
 
 /** Why the floors a build answered are not SIP's margins under the rates it read, for SIP's basket — or are not about the prices the form showed; null when they are. */
-function floorsProblem(floors: PolicyFloorsJson | undefined, shown: VaultStateJson["prices"] | null | undefined): string | null {
+function floorsProblem(
+  floors: PolicyFloorsJson | undefined,
+  shown: VaultStateJson["prices"] | null | undefined,
+  /** The mints the owner picked: the fee ceiling binds only these, as it does on the server. */
+  chosenMints: ReadonlySet<string>,
+): string | null {
   const margin = (wad: bigint | null, bps: number): bigint | null => {
     try {
       return wad === null ? null : floorWad(wad, bps);
@@ -538,12 +543,21 @@ function floorsProblem(floors: PolicyFloorsJson | undefined, shown: VaultStateJs
     // (the 3 % fee, plus the 200 bps legFloorMarginBps widens by at 300), and
     // a leg charging more than 300 is one the keeper refuses to buy at all.
     //
+    // THE CEILING BINDS ONLY A CHOSEN LEG, exactly as the server's
+    // fee_over_ceiling does (build-handler.ts investPolicy): a stock the owner
+    // did not pick is priced in this block but never reaches the policy, so its
+    // fee stops nothing he signs. Holding it to the ceiling anyway would refuse
+    // EVERY basket — a SPYx-only one included — the day an issuer writes more
+    // than 300 on any offered leg, which the server deliberately keeps building.
+    // An unchosen leg's arithmetic is still redone below, over any fee a mint
+    // can carry (0 to 10,000), because its rate is still a price reading.
+    //
     // THE MARGIN IS THE CORE'S legFloorWad, not a number this page keeps: 95 %
     // of the net rate at a fee of 100 bps or less, 93 % at 300, because the
     // keeper asks the market for more room at a dearer fee and the floor has to
     // leave its min_out that room (solana-core product.ts legFloorMarginBps).
     const fee = entry?.transferFeeBps;
-    if (typeof fee !== "number" || !Number.isInteger(fee) || fee < 0 || fee > CATALOGUE_MAX_FEE_BPS) {
+    if (typeof fee !== "number" || !Number.isInteger(fee) || fee < 0 || fee > (chosenMints.has(leg.mint) ? CATALOGUE_MAX_FEE_BPS : 10_000)) {
       return `its ${leg.symbol} floor names a transfer fee SaverFi's keeper would not buy through`;
     }
     const mid = rawFrom(entry.liveWad);
@@ -646,7 +660,8 @@ export async function investPolicyFlow(deps: PensionFlowDeps, input: InvestPolic
   // verifiable names, so reaching here means the caller went around it.
   if (venueProgram === undefined) return refused(FAILURE_COPY.unverifiableVenue(venueName));
   return pensionWrite<InvestPolicyBuildJson>(deps, request, async (body) => {
-    const problem = floorsProblem(body.floors, input.shownPrices);
+    const chosen = input.weights === undefined ? OFFERED_LEGS.map((leg, index) => ({ leg, index })) : OFFERED_LEGS.map((leg, index) => ({ leg, index })).filter(({ leg }) => input.weights!.has(leg.mint));
+    const problem = floorsProblem(body.floors, input.shownPrices, new Set(chosen.map(({ leg }) => leg.mint)));
     if (problem !== null) throw new IntentError(FAILURE_COPY.builtMismatch(problem));
     const vault = await deriveVaultAddress(input.pensionKey);
     const equalShares = basketWeightsBps(OFFERED_LEGS.length);
@@ -656,7 +671,6 @@ export async function investPolicyFlow(deps: PensionFlowDeps, input: InvestPolic
     // the stocks the owner picked, so the legs checked here are the picked ones
     // with each one's floor taken from that block BY MINT. With no weights at
     // all this is the whole catalogue at equal shares, exactly as before.
-    const chosen = input.weights === undefined ? OFFERED_LEGS.map((leg, index) => ({ leg, index })) : OFFERED_LEGS.map((leg, index) => ({ leg, index })).filter(({ leg }) => input.weights!.has(leg.mint));
     const weightOf = (mint: string, index: number): number => input.weights?.get(mint) ?? equalShares[index]!;
     return {
       instruction: "set_invest_policy",

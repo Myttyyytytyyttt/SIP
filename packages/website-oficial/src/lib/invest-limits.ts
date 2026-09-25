@@ -9,7 +9,18 @@
  * existing imports are untouched.
  */
 
-import { CONVERT_FLOOR_MARGIN_BPS, OFFERED_LEGS, floorWad, judgedFeeBps, legFloorMarginBps, legFloorWad, usdcRawPer1e8LegRaw, usdcRawPerSol } from "@sip/solana-core/client";
+import {
+  CONVERT_FLOOR_MARGIN_BPS,
+  OFFERED_LEGS,
+  catalogueLegSlippageBps,
+  floorWad,
+  judgedFeeBps,
+  legFloorMarginBps,
+  legFloorWad,
+  netOfTransferFeeWad,
+  usdcRawPer1e8LegRaw,
+  usdcRawPerSol,
+} from "@sip/solana-core/client";
 
 import { rawFrom } from "@/lib/amounts";
 import type { VaultStateJson } from "@/lib/vault-api";
@@ -144,4 +155,39 @@ export function floorDrift(storedWad: bigint | null, liveWad: bigint | null, mar
   if (storedWad > liveWad) return { kind: "passed" };
   const driftBps = Number(((liveWad - storedWad) * 10_000n) / storedWad);
   return { kind: driftBps > signedSlackBps(marginBps) * FLOOR_DRIFT_NOTICE_MULTIPLE ? "slack" : "in-step", driftBps };
+}
+
+// ── A SIGNED FLOOR THE KEEPER'S OWN ASK CAN NO LONGER CLEAR ──────────────────
+//
+// THE THIRD WAY A FLOOR STOPS BUYING, AND THE ONE NOTHING ON THE PAGE SHOWED.
+// "passed" is the market falling through a floor; this is the KEEPER's ask
+// falling through it while the market stands still. The keeper hands invest()
+// a min_out of the quote less legSlippageBps(fee), less the leg's transfer fee
+// (jupiter-route.ts netOfVenueThreshold), and refuses the whole basket
+// [below-owner-floor] when that sits under the signed floor. When the issuer
+// raises a fee, that ask falls — at 300 bps it is 0.96 x 0.97 = 93.1 % of the
+// quote, where at 100 it was 0.98 x 0.99 = 97.0 % — and a floor signed at 95 %
+// of the GROSS mid before 2026-09-24 is then above it on every route. Measured
+// 2026-09-25 (slot 450224399): the owner's own ANTHROPIC floor, 902223869744110771
+// wad, against a pool mid of 950870892320522646 wad, stood about 190 bps above
+// this ceiling at 300 bps, and the keeper refused every sweep. The floor looks
+// in step with the market; only signing again fixes it.
+//
+// THE CEILING IS THE KEEPER'S BEST CASE: its min_out from a quote exactly AT
+// the pool mid the screen reads. A real quote pays the pool's tier and its
+// impact and lands under the mid (about 19 bps under on a $2.75 leg, measured
+// the same morning), so a floor above this line is refused on any ordinary
+// route. The fee is the catalogue's judged one — the higher of the rate in
+// force and a rate already written — the same reading the build nets and the
+// page previews. A DISPLAY RULE: no gate reads it.
+
+/** The keeper's min_out per 1e18 USDC raw from a quote at `midWad` exactly, at a `feeBps` transfer fee: the mid less catalogueLegSlippageBps(fee), then less the fee. */
+export function keeperBestMinOutWad(midWad: bigint, feeBps: number): bigint {
+  return netOfTransferFeeWad(floorWad(midWad, catalogueLegSlippageBps(feeBps)), feeBps);
+}
+
+/** Whether a signed leg floor sits above what the keeper's own min_out can reach at today's mid — the keeper then refuses the basket every sweep. False when either number is missing. */
+export function floorOverKeeperAsk(storedWad: bigint | null, liveWad: bigint | null, feeBps: number): boolean {
+  if (storedWad === null || liveWad === null || storedWad <= 0n || liveWad <= 0n) return false;
+  return storedWad > keeperBestMinOutWad(liveWad, feeBps);
 }

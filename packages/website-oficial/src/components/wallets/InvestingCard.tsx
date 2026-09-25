@@ -99,7 +99,7 @@ import {
   type PickedLeg,
   type PickedRow,
 } from "@/lib/basket-picker";
-import { floorDrift, legFloorUnderMidBps, todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
+import { floorDrift, floorOverKeeperAsk, keeperBestMinOutWad, legFloorUnderMidBps, todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
 import { floorsState } from "@/lib/live-model";
 import type { InvestPolicyBuildJson, InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
 import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, shortAddress, signedLegsOf } from "@/lib/vault-copy";
@@ -1320,17 +1320,25 @@ function PolicySummary({
     else if (solDrift.kind === "slack")
       driftLines.push(INVEST_COPY.solFloorSlack(formatUsd(usdcRawPerSol(storedConvert)), formatUsd(usdcRawPerSol(liveConvert)), ratePercent(solDrift.driftBps)));
   }
+  // A LIMIT THE KEEPER'S OWN ASK HAS FALLEN THROUGH (invest-limits.ts
+  // floorOverKeeperAsk): the market still stands above it, so the badge would
+  // say "Floors below market" over a basket the keeper refuses every sweep.
+  let overAsk = false;
   for (const leg of legs) {
     // The margin a floor is signed at under the GROSS mid the screen reads: the
     // leg's fee and legFloorMarginBps compounded (979 bps at 300), so a floor
     // rightly signed that far under is not called slack the day it is signed.
     const asset = catalogueAsset(leg.mint);
-    const drift = floorDrift(leg.floor, leg.live, legFloorUnderMidBps(asset === null || asset.fee === null ? 0 : judgedFeeBps(asset.fee)));
+    const feeBps = asset === null || asset.fee === null ? 0 : judgedFeeBps(asset.fee);
+    const drift = floorDrift(leg.floor, leg.live, legFloorUnderMidBps(feeBps));
     if (drift === null || leg.floor === null || leg.live === null) continue;
     const limit = formatUsd(usdcRawPer1e8LegRaw(leg.floor));
     const today = formatUsd(usdcRawPer1e8LegRaw(leg.live));
     if (drift.kind === "passed") driftLines.push(INVEST_COPY.legFloorPassed(leg.symbol, limit, today));
-    else if (drift.kind === "slack") driftLines.push(INVEST_COPY.legFloorSlack(leg.symbol, limit, today, ratePercent(drift.driftBps)));
+    else if (floorOverKeeperAsk(leg.floor, leg.live, feeBps)) {
+      overAsk = true;
+      driftLines.push(INVEST_COPY.legFloorOverKeeperAsk(leg.symbol, limit, today, formatUsd(usdcRawPer1e8LegRaw(keeperBestMinOutWad(leg.live, feeBps))), ratePercent(feeBps)));
+    } else if (drift.kind === "slack") driftLines.push(INVEST_COPY.legFloorSlack(leg.symbol, limit, today, ratePercent(drift.driftBps)));
   }
 
   return (
@@ -1340,7 +1348,9 @@ function PolicySummary({
         <CardDescription>{policy.enabled ? INVEST_COPY.enabled : INVEST_COPY.paused}</CardDescription>
         {pricesKnown ? (
           <CardAction>
-            <Badge variant={belowMarket ? "outline" : "destructive"}>{belowMarket ? INVEST_COPY.floorsBelowMarket : INVEST_COPY.floorPassed}</Badge>
+            <Badge variant={belowMarket && !overAsk ? "outline" : "destructive"}>
+              {!belowMarket ? INVEST_COPY.floorPassed : overAsk ? INVEST_COPY.floorOverAsk : INVEST_COPY.floorsBelowMarket}
+            </Badge>
           </CardAction>
         ) : null}
       </CardHeader>
