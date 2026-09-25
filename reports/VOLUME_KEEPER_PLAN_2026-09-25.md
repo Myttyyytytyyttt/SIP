@@ -180,8 +180,8 @@ cambia la configuración del protocolo.
 - **Arreglar un bloqueo:** hoy el servidor no dejaría **pausar** un vault que esté en volumen, ni cambiar su tope o
   su reserva, sin sacarlo antes del modo volumen (pausar la inversión sí funciona). Hoy no existe ningún vault en
   volumen, pero hay que abrirlo antes de la prueba real.
-- **Textos que prometen de más:** la portada ya ofrece "2 % de su volumen" y el pie ofrece el cobro por volumen. Se quedan hasta la fase 3, o los
-  corrijo antes si quieres.
+- **Portada y pie:** ya ofrecen el cobro por volumen ("2 % de su volumen" en la portada). Se quedan como decidiste
+  hoy; con la fase 3 pasan a ser verdad.
 - Al final, encender `VOLUME_MODE_OFFERED` y actualizar los tests que lo fijan.
 
 ## 6. Lista de trabajo
