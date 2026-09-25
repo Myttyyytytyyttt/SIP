@@ -30,6 +30,16 @@ No deposit. No decision to save. Trade where you already trade.
 
 ---
 
+<div align="center">
+
+<img src="docs/media/saverfi-demo.gif" alt="SaverFi: a trade is filled, a slice is put aside, and the vault buys tokenized stock" width="100%">
+
+<sub><b>A trade fills. A slice is put aside. The vault buys real tokenized stock — and only your key can open it.</b></sub>
+
+</div>
+
+---
+
 ## The idea
 
 People who trade every day rarely save. Not because they can't — because saving is a separate decision, made on a separate day, with money that already feels spent.
