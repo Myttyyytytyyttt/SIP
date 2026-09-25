@@ -28,6 +28,11 @@ import { USDC_MINT } from "../src/invest-decision.js";
 import { runInvestTick } from "../src/invest-tick.js";
 import type { CarryBook } from "../src/settle-decision.js";
 import { runSettleTick } from "../src/settle-tick.js";
+import { MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
+
+// THE SETTLE TICK ITSELF, NOT ONE KEEPER'S SHARE OF IT: these turns settle both modes, as one keeper did before
+// SIP_SOLANA_ROLE split them (keeperModes pins that split on its own).
+const BOTH_MODES: readonly number[] = [MODE_PROFIT, MODE_VOLUME];
 
 const programId = new PublicKey(idl.address);
 const crank = benchKey("crank");
@@ -114,7 +119,7 @@ describe("what a user costs the sweep, measured against the real ticks", () => {
     const vaults = await readVaults(program, links.map((link) => link.vault));
     chain.takeCalls();
 
-    const settle = await runSettleTick({
+    const settle = await runSettleTick({ settles: BOTH_MODES,
       connection,
       program,
       link: links[0]!,
@@ -159,7 +164,7 @@ describe("what a user costs the sweep, measured against the real ticks", () => {
     const vaults = await readVaults(program, links.map((link) => link.vault));
     chain.takeCalls();
 
-    const settle = await runSettleTick({
+    const settle = await runSettleTick({ settles: BOTH_MODES,
       connection,
       program,
       link: links[0]!,
@@ -191,7 +196,7 @@ describe("what a user costs the sweep, measured against the real ticks", () => {
       const links = await discoverLinks(connection, programId, accountDiscriminator("TradingLink"));
       const vaults = await readVaults(program, links.map((link) => link.vault));
       chain.takeCalls();
-      await runSettleTick({
+      await runSettleTick({ settles: BOTH_MODES,
         connection,
         program,
         link: links[0]!,

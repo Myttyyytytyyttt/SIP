@@ -76,8 +76,8 @@ describe("the settlement mirror's shape", () => {
     expect(setup).toContain("settlementColumns:");
   });
 
-  it("is fed the notional the window actually measured", () => {
-    expect(keeper).toContain("volumeRaw: settle.tradedLamports ?? 0n,");
+  it("is fed the notional the window actually measured: the volume keeper's own measure, else the walk's", () => {
+    expect(keeper).toContain("volumeRaw: settle.volumeLamports ?? settle.tradedLamports ?? 0n,");
   });
 });
 

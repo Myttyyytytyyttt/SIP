@@ -69,3 +69,10 @@ describe("the leaderboard's way back", () => {
     expect(renderToStaticMarkup(createElement(OpenPension, { returning: false }))).toContain('href="/"');
   });
 });
+
+describe("the navbar's logo", () => {
+  it("leads to the landing, which shows whoever is looking — '/' is a connected key's own pension", () => {
+    const html = renderToStaticMarkup(createElement(SiteHeader, { activitySheet: null, control: null, account: null, current: "pension" }));
+    expect(html).toMatch(/<h1[^>]*><a[^>]*href="\/welcome"[^>]*>[\s\S]*SaverFi[\s\S]*<\/a><\/h1>/);
+  });
+});

@@ -78,6 +78,12 @@ export interface SavingsRule {
   readonly thresholdUsd: number | null;
   readonly targets: readonly SavingsTarget[];
   readonly paused: boolean;
+  /**
+   * Said under "Invests in" on a live card when the list alone would mislead:
+   * the policy could not be read, or the basket is chosen but not approved yet.
+   * The sample never sets it.
+   */
+  readonly targetsNote?: string;
 }
 
 export type Side = "buy" | "sell";
@@ -288,11 +294,19 @@ export interface SavingsStats {
    * `settledOutsideHistory`: the vault's state records a settlement the loaded
    * history does not hold, so nothing may say "none yet".
    * `holdingsUnreadable`: the token list could not be read — not "holds nothing".
+   * `investedOutsideHistory`: the policy's own counters record a buy and the
+   * loaded history holds none, so "No investments yet" would be false — true;
+   * null when that cannot be told (the policy could not be read); false when
+   * the history holds a buy or there is no policy to have bought with.
+   * `lastInvestedDay`: the newest UTC day those counters record a buy on, and
+   * what that WHOLE day spent in dollars (USDC, a dollar each).
    */
   readonly pricedToday?: boolean;
   readonly totalSavedSol?: string | null;
   readonly settledOutsideHistory?: boolean;
   readonly holdingsUnreadable?: boolean;
+  readonly investedOutsideHistory?: boolean | null;
+  readonly lastInvestedDay?: { readonly day: string; readonly spentUsd: number } | null;
 }
 
 export interface DashboardMock {
@@ -310,6 +324,16 @@ export interface DashboardMock {
   readonly stats: SavingsStats;
   readonly curve: readonly SavingsPoint[];
   readonly days: readonly SavingsDay[];
+  /**
+   * THE WEEK SQUARES' OWN DAYS, when they are not `days` (a live page, 09-25):
+   * always the last thirteen weeks, so the squares never vanish because the
+   * loaded history is one busy day. A day the history cannot vouch for is null
+   * (drawn apart, never as a zero); `days` stays the covered span the stats
+   * count, so "Active days … of N" never counts a day nobody could read.
+   */
+  readonly calendar?: readonly SavingsDay[];
+  /** The vault's own account, shown under the total on a live page. The sample has none. */
+  readonly vault?: { readonly address: string; readonly href: string };
   readonly holdings: readonly Holding[];
   /** Newest first. */
   readonly trades: readonly Trade[];

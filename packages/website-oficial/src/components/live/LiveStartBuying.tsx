@@ -38,7 +38,6 @@ import {
   TOKEN_PROGRAM,
   USDC_MINT,
   WSOL_MINT,
-  defaultInvestPolicy,
   legFloorMarginBps,
   ownerComputeBudget,
   priorityFeeLamports,
@@ -59,6 +58,7 @@ import { todaysLimits } from "@/lib/invest-limits";
 import { START_BUYING_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
 import { basketOnShelf } from "@/lib/onboarding";
+import { BASE_THRESHOLD_RAW, minimumFor } from "@/lib/rule-settings";
 import { saveBasketChoice } from "@/lib/onboarding-memory";
 import type { VaultStateJson } from "@/lib/vault-api";
 import { DEFAULT_VENUE_NAME } from "@/lib/vault-flows";
@@ -99,8 +99,17 @@ export function startBuyingPlan(mints: readonly string[]): StartBuyingPlan {
   );
   if (!weights.ok) return { request: null, legs: [], purchaseRaw: null, window: null };
   const legs = assets.map((asset) => ({ asset, weightBps: weights.byMint.get(asset.mint)! }));
-  // The form's own starting minimum: the catalogue's $5, split over the shelf.
-  const minimumText = formatUnits(defaultInvestPolicy(OFFERED_LEGS.length).minInvestment, USDC_DECIMALS);
+  // THE $10 BASE (owner, 09-25): every basket starts buying when $10 is ready,
+  // whatever the number of stocks — so the minimum PER LEG is what makes the
+  // whole basket reach $10 (rule-settings.ts). It used to be the catalogue's $5
+  // split over the whole shelf, which made a one-stock basket buy at $2.50.
+  const minimumText = formatUnits(
+    minimumFor(
+      BASE_THRESHOLD_RAW,
+      legs.map((leg) => leg.weightBps),
+    ),
+    USDC_DECIMALS,
+  );
   const minimum = readMinimum(minimumText, null);
   if (!minimum.ok) return { request: null, legs, purchaseRaw: null, window: null };
   const window = basketLimits(legs, minimum.raw);

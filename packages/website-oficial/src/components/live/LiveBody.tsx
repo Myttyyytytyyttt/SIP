@@ -223,6 +223,9 @@ export function LiveBody({
                     days={page.days}
                     rule={page.rule}
                     now={page.now}
+                    trades={page.trades}
+                    {...(page.calendar === undefined ? {} : { calendar: page.calendar })}
+                    {...(page.vault === undefined ? {} : { vault: page.vault })}
                     {...(page.unit === undefined ? {} : { unit: page.unit })}
                     className={PENSION_SLOT}
                   />

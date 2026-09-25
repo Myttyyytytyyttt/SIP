@@ -1476,6 +1476,8 @@ export const PROGRESS_COPY = {
   notConfirmedDetail: "The transaction was sent, and Solana has not confirmed it yet. Check again before signing anything new.",
   checkAgain: "Check again",
   refused: "Refused",
+  /** A write the person cancelled in their wallet: neutral, never the red "Refused". */
+  cancelled: "Cancelled",
   rateLimited: "Too many requests",
   unreadable: "Solana did not answer",
 } as const;

@@ -101,12 +101,12 @@ const measured = (over: Partial<WindowMeasurement> = {}): WindowMeasurement => (
 
 describe("the vault's mode", () => {
   it("lets both real modes through to be measured", () => {
-    expect(modeDecision(vault())).toBeNull();
-    expect(modeDecision(vault({ skimMode: MODE_VOLUME }))).toBeNull();
+    expect(modeDecision(vault(), [MODE_PROFIT, MODE_VOLUME])).toBeNull();
+    expect(modeDecision(vault({ skimMode: MODE_VOLUME }), [MODE_PROFIT, MODE_VOLUME])).toBeNull();
   });
 
   it("stops a mode no program version defines, before anything is measured", () => {
-    const decision = modeDecision(vault({ skimMode: 9 }));
+    const decision = modeDecision(vault({ skimMode: 9 }), [MODE_PROFIT, MODE_VOLUME]);
     expect(decision?.outcome).toBe("UNSUPPORTED_MODE");
     expect(decision?.detail).toContain("skim_mode 9");
   });

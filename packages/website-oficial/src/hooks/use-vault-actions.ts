@@ -73,6 +73,8 @@ export interface CreateRequest {
   readonly walletReserve: bigint;
   /** The profit rate in basis points; the product's default when absent. */
   readonly skimBps?: number;
+  /** The volume rate in basis points; the product's default when absent. */
+  readonly volumeBps?: number;
 }
 
 export interface InvestRequest {
@@ -287,7 +289,14 @@ export function useVaultWrite(key: string) {
       return run("create", ({ onStep, onBuilt }) =>
         createVaultFlow(
           { api, onStep, onBuilt, signers: pensionSigner({ wallets, pensionKey, signTransaction: signOne }) },
-          { pensionKey, mode: input.mode, maxContribution: input.maxContribution, walletReserve: input.walletReserve, ...(input.skimBps === undefined ? {} : { skimBps: input.skimBps }) },
+          {
+            pensionKey,
+            mode: input.mode,
+            maxContribution: input.maxContribution,
+            walletReserve: input.walletReserve,
+            ...(input.skimBps === undefined ? {} : { skimBps: input.skimBps }),
+            ...(input.volumeBps === undefined ? {} : { volumeBps: input.volumeBps }),
+          },
         ),
       );
     },

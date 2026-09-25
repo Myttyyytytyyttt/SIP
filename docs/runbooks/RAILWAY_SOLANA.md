@@ -480,6 +480,65 @@ poco justo después del cambio y, en `/status`, alguna barrida de más con `lane
 Borra `SIP_SOLANA_DOORBELL_SECRET` en Railway. Tras el redespliegue el vigilante vuelve a girar a todos en cada barrida,
 como antes. Después borra el webhook en el panel de Helius, para que deje de gastar créditos.
 
+## 6. El vigilante de volumen (`sip-solana-volume-keeper`)
+
+Es **otro servicio**, con el mismo código y la misma imagen que el de la sección 1. Una variable decide qué hace:
+`SIP_SOLANA_ROLE=volume`.
+
+- **Cobra solo los vaults en modo volumen.** El vigilante de siempre (sin esa variable) cobra solo los de beneficio. Así
+  cada vínculo tiene exactamente un servicio que lo cobra.
+- **Nunca invierte.** El vigilante de siempre sigue invirtiendo los ahorros de todos los vaults, sean del modo que sean.
+- **Tiene su propio candado** (`sip-solana-volume-keeper`): nunca espera al de siempre ni le quita el suyo.
+- **No usa el timbre de Helius**: gira todos los vínculos en cada barrida. Con `SIP_SOLANA_DOORBELL_SECRET` puesto **no
+  arranca**: ese secreto solo lo tiene el vigilante de siempre, así que un `SIP_SOLANA_ROLE=volume` puesto en ese servicio
+  por error falla el despliegue y Railway deja funcionando el anterior.
+- **Sus alertas empiezan por `[volume]`** en el mismo Telegram.
+- En los vaults de beneficio no cobra nada. **En seco**, su fila de `/status` enseña cuánto volumen lleva el tramo sin
+  cobrar y lo que costaría en modo volumen, y lo mismo del **último tramo ya cobrado** (ese no se vacía cuando el
+  vigilante de siempre cobra un trade ganador al minuto). Armado ya no lo calcula, para no gastar lecturas de Helius en
+  vaults que cobra el otro.
+
+Qué cuenta como volumen, la frecuencia de cobro y el cambio de modo: `reports/VOLUME_KEEPER_PLAN_2026-09-25.md`.
+
+### Fase A — en seco (no cobra nada, no lleva ninguna clave)
+
+1. **New → GitHub repo → SIP**, en el mismo proyecto que `sip-solana-keeper`. Llámalo `sip-solana-volume-keeper`.
+2. **Settings → Source**: *Branch* = `volume-keeper` mientras el código no esté en `main`. *Root Directory* vacío.
+3. **Settings → Build**: el builder tiene que decir *Dockerfile* (lo detecta en la raíz). *Watch Paths*: las mismas que
+   el de la sección 1.
+4. **Settings → Deploy**: *Healthcheck Path* `/health`, reinicio *On Failure* con 10 intentos. **Settings → Scale**: 1
+   réplica. **Settings → Networking**: genera un dominio.
+5. **Variables**, solo estas tres:
+   - `SIP_SOLANA_ROLE` = `volume`
+   - `SIP_SOLANA_PROGRAM_ID` = el mismo valor que en `sip-solana-keeper` (es público)
+   - `SIP_SOLANA_RPC_URLS` = una URL de Helius con **una clave de API nueva**, creada en el panel de Helius para este
+     servicio, para no gastar las peticiones por segundo del vigilante que cobra. Pégala solo en Railway.
+6. **No pongas** `SIP_SOLANA_BROADCAST`, `SIP_SOLANA_ALLOW_BROADCAST`, `SIP_SOLANA_SETTLE_KEY`, las de Privy,
+   `DATABASE_URL`, `SIP_SOLANA_DOORBELL_SECRET` ni `SIP_SOLANA_ALERT_WEBHOOK`. En seco no pide candado, no lee claves de
+   firma y no escribe historial (sección 3).
+7. Comprueba:
+   - `https://<dominio>/health` responde `{"ok":true}`;
+   - `https://<dominio>/status` dice `"role":"volume"`, `"mode":"dry-run"`, `"armed":false`;
+   - tu wallet tiene `"invest":"none (volume keeper)"`, y en `detail` la vista previa del volumen;
+   - en *Deploy Logs*, `keeper starting` dice `role: volume keeper — settles VOLUME vaults only, never invests`.
+
+### Fase B — cobrar de verdad (después, y en este orden)
+
+1. **Primero el vigilante de siempre con el código nuevo** (`main`), para que deje de tocar los vaults de volumen.
+2. **Después, un vault en modo volumen** para la prueba real. Hace falta abrir el volumen en la web solo para ese vault.
+3. **Por último, armar este servicio.** Añade como *referencia* a `sip-solana-keeper`, sin pegar valores (Railway:
+   *Add Variable → Reference*): `DATABASE_URL`, `SIP_SOLANA_BROADCAST`, `SIP_SOLANA_ALLOW_BROADCAST`,
+   `SIP_SOLANA_SETTLE_KEY`, `SIP_SOLANA_PRIVY_APP_ID`, `SIP_SOLANA_PRIVY_APP_SECRET`,
+   `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY`, `SIP_SOLANA_PRIVY_SIGNER_ID`, `SIP_SOLANA_PRIVY_POLICY_ID` y
+   `SIP_SOLANA_ALERT_WEBHOOK`. La cadena solo acepta esa llave de cobro, y cada wallet tiene sentado un solo firmante de
+   Privy: por eso son las mismas.
+4. Comprueba en `/status`: `"mode":"live"`, `missingLiveCondition` null. La primera barrida puede decir otra cosa
+   mientras toma su candado.
+
+**Si falta `SIP_SOLANA_ROLE`**, este servicio arranca como un segundo vigilante de beneficio. En seco no hace nada.
+Armado, compite por el candado del de siempre y solo uno de los dos actúa, pero sería el servicio equivocado.
+Un valor que no sea `volume` ni `profit` impide arrancar.
+
 ## Si algo falla
 
 - **El vigilante termina de desplegar y se reinicia en bucle**: abre los logs de `sip-solana-keeper` y busca

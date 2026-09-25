@@ -217,6 +217,10 @@ export const LIVE_COPY = {
   progressLabel: "Progress to next investment",
   lastInvestment: "Last investment",
   noInvestmentLoaded: "No investment in the loaded history",
+  // The chain's counters record a buy the loaded page does not hold. The
+  // amount is the whole UTC day's, and there is no transaction to link to.
+  olderThanHistory: "Older than the history loaded here",
+  lastBuyOutsideHistory: (day: string, amount: string): string => `Last buy ${day} (UTC) · ${amount} that day`,
   manageInWallets: "Manage in Wallets",
   resumeInvesting: "Resume investing",
 
@@ -300,7 +304,10 @@ export const ACTIVITY_COPY = {
   settledCapped: (owed: string, max: string): string => `${owed} SOL owed, capped at ${max} SOL; the rest is not carried over`,
   /** What a settlement measures: the vault's own mode, never the other one. */
   measureProfit: "profit",
-  measureVolume: "volume",
+  // "1 % of $355.09 in buys and sells", never "… volume": one settlement is
+  // every buy AND sell since the last one, and "$355 volume" read as one trade
+  // counted twice (owner, 09-25, on his first volume settles).
+  measureVolume: "in buys and sells",
 
   wrapped: "Wrapped SOL for investing",
   converted: "Converted SOL to USDC",

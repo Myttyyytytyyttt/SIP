@@ -104,7 +104,7 @@ describe("a settlement the state records and the loaded history does not hold", 
 
     // …and through the adapter that is an empty curve, which the chart draws as a band.
     expect(toDashboardMock(data, { complete: false }).curve).toEqual([]);
-    const html = renderToStaticMarkup(createElement(PensionChart, { curve: [], settledOutsideHistory: true }));
+    const html = renderToStaticMarkup(createElement(PensionChart, { now: "2026-09-16T12:00:00.000Z", curve: [], settledOutsideHistory: true }));
     expect(html).not.toContain(LIVE_COPY.chartEmpty);
     expect(html).toContain(LIVE_COPY.chartOutsideHistory);
   });
@@ -121,7 +121,7 @@ describe("a settlement the state records and the loaded history does not hold", 
    * standing and the band would spring back on every screen over 640px.
    */
   it("keeps a sized band instead of collapsing to one line, at both breakpoints", () => {
-    const html = renderToStaticMarkup(createElement(PensionChart, { curve: [], settledOutsideHistory: true, className: "h-64 w-full sm:h-72" }));
+    const html = renderToStaticMarkup(createElement(PensionChart, { now: "2026-09-16T12:00:00.000Z", curve: [], settledOutsideHistory: true, className: "h-64 w-full sm:h-72" }));
     expect(html).toContain("border-dashed");
     expect(html).toContain("h-28");
     expect(html).toContain("sm:h-28");
@@ -139,7 +139,7 @@ describe("a settlement the state records and the loaded history does not hold", 
       { date: new Date(NOW_MS - 86_400_000).toISOString().slice(0, 10), total: 3.66 },
       { date: new Date(NOW_MS).toISOString().slice(0, 10), total: 3.66 },
     ];
-    const html = renderToStaticMarkup(createElement(PensionChart, { curve: flat, settledOutsideHistory: true, className: "h-64 w-full sm:h-72" }));
+    const html = renderToStaticMarkup(createElement(PensionChart, { now: "2026-09-16T12:00:00.000Z", curve: flat, settledOutsideHistory: true, className: "h-64 w-full sm:h-72" }));
     // The figure is on screen, and the caption still says why the line is level.
     expect(html).toContain("$3.66");
     expect(html).toContain(LIVE_COPY.chartFlat);

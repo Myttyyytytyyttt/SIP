@@ -34,10 +34,15 @@ import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import { assertSettleShape, type SolanaWalletSubmitter } from "../src/privy-signer.js";
 import { MAX_SUPPORTED_TRANSACTION_VERSION } from "../src/measure-window.js";
-import { attestationMessage } from "../src/program-scripts.js";
-import { attestationInputs, type CarryBook, type LossCarry } from "../src/settle-decision.js";
+import { MODE_PROFIT, MODE_VOLUME, attestationMessage } from "../src/program-scripts.js";
+import { attestationInputs, keeperModes, type CarryBook, type LossCarry } from "../src/settle-decision.js";
 import { CONFIRM_POLL_MS, CONFIRM_TIMEOUT_MS, runSettleTick, type SettleDeps, type SettleResult } from "../src/settle-tick.js";
+import { createVolumeBase } from "../src/volume-base.js";
 import { FakeLedger, chained } from "./fake-ledger.js";
+
+// THE SETTLE TICK ITSELF, NOT ONE KEEPER'S SHARE OF IT: these turns settle both modes, as one keeper did before
+// SIP_SOLANA_ROLE split them (keeperModes pins that split on its own).
+const BOTH_MODES: readonly number[] = [MODE_PROFIT, MODE_VOLUME];
 
 const programId = new PublicKey(idl.address);
 const EPOCH = 300_000_000;
@@ -163,6 +168,7 @@ function chain(extra: Readonly<Record<string, Handler>> = {}) {
     new anchor.AnchorProvider(connection, { publicKey: PublicKey.default, signTransaction: refuse, signAllTransactions: refuse }, { commitment: "confirmed" }),
   );
   const deps = (over: Partial<SettleDeps> = {}): SettleDeps => ({
+    settles: BOTH_MODES,
     connection,
     program,
     link,
@@ -218,6 +224,66 @@ async function underFakeTimers(turn: () => Promise<SettleResult>): Promise<Settl
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("one keeper per mode, before any RPC call", () => {
+  // EXACTLY ONE SERVICE SETTLES EACH LINK. The profit keeper used to walk a VOLUME
+  // vault's span and could zero-settle it; now each keeper leaves the other's mode
+  // alone before its first request, live or dry.
+  it("the profit keeper leaves a VOLUME vault alone, and the volume keeper a PROFIT one", async () => {
+    const cases = [
+      ["profit", MODE_VOLUME, /the volume keeper settles/],
+      ["volume", MODE_PROFIT, /the profit keeper settles/],
+    ] as const;
+    for (const [role, skimMode, says] of cases) {
+      for (const live of [true, false]) {
+        const c = chain();
+        const result = await runSettleTick(
+          c.deps({ settles: keeperModes(role), vault: { ...vault, skimMode }, ...(live ? {} : { live: false, attester: null, walletSigner: null }) }),
+        );
+        expect(result.outcome, `${role} keeper, live ${live}`).toBe("UNSUPPORTED_MODE");
+        expect(result.detail).toMatch(says);
+        expect(c.calls, `${role} keeper, live ${live}`).toEqual([]);
+        expect(c.sent).toEqual([]);
+      }
+    }
+  });
+
+  it("the volume keeper charges a VOLUME vault what its probe measured, at the volume rate, attested in mode 1", async () => {
+    const c = chain();
+    const probed: string[] = [];
+    const result = await runSettleTick(
+      c.deps({
+        settles: keeperModes("volume"),
+        vault: { ...vault, skimMode: MODE_VOLUME },
+        live: false,
+        attester: null,
+        walletSigner: null,
+        // A probe that says the one trade above the link traded 1 SOL.
+        volumeProbe: (tx) => {
+          probed.push(tx.transaction.signatures[0]!);
+          return { counted: true, lamports: 1_000_000_000n };
+        },
+        volumeBase: createVolumeBase({ volumeBps: 200, boundary: async () => ({ slot: null, detail: "" }), nowSeconds: () => 0 }),
+      }),
+    );
+    expect(probed).toEqual(["trade-5"]);
+    expect(result).toMatchObject({
+      outcome: "SETTLED",
+      mode: MODE_VOLUME,
+      baseLamports: 1_000_000_000n,
+      volumeLamports: 1_000_000_000n,
+      // 1 SOL at 200 bps.
+      expectedLamports: 20_000_000n,
+    });
+    expect(result.detail).toContain("1000000000 lamports of measured notional");
+  });
+
+  it("each keeper still walks its own mode's vault", async () => {
+    const c = chain();
+    await runSettleTick(c.deps({ settles: keeperModes("profit"), live: false, attester: null, walletSigner: null }));
+    expect(c.calls).toContain("getSignaturesForAddress");
+  });
 });
 
 describe("the wallet reserve, before anything is signed", () => {

@@ -82,6 +82,12 @@ export interface AlerterOptions {
   readonly destination?: AlertDestination;
   /** Turned into buttons on Telegram and into a `links` field elsewhere. */
   readonly links?: AlertLinks;
+  /**
+   * Put in front of every title, in the log and in the body: "[volume] " on the
+   * volume keeper, so its alerts are told apart from the profit keeper's in the
+   * one Telegram chat both send to. Absent, titles are exactly as fired.
+   */
+  readonly titlePrefix?: string;
   /** Injected for tests. */
   readonly now?: () => number;
   readonly post?: (url: string, body: string) => Promise<void>;
@@ -207,7 +213,8 @@ export function createAlerter(options: AlerterOptions): Alerter {
   let lastSentAt: number | null = null;
 
   return {
-    fire(alert: Alert): void {
+    fire(fired_: Alert): void {
+      const alert: Alert = options.titlePrefix === undefined ? fired_ : { ...fired_, title: `${options.titlePrefix}${fired_.title}` };
       const at = now();
       const previous = fired.get(alert.key);
       // A CONDITION THAT GETS WORSE IS NOT A REPEAT OF ITSELF. crank-low is one

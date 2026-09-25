@@ -271,7 +271,9 @@ export function SaveCalendar({ days, now }: { days: readonly SavingsDay[]; now: 
   const q3 = quartile(0.75);
 
   const tone = (value: number | null): string => {
-    if (value === null || value <= 0) return "bg-muted";
+    // Unknown — outside the history this page loaded — is not a day without a save.
+    if (value === null) return "bg-muted/35";
+    if (value <= 0) return "bg-muted";
     if (value <= q1) return "bg-emerald-500/30";
     if (value <= q2) return "bg-emerald-500/55";
     if (value <= q3) return "bg-emerald-500/80";

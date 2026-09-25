@@ -327,13 +327,13 @@ describe("createVault", () => {
     expect((await build({ action: "createVault", owner, mode: 0 })).json.error?.code).toBe("unreadable");
   });
 
-  it("mode 1 is 400 volume_not_offered while VOLUME is not offered, before any read; offered, it builds", async () => {
-    const off = setup();
+  it("mode 1 is 400 volume_not_offered while VOLUME is not offered, before any read; offered — the default since 09-25 — it builds", async () => {
+    const off = setup(undefined, { volumeOffered: false });
     const refused = await off.build({ action: "createVault", owner: key(), mode: 1 });
     expect([refused.status, refused.json.error?.code, refused.json.error?.message]).toEqual([400, "volume_not_offered", "Volume mode is not offered yet."]);
     expect(off.upstream.calls).toHaveLength(0);
 
-    const on = setup(undefined, { volumeOffered: true });
+    const on = setup();
     const built = await on.build({ action: "createVault", owner: key(), mode: 1 });
     expect(built.status).toBe(200);
     const sip = parseLegacyMessage(splitWire(fromB64(built.json.txBase64)).message).instructions[2]!;
@@ -469,14 +469,14 @@ describe("setPolicy", () => {
     expect(upstream.calls).toHaveLength(0);
   });
 
-  it("mode volume is 400 volume_not_offered while VOLUME is not offered, before any read; offered, it builds", async () => {
+  it("mode volume is 400 volume_not_offered while VOLUME is not offered, before any read; offered — the default since 09-25 — it builds", async () => {
     const owner = key();
-    const off = setup(vaultChain(owner));
+    const off = setup(vaultChain(owner), { volumeOffered: false });
     const refused = await off.build({ action: "setPolicy", owner, ...WHOLE_RULE, mode: "volume" });
     expect([refused.status, refused.json.error?.code, refused.json.error?.message]).toEqual([400, "volume_not_offered", "Volume mode is not offered yet."]);
     expect(off.upstream.calls).toHaveLength(0);
 
-    const on = setup(vaultChain(owner), { volumeOffered: true });
+    const on = setup(vaultChain(owner));
     const built = await on.build({ action: "setPolicy", owner, ...WHOLE_RULE, mode: "volume" });
     expect(built.status).toBe(200);
     expect(decodeArgs("set_policy_v2", instructionsOf(built.json.txBase64)[2]!.data)).toMatchObject({ mode: 1 });

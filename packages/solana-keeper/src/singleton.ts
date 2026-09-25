@@ -21,6 +21,19 @@ import { createHash } from "node:crypto";
 export const KEEPER_LOCK_NAME = "sip-solana-keeper";
 
 /**
+ * The volume keeper's lock: ANOTHER NAME, so the two services on one database
+ * each hold their own. Under one name the volume keeper would never act while
+ * the profit keeper held it, and during a handover it could take the profit
+ * keeper's place. Each lock still keeps two replicas of one role from acting.
+ */
+export const VOLUME_KEEPER_LOCK_NAME = "sip-solana-volume-keeper";
+
+/** The lock a keeper of this role claims. */
+export function lockNameFor(role: "profit" | "volume"): string {
+  return role === "volume" ? VOLUME_KEEPER_LOCK_NAME : KEEPER_LOCK_NAME;
+}
+
+/**
  * A 64-bit key for pg_try_advisory_lock, derived from a name.
  *
  * THE WORKER'S DERIVATION, REIMPLEMENTED RATHER THAN IMPORTED. The EVM worker,

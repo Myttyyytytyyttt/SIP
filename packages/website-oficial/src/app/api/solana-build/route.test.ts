@@ -240,7 +240,7 @@ describe("/api/solana-build", () => {
     expect(methods.filter((method) => method === "getLatestBlockhash")).toHaveLength(1);
   });
 
-  it("an existing vault is 409 vault_exists; VOLUME is 400 volume_not_offered with nothing read", async () => {
+  it("an existing vault is 409 vault_exists; VOLUME is offered since 09-25, so it is never refused as not offered", async () => {
     useEnv(SOLANA_ENV);
     const owner = someKey();
     const methods = stubChain(new Map([[deriveVaultPda(owner).toBase58(), vaultOf(owner)]]));
@@ -248,8 +248,8 @@ describe("/api/solana-build", () => {
     expect([exists.status, exists.json.error?.code]).toEqual([409, "vault_exists"]);
     const readsSoFar = methods.length;
     const volume = await answer(await POST(buildRequest({ action: "createVault", owner: someKey(), mode: 1 })));
-    expect([volume.status, volume.json.error?.code, volume.json.error?.message]).toEqual([400, "volume_not_offered", "Volume mode is not offered yet."]);
-    expect(methods).toHaveLength(readsSoFar);
+    expect(volume.json.error?.code).not.toBe("volume_not_offered");
+    expect(readsSoFar).toBeGreaterThan(0);
   });
 
   it("prepareLink refuses until the program is configured, and a wallet linked elsewhere; then answers the SIP_LINK_V1 consent", async () => {

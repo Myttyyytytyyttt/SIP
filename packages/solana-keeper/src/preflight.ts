@@ -28,13 +28,15 @@
 // resolved fails here loudly instead of reaching out of a build container.
 // Measured cost of all four: 3 ms.
 
+import { readFileSync } from "node:fs";
 import type * as anchor from "@coral-xyz/anchor";
 import { AnchorProvider, Program } from "@coral-xyz/anchor";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { GOLDEN_V2_HEX, GOLDEN_V2_INPUTS } from "./attestation-golden.js";
 import { JUPITER_V6_PROGRAM } from "./invest-decision.js";
 import { convertCall, investCall, wrapSolCall } from "./invest-tick.js";
-import { isExternalFlowTx } from "./measure-window.js";
+import { tradeNotional } from "./measure-volume.js";
+import { isExternalFlowTx, readTransaction } from "./measure-window.js";
 import {
   OLD_NUVEM_PROGRAM_ID,
   SIP_PROGRAM_ID,
@@ -70,7 +72,37 @@ export interface PreflightResult {
  * on purpose — which is the point. test/attestation-golden.test.ts holds the
  * second copy, under vitest.
  */
-export const EXPECTED_INVARIANTS = 18;
+export const EXPECTED_INVARIANTS = 20;
+
+/**
+ * THE VOLUME RULE, IN THE IMAGE THAT WILL CHARGE ON IT. Two of the owner's real
+ * mainnet transactions (test/fixtures/volume-mainnet.json), decoded by web3.js
+ * through readTransaction exactly as a live walk decodes them, version 1 message
+ * included: his first buy of 2026-09-23 must measure 1 010 000 000 lamports and our
+ * settle of 2026-09-19 nothing. Under vitest a CommonJS interop fault is invisible
+ * (see anchor-interop.ts); this runs under the image's own Node.
+ */
+async function volumeVector(): Promise<{ readonly buy: bigint | null; readonly settle: boolean }> {
+  const file = JSON.parse(readFileSync(new URL("../test/fixtures/volume-mainnet.json", import.meta.url), "utf8")) as {
+    readonly fixtures: Readonly<Record<string, { readonly signature: string; readonly wallet: string; readonly result: unknown }>>;
+  };
+  const answer = (name: string) => file.fixtures[name]!;
+  const connection = new Connection("http://preflight.invalid", {
+    fetch: async (_input, init) => {
+      const request = JSON.parse(String(init?.body)) as { readonly id: unknown; readonly params: readonly unknown[] };
+      const entry = Object.values(file.fixtures).find((candidate) => candidate.signature === request.params[0]);
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: entry?.result ?? null }), { status: 200 });
+    },
+  });
+  const measured = async (name: string) => {
+    const tx = await readTransaction(connection, answer(name).signature, "finalized");
+    if (tx === null) throw new Error(`the volume vector ${name} decoded to null`);
+    return tradeNotional(tx, new PublicKey(answer(name).wallet), SIP_PROGRAM_ID);
+  };
+  const buy = await measured("owner-buy-1");
+  const settle = await measured("owner-settle-2026-09-19");
+  return { buy: buy.counted ? buy.lamports : null, settle: settle.counted };
+}
 
 const ED25519 = "Ed25519SigVerify111111111111111111111111111";
 const SYSTEM = "11111111111111111111111111111111";
@@ -308,6 +340,14 @@ export async function runPreflight(): Promise<PreflightResult> {
     invariants.push([`${name} builds the bytes it has always built`, hex === BUILDER_VECTORS.get(name), true]);
   }
   invariants.push(["convert and invest carry the venue account they were given", built.venueAccountsPresent, true]);
+  let volume: Awaited<ReturnType<typeof volumeVector>>;
+  try {
+    volume = await volumeVector();
+  } catch (error) {
+    return { ok: false, program: SIP, invariants: invariants.length, failure: `the volume vector threw: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  invariants.push(["the volume rule measures the owner's first buy at 1 010 000 000 lamports", volume.buy === 1_010_000_000n, true]);
+  invariants.push(["the volume rule does not count our own settle", volume.settle, false]);
 
   for (const [name, got, want] of invariants) {
     if (got !== want) {

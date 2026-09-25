@@ -103,11 +103,25 @@ export function SiteHeader({
           </SheetContent>
         </Sheet>
 
-        {/* The brand's mark before its name, as the footer wears it — in the ink the theme calls for. */}
-        <div className="flex items-center gap-2">
-          <SipMark className="h-5 w-auto" />
-          <h1 className="font-semibold tracking-tight">SaverFi</h1>
-        </div>
+        {/*
+          The brand's mark before its name, as the footer wears it — in the ink
+          the theme calls for. It leads to the landing (owner, 09-25): "/" is a
+          connected key's own pension, so the front door has its own address.
+        */}
+        <h1 className="font-semibold tracking-tight">
+          <AppLink
+            href="/welcome"
+            title="SaverFi — home"
+            className="flex items-center gap-2 rounded-md outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            onClick={(event) => {
+              if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+              turnTo?.("/welcome");
+            }}
+          >
+            <SipMark className="h-5 w-auto" />
+            <span>SaverFi</span>
+          </AppLink>
+        </h1>
 
         <nav aria-label="Main" className="ml-6 hidden items-center gap-1 md:flex">
           {nav.map((item) => (

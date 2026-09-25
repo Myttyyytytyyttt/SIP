@@ -63,6 +63,10 @@ import { expectedContribution, type VolumeBase } from "../src/settle-decision.js
 import { runSettleTick, type SettleResult } from "../src/settle-tick.js";
 import { LOCAL_PORTS, SIP_VAULT_PROGRAM_ID, startLocalValidator, type LocalValidator } from "./local-validator.js";
 
+// THE SETTLE TICK ITSELF, NOT ONE KEEPER'S SHARE OF IT: these turns settle both modes, as one keeper did before
+// SIP_SOLANA_ROLE split them (keeperModes pins that split on its own).
+const BOTH_MODES: readonly number[] = [MODE_PROFIT, MODE_VOLUME];
+
 const SOL = BigInt(LAMPORTS_PER_SOL);
 /** The market's one payment into each wallet: the trade's profit, and the notional the VOLUME seam attests. */
 const TRADE_LAMPORTS = SOL;
@@ -223,7 +227,7 @@ async function keeperTurn(p: Participant): Promise<{ readonly link: ManagedLink;
   const vaults = await readVaults(program, links.map((candidate) => candidate.vault));
   const link = links.find((candidate) => candidate.wallet.equals(p.wallet.publicKey));
   if (link === undefined) throw new Error(`discovery found no link for the ${p.name} wallet`);
-  const result = await runSettleTick({
+  const result = await runSettleTick({ settles: BOTH_MODES,
     connection,
     program,
     link,

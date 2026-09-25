@@ -568,7 +568,7 @@ function MockBody({ load, control, account, current }: { readonly load: Dashboar
             cards={
               <>
                 <SavingsRulePanel rule={rule} stats={stats} activity={activity} now={now} className={RULE_SLOT} />
-                <PensionPanel stats={stats} curve={curve} holdings={holdings} days={days} rule={rule} now={now} className={PENSION_SLOT} />
+                <PensionPanel stats={stats} curve={curve} holdings={holdings} days={days} rule={rule} now={now} trades={trades} className={PENSION_SLOT} />
               </>
             }
           />

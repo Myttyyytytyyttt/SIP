@@ -32,6 +32,34 @@ export function usedInLast30Days(bucketDays: readonly number[], bucketAmounts: r
   return bucketDays.reduce((total, day, index) => (day + 31 > today ? total + (rawFrom(bucketAmounts[index]) ?? 0n) : total), 0n);
 }
 
+/**
+ * THE LAST DAY THE POLICY BOUGHT ANYTHING, FROM THE CHAIN'S OWN COUNTERS.
+ *
+ * Every buy adds its USDC to the bucket of its UTC day (state.rs, invest.rs),
+ * and a re-signed policy keeps the buckets — so the newest bucket holding more
+ * than zero is the day of the last buy, whatever the loaded page of history
+ * holds. The live rule card needs it because that page is fifteen signatures
+ * long: once upkeep pushes the buys off it, "No investments yet" would sit
+ * beside the shares they bought.
+ *
+ * The amount is the WHOLE UTC day's spend, not one transaction's, and there is
+ * no signature to link to. A bucket never written is day 0 with amount 0 and
+ * is skipped; so is one whose amount cannot be read. Null when none is left.
+ */
+export function lastInvestedDay(bucketDays: readonly number[], bucketAmounts: readonly string[]): { readonly day: string; readonly usdcRaw: bigint } | null {
+  let newestDay = 0;
+  let newestRaw = 0n;
+  for (let index = 0; index < bucketDays.length; index += 1) {
+    const day = bucketDays[index]!;
+    const usdcRaw = rawFrom(bucketAmounts[index]) ?? 0n;
+    if (usdcRaw > 0n && Number.isSafeInteger(day) && day > newestDay) {
+      newestDay = day;
+      newestRaw = usdcRaw;
+    }
+  }
+  return newestDay === 0 ? null : { day: new Date(newestDay * 86_400_000).toISOString().slice(0, 10), usdcRaw: newestRaw };
+}
+
 export interface TodaysLimits {
   /** USDC raw per SOL at the convert floor, and at today's rate. */
   readonly floorPerSol: bigint;

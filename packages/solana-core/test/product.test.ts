@@ -71,8 +71,8 @@ describe("the vault a new pension key is offered", () => {
     expect(DEFAULT_VAULT_POLICY.walletReserve).toBe(50_000_000n);
   });
 
-  it("does not offer VOLUME: the owner's decision is open, and changing it must change this test", () => {
-    expect(VOLUME_MODE_OFFERED).toBe(false);
+  it("offers VOLUME since 09-25, with the volume keeper: changing it must change this test", () => {
+    expect(VOLUME_MODE_OFFERED).toBe(true);
   });
 });
 

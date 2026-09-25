@@ -36,7 +36,8 @@ import { LABEL } from "@/lib/classes";
 import { cn } from "@/lib/utils";
 import type { VaultStateJson } from "@/lib/vault-api";
 import { CREATE_VAULT_FEE_LAMPORTS, readLimits } from "@/lib/vault-limits";
-import { PROFIT_RATE, VAULT_COPY, VOLUME_RATE, ratePercent } from "@/lib/vault-copy";
+import { VOLUME_START_BPS } from "@/lib/rule-settings";
+import { PROFIT_RATE, VAULT_COPY, ratePercent } from "@/lib/vault-copy";
 
 type VaultWrite = ReturnType<typeof useVaultWrite>;
 
@@ -158,7 +159,7 @@ function CreateVault({ state, volumeOffered, write, progress }: { readonly state
                 {VAULT_COPY.volumeLabel}
                 {!volumeOffered ? <Badge variant="secondary">{VAULT_COPY.comingSoon}</Badge> : null}
               </span>
-              <span className="block text-xs text-muted-foreground">{volumeOffered ? VAULT_COPY.volumeRule(VOLUME_RATE, shownMax, shownReserve) : VAULT_COPY.volumeComing}</span>
+              <span className="block text-xs text-muted-foreground">{volumeOffered ? VAULT_COPY.volumeRule(ratePercent(VOLUME_START_BPS), shownMax, shownReserve) : VAULT_COPY.volumeComing}</span>
             </span>
           </label>
         </fieldset>
@@ -192,7 +193,10 @@ function CreateVault({ state, volumeOffered, write, progress }: { readonly state
           aria-busy={write.running}
           // An explicit object: the flow gets the limits shown, never a click event.
           onClick={() => {
-            if (limits.ok) void write.createVault({ mode, maxContribution: limits.maxContribution, walletReserve: limits.walletReserve });
+            if (limits.ok) {
+              // A vault made on Volume starts at 1 % of every buy and every sell (owner, 09-25), not the program's 2 %.
+              void write.createVault({ mode, maxContribution: limits.maxContribution, walletReserve: limits.walletReserve, ...(mode === MODE_VOLUME ? { volumeBps: VOLUME_START_BPS } : {}) });
+            }
           }}
         >
           {write.running ? VAULT_COPY.creating : VAULT_COPY.create}

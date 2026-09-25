@@ -120,8 +120,8 @@ describe("VaultCard", () => {
     }
   });
 
-  it("no vault: Profit selected with its rule, Volume greyed with Coming soon, the limits with dollars, and the live rent", () => {
-    const html = render(screen({ kind: "ready", state: stateWith() }));
+  it("no vault, VOLUME not offered: Profit selected with its rule, Volume greyed with Coming soon, the limits with dollars, and the live rent", () => {
+    const html = render(screen({ kind: "ready", state: stateWith() }), { volumeOffered: false });
     expect(radio(html, "0")).toContain('checked=""');
     expect(radio(html, "1")).toContain('disabled=""');
     expect(html).toContain("Profit · 20 % of what your trading wallet gains. The keeper watches your trading wallet&#x27;s SOL.");
@@ -143,7 +143,8 @@ describe("VaultCard", () => {
     const html = render(screen({ kind: "ready", state: stateWith() }), { volumeOffered: true });
     expect(radio(html, "1")).not.toContain('disabled=""');
     expect(html).not.toContain("Coming soon");
-    expect(html).toContain("Volume · 2 % of the SOL value of every buy and sell your trading wallet makes, win or lose.");
+    // A vault made on Volume starts at 1 % (owner, 09-25), not the program's 2 %.
+    expect(html).toContain("Volume · 1 % of the SOL value of every buy and sell your trading wallet makes, win or lose.");
   });
 
   it("Create hands the flow the limits shown as an explicit object, never the click event, and re-reads when the vault already exists", async () => {
