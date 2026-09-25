@@ -79,8 +79,12 @@ import {
   probeAmount,
   venueImpactBps,
   MAX_PYTH_AGE_SECONDS,
+  MAX_PYTH_CONF_BPS,
   MAX_PYTH_DEVIATION_BPS,
   oracleConvertDecision,
+  oracleConvertReading,
+  pythConfBps,
+  pythConservativeBounds,
   rollingDecision,
   routeRateWad,
   rollingTotal,
@@ -2082,6 +2086,173 @@ describe("the oracle gate on the SOL hop", () => {
     expect(Object.keys(blind)).not.toContain("outcome");
     expect(blind.convert === false && blind.detail).toContain("only the USDC the vault already holds is invested");
     expect(ask()).toEqual(convertDecision({ minConvertRateWad: 1n }));
+  });
+});
+
+describe("the confidence arm: what Pyth says about how well it knows the price", () => {
+  // MAINNET'S OWN NUMBERS, read read-only 2026-09-25 17:49Z from the two
+  // receiver-owned accounts (slot 450424606, both Full, both 3 s behind the
+  // chain clock). Nine samples over the next 64 s stayed inside SOL/USD
+  // 0.55-1.31 bps and USDC/USD 2.38-2.65 bps, emas 1.09 and 2.17.
+  const MEASURED_SOL_PRICE = 12_087_258_518n;
+  const MEASURED_SOL_CONF = 1_384_734n;
+  const MEASURED_USDC_PRICE = 99_989_636n;
+  const MEASURED_USDC_CONF = 25_864n;
+  const measuredSol = (): PythPriceUpdate => ({ ...solFeed(PUBLISHED, MEASURED_SOL_PRICE), conf: MEASURED_SOL_CONF, emaConf: 1_318_000n });
+  const measuredUsdc = (): PythPriceUpdate => ({ ...usdcFeed(PUBLISHED, MEASURED_USDC_PRICE), conf: MEASURED_USDC_CONF, emaConf: 21_600n });
+  /** $120.87258518 over $0.99989636 in USDC raw per lamport x 1e18, from the measured pair. */
+  const MEASURED_WAD = 120_885_113_713_185_234n;
+  const measured = (over: Partial<Parameters<typeof oracleConvertDecision>[0]> = {}) =>
+    oracleConvertDecision({ sol: measuredSol(), usdc: measuredUsdc(), nowUnixSeconds: CHAIN_NOW, routeWad: null, ...over });
+
+  /** A conf whose TRUNCATED ratio against `price` is exactly `bps` — rounded up, because the ratio floors. */
+  const confAt = (price: bigint, bps: bigint) => (price * bps + 9_999n) / 10_000n;
+  const widen = (bps: bigint) => ({
+    sol: { ...solFeed(), conf: confAt(10_259_321_149n, bps) },
+    usdc: { ...usdcFeed(), conf: confAt(99_987_040n, bps) },
+  });
+
+  it("pins the ceiling where the measurements put it, under everything it backs", () => {
+    expect(MAX_PYTH_CONF_BPS).toBe(50n);
+    // Pyth's doc offers 2 % as an EXAMPLE threshold. On these two feeds that is
+    // 200 bps against a pair living under 3, a line that could never fire.
+    expect(MAX_PYTH_CONF_BPS).toBeLessThan(200n);
+    // ~19x the widest USDC/USD reading and ~38x the widest SOL/USD one, so
+    // ordinary movement never reaches it and a real disagreement does.
+    expect(MAX_PYTH_CONF_BPS).toBeGreaterThan(3n * 10n);
+    // A TENTH OF WHAT IT BACKS: the deviation arm's gap and, doubled (both feeds
+    // at the ceiling at once), still a tenth of the 1000 bps convert-floor
+    // margin the owner signs — so a pair admitted here can still clear the floor.
+    expect(MAX_PYTH_CONF_BPS * 10n).toBe(MAX_PYTH_DEVIATION_BPS);
+    expect(MAX_PYTH_CONF_BPS * 2n).toBeLessThan(1_000n);
+  });
+
+  it("is SILENT at the confidence mainnet actually publishes: today's pair still converts", () => {
+    expect(pythConfBps(measuredSol())).toBe(1n);
+    expect(pythConfBps(measuredUsdc())).toBe(2n);
+    expect(measured()).toEqual({ convert: true });
+    expect(measured({ routeWad: MEASURED_WAD })).toEqual({ convert: true });
+    // And the reading that comes with it agrees the arm had nothing to say.
+    const reading = oracleConvertReading({ sol: measuredSol(), usdc: measuredUsdc(), nowUnixSeconds: CHAIN_NOW, routeWad: MEASURED_WAD });
+    expect(reading.convert).toBe(true);
+    expect(reading.confBps).toEqual({ sol: 1n, usdc: 2n });
+  });
+
+  it("CANNOT refuse a turn the price-only arms admitted: at measured width the verdict is the zero-conf verdict", () => {
+    // THE WHOLE SAFETY PROPERTY. The same pair with conf zeroed — no uncertainty
+    // at all, which is what a guard that ignored conf effectively assumed — must
+    // decide every one of these turns the same way as the measured pair does.
+    const certain = { sol: { ...measuredSol(), conf: 0n }, usdc: { ...measuredUsdc(), conf: 0n } };
+    const routes = [null, MEASURED_WAD, (MEASURED_WAD * 9_500n) / 10_000n, (MEASURED_WAD * 10_500n) / 10_000n, (MEASURED_WAD * 8_000n) / 10_000n];
+    for (const routeWad of routes) {
+      for (const nowUnixSeconds of [CHAIN_NOW, PUBLISHED + 15n, PUBLISHED + MAX_PYTH_AGE_SECONDS, PUBLISHED + 61n, PUBLISHED - 300n]) {
+        expect(measured({ routeWad, nowUnixSeconds })).toEqual(oracleConvertDecision({ ...certain, nowUnixSeconds, routeWad }));
+      }
+    }
+  });
+
+  it("fires PAST the ceiling and not AT it, on either feed", () => {
+    for (const feedName of ["sol", "usdc"] as const) {
+      const at = { [feedName]: widen(MAX_PYTH_CONF_BPS)[feedName] };
+      const past = { [feedName]: widen(MAX_PYTH_CONF_BPS + 1n)[feedName] };
+      expect(pythConfBps(widen(MAX_PYTH_CONF_BPS)[feedName])).toBe(MAX_PYTH_CONF_BPS);
+      expect(pythConfBps(widen(MAX_PYTH_CONF_BPS + 1n)[feedName])).toBe(MAX_PYTH_CONF_BPS + 1n);
+      expect(ask(at)).toEqual({ convert: true });
+      const refused = ask(past);
+      expect(refused.convert).toBe(false);
+      expect(refused.convert === false && refused.detail).toContain(`past the ${MAX_PYTH_CONF_BPS} bps ceiling`);
+    }
+    // A band as wide as the price is not a price; it is refused like any other.
+    expect(ask({ sol: { ...solFeed(), conf: 10_259_321_149n } }).convert).toBe(false);
+  });
+
+  it("names the feed, its price, its confidence, the ratio and the ceiling, in the refusal", () => {
+    const wideSol = { ...solFeed(), conf: confAt(10_259_321_149n, 137n) };
+    const decision = ask({ sol: wideSol });
+    expect(decision.convert).toBe(false);
+    const detail = decision.convert ? "" : decision.detail;
+    expect(detail).toContain("SOL/USD");
+    expect(detail).toContain("102.59321149"); // the price, as a human reads it
+    expect(detail).toContain("1.40552700"); // the confidence, in the same expo
+    expect(detail).toContain(String(wideSol.conf)); // and raw, for whoever checks
+    expect(detail).toContain("137 bps");
+    expect(detail).toContain(`past the ${MAX_PYTH_CONF_BPS} bps ceiling`);
+    // The quiet feed is not accused: it is reported, not named as the wide one.
+    expect(detail).not.toContain("the USDC/USD feed quotes");
+    // What happens to the money is in the same sentence as the reason.
+    expect(detail).toContain("only the USDC the vault already holds is invested");
+    expect(detail).toContain("the SOL hop is skipped this turn");
+
+    // Both wide: both named, in one refusal.
+    const both = ask(widen(400n));
+    const bothDetail = both.convert ? "" : both.detail;
+    expect(bothDetail).toContain("the SOL/USD feed quotes");
+    expect(bothDetail).toContain("the USDC/USD feed quotes");
+  });
+
+  it("rests the SOL hop and NOTHING else, exactly as every other arm does", () => {
+    // Not FAILED, not REFUSED, not an alert: the same two keys convertDecision
+    // returns, so the turn cannot tell a wide band from a vault whose owner
+    // never signed a conversion floor — and goes on investing the held USDC.
+    const off = convertDecision({ minConvertRateWad: 0n });
+    const refused = ask(widen(600n));
+    expect(Object.keys(refused).sort()).toEqual(Object.keys(off).sort());
+    expect(Object.keys(refused)).not.toContain("outcome");
+    expect(refused.convert === false && refused.detail).toContain("only the USDC the vault already holds is invested");
+    expect(refused.convert === false && refused.detail).toContain("NOBODY NEEDS PAGING");
+  });
+
+  it("reports Pyth's conservative pricing beside the verdict, refusal or not", () => {
+    const bounds = pythConservativeBounds(measuredSol(), measuredUsdc());
+    expect(bounds).not.toBeNull();
+    expect(bounds?.midWad).toBe(MEASURED_WAD);
+    // What the vault GIVES UP at the bottom of its band over what it RECEIVES at
+    // the top of its: the fewest USDC raw a lamport can be worth inside Pyth's
+    // own uncertainty. And the other end, which a defensive min-out would demand.
+    expect(bounds?.solLowerPrice).toBe(MEASURED_SOL_PRICE - MEASURED_SOL_CONF);
+    expect(bounds?.usdcUpperPrice).toBe(MEASURED_USDC_PRICE + MEASURED_USDC_CONF);
+    expect(bounds?.giveUpLowerWad).toBe(120_840_007_638_815_983n);
+    expect(bounds?.receiveUpperWad).toBe(120_930_243_128_480_585n);
+    expect(bounds?.giveUpLowerWad).toBeLessThan(MEASURED_WAD);
+    expect(bounds?.receiveUpperWad).toBeGreaterThan(MEASURED_WAD);
+    // 1.15 bps of SOL uncertainty and 2.59 of USDC, both ways: 7 bps of span
+    // under a deviation arm that tolerates 500. That ratio is the point.
+    expect(bounds?.bandBps).toBe(7n);
+
+    // It rides on the refusals too, which is where an operator needs it.
+    const refusal = oracleConvertReading({ sol: widen(600n).sol, usdc: usdcFeed(), nowUnixSeconds: CHAIN_NOW, routeWad: null });
+    expect(refusal.convert).toBe(false);
+    expect(refusal.conservative).not.toBeNull();
+    expect(refusal.confBps).toEqual({ sol: 600n, usdc: 0n });
+    // And on a stale pair, whose bands are still readable even though the arm
+    // above refused before the ratio was ever compared.
+    const stale = oracleConvertReading({ sol: measuredSol(), usdc: measuredUsdc(), nowUnixSeconds: PUBLISHED + 3_600n, routeWad: null });
+    expect(stale.convert).toBe(false);
+    expect(stale.conservative?.midWad).toBe(MEASURED_WAD);
+
+    // A pair with no usable rate has no bands to report, and says so instead of throwing.
+    expect(pythConservativeBounds(solFeed(PUBLISHED, 0n), usdcFeed())).toBeNull();
+    expect(pythConservativeBounds(feed(PYTH_SOL_USD_FEED_ID_HEX, 10_259_321_149n, PUBLISHED, -40), usdcFeed())).toBeNull();
+    expect(pythConservativeBounds({ ...solFeed(), conf: 10_259_321_149n * 2n }, usdcFeed())).toBeNull();
+    const unread = oracleConvertReading({ sol: null, usdc: null, nowUnixSeconds: CHAIN_NOW, routeWad: null });
+    expect(unread.conservative).toBeNull();
+    expect(unread.confBps).toBeNull();
+  });
+
+  it("does NOT move what the deviation arm compares, which is still mid to mid", () => {
+    // DELIBERATELY UNTOUCHED. Holding a pool to the defensive END of the band
+    // instead of the mid is a separate judgement with its own blast radius; the
+    // bounds are reported so the page can show it, and nothing compares against
+    // them yet. The proof: a route 400 bps under mid converts at measured
+    // confidence AND with both feeds at the ceiling, where a bound moved onto
+    // giveUpLowerWad would have started refusing it.
+    const under400 = (wad: bigint) => wad - (wad * 400n) / 10_000n;
+    expect(measured({ routeWad: under400(MEASURED_WAD) })).toEqual({ convert: true });
+    const atCeiling = { sol: widen(MAX_PYTH_CONF_BPS).sol, usdc: widen(MAX_PYTH_CONF_BPS).usdc };
+    expect(oracleConvertDecision({ ...atCeiling, nowUnixSeconds: CHAIN_NOW, routeWad: under400(ORACLE_WAD) })).toEqual({ convert: true });
+    const wide = pythConservativeBounds(atCeiling.sol, atCeiling.usdc);
+    expect(wide?.bandBps).toBe(200n);
+    expect(under400(ORACLE_WAD)).toBeLessThan(wide?.giveUpLowerWad ?? 0n);
   });
 });
 
