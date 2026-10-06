@@ -70,6 +70,7 @@ Not a testnet, not a simulation. Real trades, measured, settled and invested by 
 | **10. And the volume savings bought stock** | A fourth volume `settle_v2` moved **0.02215709 SOL** in; converted, it took the vault's USDC past the basket's $10, and the keeper bought SPYx with 5.34 USDC | [`4LunSyrb…`](https://solscan.io/tx/4LunSyrbytTC4MegKqgzoQa4SYUV7KxGTbUxRe72yzzEYv7MkA7Ejr4zpiuRKbtxjYknmRndJ6U8i5Y134zFDrm9) · [`3Cs1H6SH…`](https://solscan.io/tx/3Cs1H6SH4QA6SGvaCYNdsjKZanUggLQyG4dbQ38qGdtJVhW8itHEVkeQt2sF26uMXihdjW3WtpV3j1yiqM5L4Nub) |
 | **11. Then back to profit, and a full basket** | The owner's pension key moved the vault back to **20 % of profit**; two profit settlements followed, and with 6 USDC the owner sent in, the keeper bought **both legs**, SPYx and ANTHROPIC, 6.35 USDC each | [`67MZSaEr…`](https://solscan.io/tx/67MZSaErMKs3AV5UnFrTRVgRJf7SCayqqHakNpEFPYyXXC9TYC5JP6gVcJ4bDFWpqkS253cuFqyz6iYu4zg4i9Aa) · [`4Tsc7BXQ…`](https://solscan.io/tx/4Tsc7BXQdUZ564znbi42ZEEy6cUeqbHq8LcRpPRJX5zmowLku1Tsp4FGhCstqf6nmdKUbiCHKyFD5ANhws5A7BEv) · [`63AQuFBU…`](https://solscan.io/tx/63AQuFBU9z2aGak2ey7B4e14iwfkQGiTXWxbYFfWwKffxjXNEX6Wqc67LoyWm4fymEGzLF221ZH2F26Kfu8tsEfr) |
 | **12. And it is still there** | On 2026-09-26 the vault holds **0.0443 SPYx** and **0.0172 ANTHROPIC** (PreStocks) — positions paid for by trading profit, trading volume and the owner's own test deposits — plus **2.69 USDC** waiting for the next buy | [vault `EFXK995P…`](https://solscan.io/account/EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU) |
+| **13. And it comes back out** | On 2026-10-06 the owner's pension key took **0.004312315 ANTHROPIC** out of the vault with `withdraw_token` — the first time money has left a SaverFi vault, signed by the only key that can make it leave | [`5GMPTgTg…`](https://solscan.io/tx/5GMPTgTgipXbt6T3RKHMFwvkhRhGR8npodrSJNSFSXtAcoBdeQS4T5SUqKizRVd1zGFsxcDP7up5Ke2VPrzNp2wc) |
 
 The keepers that did it — one settles profit vaults and invests every vault, the other settles volume vaults — are running right now and say so in public:
 
@@ -252,7 +253,7 @@ A hackathon README that overclaims is worse than one that claims less, so:
 - A stock leg has **no independent price anchor**. The depth gate measures depth at the size of the turn and has no opinion about price; Pyth anchors the SOL hop alone; the only price bound on a stock leg is the floor its owner signed, which is derived once and then stands.
 - The landing's background video **belongs to the reference template**, not to SaverFi.
 - The program is **upgradeable by a single team key** with no timelock. That is a beta posture, stated plainly.
-- `withdraw` and `withdraw_token` are implemented and tested, but **have not yet been exercised on mainnet**.
+- `withdraw_token` was exercised on mainnet for the first time on 2026-10-06, when the owner took 0.004312315 ANTHROPIC out of the vault ([`5GMPTgTg…`](https://solscan.io/tx/5GMPTgTgipXbt6T3RKHMFwvkhRhGR8npodrSJNSFSXtAcoBdeQS4T5SUqKizRVd1zGFsxcDP7up5Ke2VPrzNp2wc)). The plain SOL `withdraw` is implemented and tested, but **has not yet been exercised on mainnet**.
 
 ---
 
