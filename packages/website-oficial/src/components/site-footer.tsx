@@ -42,6 +42,8 @@ const LINKS = [
   // Public: it needs no session, so it is reachable from the footer of every
   // page, including the ones a visitor sees before connecting anything.
   { title: "Leaderboard", href: "/leaderboard" },
+  // Every pension added up. Below md the header's tabs are gone, so this is a phone's one door to it.
+  { title: "Dashboard", href: "/dashboard" },
   { title: "Docs", href: "#" },
   { title: "Privacy", href: "#" },
   { title: "Terms", href: "#" },
@@ -97,8 +99,11 @@ export function SiteFooter({ now, className, mode = null }: { now: string; class
 
           <div>
             <h3 className={LABEL}>Explore</h3>
-            {/* Two short columns rather than one long one (owner, 09-23): the pages, then the fine print. Filled column by column. */}
-            <ul className="mt-4 grid w-fit grid-flow-col grid-rows-3 gap-x-12 gap-y-2.5 text-sm">
+            {/*
+              Two short columns rather than one long one (owner, 09-23): the pages, then the fine print. Filled column by
+              column — four rows since the dashboard joined, so the four pages stay in the first column.
+            */}
+            <ul className="mt-4 grid w-fit grid-flow-col grid-rows-4 gap-x-12 gap-y-2.5 text-sm">
               {LINKS.map(({ title, href }) => (
                 <li key={title}>
                   <AppLink className={QUIET} href={hrefOf(href)}>

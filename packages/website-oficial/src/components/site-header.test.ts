@@ -34,12 +34,14 @@ describe("the navbar's tabs", () => {
     expect(href(html, "Pension")).toBe("/?mode=mock");
     expect(href(html, "Activity")).toBe("/activity?mode=mock");
     expect(href(html, "Leaderboard")).toBe("/leaderboard?mode=mock");
+    expect(href(html, "Dashboard")).toBe("/dashboard?mode=mock");
   });
 
   it("are bare when the page names no mode", () => {
     const html = nav();
     expect(href(html, "Pension")).toBe("/");
     expect(href(html, "Activity")).toBe("/activity");
+    expect(href(html, "Dashboard")).toBe("/dashboard");
   });
 
   it("leave a link that goes nowhere in the app as it is", () => {
@@ -55,11 +57,13 @@ describe("the footer's links", () => {
     expect(html).toContain('href="/?mode=mock"');
     expect(html).toContain('href="/activity?mode=mock"');
     expect(html).toContain('href="/leaderboard?mode=mock"');
+    expect(html).toContain('href="/dashboard?mode=mock"');
     expect(html).not.toContain('href="#?mode=mock"');
   });
 
   it("are bare without a mode", () => {
     expect(footer()).toContain('href="/activity"');
+    expect(footer()).toContain('href="/dashboard"');
   });
 });
 

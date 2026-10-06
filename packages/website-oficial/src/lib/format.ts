@@ -32,6 +32,12 @@ const USD_COMPACT = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 1,
 });
 
+/** usdCompact's twin without the currency: a count or a SOL figure on an axis. */
+const COMPACT = new Intl.NumberFormat("en-US", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
 const NUMBER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 4 });
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
@@ -74,6 +80,11 @@ export function usdCompact(value: number | null): string {
   return value === null ? UNKNOWN : USD_COMPACT.format(value);
 }
 
+/** "1.2K", "3.4M" — for axes, where the unit is said once beside the chart. */
+export function compact(value: number | null): string {
+  return value === null ? UNKNOWN : COMPACT.format(value);
+}
+
 const PERCENT = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
 
 /**
@@ -105,6 +116,17 @@ export function dayLabel(iso: string): string {
 /** "Sep 7, 2026" */
 export function dateLabel(iso: string): string {
   return `${dayLabel(iso)}, ${new Date(iso).getUTCFullYear()}`;
+}
+
+/**
+ * "Sep 28 – Oct 4" / "Sep 14 – 20" — the UTC week that starts on `monday`
+ * (a "YYYY-MM-DD" day or a timestamp on it).
+ */
+export function weekLabel(monday: string): string {
+  const start = new Date(`${monday.slice(0, 10)}T00:00:00.000Z`);
+  const end = new Date(start.getTime() + 6 * 86_400_000);
+  const startText = dayLabel(start.toISOString());
+  return start.getUTCMonth() === end.getUTCMonth() ? `${startText} – ${end.getUTCDate()}` : `${startText} – ${dayLabel(end.toISOString())}`;
 }
 
 /** "14:32 UTC" — the zone is on the label, not only in this file. */

@@ -92,7 +92,7 @@ export const LEADERBOARD_REVALIDATE_SECONDS = 60;
 /** A keeper that does not answer in this long is treated as unavailable. */
 const TIMEOUT_MS = 6_000;
 
-type Env = Readonly<Record<string, string | undefined>>;
+export type Env = Readonly<Record<string, string | undefined>>;
 
 /**
  * The keeper's /leaderboard URL, or why there is none.
@@ -224,16 +224,32 @@ export function parseLeaderboard(value: unknown): LeaderboardData | null {
 }
 
 /**
- * Reads the keeper's board. NEVER THROWS and never returns an empty payload in
- * place of a failure: the caller must be able to say "unavailable" out loud,
- * because an empty table tells a visitor that nobody has ever saved anything.
+ * WHY A READ FAILED, as a code a page can word for its own readers. The
+ * `detail` beside it is the operator's sentence — it names the keeper and the
+ * variable — and a public page that is not this one's twin may not print it.
  */
-export async function fetchLeaderboard(
-  env: Env = process.env,
-  fetchImpl: typeof fetch = fetch,
-): Promise<LeaderboardResult> {
+export type LeaderboardFailure = "unconfigured" | "misconfigured" | "timeout" | "unreachable" | "not-ready" | "refused";
+
+export type LeaderboardBodyResult =
+  | { readonly ok: true; readonly body: unknown }
+  | { readonly ok: false; readonly failure: LeaderboardFailure; readonly detail: string };
+
+/**
+ * The keeper's /leaderboard answer, UNPARSED: the same request, the same
+ * timeout and the same shared cache as fetchLeaderboard, which is built on it.
+ *
+ * FOR A READER THAT NEEDS WHAT parseLeaderboard DROPS. That parser rebuilds the
+ * board from the keys it knows and turns a missing count into 0 — right for a
+ * ranking, wrong for a page of totals, where "missing" must stay "unknown" and
+ * a block a newer keeper adds must survive the trip (src/lib/global-stats-model.ts).
+ * Never throws.
+ */
+export async function fetchLeaderboardBody(env: Env = process.env, fetchImpl: typeof fetch = fetch): Promise<LeaderboardBodyResult> {
   const endpoint = leaderboardEndpoint(env);
-  if (!endpoint.ok) return endpoint;
+  if (!endpoint.ok) {
+    const empty = (env[KEEPER_URL_VARIABLE]?.trim() ?? "") === "";
+    return { ok: false, failure: empty ? "unconfigured" : "misconfigured", detail: endpoint.detail };
+  }
   try {
     const response = await fetchImpl(endpoint.url, {
       headers: { accept: "application/json" },
@@ -247,17 +263,33 @@ export async function fetchLeaderboard(
       // The keeper's own reason when it gave one: "no database", "not computed
       // yet". Far better than "503" for whoever has to fix it.
       const detail = isRecord(body) && typeof body["detail"] === "string" ? body["detail"] : `the keeper answered ${response.status}`;
-      return { ok: false, detail };
+      return { ok: false, failure: response.status === 503 ? "not-ready" : "refused", detail };
     }
-    const data = parseLeaderboard(body);
-    if (data === null) return { ok: false, detail: "the keeper's answer was not a leaderboard this build understands" };
-    return { ok: true, data };
+    return { ok: true, body };
   } catch (error) {
     // A TIMEOUT AND A DNS FAILURE READ THE SAME to a visitor, and neither may
     // put an upstream message on the page.
     const timedOut = error instanceof Error && error.name === "TimeoutError";
-    return { ok: false, detail: timedOut ? "the keeper did not answer in time" : "the keeper could not be reached" };
+    return timedOut
+      ? { ok: false, failure: "timeout", detail: "the keeper did not answer in time" }
+      : { ok: false, failure: "unreachable", detail: "the keeper could not be reached" };
   }
+}
+
+/**
+ * Reads the keeper's board. NEVER THROWS and never returns an empty payload in
+ * place of a failure: the caller must be able to say "unavailable" out loud,
+ * because an empty table tells a visitor that nobody has ever saved anything.
+ */
+export async function fetchLeaderboard(
+  env: Env = process.env,
+  fetchImpl: typeof fetch = fetch,
+): Promise<LeaderboardResult> {
+  const read = await fetchLeaderboardBody(env, fetchImpl);
+  if (!read.ok) return { ok: false, detail: read.detail };
+  const data = parseLeaderboard(read.body);
+  if (data === null) return { ok: false, detail: "the keeper's answer was not a leaderboard this build understands" };
+  return { ok: true, data };
 }
 
 /**

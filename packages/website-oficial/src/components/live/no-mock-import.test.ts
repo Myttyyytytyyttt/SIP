@@ -51,6 +51,10 @@ const SHARED = [
   "onboarding/OnboardingBody.tsx",
   "onboarding/OnboardingDialog.tsx",
   "onboarding/OnboardingHost.tsx",
+  // The public dashboard draws the sample in Mock and the real figures in
+  // Live with the same components: the sample reaches them only as props.
+  "global-stats-view.tsx",
+  "global-stats-chart.tsx",
 ];
 
 /** The live surface: every panel, every pure module behind them, and the sample components they share. */

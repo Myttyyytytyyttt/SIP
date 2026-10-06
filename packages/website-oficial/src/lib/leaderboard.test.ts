@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   KEEPER_URL_VARIABLE,
   fetchLeaderboard,
+  fetchLeaderboardBody,
   formatSol,
   leaderboardEndpoint,
   parseLeaderboard,
@@ -176,6 +177,42 @@ describe("fetching it", () => {
     const fetchImpl = vi.fn();
     const answer = await fetchLeaderboard({}, fetchImpl as unknown as typeof fetch);
     expect(answer.ok).toBe(false);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * THE UNPARSED READ the public dashboard builds on: the same request, the body
+ * as it came, and a failure CODE a page can word for visitors beside the
+ * operator's sentence.
+ */
+describe("fetching the raw answer", () => {
+  const env = { [KEEPER_URL_VARIABLE]: "https://keeper.example.test" };
+  const answering = (response: Response) => vi.fn().mockResolvedValue(response) as unknown as typeof fetch;
+
+  it("returns the body untouched, keys the board parser would drop included", async () => {
+    const body = { ...payload(), stats: { v: 1 } };
+    const answer = await fetchLeaderboardBody(env, answering(Response.json(body)));
+    expect(answer).toEqual({ ok: true, body });
+  });
+
+  it("says why it failed, as a code and as today's sentence", async () => {
+    expect(await fetchLeaderboardBody({}, vi.fn() as unknown as typeof fetch)).toMatchObject({ ok: false, failure: "unconfigured" });
+    expect(await fetchLeaderboardBody({ [KEEPER_URL_VARIABLE]: "not a url" }, vi.fn() as unknown as typeof fetch)).toMatchObject({ ok: false, failure: "misconfigured" });
+    expect(await fetchLeaderboardBody(env, answering(Response.json({ detail: "this keeper has no database" }, { status: 503 })))).toEqual({
+      ok: false,
+      failure: "not-ready",
+      detail: "this keeper has no database",
+    });
+    expect(await fetchLeaderboardBody(env, answering(new Response("nope", { status: 500 })))).toEqual({ ok: false, failure: "refused", detail: "the keeper answered 500" });
+    const thrown = Object.assign(new Error("timed out"), { name: "TimeoutError" });
+    expect(await fetchLeaderboardBody(env, vi.fn().mockRejectedValue(thrown) as unknown as typeof fetch)).toMatchObject({ ok: false, failure: "timeout" });
+    expect(await fetchLeaderboardBody(env, vi.fn().mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch)).toMatchObject({ ok: false, failure: "unreachable" });
+  });
+
+  it("does not call the network with no keeper configured", async () => {
+    const fetchImpl = vi.fn();
+    await fetchLeaderboardBody({}, fetchImpl as unknown as typeof fetch);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

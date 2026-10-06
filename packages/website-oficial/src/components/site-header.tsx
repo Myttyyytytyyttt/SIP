@@ -49,7 +49,7 @@ export function SiteHeader({
   contributions?: React.ReactNode;
   /** Connect, Disconnect, the pension key, or a placeholder while Privy is asked. */
   account: React.ReactNode;
-  readonly current?: "pension" | "activity" | "leaderboard";
+  readonly current?: "pension" | "activity" | "leaderboard" | "dashboard";
   /**
    * THE MODE THE TABS CARRY (owner, 09-24). A bare "/" is the landing to a
    * visitor and a bare "/activity" is Live's connect card, so a tab pressed in
@@ -75,6 +75,9 @@ export function SiteHeader({
     // A REAL PAGE, AND A PUBLIC ONE: /leaderboard mounts no Privy provider, so
     // this link works for a visitor who has never connected anything.
     { label: "Leaderboard", href: tab("/leaderboard"), current: current === "leaderboard", className: undefined },
+    // Every pension added up (owner, 10-06): public as well, and it follows
+    // the mode like the rest — the sample in Mock, the real figures in Live.
+    { label: "Dashboard", href: tab("/dashboard"), current: current === "dashboard", className: undefined },
     { label: "Docs", href: "#", current: false, className: undefined },
   ];
 

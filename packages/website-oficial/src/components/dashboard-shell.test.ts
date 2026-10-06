@@ -200,7 +200,7 @@ describe("the sample keeps the visitor in it", () => {
   it("carries ?mode=mock on every tab and footer link to the app's pages", () => {
     mocked.search = new URLSearchParams("mode=mock");
     const html = render();
-    for (const pathname of ["/activity", "/leaderboard"]) {
+    for (const pathname of ["/activity", "/leaderboard", "/dashboard"]) {
       const hrefs = hrefsTo(html, pathname);
       expect(hrefs.length, pathname).toBeGreaterThan(0);
       for (const href of hrefs) expect(href, pathname).toBe(`${pathname}?mode=mock`);

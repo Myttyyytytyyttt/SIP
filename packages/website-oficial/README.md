@@ -118,6 +118,9 @@ src/components/savings-strip.tsx, strip-chip.tsx
 src/components/savings-rule-panel.tsx
 src/components/pension-panel.tsx, pension-chart.tsx, pension-stats.tsx, pension-holdings.tsx
 src/components/mode-toggle.tsx, theme-provider.tsx, site-footer.tsx
+src/app/dashboard/page.tsx          /dashboard: every pension added up, public; Mock is a labelled sample, Live the keeper's figures
+src/lib/global-stats-*.ts           its model (unknown is never 0), chart arithmetic, sample, copy, mode, load and SOL price
+src/components/global-stats-*.tsx   its body, the stacked-bar card and the Live|Mock control
 src/components/ui/*                 shadcn, generated — add with `pnpm dlx shadcn@4 add <name>`, never edit by hand
 ```
 
@@ -128,7 +131,11 @@ src/components/ui/*                 shadcn, generated — add with `pnpm dlx sha
   That is what keeps server and client HTML identical.
 - **Tokens only.** `background`, `foreground`, `muted`, `border`, `card`,
   `primary`, `destructive`. One accent — emerald — and it means exactly one
-  thing: money put aside.
+  thing: money put aside. The one exception is the series of a chart that
+  splits by mode or by purpose (the public dashboard, owner 10-06): Profit
+  emerald-600, Volume violet-600, invested blue-600, a count neutral-500, all in
+  `SERIES` of src/lib/global-stats-series.ts and checked for colour-blind
+  separation on the card in both themes. Text never wears a series colour.
 - **Vocabulary.** Orders are *bought* / *sold*; the slice is *put aside*; the
   pension *invests* when the pile reaches the threshold. The example is a
   volume-mode vault, so its slice comes from each fill's size and it never shows
