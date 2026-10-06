@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Analytics } from "@vercel/analytics/next";
 import { Geist, Geist_Mono } from "next/font/google";
 
 import { RouteLoaderProvider } from "@/components/route-loader";
@@ -48,6 +49,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <RouteLoaderProvider>{children}</RouteLoaderProvider>
           </TooltipProvider>
         </ThemeProvider>
+        {/* Vercel Web Analytics: page views, referrers, countries and devices, without cookies and
+            without identifying anyone. ONLY ON VERCEL (VERCEL=1, set on every Vercel build and
+            runtime): there the script is served from this site's own /_vercel/insights, which the
+            CSP's 'self' already allows. Anywhere else it would load a debug script from
+            va.vercel-scripts.com that the CSP blocks, leaving a red console line in every local run. */}
+        {process.env.VERCEL === "1" ? <Analytics /> : null}
       </body>
     </html>
   );

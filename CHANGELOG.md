@@ -10,19 +10,39 @@ line is not.
 
 ---
 
+## 2026-09-27
+
+A quiet weekend after the submission: no commits on the 26th or the 27th, and nothing touched
+the vault after 19:49 UTC on the 25th. Two things happened, both in the conversations.
+
+- **Development continues after the submission.** Having read the Stocklana rules, the owner
+  decided to keep improving the app rather than freeze it, and to point the judges at the
+  commit from submission day if they ask what was submitted. That commit is `a1cbc50`, still
+  the head of main.
+- **The keeper's first critical alert in production.** At about 14:05 Lisbon the profit keeper
+  sent a critical alert to the owner's Telegram: a sweep had failed because the RPC provider's
+  account index was overloaded and refused the call that lists every account the program owns,
+  suggesting a paginated variant instead. Nothing was changed. On 2026-09-28 the same keeper
+  process, running since 2026-09-25 18:38 UTC, reported no sweep error, one alert delivered in
+  its lifetime, and over 3,800 sweeps. So the alert path works end to end, and the sweep
+  recovered on its own; how many sweeps failed is not recorded. The keeper finds its wallets
+  with that one heavy call on every sweep, so this will come back as the program grows.
+
 ## 2026-09-25
 
-*Partial: written at 20:00 Lisbon from the commits on main up to `50d0d51` and the chain up to
-18:45 UTC. The rest of the day will be added tomorrow.*
+*Written at 20:00 Lisbon from the commits on main up to `50d0d51` and the chain up to 18:45 UTC;
+completed on 2026-09-26 from the rest of the day's commits and the chain up to its end.*
 
 The day SaverFi started saving by volume. Early in the morning the owner asked for a keeper that
 charges on trading volume alone, with a report first; by the evening a second keeper service was
 live on Railway, Volume was offered across the web, and the owner's own vault had switched to
-1 % and saved three times from real trades on mainnet. Overnight, before any of that, the
-follow-ups to the PreStocks issuer's 3 % fee were finished, and in the evening a public page
-began showing the vault's prices beside Pyth's and PreStocks'. 40 commits reached main between
-01:16 and 19:42 Lisbon (four of them merges, one the previous day's changelog). Every volume
-settlement so far is the owner's: the program still holds exactly one vault.
+1 % and saved four times from real trades on mainnet — then, at 20:41 Lisbon, went back to
+saving a share of profit, and that evening's savings bought both stocks of its basket.
+Overnight, before any of that, the follow-ups to the PreStocks issuer's 3 % fee were finished,
+and in the evening a public page began showing the vault's prices beside Pyth's and PreStocks',
+the same day the hackathon submission was prepared. 43 commits reached main between 01:16 and
+21:19 Lisbon (five of them merges). Every volume settlement so far is the
+owner's: the program still holds exactly one vault.
 
 **Volume mode — from a report in the morning to three settlements in the evening**
 
@@ -71,10 +91,38 @@ settlement so far is the owner's: the program still holds exactly one vault.
   switch, so the switch's forgiveness has not been exercised on mainnet yet.
 - **Where the savings went.** Earlier that afternoon, still on profit, the vault had saved
   0.022141459 SOL at 25 %. The keeper wrapped and converted all four settlements into USDC; the
-  vault holds 7.975313 USDC, under the $10 its two-stock basket needs before it buys ($5 a
-  leg), so nothing saved on volume has bought stock yet. Settlement has now run six times on
-  this vault — three at profit, three at volume — and the six payments add up exactly to its
-  `lifetime_saved`, 0.130904451 SOL.
+  vault held 7.975313 USDC at 18:45 UTC, under the $10 its two-stock basket needs before it buys
+  ($5 a leg). By then settlement had run six times on this vault — three at profit, three at
+  volume — and the six payments added up exactly to its `lifetime_saved`, 0.130904451 SOL.
+
+**The evening on mainnet — volume savings bought stock, then the vault went back to profit**
+
+*Read from the chain on 2026-09-26; all times UTC.*
+
+- **A fourth volume settlement, and the first buy it paid into.** At 19:38:00 the volume keeper
+  settled 0.02215709 SOL, 1 % of 2.215709047 SOL of trading
+  ([`4LunSyrb…`](https://solscan.io/tx/4LunSyrbytTC4MegKqgzoQa4SYUV7KxGTbUxRe72yzzEYv7MkA7Ejr4zpiuRKbtxjYknmRndJ6U8i5Y134zFDrm9)).
+  Wrapped and converted, it became 2.701169 USDC and lifted the vault to 10.676482 USDC, over the
+  basket's $10; at 19:41:22 the keeper bought SPYx with 5.338241 USDC
+  ([`3Cs1H6SH…`](https://solscan.io/tx/3Cs1H6SH4QA6SGvaCYNdsjKZanUggLQyG4dbQ38qGdtJVhW8itHEVkeQt2sF26uMXihdjW3WtpV3j1yiqM5L4Nub)).
+  Only the SPYx leg was bought in that turn; the chain does not say why the ANTHROPIC leg waited.
+- **Back to profit.** At 19:41:57 the owner's pension key signed `set_policy_v2` again
+  ([`67MZSaEr…`](https://solscan.io/tx/67MZSaErMKs3AV5UnFrTRVgRJf7SCayqqHakNpEFPYyXXC9TYC5JP6gVcJ4bDFWpqkS253cuFqyz6iYu4zg4i9Aa)),
+  and the settlements that followed carry the profit mode at 20 %. The volume keeper's `/status`
+  now says it leaves this vault to the profit keeper. The owner's reason is not in the day's
+  conversations.
+- **Two profit settlements and a basket bought in full.** The profit keeper settled 0.011247682
+  SOL at 19:45:21 and 0.022072745 SOL at 19:46:21, 20 % of 0.056238411 and 0.110363727 SOL
+  ([`RnraNqXJ…`](https://solscan.io/tx/RnraNqXJ2zcSqSsmeFMjDLbAhdHyGvMZsemkedEyxCNdhCSLmxu8KNwrAspvQ5hmkvxUCUvFjdE4uVHodSsVcut) ·
+  [`5JrMLHZ5…`](https://solscan.io/tx/5JrMLHZ5nDyD5LL2Sq66HACxnTmQQ2sqNFnQMp3rxaFkKRJMiiNGHJvQcczxZ3TSmQ6FE31WEjcoFvB3K3o1tNyt)).
+  At 19:46:50 the owner sent 6 USDC straight into the vault's USDC account, and at 19:49 the keeper
+  converted the SOL and bought both legs, 6.354637 USDC each
+  ([`4Tsc7BXQ…`](https://solscan.io/tx/4Tsc7BXQdUZ564znbi42ZEEy6cUeqbHq8LcRpPRJX5zmowLku1Tsp4FGhCstqf6nmdKUbiCHKyFD5ANhws5A7BEv) ·
+  [`63AQuFBU…`](https://solscan.io/tx/63AQuFBU9z2aGak2ey7B4e14iwfkQGiTXWxbYFfWwKffxjXNEX6Wqc67LoyWm4fymEGzLF221ZH2F26Kfu8tsEfr)).
+- **Where it ended the day.** Settlement has run nine times on this vault — five at profit, four
+  at volume, 0.065912741 SOL of it from volume — for a `lifetime_saved` of 0.186381968 SOL, the
+  figure the leaderboard also reports. The vault holds 0.0443 SPYx, 0.0172 ANTHROPIC and
+  2.689084 USDC. Nothing touched the vault after 19:49.
 
 **Web — Volume across the site**
 
@@ -121,6 +169,22 @@ settlement so far is the owner's: the program still holds exactly one vault.
   `73ec97c`. It already held back on a price more than 60 s old or 5 % away from the route it
   captured. Neither keeper's `/status` names the commit it runs, so whether the live keepers
   have this yet is not established.
+- In the evening, at the owner's word, a second, independent path to the same oracle `dab49b6`:
+  what Pyth's own Hermes service publishes at the moment of the request, beside the on-chain
+  account the keeper trusts, with the drift between them. It asks only for SOL/USD and USDC/USD,
+  because the free Pyth credential the owner registered for answers "Not entitled" for every
+  tokenised-stock and equity feed, and the page says so as a dated measurement. A dead Hermes
+  cannot take the page down, and the credential never reaches the answer. Live on the production
+  site: on 2026-09-26 `/prices` showed the two paths 1 bps apart on SOL and 0 on USDC.
+
+**The hackathon submission**
+
+- The Stocklana submission was prepared through the evening, ahead of the 20:00 UTC close: the
+  main track plus the two sponsor bounties the owner chose, PreStocks and Pyth. Its text was
+  checked adversarially against mainnet and the repository, which caught the README still saying
+  settlement had run twice when the chain said six `cc4030c`. At the owner's request the README
+  now opens with a large link to a video that shows the product end to end `732349d`. Whether
+  and when the form was sent is not recorded in the commits.
 
 **The 3 % fee, finished overnight**
 
@@ -147,8 +211,8 @@ settlement so far is the owner's: the program still holds exactly one vault.
   and 40 s later the keeper bought both legs, 6.25 USDC each
   ([`4Kam49yG…`](https://solscan.io/tx/4Kam49yGYiJpKtNbt6LoBqJqVdfUmrBJW2cXCkKTo85eoNZo1ndjxQv8W1jhSKm3egtBs2kHMunRmpwSZNKxzU7C) ·
   [`4KFyPXtC…`](https://solscan.io/tx/4KFyPXtC7S83C19s8JHah5KiFbR3HEKY2pTDQtsHY6wi7tMjF12AGd8sjiGjZ232wK1gTjQwPWcwu4voQHnfxsQj)).
-  Whether the re-signed floors were also needed is not established. ANTHROPIC's 3 % takes
-  effect with epoch 1043, around 05:00 UTC on Saturday 26 at today's slot rate.
+  Whether the re-signed floors were also needed is not established. ANTHROPIC's 3 % was due
+  with epoch 1043 on Saturday 26, and on that day `/prices` read it from the mint as in force.
 
 **Docs**
 
