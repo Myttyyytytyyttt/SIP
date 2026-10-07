@@ -139,32 +139,141 @@
    its own type, so it reads the same under a light system setting. What moves
    with the scroll is written by one coalesced rAF in landing.tsx; what moves
    with the pointer is pure CSS below. Reduced motion turns the theatre off.  */
-@keyframes landing-rise {
-  0%   { opacity: 0; transform: translateY(24px); }
+/* ─── THE ENTRANCE (owner, 10-07): out of step, on purpose ─────────────────
+   Every element arrives with its own effect at its own moment (the delays are
+   inline in landing.tsx): the headline line by line out of a blur, the eyebrow
+   from the side, the buttons popping in one after another, the paragraph rising,
+   the frame climbing from below, the bar dropping in last. One rise for
+   everything read as a slide; this reads as a page assembling itself.
+
+   `backwards`, not `both`, and no static opacity/transform: with `both` the
+   finished animation kept `transform: none` in force and beat the frame's own
+   perspective forever — the tilt never rendered. The 0% keyframe already covers
+   the delay, and 100% equals the base, so nothing snaps. */
+@keyframes landing-in-up {
+  0%   { opacity: 0; transform: translateY(22px); }
   100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes landing-in-down {
+  0%   { opacity: 0; transform: translateY(-14px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes landing-in-side {
+  0%   { opacity: 0; transform: translateX(-20px); filter: blur(6px); }
+  100% { opacity: 1; transform: translateX(0); filter: blur(0); }
+}
+@keyframes landing-in-blur {
+  0%   { opacity: 0; transform: translateY(28px); filter: blur(14px); }
+  60%  { filter: blur(0); }
+  100% { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+@keyframes landing-in-pop {
+  0%   { opacity: 0; transform: scale(0.88); }
+  100% { opacity: 1; transform: scale(1); }
+}
+@keyframes landing-in-frame {
+  0%   { opacity: 0; transform: translateY(96px) scale(0.94); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
 }
 @keyframes landing-fade {
   0%   { opacity: 0; }
   100% { opacity: 1; }
 }
-/* `backwards`, not `both`, and no static opacity/transform: with `both` the
-   finished animation kept `transform: translateY(0)` in force and beat the
-   frame's own perspective forever — the tilt never rendered. The 0% keyframe
-   already covers the delay, and 100% equals the base, so nothing snaps. */
-.landing-root[data-loaded] .landing-rise {
-  animation: landing-rise 0.9s cubic-bezier(0.16, 1, 0.3, 1) backwards;
-}
+.landing-root[data-loaded] .landing-in-up    { animation: landing-in-up 0.9s cubic-bezier(0.16, 1, 0.3, 1) backwards; }
+.landing-root[data-loaded] .landing-in-down  { animation: landing-in-down 0.7s cubic-bezier(0.16, 1, 0.3, 1) backwards; }
+.landing-root[data-loaded] .landing-in-side  { animation: landing-in-side 0.8s cubic-bezier(0.16, 1, 0.3, 1) backwards; }
+.landing-root[data-loaded] .landing-in-blur  { animation: landing-in-blur 1.1s cubic-bezier(0.16, 1, 0.3, 1) backwards; }
+/* A little overshoot: the buttons land with a click rather than a glide. */
+.landing-root[data-loaded] .landing-in-pop   { animation: landing-in-pop 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) backwards; }
+/* 1.3 s: FRAME_RISE_S in landing.tsx waits for exactly this. */
+.landing-root[data-loaded] .landing-in-frame { animation: landing-in-frame 1.3s cubic-bezier(0.16, 1, 0.3, 1) backwards; }
 /* Held until the loader leaves, so the entrance is seen rather than spent
    underneath it. Without JavaScript nothing marks the page loaded, so after
-   8 s the words and the frame simply appear. */
-.landing-root:not([data-loaded]) .landing-rise {
+   8 s everything simply appears. */
+.landing-root:not([data-loaded]) .landing-in {
   opacity: 0;
-  animation: landing-rise-giveup 1ms linear 8s forwards;
+  animation: landing-in-giveup 1ms linear 8s forwards;
 }
-@keyframes landing-rise-giveup { to { opacity: 1; } }
+@keyframes landing-in-giveup { to { opacity: 1; } }
 .landing-fade {
   animation: landing-fade 1s cubic-bezier(0.16, 1, 0.3, 1) backwards;
 }
+
+/* ─── The intro (owner, 10-07) ───────────────────────────────────────────────
+   The launch film's logo build, over everything, on the landing's own ground —
+   the film was made on #0A0B11, so its edge never shows. It leaves with the
+   loader (data-loaded), which landing.tsx sets only once the film has ended or
+   been skipped AND the page is ready. A visitor who has seen it in this tab
+   (data-intro-seen, set before the first paint) never sees it. Without
+   JavaScript it gives up after 8 s like the loader, by leaving the screen. */
+.landing-intro {
+  position: fixed;
+  inset: 0;
+  z-index: 101;
+  display: grid;
+  place-items: center;
+  background: #0A0B11;
+  transition: opacity 500ms ease, visibility 0s linear 500ms;
+  animation: landing-loader-giveup 1ms linear 8s forwards;
+}
+.landing-root[data-intro-seen] .landing-intro { display: none; }
+/* While the film is the loader, the ring is not: it would show through the
+   film's fade-out, a small spinning S inside the big one. The film stands
+   until the page is ready, so the ring has nothing to cover. */
+.landing-root:not([data-intro-seen]) .landing-loader { display: none; }
+.landing-root[data-loaded] .landing-intro {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  animation: none;
+}
+/* The film fills the screen's shorter side, as it would a 16:9 screen: the S
+   stays the size it was framed at, and the ground around it is the page's. */
+.landing-intro-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #0A0B11;
+}
+.landing-root[data-loaded] .landing-intro-video,
+.landing-root[data-loaded] .landing-intro-still { transform: scale(1.04); transition: transform 500ms cubic-bezier(0.16, 1, 0.3, 1); }
+/* The finished S, shown only when the film will not run: reduced motion, or a
+   film that failed or was refused (data-intro-still, set by landing.tsx). */
+.landing-intro-still {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+}
+.landing-root[data-intro-still] .landing-intro-still { opacity: 1; }
+/* The S on its way to the bar: placed and moved by landing.tsx (fly). While it
+   flies it stands in for the film's S, so the film's S goes at once rather than
+   fading under it, and the bar's own mark waits for it to land. */
+.landing-intro-fly {
+  position: fixed;
+  z-index: 102;
+  display: none;
+  transform-origin: 0 0;
+  pointer-events: none;
+  filter: drop-shadow(0 0 22px rgba(52, 211, 153, 0.6));
+}
+.landing-root[data-intro-fly] .landing-intro-fly { display: block; }
+.landing-root[data-intro-fly] .landing-intro-video { visibility: hidden; }
+.landing-root[data-intro-fly] .landing-nav-mark { opacity: 0; }
+.landing-intro-skip {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  border-radius: 9999px;
+  padding: 8px 14px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.55);
+  transition: color 200ms ease, background-color 200ms ease;
+}
+.landing-intro-skip:hover { color: #fff; background: rgba(255, 255, 255, 0.06); }
 
 /* ─── The loader ─────────────────────────────────────────────────────────────
    The SIP mark filling and draining inside a spinning ring, on the page's own
@@ -311,6 +420,12 @@
    gate outranks it until both are true. */
 .landing-footage { transition: opacity 900ms ease; }
 .landing-root:not([data-scene][data-footage-loaded]) .landing-footage { opacity: 0; }
+/* The frame's loop fades in over its rest frame once it is really playing. */
+.landing-app-loop { opacity: 0; transition: opacity 400ms ease; }
+.landing-root[data-app-loop] .landing-app-loop { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .landing-app-loop { display: none; }
+}
 /* Hover on the frame: the picture softens behind a Connect in the middle.
    Hidden and click-through by default; the button takes pointer events only
    while the overlay shows; keyboard focus on the button shows it too. Never
@@ -392,7 +507,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .landing-root[data-loaded] .landing-rise, .landing-fade { animation: none; }
+  .landing-root[data-loaded] .landing-in, .landing-fade { animation: none; }
+  /* The film's last frame, still, with no film behind it. */
+  .landing-intro, .landing-intro-video, .landing-intro-still { transition: none; transform: none; }
+  .landing-intro-still { opacity: 1; }
   .landing-hover { transition: none; }
   .landing-footage { transition: none; }
   .landing-loader, .landing-loader-spin { transition: none; }

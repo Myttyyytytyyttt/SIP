@@ -41,6 +41,10 @@ export const TICKERS = [
   "CASHCAT",
   "PLTRx",
   "METAx",
+  // The real shelf's PreStocks, which the sample basket and its wallet use since 10-08.
+  "ANTHROPIC",
+  "SPACEX",
+  "OPENAI",
 ] as const;
 
 export type Ticker = (typeof TICKERS)[number];

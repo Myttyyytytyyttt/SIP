@@ -9,10 +9,16 @@
  * about it on every load.
  *
  * The story it tells: a trader funded a wallet on the first day, linked it to a
- * volume-mode vault, and has been buying and selling the desk products and
- * xStocks since. Every fill — buy or sell — put 2% of its size aside. Once the
- * pile reached five dollars, the pension invested it in whichever target was
- * furthest under its weight. That is the rule in src/mocks/types.ts, run forward.
+ * volume-mode vault, and has been trading memecoins, the desk's leveraged BTC
+ * and PreStocks since. Every fill — buy or sell — put 1% of its size aside, the
+ * rate a new volume vault starts at. Once the pile reached ten dollars, the
+ * default threshold, the pension invested it in whichever target was furthest
+ * under its weight. That is the rule in src/mocks/types.ts, run forward.
+ *
+ * ONLY WHAT THE PRODUCT CAN DO (owner, 10-08). The basket is SPYx and
+ * ANTHROPIC, the two assets a vault can actually buy today, and nothing the
+ * wallet trades is a stock SaverFi does not offer — the landing's film of this
+ * page hands over to the page itself, so the two must match.
  *
  * IDENTIFIERS HAVE THEIR OWN SEEDED STREAM. The address and the signatures are
  * base58, as Solana prints them. Drawing their bytes from the trades' generator
@@ -34,7 +40,11 @@ import type {
 export const MOCK_NOW = "2026-09-07T14:32:00.000Z";
 
 const DAYS = 90;
-const SEED = 137;
+/**
+ * Chosen (10-08) for a page that looks alive: trades and a buy today, a pile
+ * part-way to the next buy, and the basket near its 60/40.
+ */
+const SEED = 142;
 /** The identifiers' stream; see the note at the top. */
 const ID_SEED = 7919;
 const DAY_MS = 86_400_000;
@@ -58,12 +68,11 @@ interface SampleDay {
 
 const RULE: SampleRule = {
   mode: "volume",
-  rateBps: 200,
-  thresholdUsd: 5,
+  rateBps: 100,
+  thresholdUsd: 10,
   targets: [
-    { symbol: "INDEX", weightBps: 6000 },
-    { symbol: "SPYx", weightBps: 2500 },
-    { symbol: "GLDx", weightBps: 1500 },
+    { symbol: "SPYx", weightBps: 6000 },
+    { symbol: "ANTHROPIC", weightBps: 4000 },
   ],
   paused: false,
 };
@@ -71,31 +80,25 @@ const RULE: SampleRule = {
 /** A Solana address of the usual length, made up for the example. */
 const WALLET_ADDRESS = "FezjSXZsF5dcDjHS9PGq2zvw2Nu8SNmJwbDRPAJZgyXA";
 /**
- * Sized against the rule: 2% of the roughly $250K this wallet trades puts about
- * $5K aside, and a $5K deposit would leave it almost nothing to trade with.
+ * Sized against the rule: 1% of the roughly $250K this wallet trades puts about
+ * $2.5K aside, and a $5K deposit would leave it little to trade with.
  */
 const OPENING_DEPOSIT_USD = 25_000;
 
-/** What the wallet trades, weighted toward the desk products. */
+/** What the wallet trades: a memecoin, the desk's leveraged BTC, and PreStocks. */
 const TRADED: ReadonlyArray<readonly [Ticker, number]> = [
-  ["pHOOD3x", 18],
-  ["pBTC3x", 14],
-  ["NVDAx", 12],
-  ["TSLAx", 11],
-  ["HOODx", 9],
-  ["MSTRx", 8],
-  ["COINx", 7],
-  ["PLTRx", 6],
-  ["METAx", 5],
-  ["AAPLx", 5],
-  ["QQQx", 5],
+  ["CASHCAT", 22],
+  ["pBTC3x", 18],
+  ["SPACEX", 15],
+  ["OPENAI", 13],
+  ["ANTHROPIC", 12],
+  ["SPYx", 10],
 ];
 
-/** Opening prices for the targets; each walks a seeded path from here. */
+/** Opening prices for the targets, near the pools' on 10-08; each walks a seeded path from here. */
 const BASE_PRICE: ReadonlyArray<readonly [Ticker, number]> = [
-  ["INDEX", 10],
-  ["SPYx", 640],
-  ["GLDx", 305],
+  ["SPYx", 760],
+  ["ANTHROPIC", 1000],
 ];
 
 // ── deterministic randomness ────────────────────────────────────────────────

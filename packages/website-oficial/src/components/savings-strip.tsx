@@ -1,4 +1,3 @@
-import { Percent } from "lucide-react";
 
 import { Num } from "@/components/num";
 import { StripChip } from "@/components/strip-chip";
@@ -63,9 +62,8 @@ export function SavingsStrip({
       <Tooltip>
         <TooltipTrigger asChild>
           <Badge variant="secondary" tabIndex={0} className="h-9 shrink-0 rounded-md px-3 font-mono tabular-nums has-data-[icon=inline-start]:pl-2.5">
-            {/* The words say what the glyph did; "% Profit: 20%" said it twice. */}
-            {live === undefined ? <Percent aria-hidden data-icon="inline-start" /> : null}
-            {live === undefined ? rate : rule.mode === "volume" ? STATS_COPY.stripModeVolume(rate) : STATS_COPY.stripModeProfit(rate)}
+            {/* The words say what a glyph would: "% Profit: 20%" said it twice, and the sample's "% 2%" too. */}
+            {rule.mode === "volume" ? STATS_COPY.stripModeVolume(rate) : STATS_COPY.stripModeProfit(rate)}
           </Badge>
         </TooltipTrigger>
         <TooltipContent>

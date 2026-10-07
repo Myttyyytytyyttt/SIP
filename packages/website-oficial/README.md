@@ -159,9 +159,13 @@ pnpm --dir packages/website-oficial run verify      # all of the above
 `security-headers.mjs` sends a same-origin CSP on every response;
 `'unsafe-eval'` is granted in development only, for React's debugging overlay.
 
-`public/landing/app-dark.png` is a picture of `/?mode=mock`. It does not change
-when the mock does: regenerate it with `tools/landing-shot` against a running
-server.
+The landing's frame plays `public/landing/app-loop.{webm,mp4}` over its rest
+frame `app-loop.jpg`, and the landing opens with `intro-logo-{1080,720}.{webm,mp4}`
+(poster `intro-logo.jpg`). They are rendered by the launch film project
+(`launch-video`, outside git) from a capture of `/?mode=mock`: they do not change
+when the sample does, so re-render them whenever it does, or the scroll into the
+app jumps. `public/landing/app-dark.png` is the same capture, for the repository's
+README; `tools/landing-shot` can still regenerate it against a running server.
 
 Privy must run the app in TEE mode for a signer seat to attach to a trading
 wallet (step 4 in `.env.example`, and
