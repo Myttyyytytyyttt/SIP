@@ -768,8 +768,8 @@ export const CREATE_LINK_COPY = {
   needsVaultTitle: "Create your vault first",
   needsVault: (rent: string | null): string =>
     rent === null
-      ? "A trading wallet can only be linked to a vault, and this pension key has none yet. SaverFi does not create one for you: a vault costs rent that never comes back, and it holds a mode and limits you choose. Create it above, then link this wallet from its row."
-      : `A trading wallet can only be linked to a vault, and this pension key has none yet. SaverFi does not create one for you: a vault costs ${rent} SOL of rent that never comes back, and it holds a mode and limits you choose. Create it above, then link this wallet from its row.`,
+      ? "A trading wallet can only be linked to a vault, and this pension key has none yet. SaverFi does not create one for you: a vault costs rent that never comes back, and it holds a mode and limits you choose. Create it in the Vault tab, then link this wallet from its row."
+      : `A trading wallet can only be linked to a vault, and this pension key has none yet. SaverFi does not create one for you: a vault costs ${rent} SOL of rent that never comes back, and it holds a mode and limits you choose. Create it in the Vault tab, then link this wallet from its row.`,
   goToVault: "Create your vault",
   /** Privy answered without an address. */
   noAddress:
@@ -1520,4 +1520,103 @@ export const FAILURE_COPY = {
   walletGuardFailed: "Phantom's safety check stopped this transaction: an account changed after Phantom previewed it. Nothing moved. Try again.",
   unreadableBuilt: "SaverFi's server sent something that is not a transaction. Nothing was signed.",
   unreadableSigned: "Phantom returned something that is not a transaction SaverFi can read. Nothing was sent.",
+} as const;
+
+/**
+ * THE MANAGE WALLETS MODAL'S FRAME (owner, 10-06): tabs on the left, opening on
+ * the overview. Each tab is named after the card it holds, so the tab and the
+ * card's own title never disagree — and START_BUYING_COPY.cannotPlan's
+ * "Manage wallets → Investing" stays a path somebody can follow.
+ */
+export const WALLETS_COPY = {
+  title: "Wallets",
+  description: "Your pension key, your vault, and the trading wallets that put a slice of every trade aside.",
+  /** The tab list's accessible name. */
+  sections: "Wallet sections",
+  tabs: {
+    overview: "Overview",
+    vault: VAULT_COPY.title,
+    trading: "Trading wallets",
+    investing: INVEST_COPY.title,
+    withdraw: WITHDRAW_COPY.title,
+  },
+  /** Said by a tab's dot to a screen reader. */
+  needsAttention: "needs your attention",
+} as const;
+
+/**
+ * THE OVERVIEW TAB (owner, 10-06): the first thing the Manage wallets modal
+ * shows — the whole setup at a glance, each part a way into the tab that
+ * manages it. Written for somebody who has never used a crypto app, so no
+ * word here is jargon, and a figure nobody read is "—", never a 0.
+ *
+ * WHERE A THING IS CHANGED IS SAID, NOT OFFERED. The vault's pause lives in
+ * Vault settings on the pension page; the overview names that place rather
+ * than growing a second switch for it.
+ */
+export const OVERVIEW_COPY = {
+  // ── what needs doing: one line each, shown only when it applies ────────────
+  readFailed: "SaverFi could not read your vault on Solana just now.",
+  /** Not "Retry": the vault card already has a button by that name on the same screen. */
+  readAgain: "Read again",
+  protocolPaused: "SaverFi is paused for everyone right now, so nothing is being put aside. You can still take your SOL out.",
+  vaultPaused:
+    "Your vault is paused, so nothing is being put aside. Turn it back on in Vault settings: the gear on the Savings rule card of your pension page.",
+  /** The two counts never overlap: a wallet that needs permission is counted there, whatever its link. */
+  walletsToFix: (needPermission: number, notLinked: number): string => {
+    const tradingWallets = (count: number): string => (count === 1 ? "1 trading wallet" : `${count} trading wallets`);
+    if (notLinked === 0) return `${tradingWallets(needPermission)} ${needPermission === 1 ? "needs" : "need"} your permission before anything can be saved from ${needPermission === 1 ? "it" : "them"}.`;
+    if (needPermission === 0) return `${tradingWallets(notLinked)} ${notLinked === 1 ? "is" : "are"} not linked to your vault, so nothing ${notLinked === 1 ? "it gains" : "they gain"} is put aside.`;
+    return `${tradingWallets(needPermission)} ${needPermission === 1 ? "needs" : "need"} your permission and ${notLinked} ${notLinked === 1 ? "is" : "are"} not linked to your vault, so nothing is put aside from them yet.`;
+  },
+  /** A button that opens another tab, named after it. */
+  goTo: (tab: string): string => `Go to ${tab}`,
+
+  // ── the pension key, as its own card used to show it ───────────────────────
+  pensionKey: "Pension key",
+  pensionKeyDescription:
+    "The wallet you connected. It owns your pension and is the only key that can withdraw. It stays in your wallet app: SaverFi never holds it and never exports it.",
+  address: "Address",
+  disconnect: "Disconnect",
+
+  // ── the four tiles ─────────────────────────────────────────────────────────
+  tilesLoading: "Reading your setup on Solana",
+  /** A figure that was not read. */
+  notRead: "—",
+  couldNotRead: "Could not be read",
+  needsVault: "Needs a vault first",
+  sol: (amount: string): string => `${amount} SOL`,
+
+  vaultMissing: "Not created",
+  vaultMissingLine: "Create it to start saving.",
+  /** "Profit · 20 % · saved so far 0.0366 SOL"; without the last part when it was not read. */
+  vaultLine: (mode: string, rate: string, saved: string | null): string => (saved === null ? `${mode} · ${rate}` : `${mode} · ${rate} · saved so far ${saved} SOL`),
+
+  walletsNone: "None yet",
+  walletsNoneLine: "Trading wallets are created here and linked to your vault.",
+  /** Before any link was read: how many there are, and no claim about their links. */
+  walletsCount: (total: number): string => (total === 1 ? "1 wallet" : `${total} wallets`),
+  walletsLinked: (linked: number, total: number): string => `${linked} of ${total} linked`,
+  walletsNeedPermission: (count: number): string => (count === 1 ? "1 needs your permission" : `${count} need your permission`),
+  walletsNotLinked: (count: number): string => `${count} not linked`,
+  walletsChecking: (count: number): string => `${count} being checked`,
+  /** No vault yet: nothing can be linked, so no link is being checked either. */
+  walletsNeedVault: "Linked once your vault exists",
+  walletsElsewhere: (count: number): string => (count === 1 ? "1 saves into another vault" : `${count} save into another vault`),
+  walletsAllLinked: "All linked",
+
+  investingMissing: "Not set up",
+  investingMissingLine: "Buys stocks with your savings once enough has piled up.",
+  investingOn: "On",
+  investingPaused: "Paused",
+  investingNothingPicked: "Nothing picked",
+
+  withdrawLine: "SOL you can withdraw now",
+  withdrawTokens: (count: number): string => (count === 1 ? "+ 1 token in your vault" : `+ ${count} tokens in your vault`),
+  tokensUnread: "Its tokens could not be read",
+
+  // ── getting set up: shown only while a step is missing ─────────────────────
+  setupTitle: "Getting set up",
+  stepDone: "done",
+  stepTodo: "not done yet",
 } as const;

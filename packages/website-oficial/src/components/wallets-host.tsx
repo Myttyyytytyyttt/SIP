@@ -22,6 +22,11 @@
  * missing.
  *
  * With a config the modal is WalletsModal: the same WalletsScreen as /wallets.
+ *
+ * THE OPENER CAN NAME A SECTION (10-06): the modal's tabs, and a caller that
+ * knows what the person came for — "Link a wallet" — opens on that tab instead
+ * of the overview. The argument is optional, so every `() => void` caller and
+ * override still fits.
  */
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -33,9 +38,13 @@ import { pensionKeyOf } from "@/lib/pension-key";
 import { WalletsModal } from "@/components/wallets/WalletsModal";
 import { WalletsSetupModal } from "@/components/wallets/WalletsSetupModal";
 import type { ConfigProblem, SolanaPublicConfig } from "@/lib/config";
+import { DEFAULT_WALLETS_SECTION, isWalletsSection, type WalletsSection } from "@/lib/wallets-sections";
+
+/** Opens the wallets modal, on `section` when one is named and on the overview otherwise. */
+type WalletsOpener = (section?: WalletsSection) => void;
 
 /** null only OUTSIDE a host — inside one there is always a modal to open. */
-const OpenerContext = createContext<(() => void) | null>(null);
+const OpenerContext = createContext<WalletsOpener | null>(null);
 
 /** Whether the wallets modal is on screen. The new-user setup waits while it is: two dialogs never stack. */
 const WalletsOpenContext = createContext(false);
@@ -48,7 +57,7 @@ type Unsubscribe = () => void;
 const ClosedContext = createContext<((listener: () => void) => Unsubscribe) | null>(null);
 
 /** The opener, or null when this subtree has no host. Safe to call anywhere. */
-export function useWalletsOpener(): (() => void) | null {
+export function useWalletsOpener(): WalletsOpener | null {
   return useContext(OpenerContext);
 }
 
@@ -56,9 +65,10 @@ export function useWalletsOpener(): (() => void) | null {
  * Hands this subtree a different opener, or the host's own when `opener` is
  * null. The dashboard uses it while a connected key has no vault: every way into
  * the wallets modal then opens the new-user setup instead, so there is one way
- * to make a vault on the page, not two different forms for the same thing.
+ * to make a vault on the page, not two different forms for the same thing. An
+ * override that takes no section (resumeOnboarding) fits, and ignores it.
  */
-export function WalletsOpenerOverride({ opener, children }: { readonly opener: (() => void) | null; readonly children: ReactNode }) {
+export function WalletsOpenerOverride({ opener, children }: { readonly opener: WalletsOpener | null; readonly children: ReactNode }) {
   const inherited = useContext(OpenerContext);
   return <OpenerContext.Provider value={opener ?? inherited}>{children}</OpenerContext.Provider>;
 }
@@ -94,9 +104,18 @@ export function WalletsHost({
 }) {
   const [open, setOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [section, setSection] = useState<WalletsSection>(DEFAULT_WALLETS_SECTION);
   const listeners = useRef(new Set<() => void>());
 
-  const opener = useCallback(() => {
+  /*
+   * THE ARGUMENT IS CHECKED, NOT TRUSTED. The sidebar's Manage wallets and the
+   * landing's Connect hand this opener straight to onClick, so what arrives first
+   * is often a click event, whatever the type says: anything that is not a
+   * section id opens the overview. Radix unmounts the closed dialog's content, so
+   * each open starts on the section asked for, not on the tab last left.
+   */
+  const opener = useCallback((requested?: unknown) => {
+    setSection(isWalletsSection(requested) ? requested : DEFAULT_WALLETS_SECTION);
     setMounted(true);
     setOpen(true);
   }, []);
@@ -127,7 +146,7 @@ export function WalletsHost({
         <Providers config={config}>
           <SharedVaultScreen>
             {children}
-            {mounted ? <WalletsModal open={open} onOpenChange={onOpenChange} /> : null}
+            {mounted ? <WalletsModal open={open} onOpenChange={onOpenChange} section={section} /> : null}
           </SharedVaultScreen>
         </Providers>
       ) : (

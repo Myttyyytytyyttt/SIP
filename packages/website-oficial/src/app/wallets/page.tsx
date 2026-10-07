@@ -7,7 +7,9 @@
  * renders the checklist instead of a broken page.
  *
  * With a configuration it mounts <Providers> around WalletsScreen, the same
- * screen the dashboard's "Manage wallets" modal shows.
+ * screen the dashboard's "Manage wallets" modal shows: its tabs, with the rail
+ * kept in view as the page scrolls. ?section=vault (or trading, investing,
+ * withdraw) opens on that tab; anything else opens on the overview.
  */
 
 import { ArrowLeft } from "lucide-react";
@@ -22,6 +24,7 @@ import { SetupChecklist } from "@/components/wallets/SetupChecklist";
 import { WalletsScreen } from "@/components/wallets/WalletsScreen";
 import { toSolanaPublicConfig, type ConfigProblem, type SolanaPublicConfig } from "@/lib/config";
 import { loadConfig } from "@/lib/load-config";
+import { isWalletsSection, type WalletsSection } from "@/lib/wallets-sections";
 
 export const dynamic = "force-dynamic";
 
@@ -30,8 +33,16 @@ export const metadata: Metadata = {
   description: "Your pension key, your vault, and the trading wallets linked to it.",
 };
 
-export default function WalletsPage() {
+export default async function WalletsPage({
+  searchParams,
+}: {
+  readonly searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const loaded = loadConfig();
+  // The tab a link asked for (the dashboard's "Open the wallets page" asks for the vault's). Anything that is
+  // not a section id, a repeated parameter included, is ignored rather than trusted.
+  const requested = (await searchParams)["section"];
+  const initialSection = isWalletsSection(requested) ? requested : undefined;
 
   return (
     <div className="flex min-h-dvh flex-col">
@@ -52,18 +63,19 @@ export default function WalletsPage() {
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-3xl flex-1 p-4 lg:p-6">
-        {loaded.ok ? <SolanaScreen config={toSolanaPublicConfig(loaded.config)} /> : <SetupCard problems={loaded.problems} />}
+      {/* 5xl: the rail and the cards beside it, at about the width the cards were built at. */}
+      <main className="mx-auto w-full max-w-5xl flex-1 p-4 lg:p-6">
+        {loaded.ok ? <SolanaScreen config={toSolanaPublicConfig(loaded.config)} initialSection={initialSection} /> : <SetupCard problems={loaded.problems} />}
       </main>
     </div>
   );
 }
 
 /** The provider mounts, and everything that depends on Privy starts inside it. */
-function SolanaScreen({ config }: { config: SolanaPublicConfig }) {
+function SolanaScreen({ config, initialSection }: { config: SolanaPublicConfig; initialSection: WalletsSection | undefined }) {
   return (
     <Providers config={config}>
-      <WalletsScreen />
+      <WalletsScreen frame="page" initialSection={initialSection} />
     </Providers>
   );
 }

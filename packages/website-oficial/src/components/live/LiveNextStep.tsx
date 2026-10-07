@@ -28,6 +28,7 @@ import { LIVE_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
 import { VAULT_COPY, ratePercent, shortAddress } from "@/lib/vault-copy";
+import type { WalletsSection } from "@/lib/wallets-sections";
 
 function Step({ label, done }: { readonly label: string; readonly done: boolean }) {
   return (
@@ -50,7 +51,12 @@ export function LiveNextStep({
   readonly pensionKey: string;
   /** Why no trading wallet can be created on this deployment, when that is so. */
   readonly seatProblem?: string | null;
-  readonly onOpenWallets: () => void;
+  /**
+   * Opens the Manage wallets modal on the section the stage needs. The type comes
+   * from the leaf module: this card renders in the sample too, and must not pull
+   * the wallets screen or Privy in with it.
+   */
+  readonly onOpenWallets: (section?: WalletsSection) => void;
   readonly className?: string;
 }) {
   const { stage, vault, wallets, policy, rents, protocolPaused } = data;
@@ -76,11 +82,11 @@ export function LiveNextStep({
       body,
       <>
         <div className="flex flex-wrap items-center gap-2">
-          <Button type="button" onClick={onOpenWallets}>
+          <Button type="button" onClick={() => onOpenWallets("vault")}>
             {copy.create}
           </Button>
           <Button type="button" variant="outline" asChild>
-            <a href="/wallets">{copy.openWallets}</a>
+            <a href="/wallets?section=vault">{copy.openWallets}</a>
           </Button>
         </div>
         <div className="space-y-2">
@@ -103,7 +109,7 @@ export function LiveNextStep({
     return shell(
       copy.title,
       copy.body,
-      <Button type="button" onClick={onOpenWallets}>
+      <Button type="button" onClick={() => onOpenWallets("trading")}>
         {copy.create}
       </Button>,
     );
@@ -119,7 +125,8 @@ export function LiveNextStep({
       // The link's rent is not in this snapshot, so the figure is left out
       // rather than guessed; the modal quotes it before anything is signed.
       copy.bodyNoRent(String(wallets.length)),
-      <Button type="button" onClick={onOpenWallets}>
+      // Each wallet's own row carries its Link to vault, in the trading wallets tab.
+      <Button type="button" onClick={() => onOpenWallets("trading")}>
         {copy.link}
       </Button>,
     );

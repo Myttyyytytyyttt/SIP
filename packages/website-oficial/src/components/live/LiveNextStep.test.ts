@@ -34,6 +34,8 @@ import type { LiveDashboard } from "@/lib/live-types";
 import { OWNER, WALLET_A, liveDashboard, liveSnapshot } from "../../../test/fixtures/live-dashboard";
 
 const onOpenWallets = vi.fn();
+/** What a real click hands a handler. */
+const CLICK = { type: "click", target: {} };
 
 function render(data: LiveDashboard, seatProblem: string | null = null): string {
   mocked.buttons.length = 0;
@@ -66,6 +68,14 @@ describe("no vault yet", () => {
     expect(buttons(LIVE_COPY.noVault.create)).toHaveLength(1);
   });
 
+  it("Create vault opens Manage wallets on its Vault tab, and the wallets page link asks for the same tab", () => {
+    const html = render(noVault());
+    buttons(LIVE_COPY.noVault.create)[0]?.onClick?.(CLICK);
+    // The section, never the click event: the opener reads its first argument as the tab.
+    expect(onOpenWallets.mock.calls).toStrictEqual([["vault"]]);
+    expect(html).toContain(`href="/wallets?section=vault"`);
+  });
+
   it("shows NO pension figures: there is no pension yet", () => {
     const html = render(noVault());
     expect(html).not.toContain(LIVE_COPY.savedSoFar);
@@ -85,6 +95,8 @@ describe("the stages after it", () => {
     const html = render(data);
     expect(html).toContain(LIVE_COPY.noTradingWallet.body);
     expect(buttons(LIVE_COPY.noTradingWallet.create)).toHaveLength(1);
+    buttons(LIVE_COPY.noTradingWallet.create)[0]?.onClick?.(CLICK);
+    expect(onOpenWallets.mock.calls).toStrictEqual([["trading"]]);
   });
 
   it("…and offers NO button when this deployment has no keeper seat, saying why instead", () => {
@@ -94,9 +106,11 @@ describe("the stages after it", () => {
     expect(buttons(LIVE_COPY.noTradingWallet.create)).toHaveLength(0);
   });
 
-  it("an unlinked wallet is offered a link", () => {
-    const html = render(liveDashboard({ snapshot: unlinkedSnapshot(), activity: null }));
+  it("an unlinked wallet is offered a link, on the Trading wallets tab where each row carries it", () => {
+    render(liveDashboard({ snapshot: unlinkedSnapshot(), activity: null }));
     expect(buttons(LIVE_COPY.notLinked.link)).toHaveLength(1);
+    buttons(LIVE_COPY.notLinked.link)[0]?.onClick?.(CLICK);
+    expect(onOpenWallets.mock.calls).toStrictEqual([["trading"]]);
   });
 
   it("…but not while the protocol is paused, or its config could not be read", () => {

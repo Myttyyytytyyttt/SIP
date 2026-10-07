@@ -20,7 +20,12 @@
  * as long as the dialog is open. Both mount inside the portal, only when it opens.
  *
  * Full screen below sm, the shape WalletsSetupModal has, so the two read as one
- * product; from sm up a sheet of at most 85vh whose body scrolls under the header.
+ * product; from sm up a sheet of 85vh whose body holds the screen's tabs: a rail
+ * on the left from md, a strip on top below it, and each panel scrolling on its
+ * own under the header. THE HEIGHT IS FIXED, not "at most": a sheet that followed
+ * its content would shrink and re-centre itself on every tab switch. From md it
+ * is wider too (4xl), so the cards beside a 13rem rail keep about the width they
+ * were built at.
  *
  * IT DOES NOT CLOSE WHILE A RE-SEAT RUNS (reseatRunning, src/lib/seat-activity.ts).
  * Between the removal and the add only this page holds the add; closing unmounts
@@ -38,6 +43,8 @@ import { Dialog, DialogDescription, DialogHeader, DialogOverlay, DialogPortal, D
 import { WalletsScreen } from "@/components/wallets/WalletsScreen";
 import { reseatRunning, subscribeSeatActivity } from "@/lib/seat-activity";
 import { cn } from "@/lib/utils";
+import { WALLETS_COPY } from "@/lib/vault-copy";
+import type { WalletsSection } from "@/lib/wallets-sections";
 
 /** Whether one of Privy's flows is on screen: its modal is a headless-ui dialog with this id, present only while open. */
 function privyDialogOpen(): boolean {
@@ -60,10 +67,22 @@ export function guardedOpenChange(onOpenChange: (open: boolean) => void): (open:
 /** components/ui/dialog.tsx's DialogContent classes, then the full-screen-below-sm shape. */
 const CONTENT = cn(
   "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
-  "h-dvh max-h-dvh w-dvw max-w-none grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden rounded-none p-0 sm:h-auto sm:max-h-[85vh] sm:w-full sm:max-w-2xl sm:rounded-xl",
+  // grid-cols-[minmax(0,1fr)]: one column that may shrink below its content. An auto column grows to the
+  // widest thing inside, and the tab strip below md is one unbroken row, so on a phone it pushed the whole
+  // dialog past the screen's edge.
+  "h-dvh max-h-dvh w-dvw max-w-none grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden rounded-none p-0 sm:h-[85vh] sm:max-h-[85vh] sm:w-full sm:max-w-2xl sm:rounded-xl md:max-w-4xl",
 );
 
-export function WalletsModal({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+export function WalletsModal({
+  open,
+  onOpenChange,
+  section,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** The tab it opens on; the overview when absent. */
+  section?: WalletsSection;
+}) {
   const reseating = useSyncExternalStore(subscribeSeatActivity, reseatRunning, reseatRunning);
   return (
     <Dialog open={open} onOpenChange={guardedOpenChange(onOpenChange)}>
@@ -84,13 +103,13 @@ export function WalletsModal({ open, onOpenChange }: { open: boolean; onOpenChan
           >
             {/* pr-12 keeps the title clear of the close button, which sits absolute in the corner. */}
             <DialogHeader className="border-b p-4 pr-12 text-left">
-              <DialogTitle>Wallets</DialogTitle>
-              <DialogDescription>Your pension key, and the trading wallets that put a slice of every trade aside.</DialogDescription>
+              <DialogTitle>{WALLETS_COPY.title}</DialogTitle>
+              <DialogDescription>{WALLETS_COPY.description}</DialogDescription>
             </DialogHeader>
 
-            <div className="min-h-0 overflow-y-auto p-4">
-              <WalletsScreen />
-            </div>
+            {/* The body row is the screen itself, with no scroll around it: its panels scroll on their own while the
+                rail stays still, and the states before the tabs bring their own scrolling body. */}
+            <WalletsScreen frame="modal" initialSection={section} />
 
             <DialogPrimitive.Close data-slot="dialog-close" asChild>
               <Button variant="ghost" className="absolute top-2 right-2" size="icon-sm" disabled={reseating}>

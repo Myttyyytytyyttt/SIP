@@ -41,7 +41,7 @@
 
 import { usePrivy } from "@privy-io/react-auth";
 import { LoaderCircle, Plus } from "lucide-react";
-import { useMemo } from "react";
+import { useContext, useMemo } from "react";
 
 import { useSolanaConfig } from "@/app/providers";
 import { Num } from "@/components/num";
@@ -50,6 +50,7 @@ import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader,
 import { TradingWalletRow, type TradingWalletRowData } from "@/components/wallets/TradingWalletRow";
 import { TxProgress } from "@/components/wallets/TxProgress";
 import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
+import { WalletsSectionContext } from "@/components/wallets/wallets-section-context";
 import { useCreateAndLink } from "@/hooks/use-create-and-link";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { formatSol, rawFrom } from "@/lib/amounts";
@@ -203,6 +204,11 @@ export function TradingWalletsCard() {
  *
  * IT IS DISMISSIBLE, and the card drops it on its own once a stop that described
  * the chain no longer does (stopStillHolds): nothing here outlives what it says.
+ *
+ * THE WAY TO THE VAULT IS A TAB SWITCH inside the tabbed wallets screen: the
+ * vault card sits in another panel there, hidden, and an anchor to it would go
+ * nowhere (and seat-activity cancels every link click while a re-seat runs).
+ * Rendered on its own, with no tabs around it, it is still the anchor.
  */
 export function CreateAndLinkNote({
   outcome,
@@ -213,6 +219,7 @@ export function CreateAndLinkNote({
   readonly vaultRent: bigint | null;
   readonly onDismiss?: () => void;
 }) {
+  const showSection = useContext(WalletsSectionContext);
   const { stop, created, link } = outcome;
   if (stop === null) {
     if (link === null || link.ok) return null;
@@ -236,9 +243,15 @@ export function CreateAndLinkNote({
       <p className="text-muted-foreground">{needsVault ? CREATE_LINK_COPY.needsVault(vaultRent === null ? null : formatSol(vaultRent)) : stop.message}</p>
       <div className="flex flex-wrap gap-2">
         {needsVault ? (
-          <Button type="button" size="sm" variant="outline" asChild>
-            <a href={`#${VAULT_CARD_ID}`}>{CREATE_LINK_COPY.goToVault}</a>
-          </Button>
+          showSection !== null ? (
+            <Button type="button" size="sm" variant="outline" onClick={() => showSection("vault")}>
+              {CREATE_LINK_COPY.goToVault}
+            </Button>
+          ) : (
+            <Button type="button" size="sm" variant="outline" asChild>
+              <a href={`#${VAULT_CARD_ID}`}>{CREATE_LINK_COPY.goToVault}</a>
+            </Button>
+          )
         ) : null}
         {onDismiss !== undefined ? (
           <Button type="button" size="sm" variant="ghost" onClick={() => onDismiss()}>

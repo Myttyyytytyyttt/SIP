@@ -44,6 +44,7 @@ import { rawFrom } from "@/lib/amounts";
 import { anchorOf, toDashboardMock } from "@/lib/live-mock";
 import type { LiveDashboard } from "@/lib/live-types";
 import { seatProblem } from "@/lib/trading-wallets";
+import type { WalletsSection } from "@/lib/wallets-sections";
 
 /** After this long without a good read, the note adds that the numbers may be out of date. */
 const STALE_WARNING_MS = 5 * 60_000;
@@ -82,7 +83,11 @@ export function LiveBody({
   readonly activityPending?: boolean;
 }) {
   const openWallets = useWalletsOpener();
-  const onOpenWallets = (): void => openWallets?.();
+  // Wrappers, not the opener itself. The sidebar hands its handler straight to onClick, so it takes nothing and
+  // opens the overview: a click event never reaches the opener from here. The next-step card names the section
+  // its stage needs, and that one is passed through.
+  const onManageWallets = (): void => openWallets?.();
+  const onOpenWallets = (section?: WalletsSection): void => openWallets?.(section);
   const config = useSolanaConfigOrNull();
 
   // The payload's own clock: every relative label is measured against it.
@@ -126,7 +131,7 @@ export function LiveBody({
       activity={page.activity}
       now={page.now}
       id={id}
-      onManageWallets={onOpenWallets}
+      onManageWallets={onManageWallets}
       className={inSheet ? "min-h-0 flex-1" : "sticky top-14 h-[calc(100dvh-3.5rem)]"}
       live={{
         below: lead === null ? null : <LeadNotes wallet={lead} />,

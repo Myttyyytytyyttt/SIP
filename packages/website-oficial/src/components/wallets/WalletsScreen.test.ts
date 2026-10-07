@@ -105,14 +105,15 @@ import { WalletsScreen } from "@/components/wallets/WalletsScreen";
 import { useKeeperSeat } from "@/hooks/use-keeper-seat";
 import { beginSeatTask, clearSeatActivity, endSeatTask, reseatRunning, seatActivity } from "@/lib/seat-activity";
 import { GRANT_BACKOFF_MS, GRANT_COPY, GRANT_HOLD_MS, RESEAT_COPY, ROW_COPY } from "@/lib/trading-wallets";
-import { CREATE_LINK_COPY } from "@/lib/vault-copy";
+import { CREATE_LINK_COPY, INVEST_COPY, VAULT_COPY, WALLETS_COPY, WITHDRAW_COPY } from "@/lib/vault-copy";
+import { WALLETS_SECTIONS, type WalletsSection } from "@/lib/wallets-sections";
 
 /** What a real click hands a handler: an object with a target, which Privy would read as options. */
 const CLICK = { type: "click", target: {} };
 
-function render(): string {
+function render(props: Parameters<typeof WalletsScreen>[0] = {}): string {
   mocked.buttons.length = 0;
-  return renderToStaticMarkup(createElement(TooltipProvider, null, createElement(WalletsScreen)));
+  return renderToStaticMarkup(createElement(TooltipProvider, null, createElement(WalletsScreen, props)));
 }
 
 const buttons = (label: string) => mocked.buttons.filter((button) => button.label === label);
@@ -126,6 +127,31 @@ function rows(html: string): { seat: string; body: string }[] {
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** Each tab in the rail: its opening tag, its state, and its visible name (a dot's screen-reader words left out). */
+function tabs(html: string): { tag: string; state: string; label: string }[] {
+  return [...html.matchAll(/<(button|a)\b([^>]*role="tab"[^>]*)>(.*?)<\/\1>/g)].map((match) => ({
+    tag: match[1] ?? "",
+    state: /data-state="([a-z]+)"/.exec(match[2] ?? "")?.[1] ?? "",
+    label: (match[3] ?? "")
+      .replace(/<span class="sr-only">.*?<\/span>/g, "")
+      .replace(/<[^>]*>/g, "")
+      .trim(),
+  }));
+}
+
+/**
+ * Each tab panel: its section (from Radix's id), its opening tag, and its markup up to the next panel. The panels
+ * are siblings in rail order, so the slice between two opening tags is the first one's content.
+ */
+function panels(html: string): { section: string; tag: string; body: string }[] {
+  const starts = [...html.matchAll(/<div[^>]*role="tabpanel"[^>]*>/g)];
+  return starts.map((match, index) => ({
+    section: /id="[^"]*-content-([a-z]+)"/.exec(match[0])?.[1] ?? "",
+    tag: match[0],
+    body: html.slice(match.index, starts[index + 1]?.index ?? html.length),
+  }));
+}
 
 beforeEach(() => {
   mocked.privy = { ready: true, authenticated: true, user: RECORD };
@@ -179,6 +205,77 @@ describe("WalletsScreen states", () => {
     create?.onClick?.(CLICK);
     await flush();
     expect(mocked.createWallet).not.toHaveBeenCalled();
+  });
+});
+
+describe("WalletsScreen tabs: a rail on the left, the overview first, every area beside it", () => {
+  it("one tab list, named, with the five sections in rail order as buttons, and the overview active", () => {
+    const html = render();
+    const lists = [...html.matchAll(/<div[^>]*role="tablist"[^>]*>/g)].map((match) => match[0]);
+    expect(lists).toHaveLength(1);
+    expect(lists[0]).toContain(`aria-label="${WALLETS_COPY.sections}"`);
+    const rail = tabs(html);
+    expect(rail.map((tab) => tab.label)).toStrictEqual(WALLETS_SECTIONS.map((id) => WALLETS_COPY.tabs[id]));
+    // Buttons, never links: seat-activity cancels every a[href] click while a re-seat runs.
+    expect(rail.map((tab) => tab.tag)).toStrictEqual(WALLETS_SECTIONS.map(() => "button"));
+    expect(rail.map((tab) => tab.state)).toStrictEqual(["active", "inactive", "inactive", "inactive", "inactive"]);
+  });
+
+  it.each<WalletsSection>(["vault", "trading", "investing", "withdraw"])("opens on %s when asked to", (section) => {
+    const html = render({ initialSection: section });
+    const active = WALLETS_SECTIONS.map((id) => (id === section ? "active" : "inactive"));
+    expect(tabs(html).map((tab) => tab.state)).toStrictEqual(active);
+    expect(panels(html).map((panel) => /data-state="([a-z]+)"/.exec(panel.tag)?.[1])).toStrictEqual(active);
+  });
+
+  it("every panel is in the one render, mounted and only hidden, each holding its own card once", () => {
+    // A card keeps its write's progress in its own state: an inactive panel that unmounted would drop it mid-signature.
+    const html = render();
+    const all = panels(html);
+    expect(all.map((panel) => panel.section)).toStrictEqual([...WALLETS_SECTIONS]);
+    for (const panel of all) {
+      expect(panel.tag, panel.section).toContain("data-[state=inactive]:hidden");
+      expect(panel.tag, panel.section).not.toMatch(/\shidden(=|\s|>)/);
+    }
+    const body = (section: WalletsSection): string => all.find((panel) => panel.section === section)?.body ?? "";
+    // The vault card's anchor, once, in the vault's panel.
+    expect(html.match(/id="vault"/g)).toHaveLength(1);
+    expect(body("vault")).toContain('id="vault"');
+    expect(body("vault")).toContain(`aria-label="${VAULT_COPY.loading}"`);
+    // Every trading wallet row, and the one press, in the trading wallets panel and nowhere else.
+    expect(rows(body("trading"))).toHaveLength(4);
+    expect(rows(html)).toHaveLength(4);
+    expect(body("trading")).toContain(CREATE_LINK_COPY.button);
+    expect(buttons(CREATE_LINK_COPY.button)).toHaveLength(1);
+    expect(body("investing")).toContain(`aria-label="${INVEST_COPY.title}"`);
+    expect(body("withdraw")).toContain(`aria-label="${WITHDRAW_COPY.title}"`);
+  });
+
+  it("the tab list comes first, so the dialog's first focus lands on the active tab, never on Disconnect", () => {
+    const html = render();
+    const list = html.indexOf('role="tablist"');
+    expect(list).toBeGreaterThan(-1);
+    expect(list).toBeLessThan(html.indexOf('role="tabpanel"'));
+    expect(list).toBeLessThan(html.indexOf(PENSION_KEY));
+    expect(html.indexOf("Disconnect")).toBeGreaterThan(list);
+  });
+
+  it("in the modal each panel scrolls on its own beside a still rail; on the page the page scrolls", () => {
+    const modal = panels(render({ frame: "modal" }));
+    for (const panel of modal) {
+      for (const name of ["min-h-0", "flex-1", "overflow-y-auto"]) expect(panel.tag, panel.section).toMatch(new RegExp(`class="[^"]*\\b${name}\\b`));
+    }
+    const page = panels(render({ frame: "page" }));
+    for (const panel of page) expect(panel.tag, panel.section).not.toContain("overflow-y-auto");
+  });
+
+  it("the states before the tabs have no rail, and in the modal they keep a scrolling body of their own", () => {
+    mocked.privy = { ready: true, authenticated: false, user: null };
+    const html = render({ frame: "modal" });
+    expect(html).not.toContain('role="tablist"');
+    expect(html).toMatch(/^<div class="min-h-0 overflow-y-auto p-4">/);
+    expect(html).toContain("Connect your pension key");
+    expect(render({ frame: "page" })).not.toContain("overflow-y-auto");
   });
 });
 

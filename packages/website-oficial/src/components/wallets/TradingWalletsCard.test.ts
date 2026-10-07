@@ -60,6 +60,7 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { CreateAndLinkNote, TradingWalletsCard } from "@/components/wallets/TradingWalletsCard";
 import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
+import { WalletsSectionContext } from "@/components/wallets/wallets-section-context";
 import { VaultWriteLock, WriteLockContext, type WriteLock } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
 import type { CreateAndLinkOutcome } from "@/lib/create-and-link";
@@ -278,7 +279,7 @@ describe("what the card says when the press stops", () => {
     return renderToStaticMarkup(createElement(TooltipProvider, null, createElement(CreateAndLinkNote, { outcome, vaultRent, onDismiss: dismiss })));
   };
 
-  it("no vault: the wallet is created and said to be created, the vault is asked for, and the way there is a link to the form", () => {
+  it("no vault, on its own: the wallet is created and said to be created, the vault is asked for, and the way there is a link to the form", () => {
     const html = noteOf({ created: TRADING_0, link: null, stop: { kind: "gate", message: LINK_COPY.needsVault, gate: "needs_vault" } });
     expect(html).toContain(asHtml(CREATE_LINK_COPY.created));
     expect(html).toContain(asHtml(CREATE_LINK_COPY.inTheList));
@@ -286,6 +287,23 @@ describe("what the card says when the press stops", () => {
     expect(html).toContain("0.00128524 SOL of rent that never comes back");
     expect(html).toContain(`href="#${VAULT_CARD_ID}"`);
     expect(html).toContain(asHtml(CREATE_LINK_COPY.goToVault));
+  });
+
+  it("no vault, inside the tabbed wallets screen: the way there is a button that switches to the Vault tab, never a link", () => {
+    // In tabs the vault card sits in another panel, hidden, so an anchor would go nowhere; and seat-activity cancels
+    // every a[href] click while a re-seat runs. The screen hands its tab switch down through the context.
+    const showSection = vi.fn();
+    mocked.buttons.length = 0;
+    const outcome: CreateAndLinkOutcome = { created: TRADING_0, link: null, stop: { kind: "gate", message: LINK_COPY.needsVault, gate: "needs_vault" } };
+    const html = renderToStaticMarkup(
+      createElement(TooltipProvider, null, createElement(WalletsSectionContext.Provider, { value: showSection }, createElement(CreateAndLinkNote, { outcome, vaultRent: 1_285_240n }))),
+    );
+    expect(html).not.toContain(`href="#${VAULT_CARD_ID}"`);
+    expect(html).not.toContain("<a ");
+    expect(html).toMatch(new RegExp(`<button[^>]*type="button"[^>]*>${asHtml(CREATE_LINK_COPY.goToVault)}</button>`));
+    const [go] = buttons(CREATE_LINK_COPY.goToVault);
+    go?.onClick?.(CLICK);
+    expect(showSection.mock.calls).toStrictEqual([["vault"]]);
   });
 
   it("…and never claims the vault was made, nor offers to make one on the owner's behalf", () => {
