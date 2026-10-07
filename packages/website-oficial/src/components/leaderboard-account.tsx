@@ -22,14 +22,11 @@
  * page of signatures and the backfill round that follows it.
  */
 
-import Link from "next/link";
-
 import { usePrivy } from "@privy-io/react-auth";
 
 import Providers from "@/app/providers";
 import { DisconnectButton, PensionKeyChip, worthFrom } from "@/components/account-chip";
 import { OpenPension } from "@/components/open-pension";
-import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useLiveDashboard } from "@/hooks/use-live-dashboard";
 import type { SolanaPublicConfig } from "@/lib/config";
@@ -65,10 +62,7 @@ function Account() {
   return (
     <>
       {pensionKey === null ? null : <PensionKeyChip address={pensionKey} worthUsdcRaw={worthFrom(live.view)} />}
-      {/* The way back in, beside the way out: this page is not the app. */}
-      <Button asChild size="sm" variant="ghost" className="hidden lg:inline-flex">
-        <Link href="/">Back to my pension</Link>
-      </Button>
+      {/* No "Back to my pension" here any more (owner, 10-07): the Pension tab on the left already is that way back. */}
       <DisconnectButton onDisconnect={() => void logout()} />
     </>
   );

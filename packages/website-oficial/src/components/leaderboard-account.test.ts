@@ -100,7 +100,8 @@ describe("with a connected pension key", () => {
     const html = render();
     expect(html).toContain(PENSION_KEY.slice(0, 4));
     expect(html).toContain("Disconnect");
-    expect(html).toContain("Back to my pension");
+    // No way back beside the way out (owner, 10-07): the Pension tab is that way back.
+    expect(html).not.toContain("Back to my pension");
     expect(html).not.toContain("Open my pension");
   });
 

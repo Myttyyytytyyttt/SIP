@@ -49,6 +49,38 @@ describe("the navbar's tabs", () => {
   });
 });
 
+/**
+ * TWO SIDES (owner, 10-07): your own pension's pages on the left; on the right
+ * the Dashboard of every pension, a rule, then the settings of this visit
+ * (Live|Mock, the account), with the theme switch the very last thing.
+ */
+describe("the navbar's two sides", () => {
+  const html = renderToStaticMarkup(
+    createElement(SiteHeader, {
+      activitySheet: null,
+      control: createElement("span", null, "MODE-CONTROL"),
+      account: createElement("span", null, "ACCOUNT-SLOT"),
+      current: "dashboard",
+      mode: "mock",
+    }),
+  );
+  const main = html.match(/<nav aria-label="Main"[\s\S]*?<\/nav>/)?.[0] ?? "";
+  const at = (needle: string): number => html.indexOf(needle);
+
+  it("keeps the Dashboard out of the left-hand tabs, and marks it current on its own page", () => {
+    expect(main).toContain(">Leaderboard<");
+    expect(main).not.toContain(">Dashboard<");
+    expect(html).toMatch(/<nav aria-label="All pensions"[^>]*>[\s\S]*?aria-current="page"[^>]*>Dashboard</);
+  });
+
+  it("orders the right side: Dashboard, the rule, Live|Mock, the account, and the theme last", () => {
+    const order = [at(">Dashboard<"), at('data-slot="separator"'), at("MODE-CONTROL"), at("ACCOUNT-SLOT"), at('aria-label="Toggle theme"')];
+    expect(order.every((index) => index > -1)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(at(">Dashboard<")).toBeGreaterThan(html.indexOf('aria-label="Main"'));
+  });
+});
+
 describe("the footer's links", () => {
   const footer = (mode?: "mock") => renderToStaticMarkup(createElement(SiteFooter, { now: "2026-09-24T00:00:00.000Z", ...(mode === undefined ? {} : { mode }) }));
 
@@ -71,6 +103,10 @@ describe("the leaderboard's way back", () => {
   it("returns a visitor to the sample they came from", () => {
     expect(renderToStaticMarkup(createElement(OpenPension, { returning: false, mode: "mock" }))).toContain('href="/?mode=mock"');
     expect(renderToStaticMarkup(createElement(OpenPension, { returning: false }))).toContain('href="/"');
+  });
+
+  it("offers nothing to somebody returning: the Pension tab is their way back (owner, 10-07)", () => {
+    expect(renderToStaticMarkup(createElement(OpenPension, { returning: true }))).toBe("");
   });
 });
 

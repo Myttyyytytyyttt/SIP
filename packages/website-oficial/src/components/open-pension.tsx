@@ -13,11 +13,17 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { urlWithMode, type UrlMode } from "@/lib/dashboard-mode";
 
-/** `mode`: the one the visitor came from, so a stranger who was in the sample goes back to it rather than to the landing. */
+/**
+ * `mode`: the one the visitor came from, so a stranger who was in the sample goes back to it rather than to the landing.
+ *
+ * NOTHING FOR SOMEBODY RETURNING (owner, 10-07): "Back to my pension" is gone. The Pension tab on the left of
+ * the bar already is that way back, and two links to the same place read as two different places.
+ */
 export function OpenPension({ returning, mode = null }: { readonly returning: boolean; readonly mode?: UrlMode | null }) {
+  if (returning) return null;
   return (
-    <Button asChild size="sm" variant={returning ? "default" : "outline"}>
-      <Link href={mode === null ? "/" : urlWithMode("/", mode)}>{returning ? "Back to my pension" : "Open my pension"}</Link>
+    <Button asChild size="sm" variant="outline">
+      <Link href={mode === null ? "/" : urlWithMode("/", mode)}>Open my pension</Link>
     </Button>
   );
 }

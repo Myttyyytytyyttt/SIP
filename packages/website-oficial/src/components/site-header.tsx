@@ -9,14 +9,22 @@ import { ModeToggle } from "@/components/mode-toggle";
 import { useRouteLoader } from "@/components/route-loader";
 import { SipMark } from "@/components/site-footer";
 import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
 import { Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { urlWithMode, type UrlMode } from "@/lib/dashboard-mode";
 import { cn } from "@/lib/utils";
 
 /**
- * The top bar: wordmark, nav, the Live|Mock control, the theme toggle, the
- * account. Below `lg` the sidebar is gone, so the leading button opens whatever
- * that state's sidebar is in a sheet.
+ * The top bar: wordmark and the pages of your own pension on the left; on the
+ * right, the Dashboard of every pension, a rule, then the settings of this
+ * visit — the Live|Mock control, the account, and the theme last of all. Below
+ * `lg` the sidebar is gone, so the leading button opens whatever that state's
+ * sidebar is in a sheet.
+ *
+ * TWO KINDS OF THING, TWO SIDES (owner, 10-07). The left is where you go in
+ * your own pension; the right is what you set, and the Dashboard, which is
+ * about everybody's, sits there before the rule that separates it from your
+ * wallet. The theme switch is the very last thing in the bar.
  *
  * THE SIDEBAR ARRIVES AS A SLOT, not as mock data. This header used to take a
  * `wallet` and an `activity` array and render the example's feed itself, which
@@ -75,13 +83,29 @@ export function SiteHeader({
     // A REAL PAGE, AND A PUBLIC ONE: /leaderboard mounts no Privy provider, so
     // this link works for a visitor who has never connected anything.
     { label: "Leaderboard", href: tab("/leaderboard"), current: current === "leaderboard", className: undefined },
-    // Every pension added up (owner, 10-06): public as well, and it follows
-    // the mode like the rest — the sample in Mock, the real figures in Live.
-    { label: "Dashboard", href: tab("/dashboard"), current: current === "dashboard", className: undefined },
     // A placeholder ("#"), so it is the one that gives way between md and lg:
-    // with five tabs, the Live|Mock control and the account, 768 px overflowed.
+    // with the tabs, the Dashboard, the Live|Mock control and the account, 768 px overflowed.
     { label: "Docs", href: "#", current: false, className: "hidden lg:inline-flex" },
   ];
+  // Every pension added up (owner, 10-06): public as well, and it follows the
+  // mode like the rest — the sample in Mock, the real figures in Live. On the
+  // right since 10-07, before the rule (see the comment at the top).
+  const dashboard = { label: "Dashboard", href: tab("/dashboard"), current: current === "dashboard", className: undefined };
+  const tabLink = (item: (typeof nav)[number]) => (
+    <Button key={item.label} variant="ghost" size="sm" asChild className={cn(item.current ? "text-foreground" : "text-muted-foreground", item.className)}>
+      <AppLink
+        href={item.href}
+        aria-current={item.current ? "page" : undefined}
+        onClick={(event) => {
+          // A click that opens elsewhere (new tab, new window) turns no page here.
+          if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          turnTo?.(item.href);
+        }}
+      >
+        {item.label}
+      </AppLink>
+    </Button>
+  );
 
   return (
     <header className="sticky top-0 z-40 h-14 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -129,17 +153,7 @@ export function SiteHeader({
         </h1>
 
         <nav aria-label="Main" className="ml-6 hidden items-center gap-1 md:flex">
-          {nav.map((item) => (
-            <Button key={item.label} variant="ghost" size="sm" asChild className={cn(item.current ? "text-foreground" : "text-muted-foreground", item.className)}>
-              <AppLink href={item.href} aria-current={item.current ? "page" : undefined} onClick={(event) => {
-                  // A click that opens elsewhere (new tab, new window) turns no page here.
-                  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-                  turnTo?.(item.href);
-                }}>
-                {item.label}
-              </AppLink>
-            </Button>
-          ))}
+          {nav.map(tabLink)}
         </nav>
 
         <div className="ml-auto flex min-w-0 items-center gap-2">
@@ -152,9 +166,14 @@ export function SiteHeader({
             or neither.
           */}
           {current === "pension" ? null : contributions}
+          {/* Hidden below md with the rest of the tabs: on a phone the footer carries it. */}
+          <nav aria-label="All pensions" className="hidden items-center md:flex">
+            {tabLink(dashboard)}
+          </nav>
+          <Separator orientation="vertical" className="hidden h-5 data-vertical:self-center md:block" />
           {control}
-          <ModeToggle />
           {account}
+          <ModeToggle />
         </div>
       </div>
     </header>
