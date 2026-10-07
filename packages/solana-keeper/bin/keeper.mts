@@ -100,6 +100,7 @@ import { MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
 import { createVolumeBase } from "../src/volume-base.js";
 import { previewLastSettled, previewVolume, type PreviewBook } from "../src/volume-preview.js";
 import { computeLeaderboard } from "../src/leaderboard.js";
+import { computeGlobalStats, type GlobalStats } from "../src/global-stats.js";
 import {
   createHeartbeatServer,
   decideHealth,
@@ -767,6 +768,15 @@ const LEADERBOARD_REFRESH_MS = 120_000;
  */
 const HISTORY_RECHECK_MS = 300_000;
 let leaderboard: LeaderboardReply = { unavailable: "the rankings have not been computed yet" };
+/**
+ * The dashboard's `stats` block, served beside the rankings: THE LAST GOOD ONE.
+ * A stats read that fails keeps this in place, so a blinking database does not
+ * blank the charts; only a keeper that has never read one serves no block, and
+ * the page then draws what the rankings alone can say.
+ */
+let lastGoodStats: (GlobalStats & { readonly computedAt: string }) | null = null;
+/** How long a stats block nobody could re-read is still served: a day. */
+const STATS_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
 
 /**
  * Re-asks whether history can be written, and says so ONLY WHEN THE ANSWER
@@ -801,7 +811,26 @@ async function refreshLeaderboard(): Promise<void> {
       if (!("body" in leaderboard)) leaderboard = { unavailable: "the history could not be read" };
       return;
     }
-    leaderboard = { body: renderLeaderboard(computeLeaderboard(days, new Date()), sharedRedactor) };
+    // AFTER THE DAYS, NEVER BESIDE THEM: one connection is all the settlement
+    // writes have while the claim pins the other, so the two reads take turns.
+    // AND NEVER IN THE RANKINGS' WAY: a stats read or a stats computation that
+    // fails leaves the last good block in place, and the board still refreshes.
+    try {
+      const statsRows = await readModel.globalStatsRows();
+      // ITS OWN computedAt: a kept block is older than the rankings beside it,
+      // and the page must end its charts on the day THIS was read — a later
+      // day is not a quiet one, it is one nobody has read yet.
+      if (statsRows !== null) lastGoodStats = { ...computeGlobalStats(statsRows.settlements, statsRows.investments), computedAt: new Date().toISOString() };
+      // A KEPT BLOCK HAS AN AGE LIMIT: past a day, figures nobody could re-read
+      // are dropped, and the page says the charts are unavailable instead.
+      else if (lastGoodStats !== null && Date.now() - Date.parse(lastGoodStats.computedAt) > STATS_MAX_AGE_MS) lastGoodStats = null;
+    } catch (error) {
+      log.warn("the global stats could not be computed (the rankings still refresh)", { detail: summarizeUpstreamError(error) });
+    }
+    const stats = lastGoodStats;
+    leaderboard = {
+      body: renderLeaderboard({ ...computeLeaderboard(days, new Date()), ...(stats === null ? {} : { stats }) }, sharedRedactor),
+    };
   } catch (error) {
     // A PAGE MUST NOT BE ABLE TO KILL THE KEEPER. This runs detached, under the
     // process's uncaughtException trap — which exits.

@@ -18,6 +18,7 @@
 import pg from "pg";
 import { summarizeUpstreamError, type Secret } from "@sip/solana-log";
 import type { DayTotals } from "./leaderboard.js";
+import type { InvestmentStatsRow, SettlementStatsRow } from "./global-stats.js";
 
 export const READ_MODEL_SCHEMA = "sip_solana";
 export const READ_MODEL_TABLES = ["vault", "trading_link", "settlement_event", "investment_event"] as const;
@@ -84,6 +85,82 @@ export const LEADERBOARD_DAY_LIMIT = 50_000;
  * files agree until the day one of them is edited.
  */
 export type LeaderboardDayRow = DayTotals;
+
+/**
+ * The dashboard's settlement figures, one row per group of each grouping set:
+ * (day, mode), (day), (mode) and (). GROUPING(x) is 1 on the sets that do not
+ * group by x, which is how a row says which set it belongs to. An empty table
+ * still returns the () row: count 0, NULL sums.
+ */
+export const GLOBAL_SETTLEMENT_STATS_SQL = `SELECT day, mode, GROUPING(day) AS no_day, GROUPING(mode) AS no_mode,
+       count(*) AS settles,
+       count(*) FILTER (WHERE contribution_raw > 0) AS paying,
+       sum(contribution_raw) AS contribution_raw,
+       sum(volume_raw) AS volume_raw,
+       count(DISTINCT vault_addr) AS subjects
+  FROM (SELECT to_char((at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day, mode, contribution_raw, volume_raw, vault_addr
+          FROM ${READ_MODEL_SCHEMA}.settlement_event) AS e
+ GROUP BY GROUPING SETS ((day, mode), (day), (mode), ())`;
+
+/**
+ * What each pension's vault bought, per UTC day and asset, per asset all time
+ * (target), and the all-time () row. `target` is the mint and NOT NULL in the
+ * table, so a NULL target is the () row and nothing else.
+ */
+export const GLOBAL_INVESTMENT_STATS_SQL = `SELECT day, target, GROUPING(day) AS no_day, count(*) AS buys, sum(spent_raw) AS spent_raw
+  FROM (SELECT to_char((at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day, target, spent_raw
+          FROM ${READ_MODEL_SCHEMA}.investment_event) AS i
+ GROUP BY GROUPING SETS ((day, target), (target), ())`;
+
+/** A settlements row as pg returns it: int8 and numeric as text, int2/int4 as numbers. */
+export interface RawSettlementStatsRow {
+  readonly day: string | null;
+  readonly mode: number | string | null;
+  readonly no_day: number | string;
+  readonly no_mode: number | string;
+  readonly settles: string | number | null;
+  readonly paying: string | number | null;
+  readonly contribution_raw: string | null;
+  readonly volume_raw: string | null;
+  readonly subjects: string | number | null;
+}
+
+export interface RawInvestmentStatsRow {
+  readonly day: string | null;
+  readonly target: string | null;
+  readonly no_day: number | string;
+  readonly buys: string | number | null;
+  readonly spent_raw: string | null;
+}
+
+/** A count: exact as a Number far past any table this keeper will hold. NULL stays NULL. */
+const countOf = (value: string | number | null): number | null => (value === null ? null : Number(value));
+/** A numeric sum, exactly: a lamport is not a rounding error. NULL (an empty group's sum) stays NULL. */
+const rawOf = (value: string | null): bigint | null => (value === null ? null : BigInt(value));
+
+export function settlementStatsRow(row: RawSettlementStatsRow): SettlementStatsRow {
+  return {
+    day: row.day,
+    mode: row.mode === null ? null : Number(row.mode),
+    noDay: Number(row.no_day) === 1,
+    noMode: Number(row.no_mode) === 1,
+    settles: countOf(row.settles),
+    paying: countOf(row.paying),
+    contributionRaw: rawOf(row.contribution_raw),
+    volumeRaw: rawOf(row.volume_raw),
+    subjects: countOf(row.subjects),
+  };
+}
+
+export function investmentStatsRow(row: RawInvestmentStatsRow): InvestmentStatsRow {
+  return {
+    day: row.day,
+    target: row.target,
+    noDay: Number(row.no_day) === 1,
+    buys: countOf(row.buys),
+    spentRaw: rawOf(row.spent_raw),
+  };
+}
 
 export interface InvestmentRow {
   readonly vaultAddr: string;
@@ -385,6 +462,40 @@ export class SolanaReadModel {
       }));
     } catch (error) {
       this.#warn("read-model leaderboard read failed (settlement unaffected)", { detail: summarizeUpstreamError(error) });
+      return null;
+    } finally {
+      client?.release();
+    }
+  }
+
+  /**
+   * The public dashboard's figures, grouped in Postgres: the rows
+   * computeGlobalStats (global-stats.ts) arranges into the `stats` block. NULL
+   * when there is no database or the read failed — leaderboardDays's rule, for
+   * the same reason: "we could not look" is not "there is nothing".
+   *
+   * GROUPING SETS, because a pension can settle in both modes on one day: the
+   * (day) set counts it once, where adding the per-mode counts would count it
+   * twice. NO LIMIT, so the block can say its read is whole; each set is at
+   * most one row per day (per mode, per asset), which stays small.
+   *
+   * SERIAL ON ONE CLIENT, NEVER Promise.all. An armed keeper pins one of the
+   * pool's two connections with its advisory lock, so a second concurrent
+   * query would take the only connection the settlement writes have.
+   */
+  async globalStatsRows(): Promise<{ settlements: SettlementStatsRow[]; investments: InvestmentStatsRow[] } | null> {
+    if (this.#pool === null) return null;
+    let client: pg.PoolClient | undefined;
+    try {
+      client = await this.#pool.connect();
+      const settled = await client.query<RawSettlementStatsRow>(GLOBAL_SETTLEMENT_STATS_SQL);
+      const invested = await client.query<RawInvestmentStatsRow>(GLOBAL_INVESTMENT_STATS_SQL);
+      return {
+        settlements: settled.rows.map(settlementStatsRow),
+        investments: invested.rows.map(investmentStatsRow),
+      };
+    } catch (error) {
+      this.#warn("read-model global stats read failed (settlement unaffected)", { detail: summarizeUpstreamError(error) });
       return null;
     } finally {
       client?.release();

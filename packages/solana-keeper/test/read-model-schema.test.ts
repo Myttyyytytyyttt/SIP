@@ -11,7 +11,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { REQUIRED_SETTLEMENT_COLUMNS } from "../src/read-model.js";
+import { GLOBAL_INVESTMENT_STATS_SQL, GLOBAL_SETTLEMENT_STATS_SQL, REQUIRED_SETTLEMENT_COLUMNS } from "../src/read-model.js";
 
 const PACKAGE = new URL("..", import.meta.url);
 const source = (path: string): string => readFileSync(fileURLToPath(new URL(path, PACKAGE)), "utf8");
@@ -107,5 +107,57 @@ describe("the leaderboard's wiring in bin/keeper.mts", () => {
     // would put a page's database query in front of a settlement.
     expect(keeper).toContain("void refreshLeaderboard();");
     expect(keeper).not.toContain("await refreshLeaderboard()");
+  });
+});
+
+describe("the dashboard's stats read", () => {
+  it("groups with GROUPING SETS, so a pension in both modes on one day is counted once", () => {
+    expect(GLOBAL_SETTLEMENT_STATS_SQL).toContain("GROUP BY GROUPING SETS ((day, mode), (day), (mode), ())");
+    expect(GLOBAL_SETTLEMENT_STATS_SQL).toContain("count(DISTINCT vault_addr) AS subjects");
+    // (target) too: each asset all time, read whole, so the per-asset totals never depend on how long the daily series is.
+    expect(GLOBAL_INVESTMENT_STATS_SQL).toContain("GROUP BY GROUPING SETS ((day, target), (target), ())");
+  });
+
+  it("has no LIMIT, because the block it feeds says truncated: false", () => {
+    for (const query of [GLOBAL_SETTLEMENT_STATS_SQL, GLOBAL_INVESTMENT_STATS_SQL]) {
+      expect(query).not.toMatch(/\bLIMIT\b/i);
+    }
+  });
+
+  it("only reads: the database is production and shared", () => {
+    for (const query of [GLOBAL_SETTLEMENT_STATS_SQL, GLOBAL_INVESTMENT_STATS_SQL]) {
+      expect(query.trimStart().startsWith("SELECT ")).toBe(true);
+      expect(query).not.toMatch(/\b(INSERT|UPDATE|DELETE|ALTER|CREATE|DROP|TRUNCATE|GRANT)\b/i);
+    }
+  });
+
+  it("runs its two queries serially on one client", () => {
+    const method = readModel.slice(readModel.indexOf("async globalStatsRows()"), readModel.indexOf("async close()"));
+    expect(method).toContain("client = await this.#pool.connect();");
+    expect(method).toContain("await client.query<RawSettlementStatsRow>(GLOBAL_SETTLEMENT_STATS_SQL)");
+    expect(method).toContain("await client.query<RawInvestmentStatsRow>(GLOBAL_INVESTMENT_STATS_SQL)");
+    expect(method).toContain("client?.release();");
+    expect(method).not.toContain("Promise.all");
+  });
+});
+
+describe("the stats block's wiring in bin/keeper.mts", () => {
+  const refresh = keeper.slice(keeper.indexOf("async function refreshLeaderboard()"), keeper.indexOf("// The heartbeat, only when a port"));
+
+  it("reads the stats AFTER the days, awaited, never beside them", () => {
+    const days = refresh.indexOf("await readModel.leaderboardDays();");
+    const stats = refresh.indexOf("await readModel.globalStatsRows();");
+    expect(days).toBeGreaterThan(-1);
+    expect(stats).toBeGreaterThan(days);
+    expect(refresh).not.toContain("Promise.all");
+  });
+
+  it("serves the last good block beside the rankings, under a top-level key of its own", () => {
+    // A kept block has an age limit: past a day nobody could re-read it, it is dropped, not served.
+    expect(keeper).toContain("const STATS_MAX_AGE_MS = 24 * 60 * 60 * 1_000;");
+    expect(refresh).toContain("Date.now() - Date.parse(lastGoodStats.computedAt) > STATS_MAX_AGE_MS) lastGoodStats = null;");
+    // Stamped with its own read time: a kept block is older than the rankings beside it.
+    expect(refresh).toContain("if (statsRows !== null) lastGoodStats = { ...computeGlobalStats(statsRows.settlements, statsRows.investments), computedAt: new Date().toISOString() };");
+    expect(refresh).toContain("renderLeaderboard({ ...computeLeaderboard(days, new Date()), ...(stats === null ? {} : { stats }) }, sharedRedactor)");
   });
 });
