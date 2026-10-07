@@ -55,6 +55,7 @@ const SHARED = [
   // Live with the same components: the sample reaches them only as props.
   "global-stats-view.tsx",
   "global-stats-chart.tsx",
+  "global-stats-area.tsx",
 ];
 
 /** The live surface: every panel, every pure module behind them, and the sample components they share. */

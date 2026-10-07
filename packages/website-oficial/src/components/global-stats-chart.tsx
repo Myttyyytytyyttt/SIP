@@ -50,6 +50,7 @@ import {
   type Unit,
   type View,
 } from "@/lib/global-stats-series";
+import { MONO, SAVED } from "@/lib/classes";
 import { cn } from "@/lib/utils";
 
 const COPY = GLOBAL_STATS_COPY.charts;
@@ -90,6 +91,7 @@ export function BarsTooltip({
   unit,
   period,
   view,
+  approximate = false,
 }: {
   readonly active?: boolean;
   readonly payload?: readonly { readonly payload?: unknown }[];
@@ -97,6 +99,8 @@ export function BarsTooltip({
   readonly unit: Unit;
   readonly period: Period;
   readonly view: View;
+  /** A measure that is never exact (what was traded): every figure is "≈", never "at least" — it can over-count too. */
+  readonly approximate?: boolean;
 }) {
   const row = payload?.[0]?.payload as PlotRow | undefined;
   if (active !== true || row === undefined) return null;
@@ -106,7 +110,7 @@ export function BarsTooltip({
   // NOT A ZERO: a bucket with a day nobody could read shows what was read, as a
   // floor — and when nothing was read, or the view is a share of it, says so.
   const unknown = row.unread && (row.total === "0" || view === "share");
-  const floor = row.unread ? `${COPY.atLeast} ` : "";
+  const floor = approximate ? "≈ " : row.unread ? `${COPY.atLeast} ` : "";
 
   return (
     <div role="status" aria-live="polite" className="grid min-w-40 items-start gap-1.5 rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-xs shadow-xl">
@@ -142,6 +146,39 @@ export function BarsTooltip({
           ) : null}
         </div>
       )}
+    </div>
+  );
+}
+
+/** A card's headline figure, as the reference sets it: large, left, its unit beside it and what it means under it. Plain strings, so it crosses from the server. */
+export interface HeadlineProps {
+  readonly value: string;
+  /** "≈", "at least", or nothing. */
+  readonly qualifier: string | null;
+  readonly unit: string;
+  /** Every digit, for the title attribute. */
+  readonly exact: string | null;
+  /** "+12.4% in 7 days", or nothing when there is no honest base to grow from. */
+  readonly delta: string | null;
+  readonly lines: readonly string[];
+}
+
+export function Headline({ value, qualifier, unit, exact, delta, lines }: HeadlineProps) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        {qualifier === null ? null : <span className="text-sm text-muted-foreground">{qualifier}</span>}
+        <span className={cn(MONO, "text-3xl font-semibold tracking-tight sm:text-4xl")} {...(exact === null ? {} : { title: exact })}>
+          {value}
+        </span>
+        {unit === "" ? null : <span className="text-sm text-muted-foreground">{unit}</span>}
+        {delta === null ? null : <span className={cn("rounded-md bg-emerald-500/10 px-1.5 py-0.5 text-xs font-medium", SAVED)}>{delta}</span>}
+      </div>
+      {lines.map((line) => (
+        <p key={line} className="text-xs text-muted-foreground">
+          {line}
+        </p>
+      ))}
     </div>
   );
 }
@@ -196,11 +233,15 @@ export interface StackedBarsCardProps {
   readonly daysOf?: "settlement" | "saving" | "purchase";
   /** A line under the chart, e.g. what each asset took. */
   readonly footer?: string | null;
+  /** The reference's headline above the chart: the figure the bars add up to. */
+  readonly headline?: HeadlineProps | null;
+  /** Figures that are approximations by nature (what was traded): printed "≈", never "at least". */
+  readonly approximate?: boolean;
   readonly className?: string;
 }
 
 export function StackedBarsCard(props: StackedBarsCardProps) {
-  const { id, title, description, info, sample, series, unit, days, end, first, periods, views, emptyCaption, unavailableCaption, daysOf = "settlement", footer = null, className } = props;
+  const { id, title, description, info, sample, series, unit, days, end, first, periods, views, emptyCaption, unavailableCaption, daysOf = "settlement", footer = null, headline = null, approximate = false, className } = props;
   const [period, setPeriod] = useState<Period>(periods[0] ?? "day");
   const [view, setView] = useState<View>(views[0] ?? "period");
 
@@ -219,7 +260,9 @@ export function StackedBarsCard(props: StackedBarsCardProps) {
         <CardDescription>{description}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        {days.kind === "unavailable" ? (
+        {headline === null ? null : <Headline {...headline} />}
+        {/* UNDER A HEADLINE, "NOT PUBLISHED YET" IS SAID ONCE, by the page: no empty band in a lead card. */}
+        {headline !== null && days.kind === "unavailable" && days.reason === "not-served-yet" ? null : days.kind === "unavailable" ? (
           <Band caption={unavailableCaption} />
         ) : days.value.rows.length === 0 ? (
           <Band caption={emptyCaption} />
@@ -240,6 +283,7 @@ export function StackedBarsCard(props: StackedBarsCardProps) {
             missing={days.value.missing ?? []}
             title={title}
             daysCaption={daysOf === "purchase" ? COPY.purchaseDays : daysOf === "saving" ? COPY.savingDays : COPY.activeDays}
+            approximate={approximate}
           />
         )}
         {footer === null ? null : <p className="text-xs text-muted-foreground">{footer}</p>}
@@ -264,6 +308,7 @@ function Plot({
   onPeriod,
   onView,
   daysCaption,
+  approximate,
 }: {
   readonly series: readonly SeriesKey[];
   readonly unit: Unit;
@@ -280,6 +325,7 @@ function Plot({
   readonly onPeriod: (period: Period) => void;
   readonly onView: (view: View) => void;
   readonly daysCaption: (days: number) => string;
+  readonly approximate: boolean;
 }) {
   const keys = period === "day" ? dayWindow(end, first) : weekWindow(end, first);
   const unread = unreadDays(rows, partial, missing);
@@ -363,7 +409,7 @@ function Plot({
             domain={view === "share" ? [0, 100] : [0, "auto"]}
             tickFormatter={(value: number) => (view === "share" ? `${value}%` : axisTick(value))}
           />
-          <ChartTooltip cursor={{ fill: "var(--muted)" }} content={<BarsTooltip series={series} unit={unit} period={period} view={view} />} />
+          <ChartTooltip cursor={{ fill: "var(--muted)" }} content={<BarsTooltip series={series} unit={unit} period={period} view={view} approximate={approximate} />} />
           {series.map((key) => (
             <Bar key={key} dataKey={key} name={SERIES[key].label} stackId="stack" fill={`var(--color-${key})`} maxBarSize={22} isAnimationActive={false} shape={segment(key)} />
           ))}
@@ -374,7 +420,9 @@ function Plot({
         THE SAME FIGURES AS TEXT, for a screen reader: the bars are a picture
         and the tooltip needs a pointer. Exact strings, as the tooltip prints them.
       */}
-      <table className="sr-only">
+      {/* sr-only on a WRAPPER: a table box ignores overflow, so on its own it widens a phone's page. */}
+      <div className="sr-only">
+      <table>
         <caption>{title}</caption>
         <thead>
           <tr>
@@ -396,13 +444,14 @@ function Plot({
                     ? COPY.unread
                     : view === "share"
                       ? pct(row.shares?.[key] ?? null)
-                      : `${row.unread ? `${COPY.atLeast} ` : ""}${valueText(row.exact[key] ?? "0", unit)}`}
+                      : `${approximate ? "≈ " : row.unread ? `${COPY.atLeast} ` : ""}${valueText(row.exact[key] ?? "0", unit)}`}
                 </td>
               ))}
             </tr>
           ))}
         </tbody>
       </table>
+      </div>
 
       <p className="text-xs text-muted-foreground">
         {[

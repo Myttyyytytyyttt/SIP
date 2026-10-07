@@ -98,6 +98,8 @@ export interface TradedTotal {
 /** One mode on one day. */
 export interface ModeCell {
   readonly savedRaw: Raw;
+  /** What that day's settlements were charged on, approximate; null when not sent. */
+  readonly tradedRaw: Raw | null;
   readonly settlements: number;
   /** Settlements that put something aside; null when not sent. */
   readonly payingSettlements: number | null;
@@ -134,6 +136,8 @@ export interface StatsBlock {
    * published yet", the second "this figure was missing from the answer".
    */
   readonly unreadable: readonly string[];
+  /** When the service read these figures: a block it kept from an earlier read is older than the rankings beside it. */
+  readonly computedAt: string | null;
   readonly totals: {
     readonly savedRaw: Raw | null;
     readonly tradedRaw: Raw | null;
@@ -152,6 +156,8 @@ export interface StatsBlock {
   readonly invested: {
     readonly spentRaw: Raw | null;
     readonly buys: number | null;
+    /** Each asset all time, read whole by the service; null when not sent. */
+    readonly byAsset: readonly AssetTotal[] | null;
     readonly daily: { readonly rows: readonly InvestedDay[]; readonly dropped: number } | null;
   } | null;
 }
@@ -169,6 +175,8 @@ export interface Shelf {
   readonly listed: number;
   /** mint -> symbol, for every catalogue entry. */
   readonly symbolOf: Readonly<Record<string, string>>;
+  /** Every catalogue entry, in the catalogue's order, and whether a pension can pick it today. */
+  readonly assets: readonly { readonly mint: string; readonly symbol: string; readonly name: string; readonly offered: boolean }[];
 }
 
 export interface GlobalStatsModel {
@@ -176,6 +184,19 @@ export interface GlobalStatsModel {
   readonly feed: { readonly ok: true; readonly contract: "totals-only" | "with-stats" } | { readonly ok: false; readonly reason: Reason };
   /** When the keeper last added it all up. */
   readonly computedAt: Stat<string>;
+  /**
+   * The last UTC day the daily series cover: the day the `stats` block was
+   * read (its own computedAt, else the payload's). Charts end here — a later
+   * day is not a quiet one, it is one nobody has read yet. Null without series.
+   */
+  readonly seriesEnd: UtcDay | null;
+  /** When the `stats` block itself was read: older than computedAt when the service kept a block it could not re-read. */
+  readonly statsComputedAt: string | null;
+  /**
+   * The first day is the history's first, not just the oldest day a cut read
+   * reached: only then can a page say "since" or "from" it.
+   */
+  readonly firstDayProven: boolean;
   /** known(null): the payload says there is no settlement yet. */
   readonly firstDay: Stat<UtcDay | null>;
   readonly lastDay: Stat<UtcDay | null>;
@@ -196,7 +217,8 @@ export interface GlobalStatsModel {
     readonly usdcRaw: Raw;
     readonly buys: number | null;
     readonly bound: Bound;
-    readonly byAsset: readonly { readonly mint: string; readonly usdcRaw: Raw }[];
+    /** Null when the split per asset is not known (not sent, and no whole daily series to rebuild it from). */
+    readonly byAsset: readonly AssetTotal[] | null;
   }>;
   /** A side that is null had no settlement in that mode: a true zero. */
   readonly byMode: Stat<{ readonly profit: ModeTotals | null; readonly volume: ModeTotals | null; readonly bound: Bound }>;
@@ -205,7 +227,34 @@ export interface GlobalStatsModel {
   readonly shelf: Shelf;
   readonly daily: Stat<Served<StatsDay>>;
   readonly investedDaily: Stat<Served<InvestedDay>>;
+  /**
+   * The leaderboard's all-time top, in its own order (by score): the pensions
+   * a visitor can check one by one. The board is cut to 100 by the keeper.
+   */
+  readonly leaders: Stat<readonly Leader[]>;
 }
+
+/** What pensions spent on one asset, all time. */
+export interface AssetTotal {
+  readonly mint: string;
+  readonly usdcRaw: Raw;
+  readonly buys: number;
+}
+
+/** One pension as the all-time board ranks it. */
+export interface Leader {
+  readonly rank: number;
+  /** The pension's vault address. */
+  readonly subject: string;
+  readonly savedRaw: Raw;
+  /** Approximate; null from a keeper too old to send it. */
+  readonly tradedRaw: Raw | null;
+  readonly settlements: number;
+  readonly activeDays: number;
+}
+
+/** How many of the board's pensions the page lists. */
+export const LEADERS_SHOWN = 8;
 
 // ── Readers: a network answer is not a type ──────────────────────────────────
 
@@ -318,7 +367,7 @@ function readModeCell(value: unknown): ModeCell | null {
   const savedRaw = readDigits(value["savedRaw"]);
   const settlements = readCount(value["settlements"]);
   if (savedRaw === null || settlements === null) return null;
-  return { savedRaw, settlements, payingSettlements: readCount(value["payingSettlements"]) };
+  return { savedRaw, tradedRaw: readDigits(value["tradedRaw"]), settlements, payingSettlements: readCount(value["payingSettlements"]) };
 }
 
 function readModeTotals(value: unknown): ModeTotals | null {
@@ -359,6 +408,21 @@ function readStatsDay(value: unknown): StatsDay | null {
   if ((value["profit"] !== undefined && profit === null) || (value["volume"] !== undefined && volume === null)) return null;
   if (profit === null && volume === null) return null;
   return { day, profit, volume, pensions: readCount(value["pensions"]) };
+}
+
+/** The per-asset totals: every row must parse, or the list is unreadable — a missing asset would shift every share. */
+function readAssetTotals(value: unknown): readonly AssetTotal[] | null {
+  if (!Array.isArray(value)) return null;
+  const rows: AssetTotal[] = [];
+  for (const raw of value) {
+    if (!isRecord(raw)) return null;
+    const mint = typeof raw["mint"] === "string" && raw["mint"] !== "" ? raw["mint"] : null;
+    const usdcRaw = readDigits(raw["spentRaw"]);
+    const buys = readCount(raw["buys"]);
+    if (mint === null || usdcRaw === null || buys === null) return null;
+    rows.push({ mint, usdcRaw, buys });
+  }
+  return rows;
 }
 
 function readInvestedDay(value: unknown): InvestedDay | null {
@@ -411,7 +475,8 @@ export function parseStatsBlock(value: unknown): StatsBlock | null {
   const volume = m === null ? null : readModeTotals(m["volume"]);
   const sideUnread = m !== null && ((m["profit"] !== undefined && profit === null) || (m["volume"] !== undefined && volume === null));
   if (sideUnread) unreadable.push("byMode");
-  const byMode = m === null || sideUnread || (profit === null && volume === null) ? null : { profit, volume };
+  // Sent with neither side: no settlement in either mode yet — known, and empty.
+  const byMode = m === null || sideUnread ? null : { profit, volume };
 
   const daily = read("daily", value["daily"], (raw) => readRows(raw, readStatsDay, (row) => row.day));
 
@@ -422,11 +487,13 @@ export function parseStatsBlock(value: unknown): StatsBlock | null {
       : {
           spentRaw: read("invested.spentRaw", i["spentRaw"], readDigits),
           buys: read("invested.buys", i["buys"], readCount),
+          byAsset: read("invested.byAsset", i["byAsset"], readAssetTotals),
           daily: read("invested.daily", i["daily"], (raw) => readRows(raw, readInvestedDay, (row) => `${row.day} ${row.mint}`)),
         };
 
   return {
     unreadable,
+    computedAt: read("computedAt", value["computedAt"], readInstant),
     totals,
     truncated: read("truncated", value["truncated"], (raw) => (typeof raw === "boolean" ? raw : null)),
     byMode,
@@ -467,6 +534,9 @@ function nothing(input: { readonly source: "live" | "sample"; readonly reason: R
     source: input.source,
     feed: { ok: false, reason: input.reason },
     computedAt: none,
+    seriesEnd: null,
+    statsComputedAt: null,
+    firstDayProven: false,
     firstDay: none,
     lastDay: none,
     saved: none,
@@ -481,6 +551,7 @@ function nothing(input: { readonly source: "live" | "sample"; readonly reason: R
     shelf: input.shelf,
     daily: none,
     investedDaily: none,
+    leaders: none,
   };
 }
 
@@ -566,23 +637,32 @@ export function buildGlobalStats(input: {
 
   const investedDaily = served(stats?.invested?.daily, missing("invested", "invested.daily"));
   const investedRaw = stats?.invested?.spentRaw ?? null;
-  // Per asset only from a whole series: a partial one would understate some assets and not others.
-  const byAsset =
-    investedDaily.kind === "known" && !investedDaily.value.partial
+  // Per asset: the service's own all-time totals when it sends them; else
+  // rebuilt from a WHOLE daily series only — a partial one would understate
+  // some assets and not others; else not known at all.
+  const sentByAsset = stats?.invested?.byAsset ?? null;
+  const byAsset: readonly AssetTotal[] | null =
+    sentByAsset !== null
+      ? [...sentByAsset].sort((a, b) => (BigInt(b.usdcRaw) > BigInt(a.usdcRaw) ? 1 : BigInt(b.usdcRaw) < BigInt(a.usdcRaw) ? -1 : a.mint < b.mint ? -1 : 1))
+      : investedDaily.kind === "known" && !investedDaily.value.partial
       ? Object.entries(
-          investedDaily.value.rows.reduce<Record<string, bigint>>((sums, row) => {
-            sums[row.mint] = (sums[row.mint] ?? 0n) + BigInt(row.spentRaw);
+          investedDaily.value.rows.reduce<Record<string, { usdc: bigint; buys: number }>>((sums, row) => {
+            const sum = sums[row.mint] ?? { usdc: 0n, buys: 0 };
+            sums[row.mint] = { usdc: sum.usdc + BigInt(row.spentRaw), buys: sum.buys + row.buys };
             return sums;
           }, {}),
         )
-          .map(([mint, usdc]) => ({ mint, usdcRaw: usdc.toString() }))
+          .map(([mint, sum]) => ({ mint, usdcRaw: sum.usdc.toString(), buys: sum.buys }))
           .sort((a, b) => (BigInt(b.usdcRaw) > BigInt(a.usdcRaw) ? 1 : BigInt(b.usdcRaw) < BigInt(a.usdcRaw) ? -1 : a.mint < b.mint ? -1 : 1))
-      : [];
+      : null;
 
   return {
     source,
     feed: { ok: true, contract: stats === null ? "totals-only" : "with-stats" },
     computedAt: computedAt === null ? unavailable("field-unreadable") : known(computedAt),
+    seriesEnd: stats === null ? null : (stats.computedAt ?? computedAt)?.slice(0, 10) ?? null,
+    statsComputedAt: stats?.computedAt ?? null,
+    firstDayProven: windowOpen,
     firstDay,
     lastDay,
     saved,
@@ -597,5 +677,18 @@ export function buildGlobalStats(input: {
     shelf,
     daily: served(stats?.daily, missing("daily")),
     investedDaily,
+    leaders: known(
+      [...board.boards.total.all]
+        .sort((a, b) => a.rank - b.rank)
+        .slice(0, LEADERS_SHOWN)
+        .map((entry) => ({
+        rank: entry.rank,
+        subject: entry.subject,
+        savedRaw: entry.amountRaw,
+        tradedRaw: entry.volumeRaw ?? null,
+        settlements: entry.settles,
+        activeDays: entry.activeDays,
+      })),
+    ),
   };
 }

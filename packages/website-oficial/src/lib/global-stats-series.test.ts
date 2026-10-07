@@ -18,7 +18,11 @@ import {
   savedByDay,
   settlementsByDay,
   shareBps,
+  growthBps,
+  savedTotalByDay,
+  sparkBars,
   toPlotRows,
+  tradedByDay,
   unreadDays,
   weekStart,
   weekWindow,
@@ -140,8 +144,8 @@ describe("what recharts receives", () => {
 
 describe("from the model's days to a chart's", () => {
   const days: readonly StatsDay[] = [
-    { day: "2026-10-01", profit: { savedRaw: "150", settlements: 6, payingSettlements: 5 }, volume: { savedRaw: "100", settlements: 4, payingSettlements: 4 }, pensions: 3 },
-    { day: "2026-10-02", profit: { savedRaw: "50", settlements: 2, payingSettlements: 2 }, volume: null, pensions: null },
+    { day: "2026-10-01", profit: { savedRaw: "150", tradedRaw: null, settlements: 6, payingSettlements: 5 }, volume: { savedRaw: "100", tradedRaw: null, settlements: 4, payingSettlements: 4 }, pensions: 3 },
+    { day: "2026-10-02", profit: { savedRaw: "50", tradedRaw: null, settlements: 2, payingSettlements: 2 }, volume: null, pensions: null },
   ];
 
   it("a mode with no row on a served day is that mode's zero", () => {
@@ -203,5 +207,37 @@ describe("the segment that takes the rounded top", () => {
   it("is the highest one DRAWN: an amount too small to draw does not take it", () => {
     const [bucket] = bucketize([{ day: "2026-10-01", values: { profit: "500000000", volume: "1" } }], ["2026-10-01"], "day", SERIES, "2026-10-01");
     expect(toPlotRows([bucket!], "period", SERIES, 9)[0]).toMatchObject({ bottom: "profit", top: "profit", volume: 0 });
+  });
+});
+
+describe("the lead cards' arithmetic", () => {
+  const days: readonly StatsDay[] = [
+    { day: "2026-09-25", profit: { savedRaw: "100", tradedRaw: "1000", settlements: 1, payingSettlements: 1 }, volume: null, pensions: 1 },
+    { day: "2026-10-02", profit: { savedRaw: "50", tradedRaw: null, settlements: 1, payingSettlements: 1 }, volume: { savedRaw: "50", tradedRaw: "5000", settlements: 1, payingSettlements: 1 }, pensions: 2 },
+  ];
+
+  it("adds both modes into what was put aside each day", () => {
+    expect(savedTotalByDay(days)).toEqual([
+      { day: "2026-09-25", values: { saved: "100" } },
+      { day: "2026-10-02", values: { saved: "100" } },
+    ]);
+  });
+
+  it("leaves out, and names, a day whose traded figure a mode did not send", () => {
+    expect(tradedByDay(days)).toEqual({ rows: [{ day: "2026-09-25", values: { profit: "1000", volume: "0" } }], missing: ["2026-10-02"] });
+  });
+
+  it("grows a running total over 7 days from where it stood before them, and not from nothing", () => {
+    const saved = savedTotalByDay(days);
+    // 100 before Sep 26, 200 by Oct 3: +100 %.
+    expect(growthBps(saved, "2026-10-03", 7, ["saved"])).toBe(10_000);
+    expect(growthBps(saved, "2026-09-26", 7, ["saved"])).toBeNull();
+  });
+
+  it("draws two weeks of spark bars against the tallest, and none when a day in them was not read", () => {
+    const bars = sparkBars(savedTotalByDay(days), "2026-10-03", 14, ["saved"], () => false);
+    expect(bars).toHaveLength(14);
+    expect(bars?.filter((bar) => bar === 1)).toHaveLength(2);
+    expect(sparkBars(savedTotalByDay(days), "2026-10-03", 14, ["saved"], (day) => day === "2026-09-30")).toBeNull();
   });
 });

@@ -21,7 +21,7 @@ import { compact } from "@/lib/format";
 import type { InvestedDay, Raw, StatsDay, UtcDay } from "@/lib/global-stats-model";
 
 /** The series a chart can carry. Colour follows the series, never its position. */
-export type SeriesKey = "profit" | "volume" | "invested" | "pensions";
+export type SeriesKey = "saved" | "profit" | "volume" | "invested" | "pensions";
 
 /**
  * THE PALETTE, one entry per series, its class strings spelled out whole so
@@ -31,6 +31,8 @@ export type SeriesKey = "profit" | "volume" | "invested" | "pensions";
  * so they never share a chart).
  */
 export const SERIES: Readonly<Record<SeriesKey, { readonly label: string; readonly color: string; readonly swatch: string }>> = {
+  // Everything put aside, both modes together: the site's one accent, which means exactly that.
+  saved: { label: "Put aside", color: "var(--color-emerald-600)", swatch: "bg-emerald-600" },
   profit: { label: "Profit", color: "var(--color-emerald-600)", swatch: "bg-emerald-600" },
   volume: { label: "Volume", color: "var(--color-violet-600)", swatch: "bg-violet-600" },
   invested: { label: "Invested", color: "var(--color-blue-600)", swatch: "bg-blue-600" },
@@ -278,4 +280,58 @@ export function investedByDay(rows: readonly InvestedDay[]): readonly DayValues[
   const sums = new Map<UtcDay, bigint>();
   for (const row of rows) sums.set(row.day, (sums.get(row.day) ?? 0n) + BigInt(row.spentRaw));
   return [...sums.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([day, usdc]) => ({ day, values: { invested: usdc.toString() } }));
+}
+
+/** SOL put aside per day, both modes together: the running total's input. */
+export const savedTotalByDay = (rows: readonly StatsDay[]): readonly DayValues[] =>
+  rows.map((row) => ({ day: row.day, values: { saved: (BigInt(cellSaved(row.profit)) + BigInt(cellSaved(row.volume))).toString() } }));
+
+/**
+ * What each day's settlements were charged on, by mode. A mode that settled
+ * that day without sending the figure leaves the day out, named in `missing`:
+ * its bar would otherwise read as a smaller day than it was.
+ */
+export function tradedByDay(rows: readonly StatsDay[]): { readonly rows: readonly DayValues[]; readonly missing: readonly UtcDay[] } {
+  const kept: DayValues[] = [];
+  const missing: UtcDay[] = [];
+  for (const row of rows) {
+    const unsent = [row.profit, row.volume].some((cell) => cell !== null && cell.tradedRaw === null);
+    if (unsent) missing.push(row.day);
+    else kept.push({ day: row.day, values: { profit: row.profit?.tradedRaw ?? "0", volume: row.volume?.tradedRaw ?? "0" } });
+  }
+  return { rows: kept, missing };
+}
+
+/**
+ * How much a running total grew over the last `days` days up to `end`, in
+ * basis points of where it stood before them. Null when it stood at nothing
+ * (growth from zero is not a percentage) or nothing is known.
+ */
+export function growthBps(rows: readonly DayValues[], end: UtcDay, days: number, series: readonly string[]): number | null {
+  const from = addDays(end, -days);
+  let before = 0n;
+  let now = 0n;
+  for (const row of rows) {
+    if (row.day > end) continue;
+    const value = series.reduce((sum, name) => sum + BigInt(row.values[name] ?? "0"), 0n);
+    now += value;
+    if (row.day <= from) before += value;
+  }
+  if (before === 0n) return null;
+  return Number(((now - before) * 10_000n) / before);
+}
+
+/**
+ * Bars for a sparkline: the last `days` days to `end`, one geometry number per
+ * day scaled to 0..1 against the tallest. Null when any of those days could not
+ * be read — a gap would read as a zero day.
+ */
+export function sparkBars(rows: readonly DayValues[], end: UtcDay, days: number, series: readonly string[], unread: (day: UtcDay) => boolean): readonly number[] | null {
+  const window = Array.from({ length: days }, (_, index) => addDays(end, index - days + 1));
+  if (window.some(unread)) return null;
+  const byDay = new Map(rows.map((row) => [row.day, series.reduce((sum, name) => sum + BigInt(row.values[name] ?? "0"), 0n)]));
+  const values = window.map((day) => byDay.get(day) ?? 0n);
+  const top = values.reduce((max, value) => (value > max ? value : max), 0n);
+  if (top === 0n) return values.map(() => 0);
+  return values.map((value) => Number((value * 1_000n) / top) / 1_000);
 }

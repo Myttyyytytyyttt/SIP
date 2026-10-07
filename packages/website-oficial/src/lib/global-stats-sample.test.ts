@@ -12,7 +12,7 @@ import { parseLeaderboard } from "@/lib/leaderboard";
 
 const NOW = "2026-10-06T18:30:00.000Z";
 const MINTS = ["mintA", "mintB"] as const;
-const SHELF = { offered: ["SPYx", "ANTHROPIC"], listed: 9, symbolOf: { mintA: "SPYx", mintB: "ANTHROPIC" } };
+const SHELF = { offered: ["SPYx", "ANTHROPIC"], listed: 9, symbolOf: { mintA: "SPYx", mintB: "ANTHROPIC" }, assets: [] };
 
 const sample = (now = NOW): GlobalStatsModel =>
   buildGlobalStats({ source: "sample", feed: { ok: true, body: sampleGlobalStatsBody(now, MINTS) }, price: known(SAMPLE_USDC_RAW_PER_SOL), shelf: SHELF });
@@ -33,9 +33,18 @@ describe("the sample payload", () => {
     expect(rows[0]?.day).toBe(addDays("2027-03-01", -59));
   });
 
-  it("names no pension, wallet or account: the boards are empty", () => {
-    const body = sampleGlobalStatsBody(NOW, MINTS) as { boards: Record<string, { season: unknown[]; all: unknown[] }> };
-    for (const board of Object.values(body.boards)) expect([...board.season, ...board.all]).toEqual([]);
+  it("names no real pension: every placeholder has a 0, which no base58 address can", () => {
+    const body = sampleGlobalStatsBody(NOW, MINTS) as { boards: Record<string, { season: { subject: string }[]; all: { subject: string }[] }> };
+    const subjects = Object.values(body.boards).flatMap((board) => [...board.season, ...board.all]).map((row) => row.subject);
+    expect(subjects.length).toBe(24);
+    for (const subject of subjects) expect(subject).toMatch(/0/);
+  });
+
+  it("ranks its board consistently with its own totals", () => {
+    const body = sampleGlobalStatsBody(NOW, MINTS) as { boards: { total: { all: { amountRaw: string; settles: number }[] } }; stats: { totals: { savedRaw: string; settlements: number } } };
+    const rows = body.boards.total.all;
+    expect(rows.reduce((sum, row) => sum + BigInt(row.amountRaw), 0n).toString()).toBe(body.stats.totals.savedRaw);
+    expect(rows.reduce((sum, row) => sum + row.settles, 0)).toBe(body.stats.totals.settlements);
   });
 });
 

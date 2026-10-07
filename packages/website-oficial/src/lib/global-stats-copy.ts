@@ -27,12 +27,15 @@ export const GLOBAL_STATS_COPY = {
   updated: (ago: string) => `Updated ${ago}`,
   daysUtc: "Days are UTC",
   span: (from: string, to: string) => `Settlements from ${from} to ${to}`,
+  spanUpTo: (to: string) => `Settlements up to ${to}`,
+  chartsUpdated: (ago: string) => `Charts updated ${ago}`,
   noSettlementYet: "No settlement yet",
 
   sampleBadge: "Sample data",
   sampleNotice: "Example figures for invented pensions, to show how this page reads. Not real pensions.",
   sampleCardBadge: "Sample",
   seeLive: "See the live numbers",
+  seeSample: "See sample data",
 
   failedTitle: "The figures could not be read",
   failedDescription: "This is not a page of zeros: nothing was read.",
@@ -59,8 +62,48 @@ export const GLOBAL_STATS_COPY = {
   atLeastSampleDollars: (usd: string) => `at least ≈ ${usd} at a sample SOL price`,
   noDollars: (why: string) => `No dollar value: ${why}`,
   across: (pensions: string) => `across ${pensions}`,
+  growth: (percent: string) => `+${percent} in 7 days`,
   acrossAtLeast: (pensions: string) => `across at least ${pensions}`,
   since: (day: string) => `since ${day}`,
+
+  strip: {
+    solPrice: "SOL price",
+    sampleSolPrice: "SOL price (sample)",
+    todaySettlements: "Settlements today",
+    todaySaved: "Put aside today",
+    settlementsOn: (day: string) => `Settlements on ${day}`,
+    savedOn: (day: string) => `Put aside on ${day}`,
+    pensions: "Pensions",
+    assets: "Assets on offer",
+    todayIsUtc: "Today is the UTC day the figures were added up.",
+  },
+
+  leaders: {
+    title: "Leading pensions",
+    description: "The top of the all-time leaderboard: each one can be checked on the chain.",
+    info: "Ranked as on the leaderboard: by days with a settlement and by what was put aside, not by size alone. Each pension is its own address on Solana.",
+    seeAll: "See the leaderboard",
+    empty: "No pension has had a settlement yet.",
+    emptyNothingSaved: "No settlement has put anything aside yet.",
+    rank: "#",
+    pension: "Pension",
+    saved: "Put aside",
+    traded: "In buys and sells",
+    settlements: "Settlements",
+    days: "Days",
+  },
+
+  assets: {
+    title: "Assets",
+    description: "What a pension can buy, and what pensions spent on each, in USDC.",
+    info: "Every asset the app lists, and the USDC pensions spent buying each one, as the settlement history recorded it.",
+    asset: "Asset",
+    invested: "Invested (USDC)",
+    share: "Share",
+    purchases: "Purchases",
+    onOffer: "On offer",
+    unlisted: "No longer listed",
+  },
 
   pensions: {
     title: "Pensions",
@@ -75,7 +118,7 @@ export const GLOBAL_STATS_COPY = {
   },
   invested: {
     title: "Invested",
-    caption: (buys: string) => `USDC, in ${buys} purchases`,
+    caption: (buys: string, one: boolean) => (one ? "USDC, in 1 purchase" : `USDC, in ${buys} purchases`),
     captionNoBuys: "USDC spent by pensions",
     info: "What pensions spent buying the assets in their basket, in USDC.",
   },
@@ -109,8 +152,11 @@ export const GLOBAL_STATS_COPY = {
   },
 
   charts: {
+    traded: {
+      description: "What the trading behind settlements moved, by mode, in SOL. Days are UTC.",
+    },
     saved: {
-      title: "Put aside",
+      title: "Put aside per day",
       description: "SOL put aside by settlements, by mode. Days are UTC.",
       info: "Each bar is what settlements put aside that day or week, split by the pension’s mode.",
     },
@@ -129,6 +175,10 @@ export const GLOBAL_STATS_COPY = {
       description: "USDC pensions spent on their assets, by the day it was recorded. Days are UTC.",
       info: "Each bar is what pensions spent buying their basket that day or week.",
     },
+    rangeLabel: "Range",
+    range30: "30D",
+    range90: "90D",
+    rangeAll: "All",
     perPeriod: "Per period",
     cumulative: "Running total",
     share: "Share of each period",

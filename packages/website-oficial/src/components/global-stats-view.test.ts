@@ -6,20 +6,51 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
+import type { HeadlineProps } from "@/components/global-stats-chart";
 import { buildGlobalStats, known, unavailable, type GlobalStatsModel } from "@/lib/global-stats-model";
 import { SAMPLE_USDC_RAW_PER_SOL, sampleGlobalStatsBody } from "@/lib/global-stats-sample";
 import type { LeaderboardBodyResult } from "@/lib/leaderboard";
 
-// recharts is drawn in the browser; here each chart card is a marker with its id.
-vi.mock("@/components/global-stats-chart", () => ({
-  StackedBarsCard: (props: { readonly id: string }) => createElement("div", null, `CHART:${props.id}`),
-}));
+// recharts is drawn in the browser; here each chart card is a marker with its id, its title, its
+// sample badge and — through the REAL Headline — the figure it leads with.
+interface CardProps {
+  readonly id: string;
+  readonly title: string;
+  readonly sample: boolean;
+  readonly headline?: HeadlineProps | null;
+}
+const marker = (prefix: string, Headline: (props: HeadlineProps) => ReturnType<typeof createElement>) => (props: CardProps) =>
+  createElement(
+    "div",
+    { "data-card": props.id },
+    props.title,
+    props.sample ? createElement("span", null, "Sample") : null,
+    props.headline === undefined || props.headline === null ? null : createElement(Headline, props.headline),
+    `${prefix}:${props.id}`,
+  );
+vi.mock("@/components/global-stats-chart", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/components/global-stats-chart")>();
+  return { ...actual, StackedBarsCard: marker("CHART", actual.Headline) };
+});
+vi.mock("@/components/global-stats-area", async () => {
+  const chart = await vi.importActual<typeof import("@/components/global-stats-chart")>("@/components/global-stats-chart");
+  return { RunningTotalCard: marker("AREA", chart.Headline) };
+});
 
 const { GlobalStatsView, heroSol } = await import("@/components/global-stats-view");
 
 const NOW = "2026-10-06T18:30:00.000Z";
 const RULES = { participation: 10, sizeFactor: 5, sizeCap: 25, sizeUnit: 1_000_000, streakPerDay: 2, streakCap: 20 };
-const SHELF = { offered: ["SPYx", "ANTHROPIC"], listed: 9, symbolOf: { mintA: "SPYx", mintB: "ANTHROPIC" } };
+const SHELF = {
+  offered: ["SPYx", "ANTHROPIC"],
+  listed: 3,
+  symbolOf: { mintA: "SPYx", mintB: "ANTHROPIC", mintC: "OPENAI" },
+  assets: [
+    { mint: "mintA", symbol: "SPYx", name: "SP500 xStock", offered: true },
+    { mint: "mintB", symbol: "ANTHROPIC", name: "Anthropic PreStock", offered: true },
+    { mint: "mintC", symbol: "OPENAI", name: "OpenAI PreStock", offered: false },
+  ],
+};
 
 /** Today's production payload: one pension, nine settlements. */
 const today = (coverage: Record<string, unknown> = { subjects: 1, settlements: 9, firstDay: "2026-09-19", lastDay: "2026-09-25" }): LeaderboardBodyResult => ({
@@ -69,8 +100,26 @@ describe("the live page with today's keeper", () => {
   it("names what is not published once, with the way to the sample, and draws no empty chart", () => {
     expect(html.match(/Daily charts are not available yet/g)).toHaveLength(1);
     expect(html).toContain('href="/dashboard?mode=mock"');
-    expect(html).not.toContain("CHART:");
+    // The two lead cards stand on their headlines; the per-day charts are not drawn at all.
+    expect(html).toContain("AREA:saved");
+    expect(html).toContain("CHART:traded");
+    expect(html).not.toMatch(/CHART:(saved|settlements|pensions|invested)-per-day/);
     expect(html).not.toContain('data-card="invested"');
+  });
+
+  it("leads with a strip of the figures it has, and leaves out the ones nobody published", () => {
+    const strip = card(html, "strip");
+    expect(strip).toContain("SOL price");
+    expect(strip).toContain("$150.00");
+    expect(strip).toContain("Pensions");
+    expect(strip).not.toContain("Settlements today");
+  });
+
+  it("lists the real leading pensions, each linked to the chain", () => {
+    const leaders = card(html, "leaders");
+    expect(leaders).toContain('href="https://solscan.io/account/pension-0"');
+    expect(leaders).toContain("0.1864 SOL");
+    expect(leaders).toContain('href="/leaderboard"');
   });
 
   it("says nothing about a sample, and shows none of its figures", () => {
@@ -137,6 +186,41 @@ describe("a total the payload cannot prove whole", () => {
   });
 });
 
+describe("what the page says about how old and how whole its figures are", () => {
+  const withStats = (stats: Record<string, unknown>, coverage?: Record<string, unknown>): LeaderboardBodyResult => {
+    const feed = today(coverage);
+    return feed.ok ? { ok: true, body: { ...(feed.body as Record<string, unknown>), stats } } : feed;
+  };
+
+  it("says when the charts are older than the totals, and names their day instead of 'today'", () => {
+    const html = render(live(withStats({ v: 1, truncated: false, computedAt: "2026-10-05T10:00:00.000Z", daily: [] })));
+    expect(html).toMatch(/Charts updated/);
+    const strip = card(html, "strip");
+    expect(strip).toContain("Settlements on Oct 5");
+    expect(strip).not.toContain("Settlements today");
+  });
+
+  it("calls a fresh block's day 'today'", () => {
+    const html = render(live(withStats({ v: 1, truncated: false, computedAt: "2026-10-06T18:27:00.000Z", daily: [] })));
+    expect(html).not.toMatch(/Charts updated/);
+    expect(card(html, "strip")).toContain("Settlements today");
+  });
+
+  it("says 'up to' instead of 'from' when the first day is only the oldest one read", () => {
+    const html = render(live(today({ subjects: 100, settlements: 900, firstDay: "2024-01-01", lastDay: "2026-09-25" })));
+    expect(html).toContain("Settlements up to Sep 25, 2026");
+    expect(html).not.toContain("Settlements from");
+  });
+
+  it("does not say nobody settled when somebody did and nothing was put aside", () => {
+    const feed = today();
+    const empty: LeaderboardBodyResult = feed.ok
+      ? { ok: true, body: { ...(feed.body as Record<string, unknown>), boards: { total: { season: [], all: [] }, ahorro: { season: [], all: [] }, volumen: { season: [], all: [] } } } }
+      : feed;
+    expect(card(render(live(empty)), "leaders")).toContain("No settlement has put anything aside yet.");
+  });
+});
+
 describe("the sample", () => {
   const html = render(sampleModel());
 
@@ -152,11 +236,29 @@ describe("the sample", () => {
     }
   });
 
-  it("draws the four charts and the two single-figure cards", () => {
-    for (const id of ["saved", "settlements", "pensions", "invested"]) expect(html).toContain(`CHART:${id}`);
+  it("draws the lead cards, the four charts and the two single-figure cards", () => {
+    expect(html).toContain("AREA:saved");
+    expect(html).toContain("CHART:traded");
+    for (const id of ["saved", "settlements", "pensions", "invested"]) expect(html).toContain(`CHART:${id}-per-day`);
     expect(html).toContain("Profit and Volume");
     expect(html).toContain("Per settlement");
     expect(html).not.toContain("Daily charts are not available yet");
+  });
+
+  it("draws two weeks of bars under each counter it has a series for", () => {
+    for (const id of ["pensions", "settlements", "invested"]) expect(card(html, id), id).toMatch(/<svg[^>]*viewBox="0 0 100 32"/);
+    expect(card(html, "shelf")).not.toMatch(/viewBox="0 0 100 32"/);
+  });
+
+  it("names its pensions by placeholders, linked nowhere", () => {
+    const leaders = card(html, "leaders");
+    expect(leaders).toContain("Samp1e");
+    expect(leaders).not.toContain("solscan");
+  });
+
+  it("puts each asset's share of the spend on a bar", () => {
+    const assets = card(html, "assets");
+    expect(assets).toMatch(/style="width:\d+(\.\d+)?%"/);
   });
 
   it("prices its dollars at a sample price, and says so in the sentence", () => {

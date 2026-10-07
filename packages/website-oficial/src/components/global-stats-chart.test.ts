@@ -6,7 +6,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { BarsTooltip, StackedBarsCard, valueText, type StackedBarsCardProps } from "@/components/global-stats-chart";
+import { RunningTotalCard } from "@/components/global-stats-area";
+import { BarsTooltip, Headline, StackedBarsCard, valueText, type StackedBarsCardProps } from "@/components/global-stats-chart";
 import { known, unavailable } from "@/lib/global-stats-model";
 import { bucketize, toPlotRows } from "@/lib/global-stats-series";
 
@@ -76,6 +77,14 @@ describe("the tooltip", () => {
     expect(partly).toContain("at least 0.0376 SOL");
   });
 
+  it("prints an approximate measure as ≈, never as 'at least', even on a partly read day", () => {
+    const html = renderToStaticMarkup(
+      createElement(BarsTooltip, { active: true, payload: [{ payload: { ...row, unread: true } }], series: ["profit", "volume"], unit: { label: "SOL", decimals: 9 }, period: "day", view: "period", approximate: true }),
+    );
+    expect(html).toContain("≈ 0.0366 SOL");
+    expect(html).not.toContain("at least");
+  });
+
   it("is nothing when the pointer is elsewhere", () => {
     expect(renderToStaticMarkup(createElement(BarsTooltip, { active: false, payload: [], series: ["profit"], unit: { label: "SOL", decimals: 9 }, period: "day", view: "period" }))).toBe("");
   });
@@ -102,5 +111,46 @@ describe("a value as the tooltip prints it", () => {
     // A positive amount never reads as zero.
     expect(valueText("4999", { label: "USDC", decimals: 6 })).toBe("<0.01 USDC");
     expect(valueText("0", { label: "USDC", decimals: 6 })).toBe("0.00 USDC");
+  });
+});
+
+describe("a lead card's headline", () => {
+  it("puts the qualifier right before the figure, the unit after it, and the growth beside it", () => {
+    const html = renderToStaticMarkup(createElement(Headline, { value: "18.9759", qualifier: "≈", unit: "SOL", exact: "18.9759 SOL", delta: "+12.4% in 7 days", lines: ["An approximate measure, not an accounting figure."] }));
+    expect(html).toMatch(/>≈<\/span><span[^>]*title="18\.9759 SOL"[^>]*>18\.9759<\/span><span[^>]*>SOL<\/span>/);
+    expect(html).toContain("+12.4% in 7 days");
+    expect(html).toContain("An approximate measure");
+  });
+
+  it("under a headline, a series not published yet draws no band: the page says it once", () => {
+    const headline = { value: "0.1864", qualifier: null, unit: "SOL", exact: null, delta: null, lines: [] };
+    const quiet = renderToStaticMarkup(createElement(StackedBarsCard, props({ headline, days: unavailable("not-served-yet") })));
+    expect(quiet).toContain("0.1864");
+    expect(quiet).not.toContain("border-dashed");
+    const unread = renderToStaticMarkup(createElement(StackedBarsCard, props({ headline, days: unavailable("field-unreadable") })));
+    expect(unread).toContain("This figure is not published yet.");
+    expect(unread).toContain("border-dashed");
+  });
+
+  it("the running-total card does the same, and keeps its headline either way", () => {
+    const base = {
+      id: "saved",
+      title: "Put aside so far",
+      description: "Across every pension, in SOL.",
+      info: "What settlements have put aside.",
+      sample: false,
+      headline: { value: "0.1864", qualifier: null, unit: "SOL", exact: null, delta: null, lines: [] },
+      series: "saved" as const,
+      unit: { label: "SOL" as const, decimals: 9 as const },
+      end: "2026-10-06",
+      first: "2026-09-19",
+      emptyCaption: "No settlement yet.",
+      unavailableCaption: "This figure was missing from the answer.",
+    };
+    const quiet = renderToStaticMarkup(createElement(RunningTotalCard, { ...base, days: unavailable("not-served-yet") }));
+    expect(quiet).toContain("0.1864");
+    expect(quiet).not.toContain("border-dashed");
+    const unread = renderToStaticMarkup(createElement(RunningTotalCard, { ...base, days: unavailable("field-unreadable") }));
+    expect(unread).toContain("This figure was missing from the answer.");
   });
 });

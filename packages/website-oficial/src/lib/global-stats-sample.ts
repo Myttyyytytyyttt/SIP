@@ -16,10 +16,12 @@
  * total its own bars contradict. No clock: the days end on the `now` the page
  * resolved, so the sample never ages the way a fixed date would.
  *
- * NO PENSION, WALLET OR ACCOUNT ADDRESS. The ranking boards are empty, so
- * nothing here can be attributed to a real account or linked to an explorer.
- * The only addresses are the PUBLIC TOKEN MINTS of the assets on offer, passed
- * in by the page, so the invested chart can name SPYx and ANTHROPIC.
+ * NO REAL PENSION, WALLET OR ACCOUNT ADDRESS. The all-time board carries the
+ * invented pensions under placeholders with a "0" in them, which base58 does
+ * not have — no key can ever encode to one (the rule of leaderboard-sample.ts),
+ * and the page never links a sample row to an explorer. The only real
+ * addresses are the PUBLIC TOKEN MINTS of the assets on offer, passed in by the
+ * page, so the invested chart can name SPYx and ANTHROPIC.
  */
 
 import { addDays, weekStart } from "@/lib/global-stats-series";
@@ -53,6 +55,9 @@ const RULES = {
 
 const EMPTY_BOARD = { season: [], all: [] } as const;
 
+/** Invented pension `i`'s placeholder: not base58 (it has "0"s), so it can never be a real account. */
+export const samplePension = (i: number): string => `Samp1ePensi0n`.padEnd(40, "x") + String(i + 1).padStart(4, "0");
+
 /**
  * The sample, as the keeper would send it at `now`. `mints`: the assets on
  * offer, whose purchases the invested series splits 60/40 (one asset takes it
@@ -66,6 +71,7 @@ export function sampleGlobalStatsBody(now: string, mints: readonly string[]): un
   const days: { profit: Cell; volume: Cell; pensions: Set<number> }[] = [];
   const everyone = new Set<number>();
   const byMode = { profit: emptyCell(), volume: emptyCell() };
+  const perPension = Array.from({ length: PENSIONS }, () => ({ saved: 0n, traded: 0n, settlements: 0, days: 0 }));
 
   for (let d = 0; d < DAYS; d += 1) {
     const day = { profit: emptyCell(), volume: emptyCell(), pensions: new Set<number>() };
@@ -87,6 +93,11 @@ export function sampleGlobalStatsBody(now: string, mints: readonly string[]): un
       }
       day.pensions.add(i);
       everyone.add(i);
+      const pension = perPension[i]!;
+      pension.saved += saved;
+      pension.traded += traded;
+      pension.settlements += settlements;
+      pension.days += 1;
     }
     days.push(day);
   }
@@ -120,9 +131,33 @@ export function sampleGlobalStatsBody(now: string, mints: readonly string[]): un
     unit: "lamports",
     rules: RULES,
     coverage: { subjects: everyone.size, settlements, firstDay: firstActive, lastDay: lastActive },
-    boards: { total: EMPTY_BOARD, ahorro: EMPTY_BOARD, volumen: EMPTY_BOARD },
+    // The all-time board, ranked the simplest honest way for a sample: by the
+    // days a pension was active, then by what it put aside. Points are those
+    // days, ten each — the participation term, and nothing the page shows.
+    boards: {
+      total: {
+        season: [],
+        all: perPension
+          .map((pension, i) => ({ ...pension, i }))
+          .filter((pension) => pension.settlements > 0)
+          .sort((a, b) => b.days - a.days || (b.saved > a.saved ? 1 : b.saved < a.saved ? -1 : a.i - b.i))
+          .map((pension, index) => ({
+            rank: index + 1,
+            subject: samplePension(pension.i),
+            points: pension.days * 10,
+            activeDays: pension.days,
+            bestStreak: 0,
+            settles: pension.settlements,
+            amountRaw: pension.saved.toString(),
+            volumeRaw: pension.traded.toString(),
+          })),
+      },
+      ahorro: EMPTY_BOARD,
+      volumen: EMPTY_BOARD,
+    },
     stats: {
       v: 1,
+      computedAt,
       truncated: false,
       totals: {
         savedRaw: total((cell) => cell.saved),
@@ -139,6 +174,14 @@ export function sampleGlobalStatsBody(now: string, mints: readonly string[]): un
       invested: {
         spentRaw: investedDaily.reduce((sum, row) => sum + BigInt(row.spentRaw), 0n).toString(),
         buys: investedDaily.reduce((sum, row) => sum + row.buys, 0),
+        // Each asset all time, as the keeper reads it: the sum of its own days.
+        byAsset: mints
+          .map((mint) => ({
+            mint,
+            spentRaw: investedDaily.filter((row) => row.mint === mint).reduce((sum, row) => sum + BigInt(row.spentRaw), 0n).toString(),
+            buys: investedDaily.filter((row) => row.mint === mint).reduce((sum, row) => sum + row.buys, 0),
+          }))
+          .filter((asset) => asset.buys > 0),
         daily: investedDaily,
       },
     },

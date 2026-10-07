@@ -50,6 +50,7 @@ const SHELF: Shelf = {
   offered: OFFERED_LEGS.map((leg) => leg.symbol),
   listed: CATALOGUE.length,
   symbolOf: Object.fromEntries(CATALOGUE.map((asset) => [asset.mint, asset.symbol])),
+  assets: CATALOGUE.map((asset) => ({ mint: asset.mint, symbol: asset.symbol, name: asset.name, offered: OFFERED_LEGS.some((leg) => leg.mint === asset.mint) })),
 };
 
 export default async function DashboardPage({
@@ -78,7 +79,17 @@ export default async function DashboardPage({
       <SiteHeader
         current="dashboard"
         mode={mode}
-        control={control ? <GlobalStatsModeToggle mode={showSample ? "mock" : "live"} path={DASHBOARD_PATH} /> : null}
+        // FROM lg UP ONLY: below it this bar also holds the tabs (from md) and
+        // "Open my pension", and they overflowed 375 px and 768 px. There the
+        // page's own links switch — "See the live numbers" in the sample, "See
+        // sample data" in Live.
+        control={
+          control ? (
+            <div className="hidden lg:block">
+              <GlobalStatsModeToggle mode={showSample ? "mock" : "live"} path={DASHBOARD_PATH} />
+            </div>
+          ) : null
+        }
         // NO CONNECT BUTTON HERE, as on /leaderboard: connecting needs the
         // Privy provider this page deliberately does not mount.
         account={returning && config !== null ? <LeaderboardAccountHost config={config} /> : <OpenPension returning={returning} mode={mode} />}
@@ -86,7 +97,7 @@ export default async function DashboardPage({
       />
 
       <main className="flex min-w-0 flex-1 flex-col gap-5 p-4 lg:gap-6 lg:p-6">
-        <GlobalStatsView model={model} now={now} />
+        <GlobalStatsView model={model} now={now} mode={mode} />
       </main>
 
       <SiteFooter now={now} mode={mode} />

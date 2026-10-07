@@ -23,7 +23,7 @@ const BODY = {
     volumen: { season: [], all: [] },
   },
 };
-const SHELF = { offered: ["SPYx"], listed: 9, symbolOf: {} };
+const SHELF = { offered: ["SPYx"], listed: 9, symbolOf: {}, assets: [] };
 const ENV = { [KEEPER_URL_VARIABLE]: "https://keeper.example.test" };
 const answering = (response: Response) => vi.fn().mockResolvedValue(response) as unknown as typeof fetch;
 
@@ -78,6 +78,7 @@ describe("the sample's reach", () => {
     "lib/global-stats-mode.ts",
     "components/global-stats-view.tsx",
     "components/global-stats-chart.tsx",
+    "components/global-stats-area.tsx",
     "components/global-stats-mode-toggle.tsx",
   ];
 

@@ -23,7 +23,7 @@ import {
 import type { LeaderboardBodyResult, LeaderboardFailure } from "@/lib/leaderboard";
 
 const RULES = { participation: 10, sizeFactor: 5, sizeCap: 25, sizeUnit: 1_000_000, streakPerDay: 2, streakCap: 20 };
-const SHELF: Shelf = { offered: ["SPYx", "ANTHROPIC"], listed: 9, symbolOf: { mintA: "SPYx", mintB: "ANTHROPIC" } };
+const SHELF: Shelf = { offered: ["SPYx", "ANTHROPIC"], listed: 9, symbolOf: { mintA: "SPYx", mintB: "ANTHROPIC" }, assets: [] };
 
 const row = (over: Record<string, unknown> = {}) => ({
   rank: 1,
@@ -209,8 +209,8 @@ describe("the stats block a newer keeper adds", () => {
     expect(model.average).toEqual(known({ lamports: "30", bound: "complete" }));
     expect(model.daily.kind === "known" && model.daily.value.rows.map((r) => r.day)).toEqual(["2026-10-01", "2026-10-02"]);
     expect(model.invested.kind === "known" && model.invested.value.byAsset).toEqual([
-      { mint: "mintA", usdcRaw: "3000000" },
-      { mint: "mintB", usdcRaw: "1000000" },
+      { mint: "mintA", usdcRaw: "3000000", buys: 3 },
+      { mint: "mintB", usdcRaw: "1000000", buys: 2 },
     ]);
   });
 
@@ -219,8 +219,8 @@ describe("the stats block a newer keeper adds", () => {
     expect(model.saved.kind === "known" && model.saved.value.bound).toBe("at-least");
     expect(model.settlements.kind === "known" && model.settlements.value.bound).toBe("at-least");
     expect(model.daily.kind === "known" && model.daily.value.partial).toBe(true);
-    // A partial series cannot be split by asset fairly.
-    expect(model.invested.kind === "known" && model.invested.value.byAsset).toEqual([]);
+    // A partial series cannot be split by asset fairly: the split is not known.
+    expect(model.invested.kind === "known" && model.invested.value.byAsset).toBeNull();
   });
 
   it("a malformed member is dropped alone; the rest, and the board, still stand", () => {
@@ -327,5 +327,58 @@ describe("only proof makes a figure whole", () => {
       expect(build(ok(body({ computedAt }))).computedAt, computedAt).toEqual(unavailable("field-unreadable"));
     }
     expect(build(ok(body({ computedAt: "2026-10-06T18:00Z" }))).computedAt).toEqual(known("2026-10-06T18:00:00.000Z"));
+  });
+});
+
+describe("what the lead cards and the tables read", () => {
+  it("ends the series on the day the stats block was read, which can be older than the rankings", () => {
+    const fresh = build(ok(body({ stats: { v: 1, truncated: false, daily: [] } })));
+    expect(fresh.seriesEnd).toBe("2026-10-06");
+    const kept = build(ok(body({ stats: { v: 1, truncated: false, computedAt: "2026-10-04T23:59:00.000Z", daily: [] } })));
+    expect(kept.seriesEnd).toBe("2026-10-04");
+    expect(build(ok(body())).seriesEnd).toBeNull();
+  });
+
+  it("lists the board's leaders in rank order, at most eight", () => {
+    const rows = Array.from({ length: 12 }, (_, index) => row({ rank: 12 - index, subject: `pension-${12 - index}` }));
+    const model = build(ok(body({ coverage: { subjects: 12, settlements: 9, firstDay: "2026-09-19", lastDay: "2026-09-25" } }, rows)));
+    expect(model.leaders.kind === "known" && model.leaders.value.map((leader) => leader.rank)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(model.leaders.kind === "known" && model.leaders.value[0]).toMatchObject({ subject: "pension-1", savedRaw: "186400000", tradedRaw: "18975900000", settlements: 9, activeDays: 3 });
+  });
+
+  it("reads an empty byMode as 'none yet', not as unpublished", () => {
+    const model = build(ok(body({ stats: { v: 1, truncated: false, byMode: {} } })));
+    expect(model.byMode).toEqual(known({ profit: null, volume: null, bound: "complete" }));
+  });
+});
+
+/** The second review (10-07): what a page may claim about the split per asset, the age of the charts and the first day. */
+describe("per asset, age and first day", () => {
+  it("takes the per-asset totals the service read whole, even when the daily series is long or cut", () => {
+    const stats = {
+      v: 1,
+      truncated: false,
+      invested: { spentRaw: "9", buys: 3, byAsset: [{ mint: "mintB", spentRaw: "2", buys: 1 }, { mint: "mintA", spentRaw: "7", buys: 2 }], daily: [{ day: "2026-10-01", mint: "x", spentRaw: 1, buys: 1 }] },
+    };
+    const model = build(ok(body({ stats })));
+    expect(model.investedDaily.kind === "known" && model.investedDaily.value.partial).toBe(true);
+    expect(model.invested.kind === "known" && model.invested.value.byAsset).toEqual([
+      { mint: "mintA", usdcRaw: "7", buys: 2 },
+      { mint: "mintB", usdcRaw: "2", buys: 1 },
+    ]);
+    // One unreadable entry and the whole list is unreadable: a missing asset would shift every share.
+    const broken = build(ok(body({ stats: { ...stats, invested: { ...stats.invested, byAsset: [{ mint: "mintA", spentRaw: 7, buys: 2 }] } } })));
+    expect(broken.invested.kind === "known" && broken.invested.value.byAsset).toBeNull();
+  });
+
+  it("carries the stats block's own time, so a kept block can say it is older", () => {
+    const kept = build(ok(body({ stats: { v: 1, truncated: false, computedAt: "2026-10-06T12:00:00.000Z" } })));
+    expect(kept.statsComputedAt).toBe("2026-10-06T12:00:00.000Z");
+    expect(build(ok(body())).statsComputedAt).toBeNull();
+  });
+
+  it("calls the first day proven only when the bounded read provably was not cut", () => {
+    expect(build(ok(body())).firstDayProven).toBe(true);
+    expect(build(ok(body({ coverage: { subjects: 100, settlements: 900, firstDay: "2024-01-01", lastDay: "2026-09-25" } }))).firstDayProven).toBe(false);
   });
 });

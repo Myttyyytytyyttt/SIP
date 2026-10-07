@@ -78,7 +78,9 @@ export function SiteHeader({
     // Every pension added up (owner, 10-06): public as well, and it follows
     // the mode like the rest — the sample in Mock, the real figures in Live.
     { label: "Dashboard", href: tab("/dashboard"), current: current === "dashboard", className: undefined },
-    { label: "Docs", href: "#", current: false, className: undefined },
+    // A placeholder ("#"), so it is the one that gives way between md and lg:
+    // with five tabs, the Live|Mock control and the account, 768 px overflowed.
+    { label: "Docs", href: "#", current: false, className: "hidden lg:inline-flex" },
   ];
 
   return (
