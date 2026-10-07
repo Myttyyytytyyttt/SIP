@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import { RunningTotalCard } from "@/components/global-stats-area";
 import { BarsTooltip, Headline, StackedBarsCard, valueText, type StackedBarsCardProps } from "@/components/global-stats-chart";
+import { GLOBAL_STATS_COPY } from "@/lib/global-stats-copy";
 import { known, unavailable } from "@/lib/global-stats-model";
 import { bucketize, toPlotRows } from "@/lib/global-stats-series";
 
@@ -152,5 +153,12 @@ describe("a lead card's headline", () => {
     expect(quiet).not.toContain("border-dashed");
     const unread = renderToStaticMarkup(createElement(RunningTotalCard, { ...base, days: unavailable("field-unreadable") }));
     expect(unread).toContain("This figure was missing from the answer.");
+  });
+});
+
+describe("the count under a chart", () => {
+  it("names what it counts: a day with trading measured is not a day with a settlement", () => {
+    expect(GLOBAL_STATS_COPY.charts.tradedDays(2)).toBe("2 days with trading measured");
+    expect(GLOBAL_STATS_COPY.charts.tradedDays(1)).toBe("1 day with trading measured");
   });
 });

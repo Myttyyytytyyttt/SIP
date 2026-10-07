@@ -230,7 +230,7 @@ export interface StackedBarsCardProps {
   /** The sentence for a series that could not be read. */
   readonly unavailableCaption: string;
   /** What a day with something on it is called under the chart: "3 days with a settlement" or "with a purchase". A word, not a function: this crosses from the server. */
-  readonly daysOf?: "settlement" | "saving" | "purchase";
+  readonly daysOf?: "settlement" | "saving" | "purchase" | "traded";
   /** A line under the chart, e.g. what each asset took. */
   readonly footer?: string | null;
   /** The reference's headline above the chart: the figure the bars add up to. */
@@ -282,7 +282,7 @@ export function StackedBarsCard(props: StackedBarsCardProps) {
             onView={setView}
             missing={days.value.missing ?? []}
             title={title}
-            daysCaption={daysOf === "purchase" ? COPY.purchaseDays : daysOf === "saving" ? COPY.savingDays : COPY.activeDays}
+            daysCaption={daysOf === "purchase" ? COPY.purchaseDays : daysOf === "saving" ? COPY.savingDays : daysOf === "traded" ? COPY.tradedDays : COPY.activeDays}
             approximate={approximate}
           />
         )}

@@ -189,6 +189,8 @@ export const GLOBAL_STATS_COPY = {
     activeDays: (n: number) => (n === 1 ? "1 day with a settlement" : `${n} days with a settlement`),
     purchaseDays: (n: number) => (n === 1 ? "1 day with a purchase" : `${n} days with a purchase`),
     savingDays: (n: number) => (n === 1 ? "1 day that put something aside" : `${n} days that put something aside`),
+    // Not "with a settlement": a settlement can record no trading (the first ones did), and its day has no bar here.
+    tradedDays: (n: number) => (n === 1 ? "1 day with trading measured" : `${n} days with trading measured`),
     runningSince: (day: string) => `Running total since ${day}`,
     partial: "Some days could not be read: their bars show only what was read.",
     unread: "Could not be read",

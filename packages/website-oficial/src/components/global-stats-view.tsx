@@ -520,6 +520,7 @@ function LeadCards({ model, sample, series, end, first }: { readonly model: Glob
         sample={sample}
         headline={tradedHeadline(model, sample, rowsOf(series.traded), partialOf(series.traded), end)}
         approximate
+        daysOf="traded"
         series={["profit", "volume"]}
         unit={{ label: "SOL", decimals: 9 }}
         days={series.traded}
