@@ -204,9 +204,10 @@ Otra línea, `other sip-vault instructions`, explica por qué tampoco se prueba 
 wallet (`create_vault_v2`), que una wallet de trading puede firmar sola, lo dejaría creado si la política fallase. Eso
 lo comprueba el paso 5, que compara la regla y su IDL.
 
-Si sale con código 2, falta o sobra algo en las variables (también si hay puesta alguna `PRIVY_API_*`: mira
-[Lo que nunca se hace](#lo-que-nunca-se-hace)), o `SIP_SOLANA_RPC_URLS` no es de mainnet. Lo dice nombrando la variable,
-nunca su valor.
+Si sale una línea `configuration refused`, falta o sobra algo en las variables (también si hay puesta alguna
+`PRIVY_API_*`: mira [Lo que nunca se hace](#lo-que-nunca-se-hace)), o `SIP_SOLANA_RPC_URLS` no es de mainnet. Lo dice
+nombrando la variable, nunca su valor. El comando sale con código 2, pero el pnpm de tu Terminal (9.12, con `--silent`)
+lo convierte en 1: fíate de la línea, no del código.
 
 ## 7. Cuando Privy rechaza la firma: ¿la llave es la del quorum?
 
@@ -274,7 +275,8 @@ Mira `verdict`:
 | `quorum-unreadable` | no se pudo leer Privy (se cayó la conexión, un error del servidor). **No dice nada de la llave** | repite dentro de un minuto. Si sigue, mira `status.privy.io` antes de tocar nada |
 
 El comando sale con **código 0** si coincide, con **código 2** si hay que cambiar una variable y no se mandó nada a
-ninguna parte, y con **código 1** en los demás casos. Nunca imprime la llave privada.
+ninguna parte, y con **código 1** en los demás casos. El pnpm de tu Terminal (9.12, con `--silent`) convierte el 2 en 1,
+así que el 2 solo lo verás si corres el comando con otro pnpm o sin `--silent`. Nunca imprime la llave privada.
 
 Tres avisos, para que no te manden a arreglar lo que no está roto:
 
@@ -555,8 +557,10 @@ tú.
    | `privy policy not updated`, cualquier otro | Privy rechazó el cambio (por ejemplo, el IDL) y no cambió nada | pásale a Claude la línea entera: no lleva secretos |
    | `privy policy updated`, `verdict: DIFFERENT` u `OWNER_CHANGED` | Privy guardó algo que no es la política nueva | haz el paso 4 y pásale a Claude las dos líneas |
 
-   Si sale con **código 2** no se mandó nada: falta una variable o la ruta de la llave no vale (relativa, no existe, o
-   no tiene dentro una llave). Lo dice nombrando la variable o la ruta, nunca el contenido.
+   Si sale una línea `configuration refused` o `arguments refused`, no se mandó nada: falta una variable o la ruta de la
+   llave no vale (relativa, no existe, o no tiene dentro una llave). Lo dice nombrando la variable o la ruta, nunca el
+   contenido. El código de salida es 2, pero el pnpm de tu Terminal (9.12, con `--silent`) lo convierte en 1: fíate de
+   la línea.
 
 4. **Compruébala** con el mismo comando del paso 2. Ahora tiene que decir `verdict: OK`.
 
