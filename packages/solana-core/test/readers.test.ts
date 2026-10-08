@@ -65,7 +65,10 @@ import {
   readImportCandidate,
   deriveClmmPoolVault,
   poolReservesFromAccounts,
+  readLink,
+  readLinkPrerequisites,
   readOwnerAccounts,
+  readPolicy,
   readPoolDepth,
   readPoolPrices,
   readProtocolConfig,
@@ -372,6 +375,96 @@ describe("readImportCandidate", () => {
     const read = await readImportCandidate(p, deriveVaultPda(key()).toBase58(), wallet);
     expect(read).toMatchObject({ ownVault: { status: "unreadable" }, protocolRole: "unreadable", link: { status: "unreadable", vault: null }, lamports: null, tokens: { kind: "unreadable" } });
     expect(JSON.stringify(read)).not.toContain(SECRET_QUERY);
+  });
+});
+
+// The rule readImportCandidate was written with (its own describe above holds it there), held for every other reader
+// that reads accounts by address: "missing" needs an answer that IS {value: null}. A flaky RPC that answers no result,
+// a null result or a result with no value has said nothing, and a vault that may exist must never be offered
+// create_vault over it.
+describe("A MEMBER WITH NO ANSWER IS NO ANSWER, in every reader that reads accounts by address", () => {
+  const NO_ANSWERS: readonly object[] = [{}, { result: null }, { result: {} }];
+  /** A pool whose one call answers `nothing`. */
+  const callAnswering = (nothing: object) => pool(() => jsonResponse({ jsonrpc: "2.0", id: 1, ...nothing })).pool;
+  /** A pool whose batch answers `nothing` for the members in `ids`, and `others(id)` for the rest. */
+  const batchAnswering = (nothing: object, ids: readonly number[], others: (id: number) => unknown) =>
+    pool((call) =>
+      jsonResponse(batchOf(call).map(({ id }) => (ids.includes(id) ? { jsonrpc: "2.0", id, ...nothing } : { jsonrpc: "2.0", id, result: others(id) }))),
+    ).pool;
+
+  it("readVault", async () => {
+    for (const nothing of NO_ANSWERS) {
+      const read = await readVault(batchAnswering(nothing, [1], () => 1_000_000), key());
+      expect(read.kind, JSON.stringify(nothing)).toBe("unreadable");
+    }
+  });
+
+  it("readLink, readPolicy and readProtocolConfig", async () => {
+    for (const nothing of NO_ANSWERS) {
+      const p = callAnswering(nothing);
+      const reads = [await readLink(p, key()), await readPolicy(p, key()), await readProtocolConfig(p)];
+      expect(reads.map((read) => read.kind), JSON.stringify(nothing)).toEqual(["unreadable", "unreadable", "unreadable"]);
+    }
+  });
+
+  it("readOwnerAccounts", async () => {
+    for (const nothing of NO_ANSWERS) {
+      const read = await readOwnerAccounts(batchAnswering(nothing, [1], () => 1_000_000), key());
+      expect([read.vault.kind, read.policy.kind, read.config.kind], JSON.stringify(nothing)).toEqual(["unreadable", "unreadable", "unreadable"]);
+    }
+  });
+
+  it("readWalletLinks", async () => {
+    for (const nothing of NO_ANSWERS) {
+      const read = await readWalletLinks(callAnswering(nothing), key(), [key(), key()]);
+      expect(read.map((link) => link.status), JSON.stringify(nothing)).toEqual(["unreadable", "unreadable"]);
+    }
+  });
+
+  it("readLinkPrerequisites", async () => {
+    for (const nothing of NO_ANSWERS) {
+      const read = await readLinkPrerequisites(callAnswering(nothing), key(), key());
+      expect([read.vault.kind, read.config.kind, read.link.kind], JSON.stringify(nothing)).toEqual(["unreadable", "unreadable", "unreadable"]);
+    }
+  });
+
+  it("readWithdrawTokenSource", async () => {
+    for (const nothing of NO_ANSWERS) {
+      const read = await readWithdrawTokenSource(callAnswering(nothing), key(), key());
+      expect([read.vault.kind, read.source.kind], JSON.stringify(nothing)).toEqual(["unreadable", "unreadable"]);
+    }
+  });
+
+  it("readVaultTokenAccounts", async () => {
+    for (const nothing of NO_ANSWERS) {
+      expect((await readVaultTokenAccounts(callAnswering(nothing), key())).kind, JSON.stringify(nothing)).toBe("unreadable");
+    }
+  });
+
+  it("readPoolDepth", async () => {
+    for (const nothing of NO_ANSWERS) {
+      const read = await readPoolDepth(callAnswering(nothing));
+      expect([read.prices.kind, read.reserves.kind], JSON.stringify(nothing)).toEqual(["unreadable", "unreadable"]);
+    }
+  });
+
+  it("readBuildBatch", async () => {
+    const answers = (id: number): unknown => (id === 1 ? { value: { blockhash: BLOCKHASH, lastValidBlockHeight: 77 } } : 111);
+    for (const nothing of NO_ANSWERS) {
+      const read = await readBuildBatch(batchAnswering(nothing, [2], answers), { addresses: [key()], sizes: [165] });
+      expect(read.kind, JSON.stringify(nothing)).toBe("unreadable");
+    }
+  });
+
+  it("readLiveSnapshot: its accounts and the vault's token accounts, down to each wallet's balance and link", async () => {
+    const answers = (id: number): unknown => (id === 5 ? [] : 1_000_000);
+    for (const nothing of NO_ANSWERS) {
+      const read = await readLiveSnapshot(batchAnswering(nothing, [1, 2], answers), { owner: key(), wallets: [key()], discover: true });
+      expect(
+        [read.vault.kind, read.policy.kind, read.config.kind, read.prices.kind, read.tokenAccounts.kind, read.wallets[0]!.lamports, read.wallets[0]!.link.status],
+        JSON.stringify(nothing),
+      ).toEqual(["unreadable", "unreadable", "unreadable", "unreadable", "unreadable", null, "unreadable"]);
+    }
   });
 });
 
@@ -1325,6 +1418,13 @@ describe("readLiveSnapshot", () => {
     expect(read.wallets[0]).toMatchObject({ wallet, lamports: 0n, link: { status: "this_vault", vault } });
     expect(read.wallets[0]!.link.state).toMatchObject({ epoch: 12n, settlementNonce: 5n, frontierSlot: 999n });
     expect(read.wallets[1]).toMatchObject({ wallet: other, lamports: 420_000_000n, link: { status: "other_vault" } });
+  });
+
+  it("a wallet the chain answers something that is not an account for has NO balance, not 0, and its link is unreadable", async () => {
+    const wallet = key();
+    const values = [sipVault(), null, null, solPool(), ...legPools(), {}, { owner: SYSTEM_PROGRAM, lamports: "lots" }];
+    const read = await readLiveSnapshot(livePool(values).pool, { owner, wallets: [wallet], discover: false });
+    expect(read.wallets[0]).toMatchObject({ wallet, lamports: null, link: { status: "unreadable", vault: null, state: null } });
   });
 
   it("discover re-reads the vault field of every link the RPC filtered, because the RPC is not the trust boundary", async () => {

@@ -81,9 +81,13 @@ function accountBytes(account: RpcAccount): Uint8Array | null {
   return tryBase64Decode(data[0]);
 }
 
-/** The anti-forgery gate, then the decoder. */
+/**
+ * The anti-forgery gate, then the decoder. "missing" only for null, the chain's own answer that there is no account;
+ * undefined is no answer at all (see answeredAccount), and unreadable.
+ */
 function decodeOwned<T>(account: RpcAccount | null | undefined, decode: (bytes: Uint8Array) => T): ChainRead<{ readonly state: T; readonly lamports: bigint }> {
-  if (account === null || account === undefined) return { kind: "missing" };
+  if (account === null) return { kind: "missing" };
+  if (account === undefined) return { kind: "unreadable", error: "the RPC answered no account, not that there is none" };
   if (account.owner !== SIP_PROGRAM_ID) {
     return { kind: "unreadable", error: `the account is owned by ${account.owner}, not the SaverFi program; refusing to decode` };
   }
@@ -101,6 +105,15 @@ function memberResult(members: readonly JsonRpcMember[], id: number): { ok: true
   if (member === undefined) return { ok: false, error: `the batch answer has no member ${id}` };
   if (member.error !== undefined && member.error !== null) return { ok: false, error: String(member.error.message ?? "error") };
   return { ok: true, result: member.result };
+}
+
+/**
+ * The account a getAccountInfo answer carries: null when the chain said there is none ({value: null}), UNDEFINED when
+ * it gave no value at all — no result, a null result, a result with no `value`. decodeOwned calls undefined
+ * unreadable; anything else goes on to its owner check, which calls what is not a SaverFi account unreadable too.
+ */
+function answeredAccount(result: unknown): RpcAccount | null | undefined {
+  return typeof result === "object" && result !== null ? (result as { value?: RpcAccount | null }).value : undefined;
 }
 
 export interface VaultRead {
@@ -122,8 +135,8 @@ export interface AccountRead<T> {
 async function readOne<T>(pool: RpcPool, address: string, decode: (bytes: Uint8Array) => T): Promise<ChainRead<AccountRead<T>>> {
   if (!isPubkey(address)) return { kind: "unreadable", error: "not a base58 32-byte address" };
   try {
-    const result = await pool.call<{ value: RpcAccount | null }>("getAccountInfo", [address, { encoding: "base64", commitment: COMMITMENT }]);
-    const read = decodeOwned(result?.value, decode);
+    const result = await pool.call<unknown>("getAccountInfo", [address, { encoding: "base64", commitment: COMMITMENT }]);
+    const read = decodeOwned(answeredAccount(result), decode);
     return read.kind === "exists" ? { kind: "exists", value: { address, ...read.value } } : read;
   } catch (error) {
     return { kind: "unreadable", error: errorText(pool, error) };
@@ -148,7 +161,7 @@ export async function readVault(pool: RpcPool, vault: string): Promise<ChainRead
     ]);
     const info = memberResult(members, 1);
     if (!info.ok) return { kind: "unreadable", error: pool.scrub(info.error) };
-    const read = decodeOwned((info.result as { value?: RpcAccount | null })?.value, decodeVault);
+    const read = decodeOwned(answeredAccount(info.result), decodeVault);
     if (read.kind !== "exists") return read;
     const floor = memberResult(members, 2);
     return floor.ok ? withRent(vault, read, floor.result) : { kind: "unreadable", error: pool.scrub(floor.error) };
@@ -447,24 +460,16 @@ export async function readImportCandidate(pool: RpcPool, ownerVault: string, wal
     return unreadable(errorText(pool, error));
   }
 
-  /**
-   * The account a getAccountInfo member answered: null when the chain said none, undefined when it gave no value at
-   * all. Anything else goes on to decodeOwned, whose owner check calls what is not a SaverFi account unreadable.
-   */
+  /** The account a getAccountInfo member answered, as answeredAccount reads it; undefined for a member that failed. */
   const accountAt = (id: number): RpcAccount | null | undefined => {
     const answer = memberResult(members, id);
-    return answer.ok && typeof answer.result === "object" && answer.result !== null ? (answer.result as { value?: RpcAccount | null }).value : undefined;
+    return answer.ok ? answeredAccount(answer.result) : undefined;
   };
 
-  const vaultAccount = accountAt(1);
-  let ownVault: ImportCandidateRead["ownVault"]["status"] = "unreadable";
-  if (vaultAccount !== undefined) {
-    const read = decodeOwned(vaultAccount, decodeVault);
-    ownVault = read.kind === "exists" ? (read.value.state.owner === wallet ? "exists" : "unreadable") : read.kind;
-  }
+  const vaultRead = decodeOwned(accountAt(1), decodeVault);
+  const ownVault = vaultRead.kind === "exists" ? (vaultRead.value.state.owner === wallet ? "exists" : "unreadable") : vaultRead.kind;
 
-  const linkAccount = accountAt(2);
-  const link = linkAccount !== undefined ? walletLinkFrom(wallet, linkAddress, ownerVault, linkAccount) : { wallet, link: linkAddress, status: "unreadable" as const, vault: null };
+  const link = walletLinkFrom(wallet, linkAddress, ownerVault, accountAt(2));
 
   // The protocol config always exists on a deployed program: one the chain says is absent ("missing") is no answer
   // either, so anything but a decoded config leaves the role unreadable.
@@ -1511,8 +1516,9 @@ export async function readLiveSnapshot(pool: RpcPool, input: LiveSnapshotInput):
     const walletReads = wallets.map((wallet, index): LiveWalletRead => {
       const address = linkAddresses[index]!;
       if (accountsError !== null) return { wallet, lamports: null, link: { address, status: "unreadable", vault: null, state: null } };
+      // 0 only for the chain's null; an answer that is not an account is a balance nobody read.
       const account = snapshotOf(values![walletAt + index]);
-      const lamports = account === null || account === undefined ? 0n : account.lamports;
+      const lamports = account === null ? 0n : account === undefined ? null : account.lamports;
       const read = decodeOwned(values![linkAt + index], decodeTradingLink);
       if (read.kind === "missing") return { wallet, lamports, link: { address, status: "missing", vault: null, state: null } };
       // An account at ["link", wallet] naming another wallet is not this wallet's link.
