@@ -207,6 +207,10 @@ export function LiveBody({
                   </p>
                 ) : null}
                 {nextStep}
+                {/* BELOW lg THE ACTIVITY COLUMN IS IN A CLOSED SHEET, so the steps
+                    on their way lead the page instead; from lg up the column
+                    shows them and this copy is not displayed (LivePending.tsx). */}
+                <PendingRows lines={pending} variant="card" className="lg:hidden" />
                 {/* The buying approval the setup promised, once the first savings have landed. */}
                 <LiveStartBuying data={data} pensionKey={pensionKey} onRefresh={onRefresh} />
               </>

@@ -580,9 +580,12 @@ export const PENDING_COPY = {
     protocol_paused: `${BRAND} is paused for everyone right now`,
     month_cap: "Your 30-day buying limit is reached",
     conversion_off: "Converting is switched off in your investment policy",
+    price_limits: "Held by your policy's old price limits · Switch to live-price buying to drop them",
   },
   /** Due, and not done: past a few sweeps the loader stops and says since when. */
   slow: (clock: string): string => `Not done since ${clock} · ${BRAND} tries again about once a minute`,
+  /** Due, and no move toward it in the loaded history to time it by: no loader, and no clock. */
+  slowUntimed: `Not done yet · ${BRAND} tries again about once a minute`,
   /** Under "Next investment": the SOL on its way is counted, and said. */
   includesConverting: (usd: string): string => `Includes about ${usd} of SOL being converted to USDC`,
   plusConverting: (sol: string): string => `Plus ${sol} SOL being converted to USDC`,

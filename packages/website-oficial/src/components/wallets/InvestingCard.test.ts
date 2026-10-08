@@ -632,7 +632,7 @@ describe("InvestingCard", () => {
     const html = render(value);
     expect(html).toContain(`>${INVEST_COPY.badgeOldLimits}<`);
     expect(html).toContain(INVEST_COPY.oldLimitsTitle);
-    expect(html).toContain(INVEST_COPY.oldLimitsHeld);
+    expect(html).toContain(INVEST_COPY.oldLimitsHeld.replaceAll("'", "&#x27;"));
     expect(html).not.toContain(INVEST_COPY.oldLimitsBlocking.replaceAll("'", "&#x27;"));
     // The old numbers, beside today's, so he can see what he is dropping.
     expect(html).toContain("SOL floor $90.03, today $100.04");
@@ -663,7 +663,13 @@ describe("InvestingCard", () => {
     const fallen = { ...PRICES!, convertWad: "80000000000000000", usdcRawPerSol: "80000000" };
     const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: POLICY }, prices: fallen }) }));
     expect(html).toContain(`>${INVEST_COPY.badgeOldLimitsBlocking}<`);
-    expect(html).toContain(INVEST_COPY.oldLimitsBlocking.replaceAll("'", "&#x27;"));
+    // ONLY THE CONVERSION STOPS: the keeper measures the convert without its
+    // floor before the wrap and refuses it only on the send path, so the USDC
+    // already held is still invested (invest-tick.ts). "Nothing is bought"
+    // would be false here.
+    expect(html).toContain(INVEST_COPY.oldLimitsBlockingConvert.replaceAll("'", "&#x27;"));
+    expect(html).not.toContain(INVEST_COPY.oldLimitsBlocking.replaceAll("'", "&#x27;"));
+    expect(html).not.toContain("nothing is bought");
     expect(html).toContain("SOL floor $90.03, today $80.00");
     expect(buttons(INVEST_COPY.switchToLive)).toHaveLength(1);
   });
@@ -688,7 +694,7 @@ describe("InvestingCard", () => {
     const policy = { ...POLICY, legs: POLICY.legs.map((leg) => (leg.mint === ANTHROPIC_MINT ? { ...leg, minOutRateWad: String(signedGross) } : leg)) };
     const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: policy } }) }));
     expect(html).toContain(`>${INVEST_COPY.badgeOldLimits}<`);
-    expect(html).toContain(INVEST_COPY.oldLimitsHeld);
+    expect(html).toContain(INVEST_COPY.oldLimitsHeld.replaceAll("'", "&#x27;"));
   });
 
   it("Pause asks for the policy on screen to be signed again with investing off, and is offered with no prices on screen; it never hands the flow the click event", async () => {

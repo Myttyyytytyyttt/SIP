@@ -135,14 +135,43 @@ export function priceLimitsOf(policy: InvestmentPolicyJson, prices: VaultStateJs
   const floors = floorsState(policy, prices);
   if (floors.storedConvert === null && floors.legs.every((leg) => leg.floor === null)) return null;
   if (!carriesPriceLimits(floors.legs.map((leg) => leg.floor), floors.storedConvert)) return "live";
+  return oldLimitsStopIn(floors) === null ? "held" : "blocking";
+}
+
+/**
+ * WHAT A "blocking" POLICY'S OLD LIMITS STOP, by the keeper's own split
+ * (packages/solana-keeper/src/invest-tick.ts):
+ *
+ *   "basket"   a leg's floor is passed, or leaves no route. The leg is measured
+ *              WITH its floor before the wrap (measureBasketVenues,
+ *              ownerFloorRateWad: leg.minOutRateWad), and a refusal there is
+ *              REFUSED for the whole basket: nothing is wrapped, converted or
+ *              bought.
+ *   "convert"  only the SOL floor is passed. That gate measures the convert
+ *              WITHOUT the floor ("NO ownerFloorRateWad HERE, DELIBERATELY"); the
+ *              floor refuses on the send path, after the wrap, so the wSOL waits
+ *              unconverted while the USDC already held is still invested.
+ *
+ * Null when nothing is judged to block (a "live" or "held" policy, or one
+ * whose rates are unread).
+ */
+export type OldLimitsStop = "basket" | "convert";
+
+export function oldLimitsStopOf(policy: InvestmentPolicyJson, prices: VaultStateJson["prices"]): OldLimitsStop | null {
+  const floors = floorsState(policy, prices);
+  if (!carriesPriceLimits(floors.legs.map((leg) => leg.floor), floors.storedConvert)) return null;
+  return oldLimitsStopIn(floors);
+}
+
+function oldLimitsStopIn(floors: FloorsState): OldLimitsStop | null {
   // A floor over its rate is passed even when some OTHER number was unread.
   const over = (floor: bigint | null, live: bigint | null): boolean => floor !== null && live !== null && floor > 0n && live > 0n && floor > live;
-  if (over(floors.storedConvert, floors.liveConvert) || floors.legs.some((leg) => over(leg.floor, leg.live))) return "blocking";
+  if (floors.legs.some((leg) => over(leg.floor, leg.live))) return "basket";
   for (const leg of floors.legs) {
     const fee = CATALOGUE.find((asset) => asset.mint === leg.mint)?.fee ?? null;
-    if (floorRoom(leg.floor, leg.live, fee === null ? 0 : judgedFeeBps(fee)) === "no-route") return "blocking";
+    if (floorRoom(leg.floor, leg.live, fee === null ? 0 : judgedFeeBps(fee)) === "no-route") return "basket";
   }
-  return "held";
+  return over(floors.storedConvert, floors.liveConvert) ? "convert" : null;
 }
 
 // ── the pieces ───────────────────────────────────────────────────────────────
@@ -191,6 +220,7 @@ function policyView(snapshot: LiveSnapshotJson, usdcHeld: bigint | null, nowMs: 
     todayPerSol: limits?.todayPerSol ?? null,
     pricesKnown: false,
     belowMarket: false,
+    oldLimitsStop: null,
     readiness: null,
   };
   if (policy.status !== "exists" || state === undefined) return empty;
@@ -221,6 +251,7 @@ function policyView(snapshot: LiveSnapshotJson, usdcHeld: bigint | null, nowMs: 
     minConvertRateWad: floors.storedConvert,
     pricesKnown: floors.pricesKnown,
     belowMarket: floors.belowMarket,
+    oldLimitsStop: oldLimitsStopOf(state, prices),
     readiness:
       usdcHeld === null || minInvestment === null || maxPerCall === null ? null : investmentReadiness(usdcHeld, state.legs, minInvestment, maxPerCall),
   };
@@ -238,6 +269,20 @@ function tokenOf(snapshot: LiveSnapshotJson, mint: string): TokenHolding | null 
   if (account === undefined || account.status !== "exists") return null;
   const amountRaw = rawFrom(account.amountRaw);
   return amountRaw === null ? null : { amountRaw, uiAmount: account.uiAmount ?? null };
+}
+
+/**
+ * THE USDC THE NEXT BUY CAN COUNT ON, for the policy's readiness. A vault USDC
+ * account that does not exist yet holds 0 — the keeper creates it inside the
+ * first conversion (invest-tick.ts) — so a vault whose first SOL is converting
+ * still has a "Next investment" bar to fill. Null only when the list, or the
+ * account itself, could not be read: unreadable is not zero.
+ */
+function usdcHeldOf(snapshot: LiveSnapshotJson, usdc: TokenHolding | null): bigint | null {
+  if (usdc !== null) return usdc.amountRaw;
+  if (snapshot.vaultTokenAccounts.status !== "exists") return null;
+  const account = snapshot.vaultTokenAccounts.items.find((item) => item.mint === USDC_MINT);
+  return account === undefined || account.status === "missing" ? 0n : null;
 }
 
 function holdingsOf(
@@ -784,7 +829,7 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
   const nowMs = snapshot.readAtMs;
   const vault = vaultView(snapshot);
   const usdc = tokenOf(snapshot, USDC_MINT);
-  const policy = policyView(snapshot, usdc?.amountRaw ?? null, nowMs);
+  const policy = policyView(snapshot, usdcHeldOf(snapshot, usdc), nowMs);
   const holdings = holdingsOf(snapshot, vault, policy);
   const wallets = walletsOf(snapshot, privyWallets, importedWallets, rawFrom(snapshot.rents.walletFloor), vault.walletReserve);
 

@@ -123,9 +123,15 @@ export const DEFAULT_INVEST_CAPS = Object.freeze({ maxPerCall: 1_000_000_000n, m
  *
  * THE TRADE-OFF HE ACCEPTED: with no signed floor, nothing on chain limits the
  * price the keeper pays if the keeper failed or its key were stolen. What still
- * bounds it on chain is the policy's own max_per_call and max_rolling_30d, its
- * mints and its venue program, and invest.rs/convert.rs requiring that the
- * vault receives at least the min_out the keeper passes. (invest.rs does not
+ * bounds the BUYS on chain is the policy's own max_per_call and max_rolling_30d,
+ * its mints and its venue program, and invest.rs requiring that the vault
+ * receives at least the min_out the keeper passes. THE CONVERSION IS NOT
+ * BOUNDED THE SAME WAY: convert.rs never touches the 30-day buckets ("Conversion
+ * is not spend"), caps one call at max(max_per_call, 1e9) counted in lamports
+ * (1 SOL until the per-buy cap passes $1,000) with no limit on how many calls,
+ * and wrap_sol.rs wraps any free SOL. With a 1-wad convert floor the whole SOL
+ * balance of the vault is what a failed or stolen keeper could sell at any
+ * price; convert.rs still requires received >= the keeper's min_out. (invest.rs does not
  * check a buy's size against the leg's weight; the weights are the keeper's
  * to follow.) The price itself is the keeper's to
  * check, live, before every buy: its min_out from the live Jupiter quote less

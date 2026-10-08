@@ -97,7 +97,7 @@ import {
   type PickedRow,
 } from "@/lib/basket-picker";
 import { todaysPrices, usedInLast30Days } from "@/lib/invest-limits";
-import { floorsState, priceLimitsOf } from "@/lib/live-model";
+import { floorsState, oldLimitsStopOf, priceLimitsOf } from "@/lib/live-model";
 import type { InvestPolicyBuildJson, InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
 import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, shortAddress, signedLegsOf } from "@/lib/vault-copy";
 
@@ -1236,6 +1236,9 @@ function PolicySummary({
   const { storedConvert, legs } = floorsState(policy, state.prices);
   const priceLimits = priceLimitsOf(policy, state.prices);
   const oldLimits = priceLimits === "held" || priceLimits === "blocking";
+  // What they stop, when they stop something: a stock's limit stops the whole
+  // basket and the conversion, the SOL limit alone only the conversion.
+  const stops = oldLimitsStopOf(policy, state.prices);
 
   const maxPerCall = rawFrom(policy.maxPerCall) ?? 0n;
   const maxRolling30d = rawFrom(policy.maxRolling30d) ?? 0n;
@@ -1291,7 +1294,7 @@ function PolicySummary({
             className={`space-y-2 rounded-md border px-3 py-2 text-xs ${priceLimits === "blocking" ? "border-destructive/40 bg-destructive/5" : "border-amber-600/30 bg-amber-600/5"}`}
           >
             <div className={LABEL}>{INVEST_COPY.oldLimitsTitle}</div>
-            <p role={priceLimits === "blocking" ? "status" : undefined}>{priceLimits === "blocking" ? INVEST_COPY.oldLimitsBlocking : INVEST_COPY.oldLimitsHeld}</p>
+            <p role={priceLimits === "blocking" ? "status" : undefined}>{priceLimits !== "blocking" ? INVEST_COPY.oldLimitsHeld : stops === "convert" ? INVEST_COPY.oldLimitsBlockingConvert : INVEST_COPY.oldLimitsBlocking}</p>
             {storedConvert !== null && storedConvert > LIVE_PRICE_FLOOR_WAD ? (
               <p>{INVEST_COPY.storedSolFloor(formatUsd(usdcRawPerSol(storedConvert)), today === null ? null : formatUsd(today.todayPerSol))}</p>
             ) : null}

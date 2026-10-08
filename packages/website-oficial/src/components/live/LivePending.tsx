@@ -13,6 +13,17 @@
  * changes inside it, which needs it to exist before the change; it holds
  * nothing and draws nothing while no step is pending. The turning mark stops
  * for anyone who asked for reduced motion.
+ *
+ * TWO PLACES, ONE PER SCREEN WIDTH (LiveBody.tsx). From lg up the steps lead
+ * the activity column. Below lg that column lives in a sheet nobody has opened,
+ * so a "card" copy leads the page's own top instead — out of the flow while it
+ * is empty (sr-only keeps the region in the accessibility tree, so the first
+ * step is still announced, without adding a gap to the column it sits in).
+ *
+ * A CONVERTING ROW'S DOLLARS ARE NOT READ OUT. They are re-priced at every
+ * read's SOL price, and inside a live region every cent would be announced
+ * again; the SOL, which only changes when the step does, is what is spoken
+ * (PendingLine.amountSpoken).
  */
 
 import { ArrowLeftRight, Clock, Loader2, Pause, PiggyBank } from "lucide-react";
@@ -31,7 +42,7 @@ const amountOf = (line: PendingLine): string => (line.active && line.kind === "b
 
 function Glyph({ line }: { readonly line: PendingLine }) {
   if (line.active) return <Loader2 className="size-4 motion-safe:animate-spin" aria-hidden data-pending-loader="" />;
-  if (line.rest === "paused" || line.rest === "protocol_paused" || line.rest === "buying_off" || line.rest === "conversion_off") {
+  if (line.rest === "paused" || line.rest === "protocol_paused" || line.rest === "buying_off" || line.rest === "conversion_off" || line.rest === "price_limits") {
     return <Pause className="size-4" aria-hidden />;
   }
   if (line.rest === "slow") return <Clock className="size-4" aria-hidden />;
@@ -42,9 +53,12 @@ export function PendingRows({
   lines,
   className,
   announce = true,
+  variant = "column",
 }: {
   readonly lines: readonly PendingLine[];
   readonly className?: string;
+  /** "card": framed, for the top of the page below lg, and out of the flow while empty. */
+  readonly variant?: "column" | "card";
   /**
    * False for a copy drawn beside another that already announces: on /activity
    * the sidebar and the page's own list show the same steps at once, and one
@@ -53,7 +67,11 @@ export function PendingRows({
   readonly announce?: boolean;
 }) {
   return (
-    <div {...(announce ? { role: "status", "aria-live": "polite" as const } : {})} className={className} data-pending-steps={lines.length}>
+    <div
+      {...(announce ? { role: "status", "aria-live": "polite" as const } : {})}
+      className={cn(variant === "card" && (lines.length === 0 ? "sr-only" : "overflow-hidden rounded-md border bg-card"), className) || undefined}
+      data-pending-steps={lines.length}
+    >
       {lines.length === 0 ? null : (
         <>
           <div className="px-4 py-2 text-xs text-muted-foreground">{PENDING_COPY.heading}</div>
@@ -71,7 +89,10 @@ export function PendingRows({
                 <span className="block truncate text-sm">{line.title}</span>
                 <span className="block text-xs text-muted-foreground">{line.sub}</span>
               </span>
-              <span className={cn("shrink-0 text-right text-sm", MONO, amountOf(line))}>{line.amount}</span>
+              <span className={cn("shrink-0 text-right text-sm", MONO, amountOf(line))} {...(line.amountSpoken === null ? {} : { "aria-hidden": true })}>
+                {line.amount}
+              </span>
+              {line.amountSpoken ? <span className="sr-only">{line.amountSpoken}</span> : null}
             </div>
           ))}
         </>

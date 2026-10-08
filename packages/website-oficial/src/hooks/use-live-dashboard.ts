@@ -477,7 +477,7 @@ export function useLiveDashboard(input: {
   useEffect(() => {
     if (pensionKey === null) return undefined;
     const visible = typeof document === "undefined" || document.visibilityState === "visible";
-    const pending = pendingPollWanted({ active: pendingActive, activeSince: activeSinceRef.current, now: Date.now() });
+    const pending = pendingPollWanted({ active: pendingActive, activeSince: activeSinceRef.current, now: Date.now(), activityRetryAt: activityTrouble?.retryAt ?? null });
     const delay = nextDelayMs({ failures, retryAfterSeconds: null, visible, lastReadAt, now: Date.now(), reading, pending });
     if (delay === null) return undefined;
     const retryAt = failure?.retryAt ?? null;

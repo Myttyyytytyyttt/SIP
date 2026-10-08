@@ -13,13 +13,16 @@
  * snapshot does not read the trading wallets' own signatures.
  *
  * ACTIVE OR WAITING, NEVER A LOADER THAT LIES. A step is "active" — drawn with
- * a loader — only while nothing the screen can read stops it and the chain last
- * moved toward it less than PENDING_STALL_MS ago. A step the keeper skips for a
- * reason on screen (the vault paused, buying switched off, the 30-day limit) is
- * "waiting" with that reason. A step still undone a few sweeps after the chain
- * last moved toward it is "waiting" as "slow": the keeper can rest for reasons
- * this page cannot read (a thin market, an oracle that is late), and a spinner
- * there would claim progress nobody measured.
+ * a loader — only while nothing the screen can read stops it and the LOADED
+ * history shows the chain moving toward it less than PENDING_STALL_MS ago. A
+ * step the keeper skips for a reason on screen (the vault paused, buying
+ * switched off, the 30-day limit, a policy's old price limits) is "waiting"
+ * with that reason. A step still undone a few sweeps after the chain last moved
+ * toward it is "waiting" as "slow": the keeper can rest for reasons this page
+ * cannot read (a thin market, an oracle that is late), and a spinner there
+ * would claim progress nobody measured. So is a step the loaded history holds
+ * no successful move toward — the history unread, or a first page of failed
+ * transactions: with nothing to time it by, no loader is evidence of anything.
  *
  * NOTHING BELOW A MINIMUM IS PENDING. Below the keeper's dust lines nothing is
  * wrapped or converted, and USDC that cannot buy every leg waits for more; the
@@ -56,7 +59,7 @@ const U64_MAX = (1n << 64n) - 1n;
 export type PendingKind = "converting" | "buying";
 
 /** Why a due step rests. "slow" is the one the screen cannot explain. */
-export type PendingRest = "buying_off" | "paused" | "protocol_paused" | "month_cap" | "conversion_off" | "slow";
+export type PendingRest = "buying_off" | "paused" | "protocol_paused" | "month_cap" | "conversion_off" | "price_limits" | "slow";
 
 export interface PendingStep {
   readonly kind: PendingKind;
@@ -69,7 +72,7 @@ export interface PendingStep {
   readonly valueUsdcRaw: bigint | null;
   /** Buying: the basket's symbols, in the policy's order. Empty for converting. */
   readonly symbols: readonly string[];
-  /** Milliseconds: when the loaded history last moved toward this step. Null when it holds no such row. */
+  /** Milliseconds: when the loaded history last moved toward this step. Null when it holds no such row — then the step is "slow", never "active". */
   readonly since: number | null;
 }
 
@@ -141,7 +144,9 @@ export function pendingSteps(data: LiveDashboard): PendingStep[] {
   const stateOf = (kind: PendingKind, reason: PendingRest | null): Pick<PendingStep, "state" | "rest" | "since"> => {
     const since = newestMove(data, kind);
     if (reason !== null) return { state: "waiting", rest: reason, since };
-    if (since !== null && data.nowMs - since > PENDING_STALL_MS) return { state: "waiting", rest: "slow", since };
+    // NO EVIDENCE, NO LOADER: with no successful move toward the step in the
+    // loaded history there is no clock to stop it by, so it waits from the start.
+    if (since === null || data.nowMs - since > PENDING_STALL_MS) return { state: "waiting", rest: "slow", since };
     return { state: "active", rest: null, since };
   };
   const steps: PendingStep[] = [];
@@ -156,9 +161,14 @@ export function pendingSteps(data: LiveDashboard): PendingStep[] {
   if (wraps || (wsol !== null && wsol >= CONVERT_DUST_LAMPORTS)) {
     const lamports = (wraps ? free : 0n) + (wsol ?? 0n);
     const conversionOff = policy.minConvertRateWad !== null && policy.minConvertRateWad <= 0n;
+    // OLD PRICE LIMITS (a policy signed before 2026-10-08): a stock's passed
+    // limit refuses the whole turn before the wrap, the SOL limit alone the
+    // conversion after it (live-model.ts oldLimitsStopOf). Either way no SOL
+    // reaches USDC until the owner switches to live-price buying.
+    const limited = policy.oldLimitsStop !== null;
     steps.push({
       kind: "converting",
-      ...stateOf("converting", rest ?? (conversionOff ? "conversion_off" : null)),
+      ...stateOf("converting", rest ?? (conversionOff ? "conversion_off" : limited ? "price_limits" : null)),
       amountRaw: lamports,
       valueUsdcRaw: perSol === null ? null : usdcRawForLamports(lamports, perSol),
       symbols: [],
@@ -178,13 +188,15 @@ export function pendingSteps(data: LiveDashboard): PendingStep[] {
       const used = policy.usedLast30d;
       const headroom = max === null || used === null || max === U64_MAX ? null : used >= max ? 0n : max - used;
       const budget = headroom !== null && headroom < perCall ? headroom : perCall;
+      // A stock's passed old limit refuses the basket; the SOL limit alone does not.
+      const buyRest = rest ?? (policy.oldLimitsStop === "basket" ? "price_limits" : null);
       // The cap leaves less than the basket needs: that is month_cap, said by turnRest.
-      if (rest !== null || buysEveryLeg(budget, weights, policy.minInvestment)) {
+      if (buyRest !== null || buysEveryLeg(budget, weights, policy.minInvestment)) {
         steps.push({
           kind: "buying",
-          ...stateOf("buying", rest),
-          amountRaw: rest === null ? budget : perCall,
-          valueUsdcRaw: rest === null ? budget : perCall,
+          ...stateOf("buying", buyRest),
+          amountRaw: buyRest === null ? budget : perCall,
+          valueUsdcRaw: buyRest === null ? budget : perCall,
           symbols: policy.legs.map((leg) => leg.symbol),
         });
       }
@@ -211,6 +223,13 @@ export interface PendingLine {
   readonly title: string;
   readonly sub: string;
   readonly amount: string;
+  /**
+   * What a screen reader hears in place of `amount`, or null to hear `amount`
+   * itself. A conversion's dollars are re-priced at every read, so they are
+   * hidden from the live region: the SOL is spoken instead, and "" when the
+   * row's own line already says it.
+   */
+  readonly amountSpoken: string | null;
 }
 
 const solText = (lamports: bigint): string => formatSolAtMost(lamports, 4);
@@ -220,7 +239,13 @@ export function pendingLines(steps: readonly PendingStep[]): PendingLine[] {
   return steps.map((step): PendingLine => {
     const active = step.state === "active";
     const why =
-      step.rest === null ? null : step.rest === "slow" ? PENDING_COPY.slow(step.since === null ? "" : clockLabel(new Date(step.since).toISOString())) : PENDING_COPY.rest[step.rest];
+      step.rest === null
+        ? null
+        : step.rest === "slow"
+          ? step.since === null
+            ? PENDING_COPY.slowUntimed
+            : PENDING_COPY.slow(clockLabel(new Date(step.since).toISOString()))
+          : PENDING_COPY.rest[step.rest];
     if (step.kind === "converting") {
       return {
         key: "converting",
@@ -231,6 +256,7 @@ export function pendingLines(steps: readonly PendingStep[]): PendingLine[] {
         sub: why ?? PENDING_COPY.convertingSub(solText(step.amountRaw)),
         // In today's dollars like every SOL amount in the column, and in SOL when no price was read.
         amount: step.valueUsdcRaw === null ? `${solText(step.amountRaw)} SOL` : formatUsd(step.valueUsdcRaw),
+        amountSpoken: why === null ? "" : `${solText(step.amountRaw)} SOL`,
       };
     }
     const names = namesOf(step.symbols);
@@ -242,6 +268,7 @@ export function pendingLines(steps: readonly PendingStep[]): PendingLine[] {
       title: active ? PENDING_COPY.buying(names) : PENDING_COPY.buyingWaiting(names),
       sub: why ?? PENDING_COPY.buyingSub,
       amount: formatUsd(step.amountRaw),
+      amountSpoken: null,
     };
   });
 }

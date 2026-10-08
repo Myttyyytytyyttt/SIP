@@ -519,8 +519,16 @@ describe("how the price is set: the live price, the keeper's checks, and what th
       `Before every buy, SaverFi's keeper asks Jupiter for a live quote for that exact buy and sends it with the least the vault must receive: the quote less ${pct(legSlippage(spyxFee))} (${pct(legSlippage(anthropicFee))} for ANTHROPIC), and less the transfer fee. ` +
         `It does not buy when the venue holds less than ${POOL_DEPTH.web.value} times the buy, when the full buy is quoted more than ${pct(impact(spyxFee))} (${pct(impact(anthropicFee))} for ANTHROPIC) worse than a sixteenth of it on the same route, or when a stock's issuer charges more than ${LEG_FEE.percentPerTransfer} % to move it. ` +
         `Converting SOL to USDC is also checked against the SOL price Pyth publishes: it waits while that price is more than ${PYTH_GUARD.keeper.maxAgeSeconds} seconds old, uncertain by more than ${pct(PYTH_GUARD.keeper.confBps)}, or more than ${pct(PYTH_GUARD.keeper.deviationBps)} away from Jupiter's quote. ` +
-        "Nothing outside the venue prices SPYx and ANTHROPIC: those checks compare Jupiter's own quotes and count what the venue holds, so they can tell a buy is too big for its market, not that the market's price is fair. A check that refuses waits for a later sweep; nothing asks you to approve again.",
+        "Nothing outside the venue prices SPYx and ANTHROPIC: those checks compare Jupiter's own quotes and count what the venue holds, so they can tell a buy is too big for its market, not that the market's price is fair. " +
+        "When the quote, the venue's depth, the size check or Pyth refuses, the buy or conversion waits for a later sweep, and nothing asks you to approve again. " +
+        `A fee over ${LEG_FEE.percentPerTransfer} % is different: it stops the whole basket until that stock's issuer lowers it, or you approve a basket without that stock.`,
     );
+    // THE FEE CEILING DOES NOT WAIT FOR A LATER SWEEP: the keeper refuses the
+    // whole basket from the epoch a leg's fee goes over it, every sweep, until
+    // the fee or the basket changes (invest-tick.ts legAdmissionDecision). So no
+    // sentence may promise that every refusal clears by itself.
+    expect(INVEST_COPY.keeperChecks(BASKETS.both)).not.toContain("A check that refuses waits for a later sweep");
+    expect(INVEST_COPY.keeperChecks(BASKETS.both)).toContain("stops the whole basket until that stock's issuer lowers it");
     // The figures, spelled, so a broken ratePercent cannot pass with them.
     expect(INVEST_COPY.keeperChecks(BASKETS.both)).toContain("the quote less 2 % (4 % for ANTHROPIC)");
     expect(INVEST_COPY.keeperChecks(BASKETS.both)).toContain("more than 0.5 % (0.25 % for ANTHROPIC) worse");
@@ -545,9 +553,24 @@ describe("how the price is set: the live price, the keeper's checks, and what th
   it("says what the chain still enforces, and plainly what it no longer does if the keeper failed or its key were stolen", () => {
     expect(INVEST_COPY.chainLimits("$149.00", "$31,000.00")).toBe(
       "What Solana itself still enforces on every buy, whatever happens to SaverFi's keeper: at most $149.00 per buy and $31,000.00 per 30 days, only the stocks you chose, through the exchange you signed, and that the vault receives at least the minimum the keeper sent with the buy. " +
-        "What it no longer enforces is a price: there is no price floor in what you sign. If SaverFi's keeper failed, or its key were stolen, nothing on Solana would stop a buy at a bad price — those caps are what would limit how much.",
+        "What it no longer enforces is a price: there is no price floor in what you sign. If SaverFi's keeper failed, or its key were stolen, nothing on Solana would stop a buy at a bad price — for buys, those caps are what would limit how much. " +
+        "Converting SOL to USDC has no such limit: it does not count toward the 30 days, each conversion is capped at 1 SOL (more only if your most per buy is over $1,000), and conversions can repeat. So all the SOL in your vault, not only those caps, is what a failed or stolen keeper could sell at any price.",
     );
     expect(INVEST_COPY.chainLimits(null, null)).toContain("the most per buy and per 30 days you set");
+  });
+
+  it("names the conversion's exposure: no 30-day cap, 1 SOL per call (convert.rs max(max_per_call, 1e9) in lamports), repeatable — the whole SOL balance", () => {
+    // convert.rs: `amount_in <= policy.max_per_call.max(1_000_000_000)`, in
+    // lamports, and no bucket write. A per-buy cap of $1,000 is 1e9 USDC raw,
+    // the very number the max() takes, so up to it a conversion is 1 SOL.
+    for (const text of [INVEST_COPY.chainLimits("$149.00", "$31,000.00"), INVEST_COPY.chainLimits(null, null)]) {
+      expect(text).toContain("Converting SOL to USDC has no such limit: it does not count toward the 30 days");
+      expect(text).toContain("each conversion is capped at 1 SOL (more only if your most per buy is over $1,000)");
+      expect(text).toContain("conversions can repeat");
+      expect(text).toContain("all the SOL in your vault, not only those caps");
+      // The caps are never said to bound the whole loss.
+      expect(text).not.toMatch(/stolen, nothing on Solana would stop a buy at a bad price — those caps are what would limit how much/);
+    }
   });
 
   it("promises nothing the checks cannot do, and no paragraph still describes a signed limit", () => {
@@ -676,9 +699,13 @@ describe("a floor signed before 2026-10-08, and whether the keeper still buys un
   it("words the old limits as a stop only when they stop buying, and offers one switch either way", () => {
     expect(INVEST_COPY.oldLimitsBlocking).toContain("old price limits are stopping your buys");
     expect(INVEST_COPY.oldLimitsHeld).not.toMatch(/stopping your buys|are stopping/);
-    // ALL OR NOTHING: a stop takes the SOL conversion too, and is said so.
+    // ALL OR NOTHING: a stock's limit takes the SOL conversion too, and is said so.
     expect(INVEST_COPY.oldLimitsBlocking).toContain("nothing is bought, and no SOL is converted");
-    for (const line of [INVEST_COPY.oldLimitsHeld, INVEST_COPY.oldLimitsBlocking]) {
+    // The SOL limit alone stops only the conversion: the USDC held is still invested.
+    expect(INVEST_COPY.oldLimitsBlockingConvert).toContain("stopping your SOL being converted to USDC");
+    expect(INVEST_COPY.oldLimitsBlockingConvert).toContain("USDC already in your vault is still invested");
+    expect(INVEST_COPY.oldLimitsBlockingConvert).not.toMatch(/nothing is bought|stopping your buys/);
+    for (const line of [INVEST_COPY.oldLimitsHeld, INVEST_COPY.oldLimitsBlocking, INVEST_COPY.oldLimitsBlockingConvert]) {
       expect(line).toContain("Switching signs the same basket again at the live price");
       // The public name, and no engine-room words.
       expect(line).not.toMatch(/keeper|min_out|bps|wad|Nuvem|\bSIP\b|Jupiter|gross|net\b/i);

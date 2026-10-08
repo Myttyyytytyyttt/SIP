@@ -183,10 +183,26 @@ describe("while something is on its way", () => {
 
   it("runs only while a step is under way, and for PENDING_POLL_MAX_MS of one stretch at most", () => {
     expect(PENDING_POLL_MAX_MS).toBe(5 * 60_000);
-    expect(pendingPollWanted({ active: false, activeSince: NOW, now: NOW })).toBe(false);
-    expect(pendingPollWanted({ active: true, activeSince: null, now: NOW })).toBe(false);
-    expect(pendingPollWanted({ active: true, activeSince: NOW, now: NOW })).toBe(true);
-    expect(pendingPollWanted({ active: true, activeSince: NOW, now: NOW + PENDING_POLL_MAX_MS - 1 })).toBe(true);
-    expect(pendingPollWanted({ active: true, activeSince: NOW, now: NOW + PENDING_POLL_MAX_MS })).toBe(false);
+    const clear = { activityRetryAt: null } as const;
+    expect(pendingPollWanted({ ...clear, active: false, activeSince: NOW, now: NOW })).toBe(false);
+    expect(pendingPollWanted({ ...clear, active: true, activeSince: null, now: NOW })).toBe(false);
+    expect(pendingPollWanted({ ...clear, active: true, activeSince: NOW, now: NOW })).toBe(true);
+    expect(pendingPollWanted({ ...clear, active: true, activeSince: NOW, now: NOW + PENDING_POLL_MAX_MS - 1 })).toBe(true);
+    expect(pendingPollWanted({ ...clear, active: true, activeSince: NOW, now: NOW + PENDING_POLL_MAX_MS })).toBe(false);
+  });
+
+  it("never asks for the history before its retry-after: a 45 s refusal while a step is under way waits the 45 s, not 20", () => {
+    const retryAt = NOW + 45_000;
+    const pending = pendingPollWanted({ active: true, activeSince: NOW, now: NOW, activityRetryAt: retryAt });
+    expect(pending).toBe(false);
+    // What the hook then schedules: the ordinary poll, brought forward to the
+    // moment the route named and no earlier (use-live-dashboard.ts).
+    const wait = nextDelayMs({ ...base, pending })!;
+    const early = nextActivityRetryMs({ retryAt, attempts: 0, now: NOW })!;
+    const when = Math.min(wait, Math.max(early, MANUAL_FLOOR_MS));
+    expect(when).toBe(45_000);
+    expect(when).toBeGreaterThanOrEqual(retryAt - NOW);
+    // Once that moment has passed, the faster cadence is allowed again.
+    expect(pendingPollWanted({ active: true, activeSince: NOW, now: retryAt, activityRetryAt: retryAt })).toBe(true);
   });
 });

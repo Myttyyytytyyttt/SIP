@@ -160,7 +160,20 @@ export function nextActivityRetryMs(input: ActivityRetryInput): number | null {
  * it by, say, held back for a reason the page cannot read — from tripling the
  * reads for as long as the tab stays open.
  */
-export function pendingPollWanted(input: { readonly active: boolean; readonly activeSince: number | null; readonly now: number }): boolean {
+export function pendingPollWanted(input: {
+  readonly active: boolean;
+  readonly activeSince: number | null;
+  readonly now: number;
+  /**
+   * When the history route said this browser may ask for it again (a 429's
+   * retry-after), or null. Every read asks for the history, so while that
+   * moment is still ahead the faster cadence would ask before it — the one
+   * thing "A REFUSAL IS OBEYED" forbids. The ordinary cadence, and the early
+   * re-read nextActivityRetryMs schedules for exactly that moment, apply instead.
+   */
+  readonly activityRetryAt: number | null;
+}): boolean {
   if (!input.active || input.activeSince === null) return false;
+  if (input.activityRetryAt !== null && input.activityRetryAt > input.now) return false;
   return input.now - input.activeSince < PENDING_POLL_MAX_MS;
 }

@@ -191,7 +191,8 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
     unrealizedUsd: null,
     pendingUsd: dollarsOf(data.notInvestedUsdcRaw),
     readyToInvestUsd: readiness === null ? null : dollarsOf(readiness.heldRaw + (next.extraUsdcRaw ?? 0n)),
-    nextInvestmentNote: next.note,
+    // A note about the sum only beside a sum: "Includes about $1.80" under a dash would contradict itself.
+    nextInvestmentNote: readiness === null ? null : next.note,
     thresholdUsd,
     savedTodayUsd: $(stats.savedTodayLamports),
     savedThisWeekUsd: $(stats.savedThisWeekLamports),

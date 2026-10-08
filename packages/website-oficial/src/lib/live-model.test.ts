@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { headCursor } from "@/lib/live-activity-store";
 import { floorRoom, keeperVenueThresholdWad } from "@/lib/invest-limits";
-import { priceLimitsOf, toLiveDashboard } from "@/lib/live-model";
+import { oldLimitsStopOf, priceLimitsOf, toLiveDashboard } from "@/lib/live-model";
 import type { LiveActivityJson, LiveEntryJson, LiveSnapshotJson, VaultEventJson } from "@/lib/live-types";
 
 import { policyState } from "../../test/fixtures/live-dashboard";
@@ -635,6 +635,26 @@ describe("priceLimitsOf", () => {
 
   it("is blocking when the SOL conversion's floor is above today's rate", () => {
     expect(priceLimitsOf(policyState({ minConvertRateWad: "100038711555492563" }), PRICES)).toBe("blocking");
+  });
+
+  /**
+   * WHAT IT STOPS, by the keeper's split (invest-tick.ts): a leg's floor is
+   * measured before the wrap and refuses the whole basket; the SOL floor only
+   * on the convert's send path, after the wrap, with the USDC held still
+   * invested.
+   */
+  it("says a passed SOL floor stops the conversion only, and a passed or routeless leg floor the whole basket", () => {
+    expect(oldLimitsStopOf(policyState({ minConvertRateWad: "100038711555492563" }), PRICES)).toBe("convert");
+    const legOver = policyState({ legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "131283650130637570" }] });
+    expect(oldLimitsStopOf(legOver, PRICES)).toBe("basket");
+    // Both passed: the basket, which takes the conversion with it.
+    expect(oldLimitsStopOf({ ...legOver, minConvertRateWad: "100038711555492563" }, PRICES)).toBe("basket");
+    const tooClose = keeperVenueThresholdWad(ANTHROPIC_MID, 300, "gross", "over-mid") + 1n;
+    expect(oldLimitsStopOf(twoLegs(tooClose), TWO_LEG_PRICES)).toBe("basket");
+    // Nothing stops: held, live, or unread.
+    expect(oldLimitsStopOf(policyState(), PRICES)).toBeNull();
+    expect(oldLimitsStopOf(live, TWO_LEG_PRICES)).toBeNull();
+    expect(oldLimitsStopOf(policyState({ minConvertRateWad: "100038711555492563" }), null)).toBeNull();
   });
 
   it("is blocking when a leg's floor leaves no route at ANTHROPIC's judged 3 %", () => {

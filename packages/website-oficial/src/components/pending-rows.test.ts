@@ -38,8 +38,8 @@ import { mock } from "@/mocks";
 
 import { NOW_MS, OWNER, liveActivity, liveEntry, liveSnapshot, seconds, signature, tokenAccount } from "../../test/fixtures/live-dashboard";
 
-const ACTIVE: PendingLine = { key: "converting", kind: "converting", active: true, rest: null, title: PENDING_COPY.converting, sub: PENDING_COPY.convertingSub("0.018"), amount: "$1.80" };
-const WAITING: PendingLine = { key: "buying", kind: "buying", active: false, rest: "paused", title: PENDING_COPY.buyingWaiting("SPYx"), sub: PENDING_COPY.rest.paused, amount: "$5.00" };
+const ACTIVE: PendingLine = { key: "converting", kind: "converting", active: true, rest: null, title: PENDING_COPY.converting, sub: PENDING_COPY.convertingSub("0.018"), amount: "$1.80", amountSpoken: "" };
+const WAITING: PendingLine = { key: "buying", kind: "buying", active: false, rest: "paused", title: PENDING_COPY.buyingWaiting("SPYx"), sub: PENDING_COPY.rest.paused, amount: "$5.00", amountSpoken: null };
 
 const html = (element: ReturnType<typeof createElement>): string => renderToStaticMarkup(createElement(TooltipProvider, null, element));
 const count = (text: string, needle: string): number => text.split(needle).length - 1;
@@ -69,6 +69,24 @@ describe("the rows", () => {
     expect(out).not.toContain("animate-spin");
     expect(out).not.toContain("text-blue-600");
     expect(out).toContain(PENDING_COPY.rest.paused);
+  });
+
+  /**
+   * THE LIVE REGION HEARS WHAT CHANGES WITH THE STEP, NOT WITH THE PRICE. A
+   * conversion's dollars are re-priced at every 20 s read; read out, every cent
+   * of SOL would be announced again for as long as the step runs.
+   */
+  it("keep a conversion's re-priced dollars out of what the live region reads, and speak its SOL once", () => {
+    const spoken = (out: string): string => out.replace(/<span[^>]*aria-hidden="true"[^>]*>[^<]*<\/span>/g, "").replace(/<svg[\s\S]*?<\/svg>/g, "");
+    const at = (amount: string): string => html(createElement(PendingRows, { lines: [{ ...ACTIVE, amount }] }));
+    expect(at("$1.80")).toContain("$1.80");
+    expect(spoken(at("$1.80"))).toBe(spoken(at("$1.81")));
+    expect(spoken(at("$1.80"))).not.toContain("$1.80");
+    // A resting conversion's line is its reason, so the SOL is spoken in the amount's place.
+    const resting = html(createElement(PendingRows, { lines: [{ ...ACTIVE, active: false, rest: "paused", sub: PENDING_COPY.rest.paused, amountSpoken: "0.018 SOL" }] }));
+    expect(resting).toContain('<span class="sr-only">0.018 SOL</span>');
+    // A buy's amount is the USDC it spends, which does not move with SOL: it is read as drawn.
+    expect(html(createElement(PendingRows, { lines: [WAITING] }))).not.toContain('aria-hidden="true">$5.00');
   });
 
   it("wear the buy's blue only on a buy under way", () => {
@@ -131,6 +149,21 @@ describe("a live page", () => {
     const wrapRow = out.indexOf("Wrapped SOL for investing");
     expect(pending).toBeGreaterThan(-1);
     expect(wrapRow).toBeGreaterThan(pending);
+  });
+
+  /**
+   * BELOW lg THE COLUMN IS IN A CLOSED SHEET (site-header.tsx) and the aside is
+   * not displayed, so the page's own top carries the steps: framed, hidden from
+   * lg up where the column shows them, and out of the flow while empty.
+   */
+  it("leads the pension page's own top with the steps below lg, where the activity column is out of sight", () => {
+    const out = render("pension", converting());
+    const top = out.match(/<div role="status" aria-live="polite" class="([^"]*)" data-pending-steps="1">/);
+    expect(top?.[1]).toBe("overflow-hidden rounded-md border bg-card lg:hidden");
+    // Before the holdings and the rule card, inside the main column.
+    expect(out.indexOf(top![0])).toBeLessThan(out.indexOf("data-next-investment-note"));
+    const empty = render("pension", toLiveDashboard({ snapshot: liveSnapshot({ vaultTokenAccounts: { status: "exists", items: [] }, vault: { ...liveSnapshot().vault, lamports: "1285240", withdrawableLamports: "0" } }), activity: liveActivity([]), privyWallets: [] }));
+    expect(empty).toContain('<div role="status" aria-live="polite" class="sr-only lg:hidden" data-pending-steps="0"></div>');
   });
 
   it("counts the SOL on its way under Next investment, and says so", () => {

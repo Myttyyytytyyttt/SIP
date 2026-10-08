@@ -86,8 +86,12 @@ describe("the poll runs faster only while something is on its way", () => {
     expect(poll).toMatch(/if \(!pendingActive\) activeSinceRef\.current = null;\s*else if \(activeSinceRef\.current === null\) activeSinceRef\.current = Date\.now\(\);/);
   });
 
-  it("asks the schedule, bounded by the stretch's clock, and re-arms when 'under way' changes", () => {
-    expect(poll).toMatch(/const pending = pendingPollWanted\(\{ active: pendingActive, activeSince: activeSinceRef\.current, now: Date\.now\(\) \}\);/);
+  it("asks the schedule, bounded by the stretch's clock and the history's retry-after, and re-arms when 'under way' changes", () => {
+    // The history's retry-after goes in: every read asks for the history, so the
+    // 20 s cadence may not run while the route has said to wait longer.
+    expect(poll).toMatch(
+      /const pending = pendingPollWanted\(\{ active: pendingActive, activeSince: activeSinceRef\.current, now: Date\.now\(\), activityRetryAt: activityTrouble\?\.retryAt \?\? null \}\);/,
+    );
     expect(poll).toMatch(/nextDelayMs\(\{ failures, retryAfterSeconds: null, visible, lastReadAt, now: Date\.now\(\), reading, pending \}\)/);
     expect(poll).toMatch(/\}, \[pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading, pendingActive\]\);/);
   });

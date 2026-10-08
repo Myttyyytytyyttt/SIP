@@ -46,8 +46,8 @@ export const SETTINGS_COPY = {
    * the sample's basket never carries them, so the sample never shows these.
    */
   switchLive: "Switch to live-price buying",
-  switchLiveHeld: "Your basket still has the price limits it was approved with. Whenever a price moves past one, buying stops until you approve again. Switch once and SaverFi buys at the live market price from then on.",
-  switchLiveBlocking: "Your old price limits are stopping your buys right now. Switch to live-price buying to drop them.",
+  switchLiveHeld: "Your basket still has the price limits it was approved with. Whenever a price moves past one, buying or converting stops until you approve again. Switch once and SaverFi buys at the live market price from then on.",
+  switchLiveBlocking: "Your old price limits are holding up your investing right now. Switch to live-price buying to drop them.",
   switchLiveBlocked: "Save or cancel your changes first: saving switches to live-price buying too.",
 
   nonceNotice: "Changing how you save restarts any saving already on its way. Nothing already in your vault is touched.",

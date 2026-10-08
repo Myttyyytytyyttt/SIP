@@ -245,6 +245,8 @@ export interface LivePolicyView {
   /** Both floors readable, and each still on the right side of today's price. */
   readonly pricesKnown: boolean;
   readonly belowMarket: boolean;
+  /** What a policy signed before 2026-10-08 stops right now, by cause (live-model.ts oldLimitsStopOf); null when nothing. */
+  readonly oldLimitsStop: "basket" | "convert" | null;
   /** Whether the next sweep can buy, from the USDC the vault actually holds. Null when there is nothing to say. */
   readonly readiness: InvestmentReadiness | null;
 }

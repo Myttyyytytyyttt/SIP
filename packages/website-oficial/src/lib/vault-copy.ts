@@ -140,7 +140,13 @@ export const shortAddress = (address: string): string => (address.length > 10 ? 
 //    nothing on chain bounds the PRICE a buy pays — only how much it spends
 //    (max_per_call, max_rolling_30d) and that it receives at least the
 //    keeper's own min_out. If the keeper failed or its key were stolen, the
-//    caps are what is left.
+//    caps are what is left FOR THE BUYS. THE CONVERSION HAS NO SUCH CAP:
+//    convert.rs never touches the 30-day buckets, bounds one call only by
+//    max(max_per_call, 1e9) counted in LAMPORTS (1 SOL until the per-buy cap
+//    passes $1,000), and nothing limits how many calls; wrap_sol.rs wraps any
+//    free SOL. With a 1-wad convert floor, every lamport the vault holds is
+//    what a failed or stolen keeper could sell at any price, and chainLimits
+//    says so.
 // INVEST_COPY.keeperChecks and INVEST_COPY.chainLimits say all three in the
 // owner's words.
 
@@ -628,7 +634,9 @@ function keeperChecksParagraph(legs: readonly SignedLeg[]): string {
     `Before every buy, SaverFi's keeper asks Jupiter for a live quote for that exact buy and sends it with the least the vault must receive: the quote less ${perLegPercent(legs, catalogueLegSlippageBps)}, and less the transfer fee. ` +
     `It does not buy when the venue holds less than ${POOL_DEPTH_MULTIPLE} times the buy, when the full buy is quoted more than ${perLegPercent(legs, sizePenaltyCeilingBps)} worse than a sixteenth of it on the same route, or when a stock's issuer charges more than ${ratePercent(MAX_LEG_FEE_BPS)} to move it. ` +
     `Converting SOL to USDC is also checked against the SOL price Pyth publishes: it waits while that price is more than ${PYTH_MAX_AGE_SECONDS} seconds old, uncertain by more than ${ratePercent(PYTH_CONF_BPS)}, or more than ${ratePercent(PYTH_DEVIATION_BPS)} away from Jupiter's quote. ` +
-    `Nothing outside the venue prices ${stocks}: those checks compare Jupiter's own quotes and count what the venue holds, so they can tell a buy is too big for its market, not that the market's price is fair. A check that refuses waits for a later sweep; nothing asks you to approve again.`
+    `Nothing outside the venue prices ${stocks}: those checks compare Jupiter's own quotes and count what the venue holds, so they can tell a buy is too big for its market, not that the market's price is fair. ` +
+    "When the quote, the venue's depth, the size check or Pyth refuses, the buy or conversion waits for a later sweep, and nothing asks you to approve again. " +
+    `A fee over ${ratePercent(MAX_LEG_FEE_BPS)} is different: it stops the whole basket until that stock's issuer lowers it, or you approve a basket without that stock.`
   );
 }
 
@@ -637,7 +645,8 @@ function chainLimitsParagraph(perBuy: string | null, per30Days: string | null): 
   const caps = perBuy === null || per30Days === null ? "the most per buy and per 30 days you set" : `at most ${perBuy} per buy and ${per30Days} per 30 days`;
   return (
     `What Solana itself still enforces on every buy, whatever happens to SaverFi's keeper: ${caps}, only the stocks you chose, through the exchange you signed, and that the vault receives at least the minimum the keeper sent with the buy. ` +
-    "What it no longer enforces is a price: there is no price floor in what you sign. If SaverFi's keeper failed, or its key were stolen, nothing on Solana would stop a buy at a bad price — those caps are what would limit how much."
+    "What it no longer enforces is a price: there is no price floor in what you sign. If SaverFi's keeper failed, or its key were stolen, nothing on Solana would stop a buy at a bad price — for buys, those caps are what would limit how much. " +
+    "Converting SOL to USDC has no such limit: it does not count toward the 30 days, each conversion is capped at 1 SOL (more only if your most per buy is over $1,000), and conversions can repeat. So all the SOL in your vault, not only those caps, is what a failed or stolen keeper could sell at any price."
   );
 }
 
@@ -1115,17 +1124,25 @@ export const INVEST_COPY = {
   // Until that day every policy signed a floor per stock and one for SOL, taken
   // once from that day's prices. They stay in a stored policy until it is
   // signed again. Two states, and the words may not mix them up: the old
-  // limits are STOPPING buys (the market passed one, or no route clears it at
-  // the keeper's own ask — invest-limits.ts priceLimitsOf "blocking"), or they
-  // are still there and not stopping anything today ("held"). One press
+  // limits are STOPPING something (the market passed one, or no route clears
+  // it at the keeper's own ask — live-model.ts priceLimitsOf "blocking"), or
+  // they are still there and not stopping anything today ("held"). One press
   // re-signs the same basket at the live price either way.
+  //
+  // AND A STOP SAYS WHAT IT STOPS (live-model.ts oldLimitsStopOf). A stock's
+  // limit refuses the whole basket before the wrap: nothing is bought or
+  // converted. The SOL limit alone refuses only the conversion, after the wrap:
+  // the USDC already in the vault is still invested.
   oldLimitsTitle: "Price limits from before",
-  /** "held": the limits are not judged to be stopping buys right now (or the prices are unread); the switch is offered, not urged. */
+  /** "held": the limits are not judged to be stopping anything right now (or the prices are unread); the switch is offered, not urged. */
   oldLimitsHeld:
-    "This policy was signed with price limits, before SaverFi switched to buying at the live price. Whenever a price moves past one of them, buying stops until you sign again. Switching signs the same basket again at the live price, once, and no price limit stops it after that.",
-  /** "blocking": the old limits are what stops the buying, and the switch is the way out. */
+    "This policy was signed with price limits, before SaverFi switched to buying at the live price. Whenever a stock's price rises past its limit, buying stops, and whenever SOL's price falls past its limit, your SOL stops being converted to USDC, until you sign again. Switching signs the same basket again at the live price, once, and no price limit stops it after that.",
+  /** "blocking" by a stock's limit: the whole basket and the conversion stop, and the switch is the way out. */
   oldLimitsBlocking:
-    "This policy's old price limits are stopping your buys: nothing is bought, and no SOL is converted, while a price sits past them. Switching signs the same basket again at the live price, so those limits stop nothing any more.",
+    "This policy's old price limits are stopping your buys: nothing is bought, and no SOL is converted, while the market cannot meet a stock's limit. Switching signs the same basket again at the live price, so those limits stop nothing any more.",
+  /** "blocking" by the SOL limit alone: only the conversion stops. */
+  oldLimitsBlockingConvert:
+    "This policy's old SOL price limit is stopping your SOL being converted to USDC while SOL's price sits under it. USDC already in your vault is still invested. Switching signs the same basket again at the live price, so that limit stops nothing any more.",
   switchToLive: "Switch to live-price buying",
 
   sign: "Sign investment policy",
@@ -1234,7 +1251,7 @@ export const INVEST_COPY = {
   /** The badge: how this policy is priced. */
   badgeLive: "Live price",
   badgeOldLimits: "Old price limits",
-  badgeOldLimitsBlocking: "Old limits stop buys",
+  badgeOldLimitsBlocking: "Old limits blocking",
   storedSolFloor: (floor: string, today: string | null): string => (today === null ? `SOL floor ${floor}` : `SOL floor ${floor}, today ${today}`),
   storedLegCeiling: (symbol: string, max: string, today: string | null): string =>
     today === null ? `${symbol} ceiling ${max} per 100,000,000 raw units` : `${symbol} ceiling ${max} per 100,000,000 raw units, today ${today}`,
