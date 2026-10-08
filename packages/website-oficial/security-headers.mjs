@@ -23,16 +23,6 @@ const WALLETCONNECT_IFRAMES = ["https://verify.walletconnect.com", "https://veri
 const TURNSTILE = "https://challenges.cloudflare.com";
 
 /**
- * THE LANDING'S BACKGROUND FOOTAGE. Without it media-src falls back to
- * default-src 'self' and the <video> is refused with nothing on the page to say
- * so — just an empty background. This host is the reference template's CDN and
- * serves a PLACEHOLDER clip (another brand's credit card): remove this entry
- * when the footage is replaced with SIP's own, self-hosted under /public. See
- * BACKGROUND_VIDEO in src/components/landing.tsx.
- */
-const LANDING_VIDEO_HOST = "https://d8j0ntlcm91z4.cloudfront.net";
-
-/**
  * THE BROWSER'S SOLANA WEBSOCKET, the one Solana origin in the policy. Privy's
  * solana.rpcs hands it to @solana/kit, which opens it lazily, only when a
  * subscription runs. That is rare, but when it happens a missing entry stalls
@@ -125,8 +115,9 @@ export function buildCsp(options = {}) {
      */
     "img-src": ["'self'", "data:", "blob:", "https://explorer-api.walletconnect.com"],
 
-    // The landing's scrubbed background video (see LANDING_VIDEO_HOST).
-    "media-src": ["'self'", LANDING_VIDEO_HOST],
+    // The landing's films (the intro, the app loop) are served from /public/landing. The template's
+    // footage on a third party's CDN went on 10-08, replaced by a ground drawn in code (landing-backdrop.tsx).
+    "media-src": ["'self'"],
 
     // next/font/google self-hosts at build time, so the faces are same-origin.
     "font-src": ["'self'"],

@@ -414,13 +414,9 @@
   }
 }
 
-/* THE SCENE COMES LAST. The footage stays invisible until the frame has fully
-   arrived in front of it (data-scene) and the clip has a frame to show
-   (data-footage-loaded). The staged block below sets its visible opacity; this
-   gate outranks it until both are true. */
-.landing-footage { transition: opacity 900ms ease; }
-.landing-root:not([data-scene][data-footage-loaded]) .landing-footage { opacity: 0; }
-/* The frame's loop fades in over its rest frame once it is really playing. */
+/* THE SCENE COMES LAST: the frame's loop starts only once the frame has fully
+   arrived (data-scene, landing.tsx), and fades in over its rest frame once it is
+   really playing (data-app-loop). */
 .landing-app-loop { opacity: 0; transition: opacity 400ms ease; }
 .landing-root[data-app-loop] .landing-app-loop { opacity: 1; }
 @media (prefers-reduced-motion: reduce) {
@@ -454,14 +450,98 @@
 .landing-grain {
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.06 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
 }
+/* ─── THE LANDING'S GROUND, MADE HERE (landing-backdrop.tsx) ────────────────
+   The launch film's blueprint, drawn in code. Appears with the page, drifts
+   with the scroll a little slower than the frame (--p), stands still under
+   reduced motion. */
+.sf-backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  transition: opacity 1.2s ease;
+  transform: translate3d(0, calc(var(--p, 0) * -60px), 0) scale(calc(1 + var(--p, 0) * 0.06));
+  transform-origin: 50% 62%;
+}
+.landing-root:not([data-loaded]) .sf-backdrop { opacity: 0; }
+
+/* The grid: hairline, strongest around the frame, gone at the edges. */
+.sf-grid-lines {
+  position: absolute;
+  inset: 0;
+  -webkit-mask: radial-gradient(75% 70% at 50% 62%, #000 0%, rgba(0, 0, 0, 0.55) 45%, transparent 85%);
+  mask: radial-gradient(75% 70% at 50% 62%, #000 0%, rgba(0, 0, 0, 0.55) 45%, transparent 85%);
+}
+.sf-grid-lines line { stroke: rgba(255, 255, 255, 0.11); stroke-width: 1; shape-rendering: crispEdges; }
+.sf-grid-lines .sf-grid-diag { stroke: rgba(255, 255, 255, 0.06); stroke-dasharray: 5 6; shape-rendering: auto; }
+.sf-grid-lines .sf-grid-node { fill: rgba(52, 211, 153, 0.6); }
+.sf-halo {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(46% 42% at 50% 64%, rgba(16, 185, 129, 0.24) 0%, rgba(16, 185, 129, 0.08) 45%, transparent 75%);
+  animation: sf-breathe 7s ease-in-out infinite alternate;
+}
+@keyframes sf-breathe { from { opacity: 0.75; } to { opacity: 1; } }
+.sf-pulses { position: absolute; inset: 0; }
+.sf-pulse {
+  position: absolute;
+  pointer-events: none;
+  animation-timing-function: cubic-bezier(0.45, 0, 0.25, 1);
+  animation-fill-mode: both;
+}
+/* A comet: a short emerald trail with a bright head, along a horizontal line. */
+.sf-pulse-h {
+  left: 0;
+  width: 150px;
+  height: 1px;
+  margin-top: -0.5px;
+  background: linear-gradient(90deg, transparent, rgba(52, 211, 153, 0.85));
+  box-shadow: 0 0 10px rgba(52, 211, 153, 0.55);
+  animation-name: sf-run-h;
+}
+.sf-pulse-v {
+  top: 0;
+  width: 1px;
+  height: 130px;
+  margin-left: -0.5px;
+  background: linear-gradient(180deg, transparent, rgba(52, 211, 153, 0.85));
+  box-shadow: 0 0 10px rgba(52, 211, 153, 0.55);
+  animation-name: sf-run-v;
+}
+.sf-pulse::after {
+  content: "";
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: #ecfdf5;
+  box-shadow: 0 0 8px 2px rgba(52, 211, 153, 0.9);
+}
+.sf-pulse-h::after { right: -2px; top: -1.5px; }
+.sf-pulse-v::after { bottom: -2px; left: -1.5px; }
+@keyframes sf-run-h {
+  0%   { transform: translateX(var(--from)) scaleX(var(--flip, 1)); opacity: 0; }
+  12%  { opacity: 1; }
+  80%  { opacity: 1; }
+  100% { transform: translateX(var(--to)) scaleX(var(--flip, 1)); opacity: 0; }
+}
+@keyframes sf-run-v {
+  0%   { transform: translateY(var(--from)); opacity: 0; }
+  12%  { opacity: 1; }
+  80%  { opacity: 1; }
+  100% { transform: translateY(var(--to)); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sf-backdrop { transform: none; transition: none; }
+  .sf-halo { animation: none; }
+  .sf-pulses { display: none; }
+}
+
 /* ─── THE STAGED LANDING ─────────────────────────────────────────────────────
    Wide, landscape, at least 600px tall: the words across the top and the frame
-   in the middle of the footage, which plays unblurred because the placeholder
-   clip's card sits hidden behind the frame (landing.tsx places it; see THE
-   PLACEHOLDER'S GEOMETRY there). The same condition is `isStaged` in
-   landing.tsx: change both. A phone, a portrait tablet or a short window keeps
-   the frame under the words over blurred footage, because there the frame is
-   smaller than the card and a smeared brand is the only safe one.
+   in the middle of the ground. The same condition is `isStaged` in landing.tsx:
+   change both. A phone, a portrait tablet or a short window keeps the frame
+   under the words, tilted back and running off the bottom.
 
    Unlayered on purpose: these must beat the Tailwind utilities on the same
    elements whatever order the utilities are emitted in. */
@@ -474,12 +554,6 @@
      the 32px title strip plus the top and bottom border; +2px the side ones. */
   .landing-stage { flex: 1 1 0; min-height: 0; margin-top: 24px; container-type: size; align-items: flex-start; }
   .landing-box { max-width: none; width: min(62vw, 100cqw, calc((100cqh - 34px) * 1.6 + 2px)); }
-  /* Hidden until the loop has put the card behind the frame: before that the
-     clip would show it, brand and all, between the words and the frame. */
-  .landing-footage { scale: none; filter: none; opacity: 0; transition: opacity 900ms ease; will-change: transform; }
-  [data-footage-ready] .landing-footage { opacity: 0.75; }
-  /* The safety net's other half: a frame smaller than the card brings the blur back. */
-  [data-footage-exposed] .landing-footage { filter: blur(10px); }
   .landing-scrim-top { height: 42%; }
   .landing-bottom-fade { height: 56px; }
 }
@@ -512,7 +586,6 @@
   .landing-intro, .landing-intro-video, .landing-intro-still { transition: none; transform: none; }
   .landing-intro-still { opacity: 1; }
   .landing-hover { transition: none; }
-  .landing-footage { transition: none; }
   .landing-loader, .landing-loader-spin { transition: none; }
   .landing-loader-ring { animation: none; }
   .landing-loader-mark { animation: none; background-position: 0 100%; }

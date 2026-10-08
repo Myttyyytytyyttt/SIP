@@ -2,14 +2,14 @@
 
 /**
  * WHAT SOMEBODY SEES BEFORE THEY CONNECT — the words on top, and the app in the
- * middle of a night scene, brought to the screen by a scroll.
+ * middle of the S's own blueprint, brought to the screen by a scroll.
  *
  * On a screen with room (wide, landscape, at least 600px tall) the headline and
- * the ways in run across the top, and below them a frame holding a screenshot of
- * the dashboard on example data sits in the middle of the background footage,
+ * the ways in run across the top, and below them a frame playing the dashboard
+ * on example data sits in the middle of the ground (landing-backdrop.tsx),
  * almost facing the viewer. On a phone, a portrait tablet or a short window
  * there is no room for that: the frame sits under the words, tilted back and
- * running off the bottom, over blurred footage. Either way, scroll and the
+ * running off the bottom. Either way, scroll and the
  * frame straightens, rises and grows until it fills the screen — and at that
  * moment you are in the app. Hover the frame and the picture softens behind a
  * Connect; click anywhere else on it and you walk into the example.
@@ -28,8 +28,8 @@
  * loop reads layout first — the hero's height and the rect of the frame's STAGE,
  * an element that never transforms — and then writes: the frame's translate,
  * tilt and scale toward "centred and covering the viewport", the copy's fade,
- * the nav's fade, the footage's placement and the video's time. Transforms and
- * opacity never dirty layout, so nothing is forced.
+ * the nav's fade, and --p, which the ground drifts with. Transforms and opacity
+ * never dirty layout, so nothing is forced.
  *
  * PROGRESSIVE, ON PURPOSE. Every way in except Connect is <a href="/?mode=mock">:
  * before hydration a click is a navigation and still arrives; after it, the
@@ -37,15 +37,18 @@
  * here — and this page resets its scroll on mount and only enters on a gesture
  * the visitor made, so a restored scroll position cannot re-enter it.
  *
- * THE LOADER, AND WHY THE SCENE COMES LAST. The page opens on the SIP mark in a
- * spinning ring and stays there until the frame can stand in front of the
- * footage. Then the words and the frame rise, and only once the frame has fully
- * arrived does the footage fade in behind it. The order is the point: a first
- * version showed the footage at ~0.3 s while the frame's entrance ran from 0.8
- * to 1.7 s, so for about a second the placeholder's card stood alone in the
- * middle of the page — correctly placed, behind a frame nobody could see yet.
+ * THE LOADER, AND WHY THE SCENE COMES LAST. The page opens on a loader (the
+ * intro below, or the SIP mark in a spinning ring) and stays there until the
+ * frame's rest frame has decoded. Then the words and the frame rise, and only
+ * once the frame has fully arrived (data-scene) does the app inside it start to
+ * move — never under the loader, never before anybody can see it.
  *
- * COMMITTED DARK, whatever the theme: the screenshot and the footage are dark.
+ * THE GROUND (owner, 10-08: "prefiero los grids"). Until then the page stood on
+ * the reference template's footage — another brand's credit card, on a third
+ * party's CDN, with a whole geometry to keep the card hidden behind the frame.
+ * It is gone: the ground is the launch film's blueprint, drawn in code.
+ *
+ * COMMITTED DARK, whatever the theme: the app and the ground are dark.
  *
  * THE INTRO (owner, 10-07). The first time somebody opens the landing in a tab,
  * the loader is the launch film's green logo build instead of the spinning
@@ -69,43 +72,9 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { usePrivy } from "@privy-io/react-auth";
 import { ArrowDown, ArrowUpRight } from "lucide-react";
 
+import { LandingBackdrop } from "@/components/landing-backdrop";
 import { useWalletsOpener } from "@/components/wallets-host";
 import { cn } from "@/lib/utils";
-
-/**
- * THE BACKGROUND FOOTAGE IS A PLACEHOLDER. It is the reference template's clip:
- * a credit card branded "INFINITE". It is here because the owner asked for the
- * template's video; it must be replaced with SIP's own before anyone outside
- * the team sees this page — another brand's name and a credit card on a
- * pension's front door is not a detail. It also lives on a third party's CDN,
- * which can vanish: self-host the replacement under public/landing/ and drop
- * the host from media-src in security-headers.mjs. Everything under THE
- * PLACEHOLDER'S GEOMETRY is fitted to this clip and is void for any other.
- */
-const BACKGROUND_VIDEO =
-  "https://d8j0ntlcm91z4.cloudfront.net/user_38xzZboKViGWJOttwIXH07lWA1P/hf_20260630_060707_72cd8ca2-3e4b-460c-9293-575573810866.mp4";
-
-/**
- * THE PLACEHOLDER'S GEOMETRY — measured on that clip, void for any other.
- *
- * On a staged screen the clip is moved and scaled so its card sits behind the
- * frame, which is what lets the footage play unblurred: the card, and the brand
- * printed on it, are hidden rather than smeared. CLIP_CARD_BOX is the largest
- * extent the card reaches over the scrubbed range, as shares of the clip's
- * frame: measured frame by frame every 0.1 s from 0 to 1.4 s by detecting its
- * rim and glow against their surroundings (union left 0.417, right 0.591, top
- * 0.287, bottom 0.710 — two independent prototype measurements agreed within
- * 0.01), then padded by 0.008 on every side. A first, eyeballed box that
- * included the unscrubbed 1.6 s was 11% taller and blurred the footage on the
- * commonest laptop screens for a card that is never that big. FOOTAGE_TOP_ALLOWANCE is how far the clip's top edge may sit below
- * the viewport's top, hidden under the top scrim. SCRUB_SECONDS stops the scroll
- * at the calm first stretch: from ~1.9 s the clip fills the screen with the card
- * and its brand at a size no frame can cover. Replace the clip, re-measure all
- * of these, and redo the brand check at rest and mid-scroll.
- */
-const CLIP_CARD_BOX = { left: 0.409, right: 0.599, top: 0.279, bottom: 0.718 } as const;
-const FOOTAGE_TOP_ALLOWANCE = 80;
-const SCRUB_SECONDS = 1.4;
 
 /**
  * How much scroll, after the hero has pinned, carries the frame from resting
@@ -181,9 +150,9 @@ const INTRO_SCRIPT = `(function(){var r=document.currentScript&&document.current
  * THE LOADER lifts when the screenshot has decoded and the fonts are in (so
  * nothing reflows under the frame), but not before MIN — a fast load should not
  * flash the mark — and no later than MAX: if the screenshot never arrives the
- * frame's own opaque ground still covers the card, and a page is better than a
- * spinner. The footage then waits for the frame's entrance to END; the fallback
- * covers an animationend that never fires (a backgrounded tab throttles them).
+ * frame's own opaque ground still stands, and a page is better than a spinner.
+ * The app's loop then waits for the frame's entrance to END; the fallback covers
+ * an animationend that never fires (a backgrounded tab throttles them).
  */
 const MIN_LOADER_MS = 700;
 const MAX_LOADER_MS = 8000;
@@ -227,7 +196,6 @@ export function Landing({
   const copyRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
 
   const [leaving, setLeaving] = useState(false);
   const enteredRef = useRef(false);
@@ -282,7 +250,6 @@ export function Landing({
     const copy = copyRef.current;
     const stage = stageRef.current;
     const frame = frameRef.current;
-    const video = videoRef.current;
     if (!root || !hero || !copy || !stage || !frame) return;
 
     // Marks the moment the page can respond. Before this, every way in is a
@@ -299,8 +266,6 @@ export function Landing({
     };
     let pending = 0;
     let lastHeroH = -1;
-    let lastFootage: string | null = null;
-    let primed = false;
 
     const tick = () => {
       pending = 0;
@@ -320,8 +285,6 @@ export function Landing({
       const start = Math.max(0, heroH - vh);
       const zoom = vh * (coarse ? ZOOM_VH_COARSE : ZOOM_VH_FINE);
       const p = clamp01(window.scrollY / (start + zoom));
-      const clipW = video?.videoWidth || 1920;
-      const clipH = video?.videoHeight || 1080;
 
       const tRot = easeInOut(clamp01(p / 0.5));
       const tMove = reduced ? 0 : easeInOut(clamp01((p - 0.1) / 0.8));
@@ -329,7 +292,6 @@ export function Landing({
       // The frame's centre: in its layout box now, and where the transform puts it.
       const cx = stageRect.left + stageRect.width / 2;
       const cy = stageRect.top + fH / 2;
-      const cyNow = cy + (vh / 2 - cy) * tMove;
 
       // ── WRITES ──
       const heightChanged = heroH !== lastHeroH;
@@ -373,47 +335,6 @@ export function Landing({
         frame.style.transform =
           `translate3d(${(vw / 2 - cx) * tMove}px, ${(vh / 2 - cy) * tMove}px, 0) ` +
           `perspective(1200px) rotateX(${tilt * (1 - tRot)}deg) scale(${1 + (fill - 1) * tScale})`;
-
-        if (video && video.readyState >= 1 && Number.isFinite(video.duration) && !video.seeking) {
-          const t = p * Math.min(video.duration, SCRUB_SECONDS) * 0.999;
-          if (Math.abs(video.currentTime - t) > 0.03) video.currentTime = t;
-        }
-      }
-
-      // THE FOOTAGE, STAGED: the clip's card behind the frame, following it as
-      // it rises. The scale is fixed at rest — enough that the clip's top edge
-      // stays under the scrim and its bottom edge off the screen — and only the
-      // translation tracks the frame, so the landscape moves with the gesture
-      // instead of the card slipping out from under it (a first version kept the
-      // footage still, and the card's edge showed under the rising frame).
-      if (video) {
-        let footage = "";
-        let exposed = false;
-        if (staged) {
-          const c = Math.max(vw / clipW, vh / clipH);
-          const W = clipW * c;
-          const H = clipH * c;
-          const ox = (vw - W) / 2;
-          const oy = (vh - H) / 2;
-          const boxCx = (CLIP_CARD_BOX.left + CLIP_CARD_BOX.right) / 2;
-          const boxCy = (CLIP_CARD_BOX.top + CLIP_CARD_BOX.bottom) / 2;
-          const cyRest = cy + Math.min(window.scrollY, start);
-          const S = Math.max(1, (cyRest - FOOTAGE_TOP_ALLOWANCE) / (boxCy * H), (vh - cyRest) / ((1 - boxCy) * H));
-          const tx = cx - vw / 2 - S * (ox + boxCx * W - vw / 2);
-          const ty = cyNow - vh / 2 - S * (oy + boxCy * H - vh / 2);
-          footage = `translate3d(${tx.toFixed(1)}px, ${ty.toFixed(1)}px, 0) scale(${S.toFixed(4)})`;
-          // THE SAFETY NET. On a screen shape nobody measured, a frame smaller
-          // than the card gets the blur back, not the brand.
-          const cardW = S * (CLIP_CARD_BOX.right - CLIP_CARD_BOX.left) * W;
-          const cardH = S * (CLIP_CARD_BOX.bottom - CLIP_CARD_BOX.top) * H;
-          exposed = cardW > fW - 16 || cardH > fH - 16;
-        }
-        if (footage !== lastFootage) {
-          video.style.transform = footage;
-          lastFootage = footage;
-        }
-        root.toggleAttribute("data-footage-exposed", exposed);
-        root.setAttribute("data-footage-ready", "");
       }
 
       if (intent && p >= ENTER_TOLERANCE) enter();
@@ -423,14 +344,7 @@ export function Landing({
     function schedule() {
       if (!pending) pending = window.requestAnimationFrame(tick);
     }
-    const onScroll = () => {
-      // iOS will not paint a seeked frame of a video that has never played.
-      if (!primed && video && coarse) {
-        primed = true;
-        video.play().then(() => video.pause()).catch(() => {});
-      }
-      schedule();
-    };
+    const onScroll = () => schedule();
 
     // ── THE INTRO ──
     // The page waits for the film to end (or be skipped), then for itself.
@@ -533,12 +447,6 @@ export function Landing({
       if (root.hasAttribute("data-scene")) return;
       root.setAttribute("data-scene", "");
       if (appLoop && !reduced) appLoop.play().catch(() => {});
-      // iOS loads nothing for a video it has not been asked to play. A muted,
-      // inline play() is allowed; pausing at once leaves the first frame showing.
-      if (video && coarse && !primed) {
-        primed = true;
-        video.play().then(() => video.pause()).catch(() => {});
-      }
     };
     const onBoxRise = (e: AnimationEvent) => {
       if (e.target !== box || e.animationName !== "landing-in-frame") return;
@@ -572,9 +480,6 @@ export function Landing({
       // screen before hydration counts toward MIN; a remount (Back) is long past it.
       timers.push(window.setTimeout(finishLoading, Math.max(0, MIN_LOADER_MS - performance.now())));
     }
-    const onVideoData = () => root.setAttribute("data-footage-loaded", "");
-    if (video && video.readyState >= 2) onVideoData();
-    video?.addEventListener("loadeddata", onVideoData);
     img?.addEventListener("load", tryFinish);
     img?.addEventListener("error", finishLoading);
     void document.fonts.ready.then(tryFinish);
@@ -585,15 +490,13 @@ export function Landing({
     const ro = new ResizeObserver(schedule);
     ro.observe(hero);
     // Staged, the hero is exactly one viewport tall and never resizes when the
-    // words reflow — but the stage does, and the footage is placed from it.
+    // words reflow — but the stage does, and the frame is placed from it.
     ro.observe(stage);
     // The entrance ends without a scroll or a resize; measure once more then.
     hero.addEventListener("animationend", schedule);
     window.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("resize", schedule);
     for (const ev of INTENT) window.addEventListener(ev, markIntent, { passive: true });
-    video?.addEventListener("seeked", schedule);
-    video?.addEventListener("loadedmetadata", schedule);
     schedule();
 
     return () => {
@@ -603,8 +506,6 @@ export function Landing({
       window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", schedule);
       for (const ev of INTENT) window.removeEventListener(ev, markIntent);
-      video?.removeEventListener("seeked", schedule);
-      video?.removeEventListener("loadedmetadata", schedule);
       if (timerRef.current !== null) window.clearTimeout(timerRef.current);
       for (const t of timers) window.clearTimeout(t);
       for (const t of introTimers) window.clearTimeout(t);
@@ -617,7 +518,6 @@ export function Landing({
       appLoop?.removeEventListener("playing", onLoopPlaying);
       img?.removeEventListener("load", tryFinish);
       img?.removeEventListener("error", finishLoading);
-      video?.removeEventListener("loadeddata", onVideoData);
     };
   }, [enter]);
 
@@ -680,25 +580,9 @@ export function Landing({
         <span className="sr-only">Loading</span>
       </div>
 
-      {/* ── Background footage, scrubbed by the scroll ─────────────────── */}
+      {/* ── The ground: the S's blueprint, drifting with the scroll ──────── */}
       <div aria-hidden className="landing-fade pointer-events-none fixed inset-0 z-0" style={{ animationDelay: "0.1s" }}>
-        {/* BLURRED WHERE IT CANNOT BE HIDDEN. Every stretch of the placeholder
-            clip shows another brand's card. Staged, the card sits behind the
-            frame and the footage plays sharp (THE STAGED LANDING in globals.css
-            lifts the blur, and hides the video until the loop has placed it).
-            On a phone, a portrait tablet or a short window the frame is smaller
-            than the card, so there the blur stays: as ambience the footage
-            still moves with the scroll; as text it says nothing. Drop the blur
-            together with the placeholder. Everywhere, it is invisible until the
-            frame has fully arrived in front of it (THE LOADER). */}
-        <video
-          ref={videoRef}
-          src={BACKGROUND_VIDEO}
-          muted
-          playsInline
-          preload="auto"
-          className="landing-footage h-full w-full scale-110 object-cover opacity-60 blur-[10px]"
-        />
+        <LandingBackdrop />
         {/* The words sit over the top of it. */}
         <div className="landing-scrim-top absolute inset-x-0 top-0 h-[75%] bg-gradient-to-b from-[#0A0B11] via-[#0A0B11]/75 to-transparent" />
         <div className="absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-[#0A0B11] to-transparent" />

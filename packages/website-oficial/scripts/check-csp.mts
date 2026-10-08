@@ -27,7 +27,7 @@ import { buildCsp, securityHeaders } from "../security-headers.mjs";
 
 const SOLANA_GOLDEN =
   "default-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; " +
-  "img-src 'self' data: blob: https://explorer-api.walletconnect.com; media-src 'self' https://d8j0ntlcm91z4.cloudfront.net; " +
+  "img-src 'self' data: blob: https://explorer-api.walletconnect.com; media-src 'self'; " +
   "font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; " +
   "child-src https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org; " +
   "frame-src https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org https://challenges.cloudflare.com; " +
