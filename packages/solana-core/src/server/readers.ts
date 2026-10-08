@@ -589,7 +589,9 @@ export interface PoolPrices {
  * Raydium pool at all. What these pools still are is the only rate this server
  * publishes: the screens value SOL and each offered stock from them. (Until
  * 2026-10-08 the build route also signed each leg's min_out_rate_wad from
- * them; it signs no price floor now, product.ts LIVE_PRICE_FLOOR_WAD.) The reserves below are theirs, which is why they are NOT the depth
+ * them; it signs no stock floor now, product.ts LIVE_PRICE_FLOOR_WAD. It still
+ * reads SOL_USDC_POOL, the first of them, for the SOL hop's safety floor,
+ * product.ts CONVERT_SAFETY_FLOOR_BPS.) The reserves below are theirs, which is why they are NOT the depth
  * the keeper's gate measures; client/product.ts says so at length.
  */
 export const PRICED_POOLS: readonly string[] = Object.freeze([SOL_USDC_POOL, ...OFFERED_LEGS.map((leg) => leg.floorPool)]);

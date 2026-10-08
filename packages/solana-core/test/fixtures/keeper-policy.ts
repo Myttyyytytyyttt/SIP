@@ -338,11 +338,12 @@ export const ROUTED_VENUE = Object.freeze({
 });
 
 /**
- * THE PRICE FLOOR EVERY NEW POLICY SIGNS SINCE 2026-10-08: 1 wad, for every
- * leg's min_out_rate_wad and for min_convert_rate_wad (solana-core product.ts
- * LIVE_PRICE_FLOOR_WAD says why, and what the owner accepted). 1 is the least
- * set_invest_policy accepts on a leg and the least convert.rs accepts on the
- * SOL hop; the keeper reads 0 on the SOL hop as "conversion off".
+ * THE PRICE FLOOR EVERY NEW POLICY SIGNS ON ITS LEGS SINCE 2026-10-08: 1 wad,
+ * for every leg's min_out_rate_wad (solana-core product.ts LIVE_PRICE_FLOOR_WAD
+ * says why, and what the owner accepted). 1 is the least set_invest_policy
+ * accepts on a leg. (It was the SOL hop's min_convert_rate_wad too until
+ * 2026-10-09; that one is CONVERT_SAFETY_FLOOR below now. The keeper still
+ * reads 0 on the SOL hop as "conversion off", and any value above 0 as on.)
  *
  * WHAT THE KEEPER MUST DO WITH IT, asserted in the keeper: convertDecision
  * converts (no "CONVERSION IS OFF" alarm), and the owner floor it computes
@@ -357,6 +358,42 @@ export const LIVE_PRICE_FLOOR = Object.freeze({
   measured: Object.freeze({ amountIn: 2_752_188n, ownerFloor: 0n, minOut: 2_432_353n }),
   /** ownerFloorFor(amount, 1) is 0 strictly under this many raw units and 1 at it: 1e18. */
   ownerFloorZeroBelowRaw: 1_000_000_000_000_000_000n,
+});
+
+/**
+ * THE SOL HOP'S SAFETY FLOOR EVERY NEW POLICY SIGNS SINCE 2026-10-09 (owner:
+ * "pon el mínimo del 50% en el SOL"): min_convert_rate_wad at `bps` of the live
+ * SOL/USDC rate at signing, rounded down (solana-core product.ts
+ * CONVERT_SAFETY_FLOOR_BPS says why the conversion keeps a floor when the legs
+ * do not).
+ *
+ * THE KEEPER HAS NO COPY OF THE NUMBER: it reads the floor from the policy,
+ * converts when it is above 0 (convertDecision), and hands the route builder
+ * ownerFloorFor(lamports, floor) as the least the conversion may pay. What it
+ * must do with a floor of THIS size is asserted on the keeper's side against
+ * `measured`: one SOL converts while the venue pays more than half the signing
+ * price, and is refused (below-owner-floor) once it pays less.
+ *
+ * WHICH SIDE GOES RED: solana-core's handlers-build.test.ts holds
+ * CONVERT_SAFETY_FLOOR_BPS and the build's answer to `web` and `measured`; the
+ * website's vault-flows.test.ts holds its pre-sign band to `web`; the keeper's
+ * jupiter-route.test.ts runs `measured` through ownerFloorFor and
+ * investMinOutFor.
+ */
+export const CONVERT_SAFETY_FLOOR = Object.freeze({
+  /** packages/solana-core/src/client/product.ts, signed by build-handler.ts investPolicy. */
+  web: Object.freeze({ constant: "CONVERT_SAFETY_FLOOR_BPS", module: "product.ts", bps: 5_000 }),
+  /**
+   * The test chain's SOL/USDC pool (chain-fixtures.ts SOL_SQRT_PRICE, mainnet
+   * slot 447313239): $100.04 a SOL as USDC raw per lamport x 1e18, and half of
+   * it rounded down. For one SOL (1e9 lamports) that floor is 50,019,355 USDC raw.
+   */
+  measured: Object.freeze({
+    liveConvertWad: 100_038_711_555_492_562n,
+    floorWad: 50_019_355_777_746_281n,
+    oneSolLamports: 1_000_000_000n,
+    oneSolFloorUsdcRaw: 50_019_355n,
+  }),
 });
 
 /**

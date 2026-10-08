@@ -23,8 +23,10 @@ export const LIGHTHOUSE_PROGRAM = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
  * Raydium CLMM. IT IS NO LONGER A VENUE A POLICY MAY NAME — it is a PRICE
  * SOURCE. The screens read SOL's and each offered stock's price from Raydium
  * CLMM pools (server/readers.ts PRICED_POOLS), and that is all this constant
- * is for now; since 2026-10-08 the build route signs no floor from them
- * (product.ts LIVE_PRICE_FLOOR_WAD). The keeper stopped routing through it when the
+ * is for now; since 2026-10-08 the build route signs no stock floor from them
+ * (product.ts LIVE_PRICE_FLOOR_WAD), and since 2026-10-09 it signs the SOL
+ * hop's safety floor from the SOL/USDC one (product.ts
+ * CONVERT_SAFETY_FLOOR_BPS). The keeper stopped routing through it when the
  * basket moved to Jupiter and refuses it outright
  * (solana-keeper/src/invest-decision.ts RETIRED_VENUES), so a policy naming it
  * as venue_program buys nothing, at any balance, for the life of the policy.

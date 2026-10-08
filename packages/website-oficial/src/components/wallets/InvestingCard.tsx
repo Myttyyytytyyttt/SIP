@@ -13,10 +13,11 @@
  * it has. Pause signs the stored policy again with investing off; every other
  * signature from here signs the live-price floors.
  *
- * WHAT IS SIGNED HAS NO PRICE FLOOR (owner, 2026-10-08): every leg's
- * min_out_rate_wad and the min_convert_rate_wad are LIVE_PRICE_FLOOR_WAD, and
- * the flow (vault-flows.ts) refuses a build carrying anything else. A policy
- * signed before that day still carries the floors it was signed with, and the
+ * WHAT IS SIGNED HAS NO STOCK PRICE FLOOR (owner, 2026-10-08): every leg's
+ * min_out_rate_wad is LIVE_PRICE_FLOOR_WAD. The SOL hop keeps a safety floor at
+ * half the SOL price at signing (owner, 2026-10-09), and the flow
+ * (vault-flows.ts) refuses a build carrying anything else. A policy signed
+ * before 2026-10-08 still carries the floors it was signed with, and the
  * summary offers one press to switch it to live-price buying.
  *
  * WHAT THIS CARD OFFERS, AND IN WHAT SHAPE. All four of the fields the owner
@@ -82,7 +83,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TxProgress } from "@/components/wallets/TxProgress";
 import { useVaultWrite, type InvestRequest, type WriteProgress } from "@/hooks/use-vault-actions";
-import { DEFAULT_VENUE_NAME, VERIFIABLE_VENUES, livePriceProblem } from "@/lib/vault-flows";
+import { DEFAULT_VENUE_NAME, VERIFIABLE_VENUES, liveFloorsProblem } from "@/lib/vault-flows";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { AmountError, USDC_DECIMALS, formatSol, formatUnits, formatUsd, parseUnits, rawFrom } from "@/lib/amounts";
 import { LABEL } from "@/lib/classes";
@@ -571,8 +572,10 @@ export function resignStoredPolicy(policy: InvestmentPolicyJson): Resign {
 /**
  * THE STORED POLICY RE-SIGNED AT THE LIVE PRICE: the stored caps, `enabled` as
  * stored, the stored basket by mint and its own minimum, the venue left to the
- * route's default. The server signs LIVE_PRICE_FLOOR_WAD for every floor, so a
- * policy signed before 2026-10-08 loses its old price limits and nothing else.
+ * route's default. The server signs LIVE_PRICE_FLOOR_WAD for every leg and a
+ * fresh SOL safety floor at half today's SOL price, so a policy signed before
+ * 2026-10-08 loses its old price limits, and one whose safety floor SOL fell
+ * under gets a new one, and nothing else changes.
  * The rule card's button of the same name sends this same request
  * (LiveRulePanel.tsx). An unreadable cap refuses rather than being sent as 0n.
  */
@@ -800,13 +803,14 @@ function Fact({ label, children }: { readonly label: string; readonly children: 
 
 /**
  * What Phantom is asked to sign, from the checked build: the basket at the live
- * price with no price floor, and the caps this card sent; or, for a pause, the
- * policy as it is.
+ * price with no stock price floor, the SOL safety floor per SOL, and the caps
+ * this card sent; or, for a pause, the policy as it is.
  *
- * ONLY OVER AN ANSWER THE FLOW ACCEPTS. The flow refuses a build whose `floors`
- * block is not the live-price one (vault-flows.ts livePriceProblem) and bytes
- * that carry any other floor, so this says nothing over an answer it would
- * refuse rather than describe floors the bytes may not carry.
+ * ONLY OVER AN ANSWER OF THE SHAPE THE FLOW ACCEPTS. The flow refuses a build
+ * whose `floors` block is not SaverFi's (vault-flows.ts liveFloorsProblem, then
+ * the band around the price shown) and bytes that carry any other floor, so this
+ * says nothing over an answer of another shape rather than describe floors the
+ * bytes may not carry.
  *
  * AND IT IS THE BASKET HE PICKED, NOT THE SHELF: the legs in
  * `request.weights`, in OFFERED_LEGS' order — the ones the bytes are checked
@@ -815,14 +819,17 @@ function Fact({ label, children }: { readonly label: string; readonly children: 
 export function SigningDetail({ progress, request }: { readonly progress: WriteProgress; readonly request: InvestRequest | "pause" | null }) {
   if (progress.phase !== "running" || progress.built === null || request === null) return null;
   if (request === "pause") return <p className="font-normal text-foreground">{INVEST_COPY.pauseSigning}</p>;
-  if (livePriceProblem((progress.built as Partial<InvestPolicyBuildJson>).floors) !== null) return null;
+  const floors = (progress.built as Partial<InvestPolicyBuildJson>).floors;
+  if (floors === undefined || liveFloorsProblem(floors) !== null) return null;
+  // Checked just above: half the SOL price the server read.
+  const solFloor = formatUsd(usdcRawPerSol(rawFrom(floors.convertWad)!));
   const symbols = OFFERED_LEGS.filter((leg) => request.weights === undefined || request.weights.has(leg.mint)).map((leg) => leg.symbol);
   // A basket with no line at all is not described in half: the weights named
   // nothing this app offers, and nothing here can say what is being signed.
   if (symbols.length === 0) return null;
   return (
     <p className="font-normal text-foreground">
-      {INVEST_COPY.youAreSigning(listAnd(symbols), formatUsd(request.maxPerCall), formatUsd(request.maxRolling30d))}
+      {INVEST_COPY.youAreSigning(listAnd(symbols), solFloor, formatUsd(request.maxPerCall), formatUsd(request.maxRolling30d))}
     </p>
   );
 }

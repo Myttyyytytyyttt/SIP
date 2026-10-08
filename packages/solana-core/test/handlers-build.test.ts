@@ -8,6 +8,8 @@ import {
   ATA_PROGRAM,
   ANTHROPIC_MINT,
   COMPUTE_BUDGET_PROGRAM,
+  PYTH_SOL_USD_FEED,
+  PYTH_USDC_USD_FEED,
   ED25519_PROGRAM,
   JUPITER_V6,
   RAYDIUM_CLMM,
@@ -25,7 +27,7 @@ import { decodeArgs } from "../src/client/borsh";
 import { SIP_ACCOUNT_SPACE } from "../src/client/decoders";
 import { SIP_PROGRAM_ID, toHex } from "../src/client/idl";
 import { linkConsentMessage } from "../src/client/link-consent";
-import { BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES, LIVE_PRICE_FLOOR_WAD, OFFERED_LEGS, basketWeightsBps } from "../src/client/product";
+import { BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES, CONVERT_SAFETY_FLOOR_BPS, LIVE_PRICE_FLOOR_WAD, OFFERED_LEGS, basketWeightsBps } from "../src/client/product";
 import { parseLegacyMessage, splitWire } from "../src/client/message";
 import { U64_MAX } from "../src/client/rules";
 import {
@@ -33,6 +35,8 @@ import {
   BUILD_REQUEST_WEIGHT,
   MAX_BUILD_REQUEST_BYTES,
   OFFERED_VENUES,
+  SIGNING_PYTH_DEVIATION_BPS,
+  SIGNING_PYTH_MAX_AGE_SECONDS,
   createSolanaBuildHandler,
   createSolanaVaultHandler,
   sharedBuildReadsBudget,
@@ -68,7 +72,8 @@ import {
   type StubChain,
 } from "./chain-fixtures";
 import { SECRET_QUERY, UPSTREAM_1, accountInfo, fakeFetch, fromB64, keypair, signBytes, signWire } from "./helpers";
-import { ROUTED_VENUE } from "./fixtures/keeper-policy";
+import { CONVERT_SAFETY_FLOOR, PYTH_GUARD, ROUTED_VENUE } from "./fixtures/keeper-policy";
+import { PYTH_FIXTURE_OWNER, PYTH_FIXTURE_PUBLISH_TIME, PYTH_SOL_USD_ACCOUNT, PYTH_USDC_USD_ACCOUNT } from "./fixtures/pyth-accounts";
 
 const load = loadSolanaServerSettings({ SIP_SOLANA_RPC_URLS: UPSTREAM_1, SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID, SIP_TRUSTED_CLIENT_IP_HEADER: "x-envoy-external-address" });
 if (!load.ok) throw new Error("test settings must load");
@@ -632,6 +637,44 @@ function investableChain(owner: string): StubChain {
 
 const instructionsOf = (txBase64: string) => parseLegacyMessage(splitWire(fromB64(txBase64)).message).instructions;
 
+/**
+ * THE SOL SAFETY FLOOR investableChain's pool gives (owner, 2026-10-09): its
+ * SOL/USDC rate at SOL_SQRT_PRICE, $100.04 a SOL, and half of it rounded down.
+ * Literals, from the shared vector, never re-derived by the code under test.
+ */
+const SOL_POOL_WAD = CONVERT_SAFETY_FLOOR.measured.liveConvertWad;
+const SOL_SAFETY_FLOOR_WAD = CONVERT_SAFETY_FLOOR.measured.floorWad;
+
+/**
+ * investableChain with Pyth's two feeds as mainnet held them (fixtures/
+ * pyth-accounts.ts, $102.61 a SOL against the pool's $100.04: 250 bps apart)
+ * and a Clock `ageSeconds` after their publish, so the oracle is judged.
+ */
+function oracleChain(owner: string, ageSeconds = 30n, solSqrtPrice = SOL_SQRT_PRICE): StubChain {
+  const chain = investableChain(owner);
+  chain.accounts.set(SYSVAR_CLOCK_ADDRESS, clockSysvarAccount(BUILD_EPOCH, undefined, PYTH_FIXTURE_PUBLISH_TIME + ageSeconds));
+  chain.accounts.set(PYTH_SOL_USD_FEED, accountInfo(PYTH_FIXTURE_OWNER, PYTH_SOL_USD_ACCOUNT, 5_117_760));
+  chain.accounts.set(PYTH_USDC_USD_FEED, accountInfo(PYTH_FIXTURE_OWNER, PYTH_USDC_USD_ACCOUNT, 5_117_760));
+  chain.accounts.set(SOL_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(WSOL_MINT, USDC_MINT, solSqrtPrice)));
+  return chain;
+}
+
+/**
+ * The SOL/USDC pool's sqrt price at each edge of SIGNING_PYTH_DEVIATION_BPS
+ * against the Pyth fixture's 102,606,509,293,604,451 (worked out once, by
+ * exact integer search): the deviation is floor(|pool - pyth| x 10,000 / pyth).
+ */
+const SQRT_AT_DEVIATION = Object.freeze({
+  /** 97,465,923,177,994,869: 500 bps under Pyth. Signs. */
+  under500: 5_758_987_327_051_731_818n,
+  /** 97,465,923,177,994,868: 501 bps under. Refused. */
+  under501: 5_758_987_327_051_731_817n,
+  /** 107,747,095,409,214,033: 500 bps over. Signs. */
+  over500: 6_055_116_568_217_620_546n,
+  /** 107,747,095,409,214,034: 501 bps over. Refused. */
+  over501: 6_055_116_568_217_620_547n,
+});
+
 describe("investPolicy", () => {
   /**
    * THE OWNER COULD NOT RE-SIGN HIS OWN POLICY, 2026-09-22.
@@ -678,7 +721,7 @@ describe("investPolicy", () => {
     ]);
   });
 
-  it("a first policy: [CU limit, CU price, ATA wSOL, ATA USDC, set_invest_policy] at the live price (every floor 1 wad), the default caps and the rent of what it creates; it verifies once the owner signs", async () => {
+  it("a first policy: [CU limit, CU price, ATA wSOL, ATA USDC, set_invest_policy] at the live price (every leg 1 wad) with the SOL hop's safety floor at half the pool's SOL price, the default caps and the rent of what it creates; it verifies once the owner signs", async () => {
     const owner = keypair();
     const ownerKey = owner.publicKey.toBase58();
     const vault = deriveVaultPda(ownerKey).toBase58();
@@ -703,7 +746,9 @@ describe("investPolicy", () => {
       ],
       venue_program: JUPITER_V6,
       in_mint: USDC_MINT,
-      min_convert_rate_wad: 1n,
+      // THE SOL SAFETY FLOOR (owner, 2026-10-09): half the SOL/USDC pool's
+      // $100.04, rounded down — 50,019,355 USDC raw per SOL.
+      min_convert_rate_wad: 50_019_355_777_746_281n,
       // 5 USDC split two ways, rounded down, so one $5 purchase still covers every leg.
       min_investment: 2_500_000n,
       max_per_call: 1_000_000_000n,
@@ -719,8 +764,8 @@ describe("investPolicy", () => {
       { mint: SPYX_MINT, address: deriveAta(vault, SPYX_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenProgram: TOKEN_2022_PROGRAM, create: false },
       { mint: ANTHROPIC_MINT, address: deriveAta(vault, ANTHROPIC_MINT, TOKEN_2022_PROGRAM).toBase58(), tokenProgram: TOKEN_2022_PROGRAM, create: false },
     ]);
-    // The answer names the floors the bytes carry, and nothing about a price.
-    expect(body.floors).toEqual({ legWad: "1", convertWad: "1" });
+    // The answer names the floors the bytes carry, and the SOL price the safety floor was taken from.
+    expect(body.floors).toEqual({ legWad: "1", convertWad: "50019355777746281", liveConvertWad: "100038711555492562" });
     // The owner is quoted the rent of the two accounts this transaction opens, and
     // NOT of the legs the keeper opens at the crank's expense.
     expect(body.costs).toEqual({
@@ -801,23 +846,24 @@ describe("investPolicy", () => {
     expect(wide.json.warnings).toEqual(["convert_per_call_above_1_sol"]);
   });
 
-  it("reads no pool: the build asks for none of PRICED_POOLS, and builds the same bytes with every pinned pool gone or spoiled", async () => {
+  it("reads one pool, SOL/USDC, for the SOL safety floor: no stock's pool is asked for, and a stock pool gone or spoiled builds the same bytes", async () => {
     const owner = key();
     const priced = setup(investableChain(owner));
     const withPools = await priced.build({ action: "investPolicy", owner });
     expect(withPools.status, JSON.stringify(withPools.json)).toBe(200);
     const requests = priced.upstream.calls.flatMap((call) => (Array.isArray(call.body) ? call.body : [call.body]) as { method: string; params: unknown[] }[]);
     const addresses = requests.filter((request) => request.method === "getMultipleAccounts").flatMap((request) => request.params[0] as string[]);
-    for (const pool of PRICED_POOLS) expect(addresses).not.toContain(pool);
+    expect(addresses).toContain(SOL_USDC_POOL);
+    for (const pool of PRICED_POOLS.slice(1)) expect(addresses).not.toContain(pool);
+    // In the same one getMultipleAccounts: the oracle the pool is cross-checked against.
+    expect(addresses).toEqual(expect.arrayContaining([SYSVAR_CLOCK_ADDRESS, PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED]));
     // The mints are still read: the fee ceiling and the token programs need them.
     expect(addresses).toContain(ANTHROPIC_MINT);
 
     const gone = investableChain(owner);
-    for (const pool of PRICED_POOLS) gone.accounts.delete(pool);
-    // Spoiled rather than missing, too: until 2026-10-08 either was 502 price_unavailable.
+    for (const pool of PRICED_POOLS.slice(1)) gone.accounts.delete(pool);
     const spoiled = investableChain(owner);
     spoiled.accounts.set(SPYX_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(USDC_MINT, SPYX_MINT, LEG_POOLS[0]!.sqrtPriceX64, [8, 6])));
-    spoiled.accounts.set(SOL_USDC_POOL, accountInfo(key(), clmmPoolAccount(WSOL_MINT, USDC_MINT, SOL_SQRT_PRICE)));
     for (const chain of [gone, spoiled]) {
       const answer = await setup(chain).build({ action: "investPolicy", owner });
       expect(answer.status, JSON.stringify(answer.json)).toBe(200);
@@ -825,6 +871,70 @@ describe("investPolicy", () => {
         decodeArgs("set_invest_policy", instructionsOf(withPools.json.txBase64).at(-1)!.data),
       );
     }
+  });
+
+  // ── THE SOL SAFETY FLOOR (owner, 2026-10-09) ────────────────────────────────
+  describe("the SOL hop's safety floor", () => {
+    it("is CONVERT_SAFETY_FLOOR_BPS of the pool's SOL price: 5,000, half, as the shared vector records it", async () => {
+      expect(CONVERT_SAFETY_FLOOR_BPS).toBe(5_000);
+      expect(CONVERT_SAFETY_FLOOR.web.bps).toBe(CONVERT_SAFETY_FLOOR_BPS);
+      expect([SOL_POOL_WAD, SOL_SAFETY_FLOOR_WAD]).toEqual([100_038_711_555_492_562n, 50_019_355_777_746_281n]);
+      const owner = key();
+      const answer = await setup(investableChain(owner)).build({ action: "investPolicy", owner });
+      expect(answer.status, JSON.stringify(answer.json)).toBe(200);
+      expect(decodeArgs("set_invest_policy", instructionsOf(answer.json.txBase64).at(-1)!.data)).toMatchObject({ min_convert_rate_wad: SOL_SAFETY_FLOOR_WAD });
+      expect(answer.json.floors).toEqual({ legWad: "1", convertWad: String(SOL_SAFETY_FLOOR_WAD), liveConvertWad: String(SOL_POOL_WAD) });
+    });
+
+    it.each<[string, (chain: StubChain) => void]>([
+      ["the SOL/USDC pool gone", (chain) => void chain.accounts.delete(SOL_USDC_POOL)],
+      ["the SOL/USDC pool owned by another program", (chain) => void chain.accounts.set(SOL_USDC_POOL, accountInfo(key(), clmmPoolAccount(WSOL_MINT, USDC_MINT, SOL_SQRT_PRICE)))],
+      ["the SOL/USDC pool's mints swapped", (chain) => void chain.accounts.set(SOL_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(USDC_MINT, WSOL_MINT, SOL_SQRT_PRICE)))],
+      ["the SOL/USDC pool at a zero price", (chain) => void chain.accounts.set(SOL_USDC_POOL, accountInfo(RAYDIUM_CLMM, clmmPoolAccount(WSOL_MINT, USDC_MINT, 0n)))],
+    ])("%s is 502 price_unavailable and nothing is built: the floor is never guessed, and never signed as 1 wad", async (_, spoil) => {
+      const owner = key();
+      const chain = investableChain(owner);
+      spoil(chain);
+      const answer = await setup(chain).build({ action: "investPolicy", owner });
+      expect([answer.status, answer.json.error?.code]).toEqual([502, "price_unavailable"]);
+      expect(answer.json).not.toHaveProperty("txBase64");
+    });
+
+    it("cross-checks a fresh Pyth price: 500 bps apart either way signs from the pool, 501 is 502 price_disagrees with nothing built", async () => {
+      expect(SIGNING_PYTH_DEVIATION_BPS).toBe(PYTH_GUARD.keeper.deviationBps);
+      expect(SIGNING_PYTH_MAX_AGE_SECONDS).toBe(PYTH_GUARD.keeper.maxAgeSeconds);
+      const owner = key();
+      const today = await setup(oracleChain(owner)).build({ action: "investPolicy", owner });
+      expect(today.status, JSON.stringify(today.json)).toBe(200);
+      expect(today.json.floors.convertWad).toBe(String(SOL_SAFETY_FLOOR_WAD));
+      for (const sqrt of [SQRT_AT_DEVIATION.under500, SQRT_AT_DEVIATION.over500]) {
+        const answer = await setup(oracleChain(owner, 30n, sqrt)).build({ action: "investPolicy", owner });
+        expect(answer.status, JSON.stringify(answer.json)).toBe(200);
+      }
+      for (const sqrt of [SQRT_AT_DEVIATION.under501, SQRT_AT_DEVIATION.over501]) {
+        const answer = await setup(oracleChain(owner, 30n, sqrt)).build({ action: "investPolicy", owner });
+        expect([answer.status, answer.json.error?.code]).toEqual([502, "price_disagrees"]);
+        expect(answer.json.error?.message).toContain("501 basis points apart");
+        expect(answer.json).not.toHaveProperty("txBase64");
+      }
+    });
+
+    it("signs from the pool alone when Pyth is no evidence: a pair more than 60 s old or ahead of the chain's clock, or a feed that does not decode", async () => {
+      const owner = key();
+      // 60 s old is still judged, and refused at 501 bps; 61 s is not judged.
+      const judged = await setup(oracleChain(owner, 60n, SQRT_AT_DEVIATION.under501)).build({ action: "investPolicy", owner });
+      expect(judged.json.error?.code).toBe("price_disagrees");
+      const ahead = await setup(oracleChain(owner, -60n, SQRT_AT_DEVIATION.under501)).build({ action: "investPolicy", owner });
+      expect(ahead.json.error?.code).toBe("price_disagrees");
+      const spoiledFeed = oracleChain(owner, 30n, SQRT_AT_DEVIATION.under501);
+      spoiledFeed.accounts.set(PYTH_SOL_USD_FEED, accountInfo(key(), PYTH_SOL_USD_ACCOUNT, 5_117_760));
+      for (const chain of [oracleChain(owner, 61n, SQRT_AT_DEVIATION.under501), oracleChain(owner, -61n, SQRT_AT_DEVIATION.under501), spoiledFeed]) {
+        const answer = await setup(chain).build({ action: "investPolicy", owner });
+        expect(answer.status, JSON.stringify(answer.json)).toBe(200);
+        // Half of 97,465,923,177,994,868, rounded down.
+        expect(answer.json.floors.convertWad).toBe("48732961588997434");
+      }
+    });
   });
 
   // ── EACH LEG'S TRANSFER FEE IS READ FOR THE KEEPER'S CEILING, AND NOTHING ELSE ─
@@ -866,7 +976,7 @@ describe("investPolicy", () => {
         expect(answer.status, JSON.stringify(answer.json)).toBe(200);
         const args = decodeArgs("set_invest_policy", instructionsOf(answer.json.txBase64).at(-1)!.data) as { legs: { min_out_rate_wad: bigint }[]; min_convert_rate_wad: bigint };
         expect(args.legs.map((leg) => leg.min_out_rate_wad), `epoch ${epoch}`).toEqual([1n, 1n]);
-        expect(args.min_convert_rate_wad).toBe(1n);
+        expect(args.min_convert_rate_wad).toBe(SOL_SAFETY_FLOOR_WAD);
       }
     });
 
@@ -1132,7 +1242,7 @@ describe("investPolicy", () => {
     expect(decodeArgs("set_invest_policy", instructionsOf(answer.json.txBase64)[4]!.data)).toMatchObject({
       legs: [{ mint: SPYX_MINT, weight_bps: 10_000, min_out_rate_wad: LIVE_PRICE_FLOOR_WAD }],
     });
-    expect(answer.json.floors).toEqual({ legWad: "1", convertWad: "1" });
+    expect(answer.json.floors).toEqual({ legWad: "1", convertWad: String(SOL_SAFETY_FLOOR_WAD), liveConvertWad: String(SOL_POOL_WAD) });
     const verified = verifySignedTransaction(signWire(answer.json.txBase64, owner));
     expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
   });
@@ -1222,16 +1332,16 @@ describe("pauseInvesting", () => {
     expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
 
     // THE PAUSE KEEPS THE STORED FLOORS (111 and 222 above); signing again or
-    // resuming goes through investPolicy, which signs the live-price floors —
-    // and, like the pause, reads no pool to do it.
+    // resuming goes through investPolicy, which signs the live-price leg floors
+    // and a fresh SOL safety floor — reading the SOL/USDC pool and no stock's.
     const resumable = investableChain(ownerKey);
-    for (const pool of PRICED_POOLS) resumable.accounts.delete(pool);
+    for (const pool of PRICED_POOLS.slice(1)) resumable.accounts.delete(pool);
     for (const [address, account] of unpricedChain(ownerKey).accounts) resumable.accounts.set(address, account);
     for (const enabled of [true, false]) {
       const resigned = await setup(resumable).build({ action: "investPolicy", owner: ownerKey, maxPerCall: "10000000", maxRolling30d: "50000000", enabled });
       expect(resigned.status, JSON.stringify(resigned.json)).toBe(200);
       expect(decodeArgs("set_invest_policy", instructionsOf(resigned.json.txBase64).at(-1)!.data)).toMatchObject({
-        min_convert_rate_wad: LIVE_PRICE_FLOOR_WAD,
+        min_convert_rate_wad: SOL_SAFETY_FLOOR_WAD,
         legs: OFFERED_LEGS.map((leg) => expect.objectContaining({ mint: leg.mint, min_out_rate_wad: LIVE_PRICE_FLOOR_WAD })),
         enabled,
       });

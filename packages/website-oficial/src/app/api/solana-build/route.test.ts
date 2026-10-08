@@ -10,8 +10,13 @@ import {
   COMPUTE_BUDGET_PROGRAM,
   ED25519_PROGRAM,
   JUPITER_V6,
+  CLMM_POOL_STATE_BYTES,
+  CLMM_POOL_STATE_DISCRIMINATOR,
   RAYDIUM_CLMM,
   SIP_ACCOUNT_SPACE,
+  SOL_USDC_POOL,
+  WSOL_MINT,
+  tryBase58Decode,
   SIP_PROGRAM_ID,
   SPYX_MINT,
   TOKEN_2022_PROGRAM,
@@ -179,6 +184,22 @@ function clockAt(epoch: bigint): AccountJson {
 
 const mainnetRent = (size: number): number => (size + 128) * 5_080;
 
+/**
+ * The wSOL/USDC Raydium CLMM pool the SOL safety floor is read from: the price
+ * fields alone (mints at 73 and 105, sqrt_price_x64 at 253), at mainnet's
+ * 5,834,501,654,111,004,443 of slot 447313239 — $100.04 a SOL.
+ */
+function solPool(sqrtPriceX64 = 5_834_501_654_111_004_443n): AccountJson {
+  const bytes = new Uint8Array(CLMM_POOL_STATE_BYTES);
+  bytes.set(CLMM_POOL_STATE_DISCRIMINATOR, 0);
+  bytes.set(tryBase58Decode(WSOL_MINT)!, 73);
+  bytes.set(tryBase58Decode(USDC_MINT)!, 105);
+  [bytes[233], bytes[234]] = [9, 6];
+  let value = sqrtPriceX64;
+  for (let i = 0; i < 16; i++, value >>= 8n) bytes[253 + i] = Number(value & 0xffn);
+  return { data: [base64Encode(bytes), "base64"], lamports: 1_000_000, owner: RAYDIUM_CLMM, executable: false, rentEpoch: 0, space: CLMM_POOL_STATE_BYTES };
+}
+
 type Answer = { status: number; text: string; json: { error?: { code: string; message: string; vault?: string; withdrawableLamports?: string } } & Record<string, any> };
 async function answer(response: Response): Promise<Answer> {
   const text = await response.text();
@@ -278,14 +299,17 @@ describe("/api/solana-build", () => {
     expect(verified.ok).toBe(true);
   });
 
-  it("investPolicy: every floor at 1 wad, the live price, with no pool read; a CreateIdempotent only for each vault account missing", async () => {
+  it("investPolicy: every leg at 1 wad, the live price, and the SOL hop at half the SOL/USDC pool's price; a CreateIdempotent only for each vault account missing", async () => {
     useEnv(SOLANA_ENV);
     const owner = Keypair.generate();
     const ownerKey = owner.publicKey.toBase58();
     const vault = deriveVaultPda(ownerKey).toBase58();
     const accounts = new Map<string, AccountJson>([
       [vault, vaultOf(ownerKey)],
-      // NO POOL: the build signs no price floor (owner, 2026-10-08) and reads none.
+      // ONE POOL, SOL/USDC: no stock floor is signed (owner, 2026-10-08), the
+      // SOL safety floor is (owner, 2026-10-09). No Pyth feed: the floor is
+      // signed from the pool alone when the oracle cannot be read.
+      [SOL_USDC_POOL, solPool()],
       [USDC_MINT, ownedBy(TOKEN_PROGRAM, 82)],
       [SPYX_MINT, ownedBy(TOKEN_2022_PROGRAM, 82)],
       [ANTHROPIC_MINT, ownedBy(TOKEN_2022_PROGRAM, 82)],
@@ -298,7 +322,7 @@ describe("/api/solana-build", () => {
     const methods = stubChain(accounts);
     const built = await answer(await POST(buildRequest({ action: "investPolicy", owner: ownerKey })));
     expect(built.status, JSON.stringify(built.json)).toBe(200);
-    expect(built.json.floors).toEqual({ legWad: "1", convertWad: "1" });
+    expect(built.json.floors).toEqual({ legWad: "1", convertWad: "50019355777746281", liveConvertWad: "100038711555492562" });
     // Two CreateIdempotent, not three: the vault lacks wSOL, SPYx and ANTHROPIC,
     // and BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES rides along with the first two,
     // leaving ANTHROPIC's to the keeper at the crank's expense.

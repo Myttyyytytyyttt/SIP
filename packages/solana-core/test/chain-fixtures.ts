@@ -302,13 +302,24 @@ export const SYSVAR_PROGRAM_ADDRESS = "Sysvar11111111111111111111111111111111111
  */
 export const BUILD_EPOCH = 1_041n;
 
-/** The Clock sysvar as the chain holds it: slot, epoch_start_timestamp, EPOCH at byte 16, leader_schedule_epoch, unix_timestamp. */
-export function clockSysvarAccount(epoch: bigint = BUILD_EPOCH, owner = SYSVAR_PROGRAM_ADDRESS): AccountJson {
+/**
+ * The Clock sysvar as the chain holds it: slot, epoch_start_timestamp, EPOCH at
+ * byte 16, leader_schedule_epoch, unix_timestamp (an i64 at byte 32). The unix
+ * time is 0 unless a test names one, which makes any Pyth publish look decades
+ * in the future rather than fresh: a test that means the oracle to be judged
+ * passes the time it means.
+ */
+export function clockSysvarAccount(epoch: bigint = BUILD_EPOCH, owner = SYSVAR_PROGRAM_ADDRESS, unixSeconds = 0n): AccountJson {
   const data = new Uint8Array(40);
   let left = epoch;
   for (let i = 0; i < 8; i++) {
     data[16 + i] = Number(left & 0xffn);
     left >>= 8n;
+  }
+  let time = BigInt.asUintN(64, unixSeconds);
+  for (let i = 0; i < 8; i++) {
+    data[32 + i] = Number(time & 0xffn);
+    time >>= 8n;
   }
   return accountInfo(owner, data, 1_169_280);
 }

@@ -12,9 +12,11 @@
  *   first and the trading wallet second.
  * - {"action":"investPolicy","owner","maxPerCall"?,"maxRolling30d"?,"enabled"?,
  *   "minInvestment"?,"weights"?,"venue"?} → set_invest_policy for the chosen
- *   basket at the live price: every floor is LIVE_PRICE_FLOOR_WAD, no signed
- *   price floor (solana-core product.ts, owner 2026-10-08), and no pool is
- *   read. Ahead of it, a CreateIdempotent for each of the first
+ *   basket at the live price: every leg's floor is LIVE_PRICE_FLOOR_WAD, no
+ *   signed stock floor (solana-core product.ts, owner 2026-10-08), and the SOL
+ *   hop's is a safety floor at half the SOL price read from the SOL/USDC pool,
+ *   cross-checked against Pyth (product.ts CONVERT_SAFETY_FLOOR_BPS, owner
+ *   2026-10-09). Ahead of it, a CreateIdempotent for each of the first
  *   BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES missing vault token accounts the policy
  *   holds, paid by the owner; the floors, those accounts and every rent come
  *   with it.

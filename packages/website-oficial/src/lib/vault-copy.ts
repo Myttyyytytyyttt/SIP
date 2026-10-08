@@ -1243,9 +1243,13 @@ export const INVEST_COPY = {
    */
   capWindowEmpty: (floor: string, ceiling: string, symbol: string): string =>
     `There is no Most per buy that works for this basket. Every buy has to be at least ${floor} for each stock to clear its minimum, and ${symbol}'s market cannot cover more than ${ceiling} at the share you have given it. Give ${symbol} a smaller share, lower Least per stock, or take ${symbol} out.`,
-  /** `basket` names the stocks the bytes carry; there is no price figure to quote, because no price floor is signed. */
-  youAreSigning: (basket: string, perBuy: string, per30Days: string): string =>
-    `You are signing: ${basket} bought at the live market price, with no price floor; at most ${perBuy} per buy and ${per30Days} per 30 days.`,
+  /**
+   * `basket` names the stocks the bytes carry, which have no price floor;
+   * `solFloor` is the SOL safety floor the bytes carry, per SOL — the one price
+   * figure signed (owner, 2026-10-09).
+   */
+  youAreSigning: (basket: string, solFloor: string, perBuy: string, per30Days: string): string =>
+    `You are signing: ${basket} bought at the live market price, with no price floor; your SOL converted to USDC only at ${solFloor} a SOL or more, half of today's price; at most ${perBuy} per buy and ${per30Days} per 30 days.`,
   enabled: "Investing is on.",
   paused: "Investing is paused.",
   /** The badge: how this policy is priced. */

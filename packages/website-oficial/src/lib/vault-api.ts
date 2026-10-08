@@ -34,16 +34,21 @@ export interface BuiltTransactionJson {
 }
 
 /**
- * The price floors an investPolicy build signs. Since 2026-10-08 both are
- * LIVE_PRICE_FLOOR_WAD ("1"): no signed price floor, SaverFi buys at the live
- * price (solana-core product.ts). vault-flows.ts livePriceProblem refuses an
- * answer naming anything else. Bigints as decimal strings.
+ * The price floors an investPolicy build signs. Every leg's is
+ * LIVE_PRICE_FLOOR_WAD ("1") since 2026-10-08: no signed stock floor, SaverFi
+ * buys at the live price. The SOL hop's is a safety floor at half the SOL
+ * price the server read (owner, 2026-10-09; solana-core product.ts
+ * CONVERT_SAFETY_FLOOR_BPS). vault-flows.ts livePriceProblem refuses an answer
+ * that is not exactly this, or whose SOL floor is not half the SOL price the
+ * page shows. Bigints as decimal strings.
  */
 export interface PolicyFloorsJson {
   /** Every leg's min_out_rate_wad. */
   readonly legWad: string;
-  /** min_convert_rate_wad. */
+  /** min_convert_rate_wad: half of liveConvertWad, rounded down. */
   readonly convertWad: string;
+  /** The SOL/USDC rate the server read for it, USDC raw per lamport x 1e18. */
+  readonly liveConvertWad: string;
 }
 
 export interface InvestPolicyBuildJson extends BuiltTransactionJson {
@@ -409,6 +414,8 @@ const BUILD_REFUSALS = new Set([
   "above_withdrawable",
   "not_held",
   "above_holding",
+  "price_unavailable",
+  "price_disagrees",
   "mint_unexpected",
   "fee_unavailable",
   "fee_over_ceiling",

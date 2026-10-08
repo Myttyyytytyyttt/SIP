@@ -91,6 +91,7 @@ import {
   SPYX_USDC_POOL,
   TOKEN_2022_PROGRAM,
 } from "./addresses";
+import { floorWad } from "./clmm-price";
 import type { OwnerInstructionName } from "./idl";
 import { DEFAULT_PURCHASE_USDC_RAW, DEFAULT_RATES, MODE_PROFIT, type VaultPolicyInput } from "./rules";
 
@@ -110,8 +111,9 @@ export const DEFAULT_VAULT_POLICY: Readonly<VaultPolicyInput> = Object.freeze({
 export const DEFAULT_INVEST_CAPS = Object.freeze({ maxPerCall: 1_000_000_000n, maxRolling30d: 31_000_000_000n });
 
 /**
- * THE PRICE FLOOR EVERY NEW INVESTMENT POLICY SIGNS: 1 wad, for every leg's
- * min_out_rate_wad and for min_convert_rate_wad. SaverFi buys at the live price.
+ * THE PRICE FLOOR EVERY NEW INVESTMENT POLICY SIGNS ON ITS STOCKS: 1 wad, for
+ * every leg's min_out_rate_wad. SaverFi buys stocks at the live price. (The SOL
+ * hop is different since 2026-10-09: CONVERT_SAFETY_FLOOR_BPS below.)
  *
  * THE OWNER'S DECISION, 2026-10-08 ("Sin precio mínimo"). Until then the build
  * signed each leg's floor 5-7 % under that day's Raydium mid, net of the leg's
@@ -119,35 +121,60 @@ export const DEFAULT_INVEST_CAPS = Object.freeze({ maxPerCall: 1_000_000_000n, m
  * signed once, so a stock that rose past it, or SOL that fell past it, stopped
  * the keeper buying or converting until the owner signed again — "Refresh
  * price limits" on every price move, which he judged absurd. He chose,
- * knowingly, to sign no price floor.
+ * knowingly, to sign no price floor on the stocks.
  *
  * THE TRADE-OFF HE ACCEPTED: with no signed floor, nothing on chain limits the
- * price the keeper pays if the keeper failed or its key were stolen. What still
- * bounds the BUYS on chain is the policy's own max_per_call and max_rolling_30d,
- * its mints and its venue program, and invest.rs requiring that the vault
- * receives at least the min_out the keeper passes. THE CONVERSION IS NOT
- * BOUNDED THE SAME WAY: convert.rs never touches the 30-day buckets ("Conversion
- * is not spend"), caps one call at max(max_per_call, 1e9) counted in lamports
- * (1 SOL until the per-buy cap passes $1,000) with no limit on how many calls,
- * and wrap_sol.rs wraps any free SOL. With a 1-wad convert floor the whole SOL
- * balance of the vault is what a failed or stolen keeper could sell at any
- * price; convert.rs still requires received >= the keeper's min_out. (invest.rs does not
- * check a buy's size against the leg's weight; the weights are the keeper's
- * to follow.) The price itself is the keeper's to
- * check, live, before every buy: its min_out from the live Jupiter quote less
- * legSlippageBps (200, or the fee + 100 above a 100 bps fee), the impact
- * ceiling, the 50x venue-inventory gate, the 300 bps fee ceiling and, on the
- * SOL hop, the Pyth guard (deviation 500 bps, confidence 50 bps, 60 s age).
+ * price the keeper pays for a stock if the keeper failed or its key were
+ * stolen. What still bounds the BUYS on chain is the policy's own max_per_call
+ * and max_rolling_30d, its mints and its venue program, and invest.rs requiring
+ * that the vault receives at least the min_out the keeper passes. (invest.rs
+ * does not check a buy's size against the leg's weight; the weights are the
+ * keeper's to follow.) The price itself is the keeper's to check, live, before
+ * every buy: its min_out from the live Jupiter quote less legSlippageBps (200,
+ * or the fee + 100 above a 100 bps fee), the impact ceiling, the 50x
+ * venue-inventory gate, the 300 bps fee ceiling and, on the SOL hop, the Pyth
+ * guard (deviation 500 bps, confidence 50 bps, 60 s age).
  *
  * WHY 1 AND NOT 0. set_invest_policy.rs requires every leg's
- * min_out_rate_wad > 0, and convert.rs refuses a min_convert_rate_wad of 0
- * (the keeper reads 0 as "conversion switched off", invest-decision.ts
- * convertDecision). 1 is the smallest value both accept, and it is no floor at
- * all: invest.rs and convert.rs compute floor = amount_in x rate / 1e18, which
- * is 0 for every amount_in under 1e18 raw units (a trillion dollars of USDC,
- * a billion SOL), and then still require min_out > 0. NO PROGRAM CHANGE.
+ * min_out_rate_wad > 0. 1 is the smallest value it accepts, and it is no floor
+ * at all: invest.rs computes floor = amount_in x rate / 1e18, which is 0 for
+ * every amount_in under 1e18 raw units (a trillion dollars of USDC), and then
+ * still requires min_out > 0. NO PROGRAM CHANGE.
  */
 export const LIVE_PRICE_FLOOR_WAD = 1n;
+
+/**
+ * THE SOL CONVERSION'S SAFETY FLOOR: min_convert_rate_wad is this share of the
+ * live SOL price at signing, in bps of it — 5,000, half (owner, 2026-10-09:
+ * "pon el mínimo del 50% en el SOL").
+ *
+ * WHY THE CONVERSION KEEPS A FLOOR WHEN THE STOCKS DO NOT. The caps that bound a
+ * stock buy do not bound a conversion: convert.rs never writes the 30-day
+ * buckets ("Conversion is not spend"), caps one call at max(max_per_call, 1e9)
+ * counted in LAMPORTS (1 SOL until the per-buy cap passes $1,000) with no limit
+ * on how many calls, and wrap_sol.rs wraps any free SOL. At a 1-wad convert
+ * floor, every lamport in the vault is what a failed keeper, or a stolen keeper
+ * key, could sell at any price. At half the signing-day price, convert.rs
+ * refuses every conversion that pays less than that, whoever sends it.
+ *
+ * THE TRADE-OFF. A floor is signed once, so if SOL's price falls under half of
+ * what it was when the policy was signed, conversion stops (FloorTooLow) until
+ * the owner signs again — the one price move that asks him to. Half was chosen
+ * so that an ordinary month never comes near it, while a stolen key still
+ * cannot sell SOL for less than half its value. It protects the SOL ON ITS WAY
+ * to USDC and nothing else: the USDC and the stocks are bounded by the caps.
+ *
+ * Signed by build-handler.ts investPolicy from the pinned SOL/USDC pool
+ * (convertSafetyFloorWad below), cross-checked there against Pyth; held by the
+ * website (vault-flows.ts livePriceProblem) to the SOL price its own screen
+ * shows. The keeper reads the floor from the policy and has no copy of it.
+ */
+export const CONVERT_SAFETY_FLOOR_BPS = 5_000;
+
+/** min_convert_rate_wad for a live SOL rate `convertWad` (USDC raw per lamport x 1e18): CONVERT_SAFETY_FLOOR_BPS of it, rounded down. */
+export function convertSafetyFloorWad(convertWad: bigint): bigint {
+  return floorWad(convertWad, 10_000 - CONVERT_SAFETY_FLOOR_BPS);
+}
 
 /** A classic SPL Token account (the vault's wSOL and USDC accounts): 165 bytes. Its rent is read from the chain, never derived. */
 export const CLASSIC_TOKEN_ACCOUNT_BYTES = 165;

@@ -1564,6 +1564,33 @@ describe("min_out under the owner's floor: the provable number, else the owner's
     expect(ownerFloorFor(LIVE_PRICE_FLOOR.ownerFloorZeroBelowRaw, 1n)).toBe(1n);
   });
 
+  /**
+   * THE SOL HOP'S SAFETY FLOOR (owner, 2026-10-09): every new policy signs
+   * min_convert_rate_wad at half the SOL price at signing. The keeper has no
+   * copy of that number — it reads the policy — so what is pinned here is what
+   * its own arithmetic does with a floor of that size, from the shared vector:
+   * one SOL converts while the venue pays at least half the signing price, and
+   * is refused once it pays a raw unit less. wSOL and USDC carry no transfer
+   * fee, so the net threshold is the venue's.
+   */
+  it("converts one SOL at a 50 % safety floor while the venue pays half the signing price, and refuses a raw unit under it", async () => {
+    const VECTOR = "keeper-policy";
+    const { CONVERT_SAFETY_FLOOR } = (await import(`../../solana-core/test/fixtures/${VECTOR}.ts`)) as {
+      CONVERT_SAFETY_FLOOR: { web: { bps: number }; measured: { floorWad: bigint; oneSolLamports: bigint; oneSolFloorUsdcRaw: bigint } };
+    };
+    expect(CONVERT_SAFETY_FLOOR.web.bps).toBe(5_000);
+    const { floorWad, oneSolLamports, oneSolFloorUsdcRaw } = CONVERT_SAFETY_FLOOR.measured;
+    const ownerFloor = ownerFloorFor(oneSolLamports, floorWad);
+    expect(ownerFloor).toBe(oneSolFloorUsdcRaw);
+    expect(ownerFloor).toBe(50_019_355n);
+    // An ordinary day: the venue pays about the signing price, far over the floor.
+    expect(investMinOutFor({ venueThreshold: 98_000_000n, netOfVenueThreshold: 98_000_000n, ownerFloor })).toBe(98_000_000n);
+    // Exactly half: still converts, at the floor.
+    expect(investMinOutFor({ venueThreshold: ownerFloor, netOfVenueThreshold: ownerFloor, ownerFloor })).toBe(ownerFloor);
+    // SOL has halved since the signature: a raw unit under the floor is refused.
+    expect(investMinOutFor({ venueThreshold: ownerFloor - 1n, netOfVenueThreshold: ownerFloor - 1n, ownerFloor })).toBeNull();
+  });
+
   it("still refuses a fee route whose venue floor is one raw unit under the owner's [below-owner-floor]", () => {
     const { condition, message } = refusal(
       quote(),

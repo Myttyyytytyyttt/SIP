@@ -36,15 +36,15 @@
 // {error:{code, message, ...}}, the shape /api/solana-tx answers with. No upstream
 // text is ever returned: a read that failed is "unreadable", with no detail.
 
-import { JUPITER_V6, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../client/addresses";
+import { JUPITER_V6, RAYDIUM_CLMM, SOL_USDC_POOL, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../client/addresses";
 import { classifyVaultEntry, scopeEntryToVault } from "../client/activity";
 import { isPubkey, isSignature } from "../client/base58";
 import { tryBase64Decode } from "../client/base64";
-import { usdcRawPer1e8LegRaw, usdcRawPerSol } from "../client/clmm-price";
+import { PoolPriceError, solUsdcConvertWad, usdcRawPer1e8LegRaw, usdcRawPerSol } from "../client/clmm-price";
 import { SIP_ACCOUNT_SPACE } from "../client/decoders";
 import { TransferFeeReadError, decodeMintTransferFee, worstCaseFeeBps } from "../client/transfer-fee";
 import { SIP_PROGRAM_ID } from "../client/idl";
-import type { PythPriceUpdate } from "../client/pyth-price";
+import { PythPriceError, type PythPriceUpdate } from "../client/pyth-price";
 import {
   BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES,
   CATALOGUE_MAX_FEE_BPS,
@@ -53,6 +53,7 @@ import {
   DEFAULT_VAULT_POLICY,
   LIVE_PRICE_FLOOR_WAD,
   MAX_PICKED_LEGS,
+  convertSafetyFloorWad,
   OFFERED_LEGS,
   SIGNATURE_FEE_LAMPORTS,
   VOLUME_MODE_OFFERED,
@@ -91,8 +92,9 @@ import { deriveAta, deriveLinkPda, deriveVaultPda } from "./pda";
 import { CLIENT_AGGREGATE_FACTOR, clientIdentityFromHeaders, createWeightedLimiter, retryAfterSeconds, type WeightedLimiter } from "./rate-limit";
 import {
   MAX_WALLET_LINKS,
-  SYSVAR_CLOCK,
+  PYTH_SNAPSHOT_ADDRESSES,
   clockEpochOf,
+  pythFromAccounts,
   listVaultHoldings,
   listVaultSignatures,
   readLiveSnapshot,
@@ -148,6 +150,10 @@ export type SolanaBuildErrorCode =
   | "not_held"
   /** More of this mint than the vault holds; `heldRaw` says how much it does. */
   | "above_holding"
+  /** The pinned SOL/USDC pool could not be priced (missing, not Raydium CLMM's, mints swapped): the SOL safety floor is not guessed, nothing is built. */
+  | "price_unavailable"
+  /** The pool's SOL price and a fresh Pyth price are more than SIGNING_PYTH_DEVIATION_BPS apart: the SOL safety floor is not signed from either. */
+  | "price_disagrees"
   /** A mint the policy names is not held by the token program SIP expects; `mint` names it. */
   | "mint_unexpected"
   /** A leg's transfer fee, or the epoch it is resolved in, could not be read: the fee ceiling is not judged on a guess. `mint` names the leg when one is at fault. */
@@ -752,20 +758,88 @@ function weightsByMint(value: unknown, inMint: string): { readonly ok: true; rea
 }
 
 /**
- * WHAT EVERY NEW POLICY SIGNS AS ITS PRICE FLOORS: LIVE_PRICE_FLOOR_WAD, the
- * smallest value the program accepts, for every leg and for the SOL hop —
- * which is no floor at all (product.ts says why, and what the owner accepted
- * on 2026-10-08). No pool is read for it: until that day the build read every
- * PRICED_POOLS mid here and signed a floor under each (10 % under SOL's, 5-7 %
- * under each stock's), and a price move past one stopped buying until the
- * owner signed again.
+ * WHAT EVERY NEW POLICY SIGNS AS ITS PRICE FLOORS.
  *
- * The answer carries these two numbers back so the page can hold the build to
- * them before the wallet asks (vault-flows.ts livePriceProblem): a build that
- * names any other floor is refused there, and the bytes are checked against
- * this same constant.
+ *   * EVERY LEG: LIVE_PRICE_FLOOR_WAD, the smallest value the program accepts,
+ *     which is no floor at all (product.ts says why, and what the owner
+ *     accepted on 2026-10-08). Until that day the build signed a floor 5-7 %
+ *     under each stock's mid, and a price move past one stopped buying until
+ *     the owner signed again.
+ *   * THE SOL HOP: CONVERT_SAFETY_FLOOR_BPS (half) of the live SOL price, read
+ *     from SOL_USDC_POOL in the build's own batch (owner, 2026-10-09). The
+ *     conversion is the one move the caps do not bound — product.ts says how —
+ *     so it keeps a floor a stolen keeper key cannot sell under; half, so that
+ *     only SOL halving since the signature stops it (solSafetyFloor below).
+ *
+ * The answer carries the numbers back so the page can hold the build to them
+ * before the wallet asks (vault-flows.ts livePriceProblem): the legs to this
+ * same constant, the SOL floor to the price the page itself shows.
  */
-const LIVE_PRICE_FLOORS = Object.freeze({ legWad: LIVE_PRICE_FLOOR_WAD, convertWad: LIVE_PRICE_FLOOR_WAD });
+const LIVE_PRICE_FLOORS = Object.freeze({ legWad: LIVE_PRICE_FLOOR_WAD });
+
+/**
+ * HOW FAR THE POOL'S SOL PRICE MAY SIT FROM A FRESH PYTH PRICE BEFORE THE SAFETY
+ * FLOOR IS NOT SIGNED FROM IT: 500 bps, either way — the keeper's own
+ * MAX_PYTH_DEVIATION_BPS on the same pair (solana-keeper invest-decision.ts),
+ * held to it by the PYTH_GUARD vector in test/fixtures/keeper-policy.ts.
+ *
+ * WHY PYTH IS ASKED AT ALL. The floor is signed once, from one pool's mid at one
+ * slot. A mid pushed DOWN for that slot signs a weaker floor than the owner was
+ * promised; one pushed UP signs a floor that blocks conversion until he signs
+ * again. Pyth is a second source the pool cannot move, already read for the
+ * dashboard (readers.ts pythFromAccounts), and its three accounts ride the
+ * build's own getMultipleAccounts, so the cross-check costs no call.
+ *
+ * WHY A DISAGREEMENT REFUSES (price_disagrees) AND A MISSING ORACLE DOES NOT.
+ * Refusing is the safe direction when two sources disagree: nothing is signed
+ * on a number one of them contradicts, and the owner can try again a minute
+ * later. But an unreadable feed, or one older than SIGNING_PYTH_MAX_AGE_SECONDS
+ * by the chain's own clock, is no evidence against the pool, and refusing then
+ * would block the very signature that restarts a conversion after SOL halved.
+ * So the pool alone signs then — still checked by the page against the price
+ * it shows, and every conversion still passes the keeper's own Pyth guard
+ * before it is sent.
+ */
+export const SIGNING_PYTH_DEVIATION_BPS = 500n;
+
+/** A Pyth pair older than this by the chain's clock (or this far ahead of it) is not used to cross-check the pool: the keeper's MAX_PYTH_AGE_SECONDS. */
+export const SIGNING_PYTH_MAX_AGE_SECONDS = 60n;
+
+/**
+ * The SOL hop's safety floor from SOL_USDC_POOL's account, cross-checked against
+ * Pyth's accounts (PYTH_SNAPSHOT_ADDRESSES' order), or why it is not signed.
+ */
+function solSafetyFloor(
+  pool: AccountSnapshot | null | undefined,
+  pythAccounts: readonly (AccountSnapshot | null | undefined)[],
+):
+  | { readonly ok: true; readonly liveConvertWad: bigint; readonly floorWad: bigint }
+  | { readonly ok: false; readonly code: "price_unavailable" }
+  | { readonly ok: false; readonly code: "price_disagrees"; readonly poolWad: bigint; readonly pythWad: bigint; readonly deviationBps: bigint } {
+  let liveConvertWad: bigint;
+  try {
+    if (pool === null || pool === undefined || pool.owner !== RAYDIUM_CLMM || pool.data === null) return { ok: false, code: "price_unavailable" };
+    liveConvertWad = solUsdcConvertWad(pool.data).wad;
+  } catch (error) {
+    if (error instanceof PoolPriceError) return { ok: false, code: "price_unavailable" };
+    throw error;
+  }
+  let pyth: PythRead | null = null;
+  try {
+    pyth = pythFromAccounts(pythAccounts);
+  } catch (error) {
+    if (!(error instanceof PythPriceError)) throw error;
+  }
+  // FRESH BY THE CHAIN'S CLOCK, EITHER WAY: a publish more than the bound
+  // AHEAD of the clock is no more a reading of now than one behind it.
+  const fresh = pyth !== null && pyth.ageSeconds <= SIGNING_PYTH_MAX_AGE_SECONDS && pyth.ageSeconds >= -SIGNING_PYTH_MAX_AGE_SECONDS;
+  if (pyth !== null && fresh && pyth.wad > 0n) {
+    const gap = liveConvertWad > pyth.wad ? liveConvertWad - pyth.wad : pyth.wad - liveConvertWad;
+    const deviationBps = (gap * 10_000n) / pyth.wad;
+    if (deviationBps > SIGNING_PYTH_DEVIATION_BPS) return { ok: false, code: "price_disagrees", poolWad: liveConvertWad, pythWad: pyth.wad, deviationBps };
+  }
+  return { ok: true, liveConvertWad, floorWad: convertSafetyFloorWad(liveConvertWad) };
+}
 
 /**
  * Each OFFERED leg's transfer fee as this build judges it against the
@@ -801,8 +875,10 @@ function legFeesJudged(
 }
 
 /**
- * investPolicy: set_invest_policy for the basket the owner chose, at the live
- * price (LIVE_PRICE_FLOORS: no signed price floor, owner 2026-10-08), with every
+ * investPolicy: set_invest_policy for the basket the owner chose, its stocks at
+ * the live price (LIVE_PRICE_FLOORS: no signed stock floor, owner 2026-10-08)
+ * and its SOL hop under a safety floor at half today's SOL price
+ * (solSafetyFloor, owner 2026-10-09), with every
  * vault token account the vault lacks created ahead of it at the owner's
  * expense. The floors, the in-mint and which stocks MAY be chosen are SIP's; the request may name the caps, the
  * minimum purchase, WHICH offered stocks the basket holds and the share each
@@ -843,11 +919,13 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
   // fees read below: every offered leg's fee is read (one getMultipleAccounts
   // either way), but only the chosen ones reach the policy or its fee ceiling.
   const chosen = OFFERED_LEGS.map((leg, index) => ({ leg, index })).filter(({ leg }) => weights.byMint.has(leg.mint));
-  const policy: InvestPolicyInput = {
+  let policy: InvestPolicyInput = {
     legs: chosen.map(({ leg }) => ({ mint: leg.mint, weightBps: weights.byMint.get(leg.mint)!, minOutRateWad: LIVE_PRICE_FLOORS.legWad })),
     venueProgram,
     inMint: USDC_MINT,
-    minConvertRateWad: LIVE_PRICE_FLOORS.convertWad,
+    // A STAND-IN, for the cap check below only: the SOL safety floor needs the
+    // chain, and replaces it before anything is built.
+    minConvertRateWad: LIVE_PRICE_FLOOR_WAD,
     minInvestment,
     maxPerCall,
     maxRolling30d,
@@ -867,11 +945,16 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
   const targets = vaultTokenAccountTargets(accounts.vaultAddress);
   const mints = [{ mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM }, ...OFFERED_LEGS.map((leg) => ({ mint: leg.mint, tokenProgram: leg.tokenProgram }))];
   const sizes = [...new Set([SIP_ACCOUNT_SPACE.InvestmentPolicy, ...targets.map((target) => target.bytes)])];
-  // NO POOL IS READ: the policy signs no price floor (LIVE_PRICE_FLOORS), and
-  // the pools were read for nothing else here. THE CLOCK RIDES LAST, in the
-  // same getMultipleAccounts: the epoch a fee is resolved in is the chain's
-  // own, read at the same slot as the mints it is resolved against.
-  const batch = await readBuildBatch(served.pool, { addresses: [...mints.map((entry) => entry.mint), ...targets.map((target) => target.address), SYSVAR_CLOCK], sizes });
+  // ONE POOL IS READ, SOL_USDC_POOL, for the SOL safety floor; no stock's pool
+  // is, because no stock floor is signed (LIVE_PRICE_FLOORS). AFTER THE TARGETS,
+  // in the same getMultipleAccounts: the chain's clock and the two Pyth feeds
+  // (PYTH_SNAPSHOT_ADDRESSES, clock first), then the pool. The epoch a fee is
+  // resolved in and the age the oracle is judged by are the chain's own, read
+  // at the same slot as the mints and the pool.
+  const batch = await readBuildBatch(served.pool, {
+    addresses: [...mints.map((entry) => entry.mint), ...targets.map((target) => target.address), ...PYTH_SNAPSHOT_ADDRESSES, SOL_USDC_POOL],
+    sizes,
+  });
   if (batch.kind !== "exists") return unreadable(served);
   const chain = batch.value;
   const rentFor = (size: number): bigint => chain.rents[sizes.indexOf(size)]!;
@@ -885,7 +968,8 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
   if (statuses.includes("unreadable")) return unreadable(served);
 
   // mints[0] is USDC; the offered legs follow it in OFFERED_LEGS' order.
-  const epoch = clockEpochOf(chain.accounts[mints.length + targets.length]);
+  const clockAt = mints.length + targets.length;
+  const epoch = clockEpochOf(chain.accounts[clockAt]);
   const fees = legFeesJudged(chain.accounts.slice(1, 1 + OFFERED_LEGS.length), epoch);
   if (!fees.ok) {
     return served.refuse(
@@ -908,6 +992,20 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
       { mint: over.leg.mint, feeBps: fees.bps[over.index]! },
     );
   }
+  // THE SOL SAFETY FLOOR, or nothing is built: a floor is never guessed, and
+  // signing 1 wad in its place would be the very gap the owner closed.
+  const sol = solSafetyFloor(chain.accounts[clockAt + PYTH_SNAPSHOT_ADDRESSES.length], chain.accounts.slice(clockAt, clockAt + PYTH_SNAPSHOT_ADDRESSES.length));
+  if (!sol.ok) {
+    return sol.code === "price_unavailable"
+      ? served.refuse(502, "price_unavailable", "SaverFi could not read today's SOL price from Raydium, so it could not set your SOL's safety floor. Nothing was built.")
+      : served.refuse(
+          502,
+          "price_disagrees",
+          `Raydium's SOL price and Pyth's are ${sol.deviationBps} basis points apart, more than the ${SIGNING_PYTH_DEVIATION_BPS} SaverFi signs a safety floor across. Nothing was built; try again in a minute.`,
+          { poolWad: sol.poolWad, pythWad: sol.pythWad },
+        );
+  }
+  policy = { ...policy, minConvertRateWad: sol.floorWad };
   // ONLY WHAT THIS POLICY MAY HOLD. buildSetInvestPolicy allows exactly wSOL,
   // the in-mint and THIS POLICY'S legs (builders.ts allowedMints), so bundling
   // an account for an offered stock the owner did NOT pick makes this handler
@@ -946,9 +1044,11 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
   return json(200, {
     ...built,
     policyExists,
-    // THE PRICE FLOORS THE BYTES CARRY: LIVE_PRICE_FLOORS, and nothing else.
-    // The page refuses a build that names any other (vault-flows.ts).
-    floors: { legWad: LIVE_PRICE_FLOORS.legWad, convertWad: LIVE_PRICE_FLOORS.convertWad },
+    // THE PRICE FLOORS THE BYTES CARRY, and the SOL price the safety floor was
+    // taken from. The page holds the legs to LIVE_PRICE_FLOOR_WAD, the SOL floor
+    // to convertSafetyFloorWad(liveConvertWad), and both to the SOL price it
+    // shows (vault-flows.ts livePriceProblem).
+    floors: { legWad: LIVE_PRICE_FLOORS.legWad, convertWad: sol.floorWad, liveConvertWad: sol.liveConvertWad },
     // Every account the policy needs, in the builder's order, and whether this
     // transaction creates it. A target that is missing and not created here is
     // the keeper's to open: it lists as create false, like one that already exists.
@@ -964,8 +1064,9 @@ const PAUSE_INVESTING_FIELDS = ["action", "owner"] as const;
  * pauseInvesting: set_invest_policy re-signing the policy the vault holds, every
  * leg, floor, venue, in-mint and cap as stored, with investing off. It reads no
  * pool. A pause changes nothing but `enabled`, so a policy signed before
- * 2026-10-08 keeps the price floors it was signed with while paused; resuming
- * goes through investPolicy, which signs LIVE_PRICE_FLOORS.
+ * 2026-10-08 keeps the price floors it was signed with while paused, and a
+ * SOL safety floor stays the one signed with it; resuming goes through
+ * investPolicy, which signs LIVE_PRICE_FLOORS and a fresh safety floor.
  */
 async function pauseInvesting(fields: Readonly<Record<string, unknown>>, served: Served): Promise<Response> {
   const extra = unexpectedField(fields, PAUSE_INVESTING_FIELDS);

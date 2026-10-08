@@ -790,7 +790,8 @@ describe("InvestingCard", () => {
   });
 
   /** A build answer as the live-price server sends it: no rates, no dollar figures, the two 1-wad floors. */
-  const LIVE_BUILD = { txBase64: "", lastValidBlockHeight: 1, floors: { legWad: "1", convertWad: "1" } };
+  /** The build every new policy gets: legs at 1 wad, the SOL floor at half $100.04, rounded down. */
+  const LIVE_BUILD = { txBase64: "", lastValidBlockHeight: 1, floors: { legWad: "1", convertWad: "50019355777746281", liveConvertWad: "100038711555492562" } };
 
   const signingDetail = (built: unknown, weights?: ReadonlyMap<string, number>): string =>
     renderToStaticMarkup(
@@ -842,16 +843,19 @@ describe("InvestingCard", () => {
     expect(readCaps("5", "31000", 5_000_000n)).toMatchObject({ ok: true });
   });
 
-  it("what Phantom is asked to sign says there is no price floor, names the basket and this card's own caps", () => {
+  it("what Phantom is asked to sign says the stocks have no price floor, quotes the SOL safety floor per SOL, names the basket and this card's own caps", () => {
     const html = signingDetail(LIVE_BUILD);
-    expect(html).toContain("You are signing: SPYx and ANTHROPIC bought at the live market price, with no price floor; at most $10.00 per buy and $50.00 per 30 days.");
-    // No price figure is quoted, because none is signed.
+    expect(html).toContain(
+      "You are signing: SPYx and ANTHROPIC bought at the live market price, with no price floor; your SOL converted to USDC only at $50.02 a SOL or more, half of today&#x27;s price; at most $10.00 per buy and $50.00 per 30 days.",
+    );
+    // No stock price figure is quoted, because none is signed.
     expect(html).not.toMatch(/never (sold below|bought above)/);
   });
 
-  it("says nothing over an answer the flow would refuse: any floor but the live-price one, the old rates-and-margins block, or none", () => {
-    expect(signingDetail({ ...LIVE_BUILD, floors: { legWad: "2", convertWad: "1" } })).toBe("");
-    expect(signingDetail({ ...LIVE_BUILD, floors: { legWad: "1", convertWad: "90034840399943305" } })).toBe("");
+  it("says nothing over an answer the flow would refuse: a leg floor, a SOL floor that is not half the price named, the 1-wad answer of 2026-10-08, the old rates-and-margins block, or none", () => {
+    expect(signingDetail({ ...LIVE_BUILD, floors: { ...LIVE_BUILD.floors, legWad: "2" } })).toBe("");
+    expect(signingDetail({ ...LIVE_BUILD, floors: { ...LIVE_BUILD.floors, convertWad: "90034840399943305" } })).toBe("");
+    expect(signingDetail({ ...LIVE_BUILD, floors: { legWad: "1", convertWad: "1" } })).toBe("");
     expect(
       signingDetail({ ...LIVE_BUILD, floors: { convertWad: "90034840399943305", marginBps: { convert: 1_000, leg: 500 }, legs: [{ mint: SPYX_MINT, wad: "124719467624105690" }] } }),
     ).toBe("");

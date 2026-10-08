@@ -17,6 +17,7 @@ import {
   linkWalletFlow,
   setPolicyFlow,
   pauseInvestingFlow,
+  shownConvertWadOf,
   withdrawFlow,
   withdrawTokenFlow,
   awaitsConfirmation,
@@ -456,7 +457,12 @@ export function useVaultWrite(key: string) {
     (input: InvestRequest): Promise<void> => {
       if (screen === null) return Promise.resolve();
       lastRequest.current = { kind: "policy", input };
-      const { api, pensionKey } = screen;
+      const { api, pensionKey, view } = screen;
+      // THE SOL PRICE THIS SCREEN IS SHOWING as the button is pressed: the flow
+      // holds the build's SOL safety floor to half of it. Read here rather than
+      // carried in the request, so "Build again" is judged against what is on
+      // screen now and not against a reading from minutes ago.
+      const shownConvertWad = shownConvertWadOf(view);
       return run("policy", ({ onStep, onBuilt }) =>
         investPolicyFlow(
           { api, onStep, onBuilt, signers: pensionSigner({ wallets, pensionKey, signTransaction: signOne }) },
@@ -468,6 +474,7 @@ export function useVaultWrite(key: string) {
             minInvestment: input.minInvestment,
             weights: input.weights,
             venue: input.venue,
+            shownConvertWad,
           },
         ),
       );

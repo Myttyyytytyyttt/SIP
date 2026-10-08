@@ -58,8 +58,11 @@ import {
   awaitsConfirmation,
   checkAgainFlow,
   createVaultFlow,
-  investPolicyFlow,
+  CONVERT_FLOOR_BAND_BPS,
+  investPolicyFlow as investPolicyFlowBare,
+  liveFloorsProblem,
   livePriceProblem,
+  shownConvertWadOf,
   setPolicyFlow,
   linkWalletFlow,
   pauseInvestingFlow,
@@ -71,7 +74,7 @@ import {
 } from "@/lib/vault-flows";
 import { resignStoredPolicy } from "@/components/wallets/InvestingCard";
 import { deriveAtaAddress, deriveConfigAddress, deriveInvestAddress, deriveLinkAddress, deriveVaultAddress } from "@/lib/vault-pda";
-import { ROUTED_VENUE } from "../../../solana-core/test/fixtures/keeper-policy";
+import { CONVERT_SAFETY_FLOOR, ROUTED_VENUE } from "../../../solana-core/test/fixtures/keeper-policy";
 
 function signBytes(signer: Keypair, message: Uint8Array): Uint8Array {
   const privateKey = createPrivateKey({
@@ -286,11 +289,22 @@ describe("the browser's addresses", () => {
 // ── the policy and the withdrawals ───────────────────────────────────────────
 
 /**
- * The price floor every new policy signs since 2026-10-08: 1 wad, for every leg
- * and the SOL hop (solana-core product.ts LIVE_PRICE_FLOOR_WAD). Written as the
- * literal, so the constant moving is a change these tests see.
+ * The price floor every new policy signs on its legs since 2026-10-08: 1 wad
+ * (solana-core product.ts LIVE_PRICE_FLOOR_WAD). Written as the literal, so the
+ * constant moving is a change these tests see.
  */
 const LIVE_PRICE_FLOOR = 1n;
+
+/**
+ * THE SOL PRICE THE SCREEN SHOWS in these tests, and the safety floor a build
+ * signs under it (owner, 2026-10-09): the shared vector's $100.04 a SOL and its
+ * half, rounded down. Literals, so neither is re-derived by the code under test.
+ */
+const SHOWN_SOL_WAD = 100_038_711_555_492_562n;
+const SOL_SAFETY_FLOOR = 50_019_355_777_746_281n;
+
+/** investPolicyFlow on a screen showing SHOWN_SOL_WAD, unless the test names another price. */
+const investPolicyFlow: typeof investPolicyFlowBare = (deps, input) => investPolicyFlowBare(deps, { shownConvertWad: SHOWN_SOL_WAD, ...input });
 /** A floor the build signed before 2026-10-08: SPYx 5 % under its mainnet rate at slot 447313239. */
 const OLD_SPYX_FLOOR = 124_719_467_624_105_690n;
 
@@ -321,7 +335,7 @@ interface PolicyForge {
   readonly maxPerCall?: bigint;
   readonly maxRolling30d?: bigint;
   readonly enabled?: boolean;
-  /** What the transaction carries for SPYx, the first leg; the answer's floors stay the live-price ones unless `floors` rewrites them. */
+  /** What the transaction carries for SPYx, the first leg; the answer's floors stay the ones SaverFi signs unless `floors` rewrites them. */
   readonly legFloor?: bigint;
   /** The same for ANTHROPIC, the second leg. */
   readonly anthropicFloor?: bigint;
@@ -351,7 +365,7 @@ function policyAnswer(owner: string, forge: PolicyForge = {}): Answer {
           { mint: SPYX_MINT, weightBps: forge.weights?.[0] ?? 5_000, minOutRateWad: forge.legFloor ?? LIVE_PRICE_FLOOR },
           { mint: ANTHROPIC_MINT, weightBps: forge.weights?.[1] ?? 5_000, minOutRateWad: forge.anthropicFloor ?? LIVE_PRICE_FLOOR },
         ],
-    minConvertRateWad: forge.convertFloor ?? LIVE_PRICE_FLOOR,
+    minConvertRateWad: forge.convertFloor ?? SOL_SAFETY_FLOOR,
     // defaultInvestPolicy(2).minInvestment: the $5 purchase split across the legs, and enforced per leg.
     minInvestment: forge.minInvestment ?? 2_500_000n,
     maxPerCall: forge.maxPerCall ?? 1_000_000_000n,
@@ -361,7 +375,7 @@ function policyAnswer(owner: string, forge: PolicyForge = {}): Answer {
     computeBudget: ownerComputeBudget("set_invest_policy"),
     vaultTokenAccounts: POLICY_TARGETS.filter((_, index) => create[index]),
   });
-  const floors: Record<string, unknown> = { legWad: LIVE_PRICE_FLOOR, convertWad: LIVE_PRICE_FLOOR };
+  const floors: Record<string, unknown> = { legWad: LIVE_PRICE_FLOOR, convertWad: SOL_SAFETY_FLOOR, liveConvertWad: SHOWN_SOL_WAD };
   return asJson<Answer>({
     ...built,
     policyExists: false,
@@ -596,9 +610,19 @@ describe("investPolicyFlow", () => {
     ["an ANTHROPIC floor in the bytes at a pre-2026-10-08 margin", (h) => policyAnswer(h.pensionKey, { anthropicFloor: 5_277_777_777_777_777_778n })],
     ["a SOL floor of zero in the bytes, which would turn conversion off", (h) => policyAnswer(h.pensionKey, { convertFloor: 0n })],
     ["a SOL floor in the bytes at a pre-2026-10-08 margin", (h) => policyAnswer(h.pensionKey, { convertFloor: 90_034_840_399_943_305n })],
-    // …AND THE ANSWER TO THE SAME CONSTANT, even when the bytes agree with it.
+    ["a SOL floor of 1 wad in the bytes under an answer naming the safety floor", (h) => policyAnswer(h.pensionKey, { convertFloor: 1n })],
+    // …AND THE ANSWER TO THE SAME NUMBERS, even when the bytes agree with it.
     ["an answer and bytes that both name a leg floor of 2 wad", (h) => policyAnswer(h.pensionKey, { legFloor: 2n, anthropicFloor: 2n, floors: (floors) => ({ ...floors, legWad: 2n }) })],
-    ["an answer and bytes that both name a SOL floor of 2 wad", (h) => policyAnswer(h.pensionKey, { convertFloor: 2n, floors: (floors) => ({ ...floors, convertWad: 2n }) })],
+    [
+      "an answer and bytes that both name a 1-wad SOL floor (the safety floor weakened away)",
+      (h) => policyAnswer(h.pensionKey, { convertFloor: 1n, floors: (floors) => ({ ...floors, convertWad: 1n, liveConvertWad: 2n }) }),
+    ],
+    [
+      "an answer and bytes whose SOL floor is half a SOL price far over the one shown (a floor that stops conversion today)",
+      (h) => policyAnswer(h.pensionKey, { convertFloor: SHOWN_SOL_WAD, floors: (floors) => ({ ...floors, convertWad: SHOWN_SOL_WAD, liveConvertWad: 2n * SHOWN_SOL_WAD }) }),
+    ],
+    ["an answer whose SOL floor is not half the SOL price it names", (h) => policyAnswer(h.pensionKey, { floors: (floors) => ({ ...floors, liveConvertWad: SHOWN_SOL_WAD + 2n }) })],
+    ["the answer of a server from 2026-10-08, with a 1-wad SOL floor and no SOL price", (h) => policyAnswer(h.pensionKey, { convertFloor: 1n, floors: () => ({ legWad: 1n, convertWad: 1n }) })],
     [
       "an answer in the shape that carried rates and margins until 2026-10-08",
       (h) => policyAnswer(h.pensionKey, { floors: (floors) => ({ ...floors, marginBps: { convert: 1_000, leg: 500 }, legs: [] }) }),
@@ -650,7 +674,7 @@ describe("investPolicyFlow", () => {
     expect(h.send).not.toHaveBeenCalled();
   });
 
-  it("signs a SPYx-only basket at 1 wad on its one leg and on the SOL hop", async () => {
+  it("signs a SPYx-only basket at 1 wad on its one leg and the safety floor on the SOL hop", async () => {
     const h = harness();
     h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey, { spyxOnly: true })));
     const result = await investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey, weights: new Map([[SPYX_MINT, 10_000]]) });
@@ -658,12 +682,77 @@ describe("investPolicyFlow", () => {
     expect(h.signWithPension).toHaveBeenCalledTimes(1);
   });
 
-  it("livePriceProblem accepts exactly { legWad: \"1\", convertWad: \"1\" } and names what is wrong with anything else", () => {
-    expect(livePriceProblem({ legWad: "1", convertWad: "1" })).toBeNull();
-    expect(livePriceProblem(undefined)).toBe("it does not say which price floors it signs");
-    for (const floors of [{ legWad: "2", convertWad: "1" }, { legWad: "1", convertWad: "0" }, { legWad: "1" }, { legWad: "1", convertWad: "1", legs: [] }]) {
-      expect(livePriceProblem(floors as never), JSON.stringify(floors)).toBe("its price floors are not SaverFi's live-price ones");
+  it("liveFloorsProblem accepts exactly the legs at 1 wad and the SOL floor at half the SOL price read, and names what is wrong with anything else", () => {
+    const good = { legWad: "1", convertWad: String(SOL_SAFETY_FLOOR), liveConvertWad: String(SHOWN_SOL_WAD) };
+    expect(liveFloorsProblem(good)).toBeNull();
+    // Half rounded down: an odd price's floor is half of the even one under it.
+    expect(liveFloorsProblem({ ...good, liveConvertWad: String(SHOWN_SOL_WAD + 1n) })).toBeNull();
+    expect(liveFloorsProblem(undefined)).toBe("it does not say which price floors it signs");
+    for (const floors of [{ legWad: "1", convertWad: "1" }, { ...good, legs: [] }, { legWad: "1", convertWad: good.convertWad }]) {
+      expect(liveFloorsProblem(floors as never), JSON.stringify(floors)).toBe("its price floors are not SaverFi's");
     }
+    expect(liveFloorsProblem({ ...good, legWad: "2" })).toBe("its stock price floor is not SaverFi's live-price one");
+    for (const floors of [{ ...good, convertWad: String(SOL_SAFETY_FLOOR + 1n) }, { ...good, convertWad: String(SOL_SAFETY_FLOOR - 1n) }, { ...good, liveConvertWad: "0" }, { ...good, convertWad: "x" }]) {
+      expect(liveFloorsProblem(floors), JSON.stringify(floors)).toBe("its SOL safety floor is not 50 % of the SOL price it read");
+    }
+  });
+
+  /**
+   * THE BAND AROUND THE PRICE THE PAGE SHOWS, AT EACH EDGE. Shown at exactly
+   * $100 a SOL (1e17 USDC raw per lamport x 1e18), the band is a floor of
+   * 47,500,000,000,000,000 to 52,500,000,000,000,000 — $47.50 to $52.50 a SOL —
+   * both included, and one wad past either edge is refused.
+   */
+  it("livePriceProblem holds the SOL floor to CONVERT_FLOOR_BAND_BPS (4,750 to 5,250) of the price shown, at each edge", () => {
+    expect(CONVERT_FLOOR_BAND_BPS).toEqual({ min: 4_750, max: 5_250 });
+    // The band is the vector's 50 % floor, give or take 5 % of it.
+    expect((CONVERT_FLOOR_BAND_BPS.min + CONVERT_FLOOR_BAND_BPS.max) / 2).toBe(CONVERT_SAFETY_FLOOR.web.bps);
+    const shown = 100_000_000_000_000_000n;
+    const at = (floor: bigint) => ({ legWad: "1", convertWad: String(floor), liveConvertWad: String(2n * floor) });
+    expect(livePriceProblem(at(50_000_000_000_000_000n), shown)).toBeNull();
+    expect(livePriceProblem(at(47_500_000_000_000_000n), shown)).toBeNull();
+    expect(livePriceProblem(at(47_499_999_999_999_999n), shown)).toBe("its SOL safety floor is far under half the SOL price this page shows you");
+    expect(livePriceProblem(at(52_500_000_000_000_000n), shown)).toBeNull();
+    expect(livePriceProblem(at(52_500_000_000_000_001n), shown)).toBe("its SOL safety floor is far over half the SOL price this page shows you");
+    // A 1-wad floor, and a floor at today's price, which would stop conversion the moment it is signed.
+    expect(livePriceProblem(at(1n), shown)).toBe("its SOL safety floor is far under half the SOL price this page shows you");
+    expect(livePriceProblem(at(shown), shown)).toBe("its SOL safety floor is far over half the SOL price this page shows you");
+    // No price on screen: nothing to hold the floor to, so nothing is signed.
+    for (const none of [null, undefined, 0n]) expect(livePriceProblem(at(50_000_000_000_000_000n), none)).toBe("this page has no SOL price to check its SOL safety floor against");
+    // The shape is judged first.
+    expect(livePriceProblem({ legWad: "1", convertWad: "1" } as never, shown)).toBe("its price floors are not SaverFi's");
+  });
+
+  it("shownConvertWadOf reads the SOL price a ready vault screen shows, and nothing from any other screen", () => {
+    const prices = { slot: 1, convertWad: String(SHOWN_SOL_WAD), usdcRawPerSol: "100038711", legs: [] };
+    expect(shownConvertWadOf({ kind: "ready", state: { prices } })).toBe(SHOWN_SOL_WAD);
+    expect(shownConvertWadOf({ kind: "ready", state: { prices: null } })).toBeNull();
+    expect(shownConvertWadOf({ kind: "loading" })).toBeNull();
+    expect(shownConvertWadOf({ kind: "unreadable" })).toBeNull();
+  });
+
+  it("signs a build whose SOL price moved a few percent from the one shown, and refuses one past the band, before Phantom is asked", async () => {
+    // Shown $100.04; the server read 4.9 % more and 4.9 % less: both sign.
+    for (const live of [104_940_608_421_711_697n, 95_136_814_689_273_427n]) {
+      const h = harness();
+      h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey, { convertFloor: live / 2n, floors: (floors) => ({ ...floors, convertWad: live / 2n, liveConvertWad: live }) })));
+      const result = await investPolicyFlowBare(h.createDeps, { pensionKey: h.pensionKey, shownConvertWad: SHOWN_SOL_WAD });
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+    }
+    // 5.1 % less: refused, and the words say why.
+    const h = harness();
+    const live = 94_936_737_266_162_442n;
+    h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey, { convertFloor: live / 2n, floors: (floors) => ({ ...floors, convertWad: live / 2n, liveConvertWad: live }) })));
+    const result = await investPolicyFlowBare(h.createDeps, { pensionKey: h.pensionKey, shownConvertWad: SHOWN_SOL_WAD });
+    expect(result).toMatchObject({ ok: false, kind: "refused" });
+    expect(!result.ok && result.message).toContain("its SOL safety floor is far under half the SOL price this page shows you");
+    expect(h.signWithPension).not.toHaveBeenCalled();
+    // And a screen with no SOL price signs nothing.
+    const blind = harness();
+    blind.build.mockImplementationOnce(async () => ok(policyAnswer(blind.pensionKey)));
+    const unseen = await investPolicyFlowBare(blind.createDeps, { pensionKey: blind.pensionKey });
+    expect(!unseen.ok && unseen.message).toContain("this page has no SOL price to check its SOL safety floor against");
+    expect(blind.signWithPension).not.toHaveBeenCalled();
   });
 
   it("Phantom dropping a token account creation is refused before anything is sent", async () => {

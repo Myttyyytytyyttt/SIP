@@ -43,6 +43,8 @@ import {
   judgedFeeBps,
   keeperInvestMinOutFor,
   LIVE_PRICE_FLOOR_WAD,
+  CONVERT_SAFETY_FLOOR_BPS,
+  convertSafetyFloorWad,
 } from "../src/client/product";
 import {
   DEFAULT_PURCHASE_USDC_RAW,
@@ -53,7 +55,7 @@ import {
   investPolicyProblems,
   vaultPolicyProblems,
 } from "../src/client/rules";
-import { LEG_FEE, LIVE_PRICE_FLOOR, OWNER_FLOOR_MIN_OUT, POOL_DEPTH } from "./fixtures/keeper-policy";
+import { CONVERT_SAFETY_FLOOR, LEG_FEE, LIVE_PRICE_FLOOR, OWNER_FLOOR_MIN_OUT, POOL_DEPTH } from "./fixtures/keeper-policy";
 import { MAX_COMPUTE_UNIT_LIMIT, MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS } from "../src/server/verify-tx";
 
 describe("the vault a new pension key is offered", () => {
@@ -356,6 +358,21 @@ describe("the first investment policy", () => {
     // The floor stays 0 below 1e18 raw units (a trillion USDC, a billion SOL) and is 1 at it.
     expect(ownerFloorFor(LIVE_PRICE_FLOOR.ownerFloorZeroBelowRaw - 1n)).toBe(0n);
     expect(ownerFloorFor(LIVE_PRICE_FLOOR.ownerFloorZeroBelowRaw)).toBe(1n);
+  });
+
+  /**
+   * THE SOL HOP'S SAFETY FLOOR (owner, 2026-10-09): half the live SOL price,
+   * rounded down. For one SOL at the vector's $100.04 the convert.rs floor
+   * (lamports x wad / 1e18) is $50.02 — what a conversion must pay at least.
+   */
+  it("signs the SOL hop at half the live SOL price, rounded down: CONVERT_SAFETY_FLOOR_BPS of it", () => {
+    expect(CONVERT_SAFETY_FLOOR_BPS).toBe(CONVERT_SAFETY_FLOOR.web.bps);
+    const { liveConvertWad, floorWad, oneSolLamports, oneSolFloorUsdcRaw } = CONVERT_SAFETY_FLOOR.measured;
+    expect(convertSafetyFloorWad(liveConvertWad)).toBe(floorWad);
+    expect((oneSolLamports * floorWad) / 10n ** 18n).toBe(oneSolFloorUsdcRaw);
+    // Rounded down, never up: an odd wad loses its half unit.
+    expect(convertSafetyFloorWad(3n)).toBe(1n);
+    expect(convertSafetyFloorWad(4n)).toBe(2n);
   });
 
   it("measures every rule at the share one turn can push into one leg of a full basket", () => {

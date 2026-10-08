@@ -31,15 +31,17 @@
  * valid, or the simulation says BlockhashNotFound, the transaction is built again
  * with the same consent: at most LINK_MAX_BUILDS builds.
  *
- * AN INVESTMENT POLICY SIGNS NO PRICE FLOOR (owner, 2026-10-08), AND THAT IS
- * CHECKED HERE. Every leg's min_out_rate_wad and the min_convert_rate_wad are
- * LIVE_PRICE_FLOOR_WAD (solana-core product.ts says why 1 and not 0). The page
- * builds the intent with that constant, not with any number the answer
- * carries, so bytes holding another floor are refused by the intent check; and
- * an answer whose `floors` block names anything else is refused before that
- * (livePriceProblem). The basket must be SIP's, the caps and on/off what the
- * person chose, and every token account created ahead of the policy the
- * vault's own, at an address the page derived itself.
+ * AN INVESTMENT POLICY SIGNS NO STOCK PRICE FLOOR (owner, 2026-10-08) AND A
+ * SOL SAFETY FLOOR AT HALF TODAY'S SOL PRICE (owner, 2026-10-09), AND BOTH ARE
+ * CHECKED HERE. Every leg's min_out_rate_wad is LIVE_PRICE_FLOOR_WAD (solana-core
+ * product.ts says why 1 and not 0), and the page builds the intent's legs with
+ * that constant, never with a number the answer carries. The SOL floor is the
+ * one number the server reads from the chain, so before it reaches the intent
+ * it is held to the SOL price THIS PAGE shows (livePriceProblem,
+ * CONVERT_FLOOR_BAND_BPS): a build answering a 1-wad floor, or one high enough
+ * to stop conversion today, is refused. The basket must be SIP's, the caps and
+ * on/off what the person chose, and every token account created ahead of the
+ * policy the vault's own, at an address the page derived itself.
  *
  * A WITHDRAWAL signs the amount asked and nothing else: SOL to the pension key,
  * or a token from the vault account the screen showed to the pension key's own
@@ -47,6 +49,7 @@
  */
 
 import {
+  CONVERT_SAFETY_FLOOR_BPS,
   DEFAULT_INVEST_CAPS,
   DEFAULT_VAULT_POLICY,
   LIVE_PRICE_FLOOR_WAD,
@@ -60,6 +63,7 @@ import {
   basketWeightsBps,
   bytesEqual,
   confirmSignature,
+  convertSafetyFloorWad,
   defaultInvestPolicy,
   linkConsentMessage,
   solscanTx,
@@ -86,6 +90,7 @@ import {
   type PolicyFloorsJson,
   type SendResponseJson,
   type VaultApi,
+  type VaultStateJson,
   type WithdrawBuildJson,
   type WithdrawTokenBuildJson,
 } from "@/lib/vault-api";
@@ -497,25 +502,86 @@ export interface InvestPolicyInput {
   readonly weights?: ReadonlyMap<string, number>;
   /** A venue NAME from VERIFIABLE_VENUES; the route's default when absent. */
   readonly venue?: string;
+  /**
+   * The SOL price this page shows as the button is pressed (/api/solana-vault's
+   * prices.convertWad: USDC raw per lamport x 1e18), the yardstick the build's
+   * SOL safety floor is held to. Null or absent when the screen shows none:
+   * then nothing is signed, because the one floor the server reads from the
+   * chain could not be checked.
+   */
+  readonly shownConvertWad?: bigint | null;
 }
 
 /**
- * Why a build answer's `floors` block is not the live-price floors SaverFi's
- * server signs — exactly { legWad: LIVE_PRICE_FLOOR_WAD, convertWad:
- * LIVE_PRICE_FLOOR_WAD } and nothing else — or null when it is.
+ * THE BAND THE SOL SAFETY FLOOR MUST SIT IN, as bps of the SOL price this page
+ * shows: 4,750 to 5,250, both included — half the price (CONVERT_SAFETY_FLOOR_BPS),
+ * give or take 5 % of that half.
  *
- * THE BYTES ARE HELD TO THE SAME CONSTANT by the intent below, so this is the
- * second of two checks: it refuses an answer that SAYS it signs a price floor
- * (an older server's rates-and-margins block included) even before the bytes
- * are compared, and the intent refuses bytes that carry one whatever the
- * answer says.
+ * WHY 5 %. It is the room the page gave a build's prices against the shown ones
+ * until 2026-10-08 (SHOWN_PRICE_TOLERANCE_BPS, 500) and the keeper's own Pyth
+ * deviation (500 bps): SOL moving a few percent in the minutes between the
+ * screen's read and the server's passes, and nothing else does.
+ *
+ * WHAT EACH EDGE REFUSES. Under 4,750: a floor that protects less than the
+ * owner was promised — a 1-wad floor most of all, a server weakening the one
+ * protection the conversion has. Over 5,250: a floor that is not the half the
+ * owner chose, up to one at or over today's price, which would stop conversion
+ * the moment it is signed.
  */
-export function livePriceProblem(floors: PolicyFloorsJson | undefined | null): string | null {
+export const CONVERT_FLOOR_BAND_BPS = Object.freeze({ min: 4_750, max: 5_250 });
+
+/**
+ * Why a build answer's `floors` block is not what SaverFi's server signs — or
+ * null when it is: exactly { legWad, convertWad, liveConvertWad }, every leg at
+ * LIVE_PRICE_FLOOR_WAD, and the SOL floor convertSafetyFloorWad(liveConvertWad),
+ * the half of the SOL price the server says it read. It needs no price of the
+ * page's own; livePriceProblem below adds that.
+ */
+export function liveFloorsProblem(floors: PolicyFloorsJson | undefined | null): string | null {
   if (floors === undefined || floors === null || typeof floors !== "object") return "it does not say which price floors it signs";
   const keys = Object.keys(floors).sort();
-  if (keys.length !== 2 || keys[0] !== "convertWad" || keys[1] !== "legWad") return "its price floors are not SaverFi's live-price ones";
-  if (rawFrom(floors.legWad) !== LIVE_PRICE_FLOOR_WAD || rawFrom(floors.convertWad) !== LIVE_PRICE_FLOOR_WAD) return "its price floors are not SaverFi's live-price ones";
+  if (keys.length !== 3 || keys[0] !== "convertWad" || keys[1] !== "legWad" || keys[2] !== "liveConvertWad") return "its price floors are not SaverFi's";
+  if (rawFrom(floors.legWad) !== LIVE_PRICE_FLOOR_WAD) return "its stock price floor is not SaverFi's live-price one";
+  const convert = rawFrom(floors.convertWad);
+  const live = rawFrom(floors.liveConvertWad);
+  const half = (() => {
+    try {
+      return live === null ? null : convertSafetyFloorWad(live);
+    } catch {
+      return null;
+    }
+  })();
+  if (convert === null || half === null || convert !== half) return `its SOL safety floor is not ${CONVERT_SAFETY_FLOOR_BPS / 100} % of the SOL price it read`;
   return null;
+}
+
+/**
+ * Why a build answer's `floors` block may not be signed on THIS screen, or null:
+ * liveFloorsProblem, and then the SOL safety floor inside CONVERT_FLOOR_BAND_BPS
+ * of `shownConvertWad`, the SOL price the page shows.
+ *
+ * THE BYTES ARE HELD TO THE SAME NUMBERS by the intent below — the legs to the
+ * constant, the SOL hop to the floor checked here — so an answer that says one
+ * thing and bytes that carry another are refused too.
+ */
+export function livePriceProblem(floors: PolicyFloorsJson | undefined | null, shownConvertWad: bigint | null | undefined): string | null {
+  const shape = liveFloorsProblem(floors);
+  if (shape !== null) return shape;
+  if (shownConvertWad === null || shownConvertWad === undefined || shownConvertWad <= 0n) return "this page has no SOL price to check its SOL safety floor against";
+  const convert = rawFrom(floors!.convertWad)!;
+  if (convert * 10_000n < shownConvertWad * BigInt(CONVERT_FLOOR_BAND_BPS.min)) return "its SOL safety floor is far under half the SOL price this page shows you";
+  if (convert * 10_000n > shownConvertWad * BigInt(CONVERT_FLOOR_BAND_BPS.max)) return "its SOL safety floor is far over half the SOL price this page shows you";
+  return null;
+}
+
+/**
+ * The SOL price a vault screen shows, as investPolicyFlow takes it
+ * (shownConvertWad): a ready read's prices.convertWad, or null when the screen
+ * is loading, unreadable, or read no price — and then nothing is signed.
+ */
+export function shownConvertWadOf(view: { readonly kind: string; readonly state?: { readonly prices: VaultStateJson["prices"] } }): bigint | null {
+  if (view.kind !== "ready" || view.state === undefined) return null;
+  return rawFrom(view.state.prices?.convertWad);
 }
 
 /** The token accounts a policy build says it creates, bound to the vault's own associated addresses as this page derives them. */
@@ -562,8 +628,9 @@ export async function tokenAccountCreates(
 
 /**
  * Signs the vault's investment policy: SIP's basket at the live price (no signed
- * price floor), the caps and on/off the person chose, and the vault token
- * accounts it lacks, paid by the pension key.
+ * stock floor), the SOL hop under a safety floor at half the SOL price, the
+ * caps and on/off the person chose, and the vault token accounts it lacks, paid
+ * by the pension key.
  */
 export async function investPolicyFlow(deps: PensionFlowDeps, input: InvestPolicyInput): Promise<FlowResult> {
   const request: Record<string, unknown> = { action: "investPolicy", owner: input.pensionKey };
@@ -591,14 +658,16 @@ export async function investPolicyFlow(deps: PensionFlowDeps, input: InvestPolic
   if (venueProgram === undefined) return refused(FAILURE_COPY.unverifiableVenue(venueName));
   return pensionWrite<InvestPolicyBuildJson>(deps, request, async (body) => {
     const chosen = input.weights === undefined ? OFFERED_LEGS.map((leg, index) => ({ leg, index })) : OFFERED_LEGS.map((leg, index) => ({ leg, index })).filter(({ leg }) => input.weights!.has(leg.mint));
-    const problem = livePriceProblem(body.floors);
+    const problem = livePriceProblem(body.floors, input.shownConvertWad);
     if (problem !== null) throw new IntentError(FAILURE_COPY.builtMismatch(problem));
+    // Checked just above: half the SOL price the server read, and inside the band around the one this page shows.
+    const convertFloor = rawFrom(body.floors.convertWad)!;
     const vault = await deriveVaultAddress(input.pensionKey);
     const equalShares = basketWeightsBps(OFFERED_LEGS.length);
     // THE BASKET THE BYTES MUST CARRY: the stocks the owner picked, in the
     // catalogue's order, each at LIVE_PRICE_FLOOR_WAD — the constant, never a
-    // number from the answer. With no weights at all this is the whole
-    // catalogue at equal shares.
+    // number from the answer — and the SOL hop at the floor checked above.
+    // With no weights at all this is the whole catalogue at equal shares.
     const weightOf = (mint: string, index: number): number => input.weights?.get(mint) ?? equalShares[index]!;
     return {
       instruction: "set_invest_policy",
@@ -608,7 +677,7 @@ export async function investPolicyFlow(deps: PensionFlowDeps, input: InvestPolic
         legs: chosen.map(({ leg, index }) => ({ mint: leg.mint, weight_bps: weightOf(leg.mint, index), min_out_rate_wad: LIVE_PRICE_FLOOR_WAD })),
         venue_program: venueProgram,
         in_mint: USDC_MINT,
-        min_convert_rate_wad: LIVE_PRICE_FLOOR_WAD,
+        min_convert_rate_wad: convertFloor,
         min_investment: input.minInvestment ?? defaultInvestPolicy(OFFERED_LEGS.length).minInvestment,
         max_per_call: input.maxPerCall ?? DEFAULT_INVEST_CAPS.maxPerCall,
         max_rolling_30d: input.maxRolling30d ?? DEFAULT_INVEST_CAPS.maxRolling30d,
