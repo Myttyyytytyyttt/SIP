@@ -10,6 +10,183 @@ line is not.
 
 ---
 
+## 2026-10-08
+
+*Partial: written at the owner's request, relayed by the session that built it, from the five
+commits up to `7160b30` (03:01 Lisbon).*
+
+A new landing, built overnight at the owner's request, one step after another; all of it is in
+production at [`/welcome`](https://sip-website-oficial.vercel.app/welcome).
+
+- **It opens on SaverFi's own logo** `c9194fd`. The green build of the S from the launch film
+  plays once per browser tab, then the S flies into the navigation bar and the page enters in
+  pieces — headline line by line, buttons one after another, the frame from below. It can be
+  skipped with a click or a key, and with reduced motion it is a still frame. It only counts as
+  seen if it really was: a slow or failed start no longer uses it up `7de9942`.
+- **The frame shows the app itself**: an eight-second loop of the sample dashboard, ending on
+  the same picture the visitor gets on scrolling in. The owner chose to re-seed the sample to
+  look like the real product — a SPYx 60 / ANTHROPIC 40 basket, Volume at 1 %, a $10 threshold
+  — and the README's screenshot is now that same capture.
+- **The reference template's footage is gone** `9f23adf`. The background used to be a third
+  party's clip, another brand's card, served from that party's CDN. It is now the grid the S is
+  built on, drawn in code; the owner picked it over an aurora after seeing both on the real
+  page. Every video the site plays is now its own, and the content security policy allows media
+  from the site alone.
+- **The background comes alive on wide screens** `7de9942` `ecc8670`. The owner asked for
+  activity on the grid while there are no users yet: cards of example savings and buys appear
+  beside the frame, fed by a line from the Axiom, GMGN and Photon terminals, with a large faint
+  S and floating SPYx, ANTHROPIC, SOL and USDC logos behind. At the owner's request the cards no
+  longer say "Example" and carry no address or time — they say what a trade does, not who made
+  it — while the frame still reads "Example — nobody's pension". Only at 1024 px and wider, never
+  with reduced motion.
+- **Simpler words** `ecc8670`. The owner asked for a summary that is easier to read: "Trade as
+  usual and grow your own onchain pension", and a shorter beta line that still says the team
+  can update the SaverFi program, because it is true.
+- **Every button goes where it says** `7160b30`. Connect connects and, once the login succeeds,
+  goes straight into the app — the pension, or the setup if there is no vault yet; before, it
+  stayed on the landing. A visitor already connected sees "Open my pension". "See the app" and
+  scrolling open the sample; Leaderboard and Dashboard are plain links, and the bar reads
+  "Leaderboard · See the app · Dashboard │ Connect". A deployment without the login provider's
+  configuration no longer breaks the landing. The full login-then-pension path is tested only
+  against the development stand-in for Privy; on production, Connect was checked as far as
+  opening the real wallet dialog.
+
+## 2026-10-07
+
+*Partial: written at about 11:15 Lisbon from the commits up to `368d791` (03:17) and the live
+services at 10:13 UTC.*
+
+The night shift after the merge: the global stats dashboard reached production with real
+numbers, and the Manage wallets screen was rebuilt. Six commits landed between 02:12 and 03:17
+Lisbon, all on `main`.
+
+**Dashboard**
+
+- **A public `/dashboard` with every pension added up** `b17a59f`. The owner asked for it on
+  30 September and named it on the 6th: a page "to verify the numbers and see how the protocol
+  operates". It follows the app's Live/Mock switch: Mock shows a labelled sample of 24 invented
+  pensions over 60 days; Live reads the keeper. Nothing it could not read is ever drawn as a 0 —
+  a missing figure is "—" with its reason, a total it cannot prove whole says "at least", and
+  dollars are always "≈ at today's SOL price".
+- **The keeper now serves the dashboard's daily figures** `14de18e`. `/leaderboard` carries a new
+  optional `stats` block — totals, by mode, by day and by asset — from two read-only queries,
+  with no migration and no new writes. A failed read keeps the last good block, which carries
+  its own time and expires after 24 hours, so it can never stop the leaderboard refreshing. On
+  the morning of the 7th the live block reported 9 settlements, 0.186381968 SOL saved (the same
+  lamports as the leaderboard) and 52.80 USDC invested in 9 buys.
+- **Redrawn in the style of Uniswap Analytics** `69bac7d`, at the owner's request: a strip of
+  headline figures, two cards with a large number and a chart (the cumulative savings curve and
+  daily trading by mode), counters with two-week mini-bars, and tables of the leading pensions
+  and of the assets bought. A follow-up fixes a caption that counted days with a settlement
+  where it meant days with trading measured — the first settlement, on 19 September, measured
+  none `74b4887`.
+
+**Web**
+
+- **Manage wallets opens on an overview** `8bd2dab`. The owner found the modal, five cards
+  stacked, too complicated; it now has its own tabs on the left (Overview, Vault, Trading
+  wallets, Investing, Take money out) and opens on an overview that only reads what the screen
+  already has. Every tab stays mounted, so a signature half-way through survives a tab change.
+- **The navigation bar in two halves** `368d791`. At the owner's request: navigating your own
+  pension on the left; on the right, after a divider, the all-pensions Dashboard, then what is
+  set per visit (Live/Mock, the account), with the theme switch last. "Back to my pension"
+  is gone from the Leaderboard and the Dashboard, since the Pension tab already is that link.
+
+**Operations**
+
+- **A push to `main` does not restart the volume keeper.** The profit keeper restarted at
+  01:54:35 UTC, 49 seconds after the push, and serves the new block; the volume keeper is still
+  the process started on 2026-09-25 and runs that day's code. The web does not read it, so the
+  dashboard is unaffected. The restart also reset the doorbell: its webhook sync failed again a
+  minute later, and by 10:12 UTC it had received no event, so every sweep is still a full pass.
+- **A fresh UI/UX audit** of production was run at the owner's request after the wallets modal
+  shipped; one finding is that a shared link shows no picture on X or Telegram, because
+  the site has no social image. Nothing of it is built yet.
+
+## 2026-10-06
+
+The Stocklana judging is over, and what was built during it went to production. Three commits,
+all in the evening.
+
+- **`post-submit` is merged into `main`** `9c4fa2b`, on the owner's "do the merge". `main` had
+  not moved during the judging, so the merge had no conflicts; before it, the whole suite ran
+  green on the branch (3,304 tests). Work goes back to `main`, and `post-submit` is frozen: no
+  more commits or pushes there. Every working session was told.
+- **Visitor analytics** `a9dbf0d`. The owner wanted to know how many people visit the site and
+  where they come from. Vercel Web Analytics gives page views, referrers, countries and devices
+  without cookies and without identifying anyone, so it needs no consent banner — and for the
+  same reason it cannot say *who* visits. It loads only when the site runs on Vercel, so the
+  content security policy did not change.
+- **Money came out of a vault for the first time.** At 19:08 UTC the owner's pension key took
+  0.004312315 ANTHROPIC out of the vault with `withdraw_token`
+  ([`5GMPTgTg…`](https://solscan.io/tx/5GMPTgTgipXbt6T3RKHMFwvkhRhGR8npodrSJNSFSXtAcoBdeQS4T5SUqKizRVd1zGFsxcDP7up5Ke2VPrzNp2wc)),
+  and the owner reported that it "works perfectly". "Only your key takes it out" is the
+  project's central promise and was the one without a transaction to show for it; it is now row
+  13 of the README's proof table `1ad4bcf`. The plain SOL `withdraw` has still not been used on
+  mainnet.
+- **A roadmap review.** The owner asked which README items are really done and what to improve
+  next; every roadmap item was checked against the code and the chain. The owner then chose
+  the interface as the next focus and moved to a separate session for it, while another session
+  continued the dashboard.
+
+## 2026-10-03
+
+No commits from the 1st to the 4th of October: `post-submit` still ends at `7f07dea`, and `main`
+is still the submission-day commit `a1cbc50`. This entry also covers what the chain and the
+keeper showed over those days.
+
+- **The merge planned for 3 October has not happened yet.** On 2026-10-05 `main` and
+  `origin/main` were still at `a1cbc50`, and the work of 27–30 September is only on
+  `post-submit`. Production is still built from the submission-day code.
+- **A third vault on mainnet.** On 2026-10-02 at 00:54 UTC another pension key created a vault
+  ([`3tRMdmWu…`](https://solscan.io/tx/3tRMdmWujVq28yibFxBs6ezXmQvkrKEnYj113J2Ysx68gGouL8zrH9TtSmDkLEgRg9UuHkGKQ3fj4HegAZ8zYFbU))
+  and linked a trading wallet to it 52 seconds later
+  ([`49PDErZp…`](https://solscan.io/tx/49PDErZpjo9Bypb7ZGP5eWu914rptb9u8bGVFmcGMswV4WZ6pNHyyvTseD3ZzpH7ihNDKJ1Q4TBjtWeTvxXgZABM)).
+  The profit keeper picked it up on its own and now watches three wallets. On 2026-10-05 both new
+  vaults still had nothing settled into them and no investment policy signed, and the owner's
+  vault had not moved since 2026-09-25.
+- **The webhook doorbell stopped following new wallets.** A few seconds after that link, the
+  keeper tried to add the new addresses to its Helius webhook, and Helius did not keep the edit.
+  The keeper stops resending it until something changes, and on 2026-10-05 it reported 4,982
+  failures in a row; the doorbell last rang on 2026-09-26. Nothing is missed today, because
+  below 50 wallets every sweep still checks every wallet once a minute, but the doorbell needs
+  this fixed before it can narrow a sweep.
+- **An X header banner for @SaverFi.** The owner asked for a banner that explains the project at a
+  glance, built from elements of the launch videos. Three designs were drafted and judged; the
+  owner kept the winner and asked for a popup of random stock purchases beside its chart, and for
+  a green glow around the logo in the avatar. None of it is in the repository.
+
+## 2026-09-30
+
+Two small commits after three quiet days (nothing on the 28th or the 29th), the decision that
+shapes the days up to the judging, and a second vault on mainnet.
+
+- **Work after the submission goes to its own branch.** Stocklana's judges evaluate until
+  2 October, and what they look at is production, which is built from `main`. So the owner moved
+  all development onto a `post-submit` branch, created from the submission-day commit `a1cbc50`,
+  until a merge planned for 3 October. Only an urgent fix to something broken in production goes
+  to `main`, and only after telling the owner. The branch does not isolate shared state — the
+  database, the Privy policies, the hosting variables and the program on mainnet — so there are
+  no destructive migrations and no program upgrade until then. Every working session
+  acknowledged it.
+- **The changelog of the 27th landed on `post-submit`, not on `main`** (`39899ad`), together with
+  the proof-table rows about what happened after the deadline, for the same reason.
+- **The launch film stays out of the repository.** The film is a separate project with renders
+  and audio measured in gigabytes; the owner does not want it in the product's repository, so
+  its folder is ignored whole (`7f07dea`). It had been committed on the branch for a few minutes
+  and was removed from the history as well, so the merge will not carry it.
+- **A global stats dashboard is next.** The owner asked for a page of app-wide statistics, tiles
+  and stacked bars in the style of on-chain analytics sites but in the app's own shadcn look, and
+  opened a separate session for it. What all-users data the app can show today was mapped and
+  then reviewed against the code. Nothing of it is built yet.
+- **A second vault on mainnet.** At 13:15 UTC a pension key other than the owner's created a
+  vault ([`5KQdiqrX…`](https://solscan.io/tx/5KQdiqrXdvekMEWoTfqjvp2k7d7Z8XT756EhrzNRfEY7oEtgyPW97vLXHfiMpWdLyuPUiwiRLHbqeejZfYQTYijd))
+  and, half a minute later, linked a trading wallet to it with the signed consent
+  ([`61Dwhefc…`](https://solscan.io/tx/61DwhefcNuGhcKqMzc1sXMh5sFZsSg66V5Xe7qRLFhc9objirYqRsGESNEuC95cTKSULAE7dvXToxqa4XaihmzHe)).
+  The profit keeper picked the new wallet up on its own. Nothing has been settled into that vault
+  yet, and it has no investment policy signed. Who signed it, and from which screen, is not
+  recorded.
+
 ## 2026-09-27
 
 A quiet weekend after the submission: no commits on the 26th or the 27th, and nothing touched

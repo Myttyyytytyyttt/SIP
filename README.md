@@ -174,25 +174,45 @@ The newest day of the [changelog](CHANGELOG.md), copied here each morning. Every
 
 <!-- latest-changelog:start -->
 <details>
-<summary><b>2026-09-27</b> — A quiet weekend after the submission: the owner keeps developing, and the keeper's first critical alert fired and recovered on its own</summary>
+<summary><b>2026-10-08</b> — A landing of SaverFi's own: the logo intro, the S's grid instead of the template's clip, and a Connect that goes straight to your pension (partial)</summary>
 
 <br>
 
-A quiet weekend after the submission: no commits on the 26th or the 27th, and nothing touched
-the vault after 19:49 UTC on the 25th. Two things happened, both in the conversations.
+A new landing, built overnight at the owner's request, one step after another; all of it is in
+production at [`/welcome`](https://sip-website-oficial.vercel.app/welcome).
 
-- **Development continues after the submission.** Having read the Stocklana rules, the owner
-  decided to keep improving the app rather than freeze it, and to point the judges at the
-  commit from submission day if they ask what was submitted. That commit is `a1cbc50`, still
-  the head of main.
-- **The keeper's first critical alert in production.** At about 14:05 Lisbon the profit keeper
-  sent a critical alert to the owner's Telegram: a sweep had failed because the RPC provider's
-  account index was overloaded and refused the call that lists every account the program owns,
-  suggesting a paginated variant instead. Nothing was changed. On 2026-09-28 the same keeper
-  process, running since 2026-09-25 18:38 UTC, reported no sweep error, one alert delivered in
-  its lifetime, and over 3,800 sweeps. So the alert path works end to end, and the sweep
-  recovered on its own; how many sweeps failed is not recorded. The keeper finds its wallets
-  with that one heavy call on every sweep, so this will come back as the program grows.
+- **It opens on SaverFi's own logo** `c9194fd`. The green build of the S from the launch film
+  plays once per browser tab, then the S flies into the navigation bar and the page enters in
+  pieces — headline line by line, buttons one after another, the frame from below. It can be
+  skipped with a click or a key, and with reduced motion it is a still frame. It only counts as
+  seen if it really was: a slow or failed start no longer uses it up `7de9942`.
+- **The frame shows the app itself**: an eight-second loop of the sample dashboard, ending on
+  the same picture the visitor gets on scrolling in. The owner chose to re-seed the sample to
+  look like the real product — a SPYx 60 / ANTHROPIC 40 basket, Volume at 1 %, a $10 threshold
+  — and the README's screenshot is now that same capture.
+- **The reference template's footage is gone** `9f23adf`. The background used to be a third
+  party's clip, another brand's card, served from that party's CDN. It is now the grid the S is
+  built on, drawn in code; the owner picked it over an aurora after seeing both on the real
+  page. Every video the site plays is now its own, and the content security policy allows media
+  from the site alone.
+- **The background comes alive on wide screens** `7de9942` `ecc8670`. The owner asked for
+  activity on the grid while there are no users yet: cards of example savings and buys appear
+  beside the frame, fed by a line from the Axiom, GMGN and Photon terminals, with a large faint
+  S and floating SPYx, ANTHROPIC, SOL and USDC logos behind. At the owner's request the cards no
+  longer say "Example" and carry no address or time — they say what a trade does, not who made
+  it — while the frame still reads "Example — nobody's pension". Only at 1024 px and wider, never
+  with reduced motion.
+- **Simpler words** `ecc8670`. The owner asked for a summary that is easier to read: "Trade as
+  usual and grow your own onchain pension", and a shorter beta line that still says the team
+  can update the SaverFi program, because it is true.
+- **Every button goes where it says** `7160b30`. Connect connects and, once the login succeeds,
+  goes straight into the app — the pension, or the setup if there is no vault yet; before, it
+  stayed on the landing. A visitor already connected sees "Open my pension". "See the app" and
+  scrolling open the sample; Leaderboard and Dashboard are plain links, and the bar reads
+  "Leaderboard · See the app · Dashboard │ Connect". A deployment without the login provider's
+  configuration no longer breaks the landing. The full login-then-pension path is tested only
+  against the development stand-in for Privy; on production, Connect was checked as far as
+  opening the real wallet dialog.
 
 </details>
 <!-- latest-changelog:end -->
@@ -209,7 +229,7 @@ the vault after 19:49 UTC on the 25th. Two things happened, both in the conversa
 - [x] **Signing through a Privy server-wallet seat**, bounded by a policy that allows only this program's instructions
 - [x] **Single-writer safety** — a Postgres advisory lock; the loser of a deploy handover demotes to dry run instead of double-settling
 - [x] **Dry run by default** — no signing secret is read until armed with an exact sentence
-- [x] **Web on Vercel** — landing, sample dashboard, live dashboard, `/wallets` vault screens, Solana routes
+- [x] **Web on Vercel** — landing, sample dashboard, live dashboard, `/wallets` vault screens, the all-pensions `/dashboard`, Solana routes
 - [x] **Vault, link, policy and pause flows** signed in the browser by the pension key
 - [x] **Live/Mock is a pure function** — sample data can never render with a live badge
 - [x] **CSP, HSTS and frame-ancestors** pinned by a build check that fails the build on drift
@@ -219,16 +239,18 @@ the vault after 19:49 UTC on the 25th. Two things happened, both in the conversa
 - [x] **[Usage leaderboard](https://sip-website-oficial.vercel.app/leaderboard)** — points come from showing up (participation and streak), with the size term capped and logarithmic, so a large wallet cannot buy the top spot
 - [x] **Aggregator routing through Jupiter v6** — the single-pool walk is gone. Proven on mainnet 2026-09-22: `convert` and `invest` both CPI Jupiter, which routed Orca Whirlpool into SPYx. The routes need address lookup tables to fit a packet at all, so the keeper compiles a v0 transaction when there are tables and the legacy one when there are not
 - [x] **The owner picks the basket and the limits** — a picker for 1–5 stocks and their shares (the program takes up to 8), the minimum per stock, the per-settlement cap and the venue, all signed in the browser, and editable after the first signature. A two-stock basket (SPYx + ANTHROPIC) signed this way bought both its legs on mainnet on 2026-09-22
-- [x] **A first-run setup for a new pension key** — a key with no vault is walked through two steps: what SaverFi does, then create the vault, choosing how much of each gain to keep (5–50 %) and whether the savings stay in SOL or buy stocks. The vault takes one signature; linking a trading wallet follows on the dashboard, and if stocks were chosen, buying them is asked for once the first savings arrive (in the same browser). Live on the site since 2026-09-24, checked in the production build — no vault has been created through it on mainnet yet
+- [x] **A first-run setup for a new pension key** — a key with no vault is walked through two steps: what SaverFi does, then create the vault, choosing how much of each gain to keep (5–50 %) and whether the savings stay in SOL or buy stocks. The vault takes one signature; linking a trading wallet follows on the dashboard, and if stocks were chosen, buying them is asked for once the first savings arrive (in the same browser). Live on the site since 2026-09-24, checked in the production build. Two more pension keys have created vaults on mainnet since, on 2026-09-30 and on 2026-10-02; whether they came through this setup is not recorded
 - [x] **The vault's rule is changed from the live page itself** — since 2026-09-25 a gear on the Savings rule card opens *Vault settings*: profit or volume and its rate, pause, the basket and its threshold, with a "?" on every title that explains it. Every change is signed by the pension key — `set_policy_v2` for how the vault saves, `set_invest_policy` for what it buys. Proven on mainnet 2026-09-23, when the owner's vault went from 20 % to 25 % of profit from the rule card
 - [x] **Volume mode, live on mainnet** — a second keeper service settles volume vaults, and the web offers Volume to every vault, starting at 1 %; the activity rows say "1 % of $X in buys and sells". Proven on mainnet 2026-09-25: after the owner switched the vault to 1 % of volume, three `settle_v2` in volume mode saved 0.043755651 SOL from five real trades, and a fourth that evening took the vault's USDC past its basket's threshold and into a SPYx buy. Live on the site, checked in the production build. So far one vault and one wallet, which went back to profit the same evening, so no vault saves on volume today
+- [x] **Money comes back out** — `withdraw_token`, signed by the pension key alone, took 0.004312315 ANTHROPIC out of the owner's vault on mainnet on 2026-10-06 ([`5GMPTgTg…`](https://solscan.io/tx/5GMPTgTgipXbt6T3RKHMFwvkhRhGR8npodrSJNSFSXtAcoBdeQS4T5SUqKizRVd1zGFsxcDP7up5Ke2VPrzNp2wc)). The plain SOL `withdraw` has not been used on mainnet yet
+- [x] **[A public dashboard of every pension](https://sip-website-oficial.vercel.app/dashboard)** — since 2026-10-07: what all vaults have saved, traded and invested, by day, by mode and by asset, read from the keeper's `stats` block (live, it matched the leaderboard to the lamport). A labelled sample in Mock; in Live, anything it could not read shows as "—", never as 0. Today its numbers are one vault's, since the other two have not saved yet
+- [x] **[A landing of SaverFi's own](https://sip-website-oficial.vercel.app/welcome)** — since 2026-10-08: it opens on the logo from the launch film, the background is the S's grid drawn in code with example activity on wide screens, and the frame plays a loop of the app. The reference template's clip from a third party's CDN is gone; every video is served by the site itself. Connect goes straight into your pension, or into the setup if you have no vault yet — that last step is tested against a development stand-in for the login provider, not with a real wallet on production
 - [x] **[Public prices, no wallet needed](https://sip-website-oficial.vercel.app/prices/view)** — `/prices` answers JSON and `/prices/view` is the page for a reader: the SOL pool beside Pyth's on-chain account and beside Pyth's Hermes service, with the drift between the two; SPYx beside Pyth's own feed; ANTHROPIC beside PreStocks' own API, with the fee in force. Every figure carries its age or source. Checked live on 2026-09-26
 
 ### 🔨 In progress
 
 - [ ] **Polishing volume in the web** — it settles and converts on mainnet, and the owner is still refining how it reads; for now a settlement row does not say how many trades it covered or split the buy from the sell, and the first-run setup offers Profit only
-- [ ] **SaverFi's own landing footage** — the hero still plays the reference template's clip from a third party's CDN
-- [ ] **Only check the wallets that moved** — a Helius webhook rings the keeper when a linked wallet or vault transacts, so each sweep turns only those, plus a safety rotation that still reaches everyone within 30 minutes. Built, deployed and switched on 2026-09-23, on the profit keeper only. On 2026-09-25 it earned the keeper's trust: between a restart at 17:30 UTC and 17:56 it received 16 events, none rejected and no misses detected. It starts untrusted after every restart until its first event; the deploy at 18:38 UTC reset it, and by 2026-09-26 it was trusted again, with 21 events received, none rejected and no misses. Its webhook sync, meanwhile, reports that Helius did not keep the keeper's last edit of the webhook. Below 50 linked wallets its safety rotation turns every wallet on every sweep anyway, so today every sweep is still a full pass
+- [ ] **Only check the wallets that moved** — a Helius webhook rings the keeper when a linked wallet or vault transacts, so each sweep turns only those, plus a safety rotation that still reaches everyone within 30 minutes. Built, deployed and switched on 2026-09-23, on the profit keeper only. On 2026-09-25 it earned the keeper's trust: between a restart at 17:30 UTC and 17:56 it received 16 events, none rejected and no misses detected. It starts untrusted after every restart until its first event; the deploy at 18:38 UTC reset it, and by 2026-09-26 it was trusted again, with 21 events received, none rejected and no misses. Since 2026-10-02 its webhook sync reports that Helius did not keep the keeper's last edit of the webhook's address list; after the restart of 2026-10-07 at 01:54 UTC it failed again, and eight hours later the doorbell had received no event, so it is untrusted. Below 50 linked wallets its safety rotation turns every wallet on every sweep anyway, so today every sweep is still a full pass
 - [ ] **Settlement at scale** — proven nine times for one wallet, five at profit and four at volume; the next milestone is many wallets, many windows. A bench that boots the real keeper against a fake chain now measures how many wallets one sweep can carry, so that number is measured rather than guessed
 - [ ] **Widening the shelf** — nine tokenized assets are catalogued and read on mainnet, each admitted or refused by six dated rules. Two clear every rule today; the rest are refused in public, with the reading that failed them
 
@@ -245,13 +267,13 @@ the vault after 19:49 UTC on the 25th. Two things happened, both in the conversa
 
 A hackathon README that overclaims is worse than one that claims less, so:
 
-- The money path is proven for **one wallet and one vault**. The settlement half has run **nine times**, for 0.186381968 SOL in total — the vault's on-chain `lifetime_saved`: five times at profit (2026-09-19, 2026-09-23 and three on 2026-09-25) and four times at volume on 2026-09-25, between 17:45 and 19:38 UTC. The investing half has filled several times, including through Jupiter and into a two-stock basket on 2026-09-22 and again on 2026-09-25, with USDC that included the volume savings. Most of what the vault has received came from the owner's own test deposits (0.164 SOL and 14.1 USDC), not from settlement. It is real, and it is one wallet: on 2026-09-26 the program holds exactly one vault, so the new-user setup has not yet created a vault for anyone — and since the owner moved it back to profit at 19:41 UTC on 2026-09-25, no vault saves on volume.
-- **Two keeper services, one per mode.** The profit keeper settles profit vaults and invests every vault's savings, volume vaults' included; the volume keeper settles volume vaults and never invests. They are built from the same keeper package, a role setting picks which mode each one settles, each runs under its own lock, and both sign with the same key — the one the program's configuration names as both its attester and its keeper. Each sweeps its wallets one after another, once a minute. The webhook "doorbell" meant to limit a sweep to the wallets that moved runs on the profit keeper only, and below 50 linked wallets its safety rotation still turns every wallet each sweep, so today both keepers do a full pass every sweep. A bench run on a laptop (not on Railway), made before the split, puts one keeper's ceiling at **at most ~97 linked wallets** at the public RPC's latency when 2 % of them trade in a given minute, and fewer as more of them do (54 at 20 %); the volume keeper's own ceiling has not been measured. Faster RPC raises it only as far as the provider plan's requests per second allow, and nothing outside the process polls `/health` yet, so a stalled keeper would not page anyone. Each sweep finds its wallets with one unpaginated `getProgramAccounts` call; on 2026-09-27 the RPC provider refused it as overloaded, the keeper's own Telegram alert fired, and the sweeps recovered by themselves, but that call will need paginating as the program grows.
+- The money path is proven for **one wallet and one vault**. The settlement half has run **nine times**, for 0.186381968 SOL in total — the vault's on-chain `lifetime_saved`: five times at profit (2026-09-19, 2026-09-23 and three on 2026-09-25) and four times at volume on 2026-09-25, between 17:45 and 19:38 UTC. The investing half has filled several times, including through Jupiter and into a two-stock basket on 2026-09-22 and again on 2026-09-25, with USDC that included the volume savings. Most of what the vault has received came from the owner's own test deposits (0.164 SOL and 14.1 USDC), not from settlement. It is real, and it is one wallet: on 2026-10-02 the program holds three vaults, but the other two — created by two other pension keys on 2026-09-30 and 2026-10-02, each with one trading wallet linked and no investment policy signed — have not had anything settled into them yet — and since the owner moved it back to profit at 19:41 UTC on 2026-09-25, no vault saves on volume.
+- **Two keeper services, one per mode.** The profit keeper settles profit vaults and invests every vault's savings, volume vaults' included; the volume keeper settles volume vaults and never invests. They are built from the same keeper package, a role setting picks which mode each one settles, each runs under its own lock, and both sign with the same key — the one the program's configuration names as both its attester and its keeper. Each sweeps its wallets one after another, once a minute. The webhook "doorbell" meant to limit a sweep to the wallets that moved runs on the profit keeper only, and below 50 linked wallets its safety rotation still turns every wallet each sweep, so today both keepers do a full pass every sweep. Since 2026-10-02, when a third wallet was linked, the profit keeper has reported that Helius did not keep its last edit of the webhook's address list (4,982 failures in a row on 2026-10-05, and again after the restart of 2026-10-07), and the doorbell has not rung since 2026-09-26; the full pass still reaches every linked wallet, but the doorbell will need that fixed before it can narrow a sweep. A bench run on a laptop (not on Railway), made before the split, puts one keeper's ceiling at **at most ~97 linked wallets** at the public RPC's latency when 2 % of them trade in a given minute, and fewer as more of them do (54 at 20 %); the volume keeper's own ceiling has not been measured. A push to `main` redeploys the profit keeper but not the volume keeper: on 2026-10-07 the volume keeper was still the process started on 2026-09-25, running that day's code. Faster RPC raises it only as far as the provider plan's requests per second allow, and nothing outside the process polls `/health` yet, so a stalled keeper would not page anyone. Each sweep finds its wallets with one unpaginated `getProgramAccounts` call; on 2026-09-27 the RPC provider refused it as overloaded, the keeper's own Telegram alert fired, and the sweeps recovered by themselves, but that call will need paginating as the program grows.
 - **Volume is measured in SOL.** A swap with no SOL or wrapped-SOL leg (USDC into a token, one token into another) counts only the SOL the wallet pays beside it, such as a tip, and a buy and a sell of one token inside a single transaction count at most their net SOL change, not both legs. Each settlement still moves at most the vault's cap — 0.06 SOL by default, which at 1 % is 6 SOL of trading in one settlement — and anything owed above it is not carried over. Switching *to* Volume forgives what the profit rule had not yet charged; switching back has no such boundary, so a volume-era trade still unsettled at that moment is measured as profit.
 - **The keeper routes Jupiter v6 and nothing else.** Raydium CLMM is retired by name, so a vault whose signed policy still points at it refuses every sweep — loudly, before any SOL is wrapped — until its owner re-signs. Adding a venue is an entry plus a route builder, not a configuration change.
 - **Two of the nine catalogued assets are offerable today.** The other seven are refused by the catalogue's own rules — a fee over the ceiling, a venue too thin for the reference leg, a floor source too small to be a price, or a recent failure still inside its quarantine window.
 - A stock leg has **no independent price anchor**. The depth gate measures depth at the size of the turn and has no opinion about price; Pyth anchors the SOL hop alone; the only price bound on a stock leg is the floor its owner signed, which is derived once and then stands.
-- The landing's background video **belongs to the reference template**, not to SaverFi.
+- The landing's moving background shows **example activity**, not real users: the cards are invented to show what a trade does, and the frame says "Example — nobody's pension".
 - The program is **upgradeable by a single team key** with no timelock. That is a beta posture, stated plainly.
 - `withdraw_token` was exercised on mainnet for the first time on 2026-10-06, when the owner took 0.004312315 ANTHROPIC out of the vault ([`5GMPTgTg…`](https://solscan.io/tx/5GMPTgTgipXbt6T3RKHMFwvkhRhGR8npodrSJNSFSXtAcoBdeQS4T5SUqKizRVd1zGFsxcDP7up5Ke2VPrzNp2wc)). The plain SOL `withdraw` is implemented and tested, but **has not yet been exercised on mainnet**.
 
