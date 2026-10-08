@@ -53,6 +53,7 @@ import type {
 } from "@/lib/live-types";
 import { type FloorRoom, floorRoom, lastInvestedDay, todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
 import type { InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
+import { tradingWalletLabels } from "@/lib/wallet-labels";
 
 /** A plain SOL transfer under this is dust — a rent top-up or a dusting, not a saving worth a row. */
 export const DUST_LAMPORTS = 100_000n;
@@ -347,8 +348,6 @@ function holdingsOf(
   return { rows: withWeights, worthNow, notInvested: sum(["sol", "wsol", "usdc"]), rentOnly };
 }
 
-const walletLabel = (index: number): string => `Trading wallet ${index + 1}`;
-
 /** The most wallets one snapshot asks about, and so the most this screen can list. */
 const MAX_WALLET_ROWS = 10;
 
@@ -365,7 +364,13 @@ interface WalletsRead {
   readonly truncated: boolean;
 }
 
-function walletsOf(snapshot: LiveSnapshotJson, privyWallets: readonly string[], walletFloor: bigint | null, walletReserve: bigint | null): WalletsRead {
+function walletsOf(
+  snapshot: LiveSnapshotJson,
+  privyWallets: readonly string[],
+  importedWallets: ReadonlySet<string>,
+  walletFloor: bigint | null,
+  walletReserve: bigint | null,
+): WalletsRead {
   const bySnapshot = new Map(snapshot.wallets.map((wallet) => [wallet.wallet, wallet]));
   const canSettleOf = (lamports: bigint | null): boolean | null => {
     if (lamports === null || walletFloor === null || walletReserve === null) return null;
@@ -377,7 +382,8 @@ function walletsOf(snapshot: LiveSnapshotJson, privyWallets: readonly string[], 
   // EVERY candidate first, and the cap afterwards, so the count of what was left
   // out is known rather than lost inside the loop that dropped it.
   //
-  // Privy's HD order leads: these are the wallets this account actually owns.
+  // Privy's list leads — created wallets in HD order, then imported ones: these are the wallets this account
+  // actually owns, named as the Wallets tab names them (src/lib/wallet-labels.ts).
   // Then links found on chain for wallets Privy does not list here — the vault
   // saves from them all the same, so hiding them would understate the pension.
   interface Candidate {
@@ -388,11 +394,12 @@ function walletsOf(snapshot: LiveSnapshotJson, privyWallets: readonly string[], 
   }
   const candidates: Candidate[] = [];
   const seen = new Set<string>();
-  privyWallets.forEach((address, index) => {
-    if (seen.has(address)) return;
+  const labels = tradingWalletLabels(privyWallets.map((address) => ({ address, imported: importedWallets.has(address) })));
+  for (const address of privyWallets) {
+    if (seen.has(address)) continue;
     seen.add(address);
-    candidates.push({ address, label: walletLabel(index), source: "privy", link: null });
-  });
+    candidates.push({ address, label: labels.get(address) ?? address, source: "privy", link: null });
+  }
   for (const link of snapshot.links?.items ?? []) {
     if (seen.has(link.wallet)) continue;
     seen.add(link.wallet);
@@ -762,19 +769,22 @@ export interface LiveDashboardInput {
    * on the vault page being one contiguous slice.
    */
   readonly linkEntries?: readonly LiveEntryJson[];
-  /** The Privy embedded wallets on this account, in HD order. */
+  /** The Privy embedded wallets on this account, as tradingWalletsOf lists them: created in HD order, then imported. */
   readonly privyWallets: readonly string[];
+  /** Which of them were imported rather than created here: they are named apart. None when absent. */
+  readonly importedWallets?: readonly string[];
 }
 
 /** The whole screen, from one snapshot and the history loaded so far. */
 export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
   const { snapshot, activity, privyWallets } = input;
+  const importedWallets = new Set(input.importedWallets ?? []);
   const nowMs = snapshot.readAtMs;
   const vault = vaultView(snapshot);
   const usdc = tokenOf(snapshot, USDC_MINT);
   const policy = policyView(snapshot, usdc?.amountRaw ?? null, nowMs);
   const holdings = holdingsOf(snapshot, vault, policy);
-  const wallets = walletsOf(snapshot, privyWallets, rawFrom(snapshot.rents.walletFloor), vault.walletReserve);
+  const wallets = walletsOf(snapshot, privyWallets, importedWallets, rawFrom(snapshot.rents.walletFloor), vault.walletReserve);
 
   // THE FEED IS THE VAULT'S HISTORY AND ONLY THE VAULT'S. A link page is a
   // wallet's slice, so listing it here would scatter rows into a column whose

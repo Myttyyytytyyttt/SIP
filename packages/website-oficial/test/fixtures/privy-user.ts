@@ -95,14 +95,16 @@ export function userWith(linkedAccounts: LinkedAccountWithMetadata[]): User {
 /**
  * One account with everything Privy can list: the Phantom pension key, an email, trading wallets out
  * of HD order in both embedded generations, one seated and one not, an imported wallet, an EVM
- * embedded wallet, and a duplicate entry.
+ * embedded wallet, and a duplicate entry. The imported wallet carries walletIndex 0, as Privy records
+ * an imported Solana wallet (react-auth 3.36.0, seen in production 2026-10-08) — the first created
+ * wallet's index too — and its address sorts before TRADING_0's, so the kind must come from `imported`.
  */
 export const RECORD: User = userWith([
   phantom(),
   { type: "email", address: "someone@example.invalid", ...VERIFIED },
   embedded(TRADING_1, 1, true),
   embedded(EVM_EMBEDDED, 0, true, { chainType: "ethereum" }),
-  embedded(IMPORTED, null, false, { imported: true }),
+  embedded(IMPORTED, 0, false, { imported: true }),
   embedded(TRADING_0, 0, false),
   embedded(TRADING_2, 2, true, { walletClientType: "privy-v2" }),
   embedded(TRADING_0, 0, false),

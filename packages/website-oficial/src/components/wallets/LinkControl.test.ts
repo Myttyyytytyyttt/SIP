@@ -105,7 +105,7 @@ function render(
   mocked.buttons.length = 0;
   const refresh = vi.fn();
   const value: VaultScreenValue = { pensionKey: PENSION_KEY, view: { kind: "ready", state: stateOf(chain) }, refresh, api: { build } as unknown as VaultApi };
-  const row = { address, id: null, walletIndex: 0, imported: false, listed: true };
+  const row = { address, id: null, walletIndex: 0, imported: false, listed: true, label: "Trading wallet 1" };
   const rows = createElement("ul", null, createElement(TradingWalletRow, { row }));
   const held = sent.length === 0 ? createElement(VaultWriteLock, null, rows) : createElement(WriteLockContext.Provider, { value: lockAwaiting(sent) }, rows);
   const html = renderToStaticMarkup(createElement(TooltipProvider, null, createElement(VaultScreenContext.Provider, { value }, held)));

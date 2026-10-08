@@ -50,6 +50,7 @@ import { isForeignSecret, judgePastedKey, privateKeyForImport, type PastedKey } 
 import { HOLDINGS_COPY, importPreflight, startingPointLine, type HoldingsNotice, type Preflight } from "@/lib/import-preflight";
 import { symbolOfMint } from "@/lib/live-symbols";
 import type { ImportAndLinkOutcome } from "@/lib/create-and-link";
+import { hasCreateRoot } from "@/lib/trading-wallets";
 import { CREATE_LINK_COPY, IMPORT_LINK_COPY, IMPORT_PANEL_COPY, VAULT_COPY, shortAddress } from "@/lib/vault-copy";
 
 /** Holdings listed by name before the rest are counted: a wallet can hold hundreds. */
@@ -250,6 +251,11 @@ export function ImportWalletPanel({
             {go.needsLink && startingPointLine(go.lamports) !== null ? <p className="text-muted-foreground">{startingPointLine(go.lamports)}</p> : null}
           </div>
           {go.holdings !== null ? <HoldingsList notice={go.holdings} acknowledged={acknowledged} onAcknowledge={setAcknowledged} /> : null}
+          {!hasCreateRoot(user) ? (
+            <p data-no-created-yet="" className="text-xs text-muted-foreground">
+              {IMPORT_PANEL_COPY.noCreatedYet}
+            </p>
+          ) : null}
           {ahead !== null ? <p className="text-xs text-muted-foreground">{ahead}</p> : null}
         </div>
       ) : null}

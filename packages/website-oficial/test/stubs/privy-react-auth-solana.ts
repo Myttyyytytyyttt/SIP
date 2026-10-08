@@ -81,7 +81,8 @@ export function useImportWallet(): { importWallet: (input: { privateKey: string;
         connectorType: "embedded",
         imported: true,
         delegated: true,
-        walletIndex: null,
+        // As Privy records an imported Solana wallet: index 0, the first created wallet's number too.
+        walletIndex: 0,
         id: "wallet-id-imported-stub",
         recoveryMethod: "privy-v2",
         firstVerifiedAt: "2026-10-08T00:00:00.000Z",

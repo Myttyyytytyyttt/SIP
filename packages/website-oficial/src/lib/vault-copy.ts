@@ -856,6 +856,9 @@ export const IMPORT_PANEL_COPY = {
   aheadLinked: "One press: SaverFi imports the wallet with its permission. It is already linked to your vault, so nothing is signed and nothing is paid.",
   aheadImportOnly: (reason: string): string => `This imports the wallet with SaverFi's permission. It cannot be linked yet: ${reason}`,
   moreHoldings: (count: number): string => `and ${count} more`,
+  /** Before an import on an account with nothing created here: Privy will not create one afterwards (createRefusal). */
+  noCreatedYet:
+    "This account has no wallet created here yet. Privy creates a new wallet only on an account that already has one created here, so after this import, Create will not work on this account. Create a wallet first if you will want one.",
 } as const;
 
 export const INVEST_COPY = {

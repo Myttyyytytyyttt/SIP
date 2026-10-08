@@ -17,11 +17,14 @@ import {
   ReseatIncomplete,
   ReseatRefused,
   SeatNotConfigured,
+  CREATE_REFUSAL,
+  createRefusal,
   createTradingWallet,
   exportTradingWallet,
   failureText,
   grantKeeperSeat,
   grantRefusal,
+  hasCreateRoot,
   keeperSigners,
   removeKeeperSeat,
   removeRefusal,
@@ -121,7 +124,9 @@ describe("createTradingWallet", () => {
 });
 
 describe("tradingWalletsOf, on a record shaped like the installed types", () => {
-  it("lists every Privy embedded Solana wallet once, in HD order with imported ones last", () => {
+  it("lists every Privy embedded Solana wallet once: created ones in HD order, then imported ones, whose index 0 it drops", () => {
+    // Privy records the imported wallet at walletIndex 0 and its address sorts first: the kind comes from `imported`.
+    expect(IMPORTED < TRADING_0).toBe(true);
     expect(tradingWalletsOf(RECORD)).toStrictEqual([
       { address: TRADING_0, id: null, walletIndex: 0, imported: false },
       { address: TRADING_1, id: "wallet-id-tradingone", walletIndex: 1, imported: false },
@@ -806,6 +811,22 @@ describe("removeKeeperSeat: the owner takes SaverFi's permission off an imported
     await expect(removeKeeperSeat({ address: IMPORTED, renderedUser: seated, removeSigners, refreshUser: unreadable, wait })).rejects.toThrow(REMOVE_COPY.recordLags);
     expect(wait).toHaveBeenCalledTimes(GRANT_BACKOFF_MS.length);
     expect(failureText(new RemoveIncomplete(REMOVE_COPY.recordLags))).toBe(REMOVE_COPY.recordLags);
+  });
+});
+
+describe("createRefusal: Privy creates one more wallet only from a root it did not import", () => {
+  const evmRoot = embedded(EVM_EMBEDDED, 0, true, { chainType: "ethereum" });
+  it.each([
+    ["no Privy wallet at all: Privy creates the first", userWith([phantom()]), null],
+    ["a created wallet at index 0", userWith([phantom(), teeWallet(TRADING_0, 0, true)]), null],
+    ["a created wallet at 0 beside an imported one at 0", userWith([phantom(), teeWallet(TRADING_0, 0, true), teeWallet(IMPORTED, 0, true, { imported: true })]), null],
+    ["ONLY an imported wallet", userWith([phantom(), teeWallet(IMPORTED, 0, true, { imported: true })]), CREATE_REFUSAL],
+    ["only imported wallets, two of them", userWith([phantom(), teeWallet(IMPORTED, 0, true, { imported: true }), teeWallet(TRADING_2, 0, true, { imported: true })]), CREATE_REFUSAL],
+    ["an imported Solana wallet and an EVM root: Privy's root may be either chain", userWith([phantom(), evmRoot, teeWallet(IMPORTED, 0, true, { imported: true })]), null],
+    ["an imported wallet beside a created one Privy lists as privy-v2: Privy's helpers ask for \"privy\" exactly", userWith([phantom(), embedded(TRADING_0, 0, true, { walletClientType: "privy-v2" }), teeWallet(IMPORTED, 0, true, { imported: true })]), CREATE_REFUSAL],
+  ] as const)("%s", (_, user, refusal) => {
+    expect(createRefusal(user)).toBe(refusal);
+    expect(hasCreateRoot(user)).toBe(refusal === null && user.linkedAccounts.some((account) => account.type === "wallet" && account.walletClientType === "privy" && account.walletIndex === 0 && account.imported !== true));
   });
 });
 

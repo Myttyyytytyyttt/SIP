@@ -286,6 +286,7 @@ function ConfiguredFrame({
   // are, so a disconnect is a disconnect.
   const pensionKey = useMemo(() => (user === null || user === undefined ? null : pensionKeyOf(user)), [user]);
   const privyWallets = useMemo(() => tradingWalletsOf(user ?? null).map((wallet) => wallet.address), [user]);
+  const importedWallets = useMemo(() => tradingWalletsOf(user ?? null).filter((wallet) => wallet.imported).map((wallet) => wallet.address), [user]);
 
   // After the patience runs out, say so rather than pulsing forever.
   useEffect(() => {
@@ -340,7 +341,7 @@ function ConfiguredFrame({
     window.history.replaceState(setupState(setupEntryOf(window.history.state)), "", state.replaceUrlWith);
   }, [state.replaceUrlWith, state.kind, pathname, router]);
 
-  const live = useLiveDashboard({ pensionKey: state.kind === "live" ? pensionKey : null, privyWallets });
+  const live = useLiveDashboard({ pensionKey: state.kind === "live" ? pensionKey : null, privyWallets, importedWallets });
   const liveStage = live.view.kind === "ready" ? live.view.data.stage : null;
 
   // Once the setup has been on screen for this key — or was asked for — a read

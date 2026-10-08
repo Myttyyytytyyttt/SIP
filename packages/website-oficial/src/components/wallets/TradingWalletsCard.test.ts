@@ -66,7 +66,7 @@ import { WalletsSectionContext } from "@/components/wallets/wallets-section-cont
 import { VaultWriteLock, WriteLockContext, type WriteLock } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
 import type { CreateAndLinkOutcome } from "@/lib/create-and-link";
-import { MAX_TRADING_WALLETS } from "@/lib/trading-wallets";
+import { CREATE_REFUSAL, MAX_TRADING_WALLETS } from "@/lib/trading-wallets";
 import type { VaultApi, VaultStateJson } from "@/lib/vault-api";
 import { CREATE_LINK_COPY, IMPORT_LINK_COPY, IMPORT_PANEL_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
 
@@ -246,6 +246,28 @@ describe("the second action: import a wallet already in use", () => {
     render(ready());
     expect(buttons(IMPORT_LINK_COPY.button)).toHaveLength(0);
     expect(buttons(CREATE_LINK_COPY.button)[0]?.disabled).toBe(true);
+  });
+
+  it("an account whose wallets are all imported: Create is held with Privy's reason, and the rows say Imported wallet", () => {
+    mocked.user = userWith([phantom(), embedded(TRADING_1, 0, true, { imported: true })]);
+    const { html } = render(ready());
+    expect(buttons(CREATE_LINK_COPY.button)[0]?.disabled).toBe(true);
+    expect(html).toContain(asHtml(CREATE_REFUSAL));
+    expect(html).not.toContain("Phantom&#x27;s window opens partway through");
+    expect(buttons(IMPORT_LINK_COPY.button)[0]?.disabled).toBe(false);
+    expect(html).toContain(">Imported wallet<");
+    expect(html).not.toMatch(/Trading wallet \d/);
+  });
+
+  it("an imported wallet at Privy's index 0 beside a created one: two names, the imported one last", () => {
+    mocked.user = userWith([phantom(), embedded(TRADING_1, 0, true, { imported: true }), embedded(TRADING_0, 0, true)]);
+    const { html } = render(ready());
+    const created = html.indexOf(">Trading wallet 1<");
+    const imported = html.indexOf(">Imported wallet<");
+    expect(created).toBeGreaterThan(-1);
+    expect(imported).toBeGreaterThan(created);
+    expect(html.match(/Trading wallet \d/g)).toHaveLength(1);
+    expect(buttons(CREATE_LINK_COPY.button)[0]?.disabled).toBe(false);
   });
 
   it("is held while a link this screen sent waits for confirmation", () => {

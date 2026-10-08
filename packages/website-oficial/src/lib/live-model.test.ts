@@ -482,6 +482,16 @@ describe("trading wallets", () => {
     expect(view.wallets[2]!.settlementNonce).toBe(2n);
   });
 
+  it("names an imported wallet apart, as the Wallets tab does, never as another 'Trading wallet N'", () => {
+    const imported = "Imp0rtedP1aceho1der11111111111111111111111";
+    const view = toLiveDashboard({ snapshot: snapshot(), activity: null, privyWallets: [WALLET_A, WALLET_B, imported], importedWallets: [imported] });
+    expect(view.wallets.map((wallet) => [wallet.address, wallet.label])).toEqual([
+      [WALLET_A, "Trading wallet 1"],
+      [WALLET_B, "Trading wallet 2"],
+      [imported, "Imported wallet"],
+    ]);
+  });
+
   it("never lists more than the ten the snapshot can ask about", () => {
     const many = Array.from({ length: 12 }, (_, index) => ({
       wallet: `ChainLink${index}P1aceho1der111111111111111`,

@@ -78,8 +78,10 @@ import { LABEL } from "@/lib/classes";
 import { GRANT_COPY, REMOVE_COPY, RESEAT_COPY, ROW_COPY, keeperSigners, seatProblem, type SeatStatus, type TradingWallet } from "@/lib/trading-wallets";
 
 export interface TradingWalletRowData extends TradingWallet {
-  /** False only for a wallet createWallet reported that Privy's record does not list yet. */
+  /** False only for a wallet createWallet or importWallet reported that Privy's record does not list yet. */
   readonly listed: boolean;
+  /** Its name, the same as on the live dashboard (src/lib/wallet-labels.ts). */
+  readonly label: string;
 }
 
 /** The seat as Privy records it, in the operator's own words: shown under Advanced. */
@@ -155,17 +157,7 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
   return (
     <li className="space-y-2 py-3 first:pt-0 last:pb-0" data-seat={keeper.seat} data-status={statusKey}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className={LABEL}>
-          {row.walletIndex !== null ? (
-            <>
-              Trading wallet <Num>{row.walletIndex + 1}</Num>
-            </>
-          ) : row.listed ? (
-            "Imported wallet"
-          ) : (
-            "New trading wallet"
-          )}
-        </div>
+        <div className={LABEL}>{row.label}</div>
         <Badge variant={status.variant} className={status.className}>
           {status.badge}
         </Badge>

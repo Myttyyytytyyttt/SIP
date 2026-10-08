@@ -144,6 +144,8 @@ const wordsFor = (failure: ApiFailure): string =>
 export function useLiveDashboard(input: {
   readonly pensionKey: string | null;
   readonly privyWallets: readonly string[];
+  /** Which of privyWallets were imported: they are named apart (src/lib/wallet-labels.ts). */
+  readonly importedWallets?: readonly string[];
   /**
    * Whether this caller needs the HISTORY as well as the snapshot. Default true.
    *
@@ -163,6 +165,7 @@ export function useLiveDashboard(input: {
   const api = useMemo(() => createLiveApi(), []);
   // A string, so a new array with the same wallets does not read again.
   const walletsKey = input.privyWallets.join(",");
+  const importedKey = (input.importedWallets ?? []).join(",");
 
   const [snapshot, setSnapshot] = useState<LiveSnapshotJson | null>(null);
   const [entries, setEntries] = useState<readonly LiveEntryJson[]>([]);
@@ -465,6 +468,7 @@ export function useLiveDashboard(input: {
       activity: activityMeta === null ? null : { vault: snapshot.vault.address, status: activityMeta.status, nextBefore: activityMeta.nextBefore, entries, gap: false },
       linkEntries,
       privyWallets: walletsKey === "" ? [] : walletsKey.split(","),
+      importedWallets: importedKey === "" ? [] : importedKey.split(","),
     });
     const stale =
       failure === null
@@ -475,7 +479,7 @@ export function useLiveDashboard(input: {
             since: failure.since,
           };
     return { kind: "ready", data, stale };
-  }, [pensionKey, snapshot, entries, linkEntries, activityMeta, failure, walletsKey]);
+  }, [pensionKey, snapshot, entries, linkEntries, activityMeta, failure, walletsKey, importedKey]);
 
   const cursor = activityMeta?.nextBefore ?? null;
   const olderView = useMemo((): LiveOlder => ({ ...older, available: cursor !== null }), [older, cursor]);

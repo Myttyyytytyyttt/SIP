@@ -113,15 +113,21 @@ export interface TradingWallet {
    * written to be safe either way.
    */
   readonly id: string | null;
-  /** The HD index Privy derived it at; null for an imported wallet. */
+  /**
+   * The HD index Privy derived a CREATED wallet at; null for an imported one. Privy itself records an imported
+   * Solana wallet with walletIndex 0 — the first created wallet's number too (react-auth 3.36.0, seen in production
+   * 10-08) — so tradingWalletsOf drops it, and nothing here tells the two kinds apart by index.
+   */
   readonly walletIndex: number | null;
   readonly imported: boolean;
 }
 
 /**
- * Every Privy embedded Solana wallet on the user, in HD order (imported ones
- * last), one entry per address. The pension key is never among them: it is an
- * external wallet, and Privy's walletClientType says so.
+ * Every Privy embedded Solana wallet on the user, one entry per address: the
+ * ones created here in HD order, then the imported ones, by address. The kind
+ * comes from Privy's `imported` flag, never from the index (see walletIndex).
+ * The pension key is never among them: it is an external wallet, and Privy's
+ * walletClientType says so.
  */
 export function tradingWalletsOf(user: User | null): TradingWallet[] {
   const byAddress = new Map<string, TradingWallet>();
@@ -129,19 +135,50 @@ export function tradingWalletsOf(user: User | null): TradingWallet[] {
     if (account.type !== "wallet" || account.chainType !== "solana") continue;
     if (!EMBEDDED_CLIENT_TYPES.has(account.walletClientType ?? "")) continue;
     if (typeof account.address !== "string" || account.address === "" || byAddress.has(account.address)) continue;
+    const imported = account.imported === true;
     byAddress.set(account.address, {
       address: account.address,
       id: typeof account.id === "string" && account.id !== "" ? account.id : null,
-      walletIndex: typeof account.walletIndex === "number" ? account.walletIndex : null,
-      imported: account.imported === true,
+      walletIndex: !imported && typeof account.walletIndex === "number" ? account.walletIndex : null,
+      imported,
     });
   }
   return [...byAddress.values()].sort(
     (a, b) =>
+      Number(a.imported) - Number(b.imported) ||
       (a.walletIndex ?? Number.MAX_SAFE_INTEGER) - (b.walletIndex ?? Number.MAX_SAFE_INTEGER) ||
       (a.address < b.address ? -1 : a.address > b.address ? 1 : 0),
   );
 }
+
+/**
+ * Why Privy would refuse to create a trading wallet on this account, or null when it would not.
+ *
+ * PRIVY CREATES "ONE MORE" ONLY FROM A ROOT. @privy-io/react-auth 3.36.0's createWallet({ createAdditional: true })
+ * computes the next index over every Privy Solana wallet on the user, imported ones included, and then throws "Must
+ * have an existing embedded wallet to create an additional wallet" unless the user has a root: a Privy wallet, NOT
+ * imported, at walletIndex 0, Ethereum or Solana (privy-context: `d`/`f` filter `!e.imported`). Creating without
+ * createAdditional throws "already has an embedded wallet" once any exists, and passing walletIndex throws in TEE
+ * execution. So an account whose only Privy wallets are imported cannot create one from this page at all.
+ */
+export function createRefusal(user: User | null): string | null {
+  const solana = privyWalletsOf(user).some((account) => account.chainType === "solana");
+  return solana && !hasCreateRoot(user) ? CREATE_REFUSAL : null;
+}
+
+/** Whether the account has the root Privy needs to create one more wallet (createRefusal): a created wallet at index 0. */
+export function hasCreateRoot(user: User | null): boolean {
+  return privyWalletsOf(user).some((account) => account.imported !== true && account.walletIndex === 0 && (account.chainType === "solana" || account.chainType === "ethereum"));
+}
+
+/** The account's wallets Privy holds, exactly as its own helpers select them: walletClientType "privy". */
+const privyWalletsOf = (user: User | null): WalletWithMetadata[] =>
+  (user?.linkedAccounts ?? []).filter((account): account is WalletWithMetadata => account.type === "wallet" && account.walletClientType === "privy");
+
+/** Said where Create is refused, and before an import on an account with nothing created here yet. */
+export const CREATE_REFUSAL =
+  "Privy creates a new wallet only on an account that already has one created here, and this account's wallets are " +
+  "all imported. Import another wallet you already use instead.";
 
 /** Privy's createWallet from @privy-io/react-auth/solana, narrowed to the one call this page makes. */
 export type CreateWalletFn = (options: {

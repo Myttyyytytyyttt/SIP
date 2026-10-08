@@ -63,7 +63,8 @@ import { useVaultScreen } from "@/hooks/use-vault-state";
 import { formatSol, rawFrom } from "@/lib/amounts";
 import { pressPlan, stopStillHolds, type CreateAndLinkOutcome } from "@/lib/create-and-link";
 import { importRequested, subscribeImportRequest, takeImportRequest } from "@/lib/import-intent";
-import { MAX_TRADING_WALLETS, ROW_COPY, keeperSigners, seatProblem, tradingWalletsOf } from "@/lib/trading-wallets";
+import { MAX_TRADING_WALLETS, ROW_COPY, createRefusal, keeperSigners, seatProblem, tradingWalletsOf } from "@/lib/trading-wallets";
+import { tradingWalletLabels } from "@/lib/wallet-labels";
 import { CREATE_LINK_COPY, IMPORT_LINK_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
 
 /** The card's own words for a first look; the ids behind them stay under Advanced. */
@@ -95,12 +96,19 @@ export function TradingWalletsCard() {
   }, [importAsked]);
 
   const rows = useMemo<TradingWalletRowData[]>(() => {
-    const listed: TradingWalletRowData[] = tradingWalletsOf(user).map((wallet) => ({ ...wallet, listed: true }));
+    const wallets = tradingWalletsOf(user);
+    // The same names as the live dashboard's (src/lib/wallet-labels.ts), from Privy's own list.
+    const labels = tradingWalletLabels(wallets);
+    const listed: TradingWalletRowData[] = wallets.map((wallet) => ({ ...wallet, listed: true, label: labels.get(wallet.address) ?? wallet.address }));
     const shown = (address: string | null) => address === null || listed.some((row) => row.address === address);
-    if (!shown(created) && created !== null) listed.push({ address: created, id: null, walletIndex: null, imported: false, listed: false });
-    if (!shown(importer.imported) && importer.imported !== null) listed.push({ address: importer.imported, id: null, walletIndex: null, imported: true, listed: false });
+    if (!shown(created) && created !== null) listed.push({ address: created, id: null, walletIndex: null, imported: false, listed: false, label: "New trading wallet" });
+    if (!shown(importer.imported) && importer.imported !== null) {
+      listed.push({ address: importer.imported, id: null, walletIndex: null, imported: true, listed: false, label: "Imported wallet" });
+    }
     return listed;
   }, [user, created, importer.imported]);
+  // An account whose only Privy wallets are imported: Privy refuses to create one more (createRefusal).
+  const cannotCreate = createRefusal(user);
 
   const problem = seatProblem(config);
   const seat = keeperSigners(config)?.[0] ?? null;
@@ -147,7 +155,7 @@ export function TradingWalletsCard() {
             type="button"
             size="sm"
             className="w-full @md/card-header:w-auto"
-            disabled={blocked || problem !== null || full}
+            disabled={blocked || problem !== null || full || cannotCreate !== null}
             aria-busy={busy}
             // An explicit call: Privy's createWallet drops an argument that looks like a click event, and the wallet would be born without its seat.
             onClick={() => void run()}
@@ -164,8 +172,13 @@ export function TradingWalletsCard() {
             {problem}
           </p>
         ) : null}
-        {/* The create's own promise steps aside while the import panel says its own. */}
-        {problem === null && !full && !importing ? <p className="text-xs text-muted-foreground">{ahead}</p> : null}
+        {/* The create's own promise steps aside while the import panel says its own, and gives way to why it cannot be kept. */}
+        {problem === null && !full && !importing && cannotCreate === null ? <p className="text-xs text-muted-foreground">{ahead}</p> : null}
+        {problem === null && !full && !importing && cannotCreate !== null ? (
+          <p data-create-refused="" className="text-xs text-muted-foreground">
+            {cannotCreate}
+          </p>
+        ) : null}
         {problem === null && !full && !importing ? (
           <Button type="button" size="sm" variant="outline" disabled={importBlocked} aria-busy={importer.write.running} onClick={() => setImporting(true)}>
             {importer.write.running ? <LoaderCircle className="animate-spin" aria-hidden /> : <Import aria-hidden />}
