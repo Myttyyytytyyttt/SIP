@@ -2342,3 +2342,24 @@ describe("the Pyth guard the website quotes", () => {
     ]);
   });
 });
+
+/**
+ * THE KEEPER'S HALF OF KEEPER_DUST (packages/solana-core/test/fixtures/keeper-policy.ts).
+ * Since 2026-10-08 the website says SOL is on its way to USDC exactly when
+ * these lines say the turn would wrap or convert it; a line moved here goes red
+ * here, and the website's copy of it goes red there.
+ */
+describe("the dust lines the website's pending rows read", () => {
+  it("are the vector's, and wrap and convert move exactly at its boundary", async () => {
+    const VECTOR = "keeper-policy";
+    const { KEEPER_DUST } = (await import(`../../solana-core/test/fixtures/${VECTOR}.ts`)) as {
+      KEEPER_DUST: { keeper: { wrapDustLamports: bigint; convertDustLamports: bigint }; boundary: { moves: bigint; stays: bigint } };
+    };
+    expect([WRAP_DUST_LAMPORTS, CONVERT_DUST_LAMPORTS]).toEqual([KEEPER_DUST.keeper.wrapDustLamports, KEEPER_DUST.keeper.convertDustLamports]);
+    const crank = 10n * KEEPER_DUST.boundary.moves + CRANK_WRAP_RESERVE_LAMPORTS;
+    expect(wrapPlan({ free: KEEPER_DUST.boundary.moves, crankLamports: crank }).amount).toBe(KEEPER_DUST.boundary.moves);
+    expect(wrapPlan({ free: KEEPER_DUST.boundary.stays, crankLamports: crank }).amount).toBe(0n);
+    expect(shouldConvert(KEEPER_DUST.boundary.moves, 0n)).toBe(true);
+    expect(shouldConvert(KEEPER_DUST.boundary.stays, 0n)).toBe(false);
+  });
+});
