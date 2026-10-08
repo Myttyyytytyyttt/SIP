@@ -1498,6 +1498,7 @@ describe("importCheck", () => {
       tokens: {
         status: "exists",
         items: [{ tokenAccount, mint, amountRaw: "9007199254740993", decimals: 6, uiAmount: "9007199254.740993", tokenProgram: TOKEN_2022_PROGRAM }],
+        count: 1,
         emptyAccounts: 1,
       },
     });
@@ -1514,9 +1515,32 @@ describe("importCheck", () => {
       protocolRole: "unreadable",
       link: { status: "unreadable", vault: null },
       lamports: null,
-      tokens: { status: "unreadable", items: [], emptyAccounts: null },
+      tokens: { status: "unreadable", items: [], count: null, emptyAccounts: null },
     });
     expect(answer.text).not.toContain(SECRET_QUERY);
+  });
+
+  it("names at most eight holdings and counts the rest", async () => {
+    const [owner, wallet] = [key(), key()];
+    const holdings = Array.from({ length: 11 }, (_, index) => ({ pubkey: key(), mint: key(), amount: String(index + 1), decimals: 0, uiAmountString: String(index + 1), tokenProgram: TOKEN_PROGRAM }));
+    const { state } = setup({ accounts: new Map(), tokenAccounts: new Map([[wallet, holdings]]) });
+    const answer = await state({ action: "importCheck", owner, wallet });
+    expect(answer.json.tokens.items).toHaveLength(8);
+    expect(answer.json.tokens.count).toBe(11);
+  });
+
+  it("names wSOL, USDC and the offered stocks first, whatever the RPC's order", async () => {
+    const [owner, wallet] = [key(), key()];
+    const memecoins = Array.from({ length: 9 }, (_, index) => ({ pubkey: key(), mint: key(), amount: String(index + 1), decimals: 0, uiAmountString: String(index + 1), tokenProgram: TOKEN_PROGRAM }));
+    const tail = [
+      { pubkey: key(), mint: SPYX_MINT, amount: "5", decimals: 8, uiAmountString: "0.00000005", tokenProgram: TOKEN_2022_PROGRAM },
+      { pubkey: key(), mint: USDC_MINT, amount: "3", decimals: 6, uiAmountString: "0.000003", tokenProgram: TOKEN_PROGRAM },
+      { pubkey: key(), mint: WSOL_MINT, amount: "7", decimals: 9, uiAmountString: "0.000000007", tokenProgram: TOKEN_PROGRAM },
+    ];
+    const { state } = setup({ accounts: new Map(), tokenAccounts: new Map([[wallet, [...memecoins, ...tail]]]) });
+    const answer = await state({ action: "importCheck", owner, wallet });
+    expect(answer.json.tokens.items.slice(0, 3).map((item: { mint: string }) => item.mint)).toEqual([WSOL_MINT, USDC_MINT, SPYX_MINT]);
+    expect(answer.json.tokens.count).toBe(12);
   });
 
   it("refuses the pension key itself, a malformed address and any field it does not take, before reading the chain", async () => {

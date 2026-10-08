@@ -56,7 +56,7 @@ import {
 } from "../client/decoders";
 import { SIP_PROGRAM_ID, idlInstruction, matchInstruction } from "../client/idl";
 import { deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "./pda";
-import { RpcAnswerError, type JsonRpcMember, type RpcPool } from "./rpc-pool";
+import { ResponseTooLargeError, RpcAnswerError, type JsonRpcMember, type RpcPool } from "./rpc-pool";
 
 export type ChainRead<T> =
   | { readonly kind: "exists"; readonly value: T }
@@ -405,6 +405,13 @@ export interface WalletTokens {
  */
 export type ProtocolRole = "authority" | "pending_authority" | "keeper" | "attester" | "none" | "unreadable";
 
+/**
+ * The most bytes the import's token listing may answer with: about 2,000 jsonParsed accounts. Past it the wallet
+ * is reported as holding too many token accounts to list (`too_many`), which the page warns about rather than
+ * refuses — and the listing never takes the vault, link and config reads down with it: those are a batch of their own.
+ */
+export const IMPORT_TOKEN_LISTING_MAX_BYTES = 1024 * 1024;
+
 /** What an import reads about an address before its key goes anywhere. */
 export interface ImportCandidateRead {
   readonly wallet: string;
@@ -416,16 +423,20 @@ export interface ImportCandidateRead {
   readonly link: WalletLinkRead;
   /** The wallet's own SOL, in lamports; null when it could not be read. */
   readonly lamports: bigint | null;
-  readonly tokens: ChainRead<WalletTokens>;
+  /** Its token accounts, or "too_many" when their listing is larger than IMPORT_TOKEN_LISTING_MAX_BYTES. */
+  readonly tokens: ChainRead<WalletTokens> | { readonly kind: "too_many" };
 }
 
 /**
- * EVERYTHING AN IMPORT CHECKS ON CHAIN, IN ONE BATCH: whether the address owns
+ * EVERYTHING AN IMPORT CHECKS ON CHAIN, IN TWO BATCHES: whether the address owns
  * a vault or holds a protocol role (the seat's policy allows any SaverFi
  * instruction, so on a vault owner's, the authority's or the keeper's key the
  * seat could sign theirs; the attester is reported too, as a protocol key),
- * where it is linked, its SOL, and every token account it holds under both
- * token programs. `ownerVault` is the pension key's vault, which the
+ * where it is linked, its SOL — one batch — and every token account it holds
+ * under both token programs, in a second batch capped at
+ * IMPORT_TOKEN_LISTING_MAX_BYTES: a listing anyone can ask for of any address
+ * must not make this server buffer megabytes, and its failure must not blind the
+ * safety reads. `ownerVault` is the pension key's vault, which the
  * link is compared with.
  *
  * Each read keeps its own outcome, and a failure is "unreadable", never
@@ -447,18 +458,23 @@ export async function readImportCandidate(pool: RpcPool, ownerVault: string, wal
     lamports: null,
     tokens: { kind: "unreadable", error },
   });
-  let members: readonly JsonRpcMember[];
-  try {
-    members = await pool.batch([
+  const safety = pool
+    .batch([
       { id: 1, method: "getAccountInfo", params: [vaultAddress, { encoding: "base64", commitment: COMMITMENT }] },
       { id: 2, method: "getAccountInfo", params: [linkAddress, { encoding: "base64", commitment: COMMITMENT }] },
       { id: 3, method: "getBalance", params: [wallet, { commitment: COMMITMENT }] },
-      ...tokenAccountsRequests(wallet, 4),
       { id: 6, method: "getAccountInfo", params: [configAddress, { encoding: "base64", commitment: COMMITMENT }] },
-    ]);
-  } catch (error) {
-    return unreadable(errorText(pool, error));
-  }
+    ])
+    .then((answer) => ({ ok: true as const, members: answer }))
+    .catch((error: unknown) => ({ ok: false as const, error: errorText(pool, error) }));
+  const listing = pool
+    .batch(tokenAccountsRequests(wallet, 4), { maxResponseBytes: IMPORT_TOKEN_LISTING_MAX_BYTES })
+    .then((answer) => ({ ok: true as const, members: answer }))
+    .catch((error: unknown) => ({ ok: false as const, tooMany: error instanceof ResponseTooLargeError, error: errorText(pool, error) }));
+  const [safetyAnswer, listingAnswer] = await Promise.all([safety, listing]);
+  const tokens = tokensFrom(pool, wallet, listingAnswer);
+  if (!safetyAnswer.ok) return { ...unreadable(safetyAnswer.error), tokens };
+  const members = safetyAnswer.members;
 
   /** The account a getAccountInfo member answered, as answeredAccount reads it; undefined for a member that failed. */
   const accountAt = (id: number): RpcAccount | null | undefined => {
@@ -493,22 +509,26 @@ export async function readImportCandidate(pool: RpcPool, ownerVault: string, wal
   const balance = balanceAnswer.ok ? (balanceAnswer.result as { value?: unknown })?.value : undefined;
   const lamports = typeof balance === "number" && Number.isSafeInteger(balance) && balance >= 0 ? BigInt(balance) : null;
 
-  let tokens: ChainRead<WalletTokens> = { kind: "exists", value: { holdings: [], emptyAccounts: 0 } };
+  return { wallet, ownVault: { address: vaultAddress, status: ownVault }, protocolRole, link, lamports, tokens };
+}
+
+/** The token batch's answer, as an import reads it: the holdings, "too_many" for a listing over its cap, or unreadable. */
+function tokensFrom(
+  pool: RpcPool,
+  wallet: string,
+  answer: { readonly ok: true; readonly members: readonly JsonRpcMember[] } | { readonly ok: false; readonly tooMany: boolean; readonly error: string },
+): ImportCandidateRead["tokens"] {
+  if (!answer.ok) return answer.tooMany ? { kind: "too_many" } : { kind: "unreadable", error: answer.error };
   const holdings: VaultHolding[] = [];
   let emptyAccounts = 0;
   for (const [index, tokenProgram] of TOKEN_PROGRAMS.entries()) {
-    const answer = memberResult(members, 4 + index);
-    const parsed = answer.ok ? tokenAccountsFrom(answer.result, wallet, tokenProgram) : null;
-    if (parsed === null) {
-      tokens = { kind: "unreadable", error: answer.ok ? "getTokenAccountsByOwner did not answer a list" : pool.scrub(answer.error) };
-      break;
-    }
+    const member = memberResult(answer.members, 4 + index);
+    const parsed = member.ok ? tokenAccountsFrom(member.result, wallet, tokenProgram) : null;
+    if (parsed === null) return { kind: "unreadable", error: member.ok ? "getTokenAccountsByOwner did not answer a list" : pool.scrub(member.error) };
     holdings.push(...parsed.holdings);
     emptyAccounts += parsed.empty;
   }
-  if (tokens.kind === "exists") tokens = { kind: "exists", value: { holdings, emptyAccounts } };
-
-  return { wallet, ownVault: { address: vaultAddress, status: ownVault }, protocolRole, link, lamports, tokens };
+  return { kind: "exists", value: { holdings, emptyAccounts } };
 }
 
 export interface LinkPrerequisites {

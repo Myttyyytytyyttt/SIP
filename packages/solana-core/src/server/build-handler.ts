@@ -220,9 +220,10 @@ export const BUILD_REQUEST_WEIGHT = 3;
  * for no rent of its own — set_policy_v2 opens no account — so it costs what
  * withdraw costs, and the same test pins it.
  *
- * importCheck is SIX, one batch: the vault and the link the address could
- * have, its balance, its token accounts under each of the two programs, and the
- * protocol config it could hold a role in.
+ * importCheck is SIX, in two batches: the vault and the link the address could
+ * have, its balance and the protocol config it could hold a role in; then its
+ * token accounts under each of the two programs, capped in bytes
+ * (IMPORT_TOKEN_LISTING_MAX_BYTES).
  */
 export const BUILD_READS_WEIGHT = { createVault: 4, setPolicy: 3, prepareLink: 1, link: 3, investPolicy: 8, pauseInvesting: 3, withdraw: 3, withdrawToken: 4, state: 12, importCheck: 6 } as const;
 
@@ -1304,6 +1305,19 @@ export function createSolanaVaultHandler(options: SolanaVaultHandlerOptions): So
 
 const IMPORT_CHECK_FIELDS = ["action", "owner", "wallet"] as const;
 
+/** The most holdings importCheck names; the rest are counted. */
+export const IMPORT_LISTED_HOLDINGS = 8;
+
+/**
+ * Which holdings importCheck names first: wSOL (unwrapping it counts as gain), USDC, then the stocks SaverFi
+ * offers, then the rest in listing order — classic-token accounts first, as TOKEN_PROGRAMS asks for them — so
+ * without this a wallet with 8 or more classic-token accounts might never name its wSOL, and would never name its SPYx.
+ */
+function namedFirst<T extends { readonly mint: string }>(holdings: readonly T[]): T[] {
+  const rank = (mint: string): number => (mint === WSOL_MINT ? 0 : mint === USDC_MINT ? 1 : OFFERED_LEGS.some((leg) => leg.mint === mint) ? 2 : 3);
+  return holdings.map((holding, index) => ({ holding, index })).sort((a, b) => rank(a.holding.mint) - rank(b.holding.mint) || a.index - b.index).map((entry) => entry.holding);
+}
+
 /**
  * POST /api/solana-vault {"action":"importCheck","owner","wallet"}: what the
  * chain says about an address before its private key is imported into Privy —
@@ -1322,6 +1336,7 @@ async function importCheck(fields: Readonly<Record<string, unknown>>, served: Se
   const spent = served.spendReads(BUILD_READS_WEIGHT.importCheck);
   if (spent !== null) return spent;
   const read = await readImportCandidate(served.pool, deriveVaultPda(owner).toBase58(), wallet);
+  const tokens = read.tokens;
   return json(200, {
     owner,
     wallet,
@@ -1330,10 +1345,11 @@ async function importCheck(fields: Readonly<Record<string, unknown>>, served: Se
     protocolRole: read.protocolRole,
     link: { address: read.link.link, status: read.link.status, vault: read.link.vault },
     lamports: read.lamports,
+    // At most IMPORT_LISTED_HOLDINGS of them, with the count: the page names a few and counts the rest.
     tokens:
-      read.tokens.kind === "exists"
-        ? { status: "exists", items: read.tokens.value.holdings, emptyAccounts: read.tokens.value.emptyAccounts }
-        : { status: "unreadable", items: [], emptyAccounts: null },
+      tokens.kind === "exists"
+        ? { status: "exists", items: namedFirst(tokens.value.holdings).slice(0, IMPORT_LISTED_HOLDINGS), count: tokens.value.holdings.length, emptyAccounts: tokens.value.emptyAccounts }
+        : { status: tokens.kind === "too_many" ? "too_many" : "unreadable", items: [], count: null, emptyAccounts: null },
   });
 }
 

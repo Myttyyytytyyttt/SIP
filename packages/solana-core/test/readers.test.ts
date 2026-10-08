@@ -63,6 +63,7 @@ import {
   listVaultLinks,
   readBuildBatch,
   readImportCandidate,
+  IMPORT_TOKEN_LISTING_MAX_BYTES,
   deriveClmmPoolVault,
   poolReservesFromAccounts,
   readLink,
@@ -258,22 +259,41 @@ describe("readImportCandidate", () => {
       { jsonrpc: "2.0", id: 6, result: { value: accountInfo(SIP_PROGRAM_ID, roles()) } },
     ].map((member) => (member.id in over ? { jsonrpc: "2.0", id: member.id, ...(over[member.id] as object) } : member));
 
-  it("asks everything in ONE batch: the vault and link the address could have, its balance, both token programs, the config", async () => {
+  it("asks in TWO batches: the safety reads (vault, link, balance, config), and the token listing on its own", async () => {
     const [owner, wallet] = [key(), key()];
     const ownerVault = deriveVaultPda(owner).toBase58();
     const { pool: p, upstream } = pool(() => jsonResponse(answers(wallet)));
     await readImportCandidate(p, ownerVault, wallet);
-    expect(upstream.calls).toHaveLength(1);
-    const batch = batchOf(upstream.calls[0]!);
-    expect(batch.map((member) => [member.method, member.params[0]])).toEqual([
+    expect(upstream.calls).toHaveLength(2);
+    const batches = upstream.calls.map((call) => batchOf(call).map((member) => [member.method, member.params[0]]));
+    expect(batches).toContainEqual([
       ["getAccountInfo", deriveVaultPda(wallet).toBase58()],
       ["getAccountInfo", deriveLinkPda(wallet).toBase58()],
       ["getBalance", wallet],
-      ["getTokenAccountsByOwner", wallet],
-      ["getTokenAccountsByOwner", wallet],
       ["getAccountInfo", deriveConfigPda().toBase58()],
     ]);
-    expect(batch.slice(3, 5).map((member) => (member.params[1] as { programId: string }).programId)).toEqual([TOKEN_PROGRAM, TOKEN_2022_PROGRAM]);
+    const listing = upstream.calls.map(batchOf).find((batch) => batch.every((member) => member.method === "getTokenAccountsByOwner"));
+    expect(listing?.map((member) => (member.params[1] as { programId: string }).programId)).toEqual([TOKEN_PROGRAM, TOKEN_2022_PROGRAM]);
+  });
+
+  it("A LISTING TOO LARGE TO READ is 'too_many', and the safety reads still answer", async () => {
+    const [owner, wallet] = [key(), key()];
+    const ownerVault = deriveVaultPda(owner).toBase58();
+    // Over the cap: 2,400 entries in each of the two members, about 1.3 MB of JSON (the cap is about 2,000 real jsonParsed accounts).
+    const many = Array.from({ length: 2_400 }, () => parsedEntry(wallet, key(), key(), "1"));
+    const { pool: p } = pool((call) => {
+      const members = batchOf(call);
+      if (members.every((member) => member.method === "getTokenAccountsByOwner")) {
+        return jsonResponse(members.map((member) => ({ jsonrpc: "2.0", id: member.id, result: { value: many } })));
+      }
+      return jsonResponse(answers(wallet, { 1: { result: { value: accountInfo(SIP_PROGRAM_ID, vaultBytes(wallet)) } } }));
+    });
+    const read = await readImportCandidate(p, ownerVault, wallet);
+    expect(JSON.stringify(many).length).toBeGreaterThan(IMPORT_TOKEN_LISTING_MAX_BYTES / 2);
+    expect(read.tokens).toEqual({ kind: "too_many" });
+    expect(read.ownVault.status).toBe("exists");
+    expect(read.protocolRole).toBe("none");
+    expect(read.link.status).toBe("missing");
   });
 
   it("reads a vault this key owns, a link elsewhere, its SOL, its balances and its empty accounts", async () => {
