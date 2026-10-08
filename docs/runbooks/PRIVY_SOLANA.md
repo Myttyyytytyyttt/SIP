@@ -585,9 +585,9 @@ tú.
      && cd ~/saverfi-politica-anterior && CI=1 pnpm install --frozen-lockfile && git log -1 --oneline
    ```
 
-   La última línea tiene que ser *"keeper: privy-policy update reescribe la política en su sitio…"*. Si sale otra cosa,
-   o un error (por ejemplo `invalid reference`, que es que no encontró el commit), **para aquí** y pásale a Claude lo que
-   salió. Si salió bien, la vuelta atrás, desde esa copia (`--dir` la nombra entera, así que no depende de dónde estés):
+   La última línea es un hash corto seguido de *"keeper: privy-policy update reescribe la política en su sitio…"*. Si
+   sale otra cosa, o un error (por ejemplo `invalid reference`, que es que no encontró el commit), **para aquí** y pásale
+   a Claude lo que salió. Si salió bien, la vuelta atrás, desde esa copia (`--dir` la nombra entera, así que no depende de dónde estés):
 
    ```bash
    printf 'App secret de Privy (SIP): ' && read -rs SECRETO && echo
