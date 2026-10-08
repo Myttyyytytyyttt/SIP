@@ -26,8 +26,8 @@ export function isDataMode(value: string): value is DataMode {
  */
 /**
  * NEITHER SIDE IS EVER DISABLED NOW. Live is a real destination whether or not a
- * wallet is connected: without one it shows an honest "connect your pension key"
- * card. A greyed-out Live was only ever true while there was no live panel at
+ * wallet is connected: without one it is the front door (the landing, at "/";
+ * src/lib/dashboard-mode.ts rule 6). A greyed-out Live was only ever true while there was no live panel at
  * all, and a control that cannot be used teaches people to stop looking at it.
  *
  * When a pension key IS connected this control is not rendered at all — the

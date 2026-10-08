@@ -64,7 +64,6 @@ describe("the public name", () => {
   });
 
   it("names itself where a person is being asked to trust it", () => {
-    expect(LIVE_COPY.connectBody).toContain(BRAND);
     expect(MODE_COPY.sample).toContain(BRAND);
     expect(MODE_COPY.keyless).toContain(BRAND);
     expect(LIVE_COPY.unreadableBody).toContain(BRAND);
@@ -91,14 +90,6 @@ describe("what the sample is allowed to promise", () => {
 });
 
 describe("the states that show no numbers", () => {
-  it("the connect card says what Live would show, and that nothing is shown until it can", () => {
-    expect(LIVE_COPY.connectTitle).toBe("Connect your pension key");
-    expect(LIVE_COPY.connectBody).toMatch(/read from Solana/);
-    expect(LIVE_COPY.connectFootnote).toMatch(/Nothing is shown until a wallet is connected/);
-    // The one place sample numbers may appear is named, so Live can never imply them.
-    expect(LIVE_COPY.connectFootnote).toMatch(/only under Mock/);
-  });
-
   it("an unreadable pension says it could not be read, NOT that there is nothing", () => {
     expect(LIVE_COPY.unreadableBody).toMatch(/could not read/i);
     expect(LIVE_COPY.unreadableBody).toMatch(/rather than a guess/);

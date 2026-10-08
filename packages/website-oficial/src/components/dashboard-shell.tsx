@@ -7,8 +7,8 @@
  * THE OWNER'S RULE, IN TWO SENTENCES. With a pension key connected the dashboard
  * is Live and the Live|Mock control leaves the navbar; a ?mode=mock in the
  * address bar is normalized away rather than obeyed. With nobody connected the
- * choice is offered, and Live shows an honest connect card — never the sample
- * under a label promising somebody their own pension.
+ * sample is offered under Mock, and Live is the front door (owner, 10-08) —
+ * never the sample under a label promising somebody their own pension.
  *
  * AND ITS ONE EXCEPTION, THE NEW-USER SETUP (owner, 09-23). A connected key with
  * no vault gets the setup over the page (src/components/onboarding): welcome,
@@ -32,7 +32,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 import { useLogin, usePrivy } from "@privy-io/react-auth";
 import { LogOut } from "lucide-react";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { ActivityMain } from "@/components/activity-main";
 import { CopyButton } from "@/components/copy-button";
@@ -42,7 +42,7 @@ import { DashboardWallets } from "@/components/dashboard-wallets";
 import { DataModeToggle } from "@/components/data-mode";
 import { Landing } from "@/components/landing";
 import { LiveBody } from "@/components/live/LiveBody";
-import { LiveConnectCard, LiveKeylessCard, LiveLoading, LivePrivyStalled, LiveUnavailableCard, LiveUnreadable } from "@/components/live/LiveStates";
+import { LiveKeylessCard, LiveLoading, LivePrivyStalled, LiveUnavailableCard, LiveUnreadable } from "@/components/live/LiveStates";
 import { DisconnectButton, PensionKeyChip, worthFrom } from "@/components/account-chip";
 import { Num } from "@/components/num";
 import { PensionPanel } from "@/components/pension-panel";
@@ -65,7 +65,6 @@ import { ACTIVITY_COPY, LIVE_COPY, MODE_COPY } from "@/lib/live-copy";
 import { onboardingWanted, setupIsTheDoor, vaultPresenceOf } from "@/lib/onboarding";
 import { ONBOARDING_DONE_KEY, forgetOnboarding, setOnboardingClosed } from "@/lib/onboarding-memory";
 import { pensionKeyOf } from "@/lib/pension-key";
-import { privyFailure } from "@/lib/privy-failure";
 import { PRIVY_PATIENCE_MS } from "@/lib/privy-patience";
 import { shortAddress } from "@/lib/vault-copy";
 import { tradingWalletsOf } from "@/lib/trading-wallets";
@@ -89,7 +88,6 @@ interface DashboardContextValue {
   readonly onDisconnect: () => void;
   /** The way out of a state that holds no numbers, and the 15 s fallback's second button. */
   readonly onSeeSample: () => void;
-  readonly loginFailure: string | null;
   readonly stalled: boolean;
 }
 
@@ -195,8 +193,20 @@ export function DashboardFrame({
   );
 }
 
+/**
+ * The front door page (welcome-landing.tsx): it draws the landing itself, for
+ * whoever is looking, inside this frame — so the frame hands it the page and
+ * never moves a visitor off it.
+ */
+const FRONT_DOOR_PATH = "/welcome";
+
 /** The URL is the mode's home, so Back undoes a switch and a reload keeps it. */
-function useMode(): { readonly urlMode: UrlMode | null; readonly pathname: string; readonly setMode: (mode: UrlMode) => void } {
+function useMode(): {
+  readonly urlMode: UrlMode | null;
+  readonly pathname: string;
+  readonly frontDoor: boolean;
+  readonly setMode: (mode: UrlMode) => void;
+} {
   const params = useSearchParams();
   const pathname = usePathname() ?? "/";
   const urlMode = readUrlMode(params.get("mode"));
@@ -208,12 +218,12 @@ function useMode(): { readonly urlMode: UrlMode | null; readonly pathname: strin
     },
     [pathname],
   );
-  return { urlMode, pathname, setMode };
+  return { urlMode, pathname, frontDoor: pathname === FRONT_DOOR_PATH, setMode };
 }
 
 /** No Solana configuration: Privy never mounts, so no Privy hook is ever called. */
 function UnconfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJson; readonly children: ReactNode }) {
-  const { urlMode, pathname, setMode } = useMode();
+  const { urlMode, pathname, frontDoor, setMode } = useMode();
   const openWallets = useWalletsOpener();
   const openSetup = useCallback(() => openWallets?.(), [openWallets]);
 
@@ -229,6 +239,7 @@ function UnconfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJso
     urlMode,
     pathname,
     landingAllowed: pathname === "/",
+    frontDoor,
   });
 
   const value: DashboardContextValue = {
@@ -241,11 +252,10 @@ function UnconfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJso
     onConnect: openSetup,
     onDisconnect: openSetup,
     onSeeSample: () => setMode("mock"),
-    loginFailure: null,
     stalled: false,
   };
   return (
-    <Body value={value} onEnter={setMode} walletsConfigured={false}>
+    <Body value={value} onEnter={setMode} walletsConfigured={false} frontDoor={frontDoor}>
       {children}
     </Body>
   );
@@ -261,19 +271,16 @@ function ConfiguredFrame({
   readonly children: ReactNode;
 }) {
   const { ready, authenticated, user, logout } = usePrivy();
-  const { urlMode, pathname, setMode } = useMode();
-  const [loginFailure, setLoginFailure] = useState<string | null>(null);
+  const { urlMode, pathname, frontDoor, setMode } = useMode();
+  const router = useRouter();
   const [gaveUp, setGaveUp] = useState(false);
   const [stalled, setStalled] = useState(false);
   const openWallets = useWalletsOpener();
 
-  const { login } = useLogin({
-    onError: (code) => {
-      const described = privyFailure(code);
-      // Closing Privy's dialog is a choice, not an error.
-      setLoginFailure(described.kind === "exited" ? null : described.message);
-    },
-  });
+  // Privy's dialog says why a login failed, and stays open while it does. Its
+  // words were also repeated on the Live connect card, which a visitor's Live
+  // no longer shows (the front door does, with its own line under Connect).
+  const { login } = useLogin();
 
   // The pension key is derived, never stored: the app keeps no copy of who you
   // are, so a disconnect is a disconnect.
@@ -307,6 +314,7 @@ function ConfiguredFrame({
     urlMode,
     pathname,
     landingAllowed: pathname === "/",
+    frontDoor,
     onboarding: { closed, vault },
   });
 
@@ -315,11 +323,22 @@ function ConfiguredFrame({
   // unless its setup was closed, and then the sample is where it belongs.
   // The entry's own state rides along (the setup's Back/Forward tag), and a
   // traversal still committing is left alone: its pathname is not ours yet.
+  // A visitor's front door (rule 6) is Next's replace, never history's: from
+  // /activity it is another page, which replaceState cannot reach. And where
+  // Privy answers in the very first commit (the dev stub does), a replaceState
+  // made there — before Next has taken the address bar over — moved the bar
+  // but not Next's own search params, so a Connect made next still read
+  // ?mode=live and never wrote it back (measured, 10-08: connected, on its
+  // pension, under a bare "/").
   useEffect(() => {
     if (state.replaceUrlWith === null) return;
     if (window.location.pathname !== pathname) return;
+    if (state.kind === "landing") {
+      router.replace(state.replaceUrlWith, { scroll: false });
+      return;
+    }
     window.history.replaceState(setupState(setupEntryOf(window.history.state)), "", state.replaceUrlWith);
-  }, [state.replaceUrlWith, pathname]);
+  }, [state.replaceUrlWith, state.kind, pathname, router]);
 
   const live = useLiveDashboard({ pensionKey: state.kind === "live" ? pensionKey : null, privyWallets });
   const liveStage = live.view.kind === "ready" ? live.view.data.stage : null;
@@ -419,13 +438,16 @@ function ConfiguredFrame({
   );
 
   const onDisconnect = useCallback(() => {
-    // Land on the Live connect card, not back on the landing.
+    // Ask for Live, which for a visitor is the front door (rule 6, owner 10-08).
+    // It matters on the keyless sample (rule 5, ?mode=mock), the one screen where
+    // this Disconnect stands beside a ?mode=mock: without it the visitor would
+    // stay on the sample. The wallets modal's own Disconnect is a bare logout()
+    // and keeps the URL's mode, so from ?mode=mock it ends on the sample.
     window.history.replaceState({}, "", urlWithMode(pathname, "live"));
     void logout();
   }, [logout, pathname]);
 
   const onConnect = useCallback(() => {
-    setLoginFailure(null);
     login();
   }, [login]);
 
@@ -456,7 +478,6 @@ function ConfiguredFrame({
       setGaveUp(true);
       setMode("mock");
     },
-    loginFailure,
     stalled: stalled && !ready && !gaveUp,
   };
 
@@ -467,7 +488,7 @@ function ConfiguredFrame({
   return (
     <>
       <WalletsOpenerOverride opener={door ? resumeOnboarding : null}>
-        <Body value={value} onEnter={setMode} walletsConfigured>
+        <Body value={value} onEnter={setMode} walletsConfigured frontDoor={frontDoor}>
           {children}
         </Body>
       </WalletsOpenerOverride>
@@ -492,15 +513,18 @@ function Body({
   children,
   onEnter,
   walletsConfigured,
+  frontDoor,
 }: {
   readonly value: DashboardContextValue;
   readonly children: ReactNode;
   /** The landing's way in: the example, or — after a Connect — the pension. */
   readonly onEnter: (to: UrlMode) => void;
   readonly walletsConfigured: boolean;
+  /** /welcome: the page draws the landing itself, and reads this frame's state to do it. */
+  readonly frontDoor: boolean;
 }) {
   // The front door is its own page: no header, no numbers, and it never waits.
-  if (value.state.kind === "landing") return <Landing onEnter={onEnter} walletsConfigured={walletsConfigured} />;
+  if (value.state.kind === "landing" && !frontDoor) return <Landing onEnter={onEnter} walletsConfigured={walletsConfigured} />;
   return <DashboardContext.Provider value={value}>{children}</DashboardContext.Provider>;
 }
 
@@ -603,7 +627,7 @@ function PlainBody({
   readonly current: "pension" | "activity";
   readonly sidebar: ReactNode;
   readonly now: string;
-  /** The mode the links carry: Live on the connect cards, so a tab does not drop the visitor on the landing. */
+  /** The mode the links carry: Live on the keyless and unavailable cards, so a tab keeps the visitor where they chose to be. */
   readonly mode: UrlMode | null;
   readonly children: ReactNode;
 }) {
@@ -628,7 +652,7 @@ function PlainBody({
  * Nothing for a connected pension: it is Live whatever the URL says.
  */
 const linkModeOf = (kind: DashboardState["kind"], urlMode: UrlMode | null): UrlMode | null =>
-  kind === "mock" ? "mock" : kind === "live-connect" || kind === "live-keyless" || kind === "live-unavailable" ? "live" : kind === "loading" ? urlMode : null;
+  kind === "mock" ? "mock" : kind === "live-keyless" || kind === "live-unavailable" ? "live" : kind === "loading" ? urlMode : null;
 
 export function DashboardView({ view }: { readonly view: "pension" | "activity" }) {
   const context = useDashboard();
@@ -657,9 +681,6 @@ export function DashboardView({ view }: { readonly view: "pension" | "activity" 
       return context.stalled
         ? plain(LIVE_COPY.checking, <LivePrivyStalled onSeeSample={onSeeSample} />)
         : plain(<Skeleton className="h-24 w-full rounded-md" aria-hidden />, <LiveLoading />);
-
-    case "live-connect":
-      return plain(LIVE_COPY.connectSidebar, <LiveConnectCard onConnect={context.onConnect} onSeeSample={onSeeSample} failure={context.loginFailure} />);
 
     case "live-keyless":
       return plain(LIVE_COPY.connectSidebar, <LiveKeylessCard onDisconnect={context.onDisconnect} />);

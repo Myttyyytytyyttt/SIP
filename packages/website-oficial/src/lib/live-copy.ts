@@ -45,14 +45,7 @@ export const LIVE_COPY = {
   reload: "Reload",
   viewSample: "View sample data",
 
-  // ── nobody connected ───────────────────────────────────────────────────────
-  connectTitle: "Connect your pension key",
-  connectBody:
-    `Live shows your own ${BRAND} pension, read from Solana: what your vault holds, what your trading wallets saved ` +
-    "and what it bought. Connect the Solana wallet that owns it: Phantom, Backpack, Solflare or another.",
-  connectButton: "Connect pension key",
-  /** Under the connect card: says exactly where sample numbers can and cannot appear. */
-  connectFootnote: "Nothing is shown until a wallet is connected. Sample numbers appear only under Mock.",
+  // ── nobody connected: a visitor's Live is the landing (owner, 10-08) ───────
   connectSidebar: "Connect your pension key to see your activity.",
   seeSample: "See sample data",
 

@@ -53,7 +53,7 @@ describe("vaultPresenceOf", () => {
   });
 });
 
-const KINDS: readonly DashboardKind[] = ["landing", "loading", "mock", "live-connect", "live-keyless", "live-unavailable", "live"];
+const KINDS: readonly DashboardKind[] = ["landing", "loading", "mock", "live-keyless", "live-unavailable", "live"];
 const PRESENCES: readonly VaultPresence[] = ["reading", "missing", "exists", "unreadable"];
 const STAGES: readonly (LiveStage | null)[] = [null, "vault_unreadable", "no_vault", "no_trading_wallet", "not_linked", "waiting_first_settlement", "active"];
 const HAS_VAULT: readonly LiveStage[] = ["no_trading_wallet", "not_linked", "waiting_first_settlement", "active"];

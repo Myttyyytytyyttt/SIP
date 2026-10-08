@@ -22,7 +22,8 @@ describe("the navbar's brand", () => {
 
 /**
  * THE TABS CARRY THE PAGE'S MODE (owner, 09-24): in the sample a bare "/" was
- * the landing and a bare "/activity" was Live's connect card.
+ * the landing and a bare "/activity" was Live's connect card (since 10-08, the
+ * landing too).
  */
 describe("the navbar's tabs", () => {
   const nav = (mode?: "mock" | "live") =>

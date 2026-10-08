@@ -247,7 +247,7 @@ const has = (body, sentence) => body.toUpperCase().includes(sentence.toUpperCase
 /**
  * Is the "Sample data" BADGE on the page?
  *
- * Deliberately not a substring search. The connect card offers a "See sample
+ * Deliberately not a substring search. The unavailable card offers a "See sample
  * data" button, and its label contains the badge's own words — so a text search
  * reports the sample as showing on a screen whose whole point is that it is not.
  * Only a leaf element whose ENTIRE text is the badge counts.
@@ -275,7 +275,8 @@ try {
     },
   });
 
-  // 2. Disconnected, Live: an honest connect card and NOT one number.
+  // 2. Disconnected, Live: a visitor's Live is the front door, moved to "/" (owner, 10-08).
+  //    No "$" check: the landing's own example cards draw dollar figures on purpose.
   await shoot(browser, {
     state: "disconnected-live",
     device: "desktop",
@@ -283,13 +284,13 @@ try {
     stub: DISCONNECTED,
     snapshot: activeSnapshot,
     activity: activeActivity,
-    marker: "Connect your pension key",
+    marker: "A slice of every trade",
     check: async (page, bad) => {
-      if (await sampleBadge(page)) bad("shows the sample badge on Live");
-      const main = await mainText(page);
-      if (main.includes("$")) bad("shows a dollar figure with nobody connected");
-      const tabs = await page.$$eval('[role="tab"]', (list) => list.map((tab) => `${tab.textContent.trim()}:${tab.getAttribute("data-state")}`));
-      if (!tabs.includes("Live:active")) bad(`Live is not active: ${tabs.join(" ")}`);
+      await page.waitForFunction(() => location.pathname === "/" && location.search === "", null, { timeout: 10_000 }).catch(() => {});
+      const url = new URL(page.url());
+      if (url.pathname !== "/" || url.search !== "") bad(`a visitor's Live was not moved to the front door: ${url.pathname}${url.search}`);
+      if ((await page.$$('[role="tablist"]')).length > 0) bad("drew the app's Live|Mock control instead of the landing");
+      if (await sampleBadge(page)) bad("shows the sample badge on a visitor's Live");
     },
   });
 

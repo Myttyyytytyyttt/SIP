@@ -60,7 +60,7 @@ export function SiteHeader({
   readonly current?: "pension" | "activity" | "leaderboard" | "dashboard";
   /**
    * THE MODE THE TABS CARRY (owner, 09-24). A bare "/" is the landing to a
-   * visitor and a bare "/activity" is Live's connect card, so a tab pressed in
+   * visitor, and so is a bare "/activity" (owner, 10-08), so a tab pressed in
    * the sample used to throw the visitor out of it — the first click a judge
    * makes. The page that knows what it is showing says so here; null leaves
    * the links bare, which is right for a connected pension (it is Live

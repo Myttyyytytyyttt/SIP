@@ -15,7 +15,7 @@
  * WHAT IT IS NOT. It is not authentication, it carries no identity, and
  * nothing is granted on the strength of it: the one thing it changes is
  * whether an unknowable moment shows the front door or a skeleton. Forging it
- * gets you a skeleton, which resolves to the connect card the moment Privy
+ * gets you a skeleton, which resolves to the landing the moment Privy
  * answers. It holds no address — this app keeps no copy of who you are, which
  * is why a disconnect is a disconnect.
  */

@@ -14,7 +14,7 @@
  * data anywhere in this file to reach for by accident.
  */
 
-import { Info, LogOut, RefreshCw } from "lucide-react";
+import { LogOut, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -72,51 +72,6 @@ export function LivePrivyStalled({ onSeeSample }: { readonly onSeeSample: () => 
         <Button type="button" variant="ghost" size="sm" onClick={onSeeSample}>
           {LIVE_COPY.viewSample}
         </Button>
-      </CardContent>
-    </Shell>
-  );
-}
-
-/**
- * Live, with nobody connected. The one state a visitor reaches by choosing Live
- * from the navbar, so it has to say what Live would show without showing any of it.
- */
-export function LiveConnectCard({
-  onConnect,
-  onSeeSample,
-  failure = null,
-  disabled = false,
-}: {
-  readonly onConnect: () => void;
-  readonly onSeeSample: () => void;
-  /** Privy's own refusal, in words. Closing its dialog is not a failure. */
-  readonly failure?: string | null;
-  readonly disabled?: boolean;
-}) {
-  return (
-    <Shell title={LIVE_COPY.connectTitle}>
-      <CardHeader>
-        <CardTitle className="text-base">{LIVE_COPY.connectTitle}</CardTitle>
-        <CardDescription>{LIVE_COPY.connectBody}</CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <Button type="button" onClick={onConnect} disabled={disabled}>
-            {LIVE_COPY.connectButton}
-          </Button>
-          <Button type="button" variant="outline" onClick={onSeeSample}>
-            {LIVE_COPY.seeSample}
-          </Button>
-        </div>
-        {failure !== null ? (
-          <p role="alert" className="text-sm text-destructive">
-            {failure}
-          </p>
-        ) : null}
-        <p className="flex items-start gap-2 text-xs text-muted-foreground">
-          <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-          {LIVE_COPY.connectFootnote}
-        </p>
       </CardContent>
     </Shell>
   );

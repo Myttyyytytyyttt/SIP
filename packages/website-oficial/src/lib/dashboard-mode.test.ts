@@ -49,10 +49,12 @@ describe("the front door does not flash past somebody who has been here", () => 
     expect(decideDashboard(connected({ knownSession: false })).kind).toBe("live");
   });
 
-  it("never turns /activity into a landing either way", () => {
+  it("never moves /activity before Privy answers: a session can be alive with its hint gone", () => {
     for (const hint of [true, false]) {
-      const decided = decideDashboard(input({ ready: false, knownSession: hint, pathname: "/activity", landingAllowed: false }));
-      expect(decided.kind).toBe("loading");
+      for (const urlMode of [null, "live"] as const) {
+        const decided = decideDashboard(input({ ready: false, knownSession: hint, urlMode, pathname: "/activity", landingAllowed: false }));
+        expect(decided).toMatchObject({ kind: "loading", replaceUrlWith: null });
+      }
     }
   });
 });
@@ -153,13 +155,15 @@ describe("before Privy answers, nothing is painted", () => {
     expect(decided.notice).toBeNull();
   });
 
-  it("?mode=live and /activity are skeletons too", () => {
-    expect(decideDashboard(input({ ready: false, urlMode: "live" })).kind).toBe("loading");
-    expect(decideDashboard(input({ ready: false, urlMode: null, pathname: "/activity", landingAllowed: false })).kind).toBe("loading");
+  it("?mode=live and /activity are skeletons too, with or without the hint — the move to the front door waits for Privy", () => {
+    for (const knownSession of [true, false]) {
+      expect(decideDashboard(input({ ready: false, knownSession, urlMode: "live" }))).toMatchObject({ kind: "loading", replaceUrlWith: null });
+      expect(decideDashboard(input({ ready: false, knownSession, urlMode: null, pathname: "/activity", landingAllowed: false })).kind).toBe("loading");
+    }
   });
 
   it("the front door does NOT wait: it holds no numbers", () => {
-    expect(decideDashboard(input({ ready: false, urlMode: null })).kind).toBe("landing");
+    expect(decideDashboard(input({ ready: false, urlMode: null }))).toMatchObject({ kind: "landing", replaceUrlWith: null });
   });
 
   it("authenticated one frame before the user object is still loading", () => {
@@ -173,24 +177,48 @@ describe("disconnected", () => {
     expect(decided).toMatchObject({ kind: "mock", toggle: true, notice: "sample", account: "connect", replaceUrlWith: null });
   });
 
-  it("Live is the connect card — never sample numbers", () => {
+  it("Live is the front door (owner, 10-08): ?mode=live — typed, the toggle's Live, a Disconnect — lands on the landing, at \"/\"", () => {
     const decided = decideDashboard(input({ urlMode: "live" }));
-    expect(decided).toMatchObject({ kind: "live-connect", toggle: true, notice: null, account: "connect" });
+    expect(decided).toMatchObject({ kind: "landing", notice: null, account: "connect", replaceUrlWith: "/" });
   });
 
-  it("/activity with no mode is Live, because there is no landing behind it", () => {
-    expect(decideDashboard(input({ urlMode: null, pathname: "/activity", landingAllowed: false })).kind).toBe("live-connect");
+  it("/activity, with no mode or with Live, sends the visitor to the front door at \"/\"; its sample stays", () => {
+    for (const urlMode of [null, "live"] as const) {
+      expect(decideDashboard(input({ urlMode, pathname: "/activity", landingAllowed: false }))).toMatchObject({ kind: "landing", replaceUrlWith: "/" });
+    }
+    expect(decideDashboard(input({ urlMode: "mock", pathname: "/activity", landingAllowed: false }))).toMatchObject({ kind: "mock", replaceUrlWith: null });
   });
 
-  it("the bare front door is the landing", () => {
-    expect(decideDashboard(input({ urlMode: null })).kind).toBe("landing");
+  it("the bare front door is the landing, where it stands", () => {
+    expect(decideDashboard(input({ urlMode: null }))).toMatchObject({ kind: "landing", replaceUrlWith: null });
+  });
+
+  it("never moves a visitor off /welcome, the page that draws the landing itself", () => {
+    const welcome = { pathname: "/welcome", landingAllowed: false, frontDoor: true } as const;
+    for (const urlMode of [null, "live"] as const) {
+      expect(decideDashboard(input({ ...welcome, urlMode })).replaceUrlWith).toBeNull();
+      expect(decideDashboard(input({ ...welcome, urlMode, ready: false })).replaceUrlWith).toBeNull();
+    }
   });
 
   it("a Privy that never loaded behaves exactly as disconnected", () => {
     const gaveUp = { ready: false, privyGaveUp: true } as const;
     expect(decideDashboard(input({ ...gaveUp, urlMode: "mock" }))).toMatchObject({ kind: "mock", toggle: true, notice: "sample" });
-    expect(decideDashboard(input({ ...gaveUp, urlMode: "live" })).kind).toBe("live-connect");
+    expect(decideDashboard(input({ ...gaveUp, urlMode: "live" }))).toMatchObject({ kind: "landing", replaceUrlWith: "/" });
     expect(decideDashboard(input({ ...gaveUp, urlMode: null })).kind).toBe("landing");
+  });
+
+  it("never shows a visitor anything but the landing or the sample", () => {
+    for (const ready of [true, false]) {
+      for (const knownSession of [true, false]) {
+        for (const urlMode of ["mock", "live", null] as const) {
+          for (const pathname of ["/", "/activity"]) {
+            const kind = decideDashboard(input({ ready, knownSession, urlMode, pathname, landingAllowed: pathname === "/" })).kind;
+            expect(["landing", "mock", "loading"]).toContain(kind);
+          }
+        }
+      }
+    }
   });
 });
 
@@ -231,7 +259,7 @@ describe("a deployment with no Solana configuration", () => {
 
 describe("the toggle's own position", () => {
   it("every live state shows Live; the sample shows Mock", () => {
-    expect((["live", "live-connect", "live-keyless", "live-unavailable"] as const).map(toggleModeOf)).toEqual(["live", "live", "live", "live"]);
+    expect((["live", "live-keyless", "live-unavailable"] as const).map(toggleModeOf)).toEqual(["live", "live", "live"]);
     expect((["mock", "landing", "loading"] as const).map(toggleModeOf)).toEqual(["mock", "mock", "mock"]);
   });
 

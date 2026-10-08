@@ -3,9 +3,14 @@
  *
  * THE OWNER'S RULE. With a pension key connected the dashboard is Live: the
  * Live/Mock choice leaves the navbar, and a ?mode=mock in the address bar does
- * not bring it back. Without a connection the choice is offered, and Live then
- * shows an honest "connect your pension key" card — never the sample under a
- * label promising someone their own pension.
+ * not bring it back. Without a connection the sample is offered under Mock —
+ * never under a label promising someone their own pension.
+ *
+ * A VISITOR'S LIVE IS THE FRONT DOOR (owner, 10-08). Without a connection
+ * there is nothing of one's own to show, so everything that asks for Live —
+ * /?mode=live, an app page with no mode, the toggle's Live, a Disconnect —
+ * lands on the landing, at "/". It replaced a "connect your pension key" card
+ * that said less than the landing does, with the same Connect.
  *
  * ONE EXCEPTION (owner, 09-23): a connected key with NO VAULT whose new-user
  * setup was closed. It sees the sample exactly as a visitor does — the badge,
@@ -27,14 +32,12 @@
  */
 
 export type DashboardKind =
-  /** The front door: no numbers, and it never waits for Privy. */
+  /** The front door: no numbers, and it never waits for Privy. Where a visitor's Live goes. */
   | "landing"
   /** Privy has not answered yet. A skeleton, never the sample. */
   | "loading"
   /** The seeded example, under its Sample data badge. */
   | "mock"
-  /** Live, with nobody connected: the connect card. No numbers. */
-  | "live-connect"
   /** Signed in, but with no external Solana wallet to be a pension key. */
   | "live-keyless"
   /** This deployment has no Solana configuration, so Live cannot exist here. */
@@ -66,7 +69,11 @@ export interface DashboardState {
   readonly toggle: boolean;
   readonly notice: DashboardNotice;
   readonly account: DashboardAccount;
-  /** A URL to normalize to with history.replaceState, applied once per change; null when the URL already says it. */
+  /**
+   * A URL to normalize to, applied once per change: for kind "landing" (rule 6)
+   * with Next's router.replace, since it can name another page (/activity → "/");
+   * otherwise with history.replaceState; null when the URL already says it.
+   */
   readonly replaceUrlWith: string | null;
 }
 
@@ -86,8 +93,16 @@ export interface DashboardInput {
   /** ?mode=, already narrowed; anything else counts as null. */
   readonly urlMode: UrlMode | null;
   readonly pathname: string;
-  /** Only "/" has a landing behind it; /activity never does. */
+  /**
+   * The landing can be drawn at this URL as it stands: only "/". From any other
+   * app page (/activity) a visitor's way to it moves the URL to "/".
+   */
   readonly landingAllowed: boolean;
+  /**
+   * This page IS the front door (/welcome): it draws the landing itself, for
+   * whoever is looking, so the frame never moves a visitor off it. Absent means false.
+   */
+  readonly frontDoor?: boolean;
   /**
    * This browser has connected before (the session hint cookie, read by the
    * server before the first paint). NOT authentication and not a claim that
@@ -134,6 +149,9 @@ export function decideDashboard(input: DashboardInput): DashboardState {
   const { walletsConfigured, privyGaveUp, ready, authenticated, hasUser, pensionKey, urlMode, pathname, landingAllowed } = input;
   const knownSession = input.knownSession === true;
   const onLanding = urlMode === null && landingAllowed;
+  // Where a visitor's front door is drawn: right here when the URL already is
+  // it, or on the front door page itself; otherwise the URL moves to "/".
+  const landingUrl = input.frontDoor === true || onLanding ? null : "/";
 
   // 1. No configuration: there is no PrivyProvider, so `ready` never comes.
   //    Never wait for it, and never claim Live could work here.
@@ -151,8 +169,15 @@ export function decideDashboard(input: DashboardInput): DashboardState {
   //    flashed past on every arrival and then threw them into their pension —
   //    the state was never wrong, only unknowable that early, and a skeleton is
   //    what an unknowable moment looks like. If the hint turns out to be stale
-  //    the next rule along lands them on the connect card, which is where a
-  //    disconnected visitor belongs anyway.
+  //    rule 6 lands them on the landing, which is where a disconnected visitor
+  //    belongs anyway.
+  //
+  //    ONLY THE BARE FRONT DOOR SKIPS THE WAIT. A visitor's /?mode=live or
+  //    /activity is the landing too (rule 6), but only once Privy has said
+  //    nobody is connected: the hint can be missing while a session is alive
+  //    (WebKit caps a script-written cookie at 7 days; Privy's tokens live in
+  //    localStorage), and moving that pension key to "/" before Privy answered
+  //    showed it the landing and lost the page it asked for.
   if (!ready && !privyGaveUp) {
     if (onLanding && !knownSession) return state("landing", false, "placeholder");
     return state("loading", false, "placeholder");
@@ -186,11 +211,11 @@ export function decideDashboard(input: DashboardInput): DashboardState {
   }
 
   // 6. Disconnected — and a Privy that never loaded is treated the same way.
-  if (onLanding) return state("landing", true, "connect");
+  //    The sample under Mock; anything else is the front door (owner, 10-08).
   if (urlMode === "mock") return state("mock", true, "connect", "sample");
-  return state("live-connect", true, "connect");
+  return state("landing", true, "connect", null, landingUrl);
 }
 
 /** Which position the Live|Mock control shows for a state, when it is shown at all. */
 export const toggleModeOf = (kind: DashboardKind): UrlMode =>
-  kind === "live" || kind === "live-connect" || kind === "live-keyless" || kind === "live-unavailable" ? "live" : "mock";
+  kind === "live" || kind === "live-keyless" || kind === "live-unavailable" ? "live" : "mock";

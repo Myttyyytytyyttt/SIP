@@ -18,8 +18,6 @@ const mocked = vi.hoisted(() => ({
   privy: { ready: true, authenticated: false, user: null as unknown },
   search: new URLSearchParams(),
   pathname: "/",
-  replaced: [] as string[],
-  pushed: [] as string[],
   live: { kind: "loading" } as { kind: string; message?: string; retryAt?: number | null; data?: unknown; stale?: unknown },
   /** Whether this tab closed the setup (the real hook reads sessionStorage, which node has none of). */
   closed: false,
@@ -46,6 +44,9 @@ vi.mock("@privy-io/react-auth", () => ({
 vi.mock("next/navigation", () => ({
   useSearchParams: () => mocked.search,
   usePathname: () => mocked.pathname,
+  // The frame calls useRouter while it renders; its only move is made in an
+  // effect, which renderToStaticMarkup never runs — nothing here navigates.
+  useRouter: () => ({ replace: () => undefined, push: () => undefined }),
 }));
 
 vi.mock("@/hooks/use-live-dashboard", () => ({
@@ -74,7 +75,7 @@ vi.mock("@/components/live/LiveRulePanel", async () => {
 });
 vi.mock("@/components/pension-chart", () => ({ PensionChart: () => createElement("div", null, "CHART") }));
 
-import { DashboardFrame, DashboardView, type DashboardLoadJson } from "@/components/dashboard-shell";
+import { DashboardFrame, DashboardView, useDashboard, type DashboardLoadJson } from "@/components/dashboard-shell";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
 import type { VaultApi, VaultStateJson } from "@/lib/vault-api";
@@ -169,29 +170,39 @@ describe("nobody connected", () => {
     expect(html).toContain("Sample data");
     expect(html).toContain(MOCK_FIGURE);
     expect(tablist(html)).not.toBeNull();
-    // Live is reachable now: it shows the connect card, so it is never greyed out.
+    // Live is a real choice, never greyed out: for a visitor it is the front door.
     expect(trigger(html, "Live")).not.toBe("");
     expect(isDisabled(trigger(html, "Live"))).toBe(false);
     expect(trigger(html, "Mock")).toContain('data-state="active"');
   });
 
-  it("Live asks for a pension key and shows NO sample numbers", () => {
+  it("Live is the front door (owner, 10-08): the landing, and NO sample numbers — on / and on /activity", () => {
     mocked.search = new URLSearchParams("mode=live");
-    const html = render();
+    for (const [pathname, view] of [["/", "pension"], ["/activity", "activity"]] as const) {
+      mocked.pathname = pathname;
+      const html = render(true, view);
+      expect(html).toBe("<div>LANDING</div>");
+      expect(html).not.toContain(MOCK_FIGURE);
+    }
+  });
 
-    expect(html).toContain("Connect your pension key");
-    expect(html).not.toContain("Sample data");
-    expect(html).not.toContain(MOCK_FIGURE);
-    expect(html).not.toContain("Sold HOODx");
-    // …and the choice is still offered, so Mock is one click away.
-    expect(trigger(html, "Live")).toContain('data-state="active"');
+  it("/welcome draws its own landing, inside the frame it reads — never the frame's", () => {
+    mocked.pathname = "/welcome";
+    for (const mode of ["", "mode=live"]) {
+      mocked.search = new URLSearchParams(mode);
+      const Welcome = () => createElement("div", null, `WELCOME:${useDashboard()?.state.account ?? "no frame"}`);
+      const html = renderToStaticMarkup(
+        createElement(TooltipProvider, null, createElement(DashboardFrame, { mock: SAMPLE, walletsConfigured: true, children: createElement(Welcome) })),
+      );
+      expect(html).toBe("<div>WELCOME:connect</div>");
+    }
   });
 });
 
 /**
- * MOVING AROUND THE SAMPLE (owner, 09-24). A bare "/" is the landing and a bare
- * "/activity" is Live's connect card, so a tab without the mode threw a visitor
- * out of the example on their first click.
+ * MOVING AROUND THE SAMPLE (owner, 09-24). A bare "/" is the landing, and since
+ * 10-08 so is a bare "/activity" (a visitor's Live is the front door), so a tab
+ * without the mode threw a visitor out of the example on their first click.
  */
 describe("the sample keeps the visitor in it", () => {
   /** Every href on the page that points at one of the app's own pages. */
@@ -209,9 +220,9 @@ describe("the sample keeps the visitor in it", () => {
     expect(html).not.toMatch(/href="\/"/);
   });
 
-  it("carries ?mode=live from Live's connect card, so Pension is not the landing", () => {
+  it("carries ?mode=live from Live's unavailable card, so Pension is not the landing", () => {
     mocked.search = new URLSearchParams("mode=live");
-    const html = render();
+    const html = render(false);
     expect(html).toContain('href="/?mode=live"');
     expect(html).toContain('href="/activity?mode=live"');
   });
