@@ -118,6 +118,7 @@ import {
   type PoolPrices,
   type PoolReserves,
   type PythRead,
+  readImportCandidate,
 } from "./readers";
 import { createRpcPool, type RpcPool } from "./rpc-pool";
 
@@ -218,8 +219,12 @@ export const BUILD_REQUEST_WEIGHT = 3;
  * withdrawable is measured against) + readBuildBatch 1 (the blockhash). It asks
  * for no rent of its own — set_policy_v2 opens no account — so it costs what
  * withdraw costs, and the same test pins it.
+ *
+ * importCheck is SIX, one batch: the vault and the link the address could
+ * have, its balance, its token accounts under each of the two programs, and the
+ * protocol config it could hold a role in.
  */
-export const BUILD_READS_WEIGHT = { createVault: 4, setPolicy: 3, prepareLink: 1, link: 3, investPolicy: 8, pauseInvesting: 3, withdraw: 3, withdrawToken: 4, state: 12 } as const;
+export const BUILD_READS_WEIGHT = { createVault: 4, setPolicy: 3, prepareLink: 1, link: 3, investPolicy: 8, pauseInvesting: 3, withdraw: 3, withdrawToken: 4, state: 12, importCheck: 6 } as const;
 
 /**
  * Upstream JSON-RPC calls /api/solana-live's actions make. A snapshot is one
@@ -1219,7 +1224,8 @@ function readView<T>(address: string, read: ChainRead<T>, view: (value: T) => Re
  */
 export function createSolanaVaultHandler(options: SolanaVaultHandlerOptions): SolanaRouteHandler {
   return createRoute("solana-vault", options, async (action, fields, served) => {
-    if (action !== "state") return served.refuse(400, "bad_request", 'Only {"action":"state"} is served.');
+    if (action === "importCheck") return importCheck(fields, served);
+    if (action !== "state") return served.refuse(400, "bad_request", "action must be state or importCheck.");
     const extra = unexpectedField(fields, STATE_FIELDS);
     if (extra !== null) return served.refuse(400, "bad_request", extra);
     const { owner, wallets } = fields;
@@ -1293,6 +1299,41 @@ export function createSolanaVaultHandler(options: SolanaVaultHandlerOptions): So
       // to withhold.
       offeredVenues: OFFERED_VENUES,
     });
+  });
+}
+
+const IMPORT_CHECK_FIELDS = ["action", "owner", "wallet"] as const;
+
+/**
+ * POST /api/solana-vault {"action":"importCheck","owner","wallet"}: what the
+ * chain says about an address before its private key is imported into Privy —
+ * whether it owns a vault or holds a protocol role, where it is linked
+ * (compared with `owner`'s vault), its SOL, and its token accounts. Public chain state, read from the ADDRESS:
+ * the key itself never comes near this server, and nothing here asks for it.
+ */
+async function importCheck(fields: Readonly<Record<string, unknown>>, served: Served): Promise<Response> {
+  const extra = unexpectedField(fields, IMPORT_CHECK_FIELDS);
+  if (extra !== null) return served.refuse(400, "bad_request", extra);
+  const { owner, wallet } = fields;
+  if (!isPubkey(owner)) return served.refuse(400, "bad_request", "owner must be a base58 32-byte public key.");
+  if (!isPubkey(wallet)) return served.refuse(400, "bad_request", "wallet must be a base58 32-byte public key.");
+  if (wallet === owner) return served.refuse(400, "wallet_is_owner", "A trading wallet cannot be your pension key.");
+
+  const spent = served.spendReads(BUILD_READS_WEIGHT.importCheck);
+  if (spent !== null) return spent;
+  const read = await readImportCandidate(served.pool, deriveVaultPda(owner).toBase58(), wallet);
+  return json(200, {
+    owner,
+    wallet,
+    programId: SIP_PROGRAM_ID,
+    ownVault: read.ownVault,
+    protocolRole: read.protocolRole,
+    link: { address: read.link.link, status: read.link.status, vault: read.link.vault },
+    lamports: read.lamports,
+    tokens:
+      read.tokens.kind === "exists"
+        ? { status: "exists", items: read.tokens.value.holdings, emptyAccounts: read.tokens.value.emptyAccounts }
+        : { status: "unreadable", items: [], emptyAccounts: null },
   });
 }
 

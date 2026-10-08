@@ -1464,6 +1464,74 @@ describe("withdrawToken", () => {
   });
 });
 
+describe("importCheck", () => {
+  it("answers what an import must know about an address, read from the address alone, at the weight it spends", async () => {
+    const owner = key();
+    const [wallet, elsewhere, mint] = [key(), key(), key()];
+    const chain = linkableChain(owner);
+    chain.accounts.set(deriveVaultPda(wallet).toBase58(), sipOwned(vaultAccount(wallet)));
+    chain.accounts.set(deriveLinkPda(wallet).toBase58(), sipOwned(linkAccount(wallet, elsewhere)));
+    const tokenAccount = key();
+    const { state, upstream } = setup({
+      ...chain,
+      balances: new Map([[wallet, 77_000_000]]),
+      tokenAccounts: new Map([
+        [
+          wallet,
+          [
+            { pubkey: tokenAccount, mint, amount: "9007199254740993", decimals: 6, uiAmountString: "9007199254.740993", tokenProgram: TOKEN_2022_PROGRAM },
+            { pubkey: key(), mint: USDC_MINT, amount: "0", decimals: 6, uiAmountString: "0", tokenProgram: TOKEN_PROGRAM },
+          ],
+        ],
+      ]),
+    });
+    const answer = await state({ action: "importCheck", owner, wallet });
+    expect(answer.status).toBe(200);
+    expect(answer.json).toEqual({
+      owner,
+      wallet,
+      programId: SIP_PROGRAM_ID,
+      ownVault: { address: deriveVaultPda(wallet).toBase58(), status: "exists" },
+      protocolRole: "none",
+      link: { address: deriveLinkPda(wallet).toBase58(), status: "other_vault", vault: elsewhere },
+      lamports: "77000000",
+      tokens: {
+        status: "exists",
+        items: [{ tokenAccount, mint, amountRaw: "9007199254740993", decimals: 6, uiAmount: "9007199254.740993", tokenProgram: TOKEN_2022_PROGRAM }],
+        emptyAccounts: 1,
+      },
+    });
+    expect(methodsOf(upstream.calls), "BUILD_READS_WEIGHT.importCheck must equal the upstream calls importCheck really makes").toHaveLength(BUILD_READS_WEIGHT.importCheck);
+  });
+
+  it("an unreadable chain is unreadable everywhere, never missing, with no endpoint in the answer", async () => {
+    const [owner, wallet] = [key(), key()];
+    const { state } = setup({ accounts: new Map(), down: true });
+    const answer = await state({ action: "importCheck", owner, wallet });
+    expect(answer.status).toBe(200);
+    expect(answer.json).toMatchObject({
+      ownVault: { status: "unreadable" },
+      protocolRole: "unreadable",
+      link: { status: "unreadable", vault: null },
+      lamports: null,
+      tokens: { status: "unreadable", items: [], emptyAccounts: null },
+    });
+    expect(answer.text).not.toContain(SECRET_QUERY);
+  });
+
+  it("refuses the pension key itself, a malformed address and any field it does not take, before reading the chain", async () => {
+    const owner = key();
+    const { state, upstream } = setup();
+    expect((await state({ action: "importCheck", owner, wallet: owner })).json.error).toMatchObject({ code: "wallet_is_owner" });
+    expect((await state({ action: "importCheck", owner, wallet: "not-a-key" })).status).toBe(400);
+    expect((await state({ action: "importCheck", owner: "nope", wallet: key() })).status).toBe(400);
+    const extra = await state({ action: "importCheck", owner, wallet: key(), privateKey: "anything" });
+    expect(extra.status).toBe(400);
+    expect(upstream.calls).toHaveLength(0);
+    expect((await state({ action: "import", owner })).json.error?.message).toBe("action must be state or importCheck.");
+  });
+});
+
 describe("state", () => {
   it("answers every read with its own outcome, bigints as strings, links per wallet, rents and the live prices", async () => {
     const owner = key();

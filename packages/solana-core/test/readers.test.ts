@@ -62,6 +62,7 @@ import {
   listVaultHoldings,
   listVaultLinks,
   readBuildBatch,
+  readImportCandidate,
   deriveClmmPoolVault,
   poolReservesFromAccounts,
   readOwnerAccounts,
@@ -232,6 +233,145 @@ describe("listVaultHoldings", () => {
       { tokenAccount: usdcAccount, mint: mintA, amountRaw: 1_500_000n, decimals: 6, uiAmount: "1.5", tokenProgram: TOKEN_PROGRAM },
       { tokenAccount: stockAccount, mint: mintB, amountRaw: 42n, decimals: 6, uiAmount: "1.5", tokenProgram: TOKEN_2022_PROGRAM },
     ]);
+  });
+});
+
+describe("readImportCandidate", () => {
+  const parsedEntry = (owner: string, pubkey: string, mint: string, amount: string) => ({
+    pubkey,
+    account: { data: { parsed: { info: { mint, owner, tokenAmount: { amount, decimals: 6, uiAmountString: amount === "0" ? "0" : "2.5" } } } } },
+  });
+  const NOBODY = "11111111111111111111111111111111";
+  const roles = (fields: Partial<Record<"authority" | "attester" | "keeper" | "pending_authority", string>> = {}) =>
+    account("ProtocolConfig", { authority: key(), attester: key(), bump: 253, keeper: key(), pending_authority: NOBODY, paused: false, version: 2, _reserved: new Array(64).fill(0), ...fields });
+  /** A whole answer: no vault, no link, `lamports`, no tokens, and a config naming nobody, unless overridden by id. */
+  const answers = (wallet: string, over: Record<number, unknown> = {}) =>
+    [
+      { jsonrpc: "2.0", id: 1, result: { value: null } },
+      { jsonrpc: "2.0", id: 2, result: { value: null } },
+      { jsonrpc: "2.0", id: 3, result: { value: 0 } },
+      { jsonrpc: "2.0", id: 4, result: { value: [] } },
+      { jsonrpc: "2.0", id: 5, result: { value: [] } },
+      { jsonrpc: "2.0", id: 6, result: { value: accountInfo(SIP_PROGRAM_ID, roles()) } },
+    ].map((member) => (member.id in over ? { jsonrpc: "2.0", id: member.id, ...(over[member.id] as object) } : member));
+
+  it("asks everything in ONE batch: the vault and link the address could have, its balance, both token programs, the config", async () => {
+    const [owner, wallet] = [key(), key()];
+    const ownerVault = deriveVaultPda(owner).toBase58();
+    const { pool: p, upstream } = pool(() => jsonResponse(answers(wallet)));
+    await readImportCandidate(p, ownerVault, wallet);
+    expect(upstream.calls).toHaveLength(1);
+    const batch = batchOf(upstream.calls[0]!);
+    expect(batch.map((member) => [member.method, member.params[0]])).toEqual([
+      ["getAccountInfo", deriveVaultPda(wallet).toBase58()],
+      ["getAccountInfo", deriveLinkPda(wallet).toBase58()],
+      ["getBalance", wallet],
+      ["getTokenAccountsByOwner", wallet],
+      ["getTokenAccountsByOwner", wallet],
+      ["getAccountInfo", deriveConfigPda().toBase58()],
+    ]);
+    expect(batch.slice(3, 5).map((member) => (member.params[1] as { programId: string }).programId)).toEqual([TOKEN_PROGRAM, TOKEN_2022_PROGRAM]);
+  });
+
+  it("reads a vault this key owns, a link elsewhere, its SOL, its balances and its empty accounts", async () => {
+    const [owner, wallet, elsewhere, mintA, mintB, accountA, accountB] = [key(), key(), key(), key(), key(), key(), key()];
+    const ownerVault = deriveVaultPda(owner).toBase58();
+    const { pool: p } = pool(() =>
+      jsonResponse(
+        answers(wallet, {
+          1: { result: { value: accountInfo(SIP_PROGRAM_ID, vaultBytes(wallet)) } },
+          2: { result: { value: accountInfo(SIP_PROGRAM_ID, linkBytes(wallet, elsewhere)) } },
+          3: { result: { context: { slot: 9 }, value: 123_456_789 } },
+          4: { result: { value: [parsedEntry(wallet, accountA, mintA, "2500000"), parsedEntry(wallet, key(), key(), "0"), parsedEntry(key(), key(), key(), "7")] } },
+          5: { result: { value: [parsedEntry(wallet, accountB, mintB, "2500000"), parsedEntry(wallet, key(), key(), "0")] } },
+        }),
+      ),
+    );
+    const read = await readImportCandidate(p, ownerVault, wallet);
+    expect(read.ownVault).toEqual({ address: deriveVaultPda(wallet).toBase58(), status: "exists" });
+    expect(read.protocolRole).toBe("none");
+    expect(read.link).toEqual({ wallet, link: deriveLinkPda(wallet).toBase58(), status: "other_vault", vault: elsewhere });
+    expect(read.lamports).toBe(123_456_789n);
+    expect(read.tokens).toEqual({
+      kind: "exists",
+      value: {
+        holdings: [
+          { tokenAccount: accountA, mint: mintA, amountRaw: 2_500_000n, decimals: 6, uiAmount: "2.5", tokenProgram: TOKEN_PROGRAM },
+          { tokenAccount: accountB, mint: mintB, amountRaw: 2_500_000n, decimals: 6, uiAmount: "2.5", tokenProgram: TOKEN_2022_PROGRAM },
+        ],
+        emptyAccounts: 2,
+      },
+    });
+  });
+
+  it("says missing only when the chain answered {value: null}, and this_vault for a link to the pension key's own vault", async () => {
+    const [owner, wallet] = [key(), key()];
+    const ownerVault = deriveVaultPda(owner).toBase58();
+    const { pool: p } = pool(() => jsonResponse(answers(wallet, { 2: { result: { value: accountInfo(SIP_PROGRAM_ID, linkBytes(wallet, ownerVault)) } } })));
+    const read = await readImportCandidate(p, ownerVault, wallet);
+    expect(read.ownVault.status).toBe("missing");
+    expect(read.protocolRole).toBe("none");
+    expect(read.link.status).toBe("this_vault");
+    expect(read.lamports).toBe(0n);
+    expect(read.tokens).toEqual({ kind: "exists", value: { holdings: [], emptyAccounts: 0 } });
+  });
+
+  it("A MEMBER WITH NO ANSWER IS NO ANSWER: no result, a null result, or a result with no value is unreadable, never missing", async () => {
+    const [owner, wallet] = [key(), key()];
+    for (const nothing of [{}, { result: null }, { result: {} }, { result: { value: "x" } }]) {
+      const { pool: p } = pool(() => jsonResponse(answers(wallet, { 1: nothing, 2: nothing, 6: nothing })));
+      const read = await readImportCandidate(p, deriveVaultPda(owner).toBase58(), wallet);
+      expect([read.ownVault.status, read.link.status, read.protocolRole], JSON.stringify(nothing)).toEqual(["unreadable", "unreadable", "unreadable"]);
+    }
+  });
+
+  it.each([
+    ["authority", "authority"],
+    ["pending_authority", "pending_authority"],
+    ["keeper", "keeper"],
+    ["attester", "attester"],
+  ] as const)("names a key that is the protocol's %s", async (field, role) => {
+    const [owner, wallet] = [key(), key()];
+    const { pool: p } = pool(() => jsonResponse(answers(wallet, { 6: { result: { value: accountInfo(SIP_PROGRAM_ID, roles({ [field]: wallet })) } } })));
+    expect((await readImportCandidate(p, deriveVaultPda(owner).toBase58(), wallet)).protocolRole).toBe(role);
+  });
+
+  it("calls a config that is absent, forged or another program's unreadable: the role cannot be known", async () => {
+    const [owner, wallet] = [key(), key()];
+    for (const config of [{ result: { value: null } }, { result: { value: accountInfo(key(), roles({ authority: wallet })) } }]) {
+      const { pool: p } = pool(() => jsonResponse(answers(wallet, { 6: config })));
+      expect((await readImportCandidate(p, deriveVaultPda(owner).toBase58(), wallet)).protocolRole).toBe("unreadable");
+    }
+  });
+
+  it("calls a forged or foreign account unreadable, never missing: a vault naming another owner, a link another program owns", async () => {
+    const [owner, wallet] = [key(), key()];
+    const { pool: p } = pool(() =>
+      jsonResponse(
+        answers(wallet, {
+          1: { result: { value: accountInfo(SIP_PROGRAM_ID, vaultBytes(key())) } },
+          2: { result: { value: accountInfo(key(), linkBytes(wallet, deriveVaultPda(owner).toBase58())) } },
+          3: { result: { value: "lots" } },
+          5: { error: { code: -32_000, message: `rate limited ${UPSTREAM_1}` } },
+        }),
+      ),
+    );
+    const read = await readImportCandidate(p, deriveVaultPda(owner).toBase58(), wallet);
+    expect(read.ownVault.status).toBe("unreadable");
+    expect(read.link.status).toBe("unreadable");
+    expect(read.lamports).toBeNull();
+    expect(read.tokens.kind).toBe("unreadable");
+    expect(JSON.stringify(read, (_, value) => (typeof value === "bigint" ? String(value) : value))).not.toContain(SECRET_QUERY);
+  });
+
+  it("reports everything unreadable when the batch fails, with no endpoint in it", async () => {
+    const { pool: p } = pool(() => {
+      throw new Error(`boom ${UPSTREAM_1}`);
+    });
+    const wallet = key();
+    const read = await readImportCandidate(p, deriveVaultPda(key()).toBase58(), wallet);
+    expect(read).toMatchObject({ ownVault: { status: "unreadable" }, protocolRole: "unreadable", link: { status: "unreadable", vault: null }, lamports: null, tokens: { kind: "unreadable" } });
+    expect(JSON.stringify(read)).not.toContain(SECRET_QUERY);
   });
 });
 

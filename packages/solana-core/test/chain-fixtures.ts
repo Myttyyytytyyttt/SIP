@@ -371,6 +371,8 @@ export interface StubChain {
   readonly parsedAccounts?: Map<string, unknown>;
   /** getTokenAccountsByOwner's answers, by owner. */
   readonly tokenAccounts?: Map<string, readonly StubTokenAccount[]>;
+  /** getBalance's answers, by address; 0 for any other. */
+  readonly balances?: Map<string, number>;
   readonly slot?: number;
   readonly lastValidBlockHeight?: number;
   /** Every call fails at the transport, quoting the endpoint, so a test can prove the quote never leaves. */
@@ -393,6 +395,8 @@ export function answerRpc(chain: StubChain): (call: UpstreamCall) => Response {
       }
       case "getAccountInfo":
         return { jsonrpc: "2.0", id, result: { context, value: chain.accounts.get(params[0] as string) ?? null } };
+      case "getBalance":
+        return { jsonrpc: "2.0", id, result: { context, value: chain.balances?.get(params[0] as string) ?? 0 } };
       case "getMinimumBalanceForRentExemption":
         return { jsonrpc: "2.0", id, result: localRent(params[0] as number) };
       case "getLatestBlockhash":

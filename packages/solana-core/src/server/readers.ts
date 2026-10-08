@@ -263,40 +263,59 @@ export interface VaultHolding {
   readonly tokenProgram: string;
 }
 
+/**
+ * One getTokenAccountsByOwner answer (jsonParsed) for `owner` under
+ * `tokenProgram`: its non-zero balances, and how many of its accounts hold
+ * nothing. An entry that does not parse, or names another owner, is skipped.
+ * Null when the answer is not a list.
+ */
+function tokenAccountsFrom(result: unknown, owner: string, tokenProgram: string): { readonly holdings: VaultHolding[]; readonly empty: number } | null {
+  const value = (result as { value?: unknown })?.value;
+  if (!Array.isArray(value)) return null;
+  const holdings: VaultHolding[] = [];
+  let empty = 0;
+  for (const entry of value as { pubkey?: string; account?: { data?: { parsed?: { info?: Record<string, unknown> } } } }[]) {
+    const info = entry.account?.data?.parsed?.info as
+      | { mint?: string; owner?: string; tokenAmount?: { amount?: string; decimals?: number; uiAmountString?: string } }
+      | undefined;
+    const amount = info?.tokenAmount?.amount;
+    if (info === undefined || typeof amount !== "string" || !/^[0-9]+$/.test(amount) || !isPubkey(info.mint) || !isPubkey(entry.pubkey)) continue;
+    if (info.owner !== undefined && info.owner !== owner) continue;
+    if (amount === "0") {
+      empty += 1;
+      continue;
+    }
+    holdings.push({
+      tokenAccount: entry.pubkey,
+      mint: info.mint,
+      amountRaw: BigInt(amount),
+      decimals: Number(info.tokenAmount?.decimals ?? 0),
+      uiAmount: String(info.tokenAmount?.uiAmountString ?? ""),
+      tokenProgram,
+    });
+  }
+  return { holdings, empty };
+}
+
+const tokenAccountsRequests = (owner: string, firstId: number) =>
+  TOKEN_PROGRAMS.map((programId, index) => ({
+    id: firstId + index,
+    method: "getTokenAccountsByOwner",
+    params: [owner, { programId }, { encoding: "jsonParsed", commitment: COMMITMENT }],
+  }));
+
 /** Every non-zero token balance the vault owns, under both token programs. */
 export async function listVaultHoldings(pool: RpcPool, vault: string): Promise<ChainRead<readonly VaultHolding[]>> {
   if (!isPubkey(vault)) return { kind: "unreadable", error: "not a base58 32-byte address" };
   try {
-    const members = await pool.batch(
-      TOKEN_PROGRAMS.map((programId, index) => ({
-        id: index + 1,
-        method: "getTokenAccountsByOwner",
-        params: [vault, { programId }, { encoding: "jsonParsed", commitment: COMMITMENT }],
-      })),
-    );
+    const members = await pool.batch(tokenAccountsRequests(vault, 1));
     const holdings: VaultHolding[] = [];
     for (const [index, tokenProgram] of TOKEN_PROGRAMS.entries()) {
       const answer = memberResult(members, index + 1);
       if (!answer.ok) return { kind: "unreadable", error: pool.scrub(answer.error) };
-      const value = (answer.result as { value?: unknown })?.value;
-      if (!Array.isArray(value)) return { kind: "unreadable", error: "getTokenAccountsByOwner did not answer a list" };
-      for (const entry of value as { pubkey?: string; account?: { data?: { parsed?: { info?: Record<string, unknown> } } } }[]) {
-        const info = entry.account?.data?.parsed?.info as
-          | { mint?: string; owner?: string; tokenAmount?: { amount?: string; decimals?: number; uiAmountString?: string } }
-          | undefined;
-        const amount = info?.tokenAmount?.amount;
-        if (info === undefined || typeof amount !== "string" || !/^[0-9]+$/.test(amount) || !isPubkey(info.mint) || !isPubkey(entry.pubkey)) continue;
-        if (info.owner !== undefined && info.owner !== vault) continue;
-        if (amount === "0") continue;
-        holdings.push({
-          tokenAccount: entry.pubkey,
-          mint: info.mint,
-          amountRaw: BigInt(amount),
-          decimals: Number(info.tokenAmount?.decimals ?? 0),
-          uiAmount: String(info.tokenAmount?.uiAmountString ?? ""),
-          tokenProgram,
-        });
-      }
+      const parsed = tokenAccountsFrom(answer.result, vault, tokenProgram);
+      if (parsed === null) return { kind: "unreadable", error: "getTokenAccountsByOwner did not answer a list" };
+      holdings.push(...parsed.holdings);
     }
     return { kind: "exists", value: holdings };
   } catch (error) {
@@ -346,13 +365,145 @@ export async function readWalletLinks(pool: RpcPool, vault: string, wallets: rea
     return allUnreadable();
   }
   if (!Array.isArray(value) || value.length !== wallets.length) return allUnreadable();
-  return wallets.map((wallet, index): WalletLinkRead => {
-    const link = links[index]!;
-    const read = decodeOwned((value as unknown[])[index] as RpcAccount | null, decodeTradingLink);
-    if (read.kind === "missing") return { wallet, link, status: "missing", vault: null };
-    if (read.kind === "unreadable" || read.value.state.wallet !== wallet) return { wallet, link, status: "unreadable", vault: null };
-    return { wallet, link, status: read.value.state.vault === vault ? "this_vault" : "other_vault", vault: read.value.state.vault };
+  return wallets.map((wallet, index): WalletLinkRead => walletLinkFrom(wallet, links[index]!, vault, (value as unknown[])[index] as RpcAccount | null));
+}
+
+/** One wallet's ["link", wallet] account, as the chain answered it, compared with `vault`. */
+function walletLinkFrom(wallet: string, link: string, vault: string, account: RpcAccount | null | undefined): WalletLinkRead {
+  const read = decodeOwned(account, decodeTradingLink);
+  if (read.kind === "missing") return { wallet, link, status: "missing", vault: null };
+  if (read.kind === "unreadable" || read.value.state.wallet !== wallet) return { wallet, link, status: "unreadable", vault: null };
+  return { wallet, link, status: read.value.state.vault === vault ? "this_vault" : "other_vault", vault: read.value.state.vault };
+}
+
+/** A wallet's tokens, as an import shows them before its key goes anywhere. */
+export interface WalletTokens {
+  /** Every non-zero balance, under both token programs, wrapped SOL included. */
+  readonly holdings: readonly VaultHolding[];
+  /** Accounts that hold nothing. Closing one refunds its rent through the token program. */
+  readonly emptyAccounts: number;
+}
+
+/**
+ * The protocol role a key holds in ["config"]: the authority (and the one a
+ * transfer is pending to) signs the protocol's own instructions, the keeper
+ * cranks invest, convert and wrap_sol, the attester signs settlements. "none"
+ * only when the config was read and names it nowhere.
+ */
+export type ProtocolRole = "authority" | "pending_authority" | "keeper" | "attester" | "none" | "unreadable";
+
+/** What an import reads about an address before its key goes anywhere. */
+export interface ImportCandidateRead {
+  readonly wallet: string;
+  /** ["vault", wallet]: "exists" when this key owns a SaverFi vault. A vault there that names another owner is "unreadable". */
+  readonly ownVault: { readonly address: string; readonly status: "exists" | "missing" | "unreadable" };
+  /** Whether ["config"] names this key in a protocol role. */
+  readonly protocolRole: ProtocolRole;
+  /** ["link", wallet], compared with the pension key's vault exactly as readWalletLinks compares it. */
+  readonly link: WalletLinkRead;
+  /** The wallet's own SOL, in lamports; null when it could not be read. */
+  readonly lamports: bigint | null;
+  readonly tokens: ChainRead<WalletTokens>;
+}
+
+/**
+ * EVERYTHING AN IMPORT CHECKS ON CHAIN, IN ONE BATCH: whether the address owns
+ * a vault or holds a protocol role (the seat's policy allows any SaverFi
+ * instruction, so on a vault owner's, the authority's or the keeper's key the
+ * seat could sign theirs; the attester is reported too, as a protocol key),
+ * where it is linked, its SOL, and every token account it holds under both
+ * token programs. `ownerVault` is the pension key's vault, which the
+ * link is compared with.
+ *
+ * Each read keeps its own outcome, and a failure is "unreadable", never
+ * "missing": an import that took a failed read for an empty one would put a
+ * vault owner's key in Privy with the seat on it. "missing" needs an answer
+ * that IS {value: null}; a member with no result, or a result with no value,
+ * is no answer.
+ */
+export async function readImportCandidate(pool: RpcPool, ownerVault: string, wallet: string): Promise<ImportCandidateRead> {
+  if (!isPubkey(ownerVault) || !isPubkey(wallet)) throw new RangeError("readImportCandidate: base58 32-byte keys only");
+  const vaultAddress = deriveVaultPda(wallet).toBase58();
+  const linkAddress = deriveLinkPda(wallet).toBase58();
+  const configAddress = deriveConfigPda().toBase58();
+  const unreadable = (error: string): ImportCandidateRead => ({
+    wallet,
+    ownVault: { address: vaultAddress, status: "unreadable" },
+    protocolRole: "unreadable",
+    link: { wallet, link: linkAddress, status: "unreadable", vault: null },
+    lamports: null,
+    tokens: { kind: "unreadable", error },
   });
+  let members: readonly JsonRpcMember[];
+  try {
+    members = await pool.batch([
+      { id: 1, method: "getAccountInfo", params: [vaultAddress, { encoding: "base64", commitment: COMMITMENT }] },
+      { id: 2, method: "getAccountInfo", params: [linkAddress, { encoding: "base64", commitment: COMMITMENT }] },
+      { id: 3, method: "getBalance", params: [wallet, { commitment: COMMITMENT }] },
+      ...tokenAccountsRequests(wallet, 4),
+      { id: 6, method: "getAccountInfo", params: [configAddress, { encoding: "base64", commitment: COMMITMENT }] },
+    ]);
+  } catch (error) {
+    return unreadable(errorText(pool, error));
+  }
+
+  /**
+   * The account a getAccountInfo member answered: null when the chain said none, undefined when it gave no value at
+   * all. Anything else goes on to decodeOwned, whose owner check calls what is not a SaverFi account unreadable.
+   */
+  const accountAt = (id: number): RpcAccount | null | undefined => {
+    const answer = memberResult(members, id);
+    return answer.ok && typeof answer.result === "object" && answer.result !== null ? (answer.result as { value?: RpcAccount | null }).value : undefined;
+  };
+
+  const vaultAccount = accountAt(1);
+  let ownVault: ImportCandidateRead["ownVault"]["status"] = "unreadable";
+  if (vaultAccount !== undefined) {
+    const read = decodeOwned(vaultAccount, decodeVault);
+    ownVault = read.kind === "exists" ? (read.value.state.owner === wallet ? "exists" : "unreadable") : read.kind;
+  }
+
+  const linkAccount = accountAt(2);
+  const link = linkAccount !== undefined ? walletLinkFrom(wallet, linkAddress, ownerVault, linkAccount) : { wallet, link: linkAddress, status: "unreadable" as const, vault: null };
+
+  // The protocol config always exists on a deployed program: one the chain says is absent ("missing") is no answer
+  // either, so anything but a decoded config leaves the role unreadable.
+  let protocolRole: ProtocolRole = "unreadable";
+  const config = decodeOwned(accountAt(6), decodeProtocolConfig);
+  if (config.kind === "exists") {
+    const state = config.value.state;
+    protocolRole =
+      state.authority === wallet
+        ? "authority"
+        : state.pendingAuthority === wallet
+          ? "pending_authority"
+          : state.keeper === wallet
+            ? "keeper"
+            : state.attester === wallet
+              ? "attester"
+              : "none";
+  }
+
+  const balanceAnswer = memberResult(members, 3);
+  const balance = balanceAnswer.ok ? (balanceAnswer.result as { value?: unknown })?.value : undefined;
+  const lamports = typeof balance === "number" && Number.isSafeInteger(balance) && balance >= 0 ? BigInt(balance) : null;
+
+  let tokens: ChainRead<WalletTokens> = { kind: "exists", value: { holdings: [], emptyAccounts: 0 } };
+  const holdings: VaultHolding[] = [];
+  let emptyAccounts = 0;
+  for (const [index, tokenProgram] of TOKEN_PROGRAMS.entries()) {
+    const answer = memberResult(members, 4 + index);
+    const parsed = answer.ok ? tokenAccountsFrom(answer.result, wallet, tokenProgram) : null;
+    if (parsed === null) {
+      tokens = { kind: "unreadable", error: answer.ok ? "getTokenAccountsByOwner did not answer a list" : pool.scrub(answer.error) };
+      break;
+    }
+    holdings.push(...parsed.holdings);
+    emptyAccounts += parsed.empty;
+  }
+  if (tokens.kind === "exists") tokens = { kind: "exists", value: { holdings, emptyAccounts } };
+
+  return { wallet, ownVault: { address: vaultAddress, status: ownVault }, protocolRole, link, lamports, tokens };
 }
 
 export interface LinkPrerequisites {
