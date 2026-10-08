@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { headCursor } from "@/lib/live-activity-store";
 import { floorRoom, keeperVenueThresholdWad } from "@/lib/invest-limits";
-import { oldLimitsStopOf, priceLimitsOf, toLiveDashboard } from "@/lib/live-model";
+import { oldLimitsStopOf, priceLimitsOf, safetyFloorStopOf, toLiveDashboard } from "@/lib/live-model";
 import type { LiveActivityJson, LiveEntryJson, LiveSnapshotJson, VaultEventJson } from "@/lib/live-types";
 
 import { policyState } from "../../test/fixtures/live-dashboard";
@@ -620,10 +620,41 @@ describe("priceLimitsOf", () => {
     expect(priceLimitsOf(policyState(), null)).toBe("held");
   });
 
-  it("is held when only ONE number carries a limit, the SOL floor or a single leg's", () => {
-    expect(priceLimitsOf(policyState({ legs: live.legs, minConvertRateWad: "90034840399943305" }), TWO_LEG_PRICES)).toBe("held");
+  it("is held when a single leg carries a limit; a SOL floor alone is a safety floor, not an old limit", () => {
     expect(priceLimitsOf({ ...twoLegs(1n, "1"), minConvertRateWad: "1" }, TWO_LEG_PRICES)).toBe("live");
     expect(priceLimitsOf({ ...twoLegs(2n, "1"), minConvertRateWad: "1" }, TWO_LEG_PRICES)).toBe("held");
+    // Legs at 1 wad and a SOL floor under today's price: what a policy signed since 2026-10-09 carries.
+    expect(priceLimitsOf(policyState({ legs: live.legs, minConvertRateWad: "90034840399943305" }), TWO_LEG_PRICES)).toBe("live");
+  });
+
+  /**
+   * THE SOL SAFETY FLOOR (owner, 2026-10-09): legs at 1 wad and the SOL floor at
+   * half the price at signing. SOL over it: "live", nothing to say. SOL under
+   * it: "safety_floor" — conversion stopped, the one case the owner signs again.
+   */
+  it("is live while SOL is over a new policy's safety floor, and safety_floor once it is under, by one wad either way", () => {
+    const signedToday = { ...live, minConvertRateWad: "50019355777746281" };
+    expect(priceLimitsOf(signedToday, TWO_LEG_PRICES)).toBe("live");
+    expect(safetyFloorStopOf(signedToday, TWO_LEG_PRICES)).toBe(false);
+    // TWO_LEG_PRICES' SOL is 100,038,711,555,492,562: a floor at it is not passed, one wad over it is.
+    const atToday = { ...live, minConvertRateWad: "100038711555492562" };
+    expect(priceLimitsOf(atToday, TWO_LEG_PRICES)).toBe("live");
+    const overToday = { ...live, minConvertRateWad: "100038711555492563" };
+    expect(priceLimitsOf(overToday, TWO_LEG_PRICES)).toBe("safety_floor");
+    expect(safetyFloorStopOf(overToday, TWO_LEG_PRICES)).toBe(true);
+    // Unread SOL judges nothing; an old policy's SOL floor is oldLimitsStopOf's, never this.
+    expect(priceLimitsOf(overToday, null)).toBe("live");
+    expect(safetyFloorStopOf(overToday, null)).toBe(false);
+    expect(safetyFloorStopOf(policyState({ minConvertRateWad: "100038711555492563" }), PRICES)).toBe(false);
+    expect(oldLimitsStopOf(overToday, TWO_LEG_PRICES)).toBeNull();
+  });
+
+  it("carries the safety-floor stop into the live dashboard's policy view", () => {
+    const under = model(snapshot({ policy: { status: "exists", address: `${VAULT}-policy`, state: policyState({ legs: live.legs.slice(0, 1).map((leg) => ({ ...leg, weightBps: 10_000 })), minConvertRateWad: "100038711555492563" }) } }));
+    expect([under.policy.safetyFloorStop, under.policy.oldLimitsStop]).toEqual([true, null]);
+    const over = model(snapshot({ policy: { status: "exists", address: `${VAULT}-policy`, state: policyState({ legs: live.legs.slice(0, 1).map((leg) => ({ ...leg, weightBps: 10_000 })), minConvertRateWad: "50019355777746281" }) } }));
+    expect(over.policy.safetyFloorStop).toBe(false);
+    expect(model().policy.safetyFloorStop).toBe(false);
   });
 
   it("is blocking when a leg's floor is above today's rate, whatever the other legs say", () => {

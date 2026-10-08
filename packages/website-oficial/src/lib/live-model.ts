@@ -22,6 +22,7 @@
 
 import {
   CATALOGUE,
+  LIVE_PRICE_FLOOR_WAD,
   OFFERED_LEGS,
   USDC_MINT,
   VOLUME_MODE_OFFERED,
@@ -86,8 +87,9 @@ export interface FloorsState {
  * A stored floor at or under today's rate lets the keeper act: SOL sells above
  * its floor, and a leg buys at least its floor's amount. Past that, buying waits
  * until the owner signs again. Every policy signed since 2026-10-08 carries
- * 1 wad (LIVE_PRICE_FLOOR_WAD), which no rate is under; only an older policy's
- * floors can be passed (priceLimitsOf below).
+ * 1 wad (LIVE_PRICE_FLOOR_WAD) on its legs, which no rate is under, and since
+ * 2026-10-09 a SOL safety floor at half the SOL price at signing, which SOL
+ * passes only by halving (priceLimitsOf below).
  *
  * Shared by the wallets screen's InvestingCard and the live rule card, so the
  * two cannot disagree about whether a floor has been passed.
@@ -112,11 +114,19 @@ export function floorsState(policy: InvestmentPolicyJson, prices: VaultStateJson
 /**
  * HOW A STORED POLICY IS PRICED, AS ONE WORD — for the wallets screen's
  * InvestingCard, the Vault settings gear and the wallets overview, so the three
- * cannot disagree about whether to ask the owner to switch.
+ * cannot disagree about whether to ask the owner to sign again.
  *
- *   "live"      every floor is LIVE_PRICE_FLOOR_WAD or under (carriesPriceLimits
- *               false): what every policy signed since 2026-10-08 carries.
- *               Nothing to say.
+ *   "live"      every leg floor is LIVE_PRICE_FLOOR_WAD or under
+ *               (carriesPriceLimits false) and SOL is not under the SOL floor:
+ *               what every policy signed since 2026-10-08 carries, its SOL
+ *               safety floor (2026-10-09) included. Nothing to say.
+ *   "safety_floor"
+ *               such a policy, and today's SOL rate is UNDER its SOL floor:
+ *               SOL has halved since it was signed, so convert.rs refuses
+ *               every conversion and the vault's SOL waits as SOL. The one
+ *               price move that asks the owner to sign again; signing gives a
+ *               new floor at half today's price. Stock buys from USDC already
+ *               held go on.
  *   "blocking"  a policy signed before that day whose old limits stop buying
  *               now: the market passed a floor — the SOL conversion's or a
  *               leg's, each read against its own rate — or a leg's floor leaves
@@ -129,13 +139,29 @@ export function floorsState(policy: InvestmentPolicyJson, prices: VaultStateJson
  *
  * Null when the policy's own numbers could not be read.
  */
-export type PriceLimits = "live" | "held" | "blocking";
+export type PriceLimits = "live" | "safety_floor" | "held" | "blocking";
 
 export function priceLimitsOf(policy: InvestmentPolicyJson, prices: VaultStateJson["prices"]): PriceLimits | null {
   const floors = floorsState(policy, prices);
   if (floors.storedConvert === null && floors.legs.every((leg) => leg.floor === null)) return null;
-  if (!carriesPriceLimits(floors.legs.map((leg) => leg.floor), floors.storedConvert)) return "live";
+  if (!carriesPriceLimits(floors.legs.map((leg) => leg.floor))) return safetyFloorPassedIn(floors) ? "safety_floor" : "live";
   return oldLimitsStopIn(floors) === null ? "held" : "blocking";
+}
+
+/**
+ * Whether a policy signed since 2026-10-08 (legs at 1 wad) has its SOL safety
+ * floor over today's SOL rate: conversion is stopped until it is signed again.
+ * False for an older policy (its SOL floor is one of oldLimitsStopOf's), and
+ * when either number is unread.
+ */
+export function safetyFloorStopOf(policy: InvestmentPolicyJson, prices: VaultStateJson["prices"]): boolean {
+  const floors = floorsState(policy, prices);
+  return !carriesPriceLimits(floors.legs.map((leg) => leg.floor)) && safetyFloorPassedIn(floors);
+}
+
+function safetyFloorPassedIn(floors: FloorsState): boolean {
+  const { storedConvert, liveConvert } = floors;
+  return storedConvert !== null && liveConvert !== null && liveConvert > 0n && storedConvert > LIVE_PRICE_FLOOR_WAD && storedConvert > liveConvert;
 }
 
 /**
@@ -159,7 +185,7 @@ export type OldLimitsStop = "basket" | "convert";
 
 export function oldLimitsStopOf(policy: InvestmentPolicyJson, prices: VaultStateJson["prices"]): OldLimitsStop | null {
   const floors = floorsState(policy, prices);
-  if (!carriesPriceLimits(floors.legs.map((leg) => leg.floor), floors.storedConvert)) return null;
+  if (!carriesPriceLimits(floors.legs.map((leg) => leg.floor))) return null;
   return oldLimitsStopIn(floors);
 }
 
@@ -221,6 +247,7 @@ function policyView(snapshot: LiveSnapshotJson, usdcHeld: bigint | null, nowMs: 
     pricesKnown: false,
     belowMarket: false,
     oldLimitsStop: null,
+    safetyFloorStop: false,
     readiness: null,
   };
   if (policy.status !== "exists" || state === undefined) return empty;
@@ -252,6 +279,7 @@ function policyView(snapshot: LiveSnapshotJson, usdcHeld: bigint | null, nowMs: 
     pricesKnown: floors.pricesKnown,
     belowMarket: floors.belowMarket,
     oldLimitsStop: oldLimitsStopOf(state, prices),
+    safetyFloorStop: safetyFloorStopOf(state, prices),
     readiness:
       usdcHeld === null || minInvestment === null || maxPerCall === null ? null : investmentReadiness(usdcHeld, state.legs, minInvestment, maxPerCall),
   };

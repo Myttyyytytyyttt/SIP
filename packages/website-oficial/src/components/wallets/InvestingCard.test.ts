@@ -624,6 +624,54 @@ describe("InvestingCard", () => {
     expect(html).not.toMatch(/SOL floor|ceiling \$/);
   });
 
+  /** LIVE_POLICY as signed since 2026-10-09: its SOL safety floor at half $100.04, rounded down. */
+  const SAFE_POLICY: InvestmentPolicyJson = { ...LIVE_POLICY, minConvertRateWad: "50019355777746281" };
+
+  it("a policy with a SOL safety floor SOL is over: the live-price badge, the floor stated per SOL, and nothing to sign", () => {
+    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: SAFE_POLICY } }) }));
+    expect(html).toContain(`>${INVEST_COPY.badgeLive}<`);
+    expect(html).toContain(INVEST_COPY.safetyFloorFact);
+    expect(html).toContain(INVEST_COPY.perSol("$50.02"));
+    expect(html).not.toContain(INVEST_COPY.safetyFloorTitle);
+    expect(html).not.toContain(INVEST_COPY.oldLimitsTitle);
+    expect(buttons(INVEST_COPY.resignSafetyFloor)).toHaveLength(0);
+    expect(buttons(INVEST_COPY.switchToLive)).toHaveLength(0);
+  });
+
+  it("SOL under the policy's safety floor: the badge, the plain words, the floor beside today's price, and one press that re-signs the same basket", async () => {
+    const build = vi.fn(async () => ({ ok: false as const, status: 409, code: "vault_missing", message: "Create your vault first.", retryAfterSeconds: null, body: {} }));
+    const fallen = { ...PRICES!, convertWad: "40000000000000000", usdcRawPerSol: "40000000" };
+    const value = screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: SAFE_POLICY }, prices: fallen }) }, { build: build as unknown as VaultApi["build"] });
+    const html = render(value);
+    expect(html).toContain(`>${INVEST_COPY.badgeSafetyFloor}<`);
+    expect(html).toContain(INVEST_COPY.safetyFloorTitle);
+    expect(html).toContain(INVEST_COPY.safetyFloorBlocking.replaceAll("'", "&#x27;"));
+    expect(html).toContain(INVEST_COPY.safetyFloorLine("$50.02", "$40.00"));
+    // Not an old policy: none of the old-limits words.
+    expect(html).not.toContain(INVEST_COPY.oldLimitsTitle);
+    expect(buttons(INVEST_COPY.switchToLive)).toHaveLength(0);
+    const press = buttons(INVEST_COPY.resignSafetyFloor);
+    expect(press.map((button) => button.disabled)).toEqual([false]);
+    press[0]?.onClick?.(CLICK);
+    await vi.waitFor(() => expect(value.refresh).toHaveBeenCalledTimes(1));
+    expect(build.mock.calls).toStrictEqual([
+      [
+        {
+          action: "investPolicy",
+          owner: PENSION,
+          maxPerCall: "10000000",
+          maxRolling30d: "50000000",
+          enabled: true,
+          minInvestment: "2500000",
+          weights: [
+            { mint: SPYX_MINT, weightBps: 5_000 },
+            { mint: ANTHROPIC_MINT, weightBps: 5_000 },
+          ],
+        },
+      ],
+    ]);
+  });
+
   it("a policy signed before 2026-10-08 whose limits still buy: the old limits named, one calm press to switch, which re-signs the same basket", async () => {
     const build = vi.fn(async () => ({ ok: false as const, status: 409, code: "vault_missing", message: "Create your vault first.", retryAfterSeconds: null, body: {} }));
     // POLICY's own floors: 10 % under SOL's price and 5 % under each leg's mid,

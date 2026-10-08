@@ -50,6 +50,17 @@ export const SETTINGS_COPY = {
   switchLiveBlocking: "Your old price limits are holding up your investing right now. Switch to live-price buying to drop them.",
   switchLiveBlocked: "Save or cancel your changes first: saving switches to live-price buying too.",
 
+  /**
+   * SOL UNDER THE SAFETY FLOOR (live-model.ts priceLimitsOf "safety_floor"):
+   * a basket approved since 2026-10-09 whose SOL has halved since. Conversion
+   * stops; one approval at today's price sets a new floor. Live-only, like the
+   * three above.
+   */
+  safetyFloor: "Approve again at today's price",
+  safetyFloorBlocking:
+    "SOL is under half its price when you approved, so your SOL is not being converted to USDC. Approve again at today's price to set a new safety floor and convert again.",
+  safetyFloorBlocked: "Save or cancel your changes first: saving approves at today's price too.",
+
   nonceNotice: "Changing how you save restarts any saving already on its way. Nothing already in your vault is touched.",
   buyingReapproved: "Changing what you buy approves your choices again, at the live market price.",
   capMoved: (from: string, to: string): string => `The most one buy can spend moves from ${from} to ${to}, to fit this basket.`,

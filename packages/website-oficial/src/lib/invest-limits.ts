@@ -1,6 +1,6 @@
 /**
  * TODAY'S PRICES, WHAT A POLICY HAS ALREADY SPENT, AND WHETHER A POLICY SIGNED
- * BEFORE 2026-10-08 STILL CARRIES PRICE LIMITS.
+ * BEFORE 2026-10-08 STILL CARRIES STOCK PRICE LIMITS.
  *
  * Pure and client-safe. These two were InvestingCard's, and they moved here when
  * the live dashboard's rule card needed the same numbers: a pure model must not
@@ -85,11 +85,16 @@ export function todaysPrices(prices: VaultStateJson["prices"]): TodaysPrices | n
 // ── A POLICY SIGNED BEFORE 2026-10-08 ────────────────────────────────────────
 //
 // Since the owner's decision that day every policy signs LIVE_PRICE_FLOOR_WAD
-// (1 wad) for every leg and for the SOL hop: no price floor (solana-core
-// product.ts). A policy signed before it carries real floors — a SOL floor
-// 10 % under that day's price and a floor per stock 5-7 % under its own — and
-// keeps them until it is signed again. The page tells the two apart by the
-// numbers alone: any floor over LIVE_PRICE_FLOOR_WAD is a price limit.
+// (1 wad) for every leg: no stock price floor (solana-core product.ts). A
+// policy signed before it carries real floors — a floor per stock 5-7 % under
+// its own price and a SOL floor 10 % under that day's — and keeps them until
+// it is signed again. The page tells the two apart by THE LEGS ALONE: any leg
+// floor over LIVE_PRICE_FLOOR_WAD is a price limit from before.
+//
+// NOT BY THE SOL FLOOR. Since 2026-10-09 every new policy signs a SOL safety
+// floor at half the SOL price (product.ts CONVERT_SAFETY_FLOOR_BPS), so a SOL
+// floor over 1 wad is what a NEW policy carries too; live-model.ts
+// priceLimitsOf judges it on its own ("safety_floor").
 
 /**
  * A price per 1e8 raw units of a leg (usdcRawPer1e8LegRaw, todaysPrices) as a
@@ -104,16 +109,13 @@ export function perWholeToken(per1e8: bigint, decimals: number): bigint {
 }
 
 /**
- * Whether a stored policy carries a price limit: any leg's min_out_rate_wad, or
- * the min_convert_rate_wad, over LIVE_PRICE_FLOOR_WAD. A floor of 0 is not a
- * limit (the program refuses one on a leg; on the SOL hop it switches the
- * conversion off, which is a different thing and not this prompt's to fix).
- * An unreadable number is not judged a limit either: nothing is urged on a
- * guess.
+ * Whether a stored policy carries the price limits of a policy signed before
+ * 2026-10-08: any leg's min_out_rate_wad over LIVE_PRICE_FLOOR_WAD. The SOL
+ * floor is not read here (see above). An unreadable number is not judged a
+ * limit: nothing is urged on a guess.
  */
-export function carriesPriceLimits(minOutRateWads: readonly (bigint | null)[], minConvertRateWad: bigint | null): boolean {
-  const over = (wad: bigint | null): boolean => wad !== null && wad > LIVE_PRICE_FLOOR_WAD;
-  return over(minConvertRateWad) || minOutRateWads.some(over);
+export function carriesPriceLimits(minOutRateWads: readonly (bigint | null)[]): boolean {
+  return minOutRateWads.some((wad) => wad !== null && wad > LIVE_PRICE_FLOOR_WAD);
 }
 
 // ── WHETHER THE KEEPER STILL BUYS UNDER A SIGNED FLOOR ───────────────────────

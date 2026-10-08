@@ -116,8 +116,12 @@ export type WithdrawTile =
   /** `tokens`: how many tokens the vault holds a balance of, or null when they could not be read. */
   | { readonly kind: "exists"; readonly withdrawable: bigint | null; readonly tokens: number | null };
 
-/** A basket approved before 2026-10-08 that still carries price limits: priceLimitsOf's words, exactly as the gear's dot reads them. */
-export type PriceLimitsAttention = "held" | "blocking";
+/**
+ * A basket approved before 2026-10-08 that still carries price limits, or one
+ * whose SOL is under its safety floor: priceLimitsOf's words, exactly as the
+ * gear's dot reads them.
+ */
+export type PriceLimitsAttention = "held" | "blocking" | "safety_floor";
 
 export interface Overview {
   /** "failed": the route did not answer, or it answered without the vault. */
@@ -243,9 +247,9 @@ export function overviewOf(view: VaultView | null, wallets: readonly OverviewWal
         ? { kind: "needs-vault" }
         : { kind: "exists", withdrawable: rawFrom(vault.withdrawableLamports), tokens: tokens.source === "unreadable" ? null : tokens.rows.length };
 
-  // The gear's own judgement (LiveRulePanel): old price limits, stopping buys now or not.
+  // The gear's own judgement (LiveRulePanel): old price limits, stopping buys now or not, or SOL under its safety floor.
   const limits = policy.status === "exists" && policy.state !== undefined ? priceLimitsOf(policy.state, state.prices) : null;
-  const priceLimits = limits === "held" || limits === "blocking" ? limits : null;
+  const priceLimits = limits === "held" || limits === "blocking" || limits === "safety_floor" ? limits : null;
 
   const counts = countWallets(state, wallets);
   const linkedHere = state.walletLinks.some((link) => link.status === "this_vault");
@@ -357,7 +361,14 @@ function AttentionRows({
   readonly setupGoesTo: WalletsSection | null;
 }) {
   const fix = walletsToFix(overview);
-  const limitsLine = overview.priceLimits === "blocking" ? SETTINGS_COPY.switchLiveBlocking : overview.priceLimits === "held" ? SETTINGS_COPY.switchLiveHeld : null;
+  const limitsLine =
+    overview.priceLimits === "blocking"
+      ? SETTINGS_COPY.switchLiveBlocking
+      : overview.priceLimits === "held"
+        ? SETTINGS_COPY.switchLiveHeld
+        : overview.priceLimits === "safety_floor"
+          ? SETTINGS_COPY.safetyFloorBlocking
+          : null;
 
   const rows: ReactNode[] = [];
   if (overview.read === "failed") {

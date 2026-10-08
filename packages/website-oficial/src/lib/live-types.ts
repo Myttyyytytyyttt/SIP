@@ -247,6 +247,12 @@ export interface LivePolicyView {
   readonly belowMarket: boolean;
   /** What a policy signed before 2026-10-08 stops right now, by cause (live-model.ts oldLimitsStopOf); null when nothing. */
   readonly oldLimitsStop: "basket" | "convert" | null;
+  /**
+   * A policy signed since 2026-10-08 whose SOL safety floor is over today's SOL
+   * price (live-model.ts safetyFloorStopOf): conversion is stopped until it is
+   * signed again; buys from USDC already held go on.
+   */
+  readonly safetyFloorStop: boolean;
   /** Whether the next sweep can buy, from the USDC the vault actually holds. Null when there is nothing to say. */
   readonly readiness: InvestmentReadiness | null;
 }

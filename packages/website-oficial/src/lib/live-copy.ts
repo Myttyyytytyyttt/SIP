@@ -581,6 +581,7 @@ export const PENDING_COPY = {
     month_cap: "Your 30-day buying limit is reached",
     conversion_off: "Converting is switched off in your investment policy",
     price_limits: "Held by your policy's old price limits · Switch to live-price buying to drop them",
+    safety_floor: "SOL is under half its price when you approved · Approve again at today's price to convert",
   },
   /** Due, and not done: past a few sweeps the loader stops and says since when. */
   slow: (clock: string): string => `Not done since ${clock} · ${BRAND} tries again about once a minute`,

@@ -341,6 +341,44 @@ describe("old price limits that stop the keeper", () => {
   });
 });
 
+/**
+ * SOL UNDER A NEWER POLICY'S SAFETY FLOOR (owner, 2026-10-09): legs at 1 wad,
+ * the SOL floor at half the price at signing. convert.rs refuses every
+ * conversion under it, so the conversion rests on it — no loader — while the
+ * USDC already held is still invested. It is the one price move the owner must
+ * sign again for, and the row says so.
+ */
+describe("SOL under the safety floor", () => {
+  const LIVE_LEGS = [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "1" }];
+  /** One wad over PRICES' SOL rate. */
+  const UNDER: Partial<InvestmentPolicyJson> = { legs: LIVE_LEGS, minConvertRateWad: "100038711555492563" };
+  /** Half of PRICES' SOL rate: SOL is over it. */
+  const OVER: Partial<InvestmentPolicyJson> = { legs: LIVE_LEGS, minConvertRateWad: "50019355777746281" };
+
+  it("rests the conversion on the safety floor, without a loader, and still buys with the USDC held", () => {
+    const data = dashboard({ ...OWNER_CASE, entries: [...OWNER_CASE.entries!, ...FRESH], usdc: 10_000_000n, policy: UNDER });
+    expect([data.policy.safetyFloorStop, data.policy.oldLimitsStop]).toEqual([true, null]);
+    const steps = pendingSteps(data);
+    expect(steps.map((step) => [step.kind, step.state, step.rest])).toEqual([
+      ["converting", "waiting", "safety_floor"],
+      ["buying", "active", null],
+    ]);
+    expect(pendingLines(steps)[0]).toMatchObject({ active: false, title: PENDING_COPY.convertingWaiting, sub: PENDING_COPY.rest.safety_floor });
+    expect(nextInvestmentOf(steps).extraUsdcRaw).toBeNull();
+  });
+
+  it("converts as usual while SOL is over it", () => {
+    const data = dashboard({ ...OWNER_CASE, entries: [...OWNER_CASE.entries!, ...FRESH], policy: OVER });
+    expect(data.policy.safetyFloorStop).toBe(false);
+    expect(pendingSteps(data)[0]).toMatchObject({ kind: "converting", state: "active", rest: null });
+  });
+
+  it("points at approving again, in the owner's words", () => {
+    expect(PENDING_COPY.rest.safety_floor).toContain("Approve again at today's price");
+    expect(PENDING_COPY.rest.safety_floor).not.toMatch(/keeper|wad|bps/i);
+  });
+});
+
 describe("a loader that stops claiming progress", () => {
   const at = (minutes: number): Setup => ({ ...OWNER_CASE, entries: [liveEntry(signature(1), minutesAgo(minutes), [wrapped("18000000")])] });
 

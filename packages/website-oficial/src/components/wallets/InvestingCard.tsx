@@ -1244,6 +1244,10 @@ function PolicySummary({
   const { storedConvert, legs } = floorsState(policy, state.prices);
   const priceLimits = priceLimitsOf(policy, state.prices);
   const oldLimits = priceLimits === "held" || priceLimits === "blocking";
+  // SOL under a newer policy's safety floor: conversion stopped, the same one press re-signs.
+  const underFloor = priceLimits === "safety_floor";
+  // A policy signed since 2026-10-08 states its SOL safety floor; an old one states its SOL limit in the block below.
+  const safetyFloor = !oldLimits && storedConvert !== null && storedConvert > LIVE_PRICE_FLOOR_WAD ? formatUsd(usdcRawPerSol(storedConvert)) : null;
   // What they stop, when they stop something: a stock's limit stops the whole
   // basket and the conversion, the SOL limit alone only the conversion.
   const stops = oldLimitsStopOf(policy, state.prices);
@@ -1287,8 +1291,14 @@ function PolicySummary({
         <CardDescription>{policy.enabled ? INVEST_COPY.enabled : INVEST_COPY.paused}</CardDescription>
         {priceLimits === null ? null : (
           <CardAction>
-            <Badge variant={priceLimits === "blocking" ? "destructive" : "outline"}>
-              {priceLimits === "live" ? INVEST_COPY.badgeLive : priceLimits === "blocking" ? INVEST_COPY.badgeOldLimitsBlocking : INVEST_COPY.badgeOldLimits}
+            <Badge variant={priceLimits === "blocking" || underFloor ? "destructive" : "outline"}>
+              {priceLimits === "live"
+                ? INVEST_COPY.badgeLive
+                : priceLimits === "blocking"
+                  ? INVEST_COPY.badgeOldLimitsBlocking
+                  : underFloor
+                    ? INVEST_COPY.badgeSafetyFloor
+                    : INVEST_COPY.badgeOldLimits}
             </Badge>
           </CardAction>
         )}
@@ -1342,12 +1352,37 @@ function PolicySummary({
             </Button>
           </div>
         ) : null}
+        {/* SOL UNDER THE SAFETY FLOOR (a policy signed since 2026-10-09): the
+            one price move that stops something and asks for a signature, said
+            first, with the one press that sets a new floor at half today's price. */}
+        {underFloor ? (
+          <div className="space-y-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs">
+            <div className={LABEL}>{INVEST_COPY.safetyFloorTitle}</div>
+            <p role="status">{INVEST_COPY.safetyFloorBlocking}</p>
+            {safetyFloor === null ? null : <p>{INVEST_COPY.safetyFloorLine(safetyFloor, today === null ? null : formatUsd(today.todayPerSol))}</p>}
+            {"problem" in switchRequest ? (
+              <p role="alert" className="text-destructive">
+                {switchRequest.problem}
+              </p>
+            ) : null}
+            <Button
+              type="button"
+              size="sm"
+              disabled={blocked || "problem" in switchRequest}
+              aria-busy={write.running}
+              onClick={"problem" in switchRequest ? undefined : () => start(switchRequest)}
+            >
+              {INVEST_COPY.resignSafetyFloor}
+            </Button>
+          </div>
+        ) : null}
         <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           <Fact label={INVEST_COPY.basket}>{legs.map((leg) => `${leg.symbol} · ${ratePercent(leg.weightBps)}`).join(", ")}</Fact>
           <Fact label={INVEST_COPY.mostPerBuy}>{formatUsd(maxPerCall)}</Fact>
           <Fact label={INVEST_COPY.mostPer30Days}>{formatUsd(maxRolling30d)}</Fact>
           <Fact label={INVEST_COPY.usedLast30}>{formatUsd(usedInLast30Days(policy.bucketDays, policy.bucketAmounts, Date.now() / 1_000))}</Fact>
           <Fact label={INVEST_COPY.lifetime}>{formatUsd(rawFrom(policy.lifetimeInvested) ?? 0n)}</Fact>
+          {safetyFloor === null ? null : <Fact label={INVEST_COPY.safetyFloorFact}>{INVEST_COPY.perSol(safetyFloor)}</Fact>}
         </dl>
         {basketReadiness === null ? null : <p className="text-xs">{readinessWords(basketReadiness, readiness !== null)}</p>}
         <p className="text-xs text-muted-foreground">{INVEST_COPY.freezeShort(policyLegs)}</p>
@@ -1357,7 +1392,7 @@ function PolicySummary({
             the stored bytes as they are, so it is never blocked by an
             arithmetic about buying. Said once: the old-limits block above
             carries it when that block is shown. */}
-        {!resign.ok && !oldLimits ? (
+        {!resign.ok && !oldLimits && !underFloor ? (
           <p role="alert" className="text-xs text-destructive">
             {resign.message}
           </p>

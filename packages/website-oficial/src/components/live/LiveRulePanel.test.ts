@@ -94,18 +94,38 @@ const ACCOUNT = liveSnapshot().vault.state! as unknown as VaultAccountJson;
 
 const leg = (mint: string, weightBps: number) => ({ mint, weightBps, minOutRateWad: "1" });
 
-/** SPYx and ANTHROPIC at 50/50, $5 a leg — $10 in all — on Jupiter, at the live price (every floor 1 wad, as signed since 2026-10-08). */
+/**
+ * SPYx and ANTHROPIC at 50/50, $5 a leg — $10 in all — on Jupiter, at the live
+ * price: every leg at 1 wad (since 2026-10-08) and the SOL safety floor at half
+ * $100.04 (since 2026-10-09).
+ */
 const POLICY = policyState({
   venueProgram: JUPITER_V6,
   legs: [leg(SPYX_MINT, 5_000), leg(ANTHROPIC_MINT, 5_000)],
-  minConvertRateWad: "1",
+  minConvertRateWad: "50019355777746281",
   minInvestment: "5000000",
   maxPerCall: "149000000",
   maxRolling30d: "4619000000",
 });
 
-/** The same basket signed before 2026-10-08: a SOL floor 10 % under that day's price, still stored. */
-const OLD_POLICY: InvestmentPolicyJson = { ...POLICY, minConvertRateWad: "90000000000000000" };
+/**
+ * The same basket signed before 2026-10-08: a floor per stock (SPYx 5 % under
+ * its rate at slot 447313239, ANTHROPIC's at the old margin) and a SOL floor 10 %
+ * under that day's price, still stored. The LEG floors are what make it old.
+ */
+const OLD_POLICY: InvestmentPolicyJson = {
+  ...POLICY,
+  legs: [
+    { mint: SPYX_MINT, weightBps: 5_000, minOutRateWad: "124719467624105690" },
+    { mint: ANTHROPIC_MINT, weightBps: 5_000, minOutRateWad: "5277777777777777778" },
+  ],
+  minConvertRateWad: "90000000000000000",
+};
+
+/** SOL at $40.00 a SOL: under POLICY's $50.02 safety floor. */
+const SOL_UNDER_SAFETY_FLOOR = { slot: 1, convertWad: "40000000000000000", usdcRawPerSol: "40000000", legs: [] } as unknown as VaultStateJson["prices"];
+/** SOL at $100.04, the price POLICY was signed at. */
+const SOL_AT_SIGNING = { slot: 1, convertWad: "100038711555492562", usdcRawPerSol: "100038711", legs: [] } as unknown as VaultStateJson["prices"];
 
 /** Prices under which OLD_POLICY's SOL floor is passed: SOL at 1 wad, far under its 9e16 floor. */
 const SOL_UNDER_OLD_FLOOR = { slot: 1, convertWad: "1", usdcRawPerSol: "0", legs: [] } as unknown as VaultStateJson["prices"];
@@ -303,6 +323,38 @@ describe("switch to live-price buying", () => {
   });
 });
 
+/**
+ * SOL UNDER A NEWER BASKET'S SAFETY FLOOR (owner, 2026-10-09): conversion is
+ * stopped until the owner signs again, so the gear offers the same one-press
+ * re-sign, first and in its own words — and says nothing while SOL is over it.
+ */
+describe("approve again at today's price", () => {
+  it("is not offered while SOL is over the safety floor, or its price is unread", () => {
+    expect(mount(vaultState(POLICY, "exists", SOL_AT_SIGNING))!.refresh).toBeNull();
+    expect(mount(vaultState(POLICY))!.refresh).toBeNull();
+  });
+
+  it("goes first when SOL is under it, says why, and re-signs the stored basket as it stands", () => {
+    const form = mount(vaultState(POLICY, "exists", SOL_UNDER_SAFETY_FLOOR))!;
+    expect(form.refreshFirst).toBe(true);
+    const text = renderToStaticMarkup(createElement("div", null, refreshOf(form, false)));
+    expect(text).toContain(SETTINGS_COPY.safetyFloorBlocking.replaceAll("'", "&#x27;"));
+    expect(text).not.toContain(SETTINGS_COPY.switchLiveBlocking);
+    expect(button(refreshOf(form, false), SETTINGS_COPY.switchLive)).toBeNull();
+    const press = button(refreshOf(form, false), SETTINGS_COPY.safetyFloor.replaceAll("'", "&#x27;"));
+    expect(press).not.toBeNull();
+    press!.props.onClick();
+    const [sent] = calls.policy as InvestRequest[];
+    expect([sent!.maxPerCall, sent!.minInvestment, sent!.enabled]).toEqual([149_000_000n, 5_000_000n, POLICY.enabled]);
+  });
+
+  it("is held while the basket has unsaved edits, in its own words", () => {
+    const form = mount(vaultState(POLICY, "exists", SOL_UNDER_SAFETY_FLOOR))!;
+    expect(button(refreshOf(form, true), SETTINGS_COPY.safetyFloor.replaceAll("'", "&#x27;"))).toBeNull();
+    expect(renderToStaticMarkup(createElement("div", null, refreshOf(form, true)))).toContain(SETTINGS_COPY.safetyFloorBlocked.replaceAll("'", "&#x27;"));
+  });
+});
+
 describe("the basket the card shows", () => {
   it("says a policy nobody could read could not be read — never 'nothing picked'", () => {
     mount(vaultState(null, "unreadable"));
@@ -320,6 +372,11 @@ describe("the gear on the card", () => {
     mount(vaultState(POLICY));
     expect(calls.door).toMatchObject({ open: false, attention: false });
     mount(vaultState(OLD_POLICY));
+    expect(calls.door).toMatchObject({ open: false, attention: true });
+    // A live-price basket whose SOL fell under its safety floor gets the dot too; over it, none.
+    mount(vaultState(POLICY, "exists", SOL_AT_SIGNING));
+    expect(calls.door).toMatchObject({ open: false, attention: false });
+    mount(vaultState(POLICY, "exists", SOL_UNDER_SAFETY_FLOOR));
     expect(calls.door).toMatchObject({ open: false, attention: true });
   });
 });

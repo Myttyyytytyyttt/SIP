@@ -140,7 +140,8 @@ const vaultExists = (overrides: Partial<VaultAccountJson> = {}): VaultStateJson[
 });
 
 /** A stored investing rule; floors of 1 sit far under any price, so they buy on every route. */
-function policyExists(enabled: boolean, legs: readonly string[] = [SPYX], minConvertRateWad = "1"): VaultStateJson["policy"] {
+/** A policy on `legs` at `legFloor` each (1 wad: signed since 2026-10-08) and a SOL floor of `minConvertRateWad`. */
+function policyExists(enabled: boolean, legs: readonly string[] = [SPYX], minConvertRateWad = "1", legFloor = "1"): VaultStateJson["policy"] {
   return {
     status: "exists",
     address: Keypair.generate().publicKey.toBase58(),
@@ -149,7 +150,7 @@ function policyExists(enabled: boolean, legs: readonly string[] = [SPYX], minCon
       enabled,
       venueProgram: Keypair.generate().publicKey.toBase58(),
       inMint: USDC_MINT,
-      legs: legs.map((mint) => ({ mint, weightBps: Math.floor(10_000 / legs.length), minOutRateWad: "1" })),
+      legs: legs.map((mint) => ({ mint, weightBps: Math.floor(10_000 / legs.length), minOutRateWad: legFloor })),
       minConvertRateWad,
       minInvestment: "1000000",
       maxPerCall: "25000000",
@@ -371,14 +372,25 @@ describe("overviewOf: what the overview may say, and what it may not", () => {
     expect(live.priceLimits).toBeNull();
     expect(attentionOf(live).has("investing")).toBe(false);
 
-    // An old SOL floor far under today's price: a limit, not stopping anything.
-    const held = overviewOf(ready(stateWith({ vault: vaultExists(), policy: policyExists(true, [SPYX], "2") })), [], PENSION_KEY);
+    // An old basket (a leg floor over 1 wad) whose SOL floor is far under today's price: a limit, not stopping anything.
+    const held = overviewOf(ready(stateWith({ vault: vaultExists(), policy: policyExists(true, [SPYX], "2", "2") })), [], PENSION_KEY);
     expect(held.priceLimits).toBe("held");
     expect([...attentionOf(held)]).toEqual(["investing"]);
 
-    const passed = overviewOf(ready(stateWith({ vault: vaultExists(), policy: policyExists(true, [SPYX], "999999999999999999999") })), [], PENSION_KEY);
+    const passed = overviewOf(ready(stateWith({ vault: vaultExists(), policy: policyExists(true, [SPYX], "999999999999999999999", "2") })), [], PENSION_KEY);
     expect(passed.priceLimits).toBe("blocking");
     expect([...attentionOf(passed)]).toEqual(["investing"]);
+  });
+
+  it("a live-price basket whose SOL fell under its safety floor puts a dot on Investing; over it, none", () => {
+    // Half of the $100.04 the screen reads: SOL is over it.
+    const over = overviewOf(ready(stateWith({ vault: vaultExists(), policy: policyExists(true, [SPYX], "50019355777746281") })), [], PENSION_KEY);
+    expect(over.priceLimits).toBeNull();
+    expect(attentionOf(over).has("investing")).toBe(false);
+    // One wad over today's price: SOL is under it.
+    const under = overviewOf(ready(stateWith({ vault: vaultExists(), policy: policyExists(true, [SPYX], "100038711555492563") })), [], PENSION_KEY);
+    expect(under.priceLimits).toBe("safety_floor");
+    expect([...attentionOf(under)]).toEqual(["investing"]);
   });
 
   it("taking money out: what can be withdrawn, and the tokens beside it only when a read found them", () => {
@@ -592,9 +604,12 @@ describe("WalletsOverview", () => {
   it("old price limits to switch from, and a wallet to fix, each send to their own tab", () => {
     mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), embedded(TRADING_1, 1, true), embedded(TRADING_0, 0, false)]) };
     const html = render(
-      ready(stateWith({ vault: vaultExists(), policy: policyExists(true, [SPYX], "999999999999999999999"), walletLinks: [link(TRADING_1, "this_vault"), link(TRADING_0, "this_vault")] })),
+      ready(stateWith({ vault: vaultExists(), policy: policyExists(true, [SPYX], "999999999999999999999", "2"), walletLinks: [link(TRADING_1, "this_vault"), link(TRADING_0, "this_vault")] })),
     );
     expect(html).toContain(SETTINGS_COPY.switchLiveBlocking.replaceAll("'", "&#x27;"));
+    // And SOL under a newer basket's safety floor says so, in its own words.
+    const floor = render(ready(stateWith({ vault: vaultExists(), policy: policyExists(true, [SPYX], "100038711555492563") })));
+    expect(floor).toContain(SETTINGS_COPY.safetyFloorBlocking.replaceAll("'", "&#x27;"));
     expect(html).toContain(OVERVIEW_COPY.walletsToFix(1, 0));
     const investing = buttons(OVERVIEW_COPY.goTo(WALLETS_COPY.tabs.investing));
     const trading = buttons(OVERVIEW_COPY.goTo(WALLETS_COPY.tabs.trading));

@@ -16,7 +16,8 @@
  * a loader — only while nothing the screen can read stops it and the LOADED
  * history shows the chain moving toward it less than PENDING_STALL_MS ago. A
  * step the keeper skips for a reason on screen (the vault paused, buying
- * switched off, the 30-day limit, a policy's old price limits) is "waiting"
+ * switched off, the 30-day limit, a policy's old price limits, SOL under the
+ * policy's safety floor) is "waiting"
  * with that reason. A step still undone a few sweeps after the chain last moved
  * toward it is "waiting" as "slow": the keeper can rest for reasons this page
  * cannot read (a thin market, an oracle that is late), and a spinner there
@@ -59,7 +60,7 @@ const U64_MAX = (1n << 64n) - 1n;
 export type PendingKind = "converting" | "buying";
 
 /** Why a due step rests. "slow" is the one the screen cannot explain. */
-export type PendingRest = "buying_off" | "paused" | "protocol_paused" | "month_cap" | "conversion_off" | "price_limits" | "slow";
+export type PendingRest = "buying_off" | "paused" | "protocol_paused" | "month_cap" | "conversion_off" | "price_limits" | "safety_floor" | "slow";
 
 export interface PendingStep {
   readonly kind: PendingKind;
@@ -166,9 +167,13 @@ export function pendingSteps(data: LiveDashboard): PendingStep[] {
     // conversion after it (live-model.ts oldLimitsStopOf). Either way no SOL
     // reaches USDC until the owner switches to live-price buying.
     const limited = policy.oldLimitsStop !== null;
+    // THE SOL SAFETY FLOOR (a policy signed since 2026-10-09): SOL under it is
+    // refused by convert.rs on every sweep, so the row rests on it — the one
+    // price move that asks the owner to approve again — and never spins.
+    const underFloor = policy.safetyFloorStop;
     steps.push({
       kind: "converting",
-      ...stateOf("converting", rest ?? (conversionOff ? "conversion_off" : limited ? "price_limits" : null)),
+      ...stateOf("converting", rest ?? (conversionOff ? "conversion_off" : limited ? "price_limits" : underFloor ? "safety_floor" : null)),
       amountRaw: lamports,
       valueUsdcRaw: perSol === null ? null : usdcRawForLamports(lamports, perSol),
       symbols: [],

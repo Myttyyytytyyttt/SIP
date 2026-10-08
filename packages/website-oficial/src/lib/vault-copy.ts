@@ -1256,6 +1256,20 @@ export const INVEST_COPY = {
   badgeLive: "Live price",
   badgeOldLimits: "Old price limits",
   badgeOldLimitsBlocking: "Old limits blocking",
+  // ── SOL UNDER A NEWER POLICY'S SAFETY FLOOR (live-model.ts "safety_floor") ──
+  // Every policy signed since 2026-10-09 carries a SOL safety floor at half the
+  // SOL price at signing. SOL under it stops conversion (convert.rs refuses)
+  // until the owner signs again; stock buys from USDC already held go on.
+  badgeSafetyFloor: "SOL under safety floor",
+  safetyFloorTitle: "SOL safety floor reached",
+  safetyFloorBlocking:
+    "SOL's price is under this policy's safety floor, half of what it was when you signed, so your SOL is not being converted to USDC. USDC already in your vault is still invested. Signing again sets a new safety floor at half today's price, and conversion starts again.",
+  resignSafetyFloor: "Sign again at today's price",
+  /** The SOL safety floor a policy signed since 2026-10-09 carries, per SOL, beside today's price when it was read. */
+  safetyFloorLine: (floor: string, today: string | null): string => (today === null ? `SOL safety floor ${floor} a SOL` : `SOL safety floor ${floor} a SOL, today ${today}`),
+  /** The summary's fact for it. */
+  safetyFloorFact: "SOL safety floor",
+  perSol: (usd: string): string => `${usd} a SOL`,
   storedSolFloor: (floor: string, today: string | null): string => (today === null ? `SOL floor ${floor}` : `SOL floor ${floor}, today ${today}`),
   /** Both prices are per WHOLE token (perWholeToken), so the line names the token, not raw units. */
   storedLegCeiling: (symbol: string, max: string, today: string | null): string =>

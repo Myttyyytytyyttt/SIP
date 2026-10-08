@@ -30,7 +30,10 @@
  * the investing card's button of the same name, byte for byte. It is shown
  * only over a basket approved before 2026-10-08, which still carries price
  * limits (live-model.ts priceLimitsOf); a dot on the gear says so, and the
- * block goes first in the dialog when those limits are stopping buys.
+ * block goes first in the dialog when those limits are stopping buys. The
+ * same request, under "Approve again at today's price", is the way out when
+ * SOL has fallen under a newer basket's safety floor ("safety_floor"), which
+ * always stops conversion and so always goes first.
  *
  * NOTHING CAN BE PRESSED TWICE. From the press until the vault screen has read
  * the chain again after the landing, the form is frozen — the old "Update
@@ -71,6 +74,7 @@ const SUCCESS = {
   rule: "Saving rule updated",
   buying: "What you buy updated",
   live: "Switched to live-price buying",
+  safetyFloor: "Approved at today's price",
 } as const;
 
 export function LiveRulePanel({
@@ -185,7 +189,9 @@ export function LiveRulePanel({
   const categories = useMemo(() => liveCategories(), []);
   const limits = policy !== null && state !== null ? priceLimitsOf(policy, state.prices) : null;
   const oldLimits = limits === "held" || limits === "blocking";
-  const attention = oldLimits || ruleWrite.unconfirmed || policyWrite.unconfirmed;
+  // SOL under the safety floor: the same one-press re-sign, in its own words.
+  const underFloor = limits === "safety_floor";
+  const attention = oldLimits || underFloor || ruleWrite.unconfirmed || policyWrite.unconfirmed;
 
   const judge = useCallback(
     (draft: SettingsDraft): SettingsJudgement => {
@@ -224,7 +230,7 @@ export function LiveRulePanel({
     if (policy === null || frozen) return;
     const request = switchToLiveRequest(policy);
     if ("problem" in request) return;
-    setPolicyLabel(SUCCESS.live);
+    setPolicyLabel(underFloor ? SUCCESS.safetyFloor : SUCCESS.live);
     setSignedRequest(request);
     setDropped(null);
     setLastWriter("policy");
@@ -239,34 +245,37 @@ export function LiveRulePanel({
     screen?.refresh();
   };
 
-  // "SWITCH TO LIVE-PRICE BUYING" — only over a signed basket that still carries price limits.
-  const resign = policy === null || !oldLimits ? null : switchToLiveRequest(policy);
-  // Old limits that stop buying now: the one thing to do, so it goes first.
-  const blocking = limits === "blocking";
+  // "SWITCH TO LIVE-PRICE BUYING" — only over a signed basket that still carries
+  // price limits — or "APPROVE AGAIN AT TODAY'S PRICE" over one whose SOL is
+  // under its safety floor: one request, the stored basket re-signed.
+  const resign = policy === null || !(oldLimits || underFloor) ? null : switchToLiveRequest(policy);
+  // Limits that stop something now: the one thing to do, so it goes first.
+  const blocking = limits === "blocking" || underFloor;
+  const resignTitle = underFloor ? SETTINGS_COPY.safetyFloor : SETTINGS_COPY.switchLive;
   const refreshBlock =
     resign === null
       ? null
       : ({ buyingChanged }: { readonly buyingChanged: boolean }) => (
       <div className={blocking ? "space-y-2 rounded-lg border border-amber-600/40 p-3" : "space-y-2 border-t pt-4"}>
         <div className="flex items-center gap-1.5">
-          <p className="text-sm leading-none font-medium">{SETTINGS_COPY.switchLive}</p>
-          <InfoTip label={SETTINGS_COPY.switchLive}>{SETTINGS_COPY.help.switchLive}</InfoTip>
+          <p className="text-sm leading-none font-medium">{resignTitle}</p>
+          {underFloor ? null : <InfoTip label={SETTINGS_COPY.switchLive}>{SETTINGS_COPY.help.switchLive}</InfoTip>}
         </div>
         <p
           className={
             blocking ? "rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-300" : "text-xs text-muted-foreground"
           }
         >
-          {blocking ? SETTINGS_COPY.switchLiveBlocking : SETTINGS_COPY.switchLiveHeld}
+          {underFloor ? SETTINGS_COPY.safetyFloorBlocking : blocking ? SETTINGS_COPY.switchLiveBlocking : SETTINGS_COPY.switchLiveHeld}
         </p>
         {"problem" in resign ? (
           <p className="text-xs text-destructive">{resign.problem}</p>
         ) : buyingChanged ? (
           // Switching now would re-sign the STORED basket under the owner's edits; Save signs at the live price anyway.
-          <p className="text-xs text-muted-foreground">{SETTINGS_COPY.switchLiveBlocked}</p>
+          <p className="text-xs text-muted-foreground">{underFloor ? SETTINGS_COPY.safetyFloorBlocked : SETTINGS_COPY.switchLiveBlocked}</p>
         ) : (
           <Button type="button" variant="outline" size="sm" disabled={frozen} onClick={switchToLive}>
-            {SETTINGS_COPY.switchLive}
+            {resignTitle}
           </Button>
         )}
       </div>

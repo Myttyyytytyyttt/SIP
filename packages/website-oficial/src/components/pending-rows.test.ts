@@ -71,6 +71,15 @@ describe("the rows", () => {
     expect(out).toContain(PENDING_COPY.rest.paused);
   });
 
+  it("draw a conversion resting on the SOL safety floor with the pause mark, like every rest the owner can lift", () => {
+    const floor: PendingLine = { ...ACTIVE, active: false, rest: "safety_floor", title: PENDING_COPY.convertingWaiting, sub: PENDING_COPY.rest.safety_floor, amountSpoken: "0.018 SOL" };
+    const out = html(createElement(PendingRows, { lines: [floor] }));
+    expect(out).not.toContain("data-pending-loader");
+    expect(out).toContain("lucide-pause");
+    expect(out).not.toContain("lucide-arrow-left-right");
+    expect(out).toContain(PENDING_COPY.rest.safety_floor.replaceAll("'", "&#x27;"));
+  });
+
   /**
    * THE LIVE REGION HEARS WHAT CHANGES WITH THE STEP, NOT WITH THE PRICE. A
    * conversion's dollars are re-priced at every 20 s read; read out, every cent

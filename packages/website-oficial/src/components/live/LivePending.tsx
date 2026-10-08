@@ -42,7 +42,14 @@ const amountOf = (line: PendingLine): string => (line.active && line.kind === "b
 
 function Glyph({ line }: { readonly line: PendingLine }) {
   if (line.active) return <Loader2 className="size-4 motion-safe:animate-spin" aria-hidden data-pending-loader="" />;
-  if (line.rest === "paused" || line.rest === "protocol_paused" || line.rest === "buying_off" || line.rest === "conversion_off" || line.rest === "price_limits") {
+  if (
+    line.rest === "paused" ||
+    line.rest === "protocol_paused" ||
+    line.rest === "buying_off" ||
+    line.rest === "conversion_off" ||
+    line.rest === "price_limits" ||
+    line.rest === "safety_floor"
+  ) {
     return <Pause className="size-4" aria-hidden />;
   }
   if (line.rest === "slow") return <Clock className="size-4" aria-hidden />;
