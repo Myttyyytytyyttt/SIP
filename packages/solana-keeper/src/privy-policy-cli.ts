@@ -144,7 +144,9 @@ const PURPOSE: Readonly<Record<string, string>> = {
 const NEEDS: Readonly<Record<Command, readonly string[]>> = {
   create: ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET"],
   // The admin key is read from its file (--admin-key), never from the environment.
-  update: ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET"],
+  // The signer id is required, unlike check's: without it update could not
+  // refuse a policy its own signer owns, and its OK would not have asked.
+  update: ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET", "SIP_SOLANA_PRIVY_SIGNER_ID"],
   check: ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET"],
   // No RPC: the key is compared with the quorum, and neither is on a chain.
   key: ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET", "SIP_SOLANA_PRIVY_AUTHORIZATION_KEY", "SIP_SOLANA_PRIVY_SIGNER_ID"],
@@ -406,6 +408,10 @@ export function mayHaveLanded(error: unknown): boolean {
   return status === null || status === 408 || status === 409 || status === 429 || status >= 500;
 }
 
+/** `~` and `~/…` as the shell would expand them; anything else unchanged. */
+const expandHome = (rawPath: string): string =>
+  rawPath === "~" ? homedir() : rawPath.startsWith("~/") ? join(homedir(), rawPath.slice(2)) : rawPath;
+
 /**
  * Admin key → key file → key quorum → policy, in that order, each step only
  * after the one before it is known to exist.
@@ -415,10 +421,6 @@ export function mayHaveLanded(error: unknown): boolean {
  * what exists, what does not, and what cannot be known (mayHaveLanded), because
  * the next step depends on exactly that.
  */
-/** `~` and `~/…` as the shell would expand them; anything else unchanged. */
-const expandHome = (rawPath: string): string =>
-  rawPath === "~" ? homedir() : rawPath.startsWith("~/") ? join(homedir(), rawPath.slice(2)) : rawPath;
-
 async function create(rawPath: string, config: CommandEnv, deps: PrivyPolicyCliDeps, { out, diag, redactor }: Io): Promise<number> {
   const path = expandHome(rawPath);
   if (!isAbsolute(path)) {

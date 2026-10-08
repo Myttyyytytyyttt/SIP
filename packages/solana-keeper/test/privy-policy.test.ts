@@ -352,6 +352,15 @@ describe("diffPolicy", () => {
     expect(diff.differences.join("\n")).toContain(`adds [${extra}]`);
   });
 
+  it("reads an idl: null on a programId condition as nothing, and still names a missing IDL", () => {
+    const copy = stored() as unknown as { rules: { conditions: Record<string, unknown>[] }[] };
+    copy.rules[1]!.conditions[0]!["idl"] = null;
+    expect(diffPolicy(policy, copy as unknown as PolicyLike).differences).toEqual([]);
+    const missing = stored();
+    nameCondition(missing).idl = null;
+    expect(diffPolicy(policy, missing).differences.join("\n")).toContain("(idl: none)");
+  });
+
   it("catches a dropped instruction_name condition", () => {
     const copy = stored();
     copy.rules[0]!.conditions = copy.rules[0]!.conditions.filter((condition) => condition.field_source !== "solana_instruction_data");

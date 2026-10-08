@@ -386,7 +386,9 @@ export function idlFingerprint(value: unknown): string {
 
 const conditionHead = (condition: PolicyConditionLike): string =>
   `${condition.field_source}.${condition.field ?? ""} ${condition.operator}` +
-  (condition.field_source === "solana_instruction_data" || condition.idl !== undefined ? ` (idl: ${idlFingerprint(condition.idl)})` : "");
+  (condition.field_source === "solana_instruction_data" || (condition.idl !== undefined && condition.idl !== null)
+    ? ` (idl: ${idlFingerprint(condition.idl)})`
+    : "");
 
 const describeCondition = (condition: PolicyConditionLike): string =>
   `${conditionHead(condition)} [${valueSet(condition.value).join(", ")}]`;

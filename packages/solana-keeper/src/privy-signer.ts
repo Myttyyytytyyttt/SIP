@@ -13,12 +13,15 @@
 // policy.
 //
 // WHY signAndSendTransaction AND NOT signTransaction — this is the whole reason
-// the file looks like this. Privy's SOLANA POLICIES can only gate four methods:
-// '*', 'exportPrivateKey', 'signAndSendTransaction' and 'signMessage'.
-// `signTransaction` is NOT among them, so a keeper built on it would run with a
+// the file looks like this. When it was written, Privy's Solana policies could
+// gate only '*', 'exportPrivateKey', 'signAndSendTransaction' and
+// 'signMessage', so a keeper built on `signTransaction` would have run with a
 // signer the policy could not constrain — an unbounded credential wearing the
-// costume of a bounded one. Sending through Privy keeps the policy in force,
-// and costs nothing: the transaction is already complete when it leaves here.
+// costume of a bounded one. Privy's policies list `signTransaction` now
+// (docs.privy.io, re-read 2026-10-08), but the keeper's policy has no rule for
+// it, so Privy denies it by default. Sending through Privy keeps the policy in
+// force, and costs nothing: the transaction is already complete when it leaves
+// here.
 //
 // The attester's Ed25519 instruction rides INSIDE the serialized transaction,
 // so Privy adds only the wallet's signature and broadcasts. Nothing about the

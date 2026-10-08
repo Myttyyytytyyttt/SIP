@@ -22,7 +22,7 @@ Esta guía la sigues tú. Ninguna de estas llaves hace falta que la vea Claude.
 | **app secret** de Privy (SIP) | secreto | gestor de contraseñas y Railway |
 | **llave de autorización del vigilante** | secreto: firma como las wallets | gestor de contraseñas y Railway |
 | **signer id** (el id de esa llave) | público | web y Railway: `SIP_SOLANA_PRIVY_SIGNER_ID` |
-| **policy id** | público | web: `SIP_SOLANA_PRIVY_POLICY_ID` |
+| **policy id** | público | web y Railway: `SIP_SOLANA_PRIVY_POLICY_ID` |
 | **llave de administración de la política** | secreto: la única que puede cambiar la política | `~/sip-keys/privy-policy-admin.key` y gestor de contraseñas; **nunca** en un servidor |
 | **admin key quorum id** | público | apuntado en el gestor, junto a la llave de administración |
 
@@ -131,7 +131,8 @@ qué no, `unknown` lo que no se puede saber (no hubo respuesta o Privy dio un er
 - **Web**: `SIP_SOLANA_PRIVY_SIGNER_ID` (paso 2) y `SIP_SOLANA_PRIVY_POLICY_ID` (`policyId`). Con ellos registra el
   signer en cada wallet y le pone esta política como **override** del signer.
 - **Vigilante en Railway**: `SIP_SOLANA_PRIVY_APP_ID`, `SIP_SOLANA_PRIVY_APP_SECRET`,
-  `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY` (paso 2) y `SIP_SOLANA_PRIVY_SIGNER_ID`.
+  `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY` (paso 2), `SIP_SOLANA_PRIVY_SIGNER_ID` y `SIP_SOLANA_PRIVY_POLICY_ID`: con ella se
+  niega a firmar por una wallet cuyo asiento no lleve esta política ([RAILWAY_SOLANA.md](RAILWAY_SOLANA.md)).
 - **Solo tu ordenador y el gestor**: la llave de administración.
 
 ## 5. Comprueba la política guardada
@@ -487,8 +488,9 @@ cambiar el id, así que todas las wallets sentadas quedan acotadas a la vez, sin
 Railway ni Vercel. El B es para cuando esa llave no está.
 
 Todo en **Terminal.app**, en `~/ProyectosCT/SIP` con `main` al día: tiene que incluir el commit *"keeper: la política
-del vigilante solo deja pasar settle_v2…"* (`git log --oneline -5` lo enseña). Ningún paso lo hace Claude: la llave de
-administración y la del vigilante solo las tienes tú.
+del vigilante solo deja pasar settle_v2…"* (`git log -1 --oneline --grep='solo deja pasar settle_v2' main` lo enseña;
+si no sale nada, no sigas). Ningún paso lo hace Claude: la llave de administración y la del vigilante solo las tienes
+tú.
 
 ### A. Cambiar la política en su sitio (`update`)
 
@@ -513,10 +515,15 @@ administración y la del vigilante solo las tienes tú.
    unset SECRETO
    ```
 
-   Lo esperado es `verdict: DIFFERENT`, con `differences` diciendo que a la regla de `sip-vault` le falta la condición
-   `solana_instruction_data.instruction_name … [settle_v2]` y que falta la regla de Ed25519. Mira también `ownerId`:
-   tiene que ser el `adminKeyQuorumId` que apuntaste en el gestor al crearla. Si sale `UNOWNED` u `OWNED_BY_SIGNER`,
-   para aquí y ve al camino B.
+   Lo esperado es `verdict: DIFFERENT` (mientras las reglas no coincidan, `verdict` dice siempre eso), con cuatro
+   `differences`: a la regla de `sip-vault` le faltan sus dos condiciones nuevas (`programId eq` y
+   `solana_instruction_data.instruction_name … [settle_v2]`), le sobra la de antes (`programId in` con los dos
+   programas), y falta la regla de Ed25519. El dueño se lee aparte, en tres campos:
+   - `ownerId` tiene que ser el `adminKeyQuorumId` que apuntaste en el gestor al crearla;
+   - `owned` tiene que ser `true` y `ownerIsSigner`, `false`;
+   - `ownershipProblems` tiene que estar vacío.
+
+   Si no es así, para aquí y ve al camino B: `update` tampoco cambiaría una política así.
 
 3. **Cámbiala.** Necesitas el archivo de la llave de administración que escribió `create`. Esta guía lo dejó en
    `~/sip-keys/privy-policy-admin.key`; si lo guardaste con otro nombre, usa ese. Si solo lo tienes en el gestor,
@@ -538,9 +545,11 @@ administración y la del vigilante solo las tienes tú.
 
    | línea | qué significa | qué haces |
    |---|---|---|
-   | `privy policy updated`, `verdict: OK` (código 0) | Privy guardó exactamente la política nueva, con el mismo dueño | sigue al paso 4 |
+   | `privy policy updated`, `verdict: OK` (código 0) | lo que Privy guardó hace lo mismo que la política nueva (las mismas reglas, programas, condiciones y nombres con sus discriminadores en el IDL; los nombres de las reglas no cuentan), y tiene el mismo dueño | sigue al paso 4 |
    | `privy policy update`, `verdict: ALREADY_CURRENT` (código 0) | ya estaba al día; no se mandó nada | sigue al paso 4 |
    | `privy policy update`, `verdict: UNOWNED` u `OWNED_BY_SIGNER` | no se cambió nada: su dueño está mal | camino B |
+   | `privy policy not read` | no pudo leer la política antes de cambiarla. No cambió nada | mira `status` y `detail`, y repite |
+   | `privy policy not read after update` | Privy **aceptó** el cambio, pero no se pudo volver a leer | haz el paso 4 |
    | `privy policy not updated`, `class: AUTHORIZATION` | Privy no aceptó la firma: ese archivo no es la llave del dueño (`ownerId` del paso 2). No cambió nada | busca en el gestor la llave de administración de ese quorum; si no está, camino B |
    | `privy policy not updated`, `next` dice *may have landed* | no hubo respuesta, o Privy dio un error de servidor: pudo guardarse o no | haz el paso 4 antes de nada |
    | `privy policy not updated`, cualquier otro | Privy rechazó el cambio (por ejemplo, el IDL) y no cambió nada | pásale a Claude la línea entera: no lleva secretos |
@@ -555,9 +564,9 @@ administración y la del vigilante solo las tienes tú.
    jsuzcjv6njl0raqjjhzqe9fh`, en una wallet de prueba con unos 0,002 SOL. Tiene que salir `PASS`. Recuerda que `verify`
    manda transacciones de verdad a mainnet y necesita la llave del vigilante.
 
-6. **Confirma que el cobro sigue pasando.** Ningún comando lo puede probar: un cobro necesita la firma del atestador, y
-   esa llave solo está en Railway. Lo prueba el siguiente cobro real del vigilante, que solo sale cuando una wallet
-   sentada tiene algo que cobrar:
+6. **Confirma que el cobro sigue pasando.** Ningún comando de esta guía lo puede probar: un cobro necesita la firma del
+   atestador, y ninguno la usa (está en Railway y en `~/sip-keys/settle.json`, [SECRETS.md](SECRETS.md)). Lo prueba el
+   siguiente cobro real del vigilante, que solo sale cuando una wallet sentada tiene algo que cobrar:
    - **Bien**: en el log de Railway, una línea `settle settled` de una wallet, con hora posterior al paso 3. En
      `/status` dura poco: `settle` = `SETTLED` en esa wallet, hasta que el vigilante la vuelve a mirar.
    - **Mal**: una línea `settle failed`, con la alerta crítica **A settlement failed**, cuyo `detail` habla de la
@@ -567,31 +576,38 @@ administración y la del vigilante solo las tienes tú.
    Mientras tanto no se pierde nada: lo que no se cobra se queda pendiente y se cobra en los barridos siguientes.
 
 7. **Volver atrás, solo si el paso 6 sale mal.** Pone otra vez las reglas de antes con el mismo `update`, corrido desde
-   el commit que lo añadió, que aún construía la política de antes:
+   el commit que lo añadió, que aún construía la política de antes. Primero, una copia del repositorio en ese commit,
+   con sus dependencias:
 
    ```bash
-   cd ~/ProyectosCT/SIP
-   git worktree add ~/saverfi-politica-anterior \
-     "$(git log -1 --format=%H --grep='^keeper: privy-policy update reescribe la política' main)"
-   cd ~/saverfi-politica-anterior
-   CI=1 pnpm install --frozen-lockfile
+   cd ~/ProyectosCT/SIP && git worktree add ~/saverfi-politica-anterior \
+     "$(git log -1 --format=%H --grep='^keeper: privy-policy update reescribe la política' main)" \
+     && cd ~/saverfi-politica-anterior && CI=1 pnpm install --frozen-lockfile && git log -1 --oneline
+   ```
+
+   La última línea tiene que ser *"keeper: privy-policy update reescribe la política en su sitio…"*. Si sale otra cosa,
+   o un error (por ejemplo `invalid reference`, que es que no encontró el commit), **para aquí** y pásale a Claude lo que
+   salió. Si salió bien, la vuelta atrás, desde esa copia (`--dir` la nombra entera, así que no depende de dónde estés):
+
+   ```bash
    printf 'App secret de Privy (SIP): ' && read -rs SECRETO && echo
    SIP_SOLANA_PRIVY_APP_ID=cmtrt36tb00080dlbrda5aqam SIP_SOLANA_PRIVY_APP_SECRET="$SECRETO" \
      SIP_SOLANA_PRIVY_SIGNER_ID=kyio853439oa78qfvmt853i4 \
-     pnpm --silent --dir packages/solana-keeper privy-policy update --policy jsuzcjv6njl0raqjjhzqe9fh \
-     --admin-key ~/sip-keys/privy-policy-admin.key
+     pnpm --silent --dir ~/saverfi-politica-anterior/packages/solana-keeper privy-policy update \
+     --policy jsuzcjv6njl0raqjjhzqe9fh --admin-key ~/sip-keys/privy-policy-admin.key
    unset SECRETO
-   cd ~/ProyectosCT/SIP && git worktree remove ~/saverfi-politica-anterior
    ```
 
-   Si `git worktree add` se queja de que no encuentra el commit, para y pásale a Claude el error. Tiene que acabar en
-   `privy policy updated`, `verdict: OK`: OK respecto a la política de antes. Los cobros vuelven a pasar; la importación
-   de wallets **no** se anuncia hasta que la política nueva funcione.
+   Tiene que acabar en `privy policy updated`, `verdict: OK`: OK respecto a la política de antes. Con eso los cobros
+   vuelven a pasar, y la importación de wallets **no** se anuncia hasta que la política nueva funcione. Si dice
+   `ALREADY_CURRENT`, no se mandó nada: o la política ya era la de antes, o el comando no corrió desde la copia; pásale a
+   Claude esa línea. Al acabar, borra la copia: `cd ~/ProyectosCT/SIP && git worktree remove ~/saverfi-politica-anterior`.
 
-8. **Después, las frases.** La tarjeta *Trading wallets* de la web, un comentario de la importación
-   (`import-preflight.ts`) y el README todavía describen la política de antes (que el asiento puede mandar cualquier
-   instrucción del programa de SaverFi). Cuando el paso 6 haya salido bien, pide a Claude que los ponga al día: antes
-   sería prometer algo que Privy aún no hace.
+8. **Después, las frases.** Varios textos todavía describen la política de antes (que el asiento puede mandar cualquier
+   instrucción del programa de SaverFi, o que una política no puede mirar nada más fino que el programa): la tarjeta
+   *Trading wallets* de la web, el README y comentarios de `import-preflight.ts`, `verify-tx.ts` y del propio programa
+   (`link_wallet.rs`). Cuando el paso 6 haya salido bien, pide a Claude que los ponga al día: antes sería prometer algo
+   que Privy aún no hace.
 
 ### B. Si no tienes la llave de administración: otra política, y volver a sentar cada wallet
 

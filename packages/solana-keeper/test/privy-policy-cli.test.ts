@@ -382,6 +382,13 @@ describe("update", () => {
     expect(result.recorded.credentials.map((credentials) => [credentials.appId, credentials.appSecret.reveal()])).toEqual([[APP_ID, APP_SECRET]]);
   });
 
+  it("will not run without the signer id, whose ownership it could not otherwise refuse", async () => {
+    const result = await run(argv, { env: privyEnv });
+    expect(result.code).toBe(2);
+    expect(result.stderr[0]).toMatchObject({ event: "configuration refused", command: "update", missing: ["SIP_SOLANA_PRIVY_SIGNER_ID"] });
+    expect([result.clientBuilt, result.recorded.updates]).toEqual([0, []]);
+  });
+
   it("leaves a policy that already matches alone", async () => {
     const result = await run(argv, { env: withSigner });
     expect(result.code).toBe(0);
@@ -786,7 +793,10 @@ describe("refusals", () => {
     for (const [argv, missing] of [
       [["create", "--admin-key-out", join(keys, "never.key")], ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET"]],
       [["check", "--policy", POLICY_ID], ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET"]],
-      [["update", "--policy", POLICY_ID, "--admin-key", join(keys, "never-read.key")], ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET"]],
+      [
+        ["update", "--policy", POLICY_ID, "--admin-key", join(keys, "never-read.key")],
+        ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET", "SIP_SOLANA_PRIVY_SIGNER_ID"],
+      ],
       [
         ["verify", "--wallet", WALLET_ID, "--policy", POLICY_ID],
         ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET", "SIP_SOLANA_PRIVY_AUTHORIZATION_KEY", "SIP_SOLANA_PRIVY_SIGNER_ID", "SIP_SOLANA_RPC_URLS"],
