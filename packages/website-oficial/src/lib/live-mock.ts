@@ -31,6 +31,7 @@ import { ACTIVITY_COPY } from "@/lib/live-copy";
 import { artForMint, NATIVE_SOL } from "@/lib/asset-art";
 import { formatSol, rawFrom, usdcRawForLamports } from "@/lib/amounts";
 import { usd } from "@/lib/format";
+import { nextInvestmentOf, pendingSteps } from "@/lib/live-pending";
 import type { LiveDashboard, LiveRow, LiveWalletView } from "@/lib/live-types";
 import { ratePercent } from "@/lib/vault-copy";
 import { measureOf, partsOf } from "@/components/live/LiveActivityRow";
@@ -156,6 +157,11 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
   const readiness = policy.readiness;
   const reachable = readiness !== null && readiness.state !== "unreachable" && readiness.investsAtRaw > 0n;
   const thresholdUsd = reachable ? dollarsOf(readiness.investsAtRaw) : null;
+  // WHAT IS ON ITS WAY COUNTS. SOL the keeper is converting to USDC is the next
+  // investment as much as the USDC already held; reading "$0.00" while it is in
+  // flight told the owner nothing was coming (10-08). Added at today's SOL
+  // price, and the card says so (`nextInvestmentNote`).
+  const next = nextInvestmentOf(pendingSteps(data));
 
   // ── the numbers ────────────────────────────────────────────────────────
   const legRows = data.holdings.filter((row) => row.kind === "leg");
@@ -184,7 +190,8 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
     costUsd: null,
     unrealizedUsd: null,
     pendingUsd: dollarsOf(data.notInvestedUsdcRaw),
-    readyToInvestUsd: readiness === null ? null : dollarsOf(readiness.heldRaw),
+    readyToInvestUsd: readiness === null ? null : dollarsOf(readiness.heldRaw + (next.extraUsdcRaw ?? 0n)),
+    nextInvestmentNote: next.note,
     thresholdUsd,
     savedTodayUsd: $(stats.savedTodayLamports),
     savedThisWeekUsd: $(stats.savedThisWeekLamports),

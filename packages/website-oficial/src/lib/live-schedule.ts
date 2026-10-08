@@ -5,7 +5,9 @@
  * THE KEEPER SWEEPS ABOUT ONCE A MINUTE, so polling faster than that spends the
  * Helius key the keeper shares to show the same numbers again. A visible tab
  * costs about 7 client tokens and 5 upstream calls a minute; a hidden one costs
- * nothing at all, because nobody is looking.
+ * nothing at all, because nobody is looking. While a step is under way
+ * (PENDING_POLL_MS below) the same reads run three times a minute, for at most
+ * five minutes at a stretch.
  *
  * A REFUSAL IS OBEYED, NOT RETRIED THROUGH. A 429 carries retry-after, and that
  * always wins over the backoff: asking again sooner than the server said is how
@@ -14,6 +16,19 @@
 
 /** The keeper's sweep: reading faster shows the same numbers twice. */
 export const POLL_BASE_MS = 60_000;
+
+/**
+ * WHILE SOMETHING IS ON ITS WAY — SOL converting, a basket about to be bought
+ * (src/lib/live-pending.ts) — the dashboard reads every 20 s instead, so the
+ * next read after the step lands comes at most 20 s later rather than up to a
+ * minute, and the loader gives way to the real row with it. Three times the
+ * reads, so it is bounded twice: it stops when no step is under way, and
+ * PENDING_POLL_MAX_MS after one was first seen, whatever the steps say.
+ */
+export const PENDING_POLL_MS = 20_000;
+
+/** The longest the faster cadence runs for one stretch of pending steps: five sweeps. */
+export const PENDING_POLL_MAX_MS = 5 * 60_000;
 
 /** After repeated failures: 2 minutes, 4, then 5 at most. Reset on success. */
 export const BACKOFF_MS: readonly number[] = [120_000, 240_000, 300_000];
@@ -33,10 +48,12 @@ export interface ScheduleInput {
   readonly now: number;
   /** A read is in flight right now. Nothing is scheduled on top of one. */
   readonly reading: boolean;
+  /** A step is under way and the faster cadence is still allowed (pendingPollWanted). Never shortens a backoff. */
+  readonly pending?: boolean;
 }
 
-const backoffFor = (failures: number): number => {
-  if (failures <= 0) return POLL_BASE_MS;
+const backoffFor = (failures: number, pending: boolean): number => {
+  if (failures <= 0) return pending ? PENDING_POLL_MS : POLL_BASE_MS;
   return BACKOFF_MS[Math.min(failures, BACKOFF_MS.length) - 1]!;
 };
 
@@ -74,7 +91,7 @@ export function nextDelayMs(input: ScheduleInput): number | null {
    * finishes; until then the answer is that there is nothing to do.
    */
   if (input.reading) return null;
-  const gap = backoffFor(input.failures);
+  const gap = backoffFor(input.failures, input.pending === true);
   const scheduled = untilGapFrom(input.lastReadAt, input.now, gap, input.failures);
   // The server's own retry-after always wins: it knows what it is holding back.
   const retry = input.retryAfterSeconds === null ? 0 : Math.max(0, input.retryAfterSeconds) * 1_000;
@@ -133,4 +150,17 @@ export function nextActivityRetryMs(input: ActivityRetryInput): number | null {
   const wait = input.retryAt - input.now;
   if (wait >= POLL_BASE_MS) return null;
   return Math.max(0, wait);
+}
+
+/**
+ * Whether the faster cadence applies now: a step is under way, and it has not
+ * already run for PENDING_POLL_MAX_MS. `activeSince` is when this page first saw
+ * a step under way in the current stretch (null when none is). The bound is what
+ * stops a step the chain never resolves — USDC that arrived with no row to time
+ * it by, say, held back for a reason the page cannot read — from tripling the
+ * reads for as long as the tab stays open.
+ */
+export function pendingPollWanted(input: { readonly active: boolean; readonly activeSince: number | null; readonly now: number }): boolean {
+  if (!input.active || input.activeSince === null) return false;
+  return input.now - input.activeSince < PENDING_POLL_MAX_MS;
 }

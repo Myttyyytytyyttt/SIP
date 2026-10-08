@@ -381,3 +381,28 @@ export const PYTH_GUARD = Object.freeze({
   confPercent: 0.5,
   deviationPercent: 5,
 });
+
+/**
+ * THE KEEPER'S DUST LINES ON THE SOL HOP, which the website's pending rows
+ * (website-oficial src/lib/live-pending.ts, owner 2026-10-08) use to say when
+ * the vault's SOL is on its way to USDC. Free SOL above the vault's rent is
+ * wrapped from `wrapDustLamports` up; wSOL already held is converted from
+ * `convertDustLamports` up, or whenever a wrap just added to it. Under both,
+ * nothing moves and the page says nothing is in flight.
+ *
+ * WHICH SIDE GOES RED: the keeper's invest-decision.test.ts holds
+ * WRAP_DUST_LAMPORTS and CONVERT_DUST_LAMPORTS to `keeper` and runs `boundary`
+ * through wrapPlan and shouldConvert; the website's live-pending.test.ts holds
+ * its constants of the same names to `web` and runs `boundary` through
+ * pendingSteps.
+ */
+export const KEEPER_DUST = Object.freeze({
+  /** packages/solana-keeper/src/invest-decision.ts */
+  keeper: Object.freeze({ module: "invest-decision.ts", wrapDustLamports: 5_000_000n, convertDustLamports: 5_000_000n }),
+  /** packages/website-oficial/src/lib/live-pending.ts */
+  web: Object.freeze({ module: "live-pending.ts", wrapDustLamports: 5_000_000n, convertDustLamports: 5_000_000n }),
+  /** THE UNIT THE WEBSITE PRINTS: 0.005 SOL each. */
+  sol: 0.005,
+  /** Either side of the comparison both make (`>=`): the first moves, the second does not. */
+  boundary: Object.freeze({ moves: 5_000_000n, stays: 4_999_999n }),
+});

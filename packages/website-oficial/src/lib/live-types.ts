@@ -235,6 +235,12 @@ export interface LivePolicyView {
    */
   readonly lastInvestedDay: { readonly day: string; readonly usdcRaw: bigint } | null;
   readonly storedSolFloorPerSol: bigint | null;
+  /**
+   * The SOL hop's signed floor as stored, in wad. 0 is the keeper's "conversion
+   * off" (invest-decision.ts convertDecision): the vault's SOL is not wrapped or
+   * converted while it stands. Null when there is no readable policy.
+   */
+  readonly minConvertRateWad: bigint | null;
   readonly todayPerSol: bigint | null;
   /** Both floors readable, and each still on the right side of today's price. */
   readonly pricesKnown: boolean;

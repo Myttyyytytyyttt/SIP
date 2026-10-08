@@ -557,3 +557,34 @@ export const START_BUYING_COPY = {
   /** The basket's own arithmetic refused it (a thin route, a leg no longer counted): said, and nothing offered to sign. */
   cannotPlan: "This basket cannot be set up from here today. Nothing was offered to sign; Manage wallets → Investing shows why.",
 } as const;
+
+/**
+ * WHAT THE KEEPER IS ABOUT TO DO WITH THIS VAULT'S MONEY (owner, 2026-10-08):
+ * the rows over the activity feed, and the line under "Next investment". Made
+ * from what the dashboard already reads (src/lib/live-pending.ts); nothing here
+ * promises a time, only how often the keeper looks, which is its sweep.
+ */
+export const PENDING_COPY = {
+  heading: "In progress",
+  converting: "Converting SOL to USDC",
+  convertingWaiting: "SOL waiting to be converted",
+  buying: (names: string): string => `Buying ${names}`,
+  buyingWaiting: (names: string): string => `Waiting to buy ${names}`,
+  /** The keeper's sweep, which is the only cadence the screen can vouch for. */
+  checks: `${BRAND} checks about once a minute`,
+  convertingSub: (sol: string): string => `${sol} SOL · ${BRAND} checks about once a minute`,
+  buyingSub: `With the USDC in your vault · ${BRAND} checks about once a minute`,
+  rest: {
+    buying_off: "Buying is switched off in your investment policy",
+    paused: "Your vault is paused: nothing is converted or bought until you resume it",
+    protocol_paused: `${BRAND} is paused for everyone right now`,
+    month_cap: "Your 30-day buying limit is reached",
+    conversion_off: "Converting is switched off in your investment policy",
+  },
+  /** Due, and not done: past a few sweeps the loader stops and says since when. */
+  slow: (clock: string): string => `Not done since ${clock} · ${BRAND} tries again about once a minute`,
+  /** Under "Next investment": the SOL on its way is counted, and said. */
+  includesConverting: (usd: string): string => `Includes about ${usd} of SOL being converted to USDC`,
+  plusConverting: (sol: string): string => `Plus ${sol} SOL being converted to USDC`,
+  readyToBuy: `Ready to buy · ${BRAND} checks about once a minute`,
+} as const;

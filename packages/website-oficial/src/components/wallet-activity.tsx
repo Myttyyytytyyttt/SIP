@@ -47,6 +47,8 @@ export interface LiveColumnSlots {
   readonly list: ReactNode;
   /** Over the rows: the history could not be read, and the retry. */
   readonly banner: ReactNode;
+  /** Over the rows, under the banner: what the keeper is about to do with the vault's money (live/LivePending.tsx). */
+  readonly pending?: ReactNode;
   /** Under the rows: what the feed leaves out, counted, and the control that opens it. */
   readonly hidden: ReactNode;
   /** What a feed with nothing to list says instead — never nothing. */
@@ -149,6 +151,7 @@ export function WalletActivity({
 
       <ScrollArea className={FEED}>
         {live?.banner ?? null}
+        {live?.pending ?? null}
         {/* Nothing to list is a sentence, never an empty column — and never "no activity yet" over a read that failed. */}
         {live !== undefined && activity.length === 0 && live.banner === null ? (
           <div className="px-4 py-6">

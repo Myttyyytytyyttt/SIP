@@ -187,6 +187,7 @@ function policyView(snapshot: LiveSnapshotJson, usdcHeld: bigint | null, nowMs: 
     lifetimeInvested: null,
     lastInvestedDay: null,
     storedSolFloorPerSol: null,
+    minConvertRateWad: null,
     todayPerSol: limits?.todayPerSol ?? null,
     pricesKnown: false,
     belowMarket: false,
@@ -217,6 +218,7 @@ function policyView(snapshot: LiveSnapshotJson, usdcHeld: bigint | null, nowMs: 
     lifetimeInvested: rawFrom(state.lifetimeInvested),
     lastInvestedDay: lastInvestedDay(state.bucketDays, state.bucketAmounts),
     storedSolFloorPerSol: floors.storedConvert === null || floors.storedConvert <= 0n ? null : usdcRawPerSol(floors.storedConvert),
+    minConvertRateWad: floors.storedConvert,
     pricesKnown: floors.pricesKnown,
     belowMarket: floors.belowMarket,
     readiness:
