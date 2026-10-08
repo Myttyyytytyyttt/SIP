@@ -54,7 +54,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { WalletActivity } from "@/components/wallet-activity";
 import { OnboardingHost } from "@/components/onboarding/OnboardingHost";
-import { WalletsOpenerOverride, useWalletsClosed, useWalletsModalOpen, useWalletsOpener } from "@/components/wallets-host";
+import { WalletsOpenerOverride, useWalletsClosed, useWalletsDisconnect, useWalletsModalOpen, useWalletsOpener } from "@/components/wallets-host";
 import { useLiveDashboard, type LiveDashboardStore } from "@/hooks/use-live-dashboard";
 import { useOnboardingClosed } from "@/hooks/use-onboarding-closed";
 import { useVaultScreen } from "@/hooks/use-vault-state";
@@ -438,14 +438,15 @@ function ConfiguredFrame({
   );
 
   const onDisconnect = useCallback(() => {
-    // Ask for Live, which for a visitor is the front door (rule 6, owner 10-08).
-    // It matters on the keyless sample (rule 5, ?mode=mock), the one screen where
-    // this Disconnect stands beside a ?mode=mock: without it the visitor would
-    // stay on the sample. The wallets modal's own Disconnect is a bare logout()
-    // and keeps the URL's mode, so from ?mode=mock it ends on the sample.
+    // Ask for Live, which for a visitor is the front door (rule 6, owner 10-08):
+    // from a ?mode=mock — the keyless sample (rule 5), or the sample of a key
+    // with no vault (rule 4a) through the wallets modal — the visitor would
+    // otherwise stay on the sample. The modal's Disconnect is this one too
+    // (useWalletsDisconnect below).
     window.history.replaceState({}, "", urlWithMode(pathname, "live"));
     void logout();
   }, [logout, pathname]);
+  useWalletsDisconnect(onDisconnect);
 
   const onConnect = useCallback(() => {
     login();

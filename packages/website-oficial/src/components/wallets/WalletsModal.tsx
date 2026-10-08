@@ -77,11 +77,14 @@ export function WalletsModal({
   open,
   onOpenChange,
   section,
+  onDisconnect,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** The tab it opens on; the overview when absent. */
   section?: WalletsSection;
+  /** The page's Disconnect (wallets-host, useWalletsDisconnect); the screen's bare logout when absent. */
+  onDisconnect?: () => void;
 }) {
   const reseating = useSyncExternalStore(subscribeSeatActivity, reseatRunning, reseatRunning);
   return (
@@ -109,7 +112,7 @@ export function WalletsModal({
 
             {/* The body row is the screen itself, with no scroll around it: its panels scroll on their own while the
                 rail stays still, and the states before the tabs bring their own scrolling body. */}
-            <WalletsScreen frame="modal" initialSection={section} />
+            <WalletsScreen frame="modal" initialSection={section} onDisconnect={onDisconnect} />
 
             <DialogPrimitive.Close data-slot="dialog-close" asChild>
               <Button variant="ghost" className="absolute top-2 right-2" size="icon-sm" disabled={reseating}>

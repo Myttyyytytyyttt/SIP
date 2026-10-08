@@ -196,6 +196,26 @@ describe("WalletsScreen states", () => {
     expect(rows(html)).toHaveLength(0);
   });
 
+  it("Disconnect is the page's own when it hands one (the modal over the dashboard), Privy's logout otherwise (/wallets)", () => {
+    const pageDisconnect = vi.fn();
+    // Both places it is offered: the keyless card, and the overview's pension key card.
+    for (const user of [userWith([embedded(TRADING_0, 0, true)]), userWith([phantom()])]) {
+      mocked.privy = { ready: true, authenticated: true, user };
+      pageDisconnect.mockReset();
+      mocked.logout.mockClear();
+      render({ onDisconnect: pageDisconnect });
+      const [handed] = buttons("Disconnect");
+      handed?.onClick?.(CLICK);
+      expect(pageDisconnect.mock.calls).toStrictEqual([[]]);
+      expect(mocked.logout).not.toHaveBeenCalled();
+
+      render();
+      const [bare] = buttons("Disconnect");
+      bare?.onClick?.(CLICK);
+      expect(mocked.logout).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it("the seat not configured: the refusal names both variables, and Create is disabled and creates nothing even if pressed", async () => {
     mocked.config = { privySignerId: null, privyPolicyId: null };
     mocked.privy = { ready: true, authenticated: true, user: userWith([phantom()]) };

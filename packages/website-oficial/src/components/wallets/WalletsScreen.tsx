@@ -73,10 +73,13 @@ type WalletsFrame = "modal" | "page";
 export function WalletsScreen({
   initialSection = DEFAULT_WALLETS_SECTION,
   frame = "page",
+  onDisconnect,
 }: {
   /** The tab it opens on. Read once, on mount: the modal mounts afresh on every open. */
   readonly initialSection?: WalletsSection;
   readonly frame?: WalletsFrame;
+  /** What Disconnect does: the page's own when it has one (the modal over the dashboard); Privy's logout otherwise. */
+  readonly onDisconnect?: () => void;
 }) {
   const { ready, authenticated, user, logout } = usePrivy();
   // Derived, never stored: the app keeps no copy of who you are.
@@ -91,7 +94,8 @@ export function WalletsScreen({
   // Privy can report the session a frame before the user object arrives.
   if (user === null) return gate(<ScreenSkeleton frame={frame} />);
 
-  const disconnect = () => void logout();
+  // Called with nothing, whatever the button hands its onClick.
+  const disconnect = onDisconnect === undefined ? () => void logout() : () => onDisconnect();
   if (pensionKey === null) return gate(<KeylessCard onDisconnect={disconnect} />);
 
   return (

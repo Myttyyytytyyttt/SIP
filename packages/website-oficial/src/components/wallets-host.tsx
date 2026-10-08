@@ -56,6 +56,29 @@ export function useWalletsModalOpen(): boolean {
 type Unsubscribe = () => void;
 const ClosedContext = createContext<((listener: () => void) => Unsubscribe) | null>(null);
 
+/** Hands the host the page's own Disconnect, or null to take it back. */
+const DisconnectRegistry = createContext<((handler: (() => void) | null) => void) | null>(null);
+
+/**
+ * THE MODAL'S DISCONNECT IS THE PAGE'S (owner, 10-08: "the modal's Disconnect
+ * also goes to the landing"). The modal is drawn by this host, beside the page
+ * rather than inside it, so it cannot be handed the page's Disconnect the way
+ * an override hands a subtree its opener: the page registers it here instead.
+ * The dashboard frame registers the one that lands a visitor on the front door
+ * (dashboard-shell.tsx, onDisconnect); with none registered, the modal's
+ * Disconnect is WalletsScreen's own bare logout, as on /wallets.
+ */
+export function useWalletsDisconnect(handler: () => void): void {
+  const register = useContext(DisconnectRegistry);
+  const latest = useRef(handler);
+  latest.current = handler;
+  useEffect(() => {
+    if (register === null) return undefined;
+    register(() => latest.current());
+    return () => register(null);
+  }, [register]);
+}
+
 /** The opener, or null when this subtree has no host. Safe to call anywhere. */
 export function useWalletsOpener(): WalletsOpener | null {
   return useContext(OpenerContext);
@@ -120,6 +143,10 @@ export function WalletsHost({
     setOpen(true);
   }, []);
 
+  // The page's Disconnect, when it registered one: the modal closes, then the page disconnects.
+  const [pageDisconnect, setPageDisconnect] = useState<(() => void) | null>(null);
+  const registerDisconnect = useCallback((handler: (() => void) | null) => setPageDisconnect(() => handler), []);
+
   const subscribe = useCallback((listener: () => void) => {
     listeners.current.add(listener);
     return () => {
@@ -133,10 +160,24 @@ export function WalletsHost({
     if (!next) for (const listener of listeners.current) listener();
   }, []);
 
+  // Closed first: a logout re-mounts everything under the vault screen, the modal
+  // included, and an open modal would come back showing its Connect card over the landing.
+  const modalDisconnect = useMemo(
+    () =>
+      pageDisconnect === null
+        ? undefined
+        : () => {
+            onOpenChange(false);
+            pageDisconnect();
+          },
+    [pageDisconnect, onOpenChange],
+  );
+
   return (
     <OpenerContext.Provider value={opener}>
       <WalletsOpenContext.Provider value={open}>
       <ClosedContext.Provider value={subscribe}>
+      <DisconnectRegistry.Provider value={registerDisconnect}>
       {config !== null ? (
         // THE PROVIDER WRAPS THE TREE, and does not sit beside it: the shell
         // reads the pension key to decide between the landing and the dashboard,
@@ -146,7 +187,7 @@ export function WalletsHost({
         <Providers config={config}>
           <SharedVaultScreen>
             {children}
-            {mounted ? <WalletsModal open={open} onOpenChange={onOpenChange} section={section} /> : null}
+            {mounted ? <WalletsModal open={open} onOpenChange={onOpenChange} section={section} onDisconnect={modalDisconnect} /> : null}
           </SharedVaultScreen>
         </Providers>
       ) : (
@@ -155,6 +196,7 @@ export function WalletsHost({
           {mounted ? <WalletsSetupModal problems={problems ?? []} open={open} onOpenChange={onOpenChange} /> : null}
         </>
       )}
+      </DisconnectRegistry.Provider>
       </ClosedContext.Provider>
       </WalletsOpenContext.Provider>
     </OpenerContext.Provider>
