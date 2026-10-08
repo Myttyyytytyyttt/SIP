@@ -20,7 +20,7 @@
 // SIP_WEB_PRIVY_STUB, and this module throws on import if it is ever loaded in a
 // production build. scripts/next-config.test.ts pins all of it.
 
-import { useCallback, useSyncExternalStore, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 
 if (process.env.NODE_ENV === "production") {
   throw new Error("test/stubs/privy-react-auth.ts was imported in a production build. It is a screenshot stub and must never ship.");
@@ -31,6 +31,12 @@ export interface PrivyStubState {
   ready: boolean;
   authenticated: boolean;
   user: unknown;
+  /**
+   * Who a login signs in as. A user injected up front counts as connected
+   * already (the dashboard reads `user`, not `authenticated`), so a script that
+   * wants to watch a visitor connect injects the user here instead.
+   */
+  loginUser?: unknown;
 }
 
 const EVENT = "saverfi-privy-stub";
@@ -81,7 +87,9 @@ export function PrivyProvider({ children }: { children: ReactNode }): ReactNode 
 export function usePrivy(): PrivyStubState & { login: () => void; logout: () => Promise<void> } {
   const current = useSyncExternalStore(subscribe, clientSnapshot, serverSnapshot);
   const login = useCallback(() => {
-    injected().authenticated = true;
+    const next = injected();
+    next.authenticated = true;
+    if (next.loginUser !== undefined) next.user = next.loginUser;
     announce();
   }, []);
   const logout = useCallback(async () => {
@@ -93,8 +101,69 @@ export function usePrivy(): PrivyStubState & { login: () => void; logout: () => 
   return { ready: current.ready, authenticated: current.authenticated, user: current.user, login, logout };
 }
 
-export function useLogin(_options?: { onError?: (code: unknown) => void }): { login: () => void } {
-  const { login } = usePrivy();
+/** What Privy hands every useLogin's onComplete. */
+interface LoginComplete {
+  user: unknown;
+  isNewUser: boolean;
+  wasAlreadyAuthenticated: boolean;
+  loginMethod: string | null;
+  loginAccount: unknown;
+}
+
+interface LoginOptions {
+  onComplete?: (complete: LoginComplete) => void;
+  onError?: (code: unknown) => void;
+}
+
+/** Like Privy's, a login made anywhere is heard by EVERY mounted useLogin. */
+const loginListeners = new Set<(complete: LoginComplete) => void>();
+
+/**
+ * PRIVY'S ORDER (3.36.0, read in its dist): the session is set first, and
+ * onComplete comes about 1.4 s later, when its dialog closes
+ * (ConnectionStatusScreen → closePrivyModal). The page has re-rendered — and
+ * re-mounted, see components/landing.tsx — by then, so the stub waits as long.
+ */
+const LOGIN_COMPLETES_AFTER_MS = 1400;
+
+/**
+ * A session the page opened with is reported ONCE per page load, from the
+ * provider's own initialisation, to the hooks mounted then — not again to every
+ * useLogin that mounts later.
+ */
+let restoredReported = false;
+
+export function useLogin(options?: LoginOptions): { login: () => void } {
+  const { login: signIn } = usePrivy();
+  const latest = useRef(options);
+  useEffect(() => {
+    latest.current = options;
+  });
+  useEffect(() => {
+    const hear = (complete: LoginComplete) => latest.current?.onComplete?.(complete);
+    loginListeners.add(hear);
+    if (!restoredReported) {
+      restoredReported = true;
+      const now = injected();
+      if (now.ready && now.authenticated) {
+        const restored = { user: now.user, isNewUser: false, wasAlreadyAuthenticated: true, loginMethod: null, loginAccount: null };
+        window.setTimeout(() => {
+          for (const each of loginListeners) each(restored);
+        }, 0);
+      }
+    }
+    return () => {
+      loginListeners.delete(hear);
+    };
+  }, []);
+  const login = useCallback(() => {
+    signIn();
+    restoredReported = true;
+    const complete = { user: injected().user, isNewUser: false, wasAlreadyAuthenticated: false, loginMethod: "siws", loginAccount: null };
+    window.setTimeout(() => {
+      for (const hear of loginListeners) hear(complete);
+    }, LOGIN_COMPLETES_AFTER_MS);
+  }, [signIn]);
   return { login };
 }
 

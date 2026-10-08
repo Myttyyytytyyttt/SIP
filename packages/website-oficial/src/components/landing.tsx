@@ -31,11 +31,24 @@
  * the nav's fade, and --p, which the ground drifts with. Transforms and opacity
  * never dirty layout, so nothing is forced.
  *
- * PROGRESSIVE, ON PURPOSE. Every way in except Connect is <a href="/?mode=mock">:
- * before hydration a click is a navigation and still arrives; after it, the
- * click becomes a fade. The shell pushes that URL on entry, so Back returns
- * here — and this page resets its scroll on mount and only enters on a gesture
- * the visitor made, so a restored scroll position cannot re-enter it.
+ * THE WAYS OUT, EACH TO ONE PLACE (owner, 10-08):
+ *  - Connect logs in, and a login that succeeds walks on into the app at
+ *    ?mode=live, where the frame (lib/dashboard-mode.ts) shows the key's own
+ *    pension, or the new-user setup when it has no vault yet. For somebody
+ *    already connected the button is "Open my pension" and goes there too —
+ *    except a key with no vault whose setup was closed in this tab (rule 4a),
+ *    for which it is the app header's own "Connect": it reopens that setup,
+ *    and the app comes in behind it.
+ *  - See the app, and the scroll, open the example (?mode=mock). A connected key
+ *    lands on its own pension from there instead (rule 4, kept by the owner on
+ *    10-08); the one connected key shown the example is rule 4a's.
+ *  - Leaderboard and Dashboard are other pages, public: real links, no fade.
+ *
+ * PROGRESSIVE, ON PURPOSE. See the app is <a href="/?mode=mock">: before
+ * hydration a click is a navigation and still arrives; after it, the click
+ * becomes a fade. The shell pushes that URL on entry, so Back returns here —
+ * and this page resets its scroll on mount and only enters on a gesture the
+ * visitor made, so a restored scroll position cannot re-enter it.
  *
  * THE LOADER, AND WHY THE SCENE COMES LAST. The page opens on a loader (the
  * intro below, or the SIP mark in a spinning ring) and stays there until the
@@ -69,11 +82,15 @@
 import Image from "next/image";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { usePrivy } from "@privy-io/react-auth";
+import { useLogin, usePrivy } from "@privy-io/react-auth";
 import { ArrowDown, ArrowUpRight } from "lucide-react";
 
 import { ExampleActivity, LandingBackdrop } from "@/components/landing-backdrop";
+import { Separator } from "@/components/ui/separator";
 import { useWalletsOpener } from "@/components/wallets-host";
+import type { UrlMode } from "@/lib/dashboard-mode";
+import { pensionKeyOf } from "@/lib/pension-key";
+import { privyFailure } from "@/lib/privy-failure";
 import { cn } from "@/lib/utils";
 
 /**
@@ -172,23 +189,94 @@ function isStaged(vw: number, vh: number): boolean {
 const FOCUS =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0B11]";
 
+/**
+ * WHAT THE WHITE BUTTON DOES, in its four honest states: opens the setup modal
+ * when the deployment is incomplete; for somebody already signed in, goes in
+ * at ?mode=live (their pension, or the card telling a session with no Solana
+ * wallet what it lacks — rule 5); logs in when Privy can; otherwise it waits — a named,
+ * focusable, aria-disabled button, never a nameless placeholder. Without a
+ * configuration there is no Privy provider, so `ready` never comes.
+ */
+export type ConnectAction = "setup" | "open-pension" | "login" | "waiting";
+
+export function connectActionOf(input: {
+  readonly walletsConfigured: boolean;
+  /** Whether the wallets modal can be opened from here (wallets-host). */
+  readonly canOpenSetup: boolean;
+  readonly ready: boolean;
+  readonly authenticated: boolean;
+}): ConnectAction {
+  if (!input.walletsConfigured) return input.canOpenSetup ? "setup" : "waiting";
+  if (!input.ready) return "waiting";
+  return input.authenticated ? "open-pension" : "login";
+}
+
+/**
+ * A LOGIN THAT SUCCEEDS GOES IN — only one made now. Privy calls every mounted
+ * useLogin's onComplete, a session it restored included (wasAlreadyAuthenticated);
+ * that one is somebody looking at the front door on purpose, and stays.
+ */
+export const goesInAfterLogin = (complete: { readonly wasAlreadyAuthenticated: boolean }): boolean => !complete.wasAlreadyAuthenticated;
+
+/**
+ * A LOGIN'S WAY IN OUTLIVES THE LANDING THAT TOOK IT. A login re-mounts the
+ * whole page: wallets-host wraps everything in the pension's vault screen once
+ * a key is connected. Privy 3.36.0 calls onComplete about 1.4 s after the
+ * session is set, as its dialog closes — after that re-mount, so the new
+ * landing hears it. Were the order ever the other way round, the landing that
+ * started the fade would be gone, and its timer with it: on 10-08 a stub that
+ * answered first left /welcome on the front door, connected. So the way in to
+ * the pension is kept here, beside the module, with the page it was taken on,
+ * until a timer delivers it; a landing that mounts on that page while it is
+ * pending starts faded and delivers it itself. Only the pension's way in: the
+ * example's is never cut short by a login. It expires, and any move through
+ * history drops it — Back or Forward is the visitor choosing somewhere else.
+ */
+let pendingWayIn: { readonly at: number; readonly path: string } | null = null;
+const PENDING_WAY_IN_MS = 2000;
+if (typeof window !== "undefined") {
+  window.addEventListener("popstate", () => {
+    pendingWayIn = null;
+  });
+}
+const pendingWayInHere = (): boolean =>
+  typeof window !== "undefined" &&
+  pendingWayIn !== null &&
+  pendingWayIn.path === window.location.pathname &&
+  performance.now() - pendingWayIn.at < PENDING_WAY_IN_MS;
+
 const clamp01 = (x: number) => (x < 0 ? 0 : x > 1 ? 1 : x);
 const easeInOut = (x: number) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
 
 export function Landing({
   onEnter,
   walletsConfigured,
+  resumeSetup = null,
 }: {
-  onEnter: () => void;
+  /** Where the visitor goes in: the example ("mock"), or their own pension after a Connect ("live"). */
+  onEnter: (to: UrlMode) => void;
   /**
    * Whether the wallets modal has a configuration. Without one there is no
    * Privy provider above us, `ready` never comes, and the honest Connect is the
    * one that opens the setup modal naming the missing variables.
    */
   walletsConfigured: boolean;
+  /**
+   * Set when the connected key has no vault and closed its setup in this tab
+   * (lib/dashboard-mode.ts, rule 4a): reopens that setup. The button is then
+   * the app header's "Connect" for that state, and like it, the setup opens at
+   * the click — before the fade, not with the way in: clearing the close moves
+   * the frame, which rewrites this page's URL, and a URL rewritten while Next
+   * navigates drops the navigation (measured, 10-08). Only /welcome passes it:
+   * "/" never shows a connected key the landing.
+   */
+  resumeSetup?: (() => void) | null;
 }) {
-  const { ready, login } = usePrivy();
+  const { ready, authenticated, user } = usePrivy();
+  // A pension key, not just a session: rule 5's session with no Solana wallet has no pension to open.
+  const hasPensionKey = user !== null && user !== undefined && pensionKeyOf(user) !== null;
   const openWallets = useWalletsOpener();
+  const [failure, setFailure] = useState<string | null>(null);
 
   const rootRef = useRef<HTMLDivElement>(null);
   const navRef = useRef<HTMLElement>(null);
@@ -197,19 +285,40 @@ export function Landing({
   const stageRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
 
-  const [leaving, setLeaving] = useState(false);
+  // Faded from the first paint when this landing is the remount of one that was leaving.
+  const [leaving, setLeaving] = useState(pendingWayInHere);
   const enteredRef = useRef(false);
   const timerRef = useRef<number | null>(null);
 
-  const enter = useCallback(() => {
+  // THE LATEST onEnter, READ AT THE MOMENT OF LEAVING. Callers pass a fresh
+  // arrow on every render; were `enter` to change with it, the scene's effect
+  // (which depends on `enter`) would tear down mid-fade — clearing the leave
+  // timer and leaving the page at opacity 0 with nowhere to go.
+  const onEnterRef = useRef(onEnter);
+  useEffect(() => {
+    onEnterRef.current = onEnter;
+  });
+
+  const enter = useCallback((to: UrlMode) => {
     if (enteredRef.current) return;
     enteredRef.current = true;
+    pendingWayIn = to === "live" ? { at: performance.now(), path: window.location.pathname } : null;
     setLeaving(true);
     timerRef.current = window.setTimeout(() => {
+      pendingWayIn = null;
       window.scrollTo({ top: 0, behavior: "auto" });
-      onEnter();
+      onEnterRef.current(to);
     }, LEAVE_MS);
-  }, [onEnter]);
+  }, []);
+
+  // Deliver a way in that a previous mount of this page took and could not
+  // finish. Re-armed on every run: React's development double-mount clears the
+  // timer between the two (the scene's cleanup), and the second run must set it again.
+  useEffect(() => {
+    if (!pendingWayInHere()) return;
+    enteredRef.current = false;
+    enter("live");
+  }, [enter]);
 
   // A modified click (new tab, new window) is a real navigation to the same
   // URL; a plain one becomes the fade.
@@ -217,16 +326,46 @@ export function Landing({
     (e: React.MouseEvent<HTMLAnchorElement>) => {
       if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
       e.preventDefault();
-      enter();
+      enter("mock");
     },
     [enter],
   );
 
-  // Connect, in its three honest states: opens the setup modal when the
-  // deployment is incomplete; logs in when Privy can; otherwise a named,
-  // focusable, aria-disabled button — never a nameless placeholder.
+  // A login made here walks into the pension (goesInAfterLogin). Closing
+  // Privy's dialog is a choice, not an error. Privy's login lives in
+  // LoginWatcher, mounted only where there is a provider to log in with.
+  const loginRef = useRef<(() => void) | null>(null);
+  const onLoginComplete = useCallback(
+    (complete: { readonly wasAlreadyAuthenticated: boolean }) => {
+      if (goesInAfterLogin(complete)) enter("live");
+    },
+    [enter],
+  );
+  const onLoginError = useCallback((code: unknown) => {
+    const described = privyFailure(code);
+    setFailure(described.kind === "exited" ? null : described.message);
+  }, []);
+
+  const action = connectActionOf({ walletsConfigured, canOpenSetup: openWallets !== null, ready, authenticated });
   const connect: (() => void) | null =
-    !walletsConfigured && openWallets !== null ? openWallets : ready ? () => login() : null;
+    action === "setup"
+      ? openWallets
+      : action === "open-pension"
+        ? () => {
+            resumeSetup?.();
+            enter("live");
+          }
+        : action === "login"
+          ? () => {
+              setFailure(null);
+              loginRef.current?.();
+            }
+          : null;
+  // "Open my pension" only where there is one to open (rule 4). Rule 4a's key
+  // reopens its setup and rule 5's session sees the keyless card: both keep the
+  // header's "Connect", and the picture still shows them the example.
+  const opensPension = action === "open-pension" && resumeSetup === null && hasPensionKey;
+  const connectLabel = opensPension ? "Open my pension" : "Connect";
 
   // THE INTRO'S DECISION, for a landing React mounts on the client (INTRO_SCRIPT
   // ran only if the server sent this page). Before paint, so the film never
@@ -337,7 +476,7 @@ export function Landing({
           `perspective(1200px) rotateX(${tilt * (1 - tRot)}deg) scale(${1 + (fill - 1) * tScale})`;
       }
 
-      if (intent && p >= ENTER_TOLERANCE) enter();
+      if (intent && p >= ENTER_TOLERANCE) enter("mock");
       // The sticky top just moved with the height: measure again next frame.
       if (heightChanged) schedule();
     };
@@ -541,6 +680,8 @@ export function Landing({
       // INTRO_SCRIPT may mark this element (data-intro-seen) before React hydrates it.
       suppressHydrationWarning
     >
+      {walletsConfigured ? <LoginWatcher loginRef={loginRef} onComplete={onLoginComplete} onError={onLoginError} /> : null}
+
       {/* ── The intro: the launch film's logo build, first visit only ───── */}
       <div className="landing-intro">
         {/* preload="none": a visitor who has seen it downloads nothing; INTRO_SCRIPT starts it for everybody else.
@@ -612,14 +753,18 @@ export function Landing({
         </span>
         <span className="flex items-center gap-2">
           {/*
-            A REAL NAVIGATION, NOT THE TRANSITION. Every other way out of this
-            page is `/?mode=mock` through enterFromLink, which is the in-page
-            scroll into the dashboard; the rankings are a different page, public,
-            and must not be intercepted by it — so no onClick.
+            REAL NAVIGATIONS, NOT THE TRANSITION. The fade (enter) is for the
+            ways into the app — See the app and the scroll to the example,
+            Connect to the pension (THE WAYS OUT, at the top of this file). The
+            rankings and the Dashboard are other pages, public, and must not be
+            intercepted by it — so no onClick.
 
-            FROM sm UP HERE, and in the hero row at every size: on a 375px phone
-            a third item in this bar crowds Connect, and Connect is what this
-            page is for.
+            FROM sm UP HERE: the rankings are also in the hero row at every
+            size, the Dashboard only below sm. On a 375px phone a third item in
+            this bar crowds Connect, and Connect is what this page is for.
+
+            THEN THE BAR'S TWO SIDES (owner, 10-08), as in the app's own header:
+            the pages, Dashboard last; a rule; and the account — Connect.
           */}
           <a
             href="/leaderboard"
@@ -640,7 +785,17 @@ export function Landing({
           >
             See the app
           </a>
-          <ConnectButton connect={connect} size="sm" />
+          <a
+            href="/dashboard"
+            className={cn(
+              "hidden rounded-full px-4 py-2 text-sm font-medium text-white/70 transition-colors hover:text-white sm:inline-flex",
+              FOCUS,
+            )}
+          >
+            Dashboard
+          </a>
+          <Separator orientation="vertical" className="mr-2 ml-1 hidden h-5 bg-white/15 data-vertical:self-center sm:block" />
+          <ConnectButton connect={connect} label={connectLabel} size="sm" />
         </span>
       </nav>
 
@@ -678,7 +833,7 @@ export function Landing({
               </h1>
               <div className="flex flex-wrap items-center gap-3">
                 <span className="landing-in landing-in-pop inline-flex" style={{ animationDelay: "0.75s" }}>
-                  <ConnectButton connect={connect} size="lg" />
+                  <ConnectButton connect={connect} label={connectLabel} size="lg" />
                 </span>
                 <a
                   href="/?mode=mock"
@@ -706,7 +861,25 @@ export function Landing({
                   Leaderboard
                   <ArrowUpRight size={14} aria-hidden />
                 </a>
+                {/* The same, for the all-pensions page: only on a phone, where the bar shows Connect alone. */}
+                <a
+                  href="/dashboard"
+                  className={cn(
+                    "landing-in landing-in-pop flex items-center gap-1.5 px-2 py-3 text-sm font-medium text-white/60 transition-colors hover:text-white sm:hidden",
+                    FOCUS,
+                  )}
+                  style={{ animationDelay: "1.04s" }}
+                >
+                  Dashboard
+                  <ArrowUpRight size={14} aria-hidden />
+                </a>
               </div>
+              {/* A Connect that did not go through says why, where the buttons are. */}
+              {failure !== null && (
+                <p role="alert" className="mt-3 max-w-md text-xs leading-relaxed text-red-300/90">
+                  {failure}
+                </p>
+              )}
             </div>
             <div className="landing-copy-aside landing-in landing-in-up md:col-span-5 lg:col-span-4" style={{ animationDelay: "0.62s" }}>
               {/* The same eyebrow, shown here instead of above the headline only
@@ -782,7 +955,7 @@ export function Landing({
                 <a
                   href="/?mode=mock"
                   onClick={enterFromLink}
-                  aria-label="Open the app with example data"
+                  aria-label={opensPension ? "Open the app" : "Open the app with example data"}
                   className="absolute inset-0 z-10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/60"
                 />
                 {/* Hover: the picture softens behind a Connect in the middle. A
@@ -793,10 +966,13 @@ export function Landing({
                     className="absolute inset-x-0 flex -translate-y-1/2 flex-col items-center gap-3"
                     style={{ top: "var(--hy, 50%)" }}
                   >
-                    <ConnectButton connect={connect} size="lg" />
-                    <span aria-hidden className="text-xs text-white/75">
-                      or click anywhere to explore the example
-                    </span>
+                    <ConnectButton connect={connect} label={connectLabel} size="lg" />
+                    {/* Not to a connected key: the picture takes it to its own pension (rule 4), not to the example. */}
+                    {opensPension ? null : (
+                      <span aria-hidden className="text-xs text-white/75">
+                        or click anywhere to explore the example
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -829,11 +1005,39 @@ export function Landing({
 }
 
 /**
- * The one white button, in two sizes and three states. While it cannot act it
- * is still a real, named, focusable button — dimmed and aria-disabled — so its
- * place in the tab order and on the page never changes.
+ * PRIVY'S LOGIN, WHERE THERE IS A PRIVY. useLogin reads the provider's context
+ * and throws without one (measured, 10-08: "Cannot read properties of
+ * undefined (reading 'current')" on a deployment with no configuration — where
+ * there is no PrivyProvider and Connect opens the setup modal instead). So the
+ * landing mounts this only when the deployment is configured, and it hands the
+ * login function up through a ref.
  */
-function ConnectButton({ connect, size }: { connect: (() => void) | null; size: "sm" | "lg" }) {
+function LoginWatcher({
+  loginRef,
+  onComplete,
+  onError,
+}: {
+  readonly loginRef: React.RefObject<(() => void) | null>;
+  readonly onComplete: (complete: { readonly wasAlreadyAuthenticated: boolean }) => void;
+  readonly onError: (code: unknown) => void;
+}) {
+  const { login } = useLogin({ onComplete, onError });
+  useEffect(() => {
+    loginRef.current = () => login();
+    return () => {
+      loginRef.current = null;
+    };
+  }, [login, loginRef]);
+  return null;
+}
+
+/**
+ * The one white button, in two sizes: Connect, or "Open my pension" for somebody
+ * already connected. While it cannot act it is still a real, named, focusable
+ * button — dimmed and aria-disabled — so its place in the tab order and on the
+ * page never changes.
+ */
+function ConnectButton({ connect, label, size }: { connect: (() => void) | null; label: string; size: "sm" | "lg" }) {
   const cls =
     size === "lg"
       ? "rounded-full bg-white px-7 py-3 text-sm font-medium text-gray-900 transition-all hover:bg-white/90 sm:px-8 sm:py-3.5"
@@ -845,7 +1049,7 @@ function ConnectButton({ connect, size }: { connect: (() => void) | null; size: 
       onClick={connect ?? undefined}
       className={cn(cls, FOCUS, connect === null && "animate-pulse cursor-default bg-white/30 text-white/40 hover:bg-white/30")}
     >
-      Connect
+      {label}
     </button>
   );
 }

@@ -245,7 +245,7 @@ function UnconfiguredFrame({ mock, children }: { readonly mock: DashboardLoadJso
     stalled: false,
   };
   return (
-    <Body value={value} onEnter={() => setMode("mock")} walletsConfigured={false}>
+    <Body value={value} onEnter={setMode} walletsConfigured={false}>
       {children}
     </Body>
   );
@@ -467,7 +467,7 @@ function ConfiguredFrame({
   return (
     <>
       <WalletsOpenerOverride opener={door ? resumeOnboarding : null}>
-        <Body value={value} onEnter={() => setMode("mock")} walletsConfigured>
+        <Body value={value} onEnter={setMode} walletsConfigured>
           {children}
         </Body>
       </WalletsOpenerOverride>
@@ -495,7 +495,8 @@ function Body({
 }: {
   readonly value: DashboardContextValue;
   readonly children: ReactNode;
-  readonly onEnter: () => void;
+  /** The landing's way in: the example, or — after a Connect — the pension. */
+  readonly onEnter: (to: UrlMode) => void;
   readonly walletsConfigured: boolean;
 }) {
   // The front door is its own page: no header, no numbers, and it never waits.
