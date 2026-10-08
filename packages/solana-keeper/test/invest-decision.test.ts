@@ -300,6 +300,21 @@ describe("the pause switches, for investing", () => {
 });
 
 describe("the conversion floor", () => {
+  /**
+   * THE LIVE-PRICE FLOOR (owner, 2026-10-08). Every new policy signs
+   * min_convert_rate_wad = 1, the least convert.rs accepts, so that no signed
+   * price stops the conversion. 1 is not 0: it must convert, and it must not
+   * raise the "CONVERSION IS OFF" alarm that 0 raises — the vector's value,
+   * read through a runtime-built specifier as the cases below load theirs.
+   */
+  it("converts at the 1-wad live-price floor every new policy signs, with no alarm", async () => {
+    const VECTOR = "keeper-policy";
+    const { LIVE_PRICE_FLOOR } = (await import(`../../solana-core/test/fixtures/${VECTOR}.ts`)) as { LIVE_PRICE_FLOOR: { web: { value: bigint } } };
+    expect(LIVE_PRICE_FLOOR.web.value).toBe(1n);
+    expect(convertDecision({ minConvertRateWad: LIVE_PRICE_FLOOR.web.value })).toEqual({ convert: true });
+    expect(convertDecision({ minConvertRateWad: 1n })).toEqual({ convert: true });
+  });
+
   it("skips wrap and convert at a zero floor, naming the field, the refusal it spares, and what is still invested", () => {
     const decision = convertDecision({ minConvertRateWad: 0n });
     expect(decision.convert).toBe(false);
@@ -2304,5 +2319,26 @@ describe("where the epoch ends, from the EpochSchedule sysvar", () => {
   it("refuses a short read rather than guessing an epoch's end", () => {
     expect(() => decodeEpochSchedule(MAINNET.subarray(0, 32))).toThrow(/33 bytes/);
     expect(() => decodeEpochSchedule(Buffer.alloc(33))).toThrow(/0 slots per epoch/);
+  });
+});
+
+/**
+ * THE KEEPER'S HALF OF PYTH_GUARD (packages/solana-core/test/fixtures/keeper-policy.ts).
+ * Since 2026-10-08 the website quotes these three numbers as part of the price
+ * protection, because the policy signs no price floor any more; a constant
+ * moved here goes red here, and the sentence moved there goes red there.
+ */
+describe("the Pyth guard the website quotes", () => {
+  it("is the vector's: 60 s, 50 bps of confidence, 500 bps of deviation", async () => {
+    const VECTOR = "keeper-policy";
+    const { PYTH_GUARD } = (await import(`../../solana-core/test/fixtures/${VECTOR}.ts`)) as {
+      PYTH_GUARD: { keeper: { maxAgeSeconds: bigint; confBps: bigint; deviationBps: bigint } };
+    };
+    expect([PYTH_GUARD.keeper.maxAgeSeconds, PYTH_GUARD.keeper.confBps, PYTH_GUARD.keeper.deviationBps]).toEqual([60n, 50n, 500n]);
+    expect([MAX_PYTH_AGE_SECONDS, MAX_PYTH_CONF_BPS, MAX_PYTH_DEVIATION_BPS]).toEqual([
+      PYTH_GUARD.keeper.maxAgeSeconds,
+      PYTH_GUARD.keeper.confBps,
+      PYTH_GUARD.keeper.deviationBps,
+    ]);
   });
 });
