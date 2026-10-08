@@ -24,6 +24,7 @@ import { Circle, CircleCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatSol } from "@/lib/amounts";
+import { requestImport } from "@/lib/import-intent";
 import { LIVE_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
@@ -109,9 +110,22 @@ export function LiveNextStep({
     return shell(
       copy.title,
       copy.body,
-      <Button type="button" onClick={() => onOpenWallets("trading")}>
-        {copy.create}
-      </Button>,
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" onClick={() => onOpenWallets("trading")}>
+          {copy.create}
+        </Button>
+        {/* The same tab, with its import panel already open (import-intent.ts). */}
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => {
+            requestImport();
+            onOpenWallets("trading");
+          }}
+        >
+          {copy.import}
+        </Button>
+      </div>,
     );
   }
 

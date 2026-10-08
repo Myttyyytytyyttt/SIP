@@ -211,6 +211,26 @@ export interface VaultStateJson {
   readonly offeredVenues?: readonly string[];
 }
 
+/**
+ * What /api/solana-vault's importCheck reads about an address before its key is
+ * imported: a vault it owns, where it is linked, its SOL and its tokens. Bigints
+ * as decimal strings; every read keeps its own outcome.
+ */
+export interface ImportCheckJson {
+  readonly owner: string;
+  readonly wallet: string;
+  readonly programId: string;
+  /** ["vault", wallet]. */
+  readonly ownVault: { readonly address: string; readonly status: ReadStatus };
+  /** The role ["config"] gives this key, if any. */
+  readonly protocolRole: "authority" | "pending_authority" | "keeper" | "attester" | "none" | "unreadable";
+  /** ["link", wallet], compared with the owner's vault. */
+  readonly link: { readonly address: string; readonly status: WalletLinkStatus; readonly vault: string | null };
+  readonly lamports: string | null;
+  /** Non-zero balances under both token programs, and the count of empty token accounts (null when unread). */
+  readonly tokens: { readonly status: "exists" | "unreadable"; readonly items: readonly HoldingJson[]; readonly emptyAccounts: number | null };
+}
+
 export interface ApiFailure {
   readonly ok: false;
   /** The HTTP status, or 0 when the request never got an answer. */
@@ -238,6 +258,8 @@ export class RpcCallError extends Error {
 export interface VaultApi {
   build<T = BuiltTransactionJson>(body: Readonly<Record<string, unknown>>): Promise<ApiResult<T>>;
   state(input: { readonly owner: string; readonly wallets: readonly string[] }): Promise<ApiResult<VaultStateJson>>;
+  /** The chain's facts about one address an import is about to bring in. The address only: no key is ever sent. */
+  importCheck(input: { readonly owner: string; readonly wallet: string }): Promise<ApiResult<ImportCheckJson>>;
   send(signedTransaction: Uint8Array): Promise<ApiResult<SendResponseJson>>;
   /** One JSON-RPC call through /api/solana-rpc; resolves to its result, throws RpcCallError otherwise. */
   rpc<T = unknown>(method: string, params: readonly unknown[]): Promise<T>;
@@ -318,6 +340,7 @@ export function createVaultApi(options: { readonly origin?: string; readonly fet
   return {
     build: <T>(body: Readonly<Record<string, unknown>>) => request<T>("/api/solana-build", body),
     state: ({ owner, wallets }) => request<VaultStateJson>("/api/solana-vault", { action: "state", owner, wallets }),
+    importCheck: ({ owner, wallet }) => request<ImportCheckJson>("/api/solana-vault", { action: "importCheck", owner, wallet }),
     send: (signedTransaction) => request<SendResponseJson>("/api/solana-tx", { action: "send", signedTxBase64: base64Encode(signedTransaction) }),
     rpc: async <T>(method: string, params: readonly unknown[]): Promise<T> => {
       const answer = await post("/api/solana-rpc", { jsonrpc: "2.0", id: 1, method, params });

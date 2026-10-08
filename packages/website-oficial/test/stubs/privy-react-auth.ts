@@ -72,8 +72,16 @@ const serverSnapshot = (): PrivyStubState => NOT_READY;
 function subscribe(onChange: () => void): () => void {
   if (typeof window === "undefined") return () => undefined;
   window.addEventListener(EVENT, onChange);
-  return () => window.removeEventListener(EVENT, onChange);
+  // The Solana half (its import) changes the user in place and says so with this event.
+  const changed = () => announce();
+  window.addEventListener(CHANGED, changed);
+  return () => {
+    window.removeEventListener(EVENT, onChange);
+    window.removeEventListener(CHANGED, changed);
+  };
 }
+
+const CHANGED = "saverfi-privy-stub-changed";
 
 function announce(): void {
   version += 1;
@@ -169,9 +177,21 @@ export function useLogin(options?: LoginOptions): { login: () => void } {
 
 export function useUser(): { user: unknown; refreshUser: () => Promise<unknown> } {
   const { user } = usePrivy();
-  return { user, refreshUser: async () => user };
+  // The record as it is NOW: an import made in this render's lifetime is in it.
+  return { user, refreshUser: async () => injected().user };
 }
 
-export function useSigners(): { addSigners: () => Promise<void>; removeSigners: () => Promise<void> } {
-  return { addSigners: async () => undefined, removeSigners: async () => undefined };
+/** removeSigners clears `delegated` on that wallet, as Privy's record shows a TEE wallet once its signers are gone. */
+export function useSigners(): { addSigners: () => Promise<void>; removeSigners: (input: { address: string }) => Promise<void> } {
+  return {
+    addSigners: async () => undefined,
+    removeSigners: async ({ address }) => {
+      const state = injected();
+      const user = state.user as { linkedAccounts: { address?: string }[] } | null;
+      if (user !== null) {
+        state.user = { ...user, linkedAccounts: user.linkedAccounts.map((account) => (account.address === address ? { ...account, delegated: false } : account)) };
+      }
+      announce();
+    },
+  };
 }

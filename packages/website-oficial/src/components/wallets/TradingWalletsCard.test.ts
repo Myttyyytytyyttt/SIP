@@ -24,6 +24,7 @@ const mocked = vi.hoisted(() => {
     wallets: [] as { address: string; standardWallet: unknown }[],
     buttons: [] as { label: string; disabled: boolean; onClick: ((event: unknown) => void) | undefined }[],
     createWallet: vi.fn(),
+    importWallet: vi.fn(),
     refreshUser: vi.fn(),
     signTransaction: vi.fn(),
     signMessage: vi.fn(),
@@ -38,6 +39,7 @@ vi.mock("@privy-io/react-auth", () => ({
 
 vi.mock("@privy-io/react-auth/solana", () => ({
   useCreateWallet: () => ({ createWallet: mocked.createWallet }),
+  useImportWallet: () => ({ importWallet: mocked.importWallet }),
   useExportWallet: () => ({ exportWallet: vi.fn() }),
   useWallets: () => ({ ready: true, wallets: mocked.wallets }),
   useSignTransaction: () => ({ signTransaction: mocked.signTransaction }),
@@ -66,7 +68,7 @@ import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hoo
 import type { CreateAndLinkOutcome } from "@/lib/create-and-link";
 import { MAX_TRADING_WALLETS } from "@/lib/trading-wallets";
 import type { VaultApi, VaultStateJson } from "@/lib/vault-api";
-import { CREATE_LINK_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
+import { CREATE_LINK_COPY, IMPORT_LINK_COPY, IMPORT_PANEL_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
 
 const CLICK = { type: "click", target: {} };
 const VAULT = "Vau1tP1aceho1der111111111111111111111111111";
@@ -216,8 +218,39 @@ describe("the one button, before it is pressed", () => {
     mocked.user = userWith([phantom(), ...Array.from({ length: MAX_TRADING_WALLETS }, (_, index) => embedded(`Fu11${index}`.padEnd(42, "x"), index, true))]);
     const { html } = render(ready());
     expect(buttons(CREATE_LINK_COPY.button)[0]?.disabled).toBe(true);
-    expect(html).toContain("trading wallets for one account");
+    expect(html).toContain("trading wallets for one account, created or imported");
     expect(html).not.toContain("Phantom&#x27;s window opens partway through");
+  });
+});
+
+describe("the second action: import a wallet already in use", () => {
+  it("sits under Create, closed: no key field is on the page until it is pressed", () => {
+    const { html } = render(ready());
+    expect(buttons(IMPORT_LINK_COPY.button)).toHaveLength(1);
+    expect(buttons(IMPORT_LINK_COPY.button)[0]?.disabled).toBe(false);
+    expect(html).not.toContain('type="password"');
+    expect(html).not.toContain(IMPORT_PANEL_COPY.title);
+  });
+
+  it("is not offered when nothing could be seated, nor at the cap — imports count toward it", () => {
+    mocked.config = { privySignerId: SIGNER, privyPolicyId: null };
+    render(ready());
+    expect(buttons(IMPORT_LINK_COPY.button)).toHaveLength(0);
+
+    mocked.config = { privySignerId: SIGNER, privyPolicyId: POLICY };
+    mocked.user = userWith([
+      phantom(),
+      ...Array.from({ length: MAX_TRADING_WALLETS - 1 }, (_, index) => embedded(`Fu11${index}`.padEnd(42, "x"), index, true)),
+      embedded("Imp0rted".padEnd(42, "x"), null, true, { imported: true }),
+    ]);
+    render(ready());
+    expect(buttons(IMPORT_LINK_COPY.button)).toHaveLength(0);
+    expect(buttons(CREATE_LINK_COPY.button)[0]?.disabled).toBe(true);
+  });
+
+  it("is held while a link this screen sent waits for confirmation", () => {
+    render(ready(), vi.fn(), [`${PENSION_KEY}:${TRADING_0}`]);
+    expect(buttons(IMPORT_LINK_COPY.button)[0]?.disabled).toBe(true);
   });
 });
 

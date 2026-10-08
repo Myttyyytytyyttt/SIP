@@ -171,6 +171,30 @@ export async function createTradingWallet(createWallet: CreateWalletFn, config: 
   return typeof address === "string" && address !== "" ? address : null;
 }
 
+/** Privy's importWallet from @privy-io/react-auth/solana, narrowed to the one call this page makes. */
+export type ImportWalletFn = (input: { privateKey: string; additionalSigners: KeeperSigner[] }) => Promise<{ address?: string } | undefined>;
+
+/**
+ * Import a wallet the person already uses, seated in the same call.
+ *
+ * REFUSES FIRST, exactly as createTradingWallet does: with no seat configured it
+ * throws SeatNotConfigured before Privy is called, so no key goes anywhere for a
+ * wallet that could never save. `additionalSigners` is keeperSigners() itself —
+ * the keeper's signer with exactly its policy, never an empty list (Privy reads
+ * one as full permission). Privy attaches signers at import only in TEE
+ * execution, which this Privy app runs (its public config: user-controlled-server-wallets-only).
+ *
+ * The key goes to Privy's frame on auth.privy.io, which encrypts it for Privy's
+ * TEE; nothing here keeps it. Returns the address Privy reports, or null.
+ */
+export async function importTradingWallet(importWallet: ImportWalletFn, config: SeatConfig, privateKey: string): Promise<string | null> {
+  const signers = keeperSigners(config);
+  if (signers === null) throw new SeatNotConfigured(seatProblem(config) ?? "The keeper's seat is not configured.");
+  const imported = await importWallet({ privateKey, additionalSigners: signers });
+  const address = imported?.address;
+  return typeof address === "string" && address !== "" ? address : null;
+}
+
 /**
  * What Privy's record of the user says about the signers on one wallet — read on
  * every call, never cached, never inferred from having asked for one:
@@ -710,6 +734,96 @@ export async function reseatKeeperSeat({
   return removing ? "reseated" : "granted";
 }
 
+/** Thrown when a removal stopped before Privy's record showed the wallet with no signer. Its message says where. */
+export class RemoveIncomplete extends Error {
+  override readonly name = "RemoveIncomplete";
+}
+
+/**
+ * "Remove SaverFi permission": the owner's own way to take the keeper's seat off
+ * an imported wallet without unlinking it (owner, 10-08). The link stays; the
+ * keeper finds no signer and settles nothing from the wallet until a grant.
+ */
+export const REMOVE_COPY = {
+  button: "Remove SaverFi permission",
+  running: "Removing…",
+  confirmTitle: "Remove SaverFi's permission from this wallet?",
+  /**
+   * NOT A PAUSE THAT FORGETS. The link's frontier moves only when a settlement lands, so once the permission is
+   * back the keeper measures from where it last settled, the time without it included. And the grant back needs
+   * Privy's record to keep the wallet's id, which nothing has shown yet for an imported wallet: the row says why
+   * when it cannot offer it.
+   */
+  confirmBody:
+    "Nothing is put aside from this wallet while the permission is off; gains made meanwhile can still be counted " +
+    "once it is back. This removes every signer on this wallet, the keeper's and any other. The wallet stays on your " +
+    "account and stays linked. To save from it again, press Grant SaverFi permission on this row; if the row cannot " +
+    "offer it, it says why.",
+  confirm: "Remove permission",
+  cancel: "Cancel",
+  done: "SaverFi's permission is off this wallet. Nothing is put aside from it until the permission is back.",
+  notATradingWallet: "Only a trading wallet Privy holds on this account can have SaverFi's permission removed here. Nothing was removed.",
+  notPerWallet:
+    "Removing SaverFi's permission is not available for this wallet. Privy removes the signers of one wallet at a time " +
+    "only from a TEE wallet it lists with its own wallet id, and its record does not show this one that way; for other " +
+    "wallets its removal revokes the signers of every wallet on your account. Nothing was removed.",
+  unconfirmed: "Privy did not confirm the removal, and its record still shows a signer on this wallet.",
+  recordLags: "Privy accepted the removal, but its record still shows a signer on this wallet after every wait. Reload the page in a minute.",
+} as const;
+
+/** Why Privy's removeSigners must not be called for this wallet, in the removal's own words, or null when it may. */
+export function removeRefusal(user: User | null, address: string): string | null {
+  if (embeddedSolanaAccount(user, address) === null) return REMOVE_COPY.notATradingWallet;
+  return teeWalletId(user, address) === null ? REMOVE_COPY.notPerWallet : null;
+}
+
+/**
+ * REMOVE EVERY SIGNER FROM ONE WALLET, and nothing else.
+ *
+ * THE SAME GUARD AS THE RE-SEAT, for the same reason: Privy's removeSigners clears
+ * one wallet only for a TEE wallet its RENDERED record lists with a server id and
+ * privy-v2 recovery; for anything else it calls the legacy revoke, which takes no
+ * address and revokes EVERY delegated wallet on the account. So `renderedUser` —
+ * the record from the render removeSigners came from — must show that, or
+ * nothing is sent.
+ *
+ * DONE MEANS THE RECORD SAYS SO. Privy's record is read until it shows the wallet
+ * with no signer, on GRANT_BACKOFF_MS; a removal Privy rejected and the record
+ * does not contradict, or a record that never catches up, is a RemoveIncomplete.
+ */
+export async function removeKeeperSeat({
+  address,
+  renderedUser,
+  removeSigners,
+  refreshUser,
+  wait = sleep,
+}: {
+  address: string;
+  renderedUser: User | null;
+  removeSigners: RemoveSignersFn;
+  refreshUser: RefreshUserFn;
+  wait?: (ms: number) => Promise<void>;
+}): Promise<"removed"> {
+  const refusal = removeRefusal(renderedUser, address);
+  if (refusal !== null) throw new ReseatRefused(refusal);
+
+  let refused: unknown = null;
+  try {
+    // An explicit object, never a click event: the address is the only thing removeSigners reads.
+    await removeSigners({ address });
+  } catch (error) {
+    refused = error;
+  }
+  for (let attempt = 0; ; attempt += 1) {
+    // A failed read is no answer: it counts as "not shown without signers", never as removed.
+    if (seatOf(await refreshUser().catch(() => null), address) === "missing") return "removed";
+    if (refused !== null) throw new RemoveIncomplete(sentences(REMOVE_COPY.unconfirmed, failureText(refused)));
+    const delay = GRANT_BACKOFF_MS[attempt];
+    if (delay === undefined) throw new RemoveIncomplete(REMOVE_COPY.recordLags);
+    await wait(delay);
+  }
+}
+
 /** Privy's exportWallet from @privy-io/react-auth/solana. */
 export type ExportWalletFn = (options: { address: string }) => Promise<void>;
 
@@ -756,7 +870,8 @@ export function failureText(error: unknown): string | null {
     error instanceof ReseatRefused ||
     error instanceof ReseatIncomplete ||
     error instanceof GrantRefused ||
-    error instanceof GrantUnconfirmed
+    error instanceof GrantUnconfirmed ||
+    error instanceof RemoveIncomplete
   ) {
     return error.message;
   }

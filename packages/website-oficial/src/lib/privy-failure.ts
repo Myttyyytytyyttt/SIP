@@ -39,8 +39,31 @@ export interface PrivyFailure {
 /** The variables a refused seat points at, named so the fix needs no guessing. */
 const SEAT_VARIABLES = "SIP_SOLANA_PRIVY_SIGNER_ID and SIP_SOLANA_PRIVY_POLICY_ID";
 
-/** Privy's text for a failure: the code a login reports, or an Error's message plus the code it carries. */
+/**
+ * KEY-SHAPED RUNS ARE TAKEN OUT BEFORE ANY TEXT IS SHOWN. An import hands Privy a
+ * private key, and an error can quote its input. Three shapes go:
+ *
+ * - base58 runs of 43 characters or more. A Solana key is about 88; 43 also
+ *   catches a key clipped by a truncated message before it gives away half of
+ *   itself. Addresses (43 or 44) and signatures go with it, which costs a
+ *   failure message nothing.
+ * - hex runs of 41 or more, with or without 0x: an EVM key, or one clipped. A
+ *   40-character EVM address survives.
+ * - a list of 16 or more small numbers: a key file's bytes.
+ */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(/\[?\s*\d{1,3}(?:\s*,\s*\d{1,3}){15,}\s*\]?/g, "[redacted]")
+    .replace(/(?:0x)?[0-9a-fA-F]{41,}/g, "[redacted]")
+    .replace(/[1-9A-HJ-NP-Za-km-z]{43,}/g, "[redacted]");
+}
+
+/** Privy's text for a failure: the code a login reports, or an Error's message plus the code it carries. Redacted. */
 function rawText(error: unknown): string {
+  return redactSecrets(unredactedText(error));
+}
+
+function unredactedText(error: unknown): string {
   if (typeof error === "string") return error.trim();
   if (error instanceof Error) {
     const code = (error as { privyErrorCode?: unknown }).privyErrorCode;

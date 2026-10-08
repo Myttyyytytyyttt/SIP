@@ -1,9 +1,11 @@
 // Privy's failures, classified from the messages its 3.36.0 bundle actually throws, so the page says
 // something someone can act on and never a blank.
 
+import { base58Encode } from "@sip/solana-core/client";
+import { Keypair } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 
-import { privyFailure, type PrivyFailureKind } from "@/lib/privy-failure";
+import { privyFailure, redactSecrets, type PrivyFailureKind } from "@/lib/privy-failure";
 
 const CASES: ReadonlyArray<readonly [string, unknown, PrivyFailureKind]> = [
   ["a closed login dialog", "exited_auth_flow", "exited"],
@@ -69,5 +71,42 @@ describe("privyFailure", () => {
     expect(privyFailure(new Error("Something new")).message).toContain("Something new");
     expect(privyFailure(undefined).message).toBe("Privy did not say why.");
     expect(privyFailure(new Error("")).message).toBe("Privy did not say why.");
+  });
+});
+
+describe("redactSecrets: no key-shaped text reaches the page", () => {
+  // Generated on the spot; never a real key.
+  const pair = Keypair.generate();
+  const key = base58Encode(pair.secretKey);
+
+  it("takes a whole Solana key out of an unrecognised failure, and out of a refused one", () => {
+    const other = privyFailure(new Error(`Could not import ${key}: bad input`)).message;
+    expect(other).not.toContain(key);
+    expect(other).toContain("[redacted]");
+    expect(other).toContain("bad input");
+    const refusedMessage = privyFailure(new Error(`Invalid policy ids for ${key}`)).message;
+    expect(refusedMessage).not.toContain(key.slice(0, 43));
+  });
+
+  it("takes out a key clipped by a truncated message, down to 43 characters", () => {
+    expect(redactSecrets(`input was ${key.slice(0, 43)}`)).toBe("input was [redacted]");
+    expect(redactSecrets(`input was ${key.slice(0, 42)}`)).toContain(key.slice(0, 42));
+  });
+
+  it("takes out hex of 41 characters or more, with or without 0x, and keeps an EVM address", () => {
+    const hex = Buffer.from(pair.secretKey.slice(0, 32)).toString("hex");
+    expect(redactSecrets(`key 0x${hex}`)).toBe("key [redacted]");
+    expect(redactSecrets(`key ${hex.slice(0, 41)}`)).toBe("key [redacted]");
+    const address = "0x52908400098527886E0F7030069857D2E4169EE7";
+    expect(redactSecrets(`account ${address}`)).toBe(`account ${address}`);
+  });
+
+  it("takes out a key file's list of numbers", () => {
+    expect(redactSecrets(`parsed [${[...pair.secretKey].join(", ")}] badly`)).toBe("parsed [redacted] badly");
+  });
+
+  it("classifies on the redacted text exactly as before", () => {
+    for (const [, error, kind] of CASES) expect(privyFailure(error).kind).toBe(kind);
+    expect(privyFailure(new Error(`Address to add signers too is not associated with current user. ${key}`)).kind).toBe("propagating");
   });
 });

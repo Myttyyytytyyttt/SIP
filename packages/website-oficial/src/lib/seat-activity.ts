@@ -21,7 +21,7 @@
  * Client-safe and pure: no React. The hook reads it with useSyncExternalStore.
  */
 
-export type SeatBusy = "granting" | "reseating" | "checking";
+export type SeatBusy = "granting" | "reseating" | "checking" | "removing";
 
 export interface SeatActivity {
   readonly busy: SeatBusy | null;

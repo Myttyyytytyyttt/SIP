@@ -284,7 +284,7 @@ function ConnectCard() {
         <CardDescription>
           Your pension key is a Solana wallet you already hold: Phantom, Backpack, Solflare or another. It owns the
           pension and is the only key that can withdraw — the team has no access to your funds. Trading wallets are
-          created here once it is connected.
+          created or imported here once it is connected.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">

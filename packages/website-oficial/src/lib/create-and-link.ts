@@ -32,9 +32,21 @@
  */
 
 import { rawFrom } from "@/lib/amounts";
-import { createTradingWallet, failureText, keeperSigners, seatProblem, type CreateWalletFn, type RefreshUserFn, type SeatConfig } from "@/lib/trading-wallets";
+import {
+  createTradingWallet,
+  failureText,
+  importTradingWallet,
+  keeperSigners,
+  seatOf,
+  seatProblem,
+  tradingWalletsOf,
+  type CreateWalletFn,
+  type ImportWalletFn,
+  type RefreshUserFn,
+  type SeatConfig,
+} from "@/lib/trading-wallets";
 import type { VaultStateJson } from "@/lib/vault-api";
-import { CREATE_LINK_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
+import { CREATE_LINK_COPY, IMPORT_LINK_COPY, LINK_COPY, VAULT_COPY, shortAddress } from "@/lib/vault-copy";
 import type { FlowStep, LinkWalletResult } from "@/lib/vault-flows";
 
 /** Why the chain cannot take a link right now. */
@@ -126,7 +138,7 @@ export interface CreateAndLinkStop {
  * during the press, which stays true however the chain moves. A chain that cannot
  * be read proves nothing, so nothing is taken back on its word.
  */
-export function stopStillHolds(stop: CreateAndLinkStop | null, state: VaultStateJson | null): boolean {
+export function stopStillHolds(stop: CreateAndLinkStop | ImportAndLinkStop | null, state: VaultStateJson | null): boolean {
   if (stop === null || stop.gate === null || state === null) return true;
   return linkGate(state)?.code === stop.gate;
 }
@@ -169,7 +181,7 @@ const stopped = (kind: CreateAndLinkStopKind, message: string | null, created: s
 });
 
 /** Waits, bounded, for this session to be able to sign for `address`. */
-async function signableSoon(deps: CreateAndLinkDeps, address: string): Promise<boolean> {
+async function signableSoon(deps: Pick<CreateAndLinkDeps, "signable" | "wait" | "readyBackoffMs">, address: string): Promise<boolean> {
   const backoff = deps.readyBackoffMs ?? READY_BACKOFF_MS;
   const wait = deps.wait ?? sleep;
   if (deps.signable().includes(address)) return true;
@@ -208,4 +220,164 @@ export async function createAndLinkFlow(deps: CreateAndLinkDeps): Promise<Create
   if (!(await signableSoon(deps, address))) return stopped("not_ready", CREATE_LINK_COPY.notReady, address);
 
   return { created: address, link: await deps.link(address), stop: null };
+}
+
+/** Where an import-and-link stopped before its link ran. */
+export type ImportAndLinkStopKind =
+  /** Refused before Privy was called: the keeper's seat is not configured. Nothing was imported. */
+  | "seat"
+  /** The field no longer held a whole key. Nothing was sent. */
+  | "no_key"
+  /** Privy refused, or its dialog was closed, and its record does not show the wallet. Nothing was imported. */
+  | "import"
+  /** Imported; Privy did not name it, and its record does not show it yet. */
+  | "no_address"
+  /** Imported, but not at the address this page checked. Not linked. */
+  | "wrong_address"
+  /** Imported; Privy's record shows no signer on it. Not linked: it could not save. */
+  | "seat_missing"
+  /** Imported; Privy's record does not list it yet, so its seat was not read. Not linked. */
+  | "seat_unknown"
+  /** Imported; the chain cannot take a link (no vault, no config, paused…). */
+  | "gate"
+  /** Imported; the screen's read of Solana is not usable. */
+  | "chain_unknown"
+  /** Imported; this session cannot sign for it yet. */
+  | "not_ready";
+
+export interface ImportAndLinkStop {
+  readonly kind: ImportAndLinkStopKind;
+  /** Words for the person; null ONLY when Privy's dialog was closed and nothing was imported. */
+  readonly message: string | null;
+  readonly gate: LinkGateCode | null;
+}
+
+export interface ImportAndLinkOutcome {
+  /** The wallet now on the account, or null when nothing was imported. */
+  readonly imported: string | null;
+  readonly link: LinkWalletResult | null;
+  readonly stop: ImportAndLinkStop | null;
+  /** The wallet was already linked to this vault before the import: nothing was left to sign. */
+  readonly alreadyLinked: boolean;
+}
+
+export interface ImportAndLinkDeps {
+  readonly importWallet: ImportWalletFn;
+  readonly config: SeatConfig;
+  /**
+   * The key, as Privy takes it, read ONCE and only after the seat is known to be
+   * configurable; null when the field no longer holds a whole key opening
+   * `expected`. The caller empties its field inside this call and judges the text
+   * again there, so the key exists from here on only in the flow's own local,
+   * which is dropped once Privy has it.
+   */
+  readonly takeKey: () => Promise<string | null>;
+  /** The address the key's private half opens, which every preflight check ran on. Privy must name this one. */
+  readonly expected: string;
+  /** False when the wallet is already linked to this vault (the preflight read it): the import is all that is left. */
+  readonly needsLink: boolean;
+  readonly refreshUser: RefreshUserFn;
+  readonly chain: () => VaultStateJson | "loading" | null;
+  readonly signable: () => readonly string[];
+  readonly link: (address: string) => Promise<LinkWalletResult>;
+  readonly onStep?: (step: FlowStep) => void;
+  /** Called the moment the wallet is known to be on the account, before anything else can stop. */
+  readonly onImported?: (address: string) => void;
+  readonly wait?: (ms: number) => Promise<void>;
+  readonly readyBackoffMs?: readonly number[];
+  readonly seatBackoffMs?: readonly number[];
+}
+
+/** The waits between readings of Privy's record while it lists a wallet just imported, with its signer. */
+export const SEAT_BACKOFF_MS: readonly number[] = [500, 1_000, 2_000, 3_000, 5_000];
+
+const importStopped = (kind: ImportAndLinkStopKind, message: string | null, imported: string | null, gate: LinkGateCode | null = null): ImportAndLinkOutcome => ({
+  imported,
+  link: null,
+  stop: { kind, message, gate },
+  alreadyLinked: false,
+});
+
+/** Whether Privy's record lists `address` as a trading wallet on this account. A record that could not be read says no. */
+const listed = (record: Awaited<ReturnType<RefreshUserFn>>, address: string): boolean => tradingWalletsOf(record).some((wallet) => wallet.address === address);
+
+/**
+ * IMPORT A WALLET THE PERSON ALREADY USES, SEATED, THEN LINK IT — one press,
+ * under the screen's write lock, like createAndLinkFlow.
+ *
+ * THE KEY IS TAKEN ONCE, after the seat is known to be configurable, and handed
+ * to Privy in the same breath; the flow keeps the ADDRESS from then on, never the
+ * key, so every way forward after a stop (the row's Link, Grant, Check again)
+ * needs nothing pasted again.
+ *
+ * A THROW IS NOT PROOF NOTHING WAS IMPORTED. Privy's importWallet imports first
+ * and re-reads the user after, failing with "Failed to import wallet" when that
+ * read does not list it yet. So the record is read either way, and a wallet it
+ * lists at the expected address is carried on as imported.
+ *
+ * THE ADDRESS MUST BE THE ONE CHECKED. Every preflight refusal — a vault this key
+ * owns, a link elsewhere, the pension key — ran on `expected`. A wallet Privy
+ * names otherwise is left unlinked, and the stop names both.
+ *
+ * THE SEAT IS READ BEFORE THE LINK, unlike a create's. It was asked for in the
+ * same call as the import, but a link costs the owner rent and a wallet without
+ * the seat would save nothing behind a "Linked" row. Privy's record must show a
+ * signer (seatOf "has-signer") within SEAT_BACKOFF_MS; a record showing none, or
+ * not listing the wallet, stops with the way forward on its row.
+ */
+export async function importAndLinkFlow(deps: ImportAndLinkDeps): Promise<ImportAndLinkOutcome> {
+  if (keeperSigners(deps.config) === null) {
+    return importStopped("seat", seatProblem(deps.config) ?? "The keeper's seat is not configured.", null);
+  }
+
+  deps.onStep?.("importing_wallet");
+  let key = await deps.takeKey();
+  if (key === null) return importStopped("no_key", IMPORT_LINK_COPY.noKey, null);
+  let named: string | null = null;
+  let failure: unknown = null;
+  try {
+    named = await importTradingWallet(deps.importWallet, deps.config, key);
+  } catch (error) {
+    failure = error;
+  } finally {
+    key = null;
+  }
+  const record = await deps.refreshUser().catch(() => null);
+  let address: string;
+  if (named !== null) {
+    address = named;
+  } else if (listed(record, deps.expected)) {
+    address = deps.expected;
+  } else if (failure !== null) {
+    // failureText is null for a closed dialog, and redacts anything key-shaped from Privy's words.
+    return importStopped("import", failureText(failure), null);
+  } else {
+    return importStopped("no_address", IMPORT_LINK_COPY.noAddress, null);
+  }
+  deps.onImported?.(address);
+  if (address !== deps.expected) {
+    return importStopped("wrong_address", IMPORT_LINK_COPY.wrongAddress(shortAddress(address), shortAddress(deps.expected)), address);
+  }
+
+  deps.onStep?.("checking_permission");
+  const wait = deps.wait ?? sleep;
+  let seat = seatOf(record, address);
+  for (const delay of deps.seatBackoffMs ?? SEAT_BACKOFF_MS) {
+    if (seat === "has-signer") break;
+    await wait(delay);
+    seat = seatOf(await deps.refreshUser().catch(() => null), address);
+  }
+  if (seat === "missing") return importStopped("seat_missing", IMPORT_LINK_COPY.seatMissing, address);
+  if (seat !== "has-signer") return importStopped("seat_unknown", IMPORT_LINK_COPY.seatUnknown, address);
+
+  if (!deps.needsLink) return { imported: address, link: null, stop: null, alreadyLinked: true };
+
+  const chain = deps.chain();
+  if (chain === "loading" || chain === null) return importStopped("chain_unknown", IMPORT_LINK_COPY.chainUnknown, address);
+  const gate = linkGate(chain);
+  if (gate !== null) return importStopped("gate", gate.message, address, gate.code);
+
+  if (!(await signableSoon(deps, address))) return importStopped("not_ready", IMPORT_LINK_COPY.notReady, address);
+
+  return { imported: address, link: await deps.link(address), stop: null, alreadyLinked: false };
 }

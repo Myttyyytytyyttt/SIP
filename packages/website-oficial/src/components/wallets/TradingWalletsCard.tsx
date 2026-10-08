@@ -1,8 +1,9 @@
 "use client";
 
 /**
- * THE TRADING WALLETS: every Privy embedded Solana wallet on this account, and
- * the one control that makes another and links it.
+ * THE TRADING WALLETS: every Privy embedded Solana wallet on this account, the
+ * control that makes another and links it, and the one that imports a wallet
+ * the person already uses and links it (ImportWalletPanel, owner 10-08).
  *
  * ONE PRESS, END TO END. "Create wallet and link it" creates the wallet inside
  * Privy with the keeper's seat and goes straight on to the link: the trading
@@ -37,46 +38,69 @@
  * disabled and the card names the missing variables: a trading wallet without the
  * seat cannot put anything aside, and a signer without its policy would be
  * unbounded (src/lib/trading-wallets.ts).
+ *
+ * TEN WALLETS, CREATED OR IMPORTED (owner 10-08). Both buttons stop at
+ * MAX_TRADING_WALLETS, and the import's preflight refuses at it too: the screen's
+ * chain read asks about that many wallets, and one past it would never be read.
  */
 
 import { usePrivy } from "@privy-io/react-auth";
-import { LoaderCircle, Plus } from "lucide-react";
-import { useContext, useMemo } from "react";
+import { Import, LoaderCircle, Plus } from "lucide-react";
+import { useContext, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 import { useSolanaConfig } from "@/app/providers";
 import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { ImportAndLinkNote, ImportWalletPanel } from "@/components/wallets/ImportWalletPanel";
 import { TradingWalletRow, type TradingWalletRowData } from "@/components/wallets/TradingWalletRow";
 import { TxProgress } from "@/components/wallets/TxProgress";
 import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
 import { WalletsSectionContext } from "@/components/wallets/wallets-section-context";
 import { useCreateAndLink } from "@/hooks/use-create-and-link";
+import { useImportAndLink } from "@/hooks/use-import-and-link";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { formatSol, rawFrom } from "@/lib/amounts";
 import { pressPlan, stopStillHolds, type CreateAndLinkOutcome } from "@/lib/create-and-link";
+import { importRequested, subscribeImportRequest, takeImportRequest } from "@/lib/import-intent";
 import { MAX_TRADING_WALLETS, ROW_COPY, keeperSigners, seatProblem, tradingWalletsOf } from "@/lib/trading-wallets";
-import { CREATE_LINK_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
+import { CREATE_LINK_COPY, IMPORT_LINK_COPY, LINK_COPY, VAULT_COPY } from "@/lib/vault-copy";
 
 /** The card's own words for a first look; the ids behind them stay under Advanced. */
 const CARD_COPY = {
+  /**
+   * The seat's reach as its POLICY sets it, not as the keeper uses it: transactions made only of SaverFi's program
+   * and Ed25519 signature checks. This said "bounded to moving SOL into your vault", which is what the keeper's code
+   * does, not what the policy limits.
+   */
   description:
-    "The wallets you trade from. SaverFi's permission on them is bounded to moving SOL into your vault; each move's " +
+    "The wallets you trade from, created here or imported from a wallet you already use. SaverFi's permission on " +
+    "them lets its keeper send only transactions made of SaverFi's program and signature checks; each saving's " +
     "small network fee is paid from the wallet. Export a wallet's key to trade from Axiom or any Solana app.",
   advanced: ROW_COPY.advanced,
 } as const;
 
 export function TradingWalletsCard() {
+  const showSection = useContext(WalletsSectionContext);
   const config = useSolanaConfig();
   const { user } = usePrivy();
   const screen = useVaultScreen();
   const { run, created, outcome, dismiss, write } = useCreateAndLink(config);
+  const importer = useImportAndLink(config);
+  const [importing, setImporting] = useState(false);
+  // The live next-step card's "Import a wallet I already use" opens this tab; the panel opens with it.
+  const importAsked = useSyncExternalStore(subscribeImportRequest, importRequested, () => false);
+  useEffect(() => {
+    if (importAsked && takeImportRequest()) setImporting(true);
+  }, [importAsked]);
 
   const rows = useMemo<TradingWalletRowData[]>(() => {
-    const listed = tradingWalletsOf(user).map((wallet) => ({ ...wallet, listed: true }));
-    if (created === null || listed.some((row) => row.address === created)) return listed;
-    return [...listed, { address: created, id: null, walletIndex: null, imported: false, listed: false }];
-  }, [user, created]);
+    const listed: TradingWalletRowData[] = tradingWalletsOf(user).map((wallet) => ({ ...wallet, listed: true }));
+    const shown = (address: string | null) => address === null || listed.some((row) => row.address === address);
+    if (!shown(created) && created !== null) listed.push({ address: created, id: null, walletIndex: null, imported: false, listed: false });
+    if (!shown(importer.imported) && importer.imported !== null) listed.push({ address: importer.imported, id: null, walletIndex: null, imported: true, listed: false });
+    return listed;
+  }, [user, created, importer.imported]);
 
   const problem = seatProblem(config);
   const seat = keeperSigners(config)?.[0] ?? null;
@@ -92,11 +116,13 @@ export function TradingWalletsCard() {
   // "Create your vault first", creates it, and the note that asked for it must go, not sit there
   // asserting under a button that has just started offering the link.
   const note = outcome !== null && stopStillHolds(outcome.stop, state) ? outcome : null;
+  const importNote = importer.outcome !== null && stopStillHolds(importer.outcome.stop, state) ? importer.outcome : null;
   const ahead = plan.links ? CREATE_LINK_COPY.ahead(plan.linkRent === null ? null : formatSol(plan.linkRent)) : `${CREATE_LINK_COPY.aheadCreateOnly} ${plan.reason}`;
   const busy = write.running;
   // A link this screen sent and cannot confirm blocks the chained press too, wherever it was sent from:
   // a second link transaction while the first may still land is exactly what the screen promises not to offer.
-  const blocked = busy || write.busyElsewhere || write.unconfirmed || write.awaitingAnyLink;
+  const blocked = busy || write.busyElsewhere || write.unconfirmed || write.awaitingAnyLink || importer.write.unconfirmed;
+  const importBlocked = importer.write.running || importer.write.busyElsewhere || importer.write.unconfirmed || importer.write.awaitingAnyLink || write.unconfirmed;
 
   return (
     <Card>
@@ -138,12 +164,26 @@ export function TradingWalletsCard() {
             {problem}
           </p>
         ) : null}
-        {problem === null && !full ? <p className="text-xs text-muted-foreground">{ahead}</p> : null}
+        {/* The create's own promise steps aside while the import panel says its own. */}
+        {problem === null && !full && !importing ? <p className="text-xs text-muted-foreground">{ahead}</p> : null}
+        {problem === null && !full && !importing ? (
+          <Button type="button" size="sm" variant="outline" disabled={importBlocked} aria-busy={importer.write.running} onClick={() => setImporting(true)}>
+            {importer.write.running ? <LoaderCircle className="animate-spin" aria-hidden /> : <Import aria-hidden />}
+            {importer.write.running ? IMPORT_LINK_COPY.running : IMPORT_LINK_COPY.button}
+          </Button>
+        ) : null}
+        {importing && problem === null && !full ? (
+          <ImportWalletPanel
+            disabled={importBlocked}
+            onImport={(request) => void importer.run(request)}
+            onClose={() => setImporting(false)}
+          />
+        ) : null}
         {write.busyElsewhere ? <p className="text-xs text-muted-foreground">{LINK_COPY.busy}</p> : null}
         {write.awaitingAnyLink && !write.unconfirmed ? <p className="text-xs text-muted-foreground">{CREATE_LINK_COPY.linkAwaiting}</p> : null}
         {full && problem === null ? (
           <p className="text-xs text-muted-foreground">
-            This page creates at most <Num>{MAX_TRADING_WALLETS}</Num> trading wallets for one account.
+            This page keeps at most <Num>{MAX_TRADING_WALLETS}</Num> trading wallets for one account, created or imported.
           </p>
         ) : null}
 
@@ -160,9 +200,28 @@ export function TradingWalletsCard() {
         />
         {note !== null ? <CreateAndLinkNote outcome={note} vaultRent={vaultRent} onDismiss={dismiss} /> : null}
 
+        <TxProgress
+          progress={importer.write.progress}
+          successLabel={IMPORT_LINK_COPY.done}
+          onBuildAgain={() => void importer.write.buildAgain()}
+          onCheckAgain={() => void importer.write.checkAgain()}
+          onDismiss={() => {
+            importer.write.dismiss();
+            importer.dismiss();
+          }}
+        />
+        {importNote !== null ? (
+          <ImportAndLinkNote
+            outcome={importNote}
+            vaultRent={vaultRent}
+            onGoToVault={showSection === null ? null : () => showSection("vault")}
+            onDismiss={importer.dismiss}
+          />
+        ) : null}
+
         {rows.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No trading wallets yet. Create one, then export its key to trade from Axiom or any Solana app.
+            No trading wallets yet. Create one and export its key to trade from Axiom or any Solana app, or import a wallet you already use.
           </p>
         ) : (
           <ul className="divide-y">

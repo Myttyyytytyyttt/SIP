@@ -5,9 +5,9 @@ import { useSignMessage, useSignTransaction, useWallets } from "@privy-io/react-
 import { createContext, createElement, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { useVaultScreen } from "@/hooks/use-vault-state";
-import { createAndLinkFlow, type CreateAndLinkOutcome } from "@/lib/create-and-link";
+import { createAndLinkFlow, importAndLinkFlow, type CreateAndLinkOutcome, type ImportAndLinkOutcome } from "@/lib/create-and-link";
 import { pensionSigner, tradingSigners, type SignMessageFn, type SignTransactionFn } from "@/lib/signing-wallets";
-import type { CreateWalletFn, RefreshUserFn, SeatConfig } from "@/lib/trading-wallets";
+import type { CreateWalletFn, ImportWalletFn, RefreshUserFn, SeatConfig } from "@/lib/trading-wallets";
 import type { BuiltTransactionJson, InvestmentPolicyJson, VaultApi } from "@/lib/vault-api";
 import { FAILURE_COPY } from "@/lib/vault-copy";
 import {
@@ -50,9 +50,10 @@ import {
  * unconfirmed link left the other one offering a second link for the same wallet:
  * both would be signed and sent, one landing and the other burning its fee.
  *
- * CREATE-AND-LINK IS ONE WRITE. The wallet's creation and its link run under a
- * single hold of the screen's lock, so nothing else can start between them; the
- * chain itself is src/lib/create-and-link.ts, and only the wiring is here.
+ * CREATE-AND-LINK IS ONE WRITE, AND SO IS IMPORT-AND-LINK. The wallet's creation
+ * (or import) and its link run under a single hold of the screen's lock, so
+ * nothing else can start between them; the chains themselves are
+ * src/lib/create-and-link.ts, and only the wiring is here.
  *
  * WHILE PHANTOM ASKS, the checked build answer rides in the progress, so a card
  * can show what is being signed (an investment policy's floors).
@@ -60,7 +61,7 @@ import {
 
 type ConnectedWallet = ReturnType<typeof useWallets>["wallets"][number];
 
-export type WriteKind = "create" | "createLink" | "link" | "rule" | "policy" | "withdraw" | "withdrawToken";
+export type WriteKind = "create" | "createLink" | "importLink" | "link" | "rule" | "policy" | "withdraw" | "withdrawToken";
 
 export type WriteProgress =
   | { readonly phase: "idle" }
@@ -205,6 +206,21 @@ export interface CreateAndLinkRequest {
   /** The address Privy named, the moment it named it: the list shows the wallet before anything else can stop. */
   readonly onCreated: (address: string) => void;
   readonly onOutcome: (outcome: CreateAndLinkOutcome) => void;
+}
+
+/** What the import panel hands the chained write: Privy's methods, the checked address, and where its answers go. */
+export interface ImportAndLinkRequest {
+  readonly importWallet: ImportWalletFn;
+  readonly config: SeatConfig;
+  readonly refreshUser: RefreshUserFn;
+  /** The key, read once and the field emptied (ImportAndLinkDeps.takeKey). */
+  readonly takeKey: () => Promise<string | null>;
+  /** The address every preflight check ran on. */
+  readonly expected: string;
+  readonly needsLink: boolean;
+  /** The address, the moment the wallet is known to be on the account. */
+  readonly onImported: (address: string) => void;
+  readonly onOutcome: (outcome: ImportAndLinkOutcome) => void;
 }
 
 /** One card's or one row's writes, under the screen's lock. `key` names the writer ("vault", "link:<address>", "policy", "withdraw:sol"…). */
@@ -398,6 +414,41 @@ export function useVaultWrite(key: string) {
     [screen, run, runLink, chainNow, rememberLink],
   );
 
+  /**
+   * ONE PRESS: import a wallet the person already uses, seated, then link it,
+   * under one hold of the lock. As with a create, a stop between the two is the
+   * card's to say in its own words, and "Build again" afterwards is a plain link
+   * on the imported address: it never asks for the key, which is gone by then.
+   */
+  const importAndLink = useCallback(
+    (request: ImportAndLinkRequest): Promise<void> => {
+      if (screen === null) return Promise.resolve();
+      lastRequest.current = null;
+      const { api, pensionKey } = screen;
+      return run("importLink", async (hooks) => {
+        const outcome = await importAndLinkFlow({
+          importWallet: request.importWallet,
+          config: request.config,
+          refreshUser: request.refreshUser,
+          takeKey: request.takeKey,
+          expected: request.expected,
+          needsLink: request.needsLink,
+          chain: chainNow,
+          signable: () => walletsRef.current.map((wallet) => wallet.address),
+          link: (address) => runLink(pensionKey, api, address, hooks),
+          onStep: hooks.onStep,
+          onImported: (address) => {
+            lastRequest.current = { kind: "link", tradingAddress: address };
+            request.onImported(address);
+          },
+        });
+        request.onOutcome(outcome);
+        return outcome.link;
+      }, rememberLink);
+    },
+    [screen, run, runLink, chainNow, rememberLink],
+  );
+
   const investPolicy = useCallback(
     (input: InvestRequest): Promise<void> => {
       if (screen === null) return Promise.resolve();
@@ -520,6 +571,7 @@ export function useVaultWrite(key: string) {
     createVault,
     setPolicy,
     createAndLink,
+    importAndLink,
     link,
     investPolicy,
     pauseInvesting,

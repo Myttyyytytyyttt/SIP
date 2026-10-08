@@ -100,11 +100,22 @@ import { deriveAtaAddress, deriveConfigAddress, deriveInvestAddress, deriveLinkA
 
 /**
  * TxProgress's steps, in order. "creating_wallet" belongs to the create-and-link
- * chain alone (src/lib/create-and-link.ts), and "consent" and "trading_signing"
- * to a link: the consent's signature before the transaction exists, and the
+ * chain alone, "importing_wallet" and "checking_permission" to the import-and-link
+ * one (both src/lib/create-and-link.ts), and "consent" and "trading_signing" to a
+ * link: the consent's signature before the transaction exists, and the
  * co-signature on the bytes Phantom returned.
  */
-export type FlowStep = "creating_wallet" | "preparing" | "consent" | "approve_pension" | "trading_signing" | "sending" | "confirming" | "done";
+export type FlowStep =
+  | "creating_wallet"
+  | "importing_wallet"
+  | "checking_permission"
+  | "preparing"
+  | "consent"
+  | "approve_pension"
+  | "trading_signing"
+  | "sending"
+  | "confirming"
+  | "done";
 
 export type FlowResult =
   | { readonly ok: true; readonly signature: string; readonly explorerUrl: string | null; readonly slot: number | null; readonly unitsConsumed: number | null }

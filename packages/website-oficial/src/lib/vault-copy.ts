@@ -788,6 +788,76 @@ export const CREATE_LINK_COPY = {
   check: "Check again",
 } as const;
 
+/**
+ * IMPORTING A WALLET THE PERSON ALREADY USES, then linking it (owner, 10-08).
+ * Every stop after the import says the wallet is there first, like a create's:
+ * an import is not undone, and the wallet is in the list with its own row.
+ */
+export const IMPORT_LINK_COPY = {
+  /** The card's second action, under Create. */
+  button: "Import a wallet I already use",
+  running: "Working…",
+  done: "Imported and linked",
+  /** The wallet was linked to this vault before the import: nothing was left to sign. */
+  doneAlreadyLinked: "Imported. This wallet was already linked to your vault, so there was nothing to sign.",
+  /** The head of every stop after the import. */
+  imported: "Your wallet is imported and nothing was lost.",
+  inTheList: CREATE_LINK_COPY.inTheList,
+  /** The field no longer held a whole key when the import began. */
+  noKey: "The key in the field changed or is gone, so nothing was sent. Paste the key again and check it.",
+  noAddress:
+    "Privy imported the wallet and did not say its address. Nothing is lost: it appears in the list below once Privy's record updates, and it can be linked from there.",
+  wrongAddress: (got: string, expected: string): string =>
+    `Privy imported the wallet ${got}, not ${expected}, the one this page checked, so it was not linked. If you did not mean to import it, remove SaverFi's permission from it on its row.`,
+  /** The record shows the wallet with no signer: the seat asked for in the same call is not there. */
+  seatMissing:
+    "Privy imported the wallet, but its record shows no SaverFi permission on it, so it was not linked: it could not save anything. Press Grant SaverFi permission on its row, then link it.",
+  seatUnknown:
+    "Privy imported the wallet, but its record does not list it yet, so its permission could not be checked and it was not linked. Check again on its row in a moment, then link it.",
+  chainUnknown: CREATE_LINK_COPY.chainUnknown,
+  notReady:
+    "This session cannot sign for the imported wallet yet, so the link was not attempted. Reload the page, then link it from its row.",
+} as const;
+
+/**
+ * THE IMPORT PANEL'S WORDS. Owner 10-08: keys from trading bots are accepted with
+ * no warning of their own. What the page does hold is said exactly: the key
+ * passes through this page on its way to Privy, so the copy says it never
+ * reaches SaverFi's SERVERS, never that SaverFi never sees it. And the seat's
+ * reach is the policy's, not the keeper's habits: any transaction made only of
+ * SaverFi's program and Ed25519 signature checks, which is why a key that owns
+ * a vault or holds a protocol role is refused.
+ */
+export const IMPORT_PANEL_COPY = {
+  title: "Import a wallet you already use",
+  intro:
+    "Paste the private key of a Solana wallet you trade from — Phantom, Solflare, Axiom, GMGN or a trading bot. SaverFi then saves from it like from a wallet created here.",
+  copy: "SaverFi gets a copy: the key keeps working wherever you use it now.",
+  travel: "From this page the key goes to Privy, encrypted for Privy's secure enclave. It never reaches SaverFi's servers.",
+  permission:
+    "SaverFi's permission on the wallet lets SaverFi's keeper send only transactions made of SaverFi's program and signature checks. It cannot export your key or sign messages, and only your pension key can withdraw from your vault.",
+  field: "Private key",
+  placeholder: "Paste the wallet's private key",
+  opens: "This key opens the wallet",
+  expect: "Check it is the wallet you expect.",
+  checking: "Checking…",
+  check: "Check this wallet",
+  reading: "Reading the wallet on Solana…",
+  cancel: "Never mind",
+  otherKey: "Use another key",
+  importAndLink: "Import and link",
+  importOnly: "Import",
+  /** What the press will do, before it is pressed: Phantom's window must never arrive unannounced. */
+  ahead: (linkRent: string | null): string =>
+    "One press: SaverFi imports the wallet with its permission, checks that Privy shows a permission on it, then links it to your vault in three steps — " +
+    "1 the wallet agrees to save into this vault, " +
+    (linkRent === null ? "2 Phantom asks you to approve and pay the link's rent, " : `2 Phantom asks you to approve and pay ${linkRent} SOL of rent, `) +
+    "3 the wallet confirms.",
+  aheadLinked: "One press: SaverFi imports the wallet with its permission. It is already linked to your vault, so nothing is signed and nothing is paid.",
+  aheadImportOnly: (reason: string): string => `This imports the wallet with SaverFi's permission. It cannot be linked yet: ${reason}`,
+  moreHoldings: (count: number): string => `and ${count} more`,
+} as const;
+
 export const INVEST_COPY = {
   title: "Investing",
   needsVault: "Create your vault first.",
@@ -1462,6 +1532,8 @@ export const WITHDRAW_COPY = {
 
 export const PROGRESS_COPY = {
   creating_wallet: "Creating your trading wallet",
+  importing_wallet: "Importing your wallet",
+  checking_permission: "Reading back the permission",
   preparing: "Preparing",
   consent: "Trading wallet signs the consent",
   approve_pension: "Approve in Phantom",
@@ -1593,7 +1665,7 @@ export const OVERVIEW_COPY = {
   vaultLine: (mode: string, rate: string, saved: string | null): string => (saved === null ? `${mode} · ${rate}` : `${mode} · ${rate} · saved so far ${saved} SOL`),
 
   walletsNone: "None yet",
-  walletsNoneLine: "Trading wallets are created here and linked to your vault.",
+  walletsNoneLine: "Trading wallets are created or imported here and linked to your vault.",
   /** Before any link was read: how many there are, and no claim about their links. */
   walletsCount: (total: number): string => (total === 1 ? "1 wallet" : `${total} wallets`),
   walletsLinked: (linked: number, total: number): string => `${linked} of ${total} linked`,

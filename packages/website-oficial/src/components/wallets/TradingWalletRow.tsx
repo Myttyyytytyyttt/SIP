@@ -43,6 +43,12 @@
  * THE LINK is the chain's record, read by the screen, not Privy's: a wallet can be
  * linked with or without a seat, and a seat puts nothing aside until it is linked.
  *
+ * AN IMPORTED WALLET'S OWNER CAN TAKE THE SEAT OFF (owner, 10-08): "Remove SaverFi
+ * permission", visible on the row and behind a plain confirmation, is the way to
+ * cut SaverFi off a wallet whose key also lives elsewhere without unlinking it.
+ * It is removeSigners under the re-seat's own guard (removeKeeperSeat): never for
+ * a record Privy would answer by revoking every wallet on the account.
+ *
  * WHAT A NEW USER SEES, AND WHAT IS UNDER "ADVANCED" (09-24). The row leads with
  * one plain status — Ready, Not linked, Needs permission, Checking — built from
  * the seat and the link together, and only the controls that move it forward:
@@ -69,7 +75,7 @@ import { LinkControl } from "@/components/wallets/LinkControl";
 import { useExportTradingWallet } from "@/hooks/use-export-trading-wallet";
 import { useKeeperSeat } from "@/hooks/use-keeper-seat";
 import { LABEL } from "@/lib/classes";
-import { GRANT_COPY, RESEAT_COPY, ROW_COPY, keeperSigners, seatProblem, type SeatStatus, type TradingWallet } from "@/lib/trading-wallets";
+import { GRANT_COPY, REMOVE_COPY, RESEAT_COPY, ROW_COPY, keeperSigners, seatProblem, type SeatStatus, type TradingWallet } from "@/lib/trading-wallets";
 
 export interface TradingWalletRowData extends TradingWallet {
   /** False only for a wallet createWallet reported that Privy's record does not list yet. */
@@ -132,6 +138,8 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
   const keeperSeat = keeperSigners(config)?.[0] ?? null;
   // The re-seat's first press only asks: the confirmation below is what removes anything.
   const [confirming, setConfirming] = useState(false);
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const removable = row.imported && row.listed && keeper.seat === "has-signer";
   const reseatable = keeper.seat === "has-signer" && row.listed;
   // One string, so the command renders as one piece of text.
   const verify = `privy-policy verify --wallet ${row.id ?? "<Privy wallet id>"} --policy ${keeperSigners(config)?.[0]?.policyIds[0] ?? "<policy id>"}`;
@@ -207,7 +215,24 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
             {exporter.busy ? "Privy dialog open…" : "Export key"}
           </Button>
         ) : null}
+        {removable && !confirmingRemove && keeper.busy !== "removing" ? (
+          <Button type="button" size="sm" variant="ghost" disabled={keeper.busy !== null || keeper.removeBlocked !== null} onClick={() => setConfirmingRemove(true)}>
+            {REMOVE_COPY.button}
+          </Button>
+        ) : null}
       </div>
+
+      {(removable && confirmingRemove) || keeper.busy === "removing" ? (
+        <RemoveConfirm
+          busy={keeper.busy === "removing"}
+          disabled={keeper.busy !== null || keeper.removeBlocked !== null}
+          onConfirm={() => {
+            void keeper.remove().finally(() => setConfirmingRemove(false));
+          }}
+          onCancel={() => setConfirmingRemove(false)}
+        />
+      ) : null}
+      {removable && keeper.removeBlocked !== null ? <p className="text-xs text-muted-foreground">{keeper.removeBlocked}</p> : null}
 
       {keeper.seat === "missing" && keeper.busy !== "reseating" && keeper.grantBlocked !== null && !refused ? (
         // The short form on a first look; Privy's full reason, in the operator's words, under Advanced.
@@ -329,3 +354,33 @@ export function ReseatConfirm({
     </div>
   );
 }
+
+/** "Remove SaverFi permission", confirmed: what stops, what is removed, and how to undo it. Only its first button calls Privy. */
+export function RemoveConfirm({
+  busy,
+  disabled,
+  onConfirm,
+  onCancel,
+}: {
+  readonly busy: boolean;
+  readonly disabled: boolean;
+  readonly onConfirm: () => void;
+  readonly onCancel: () => void;
+}) {
+  return (
+    <div role="group" aria-label={REMOVE_COPY.confirmTitle} className="space-y-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs">
+      <p className="font-medium">{REMOVE_COPY.confirmTitle}</p>
+      <p className="text-muted-foreground">{REMOVE_COPY.confirmBody}</p>
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" size="sm" variant="destructive" disabled={disabled} aria-busy={busy} onClick={() => onConfirm()}>
+          {busy ? <LoaderCircle className="animate-spin" aria-hidden /> : null}
+          {busy ? REMOVE_COPY.running : REMOVE_COPY.confirm}
+        </Button>
+        <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => onCancel()}>
+          {REMOVE_COPY.cancel}
+        </Button>
+      </div>
+    </div>
+  );
+}
+

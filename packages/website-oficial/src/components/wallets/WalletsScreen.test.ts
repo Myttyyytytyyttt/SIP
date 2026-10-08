@@ -75,6 +75,8 @@ vi.mock("@privy-io/react-auth", () => ({
 
 vi.mock("@privy-io/react-auth/solana", () => ({
   useCreateWallet: () => ({ createWallet: mocked.createWallet }),
+  // Nothing here imports: the card only needs the hook to exist.
+  useImportWallet: () => ({ importWallet: async () => ({}) }),
   useExportWallet: () => ({ exportWallet: mocked.exportWallet }),
   // The vault card and each row's link control take their signers from these; nothing here signs.
   useWallets: () => ({ ready: true, wallets: [] }),

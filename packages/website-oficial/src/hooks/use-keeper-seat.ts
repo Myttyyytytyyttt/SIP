@@ -12,8 +12,11 @@ import {
   RESEAT_COPY,
   ReseatIncomplete,
   failureText,
+  REMOVE_COPY,
   grantKeeperSeat,
   grantRefusal,
+  removeKeeperSeat,
+  removeRefusal,
   reseatKeeperSeat,
   reseatRefusal,
   seatOf,
@@ -25,7 +28,8 @@ import {
  * The keeper's seat on one trading wallet: what Privy's record says of its signers on
  * every render (never local state) — a signer, none, or not listed yet, but never
  * whose — the grant that repairs a missing seat, the re-seat that replaces whatever
- * signer is there, and a re-read for an unknown one. The rules live in seatOf,
+ * signer is there, the removal an imported wallet's owner can make, and a re-read
+ * for an unknown one. The rules live in seatOf,
  * grantKeeperSeat and reseatKeeperSeat (src/lib/trading-wallets.ts).
  *
  * `reseatBlocked` and `grantBlocked` are why this wallet cannot be re-seated or
@@ -83,6 +87,17 @@ export function useKeeperSeat(address: string, config: SeatConfig) {
     }
   }, [address, config, user, removeSigners, addSigners, refreshUser]);
 
+  // The record this render's removeSigners reads goes with it, exactly as for the re-seat.
+  const remove = useCallback(async () => {
+    if (!beginSeatTask(address, "removing")) return;
+    try {
+      await removeKeeperSeat({ address, renderedUser: user, removeSigners, refreshUser });
+      endSeatTask(address, { notice: REMOVE_COPY.done });
+    } catch (error) {
+      endSeatTask(address, { failure: failureText(error) });
+    }
+  }, [address, user, removeSigners, refreshUser]);
+
   const check = useCallback(async () => {
     if (!beginSeatTask(address, "checking", { keepNotice: true })) return;
     try {
@@ -97,8 +112,10 @@ export function useKeeperSeat(address: string, config: SeatConfig) {
     seat: seatOf(user, address),
     reseatBlocked: reseatRefusal(user, address),
     grantBlocked: grantRefusal(user, address),
+    removeBlocked: removeRefusal(user, address),
     grant,
     reseat,
+    remove,
     check,
     busy: activity.busy,
     failure: activity.failure,

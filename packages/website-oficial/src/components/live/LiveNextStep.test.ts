@@ -28,6 +28,7 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 });
 
 import { LiveNextStep } from "@/components/live/LiveNextStep";
+import { takeImportRequest } from "@/lib/import-intent";
 import { LIVE_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
 
@@ -97,6 +98,17 @@ describe("the stages after it", () => {
     expect(buttons(LIVE_COPY.noTradingWallet.create)).toHaveLength(1);
     buttons(LIVE_COPY.noTradingWallet.create)[0]?.onClick?.(CLICK);
     expect(onOpenWallets.mock.calls).toStrictEqual([["trading"]]);
+    expect(takeImportRequest()).toBe(false);
+  });
+
+  it("…or to import a wallet already in use: the same tab, with the import panel asked for", () => {
+    const data = liveDashboard({ snapshot: liveSnapshot({ wallets: [] }), activity: null, privyWallets: [] });
+    render(data);
+    expect(buttons(LIVE_COPY.noTradingWallet.import)).toHaveLength(1);
+    buttons(LIVE_COPY.noTradingWallet.import)[0]?.onClick?.(CLICK);
+    expect(onOpenWallets.mock.calls).toStrictEqual([["trading"]]);
+    expect(takeImportRequest()).toBe(true);
+    expect(takeImportRequest()).toBe(false);
   });
 
   it("…and offers NO button when this deployment has no keeper seat, saying why instead", () => {
@@ -104,6 +116,7 @@ describe("the stages after it", () => {
     const html = render(data, "The keeper's seat is not configured.");
     expect(html).toContain("The keeper&#x27;s seat is not configured.");
     expect(buttons(LIVE_COPY.noTradingWallet.create)).toHaveLength(0);
+    expect(buttons(LIVE_COPY.noTradingWallet.import)).toHaveLength(0);
   });
 
   it("an unlinked wallet is offered a link, on the Trading wallets tab where each row carries it", () => {

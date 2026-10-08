@@ -245,9 +245,11 @@ export const LIVE_COPY = {
   noTradingWallet: {
     title: "Your vault is ready",
     body:
-      `${BRAND} saves from a trading wallet: a wallet created under Manage wallets with the keeper’s permission. ` +
-      "One press creates it and links it to your vault; then fund it with SOL and trade from it, or export its key to use it in Axiom or any Solana app.",
+      `${BRAND} saves from a trading wallet: a wallet created under Manage wallets with the keeper’s permission, or one you already use, imported there with it. ` +
+      "Creating one is a single press that also links it to your vault; importing one takes its private key, then the same link. " +
+      "Then fund it with SOL and trade from it, or use its key in Axiom or any Solana app.",
     create: "Create and link a trading wallet",
+    import: "Import a wallet I already use",
   },
 
   notLinked: {

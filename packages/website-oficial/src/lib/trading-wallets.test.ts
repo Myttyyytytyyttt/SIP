@@ -11,7 +11,9 @@ import {
   GrantRefused,
   GrantUnconfirmed,
   NotATradingWallet,
+  REMOVE_COPY,
   RESEAT_COPY,
+  RemoveIncomplete,
   ReseatIncomplete,
   ReseatRefused,
   SeatNotConfigured,
@@ -21,6 +23,8 @@ import {
   grantKeeperSeat,
   grantRefusal,
   keeperSigners,
+  removeKeeperSeat,
+  removeRefusal,
   reseatKeeperSeat,
   reseatRefusal,
   seatOf,
@@ -752,3 +756,56 @@ describe("failureText", () => {
     expect(failureText(new GrantUnconfirmed(GRANT_COPY.addedUnconfirmed))).toBe(GRANT_COPY.addedUnconfirmed);
   });
 });
+
+describe("removeKeeperSeat: the owner takes SaverFi's permission off an imported wallet", () => {
+  const seated = userWith([phantom(), teeWallet(IMPORTED, null, true, { imported: true })]);
+  const cleared = userWith([phantom(), teeWallet(IMPORTED, null, false, { imported: true })]);
+  const noWait = (_ms: number): Promise<void> => Promise.resolve();
+  const reads = (...users: User[]) => {
+    const fn = vi.fn<RefreshUserFn>();
+    for (const user of users) fn.mockResolvedValueOnce(user);
+    return fn.mockResolvedValue(users.at(-1) ?? null);
+  };
+
+  it("removes, with exactly the address, and is done once Privy's record shows no signer", async () => {
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const refreshUser = reads(seated, cleared);
+    const wait = vi.fn(noWait);
+    await expect(removeKeeperSeat({ address: IMPORTED, renderedUser: seated, removeSigners, refreshUser, wait })).resolves.toBe("removed");
+    expect(removeSigners.mock.calls).toStrictEqual([[{ address: IMPORTED }]]);
+    expect(wait.mock.calls).toStrictEqual([[GRANT_BACKOFF_MS[0]]]);
+  });
+
+  it("SENDS NOTHING for a wallet whose rendered record is not a TEE wallet with its id: Privy would revoke every wallet on the account", async () => {
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const onDevice = userWith([phantom(), embedded(IMPORTED, null, true, { imported: true })]);
+    await expect(removeKeeperSeat({ address: IMPORTED, renderedUser: onDevice, removeSigners, refreshUser: reads(onDevice), wait: noWait })).rejects.toThrow(
+      REMOVE_COPY.notPerWallet,
+    );
+    await expect(removeKeeperSeat({ address: PENSION_KEY, renderedUser: seated, removeSigners, refreshUser: reads(seated), wait: noWait })).rejects.toThrow(
+      REMOVE_COPY.notATradingWallet,
+    );
+    expect(removeSigners).not.toHaveBeenCalled();
+    expect(removeRefusal(seated, IMPORTED)).toBeNull();
+  });
+
+  it("counts a refused removal as done when the record shows no signer anyway, and as incomplete when it does not", async () => {
+    const failing = vi.fn<RemoveSignersFn>(async () => {
+      throw new Error("Could not refresh user");
+    });
+    await expect(removeKeeperSeat({ address: IMPORTED, renderedUser: seated, removeSigners: failing, refreshUser: reads(cleared), wait: noWait })).resolves.toBe("removed");
+    const stuck = removeKeeperSeat({ address: IMPORTED, renderedUser: seated, removeSigners: failing, refreshUser: reads(seated), wait: noWait });
+    await expect(stuck).rejects.toBeInstanceOf(RemoveIncomplete);
+    await expect(removeKeeperSeat({ address: IMPORTED, renderedUser: seated, removeSigners: failing, refreshUser: reads(seated), wait: noWait })).rejects.toThrow(REMOVE_COPY.unconfirmed);
+  });
+
+  it("never calls a removal done on a record that cannot be read, nor on one that never catches up", async () => {
+    const removeSigners = vi.fn<RemoveSignersFn>(async () => ({}));
+    const unreadable = vi.fn<RefreshUserFn>().mockRejectedValue(new Error("network"));
+    const wait = vi.fn(noWait);
+    await expect(removeKeeperSeat({ address: IMPORTED, renderedUser: seated, removeSigners, refreshUser: unreadable, wait })).rejects.toThrow(REMOVE_COPY.recordLags);
+    expect(wait).toHaveBeenCalledTimes(GRANT_BACKOFF_MS.length);
+    expect(failureText(new RemoveIncomplete(REMOVE_COPY.recordLags))).toBe(REMOVE_COPY.recordLags);
+  });
+});
+
