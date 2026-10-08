@@ -9,7 +9,7 @@ import { generateP256KeyPair } from "@privy-io/node";
 import { Secret } from "@sip/solana-log";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
-import { buildKeeperPolicy } from "../src/privy-policy.js";
+import { buildKeeperPolicy, settleOnlyIdl } from "../src/privy-policy.js";
 import { createPrivyPolicyClient } from "../src/privy-policy-client.js";
 import { PRIVY_API_URL, readPrivyKeyQuorum } from "../src/privy-signer.js";
 
@@ -77,6 +77,17 @@ describe("createPrivyPolicyClient", () => {
       ["POST", "/v1/policies"],
     ]);
     expect(sent[1]!.headers.get("privy-idempotency-key")).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    // THE RULES AS BUILT, past the SDK's types: string values stay strings and the IDL arrives whole.
+    const body = sent[1]!.body as { rules: { conditions: Record<string, unknown>[] }[]; owner_id: string };
+    expect(body.rules).toEqual(JSON.parse(JSON.stringify(buildKeeperPolicy(SIP_PROGRAM_ID).rules)));
+    expect(body.rules[0]!.conditions[1]).toEqual({
+      field_source: "solana_instruction_data",
+      field: "instruction_name",
+      operator: "eq",
+      value: "settle_v2",
+      idl: JSON.parse(JSON.stringify(settleOnlyIdl())),
+    });
+    expect(body.owner_id).toBe("adminQuorum0000000000001");
   });
 
   it("sends an update once, as a PATCH of the policy's name and rules signed with the admin key, and nothing else", async () => {

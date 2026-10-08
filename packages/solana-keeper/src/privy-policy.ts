@@ -8,18 +8,34 @@
 // also bind the user and block their export to Axiom. Without it the key on
 // Railway can do anything a wallet can — sign any message, send any
 // transaction, export the key. With it, the key cannot sign a message or
-// export a key, and can only send transactions made ENTIRELY of sip-vault and
-// Ed25519SigVerify instructions.
+// export a key, and can only send transactions made ENTIRELY of sip-vault
+// settle_v2 instructions and Ed25519SigVerify instructions.
 //
-// WHAT THAT STILL ALLOWS. The bound is on programs, not on what they are told
-// to do, and it is wider than "only the settle":
-//   * PER PROGRAM, NOT PER INSTRUCTION. Privy's solana_program_instruction
-//     source exposes only programId — no instruction data, no accounts — so
-//     every sip-vault instruction the wallet signs passes: settle_v2 and, in
-//     today's IDL, link_wallet (which also needs a vault owner's signature).
+// PER INSTRUCTION, NOT ONLY PER PROGRAM. When this policy was first written
+// (2026-09) Privy's one source for a custom Solana program was
+// solana_program_instruction, which exposes the programId and nothing else, so
+// the policy let through EVERY sip-vault instruction the wallet could sign. A
+// wallet imported into SaverFi is often its owner's main trading wallet, and
+// whoever held the keeper's authorization key and the app's credentials could
+// have had it sign, through the seat, create_vault_v2 naming itself as owner,
+// then link_wallet again and again with itself paying each link's rent. Privy
+// now decodes instruction data against an Anchor IDL
+// (field_source solana_instruction_data), and the sip-vault rule pairs its
+// programId with instruction_name == settle_v2, read through settleOnlyIdl():
+// the exported IDL cut down to settle_v2 alone. An IDL condition matches by the
+// discriminator the data begins with, WHATEVER PROGRAM IS CALLED, so it never
+// stands without the programId condition beside it (docs.privy.io,
+// controls/policies/example-policies/solana-idls).
+//
+// WHAT THAT STILL ALLOWS.
+//   * Any settle_v2 the wallet signs. What one moves is bounded by sip-vault's
+//     own checks — the configured attester's Ed25519 signature it finds before
+//     it in the transaction, the vault's and the protocol's pause, the vault's
+//     max_contribution and wallet_reserve — not by Privy.
 //   * An Ed25519SigVerify-only transaction passes, and costs the wallet the
 //     base fee plus a fee per signature it declares every time it is sent: a
-//     drain bounded by transaction size, not stopped by the policy.
+//     drain bounded by transaction size, not stopped by the policy. That
+//     program is not an Anchor program, so no IDL narrows it.
 //
 // WHY COMPUTE BUDGET IS NOT ALLOWED. A transaction of nothing but
 // SetComputeUnitLimit and SetComputeUnitPrice would pass an allowlist naming
@@ -31,12 +47,15 @@
 // nothing else (only invest-tick's crank transaction uses compute budget, and
 // the settle key signs that one, not Privy), so it is left out.
 //
-// HOW PRIVY EVALUATES IT (docs.privy.io, re-read 2026-09-13):
+// HOW PRIVY EVALUATES IT (docs.privy.io, re-read 2026-10-08):
 //   * any matching DENY denies; an ALLOW with no DENY allows; a method with no
 //     rule is DENIED by default;
-//   * on Solana EVERY top-level instruction must be ALLOWed. settle_v2's System
-//     transfer happens by CPI inside the program, so it is not top level and the
-//     System program needs no entry;
+//   * on Solana EVERY top-level instruction must be ALLOWed, each by some rule
+//     whose conditions all hold for it. So settle_v2 and Ed25519SigVerify get a
+//     rule each: one rule naming both programs AND settle_v2 would never allow
+//     the Ed25519 instruction, whose data begins with no settle_v2
+//     discriminator. settle_v2's System transfer happens by CPI inside the
+//     program, so it is not top level and the System program needs no entry;
 //   * there is no '*' rule. A '*' DENY would also deny signAndSendTransaction,
 //     and a '*' ALLOW would re-open everything the default denies.
 //
@@ -58,9 +77,9 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
-import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "./idl.js";
+import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID, idl, type SipVaultIdl } from "./idl.js";
 
-export const KEEPER_POLICY_NAME = "SIP Solana keeper — settle only";
+export const KEEPER_POLICY_NAME = "SaverFi keeper — settle_v2 only";
 /** The 1-of-1 key quorum that owns the policy. Its private key never reaches Railway. */
 export const ADMIN_KEY_QUORUM_NAME = "sip-solana-policy-admin";
 export const ED25519_PROGRAM_ID = "Ed25519SigVerify111111111111111111111111111";
@@ -68,15 +87,52 @@ export const COMPUTE_BUDGET_PROGRAM_ID = "ComputeBudget1111111111111111111111111
 export const MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 /** What the refusal probes sign or carry. Harmless if a probe ever went through. */
 export const PROBE_MESSAGE = "sip policy probe";
+/** The one sip-vault instruction the keeper's signer may send. */
+export const SETTLE_INSTRUCTION = "settle_v2";
+/** Privy's ceiling for one condition's IDL (docs.privy.io, controls/policies/example-policies/solana-idls). */
+export const PRIVY_IDL_MAX_BYTES = 32 * 1024;
 
 export type PolicyAction = "ALLOW" | "DENY";
 
-export interface KeeperPolicyCondition {
+/** An account of an instruction in the policy's IDL: its name and flags, in the program's order. */
+export interface PolicyIdlAccount {
+  readonly name: string;
+  readonly writable?: true;
+  readonly signer?: true;
+  readonly optional?: true;
+  readonly address?: string;
+}
+
+/** The modern Anchor IDL (0.30+, explicit discriminators) a solana_instruction_data condition carries. */
+export interface PolicyIdl {
+  readonly address: string;
+  readonly metadata: { readonly name: string; readonly version: string; readonly spec: string };
+  readonly instructions: readonly {
+    readonly name: string;
+    readonly discriminator: readonly number[];
+    readonly accounts: readonly PolicyIdlAccount[];
+    readonly args: readonly { readonly name: string; readonly type: string }[];
+  }[];
+}
+
+/** "This instruction calls this program." */
+export interface ProgramCondition {
   readonly field_source: "solana_program_instruction";
   readonly field: "programId";
-  readonly operator: "in";
-  readonly value: readonly string[];
+  readonly operator: "eq";
+  readonly value: string;
 }
+
+/** "This instruction's data begins with the discriminator `idl` names `value`." Only ever next to a ProgramCondition. */
+export interface InstructionNameCondition {
+  readonly field_source: "solana_instruction_data";
+  readonly field: "instruction_name";
+  readonly operator: "eq";
+  readonly value: string;
+  readonly idl: PolicyIdl;
+}
+
+export type KeeperPolicyCondition = ProgramCondition | InstructionNameCondition;
 
 export interface KeeperPolicyRule {
   readonly name: string;
@@ -103,6 +159,8 @@ export interface PolicyConditionLike {
   readonly field?: string;
   readonly operator: string;
   readonly value: unknown;
+  /** solana_instruction_data only: the IDL the field is decoded with, as Privy returns it. */
+  readonly idl?: unknown;
 }
 
 export interface PolicyRuleLike {
@@ -131,6 +189,63 @@ const deepFreeze = <T>(value: T): T => {
 };
 
 /**
+ * The exported IDL cut down to settle_v2: what the policy's instruction_name
+ * condition decodes with.
+ *
+ * WHY A SUBSET. Privy asks for an IDL trimmed to the instructions the policy
+ * uses, and takes at most PRIVY_IDL_MAX_BYTES per condition. The whole
+ * exported IDL, as compact JSON, is already most of that ceiling (28 580 bytes
+ * on 2026-10-08) and grows with every instruction; settle_v2 alone is under
+ * 1 KB, and it is what the owner reads in `privy-policy --print`.
+ *
+ * WHAT IS KEPT. Privy asks for each instruction the policy uses to be
+ * complete: every account, in the program's order, and every type it uses. So
+ * settle_v2 keeps its discriminator, its accounts (name and flags) and its
+ * arguments, and the IDL keeps the address and metadata of the program it came
+ * from: Privy ignores the address, and the programId condition is what names
+ * the program. Account docs and PDA seeds are dropped: decoding never reads
+ * them, and the seeds name the Vault account type, which this IDL does not
+ * carry.
+ *
+ * IT REFUSES WHAT IT CANNOT CARRY WHOLE. settle_v2's arguments are all
+ * primitives today, so the IDL needs no `types`; an argument of a defined type,
+ * or an account group, throws here rather than build an IDL Privy would refuse
+ * or decode differently from the program.
+ */
+export function settleOnlyIdl(source: SipVaultIdl = idl): PolicyIdl {
+  const settle = source.instructions.find((instruction) => instruction.name === SETTLE_INSTRUCTION);
+  if (settle === undefined) throw new Error(`the exported IDL has no ${SETTLE_INSTRUCTION} instruction`);
+  const accounts = settle.accounts.map((account): PolicyIdlAccount => {
+    if ("accounts" in account) {
+      throw new Error(`${SETTLE_INSTRUCTION}'s account ${account.name} is a group; the policy's IDL keeps plain accounts only`);
+    }
+    return {
+      name: account.name,
+      ...(account.writable === true ? { writable: true as const } : {}),
+      ...(account.signer === true ? { signer: true as const } : {}),
+      ...(account.optional === true ? { optional: true as const } : {}),
+      ...(account.address !== undefined ? { address: account.address } : {}),
+    };
+  });
+  const args = settle.args.map((arg) => {
+    if (typeof arg.type !== "string") {
+      throw new Error(`${SETTLE_INSTRUCTION}'s argument ${arg.name} is not a primitive; the policy's IDL would need its types`);
+    }
+    return { name: arg.name, type: arg.type };
+  });
+  const subset: PolicyIdl = {
+    address: source.address,
+    metadata: { name: source.metadata.name, version: source.metadata.version, spec: source.metadata.spec },
+    instructions: [{ name: settle.name, discriminator: [...settle.discriminator], accounts, args }],
+  };
+  const bytes = Buffer.byteLength(JSON.stringify(subset), "utf8");
+  if (bytes > PRIVY_IDL_MAX_BYTES) {
+    throw new Error(`the policy's IDL is ${bytes} bytes; Privy takes at most ${PRIVY_IDL_MAX_BYTES} per condition`);
+  }
+  return deepFreeze(subset);
+}
+
+/**
  * The keeper's policy for `programId`, which must be the exported IDL's address.
  *
  * TAKES THE ID AND REFUSES EVERY OTHER. The parameter exists so a caller that
@@ -157,17 +272,25 @@ export function buildKeeperPolicy(programId: string): KeeperPolicy {
     chain_type: "solana",
     rules: [
       {
-        name: "Allow sip-vault settle transactions only",
+        name: "Allow sip-vault settle_v2 only",
         method: "signAndSendTransaction",
         action: "ALLOW",
         conditions: [
+          { field_source: "solana_program_instruction", field: "programId", operator: "eq", value: programId },
           {
-            field_source: "solana_program_instruction",
-            field: "programId",
-            operator: "in",
-            value: [programId, ED25519_PROGRAM_ID],
+            field_source: "solana_instruction_data",
+            field: "instruction_name",
+            operator: "eq",
+            value: SETTLE_INSTRUCTION,
+            idl: settleOnlyIdl(),
           },
         ],
+      },
+      {
+        name: "Allow the attester's Ed25519SigVerify",
+        method: "signAndSendTransaction",
+        action: "ALLOW",
+        conditions: [{ field_source: "solana_program_instruction", field: "programId", operator: "eq", value: ED25519_PROGRAM_ID }],
       },
       { name: "Deny private key export", method: "exportPrivateKey", action: "DENY", conditions: [] },
       { name: "Deny message signing", method: "signMessage", action: "DENY", conditions: [] },
@@ -175,9 +298,25 @@ export function buildKeeperPolicy(programId: string): KeeperPolicy {
   });
 }
 
-/** The allowlist of a policy this file built. */
+const programsOf = (rule: KeeperPolicyRule): readonly string[] =>
+  rule.conditions.flatMap((condition) => (condition.field_source === "solana_program_instruction" ? [condition.value] : []));
+
+/** The programs a policy this file built lets an instruction call, in rule order. */
 export function allowedPrograms(policy: KeeperPolicy): readonly string[] {
-  return policy.rules.flatMap((rule) => (rule.action === "ALLOW" ? rule.conditions.flatMap((condition) => condition.value) : []));
+  return policy.rules.flatMap((rule) => (rule.action === "ALLOW" ? programsOf(rule) : []));
+}
+
+/**
+ * What each ALLOW rule of a policy this file built lets through, one line per
+ * rule, for a person to read next to the policy itself.
+ */
+export function allowedInstructions(policy: KeeperPolicy): readonly string[] {
+  return policy.rules.flatMap((rule) => {
+    if (rule.action !== "ALLOW") return [];
+    const names = rule.conditions.flatMap((condition) => (condition.field_source === "solana_instruction_data" ? [condition.value] : []));
+    const programs = programsOf(rule).join(", ");
+    return [names.length === 0 ? `${programs}: any instruction` : `${programs}: ${names.join(", ")} only`];
+  });
 }
 
 // --- diff --------------------------------------------------------------------
@@ -201,8 +340,53 @@ export interface PolicyDiff {
 const valueSet = (value: unknown): string[] =>
   [...new Set((Array.isArray(value) ? value : [value]).map((item) => String(item)))].sort();
 
+/** An IDL's discriminator as hex, from the byte list Anchor writes or a hex string; null for anything else. */
+function discriminatorHex(value: unknown): string | null {
+  if (Array.isArray(value) && value.length > 0 && value.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+    return Buffer.from(value as number[]).toString("hex");
+  }
+  if (typeof value === "string" && /^(0x)?([0-9a-fA-F]{2})+$/.test(value)) return value.replace(/^0x/, "").toLowerCase();
+  return null;
+}
+
+/**
+ * What an IDL makes instruction_name mean: every instruction it names, as
+ * name=0x<discriminator>, sorted.
+ *
+ * THE PART THAT ENFORCES, AND ONLY THAT. instruction_name is the name the IDL
+ * gives the discriminator an instruction's data begins with, so the condition
+ * allows exactly the discriminators its IDL names settle_v2. Listing every
+ * name=discriminator pair shows a stored IDL that gives that name to another
+ * discriminator, in place of the real one or beside it, and also any other
+ * change to the instructions it names, which a reviewer should see even when it
+ * widens nothing. Docs, flags and argument lists do not decide what a name
+ * resolves to, so a copy Privy re-serialized differently still reads the same.
+ */
+export function idlFingerprint(value: unknown): string {
+  let parsed = value;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed) as unknown;
+    } catch {
+      return "unreadable";
+    }
+  }
+  const instructions = typeof parsed === "object" && parsed !== null ? (parsed as { instructions?: unknown }).instructions : undefined;
+  if (!Array.isArray(instructions)) return parsed === undefined || parsed === null ? "none" : "unreadable";
+  if (instructions.length === 0) return "no instructions";
+  const entries = instructions.map((instruction: unknown) => {
+    const { name, discriminator } = (typeof instruction === "object" && instruction !== null ? instruction : {}) as {
+      name?: unknown;
+      discriminator?: unknown;
+    };
+    return `${typeof name === "string" ? name : "?"}=0x${discriminatorHex(discriminator) ?? "?"}`;
+  });
+  return [...new Set(entries)].sort().join(", ");
+}
+
 const conditionHead = (condition: PolicyConditionLike): string =>
-  `${condition.field_source}.${condition.field ?? ""} ${condition.operator}`;
+  `${condition.field_source}.${condition.field ?? ""} ${condition.operator}` +
+  (condition.field_source === "solana_instruction_data" || condition.idl !== undefined ? ` (idl: ${idlFingerprint(condition.idl)})` : "");
 
 const describeCondition = (condition: PolicyConditionLike): string =>
   `${conditionHead(condition)} [${valueSet(condition.value).join(", ")}]`;
@@ -214,9 +398,23 @@ const describeConditions = (conditions: readonly PolicyConditionLike[]): string 
 
 const describeRule = (rule: PolicyRuleLike): string => `${rule.action} ${rule.method} ${describeConditions(rule.conditions)}`;
 
+/** The programs a rule's programId conditions name, as a sorted set. */
+const programsIn = (rule: PolicyRuleLike): string[] =>
+  valueSet(
+    rule.conditions.flatMap((condition) =>
+      condition.field_source === "solana_program_instruction" && condition.field === "programId" ? valueSet(condition.value) : [],
+    ),
+  );
+
+/** "the ALLOW signAndSendTransaction rule", plus the programs it names when it names any: two rules share a method now. */
+const ruleLabel = (rule: PolicyRuleLike): string => {
+  const programs = programsIn(rule);
+  return `the ${rule.action} ${rule.method} rule${programs.length > 0 ? ` for ${programs.join(", ")}` : ""}`;
+};
+
 function conditionDelta(expected: PolicyRuleLike, actual: PolicyRuleLike): string[] {
   const out: string[] = [];
-  const label = `the ${expected.action} ${expected.method} rule`;
+  const label = ruleLabel(expected);
   const unmatched = [...actual.conditions];
   for (const want of expected.conditions) {
     const index = unmatched.findIndex((got) => conditionHead(got) === conditionHead(want));
@@ -280,14 +478,17 @@ export function diffPolicy(expected: KeeperPolicy, actual: PolicyLike, options: 
     (want, got) =>
       differences.push(`the ${want.method} rule (${describeConditions(want.conditions)}) is ${got.action}; expected ${want.action}`),
   );
-  // Same method and action, other conditions: an allowlist that grew or shrank.
+  const reportConditions = (want: PolicyRuleLike, got: PolicyRuleLike): void => {
+    const delta = conditionDelta(want, got);
+    differences.push(...(delta.length > 0 ? delta : [`${ruleLabel(want)}'s conditions differ`]));
+  };
+  // Same method, action and programs, other conditions: one program's rule whose terms changed.
   take(
-    (want, got) => want.method === got.method && want.action === got.action,
-    (want, got) => {
-      const delta = conditionDelta(want, got);
-      differences.push(...(delta.length > 0 ? delta : [`the ${want.action} ${want.method} rule's conditions differ`]));
-    },
+    (want, got) => want.method === got.method && want.action === got.action && programsIn(want).join() === programsIn(got).join(),
+    reportConditions,
   );
+  // Same method and action, other conditions: an allowlist that grew or shrank.
+  take((want, got) => want.method === got.method && want.action === got.action, reportConditions);
   for (const want of missing) differences.push(`missing rule: ${describeRule(want)}`);
   for (const got of extra) {
     differences.push(

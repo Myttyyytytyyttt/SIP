@@ -17,9 +17,8 @@
 // '*', 'exportPrivateKey', 'signAndSendTransaction' and 'signMessage'.
 // `signTransaction` is NOT among them, so a keeper built on it would run with a
 // signer the policy could not constrain — an unbounded credential wearing the
-// costume of a bounded one. Sending through Privy keeps the program allowlist
-// in force, and costs nothing: the transaction is already complete when it
-// leaves here.
+// costume of a bounded one. Sending through Privy keeps the policy in force,
+// and costs nothing: the transaction is already complete when it leaves here.
 //
 // The attester's Ed25519 instruction rides INSIDE the serialized transaction,
 // so Privy adds only the wallet's signature and broadcasts. Nothing about the
@@ -29,8 +28,10 @@
 // comes from pinnedPrivyClient below, so where the app secret goes and how often
 // a request is sent are decided in one place. A settle leaves once, under an
 // idempotency key of its own, and only as [Ed25519SigVerify, settle_v2] paid by
-// the wallet: the policy bounds this signer by program, and assertSettleShape
-// bounds it by instruction.
+// the wallet: the policy privy-policy.ts builds lets the signer send only those
+// two kinds of instruction, in any number and order, and assertSettleShape holds
+// this process to exactly that pair. Which policy Privy enforces is whatever
+// the owner last stored; `privy-policy check` compares it with the built one.
 
 import { PrivyClient } from "@privy-io/node";
 import { Ed25519Program, PublicKey, Transaction, type TransactionInstruction } from "@solana/web3.js";

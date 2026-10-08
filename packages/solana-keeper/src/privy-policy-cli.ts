@@ -36,6 +36,8 @@ import {
   ADMIN_KEY_QUORUM_NAME,
   AdminKeyFileError,
   PROBE_MESSAGE,
+  SETTLE_INSTRUCTION,
+  allowedInstructions,
   allowedPrograms,
   buildKeeperPolicy,
   buildMemoProbe,
@@ -353,7 +355,7 @@ export async function runPrivyPolicyCli(argv: readonly string[], deps: PrivyPoli
   if (parsed.kind === "print") {
     // No environment, no network, no key: the document and nothing else.
     const policy = buildKeeperPolicy(SIP_PROGRAM_ID);
-    out.info("privy policy", { policy, programs: allowedPrograms(policy) });
+    out.info("privy policy", { policy, programs: allowedPrograms(policy), allows: allowedInstructions(policy) });
     return 0;
   }
 
@@ -500,7 +502,7 @@ async function create(rawPath: string, config: CommandEnv, deps: PrivyPolicyCliD
     return 1;
   }
 
-  out.info("privy policy created", { policyId: created.id, adminKeyQuorumId, programs, adminKeyFile });
+  out.info("privy policy created", { policyId: created.id, adminKeyQuorumId, programs, allows: allowedInstructions(policy), adminKeyFile });
 
   // What Privy stored, not what was sent: the id is only worth handing to the web if the two agree.
   const stored = diffPolicy(policy, created);
@@ -577,7 +579,13 @@ async function update(policyId: string, rawPath: string, config: CommandEnv, dep
   }
   const was = diffPolicy(expected, before, { signerId: config.signerId });
   if (was.ok) {
-    out.info("privy policy update", { policyId, verdict: "ALREADY_CURRENT", ownerId: was.ownerId, programs: allowedPrograms(expected) });
+    out.info("privy policy update", {
+      policyId,
+      verdict: "ALREADY_CURRENT",
+      ownerId: was.ownerId,
+      programs: allowedPrograms(expected),
+      allows: allowedInstructions(expected),
+    });
     return 0;
   }
   if (was.ownershipProblems.length > 0) {
@@ -630,6 +638,7 @@ async function update(policyId: string, rawPath: string, config: CommandEnv, dep
     differences: now.differences,
     ownershipProblems: now.ownershipProblems,
     programs: allowedPrograms(expected),
+    allows: allowedInstructions(expected),
   });
   return verdict === "OK" ? 0 : 1;
 }
@@ -664,6 +673,7 @@ async function check(policyId: string, config: CommandEnv, deps: PrivyPolicyCliD
     differences: diff.differences,
     ownershipProblems: diff.ownershipProblems,
     programs: allowedPrograms(expected),
+    allows: allowedInstructions(expected),
   });
   return diff.ok ? 0 : 1;
 }
@@ -792,6 +802,11 @@ const LEVEL: Readonly<Record<ProbeOutcome, "info" | "warn" | "error">> = {
  * it does not: a bare message, a 1-lamport transfer to self, a memo. Only
  * POLICY_VIOLATION counts. A success is CRITICAL and prints what Privy returned;
  * a simulation failure is INCONCLUSIVE and never a pass.
+ *
+ * WHAT IT DOES NOT PROBE, AND SAYS SO: sip-vault's instructions other than
+ * settle_v2, and the retired program. Each would have to be a call that
+ * succeeds, and neither has one that is harmless; `check` compares the rules
+ * that refuse them.
  */
 async function verify(walletId: string, policyId: string, config: CommandEnv, deps: PrivyPolicyCliDeps, { out, diag, redactor }: Io): Promise<number> {
   const signerId = config.signerId!;
@@ -917,6 +932,15 @@ async function verify(walletId: string, policyId: string, config: CommandEnv, de
       out[LEVEL[outcome]]("privy probe", { probe: probe.name, outcome, ...failureFields(error, redactor), meaning: MEANING[outcome] });
     }
   }
+
+  out.info("other sip-vault instructions", {
+    allowed: [SETTLE_INSTRUCTION],
+    detail:
+      `The policy lets the signer send sip-vault's ${SETTLE_INSTRUCTION} and no other sip-vault instruction: its ` +
+      "instruction_name condition, whose IDL check compares. It is not probed: Privy simulates before it evaluates the " +
+      "policy, so a refusal probe has to be a call that would succeed, and create_vault_v2 naming the wallet as owner " +
+      "would leave a vault behind if it went through.",
+  });
 
   out.info("old program", {
     program: OLD_NUVEM_PROGRAM_ID,

@@ -514,10 +514,11 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   // The same two instructions the fee was priced for, the attestation now signed.
   const tx = settleTransaction({ blockhash, lastValidBlockHeight }, link.wallet, attestationInstruction(attester.secretKey, inputs), settleIx);
 
-  // ONLY THE SETTLE LEAVES, ON EITHER ROUTE. The Privy policy bounds the signer
-  // by program and never sees instruction data (privy-policy.ts), so the shape is
-  // held here, before a keypair signs or Privy is asked, and the local proof
-  // sends through the same check the product path does. A transaction that fails
+  // ONLY THE SETTLE LEAVES, ON EITHER ROUTE. The Privy policy privy-policy.ts
+  // builds lets the signer send settle_v2 and Ed25519SigVerify instructions, in
+  // any number and order, and the local route has no policy at all, so the exact
+  // shape is held here, before a keypair signs or Privy is asked, and the local
+  // proof sends through the same check the product path does. A transaction that fails
   // it is a bug in this file: nothing is sent, and a human should look.
   try {
     assertSettleShape(tx, program.programId, link.wallet);
@@ -543,7 +544,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
       signature = await connection.sendRawTransaction(tx.serialize(), { preflightCommitment: "confirmed" });
     } else {
       // The product path: Privy signs as the wallet AND broadcasts, so the
-      // policy's program allowlist is in force on the way out. One request,
+      // policy is in force on the way out. One request,
       // under this attempt's own key.
       signature = await walletSigner.submit(tx, { idempotencyKey: settleIdempotencyKey(link, inputs.validUntilSlot) });
     }

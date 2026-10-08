@@ -19,6 +19,7 @@
 //     created again, and `create` could no longer say which objects exist.
 
 import { randomUUID } from "node:crypto";
+import type { PrivyClient } from "@privy-io/node";
 import { Connection, PublicKey } from "@solana/web3.js";
 import type { Secret } from "@sip/solana-log";
 import type { PrivyPolicyClient, ProbeChain } from "./privy-policy-cli.js";
@@ -26,19 +27,31 @@ import type { KeeperPolicy } from "./privy-policy.js";
 import { SOLANA_MAINNET_CAIP2, pinnedPrivyClient } from "./privy-signer.js";
 import { poolFetch } from "./rpc-pool.js";
 
-/** The rules as Privy's create and update bodies take them. One translation, so the two can never send different rules. */
-function ruleBodies(policy: KeeperPolicy) {
+/** The rules type Privy's SDK takes, read off its own create method. */
+type SdkRules = Parameters<ReturnType<PrivyClient["policies"]>["create"]>[0]["rules"];
+
+/**
+ * The rules as Privy's create and update bodies take them. One translation, so
+ * the two can never send different rules.
+ *
+ * EACH CONDITION GOES AS BUILT, a plain copy with every field it has: a string
+ * value stays a string (spreading one into a list would send its characters),
+ * and the instruction_name condition keeps its `idl`.
+ *
+ * PAST THE SDK'S TYPES, ON PURPOSE. @privy-io/node 0.28 predates Privy's
+ * solana_instruction_data source: its condition union has no `idl`, so the type
+ * checker refuses the one condition the policy rests on. The SDK sends the body
+ * it is handed as JSON (resources/policies.js passes it through), so the cast
+ * changes what tsc sees and not the request; test/privy-policy-client.test.ts
+ * reads the request body to prove the IDL arrives.
+ */
+function ruleBodies(policy: KeeperPolicy): SdkRules {
   return policy.rules.map((rule) => ({
     name: rule.name,
     method: rule.method,
     action: rule.action,
-    conditions: rule.conditions.map((condition) => ({
-      field_source: condition.field_source,
-      field: condition.field,
-      operator: condition.operator,
-      value: [...condition.value],
-    })),
-  }));
+    conditions: rule.conditions.map((condition) => JSON.parse(JSON.stringify(condition)) as unknown),
+  })) as unknown as SdkRules;
 }
 
 export interface PrivyPolicyClientOptions {

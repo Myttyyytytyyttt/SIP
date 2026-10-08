@@ -27,7 +27,15 @@ import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "../src/idl.js";
 import { SERVICE } from "../src/keeper-log.js";
 import { type KeyQuorumLike } from "../src/privy-authorization-key.js";
 import { runPrivyPolicyCli, type PrivyPolicyClient, type ProbeChain, type WalletLike } from "../src/privy-policy-cli.js";
-import { MEMO_PROGRAM_ID, PROBE_MESSAGE, allowedPrograms, buildKeeperPolicy, type KeeperPolicy, type PolicyLike } from "../src/privy-policy.js";
+import {
+  MEMO_PROGRAM_ID,
+  PROBE_MESSAGE,
+  allowedInstructions,
+  allowedPrograms,
+  buildKeeperPolicy,
+  type KeeperPolicy,
+  type PolicyLike,
+} from "../src/privy-policy.js";
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "sip-privy-policy-cli-")));
 const repo = join(root, "repo");
@@ -207,6 +215,7 @@ describe("--print", () => {
       expect(result.stdout).toHaveLength(1);
       expect(result.stdout[0]).toMatchObject({ event: "privy policy", policy: JSON.parse(JSON.stringify(buildKeeperPolicy(SIP_PROGRAM_ID))) });
       expect(result.stdout[0]!["programs"]).toEqual(allowedPrograms(buildKeeperPolicy(SIP_PROGRAM_ID)));
+      expect(result.stdout[0]!["allows"]).toEqual([`${SIP_PROGRAM_ID}: settle_v2 only`, "Ed25519SigVerify111111111111111111111111111: any instruction"]);
       expect([result.clientBuilt, result.chainBuilt]).toEqual([0, 0]);
     }
     expect(touched).toEqual([]);
@@ -222,9 +231,10 @@ describe("create", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toHaveLength(1);
     const line = result.stdout[0]!;
-    expect(Object.keys(line).sort()).toEqual(["adminKeyFile", "adminKeyQuorumId", "event", "level", "policyId", "programs", "service", "ts"]);
+    expect(Object.keys(line).sort()).toEqual(["adminKeyFile", "adminKeyQuorumId", "allows", "event", "level", "policyId", "programs", "service", "ts"]);
     expect(line).toMatchObject({ event: "privy policy created", policyId: POLICY_ID, adminKeyQuorumId: ADMIN_QUORUM_ID, adminKeyFile: path });
     expect(line["programs"]).toEqual(allowedPrograms(buildKeeperPolicy(SIP_PROGRAM_ID)));
+    expect(line["allows"]).toEqual(allowedInstructions(buildKeeperPolicy(SIP_PROGRAM_ID)));
 
     expect(readFileSync(path, "utf8")).toBe(keyPair.privateKey);
     expect(statSync(path).mode & 0o777).toBe(0o600);
@@ -467,8 +477,8 @@ describe("check", () => {
 
   it("exits 1 for a missing owner, an owner that is the signer, and an added program", async () => {
     const extra = Keypair.generate().publicKey.toBase58();
-    const widened = JSON.parse(JSON.stringify(policy)) as { rules: { conditions: { value: string[] }[] }[] };
-    widened.rules[0]!.conditions[0]!.value.push(extra);
+    const widened = JSON.parse(JSON.stringify(policy)) as { rules: { conditions: { value: string | string[] }[] }[] };
+    widened.rules[1]!.conditions[0]!.value = [widened.rules[1]!.conditions[0]!.value as string, extra];
     for (const [getPolicy, verdict] of [
       [async () => storedPolicy(policy, { owner_id: null }), "UNOWNED"],
       [async () => storedPolicy(policy, { owner_id: SIGNER_ID }), "OWNED_BY_SIGNER"],
@@ -696,6 +706,9 @@ describe("verify", () => {
     expect(summary(result)).toMatchObject({ verdict: "PASS", probes: { signMessage: "REFUSED", selfTransfer: "REFUSED", memo: "REFUSED" } });
     expect(result.stdout.find((line) => line["event"] === "old program")).toMatchObject({ program: OLD_NUVEM_PROGRAM_ID, excluded: true });
     expect(String(result.stdout.find((line) => line["event"] === "old program")!["detail"])).toContain("simulates before");
+    const others = result.stdout.find((line) => line["event"] === "other sip-vault instructions")!;
+    expect(others).toMatchObject({ allowed: ["settle_v2"] });
+    expect(String(others["detail"])).toContain("It is not probed");
 
     expect(result.recorded.messages.map((message) => new TextDecoder().decode(message))).toEqual([PROBE_MESSAGE]);
     const [transfer, memo] = result.recorded.transactions;
