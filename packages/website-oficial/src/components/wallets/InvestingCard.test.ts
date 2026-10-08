@@ -636,7 +636,7 @@ describe("InvestingCard", () => {
     expect(html).not.toContain(INVEST_COPY.oldLimitsBlocking.replaceAll("'", "&#x27;"));
     // The old numbers, beside today's, so he can see what he is dropping.
     expect(html).toContain("SOL floor $90.03, today $100.04");
-    expect(html).toContain("SPYx ceiling $801.80 per 100,000,000 raw units, today $761.71");
+    expect(html).toContain("SPYx ceiling $801.80 per SPYx, today $761.71");
     const press = buttons(INVEST_COPY.switchToLive);
     expect(press.map((button) => button.disabled)).toEqual([false]);
     press[0]?.onClick?.(CLICK);

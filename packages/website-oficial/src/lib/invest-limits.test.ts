@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { lastInvestedDay } from "@/lib/invest-limits";
+import { lastInvestedDay, perWholeToken } from "@/lib/invest-limits";
 
 /** 31 buckets as the program stores them: unwritten ones are day 0, amount 0. */
 function buckets(written: readonly (readonly [number, string])[]): { days: number[]; amounts: string[] } {
@@ -50,5 +50,17 @@ describe("lastInvestedDay", () => {
     const { days, amounts } = buckets([[20_718, "0"]]);
     expect(lastInvestedDay(days, amounts)).toBeNull();
     expect(lastInvestedDay([], [])).toBeNull();
+  });
+});
+
+describe("perWholeToken", () => {
+  // 1e8 raw units is one SPYx (8 decimals) and a tenth of an ANTHROPIC (9 decimals):
+  // the old-limits block printed "per 100,000,000 raw units" until 2026-10-08.
+  it("keeps an 8-decimal price as it is and multiplies a 9-decimal one by ten", () => {
+    expect(perWholeToken(761_709_474n, 8)).toBe(761_709_474n);
+    expect(perWholeToken(105_408_000n, 9)).toBe(1_054_080_000n);
+  });
+  it("divides for a token with fewer than 8 decimals", () => {
+    expect(perWholeToken(761_709_474n, 6)).toBe(7_617_094n);
   });
 });

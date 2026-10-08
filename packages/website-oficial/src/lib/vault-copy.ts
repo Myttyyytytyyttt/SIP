@@ -1253,8 +1253,9 @@ export const INVEST_COPY = {
   badgeOldLimits: "Old price limits",
   badgeOldLimitsBlocking: "Old limits blocking",
   storedSolFloor: (floor: string, today: string | null): string => (today === null ? `SOL floor ${floor}` : `SOL floor ${floor}, today ${today}`),
+  /** Both prices are per WHOLE token (perWholeToken), so the line names the token, not raw units. */
   storedLegCeiling: (symbol: string, max: string, today: string | null): string =>
-    today === null ? `${symbol} ceiling ${max} per 100,000,000 raw units` : `${symbol} ceiling ${max} per 100,000,000 raw units, today ${today}`,
+    today === null ? `${symbol} ceiling ${max} per ${symbol}` : `${symbol} ceiling ${max} per ${symbol}, today ${today}`,
   usedLast30: "Used in the last 30 days",
   lifetime: "Invested so far",
   ready: "Ready: the next sweep can buy.",

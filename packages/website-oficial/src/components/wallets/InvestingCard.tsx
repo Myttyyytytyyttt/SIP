@@ -53,6 +53,7 @@
 import {
   DEFAULT_INVEST_CAPS,
   LEG_WEIGHT_TOTAL_BPS,
+  CATALOGUE,
   LIVE_PRICE_FLOOR_WAD,
   OFFERED_LEGS,
   SIGNATURE_FEE_LAMPORTS,
@@ -96,7 +97,7 @@ import {
   type PickedLeg,
   type PickedRow,
 } from "@/lib/basket-picker";
-import { todaysPrices, usedInLast30Days } from "@/lib/invest-limits";
+import { perWholeToken, todaysPrices, usedInLast30Days } from "@/lib/invest-limits";
 import { floorsState, oldLimitsStopOf, priceLimitsOf } from "@/lib/live-model";
 import type { InvestPolicyBuildJson, InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
 import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, shortAddress, signedLegsOf } from "@/lib/vault-copy";
@@ -1300,7 +1301,18 @@ function PolicySummary({
             ) : null}
             {legs.map((leg) =>
               leg.floor !== null && leg.floor > LIVE_PRICE_FLOOR_WAD ? (
-                <p key={leg.mint}>{INVEST_COPY.storedLegCeiling(leg.symbol, formatUsd(usdcRawPer1e8LegRaw(leg.floor)), leg.today === null ? null : formatUsd(leg.today))}</p>
+                <p key={leg.mint}>
+                  {(() => {
+                    // PER WHOLE TOKEN: 1e8 raw units is one SPYx but a tenth of an
+                    // ANTHROPIC. A leg the catalogue no longer lists keeps 8.
+                    const decimals = CATALOGUE.find((asset) => asset.mint === leg.mint)?.decimals ?? 8;
+                    return INVEST_COPY.storedLegCeiling(
+                      leg.symbol,
+                      formatUsd(perWholeToken(usdcRawPer1e8LegRaw(leg.floor), decimals)),
+                      leg.today === null ? null : formatUsd(perWholeToken(leg.today, decimals)),
+                    );
+                  })()}
+                </p>
               ) : null,
             )}
             {/* WHY IT CAN BE GREYED OUT: it re-signs the STORED basket, so it is

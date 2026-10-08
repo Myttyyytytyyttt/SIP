@@ -92,6 +92,18 @@ export function todaysPrices(prices: VaultStateJson["prices"]): TodaysPrices | n
 // numbers alone: any floor over LIVE_PRICE_FLOOR_WAD is a price limit.
 
 /**
+ * A price per 1e8 raw units of a leg (usdcRawPer1e8LegRaw, todaysPrices) as a
+ * price per WHOLE token, in USDC raw units.
+ *
+ * 1e8 RAW UNITS IS NOT ONE TOKEN FOR EVERY LEG: it is one SPYx (8 decimals) but a
+ * tenth of an ANTHROPIC (9 decimals). The old-limits block printed "per
+ * 100,000,000 raw units", which was true and which nobody could read.
+ */
+export function perWholeToken(per1e8: bigint, decimals: number): bigint {
+  return decimals >= 8 ? per1e8 * 10n ** BigInt(decimals - 8) : per1e8 / 10n ** BigInt(8 - decimals);
+}
+
+/**
  * Whether a stored policy carries a price limit: any leg's min_out_rate_wad, or
  * the min_convert_rate_wad, over LIVE_PRICE_FLOOR_WAD. A floor of 0 is not a
  * limit (the program refuses one on a leg; on the SOL hop it switches the
