@@ -457,6 +457,23 @@ describe("a bell is answered by a turn, not by the clock", () => {
     expect(next.turns.find((turn) => turn.link.link === traded.link)?.lane === "bell").toBe(false);
   });
 
+  it("rings again on every delivery: a wallet that trades every two minutes is turned every sweep, though each turn rests", () => {
+    // PINNED FOR THE WALK'S COST (2026-10-08). A wallet that keeps trading is not
+    // left to the safety lane: each delivery naming it starts a new unanswered
+    // bell, so its resting NO_PROFIT turns save no sweep, and only the walk cache
+    // keeps each of them from fetching its whole window again.
+    const links = fleet(200);
+    const bell = trustedBell(links);
+    const trader = links[17]!;
+    for (let sweep = 1; sweep <= 30; sweep++) {
+      const now = T0 + sweep * SWEEP;
+      if (sweep % 2 === 1) bell.ingest([{ slot: sweep, transaction: { signatures: [`trade-${sweep}`], message: { accountKeys: [trader.wallet] } } }], known(links), now - 5_000);
+      const turn = lanesOf(bell, links, now).turns.find((candidate) => candidate.link.link === trader.link);
+      expect(turn?.lane, `sweep ${sweep}`).toBe("bell");
+      bell.recordTurn(trader, "bell", true, now + 2_000, "NO_PROFIT", now);
+    }
+  });
+
   it("keeps the bell for at least the hold even when answered at once", () => {
     const links = fleet(200);
     const bell = trustedBell(links);

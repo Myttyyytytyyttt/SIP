@@ -33,7 +33,7 @@ import type { VaultState } from "../src/accounts.js";
 import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import { assertSettleShape, type SolanaWalletSubmitter } from "../src/privy-signer.js";
-import { MAX_SUPPORTED_TRANSACTION_VERSION } from "../src/measure-window.js";
+import { MAX_SUPPORTED_TRANSACTION_VERSION, WalkCache } from "../src/measure-window.js";
 import { MODE_PROFIT, MODE_VOLUME, attestationMessage } from "../src/program-scripts.js";
 import { attestationInputs, keeperModes, type CarryBook, type LossCarry } from "../src/settle-decision.js";
 import { CONFIRM_POLL_MS, CONFIRM_TIMEOUT_MS, runSettleTick, type SettleDeps, type SettleResult } from "../src/settle-tick.js";
@@ -297,6 +297,23 @@ describe("the wallet reserve, before anything is signed", () => {
       expect(c.calls).not.toContain("sendRawTransaction");
       expect(c.calls.slice(-4)).toEqual(["getLatestBlockhash", "getFeeForMessage", "getBalance", "getMinimumBalanceForRentExemption"]);
     }
+  });
+
+  it("rests the same way on the next turn from the walk cache it was given, fetching no finalized transaction again", async () => {
+    // A wallet short of its reserve rests here sweep after sweep with its window
+    // above the frontier, and every one of those turns used to fetch it again.
+    const walkCache = new WalkCache();
+    const results: SettleResult[] = [];
+    const fetched: number[] = [];
+    for (let turn = 0; turn < 2; turn++) {
+      const c = chain({ getBalance: async () => EXACT - 1 });
+      results.push(await runSettleTick(c.deps({ live: false, attester: null, walletSigner: null, walkCache })));
+      fetched.push(c.calls.filter((name) => name === "getTransaction").length);
+    }
+    expect(results[0]).toMatchObject({ outcome: "BELOW_RESERVE", baseLamports: 1_000_000_000n });
+    expect(results[1]).toEqual(results[0]);
+    // The anchor and the trade, then nothing.
+    expect(fetched).toEqual([2, 0]);
   });
 
   it("rests a backlog's positive prefix the wallet cannot pay at BELOW_RESERVE, never settling past it with a zero base, and reads nothing above the prefix", async () => {

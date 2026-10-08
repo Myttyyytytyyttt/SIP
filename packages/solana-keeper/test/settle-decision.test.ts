@@ -96,6 +96,7 @@ const measured = (over: Partial<WindowMeasurement> = {}): WindowMeasurement => (
   frontierReached: true,
   pagesExhausted: false,
   prefixCut: false,
+  fetched: 13,
   ...over,
 });
 

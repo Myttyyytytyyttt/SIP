@@ -123,6 +123,7 @@ function setup(): { redactor: Redactor; status: KeeperStatus } {
     linksDiscovered: 2,
     linksTriaged: 1,
     lastSweepPhaseMs: { chainReadMs: 120, discoveryMs: 240, vaultReadMs: 68, triageMs: 520, expensiveMs: 40_000 },
+    lastSweepWalk: { fetched: 1_204, cacheHits: 96, cacheEntries: 400 },
     // AN INDEX, NEVER A URL: the endpoints carry API keys and this page is public.
     rpcEndpointInUse: "endpoint 2/2",
     failovers: 3,
@@ -228,6 +229,7 @@ describe("the /status JSON", () => {
     expect(parsed.linksTriaged).toBe(1);
     // Which lane is filling the sweep.
     expect(parsed.lastSweepPhaseMs).toEqual({ chainReadMs: 120, discoveryMs: 240, vaultReadMs: 68, triageMs: 520, expensiveMs: 40_000 });
+    expect(parsed.lastSweepWalk).toEqual({ fetched: 1_204, cacheHits: 96, cacheEntries: 400 });
     // The binding external limit, counted rather than assumed.
     expect(parsed.jupiterCallsPerSweep).toBe(12);
     expect(parsed.failovers).toBe(3);

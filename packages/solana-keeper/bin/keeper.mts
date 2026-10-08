@@ -95,7 +95,7 @@ import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KeeperClaim, advisoryKeyFor, lockNameFor } from "../src/singleton.js";
 import { tradeNotional } from "../src/measure-volume.js";
 import { PolicyBoundaryBook, type OwnerHistoryReader } from "../src/policy-boundary.js";
-import { readTransaction } from "../src/measure-window.js";
+import { readTransaction, WalkCache, type WalkCounters } from "../src/measure-window.js";
 import { MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
 import { createVolumeBase } from "../src/volume-base.js";
 import { previewLastSettled, previewVolume, type PreviewBook } from "../src/volume-preview.js";
@@ -121,6 +121,7 @@ import {
   settleWalked,
   sweepSkippedAlert,
   sweepSlowAlert,
+  walkSweepReport,
 } from "../src/sweep-cost.js";
 import {
   VAULT_READ_ALERT_KEY,
@@ -348,6 +349,14 @@ const settleRetries = new Map<string, number>();
  * transactions (ZERO_BASE_MIN_TXS).
  */
 const settleCarries: CarryBook = new Map();
+
+/**
+ * What the settle walks read, kept between sweeps (WalkCache, src/measure-window.ts):
+ * a span that did not settle is walked again from the same frontier, and only what
+ * the cache does not hold is fetched again — mostly what is new since. IN MEMORY:
+ * after a restart, each window is fetched once more.
+ */
+const walkCache = new WalkCache();
 
 /**
  * What the carry book holds, for /status. The book is keyed by LINK and an
@@ -712,6 +721,7 @@ const health: KeeperStatus = {
   linksDiscovered: null,
   linksTriaged: null,
   lastSweepPhaseMs: null,
+  lastSweepWalk: null,
   // Folded in at render from the transport's own callbacks, which are installed
   // before this object exists; these two are the placeholders that keep the
   // shape whole.
@@ -1019,7 +1029,12 @@ const sweepTimes = createSweepTimes();
  * is measurement: if any of it threw while the flag was still set, it would
  * wedge the keeper in exactly the way this instrumentation exists to report.
  */
-function noteSweepCost(elapsedMs: number, phases: KeeperStatus["lastSweepPhaseMs"], linksTriaged: number | null): void {
+function noteSweepCost(
+  elapsedMs: number,
+  phases: KeeperStatus["lastSweepPhaseMs"],
+  linksTriaged: number | null,
+  walkAtStart: WalkCounters,
+): void {
   health.lastSweepMs = elapsedMs;
   sweepTimes.add(elapsedMs);
   health.sweepMsP50 = sweepTimes.p50();
@@ -1027,6 +1042,7 @@ function noteSweepCost(elapsedMs: number, phases: KeeperStatus["lastSweepPhaseMs
   health.lastSweepPhaseMs = phases;
   health.linksTriaged = linksTriaged;
   health.jupiterCallsPerSweep = jupiterCalls.sweepTotal();
+  health.lastSweepWalk = walkSweepReport(walkAtStart, walkCache.counters, walkCache.size);
   // A SWEEP FINISHED, so the run of skipped ones is over. The total stands: it
   // is the count of users that went unserved, and it is not undone by a later
   // sweep going through.
@@ -1073,6 +1089,8 @@ async function sweep(): Promise<void> {
   // ZEROED AT THE TOP, READ IN THE `finally`: one sweep runs at a time, so the
   // count between those two points is this sweep's.
   jupiterCalls.startSweep();
+  // The walk cache counts since boot; the `finally` reports this sweep's difference.
+  const walkAtStart = walkCache.counters;
   // WHERE THIS SWEEP'S MILLISECONDS WENT. Declared out here so the `finally`
   // can publish them even when the sweep throws halfway: a failed sweep's
   // shape is the most interesting one there is.
@@ -1302,6 +1320,8 @@ async function sweep(): Promise<void> {
     // longer discovered stops being counted.
     const discoveredWallets = new Set(doorLinks.map((link) => link.wallet));
     signingRoutes.prune(discoveredWallets);
+    // So does what the walks kept for it.
+    walkCache.prune(discoveredWallets);
     /** Each vault's invest turns for THIS sweep, folded; the streaks are applied once from it below. */
     const investSweep = new Map<string, VaultInvestSweep>();
     /**
@@ -1489,6 +1509,7 @@ async function sweep(): Promise<void> {
           // EXACTLY ONE KEEPER SETTLES EACH MODE (keeperModes).
           settles: keeperModes(config.role),
           ...volumeTurn,
+          walkCache,
         });
         settleOutcome = settle.outcome;
         // EVERY TRANSACTION THIS KEEPER SENDS MUST COME BACK THROUGH THE
@@ -1918,6 +1939,7 @@ async function sweep(): Promise<void> {
         Date.now() - cycleBeganAt,
         { chainReadMs, discoveryMs, vaultReadMs, triageMs, expensiveMs },
         linksTriaged,
+        walkAtStart,
       );
     } catch (error) {
       log.warn("the sweep's own cost could not be recorded (the sweep itself is unaffected)", {

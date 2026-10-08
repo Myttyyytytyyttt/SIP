@@ -40,7 +40,7 @@ import { readSettlementNonce, type VaultState } from "./accounts.js";
 import { BN } from "./anchor-interop.js";
 import type { ManagedLink } from "./discovery.js";
 import { idl } from "./idl.js";
-import { connectionReader, measureSince, readTransaction } from "./measure-window.js";
+import { connectionReader, measureSince, readTransaction, type WalkCache } from "./measure-window.js";
 import type { VolumeProbe } from "./measure-volume.js";
 import { method } from "./methods.js";
 import { assertSettleShape, type SolanaWalletSubmitter } from "./privy-signer.js";
@@ -169,6 +169,12 @@ export interface SettleDeps {
    * without a word. In memory: a restart forgets it.
    */
   readonly carries: CarryBook;
+  /**
+   * What earlier sweeps' walks read, kept by keeper.mts for the life of the
+   * process (WalkCache). Absent, every turn whose walk reaches its frontier
+   * fetches its whole window again — the anchor and the oldest prefix above it.
+   */
+  readonly walkCache?: WalkCache;
 }
 
 /** How often a sent settle's status is asked for. */
@@ -349,7 +355,9 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   }
   // BEFORE THE WALK, NOT AFTER: see MeasurementContext.finalizedSlot.
   const finalizedSlot = BigInt(await connection.getSlot("finalized"));
-  const measured = await measureSince(connectionReader(connection), link.wallet, from, program.programId, deps.volumeProbe);
+  const measured = await measureSince(connectionReader(connection), link.wallet, from, program.programId, deps.volumeProbe, {
+    cache: deps.walkCache,
+  });
   // THE CARRY FOR THIS LINK'S EXACT STATE, read after the walk and before the base.
   // Only a zero settle that landed leaves a link in the state a carry was recorded
   // for, so a loss is netted once, by the window right above that settle.

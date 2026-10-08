@@ -33,6 +33,7 @@ const span = (volumeTrades: readonly VolumeTrade[] | undefined, over: Partial<Wi
   frontierReached: true,
   pagesExhausted: false,
   prefixCut: false,
+  fetched: 6,
   ...(volumeTrades === undefined ? {} : { volumeTrades }),
   ...over,
 });

@@ -18,7 +18,7 @@
 
 import { SolanaJSONRPCErrorCode } from "@solana/web3.js";
 import type { Connection, Finality, PublicKey, VersionedMessage, VersionedTransactionResponse } from "@solana/web3.js";
-import type { VolumeProbe } from "./measure-volume.js";
+import type { TradeNotional, VolumeProbe } from "./measure-volume.js";
 
 // Programs whose presence NEVER means trading: the System/ComputeBudget pair,
 // plus the Ed25519 precompile that a settle carries for its attestation. A
@@ -224,6 +224,191 @@ export async function readTransaction(
   }
 }
 
+/**
+ * What the walk takes from ONE transaction for ONE wallet: everything the fold
+ * below reads, and nothing else. A finalized transaction never changes, so this
+ * is as true next sweep as it is now, and a WalkCache keeps it between sweeps.
+ */
+export interface TxFacts {
+  readonly slot: number;
+  readonly blockTime: number | null;
+  /**
+   * The wallet's balances and every program the transaction touched, inner
+   * instructions included; null when the transaction does not name the wallet,
+   * which the walk skips inside the window and counts as unfetchable when it is
+   * the anchor.
+   */
+  readonly named: { readonly pre: bigint; readonly post: bigint; readonly programs: readonly string[] } | null;
+  readonly failed: boolean;
+  /** meta.fee when the wallet is the fee payer, zero otherwise. */
+  readonly walletFee: bigint;
+  readonly signedByWallet: boolean;
+  /**
+   * The volume probe's answer, with the probe and the settle program it was asked
+   * with. Absent when no probe ran; a walk with a different probe, or none of its
+   * answer, reads the transaction again.
+   */
+  readonly volume?: { readonly probe: VolumeProbe; readonly settleProgramId: string | undefined; readonly traded: TradeNotional };
+}
+
+/**
+ * A copy of a base58 id in one flat string.
+ *
+ * WHY (review, 2026-10-08). PublicKey.toBase58() builds its answer one character
+ * at a time, and V8 keeps that as a chain of fragments: about 1 KB per id, against
+ * 72 bytes flat. Held for the life of the process by a WalkCache, a full cache of
+ * six-program transactions retained 54.8 MiB measured through measureSince, and
+ * 317.6 MiB at 32 programs a transaction. Base58 is ASCII, so the round trip
+ * through latin1 is exact.
+ */
+function compactId(id: string): string {
+  return Buffer.from(id, "latin1").toString("latin1");
+}
+
+/** The facts of one transaction the RPC returned whole, for `wallet`. */
+export function factsOf(
+  tx: VersionedTransactionResponse & { readonly meta: NonNullable<VersionedTransactionResponse["meta"]> },
+  wallet: PublicKey,
+  settleProgramId: string | undefined,
+  volumeProbe: VolumeProbe | undefined,
+): TxFacts {
+  const balances = walletBalances(tx, wallet);
+  const message = tx.transaction.message;
+  return {
+    slot: tx.slot,
+    blockTime: tx.blockTime ?? null,
+    named: balances === null ? null : { pre: balances.pre, post: balances.post, programs: [...balances.programs].map(compactId) },
+    failed: tx.meta.err !== null,
+    walletFee: isFeePayer(message, wallet) ? BigInt(tx.meta.fee) : 0n,
+    signedByWallet: isSignedByWallet(message, wallet),
+    // ONLY FOR A TRANSACTION THAT NAMES THE WALLET, as the walk always probed.
+    ...(volumeProbe === undefined || balances === null
+      ? {}
+      : { volume: { probe: volumeProbe, settleProgramId, traded: volumeProbe(tx, wallet, settleProgramId) } }),
+  };
+}
+
+/**
+ * Transactions a WalkCache holds at most, over every wallet: ten thousand.
+ * Filling it through measureSince over the fake ledger on 2026-10-08 (34 wallets
+ * of 294 transactions) grew the heap by 7.7 MiB at six program ids a transaction
+ * and 25.4 MiB at 32, the fake ledger's own request log included (compactId).
+ * Enough for thirty-three links holding a whole MAX_SIGNATURES window and its
+ * anchor each; past it, the wallets whose reads were kept longest ago are
+ * dropped, and a dropped transaction is read again from the RPC.
+ */
+export const WALK_CACHE_MAX_ENTRIES = 10_000;
+
+/**
+ * What the walk read, KEPT BETWEEN SWEEPS, per wallet.
+ *
+ * WHY. Nothing but a landed settle moves the frontier, so a span whose walk
+ * reaches the frontier and does not settle is walked again from the same
+ * frontier on its next turn (every sweep while it is busy, and for every link at
+ * fifty links or fewer; src/doorbell.ts), and its whole window — the anchor and
+ * the oldest prefix above the frontier — used to be fetched again: a losing span resting at NO_PROFIT up
+ * to ZERO_BASE_MIN_TXS, an INCOMPLETE one that reached its frontier (a read that
+ * failed, or a balance-chain break), a RETRY, and the link's own last settle,
+ * which sits above the frontier it moved until the next one lands. Measured over the fake ledger: a
+ * losing wallet that only trades re-fetched up to 101 transactions a turn while
+ * it rested (99 trades, its last settle and the anchor), and a stranger's 299
+ * dust transfers made every turn of that link fetch 300, for one payment of their
+ * fees. With this, a turn fetches what the cache does not hold: mostly what is
+ * new since the last turn, and anything the cache dropped or never kept (below).
+ *
+ * SAFE BECAUSE THE WALK READS FINALIZED HISTORY ONLY (WALK_COMMITMENT): what a
+ * finalized transaction says never changes. What is not trusted is not kept: a
+ * read the RPC would not return (null), or returned without the wallet among its
+ * keys, is asked again; and a walk that found a balance-chain break where no read
+ * had failed keeps nothing for its wallet, so the next turn fetches its window
+ * again instead of trusting any of it.
+ *
+ * WHAT A CACHED WALK MEASURES. When both read the whole window, exactly what an
+ * uncached walk measures. A cached walk does not ask the RPC for what it holds,
+ * so where the RPC would answer null for such a transaction, it measures from the
+ * finalized read it kept and an uncached walk would be INCOMPLETE.
+ *
+ * BOUNDED THREE WAYS. A walk that reaches its frontier replaces what was kept for
+ * that wallet with what it read and trusts — its anchor and its prefix, or nothing
+ * after a chain break where no read failed — so what fell below the frontier is
+ * dropped by the first walk that reaches the new one; past maxEntries the wallets
+ * whose reads were kept longest ago go first (a walk that does not reach its
+ * frontier, or throws, leaves its wallet's place as it was); and the sweep prunes
+ * every wallet that is no longer linked (prune).
+ */
+export class WalkCache {
+  readonly #wallets = new Map<string, ReadonlyMap<string, TxFacts>>();
+  #entries = 0;
+  #hits = 0;
+  #fetched = 0;
+
+  constructor(readonly maxEntries: number = WALK_CACHE_MAX_ENTRIES) {
+    if (!Number.isInteger(maxEntries) || maxEntries < 1) throw new Error(`a walk cache holds at least one transaction, not ${maxEntries}`);
+  }
+
+  get(wallet: string, signature: string): TxFacts | undefined {
+    return this.#wallets.get(wallet)?.get(signature);
+  }
+
+  /** Replaces what is kept for `wallet` with `facts`, which become the most recently walked. */
+  keep(wallet: string, facts: ReadonlyMap<string, TxFacts>): void {
+    this.#drop(wallet);
+    // A window larger than the whole cache would only evict every other wallet and then itself.
+    if (facts.size === 0 || facts.size > this.maxEntries) return;
+    this.#wallets.set(wallet, new Map(facts));
+    this.#entries += facts.size;
+    for (const [other, kept] of this.#wallets) {
+      if (this.#entries <= this.maxEntries) break;
+      this.#wallets.delete(other);
+      this.#entries -= kept.size;
+    }
+  }
+
+  /** Forgets what is kept for every wallet not in `linked`: the sweep calls it with the wallets it discovered. */
+  prune(linked: ReadonlySet<string>): void {
+    for (const wallet of [...this.#wallets.keys()]) if (!linked.has(wallet)) this.#drop(wallet);
+  }
+
+  #drop(wallet: string): void {
+    const old = this.#wallets.get(wallet);
+    if (old === undefined) return;
+    this.#entries -= old.size;
+    this.#wallets.delete(wallet);
+  }
+
+  /** Transactions kept, over every wallet. */
+  get size(): number {
+    return this.#entries;
+  }
+
+  /** What one walk that reached its frontier took from here and from the reader; measureSince reports it. */
+  noteWalk(walk: { readonly hits: number; readonly fetched: number }): void {
+    this.#hits += walk.hits;
+    this.#fetched += walk.fetched;
+  }
+
+  /**
+   * Since this cache was made: transactions served from it, and transactions the
+   * walks fetched instead. Totals only; the sweep reads them before and after
+   * itself and reports the difference (walkSweepReport, sweep-cost.ts).
+   */
+  get counters(): WalkCounters {
+    return { hits: this.#hits, fetched: this.#fetched };
+  }
+}
+
+/** A WalkCache's running totals. */
+export interface WalkCounters {
+  readonly hits: number;
+  readonly fetched: number;
+}
+
+/** How a walk may use what earlier sweeps read. */
+export interface WalkOptions {
+  /** What earlier walks read; absent, every transaction is fetched. */
+  readonly cache?: WalkCache;
+}
+
 export function connectionReader(connection: Connection): LedgerReader {
   return {
     signatures: (wallet, options, commitment) =>
@@ -326,6 +511,8 @@ export interface WindowMeasurement {
    * a walk that did not reach the frontier, which reads nothing.
    */
   readonly prefixCut: boolean;
+  /** Transactions this walk fetched from the reader, its anchor included; what a WalkCache held is not counted. */
+  readonly fetched: number;
 }
 
 /** One transaction the volume probe counted: where it sits, when, and what it traded. */
@@ -367,6 +554,8 @@ export async function measureSince(
    * profit keeper leaves it — nothing is probed and `volumeTrades` is absent.
    */
   volumeProbe?: VolumeProbe,
+  /** What earlier sweeps read (WalkOptions). The signature pages are always walked. */
+  { cache }: WalkOptions = {},
 ): Promise<WindowMeasurement> {
   // Collect signatures newest-first until one sits at or below the frontier.
   const collected: { signature: string; slot: number }[] = [];
@@ -447,6 +636,7 @@ export async function measureSince(
     frontierReached,
     pagesExhausted,
     prefixCut: false,
+    fetched: 0,
   };
   // NOTHING IS READ THAT CANNOT BE ATTESTED. A walk that did not reach the
   // frontier is refused whatever its transactions say, so not one of them is
@@ -478,6 +668,34 @@ export async function measureSince(
   let firstSlot = 0n;
   const settleProgramId = settleProgram?.toBase58();
   const volumeTrades: VolumeTrade[] = [];
+  const walletKey = wallet.toBase58();
+  /** Every transaction this walk used, fetched or cached: what the cache keeps for this wallet afterwards. */
+  const used = new Map<string, TxFacts>();
+  let fetched = 0;
+  let hits = 0;
+  /**
+   * One transaction's facts: from the cache when an earlier walk read it whole
+   * (and, where `probed`, with this probe's answer), else from the reader. Null
+   * is a transaction the RPC would not return. The anchor is read unprobed: the
+   * probe runs on the window's transactions only, as it always did.
+   */
+  const read = async (signature: string, probed: boolean): Promise<TxFacts | null> => {
+    const probe = probed ? volumeProbe : undefined;
+    const hit = cache?.get(walletKey, signature);
+    if (hit !== undefined && (probe === undefined || (hit.volume?.probe === probe && hit.volume.settleProgramId === settleProgramId))) {
+      used.set(signature, hit);
+      hits += 1;
+      return hit;
+    }
+    fetched += 1;
+    const tx = await reader.transaction(signature, WALK_COMMITMENT);
+    if (!tx || !tx.meta) return null;
+    const facts = factsOf({ ...tx, meta: tx.meta }, wallet, settleProgramId, probe);
+    // AN ANSWER WITHOUT THE WALLET IS NOT KEPT: the anchor counts it as unfetchable,
+    // and one that stayed would say so for the life of the process.
+    if (facts.named !== null) used.set(signature, facts);
+    return facts;
+  };
 
   // THE ANCHOR SEEDS THE CHAIN. Each walk used to start its chain at null, so
   // the first transaction of a window was checked against nothing, and a hole
@@ -487,14 +705,13 @@ export async function measureSince(
   // equal it. An anchor the RPC would not return, or returned without the
   // wallet among its keys, is counted as unfetchable, never skipped: a skipped
   // anchor is a window whose first balance nobody checked.
-  const anchorTx = await reader.transaction(anchor, WALK_COMMITMENT);
-  const anchorBalances = anchorTx === null ? null : walletBalances(anchorTx, wallet);
-  if (anchorBalances === null) unfetchable += 1;
-  else prevPost = anchorBalances.post;
+  const anchorFacts = await read(anchor, false);
+  if (anchorFacts === null || anchorFacts.named === null) unfetchable += 1;
+  else prevPost = anchorFacts.named.post;
 
   for (const entry of prefix) {
-    const tx = await reader.transaction(entry.signature, WALK_COMMITMENT);
-    if (!tx || !tx.meta) {
+    const facts = await read(entry.signature, true);
+    if (facts === null) {
       // A NULL IS NOT AN ABSENCE. live-route.ts documents the same hazard in
       // its own error text: a throttling RPC returns null WITHOUT erroring. So
       // skipping here silently dropped a real balance-changing transaction from
@@ -505,27 +722,26 @@ export async function measureSince(
       unfetchable += 1;
       continue;
     }
-    const balances = walletBalances(tx, wallet);
-    if (balances === null) continue;
-    const { pre, post, programs } = balances;
+    if (facts.named === null) continue;
+    const { pre, post, programs } = facts.named;
 
     if (prevPost !== null && pre !== prevPost) chainBreaks += 1;
     prevPost = post;
     if (firstPre === null) {
       firstPre = pre;
-      firstSlot = BigInt(tx.slot);
+      firstSlot = BigInt(facts.slot);
     }
     lastPost = post;
     txCount += 1;
 
     const isExternalFlow = isExternalFlowTx(programs, settleProgramId);
-    const ownSettle = isExternalFlow && settleProgramId !== undefined && programs.has(settleProgramId);
+    const ownSettle = isExternalFlow && settleProgramId !== undefined && programs.includes(settleProgramId);
     if (isExternalFlow) {
       const delta = post - pre;
       if (delta > 0n) deposits += delta;
       else withdrawals += -delta;
       if (ownSettle) settleTxCount += 1;
-    } else if (tx.meta.err === null) {
+    } else if (!facts.failed) {
       successfulTradeCount += 1;
       // THE FEE IS NOT NOTIONAL, and it is inside this delta: the wallet is the
       // fee payer for its own swaps, so a buy shows notional + fee leaving and a
@@ -533,7 +749,7 @@ export async function measureSince(
       // trades often from being credited for its own costs — and keeps a
       // fee-only transaction (an approve, a close) at exactly zero rather than
       // at one fee of phantom volume.
-      const fee = isFeePayer(tx.transaction.message, wallet) ? BigInt(tx.meta.fee) : 0n;
+      const fee = facts.walletFee;
       const delta = post - pre;
       const notional = delta < 0n ? -delta - fee : delta + fee;
       if (notional > 0n) tradedLamports += notional;
@@ -541,14 +757,20 @@ export async function measureSince(
     // THE CADENCE COUNTS WHAT THE WALLET SIGNED, AND NOTHING WE SENT. A failed
     // transaction the wallet signed counts: the trader acted, and paid its fee.
     // Our own settle does not, although the wallet signed it too.
-    if (!ownSettle && isSignedByWallet(tx.transaction.message, wallet)) walletSignedTxCount += 1;
+    if (!ownSettle && facts.signedByWallet) walletSignedTxCount += 1;
     if (volumeProbe !== undefined) {
-      const traded = volumeProbe(tx, wallet, settleProgramId);
+      const traded = facts.volume!.traded;
       if (traded.counted) {
-        volumeTrades.push({ signature: entry.signature, slot: BigInt(tx.slot), blockTime: tx.blockTime ?? null, lamports: traded.lamports });
+        volumeTrades.push({ signature: entry.signature, slot: BigInt(facts.slot), blockTime: facts.blockTime, lamports: traded.lamports });
       }
     }
   }
+  // A CHAIN THAT BREAKS WHERE NO READ FAILED KEEPS NOTHING: whatever caused it,
+  // the next turn fetches the window again instead of trusting any of it. A walk
+  // with a read that failed keeps its good reads, since the break may be that
+  // missing transaction's, and the missing one is asked for again.
+  cache?.keep(walletKey, chainBreaks > 0 && unfetchable === 0 ? new Map() : used);
+  cache?.noteWalk({ hits, fetched });
 
   const cashDelta = firstPre === null ? 0n : lastPost - firstPre;
   return {
@@ -570,6 +792,7 @@ export async function measureSince(
     // settle can move the frontier to without skipping or rereading anything.
     lastSlot: endSlot === null ? from : BigInt(endSlot),
     prefixCut,
+    fetched,
     ...(volumeProbe === undefined ? {} : { volumeTrades }),
   };
 }
@@ -598,7 +821,7 @@ export function isSignedByWallet(message: VersionedMessage, wallet: PublicKey): 
 /**
  * The wallet's balance before and after one transaction, and every program the
  * transaction touched, inner instructions included. Null when there is no meta
- * or the transaction does not name the wallet.
+ * or the transaction does not name the wallet. Read through factsOf.
  */
 function walletBalances(
   tx: VersionedTransactionResponse,

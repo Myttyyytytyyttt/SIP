@@ -22,7 +22,9 @@
 // standing warning is cleared at the escalation or it swallows the critical.
 
 import type { Alert } from "./alerts.js";
+import type { WalkCounters } from "./measure-window.js";
 import type { SettleOutcome } from "./settle-decision.js";
+import type { SweepWalk } from "./status.js";
 
 /**
  * How many sweeps' durations are kept for the percentiles: thirty.
@@ -263,3 +265,11 @@ export function createJupiterCallCounter(): JupiterCallCounter {
 
 /** The one counter the keeper reads and venue-depth.ts writes. */
 export const jupiterCalls: JupiterCallCounter = createJupiterCallCounter();
+
+/**
+ * What one sweep's settle walks read (SweepWalk): the walk cache's running totals
+ * when the sweep ended less those when it began, and what the cache holds now.
+ */
+export function walkSweepReport(atStart: WalkCounters, atEnd: WalkCounters, cacheEntries: number): SweepWalk {
+  return { fetched: atEnd.fetched - atStart.fetched, cacheHits: atEnd.hits - atStart.hits, cacheEntries };
+}

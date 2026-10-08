@@ -162,6 +162,19 @@ export interface SweepPhaseMs {
 }
 
 /**
+ * What one sweep's settle walks read, counted by the walk cache over the walks
+ * that reached their frontier; a walk that threw is not counted.
+ */
+export interface SweepWalk {
+  /** Transactions fetched from the RPC, anchors included. */
+  readonly fetched: number;
+  /** Transactions the walk cache served instead. */
+  readonly cacheHits: number;
+  /** Transactions the cache holds once the sweep is over. */
+  readonly cacheEntries: number;
+}
+
+/**
  * The doorbell (src/doorbell.ts), as an operator reads it.
  *
  * THE QUESTION IT ANSWERS: is the keeper still looking at everybody? `trusted`
@@ -235,6 +248,15 @@ export interface KeeperStatus {
   linksTriaged: number | null;
   /** Where the last sweep's milliseconds went, by phase. Null until one has completed. */
   lastSweepPhaseMs: SweepPhaseMs | null;
+  /**
+   * What the last sweep's settle walks read (SweepWalk). Null until a sweep has
+   * completed.
+   *
+   * THE WALK IS WHERE A BUSY WALLET'S COST IS: one getTransaction for the anchor
+   * and for each transaction of the window — the oldest prefix above the frontier
+   * — that the cache does not hold, one call at a time.
+   */
+  lastSweepWalk: SweepWalk | null;
   /**
    * Which endpoint answered last, and how many times one has been set aside.
    *
