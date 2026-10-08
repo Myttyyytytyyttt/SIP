@@ -41,6 +41,7 @@ import {
 import { MODE_PROFIT } from "../src/program-scripts.js";
 import { ZERO_BASE_MIN_TXS, decideFromMeasurement, defaultVolumeBase } from "../src/settle-decision.js";
 import { FakeLedger, chained, type LedgerEntry } from "./fake-ledger.js";
+import { fixture, fixtureTransaction } from "./volume-fixtures.js";
 
 const SIP = SIP_PROGRAM_ID;
 const SYSTEM = "11111111111111111111111111111111";
@@ -48,6 +49,8 @@ const ED25519 = "Ed25519SigVerify111111111111111111111111111";
 const COMPUTE = "ComputeBudget111111111111111111111111111111";
 const JUPITER = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
 const RAYDIUM = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
+const MEMO_V2 = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+const MEMO_V1 = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
 
 describe("classification", () => {
   it("a real settle counts as external flow, so it does not depress the next window", () => {
@@ -71,6 +74,15 @@ describe("classification", () => {
     // trade — erasing the win from the skim if presence were enough.
     expect(isExternalFlowTx([SIP, JUPITER, SYSTEM], SIP)).toBe(false);
     expect(isExternalFlowTx([SIP, RAYDIUM], SIP)).toBe(false);
+  });
+
+  it("a deposit or a payment out carrying a memo is external flow, under either Memo program; a trade carrying one is still trading", () => {
+    for (const memo of [MEMO_V2, MEMO_V1]) {
+      expect(isExternalFlowTx([SYSTEM, memo], SIP), memo).toBe(true);
+      expect(isExternalFlowTx([COMPUTE, SYSTEM, memo], SIP), memo).toBe(true);
+      expect(isExternalFlowTx([JUPITER, SYSTEM, memo], SIP), memo).toBe(false);
+      expect(isExternalFlowTx([SIP, JUPITER, memo], SIP), memo).toBe(false);
+    }
   });
 
   it("without a settle program id, only the pure set is flow", () => {
@@ -454,6 +466,57 @@ describe("the walk, over a finalized ledger", () => {
 // fraction of a cent, and 100 transfers a stranger sent used to make a losing
 // span zero-settle and forget its loss. The fake ledger's signers build each case
 // as the chain would carry it.
+
+describe("a deposit that carries a memo", () => {
+  it("is measured as a deposit between two trades, so only the trades' net is charged", async () => {
+    const stranger = Keypair.generate().publicKey;
+    const ledger = new FakeLedger(
+      wallet,
+      chained(1_000_000, [
+        { signature: "anchor-500", slot: 500, programs: FLOW, delta: 0 },
+        { signature: "trade-501", slot: 501, programs: TRADE, delta: 50_000 },
+        // An exchange's payout: its own key signs and pays, with a reference in a memo.
+        { signature: "payout-502", slot: 502, programs: [COMPUTE, SYSTEM, MEMO_V2], delta: 1_000_000_000, signers: [stranger] },
+        { signature: "trade-503", slot: 503, programs: TRADE, delta: -20_000 },
+      ]),
+    );
+    const measured = await measureSince(ledger, wallet, 500n, settleProgram);
+    expect(measured).toMatchObject({ txCount: 3, deposits: 1_000_000_000n, profitLamports: 30_000n, successfulTradeCount: 2, chainBreaks: 0 });
+    // Before the memo was flow, a billion lamports of profit, charged at the vault's rate up to its per-settlement cap.
+    expect(await decideFromMeasurement(measured, at500)).toEqual({ kind: "settle", baseLamports: 30_000n, endSlot: 503n });
+  });
+
+  it("is a deposit for the wallet a real mainnet payout with a memo paid, and settles nothing", async () => {
+    // volume-mainnet.json "memo-transfer": {System, Memo v2}, 900 000 lamports from
+    // the payer to the wallet it names second, which did not sign.
+    const { tx: payout } = await fixtureTransaction("memo-transfer");
+    const { signature } = fixture("memo-transfer");
+    const paid = new PublicKey("ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt");
+    const anchorSlot = payout.slot - 1;
+    // The anchor the walk starts the balance chain from: the payee's balance before the payout.
+    const below = new FakeLedger(paid, [{ signature: "anchor", slot: anchorSlot, pre: 2_506_570, post: 2_506_570, programs: FLOW }]);
+    const reader = {
+      signatures: async () => [
+        { signature, slot: payout.slot },
+        { signature: "anchor", slot: anchorSlot },
+      ],
+      transaction: async (wanted: string, commitment: Finality) => (wanted === signature ? payout : below.transaction(wanted, commitment)),
+    };
+    const measured = await measureSince(reader, paid, BigInt(anchorSlot), settleProgram);
+    expect(measured).toMatchObject({
+      txCount: 1,
+      deposits: 900_000n,
+      withdrawals: 0n,
+      profitLamports: 0n,
+      successfulTradeCount: 0,
+      walletSignedTxCount: 0,
+      chainBreaks: 0,
+      unfetchable: 0,
+    });
+    const decision = await decideFromMeasurement(measured, ctx(BigInt(anchorSlot), 10n ** 12n));
+    expect(decision).toMatchObject({ kind: "stop", outcome: "NO_PROFIT", baseLamports: 0n });
+  });
+});
 
 describe("the zero-base cadence counts only what the wallet signed", () => {
   const stranger = Keypair.generate().publicKey;

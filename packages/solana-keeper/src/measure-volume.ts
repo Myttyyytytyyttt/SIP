@@ -4,9 +4,10 @@
 // A TRANSACTION COUNTS WHEN ALL FOUR HOLD:
 //   1. the trading wallet SIGNED it — a stranger's credit is not the trader's volume;
 //   2. it SUCCEEDED — a failed swap pays its fee and buys nothing;
-//   3. it is not an external flow or one of our own settles (isExternalFlowTx);
+//   3. it is not an external flow or one of our own settles (isExternalFlowTx) —
+//      a transfer, with or without a memo;
 //   4. the wallet's SOL position and another token it owns moved in OPPOSITE
-//      directions — a buy or a sell, not a wrap, an unwrap or a transfer with a Memo.
+//      directions — a buy or a sell, not a wrap or an unwrap.
 //
 // ITS NOTIONAL is how far the wallet's SOL position moved: its own lamports plus
 // the wSOL its token accounts hold, with the network fee put back when the wallet

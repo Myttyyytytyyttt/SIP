@@ -108,7 +108,8 @@ describe("what is not volume", () => {
   const traps: readonly (readonly [string, string])[] = [
     ["wrap", "no-sol-leg"],
     ["unwrap", "no-sol-leg"],
-    ["memo-transfer", "no-counter-leg"],
+    // A transfer with a memo is an external flow (measure-window.ts, NON_TRADING), so rule 3 refuses it before rule 4.
+    ["memo-transfer", "flow"],
     ["failed-swap", "failed"],
     ["usdc-to-token-swap", "no-sol-leg"],
   ];

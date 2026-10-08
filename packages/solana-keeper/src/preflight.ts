@@ -72,7 +72,7 @@ export interface PreflightResult {
  * on purpose — which is the point. test/attestation-golden.test.ts holds the
  * second copy, under vitest.
  */
-export const EXPECTED_INVARIANTS = 20;
+export const EXPECTED_INVARIANTS = 22;
 
 /**
  * THE VOLUME RULE, IN THE IMAGE THAT WILL CHARGE ON IT. Two of the owner's real
@@ -107,6 +107,7 @@ async function volumeVector(): Promise<{ readonly buy: bigint | null; readonly s
 const ED25519 = "Ed25519SigVerify111111111111111111111111111";
 const SYSTEM = "11111111111111111111111111111111";
 const JUPITER = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
+const MEMO = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 
 /**
  * The four instructions the money paths send, built offline from fixed inputs.
@@ -292,6 +293,8 @@ export async function runPreflight(): Promise<PreflightResult> {
     // program is trading, even bundled with a settle.
     ["real settle is flow", isExternalFlowTx([ED25519, SIP, SYSTEM], SIP), true],
     ["pure deposit is flow", isExternalFlowTx([SYSTEM], SIP), true],
+    ["deposit with a memo is flow", isExternalFlowTx([SYSTEM, MEMO], SIP), true],
+    ["trade with a memo is trading", isExternalFlowTx([JUPITER, SYSTEM, MEMO], SIP), false],
     ["clean trade is trading", isExternalFlowTx([JUPITER, SYSTEM], SIP), false],
     ["settle+trade bundle is trading", isExternalFlowTx([SIP, JUPITER, SYSTEM], SIP), false],
     ["the IDL is not the retired program", SIP !== OLD_NUVEM_PROGRAM_ID, true],

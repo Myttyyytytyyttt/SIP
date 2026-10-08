@@ -13,21 +13,39 @@
 // than to account age.
 //
 // The formula is RH's, unchanged: profit = cashΔ − deposits + withdrawals, in
-// lamports. Pure System/ComputeBudget transfers are external flows; everything
-// else (Jupiter, pump.fun, Raydium, anything) is trading and counts.
+// lamports. A transaction that touches only System, ComputeBudget, Ed25519, SPL
+// Memo and our own program is an external flow — a plain transfer, with or
+// without a memo, or our own settle; one that calls anything else (Jupiter,
+// pump.fun, Raydium, a bridge program, anything) is trading and counts.
 
 import { SolanaJSONRPCErrorCode } from "@solana/web3.js";
 import type { Connection, Finality, PublicKey, VersionedMessage, VersionedTransactionResponse } from "@solana/web3.js";
 import type { TradeNotional, VolumeProbe } from "./measure-volume.js";
 
 // Programs whose presence NEVER means trading: the System/ComputeBudget pair,
-// plus the Ed25519 precompile that a settle carries for its attestation. A
-// transaction touching ONLY these (optionally plus our own program) moved the
-// wallet's lamports for a reason that is not a trade.
+// the Ed25519 precompile that a settle carries for its attestation, and both SPL
+// Memo programs. A transaction touching ONLY these (optionally plus our own
+// program) moved the wallet's lamports for a reason that is not a trade.
+//
+// THE MEMO, BECAUSE A DEPOSIT CAN CARRY ONE (2026-10-08). A service that pays out
+// with a reference sends {System, Memo}: the fixture volume-mainnet.json
+// "memo-transfer" is one, read from mainnet. Classified as trading, such a
+// deposit was profit, and a PROFIT vault took its rate of it, up to its
+// per-settlement cap; a memo'd payment out was a trading loss. Neither Memo
+// program moves a lamport or a token, or invokes another program — each checks
+// that its message is UTF-8, and v2 also checks its signers and logs it — so a
+// set that adds them still lets value move only through System and our own
+// program. A bridge is NOT here: bridge
+// programs move value, and many fill through a swap, so a deposit credited by a
+// transaction that calls one is still trading, as anything but a plain transfer
+// is.
 const NON_TRADING = new Set([
   "11111111111111111111111111111111",
   "ComputeBudget111111111111111111111111111111",
   "Ed25519SigVerify111111111111111111111111111",
+  // SPL Memo v2, then v1.
+  "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+  "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo",
 ]);
 
 /**

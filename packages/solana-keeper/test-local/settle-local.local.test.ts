@@ -43,7 +43,6 @@ import {
   PublicKey,
   SystemProgram,
   Transaction,
-  TransactionInstruction,
   sendAndConfirmTransaction,
   type Connection,
   type MessageAccountKeys,
@@ -74,7 +73,6 @@ const MAX_CONTRIBUTION = 10n * SOL;
 /** The product's rates (state.rs): PROFIT 20 %, VOLUME 2 %. Every vault stores both. */
 const PROFIT_BPS = 2_000;
 const VOLUME_BPS = 200;
-const MEMO_PROGRAM = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 const ED25519_PROGRAM = "Ed25519SigVerify111111111111111111111111111";
 /** settle_v2's discriminator, as the exported IDL records it. */
 const SETTLE_V2_DISCRIMINATOR = [5, 41, 238, 141, 219, 81, 39, 145];
@@ -487,20 +485,18 @@ describe("the local proof: one settle per mode lands through the keeper's own tu
     // signature at or below the span's start, which is the epoch.
     while (BigInt(await connection.getSlot("confirmed")) <= lastEpoch) await sleep(200);
 
-    // Any program outside System, ComputeBudget, Ed25519 and sip-vault makes a
-    // transaction trading (measure-window.ts). Memo is in the validator's
-    // genesis; the ATA program is the fallback if it ever is not.
-    const memo = await connection.getAccountInfo(MEMO_PROGRAM, "confirmed");
-    const marker =
-      memo?.executable === true
-        ? new TransactionInstruction({ programId: MEMO_PROGRAM, keys: [], data: Buffer.from("trade") })
-        : createAssociatedTokenAccountIdempotentInstruction(
-            market.publicKey,
-            getAssociatedTokenAddressSync(NATIVE_MINT, market.publicKey),
-            market.publicKey,
-            NATIVE_MINT,
-          );
-    console.log(`local proof: each trade is the market's 1 SOL payment beside a ${memo?.executable === true ? "Memo" : "create-idempotent ATA"} instruction`);
+    // Any program outside the flow set (System, ComputeBudget, Ed25519, both SPL
+    // Memo programs) and sip-vault makes a transaction trading (measure-window.ts).
+    // NOT A MEMO: since 2026-10-08 a payment beside a memo is a deposit. The ATA
+    // program is in the validator's genesis, and the market pays the rent of its
+    // own wrapped-SOL account, so the wallet's delta is still exactly the payment.
+    const marker = createAssociatedTokenAccountIdempotentInstruction(
+      market.publicKey,
+      getAssociatedTokenAddressSync(NATIVE_MINT, market.publicKey),
+      market.publicKey,
+      NATIVE_MINT,
+    );
+    console.log("local proof: each trade is the market's 1 SOL payment beside a create-idempotent ATA instruction");
 
     for (const p of participants) {
       const epoch = earlier(epochs.get(p.name), "the setup");

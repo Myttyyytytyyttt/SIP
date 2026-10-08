@@ -92,8 +92,10 @@ describe("--preflight", () => {
   // This case only holds the count and the vectors steady.
   // AND SINCE 2026-09-25, TWENTY: the volume keeper's rule, measured on two of the
   // owner's real mainnet transactions in the image that will charge on it.
-  it("holds all twenty invariants: the golden vector, the seven builds, the venue account and the volume rule", async () => {
-    expect(await runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 20 });
+  // TWENTY-TWO SINCE 2026-10-08: a deposit carrying a memo is flow, and a trade
+  // carrying one is still trading — the Memo programs joined the flow set.
+  it("holds all twenty-two invariants: the golden vector, the seven builds, the venue account, the volume rule and the memo", async () => {
+    expect(await runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 22 });
   });
 
   // THE SECOND COPY OF THE NUMBER, and the reason it is written as a literal:
@@ -112,7 +114,7 @@ describe("--preflight", () => {
   // Raising this line is how that check was added on purpose rather than as a
   // side effect.
   it("pins its own size, so a gate that shrinks fails instead of quietly reporting a smaller one", async () => {
-    expect(EXPECTED_INVARIANTS).toBe(20);
+    expect(EXPECTED_INVARIANTS).toBe(22);
     expect((await runPreflight()).invariants).toBe(EXPECTED_INVARIANTS);
   });
 
@@ -143,7 +145,7 @@ describe("--preflight", () => {
       expect(await preflightOverADriftedVector()).toEqual({
         ok: false,
         program: SIP_PROGRAM_ID,
-        invariants: 20,
+        invariants: 22,
         failure: 'invariant "the attestation mirror matches the program golden vector" is false, expected true',
       });
     } finally {

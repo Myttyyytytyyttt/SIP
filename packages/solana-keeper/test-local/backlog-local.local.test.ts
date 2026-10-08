@@ -78,7 +78,6 @@ const WALLET_FUNDING = 2n * SOL;
 const FIRST_TRANSFERS = MAX_SIGNATURES - 1;
 /** What sits above it, so the span holds more than 300 signatures. */
 const LATER_TRANSFERS = 20;
-const MEMO_PROGRAM = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 /** Transactions sent at once, and signatures per status request (the RPC takes at most 256). */
 const SEND_CHUNK = 50;
 const STATUS_CHUNK = 256;
@@ -197,17 +196,15 @@ async function zeroTransfers(count: number, firstUnits: number): Promise<Buffer[
 /**
  * An instruction that makes the transaction beside it a trade, paid by `payer`.
  *
- * Any program outside System, ComputeBudget, Ed25519 and sip-vault makes a
- * transaction trading (measure-window.ts). Memo is in the validator's genesis; the
- * ATA program is the fallback if it ever is not, and then `payer` also pays the
- * rent of its own wrapped-SOL account, which is why the loss is read from its
- * receipt and never assumed.
+ * Any program outside the flow set (System, ComputeBudget, Ed25519, both SPL Memo
+ * programs) and sip-vault makes a transaction trading (measure-window.ts). NOT A
+ * MEMO: since 2026-10-08 a transfer beside a memo is a flow. The ATA program is in
+ * the validator's genesis, and `payer` pays the rent of its own wrapped-SOL
+ * account the first time, which is why the loss is read from its receipt and
+ * never assumed.
  */
 async function tradeMarker(payer: PublicKey): Promise<TransactionInstruction> {
-  const memo = await connection.getAccountInfo(MEMO_PROGRAM, "confirmed");
-  return memo?.executable === true
-    ? new TransactionInstruction({ programId: MEMO_PROGRAM, keys: [], data: Buffer.from("trade") })
-    : createAssociatedTokenAccountIdempotentInstruction(payer, getAssociatedTokenAddressSync(NATIVE_MINT, payer), payer, NATIVE_MINT);
+  return createAssociatedTokenAccountIdempotentInstruction(payer, getAssociatedTokenAddressSync(NATIVE_MINT, payer), payer, NATIVE_MINT);
 }
 
 /**
