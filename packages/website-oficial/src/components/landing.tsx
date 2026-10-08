@@ -63,14 +63,17 @@
  *
  * COMMITTED DARK, whatever the theme: the app and the ground are dark.
  *
- * THE INTRO (owner, 10-07). The first time somebody opens the landing in a tab,
- * the loader is the launch film's green logo build instead of the spinning
- * ring: the point of light, the guides, the pieces of the S locking together,
- * the bloom. The page is revealed when the film has ended AND the page is ready,
- * whichever comes last; a click, a tap or a key skips it. Later visits in the
- * same tab get the ring. Reduced motion shows the film's last frame, still.
+ * THE INTRO (owner, 10-07). The loader is the launch film's green logo build
+ * instead of the spinning ring: the point of light, the guides, the pieces of
+ * the S locking together, the bloom. The page is revealed when the film has
+ * ended AND the page is ready, whichever comes last; a click, a tap or a key
+ * skips it. Reduced motion shows the film's last frame, still.
+ * FIVE MINUTES OF MEMORY (owner, 10-08). Whoever saw it less than
+ * INTRO_REMEMBER_MS ago gets the ring — Back from the app, a Disconnect, the
+ * Live toggle all come here, and a film each time would be a toll; after that
+ * it plays again. It used to be once per tab, which made it hard to see twice.
  * The decision is made BEFORE THE FIRST PAINT by a few lines of inline script
- * (sessionStorage is not readable on the server), so a returning visitor never
+ * (localStorage is not readable on the server), so a returning visitor never
  * sees the film start and vanish.
  *
  * THEN THE PAGE ARRIVES OUT OF STEP (owner, 10-07): not one rise for everything
@@ -129,8 +132,21 @@ const INTRO_WIDE_MEDIA = "(min-width: 1024px)";
  * sample page changes).
  */
 const APP_LOOP = { webm: "/landing/app-loop.webm", mp4: "/landing/app-loop.mp4", poster: "/landing/app-loop.jpg" } as const;
-/** sessionStorage: the film is for the first visit in a tab. */
+/** localStorage: when this browser last saw the film, in ms since the epoch. */
 const INTRO_KEY = "saverfi.intro";
+/** How long the film is remembered: within it the landing opens on the ring. */
+export const INTRO_REMEMBER_MS = 5 * 60_000;
+
+/**
+ * Whether the film was seen recently enough to skip. Anything that is not a
+ * time in the past window — nothing stored, the old per-tab "seen", a clock that
+ * moved backwards — plays it. The inline script below makes the same decision
+ * in the same words; landing.test.ts keeps the two in step.
+ */
+export const introSeenRecently = (stored: string | null, now: number): boolean => {
+  const at = Number(stored);
+  return stored !== null && Number.isFinite(at) && at > 0 && now - at >= 0 && now - at < INTRO_REMEMBER_MS;
+};
 /**
  * WHERE THE S ENDS IN THE FILM, measured on its last frame (launch session,
  * 10-08): a 1920×1080 frame, the S's centre and height in it. The film is shown
@@ -156,12 +172,13 @@ const INTRO_STILL_MS = 900;
 const INTRO_START_MS = 2500;
 const INTRO_END_MARGIN_MS = 800;
 /**
- * Runs while the HTML is parsed, before the first paint: a visitor who has seen
- * the film in this tab gets the ring (data-intro-seen), anybody else's film
- * starts now rather than at hydration. The same decision is made again in a
- * layout effect for a landing React mounts on the client, where this does not run.
+ * Runs while the HTML is parsed, before the first paint: a visitor who saw the
+ * film in the last INTRO_REMEMBER_MS gets the ring (data-intro-seen), anybody
+ * else's film starts now rather than at hydration. The same decision is made
+ * again in a layout effect for a landing React mounts on the client, where this
+ * does not run. Its test is introSeenRecently's, spelled in ES5.
  */
-const INTRO_SCRIPT = `(function(){var r=document.currentScript&&document.currentScript.parentElement;if(!r)return;var s=false;try{s=sessionStorage.getItem(${JSON.stringify(INTRO_KEY)})==="seen"}catch(e){}if(s){r.setAttribute("data-intro-seen","");return}if(window.matchMedia&&matchMedia("(prefers-reduced-motion: reduce)").matches)return;var v=r.querySelector(".landing-intro-video");if(v){var p=v.play();if(p&&p.catch)p.catch(function(){})}})();`;
+export const INTRO_SCRIPT = `(function(){var r=document.currentScript&&document.currentScript.parentElement;if(!r)return;var s=false;try{var v0=localStorage.getItem(${JSON.stringify(INTRO_KEY)});var t=Number(v0),d=Date.now()-t;s=v0!==null&&isFinite(t)&&t>0&&d>=0&&d<${INTRO_REMEMBER_MS}}catch(e){}if(s){r.setAttribute("data-intro-seen","");return}if(window.matchMedia&&matchMedia("(prefers-reduced-motion: reduce)").matches)return;var v=r.querySelector(".landing-intro-video");if(v){var p=v.play();if(p&&p.catch)p.catch(function(){})}})();`;
 
 /**
  * THE LOADER lifts when the screenshot has decoded and the fonts are in (so
@@ -375,7 +392,7 @@ export function Landing({
     if (!root) return;
     let seen = false;
     try {
-      seen = window.sessionStorage.getItem(INTRO_KEY) === "seen";
+      seen = introSeenRecently(window.localStorage.getItem(INTRO_KEY), Date.now());
     } catch {
       // Storage refused (a private window, blocked site data): the film plays, once per page load.
     }
@@ -498,14 +515,15 @@ export function Landing({
       const built = introVideo !== null && !root.hasAttribute("data-intro-still") && (introVideo.ended || introVideo.currentTime >= INTRO_S_BUILT_S);
       flyFromFilm = !reduced && built;
       // SEEN MEANS SEEN. Only a film that got as far as the S, a skip the visitor
-      // chose, or the still that reduced motion asked for counts. A film that was
-      // too slow to start, failed or was refused autoplay does not: it gets
-      // another chance on the next load in this tab (owner, 10-08: he never saw it).
+      // chose, or the still that reduced motion asked for counts — and the five
+      // minutes run from then. A film that was too slow to start, failed or was
+      // refused autoplay does not: it gets another chance on the next load
+      // (owner, 10-08: he never saw it).
       if (built || skippedByVisitor || reduced) {
         try {
-          window.sessionStorage.setItem(INTRO_KEY, "seen");
+          window.localStorage.setItem(INTRO_KEY, String(Date.now()));
         } catch {
-          // Not remembered: the next visit in this tab plays it again. Harmless.
+          // Not remembered: the next visit plays it again. Harmless.
         }
       }
       tryFinish();
@@ -569,13 +587,20 @@ export function Landing({
         introVideo.addEventListener("ended", finishIntro);
         introVideo.addEventListener("error", stillThenFinish);
         introVideo.addEventListener("playing", onIntroPlaying);
+        // INTRO_SCRIPT started a server-sent film while the page was parsed (play()
+        // clears `paused` at once), so its limit runs from navigation. A film this
+        // effect starts — a landing React mounts on the client: Back, a Disconnect,
+        // the Live toggle, five minutes after the last one — gets the whole limit
+        // from now: timed from navigation it was long spent, and the film was cut
+        // before its first frame.
+        const introFrom = introVideo.paused ? performance.now() : 0;
         // Autoplay refused (iOS Low Power Mode, a strict browser): the poster stands, then the page.
         if (introVideo.paused) introVideo.play().catch(stillThenFinish);
         else onIntroPlaying();
         introTimers.push(
           window.setTimeout(() => {
             if (!introStarted) finishIntro();
-          }, Math.max(0, INTRO_START_MS - performance.now())),
+          }, Math.max(0, INTRO_START_MS - (performance.now() - introFrom))),
         );
       }
       intro?.addEventListener("pointerdown", skipIntro);
@@ -682,7 +707,7 @@ export function Landing({
     >
       {walletsConfigured ? <LoginWatcher loginRef={loginRef} onComplete={onLoginComplete} onError={onLoginError} /> : null}
 
-      {/* ── The intro: the launch film's logo build, first visit only ───── */}
+      {/* ── The intro: the launch film's logo build, unless seen in the last five minutes ── */}
       <div className="landing-intro">
         {/* preload="none": a visitor who has seen it downloads nothing; INTRO_SCRIPT starts it for everybody else.
             NO POSTER: the still is the film's LAST frame, and as a poster it showed the finished S before the

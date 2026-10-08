@@ -36,7 +36,7 @@ vi.mock("next/image", () => ({
 }));
 
 import { EVM_EMBEDDED, embedded, phantom, userWith } from "../../test/fixtures/privy-user";
-import { Landing, connectActionOf, goesInAfterLogin } from "./landing";
+import { INTRO_REMEMBER_MS, INTRO_SCRIPT, Landing, connectActionOf, goesInAfterLogin, introSeenRecently } from "./landing";
 
 /** Signed in with a pension key (an external Solana wallet). */
 const withKey = () => ({ ready: true, authenticated: true, user: userWith([phantom()]) });
@@ -120,6 +120,45 @@ describe("a login completed while the landing is up", () => {
     mocked.opener = () => undefined;
     render(false);
     expect(mocked.loginOptions).toBeNull();
+  });
+});
+
+describe("the intro's five minutes of memory (owner, 10-08)", () => {
+  const NOW = Date.UTC(2026, 9, 8, 12, 0, 0);
+  const STORED = [
+    null,
+    "seen",
+    "abc",
+    "0",
+    String(NOW - 1_000),
+    String(NOW - INTRO_REMEMBER_MS + 1),
+    String(NOW - INTRO_REMEMBER_MS),
+    String(NOW - 60 * 60_000),
+    String(NOW + 60_000),
+  ];
+
+  it("skips the film only within five minutes of having seen it", () => {
+    expect(INTRO_REMEMBER_MS).toBe(300_000);
+    expect(introSeenRecently(String(NOW - 1_000), NOW)).toBe(true);
+    expect(introSeenRecently(String(NOW - INTRO_REMEMBER_MS + 1), NOW)).toBe(true);
+    expect(introSeenRecently(String(NOW - INTRO_REMEMBER_MS), NOW)).toBe(false);
+    // Nothing stored, the old per-tab "seen", garbage, or a clock that went backwards: the film plays.
+    for (const stored of [null, "seen", "abc", "0", String(NOW + 60_000)]) expect(introSeenRecently(stored, NOW), String(stored)).toBe(false);
+  });
+
+  it("the script that decides before the first paint agrees with it, value by value", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    for (const stored of STORED) {
+      const marks: string[] = [];
+      const root = { setAttribute: (name: string) => marks.push(name), querySelector: () => null };
+      vi.stubGlobal("document", { currentScript: { parentElement: root } });
+      vi.stubGlobal("localStorage", { getItem: () => stored });
+      vi.stubGlobal("window", { matchMedia: () => ({ matches: false }) });
+      vi.stubGlobal("matchMedia", () => ({ matches: false }));
+      new Function(INTRO_SCRIPT)();
+      expect(marks.includes("data-intro-seen"), String(stored)).toBe(introSeenRecently(stored, NOW));
+    }
   });
 });
 

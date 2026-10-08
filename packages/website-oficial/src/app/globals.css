@@ -203,8 +203,9 @@
    The launch film's logo build, over everything, on the landing's own ground —
    the film was made on #0A0B11, so its edge never shows. It leaves with the
    loader (data-loaded), which landing.tsx sets only once the film has ended or
-   been skipped AND the page is ready. A visitor who has seen it in this tab
-   (data-intro-seen, set before the first paint) never sees it. Without
+   been skipped AND the page is ready. A visitor who saw it in this browser
+   less than five minutes ago (INTRO_REMEMBER_MS in landing.tsx;
+   data-intro-seen, set before the first paint) does not see it. Without
    JavaScript it gives up after 8 s like the loader, by leaving the screen. */
 .landing-intro {
   position: fixed;
