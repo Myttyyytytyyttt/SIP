@@ -1,19 +1,14 @@
 // A Token-2022 mint's transfer fee, out of the mint's own bytes. Browser-safe,
 // bigint only.
 //
-// WHY THE BUILD ROUTE NEEDS IT. A leg's min_out_rate_wad is checked by
-// invest.rs against `received` — the destination account's balance DELTA,
-// which is what Token-2022 credits AFTER withholding the mint's transfer fee.
-// The rate the floor is taken from (clmm-price.ts legWadFromSqrtPrice) is a
-// Raydium CLMM pool's sqrt_price squared: a mid, GROSS of that fee, because the
-// pool prices what leaves its vault and the fee is withheld on the way out.
-// MEASURED 2026-09-24, slot 450109719: ANTHROPIC's floor pool mid put $5 at
-// 4,783,107 raw, and Jupiter quoting the SAME pool alone answered 4,723,099 —
-// 125.45 bps under, which is the pool's 25 bps tier plus the mint's 100 bps
-// fee. So a floor signed at 95 % of the mid leaves the market 5 % minus the
-// fee, and at the 300 bps the issuer wrote for epoch 1043, about 2 %.
-// server/build-handler.ts takes the fee off first (legFloorWad below); this
-// reads it.
+// WHY THE BUILD ROUTE NEEDS IT. The keeper refuses a whole basket from the
+// epoch a chosen leg's fee goes over its ceiling (CATALOGUE_MAX_FEE_BPS), so
+// server/build-handler.ts reads each leg's fee and refuses to build such a
+// basket (fee_over_ceiling). Until 2026-10-08 it also netted each leg's signed
+// floor of this fee; it signs no price floor now (product.ts
+// LIVE_PRICE_FLOOR_WAD). netOfTransferFeeWad below is kept for the website,
+// which still judges a policy signed before that day against the keeper's rule
+// (website-oficial invest-limits.ts keeperVenueThresholdWad).
 //
 // THE SAME WALK AS THE KEEPER'S decodeMintFacts (invest-decision.ts), which
 // this package may not import (the keeper's package.json is what ships to
@@ -21,10 +16,7 @@
 // base, zero padding to 165, AccountType::Mint at 165, then TLV entries from
 // 166 until an Uninitialized (0) type or the end. A layout this walk does not
 // understand THROWS: a fee read out of bytes that did not parse is a number
-// nobody should sign a floor with.
-
-import { floorWad } from "./clmm-price";
-import { legFloorMarginBps } from "./product";
+// nobody should judge a basket with.
 
 /** Something about a mint's bytes this walk does not understand. The build route refuses rather than guess a fee. */
 export class TransferFeeReadError extends Error {
@@ -98,29 +90,31 @@ export function decodeMintTransferFee(data: Uint8Array): MintTransferFeeSchedule
 }
 
 /**
- * The fee a floor signed in `currentEpoch` must leave room for, in bps: the
- * rate in force now, or a rate already written for a LATER epoch, whichever is
- * higher.
+ * The fee a leg must be judged at in `currentEpoch`, in bps: the rate in force
+ * now, or a rate already written for a LATER epoch, whichever is higher.
  *
- * WHY THE HIGHER, AND WHY NOT SIMPLY THE LIVE ONE. A floor is signed once and
- * stands until the owner signs again; the fee moves at an epoch boundary with
- * nobody's signature. Read 2026-09-24 in epoch 1041, ANTHROPIC charged 100 and
- * had 300 written for 1043: a floor netted of the live 100 would leave the
- * market 5 % for two days and about 3 % from then on for the life of the
- * policy. Netting the written 300 costs the owner 2 % of floor headroom for
- * those two days and nothing after. The keeper sizes its slippage the same way
- * (invest-decision.ts worstCaseTransferFee), for the same reason.
+ * WHAT IT IS FOR SINCE 2026-10-08. The build route no longer nets any floor of
+ * it (policies sign LIVE_PRICE_FLOOR_WAD, product.ts); it judges a chosen leg
+ * against the keeper's fee ceiling with it (build-handler.ts fee_over_ceiling).
+ *
+ * WHY THE HIGHER, AND WHY NOT SIMPLY THE LIVE ONE. The fee moves at an epoch
+ * boundary with nobody's signature, and the keeper refuses a basket from the
+ * epoch a leg's fee goes over its ceiling. Read 2026-09-24 in epoch 1041,
+ * ANTHROPIC charged 100 and had 300 written for 1043: a basket judged on the
+ * live 100 alone would not see a rise that was already on chain. The keeper
+ * sizes its slippage the same way (invest-decision.ts worstCaseTransferFee),
+ * for the same reason.
  *
  * WHY `older` IS IGNORED ONCE `newer` HAS ARRIVED. From newer.epoch on, older
  * is history — a fee the mint no longer charges and never will again unless it
- * is written anew — so a cut that has landed is netted as the cut.
+ * is written anew — so a cut that has landed is judged as the cut.
  *
- * maximum_fee IS NOT APPLIED. It caps the fee on large transfers, so netting
- * the full rate over-nets a capped mint: a LOWER floor, never a floor the
- * credit cannot reach. Every PreStocks mint read on 2026-09-24 had maximum_fee
- * u64::MAX, so today the rate is the fee.
+ * maximum_fee IS NOT APPLIED. It caps the fee on large transfers, so the full
+ * rate over-states a capped mint's fee, never under-states it. Every PreStocks
+ * mint read on 2026-09-24 had maximum_fee u64::MAX, so today the rate is the
+ * fee.
  */
-export function feeToNetBps(schedule: MintTransferFeeSchedule | null, currentEpoch: bigint): number {
+export function worstCaseFeeBps(schedule: MintTransferFeeSchedule | null, currentEpoch: bigint): number {
   if (schedule === null) return 0;
   if (currentEpoch >= schedule.newer.epoch) return schedule.newer.bps;
   return Math.max(schedule.older.bps, schedule.newer.bps);
@@ -128,27 +122,13 @@ export function feeToNetBps(schedule: MintTransferFeeSchedule | null, currentEpo
 
 /**
  * `wad` less a `feeBps` transfer fee, rounded down: what a leg rate becomes
- * once Token-2022 has withheld the fee from the transfer into the vault.
- *
- * ROUNDED DOWN, AND TOKEN-2022 ROUNDS ITS FEE UP. The two disagree by at most
- * one raw unit per transfer — a floor could sit one unit above a credit exactly
- * at the rate — and the margin of at least 5 % taken after this (legFloorWad) is over
- * 100,000 raw units on a $2.50 ANTHROPIC leg (half the $5 minimum purchase;
- * about 2.39 million raw units at the mid measured 2026-09-24), so the unit is
- * noise inside it.
+ * once Token-2022 has withheld the fee from the transfer into the vault. The
+ * website models the keeper's threshold on a route whose last hop quotes net
+ * with it (invest-limits.ts keeperVenueThresholdWad), to judge a floor signed
+ * before 2026-10-08. Token-2022 rounds its fee UP, so this can sit one raw
+ * unit over a real credit; that judgement is a screen, and no gate reads it.
  */
 export function netOfTransferFeeWad(wad: bigint, feeBps: number): bigint {
   if (!Number.isInteger(feeBps) || feeBps < 0 || feeBps > 10_000) throw new RangeError("a transfer fee is 0 to 10,000 bps");
   return (wad * BigInt(10_000 - feeBps)) / 10_000n;
-}
-
-/**
- * The floor a policy signed now carries for a leg: the pool's GROSS mid, less
- * the leg's transfer fee, less legFloorMarginBps(fee) — the one arithmetic the
- * build signs (server/build-handler.ts liveFloors), the page previews
- * (invest-limits.ts) and the page re-checks before signing (vault-flows.ts).
- * 95 % of the net mid at a fee of 100 bps or less; 93 % of it at 300.
- */
-export function legFloorWad(midWad: bigint, feeBps: number): bigint {
-  return floorWad(netOfTransferFeeWad(midWad, feeBps), legFloorMarginBps(feeBps));
 }

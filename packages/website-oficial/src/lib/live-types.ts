@@ -64,7 +64,7 @@ export interface LiveSnapshotJson {
   };
   readonly policy: { readonly status: ReadStatus; readonly address: string; readonly lamports?: string; readonly state?: InvestmentPolicyJson };
   readonly config: { readonly address: string; readonly status: ReadStatus; readonly exists: boolean; readonly paused: boolean | null };
-  /** The same shape /api/solana-vault answers, so todaysLimits applies unchanged. */
+  /** The same shape /api/solana-vault answers, so todaysPrices applies unchanged. */
   readonly prices: VaultStateJson["prices"];
   readonly vaultTokenAccounts: VaultStateJson["vaultTokenAccounts"];
   readonly rents: { readonly vault: string | null; readonly walletFloor: string | null };

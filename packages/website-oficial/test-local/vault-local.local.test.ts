@@ -60,23 +60,18 @@ import {
   RAYDIUM_CLMM,
   SIP_ACCOUNT_SPACE,
   SIP_PROGRAM_ID,
-  SOL_USDC_POOL,
   SPYX_MINT,
-  SPYX_USDC_POOL,
   TOKEN_2022_PROGRAM,
   TOKEN_PROGRAM,
   USDC_MINT,
   WSOL_MINT,
   base64Encode,
-  convertWadFromSqrtPrice,
-  decodeClmmPoolPrice,
   decodeInvestmentPolicy,
   decodeProtocolConfig,
   decodeTradingLink,
   decodeVault,
   encodeArgs,
   idlInstruction,
-  legWadFromSqrtPrice,
   linkConsentMessage,
   ownerComputeBudget,
   toHex,
@@ -458,20 +453,15 @@ describe("web-boveda on the tested sip_vault", () => {
     expect([refused.status, refused.json.error?.code]).toEqual([422, "link_consent_invalid"]);
   });
 
-  it("11. investPolicyFlow signs SPYx at the cloned pools' floors, creating and paying for the vault's three token accounts; again with other caps and none; an account for another vault is refused", async () => {
+  it("11. investPolicyFlow signs SPYx at the live-price floors, creating and paying for the vault's three token accounts; again with other caps and none; an account for another vault is refused", async () => {
     const owner = key(ownerA);
     const vault = deriveVaultPda(owner).toBase58();
     const signers = wallets(ownerA, tradingA);
 
-    // The harness's own floors, from the cloned pools' sqrt prices, with no code of the build route.
-    const [solPool, spyxPool] = await connection.getMultipleAccountsInfo([new PublicKey(SOL_USDC_POOL), new PublicKey(SPYX_USDC_POOL)], "confirmed");
-    expect([solPool?.owner.toBase58(), spyxPool?.owner.toBase58()]).toEqual([RAYDIUM_CLMM, RAYDIUM_CLMM]);
-    const solSqrt = decodeClmmPoolPrice(Uint8Array.from(solPool!.data)).sqrtPriceX64;
-    const spyxSqrt = decodeClmmPoolPrice(Uint8Array.from(spyxPool!.data)).sqrtPriceX64;
-    const convertFloor = (convertWadFromSqrtPrice(solSqrt) * 9_000n) / 10_000n;
-    const legFloor = (legWadFromSqrtPrice(spyxSqrt) * 9_500n) / 10_000n;
-    expect(convertFloor).toBe(((solSqrt * solSqrt * 10n ** 18n) >> 128n) * 9_000n / 10_000n);
-    expect(legFloor).toBe(((((1n << 128n) * 10n ** 18n) / (spyxSqrt * spyxSqrt)) * 9_500n) / 10_000n);
+    // The live-price floors every policy signs since 2026-10-08 (solana-core
+    // product.ts LIVE_PRICE_FLOOR_WAD), written as literals: no pool is read.
+    const convertFloor = 1n;
+    const legFloor = 1n;
 
     const shown: InvestPolicyBuildJson[] = [];
     const before = await lamports(owner);
@@ -479,10 +469,10 @@ describe("web-boveda on the tested sip_vault", () => {
     const signature = landedSignature(result);
     const tx = await landed(signature);
     expect(shown).toHaveLength(1);
-    expect([shown[0]!.floors.convertWad, shown[0]!.floors.legs[0]!.wad]).toEqual([convertFloor.toString(), legFloor.toString()]);
+    expect([shown[0]!.floors.convertWad, shown[0]!.floors.legWad]).toEqual([convertFloor.toString(), legFloor.toString()]);
 
     expect(programsOf(tx)).toEqual([COMPUTE_BUDGET, COMPUTE_BUDGET, ATA_PROGRAM, ATA_PROGRAM, ATA_PROGRAM, SIP_PROGRAM_ID]);
-    // The landed data is the core fixture with only its two floors put in from the cloned pools: the same basket, venue, in-mint, $5 minimum, caps and switch.
+    // The landed data is the core fixture with only its two floors replaced by the live-price ones: the same basket, venue, in-mint, $5 minimum, caps and switch.
     const firstPolicyData = replaceField(
       replaceField(OWNER_INSTRUCTION_DATA_HEX.SET_INVEST_POLICY_GOLDEN_FLOORS, leHex(GOLDEN_SPYX_FLOOR_WAD, 16), leHex(legFloor, 16)),
       leHex(GOLDEN_CONVERT_FLOOR_WAD, 16),

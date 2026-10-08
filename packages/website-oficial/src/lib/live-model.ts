@@ -51,7 +51,7 @@ import type {
   LiveWalletView,
   VaultEventJson,
 } from "@/lib/live-types";
-import { type FloorRoom, floorRoom, lastInvestedDay, todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
+import { carriesPriceLimits, floorRoom, lastInvestedDay, todaysPrices, usedInLast30Days } from "@/lib/invest-limits";
 import type { InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
 import { tradingWalletLabels } from "@/lib/wallet-labels";
 
@@ -85,13 +85,15 @@ export interface FloorsState {
  *
  * A stored floor at or under today's rate lets the keeper act: SOL sells above
  * its floor, and a leg buys at least its floor's amount. Past that, buying waits
- * until the owner signs again — which the card says rather than looking broken.
+ * until the owner signs again. Every policy signed since 2026-10-08 carries
+ * 1 wad (LIVE_PRICE_FLOOR_WAD), which no rate is under; only an older policy's
+ * floors can be passed (priceLimitsOf below).
  *
  * Shared by the wallets screen's InvestingCard and the live rule card, so the
  * two cannot disagree about whether a floor has been passed.
  */
 export function floorsState(policy: InvestmentPolicyJson, prices: VaultStateJson["prices"]): FloorsState {
-  const limits = todaysLimits(prices);
+  const limits = todaysPrices(prices);
   const storedConvert = rawFrom(policy.minConvertRateWad);
   const liveConvert = rawFrom(prices?.convertWad);
   const legs = policy.legs.map((leg) => ({
@@ -107,42 +109,40 @@ export function floorsState(policy: InvestmentPolicyJson, prices: VaultStateJson
   return { storedConvert, liveConvert, legs, pricesKnown, belowMarket };
 }
 
-/** Where a stored policy's price limits stand as a whole: a floor the market passed, or the worst leg's floorRoom. */
-export type PolicyRoom = "passed" | FloorRoom;
-
-const ROOM_RANK: Readonly<Record<FloorRoom, number>> = { "every-route": 0, "some-routes": 1, "no-route": 2 };
-
 /**
- * WHETHER THE STORED PRICE LIMITS STILL LET SAVERFI BUY, AS ONE WORD — the
- * wallets screen's InvestingCard reasoning (its badge and its room notes),
- * without its sentences, so the Vault settings gear can say whether "Refresh
- * price limits" is needed without importing a `"use client"` card.
+ * HOW A STORED POLICY IS PRICED, AS ONE WORD — for the wallets screen's
+ * InvestingCard, the Vault settings gear and the wallets overview, so the three
+ * cannot disagree about whether to ask the owner to switch.
  *
- *   "passed"       the market fell through a floor — the SOL conversion's or a
- *                  leg's, each read against its own rate (floorsState's
- *                  belowMarket, and the card's per-leg floorDrift "passed"):
- *                  nothing buys until the owner approves again;
- *   the worst leg  of floorRoom at the leg's JUDGED fee — the highest one its
- *                  issuer has written, the one in force once its epoch comes
- *                  (ANTHROPIC's 3 % from epoch 1043): "no-route" beats
- *                  "some-routes" beats "every-route".
+ *   "live"      every floor is LIVE_PRICE_FLOOR_WAD or under (carriesPriceLimits
+ *               false): what every policy signed since 2026-10-08 carries.
+ *               Nothing to say.
+ *   "blocking"  a policy signed before that day whose old limits stop buying
+ *               now: the market passed a floor — the SOL conversion's or a
+ *               leg's, each read against its own rate — or a leg's floor leaves
+ *               the keeper no route at all (floorRoom "no-route", at the leg's
+ *               JUDGED fee, the highest its issuer has written). Nothing is
+ *               bought until it is signed again.
+ *   "held"      a policy with old limits that are not judged to block right
+ *               now — every route or some routes clear them, or a rate is
+ *               unread. Offered the switch, not urged.
  *
- * Null when nothing could be judged (a floor or a rate unread). A leg the
- * catalogue does not know is judged at no fee, as the card judges it.
+ * Null when the policy's own numbers could not be read.
  */
-export function policyRoom(policy: InvestmentPolicyJson, prices: VaultStateJson["prices"]): PolicyRoom | null {
+export type PriceLimits = "live" | "held" | "blocking";
+
+export function priceLimitsOf(policy: InvestmentPolicyJson, prices: VaultStateJson["prices"]): PriceLimits | null {
   const floors = floorsState(policy, prices);
-  if (floors.pricesKnown && !floors.belowMarket) return "passed";
+  if (floors.storedConvert === null && floors.legs.every((leg) => leg.floor === null)) return null;
+  if (!carriesPriceLimits(floors.legs.map((leg) => leg.floor), floors.storedConvert)) return "live";
   // A floor over its rate is passed even when some OTHER number was unread.
   const over = (floor: bigint | null, live: bigint | null): boolean => floor !== null && live !== null && floor > 0n && live > 0n && floor > live;
-  if (over(floors.storedConvert, floors.liveConvert) || floors.legs.some((leg) => over(leg.floor, leg.live))) return "passed";
-  let worst: FloorRoom | null = null;
+  if (over(floors.storedConvert, floors.liveConvert) || floors.legs.some((leg) => over(leg.floor, leg.live))) return "blocking";
   for (const leg of floors.legs) {
     const fee = CATALOGUE.find((asset) => asset.mint === leg.mint)?.fee ?? null;
-    const room = floorRoom(leg.floor, leg.live, fee === null ? 0 : judgedFeeBps(fee));
-    if (room !== null && (worst === null || ROOM_RANK[room] > ROOM_RANK[worst])) worst = room;
+    if (floorRoom(leg.floor, leg.live, fee === null ? 0 : judgedFeeBps(fee)) === "no-route") return "blocking";
   }
-  return worst;
+  return "held";
 }
 
 // ── the pieces ───────────────────────────────────────────────────────────────
@@ -174,7 +174,7 @@ function vaultView(snapshot: LiveSnapshotJson): LiveVaultView {
 function policyView(snapshot: LiveSnapshotJson, usdcHeld: bigint | null, nowMs: number): LivePolicyView {
   const { policy, prices } = snapshot;
   const state = policy.state;
-  const limits = todaysLimits(prices);
+  const limits = todaysPrices(prices);
   const empty: LivePolicyView = {
     status: policy.status,
     address: policy.address,
@@ -836,4 +836,4 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
 }
 
 /** Re-exported so the live rule card reads the same limits the wallets screen does. */
-export { todaysLimits, usedInLast30Days };
+export { todaysPrices, usedInLast30Days };

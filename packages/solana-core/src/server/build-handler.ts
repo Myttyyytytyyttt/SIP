@@ -40,20 +40,18 @@ import { JUPITER_V6, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT } from "../client/addre
 import { classifyVaultEntry, scopeEntryToVault } from "../client/activity";
 import { isPubkey, isSignature } from "../client/base58";
 import { tryBase64Decode } from "../client/base64";
-import { PoolPriceError, floorWad, usdcRawPer1e8LegRaw, usdcRawPerSol } from "../client/clmm-price";
+import { usdcRawPer1e8LegRaw, usdcRawPerSol } from "../client/clmm-price";
 import { SIP_ACCOUNT_SPACE } from "../client/decoders";
-import { TransferFeeReadError, decodeMintTransferFee, feeToNetBps, legFloorWad } from "../client/transfer-fee";
+import { TransferFeeReadError, decodeMintTransferFee, worstCaseFeeBps } from "../client/transfer-fee";
 import { SIP_PROGRAM_ID } from "../client/idl";
 import type { PythPriceUpdate } from "../client/pyth-price";
 import {
   BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES,
   CATALOGUE_MAX_FEE_BPS,
   CLASSIC_TOKEN_ACCOUNT_BYTES,
-  CONVERT_FLOOR_MARGIN_BPS,
   DEFAULT_INVEST_CAPS,
   DEFAULT_VAULT_POLICY,
-  LEG_FLOOR_MARGIN_BPS,
-  legFloorMarginBps,
+  LIVE_PRICE_FLOOR_WAD,
   MAX_PICKED_LEGS,
   OFFERED_LEGS,
   SIGNATURE_FEE_LAMPORTS,
@@ -93,14 +91,12 @@ import { deriveAta, deriveLinkPda, deriveVaultPda } from "./pda";
 import { CLIENT_AGGREGATE_FACTOR, clientIdentityFromHeaders, createWeightedLimiter, retryAfterSeconds, type WeightedLimiter } from "./rate-limit";
 import {
   MAX_WALLET_LINKS,
-  PRICED_POOLS,
   SYSVAR_CLOCK,
   clockEpochOf,
   listVaultHoldings,
   listVaultSignatures,
   readLiveSnapshot,
   readVaultTransactions,
-  poolPricesFromAccounts,
   readBlockhashAndRents,
   readBuildBatch,
   readLinkPrerequisites,
@@ -152,11 +148,9 @@ export type SolanaBuildErrorCode =
   | "not_held"
   /** More of this mint than the vault holds; `heldRaw` says how much it does. */
   | "above_holding"
-  /** A pinned pool could not be priced (missing, not Raydium CLMM's, mints swapped): no floor is guessed. */
-  | "price_unavailable"
   /** A mint the policy names is not held by the token program SIP expects; `mint` names it. */
   | "mint_unexpected"
-  /** A leg's transfer fee, or the epoch it is resolved in, could not be read: no floor is guessed. `mint` names the leg when one is at fault. */
+  /** A leg's transfer fee, or the epoch it is resolved in, could not be read: the fee ceiling is not judged on a guess. `mint` names the leg when one is at fault. */
   | "fee_unavailable"
   /** A CHOSEN leg's fee — in force or already written for a later epoch — is over the keeper's ceiling; `mint` and `feeBps` name it. */
   | "fee_over_ceiling"
@@ -461,8 +455,8 @@ function decimalU64(value: unknown): bigint | null {
  * conservative list, it is a list of one wrong answer.
  *
  * RAYDIUM IS NOT GONE FROM THE PRODUCT, it has stopped being a VENUE. The
- * floors this same transaction signs are still read from its pools
- * (readers.ts PRICED_POOLS, reached through liveFloors below), which is a
+ * screens still read each offered stock's price from its pools (readers.ts
+ * PRICED_POOLS, served by /api/solana-vault and /api/solana-live), which is a
  * price source and not a counterparty. This table is where that distinction is
  * spent, so the constant no longer belongs in it.
  */
@@ -757,93 +751,37 @@ function weightsByMint(value: unknown, inMint: string): { readonly ok: true; rea
   return { ok: true, byMint };
 }
 
-interface LiveFloors {
-  readonly convertWad: bigint;
-  readonly convertFloor: bigint;
-  /** In OFFERED_LEGS' order: each leg's pool mid, GROSS of its transfer fee. */
-  readonly legWads: readonly bigint[];
-  /** In OFFERED_LEGS' order: the fee each floor was netted of (feeToNetBps), in bps. */
-  readonly legFeeBps: readonly number[];
-  /** In OFFERED_LEGS' order: the margin each floor was taken at, legFloorMarginBps(fee). */
-  readonly legMarginBps: readonly number[];
-  /** In OFFERED_LEGS' order: legFloorWad(legWad, fee) = floorWad(netOfTransferFeeWad(legWad, fee), legFloorMarginBps(fee)). */
-  readonly legFloors: readonly bigint[];
-}
-
-/** Today's rates from PRICED_POOLS' accounts, or null when a pool is not what SIP pins. */
-function livePrices(pools: readonly (AccountSnapshot | null)[], slot: number | null): PoolPrices | null {
-  try {
-    return poolPricesFromAccounts(pools, slot);
-  } catch (error) {
-    if (error instanceof PoolPriceError) return null;
-    throw error;
-  }
-}
+/**
+ * WHAT EVERY NEW POLICY SIGNS AS ITS PRICE FLOORS: LIVE_PRICE_FLOOR_WAD, the
+ * smallest value the program accepts, for every leg and for the SOL hop —
+ * which is no floor at all (product.ts says why, and what the owner accepted
+ * on 2026-10-08). No pool is read for it: until that day the build read every
+ * PRICED_POOLS mid here and signed a floor under each (10 % under SOL's, 5-7 %
+ * under each stock's), and a price move past one stopped buying until the
+ * owner signed again.
+ *
+ * The answer carries these two numbers back so the page can hold the build to
+ * them before the wallet asks (vault-flows.ts livePriceProblem): a build that
+ * names any other floor is refused there, and the bytes are checked against
+ * this same constant.
+ */
+const LIVE_PRICE_FLOORS = Object.freeze({ legWad: LIVE_PRICE_FLOOR_WAD, convertWad: LIVE_PRICE_FLOOR_WAD });
 
 /**
- * The floors under today's rates, each leg's taken AFTER ITS TRANSFER FEE.
+ * Each OFFERED leg's transfer fee as this build judges it against the
+ * keeper's ceiling (the higher of the one in force and one already written for
+ * a later epoch, worstCaseFeeBps), in OFFERED_LEGS' order, out of the leg mints' own bytes
+ * and the chain's own epoch — or the leg that could not be read.
  *
- * THE MID IS GROSS AND THE CHECK IS NET, AND UNTIL 2026-09-24 THE FLOOR WAS
- * DRAWN BETWEEN THEM. legWads is a Raydium CLMM pool's sqrt_price squared
- * (clmm-price.ts legWadFromSqrtPrice): what the pool prices out of its vault,
- * with no fee in it anywhere. invest.rs checks the floor against `received`,
- * the vault account's balance DELTA — what Token-2022 credits after withholding
- * the mint's fee. MEASURED 2026-09-24 (slot 450109719), $5 into ANTHROPIC: the
- * floor pool's mid said 4,783,107 raw, and Jupiter quoting that same pool alone
- * answered 4,723,099, 125.45 bps under — the pool's 25 bps tier plus the mint's
- * 100 bps fee. So a floor at 95 % of the mid left the market 5 % MINUS THE FEE:
- * about 4 % at 100 bps, about 2 % at the 300 the issuer wrote for epoch 1043,
- * and the owner's own ANTHROPIC floor measured +2.66 % over a live $5 credit at
- * 300. A floor that thin fails FillTooSmall on an ordinary day's drift, and by
- * the all-or-nothing doctrine that stops the whole basket.
+ * WHAT IT IS STILL FOR. No floor is netted of it any more (LIVE_PRICE_FLOORS
+ * above); it decides fee_over_ceiling, because the keeper refuses the whole
+ * basket from the epoch a chosen leg's fee goes over CATALOGUE_MAX_FEE_BPS.
  *
- * SO THE FEE COMES OFF FIRST, AND IT IS THE HIGHER OF THE LIVE AND THE WRITTEN
- * ONE (feeToNetBps): the full LEG_FLOOR_MARGIN_BPS is then left for the MARKET
- * for the life of the policy, including after a rise already on chain lands.
- *
- * AND THE MARGIN WIDENS WITH THE KEEPER'S ASK (product.ts legFloorMarginBps).
- * Netting the fee is not enough on its own, because the keeper buys a leg only
- * when the venue's threshold — the quote less legSlippageBps(fee) — clears the
- * signed floor (jupiter-route.ts investMinOutFor), and on a route whose last
- * hop quotes net that quote already has the fee off. At 300 bps the keeper
- * asks 400, not 200, so that threshold drops about 2 % further, and a flat 5 %
- * under the net mid left it about 1 % of room: 700 bps under the net mid at a
- * 300 bps fee gives back the ~3 % the market had at 100.
- *
- * THE COST, stated where it is paid: at 300 bps the floor is 3 % lower for the
- * fee and 2 % lower for the ask, so a fill may land up to 7 % under the net mid
- * (about 9.8 % under the gross one) before invest() refuses it — 2 % less
- * protection against a bad price than the flat margin gave, and before epoch
- * 1043, while ANTHROPIC still charges 1 %, 2 % more room than the fee alone
- * needs as well. The owner accepted the 3 % fee on 2026-09-24; a floor that did
- * not make room for it and for the keeper's ask would sign policies that stop
- * buying.
- *
- * The convert floor is not touched: wSOL and USDC are classic SPL mints and
- * carry no fee.
+ * REFUSED RATHER THAN GUESSED. An unread fee is not a zero fee, and a missing
+ * epoch cannot say whether a written rise has landed: either way nothing is
+ * built (fee_unavailable).
  */
-function liveFloors(prices: PoolPrices, legFeeBps: readonly number[]): LiveFloors {
-  const legWads = OFFERED_LEGS.map((leg) => prices.legWads[leg.mint]!);
-  return {
-    convertWad: prices.convertWad,
-    convertFloor: floorWad(prices.convertWad, CONVERT_FLOOR_MARGIN_BPS),
-    legWads,
-    legFeeBps,
-    legMarginBps: legFeeBps.map((fee) => legFloorMarginBps(fee)),
-    legFloors: legWads.map((wad, index) => legFloorWad(wad, legFeeBps[index]!)),
-  };
-}
-
-/**
- * Each OFFERED leg's fee to net, in OFFERED_LEGS' order, out of the leg mints'
- * own bytes and the chain's own epoch — or the leg that could not be read.
- *
- * REFUSED RATHER THAN GUESSED. A floor netted of a fee nobody read is a floor
- * about different money; a missing epoch cannot say whether a written rise has
- * landed. Either way nothing is built, exactly as an unpriceable pool builds
- * nothing (price_unavailable).
- */
-function legFeesToNet(
+function legFeesJudged(
   mints: readonly (AccountSnapshot | null)[],
   epoch: bigint | null,
 ): { readonly ok: true; readonly bps: readonly number[] } | { readonly ok: false; readonly mint: string | null; readonly why: string } {
@@ -853,7 +791,7 @@ function legFeesToNet(
     const data = mints[index]?.data ?? null;
     if (data === null) return { ok: false, mint: leg.mint, why: `${leg.symbol}'s mint bytes were not returned` };
     try {
-      bps.push(feeToNetBps(decodeMintTransferFee(data), epoch));
+      bps.push(worstCaseFeeBps(decodeMintTransferFee(data), epoch));
     } catch (error) {
       if (error instanceof TransferFeeReadError) return { ok: false, mint: leg.mint, why: `${leg.symbol}'s mint does not decode: ${error.message}` };
       throw error;
@@ -863,10 +801,10 @@ function legFeesToNet(
 }
 
 /**
- * investPolicy: set_invest_policy for the basket the owner chose, with floors
- * read from the pinned pools at build time and every vault token account the
- * vault lacks created ahead of it at the owner's expense. Floors, the in-mint
- * and which stocks MAY be chosen are SIP's; the request may name the caps, the
+ * investPolicy: set_invest_policy for the basket the owner chose, at the live
+ * price (LIVE_PRICE_FLOORS: no signed price floor, owner 2026-10-08), with every
+ * vault token account the vault lacks created ahead of it at the owner's
+ * expense. The floors, the in-mint and which stocks MAY be chosen are SIP's; the request may name the caps, the
  * minimum purchase, WHICH offered stocks the basket holds and the share each
  * takes, and the venue — by name — and whether investing is on. Every one of
  * those is optional, and absent it is built exactly as before: equal shares
@@ -901,24 +839,22 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
     return served.refuse(400, "bad_request", `venue must be one of: ${OFFERED_VENUES.join(", ")}. It is a venue's name, never a program address.`);
   }
 
-  // THE CHOSEN LEGS, IN THE CATALOGUE'S ORDER, each carrying the index its floor
-  // is read at. The floors are still read for the WHOLE shelf — PRICED_POOLS is
-  // one getMultipleAccounts either way and the answer's `floors` block is a
-  // price reading the page checks against what it showed — but only the chosen
-  // ones reach the policy the program is asked to store.
+  // THE CHOSEN LEGS, IN THE CATALOGUE'S ORDER, each carrying its index into the
+  // fees read below: every offered leg's fee is read (one getMultipleAccounts
+  // either way), but only the chosen ones reach the policy or its fee ceiling.
   const chosen = OFFERED_LEGS.map((leg, index) => ({ leg, index })).filter(({ leg }) => weights.byMint.has(leg.mint));
-  const policyAt = (convertFloor: bigint, legFloors: readonly bigint[]): InvestPolicyInput => ({
-    legs: chosen.map(({ leg, index }) => ({ mint: leg.mint, weightBps: weights.byMint.get(leg.mint)!, minOutRateWad: legFloors[index]! })),
+  const policy: InvestPolicyInput = {
+    legs: chosen.map(({ leg }) => ({ mint: leg.mint, weightBps: weights.byMint.get(leg.mint)!, minOutRateWad: LIVE_PRICE_FLOORS.legWad })),
     venueProgram,
     inMint: USDC_MINT,
-    minConvertRateWad: convertFloor,
+    minConvertRateWad: LIVE_PRICE_FLOORS.convertWad,
     minInvestment,
     maxPerCall,
     maxRolling30d,
     enabled,
-  });
+  };
   // The caps against the $5 minimum need no chain.
-  const capProblems = investPolicyProblems(policyAt(1n, OFFERED_LEGS.map(() => 1n)));
+  const capProblems = investPolicyProblems(policy);
   if (capProblems.length > 0) return served.refuse(400, "invalid_policy", "The program would refuse these limits.", { problems: capProblems });
 
   const spent = served.spendReads(BUILD_READS_WEIGHT.investPolicy);
@@ -931,29 +867,33 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
   const targets = vaultTokenAccountTargets(accounts.vaultAddress);
   const mints = [{ mint: USDC_MINT, tokenProgram: TOKEN_PROGRAM }, ...OFFERED_LEGS.map((leg) => ({ mint: leg.mint, tokenProgram: leg.tokenProgram }))];
   const sizes = [...new Set([SIP_ACCOUNT_SPACE.InvestmentPolicy, ...targets.map((target) => target.bytes)])];
-  // THE CLOCK RIDES LAST, in the same getMultipleAccounts: every index above it
-  // is unchanged, and the epoch a fee is resolved in is the chain's own, read
-  // at the same slot as the mints it is resolved against.
-  const batch = await readBuildBatch(served.pool, { addresses: [...PRICED_POOLS, ...mints.map((entry) => entry.mint), ...targets.map((target) => target.address), SYSVAR_CLOCK], sizes });
+  // NO POOL IS READ: the policy signs no price floor (LIVE_PRICE_FLOORS), and
+  // the pools were read for nothing else here. THE CLOCK RIDES LAST, in the
+  // same getMultipleAccounts: the epoch a fee is resolved in is the chain's
+  // own, read at the same slot as the mints it is resolved against.
+  const batch = await readBuildBatch(served.pool, { addresses: [...mints.map((entry) => entry.mint), ...targets.map((target) => target.address), SYSVAR_CLOCK], sizes });
   if (batch.kind !== "exists") return unreadable(served);
   const chain = batch.value;
   const rentFor = (size: number): bigint => chain.rents[sizes.indexOf(size)]!;
 
-  const prices = livePrices(chain.accounts.slice(0, PRICED_POOLS.length), chain.slot);
-  if (prices === null) return served.refuse(502, "price_unavailable", "SaverFi could not read today's prices from Raydium, so no floor was set. Nothing was built.");
   for (const [index, entry] of mints.entries()) {
-    if (chain.accounts[PRICED_POOLS.length + index]?.owner !== entry.tokenProgram) {
+    if (chain.accounts[index]?.owner !== entry.tokenProgram) {
       return served.refuse(409, "mint_unexpected", "A token this policy names is not held by the token program SaverFi expects. Nothing was built.", { mint: entry.mint });
     }
   }
-  const statuses = targets.map((target, index) => tokenAccountStatus(chain.accounts[PRICED_POOLS.length + mints.length + index], target.tokenProgram));
+  const statuses = targets.map((target, index) => tokenAccountStatus(chain.accounts[mints.length + index], target.tokenProgram));
   if (statuses.includes("unreadable")) return unreadable(served);
 
   // mints[0] is USDC; the offered legs follow it in OFFERED_LEGS' order.
-  const epoch = clockEpochOf(chain.accounts[PRICED_POOLS.length + mints.length + targets.length]);
-  const fees = legFeesToNet(chain.accounts.slice(PRICED_POOLS.length + 1, PRICED_POOLS.length + 1 + OFFERED_LEGS.length), epoch);
+  const epoch = clockEpochOf(chain.accounts[mints.length + targets.length]);
+  const fees = legFeesJudged(chain.accounts.slice(1, 1 + OFFERED_LEGS.length), epoch);
   if (!fees.ok) {
-    return served.refuse(502, "fee_unavailable", "SaverFi could not read a stock's transfer fee from Solana, so no floor was set. Nothing was built.", fees.mint === null ? {} : { mint: fees.mint });
+    return served.refuse(
+      502,
+      "fee_unavailable",
+      "SaverFi could not read a stock's transfer fee from Solana, so it could not check that its keeper would buy it. Nothing was built.",
+      fees.mint === null ? {} : { mint: fees.mint },
+    );
   }
   // A CHOSEN LEG OVER THE CEILING IS A POLICY THAT BUYS NOTHING. The keeper
   // refuses the whole basket from the epoch such a fee lands in; signing it
@@ -968,11 +908,6 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
       { mint: over.leg.mint, feeBps: fees.bps[over.index]! },
     );
   }
-  const floors = liveFloors(prices, fees.bps);
-
-  const policy = policyAt(floors.convertFloor, floors.legFloors);
-  const problems = investPolicyProblems(policy);
-  if (problems.length > 0) return served.refuse(400, "invalid_policy", "The program would refuse this policy.", { problems });
   // ONLY WHAT THIS POLICY MAY HOLD. buildSetInvestPolicy allows exactly wSOL,
   // the in-mint and THIS POLICY'S legs (builders.ts allowedMints), so bundling
   // an account for an offered stock the owner did NOT pick makes this handler
@@ -1011,31 +946,9 @@ async function investPolicy(fields: Readonly<Record<string, unknown>>, served: S
   return json(200, {
     ...built,
     policyExists,
-    floors: {
-      slot: chain.slot,
-      // The epoch each leg's fee was resolved in, from the chain's own clock.
-      epoch: epoch!,
-      marginBps: { convert: CONVERT_FLOOR_MARGIN_BPS, leg: LEG_FLOOR_MARGIN_BPS },
-      liveConvertWad: floors.convertWad,
-      convertWad: floors.convertFloor,
-      usdcRawPerSol: usdcRawPerSol(floors.convertWad),
-      floorUsdcRawPerSol: usdcRawPerSol(floors.convertFloor),
-      legs: OFFERED_LEGS.map((leg, index) => ({
-        symbol: leg.symbol,
-        mint: leg.mint,
-        liveWad: floors.legWads[index]!,
-        // THE FEE THE FLOOR WAS NETTED OF, so the page can redo the arithmetic
-        // rather than believe it: wad = floorWad(netOfTransferFeeWad(liveWad,
-        // transferFeeBps), marginBps) — legFloorWad(liveWad, transferFeeBps).
-        transferFeeBps: floors.legFeeBps[index]!,
-        // The margin under the net mid this leg's floor was taken at:
-        // marginBps.leg, plus what the keeper's ask widens by at this fee.
-        marginBps: floors.legMarginBps[index]!,
-        wad: floors.legFloors[index]!,
-        usdcRawPer1e8: usdcRawPer1e8LegRaw(floors.legWads[index]!),
-        maxUsdcRawPer1e8: usdcRawPer1e8LegRaw(floors.legFloors[index]!),
-      })),
-    },
+    // THE PRICE FLOORS THE BYTES CARRY: LIVE_PRICE_FLOORS, and nothing else.
+    // The page refuses a build that names any other (vault-flows.ts).
+    floors: { legWad: LIVE_PRICE_FLOORS.legWad, convertWad: LIVE_PRICE_FLOORS.convertWad },
     // Every account the policy needs, in the builder's order, and whether this
     // transaction creates it. A target that is missing and not created here is
     // the keeper's to open: it lists as create false, like one that already exists.
@@ -1050,10 +963,9 @@ const PAUSE_INVESTING_FIELDS = ["action", "owner"] as const;
 /**
  * pauseInvesting: set_invest_policy re-signing the policy the vault holds, every
  * leg, floor, venue, in-mint and cap as stored, with investing off. It reads no
- * pool. A pause is the owner's control to stop the keeper investing, so it must
- * work when the pinned pools cannot be priced (closed, migrated, a changed
- * layout) or while the prices are why the owner wants to stop. Signing again and
- * resuming set new floors, and read today's prices (investPolicy).
+ * pool. A pause changes nothing but `enabled`, so a policy signed before
+ * 2026-10-08 keeps the price floors it was signed with while paused; resuming
+ * goes through investPolicy, which signs LIVE_PRICE_FLOORS.
  */
 async function pauseInvesting(fields: Readonly<Record<string, unknown>>, served: Served): Promise<Response> {
   const extra = unexpectedField(fields, PAUSE_INVESTING_FIELDS);

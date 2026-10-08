@@ -109,17 +109,39 @@ export const DEFAULT_VAULT_POLICY: Readonly<VaultPolicyInput> = Object.freeze({
 /** The first investment policy's caps, in USDC raw units (6 decimals): $1,000 per buy, $31,000 per 30 days. */
 export const DEFAULT_INVEST_CAPS = Object.freeze({ maxPerCall: 1_000_000_000n, maxRolling30d: 31_000_000_000n });
 
-/** The convert floor sits this far under the live SOL/USDC pool price: 10 %. */
-export const CONVERT_FLOOR_MARGIN_BPS = 1_000;
 /**
- * A leg's floor sits AT LEAST this far under the live pool rate NET OF THE
- * LEG'S TRANSFER FEE: 5 %, the whole of it at a fee of 100 bps or less. A
- * dearer fee widens it (legFloorMarginBps below: 700 at 300 bps), because the
- * keeper widens its own ask with the fee and the threshold it compares the
- * floor with falls with it.
- * server/build-handler.ts says why the fee is taken off first.
+ * THE PRICE FLOOR EVERY NEW INVESTMENT POLICY SIGNS: 1 wad, for every leg's
+ * min_out_rate_wad and for min_convert_rate_wad. SaverFi buys at the live price.
+ *
+ * THE OWNER'S DECISION, 2026-10-08 ("Sin precio mínimo"). Until then the build
+ * signed each leg's floor 5-7 % under that day's Raydium mid, net of the leg's
+ * transfer fee, and the convert floor 10 % under the SOL price. A floor is
+ * signed once, so a stock that rose past it, or SOL that fell past it, stopped
+ * the keeper buying or converting until the owner signed again — "Refresh
+ * price limits" on every price move, which he judged absurd. He chose,
+ * knowingly, to sign no price floor.
+ *
+ * THE TRADE-OFF HE ACCEPTED: with no signed floor, nothing on chain limits the
+ * price the keeper pays if the keeper failed or its key were stolen. What still
+ * bounds it on chain is the policy's own max_per_call and max_rolling_30d, its
+ * mints and its venue program, and invest.rs/convert.rs requiring that the
+ * vault receives at least the min_out the keeper passes. (invest.rs does not
+ * check a buy's size against the leg's weight; the weights are the keeper's
+ * to follow.) The price itself is the keeper's to
+ * check, live, before every buy: its min_out from the live Jupiter quote less
+ * legSlippageBps (200, or the fee + 100 above a 100 bps fee), the impact
+ * ceiling, the 50x venue-inventory gate, the 300 bps fee ceiling and, on the
+ * SOL hop, the Pyth guard (deviation 500 bps, confidence 50 bps, 60 s age).
+ *
+ * WHY 1 AND NOT 0. set_invest_policy.rs requires every leg's
+ * min_out_rate_wad > 0, and convert.rs refuses a min_convert_rate_wad of 0
+ * (the keeper reads 0 as "conversion switched off", invest-decision.ts
+ * convertDecision). 1 is the smallest value both accept, and it is no floor at
+ * all: invest.rs and convert.rs compute floor = amount_in x rate / 1e18, which
+ * is 0 for every amount_in under 1e18 raw units (a trillion dollars of USDC,
+ * a billion SOL), and then still require min_out > 0. NO PROGRAM CHANGE.
  */
-export const LEG_FLOOR_MARGIN_BPS = 500;
+export const LIVE_PRICE_FLOOR_WAD = 1n;
 
 /** A classic SPL Token account (the vault's wSOL and USDC accounts): 165 bytes. Its rent is read from the chain, never derived. */
 export const CLASSIC_TOKEN_ACCOUNT_BYTES = 165;
@@ -136,10 +158,12 @@ export const CLASSIC_TOKEN_ACCOUNT_BYTES = 165;
 //   * ANTHROPIC routed BisonFi + Manifest, touching its pinned pool not at all,
 //     and a 5 USDC buy of the same mint routed GoonFi V2 + Whirlpool + Manifest.
 // So `pool` is gone and `floorPool` has taken its place, meaning ONE thing: the
-// Raydium CLMM/USDC pool the BUILD ROUTE READS A PRICE FROM when it signs a
-// leg's min_out_rate_wad (server/build-handler.ts liveFloors over
-// server/readers.ts PRICED_POOLS). It is a price source. It is not where the
-// money goes, and nothing here may read as if it were.
+// Raydium CLMM/USDC pool SaverFi READS THE LEG'S PRICE FROM (server/readers.ts
+// PRICED_POOLS, which /api/solana-vault and /api/solana-live serve and the
+// screens value holdings with). Until 2026-10-08 the build route also signed
+// each leg's min_out_rate_wad from it, which is where the name comes from; it
+// signs no price floor now (LIVE_PRICE_FLOOR_WAD above). It is a price source.
+// It is not where the money goes, and nothing here may read as if it were.
 //
 // NOTHING BELOW IS CLAIMED WITHOUT A DATE AND A SOURCE. Every number an entry
 // asserts about a market or a mint carries `readOn` and `by`: the day it was
@@ -274,12 +298,12 @@ export interface CatalogueAsset {
   /** What the Associated Token Account program allocates for this mint, extensions included: the size its rent is read for. */
   readonly tokenAccountBytes: number;
   /**
-   * The Raydium CLMM/USDC pool this leg's min_out_rate_wad is PRICED from, or
-   * null when none is pinned — in which case SaverFi cannot sign a floor for
-   * it, whatever its depth. NOT a route: see the note at the top of this block.
+   * The Raydium CLMM/USDC pool this leg's price is READ from, or null when
+   * none is pinned — in which case SaverFi cannot price it on screen, whatever
+   * its depth. NOT a route: see the note at the top of this block.
    */
   readonly floorPool: string | null;
-  /** That pool's USDC-side reserve when it was last read: what it costs to move the price this product signs its floor against. */
+  /** That pool's USDC-side reserve when it was last read: what it costs to move the price this product reads from it. */
   readonly floorPoolUsdc: DepthReading | null;
   /** The live transfer fee, or null when nobody has read it. An unread fee is not a zero fee. */
   readonly fee: FeeReading | null;
@@ -451,47 +475,6 @@ export const CATALOGUE_MIN_IMPACT_CEILING_BPS = 5;
 export const catalogueLegSlippageBps = (feeBps: number): number => Math.max(CATALOGUE_SLIPPAGE_BPS, feeBps + CATALOGUE_SLIPPAGE_MARGIN_BPS);
 
 /**
- * How far under the net-of-fee mid a leg's floor is signed, in bps:
- * LEG_FLOOR_MARGIN_BPS plus whatever the keeper asks Jupiter for over its plain
- * CATALOGUE_SLIPPAGE_BPS — 500 at a fee of 0 to 100 bps, 550 at 150, 700 at
- * the 300 ceiling.
- *
- * WHY THE FLOOR MOVES WITH THE KEEPER'S ASK. The keeper buys a leg exactly
- * when the venue's own threshold — the quote less legSlippageBps(fee), Jupiter's
- * otherAmountThreshold — clears the signed floor (jupiter-route.ts
- * investMinOutFor, deployed with df6ca67; keeperInvestMinOutFor below mirrors
- * it and test/fixtures/keeper-policy.ts OWNER_FLOOR_MIN_OUT holds the two
- * together). Which quote that is depends on the route's LAST hop: a venue that
- * quotes GROSS (Manifest) answers about the mid less its own cost, and one that
- * quotes NET (Raydium CLMM, Meteora DLMM) answers that less the transfer fee as
- * well. The net case is the tight one: its threshold is about
- * mid x (1 - fee) x (1 - ask). At a fee of 100 the ask is 200 and a floor 5 %
- * under the net mid leaves 0.98 / 0.95, about 3.2 %, for the route's own cost
- * and a day's drift. At 300 the ask is 400; a flat 5 % would leave
- * 0.96 / 0.95, about 1 %, and widening the floor by the same 200 bps the ask
- * widened gives back 0.96 / 0.93, about 3.2 %. On a gross last hop the room is
- * wider by the fee.
- *
- * WHAT IS MEASURED AND WHAT IS DERIVED. Measured 2026-09-25 (epoch 1042, slot
- * 450231345, live Jupiter quotes for the owner's $2.75 ANTHROPIC leg at
- * slippage 400): the default route ended on Manifest 18.95 bps under the floor
- * pool's mid, and routes held to Raydium CLMM or Meteora DLMM came back 99.79
- * and 105.83 bps under it with 100 bps of fee already off. The 300 bps cases
- * are derived from those readings; 300 is not in force before epoch 1043.
- * (The rule before df6ca67 took the fee off the threshold a second time and
- * refused whatever that left under the floor; the "min_out 2,427,695 under his
- * floor 2,483,089" refusal recorded in the keeper was that rule.)
- *
- * THE COST, AND IT IS PAID HERE. A lower floor is less protection against a bad
- * price: at 300 bps a leg may now be filled up to 7 % under the net mid (about
- * 9.8 % under the gross one) before invest() refuses it, where the flat margin
- * stopped at 5 %. The fee itself is not the protection's to argue with — the
- * issuer takes it whatever the floor says — but the extra 2 % is price the
- * owner gives up so that the keeper's own ask does not refuse his basket.
- */
-export const legFloorMarginBps = (feeBps: number): number => LEG_FLOOR_MARGIN_BPS + (catalogueLegSlippageBps(feeBps) - CATALOGUE_SLIPPAGE_BPS);
-
-/**
  * The keeper's investMinOutFor (jupiter-route.ts), restated because the browser
  * may not import the keeper: the min_out it hands invest() for a route with
  * this venueThreshold and netOfVenueThreshold under this ownerFloor, or null
@@ -512,16 +495,16 @@ export function keeperInvestMinOutFor(numbers: { readonly venueThreshold: bigint
 export const CATALOGUE_MIN_VENUE_DEPTH_RAW = CATALOGUE_REFERENCE_LEG_RAW * CATALOGUE_VENUE_INVENTORY_MULTIPLE;
 
 /**
- * What a FLOOR SOURCE must hold of USDC to count as a price: 50 x the smallest
- * purchase this product makes, 250 USDC.
+ * What a leg's PRICE SOURCE (its floorPool) must hold of USDC to count as a
+ * price: 50 x the smallest purchase this product makes, 250 USDC.
  *
- * WHY A POOL'S DEPTH DECIDES WHETHER ITS PRICE IS A PRICE. A leg's floor is the
- * only price defence a stock leg has — Pyth anchors the SOL hop and nothing
- * anchors the stocks — and it is signed ONCE, from this pool's mid, and then
- * stands until the owner signs again. A mid that costs a few dollars to move is
- * a mid an attacker sets at the moment of signing, and a floor signed off it is
- * wrong for the life of the policy. The bar is deliberately the small one: it
- * asks that the price source be a market at all, not that it be deep.
+ * WHY A POOL'S DEPTH DECIDES WHETHER ITS PRICE IS A PRICE. The screens value
+ * the leg from this pool's mid, and a mid that costs a few dollars to move is a
+ * number anyone can set. Until 2026-10-08 the build also signed each leg's
+ * floor from it, once, for the life of the policy, which is what this bar was
+ * first written for; it signs no price floor now (LIVE_PRICE_FLOOR_WAD). The
+ * bar is deliberately the small one: it asks that the price source be a market
+ * at all, not that it be deep.
  */
 export const CATALOGUE_MIN_FLOOR_POOL_RAW = CATALOGUE_VENUE_INVENTORY_MULTIPLE * DEFAULT_PURCHASE_USDC_RAW;
 
@@ -565,7 +548,7 @@ export const OFFER_RULES = Object.freeze({
   DEPTH: `the venue it routes through held at least ${CATALOGUE_VENUE_INVENTORY_MULTIPLE}x the reference leg in USDC`,
   /** ARM 2's shape: the reference leg must not be quoted worse than the keeper's own impact ceiling. */
   PRICE_AT_SIZE: "the reference leg is not quoted worse than the keeper's impact ceiling against a sixteenth-sized probe",
-  /** The build route can only sign a floor from a Raydium CLMM/USDC pool, and only from one deep enough for its mid to be a price. */
+  /** SaverFi reads a leg's price only from a Raydium CLMM/USDC pool (server/readers.ts PRICED_POOLS), and only from one deep enough for its mid to be a price. */
   FLOOR: "a Raydium CLMM/USDC pool is pinned for it and holds enough USDC for its mid to be a price",
   /** A standing list needs persistence, not a spot reading. See the constant below. */
   HELD: "it has not been read under any of these bars inside the quarantine window",
@@ -620,7 +603,7 @@ export function offerProblems(asset: CatalogueAsset): RuleFailure[] {
   }
 
   if (asset.floorPool === null) {
-    fail("FLOOR", "no Raydium CLMM/USDC pool is pinned for it, and the build route can price a leg's floor from nothing else");
+    fail("FLOOR", "no Raydium CLMM/USDC pool is pinned for it, and SaverFi reads a leg's price from nothing else");
   } else if (asset.floorPoolUsdc === null) {
     fail("FLOOR", `its floor pool ${asset.floorPool} has never had its USDC side read, so nobody knows what moving that mid costs`);
   } else if (asset.floorPoolUsdc.usdcRaw < CATALOGUE_MIN_FLOOR_POOL_RAW) {
@@ -738,7 +721,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     quarantinedUntil: null,
     notes: Object.freeze([
       "ITS FLOOR POOL IS NOT ITS MARKET. The pool this entry prices the floor from held $2,646,541.82; the pool a 200 USDC buy actually routed through is a different Raydium CLMM pool holding $317,640.47. The two disagree by 8.3x and both are real — one is where the price is read, the other is where the money goes.",
-      "The two prices agree even so: the floor pool's mid put 200 USDC at 25,961,743 raw SPYx and the route filled 25,940,466, 8 bps apart, well inside the 500 bps LEG_FLOOR_MARGIN_BPS the floor is signed at.",
+      "The two prices agree even so: the floor pool's mid put 200 USDC at 25,961,743 raw SPYx and the route filled 25,940,466, 8 bps apart.",
       "Zero transfer fee, permanently: see XSTOCKS_POWERS. Its impact ceiling is therefore the full 50 bps, not the 25 a PreStock is left with.",
     ]),
   }),
@@ -890,7 +873,7 @@ export const CATALOGUE: readonly CatalogueAsset[] = Object.freeze([
     sizePenalty: Object.freeze({ bps: 10.8, atRaw: 200_000_000n, probeRaw: 12_500_000n, sameVenues: true, routes: "Manifest J4PjSn… at both sizes", readOn: "2026-09-21", by: "lite-api.jup.ag, three readings, all 10.8" }),
     quarantinedUntil: null,
     notes: Object.freeze([
-      "THE ONE WORTH RE-READING WHEN THE FLOOR STOPS COMING FROM A RAYDIUM POOL. Its price holds at the reference leg — 10.8 bps against a 25 bps ceiling, same venue at both sizes — and the two rules it fails are both about infrastructure rather than about the asset: its venue is $2,736 short of covering a $200 leg fifty times over, and SaverFi has no way to sign a floor for anything that does not trade on a Raydium CLMM/USDC pool.",
+      "THE ONE WORTH RE-READING WHEN SAVERFI'S PRICES STOP COMING FROM A RAYDIUM POOL. Its price holds at the reference leg — 10.8 bps against a 25 bps ceiling, same venue at both sizes — and the two rules it fails are both about infrastructure rather than about the asset: its venue is $2,736 short of covering a $200 leg fifty times over, and SaverFi has no way to read a price for anything that does not trade on a Raydium CLMM/USDC pool.",
     ]),
   }),
   Object.freeze({

@@ -586,9 +586,10 @@ export interface PoolPrices {
  * moved to Jupiter these were also the pools a buy went through; they are not
  * any more, and the catalogue measured the gap on 2026-09-21 — a 200 USDC SPYx
  * buy routed a different Raydium pool, and the same buy of ANTHROPIC touched no
- * Raydium pool at all. What these pools still are is the only thing the build
- * route can read a leg's min_out_rate_wad from, and the only rate this server
- * publishes. The reserves below are theirs, which is why they are NOT the depth
+ * Raydium pool at all. What these pools still are is the only rate this server
+ * publishes: the screens value SOL and each offered stock from them. (Until
+ * 2026-10-08 the build route also signed each leg's min_out_rate_wad from
+ * them; it signs no price floor now, product.ts LIVE_PRICE_FLOOR_WAD.) The reserves below are theirs, which is why they are NOT the depth
  * the keeper's gate measures; client/product.ts says so at length.
  */
 export const PRICED_POOLS: readonly string[] = Object.freeze([SOL_USDC_POOL, ...OFFERED_LEGS.map((leg) => leg.floorPool)]);
@@ -611,7 +612,7 @@ function snapshotOf(account: unknown): AccountSnapshot | null | undefined {
 /**
  * The rates from PRICED_POOLS' accounts, in that order. Each pool must exist, be
  * owned by Raydium CLMM, and hold its mints in the pinned order; anything else
- * throws PoolPriceError, because a floor is never guessed.
+ * throws PoolPriceError, because a price is never guessed.
  */
 export function poolPricesFromAccounts(accounts: readonly (AccountSnapshot | null | undefined)[], slot: number | null): PoolPrices {
   if (accounts.length !== PRICED_POOLS.length) throw new PoolPriceError("every priced pool must be read");
@@ -828,13 +829,13 @@ export interface PoolDepth {
 }
 
 /**
- * The live rates behind the floors and the forms' dollar figures, and each
+ * The live rates behind the forms' dollar figures, and each
  * pinned pool's own in-side reserve beside them (no per-buy ceiling divides it;
  * see the reserve section): PRICED_POOLS and their in-side vaults in ONE
  * getMultipleAccounts.
  *
  * TWO OUTCOMES OUT OF ONE ANSWER, AND NEITHER CAN REACH THE OTHER. Anything but
- * every pool, ours, in order, leaves `prices` unreadable: a floor is never
+ * every pool, ours, in order, leaves `prices` unreadable: a price is never
  * guessed. A vault that is not what its pool names leaves that one reserve
  * unknown and nothing else — the prices were already decided, from their own
  * slice of the same answer, by the same function they always were.

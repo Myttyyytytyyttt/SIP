@@ -40,7 +40,7 @@ import { tickerLogo, type ActivityEvent, type InvestedEvent, type SavingsRule, t
 export interface RuleSettingsDoor {
   readonly open: boolean;
   readonly onOpen: () => void;
-  /** Something behind the gear needs doing (price limits to refresh, a write to confirm): a dot on the gear. */
+  /** Something behind the gear needs doing (old price limits to switch from, a write to confirm): a dot on the gear. */
   readonly attention: boolean;
 }
 
@@ -153,7 +153,7 @@ export function SavingsRulePanel({
           {/*
             THE GEAR. Muted at rest; mustard — the colour of a setting — on
             hover and while its dialog is open, and a mustard dot when something
-            behind it needs the owner (price limits to refresh, a write to confirm).
+            behind it needs the owner (old price limits to switch from, a write to confirm).
           */}
           <Button
             type="button"

@@ -14,13 +14,15 @@
  * the most.
  */
 
-import { DEFAULT_VAULT_POLICY, LEG_FLOOR_MARGIN_BPS, PRESTOCKS_POWERS, XSTOCKS_POWERS, legFloorMarginBps, type AssetGroup, type CatalogueAsset } from "@sip/solana-core/client";
-
-/**
- * How far over today's price a floor `marginBps` under it lets a stock be
- * bought, to one decimal: 500 is "5.3 %" (1 / 0.95 - 1), 700 is "7.5 %".
- */
-export const overTodayPercent = (marginBps: number): string => `${((marginBps * 100) / (10_000 - marginBps)).toFixed(1)} %`;
+import {
+  DEFAULT_VAULT_POLICY,
+  PRESTOCKS_POWERS,
+  XSTOCKS_POWERS,
+  catalogueLegSlippageBps,
+  sizePenaltyCeilingBps,
+  type AssetGroup,
+  type CatalogueAsset,
+} from "@sip/solana-core/client";
 
 /** Basis points as a percentage: 2000 is "20 %". */
 export const ratePercent = (bps: number): string => `${Number((bps / 100).toFixed(2))} %`;
@@ -86,6 +88,20 @@ export const POOL_DEPTH_MULTIPLE = 50;
  */
 export const MAX_LEG_FEE_BPS = 300;
 
+/**
+ * THE KEEPER'S PYTH GUARD ON THE SOL HOP, as the copy states it: the SOL-to-USDC
+ * conversion is skipped for a sweep while Pyth's price is older than
+ * PYTH_MAX_AGE_SECONDS, while either feed's own confidence band is wider than
+ * PYTH_CONF_BPS of its price, or while the conversion's own Jupiter quote sits
+ * more than PYTH_DEVIATION_BPS from Pyth's rate (packages/solana-keeper
+ * invest-decision.ts MAX_PYTH_AGE_SECONDS, MAX_PYTH_CONF_BPS,
+ * MAX_PYTH_DEVIATION_BPS). vault-copy.test.ts holds these to PYTH_GUARD in the
+ * committed vector, and the keeper's own test holds its constants to it.
+ */
+export const PYTH_MAX_AGE_SECONDS = 60;
+export const PYTH_CONF_BPS = 50;
+export const PYTH_DEVIATION_BPS = 500;
+
 /** "SPYx and ANTHROPIC", "SPYx, ANTHROPIC and GLDx", "SPYx" — a list in a sentence. */
 export const listAnd = (items: readonly string[]): string =>
   items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
@@ -119,14 +135,14 @@ export const shortAddress = (address: string): string => (address.length > 10 ? 
 //    only (invest-decision.ts oracleConvertDecision); ARM 1 counts units and
 //    has no opinion about what a unit is worth, and ARM 2 divides two quotes
 //    from one quoter, so a uniformly bad price divides out of it.
-//  * the owner-signed floor DECAYS. It is derived once, at signing, from one
-//    Raydium CLMM pool's mid, net of the leg's transfer fee, at
-//    legFloorMarginBps(fee) under it — LEG_FLOOR_MARGIN_BPS, widened at a fee
-//    over 1 % (solana-core/src/server/build-handler.ts),
-//    and then it stands. As the
-//    market moves it becomes either a no-op or a block, and nothing re-signs it.
-// INVEST_COPY.defencesLimits says all three in the owner's words, and the
-// floor-drift block measures the third against the rate the page just read.
+//  * there is NO SIGNED PRICE FLOOR since 2026-10-08 (owner's decision,
+//    solana-core product.ts LIVE_PRICE_FLOOR_WAD): the policy signs 1 wad, so
+//    nothing on chain bounds the PRICE a buy pays — only how much it spends
+//    (max_per_call, max_rolling_30d) and that it receives at least the
+//    keeper's own min_out. If the keeper failed or its key were stolen, the
+//    caps are what is left.
+// INVEST_COPY.keeperChecks and INVEST_COPY.chainLimits say all three in the
+// owner's words.
 
 /** A chosen leg, as the signed paragraphs need it: what it is called, which product it is, and its own fee reading. */
 export interface SignedLeg {
@@ -574,42 +590,54 @@ function freezeNoticeParagraph(legs: readonly SignedLeg[]): string {
 }
 
 /**
- * The legs whose limit is signed further under the market than the usual
- * margin, said with their own margin — or nothing. At a fee over 1 % the
- * build widens the margin by what each buy asks the market for over the plain
- * 2 % (solana-core legFloorMarginBps), and "5 % under it" is then not true of
- * that leg: the owner is owed the number he actually signs.
+ * Each distinct value `of` takes over the legs, with the legs it applies to:
+ * "2 %" alone when every leg agrees, else "2 % (4 % for ANTHROPIC)" — the
+ * value most legs share first (the first leg's, on a tie), the others named.
+ * The keeper sizes both its slippage and its impact bar by each leg's own fee,
+ * so one number is only true of a basket whose legs agree.
  */
-function widerMarginClause(legs: readonly SignedLeg[]): string {
-  const wider = legs
-    .map((leg) => ({ symbol: leg.symbol, margin: legFloorMarginBps(judgedFeeOf(leg) ?? 0) }))
-    .filter((leg) => leg.margin > LEG_FLOOR_MARGIN_BPS);
-  if (wider.length === 0) return "";
-  const named = wider.map((leg) => `${ratePercent(leg.margin)} for ${leg.symbol}`);
-  const list = named.length === 1 ? named[0]! : `${named.slice(0, -1).join(", ")} and ${named.at(-1)}`;
-  return ` (${list}, whose fee makes each buy ask the market for more room — a lower limit, and so less protection against a bad price)`;
+function perLegPercent(legs: readonly SignedLeg[], of: (feeBps: number) => number): string {
+  const byValue = new Map<number, string[]>();
+  for (const leg of legs) {
+    const value = of(judgedFeeOf(leg) ?? 0);
+    byValue.set(value, [...(byValue.get(value) ?? []), leg.symbol]);
+  }
+  if (byValue.size === 0) return ratePercent(of(0));
+  // Most legs first; a tie keeps the basket's own order (sort is stable).
+  const ordered = [...byValue.entries()].sort((a, b) => b[1].length - a[1].length);
+  const [first, ...rest] = ordered;
+  return rest.length === 0 ? ratePercent(first![0]) : `${ratePercent(first![0])} (${rest.map(([value, symbols]) => `${ratePercent(value)} for ${listAnd(symbols)}`).join(", ")})`;
 }
 
 /**
- * THE HONEST MAP OF THE DEFENCES, and it is short on purpose.
+ * THE KEEPER'S LIVE PRICE CHECKS, which are the price protection since the
+ * owner chose to sign no price floor (2026-10-08). Every number is the code's:
+ * the slippage is catalogueLegSlippageBps and the impact bar
+ * sizePenaltyCeilingBps — solana-core's mirrors of the keeper's legSlippageBps
+ * and maxTurnImpactBps, held to it by test/fixtures/keeper-policy.ts LEG_FEE —
+ * each at the leg's highest written fee; the cover is POOL_DEPTH_MULTIPLE, the
+ * fee ceiling MAX_LEG_FEE_BPS and the SOL hop's guard the PYTH_* constants.
  *
- * Every clause here is a limit rather than a promise, because this file is the
- * one where an over-claim costs the most: the owner reads it, ticks a box and
- * signs. The three limits are the keeper's own (invest-decision.ts, "THE PRICE
- * DEFENCES" and "WHY AN ORACLE AT ALL"), said in his words and not in its.
+ * AND WHAT THEY ARE NOT. The impact bar compares two quotes from one quoter and
+ * the cover counts units, so neither is an independent price for a stock; only
+ * the SOL hop has one (Pyth). Said, rather than left to be assumed.
  */
-function defencesLimitsParagraph(legs: readonly SignedLeg[], marginUnderMarket: string): string {
-  const stocks = legs.length === 0 ? "The stocks" : symbolsOf(legs);
-  const plural = legs.length !== 1;
+function keeperChecksParagraph(legs: readonly SignedLeg[]): string {
+  const stocks = legs.length === 0 ? "the stocks" : symbolsOf(legs);
   return (
-    `What SaverFi checks before a buy, and what it does not. It measures how much the venue it is buying from can hand over, and refuses unless that venue holds at least ${POOL_DEPTH_MULTIPLE} times the buy. ` +
-    "THAT IS A CHECK ON SIZE, NOT ON PRICE: it can tell you a market is too thin for the buy you have asked for, and it cannot tell you the price you get is a fair one. " +
-    "The SOL-to-USDC conversion has one outside opinion on it — the SOL price Pyth publishes, which is the only number in a buy that does not come from the venue being traded against. " +
-    `${stocks} ${plural ? "have" : "has"} no such anchor today: nothing SaverFi reads publishes an independent price for ${plural ? "them" : "it"} on chain, so the only price bound on ${plural ? "those legs" : "that leg"} is the limit you sign yourself. ` +
-    `And that limit is signed once: it is taken from one pool's price at the moment you sign${
-      legs.some((leg) => (judgedFeeOf(leg) ?? 0) > 0) ? ", less the highest transfer fee each stock's issuer has set," : ","
-    } ${marginUnderMarket} under it${widerMarginClause(legs)}, and it does not follow the market afterwards. ` +
-    "As the market moves, the same number stops protecting you — or starts refusing every honest buy. SaverFi shows you how far it has drifted rather than leaving you to assume it still fits."
+    `Before every buy, SaverFi's keeper asks Jupiter for a live quote for that exact buy and sends it with the least the vault must receive: the quote less ${perLegPercent(legs, catalogueLegSlippageBps)}, and less the transfer fee. ` +
+    `It does not buy when the venue holds less than ${POOL_DEPTH_MULTIPLE} times the buy, when the full buy is quoted more than ${perLegPercent(legs, sizePenaltyCeilingBps)} worse than a sixteenth of it on the same route, or when a stock's issuer charges more than ${ratePercent(MAX_LEG_FEE_BPS)} to move it. ` +
+    `Converting SOL to USDC is also checked against the SOL price Pyth publishes: it waits while that price is more than ${PYTH_MAX_AGE_SECONDS} seconds old, uncertain by more than ${ratePercent(PYTH_CONF_BPS)}, or more than ${ratePercent(PYTH_DEVIATION_BPS)} away from Jupiter's quote. ` +
+    `Nothing outside the venue prices ${stocks}: those checks compare Jupiter's own quotes and count what the venue holds, so they can tell a buy is too big for its market, not that the market's price is fair. A check that refuses waits for a later sweep; nothing asks you to approve again.`
+  );
+}
+
+/** What Solana still enforces with no price floor, and what it no longer does. */
+function chainLimitsParagraph(perBuy: string | null, per30Days: string | null): string {
+  const caps = perBuy === null || per30Days === null ? "the most per buy and per 30 days you set" : `at most ${perBuy} per buy and ${per30Days} per 30 days`;
+  return (
+    `What Solana itself still enforces on every buy, whatever happens to SaverFi's keeper: ${caps}, only the stocks you chose, through the exchange you signed, and that the vault receives at least the minimum the keeper sent with the buy. ` +
+    "What it no longer enforces is a price: there is no price floor in what you sign. If SaverFi's keeper failed, or its key were stolen, nothing on Solana would stop a buy at a bad price — those caps are what would limit how much."
   );
 }
 
@@ -893,45 +921,14 @@ export const INVEST_COPY = {
   buysUnknown: "Buys once enough USDC is ready for the smallest share to clear its minimum",
   mostPerBuy: "Most per buy",
   mostPer30Days: "Most per 30 days",
-  floorsTitle: "Today's price limits",
-  solFloor: (floor: string, today: string): string => `SOL is never sold below ${floor} (90 % of today's ${today})`,
-  /**
-   * WHAT THE SOL FLOOR ACTUALLY IS, said in words, beside the live price it was
-   * taken from. It reaches the program as min_convert_rate_wad, and the program
-   * does NOT validate it: a zero there is accepted and silently means "sell this
-   * vault's SOL at any price at all". Nothing on this screen can reach zero — the
-   * web never lets the figure be typed, it is always floorWad(live price,
-   * CONVERT_FLOOR_MARGIN_BPS), and vault-flows.ts refuses to sign a build whose
-   * convertWad is null, zero or not exactly that — but the owner is signing the
-   * number, so he is told what it does and what zero would have meant. `margin`
-   * is how far under the live price it sits, from CONVERT_FLOOR_MARGIN_BPS.
-   */
-  convertFloorEffect: (margin: string): string =>
-    `That floor is what keeps converting switched on: the keeper sells your vault's SOL for USDC only at or above it, and it is set ${margin} under the price just read above. It is never zero, and zero is the one value that would matter — it would mean your SOL sold at any price at all.`,
-  /**
-   * `fee` is the transfer fee the floor is netted of, as a percentage, or null
-   * for a leg with none; `marginBps` is how far under the net price the floor
-   * sits (solana-core legFloorMarginBps: 500, or 700 at a 3 % fee). WITH A FEE
-   * THE LIMIT IS PER UNIT THAT ARRIVES: the floor is checked against what the
-   * vault is credited, after the issuer's cut, so the percentage over today's
-   * price is true only once that cut is counted — and the page says so rather
-   * than letting a bigger number look like a looser limit. AND A WIDER MARGIN
-   * IS SAID AS ONE: at 700 the limit is 7.5 % over, not 5.3 %, and the sentence
-   * says why the room is there. AND THE FEE MAY NOT BE IN FORCE YET: the build
-   * nets the higher of the live and the written fee, so on 2026-09-25 (epoch
-   * 1042, 100 bps in force, 300 written for 1043) the floor 0.97 x 0.93 = 90.2 %
-   * of the mid let a unit that arrives at 0.99 of it cost up to 9.7 % over
-   * today's price, not 7.5 %. The sentence says the room is larger until then.
-   */
-  legCeiling: (symbol: string, max: string, fee: string | null, marginBps: number): string => {
-    const over = overTodayPercent(marginBps);
-    if (fee === null) return `${symbol} is never bought above ${max} per 100,000,000 raw units (${over} over today's pool price)`;
-    return (
-      `${symbol} is never bought above ${max} per 100,000,000 raw units that reach your vault (${over} over today's pool price once a ${fee} transfer fee is counted — the highest its issuer has set, in force now or written for a later epoch, so while a lower fee applies a buy may land further over today's price` +
-      `${marginBps > LEG_FLOOR_MARGIN_BPS ? `; wider than the usual ${overTodayPercent(LEG_FLOOR_MARGIN_BPS)} because at that fee each buy asks the market for more room, and the limit has to leave it` : ""})`
-    );
-  },
-  pricesUnknown: "Today's prices could not be read just now. The build reads them again, and the limits you sign are shown before Phantom asks.",
+  priceTitle: "How the price is set",
+  /** The owner's decision (2026-10-08), in his terms: no signed price floor, and what that buys him. */
+  livePrice:
+    "SaverFi buys at the live market price. What you sign has no price floor, so a stock rising or SOL falling is not a reason for SaverFi to stop buying, and a price move never asks you to sign again.",
+  /** The keeper's live checks, with the code's numbers for THIS basket's legs. */
+  keeperChecks: (legs: readonly SignedLeg[]): string => keeperChecksParagraph(legs),
+  /** What the chain still enforces, and plainly what it no longer does. Null caps while the boxes cannot be read. */
+  chainLimits: (perBuy: string | null, per30Days: string | null): string => chainLimitsParagraph(perBuy, per30Days),
   /**
    * The owner's words for what a policy does, at the limits shown. `basket` is
    * every CHOSEN leg with its weight, so this sentence cannot go on naming one
@@ -971,8 +968,8 @@ export const INVEST_COPY = {
    * arithmetic coincidence TESTING_TRAPS.md is about. It now says it does not
    * know rather than naming a number that is right for a different basket.
    */
-  policyRule: (basket: string, floorUsdPerSol: string, purchase: string | null, maxPerCall: string, maxRolling: string, rent: string): string =>
-    `Your vault invests in ${basket}, each bought through Jupiter, which picks the route for every buy, and a buy takes all of them or none. When the vault holds SOL, the keeper converts it to USDC, never below ${floorUsdPerSol} per SOL, then ${purchase === null ? "buys once enough USDC is ready for the smallest share in the basket to clear its minimum" : `buys once ${purchase} of USDC is ready`} and never above the per-stock limits below. At most ${maxPerCall} per buy and ${maxRolling} per 30 days until you change them. If a price moves past a limit, or the venue a buy would land in is too small for it, nothing is bought and no SOL is converted until you sign again. Nothing is sold at a worse price. Setting this up costs ${rent} SOL of rent for the policy and the vault's token accounts, and none of it comes back.`,
+  policyRule: (basket: string, purchase: string | null, maxPerCall: string, maxRolling: string, rent: string): string =>
+    `Your vault invests in ${basket}, each bought through Jupiter, which picks the route for every buy, and a buy takes all of them or none. When the vault holds SOL, the keeper converts it to USDC at the live price, then ${purchase === null ? "buys once enough USDC is ready for the smallest share in the basket to clear its minimum" : `buys once ${purchase} of USDC is ready`}, at the live price. At most ${maxPerCall} per buy and ${maxRolling} per 30 days until you change them. If the venue a buy would land in is too small for it, or the keeper's price checks below refuse it, nothing is bought and no SOL is converted on that sweep, and a later sweep tries again. Setting this up costs ${rent} SOL of rent for the policy and the vault's token accounts, and none of it comes back.`,
 
   // ── WHAT THE POSITION COSTS, AND WHO OWNS EACH NUMBER ──────────────────────
   //
@@ -1005,19 +1002,6 @@ export const INVEST_COPY = {
   feeCeiling: (legs: readonly SignedLeg[], max: string = ratePercent(MAX_LEG_FEE_BPS)): string => feeCeilingParagraph(legs, max),
   /** What a round trip actually cost, where anybody measured one, and silence where nobody did. */
   marketCost: (legs: readonly SignedLeg[]): string => marketCostParagraph(legs),
-  /**
-   * WHAT SAVERFI CHECKS AND WHAT IT DOES NOT, which no sentence on this card
-   * said while three of them described the checks.
-   *
-   * The depth gate measures DEPTH AT THE SIZE OF THE TURN and has no opinion
-   * about price; Pyth anchors the SOL hop alone; the stock legs' only price
-   * bound is the owner's own floor, and that floor is signed once and decays.
-   * `marginUnderMarket` is LEG_FLOOR_MARGIN_BPS as a percentage, from the
-   * constant the build route actually derives the floor with; a leg whose fee
-   * widens it (legFloorMarginBps) is named with its own margin.
-   */
-  defencesLimits: (legs: readonly SignedLeg[], marginUnderMarket: string): string => defencesLimitsParagraph(legs, marginUnderMarket),
-
   // ── WHETHER IT CAN BUY AT ALL TODAY ────────────────────────────────────────
   //
   // NOT "only one leg can be bought": the keeper's depth gate is all-or-nothing
@@ -1126,86 +1110,23 @@ export const INVEST_COPY = {
   /** The box he ticks, naming the powers HIS legs are subject to and no others. */
   acknowledge: (legs: readonly SignedLeg[]): string => acknowledgeSentence(legs),
 
-  // ── THE FLOOR HE SIGNED ONCE, AND THE MARKET THAT WALKED AWAY FROM IT ──────
+  // ── A POLICY SIGNED BEFORE 2026-10-08, WITH PRICE FLOORS IN IT ─────────────
   //
-  // WHY THIS BLOCK EXISTS. min_out_rate_wad is derived at signing time from one
-  // pool's mid (net of the leg's fee since 2026-09-24), legFloorMarginBps(fee)
-  // under it, and then it stands until the
-  // owner signs again. The keeper's own comment is blunt about what that means:
-  // the floor "DECAYS ... it clears itself as the market rises (a stale floor
-  // stops binding) and blocks every honest buy as the market falls. A floor
-  // that always passes is not a defence."
-  //
-  // THE SCREEN ALREADY SAID ONE HALF OF THAT AND NOT THE OTHER. A floor the
-  // market has PASSED is visible: the badge flips and `marketPast` explains it.
-  // A floor the market has left far behind is invisible, and it is the one that
-  // costs money quietly — the number is still there, still signed, and would
-  // let a buy through at a price nobody would accept today.
-  //
-  // WHAT IT MAY NOT SAY. Not that the drift is dangerous by some threshold of
-  // its own invention, and not when it was signed: THE POLICY ACCOUNT RECORDS
-  // NO SIGNING DATE (state.rs InvestmentPolicy has no timestamp), so the date
-  // is passed in when a caller genuinely knows one and the sentence says
-  // plainly that it is unknown when nobody does. The drift itself is arithmetic
-  // over two numbers on the page: the floor the policy carries and the rate the
-  // screen just read.
-  floorDriftTitle: "The limits you signed do not follow the market",
-  /** The head of the block. `signedOn` is null whenever nobody knows the day, and that is said rather than guessed. */
-  floorDriftSigned: (signedOn: string | null): string =>
-    signedOn === null
-      ? "You signed these limits once and they have stood unchanged since. SaverFi cannot tell you which day that was — the policy on Solana does not record one — so what it shows instead is how far today's prices have moved away from them."
-      : `You signed these limits on ${signedOn} and they have stood unchanged since. Today's prices have not.`,
-  /** A leg whose limit the market has left far below: it still permits a buy nobody would make today. */
-  legFloorSlack: (symbol: string, limit: string, today: string, drift: string): string =>
-    `${symbol} may still be bought at up to ${limit}, while the market is at ${today} — ${drift} above today's price. That limit was set just under the price of the day it was signed, and it has not moved since, so it is no longer stopping much. Sign again to set it from today's prices.`,
-  // ── WHETHER SAVERFI CAN STILL BUY UNDER A SIGNED LIMIT ────────────────────
-  //
-  // invest-limits.ts floorRoom answers "every-route", "some-routes" or
-  // "no-route" for each leg, at the highest transfer fee its issuer has
-  // written; these are the words for the last two. Neither may say more than
-  // the keeper does: under "some-routes" it still buys whenever a sweep's best
-  // route quotes before the fee or comes back close enough to the pool's price,
-  // so the sentence must not say it refuses; under "no-route" not even a route
-  // 25 bps over the pool's price clears the limit, the keeper refuses the whole
-  // basket and the SOL conversion on every sweep (invest-tick.ts, before the
-  // wrap), and the sentence says exactly that. A leg with no fee reaches
-  // "some-routes" only through the route's own price, and is never told of a fee.
-  //
-  // `fromEpoch` is the epoch a written rise takes effect in, when the limit is
-  // still fine at the fee charged today and only that rise moves it; null when
-  // the state already holds at today's fee (or no rise is written).
-  roomTitle: "Whether SaverFi can still buy under your limits",
-  /** "some-routes": a note, not an alarm — buying goes on, on some routes. */
-  legFloorSomeRoutes: (symbol: string, limit: string, feeBps: number, fromEpoch: number | null): string =>
-    `${
-      fromEpoch !== null
-        ? `From ${epochWords(fromEpoch)}, ${symbol}'s issuer charges ${ratePercent(feeBps)} on every transfer. Your ${symbol} limit of ${limit} will still let`
-        : feeBps > 0
-          ? `At the ${ratePercent(feeBps)} ${symbol}'s issuer charges on every transfer, your ${symbol} limit of ${limit} lets`
-          : `Your ${symbol} limit of ${limit} lets`
-    } SaverFi buy on some of the routes the market offers, but not on every one: when a sweep's best route is one of the others, SaverFi waits for a later sweep instead of buying. Signing again with today's prices keeps every route open.`,
-  /** "no-route": nothing is bought until the owner signs again. The badge says "Sign again" beside it. */
-  legFloorNoRoute: (symbol: string, limit: string, today: string, feeBps: number, fromEpoch: number | null): string =>
-    `${
-      fromEpoch !== null
-        ? `From ${epochWords(fromEpoch)}, when ${symbol}'s issuer starts charging ${ratePercent(feeBps)} on every transfer, SaverFi will not buy`
-        : feeBps > 0
-          ? `At the ${ratePercent(feeBps)} ${symbol}'s issuer charges on every transfer, SaverFi does not buy`
-          : "SaverFi does not buy"
-    } this basket — no stock in it, and no SOL converted toward it — until you sign again. Your ${symbol} limit of ${limit} is too close to today's price of ${today} to leave room for ${
-      feeBps > 0 ? "that fee and " : ""
-    }the market's movement on any route. The market has not passed your limit; signing again with today's prices sets it with that room.`,
-  /** A leg whose limit the market has passed: the all-or-nothing refusal, said as what it stops. */
-  legFloorPassed: (symbol: string, limit: string, today: string): string =>
-    `${symbol} is limited to ${limit} and the market has passed it at ${today}: nothing is bought, and no SOL is converted toward any of it, until you sign again with today's prices.`,
-  /** The SOL floor the market has left far above: your SOL may be sold far under what it is worth. */
-  solFloorSlack: (floor: string, today: string, drift: string): string =>
-    `Your SOL may still be sold for as little as ${floor} per SOL, while it is worth ${today} — ${drift} under today's price. That floor was set just under the price of the day it was signed and has not moved since. Sign again to set it from today's prices.`,
-  /** The SOL floor the market has fallen through: conversion stops, and with it the buying. */
-  solFloorPassed: (floor: string, today: string): string =>
-    `Your SOL floor is ${floor} per SOL and SOL is at ${today}, under it: no SOL is converted, so nothing is bought, until you sign again with today's prices.`,
-  /** Every floor still sits where it was signed, within the margin it was signed at. */
-  floorsInStep: "Every limit still sits close to the prices just read.",
+  // Until that day every policy signed a floor per stock and one for SOL, taken
+  // once from that day's prices. They stay in a stored policy until it is
+  // signed again. Two states, and the words may not mix them up: the old
+  // limits are STOPPING buys (the market passed one, or no route clears it at
+  // the keeper's own ask — invest-limits.ts priceLimitsOf "blocking"), or they
+  // are still there and not stopping anything today ("held"). One press
+  // re-signs the same basket at the live price either way.
+  oldLimitsTitle: "Price limits from before",
+  /** "held": the limits are not judged to be stopping buys right now (or the prices are unread); the switch is offered, not urged. */
+  oldLimitsHeld:
+    "This policy was signed with price limits, before SaverFi switched to buying at the live price. Whenever a price moves past one of them, buying stops until you sign again. Switching signs the same basket again at the live price, once, and no price limit stops it after that.",
+  /** "blocking": the old limits are what stops the buying, and the switch is the way out. */
+  oldLimitsBlocking:
+    "This policy's old price limits are stopping your buys: nothing is bought, and no SOL is converted, while a price sits past them. Switching signs the same basket again at the live price, so those limits stop nothing any more.",
+  switchToLive: "Switch to live-price buying",
 
   sign: "Sign investment policy",
   signing: "Signing…",
@@ -1259,7 +1180,7 @@ export const INVEST_COPY = {
   basketTooMany: (most: number, chosen: number): string => `A basket holds at most ${most} stocks. This one has ${chosen}: untick one before adding another.`,
   venueLabel: "Where it trades",
   venueHint: "The exchange the keeper buys through. SaverFi checks the transaction against the one you pick before your wallet is asked to sign it.",
-  convertWarning: "Above $1,000.00 per buy, one conversion can sell more than 1 SOL of your savings at the floor.",
+  convertWarning: "Above $1,000.00 per buy, one conversion can sell more than 1 SOL of your savings at once.",
   /**
    * SAID BESIDE THE BOX, the moment he types past the ceiling — AND IT NOW
    * BLOCKS SIGN RATHER THAN ONLY COLOURING THE TEXT.
@@ -1305,16 +1226,15 @@ export const INVEST_COPY = {
    */
   capWindowEmpty: (floor: string, ceiling: string, symbol: string): string =>
     `There is no Most per buy that works for this basket. Every buy has to be at least ${floor} for each stock to clear its minimum, and ${symbol}'s market cannot cover more than ${ceiling} at the share you have given it. Give ${symbol} a smaller share, lower Least per stock, or take ${symbol} out.`,
-  youAreSigning: (solFloor: string, legs: string, perBuy: string, per30Days: string): string =>
-    `You are signing: SOL never sold below ${solFloor}; ${legs}; at most ${perBuy} per buy and ${per30Days} per 30 days.`,
-  legSigning: (symbol: string, max: string): string => `${symbol} never bought above ${max} per 100,000,000 raw units`,
+  /** `basket` names the stocks the bytes carry; there is no price figure to quote, because no price floor is signed. */
+  youAreSigning: (basket: string, perBuy: string, per30Days: string): string =>
+    `You are signing: ${basket} bought at the live market price, with no price floor; at most ${perBuy} per buy and ${per30Days} per 30 days.`,
   enabled: "Investing is on.",
   paused: "Investing is paused.",
-  floorsBelowMarket: "Floors below market",
-  floorPassed: "Floor passed",
-  /** The badge when a leg's signed limit leaves SaverFi no route to buy on (invest-limits.ts floorRoom "no-route"): nothing is wrong with the market, the limit has to be signed again. */
-  floorNoRoute: "Sign again",
-  marketPast: "The market moved past a floor: buying waits until you sign again with today's prices.",
+  /** The badge: how this policy is priced. */
+  badgeLive: "Live price",
+  badgeOldLimits: "Old price limits",
+  badgeOldLimitsBlocking: "Old limits stop buys",
   storedSolFloor: (floor: string, today: string | null): string => (today === null ? `SOL floor ${floor}` : `SOL floor ${floor}, today ${today}`),
   storedLegCeiling: (symbol: string, max: string, today: string | null): string =>
     today === null ? `${symbol} ceiling ${max} per 100,000,000 raw units` : `${symbol} ceiling ${max} per 100,000,000 raw units, today ${today}`,
@@ -1323,7 +1243,6 @@ export const INVEST_COPY = {
   ready: "Ready: the next sweep can buy.",
   waiting: (at: string): string => `Waiting: it buys once the vault holds ${at} of USDC.`,
   unreachable: "These limits can never buy the whole basket: raise Most per buy.",
-  signAgain: "Sign again with today's prices",
   pause: "Pause investing",
   resume: "Resume investing",
 
@@ -1361,7 +1280,7 @@ export const INVEST_COPY = {
    * of it.
    *
    * The edit form used to be REFUSED in this case, because it shares its
-   * reading of the stored basket with "Sign again" — where a missing leg
+   * reading of the stored basket with the re-signing buttons — where a missing leg
    * really would build a different basket. For the form the opposite is true:
    * set_invest_policy overwrites, so a fresh basket without that stock is
    * precisely the remedy, and the owner whose basket has stopped buying
@@ -1403,12 +1322,12 @@ export const INVEST_COPY = {
    * today: this is a guard, not a repair.
    */
   editFractionalShare: (symbol: string, share: string): string =>
-    `This policy gives ${symbol} ${share}, which is not a whole number of percent, and the share boxes take whole percentages only. Changing the basket here would have to round it into a share you never chose, so it is not offered. Signing again and pausing still work on it exactly as it stands.`,
-  pauseKeeps: "Pausing signs this policy again as it is, with investing off, so it needs no prices. Resuming and signing again read today's prices.",
+    `This policy gives ${symbol} ${share}, which is not a whole number of percent, and the share boxes take whole percentages only. Changing the basket here would have to round it into a share you never chose, so it is not offered. Pausing and resuming still work on it exactly as it stands.`,
+  pauseKeeps: "Pausing signs this policy again as it is, with investing off. Resuming signs it again at the live price.",
   pauseSigning: "You are signing: investing paused, with every floor and limit this policy has.",
   noRefill: "Signing again does not refill this month's cap.",
 
-  // ── WHEN "Sign again" AND "Resume" MAY NOT BE PRESSED ─────────────────────
+  // ── WHEN "Switch to live-price buying" AND "Resume" MAY NOT BE PRESSED ───────
   //
   // BOTH BUTTONS RE-SIGN THE STORED BASKET, which is the change these four
   // sentences belong to. They used to send the two caps and nothing else, and

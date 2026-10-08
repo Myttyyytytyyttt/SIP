@@ -10,13 +10,14 @@
  * - {"action":"link","owner","wallet","consentSignature"} → the link transaction,
  *   [compute budget, Ed25519SigVerify, link_wallet], that the pension key signs
  *   first and the trading wallet second.
- * - {"action":"investPolicy","owner","maxPerCall"?,"maxRolling30d"?,"enabled"?} →
- *   set_invest_policy for SPYx at floors read from the pools right now (90 % of
- *   SOL's price, 95 % of SPYx's rate; a leg with a transfer fee is floored under
- *   its rate net of that fee, 93 % of it at 300 bps — solana-core
- *   legFloorWad), behind a CreateIdempotent for each of the
- *   vault's wSOL, USDC and SPYx accounts it lacks, paid by the owner; the floors,
- *   those accounts and every rent come with it.
+ * - {"action":"investPolicy","owner","maxPerCall"?,"maxRolling30d"?,"enabled"?,
+ *   "minInvestment"?,"weights"?,"venue"?} → set_invest_policy for the chosen
+ *   basket at the live price: every floor is LIVE_PRICE_FLOOR_WAD, no signed
+ *   price floor (solana-core product.ts, owner 2026-10-08), and no pool is
+ *   read. Ahead of it, a CreateIdempotent for each of the first
+ *   BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES missing vault token accounts the policy
+ *   holds, paid by the owner; the floors, those accounts and every rent come
+ *   with it.
  * - {"action":"pauseInvesting","owner"} → set_invest_policy re-signing the
  *   stored policy, every floor and cap as it is, with investing off. It reads no
  *   pool, so the owner can pause when prices cannot be read.

@@ -130,7 +130,7 @@ describe("the transfer fee in force, against the chain's own epoch", () => {
     expect(fee!.sinceEpoch).toBe(1_039n);
     expect(fee!.scheduled).toEqual({ bps: 300, fromEpoch: 1_043n });
     // A floor signed today must net the HIGHER of the two: solana-core's rule, not this page's.
-    expect(fee!.netBps).toBe(300);
+    expect(fee!.judgedBps).toBe(300);
   });
 
   it("charges the newer rate from its epoch on, with nothing left scheduled", () => {
@@ -138,7 +138,7 @@ describe("the transfer fee in force, against the chain's own epoch", () => {
     expect(fee!.bps).toBe(300);
     expect(fee!.sinceEpoch).toBe(1_043n);
     expect(fee!.scheduled).toBeNull();
-    expect(fee!.netBps).toBe(300);
+    expect(fee!.judgedBps).toBe(300);
   });
 
   it("is null for a mint that carries no fee extension", () => {

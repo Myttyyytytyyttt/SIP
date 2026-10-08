@@ -22,6 +22,7 @@ import { VaultScreenContext, type VaultScreenValue } from "@/hooks/use-vault-sta
 import { START_BUYING_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
 import type { VaultApi, VaultStateJson } from "@/lib/vault-api";
+import { INVEST_COPY } from "@/lib/vault-copy";
 import { DEFAULT_VENUE_NAME } from "@/lib/vault-flows";
 import { liveDashboard, liveSnapshot, OWNER, VAULT } from "../../../test/fixtures/live-dashboard";
 
@@ -134,11 +135,15 @@ describe("LiveStartBuying", () => {
     // The fee line for the leg whose issuer charges, and none for the one that cannot.
     expect(html).toContain("ANTHROPIC’s issuer takes");
     expect(html).not.toContain("SPYx’s issuer takes");
-    // ANTHROPIC's issuer has 3 % written, so its limit is the wider 7 % the
-    // build signs at that fee (legFloorMarginBps), named on the card itself.
-    expect(html).toContain("(for ANTHROPIC about 7 %, after the highest transfer fee its issuer has set, because at that fee each buy asks the market for more room and the limit has to leave it)");
-    // The conversion is said whether or not today's prices could be read: this fixture has none for the legs.
-    expect(html).toContain("Your SOL savings, now and later, are sold for USDC");
+    // NO SIGNED PRICE FLOOR (owner, 2026-10-08): one line on the card, and the
+    // keeper's checks and what the chain still enforces under the details.
+    expect(html).toContain(START_BUYING_COPY.livePrice);
+    expect(html).toContain(INVEST_COPY.priceTitle);
+    expect(html).toContain("the quote less 2 % (4 % for ANTHROPIC)");
+    expect(html).toContain("If SaverFi&#x27;s keeper failed, or its key were stolen, nothing on Solana would stop a buy at a bad price");
+    expect(html).not.toMatch(/never sold below|never bought above|Price limits are set/);
+    // The conversion is said, at the live price.
+    expect(html).toContain("Your SOL savings, now and later, are sold for USDC at the live price");
     // The depth risk the full form puts in an amber box is under the details too.
     expect(html).toContain("buys only where the market can take the whole buy");
 

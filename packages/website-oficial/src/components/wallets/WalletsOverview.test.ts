@@ -365,13 +365,19 @@ describe("overviewOf: what the overview may say, and what it may not", () => {
     expect(unread.steps).toBeNull();
   });
 
-  it("price limits the market has passed put a dot on Investing; limits that still buy on every route do not", () => {
-    const fine = overviewOf(ready(stateWith({ vault: vaultExists(), policy: policyExists(true) })), [], PENSION_KEY);
-    expect(fine.priceLimits).toBeNull();
-    expect(attentionOf(fine).has("investing")).toBe(false);
+  it("a basket still carrying price limits puts a dot on Investing, blocking or not; a live-price basket does not", () => {
+    // policyExists signs every floor at 1 wad: what a policy signed since 2026-10-08 carries.
+    const live = overviewOf(ready(stateWith({ vault: vaultExists(), policy: policyExists(true) })), [], PENSION_KEY);
+    expect(live.priceLimits).toBeNull();
+    expect(attentionOf(live).has("investing")).toBe(false);
+
+    // An old SOL floor far under today's price: a limit, not stopping anything.
+    const held = overviewOf(ready(stateWith({ vault: vaultExists(), policy: policyExists(true, [SPYX], "2") })), [], PENSION_KEY);
+    expect(held.priceLimits).toBe("held");
+    expect([...attentionOf(held)]).toEqual(["investing"]);
 
     const passed = overviewOf(ready(stateWith({ vault: vaultExists(), policy: policyExists(true, [SPYX], "999999999999999999999") })), [], PENSION_KEY);
-    expect(passed.priceLimits).toBe("passed");
+    expect(passed.priceLimits).toBe("blocking");
     expect([...attentionOf(passed)]).toEqual(["investing"]);
   });
 
@@ -583,12 +589,12 @@ describe("WalletsOverview", () => {
     expect(labels()).toEqual([OVERVIEW_COPY.disconnect]);
   });
 
-  it("price limits to refresh, and a wallet to fix, each send to their own tab", () => {
+  it("old price limits to switch from, and a wallet to fix, each send to their own tab", () => {
     mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), embedded(TRADING_1, 1, true), embedded(TRADING_0, 0, false)]) };
     const html = render(
       ready(stateWith({ vault: vaultExists(), policy: policyExists(true, [SPYX], "999999999999999999999"), walletLinks: [link(TRADING_1, "this_vault"), link(TRADING_0, "this_vault")] })),
     );
-    expect(html).toContain(SETTINGS_COPY.refreshNeeded.replaceAll("'", "&#x27;"));
+    expect(html).toContain(SETTINGS_COPY.switchLiveBlocking.replaceAll("'", "&#x27;"));
     expect(html).toContain(OVERVIEW_COPY.walletsToFix(1, 0));
     const investing = buttons(OVERVIEW_COPY.goTo(WALLETS_COPY.tabs.investing));
     const trading = buttons(OVERVIEW_COPY.goTo(WALLETS_COPY.tabs.trading));

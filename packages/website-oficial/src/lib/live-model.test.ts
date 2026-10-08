@@ -1,12 +1,12 @@
 // The chain's answer turned into a screen: what each number on the live
 // dashboard is, and what it becomes when the chain did not say.
 
-import { ANTHROPIC_MINT, SPYX_MINT, USDC_MINT, WSOL_MINT, base58Encode, floorWad, legFloorWad } from "@sip/solana-core/client";
+import { ANTHROPIC_MINT, SPYX_MINT, USDC_MINT, WSOL_MINT, base58Encode, floorWad } from "@sip/solana-core/client";
 import { describe, expect, it } from "vitest";
 
 import { headCursor } from "@/lib/live-activity-store";
 import { floorRoom, keeperVenueThresholdWad } from "@/lib/invest-limits";
-import { policyRoom, toLiveDashboard } from "@/lib/live-model";
+import { priceLimitsOf, toLiveDashboard } from "@/lib/live-model";
 import type { LiveActivityJson, LiveEntryJson, LiveSnapshotJson, VaultEventJson } from "@/lib/live-types";
 
 import { policyState } from "../../test/fixtures/live-dashboard";
@@ -576,53 +576,76 @@ describe("the policy's last buy", () => {
 });
 
 /**
- * THE GEAR'S ONE WORD FOR THE STORED PRICE LIMITS (policyRoom): InvestingCard's
- * badge and room notes without their sentences. "passed" when the market fell
- * through a floor; otherwise the WORST leg's floorRoom at its judged fee —
- * ANTHROPIC's 3 % written for epoch 1043.
+ * THE ONE WORD FOR HOW A STORED POLICY IS PRICED (priceLimitsOf), read by the
+ * investing card, the Vault settings gear and the wallets overview alike.
+ * "live" for a policy signed since 2026-10-08 (every floor 1 wad); for an
+ * older one, "blocking" when its limits stop buying now — the market passed a
+ * floor, or a leg's floor leaves no route at its judged fee (ANTHROPIC's 3 %
+ * written for epoch 1043) — and "held" otherwise.
  */
-describe("policyRoom", () => {
+describe("priceLimitsOf", () => {
   const ANTHROPIC_MID = 5_555_555_555_555_555_556n;
   const TWO_LEG_PRICES: LiveSnapshotJson["prices"] = {
     ...PRICES!,
     legs: [...PRICES!.legs, { symbol: "ANTHROPIC", mint: ANTHROPIC_MINT, wad: String(ANTHROPIC_MID), usdcRawPer1e8: "18000000" }],
   };
-  const twoLegs = (anthropicFloor: bigint) =>
+  const twoLegs = (anthropicFloor: bigint, spyxFloor = "124000000000000000") =>
     policyState({
       legs: [
-        { mint: SPYX_MINT, weightBps: 5_000, minOutRateWad: "124000000000000000" },
+        { mint: SPYX_MINT, weightBps: 5_000, minOutRateWad: spyxFloor },
         { mint: ANTHROPIC_MINT, weightBps: 5_000, minOutRateWad: String(anthropicFloor) },
       ],
     });
-
-  it("is every-route when each floor leaves room on the costliest route", () => {
-    expect(policyRoom(policyState(), PRICES)).toBe("every-route");
-    expect(policyRoom(twoLegs(legFloorWad(ANTHROPIC_MID, 300)), TWO_LEG_PRICES)).toBe("every-route");
+  /** What every policy signed since 2026-10-08 carries. */
+  const live = policyState({
+    legs: [
+      { mint: SPYX_MINT, weightBps: 5_000, minOutRateWad: "1" },
+      { mint: ANTHROPIC_MINT, weightBps: 5_000, minOutRateWad: "1" },
+    ],
+    minConvertRateWad: "1",
   });
 
-  it("is passed when a leg's floor is above today's rate, whatever the other legs say", () => {
-    expect(policyRoom(policyState({ legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "131283650130637570" }] }), PRICES)).toBe("passed");
-    // A leg over its rate is passed even when the SOL rate could not be read.
-    const noConvert = { ...PRICES!, convertWad: "" };
-    expect(policyRoom(policyState({ legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "131283650130637570" }] }), noConvert)).toBe("passed");
+  it("is live when every floor is the 1 wad a policy signs since 2026-10-08 — with prices read or not", () => {
+    expect(priceLimitsOf(live, TWO_LEG_PRICES)).toBe("live");
+    expect(priceLimitsOf(live, null)).toBe("live");
   });
 
-  it("is passed when the SOL conversion's floor is above today's rate", () => {
-    expect(policyRoom(policyState({ minConvertRateWad: "100038711555492563" }), PRICES)).toBe("passed");
-  });
-
-  it("is the WORST leg's room otherwise: some-routes, then no-route, at ANTHROPIC's judged 3 %", () => {
-    // Signed at 95 % of the gross mid before floors were netted (the owner's own case).
+  it("is held for an old policy whose limits every route, or some routes, still clear", () => {
+    expect(priceLimitsOf(policyState(), PRICES)).toBe("held");
+    // Signed at 95 % of the gross mid before floors were netted (the owner's own case): some routes at 3 %.
     const signedGross = floorWad(ANTHROPIC_MID, 500);
     expect(floorRoom(signedGross, ANTHROPIC_MID, 300)).toBe("some-routes");
-    expect(policyRoom(twoLegs(signedGross), TWO_LEG_PRICES)).toBe("some-routes");
+    expect(priceLimitsOf(twoLegs(signedGross), TWO_LEG_PRICES)).toBe("held");
+    // With no prices read nothing is judged to block, and the limits are still there to switch from.
+    expect(priceLimitsOf(policyState(), null)).toBe("held");
+  });
+
+  it("is held when only ONE number carries a limit, the SOL floor or a single leg's", () => {
+    expect(priceLimitsOf(policyState({ legs: live.legs, minConvertRateWad: "90034840399943305" }), TWO_LEG_PRICES)).toBe("held");
+    expect(priceLimitsOf({ ...twoLegs(1n, "1"), minConvertRateWad: "1" }, TWO_LEG_PRICES)).toBe("live");
+    expect(priceLimitsOf({ ...twoLegs(2n, "1"), minConvertRateWad: "1" }, TWO_LEG_PRICES)).toBe("held");
+  });
+
+  it("is blocking when a leg's floor is above today's rate, whatever the other legs say", () => {
+    expect(priceLimitsOf(policyState({ legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "131283650130637570" }] }), PRICES)).toBe("blocking");
+    // A leg over its rate is passed even when the SOL rate could not be read.
+    const noConvert = { ...PRICES!, convertWad: "" };
+    expect(priceLimitsOf(policyState({ legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "131283650130637570" }] }), noConvert)).toBe("blocking");
+  });
+
+  it("is blocking when the SOL conversion's floor is above today's rate", () => {
+    expect(priceLimitsOf(policyState({ minConvertRateWad: "100038711555492563" }), PRICES)).toBe("blocking");
+  });
+
+  it("is blocking when a leg's floor leaves no route at ANTHROPIC's judged 3 %", () => {
     // One unit over what even the kindest gross route over the mid leaves at 300.
     const tooClose = keeperVenueThresholdWad(ANTHROPIC_MID, 300, "gross", "over-mid") + 1n;
     expect(tooClose <= ANTHROPIC_MID).toBe(true);
-    expect(policyRoom(twoLegs(tooClose), TWO_LEG_PRICES)).toBe("no-route");
+    expect(priceLimitsOf(twoLegs(tooClose), TWO_LEG_PRICES)).toBe("blocking");
   });
 
-  it("is null when nothing could be judged: no prices read", () => {
-    expect(policyRoom(policyState(), null)).toBeNull();
+  it("is null when the policy's own numbers could not be read", () => {
+    expect(priceLimitsOf(policyState({ legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "" }], minConvertRateWad: "" }), PRICES)).toBeNull();
   });
 });
+

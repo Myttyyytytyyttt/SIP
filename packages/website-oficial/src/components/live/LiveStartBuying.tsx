@@ -6,8 +6,9 @@
  * THE OWNER'S RULE (09-24): the setup's vault step lets a person choose what
  * their savings become — SOL, or the offered stocks at an equal split — and
  * signs only the vault. The investing policy is asked for HERE, once the first
- * settlement has landed, so its price limits are that day's and the rent is
- * spent on a pension that has actually started saving.
+ * settlement has landed, so the rent is spent on a pension that has actually
+ * started saving. It signs no price floor: SaverFi buys at the live price
+ * (owner, 2026-10-08).
  *
  * IT SIGNS WHAT THE INVESTING FORM WOULD SIGN for the same basket. The request
  * is built by InvestingCard's own pure pieces — readWeights, readMinimum,
@@ -18,8 +19,8 @@
  * form's suggestion. The same write path signs it (useVaultWrite.investPolicy),
  * under the page's one lock, and the flow checks the build before Phantom asks.
  *
- * SHORT, NOT PARTIAL. Three lines say what changes, what can stop it and what
- * the price limits do; every paragraph the full form shows before the same
+ * SHORT, NOT PARTIAL. Three lines say what changes, what can stop it and how
+ * the price is set; every paragraph the full form shows before the same
  * signature sits under "What exactly am I signing?", and the box to tick is the
  * form's own sentence, word for word.
  *
@@ -30,15 +31,12 @@
 
 import {
   BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES,
-  CONVERT_FLOOR_MARGIN_BPS,
   DEFAULT_INVEST_CAPS,
-  LEG_FLOOR_MARGIN_BPS,
   OFFERED_LEGS,
   SIGNATURE_FEE_LAMPORTS,
   TOKEN_PROGRAM,
   USDC_MINT,
   WSOL_MINT,
-  legFloorMarginBps,
   ownerComputeBudget,
   priorityFeeLamports,
 } from "@sip/solana-core/client";
@@ -46,7 +44,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { SigningDetail, atMostUsd, pickedLegLimits, policyRequest, readCaps, readMinimum, readWeights } from "@/components/wallets/InvestingCard";
+import { SigningDetail, atMostUsd, policyRequest, readCaps, readMinimum, readWeights } from "@/components/wallets/InvestingCard";
 import { TxProgress } from "@/components/wallets/TxProgress";
 import { useBasketChoice } from "@/hooks/use-onboarding-closed";
 import { useVaultWrite, type InvestRequest } from "@/hooks/use-vault-actions";
@@ -54,7 +52,6 @@ import { useVaultScreen } from "@/hooks/use-vault-state";
 import { USDC_DECIMALS, formatSol, formatUnits, formatUsd, rawFrom } from "@/lib/amounts";
 import { LABEL } from "@/lib/classes";
 import { basketLimits, evenPercents, overCeiling, type BasketLimits, type PickedLeg } from "@/lib/basket-picker";
-import { todaysLimits } from "@/lib/invest-limits";
 import { START_BUYING_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
 import { basketOnShelf } from "@/lib/onboarding";
@@ -62,7 +59,7 @@ import { BASE_THRESHOLD_RAW, minimumFor } from "@/lib/rule-settings";
 import { saveBasketChoice } from "@/lib/onboarding-memory";
 import type { VaultStateJson } from "@/lib/vault-api";
 import { DEFAULT_VENUE_NAME } from "@/lib/vault-flows";
-import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, judgedFeeOf, listAnd, ratePercent, signedLegsOf, writtenFeeWords } from "@/lib/vault-copy";
+import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, signedLegsOf, writtenFeeWords } from "@/lib/vault-copy";
 
 /**
  * THE MOST ONE BUY MAY SPEND for a basket started here: $25.
@@ -229,7 +226,7 @@ function StartBuyingCard({
   const [signed, setSigned] = useState<InvestRequest | null>(null);
 
   // A landed policy: the dashboard reads again, and the card goes with the policy it created.
-  // A refusal: the vault is read again too, so a retry is judged against today's prices, not the ones that were refused.
+  // A refusal: the vault is read again too, so a retry is built from what is on chain now, not from the read that was refused.
   const seen = useRef(new WeakSet<object>());
   const latestRefresh = useRef(onRefresh);
   latestRefresh.current = onRefresh;
@@ -258,7 +255,6 @@ function StartBuyingCard({
   const copyLegs = signedLegsOf(assets);
   const symbols = assets.map((asset) => asset.symbol);
   const basketText = plan.legs.length <= 1 ? listAnd(symbols) : `${listAnd(symbols)}, ${ratePercent(plan.legs[0]!.weightBps)} each`;
-  const limits = todaysLimits(state.prices);
   const rent = startBuyingRent(state, plan.legs.map((leg) => leg.asset.mint));
   const fees = SIGNATURE_FEE_LAMPORTS + priorityFeeLamports(ownerComputeBudget("set_invest_policy"));
   const purchase = plan.purchaseRaw === null ? null : formatUsd(plan.purchaseRaw);
@@ -278,18 +274,11 @@ function StartBuyingCard({
       <CardContent className="space-y-3 text-sm">
         <ul className="list-disc space-y-1 pl-4 text-xs text-muted-foreground marker:text-muted-foreground/60">
           {/* Always said, prices or not: once a policy exists, every lamport saved is converted. */}
-          <li>{START_BUYING_COPY.convert(limits === null ? null : formatUsd(limits.floorPerSol), purchase)}</li>
-          {limits === null ? <li>{INVEST_COPY.pricesUnknown}</li> : null}
+          <li>{START_BUYING_COPY.convert(purchase)}</li>
           {feeLegs.map((leg) => (
             <li key={leg.symbol}>{START_BUYING_COPY.fee(leg.symbol, ratePercent(leg.feeBps ?? 0), writtenFeeWords(leg), ratePercent(MAX_LEG_FEE_BPS))}</li>
           ))}
-          <li>
-            {START_BUYING_COPY.limits(
-              ratePercent(CONVERT_FLOOR_MARGIN_BPS),
-              ratePercent(LEG_FLOOR_MARGIN_BPS),
-              feeLegs.map((leg) => ({ symbol: leg.symbol, margin: ratePercent(legFloorMarginBps(judgedFeeOf(leg) ?? 0)) })),
-            )}
-          </li>
+          <li>{START_BUYING_COPY.livePrice}</li>
         </ul>
 
         {/* Everything the investing form says before this same signature, one click away. */}
@@ -300,7 +289,6 @@ function StartBuyingCard({
               <p>
                 {INVEST_COPY.policyRule(
                   listAnd(plan.legs.map((leg) => `${leg.asset.symbol} at ${ratePercent(leg.weightBps)}`)),
-                  limits === null ? "today's floor" : formatUsd(limits.floorPerSol),
                   purchase,
                   formatUsd(request.maxPerCall),
                   formatUsd(request.maxRolling30d),
@@ -309,18 +297,10 @@ function StartBuyingCard({
               </p>
             ) : null}
             <div className="space-y-1">
-              <div className={LABEL}>{INVEST_COPY.floorsTitle}</div>
-              {limits === null ? (
-                <p>{INVEST_COPY.pricesUnknown}</p>
-              ) : (
-                <>
-                  <p>{INVEST_COPY.solFloor(formatUsd(limits.floorPerSol), formatUsd(limits.todayPerSol))}</p>
-                  {pickedLegLimits(limits.legs, assets).map((leg) => (
-                    <p key={leg.mint}>{INVEST_COPY.legCeiling(leg.symbol, formatUsd(leg.maxPer1e8), leg.feeBps > 0 ? ratePercent(leg.feeBps) : null, leg.marginBps)}</p>
-                  ))}
-                  <p>{INVEST_COPY.convertFloorEffect(ratePercent(CONVERT_FLOOR_MARGIN_BPS))}</p>
-                </>
-              )}
+              <div className={LABEL}>{INVEST_COPY.priceTitle}</div>
+              <p>{INVEST_COPY.livePrice}</p>
+              <p>{INVEST_COPY.keeperChecks(copyLegs)}</p>
+              <p>{INVEST_COPY.chainLimits(request === null ? null : formatUsd(request.maxPerCall), request === null ? null : formatUsd(request.maxRolling30d))}</p>
             </div>
             <div className="space-y-1">
               <div className={LABEL}>{INVEST_COPY.thinPoolTitle}</div>
@@ -335,7 +315,6 @@ function StartBuyingCard({
               <p>{INVEST_COPY.issuerCost(copyLegs)}</p>
               <p>{INVEST_COPY.feeCeiling(copyLegs, ratePercent(MAX_LEG_FEE_BPS))}</p>
               <p>{INVEST_COPY.marketCost(copyLegs)}</p>
-              <p>{INVEST_COPY.defencesLimits(copyLegs, ratePercent(LEG_FLOOR_MARGIN_BPS))}</p>
             </div>
             <p>{INVEST_COPY.freezeNotice(copyLegs)}</p>
             <p>{INVEST_COPY.issuerKeys(copyLegs)}</p>

@@ -33,30 +33,17 @@ export interface BuiltTransactionJson {
   readonly costs?: { readonly rentLamports: string; readonly signatureFeeLamports: string; readonly priorityFeeLamports: string };
 }
 
-/** The floors an investPolicy build signs, with the rates they were read from. Bigints as decimal strings. */
+/**
+ * The price floors an investPolicy build signs. Since 2026-10-08 both are
+ * LIVE_PRICE_FLOOR_WAD ("1"): no signed price floor, SaverFi buys at the live
+ * price (solana-core product.ts). vault-flows.ts livePriceProblem refuses an
+ * answer naming anything else. Bigints as decimal strings.
+ */
 export interface PolicyFloorsJson {
-  readonly slot: number | null;
-  /** The epoch each leg's transfer fee was resolved in, from the chain's own clock. */
-  readonly epoch: string;
-  readonly marginBps: { readonly convert: number; readonly leg: number };
-  /** USDC raw per lamport × 1e18, read from the SOL/USDC pool. */
-  readonly liveConvertWad: string;
-  /** min_convert_rate_wad: liveConvertWad less the convert margin. */
+  /** Every leg's min_out_rate_wad. */
+  readonly legWad: string;
+  /** min_convert_rate_wad. */
   readonly convertWad: string;
-  readonly usdcRawPerSol: string;
-  readonly floorUsdcRawPerSol: string;
-  readonly legs: readonly {
-    readonly symbol: string;
-    readonly mint: string;
-    /** Leg raw per USDC raw × 1e18, read from the leg's pool: a mid, GROSS of the leg's transfer fee. */
-    readonly liveWad: string;
-    /** The transfer fee the floor was netted of, in bps: the higher of the one in force and one already written for a later epoch. */
-    readonly transferFeeBps: number;
-    /** min_out_rate_wad: liveWad less transferFeeBps, then less the leg margin. */
-    readonly wad: string;
-    readonly usdcRawPer1e8: string;
-    readonly maxUsdcRawPer1e8: string;
-  }[];
 }
 
 export interface InvestPolicyBuildJson extends BuiltTransactionJson {
@@ -422,7 +409,6 @@ const BUILD_REFUSALS = new Set([
   "above_withdrawable",
   "not_held",
   "above_holding",
-  "price_unavailable",
   "mint_unexpected",
   "fee_unavailable",
   "fee_over_ceiling",

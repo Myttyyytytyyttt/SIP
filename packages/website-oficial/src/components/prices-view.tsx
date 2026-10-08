@@ -361,7 +361,7 @@ export function PricesView({ model }: { model: PricesModel }) {
                 from={
                   <>
                     Raydium CLMM <Mono>{anthropic.poolAddress}</Mono> at {pool.slot === null ? "the slot read" : `slot ${pool.slot}`}, the pool this
-                    product pins for the leg&apos;s floor. It is not the route a purchase takes: the keeper buys through Jupiter, which picks its own.
+                    product reads the leg&apos;s price from. It is not the route a purchase takes: the keeper buys through Jupiter, which picks its own.
                   </>
                 }
               />
@@ -419,7 +419,7 @@ export function PricesView({ model }: { model: PricesModel }) {
                       ) : (
                         <>
                           <strong>{fee.scheduled.bps} bps is already written for epoch {fee.scheduled.fromEpoch.toString()}</strong> — an epoch is
-                          hours, and nobody signs for it. A floor signed today therefore nets {fee.netBps} bps, the higher of the two.
+                          hours, and nobody signs for it. SaverFi therefore checks this stock against its fee ceiling at {fee.judgedBps} bps, the higher of the two.
                         </>
                       )}
                     </>

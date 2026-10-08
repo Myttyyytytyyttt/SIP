@@ -15,12 +15,11 @@ import {
   liveCategories,
   liveSeed,
   planSettings,
-  refreshRequest,
   settingsPolicyPlan,
   type LiveSeed,
 } from "@/components/live/rule-settings-plan";
 import { START_BUYING_PER_BUY_RAW } from "@/components/live/LiveStartBuying";
-import { atLeastUsd, atMostUsd, resignStoredPolicy } from "@/components/wallets/InvestingCard";
+import { atLeastUsd, atMostUsd, resignStoredPolicy, switchToLiveRequest } from "@/components/wallets/InvestingCard";
 import { formatUsd, rawFrom } from "@/lib/amounts";
 import { basketLimits, catalogueAsset } from "@/lib/basket-picker";
 import { LIVE_COPY } from "@/lib/live-copy";
@@ -407,31 +406,28 @@ describe("planSettings with no policy: the basket is a choice kept on this devic
   });
 });
 
-// ── (4) REFRESH PRICE LIMITS ─────────────────────────────────────────────────
+// ── (4) SWITCH TO LIVE-PRICE BUYING ──────────────────────────────────────────
 
-describe("refreshRequest: the investing card's 'Sign again', byte for byte", () => {
-  /** What InvestingCard's PolicySummary hands `start` on "Sign again" (InvestingCard.tsx). */
-  function signAgain(policy: InvestmentPolicyJson) {
-    const resign = resignStoredPolicy(policy);
-    if (!resign.ok) throw new Error(resign.message);
-    const maxPerCall = rawFrom(policy.maxPerCall) ?? 0n;
-    const maxRolling30d = rawFrom(policy.maxRolling30d) ?? 0n;
-    return { maxPerCall, maxRolling30d, enabled: policy.enabled, minInvestment: resign.minInvestment, weights: resign.weights };
-  }
+describe("switchToLiveRequest: the stored basket, re-signed as it stands at the live price", () => {
+  /** A policy signed before 2026-10-08: the owner's basket with a real SOL floor. */
+  const OLD = { ...OWNERS_POLICY, minConvertRateWad: "90000000000000000" };
 
-  it("equals it on the owner's policy, and on a paused one", () => {
-    for (const policy of [OWNERS_POLICY, { ...OWNERS_POLICY, enabled: false }]) {
-      const request = refreshRequest(policy);
-      expect(request).toEqual(signAgain(policy));
+  it("sends the stored caps, enabled as stored, the stored basket by mint and its own minimum — and no venue, so the route's default", () => {
+    for (const policy of [OLD, { ...OLD, enabled: false }]) {
+      const resign = resignStoredPolicy(policy);
+      if (!resign.ok) throw new Error(resign.message);
+      const request = switchToLiveRequest(policy);
+      expect(request).toEqual({ maxPerCall: 149_000_000n, maxRolling30d: 4_619_000_000n, enabled: policy.enabled, minInvestment: resign.minInvestment, weights: resign.weights });
       expect("venue" in request).toBe(false);
     }
   });
 
-  it("refuses with resign's own reason when the stored cap is over its basket's ceiling", () => {
+  it("refuses with resign's own reason when the stored cap is over its basket's ceiling, and refuses an unreadable cap rather than sending 0", () => {
     const over = policyState({ venueProgram: JUPITER_V6, legs: [leg(ANTHROPIC_MINT, 10_000)], minInvestment: "10000000", maxPerCall: "1000000000" });
     const resign = resignStoredPolicy(over);
     expect(resign.ok).toBe(false);
-    expect(refreshRequest(over)).toEqual({ problem: resign.ok ? "" : resign.message });
+    expect(switchToLiveRequest(over)).toEqual({ problem: resign.ok ? "" : resign.message });
+    expect(switchToLiveRequest({ ...OLD, maxRolling30d: "" })).toEqual({ problem: INVEST_COPY.resignUnreadable });
   });
 });
 

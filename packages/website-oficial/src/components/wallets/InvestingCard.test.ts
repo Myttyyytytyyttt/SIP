@@ -1,7 +1,7 @@
 // The investing card rendered to HTML in each state, with Privy mocked, and its buttons pressed: the
 // pattern VaultCard.test.ts uses. Pressing a button runs the real flow against a stub client.
 
-import { ANDURIL_MINT, ANTHROPIC_MINT, CATALOGUE, JUPITER_V6, OFFERED_LEGS, RAYDIUM_CLMM, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT, floorWad, isOfferable, legFloorWad, netOfTransferFeeWad, offerProblems, usdcRawPer1e8LegRaw } from "@sip/solana-core/client";
+import { ANDURIL_MINT, ANTHROPIC_MINT, CATALOGUE, JUPITER_V6, OFFERED_LEGS, RAYDIUM_CLMM, SIP_PROGRAM_ID, SPYX_MINT, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, USDC_MINT, WSOL_MINT, floorWad, isOfferable, netOfTransferFeeWad, offerProblems, usdcRawPer1e8LegRaw } from "@sip/solana-core/client";
 import { Keypair } from "@solana/web3.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -54,7 +54,6 @@ import {
   editScreen,
   policyEditSeed,
   policyRequest,
-  pickedLegLimits,
   readCaps,
   readMinimum,
   readWeights,
@@ -71,7 +70,7 @@ import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hoo
 import { USDC_DECIMALS, formatUnits, formatUsd } from "@/lib/amounts";
 import { floorRoom, keeperVenueThresholdWad } from "@/lib/invest-limits";
 import { PICKER_MAX_LEGS } from "@/lib/basket-picker";
-import { INVEST_COPY } from "@/lib/vault-copy";
+import { INVEST_COPY, signedLegsOf } from "@/lib/vault-copy";
 import type { InvestmentPolicyJson, VaultApi, VaultStateJson } from "@/lib/vault-api";
 
 const CLICK = { type: "click", target: {} };
@@ -171,7 +170,7 @@ describe("InvestingCard", () => {
     expect(render(screen({ kind: "ready", state: stateWith({ policy: { status: "unreadable", address: account() } }) }))).toContain("SaverFi could not read your investment policy just now.");
   });
 
-  it("no policy: the whole basket in the prose, what the position costs and who sets it, that today's caps may buy nothing, what the SOL floor is for, and the issuer's powers over BOTH stocks; Sign waits for the box", () => {
+  it("no policy: the whole basket in the prose, what the position costs and who sets it, that today's caps may buy nothing, how the price is set, and the issuer's powers over BOTH stocks; Sign waits for the box", () => {
     const html = render(screen({ kind: "ready", state: stateWith() }));
     // basketWeightsBps(2): equal halves, one line per offered leg.
     expect(html).toContain("SPYx · 50 %, ANTHROPIC · 50 %");
@@ -193,14 +192,15 @@ describe("InvestingCard", () => {
     expect(html).toContain("Most per buy starts at $149.00, which is half the ceiling");
     expect(html).toContain("the leg that sets it is ANTHROPIC");
     expect(html).toContain("the whole buy can be at most $298.00");
-    expect(html).toContain("SOL is never sold below $90.03 (90 % of today&#x27;s $100.04)");
-    expect(html).toContain("SPYx is never bought above $801.80 per 100,000,000 raw units (5.3 % over today&#x27;s pool price)");
-    // ANTHROPIC's issuer has 3 % written for epoch 1043, so its limit is per
-    // unit that ARRIVES, net of that 3 %, and 700 bps under that — $18.00 /
-    // (0.97 x 0.93) = $19.95 — and the sentence says why the room is wider.
-    expect(html).toContain(
-      "ANTHROPIC is never bought above $19.95 per 100,000,000 raw units that reach your vault (7.5 % over today&#x27;s pool price once a 3 % transfer fee is counted — the highest its issuer has set, in force now or written for a later epoch, so while a lower fee applies a buy may land further over today&#x27;s price; wider than the usual 5.3 % because at that fee each buy asks the market for more room, and the limit has to leave it)",
-    );
+    // HOW THE PRICE IS SET (owner, 2026-10-08): no price floor is signed, so
+    // no "never sold below" / "never bought above" figure is quoted any more;
+    // the keeper's live checks with their numbers for THESE legs, and what the
+    // chain still enforces at the caps in the boxes, are.
+    expect(html).toContain(`>${INVEST_COPY.priceTitle}<`);
+    expect(html).toContain(INVEST_COPY.livePrice.replaceAll("'", "&#x27;"));
+    expect(html).toContain(INVEST_COPY.keeperChecks(signedLegsOf(OFFERED_LEGS)).replaceAll("'", "&#x27;"));
+    expect(html).toContain(INVEST_COPY.chainLimits("$149.00", "$31,000.00").replaceAll("'", "&#x27;"));
+    expect(html).not.toMatch(/never sold below|never bought above|price limits/i);
     // THE PROSE NAMES THE WHOLE BASKET, from the offered legs and their weights.
     // It used to open "Your vault invests in SPYx (SP500 xStock) through Raydium"
     // while the Basket field directly below already read two legs — the card
@@ -213,25 +213,19 @@ describe("InvestingCard", () => {
     );
     expect(html).not.toContain("invests in SPYx (SP500 xStock)");
     expect(html).not.toContain("each through its own Raydium pool");
-    expect(html).toContain("the keeper converts it to USDC, never below $90.03 per SOL, then buys once $5.00 of USDC is ready");
+    expect(html).toContain("the keeper converts it to USDC at the live price, then buys once $5.00 of USDC is ready, at the live price.");
     expect(html).toContain("At most $149.00 per buy and $31,000.00 per 30 days until you change them.");
-    // The per-stock ceilings left the prose: at two legs they were joined by a
-    // slash into "$801.80 / $18.95", a figure of no meaning. One line per stock
-    // in the limits box above is the whole of it now.
-    expect(html).not.toContain("$801.80 / $18.95");
     // THE VENUE, NOT "THE POOL", here too: the same unit change of 2026-09-21
-    // that rewrote thinPool sixteen lines below left this clause behind.
-    expect(html).toContain("or the venue a buy would land in is too small for it, nothing is bought and no SOL is converted until you sign again.");
+    // that rewrote thinPool sixteen lines below left this clause behind. And
+    // since 2026-10-08 a refusal waits for a later sweep, not for a signature.
+    expect(html).toContain(
+      "If the venue a buy would land in is too small for it, or the keeper&#x27;s price checks below refuse it, nothing is bought and no SOL is converted on that sweep, and a later sweep tries again.",
+    );
     expect(html).not.toContain("one of the pools is too small for the buy");
     // Policy 5,577,840 + wSOL and USDC 1,488,440 each + SPYx 1,559,560 + ANTHROPIC 1,620,520 lamports, then 5,000 + 30,000 of fees.
     expect(html).toContain("Setting this up costs 0.0117348 SOL of rent for the policy and the vault&#x27;s token accounts, and none of it comes back.");
     expect(html).toContain("Cost: 0.0117348 SOL of rent that does not come back, plus 0.000035 SOL of network fees.");
 
-    // WHAT THE SOL FLOOR IS FOR, beside the live price it came from: the program
-    // does not validate min_convert_rate_wad, and zero there silently switches
-    // converting off, so the effect and the zero are both said out loud.
-    expect(html).toContain("That floor is what keeps converting switched on: the keeper sells your vault&#x27;s SOL for USDC only at or above it, and it is set 10 % under the price just read above.");
-    expect(html).toContain("it would mean your SOL sold at any price at all.");
 
     // WHETHER IT CAN BUY AT ALL TODAY. The keeper's depth gate is all-or-nothing
     // and tests a converting turn at max_per_call itself, so the shipped $1,000
@@ -318,17 +312,11 @@ describe("InvestingCard", () => {
     expect(html).not.toContain("sits exactly on that limit today");
     expect(html).toContain("the vault stops buying the whole basket — SPYx and ANTHROPIC, every one of them — and stops converting your SOL at all");
 
-    // WHAT SAVERFI DOES NOT DO, which nothing on this card said while three
-    // paragraphs described what it does. The depth gate is a size check; Pyth
-    // covers the SOL hop only; the stock legs' one price bound is a floor the
-    // owner signs once and which decays from the moment he signs it.
-    expect(html).toContain("THAT IS A CHECK ON SIZE, NOT ON PRICE");
-    expect(html).toContain("the SOL price Pyth publishes, which is the only number in a buy that does not come from the venue being traded against");
-    expect(html).toContain("SPYx and ANTHROPIC have no such anchor today");
-    expect(html).toContain(
-      "it is taken from one pool&#x27;s price at the moment you sign, less the highest transfer fee each stock&#x27;s issuer has set, 5 % under it " +
-        "(7 % for ANTHROPIC, whose fee makes each buy ask the market for more room — a lower limit, and so less protection against a bad price), and it does not follow the market afterwards",
-    );
+    // WHAT SAVERFI DOES NOT DO: its checks are about size and Jupiter's own
+    // quotes, nothing outside the venue prices the stocks, and with no signed
+    // floor nothing on Solana stops a bad price if the keeper failed.
+    expect(html).toContain("Nothing outside the venue prices SPYx and ANTHROPIC");
+    expect(html).toContain("If SaverFi&#x27;s keeper failed, or its key were stolen, nothing on Solana would stop a buy at a bad price");
     expect(html).not.toMatch(/fair price|best price|guarantee/i);
 
     // THE ISSUER RISK HE TICKS A BOX ABOUT, enumerated per issuer of per leg.
@@ -612,156 +600,102 @@ describe("InvestingCard", () => {
     expect(setupRent({ ...partly, vaultTokenAccounts: { status: "unreadable", items: [] } })).toBeNull();
   });
 
-  it("a policy: on, the basket, its floors against today's prices below market, the caps, what it used and invested, and whether it can buy", () => {
+  /** POLICY as every policy is signed since 2026-10-08: the same basket and caps, every floor 1 wad. */
+  const LIVE_POLICY: InvestmentPolicyJson = { ...POLICY, legs: POLICY.legs.map((leg) => ({ ...leg, minOutRateWad: "1" })), minConvertRateWad: "1" };
+
+  it("a policy signed at the live price: on, the basket, the caps, what it used and invested, whether it can buy — and no price limits to switch from", () => {
     const holdings: VaultStateJson["holdings"] = { status: "exists", items: [{ tokenAccount: account(), mint: USDC_MINT, amountRaw: "3000000", decimals: 6, uiAmount: "3", tokenProgram: TOKEN_PROGRAM }] };
-    // SIGNED TODAY, UNDER TODAY'S RULE: ANTHROPIC's floor net of the 3 % its
-    // issuer wrote and 700 bps under that (legFloorWad). POLICY's own 95 % of
-    // the gross mid is the pre-2026-09-24 floor the keeper can no longer clear
-    // at that fee — the "sign again" case, pinned in its own test below.
-    const signedNow = { ...POLICY, legs: POLICY.legs.map((leg) => (leg.mint === ANTHROPIC_MINT ? { ...leg, minOutRateWad: String(legFloorWad(BigInt(PRICES!.legs[1]!.wad), 300)) } : leg)) };
-    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: signedNow }, holdings }) }));
+    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: LIVE_POLICY }, holdings }) }));
     expect(html).toContain("Investing is on.");
-    expect(html).toContain("Floors below market");
+    expect(html).toContain(`>${INVEST_COPY.badgeLive}<`);
     expect(html).toContain("SPYx · 50 %, ANTHROPIC · 50 %");
     expect(html).toContain("$10.00");
     expect(html).toContain("$50.00");
     expect(html).toContain("$25.00");
-    expect(html).toContain("SOL floor $90.03, today $100.04");
-    expect(html).toContain("SPYx ceiling $801.80 per 100,000,000 raw units, today $761.71");
-    expect(html).toContain("ANTHROPIC ceiling $19.95 per 100,000,000 raw units, today $18.00");
     expect(html).toContain("Waiting: it buys once the vault holds $5.00 of USDC.");
     expect(html).toContain("Signing again does not refill this month&#x27;s cap.");
-    expect(buttons("Sign again with today's prices")).toHaveLength(1);
     expect(buttons("Pause investing")).toHaveLength(1);
     expect(buttons("Sign investment policy")).toHaveLength(0);
-    // AND NOTHING ABOUT DRIFT, because these floors are exactly where they were
-    // signed: 90.03 against 100.04 is the 10 % convert margin, SPYx sits 5 %
-    // under today and ANTHROPIC its 979 bps (the 3 % fee, then 7 %). A notice that fired here would fire on every policy the
-    // moment it was signed, which is a notice nobody would read.
-    expect(html).not.toContain("The limits you signed do not follow the market");
+    // NOTHING TO SWITCH FROM: no old-limits block, no switch button, no "Sign
+    // again", and no stored floor quoted as if it limited anything.
+    expect(html).not.toContain(INVEST_COPY.oldLimitsTitle);
+    expect(buttons(INVEST_COPY.switchToLive)).toHaveLength(0);
+    expect(buttons("Sign again with today's prices")).toHaveLength(0);
+    expect(html).not.toMatch(/SOL floor|ceiling \$/);
   });
 
-  it("a SOL price under the signed floor says buying waits until signing again", () => {
+  it("a policy signed before 2026-10-08 whose limits still buy: the old limits named, one calm press to switch, which re-signs the same basket", async () => {
+    const build = vi.fn(async () => ({ ok: false as const, status: 409, code: "vault_missing", message: "Create your vault first.", retryAfterSeconds: null, body: {} }));
+    // POLICY's own floors: 10 % under SOL's price and 5 % under each leg's mid,
+    // as the build signed them before 2026-10-08.
+    const value = screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: POLICY } }) }, { build: build as unknown as VaultApi["build"] });
+    const html = render(value);
+    expect(html).toContain(`>${INVEST_COPY.badgeOldLimits}<`);
+    expect(html).toContain(INVEST_COPY.oldLimitsTitle);
+    expect(html).toContain(INVEST_COPY.oldLimitsHeld);
+    expect(html).not.toContain(INVEST_COPY.oldLimitsBlocking.replaceAll("'", "&#x27;"));
+    // The old numbers, beside today's, so he can see what he is dropping.
+    expect(html).toContain("SOL floor $90.03, today $100.04");
+    expect(html).toContain("SPYx ceiling $801.80 per 100,000,000 raw units, today $761.71");
+    const press = buttons(INVEST_COPY.switchToLive);
+    expect(press.map((button) => button.disabled)).toEqual([false]);
+    press[0]?.onClick?.(CLICK);
+    await vi.waitFor(() => expect(value.refresh).toHaveBeenCalledTimes(1));
+    expect(build.mock.calls).toStrictEqual([
+      [
+        {
+          action: "investPolicy",
+          owner: PENSION,
+          maxPerCall: "10000000",
+          maxRolling30d: "50000000",
+          enabled: true,
+          minInvestment: "2500000",
+          weights: [
+            { mint: SPYX_MINT, weightBps: 5_000 },
+            { mint: ANTHROPIC_MINT, weightBps: 5_000 },
+          ],
+        },
+      ],
+    ]);
+  });
+
+  it("old limits the SOL price has fallen through: the urgent words and badge, and the same one press", () => {
     const fallen = { ...PRICES!, convertWad: "80000000000000000", usdcRawPerSol: "80000000" };
     const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: POLICY }, prices: fallen }) }));
-    expect(html).toContain("The market moved past a floor: buying waits until you sign again with today&#x27;s prices.");
-    expect(html).not.toContain("Floors below market");
-    // AND WHICH FLOOR, AND WHAT IT STOPS. The badge says a floor has been
-    // passed; this says it was the SOL one, at what price, and that the
-    // conversion stopping stops the buying too.
-    expect(html).toContain("The limits you signed do not follow the market");
-    expect(html).toContain("Your SOL floor is $90.03 per SOL and SOL is at $80.00, under it: no SOL is converted, so nothing is bought, until you sign again with today&#x27;s prices.");
+    expect(html).toContain(`>${INVEST_COPY.badgeOldLimitsBlocking}<`);
+    expect(html).toContain(INVEST_COPY.oldLimitsBlocking.replaceAll("'", "&#x27;"));
+    expect(html).toContain("SOL floor $90.03, today $80.00");
+    expect(buttons(INVEST_COPY.switchToLive)).toHaveLength(1);
   });
 
-  /**
-   * THE HALF THAT WAS INVISIBLE. A floor the market has PASSED is loud: the
-   * badge flips and buying stops. A floor the market has walked away FROM is
-   * silent — still signed, still enforced, and now permitting a fill at a price
-   * nobody would take today. The keeper's own comment on min_out_rate_wad says
-   * both halves ("it clears itself as the market rises ... and blocks every
-   * honest buy as the market falls"), and only one of them was on the screen.
-   */
-  it("says how far a signed floor has drifted from the market, and that the day it was signed is not knowable", () => {
-    // SPYx's price fell to a third since signing — min_out_rate_wad is units
-    // per USDC, so a bigger wad is a cheaper stock — and the stored floor still
-    // lets the vault pay $801.80 per 100,000,000 raw units for something the
-    // market is selling at $253.90.
-    const walked = { ...PRICES!, legs: PRICES!.legs.map((leg) => (leg.mint === SPYX_MINT ? { ...leg, wad: "393850950391912707" } : leg)) };
-    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: POLICY }, prices: walked }) }));
-    expect(html).toContain("The limits you signed do not follow the market");
-    // THE DRIFT IS ARITHMETIC OVER TWO NUMBERS ON THE PAGE — the wad the policy
-    // carries and the wad just read — and it is quoted against the floor, which
-    // is what the sentence names.
-    expect(html).toContain("SPYx may still be bought at up to $801.80, while the market is at $253.90 — 215.78 % above today&#x27;s price");
-    expect(html).toContain("it is no longer stopping much");
-    expect(html).toContain("Sign again to set it from today&#x27;s prices.");
-    // THE DATE IS NOT INVENTED. InvestmentPolicy carries no timestamp, so the
-    // page says it cannot date the signature rather than implying freshness.
-    expect(html).toContain("SaverFi cannot tell you which day that was — the policy on Solana does not record one");
-    // AND THE LEG THAT HAS NOT DRIFTED IS NOT LISTED: ANTHROPIC still sits 5 %
-    // under its own market, which is where it was signed.
-    expect(html).not.toContain("ANTHROPIC may still be bought");
-  });
-
-  it("does not call a floor slack the day it is signed netted of ANTHROPIC's 3 % and at the wider 7 % the keeper's ask needs", () => {
-    // Signed today from the same mid the screen reads: 0.97 x 0.93 of it, 1,085
-    // bps under — past the 1,052 edge of a flat 5 % margin, and inside the
-    // 2,170 of the 979 bps it was actually signed at (legFloorUnderMidBps).
-    const signedToday = legFloorWad(BigInt(PRICES!.legs[1]!.wad), 300);
-    const policy = { ...POLICY, legs: POLICY.legs.map((leg) => (leg.mint === ANTHROPIC_MINT ? { ...leg, minOutRateWad: String(signedToday) } : leg)) };
-    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: policy } }) }));
-    expect(html).not.toContain("ANTHROPIC may still be bought");
-    expect(html).not.toContain("The limits you signed do not follow the market");
-    expect(html).not.toContain("over your limit");
-  });
-
-  /**
-   * THE OWNER'S OWN CASE, AND WHAT THE CARD USED TO GET WRONG ABOUT IT. His
-   * ANTHROPIC floor was signed at 95 % of the GROSS mid, before floors were
-   * netted of the fee. Until this change the card modelled the keeper's
-   * min_out as the quote less its ask, less the fee, and told him "Sign
-   * again" — while the keeper deployed with df6ca67 buys under that floor on a
-   * route that quotes gross. Here: the same 95 % of the gross mid the screen
-   * reads, at the 3 % written for epoch 1043.
-   */
-  it("gives a limit signed at 95 % of the gross price a soft note, not \"Sign again\" — SaverFi still buys on some routes once ANTHROPIC's 3 % is in force", () => {
-    const mid = BigInt(PRICES!.legs[1]!.wad);
-    const signedGross = floorWad(mid, 500);
-    expect(floorRoom(signedGross, mid, 300)).toBe("some-routes");
-    expect(floorRoom(signedGross, mid, 100)).toBe("every-route");
-    const policy = { ...POLICY, legs: POLICY.legs.map((leg) => (leg.mint === ANTHROPIC_MINT ? { ...leg, minOutRateWad: String(signedGross) } : leg)) };
-    const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: policy } }) }));
-    expect(html).toContain(INVEST_COPY.roomTitle);
-    expect(html).toContain(INVEST_COPY.legFloorSomeRoutes("ANTHROPIC", formatUsd(usdcRawPer1e8LegRaw(signedGross)), 300, 1043).replaceAll("'", "&#x27;"));
-    expect(html).toContain("From epoch 1043, around 26 September 2026, ANTHROPIC&#x27;s issuer charges 3 % on every transfer.");
-    // Buying goes on: the badge is the ordinary one, and nothing says refuse.
-    expect(html).toContain(`>${INVEST_COPY.floorsBelowMarket}<`);
-    expect(html).not.toContain(`>${INVEST_COPY.floorNoRoute}<`);
-    expect(html).not.toMatch(/will not buy|refuse/);
-  });
-
-  it("tells the owner to sign again when a limit leaves SaverFi no route at all once ANTHROPIC's 3 % is in force, and dates it", () => {
+  it("old limits that leave SaverFi no route at ANTHROPIC's judged 3 % are urgent too, though the market has not passed them", () => {
     const mid = BigInt(PRICES!.legs[1]!.wad);
     // One unit over what even the kindest route quoting before the fee — one
     // that comes back over the pool's mid — leaves at 300.
     const tooClose = keeperVenueThresholdWad(mid, 300, "gross", "over-mid") + 1n;
     expect(floorRoom(tooClose, mid, 300)).toBe("no-route");
-    expect(floorRoom(tooClose, mid, 100)).toBe("every-route");
+    expect(tooClose <= mid).toBe(true);
     const policy = { ...POLICY, legs: POLICY.legs.map((leg) => (leg.mint === ANTHROPIC_MINT ? { ...leg, minOutRateWad: String(tooClose) } : leg)) };
     const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: policy } }) }));
-    expect(html).toContain(
-      INVEST_COPY.legFloorNoRoute("ANTHROPIC", formatUsd(usdcRawPer1e8LegRaw(tooClose)), formatUsd(usdcRawPer1e8LegRaw(mid)), 300, 1043).replaceAll("'", "&#x27;"),
-    );
-    expect(html).toContain("From epoch 1043, around 26 September 2026, when ANTHROPIC&#x27;s issuer starts charging 3 % on every transfer, SaverFi will not buy this basket");
-    expect(html).toContain(`>${INVEST_COPY.floorNoRoute}<`);
-    expect(html).not.toContain(`>${INVEST_COPY.floorsBelowMarket}<`);
-    // The market has NOT passed it: this is not the "Floor passed" refusal.
-    expect(html).not.toContain(`>${INVEST_COPY.floorPassed}<`);
+    expect(html).toContain(`>${INVEST_COPY.badgeOldLimitsBlocking}<`);
+    expect(html).toContain(INVEST_COPY.oldLimitsBlocking.replaceAll("'", "&#x27;"));
   });
 
-  /**
-   * THE FALSE ALARM THIS GUARDS AGAINST: a floor just past what a route 25 bps
-   * under the mid leaves, which the keeper still buys under whenever the route
-   * comes back at or over the mid (measured 2026-09-25 for SPYx, 6.16 bps
-   * over). The card gives it the note and keeps the ordinary badge.
-   */
-  it("does not say \"Sign again\" over a limit only a costly route refuses — a route at the mid still buys", () => {
+  it("old limits only SOME routes clear are offered the switch calmly — the keeper still buys on the others", () => {
     const mid = BigInt(PRICES!.legs[1]!.wad);
-    const pastCostly = keeperVenueThresholdWad(mid, 300, "gross") + 1n;
-    expect(floorRoom(pastCostly, mid, 300)).toBe("some-routes");
-    const policy = { ...POLICY, legs: POLICY.legs.map((leg) => (leg.mint === ANTHROPIC_MINT ? { ...leg, minOutRateWad: String(pastCostly) } : leg)) };
+    const signedGross = floorWad(mid, 500);
+    expect(floorRoom(signedGross, mid, 300)).toBe("some-routes");
+    const policy = { ...POLICY, legs: POLICY.legs.map((leg) => (leg.mint === ANTHROPIC_MINT ? { ...leg, minOutRateWad: String(signedGross) } : leg)) };
     const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: policy } }) }));
-    expect(html).toContain(INVEST_COPY.legFloorSomeRoutes("ANTHROPIC", formatUsd(usdcRawPer1e8LegRaw(pastCostly)), 300, 1043).replaceAll("'", "&#x27;"));
-    expect(html).toContain(`>${INVEST_COPY.floorsBelowMarket}<`);
-    expect(html).not.toContain(`>${INVEST_COPY.floorNoRoute}<`);
-    expect(html).not.toMatch(/will not buy|does not buy/);
+    expect(html).toContain(`>${INVEST_COPY.badgeOldLimits}<`);
+    expect(html).toContain(INVEST_COPY.oldLimitsHeld);
   });
 
   it("Pause asks for the policy on screen to be signed again with investing off, and is offered with no prices on screen; it never hands the flow the click event", async () => {
     const build = vi.fn(async () => ({ ok: false as const, status: 409, code: "vault_missing", message: "Create your vault first.", retryAfterSeconds: null, body: {} }));
     const value = screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: POLICY }, prices: null }) }, { build: build as unknown as VaultApi["build"] });
     const html = render(value);
-    expect(html).toContain("Pausing signs this policy again as it is, with investing off, so it needs no prices.");
+    expect(html).toContain("Pausing signs this policy again as it is, with investing off. Resuming signs it again at the live price.");
     expect(buttons("Pause investing").map((button) => button.disabled)).toEqual([false]);
     buttons("Pause investing")[0]?.onClick?.(CLICK);
     await vi.waitFor(() => expect(value.refresh).toHaveBeenCalledTimes(1));
@@ -780,7 +714,7 @@ describe("InvestingCard", () => {
    * the stored legs. The weights and the minimum below are what makes
    * pause-then-resume a round trip.
    */
-  it("Resume hands the flow the stored caps, the stored basket and its own minimum, which reads today's prices", async () => {
+  it("Resume hands the flow the stored caps, the stored basket and its own minimum, which the server signs at the live price", async () => {
     const build = vi.fn(async () => ({ ok: false as const, status: 409, code: "vault_missing", message: "Create your vault first.", retryAfterSeconds: null, body: {} }));
     const value = screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: { ...POLICY, enabled: false } } }) }, { build: build as unknown as VaultApi["build"] });
     const html = render(value);
@@ -805,13 +739,13 @@ describe("InvestingCard", () => {
     ]);
   });
 
-  it("Sign again re-signs the basket the policy holds, not the whole shelf: a one-stock policy stays one stock", async () => {
+  it("Switch to live-price buying re-signs the basket the policy holds, not the whole shelf: a one-stock policy stays one stock", async () => {
     const build = vi.fn(async () => ({ ok: false as const, status: 409, code: "vault_missing", message: "Create your vault first.", retryAfterSeconds: null, body: {} }));
     // THE LIVE POLICY'S SHAPE: one leg, SPYx at 10,000 bps, the one-leg minimum.
     const oneLeg = { ...POLICY, legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "124719467624105690" }], minInvestment: "5000000" };
     const value = screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: oneLeg } }) }, { build: build as unknown as VaultApi["build"] });
     render(value);
-    buttons("Sign again with today's prices")[0]?.onClick?.(CLICK);
+    buttons(INVEST_COPY.switchToLive)[0]?.onClick?.(CLICK);
     await vi.waitFor(() => expect(value.refresh).toHaveBeenCalledTimes(1));
     expect(build.mock.calls).toStrictEqual([
       [
@@ -840,37 +774,17 @@ describe("InvestingCard", () => {
    * any balance — the whole basket, the SOL conversion included — with the rent
    * spent again. Pause must stay available, because it reads no price.
    */
-  it("refuses to re-sign a stored cap its own basket's counted routes cannot cover, and still offers Pause", () => {
+  it("refuses to switch a stored cap its own basket's counted routes cannot cover, and still offers Pause", () => {
     const overCeiling = { ...POLICY, maxPerCall: "1000000000", maxRolling30d: "31000000000" };
     const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: overCeiling } }) }));
     expect(html).toContain("ANTHROPIC");
     expect(html).toContain("buys nothing at any balance");
-    expect(buttons("Sign again with today's prices").map((button) => button.disabled)).toEqual([true]);
+    expect(buttons(INVEST_COPY.switchToLive).map((button) => button.disabled)).toEqual([true]);
     expect(buttons("Pause investing").map((button) => button.disabled)).toEqual([false]);
   });
 
-  /**
-   * A build answer whose dollar fields and whose wads disagree. Nothing holds
-   * the two to each other: the flow checks the WADS (they are what the
-   * transaction carries), while floorUsdcRawPerSol, maxUsdcRawPer1e8 and
-   * symbol ride along unchecked.
-   */
-  const FORGED_BUILD = {
-    txBase64: "",
-    lastValidBlockHeight: 1,
-    floors: {
-      slot: 1,
-      marginBps: { convert: 1_000, leg: 500 },
-      liveConvertWad: "2",
-      convertWad: "1",
-      usdcRawPerSol: "100038711",
-      floorUsdcRawPerSol: "90034840",
-      legs: [
-        { symbol: "NOTSPYX", mint: SPYX_MINT, liveWad: "2", wad: "1", usdcRawPer1e8: "761709474", maxUsdcRawPer1e8: "801799446" },
-        { symbol: "NOTANTHROPIC", mint: ANTHROPIC_MINT, liveWad: "2", wad: "1", usdcRawPer1e8: "18000000", maxUsdcRawPer1e8: "18947369" },
-      ],
-    },
-  };
+  /** A build answer as the live-price server sends it: no rates, no dollar figures, the two 1-wad floors. */
+  const LIVE_BUILD = { txBase64: "", lastValidBlockHeight: 1, floors: { legWad: "1", convertWad: "1" } };
 
   const signingDetail = (built: unknown, weights?: ReadonlyMap<string, number>): string =>
     renderToStaticMarkup(
@@ -881,56 +795,21 @@ describe("InvestingCard", () => {
     );
 
   /**
-   * THE LAST SENTENCE BEFORE PHANTOM IS ABOUT THE BASKET HE PICKED.
-   *
-   * The build's `floors` block prices the WHOLE shelf — one pool read either
-   * way — but the policy carries only the legs in `weights`, which both
-   * vault-flows.ts and build-handler.ts filter to. This paragraph was built
-   * from OFFERED_LEGS regardless, so a one-stock basket was approved under a
-   * sentence promising a price ceiling for a stock the transaction does not
-   * contain: a false statement at the one moment the owner is reading most
-   * carefully. The floors are still read by INDEX and the lines filtered by
-   * MINT, so a leg cannot inherit its neighbour's floor either.
+   * THE LAST SENTENCE BEFORE PHANTOM IS ABOUT THE BASKET HE PICKED: the legs in
+   * `weights`, which both vault-flows.ts and build-handler.ts filter to, so a
+   * one-stock basket is never approved under a sentence naming a stock the
+   * transaction does not contain.
    */
-  it("names only the stocks the request actually signs, at each one's own floor", () => {
-    const spyxOnly = signingDetail(FORGED_BUILD, new Map([[SPYX_MINT, 10_000]]));
-    expect(spyxOnly).toContain("SPYx never bought above");
-    expect(spyxOnly).not.toContain("ANTHROPIC never bought above");
-
-    // The other way round, so the filter cannot be passing by position: the
-    // basket is ANTHROPIC alone, and its line must carry ITS OWN floor — the
-    // second entry of the block, not the first.
-    const anthropicOnly = signingDetail(FORGED_BUILD, new Map([[ANTHROPIC_MINT, 10_000]]));
-    expect(anthropicOnly).toContain("ANTHROPIC never bought above");
-    expect(anthropicOnly).not.toContain("SPYx never bought above");
-
+  it("names only the stocks the request actually signs", () => {
+    const spyxOnly = signingDetail(LIVE_BUILD, new Map([[SPYX_MINT, 10_000]]));
+    expect(spyxOnly).toContain("You are signing: SPYx bought at the live market price");
+    expect(spyxOnly).not.toContain("ANTHROPIC");
+    const anthropicOnly = signingDetail(LIVE_BUILD, new Map([[ANTHROPIC_MINT, 10_000]]));
+    expect(anthropicOnly).toContain("You are signing: ANTHROPIC bought at the live market price");
+    expect(anthropicOnly).not.toContain("SPYx");
     // A weights map naming nothing this app offers describes nothing at all,
     // rather than describing the shelf.
-    expect(signingDetail(FORGED_BUILD, new Map([[ANDURIL_MINT, 10_000]]))).toBe("");
-  });
-
-  /**
-   * THE "Today's price limits" BOX IS ABOUT THE TICKED STOCKS.
-   *
-   * todaysLimits prices the whole shelf and takes no basket — the build reads
-   * every offered leg's pool in one call, which is right — but the box was
-   * printing all of them under a heading the owner reads as a description of
-   * the policy he is signing. On a SPYx-only basket it read "ANTHROPIC is never
-   * bought above $18.95", a limit his policy would not contain.
-   */
-  it("shows a price limit for each ticked stock and for no others", () => {
-    const shelf = [
-      { mint: SPYX_MINT, symbol: "SPYx" },
-      { mint: ANTHROPIC_MINT, symbol: "ANTHROPIC" },
-    ];
-    expect(pickedLegLimits(shelf, [{ mint: SPYX_MINT }])).toEqual([{ mint: SPYX_MINT, symbol: "SPYx" }]);
-    expect(pickedLegLimits(shelf, [{ mint: ANTHROPIC_MINT }])).toEqual([{ mint: ANTHROPIC_MINT, symbol: "ANTHROPIC" }]);
-    // A stock nobody ticked contributes nothing, and an empty basket shows no
-    // limits at all rather than the shelf's.
-    expect(pickedLegLimits(shelf, [{ mint: ANDURIL_MINT }])).toEqual([]);
-    expect(pickedLegLimits(shelf, [])).toEqual([]);
-    // The default basket IS the shelf, so the box is unchanged where it was right.
-    expect(pickedLegLimits(shelf, shelf)).toEqual(shelf);
+    expect(signingDetail(LIVE_BUILD, new Map([[ANDURIL_MINT, 10_000]]))).toBe("");
   });
 
   /**
@@ -957,46 +836,19 @@ describe("InvestingCard", () => {
     expect(readCaps("5", "31000", 5_000_000n)).toMatchObject({ ok: true });
   });
 
-  it("what Phantom is asked to sign is read from the floors the BYTES carry, never from the answer's own dollar fields", () => {
-    const html = signingDetail(FORGED_BUILD);
-    // The unchecked display fields, over bytes that signed neither of them.
-    expect(html).not.toContain("$90.03");
-    expect(html).not.toContain("$801.80");
-    expect(html).not.toContain("$18.95");
-    expect(html).not.toContain("NOTSPYX");
-    expect(html).not.toContain("NOTANTHROPIC");
-    // What min_convert_rate_wad = 1 actually means, and SaverFi's own basket names.
-    expect(html).toContain("SOL never sold below $0.00");
-    expect(html).toContain("SPYx never bought above");
-    expect(html).toContain("ANTHROPIC never bought above");
-    // The caps are this card's own, not the answer's.
-    expect(html).toContain("$10.00");
-    expect(html).toContain("$50.00");
+  it("what Phantom is asked to sign says there is no price floor, names the basket and this card's own caps", () => {
+    const html = signingDetail(LIVE_BUILD);
+    expect(html).toContain("You are signing: SPYx and ANTHROPIC bought at the live market price, with no price floor; at most $10.00 per buy and $50.00 per 30 days.");
+    // No price figure is quoted, because none is signed.
+    expect(html).not.toMatch(/never (sold below|bought above)/);
   });
 
-  it("an honest build is described by its own floors", () => {
-    const honest = {
-      ...FORGED_BUILD,
-      floors: {
-        ...FORGED_BUILD.floors,
-        convertWad: "90034840399943305",
-        legs: [
-          { ...FORGED_BUILD.floors.legs[0]!, wad: "124719467624105690" },
-          { ...FORGED_BUILD.floors.legs[1]!, wad: "5277777777777777778" },
-        ],
-      },
-    };
-    const html = signingDetail(honest);
-    expect(html).toContain("SOL never sold below $90.03");
-    expect(html).toContain("SPYx never bought above $801.80");
-    expect(html).toContain("ANTHROPIC never bought above $18.95");
-  });
-
-  it("says nothing rather than a figure when a checked floor cannot be read", () => {
-    expect(signingDetail({ ...FORGED_BUILD, floors: { ...FORGED_BUILD.floors, convertWad: "0" } })).toBe("");
-    expect(signingDetail({ ...FORGED_BUILD, floors: { ...FORGED_BUILD.floors, legs: [] } })).toBe("");
-    // A build that carries only the first leg is one floor short of the basket, and says nothing either.
-    expect(signingDetail({ ...FORGED_BUILD, floors: { ...FORGED_BUILD.floors, legs: [FORGED_BUILD.floors.legs[0]!] } })).toBe("");
+  it("says nothing over an answer the flow would refuse: any floor but the live-price one, the old rates-and-margins block, or none", () => {
+    expect(signingDetail({ ...LIVE_BUILD, floors: { legWad: "2", convertWad: "1" } })).toBe("");
+    expect(signingDetail({ ...LIVE_BUILD, floors: { legWad: "1", convertWad: "90034840399943305" } })).toBe("");
+    expect(
+      signingDetail({ ...LIVE_BUILD, floors: { convertWad: "90034840399943305", marginBps: { convert: 1_000, leg: 500 }, legs: [{ mint: SPYX_MINT, wad: "124719467624105690" }] } }),
+    ).toBe("");
     expect(signingDetail({ txBase64: "", lastValidBlockHeight: 1 })).toBe("");
   });
 
@@ -1093,8 +945,9 @@ describe("InvestingCard: changing a policy that exists", () => {
     // re-sign what is stored, and a basket, a share, a cap or a minimum can
     // never be changed by anybody who has signed once.
     expect(buttons(INVEST_COPY.editBasket).map((button) => button.disabled)).toEqual([false]);
-    // AND IT IS AN ADDITION, NOT A REPLACEMENT: both existing buttons stay.
-    expect(buttons("Sign again with today's prices")).toHaveLength(1);
+    // AND IT IS AN ADDITION, NOT A REPLACEMENT: the switch (this policy still
+    // carries the price limits it was signed with) and Pause stay.
+    expect(buttons(INVEST_COPY.switchToLive)).toHaveLength(1);
     expect(buttons("Pause investing")).toHaveLength(1);
   });
 
@@ -1425,7 +1278,7 @@ describe("InvestingCard: changing a policy that exists", () => {
    * shelf, the owner's basket stops buying and the picker became unreachable —
    * which is the owner's original complaint, back again.
    */
-  it("a stored stock the shelf dropped opens the form instead of shutting it, and only Sign-again refuses", () => {
+  it("a stored stock the shelf dropped opens the form instead of shutting it, and only the switch refuses", () => {
     const stale: InvestmentPolicyJson = {
       ...LIVE_ONE_LEG,
       legs: [
@@ -1441,9 +1294,9 @@ describe("InvestingCard: changing a policy that exists", () => {
     const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: stale } }) }));
     // THE WAY OUT IS OPEN…
     expect(buttons(INVEST_COPY.editBasket).map((button) => button.disabled)).toEqual([false]);
-    // …and the button that really would sign a different basket still refuses,
+    // …and the switch, which really would sign a different basket, still refuses,
     // with the copy written for it.
-    expect(buttons("Sign again with today's prices").map((button) => button.disabled)).toEqual([true]);
+    expect(buttons(INVEST_COPY.switchToLive).map((button) => button.disabled)).toEqual([true]);
     expect(html).toContain(INVEST_COPY.resignUnoffered("ANDURIL"));
     expect(buttons("Pause investing").map((button) => button.disabled)).toEqual([false]);
 

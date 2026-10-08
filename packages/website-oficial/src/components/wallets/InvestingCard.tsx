@@ -5,19 +5,19 @@
  *
  * STATES. Loading: a skeleton. Unreadable (the route, the vault or the policy):
  * words, and never a form, because a policy may exist. No vault: "Create your
- * vault first." No policy: SIP's basket and its $5 rule, the two caps, today's
- * price limits, the rent, and the issuer's powers over SPYx with a box to tick
- * before Sign investment policy. A policy: on or paused, the floors it signed
- * against today's prices, its caps, what it used in the trailing 30 days and in
- * all, whether the next sweep can buy, and buttons to sign again at today's
- * prices or to pause and resume, each keeping the caps it has. Pause signs the
- * stored policy again with investing off and reads no price, so the owner can
- * stop investing when the pools cannot be priced; Sign again and Resume set
- * floors from today's prices.
+ * vault first." No policy: SIP's basket and its $5 rule, the two caps, how the
+ * price is set, the rent, and the issuer's powers over the chosen stocks with a
+ * box to tick before Sign investment policy. A policy: on or paused, its caps,
+ * what it used in the trailing 30 days and in all, whether the next sweep can
+ * buy, and buttons to change it or to pause and resume, each keeping the caps
+ * it has. Pause signs the stored policy again with investing off; every other
+ * signature from here signs the live-price floors.
  *
- * WHAT IS SIGNED is the build's floors, not the ones shown here before building:
- * the flow checks them against SIP's margins, and they are shown again while
- * Phantom asks.
+ * WHAT IS SIGNED HAS NO PRICE FLOOR (owner, 2026-10-08): every leg's
+ * min_out_rate_wad and the min_convert_rate_wad are LIVE_PRICE_FLOOR_WAD, and
+ * the flow (vault-flows.ts) refuses a build carrying anything else. A policy
+ * signed before that day still carries the floors it was signed with, and the
+ * summary offers one press to switch it to live-price buying.
  *
  * WHAT THIS CARD OFFERS, AND IN WHAT SHAPE. All four of the fields the owner
  * asked for are buildable, and the three that belong to the POLICY are wired
@@ -43,20 +43,17 @@
  * route.test.ts pins every one of those shapes, so a change to the whitelist
  * turns it red rather than leaving this comment quietly wrong.
  *
- * AND THE ONE FIELD THAT MUST NEVER BECOME AN INPUT: min_convert_rate_wad. The
- * program does not validate it, and a zero there silently switches the
- * SOL-to-USDC conversion off. Nothing here can reach it — it is always
- * floorWad(the live pool price, CONVERT_FLOOR_MARGIN_BPS), and vault-flows.ts
- * refuses to sign a build whose convertWad is null, zero or not exactly that.
- * The card states its EFFECT in words beside the live price it came from
- * (INVEST_COPY.convertFloorEffect), which is as far as this should ever go.
+ * AND THE ONE FIELD THAT MUST NEVER BECOME AN INPUT: min_convert_rate_wad. A
+ * zero there is accepted by set_invest_policy and switches the SOL-to-USDC
+ * conversion off (convert.rs refuses every call). Nothing here can reach it:
+ * it is always LIVE_PRICE_FLOOR_WAD, and vault-flows.ts holds the bytes to
+ * that constant.
  */
 
 import {
-  CONVERT_FLOOR_MARGIN_BPS,
   DEFAULT_INVEST_CAPS,
-  LEG_FLOOR_MARGIN_BPS,
   LEG_WEIGHT_TOTAL_BPS,
+  LIVE_PRICE_FLOOR_WAD,
   OFFERED_LEGS,
   SIGNATURE_FEE_LAMPORTS,
   TOKEN_PROGRAM,
@@ -84,7 +81,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TxProgress } from "@/components/wallets/TxProgress";
 import { useVaultWrite, type InvestRequest, type WriteProgress } from "@/hooks/use-vault-actions";
-import { DEFAULT_VENUE_NAME, VERIFIABLE_VENUES } from "@/lib/vault-flows";
+import { DEFAULT_VENUE_NAME, VERIFIABLE_VENUES, livePriceProblem } from "@/lib/vault-flows";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { AmountError, USDC_DECIMALS, formatSol, formatUnits, formatUsd, parseUnits, rawFrom } from "@/lib/amounts";
 import { LABEL } from "@/lib/classes";
@@ -99,8 +96,8 @@ import {
   type PickedLeg,
   type PickedRow,
 } from "@/lib/basket-picker";
-import { type FloorRoom, floorDrift, floorRoom, legFloorUnderMidBps, todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
-import { floorsState } from "@/lib/live-model";
+import { todaysPrices, usedInLast30Days } from "@/lib/invest-limits";
+import { floorsState, priceLimitsOf } from "@/lib/live-model";
 import type { InvestPolicyBuildJson, InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
 import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, shortAddress, signedLegsOf } from "@/lib/vault-copy";
 
@@ -388,7 +385,7 @@ export function policyRequest(input: {
   };
 }
 
-/** What "Sign again" and "Resume" would re-sign, or why neither may be pressed. */
+/** What "Switch to live-price buying" and "Resume" would re-sign, or why neither may be pressed. */
 export type Resign =
   | { readonly ok: true; readonly weights: ReadonlyMap<string, number>; readonly minInvestment: bigint; readonly limits: BasketLimits }
   | { readonly ok: false; readonly message: string };
@@ -396,9 +393,10 @@ export type Resign =
 /**
  * WHAT THE TWO BUTTONS ON A SIGNED POLICY MAY DO, AND WHEN THEY MAY NOT.
  *
- * BOTH OF THEM RE-SIGN. "Sign again with today's prices" and "Resume investing"
- * are set_invest_policy, the same instruction the setup form builds, and they
- * used to send the two caps and NOTHING ELSE. Every other field was then filled
+ * BOTH OF THEM RE-SIGN. "Switch to live-price buying" (until 2026-10-08 "Sign
+ * again with today's prices") and "Resume investing" are set_invest_policy, the
+ * same instruction the setup form builds, and they used to send the two caps
+ * and NOTHING ELSE. Every other field was then filled
  * in by the build route's defaults — the WHOLE shelf at equal shares, at the
  * catalogue's split minimum (vault-flows.ts and build-handler.ts both, so the
  * server could not catch it either). On the live one-leg policy that is one
@@ -418,7 +416,7 @@ export type Resign =
  * WHAT IT WILL NOT DO IS GUESS. A leg the catalogue no longer offers cannot be
  * re-signed (the request would silently drop it, which is a different basket),
  * an unreadable field is not defaulted, and in every refusal Pause still works
- * — it reads no price and re-signs exactly what is stored.
+ * — it re-signs exactly what is stored.
  */
 /** A stored policy resolved back to catalogue legs, with the three figures it carries; or why it could not be read. */
 type StoredBasket =
@@ -569,27 +567,27 @@ export function resignStoredPolicy(policy: InvestmentPolicyJson): Resign {
   return { ok: true, weights, minInvestment, limits };
 }
 
-// These two moved to src/lib/invest-limits.ts, where the live dashboard's rule
+/**
+ * THE STORED POLICY RE-SIGNED AT THE LIVE PRICE: the stored caps, `enabled` as
+ * stored, the stored basket by mint and its own minimum, the venue left to the
+ * route's default. The server signs LIVE_PRICE_FLOOR_WAD for every floor, so a
+ * policy signed before 2026-10-08 loses its old price limits and nothing else.
+ * The rule card's button of the same name sends this same request
+ * (LiveRulePanel.tsx). An unreadable cap refuses rather than being sent as 0n.
+ */
+export function switchToLiveRequest(policy: InvestmentPolicyJson): InvestRequest | { readonly problem: string } {
+  const resign = resignStoredPolicy(policy);
+  if (!resign.ok) return { problem: resign.message };
+  const maxPerCall = rawFrom(policy.maxPerCall);
+  const maxRolling30d = rawFrom(policy.maxRolling30d);
+  if (maxPerCall === null || maxRolling30d === null) return { problem: INVEST_COPY.resignUnreadable };
+  return { maxPerCall, maxRolling30d, enabled: policy.enabled, minInvestment: resign.minInvestment, weights: resign.weights };
+}
+
+// These two live in src/lib/invest-limits.ts, where the live dashboard's rule
 // card reads the same numbers; re-exported so this card's existing imports and
 // its test are untouched.
-export { todaysLimits, usedInLast30Days, type TodaysLimits } from "@/lib/invest-limits";
-
-/**
- * TODAY'S PER-STOCK LIMITS, FOR THE STOCKS HE TICKED.
- *
- * todaysLimits prices the WHOLE shelf and takes no basket: the build reads
- * every offered leg's pool in one call and the page checks them all, which is
- * right. What was wrong was printing them all under a heading that reads as a
- * description of the policy being signed — a one-stock basket carried a limit
- * line for a stock that basket does not hold, which is the same defect the
- * approval paragraph had one screen later.
- *
- * IT FOLLOWS THE TICKS, NOT THE SHARES, like the paragraphs below it: a row
- * whose percentage box is still empty is a stock he has chosen, and its limit
- * is his to read while he types.
- */
-export const pickedLegLimits = <T extends { readonly mint: string }>(legs: readonly T[], picked: readonly { readonly mint: string }[]): readonly T[] =>
-  legs.filter((leg) => picked.some((asset) => asset.mint === leg.mint));
+export { todaysPrices, usedInLast30Days, type TodaysPrices } from "@/lib/invest-limits";
 
 /** The rent a first policy costs: the policy account if missing, and each vault token account missing; null when any part is unknown. */
 export function setupRent(state: VaultStateJson): bigint | null {
@@ -800,50 +798,30 @@ function Fact({ label, children }: { readonly label: string; readonly children: 
 }
 
 /**
- * What Phantom is asked to sign, from the checked build: its floors, and the
- * caps this card sent; or, for a pause, the policy as it is.
+ * What Phantom is asked to sign, from the checked build: the basket at the live
+ * price with no price floor, and the caps this card sent; or, for a pause, the
+ * policy as it is.
  *
- * EVERY FIGURE COMES FROM THE WADS THE FLOW CHECKED and the transaction
- * actually carries — never from the answer's own dollar fields
- * (floorUsdcRawPerSol, maxUsdcRawPer1e8, symbol). Those ride along beside the
- * wads and nothing holds them to each other, so a build could print a floor of
- * $90.03 over bytes that signed $0.00. The basket's names are SaverFi's own
- * OFFERED_LEGS, in the order the flow pinned them to.
+ * ONLY OVER AN ANSWER THE FLOW ACCEPTS. The flow refuses a build whose `floors`
+ * block is not the live-price one (vault-flows.ts livePriceProblem) and bytes
+ * that carry any other floor, so this says nothing over an answer it would
+ * refuse rather than describe floors the bytes may not carry.
  *
- * AND IT IS THE BASKET HE PICKED, NOT THE SHELF. The answer's `floors` block
- * prices the WHOLE shelf, in OFFERED_LEGS' order, because that is one pool read
- * either way — but the policy carries only the legs in `request.weights`
- * (vault-flows.ts and build-handler.ts both filter to them). This is the last
- * sentence the owner reads before Phantom, so a line here about a stock his
- * policy will not contain is a false statement at the worst possible moment:
- * it named an ANTHROPIC price ceiling over bytes that signed SPYx alone. The
- * floors are still read by INDEX into that block, and the lines are filtered by
- * MINT, so a leg cannot be printed against its neighbour's floor either.
+ * AND IT IS THE BASKET HE PICKED, NOT THE SHELF: the legs in
+ * `request.weights`, in OFFERED_LEGS' order — the ones the bytes are checked
+ * to carry.
  */
 export function SigningDetail({ progress, request }: { readonly progress: WriteProgress; readonly request: InvestRequest | "pause" | null }) {
   if (progress.phase !== "running" || progress.built === null || request === null) return null;
   if (request === "pause") return <p className="font-normal text-foreground">{INVEST_COPY.pauseSigning}</p>;
-  const floors = (progress.built as Partial<InvestPolicyBuildJson>).floors;
-  const convertWad = rawFrom(floors?.convertWad);
-  // A floor nobody can read is not guessed at: the progress says nothing rather
-  // than a figure the bytes may not carry.
-  if (floors === undefined || floors === null || convertWad === null || convertWad <= 0n) return null;
-  const legs: string[] = [];
-  for (const [index, leg] of OFFERED_LEGS.entries()) {
-    const wad = rawFrom(floors.legs?.[index]?.wad);
-    // A FLOOR THE BUILD DID NOT PRICE IS STILL FATAL, even for a leg this
-    // policy does not hold: the flow checks the whole block before it signs, so
-    // a missing wad anywhere means the answer is not the one that was checked.
-    if (wad === null || wad <= 0n) return null;
-    if (request.weights !== undefined && !request.weights.has(leg.mint)) continue;
-    legs.push(INVEST_COPY.legSigning(leg.symbol, formatUsd(usdcRawPer1e8LegRaw(wad))));
-  }
+  if (livePriceProblem((progress.built as Partial<InvestPolicyBuildJson>).floors) !== null) return null;
+  const symbols = OFFERED_LEGS.filter((leg) => request.weights === undefined || request.weights.has(leg.mint)).map((leg) => leg.symbol);
   // A basket with no line at all is not described in half: the weights named
   // nothing this app offers, and nothing here can say what is being signed.
-  if (legs.length === 0) return null;
+  if (symbols.length === 0) return null;
   return (
     <p className="font-normal text-foreground">
-      {INVEST_COPY.youAreSigning(formatUsd(usdcRawPerSol(convertWad)), legs.join("; "), formatUsd(request.maxPerCall), formatUsd(request.maxRolling30d))}
+      {INVEST_COPY.youAreSigning(listAnd(symbols), formatUsd(request.maxPerCall), formatUsd(request.maxRolling30d))}
     </p>
   );
 }
@@ -946,10 +924,8 @@ export function PolicySetup({
   // lighterWeightBps answers null in a one-stock basket, where the share is
   // 100 % by arithmetic and cannot be lowered at all.
   const lighter = capsWindow !== null && caps.ok ? lighterWeightBps(caps.maxPerCall, capsWindow) : null;
-  const priceLimits = todaysLimits(state.prices);
   const rent = setupRent(state);
   const fees = SIGNATURE_FEE_LAMPORTS + priorityFeeLamports(ownerComputeBudget("set_invest_policy"));
-  const floorText = priceLimits === null ? "today's floor" : formatUsd(priceLimits.floorPerSol);
   // "SPYx at 50 % and ANTHROPIC at 50 %", from the CHOSEN legs and their
   // weights — so the prose, the Basket field and the picker cannot say three
   // different things, which is what the prose and the field did while it named
@@ -994,7 +970,6 @@ export function PolicySetup({
         <CardDescription>
           {INVEST_COPY.policyRule(
             basket,
-            floorText,
             purchaseText,
             caps.ok ? formatUsd(caps.maxPerCall) : `$${perBuy.trim()}`,
             caps.ok ? formatUsd(caps.maxRolling30d) : `$${per30Days.trim()}`,
@@ -1159,26 +1134,14 @@ export function PolicySetup({
           </div>
         ) : null}
 
+        {/* HOW THE PRICE IS SET (owner, 2026-10-08): no price floor is signed,
+            what the keeper checks live instead, with its own numbers for the
+            TICKED stocks, and what the chain still enforces. */}
         <div className="space-y-1 rounded-md border px-3 py-2 text-xs">
-          <div className={LABEL}>{INVEST_COPY.floorsTitle}</div>
-          {priceLimits === null ? (
-            <p>{INVEST_COPY.pricesUnknown}</p>
-          ) : (
-            <>
-              <p>{INVEST_COPY.solFloor(formatUsd(priceLimits.floorPerSol), formatUsd(priceLimits.todayPerSol))}</p>
-              {/* THE TICKED STOCKS, NOT THE SHELF. todaysLimits prices every
-                  offered leg — the build reads them all in one call and the
-                  page checks them all — but a box headed "Today's price limits"
-                  under a basket of one was printing a limit for a stock that
-                  basket does not hold. It follows the TICKS, like the paragraphs
-                  below it, so a row with an empty percentage box still has its
-                  own limit shown. */}
-              {pickedLegLimits(priceLimits.legs, chosenAssets).map((leg) => (
-                <p key={leg.mint}>{INVEST_COPY.legCeiling(leg.symbol, formatUsd(leg.maxPer1e8), leg.feeBps > 0 ? ratePercent(leg.feeBps) : null, leg.marginBps)}</p>
-              ))}
-              <p className="text-muted-foreground">{INVEST_COPY.convertFloorEffect(ratePercent(CONVERT_FLOOR_MARGIN_BPS))}</p>
-            </>
-          )}
+          <div className={LABEL}>{INVEST_COPY.priceTitle}</div>
+          <p>{INVEST_COPY.livePrice}</p>
+          <p>{INVEST_COPY.keeperChecks(copyLegs)}</p>
+          <p>{INVEST_COPY.chainLimits(caps.ok ? formatUsd(caps.maxPerCall) : null, caps.ok ? formatUsd(caps.maxRolling30d) : null)}</p>
         </div>
 
         <p className="text-xs">{rent === null ? VAULT_COPY.costUnknown : VAULT_COPY.cost(formatSol(rent), formatSol(fees))}</p>
@@ -1188,7 +1151,6 @@ export function PolicySetup({
           <p>{INVEST_COPY.issuerCost(copyLegs)}</p>
           <p>{INVEST_COPY.feeCeiling(copyLegs, ratePercent(MAX_LEG_FEE_BPS))}</p>
           <p>{INVEST_COPY.marketCost(copyLegs)}</p>
-          <p>{INVEST_COPY.defencesLimits(copyLegs, ratePercent(LEG_FLOOR_MARGIN_BPS))}</p>
         </div>
 
         <div className="space-y-2 rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs">
@@ -1267,10 +1229,13 @@ function PolicySummary({
   /** Why not, when onEdit is null. */
   readonly editProblem: string | null;
 }) {
-  const limits = todaysLimits(state.prices);
-  // The live rule card reads the same state, so the two cannot disagree about
-  // whether a floor has been passed.
-  const { storedConvert, liveConvert, legs, pricesKnown, belowMarket } = floorsState(policy, state.prices);
+  const today = todaysPrices(state.prices);
+  // The stored floors beside today's rates, and the one word the gear and the
+  // wallets overview read too (live-model.ts priceLimitsOf), so the three
+  // cannot disagree about whether to ask for the switch.
+  const { storedConvert, legs } = floorsState(policy, state.prices);
+  const priceLimits = priceLimitsOf(policy, state.prices);
+  const oldLimits = priceLimits === "held" || priceLimits === "blocking";
 
   const maxPerCall = rawFrom(policy.maxPerCall) ?? 0n;
   const maxRolling30d = rawFrom(policy.maxRolling30d) ?? 0n;
@@ -1295,103 +1260,64 @@ function PolicySummary({
     }),
   );
 
-  // ── HOW FAR EACH SIGNED FLOOR HAS DRIFTED ──────────────────────────────────
-  //
-  // Signed once, from one pool's price, and untouched since. The card already
-  // showed the half that is loud — a floor the market has PASSED stops every
-  // buy and flips the badge — and said nothing about the half that is quiet: a
-  // floor the market has left far behind still permits a fill at a price
-  // nobody would take today. Both are listed here, in the owner's terms,
-  // before the caps and the buttons rather than under them.
-  //
-  // THE DAY HE SIGNED IS NOT KNOWN AND IS NOT GUESSED. InvestmentPolicy carries
-  // no timestamp (solana-program state.rs), so null is passed and the sentence
-  // says so; what IS on the page is the floor and the rate just read, and the
-  // drift is arithmetic over those two.
-  // WHAT THE TWO RE-SIGNING BUTTONS WOULD BUILD, or why neither may be pressed:
+  // WHAT THE RE-SIGNING BUTTONS WOULD BUILD, or why they may not be pressed:
   // the stored basket and its own minimum, judged against the same floor and
-  // depth ceiling the setup form judges a new one by.
+  // depth ceiling the setup form judges a new one by. "Switch to live-price
+  // buying" and the rule card's button of the same name send the same request
+  // (rule-settings-plan.ts switchToLiveRequest); Resume sends it with
+  // investing on.
   const resign = resignStoredPolicy(policy);
-
-  const solDrift = floorDrift(storedConvert, liveConvert, CONVERT_FLOOR_MARGIN_BPS);
-  const driftLines: string[] = [];
-  if (solDrift !== null && storedConvert !== null && liveConvert !== null) {
-    if (solDrift.kind === "passed") driftLines.push(INVEST_COPY.solFloorPassed(formatUsd(usdcRawPerSol(storedConvert)), formatUsd(usdcRawPerSol(liveConvert))));
-    else if (solDrift.kind === "slack")
-      driftLines.push(INVEST_COPY.solFloorSlack(formatUsd(usdcRawPerSol(storedConvert)), formatUsd(usdcRawPerSol(liveConvert)), ratePercent(solDrift.driftBps)));
-  }
-  // WHETHER SAVERFI CAN STILL BUY UNDER EACH SIGNED LIMIT (invest-limits.ts
-  // floorRoom), at the highest fee the leg's issuer has written — the fee in
-  // force once its epoch arrives. "some-routes" is a note and buying goes on;
-  // only "no-route" flips the badge, because only then does the keeper refuse
-  // every sweep. `fromEpoch` names the written rise only when today's fee still
-  // leaves the limit in a better state, so the sentence dates the change it is
-  // about rather than a change that has nothing to do with it.
-  const roomRank: Record<FloorRoom, number> = { "every-route": 0, "some-routes": 1, "no-route": 2 };
-  const roomLines: string[] = [];
-  let noRoute = false;
-  for (const leg of legs) {
-    // The margin a floor is signed at under the GROSS mid the screen reads: the
-    // leg's fee and legFloorMarginBps compounded (979 bps at 300), so a floor
-    // rightly signed that far under is not called slack the day it is signed.
-    const asset = catalogueAsset(leg.mint);
-    const feeBps = asset === null || asset.fee === null ? 0 : judgedFeeBps(asset.fee);
-    const drift = floorDrift(leg.floor, leg.live, legFloorUnderMidBps(feeBps));
-    if (drift === null || leg.floor === null || leg.live === null) continue;
-    const limit = formatUsd(usdcRawPer1e8LegRaw(leg.floor));
-    const today = formatUsd(usdcRawPer1e8LegRaw(leg.live));
-    if (drift.kind === "passed") {
-      driftLines.push(INVEST_COPY.legFloorPassed(leg.symbol, limit, today));
-      continue;
-    }
-    if (drift.kind === "slack") driftLines.push(INVEST_COPY.legFloorSlack(leg.symbol, limit, today, ratePercent(drift.driftBps)));
-    const room = floorRoom(leg.floor, leg.live, feeBps);
-    if (room === null || room === "every-route") continue;
-    const scheduled = asset?.fee?.scheduled ?? null;
-    const roomToday = asset === null || asset.fee === null ? room : floorRoom(leg.floor, leg.live, asset.fee.bps);
-    const fromEpoch = scheduled !== null && scheduled.bps === feeBps && roomToday !== null && roomRank[roomToday] < roomRank[room] ? scheduled.epoch : null;
-    if (room === "no-route") {
-      noRoute = true;
-      roomLines.push(INVEST_COPY.legFloorNoRoute(leg.symbol, limit, today, feeBps, fromEpoch));
-    } else roomLines.push(INVEST_COPY.legFloorSomeRoutes(leg.symbol, limit, feeBps, fromEpoch));
-  }
+  const switchRequest = switchToLiveRequest(policy);
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>{INVEST_COPY.title}</CardTitle>
         <CardDescription>{policy.enabled ? INVEST_COPY.enabled : INVEST_COPY.paused}</CardDescription>
-        {pricesKnown ? (
+        {priceLimits === null ? null : (
           <CardAction>
-            <Badge variant={belowMarket && !noRoute ? "outline" : "destructive"}>
-              {!belowMarket ? INVEST_COPY.floorPassed : noRoute ? INVEST_COPY.floorNoRoute : INVEST_COPY.floorsBelowMarket}
+            <Badge variant={priceLimits === "blocking" ? "destructive" : "outline"}>
+              {priceLimits === "live" ? INVEST_COPY.badgeLive : priceLimits === "blocking" ? INVEST_COPY.badgeOldLimitsBlocking : INVEST_COPY.badgeOldLimits}
             </Badge>
           </CardAction>
-        ) : null}
+        )}
       </CardHeader>
       <CardContent className="space-y-4">
-        {pricesKnown && !belowMarket ? (
-          <p role="status" className="text-xs text-destructive">
-            {INVEST_COPY.marketPast}
-          </p>
-        ) : null}
-        {/* BEFORE IT BITES: the drift sits above the caps and the buttons, not
-            under the stored numbers it is about. */}
-        {driftLines.length > 0 ? (
-          <div className="space-y-1 rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs">
-            <div className={LABEL}>{INVEST_COPY.floorDriftTitle}</div>
-            <p>{INVEST_COPY.floorDriftSigned(null)}</p>
-            {driftLines.map((line) => (
-              <p key={line}>{line}</p>
-            ))}
-          </div>
-        ) : null}
-        {roomLines.length > 0 ? (
-          <div className={`space-y-1 rounded-md border px-3 py-2 text-xs ${noRoute ? "border-destructive/40 bg-destructive/5" : "border-amber-600/30 bg-amber-600/5"}`}>
-            <div className={LABEL}>{INVEST_COPY.roomTitle}</div>
-            {roomLines.map((line) => (
-              <p key={line}>{line}</p>
-            ))}
+        {/* A POLICY SIGNED BEFORE 2026-10-08: its old price limits, said
+            before the caps and the buttons, with the ONE press that drops
+            them. Urgent only when they are stopping buys now. */}
+        {oldLimits ? (
+          <div
+            className={`space-y-2 rounded-md border px-3 py-2 text-xs ${priceLimits === "blocking" ? "border-destructive/40 bg-destructive/5" : "border-amber-600/30 bg-amber-600/5"}`}
+          >
+            <div className={LABEL}>{INVEST_COPY.oldLimitsTitle}</div>
+            <p role={priceLimits === "blocking" ? "status" : undefined}>{priceLimits === "blocking" ? INVEST_COPY.oldLimitsBlocking : INVEST_COPY.oldLimitsHeld}</p>
+            {storedConvert !== null && storedConvert > LIVE_PRICE_FLOOR_WAD ? (
+              <p>{INVEST_COPY.storedSolFloor(formatUsd(usdcRawPerSol(storedConvert)), today === null ? null : formatUsd(today.todayPerSol))}</p>
+            ) : null}
+            {legs.map((leg) =>
+              leg.floor !== null && leg.floor > LIVE_PRICE_FLOOR_WAD ? (
+                <p key={leg.mint}>{INVEST_COPY.storedLegCeiling(leg.symbol, formatUsd(usdcRawPer1e8LegRaw(leg.floor)), leg.today === null ? null : formatUsd(leg.today))}</p>
+              ) : null,
+            )}
+            {/* WHY IT CAN BE GREYED OUT: it re-signs the STORED basket, so it is
+                held to the same window the setup form is held to (resignStoredPolicy),
+                and the reason is said beside it. */}
+            {"problem" in switchRequest ? (
+              <p role="alert" className="text-destructive">
+                {switchRequest.problem}
+              </p>
+            ) : null}
+            <Button
+              type="button"
+              size="sm"
+              variant={priceLimits === "blocking" ? "default" : "outline"}
+              disabled={blocked || "problem" in switchRequest}
+              aria-busy={write.running}
+              onClick={"problem" in switchRequest ? undefined : () => start(switchRequest)}
+            >
+              {INVEST_COPY.switchToLive}
+            </Button>
           </div>
         ) : null}
         <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -1401,24 +1327,15 @@ function PolicySummary({
           <Fact label={INVEST_COPY.usedLast30}>{formatUsd(usedInLast30Days(policy.bucketDays, policy.bucketAmounts, Date.now() / 1_000))}</Fact>
           <Fact label={INVEST_COPY.lifetime}>{formatUsd(rawFrom(policy.lifetimeInvested) ?? 0n)}</Fact>
         </dl>
-        <div className="space-y-1 text-xs">
-          {storedConvert !== null && storedConvert > 0n ? (
-            <p>{INVEST_COPY.storedSolFloor(formatUsd(usdcRawPerSol(storedConvert)), limits === null ? null : formatUsd(limits.todayPerSol))}</p>
-          ) : null}
-          {legs.map((leg) =>
-            leg.floor !== null && leg.floor > 0n ? (
-              <p key={leg.mint}>{INVEST_COPY.storedLegCeiling(leg.symbol, formatUsd(usdcRawPer1e8LegRaw(leg.floor)), leg.today === null ? null : formatUsd(leg.today))}</p>
-            ) : null,
-          )}
-        </div>
         {basketReadiness === null ? null : <p className="text-xs">{readinessWords(basketReadiness, readiness !== null)}</p>}
         <p className="text-xs text-muted-foreground">{INVEST_COPY.freezeShort(policyLegs)}</p>
-        {/* WHY A REFUSAL CAN SIT HERE AND PAUSE STILL WORK. Both re-signing
-            buttons build set_invest_policy from today's prices and the stored
-            basket, so they are held to the same window the setup form is held
-            to; Pause reads no price and re-signs the stored bytes as they are,
-            so it is never blocked by an arithmetic about buying. */}
-        {!resign.ok ? (
+        {/* WHY A REFUSAL CAN SIT HERE AND PAUSE STILL WORK. Switching and
+            Resume re-sign the stored basket at the live price, so they are
+            held to the same window the setup form is held to; Pause re-signs
+            the stored bytes as they are, so it is never blocked by an
+            arithmetic about buying. Said once: the old-limits block above
+            carries it when that block is shown. */}
+        {!resign.ok && !oldLimits ? (
           <p role="alert" className="text-xs text-destructive">
             {resign.message}
           </p>
@@ -1441,21 +1358,6 @@ function PolicySummary({
               the only one that lets him sign something else. */}
           <Button type="button" size="sm" disabled={blocked || onEdit === null} onClick={() => onEdit?.()}>
             {INVEST_COPY.editBasket}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={blocked || !resign.ok}
-            aria-busy={write.running}
-            onClick={() => {
-              // THE SAME CONDITION AS THE BUTTON'S OWN. And the stored basket
-              // travels with the caps: without weights and minInvestment the
-              // route rebuilds the WHOLE shelf at equal shares.
-              if (resign.ok) start({ maxPerCall, maxRolling30d, enabled: policy.enabled, minInvestment: resign.minInvestment, weights: resign.weights });
-            }}
-          >
-            {INVEST_COPY.signAgain}
           </Button>
           <Button
             type="button"
