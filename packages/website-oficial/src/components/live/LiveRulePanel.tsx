@@ -134,7 +134,7 @@ export function LiveRulePanel({
         setLandings((count) => count + 1);
         onRefresh();
       } else if (progress === policyWrite.progress && progress.result.kind === "refused" && progress.result.code !== DECLINED_CODE) {
-        // A refused policy is most often a price that moved: read today's again before the next try.
+        // A refused policy (a leg fee over the ceiling or unreadable, a stale vault): read the vault again before the next try.
         screen?.refresh();
       }
     }

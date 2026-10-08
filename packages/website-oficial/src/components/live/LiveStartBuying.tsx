@@ -178,10 +178,11 @@ export function LiveStartBuying({ data, pensionKey, onRefresh }: { readonly data
     view.state.owner === pensionKey &&
     view.state.policy.status === "missing";
 
-  // THE PRICES IT SHOWS AND IS CHECKED AGAINST ARE READ NOW. The vault screen is
-  // read on changes, not on a timer, so its last answer can be hours old by the
-  // time the first settlement lands; the build refuses a price that moved more
-  // than 5 % from the one shown, and would refuse it on every retry.
+  // THE VAULT IT SIGNS FOR IS READ NOW. The vault screen is read on changes, not
+  // on a timer, so its last answer can be hours old by the time the first
+  // settlement lands. Since 2026-10-08 the policy signs no price floor (live-price
+  // buying), so no shown price is checked any more; what can be stale is the
+  // vault's own state — its policy, its token accounts, the leg fees.
   const refreshVault = screen?.refresh ?? null;
   const asked = useRef(false);
   const becameEligible = data.stage === "active" && data.policy.status === "missing" && basket !== null && basket.kind === "stocks";
