@@ -50,7 +50,7 @@ import { isForeignSecret, judgePastedKey, privateKeyForImport, type PastedKey } 
 import { HOLDINGS_COPY, importPreflight, startingPointLine, type HoldingsNotice, type Preflight } from "@/lib/import-preflight";
 import { symbolOfMint } from "@/lib/live-symbols";
 import type { ImportAndLinkOutcome } from "@/lib/create-and-link";
-import { hasCreateRoot } from "@/lib/trading-wallets";
+import { createRefusal, hasCreateRoot } from "@/lib/trading-wallets";
 import { CREATE_LINK_COPY, IMPORT_LINK_COPY, IMPORT_PANEL_COPY, VAULT_COPY, shortAddress } from "@/lib/vault-copy";
 
 /** Holdings listed by name before the rest are counted: a wallet can hold hundreds. */
@@ -62,6 +62,8 @@ export interface ImportRequest {
   readonly takeKey: () => Promise<string | null>;
   readonly expected: string;
   readonly needsLink: boolean;
+  /** Whether the press goes on to a link (needsLink and the chain can take one): the progress ladder shows its steps only then. */
+  readonly links: boolean;
 }
 
 export function ImportWalletPanel({
@@ -146,11 +148,19 @@ export function ImportWalletPanel({
     setRefusal(decided.kind === "refused" ? decided.message : null);
   };
 
+  // The field is disabled during review: focus waits for the render that enables it.
+  const refocus = useRef(false);
+  useEffect(() => {
+    if (review !== null || !refocus.current) return;
+    refocus.current = false;
+    field.current?.focus();
+  }, [review]);
+
   const otherKey = () => {
     clearKey();
     setReview(null);
     setRefusal(null);
-    field.current?.focus();
+    refocus.current = true;
   };
 
   const close = () => {
@@ -167,6 +177,7 @@ export function ImportWalletPanel({
     onImport({
       expected,
       needsLink: review.verdict.needsLink,
+      links: review.verdict.needsLink && pressPlan(screen?.view ?? null).links,
       takeKey: async () => {
         const text = held ?? "";
         held = null;
@@ -194,6 +205,7 @@ export function ImportWalletPanel({
         <p>{IMPORT_PANEL_COPY.intro}</p>
         <p>{IMPORT_PANEL_COPY.copy}</p>
         <p>{IMPORT_PANEL_COPY.travel}</p>
+        <p>{IMPORT_PANEL_COPY.login}</p>
         <p>{IMPORT_PANEL_COPY.permission}</p>
       </div>
 
@@ -243,21 +255,15 @@ export function ImportWalletPanel({
       ) : null}
 
       {review !== null && go !== null ? (
-        <div className="space-y-3">
-          <div className="space-y-1 text-xs">
-            <p className="text-muted-foreground">{IMPORT_PANEL_COPY.opens}</p>
-            <AddressLine address={review.address} />
-            {/* Only for a new link: one already in place measures from its own frontier, not from now. */}
-            {go.needsLink && startingPointLine(go.lamports) !== null ? <p className="text-muted-foreground">{startingPointLine(go.lamports)}</p> : null}
-          </div>
-          {go.holdings !== null ? <HoldingsList notice={go.holdings} acknowledged={acknowledged} onAcknowledge={setAcknowledged} /> : null}
-          {!hasCreateRoot(user) ? (
-            <p data-no-created-yet="" className="text-xs text-muted-foreground">
-              {IMPORT_PANEL_COPY.noCreatedYet}
-            </p>
-          ) : null}
-          {ahead !== null ? <p className="text-xs text-muted-foreground">{ahead}</p> : null}
-        </div>
+        <ImportReview
+          address={review.address}
+          verdict={go}
+          // Only on an account with no Privy wallet yet: where Create is already refused, the card says so.
+          noCreatedYet={!hasCreateRoot(user) && createRefusal(user) === null}
+          ahead={ahead}
+          acknowledged={acknowledged}
+          onAcknowledge={setAcknowledged}
+        />
       ) : null}
 
       <div className="flex flex-wrap gap-2">
@@ -285,15 +291,81 @@ export function ImportWalletPanel({
   );
 }
 
-/** What the wallet holds besides SOL, and the acknowledgement the press waits for. */
-function HoldingsList({ notice, acknowledged, onAcknowledge }: { readonly notice: HoldingsNotice; readonly acknowledged: boolean; readonly onAcknowledge: (value: boolean) => void }) {
-  const checkboxId = useId();
-  const shown = notice.holdings.slice(0, LISTED_HOLDINGS);
-  const rest = notice.holdings.length - shown.length;
+/**
+ * The review before the press, from the preflight's verdict alone — pure, so its every shape is tested
+ * (ImportWalletPanel.test.ts). The SOL starting point is said only for a new link: one already in place measures
+ * from its own start or last saving. The line on SOL coming back from other apps is said on every import, in the
+ * words that fit it.
+ */
+export function ImportReview({
+  address,
+  verdict,
+  noCreatedYet,
+  ahead,
+  acknowledged,
+  onAcknowledge,
+}: {
+  readonly address: string;
+  readonly verdict: Extract<Preflight, { kind: "go" }>;
+  readonly noCreatedYet: boolean;
+  readonly ahead: string | null;
+  readonly acknowledged: boolean;
+  readonly onAcknowledge: (value: boolean) => void;
+}) {
+  const startingPoint = verdict.needsLink ? startingPointLine(verdict.lamports) : null;
   return (
-    <div role="group" aria-labelledby={`${checkboxId}-title`} data-holdings={notice.holdings.length} className="space-y-2 rounded-md border border-amber-600/30 bg-amber-500/5 px-3 py-2 text-xs">
+    <div className="space-y-3">
+      <div className="space-y-1 text-xs">
+        <p className="text-muted-foreground">{IMPORT_PANEL_COPY.opens}</p>
+        <AddressLine address={address} />
+        {startingPoint !== null ? <p className="text-muted-foreground">{startingPoint}</p> : null}
+        <p data-elsewhere="" className="text-muted-foreground">
+          {verdict.needsLink ? HOLDINGS_COPY.elsewhere : HOLDINGS_COPY.elsewhereLinked}
+        </p>
+      </div>
+      {verdict.holdings !== null ? <HoldingsList notice={verdict.holdings} linked={!verdict.needsLink} acknowledged={acknowledged} onAcknowledge={onAcknowledge} /> : null}
+      {noCreatedYet ? (
+        <p data-no-created-yet="" className="text-xs text-muted-foreground">
+          {IMPORT_PANEL_COPY.noCreatedYet}
+        </p>
+      ) : null}
+      {ahead !== null ? <p className="text-xs text-muted-foreground">{ahead}</p> : null}
+    </div>
+  );
+}
+
+/**
+ * What the wallet holds besides SOL, and the acknowledgement the press waits for, in three shapes with their own
+ * words: tokens (a few named, the rest counted), a listing too large to read (closing accounts said outright: there
+ * are thousands), and empty token accounts alone.
+ */
+export function HoldingsList({
+  notice,
+  linked = false,
+  acknowledged,
+  onAcknowledge,
+}: {
+  readonly notice: HoldingsNotice;
+  /** Already linked to this vault: nothing done before the import keeps a sale out of the measure, so no "before you import" advice. */
+  readonly linked?: boolean;
+  readonly acknowledged: boolean;
+  readonly onAcknowledge: (value: boolean) => void;
+}) {
+  const checkboxId = useId();
+  const shape = notice.count === null ? "too-many" : notice.count === 0 ? "empty-only" : "tokens";
+  const shown = notice.holdings.slice(0, LISTED_HOLDINGS);
+  const rest = (notice.count ?? 0) - shown.length;
+  const title = shape === "too-many" ? HOLDINGS_COPY.titleTooMany : shape === "empty-only" ? HOLDINGS_COPY.titleEmptyOnly : HOLDINGS_COPY.title;
+  const avoid = linked
+    ? shape === "empty-only"
+      ? HOLDINGS_COPY.avoidLinkedEmptyOnly
+      : HOLDINGS_COPY.avoidLinked
+    : shape === "too-many" ? HOLDINGS_COPY.avoidTooMany : shape === "empty-only" ? HOLDINGS_COPY.avoidEmptyOnly : HOLDINGS_COPY.avoid;
+  const acknowledge = shape === "too-many" ? HOLDINGS_COPY.acknowledgeTooMany : shape === "empty-only" ? HOLDINGS_COPY.acknowledgeEmptyOnly : HOLDINGS_COPY.acknowledge;
+  return (
+    <div role="group" aria-labelledby={`${checkboxId}-title`} data-holdings={shape} className="space-y-2 rounded-md border border-amber-600/30 bg-amber-500/5 px-3 py-2 text-xs">
       <p id={`${checkboxId}-title`} className="font-medium">
-        {HOLDINGS_COPY.title}
+        {title}
       </p>
       {shown.length > 0 ? (
         <ul className="space-y-0.5">
@@ -306,12 +378,17 @@ function HoldingsList({ notice, acknowledged, onAcknowledge }: { readonly notice
           {rest > 0 ? <li className="text-muted-foreground">{IMPORT_PANEL_COPY.moreHoldings(rest)}</li> : null}
         </ul>
       ) : null}
-      <p className="text-muted-foreground">{HOLDINGS_COPY.body}</p>
-      {notice.emptyAccounts > 0 ? <p className="text-muted-foreground">{HOLDINGS_COPY.emptyAccounts(notice.emptyAccounts)}</p> : null}
-      <p className="text-muted-foreground">{HOLDINGS_COPY.avoid}</p>
+      {shape === "empty-only" && notice.emptyAccounts !== null ? (
+        <p className="text-muted-foreground">{HOLDINGS_COPY.emptyOnly(notice.emptyAccounts)}</p>
+      ) : (
+        <p className="text-muted-foreground">{HOLDINGS_COPY.body}</p>
+      )}
+      {shape === "too-many" ? <p className="text-muted-foreground">{HOLDINGS_COPY.tooManyClosing}</p> : null}
+      {shape === "tokens" && notice.emptyAccounts !== null && notice.emptyAccounts > 0 ? <p className="text-muted-foreground">{HOLDINGS_COPY.emptyAccounts(notice.emptyAccounts)}</p> : null}
+      <p className="text-muted-foreground">{avoid}</p>
       <label htmlFor={checkboxId} className="flex items-start gap-2">
         <input id={checkboxId} type="checkbox" checked={acknowledged} onChange={(event) => onAcknowledge(event.currentTarget.checked)} className="mt-0.5" />
-        <span>{HOLDINGS_COPY.acknowledge}</span>
+        <span>{acknowledge}</span>
       </label>
     </div>
   );
@@ -336,6 +413,14 @@ export function ImportAndLinkNote({
   readonly onDismiss: () => void;
 }) {
   const { stop, imported, link, alreadyLinked } = outcome;
+  // The outcome the press announced, not a failure: said once, as a status.
+  if (stop?.kind === "link_later") {
+    return (
+      <p role="status" data-outcome="link_later" className="text-xs text-muted-foreground">
+        {stop.message}
+      </p>
+    );
+  }
   if (stop === null) {
     if (alreadyLinked) {
       return (

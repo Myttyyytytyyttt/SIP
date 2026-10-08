@@ -830,3 +830,12 @@ describe("createRefusal: Privy creates one more wallet only from a root it did n
   });
 });
 
+describe("tradingWalletsOf: imported wallets keep their order as more are imported", () => {
+  it("orders them by when Privy first verified them, so a later import does not change the number of an earlier dated one", () => {
+    const early = teeWallet(TRADING_2, 0, true, { imported: true, firstVerifiedAt: new Date("2026-10-01T00:00:00.000Z") });
+    // Imported later, with an address that sorts first.
+    const late = teeWallet(IMPORTED, 0, true, { imported: true, firstVerifiedAt: new Date("2026-10-08T00:00:00.000Z") });
+    expect(IMPORTED < TRADING_2).toBe(true);
+    expect(tradingWalletsOf(userWith([phantom(), late, teeWallet(TRADING_0, 0, true), early])).map((wallet) => wallet.address)).toStrictEqual([TRADING_0, TRADING_2, IMPORTED]);
+  });
+});

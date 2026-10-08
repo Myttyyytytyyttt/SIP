@@ -97,13 +97,15 @@ export function TradingWalletsCard() {
 
   const rows = useMemo<TradingWalletRowData[]>(() => {
     const wallets = tradingWalletsOf(user);
+    const known = (address: string | null): address is string => address !== null && !wallets.some((wallet) => wallet.address === address);
+    // An imported wallet Privy's record does not list yet is named with the rest, so it can never share a name.
+    const pendingImport = known(importer.imported) ? importer.imported : null;
     // The same names as the live dashboard's (src/lib/wallet-labels.ts), from Privy's own list.
-    const labels = tradingWalletLabels(wallets);
+    const labels = tradingWalletLabels([...wallets, ...(pendingImport === null ? [] : [{ address: pendingImport, imported: true }])]);
     const listed: TradingWalletRowData[] = wallets.map((wallet) => ({ ...wallet, listed: true, label: labels.get(wallet.address) ?? wallet.address }));
-    const shown = (address: string | null) => address === null || listed.some((row) => row.address === address);
-    if (!shown(created) && created !== null) listed.push({ address: created, id: null, walletIndex: null, imported: false, listed: false, label: "New trading wallet" });
-    if (!shown(importer.imported) && importer.imported !== null) {
-      listed.push({ address: importer.imported, id: null, walletIndex: null, imported: true, listed: false, label: "Imported wallet" });
+    if (known(created)) listed.push({ address: created, id: null, walletIndex: null, imported: false, listed: false, label: "New trading wallet" });
+    if (pendingImport !== null) {
+      listed.push({ address: pendingImport, id: null, walletIndex: null, imported: true, listed: false, label: labels.get(pendingImport) ?? "Imported wallet" });
     }
     return listed;
   }, [user, created, importer.imported]);
@@ -174,7 +176,8 @@ export function TradingWalletsCard() {
         ) : null}
         {/* The create's own promise steps aside while the import panel says its own, and gives way to why it cannot be kept. */}
         {problem === null && !full && !importing && cannotCreate === null ? <p className="text-xs text-muted-foreground">{ahead}</p> : null}
-        {problem === null && !full && !importing && cannotCreate !== null ? (
+        {/* Kept while the import panel is open too: Create stays disabled there, and must say why. */}
+        {problem === null && !full && cannotCreate !== null ? (
           <p data-create-refused="" className="text-xs text-muted-foreground">
             {cannotCreate}
           </p>

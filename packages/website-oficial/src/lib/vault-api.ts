@@ -227,8 +227,16 @@ export interface ImportCheckJson {
   /** ["link", wallet], compared with the owner's vault. */
   readonly link: { readonly address: string; readonly status: WalletLinkStatus; readonly vault: string | null };
   readonly lamports: string | null;
-  /** Non-zero balances under both token programs, and the count of empty token accounts (null when unread). */
-  readonly tokens: { readonly status: "exists" | "unreadable"; readonly items: readonly HoldingJson[]; readonly emptyAccounts: number | null };
+  /**
+   * Non-zero balances under both token programs — at most a few named, `count` of them in all — and the count of
+   * empty token accounts. "too_many" when the listing is too large to read; counts are null unless it was read.
+   */
+  readonly tokens: {
+    readonly status: "exists" | "too_many" | "unreadable";
+    readonly items: readonly HoldingJson[];
+    readonly count: number | null;
+    readonly emptyAccounts: number | null;
+  };
 }
 
 export interface ApiFailure {

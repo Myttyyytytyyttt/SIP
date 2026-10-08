@@ -24,7 +24,7 @@ function check(overrides: Partial<ImportCheckJson> = {}): ImportCheckJson {
     protocolRole: "none",
     link: { address: "link-of-candidate", status: "missing", vault: null },
     lamports: "50000000",
-    tokens: { status: "exists", items: [], emptyAccounts: 0 },
+    tokens: { status: "exists", items: [], count: 0, emptyAccounts: 0 },
     ...overrides,
   };
 }
@@ -96,7 +96,7 @@ describe("importPreflight: what the chain says", () => {
     ["a request that failed", "unreadable", "chain_unreadable"],
     ["a vault read that failed", check({ ownVault: { address: "v", status: "unreadable" } }), "chain_unreadable"],
     ["a link read that failed", check({ link: { address: "l", status: "unreadable", vault: null } }), "chain_unreadable"],
-    ["a token read that failed", check({ tokens: { status: "unreadable", items: [], emptyAccounts: null } }), "chain_unreadable"],
+    ["a token read that failed", check({ tokens: { status: "unreadable", items: [], count: null, emptyAccounts: null } }), "chain_unreadable"],
     ["an answer about another address", check({ wallet: TRADING_0 }), "chain_unreadable"],
     ["an answer about another owner's vault", check({ owner: TRADING_0 }), "chain_unreadable"],
   ];
@@ -105,14 +105,23 @@ describe("importPreflight: what the chain says", () => {
     expect(reason(run({ check: answer }))).toBe(expected);
   });
 
-  it("puts what the wallet holds in front of the person, empty token accounts included", () => {
-    expect(run({ check: check({ tokens: { status: "exists", items: [HOLDING], emptyAccounts: 3 } }) })).toEqual({
+  it("puts what the wallet holds in front of the person, the count of the rest and the empty token accounts included", () => {
+    expect(run({ check: check({ tokens: { status: "exists", items: [HOLDING], count: 12, emptyAccounts: 3 } }) })).toEqual({
       kind: "go",
       needsLink: true,
       lamports: 50_000_000n,
-      holdings: { holdings: [HOLDING], emptyAccounts: 3 },
+      holdings: { holdings: [HOLDING], count: 12, emptyAccounts: 3 },
     });
-    expect(run({ check: check({ tokens: { status: "exists", items: [], emptyAccounts: 1 } }) })).toMatchObject({ holdings: { holdings: [], emptyAccounts: 1 } });
+    expect(run({ check: check({ tokens: { status: "exists", items: [], count: 0, emptyAccounts: 1 } }) })).toMatchObject({ holdings: { holdings: [], count: 0, emptyAccounts: 1 } });
+  });
+
+  it("A LISTING TOO LARGE TO READ is warned about with nothing named — never waved through, never refused for good", () => {
+    expect(run({ check: check({ tokens: { status: "too_many", items: [], count: null, emptyAccounts: null } }) })).toEqual({
+      kind: "go",
+      needsLink: true,
+      lamports: 50_000_000n,
+      holdings: { holdings: [], count: null, emptyAccounts: null },
+    });
   });
 
   it("goes with an unknown balance rather than an invented one", () => {

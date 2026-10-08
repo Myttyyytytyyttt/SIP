@@ -51,8 +51,12 @@ export type PreflightRefusal =
 
 /** What the wallet holds besides SOL, when it holds anything. */
 export interface HoldingsNotice {
+  /** The holdings named (a few of them). */
   readonly holdings: readonly HoldingJson[];
-  readonly emptyAccounts: number;
+  /** How many non-zero holdings there are in all; null when the listing was too large to read. */
+  readonly count: number | null;
+  /** Empty token accounts; null when the listing was too large to read. */
+  readonly emptyAccounts: number | null;
 }
 
 export type Preflight =
@@ -122,30 +126,59 @@ export function importPreflight(input: {
   if (check.protocolRole !== "none") return refused("protocol_key", PREFLIGHT_COPY.protocolKey);
   if (check.link.status === "other_vault") return refused("linked_elsewhere", PREFLIGHT_COPY.linkedElsewhere);
   if (check.link.status === "unreadable") return refused("chain_unreadable", PREFLIGHT_COPY.chainUnreadable);
+  const go = { kind: "go" as const, needsLink: check.link.status === "missing", lamports: rawFrom(check.lamports) };
+  // A listing too large to read is a wallet with very many token accounts: it is warned about, never waved through
+  // and never refused for good.
+  if (check.tokens.status === "too_many") return { ...go, holdings: { holdings: [], count: null, emptyAccounts: null } };
   // Without the token read there is nothing to warn with, and the warning is the condition of going on.
   if (check.tokens.status !== "exists" || check.tokens.emptyAccounts === null) return refused("chain_unreadable", PREFLIGHT_COPY.chainUnreadable);
 
   const { items, emptyAccounts } = check.tokens;
-  return {
-    kind: "go",
-    needsLink: check.link.status === "missing",
-    lamports: rawFrom(check.lamports),
-    holdings: items.length === 0 && emptyAccounts === 0 ? null : { holdings: items, emptyAccounts },
-  };
+  const count = check.tokens.count ?? items.length;
+  return { ...go, holdings: count === 0 && emptyAccounts === 0 ? null : { holdings: items, count, emptyAccounts } };
 }
 
-/** The holdings notice, in words. Shown with a checkbox; the import waits for it. */
+/**
+ * The holdings notice, in words. Shown with a checkbox; the import waits for it. Three shapes: tokens (named, the
+ * rest counted), a listing too large to read, and empty token accounts alone — each says what it is, and what
+ * turning it into SOL later does. wSOL is in the list: unwrapping it is no sale, and still counts.
+ */
 export const HOLDINGS_COPY = {
   title: "This wallet holds more than SOL",
+  titleTooMany: "This wallet has too many token accounts to list",
+  titleEmptyOnly: "This wallet has empty token accounts",
   body:
     "SaverFi counts this wallet's gains in SOL from the moment it is linked, and it does not know what you paid for " +
-    "anything you hold before that. In profit mode, if you later sell any of these for SOL, all the SOL they bring " +
-    "counts as gain, and your rate of it is put aside into your vault, which can be much more than your rate of what you really made.",
+    "anything you hold before that. In profit mode, if you later sell any of these for SOL — or unwrap wSOL — all the " +
+    "SOL they bring counts as gain, and your rate of it is put aside into your vault, which can be much more than your " +
+    "rate of what you really made.",
   emptyAccounts: (count: number): string =>
     `It also has ${count} empty token ${count === 1 ? "account" : "accounts"}. Closing one gives back about 0.002 SOL, which counts as gain too.`,
+  emptyOnly: (count: number): string =>
+    `It has ${count} empty token ${count === 1 ? "account" : "accounts"}. Closing one after the wallet is linked gives back about 0.002 SOL, which counts as gain, and in profit mode your rate of it is put aside.`,
+  /** Too many to list: closing them is the biggest part (about 0.002 SOL back from each, and there are thousands). */
+  tooManyClosing:
+    "Closing any of its token accounts after the wallet is linked gives back about 0.002 SOL each, which counts as gain too; with this many, that can add up to several SOL.",
   avoid: "To avoid this, sell or move these before you import the wallet.",
-  acknowledge: "I understand: selling these after the wallet is linked counts as gain.",
-  startingPoint: (sol: string): string => `It holds ${sol} SOL now. The SOL it holds when it is linked is its starting point, never counted as gain.`,
+  avoidTooMany: "To avoid this, sell, move or close these before you import the wallet.",
+  avoidEmptyOnly: "To avoid this, close them before you import the wallet.",
+  acknowledge: "I understand: selling or unwrapping these after the wallet is linked counts as gain.",
+  acknowledgeTooMany: "I understand: selling, unwrapping or closing these after the wallet is linked counts as gain.",
+  acknowledgeEmptyOnly: "I understand: closing them after the wallet is linked counts as gain.",
+  /** Already linked: measured from that link, so nothing done before the import keeps a sale out — only moving tokens away does. */
+  avoidLinked:
+    "This wallet is measured from when it was linked, or from its last settlement, so selling, unwrapping or closing these now counts too. Moving tokens to another wallet does not.",
+  avoidLinkedEmptyOnly: "This wallet is measured from when it was linked, or from its last settlement, so closing them now counts too.",
+  startingPoint: (sol: string): string => `It holds ${sol} SOL now. The SOL in the wallet itself when it is linked is its starting point, never counted as gain.`,
+  /**
+   * Said on every import. This page does not read these: stake accounts could be listed, positions in other apps in
+   * general cannot. Unstaking alone moves no SOL on Solana — the later withdrawal does — so the advice is to withdraw.
+   */
+  elsewhere:
+    "SOL that comes back to this wallet later from anything but a plain transfer — withdrawn stake, or lending, perps or limit orders in other apps — counts as gain too. To keep it out, bring it back into the wallet before you import: withdraw staked SOL, not just unstake it.",
+  /** The same, for a wallet already linked to this vault: it is measured from that link, so there is nothing to do before. */
+  elsewhereLinked:
+    "SOL that comes back to this wallet from anything but a plain transfer — withdrawn stake, or lending, perps or limit orders in other apps — counts as gain too, including what came back since it was linked or since its last settlement.",
 } as const;
 
 /** The SOL line, or null when the balance was not read. */

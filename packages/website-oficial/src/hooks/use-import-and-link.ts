@@ -30,7 +30,7 @@ export function useImportAndLink(config: SeatConfig) {
   const inFlight = useRef(false);
 
   const run = useCallback(
-    async (input: { readonly takeKey: () => Promise<string | null>; readonly expected: string; readonly needsLink: boolean }) => {
+    async (input: { readonly takeKey: () => Promise<string | null>; readonly expected: string; readonly needsLink: boolean; readonly links: boolean }) => {
       if (inFlight.current) return;
       inFlight.current = true;
       setOutcome(null);
@@ -42,6 +42,7 @@ export function useImportAndLink(config: SeatConfig) {
           takeKey: input.takeKey,
           expected: input.expected,
           needsLink: input.needsLink,
+          links: input.links,
           onImported: setImported,
           onOutcome: setOutcome,
         });

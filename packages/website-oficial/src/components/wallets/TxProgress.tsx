@@ -28,6 +28,8 @@ const CREATE_STEPS: readonly FlowStep[] = ["preparing", "approve_pension", "send
 const LINK_STEPS: readonly FlowStep[] = ["preparing", "consent", "approve_pension", "trading_signing", "sending", "confirming", "done"];
 const CREATE_LINK_STEPS: readonly FlowStep[] = ["creating_wallet", ...LINK_STEPS];
 const IMPORT_LINK_STEPS: readonly FlowStep[] = ["importing_wallet", "checking_permission", ...LINK_STEPS];
+/** An import no link follows (already linked, or no vault yet): nothing for Phantom, so no link steps promised. */
+const IMPORT_STEPS: readonly FlowStep[] = ["importing_wallet", "checking_permission", "done"];
 
 function SolscanLink({ href }: { readonly href: string }) {
   return (
@@ -74,7 +76,15 @@ export function TxProgress({
 
   if (progress.phase === "running") {
     const steps =
-      progress.kind === "createLink" ? CREATE_LINK_STEPS : progress.kind === "importLink" ? IMPORT_LINK_STEPS : progress.kind === "link" ? LINK_STEPS : CREATE_STEPS;
+      progress.kind === "createLink"
+        ? CREATE_LINK_STEPS
+        : progress.kind === "importLink"
+          ? IMPORT_LINK_STEPS
+          : progress.kind === "import"
+            ? IMPORT_STEPS
+            : progress.kind === "link"
+              ? LINK_STEPS
+              : CREATE_STEPS;
     const current = steps.indexOf(progress.step);
     return (
       <div role="status" aria-live="polite" data-progress={progress.step} className="space-y-1 rounded-md border px-3 py-2 text-xs">

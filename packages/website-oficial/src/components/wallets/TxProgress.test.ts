@@ -39,3 +39,18 @@ describe("a write the person cancelled in their wallet", () => {
     expect(html).not.toContain(PROGRESS_COPY.cancelled);
   });
 });
+
+describe("the import's ladder", () => {
+  const running = (kind: "import" | "importLink"): WriteProgress => ({ phase: "running", kind, step: "checking_permission", built: null });
+
+  it("promises the link's steps, Phantom's included, only for an import a link follows", () => {
+    const linking = render(running("importLink"));
+    expect(linking).toContain(PROGRESS_COPY.importing_wallet);
+    expect(linking).toContain(PROGRESS_COPY.approve_pension);
+    const alone = render(running("import"));
+    expect(alone).toContain(PROGRESS_COPY.importing_wallet);
+    expect(alone).toContain(PROGRESS_COPY.checking_permission);
+    expect(alone).not.toContain(PROGRESS_COPY.approve_pension);
+    expect(alone).not.toContain(PROGRESS_COPY.consent);
+  });
+});

@@ -46,6 +46,7 @@ import {
   type SeatConfig,
 } from "@/lib/trading-wallets";
 import type { VaultStateJson } from "@/lib/vault-api";
+import { scrubKeyFrom } from "@/lib/import-key";
 import { CREATE_LINK_COPY, IMPORT_LINK_COPY, LINK_COPY, VAULT_COPY, shortAddress } from "@/lib/vault-copy";
 import type { FlowStep, LinkWalletResult } from "@/lib/vault-flows";
 
@@ -228,7 +229,11 @@ export type ImportAndLinkStopKind =
   | "seat"
   /** The field no longer held a whole key. Nothing was sent. */
   | "no_key"
-  /** Privy refused, or its dialog was closed, and its record does not show the wallet. Nothing was imported. */
+  /**
+   * Privy refused — its record re-read on IMPORT_RECHECK_MS still did not list the wallet, and its words plus
+   * importMaybe say to reload and look, since a throw is not proof — or its dialog was closed: the record is read
+   * once, and nothing is shown.
+   */
   | "import"
   /** Imported; Privy did not name it, and its record does not show it yet. */
   | "no_address"
@@ -243,7 +248,9 @@ export type ImportAndLinkStopKind =
   /** Imported; the screen's read of Solana is not usable. */
   | "chain_unknown"
   /** Imported; this session cannot sign for it yet. */
-  | "not_ready";
+  | "not_ready"
+  /** Imported; the press promised no link (the chain could not take one then), so none is made now: its row links it. */
+  | "link_later";
 
 export interface ImportAndLinkStop {
   readonly kind: ImportAndLinkStopKind;
@@ -253,7 +260,7 @@ export interface ImportAndLinkStop {
 }
 
 export interface ImportAndLinkOutcome {
-  /** The wallet now on the account, or null when nothing was imported. */
+  /** The wallet now on the account, or null when it is not known to be on it. */
   readonly imported: string | null;
   readonly link: LinkWalletResult | null;
   readonly stop: ImportAndLinkStop | null;
@@ -276,6 +283,11 @@ export interface ImportAndLinkDeps {
   readonly expected: string;
   /** False when the wallet is already linked to this vault (the preflight read it): the import is all that is left. */
   readonly needsLink: boolean;
+  /**
+   * Whether the press PROMISED a link (needsLink, and the chain could take one when it was pressed). False: no link
+   * is made whatever the chain says by then — Phantom never opens on a press that said it would not.
+   */
+  readonly links: boolean;
   readonly refreshUser: RefreshUserFn;
   readonly chain: () => VaultStateJson | "loading" | null;
   readonly signable: () => readonly string[];
@@ -286,10 +298,27 @@ export interface ImportAndLinkDeps {
   readonly wait?: (ms: number) => Promise<void>;
   readonly readyBackoffMs?: readonly number[];
   readonly seatBackoffMs?: readonly number[];
+  readonly importRecheckMs?: readonly number[];
 }
 
 /** The waits between readings of Privy's record while it lists a wallet just imported, with its signer. */
 export const SEAT_BACKOFF_MS: readonly number[] = [500, 1_000, 2_000, 3_000, 5_000];
+
+/** The waits between readings of Privy's record after its import threw, before saying it is not listed (yet). */
+export const IMPORT_RECHECK_MS: readonly number[] = [500, 1_000, 2_000];
+
+/**
+ * Privy's error with every run of 8 or more characters of `key` taken out of its text (scrubKeyFrom), in every shape privyFailure reads:
+ * a string, an Error, or any object with a string `message` — its code scrubbed and kept too. Anything else carries
+ * no text to show.
+ */
+function withoutKey(error: unknown, key: string): unknown {
+  if (typeof error === "string") return scrubKeyFrom(error, key);
+  if (typeof error !== "object" || error === null) return error;
+  const message: unknown = (error as { message?: unknown }).message;
+  const code: unknown = (error as { privyErrorCode?: unknown }).privyErrorCode;
+  return Object.assign(new Error(typeof message === "string" ? scrubKeyFrom(message, key) : ""), typeof code === "string" ? { privyErrorCode: scrubKeyFrom(code, key) } : {});
+}
 
 const importStopped = (kind: ImportAndLinkStopKind, message: string | null, imported: string | null, gate: LinkGateCode | null = null): ImportAndLinkOutcome => ({
   imported,
@@ -312,8 +341,12 @@ const listed = (record: Awaited<ReturnType<RefreshUserFn>>, address: string): bo
  *
  * A THROW IS NOT PROOF NOTHING WAS IMPORTED. Privy's importWallet imports first
  * and re-reads the user after, failing with "Failed to import wallet" when that
- * read does not list it yet. So the record is read either way, and a wallet it
- * lists at the expected address is carried on as imported.
+ * read does not list it yet. So the record is read either way — on
+ * IMPORT_RECHECK_MS after a throw, a read that fails counting as no answer — and
+ * a wallet it lists at the expected address is carried on as imported. One it
+ * still does not list stops with Privy's words and where to look, never with
+ * "nothing happened". Privy's text loses every run of 8 or more characters of
+ * the key first (scrubKeyFrom), while the flow still holds it to compare.
  *
  * THE ADDRESS MUST BE THE ONE CHECKED. Every preflight refusal — a vault this key
  * owns, a link elsewhere, the pension key — ran on `expected`. A wallet Privy
@@ -331,6 +364,7 @@ export async function importAndLinkFlow(deps: ImportAndLinkDeps): Promise<Import
   }
 
   deps.onStep?.("importing_wallet");
+  const wait = deps.wait ?? sleep;
   let key = await deps.takeKey();
   if (key === null) return importStopped("no_key", IMPORT_LINK_COPY.noKey, null);
   let named: string | null = null;
@@ -338,11 +372,19 @@ export async function importAndLinkFlow(deps: ImportAndLinkDeps): Promise<Import
   try {
     named = await importTradingWallet(deps.importWallet, deps.config, key);
   } catch (error) {
-    failure = error;
+    failure = withoutKey(error, key);
   } finally {
     key = null;
   }
-  const record = await deps.refreshUser().catch(() => null);
+  let record = await deps.refreshUser().catch(() => null);
+  // A closed dialog is a choice (failureText null): nothing to wait for.
+  if (named === null && failure !== null && failureText(failure) !== null) {
+    for (const delay of deps.importRecheckMs ?? IMPORT_RECHECK_MS) {
+      if (listed(record, deps.expected)) break;
+      await wait(delay);
+      record = await deps.refreshUser().catch(() => null);
+    }
+  }
   let address: string;
   if (named !== null) {
     address = named;
@@ -350,7 +392,8 @@ export async function importAndLinkFlow(deps: ImportAndLinkDeps): Promise<Import
     address = deps.expected;
   } else if (failure !== null) {
     // failureText is null for a closed dialog, and redacts anything key-shaped from Privy's words.
-    return importStopped("import", failureText(failure), null);
+    const said = failureText(failure);
+    return importStopped("import", said === null ? null : `${said} ${IMPORT_LINK_COPY.importMaybe}`, null);
   } else {
     return importStopped("no_address", IMPORT_LINK_COPY.noAddress, null);
   }
@@ -360,7 +403,6 @@ export async function importAndLinkFlow(deps: ImportAndLinkDeps): Promise<Import
   }
 
   deps.onStep?.("checking_permission");
-  const wait = deps.wait ?? sleep;
   let seat = seatOf(record, address);
   for (const delay of deps.seatBackoffMs ?? SEAT_BACKOFF_MS) {
     if (seat === "has-signer") break;
@@ -371,6 +413,13 @@ export async function importAndLinkFlow(deps: ImportAndLinkDeps): Promise<Import
   if (seat !== "has-signer") return importStopped("seat_unknown", IMPORT_LINK_COPY.seatUnknown, address);
 
   if (!deps.needsLink) return { imported: address, link: null, stop: null, alreadyLinked: true };
+  if (!deps.links) {
+    // The press said it would not link: what the chain says now is reported, never acted on.
+    const now = deps.chain();
+    const gateNow = now === "loading" || now === null ? null : linkGate(now);
+    if (gateNow !== null) return importStopped("gate", gateNow.message, address, gateNow.code);
+    return importStopped("link_later", IMPORT_LINK_COPY.linkLater, address);
+  }
 
   const chain = deps.chain();
   if (chain === "loading" || chain === null) return importStopped("chain_unknown", IMPORT_LINK_COPY.chainUnknown, address);

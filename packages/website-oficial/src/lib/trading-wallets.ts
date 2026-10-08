@@ -124,18 +124,24 @@ export interface TradingWallet {
 
 /**
  * Every Privy embedded Solana wallet on the user, one entry per address: the
- * ones created here in HD order, then the imported ones, by address. The kind
- * comes from Privy's `imported` flag, never from the index (see walletIndex).
- * The pension key is never among them: it is an external wallet, and Privy's
- * walletClientType says so.
+ * ones created here in HD order, then the imported ones in the order they were
+ * imported (Privy's firstVerifiedAt; by address where it is missing, after the
+ * dated ones), so a new import does not change the number of an earlier dated
+ * one — though a lone "Imported wallet" becomes "Imported wallet 1" when a
+ * second arrives (src/lib/wallet-labels.ts). The kind comes from Privy's
+ * `imported` flag, never from the index (see walletIndex). The pension key is
+ * never among them: it is an external wallet, and Privy's walletClientType says so.
  */
 export function tradingWalletsOf(user: User | null): TradingWallet[] {
   const byAddress = new Map<string, TradingWallet>();
+  const importedAt = new Map<string, number>();
   for (const account of user?.linkedAccounts ?? []) {
     if (account.type !== "wallet" || account.chainType !== "solana") continue;
     if (!EMBEDDED_CLIENT_TYPES.has(account.walletClientType ?? "")) continue;
     if (typeof account.address !== "string" || account.address === "" || byAddress.has(account.address)) continue;
     const imported = account.imported === true;
+    const verified: unknown = account.firstVerifiedAt;
+    if (imported && verified instanceof Date && Number.isFinite(verified.getTime())) importedAt.set(account.address, verified.getTime());
     byAddress.set(account.address, {
       address: account.address,
       id: typeof account.id === "string" && account.id !== "" ? account.id : null,
@@ -147,6 +153,7 @@ export function tradingWalletsOf(user: User | null): TradingWallet[] {
     (a, b) =>
       Number(a.imported) - Number(b.imported) ||
       (a.walletIndex ?? Number.MAX_SAFE_INTEGER) - (b.walletIndex ?? Number.MAX_SAFE_INTEGER) ||
+      (importedAt.get(a.address) ?? Number.MAX_SAFE_INTEGER) - (importedAt.get(b.address) ?? Number.MAX_SAFE_INTEGER) ||
       (a.address < b.address ? -1 : a.address > b.address ? 1 : 0),
   );
 }
@@ -175,10 +182,10 @@ export function hasCreateRoot(user: User | null): boolean {
 const privyWalletsOf = (user: User | null): WalletWithMetadata[] =>
   (user?.linkedAccounts ?? []).filter((account): account is WalletWithMetadata => account.type === "wallet" && account.walletClientType === "privy");
 
-/** Said where Create is refused, and before an import on an account with nothing created here yet. */
+/** Said where Create is refused (createRefusal). */
 export const CREATE_REFUSAL =
-  "Privy creates a new wallet only on an account that already has one created here, and this account's wallets are " +
-  "all imported. Import another wallet you already use instead.";
+  "This account's wallets are all imported, and Privy creates a new wallet on an account like that only if one was " +
+  "created here first. Import another wallet you already use instead.";
 
 /** Privy's createWallet from @privy-io/react-auth/solana, narrowed to the one call this page makes. */
 export type CreateWalletFn = (options: {

@@ -803,6 +803,14 @@ export const IMPORT_LINK_COPY = {
   /** The head of every stop after the import. */
   imported: "Your wallet is imported and nothing was lost.",
   inTheList: CREATE_LINK_COPY.inTheList,
+  /**
+   * After a refused import Privy's record still does not list: said after Privy's own words. Nothing re-reads the
+   * record after this stop, so the way to look again is a reload.
+   */
+  importMaybe: "Privy may still have imported it. Reload the page in a minute: if the wallet is in the list, its row shows its permission and whether it is linked.",
+  /** The press promised no link: an outcome as announced, not a failure, so it is said on its own (ImportAndLinkNote). */
+  linkLater:
+    "Your wallet is imported. It was not linked, as the panel said before you pressed Import: link it to your vault from its row below.",
   /** The field no longer held a whole key when the import began. */
   noKey: "The key in the field changed or is gone, so nothing was sent. Paste the key again and check it.",
   noAddress:
@@ -832,8 +840,15 @@ export const IMPORT_PANEL_COPY = {
   title: "Import a wallet you already use",
   intro:
     "Paste the private key of a Solana wallet you trade from — Phantom, Solflare, Axiom, GMGN or a trading bot. SaverFi then saves from it like from a wallet created here.",
-  copy: "SaverFi gets a copy: the key keeps working wherever you use it now.",
+  /**
+   * What importing hands over, in full (audit 10-08): Privy keeps a copy, the original keeps working, and the wallet
+   * is now ALSO reachable through the SaverFi login — like a wallet created here, it can be used and exported
+   * from this account, and this page has no way to take it off the account again.
+   */
+  copy: "Importing makes a copy: the key keeps working wherever you use it now.",
   travel: "From this page the key goes to Privy, encrypted for Privy's secure enclave. It never reaches SaverFi's servers.",
+  login:
+    "Once imported, the wallet can also be used and its key exported from your SaverFi account, signed in with your pension key, like a wallet created here — and, as for those, SaverFi's site can ask Privy to sign with it without a confirmation screen from your wallet app. This page cannot take it off your account again.",
   permission:
     "SaverFi's permission on the wallet lets SaverFi's keeper send only transactions made of SaverFi's program and signature checks. It cannot export your key or sign messages, and only your pension key can withdraw from your vault.",
   field: "Private key",
@@ -853,12 +868,18 @@ export const IMPORT_PANEL_COPY = {
     "1 the wallet agrees to save into this vault, " +
     (linkRent === null ? "2 Phantom asks you to approve and pay the link's rent, " : `2 Phantom asks you to approve and pay ${linkRent} SOL of rent, `) +
     "3 the wallet confirms.",
-  aheadLinked: "One press: SaverFi imports the wallet with its permission. It is already linked to your vault, so nothing is signed and nothing is paid.",
+  /**
+   * Already linked to this vault: the keeper measures from the link's frontier — its last settlement, a zero one
+   * included — or from the slot it was created in when it has none (audit 10-08), so trades made before the import
+   * can count once the permission lands.
+   */
+  aheadLinked:
+    "One press: SaverFi imports the wallet with its permission. It is already linked to your vault, so nothing is signed and nothing is paid — and SaverFi counts its gains from when it was linked, or from its last settlement if it has had one, so trades made since then, before this import, can count too.",
   aheadImportOnly: (reason: string): string => `This imports the wallet with SaverFi's permission. It cannot be linked yet: ${reason}`,
   moreHoldings: (count: number): string => `and ${count} more`,
-  /** Before an import on an account with nothing created here: Privy will not create one afterwards (createRefusal). */
+  /** Before an import on an account with no wallet yet: Privy will not create one afterwards (createRefusal). */
   noCreatedYet:
-    "This account has no wallet created here yet. Privy creates a new wallet only on an account that already has one created here, so after this import, Create will not work on this account. Create a wallet first if you will want one.",
+    "This account has no trading wallet yet. Once it has an imported one, Privy creates a new wallet on it only if one was created here first, so after this import, Create will not work on this account. Create a wallet first if you will want one.",
 } as const;
 
 export const INVEST_COPY = {

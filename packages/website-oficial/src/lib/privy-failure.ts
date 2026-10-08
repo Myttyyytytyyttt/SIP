@@ -43,10 +43,12 @@ const SEAT_VARIABLES = "SIP_SOLANA_PRIVY_SIGNER_ID and SIP_SOLANA_PRIVY_POLICY_I
  * KEY-SHAPED RUNS ARE TAKEN OUT BEFORE ANY TEXT IS SHOWN. An import hands Privy a
  * private key, and an error can quote its input. Three shapes go:
  *
- * - base58 runs of 43 characters or more. A Solana key is about 88; 43 also
- *   catches a key clipped by a truncated message before it gives away half of
- *   itself. Addresses (43 or 44) and signatures go with it, which costs a
- *   failure message nothing.
+ * - base58 runs of 43 characters or more: whole keys (about 88), addresses (43
+ *   or 44) and signatures. A key CLIPPED shorter than that survives, and base58
+ *   puts the private seed first, so 38 to 42 leading characters would give most
+ *   of it away. This is a backstop: Privy's 3.36.0 import errors have not been
+ *   seen to quote the key, and the import flow scrubs every run of 8 or more
+ *   characters of the key it handed over from Privy's text first (scrubKeyFrom, src/lib/import-key.ts).
  * - hex runs of 41 or more, with or without 0x: an EVM key, or one clipped. A
  *   40-character EVM address survives.
  * - a list of 16 or more small numbers: a key file's bytes.

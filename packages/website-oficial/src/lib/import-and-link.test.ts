@@ -7,7 +7,7 @@ import { Keypair } from "@solana/web3.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { PENSION_KEY, POLICY, SIGNER, TRADING_0, phantom, teeWallet, userWith } from "../../test/fixtures/privy-user";
-import { SEAT_BACKOFF_MS, importAndLinkFlow, stopStillHolds, type ImportAndLinkDeps } from "@/lib/create-and-link";
+import { IMPORT_RECHECK_MS, SEAT_BACKOFF_MS, importAndLinkFlow, stopStillHolds, type ImportAndLinkDeps } from "@/lib/create-and-link";
 import { SeatNotConfigured, importTradingWallet, type ImportWalletFn } from "@/lib/trading-wallets";
 import type { VaultStateJson } from "@/lib/vault-api";
 import { IMPORT_LINK_COPY, LINK_COPY, shortAddress } from "@/lib/vault-copy";
@@ -47,6 +47,7 @@ function harness(
     records?: ReadonlyArray<ReturnType<typeof userWith> | null>;
     takeKey?: () => Promise<string | null>;
     needsLink?: boolean;
+    links?: boolean;
     chain?: () => VaultStateJson | "loading" | null;
     signable?: () => readonly string[];
   } = {},
@@ -65,6 +66,7 @@ function harness(
     takeKey,
     expected: WALLET,
     needsLink: over.needsLink ?? true,
+    links: over.links ?? over.needsLink ?? true,
     refreshUser,
     chain: over.chain ?? (() => stateOf()),
     signable: over.signable ?? (() => [PENSION_KEY, WALLET]),
@@ -194,3 +196,57 @@ describe("importAndLinkFlow", () => {
     expect(notReady).toMatchObject({ imported: WALLET, stop: { kind: "not_ready", message: IMPORT_LINK_COPY.notReady } });
   });
 });
+
+describe("importAndLinkFlow after Privy throws", () => {
+  it("re-reads the record before concluding: a wallet Privy lists a moment later is carried on as imported", async () => {
+    const h = harness({ importWallet: vi.fn().mockRejectedValue(new Error("Failed to import wallet")), records: [WITHOUT, null, WITHOUT, SEATED] });
+    expect(await importAndLinkFlow(h.deps)).toMatchObject({ imported: WALLET, link: LANDED, stop: null });
+    expect(h.waits.slice(0, 3)).toEqual(IMPORT_RECHECK_MS.slice(0, 3));
+  });
+
+  it("still not listed: Privy's words, then where to look — never 'nothing happened'", async () => {
+    const h = harness({ importWallet: vi.fn().mockRejectedValue(new Error("Failed to import wallet")), records: [WITHOUT] });
+    const outcome = await importAndLinkFlow(h.deps);
+    expect(outcome.stop?.kind).toBe("import");
+    expect(outcome.stop?.message).toContain("Failed to import wallet");
+    expect(outcome.stop?.message).toContain(IMPORT_LINK_COPY.importMaybe);
+    expect(h.waits).toEqual(IMPORT_RECHECK_MS);
+  });
+
+  it("takes every run of 8+ characters of the key out of Privy's words, even one too short for the general redaction", async () => {
+    const piece = KEY.slice(5, 25);
+    const h = harness({ importWallet: vi.fn().mockRejectedValue(new Error(`Invalid key near ${piece}`)), records: [WITHOUT] });
+    const outcome = await importAndLinkFlow(h.deps);
+    expect(outcome.stop?.message).toContain("Invalid key near [redacted]");
+    expect(outcome.stop?.message).not.toContain(piece);
+  });
+
+  it("does not wait when Privy's dialog was only closed", async () => {
+    const h = harness({ importWallet: vi.fn().mockRejectedValue(new Error("User exited the flow")), records: [WITHOUT] });
+    await importAndLinkFlow(h.deps);
+    expect(h.waits).toEqual([]);
+  });
+});
+
+describe("importAndLinkFlow keeps the press's word", () => {
+  it("makes no link the press did not promise, even when the chain can take one by then", async () => {
+    const h = harness({ links: false });
+    const outcome = await importAndLinkFlow(h.deps);
+    expect(outcome).toMatchObject({ imported: WALLET, link: null, stop: { kind: "link_later", message: IMPORT_LINK_COPY.linkLater } });
+    expect(h.link).not.toHaveBeenCalled();
+  });
+
+  it("says the chain's own reason when it still cannot take a link", async () => {
+    const outcome = await importAndLinkFlow(harness({ links: false, chain: () => stateOf("missing") }).deps);
+    expect(outcome).toMatchObject({ imported: WALLET, stop: { kind: "gate", gate: "needs_vault" } });
+  });
+
+  it("scrubs the key out of an error shaped as a plain {message} object, and out of its code", async () => {
+    const piece = KEY.slice(3, 20);
+    const h = harness({ importWallet: vi.fn().mockRejectedValue({ message: `bad ${piece}`, privyErrorCode: `code ${piece}` }), records: [WITHOUT] });
+    const outcome = await importAndLinkFlow(h.deps);
+    expect(outcome.stop?.message).not.toContain(piece);
+    expect(outcome.stop?.message).toContain("[redacted]");
+  });
+});
+

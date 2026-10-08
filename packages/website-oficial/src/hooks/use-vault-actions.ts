@@ -61,7 +61,7 @@ import {
 
 type ConnectedWallet = ReturnType<typeof useWallets>["wallets"][number];
 
-export type WriteKind = "create" | "createLink" | "importLink" | "link" | "rule" | "policy" | "withdraw" | "withdrawToken";
+export type WriteKind = "create" | "createLink" | "import" | "importLink" | "link" | "rule" | "policy" | "withdraw" | "withdrawToken";
 
 export type WriteProgress =
   | { readonly phase: "idle" }
@@ -218,6 +218,8 @@ export interface ImportAndLinkRequest {
   /** The address every preflight check ran on. */
   readonly expected: string;
   readonly needsLink: boolean;
+  /** Whether a link follows the import: the progress ladder shows the link's steps only then ("importLink", else "import"). */
+  readonly links: boolean;
   /** The address, the moment the wallet is known to be on the account. */
   readonly onImported: (address: string) => void;
   readonly onOutcome: (outcome: ImportAndLinkOutcome) => void;
@@ -425,7 +427,7 @@ export function useVaultWrite(key: string) {
       if (screen === null) return Promise.resolve();
       lastRequest.current = null;
       const { api, pensionKey } = screen;
-      return run("importLink", async (hooks) => {
+      return run(request.links ? "importLink" : "import", async (hooks) => {
         const outcome = await importAndLinkFlow({
           importWallet: request.importWallet,
           config: request.config,
@@ -433,6 +435,7 @@ export function useVaultWrite(key: string) {
           takeKey: request.takeKey,
           expected: request.expected,
           needsLink: request.needsLink,
+          links: request.links,
           chain: chainNow,
           signable: () => walletsRef.current.map((wallet) => wallet.address),
           link: (address) => runLink(pensionKey, api, address, hooks),

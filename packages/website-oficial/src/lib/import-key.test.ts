@@ -7,7 +7,7 @@ import { base58Encode } from "@sip/solana-core/client";
 import { Keypair } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 
-import { KEY_COPY, isForeignSecret, judgePastedKey, privateKeyForImport, type DeriveAddress } from "@/lib/import-key";
+import { KEY_COPY, isForeignSecret, judgePastedKey, privateKeyForImport, scrubKeyFrom, type DeriveAddress } from "@/lib/import-key";
 
 const fresh = () => {
   const pair = Keypair.generate();
@@ -154,3 +154,24 @@ describe("isForeignSecret: what the field drops the moment it is recognised", ()
   });
 });
 
+describe("scrubKeyFrom: an error raised while the key was handed over keeps no run of 8 or more of its characters", () => {
+  it("takes out the whole key, a clipped piece of 8 characters or more, and leaves shorter runs and other text", () => {
+    const key = fresh();
+    expect(scrubKeyFrom(`bad key ${key.base58} here`, key.base58)).toBe("bad key [redacted] here");
+    const piece = key.base58.slice(10, 30);
+    expect(scrubKeyFrom(`input …${piece}… rejected`, key.base58)).toBe("input …[redacted]… rejected");
+    expect(scrubKeyFrom(`ok ${key.base58.slice(0, 7)} ok`, key.base58)).toBe(`ok ${key.base58.slice(0, 7)} ok`);
+    expect(scrubKeyFrom("Failed to import wallet", key.base58)).toBe("Failed to import wallet");
+  });
+});
+
+describe("the key-file messages", () => {
+  it("count in words that agree, and name a value that is not a byte for what it is", async () => {
+    expect(KEY_COPY.keyFile(1)).toBe("That list has 1 number. A Solana key file holds 64, each from 0 to 255.");
+    expect(await judgePastedKey("[7]")).toMatchObject({ reason: "key_file", message: KEY_COPY.keyFile(1) });
+    const key = fresh();
+    const bent = [...key.secret];
+    bent[0] = 300;
+    expect(await judgePastedKey(JSON.stringify(bent))).toEqual({ kind: "refused", reason: "key_file", message: KEY_COPY.keyFileByte });
+  });
+});

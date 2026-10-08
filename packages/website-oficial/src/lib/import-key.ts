@@ -65,7 +65,9 @@ export const KEY_COPY = {
   evmKey: "That is written in hex, like an Ethereum-style key. SaverFi needs a Solana private key as your wallet app exports it: about 88 letters and numbers.",
   halfKey:
     "That is only 32 bytes: a wallet address, or half of a key. Paste the whole private key your wallet exports, about 88 characters long.",
-  keyFile: (count: number): string => `That list has ${count} numbers. A Solana key file holds ${SECRET_KEY_BYTES}, each from 0 to 255.`,
+  keyFile: (count: number): string =>
+    `That list has ${count} ${count === 1 ? "number" : "numbers"}. A Solana key file holds ${SECRET_KEY_BYTES}, each from 0 to 255.`,
+  keyFileByte: "That list has a value that is not a whole number from 0 to 255, so it is not a Solana key file.",
   notAKey:
     "That is not a Solana private key. Paste the key your wallet exports: about 88 letters and numbers, or a key file's list of 64 numbers.",
   damaged: "This key is damaged: its two halves do not belong to the same wallet. Copy it again from your wallet app.",
@@ -95,9 +97,8 @@ function parseList(text: string): Parsed {
   } catch {
     return refused("not_a_key", KEY_COPY.notAKey);
   }
-  if (!Array.isArray(value) || !value.every((n) => Number.isInteger(n) && (n as number) >= 0 && (n as number) <= 255)) {
-    return refused("key_file", KEY_COPY.keyFile(Array.isArray(value) ? value.length : 0));
-  }
+  if (!Array.isArray(value)) return refused("not_a_key", KEY_COPY.notAKey);
+  if (!value.every((n) => Number.isInteger(n) && (n as number) >= 0 && (n as number) <= 255)) return refused("key_file", KEY_COPY.keyFileByte);
   if (value.length === 32) return refused("half_key", KEY_COPY.halfKey);
   if (value.length !== SECRET_KEY_BYTES) return refused("key_file", KEY_COPY.keyFile(value.length));
   return { kind: "bytes", bytes: Uint8Array.from(value as number[]), format: "json" };
@@ -174,6 +175,29 @@ export async function judgePastedKey(text: string, derive: DeriveAddress = deriv
 export function isForeignSecret(text: string, verdict: PastedKey): boolean {
   if (verdict.kind !== "refused") return false;
   return verdict.reason === "recovery_phrase" || (verdict.reason === "evm_key" && /^(0x)?[0-9a-f]{64}$/i.test(unwrap(text)));
+}
+
+/**
+ * `text` with every run of `min` or more characters that also appears in `key` replaced by "[redacted]": for an
+ * error raised while the key was being handed over, whatever shape a quoted or clipped piece of it takes. Short
+ * messages only — it compares every position.
+ */
+export function scrubKeyFrom(text: string, key: string, min = 8): string {
+  if (key.length < min) return text;
+  let out = "";
+  let at = 0;
+  while (at < text.length) {
+    let run = 0;
+    for (let length = min; at + length <= text.length && key.includes(text.slice(at, at + length)); length += 1) run = length;
+    if (run >= min) {
+      out += "[redacted]";
+      at += run;
+    } else {
+      out += text[at];
+      at += 1;
+    }
+  }
+  return out;
 }
 
 /**
