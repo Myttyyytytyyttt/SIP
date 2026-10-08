@@ -16,6 +16,8 @@
 
 import { useEffect, useRef } from "react";
 
+import { usd } from "@/lib/format";
+
 /** The S's grid in the film (launch-video MarkBuild): its edges, on a 1272×1488 mark. */
 const MARK_H_LINES = [0, 271, 497, 607, 880, 989, 1219, 1488] as const;
 const MARK_V_LINES = [0, 275, 998, 1272] as const;
@@ -103,4 +105,126 @@ export function LandingBackdrop() {
       <div ref={pulses} className="sf-pulses" />
     </div>
   );
+}
+
+/**
+ * EXAMPLE ACTIVITY ON THE GROUND (owner, 10-08: "que se vea bonito" while there
+ * are no users yet). Small glass cards in the gutters beside the frame, one
+ * every few seconds: a slice put aside from a trade, a pile invested.
+ *
+ * EVERY CARD SAYS "Example". The addresses and amounts are made up, so each
+ * card is labelled as the frame and the sample are ("Example — nobody's
+ * pension"): the page may look alive, but it never tells a visitor that strangers
+ * are saving here right now. Replace EXAMPLES with the chain's own recent
+ * settlements and buys once there are enough of them, and drop the tag then.
+ *
+ * Only where the gutters can hold a card (they are measured beside the frame at
+ * every card), only once the page has arrived, never while the scroll is taking
+ * the frame into the app, never while the tab is hidden, never under reduced motion.
+ */
+interface ExampleEvent {
+  readonly who: string;
+  readonly kind: "saved" | "invested";
+  readonly usd: number;
+  readonly token: string;
+  /** For a slice: the trade it came from. */
+  readonly trade?: { readonly side: "buy" | "sell"; readonly usd: number };
+}
+
+/** Made-up addresses on purpose; the traded tokens and the basket are the sample's (src/mocks/data.ts). */
+const EXAMPLES: readonly ExampleEvent[] = [
+  { who: "7xKp…3fQa", kind: "saved", usd: 16.67, token: "CASHCAT", trade: { side: "sell", usd: 1667.22 } },
+  { who: "Fq2M…9LbR", kind: "invested", usd: 25.53, token: "SPYx" },
+  { who: "3nVw…KtX8", kind: "saved", usd: 8.4, token: "OPENAI", trade: { side: "buy", usd: 840.1 } },
+  { who: "Hd7e…pQ2c", kind: "saved", usd: 20.35, token: "pBTC3x", trade: { side: "buy", usd: 2035.46 } },
+  { who: "9aRt…mW4z", kind: "invested", usd: 17.02, token: "ANTHROPIC" },
+  { who: "Bq1L…7sUe", kind: "saved", usd: 3.67, token: "SPACEX", trade: { side: "sell", usd: 367.21 } },
+  { who: "5mZc…Yh8n", kind: "saved", usd: 12.9, token: "ANTHROPIC", trade: { side: "sell", usd: 1290 } },
+  { who: "Ku4P…2dVx", kind: "invested", usd: 10, token: "SPYx" },
+  { who: "Ew8N…r5Jk", kind: "saved", usd: 6.39, token: "OPENAI", trade: { side: "buy", usd: 638.96 } },
+  { who: "2pGs…Cz7m", kind: "saved", usd: 27.34, token: "CASHCAT", trade: { side: "sell", usd: 2734.4 } },
+  { who: "Lr6T…8vNq", kind: "invested", usd: 14.25, token: "ANTHROPIC" },
+  { who: "8bYd…Wa3t", kind: "saved", usd: 9.15, token: "SPYx", trade: { side: "sell", usd: 914.79 } },
+];
+
+/** A card every this often; it stays CARD_MS. At most two show at once. */
+const CARD_EVERY_MS = 2600;
+const CARD_MS = 4200;
+const CARD_W = 236;
+
+function card(event: ExampleEvent): HTMLElement {
+  const el = document.createElement("div");
+  el.className = `sf-toast sf-toast-${event.kind}`;
+  const logo = document.createElement("img");
+  logo.src = `/stocks/${event.token}.png`;
+  logo.alt = "";
+  logo.className = "sf-toast-logo";
+  const body = document.createElement("div");
+  body.className = "sf-toast-body";
+  const top = document.createElement("div");
+  top.className = "sf-toast-top";
+  const title = document.createElement("span");
+  title.className = "sf-toast-title";
+  title.textContent = event.kind === "saved" ? `+${usd(event.usd)} put aside` : `Invested ${usd(event.usd)}`;
+  const tag = document.createElement("span");
+  tag.className = "sf-toast-tag";
+  tag.textContent = "Example";
+  top.append(title, tag);
+  const sub = document.createElement("div");
+  sub.className = "sf-toast-sub";
+  sub.textContent = event.kind === "saved" && event.trade !== undefined ? `1% of a ${usd(event.trade.usd)} ${event.token} ${event.trade.side}` : `in ${event.token}, from the pension's pile`;
+  const who = document.createElement("div");
+  who.className = "sf-toast-who";
+  who.textContent = event.who;
+  body.append(top, sub, who);
+  el.append(logo, body);
+  return el;
+}
+
+export function ExampleActivity() {
+  const layer = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = layer.current;
+    const root = el?.closest(".landing-root");
+    if (!el || !root) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    let n = 0;
+    let lastSide = 1;
+    const spawn = () => {
+      if (document.hidden || !root.hasAttribute("data-loaded") || root.hasAttribute("data-zooming")) return;
+      if (el.childElementCount >= 2) return;
+      const frame = root.querySelector(".landing-box");
+      if (!frame) return;
+      const r = frame.getBoundingClientRect();
+      const vw = window.innerWidth;
+      const left = r.left;
+      const right = vw - r.right;
+      // Alternate the sides; use one only if a card fits there with a margin.
+      const side = lastSide === 1 ? 0 : 1;
+      const room = side === 0 ? left : right;
+      if (room < CARD_W + 32) return;
+      lastSide = side;
+      const event = EXAMPLES[n % EXAMPLES.length]!;
+      n += 1;
+      const node = card(event);
+      const x = side === 0 ? (left - CARD_W) / 2 : r.right + (right - CARD_W) / 2;
+      // Down the frame's height, a different row each time, clear of its title strip and the bottom fade.
+      const rows = [0.12, 0.42, 0.27, 0.57, 0.2, 0.5];
+      const y = r.top + 40 + (r.height - 140) * rows[n % rows.length]!;
+      node.style.left = `${Math.round(x)}px`;
+      node.style.top = `${Math.round(y)}px`;
+      node.style.width = `${CARD_W}px`;
+      node.style.animationDuration = `${CARD_MS}ms`;
+      node.addEventListener("animationend", () => node.remove(), { once: true });
+      el.appendChild(node);
+    };
+    const timer = window.setInterval(spawn, CARD_EVERY_MS);
+    return () => {
+      window.clearInterval(timer);
+      el.replaceChildren();
+    };
+  }, []);
+
+  return <div ref={layer} className="sf-toasts" aria-hidden />;
 }

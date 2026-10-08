@@ -531,7 +531,72 @@
   100% { transform: translateY(var(--to)); opacity: 0; }
 }
 
+/* Example activity: glass cards in the gutters beside the frame
+   (ExampleActivity in landing-backdrop.tsx). Every one is tagged "Example". */
+.sf-toasts {
+  position: absolute;
+  inset: 0;
+  transition: opacity 400ms ease;
+  opacity: calc(1 - var(--p, 0) * 6);
+}
+.landing-root:not([data-loaded]) .sf-toasts { opacity: 0; }
+.sf-toast {
+  position: absolute;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(17, 18, 24, 0.72);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 12px 40px -12px rgba(0, 0, 0, 0.7);
+  animation: sf-toast 4.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.sf-toast-saved { box-shadow: 0 12px 40px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(52, 211, 153, 0.10), 0 0 24px -8px rgba(52, 211, 153, 0.35); }
+.sf-toast-invested { box-shadow: 0 12px 40px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(96, 165, 250, 0.10), 0 0 24px -8px rgba(96, 165, 250, 0.35); }
+.sf-toast-logo { width: 26px; height: 26px; border-radius: 9999px; flex: none; margin-top: 1px; }
+.sf-toast-body { min-width: 0; flex: 1; }
+.sf-toast-top { display: flex; align-items: center; gap: 6px; }
+.sf-toast-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sf-toast-saved .sf-toast-title { color: #34d399; }
+.sf-toast-invested .sf-toast-title { color: #60a5fa; }
+.sf-toast-tag {
+  margin-left: auto;
+  flex: none;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 0 6px;
+  font-size: 9.5px;
+  line-height: 15px;
+  letter-spacing: 0.03em;
+  color: rgba(255, 255, 255, 0.5);
+}
+.sf-toast-who {
+  margin-top: 1px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.38);
+}
+.sf-toast-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+@keyframes sf-toast {
+  0%   { opacity: 0; transform: translateY(10px) scale(0.96); }
+  10%  { opacity: 1; transform: translateY(0) scale(1); }
+  82%  { opacity: 1; transform: translateY(0) scale(1); }
+  100% { opacity: 0; transform: translateY(-8px) scale(0.98); }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .sf-toasts { display: none; }
   .sf-backdrop { transform: none; transition: none; }
   .sf-halo { animation: none; }
   .sf-pulses { display: none; }

@@ -72,7 +72,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { usePrivy } from "@privy-io/react-auth";
 import { ArrowDown, ArrowUpRight } from "lucide-react";
 
-import { LandingBackdrop } from "@/components/landing-backdrop";
+import { ExampleActivity, LandingBackdrop } from "@/components/landing-backdrop";
 import { useWalletsOpener } from "@/components/wallets-host";
 import { cn } from "@/lib/utils";
 
@@ -352,14 +352,22 @@ export function Landing({
     const introVideo = intro?.querySelector<HTMLVideoElement>("video") ?? null;
     let introDone = intro === null || root.hasAttribute("data-intro-seen");
     const introTimers: number[] = [];
+    let skippedByVisitor = false;
     const finishIntro = () => {
       if (introDone) return;
       introDone = true;
-      flyFromFilm = !reduced && introVideo !== null && !root.hasAttribute("data-intro-still") && (introVideo.ended || introVideo.currentTime >= INTRO_S_BUILT_S);
-      try {
-        window.sessionStorage.setItem(INTRO_KEY, "seen");
-      } catch {
-        // Not remembered: the next visit in this tab plays it again. Harmless.
+      const built = introVideo !== null && !root.hasAttribute("data-intro-still") && (introVideo.ended || introVideo.currentTime >= INTRO_S_BUILT_S);
+      flyFromFilm = !reduced && built;
+      // SEEN MEANS SEEN. Only a film that got as far as the S, a skip the visitor
+      // chose, or the still that reduced motion asked for counts. A film that was
+      // too slow to start, failed or was refused autoplay does not: it gets
+      // another chance on the next load in this tab (owner, 10-08: he never saw it).
+      if (built || skippedByVisitor || reduced) {
+        try {
+          window.sessionStorage.setItem(INTRO_KEY, "seen");
+        } catch {
+          // Not remembered: the next visit in this tab plays it again. Harmless.
+        }
       }
       tryFinish();
     };
@@ -412,6 +420,7 @@ export function Landing({
       if (introDone) return;
       // A key that means "go on", or any press on the film itself.
       if (e instanceof KeyboardEvent && !["Escape", "Enter", " ", "ArrowDown", "PageDown"].includes(e.key)) return;
+      skippedByVisitor = true;
       finishIntro();
     };
     if (!introDone) {
@@ -587,6 +596,8 @@ export function Landing({
         <div className="landing-scrim-top absolute inset-x-0 top-0 h-[75%] bg-gradient-to-b from-[#0A0B11] via-[#0A0B11]/75 to-transparent" />
         <div className="absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-[#0A0B11] to-transparent" />
         <div className="landing-grain absolute inset-0 opacity-70 mix-blend-soft-light" />
+        {/* Over the scrims, so a card low in the gutter is not dimmed by the bottom fade. */}
+        <ExampleActivity />
       </div>
 
       {/* ── Nav ─────────────────────────────────────────────────────────── */}
