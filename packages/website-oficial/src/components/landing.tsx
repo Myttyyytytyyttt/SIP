@@ -925,7 +925,7 @@ export function Landing({
                   absolutes it replaced. */}
               <p className="landing-in landing-in-up mt-3 text-xs leading-relaxed text-white/45" style={{ animationDelay: "1.1s" }}>
                 Beta · Only you can manage your vault and withdraw whenever you wish. The team holds none of your keys or
-                assets, but can still update the SaverFi program.
+                assets.
               </p>
             </div>
           </div>

@@ -12,17 +12,21 @@ line is not.
 
 ## 2026-10-08
 
-*Partial: written at the owner's request, relayed by the session that built it, from the five
-commits up to `7160b30` (03:01 Lisbon).*
+*Partial: written at about 11:15 Lisbon from the commits up to `0fbbaa7` (07:56) and the live
+services at 10:14 UTC.*
+
+**Landing**
 
 A new landing, built overnight at the owner's request, one step after another; all of it is in
 production at [`/welcome`](https://sip-website-oficial.vercel.app/welcome).
 
 - **It opens on SaverFi's own logo** `c9194fd`. The green build of the S from the launch film
-  plays once per browser tab, then the S flies into the navigation bar and the page enters in
-  pieces — headline line by line, buttons one after another, the frame from below. It can be
-  skipped with a click or a key, and with reduced motion it is a still frame. It only counts as
-  seen if it really was: a slow or failed start no longer uses it up `7de9942`.
+  plays, then the S flies into the navigation bar and the page enters in pieces — headline line
+  by line, buttons one after another, the frame from below. It can be skipped with a click or a
+  key, and with reduced motion it is a still frame. It only counts as seen if it really was: a
+  slow or failed start no longer uses it up `7de9942`. At first it played once per browser tab;
+  by the morning it was remembered for five minutes per browser instead, so a quick reload is
+  fast and a later visit, or a return from the app, sees it again `0ad9718`.
 - **The frame shows the app itself**: an eight-second loop of the sample dashboard, ending on
   the same picture the visitor gets on scrolling in. The owner chose to re-seed the sample to
   look like the real product — a SPYx 60 / ANTHROPIC 40 basket, Volume at 1 %, a $10 threshold
@@ -50,11 +54,58 @@ production at [`/welcome`](https://sip-website-oficial.vercel.app/welcome).
   configuration no longer breaks the landing. The full login-then-pension path is tested only
   against the development stand-in for Privy; on production, Connect was checked as far as
   opening the real wallet dialog.
+- **Without a wallet, Live is the landing** `609d701`. The owner's decision: a visitor with no
+  wallet who asks for Live — `/?mode=live`, `/activity`, the Live button on the sample, or
+  Disconnect — lands on the landing at `/`, and the "Connect your pension key" card is gone.
+  With a wallet connected, Live goes straight into the pension and never passes through the
+  landing, even when the "already connected" cookie has expired. `/?mode=mock` is still the
+  sample, and `/welcome` never moves. Checked on production as a visitor; the connected path is
+  tested only against the development stand-in for Privy. At first the Disconnect inside the
+  wallets modal only signed out and left a visitor on the sample; at the owner's request it now
+  lands on the landing too `0e0bc48`.
+
+**Wallet import**
+
+- **Bring a wallet you already trade with** `981d427` `a79be6e`. The owner asked for it at
+  03:10, from the roadmap; by 05:32 "Import a wallet I already use" sat under Create on the
+  trading-wallets card and in the live panel's next step. The private key is pasted into a
+  masked field that never enters the page's state and is cleared on every refusal; the page
+  derives the address from the key itself and refuses a damaged one. Before the key goes
+  anywhere, the server reads the address on chain and refuses a key that owns a vault, holds a
+  role in the protocol, or is linked to another vault. Privy then imports it with the keeper's
+  seat and policy in the same call, the page reads back that the seat is there, and links it to
+  the vault the usual way. Imported rows can have SaverFi's permission removed again.
+- **The owner's decisions on it**: a wallet that already holds tokens other than SOL must have a
+  box ticked first, because selling them later counts as profit; no special warning for keys of
+  Telegram trading bots. The card no longer says the permission is "bounded to moving SOL into
+  your vault" — it now says what the policy allows: SaverFi program transactions only.
+- **First real import, linked on mainnet.** At 04:42 UTC a fourth wallet was linked to the
+  owner's vault ([`dXz3F1L3…`](https://solscan.io/tx/dXz3F1L3xP4F3aLC6hNwjf1zCC5XvCDGXbvXeu7XQE6zT4imAoN8AENyTEyE7v8G1C2upYV35EVto8RDvjjmwR4)),
+  and the keeper reports all four wallets signable through its Privy seat. Nothing has been
+  settled from it yet. It showed that Privy numbers an imported wallet 0, like the first created
+  one, so the two were both called "Trading wallet 1"; imported wallets are now named and
+  ordered on their own, and Create explains why it is disabled on an account whose only Privy
+  wallets are imported `ada9339`.
+- **An audit before calling it done** `01f1a6f` `0fbbaa7`: a multi-agent review confirmed 14
+  findings, none critical or high. The largest: the import check would read any address's whole
+  token list into memory, so a wallet with thousands of accounts could swell the server; the
+  list now has its own capped read and names at most eight holdings. The panel now also says
+  plainly that SOL coming back by anything other than a plain transfer — an unstake, a lending
+  or perps exit — counts as profit, and that once imported the wallet can also be used and
+  exported from the SaverFi account. One finding is left to the owner, since fixing it means
+  touching the keeper: a SOL deposit whose transaction also calls another program, such as an
+  exchange withdrawal with a memo, counts as profit for every wallet.
+- **An unanswered read is "unreadable", never "missing"** `b27f48f`. A chain read that came back
+  without a result used to look like a vault that does not exist, so the page could offer to
+  create a vault that may already be there. The same fix covers links, policies and balances.
+
+**Keeper**
+
+- **The doorbell rang again.** The new link at 04:42 UTC was its first event since the restart
+  of the 7th, and the profit keeper trusts it again. Its webhook sync still fails (323 times in a
+  row at 10:14 UTC), so with four wallets every sweep is still a full pass.
 
 ## 2026-10-07
-
-*Partial: written at about 11:15 Lisbon from the commits up to `368d791` (03:17) and the live
-services at 10:13 UTC.*
 
 The night shift after the merge: the global stats dashboard reached production with real
 numbers, and the Manage wallets screen was rebuilt. Six commits landed between 02:12 and 03:17
@@ -102,6 +153,10 @@ Lisbon, all on `main`.
 - **A fresh UI/UX audit** of production was run at the owner's request after the wallets modal
   shipped; one finding is that a shared link shows no picture on X or Telegram, because
   the site has no social image. Nothing of it is built yet.
+- **The new landing was started that evening.** At 22:53 Lisbon the owner described it — the
+  green logo from the launch film first, then the page's pieces arriving out of step — and asked
+  the launch-film session for two videos, and ruled that nothing would go to production until
+  both were integrated; it all landed after midnight and is under 2026-10-08.
 
 ## 2026-10-06
 

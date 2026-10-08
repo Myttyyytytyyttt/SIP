@@ -1,5 +1,21 @@
 {
+  "env": {
+    "PATH": "/Users/walch/.nvm/versions/node/v22.14.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  },
   "permissions": {
+    "allow": [
+      "Write(CHANGELOG.md)",
+      "Edit(CHANGELOG.md)",
+      "Write(README.md)",
+      "Edit(README.md)",
+      "Bash(node tools/daily-digest.mjs:*)",
+      "Bash(git fetch:*)",
+      "Bash(pnpm --dir packages/website-oficial exec vitest run:*)",
+      "Bash(git add CHANGELOG.md README.md)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(git pull --rebase)"
+    ],
     "deny": [
       "Read(~/sip-keys/**)",
       "Edit(~/sip-keys/**)",
