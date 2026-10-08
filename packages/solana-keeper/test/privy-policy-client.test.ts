@@ -22,6 +22,8 @@ interface Sent {
   readonly url: string;
   readonly method: string;
   readonly headers: Headers;
+  /** The JSON body as sent, or null for a request without one. */
+  readonly body: unknown;
 }
 
 /** A fetch that answers every request with `status` and `body`, and remembers what was asked. */
@@ -33,6 +35,7 @@ function answering(status: number, body: unknown): { readonly fetch: typeof glob
       url: request?.url ?? String(input),
       method: init?.method ?? request?.method ?? "GET",
       headers: new Headers(init?.headers ?? request?.headers),
+      body: typeof init?.body === "string" ? JSON.parse(init.body) : null,
     });
     return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   };
@@ -74,6 +77,24 @@ describe("createPrivyPolicyClient", () => {
       ["POST", "/v1/policies"],
     ]);
     expect(sent[1]!.headers.get("privy-idempotency-key")).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+
+  it("sends an update once, as a PATCH of the policy's name and rules signed with the admin key, and nothing else", async () => {
+    const { fetch, sent } = answering(504, { error: "gateway timeout" });
+    const policy = buildKeeperPolicy(SIP_PROGRAM_ID);
+    const { privateKey } = await generateP256KeyPair();
+
+    await expect(
+      createPrivyPolicyClient(credentials, { fetch }).updatePolicy("keeperPolicy000000000001", policy, new Secret(privateKey, "policyAdminKey")),
+    ).rejects.toMatchObject({ status: 504 });
+
+    expect(sent).toHaveLength(1);
+    expect([sent[0]!.method, new URL(sent[0]!.url).origin, new URL(sent[0]!.url).pathname]).toEqual(["PATCH", PRIVY_API_URL, "/v1/policies/keeperPolicy000000000001"]);
+    expect(sent[0]!.headers.get("privy-authorization-signature")).toMatch(/^[A-Za-z0-9+/]+=*$/);
+    // Only what update changes: no owner, no chain, and the key itself never leaves in the body.
+    expect(Object.keys(sent[0]!.body as object).sort()).toEqual(["name", "rules"]);
+    expect(sent[0]!.body).toEqual({ name: policy.name, rules: JSON.parse(JSON.stringify(policy.rules)) });
+    expect(JSON.stringify(sent[0]!.body)).not.toContain(privateKey);
   });
 });
 

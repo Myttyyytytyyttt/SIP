@@ -1,4 +1,4 @@
-// The flows behind bin/privy-policy.mts: print, create, check and verify.
+// The flows behind bin/privy-policy.mts: print, create, update, check, key and verify.
 //
 // THE PRIVY CALLS ARE BEHIND AN INTERFACE (PrivyPolicyClient, ProbeChain) so the
 // flows run against a fake in test/privy-policy-cli.test.ts with no network,
@@ -15,7 +15,7 @@
 // not, or Privy could not be read; 2 "you have to change something" — an
 // argument, a variable, a path — and nothing was sent anywhere.
 
-import { statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { Redactor, Secret, sharedRedactor, summarizeUpstreamError, type Logger } from "@sip/solana-log";
@@ -75,6 +75,8 @@ export interface PrivyPolicyClient {
   /** Reads a key quorum's registered PUBLIC keys. App credentials only: a GET takes no authorization signature. */
   getKeyQuorum(keyQuorumId: string): Promise<KeyQuorumLike>;
   createPolicy(policy: KeeperPolicy, ownerId: string): Promise<PolicyLike & { readonly id: string }>;
+  /** Replaces the policy's name and rules, signed with its owner's admin key. Its id, owner and chain stay. */
+  updatePolicy(policyId: string, policy: KeeperPolicy, adminKey: Secret): Promise<PolicyLike>;
   getPolicy(policyId: string): Promise<PolicyLike>;
   getWallet(walletId: string): Promise<WalletLike>;
   /** Signs as the wallet with the keeper signer's authorization key. */
@@ -106,6 +108,7 @@ export interface PrivyPolicyCliDeps {
 export const USAGE = [
   "privy-policy --print",
   "privy-policy create --admin-key-out <absolute path outside the repository, e.g. ~/sip-keys/privy-policy-admin.key>",
+  "privy-policy update --policy <policy id> --admin-key <absolute path of that policy's admin key file, e.g. ~/sip-keys/privy-policy-admin.key>",
   "privy-policy check --policy <policy id>",
   "privy-policy key",
   "privy-policy verify --wallet <privy wallet id> --policy <policy id>",
@@ -114,10 +117,11 @@ export const USAGE = [
 /** Below this, a probe's simulation will most likely fail on rent or fees and prove nothing. */
 export const MIN_PROBE_LAMPORTS = 1_000_000;
 
-type Command = "create" | "check" | "key" | "verify";
+type Command = "create" | "update" | "check" | "key" | "verify";
 
 const FLAGS: Readonly<Record<Command, readonly string[]>> = {
   create: ["--admin-key-out"],
+  update: ["--policy", "--admin-key"],
   check: ["--policy"],
   // Flagless on purpose: it asks about the environment the keeper runs under, so
   // taking either id as an argument would let it answer about a pairing that is
@@ -137,6 +141,8 @@ const PURPOSE: Readonly<Record<string, string>> = {
 
 const NEEDS: Readonly<Record<Command, readonly string[]>> = {
   create: ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET"],
+  // The admin key is read from its file (--admin-key), never from the environment.
+  update: ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET"],
   check: ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET"],
   // No RPC: the key is compared with the quorum, and neither is on a chain.
   key: ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET", "SIP_SOLANA_PRIVY_AUTHORIZATION_KEY", "SIP_SOLANA_PRIVY_SIGNER_ID"],
@@ -360,6 +366,8 @@ export async function runPrivyPolicyCli(argv: readonly string[], deps: PrivyPoli
     switch (parsed.kind) {
       case "create":
         return await create(parsed.flags.get("--admin-key-out")!, read.config, deps, { out, diag, redactor });
+      case "update":
+        return await update(parsed.flags.get("--policy")!, parsed.flags.get("--admin-key")!, read.config, deps, { out, diag, redactor });
       case "check":
         return await check(parsed.flags.get("--policy")!, read.config, deps, { out, diag, redactor });
       case "key":
@@ -405,8 +413,12 @@ export function mayHaveLanded(error: unknown): boolean {
  * what exists, what does not, and what cannot be known (mayHaveLanded), because
  * the next step depends on exactly that.
  */
+/** `~` and `~/…` as the shell would expand them; anything else unchanged. */
+const expandHome = (rawPath: string): string =>
+  rawPath === "~" ? homedir() : rawPath.startsWith("~/") ? join(homedir(), rawPath.slice(2)) : rawPath;
+
 async function create(rawPath: string, config: CommandEnv, deps: PrivyPolicyCliDeps, { out, diag, redactor }: Io): Promise<number> {
-  const path = rawPath === "~" ? homedir() : rawPath.startsWith("~/") ? join(homedir(), rawPath.slice(2)) : rawPath;
+  const path = expandHome(rawPath);
   if (!isAbsolute(path)) {
     diag.error("configuration refused", {
       command: "create",
@@ -503,6 +515,123 @@ async function create(rawPath: string, config: CommandEnv, deps: PrivyPolicyCliD
     return 1;
   }
   return 0;
+}
+
+// --- update ------------------------------------------------------------------------
+
+/**
+ * Rewrites a policy that already exists into the one this package builds,
+ * KEEPING ITS ID — so every seat that names it as its override is bound by the
+ * new rules at once, with no wallet re-seated and no variable changed.
+ *
+ * ONLY THE OWNER CAN, AND THIS IS THE OWNER'S COMMAND. Privy accepts the PATCH
+ * only when it is signed by the policy's owner quorum, whose key `create` wrote
+ * to a file on the owner's machine; it is read from that file, here and nowhere
+ * else, and never from the environment the keeper runs under.
+ *
+ * READ, WRITE, READ AGAIN. The stored policy is read first: one that already
+ * matches is left alone, and one with no owner, or owned by the keeper's own
+ * signer, is refused — `check` names both as broken, and rewriting its rules
+ * would leave that unfixed. Then the PATCH, then what Privy stored is read back
+ * and held to the same diff `check` uses. The exit code is that verdict.
+ */
+async function update(policyId: string, rawPath: string, config: CommandEnv, deps: PrivyPolicyCliDeps, { out, diag, redactor }: Io): Promise<number> {
+  const path = expandHome(rawPath);
+  if (!isAbsolute(path)) {
+    diag.error("configuration refused", {
+      command: "update",
+      problems: ["--admin-key must be an absolute path, e.g. ~/sip-keys/privy-policy-admin.key: a relative one resolves against packages/solana-keeper."],
+    });
+    return 2;
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? "unknown error";
+    diag.error("configuration refused", { command: "update", problems: [`could not read the admin key file ${path} (${code}).`] });
+    return 2;
+  }
+  // Registered before anything else can be written, in both spellings, so no line can ever carry it.
+  if (raw !== "") redactor.register(raw, "policyAdminKey");
+  const key = raw.trim();
+  if (key !== "") redactor.register(key, "policyAdminKey");
+  if (!isP256Pkcs8PrivateKey(key)) {
+    diag.error("configuration refused", {
+      command: "update",
+      problems: [`${path} does not hold a base64 PKCS8 P-256 private key, the shape create writes. Its contents are withheld.`],
+    });
+    return 2;
+  }
+  const adminKey = new Secret(key, "policyAdminKey");
+
+  const expected = buildKeeperPolicy(SIP_PROGRAM_ID);
+  const client = deps.client({ appId: config.appId, appSecret: config.appSecret });
+
+  let before: PolicyLike;
+  try {
+    before = await client.getPolicy(policyId);
+  } catch (error) {
+    diag.error("privy policy not read", { policyId, ...failureFields(error, redactor) });
+    return 1;
+  }
+  const was = diffPolicy(expected, before, { signerId: config.signerId });
+  if (was.ok) {
+    out.info("privy policy update", { policyId, verdict: "ALREADY_CURRENT", ownerId: was.ownerId, programs: allowedPrograms(expected) });
+    return 0;
+  }
+  if (was.ownershipProblems.length > 0) {
+    out.error("privy policy update", {
+      policyId,
+      verdict: !was.owned ? "UNOWNED" : "OWNED_BY_SIGNER",
+      ownerId: was.ownerId,
+      ownershipProblems: was.ownershipProblems,
+      next: "Nothing was changed. Rewriting this policy's rules would leave its ownership broken: make an owned one with create instead.",
+    });
+    return 1;
+  }
+  diag.info("privy policy before update", { policyId, ownerId: was.ownerId, differences: was.differences });
+
+  try {
+    await client.updatePolicy(policyId, expected, adminKey);
+  } catch (error) {
+    const fields = failureFields(error, redactor);
+    diag.error("privy policy not updated", {
+      policyId,
+      ...fields,
+      next: mayHaveLanded(error)
+        ? "No answer or a server error, so the update may have landed. Run check on this policy before anything else."
+        : fields.class === "AUTHORIZATION"
+          ? `Privy refused the signature: ${path} is not the admin key of this policy's owner, key quorum ${was.ownerId}. Nothing was changed.`
+          : "Privy refused the update and nothing was changed. Read detail.",
+    });
+    return 1;
+  }
+
+  // What Privy stored, read back, not what was sent.
+  let stored: PolicyLike;
+  try {
+    stored = await client.getPolicy(policyId);
+  } catch (error) {
+    diag.error("privy policy not read after update", {
+      policyId,
+      ...failureFields(error, redactor),
+      next: "Privy accepted the update. Run check on this policy to see what it stored.",
+    });
+    return 1;
+  }
+  const now = diffPolicy(expected, stored, { signerId: config.signerId });
+  const verdict = !now.identical ? "DIFFERENT" : now.ownerId !== was.ownerId ? "OWNER_CHANGED" : !now.ok ? "OWNERSHIP" : "OK";
+  out[verdict === "OK" ? "info" : "error"]("privy policy updated", {
+    policyId,
+    verdict,
+    ownerId: now.ownerId,
+    previousOwnerId: was.ownerId,
+    differences: now.differences,
+    ownershipProblems: now.ownershipProblems,
+    programs: allowedPrograms(expected),
+  });
+  return verdict === "OK" ? 0 : 1;
 }
 
 // --- check -------------------------------------------------------------------------

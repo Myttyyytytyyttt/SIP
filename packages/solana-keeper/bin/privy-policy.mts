@@ -1,12 +1,19 @@
 #!/usr/bin/env node
 // "¿El signer del keeper está acotado de verdad?" — la política de Privy que lo
-// acota: imprimirla, crearla, comprobarla y demostrar que rechaza lo que debe.
+// acota: imprimirla, crearla, ponerla al día, comprobarla y demostrar que rechaza
+// lo que debe.
 //
 //   pnpm --dir packages/solana-keeper privy-policy --print
 //   pnpm --dir packages/solana-keeper privy-policy create --admin-key-out ~/sip-keys/privy-policy-admin.key
+//   pnpm --dir packages/solana-keeper privy-policy update --policy <id de la política> --admin-key ~/sip-keys/privy-policy-admin.key
 //   pnpm --dir packages/solana-keeper privy-policy check --policy <id de la política>
 //   pnpm --dir packages/solana-keeper privy-policy key
 //   pnpm --dir packages/solana-keeper privy-policy verify --wallet <id de la wallet en Privy> --policy <id de la política>
+//
+// `update` reescribe una política que ya existe con las reglas de este paquete y
+// SIN CAMBIARLE EL ID: cada asiento que la nombra queda acotado por las reglas
+// nuevas a la vez, sin volver a sentar ninguna wallet. Firma con la llave de
+// administración que `create` escribió, leída de su archivo y nunca del entorno.
 //
 // `key` es la que se corre cuando Privy contesta 401 al firmar: dice si la clave
 // de autorización configurada pertenece de verdad al key quorum del keeper.

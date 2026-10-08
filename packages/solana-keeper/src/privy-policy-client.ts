@@ -22,8 +22,24 @@ import { randomUUID } from "node:crypto";
 import { Connection, PublicKey } from "@solana/web3.js";
 import type { Secret } from "@sip/solana-log";
 import type { PrivyPolicyClient, ProbeChain } from "./privy-policy-cli.js";
+import type { KeeperPolicy } from "./privy-policy.js";
 import { SOLANA_MAINNET_CAIP2, pinnedPrivyClient } from "./privy-signer.js";
 import { poolFetch } from "./rpc-pool.js";
+
+/** The rules as Privy's create and update bodies take them. One translation, so the two can never send different rules. */
+function ruleBodies(policy: KeeperPolicy) {
+  return policy.rules.map((rule) => ({
+    name: rule.name,
+    method: rule.method,
+    action: rule.action,
+    conditions: rule.conditions.map((condition) => ({
+      field_source: condition.field_source,
+      field: condition.field,
+      operator: condition.operator,
+      value: [...condition.value],
+    })),
+  }));
+}
 
 export interface PrivyPolicyClientOptions {
   /** Tests only: a fetch that answers in-process, so the transport settings above are checked with no network. */
@@ -71,19 +87,17 @@ export function createPrivyPolicyClient(
         version: policy.version,
         name: policy.name,
         chain_type: policy.chain_type,
-        rules: policy.rules.map((rule) => ({
-          name: rule.name,
-          method: rule.method,
-          action: rule.action,
-          conditions: rule.conditions.map((condition) => ({
-            field_source: condition.field_source,
-            field: condition.field,
-            operator: condition.operator,
-            value: [...condition.value],
-          })),
-        })),
+        rules: ruleBodies(policy),
         owner_id: ownerId,
       });
+    },
+
+    async updatePolicy(policyId, policy, adminKey) {
+      // SIGNED BY THE POLICY'S OWNER. The SDK signs the PATCH with the keys in
+      // authorization_context (prepareRequest), and Privy accepts it only from
+      // the owner quorum. No idempotency key: the same PATCH sent twice leaves
+      // the same policy, and this client sends it once.
+      return privy.policies().update(policyId, { name: policy.name, rules: ruleBodies(policy), authorization_context: authorization(adminKey) });
     },
 
     async getPolicy(policyId) {

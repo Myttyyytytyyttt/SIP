@@ -38,6 +38,8 @@ afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 /** Throwaway: generated per run, registered nowhere, never used against Privy. */
 const signerPair = await generateP256KeyPair();
+/** The admin key `update` reads from its file. Throwaway, like the signer's. */
+const adminPair = await generateP256KeyPair();
 const APP_ID = "sipprivyapp0000000000000001";
 const APP_SECRET = "privy-app-secret-NeverPrinted-0005";
 const AUTH_KEY = `wallet-auth:${signerPair.privateKey}`;
@@ -80,6 +82,7 @@ interface Behaviour {
   readonly createKeyQuorum?: () => Promise<{ id: string }>;
   readonly getKeyQuorum?: () => Promise<KeyQuorumLike>;
   readonly createPolicy?: (policy: KeeperPolicy, ownerId: string) => Promise<PolicyLike & { id: string }>;
+  readonly updatePolicy?: (policy: KeeperPolicy) => Promise<PolicyLike>;
   readonly getPolicy?: () => Promise<PolicyLike>;
   readonly getWallet?: () => Promise<WalletLike>;
   readonly signMessage?: () => Promise<{ signature: string }>;
@@ -92,6 +95,7 @@ interface Recorded {
   readonly quorumsRead: string[];
   readonly quorums: { publicKey: string; displayName: string }[];
   readonly policies: { policy: KeeperPolicy; ownerId: string }[];
+  readonly updates: { policyId: string; policy: KeeperPolicy; adminKey: string }[];
   readonly messages: Uint8Array[];
   readonly transactions: Transaction[];
   readonly keys: string[];
@@ -111,6 +115,10 @@ function fakePrivy(behaviour: Behaviour, recorded: Recorded): PrivyPolicyClient 
     async createPolicy(policy, ownerId) {
       recorded.policies.push({ policy, ownerId });
       return behaviour.createPolicy ? behaviour.createPolicy(policy, ownerId) : storedPolicy(policy, { owner_id: ownerId });
+    },
+    async updatePolicy(policyId, policy, adminKey) {
+      recorded.updates.push({ policyId, policy, adminKey: adminKey.reveal() });
+      return behaviour.updatePolicy ? behaviour.updatePolicy(policy) : storedPolicy(policy);
     },
     async getPolicy() {
       return behaviour.getPolicy ? behaviour.getPolicy() : storedPolicy(buildKeeperPolicy(SIP_PROGRAM_ID));
@@ -153,7 +161,7 @@ async function run(
 ): Promise<Run> {
   const out: string[] = [];
   const err: string[] = [];
-  const recorded: Recorded = { credentials: [], quorumsRead: [], quorums: [], policies: [], messages: [], transactions: [], keys: [] };
+  const recorded: Recorded = { credentials: [], quorumsRead: [], quorums: [], policies: [], updates: [], messages: [], transactions: [], keys: [] };
   let clientBuilt = 0;
   let chainBuilt = 0;
   const code = await runPrivyPolicyCli(argv, {
@@ -323,6 +331,126 @@ describe("create", () => {
     }
     expect(existsSync(join(repo, "packages", "admin.key"))).toBe(false);
     expect(readFileSync(existing, "utf8")).toBe("keep me");
+  });
+});
+
+describe("update", () => {
+  const policy = buildKeeperPolicy(SIP_PROGRAM_ID);
+  const withSigner = { ...privyEnv, SIP_SOLANA_PRIVY_SIGNER_ID: SIGNER_ID };
+  const adminKeyFile = join(keys, "update-admin.key");
+  writeFileSync(adminKeyFile, `${adminPair.privateKey}\n`, { mode: 0o600 });
+  const argv = ["update", "--policy", POLICY_ID, "--admin-key", adminKeyFile];
+
+  /** What Privy stores before the update: the built policy, plus one more program in the ALLOW rule. */
+  const wider = (over: Partial<PolicyLike> = {}): PolicyLike & { id: string } => {
+    const stored = storedPolicy(policy, over) as unknown as { rules: { action: string; conditions: { value: unknown }[] }[] };
+    const allow = stored.rules.find((rule) => rule.action === "ALLOW")!;
+    allow.conditions[0]!.value = [...[allow.conditions[0]!.value].flat(), Keypair.generate().publicKey.toBase58()];
+    return stored as unknown as PolicyLike & { id: string };
+  };
+
+  /** A getPolicy that answers `first` once, then `then`. */
+  const reads = (first: PolicyLike, then: PolicyLike): (() => Promise<PolicyLike>) => {
+    let calls = 0;
+    return async () => ((calls += 1) === 1 ? first : then);
+  };
+
+  it("reads, sends the built policy signed with the file's key, reads back, and exits 0 when Privy stored it", async () => {
+    const result = await run(argv, { env: withSigner, privy: { getPolicy: reads(wider(), storedPolicy(policy)) } });
+
+    expect(result.code).toBe(0);
+    expect(result.recorded.updates).toHaveLength(1);
+    expect(result.recorded.updates[0]!.policyId).toBe(POLICY_ID);
+    expect(JSON.stringify(result.recorded.updates[0]!.policy)).toBe(JSON.stringify(policy));
+    // The file's trailing newline is not part of the key.
+    expect(result.recorded.updates[0]!.adminKey).toBe(adminPair.privateKey);
+    expect(result.stdout).toHaveLength(1);
+    expect(result.stdout[0]).toMatchObject({ event: "privy policy updated", verdict: "OK", ownerId: ADMIN_QUORUM_ID, previousOwnerId: ADMIN_QUORUM_ID, differences: [] });
+    const before = result.stderr.find((line) => line["event"] === "privy policy before update")!;
+    expect(JSON.stringify(before["differences"])).toContain("adds [");
+    expect(result.text).not.toContain(adminPair.privateKey);
+    expect(result.recorded.credentials.map((credentials) => [credentials.appId, credentials.appSecret.reveal()])).toEqual([[APP_ID, APP_SECRET]]);
+  });
+
+  it("leaves a policy that already matches alone", async () => {
+    const result = await run(argv, { env: withSigner });
+    expect(result.code).toBe(0);
+    expect(result.recorded.updates).toEqual([]);
+    expect(result.stdout[0]).toMatchObject({ event: "privy policy update", verdict: "ALREADY_CURRENT" });
+  });
+
+  it("refuses to rewrite a policy with no owner, or owned by the keeper's own signer, and changes nothing", async () => {
+    for (const [owner, verdict] of [
+      [null, "UNOWNED"],
+      [SIGNER_ID, "OWNED_BY_SIGNER"],
+    ] as const) {
+      const result = await run(argv, { env: withSigner, privy: { getPolicy: async () => wider({ owner_id: owner }) } });
+      expect(result.code, verdict).toBe(1);
+      expect(result.recorded.updates, verdict).toEqual([]);
+      expect(result.stdout[0], verdict).toMatchObject({ event: "privy policy update", verdict });
+    }
+  });
+
+  it("exits 1 when what Privy stored is not the built policy, or no longer has the same owner", async () => {
+    const appended = { ...wider(), rules: [...wider().rules, ...storedPolicy(policy).rules] };
+    for (const [after, verdict] of [
+      [appended, "DIFFERENT"],
+      [storedPolicy(policy, { owner_id: "someOtherQuorum000000001" }), "OWNER_CHANGED"],
+    ] as const) {
+      const result = await run(argv, { env: withSigner, privy: { getPolicy: reads(wider(), after) } });
+      expect(result.code, verdict).toBe(1);
+      expect(result.recorded.updates, verdict).toHaveLength(1);
+      expect(result.stdout[0], verdict).toMatchObject({ event: "privy policy updated", verdict });
+    }
+  });
+
+  it("says whose key Privy wanted when it refuses the signature, and what to do when the answer is lost", async () => {
+    const refused = await run(argv, {
+      env: withSigner,
+      privy: {
+        getPolicy: async () => wider(),
+        updatePolicy: async () => Promise.reject(new AuthenticationError(401, { error: "No valid authorization signatures were provided." }, undefined, headers)),
+      },
+    });
+    expect(refused.code).toBe(1);
+    const line = refused.stderr.find((entry) => entry["event"] === "privy policy not updated")!;
+    expect(line).toMatchObject({ class: "AUTHORIZATION", status: 401 });
+    expect(String(line["next"])).toContain(`key quorum ${ADMIN_QUORUM_ID}`);
+
+    const lost = await run(argv, {
+      env: withSigner,
+      privy: {
+        getPolicy: async () => wider(),
+        updatePolicy: async () => Promise.reject(new InternalServerError(504, { error: "gateway timeout" }, undefined, headers)),
+      },
+    });
+    expect(lost.code).toBe(1);
+    expect(String(lost.stderr.find((entry) => entry["event"] === "privy policy not updated")!["next"])).toContain("may have landed");
+  });
+
+  it("refuses a relative path, a missing file and a file that is not a key before asking Privy anything, quoting none of it", async () => {
+    const notAKey = join(keys, "not-a-key.key");
+    writeFileSync(notAKey, "AdminFileContentsNeverPrinted0011", { mode: 0o600 });
+    for (const path of ["admin.key", join(keys, "does-not-exist.key"), notAKey]) {
+      const result = await run(["update", "--policy", POLICY_ID, "--admin-key", path], { env: withSigner });
+      expect(result.code, path).toBe(2);
+      expect([result.clientBuilt, result.stdout], path).toEqual([0, []]);
+      expect(result.stderr[0], path).toMatchObject({ event: "configuration refused", command: "update" });
+      expect(result.text, path).not.toContain("AdminFileContentsNeverPrinted0011");
+    }
+  });
+
+  it("never prints the admin key, even when Privy's answer quotes it", async () => {
+    const result = await run(argv, {
+      env: withSigner,
+      privy: {
+        getPolicy: async () => wider(),
+        updatePolicy: async () => Promise.reject(new BadRequestError(400, { error: `leaked ${adminPair.privateKey}` }, undefined, headers)),
+      },
+    });
+    expect(result.code).toBe(1);
+    expect(result.text).not.toContain(adminPair.privateKey);
+    expect(result.text).toContain("<redacted:policyAdminKey>");
   });
 });
 
@@ -645,6 +773,7 @@ describe("refusals", () => {
     for (const [argv, missing] of [
       [["create", "--admin-key-out", join(keys, "never.key")], ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET"]],
       [["check", "--policy", POLICY_ID], ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET"]],
+      [["update", "--policy", POLICY_ID, "--admin-key", join(keys, "never-read.key")], ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET"]],
       [
         ["verify", "--wallet", WALLET_ID, "--policy", POLICY_ID],
         ["SIP_SOLANA_PRIVY_APP_ID", "SIP_SOLANA_PRIVY_APP_SECRET", "SIP_SOLANA_PRIVY_AUTHORIZATION_KEY", "SIP_SOLANA_PRIVY_SIGNER_ID", "SIP_SOLANA_RPC_URLS"],
@@ -699,7 +828,7 @@ describe("refusals", () => {
   });
 
   it("refuses unknown commands, unknown or repeated flags, and missing values", async () => {
-    for (const argv of [[], ["delete"], ["check"], ["check", "--policy"], ["check", "--policy", POLICY_ID, "--wallet", WALLET_ID], ["check", "--policy", "a", "--policy", "b"], ["check", "--policy", "has spaces"]]) {
+    for (const argv of [[], ["delete"], ["check"], ["check", "--policy"], ["update", "--policy", POLICY_ID], ["update", "--admin-key", "/k"], ["check", "--policy", POLICY_ID, "--wallet", WALLET_ID], ["check", "--policy", "a", "--policy", "b"], ["check", "--policy", "has spaces"]]) {
       const result = await run(argv, { env: privyEnv });
       expect(result.code, argv.join(" ")).toBe(2);
       expect(events(result.stderr)).toEqual(["arguments refused"]);
