@@ -719,16 +719,15 @@ export function Landing({
                 <span className="tracking-wide">A pension that builds itself, on Solana</span>
               </p>
               <p className="landing-copy-lede text-[15px] leading-relaxed text-white/70 sm:text-base">
-                SaverFi puts a slice of your trading — 1% of its volume or 20% of its realized profit, yours to set — into a
-                pension of your own. Trade wherever you already trade — GMGN, Axiom, your own router — and it grows on
-                its own.
+                Trade as usual and grow your own onchain pension. Each trade automatically puts a share of its volume (or
+                of its profit) into a pension only you control.
               </p>
               {/* True of the program today, and to be replaced by the new truth
                   when its upgrade authority moves behind a delay — not by the
                   absolutes it replaced. */}
               <p className="landing-in landing-in-up mt-3 text-xs leading-relaxed text-white/45" style={{ animationDelay: "1.1s" }}>
-                Beta. The team has no key to your pension, but the SaverFi program is upgradeable by its upgrade authority —
-                today a single team key with no timelock.
+                Beta · Only you can manage your vault and withdraw whenever you wish. The team holds none of your keys or
+                assets, but can still update the SaverFi program.
               </p>
             </div>
           </div>

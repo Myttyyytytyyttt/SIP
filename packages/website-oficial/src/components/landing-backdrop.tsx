@@ -27,6 +27,31 @@ const TILE_H = (TILE_W * 1488) / 1272;
 const hLines = MARK_H_LINES.map((y) => (y / 1488) * TILE_H);
 const vLines = MARK_V_LINES.map((x) => (x / 1272) * TILE_W);
 
+/** The S's seven pieces, vectorised in launch-video (src/components/Logo.tsx), on its 1272×1488 grid. */
+const MARK_W = 1272;
+const MARK_H = 1488;
+const MARK_PIECES: readonly (readonly (readonly [number, number])[])[] = [
+  [[275, 0], [998, 0], [998, 271], [275, 271]],
+  [[998, 0], [1272, 271], [1272, 497], [998, 497]],
+  [[0, 271], [275, 271], [275, 607], [0, 607]],
+  [[0, 607], [998, 607], [1272, 880], [275, 880]],
+  [[998, 880], [1272, 880], [1272, 1219], [998, 1219]],
+  [[0, 989], [275, 989], [275, 1219], [0, 1219]],
+  [[0, 1219], [998, 1219], [998, 1488], [275, 1488]],
+];
+
+/**
+ * The marks that drift beside the headline: the basket's two assets and what
+ * savings arrive as. Nearer ones are larger, sharper and move more with the
+ * scroll (--depth); farther ones are small, dim and soft.
+ */
+const FLOATS = [
+  { src: "/stocks/SPYx.png", x: "52%", y: "15%", size: 34, opacity: 0.55, blur: 0, drift: 9, depth: 1 },
+  { src: "/stocks/ANTHROPIC.png", x: "61%", y: "27%", size: 26, opacity: 0.4, blur: 1.2, drift: 11, depth: 0.7 },
+  { src: "/stocks/SOL.png", x: "45%", y: "29%", size: 18, opacity: 0.3, blur: 2, drift: 13, depth: 0.45 },
+  { src: "/stocks/USDC.png", x: "66%", y: "10%", size: 16, opacity: 0.28, blur: 2.4, drift: 12, depth: 0.35 },
+] as const;
+
 /** A light every this often, on a line picked in turn: calm, one at a time. */
 const PULSE_EVERY_MS = 1700;
 const PULSE_MS = 2600;
@@ -100,9 +125,27 @@ export function LandingBackdrop() {
         </defs>
         <rect width="100%" height="100%" fill="url(#sf-grid-tile)" />
       </svg>
+      {/* The S itself, enormous and faint, behind the frame: the intro's S leaves its shadow on the page. */}
+      <svg className="sf-giant-s" viewBox={`0 0 ${MARK_W} ${MARK_H}`} preserveAspectRatio="xMidYMid meet">
+        {MARK_PIECES.map((piece, i) => (
+          <path key={i} d={`M${piece.map(([x, y]) => `${x} ${y}`).join(" L")} Z`} vectorEffect="non-scaling-stroke" />
+        ))}
+      </svg>
       {/* The S's bloom, behind the frame. */}
       <div className="sf-halo" />
       <div ref={pulses} className="sf-pulses" />
+      {/* What the pension buys and what it is paid in, drifting at different depths in the space beside the headline. */}
+      <div className="sf-floats">
+        {FLOATS.map((f) => (
+          <img
+            key={f.src}
+            className="sf-float"
+            src={f.src}
+            alt=""
+            style={{ left: f.x, top: f.y, width: f.size, height: f.size, opacity: f.opacity, filter: f.blur ? `blur(${f.blur}px)` : undefined, animationDuration: `${f.drift}s`, ["--depth" as string]: f.depth }}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -112,18 +155,18 @@ export function LandingBackdrop() {
  * are no users yet). Small glass cards in the gutters beside the frame, one
  * every few seconds: a slice put aside from a trade, a pile invested.
  *
- * EVERY CARD SAYS "Example". The addresses and amounts are made up, so each
- * card is labelled as the frame and the sample are ("Example — nobody's
- * pension"): the page may look alive, but it never tells a visitor that strangers
- * are saving here right now. Replace EXAMPLES with the chain's own recent
- * settlements and buys once there are enough of them, and drop the tag then.
+ * WHAT A TRADE DOES, NOT WHO DID IT (owner, 10-08: no "Example" tag). The
+ * amounts are made up, so a card names no one and no moment: no address, no
+ * "just now". It shows what one trade puts aside and what a pile buys, the way
+ * the frame shows "Example — nobody's pension" — never that strangers are saving
+ * here right now. Once there is real activity, show the chain's own recent
+ * settlements and buys instead, with their addresses.
  *
  * Only where the gutters can hold a card (they are measured beside the frame at
  * every card), only once the page has arrived, never while the scroll is taking
  * the frame into the app, never while the tab is hidden, never under reduced motion.
  */
 interface ExampleEvent {
-  readonly who: string;
   readonly kind: "saved" | "invested";
   readonly usd: number;
   readonly token: string;
@@ -131,26 +174,46 @@ interface ExampleEvent {
   readonly trade?: { readonly side: "buy" | "sell"; readonly usd: number };
 }
 
-/** Made-up addresses on purpose; the traded tokens and the basket are the sample's (src/mocks/data.ts). */
+/** The traded tokens and the basket are the sample's (src/mocks/data.ts). */
 const EXAMPLES: readonly ExampleEvent[] = [
-  { who: "7xKp…3fQa", kind: "saved", usd: 16.67, token: "CASHCAT", trade: { side: "sell", usd: 1667.22 } },
-  { who: "Fq2M…9LbR", kind: "invested", usd: 25.53, token: "SPYx" },
-  { who: "3nVw…KtX8", kind: "saved", usd: 8.4, token: "OPENAI", trade: { side: "buy", usd: 840.1 } },
-  { who: "Hd7e…pQ2c", kind: "saved", usd: 20.35, token: "pBTC3x", trade: { side: "buy", usd: 2035.46 } },
-  { who: "9aRt…mW4z", kind: "invested", usd: 17.02, token: "ANTHROPIC" },
-  { who: "Bq1L…7sUe", kind: "saved", usd: 3.67, token: "SPACEX", trade: { side: "sell", usd: 367.21 } },
-  { who: "5mZc…Yh8n", kind: "saved", usd: 12.9, token: "ANTHROPIC", trade: { side: "sell", usd: 1290 } },
-  { who: "Ku4P…2dVx", kind: "invested", usd: 10, token: "SPYx" },
-  { who: "Ew8N…r5Jk", kind: "saved", usd: 6.39, token: "OPENAI", trade: { side: "buy", usd: 638.96 } },
-  { who: "2pGs…Cz7m", kind: "saved", usd: 27.34, token: "CASHCAT", trade: { side: "sell", usd: 2734.4 } },
-  { who: "Lr6T…8vNq", kind: "invested", usd: 14.25, token: "ANTHROPIC" },
-  { who: "8bYd…Wa3t", kind: "saved", usd: 9.15, token: "SPYx", trade: { side: "sell", usd: 914.79 } },
+  { kind: "saved", usd: 16.67, token: "CASHCAT", trade: { side: "sell", usd: 1667.22 } },
+  { kind: "invested", usd: 25.53, token: "SPYx" },
+  { kind: "saved", usd: 8.4, token: "OPENAI", trade: { side: "buy", usd: 840.1 } },
+  { kind: "saved", usd: 20.35, token: "pBTC3x", trade: { side: "buy", usd: 2035.46 } },
+  { kind: "invested", usd: 17.02, token: "ANTHROPIC" },
+  { kind: "saved", usd: 3.67, token: "SPACEX", trade: { side: "sell", usd: 367.21 } },
+  { kind: "saved", usd: 12.9, token: "ANTHROPIC", trade: { side: "sell", usd: 1290 } },
+  { kind: "invested", usd: 10, token: "SPYx" },
+  { kind: "saved", usd: 6.39, token: "OPENAI", trade: { side: "buy", usd: 638.96 } },
+  { kind: "saved", usd: 27.34, token: "CASHCAT", trade: { side: "sell", usd: 2734.4 } },
+  { kind: "invested", usd: 14.25, token: "ANTHROPIC" },
+  { kind: "saved", usd: 9.15, token: "SPYx", trade: { side: "sell", usd: 914.79 } },
 ];
 
-/** A card every this often; it stays CARD_MS. At most two show at once. */
+/** A card every this often, alternating sides; it stays CARD_MS, so a side never holds two. */
 const CARD_EVERY_MS = 2600;
 const CARD_MS = 4200;
 const CARD_W = 236;
+/** A beam's light takes this long to reach the frame; the card shows as it arrives. */
+const BEAM_MS = 700;
+/** Below this the gutters cannot hold a terminal and its beam, or a card: none of this shows. */
+const MIN_GUTTER = 250;
+const TERMINAL_W = 150;
+const EDGE = 24;
+
+/**
+ * THE TERMINALS (owner, 10-08, from the launch film): where the trading happens.
+ * A SaverFi wallet trades in any of them; a beam of light carries the slice from
+ * the terminal to the frame — the vault — and the card says what it was.
+ * `row` is the card's height in the frame, as a share of it.
+ */
+const TERMINALS = [
+  { name: "Axiom", logo: "/landing/terminals/axiom.png", side: "left", row: 0.06 },
+  { name: "GMGN", logo: "/landing/terminals/gmgn.png", side: "right", row: 0.12 },
+  { name: "Photon", logo: "/landing/terminals/photon.png", side: "left", row: 0.74 },
+] as const;
+/** Where each side's card shows, as a share of the frame's height: between that side's terminals. */
+const CARD_ROW = { left: 0.36, right: 0.44 } as const;
 
 function card(event: ExampleEvent): HTMLElement {
   const el = document.createElement("div");
@@ -166,65 +229,135 @@ function card(event: ExampleEvent): HTMLElement {
   const title = document.createElement("span");
   title.className = "sf-toast-title";
   title.textContent = event.kind === "saved" ? `+${usd(event.usd)} put aside` : `Invested ${usd(event.usd)}`;
-  const tag = document.createElement("span");
-  tag.className = "sf-toast-tag";
-  tag.textContent = "Example";
-  top.append(title, tag);
+  top.append(title);
   const sub = document.createElement("div");
   sub.className = "sf-toast-sub";
   sub.textContent = event.kind === "saved" && event.trade !== undefined ? `1% of a ${usd(event.trade.usd)} ${event.token} ${event.trade.side}` : `in ${event.token}, from the pension's pile`;
-  const who = document.createElement("div");
-  who.className = "sf-toast-who";
-  who.textContent = event.who;
-  body.append(top, sub, who);
+  body.append(top, sub);
   el.append(logo, body);
   return el;
 }
 
 export function ExampleActivity() {
   const layer = useRef<HTMLDivElement>(null);
+  const terminals = useRef<(HTMLDivElement | null)[]>([]);
+  const beams = useRef<(HTMLDivElement | null)[]>([]);
+  const cards = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const el = layer.current;
+    const cardLayer = cards.current;
     const root = el?.closest(".landing-root");
-    if (!el || !root) return;
+    if (!el || !cardLayer || !root) return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    let n = 0;
-    let lastSide = 1;
-    const spawn = () => {
-      if (document.hidden || !root.hasAttribute("data-loaded") || root.hasAttribute("data-zooming")) return;
-      if (el.childElementCount >= 2) return;
+
+    // THE PLACES, measured from the frame: the terminals at the outer edge of each
+    // gutter, a beam from each to the frame's side, the cards between them.
+    let frameRect: DOMRect | null = null;
+    const layout = (): boolean => {
       const frame = root.querySelector(".landing-box");
-      if (!frame) return;
+      if (!frame) return false;
       const r = frame.getBoundingClientRect();
       const vw = window.innerWidth;
-      const left = r.left;
-      const right = vw - r.right;
-      // Alternate the sides; use one only if a card fits there with a margin.
-      const side = lastSide === 1 ? 0 : 1;
-      const room = side === 0 ? left : right;
-      if (room < CARD_W + 32) return;
-      lastSide = side;
+      const fits = r.left >= MIN_GUTTER && vw - r.right >= MIN_GUTTER;
+      el.toggleAttribute("data-placed", fits);
+      if (!fits) return false;
+      frameRect = r;
+      TERMINALS.forEach((t, i) => {
+        const node = terminals.current[i];
+        const beam = beams.current[i];
+        if (!node || !beam) return;
+        const left = t.side === "left" ? EDGE : vw - EDGE - TERMINAL_W;
+        const top = r.top + r.height * t.row;
+        node.style.left = `${left}px`;
+        node.style.top = `${top}px`;
+        // From the terminal's inner edge to the frame's side, at the terminal's middle.
+        const from = t.side === "left" ? left + TERMINAL_W : r.right + 6;
+        const to = t.side === "left" ? r.left - 6 : left;
+        beam.style.left = `${Math.min(from, to)}px`;
+        beam.style.width = `${Math.abs(to - from)}px`;
+        beam.style.top = `${top + 23}px`;
+      });
+      return true;
+    };
+
+    let n = 0;
+    let side: "left" | "right" = "right";
+    const lastTerminal = { left: 2, right: 1 };
+    const timers: number[] = [];
+    const spawn = () => {
+      if (document.hidden || !root.hasAttribute("data-loaded") || root.hasAttribute("data-zooming")) return;
+      if (!layout() || frameRect === null) return;
+      const r = frameRect;
+      side = side === "left" ? "right" : "left";
       const event = EXAMPLES[n % EXAMPLES.length]!;
       n += 1;
-      const node = card(event);
-      const x = side === 0 ? (left - CARD_W) / 2 : r.right + (right - CARD_W) / 2;
-      // Down the frame's height, a different row each time, clear of its title strip and the bottom fade.
-      const rows = [0.12, 0.42, 0.27, 0.57, 0.2, 0.5];
-      const y = r.top + 40 + (r.height - 140) * rows[n % rows.length]!;
-      node.style.left = `${Math.round(x)}px`;
-      node.style.top = `${Math.round(y)}px`;
-      node.style.width = `${CARD_W}px`;
-      node.style.animationDuration = `${CARD_MS}ms`;
-      node.addEventListener("animationend", () => node.remove(), { once: true });
-      el.appendChild(node);
+      const show = () => {
+        const node = card(event);
+        const vw = window.innerWidth;
+        const gutter = side === "left" ? r.left : vw - r.right;
+        const x = side === "left" ? (gutter - CARD_W) / 2 : r.right + (gutter - CARD_W) / 2;
+        node.style.left = `${Math.round(x)}px`;
+        node.style.top = `${Math.round(r.top + r.height * CARD_ROW[side])}px`;
+        node.style.width = `${CARD_W}px`;
+        node.style.animationDuration = `${CARD_MS}ms`;
+        node.addEventListener("animationend", () => node.remove(), { once: true });
+        cardLayer.appendChild(node);
+      };
+      if (event.kind === "invested") {
+        // Bought from the pile in the vault: no terminal, no beam.
+        show();
+        return;
+      }
+      // A slice from a trade: the side's terminals take turns sending it.
+      const options = TERMINALS.map((t, i) => ({ t, i })).filter(({ t }) => t.side === side);
+      const pick = options.find(({ i }) => i !== lastTerminal[side]) ?? options[0];
+      if (!pick) return show();
+      lastTerminal[side] = pick.i;
+      const beam = beams.current[pick.i];
+      const terminal = terminals.current[pick.i];
+      terminal?.classList.remove("sf-terminal-hot");
+      if (terminal) void terminal.offsetWidth;
+      terminal?.classList.add("sf-terminal-hot");
+      if (beam) {
+        const light = document.createElement("span");
+        light.className = "sf-beam-light";
+        light.style.animationDuration = `${BEAM_MS}ms`;
+        if (side === "right") light.style.setProperty("--dir", "-1");
+        light.addEventListener("animationend", () => light.remove(), { once: true });
+        beam.appendChild(light);
+      }
+      timers.push(window.setTimeout(show, BEAM_MS - 120));
     };
+
+    const onResize = () => layout();
+    window.addEventListener("resize", onResize);
+    const first = window.setTimeout(() => layout(), 1800);
     const timer = window.setInterval(spawn, CARD_EVERY_MS);
     return () => {
+      window.removeEventListener("resize", onResize);
+      window.clearTimeout(first);
       window.clearInterval(timer);
-      el.replaceChildren();
+      for (const t of timers) window.clearTimeout(t);
+      cardLayer.replaceChildren();
     };
   }, []);
 
-  return <div ref={layer} className="sf-toasts" aria-hidden />;
+  return (
+    <div ref={layer} className="sf-toasts" aria-hidden>
+      {TERMINALS.map((t, i) => (
+        <div key={`beam-${t.name}`} ref={(node) => { beams.current[i] = node; }} className="sf-beam" />
+      ))}
+      {TERMINALS.map((t, i) => (
+        <div key={t.name} ref={(node) => { terminals.current[i] = node; }} className="sf-terminal" style={{ width: TERMINAL_W }}>
+          <img src={t.logo} alt="" className="sf-terminal-logo" />
+          <span className="sf-terminal-text">
+            <span className="sf-terminal-name">{t.name}</span>
+            <span className="sf-terminal-sub">SaverFi wallet</span>
+          </span>
+        </div>
+      ))}
+      <div ref={cards} />
+    </div>
+  );
 }

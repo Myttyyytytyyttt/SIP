@@ -532,7 +532,7 @@
 }
 
 /* Example activity: glass cards in the gutters beside the frame
-   (ExampleActivity in landing-backdrop.tsx). Every one is tagged "Example". */
+   (ExampleActivity in landing-backdrop.tsx): what a trade does, never who did it. */
 .sf-toasts {
   position: absolute;
   inset: 0;
@@ -562,23 +562,6 @@
 .sf-toast-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sf-toast-saved .sf-toast-title { color: #34d399; }
 .sf-toast-invested .sf-toast-title { color: #60a5fa; }
-.sf-toast-tag {
-  margin-left: auto;
-  flex: none;
-  border-radius: 9999px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  padding: 0 6px;
-  font-size: 9.5px;
-  line-height: 15px;
-  letter-spacing: 0.03em;
-  color: rgba(255, 255, 255, 0.5);
-}
-.sf-toast-who {
-  margin-top: 1px;
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 10.5px;
-  color: rgba(255, 255, 255, 0.38);
-}
 .sf-toast-sub {
   margin-top: 2px;
   font-size: 11px;
@@ -595,8 +578,90 @@
   100% { opacity: 0; transform: translateY(-8px) scale(0.98); }
 }
 
+/* The S, enormous and faint behind the frame: outlines and a whisper of emerald. */
+.sf-giant-s {
+  position: absolute;
+  left: 50%;
+  top: 62%;
+  height: 165vh;
+  width: calc(165vh * 1272 / 1488);
+  transform: translate(-50%, -50%);
+  overflow: visible;
+}
+.sf-giant-s path {
+  fill: rgba(16, 185, 129, 0.025);
+  stroke: rgba(255, 255, 255, 0.07);
+  stroke-width: 1;
+}
+/* The drifting marks: hidden where the headline has no room beside it. */
+.sf-floats { position: absolute; inset: 0; display: none; }
+@media (min-width: 1024px) and (min-height: 600px) and (min-aspect-ratio: 5/4) {
+  .sf-floats { display: block; }
+}
+.sf-float {
+  position: absolute;
+  border-radius: 9999px;
+  translate: 0 calc(var(--p, 0) * -120px * var(--depth, 1));
+  animation: sf-float ease-in-out infinite alternate;
+  box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.8);
+}
+@keyframes sf-float {
+  from { transform: translateY(-6px) rotate(-4deg); }
+  to   { transform: translateY(8px) rotate(5deg); }
+}
+/* The terminals and their beams: shown only where the gutters were measured to hold them (data-placed). */
+.sf-terminal, .sf-beam { display: none; }
+.sf-toasts[data-placed] .sf-terminal { display: flex; }
+.sf-toasts[data-placed] .sf-beam { display: block; }
+.sf-terminal {
+  position: absolute;
+  align-items: center;
+  gap: 8px;
+  height: 46px;
+  padding: 0 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(17, 18, 24, 0.6);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  transition: border-color 600ms ease, box-shadow 600ms ease;
+}
+.sf-terminal-hot { animation: sf-terminal-hot 1.4s ease-out; }
+@keyframes sf-terminal-hot {
+  0%   { border-color: rgba(52, 211, 153, 0.55); box-shadow: 0 0 22px -6px rgba(52, 211, 153, 0.55); }
+  100% { border-color: rgba(255, 255, 255, 0.08); box-shadow: none; }
+}
+.sf-terminal-logo { width: 24px; height: 24px; border-radius: 7px; flex: none; }
+.sf-terminal-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
+.sf-terminal-name { font-size: 12px; font-weight: 600; color: rgba(255, 255, 255, 0.85); }
+.sf-terminal-sub { font-size: 10px; color: rgba(255, 255, 255, 0.42); }
+/* Dashed, so the wire never reads as one more line of the grid behind it. */
+.sf-beam {
+  position: absolute;
+  height: 1px;
+  background: repeating-linear-gradient(90deg, rgba(52, 211, 153, 0.32) 0 4px, transparent 4px 9px);
+  overflow: visible;
+}
+.sf-beam-light {
+  position: absolute;
+  top: -1px;
+  width: 64px;
+  height: 3px;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, transparent, rgba(110, 231, 183, 1));
+  box-shadow: 0 0 14px 1px rgba(52, 211, 153, 0.9);
+  animation: sf-beam cubic-bezier(0.45, 0, 0.25, 1) both;
+}
+@keyframes sf-beam {
+  0%   { left: calc(50% - 50% * var(--dir, 1) - 32px); opacity: 0; transform: scaleX(var(--dir, 1)); }
+  15%  { opacity: 1; }
+  85%  { opacity: 1; }
+  100% { left: calc(50% + 50% * var(--dir, 1) - 32px); opacity: 0; transform: scaleX(var(--dir, 1)); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sf-toasts { display: none; }
+  .sf-float { animation: none; translate: none; }
   .sf-backdrop { transform: none; transition: none; }
   .sf-halo { animation: none; }
   .sf-pulses { display: none; }
