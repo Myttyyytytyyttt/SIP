@@ -9,8 +9,11 @@ import {
   PENDING_POLL_MS,
   POLL_BASE_MS,
   UNHEARD_POLL_MS,
+  backingOffOf,
+  manualReadyAt,
   nextDelayMs,
   nextManualDelayMs,
+  nextReadAtOf,
   pendingPollWanted,
   ACTIVITY_RETRIES,
   nextActivityRetryMs,
@@ -280,5 +283,46 @@ describe("a refusal the faster cadence earned", () => {
     expect(refusalBacksOff({ rateLimited: false, unheard: true, failures: 0 })).toBe(true);
     expect(refusalBacksOff({ rateLimited: true, unheard: false, failures: 0 })).toBe(true);
     expect(refusalBacksOff({ rateLimited: true, unheard: true, failures: 1 })).toBe(true);
+  });
+});
+
+/**
+ * WHAT THE PAGE IS TOLD OF THE SCHEDULE (UI plan 10-09, §5 items 5 and 6): when
+ * a refresh stops waiting, when the next read nobody asked for is due, and
+ * whether the reads are backing off — so a Retry is enabled at the true moment
+ * and a stale note can say "next try at" without promising one.
+ */
+describe("what the page is told of the schedule", () => {
+  it("a refresh reads at once from MANUAL_FLOOR_MS after the last read finished — exactly when nextManualDelayMs reaches 0", () => {
+    expect(manualReadyAt(null)).toBe(0);
+    expect(manualReadyAt(NOW)).toBe(NOW + MANUAL_FLOOR_MS);
+    for (const [lastReadAt, now] of [
+      [null, NOW],
+      [NOW, NOW],
+      [NOW, NOW + 4_000],
+      [NOW, NOW + MANUAL_FLOOR_MS - 1],
+      [NOW, NOW + MANUAL_FLOOR_MS],
+      [NOW, NOW + 60_000],
+    ] as const) {
+      expect(nextManualDelayMs({ lastReadAt, now, retryAfterSeconds: null })).toBe(Math.max(0, manualReadyAt(lastReadAt) - now));
+    }
+  });
+
+  it("the next read is the earlier of the poll's timer and the push's, and none while the tab is hidden or none is armed", () => {
+    expect(nextReadAtOf({ visible: true, pollAt: NOW + 60_000, pushAt: NOW + 11_500 })).toBe(NOW + 11_500);
+    expect(nextReadAtOf({ visible: true, pollAt: NOW + 20_000, pushAt: NOW + 30_000 })).toBe(NOW + 20_000);
+    expect(nextReadAtOf({ visible: true, pollAt: NOW + 60_000, pushAt: null })).toBe(NOW + 60_000);
+    expect(nextReadAtOf({ visible: true, pollAt: null, pushAt: NOW + 1_500 })).toBe(NOW + 1_500);
+    expect(nextReadAtOf({ visible: true, pollAt: null, pushAt: null })).toBeNull();
+    expect(nextReadAtOf({ visible: false, pollAt: NOW + 60_000, pushAt: NOW + 1_500 })).toBeNull();
+  });
+
+  it("backing off: after a failed read, or a 429 the 20 s cadence earned — not otherwise", () => {
+    expect(backingOffOf({ failures: 0, refused: false })).toBe(false);
+    expect(backingOffOf({ failures: 1, refused: false })).toBe(true);
+    expect(backingOffOf({ failures: 0, refused: true })).toBe(true);
+    // Each is what moves the schedule off its ordinary cadence.
+    expect(nextDelayMs({ ...base, failures: 1 })).toBe(BACKOFF_MS[0]);
+    expect(unheardPollWanted({ socket: "off", activityRetryAt: null, now: NOW, refused: true })).toBe(false);
   });
 });

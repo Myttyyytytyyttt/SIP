@@ -412,7 +412,12 @@ describe("the dashboard's own read path calls it", () => {
    */
   it("writes what it read into the LINK store, and touches neither the vault's rows nor its cursor", () => {
     const round = source.slice(source.search(CALLS_BACKFILL), source.indexOf("const loadOlder"));
-    expect(round).toContain("setLinkEntries(");
+    // Gathered for the read's one commit (UI plan 10-09 §5 item 7), which puts
+    // them in the link list and nowhere else: live-commit.test.ts.
+    expect(round).toMatch(/linkRows\.push\(\.\.\.filled\.entries\);/);
+    expect(round).toMatch(/commitRead\(held, \{ snapshot: current, history, linkRows, at \}\)/);
+    // Nothing else the round does reaches the vault's rows, its cursor or Load older.
+    expect(round).not.toMatch(/\bhistory\s*=[^=]/);
     expect(round).not.toContain("setEntries(");
     expect(round).not.toContain("setActivityMeta(");
     expect(round).not.toContain("setOlder(");
