@@ -16,6 +16,12 @@
  * unreadable card (LiveStates.tsx) and the history's banner (LiveColumn.tsx),
  * in the column and on /activity.
  *
+ * THE FLOOR IS THE STORE'S OWN (plan B2): `live.refreshReadyAt`, the moment
+ * from which refresh() reads at once, failed reads included. It used to be
+ * this browser's guess — the floor after the last read it SAW finish, which
+ * opened early by the gap between a read's snapshot and its history and held
+ * a host mounted long after its read for a floor nobody needed.
+ *
  * ITS WORDS ARE NEVER IN A LIVE REGION. The sentence beside it says what failed
  * and is the one announced; a countdown inside a polite region would be read
  * out every second. A button's name changes silently.
@@ -27,12 +33,11 @@
  */
 
 import { RefreshCw } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useCountdown } from "@/components/live/use-countdown";
 import { Button } from "@/components/ui/button";
 import { LIVE_COPY } from "@/lib/live-copy";
-import { MANUAL_FLOOR_MS } from "@/lib/live-schedule";
 import { cn } from "@/lib/utils";
 
 /** How long "Retrying…" stands when no read finishes: then the button is offered again rather than held. */
@@ -51,35 +56,6 @@ export function retryLook(input: { readonly left: number | null; readonly retryi
 }
 
 /**
- * Something that changes each time a read FINISHES, good or failed: the
- * snapshot's own clock, and the moment of the last failure. A change pushed
- * from the chain changes neither, so it never moves the floor.
- */
-export function readKeyOf(nowMs: number, stale: { readonly since: number } | null): string {
-  return `${nowMs}|${stale?.since ?? ""}`;
-}
-
-/**
- * [FALLBACK, until the hook says it itself] When a press reads at once: the
- * manual floor after the last read this browser SAW finish — captured when
- * `readKey` changes, and at mount. Approximate both ways, and said so: a
- * read's snapshot lands before its history does, so the button can open up
- * to that gap early (a press then waits it out under "Retrying…"); and a host
- * mounted long after its read — a walk to /activity and back — holds the
- * button for a floor nobody needed.
- */
-export function useReadyAt(readKey: unknown): number {
-  const [readyAt, setReadyAt] = useState(() => Date.now() + MANUAL_FLOOR_MS);
-  const seen = useRef(readKey);
-  useEffect(() => {
-    if (Object.is(seen.current, readKey)) return;
-    seen.current = readKey;
-    setReadyAt(Date.now() + MANUAL_FLOOR_MS);
-  }, [readKey]);
-  return readyAt;
-}
-
-/**
  * WHICH READ A PRESS WAS MADE AFTER: the floor and the retry-after it was
  * pressed against. A read that finishes moves the floor (or brings a new
  * retry-after), and that alone ends the press — no effect has to notice it.
@@ -91,8 +67,7 @@ export function pressKeyOf(retryAt: number | null, readyAt: number): string {
 /**
  * Whether a press is still waiting on its read: true from the press until
  * `after` changes (pressKeyOf) or for RETRYING_MS, whichever comes first.
- * Returns that, and the press. Shared by the Retry buttons and the header's
- * Check now (LiveHeartbeat.tsx), whose dot breathes for exactly as long.
+ * Returns that, and the press.
  */
 export function usePressedUntilRead(after: string): readonly [boolean, () => void] {
   const [pressedAfter, setPressedAfter] = useState<string | null>(null);
@@ -114,7 +89,7 @@ export function RetryButton({
 }: {
   /** When the server said this browser may ask again (a 429's retry-after); null when it named no time. */
   readonly retryAt: number | null;
-  /** When a press stops being deferred by the floor (useReadyAt). */
+  /** When a press stops being deferred by the floor: the store's `live.refreshReadyAt`. */
   readonly readyAt: number;
   readonly onRetry: () => void;
   /** The unreadable card's button carries the refresh glyph; the history's banner does not. */

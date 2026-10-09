@@ -45,7 +45,6 @@ import { FeedSkeleton } from "@/components/live/FeedSkeleton";
 import { LiveBody } from "@/components/live/LiveBody";
 import { LiveFirstRead } from "@/components/live/LiveFirstRead";
 import { LiveKeylessCard, LiveLoading, LivePrivyStalled, LiveUnavailableCard, LiveUnreadable } from "@/components/live/LiveStates";
-import { readKeyOf } from "@/components/live/RetryButton";
 import { DisconnectButton, PensionKeyChip, worthFrom } from "@/components/account-chip";
 import { Num } from "@/components/num";
 import { PensionPanel } from "@/components/pension-panel";
@@ -710,8 +709,11 @@ export function DashboardView({ view }: { readonly view: "pension" | "activity" 
       // `readAtMs`, and every countdown ticks in its own leaf (use-countdown.ts).
       const clock = Date.now();
       if (live.view.kind === "unreadable") {
-        // The view itself is the read key: with nothing read yet, only a new failure makes a new one.
-        return plain(LIVE_COPY.readingSidebar, <LiveUnreadable message={live.view.message} retryAt={live.view.retryAt} readKey={live.view} onRetry={() => live.refresh()} />);
+        // Its Retry opens when the store says a press reads at once (live.refreshReadyAt), as every Retry on the page does.
+        return plain(
+          LIVE_COPY.readingSidebar,
+          <LiveUnreadable message={live.view.message} retryAt={live.view.retryAt} readyAt={live.live.refreshReadyAt} onRetry={() => live.refresh()} />,
+        );
       }
       // A 200 whose VAULT could not be read is not a vault that does not exist.
       // It gets the unreadable card, never an offer to create one that may
@@ -719,7 +721,7 @@ export function DashboardView({ view }: { readonly view: "pension" | "activity" 
       if (live.view.data.stage === "vault_unreadable") {
         return plain(
           LIVE_COPY.readingSidebar,
-          <LiveUnreadable message={LIVE_COPY.unreadableBody} retryAt={null} readKey={readKeyOf(live.view.data.nowMs, live.view.stale)} onRetry={() => live.refresh()} />,
+          <LiveUnreadable message={LIVE_COPY.unreadableBody} retryAt={null} readyAt={live.live.refreshReadyAt} onRetry={() => live.refresh()} />,
         );
       }
       return (
@@ -737,6 +739,7 @@ export function DashboardView({ view }: { readonly view: "pension" | "activity" 
           activityUnreadable={live.activityUnreadable}
           activityRetryAt={live.activityRetryAt}
           activityPending={live.activityPending}
+          live={live.live}
         />
       );
     }

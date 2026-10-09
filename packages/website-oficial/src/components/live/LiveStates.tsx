@@ -16,7 +16,7 @@
 
 import { LogOut, RefreshCw } from "lucide-react";
 
-import { RetryButton, useReadyAt } from "@/components/live/RetryButton";
+import { RetryButton } from "@/components/live/RetryButton";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -125,22 +125,21 @@ export function LiveUnavailableCard({ onConnect, onSeeSample }: { readonly onCon
  * no reason of its own — the caller passed the card's sentence as the message,
  * and it was printed twice, one line under the other (G10).
  *
- * The retry counts down to when a press reads at once (RetryButton.tsx):
- * `readKey` changes with every read that finishes, which is what moves it.
+ * The retry counts down to when a press reads at once (RetryButton.tsx): the
+ * store's own `live.refreshReadyAt`, which every read that finishes moves.
  */
 export function LiveUnreadable({
   message,
   retryAt,
-  readKey,
+  readyAt,
   onRetry,
 }: {
   readonly message: string;
   readonly retryAt: number | null;
-  /** Changes each time a read finishes, good or failed (RetryButton.tsx readKeyOf). */
-  readonly readKey: unknown;
+  /** From when a press reads at once: the store's `live.refreshReadyAt` (use-live-dashboard.ts). */
+  readonly readyAt: number;
   readonly onRetry: () => void;
 }) {
-  const readyAt = useReadyAt(readKey);
   const reason = message === "" || message === LIVE_COPY.unreadableBody ? null : message;
   return (
     <Shell title={LIVE_COPY.unreadableTitle}>

@@ -195,6 +195,39 @@ describe("the header dot's words", () => {
       expect(sentence).not.toMatch(/\b(keeper|read|poll|wrap|policy|RPC|socket)\b/i);
     }
   });
+
+  /**
+   * PLAN B2: the words the store's signals buy. "Live" is said by one sentence
+   * only — the one LiveHeartbeat shows while the push is live — and a time is
+   * named only by the next-check lines, which it shows only from the moment the
+   * page's schedule armed (`live.nextReadAt`).
+   */
+  it("say Live in one sentence only, and name a time only in the next check's", () => {
+    const timed = [
+      LIVE_COPY.pulse.nextIn(14),
+      LIVE_COPY.pulse.nextAt("12:05 UTC"),
+      LIVE_COPY.pulse.retryNextIn(40),
+      LIVE_COPY.pulse.retryNextAt("12:04 UTC"),
+    ];
+    const plain = [
+      LIVE_COPY.pulse.notLive,
+      LIVE_COPY.pulse.notLiveEvery(20),
+      LIVE_COPY.pulse.heard,
+      LIVE_COPY.pulse.heardBehind,
+      LIVE_COPY.pulse.update,
+      LIVE_COPY.pulse.reloadPage,
+    ];
+    expect(LIVE_COPY.pulse.live("just now")).toBe("Live · updated just now");
+    expect(LIVE_COPY.pulse.notLiveEvery(20)).toBe("Not live right now · checks Solana about every 20 s");
+    expect(timed).toEqual(["Next check in 14 s", "Next check at 12:05 UTC", "Waiting after an error · next try in 40 s", "Waiting after an error · next try at 12:04 UTC"]);
+    for (const sentence of [...timed, ...plain]) {
+      expect(sentence).not.toMatch(/\bLive\b/);
+      expect(sentence).not.toMatch(/\b(keeper|read|poll|wrap|policy|RPC|socket|push)\b/i);
+      expect(sentence).not.toMatch(/shortly|in a (moment|minute)/i);
+    }
+    for (const sentence of plain) expect(sentence).not.toMatch(/\bnext\b|\d+:\d+/i);
+    expect(LIVE_COPY.pulse.update).toContain(BRAND);
+  });
 });
 
 /**

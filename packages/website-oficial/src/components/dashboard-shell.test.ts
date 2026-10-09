@@ -56,6 +56,8 @@ vi.mock("@/hooks/use-live-dashboard", () => ({
     loadOlder: vi.fn(),
     older: { busy: false, retryAt: null, message: null, complete: false, available: false },
     activityUnreadable: false,
+    // How live the page is (LiveLiveness): a quiet one, its floor long passed.
+    live: { socket: "none", reading: false, heard: null, lastReadAt: null, refreshReadyAt: 0, nextReadAt: null, backingOff: false, readId: 0 },
   }),
 }));
 

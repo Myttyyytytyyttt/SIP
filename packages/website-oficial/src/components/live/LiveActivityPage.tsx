@@ -98,7 +98,7 @@ export function LiveActivityPage({
 }: {
   readonly data: LiveDashboard;
   readonly now: string;
-  /** When the history's Retry stops being deferred by the floor after the last read (RetryButton.tsx useReadyAt). */
+  /** When the history's Retry stops being deferred by the floor after the last read (the store's `live.refreshReadyAt`). */
   readonly readyAt: number;
   readonly labelOf: (wallet: string | null) => string;
   readonly older: LiveOlder;

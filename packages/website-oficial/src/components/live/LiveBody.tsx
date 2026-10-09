@@ -47,6 +47,14 @@
  *
  * EVERY MOMENT IT NAMES CARRIES ITS DAY WHEN THAT IS NOT TODAY (format.ts
  * whenLabel): the stale note, the hero's pill, a done step, the setup's wait.
+ *
+ * HOW LIVE IT IS COMES FROM THE STORE, NOT FROM A GUESS (plan B2): `live`
+ * (use-live-dashboard.ts LiveLiveness) — whether the chain's push is live, a
+ * check is out, a change was heard, when the last update landed, when the next
+ * check is due, and from when a Retry reads at once. The header's dot says it
+ * (LiveHeartbeat.tsx), and every Retry on the page opens at that one moment.
+ * And whether a newer version is served (use-update-available.ts): asked here,
+ * where it is drawn, so the sample never asks.
  */
 
 import { useRef, type ReactNode } from "react";
@@ -62,9 +70,9 @@ import { LiveAnnouncer } from "@/components/live/LiveAnnouncer";
 import { LiveHeartbeat } from "@/components/live/LiveHeartbeat";
 import { LoadOlderButton } from "@/components/live/LoadOlderButton";
 import { PendingRows, usePendingView } from "@/components/live/LivePending";
-import { readKeyOf, useReadyAt } from "@/components/live/RetryButton";
 import { Reveal } from "@/components/live/Reveal";
 import { heroPillOf, pillShown, useArrivals } from "@/components/live/use-arrivals";
+import { useUpdateAvailable } from "@/components/live/use-update-available";
 import { historyKeyOf, useReadSettled } from "@/components/live/use-read-settled";
 import { DashboardSource } from "@/components/DashboardSource";
 import { DashboardMain, PENSION_SLOT, RULE_SLOT } from "@/components/dashboard-main";
@@ -76,7 +84,7 @@ import { HeaderContributions } from "@/components/header-contributions";
 import { SiteHeader } from "@/components/site-header";
 import { useSolanaConfigOrNull } from "@/app/providers";
 import { useWalletsOpener } from "@/components/wallets-host";
-import type { LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
+import type { LiveLiveness, LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
 import { whenLabel } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import { rawFrom } from "@/lib/amounts";
@@ -133,6 +141,7 @@ export function LiveBody({
   activityUnreadable,
   activityRetryAt = null,
   activityPending = false,
+  live,
 }: {
   readonly view: "pension" | "activity";
   readonly data: LiveDashboard;
@@ -151,6 +160,12 @@ export function LiveBody({
   readonly activityRetryAt?: number | null;
   /** Drawn before the history answered (use-live-dashboard.ts, FIRST_PAINT_WAIT_MS): the feed says it is reading. */
   readonly activityPending?: boolean;
+  /**
+   * How live the page is (use-live-dashboard.ts LiveLiveness). REQUIRED: the
+   * header's dot and every Retry read it, and without it neither has anything
+   * true to say.
+   */
+  readonly live: LiveLiveness;
 }) {
   const openWallets = useWalletsOpener();
   // Wrappers, not the opener itself. The sidebar hands its handler straight to onClick, so it takes nothing and
@@ -204,10 +219,12 @@ export function LiveBody({
   const notice = (): string | null =>
     stale === null ? null : staleNote({ when: whenLabel(data.nowMs, nowMs), message: stale.message, long: nowMs - stale.since >= STALE_WARNING_MS });
 
-  // [FALLBACK] When a Retry reads at once: the manual floor after the last read
-  // this browser saw finish, good or failed (RetryButton.tsx). One for the page,
-  // so the aside's banner, the sheet's and /activity's count down together.
-  const readyAt = useReadyAt(readKeyOf(data.nowMs, stale));
+  // When a Retry reads at once: the store's own floor after the last read,
+  // good or failed. One for the page, so the aside's banner, the sheet's,
+  // /activity's and the dot's Check now count down together.
+  const readyAt = live.refreshReadyAt;
+  // A newer version served than this tab runs: the dot's ring and its reload.
+  const updateAvailable = useUpdateAvailable();
 
   /*
    * WHAT TO KEEP IN MIND ABOUT EVERY FIGURE ON THE PAGE, on both views: the
@@ -296,7 +313,7 @@ export function LiveBody({
         // sample's too — is not edited for it.
         account={
           <>
-            <LiveHeartbeat pensionKey={pensionKey} nowMs={data.nowMs} stale={stale} readyAt={readyAt} onCheck={onRefresh} />
+            <LiveHeartbeat nowMs={data.nowMs} stale={stale} live={live} activityRetryAt={activityRetryAt} updateAvailable={updateAvailable} onCheck={onRefresh} />
             {account}
           </>
         }

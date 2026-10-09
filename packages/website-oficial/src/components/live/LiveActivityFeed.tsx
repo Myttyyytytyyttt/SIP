@@ -240,7 +240,7 @@ export function LiveActivityFeed({
   readonly onRetry?: () => void;
   /** When the server said the history may be asked for again. The button counts down to it. */
   readonly retryAt?: number | null;
-  /** When a retry stops being deferred by the floor after the last read (RetryButton.tsx useReadyAt); 0 when none applies. */
+  /** When a retry stops being deferred by the floor after the last read (the store's `live.refreshReadyAt`); 0 when none applies. */
   readonly readyAt?: number;
   /** What to say instead of rows: the stage's own sentence, when it has one. */
   readonly emptyNote?: string;

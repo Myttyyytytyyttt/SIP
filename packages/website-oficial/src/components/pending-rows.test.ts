@@ -37,6 +37,7 @@ import type { LiveDashboard, VaultEventJson } from "@/lib/live-types";
 import { mock } from "@/mocks";
 
 import { NOW_MS, OWNER, WALLET_A, liveActivity, liveEntry, liveSnapshot, policyState, seconds, signature, tokenAccount } from "../../test/fixtures/live-dashboard";
+import { liveLiveness } from "../../test/fixtures/live-liveness";
 
 const ACTIVE: PendingLine = { key: "converting", kind: "converting", active: true, rest: null, title: PENDING_COPY.converting, sub: PENDING_COPY.convertingSub("0.018"), amount: "$1.80", amountSpoken: "" };
 const WAITING: PendingLine = { key: "buying", kind: "buying", active: false, rest: "paused", title: PENDING_COPY.buyingWaiting("SPYx"), sub: PENDING_COPY.rest.paused, amount: "$5.00", amountSpoken: null };
@@ -150,6 +151,7 @@ describe("a live page", () => {
         onLoadOlder: vi.fn(),
         nowMs: NOW_MS,
         activityUnreadable: false,
+        live: liveLiveness(),
       }),
     );
 

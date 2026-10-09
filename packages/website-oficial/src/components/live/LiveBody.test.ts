@@ -32,11 +32,13 @@ vi.mock("@/components/pension-chart", () => ({ PensionChart: () => createElement
 
 import { LiveBody, countsUnknownOf, staleNote } from "@/components/live/LiveBody";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import type { LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
+import type { LiveLiveness, LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
 import { ACTIVITY_COPY, LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
+import { MANUAL_FLOOR_MS } from "@/lib/live-schedule";
 import type { LiveDashboard, VaultEventJson } from "@/lib/live-types";
 
 import { DEFAULT_ENTRIES, NOW_MS, OWNER, liveActivity, liveDashboard, liveEntry, liveSnapshot, seconds, signature } from "../../../test/fixtures/live-dashboard";
+import { liveLiveness } from "../../../test/fixtures/live-liveness";
 import { tickingInRegion } from "../../../test/live-regions";
 
 const older = { busy: false, retryAt: null, message: null, complete: false, available: true };
@@ -59,6 +61,8 @@ function render(input: {
   readonly activityPending?: boolean;
   /** The browser's clock; the payload's own by default. */
   readonly nowMs?: number;
+  /** How live the page is; by default a read that finished just now, its floor still running. */
+  readonly live?: Partial<LiveLiveness>;
 }): string {
   return renderToStaticMarkup(
     createElement(
@@ -77,6 +81,7 @@ function render(input: {
         nowMs: input.nowMs ?? NOW_MS,
         activityUnreadable: input.activityUnreadable,
         ...(input.activityPending === undefined ? {} : { activityPending: input.activityPending }),
+        live: liveLiveness({ refreshReadyAt: Date.now() + MANUAL_FLOOR_MS, ...input.live }),
       }),
     ),
   );
@@ -87,9 +92,18 @@ describe("an activity read that failed", () => {
     const html = render({ activityUnreadable: true });
     expect(html).toContain(ACTIVITY_COPY.unreadableNow);
     expect(html).not.toContain(ACTIVITY_COPY.empty);
-    // Drawn right after the read that failed, so it counts down the floor
-    // before a press can read at once (RetryButton.tsx).
+    // Drawn right after the read that failed, so it counts down the store's
+    // floor before a press can read at once (RetryButton.tsx).
     expect(html).toMatch(/Try again in \d+ s/);
+  });
+
+  it("opens its retry at the store's own floor, on both views", () => {
+    for (const view of ["pension", "activity"] as const) {
+      expect(render({ view, activityUnreadable: true, live: { refreshReadyAt: Date.now() - 1 } })).toContain(`>${LIVE_COPY.retry}</button>`);
+      const held = render({ view, activityUnreadable: true, live: { refreshReadyAt: Date.now() + 6_000 } });
+      expect(held).toContain(LIVE_COPY.retryIn(6));
+      expect(held).not.toContain(`>${LIVE_COPY.retry}</button>`);
+    }
   });
 
   it("keeps the countdown out of the sentence a screen reader is told about, on both views", () => {
@@ -402,7 +416,7 @@ describe("countsUnknownOf", () => {
  * dot only, its words its accessible name, never text in the bar (owner).
  */
 describe("how fresh the page is", () => {
-  const withAccount = (view: "pension" | "activity", stale: LiveStale | null = null): string =>
+  const withAccount = (view: "pension" | "activity", stale: LiveStale | null = null, live: Partial<LiveLiveness> = {}): string =>
     renderToStaticMarkup(
       createElement(
         TooltipProvider,
@@ -419,6 +433,7 @@ describe("how fresh the page is", () => {
           onLoadOlder: vi.fn(),
           nowMs: NOW_MS,
           activityUnreadable: false,
+          live: liveLiveness(live),
         }),
       ),
     );
@@ -437,6 +452,14 @@ describe("how fresh the page is", () => {
     const bar = header(withAccount("pension"));
     expect(bar).toContain(`aria-label="${LIVE_COPY.pulse.updated(LIVE_COPY.pulse.ago(0))}"`);
     expect(seen(bar)).not.toContain(LIVE_COPY.pulse.updated(LIVE_COPY.pulse.ago(0)));
+  });
+
+  it("reads the store's own signals: Live only while the push is live, breathing while a check is out", () => {
+    expect(header(withAccount("pension", null, { socket: "live" }))).toContain(`aria-label="${LIVE_COPY.pulse.live(LIVE_COPY.pulse.ago(0)).replace(" · ", ", ")}"`);
+    expect(header(withAccount("pension", null, { reading: true }))).toContain('data-pulse="checking"');
+    expect(header(withAccount("activity", null, { heard: { at: Date.now(), wallets: [] } }))).toContain('data-pulse="heard"');
+    // No newer version known in this test's bundle: no ring.
+    expect(header(withAccount("pension"))).not.toContain("data-update");
   });
 
   it("is behind when the last update failed, beside the stale note that announces it", () => {

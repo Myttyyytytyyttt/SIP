@@ -129,9 +129,11 @@ export const LIVE_COPY = {
   /**
    * THE DOT'S WORDS (owner, 10-09: the dot only, at every width). They are its
    * popover and its accessible name, never text in the bar (LiveHeartbeat.tsx).
-   * Each says what this browser saw — when the figures last changed, that a
-   * check it asked for is under way, that the last update failed — and none
-   * promises when the next one comes.
+   * Each says what the page knows — when the figures last changed, that a
+   * check is under way, that the chain said something changed, that the last
+   * update failed, whether changes reach it within seconds — and a time for
+   * the next check only where the page's own schedule has armed one
+   * (`live.nextReadAt`, plan B2): never a promise the schedule does not keep.
    */
   pulse: {
     /** How long ago, coarse: it changes at most once a minute. "just now" under 90 s. */
@@ -153,6 +155,42 @@ export const LIVE_COPY = {
     checkNow: "Check now",
     /** The floor after the last update, or a retry-after, still running (RetryButton.tsx). */
     checkIn: (seconds: number): string => `Check again in ${seconds} s`,
+    /**
+     * THE CHAIN'S PUSH IS CONFIRMED FOR EVERY ADDRESS WATCHED (`live.socket`
+     * "live"): a change shows within seconds. The only sentence that says
+     * "Live" — never while the push is connecting, off, or not wanted.
+     */
+    live: (ago: string): string => `Live · updated ${ago}`,
+    /**
+     * THE PUSH IS WANTED AND NOT LIVE (connecting, or off and waiting to try
+     * again), so the page is on its own schedule. It says "not live" and, only
+     * where the schedule really runs at one (LiveHeartbeat.tsx pushOffCadenceMs),
+     * how often it looks; with no steady cadence to name, it names none.
+     */
+    notLive: "Not live right now",
+    notLiveEvery: (seconds: number): string => `Not live right now · checks Solana about every ${seconds} s`,
+    /** The chain said something changed that no update has brought yet (`live.heard`). */
+    heard: "Change seen on Solana · updating",
+    /** The same, while the updates are failing: what was seen is not on this page, and nothing says when it will be. */
+    heardBehind: "Change seen on Solana · not on this page yet",
+    /**
+     * THE NEXT CHECK THE PAGE'S OWN SCHEDULE HAS ARMED (`live.nextReadAt`): a
+     * countdown while it is close, the moment (dated when not today) when it
+     * is further off. Nothing when none is armed — a hidden tab, a check
+     * already out — and nothing once the moment has passed.
+     */
+    nextIn: (seconds: number): string => `Next check in ${seconds} s`,
+    nextAt: (when: string): string => `Next check at ${when}`,
+    /** The same while the checks are slowed by failures (`live.backingOff`): the next try, never "shortly". */
+    retryNextIn: (seconds: number): string => `Waiting after an error · next try in ${seconds} s`,
+    retryNextAt: (when: string): string => `Waiting after an error · next try at ${when}`,
+    /**
+     * A NEWER BUILD IS SERVED THAN THE ONE THIS TAB RUNS (hooks/use-new-version.ts).
+     * A state of the dot — no chip, no words in the bar (owner, 10-09) — whose
+     * popover says it and offers the reload.
+     */
+    update: `A newer version of ${BRAND} is available`,
+    reloadPage: "Reload page",
   },
 
   // ── what is on its way, over the feed (LivePending.tsx) ────────────────────
