@@ -182,14 +182,6 @@ export const LIVE_COPY = {
   /** The track's far end. A bar with no scale is a fraction of nothing. */
   rateFloor: "0%",
   investsIn: "Invests in",
-  /*
-   * NOT INVEST_COPY.floorsTitle ("Today's price limits"), which means the
-   * opposite where it is defined: that one heads the limits a policy signed
-   * NOW would carry, computed from today's prices. These are the ones already
-   * signed, on some past day, and they decay as the market moves away from
-   * them — which is the whole reason they are worth showing.
-   */
-  signedPriceLimits: "Price limits you signed",
   vaultSection: "Vault",
   mode: "Mode",
   modeProfit: (rate: string): string => `Profit · ${rate}`,
@@ -204,7 +196,6 @@ export const LIVE_COPY = {
   setUpInvesting: "Set up investing",
   policyUnreadable: `${BRAND} could not read your investment policy just now.`,
   buyingWaits: "Buying waits",
-  floorPassed: "The market moved past a price limit you signed, so buying waits. Sign again with today’s prices.",
   nextInvestment: "Next investment",
   solWaitingToConvert: (sol: string): string => `SOL waiting to convert: ${sol} SOL`,
   progressLabel: "Progress to next investment",
@@ -526,8 +517,8 @@ export const ONBOARDING_COPY = {
  * for once the first savings have arrived, with that day's prices (owner,
  * 09-24: choose on the setup, sign later).
  *
- * SHORT, NOT PARTIAL. Three lines say what changes, what can stop it and what
- * the price limits do; everything the full investing form says before the same
+ * SHORT, NOT PARTIAL. Three lines say what changes, what can stop it and how
+ * the price is set; everything the full investing form says before the same
  * signature is one click away under "What exactly am I signing?", and the box
  * to tick is the investing form's own sentence, word for word.
  */
@@ -535,9 +526,9 @@ export const START_BUYING_COPY = {
   title: "Your first savings arrived",
   /** `basket` is "SPYx and ANTHROPIC, 50 % each" or "SPYx". */
   lede: (basket: string): string => `Start buying ${basket}? You chose this when you made your vault.`,
-  /** `floor` is today's SOL floor in dollars; `purchase` the whole buy that clears every leg's minimum. */
-  convert: (floor: string | null, purchase: string | null): string =>
-    `Your SOL savings, now and later, are sold for USDC${floor === null ? "" : `, never below ${floor} per SOL`}, and bought in ${purchase === null ? "once enough is ready" : `once ${purchase} is ready`}.`,
+  /** `purchase` is the whole buy that clears every leg's minimum. */
+  convert: (purchase: string | null): string =>
+    `Your SOL savings, now and later, are sold for USDC at the live price, never under half the SOL price when you approve, and bought in ${purchase === null ? "once enough is ready" : `once ${purchase} is ready`}.`,
   /**
    * One line per leg whose issuer charges to move it. `written` is a fee the
    * issuer has already set for later ("3 % from around 26 September 2026"), or
@@ -548,29 +539,12 @@ export const START_BUYING_COPY = {
   fee: (symbol: string, fee: string, written: string | null, max: string): string =>
     `${symbol}’s issuer takes ${fee} each time it moves, in and out${written === null ? "" : `, and has already set ${written}`}; above ${max}, buying stops until you change the basket.`,
   /**
-   * `feeLegs` are the legs whose issuer fee comes off what arrives, each with
-   * the margin its limit is set at, or none. SINCE 2026-09-24 THE STOCK LIMIT
-   * IS SET AFTER THAT FEE (the build nets the highest fee the issuer has set
-   * before taking the margin) — it used to read "less for ANTHROPIC", because
-   * the fee was eating the margin. AND AT A FEE OVER 1 % THE MARGIN IS WIDER
-   * (solana-core legFloorMarginBps: 7 % at 3 %), because each buy then asks the
-   * market for more room and a limit that did not leave it would stop every
-   * buy; the sentence names that margin rather than let "about 5 %" stand for
-   * a leg it is not true of.
+   * THE OWNER'S DECISIONS IN ONE LINE: no price floor on the stocks
+   * (2026-10-08), a safety floor at half the SOL price on the conversion
+   * (2026-10-09). "What exactly am I signing?" carries the keeper's checks and
+   * what the chain still enforces (INVEST_COPY.keeperChecks, INVEST_COPY.chainLimits).
    */
-  limits: (solMargin: string, stockMargin: string, feeLegs: readonly { readonly symbol: string; readonly margin: string }[]): string => {
-    const named = feeLegs.map((leg) => (leg.margin === stockMargin ? leg.symbol : `${leg.symbol} about ${leg.margin}`));
-    const wider = feeLegs.some((leg) => leg.margin !== stockMargin);
-    const list = named.length <= 1 ? (named[0] ?? "") : `${named.slice(0, -1).join(", ")} and ${named.at(-1)}`;
-    return (
-      `Price limits are set from today’s prices: if SOL falls more than ${solMargin}, or a stock costs more than about ${stockMargin} over today’s price` +
-      `${
-        feeLegs.length === 0
-          ? ""
-          : ` (for ${list}, after the highest transfer fee its issuer has set${wider ? ", because at that fee each buy asks the market for more room and the limit has to leave it" : ""})`
-      }, buying waits until prices come back or you sign again.`
-    );
-  },
+  livePrice: `No price limit on the stocks: ${BRAND} buys them at the live market price and checks it before every buy. Your SOL keeps one safety floor, half its price when you approve; only SOL falling under it asks you to approve again.`,
   /** The depth ceiling, for a cap this card fixes rather than one the owner types. */
   depth: (ceiling: string, cap: string, symbol: string, provenance: string): string =>
     `${BRAND} buys only where the market can take the whole buy: on the shares chosen, ${symbol} sets the ceiling at ${ceiling} per buy, from what its route held ${provenance}. ` +
@@ -583,4 +557,39 @@ export const START_BUYING_COPY = {
   started: "Buying set up",
   /** The basket's own arithmetic refused it (a thin route, a leg no longer counted): said, and nothing offered to sign. */
   cannotPlan: "This basket cannot be set up from here today. Nothing was offered to sign; Manage wallets → Investing shows why.",
+} as const;
+
+/**
+ * WHAT THE KEEPER IS ABOUT TO DO WITH THIS VAULT'S MONEY (owner, 2026-10-08):
+ * the rows over the activity feed, and the line under "Next investment". Made
+ * from what the dashboard already reads (src/lib/live-pending.ts); nothing here
+ * promises a time, only how often the keeper looks, which is its sweep.
+ */
+export const PENDING_COPY = {
+  heading: "In progress",
+  converting: "Converting SOL to USDC",
+  convertingWaiting: "SOL waiting to be converted",
+  buying: (names: string): string => `Buying ${names}`,
+  buyingWaiting: (names: string): string => `Waiting to buy ${names}`,
+  /** The keeper's sweep, which is the only cadence the screen can vouch for. */
+  checks: `${BRAND} checks about once a minute`,
+  convertingSub: (sol: string): string => `${sol} SOL · ${BRAND} checks about once a minute`,
+  buyingSub: `With the USDC in your vault · ${BRAND} checks about once a minute`,
+  rest: {
+    buying_off: "Buying is switched off in your investment policy",
+    paused: "Your vault is paused: nothing is converted or bought until you resume it",
+    protocol_paused: `${BRAND} is paused for everyone right now`,
+    month_cap: "Your 30-day buying limit is reached",
+    conversion_off: "Converting is switched off in your investment policy",
+    price_limits: "Held by your policy's old price limits · Switch to live-price buying to drop them",
+    safety_floor: "SOL is under half its price when you approved · Approve again at today's price to convert",
+  },
+  /** Due, and not done: past a few sweeps the loader stops and says since when. */
+  slow: (clock: string): string => `Not done since ${clock} · ${BRAND} tries again about once a minute`,
+  /** Due, and no move toward it in the loaded history to time it by: no loader, and no clock. */
+  slowUntimed: `Not done yet · ${BRAND} tries again about once a minute`,
+  /** Under "Next investment": the SOL on its way is counted, and said. */
+  includesConverting: (usd: string): string => `Includes about ${usd} of SOL being converted to USDC`,
+  plusConverting: (sol: string): string => `Plus ${sol} SOL being converted to USDC`,
+  readyToBuy: `Ready to buy · ${BRAND} checks about once a minute`,
 } as const;

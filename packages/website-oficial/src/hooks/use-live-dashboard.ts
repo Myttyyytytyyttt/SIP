@@ -5,7 +5,10 @@
  *
  * One snapshot and one page of history on mount, then a poll at the keeper's own
  * sweep — never faster, because reading twice a minute shows the same numbers
- * twice and spends a key the keeper shares. A hidden tab polls not at all.
+ * twice and spends a key the keeper shares. The one exception is a step the
+ * keeper is about to take with the vault's money (src/lib/live-pending.ts):
+ * while one is under way the poll runs every 20 s, for at most five minutes at
+ * a stretch (live-schedule.ts PENDING_POLL_MS). A hidden tab polls not at all.
  *
  * A POLL ASKS ONLY FOR WHAT IS NEW: `until` the newest signature already held,
  * so a quiet minute costs one getSignaturesForAddress and nothing else. The rows
@@ -67,7 +70,8 @@ import { backfillLinkSettlements, backfillSpend, chainSaysSettled, forgetBackfil
 import { LIVE_COPY } from "@/lib/live-copy";
 import { firstPaintGate } from "@/lib/first-paint";
 import { toLiveDashboard } from "@/lib/live-model";
-import { MANUAL_FLOOR_MS, nextActivityRetryMs, nextDelayMs, nextManualDelayMs, shouldRefreshOnShow } from "@/lib/live-schedule";
+import { anyActive, pendingSteps } from "@/lib/live-pending";
+import { MANUAL_FLOOR_MS, nextActivityRetryMs, nextDelayMs, nextManualDelayMs, pendingPollWanted, shouldRefreshOnShow } from "@/lib/live-schedule";
 import type { LiveActivityJson, LiveDashboard, LiveEntryJson, LiveSnapshotJson } from "@/lib/live-types";
 import { vaultFailureWords, type ApiFailure } from "@/lib/vault-api";
 
@@ -381,35 +385,6 @@ export function useLiveDashboard(input: {
     void read(true);
   }, [pensionKey, walletsKey, read]);
 
-  // THE POLL. Re-armed after each read, and never while the tab is hidden.
-  useEffect(() => {
-    if (pensionKey === null) return undefined;
-    const visible = typeof document === "undefined" || document.visibilityState === "visible";
-    const delay = nextDelayMs({ failures, retryAfterSeconds: null, visible, lastReadAt, now: Date.now(), reading });
-    if (delay === null) return undefined;
-    const retryAt = failure?.retryAt ?? null;
-    const wait = retryAt === null ? delay : Math.max(delay, retryAt - Date.now());
-
-    // ONE LEG WAS REFUSED AND SAID WHEN TO COME BACK. The snapshot succeeded —
-    // every figure on the screen is current — so nothing is backed off; the
-    // next ordinary read is simply brought forward to the moment the server
-    // named, and only once. Never earlier than the manual floor, because a
-    // retry-after of zero would otherwise spend a page's tokens immediately.
-    const early = nextActivityRetryMs({ retryAt: activityTrouble?.retryAt ?? null, attempts: activityTrouble?.attempts ?? 0, now: Date.now() });
-    const soon = early === null ? null : Math.max(early, MANUAL_FLOOR_MS);
-    const when = soon === null ? Math.max(0, wait) : Math.min(Math.max(0, wait), soon);
-
-    const timer = window.setTimeout(() => {
-      // Only a read that actually RAN re-arms the poll. A call that turned back
-      // at the in-flight guard re-arms nothing: the read already running will,
-      // when it finishes and `reading` falls.
-      void read(false, soon !== null && when === soon).then((ran) => {
-        if (ran) setTick((count) => count + 1);
-      });
-    }, when);
-    return () => window.clearTimeout(timer);
-  }, [pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading]);
-
   // Coming back to a tab whose numbers are a sweep old reads once, at once.
   useEffect(() => {
     if (pensionKey === null || typeof document === "undefined") return undefined;
@@ -480,6 +455,53 @@ export function useLiveDashboard(input: {
           };
     return { kind: "ready", data, stale };
   }, [pensionKey, snapshot, entries, linkEntries, activityMeta, failure, walletsKey, importedKey]);
+
+  /*
+   * WHETHER A STEP IS UNDER WAY (src/lib/live-pending.ts), from the model the
+   * page draws — and, in activeSinceRef, when this stretch of them began.
+   */
+  const pendingActive = wantsActivity && view.kind === "ready" && anyActive(pendingSteps(view.data));
+  const activeSinceRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!pendingActive) activeSinceRef.current = null;
+    else if (activeSinceRef.current === null) activeSinceRef.current = Date.now();
+  }, [pendingActive, pensionKey]);
+
+  // THE POLL. Re-armed after each read, and never while the tab is hidden.
+  //
+  // FASTER WHILE SOMETHING IS ON ITS WAY (live-schedule.ts PENDING_POLL_MS): a
+  // conversion or a buy the keeper is about to make, so its loader gives way to
+  // the real row soon after it lands. Only for a caller that draws the history
+  // — the leaderboard's balance chip shows no step — and only for
+  // PENDING_POLL_MAX_MS of one stretch, counted from activeSinceRef.
+  useEffect(() => {
+    if (pensionKey === null) return undefined;
+    const visible = typeof document === "undefined" || document.visibilityState === "visible";
+    const pending = pendingPollWanted({ active: pendingActive, activeSince: activeSinceRef.current, now: Date.now(), activityRetryAt: activityTrouble?.retryAt ?? null });
+    const delay = nextDelayMs({ failures, retryAfterSeconds: null, visible, lastReadAt, now: Date.now(), reading, pending });
+    if (delay === null) return undefined;
+    const retryAt = failure?.retryAt ?? null;
+    const wait = retryAt === null ? delay : Math.max(delay, retryAt - Date.now());
+
+    // ONE LEG WAS REFUSED AND SAID WHEN TO COME BACK. The snapshot succeeded —
+    // every figure on the screen is current — so nothing is backed off; the
+    // next ordinary read is simply brought forward to the moment the server
+    // named, and only once. Never earlier than the manual floor, because a
+    // retry-after of zero would otherwise spend a page's tokens immediately.
+    const early = nextActivityRetryMs({ retryAt: activityTrouble?.retryAt ?? null, attempts: activityTrouble?.attempts ?? 0, now: Date.now() });
+    const soon = early === null ? null : Math.max(early, MANUAL_FLOOR_MS);
+    const when = soon === null ? Math.max(0, wait) : Math.min(Math.max(0, wait), soon);
+
+    const timer = window.setTimeout(() => {
+      // Only a read that actually RAN re-arms the poll. A call that turned back
+      // at the in-flight guard re-arms nothing: the read already running will,
+      // when it finishes and `reading` falls.
+      void read(false, soon !== null && when === soon).then((ran) => {
+        if (ran) setTick((count) => count + 1);
+      });
+    }, when);
+    return () => window.clearTimeout(timer);
+  }, [pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading, pendingActive]);
 
   const cursor = activityMeta?.nextBefore ?? null;
   const olderView = useMemo((): LiveOlder => ({ ...older, available: cursor !== null }), [older, cursor]);

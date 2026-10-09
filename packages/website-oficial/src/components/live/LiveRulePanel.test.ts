@@ -94,16 +94,47 @@ const ACCOUNT = liveSnapshot().vault.state! as unknown as VaultAccountJson;
 
 const leg = (mint: string, weightBps: number) => ({ mint, weightBps, minOutRateWad: "1" });
 
-/** SPYx and ANTHROPIC at 50/50, $5 a leg — $10 in all — on Jupiter. */
+/**
+ * SPYx and ANTHROPIC at 50/50, $5 a leg — $10 in all — on Jupiter, at the live
+ * price: every leg at 1 wad (since 2026-10-08) and the SOL safety floor at half
+ * $100.04 (since 2026-10-09).
+ */
 const POLICY = policyState({
   venueProgram: JUPITER_V6,
   legs: [leg(SPYX_MINT, 5_000), leg(ANTHROPIC_MINT, 5_000)],
+  minConvertRateWad: "50019355777746281",
   minInvestment: "5000000",
   maxPerCall: "149000000",
   maxRolling30d: "4619000000",
 });
 
-function vaultState(policy: InvestmentPolicyJson | null, status: "exists" | "missing" | "unreadable" = policy === null ? "missing" : "exists"): VaultStateJson {
+/**
+ * The same basket signed before 2026-10-08: a floor per stock (SPYx 5 % under
+ * its rate at slot 447313239, ANTHROPIC's at the old margin) and a SOL floor 10 %
+ * under that day's price, still stored. The LEG floors are what make it old.
+ */
+const OLD_POLICY: InvestmentPolicyJson = {
+  ...POLICY,
+  legs: [
+    { mint: SPYX_MINT, weightBps: 5_000, minOutRateWad: "124719467624105690" },
+    { mint: ANTHROPIC_MINT, weightBps: 5_000, minOutRateWad: "5277777777777777778" },
+  ],
+  minConvertRateWad: "90000000000000000",
+};
+
+/** SOL at $40.00 a SOL: under POLICY's $50.02 safety floor. */
+const SOL_UNDER_SAFETY_FLOOR = { slot: 1, convertWad: "40000000000000000", usdcRawPerSol: "40000000", legs: [] } as unknown as VaultStateJson["prices"];
+/** SOL at $100.04, the price POLICY was signed at. */
+const SOL_AT_SIGNING = { slot: 1, convertWad: "100038711555492562", usdcRawPerSol: "100038711", legs: [] } as unknown as VaultStateJson["prices"];
+
+/** Prices under which OLD_POLICY's SOL floor is passed: SOL at 1 wad, far under its 9e16 floor. */
+const SOL_UNDER_OLD_FLOOR = { slot: 1, convertWad: "1", usdcRawPerSol: "0", legs: [] } as unknown as VaultStateJson["prices"];
+
+function vaultState(
+  policy: InvestmentPolicyJson | null,
+  status: "exists" | "missing" | "unreadable" = policy === null ? "missing" : "exists",
+  prices: VaultStateJson["prices"] = null,
+): VaultStateJson {
   return {
     owner: "owner",
     programId: "program",
@@ -114,7 +145,7 @@ function vaultState(policy: InvestmentPolicyJson | null, status: "exists" | "mis
     holdings: { status: "exists", items: [] },
     vaultTokenAccounts: { status: "exists", items: [] },
     rents: null,
-    prices: null,
+    prices,
   } as unknown as VaultStateJson;
 }
 
@@ -252,30 +283,75 @@ describe("one Save", () => {
   });
 });
 
-describe("refresh price limits", () => {
-  it("re-signs the stored basket as it stands, at today's prices", () => {
-    const form = mount(vaultState(POLICY))!;
-    const press = button(refreshOf(form, false), SETTINGS_COPY.refresh);
+describe("switch to live-price buying", () => {
+  it("is offered over a basket still carrying old price limits, and re-signs it as it stands", () => {
+    const form = mount(vaultState(OLD_POLICY))!;
+    const press = button(refreshOf(form, false), SETTINGS_COPY.switchLive);
     expect(press).not.toBeNull();
     press!.props.onClick();
     const [sent] = calls.policy as InvestRequest[];
     expect(sent!.maxPerCall).toBe(149_000_000n);
     expect(sent!.minInvestment).toBe(5_000_000n);
-    expect(sent!.enabled).toBe(POLICY.enabled);
+    expect(sent!.enabled).toBe(OLD_POLICY.enabled);
     expect([...(sent!.weights ?? new Map())].sort()).toEqual([
       [ANTHROPIC_MINT, 5_000],
       [SPYX_MINT, 5_000],
     ].sort());
   });
 
-  it("is not offered without a signed basket", () => {
+  it("is not offered over a live-price basket, nor without a signed basket", () => {
+    expect(mount(vaultState(POLICY))!.refresh).toBeNull();
     expect(mount(vaultState(null))!.refresh).toBeNull();
   });
 
+  it("goes first, in urgent words, only when the old limits stop buying", () => {
+    const held = mount(vaultState(OLD_POLICY))!;
+    expect(held.refreshFirst).toBe(false);
+    const heldText = renderToStaticMarkup(createElement("div", null, refreshOf(held, false)));
+    expect(heldText).toContain(SETTINGS_COPY.switchLiveHeld);
+    expect(heldText).not.toContain(SETTINGS_COPY.switchLiveBlocking);
+
+    const blocking = mount(vaultState(OLD_POLICY, "exists", SOL_UNDER_OLD_FLOOR))!;
+    expect(blocking.refreshFirst).toBe(true);
+    expect(renderToStaticMarkup(createElement("div", null, refreshOf(blocking, false)))).toContain(SETTINGS_COPY.switchLiveBlocking);
+  });
+
   it("is held while the basket has unsaved edits: it would re-sign the stored one under them", () => {
-    const form = mount(vaultState(POLICY))!;
-    expect(button(refreshOf(form, true), SETTINGS_COPY.refresh)).toBeNull();
-    expect(renderToStaticMarkup(createElement("div", null, refreshOf(form, true)))).toContain(SETTINGS_COPY.refreshBlocked);
+    const form = mount(vaultState(OLD_POLICY))!;
+    expect(button(refreshOf(form, true), SETTINGS_COPY.switchLive)).toBeNull();
+    expect(renderToStaticMarkup(createElement("div", null, refreshOf(form, true)))).toContain(SETTINGS_COPY.switchLiveBlocked);
+  });
+});
+
+/**
+ * SOL UNDER A NEWER BASKET'S SAFETY FLOOR (owner, 2026-10-09): conversion is
+ * stopped until the owner signs again, so the gear offers the same one-press
+ * re-sign, first and in its own words — and says nothing while SOL is over it.
+ */
+describe("approve again at today's price", () => {
+  it("is not offered while SOL is over the safety floor, or its price is unread", () => {
+    expect(mount(vaultState(POLICY, "exists", SOL_AT_SIGNING))!.refresh).toBeNull();
+    expect(mount(vaultState(POLICY))!.refresh).toBeNull();
+  });
+
+  it("goes first when SOL is under it, says why, and re-signs the stored basket as it stands", () => {
+    const form = mount(vaultState(POLICY, "exists", SOL_UNDER_SAFETY_FLOOR))!;
+    expect(form.refreshFirst).toBe(true);
+    const text = renderToStaticMarkup(createElement("div", null, refreshOf(form, false)));
+    expect(text).toContain(SETTINGS_COPY.safetyFloorBlocking.replaceAll("'", "&#x27;"));
+    expect(text).not.toContain(SETTINGS_COPY.switchLiveBlocking);
+    expect(button(refreshOf(form, false), SETTINGS_COPY.switchLive)).toBeNull();
+    const press = button(refreshOf(form, false), SETTINGS_COPY.safetyFloor.replaceAll("'", "&#x27;"));
+    expect(press).not.toBeNull();
+    press!.props.onClick();
+    const [sent] = calls.policy as InvestRequest[];
+    expect([sent!.maxPerCall, sent!.minInvestment, sent!.enabled]).toEqual([149_000_000n, 5_000_000n, POLICY.enabled]);
+  });
+
+  it("is held while the basket has unsaved edits, in its own words", () => {
+    const form = mount(vaultState(POLICY, "exists", SOL_UNDER_SAFETY_FLOOR))!;
+    expect(button(refreshOf(form, true), SETTINGS_COPY.safetyFloor.replaceAll("'", "&#x27;"))).toBeNull();
+    expect(renderToStaticMarkup(createElement("div", null, refreshOf(form, true)))).toContain(SETTINGS_COPY.safetyFloorBlocked.replaceAll("'", "&#x27;"));
   });
 });
 
@@ -292,8 +368,15 @@ describe("the basket the card shows", () => {
 });
 
 describe("the gear on the card", () => {
-  it("is handed to the card closed, with no dot over a basket whose limits are current", () => {
+  it("is handed to the card closed, with no dot over a live-price basket, and a dot over one still carrying old price limits", () => {
     mount(vaultState(POLICY));
     expect(calls.door).toMatchObject({ open: false, attention: false });
+    mount(vaultState(OLD_POLICY));
+    expect(calls.door).toMatchObject({ open: false, attention: true });
+    // A live-price basket whose SOL fell under its safety floor gets the dot too; over it, none.
+    mount(vaultState(POLICY, "exists", SOL_AT_SIGNING));
+    expect(calls.door).toMatchObject({ open: false, attention: false });
+    mount(vaultState(POLICY, "exists", SOL_UNDER_SAFETY_FLOOR));
+    expect(calls.door).toMatchObject({ open: false, attention: true });
   });
 });

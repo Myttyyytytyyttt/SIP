@@ -176,12 +176,8 @@ export interface LegPoolFixture {
   readonly sqrtPriceX64: bigint;
   /** legUsdcWad: leg raw out per USDC raw in, x 1e18. */
   readonly legWad: bigint;
-  /** floorWad(legWad, LEG_FLOOR_MARGIN_BPS = 500): the floor set_invest_policy stores. */
-  readonly floorWad: bigint;
   /** usdcRawPer1e8LegRaw(legWad): what 1e8 raw units cost at today's rate. */
   readonly usdcRawPer1e8: bigint;
-  /** usdcRawPer1e8LegRaw(floorWad): the most the floor lets be paid for 1e8 raw units. */
-  readonly maxUsdcRawPer1e8: bigint;
   /** token_vault_0 at offset 137: the leg's own vault, as mainnet's pool names it. */
   readonly vault0: string;
   /** token_vault_1 at offset 169: the USDC vault — the IN side, the one the reserve panel reads. */
@@ -217,9 +213,7 @@ export const LEG_POOLS: readonly LegPoolFixture[] = Object.freeze([
     decimals: 8,
     sqrtPriceX64: SPYX_SQRT_PRICE,
     legWad: 131_283_650_130_637_569n,
-    floorWad: 124_719_467_624_105_690n,
     usdcRawPer1e8: 761_709_474n,
-    maxUsdcRawPer1e8: 801_799_446n,
     vault0: "CiQuPAfYp5v82vijk6u7wqFnaZqtGdJfUUSjDKAtT9ML",
     usdcVault: "3EmW8zJDHrfgwpQJAt1oD6nxgQZLUwrCRSKk8Gr3iKRF",
     usdcReserve: 2_110_084_527_716n,
@@ -231,9 +225,7 @@ export const LEG_POOLS: readonly LegPoolFixture[] = Object.freeze([
     decimals: 9,
     sqrtPriceX64: ANTHROPIC_SQRT_PRICE,
     legWad: 5_555_555_555_555_555_556n,
-    floorWad: 5_277_777_777_777_777_778n,
     usdcRawPer1e8: 18_000_000n,
-    maxUsdcRawPer1e8: 18_947_369n,
     vault0: "FgHMtKqgquroXWykub1XgLBhtH98m7E9QwFWeyDYLEEn",
     usdcVault: "FZmwQEZqNiSPx1CbATM9uEbAr67iXYV2n2Az6tjGEGmh",
     usdcReserve: 9_575_440_815n,
@@ -310,13 +302,24 @@ export const SYSVAR_PROGRAM_ADDRESS = "Sysvar11111111111111111111111111111111111
  */
 export const BUILD_EPOCH = 1_041n;
 
-/** The Clock sysvar as the chain holds it: slot, epoch_start_timestamp, EPOCH at byte 16, leader_schedule_epoch, unix_timestamp. */
-export function clockSysvarAccount(epoch: bigint = BUILD_EPOCH, owner = SYSVAR_PROGRAM_ADDRESS): AccountJson {
+/**
+ * The Clock sysvar as the chain holds it: slot, epoch_start_timestamp, EPOCH at
+ * byte 16, leader_schedule_epoch, unix_timestamp (an i64 at byte 32). The unix
+ * time is 0 unless a test names one, which makes any Pyth publish look decades
+ * in the future rather than fresh: a test that means the oracle to be judged
+ * passes the time it means.
+ */
+export function clockSysvarAccount(epoch: bigint = BUILD_EPOCH, owner = SYSVAR_PROGRAM_ADDRESS, unixSeconds = 0n): AccountJson {
   const data = new Uint8Array(40);
   let left = epoch;
   for (let i = 0; i < 8; i++) {
     data[16 + i] = Number(left & 0xffn);
     left >>= 8n;
+  }
+  let time = BigInt.asUintN(64, unixSeconds);
+  for (let i = 0; i < 8; i++) {
+    data[32 + i] = Number(time & 0xffn);
+    time >>= 8n;
   }
   return accountInfo(owner, data, 1_169_280);
 }

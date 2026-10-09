@@ -271,11 +271,19 @@ export interface SavingsStats {
   readonly projectedYearUsd: number | null;
   /**
    * What "Next investment" counts toward the threshold, where that is not the
-   * whole pending pile. On a live vault only the USDC already converted is
-   * ready to buy with; the SOL and wSOL still waiting are pending but not yet
-   * this. Absent means the sample's own reading: pendingUsd.
+   * whole pending pile. On a live vault it is the USDC already converted, plus
+   * the SOL on its way to USDC at today's price (live-pending.ts); SOL held
+   * back by a rest the page can read — a pause, buying or converting switched
+   * off, the 30-day limit — is pending but not this.
+   * Absent means the sample's own reading: pendingUsd.
    */
   readonly readyToInvestUsd?: number | null;
+  /**
+   * A live page's line under "Next investment" about money already on its way:
+   * the SOL being converted to USDC that `readyToInvestUsd` now counts, or a
+   * basket ready to buy (src/lib/live-pending.ts). Absent on the sample.
+   */
+  readonly nextInvestmentNote?: string | null;
   /**
    * The words a live page puts on the tiles whose sample names would claim
    * something the chain does not record — "Settlements" where the sample says

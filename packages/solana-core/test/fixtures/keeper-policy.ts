@@ -217,9 +217,11 @@ export const LEG_FEE = Object.freeze({
  * quotedOut 2,612,063 at slippage 400, a Manifest last hop that quotes gross.
  *
  * WHICH SIDE ASSERTS IT: solana-core's product.test.ts holds its mirror
- * (keeperInvestMinOutFor) to every case, and the website's floor check is
- * built on that mirror. THE KEEPER'S OWN TESTS DO NOT READ THIS ENTRY YET: a
- * change to investMinOutFor goes red here only once someone adds that half.
+ * (keeperInvestMinOutFor) to every case, and the website's judgement of a
+ * policy signed before 2026-10-08 (invest-limits.ts floorRoom) is built on that
+ * mirror. Since 2026-10-08 the keeper's own jupiter-route.test.ts runs every
+ * case through the real investMinOutFor as well, so a change to it goes red
+ * in the keeper.
  */
 export const OWNER_FLOOR_MIN_OUT = Object.freeze({
   keeper: Object.freeze({ function: "investMinOutFor", module: "jupiter-route.ts", deployedAt: "df6ca67" }),
@@ -326,10 +328,118 @@ export const ROUTED_VENUE = Object.freeze({
    * RETIRED, AND THE POINT IS THAT IT IS STILL REAL. Raydium CLMM is what every
    * policy signed before 2026-09-22 names — the live mainnet one was re-signed
    * onto Jupiter v6 that day (CHANGELOG.md) — and it is still the PRICE SOURCE
-   * the floors are read from (readers.ts PRICED_POOLS).
+   * the screens read (readers.ts PRICED_POOLS). Since 2026-10-08 no floor is
+   * signed from it (product.ts LIVE_PRICE_FLOOR_WAD).
    * What it may never be again is a venue a new policy can be signed with.
    */
   retired: Object.freeze({ constant: "RAYDIUM_CLMM", programId: "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", venueName: "raydium-clmm", stillAPriceSource: true }),
   /** One venue, on purpose: a second entry is a second route builder, not a second name. */
   routableCount: 1,
+});
+
+/**
+ * THE PRICE FLOOR EVERY NEW POLICY SIGNS ON ITS LEGS SINCE 2026-10-08: 1 wad,
+ * for every leg's min_out_rate_wad (solana-core product.ts LIVE_PRICE_FLOOR_WAD
+ * says why, and what the owner accepted). 1 is the least set_invest_policy
+ * accepts on a leg. (It was the SOL hop's min_convert_rate_wad too until
+ * 2026-10-09; that one is CONVERT_SAFETY_FLOOR below now. The keeper still
+ * reads 0 on the SOL hop as "conversion off", and any value above 0 as on.)
+ *
+ * WHAT THE KEEPER MUST DO WITH IT, asserted in the keeper: convertDecision
+ * converts (no "CONVERSION IS OFF" alarm), and the owner floor it computes
+ * (jupiter-route.ts ownerFloorFor = amount_in x wad / 1e18) is 0 for any
+ * amount under 1e18 raw, so investMinOutFor hands invest() the live
+ * netOfVenueThreshold. The measured leg is OWNER_FLOOR_MIN_OUT's.
+ */
+export const LIVE_PRICE_FLOOR = Object.freeze({
+  /** packages/solana-core/src/client/product.ts, signed by build-handler.ts and checked by the website's vault-flows.ts. */
+  web: Object.freeze({ constant: "LIVE_PRICE_FLOOR_WAD", module: "product.ts", value: 1n }),
+  /** The measured ANTHROPIC leg at a 1-wad floor: ownerFloor 0, so min_out is the venue's own threshold net of the fee. */
+  measured: Object.freeze({ amountIn: 2_752_188n, ownerFloor: 0n, minOut: 2_432_353n }),
+  /** ownerFloorFor(amount, 1) is 0 strictly under this many raw units and 1 at it: 1e18. */
+  ownerFloorZeroBelowRaw: 1_000_000_000_000_000_000n,
+});
+
+/**
+ * THE SOL HOP'S SAFETY FLOOR EVERY NEW POLICY SIGNS SINCE 2026-10-09 (owner:
+ * "pon el mínimo del 50% en el SOL"): min_convert_rate_wad at `bps` of the live
+ * SOL/USDC rate at signing, rounded down (solana-core product.ts
+ * CONVERT_SAFETY_FLOOR_BPS says why the conversion keeps a floor when the legs
+ * do not).
+ *
+ * THE KEEPER HAS NO COPY OF THE NUMBER: it reads the floor from the policy,
+ * converts when it is above 0 (convertDecision), and hands the route builder
+ * ownerFloorFor(lamports, floor) as the least the conversion may pay. What it
+ * must do with a floor of THIS size is asserted on the keeper's side against
+ * `measured`: one SOL converts while the venue pays more than half the signing
+ * price, and is refused (below-owner-floor) once it pays less.
+ *
+ * WHICH SIDE GOES RED: solana-core's handlers-build.test.ts holds
+ * CONVERT_SAFETY_FLOOR_BPS and the build's answer to `web` and `measured`; the
+ * website's vault-flows.test.ts holds its pre-sign band to `web`; the keeper's
+ * jupiter-route.test.ts runs `measured` through ownerFloorFor and
+ * investMinOutFor.
+ */
+export const CONVERT_SAFETY_FLOOR = Object.freeze({
+  /** packages/solana-core/src/client/product.ts, signed by build-handler.ts investPolicy. */
+  web: Object.freeze({ constant: "CONVERT_SAFETY_FLOOR_BPS", module: "product.ts", bps: 5_000 }),
+  /**
+   * The test chain's SOL/USDC pool (chain-fixtures.ts SOL_SQRT_PRICE, mainnet
+   * slot 447313239): $100.04 a SOL as USDC raw per lamport x 1e18, and half of
+   * it rounded down. For one SOL (1e9 lamports) that floor is 50,019,355 USDC raw.
+   */
+  measured: Object.freeze({
+    liveConvertWad: 100_038_711_555_492_562n,
+    floorWad: 50_019_355_777_746_281n,
+    oneSolLamports: 1_000_000_000n,
+    oneSolFloorUsdcRaw: 50_019_355n,
+  }),
+});
+
+/**
+ * THE KEEPER'S PYTH GUARD ON THE SOL HOP, the numbers the website now quotes
+ * as part of the price protection (the policy signs no price floor since
+ * 2026-10-08): the conversion waits while Pyth's price is older than
+ * maxAgeSeconds, while either feed's confidence band is wider than confBps of
+ * its price, or while the conversion's own quote sits more than deviationBps
+ * from Pyth's rate.
+ *
+ * WHICH SIDE GOES RED: the keeper's invest-decision.test.ts holds
+ * MAX_PYTH_AGE_SECONDS, MAX_PYTH_CONF_BPS and MAX_PYTH_DEVIATION_BPS to
+ * `keeper`; the website's vault-copy.test.ts holds PYTH_MAX_AGE_SECONDS,
+ * PYTH_CONF_BPS and PYTH_DEVIATION_BPS to `web` and to the percentages it prints.
+ */
+export const PYTH_GUARD = Object.freeze({
+  /** packages/solana-keeper/src/invest-decision.ts */
+  keeper: Object.freeze({ module: "invest-decision.ts", maxAgeSeconds: 60n, confBps: 50n, deviationBps: 500n }),
+  /** packages/website-oficial/src/lib/vault-copy.ts, printed by INVEST_COPY.keeperChecks. */
+  web: Object.freeze({ module: "vault-copy.ts", maxAgeSeconds: 60, confBps: 50, deviationBps: 500 }),
+  /** THE UNIT THE WEBSITE PRINTS: 50 bps is 0.5 %, 500 bps is 5 %. */
+  confPercent: 0.5,
+  deviationPercent: 5,
+});
+
+/**
+ * THE KEEPER'S DUST LINES ON THE SOL HOP, which the website's pending rows
+ * (website-oficial src/lib/live-pending.ts, owner 2026-10-08) use to say when
+ * the vault's SOL is on its way to USDC. Free SOL above the vault's rent is
+ * wrapped from `wrapDustLamports` up; wSOL already held is converted from
+ * `convertDustLamports` up, or whenever a wrap just added to it. Under both,
+ * nothing moves and the page says nothing is in flight.
+ *
+ * WHICH SIDE GOES RED: the keeper's invest-decision.test.ts holds
+ * WRAP_DUST_LAMPORTS and CONVERT_DUST_LAMPORTS to `keeper` and runs `boundary`
+ * through wrapPlan and shouldConvert; the website's live-pending.test.ts holds
+ * its constants of the same names to `web` and runs `boundary` through
+ * pendingSteps.
+ */
+export const KEEPER_DUST = Object.freeze({
+  /** packages/solana-keeper/src/invest-decision.ts */
+  keeper: Object.freeze({ module: "invest-decision.ts", wrapDustLamports: 5_000_000n, convertDustLamports: 5_000_000n }),
+  /** packages/website-oficial/src/lib/live-pending.ts */
+  web: Object.freeze({ module: "live-pending.ts", wrapDustLamports: 5_000_000n, convertDustLamports: 5_000_000n }),
+  /** THE UNIT THE WEBSITE PRINTS: 0.005 SOL each. */
+  sol: 0.005,
+  /** Either side of the comparison both make (`>=`): the first moves, the second does not. */
+  boundary: Object.freeze({ moves: 5_000_000n, stays: 4_999_999n }),
 });

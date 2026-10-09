@@ -40,7 +40,7 @@ import { tickerLogo, type ActivityEvent, type InvestedEvent, type SavingsRule, t
 export interface RuleSettingsDoor {
   readonly open: boolean;
   readonly onOpen: () => void;
-  /** Something behind the gear needs doing (price limits to refresh, a write to confirm): a dot on the gear. */
+  /** Something behind the gear needs doing (old price limits to switch from, a write to confirm): a dot on the gear. */
   readonly attention: boolean;
 }
 
@@ -131,7 +131,7 @@ export function SavingsRulePanel({
 
   const lastInvestment = activity.find((event): event is InvestedEvent => event.kind === "invested");
   // What counts toward the threshold: the sample's pending pile, or — on a live
-  // vault — only the USDC already converted and ready to buy with.
+  // vault — the USDC already converted and the SOL being converted to it.
   const ready = stats.readyToInvestUsd === undefined ? stats.pendingUsd : stats.readyToInvestUsd;
   // What the rate is taken from, in the vault's own words.
   const appliedTo = mode === "profit" ? "Applied to your realised trading gains" : "Applied to every buy and sell";
@@ -153,7 +153,7 @@ export function SavingsRulePanel({
           {/*
             THE GEAR. Muted at rest; mustard — the colour of a setting — on
             hover and while its dialog is open, and a mustard dot when something
-            behind it needs the owner (price limits to refresh, a write to confirm).
+            behind it needs the owner (old price limits to switch from, a write to confirm).
           */}
           <Button
             type="button"
@@ -214,6 +214,12 @@ export function SavingsRulePanel({
           <p className="text-xs text-muted-foreground">
             <Num>{usd(toGo)}</Num> to go
           </p>
+          {/* A live page's money already on its way; the sample never sets it. */}
+          {stats.nextInvestmentNote ? (
+            <p className="text-xs text-muted-foreground" data-next-investment-note="">
+              {stats.nextInvestmentNote}
+            </p>
+          ) : null}
         </div>
 
         <div className="space-y-2">

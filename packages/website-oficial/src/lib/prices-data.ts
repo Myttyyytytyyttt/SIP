@@ -53,7 +53,7 @@ import {
   SPYX_USDC_POOL,
   decodeMintTransferFee,
   decodePythPriceUpdate,
-  feeToNetBps,
+  worstCaseFeeBps,
   offerProblems,
   pythRateWad,
   type MintTransferFeeSchedule,
@@ -450,8 +450,8 @@ export interface FeeInForce {
   /** The first epoch that rate applies in. */
   readonly sinceEpoch: bigint;
   readonly scheduled: { readonly bps: number; readonly fromEpoch: bigint } | null;
-  /** What a floor signed today must net, which is the HIGHER of the two (solana-core feeToNetBps says why). */
-  readonly netBps: number;
+  /** The fee SaverFi judges against its fee ceiling today: the HIGHER of the two (solana-core worstCaseFeeBps says why). */
+  readonly judgedBps: number;
 }
 
 export function feeInForce(schedule: MintTransferFeeSchedule | null, epoch: bigint): FeeInForce | null {
@@ -462,7 +462,7 @@ export function feeInForce(schedule: MintTransferFeeSchedule | null, epoch: bigi
     bps: live.bps,
     sinceEpoch: live.epoch,
     scheduled: arrived || schedule.newer.epoch <= schedule.older.epoch ? null : { bps: schedule.newer.bps, fromEpoch: schedule.newer.epoch },
-    netBps: feeToNetBps(schedule, epoch),
+    judgedBps: worstCaseFeeBps(schedule, epoch),
   };
 }
 

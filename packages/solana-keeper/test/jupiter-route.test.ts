@@ -1526,6 +1526,71 @@ describe("min_out under the owner's floor: the provable number, else the owner's
     expect(investMinOut(route)).toBe(3_221_704n);
   });
 
+  /**
+   * THE LIVE-PRICE FLOOR (owner, 2026-10-08): every new policy signs
+   * min_out_rate_wad = 1. The owner floor it gives is amount_in x 1 / 1e18 = 0
+   * for any real buy, so the route builder hands invest() its own live number
+   * — the venue's threshold net of the fee — and refuses nothing for the floor.
+   */
+  it("at the 1-wad live-price floor, the owner floor is 0 and invest() gets the live min_out", () => {
+    const route = verifySharedAccountsRoute(quote(), responseDeliveringToVault(), context({ transferFee: FEE_100, ownerFloorRateWad: 1n }));
+    expect(route.output.ownerFloor).toBe(0n);
+    expect(route.output.netOfVenueThreshold).toBe(3_189_486n);
+    expect(investMinOut(route)).toBe(route.output.netOfVenueThreshold);
+  });
+
+  it("runs the committed vector through the real investMinOutFor: every OWNER_FLOOR_MIN_OUT case, and the 1-wad floor on the measured leg", async () => {
+    const VECTOR = "keeper-policy";
+    const { OWNER_FLOOR_MIN_OUT, LIVE_PRICE_FLOOR } = (await import(`../../solana-core/test/fixtures/${VECTOR}.ts`)) as {
+      OWNER_FLOOR_MIN_OUT: {
+        measured: { amountIn: bigint; venueThreshold: bigint; netOfVenueThreshold: bigint };
+        cases: readonly (readonly [bigint | null, bigint | null])[];
+      };
+      LIVE_PRICE_FLOOR: { web: { value: bigint }; measured: { amountIn: bigint; ownerFloor: bigint; minOut: bigint }; ownerFloorZeroBelowRaw: bigint };
+    };
+    const { venueThreshold, netOfVenueThreshold } = OWNER_FLOOR_MIN_OUT.measured;
+    // Compared with literals first, so a renamed field cannot pass as undefined.
+    expect([venueThreshold, netOfVenueThreshold]).toEqual([2_507_581n, 2_432_353n]);
+    expect(OWNER_FLOOR_MIN_OUT.cases.length).toBe(6);
+    for (const [ownerFloor, minOut] of OWNER_FLOOR_MIN_OUT.cases) {
+      expect(investMinOutFor({ venueThreshold, netOfVenueThreshold, ownerFloor }), `owner floor ${ownerFloor}`).toBe(minOut);
+    }
+    const live = LIVE_PRICE_FLOOR.measured;
+    expect(live.amountIn).toBe(OWNER_FLOOR_MIN_OUT.measured.amountIn);
+    expect(ownerFloorFor(live.amountIn, LIVE_PRICE_FLOOR.web.value)).toBe(live.ownerFloor);
+    expect(investMinOutFor({ venueThreshold, netOfVenueThreshold, ownerFloor: live.ownerFloor })).toBe(live.minOut);
+    expect(live.minOut).toBe(netOfVenueThreshold);
+    expect(ownerFloorFor(LIVE_PRICE_FLOOR.ownerFloorZeroBelowRaw - 1n, 1n)).toBe(0n);
+    expect(ownerFloorFor(LIVE_PRICE_FLOOR.ownerFloorZeroBelowRaw, 1n)).toBe(1n);
+  });
+
+  /**
+   * THE SOL HOP'S SAFETY FLOOR (owner, 2026-10-09): every new policy signs
+   * min_convert_rate_wad at half the SOL price at signing. The keeper has no
+   * copy of that number — it reads the policy — so what is pinned here is what
+   * its own arithmetic does with a floor of that size, from the shared vector:
+   * one SOL converts while the venue pays at least half the signing price, and
+   * is refused once it pays a raw unit less. wSOL and USDC carry no transfer
+   * fee, so the net threshold is the venue's.
+   */
+  it("converts one SOL at a 50 % safety floor while the venue pays half the signing price, and refuses a raw unit under it", async () => {
+    const VECTOR = "keeper-policy";
+    const { CONVERT_SAFETY_FLOOR } = (await import(`../../solana-core/test/fixtures/${VECTOR}.ts`)) as {
+      CONVERT_SAFETY_FLOOR: { web: { bps: number }; measured: { floorWad: bigint; oneSolLamports: bigint; oneSolFloorUsdcRaw: bigint } };
+    };
+    expect(CONVERT_SAFETY_FLOOR.web.bps).toBe(5_000);
+    const { floorWad, oneSolLamports, oneSolFloorUsdcRaw } = CONVERT_SAFETY_FLOOR.measured;
+    const ownerFloor = ownerFloorFor(oneSolLamports, floorWad);
+    expect(ownerFloor).toBe(oneSolFloorUsdcRaw);
+    expect(ownerFloor).toBe(50_019_355n);
+    // An ordinary day: the venue pays about the signing price, far over the floor.
+    expect(investMinOutFor({ venueThreshold: 98_000_000n, netOfVenueThreshold: 98_000_000n, ownerFloor })).toBe(98_000_000n);
+    // Exactly half: still converts, at the floor.
+    expect(investMinOutFor({ venueThreshold: ownerFloor, netOfVenueThreshold: ownerFloor, ownerFloor })).toBe(ownerFloor);
+    // SOL has halved since the signature: a raw unit under the floor is refused.
+    expect(investMinOutFor({ venueThreshold: ownerFloor - 1n, netOfVenueThreshold: ownerFloor - 1n, ownerFloor })).toBeNull();
+  });
+
   it("still refuses a fee route whose venue floor is one raw unit under the owner's [below-owner-floor]", () => {
     const { condition, message } = refusal(
       quote(),

@@ -22,6 +22,7 @@
 import { useState, type ReactNode } from "react";
 
 import { FeedFooter, LiveActivityFeed } from "@/components/live/LiveActivityFeed";
+import { PendingRows } from "@/components/live/LivePending";
 import { secondsUntil } from "@/components/live/LiveStates";
 import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
@@ -30,11 +31,12 @@ import { formatSol } from "@/lib/amounts";
 import { LABEL } from "@/lib/classes";
 import { dateLabel } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
+import type { PendingLine } from "@/lib/live-pending";
 import type { LiveDashboard, LiveRow, VaultEventKindJson } from "@/lib/live-types";
 import type { LiveOlder } from "@/hooks/use-live-dashboard";
 import { cn } from "@/lib/utils";
 
-type Filter = "all" | "savings" | "investing" | "withdrawals";
+export type Filter = "all" | "savings" | "investing" | "withdrawals";
 
 /** Which event kinds each chip keeps. `all` keeps everything the model made visible. */
 const KINDS: Readonly<Record<Exclude<Filter, "all">, ReadonlySet<VaultEventKindJson>>> = {
@@ -42,6 +44,11 @@ const KINDS: Readonly<Record<Exclude<Filter, "all">, ReadonlySet<VaultEventKindJ
   investing: new Set<VaultEventKindJson>(["wrapped", "converted", "invested", "policy_signed"]),
   withdrawals: new Set<VaultEventKindJson>(["withdrew_sol", "withdrew_token"]),
 };
+
+/** Converting and buying are investing: shown under All and Investing, never under Savings or Withdrawals. */
+export function pendingShownFor(filter: Filter, pending: readonly PendingLine[]): readonly PendingLine[] {
+  return filter === "all" || filter === "investing" ? pending : [];
+}
 
 const CHIPS: readonly (readonly [Filter, string])[] = [
   ["all", ACTIVITY_COPY.filterAll],
@@ -61,6 +68,7 @@ export function LiveActivityPage({
   activityUnreadable,
   activityRetryAt = null,
   nextStep,
+  pending = [],
   emptyNote,
   className,
 }: {
@@ -83,6 +91,8 @@ export function LiveActivityPage({
   readonly activityRetryAt?: number | null;
   /** The one thing to do next. Shown INSTEAD of the summary before a vault exists. */
   readonly nextStep: ReactNode;
+  /** What the keeper is about to do with the vault's money (src/lib/live-pending.ts), over the rows. */
+  readonly pending?: readonly PendingLine[];
   readonly emptyNote?: string;
   readonly className?: string;
 }) {
@@ -95,6 +105,7 @@ export function LiveActivityPage({
   // is not in the vault's page, and the footer must not contradict the strip.
   const settlements = data.settlementRows.length;
   const retryIn = secondsUntil(older.retryAt, nowMs);
+  const pendingShown = pendingShownFor(filter, pending);
 
   const frame = (children: ReactNode) => <div className={cn("flex min-w-0 flex-1 flex-col gap-4 p-4 lg:gap-6 lg:p-6", className)}>{children}</div>;
 
@@ -147,6 +158,7 @@ export function LiveActivityPage({
           </div>
 
           <div className="overflow-hidden rounded-md border">
+            <PendingRows lines={pendingShown} {...(pendingShown.length === 0 ? {} : { className: "border-b" })} />
             <LiveActivityFeed
               rows={rows}
               now={now}

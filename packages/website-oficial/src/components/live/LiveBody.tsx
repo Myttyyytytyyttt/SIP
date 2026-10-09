@@ -26,6 +26,7 @@ import { LiveNextStep } from "@/components/live/LiveNextStep";
 import { LiveStartBuying } from "@/components/live/LiveStartBuying";
 import { LiveRulePanel } from "@/components/live/LiveRulePanel";
 import { FeedBanner, HiddenRows, LeadNotes, WalletList } from "@/components/live/LiveColumn";
+import { PendingRows } from "@/components/live/LivePending";
 import { secondsUntil } from "@/components/live/LiveStates";
 import { DashboardSource } from "@/components/DashboardSource";
 import { DashboardMain, PENSION_SLOT, RULE_SLOT } from "@/components/dashboard-main";
@@ -42,6 +43,7 @@ import { clockLabel } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import { rawFrom } from "@/lib/amounts";
 import { anchorOf, toDashboardMock } from "@/lib/live-mock";
+import { pendingLines, pendingSteps } from "@/lib/live-pending";
 import type { LiveDashboard } from "@/lib/live-types";
 import { seatProblem } from "@/lib/trading-wallets";
 import type { WalletsSection } from "@/lib/wallets-sections";
@@ -97,6 +99,8 @@ export function LiveBody({
   // draw instead of the seeded example — real figures, today's dollars, and a
   // dash wherever the chain has no answer (src/lib/live-mock.ts).
   const page = toDashboardMock(data, { complete: older.complete });
+  // WHAT IS ON ITS WAY: SOL converting, a basket about to be bought (src/lib/live-pending.ts).
+  const pending = pendingLines(pendingSteps(data));
 
   /** A wallet's own label, so a settlement says which one it came from. */
   const labelOf = (wallet: string | null): string => {
@@ -137,6 +141,8 @@ export function LiveBody({
         below: lead === null ? null : <LeadNotes wallet={lead} />,
         list: <WalletList wallets={data.wallets} usdcRawPerSol={rawFrom(data.prices?.usdcRawPerSol)} />,
         banner: activityUnreadable ? <FeedBanner onRetry={onRefresh} retryAt={activityRetryAt} nowMs={nowMs} /> : null,
+        // On /activity the page's own list announces the steps; the column only shows them.
+        pending: <PendingRows lines={pending} announce={view !== "activity"} />,
         hidden: <HiddenRows events={page.hidden ?? []} upkeep={data.hiddenUpkeep} dust={data.hiddenDust} now={page.now} id={id} />,
         // A page whose every transaction was upkeep is not an empty history.
         empty: emptyNote ?? (data.hiddenRows.length > 0 ? ACTIVITY_COPY.onlyHidden : ACTIVITY_COPY.empty),
@@ -186,6 +192,7 @@ export function LiveBody({
             activityUnreadable={activityUnreadable}
             activityRetryAt={activityRetryAt}
             nextStep={nextStep}
+            pending={pending}
             {...(emptyNote === undefined ? {} : { emptyNote })}
           />
         ) : (
@@ -200,6 +207,10 @@ export function LiveBody({
                   </p>
                 ) : null}
                 {nextStep}
+                {/* BELOW lg THE ACTIVITY COLUMN IS IN A CLOSED SHEET, so the steps
+                    on their way lead the page instead; from lg up the column
+                    shows them and this copy is not displayed (LivePending.tsx). */}
+                <PendingRows lines={pending} variant="card" className="lg:hidden" />
                 {/* The buying approval the setup promised, once the first savings have landed. */}
                 <LiveStartBuying data={data} pensionKey={pensionKey} onRefresh={onRefresh} />
               </>

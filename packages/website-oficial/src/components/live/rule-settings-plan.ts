@@ -459,26 +459,10 @@ export function planSettings(input: SettingsPlanInput): SettingsPlan {
   return { rule, policy, choice, problem: null, changes, notices, newLegs, acknowledge, approvals };
 }
 
-// ── (4) "REFRESH PRICE LIMITS" ──────────────────────────────────────────────
-
-/**
- * THE STORED POLICY RE-SIGNED AT TODAY'S PRICES: byte-for-byte what the
- * investing card's "Sign again" sends (InvestingCard.tsx PolicySummary) — the
- * stored caps, `enabled` as stored, the stored basket by mint and its own
- * minimum, the venue left to the route's default. The server builds the new
- * floors from today's pools, net of the higher of the live and written fee.
- *
- * One difference, for an unreadable field only: "Sign again" would send a
- * 30-day cap it could not read as 0n; this refuses instead.
- */
-export function refreshRequest(policy: InvestmentPolicyJson): InvestRequest | { readonly problem: string } {
-  const resign = resignStoredPolicy(policy);
-  if (!resign.ok) return { problem: resign.message };
-  const maxPerCall = rawFrom(policy.maxPerCall);
-  const maxRolling30d = rawFrom(policy.maxRolling30d);
-  if (maxPerCall === null || maxRolling30d === null) return { problem: INVEST_COPY.resignUnreadable };
-  return { maxPerCall, maxRolling30d, enabled: policy.enabled, minInvestment: resign.minInvestment, weights: resign.weights };
-}
+// ── (4) "SWITCH TO LIVE-PRICE BUYING" ───────────────────────────────────────
+//
+// The request lives beside resignStoredPolicy in InvestingCard.tsx
+// (switchToLiveRequest), which both the investing card and LiveRulePanel send.
 
 // ── (5) THE SHELF, BY CATEGORY ──────────────────────────────────────────────
 

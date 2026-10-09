@@ -18,7 +18,11 @@ import {
   usdcRawPer1e8LegRaw,
   usdcRawPerSol,
 } from "../src/client/clmm-price";
-import { CONVERT_FLOOR_MARGIN_BPS, LEG_FLOOR_MARGIN_BPS } from "../src/client/product";
+// The 10 % and 5 % margins below are the ones the build route signed floors at
+// until 2026-10-08 (it signs LIVE_PRICE_FLOOR_WAD now); they stay here as worked
+// cases of floorWad, which the website still uses on a policy signed before then.
+const OLD_CONVERT_MARGIN_BPS = 1_000;
+const OLD_LEG_MARGIN_BPS = 500;
 import { U128_MAX } from "../src/client/rules";
 
 /** sqrt_price_x64 of 3ucNos4N (wSOL/USDC) and 6truu3rZ (SPYx/USDC) at slot 447313239. */
@@ -41,14 +45,14 @@ describe("the goldens", () => {
   it("convert: sqrtP 5834501654111004443 is 100038711555492562 USDC raw per lamport × 1e18 ($100.04), floored 10 % to 90034840399943305", () => {
     const wad = convertWadFromSqrtPrice(SOL_SQRT);
     expect(wad).toBe(100_038_711_555_492_562n);
-    expect(floorWad(wad, CONVERT_FLOOR_MARGIN_BPS)).toBe(90_034_840_399_943_305n);
+    expect(floorWad(wad, OLD_CONVERT_MARGIN_BPS)).toBe(90_034_840_399_943_305n);
     expect(usdcRawPerSol(wad)).toBe(100_038_711n);
   });
 
   it("SPYx: sqrtP 50911325114989095030 is 131283650130637569 SPYx raw per USDC raw × 1e18, floored 5 % to 124719467624105690", () => {
     const wad = legWadFromSqrtPrice(SPYX_SQRT);
     expect(wad).toBe(131_283_650_130_637_569n);
-    const floor = floorWad(wad, LEG_FLOOR_MARGIN_BPS);
+    const floor = floorWad(wad, OLD_LEG_MARGIN_BPS);
     expect(floor).toBe(124_719_467_624_105_690n);
     // At most $801.80 per 1e8 raw at the floor, against $761.71 at the pool.
     expect(usdcRawPer1e8LegRaw(floor)).toBe(801_799_446n);

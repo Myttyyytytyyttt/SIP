@@ -6,23 +6,22 @@ import { createPrivateKey, sign } from "node:crypto";
 
 import {
   ANTHROPIC_MINT,
-  ANTHROPIC_USDC_POOL,
   ATA_PROGRAM,
-  CLMM_POOL_STATE_BYTES,
-  CLMM_POOL_STATE_DISCRIMINATOR,
   COMPUTE_BUDGET_PROGRAM,
   ED25519_PROGRAM,
   JUPITER_V6,
+  CLMM_POOL_STATE_BYTES,
+  CLMM_POOL_STATE_DISCRIMINATOR,
   RAYDIUM_CLMM,
   SIP_ACCOUNT_SPACE,
-  SIP_PROGRAM_ID,
   SOL_USDC_POOL,
+  WSOL_MINT,
+  tryBase58Decode,
+  SIP_PROGRAM_ID,
   SPYX_MINT,
-  SPYX_USDC_POOL,
   TOKEN_2022_PROGRAM,
   TOKEN_PROGRAM,
   USDC_MINT,
-  WSOL_MINT,
   accountDiscriminator,
   base58Encode,
   base64Encode,
@@ -31,7 +30,6 @@ import {
   parseLegacyMessage,
   splitWire,
   toHex,
-  tryBase58Decode,
   tryBase64Decode,
 } from "@sip/solana-core/client";
 import { deriveAta, deriveConfigPda, deriveLinkPda, deriveVaultPda, verifySignedTransaction } from "@sip/solana-core/server";
@@ -184,18 +182,23 @@ function clockAt(epoch: bigint): AccountJson {
   return { data: [base64Encode(bytes), "base64"], lamports: 1_169_280, owner: "Sysvar1111111111111111111111111111111111111", executable: false, rentEpoch: 0, space: 40 };
 }
 
-/** A Raydium CLMM PoolState with the fields SIP prices from: the mints at 73 and 105, sqrt_price_x64 at 253. */
-function poolOf(mint0: string, mint1: string, sqrtPriceX64: bigint): AccountJson {
+const mainnetRent = (size: number): number => (size + 128) * 5_080;
+
+/**
+ * The wSOL/USDC Raydium CLMM pool the SOL safety floor is read from: the price
+ * fields alone (mints at 73 and 105, sqrt_price_x64 at 253), at mainnet's
+ * 5,834,501,654,111,004,443 of slot 447313239 — $100.04 a SOL.
+ */
+function solPool(sqrtPriceX64 = 5_834_501_654_111_004_443n): AccountJson {
   const bytes = new Uint8Array(CLMM_POOL_STATE_BYTES);
   bytes.set(CLMM_POOL_STATE_DISCRIMINATOR, 0);
-  bytes.set(tryBase58Decode(mint0)!, 73);
-  bytes.set(tryBase58Decode(mint1)!, 105);
+  bytes.set(tryBase58Decode(WSOL_MINT)!, 73);
+  bytes.set(tryBase58Decode(USDC_MINT)!, 105);
+  [bytes[233], bytes[234]] = [9, 6];
   let value = sqrtPriceX64;
   for (let i = 0; i < 16; i++, value >>= 8n) bytes[253 + i] = Number(value & 0xffn);
-  return { data: [base64Encode(bytes), "base64"], lamports: 1_000_000, owner: RAYDIUM_CLMM, executable: false, rentEpoch: 0, space: bytes.length };
+  return { data: [base64Encode(bytes), "base64"], lamports: 1_000_000, owner: RAYDIUM_CLMM, executable: false, rentEpoch: 0, space: CLMM_POOL_STATE_BYTES };
 }
-
-const mainnetRent = (size: number): number => (size + 128) * 5_080;
 
 type Answer = { status: number; text: string; json: { error?: { code: string; message: string; vault?: string; withdrawableLamports?: string } } & Record<string, any> };
 async function answer(response: Response): Promise<Answer> {
@@ -296,38 +299,30 @@ describe("/api/solana-build", () => {
     expect(verified.ok).toBe(true);
   });
 
-  it("investPolicy: floors at 90 % and, for legs with no transfer fee, 95 % of the pools SaverFi prices from, a CreateIdempotent only for each vault account missing, and 502 price_unavailable without a pool", async () => {
+  it("investPolicy: every leg at 1 wad, the live price, and the SOL hop at half the SOL/USDC pool's price; a CreateIdempotent only for each vault account missing", async () => {
     useEnv(SOLANA_ENV);
     const owner = Keypair.generate();
     const ownerKey = owner.publicKey.toBase58();
     const vault = deriveVaultPda(ownerKey).toBase58();
     const accounts = new Map<string, AccountJson>([
       [vault, vaultOf(ownerKey)],
-      [SOL_USDC_POOL, poolOf(WSOL_MINT, USDC_MINT, 5_834_501_654_111_004_443n)],
-      [SPYX_USDC_POOL, poolOf(SPYX_MINT, USDC_MINT, 50_911_325_114_989_095_030n)],
-      // Both legs are priced, because PRICED_POOLS is one pool per offered leg:
-      // without ANTHROPIC's the route reads no prices at all and refuses.
-      [ANTHROPIC_USDC_POOL, poolOf(ANTHROPIC_MINT, USDC_MINT, 7_826_290_695_199_669_327n)],
+      // ONE POOL, SOL/USDC: no stock floor is signed (owner, 2026-10-08), the
+      // SOL safety floor is (owner, 2026-10-09). No Pyth feed: the floor is
+      // signed from the pool alone when the oracle cannot be read.
+      [SOL_USDC_POOL, solPool()],
       [USDC_MINT, ownedBy(TOKEN_PROGRAM, 82)],
       [SPYX_MINT, ownedBy(TOKEN_2022_PROGRAM, 82)],
       [ANTHROPIC_MINT, ownedBy(TOKEN_2022_PROGRAM, 82)],
       [deriveAta(vault, USDC_MINT, TOKEN_PROGRAM).toBase58(), ownedBy(TOKEN_PROGRAM, 165)],
-      // THE CHAIN'S CLOCK, which each leg's transfer fee is resolved against.
-      // These mints are 82 bare bytes — no fee — so the epoch changes nothing
-      // here and the floors are the plain 95 %; the fee cases are solana-core's
-      // (handlers-build.test.ts, "net of each leg's transfer fee").
+      // THE CHAIN'S CLOCK, which each leg's transfer fee is resolved against
+      // for the keeper's fee ceiling. These mints are 82 bare bytes — no fee;
+      // the fee cases are solana-core's (handlers-build.test.ts).
       [SYSVAR_CLOCK, clockAt(1_041n)],
     ]);
     const methods = stubChain(accounts);
     const built = await answer(await POST(buildRequest({ action: "investPolicy", owner: ownerKey })));
     expect(built.status, JSON.stringify(built.json)).toBe(200);
-    expect(built.json.floors).toMatchObject({
-      convertWad: "90034840399943305",
-      legs: [
-        { mint: SPYX_MINT, wad: "124719467624105690" },
-        { mint: ANTHROPIC_MINT, wad: "5277777777777777778" },
-      ],
-    });
+    expect(built.json.floors).toEqual({ legWad: "1", convertWad: "50019355777746281", liveConvertWad: "100038711555492562" });
     // Two CreateIdempotent, not three: the vault lacks wSOL, SPYx and ANTHROPIC,
     // and BUNDLED_VAULT_TOKEN_ACCOUNT_CREATES rides along with the first two,
     // leaving ANTHROPIC's to the keeper at the crank's expense.
@@ -336,11 +331,6 @@ describe("/api/solana-build", () => {
     expect(built.json.costs.rentLamports).toBe(String(mainnetRent(970) + mainnetRent(165) + mainnetRent(179)));
     expect(verifySignedTransaction(signed(built.json.txBase64, owner)).ok).toBe(true);
     expect(methods.filter((method) => method === "getLatestBlockhash")).toHaveLength(1);
-
-    accounts.delete(SPYX_USDC_POOL);
-    const unpriced = await answer(await POST(buildRequest({ action: "investPolicy", owner: ownerKey })));
-    expect([unpriced.status, unpriced.json.error?.code]).toEqual([502, "price_unavailable"]);
-    expect(unpriced.json).not.toHaveProperty("txBase64");
   });
 
   /**

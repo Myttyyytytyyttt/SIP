@@ -327,28 +327,29 @@ describe("the start-buying card's own words", () => {
     const sentences = [
       START_BUYING_COPY.title,
       START_BUYING_COPY.lede("SPYx and ANTHROPIC, 50 % each"),
-      START_BUYING_COPY.convert(null, null),
-      START_BUYING_COPY.convert("$180.00", "$5.00"),
+      START_BUYING_COPY.convert(null),
+      START_BUYING_COPY.convert("$5.00"),
       START_BUYING_COPY.fee("ANTHROPIC", "1 %", "3 % from around 26 September 2026", "3 %"),
       START_BUYING_COPY.fee("ANTHROPIC", "3 %", null, "3 %"),
-      START_BUYING_COPY.limits("10 %", "5 %", [{ symbol: "ANTHROPIC", margin: "7 %" }]),
-      START_BUYING_COPY.limits("10 %", "5 %", [{ symbol: "ANTHROPIC", margin: "5 %" }]),
-      START_BUYING_COPY.limits("10 %", "5 %", []),
+      START_BUYING_COPY.livePrice,
       START_BUYING_COPY.depth("$298.00", "$25.00", "ANTHROPIC", "as counted on 2026-09-21"),
       START_BUYING_COPY.cost("0.0118", "0.000035"),
       START_BUYING_COPY.cannotPlan,
     ];
     expect(sentences.filter((sentence) => /\bkeeper\b|\bSIP\b|nuvem/i.test(sentence))).toEqual([]);
-    expect(START_BUYING_COPY.convert(null, null)).toMatch(/sold for USDC/);
-    expect(START_BUYING_COPY.convert(null, null)).not.toMatch(/null|undefined/);
-    // THE STOCK LIMIT IS SET AFTER THE FEE, and at a fee over 1 % it is wider
-    // and says by how much — "about 5 %" is not true of a leg signed at 7 %.
-    expect(START_BUYING_COPY.limits("10 %", "5 %", [{ symbol: "ANTHROPIC", margin: "7 %" }])).toContain(
-      "or a stock costs more than about 5 % over today’s price (for ANTHROPIC about 7 %, after the highest transfer fee its issuer has set, because at that fee each buy asks the market for more room and the limit has to leave it)",
+    expect(START_BUYING_COPY.convert(null)).toMatch(/sold for USDC at the live price/);
+    expect(START_BUYING_COPY.convert(null)).not.toMatch(/null|undefined/);
+    expect(START_BUYING_COPY.convert("$5.00")).toBe(
+      "Your SOL savings, now and later, are sold for USDC at the live price, never under half the SOL price when you approve, and bought in once $5.00 is ready.",
     );
-    expect(START_BUYING_COPY.limits("10 %", "5 %", [{ symbol: "ANTHROPIC", margin: "5 %" }])).toContain("(for ANTHROPIC, after the highest transfer fee its issuer has set)");
-    expect(START_BUYING_COPY.limits("10 %", "5 %", [])).not.toMatch(/transfer fee|\(for/);
-    expect(START_BUYING_COPY.limits("10 %", "5 %", [{ symbol: "ANTHROPIC", margin: "7 %" }])).not.toMatch(/less for/);
+    // NO SIGNED STOCK PRICE FLOOR (owner, 2026-10-08) and the SOL safety floor
+    // (owner, 2026-10-09), said in one line, and no sentence on the card still
+    // promises a stock floor, or that no price move ever asks for an approval.
+    expect(START_BUYING_COPY.livePrice).toBe(
+      "No price limit on the stocks: SaverFi buys them at the live market price and checks it before every buy. Your SOL keeps one safety floor, half its price when you approve; only SOL falling under it asks you to approve again.",
+    );
+    expect(sentences.filter((sentence) => /a price move never asks/i.test(sentence))).toEqual([]);
+    expect(sentences.filter((sentence) => /never below|price limits are set|until prices come back/i.test(sentence))).toEqual([]);
     expect(START_BUYING_COPY.cost("0.0118", "0.000035")).toMatch(/not refundable/);
   });
 });

@@ -40,15 +40,29 @@ export const SETTINGS_COPY = {
   smallLeg: (symbol: string, usd: string): string =>
     `At this threshold ${symbol} gets ${usd} per buy. Very small buys may wait until the pile is bigger.`,
 
-  refresh: "Refresh price limits",
-  refreshDone: "Your price limits match today's prices.",
-  refreshNeeded: "Your price limits are older than today's prices. Refresh them so every buy can go through.",
-  refreshSomeRoutes: "Some routes can still buy at your current limits. Refresh them so every route can.",
-  refreshNoRoute: "No route can buy at your current limits. Refresh them to start buying again.",
-  refreshBlocked: "Save or cancel your changes first: saving refreshes the price limits too.",
+  /**
+   * A BASKET APPROVED BEFORE 2026-10-08 STILL CARRIES PRICE LIMITS (live-model.ts
+   * priceLimitsOf "held" or "blocking"); one approval drops them. Live-only:
+   * the sample's basket never carries them, so the sample never shows these.
+   */
+  switchLive: "Switch to live-price buying",
+  switchLiveHeld: "Your basket still has the price limits it was approved with. Whenever a price moves past one, buying or converting stops until you approve again. Switch once and SaverFi buys at the live market price from then on.",
+  switchLiveBlocking: "Your old price limits are holding up your investing right now. Switch to live-price buying to drop them.",
+  switchLiveBlocked: "Save or cancel your changes first: saving switches to live-price buying too.",
+
+  /**
+   * SOL UNDER THE SAFETY FLOOR (live-model.ts priceLimitsOf "safety_floor"):
+   * a basket approved since 2026-10-09 whose SOL has halved since. Conversion
+   * stops; one approval at today's price sets a new floor. Live-only, like the
+   * three above.
+   */
+  safetyFloor: "Approve again at today's price",
+  safetyFloorBlocking:
+    "SOL is under half its price when you approved, so your SOL is not being converted to USDC. Approve again at today's price to set a new safety floor and convert again.",
+  safetyFloorBlocked: "Save or cancel your changes first: saving approves at today's price too.",
 
   nonceNotice: "Changing how you save restarts any saving already on its way. Nothing already in your vault is touched.",
-  buyingReapproved: "Changing what you buy approves your choices again, with price limits read from today's prices.",
+  buyingReapproved: "Changing what you buy approves your choices again, at the live market price.",
   capMoved: (from: string, to: string): string => `The most one buy can spend moves from ${from} to ${to}, to fit this basket.`,
   approvals: (count: number): string => (count === 1 ? "Your wallet will ask you to approve 1 change." : `Your wallet will ask you to approve ${count} changes, one after the other.`),
   save: "Save changes",
@@ -77,7 +91,7 @@ export const SETTINGS_COPY = {
     unavailable: "Too little of these is traded to buy them safely today. They come back when their markets grow.",
     shares: "How each buy is split between the assets you picked. The shares must add up to 100 %.",
     threshold: "Your savings wait until they reach this amount, then buy everything in one go. Fewer, bigger buys lose less to fees. $10 is the default.",
-    refresh: "Buys only go through at prices close to the ones you approved. Refreshing approves your current choices again at today's prices. Nothing is bought when you do it.",
+    switchLive: "SaverFi now buys stocks at the live market price and checks the price itself before every buy, so there is no stock price limit for you to approve again; your SOL keeps one safety floor, half its price when you switch. Switching approves your current choices again without the old limits. Nothing is bought when you do it.",
   },
 
   /**

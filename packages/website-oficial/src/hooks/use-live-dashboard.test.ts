@@ -74,3 +74,25 @@ describe("Load older is offered only when there is an older page", () => {
     expect(source).toMatch(/const cursor = activityMeta\?\.nextBefore \?\? null;/);
   });
 });
+
+describe("the poll runs faster only while something is on its way", () => {
+  const poll = source.slice(source.indexOf("const pendingActive ="), source.indexOf("const cursor = activityMeta"));
+
+  it("takes 'under way' from the model the page draws, and only for a caller that draws the history", () => {
+    expect(poll).toMatch(/const pendingActive = wantsActivity && view\.kind === "ready" && anyActive\(pendingSteps\(view\.data\)\);/);
+  });
+
+  it("starts the stretch's clock when a step first appears and clears it when none is left", () => {
+    expect(poll).toMatch(/if \(!pendingActive\) activeSinceRef\.current = null;\s*else if \(activeSinceRef\.current === null\) activeSinceRef\.current = Date\.now\(\);/);
+  });
+
+  it("asks the schedule, bounded by the stretch's clock and the history's retry-after, and re-arms when 'under way' changes", () => {
+    // The history's retry-after goes in: every read asks for the history, so the
+    // 20 s cadence may not run while the route has said to wait longer.
+    expect(poll).toMatch(
+      /const pending = pendingPollWanted\(\{ active: pendingActive, activeSince: activeSinceRef\.current, now: Date\.now\(\), activityRetryAt: activityTrouble\?\.retryAt \?\? null \}\);/,
+    );
+    expect(poll).toMatch(/nextDelayMs\(\{ failures, retryAfterSeconds: null, visible, lastReadAt, now: Date\.now\(\), reading, pending \}\)/);
+    expect(poll).toMatch(/\}, \[pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading, pendingActive\]\);/);
+  });
+});

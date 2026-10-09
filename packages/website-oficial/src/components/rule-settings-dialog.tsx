@@ -198,15 +198,16 @@ export interface RuleSettingsFormProps {
   readonly onSave: (draft: SettingsDraft) => void;
   readonly onCancel: () => void;
   /**
-   * The host's "Refresh price limits" block, at the end of the Buying section; null on the sample and without a
-   * policy. A function is handed whether the Buying half has unsaved edits: refreshing then would re-sign the
-   * STORED basket under the owner's edits, so the host holds it until they are saved or cancelled.
+   * The host's "Switch to live-price buying" block, at the end of the Buying section; null on the sample, without a
+   * policy and over a policy with no old price limits. A function is handed whether the Buying half has unsaved
+   * edits: switching then would re-sign the STORED basket under the owner's edits, so the host holds it until they
+   * are saved or cancelled.
    */
   readonly refresh: ReactNode | ((state: { readonly buyingChanged: boolean }) => ReactNode);
   /**
-   * Put the refresh block FIRST, over everything else: the host says so when the
-   * stored price limits no longer buy on every route — the one thing the owner
-   * must do, and the reason the gear carries a dot.
+   * Put the host's block FIRST, over everything else: the host says so when a
+   * policy's old price limits are stopping buys — the one thing the owner must
+   * do then.
    */
   readonly refreshFirst?: boolean;
   /** The host's progress of the approvals under way, under the buttons. */
@@ -579,8 +580,8 @@ export function RuleSettingsForm({
             </>
           )}
 
-          {/* The host's refresh: after the buying choices, and there even when they are locked — a stored basket can
-              need new price limits whether or not this page can edit it. */}
+          {/* The host's block: after the buying choices, and there even when they are locked — a stored basket can
+              carry old price limits whether or not this page can edit it. */}
           {refreshFirst ? null : refreshNode}
         </fieldset>
       </div>

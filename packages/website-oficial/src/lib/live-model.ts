@@ -22,6 +22,7 @@
 
 import {
   CATALOGUE,
+  LIVE_PRICE_FLOOR_WAD,
   OFFERED_LEGS,
   USDC_MINT,
   VOLUME_MODE_OFFERED,
@@ -51,7 +52,7 @@ import type {
   LiveWalletView,
   VaultEventJson,
 } from "@/lib/live-types";
-import { type FloorRoom, floorRoom, lastInvestedDay, todaysLimits, usedInLast30Days } from "@/lib/invest-limits";
+import { carriesPriceLimits, floorRoom, lastInvestedDay, todaysPrices, usedInLast30Days } from "@/lib/invest-limits";
 import type { InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
 import { tradingWalletLabels } from "@/lib/wallet-labels";
 
@@ -85,13 +86,16 @@ export interface FloorsState {
  *
  * A stored floor at or under today's rate lets the keeper act: SOL sells above
  * its floor, and a leg buys at least its floor's amount. Past that, buying waits
- * until the owner signs again — which the card says rather than looking broken.
+ * until the owner signs again. Every policy signed since 2026-10-08 carries
+ * 1 wad (LIVE_PRICE_FLOOR_WAD) on its legs, which no rate is under, and since
+ * 2026-10-09 a SOL safety floor at half the SOL price at signing, which SOL
+ * passes only by halving (priceLimitsOf below).
  *
  * Shared by the wallets screen's InvestingCard and the live rule card, so the
  * two cannot disagree about whether a floor has been passed.
  */
 export function floorsState(policy: InvestmentPolicyJson, prices: VaultStateJson["prices"]): FloorsState {
-  const limits = todaysLimits(prices);
+  const limits = todaysPrices(prices);
   const storedConvert = rawFrom(policy.minConvertRateWad);
   const liveConvert = rawFrom(prices?.convertWad);
   const legs = policy.legs.map((leg) => ({
@@ -107,42 +111,93 @@ export function floorsState(policy: InvestmentPolicyJson, prices: VaultStateJson
   return { storedConvert, liveConvert, legs, pricesKnown, belowMarket };
 }
 
-/** Where a stored policy's price limits stand as a whole: a floor the market passed, or the worst leg's floorRoom. */
-export type PolicyRoom = "passed" | FloorRoom;
+/**
+ * HOW A STORED POLICY IS PRICED, AS ONE WORD — for the wallets screen's
+ * InvestingCard, the Vault settings gear and the wallets overview, so the three
+ * cannot disagree about whether to ask the owner to sign again.
+ *
+ *   "live"      every leg floor is LIVE_PRICE_FLOOR_WAD or under
+ *               (carriesPriceLimits false) and SOL is not under the SOL floor:
+ *               what every policy signed since 2026-10-08 carries, its SOL
+ *               safety floor (2026-10-09) included. Nothing to say.
+ *   "safety_floor"
+ *               such a policy, and today's SOL rate is UNDER its SOL floor:
+ *               SOL has halved since it was signed, so convert.rs refuses
+ *               every conversion and the vault's SOL waits as SOL. The one
+ *               price move that asks the owner to sign again; signing gives a
+ *               new floor at half today's price. Stock buys from USDC already
+ *               held go on.
+ *   "blocking"  a policy signed before that day whose old limits stop buying
+ *               now: the market passed a floor — the SOL conversion's or a
+ *               leg's, each read against its own rate — or a leg's floor leaves
+ *               the keeper no route at all (floorRoom "no-route", at the leg's
+ *               JUDGED fee, the highest its issuer has written). Nothing is
+ *               bought until it is signed again.
+ *   "held"      a policy with old limits that are not judged to block right
+ *               now — every route or some routes clear them, or a rate is
+ *               unread. Offered the switch, not urged.
+ *
+ * Null when the policy's own numbers could not be read.
+ */
+export type PriceLimits = "live" | "safety_floor" | "held" | "blocking";
 
-const ROOM_RANK: Readonly<Record<FloorRoom, number>> = { "every-route": 0, "some-routes": 1, "no-route": 2 };
+export function priceLimitsOf(policy: InvestmentPolicyJson, prices: VaultStateJson["prices"]): PriceLimits | null {
+  const floors = floorsState(policy, prices);
+  if (floors.storedConvert === null && floors.legs.every((leg) => leg.floor === null)) return null;
+  if (!carriesPriceLimits(floors.legs.map((leg) => leg.floor))) return safetyFloorPassedIn(floors) ? "safety_floor" : "live";
+  return oldLimitsStopIn(floors) === null ? "held" : "blocking";
+}
 
 /**
- * WHETHER THE STORED PRICE LIMITS STILL LET SAVERFI BUY, AS ONE WORD — the
- * wallets screen's InvestingCard reasoning (its badge and its room notes),
- * without its sentences, so the Vault settings gear can say whether "Refresh
- * price limits" is needed without importing a `"use client"` card.
- *
- *   "passed"       the market fell through a floor — the SOL conversion's or a
- *                  leg's, each read against its own rate (floorsState's
- *                  belowMarket, and the card's per-leg floorDrift "passed"):
- *                  nothing buys until the owner approves again;
- *   the worst leg  of floorRoom at the leg's JUDGED fee — the highest one its
- *                  issuer has written, the one in force once its epoch comes
- *                  (ANTHROPIC's 3 % from epoch 1043): "no-route" beats
- *                  "some-routes" beats "every-route".
- *
- * Null when nothing could be judged (a floor or a rate unread). A leg the
- * catalogue does not know is judged at no fee, as the card judges it.
+ * Whether a policy signed since 2026-10-08 (legs at 1 wad) has its SOL safety
+ * floor over today's SOL rate: conversion is stopped until it is signed again.
+ * False for an older policy (its SOL floor is one of oldLimitsStopOf's), and
+ * when either number is unread.
  */
-export function policyRoom(policy: InvestmentPolicyJson, prices: VaultStateJson["prices"]): PolicyRoom | null {
+export function safetyFloorStopOf(policy: InvestmentPolicyJson, prices: VaultStateJson["prices"]): boolean {
   const floors = floorsState(policy, prices);
-  if (floors.pricesKnown && !floors.belowMarket) return "passed";
+  return !carriesPriceLimits(floors.legs.map((leg) => leg.floor)) && safetyFloorPassedIn(floors);
+}
+
+function safetyFloorPassedIn(floors: FloorsState): boolean {
+  const { storedConvert, liveConvert } = floors;
+  return storedConvert !== null && liveConvert !== null && liveConvert > 0n && storedConvert > LIVE_PRICE_FLOOR_WAD && storedConvert > liveConvert;
+}
+
+/**
+ * WHAT A "blocking" POLICY'S OLD LIMITS STOP, by the keeper's own split
+ * (packages/solana-keeper/src/invest-tick.ts):
+ *
+ *   "basket"   a leg's floor is passed, or leaves no route. The leg is measured
+ *              WITH its floor before the wrap (measureBasketVenues,
+ *              ownerFloorRateWad: leg.minOutRateWad), and a refusal there is
+ *              REFUSED for the whole basket: nothing is wrapped, converted or
+ *              bought.
+ *   "convert"  only the SOL floor is passed. That gate measures the convert
+ *              WITHOUT the floor ("NO ownerFloorRateWad HERE, DELIBERATELY"); the
+ *              floor refuses on the send path, after the wrap, so the wSOL waits
+ *              unconverted while the USDC already held is still invested.
+ *
+ * Null when nothing is judged to block (a "live" or "held" policy, or one
+ * whose rates are unread).
+ */
+export type OldLimitsStop = "basket" | "convert";
+
+export function oldLimitsStopOf(policy: InvestmentPolicyJson, prices: VaultStateJson["prices"]): OldLimitsStop | null {
+  const floors = floorsState(policy, prices);
+  if (!carriesPriceLimits(floors.legs.map((leg) => leg.floor))) return null;
+  return oldLimitsStopIn(floors);
+}
+
+function oldLimitsStopIn(floors: FloorsState): OldLimitsStop | null {
   // A floor over its rate is passed even when some OTHER number was unread.
   const over = (floor: bigint | null, live: bigint | null): boolean => floor !== null && live !== null && floor > 0n && live > 0n && floor > live;
-  if (over(floors.storedConvert, floors.liveConvert) || floors.legs.some((leg) => over(leg.floor, leg.live))) return "passed";
-  let worst: FloorRoom | null = null;
+  if (floors.legs.some((leg) => over(leg.floor, leg.live))) return "basket";
   for (const leg of floors.legs) {
     const fee = CATALOGUE.find((asset) => asset.mint === leg.mint)?.fee ?? null;
-    const room = floorRoom(leg.floor, leg.live, fee === null ? 0 : judgedFeeBps(fee));
-    if (room !== null && (worst === null || ROOM_RANK[room] > ROOM_RANK[worst])) worst = room;
+    if (floorRoom(leg.floor, leg.live, fee === null ? 0 : judgedFeeBps(fee)) === "no-route") return "basket";
   }
-  return worst;
+  return over(floors.storedConvert, floors.liveConvert) ? "convert" : null;
 }
 
 // ── the pieces ───────────────────────────────────────────────────────────────
@@ -174,7 +229,7 @@ function vaultView(snapshot: LiveSnapshotJson): LiveVaultView {
 function policyView(snapshot: LiveSnapshotJson, usdcHeld: bigint | null, nowMs: number): LivePolicyView {
   const { policy, prices } = snapshot;
   const state = policy.state;
-  const limits = todaysLimits(prices);
+  const limits = todaysPrices(prices);
   const empty: LivePolicyView = {
     status: policy.status,
     address: policy.address,
@@ -187,9 +242,12 @@ function policyView(snapshot: LiveSnapshotJson, usdcHeld: bigint | null, nowMs: 
     lifetimeInvested: null,
     lastInvestedDay: null,
     storedSolFloorPerSol: null,
+    minConvertRateWad: null,
     todayPerSol: limits?.todayPerSol ?? null,
     pricesKnown: false,
     belowMarket: false,
+    oldLimitsStop: null,
+    safetyFloorStop: false,
     readiness: null,
   };
   if (policy.status !== "exists" || state === undefined) return empty;
@@ -217,8 +275,11 @@ function policyView(snapshot: LiveSnapshotJson, usdcHeld: bigint | null, nowMs: 
     lifetimeInvested: rawFrom(state.lifetimeInvested),
     lastInvestedDay: lastInvestedDay(state.bucketDays, state.bucketAmounts),
     storedSolFloorPerSol: floors.storedConvert === null || floors.storedConvert <= 0n ? null : usdcRawPerSol(floors.storedConvert),
+    minConvertRateWad: floors.storedConvert,
     pricesKnown: floors.pricesKnown,
     belowMarket: floors.belowMarket,
+    oldLimitsStop: oldLimitsStopOf(state, prices),
+    safetyFloorStop: safetyFloorStopOf(state, prices),
     readiness:
       usdcHeld === null || minInvestment === null || maxPerCall === null ? null : investmentReadiness(usdcHeld, state.legs, minInvestment, maxPerCall),
   };
@@ -236,6 +297,20 @@ function tokenOf(snapshot: LiveSnapshotJson, mint: string): TokenHolding | null 
   if (account === undefined || account.status !== "exists") return null;
   const amountRaw = rawFrom(account.amountRaw);
   return amountRaw === null ? null : { amountRaw, uiAmount: account.uiAmount ?? null };
+}
+
+/**
+ * THE USDC THE NEXT BUY CAN COUNT ON, for the policy's readiness. A vault USDC
+ * account that does not exist yet holds 0 — the keeper creates it inside the
+ * first conversion (invest-tick.ts) — so a vault whose first SOL is converting
+ * still has a "Next investment" bar to fill. Null only when the list, or the
+ * account itself, could not be read: unreadable is not zero.
+ */
+function usdcHeldOf(snapshot: LiveSnapshotJson, usdc: TokenHolding | null): bigint | null {
+  if (usdc !== null) return usdc.amountRaw;
+  if (snapshot.vaultTokenAccounts.status !== "exists") return null;
+  const account = snapshot.vaultTokenAccounts.items.find((item) => item.mint === USDC_MINT);
+  return account === undefined || account.status === "missing" ? 0n : null;
 }
 
 function holdingsOf(
@@ -782,7 +857,7 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
   const nowMs = snapshot.readAtMs;
   const vault = vaultView(snapshot);
   const usdc = tokenOf(snapshot, USDC_MINT);
-  const policy = policyView(snapshot, usdc?.amountRaw ?? null, nowMs);
+  const policy = policyView(snapshot, usdcHeldOf(snapshot, usdc), nowMs);
   const holdings = holdingsOf(snapshot, vault, policy);
   const wallets = walletsOf(snapshot, privyWallets, importedWallets, rawFrom(snapshot.rents.walletFloor), vault.walletReserve);
 
@@ -836,4 +911,4 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
 }
 
 /** Re-exported so the live rule card reads the same limits the wallets screen does. */
-export { todaysLimits, usedInLast30Days };
+export { todaysPrices, usedInLast30Days };

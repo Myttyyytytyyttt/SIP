@@ -64,7 +64,7 @@ export interface LiveSnapshotJson {
   };
   readonly policy: { readonly status: ReadStatus; readonly address: string; readonly lamports?: string; readonly state?: InvestmentPolicyJson };
   readonly config: { readonly address: string; readonly status: ReadStatus; readonly exists: boolean; readonly paused: boolean | null };
-  /** The same shape /api/solana-vault answers, so todaysLimits applies unchanged. */
+  /** The same shape /api/solana-vault answers, so todaysPrices applies unchanged. */
   readonly prices: VaultStateJson["prices"];
   readonly vaultTokenAccounts: VaultStateJson["vaultTokenAccounts"];
   readonly rents: { readonly vault: string | null; readonly walletFloor: string | null };
@@ -235,10 +235,24 @@ export interface LivePolicyView {
    */
   readonly lastInvestedDay: { readonly day: string; readonly usdcRaw: bigint } | null;
   readonly storedSolFloorPerSol: bigint | null;
+  /**
+   * The SOL hop's signed floor as stored, in wad. 0 is the keeper's "conversion
+   * off" (invest-decision.ts convertDecision): the vault's SOL is not wrapped or
+   * converted while it stands. Null when there is no readable policy.
+   */
+  readonly minConvertRateWad: bigint | null;
   readonly todayPerSol: bigint | null;
   /** Both floors readable, and each still on the right side of today's price. */
   readonly pricesKnown: boolean;
   readonly belowMarket: boolean;
+  /** What a policy signed before 2026-10-08 stops right now, by cause (live-model.ts oldLimitsStopOf); null when nothing. */
+  readonly oldLimitsStop: "basket" | "convert" | null;
+  /**
+   * A policy signed since 2026-10-08 whose SOL safety floor is over today's SOL
+   * price (live-model.ts safetyFloorStopOf): conversion is stopped until it is
+   * signed again; buys from USDC already held go on.
+   */
+  readonly safetyFloorStop: boolean;
   /** Whether the next sweep can buy, from the USDC the vault actually holds. Null when there is nothing to say. */
   readonly readiness: InvestmentReadiness | null;
 }

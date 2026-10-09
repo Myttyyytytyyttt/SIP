@@ -2,7 +2,19 @@
 
 import { describe, expect, it } from "vitest";
 
-import { BACKOFF_MS, MANUAL_FLOOR_MS, POLL_BASE_MS, nextDelayMs, nextManualDelayMs, shouldRefreshOnShow, ACTIVITY_RETRIES, nextActivityRetryMs } from "@/lib/live-schedule";
+import {
+  BACKOFF_MS,
+  MANUAL_FLOOR_MS,
+  PENDING_POLL_MAX_MS,
+  PENDING_POLL_MS,
+  POLL_BASE_MS,
+  nextDelayMs,
+  nextManualDelayMs,
+  pendingPollWanted,
+  shouldRefreshOnShow,
+  ACTIVITY_RETRIES,
+  nextActivityRetryMs,
+} from "@/lib/live-schedule";
 
 const NOW = 1_789_500_000_000;
 const base = { failures: 0, retryAfterSeconds: null, visible: true, lastReadAt: NOW, now: NOW, reading: false } as const;
@@ -151,5 +163,46 @@ describe("when a refused history is worth asking for again early", () => {
 
   it("never asks for a time already past", () => {
     expect(nextActivityRetryMs({ retryAt: now - 5_000, attempts: 0, now })).toBe(0);
+  });
+});
+
+describe("while something is on its way", () => {
+  it("reads every 20 s, a third of the sweep, counted from the last read", () => {
+    expect(PENDING_POLL_MS).toBe(20_000);
+    expect(nextDelayMs({ ...base, pending: true })).toBe(PENDING_POLL_MS);
+    expect(nextDelayMs({ ...base, pending: true, now: NOW + 15_000 })).toBe(5_000);
+    expect(nextDelayMs({ ...base, pending: false })).toBe(POLL_BASE_MS);
+  });
+
+  it("never shortens a backoff, a retry-after or a hidden tab's silence", () => {
+    expect(nextDelayMs({ ...base, pending: true, failures: 1 })).toBe(BACKOFF_MS[0]);
+    expect(nextDelayMs({ ...base, pending: true, retryAfterSeconds: 45 })).toBe(45_000);
+    expect(nextDelayMs({ ...base, pending: true, visible: false })).toBeNull();
+    expect(nextDelayMs({ ...base, pending: true, reading: true })).toBeNull();
+  });
+
+  it("runs only while a step is under way, and for PENDING_POLL_MAX_MS of one stretch at most", () => {
+    expect(PENDING_POLL_MAX_MS).toBe(5 * 60_000);
+    const clear = { activityRetryAt: null } as const;
+    expect(pendingPollWanted({ ...clear, active: false, activeSince: NOW, now: NOW })).toBe(false);
+    expect(pendingPollWanted({ ...clear, active: true, activeSince: null, now: NOW })).toBe(false);
+    expect(pendingPollWanted({ ...clear, active: true, activeSince: NOW, now: NOW })).toBe(true);
+    expect(pendingPollWanted({ ...clear, active: true, activeSince: NOW, now: NOW + PENDING_POLL_MAX_MS - 1 })).toBe(true);
+    expect(pendingPollWanted({ ...clear, active: true, activeSince: NOW, now: NOW + PENDING_POLL_MAX_MS })).toBe(false);
+  });
+
+  it("never asks for the history before its retry-after: a 45 s refusal while a step is under way waits the 45 s, not 20", () => {
+    const retryAt = NOW + 45_000;
+    const pending = pendingPollWanted({ active: true, activeSince: NOW, now: NOW, activityRetryAt: retryAt });
+    expect(pending).toBe(false);
+    // What the hook then schedules: the ordinary poll, brought forward to the
+    // moment the route named and no earlier (use-live-dashboard.ts).
+    const wait = nextDelayMs({ ...base, pending })!;
+    const early = nextActivityRetryMs({ retryAt, attempts: 0, now: NOW })!;
+    const when = Math.min(wait, Math.max(early, MANUAL_FLOOR_MS));
+    expect(when).toBe(45_000);
+    expect(when).toBeGreaterThanOrEqual(retryAt - NOW);
+    // Once that moment has passed, the faster cadence is allowed again.
+    expect(pendingPollWanted({ active: true, activeSince: NOW, now: retryAt, activityRetryAt: retryAt })).toBe(true);
   });
 });

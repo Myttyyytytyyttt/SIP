@@ -25,10 +25,8 @@ import {
   CATALOGUE_SLIPPAGE_MARGIN_BPS,
   CATALOGUE_VENUE_INVENTORY_MULTIPLE,
   CLASSIC_TOKEN_ACCOUNT_BYTES,
-  CONVERT_FLOOR_MARGIN_BPS,
   DEFAULT_INVEST_CAPS,
   DEFAULT_VAULT_POLICY,
-  LEG_FLOOR_MARGIN_BPS,
   MAX_PICKED_LEGS,
   OFFERED_LEGS,
   OWNER_TX_COMPUTE,
@@ -44,6 +42,9 @@ import {
   sizePenaltyCeilingBps,
   judgedFeeBps,
   keeperInvestMinOutFor,
+  LIVE_PRICE_FLOOR_WAD,
+  CONVERT_SAFETY_FLOOR_BPS,
+  convertSafetyFloorWad,
 } from "../src/client/product";
 import {
   DEFAULT_PURCHASE_USDC_RAW,
@@ -54,7 +55,7 @@ import {
   investPolicyProblems,
   vaultPolicyProblems,
 } from "../src/client/rules";
-import { LEG_FEE, OWNER_FLOOR_MIN_OUT, POOL_DEPTH } from "./fixtures/keeper-policy";
+import { CONVERT_SAFETY_FLOOR, LEG_FEE, LIVE_PRICE_FLOOR, OWNER_FLOOR_MIN_OUT, POOL_DEPTH } from "./fixtures/keeper-policy";
 import { MAX_COMPUTE_UNIT_LIMIT, MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS } from "../src/server/verify-tx";
 
 describe("the vault a new pension key is offered", () => {
@@ -142,7 +143,6 @@ describe("the first investment policy", () => {
       [ANTHROPIC_MINT, ANTHROPIC_USDC_POOL],
     ]);
     for (const leg of OFFERED_LEGS) expect(leg.tokenProgram).toBe(TOKEN_2022_PROGRAM);
-    expect([CONVERT_FLOOR_MARGIN_BPS, LEG_FLOOR_MARGIN_BPS]).toEqual([1_000, 500]);
   });
 
   it("refuses every other asset on a NAMED rule, and the naming is the part that has to survive", () => {
@@ -335,6 +335,44 @@ describe("the first investment policy", () => {
     const { ownerFloor, minOut } = OWNER_FLOOR_MIN_OUT.ownersLeg;
     expect(ownerFloor > netOfVenueThreshold && ownerFloor <= venueThreshold).toBe(true);
     expect(keeperInvestMinOutFor({ venueThreshold, netOfVenueThreshold, ownerFloor })).toBe(minOut);
+  });
+
+  /**
+   * NO SIGNED PRICE FLOOR (owner, 2026-10-08). A new policy signs 1 wad, the
+   * least the program accepts, and at 1 wad the owner floor the keeper and
+   * invest.rs compute (amount_in x wad / 1e18) is 0 for the measured leg — so
+   * the keeper hands invest() its own live min_out, the venue's threshold net
+   * of the fee. The keeper's own tests run the same vector through the real
+   * investMinOutFor and convertDecision.
+   */
+  it("signs 1 wad, the least the program accepts, and at it the keeper's min_out is the live one", () => {
+    expect(LIVE_PRICE_FLOOR_WAD).toBe(1n);
+    expect(LIVE_PRICE_FLOOR_WAD).toBe(LIVE_PRICE_FLOOR.web.value);
+    const ownerFloorFor = (amountIn: bigint): bigint => (amountIn * LIVE_PRICE_FLOOR_WAD) / 10n ** 18n;
+    const { amountIn, ownerFloor, minOut } = LIVE_PRICE_FLOOR.measured;
+    expect(amountIn).toBe(OWNER_FLOOR_MIN_OUT.measured.amountIn);
+    expect(ownerFloorFor(amountIn)).toBe(ownerFloor);
+    const { venueThreshold, netOfVenueThreshold } = OWNER_FLOOR_MIN_OUT.measured;
+    expect(keeperInvestMinOutFor({ venueThreshold, netOfVenueThreshold, ownerFloor })).toBe(minOut);
+    expect(minOut).toBe(netOfVenueThreshold);
+    // The floor stays 0 below 1e18 raw units (a trillion USDC, a billion SOL) and is 1 at it.
+    expect(ownerFloorFor(LIVE_PRICE_FLOOR.ownerFloorZeroBelowRaw - 1n)).toBe(0n);
+    expect(ownerFloorFor(LIVE_PRICE_FLOOR.ownerFloorZeroBelowRaw)).toBe(1n);
+  });
+
+  /**
+   * THE SOL HOP'S SAFETY FLOOR (owner, 2026-10-09): half the live SOL price,
+   * rounded down. For one SOL at the vector's $100.04 the convert.rs floor
+   * (lamports x wad / 1e18) is $50.02 — what a conversion must pay at least.
+   */
+  it("signs the SOL hop at half the live SOL price, rounded down: CONVERT_SAFETY_FLOOR_BPS of it", () => {
+    expect(CONVERT_SAFETY_FLOOR_BPS).toBe(CONVERT_SAFETY_FLOOR.web.bps);
+    const { liveConvertWad, floorWad, oneSolLamports, oneSolFloorUsdcRaw } = CONVERT_SAFETY_FLOOR.measured;
+    expect(convertSafetyFloorWad(liveConvertWad)).toBe(floorWad);
+    expect((oneSolLamports * floorWad) / 10n ** 18n).toBe(oneSolFloorUsdcRaw);
+    // Rounded down, never up: an odd wad loses its half unit.
+    expect(convertSafetyFloorWad(3n)).toBe(1n);
+    expect(convertSafetyFloorWad(4n)).toBe(2n);
   });
 
   it("measures every rule at the share one turn can push into one leg of a full basket", () => {

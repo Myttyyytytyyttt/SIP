@@ -95,7 +95,13 @@ describe("words", () => {
     ["above_withdrawable", 422, "That is more than the vault can release: it keeps its rent reserve."],
     ["not_held", 422, "Your vault holds none of this token."],
     ["above_holding", 422, "Your vault holds less of this token than that."],
-    ["price_unavailable", 502, "SaverFi could not read today's prices from Raydium, so no floor was set. Nothing was built."],
+    ["fee_unavailable", 502, "SaverFi could not read a stock's transfer fee from Solana, so it could not check that its keeper would buy it. Nothing was built."],
+    ["price_unavailable", 502, "SaverFi could not read today's SOL price from Raydium, so it could not set your SOL's safety floor. Nothing was built."],
+    [
+      "price_disagrees",
+      502,
+      "Raydium's SOL price and Pyth's are 501 basis points apart, more than the 500 SaverFi signs a safety floor across. Nothing was built; try again in a minute.",
+    ],
     ["mint_unexpected", 409, "A token this policy names is not held by the token program SaverFi expects. Nothing was built."],
   ])("the build route's %s is shown as its own words", (code, status, message) => {
     expect(vaultFailureWords(failure(code, {}, status, message))).toBe(message);

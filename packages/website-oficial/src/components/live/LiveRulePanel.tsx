@@ -26,10 +26,14 @@
  *                               asks for the approval once there is something
  *                               to buy with.
  *
- * "REFRESH PRICE LIMITS" re-signs the stored basket at today's prices — the
- * investing card's "Sign again", byte for byte. It is the one thing an owner
- * must do when an issuer's fee moves under a signed basket (09-24: ANTHROPIC's
- * went to 3 %), so it sits here, in plain sight, with a dot on the gear.
+ * "SWITCH TO LIVE-PRICE BUYING" re-signs the stored basket at the live price —
+ * the investing card's button of the same name, byte for byte. It is shown
+ * only over a basket approved before 2026-10-08, which still carries price
+ * limits (live-model.ts priceLimitsOf); a dot on the gear says so, and the
+ * block goes first in the dialog when those limits are stopping buys. The
+ * same request, under "Approve again at today's price", is the way out when
+ * SOL has fallen under a newer basket's safety floor ("safety_floor"), which
+ * always stops conversion and so always goes first.
  *
  * NOTHING CAN BE PRESSED TWICE. From the press until the vault screen has read
  * the chain again after the landing, the form is frozen — the old "Update
@@ -41,11 +45,11 @@ import { VOLUME_MODE_OFFERED } from "@sip/solana-core/client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { InfoTip } from "@/components/info-tip";
-import { liveCategories, liveSeed, planSettings, refreshRequest, type LiveSeed } from "@/components/live/rule-settings-plan";
+import { liveCategories, liveSeed, planSettings, type LiveSeed } from "@/components/live/rule-settings-plan";
 import { RuleSettingsDialog, RuleSettingsForm, RuleSettingsStatus, type SettingsJudgement } from "@/components/rule-settings-dialog";
 import { SavingsRulePanel } from "@/components/savings-rule-panel";
 import { Button } from "@/components/ui/button";
-import { SigningDetail } from "@/components/wallets/InvestingCard";
+import { SigningDetail, switchToLiveRequest } from "@/components/wallets/InvestingCard";
 import { TxProgress } from "@/components/wallets/TxProgress";
 import { useBasketChoice } from "@/hooks/use-onboarding-closed";
 import { useVaultWrite, type InvestRequest } from "@/hooks/use-vault-actions";
@@ -53,7 +57,7 @@ import { useVaultScreen } from "@/hooks/use-vault-state";
 import { artForMint } from "@/lib/asset-art";
 import { PICKER_MAX_LEGS, catalogueAsset } from "@/lib/basket-picker";
 import { LIVE_COPY } from "@/lib/live-copy";
-import { policyRoom } from "@/lib/live-model";
+import { priceLimitsOf } from "@/lib/live-model";
 import { basketOnShelf, basketSplit } from "@/lib/onboarding";
 import { saveBasketChoice, type BasketChoice } from "@/lib/onboarding-memory";
 import type { SettingsDraft } from "@/lib/rule-settings";
@@ -69,7 +73,8 @@ export { RATE_RANGES, minimumFor } from "@/lib/rule-settings";
 const SUCCESS = {
   rule: "Saving rule updated",
   buying: "What you buy updated",
-  refresh: "Price limits refreshed",
+  live: "Switched to live-price buying",
+  safetyFloor: "Approved at today's price",
 } as const;
 
 export function LiveRulePanel({
@@ -133,7 +138,7 @@ export function LiveRulePanel({
         setLandings((count) => count + 1);
         onRefresh();
       } else if (progress === policyWrite.progress && progress.result.kind === "refused" && progress.result.code !== DECLINED_CODE) {
-        // A refused policy is most often a price that moved: read today's again before the next try.
+        // A refused policy (a leg fee over the ceiling or unreadable, a stale vault): read the vault again before the next try.
         screen?.refresh();
       }
     }
@@ -182,8 +187,11 @@ export function LiveRulePanel({
   if (!frozen && ready !== null) keyRef.current = `${ready.key}#${landings}`;
 
   const categories = useMemo(() => liveCategories(), []);
-  const room = policy !== null && state !== null ? policyRoom(policy, state.prices) : null;
-  const attention = room === "passed" || room === "no-route" || room === "some-routes" || ruleWrite.unconfirmed || policyWrite.unconfirmed;
+  const limits = policy !== null && state !== null ? priceLimitsOf(policy, state.prices) : null;
+  const oldLimits = limits === "held" || limits === "blocking";
+  // SOL under the safety floor: the same one-press re-sign, in its own words.
+  const underFloor = limits === "safety_floor";
+  const attention = oldLimits || underFloor || ruleWrite.unconfirmed || policyWrite.unconfirmed;
 
   const judge = useCallback(
     (draft: SettingsDraft): SettingsJudgement => {
@@ -218,11 +226,11 @@ export function LiveRulePanel({
     }
   };
 
-  const refreshLimits = (): void => {
+  const switchToLive = (): void => {
     if (policy === null || frozen) return;
-    const request = refreshRequest(policy);
+    const request = switchToLiveRequest(policy);
     if ("problem" in request) return;
-    setPolicyLabel(SUCCESS.refresh);
+    setPolicyLabel(underFloor ? SUCCESS.safetyFloor : SUCCESS.live);
     setSignedRequest(request);
     setDropped(null);
     setLastWriter("policy");
@@ -231,60 +239,49 @@ export function LiveRulePanel({
 
   const onOpen = (): void => {
     setOpen(true);
-    // Frozen until the read below answers: a quick Save or Refresh would otherwise sign from what was on screen before.
+    // Frozen until the read below answers: a quick Save or Switch would otherwise sign from what was on screen before.
     setOpenedOn(state);
-    // Fresh prices for the build's shown-price check: a stale read refuses the first Save.
+    // A fresh read of the vault and its policy, so the form opens on what is on chain now.
     screen?.refresh();
   };
 
-  // "REFRESH PRICE LIMITS" — only over a signed basket.
-  const resign = policy === null ? null : refreshRequest(policy);
-  const roomLine =
-    room === "passed"
-      ? SETTINGS_COPY.refreshNeeded
-      : room === "no-route"
-        ? SETTINGS_COPY.refreshNoRoute
-        : room === "some-routes"
-          ? SETTINGS_COPY.refreshSomeRoutes
-          : room === "every-route"
-            ? SETTINGS_COPY.refreshDone
-            : null;
-  // Price limits that no longer buy on every route: the one thing to do, so it goes first.
-  const needsRefresh = room === "passed" || room === "no-route" || room === "some-routes";
+  // "SWITCH TO LIVE-PRICE BUYING" — only over a signed basket that still carries
+  // price limits — or "APPROVE AGAIN AT TODAY'S PRICE" over one whose SOL is
+  // under its safety floor: one request, the stored basket re-signed.
+  const resign = policy === null || !(oldLimits || underFloor) ? null : switchToLiveRequest(policy);
+  // Limits that stop something now: the one thing to do, so it goes first.
+  const blocking = limits === "blocking" || underFloor;
+  const resignTitle = underFloor ? SETTINGS_COPY.safetyFloor : SETTINGS_COPY.switchLive;
   const refreshBlock =
-    policy === null
+    resign === null
       ? null
       : ({ buyingChanged }: { readonly buyingChanged: boolean }) => (
-      <div className={needsRefresh ? "space-y-2 rounded-lg border border-amber-600/40 p-3" : "space-y-2 border-t pt-4"}>
+      <div className={blocking ? "space-y-2 rounded-lg border border-amber-600/40 p-3" : "space-y-2 border-t pt-4"}>
         <div className="flex items-center gap-1.5">
-          <p className="text-sm leading-none font-medium">{SETTINGS_COPY.refresh}</p>
-          <InfoTip label={SETTINGS_COPY.refresh}>{SETTINGS_COPY.help.refresh}</InfoTip>
+          <p className="text-sm leading-none font-medium">{resignTitle}</p>
+          {underFloor ? null : <InfoTip label={SETTINGS_COPY.switchLive}>{SETTINGS_COPY.help.switchLive}</InfoTip>}
         </div>
-        {roomLine === null ? null : (
-          <p
-            className={
-              room === "every-route"
-                ? "text-xs text-muted-foreground"
-                : "rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-300"
-            }
-          >
-            {roomLine}
-          </p>
-        )}
-        {resign !== null && "problem" in resign ? (
+        <p
+          className={
+            blocking ? "rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-300" : "text-xs text-muted-foreground"
+          }
+        >
+          {underFloor ? SETTINGS_COPY.safetyFloorBlocking : blocking ? SETTINGS_COPY.switchLiveBlocking : SETTINGS_COPY.switchLiveHeld}
+        </p>
+        {"problem" in resign ? (
           <p className="text-xs text-destructive">{resign.problem}</p>
         ) : buyingChanged ? (
-          // Refreshing now would re-sign the STORED basket under the owner's edits; Save re-prices anyway.
-          <p className="text-xs text-muted-foreground">{SETTINGS_COPY.refreshBlocked}</p>
+          // Switching now would re-sign the STORED basket under the owner's edits; Save signs at the live price anyway.
+          <p className="text-xs text-muted-foreground">{underFloor ? SETTINGS_COPY.safetyFloorBlocked : SETTINGS_COPY.switchLiveBlocked}</p>
         ) : (
-          <Button type="button" variant="outline" size="sm" disabled={frozen} onClick={refreshLimits}>
-            {SETTINGS_COPY.refresh}
+          <Button type="button" variant="outline" size="sm" disabled={frozen} onClick={switchToLive}>
+            {resignTitle}
           </Button>
         )}
       </div>
     );
 
-  // THE WRITE STARTED LAST is the one shown: a finished "Price limits refreshed"
+  // THE WRITE STARTED LAST is the one shown: a finished "Switched to live-price buying"
   // must never sit over the next rule's steps, its cancel, or its Check again.
   const showPolicy = lastWriter === "policy" ? policyWrite.progress.phase !== "idle" : ruleWrite.progress.phase === "idle" && policyWrite.progress.phase !== "idle";
   const writeProgress =
@@ -383,7 +380,7 @@ export function LiveRulePanel({
           if (!holdClose) setOpen(false);
         }}
         refresh={refreshBlock}
-        refreshFirst={needsRefresh}
+        refreshFirst={blocking}
         progress={progress}
       />
     );

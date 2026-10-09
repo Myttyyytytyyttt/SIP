@@ -1,5 +1,6 @@
 /**
- * WHAT AN INVESTMENT POLICY WOULD CARRY TODAY, and what it has already spent.
+ * TODAY'S PRICES, WHAT A POLICY HAS ALREADY SPENT, AND WHETHER A POLICY SIGNED
+ * BEFORE 2026-10-08 STILL CARRIES STOCK PRICE LIMITS.
  *
  * Pure and client-safe. These two were InvestingCard's, and they moved here when
  * the live dashboard's rule card needed the same numbers: a pure model must not
@@ -10,14 +11,11 @@
  */
 
 import {
-  CONVERT_FLOOR_MARGIN_BPS,
+  LIVE_PRICE_FLOOR_WAD,
   OFFERED_LEGS,
   catalogueLegSlippageBps,
   floorWad,
-  judgedFeeBps,
   keeperInvestMinOutFor,
-  legFloorMarginBps,
-  legFloorWad,
   netOfTransferFeeWad,
   usdcRawPer1e8LegRaw,
   usdcRawPerSol,
@@ -60,30 +58,15 @@ export function lastInvestedDay(bucketDays: readonly number[], bucketAmounts: re
   return newestDay === 0 ? null : { day: new Date(newestDay * 86_400_000).toISOString().slice(0, 10), usdcRaw: newestRaw };
 }
 
-export interface TodaysLimits {
-  /** USDC raw per SOL at the convert floor, and at today's rate. */
-  readonly floorPerSol: bigint;
+export interface TodaysPrices {
+  /** USDC raw per SOL at today's rate. */
   readonly todayPerSol: bigint;
-  /**
-   * Per leg: today's price, and the most the floor a policy signed now lets be
-   * paid — per 1e8 raw units THAT ARRIVE, because the floor is net of `feeBps`,
-   * the transfer fee the build nets (the higher of the one in force and one
-   * already written, as the catalogue read it) — and `marginBps`, how far
-   * under that net price the floor sits (legFloorMarginBps: 500, or 700 at a
-   * 300 bps fee, where the keeper asks the market for 200 bps more).
-   */
-  readonly legs: readonly {
-    readonly mint: string;
-    readonly symbol: string;
-    readonly todayPer1e8: bigint;
-    readonly maxPer1e8: bigint;
-    readonly feeBps: number;
-    readonly marginBps: number;
-  }[];
+  /** Per offered leg: today's price per 1e8 raw units. */
+  readonly legs: readonly { readonly mint: string; readonly symbol: string; readonly todayPer1e8: bigint }[];
 }
 
-/** The limits a policy signed now would carry, from the screen's last read of the pools; null when a price is missing. */
-export function todaysLimits(prices: VaultStateJson["prices"]): TodaysLimits | null {
+/** Today's prices from the screen's last read of the pools; null when one is missing. */
+export function todaysPrices(prices: VaultStateJson["prices"]): TodaysPrices | null {
   if (prices === null) return null;
   try {
     const convert = rawFrom(prices.convertWad);
@@ -91,105 +74,58 @@ export function todaysLimits(prices: VaultStateJson["prices"]): TodaysLimits | n
     const legs = OFFERED_LEGS.map((leg) => {
       const wad = rawFrom(prices.legs.find((entry) => entry.mint === leg.mint)?.wad);
       if (wad === null) throw new RangeError(`no price for ${leg.symbol}`);
-      // THE SAME ARITHMETIC THE BUILD SIGNS (build-handler.ts liveFloors), with
-      // the catalogue's reading of the fee standing in for the mint read the
-      // build takes at the click. The build's own figure is what is signed, and
-      // vault-flows.ts holds it to this arithmetic over the fee IT read.
-      const feeBps = judgedFeeBps(leg.fee);
-      return {
-        mint: leg.mint,
-        symbol: leg.symbol,
-        todayPer1e8: usdcRawPer1e8LegRaw(wad),
-        maxPer1e8: usdcRawPer1e8LegRaw(legFloorWad(wad, feeBps)),
-        feeBps,
-        marginBps: legFloorMarginBps(feeBps),
-      };
+      return { mint: leg.mint, symbol: leg.symbol, todayPer1e8: usdcRawPer1e8LegRaw(wad) };
     });
-    return { floorPerSol: usdcRawPerSol(floorWad(convert, CONVERT_FLOOR_MARGIN_BPS)), todayPerSol: usdcRawPerSol(convert), legs };
+    return { todayPerSol: usdcRawPerSol(convert), legs };
   } catch {
     return null;
   }
 }
 
-// ── HOW FAR A SIGNED FLOOR HAS DRIFTED FROM THE MARKET ───────────────────────
+// ── A POLICY SIGNED BEFORE 2026-10-08 ────────────────────────────────────────
 //
-// A floor is signed ONCE. build-handler derives min_out_rate_wad from a pool's
-// mid, net of the leg's transfer fee, at legFloorMarginBps(fee) under it (a
-// policy signed before 2026-09-24 was not netted, and took a flat 500), and
-// min_convert_rate_wad from the SOL
-// price at CONVERT_FLOOR_MARGIN_BPS under it, and then both numbers stand until
-// the owner signs again. The keeper's own comment states the consequence:
-// the floor "DECAYS ... it clears itself as the market rises (a stale floor
-// stops binding) and blocks every honest buy as the market falls."
+// Since the owner's decision that day every policy signs LIVE_PRICE_FLOOR_WAD
+// (1 wad) for every leg: no stock price floor (solana-core product.ts). A
+// policy signed before it carries real floors — a floor per stock 5-7 % under
+// its own price and a SOL floor 10 % under that day's — and keeps them until
+// it is signed again. The page tells the two apart by THE LEGS ALONE: any leg
+// floor over LIVE_PRICE_FLOOR_WAD is a price limit from before.
 //
-// BOTH ENDS OF THAT ARE FAILURES AND ONLY ONE OF THEM IS VISIBLE. A floor the
-// market has passed shows up immediately — nothing buys, and the card says so.
-// A floor the market has left far behind shows up as nothing at all: it is
-// still signed, still enforced on chain, and it would let a fill through at a
-// price no one would accept today. That is the half this measures.
-//
-// THE ARITHMETIC IS OVER TWO NUMBERS THE PAGE ALREADY HAS: the wad the policy
-// carries, and the wad the screen just read. No reading is taken for it.
+// NOT BY THE SOL FLOOR. Since 2026-10-09 every new policy signs a SOL safety
+// floor at half the SOL price (product.ts CONVERT_SAFETY_FLOOR_BPS), so a SOL
+// floor over 1 wad is what a NEW policy carries too; live-model.ts
+// priceLimitsOf judges it on its own ("safety_floor").
 
 /**
- * How far under the GROSS pool mid a leg's floor is signed today, in bps: the
- * transfer fee and legFloorMarginBps(fee) compounded — 500 with no fee, 595 at
- * 100 bps, 979 at 300. It is the margin floorDrift needs for a leg: the drift
- * is measured against the gross mid the screen reads, so a floor that is
- * rightly 9.8 % under it at 300 bps must not be called out as slack the moment
- * it is signed. A DISPLAY NUMBER, like FLOOR_DRIFT_NOTICE_MULTIPLE: it reads
- * the fee as the catalogue has it now, which is the fee a policy signed now
- * nets, and a policy signed before 2026-09-24 sits closer to the mid than this.
+ * A price per 1e8 raw units of a leg (usdcRawPer1e8LegRaw, todaysPrices) as a
+ * price per WHOLE token, in USDC raw units.
+ *
+ * 1e8 RAW UNITS IS NOT ONE TOKEN FOR EVERY LEG: it is one SPYx (8 decimals) but a
+ * tenth of an ANTHROPIC (9 decimals). The old-limits block printed "per
+ * 100,000,000 raw units", which was true and which nobody could read.
  */
-export function legFloorUnderMidBps(feeBps: number): number {
-  return 10_000 - Math.round(((10_000 - feeBps) * (10_000 - legFloorMarginBps(feeBps))) / 10_000);
+export function perWholeToken(per1e8: bigint, decimals: number): bigint {
+  return decimals >= 8 ? per1e8 * 10n ** BigInt(decimals - 8) : per1e8 / 10n ** BigInt(8 - decimals);
 }
 
-/** The margin's own slack, in basis points: a floor signed m bps under the market sits m/(10,000-m) under it as a ratio. At 500 bps that is 526, at 1,000 it is 1,111. */
-export const signedSlackBps = (marginBps: number): number => Math.round((marginBps * 10_000) / (10_000 - marginBps));
-
 /**
- * HOW MUCH FURTHER THAN ITS OWN MARGIN A FLOOR HAS TO HAVE DRIFTED BEFORE THE
- * CARD CALLS IT OUT, and it is a display rule and nothing else — no gate, on
- * chain or in the keeper, cares about this number.
- *
- * ONE margin's worth of movement is what the margin was for: the floor was set
- * that far under the market precisely so an ordinary day does not pass it.
- * TWICE it is the market having gone somewhere else, and the floor is then
- * further from today's price than it ever was from the price it was signed at.
+ * Whether a stored policy carries the price limits of a policy signed before
+ * 2026-10-08: any leg's min_out_rate_wad over LIVE_PRICE_FLOOR_WAD. The SOL
+ * floor is not read here (see above). An unreadable number is not judged a
+ * limit: nothing is urged on a guess.
  */
-export const FLOOR_DRIFT_NOTICE_MULTIPLE = 2;
-
-/** Where a signed floor now stands against the rate just read. */
-export type FloorDrift =
-  /** The market has fallen through the floor: the keeper refuses, and by the all-or-nothing doctrine it refuses the whole basket. */
-  | { readonly kind: "passed" }
-  /** The market has left the floor far behind: it still permits a fill at `driftBps` worse than today. */
-  | { readonly kind: "slack"; readonly driftBps: number }
-  /** The floor is still about where it was signed. */
-  | { readonly kind: "in-step"; readonly driftBps: number };
-
-/**
- * `storedWad` is the floor the policy carries, `liveWad` the same quantity as
- * the screen just read it, and `marginBps` the margin it was signed at. Null
- * when either number is missing or not positive — an unread rate is not a
- * drift of zero, and nothing is said about it.
- *
- * THE DRIFT IS MEASURED AGAINST THE FLOOR, not against the market, because the
- * floor is what the sentence quotes: at driftBps the floor permits a fill that
- * much worse than the rate just read.
- */
-export function floorDrift(storedWad: bigint | null, liveWad: bigint | null, marginBps: number): FloorDrift | null {
-  if (storedWad === null || liveWad === null || storedWad <= 0n || liveWad <= 0n) return null;
-  if (storedWad > liveWad) return { kind: "passed" };
-  const driftBps = Number(((liveWad - storedWad) * 10_000n) / storedWad);
-  return { kind: driftBps > signedSlackBps(marginBps) * FLOOR_DRIFT_NOTICE_MULTIPLE ? "slack" : "in-step", driftBps };
+export function carriesPriceLimits(minOutRateWads: readonly (bigint | null)[]): boolean {
+  return minOutRateWads.some((wad) => wad !== null && wad > LIVE_PRICE_FLOOR_WAD);
 }
 
 // ── WHETHER THE KEEPER STILL BUYS UNDER A SIGNED FLOOR ───────────────────────
 //
-// THE THIRD WAY A FLOOR CAN STOP BUYING, AND THE ONE NOTHING ELSE ON THE PAGE
-// SHOWS. "passed" is the market falling through a floor. This is the room the
+// ONLY A POLICY SIGNED BEFORE 2026-10-08 HAS A FLOOR THIS CAN JUDGE: at 1 wad
+// every route clears it. live-model.ts priceLimitsOf uses it to decide whether
+// such a policy's old limits are stopping buys right now.
+//
+// THE THIRD WAY A FLOOR CAN STOP BUYING. "passed" is the market falling
+// through a floor. This is the room the
 // keeper asks of the market falling through it while the market stands still,
 // because the issuer's transfer fee rose.
 //

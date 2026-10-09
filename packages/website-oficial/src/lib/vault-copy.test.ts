@@ -34,17 +34,19 @@
 
 import { describe, expect, it } from "vitest";
 
-import { CATALOGUE, CONVERT_FLOOR_MARGIN_BPS, LEG_FLOOR_MARGIN_BPS, OFFERED_LEGS, PRESTOCKS_POWERS, floorWad, keeperInvestMinOutFor, legFloorWad, type CatalogueAsset } from "@sip/solana-core/client";
+import { CATALOGUE, LIVE_PRICE_FLOOR_WAD, OFFERED_LEGS, PRESTOCKS_POWERS, floorWad, keeperInvestMinOutFor, type CatalogueAsset } from "@sip/solana-core/client";
 
-import { ALL_OR_NOTHING, LEG_FEE, LOSS_FORGIVEN, OWNER_FLOOR_MIN_OUT, POOL_DEPTH, TRANSFER_HOOK } from "../../../solana-core/test/fixtures/keeper-policy";
+import { ALL_OR_NOTHING, CONVERT_SAFETY_FLOOR, LEG_FEE, LIVE_PRICE_FLOOR, LOSS_FORGIVEN, OWNER_FLOOR_MIN_OUT, POOL_DEPTH, PYTH_GUARD, TRANSFER_HOOK } from "../../../solana-core/test/fixtures/keeper-policy";
 
-import { FLOOR_DRIFT_NOTICE_MULTIPLE, ROUTE_COST_UNDER_MID_BPS, ROUTE_OVER_MID_BPS, floorDrift, floorRoom, keeperVenueThresholdWad, legFloorUnderMidBps, signedSlackBps } from "@/lib/invest-limits";
+import { ROUTE_COST_UNDER_MID_BPS, ROUTE_OVER_MID_BPS, floorRoom, keeperVenueThresholdWad } from "@/lib/invest-limits";
 import {
   INVEST_COPY,
   LOSS_DROPPED_AFTER_TXS,
   MAX_LEG_FEE_BPS,
   POOL_DEPTH_MULTIPLE,
-  overTodayPercent,
+  PYTH_CONF_BPS,
+  PYTH_DEVIATION_BPS,
+  PYTH_MAX_AGE_SECONDS,
   VAULT_COPY,
   ratePercent,
   roundTripPercent,
@@ -95,7 +97,7 @@ const paragraphsFor = (legs: readonly SignedLeg[]): Record<string, string> => ({
   issuerCost: INVEST_COPY.issuerCost(legs),
   feeCeiling: INVEST_COPY.feeCeiling(legs),
   marketCost: INVEST_COPY.marketCost(legs),
-  defencesLimits: INVEST_COPY.defencesLimits(legs, ratePercent(LEG_FLOOR_MARGIN_BPS)),
+  keeperChecks: INVEST_COPY.keeperChecks(legs),
   freezeNotice: INVEST_COPY.freezeNotice(legs),
   issuerKeys: INVEST_COPY.issuerKeys(legs),
   hookSwitch: INVEST_COPY.hookSwitch(legs),
@@ -492,47 +494,111 @@ describe("the copy is generated from the basket, and names nothing else", () => 
   });
 });
 
-describe("what the defences do not do", () => {
-  it("says the depth gate measures size and not price, that Pyth covers the SOL leg only, and that the floor decays", () => {
-    const limits = INVEST_COPY.defencesLimits(BASKETS.both, ratePercent(LEG_FLOOR_MARGIN_BPS));
-    expect(limits).toContain(`holds at least ${POOL_DEPTH_MULTIPLE} times the buy`);
-    expect(limits).toContain("THAT IS A CHECK ON SIZE, NOT ON PRICE");
-    expect(limits).toContain("the SOL price Pyth publishes, which is the only number in a buy that does not come from the venue being traded against");
-    expect(limits).toContain("SPYx and ANTHROPIC have no such anchor today");
-    // THE FEE COMES OFF FIRST, AND A 3 % FEE WIDENS THE MARGIN — said with the
-    // leg's own number and its cost, because "5 % under it" is not true of it.
-    expect(limits).toContain(
-      `it is taken from one pool's price at the moment you sign, less the highest transfer fee each stock's issuer has set, ${ratePercent(LEG_FLOOR_MARGIN_BPS)} under it ` +
-        "(7 % for ANTHROPIC, whose fee makes each buy ask the market for more room — a lower limit, and so less protection against a bad price), and it does not follow the market afterwards",
+describe("how the price is set: the live price, the keeper's checks, and what the chain still enforces", () => {
+  /** The keeper's slippage for a leg at this fee, from the VECTOR (legSlippageBps = max(200, fee + 100)), never from the page's own copy. */
+  const legSlippage = (fee: bigint): bigint => (LEG_FEE.slippageBps > fee + LEG_FEE.slippageMarginBps ? LEG_FEE.slippageBps : fee + LEG_FEE.slippageMarginBps);
+  /** The keeper's impact bar at this fee, from the VECTOR's worked pairs. */
+  const impact = (fee: bigint): bigint => LEG_FEE.impactCeilingBps.find(([at]) => at === fee)![1];
+  const pct = (bps: bigint): string => ratePercent(Number(bps));
+
+  it("states the owner's decisions plainly: no price floor on the stocks, a safety floor at half the SOL price on the conversion, and the one move that asks him to sign again", () => {
+    expect(INVEST_COPY.livePrice).toBe(
+      "SaverFi buys stocks at the live market price. What you sign has no price floor on them, so a stock's price moving is not a reason for SaverFi to stop buying. Converting your SOL to USDC keeps one safety floor: half the SOL price when you sign. SaverFi never converts below it, and only if SOL falls under it does conversion stop until you sign again.",
     );
-    // With no fee in the basket, the plain margin is the whole sentence.
-    expect(INVEST_COPY.defencesLimits(BASKETS.spyxOnly, ratePercent(LEG_FLOOR_MARGIN_BPS))).toContain(
-      `it is taken from one pool's price at the moment you sign, ${ratePercent(LEG_FLOOR_MARGIN_BPS)} under it, and it does not follow the market afterwards`,
-    );
-    expect(limits).toContain("the same number stops protecting you — or starts refusing every honest buy");
-    // AND IT PROMISES NOTHING IT CANNOT DO. These are the readings a reader
-    // would otherwise supply for free.
-    expect(limits).not.toMatch(/fair price|best price|guarantee|protects you from a bad price|price is checked/i);
+    // "Half" is the vector's 5,000 bps, not a word the page chose on its own.
+    expect(CONVERT_SAFETY_FLOOR.web.bps).toBe(5_000);
+    // No sentence still promises that no price move ever asks for a signature.
+    expect(INVEST_COPY.livePrice).not.toMatch(/a price move never asks/);
+    // And the constant the page builds every policy with is the vector's: the
+    // least the program accepts, which floors nothing.
+    expect(LIVE_PRICE_FLOOR_WAD).toBe(LIVE_PRICE_FLOOR.web.value);
   });
 
-  it("says it of the legs chosen, singular or plural, and of no others", () => {
-    expect(INVEST_COPY.defencesLimits(BASKETS.anthropicOnly, "5 %")).toContain("ANTHROPIC has no such anchor today");
-    expect(INVEST_COPY.defencesLimits(BASKETS.anthropicOnly, "5 %")).not.toContain("SPYx");
+  it("quotes the keeper's own numbers for the chosen legs — slippage and impact at each leg's highest written fee, cover, fee ceiling and the Pyth guard", () => {
+    // SPYx has no fee; ANTHROPIC's issuer has written 300 bps.
+    const spyxFee = BigInt(SPYX.feeBps ?? 0);
+    const anthropicFee = BigInt(Math.max(ANTHROPIC.feeBps ?? 0, ANTHROPIC.scheduledFeeBps ?? 0));
+    expect([spyxFee, anthropicFee]).toEqual([0n, 300n]);
+    expect(INVEST_COPY.keeperChecks(BASKETS.both)).toBe(
+      `Before every buy, SaverFi's keeper asks Jupiter for a live quote for that exact buy and sends it with the least the vault must receive: the quote less ${pct(legSlippage(spyxFee))} (${pct(legSlippage(anthropicFee))} for ANTHROPIC), and less the transfer fee. ` +
+        `It does not buy when the venue holds less than ${POOL_DEPTH.web.value} times the buy, when the full buy is quoted more than ${pct(impact(spyxFee))} (${pct(impact(anthropicFee))} for ANTHROPIC) worse than a sixteenth of it on the same route, or when a stock's issuer charges more than ${LEG_FEE.percentPerTransfer} % to move it. ` +
+        `Converting SOL to USDC is also checked against the SOL price Pyth publishes: it waits while that price is more than ${PYTH_GUARD.keeper.maxAgeSeconds} seconds old, uncertain by more than ${pct(PYTH_GUARD.keeper.confBps)}, or more than ${pct(PYTH_GUARD.keeper.deviationBps)} away from Jupiter's quote. ` +
+        "Nothing outside the venue prices SPYx and ANTHROPIC: those checks compare Jupiter's own quotes and count what the venue holds, so they can tell a buy is too big for its market, not that the market's price is fair. " +
+        "When the quote, the venue's depth, the size check or Pyth refuses, the buy or conversion waits for a later sweep, and nothing asks you to approve again. " +
+        `A fee over ${LEG_FEE.percentPerTransfer} % is different: it stops the whole basket until that stock's issuer lowers it, or you approve a basket without that stock.`,
+    );
+    // THE FEE CEILING DOES NOT WAIT FOR A LATER SWEEP: the keeper refuses the
+    // whole basket from the epoch a leg's fee goes over it, every sweep, until
+    // the fee or the basket changes (invest-tick.ts legAdmissionDecision). So no
+    // sentence may promise that every refusal clears by itself.
+    expect(INVEST_COPY.keeperChecks(BASKETS.both)).not.toContain("A check that refuses waits for a later sweep");
+    expect(INVEST_COPY.keeperChecks(BASKETS.both)).toContain("stops the whole basket until that stock's issuer lowers it");
+    // The figures, spelled, so a broken ratePercent cannot pass with them.
+    expect(INVEST_COPY.keeperChecks(BASKETS.both)).toContain("the quote less 2 % (4 % for ANTHROPIC)");
+    expect(INVEST_COPY.keeperChecks(BASKETS.both)).toContain("more than 0.5 % (0.25 % for ANTHROPIC) worse");
+    // One leg, one number: nothing about a stock that is not in the basket.
+    const spyxOnly = INVEST_COPY.keeperChecks(BASKETS.spyxOnly);
+    expect(spyxOnly).toContain("the quote less 2 %, and less the transfer fee");
+    expect(spyxOnly).not.toContain("ANTHROPIC");
+    expect(INVEST_COPY.keeperChecks(BASKETS.anthropicOnly)).toContain("the quote less 4 %, and less the transfer fee");
+  });
+
+  it("holds the Pyth figures to the keeper's own constants through the vector", () => {
+    expect([PYTH_MAX_AGE_SECONDS, PYTH_CONF_BPS, PYTH_DEVIATION_BPS]).toEqual([
+      Number(PYTH_GUARD.keeper.maxAgeSeconds),
+      Number(PYTH_GUARD.keeper.confBps),
+      Number(PYTH_GUARD.keeper.deviationBps),
+    ]);
+    expect([PYTH_MAX_AGE_SECONDS, PYTH_CONF_BPS, PYTH_DEVIATION_BPS]).toEqual([PYTH_GUARD.web.maxAgeSeconds, PYTH_GUARD.web.confBps, PYTH_GUARD.web.deviationBps]);
+    // THE UNIT THE PAGE PRINTS: 50 bps is half a percent, 500 is five.
+    expect([ratePercent(PYTH_CONF_BPS), ratePercent(PYTH_DEVIATION_BPS)]).toEqual([`${PYTH_GUARD.confPercent} %`, `${PYTH_GUARD.deviationPercent} %`]);
+  });
+
+  it("says what the chain still enforces, and plainly what it no longer does if the keeper failed or its key were stolen", () => {
+    expect(INVEST_COPY.chainLimits("$149.00", "$31,000.00")).toBe(
+      "What Solana itself still enforces on every buy, whatever happens to SaverFi's keeper: at most $149.00 per buy and $31,000.00 per 30 days, only the stocks you chose, through the exchange you signed, and that the vault receives at least the minimum the keeper sent with the buy. " +
+        "What it no longer enforces on a buy is a price: there is no price floor on the stocks in what you sign. If SaverFi's keeper failed, or its key were stolen, nothing on Solana would stop a buy at a bad price — for buys, those caps are what would limit how much. " +
+        "Converting SOL to USDC is not limited by those caps: it does not count toward the 30 days, each conversion is capped at 1 SOL (more only if your most per buy is over $1,000), and conversions can repeat. What limits it is the safety floor you sign: Solana refuses any conversion that pays less than half the SOL price when you signed, so a failed or stolen keeper could not sell your SOL for less than that. " +
+        "If SOL's price falls under that floor, nothing is converted until you sign again, at a new floor; USDC already in your vault is still invested.",
+    );
+    expect(INVEST_COPY.chainLimits(null, null)).toContain("the most per buy and per 30 days you set");
+  });
+
+  it("names the conversion's exposure — no 30-day cap, 1 SOL per call (convert.rs max(max_per_call, 1e9) in lamports), repeatable — and the safety floor that bounds it", () => {
+    // convert.rs: `amount_in <= policy.max_per_call.max(1_000_000_000)`, in
+    // lamports, and no bucket write. A per-buy cap of $1,000 is 1e9 USDC raw,
+    // the very number the max() takes, so up to it a conversion is 1 SOL.
+    for (const text of [INVEST_COPY.chainLimits("$149.00", "$31,000.00"), INVEST_COPY.chainLimits(null, null)]) {
+      expect(text).toContain("Converting SOL to USDC is not limited by those caps: it does not count toward the 30 days");
+      expect(text).toContain("each conversion is capped at 1 SOL (more only if your most per buy is over $1,000)");
+      expect(text).toContain("conversions can repeat");
+      // WHAT BOUNDS IT SINCE 2026-10-09: the signed safety floor, at half the SOL price at signing.
+      expect(text).toContain("Solana refuses any conversion that pays less than half the SOL price when you signed");
+      // And the one case it stops conversion, with the USDC held still invested.
+      expect(text).toContain("If SOL's price falls under that floor, nothing is converted until you sign again");
+      expect(text).toContain("USDC already in your vault is still invested");
+      // The caps are never said to bound the conversion, nor the SOL said to be sellable at any price.
+      expect(text).not.toMatch(/stolen, nothing on Solana would stop a buy at a bad price — those caps are what would limit how much/);
+      expect(text).not.toMatch(/sell at any price/);
+    }
+  });
+
+  it("promises nothing the checks cannot do, and no paragraph still describes a signed limit", () => {
+    for (const legs of Object.values(BASKETS)) {
+      const text = [INVEST_COPY.livePrice, INVEST_COPY.keeperChecks(legs), INVEST_COPY.chainLimits("$1.00", "$2.00")].join(" ");
+      expect(text).not.toMatch(/best price|guarantee|protects you from a bad price|never (sold below|bought above)|price limits? (you sign|are set)/i);
+    }
+    expect(INVEST_COPY.policyRule("SPYx at 100 %", "$5.00", "$149.00", "$31,000.00", "0.01")).not.toMatch(/never below|limit|until you sign again/);
   });
 });
 
-describe("the floor the owner signed, and the market that moved away from it", () => {
+describe("a floor signed before 2026-10-08, and whether the keeper still buys under it", () => {
   /**
-   * THE ARITHMETIC AND THE WORDS ARE ASSERTED TOGETHER, on purpose: the whole
-   * risk of this block is a sentence that says "drifted 30 %" over a number
-   * that means something else. invest-limits.ts's floorDrift is the only
-   * source, and the copy is a function of what it answers.
-   *
-   * WHAT A FLOOR IS: min_out_rate_wad, the least the vault accepts per unit
-   * spent, derived once at signing from a pool's mid LEG_FLOOR_MARGIN_BPS under
-   * it. The rate rising means the market moved AWAY from the floor (it now
-   * permits a fill that much worse than today); the rate falling THROUGH the
-   * floor means nothing buys at all.
+   * ONLY AN OLD POLICY HAS A FLOOR TO JUDGE. Until 2026-10-08 the build signed
+   * min_out_rate_wad 5-7 % under a pool's mid; such a policy keeps it until it
+   * is signed again, and live-model.ts priceLimitsOf calls it "blocking" when
+   * floorRoom answers "no-route" (or the market passed it). Every policy signed
+   * since carries LIVE_PRICE_FLOOR_WAD, which every route clears.
    */
   /**
    * THE KEEPER'S RULE, FROM THE SHARED VECTOR, AND THE THREE STATES IT GIVES.
@@ -635,117 +701,31 @@ describe("the floor the owner signed, and the market that moved away from it", (
     expect((outAmount - atMid) * 10_000n).toBeLessThanOrEqual(BigInt(ROUTE_OVER_MID_BPS) * atMid);
   });
 
-  it("puts every floor a policy signed today carries on every route, at the fee it was netted of", () => {
-    for (const fee of [0, 100, 300]) expect(floorRoom(legFloorWad(mid, fee), mid, fee), `signed today at ${fee}`).toBe("every-route");
-    // And the flat 5 % under the gross mid the owner signed before 2026-09-24
-    // is fine with no fee at all.
+  it("puts a policy signed today — 1 wad, no price floor — on every route at any fee, and the flat 5 % signed before 2026-09-24 on every route with no fee", () => {
+    for (const fee of [0, 100, 300]) expect(floorRoom(LIVE_PRICE_FLOOR_WAD, mid, fee), `signed today at ${fee}`).toBe("every-route");
     expect(floorRoom(floorWad(mid, 500), mid, 0)).toBe("every-route");
   });
 
-  it("words the soft note as a note and the refusal as a refusal, dated only when the written rise is what moves it", () => {
-    const some = INVEST_COPY.legFloorSomeRoutes("ANTHROPIC", "$2.68", 300, 1043);
-    expect(some).toBe(
-      "From epoch 1043, around 26 September 2026, ANTHROPIC's issuer charges 3 % on every transfer. Your ANTHROPIC limit of $2.68 will still let SaverFi buy on some of the routes the market offers, but not on every one: when a sweep's best route is one of the others, SaverFi waits for a later sweep instead of buying. Signing again with today's prices keeps every route open.",
-    );
-    expect(some).not.toMatch(/Sign again|refuse|will not buy|does not buy/);
-    expect(INVEST_COPY.legFloorSomeRoutes("ANTHROPIC", "$2.68", 300, null)).toMatch(/^At the 3 % ANTHROPIC's issuer charges on every transfer, your ANTHROPIC limit of \$2\.68 lets SaverFi buy on some/);
-    // A leg with no fee (SPYx) is never told about one: its routes differ by their own price alone.
-    const someNoFee = INVEST_COPY.legFloorSomeRoutes("SPYx", "$740.00", 0, null);
-    expect(someNoFee).toMatch(/^Your SPYx limit of \$740\.00 lets SaverFi buy on some of the routes/);
-    expect(someNoFee).not.toMatch(/fee|issuer|%/);
-
-    const none = INVEST_COPY.legFloorNoRoute("ANTHROPIC", "$2.75", "$2.82", 300, 1043);
-    expect(none).toBe(
-      "From epoch 1043, around 26 September 2026, when ANTHROPIC's issuer starts charging 3 % on every transfer, SaverFi will not buy this basket — no stock in it, and no SOL converted toward it — until you sign again. Your ANTHROPIC limit of $2.75 is too close to today's price of $2.82 to leave room for that fee and the market's movement on any route. The market has not passed your limit; signing again with today's prices sets it with that room.",
-    );
-    expect(INVEST_COPY.legFloorNoRoute("ANTHROPIC", "$2.75", "$2.82", 300, null)).toMatch(/^At the 3 % ANTHROPIC's issuer charges on every transfer, SaverFi does not buy this basket/);
-    // A leg with no fee is never told about one.
-    const noFee = INVEST_COPY.legFloorNoRoute("SPYx", "$740.00", "$750.00", 0, null);
-    expect(noFee).toMatch(/^SaverFi does not buy this basket/);
-    expect(noFee).not.toMatch(/fee|issuer/);
-    expect(INVEST_COPY.floorNoRoute).toBe("Sign again");
-    // The public name, and no engine-room words.
-    for (const line of [some, someNoFee, none, noFee, INVEST_COPY.roomTitle]) expect(line).not.toMatch(/keeper|min_out|bps|Nuvem|\bSIP\b|Jupiter|gross|net\b/i);
-  });
-
-  it("measures the slack against the floor, and calls it out only past twice the margin it was signed at", () => {
-    // At signing, a floor set m bps under the market sits m/(10,000-m) under it
-    // as a ratio: 526 bps at the 500 the legs are signed with, 1,111 at the
-    // 1,000 the SOL floor is.
-    expect(signedSlackBps(LEG_FLOOR_MARGIN_BPS)).toBe(526);
-    expect(signedSlackBps(CONVERT_FLOOR_MARGIN_BPS)).toBe(1_111);
-
-    // A FLOOR JUST SIGNED IS IN STEP, and stays in step through an ordinary
-    // day's movement: that is what the margin was for.
-    const justSigned = floorDrift(9_500n, 10_000n, LEG_FLOOR_MARGIN_BPS);
-    expect(justSigned).toEqual({ kind: "in-step", driftBps: 526 });
-
-    // THE BOUNDARY, ON BOTH SIDES. Twice the signed slack is still in step; one
-    // basis point past it is called out. A test that only asserted the loud
-    // case could not tell this rule from any other.
-    const edge = signedSlackBps(LEG_FLOOR_MARGIN_BPS) * FLOOR_DRIFT_NOTICE_MULTIPLE;
-    expect(edge).toBe(1_052);
-    expect(floorDrift(10_000n, 10_000n + BigInt(edge), LEG_FLOOR_MARGIN_BPS)).toEqual({ kind: "in-step", driftBps: edge });
-    expect(floorDrift(10_000n, 10_000n + BigInt(edge) + 1n, LEG_FLOOR_MARGIN_BPS)).toEqual({ kind: "slack", driftBps: edge + 1 });
-
-    // THE MARKET THROUGH THE FLOOR: the loud half, which the badge already
-    // showed and which is repeated here as what it stops.
-    expect(floorDrift(10_001n, 10_000n, LEG_FLOOR_MARGIN_BPS)).toEqual({ kind: "passed" });
-    // AND AN UNREAD RATE IS NOT A DRIFT OF ZERO.
-    expect(floorDrift(null, 10_000n, LEG_FLOOR_MARGIN_BPS)).toBeNull();
-    expect(floorDrift(10_000n, null, LEG_FLOOR_MARGIN_BPS)).toBeNull();
-    expect(floorDrift(0n, 10_000n, LEG_FLOOR_MARGIN_BPS)).toBeNull();
-  });
-
-  it("measures a floor netted of a 3 % fee against the gross mid at its own margin, so a floor just signed is not called slack", () => {
-    // The fee and legFloorMarginBps compounded, under the GROSS mid the screen
-    // reads: 500 with no fee, 595 at 100 bps, 979 at 300 (0.97 x 0.93 = 0.9021).
-    expect([0, 100, 300].map(legFloorUnderMidBps)).toEqual([500, 595, 979]);
-    const mid = 10n ** 18n;
-    const signedAt300 = legFloorWad(mid, 300);
-    expect(signedAt300).toBe(902_100_000_000_000_000n);
-    // JUST SIGNED, IN STEP at its own margin — and at the plain 500 the same
-    // floor would already read as slack (1,085 bps past a 1,052 edge), which is
-    // the false alarm this margin exists to prevent.
-    expect(floorDrift(signedAt300, mid, legFloorUnderMidBps(300))).toEqual({ kind: "in-step", driftBps: 1_085 });
-    expect(floorDrift(signedAt300, mid, LEG_FLOOR_MARGIN_BPS)).toEqual({ kind: "slack", driftBps: 1_085 });
-  });
-
-  it("states the limit over today's price from the margin it was signed at, and says why a fee leg's is wider", () => {
-    expect(overTodayPercent(500)).toBe("5.3 %");
-    expect(overTodayPercent(700)).toBe("7.5 %");
-    expect(INVEST_COPY.legCeiling("SPYx", "$801.80", null, 500)).toBe("SPYx is never bought above $801.80 per 100,000,000 raw units (5.3 % over today's pool price)");
-    expect(INVEST_COPY.legCeiling("ANTHROPIC", "$19.95", "3 %", 700)).toBe(
-      "ANTHROPIC is never bought above $19.95 per 100,000,000 raw units that reach your vault (7.5 % over today's pool price once a 3 % transfer fee is counted — the highest its issuer has set, in force now or written for a later epoch, so while a lower fee applies a buy may land further over today's price; " +
-        "wider than the usual 5.3 % because at that fee each buy asks the market for more room, and the limit has to leave it)",
-    );
-    // At a 1 % fee the margin is the plain one, and no wider room is claimed.
-    expect(INVEST_COPY.legCeiling("ANTHROPIC", "$18.95", "1 %", 500)).not.toMatch(/wider/);
-  });
-
-  it("says the date it was signed, or says plainly that nobody knows it", () => {
-    // THE POLICY ACCOUNT CARRIES NO TIMESTAMP (solana-program state.rs), so the
-    // page cannot date the signature. It says so rather than implying freshness
-    // — an invented "signed recently" is exactly the claim the owner would act
-    // on.
-    expect(INVEST_COPY.floorDriftSigned(null)).toContain("SaverFi cannot tell you which day that was — the policy on Solana does not record one");
-    expect(INVEST_COPY.floorDriftSigned(null)).toContain("how far today's prices have moved away from them");
-    expect(INVEST_COPY.floorDriftSigned("19 September 2026")).toContain("You signed these limits on 19 September 2026");
-  });
-
-  it("tells the owner what a drifted limit still permits, and what a passed one stops", () => {
-    const slack = INVEST_COPY.legFloorSlack("ANTHROPIC", "$12.40", "$10.00", "24 %");
-    expect(slack).toContain("ANTHROPIC may still be bought at up to $12.40, while the market is at $10.00 — 24 % above today's price");
-    expect(slack).toContain("it is no longer stopping much");
-    expect(slack).toContain("Sign again to set it from today's prices.");
-
-    const passed = INVEST_COPY.legFloorPassed("SPYx", "$6.10", "$6.40");
-    expect(passed).toContain("SPYx is limited to $6.10 and the market has passed it at $6.40");
-    // ALL OR NOTHING AGAIN: one passed floor stops the conversion too, so the
-    // sentence may not describe it as one leg's problem.
-    expect(passed).toContain("nothing is bought, and no SOL is converted toward any of it");
-
-    expect(INVEST_COPY.solFloorSlack("$120.00", "$180.00", "50 %")).toContain("sold for as little as $120.00 per SOL, while it is worth $180.00 — 50 % under today's price");
-    expect(INVEST_COPY.solFloorPassed("$180.00", "$120.00")).toContain("no SOL is converted, so nothing is bought, until you sign again");
+  it("words the old limits as a stop only when they stop buying, and offers one switch either way", () => {
+    expect(INVEST_COPY.oldLimitsBlocking).toContain("old price limits are stopping your buys");
+    expect(INVEST_COPY.oldLimitsHeld).not.toMatch(/stopping your buys|are stopping/);
+    // ALL OR NOTHING: a stock's limit takes the SOL conversion too, and is said so.
+    expect(INVEST_COPY.oldLimitsBlocking).toContain("nothing is bought, and no SOL is converted");
+    // The SOL limit alone stops only the conversion: the USDC held is still invested.
+    expect(INVEST_COPY.oldLimitsBlockingConvert).toContain("stopping your SOL being converted to USDC");
+    expect(INVEST_COPY.oldLimitsBlockingConvert).toContain("USDC already in your vault is still invested");
+    expect(INVEST_COPY.oldLimitsBlockingConvert).not.toMatch(/nothing is bought|stopping your buys/);
+    for (const line of [INVEST_COPY.oldLimitsHeld, INVEST_COPY.oldLimitsBlocking, INVEST_COPY.oldLimitsBlockingConvert]) {
+      expect(line).toContain("Switching signs the same basket again at the live price");
+      // The public name, and no engine-room words.
+      expect(line).not.toMatch(/keeper|min_out|bps|wad|Nuvem|\bSIP\b|Jupiter|gross|net\b/i);
+    }
+    expect(INVEST_COPY.switchToLive).toBe("Switch to live-price buying");
+    // WHAT THE SWITCH SIGNS SINCE 2026-10-09: no stock floor, and a SOL safety
+    // floor at half the price that day — so no line promises that nothing
+    // can ever stop it again.
+    expect(INVEST_COPY.oldLimitsHeld).toContain("only SOL falling under half its price at the switch stops conversion");
+    expect(INVEST_COPY.oldLimitsBlockingConvert).toContain("with a new SOL safety floor at half today's price");
+    for (const line of [INVEST_COPY.oldLimitsHeld, INVEST_COPY.oldLimitsBlocking, INVEST_COPY.oldLimitsBlockingConvert]) expect(line).not.toMatch(/no price limit stops it/);
   });
 });
