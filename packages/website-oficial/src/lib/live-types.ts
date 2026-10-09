@@ -146,6 +146,18 @@ export interface LiveLinkActivityRequest {
 // ── the view model: what the dashboard actually draws ────────────────────────
 
 /**
+ * A TRADING WALLET THE CHAIN SAID CHANGED (src/lib/live-push.ts), handed to the
+ * model only once a read at or past `slot` has read the history too.
+ */
+export interface LiveWalletChange {
+  readonly wallet: string;
+  /** The slot the notification named. */
+  readonly slot: number;
+  /** The server's clock at the read that first covered it: the step's clock, like every other on the page. */
+  readonly sinceMs: number;
+}
+
+/**
  * How far along this pension is. The FIRST that matches wins, and
  * `vault_unreadable` comes before `no_vault` on purpose: offering to create a
  * vault that may already exist asks someone to sign what the chain must refuse.
@@ -204,6 +216,12 @@ export interface LiveWalletView {
   readonly linkAddress: string;
   readonly linkStatus: WalletLinkStatus;
   readonly settlementNonce: bigint | null;
+  /**
+   * The link's frontier: the slot up to which the keeper has measured this
+   * wallet's trades. A change to the wallet past it is not measured yet. Null
+   * unless the link itself was read.
+   */
+  readonly frontierSlot: bigint | null;
   /** Whether it holds more than the floor plus the reserve, so a settlement could run at all. Null when unknown. */
   readonly canSettle: boolean | null;
 }
@@ -259,6 +277,8 @@ export interface LivePolicyView {
 
 export interface LiveRow {
   readonly signature: string;
+  /** The slot the transaction landed in. */
+  readonly slot: number;
   /** ISO 8601 UTC, from the transaction's block time; null when the chain did not say. */
   readonly at: string | null;
   readonly blockTime: number | null;
@@ -345,6 +365,8 @@ export interface LiveDashboard {
    * strip shows settlements, so it reads this.
    */
   readonly settlementRows: readonly LiveRow[];
+  /** Trading wallets the push saw change since the page opened (live-push.ts); empty without the push. */
+  readonly walletChanges: readonly LiveWalletChange[];
   /**
    * The rows the feed leaves out, newest first: the keeper's own account-keeping
    * and sub-dust transfers. Counted in `hiddenUpkeep`/`hiddenDust` AND kept, so

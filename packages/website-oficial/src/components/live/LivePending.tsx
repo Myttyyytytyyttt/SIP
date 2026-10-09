@@ -7,7 +7,12 @@
  * converting and for anything resting, blue for a buy under way. A step under
  * way puts a small turning mark in the square; one that rests puts a still
  * glyph there and says why. When the chain catches up the step drops out of
- * this list, and the feed below holds the transaction that did it.
+ * this list, and the feed below holds the transaction that did it. A trading
+ * wallet the chain said changed, and not yet saved from, leads the list
+ * ("Trading wallet 1: checking your latest activity"): grey, with no amount, because
+ * nothing is known yet about what it will save. Its title wraps instead of
+ * truncating: it has no amount beside it, and in the 263 px column of the lg
+ * layout the one-line title lost its last words.
  *
  * THE REGION IS ALWAYS THERE, EMPTY OR NOT. A polite live region announces what
  * changes inside it, which needs it to exist before the change; it holds
@@ -93,7 +98,7 @@ export function PendingRows({
                 <Glyph line={line} />
               </span>
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm">{line.title}</span>
+                <span className={cn("block text-sm", line.kind === "measuring" ? "break-words" : "truncate")}>{line.title}</span>
                 <span className="block text-xs text-muted-foreground">{line.sub}</span>
               </span>
               <span className={cn("shrink-0 text-right text-sm", MONO, amountOf(line))} {...(line.amountSpoken === null ? {} : { "aria-hidden": true })}>

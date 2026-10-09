@@ -7,7 +7,9 @@
  * costs about 7 client tokens and 5 upstream calls a minute; a hidden one costs
  * nothing at all, because nobody is looking. While a step is under way
  * (PENDING_POLL_MS below) the same reads run three times a minute, for at most
- * five minutes at a stretch.
+ * five minutes at a stretch. A change the chain announces (live-push.ts) brings
+ * the next read forward, never closer than MANUAL_FLOOR_MS to the last: six
+ * reads a minute at most, however busy the chain.
  *
  * A REFUSAL IS OBEYED, NOT RETRIED THROUGH. A 429 carries retry-after, and that
  * always wins over the backoff: asking again sooner than the server said is how
@@ -110,9 +112,11 @@ export function nextManualDelayMs(input: Pick<ScheduleInput, "lastReadAt" | "now
   return Math.max(floor, retry);
 }
 
-/** Whether a tab that just became visible should read at once: its numbers are a sweep old. */
-export const shouldRefreshOnShow = (lastReadAt: number | null, now: number): boolean =>
-  lastReadAt === null || now - lastReadAt >= POLL_BASE_MS;
+/*
+ * A tab that becomes visible again reads at once when its last read is the
+ * manual floor old — no longer a whole sweep: live-push.ts showReadWanted,
+ * beside the push that also brings reads forward.
+ */
 
 /** Early re-reads the HISTORY may buy between one page that WAS read and the next. */
 export const ACTIVITY_RETRIES = 1;

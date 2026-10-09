@@ -150,7 +150,8 @@ describe("the thin-pool notice", () => {
     expect(notice).not.toMatch(/\$9,5|\$190|\$380|20 September/);
     // ALL OR NOTHING, which is the keeper's own doctrine.
     expect(notice).toContain("a buy takes all of the basket or none");
-    expect(notice).toContain("nothing bought, no SOL converted, at any balance");
+    expect(notice).toContain("once the vault holds more than the ceiling, its SOL included, the buying stops altogether — nothing bought, no SOL converted — and since savings keep arriving, it stays stopped until that market deepens");
+    expect(notice).not.toContain("at any balance");
     // THE DOCTRINE, THROUGH THE VECTOR. The keeper's DepthDecision carries ONE
     // verdict for the whole basket and no per-leg outcome, so a half-basket is
     // unrepresentable; the keeper's own test holds that type, and what the gate

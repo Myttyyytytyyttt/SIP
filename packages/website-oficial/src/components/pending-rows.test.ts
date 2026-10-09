@@ -36,7 +36,7 @@ import type { PendingLine } from "@/lib/live-pending";
 import type { LiveDashboard, VaultEventJson } from "@/lib/live-types";
 import { mock } from "@/mocks";
 
-import { NOW_MS, OWNER, liveActivity, liveEntry, liveSnapshot, seconds, signature, tokenAccount } from "../../test/fixtures/live-dashboard";
+import { NOW_MS, OWNER, WALLET_A, liveActivity, liveEntry, liveSnapshot, seconds, signature, tokenAccount } from "../../test/fixtures/live-dashboard";
 
 const ACTIVE: PendingLine = { key: "converting", kind: "converting", active: true, rest: null, title: PENDING_COPY.converting, sub: PENDING_COPY.convertingSub("0.018"), amount: "$1.80", amountSpoken: "" };
 const WAITING: PendingLine = { key: "buying", kind: "buying", active: false, rest: "paused", title: PENDING_COPY.buyingWaiting("SPYx"), sub: PENDING_COPY.rest.paused, amount: "$5.00", amountSpoken: null };
@@ -195,6 +195,38 @@ describe("a live page", () => {
     expect(pendingShownFor("investing", [ACTIVE])).toEqual([ACTIVE]);
     expect(pendingShownFor("savings", [ACTIVE])).toEqual([]);
     expect(pendingShownFor("withdrawals", [ACTIVE])).toEqual([]);
+  });
+
+  it("keeps a wallet being checked under All and Savings — a saving may follow — and out of Investing and Withdrawals", () => {
+    const checking: PendingLine = { key: "measuring:W", kind: "measuring", active: true, rest: null, title: PENDING_COPY.measuring("Wallet 1"), sub: PENDING_COPY.measuringSub.profit, amount: "", amountSpoken: "" };
+    expect(pendingShownFor("all", [checking, ACTIVE])).toEqual([checking, ACTIVE]);
+    expect(pendingShownFor("savings", [checking, ACTIVE])).toEqual([checking]);
+    expect(pendingShownFor("investing", [checking, ACTIVE])).toEqual([ACTIVE]);
+    expect(pendingShownFor("withdrawals", [checking, ACTIVE])).toEqual([]);
+  });
+
+  /**
+   * A TRADE MADE ELSEWHERE (owner, 2026-10-09): the push saw the trading wallet
+   * change past its frontier, a read at or past that slot read the history, and
+   * no settlement of it is on screen — so the page says it is being checked,
+   * with the loader, at the top of the column, and nothing about an amount.
+   */
+  it("leads the column with a wallet being checked, by its name, with a loader and no amount", () => {
+    const data = toLiveDashboard({
+      snapshot: liveSnapshot({ readAtMs: NOW_MS, vault: { ...liveSnapshot().vault, lamports: "1285240", withdrawableLamports: "0" }, vaultTokenAccounts: { status: "exists", items: [] } }),
+      activity: liveActivity([]),
+      privyWallets: [WALLET_A],
+      walletChanges: [{ wallet: WALLET_A, slot: 5_000, sinceMs: NOW_MS }],
+    });
+    const label = data.wallets[0]!.label;
+    const out = render("pension", data);
+    expect(out).toMatch(/<div role="status" aria-live="polite" data-pending-steps="1"/);
+    expect(out).toContain('data-pending-step="measuring"');
+    expect(out).toContain(PENDING_COPY.measuring(label));
+    expect(out).toMatch(/data-pending-step="measuring" data-state="active">[\s\S]*?data-pending-loader=""/);
+    // The same page without the push draws nothing pending.
+    const quiet = render("pension", { ...data, walletChanges: [] });
+    expect(quiet).not.toContain('data-pending-step="measuring"');
   });
 
   it("draws an empty region, and no line under Next investment, once the chain has caught up", () => {

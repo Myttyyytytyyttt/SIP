@@ -10,6 +10,17 @@
  * while one is under way the poll runs every 20 s, for at most five minutes at
  * a stretch (live-schedule.ts PENDING_POLL_MS). A hidden tab polls not at all.
  *
+ * AND THE CHAIN RINGS (owner, 2026-10-09: a trade made elsewhere showed nothing
+ * here until a reload). One WebSocket to the key-free public endpoint watches
+ * the linked trading wallets, the vault and its USDC and wSOL accounts
+ * (src/lib/live-socket.ts); a change buys ONE read, debounced and never sooner
+ * than the manual floor after the last, never through a retry-after or a
+ * backoff (src/lib/live-push.ts). The socket stays open while the tab is
+ * hidden and reads nothing then: the tab reads when it is looked at again —
+ * on visibilitychange or focus, as soon as the last read is the floor old.
+ * A wallet's change reaches the page, as "checking your latest activity",
+ * only once a read at or past it has read the history too.
+ *
  * A POLL ASKS ONLY FOR WHAT IS NEW: `until` the newest signature already held,
  * so a quiet minute costs one getSignaturesForAddress and nothing else. The rows
  * already loaded ARE the cache; nothing is re-read to draw them again.
@@ -64,6 +75,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { useSolanaConfigOrNull } from "@/app/providers";
+
 import { activityTroubleFrom, createLiveApi, type LiveActivityTrouble } from "@/lib/live-api";
 import { appendOlder, headCursor, mergeHead, newestSignature } from "@/lib/live-activity-store";
 import { backfillLinkSettlements, backfillSpend, chainSaysSettled, forgetBackfillSpend, holdsSettlement, settlementWallets, shouldBackfill } from "@/lib/live-backfill";
@@ -71,7 +84,26 @@ import { LIVE_COPY } from "@/lib/live-copy";
 import { firstPaintGate } from "@/lib/first-paint";
 import { toLiveDashboard } from "@/lib/live-model";
 import { anyActive, pendingSteps } from "@/lib/live-pending";
-import { MANUAL_FLOOR_MS, nextActivityRetryMs, nextDelayMs, nextManualDelayMs, pendingPollWanted, shouldRefreshOnShow } from "@/lib/live-schedule";
+import {
+  EMPTY_PUSH,
+  afterRead,
+  baselineOf,
+  heardLate,
+  movedSince,
+  notified,
+  pushReadDelayMs,
+  recallPush,
+  rememberPush,
+  resynced,
+  showReadWanted,
+  walletChangesOf,
+  walletEnds,
+  watchedAddresses,
+  watchedWallets,
+  type PushState,
+} from "@/lib/live-push";
+import { MANUAL_FLOOR_MS, nextActivityRetryMs, nextDelayMs, nextManualDelayMs, pendingPollWanted } from "@/lib/live-schedule";
+import { browserSocket, watchAccounts, type ChainWatch } from "@/lib/live-socket";
 import type { LiveActivityJson, LiveDashboard, LiveEntryJson, LiveSnapshotJson } from "@/lib/live-types";
 import { vaultFailureWords, type ApiFailure } from "@/lib/vault-api";
 
@@ -135,6 +167,9 @@ export interface LiveDashboardStore {
    */
   readonly activityPending: boolean;
 }
+
+/** The later of two moments, either of which may be absent. */
+const latestOf = (a: number | null, b: number | null): number | null => (a === null ? b : b === null ? a : Math.max(a, b));
 
 const wordsFor = (failure: ApiFailure): string =>
   failure.status === 429 || failure.code === "rate_limited"
@@ -203,6 +238,8 @@ export function useLiveDashboard(input: {
   // and a ref changing does not re-run the effect that would do it.
   const [reading, setReading] = useState(false);
   const [tick, setTick] = useState(0);
+  /** What the chain said changed, and what the reads have made of it (live-push.ts). */
+  const [push, setPush] = useState<PushState>(() => (pensionKey !== null && wantsActivity ? recallPush(pensionKey).push : EMPTY_PUSH));
 
   // Everything a late answer must be checked against before it is believed.
   const request = useRef(0);
@@ -217,6 +254,12 @@ export function useLiveDashboard(input: {
   const readingRef = useRef(false);
   const lastReadRef = useRef<number | null>(null);
   lastReadRef.current = lastReadAt;
+  const failuresRef = useRef(0);
+  failuresRef.current = failures;
+  /** The later of the snapshot's and the history's retry-after: every read asks for both. */
+  const retryAt = latestOf(failure?.retryAt ?? null, activityTrouble?.retryAt ?? null);
+  const retryAtRef = useRef<number | null>(null);
+  retryAtRef.current = retryAt;
   // ONE READER OF THE TAIL, in a ref rather than in state: the backfill takes
   // this before it awaits, so a click arriving in the same tick as the
   // setOlder below still finds the tail taken.
@@ -240,7 +283,13 @@ export function useLiveDashboard(input: {
     setLastReadAt(null);
     setOlder({ busy: false, retryAt: null, message: null, complete: false });
     setActivityTrouble(null);
-  }, [pensionKey]);
+    // What the push heard and the last read's balances outlive a remount (live-push.ts recallPush).
+    setPush(pensionKey !== null && wantsActivity ? recallPush(pensionKey).push : EMPTY_PUSH);
+  }, [pensionKey, wantsActivity]);
+  // Kept for the next remount — only by a caller that draws the history.
+  useEffect(() => {
+    if (pensionKey !== null && wantsActivity) rememberPush(pensionKey, { push });
+  }, [pensionKey, wantsActivity, push]);
 
   const read = useCallback(
     /** `early` marks the extra read a 429's retry-after bought, so it is counted. */
@@ -280,6 +329,10 @@ export function useLiveDashboard(input: {
           setFailure(null);
         }
         const gate = firstPaintGate({ hold: holdFirstPaint, commit: () => setSnapshot(answered.body), stale, waitMs: FIRST_PAINT_WAIT_MS });
+        // Whether this read read the history too: only then may a wallet's change reach the page (live-push.ts).
+        let historyRead = false;
+        // The settlements this read can see, for where each wallet's last saving left it (walletEnds).
+        const seen: LiveEntryJson[] = [...entriesRef.current, ...linkEntriesRef.current];
 
         try {
           // No vault, no history: the route would answer an empty page, so it is not asked.
@@ -296,6 +349,7 @@ export function useLiveDashboard(input: {
             // one refusal buys one faster question and no more.
             setActivityTrouble((held) => activityTroubleFrom(page, { attempts: early ? (held?.attempts ?? 0) + 1 : 0, now: Date.now() }));
             if (page.ok && page.body.status === "exists") {
+              historyRead = true;
               // A POLL DOES NOT REDEFINE WHERE THE HISTORY ENDS. It asked only for
               // what is new, and its "nothing more to page" is about that window.
               const cursor = headCursor({
@@ -317,6 +371,7 @@ export function useLiveDashboard(input: {
               // only — a manual page appended while this read was in flight can
               // at worst make it ask for a page it need not have.
               const loaded = until === null || page.body.gap ? page.body.entries : [...page.body.entries, ...entriesRef.current];
+              seen.push(...page.body.entries);
               // A GAP THREW THE HISTORY AWAY, so what a round already bought is
               // gone with it and the round may be bought once more.
               if (page.body.gap) forgetBackfillSpend(pensionKey);
@@ -357,6 +412,7 @@ export function useLiveDashboard(input: {
                 // about how much of the VAULT's history is loaded, and a failure
                 // of a read nobody asked for is not the Load older button's.
                 if (filled.entries.length > 0) setLinkEntries((held) => appendOlder(held, filled.entries));
+                seen.push(...filled.entries);
               }
             }
           }
@@ -368,6 +424,14 @@ export function useLiveDashboard(input: {
         }
         setFailures(0);
         setFailure(null);
+        // What the chain rang about and this read has now seen — and what moved
+        // that nobody heard, from the balances against the last read's.
+        if (wantsActivity) {
+          const moved = movedSince(recallPush(pensionKey).baseline, answered.body);
+          rememberPush(pensionKey, { baseline: baselineOf(answered.body) });
+          const ends = walletEnds(answered.body, seen);
+          setPush((held) => afterRead(heardLate(held, moved), { slot: answered.body.slot, historyRead, readAtMs: answered.body.readAtMs, ends }));
+        }
         setLastReadAt(Date.now());
         return true;
       } finally {
@@ -385,17 +449,83 @@ export function useLiveDashboard(input: {
     void read(true);
   }, [pensionKey, walletsKey, read]);
 
-  // Coming back to a tab whose numbers are a sweep old reads once, at once.
+  // COMING BACK TO THE TAB reads once, at once, when the last read is the
+  // manual floor old — not a sweep (live-push.ts showReadWanted) — and never
+  // before a retry-after or through a backoff. Focus as well as visibility: a
+  // window brought forward beside another is visible all along.
   useEffect(() => {
     if (pensionKey === null || typeof document === "undefined") return undefined;
     const onShow = (): void => {
       if (document.visibilityState !== "visible") return;
-      if (shouldRefreshOnShow(lastReadRef.current, Date.now())) void read(false);
+      if (showReadWanted({ lastReadAt: lastReadRef.current, now: Date.now(), failures: failuresRef.current, retryAt: retryAtRef.current })) void read(false);
       setTick((count) => count + 1);
     };
     document.addEventListener("visibilitychange", onShow);
-    return () => document.removeEventListener("visibilitychange", onShow);
+    window.addEventListener("focus", onShow);
+    return () => {
+      document.removeEventListener("visibilitychange", onShow);
+      window.removeEventListener("focus", onShow);
+    };
   }, [pensionKey, read]);
+
+  /*
+   * THE SOCKET (live-socket.ts). One per open live dashboard — never for a
+   * caller that does not draw the history (the leaderboard's balance chip),
+   * never before there is a pension key, so never in the sample. Opened on the
+   * key-free WebSocket the server validated for Privy; closed, after
+   * unsubscribing, when the key changes, the page leaves live mode or unmounts.
+   */
+  const wsUrl = useSolanaConfigOrNull()?.solanaWsUrl ?? null;
+  const watched = useMemo(() => watchedAddresses(snapshot).join(","), [snapshot]);
+  const watchedRef = useRef("");
+  watchedRef.current = watched;
+  const watchRef = useRef<ChainWatch | null>(null);
+  // Nothing to watch, no socket: the endpoint closes one with no subscription, and a vault created later opens it then.
+  const hasWatched = watched !== "";
+  useEffect(() => {
+    if (pensionKey === null || !wantsActivity || !hasWatched || wsUrl === null || typeof WebSocket === "undefined") return undefined;
+    const watch = watchAccounts({
+      url: wsUrl,
+      addresses: watchedRef.current === "" ? [] : watchedRef.current.split(","),
+      open: browserSocket,
+      onChange: (address, slot) => {
+        const wallet = watchedWallets(snapshotRef.current).includes(address);
+        setPush((held) => notified(held, { address, slot, now: Date.now(), wallet }));
+      },
+      onResync: () => setPush((held) => resynced(held, Date.now())),
+    });
+    watchRef.current = watch;
+    return () => {
+      watch.close();
+      if (watchRef.current === watch) watchRef.current = null;
+    };
+  }, [pensionKey, wantsActivity, hasWatched, wsUrl]);
+  // A changed set — a wallet linked, a token account created — is resubscribed, not reopened.
+  useEffect(() => {
+    watchRef.current?.setAddresses(watched === "" ? [] : watched.split(","));
+  }, [watched, pensionKey, wantsActivity, hasWatched, wsUrl]);
+
+  /*
+   * THE READ A PUSH BUYS (live-push.ts pushReadDelayMs): one, at the end of the
+   * debounce window, never sooner than the floor after the last read, never
+   * before a retry-after, never while backing off, hidden, or reading. A read
+   * that answered from before the change leaves it standing, and this asks
+   * again after the floor.
+   */
+  useEffect(() => {
+    if (pensionKey === null) return undefined;
+    const visible = typeof document === "undefined" || document.visibilityState === "visible";
+    const delay = pushReadDelayMs({ dirty: push.dirty, now: Date.now(), lastReadAt, visible, reading, failures, retryAt });
+    if (delay === null) return undefined;
+    const timer = window.setTimeout(() => {
+      // Hidden since this was armed: the change stays, and the tab reads it when it is looked at again.
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      void read(false).then((ran) => {
+        if (ran) setTick((count) => count + 1);
+      });
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [pensionKey, push.dirty, lastReadAt, reading, failures, retryAt, tick, read]);
 
   const refresh = useCallback(
     (options: { readonly discover?: boolean } = {}): void => {
@@ -432,6 +562,8 @@ export function useLiveDashboard(input: {
     });
   }, [api, pensionKey, activityMeta, older.busy]);
 
+  const walletChanges = useMemo(() => walletChangesOf(push), [push]);
+
   const view = useMemo((): LiveView => {
     if (pensionKey === null) return { kind: "idle" };
     if (snapshot === null) {
@@ -444,6 +576,7 @@ export function useLiveDashboard(input: {
       linkEntries,
       privyWallets: walletsKey === "" ? [] : walletsKey.split(","),
       importedWallets: importedKey === "" ? [] : importedKey.split(","),
+      walletChanges,
     });
     const stale =
       failure === null
@@ -454,7 +587,7 @@ export function useLiveDashboard(input: {
             since: failure.since,
           };
     return { kind: "ready", data, stale };
-  }, [pensionKey, snapshot, entries, linkEntries, activityMeta, failure, walletsKey, importedKey]);
+  }, [pensionKey, snapshot, entries, linkEntries, activityMeta, failure, walletsKey, importedKey, walletChanges]);
 
   /*
    * WHETHER A STEP IS UNDER WAY (src/lib/live-pending.ts), from the model the

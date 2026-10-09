@@ -188,10 +188,13 @@ export interface DepthCeiling {
  * THE LARGEST max_per_call AT WHICH EVERY LEG STILL CLEARS THE DEPTH GATE.
  * This is the function that replaces DEPTH_CEILING_PER_BUY_RAW.
  *
- * WHAT IS BEING FORECAST. On a CONVERTING turn the USDC the convert will bring
- * in does not exist yet, so turnSpendCeiling tests the turn at its worst
- * reachable case — min(max_per_call, headroom), which on a fresh vault is the
- * cap itself. legDepthDecision then refuses a hop whose census is under
+ * WHAT IS BEING FORECAST. turnSpendCeiling tests a turn at what it can reach:
+ * the USDC held plus an upper estimate of what this turn's SOL converts to,
+ * capped by min(max_per_call, headroom). A vault holding more than the cap is
+ * tested at the cap itself, and that is the case forecast here, because a
+ * savings vault fills up (until keeper 87cc22b, 2026-10-09, every converting
+ * turn was tested at the cap, at any balance). legDepthDecision then refuses a
+ * hop whose census is under
  *
  *     inventory  <  take × MIN_VENUE_INVENTORY_MULTIPLE
  *
@@ -218,8 +221,8 @@ export interface DepthCeiling {
  *
  * AND IT IS ALL-OR-NOTHING AGAIN: legDepthDecision refuses the whole basket,
  * "the deep ones included, and refusing to convert SOL toward it". A cap over
- * this ceiling does not buy less; it buys nothing, at any balance, forever,
- * while the rent stays spent.
+ * this ceiling does not buy less; once the vault holds more than the ceiling
+ * it buys nothing, a filling vault stays past it, and the rent stays spent.
  *
  * WHAT INVALIDATES IT: the reading. One venue, counted once, on one day. The
  * same kind of inventory fell from about $6,700 to $51 in two days on the leg

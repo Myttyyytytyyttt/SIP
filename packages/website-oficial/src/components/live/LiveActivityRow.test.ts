@@ -38,6 +38,7 @@ const settled = (paid: string, capped = false, owed = paid): VaultEventJson =>
 function row(event: VaultEventJson, overrides: Partial<LiveRow> = {}): LiveRow {
   return {
     signature: SIG,
+    slot: 4_000,
     at: new Date(Date.UTC(2026, 8, 16, 11, 0, 0)).toISOString(),
     blockTime: Math.floor(Date.UTC(2026, 8, 16, 11, 0, 0) / 1_000),
     ok: true,
