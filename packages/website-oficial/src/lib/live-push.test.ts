@@ -13,6 +13,8 @@ import {
   PUSH_WALLET_FLOOR_MS,
   WALLET_CHANGE_FORGET_MS,
   afterRead,
+  historyAhead,
+  newestSlotOf,
   notified,
   pushReadDelayMs,
   recallPush,
@@ -25,7 +27,7 @@ import {
 } from "@/lib/live-push";
 import { MEASURING_HIDE_MS } from "@/lib/live-pending";
 import { MANUAL_FLOOR_MS, POLL_BASE_MS } from "@/lib/live-schedule";
-import { VAULT, WALLET_A, liveSnapshot, tokenAccount } from "../../test/fixtures/live-dashboard";
+import { VAULT, WALLET_A, liveEntry, liveSnapshot, settledEvent, signature, tokenAccount } from "../../test/fixtures/live-dashboard";
 
 const NOW = 1_789_500_000_000;
 const quiet: PushReadInput = { dirty: { since: NOW, slot: 10, urgent: true }, now: NOW, lastReadAt: NOW - 60_000, visible: true, reading: false, failures: 0, retryAt: null };
@@ -40,7 +42,7 @@ describe("what a push buys", () => {
     expect(pushReadDelayMs(quiet)).toBe(PUSH_DEBOUNCE_MS);
     // A second change 1 s later rides along: the window does not move.
     const state = notified(notified(EMPTY_PUSH, { address: VAULT, slot: 10, now: NOW, wallet: false }), { address: "wsol", slot: 12, now: NOW + 1_000, wallet: false });
-    expect(state.dirty).toEqual({ since: NOW, slot: 12, urgent: true });
+    expect(state.dirty).toEqual({ since: NOW, slot: 12, urgent: true, vaultSlot: 12 });
     expect(pushReadDelayMs({ ...quiet, dirty: state.dirty, now: NOW + 1_000 })).toBe(500);
   });
 
@@ -258,5 +260,134 @@ describe("what one dashboard watches", () => {
     expect(MAX_WATCHED).toBe(13);
     expect(watched).toHaveLength(MAX_WATCHED);
     expect(watched).toContain(VAULT);
+  });
+});
+
+/**
+ * A VAULT CHANGE GETS ITS DEBOUNCE (diagnosis 10-09, push D4). It arrived
+ * while a busy wallet's change was waiting out the 30 s floor and inherited
+ * that change's `since`: no debounce at all, a read possibly 0.2 s after the
+ * confirmation, before the wrap that follows a settle.
+ */
+describe("a change that turns urgent", () => {
+  it("opens the window again, so the vault's change waits PUSH_DEBOUNCE_MS like any first change", () => {
+    const covered = afterRead(notified(EMPTY_PUSH, { address: WALLET_A, slot: 100, now: NOW, wallet: true }), { slot: 100, historyRead: true, readAtMs: NOW, ends: {} });
+    const busy = notified(covered, { address: WALLET_A, slot: 120, now: NOW + 2_000, wallet: true });
+    expect(busy.dirty).toMatchObject({ since: NOW + 2_000, urgent: false });
+    const vault = notified(busy, { address: VAULT, slot: 121, now: NOW + 40_000, wallet: false });
+    expect(vault.dirty).toMatchObject({ since: NOW + 40_000, urgent: true, vaultSlot: 121 });
+    // Long after the last read: the debounce, not zero.
+    expect(pushReadDelayMs({ ...quiet, dirty: vault.dirty, now: NOW + 40_000, lastReadAt: NOW - 60_000 })).toBe(PUSH_DEBOUNCE_MS);
+  });
+
+  it("keeps the window of a change that was urgent already: a chain that keeps ringing does not postpone its read", () => {
+    const first = notified(EMPTY_PUSH, { address: VAULT, slot: 10, now: NOW, wallet: false });
+    const second = notified(first, { address: WALLET_A, slot: 11, now: NOW + 1_000, wallet: true });
+    expect(second.dirty?.since).toBe(NOW);
+  });
+});
+
+/**
+ * A VAULT'S CHANGE IS COVERED ONLY ONCE THE HISTORY SHOWS IT (diagnosis 10-09,
+ * push D4): the snapshot and the history come from separate calls, maybe
+ * separate nodes, and a read that took the new balance with a page that had
+ * not indexed the settle left the settled row to the next sweep.
+ */
+describe("what a read covers of the vault's own changes", () => {
+  const rung = notified(EMPTY_PUSH, { address: VAULT, slot: 500, now: NOW, wallet: false });
+
+  it("is covered by a read whose history reaches the change's slot", () => {
+    expect(afterRead(rung, { slot: 500, historyRead: true, readAtMs: NOW, historySlot: 500 }).dirty).toBeNull();
+    expect(afterRead(rung, { slot: 510, historyRead: true, readAtMs: NOW, historySlot: 505 }).dirty).toBeNull();
+  });
+
+  it("stays for ONE follow-up read after the floor when the history has not reached it", () => {
+    const behind = afterRead(rung, { slot: 500, historyRead: true, readAtMs: NOW, historySlot: 499 });
+    expect(behind.dirty).toMatchObject({ slot: 500, vaultSlot: 500, urgent: true, followUp: true });
+    // Read again after the manual floor, not a sweep.
+    expect(pushReadDelayMs({ ...quiet, dirty: behind.dirty, now: NOW + 1_000, lastReadAt: NOW + 1_000 })).toBe(MANUAL_FLOOR_MS);
+    // The follow-up is covered by any answer at or past the slot, whatever its history says.
+    expect(afterRead(behind, { slot: 500, historyRead: true, readAtMs: NOW + 12_000, historySlot: 499 }).dirty).toBeNull();
+    expect(afterRead(behind, { slot: 500, historyRead: false, readAtMs: NOW + 12_000 }).dirty).toBeNull();
+  });
+
+  it("a read with no history, or none held, owes the follow-up too", () => {
+    expect(afterRead(rung, { slot: 500, historyRead: false, readAtMs: NOW, historySlot: 900 }).dirty?.followUp).toBe(true);
+    expect(afterRead(rung, { slot: 500, historyRead: true, readAtMs: NOW, historySlot: null }).dirty?.followUp).toBe(true);
+    expect(afterRead(rung, { slot: 500, historyRead: true, readAtMs: NOW }).dirty?.followUp).toBe(true);
+  });
+
+  it("a snapshot from before the change still leaves it standing, follow-up or not", () => {
+    expect(afterRead(rung, { slot: 499, historyRead: true, readAtMs: NOW, historySlot: 600 }).dirty).toEqual(rung.dirty);
+  });
+
+  it("a newer vault change while the follow-up waits owes a follow-up of its own; a wallet's does not reset it", () => {
+    const behind = afterRead(rung, { slot: 500, historyRead: true, readAtMs: NOW, historySlot: 1 });
+    const wallet = notified(behind, { address: WALLET_A, slot: 520, now: NOW + 1_000, wallet: true });
+    expect(wallet.dirty).toMatchObject({ vaultSlot: 500, followUp: true, slot: 520 });
+    const newer = notified(behind, { address: VAULT, slot: 530, now: NOW + 1_000, wallet: false });
+    expect(newer.dirty).toMatchObject({ vaultSlot: 530, slot: 530 });
+    expect(newer.dirty?.followUp).toBeUndefined();
+  });
+
+  it("only wallets rang: the history is not asked for (their rule is walletChangesOf's)", () => {
+    const wallet = notified(EMPTY_PUSH, { address: WALLET_A, slot: 500, now: NOW, wallet: true });
+    expect(wallet.dirty?.vaultSlot).toBeUndefined();
+    expect(afterRead(wallet, { slot: 500, historyRead: true, readAtMs: NOW, historySlot: 1 }).dirty).toBeNull();
+  });
+
+  it("a socket that came back still owes one read, covered by any answer", () => {
+    expect(afterRead(resynced(EMPTY_PUSH, NOW), { slot: 1, historyRead: false, readAtMs: NOW }).dirty).toBeNull();
+  });
+
+  it("the follow-up buys at most one extra read per vault change: a busy minute is still six", () => {
+    let lastReadAt = NOW - POLL_BASE_MS;
+    let reads = 0;
+    let state = EMPTY_PUSH;
+    for (let t = NOW; t < NOW + 60_000; t += 100) {
+      state = notified(state, { address: VAULT, slot: t, now: t, wallet: false });
+      if (pushReadDelayMs({ ...quiet, dirty: state.dirty, now: t, lastReadAt }) === 0) {
+        reads += 1;
+        lastReadAt = t;
+        // A history that never catches up.
+        state = afterRead(state, { slot: t, historyRead: true, readAtMs: t, historySlot: 0 });
+      }
+    }
+    expect(reads).toBe(6);
+  });
+});
+
+/**
+ * A HISTORY AHEAD OF ITS SNAPSHOT (diagnosis 10-09, inventory D4): a saving
+ * newer than the snapshot drew "+$0.43" in the feed beside a Saved so far and
+ * a Pending without it, until a second read at least 10 s later.
+ */
+describe("whether the history is ahead of the snapshot", () => {
+  const settled = (slot: number, ok = true) => ({ ...liveEntry(signature(slot % 200), 1, [settledEvent("3911799")], slot), ok });
+
+  it("is, for a saving past the snapshot's slot", () => {
+    expect(historyAhead([settled(4_243)], 4_242)).toBe(true);
+  });
+
+  it("is not, for one at or before it, or one that failed on chain", () => {
+    expect(historyAhead([settled(4_242)], 4_242)).toBe(false);
+    expect(historyAhead([settled(4_100)], 4_242)).toBe(false);
+    expect(historyAhead([settled(4_300, false)], 4_242)).toBe(false);
+  });
+
+  it("is, for a wrap, a conversion or a buy past it — they move the figures too — and not for upkeep or a rule", () => {
+    expect(historyAhead([liveEntry("c", 1, [{ kind: "converted", lamportsSpent: "1", usdcReceivedRaw: "1" } as never], 4_300)], 4_242)).toBe(true);
+    expect(historyAhead([liveEntry("i", 1, [{ kind: "invested", mint: null, symbol: null, usdcSpentRaw: "1", receivedRaw: "1", receivedUi: null } as never], 4_300)], 4_242)).toBe(true);
+    expect(historyAhead([liveEntry("u", 1, [{ kind: "upkeep" } as never], 4_300)], 4_242)).toBe(false);
+    expect(historyAhead([liveEntry("r", 1, [{ kind: "rule_changed", mode: 1, skimBps: null, volumeBps: 200, paused: false, maxContribution: null, walletReserve: null } as never], 4_300)], 4_242)).toBe(false);
+  });
+
+  it("cannot be, against a snapshot that named no slot", () => {
+    expect(historyAhead([settled(4_300)], null)).toBe(false);
+  });
+
+  it("the newest slot of a history is its highest, and none for an empty one", () => {
+    expect(newestSlotOf([settled(10), settled(30), settled(20)])).toBe(30);
+    expect(newestSlotOf([])).toBeNull();
   });
 });

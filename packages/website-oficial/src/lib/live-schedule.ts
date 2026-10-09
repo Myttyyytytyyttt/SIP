@@ -7,7 +7,8 @@
  * costs about 7 client tokens and 5 upstream calls a minute; a hidden one costs
  * nothing at all, because nobody is looking. While a step is under way
  * (PENDING_POLL_MS below) the same reads run three times a minute, for at most
- * five minutes at a stretch. A change the chain announces (live-push.ts) brings
+ * five minutes at a stretch, and so they do while the chain's push is down
+ * (UNHEARD_POLL_MS). A change the chain announces (live-push.ts) brings
  * the next read forward, never closer than MANUAL_FLOOR_MS to the last: six
  * reads a minute at most, however busy the chain.
  *
@@ -15,6 +16,8 @@
  * always wins over the backoff: asking again sooner than the server said is how
  * one browser turns a busy minute into a locked-out one.
  */
+
+import type { SocketState } from "@/lib/live-socket";
 
 /** The keeper's sweep: reading faster shows the same numbers twice. */
 export const POLL_BASE_MS = 60_000;
@@ -31,6 +34,38 @@ export const PENDING_POLL_MS = 20_000;
 
 /** The longest the faster cadence runs for one stretch of pending steps: five sweeps. */
 export const PENDING_POLL_MAX_MS = 5 * 60_000;
+
+/**
+ * WHILE NOTHING WILL RING (owner, 10-09: "todo lo que pase se muestre
+ * rápidamente"). The minute's poll was sized for a page the chain also rings:
+ * the socket brings a change forward, the poll only sweeps up after it. With
+ * the socket down — still connecting, closed and waiting for its next attempt,
+ * or with no endpoint to open — the poll is ALL the page has, and a saving
+ * that lands just after a read stays off screen for up to a minute. So a
+ * visible tab whose push is wanted and not live reads every 20 s.
+ *
+ * WHAT IT COSTS, against /api/solana-live's own per-client bucket of
+ * relay.perClientPerMin = 60 weighted tokens a minute (solana-core
+ * build-handler.ts): a quiet read is a snapshot (4: BUILD_REQUEST_WEIGHT 3 + 1
+ * more call) and an activity page (3, plus 1 per new transaction), about 7
+ * tokens, so three a minute is about 21 of the 60 — the pending cadence's
+ * rate, never added to it, and well inside the bucket. Upstream, 15 calls a
+ * minute per such tab (relay.readsGlobalPerMin, 1,800 by default, is what
+ * every route's reads share). A hidden tab still reads nothing, a backoff
+ * still wins, and so does a retry-after.
+ */
+export const UNHEARD_POLL_MS = 20_000;
+
+/**
+ * Whether the page is on its own: a socket is wanted (a live pension with a
+ * vault to watch — "none" otherwise) and it is not live. Never while the
+ * history's retry-after is still ahead: every read asks for the history, and
+ * the faster cadence would ask before the moment the server named.
+ */
+export function unheardPollWanted(input: { readonly socket: SocketState | "none"; readonly activityRetryAt: number | null; readonly now: number }): boolean {
+  if (input.socket === "none" || input.socket === "live") return false;
+  return !(input.activityRetryAt !== null && input.activityRetryAt > input.now);
+}
 
 /** After repeated failures: 2 minutes, 4, then 5 at most. Reset on success. */
 export const BACKOFF_MS: readonly number[] = [120_000, 240_000, 300_000];
@@ -52,10 +87,15 @@ export interface ScheduleInput {
   readonly reading: boolean;
   /** A step is under way and the faster cadence is still allowed (pendingPollWanted). Never shortens a backoff. */
   readonly pending?: boolean;
+  /** The push is wanted and not live (unheardPollWanted): the poll is all there is. Never shortens a backoff. */
+  readonly unheard?: boolean;
 }
 
-const backoffFor = (failures: number, pending: boolean): number => {
-  if (failures <= 0) return pending ? PENDING_POLL_MS : POLL_BASE_MS;
+const backoffFor = (failures: number, input: Pick<ScheduleInput, "pending" | "unheard">): number => {
+  if (failures <= 0) {
+    if (input.pending === true) return PENDING_POLL_MS;
+    return input.unheard === true ? UNHEARD_POLL_MS : POLL_BASE_MS;
+  }
   return BACKOFF_MS[Math.min(failures, BACKOFF_MS.length) - 1]!;
 };
 
@@ -93,7 +133,7 @@ export function nextDelayMs(input: ScheduleInput): number | null {
    * finishes; until then the answer is that there is nothing to do.
    */
   if (input.reading) return null;
-  const gap = backoffFor(input.failures, input.pending === true);
+  const gap = backoffFor(input.failures, input);
   const scheduled = untilGapFrom(input.lastReadAt, input.now, gap, input.failures);
   // The server's own retry-after always wins: it knows what it is holding back.
   const retry = input.retryAfterSeconds === null ? 0 : Math.max(0, input.retryAfterSeconds) * 1_000;

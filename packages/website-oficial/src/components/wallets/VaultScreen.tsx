@@ -33,13 +33,32 @@ export const VAULT_CARD_ID = "vault";
  * and a VaultScreen that finds one already there for the same key adds nothing
  * — no second read, no second lock — and hands its children through.
  */
-export function VaultScreen({ pensionKey, children }: { readonly pensionKey: string; readonly children: ReactNode }) {
+export function VaultScreen({
+  pensionKey,
+  poll = true,
+  children,
+}: {
+  readonly pensionKey: string;
+  /**
+   * Whether this screen keeps itself current — a read every sweep while the
+   * tab is visible, and one on coming back to it (useVaultState `poll`). True
+   * for /wallets, where nothing else reads the chain. The dashboard's shared
+   * screen passes false: its live store already polls and hears the chain,
+   * and tells this screen when the vault moved (useVaultFollowsLive).
+   */
+  readonly poll?: boolean;
+  readonly children: ReactNode;
+}) {
   const outer = useContext(VaultScreenContext);
   if (outer !== null && outer.pensionKey === pensionKey) return <>{children}</>;
-  return <OwnVaultScreen pensionKey={pensionKey}>{children}</OwnVaultScreen>;
+  return (
+    <OwnVaultScreen pensionKey={pensionKey} poll={poll}>
+      {children}
+    </OwnVaultScreen>
+  );
 }
 
-function OwnVaultScreen({ pensionKey, children }: { readonly pensionKey: string; readonly children: ReactNode }) {
+function OwnVaultScreen({ pensionKey, poll, children }: { readonly pensionKey: string; readonly poll: boolean; readonly children: ReactNode }) {
   const { user } = usePrivy();
   const api = useMemo(() => createVaultApi(), []);
   // Privy's record of the trading wallets, never the pension key, and at most as many as one read asks about.
@@ -53,8 +72,8 @@ function OwnVaultScreen({ pensionKey, children }: { readonly pensionKey: string;
     [user, pensionKey],
   );
   const wallets = useMemo(() => (walletsKey === "" ? [] : walletsKey.split(",")), [walletsKey]);
-  const { view, refresh } = useVaultState(api, pensionKey, wallets);
-  const value = useMemo<VaultScreenValue>(() => ({ pensionKey, view, refresh, api }), [pensionKey, view, refresh, api]);
+  const { view, refresh, refreshing, catchUp } = useVaultState(api, pensionKey, wallets, { poll });
+  const value = useMemo<VaultScreenValue>(() => ({ pensionKey, view, refresh, api, refreshing, catchUp }), [pensionKey, view, refresh, api, refreshing, catchUp]);
 
   return (
     <VaultScreenContext.Provider value={value}>

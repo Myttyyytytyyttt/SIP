@@ -8,11 +8,13 @@ import {
   PENDING_POLL_MAX_MS,
   PENDING_POLL_MS,
   POLL_BASE_MS,
+  UNHEARD_POLL_MS,
   nextDelayMs,
   nextManualDelayMs,
   pendingPollWanted,
   ACTIVITY_RETRIES,
   nextActivityRetryMs,
+  unheardPollWanted,
 } from "@/lib/live-schedule";
 
 const NOW = 1_789_500_000_000;
@@ -197,5 +199,44 @@ describe("while something is on its way", () => {
     expect(when).toBeGreaterThanOrEqual(retryAt - NOW);
     // Once that moment has passed, the faster cadence is allowed again.
     expect(pendingPollWanted({ active: true, activeSince: NOW, now: retryAt, activityRetryAt: retryAt })).toBe(true);
+  });
+});
+
+/**
+ * WHILE NOTHING WILL RING (owner, 10-09: "todo lo que pase se muestre
+ * rápidamente"): with the chain's push down the poll is all the page has, so
+ * a visible tab reads every 20 s — about 21 of /api/solana-live's 60 client
+ * tokens a minute — and never through a backoff or a retry-after.
+ */
+describe("the poll while the push is down", () => {
+  it("reads every UNHEARD_POLL_MS instead of a sweep, counted from the last read", () => {
+    expect(UNHEARD_POLL_MS).toBe(20_000);
+    expect(nextDelayMs({ ...base, unheard: true })).toBe(UNHEARD_POLL_MS);
+    expect(nextDelayMs({ ...base, unheard: true, now: NOW + 15_000 })).toBe(5_000);
+    expect(nextDelayMs({ ...base, unheard: false })).toBe(POLL_BASE_MS);
+  });
+
+  it("stays well inside the client's 60 tokens a minute: three quiet reads of about 7", () => {
+    const readsPerMinute = 60_000 / UNHEARD_POLL_MS;
+    expect(readsPerMinute * 7).toBeLessThanOrEqual(60 / 2);
+  });
+
+  it("never shortens a backoff, never runs hidden, never schedules on top of a read", () => {
+    expect(nextDelayMs({ ...base, unheard: true, failures: 1 })).toBe(BACKOFF_MS[0]);
+    expect(nextDelayMs({ ...base, unheard: true, visible: false })).toBeNull();
+    expect(nextDelayMs({ ...base, unheard: true, reading: true })).toBeNull();
+  });
+
+  it("is wanted only for a socket that is wanted and not live", () => {
+    expect(unheardPollWanted({ socket: "off", activityRetryAt: null, now: NOW })).toBe(true);
+    expect(unheardPollWanted({ socket: "connecting", activityRetryAt: null, now: NOW })).toBe(true);
+    expect(unheardPollWanted({ socket: "live", activityRetryAt: null, now: NOW })).toBe(false);
+    // No socket wanted — the sample, a key with no vault, the leaderboard's chip — keeps the sweep.
+    expect(unheardPollWanted({ socket: "none", activityRetryAt: null, now: NOW })).toBe(false);
+  });
+
+  it("is not wanted while the history's retry-after is still ahead: a refusal is obeyed", () => {
+    expect(unheardPollWanted({ socket: "off", activityRetryAt: NOW + 1, now: NOW })).toBe(false);
+    expect(unheardPollWanted({ socket: "off", activityRetryAt: NOW, now: NOW })).toBe(true);
   });
 });

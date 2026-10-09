@@ -210,10 +210,18 @@ export function WalletsHost({
  * a pension key — the one read it makes is of that key's vault — and it sits
  * inside Providers because it reads Privy. The modal's own VaultScreen finds it
  * and adds nothing.
+ *
+ * IT DOES NOT POLL. The dashboard's live store reads and hears the chain
+ * already; the shell tells this screen when the vault moved and when the
+ * modal opens (useVaultFollowsLive), so one clock reads the vault, not two.
  */
 function SharedVaultScreen({ children }: { readonly children: ReactNode }) {
   const { ready, authenticated, user } = usePrivy();
   const pensionKey = useMemo(() => (user === null ? null : pensionKeyOf(user)), [user]);
   if (!ready || !authenticated || pensionKey === null) return <>{children}</>;
-  return <VaultScreen pensionKey={pensionKey}>{children}</VaultScreen>;
+  return (
+    <VaultScreen pensionKey={pensionKey} poll={false}>
+      {children}
+    </VaultScreen>
+  );
 }
