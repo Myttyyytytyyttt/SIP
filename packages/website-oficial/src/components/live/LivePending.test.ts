@@ -53,7 +53,7 @@ const WRAP = liveEntry(signature(1), seconds(NOW_MS - 60_000), [wrapped]);
 const converting = (): LiveDashboard => vault("18000000", [WRAP]);
 const inputOf = (data: LiveDashboard) => {
   const steps = pendingSteps(data);
-  return { data, steps, lines: pendingLines(steps) };
+  return { data, steps, lines: pendingLines(steps, data.nowMs) };
 };
 
 describe("doneOf: a step ends as done only on the transaction that did it", () => {
@@ -232,7 +232,8 @@ describe("the rows drawn", () => {
   });
 
   it("draw every copy from one view: the same rows in the column and on the card", () => {
-    const view = viewOf(pendingLines(pendingSteps(converting())));
+    const data = converting();
+    const view = viewOf(pendingLines(pendingSteps(data), data.nowMs));
     const column = renderToStaticMarkup(createElement(PendingRows, { lines: view.lines, view }));
     const card = renderToStaticMarkup(createElement(PendingRows, { lines: view.lines, view, variant: "card" }));
     const rowsOf = (out: string) => out.match(/data-pending-step="[a-z]+"/g);
