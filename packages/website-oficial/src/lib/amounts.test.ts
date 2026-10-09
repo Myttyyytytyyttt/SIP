@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { AmountError, formatSol, formatUnits, formatUsd, parseUnits, rawFrom, shareOfRaw, solToLamports, usdcRawForLamports, usdcToRaw, splitDecimal, formatSolAtMost } from "@/lib/amounts";
+import { AmountError, formatSol, formatUnits, formatUsd, parseUnits, rawFrom, shareOfRaw, solToLamports, usdcRawForLamports, usdcToRaw, splitDecimal, formatSolAtMost, formatSolAtLeast } from "@/lib/amounts";
 
 describe("token shares", () => {
   it("25 % and 50 % round down; All is the raw amount itself", () => {
@@ -115,5 +115,36 @@ describe("a SOL figure rounded for a glance", () => {
   it("groups the whole part and keeps a sign", () => {
     expect(formatSolAtMost(1_234_000_000_000n, 3)).toBe("1,234");
     expect(formatSolAtMost(-36_634_582n, 3)).toBe("-0.037");
+  });
+});
+
+/**
+ * AN AMOUNT SOMEBODY IS TOLD TO BRING (review 2026-10-09): rounded up, so a
+ * saving of exactly what is printed is always enough.
+ */
+describe("a SOL figure rounded up for a threshold", () => {
+  it("rounds up to the places asked, never down", () => {
+    // The review's case: 1,140,000 lamports short read "0.0011" half-up, and 0.0011 SOL fell 40,000 lamports short.
+    expect(formatSolAtMost(1_140_000n, 4)).toBe("0.0011");
+    expect(formatSolAtLeast(1_140_000n, 4)).toBe("0.0012");
+    expect(formatSolAtLeast(1_100_001n, 4)).toBe("0.0012");
+    // Exact amounts are not pushed up.
+    expect(formatSolAtLeast(1_100_000n, 4)).toBe("0.0011");
+    expect(formatSolAtLeast(5_000_000n, 4)).toBe("0.005");
+  });
+
+  it("is always enough: the printed amount, in lamports, is at least the amount and less than one more unit", () => {
+    for (const lamports of [1n, 49_999n, 50_000n, 99_999n, 100_000n, 1_088_201n, 1_140_000n, 4_999_999n, 123_456_789n]) {
+      const printed = solToLamports(formatSolAtLeast(lamports, 4).replaceAll(",", ""));
+      expect(printed).toBeGreaterThanOrEqual(lamports);
+      expect(printed - lamports).toBeLessThan(100_000n);
+    }
+  });
+
+  it("never reads as zero above nothing, groups the whole part and keeps a sign", () => {
+    expect(formatSolAtLeast(1n, 4)).toBe("0.0001");
+    expect(formatSolAtLeast(0n, 4)).toBe("0");
+    expect(formatSolAtLeast(1_234_000_000_001n, 3)).toBe("1,234.001");
+    expect(formatSolAtLeast(-1_140_000n, 4)).toBe("-0.0012");
   });
 });

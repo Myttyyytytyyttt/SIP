@@ -597,12 +597,20 @@ export const PENDING_COPY = {
   /** A conversion due and not done ("slow"): still counted, never called under way. */
   includesConvertingSlow: (usd: string): string => `Includes about ${usd} of SOL not converted yet · ${BRAND} tries again about once a minute`,
   /**
+   * THE SOL BEING CONVERTED COMPLETES THE BASKET ONLY AT ABOUT TODAY'S PRICE
+   * (live-pending.ts NextInvestmentGate "conversion"): the buy is made with
+   * the USDC the conversion really brings, so whether it is enough is known
+   * once it lands — said as a condition, never as "$0.00 to go".
+   */
+  conversionDecides: "Enough to buy if the conversion lands near today's price",
+  /**
    * SOL UNDER THE KEEPER'S LINES (live-pending.ts solUnderWrapLine): counted
    * like SOL being converted, and what moves it said — savings taking the free
    * SOL to the wrap line, which then converts it all. `short` is the free SOL's
-   * own shortfall, as printed. NEVER "once your vault holds 0.005 SOL": the free
-   * SOL and the wSOL each reach their own line on their own, and 0.003 of each
-   * is 0.006 held with nothing moving (review 2026-10-09).
+   * own shortfall, as printed — rounded UP (live-pending.ts shortText), so a
+   * saving of exactly that is enough. NEVER "once your vault holds 0.005 SOL":
+   * the free SOL and the wSOL each reach their own line on their own, and 0.003
+   * of each is 0.006 held with nothing moving (review 2026-10-09).
    */
   includesWaiting: (usd: string, short: string): string => `Includes about ${usd} of SOL too small to convert yet · It converts once your savings add ${short} SOL`,
   /** SOL converting now and SOL under the lines at once: one sum, the one the bar adds, and the part that waits. */

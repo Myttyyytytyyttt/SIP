@@ -323,6 +323,9 @@ export interface SavingsStats {
    * note names it);
    * "slow" — the SOL being converted would complete the basket and its
    * conversion is overdue;
+   * "conversion" — the SOL being converted completes the basket only at
+   * about today's price: whether it is enough is known once it lands (the
+   * note says so);
    * "held" — a rest the page can read and the owner can lift holds the buy or
    * the conversion it needs: the vault or SaverFi paused, buying or converting
    * switched off, the 30-day limit, old price limits, SOL under its safety
@@ -334,7 +337,7 @@ export interface SavingsStats {
    * The card never draws a full bar, or "$0.00 to go", while one is set. Null
    * when nothing gates the buy. Absent on the sample.
    */
-  readonly nextInvestmentGate?: "wrap_line" | "slow" | "held" | "unknown" | null;
+  readonly nextInvestmentGate?: "wrap_line" | "slow" | "conversion" | "held" | "unknown" | null;
   /**
    * WHAT A LIVE PAGE'S NEXT INVESTMENT IS MADE OF, in today's dollars
    * (live-pending.ts NextInvestmentParts, worked out in raw units first):

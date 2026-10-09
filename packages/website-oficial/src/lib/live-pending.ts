@@ -51,7 +51,7 @@
  * null, so is every figure made from it, and the line says which input.
  */
 
-import { formatSolAtMost, formatUsd, usdcRawForLamports, rawFrom } from "@/lib/amounts";
+import { formatSolAtLeast, formatSolAtMost, formatUsd, usdcRawForLamports, rawFrom } from "@/lib/amounts";
 import { whenLabel } from "@/lib/format";
 import { PENDING_COPY } from "@/lib/live-copy";
 import type { LiveDashboard, LiveRow } from "@/lib/live-types";
@@ -65,6 +65,17 @@ import type { LiveDashboard, LiveRow } from "@/lib/live-types";
  */
 export const WRAP_DUST_LAMPORTS = 5_000_000n;
 export const CONVERT_DUST_LAMPORTS = 5_000_000n;
+
+/**
+ * THE MOST BELOW ITS QUOTE THE KEEPER LETS A CONVERSION FILL (packages/
+ * solana-keeper src/min-out.ts SLIPPAGE_BPS): the route's min_out is the quote
+ * less 2 % — legSlippageBps of a 0 bps fee (invest-decision.ts), as neither
+ * wSOL nor USDC carries one. Next investment counts SOL being converted at
+ * today's price; what the keeper buys with is the USDC that conversion really
+ * brings, so only SOL that clears the basket by more than this is a buy the
+ * page can promise (toGoOf). Held to the keeper's by live-pending.test.ts.
+ */
+export const CONVERT_SLIPPAGE_BPS = 200n;
 
 /**
  * How long after the chain last moved toward a step its loader may run: five
@@ -464,6 +475,15 @@ export interface PendingLine {
 }
 
 const solText = (lamports: bigint): string => formatSolAtMost(lamports, 4);
+/**
+ * WHAT A SAVING MUST BRING, as the page prints it: rounded UP (amounts.ts
+ * formatSolAtLeast), so "once your savings add 0.0012 SOL" is always enough.
+ * Half-up printed 1,140,000 lamports as "0.0011", and a saving of exactly that
+ * would leave the free SOL under the keeper's wrap line, with nothing
+ * converted (review 2026-10-09). Only for an amount to bring: what is held is
+ * solText.
+ */
+const shortText = (lamports: bigint): string => formatSolAtLeast(lamports, 4);
 
 /**
  * The steps in words, for the rows over the feed.
@@ -575,7 +595,7 @@ export function nextInvestmentOf(
       const usd = formatUsd(converting.valueUsdcRaw);
       return { extraUsdcRaw: converting.valueUsdcRaw, note: slow ? PENDING_COPY.includesConvertingSlow(usd) : PENDING_COPY.includesConverting(usd) };
     }
-    const short = solText(waiting.shortLamports);
+    const short = shortText(waiting.shortLamports);
     // One price values every SOL figure here: both have a dollar value, or neither does.
     if (converting.valueUsdcRaw === null || waiting.valueUsdcRaw === null) {
       const unpriced = slow ? PENDING_COPY.unpricedBothSlow : PENDING_COPY.unpricedBoth;
@@ -587,7 +607,7 @@ export function nextInvestmentOf(
   }
   const buying = steps.find((step) => step.kind === "buying" && step.state === "active");
   if (waiting === null) return { extraUsdcRaw: null, note: buying === undefined ? null : PENDING_COPY.readyToBuy };
-  const short = solText(waiting.shortLamports);
+  const short = shortText(waiting.shortLamports);
   return {
     extraUsdcRaw: waiting.valueUsdcRaw,
     note:
@@ -612,6 +632,12 @@ export function nextInvestmentOf(
  * conversion is due and not done — the page cannot tell a crank short of SOL,
  * a thin market or a late oracle apart, only that the keeper has not moved.
  *
+ * "conversion": the SOL being converted completes the basket at today's price,
+ * but not if it fills as far under its quote as the keeper allows
+ * (CONVERT_SLIPPAGE_BPS). The keeper converts, then buys only on the USDC the
+ * vault really holds — so whether this conversion is enough is known once it
+ * lands, and the page does not promise it before.
+ *
  * "held": a rest the page can read and the owner can lift (PendingRest less
  * "slow") holds the buy — the buying step's own rest when the USDC buys the
  * basket, or, when it does not, the conversion's: then no SOL reaches USDC,
@@ -624,7 +650,7 @@ export function nextInvestmentOf(
  * free SOL, today's SOL price — so it cannot say whether, or after how much
  * more, the keeper buys. Never a guess either way.
  */
-export type NextInvestmentGate = "wrap_line" | "slow" | "held" | "unknown";
+export type NextInvestmentGate = "wrap_line" | "slow" | "conversion" | "held" | "unknown";
 
 /**
  * HOW FAR THE NEXT INVESTMENT STILL IS — the smallest further saving, in USDC
@@ -646,8 +672,9 @@ export type NextInvestmentGate = "wrap_line" | "slow" | "held" | "unknown";
  * lacks (`ahead`, wrapLineAhead), gated "wrap_line" when that is the larger.
  *
  * 0 WITH NO GATE MEANS A BUY IS COMING. With a gate it is not, whatever this
- * figure: "slow" lacks no saving at all (0), "held" lacks the owner's switch
- * and not money, and a line a few lamports away is worth less than a cent — so
+ * figure: "slow" lacks no saving at all (0), "conversion" lacks none if the
+ * SOL converts near today's price (0), "held" lacks the owner's switch and
+ * not money, and a line a few lamports away is worth less than a cent — so
  * the card says a gate in words, never as "$0.00 to go"
  * (savings-rule-panel.tsx), and `note` is those words wherever
  * nextInvestmentOf's own line does not already say them.
@@ -655,7 +682,9 @@ export type NextInvestmentGate = "wrap_line" | "slow" | "held" | "unknown";
  * - The USDC alone buys the basket: 0 — gated "held" when the buying step
  *   waits on a rest the page can read, and `note` names it.
  * - With the SOL being converted it does: 0 — gated "slow" when that
- *   conversion is overdue, so nothing claims a buy is coming.
+ *   conversion is overdue, so nothing claims a buy is coming, and
+ *   "conversion" when it does only at today's price: counted at the most
+ *   under its quote the keeper lets it fill, it falls short.
  * - SOL waits under the line: gated "wrap_line", and to go is that larger of two.
  * - The line the next saving must cross is worth more than the threshold less
  *   what is on its way: that, gated "wrap_line", and `note` names the line.
@@ -681,7 +710,19 @@ export function toGoOf(
   const convertingRaw = converting?.valueUsdcRaw ?? null;
   const onItsWay = readiness.heldRaw + (convertingRaw ?? 0n);
   if (converting !== undefined && convertingRaw !== null && onItsWay >= target) {
-    return { toGoRaw: 0n, gate: converting.rest === "slow" ? "slow" : null, note: null };
+    if (converting.rest === "slow") return { toGoRaw: 0n, gate: "slow", note: null };
+    /*
+     * ENOUGH AT TODAY'S PRICE IS NOT ENOUGH ONCE CONVERTED (review 2026-10-09).
+     * The conversion pays its pool and may fill up to CONVERT_SLIPPAGE_BPS
+     * under its quote, and the keeper then buys on the USDC it really holds,
+     * all legs or none (invest-tick.ts). $0.40 of USDC and $0.605 of SOL
+     * converting against a $1.00 basket read "$0.00 to go" on a full bar; a
+     * fill at $0.598 would leave $0.998, under the basket, and buy nothing. A
+     * buy is promised only when the SOL clears the basket at that worst fill.
+     */
+    const atWorst = readiness.heldRaw + (convertingRaw * (10_000n - CONVERT_SLIPPAGE_BPS)) / 10_000n;
+    if (atWorst >= target) return { toGoRaw: 0n, gate: null, note: null };
+    return { toGoRaw: 0n, gate: "conversion", note: PENDING_COPY.conversionDecides };
   }
   const gap = target - onItsWay - (waiting?.valueUsdcRaw ?? 0n);
   if (waiting === null) {

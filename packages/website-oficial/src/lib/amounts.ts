@@ -54,9 +54,9 @@ export const formatSol = (lamports: bigint): string => formatUnits(lamports, SOL
  * Lamports as SOL text rounded to at most `decimals` places, for a face that
  * has to be read at a glance.
  *
- * THE ONLY ROUNDING IN THIS FILE, and it is a DISPLAY rounding: everything
- * else here never rounds, because a lamport lost is a transaction that differs
- * from what somebody typed. A strip chip is not a transaction — it is a
+ * ONE OF THE TWO ROUNDINGS IN THIS FILE (formatSolAtLeast is the other), and
+ * both are DISPLAY roundings: everything else here never rounds, because a
+ * lamport lost is a transaction that differs from what somebody typed. A strip chip is not a transaction — it is a
  * glance — and "+0.036634582" in a 9-character pill is unreadable. Every
  * caller must keep the exact figure within reach; the chips put it in their
  * tooltip and their accessible name.
@@ -72,6 +72,27 @@ export function formatSolAtMost(lamports: bigint, decimals: number): string {
   const rounded = (lamports + scale / 2n) / scale;
   if (rounded === 0n) return lamports === 0n ? "0" : `<${formatUnits(1n, decimals)}`;
   return formatUnits(rounded, decimals, { grouped: true });
+}
+
+/**
+ * Lamports as SOL text rounded UP to at most `decimals` places, for an amount
+ * the page tells somebody to bring: "once your savings add 0.0012 SOL".
+ *
+ * A THRESHOLD IS ROUNDED THE WAY THAT KEEPS IT TRUE (review 2026-10-09).
+ * formatSolAtMost rounds half-up, so about half of all shortfalls printed
+ * LOWER than they are: 1,140,000 lamports short of the keeper's wrap line read
+ * "add 0.0011 SOL", and a saving of exactly that would leave the vault 40,000
+ * lamports under the line, with nothing converted. Rounded up, what is printed
+ * is always enough — at most one unit of the last place more than needed — the
+ * rule core's investmentReadiness keeps for the basket's threshold. And it
+ * never reads as zero: anything above nothing is at least one unit of the
+ * last place. Away from zero for a negative amount, so its size is never
+ * understated either.
+ */
+export function formatSolAtLeast(lamports: bigint, decimals: number): string {
+  if (lamports < 0n) return `-${formatSolAtLeast(-lamports, decimals)}`;
+  const scale = 10n ** BigInt(SOL_DECIMALS - decimals);
+  return formatUnits((lamports + scale - 1n) / scale, decimals, { grouped: true });
 }
 
 /**

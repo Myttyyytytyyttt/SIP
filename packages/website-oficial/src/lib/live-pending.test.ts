@@ -10,6 +10,7 @@ import { PENDING_COPY } from "@/lib/live-copy";
 import { toDashboardMock } from "@/lib/live-mock";
 import {
   CONVERT_DUST_LAMPORTS,
+  CONVERT_SLIPPAGE_BPS,
   PENDING_STALL_MS,
   WRAP_DUST_LAMPORTS,
   anyActive,
@@ -38,6 +39,7 @@ import {
 } from "../../test/fixtures/live-dashboard";
 import { toLiveDashboard } from "@/lib/live-model";
 import { KEEPER_DUST } from "../../../solana-core/test/fixtures/keeper-policy";
+import { SLIPPAGE_BPS } from "../../../solana-keeper/src/min-out";
 
 const PER_SOL = 100_038_711n;
 const RENT = 1_285_240n;
@@ -565,9 +567,10 @@ describe("SOL under the keeper's wrap line", () => {
   });
 
   it("says what moves the SOL from the keeper's constant, not a figure typed into the words", () => {
-    // The free SOL's own shortfall: the line less what it holds.
-    const short = Number(BigInt(Math.round(KEEPER_DUST.sol * 1e9)) - UNDER_LINE) / 1e9;
-    expect(PENDING_COPY.includesWaiting("$0.39", short.toFixed(4))).toBe(statsOf(owner()).nextInvestmentNote);
+    // The free SOL's own shortfall: the line less what it holds, rounded UP to the fourth place.
+    const shortLamports = BigInt(Math.round(KEEPER_DUST.sol * 1e9)) - UNDER_LINE;
+    const short = (Math.ceil(Number(shortLamports) / 1e5) / 1e4).toFixed(4);
+    expect(PENDING_COPY.includesWaiting("$0.39", short)).toBe(statsOf(owner()).nextInvestmentNote);
     // And the whole line, where it is the next saving's to cross.
     expect(statsOf(owner({ free: 0n, usdc: 800_000n })).nextInvestmentNote).toBe(PENDING_COPY.lineAhead(String(KEEPER_DUST.sol), "$0.50"));
   });
@@ -607,9 +610,32 @@ describe("SOL under the keeper's wrap line", () => {
     expect(under.toGoUsd).toBe(0.499807);
     // At it, the conversion takes all of it, and the next saving lands on an empty vault: it must bring the whole line.
     expect(at.toGoUsd).toBe(Number(value(WRAP_DUST_LAMPORTS)) / 1e6);
-    expect(under.nextInvestmentNote).toBe(PENDING_COPY.includesWaiting("$0.50", "<0.0001"));
+    // One lamport short: a saving of 0.0001 SOL crosses the line ("<0.0001" asked for less than nothing printable).
+    expect(under.nextInvestmentNote).toBe(PENDING_COPY.includesWaiting("$0.50", "0.0001"));
     expect(at.nextInvestmentNote).toBe(`${PENDING_COPY.includesConverting("$0.50")} · ${PENDING_COPY.lineAhead("0.005", "$0.50")}`);
     expect([under.nextInvestmentGate, at.nextInvestmentGate]).toEqual(["wrap_line", "wrap_line"]);
+  });
+
+  /**
+   * WHAT A SAVING MUST BRING IS PRINTED ROUNDED UP (review 2026-10-09). Half-up
+   * printed 1,140,000 lamports short as "0.0011", and a saving of exactly
+   * 0.0011 SOL would take the free SOL to 4,960,000 — still under the
+   * keeper's line, so nothing would convert and the card's line would be false.
+   */
+  it("prints the shortfall rounded up, so a saving of exactly what it says crosses the line", () => {
+    const free = WRAP_DUST_LAMPORTS - 1_140_000n;
+    expect(solUnderWrapLine(owner({ free }))?.shortLamports).toBe(1_140_000n);
+    expect(statsOf(owner({ free })).nextInvestmentNote).toBe(PENDING_COPY.includesWaiting(formatUsd(value(free)), "0.0012"));
+    // A saving of what is printed is enough; one of what half-up printed was not.
+    expect(free + 1_200_000n >= WRAP_DUST_LAMPORTS).toBe(true);
+    expect(free + 1_100_000n >= WRAP_DUST_LAMPORTS).toBe(false);
+    // The same in every line that names it: beside a conversion, and with no price.
+    const both = owner({ free, wsol: CONVERT_DUST_LAMPORTS, entries: FRESH });
+    expect(nextInvestmentOf(pendingSteps(both), solUnderWrapLine(both)).note).toBe(
+      PENDING_COPY.includesBoth(formatUsd(value(CONVERT_DUST_LAMPORTS) + value(free)), formatUsd(value(free)), "0.0012"),
+    );
+    const unpriced = owner({ free, prices: null });
+    expect(nextInvestmentOf(pendingSteps(unpriced), solUnderWrapLine(unpriced)).note).toBe(PENDING_COPY.unpricedWaiting("0.0039", "0.0012"));
   });
 
   it("adds free SOL under the line to wSOL converting on its own, and says the one sum the bar adds", () => {
@@ -711,6 +737,34 @@ describe("SOL under the keeper's wrap line", () => {
     // The same SOL under way gates nothing.
     const active = statsOf(owner({ free: 0n, wsol: 18_000_000n, entries: OWNER_CASE.entries }));
     expect([active.toGoUsd, active.nextInvestmentGate, active.nextInvestmentNote]).toEqual([0, null, PENDING_COPY.includesConverting("$1.80")]);
+  });
+
+  /**
+   * ENOUGH AT TODAY'S PRICE IS NOT ENOUGH ONCE CONVERTED (review 2026-10-09).
+   * The keeper converts, then buys only on the USDC the vault really holds,
+   * all legs or none; the conversion may fill up to its slippage bound under
+   * the quote. $0.40 of USDC and $0.605 of SOL converting read "$0.00 to go"
+   * on a full bar, and a fill at $0.598 would buy nothing.
+   */
+  it("promises no buy on SOL that completes the basket only at today's price, and says what decides it", () => {
+    const wsol = 6_047_659n;
+    expect(value(wsol)).toBe(605_000n);
+    // $1.005 at today's price; $0.9929 at the worst fill the keeper lets the conversion take.
+    expect(400_000n + value(wsol)).toBeGreaterThanOrEqual(1_000_000n);
+    expect(400_000n + (value(wsol) * (10_000n - CONVERT_SLIPPAGE_BPS)) / 10_000n).toBeLessThan(1_000_000n);
+    const stats = statsOf(owner({ free: 0n, wsol, usdc: 400_000n, entries: OWNER_CASE.entries }));
+    expect(stats.readyToInvestUsd).toBe(1.005);
+    expect([stats.toGoUsd, stats.nextInvestmentGate]).toEqual([0, "conversion"]);
+    expect(stats.nextInvestmentNote).toBe(`${PENDING_COPY.includesConverting("$0.61")} · ${PENDING_COPY.conversionDecides}`);
+    expect(PENDING_COPY.conversionDecides).not.toMatch(/keeper|poll|\bread\b/i);
+  });
+
+  it("promises the buy once the SOL clears the basket at that worst fill, and keeps an overdue one 'slow' either way", () => {
+    // $0.70 converting: $1.086 even 2 % under the quote.
+    const clear = statsOf(owner({ free: 0n, wsol: 6_997_292n, usdc: 400_000n, entries: OWNER_CASE.entries }));
+    expect([clear.toGoUsd, clear.nextInvestmentGate, clear.nextInvestmentNote]).toEqual([0, null, PENDING_COPY.includesConverting("$0.70")]);
+    const late = [liveEntry(signature(1), minutesAgo(20), [wrapped("6047659")])];
+    expect(statsOf(owner({ free: 0n, wsol: 6_047_659n, usdc: 400_000n, entries: late })).nextInvestmentGate).toBe("slow");
   });
 
   it("says no to-go and no gate where there is no basket to measure", () => {
@@ -993,6 +1047,12 @@ describe("Next investment, unknown", () => {
   it("names the input in words the owner knows", () => {
     for (const text of Object.values(PENDING_COPY.unknown)) expect(text).not.toMatch(/keeper|poll|\bread\b|lamport|wad/i);
   });
+
+  it("has a figure and nothing else for a basket the caps can never buy: no threshold, no to-go, no gate (the card draws no bar for it)", () => {
+    // One call's $0.90 split 50 / 50 gives each leg $0.45, under the $0.50 minimum: no balance ever buys it.
+    const stats = statsOf(dashboard({ usdc: 800_000n, policy: { ...OWNER_POLICY, maxPerCall: "900000" } }));
+    expect([stats.readyToInvestUsd, stats.thresholdUsd, stats.toGoUsd, stats.nextInvestmentGate]).toEqual([0.8, null, null, null]);
+  });
 });
 
 describe("the words", () => {
@@ -1015,6 +1075,17 @@ describe("the words", () => {
       amountSpoken: "",
     });
     expect(pendingLines(pendingSteps(dashboard({ ...OWNER_CASE, paused: true })), NOW_MS)[0]).toMatchObject({ title: PENDING_COPY.convertingWaiting, sub: PENDING_COPY.rest.paused, active: false });
+  });
+});
+
+/**
+ * THE KEEPER'S SLIPPAGE BOUND ON THE CONVERSION: what Next investment allows a
+ * conversion to fill under its quote before it promises a buy. The convert is
+ * quoted at legSlippageBps of a 0 bps fee, which is SLIPPAGE_BPS itself.
+ */
+describe("the keeper's slippage bound on the conversion", () => {
+  it("is the keeper's own", () => {
+    expect(CONVERT_SLIPPAGE_BPS).toBe(SLIPPAGE_BPS);
   });
 });
 

@@ -181,8 +181,9 @@ export function SavingsRulePanel({
    * not even a float's last digit can move the landing's bar.
    *
    * A LIVE PAGE'S "TO GO" IS THE KEEPER'S (live-pending.ts toGoOf). While a
-   * gate holds the buy — the wrap line, a conversion overdue, a rest the page
-   * can read — the bar stops short of full, and dollars to go are printed only where they are
+   * gate holds the buy — the wrap line, a conversion overdue or one enough
+   * only at today's price, a rest the page can read — the bar stops short of
+   * full, and dollars to go are printed only where they are
    * the headline's own difference: "$1.19 of $1.00 · $0.11 to go" would argue
    * with itself, and "$0.00 to go" would promise a buy that is not coming. The
    * note under the bar says what is left instead.
@@ -195,8 +196,16 @@ export function SavingsRulePanel({
    * left. The headline keeps its dash and the line under it says why. Only a
    * live page sets the figure to null: the sample's is undefined, and draws
    * exactly what it always drew.
+   *
+   * NOR DOES A THRESHOLD NOBODY CAN REACH (review 2026-10-09). A live basket
+   * the caps can never buy has no threshold (live-mock.ts: null) and nothing
+   * to go, while its figure is known: "$0.80 of —" drew an empty bar under it
+   * and "— to go" beside it — the very misreading above, from the other side.
+   * The headline keeps the figure and the dash; no bar, no "to go". A live
+   * page is told apart by `toGoUsd`, which only it sets.
    */
   const figureUnknown = stats.readyToInvestUsd === null;
+  const nothingToMeasure = stats.toGoUsd !== undefined && (thresholdUsd === null || thresholdUsd <= 0);
   const fill =
     stats.toGoUsd === undefined
       ? ready !== null && thresholdUsd !== null && thresholdUsd > 0
@@ -205,10 +214,12 @@ export function SavingsRulePanel({
       : ready !== null && thresholdUsd !== null && thresholdUsd > 0
         ? Math.min(gate === null ? 100 : GATED_PROGRESS_MAX, (ready / thresholdUsd) * 100)
         : 0;
-  const progress = figureUnknown ? null : fill;
+  const progress = figureUnknown || nothingToMeasure ? null : fill;
   const toGo = stats.toGoUsd === undefined ? (ready !== null && thresholdUsd !== null ? Math.max(0, thresholdUsd - ready) : null) : stats.toGoUsd;
   const toGoShown =
     !figureUnknown &&
+    // A live "to go" nobody could make is not printed as "— to go"; the sample's arithmetic is untouched.
+    (stats.toGoUsd === undefined || toGo !== null) &&
     (gate === null ||
       (toGo !== null && ready !== null && thresholdUsd !== null && usd(toGo) !== usd(0) && usd(toGo) === usd(Math.max(0, thresholdUsd - ready))));
   const nextView: NextInvestmentView = {

@@ -141,6 +141,15 @@ describe("next investment, gated", () => {
     expect(nextBlock(html)).toContain(paused);
   });
 
+  it("never says $0.00 to go, or draws a full bar, on SOL that completes the basket only at today's price", () => {
+    // Review 2026-10-09: the keeper buys on the USDC the conversion really brings, and it may fill under its quote.
+    const decides = "Includes about $0.61 of SOL being converted to USDC · Enough to buy if the conversion lands near today's price";
+    const html = live({ readyToInvestUsd: 1.005, toGoUsd: 0, nextInvestmentGate: "conversion", nextInvestmentNote: decides });
+    expect(fill(html)).toBe("-5");
+    expect(nextBlock(html)).not.toContain("to go");
+    expect(nextBlock(html)).toContain(decides.replaceAll("'", "&#x27;"));
+  });
+
   it("says no $0.00 to go under the line either, when what the line lacks is worth less than a cent", () => {
     const html = live({ readyToInvestUsd: 1.5, toGoUsd: 0, nextInvestmentGate: "wrap_line" });
     expect(fill(html)).toBe("-5");
@@ -184,6 +193,25 @@ describe("next investment, unknown", () => {
     const html = nextBlock(live({ readyToInvestUsd: null, toGoUsd: null, nextInvestmentGate: null, nextInvestmentNote: null }));
     expect(html).not.toContain('data-slot="progress"');
     expect(html).not.toContain("to go");
+  });
+
+  it("draws no bar, and no '— to go', for a basket the caps can never buy: a known figure with no threshold to measure it against", () => {
+    // Review 2026-10-09: "$0.80 of —" drew an empty bar and "— to go" (live-pending.ts: unreachable → no threshold, no to-go, no gate).
+    const stats = { readyToInvestUsd: 0.8, thresholdUsd: null, toGoUsd: null, nextInvestmentGate: null, nextInvestmentNote: null };
+    const html = nextBlock(live(stats));
+    expect(html).toMatch(/\$0\.80 <span class="text-muted-foreground">of<\/span> —/);
+    expect(html).not.toContain('data-slot="progress"');
+    expect(html).not.toContain("to go");
+    const seen: NextInvestmentView[] = [];
+    render(PROFIT, {
+      settings: door(),
+      stats: { ...STATS, ...stats } as SavingsStats,
+      renderNextInvestment: (next) => {
+        seen.push(next);
+        return createElement("div");
+      },
+    });
+    expect(seen[0]).toMatchObject({ readyUsd: 0.8, thresholdUsd: null, progress: null, toGoUsd: null, toGoShown: false, gate: null });
   });
 
   it("still draws the bar for a known figure of nothing: $0.00 is a figure", () => {
