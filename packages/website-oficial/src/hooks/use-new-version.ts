@@ -6,10 +6,10 @@
  * as it stays open, and nothing said so. Data only — what the page draws for
  * it (a chip, a reload) is the page's.
  *
- * PLUMBING ONLY, FOR NOW (review 2026-10-09): nothing mounts this yet, so no
- * tab asks /api/version and a stale tab still says nothing. It is meant for
- * the dashboard frame, beside the UI that draws `updateAvailable`; until that
- * lands, D5 is not fixed — only made fixable.
+ * MOUNTED BY THE HEARTBEAT (caa71be, 10-09): components/live/
+ * use-update-available.ts calls it, and LiveHeartbeat draws `updateAvailable`
+ * as a ring on its dot with "Reload page" in the popover. Between 897affd and
+ * that commit nothing mounted it, so no tab asked.
  *
  * It asks GET /api/version when the tab is looked at again or takes focus, at
  * most once a minute (VERSION_CHECK_FLOOR_MS), and every VERSION_CHECK_MS

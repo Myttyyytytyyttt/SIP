@@ -8,9 +8,9 @@
  * say that what it showed was not what had shipped. So the page
  * has what it needs to ask: GET /api/version answers the commit the server
  * runs, and this bundle carries the commit it was built from; when they
- * differ, an update is available (src/hooks/use-new-version.ts). No tab asks
- * yet — nothing mounts that hook until the UI that draws it does — and what
- * the page does with the answer is the page's.
+ * differ, an update is available (src/hooks/use-new-version.ts). The live
+ * dashboard's heartbeat asks, through components/live/use-update-available.ts
+ * (caa71be); what the page does with the answer is the page's.
  *
  * THE BUNDLE'S COMMIT IS BAKED IN AT BUILD TIME, ON PURPOSE. Everything else
  * this app knows of its deployment is read at request time (lib/config.ts:
