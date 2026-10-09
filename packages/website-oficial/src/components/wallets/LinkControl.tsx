@@ -35,7 +35,7 @@ import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { TxProgress } from "@/components/wallets/TxProgress";
+import { TxProgress, useStepStartedAt } from "@/components/wallets/TxProgress";
 import { useVaultWrite } from "@/hooks/use-vault-actions";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { formatSol, rawFrom } from "@/lib/amounts";
@@ -46,6 +46,7 @@ import { CREATE_LINK_COPY, LINK_COPY } from "@/lib/vault-copy";
 export function LinkControl({ address }: { readonly address: string; readonly seat?: SeatStatus }) {
   const screen = useVaultScreen();
   const write = useVaultWrite(`link:${address}`);
+  const startedAt = useStepStartedAt(write.progress);
   const [open, setOpen] = useState(false);
   if (screen === null || address === screen.pensionKey || screen.view.kind === "loading") return null;
 
@@ -53,6 +54,7 @@ export function LinkControl({ address }: { readonly address: string; readonly se
     <TxProgress
       progress={write.progress}
       successLabel={LINK_COPY.done}
+      startedAt={startedAt}
       onBuildAgain={() => void write.buildAgain()}
       onCheckAgain={() => void write.checkAgain()}
       onDismiss={() => write.dismiss()}

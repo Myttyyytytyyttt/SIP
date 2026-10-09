@@ -541,16 +541,21 @@ function Tiles({ overview, onSelect }: { readonly overview: Overview; readonly o
   if (overview.read === "loading" || vault.kind === "loading" || investing.kind === "loading" || withdraw.kind === "loading") {
     return (
       // role="status" and a spoken line: an aria-label on a plain div is not read out.
-      <div role="status" className={TILE_GRID} aria-busy="true">
-        <span className="sr-only">{OVERVIEW_COPY.tilesLoading}</span>
-        {(["vault", "trading", "investing", "withdraw"] as const).map((section) => (
-          // The tile's three lines at their own heights, so nothing moves when the read answers.
-          <div key={section} className="flex flex-col gap-2 rounded-xl border bg-card p-4 shadow-xs">
-            <Skeleton className="h-4 w-28" />
-            <Skeleton className="h-7 w-32" />
-            <Skeleton className="h-4 w-40 max-w-full" />
-          </div>
-        ))}
+      <div role="status" aria-busy="true" className="space-y-3">
+        <div className={TILE_GRID}>
+          {(["vault", "trading", "investing", "withdraw"] as const).map((section) => (
+            // The tile's three lines at their own heights, so nothing moves when the read answers.
+            <div key={section} className="flex flex-col gap-2 rounded-xl border bg-card p-4 shadow-xs">
+              <Skeleton className="h-4 w-28" />
+              <Skeleton className="h-7 w-32" />
+              <Skeleton className="h-4 w-40 max-w-full" />
+            </div>
+          ))}
+        </div>
+        {/* SHOWN, NOT ONLY SPOKEN (10-09): the pulse alone says nothing about what it waits for, and stands
+            still for anyone who asked for less motion. UNDER the tiles, where "Getting set up" comes next:
+            when the read answers the line goes and nothing above it moves. */}
+        <p className="text-sm text-muted-foreground">{OVERVIEW_COPY.tilesLoading}</p>
       </div>
     );
   }

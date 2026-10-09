@@ -70,7 +70,7 @@ import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hoo
 import { USDC_DECIMALS, formatUnits, formatUsd } from "@/lib/amounts";
 import { floorRoom, keeperVenueThresholdWad } from "@/lib/invest-limits";
 import { PICKER_MAX_LEGS } from "@/lib/basket-picker";
-import { INVEST_COPY, signedLegsOf } from "@/lib/vault-copy";
+import { INVEST_COPY, VAULT_COPY, signedLegsOf } from "@/lib/vault-copy";
 import type { InvestmentPolicyJson, VaultApi, VaultStateJson } from "@/lib/vault-api";
 
 const CLICK = { type: "click", target: {} };
@@ -156,6 +156,13 @@ beforeEach(() => {
 });
 
 describe("InvestingCard", () => {
+  it("loading: says in words what it waits for, beside a block, and offers nothing to sign (10-09)", () => {
+    const html = render(screen({ kind: "loading" }));
+    expect(html).toContain('aria-busy="true"');
+    expect(html).toContain(VAULT_COPY.loading);
+    expect(mocked.buttons).toHaveLength(0);
+  });
+
   it("no vault: says to create it first, and offers nothing to sign", () => {
     const html = render(screen({ kind: "ready", state: stateWith({ vault: { status: "missing", address: VAULT } }) }));
     expect(html).toContain("Create your vault first.");

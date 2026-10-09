@@ -44,6 +44,7 @@ import { WithdrawCard, largestHoldings, maxWithdrawalText, readWithdrawal, token
 import { VaultWriteLock } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
 import type { HoldingJson, VaultApi, VaultStateJson } from "@/lib/vault-api";
+import { VAULT_COPY } from "@/lib/vault-copy";
 
 const CLICK = { type: "click", target: {} };
 const PENSION = Keypair.generate().publicKey.toBase58();
@@ -87,6 +88,13 @@ beforeEach(() => {
 });
 
 describe("WithdrawCard", () => {
+  it("loading: says in words what it waits for, beside a block, and offers nothing to withdraw (10-09)", () => {
+    const html = render(screen({ kind: "loading" }));
+    expect(html).toContain('aria-busy="true"');
+    expect(html).toContain(VAULT_COPY.loading);
+    expect(mocked.buttons).toHaveLength(0);
+  });
+
   it("SOL: the balance, the rent kept, what can be withdrawn and the rule; Withdraw SOL waits for an amount", () => {
     const html = render(screen({ kind: "ready", state: stateWith() }));
     expect(html).toContain("0.15128524 SOL");

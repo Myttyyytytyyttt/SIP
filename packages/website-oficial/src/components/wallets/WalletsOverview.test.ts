@@ -527,7 +527,9 @@ describe("WalletsOverview", () => {
     expect(tiles(html)).toEqual([]);
     // Said out loud: a status region with a spoken line, not an aria-label on a plain div.
     expect(html).toContain('role="status"');
-    expect(html).toContain(`<span class="sr-only">${OVERVIEW_COPY.tilesLoading}</span>`);
+    // Shown, not only spoken (10-09), and under the tiles: when the read answers, nothing above it moves.
+    expect(html).toContain(`<p class="text-sm text-muted-foreground">${OVERVIEW_COPY.tilesLoading}</p>`);
+    expect(html.indexOf(OVERVIEW_COPY.tilesLoading)).toBeGreaterThan(html.lastIndexOf('data-slot="skeleton"'));
     expect(count(html, `>${PENSION_KEY}<`)).toBe(1);
     expect(html).not.toContain(OVERVIEW_COPY.setupTitle);
     expect(html).not.toMatch(ZERO_SOL);

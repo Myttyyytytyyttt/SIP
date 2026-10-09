@@ -17,8 +17,17 @@
  * and what the dashboard does next.
  *
  * THE VAULT STEP NEVER OFFERS CREATE ON A READ IT DOES NOT HAVE. While the read
- * is in flight it shows a skeleton; when it failed, Retry — and in both the
- * button is not rendered at all, not merely disabled (VaultCard's rule).
+ * is in flight it shows a skeleton under "Reading your vault on Solana…" (the
+ * words since 10-09: a pulse alone says nothing, and stands still for anyone
+ * who asked for less motion); when it failed, Retry — and in both the button
+ * is not rendered at all, not merely disabled (VaultCard's rule).
+ *
+ * THE READY SCREEN'S LIST IS THE DASHBOARD'S (10-09). "Getting started" with
+ * the lines LiveNextStep ticks off — vault created, trading wallet linked,
+ * first saving and, when stocks were chosen, first buy — so the list the setup
+ * ends on is the one the dashboard carries on with. Here only the vault is
+ * ticked, since only the write that just landed says so; each open line says
+ * how it gets done.
  *
  * THE FOOTER STAYS ON SCREEN. The body scrolls between the dialog's header and
  * this footer, so on a phone the cost line and the button are always visible;
@@ -26,7 +35,7 @@
  */
 
 import { DEFAULT_VAULT_POLICY, MODE_PROFIT, OFFERED_LEGS, USDC_MINT } from "@sip/solana-core/client";
-import { ArrowLeftRight, ArrowRight, ChartLine, Circle, PiggyBank, RefreshCw, ShieldCheck, type LucideIcon } from "lucide-react";
+import { ArrowLeftRight, ArrowRight, ChartLine, Circle, CircleCheck, PiggyBank, RefreshCw, ShieldCheck, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -378,6 +387,7 @@ function VaultStep(props: OnboardingBodyProps) {
             <StepMotion motion={STEP_MOTION.vault} wide />
             {reading ? (
               <div aria-busy="true" aria-label={VAULT_COPY.loading} className="space-y-3">
+                <p className="text-sm text-muted-foreground">{VAULT_COPY.loading}</p>
                 <Skeleton className="h-20 w-full rounded-lg" />
                 <Skeleton className="h-10 w-full rounded-lg" />
               </div>
@@ -492,10 +502,32 @@ function VaultStep(props: OnboardingBodyProps) {
   );
 }
 
+/**
+ * One line of the setup's list, in LiveNextStep's own look (its Step): a
+ * ticked circle and a struck label when done, an open circle when not, and
+ * the state in words for a screen reader. An open line says how it gets done.
+ */
+function SetupLine({ label, done = false, how }: { readonly label: string; readonly done?: boolean; readonly how?: string }) {
+  return (
+    <li className="flex items-start gap-2 text-sm">
+      {done ? (
+        <CircleCheck className="mt-0.5 size-4 shrink-0 text-emerald-700 dark:text-emerald-400" aria-hidden />
+      ) : (
+        <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+      )}
+      <span className="min-w-0">
+        <span className={done ? "text-muted-foreground line-through" : undefined}>{label}</span>
+        <span className="sr-only">{done ? " done" : " not done yet"}</span>
+        {how === undefined ? null : <span className="block text-xs text-muted-foreground">{how}</span>}
+      </span>
+    </li>
+  );
+}
+
 function Ready({ progress, onDone, basket }: OnboardingBodyProps) {
   const copy = ONBOARDING_COPY.ready;
+  const setup = LIVE_COPY.setup;
   const chosen = basketSplit(basket).map((leg) => leg.symbol);
-  const next = [...copy.next, chosen.length === 0 ? copy.nextSol : copy.nextStocks(listAnd(chosen))];
   return (
     <Frame
       label={copy.title}
@@ -504,16 +536,16 @@ function Ready({ progress, onDone, basket }: OnboardingBodyProps) {
           <TxProgress progress={progress} successLabel={VAULT_COPY.created} />
           <section aria-labelledby="onboarding-next" className="space-y-2">
             <h3 id="onboarding-next" className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-              {copy.nextTitle}
+              {setup.checklist}
             </h3>
             <ol className="space-y-1.5">
-              {next.map((line) => (
-                <li key={line} className="flex items-center gap-2 text-sm">
-                  <Circle className="size-4 text-muted-foreground" aria-hidden />
-                  {line}
-                </li>
-              ))}
+              <SetupLine label={setup.vault} done />
+              <SetupLine label={setup.linked} how={copy.how.linked} />
+              <SetupLine label={setup.firstSaving} how={copy.how.firstSaving} />
+              {/* As on the dashboard, a first buy is listed only when stocks were chosen: SOL is never promised one. */}
+              {chosen.length === 0 ? null : <SetupLine label={setup.firstBuy} how={copy.how.firstBuy(listAnd(chosen))} />}
             </ol>
+            {chosen.length === 0 ? <p className="text-xs text-muted-foreground">{copy.keptAsSol}</p> : null}
           </section>
         </div>
       }

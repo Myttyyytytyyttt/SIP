@@ -47,6 +47,7 @@ import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
 import { VaultWriteLock } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
 import type { VaultApi, VaultStateJson } from "@/lib/vault-api";
+import { VAULT_COPY } from "@/lib/vault-copy";
 
 const CLICK = { type: "click", target: {} };
 const PENSION = Keypair.generate().publicKey.toBase58();
@@ -103,9 +104,11 @@ describe("VaultCard", () => {
     }
   });
 
-  it("loading: a skeleton, and no create form", () => {
+  it("loading: a skeleton under words that say what it waits for, and no create form", () => {
     const html = render(screen({ kind: "loading" }));
     expect(html).toContain('aria-busy="true"');
+    // Shown, not only an aria-label (10-09): the pulse alone says nothing, and stands still under reduced motion.
+    expect(html).toContain(`>${VAULT_COPY.loading}</div>`);
     expect(buttons("Create vault")).toHaveLength(0);
   });
 

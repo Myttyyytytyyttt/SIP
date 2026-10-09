@@ -13,11 +13,21 @@
  * nothing moved; "Not confirmed yet" offers only Check again on the signature
  * that was sent, never re-signing, and cannot be dismissed; a refusal says why.
  * Cancelled in the wallet (code "declined"): a neutral "Cancelled", not a refusal.
+ *
+ * HOW LONG "CONFIRMING" HAS STOOD (10-09). Solana usually answers in a second
+ * or two; when it does not, a line that reads the same at second three and at
+ * second forty looks stuck. A host that passes `startedAt` (useStepStartedAt,
+ * below) gets "Confirming on Solana · 8 s" once the step has stood
+ * CONFIRMING_ELAPSED_MS, counting in its own leaf (Elapsed.tsx). The count is
+ * aria-hidden: this ladder is a polite region, and a number that changes every
+ * second inside it would be read out every second. A host that passes nothing
+ * keeps today's markup exactly.
  */
 
 import { Check, ExternalLink, LoaderCircle, RefreshCw } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
+import { Elapsed } from "@/components/live/Elapsed";
 import { Button } from "@/components/ui/button";
 import type { WriteProgress } from "@/hooks/use-vault-actions";
 import { cn } from "@/lib/utils";
@@ -30,6 +40,48 @@ const CREATE_LINK_STEPS: readonly FlowStep[] = ["creating_wallet", ...LINK_STEPS
 const IMPORT_LINK_STEPS: readonly FlowStep[] = ["importing_wallet", "checking_permission", ...LINK_STEPS];
 /** An import no link follows (already linked, or no vault yet): nothing for Phantom, so no link steps promised. */
 const IMPORT_STEPS: readonly FlowStep[] = ["importing_wallet", "checking_permission", "done"];
+
+/** The count appears beside "Confirming on Solana": the first read's own threshold (LiveFirstRead.tsx), before which a count is only noise. */
+export const CONFIRMING_ELAPSED_MS = 5_000;
+
+/** The step in flight, as one key — the write's kind and its step — or null when nothing runs. */
+export function stepKeyOf(progress: WriteProgress): string | null {
+  return progress.phase === "running" ? `${progress.kind}:${progress.step}` : null;
+}
+
+/** The step in flight and when this browser first showed it. */
+export interface StepMark {
+  readonly key: string | null;
+  readonly at: number | null;
+}
+
+export const NO_STEP: StepMark = { key: null, at: null };
+
+/**
+ * The mark after `progress`: unchanged while the same step runs, restarted at
+ * `now` when another one starts — a rebuild that goes back to "Preparing", a
+ * chained link's own "Confirming" after the create's — and cleared when the
+ * write stops.
+ */
+export function markStep(mark: StepMark, progress: WriteProgress, now: number): StepMark {
+  const key = stepKeyOf(progress);
+  if (key === mark.key) return mark;
+  return { key, at: key === null ? null : now };
+}
+
+/**
+ * When the step in flight began, in this browser's clock (null when nothing
+ * runs) — for TxProgress's `startedAt`. Called by the host that owns the
+ * write, which stays mounted while the ladder itself may come and go. Worked
+ * out during the render, so the step and its moment never disagree for a frame.
+ */
+export function useStepStartedAt(progress: WriteProgress): number | null {
+  const [mark, setMark] = useState<StepMark>(NO_STEP);
+  if (stepKeyOf(progress) === mark.key) return mark.at;
+  const next = markStep(mark, progress, Date.now());
+  setMark(next);
+  return next.at;
+}
 
 function SolscanLink({ href }: { readonly href: string }) {
   return (
@@ -62,6 +114,7 @@ export function TxProgress({
   onCheckAgain,
   onDismiss,
   approveDetail,
+  startedAt = null,
 }: {
   readonly progress: WriteProgress;
   /** What landed: "Vault created", "Linked", "Policy signed", "Withdrawn". */
@@ -71,6 +124,8 @@ export function TxProgress({
   readonly onDismiss?: () => void;
   /** What is being signed, shown while Phantom asks. */
   readonly approveDetail?: ReactNode;
+  /** When the step in flight began, in this browser's clock (useStepStartedAt): "Confirming on Solana" then counts. */
+  readonly startedAt?: number | null;
 }) {
   if (progress.phase === "idle") return null;
 
@@ -92,6 +147,9 @@ export function TxProgress({
           <div key={step} className={cn("flex items-center gap-2", index === current ? "font-medium text-foreground" : "text-muted-foreground", index > current && "opacity-60")}>
             {index < current ? <Check className="size-3.5" aria-hidden /> : index === current ? <LoaderCircle className="size-3.5 motion-safe:animate-spin" aria-hidden /> : <span className="size-3.5" aria-hidden />}
             {PROGRESS_COPY[step]}
+            {index === current && step === "confirming" && startedAt !== null ? (
+              <Elapsed from={startedAt} after={CONFIRMING_ELAPSED_MS} className="-ml-0.5 font-normal text-muted-foreground" />
+            ) : null}
           </div>
         ))}
         {progress.step === "approve_pension" && approveDetail !== undefined && approveDetail !== null ? <div className="pt-1">{approveDetail}</div> : null}

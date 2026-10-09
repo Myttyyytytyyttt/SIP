@@ -81,7 +81,7 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { TxProgress } from "@/components/wallets/TxProgress";
+import { TxProgress, useStepStartedAt } from "@/components/wallets/TxProgress";
 import { useVaultWrite, type InvestRequest, type WriteProgress } from "@/hooks/use-vault-actions";
 import { DEFAULT_VENUE_NAME, VERIFIABLE_VENUES, liveFloorsProblem } from "@/lib/vault-flows";
 import { useVaultScreen } from "@/hooks/use-vault-state";
@@ -659,6 +659,7 @@ export const editScreen = (input: { readonly editing: boolean; readonly justSign
 export function InvestingCard() {
   const screen = useVaultScreen();
   const write = useVaultWrite("policy");
+  const startedAt = useStepStartedAt(write.progress);
   const [signing, setSigning] = useState<InvestRequest | "pause" | null>(null);
   // WHETHER THE OWNER IS CHANGING THE POLICY HE HAS. Declared with the other
   // hooks, above the early return: a hook after a conditional return is a hook
@@ -681,6 +682,7 @@ export function InvestingCard() {
     <TxProgress
       progress={write.progress}
       successLabel={INVEST_COPY.signed}
+      startedAt={startedAt}
       onBuildAgain={() => void write.buildAgain()}
       onCheckAgain={() => void write.checkAgain()}
       onDismiss={() => {
@@ -698,6 +700,8 @@ export function InvestingCard() {
       <Card aria-busy="true" aria-label={INVEST_COPY.title}>
         <CardHeader>
           <CardTitle>{INVEST_COPY.title}</CardTitle>
+          {/* What the block waits for, in words (10-09), as on the vault card. */}
+          <CardDescription>{VAULT_COPY.loading}</CardDescription>
         </CardHeader>
         <CardContent>
           <Skeleton className="h-20 w-full" />

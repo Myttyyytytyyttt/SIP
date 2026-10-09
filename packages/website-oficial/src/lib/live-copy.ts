@@ -642,11 +642,19 @@ export const ONBOARDING_COPY = {
   ready: {
     title: "Your vault is ready",
     body: "Nothing is saved until a trading wallet is linked to it. Your dashboard walks you through the rest.",
-    nextTitle: "Next, from your dashboard",
-    next: ["Create and link a trading wallet", "Send it SOL and trade from it"],
-    /** The third line follows what was chosen on the vault step. */
-    nextStocks: (names: string): string => `Approve buying ${names} when your first savings arrive`,
-    nextSol: "Your savings stay as SOL until you choose stocks",
+    /**
+     * HOW EACH OPEN LINE GETS DONE (10-09). The list itself is the dashboard's
+     * (LIVE_COPY.setup, ticked off by LiveNextStep), so the setup ends on the
+     * same lines the dashboard carries on with; these are said under them.
+     */
+    how: {
+      linked: "Create and link a trading wallet",
+      firstSaving: "Send it SOL and trade from it",
+      /** Only when stocks were chosen on the vault step. */
+      firstBuy: (names: string): string => `Approve buying ${names} when your first savings arrive`,
+    },
+    /** Under the list when SOL was chosen: no first buy is promised. */
+    keptAsSol: "Your savings stay as SOL until you choose stocks",
     done: "Go to my dashboard",
   },
 } as const;

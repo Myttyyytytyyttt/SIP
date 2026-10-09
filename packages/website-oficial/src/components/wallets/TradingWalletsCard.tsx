@@ -54,7 +54,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { ImportAndLinkNote, ImportWalletPanel } from "@/components/wallets/ImportWalletPanel";
 import { TradingWalletRow, type TradingWalletRowData } from "@/components/wallets/TradingWalletRow";
-import { TxProgress } from "@/components/wallets/TxProgress";
+import { TxProgress, useStepStartedAt } from "@/components/wallets/TxProgress";
 import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
 import { WalletsSectionContext } from "@/components/wallets/wallets-section-context";
 import { useCreateAndLink } from "@/hooks/use-create-and-link";
@@ -88,6 +88,8 @@ export function TradingWalletsCard() {
   const screen = useVaultScreen();
   const { run, created, outcome, dismiss, write } = useCreateAndLink(config);
   const importer = useImportAndLink(config);
+  const createStartedAt = useStepStartedAt(write.progress);
+  const importStartedAt = useStepStartedAt(importer.write.progress);
   const [importing, setImporting] = useState(false);
   // The live next-step card's "Import a wallet I already use" opens this tab; the panel opens with it.
   const importAsked = useSyncExternalStore(subscribeImportRequest, importRequested, () => false);
@@ -206,6 +208,7 @@ export function TradingWalletsCard() {
         <TxProgress
           progress={write.progress}
           successLabel={CREATE_LINK_COPY.done}
+          startedAt={createStartedAt}
           onBuildAgain={() => void write.buildAgain()}
           onCheckAgain={() => void write.checkAgain()}
           // The note beside a stopped link says the wallet is safe; dismissing the one dismisses the other.
@@ -219,6 +222,7 @@ export function TradingWalletsCard() {
         <TxProgress
           progress={importer.write.progress}
           successLabel={IMPORT_LINK_COPY.done}
+          startedAt={importStartedAt}
           onBuildAgain={() => void importer.write.buildAgain()}
           onCheckAgain={() => void importer.write.checkAgain()}
           onDismiss={() => {

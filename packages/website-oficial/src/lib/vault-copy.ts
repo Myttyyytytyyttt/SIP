@@ -665,7 +665,8 @@ function acknowledgeSentence(legs: readonly SignedLeg[]): string {
 
 export const VAULT_COPY = {
   title: "Vault",
-  loading: "Reading your vault on Solana",
+  /** Shown, not only spoken, beside a skeleton that waits on the vault's read (10-09). */
+  loading: "Reading your vault on Solana…",
   unreadable: "SaverFi could not read Solana just now. Nothing was offered to sign.",
   retry: "Retry",
   noVault: "No vault yet",
@@ -1653,7 +1654,8 @@ export const OVERVIEW_COPY = {
   disconnect: "Disconnect",
 
   // ── the four tiles ─────────────────────────────────────────────────────────
-  tilesLoading: "Reading your setup on Solana",
+  /** Under the tiles' skeletons, shown and spoken (10-09). */
+  tilesLoading: "Reading your setup on Solana…",
   /** A figure that was not read. */
   notRead: "—",
   couldNotRead: "Could not be read",

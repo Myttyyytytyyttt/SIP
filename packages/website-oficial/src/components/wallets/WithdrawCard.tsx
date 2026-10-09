@@ -32,7 +32,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddressLine } from "@/components/wallets/AddressLine";
-import { TxProgress } from "@/components/wallets/TxProgress";
+import { TxProgress, useStepStartedAt } from "@/components/wallets/TxProgress";
 import { useVaultWrite, type TokenWithdrawRequest } from "@/hooks/use-vault-actions";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { AmountError, SOL_DECIMALS, formatSol, formatUnits, parseUnits, rawFrom, shareOfRaw } from "@/lib/amounts";
@@ -126,6 +126,9 @@ export function WithdrawCard() {
   const screen = useVaultScreen();
   const sol = useVaultWrite("withdraw:sol");
   const tokens = useVaultWrite("withdraw:tokens");
+  // Here, with the writes they time: the sections mount only once the vault has been read.
+  const solStartedAt = useStepStartedAt(sol.progress);
+  const tokensStartedAt = useStepStartedAt(tokens.progress);
   const [amountText, setAmountText] = useState("");
   if (screen === null) return null;
   const { view } = screen;
@@ -148,6 +151,8 @@ export function WithdrawCard() {
       <Card aria-busy="true" aria-label={WITHDRAW_COPY.title}>
         <CardHeader>
           <CardTitle>{WITHDRAW_COPY.title}</CardTitle>
+          {/* What the block waits for, in words (10-09), as on the vault card. */}
+          <CardDescription>{VAULT_COPY.loading}</CardDescription>
         </CardHeader>
         <CardContent>
           <Skeleton className="h-20 w-full" />
@@ -163,8 +168,8 @@ export function WithdrawCard() {
     <Card>
       {header(null)}
       <CardContent className="space-y-6">
-        <SolSection state={state} write={sol} amountText={amountText} setAmountText={setAmountText} />
-        <TokenSection state={state} write={tokens} />
+        <SolSection state={state} write={sol} startedAt={solStartedAt} amountText={amountText} setAmountText={setAmountText} />
+        <TokenSection state={state} write={tokens} startedAt={tokensStartedAt} />
       </CardContent>
     </Card>
   );
@@ -173,11 +178,13 @@ export function WithdrawCard() {
 function SolSection({
   state,
   write,
+  startedAt,
   amountText,
   setAmountText,
 }: {
   readonly state: VaultStateJson;
   readonly write: VaultWrite;
+  readonly startedAt: number | null;
   readonly amountText: string;
   readonly setAmountText: (text: string) => void;
 }) {
@@ -249,6 +256,7 @@ function SolSection({
       <TxProgress
         progress={write.progress}
         successLabel={WITHDRAW_COPY.withdrawn}
+        startedAt={startedAt}
         onBuildAgain={() => void write.buildAgain()}
         onCheckAgain={() => void write.checkAgain()}
         onDismiss={() => write.dismiss()}
@@ -257,7 +265,7 @@ function SolSection({
   );
 }
 
-function TokenSection({ state, write }: { readonly state: VaultStateJson; readonly write: VaultWrite }) {
+function TokenSection({ state, write, startedAt }: { readonly state: VaultStateJson; readonly write: VaultWrite; readonly startedAt: number | null }) {
   const offered = tokenRows(state);
   const blocked = write.running || write.busyElsewhere || write.unconfirmed;
   const withdraw = (request: TokenWithdrawRequest): void => void write.withdrawToken(request);
@@ -284,6 +292,7 @@ function TokenSection({ state, write }: { readonly state: VaultStateJson; readon
       <TxProgress
         progress={write.progress}
         successLabel={WITHDRAW_COPY.withdrawn}
+        startedAt={startedAt}
         onBuildAgain={() => void write.buildAgain()}
         onCheckAgain={() => void write.checkAgain()}
         onDismiss={() => write.dismiss()}

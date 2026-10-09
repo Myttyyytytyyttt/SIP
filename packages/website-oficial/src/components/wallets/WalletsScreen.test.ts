@@ -104,6 +104,7 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ReseatConfirm } from "@/components/wallets/TradingWalletRow";
 import { WalletsScreen } from "@/components/wallets/WalletsScreen";
+import { WALLETS_LOADING } from "@/components/wallets/WalletsTabsSkeleton";
 import { useKeeperSeat } from "@/hooks/use-keeper-seat";
 import { beginSeatTask, clearSeatActivity, endSeatTask, reseatRunning, seatActivity } from "@/lib/seat-activity";
 import { GRANT_BACKOFF_MS, GRANT_COPY, GRANT_HOLD_MS, RESEAT_COPY, ROW_COPY } from "@/lib/trading-wallets";
@@ -173,6 +174,9 @@ describe("WalletsScreen states", () => {
     mocked.privy = { ready: false, authenticated: false, user: null };
     const html = render();
     expect(html).toContain('aria-busy="true"');
+    // Words a sighted person reads (10-09), claiming no Solana read, and not spoken twice beside the status line.
+    expect(html).toContain(`<p aria-hidden="true" class="text-sm text-muted-foreground">${WALLETS_LOADING}</p>`);
+    expect(html).not.toContain("Solana");
     expect(html).not.toContain("Connect pension key");
     expect(buttons(CREATE_LINK_COPY.button)).toHaveLength(0);
   });

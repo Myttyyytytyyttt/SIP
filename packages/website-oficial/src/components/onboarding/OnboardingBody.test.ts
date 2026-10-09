@@ -84,6 +84,12 @@ const button = (label: string) => {
   expect(found).toHaveLength(1);
   return found[0]!;
 };
+/** The ready screen's list, line by line: its label and whether it is ticked, as a screen reader is told. */
+const lines = (html: string): { label: string; done: boolean }[] =>
+  [...html.matchAll(/<li class="flex items-start gap-2 text-sm">(.*?)<\/li>/g)].map(([, body = ""]) => ({
+    label: /<span(?: class="[^"]*")?>([^<]+)<\/span><span class="sr-only">/.exec(body)?.[1] ?? "",
+    done: body.includes('<span class="sr-only"> done</span>'),
+  }));
 /** The text a person reads: tags dropped, entities for the two characters React escapes put back. */
 const textOf = (html: string): string => html.replace(/<[^>]+>/g, " ").replace(/&#x27;/g, "'").replace(/&amp;/g, "&").replace(/\s+/g, " ");
 
@@ -242,6 +248,8 @@ describe("the vault step", () => {
   it("never offers Create on a read in flight or failed — the button is not there at all", () => {
     const reading = render(props({ step: "vault", read: "reading" }));
     expect(reading).toContain('aria-busy="true"');
+    // Shown, not only spoken (10-09): the pulse alone says nothing, and stands still under reduced motion.
+    expect(reading).toContain(`<p class="text-sm text-muted-foreground">${VAULT_COPY.loading}</p>`);
     expect(buttons(VAULT_COPY.create)).toHaveLength(0);
     expect(textOf(reading)).not.toContain("Cost:");
 
@@ -286,9 +294,17 @@ describe("ready", () => {
     const html = render(value);
     expect(textOf(html)).toContain(VAULT_COPY.created);
     expect(html).toContain('href="https://solscan.io/tx/sig"');
-    for (const line of ONBOARDING_COPY.ready.next) expect(textOf(html)).toContain(line);
-    // The last line follows the choice: SOL by default here.
-    expect(textOf(html)).toContain(ONBOARDING_COPY.ready.nextSol);
+    // The dashboard's own list (10-09), its heading included, so the setup ends where the dashboard carries on.
+    expect(textOf(html)).toContain(LIVE_COPY.setup.checklist);
+    expect(lines(html)).toEqual([
+      { label: LIVE_COPY.setup.vault, done: true },
+      { label: LIVE_COPY.setup.linked, done: false },
+      { label: LIVE_COPY.setup.firstSaving, done: false },
+    ]);
+    expect(textOf(html)).toContain(ONBOARDING_COPY.ready.how.linked);
+    expect(textOf(html)).toContain(ONBOARDING_COPY.ready.how.firstSaving);
+    // SOL by default here: no first buy is promised, and the line says why.
+    expect(textOf(html)).toContain(ONBOARDING_COPY.ready.keptAsSol);
     expect(buttons(VAULT_COPY.dismiss)).toHaveLength(0);
     const done = button(ONBOARDING_COPY.ready.done);
     expect(done.primary).toBe(true);
@@ -307,7 +323,9 @@ describe("ready, after stocks were chosen", () => {
         progress: { phase: "finished", kind: "create", result: { ok: true, signature: "sig", explorerUrl: null, slot: 1, unitsConsumed: null } } as WriteProgress,
       }),
     );
+    expect(lines(html).map((line) => line.label)).toEqual([LIVE_COPY.setup.vault, LIVE_COPY.setup.linked, LIVE_COPY.setup.firstSaving, LIVE_COPY.setup.firstBuy]);
+    expect(lines(html).at(-1)?.done).toBe(false);
     expect(textOf(html)).toContain("Approve buying SPYx and ANTHROPIC when your first savings arrive");
-    expect(textOf(html)).not.toContain(ONBOARDING_COPY.ready.nextSol);
+    expect(textOf(html)).not.toContain(ONBOARDING_COPY.ready.keptAsSol);
   });
 });

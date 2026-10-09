@@ -3,7 +3,9 @@
 /**
  * THE VAULT CARD: the pension key's vault, or the form that creates it.
  *
- * FOUR STATES. Loading: a skeleton. Unreadable (the route did not answer, or its
+ * FOUR STATES. Loading: a skeleton under "Reading your vault on Solana…" — the
+ * words say what the block waits for, and still say it for anyone whose
+ * system asked for less motion, for whom the block does not pulse. Unreadable (the route did not answer, or its
  * vault read failed): words and Retry, and never the create form, because the
  * vault may exist. No vault: the mode choice with each mode's honest rule, the
  * limits, the live rent, and Create vault. A vault: its rule, address, balance,
@@ -27,7 +29,7 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddressLine } from "@/components/wallets/AddressLine";
 import { LimitField } from "@/components/wallets/LimitField";
-import { TxProgress } from "@/components/wallets/TxProgress";
+import { TxProgress, useStepStartedAt } from "@/components/wallets/TxProgress";
 import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
 import { useVaultWrite } from "@/hooks/use-vault-actions";
 import { useVaultScreen } from "@/hooks/use-vault-state";
@@ -60,6 +62,7 @@ export function VaultCard({ volumeOffered = VOLUME_MODE_OFFERED }: { readonly vo
 function VaultCardBody({ volumeOffered }: { readonly volumeOffered: boolean }) {
   const screen = useVaultScreen();
   const write = useVaultWrite("vault");
+  const startedAt = useStepStartedAt(write.progress);
   if (screen === null) return null;
   const { view } = screen;
 
@@ -67,6 +70,7 @@ function VaultCardBody({ volumeOffered }: { readonly volumeOffered: boolean }) {
     <TxProgress
       progress={write.progress}
       successLabel={VAULT_COPY.created}
+      startedAt={startedAt}
       onBuildAgain={() => void write.buildAgain()}
       onCheckAgain={() => void write.checkAgain()}
       onDismiss={() => write.dismiss()}
@@ -78,6 +82,7 @@ function VaultCardBody({ volumeOffered }: { readonly volumeOffered: boolean }) {
       <Card aria-busy="true" aria-label={VAULT_COPY.loading}>
         <CardHeader>
           <CardTitle>{VAULT_COPY.title}</CardTitle>
+          <CardDescription>{VAULT_COPY.loading}</CardDescription>
         </CardHeader>
         <CardContent>
           <Skeleton className="h-20 w-full" />
