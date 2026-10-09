@@ -49,6 +49,8 @@ import {
 } from "lucide-react";
 
 import { Figure } from "@/components/live/Figure";
+import { arrivalTone } from "@/components/live/use-arrivals";
+import { WASH_HOST, Wash } from "@/components/live/Wash";
 import { Num } from "@/components/num";
 import { Badge } from "@/components/ui/badge";
 import { formatSol, formatUsd, rawFrom } from "@/lib/amounts";
@@ -307,12 +309,15 @@ export function LiveActivityRow({
   labelOf,
   maxContribution,
   first = false,
+  arrived = false,
 }: {
   readonly row: LiveRow;
   readonly labelOf: (wallet: string | null) => string;
   readonly maxContribution: bigint | null;
   /** The feed's single Tab stop, until a row takes focus. */
   readonly first?: boolean;
+  /** It just arrived (use-arrivals.ts): the wash, in what the row is — and grey for a transaction that failed (Wash.tsx). */
+  readonly arrived?: boolean;
 }) {
   const parts = partsOf(row.event, labelOf, maxContribution);
   const clock = row.at === null ? null : clockLabel(row.at);
@@ -346,10 +351,12 @@ export function LiveActivityRow({
     "flex w-full items-start gap-3 px-4 py-2.5 text-left outline-none",
     // Inset ring: a ScrollArea viewport would clip one drawn outside the row.
     "hover:bg-muted/50 focus-visible:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+    arrived && WASH_HOST,
   );
 
   const body = (
     <>
+      {arrived ? <Wash tone={arrivalTone(row)} /> : null}
       <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted">{parts.icon}</span>
       <span className="min-w-0 flex-1">
         <span className={cn("flex items-center gap-1.5 text-sm", parts.failed && "text-muted-foreground")}>

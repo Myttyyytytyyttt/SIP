@@ -12,6 +12,18 @@ import { shortAddress } from "@/lib/vault-copy";
 import type { Holding, SavingsDay, SavingsPoint, SavingsRule, SavingsStats, Trade } from "@/mocks/types";
 
 /**
+ * WHAT A LIVE PAGE ADDS TO THE HERO (live/use-arrivals.ts): the pill beside
+ * "Saved so far" when savings have just arrived — "+$0.43 saved · 14:32 UTC".
+ * `pill` is the newest one's words, kept after it lapses so it fades out over
+ * them; `shown` is whether it is up. No count-up and no flash on any figure
+ * (owner, 10-09): the pill is the one mark.
+ */
+export interface HeroPulse {
+  readonly pill: { readonly text: string; readonly title: string | null } | null;
+  readonly shown: boolean;
+}
+
+/**
  * The big panel — where the reference played its round. The figure, its
  * curve, the stats and what the pension holds. Server component: the only
  * interaction (the chart's range) lives inside PensionChart.
@@ -27,6 +39,7 @@ export function PensionPanel({
   calendar,
   vault,
   trades,
+  pulse,
   className,
 }: {
   stats: SavingsStats;
@@ -43,6 +56,8 @@ export function PensionPanel({
   now: string;
   /** The curve's unit when it is not dollars: a live page that could not read a price. */
   unit?: "SOL";
+  /** A live page's arrivals: the pill beside the label. Absent on the sample, which keeps its bare label. */
+  pulse?: HeroPulse;
   className?: string;
 }) {
   const savedToday = stats.savedTodayUsd !== null && stats.savedTodayUsd > 0;
@@ -62,7 +77,30 @@ export function PensionPanel({
     <Card className={cn("@container/panel overflow-hidden xl:[--card-spacing:--spacing(3)]", className)}>
       <CardHeader className="flex flex-col gap-4 @md/panel:flex-row @md/panel:items-start @md/panel:justify-between">
         <div className="space-y-1">
-          <p className={LABEL}>Saved so far</p>
+          {pulse === undefined ? (
+            <p className={LABEL}>Saved so far</p>
+          ) : (
+            /*
+             * THE LABEL'S OWN 16 px LINE, with the pill in it: h-4 is LABEL's
+             * line, and the pill is always mounted while a live page passes
+             * `pulse` — faded out, not removed — so the hero never changes
+             * height when a saving arrives or its pill lapses. Reduced motion:
+             * it appears and goes without the fade.
+             */
+            <div className="flex h-4 min-w-0 items-center gap-2">
+              <p className={cn(LABEL, "shrink-0")}>Saved so far</p>
+              <span
+                className={cn(
+                  "block h-4 min-w-0 truncate rounded-full bg-emerald-500/12 px-1.5 text-[11px] leading-4 tabular-nums transition-opacity duration-300 motion-reduce:transition-none",
+                  SAVED,
+                  pulse.shown && pulse.pill !== null ? "opacity-100" : "opacity-0",
+                )}
+                {...(pulse.shown && pulse.pill !== null ? (pulse.pill.title === null ? {} : { title: pulse.pill.title }) : { "aria-hidden": true })}
+              >
+                {pulse.pill?.text}
+              </span>
+            </div>
+          )}
           <p
             className="font-mono text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl xl:short:text-4xl"
             // The chain's own figure, in full, and that the dollar is it at one price read now.

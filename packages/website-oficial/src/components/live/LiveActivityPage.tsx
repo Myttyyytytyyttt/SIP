@@ -93,6 +93,7 @@ export function LiveActivityPage({
   notes,
   pending = NOTHING_PENDING,
   emptyNote,
+  arrived,
   className,
 }: {
   readonly data: LiveDashboard;
@@ -121,6 +122,8 @@ export function LiveActivityPage({
   /** What the keeper is about to do with the vault's money (src/lib/live-pending.ts), over the rows — with what just ended (LivePending.tsx usePendingView). */
   readonly pending?: PendingView;
   readonly emptyNote?: string;
+  /** The transactions that just arrived, by signature (use-arrivals.ts): their rows wear the wash, under any filter. */
+  readonly arrived?: ReadonlySet<string>;
   readonly className?: string;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
@@ -208,6 +211,7 @@ export function LiveActivityPage({
               readyAt={readyAt}
               {...(onRetryActivity === undefined ? {} : { onRetry: onRetryActivity })}
               emptyNote={filter === "all" ? emptyNote : ACTIVITY_COPY.noneInFilter}
+              {...(arrived === undefined ? {} : { arrived })}
             />
           </div>
 

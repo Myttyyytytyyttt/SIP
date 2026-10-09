@@ -62,12 +62,15 @@ function Days({
   labelOf,
   maxContribution,
   ownsTabStop,
+  arrived,
 }: {
   readonly rows: readonly LiveRow[];
   readonly now: string;
   readonly labelOf: (wallet: string | null) => string;
   readonly maxContribution: bigint | null;
   readonly ownsTabStop: boolean;
+  /** The transactions that just arrived, by signature; none in the hidden disclosure, which is never news. */
+  readonly arrived?: ReadonlySet<string>;
 }) {
   let position = 0;
   const keyOf = keyBySignature();
@@ -85,7 +88,16 @@ function Days({
             // so the signature alone is not a key — and a place in the day is
             // not one either: a new row above would shift every key under it
             // (live/row-keys.ts).
-            return <LiveActivityRow key={keyOf(row.signature)} row={row} labelOf={labelOf} maxContribution={maxContribution} first={first} />;
+            return (
+              <LiveActivityRow
+                key={keyOf(row.signature)}
+                row={row}
+                labelOf={labelOf}
+                maxContribution={maxContribution}
+                first={first}
+                arrived={arrived?.has(row.signature) === true}
+              />
+            );
           })}
         </div>
       ))}
@@ -210,6 +222,7 @@ export function LiveActivityFeed({
   retryAt = null,
   readyAt = 0,
   emptyNote,
+  arrived,
   className,
 }: {
   readonly rows: readonly LiveRow[];
@@ -231,6 +244,8 @@ export function LiveActivityFeed({
   readonly readyAt?: number;
   /** What to say instead of rows: the stage's own sentence, when it has one. */
   readonly emptyNote?: string;
+  /** The transactions that just arrived, by signature (use-arrivals.ts): their rows wear the wash. */
+  readonly arrived?: ReadonlySet<string>;
   readonly className?: string;
 }) {
   /**
@@ -290,7 +305,7 @@ export function LiveActivityFeed({
   return (
     <div className={className} data-live-feed={id}>
       {banner}
-      <Days rows={rows} now={now} labelOf={labelOf} maxContribution={maxContribution} ownsTabStop />
+      <Days rows={rows} now={now} labelOf={labelOf} maxContribution={maxContribution} ownsTabStop {...(arrived === undefined ? {} : { arrived })} />
       {disclosure}
     </div>
   );

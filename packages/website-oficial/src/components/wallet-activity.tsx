@@ -65,6 +65,12 @@ export interface LiveColumnSlots {
    * knows (G10).
    */
   readonly countsUnknown?: boolean;
+  /**
+   * The transactions that just arrived, by signature (live/use-arrivals.ts):
+   * their rows wear the wash. One set for the page, so the aside's copy and the
+   * sheet's mark the same rows on the same clock.
+   */
+  readonly arrived?: ReadonlySet<string>;
   /** Inside the header's sheet: pressing Manage wallets closes the sheet before the modal opens. */
   readonly inSheet: boolean;
 }
@@ -179,7 +185,15 @@ export function WalletActivity({
               {date === "" ? "Time unknown" : relativeDayLabel(date, now)}
             </div>
             {events.map((event) => (
-              <ActivityRow key={event.id} event={event} now={now} first={event.id === firstId} order={orderOf.get(event.id) ?? 0} />
+              <ActivityRow
+                key={event.id}
+                event={event}
+                now={now}
+                first={event.id === firstId}
+                order={orderOf.get(event.id) ?? 0}
+                // Only ever passed for a row that arrived: the sample's rows get no new prop at all.
+                {...(live?.arrived?.has(event.txHash) === true ? { arrived: true } : {})}
+              />
             ))}
           </div>
         ))}

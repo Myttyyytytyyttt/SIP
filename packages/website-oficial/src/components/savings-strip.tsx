@@ -38,6 +38,8 @@ export interface LiveStrip {
    * its state, so the ticking stays in that leaf and out of this strip.
    */
   readonly loadOlderSlot?: ReactNode;
+  /** The settlements that just arrived, by signature (live/use-arrivals.ts): their chips slide in and wear the wash. */
+  readonly arrived?: ReadonlySet<string>;
 }
 
 export function SavingsStrip({
@@ -89,7 +91,14 @@ export function SavingsStrip({
       ) : (
         <div className="-m-px flex min-w-0 flex-1 gap-2 overflow-x-auto p-px [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [mask-image:linear-gradient(to_right,black_calc(100%-2rem),transparent)]">
           {shown.map((trade, index) => (
-            <StripChip key={trade.id} trade={trade} now={now} newest={index === 0} />
+            <StripChip
+              key={trade.id}
+              trade={trade}
+              now={now}
+              newest={index === 0}
+              // Only ever passed for a chip that arrived: the sample's chips get no new prop at all.
+              {...(live?.arrived?.has(trade.txHash) === true ? { arrived: true } : {})}
+            />
           ))}
         </div>
       )}

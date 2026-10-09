@@ -19,6 +19,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { WASH_HOST, Wash, washToneOf } from "@/components/live/Wash";
 import { Num } from "@/components/num";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -265,23 +266,33 @@ export function ActivityRow({
   now,
   first = false,
   order,
+  arrived = false,
 }: {
   event: ActivityEvent;
   now: string;
   first?: boolean;
   /** Its place in the feed's entrance: rows rise in one after another, the first dozen in a short cascade. */
   order?: number;
+  /**
+   * A live page's row that just arrived (live/use-arrivals.ts): a wash in the
+   * row's own tone, over its ground and under its words (live/Wash.tsx). It
+   * still rises in with the rest. The sample never passes it, and without it
+   * the row's markup is exactly the sample's.
+   */
+  arrived?: boolean;
 }) {
   const { tone, leading, title, sub, amount, amountClass, note, failed, backdrop } = parts(event);
   const className = cn(
     // Inset ring: the ScrollArea viewport would clip one drawn outside the row.
     "group/row flex w-full items-start gap-3 px-4 py-2.5 text-left outline-none hover:bg-muted/50 focus-visible:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
     order === undefined ? undefined : "rise-in",
+    arrived ? WASH_HOST : undefined,
   );
   const rise = order === undefined ? undefined : ({ ["--rise" as string]: `${Math.min(order, 12) * 35}ms` } as const);
 
   const body = (
     <>
+      {arrived ? <Wash tone={washToneOf(tone)} /> : null}
       <span className={cn("relative flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-md", TONE_TILE[tone])}>
         {backdrop === undefined ? null : <BackdropArt art={backdrop} />}
         {/* The glyph leads, and leans in a touch when the row is pointed at. */}

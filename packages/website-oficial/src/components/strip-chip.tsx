@@ -1,5 +1,6 @@
 import Image from "next/image";
 
+import { CHIP_ENTRANCE, WASH_HOST, Wash } from "@/components/live/Wash";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SAVED } from "@/lib/classes";
 import { fillLabel, timeAgo, usd, usdSigned } from "@/lib/format";
@@ -25,7 +26,24 @@ function faceOf(saved: number | null): string {
   return usdSigned(saved);
 }
 
-export function StripChip({ trade, now, newest = false }: { trade: Trade; now: string; newest?: boolean }) {
+export function StripChip({
+  trade,
+  now,
+  newest = false,
+  arrived = false,
+}: {
+  trade: Trade;
+  now: string;
+  newest?: boolean;
+  /**
+   * A live settlement that just arrived (live/use-arrivals.ts): it slides in
+   * from the left, where the newest chip goes, and wears the wash — green when
+   * it put money aside, grey when it moved nothing (live/Wash.tsx). The newest
+   * chip's ring is untouched. The sample never passes it, and without it the
+   * chip's markup is exactly the sample's.
+   */
+  arrived?: boolean;
+}) {
   const saved = trade.savedUsd !== null && trade.savedUsd > 0;
   // A fill names its side and size; a live chip is a settlement and brings its own words.
   const detail =
@@ -41,9 +59,11 @@ export function StripChip({ trade, now, newest = false }: { trade: Trade; now: s
     // The text shade and its contrast reasoning live with SAVED in classes.ts.
     saved ? cn("border-emerald-500/20 bg-emerald-500/10", SAVED) : "text-muted-foreground",
     newest && "ring-1 ring-ring/40",
+    arrived && cn(WASH_HOST, CHIP_ENTRANCE),
   );
   const face = (
     <>
+      {arrived ? <Wash tone={saved ? "saved" : "quiet"} /> : null}
       <Image src={trade.logo ?? tickerLogo(trade.symbol)} alt={trade.symbol} width={14} height={14} className="rounded-full" />
       {faceOf(trade.savedUsd)}
     </>

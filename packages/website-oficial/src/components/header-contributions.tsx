@@ -17,6 +17,7 @@
  */
 
 import { keyBySignature } from "@/components/live/row-keys";
+import { CHIP_ENTRANCE, WASH_HOST, Wash } from "@/components/live/Wash";
 import { formatSol, rawFrom } from "@/lib/amounts";
 import type { LiveRow } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
@@ -34,22 +35,36 @@ const SHOWN = 8;
  *
  * KEYED BY TRANSACTION AND COUNT (10-09): one settle that pays two wallets is
  * one signature and two chips, so the signature alone gave two chips one key
- * (live/row-keys.ts).
+ * (live/row-keys.ts). The signature itself is kept too: it is what says a chip
+ * just arrived (live/use-arrivals.ts).
  */
-export function contributions(rows: readonly LiveRow[]): { readonly key: string; readonly lamports: bigint }[] {
-  const found: { key: string; lamports: bigint }[] = [];
+export function contributions(rows: readonly LiveRow[]): { readonly key: string; readonly signature: string; readonly lamports: bigint }[] {
+  const found: { key: string; signature: string; lamports: bigint }[] = [];
   const keyOf = keyBySignature();
   for (const row of rows) {
     if (row.event.kind !== "settled" || !row.ok) continue;
     const lamports = rawFrom(row.event.paid) ?? 0n;
     if (lamports <= 0n) continue;
-    found.push({ key: keyOf(row.signature), lamports });
+    found.push({ key: keyOf(row.signature), signature: row.signature, lamports });
     if (found.length === SHOWN) break;
   }
   return found;
 }
 
-export function HeaderContributions({ rows, className }: { readonly rows: readonly LiveRow[]; readonly className?: string }) {
+export function HeaderContributions({
+  rows,
+  arrived,
+  className,
+}: {
+  readonly rows: readonly LiveRow[];
+  /**
+   * The settlements that just arrived, by signature (live/use-arrivals.ts):
+   * their chips slide in from the left, where the newest goes, and wear the
+   * green wash (live/Wash.tsx) — every chip here is money that moved.
+   */
+  readonly arrived?: ReadonlySet<string>;
+  readonly className?: string;
+}) {
   const chips = contributions(rows);
   // NOTHING TO SAY, NOTHING SHOWN. An empty strip would leave a gap that reads
   // as a component that failed to load.
@@ -78,16 +93,23 @@ export function HeaderContributions({ rows, className }: { readonly rows: readon
       }}
         aria-label="Recent contributions"
       >
-        {chips.map((chip) => (
-          <span
-            key={chip.key}
-            role="listitem"
-            className="inline-flex shrink-0 items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 font-mono text-xs whitespace-nowrap text-emerald-700 tabular-nums dark:text-emerald-300"
-          >
-            +{formatSol(chip.lamports)}
-            <span className="text-emerald-700/60 dark:text-emerald-300/60">SOL</span>
-          </span>
-        ))}
+        {chips.map((chip) => {
+          const fresh = arrived?.has(chip.signature) === true;
+          return (
+            <span
+              key={chip.key}
+              role="listitem"
+              className={cn(
+                "inline-flex shrink-0 items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 font-mono text-xs whitespace-nowrap text-emerald-700 tabular-nums dark:text-emerald-300",
+                fresh && cn(WASH_HOST, CHIP_ENTRANCE),
+              )}
+            >
+              {fresh ? <Wash tone="saved" /> : null}
+              +{formatSol(chip.lamports)}
+              <span className="text-emerald-700/60 dark:text-emerald-300/60">SOL</span>
+            </span>
+          );
+        })}
       </div>
     </>
   );

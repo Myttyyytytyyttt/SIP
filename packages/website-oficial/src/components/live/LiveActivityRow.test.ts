@@ -201,3 +201,24 @@ describe("a plain transfer takes the plus and not the colour", () => {
     expect(html).toMatch(/\+0\.06/);
   });
 });
+
+/** /activity's row that just arrived (use-arrivals.ts): the wash, in what the row is, and grey for a failure. */
+describe("a row that just arrived", () => {
+  const arrived = (event: VaultEventJson, overrides: Partial<LiveRow> = {}): string =>
+    renderToStaticMarkup(createElement(LiveActivityRow, { row: row(event, overrides), labelOf, maxContribution: MAX_CONTRIBUTION, arrived: true }));
+
+  it("wears a green wash for a saving that moved money, inside its link", () => {
+    const html = arrived(settled("60000000"));
+    expect(html).toMatch(/<a [^>]*class="[^"]*relative isolate"[^>]*><span aria-hidden="true" class="live-wash" data-tone="saved">/);
+  });
+
+  it("is never green for a transaction that failed, nor for a settlement that moved nothing", () => {
+    expect(arrived(settled("60000000"), { ok: false })).toContain('data-tone="quiet"');
+    expect(arrived(settled("0"))).toContain('data-tone="quiet"');
+  });
+
+  it("carries nothing of it when it did not arrive", () => {
+    expect(render(settled("60000000"))).not.toContain("live-wash");
+    expect(render(settled("60000000"))).not.toContain("isolate");
+  });
+});

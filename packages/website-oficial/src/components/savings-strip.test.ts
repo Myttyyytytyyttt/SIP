@@ -144,3 +144,44 @@ describe("a settlement the loaded history does not hold", () => {
     expect(render({ data: noRows(), settledOutsideHistory: false })).toBe("");
   });
 });
+
+/**
+ * A SETTLEMENT THAT JUST ARRIVED (10-09, live/use-arrivals.ts): its chip slides
+ * in from the left, where the newest goes, and wears the wash — and only it.
+ * The newest chip's ring is its own and stays.
+ */
+describe("a chip that just arrived", () => {
+  const two = liveDashboard({
+    activity: liveActivity([
+      liveEntry(signature(4), seconds(NOW_MS - 60_000), [settledEvent("40000000")], 4_100),
+      liveEntry(signature(3), seconds(NOW_MS - 3_600_000), [settledEvent("60000000")]),
+    ]),
+  });
+
+  const strip = (arrived: ReadonlySet<string> | undefined): string => {
+    const page = toDashboardMock(two, { complete: false });
+    return renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(SavingsStrip, {
+          trades: page.trades,
+          rule: page.rule,
+          now: page.now,
+          live: { settledOutsideHistory: false, ...(arrived === undefined ? {} : { arrived }) },
+        }),
+      ),
+    );
+  };
+
+  it("slides in and wears the wash, and the chip already there does not", () => {
+    const html = strip(new Set([signature(4)]));
+    expect(html.match(/live-wash/g)).toHaveLength(1);
+    expect(html).toMatch(/class="[^"]*ring-1 ring-ring\/40 relative isolate motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-left-2"[^>]*><span aria-hidden="true" class="live-wash" data-tone="saved">/);
+  });
+
+  it("is the same markup as before when nothing arrived", () => {
+    expect(strip(new Set())).toBe(strip(undefined));
+    expect(strip(undefined)).not.toContain("live-wash");
+  });
+});

@@ -30,6 +30,13 @@
  * WHAT IS ON ITS WAY IS READ OFF A SETTLED READ (use-read-settled.ts): a
  * read's snapshot lands before its history, and the steps over the feed wait
  * for the history before anything ends or flips (LivePending.tsx).
+ *
+ * WHAT JUST ARRIVED IS WORKED OUT ONCE, HERE (use-arrivals.ts): a transaction
+ * new to the page and newer than anything it showed. Its rows in the column
+ * (both copies), on /activity, its chips in the strip and in the bar wear one
+ * wash on one clock; a saving puts its pill beside the hero's figure; and the
+ * page's one announcer says it in words (LiveAnnouncer.tsx). No figure counts
+ * up or flashes (owner, 10-09).
  */
 
 import { useRef, type ReactNode } from "react";
@@ -40,11 +47,13 @@ import { LiveStartBuying } from "@/components/live/LiveStartBuying";
 import { LiveRulePanel } from "@/components/live/LiveRulePanel";
 import { FeedBanner, HiddenRows, LeadNotes, WalletList } from "@/components/live/LiveColumn";
 import { FeedSkeleton } from "@/components/live/FeedSkeleton";
+import { LiveAnnouncer } from "@/components/live/LiveAnnouncer";
 import { LiveHeartbeat } from "@/components/live/LiveHeartbeat";
 import { LoadOlderButton } from "@/components/live/LoadOlderButton";
 import { PendingRows, usePendingView } from "@/components/live/LivePending";
 import { readKeyOf, useReadyAt } from "@/components/live/RetryButton";
 import { Reveal } from "@/components/live/Reveal";
+import { heroPillOf, pillShown, useArrivals } from "@/components/live/use-arrivals";
 import { useReadSettled } from "@/components/live/use-read-settled";
 import { DashboardSource } from "@/components/DashboardSource";
 import { DashboardMain, PENSION_SLOT, RULE_SLOT } from "@/components/dashboard-main";
@@ -164,6 +173,11 @@ export function LiveBody({
   const stripWasAbsent = useRef(false);
   if (!hasStrip) stripWasAbsent.current = true;
 
+  // WHAT JUST ARRIVED, once for every surface. From the newest commit: rows
+  // change only with a read's history, so there is no half state to wait out.
+  const arrivals = useArrivals({ key: pensionKey, data, activityPending, activityUnreadable });
+  const pulse = { pill: heroPillOf(arrivals.saving, page.trades), shown: pillShown(arrivals.saving, data.nowMs) };
+
   /** A wallet's own label, so a settlement says which one it came from. */
   const labelOf = (wallet: string | null): string => {
     if (wallet === null) return ACTIVITY_COPY.someWallet;
@@ -230,6 +244,7 @@ export function LiveBody({
         // The feed's shape under "Reading this pension's history…", only while it is.
         skeleton: activityPending ? <FeedSkeleton className="mt-3" /> : null,
         countsUnknown,
+        arrived: arrivals.arrived,
         inSheet,
       }}
     />
@@ -259,7 +274,7 @@ export function LiveBody({
         // settlements are already on screen in full. From settlementRows, not
         // the feed: a settlement read from a wallet's link is not in the
         // vault's own page and is a contribution all the same.
-        contributions={<HeaderContributions rows={data.settlementRows} />}
+        contributions={<HeaderContributions rows={data.settlementRows} arrived={arrivals.arrived} />}
         // HOW FRESH THIS PAGE IS: a dot before the pension key, its words in
         // its popover (LiveHeartbeat.tsx). Wrapped in here, so the header — the
         // sample's too — is not edited for it.
@@ -271,6 +286,9 @@ export function LiveBody({
         }
         current={view}
       />
+
+      {/* What just arrived, in words: one polite announcement per update that brought something. */}
+      <LiveAnnouncer news={arrivals.news} labelOf={labelOf} />
 
       <div className="flex flex-1">
         <aside className="hidden w-80 shrink-0 border-r lg:block xl:w-88">{sidebarFor("activity-aside", false)}</aside>
@@ -290,6 +308,7 @@ export function LiveBody({
             nextStep={nextStep}
             notes={notes}
             pending={pending}
+            arrived={arrivals.arrived}
             {...(emptyNote === undefined ? {} : { emptyNote })}
           />
         ) : (
@@ -316,6 +335,7 @@ export function LiveBody({
                     live={{
                       settledOutsideHistory: data.stats.settledOutsideHistory,
                       loadOlderSlot: <LoadOlderButton older={older} onLoadOlder={onLoadOlder} className="h-9 shrink-0" />,
+                      arrived: arrivals.arrived,
                     }}
                   />
                 </Reveal>
@@ -333,6 +353,7 @@ export function LiveBody({
                     rule={page.rule}
                     now={page.now}
                     trades={page.trades}
+                    pulse={pulse}
                     {...(page.calendar === undefined ? {} : { calendar: page.calendar })}
                     {...(page.vault === undefined ? {} : { vault: page.vault })}
                     {...(page.unit === undefined ? {} : { unit: page.unit })}

@@ -47,3 +47,17 @@ describe("what it shows", () => {
     expect(renderToStaticMarkup(createElement(HeaderContributions, { rows: [] }))).toBe("");
   });
 });
+
+describe("a contribution that just arrived", () => {
+  it("slides in and wears the green wash; the others in the bar do not", () => {
+    const rows = [row(signature(2), settledEvent("10000000")), ...ONE_SETTLE_TWO_WALLETS];
+    const html = renderToStaticMarkup(createElement(HeaderContributions, { rows, arrived: new Set([signature(2)]) }));
+    expect(html.match(/live-wash/g)).toHaveLength(1);
+    expect(html).toMatch(/class="[^"]*relative isolate motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-left-2"><span aria-hidden="true" class="live-wash" data-tone="saved">/);
+  });
+
+  it("marks both chips of one settle that paid two wallets: one signature, both new", () => {
+    const html = renderToStaticMarkup(createElement(HeaderContributions, { rows: ONE_SETTLE_TWO_WALLETS, arrived: new Set([signature(1)]) }));
+    expect(html.match(/live-wash/g)).toHaveLength(2);
+  });
+});

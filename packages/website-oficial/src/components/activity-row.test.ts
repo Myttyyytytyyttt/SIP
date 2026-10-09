@@ -160,3 +160,32 @@ describe("the row's entrance", () => {
     expect(render(other("link"), 400)).toContain("--rise:420ms");
   });
 });
+
+/**
+ * A LIVE ROW THAT JUST ARRIVED (10-09, live/use-arrivals.ts): a wash in the
+ * row's own tone, its own child under the row's words, and the row a box for
+ * it only while it is marked. A failure is washed grey, never red or green.
+ * Without the prop the row is the sample's exactly (sample-golden.test.ts).
+ */
+describe("a row that just arrived", () => {
+  const arrived = (event: ActivityEvent, order?: number): string =>
+    renderToStaticMarkup(createElement(TooltipProvider, null, createElement(ActivityRow, { event, now: NOW, arrived: true, ...(order === undefined ? {} : { order }) })));
+
+  it("wears the wash in its own tone, aria-hidden, and still rises in", () => {
+    const html = arrived({ ...BASE, kind: "saved", from: "Trading wallet 1", basis: "25 % of $17.52 profit", savedUsd: 4.38 }, 0);
+    expect(html).toMatch(/<span aria-hidden="true" class="live-wash" data-tone="saved"><\/span>/);
+    expect(html).toMatch(/class="[^"]*rise-in relative isolate"/);
+    expect(arrived({ ...BASE, kind: "invested", symbol: "SPYx", shares: 1, priceUsd: 1, amountUsd: 1 })).toContain('data-tone="invest"');
+    expect(arrived(other("rule"))).toContain('data-tone="setting"');
+  });
+
+  it("is washed grey when it failed", () => {
+    expect(arrived(other("other", { failed: true }))).toContain('data-tone="quiet"');
+  });
+
+  it("carries nothing of it when it did not arrive", () => {
+    const html = render(other("link"), 0);
+    expect(html).not.toContain("live-wash");
+    expect(html).not.toContain("isolate");
+  });
+});

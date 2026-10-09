@@ -221,6 +221,42 @@ describe("the steps' and the setup's words", () => {
   });
 });
 
+/**
+ * WHAT JUST ARRIVED (owner, 10-09): the hero's pill in the owner's own shape,
+ * "+$x saved · HH:MM", and the announcer in the chain's own amounts. Neither
+ * promises a time nor names the machinery.
+ */
+describe("the words for what just arrived", () => {
+  it("are the owner's pill: the amount saved, or the amount and how many", () => {
+    expect(LIVE_COPY.heroPill.saved("$0.43")).toBe("+$0.43 saved");
+    expect(LIVE_COPY.heroPill.savings("$0.86", 2)).toBe("+$0.86 · 2 savings");
+    expect(LIVE_COPY.heroPill.atPrice("0.0043")).toBe("0.0043 SOL at today’s SOL price");
+  });
+
+  it("count one transaction as one", () => {
+    expect(LIVE_COPY.announce.count(1)).toBe("1 new transaction on your pension.");
+    expect(LIVE_COPY.announce.count(4)).toBe("4 new transactions on your pension.");
+  });
+
+  it("promise no time and name none of the machinery", () => {
+    const words = [
+      LIVE_COPY.heroPill.saved("$0.43"),
+      LIVE_COPY.heroPill.savings("$0.86", 2),
+      LIVE_COPY.heroPill.atPrice("0.0043"),
+      LIVE_COPY.heroPill.sol("0.0043"),
+      LIVE_COPY.announce.saved("0.0043", "Trading wallet 1"),
+      LIVE_COPY.announce.converted("0.0043", "0.43"),
+      LIVE_COPY.announce.bought("SPYx and ANTHROPIC"),
+      LIVE_COPY.announce.ruleChanged,
+      LIVE_COPY.announce.count(3),
+    ];
+    for (const sentence of words) {
+      expect(sentence).not.toMatch(/shortly|again in|in a (moment|minute)|\bsoon\b/i);
+      expect(sentence).not.toMatch(/\b(keeper|read|poll|wrap|policy|RPC|socket)\b/i);
+    }
+  });
+});
+
 describe("the rate a sentence quotes is the product's own", () => {
   it("the profit sentences carry ratePercent(DEFAULT_VAULT_POLICY.skimBps)", () => {
     const rate = ratePercent(DEFAULT_VAULT_POLICY.skimBps);

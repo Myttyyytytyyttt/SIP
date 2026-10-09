@@ -473,3 +473,22 @@ describe("what comes and goes in the pension view (10-09, G8)", () => {
     expect(html).not.toContain("mt-0");
   });
 });
+
+/**
+ * WHAT JUST ARRIVED (10-09, use-arrivals.ts). A first paint brings nothing new:
+ * no wash anywhere, the hero's pill mounted but faded and unspoken, and the
+ * page's one announcer there and silent — on both views, so it exists before
+ * the first arrival it has to say.
+ */
+describe("what just arrived, on the page's first paint", () => {
+  it("is nothing: no wash, a silent announcer, and the pill mounted but out of sight", () => {
+    for (const view of ["pension", "activity"] as const) {
+      const html = render({ view, data: liveDashboard(), activityUnreadable: false });
+      expect(html).not.toContain("live-wash");
+      const announcers = html.match(/<p role="status" aria-live="polite" aria-atomic="true" class="sr-only" data-live-announcer="">(.*?)<\/p>/g) ?? [];
+      expect(announcers).toEqual(['<p role="status" aria-live="polite" aria-atomic="true" class="sr-only" data-live-announcer=""></p>']);
+    }
+    const pension = render({ data: liveDashboard(), activityUnreadable: false });
+    expect(pension).toMatch(/<div class="flex h-4 min-w-0 items-center gap-2"><p class="[^"]*">Saved so far<\/p><span class="[^"]*opacity-0" aria-hidden="true"><\/span><\/div>/);
+  });
+});

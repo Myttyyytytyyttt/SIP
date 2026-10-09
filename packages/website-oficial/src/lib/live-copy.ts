@@ -168,6 +168,34 @@ export const LIVE_COPY = {
     boughtSub: "Now in your holdings",
   },
 
+  // ── what just arrived (use-arrivals.ts) ────────────────────────────────────
+  /**
+   * THE HERO'S PILL, beside "Saved so far" (owner, 10-09): what the savings
+   * that just arrived came to, and when. "+$0.43 saved · 14:32 UTC"; two or
+   * more in one update, "+$0.86 · 2 savings · 14:33 UTC". The dollars are the
+   * chips' own, at today's SOL price, so hovering says the SOL behind them.
+   */
+  heroPill: {
+    saved: (amount: string): string => `+${amount} saved`,
+    savings: (amount: string, count: number): string => `+${amount} · ${count} savings`,
+    atPrice: (sol: string): string => `${sol} SOL at today’s SOL price`,
+    /** The face is SOL already, rounded: the hover gives every digit. */
+    sol: (sol: string): string => `${sol} SOL`,
+  },
+  /**
+   * WHAT THE ANNOUNCER SAYS (LiveAnnouncer.tsx), once per update that brought
+   * something: in the chain's own amounts — SOL, USDC, symbols — because a
+   * dollar re-priced on every update is not news. Three or more transactions,
+   * or one without a sentence of its own, are a count.
+   */
+  announce: {
+    saved: (sol: string, wallet: string): string => `Saved ${sol} SOL from ${wallet}.`,
+    converted: (sol: string, usdc: string): string => `Converted ${sol} SOL to ${usdc} USDC.`,
+    bought: (names: string): string => `Bought ${names}.`,
+    ruleChanged: "Saving rule changed.",
+    count: (count: number): string => `${count} new ${count === 1 ? "transaction" : "transactions"} on your pension.`,
+  },
+
   // ── the setup, ticked off through the first buy (LiveNextStep.tsx) ─────────
   /**
    * WHAT IS DONE AND WHAT COMES NEXT, as facts the chain can be asked about
