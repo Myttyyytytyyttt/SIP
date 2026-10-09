@@ -340,6 +340,21 @@ describe("a buy older than the loaded history is still a buy", () => {
     expect(stats.lastInvestedDay).toEqual({ day: "2026-09-22", spentUsd: 16.964637 });
   });
 
+  /**
+   * A COUNT OF A HISTORY NOBODY READ IS NOT 0 (review 2026-10-09). Before the
+   * first page answers, or when it could not be read, the Investments tile said
+   * "0 in the loaded history" — a claim about a page that was not there.
+   */
+  it("counts no buys in a history that has not answered or could not be read: the tile says a dash", () => {
+    expect(adapt(liveDashboard({ activity: null })).stats.investments).toBeNull();
+    expect(liveDashboard({ activity: liveActivity([], { status: "unreadable" }) }).stats.investmentsLoaded).toBeNull();
+    // An empty page that did answer is a real 0.
+    expect(adapt(liveDashboard({ activity: liveActivity([]) })).stats.investments).toBe(0);
+    // And the chain's own counters still speak for a buy the page did not load.
+    const unread = adapt(liveDashboard({ snapshot: withPolicy({ status: "exists", address: "policy", state: ownersPolicy() }), activity: null })).stats;
+    expect([unread.investments, unread.investedOutsideHistory]).toEqual([null, true]);
+  });
+
   it("is false when there is no policy to have bought with, or it never bought", () => {
     const missing = adapt(liveDashboard({ snapshot: withPolicy({ status: "missing", address: "policy" }) })).stats;
     expect(missing.investedOutsideHistory).toBe(false);

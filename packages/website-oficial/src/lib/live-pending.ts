@@ -42,10 +42,17 @@
  * floor — is pending without being counted. No policy, or one that could not
  * be read, says nothing at all: the "first savings" card asks for the
  * approval, and keeping SOL as SOL is a choice.
+ *
+ * WHAT THE PAGE CANNOT WEIGH IS SAID, NEVER GUESSED (review 2026-10-09).
+ * nextInvestment makes Next investment in raw units, part by part — the USDC,
+ * the SOL converting, the SOL waiting under the lines, the SOL a rest holds —
+ * and adds them up to the footer's Pending exactly. A part made with an input
+ * the page could not read (the vault's free SOL, today's price, a switch) is
+ * null, so is every figure made from it, and the line says which input.
  */
 
 import { formatSolAtMost, formatUsd, usdcRawForLamports, rawFrom } from "@/lib/amounts";
-import { clockLabel } from "@/lib/format";
+import { whenLabel } from "@/lib/format";
 import { PENDING_COPY } from "@/lib/live-copy";
 import type { LiveDashboard, LiveRow } from "@/lib/live-types";
 
@@ -77,6 +84,9 @@ type InvestKind = Exclude<PendingKind, "measuring">;
 /** Why a due step rests. "slow" is the one the screen cannot explain. */
 export type PendingRest = "buying_off" | "paused" | "protocol_paused" | "month_cap" | "conversion_off" | "price_limits" | "safety_floor" | "slow";
 
+/** A rest the page can read and the owner can lift: every PendingRest but "slow". */
+type StatedRest = Exclude<PendingRest, "slow">;
+
 export interface PendingStep {
   readonly kind: PendingKind;
   readonly state: "active" | "waiting";
@@ -84,7 +94,11 @@ export interface PendingStep {
   readonly rest: PendingRest | null;
   /** Converting: the lamports on their way to USDC. Buying: the USDC the next buy spends, raw. */
   readonly amountRaw: bigint;
-  /** In USDC raw: the SOL at the price this snapshot read, or the USDC itself. Null without a price. */
+  /**
+   * In USDC raw: the SOL at the price this snapshot read — the free SOL and the
+   * wSOL valued apart, as their holdings rows are, so the row and the bar agree
+   * with the footer's Pending to the raw unit — or the USDC itself. Null without a price.
+   */
   readonly valueUsdcRaw: bigint | null;
   /** Buying: the basket's symbols, in the policy's order. Empty for converting. */
   readonly symbols: readonly string[];
@@ -163,7 +177,7 @@ const buysEveryLeg = (budget: bigint, weights: readonly number[], minInvestment:
  * 30-day cap. "unknown" when a switch it reads could not be read here — then
  * nothing is said, rather than a loader for a turn that may not run.
  */
-function turnRest(data: LiveDashboard): PendingRest | null | "unknown" {
+function turnRest(data: LiveDashboard): StatedRest | null | "unknown" {
   const { policy, vault } = data;
   if (policy.enabled === null) return "unknown";
   if (!policy.enabled) return "buying_off";
@@ -185,7 +199,7 @@ function turnRest(data: LiveDashboard): PendingRest | null | "unknown" {
  * converting step's order: converting off (a floor of 0), then old price
  * limits, then the safety floor.
  */
-function conversionSwitch(policy: LiveDashboard["policy"]): PendingRest | null {
+function conversionSwitch(policy: LiveDashboard["policy"]): StatedRest | null {
   if (policy.minConvertRateWad !== null && policy.minConvertRateWad <= 0n) return "conversion_off";
   // OLD PRICE LIMITS (a policy signed before 2026-10-08): a stock's passed
   // limit refuses the whole turn before the wrap, the SOL limit alone the
@@ -204,7 +218,7 @@ function conversionSwitch(policy: LiveDashboard["policy"]): PendingRest | null {
  * conversion's switches. The one test for the SOL being converted and for the
  * SOL under the wrap line alike, so the bar never counts SOL the row says is held.
  */
-const convertRest = (data: LiveDashboard): PendingRest | null | "unknown" => turnRest(data) ?? conversionSwitch(data.policy);
+const convertRest = (data: LiveDashboard): StatedRest | null | "unknown" => turnRest(data) ?? conversionSwitch(data.policy);
 
 /** What the vault's own token account holds, raw; 0 for one it does not have, null when the list was not read. */
 const heldToken = (data: LiveDashboard, kind: "wsol" | "usdc"): bigint | null =>
@@ -294,13 +308,14 @@ function investSteps(data: LiveDashboard): PendingStep[] {
   const wsol = heldToken(data, "wsol");
   const wraps = free !== null && free >= WRAP_DUST_LAMPORTS;
   if (wraps || (wsol !== null && wsol >= CONVERT_DUST_LAMPORTS)) {
-    const lamports = (wraps ? free : 0n) + (wsol ?? 0n);
+    const wrapping = wraps ? free : 0n;
     steps.push({
       kind: "converting",
       // convertRest(data): the turn's "unknown" has already returned above.
       ...stateOf("converting", rest ?? conversionSwitch(policy)),
-      amountRaw: lamports,
-      valueUsdcRaw: perSol === null ? null : usdcRawForLamports(lamports, perSol),
+      amountRaw: wrapping + (wsol ?? 0n),
+      // Row by row (the SOL row, then the wSOL row): one sum could differ from the two by a raw unit.
+      valueUsdcRaw: perSol === null ? null : usdcRawForLamports(wrapping, perSol) + usdcRawForLamports(wsol ?? 0n, perSol),
       symbols: [],
     });
   }
@@ -450,8 +465,15 @@ export interface PendingLine {
 
 const solText = (lamports: bigint): string => formatSolAtMost(lamports, 4);
 
-/** The steps in words, for the rows over the feed. */
-export function pendingLines(steps: readonly PendingStep[]): PendingLine[] {
+/**
+ * The steps in words, for the rows over the feed.
+ *
+ * `nowMs` IS THE PAGE'S CLOCK (LiveDashboard.nowMs), the one every step's
+ * `since` is on: a step stuck since before today says its day (format.ts
+ * whenLabel), so "Not done since 23:58 UTC" read the morning after does not
+ * pass for a few minutes.
+ */
+export function pendingLines(steps: readonly PendingStep[], nowMs: number): PendingLine[] {
   return steps.map((step): PendingLine => {
     const active = step.state === "active";
     if (step.kind === "measuring") {
@@ -462,7 +484,8 @@ export function pendingLines(steps: readonly PendingStep[]): PendingLine[] {
         kind: "measuring",
         active,
         rest: step.rest,
-        title: active ? PENDING_COPY.measuring(label) : PENDING_COPY.measuringWaiting(label),
+        // A measuring step is always timed: since is the read that first saw the change.
+        title: active ? PENDING_COPY.measuring(label) : PENDING_COPY.measuringWaiting(label, whenLabel(step.since ?? nowMs, nowMs)),
         sub: active ? PENDING_COPY.measuringSub[mode] : PENDING_COPY.measuringRest[mode],
         amount: "",
         amountSpoken: "",
@@ -474,7 +497,7 @@ export function pendingLines(steps: readonly PendingStep[]): PendingLine[] {
         : step.rest === "slow"
           ? step.since === null
             ? PENDING_COPY.slowUntimed
-            : PENDING_COPY.slow(clockLabel(new Date(step.since).toISOString()))
+            : PENDING_COPY.slow(whenLabel(step.since, nowMs))
           : PENDING_COPY.rest[step.rest];
     if (step.kind === "converting") {
       return {
@@ -518,10 +541,23 @@ const countedConverting = (steps: readonly PendingStep[]): PendingStep | undefin
  * to add or no price to add it at; the line then says the SOL.
  *
  * THE LINE SAYS WHAT THE BAR ADDS, all of it: a conversion and SOL under the
- * line together are one sum, said once, with the part that waits and the line
- * it waits for. A conversion that is due and not done ("slow") is still
- * counted, but not called under way. A basket the USDC alone buys says so —
- * over any SOL waiting, which is not what this buy spends.
+ * line together are one sum, said once, with the part that waits and what
+ * moves it. A conversion that is due and not done ("slow") is still counted,
+ * but not called under way. A basket the USDC alone buys says so — over any
+ * SOL waiting, which is not what this buy spends.
+ *
+ * EACH SOL HOLDING REACHES ITS OWN LINE ON ITS OWN (review 2026-10-09). The
+ * keeper wraps the free SOL from WRAP_DUST_LAMPORTS and converts the wSOL from
+ * CONVERT_DUST_LAMPORTS, or beside a wrap; it never pools the two toward one
+ * line. So no line says "once your vault holds 0.005 SOL" — 0.003 free and
+ * 0.003 wrapped is 0.006 held, and nothing moves. What moves the SOL under the
+ * lines is always the same thing: savings, which land as free SOL, taking the
+ * free SOL to the wrap line — and then the turn wraps it and converts every
+ * wSOL beside it. That is what the line says, with the free SOL's own
+ * shortfall (`waiting.shortLamports`).
+ *
+ * WITH NO PRICE the SOL is said in SOL and on its own: the bar's figure is then
+ * a dash (nextInvestment), so nothing here begins "Plus" a figure not shown.
  */
 export function nextInvestmentOf(
   steps: readonly PendingStep[],
@@ -534,7 +570,7 @@ export function nextInvestmentOf(
     if (waiting === null) {
       if (converting.valueUsdcRaw === null) {
         const sol = solText(converting.amountRaw);
-        return { extraUsdcRaw: null, note: slow ? PENDING_COPY.plusConvertingSlow(sol) : PENDING_COPY.plusConverting(sol) };
+        return { extraUsdcRaw: null, note: slow ? PENDING_COPY.unpricedConvertingSlow(sol) : PENDING_COPY.unpricedConverting(sol) };
       }
       const usd = formatUsd(converting.valueUsdcRaw);
       return { extraUsdcRaw: converting.valueUsdcRaw, note: slow ? PENDING_COPY.includesConvertingSlow(usd) : PENDING_COPY.includesConverting(usd) };
@@ -542,12 +578,12 @@ export function nextInvestmentOf(
     const short = solText(waiting.shortLamports);
     // One price values every SOL figure here: both have a dollar value, or neither does.
     if (converting.valueUsdcRaw === null || waiting.valueUsdcRaw === null) {
-      const plus = slow ? PENDING_COPY.plusBothSlow : PENDING_COPY.plusBoth;
-      return { extraUsdcRaw: null, note: plus(solText(converting.amountRaw + waiting.lamports), solText(waiting.lamports), WRAP_LINE_SOL, short) };
+      const unpriced = slow ? PENDING_COPY.unpricedBothSlow : PENDING_COPY.unpricedBoth;
+      return { extraUsdcRaw: null, note: unpriced(solText(converting.amountRaw + waiting.lamports), solText(waiting.lamports), short) };
     }
     const total = converting.valueUsdcRaw + waiting.valueUsdcRaw;
     const includes = slow ? PENDING_COPY.includesBothSlow : PENDING_COPY.includesBoth;
-    return { extraUsdcRaw: total, note: includes(formatUsd(total), formatUsd(waiting.valueUsdcRaw), WRAP_LINE_SOL, short) };
+    return { extraUsdcRaw: total, note: includes(formatUsd(total), formatUsd(waiting.valueUsdcRaw), short) };
   }
   const buying = steps.find((step) => step.kind === "buying" && step.state === "active");
   if (waiting === null) return { extraUsdcRaw: null, note: buying === undefined ? null : PENDING_COPY.readyToBuy };
@@ -558,25 +594,37 @@ export function nextInvestmentOf(
       buying !== undefined
         ? PENDING_COPY.readyToBuy
         : waiting.valueUsdcRaw === null
-          ? PENDING_COPY.plusWaiting(solText(waiting.lamports), WRAP_LINE_SOL, short)
-          : PENDING_COPY.includesWaiting(formatUsd(waiting.valueUsdcRaw), WRAP_LINE_SOL, short),
+          ? PENDING_COPY.unpricedWaiting(solText(waiting.lamports), short)
+          : PENDING_COPY.includesWaiting(formatUsd(waiting.valueUsdcRaw), short),
   };
 }
 
 /**
  * Why the keeper will not buy on what the bar counts, whatever the figures say.
+ *
  * "wrap_line": the USDC and the SOL being converted do not reach the basket
  * alone, and either the rest of what is counted is SOL under the keeper's wrap
- * line, which nothing moves until a saving takes the vault to that line, or
- * the line is what the next saving must cross, and it is more than the
- * basket lacks (wrapLineAhead). "slow": the SOL being converted would complete
- * the basket, and its conversion is due and not done — the page cannot tell a
- * crank short of SOL, a thin market or a late oracle apart, only that the
- * keeper has not moved. "rest": the USDC buys the basket and a rest the page
- * can read holds the buy — the vault or SaverFi paused, buying off, the
- * 30-day limit, old price limits (the buying step's own rest).
+ * line, which nothing moves until a saving takes the vault's free SOL to that
+ * line, or the line is what the next saving must cross, and it is more than
+ * the basket lacks (wrapLineAhead).
+ *
+ * "slow": the SOL being converted would complete the basket, and its
+ * conversion is due and not done — the page cannot tell a crank short of SOL,
+ * a thin market or a late oracle apart, only that the keeper has not moved.
+ *
+ * "held": a rest the page can read and the owner can lift (PendingRest less
+ * "slow") holds the buy — the buying step's own rest when the USDC buys the
+ * basket, or, when it does not, the conversion's: then no SOL reaches USDC,
+ * not even the next saving's, so the basket cannot fill whatever is saved. The
+ * vault or SaverFi paused, buying or converting switched off, the 30-day
+ * limit, old price limits, SOL under its safety floor.
+ *
+ * "unknown": a switch, or an amount, the page could not read stands between
+ * the figures and a buy — the vault's pause or the policy's switch, the vault's
+ * free SOL, today's SOL price — so it cannot say whether, or after how much
+ * more, the keeper buys. Never a guess either way.
  */
-export type NextInvestmentGate = "wrap_line" | "slow" | "rest";
+export type NextInvestmentGate = "wrap_line" | "slow" | "held" | "unknown";
 
 /**
  * HOW FAR THE NEXT INVESTMENT STILL IS — the smallest further saving, in USDC
@@ -598,13 +646,13 @@ export type NextInvestmentGate = "wrap_line" | "slow" | "rest";
  * lacks (`ahead`, wrapLineAhead), gated "wrap_line" when that is the larger.
  *
  * 0 WITH NO GATE MEANS A BUY IS COMING. With a gate it is not, whatever this
- * figure: "slow" lacks no saving at all (0), "rest" lacks the owner's switch
+ * figure: "slow" lacks no saving at all (0), "held" lacks the owner's switch
  * and not money, and a line a few lamports away is worth less than a cent — so
  * the card says a gate in words, never as "$0.00 to go"
  * (savings-rule-panel.tsx), and `note` is those words wherever
  * nextInvestmentOf's own line does not already say them.
  *
- * - The USDC alone buys the basket: 0 — gated "rest" when the buying step
+ * - The USDC alone buys the basket: 0 — gated "held" when the buying step
  *   waits on a rest the page can read, and `note` names it.
  * - With the SOL being converted it does: 0 — gated "slow" when that
  *   conversion is overdue, so nothing claims a buy is coming.
@@ -613,8 +661,8 @@ export type NextInvestmentGate = "wrap_line" | "slow" | "rest";
  *   what is on its way: that, gated "wrap_line", and `note` names the line.
  * - Otherwise: the threshold less what is on its way.
  *
- * With no price the SOL cannot be added, so what is to go is the USDC's own
- * gap — the dollars the bar shows, with the SOL said in SOL beside them.
+ * Only for what the page can weigh: nextInvestment says "held" and "unknown"
+ * for the rest before it gets here, and asks this only with a price.
  */
 export function toGoOf(
   readiness: { readonly heldRaw: bigint; readonly investsAtRaw: bigint },
@@ -627,7 +675,7 @@ export function toGoOf(
     // The buying step carries the turn's rest, and a stock's passed old limit (investSteps); "slow" is not one the page can read.
     const rest = steps.find((step) => step.kind === "buying")?.rest ?? null;
     if (rest === null || rest === "slow") return { toGoRaw: 0n, gate: null, note: null };
-    return { toGoRaw: 0n, gate: "rest", note: PENDING_COPY.rest[rest] };
+    return { toGoRaw: 0n, gate: "held", note: PENDING_COPY.rest[rest] };
   }
   const converting = countedConverting(steps);
   const convertingRaw = converting?.valueUsdcRaw ?? null;
@@ -644,7 +692,7 @@ export function toGoOf(
   }
   const toLine = waiting.shortUsdcRaw ?? 0n;
   const toGoRaw = gap > toLine ? gap : toLine;
-  // nextInvestmentOf's line already names the line and what it lacks.
+  // nextInvestmentOf's line already names what moves the SOL, and what it lacks.
   return { toGoRaw: toGoRaw > 0n ? toGoRaw : 0n, gate: "wrap_line", note: null };
 }
 
@@ -654,3 +702,193 @@ export function toGoOf(
  */
 export const nextInvestmentLine = (counted: string | null, gated: string | null): string | null =>
   counted === null ? gated : gated === null ? counted : `${counted} · ${gated}`;
+
+// ── the next investment, part by part ────────────────────────────────────────
+
+/** Where SOL the vault holds stands in Next investment. */
+type SolPart = "converting" | "waiting" | "held";
+
+const EVERY_PART: readonly SolPart[] = ["converting", "waiting", "held"];
+const MOVING_PARTS: readonly SolPart[] = ["converting", "waiting"];
+
+/**
+ * ONE OF THE VAULT'S TWO SOL HOLDINGS — its free SOL, its wSOL — and the part
+ * of Next investment it stands in. WHOLLY IN ONE, never split: the keeper
+ * wraps all the free SOL or none, and converts all the wSOL or none. That is
+ * what lets each part be valued row by row exactly as the holdings rows are,
+ * and so add up to the footer's Pending to the raw unit.
+ *
+ * `part` is null when the page cannot tell which — a switch it could not read
+ * decides whether anything moves, or the free SOL it could not read decides
+ * whether the wrap runs — and `could` then names the parts it might be in.
+ */
+interface SolHolding {
+  readonly lamports: bigint | null;
+  readonly part: SolPart | null;
+  readonly could: readonly SolPart[];
+}
+
+/**
+ * The free SOL and the wSOL, each placed by the very tests the rows and the
+ * bar are made by: convertRest holds both back ("held"); with no rest, the
+ * keeper's wake rule (investSteps, solUnderWrapLine) — free SOL from the wrap
+ * line is converted and takes every wSOL with it, wSOL from its own line is
+ * converted on its own, and the rest waits under the lines.
+ */
+function solHoldings(data: LiveDashboard): readonly SolHolding[] {
+  const free = data.vault.exists ? data.vault.withdrawable : null;
+  const wsol = heldToken(data, "wsol");
+  const rest = convertRest(data);
+  if (rest === "unknown") {
+    return [
+      { lamports: free, part: null, could: EVERY_PART },
+      { lamports: wsol, part: null, could: EVERY_PART },
+    ];
+  }
+  if (rest !== null) {
+    return [
+      { lamports: free, part: "held", could: [] },
+      { lamports: wsol, part: "held", could: [] },
+    ];
+  }
+  const wraps = free === null ? null : free >= WRAP_DUST_LAMPORTS;
+  const wsolPart: SolPart | null =
+    wraps === true || (wsol !== null && wsol >= CONVERT_DUST_LAMPORTS) ? "converting" : wraps === false && wsol !== null ? "waiting" : null;
+  return [
+    { lamports: free, part: wraps === null ? null : wraps ? "converting" : "waiting", could: MOVING_PARTS },
+    { lamports: wsol, part: wsolPart, could: MOVING_PARTS },
+  ];
+}
+
+/**
+ * One part's SOL, lamports, and its value in USDC raw — each holding at the
+ * price this snapshot read, as its holdings row is. Null when a holding that
+ * might stand in it could not be placed or measured; a holding of nothing
+ * stands nowhere. The value is null without a price unless the part is empty.
+ */
+function partOf(holdings: readonly SolHolding[], part: SolPart, perSol: bigint | null): { readonly lamports: bigint | null; readonly usdcRaw: bigint | null } {
+  let lamports = 0n;
+  let usdcRaw = 0n;
+  for (const holding of holdings) {
+    if (holding.lamports === 0n) continue;
+    const here = holding.part === null ? holding.could.includes(part) : holding.part === part;
+    if (!here) continue;
+    if (holding.part === null || holding.lamports === null) return { lamports: null, usdcRaw: null };
+    lamports += holding.lamports;
+    if (perSol !== null) usdcRaw += usdcRawForLamports(holding.lamports, perSol);
+  }
+  return { lamports, usdcRaw: perSol === null && lamports > 0n ? null : usdcRaw };
+}
+
+/**
+ * WHAT NEXT INVESTMENT IS MADE OF, in USDC raw at today's price — and the SOL
+ * behind each SOL part, in lamports. Every part is null when it is unknown,
+ * never 0: a part with nothing in it is 0, one the page cannot measure is not.
+ *
+ * - `usdc`: the vault's USDC. Counted at a dollar, and hidden with every other
+ *   dollar when no prices were read — the USDC holdings row's own rule
+ *   (live-model.ts holdingsOf: the dollar column is all or nothing).
+ * - `converting`: the SOL the converting step counts — under way, or due and
+ *   not done ("slow").
+ * - `waiting`: the SOL and wSOL under the keeper's lines (solUnderWrapLine).
+ * - `held`: the SOL a rest the page can read holds back — the vault or SaverFi
+ *   paused, buying or converting switched off, the 30-day limit, old price
+ *   limits, the safety floor. Pending, and not counted by the bar. The USDC
+ *   under such a rest stays in `usdc`: the gate says the rest.
+ *
+ * usdc + converting + waiting + held is the footer's Pending (live-model.ts
+ * notInvested) to the raw unit whenever all four are known, and the lamports
+ * of the three SOL parts are the vault's free SOL and wSOL.
+ */
+export interface NextInvestmentParts {
+  readonly usdcRaw: bigint | null;
+  readonly convertingRaw: bigint | null;
+  readonly waitingRaw: bigint | null;
+  readonly heldRaw: bigint | null;
+  readonly convertingLamports: bigint | null;
+  readonly waitingLamports: bigint | null;
+  readonly heldLamports: bigint | null;
+}
+
+/** Next investment, whole: what the bar counts and of what, how far the buy still is, why not, and the line that says so. */
+export interface NextInvestment {
+  readonly parts: NextInvestmentParts;
+  /** usdc + converting + waiting, USDC raw: the bar's figure. Null when any of the three is: no figure, and no bar. */
+  readonly readyRaw: bigint | null;
+  /**
+   * toGoOf's figure, USDC raw. With "held", the money the basket lacks — the
+   * switch is what the line names. Null with no basket the caps can ever buy,
+   * and with "unknown".
+   */
+  readonly toGoRaw: bigint | null;
+  readonly gate: NextInvestmentGate | null;
+  /** nextInvestmentOf's words about the money counted, then the gate's where they do not say it; null for neither. */
+  readonly note: string | null;
+}
+
+/**
+ * NEXT INVESTMENT FOR A LIVE VAULT, from the dashboard: the parts, the bar's
+ * figure, what is to go, the gate and the line. Null when there is no basket
+ * to measure — no policy readable, or the vault's USDC unread
+ * (LivePolicyView.readiness).
+ *
+ * A NULL FIGURE IS UNKNOWN, NEVER 0 (review 2026-10-09). The bar used to count
+ * what it could read and leave out what it could not: the free SOL unread
+ * added nothing, and with no price "$0.30 of $1.00" stood beside SOL it had not
+ * valued. Now a figure made with an unknown is itself unknown, and the line
+ * says which input is missing.
+ *
+ * In order: a basket the caps can never buy has nothing to go; a switch the
+ * page could not read is "unknown" whatever the USDC; the USDC alone buying
+ * the basket is toGoOf's ("held" when the buy rests); short of it, a rest on
+ * the conversion is "held" — no saving converts while it stands — and the
+ * money lacking is what is to go; then the free SOL or today's price unread is
+ * "unknown"; and everything readable is toGoOf's.
+ */
+export function nextInvestment(data: LiveDashboard, steps: readonly PendingStep[] = pendingSteps(data)): NextInvestment | null {
+  const readiness = data.policy.readiness;
+  if (readiness === null) return null;
+  const perSol = rawFrom(data.prices?.usdcRawPerSol);
+  const holdings = solHoldings(data);
+  const converting = partOf(holdings, "converting", perSol);
+  const waitingPart = partOf(holdings, "waiting", perSol);
+  const held = partOf(holdings, "held", perSol);
+  const usdc = readiness.heldRaw;
+  const parts: NextInvestmentParts = {
+    usdcRaw: data.prices === null && usdc > 0n ? null : usdc,
+    convertingRaw: converting.usdcRaw,
+    waitingRaw: waitingPart.usdcRaw,
+    heldRaw: held.usdcRaw,
+    convertingLamports: converting.lamports,
+    waitingLamports: waitingPart.lamports,
+    heldLamports: held.lamports,
+  };
+  const readyRaw = parts.usdcRaw === null || parts.convertingRaw === null || parts.waitingRaw === null ? null : parts.usdcRaw + parts.convertingRaw + parts.waitingRaw;
+
+  // WORDS ABOUT A SUM ONLY WHERE THE SUM CAN BE MADE. With a SOL holding the
+  // page cannot place, "Includes about $1.80 of SOL being converted" would sit
+  // under a dash and describe a figure that is not there; a basket the USDC
+  // alone buys is still said.
+  const placed = converting.lamports !== null && waitingPart.lamports !== null && held.lamports !== null;
+  const waiting = solUnderWrapLine(data);
+  const buying = steps.some((step) => step.kind === "buying" && step.state === "active");
+  const counted = placed ? nextInvestmentOf(steps, waiting).note : buying ? PENDING_COPY.readyToBuy : null;
+  const result = (toGoRaw: bigint | null, gate: NextInvestmentGate | null, gated: string | null): NextInvestment => ({
+    parts,
+    readyRaw,
+    toGoRaw,
+    gate,
+    note: nextInvestmentLine(counted, gated),
+  });
+
+  const target = readiness.investsAtRaw;
+  if (readiness.state === "unreachable" || target <= 0n) return result(null, null, null);
+  const rest = convertRest(data);
+  if (rest === "unknown") return result(null, "unknown", PENDING_COPY.unknown.switch);
+  if (usdc >= target || (rest === null && placed && perSol !== null)) {
+    const toGo = toGoOf(readiness, steps, waiting, wrapLineAhead(data));
+    return result(toGo.toGoRaw, toGo.gate, toGo.note);
+  }
+  if (rest !== null) return result(target - usdc, "held", PENDING_COPY.rest[rest]);
+  return result(null, "unknown", placed ? PENDING_COPY.unknown.price : PENDING_COPY.unknown.balance);
+}

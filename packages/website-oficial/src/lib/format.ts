@@ -136,6 +136,30 @@ export function clockLabel(iso: string): string {
 }
 
 /**
+ * "14:32 UTC" / "yesterday, 23:58 UTC" / "Oct 7, 14:32 UTC" / "Oct 7, 2025,
+ * 14:32 UTC" — a moment that may not be today, said with its day when it is not.
+ *
+ * A BARE CLOCK IS ONLY TODAY'S. "Not done since 23:58 UTC" read the morning
+ * after says a step stuck for eight hours has been stuck for minutes, and
+ * clockLabel alone cannot tell the two apart. So the day is added the moment
+ * it differs from `nowMs`'s, and the year the moment that does — judged in UTC
+ * like every label here, against the page's own clock and never Date.now(),
+ * for the reason at the top. Lower-case "yesterday": it sits inside a sentence
+ * ("Not done since yesterday, 23:58 UTC"), not at the head of a day's rows the
+ * way relativeDayLabel's "Yesterday" does.
+ */
+export function whenLabel(ms: number, nowMs: number): string {
+  const iso = new Date(ms).toISOString();
+  const clock = clockLabel(iso);
+  const day = iso.slice(0, 10);
+  const today = new Date(nowMs).toISOString().slice(0, 10);
+  if (day === today) return clock;
+  const yesterday = new Date(Date.parse(`${today}T00:00:00.000Z`) - 86_400_000).toISOString().slice(0, 10);
+  if (day === yesterday) return `yesterday, ${clock}`;
+  return day.slice(0, 4) === today.slice(0, 4) ? `${dayLabel(iso)}, ${clock}` : `${dateLabel(iso)}, ${clock}`;
+}
+
+/**
  * "just now" / "4m ago" / "3h ago" / "2d ago", and the calendar date past a
  * week. `now` is a parameter, not Date.now(), for the reason at the top.
  */

@@ -327,7 +327,12 @@ export interface LiveStatsView {
    * never zero.
    */
   readonly dailySaved: readonly { readonly day: string; readonly lamports: bigint }[];
-  readonly investmentsLoaded: number;
+  /**
+   * The buys (invested events) in the vault's loaded page. Null while no page
+   * of the history has answered, or the history could not be read: then there
+   * is nothing to count in, and a count of 0 would be a claim.
+   */
+  readonly investmentsLoaded: number | null;
 }
 
 export interface LiveDashboard {

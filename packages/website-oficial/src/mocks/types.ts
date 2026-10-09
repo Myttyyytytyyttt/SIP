@@ -262,8 +262,14 @@ export interface SavingsStats {
   /** The single fill that put the most aside. */
   readonly bestTradeSavedUsd: number | null;
   readonly bestTradeId: string | null;
-  /** How many times the pile reached the threshold and was invested. */
-  readonly investments: number;
+  /**
+   * How many times the pile reached the threshold and was invested — the
+   * Investments tile's figure. A live page counts the buys in its loaded
+   * history, and is null while that history has not answered or could not be
+   * read: a count nobody made is a dash, never 0 (live-mock.ts). The sample
+   * always has its own number.
+   */
+  readonly investments: number | null;
   readonly activeDays: number | null;
   readonly currentStreakDays: number | null;
   readonly longestStreakDays: number | null;
@@ -277,19 +283,22 @@ export interface SavingsStats {
    * the keeper's dust lines, which get no row but are counted here. SOL held
    * back by a rest the page can read — a pause, buying or converting switched
    * off, the 30-day limit, old price limits, the safety floor — is pending but
-   * not this. With no SOL price it is the USDC alone, and the note says the SOL.
-   * Absent means the sample's own reading: pendingUsd.
+   * not this. NULL IS UNKNOWN, NEVER 0: with no prices read, or the vault's free
+   * SOL or a switch unreadable, the figure cannot be made, the card draws no
+   * bar, and the note says the SOL in SOL and which input is missing.
+   * `nextInvestmentParts` is what it is made of. Absent means the sample's own
+   * reading: pendingUsd.
    */
   readonly readyToInvestUsd?: number | null;
   /**
    * A live page's line under "Next investment" about the money it counts that
    * is not USDC yet, or a basket ready to buy (src/lib/live-pending.ts): the
-   * SOL being converted, the SOL under the wrap line with the line it waits for
-   * ("Includes about $0.43 of SOL. It converts to USDC once your vault holds
-   * 0.005 SOL (0.0011 SOL more)"), or both as one sum — and, after it, what
+   * SOL being converted, the SOL under the keeper's lines with what moves it
+   * ("Includes about $0.43 of SOL too small to convert yet · It converts once
+   * your savings add 0.0011 SOL"), or both as one sum — and, after it, what
    * gates the buy where nothing else says it: the line the next saving must
-   * cross, or the rest that holds a basket the USDC already buys. Absent on
-   * the sample.
+   * cross, the rest that holds the buy, or the input the page could not read.
+   * Absent on the sample.
    */
   readonly nextInvestmentNote?: string | null;
   /**
@@ -298,25 +307,52 @@ export interface SavingsStats {
    * threshold less `readyToInvestUsd`: the next saving must also take the
    * vault's free SOL to the keeper's wrap line — from what waits under it, or
    * from none after a wrap — and that can be the larger figure. 0 with no gate
-   * means a buy is coming; with
-   * `nextInvestmentGate` set it is not, whatever this says, and the card says
-   * so in words. Null when there is no threshold or the USDC could not be
-   * read. Absent on the sample, whose card keeps its own arithmetic.
+   * means a buy is coming; with `nextInvestmentGate` set it is not, whatever
+   * this says, and the card says so in words ("held": the money the basket
+   * lacks, beside the switch that also does). Null when there is no threshold,
+   * the USDC could not be read, or the gate is "unknown" — never a guessed
+   * figure. Absent on the sample, whose card keeps its own arithmetic.
    */
   readonly toGoUsd?: number | null;
   /**
-   * Why the keeper will not buy on what the bar counts, on a live page:
+   * Why the keeper will not buy on what the bar counts, on a live page
+   * (live-pending.ts NextInvestmentGate):
    * "wrap_line" — part of it is SOL under the keeper's wrap line, which moves
-   * only once a saving takes the vault to that line, or the next saving must
-   * cross that line and it is more than the basket lacks (the note names it);
+   * only once a saving takes the vault's free SOL to that line, or the next
+   * saving must cross that line and it is more than the basket lacks (the
+   * note names it);
    * "slow" — the SOL being converted would complete the basket and its
-   * conversion is overdue; "rest" — the USDC buys the basket and a rest the
-   * page can read holds the buy (a pause, buying off, the 30-day limit, old
-   * price limits; the note names it). The card never draws a full bar, or
-   * "$0.00 to go", while one is set. Null when nothing gates the buy. Absent
-   * on the sample.
+   * conversion is overdue;
+   * "held" — a rest the page can read and the owner can lift holds the buy or
+   * the conversion it needs: the vault or SaverFi paused, buying or converting
+   * switched off, the 30-day limit, old price limits, SOL under its safety
+   * floor (the note names it);
+   * "unknown" — a switch or an amount the page could not read (the vault's
+   * pause, its free SOL, today's SOL price) stands between the figures and a
+   * buy, so whether, or after how much, the keeper buys cannot be said; the
+   * note says which, and `toGoUsd` is null.
+   * The card never draws a full bar, or "$0.00 to go", while one is set. Null
+   * when nothing gates the buy. Absent on the sample.
    */
-  readonly nextInvestmentGate?: "wrap_line" | "slow" | "rest" | null;
+  readonly nextInvestmentGate?: "wrap_line" | "slow" | "held" | "unknown" | null;
+  /**
+   * WHAT A LIVE PAGE'S NEXT INVESTMENT IS MADE OF, in today's dollars
+   * (live-pending.ts NextInvestmentParts, worked out in raw units first):
+   * `usdc` the vault's USDC; `converting` the SOL on its way to USDC (under way,
+   * or due and overdue); `waiting` the SOL and wSOL under the keeper's lines;
+   * `held` the SOL a rest the page can read holds back, pending and NOT in the
+   * figure. `readyToInvestUsd` is usdc + converting + waiting, and the four
+   * together are `pendingUsd`, both exact in raw units — these dollars are
+   * each rounded from their own raw sum, so add them for a bar's segments, not
+   * for a total. Each is null when unknown, never 0. Null when there is no
+   * basket to measure; absent on the sample.
+   */
+  readonly nextInvestmentParts?: {
+    readonly usdc: number | null;
+    readonly converting: number | null;
+    readonly waiting: number | null;
+    readonly held: number | null;
+  } | null;
   /**
    * The words a live page puts on the tiles whose sample names would claim
    * something the chain does not record — "Settlements" where the sample says

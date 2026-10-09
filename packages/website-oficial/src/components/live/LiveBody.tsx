@@ -99,8 +99,9 @@ export function LiveBody({
   // draw instead of the seeded example — real figures, today's dollars, and a
   // dash wherever the chain has no answer (src/lib/live-mock.ts).
   const page = toDashboardMock(data, { complete: older.complete });
-  // WHAT IS ON ITS WAY: SOL converting, a basket about to be bought (src/lib/live-pending.ts).
-  const pending = pendingLines(pendingSteps(data));
+  // WHAT IS ON ITS WAY: SOL converting, a basket about to be bought (src/lib/live-pending.ts),
+  // each "since" said against the payload's own clock, with its day when that is not today.
+  const pending = pendingLines(pendingSteps(data), data.nowMs);
 
   /** A wallet's own label, so a settlement says which one it came from. */
   const labelOf = (wallet: string | null): string => {

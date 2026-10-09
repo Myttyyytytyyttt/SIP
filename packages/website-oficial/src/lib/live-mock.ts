@@ -31,7 +31,7 @@ import { ACTIVITY_COPY } from "@/lib/live-copy";
 import { artForMint, NATIVE_SOL } from "@/lib/asset-art";
 import { formatSol, rawFrom, usdcRawForLamports } from "@/lib/amounts";
 import { usd } from "@/lib/format";
-import { nextInvestmentLine, nextInvestmentOf, pendingSteps, solUnderWrapLine, toGoOf, wrapLineAhead } from "@/lib/live-pending";
+import { nextInvestment } from "@/lib/live-pending";
 import type { LiveDashboard, LiveRow, LiveWalletView } from "@/lib/live-types";
 import { ratePercent } from "@/lib/vault-copy";
 import { measureOf, partsOf } from "@/components/live/LiveActivityRow";
@@ -169,10 +169,12 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
   // line binds the next saving even with no SOL under it; `toGoUsd` and
   // `nextInvestmentGate` carry what is really left, and why (live-pending.ts
   // toGoOf), and the line under the bar says the gate where nothing else does.
-  const steps = pendingSteps(data);
-  const waiting = solUnderWrapLine(data);
-  const next = nextInvestmentOf(steps, waiting);
-  const toGo = reachable ? toGoOf(readiness, steps, waiting, wrapLineAhead(data)) : null;
+  //
+  // ALL OF IT IS MADE IN RAW UNITS, PART BY PART (live-pending.ts
+  // nextInvestment), and only turned into dollars here: the parts add up to
+  // the figure and to Pending exactly, and a part, the figure or what is to go
+  // that the page cannot make is null — a dash — never a 0.
+  const next = nextInvestment(data);
 
   // ── the numbers ────────────────────────────────────────────────────────
   const legRows = data.holdings.filter((row) => row.kind === "leg");
@@ -201,11 +203,20 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
     costUsd: null,
     unrealizedUsd: null,
     pendingUsd: dollarsOf(data.notInvestedUsdcRaw),
-    readyToInvestUsd: readiness === null ? null : dollarsOf(readiness.heldRaw + (next.extraUsdcRaw ?? 0n)),
+    readyToInvestUsd: next === null ? null : dollarsOf(next.readyRaw),
     // A note about the sum only beside a sum: "Includes about $1.80" under a dash would contradict itself.
-    nextInvestmentNote: readiness === null ? null : nextInvestmentLine(next.note, toGo?.note ?? null),
-    toGoUsd: toGo === null ? null : dollarsOf(toGo.toGoRaw),
-    nextInvestmentGate: toGo === null ? null : toGo.gate,
+    nextInvestmentNote: next === null ? null : next.note,
+    toGoUsd: next === null ? null : dollarsOf(next.toGoRaw),
+    nextInvestmentGate: next === null ? null : next.gate,
+    nextInvestmentParts:
+      next === null
+        ? null
+        : {
+            usdc: dollarsOf(next.parts.usdcRaw),
+            converting: dollarsOf(next.parts.convertingRaw),
+            waiting: dollarsOf(next.parts.waitingRaw),
+            held: dollarsOf(next.parts.heldRaw),
+          },
     thresholdUsd,
     savedTodayUsd: $(stats.savedTodayLamports),
     savedThisWeekUsd: $(stats.savedThisWeekLamports),
@@ -217,6 +228,7 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
       vault.lifetimeSaved === null || stats.settlementsLifetime === null || stats.settlementsLifetime === 0n ? null : $(vault.lifetimeSaved / stats.settlementsLifetime),
     bestTradeSavedUsd: $(stats.biggestPaid),
     bestTradeId: null,
+    // Null while the history is on its way or could not be read: the tile says a dash, not 0.
     investments: stats.investmentsLoaded,
     activeDays: stats.dailySaved.length === 0 ? null : stats.dailySaved.filter((day) => day.lamports > 0n).length,
     currentStreakDays: stats.dailySaved.length === 0 ? null : streaks.current,
@@ -229,7 +241,7 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
     totalSavedSol: vault.lifetimeSaved === null ? null : formatSol(vault.lifetimeSaved),
     settledOutsideHistory: stats.settledOutsideHistory,
     holdingsUnreadable: !data.tokensReadable,
-    investedOutsideHistory: stats.investmentsLoaded > 0 ? false : everInvested,
+    investedOutsideHistory: (stats.investmentsLoaded ?? 0) > 0 ? false : everInvested,
     // USDC is a dollar: the same rule the USDC holding row is valued by.
     lastInvestedDay: lastBuy === null ? null : { day: lastBuy.day, spentUsd: dollarsOf(lastBuy.usdcRaw) ?? 0 },
   };

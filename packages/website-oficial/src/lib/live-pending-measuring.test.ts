@@ -95,7 +95,7 @@ describe("a trading wallet that changed past its frontier", () => {
     expect(steps[0]).toMatchObject({ kind: "measuring", state: "active", rest: null, since: NOW_MS, mode: 0 });
     const label = data.wallets[0]!.label;
     expect(steps[0]!.wallet).toEqual({ address: WALLET_A, label });
-    expect(pendingLines(steps)[0]).toMatchObject({ key: `measuring:${WALLET_A}`, active: true, title: PENDING_COPY.measuring(label), sub: PENDING_COPY.measuringSub.profit });
+    expect(pendingLines(steps, data.nowMs)[0]).toMatchObject({ key: `measuring:${WALLET_A}`, active: true, title: PENDING_COPY.measuring(label), sub: PENDING_COPY.measuringSub.profit });
   });
 
   it("comes before the keeper's own steps: trades are measured before anything is converted", () => {
@@ -124,13 +124,13 @@ describe("a trading wallet that changed past its frontier", () => {
   });
 
   it("leads with the wallet's name, so a title cut short on a phone still says which wallet", () => {
-    for (const title of [PENDING_COPY.measuring("Trading wallet 1"), PENDING_COPY.measuringWaiting("Imported wallet 2")]) {
+    for (const title of [PENDING_COPY.measuring("Trading wallet 1"), PENDING_COPY.measuringWaiting("Imported wallet 2", "12:00 UTC")]) {
       expect(title).toMatch(/^(Trading wallet 1|Imported wallet 2): /);
     }
   });
 
   it("says 'activity', never 'trade': a transfer into the wallet changes it too", () => {
-    const line = pendingLines(measuring(dashboard()))[0]!;
+    const line = pendingLines(measuring(dashboard()), NOW_MS)[0]!;
     expect(line.title).toMatch(/latest activity/);
     expect(line.title).not.toMatch(/trade/i);
   });
@@ -222,7 +222,25 @@ describe("a loader that stops claiming progress", () => {
     expect(late[0]).toMatchObject({ state: "waiting", rest: "slow" });
     expect(anyActive(late)).toBe(false);
     const label = dashboard().wallets[0]!.label;
-    expect(pendingLines(late)[0]).toMatchObject({ active: false, title: PENDING_COPY.measuringWaiting(label), sub: PENDING_COPY.measuringRest.profit });
+    // Resting, it says when the change was seen: NOW_MS is 12:00 UTC.
+    expect(pendingLines(late, NOW_MS + MEASURING_STALL_MS + 1)[0]).toMatchObject({
+      active: false,
+      title: PENDING_COPY.measuringWaiting(label, "12:00 UTC"),
+      sub: PENDING_COPY.measuringRest.profit,
+    });
+  });
+
+  /**
+   * A LINE READ AFTER MIDNIGHT (review 2026-10-09): a change seen at 23:58 UTC
+   * and still without a saving at 00:05 said "seen 23:58" with no day, which
+   * reads as the day it is read on. The day is said once it is not today.
+   */
+  it("names the day the change was seen when that is not the page's own day", () => {
+    const seen = Date.UTC(2026, 8, 15, 23, 58);
+    const steps = measuring(dashboard({ after: MEASURING_STALL_MS + 1 })).map((step) => ({ ...step, since: seen }));
+    const line = pendingLines(steps, seen + MEASURING_STALL_MS + 5 * 60_000)[0]!;
+    expect(line.title).toBe(PENDING_COPY.measuringWaiting(dashboard().wallets[0]!.label, "yesterday, 23:58 UTC"));
+    expect(line.title).toMatch(/seen yesterday, 23:58 UTC$/);
   });
 
   it("leaves the page after MEASURING_HIDE_MS, on a volume vault too: a plain transfer owes nothing, and an hour's line would say otherwise", () => {
@@ -273,12 +291,12 @@ describe("a loader that stops claiming progress", () => {
 
 describe("the words, by mode", () => {
   it("PROFIT: a saving follows only if the trades since the last one made a profit", () => {
-    expect(pendingLines(measuring(dashboard({ mode: 0 })))[0]!.sub).toBe(PENDING_COPY.measuringSub.profit);
+    expect(pendingLines(measuring(dashboard({ mode: 0 })), NOW_MS)[0]!.sub).toBe(PENDING_COPY.measuringSub.profit);
     expect(PENDING_COPY.measuringSub.profit).toMatch(/only if your trades since the last one made a profit/);
   });
 
   it("VOLUME: a saving follows once 0.001 SOL is owed, or an hour after the oldest unsaved trade — the volume keeper's own numbers", () => {
-    expect(pendingLines(measuring(dashboard({ mode: 1 })))[0]!.sub).toBe(PENDING_COPY.measuringSub.volume);
+    expect(pendingLines(measuring(dashboard({ mode: 1 })), NOW_MS)[0]!.sub).toBe(PENDING_COPY.measuringSub.volume);
     expect(VOLUME_MIN_OWED_LAMPORTS).toBe(KEEPER_VOLUME_MIN_OWED);
     expect(VOLUME_MAX_WAIT_MS).toBe(VOLUME_MAX_WAIT_SECONDS * 1_000);
     const owed = `${formatSolAtMost(VOLUME_MIN_OWED_LAMPORTS, 4)} SOL`;
@@ -288,7 +306,7 @@ describe("the words, by mode", () => {
   });
 
   it("never names the keeper, a slot or a frontier", () => {
-    for (const text of [...Object.values(PENDING_COPY.measuringSub), ...Object.values(PENDING_COPY.measuringRest), PENDING_COPY.measuring("W"), PENDING_COPY.measuringWaiting("W")]) {
+    for (const text of [...Object.values(PENDING_COPY.measuringSub), ...Object.values(PENDING_COPY.measuringRest), PENDING_COPY.measuring("W"), PENDING_COPY.measuringWaiting("W", "12:00 UTC")]) {
       expect(text).not.toMatch(/keeper|slot|frontier|lamport/i);
     }
   });

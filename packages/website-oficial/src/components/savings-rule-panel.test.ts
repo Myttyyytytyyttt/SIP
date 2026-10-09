@@ -7,7 +7,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { SavingsRulePanel, type RuleSettingsDoor } from "@/components/savings-rule-panel";
+import { SavingsRulePanel, type NextInvestmentView, type RuleSettingsDoor } from "@/components/savings-rule-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { SETTINGS_COPY } from "@/lib/settings-copy";
@@ -22,7 +22,12 @@ const door = (overrides: Partial<RuleSettingsDoor> = {}): RuleSettingsDoor => ({
 
 function render(
   rule: SavingsRule,
-  options: { readonly settings?: RuleSettingsDoor; readonly stats?: SavingsStats; readonly activity?: readonly ActivityEvent[] } = {},
+  options: {
+    readonly settings?: RuleSettingsDoor;
+    readonly stats?: SavingsStats;
+    readonly activity?: readonly ActivityEvent[];
+    readonly renderNextInvestment?: (next: NextInvestmentView) => ReturnType<typeof createElement>;
+  } = {},
 ): string {
   return renderToStaticMarkup(
     createElement(
@@ -34,6 +39,7 @@ function render(
         activity: options.activity ?? [],
         now: NOW,
         ...(options.settings === undefined ? {} : { settings: options.settings }),
+        ...(options.renderNextInvestment === undefined ? {} : { renderNextInvestment: options.renderNextInvestment }),
       }),
     ),
   );
@@ -129,7 +135,7 @@ describe("next investment, gated", () => {
   it("never says $0.00 to go, or draws a full bar, while a rest the page can read holds a basket the USDC buys", () => {
     // Review 2026-10-09: the vault paused with $1.20 of USDC read "$0.00 to go" on a full bar, and nothing under it.
     const paused = "Your vault is paused: nothing is converted or bought until you resume it";
-    const html = live({ readyToInvestUsd: 1.2, toGoUsd: 0, nextInvestmentGate: "rest", nextInvestmentNote: paused });
+    const html = live({ readyToInvestUsd: 1.2, toGoUsd: 0, nextInvestmentGate: "held", nextInvestmentNote: paused });
     expect(fill(html)).toBe("-5");
     expect(nextBlock(html)).not.toContain("to go");
     expect(nextBlock(html)).toContain(paused);
@@ -152,6 +158,118 @@ describe("next investment, gated", () => {
   it("takes a live page's to-go from the keeper's figure, not the threshold less the bar", () => {
     const html = nextBlock(live({ readyToInvestUsd: 0.2, toGoUsd: 0.75, nextInvestmentGate: null }));
     expect(html).toContain('<span class="font-mono tabular-nums">$0.75</span> to go');
+  });
+});
+
+/**
+ * A FIGURE NOBODY COULD MAKE (review 2026-10-09). A live page's figure is null
+ * when an input it is made of could not be read; an empty bar under "— of
+ * $1.00" read as nothing saved, and "— to go" as nothing left.
+ */
+describe("next investment, unknown", () => {
+  const nextBlock = (html: string): string => html.slice(html.indexOf("Next investment"), html.indexOf("Last investment"));
+  const UNKNOWN_NOTE = "Today's SOL price is unavailable, so what is still to go is not shown";
+  const live = (stats: Partial<SavingsStats>): string => render(PROFIT, { settings: door(), stats: { ...STATS, thresholdUsd: 1, ...stats } as SavingsStats });
+
+  it("draws no bar and no to-go for a null figure: the dash in the headline, and the line that says why", () => {
+    const html = nextBlock(live({ readyToInvestUsd: null, toGoUsd: null, nextInvestmentGate: "unknown", nextInvestmentNote: UNKNOWN_NOTE }));
+    expect(html).not.toContain('data-slot="progress"');
+    expect(html).toMatch(/— <span class="text-muted-foreground">of<\/span> \$1\.00/);
+    // No to-go line of its own: the only "to go" is the note's.
+    expect(html).not.toContain("</span> to go");
+    expect(html).toContain(UNKNOWN_NOTE.replaceAll("'", "&#x27;"));
+  });
+
+  it("draws no bar, and no '— to go', where there is no basket to measure", () => {
+    const html = nextBlock(live({ readyToInvestUsd: null, toGoUsd: null, nextInvestmentGate: null, nextInvestmentNote: null }));
+    expect(html).not.toContain('data-slot="progress"');
+    expect(html).not.toContain("to go");
+  });
+
+  it("still draws the bar for a known figure of nothing: $0.00 is a figure", () => {
+    const html = nextBlock(live({ readyToInvestUsd: 0, toGoUsd: 1, nextInvestmentGate: null }));
+    expect(html).toContain('data-slot="progress"');
+    expect(html).toContain('<span class="font-mono tabular-nums">$1.00</span> to go');
+  });
+});
+
+/**
+ * THE SAMPLE'S BLOCK, CHARACTER FOR CHARACTER. It sets none of the live
+ * fields, so the card draws today's formulas: the pending pile of its own
+ * threshold, a full-width bar, the difference to go.
+ */
+describe("next investment on the sample", () => {
+  it("draws its pending pile of the threshold, the bar at that share, and the difference to go", () => {
+    const html = render(VOLUME, { stats: { ...STATS, pendingUsd: 3 } });
+    const block = html.slice(html.indexOf("Next investment"), html.indexOf("Last investment"));
+    expect(block).toMatch(/\$3\.00 <span class="text-muted-foreground">of<\/span> \$5\.00/);
+    expect(block).toContain("translateX(-40%)");
+    expect(block).toContain('<span class="font-mono tabular-nums">$2.00</span> to go');
+    expect(block).not.toContain("data-next-investment-note");
+  });
+});
+
+/**
+ * A LIVE PAGE DRAWS THE BLOCK ITSELF (renderNextInvestment): the marks beside
+ * the label, the parts as segments, the line as a waiting note — from the
+ * figures the card worked out, so the drawing does no arithmetic of its own.
+ */
+describe("next investment, drawn by a live page", () => {
+  const PARTS = { usdc: 0.3, converting: 0.5, waiting: 0.391331, held: 0 };
+  const STATS_LIVE = {
+    ...STATS,
+    thresholdUsd: 1,
+    readyToInvestUsd: 1.191331,
+    toGoUsd: 0.108862,
+    nextInvestmentGate: "wrap_line",
+    nextInvestmentNote: "Includes about $0.89 of SOL on its way to USDC",
+    nextInvestmentParts: PARTS,
+  } as SavingsStats;
+
+  it("hands the slot the card's own figures, and puts what it returns in the block's place", () => {
+    const seen: NextInvestmentView[] = [];
+    const html = render(PROFIT, {
+      settings: door(),
+      stats: STATS_LIVE,
+      renderNextInvestment: (next) => {
+        seen.push(next);
+        return createElement("div", { "data-drawn-by-live": "" }, "LIVE BLOCK");
+      },
+    });
+    expect(seen).toEqual([
+      {
+        readyUsd: 1.191331,
+        thresholdUsd: 1,
+        progress: 95,
+        toGoUsd: 0.108862,
+        toGoShown: false,
+        note: "Includes about $0.89 of SOL on its way to USDC",
+        gate: "wrap_line",
+        parts: PARTS,
+      },
+    ]);
+    expect(html).toContain('<div data-drawn-by-live="">LIVE BLOCK</div>');
+    // The block's own drawing is gone: the slot stands in its place.
+    expect(html).not.toContain("Next investment");
+    expect(html).not.toContain('data-slot="progress"');
+    expect(html).toContain("Last investment");
+  });
+
+  it("hands no bar and no to-go for a null figure", () => {
+    const seen: NextInvestmentView[] = [];
+    render(PROFIT, {
+      settings: door(),
+      stats: { ...STATS_LIVE, readyToInvestUsd: null, toGoUsd: null, nextInvestmentGate: "unknown", nextInvestmentParts: { ...PARTS, waiting: null } },
+      renderNextInvestment: (next) => {
+        seen.push(next);
+        return createElement("div");
+      },
+    });
+    expect(seen[0]).toMatchObject({ readyUsd: null, progress: null, toGoShown: false, gate: "unknown", parts: { ...PARTS, waiting: null } });
+  });
+
+  it("is not asked on the sample, which never passes it", () => {
+    expect(render(VOLUME)).toContain("Next investment");
   });
 });
 

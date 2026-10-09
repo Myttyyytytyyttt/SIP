@@ -821,7 +821,10 @@ function statsOf(
     gainsMeasuredLamports: whole ? settlements.reduce((total, entry) => total + entry.base, 0n) : null,
     gainsThisMonthLamports: baseSince(nowMs - 30 * DAY_MS),
     dailySaved,
-    investmentsLoaded: rows.filter((row) => row.event.kind === "invested").length,
+    // A COUNT OF A HISTORY NOBODY READ IS NOT 0. Before the first page answers,
+    // or when it could not be read, there is no history to count buys in: the
+    // Investments tile says a dash, not "0 in the loaded history".
+    investmentsLoaded: activity === null || activity.status !== "exists" ? null : rows.filter((row) => row.event.kind === "invested").length,
   };
 }
 
