@@ -22,7 +22,7 @@ import {
 import { Num } from "@/components/num";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { MONO, SAVED } from "@/lib/classes";
+import { MONO, TONE_TEXT, TONE_TILE, type Tone } from "@/lib/classes";
 import { clockLabel, fillLabel, shares, shortHex, timeAgo, usd, usdSigned } from "@/lib/format";
 import { cn } from "@/lib/utils";
 // The leaf, not the barrel: `@/mocks` also re-exports the seeded dataset, and this file ships to the browser.
@@ -49,45 +49,12 @@ const mark = (symbol: string, logo: string | undefined, size: number): ReactNode
   <Image src={logo ?? tickerLogo(symbol)} alt={symbol} width={size} height={size} className="rounded-full" />
 );
 
-/**
- * WHAT KIND OF THING HAPPENED, AT A GLANCE (owner, 09-23):
- *
- *   saved    green   money coming in — a slice the rule put aside (from gains
- *                    or from volume), and SOL that simply arrived;
- *   invest   blue    the pension buying what it holds;
- *   setting  mustard a change to how the pension behaves, and only that — a
- *                    new rule, a signed policy, a wallet linked or unlinked,
- *                    the vault itself created;
- *   quiet    grey    the system doing its job — a conversion, a wrap, the
- *                    keeper's upkeep, a settlement that found nothing to take,
- *                    a withdrawal whose minus sign already says it. Correct
- *                    and expected, so it steps back and lets the rest be seen;
- *   failed   red     kept rare on purpose: a transaction that did not land, or
- *                    one nobody could read. Red that shows up every day stops
- *                    meaning anything.
- *
- * The tint is on the icon's square and on the amount, never on the words: the
- * row still reads the same in any colour, and nothing is said only by hue.
+/*
+ * WHAT KIND OF THING HAPPENED, AT A GLANCE (owner, 09-23): green money in, blue
+ * a buy, mustard a setting, grey the machinery, red what did not land. The
+ * tones, their squares and their amounts live in lib/classes.ts (TONE_TILE,
+ * TONE_TEXT) since 10-09, so the live page's marks wear the very same ones.
  */
-type Tone = "saved" | "invest" | "setting" | "quiet" | "failed";
-
-const TILE: Readonly<Record<Tone, string>> = {
-  saved: "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400",
-  invest: "bg-blue-500/12 text-blue-600 dark:text-blue-400",
-  setting: "bg-amber-500/12 text-amber-700 dark:text-amber-400",
-  quiet: "bg-muted text-muted-foreground",
-  failed: "bg-destructive/10 text-destructive",
-};
-
-const AMOUNT: Readonly<Record<Tone, string>> = {
-  saved: SAVED,
-  invest: "text-blue-600 dark:text-blue-400",
-  setting: "text-amber-700 dark:text-amber-400",
-  // Muted, not the page's ink: in the dark theme plain white would be the
-  // loudest figure in the column, on the rows that matter least.
-  quiet: "text-muted-foreground",
-  failed: "text-destructive",
-};
 
 /**
  * WHAT THE SQUARE SHOWS BEHIND ITS GLYPH — the marks of what the transaction
@@ -183,7 +150,7 @@ function parts(event: ActivityEvent): RowParts {
         sub: joined(<Num>{usd(event.notionalUsd)}</Num>),
         // The slice is the row's number — it is what the product does; the size sits in the sub line.
         amount: usdSigned(event.savedUsd),
-        amountClass: AMOUNT[saved ? "saved" : "quiet"],
+        amountClass: TONE_TEXT[saved ? "saved" : "quiet"],
       };
     }
     case "invested":
@@ -206,7 +173,7 @@ function parts(event: ActivityEvent): RowParts {
           </>,
         ),
         amount: usd(event.amountUsd),
-        amountClass: AMOUNT.invest,
+        amountClass: TONE_TEXT.invest,
       };
     case "deposit":
       return {
@@ -216,7 +183,7 @@ function parts(event: ActivityEvent): RowParts {
         title: "Funded wallet",
         sub: clock,
         amount: usdSigned(event.amountUsd),
-        amountClass: AMOUNT.saved,
+        amountClass: TONE_TEXT.saved,
       };
     case "saved": {
       // The trade row's shape, because this IS what a trade row stood for: the
@@ -228,7 +195,7 @@ function parts(event: ActivityEvent): RowParts {
         title: event.title ?? `Saved from ${event.from}`,
         sub: joined(event.basis),
         amount: usdSigned(event.savedUsd),
-        amountClass: AMOUNT[saved ? "saved" : "quiet"],
+        amountClass: TONE_TEXT[saved ? "saved" : "quiet"],
         ...(event.note === undefined ? {} : { note: event.note }),
       };
     }
@@ -241,7 +208,7 @@ function parts(event: ActivityEvent): RowParts {
         title: event.title,
         sub: joined(event.sub),
         amount: event.amount ?? "",
-        amountClass: AMOUNT[event.failed ? "failed" : TONE_OF_OTHER[event.icon]],
+        amountClass: TONE_TEXT[event.failed ? "failed" : TONE_OF_OTHER[event.icon]],
         ...(event.failed ? { failed: true } : {}),
       };
     }
@@ -315,7 +282,7 @@ export function ActivityRow({
 
   const body = (
     <>
-      <span className={cn("relative flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-md", TILE[tone])}>
+      <span className={cn("relative flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-md", TONE_TILE[tone])}>
         {backdrop === undefined ? null : <BackdropArt art={backdrop} />}
         {/* The glyph leads, and leans in a touch when the row is pointed at. */}
         <span className="relative flex transition-transform duration-300 group-hover/row:scale-110">{leading}</span>
@@ -332,7 +299,7 @@ export function ActivityRow({
         <span className="block truncate text-xs text-muted-foreground">{sub}</span>
         {note === undefined ? null : <span className="block truncate text-xs text-muted-foreground">{note}</span>}
       </span>
-      <span className={cn("shrink-0 text-right text-sm", MONO, amountClass ?? AMOUNT[tone])}>{amount}</span>
+      <span className={cn("shrink-0 text-right text-sm", MONO, amountClass ?? TONE_TEXT[tone])}>{amount}</span>
     </>
   );
 

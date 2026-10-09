@@ -76,7 +76,8 @@ describe("before Privy answers", () => {
   it("shows a placeholder, never a control that cannot act yet", () => {
     mocked.privy = { ready: false, authenticated: false, user: null };
     const html = render();
-    expect(html).toContain("animate-pulse");
+    // A pulse only for whoever has not asked their system for less motion (10-09).
+    expect(html).toContain("motion-safe:animate-pulse");
     expect(html).not.toContain("Open my pension");
     expect(html).not.toContain("Disconnect");
   });

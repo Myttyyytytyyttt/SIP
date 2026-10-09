@@ -16,6 +16,7 @@
  * something separate from the buttons beside it.
  */
 
+import { keyBySignature } from "@/components/live/row-keys";
 import { formatSol, rawFrom } from "@/lib/amounts";
 import type { LiveRow } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
@@ -30,14 +31,19 @@ const SHOWN = 8;
  *
  * `paid` IS WHAT MOVED, not what was owed: a contribution clipped by
  * max_contribution shows the smaller, true number.
+ *
+ * KEYED BY TRANSACTION AND COUNT (10-09): one settle that pays two wallets is
+ * one signature and two chips, so the signature alone gave two chips one key
+ * (live/row-keys.ts).
  */
-function contributions(rows: readonly LiveRow[]): { readonly key: string; readonly lamports: bigint }[] {
+export function contributions(rows: readonly LiveRow[]): { readonly key: string; readonly lamports: bigint }[] {
   const found: { key: string; lamports: bigint }[] = [];
+  const keyOf = keyBySignature();
   for (const row of rows) {
     if (row.event.kind !== "settled" || !row.ok) continue;
     const lamports = rawFrom(row.event.paid) ?? 0n;
     if (lamports <= 0n) continue;
-    found.push({ key: row.signature, lamports });
+    found.push({ key: keyOf(row.signature), lamports });
     if (found.length === SHOWN) break;
   }
   return found;

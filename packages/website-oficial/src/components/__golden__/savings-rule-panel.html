@@ -1,0 +1,65 @@
+<div data-slot="card" data-size="default" class="group/card flex flex-col gap-(--card-spacing) overflow-hidden rounded-xl bg-card py-(--card-spacing) text-sm text-card-foreground ring-1 ring-foreground/10 [--card-spacing:--spacing(4)] has-data-[slot=card-footer]:pb-0 has-[&gt;img:first-child]:pt-0 data-[size=sm]:[--card-spacing:--spacing(3)] data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl h-fit xl:[--card-spacing:--spacing(3)] order-2 md:order-1 lg:order-2 xl:order-1 rise-in rise-d1">
+<div data-slot="card-header" class="group/card-header @container/card-header grid auto-rows-min items-start gap-1 rounded-t-xl px-(--card-spacing) has-data-[slot=card-action]:grid-cols-[1fr_auto] has-data-[slot=card-description]:grid-rows-[auto_auto] [.border-b]:pb-(--card-spacing)">
+<div data-slot="card-title" class="font-heading text-base leading-snug font-medium group-data-[size=sm]/card:text-sm">Savings rule</div>
+<div data-slot="card-description" class="text-sm text-muted-foreground">Applied to every buy and sell</div>
+<div data-slot="card-action" class="col-start-2 row-span-2 row-start-1 self-start justify-self-end">
+<button data-slot="button" data-variant="ghost" data-size="icon-sm" class="group/button inline-flex shrink-0 items-center justify-center border border-transparent bg-clip-padding text-sm font-medium whitespace-nowrap transition-all outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&amp;_svg]:pointer-events-none [&amp;_svg]:shrink-0 [&amp;_svg:not([class*=&#x27;size-&#x27;])]:size-4 hover:bg-muted aria-expanded:bg-muted dark:hover:bg-muted/50 size-7 rounded-[min(var(--radius-md),12px)] in-data-[slot=button-group]:rounded-lg relative text-muted-foreground hover:text-amber-700 aria-expanded:text-amber-700 dark:hover:text-amber-400 dark:aria-expanded:text-amber-400" type="button" aria-label="Vault settings" title="Vault settings" aria-haspopup="dialog" aria-expanded="false">
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-settings" aria-hidden="true">
+<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915">
+</path>
+<circle cx="12" cy="12" r="3">
+</circle>
+</svg>
+</button>
+</div>
+</div>
+<div data-slot="card-content" class="px-(--card-spacing) space-y-5 xl:space-y-4 xl:short:space-y-3">
+<div class="flex items-center justify-between gap-2">
+<p class="text-sm leading-none font-medium">Rate</p>
+<span class="flex items-center gap-2">
+<span class="font-mono tabular-nums text-sm">1%</span>
+</span>
+</div>
+<div class="space-y-2">
+<p class="text-sm leading-none font-medium">Invests in</p>
+<ul class="space-y-1.5">
+<li class="flex items-center justify-between text-sm">
+<span class="flex items-center gap-2">
+<img alt="SPYx" loading="lazy" width="16" height="16" decoding="async" data-nimg="1" class="rounded-full" style="color:transparent" srcSet="/_next/image?url=%2Fstocks%2FSPYx.png&amp;w=32&amp;q=75 1x" src="/_next/image?url=%2Fstocks%2FSPYx.png&amp;w=32&amp;q=75"/>SPYx</span>
+<span class="font-mono tabular-nums">60%</span>
+</li>
+<li class="flex items-center justify-between text-sm">
+<span class="flex items-center gap-2">
+<img alt="ANTHROPIC" loading="lazy" width="16" height="16" decoding="async" data-nimg="1" class="rounded-full" style="color:transparent" srcSet="/_next/image?url=%2Fstocks%2FANTHROPIC.png&amp;w=32&amp;q=75 1x" src="/_next/image?url=%2Fstocks%2FANTHROPIC.png&amp;w=32&amp;q=75"/>ANTHROPIC</span>
+<span class="font-mono tabular-nums">40%</span>
+</li>
+</ul>
+</div>
+<div data-orientation="horizontal" role="none" data-slot="separator" class="shrink-0 bg-border data-horizontal:h-px data-horizontal:w-full data-vertical:w-px data-vertical:self-stretch">
+</div>
+<div class="space-y-2">
+<div class="flex items-center justify-between gap-2">
+<p class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Next investment</p>
+<p class="font-mono tabular-nums text-sm">$8.42<!-- --> <span class="text-muted-foreground">of</span> <!-- -->$10.00</p>
+</div>
+<div aria-valuemax="100" aria-valuemin="0" role="progressbar" data-state="indeterminate" data-max="100" data-slot="progress" class="relative flex h-1 w-full items-center overflow-x-hidden rounded-full bg-muted" aria-label="Progress to next investment">
+<div data-state="indeterminate" data-max="100" data-slot="progress-indicator" class="size-full flex-1 bg-primary transition-all motion-reduce:transition-none" style="transform:translateX(-15.799999999999997%)">
+</div>
+</div>
+<p class="text-xs text-muted-foreground">
+<span class="font-mono tabular-nums">$1.58</span> to go</p>
+</div>
+<div class="space-y-2">
+<p class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Last investment</p>
+<button data-state="closed" data-slot="tooltip-trigger" type="button" class="flex w-full items-center gap-3 rounded-md border p-3 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+<img alt="SPYx" loading="lazy" width="20" height="20" decoding="async" data-nimg="1" class="rounded-full" style="color:transparent" srcSet="/_next/image?url=%2Fstocks%2FSPYx.png&amp;w=32&amp;q=75 1x, /_next/image?url=%2Fstocks%2FSPYx.png&amp;w=48&amp;q=75 2x" src="/_next/image?url=%2Fstocks%2FSPYx.png&amp;w=48&amp;q=75"/>
+<span class="min-w-0 flex-1">
+<span class="block truncate text-sm">Invested in <!-- -->SPYx</span>
+<span class="block truncate text-xs text-muted-foreground">
+<span class="font-mono tabular-nums">0.0299</span> shares ·<!-- --> <!-- -->6h ago</span>
+</span>
+<span class="font-mono tabular-nums shrink-0 text-sm">$25.53</span>
+</button>
+</div>
+</div>
+</div>

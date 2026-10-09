@@ -162,7 +162,7 @@ export function TradingWalletsCard() {
             // An explicit call: Privy's createWallet drops an argument that looks like a click event, and the wallet would be born without its seat.
             onClick={() => void run()}
           >
-            {busy ? <LoaderCircle className="animate-spin" aria-hidden /> : <Plus aria-hidden />}
+            {busy ? <LoaderCircle className="motion-safe:animate-spin" aria-hidden /> : <Plus aria-hidden />}
             {busy ? CREATE_LINK_COPY.running : plan.links ? CREATE_LINK_COPY.button : CREATE_LINK_COPY.buttonCreateOnly}
           </Button>
         </CardAction>
@@ -184,7 +184,7 @@ export function TradingWalletsCard() {
         ) : null}
         {problem === null && !full && !importing ? (
           <Button type="button" size="sm" variant="outline" disabled={importBlocked} aria-busy={importer.write.running} onClick={() => setImporting(true)}>
-            {importer.write.running ? <LoaderCircle className="animate-spin" aria-hidden /> : <Import aria-hidden />}
+            {importer.write.running ? <LoaderCircle className="motion-safe:animate-spin" aria-hidden /> : <Import aria-hidden />}
             {importer.write.running ? IMPORT_LINK_COPY.running : IMPORT_LINK_COPY.button}
           </Button>
         ) : null}

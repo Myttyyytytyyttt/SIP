@@ -269,7 +269,7 @@ export function ImportWalletPanel({
       <div className="flex flex-wrap gap-2">
         {review === null ? (
           <Button type="button" size="sm" disabled={verdict.kind !== "key" || judging || checking || screen === null} aria-busy={checking} onClick={() => void check()}>
-            {checking ? <LoaderCircle className="animate-spin" aria-hidden /> : null}
+            {checking ? <LoaderCircle className="motion-safe:animate-spin" aria-hidden /> : null}
             {checking ? IMPORT_PANEL_COPY.checking : IMPORT_PANEL_COPY.check}
           </Button>
         ) : (

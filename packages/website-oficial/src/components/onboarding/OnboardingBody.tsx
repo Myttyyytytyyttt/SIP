@@ -27,7 +27,7 @@
 
 import { DEFAULT_VAULT_POLICY, MODE_PROFIT, OFFERED_LEGS, USDC_MINT } from "@sip/solana-core/client";
 import { ArrowLeftRight, ArrowRight, ChartLine, Circle, PiggyBank, RefreshCw, ShieldCheck, type LucideIcon } from "lucide-react";
-import { useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -38,12 +38,13 @@ import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { TxProgress } from "@/components/wallets/TxProgress";
+import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import type { CreateRequest, WriteProgress } from "@/hooks/use-vault-actions";
 import { formatSol } from "@/lib/amounts";
 import { LIVE_COPY, ONBOARDING_COPY } from "@/lib/live-copy";
 import { SETUP_RATE, SETUP_STOCKS, basketSplit, setupRate, toggleBasket, type OnboardingBodyStep, type VaultStepRead } from "@/lib/onboarding";
 import type { BasketChoice } from "@/lib/onboarding-memory";
-import { MONO } from "@/lib/classes";
+import { MONO, TONE_TILE } from "@/lib/classes";
 import { cn } from "@/lib/utils";
 import { LINK_COPY, PROFIT_RATE, VAULT_COPY, listAnd, ratePercent, shortAddress } from "@/lib/vault-copy";
 
@@ -164,17 +165,11 @@ function Identity({ pensionKey, onDisconnect, disabled }: { readonly pensionKey:
   );
 }
 
-const TILE = {
-  quiet: "bg-muted text-muted-foreground",
-  saved: "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400",
-  invest: "bg-blue-500/12 text-blue-600 dark:text-blue-400",
-} as const;
-
-/** One of the four things SaverFi does: second to the motion, so smaller than it. */
-function Point({ icon: Icon, tone, title, children }: { readonly icon: LucideIcon; readonly tone: keyof typeof TILE; readonly title: string; readonly children: ReactNode }) {
+/** One of the four things SaverFi does: second to the motion, so smaller than it. Its square wears the feed's own tones (lib/classes.ts). */
+function Point({ icon: Icon, tone, title, children }: { readonly icon: LucideIcon; readonly tone: "quiet" | "saved" | "invest"; readonly title: string; readonly children: ReactNode }) {
   return (
     <li className="flex items-start gap-2.5">
-      <span className={cn("flex size-7 shrink-0 items-center justify-center rounded-md", TILE[tone])}>
+      <span className={cn("flex size-7 shrink-0 items-center justify-center rounded-md", TONE_TILE[tone])}>
         <Icon className="size-3.5" aria-hidden />
       </span>
       <span className="min-w-0 space-y-0.5">
@@ -204,18 +199,6 @@ export const STEP_MOTION = {
   welcome: { video: "/motion/onboarding-welcome.mp4", poster: "/motion/onboarding-welcome.jpg" },
   vault: { video: "/motion/onboarding-vault.mp4", poster: "/motion/onboarding-vault.jpg" },
 } as const;
-
-const REDUCED = "(prefers-reduced-motion: reduce)";
-const subscribeReduced = (onChange: () => void): (() => void) => {
-  const query = window.matchMedia(REDUCED);
-  query.addEventListener("change", onChange);
-  return () => query.removeEventListener("change", onChange);
-};
-
-/** Whether the person asked for less motion. False on the server: the setup is never server-rendered anyway. */
-function useReducedMotion(): boolean {
-  return useSyncExternalStore(subscribeReduced, () => window.matchMedia(REDUCED).matches, () => false);
-}
 
 /** The motion says with pictures what the words around it say, so it is hidden from screen readers. */
 function StepMotion({ motion, wide = false }: { readonly motion: (typeof STEP_MOTION)[keyof typeof STEP_MOTION]; readonly wide?: boolean }) {
@@ -435,7 +418,7 @@ function VaultStep(props: OnboardingBodyProps) {
           <div role="group" aria-labelledby="onboarding-rate" className="space-y-2.5 rounded-lg border px-3 py-2.5">
             <div className="flex items-center justify-between gap-3">
               <Label id="onboarding-rate" className="flex items-center gap-2 text-[0.8rem]">
-                <span className={cn("flex size-6 shrink-0 items-center justify-center rounded-md", TILE.saved)}>
+                <span className={cn("flex size-6 shrink-0 items-center justify-center rounded-md", TONE_TILE.saved)}>
                   <PiggyBank className="size-3.5" aria-hidden />
                 </span>
                 {copy.rateLabel}

@@ -176,7 +176,7 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
             aria-busy={keeper.busy === "granting"}
             onClick={() => void keeper.grant()}
           >
-            {keeper.busy === "granting" ? <LoaderCircle className="animate-spin" aria-hidden /> : null}
+            {keeper.busy === "granting" ? <LoaderCircle className="motion-safe:animate-spin" aria-hidden /> : null}
             {keeper.busy === "granting" ? ROW_COPY.granting : ROW_COPY.grant}
           </Button>
         ) : null}
@@ -189,7 +189,7 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
             aria-busy={keeper.busy === "checking"}
             onClick={() => void keeper.check()}
           >
-            <RefreshCw className={keeper.busy === "checking" ? "animate-spin" : undefined} aria-hidden />
+            <RefreshCw className={keeper.busy === "checking" ? "motion-safe:animate-spin" : undefined} aria-hidden />
             Check again
           </Button>
         ) : null}
@@ -203,7 +203,7 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
             // An explicit call: Privy's exportWallet with no address exports the wallet at HD index 0.
             onClick={() => void exporter.run()}
           >
-            {exporter.busy ? <LoaderCircle className="animate-spin" aria-hidden /> : <KeyRound aria-hidden />}
+            {exporter.busy ? <LoaderCircle className="motion-safe:animate-spin" aria-hidden /> : <KeyRound aria-hidden />}
             {exporter.busy ? "Privy dialog open…" : "Export key"}
           </Button>
         ) : null}
@@ -336,7 +336,7 @@ export function ReseatConfirm({
       </div>
       <div className="flex flex-wrap gap-2">
         <Button type="button" size="sm" variant="destructive" disabled={disabled} aria-busy={busy} onClick={() => onConfirm()}>
-          {busy ? <LoaderCircle className="animate-spin" aria-hidden /> : null}
+          {busy ? <LoaderCircle className="motion-safe:animate-spin" aria-hidden /> : null}
           {busy ? RESEAT_COPY.running : RESEAT_COPY.confirm}
         </Button>
         <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => onCancel()}>
@@ -365,7 +365,7 @@ export function RemoveConfirm({
       <p className="text-muted-foreground">{REMOVE_COPY.confirmBody}</p>
       <div className="flex flex-wrap gap-2">
         <Button type="button" size="sm" variant="destructive" disabled={disabled} aria-busy={busy} onClick={() => onConfirm()}>
-          {busy ? <LoaderCircle className="animate-spin" aria-hidden /> : null}
+          {busy ? <LoaderCircle className="motion-safe:animate-spin" aria-hidden /> : null}
           {busy ? REMOVE_COPY.running : REMOVE_COPY.confirm}
         </Button>
         <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => onCancel()}>

@@ -415,6 +415,75 @@
   }
 }
 
+/* ─── THE LIVE PAGE'S MARKS (10-09) ─────────────────────────────────────────
+   LIVE ONLY. Every class here sits on an element the sample never renders, so
+   /?mode=mock — and the landing's app-loop video recorded from it — cannot
+   change by a pixel because of them. One moving mark per fact: the wash says a
+   row or chip just arrived, the breathing dot says the page is checking, the
+   ping says a check brought something.
+
+   THE WASH IS ITS OWN ABSOLUTELY PLACED CHILD, never a class on the host, so the
+   host keeps its rise-in, its focus ring (a box-shadow) and its hover ground:
+   unlayered CSS here would beat every Tailwind utility on the host itself. The
+   host gets `relative isolate` only while it is arrived. It fades from a tint to
+   nothing in 2.4 s and keeps its 2 px edge for as long as it is held.
+
+   Under the tab loader it waits, as rise-in does (route-loader.tsx sets
+   data-turning). Reduced motion: no fade, no breathing, no ping. The wash
+   becomes a still 10 % tint with its edge; a mark that breathes must bring a
+   still look of its own, since this block only stops it. */
+.live-wash {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: inherit;
+  --live-tone: var(--color-emerald-500);
+  box-shadow: inset 2px 0 0 var(--live-tone);
+  animation: live-wash 2400ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+.live-wash[data-tone="invest"] { --live-tone: var(--color-blue-500); }
+.live-wash[data-tone="setting"] { --live-tone: var(--color-amber-500); }
+.live-wash[data-tone="quiet"] { --live-tone: var(--muted-foreground); }
+@keyframes live-wash {
+  from { background-color: color-mix(in oklab, var(--live-tone) 14%, transparent); }
+}
+:root[data-turning] .live-wash {
+  animation-play-state: paused;
+}
+
+@keyframes live-breathe {
+  50% { opacity: 0.35; }
+}
+.live-breathe {
+  animation: live-breathe 1.2s ease-in-out infinite;
+}
+
+@keyframes live-ping {
+  from { transform: scale(1); opacity: 0.5; }
+  to { transform: scale(2.6); opacity: 0; }
+}
+.live-ping {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: live-ping 900ms ease-out 1 forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-wash {
+    animation: none;
+    background-color: color-mix(in oklab, var(--live-tone) 10%, transparent);
+  }
+  .live-breathe {
+    animation: none;
+  }
+  .live-ping {
+    display: none;
+  }
+}
+
 /* THE SCENE COMES LAST: the frame's loop starts only once the frame has fully
    arrived (data-scene, landing.tsx), and fades in over its rest frame once it is
    really playing (data-app-loop). */

@@ -66,7 +66,7 @@ export function guardedOpenChange(onOpenChange: (open: boolean) => void): (open:
 
 /** components/ui/dialog.tsx's DialogContent classes, then the full-screen-below-sm shape. */
 const CONTENT = cn(
-  "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+  "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 motion-safe:data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 motion-safe:data-closed:zoom-out-95",
   // grid-cols-[minmax(0,1fr)]: one column that may shrink below its content. An auto column grows to the
   // widest thing inside, and the tab strip below md is one unbroken row, so on a phone it pushed the whole
   // dialog past the screen's edge.

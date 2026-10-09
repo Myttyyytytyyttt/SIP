@@ -18,9 +18,10 @@ function Progress({
       )}
       {...props}
     >
+      {/* The fill slides to a new value, and simply stands at it under reduced motion (10-09). */}
       <ProgressPrimitive.Indicator
         data-slot="progress-indicator"
-        className="size-full flex-1 bg-primary transition-all"
+        className="size-full flex-1 bg-primary transition-all motion-reduce:transition-none"
         style={{ transform: `translateX(-${100 - (value || 0)}%)` }}
       />
     </ProgressPrimitive.Root>

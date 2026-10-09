@@ -54,3 +54,12 @@ describe("the import's ladder", () => {
     expect(alone).not.toContain(PROGRESS_COPY.consent);
   });
 });
+
+describe("the step in flight", () => {
+  it("spins only for whoever has not asked for less motion; the bold current step says it either way (10-09)", () => {
+    const html = render({ phase: "running", kind: "rule", step: "sending", built: null });
+    expect(html).toMatch(/<svg[^>]*class="[^"]*motion-safe:animate-spin[^"]*"/);
+    expect(html).not.toMatch(/class="[^"]*(?<!motion-safe:)animate-spin/);
+    expect(html).toContain(`font-medium text-foreground">`);
+  });
+});

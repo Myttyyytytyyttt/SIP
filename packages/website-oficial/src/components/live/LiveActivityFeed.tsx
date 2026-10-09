@@ -27,6 +27,7 @@ import { useState } from "react";
 
 import { LiveActivityRow } from "@/components/live/LiveActivityRow";
 import { secondsUntil } from "@/components/live/LiveStates";
+import { keyBySignature } from "@/components/live/row-keys";
 import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
 import { relativeDayLabel } from "@/lib/format";
@@ -70,6 +71,7 @@ function Days({
   readonly ownsTabStop: boolean;
 }) {
   let position = 0;
+  const keyOf = keyBySignature();
   return (
     <>
       {groupByDay(rows).map(([day, dayRows]) => (
@@ -77,12 +79,14 @@ function Days({
           <div className="sticky top-0 z-10 bg-background px-4 py-2 text-xs text-muted-foreground">
             {day === "" ? ACTIVITY_COPY.timeUnknown : ACTIVITY_COPY.dayHeading(relativeDayLabel(day, now))}
           </div>
-          {dayRows.map((row, within) => {
+          {dayRows.map((row) => {
             const first = ownsTabStop && position === 0;
             position += 1;
             // A transaction can hold two events (two settlements in one settle),
-            // so the signature alone is not a key.
-            return <LiveActivityRow key={`${row.signature}-${within}-${row.event.kind}`} row={row} labelOf={labelOf} maxContribution={maxContribution} first={first} />;
+            // so the signature alone is not a key — and a place in the day is
+            // not one either: a new row above would shift every key under it
+            // (live/row-keys.ts).
+            return <LiveActivityRow key={keyOf(row.signature)} row={row} labelOf={labelOf} maxContribution={maxContribution} first={first} />;
           })}
         </div>
       ))}

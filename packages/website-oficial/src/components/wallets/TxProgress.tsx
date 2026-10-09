@@ -90,7 +90,7 @@ export function TxProgress({
       <div role="status" aria-live="polite" data-progress={progress.step} className="space-y-1 rounded-md border px-3 py-2 text-xs">
         {steps.map((step, index) => (
           <div key={step} className={cn("flex items-center gap-2", index === current ? "font-medium text-foreground" : "text-muted-foreground", index > current && "opacity-60")}>
-            {index < current ? <Check className="size-3.5" aria-hidden /> : index === current ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <span className="size-3.5" aria-hidden />}
+            {index < current ? <Check className="size-3.5" aria-hidden /> : index === current ? <LoaderCircle className="size-3.5 motion-safe:animate-spin" aria-hidden /> : <span className="size-3.5" aria-hidden />}
             {PROGRESS_COPY[step]}
           </div>
         ))}
