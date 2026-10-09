@@ -26,11 +26,11 @@
  *
  * THE HEADING SAYS WHAT THE ROWS ARE (10-09, G14): "In progress" while one is
  * under way, "Waiting" when every one rests — and NOTHING once no step stands
- * (review, 10-09): over the done rows alone, or the held card's "Nothing in
- * progress right now", either word would be false. It closes then (a Reveal,
- * in step with the idle line, so the card swaps one line for the other). It
- * is aria-hidden: the rows are what the region speaks, and a heading that
- * flips is not news.
+ * (review, 10-09): over the done rows alone, the held card's "Nothing in
+ * progress right now", or steps the page can no longer confirm, either word
+ * would be false. It closes then (a Reveal, in step with the idle line, so the
+ * card swaps one line for the other). It is aria-hidden: the rows are what
+ * the region speaks, and a heading that flips is not news.
  *
  * HOW A STEP ENDS (10-09). The rows are drawn from a read that landed WHOLE
  * (use-whole-read.ts): its snapshot and its history in one commit, so a step
@@ -39,15 +39,22 @@
  *    a buy, no older than the step's own clock — so its row stays DONE_HOLD_MS as
  *    "Converted to USDC · 14:32 UTC" / "Bought SPYx and ANTHROPIC · 14:33 UTC"
  *    (the time it landed, its day too when not today), with a check in the
- *    step's tone. aria-hidden: the arrival is the feed's news, not this
- *    region's (the announcer, step A5, speaks it);
+ *    step's tone. aria-hidden when the announcer spoke its transaction (step
+ *    A5): the arrival is the feed's news, not this region's. When it did not
+ *    — the arrival is not marked on the history's unreadable→readable edge
+ *    (use-arrivals.ts) — the row says it itself (toldBy, review 10-09): a
+ *    step seen done must not go unsaid to a screen reader;
  *  * otherwise it simply closes (Reveal.tsx), over its last words. When unsure,
  *    nothing is claimed done.
  * A read whose history could not be read commits its snapshot alone, and
  * nothing is judged off it (plan B5): the rows stay as the last whole read drew
- * them, and a step that newer snapshot no longer has as under way keeps its
- * row, its loader standing still — the page is no longer sure it turns — until
- * a read lands whole and says what became of it.
+ * them. A step that newer snapshot no longer has as under way keeps its row,
+ * DRAWN RESTING (review, 10-09: pendingViewOf) — the still clock, "Not
+ * confirmed on this page yet", no "In progress" over it and no turning mark
+ * beside Next investment — until a read lands whole and says what became of
+ * it. No timer: once nothing claims the step is under way, holding its row is
+ * honest. The track itself keeps the whole read's lines, so what a whole read
+ * ends is still judged against them.
  *
  * THE REGION IS ALWAYS THERE, EMPTY OR NOT. A polite live region announces what
  * changes inside it, which needs it to exist before the change; it holds
@@ -107,6 +114,12 @@ export interface ShownLine extends Omit<PendingLine, "kind"> {
   readonly kind: RowKind;
   /** Heard, not yet read: no step stands behind it. Its words are not read out (Row). */
   readonly heard?: true;
+  /**
+   * Under way in the whole read, and not in the newer snapshot a read committed
+   * without its history: drawn resting, its line saying the page cannot
+   * confirm it (unconfirmedOf). Never in the track, only in what is drawn.
+   */
+  readonly unconfirmed?: true;
 }
 
 /** A step that just finished, as its row says it while it is held. */
@@ -116,12 +129,22 @@ export interface DoneLine {
   readonly title: string;
   readonly sub: string;
   readonly tone: Tone;
+  /** The landed transactions that ended it: whether the announcer spoke them decides who says it (toldBy). */
+  readonly signatures: readonly string[];
 }
 
 /** One row as the list draws it: a step, or a step just done — either one on its way out. */
 export type PendingRow =
   | { readonly show: "line"; readonly key: string; readonly kind: RowKind; readonly line: ShownLine; readonly still: boolean; readonly leaving: boolean }
-  | { readonly show: "done"; readonly key: string; readonly kind: PendingKind; readonly done: DoneLine; readonly leaving: boolean };
+  | {
+      readonly show: "done";
+      readonly key: string;
+      readonly kind: PendingKind;
+      readonly done: DoneLine;
+      readonly leaving: boolean;
+      /** False when the announcer did not speak its transaction, so the row says it (toldBy); spoken elsewhere when not given. */
+      readonly told?: boolean;
+    };
 
 /** What every copy of the rows draws. */
 export interface PendingView {
@@ -175,9 +198,10 @@ export function doneOf(step: PendingStep, key: string, after: LiveDashboard, bef
   if (landed.length === 0) return null;
   const newest = landed.reduce((best, row) => (row.slot > best.slot ? row : best));
   const when = newest.blockTime === null ? null : whenLabel(newest.blockTime * 1_000, after.nowMs);
+  const signatures = landed.map((row) => row.signature);
   if (step.kind === "converting") {
     const title = when === null ? LIVE_COPY.pendingDone.converted : LIVE_COPY.pendingDone.convertedAt(when);
-    return { key, kind: step.kind, title, sub: LIVE_COPY.pendingDone.convertedSub, tone: "quiet" };
+    return { key, kind: step.kind, title, sub: LIVE_COPY.pendingDone.convertedSub, tone: "quiet", signatures };
   }
   // Every landed row is a buy here, so `names` is never empty: namesOf never falls back to "your basket".
   const names: string[] = [];
@@ -188,7 +212,7 @@ export function doneOf(step: PendingStep, key: string, after: LiveDashboard, bef
     if (!names.includes(symbol)) names.push(symbol);
   }
   const title = when === null ? LIVE_COPY.pendingDone.bought(namesOf(names)) : LIVE_COPY.pendingDone.boughtAt(namesOf(names), when);
-  return { key, kind: step.kind, title, sub: LIVE_COPY.pendingDone.boughtSub, tone: "invest" };
+  return { key, kind: step.kind, title, sub: LIVE_COPY.pendingDone.boughtSub, tone: "invest", signatures };
 }
 
 type Leaving = { readonly show: "line"; readonly line: ShownLine } | { readonly show: "done"; readonly done: DoneLine };
@@ -313,12 +337,56 @@ export function nextDue(track: PendingTrack): number | null {
 /**
  * THE STEPS THE PAGE IS NO LONGER SURE OF: under way in the whole read the
  * rows are drawn from, and not under way in the newer snapshot a read
- * committed without its history (use-whole-read.ts). Their loader stands still
- * until a read lands whole. Empty while the newest read is the whole one.
+ * committed without its history (use-whole-read.ts). They are drawn resting
+ * (unconfirmedOf) until a read lands whole. Empty while the newest read is the
+ * whole one.
  */
 export function stillOf(drawn: readonly ShownLine[], latest: readonly ShownLine[]): ReadonlySet<string> {
   const turning = new Set(latest.filter((line) => line.active).map((line) => line.key));
   return new Set(drawn.filter((line) => line.active && !turning.has(line.key)).map((line) => line.key));
+}
+
+/**
+ * A STEP THE PAGE CAN NO LONGER CONFIRM, AS IT IS DRAWN (review, 10-09). The
+ * hold itself is right — a read with no history can neither time a new step
+ * nor say how an old one ended — but its words were not: the line went on
+ * saying "Converting SOL to USDC" under "In progress", beside a turning mark at
+ * Next investment, for as long as the history failed, with nothing current
+ * behind it. Now it rests: the still clock of a wait (the convention a change
+ * heard uses while behind, heard-lines.ts), grey, and the doubt in its line.
+ * Its title stays the step's name; nothing says it ended either.
+ */
+export function unconfirmedOf(line: ShownLine): ShownLine {
+  return { ...line, active: false, rest: "slow", sub: LIVE_COPY.pendingUnconfirmed, unconfirmed: true };
+}
+
+/**
+ * WHAT EVERY COPY DRAWS FROM THE TRACK: its lines — each one the newest
+ * snapshot no longer has under way drawn resting (unconfirmedOf) — the rows
+ * made from them, and whether the card is held. Only the drawing changes: the
+ * track keeps the whole read's own lines, so what the next whole read ends is
+ * judged against them (advancePending, doneOf).
+ */
+export function pendingViewOf(track: PendingTrack, latest: readonly ShownLine[]): PendingView {
+  const still = stillOf(track.lines, latest);
+  const lines = still.size === 0 ? track.lines : track.lines.map((line) => (still.has(line.key) ? unconfirmedOf(line) : line));
+  return { lines, rows: pendingRowsOf({ ...track, lines }, still), held: track.cardUntil !== null };
+}
+
+/**
+ * WHO SAYS A STEP IS DONE (review, 10-09). A done row is aria-hidden on the
+ * premise that the announcer spoke its transaction (use-arrivals.ts). That
+ * premise fails on the history's unreadable→readable edge, where no arrival is
+ * marked: the row was drawn done and nobody said it. So a done row whose
+ * transactions are not among `arrived` is `told: false`, and says it itself
+ * (Row). The same view back when no row is done.
+ */
+export function toldBy(view: PendingView, arrived: ReadonlySet<string>): PendingView {
+  if (!view.rows.some((row) => row.show === "done")) return view;
+  return {
+    ...view,
+    rows: view.rows.map((row) => (row.show === "done" ? { ...row, told: row.done.signatures.some((signature) => arrived.has(signature)) } : row)),
+  };
 }
 
 const RANK: Readonly<Record<RowKind, number>> = { measuring: 0, vault: 1, converting: 2, buying: 3 };
@@ -345,11 +413,11 @@ export function pendingRowsOf(track: PendingTrack, still: ReadonlySet<string>): 
 /**
  * THE TRACK, ONCE FOR THE PAGE (LiveBody). `data` is the whole read and
  * `steps`/`lines` its steps, `heard` what Solana said changed and no step
- * draws yet; `latest` is the newest snapshot's lines, for the loaders the page
- * is no longer sure of. A new whole read, or a change in what was heard, is
- * worked out during the render, so a step that ended is drawn done or leaving
- * in the very frame its line would otherwise vanish from; one timer lets go of
- * whatever is due first.
+ * draws yet; `latest` is the newest snapshot's lines, for the steps the page
+ * can no longer confirm (pendingViewOf). A new whole read, or a change in
+ * what was heard, is worked out during the render, so a step that ended is
+ * drawn done or leaving in the very frame its line would otherwise vanish
+ * from; one timer lets go of whatever is due first.
  */
 export function usePendingView(input: PendingInput & { readonly latest: readonly PendingLine[] }): PendingView {
   const [track, setTrack] = useState<PendingTrack>(() => startTrack(input));
@@ -366,8 +434,7 @@ export function usePendingView(input: PendingInput & { readonly latest: readonly
   }, [due]);
 
   // A heard line turns for as long as it is heard: it is in the newest as well.
-  const latest = withHeard(input.latest, input.heard ?? NO_LINES);
-  return { lines: current.lines, rows: pendingRowsOf(current, stillOf(current.lines, latest)), held: current.cardUntil !== null };
+  return pendingViewOf(current, withHeard(input.latest, input.heard ?? NO_LINES));
 }
 
 /** The mark a step wears: under way, resting on a slow keeper, or held for a reason the row states. */
@@ -382,19 +449,21 @@ const toneOf = (line: ShownLine): Tone => (line.active && line.kind === "buying"
 /**
  * The heading over the rows: under way if one is, waiting if every step rests,
  * and none with no step at all — done rows alone, or a card held up over
- * nothing, are neither in progress nor waiting.
+ * nothing, are neither in progress nor waiting. A step the page can no longer
+ * confirm (unconfirmedOf) is neither either: over such rows alone, nothing.
  */
 export function headingOf(lines: readonly ShownLine[]): string | null {
-  if (lines.length === 0) return null;
-  return lines.some((line) => line.active) ? LIVE_COPY.pendingHeading.active : LIVE_COPY.pendingHeading.waiting;
+  const known = lines.filter((line) => line.unconfirmed !== true);
+  if (known.length === 0) return null;
+  return known.some((line) => line.active) ? LIVE_COPY.pendingHeading.active : LIVE_COPY.pendingHeading.waiting;
 }
 
 function Row({ row }: { readonly row: PendingRow }) {
   if (row.show === "done") {
     const { done } = row;
     return (
-      // Not read out: the feed's own row is the news (the announcer, step A5).
-      <div className="flex w-full items-start gap-3 px-4 py-2.5" data-pending-done={done.kind} aria-hidden>
+      // Not read out when the announcer spoke its transaction (step A5): the feed's own row is the news. When it did not, the region says it (toldBy).
+      <div className="flex w-full items-start gap-3 px-4 py-2.5" data-pending-done={done.kind} {...(row.told === false ? {} : { "aria-hidden": true })}>
         <WorkMark state="done" tone={done.tone} />
         <span className="min-w-0 flex-1">
           {/* Wraps rather than truncating: at the lg column's 263 px the time at its end is what a cut would lose. */}

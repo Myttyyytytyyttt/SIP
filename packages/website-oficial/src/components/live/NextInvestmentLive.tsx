@@ -82,7 +82,12 @@ export function nextMarkOf(work: NextWork | null, gate: NextInvestmentView["gate
 const underWay = (rows: readonly PendingRow[], kind: "converting" | "buying") =>
   rows.find((row): row is Extract<PendingRow, { show: "line" }> => row.show === "line" && !row.leaving && row.kind === kind && row.line.active);
 
-/** The work beside the label: a buy under way before a conversion, since the buy is the investment itself. */
+/**
+ * The work beside the label: a buy under way before a conversion, since the buy
+ * is the investment itself. A step the page can no longer confirm is drawn
+ * resting (LivePending.tsx unconfirmedOf), so it is no work under way here
+ * either, and the mark falls back to the newest data's gate.
+ */
 export function nextWorkOf(rows: readonly PendingRow[]): NextWork | null {
   const row = underWay(rows, "buying") ?? underWay(rows, "converting");
   return row === undefined ? null : { kind: row.kind === "buying" ? "buying" : "converting", still: row.still };

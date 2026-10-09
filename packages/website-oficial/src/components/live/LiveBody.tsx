@@ -33,8 +33,8 @@
  * use-whole-read.ts): a read commits its snapshot and its history together
  * and is drawn at once. A later read that could not read its history commits
  * its snapshot alone; the steps over the feed then stay as the last whole
- * read drew them, their loaders still where that snapshot no longer has them
- * under way (LivePending.tsx).
+ * read drew them, drawn resting — "not confirmed on this page yet" — where
+ * that snapshot no longer has them under way (LivePending.tsx pendingViewOf).
  *
  * AND WHAT SOLANA SAID CHANGED LEADS THEM BEFORE ANY UPDATE HAS (plan B3,
  * heard-lines.ts): "Activity seen on Trading wallet 1 · checking" from the
@@ -61,7 +61,11 @@
  * (use-live-dashboard.ts LiveLiveness) — whether the chain's push is live, a
  * check is out, a change was heard, when the last update landed, when the next
  * check is due, and from when a Retry reads at once. The header's dot says it
- * (LiveHeartbeat.tsx), and every Retry on the page opens at that one moment.
+ * (LiveHeartbeat.tsx), and every Retry on the page opens at that one moment —
+ * or at the later retry-after the server named, the snapshot's or the
+ * history's, as Check now does. Whether what was heard is BEHIND — not on the
+ * page, and no update known to be bringing it — is worked out once here too,
+ * so the dot and the rows say the same of one change.
  * And whether a newer version is served (use-update-available.ts): asked here,
  * where it is drawn, so the sample never asks.
  *
@@ -88,7 +92,7 @@ import { FeedSkeleton } from "@/components/live/FeedSkeleton";
 import { LiveAnnouncer } from "@/components/live/LiveAnnouncer";
 import { LiveHeartbeat } from "@/components/live/LiveHeartbeat";
 import { LoadOlderButton } from "@/components/live/LoadOlderButton";
-import { PendingRows, usePendingView } from "@/components/live/LivePending";
+import { PendingRows, toldBy, usePendingView } from "@/components/live/LivePending";
 import { Reveal } from "@/components/live/Reveal";
 import { heardLinesOf } from "@/components/live/heard-lines";
 import { useWriteJudge } from "@/components/live/last-write-context";
@@ -230,8 +234,12 @@ export function LiveBody({
   // AND BEFORE ANY OF THAT, WHAT SOLANA SAID CHANGED (heard-lines.ts): from the
   // newest snapshot and the store's `heard`, under the keys the steps will
   // take. "Behind" while the updates fail — the stale note, or the history
-  // unreadable — when no update is known to be bringing it.
-  const heard = heardLinesOf({ heard: live.heard, data, lines, behind: stale !== null || activityUnreadable, signing: sync?.state === "syncing" });
+  // unreadable — when no update is known to be bringing it. ONE VALUE for the
+  // rows and the header's dot (review, 10-09): the dot used to breathe
+  // "Change seen on Solana · updating" through a history outage while these
+  // rows said the same change was "not on this page yet".
+  const heardBehind = stale !== null || activityUnreadable;
+  const heard = heardLinesOf({ heard: live.heard, data, lines, behind: heardBehind, signing: sync?.state === "syncing" });
   const pending = usePendingView({ data: shown.data, steps, lines, heard, latest });
 
   // THE STRIP, ONLY ONCE THERE IS ONE (SavingsStrip's own null rule). Grown in
@@ -243,6 +251,9 @@ export function LiveBody({
   // WHAT JUST ARRIVED, once for every surface. From the newest commit: rows
   // change only with a read's history, so there is no half state to wait out.
   const arrivals = useArrivals({ key: pensionKey, data, activityPending, activityUnreadable });
+  // The rows every copy draws, each done row knowing whether the announcer spoke
+  // its transaction — when it did not, the row says it (LivePending.tsx toldBy).
+  const pendingView = toldBy(pending, arrivals.arrived);
   const pulse = { pill: heroPillOf(arrivals.saving, page.trades, data.nowMs), shown: pillShown(arrivals.saving, data.nowMs) };
   // The rule card's: the steps as the rows draw them, and the same arrivals.
   const rulePulse = rulePulseOf({ rows: pending.rows, history: data.rows, arrived: arrivals.arrived });
@@ -264,6 +275,13 @@ export function LiveBody({
   // good or failed. One for the page, so the aside's banner, the sheet's,
   // /activity's and the dot's Check now count down together.
   const readyAt = live.refreshReadyAt;
+  // The later retry-after the server named, the snapshot's (stale) or the
+  // history's: refresh() waits for neither, so no Retry opens before it — a
+  // press would be refused, and deepen the backoff (LiveHeartbeat.tsx
+  // checkEnableAt, review 10-09). The dot keeps the history's own: it also
+  // says whether the schedule runs at its steady cadence (pushOffCadenceMs).
+  const staleRetryAt = stale?.retryAt ?? null;
+  const retryAt = staleRetryAt === null ? activityRetryAt : activityRetryAt === null ? staleRetryAt : Math.max(staleRetryAt, activityRetryAt);
   // A newer version served than this tab runs: the dot's ring and its reload.
   const updateAvailable = useUpdateAvailable();
 
@@ -309,9 +327,9 @@ export function LiveBody({
       live={{
         below: lead === null ? null : <LeadNotes wallet={lead} />,
         list: <WalletList wallets={data.wallets} usdcRawPerSol={rawFrom(data.prices?.usdcRawPerSol)} />,
-        banner: activityUnreadable ? <FeedBanner onRetry={onRefresh} retryAt={activityRetryAt} readyAt={readyAt} /> : null,
+        banner: activityUnreadable ? <FeedBanner onRetry={onRefresh} retryAt={retryAt} readyAt={readyAt} /> : null,
         // On /activity the page's own list announces the steps; the column only shows them.
-        pending: <PendingRows lines={pending.lines} view={pending} announce={view !== "activity"} />,
+        pending: <PendingRows lines={pendingView.lines} view={pendingView} announce={view !== "activity"} />,
         hidden: <HiddenRows events={page.hidden ?? []} upkeep={data.hiddenUpkeep} dust={data.hiddenDust} now={page.now} id={id} />,
         // A page whose every transaction was upkeep is not an empty history.
         empty: emptyNote ?? (data.hiddenRows.length > 0 ? ACTIVITY_COPY.onlyHidden : ACTIVITY_COPY.empty),
@@ -355,7 +373,15 @@ export function LiveBody({
         // sample's too — is not edited for it.
         account={
           <>
-            <LiveHeartbeat nowMs={data.nowMs} stale={stale} live={live} activityRetryAt={activityRetryAt} updateAvailable={updateAvailable} onCheck={onRefresh} />
+            <LiveHeartbeat
+              nowMs={data.nowMs}
+              stale={stale}
+              live={live}
+              activityRetryAt={activityRetryAt}
+              heardBehind={heardBehind}
+              updateAvailable={updateAvailable}
+              onCheck={onRefresh}
+            />
             {account}
           </>
         }
@@ -378,11 +404,11 @@ export function LiveBody({
             onLoadOlder={onLoadOlder}
             onRetryActivity={onRefresh}
             activityUnreadable={activityUnreadable}
-            activityRetryAt={activityRetryAt}
+            activityRetryAt={retryAt}
             countsUnknown={countsUnknown}
             nextStep={nextStep}
             notes={notes}
-            pending={pending}
+            pending={pendingView}
             arrived={arrivals.arrived}
             {...(emptyNote === undefined ? {} : { emptyNote })}
           />
@@ -395,7 +421,7 @@ export function LiveBody({
                 {/* BELOW lg THE ACTIVITY COLUMN IS IN A CLOSED SHEET, so the steps
                     on their way lead the page instead; from lg up the column
                     shows them and this copy is not displayed (LivePending.tsx). */}
-                <PendingRows lines={pending.lines} view={pending} variant="card" className="lg:hidden" />
+                <PendingRows lines={pendingView.lines} view={pendingView} variant="card" className="lg:hidden" />
                 {/* The buying approval the setup promised, once the first savings have landed. */}
                 <LiveStartBuying data={data} pensionKey={pensionKey} onRefresh={onRefresh} sync={sync} />
               </>

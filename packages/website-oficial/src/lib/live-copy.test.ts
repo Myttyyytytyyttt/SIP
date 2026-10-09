@@ -239,6 +239,7 @@ describe("the steps' and the setup's words", () => {
   it("head the rows by what they are: under way, or waiting", () => {
     expect(LIVE_COPY.pendingHeading).toEqual({ active: "In progress", waiting: "Waiting" });
     expect(LIVE_COPY.pendingIdle).toBe("Nothing in progress right now");
+    expect(LIVE_COPY.pendingUnconfirmed).toBe("Not confirmed on this page yet");
     expect(LIVE_COPY.pendingDone.bought("SPYx and ANTHROPIC")).toBe("Bought SPYx and ANTHROPIC");
   });
 
@@ -252,6 +253,7 @@ describe("the steps' and the setup's words", () => {
     const words = [
       ...Object.values(LIVE_COPY.pendingHeading),
       LIVE_COPY.pendingIdle,
+      LIVE_COPY.pendingUnconfirmed,
       LIVE_COPY.pendingDone.converted,
       LIVE_COPY.pendingDone.convertedAt("14:32 UTC"),
       LIVE_COPY.pendingDone.convertedSub,

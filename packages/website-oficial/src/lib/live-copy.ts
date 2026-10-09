@@ -207,6 +207,14 @@ export const LIVE_COPY = {
   /** The below-lg card, held up for a minute after its last step ended, so one cycle does not push the page three times. */
   pendingIdle: "Nothing in progress right now",
   /**
+   * UNDER A STEP THE PAGE CAN NO LONGER CONFIRM (review, 10-09): under way in
+   * the last update that brought the history, and not in a newer one that
+   * could not (use-whole-read.ts). The row stays, resting, until an update
+   * says what became of it; nothing claims it is still in progress, nor that
+   * it ended — the same doubt as a change seen and "not on this page yet".
+   */
+  pendingUnconfirmed: "Not confirmed on this page yet",
+  /**
    * WHAT SOLANA SAID CHANGED, BEFORE ANY UPDATE HAS BROUGHT IT (`live.heard`,
    * plan B3): a trading wallet's first activity since its last saving, or —
    * when it names no trading wallet — the vault's own. It leads the rows from

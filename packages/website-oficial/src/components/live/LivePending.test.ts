@@ -1,7 +1,9 @@
 // How a step over the feed ends, and how the rows say what they are
 // (LivePending.tsx, 10-09): "done" only once the transaction that did it is on
 // the page, an honest heading, the below-lg card held up for a minute, and every
-// copy drawn from one track.
+// copy drawn from one track. And from the review (10-09): a step the newest
+// snapshot no longer has under way rests — no "In progress" with nothing behind
+// it — and a done row the announcer did not speak says itself.
 
 import { ANTHROPIC_MINT, SPYX_MINT, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
 import { createElement } from "react";
@@ -17,19 +19,25 @@ import {
   headingOf,
   nextDue,
   pendingRowsOf,
+  pendingViewOf,
   releasePending,
   startTrack,
   stillOf,
+  toldBy,
+  unconfirmedOf,
   viewOf,
   type PendingTrack,
 } from "@/components/live/LivePending";
+import { nextWorkOf, rulePulseOf } from "@/components/live/NextInvestmentLive";
 import { REVEAL_MS } from "@/components/live/Reveal";
+import { arrivalsOf, baseOf, type ArrivalFrame } from "@/components/live/use-arrivals";
 import { LIVE_COPY, PENDING_COPY } from "@/lib/live-copy";
 import { toLiveDashboard } from "@/lib/live-model";
 import { pendingLines, pendingSteps, type PendingLine, type PendingStep } from "@/lib/live-pending";
 import type { LiveDashboard, VaultEventJson } from "@/lib/live-types";
 
 import { NOW_MS, liveActivity, liveEntry, liveSnapshot, seconds, signature, tokenAccount } from "../../../test/fixtures/live-dashboard";
+import { liveRegions } from "../../../test/live-regions";
 
 const wrapped = { kind: "wrapped", lamports: "18000000" } as VaultEventJson;
 const converted = { kind: "converted", lamportsSpent: "18000000", usdcReceivedRaw: "1800000" } as VaultEventJson;
@@ -68,6 +76,7 @@ describe("doneOf: a step ends as done only on the transaction that did it", () =
       title: LIVE_COPY.pendingDone.convertedAt("12:00 UTC"),
       sub: LIVE_COPY.pendingDone.convertedSub,
       tone: "quiet",
+      signatures: [signature(2)],
     });
   });
 
@@ -118,7 +127,14 @@ describe("doneOf: a buy names only the legs that landed", () => {
 
   it("says only SPYx when the ANTHROPIC leg did not land", () => {
     const done = bought(liveEntry(signature(5), seconds(NOW_MS + 10_000), [invested(SPYX_MINT, "SPYx")], 4_100));
-    expect(done).toEqual({ key: "buying", kind: "buying", title: LIVE_COPY.pendingDone.boughtAt("SPYx", "12:00 UTC"), sub: LIVE_COPY.pendingDone.boughtSub, tone: "invest" });
+    expect(done).toEqual({
+      key: "buying",
+      kind: "buying",
+      title: LIVE_COPY.pendingDone.boughtAt("SPYx", "12:00 UTC"),
+      sub: LIVE_COPY.pendingDone.boughtSub,
+      tone: "invest",
+      signatures: [signature(5)],
+    });
   });
 
   it("names both legs, in the order they landed, when both did", () => {
@@ -198,6 +214,130 @@ describe("stillOf: the loaders the page is no longer sure of", () => {
 
   it("stills nothing once the read has settled, or while the snapshot agrees", () => {
     expect(stillOf([active], [active]).size).toBe(0);
+  });
+});
+
+/**
+ * A STEP THE PAGE CAN NO LONGER CONFIRM (review, 10-09). The whole read had SOL
+ * converting; every read since committed its snapshot alone — the history
+ * refused — and that snapshot no longer has it under way. The row stays (a
+ * read with no history cannot say how it ended), but nothing says it is in
+ * progress: the still clock, grey, "Not confirmed on this page yet", and no
+ * turning mark beside Next investment — for as long as the history fails.
+ */
+describe("a step the newest snapshot no longer has under way", () => {
+  /** The whole read the rows are drawn from: the conversion under way. */
+  const held = (): PendingTrack => startTrack(inputOf(converting()));
+  /** The newest snapshot, its history unreadable: the wSOL is gone. */
+  const latest = (): PendingLine[] => {
+    const alone = vault("0", [WRAP], NOW_MS + 20_000);
+    return pendingLines(pendingSteps(alone), alone.nowMs);
+  };
+
+  it("keeps its row, drawn resting: no 'In progress', no loader, the doubt in its line and the step's own name", () => {
+    const view = pendingViewOf(held(), latest());
+    expect(view.lines).toMatchObject([{ key: "converting", active: false, rest: "slow", sub: LIVE_COPY.pendingUnconfirmed, unconfirmed: true }]);
+    expect(view.rows).toMatchObject([{ show: "line", key: "converting", still: true, leaving: false }]);
+    expect(headingOf(view.lines)).toBeNull();
+
+    const out = renderToStaticMarkup(createElement(PendingRows, { lines: view.lines, view }));
+    expect(out).not.toContain(LIVE_COPY.pendingHeading.active);
+    expect(out).not.toContain(LIVE_COPY.pendingHeading.waiting);
+    expect(out).not.toContain("data-work-loader");
+    expect(out).not.toContain("animate-spin");
+    expect(out).toContain('data-work-mark="slow"');
+    expect(out).toContain('data-state="waiting"');
+    expect(out).toContain(PENDING_COPY.converting);
+    expect(out).toContain(LIVE_COPY.pendingUnconfirmed);
+    // Nothing claims it ended either.
+    expect(out).not.toContain("data-pending-done");
+  });
+
+  it("is no work under way beside Next investment, nor a buy beside Last investment", () => {
+    const view = pendingViewOf(held(), latest());
+    expect(nextWorkOf(view.rows)).toBeNull();
+    expect(rulePulseOf({ rows: view.rows, history: [], arrived: new Set() })).toMatchObject({ work: null, buying: null });
+  });
+
+  it("changes only what is drawn: the track keeps the whole read's line, so the next whole read still says how it ended", () => {
+    const track = held();
+    pendingViewOf(track, latest());
+    expect(track.lines[0]).toMatchObject({ key: "converting", active: true });
+    const whole = vault("0", [liveEntry(signature(2), seconds(NOW_MS + 20_000), [converted]), WRAP], NOW_MS + 40_000);
+    expect(advancePending(track, inputOf(whole), 1_000).done.get("converting")?.row.title).toBe(LIVE_COPY.pendingDone.convertedAt("12:00 UTC"));
+  });
+
+  it("draws the whole read's lines as they are while the newest snapshot agrees", () => {
+    const track = held();
+    const view = pendingViewOf(track, track.lines);
+    expect(view.lines).toBe(track.lines);
+    expect(headingOf(view.lines)).toBe(LIVE_COPY.pendingHeading.active);
+    expect(nextWorkOf(view.rows)).toEqual({ kind: "converting", still: false });
+  });
+
+  it("heads the rows by the steps the page can vouch for", () => {
+    const converting: PendingLine = { key: "converting", kind: "converting", active: true, rest: null, title: PENDING_COPY.converting, sub: "", amount: "$1.80", amountSpoken: "" };
+    const buying = (active: boolean): PendingLine => ({ key: "buying", kind: "buying", active, rest: active ? null : "paused", title: "", sub: "", amount: "$5.00", amountSpoken: null });
+    expect(headingOf([unconfirmedOf(converting), buying(false)])).toBe(LIVE_COPY.pendingHeading.waiting);
+    expect(headingOf([unconfirmedOf(converting), buying(true)])).toBe(LIVE_COPY.pendingHeading.active);
+    expect(headingOf([unconfirmedOf(converting)])).toBeNull();
+  });
+});
+
+/**
+ * WHO SAYS A STEP IS DONE (review, 10-09). The done row is out of what the
+ * region reads because the announcer speaks its transaction — except where the
+ * announcer marks no arrival: the history coming back from unreadable. There
+ * the row was drawn done and nobody said it; now the row says it.
+ */
+describe("a done row, and who says it", () => {
+  const CONVERT = liveEntry(signature(2), seconds(NOW_MS + 20_000), [converted], 4_100);
+  const frame = (data: LiveDashboard, activityUnreadable = false): ArrivalFrame => ({ key: "owner", data, activityPending: false, activityUnreadable });
+  /** The done row as drawn, with the signatures the announcer spoke. */
+  const drawnAfter = (before: LiveDashboard, after: LiveDashboard, arrived: readonly string[]) => {
+    const track = advancePending(startTrack(inputOf(before)), inputOf(after), 1_000);
+    const view = toldBy(pendingViewOf(track, []), new Set(arrived));
+    return { view, out: renderToStaticMarkup(createElement(PendingRows, { lines: view.lines, view })) };
+  };
+
+  it("leaves it to the announcer when the announcer spoke its transaction: one arrival, said once", () => {
+    const before = converting();
+    const after = vault("0", [CONVERT, WRAP], NOW_MS + 30_000);
+    const arrived = arrivalsOf(baseOf(frame(before)), frame(after)).arrived.map((row) => row.signature);
+    expect(arrived).toEqual([signature(2)]);
+    const { view, out } = drawnAfter(before, after, arrived);
+    expect(view.rows).toMatchObject([{ show: "done", key: "converting", told: true }]);
+    expect(out).toMatch(/<div class="[^"]*" data-pending-done="converting" aria-hidden="true">/);
+  });
+
+  it("says it itself when the announcer did not: read N, a read with the history unreadable, then a whole one", () => {
+    const n = converting();
+    // The conversion lands while the history cannot be read: the snapshot alone, the rows kept.
+    const n1 = vault("0", [WRAP], NOW_MS + 20_000);
+    const n2 = vault("0", [CONVERT, WRAP], NOW_MS + 40_000);
+    const first = arrivalsOf(baseOf(frame(n)), frame(n1, true));
+    const second = arrivalsOf(first.base, frame(n2));
+    // The history coming back into view marks nothing (use-arrivals.ts) — so the announcer is silent.
+    expect(second.arrived).toEqual([]);
+    // Yet the whole read N+2, against the whole read N, ended the step with its transaction: done.
+    expect(doneOf(pendingSteps(n)[0]!, "converting", n2, n)).not.toBeNull();
+
+    const { view, out } = drawnAfter(n, n2, second.arrived.map((row) => row.signature));
+    expect(view.rows).toMatchObject([{ show: "done", key: "converting", told: false }]);
+    expect(out).toMatch(/<div class="[^"]*" data-pending-done="converting">/);
+    // Inside the polite region, and not hidden from it.
+    const [region] = liveRegions(out);
+    expect(region).toContain(LIVE_COPY.pendingDone.convertedAt("12:00 UTC"));
+    expect(region).not.toMatch(/data-pending-done="converting" aria-hidden/);
+  });
+
+  it("hands back the same view when no row is done, and leaves a row nobody judged as it was", () => {
+    const view = viewOf(pendingLines(pendingSteps(converting()), NOW_MS));
+    expect(toldBy(view, new Set())).toBe(view);
+    // A done row drawn without toldBy (a caller that tracks no arrivals) stays out of the region, as before.
+    const track = advancePending(startTrack(inputOf(converting())), inputOf(vault("0", [CONVERT, WRAP], NOW_MS + 30_000)), 1_000);
+    const plain = pendingViewOf(track, []);
+    expect(renderToStaticMarkup(createElement(PendingRows, { lines: plain.lines, view: plain }))).toMatch(/data-pending-done="converting" aria-hidden="true"/);
   });
 });
 

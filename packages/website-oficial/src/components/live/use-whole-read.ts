@@ -22,11 +22,13 @@ import { useState } from "react";
  *   - a step NEW to it is timed off rows that may be missing its newest move,
  *     so a fresh saving's conversion could read "Not done since" an older one.
  * So the steps stay as the last read that landed whole drew them, and every
- * loader the newer snapshot no longer has under way stands still
- * (LivePending.tsx stillOf): the page stops vouching that it turns, and
+ * step the newer snapshot no longer has under way is drawn RESTING
+ * (LivePending.tsx pendingViewOf, review 10-09): the still clock, "Not
+ * confirmed on this page yet", no "In progress" over it and no turning mark
+ * beside Next investment. The page stops vouching that it is under way, and
  * claims no step ended, done or slow off that commit. Until the next read
  * lands whole — no timer and no cap: the store says when, by the read it
- * commits.
+ * commits, and with nothing claimed in the meantime none is needed.
  *
  * NOTHING TO STAND ON, NOTHING HELD: the page's first paint (its snapshot
  * drawn before its history answered, lib/first-paint.ts) is no read's commit,

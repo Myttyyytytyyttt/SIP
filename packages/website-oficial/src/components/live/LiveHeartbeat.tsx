@@ -8,8 +8,10 @@
  * the cards. The dot says it at a glance, beside the pension key:
  *
  *   solid       as of the last update            "Updated just now" / "Live · updated 2 min ago"
- *   breathing   a check is out, or the chain     "Checking…" / "Change seen on Solana · updating"
- *               said something changed
+ *   breathing   a check is out                   the same words: a check changes none of them
+ *   breathing   the chain said something         "Change seen on Solana · updating"
+ *               changed, and an update can bring it
+ *   solid       …and the history cannot be read  "Change seen on Solana · not on this page yet"
  *   hollow      the last update failed           "Behind — couldn’t update" · "As of 14:32 UTC"
  *   ringed      a newer version is served        "A newer version of SaverFi is available" · Reload page
  *
@@ -29,6 +31,16 @@
  *    or while `live.heard`: the chain rang about a change no update has
  *    brought yet. A press of Check now breathes because it starts a check,
  *    not because it was pressed.
+ *  * A CHECK CHANGES NO WORD (review, 10-09; plan P1: background checks never
+ *    change the text). The page checks every 20–60 s, and the dot keeps the
+ *    focus after Escape: a name that flipped to "Checking…" on every check
+ *    was read out again each time. Only the breath says a check is out; a
+ *    press says "Checking…" on Check now itself, where the focus then is.
+ *  * A CHANGE HEARD WHILE THE HISTORY CANNOT BE READ DOES NOT BREATHE
+ *    (review, 10-09). What was heard is not on the page then, and no update is
+ *    known to be bringing it: the dot says "not on this page yet", the rows'
+ *    own words for the same moment (heard-lines.ts) — LiveBody hands both the
+ *    one `heardBehind`. Not "Behind": the snapshot did update.
  *  * "Live" only while `live.socket` is "live": every address watched is
  *    confirmed, a change shows within seconds. Connecting or off, it says
  *    "Not live right now", and how often the page looks only where its
@@ -54,9 +66,12 @@
  * spoken; a failure is announced by the stale note's own region
  * (DashboardSource.tsx).
  *
- * REDUCED MOTION: the dot does not breathe — a check under way, or a change
- * heard, is the hollow dot, and the words carry it — the popover appears at
- * once, without its fade and zoom, and Check now's glyph stands still.
+ * REDUCED MOTION: the dot does not breathe. A check under way looks as fresh
+ * does (Check now says it, once pressed), a change heard is the faint dot —
+ * the breath held at its low point — and only a failed update is hollow
+ * (review, 10-09: with no words in the bar, a check must never wear the
+ * failed look). The popover appears at once, without its fade and zoom, and
+ * Check now's glyph stands still.
  *
  * LIVE ONLY. LiveBody puts it before the account in the header. The sample, the
  * first read, and the unreadable and keyless screens never draw it.
@@ -65,7 +80,7 @@
 import { RefreshCw, RotateCw } from "lucide-react";
 import { useEffect, useId, useRef, useState, type PointerEvent } from "react";
 
-import { retryEnableAt } from "@/components/live/RetryButton";
+import { pressKeyOf, retryEnableAt, usePressedUntilRead } from "@/components/live/RetryButton";
 import { useCountdown } from "@/components/live/use-countdown";
 import { useTicker } from "@/components/live/use-ticker";
 import { Button } from "@/components/ui/button";
@@ -120,6 +135,8 @@ export interface PulseFacts {
   readonly asOf: string;
   /** The chain said something changed that no update has brought yet. */
   readonly heard: boolean;
+  /** …and it is not on the page, with no update known to be bringing it: the history cannot be read, or the page is behind (heard-lines.ts). */
+  readonly heardBehind: boolean;
   /** pushOffCadenceMs. */
   readonly cadenceMs: number | null;
   /** A newer build is served than this tab runs. */
@@ -131,10 +148,12 @@ const spoken = (line: string): string => line.replaceAll(" · ", ", ");
 
 /**
  * What the popover says above its buttons — the first line is its title — and
- * the dot's accessible name. The name says everything on its own: a check
- * under way included, which in the popover is Check now's own label, and an
- * update, which there is its own section. The next check is not in it: that
- * counts down in the popover (NextCheck), and a name is read once.
+ * the dot's accessible name. The name says everything on its own, an update
+ * included, which in the popover is its own section. A check under way is NOT
+ * in it (review, 10-09; plan P1): the page checks every 20–60 s, and a focused
+ * dot whose name flipped with each check was read out again each time — only
+ * the breath says it, and a press says it on Check now. Nor is the next check:
+ * that counts down in the popover (NextCheck), and a name is read once.
  */
 export function pulseWords(facts: PulseFacts): { readonly lines: readonly string[]; readonly name: string } {
   const lines: string[] = [];
@@ -145,15 +164,14 @@ export function pulseWords(facts: PulseFacts): { readonly lines: readonly string
     // Unknown is "—", never "just now".
     const ago = facts.ageMs === null ? "—" : LIVE_COPY.pulse.ago(facts.ageMs);
     lines.push(facts.socket === "live" ? LIVE_COPY.pulse.live(ago) : LIVE_COPY.pulse.updated(ago));
-    if (facts.heard) lines.push(LIVE_COPY.pulse.heard);
+    if (facts.heard) lines.push(facts.heardBehind ? LIVE_COPY.pulse.heardBehind : LIVE_COPY.pulse.heard);
     if (facts.socket === "connecting" || facts.socket === "off") {
       lines.push(facts.cadenceMs === null ? LIVE_COPY.pulse.notLive : LIVE_COPY.pulse.notLiveEvery(Math.round(facts.cadenceMs / 1_000)));
     }
   }
   const said = lines.map(spoken);
   if (facts.update) said.push(LIVE_COPY.pulse.update);
-  const name = said.join(". ");
-  return { lines, name: facts.state === "checking" ? `${LIVE_COPY.pulse.checking} ${name}` : name };
+  return { lines, name: said.join(". ") };
 }
 
 /**
@@ -179,7 +197,7 @@ export function checkEnableAt(input: { readonly refreshReadyAt: number; readonly
   return retryEnableAt(a === null ? b : b === null ? a : Math.max(a, b), input.refreshReadyAt);
 }
 
-/** What Check now says, and whether it can be pressed. */
+/** What Check now says, and whether it can be pressed. `checking`: it was pressed, and the check it asked for has not finished. */
 export function checkLook(input: { readonly left: number | null; readonly checking: boolean }): { readonly label: string; readonly disabled: boolean } {
   if (input.checking) return { label: LIVE_COPY.pulse.checking, disabled: true };
   if (input.left !== null) return { label: LIVE_COPY.pulse.checkIn(input.left), disabled: true };
@@ -189,9 +207,13 @@ export function checkLook(input: { readonly left: number | null; readonly checki
 /** The dot's look in each state. All are the same box, so no state moves anything. */
 export const PULSE_DOT: Readonly<Record<PulseState, string>> = {
   fresh: "bg-muted-foreground/70",
-  // globals.css stops the breath under reduced motion; the hollow ring stands in for it.
-  checking: "live-breathe bg-muted-foreground/70 motion-reduce:border motion-reduce:border-muted-foreground motion-reduce:bg-transparent",
-  heard: "live-breathe bg-muted-foreground/70 motion-reduce:border motion-reduce:border-muted-foreground motion-reduce:bg-transparent",
+  // globals.css stops the breath under reduced motion. A check out then looks
+  // fresh — background checks change nothing but the breath (plan B2) — and a
+  // change heard is the breath held at its low point. The hollow ring is
+  // "behind" alone: with no words in the bar (owner, 10-09) a check must never
+  // wear the failed look.
+  checking: "live-breathe bg-muted-foreground/70",
+  heard: "live-breathe bg-muted-foreground/70 motion-reduce:bg-muted-foreground/35",
   behind: "border border-muted-foreground bg-transparent",
 };
 
@@ -206,10 +228,27 @@ export const PULSE_UPDATE = "ring-2 ring-muted-foreground/60 ring-offset-1 ring-
  * Check now, inside the popover — mounted only while it is open, so its
  * countdown ticks only while someone can see it. Held with aria-disabled, not
  * `disabled`, so a keyboard press keeps the focus (RetryButton.tsx).
+ *
+ * "CHECKING…" ANSWERS ITS OWN PRESS, as RetryButton's "Retrying…" does
+ * (review, 10-09): a check the page made by itself changes no name a focus
+ * rests on (plan P1) — only the glyph turns for it. The read that finishes
+ * moves the floor, and with it `enableAt`, which ends the press
+ * (usePressedUntilRead); a press while a check is already out waits for that
+ * one, the answer refresh() gives too.
  */
-export function CheckNow({ enableAt, checking, onCheck }: { readonly enableAt: number; readonly checking: boolean; readonly onCheck: () => void }) {
+export function CheckNow({
+  enableAt,
+  checking,
+  onCheck,
+}: {
+  readonly enableAt: number;
+  /** A check is out (`live.reading`): the glyph turns for it, the label does not. */
+  readonly checking: boolean;
+  readonly onCheck: () => void;
+}) {
   const left = useCountdown(enableAt);
-  const look = checkLook({ left, checking });
+  const [pressed, press] = usePressedUntilRead(pressKeyOf(null, enableAt));
+  const look = checkLook({ left, checking: pressed });
   return (
     <Button
       type="button"
@@ -219,6 +258,7 @@ export function CheckNow({ enableAt, checking, onCheck }: { readonly enableAt: n
       {...(look.disabled ? { "aria-disabled": true } : {})}
       onClick={() => {
         if (look.disabled) return;
+        press();
         onCheck();
       }}
     >
@@ -253,6 +293,7 @@ export function LiveHeartbeat({
   stale,
   live,
   activityRetryAt,
+  heardBehind,
   updateAvailable,
   onCheck,
 }: {
@@ -263,6 +304,13 @@ export function LiveHeartbeat({
   readonly live: LiveLiveness;
   /** When the server said the history may be asked for again; Check now waits for it too. */
   readonly activityRetryAt: number | null;
+  /**
+   * What was heard is not on the page, and no update is known to be bringing
+   * it — the stale note, or the history unreadable: heard-lines.ts's own
+   * `behind`, the same value LiveBody hands the rows. A change heard then does
+   * not breathe, and says "not on this page yet".
+   */
+  readonly heardBehind: boolean;
   /** A newer build is served than this tab runs (use-update-available.ts). */
   readonly updateAvailable: boolean;
   /** The store's refresh — the same read every Retry asks for. */
@@ -271,7 +319,8 @@ export function LiveHeartbeat({
   // The ticker is what re-renders; the clock is read here, as in use-countdown.ts.
   useTicker(true, PULSE_TICK_MS);
   const now = Date.now();
-  const state = pulseStateOf({ stale: stale !== null, heard: live.heard !== null, reading: live.reading });
+  // A change heard breathes only while an update can bring it; behind, the dot breathes only for a check really out.
+  const state = pulseStateOf({ stale: stale !== null, heard: live.heard !== null && !heardBehind, reading: live.reading });
   const words = pulseWords({
     state,
     socket: live.socket,
@@ -279,6 +328,7 @@ export function LiveHeartbeat({
     // The browser's day: the snapshot's own clock is the moment named, and against itself it is always today.
     asOf: whenLabel(nowMs, now),
     heard: live.heard !== null,
+    heardBehind,
     cadenceMs: pushOffCadenceMs({ socket: live.socket, backingOff: live.backingOff, activityRetryAt, now }),
     update: updateAvailable,
   });

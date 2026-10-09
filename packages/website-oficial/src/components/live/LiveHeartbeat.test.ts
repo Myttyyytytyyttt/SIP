@@ -1,12 +1,14 @@
 // The header's dot (LiveHeartbeat.tsx): one dot at every width, its words in its
 // popover and its accessible name, never text in the bar (owner, 10-09). Since
 // plan B2 every state is a signal the store gives (`live`): solid when updated,
-// breathing while a check is out or a change was heard, hollow when the last
-// update failed — and that order when two are true — "Live" only while the push
-// is live, a cadence only where the schedule keeps one, the next check only
-// when one is armed, and a ring for a newer version, whose popover offers the
-// reload. Check now counts down to when a press helps, and says it is checking
-// while a check is out.
+// breathing while a check is out or a change was heard that an update can
+// bring, hollow when the last update failed — and that order when two are
+// true — "Live" only while the push is live, a cadence only where the schedule
+// keeps one, the next check only when one is armed, and a ring for a newer
+// version, whose popover offers the reload. A check changes no word; a change
+// heard while the history cannot be read is "not on this page yet", as the
+// rows say it. Check now counts down to when a press helps, and says it is
+// checking only after its own press (review, 10-09).
 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -54,7 +56,14 @@ const HEARD = { at: T - 1_000, wallets: [] };
 /** The dot as drawn at browser time `at`, with the store saying `live`. */
 const dotAt = (
   at: number,
-  props: { readonly live?: Partial<LiveLiveness>; readonly nowMs?: number; readonly stale?: LiveStale | null; readonly activityRetryAt?: number | null; readonly updateAvailable?: boolean } = {},
+  props: {
+    readonly live?: Partial<LiveLiveness>;
+    readonly nowMs?: number;
+    readonly stale?: LiveStale | null;
+    readonly activityRetryAt?: number | null;
+    readonly heardBehind?: boolean;
+    readonly updateAvailable?: boolean;
+  } = {},
 ): string => {
   vi.setSystemTime(at);
   return renderToStaticMarkup(
@@ -63,6 +72,8 @@ const dotAt = (
       stale: props.stale ?? null,
       live: liveLiveness({ lastReadAt: T, refreshReadyAt: T + MANUAL_FLOOR_MS, ...props.live }),
       activityRetryAt: props.activityRetryAt ?? null,
+      // LiveBody's own rule: behind whenever the page is stale (or the history unreadable, which this dot is told).
+      heardBehind: props.heardBehind ?? (props.stale ?? null) !== null,
       updateAvailable: props.updateAvailable ?? false,
       onCheck: () => undefined,
     }),
@@ -82,6 +93,7 @@ const facts = (over: Partial<PulseFacts> = {}): PulseFacts => ({
   ageMs: 12_000,
   asOf: "11:59 UTC",
   heard: false,
+  heardBehind: false,
   cadenceMs: null,
   update: false,
   ...over,
@@ -135,10 +147,11 @@ describe("the dot's words", () => {
     expect(pulseWords(facts({ socket: "off", cadenceMs: UNHEARD_POLL_MS })).name).toBe("Updated just now. Not live right now, checks Solana about every 20 s");
   });
 
-  it("name a check under way, and leave the popover to Check now's own label", () => {
+  it("change nothing for a check under way: the page checks every 20–60 s, and a focused dot's name must not flip with each", () => {
     const words = pulseWords(facts({ state: "checking", ageMs: 120_000 }));
-    expect(words.name).toBe("Checking… Updated 2 min ago");
-    expect(words.lines).toEqual(["Updated 2 min ago"]);
+    expect(words).toEqual(pulseWords(facts({ state: "fresh", ageMs: 120_000 })));
+    expect(words.name).toBe("Updated 2 min ago");
+    expect(words.name).not.toContain(LIVE_COPY.pulse.checking);
   });
 
   it("say a change was seen on Solana and is on its way", () => {
@@ -151,6 +164,17 @@ describe("the dot's words", () => {
     const words = pulseWords(facts({ state: "behind", ageMs: 6 * 60_000, asOf: "11:54 UTC", socket: "off", cadenceMs: UNHEARD_POLL_MS }));
     expect(words.lines).toEqual(["Behind — couldn’t update", "As of 11:54 UTC"]);
     expect(words.name).toBe("Behind — couldn’t update. As of 11:54 UTC");
+  });
+
+  it("say a change seen is not on this page yet while the history cannot be read — the rows' own words, not 'updating'", () => {
+    for (const state of ["fresh", "checking"] as const) {
+      const words = pulseWords(facts({ state, heard: true, heardBehind: true }));
+      expect(words.lines).toContain(LIVE_COPY.pulse.heardBehind);
+      expect(words.lines).not.toContain(LIVE_COPY.pulse.heard);
+      expect(words.name).not.toContain("updating");
+      // Not "Behind": the snapshot did update.
+      expect(words.lines).not.toContain(LIVE_COPY.pulse.behind);
+    }
   });
 
   it("say, while behind, that a change seen is not on this page yet — not that it is updating", () => {
@@ -169,8 +193,10 @@ describe("the dot's words", () => {
     const sentences = (["fresh", "checking", "heard", "behind"] as const).flatMap((state) =>
       (["none", "connecting", "live", "off"] as const).flatMap((socket) =>
         [true, false].flatMap((update) => {
-          const words = pulseWords(facts({ state, socket, heard: state === "heard", cadenceMs: UNHEARD_POLL_MS, update, ageMs: 300_000 }));
-          return [...words.lines, words.name];
+          return [false, true].flatMap((heardBehind) => {
+            const words = pulseWords(facts({ state, socket, heard: state === "heard" || heardBehind, heardBehind, cadenceMs: UNHEARD_POLL_MS, update, ageMs: 300_000 }));
+            return [...words.lines, words.name];
+          });
         }),
       ),
     );
@@ -259,7 +285,8 @@ describe("in the bar", () => {
     const reading = dotAt(T, { live: { reading: true } });
     expect(reading).toContain('data-pulse="checking"');
     expect(boxOf(reading)).toContain("live-breathe");
-    expect(nameOf(reading)).toBe("Checking… Updated just now");
+    // The breath says it; the name a focus rests on does not change with every check.
+    expect(nameOf(reading)).toBe("Updated just now");
 
     const heard = dotAt(T, { live: { heard: HEARD } });
     expect(heard).toContain('data-pulse="heard"');
@@ -267,6 +294,17 @@ describe("in the bar", () => {
     expect(nameOf(heard)).toBe("Updated just now. Change seen on Solana, updating");
 
     expect(boxOf(dotAt(T))).not.toContain("live-breathe");
+  });
+
+  it("does not breathe for a change heard while the history cannot be read, and says it is not on this page yet", () => {
+    const html = dotAt(T, { live: { heard: HEARD }, heardBehind: true });
+    expect(html).toContain('data-pulse="fresh"');
+    expect(boxOf(html)).not.toContain("live-breathe");
+    expect(nameOf(html)).toBe("Updated just now. Change seen on Solana, not on this page yet");
+    // A check really out still breathes — for the check, never as "heard".
+    const reading = dotAt(T, { live: { heard: HEARD, reading: true }, heardBehind: true });
+    expect(reading).toContain('data-pulse="checking"');
+    expect(reading).not.toContain('data-pulse="heard"');
   });
 
   it("is hollow and says so when the last update failed, with the moment the figures are from", () => {
@@ -320,6 +358,8 @@ describe("in the bar", () => {
 describe("Check now", () => {
   const button = (props: { readonly enableAt: number; readonly checking: boolean }): string =>
     renderToStaticMarkup(createElement(CheckNow, { ...props, onCheck: () => undefined }));
+  /** Its accessible name: the button's words, the glyph being aria-hidden. */
+  const label = (html: string): string => seen(html);
 
   it("opens at the store's floor, or at a retry-after the server named, whichever is later", () => {
     expect(checkEnableAt({ refreshReadyAt: T + MANUAL_FLOOR_MS, staleRetryAt: null, activityRetryAt: null })).toBe(T + MANUAL_FLOOR_MS);
@@ -343,12 +383,16 @@ describe("Check now", () => {
     expect(counting).not.toMatch(/\sdisabled=""/);
   });
 
-  it("says it is checking while a check is out, and its glyph turns only for those who allow motion", () => {
+  it("turns its glyph while a check is out — only for those who allow motion — and keeps its own name until its own press", () => {
     const html = button({ enableAt: T - 1, checking: true });
-    expect(html).toContain(LIVE_COPY.pulse.checking);
-    expect(html).toMatch(DISABLED);
+    // A check the page made by itself is not this button's to announce: its name stays.
+    expect(label(html)).toBe(LIVE_COPY.pulse.checkNow);
+    expect(html).not.toContain(LIVE_COPY.pulse.checking);
+    expect(html).not.toMatch(DISABLED);
     expect(html).toContain("motion-safe:animate-spin");
     expect(html).not.toMatch(/(^|[\s"])animate-spin/);
+    // While its floor runs it still counts down, check out or not.
+    expect(label(button({ enableAt: T + MANUAL_FLOOR_MS, checking: true }))).toBe(LIVE_COPY.pulse.checkIn(10));
   });
 
   it("is checking over counting, and counting over ready", () => {
@@ -369,11 +413,13 @@ describe("a newer version, in the popover", () => {
 });
 
 describe("reduced motion", () => {
-  it("the dot breathes only through the class globals.css stills, and is the hollow ring instead", () => {
-    for (const state of ["checking", "heard"] as const) {
-      expect(PULSE_DOT[state]).toContain("live-breathe");
-      expect(PULSE_DOT[state]).toContain("motion-reduce:border motion-reduce:border-muted-foreground motion-reduce:bg-transparent");
-    }
+  it("the dot breathes only through the class globals.css stills, and only a failed update is hollow", () => {
+    for (const state of ["checking", "heard"] as const) expect(PULSE_DOT[state]).toContain("live-breathe");
+    // Still, a check out looks fresh, a change heard is the breath's low point, and neither wears the failed look.
+    expect(PULSE_DOT.checking).not.toContain("motion-reduce:");
+    expect(PULSE_DOT.heard).toContain("motion-reduce:bg-muted-foreground/35");
+    for (const state of ["fresh", "checking", "heard"] as const) expect(PULSE_DOT[state]).not.toMatch(/bg-transparent|(^|\s)(motion-reduce:)?border(\s|$)/);
+    expect(PULSE_DOT.behind).toContain("bg-transparent");
     for (const look of [...Object.values(PULSE_DOT), PULSE_UPDATE]) expect(look).not.toMatch(/(^|\s)animate-/);
     // Only a check out or a change heard moves at all; the update's ring never does.
     expect(PULSE_DOT.fresh).not.toContain("live-");

@@ -203,15 +203,19 @@ export function useWriteJudge(page: PageRead & { readonly pensionKey: string }):
     setSeen({ signature: write.signature, readId: page.readId });
   }
 
-  // Moves only when a cap comes due, so the verdict is worked out again then.
-  const [, setTick] = useState(0);
-  const state = write === null || readIdAt === null ? null : syncStateOf(write, { page, readIdAt, now: Date.now() });
+  // Moves only when a cap comes due, to that deadline: a timer may wake a
+  // millisecond early (use-hold.ts), and one judged a hair before it would
+  // leave `due` unchanged — and no effect would set the timer again. The
+  // deadline is the least `now` can be, so the verdict waking for it is the
+  // one past it (review, 10-09).
+  const [dueSeen, setDueSeen] = useState(0);
+  const state = write === null || readIdAt === null ? null : syncStateOf(write, { page, readIdAt, now: Math.max(Date.now(), dueSeen) });
   const sync = useMemo<WriteSync | null>(() => (write === null || state === null ? null : { write, state }), [write, state]);
 
   const due = sync === null ? null : syncDueAt(sync);
   useEffect(() => {
     if (due === null) return undefined;
-    const timer = setTimeout(() => setTick((tick) => tick + 1), Math.max(0, due - Date.now()));
+    const timer = setTimeout(() => setDueSeen(due), Math.max(0, due - Date.now()));
     return () => clearTimeout(timer);
   }, [due]);
 

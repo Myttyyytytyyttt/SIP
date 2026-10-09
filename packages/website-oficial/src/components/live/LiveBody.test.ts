@@ -9,9 +9,10 @@
 // does, so a prop dropped anywhere between the hook and the feed fails here
 // rather than in front of somebody looking at their own pension.
 
+import { USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 // The frame's two contexts, stubbed: this test is about what the body draws,
 // not about Privy or the wallets modal.
@@ -29,8 +30,22 @@ vi.mock("@/components/live/LiveRulePanel", async () => {
   };
 });
 vi.mock("@/components/pension-chart", () => ({ PensionChart: () => createElement("div", null, "LIVECHART") }));
+// THE WHOLE READ A STATIC RENDER CANNOT HOLD. One render has one commit, so
+// the last whole read the steps stand on through a history outage
+// (use-whole-read.ts) is handed in here; null — every test but the one that
+// sets it — is the real hook.
+const wholeRead = vi.hoisted(() => ({ held: null as unknown }));
+vi.mock("@/components/live/use-whole-read", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/components/live/use-whole-read")>();
+  return {
+    ...real,
+    useWholeRead: <T,>(data: T, read: { readonly readId: number; readonly whole: boolean }) =>
+      wholeRead.held === null ? real.useWholeRead(data, read) : { data: wholeRead.held as T, newest: false },
+  };
+});
 
 import { LiveBody, countsUnknownOf, signedRows, staleNote } from "@/components/live/LiveBody";
+import { checkEnableAt } from "@/components/live/LiveHeartbeat";
 import { LastWriteContext, type LastWrite } from "@/components/live/last-write-context";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { LiveLiveness, LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
@@ -39,7 +54,20 @@ import { toLiveDashboard } from "@/lib/live-model";
 import { MANUAL_FLOOR_MS } from "@/lib/live-schedule";
 import type { LiveDashboard, VaultEventJson } from "@/lib/live-types";
 
-import { DEFAULT_ENTRIES, NOW_MS, OWNER, WALLET_A, liveActivity, liveDashboard, liveEntry, liveSnapshot, seconds, settledEvent, signature } from "../../../test/fixtures/live-dashboard";
+import {
+  DEFAULT_ENTRIES,
+  NOW_MS,
+  OWNER,
+  WALLET_A,
+  liveActivity,
+  liveDashboard,
+  liveEntry,
+  liveSnapshot,
+  seconds,
+  settledEvent,
+  signature,
+  tokenAccount,
+} from "../../../test/fixtures/live-dashboard";
 import { liveLiveness } from "../../../test/fixtures/live-liveness";
 import { tickingInRegion } from "../../../test/live-regions";
 
@@ -61,6 +89,8 @@ function render(input: {
   readonly stale?: LiveStale | null;
   readonly older?: LiveOlder;
   readonly activityPending?: boolean;
+  /** When the server said the history may be asked for again. */
+  readonly activityRetryAt?: number | null;
   /** The browser's clock; the payload's own by default. */
   readonly nowMs?: number;
   /** How live the page is; by default a read that finished just now, its floor still running. */
@@ -89,6 +119,7 @@ function render(input: {
         nowMs: input.nowMs ?? NOW_MS,
         activityUnreadable: input.activityUnreadable,
         ...(input.activityPending === undefined ? {} : { activityPending: input.activityPending }),
+        ...(input.activityRetryAt === undefined ? {} : { activityRetryAt: input.activityRetryAt }),
         live: liveLiveness({ refreshReadyAt: Date.now() + MANUAL_FLOOR_MS, ...input.live }),
       }),
       ),
@@ -120,6 +151,21 @@ describe("an activity read that failed", () => {
       const html = render({ view, activityUnreadable: true });
       expect(html).toMatch(/Try again in \d+ s/);
       expect(tickingInRegion(html)).toBe(false);
+    }
+  });
+
+  it("opens its retry no sooner than the snapshot's retry-after either, at the same moment as the dot's Check now", () => {
+    // The history refused (retry-after 5 s), then the snapshot too (30 s): the page is stale, the banner still up.
+    const now = Date.now();
+    const stale: LiveStale = { message: LIVE_COPY.network, retryAt: now + 30_000, since: now };
+    const live = { refreshReadyAt: now + MANUAL_FLOOR_MS };
+    expect(checkEnableAt({ refreshReadyAt: live.refreshReadyAt, staleRetryAt: stale.retryAt, activityRetryAt: now + 5_000 })).toBe(now + 30_000);
+    for (const view of ["pension", "activity"] as const) {
+      const html = render({ view, activityUnreadable: true, stale, activityRetryAt: now + 5_000, live });
+      // A press before it would be refused, and deepen the backoff: every banner counts down to the 30 s.
+      expect(html).toContain(LIVE_COPY.retryIn(30));
+      expect(html).not.toContain(LIVE_COPY.retryIn(10));
+      expect(html).not.toContain(LIVE_COPY.retryIn(5));
     }
   });
 
@@ -471,6 +517,17 @@ describe("how fresh the page is", () => {
     expect(header(withAccount("pension"))).not.toContain("data-update");
   });
 
+  it("does not breathe 'updating' for a change heard while the history cannot be read: the rows' own words, one fact", () => {
+    const heard = { heard: { at: Date.now(), wallets: [] } };
+    const html = render({ data: liveDashboard(), activityUnreadable: true, live: heard });
+    const bar = header(html);
+    expect(bar).toContain('data-pulse="fresh"');
+    expect(bar).toContain(`aria-label="Updated just now. ${LIVE_COPY.pulse.heardBehind.replace(" · ", ", ")}"`);
+    expect(bar).not.toContain("updating");
+    expect(html).toContain(LIVE_COPY.heardLine.vaultBehind);
+    expect(html).not.toContain(LIVE_COPY.heardLine.vault);
+  });
+
   it("is behind when the last update failed, beside the stale note that announces it", () => {
     const html = withAccount("pension", { message: LIVE_COPY.network, retryAt: null, since: Date.now() });
     expect(header(html)).toContain('data-pulse="behind"');
@@ -554,6 +611,50 @@ describe("the rule card on a live page", () => {
     const html = render({ data: liveDashboard(), activityUnreadable: false });
     expect(html).not.toContain("data-buying");
     expect(html).toContain('<div class="flex h-4 min-w-0 items-center justify-between gap-2"><p class="text-xs font-medium uppercase tracking-wide text-muted-foreground shrink-0">Last investment</p></div>');
+  });
+});
+
+/**
+ * A STEP THE PAGE CAN NO LONGER CONFIRM (review, 10-09). The last whole read had
+ * SOL converting; the reads since could not read the history, and the newest
+ * snapshot no longer has the conversion under way — the SOL became USDC, and
+ * Next investment's figure already counts it. The row stays, but nothing says
+ * it is in progress: no heading, no turning mark over the feed or beside Next
+ * investment, for as long as the history fails.
+ */
+describe("a step the newest snapshot no longer has under way, through a history outage", () => {
+  afterEach(() => {
+    wholeRead.held = null;
+  });
+  const WRAP = liveEntry(signature(40), seconds(NOW_MS - 60_000), [{ kind: "wrapped", lamports: "18000000" } as VaultEventJson], 4_100);
+  /** The vault holding `wsol` lamports of wSOL and nothing free, over a wrap a minute ago. */
+  const vault = (wsol: string): LiveDashboard => {
+    const base = liveSnapshot();
+    return liveDashboard({
+      snapshot: liveSnapshot({
+        vault: { ...base.vault, lamports: "1285240", withdrawableLamports: "0" },
+        vaultTokenAccounts: { status: "exists", items: [tokenAccount(WSOL_MINT, wsol, "0", 9), tokenAccount(USDC_MINT, "0", "0", 6)] },
+      }),
+      activity: liveActivity([WRAP, ...DEFAULT_ENTRIES]),
+    });
+  };
+  const IN_PROGRESS = `>${LIVE_COPY.pendingHeading.active}<`;
+
+  it("is under way, and says so, while the newest read is the whole one", () => {
+    const html = render({ data: vault("18000000"), activityUnreadable: false });
+    expect(html).toContain(IN_PROGRESS);
+    expect(html).toContain(PENDING_COPY.converting);
+    expect(html).toContain("data-work-loader");
+  });
+
+  it("keeps its row, resting, and claims nothing in progress — over the feed or beside Next investment", () => {
+    wholeRead.held = vault("18000000");
+    const html = render({ data: vault("0"), activityUnreadable: true });
+    expect(html).toContain(PENDING_COPY.converting);
+    expect(html).toContain(LIVE_COPY.pendingUnconfirmed);
+    expect(html).not.toContain(IN_PROGRESS);
+    // No turning mark anywhere: not on the row, not on Next investment's label.
+    expect(html).not.toContain("data-work-loader");
   });
 });
 
