@@ -61,6 +61,8 @@ import {
   convertAmount,
   convertCapLamports,
   convertDecision,
+  convertProceedsCeiling,
+  CONVERT_PROCEEDS_MARGIN_BPS,
   censusVenueInventory,
   decodeMintFacts,
   decodeTokenAccountFacts,
@@ -1369,17 +1371,98 @@ describe("how much of a turn one leg gets", () => {
     expect(basketBudget({ held: 400_000_000n, maxPerCall: 250_000_000n, headroom: 9_000_000n })).toBe(9_000_000n);
   });
 
-  it("tests a converting turn at the most it could reach, and a resting one at what the vault actually holds", () => {
+  it("tests a converting turn at what its SOL can really bring in, capped as before, and a resting one at what the vault holds", () => {
     const caps = { maxPerCall: 250_000_000n, headroom: 900_000_000n };
-    // The convert has not happened yet, so the USDC that will exist is unknown;
-    // what is known is that it cannot buy past the cap or the headroom.
-    expect(turnSpendCeiling({ held: 0n, converting: true, ...caps })).toBe(250_000_000n);
-    expect(turnSpendCeiling({ held: 0n, converting: true, ...caps, headroom: 40_000_000n })).toBe(40_000_000n);
+    // What the convert can bring in is ADDED to what the vault already holds:
+    // both are money this turn may reach.
+    expect(turnSpendCeiling({ held: 0n, converting: true, convertProceeds: 2_000_000n, ...caps })).toBe(2_000_000n);
+    expect(turnSpendCeiling({ held: 3_000_000n, converting: true, convertProceeds: 2_000_000n, ...caps })).toBe(5_000_000n);
+    // THE CAP STILL BINDS. A large vault reaches max_per_call, or the 30-day
+    // headroom, exactly as it did before the estimate existed.
+    expect(turnSpendCeiling({ held: 0n, converting: true, convertProceeds: 1_000_000_000n, ...caps })).toBe(250_000_000n);
+    expect(turnSpendCeiling({ held: 200_000_000n, converting: true, convertProceeds: 100_000_000n, ...caps })).toBe(250_000_000n);
+    expect(turnSpendCeiling({ held: 0n, converting: true, convertProceeds: 1_000_000_000n, ...caps, headroom: 40_000_000n })).toBe(40_000_000n);
+    expect(turnSpendCeiling({ held: 0n, converting: true, convertProceeds: 2_000_000n, ...caps, headroom: 1_500_000n })).toBe(1_500_000n);
     // A turn whose SOL hop is off or rested can gain no in-asset this turn, so
     // its own holding is the ceiling — testing it at the cap would refuse a
-    // 20-dollar basket because a 250-dollar one would have been too big.
-    expect(turnSpendCeiling({ held: 20_000_000n, converting: false, ...caps })).toBe(20_000_000n);
-    expect(turnSpendCeiling({ held: 400_000_000n, converting: false, ...caps })).toBe(250_000_000n);
+    // 20-dollar basket because a 250-dollar one would have been too big. An
+    // estimate handed to a resting turn is not money it can reach.
+    expect(turnSpendCeiling({ held: 20_000_000n, converting: false, convertProceeds: null, ...caps })).toBe(20_000_000n);
+    expect(turnSpendCeiling({ held: 20_000_000n, converting: false, convertProceeds: 90_000_000n, ...caps })).toBe(20_000_000n);
+    expect(turnSpendCeiling({ held: 400_000_000n, converting: false, convertProceeds: null, ...caps })).toBe(250_000_000n);
+  });
+
+  it("falls back to the cap when no price was read: refusing more, never less", () => {
+    const caps = { maxPerCall: 250_000_000n, headroom: 900_000_000n };
+    expect(turnSpendCeiling({ held: 0n, converting: true, convertProceeds: null, ...caps })).toBe(250_000_000n);
+    expect(turnSpendCeiling({ held: 5_000_000n, converting: true, convertProceeds: null, ...caps })).toBe(250_000_000n);
+    expect(turnSpendCeiling({ held: 0n, converting: true, convertProceeds: null, ...caps, headroom: 40_000_000n })).toBe(40_000_000n);
+    // And so does the estimate itself, rather than inventing a price.
+    expect(convertProceedsCeiling({ lamports: 19_700_000n, receiveUpperWad: null })).toBeNull();
+    expect(convertProceedsCeiling({ lamports: 19_700_000n, receiveUpperWad: 0n })).toBeNull();
+    expect(convertProceedsCeiling({ lamports: 0n, receiveUpperWad: 10n ** 17n })).toBe(0n);
+  });
+
+  it("estimates a convert's proceeds at the top of the oracle's band plus the margin, rounded up", () => {
+    // 1 SOL at exactly $100 (0.1 USDC raw per lamport) is $110 with the margin.
+    expect(CONVERT_PROCEEDS_MARGIN_BPS).toBe(1_000n);
+    expect(convertProceedsCeiling({ lamports: 1_000_000_000n, receiveUpperWad: 10n ** 17n })).toBe(110_000_000n);
+    // Rounded UP, never down: an upper bound that truncates is not one.
+    expect(convertProceedsCeiling({ lamports: 1n, receiveUpperWad: 10n ** 17n })).toBe(1n);
+    expect(convertProceedsCeiling({ lamports: 19_700_001n, receiveUpperWad: 10n ** 17n })).toBe(2_167_001n);
+  });
+
+  it("sits above every quote the oracle's deviation arm lets the convert be sent at", () => {
+    // The margin is tied to the deviation bound, and that is the argument for
+    // its size: the convert is sent only at a route rate within
+    // MAX_PYTH_DEVIATION_BPS of the same Pyth reading, so the estimate must
+    // clear the most that arm admits, with room left for the fill landing
+    // above its quote.
+    expect(CONVERT_PROCEEDS_MARGIN_BPS).toBe(2n * MAX_PYTH_DEVIATION_BPS);
+    const sol = solFeed();
+    const usdc = usdcFeed();
+    const bounds = pythConservativeBounds(sol, usdc);
+    expect(bounds).not.toBeNull();
+    const lamports = 19_700_000n;
+    const estimate = convertProceedsCeiling({ lamports, receiveUpperWad: bounds!.receiveUpperWad })!;
+    // The richest route rate the deviation arm still lets through, found by
+    // asking it rather than by re-deriving its arithmetic here.
+    const mid = bounds!.midWad;
+    let richest = mid;
+    for (let bps = 0n; bps <= 2n * MAX_PYTH_DEVIATION_BPS; bps += 1n) {
+      const routeWad = mid + (mid * bps) / 10_000n;
+      if (!oracleConvertDecision({ sol, usdc, nowUnixSeconds: CHAIN_NOW, routeWad }).convert) break;
+      richest = routeWad;
+    }
+    expect(richest).toBeGreaterThan(mid);
+    const richestQuote = (lamports * richest) / 10n ** 18n;
+    expect(estimate).toBeGreaterThan(richestQuote);
+    // With room to spare for the fill: at least another 400 bps over that quote.
+    expect(estimate * 10_000n).toBeGreaterThanOrEqual(richestQuote * 10_400n);
+  });
+
+  it("judges the owner's vault of 2026-10-09 at the size it could reach, not at half its max_per_call", () => {
+    // MEASURED 00:42Z: 0.0197 SOL free, no wSOL, no USDC, SOL near $109, a
+    // basket of SPYx 50 / ANTHROPIC 50 under max_per_call $149. The deployed
+    // gate judged each leg at 74.5 dollars and refused ANTHROPIC's venue at
+    // that size, the conversion with it.
+    const free = 19_700_000n;
+    const maxPerCall = 149_000_000n;
+    const sol = feed(PYTH_SOL_USD_FEED_ID_HEX, 10_900_000_000n, PUBLISHED);
+    const usdc = feed(PYTH_USDC_USD_FEED_ID_HEX, 100_000_000n, PUBLISHED);
+    const lamports = convertAmount(0n + free, maxPerCall);
+    expect(lamports).toBe(free);
+    const convertProceeds = convertProceedsCeiling({ lamports, receiveUpperWad: pythConservativeBounds(sol, usdc)!.receiveUpperWad });
+    const ceiling = turnSpendCeiling({ held: 0n, converting: true, convertProceeds, maxPerCall, headroom: U64_MAX });
+    // 0.0197 SOL x $109 x 1.10, and a hair for the feeds' own conf: $2.36.
+    expect(ceiling).toBe(2_362_054n);
+    const perLeg = [5_000, 5_000].map((weight) => legShare(ceiling, weight));
+    expect(perLeg).toEqual([1_181_027n, 1_181_027n]);
+    // Not the 74.5 dollars the deployed gate judged, sixty-three times over.
+    expect(legShare(turnSpendCeiling({ held: 0n, converting: true, convertProceeds: null, maxPerCall, headroom: U64_MAX }), 5_000)).toBe(74_500_000n);
+    // And still above what the convert can honestly bring in at the mid
+    // ($2.147), so the vault's whole conversion is inside what was tested.
+    expect(ceiling).toBeGreaterThan((free * 109n) / 1_000n);
   });
 });
 

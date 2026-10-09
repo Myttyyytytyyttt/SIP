@@ -69,6 +69,7 @@ import {
   convertAmount,
   convertDecision,
   convertCapLamports,
+  convertProceedsCeiling,
   decodeEpochSchedule,
   inMintDecision,
   investPauseDecision,
@@ -78,6 +79,7 @@ import {
   legShare,
   legSlippageBps,
   oracleConvertDecision,
+  pythConservativeBounds,
   rollingDecision,
   routeRateWad,
   slotsLeftInEpoch,
@@ -677,11 +679,15 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // max_per_call caps the whole basket and is then split by weight, so a
   // 1,000-dollar cap over three legs is about 333 dollars into ONE venue. The
   // convert has not happened yet, so a converting turn is tested at the most it
-  // could reach — and the budget below is clamped to that same ceiling, so what
-  // was tested is what is spent (turnSpendCeiling). BOTH ARMS ARE MONOTONE IN
-  // SIZE: a smaller spend takes fewer units (higher cover) and has no more
-  // impact, so a gate passed at the ceiling holds for anything the turn
-  // actually spends.
+  // could reach: the USDC already held plus an upper bound on what converting
+  // its SOL can yield, priced off the Pyth pair this turn already read, under
+  // max_per_call and the headroom (turnSpendCeiling, which says why the cap
+  // alone refused small vaults for a size they could never reach). And the
+  // budget below is clamped to that same ceiling, so a convert that yields
+  // more than estimated is not spent this turn: what was tested is the most
+  // that is spent. BOTH ARMS ARE MONOTONE IN SIZE: a smaller spend takes fewer
+  // units (higher cover) and has no more impact, so a gate passed at the
+  // ceiling holds for anything the turn actually spends.
   //
   // AND THE CONVERT IS ONE OF THE LEGS. venue_program is ONE field on the
   // owner-signed policy (state.rs:212) that both convert.rs:88-91 and
@@ -691,9 +697,27 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // leg refuses the conversion: ONE verdict, as today, and reached before the
   // wrap so the owner's SOL is never sold toward a basket that cannot be
   // bought.
+  //
+  // THE MOST wSOL THIS TURN COULD CONVERT, which is what the convert leg is
+  // measured at. The wrap has not happened, so the reachable balance is what is
+  // already stranded as wSOL plus every free lamport the vault holds, capped by
+  // what convert.rs admits in one call. Measuring the ceiling rather than the
+  // eventual amount is the same monotonicity argument as the legs': the real
+  // convert is no larger, so it takes no more out of the venue.
+  const convertCeiling = converts ? convertAmount(wsolHeld + free, policy.maxPerCall) : 0n;
+  // AND WHAT THAT MUCH SOL CAN BRING IN, priced off the two feeds this turn
+  // read beside the vault. A converting turn has already passed the oracle's
+  // freshness and confidence arms (`converts` requires it), so the bands are
+  // there; were they not, null falls the ceiling back to max_per_call.
+  const convertProceeds = convertProceedsCeiling({
+    lamports: convertCeiling,
+    receiveUpperWad:
+      solFeed === null || usdcFeed === null ? null : (pythConservativeBounds(solFeed, usdcFeed)?.receiveUpperWad ?? null),
+  });
   const spendCeiling = turnSpendCeiling({
     held: usdcHeld,
     converting: converts,
+    convertProceeds,
     maxPerCall: policy.maxPerCall,
     headroom: rolling.headroom,
   });
@@ -702,14 +726,6 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // address is arithmetic over the mint and the vault, so it costs nothing, and
   // whether the account EXISTS is still the token-account plan's question.
   const legAtas = policy.legs.map((leg) => getAssociatedTokenAddressSync(leg.mint, vault, true, TOKEN_2022_PROGRAM_ID));
-
-  // THE MOST wSOL THIS TURN COULD CONVERT, which is what the convert leg is
-  // measured at. The wrap has not happened, so the reachable balance is what is
-  // already stranded as wSOL plus every free lamport the vault holds, capped by
-  // what convert.rs admits in one call. Measuring the ceiling rather than the
-  // eventual amount is the same monotonicity argument as the legs': the real
-  // convert is no larger, so it takes no more out of the venue.
-  const convertCeiling = converts ? convertAmount(wsolHeld + free, policy.maxPerCall) : 0n;
 
   let measured: { readonly legs: LegVenue[] };
   try {
@@ -939,9 +955,13 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
     // most the budget, so a budget within the headroom keeps every leg within it.
     //
     // AND NEVER MORE THAN THE DEPTH GATE TESTED. The gate above measured each
-    // pool against this turn's ceiling; clamping here is what turns that from a
-    // close estimate into a guarantee, whatever the convert brought in or
-    // whoever deposited into the vault while this turn was running.
+    // pool against this turn's ceiling, and on a converting turn that ceiling
+    // is an ESTIMATE of what the convert would bring in (turnSpendCeiling);
+    // clamping here is what turns it into a guarantee, whatever the convert
+    // really brought in or whoever deposited into the vault while this turn
+    // was running. What the clamp leaves unspent waits for the next sweep.
+    // test/accounts.test.ts drives a convert that yields far more than
+    // estimated through this line, and fails if it is removed.
     const spend = basketBudget({ held: usdc, maxPerCall: policy.maxPerCall, headroom: rolling.headroom });
     const budget = spend > spendCeiling ? spendCeiling : spend;
 

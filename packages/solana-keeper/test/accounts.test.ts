@@ -1075,14 +1075,20 @@ describe("the ticks' first steps, over the same bytes", () => {
     });
 
     expect(result.outcome).toBe("REFUSED");
-    // THE AMOUNT TESTED IS THE ONE THIS TURN WOULD REALLY SPEND: max_per_call
-    // (250 USDC) caps the BASKET and is split by weight, so the 3,300 bps leg
-    // gets 82.5 USDC — not the 5-dollar default purchase, and not the whole cap.
-    // The stub quotes a leg 1:1, so that is also what the hop TAKES out of the
-    // venue, which is the number the cover is measured against.
+    // THE AMOUNT TESTED IS THE MOST THIS TURN COULD REALLY SPEND. The vault
+    // holds no USDC, and convert.rs lets one call sell at most 1 SOL here
+    // (max(max_per_call, 1 SOL), convertCapLamports) — so whatever the ~10 SOL
+    // it holds, this turn can bring in 1 SOL at the feeds' $102.59, which the ceiling
+    // prices at the top of the oracle's band plus CONVERT_PROCEEDS_MARGIN_BPS:
+    // 112,868,301 raw, under the 250 USDC max_per_call. Split by weight, the
+    // 3,300 bps leg gets 37.25 USDC — not the 5-dollar default purchase, and
+    // not the 82.50 that 3,300 bps of the cap came to before this ceiling was
+    // changed (2026-10-09), which this turn could never have reached. The stub quotes a leg 1:1, so
+    // that is also what the hop TAKES out of the venue, which is the number the
+    // cover is measured against.
     expect(result.detail).toContain(`holds ${DRAINED_INVENTORY} raw of ${basket.mints[1]!.toBase58()} across 1 account(s) at its Manifest hop`);
-    expect(result.detail).toContain("against the 82500000 this turn would move through it");
-    expect(result.detail).toContain("1.3x cover, under the 50x this keeper trades on (it would need 4125000000)");
+    expect(result.detail).toContain("against the 37246539 this turn would move through it");
+    expect(result.detail).toContain("3.0x cover, under the 50x this keeper trades on (it would need 1862326950)");
     expect(result.detail).toContain(basket.mints[1]!.toBase58());
     // FOUR, NOT THREE: the wSOL -> USDC conversion is one more leg of the same
     // basket, measured by the same function and judged by the same verdict.
@@ -1542,6 +1548,132 @@ describe("the ticks' first steps, over the same bytes", () => {
       },
     }) as Connection;
   }
+
+  // ── a small converting vault, measured at what it can reach ───────────────
+  //
+  // THE OWNER'S VAULT ON 2026-10-09, IN THIS FILE'S PRICES. 0.0197 SOL free, no
+  // wSOL and no USDC, a two-leg basket at 50/50 under max_per_call $149 and a
+  // $1 minimum. The deployed gate measured each leg at half the cap, $74.50,
+  // and refused a venue at that size that the vault could never push more than
+  // about a dollar into. Here SOL is the feeds' $102.59, so what the convert
+  // can bring in is 0.0197 x $102.59 = $2.02, and the ceiling is that at the
+  // top of the oracle's band plus CONVERT_PROCEEDS_MARGIN_BPS: 2,223,506 raw.
+
+  /** The vault's free SOL in these cases: the stub serves every account 10 SOL, so the rent floor is set to leave this much. */
+  const SMALL_FREE = 19_700_000;
+  /** convertProceedsCeiling of SMALL_FREE at this file's feeds (conf 1,000 at -8 on both), worked in exact fractions outside the code: ceil(19.7e6 x (102.59322149 / 0.99986040) / 1e3 x 1.1). */
+  const SMALL_CEILING = 2_223_506n;
+  /** What one 5,000 bps leg of that is: the size the gate must measure. */
+  const SMALL_LEG = 1_111_753n;
+
+  function smallVault(basket: ReturnType<typeof basketOnChain>, extra: Readonly<Record<string, Handler>> = {}) {
+    const legs = basket.legs.map((leg) => ({ ...leg, weightBps: 5_000 }));
+    return chainWith(
+      {},
+      { legs, maxPerCall: 149_000_000n, minInvestment: 1_000_000n },
+      {
+        ...convertingAndFunded,
+        getMinimumBalanceForRentExemption: async () => 10_000_000_000 - SMALL_FREE,
+        ...extra,
+      },
+      true,
+      basket.accounts,
+    );
+  }
+
+  /** The amount of every Jupiter quote whose output is one of `mints`, in the order asked. */
+  function legQuoteAmounts(urls: readonly string[], mints: readonly PublicKey[]): bigint[] {
+    const names = new Set(mints.map((mint) => mint.toBase58()));
+    return urls
+      .filter((url) => url.includes("/quote"))
+      .map((url) => new URL(url).searchParams)
+      .filter((params) => names.has(params.get("outputMint") ?? ""))
+      .map((params) => BigInt(params.get("amount") ?? "0"));
+  }
+
+  it("measures a small converting vault's legs at what its SOL can bring in, not at half its max_per_call", async () => {
+    const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+    const { urls } = stubJupiter();
+    const chain = smallVault(basket);
+    const { program } = capturing(chain.connection);
+    const result = await runInvestTick({
+      connection: chain.connection, program, vault: chain.vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
+    });
+
+    // PAST THE GATE: the turn dies where the capturing wallet refuses to sign
+    // the wrap, so every quote below was asked before any money could move.
+    expect(result.outcome).toBe("FAILED");
+    const amounts = legQuoteAmounts(urls, basket.mints);
+    // Two legs, each quoted at its turn size and at ARM 2's probe.
+    expect(amounts).toHaveLength(4);
+    expect(amounts.reduce((a, b) => (a > b ? a : b), 0n)).toBe(SMALL_LEG);
+    // The deployed gate's size, which no quote here may reach.
+    for (const amount of amounts) expect(amount).toBeLessThan(74_500_000n);
+  });
+
+  it("never spends more than the gate measured, even when the convert brings in far more than estimated", async () => {
+    // THE CLAMP, DRIVEN THROUGH A WHOLE TURN. The chain here confirms what it
+    // is sent, and the USDC the vault holds after the convert is 500 dollars —
+    // a convert that paid out far past its estimate, or a deposit that landed
+    // mid-turn; to the turn the two are the same thing. max_per_call alone
+    // would let 149 of it be spent, 74.50 a leg, into venues the gate measured
+    // at about a dollar a leg. invest-tick.ts clamps the budget to the ceiling
+    // the gate tested; remove that line and this fails.
+    const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+    const { urls } = stubJupiter();
+    const crank = Keypair.generate();
+    let sent = 0;
+    let quotesBeforeFirstSend: number | null = null;
+    let usdcAta: PublicKey | undefined;
+    let wsolAta: PublicKey | undefined;
+    const chain = smallVault(basket, {
+      sendRawTransaction: async () => {
+        if (quotesBeforeFirstSend === null) quotesBeforeFirstSend = urls.length;
+        sent += 1;
+        return Keypair.generate().publicKey.toBase58();
+      },
+      confirmTransaction: async () => ({ context: { slot: 1 }, value: { err: null } }),
+      getSlot: async () => 1,
+      getTokenAccountBalance: async (address) => {
+        const raw = (amount: bigint) => ({ context: { slot: 1 }, value: { amount: amount.toString(), decimals: 6, uiAmount: null } });
+        // After the wrap, the vault holds what it wrapped as wSOL.
+        if (wsolAta !== undefined && (address as PublicKey).equals(wsolAta) && sent >= 1) return raw(BigInt(SMALL_FREE));
+        // After the convert, far more USDC than the estimate said it could.
+        if (usdcAta !== undefined && (address as PublicKey).equals(usdcAta) && sent >= 2) return raw(500_000_000n);
+        throw new Error("could not find account");
+      },
+    });
+    usdcAta = getAssociatedTokenAddressSync(USDC_MINT, chain.vault, true, TOKEN_PROGRAM_ID);
+    wsolAta = getAssociatedTokenAddressSync(NATIVE_MINT, chain.vault, true, TOKEN_PROGRAM_ID);
+    const signing = async <T extends Transaction | VersionedTransaction>(tx: T): Promise<T> => tx;
+    const program = new anchor.Program(
+      idl,
+      new anchor.AnchorProvider(
+        chain.connection,
+        { publicKey: crank.publicKey, signTransaction: signing, signAllTransactions: async (txs) => txs },
+        { commitment: "confirmed" },
+      ),
+    );
+    const result = await runInvestTick({
+      connection: chain.connection, program, vault: chain.vault, crank, crankLamports: 10_000_000_000n, live: true, protocolPaused: false,
+    });
+
+    expect(result.detail).toContain("bought");
+    expect(result.outcome).toBe("INVESTED");
+    // The wrap, the convert and one invest per leg.
+    expect(sent).toBe(4);
+    // WHAT WAS SPENT IS WHAT WAS TESTED, and not a raw more: each leg's share
+    // of the ceiling the gate measured, not of the 149 the vault could afford.
+    expect(result.purchases?.map((purchase) => purchase.spentRaw)).toEqual([SMALL_LEG, SMALL_LEG]);
+    const gate = legQuoteAmounts(urls.slice(0, quotesBeforeFirstSend ?? 0), basket.mints);
+    const send = legQuoteAmounts(urls.slice(quotesBeforeFirstSend ?? 0), basket.mints);
+    expect(gate.length).toBeGreaterThan(0);
+    expect(send.length).toBeGreaterThan(0);
+    const tested = gate.reduce((a, b) => (a > b ? a : b), 0n);
+    for (const amount of send) expect(amount).toBeLessThanOrEqual(tested);
+    expect(legQuoteAmounts(urls, basket.mints)).not.toContain(74_500_000n);
+    expect(SMALL_CEILING / 2n).toBe(SMALL_LEG);
+  });
 
   it("reads every token account it might need in ONE request, and creates the missing one INSIDE the transaction that uses it", async () => {
     const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);

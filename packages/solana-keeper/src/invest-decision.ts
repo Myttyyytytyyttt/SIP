@@ -1597,17 +1597,84 @@ export function legShare(budget: bigint, weightBps: number): bigint {
 }
 
 /**
+ * How far above the oracle's own upper band a converting turn's estimate of its
+ * proceeds sits: 1000 bps, twice MAX_PYTH_DEVIATION_BPS, and tied to it.
+ *
+ * WHAT IT HAS TO COVER, in the order the turn meets it. The convert is SENT only
+ * after oracleConvertDecision has compared the send-time route's quoted rate
+ * against the SAME Pyth reading the gate priced from (the turn reads the feeds
+ * once), and it rests the hop when the two sit more than MAX_PYTH_DEVIATION_BPS
+ * apart. So the quote the convert is sent at is at most about 500 bps over the
+ * oracle's mid, and receiveUpperWad is already at or above that mid. That is the
+ * first 500. The second 500 is for what lands differing from what was quoted: an
+ * ExactIn swap pays out whatever the venue pays, at or above min_out, so a
+ * market that moves the vault's way between the quote and the landing hands it
+ * more than the quote said; 500 bps is room for SOL to move 5 % the vault's way
+ * in the seconds between the two. Nothing here measured how far it moves in
+ * practice, which is why the bound below is the clamp and not this.
+ *
+ * IT IS NOT WHAT KEEPS THE TURN INSIDE ITS TEST, and must not be read as that.
+ * The tick clamps the budget it spends to the ceiling the gate tested, whatever
+ * the convert brought in (invest-tick.ts, `budget = spend > spendCeiling ?
+ * spendCeiling : spend`), so proceeds past this estimate are not spent this
+ * turn: they wait in the vault for the next sweep. What the margin decides is
+ * only how rarely that happens.
+ */
+export const CONVERT_PROCEEDS_MARGIN_BPS = 2n * MAX_PYTH_DEVIATION_BPS;
+
+/**
+ * The most in-asset (USDC raw) converting `lamports` this turn could bring in,
+ * by the oracle the turn already read: the lamports at Pyth's `receiveUpperWad`
+ * (SOL at the top of its band over USDC at the bottom of its), plus
+ * CONVERT_PROCEEDS_MARGIN_BPS, rounded UP.
+ *
+ * NULL WHEN THERE IS NO PRICE, never a guess. The caller then falls back to
+ * max_per_call, which refuses more and never less.
+ */
+export function convertProceedsCeiling(input: {
+  /** The most this turn could convert: convertAmount(wsolHeld + free, max_per_call), the size the convert leg is measured at. */
+  readonly lamports: bigint;
+  /** USDC raw per lamport x 1e18 at the top of the oracle's band (PythConservativeBounds.receiveUpperWad), or null. */
+  readonly receiveUpperWad: bigint | null;
+}): bigint | null {
+  if (input.receiveUpperWad === null || input.receiveUpperWad <= 0n) return null;
+  if (input.lamports <= 0n) return 0n;
+  const numerator = input.lamports * input.receiveUpperWad * (10_000n + CONVERT_PROCEEDS_MARGIN_BPS);
+  const denominator = 10n ** 18n * 10_000n;
+  return (numerator + denominator - 1n) / denominator;
+}
+
+/**
  * The most a turn could still spend, decided BEFORE the wrap — the figure the
  * depth gate tests against, because the gate has to run before anything is
  * wrapped or converted.
  *
- * THE ONE UNKNOWN IS REPLACED BY ITS OWN CAP. At the moment of the gate the
- * USDC that will exist after the convert has not been bought yet, so the exact
- * budget is unknowable; what IS known is that the budget can never exceed
- * max_per_call or the 30-day headroom, whatever the convert brings in. So a
- * converting turn is tested at min(max_per_call, headroom) — the worst case it
- * can reach — and the tick then clamps the budget it really spends to this same
- * ceiling, so the gate's guarantee holds exactly rather than approximately.
+ * WHAT IT USED TO DO, AND WHAT THAT COST. At the moment of the gate the USDC the
+ * convert will bring in has not been bought yet, and this used to replace that
+ * unknown by its cap: a converting turn was tested at min(max_per_call,
+ * headroom) whatever it could really buy. That is safe and it refused a vault
+ * for a size it could never reach. Measured 2026-10-09 00:42Z on the owner's
+ * vault (basket SPYx 50 / ANTHROPIC 50, max_per_call $149, min investment $1):
+ * 0.0197 SOL free, about $2.15 to convert, and the gate judged ANTHROPIC at
+ * $74.5 — half the cap — found the Manifest venue at 28.1x cover and 38 bps of
+ * impact at THAT size, and refused the whole basket and the conversion with it.
+ * Every later sweep would have judged it at the same $74.5 however small the
+ * vault stayed, so its SOL would not convert while that venue stayed as it was.
+ *
+ * WHAT IT DOES NOW. A converting turn is tested at what it can reach: the USDC
+ * the vault already holds plus `convertProceeds`, the convertProceedsCeiling of
+ * the lamports the convert leg is measured at — an upper bound on what that
+ * convert can yield, priced off the oracle the turn already read — then capped
+ * by max_per_call and the 30-day headroom exactly as before. With no price
+ * (`convertProceeds` null) it falls back to the cap, as it always did: refusing
+ * more, never less.
+ *
+ * WHY AN ESTIMATE IS SAFE HERE: the tick clamps the budget it really spends to
+ * this same ceiling (invest-tick.ts, after the convert), so a convert that
+ * yields more than estimated — or a deposit that lands mid-turn — is not spent
+ * this turn, and what the gate tested is the most any leg is sent. Both of the
+ * gate's arms are monotone in size, so a gate passed at the ceiling holds for
+ * anything smaller.
  *
  * AND A RESTING TURN IS NOT PUNISHED FOR IT. When the SOL hop is off or the
  * oracle rested it, no new in-asset can appear this turn, so the vault's own
@@ -1620,10 +1687,16 @@ export function turnSpendCeiling(input: {
   readonly held: bigint;
   /** Whether this turn will wrap and convert, and so may hold more by the time it buys. */
   readonly converting: boolean;
+  /** convertProceedsCeiling of this turn's convertible SOL, or null when no price was read. Ignored when not converting. */
+  readonly convertProceeds: bigint | null;
   readonly maxPerCall: bigint;
   readonly headroom: bigint;
 }): bigint {
-  const reachable = input.converting ? input.maxPerCall : input.held;
+  const reachable = !input.converting
+    ? input.held
+    : input.convertProceeds === null
+      ? input.maxPerCall
+      : input.held + input.convertProceeds;
   return basketBudget({ held: reachable, maxPerCall: input.maxPerCall, headroom: input.headroom });
 }
 
