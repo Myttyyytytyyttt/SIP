@@ -29,10 +29,9 @@ import { useState } from "react";
 
 import { ActivityRow } from "@/components/activity-row";
 import { CopyButton } from "@/components/copy-button";
-import { secondsUntil } from "@/components/live/LiveStates";
+import { RetryButton } from "@/components/live/RetryButton";
 import { Num } from "@/components/num";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { formatSol, formatUsd, usdcRawForLamports } from "@/lib/amounts";
 import { MONO } from "@/lib/classes";
 import { relativeDayLabel } from "@/lib/format";
@@ -123,19 +122,21 @@ export function WalletList({ wallets, usdcRawPerSol }: { readonly wallets: reado
 /**
  * A FAILED READ IS A NOTE ABOVE THE HISTORY, NOT INSTEAD OF IT. The hook keeps
  * the rows it already had when a poll fails, and they stay on screen under
- * this. The button counts down to when the server said it will answer again,
- * rather than offering a press that walks into the same refusal.
+ * this. The button counts down to when a press will read at once — the
+ * server's retry-after, or the floor after the last read — rather than
+ * offering a press that walks into the same refusal (RetryButton.tsx).
+ *
+ * One banner for every feed: the column's, and /activity's (LiveActivityFeed).
+ * THE SENTENCE IS THE LIVE REGION, NOT THE BANNER: the button's countdown
+ * ticks now, and inside a polite region every second of it would be read out.
  */
-export function FeedBanner({ onRetry, retryAt, nowMs }: { readonly onRetry?: () => void; readonly retryAt: number | null; readonly nowMs: number }) {
-  const left = secondsUntil(retryAt, nowMs);
+export function FeedBanner({ onRetry, retryAt, readyAt }: { readonly onRetry?: () => void; readonly retryAt: number | null; readonly readyAt: number }) {
   return (
-    <div className="space-y-2 border-b px-4 py-3" role="status">
-      <p className="text-sm text-muted-foreground">{ACTIVITY_COPY.unreadableNow}</p>
-      {onRetry === undefined ? null : (
-        <Button type="button" variant="outline" size="sm" onClick={onRetry} disabled={left !== null}>
-          {left === null ? LIVE_COPY.retry : LIVE_COPY.retryIn(left)}
-        </Button>
-      )}
+    <div className="space-y-2 border-b px-4 py-3">
+      <p className="text-sm text-muted-foreground" role="status">
+        {ACTIVITY_COPY.unreadableNow}
+      </p>
+      {onRetry === undefined ? null : <RetryButton retryAt={retryAt} readyAt={readyAt} onRetry={onRetry} />}
     </div>
   );
 }

@@ -16,18 +16,12 @@
 
 import { LogOut, RefreshCw } from "lucide-react";
 
+import { RetryButton, useReadyAt } from "@/components/live/RetryButton";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { cn } from "@/lib/utils";
-
-/** Seconds until `at`, for a countdown; null when there is nothing to count down to. */
-export function secondsUntil(at: number | null, now: number): number | null {
-  if (at === null) return null;
-  const left = Math.ceil((at - now) / 1_000);
-  return left > 0 ? left : null;
-}
 
 function Shell({ title, children, className }: { readonly title: string; readonly children: React.ReactNode; readonly className?: string }) {
   return (
@@ -124,32 +118,40 @@ export function LiveUnavailableCard({ onConnect, onSeeSample }: { readonly onCon
  * Connected, and the chain could not be read. NEVER shown as "no vault": a read
  * that failed says nothing about whether a vault exists, and offering to create
  * one here would ask for a signature the chain must refuse.
+ *
+ * THE CARD'S OWN SENTENCE IS SAID ONCE. Under the title goes the reason, when
+ * there is one beyond it ("Too many requests from this browser just now."),
+ * and the card's sentence under that. A vault the snapshot could not read has
+ * no reason of its own — the caller passed the card's sentence as the message,
+ * and it was printed twice, one line under the other (G10).
+ *
+ * The retry counts down to when a press reads at once (RetryButton.tsx):
+ * `readKey` changes with every read that finishes, which is what moves it.
  */
 export function LiveUnreadable({
   message,
   retryAt,
-  now,
+  readKey,
   onRetry,
 }: {
   readonly message: string;
   readonly retryAt: number | null;
-  readonly now: number;
+  /** Changes each time a read finishes, good or failed (RetryButton.tsx readKeyOf). */
+  readonly readKey: unknown;
   readonly onRetry: () => void;
 }) {
-  const left = secondsUntil(retryAt, now);
+  const readyAt = useReadyAt(readKey);
+  const reason = message === "" || message === LIVE_COPY.unreadableBody ? null : message;
   return (
     <Shell title={LIVE_COPY.unreadableTitle}>
       <CardHeader>
         <CardTitle className="text-base">{LIVE_COPY.unreadableTitle}</CardTitle>
-        <CardDescription role="status">{message === "" ? LIVE_COPY.unreadableBody : message}</CardDescription>
+        <CardDescription role="status">{reason ?? LIVE_COPY.unreadableBody}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
-        <p className="text-sm text-muted-foreground">{LIVE_COPY.unreadableBody}</p>
+        {reason === null ? null : <p className="text-sm text-muted-foreground">{LIVE_COPY.unreadableBody}</p>}
         <div>
-          <Button type="button" variant="outline" size="sm" onClick={onRetry} disabled={left !== null}>
-            <RefreshCw aria-hidden />
-            {left === null ? LIVE_COPY.retry : LIVE_COPY.retryIn(left)}
-          </Button>
+          <RetryButton retryAt={retryAt} readyAt={readyAt} onRetry={onRetry} icon />
         </div>
       </CardContent>
     </Shell>

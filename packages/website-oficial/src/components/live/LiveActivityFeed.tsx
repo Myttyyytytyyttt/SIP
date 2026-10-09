@@ -26,12 +26,11 @@
 import { useState } from "react";
 
 import { LiveActivityRow } from "@/components/live/LiveActivityRow";
-import { secondsUntil } from "@/components/live/LiveStates";
+import { FeedBanner } from "@/components/live/LiveColumn";
 import { keyBySignature } from "@/components/live/row-keys";
 import { Num } from "@/components/num";
-import { Button } from "@/components/ui/button";
 import { relativeDayLabel } from "@/lib/format";
-import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
+import { ACTIVITY_COPY } from "@/lib/live-copy";
 import type { LiveRow } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
 
@@ -204,7 +203,7 @@ export function LiveActivityFeed({
   unreadable = false,
   onRetry,
   retryAt = null,
-  nowMs,
+  readyAt = 0,
   emptyNote,
   className,
 }: {
@@ -223,8 +222,8 @@ export function LiveActivityFeed({
   readonly onRetry?: () => void;
   /** When the server said the history may be asked for again. The button counts down to it. */
   readonly retryAt?: number | null;
-  /** The BROWSER's clock, for that countdown only — never for a label. */
-  readonly nowMs?: number;
+  /** When a retry stops being deferred by the floor after the last read (RetryButton.tsx useReadyAt); 0 when none applies. */
+  readonly readyAt?: number;
   /** What to say instead of rows: the stage's own sentence, when it has one. */
   readonly emptyNote?: string;
   readonly className?: string;
@@ -239,19 +238,10 @@ export function LiveActivityFeed({
    * that showed none. The banner is rendered over the rows now; only a feed
    * that genuinely holds nothing is the banner alone.
    */
-  // The server said when it will answer again, so the button says so too
-  // rather than offering a press that walks into the same refusal.
-  const left = nowMs === undefined ? null : secondsUntil(retryAt ?? null, nowMs);
-  const banner = !unreadable ? null : (
-    <div className="space-y-2 border-b px-4 py-3" role="status">
-      <p className="text-sm text-muted-foreground">{ACTIVITY_COPY.unreadableNow}</p>
-      {onRetry === undefined ? null : (
-        <Button type="button" variant="outline" size="sm" onClick={onRetry} disabled={left !== null}>
-          {left === null ? LIVE_COPY.retry : LIVE_COPY.retryIn(left)}
-        </Button>
-      )}
-    </div>
-  );
+  // The column's own banner (LiveColumn.tsx): the server said when it will
+  // answer again, so the button counts down to it rather than offering a press
+  // that walks into the same refusal.
+  const banner = !unreadable ? null : <FeedBanner retryAt={retryAt ?? null} readyAt={readyAt} {...(onRetry === undefined ? {} : { onRetry })} />;
 
   const disclosure = (
     <HiddenTransactions

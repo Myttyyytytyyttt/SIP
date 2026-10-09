@@ -11,6 +11,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
+import { LoadOlderButton } from "@/components/live/LoadOlderButton";
 import { SavingsStrip } from "@/components/savings-strip";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ACTIVITY_COPY, STATS_COPY } from "@/lib/live-copy";
@@ -19,7 +20,7 @@ import type { LiveDashboard, VaultEventJson } from "@/lib/live-types";
 
 import { NOW_MS, liveActivity, liveDashboard, liveEntry, seconds, settledEvent, signature } from "../../test/fixtures/live-dashboard";
 
-/** The strip as LiveBody mounts it. `settledOutsideHistory` is the caller's fact, not the rows'. */
+/** The strip as LiveBody mounts it, Load older in its slot. `settledOutsideHistory` is the caller's fact, not the rows'. */
 function render(input: { readonly data: LiveDashboard; readonly settledOutsideHistory?: boolean; readonly complete?: boolean; readonly available?: boolean }): string {
   const page = toDashboardMock(input.data, { complete: input.complete ?? false });
   return renderToStaticMarkup(
@@ -32,7 +33,11 @@ function render(input: { readonly data: LiveDashboard; readonly settledOutsideHi
         now: page.now,
         live: {
           settledOutsideHistory: input.settledOutsideHistory ?? input.data.stats.settledOutsideHistory,
-          loadOlder: { busy: false, retryIn: null, complete: input.complete ?? false, available: input.available ?? true, onClick: () => undefined },
+          loadOlderSlot: createElement(LoadOlderButton, {
+            older: { busy: false, retryAt: null, message: null, complete: input.complete ?? false, available: input.available ?? true },
+            onLoadOlder: () => undefined,
+            className: "h-9 shrink-0",
+          }),
         },
       }),
     ),

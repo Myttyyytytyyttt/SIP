@@ -70,19 +70,32 @@ export const LIVE_COPY = {
   unreadableTitle: "Your pension could not be read",
   unreadableBody: `${BRAND} could not read your pension on Solana just now. Nothing is shown rather than a guess.`,
   retry: "Retry",
-  /** A 429 from this browser's own bucket: says when, not just that. */
-  rateLimited: (seconds: number | null): string =>
-    seconds === null ? "Too many requests from this browser just now. Trying again shortly." : `Too many requests from this browser just now. Trying again in ${seconds} s.`,
+  /** A retry pressed, until the read it asked for finishes (RetryButton.tsx). */
+  retrying: "Retrying…",
+  /**
+   * A 429 from this browser's own bucket: says what happened, and NO TIME
+   * (10-09). It used to say "trying again in 12 s" — but after a failure the
+   * next read on its own is the backoff's two to five minutes, not the
+   * server's retry-after (live-schedule.ts BACKOFF_MS), and an older page is
+   * never asked for again unless someone presses. When a press will help is
+   * the buttons' to count down. It still takes the seconds, because the hook
+   * that words its failures passes them.
+   */
+  rateLimited: (_seconds: number | null): string => "Too many requests from this browser just now.",
   network: `${BRAND} could not be reached. Check your connection, then try again.`,
   deploymentUnavailable: "Live data is not available on this deployment right now.",
-  /** A retry that is still waiting out a retry-after. */
+  /** A retry that is still waiting out a retry-after, or the floor after the last read. */
   retryIn: (seconds: number): string => `Try again in ${seconds} s`,
 
   // ── a later poll failed, with good data still on screen ────────────────────
-  /** Never styled as an alarm, and it never falls back to the sample. */
-  staleAsOf: (clock: string, seconds: number): string => `Showing Solana as of ${clock}. The last read failed; trying again in ${seconds} s.`,
-  /** The same, when the server named no retry time. */
-  staleAsOfPending: (clock: string): string => `Showing Solana as of ${clock}. The last read failed; trying again shortly.`,
+  /**
+   * Never styled as an alarm, and it never falls back to the sample. It names
+   * no time for the next try (10-09): the old "trying again in 30 s" was the
+   * server's retry-after, and the schedule's backoff kept none of it. What it
+   * can promise is that the page has not given up — it reads again by itself
+   * while it is on screen. The reason follows it, in the failure's own words.
+   */
+  staleAsOf: (clock: string): string => `Showing Solana as of ${clock}. The last update failed; ${BRAND} keeps trying.`,
   staleLong: "These numbers may be out of date.",
 
   // ── the sidebar ────────────────────────────────────────────────────────────
@@ -343,6 +356,11 @@ export const ACTIVITY_COPY = {
   seeAll: "See all activity",
   loadOlder: "Load older",
   loadingOlder: "Loading…",
+  /**
+   * An older page that failed. Nothing reads it again unless someone presses,
+   * so it says to — and no "trying again shortly" (10-09).
+   */
+  olderFailed: "Could not load older activity · try again",
   showingSince: (date: string): string => `Showing since ${date}`,
   complete: "Complete history",
   timeUnknown: "Time unknown",

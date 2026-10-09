@@ -102,19 +102,39 @@ describe("the states that show no numbers", () => {
   });
 });
 
-describe("refusals say when, not just that", () => {
-  it("a rate limit counts down when the server said how long", () => {
-    expect(LIVE_COPY.rateLimited(12)).toContain("12 s");
-    expect(LIVE_COPY.rateLimited(null)).not.toContain("null");
-    expect(LIVE_COPY.rateLimited(null)).toMatch(/shortly/);
+/**
+ * A SENTENCE NEVER PROMISES A TIME THE SCHEDULE DOES NOT KEEP (10-09). After a
+ * failed read the next one on its own is the backoff's two to five minutes
+ * (live-schedule.ts BACKOFF_MS), not the server's retry-after, so "trying again
+ * in 12 s" and "…shortly" were both false. When a PRESS will help is the
+ * buttons' to count down (RetryButton, LoadOlderButton), and they tick.
+ */
+describe("refusals say what happened, and no time", () => {
+  const promise = /\d+ ?s\b|shortly|again in|in a (moment|minute)/i;
+
+  it("a rate limit says what it is, and the same with or without the server's seconds", () => {
+    expect(LIVE_COPY.rateLimited(12)).toBe(LIVE_COPY.rateLimited(null));
+    expect(LIVE_COPY.rateLimited(12)).toMatch(/too many requests/i);
+    expect(LIVE_COPY.rateLimited(12)).not.toMatch(promise);
   });
 
-  it("a stale reading says as of when, and never falls back to the sample", () => {
-    const stale = LIVE_COPY.staleAsOf("14:32", 30);
-    expect(stale).toContain("14:32");
-    expect(stale).toContain("30 s");
+  it("a stale reading says as of when, that it keeps trying, and never when", () => {
+    const stale = LIVE_COPY.staleAsOf("14:32 UTC");
+    expect(stale).toContain("14:32 UTC");
+    expect(stale).toMatch(/keeps trying/);
+    expect(stale).not.toMatch(promise);
     expect(stale).not.toMatch(/sample|example/i);
-    expect(LIVE_COPY.staleAsOfPending("14:32")).toContain("14:32");
+  });
+
+  it("an older page that failed says to try again, never that it is being tried", () => {
+    expect(ACTIVITY_COPY.olderFailed).toMatch(/try again/);
+    expect(ACTIVITY_COPY.olderFailed).not.toMatch(promise);
+  });
+
+  it("none of it uses the machinery's words", () => {
+    for (const sentence of [LIVE_COPY.rateLimited(null), LIVE_COPY.staleAsOf("14:32 UTC"), LIVE_COPY.retrying, ACTIVITY_COPY.olderFailed]) {
+      expect(sentence).not.toMatch(/\b(keeper|read|poll|wrap|policy)\b/i);
+    }
   });
 });
 

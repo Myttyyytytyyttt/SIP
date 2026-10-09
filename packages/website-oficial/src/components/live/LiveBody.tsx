@@ -7,11 +7,13 @@
  * layouts — but every component inside it is a live one, and none of them can
  * reach the seeded example (src/components/live/no-mock-import.test.ts).
  *
- * ONE CLOCK FOR LABELS, ANOTHER FOR COUNTDOWNS, and they are different on
- * purpose. `now` is the SERVER's clock as at the snapshot (`data.nowMs`): every
- * "4m ago" and every day heading is measured against it, so the page cannot
- * disagree with the numbers it was read with. `nowMs` is the browser's, used
- * only for "try again in 12 s", which is about this browser's own next attempt.
+ * ONE CLOCK FOR LABELS, ANOTHER FOR THIS BROWSER'S OWN WAITING, and they are
+ * different on purpose. `now` is the SERVER's clock as at the snapshot
+ * (`data.nowMs`): every "4m ago" and every day heading is measured against it,
+ * so the page cannot disagree with the numbers it was read with. `nowMs` is the
+ * browser's, used only for how long a failure has stood. Every "try again in
+ * 12 s" ticks in its own leaf (RetryButton, LoadOlderButton), so this body is
+ * never re-rendered every second for one.
  *
  * A STAGE THAT HAS NOTHING TO SHOW SHOWS NOTHING. Before there is a vault the
  * panels are not rendered at all — not rendered empty — because a hero reading
@@ -26,8 +28,9 @@ import { LiveNextStep } from "@/components/live/LiveNextStep";
 import { LiveStartBuying } from "@/components/live/LiveStartBuying";
 import { LiveRulePanel } from "@/components/live/LiveRulePanel";
 import { FeedBanner, HiddenRows, LeadNotes, WalletList } from "@/components/live/LiveColumn";
+import { LoadOlderButton } from "@/components/live/LoadOlderButton";
 import { PendingRows } from "@/components/live/LivePending";
-import { secondsUntil } from "@/components/live/LiveStates";
+import { readKeyOf, useReadyAt } from "@/components/live/RetryButton";
 import { DashboardSource } from "@/components/DashboardSource";
 import { DashboardMain, PENSION_SLOT, RULE_SLOT } from "@/components/dashboard-main";
 import { PensionPanel } from "@/components/pension-panel";
@@ -50,6 +53,23 @@ import type { WalletsSection } from "@/lib/wallets-sections";
 
 /** After this long without a good read, the note adds that the numbers may be out of date. */
 const STALE_WARNING_MS = 5 * 60_000;
+
+/**
+ * THE STALE NOTE: as of when, that the page keeps trying, and why the last
+ * update failed — in the failure's own words (`stale.message`), which since
+ * 10-09 name no time either. It used to promise "trying again in 30 s": the
+ * server's retry-after, which the schedule's two-to-five-minute backoff never
+ * kept (G6).
+ *
+ * "May be out of date" is said once, last. The hook adds it to the message
+ * itself on a view worked out five minutes after the failure, and this body
+ * adds it on its own clock; whichever saw it first, it is not said twice.
+ */
+export function staleNote(input: { readonly clock: string; readonly message: string; readonly long: boolean }): string {
+  const said = input.message.endsWith(LIVE_COPY.staleLong);
+  const reason = (said ? input.message.slice(0, -LIVE_COPY.staleLong.length) : input.message).trim();
+  return [LIVE_COPY.staleAsOf(input.clock), reason, said || input.long ? LIVE_COPY.staleLong : ""].filter((part) => part !== "").join(" ");
+}
 
 export function LiveBody({
   view,
@@ -75,7 +95,7 @@ export function LiveBody({
   readonly older: LiveOlder;
   readonly onRefresh: () => void;
   readonly onLoadOlder: () => void;
-  /** The browser's clock. Countdowns only; never a label. */
+  /** The browser's clock: how long a failure has stood. Never a label. */
   readonly nowMs: number;
   /** The history could not be read. REQUIRED, because forgetting it drew an empty feed over a pension with settlements. */
   readonly activityUnreadable: boolean;
@@ -109,14 +129,31 @@ export function LiveBody({
     return data.wallets.find((entry) => entry.address === wallet)?.label ?? ACTIVITY_COPY.someWallet;
   };
 
-  // A poll that failed keeps the last good data and says as of when.
-  const notice = (): string | null => {
-    if (stale === null) return null;
-    const clock = clockLabel(now);
-    const seconds = secondsUntil(stale.retryAt, nowMs);
-    const line = seconds === null ? LIVE_COPY.staleAsOfPending(clock) : LIVE_COPY.staleAsOf(clock, seconds);
-    return nowMs - stale.since >= STALE_WARNING_MS ? `${line} ${LIVE_COPY.staleLong}` : line;
-  };
+  // A poll that failed keeps the last good data and says as of when, and why.
+  const notice = (): string | null =>
+    stale === null ? null : staleNote({ clock: clockLabel(now), message: stale.message, long: nowMs - stale.since >= STALE_WARNING_MS });
+
+  // [FALLBACK] When a Retry reads at once: the manual floor after the last read
+  // this browser saw finish, good or failed (RetryButton.tsx). One for the page,
+  // so the aside's banner, the sheet's and /activity's count down together.
+  const readyAt = useReadyAt(readKeyOf(data.nowMs, stale));
+
+  /*
+   * WHAT TO KEEP IN MIND ABOUT EVERY FIGURE ON THE PAGE, on both views: the
+   * stale note and the protocol-paused line. /activity showed neither, so a
+   * history the page could not update looked current there (G11).
+   */
+  const notes = (
+    <>
+      {/* Reads the rendered payload's own source, never the toggle. */}
+      <DashboardSource source="live" notice={notice()} />
+      {data.protocolPaused === true ? (
+        <p role="status" className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          {LIVE_COPY.protocolPaused}
+        </p>
+      ) : null}
+    </>
+  );
 
   // No vault means no history was even requested; say that rather than "none yet".
   // And a history still on its way is not an empty one either.
@@ -141,7 +178,7 @@ export function LiveBody({
       live={{
         below: lead === null ? null : <LeadNotes wallet={lead} />,
         list: <WalletList wallets={data.wallets} usdcRawPerSol={rawFrom(data.prices?.usdcRawPerSol)} />,
-        banner: activityUnreadable ? <FeedBanner onRetry={onRefresh} retryAt={activityRetryAt} nowMs={nowMs} /> : null,
+        banner: activityUnreadable ? <FeedBanner onRetry={onRefresh} retryAt={activityRetryAt} readyAt={readyAt} /> : null,
         // On /activity the page's own list announces the steps; the column only shows them.
         pending: <PendingRows lines={pending} announce={view !== "activity"} />,
         hidden: <HiddenRows events={page.hidden ?? []} upkeep={data.hiddenUpkeep} dust={data.hiddenDust} now={page.now} id={id} />,
@@ -185,7 +222,7 @@ export function LiveBody({
           <LiveActivityPage
             data={data}
             now={now}
-            nowMs={nowMs}
+            readyAt={readyAt}
             labelOf={labelOf}
             older={older}
             onLoadOlder={onLoadOlder}
@@ -193,6 +230,7 @@ export function LiveBody({
             activityUnreadable={activityUnreadable}
             activityRetryAt={activityRetryAt}
             nextStep={nextStep}
+            notes={notes}
             pending={pending}
             {...(emptyNote === undefined ? {} : { emptyNote })}
           />
@@ -200,13 +238,7 @@ export function LiveBody({
           <DashboardMain
             top={
               <>
-                {/* Reads the rendered payload's own source, never the toggle. */}
-                <DashboardSource source="live" notice={notice()} />
-                {data.protocolPaused === true ? (
-                  <p role="status" className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                    {LIVE_COPY.protocolPaused}
-                  </p>
-                ) : null}
+                {notes}
                 {nextStep}
                 {/* BELOW lg THE ACTIVITY COLUMN IS IN A CLOSED SHEET, so the steps
                     on their way lead the page instead; from lg up the column
@@ -224,7 +256,7 @@ export function LiveBody({
                   now={page.now}
                   live={{
                     settledOutsideHistory: data.stats.settledOutsideHistory,
-                    loadOlder: { busy: older.busy, retryIn: secondsUntil(older.retryAt, nowMs), complete: older.complete, available: older.available, onClick: onLoadOlder },
+                    loadOlderSlot: <LoadOlderButton older={older} onLoadOlder={onLoadOlder} className="h-9 shrink-0" />,
                   }}
                 />
               )

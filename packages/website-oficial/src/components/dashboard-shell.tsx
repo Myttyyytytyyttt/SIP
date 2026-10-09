@@ -43,6 +43,7 @@ import { DataModeToggle } from "@/components/data-mode";
 import { Landing } from "@/components/landing";
 import { LiveBody } from "@/components/live/LiveBody";
 import { LiveKeylessCard, LiveLoading, LivePrivyStalled, LiveUnavailableCard, LiveUnreadable } from "@/components/live/LiveStates";
+import { readKeyOf } from "@/components/live/RetryButton";
 import { DisconnectButton, PensionKeyChip, worthFrom } from "@/components/account-chip";
 import { Num } from "@/components/num";
 import { PensionPanel } from "@/components/pension-panel";
@@ -698,17 +699,22 @@ export function DashboardView({ view }: { readonly view: "pension" | "activity" 
       if (live === null || pensionKey === null || live.view.kind === "idle" || live.view.kind === "loading") {
         return plain(LIVE_COPY.readingSidebar, <LiveLoading label={LIVE_COPY.reading} />);
       }
-      // The browser's own clock, and ONLY for countdowns — every label on the
-      // page below is measured against the snapshot's own `readAtMs`.
+      // The browser's own clock, and ONLY for how long a failure has stood —
+      // every label on the page below is measured against the snapshot's own
+      // `readAtMs`, and every countdown ticks in its own leaf (use-countdown.ts).
       const clock = Date.now();
       if (live.view.kind === "unreadable") {
-        return plain(LIVE_COPY.readingSidebar, <LiveUnreadable message={live.view.message} retryAt={live.view.retryAt} now={clock} onRetry={() => live.refresh()} />);
+        // The view itself is the read key: with nothing read yet, only a new failure makes a new one.
+        return plain(LIVE_COPY.readingSidebar, <LiveUnreadable message={live.view.message} retryAt={live.view.retryAt} readKey={live.view} onRetry={() => live.refresh()} />);
       }
       // A 200 whose VAULT could not be read is not a vault that does not exist.
       // It gets the unreadable card, never an offer to create one that may
       // already be there — that asks for a signature the chain must refuse.
       if (live.view.data.stage === "vault_unreadable") {
-        return plain(LIVE_COPY.readingSidebar, <LiveUnreadable message={LIVE_COPY.unreadableBody} retryAt={null} now={clock} onRetry={() => live.refresh()} />);
+        return plain(
+          LIVE_COPY.readingSidebar,
+          <LiveUnreadable message={LIVE_COPY.unreadableBody} retryAt={null} readKey={readKeyOf(live.view.data.nowMs, live.view.stale)} onRetry={() => live.refresh()} />,
+        );
       }
       return (
         <LiveBody

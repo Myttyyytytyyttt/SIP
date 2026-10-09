@@ -30,12 +30,14 @@ vi.mock("@/components/live/LiveRulePanel", async () => {
 });
 vi.mock("@/components/pension-chart", () => ({ PensionChart: () => createElement("div", null, "LIVECHART") }));
 
-import { LiveBody } from "@/components/live/LiveBody";
+import { LiveBody, staleNote } from "@/components/live/LiveBody";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import type { LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
 import { ACTIVITY_COPY, LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
 
 import { NOW_MS, OWNER, liveActivity, liveDashboard, liveEntry, liveSnapshot, seconds, signature } from "../../../test/fixtures/live-dashboard";
+import { tickingInRegion } from "../../../test/live-regions";
 
 const older = { busy: false, retryAt: null, message: null, complete: false, available: true };
 
@@ -48,7 +50,13 @@ const settledButNoRows = (): LiveDashboard => liveDashboard({ activity: null });
 /** What a person reads: the markup without its tags. A count and its word sit in two spans. */
 const seen = (html: string): string => html.replace(/<[^>]*>/g, "");
 
-function render(input: { readonly view?: "pension" | "activity"; readonly activityUnreadable: boolean; readonly data?: LiveDashboard }): string {
+function render(input: {
+  readonly view?: "pension" | "activity";
+  readonly activityUnreadable: boolean;
+  readonly data?: LiveDashboard;
+  readonly stale?: LiveStale | null;
+  readonly older?: LiveOlder;
+}): string {
   return renderToStaticMarkup(
     createElement(
       TooltipProvider,
@@ -56,11 +64,11 @@ function render(input: { readonly view?: "pension" | "activity"; readonly activi
       createElement(LiveBody, {
         view: input.view ?? "pension",
         data: input.data ?? settledButNoRows(),
-        stale: null,
+        stale: input.stale ?? null,
         pensionKey: OWNER,
         control: null,
         account: null,
-        older,
+        older: input.older ?? older,
         onRefresh: vi.fn(),
         onLoadOlder: vi.fn(),
         nowMs: NOW_MS,
@@ -75,7 +83,17 @@ describe("an activity read that failed", () => {
     const html = render({ activityUnreadable: true });
     expect(html).toContain(ACTIVITY_COPY.unreadableNow);
     expect(html).not.toContain(ACTIVITY_COPY.empty);
-    expect(html).toContain(LIVE_COPY.retry);
+    // Drawn right after the read that failed, so it counts down the floor
+    // before a press can read at once (RetryButton.tsx).
+    expect(html).toMatch(/Try again in \d+ s/);
+  });
+
+  it("keeps the countdown out of the sentence a screen reader is told about, on both views", () => {
+    for (const view of ["pension", "activity"] as const) {
+      const html = render({ view, activityUnreadable: true });
+      expect(html).toMatch(/Try again in \d+ s/);
+      expect(tickingInRegion(html)).toBe(false);
+    }
   });
 
   it("says so on /activity too, which follows the same rule", () => {
@@ -228,5 +246,83 @@ describe("the column under a linked wallet", () => {
   it("says nothing of the pension key: the navbar already does", () => {
     const html = render({ data: liveDashboard(), activityUnreadable: false });
     expect(html).not.toContain(LIVE_COPY.pensionKey);
+  });
+});
+
+/**
+ * A PAGE WHOSE LAST UPDATE FAILED says as of when, that it keeps trying, and
+ * why — and never when it will try next: the next read on its own is the
+ * backoff's two to five minutes, and "trying again in 12 s" was the server's
+ * retry-after, which nothing kept (G6). /activity says it too (G11).
+ */
+describe("a page whose last update failed", () => {
+  const stale: LiveStale = { message: LIVE_COPY.rateLimited(12), retryAt: NOW_MS + 12_000, since: NOW_MS - 30_000 };
+  const asOf = LIVE_COPY.staleAsOf("12:00 UTC");
+
+  it("says as of when, and why, on the pension view", () => {
+    const html = render({ data: liveDashboard(), activityUnreadable: false, stale });
+    expect(html).toContain(`${asOf} ${LIVE_COPY.rateLimited(null)}`);
+    expect(seen(html)).not.toMatch(/trying again|shortly/i);
+  });
+
+  it("says the same on /activity, where a stale history used to look current", () => {
+    const html = render({ view: "activity", data: liveDashboard(), activityUnreadable: false, stale });
+    expect(html).toContain(`${asOf} ${LIVE_COPY.rateLimited(null)}`);
+  });
+
+  it("adds that the numbers may be out of date once the failure has stood five minutes", () => {
+    const old = { ...stale, since: NOW_MS - 5 * 60_000 };
+    expect(render({ data: liveDashboard(), activityUnreadable: false, stale: old })).toContain(LIVE_COPY.staleLong);
+    expect(render({ data: liveDashboard(), activityUnreadable: false, stale })).not.toContain(LIVE_COPY.staleLong);
+  });
+
+  it("draws no note while the page is current", () => {
+    expect(render({ view: "activity", data: liveDashboard(), activityUnreadable: false })).not.toContain(asOf);
+  });
+});
+
+describe("the protocol paused for everyone", () => {
+  const paused = (): LiveDashboard => ({ ...liveDashboard(), protocolPaused: true });
+
+  it("is said on the pension view, and on /activity too", () => {
+    expect(render({ data: paused(), activityUnreadable: false })).toContain(LIVE_COPY.protocolPaused);
+    expect(render({ view: "activity", data: paused(), activityUnreadable: false })).toContain(LIVE_COPY.protocolPaused);
+    expect(render({ view: "activity", data: liveDashboard(), activityUnreadable: false })).not.toContain(LIVE_COPY.protocolPaused);
+  });
+
+  it("is said on /activity even before there is a vault", () => {
+    expect(render({ view: "activity", data: { ...noVault(), protocolPaused: true }, activityUnreadable: false })).toContain(LIVE_COPY.protocolPaused);
+  });
+});
+
+describe("staleNote", () => {
+  it("is as of when, then the failure's own words", () => {
+    expect(staleNote({ clock: "14:32 UTC", message: LIVE_COPY.network, long: false })).toBe(`${LIVE_COPY.staleAsOf("14:32 UTC")} ${LIVE_COPY.network}`);
+  });
+
+  it("says the numbers may be out of date once, last, whoever added it first", () => {
+    const fromHook = `${LIVE_COPY.network} ${LIVE_COPY.staleLong}`;
+    for (const [message, long] of [
+      [fromHook, false],
+      [fromHook, true],
+      [LIVE_COPY.network, true],
+    ] as const) {
+      const note = staleNote({ clock: "14:32 UTC", message, long });
+      expect(note.split(LIVE_COPY.staleLong)).toHaveLength(2);
+      expect(note.endsWith(LIVE_COPY.staleLong)).toBe(true);
+    }
+  });
+
+  it("drops an empty reason rather than leaving a gap", () => {
+    expect(staleNote({ clock: "14:32 UTC", message: "", long: false })).toBe(LIVE_COPY.staleAsOf("14:32 UTC"));
+  });
+});
+
+describe("an older page that failed", () => {
+  it("says to try again on /activity, never that it is being tried", () => {
+    const failed = { ...older, retryAt: NOW_MS - 1_000, message: LIVE_COPY.rateLimited(4) };
+    const html = render({ view: "activity", data: liveDashboard(), activityUnreadable: false, older: failed });
+    expect(html).toContain(ACTIVITY_COPY.olderFailed);
+    expect(seen(html)).not.toMatch(/trying again|shortly/i);
   });
 });

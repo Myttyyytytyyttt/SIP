@@ -10,7 +10,14 @@
  * listing and a transaction read upstream.
  *
  * THE COUNTDOWN IS THE HONEST PART. When the server refuses with a retry-after,
- * the button says when it can be pressed rather than failing again on click.
+ * the button says when it can be pressed rather than failing again on click —
+ * and it moves (LoadOlderButton.tsx). A failed page says to try again, never
+ * that it is being tried: nothing reads an older page unless someone presses.
+ *
+ * A STALE PAGE SAYS SO HERE TOO (G11). The pension view leads with the note
+ * that the last update failed and the line that SaverFi is paused; this page
+ * showed neither, so a history the page could no longer update looked current.
+ * LiveBody hands both over as `notes`, the same elements the pension view draws.
  *
  * A PENSION THAT DOES NOT EXIST YET GETS THE SAME GUARD THE PENSION VIEW GIVES
  * ITS PANELS. Before there is a vault there is no total, no history and no
@@ -22,8 +29,8 @@
 import { useState, type ReactNode } from "react";
 
 import { FeedFooter, LiveActivityFeed } from "@/components/live/LiveActivityFeed";
+import { LoadOlderButton } from "@/components/live/LoadOlderButton";
 import { PendingRows } from "@/components/live/LivePending";
-import { secondsUntil } from "@/components/live/LiveStates";
 import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -67,7 +74,7 @@ const CHIPS: readonly (readonly [Filter, string])[] = [
 export function LiveActivityPage({
   data,
   now,
-  nowMs,
+  readyAt,
   labelOf,
   older,
   onLoadOlder,
@@ -75,14 +82,15 @@ export function LiveActivityPage({
   activityUnreadable,
   activityRetryAt = null,
   nextStep,
+  notes,
   pending = [],
   emptyNote,
   className,
 }: {
   readonly data: LiveDashboard;
   readonly now: string;
-  /** The browser's clock, for the retry countdown only. */
-  readonly nowMs: number;
+  /** When the history's Retry stops being deferred by the floor after the last read (RetryButton.tsx useReadyAt). */
+  readonly readyAt: number;
   readonly labelOf: (wallet: string | null) => string;
   readonly older: LiveOlder;
   readonly onLoadOlder: () => void;
@@ -98,6 +106,8 @@ export function LiveActivityPage({
   readonly activityRetryAt?: number | null;
   /** The one thing to do next. Shown INSTEAD of the summary before a vault exists. */
   readonly nextStep: ReactNode;
+  /** What to keep in mind about every figure on the page — stale, paused — over everything else, as on the pension view. */
+  readonly notes?: ReactNode;
   /** What the keeper is about to do with the vault's money (src/lib/live-pending.ts), over the rows. */
   readonly pending?: readonly PendingLine[];
   readonly emptyNote?: string;
@@ -111,17 +121,24 @@ export function LiveActivityPage({
   // From settlementRows, not the feed: a settlement found on a wallet's link
   // is not in the vault's page, and the footer must not contradict the strip.
   const settlements = data.settlementRows.length;
-  const retryIn = secondsUntil(older.retryAt, nowMs);
   const pendingShown = pendingShownFor(filter, pending);
 
   const frame = (children: ReactNode) => <div className={cn("flex min-w-0 flex-1 flex-col gap-4 p-4 lg:gap-6 lg:p-6", className)}>{children}</div>;
 
   // No vault: no total to show, and nothing was ever asked for to be complete.
   // The sidebar says why the feed is empty; this column says what to do about it.
-  if (data.stage === "no_vault") return frame(nextStep);
+  if (data.stage === "no_vault") {
+    return frame(
+      <>
+        {notes}
+        {nextStep}
+      </>,
+    );
+  }
 
   return frame(
     <>
+      {notes}
       <Card>
         <CardHeader>
           <dl className="flex flex-wrap items-baseline gap-x-8 gap-y-3">
@@ -177,7 +194,7 @@ export function LiveActivityPage({
               hiddenDust={data.hiddenDust}
               unreadable={activityUnreadable}
               retryAt={activityRetryAt}
-              nowMs={nowMs}
+              readyAt={readyAt}
               {...(onRetryActivity === undefined ? {} : { onRetry: onRetryActivity })}
               emptyNote={filter === "all" ? emptyNote : ACTIVITY_COPY.noneInFilter}
             />
@@ -187,16 +204,16 @@ export function LiveActivityPage({
             <FeedFooter transactions={data.rows.length} settlements={settlements} />
             {older.complete ? (
               <span className="text-xs text-muted-foreground">{ACTIVITY_COPY.complete}</span>
-            ) : !older.available ? null : (
-              <Button type="button" size="sm" variant="outline" disabled={older.busy || retryIn !== null} onClick={onLoadOlder}>
-                {older.busy ? ACTIVITY_COPY.loadingOlder : retryIn === null ? ACTIVITY_COPY.loadOlder : LIVE_COPY.retryIn(retryIn)}
-              </Button>
+            ) : (
+              <LoadOlderButton older={older} onLoadOlder={onLoadOlder} />
             )}
           </div>
 
+          {/* Its own sentence, whatever refused the page: an older page is
+              fetched only when someone presses, so the line says to press. */}
           {older.message === null ? null : (
             <p role="status" className="text-xs text-muted-foreground">
-              {older.message}
+              {ACTIVITY_COPY.olderFailed}
             </p>
           )}
         </CardContent>

@@ -1,11 +1,12 @@
 
+import type { ReactNode } from "react";
+
 import { Num } from "@/components/num";
 import { StripChip } from "@/components/strip-chip";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { pct, usd } from "@/lib/format";
-import { ACTIVITY_COPY, LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
+import { STATS_COPY } from "@/lib/live-copy";
 import { cn } from "@/lib/utils";
 import type { SavingsRule, Trade } from "@/mocks/types";
 
@@ -30,8 +31,13 @@ const SHOWN = 40;
  */
 export interface LiveStrip {
   readonly settledOutsideHistory: boolean;
-  /** `available`: a head page named an older one. Without it the button would press on nothing (use-live-dashboard.ts). */
-  readonly loadOlder: { readonly busy: boolean; readonly retryIn: number | null; readonly complete: boolean; readonly available: boolean; readonly onClick: () => void };
+  /**
+   * The one thing that can fill an empty band: Load older, counting down on its
+   * own (live/LoadOlderButton.tsx), which draws nothing once the history is
+   * complete or before a head page has named an older one. A slot rather than
+   * its state, so the ticking stays in that leaf and out of this strip.
+   */
+  readonly loadOlderSlot?: ReactNode;
 }
 
 export function SavingsStrip({
@@ -77,22 +83,9 @@ export function SavingsStrip({
         edge — with the scrollbar hidden, it is the only hint there is more.
       */}
       {shown.length === 0 && live !== undefined ? (
-        // The chips' own slot, holding the one thing that can fill it. With the
-        // history already at its beginning there is nothing older to ask for,
-        // and a button that cannot help is worse than no button — nor is there
-        // one to press before a head page has said where the older one starts.
-        live.loadOlder.complete || !live.loadOlder.available ? null : (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="h-9 shrink-0"
-            disabled={live.loadOlder.busy || live.loadOlder.retryIn !== null}
-            onClick={live.loadOlder.onClick}
-          >
-            {live.loadOlder.busy ? ACTIVITY_COPY.loadingOlder : live.loadOlder.retryIn === null ? ACTIVITY_COPY.loadOlder : LIVE_COPY.retryIn(live.loadOlder.retryIn)}
-          </Button>
-        )
+        // The chips' own slot, holding the one thing that can fill it — or
+        // nothing, when there is nothing older to ask for (LiveStrip above).
+        live.loadOlderSlot ?? null
       ) : (
         <div className="-m-px flex min-w-0 flex-1 gap-2 overflow-x-auto p-px [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [mask-image:linear-gradient(to_right,black_calc(100%-2rem),transparent)]">
           {shown.map((trade, index) => (
