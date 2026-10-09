@@ -28,6 +28,15 @@
  * IT SHOWS ONLY WHEN IT CAN BE TRUE: a live pension whose first settlement has
  * landed, with no policy on either read, and a stored choice of stocks that are
  * still on the shelf. "Keep as SOL" records that choice and the card is gone.
+ *
+ * IT GROWS IN, AND CLOSES OVER ITS LAST STATE (10-09, G8). It comes when the
+ * first settlement lands, on a page already drawn, so it opens rather than
+ * popping in at full height; when the policy it signed lands, it closes over
+ * its "Buying set up" rather than vanishing (Reveal.tsx).
+ *
+ * WHEN ANOTHER SIGNATURE HOLDS THE PAGE'S LOCK, IT SAYS SO. Its buttons were
+ * greyed with no word of why; the line under them is the wallets screen's own
+ * (LINK_COPY.busy).
  */
 
 import {
@@ -43,6 +52,7 @@ import {
 } from "@sip/solana-core/client";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { Reveal } from "@/components/live/Reveal";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SigningDetail, atMostUsd, policyRequest, readCaps, readMinimum, readWeights } from "@/components/wallets/InvestingCard";
@@ -60,7 +70,7 @@ import { BASE_THRESHOLD_RAW, minimumFor } from "@/lib/rule-settings";
 import { saveBasketChoice } from "@/lib/onboarding-memory";
 import type { VaultStateJson } from "@/lib/vault-api";
 import { DEFAULT_VENUE_NAME } from "@/lib/vault-flows";
-import { INVEST_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, signedLegsOf, writtenFeeWords } from "@/lib/vault-copy";
+import { INVEST_COPY, LINK_COPY, MAX_LEG_FEE_BPS, VAULT_COPY, listAnd, ratePercent, signedLegsOf, writtenFeeWords } from "@/lib/vault-copy";
 
 /**
  * THE MOST ONE BUY MAY SPEND for a basket started here: $25.
@@ -195,17 +205,21 @@ export function LiveStartBuying({ data, pensionKey, onRefresh }: { readonly data
   }, [becameEligible, refreshVault]);
 
   if (eligible && view !== null && view.kind === "ready" && basket !== null && basket.kind === "stocks") shown.current = { state: view.state, mints: basket.mints };
-  if (!eligible && !holding) return null;
-  if (shown.current === null) return null;
+  const open = (eligible || holding) && shown.current !== null;
+  // In the top column's `gap-4`: it grows in, and closes over what it last showed.
   return (
-    <StartBuyingCard
-      state={shown.current.state}
-      mints={shown.current.mints}
-      pensionKey={pensionKey}
-      onRefresh={onRefresh}
-      onRefreshVault={refreshVault}
-      onHolding={setHolding}
-    />
+    <Reveal open={open} inGap>
+      {open && shown.current !== null ? (
+        <StartBuyingCard
+          state={shown.current.state}
+          mints={shown.current.mints}
+          pensionKey={pensionKey}
+          onRefresh={onRefresh}
+          onRefreshVault={refreshVault}
+          onHolding={setHolding}
+        />
+      ) : null}
+    </Reveal>
   );
 }
 
@@ -340,6 +354,8 @@ function StartBuyingCard({
         </label>
 
         {request === null ? <p className="text-xs text-muted-foreground">{START_BUYING_COPY.cannotPlan}</p> : null}
+        {/* Why the buttons are greyed when nothing here is: another signature holds the page's lock. */}
+        {write.busyElsewhere ? <p className="text-xs text-muted-foreground">{LINK_COPY.busy}</p> : null}
         <p className="text-xs">{rent === null ? VAULT_COPY.costUnknown : START_BUYING_COPY.cost(formatSol(rent), formatSol(fees))}</p>
 
         <div className="flex flex-wrap gap-2">

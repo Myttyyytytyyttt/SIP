@@ -17,16 +17,35 @@
  * THE COST IS NAMED BEFORE THE BUTTON IS PRESSED. Creating a vault spends rent
  * that does not come back, so the sentence carries the figure the chain just
  * quoted, and says plainly when it could not be read.
+ *
+ * THE SETUP STAYS IN VIEW THROUGH THE FIRST BUY (10-09). From the first wait
+ * the card lists what is done and what comes next — vault created, a trading
+ * wallet linked, the first saving, the first buy — and once the pension is
+ * running it stays, ticked, until that first buy has happened. "First buy" is
+ * listed only while one is on its way: a signed approval with buying on, or
+ * stocks chosen on the setup and not approved yet. A pension kept as SOL, or
+ * one whose buying is off, is never promised a buy, and its card ends at the
+ * first saving as it always did.
+ *
+ * ONE CARD, NEVER TWO (10-09, G8). In the pension view's top column
+ * (`animate`), the card grows in, swaps its height from one stage's card to the
+ * next one's, and closes when there is nothing left to do (Reveal.tsx) — it
+ * used to pop in and out at full height and push the page under it.
  */
 
 import { Circle, CircleCheck } from "lucide-react";
+import type { ReactNode } from "react";
 
+import { HeightSwap, Reveal } from "@/components/live/Reveal";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useBasketChoice } from "@/hooks/use-onboarding-closed";
 import { formatSol } from "@/lib/amounts";
 import { requestImport } from "@/lib/import-intent";
 import { LIVE_COPY } from "@/lib/live-copy";
-import type { LiveDashboard } from "@/lib/live-types";
+import type { LiveDashboard, LivePolicyView } from "@/lib/live-types";
+import { basketOnShelf } from "@/lib/onboarding";
+import type { BasketChoice } from "@/lib/onboarding-memory";
 import { cn } from "@/lib/utils";
 import { VAULT_COPY, ratePercent, shortAddress } from "@/lib/vault-copy";
 import type { WalletsSection } from "@/lib/wallets-sections";
@@ -41,13 +60,39 @@ function Step({ label, done }: { readonly label: string; readonly done: boolean 
   );
 }
 
-export function LiveNextStep({
-  data,
-  pensionKey,
-  seatProblem = null,
-  onOpenWallets,
-  className,
-}: {
+/**
+ * WHERE THE FIRST BUY STANDS: done (the policy has spent USDC), on its way (an
+ * approval with buying on and nothing spent yet, or stocks chosen on the setup
+ * and no approval signed), or "none" — nothing promised: a pension kept as SOL,
+ * buying switched off, or a policy that could not be read.
+ */
+export function firstBuyOf(policy: LivePolicyView, choice: BasketChoice | null): "none" | "ahead" | "done" {
+  if (policy.status === "exists") {
+    if (policy.lifetimeInvested === null) return "none";
+    if (policy.lifetimeInvested > 0n) return "done";
+    return policy.enabled === true ? "ahead" : "none";
+  }
+  if (policy.status === "missing") return choice !== null && basketOnShelf(choice).kind === "stocks" ? "ahead" : "none";
+  return "none";
+}
+
+/** What is done, from the chain, and what comes next. */
+function SetupChecklist({ data, firstBuy }: { readonly data: LiveDashboard; readonly firstBuy: "none" | "ahead" | "done" }) {
+  const copy = LIVE_COPY.setup;
+  return (
+    <div className="space-y-2">
+      <p className="text-sm font-medium">{copy.checklist}</p>
+      <ul className="space-y-1.5">
+        <Step label={copy.vault} done={data.vault.exists} />
+        <Step label={copy.linked} done={data.wallets.some((wallet) => wallet.linkStatus === "this_vault")} />
+        <Step label={copy.firstSaving} done={data.stage === "active"} />
+        {firstBuy === "none" ? null : <Step label={copy.firstBuy} done={firstBuy === "done"} />}
+      </ul>
+    </div>
+  );
+}
+
+type NextStepProps = {
   readonly data: LiveDashboard;
   readonly pensionKey: string;
   /** Why no trading wallet can be created on this deployment, when that is so. */
@@ -59,12 +104,34 @@ export function LiveNextStep({
    */
   readonly onOpenWallets: (section?: WalletsSection) => void;
   readonly className?: string;
-}) {
-  const { stage, vault, wallets, policy, rents, protocolPaused } = data;
-  // `active` needs no card, and `vault_unreadable` is the frame's to handle.
-  if (stage === "active" || stage === "vault_unreadable") return null;
+};
 
-  const shell = (title: string, description: string, children?: React.ReactNode) => (
+export function LiveNextStep({
+  animate = false,
+  ...props
+}: NextStepProps & {
+  /** In a `gap-4` column on a page already drawn: grow in, swap stage cards by height, close (see the top of the file). */
+  readonly animate?: boolean;
+}) {
+  const choice = useBasketChoice(props.pensionKey);
+  const card = nextStepCard(props, choice);
+  if (!animate) return card;
+  return (
+    <Reveal open={card !== null} inGap>
+      <HeightSwap swapKey={props.data.stage}>{card}</HeightSwap>
+    </Reveal>
+  );
+}
+
+function nextStepCard({ data, pensionKey, seatProblem = null, onOpenWallets, className }: NextStepProps, choice: BasketChoice | null): ReactNode {
+  const { stage, vault, wallets, policy, rents, protocolPaused } = data;
+  // `vault_unreadable` is the frame's to handle.
+  if (stage === "vault_unreadable") return null;
+  const firstBuy = firstBuyOf(policy, choice);
+  // A running pension needs no card — until its first buy has happened, when one is on its way.
+  if (stage === "active" && firstBuy !== "ahead") return null;
+
+  const shell = (title: string, description: string, children?: ReactNode) => (
     <Card className={className}>
       <CardHeader>
         <CardTitle className="text-base">{title}</CardTitle>
@@ -146,20 +213,32 @@ export function LiveNextStep({
     );
   }
 
+  // Saving, and the first buy still ahead: the list, ticked, says what is left.
+  if (stage === "active") {
+    return shell(
+      LIVE_COPY.firstBuy.title,
+      policy.status === "exists" ? LIVE_COPY.firstBuy.body : LIVE_COPY.firstBuy.approve,
+      <SetupChecklist data={data} firstBuy={firstBuy} />,
+    );
+  }
+
   // waiting_first_settlement
   const rate = vault.rateBps === null ? null : ratePercent(vault.rateBps);
   const short = wallets.filter((wallet) => wallet.canSettle === false && wallet.linkStatus === "this_vault");
   return shell(
     LIVE_COPY.waiting.title,
     rate === null ? LIVE_COPY.waiting.body("its rate") : LIVE_COPY.waiting.body(rate),
-    short.length === 0 ? undefined : (
-      <ul className="space-y-1.5">
-        {short.map((wallet) => (
-          <li key={wallet.address} className={cn("text-sm text-amber-700 dark:text-amber-400")}>
-            {wallet.label}: {vault.walletReserve === null ? "" : LIVE_COPY.reserveNote(formatSol(vault.walletReserve))}
-          </li>
-        ))}
-      </ul>
-    ),
+    <>
+      {short.length === 0 ? null : (
+        <ul className="space-y-1.5">
+          {short.map((wallet) => (
+            <li key={wallet.address} className={cn("text-sm text-amber-700 dark:text-amber-400")}>
+              {wallet.label}: {vault.walletReserve === null ? "" : LIVE_COPY.reserveNote(formatSol(vault.walletReserve))}
+            </li>
+          ))}
+        </ul>
+      )}
+      <SetupChecklist data={data} firstBuy={firstBuy} />
+    </>,
   );
 }

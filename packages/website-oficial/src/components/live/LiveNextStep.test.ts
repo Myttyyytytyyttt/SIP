@@ -13,8 +13,11 @@ const mocked = vi.hoisted(() => {
     if (typeof node === "object" && node !== null && "props" in node) return textOf((node as { props: { children?: unknown } }).props.children);
     return "";
   }
-  return { textOf, buttons: [] as { label: string; onClick: ((event: unknown) => void) | undefined }[] };
+  return { textOf, buttons: [] as { label: string; onClick: ((event: unknown) => void) | undefined }[], choice: null as unknown };
 });
+
+// What this browser remembers the setup chose for the savings: nothing, unless a test says.
+vi.mock("@/hooks/use-onboarding-closed", () => ({ useBasketChoice: () => mocked.choice }));
 
 vi.mock("@/components/ui/button", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/components/ui/button")>();
@@ -27,20 +30,22 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
   };
 });
 
-import { LiveNextStep } from "@/components/live/LiveNextStep";
+import { OFFERED_LEGS } from "@sip/solana-core/client";
+
+import { LiveNextStep, firstBuyOf } from "@/components/live/LiveNextStep";
 import { takeImportRequest } from "@/lib/import-intent";
 import { LIVE_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
 
-import { OWNER, WALLET_A, liveDashboard, liveSnapshot } from "../../../test/fixtures/live-dashboard";
+import { OWNER, VAULT, WALLET_A, liveDashboard, liveSnapshot, policyState } from "../../../test/fixtures/live-dashboard";
 
 const onOpenWallets = vi.fn();
 /** What a real click hands a handler. */
 const CLICK = { type: "click", target: {} };
 
-function render(data: LiveDashboard, seatProblem: string | null = null): string {
+function render(data: LiveDashboard, seatProblem: string | null = null, animate = false): string {
   mocked.buttons.length = 0;
-  return renderToStaticMarkup(createElement(LiveNextStep, { data, pensionKey: OWNER, seatProblem, onOpenWallets }));
+  return renderToStaticMarkup(createElement(LiveNextStep, { data, pensionKey: OWNER, seatProblem, onOpenWallets, animate }));
 }
 
 const buttons = (label: string) => mocked.buttons.filter((button) => button.label === label);
@@ -58,6 +63,7 @@ const unlinkedSnapshot = () =>
 
 beforeEach(() => {
   mocked.buttons.length = 0;
+  mocked.choice = null;
   onOpenWallets.mockClear();
 });
 
@@ -145,12 +151,107 @@ describe("the stages after it", () => {
     expect(render(data)).toContain(LIVE_COPY.waiting.body("20 %"));
   });
 
-  it("renders nothing at all once the pension is running", () => {
-    expect(render(liveDashboard())).toBe("");
+  it("renders nothing at all once the pension is running and its first buy has happened", () => {
+    expect(render(liveDashboard({ snapshot: withPolicy(policyState({ lifetimeInvested: "5000000" })) }))).toBe("");
   });
 
   it("never offers to create a vault that merely could not be READ", () => {
     const data = liveDashboard({ snapshot: liveSnapshot({ vault: { status: "unreadable", address: "v" } }), activity: null });
     expect(render(data)).toBe("");
+  });
+});
+
+// ── the setup, ticked off through the first buy (10-09) ─────────────────────
+
+const STOCKS = { kind: "stocks", mints: OFFERED_LEGS.map((leg) => leg.mint) };
+
+function withPolicy(policy: ReturnType<typeof policyState> | "missing" | "unreadable", base = liveSnapshot()) {
+  return liveSnapshot({
+    ...base,
+    policy:
+      policy === "missing" || policy === "unreadable"
+        ? ({ status: policy, address: `${VAULT}-policy` } as never)
+        : { status: "exists", address: `${VAULT}-policy`, state: policy },
+  });
+}
+
+/** Linked, nothing settled yet: the wait for the first saving. */
+function waitingSnapshot() {
+  const fresh = liveSnapshot();
+  return liveSnapshot({ ...fresh, vault: { ...fresh.vault, state: { ...fresh.vault.state!, lifetimeSaved: "0" } }, wallets: [{ ...fresh.wallets[0]!, link: { ...fresh.wallets[0]!.link, settlementNonce: "0" } }] });
+}
+
+const done = (html: string): number => html.split("line-through").length - 1;
+
+describe("the setup, ticked off through the first buy", () => {
+  it("lists what is done while the first saving is awaited, and the first buy ahead when a signed approval has buying on", () => {
+    const data = liveDashboard({ snapshot: waitingSnapshot(), activity: null });
+    expect(data.stage).toBe("waiting_first_settlement");
+    const html = render(data);
+    expect(html).toContain(LIVE_COPY.waiting.title);
+    expect(html).toContain(LIVE_COPY.setup.checklist);
+    for (const label of [LIVE_COPY.setup.vault, LIVE_COPY.setup.linked, LIVE_COPY.setup.firstSaving, LIVE_COPY.setup.firstBuy]) expect(html).toContain(label);
+    // Vault created and the wallet linked; the first saving and the first buy still ahead.
+    expect(done(html)).toBe(2);
+  });
+
+  it("promises no buy to a pension kept as SOL, or one whose choice this browser does not hold — and does to stocks chosen", () => {
+    const data = liveDashboard({ snapshot: withPolicy("missing", waitingSnapshot()), activity: null });
+    mocked.choice = { kind: "sol" };
+    expect(render(data)).not.toContain(LIVE_COPY.setup.firstBuy);
+    mocked.choice = null;
+    expect(render(data)).not.toContain(LIVE_COPY.setup.firstBuy);
+    mocked.choice = STOCKS;
+    expect(render(data)).toContain(LIVE_COPY.setup.firstBuy);
+  });
+
+  it("stays once the pension is running, ticked to the first saving, until the first buy", () => {
+    const data = liveDashboard();
+    expect(data.stage).toBe("active");
+    const html = render(data);
+    expect(html).toContain(LIVE_COPY.firstBuy.title);
+    expect(html).toContain(LIVE_COPY.firstBuy.body);
+    expect(html).toContain(LIVE_COPY.setup.firstBuy);
+    expect(done(html)).toBe(3);
+    // Nothing to press: the buy is the keeper's to make.
+    expect(mocked.buttons).toHaveLength(0);
+  });
+
+  it("says the approval comes first when stocks were chosen and nothing is signed yet", () => {
+    mocked.choice = STOCKS;
+    expect(render(liveDashboard({ snapshot: withPolicy("missing") }))).toContain(LIVE_COPY.firstBuy.approve);
+  });
+
+  it("shows nothing once running when no buy is on its way: buying off, kept as SOL, or an approval that could not be read", () => {
+    expect(render(liveDashboard({ snapshot: withPolicy(policyState({ enabled: false })) }))).toBe("");
+    mocked.choice = { kind: "sol" };
+    expect(render(liveDashboard({ snapshot: withPolicy("missing") }))).toBe("");
+    mocked.choice = STOCKS;
+    expect(render(liveDashboard({ snapshot: withPolicy("unreadable") }))).toBe("");
+  });
+
+  it("firstBuyOf: done once the approval has spent, ahead while it can still buy, nothing promised otherwise", () => {
+    const policy = (overrides: Parameters<typeof policyState>[0]) => liveDashboard({ snapshot: withPolicy(policyState(overrides)) }).policy;
+    expect(firstBuyOf(policy({ lifetimeInvested: "1" }), null)).toBe("done");
+    expect(firstBuyOf(policy({}), null)).toBe("ahead");
+    expect(firstBuyOf(policy({ enabled: false }), null)).toBe("none");
+    const missing = liveDashboard({ snapshot: withPolicy("missing") }).policy;
+    expect(firstBuyOf(missing, null)).toBe("none");
+    expect(firstBuyOf(missing, { kind: "sol" })).toBe("none");
+    expect(firstBuyOf(missing, STOCKS as never)).toBe("ahead");
+    // Stocks no longer on the shelf are no buy at all.
+    expect(firstBuyOf(missing, { kind: "stocks", mints: ["NotOnTheShelf1111111111111111111111111111"] })).toBe("none");
+  });
+});
+
+describe("in the pension view's top column", () => {
+  it("is one box that grows and closes, with the stage's card inside one swap — open at once on the first paint", () => {
+    const html = render(liveDashboard({ snapshot: waitingSnapshot(), activity: null }), null, true);
+    expect(html).toMatch(/^<div class="grid transition-\[grid-template-rows,opacity,margin-top\][^"]* grid-rows-\[1fr\] opacity-100 mt-0"><div class="min-h-0"><div><div><div data-slot="card"/);
+    expect(html).not.toContain("animate-in");
+  });
+
+  it("draws nothing, and holds no gap, when there is no card", () => {
+    expect(render(liveDashboard({ snapshot: withPolicy(policyState({ lifetimeInvested: "5000000" })) }), null, true)).toBe("");
   });
 });

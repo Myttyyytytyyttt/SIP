@@ -30,7 +30,7 @@ import { useState, type ReactNode } from "react";
 
 import { FeedFooter, LiveActivityFeed } from "@/components/live/LiveActivityFeed";
 import { LoadOlderButton } from "@/components/live/LoadOlderButton";
-import { PendingRows } from "@/components/live/LivePending";
+import { PendingRows, viewOf, type PendingView } from "@/components/live/LivePending";
 import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -57,12 +57,19 @@ const KINDS: Readonly<Record<Exclude<Filter, "all">, ReadonlySet<VaultEventKindJ
  * being checked is a saving that may follow: under All and Savings. Nothing
  * pending is a withdrawal.
  */
-export function pendingShownFor(filter: Filter, pending: readonly PendingLine[]): readonly PendingLine[] {
+export function pendingShownFor<T extends { readonly kind: PendingLine["kind"] }>(filter: Filter, pending: readonly T[]): readonly T[] {
   if (filter === "all") return pending;
   if (filter === "savings") return pending.filter((line) => line.kind === "measuring");
   if (filter === "investing") return pending.filter((line) => line.kind !== "measuring");
   return [];
 }
+
+/** The same filter over the steps and over the rows drawn for them, held ones included. */
+export function pendingViewFor(filter: Filter, view: PendingView): PendingView {
+  return { lines: pendingShownFor(filter, view.lines), rows: pendingShownFor(filter, view.rows), held: false };
+}
+
+const NOTHING_PENDING: PendingView = viewOf([]);
 
 const CHIPS: readonly (readonly [Filter, string])[] = [
   ["all", ACTIVITY_COPY.filterAll],
@@ -84,7 +91,7 @@ export function LiveActivityPage({
   countsUnknown = false,
   nextStep,
   notes,
-  pending = [],
+  pending = NOTHING_PENDING,
   emptyNote,
   className,
 }: {
@@ -111,8 +118,8 @@ export function LiveActivityPage({
   readonly nextStep: ReactNode;
   /** What to keep in mind about every figure on the page — stale, paused — over everything else, as on the pension view. */
   readonly notes?: ReactNode;
-  /** What the keeper is about to do with the vault's money (src/lib/live-pending.ts), over the rows. */
-  readonly pending?: readonly PendingLine[];
+  /** What the keeper is about to do with the vault's money (src/lib/live-pending.ts), over the rows — with what just ended (LivePending.tsx usePendingView). */
+  readonly pending?: PendingView;
   readonly emptyNote?: string;
   readonly className?: string;
 }) {
@@ -124,7 +131,7 @@ export function LiveActivityPage({
   // From settlementRows, not the feed: a settlement found on a wallet's link
   // is not in the vault's page, and the footer must not contradict the strip.
   const settlements = data.settlementRows.length;
-  const pendingShown = pendingShownFor(filter, pending);
+  const pendingShown = pendingViewFor(filter, pending);
 
   const frame = (children: ReactNode) => <div className={cn("flex min-w-0 flex-1 flex-col gap-4 p-4 lg:gap-6 lg:p-6", className)}>{children}</div>;
 
@@ -185,7 +192,8 @@ export function LiveActivityPage({
           </div>
 
           <div className="overflow-hidden rounded-md border">
-            <PendingRows lines={pendingShown} {...(pendingShown.length === 0 ? {} : { className: "border-b" })} />
+            {/* The divider is the rows' own, so it comes and goes with them. */}
+            <PendingRows lines={pendingShown.lines} view={pendingShown} innerClassName="border-b" />
             <LiveActivityFeed
               rows={rows}
               now={now}

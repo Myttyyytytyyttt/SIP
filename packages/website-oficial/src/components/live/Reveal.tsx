@@ -27,9 +27,20 @@
  * transition at all. While it moves the content is clipped to the row; once it
  * stands open it is not, so a card's ring and a focused button's ring are drawn
  * whole.
+ *
+ * JOINING A PAGE ALREADY DRAWN (`appear`, 10-09). Something mounted at the very
+ * moment it is wanted — the strip on the first settlement, whose wrapper must
+ * not stand empty before it; a step joining a card already open — has no
+ * closed render to grow from. `appear` gives it one: it starts collapsed and
+ * grows. Never passed for what is there on the page's first paint.
+ *
+ * ONE CARD BECOMING ANOTHER (HeightSwap, below). A stage card that turns into
+ * the next stage's is one box whose height moves from the old card's to the new
+ * one's while the content swaps inside it — never an exit and an entrance
+ * stacked, which would hold two cards on screen at once.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import { cn } from "@/lib/utils";
@@ -54,24 +65,16 @@ export function revealLook(open: boolean, phase: RevealPhase): "gone" | "collaps
   return phase === "closed" ? "gone" : "collapsed";
 }
 
-export function Reveal({
-  open,
-  inGap = false,
-  className,
-  children,
-}: {
-  readonly open: boolean;
-  /** It sits in a `gap-4` column: while closed it takes the gap back with it. */
-  readonly inGap?: boolean;
-  readonly className?: string;
-  readonly children: ReactNode;
-}) {
+/**
+ * Where a Reveal is in its life, for `open`. Its own component uses it, and so
+ * does anything that must stay mounted around what comes and goes — a live
+ * region that has to exist before its first announcement (LivePending.tsx).
+ */
+export function useRevealPhase(open: boolean, appear = false): RevealPhase {
   const reduced = useReducedMotion();
-  // First paint: whatever is asked for is simply there.
-  const [phase, setPhase] = useState<RevealPhase>(open ? "open" : "closed");
-  // What it showed last while open, so it closes over its content.
-  const shown = useRef<ReactNode>(children);
-  if (open) shown.current = children;
+  // First paint: whatever is asked for is simply there — unless it is joining a
+  // page already drawn, which starts from its collapsed frame (reduced motion: there at once).
+  const [phase, setPhase] = useState<RevealPhase>(open && (!appear || reduced) ? "open" : "closed");
 
   useEffect(() => {
     if (open) {
@@ -108,12 +111,49 @@ export function Reveal({
     return () => clearTimeout(timer);
   }, [open, phase, reduced]);
 
+  return phase;
+}
+
+export function Reveal({
+  open,
+  appear = false,
+  inGap = false,
+  className,
+  children,
+}: {
+  readonly open: boolean;
+  /** Mounted at the moment it is wanted, on a page already drawn: it grows in rather than popping (see the top of the file). */
+  readonly appear?: boolean;
+  /** It sits in a `gap-4` column: while closed it takes the gap back with it. */
+  readonly inGap?: boolean;
+  readonly className?: string;
+  readonly children: ReactNode;
+}) {
+  const phase = useRevealPhase(open, appear);
+  // What it showed last while open, so it closes over its content.
+  const shown = useRef<ReactNode>(children);
+  if (open) shown.current = children;
+
   const look = revealLook(open, phase);
   if (look === "gone") return null;
   return (
     <RevealFrame grown={look === "grown"} clipped={!open || phase !== "open"} leaving={!open} inGap={inGap} {...(className === undefined ? {} : { className })}>
       {open ? children : shown.current}
     </RevealFrame>
+  );
+}
+
+/**
+ * The outer box's classes at one moment. `still` drops the transition: for a
+ * box that stays mounted while closed (a live region), the first collapsed
+ * frame after "gone" must not animate from whatever it looked like before.
+ */
+export function revealFrameClass(input: { readonly grown: boolean; readonly inGap: boolean; readonly still?: boolean }): string {
+  return cn(
+    "grid",
+    input.still !== true && "transition-[grid-template-rows,opacity,margin-top] duration-300 ease-out motion-reduce:transition-none",
+    input.grown ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
+    input.inGap && (input.grown ? "mt-0" : "-mt-4"),
   );
 }
 
@@ -137,16 +177,84 @@ export function RevealFrame({
   readonly children: ReactNode;
 }) {
   return (
-    <div
-      className={cn(
-        "grid transition-[grid-template-rows,opacity,margin-top] duration-300 ease-out motion-reduce:transition-none",
-        grown ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
-        inGap && (grown ? "mt-0" : "-mt-4"),
-        className,
-      )}
-      {...(leaving ? { inert: true, "aria-hidden": true } : {})}
-    >
+    <div className={cn(revealFrameClass({ grown, inGap }), className)} {...(leaving ? { inert: true, "aria-hidden": true } : {})}>
       <div className={cn("min-h-0", clipped && "overflow-hidden")}>{children}</div>
+    </div>
+  );
+}
+
+/**
+ * Whether a swap from one card to the next should move the box: there was a
+ * card before, its key changed, the two heights differ, and nobody asked for
+ * less motion. Anything else simply swaps.
+ */
+export function swapMoves(input: {
+  readonly before: { readonly key: string; readonly height: number | null };
+  readonly key: string;
+  readonly height: number | null;
+  readonly reduced: boolean;
+}): boolean {
+  const { before, key, height, reduced } = input;
+  return !reduced && before.key !== key && before.height !== null && height !== null && before.height !== height;
+}
+
+/**
+ * ONE BOX, ITS CARD SWAPPED (10-09): the stage card of one stage becoming the
+ * next one's. Measure, then set height: the new card is laid out at once, the
+ * box is held at the old card's height for the frame that paints it, then moves
+ * to the new card's in the same 300 ms as a Reveal, then lets go of its height
+ * altogether, so whatever the card does next it does in its own height. The new
+ * card fades in over the old one's place (motion-safe; reduced motion swaps at
+ * once, at the new height).
+ *
+ * THE FIRST PAINT NEVER MOVES, and neither does a card that only changes inside
+ * its own stage: only a change of `swapKey` does.
+ */
+export function HeightSwap({ swapKey, className, children }: { readonly swapKey: string; readonly className?: string; readonly children: ReactNode }) {
+  const reduced = useReducedMotion();
+  const inner = useRef<HTMLDivElement>(null);
+  // The key and height of the card the box last held, measured after every commit.
+  const seen = useRef<{ key: string; height: number | null }>({ key: swapKey, height: null });
+  // Held at a height (px) while a swap moves; `moving` once the transition runs.
+  const [lock, setLock] = useState<{ readonly px: number; readonly moving: boolean } | null>(null);
+  // Once a swap has happened, every new card fades in; the first one never does.
+  const first = useRef(swapKey);
+  const swapped = useRef(false);
+  if (swapKey !== first.current) swapped.current = true;
+
+  // Before the paint: a new key, a different height — hold the box where it was.
+  useLayoutEffect(() => {
+    const height = inner.current?.offsetHeight ?? null;
+    const before = seen.current;
+    seen.current = { key: swapKey, height };
+    if (swapMoves({ before, key: swapKey, height, reduced })) setLock({ px: lock?.px ?? before.height!, moving: false });
+  });
+
+  useEffect(() => {
+    if (lock === null) return;
+    if (!lock.moving) {
+      // Two frames, so the held height has been painted before it moves.
+      let second = 0;
+      const frame = requestAnimationFrame(() => {
+        second = requestAnimationFrame(() => setLock({ px: inner.current?.offsetHeight ?? lock.px, moving: true }));
+      });
+      return () => {
+        cancelAnimationFrame(frame);
+        cancelAnimationFrame(second);
+      };
+    }
+    const timer = setTimeout(() => setLock(null), REVEAL_MS);
+    return () => clearTimeout(timer);
+  }, [lock]);
+
+  return (
+    <div
+      className={cn(lock !== null && "overflow-hidden", lock?.moving === true && "transition-[height] duration-300 ease-out motion-reduce:transition-none", className) || undefined}
+      {...(lock === null ? {} : { style: { height: lock.px } })}
+    >
+      <div key={swapKey} ref={inner} className={swapped.current ? "motion-safe:animate-in motion-safe:fade-in" : undefined}>
+        {children}
+      </div>
     </div>
   );
 }

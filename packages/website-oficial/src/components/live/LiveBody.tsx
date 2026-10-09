@@ -19,10 +19,20 @@
  * A STAGE THAT HAS NOTHING TO SHOW SHOWS NOTHING. Before there is a vault the
  * panels are not rendered at all — not rendered empty — because a hero reading
  * "0 SOL" over a chart with no points reads as a broken pension rather than one
- * that has not been created yet.
+ * that has not been created yet. The strip likewise: it is not passed at all
+ * before the first settlement, so its wrapper does not stand empty in the
+ * column holding a gap open, and it grows in when that settlement lands.
+ *
+ * WHAT COMES AND GOES IN THE TOP COLUMN DOES NOT SHOVE THE PAGE (10-09, G8):
+ * the stage card swaps its height from one stage to the next, the steps' card
+ * grows and closes, the start-buying card grows in (Reveal.tsx).
+ *
+ * WHAT IS ON ITS WAY IS READ OFF A SETTLED READ (use-read-settled.ts): a
+ * read's snapshot lands before its history, and the steps over the feed wait
+ * for the history before anything ends or flips (LivePending.tsx).
  */
 
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 
 import { LiveActivityPage } from "@/components/live/LiveActivityPage";
 import { LiveNextStep } from "@/components/live/LiveNextStep";
@@ -32,8 +42,10 @@ import { FeedBanner, HiddenRows, LeadNotes, WalletList } from "@/components/live
 import { FeedSkeleton } from "@/components/live/FeedSkeleton";
 import { LiveHeartbeat } from "@/components/live/LiveHeartbeat";
 import { LoadOlderButton } from "@/components/live/LoadOlderButton";
-import { PendingRows } from "@/components/live/LivePending";
+import { PendingRows, usePendingView } from "@/components/live/LivePending";
 import { readKeyOf, useReadyAt } from "@/components/live/RetryButton";
+import { Reveal } from "@/components/live/Reveal";
+import { useReadSettled } from "@/components/live/use-read-settled";
 import { DashboardSource } from "@/components/DashboardSource";
 import { DashboardMain, PENSION_SLOT, RULE_SLOT } from "@/components/dashboard-main";
 import { PensionPanel } from "@/components/pension-panel";
@@ -135,9 +147,22 @@ export function LiveBody({
   // draw instead of the seeded example — real figures, today's dollars, and a
   // dash wherever the chain has no answer (src/lib/live-mock.ts).
   const page = toDashboardMock(data, { complete: older.complete });
-  // WHAT IS ON ITS WAY: SOL converting, a basket about to be bought (src/lib/live-pending.ts),
-  // each "since" said against the payload's own clock, with its day when that is not today.
-  const pending = pendingLines(pendingSteps(data), data.nowMs);
+  // WHAT IS ON ITS WAY: a wallet being checked, SOL converting, a basket about
+  // to be bought (src/lib/live-pending.ts) — from the last read whose history
+  // had landed, with the newest snapshot's steps beside it for the loaders the
+  // page is no longer sure of. Worked out once, for every copy of the rows;
+  // each "since" said against its payload's own clock, with its day when that
+  // is not today.
+  const settled = useReadSettled(data, { activityPending, activityUnreadable });
+  const steps = pendingSteps(settled.data);
+  const lines = pendingLines(steps, settled.data.nowMs);
+  const pending = usePendingView({ data: settled.data, steps, lines, latest: settled.settled ? lines : pendingLines(pendingSteps(data), data.nowMs) });
+
+  // THE STRIP, ONLY ONCE THERE IS ONE (SavingsStrip's own null rule). Grown in
+  // when it comes after the page was drawn without it; simply there otherwise.
+  const hasStrip = page.trades.length > 0 || data.stats.settledOutsideHistory;
+  const stripWasAbsent = useRef(false);
+  if (!hasStrip) stripWasAbsent.current = true;
 
   /** A wallet's own label, so a settlement says which one it came from. */
   const labelOf = (wallet: string | null): string => {
@@ -198,7 +223,7 @@ export function LiveBody({
         list: <WalletList wallets={data.wallets} usdcRawPerSol={rawFrom(data.prices?.usdcRawPerSol)} />,
         banner: activityUnreadable ? <FeedBanner onRetry={onRefresh} retryAt={activityRetryAt} readyAt={readyAt} /> : null,
         // On /activity the page's own list announces the steps; the column only shows them.
-        pending: <PendingRows lines={pending} announce={view !== "activity"} />,
+        pending: <PendingRows lines={pending.lines} view={pending} announce={view !== "activity"} />,
         hidden: <HiddenRows events={page.hidden ?? []} upkeep={data.hiddenUpkeep} dust={data.hiddenDust} now={page.now} id={id} />,
         // A page whose every transaction was upkeep is not an empty history.
         empty: emptyNote ?? (data.hiddenRows.length > 0 ? ACTIVITY_COPY.onlyHidden : ACTIVITY_COPY.empty),
@@ -216,6 +241,9 @@ export function LiveBody({
       pensionKey={pensionKey}
       seatProblem={config === null ? null : seatProblem(config)}
       onOpenWallets={onOpenWallets}
+      // In the pension view's top column it enters, swaps and leaves without
+      // shoving the page; /activity shows it only before there is a vault.
+      animate={view === "pension"}
     />
   );
 
@@ -273,22 +301,24 @@ export function LiveBody({
                 {/* BELOW lg THE ACTIVITY COLUMN IS IN A CLOSED SHEET, so the steps
                     on their way lead the page instead; from lg up the column
                     shows them and this copy is not displayed (LivePending.tsx). */}
-                <PendingRows lines={pending} variant="card" className="lg:hidden" />
+                <PendingRows lines={pending.lines} view={pending} variant="card" className="lg:hidden" />
                 {/* The buying approval the setup promised, once the first savings have landed. */}
                 <LiveStartBuying data={data} pensionKey={pensionKey} onRefresh={onRefresh} />
               </>
             }
             strip={
-              panels ? null : (
-                <SavingsStrip
-                  trades={page.trades}
-                  rule={page.rule}
-                  now={page.now}
-                  live={{
-                    settledOutsideHistory: data.stats.settledOutsideHistory,
-                    loadOlderSlot: <LoadOlderButton older={older} onLoadOlder={onLoadOlder} className="h-9 shrink-0" />,
-                  }}
-                />
+              panels || !hasStrip ? null : (
+                <Reveal open appear={stripWasAbsent.current}>
+                  <SavingsStrip
+                    trades={page.trades}
+                    rule={page.rule}
+                    now={page.now}
+                    live={{
+                      settledOutsideHistory: data.stats.settledOutsideHistory,
+                      loadOlderSlot: <LoadOlderButton older={older} onLoadOlder={onLoadOlder} className="h-9 shrink-0" />,
+                    }}
+                  />
+                </Reveal>
               )
             }
             cards={

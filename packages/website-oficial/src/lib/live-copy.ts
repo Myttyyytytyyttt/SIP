@@ -143,6 +143,54 @@ export const LIVE_COPY = {
     checkIn: (seconds: number): string => `Check again in ${seconds} s`,
   },
 
+  // ── what is on its way, over the feed (LivePending.tsx) ────────────────────
+  /**
+   * THE ROWS' HEADING SAYS WHAT THEY ARE (10-09, G14). It said "In progress"
+   * over steps that were all resting. Now: "In progress" while one of them is
+   * under way, "Waiting" when every one rests. Never read out (aria-hidden):
+   * the rows are what the region announces, and a flip is not news.
+   */
+  pendingHeading: {
+    active: "In progress",
+    waiting: "Waiting",
+  },
+  /** The below-lg card, held up for a minute after its last step ended, so one cycle does not push the page three times. */
+  pendingIdle: "Nothing in progress right now",
+  /**
+   * A step whose transaction has landed, held a few seconds where its row was —
+   * only once that transaction is on the page. No time: its row in the
+   * activity carries one, and a done line is gone before it would matter.
+   */
+  pendingDone: {
+    converted: "Converted to USDC",
+    convertedSub: "The USDC is in your vault",
+    bought: (names: string): string => `Bought ${names}`,
+    boughtSub: "Now in your holdings",
+  },
+
+  // ── the setup, ticked off through the first buy (LiveNextStep.tsx) ─────────
+  /**
+   * WHAT IS DONE AND WHAT COMES NEXT, as facts the chain can be asked about
+   * (10-09). It stays on the dashboard from the first wait through the first
+   * buy, so what the setup started goes on ticking off here. "First buy"
+   * is listed only when a buy is on its way at all: a pension kept as SOL is
+   * never promised one.
+   */
+  setup: {
+    checklist: "Getting started",
+    vault: "Vault created",
+    linked: "Trading wallet linked",
+    firstSaving: "First saving",
+    firstBuy: "First buy",
+  },
+  /** The pension has saved, and its first buy has not happened yet. */
+  firstBuy: {
+    title: "Next: your first buy",
+    body: "Your first savings are in your vault. The first buy comes once Next investment reaches its amount.",
+    /** No approval signed yet, and stocks were chosen: the approval is what comes first. */
+    approve: "Your first savings are in your vault. Buying starts once you approve it.",
+  },
+
   // ── the sidebar ────────────────────────────────────────────────────────────
   pensionKey: "Pension key",
   tradingWallets: "Trading wallets",

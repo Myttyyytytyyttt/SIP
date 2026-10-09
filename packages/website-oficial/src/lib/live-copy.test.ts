@@ -191,6 +191,36 @@ describe("the header dot's words", () => {
   });
 });
 
+/**
+ * WHAT IS ON ITS WAY, AND THE SETUP THROUGH THE FIRST BUY (10-09). The steps'
+ * heading says what they are, a done line says what landed, and the checklist
+ * states facts — none of it promises a time or names the machinery.
+ */
+describe("the steps' and the setup's words", () => {
+  it("head the rows by what they are: under way, or waiting", () => {
+    expect(LIVE_COPY.pendingHeading).toEqual({ active: "In progress", waiting: "Waiting" });
+    expect(LIVE_COPY.pendingIdle).toBe("Nothing in progress right now");
+    expect(LIVE_COPY.pendingDone.bought("SPYx and ANTHROPIC")).toBe("Bought SPYx and ANTHROPIC");
+  });
+
+  it("promise no time and name none of the machinery", () => {
+    const words = [
+      ...Object.values(LIVE_COPY.pendingHeading),
+      LIVE_COPY.pendingIdle,
+      LIVE_COPY.pendingDone.converted,
+      LIVE_COPY.pendingDone.convertedSub,
+      LIVE_COPY.pendingDone.bought("SPYx"),
+      LIVE_COPY.pendingDone.boughtSub,
+      ...Object.values(LIVE_COPY.setup),
+      ...Object.values(LIVE_COPY.firstBuy),
+    ];
+    for (const sentence of words) {
+      expect(sentence).not.toMatch(/shortly|again in|in a (moment|minute)|\bsoon\b/i);
+      expect(sentence).not.toMatch(/\b(keeper|read|poll|wrap|policy|RPC|socket)\b/i);
+    }
+  });
+});
+
 describe("the rate a sentence quotes is the product's own", () => {
   it("the profit sentences carry ratePercent(DEFAULT_VAULT_POLICY.skimBps)", () => {
     const rate = ratePercent(DEFAULT_VAULT_POLICY.skimBps);

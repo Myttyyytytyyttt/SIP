@@ -437,3 +437,39 @@ describe("how fresh the page is", () => {
     expect(html).toContain(LIVE_COPY.staleAsOf("12:00 UTC"));
   });
 });
+
+describe("what comes and goes in the pension view (10-09, G8)", () => {
+  /** Linked, nothing settled yet, an empty history: the wait for the first saving. */
+  const waiting = (): LiveDashboard => {
+    const fresh = liveSnapshot();
+    return liveDashboard({
+      snapshot: liveSnapshot({ ...fresh, vault: { ...fresh.vault, state: { ...fresh.vault.state!, lifetimeSaved: "0" } }, wallets: [{ ...fresh.wallets[0]!, link: { ...fresh.wallets[0]!.link, settlementNonce: "0" } }] }),
+      activity: liveActivity([]),
+    });
+  };
+
+  it("passes no strip before the first settlement, so no empty wrapper holds a gap open in the column", () => {
+    const data = waiting();
+    expect(data.stage).toBe("waiting_first_settlement");
+    const html = render({ data, activityUnreadable: false });
+    expect(html).not.toContain(`aria-label="${STATS_COPY.settlementStripLabel}"`);
+    expect(html).not.toContain('<div class="rise-in"></div>');
+  });
+
+  it("draws the strip in a box that can grow in — simply open on the page's first paint", () => {
+    const html = render({ data: liveDashboard(), activityUnreadable: false });
+    expect(html).toMatch(new RegExp(`<div class="rise-in"><div class="grid [^"]*grid-rows-\\[1fr\\] opacity-100"><div class="min-h-0"><div[^>]*role="group" aria-label="${STATS_COPY.settlementStripLabel}"`));
+  });
+
+  it("puts the stage card in one box that grows, swaps and closes, inside the top column's gap", () => {
+    const html = render({ data: waiting(), activityUnreadable: false });
+    expect(html).toMatch(/<div class="grid [^"]*grid-rows-\[1fr\] opacity-100 mt-0"><div class="min-h-0"><div><div><div data-slot="card"[^>]*><div[^>]*><div[^>]*>Waiting for the first settlement</);
+  });
+
+  it("draws /activity's own stage card plainly: it stands in a page of its own, not a column that moves", () => {
+    const noVault = liveDashboard({ snapshot: liveSnapshot({ vault: { status: "missing", address: "v" }, policy: { status: "missing", address: "p" }, wallets: [] }), activity: null, privyWallets: [] });
+    const html = render({ view: "activity", data: noVault, activityUnreadable: false });
+    expect(html).toContain(LIVE_COPY.noVault.title);
+    expect(html).not.toContain("mt-0");
+  });
+});

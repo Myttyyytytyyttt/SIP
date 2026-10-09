@@ -27,7 +27,8 @@ const GATED = [
   "wallets/TradingWalletRow.tsx",
   "wallets/TradingWalletsCard.tsx",
   "wallets/ImportWalletPanel.tsx",
-  "live/LivePending.tsx",
+  // The steps' turning mark, shared since 10-09 (LivePending.tsx draws it).
+  "live/WorkMark.tsx",
   // The first read's glyph (10-09); its blocks are Skeleton's, gated above.
   "live/LiveFirstRead.tsx",
 ] as const;

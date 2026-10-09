@@ -30,7 +30,7 @@ import { PendingRows } from "@/components/live/LivePending";
 import { SavingsRulePanel } from "@/components/savings-rule-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WalletActivity } from "@/components/wallet-activity";
-import { PENDING_COPY } from "@/lib/live-copy";
+import { LIVE_COPY, PENDING_COPY } from "@/lib/live-copy";
 import { toLiveDashboard } from "@/lib/live-model";
 import type { PendingLine } from "@/lib/live-pending";
 import type { LiveDashboard, VaultEventJson } from "@/lib/live-types";
@@ -52,10 +52,10 @@ describe("the rows", () => {
 
   it("put a turning mark in the square of a step under way, which stops for reduced motion", () => {
     const out = html(createElement(PendingRows, { lines: [ACTIVE] }));
-    expect(out).toContain(PENDING_COPY.heading);
+    expect(out).toContain(LIVE_COPY.pendingHeading.active);
     expect(out).toContain('data-pending-step="converting"');
     expect(out).toContain('data-state="active"');
-    expect(out).toMatch(/<svg[^>]*class="[^"]*motion-safe:animate-spin[^"]*"[^>]*data-pending-loader=""/);
+    expect(out).toMatch(/<svg[^>]*class="[^"]*motion-safe:animate-spin[^"]*"[^>]*data-work-loader=""/);
     expect(out).not.toMatch(/class="[^"]*(?<!motion-safe:)animate-spin/);
     expect(out).toContain(ACTIVE.title);
     expect(out).toContain(ACTIVE.sub);
@@ -65,7 +65,7 @@ describe("the rows", () => {
   it("draw a resting step still, with its reason, and in grey rather than a buy's blue", () => {
     const out = html(createElement(PendingRows, { lines: [WAITING] }));
     expect(out).toContain('data-state="waiting"');
-    expect(out).not.toContain("data-pending-loader");
+    expect(out).not.toContain("data-work-loader");
     expect(out).not.toContain("animate-spin");
     expect(out).not.toContain("text-blue-600");
     expect(out).toContain(PENDING_COPY.rest.paused);
@@ -74,7 +74,7 @@ describe("the rows", () => {
   it("draw a conversion resting on the SOL safety floor with the pause mark, like every rest the owner can lift", () => {
     const floor: PendingLine = { ...ACTIVE, active: false, rest: "safety_floor", title: PENDING_COPY.convertingWaiting, sub: PENDING_COPY.rest.safety_floor, amountSpoken: "0.018 SOL" };
     const out = html(createElement(PendingRows, { lines: [floor] }));
-    expect(out).not.toContain("data-pending-loader");
+    expect(out).not.toContain("data-work-loader");
     expect(out).toContain("lucide-pause");
     expect(out).not.toContain("lucide-arrow-left-right");
     expect(out).toContain(PENDING_COPY.rest.safety_floor.replaceAll("'", "&#x27;"));
@@ -108,7 +108,7 @@ describe("the sample stays the sample", () => {
   it("has no pending region in its column: the slot is a live page's only", () => {
     const out = html(createElement(WalletActivity, { wallet: mock.wallet, activity: mock.activity, now: mock.now }));
     expect(out).not.toContain("data-pending-steps");
-    expect(out).not.toContain(PENDING_COPY.heading);
+    expect(out).not.toContain(LIVE_COPY.pendingHeading.active);
   });
 
   it("has no line under Next investment, and its figure is the sample's own pending pile", () => {
@@ -170,8 +170,10 @@ describe("a live page", () => {
    */
   it("leads the pension page's own top with the steps below lg, where the activity column is out of sight", () => {
     const out = render("pension", converting());
-    const top = out.match(/<div role="status" aria-live="polite" class="([^"]*)" data-pending-steps="1">/);
-    expect(top?.[1]).toBe("overflow-hidden rounded-md border bg-card lg:hidden");
+    // The region is the card's own box: open, at the page's first paint, with nothing to grow from (Reveal.tsx).
+    const top = out.match(/<div role="status" aria-live="polite" class="([^"]*)" data-pending-steps="1"><div class="min-h-0"><div class="([^"]*)">/);
+    expect(top?.[1]).toBe("grid transition-[grid-template-rows,opacity,margin-top] duration-300 ease-out motion-reduce:transition-none grid-rows-[1fr] opacity-100 mt-0 lg:hidden");
+    expect(top?.[2]).toBe("overflow-hidden rounded-md border bg-card");
     // Before the holdings and the rule card, inside the main column.
     expect(out.indexOf(top![0])).toBeLessThan(out.indexOf("data-next-investment-note"));
     const empty = render("pension", toLiveDashboard({ snapshot: liveSnapshot({ vaultTokenAccounts: { status: "exists", items: [] }, vault: { ...liveSnapshot().vault, lamports: "1285240", withdrawableLamports: "0" } }), activity: liveActivity([]), privyWallets: [] }));
@@ -226,7 +228,9 @@ describe("a live page", () => {
     // The aside's column, and the page's own list.
     expect(count(out, 'data-pending-step="converting"')).toBeGreaterThanOrEqual(2);
     // One polite region for them, the page's own: the column beside it shows them silently.
-    expect(out.match(/<div[^>]*aria-live="polite"[^>]*data-pending-steps="1"/g)).toEqual(['<div role="status" aria-live="polite" class="border-b" data-pending-steps="1"']);
+    expect(out.match(/<div[^>]*aria-live="polite"[^>]*data-pending-steps="1"/g)).toEqual(['<div role="status" aria-live="polite" data-pending-steps="1"']);
+    // Its divider comes and goes with the rows, inside the region.
+    expect(out).toMatch(/<div role="status" aria-live="polite" data-pending-steps="1"><div class="grid[^"]*"><div class="min-h-0"><div class="border-b">/);
   });
 
   it("keeps them under All and Investing on /activity, and out of Savings and Withdrawals", () => {
@@ -262,7 +266,7 @@ describe("a live page", () => {
     expect(out).toMatch(/<div role="status" aria-live="polite" data-pending-steps="1"/);
     expect(out).toContain('data-pending-step="measuring"');
     expect(out).toContain(PENDING_COPY.measuring(label));
-    expect(out).toMatch(/data-pending-step="measuring" data-state="active">[\s\S]*?data-pending-loader=""/);
+    expect(out).toMatch(/data-pending-step="measuring" data-state="active">[\s\S]*?data-work-loader=""/);
     // The same page without the push draws nothing pending.
     const quiet = render("pension", { ...data, walletChanges: [] });
     expect(quiet).not.toContain('data-pending-step="measuring"');

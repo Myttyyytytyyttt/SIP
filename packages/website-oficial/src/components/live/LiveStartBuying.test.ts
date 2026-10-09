@@ -17,12 +17,12 @@ vi.mock("@privy-io/react-auth/solana", () => ({
 
 import { LiveStartBuying, START_BUYING_PER_BUY_RAW, startBuyingPlan, startBuyingRent } from "@/components/live/LiveStartBuying";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { VaultWriteLock } from "@/hooks/use-vault-actions";
+import { VaultWriteLock, WriteLockContext, type WriteLock } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue } from "@/hooks/use-vault-state";
 import { START_BUYING_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
 import type { VaultApi, VaultStateJson } from "@/lib/vault-api";
-import { INVEST_COPY } from "@/lib/vault-copy";
+import { INVEST_COPY, LINK_COPY } from "@/lib/vault-copy";
 import { DEFAULT_VENUE_NAME } from "@/lib/vault-flows";
 import { liveDashboard, liveSnapshot, OWNER, VAULT } from "../../../test/fixtures/live-dashboard";
 
@@ -78,16 +78,27 @@ function vaultState(policy: "missing" | "exists" = "missing"): VaultStateJson {
   } as unknown as VaultStateJson;
 }
 
-function render(data: LiveDashboard, state: VaultStateJson = vaultState()): string {
+function render(data: LiveDashboard, state: VaultStateJson = vaultState(), lock: WriteLock | null = null): string {
   const screen: VaultScreenValue = { pensionKey: OWNER, view: { kind: "ready", state }, refresh: vi.fn(), api: {} as VaultApi };
+  const card = createElement(LiveStartBuying, { data, pensionKey: OWNER, onRefresh: vi.fn() });
   return renderToStaticMarkup(
     createElement(
       TooltipProvider,
       null,
-      createElement(VaultScreenContext.Provider, { value: screen }, createElement(VaultWriteLock, null, createElement(LiveStartBuying, { data, pensionKey: OWNER, onRefresh: vi.fn() }))),
+      createElement(VaultScreenContext.Provider, { value: screen }, lock === null ? createElement(VaultWriteLock, null, card) : createElement(WriteLockContext.Provider, { value: lock }, card)),
     ),
   );
 }
+
+/** The page's lock, held by another write on the screen (a rule save, a link). */
+const heldElsewhere: WriteLock = {
+  holder: "rule-settings",
+  acquire: () => false,
+  release: () => undefined,
+  consents: new Map(),
+  unconfirmedLinks: new Set(),
+  setUnconfirmedLink: () => undefined,
+};
 
 /** An active pension (its first settlement landed) with no investing policy. */
 const activeNoPolicy = (): LiveDashboard => liveDashboard({ snapshot: liveSnapshot({ policy: { status: "missing", address: `${VAULT}-policy` } as never }) });
@@ -172,5 +183,17 @@ describe("LiveStartBuying", () => {
     });
     expect(waiting.stage).toBe("waiting_first_settlement");
     expect(render(waiting)).toBe("");
+  });
+
+  it("says why its buttons are greyed while another signature holds the page's lock, and only then", () => {
+    const html = render(activeNoPolicy(), vaultState(), heldElsewhere);
+    expect(html).toContain(LINK_COPY.busy);
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Keep as SOL<\/button>/);
+    expect(render(activeNoPolicy())).not.toContain(LINK_COPY.busy);
+  });
+
+  it("stands in a box that grows in and closes over its last state — simply open on the page's first paint", () => {
+    const html = render(activeNoPolicy());
+    expect(html).toMatch(/^<div class="grid transition-\[grid-template-rows,opacity,margin-top\][^"]* grid-rows-\[1fr\] opacity-100 mt-0"><div class="min-h-0"><div[^>]*data-start-buying=""/);
   });
 });
