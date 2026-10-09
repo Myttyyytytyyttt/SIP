@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { holdUntil, nextRelease, releaseDue, type Holds } from "@/components/live/use-hold";
 import type { WashTone } from "@/components/live/Wash";
 import { formatSol, formatSolAtMost, rawFrom } from "@/lib/amounts";
-import { clockLabel, usd } from "@/lib/format";
+import { usd, whenLabel } from "@/lib/format";
 import { LIVE_COPY } from "@/lib/live-copy";
 import type { LiveDashboard, LiveRow } from "@/lib/live-types";
 // The leaf, not the barrel: `@/mocks` also re-exports the seeded dataset (no-mock-import.test.ts).
@@ -268,10 +268,12 @@ const dollars = (value: number): string => (value > 0 && value < 0.005 ? "<$0.01
  * live-mock.ts), never a difference of the lifetime total, which the price
  * moves on every read. A saving with no chip, or a chip no price could value,
  * and the pill says SOL instead: the chain's own figure, rounded on the face
- * and whole on hover. The time is the clock alone: the saving has only just
- * arrived. [B] dated, once whenLabel lands.
+ * and whole on hover. The time is the newest one's, with its day when that is
+ * not the page's today (format.ts whenLabel, against `nowMs`, the payload's own
+ * clock): a saving that landed at 23:58 and is still on the pill after midnight
+ * says "yesterday, 23:58 UTC".
  */
-export function heroPillOf(saving: ArrivalSaving | null, trades: readonly Trade[]): HeroPill | null {
+export function heroPillOf(saving: ArrivalSaving | null, trades: readonly Trade[], nowMs: number): HeroPill | null {
   if (saving === null || saving.rows.length === 0) return null;
   let lamports = 0n;
   for (const row of saving.rows) if (row.event.kind === "settled") lamports += rawFrom(row.event.paid) ?? 0n;
@@ -286,7 +288,7 @@ export function heroPillOf(saving: ArrivalSaving | null, trades: readonly Trade[
   const amount = count === 1 ? LIVE_COPY.heroPill.saved(face) : LIVE_COPY.heroPill.savings(face, count);
   const newest = saving.rows.reduce<LiveRow | null>((best, row) => (row.at !== null && (best === null || row.slot > best.slot) ? row : best), null);
   return {
-    text: newest === null || newest.at === null ? amount : `${amount} · ${clockLabel(newest.at)}`,
+    text: newest === null || newest.at === null ? amount : `${amount} · ${whenLabel(Date.parse(newest.at), nowMs)}`,
     title: priced ? LIVE_COPY.heroPill.atPrice(formatSol(lamports)) : LIVE_COPY.heroPill.sol(formatSol(lamports)),
   };
 }

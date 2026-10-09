@@ -27,7 +27,9 @@
  * whose buying is off, or one the chain would refuse to buy for right now —
  * paused, an old price limit passed, caps no balance can clear (review,
  * 10-09) — is never promised a buy, and its card ends at the first saving as
- * it always did.
+ * it always did. While the first saving is still to come it says since when
+ * it has been awaited — the link that started the wait, dated when not today
+ * (waitingSinceOf) — and nothing when the loaded history cannot say.
  *
  * ONE CARD, NEVER TWO (10-09, G8). In the pension view's top column
  * (`animate`), the card grows in, swaps its height from one stage's card to the
@@ -43,6 +45,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useBasketChoice } from "@/hooks/use-onboarding-closed";
 import { formatSol } from "@/lib/amounts";
+import { whenLabel } from "@/lib/format";
 import { requestImport } from "@/lib/import-intent";
 import { LIVE_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
@@ -52,11 +55,20 @@ import { cn } from "@/lib/utils";
 import { VAULT_COPY, ratePercent, shortAddress } from "@/lib/vault-copy";
 import type { WalletsSection } from "@/lib/wallets-sections";
 
-function Step({ label, done }: { readonly label: string; readonly done: boolean }) {
+function Step({ label, done, note }: { readonly label: string; readonly done: boolean; readonly note?: string | null }) {
   return (
     <li className="flex items-center gap-2 text-sm">
       {done ? <CircleCheck className="size-4 text-emerald-700 dark:text-emerald-400" aria-hidden /> : <Circle className="size-4 text-muted-foreground" aria-hidden />}
-      <span className={done ? "text-muted-foreground line-through" : undefined}>{label}</span>
+      <span className={done ? "text-muted-foreground line-through" : undefined}>
+        {label}
+        {/* In the label's own run, so a narrow card wraps the sentence rather than squeezing the label. */}
+        {note === undefined || note === null ? null : (
+          <>
+            {" "}
+            <span className="text-muted-foreground">{note}</span>
+          </>
+        )}
+      </span>
       <span className="sr-only">{done ? "done" : "not done yet"}</span>
     </li>
   );
@@ -94,16 +106,38 @@ export function firstBuyOf(data: Pick<LiveDashboard, "policy" | "vault" | "proto
   return "none";
 }
 
+/**
+ * SINCE WHEN THE FIRST SAVING HAS BEEN AWAITED, in ms: when the wallets linked
+ * to this vault were linked — each one's latest link, the earliest of those —
+ * from the loaded history. Null unless that history holds a successful link
+ * for EVERY wallet linked now: an older link it does not hold would make the
+ * wait longer than said. Never guessed from when the vault was made, which can
+ * be long before any wallet was linked.
+ */
+export function waitingSinceOf(data: Pick<LiveDashboard, "rows" | "wallets">): number | null {
+  const linked = new Set(data.wallets.filter((wallet) => wallet.linkStatus === "this_vault").map((wallet) => wallet.address));
+  if (linked.size === 0) return null;
+  const latest = new Map<string, number>();
+  for (const row of data.rows) {
+    if (!row.ok || row.blockTime === null || row.event.kind !== "linked" || row.event.wallet === null || !linked.has(row.event.wallet)) continue;
+    const at = row.blockTime * 1_000;
+    if ((latest.get(row.event.wallet) ?? -Infinity) < at) latest.set(row.event.wallet, at);
+  }
+  return latest.size === linked.size ? Math.min(...latest.values()) : null;
+}
+
 /** What is done, from the chain, and what comes next. */
 function SetupChecklist({ data, firstBuy }: { readonly data: LiveDashboard; readonly firstBuy: "none" | "ahead" | "done" }) {
   const copy = LIVE_COPY.setup;
+  const saved = data.stage === "active";
+  const since = saved ? null : waitingSinceOf(data);
   return (
     <div className="space-y-2">
       <p className="text-sm font-medium">{copy.checklist}</p>
       <ul className="space-y-1.5">
         <Step label={copy.vault} done={data.vault.exists} />
         <Step label={copy.linked} done={data.wallets.some((wallet) => wallet.linkStatus === "this_vault")} />
-        <Step label={copy.firstSaving} done={data.stage === "active"} />
+        <Step label={copy.firstSaving} done={saved} note={since === null ? null : copy.waitingSince(whenLabel(since, data.nowMs))} />
         {firstBuy === "none" ? null : <Step label={copy.firstBuy} done={firstBuy === "done"} />}
       </ul>
     </div>

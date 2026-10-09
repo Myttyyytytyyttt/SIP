@@ -14,7 +14,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RuleSettingsFormProps } from "@/components/rule-settings-dialog";
-import type { RuleSettingsDoor } from "@/components/savings-rule-panel";
+import type { LiveRulePulse } from "@/components/live/NextInvestmentLive";
+import type { NextInvestmentView, RuleSettingsDoor } from "@/components/savings-rule-panel";
 import type { InvestRequest, VaultRuleRequest } from "@/hooks/use-vault-actions";
 import type { SettingsDraft } from "@/lib/rule-settings";
 import { LIVE_COPY } from "@/lib/live-copy";
@@ -32,6 +33,8 @@ const calls = vi.hoisted(() => ({
   status: null as unknown,
   door: null as unknown,
   card: null as unknown,
+  next: null as unknown,
+  pulse: null as unknown,
   state: null as unknown,
   running: false,
 }));
@@ -69,9 +72,11 @@ vi.mock("@/hooks/use-vault-actions", () => {
 
 // The card and the dialog have their own tests; here only what the host hands them matters.
 vi.mock("@/components/savings-rule-panel", () => ({
-  SavingsRulePanel: (props: { settings: RuleSettingsDoor; rule: SavingsRule }) => {
+  SavingsRulePanel: (props: { settings: RuleSettingsDoor; rule: SavingsRule; renderNextInvestment?: unknown; pulse?: unknown }) => {
     calls.door = props.settings;
     calls.card = props.rule;
+    calls.next = props.renderNextInvestment ?? null;
+    calls.pulse = props.pulse ?? null;
     return null;
   },
 }));
@@ -153,12 +158,16 @@ const RULE: SavingsRule = { mode: "profit", rateBps: 2_000, thresholdUsd: 10, ta
 const STATS = {} as SavingsStats;
 
 /** Mounts the host and returns the form it built (null when it shows a status instead). */
-function mount(state: VaultStateJson | null): RuleSettingsFormProps | null {
+function mount(state: VaultStateJson | null, pulse?: LiveRulePulse): RuleSettingsFormProps | null {
   calls.state = state;
   calls.form = null;
   calls.status = null;
   calls.door = null;
-  renderToStaticMarkup(createElement(LiveRulePanel, { rule: RULE, stats: STATS, activity: [], now: "2026-09-16T12:00:00.000Z", onRefresh: () => undefined }));
+  calls.next = null;
+  calls.pulse = null;
+  renderToStaticMarkup(
+    createElement(LiveRulePanel, { rule: RULE, stats: STATS, activity: [], now: "2026-09-16T12:00:00.000Z", onRefresh: () => undefined, ...(pulse === undefined ? {} : { pulse }) }),
+  );
   return calls.form as RuleSettingsFormProps | null;
 }
 
@@ -378,5 +387,31 @@ describe("the gear on the card", () => {
     expect(calls.door).toMatchObject({ open: false, attention: false });
     mount(vaultState(POLICY, "exists", SOL_UNDER_SAFETY_FLOOR));
     expect(calls.door).toMatchObject({ open: false, attention: true });
+  });
+});
+
+/**
+ * NEXT INVESTMENT IS THIS PAGE'S OWN DRAWING (10-09, plan B1): the card hands
+ * its figures to NextInvestmentLive, with the work LiveBody saw under way, and
+ * what moved on the card goes to it as `pulse`.
+ */
+describe("what moves on the card", () => {
+  const VIEW: NextInvestmentView = { readyUsd: 0.43, thresholdUsd: 1, progress: 43, toGoUsd: 0.97, toGoShown: false, note: "Includes about $0.43 of SOL", gate: "wrap_line", parts: null };
+  const drawn = (): string => renderToStaticMarkup(createElement("div", null, (calls.next as (next: NextInvestmentView) => ReactNode)(VIEW)));
+
+  it("always draws Next investment itself, with the gate's mark when nothing is under way", () => {
+    mount(vaultState(POLICY));
+    expect(typeof calls.next).toBe("function");
+    expect(drawn()).toContain('data-next-mark="gated"');
+    // Nothing was handed: nothing is marked as moving, nothing washes.
+    expect(calls.pulse).toBeNull();
+  });
+
+  it("marks the work LiveBody saw under way, and hands the card the rest of the pulse", () => {
+    const pulse: LiveRulePulse = { work: { kind: "buying", still: false }, buying: { text: "Buying SPYx…", still: false }, arrived: new Set(["sig"]), ruleArrived: true };
+    mount(vaultState(POLICY), pulse);
+    expect(drawn()).toContain('data-next-mark="active"');
+    expect(drawn()).toContain("text-blue-600");
+    expect(calls.pulse).toBe(pulse);
   });
 });

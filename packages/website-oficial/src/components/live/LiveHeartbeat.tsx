@@ -9,7 +9,7 @@
  *
  *   solid       as of the last update            "Updated just now" / "Updated 2 min ago"
  *   breathing   a check someone asked for runs   "Checking…"
- *   hollow      the last update failed           "Behind — couldn’t update"
+ *   hollow      the last update failed           "Behind — couldn’t update" · "As of 14:32 UTC"
  *
  * THE DOT ONLY, AT EVERY WIDTH (owner, 10-09). Its words are its popover and its
  * accessible name, never text in the bar, and its three looks are one box: no
@@ -31,7 +31,10 @@
  *    breathed on a guess would be the dishonest kind of live.
  *  * "Behind" is the stale view: the last update failed, the figures are the
  *    last good ones. It wins over a press (behind > checking > fresh); the
- *    press still shows, on Check now itself.
+ *    press still shows, on Check now itself. It says as of when, the stale
+ *    note's own moment — the snapshot's clock, with its day when that is not
+ *    this browser's today (format.ts whenLabel): a page stuck since last night
+ *    must not read as minutes old.
  *  * Check now opens at the floor after the last read this browser saw finish
  *    (useReadyAt, the same moment every Retry on the page counts to) or at the
  *    server's retry-after, whichever is later — a press before that would be
@@ -58,6 +61,7 @@ import { useTicker } from "@/components/live/use-ticker";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { LiveStale } from "@/hooks/use-live-dashboard";
+import { whenLabel } from "@/lib/format";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { cn } from "@/lib/utils";
 
@@ -78,11 +82,12 @@ export function pulseStateOf(input: { readonly stale: boolean; readonly checking
  * What the popover says above Check now, and the dot's accessible name. The
  * name says everything on its own — a check under way included, which in the
  * popover is Check now's own label, so the popover does not say it twice.
+ * `asOf` is the figures' own moment, dated when not today: what "behind" says.
  */
-export function pulseWords(state: PulseState, ageMs: number): { readonly lines: readonly string[]; readonly name: string } {
+export function pulseWords(state: PulseState, ageMs: number, asOf: string): { readonly lines: readonly string[]; readonly name: string } {
   const ago = LIVE_COPY.pulse.ago(ageMs);
   if (state === "behind") {
-    const lines = [LIVE_COPY.pulse.behind, LIVE_COPY.pulse.lastUpdated(ago)];
+    const lines = [LIVE_COPY.pulse.behind, LIVE_COPY.pulse.asOf(asOf)];
     return { lines, name: lines.join(". ") };
   }
   const updated = LIVE_COPY.pulse.updated(ago);
@@ -171,7 +176,9 @@ export function LiveHeartbeat({
   const retryAt = stale?.retryAt ?? null;
   const [checking, press] = usePressedUntilRead(pressKeyOf(retryAt, readyAt));
   const state = pulseStateOf({ stale: stale !== null, checking });
-  const words = pulseWords(state, Date.now() - at);
+  // The browser's day: the snapshot's own clock is the moment named, and against itself it is always today.
+  const now = Date.now();
+  const words = pulseWords(state, now - at, whenLabel(nowMs, now));
   const titleId = useId();
 
   // HOVER OPENS, A PRESS PINS — InfoTip's mechanics (info-tip.tsx), and why each piece is there is said there.

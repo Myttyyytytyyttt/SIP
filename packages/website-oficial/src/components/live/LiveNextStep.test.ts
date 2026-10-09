@@ -32,12 +32,12 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 
 import { OFFERED_LEGS } from "@sip/solana-core/client";
 
-import { LiveNextStep, firstBuyOf } from "@/components/live/LiveNextStep";
+import { LiveNextStep, firstBuyOf, waitingSinceOf } from "@/components/live/LiveNextStep";
 import { takeImportRequest } from "@/lib/import-intent";
 import { LIVE_COPY } from "@/lib/live-copy";
-import type { LiveDashboard } from "@/lib/live-types";
+import type { LiveDashboard, LiveEntryJson, VaultEventJson } from "@/lib/live-types";
 
-import { OWNER, VAULT, WALLET_A, liveDashboard, liveSnapshot, policyState } from "../../../test/fixtures/live-dashboard";
+import { NOW_MS, OWNER, VAULT, WALLET_A, liveActivity, liveDashboard, liveEntry, liveSnapshot, policyState, seconds, signature } from "../../../test/fixtures/live-dashboard";
 
 const onOpenWallets = vi.fn();
 /** What a real click hands a handler. */
@@ -182,6 +182,48 @@ function waitingSnapshot() {
 }
 
 const done = (html: string): number => html.split("line-through").length - 1;
+
+/**
+ * SINCE WHEN THE FIRST SAVING HAS BEEN AWAITED (10-09): from the link that
+ * started the wait, as the chain dated it, with its day when that is not today
+ * — and nothing when the loaded history cannot say, never a guess.
+ */
+describe("the first saving, awaited since the link", () => {
+  const link = (ms: number, over: { readonly wallet?: string | null; readonly ok?: boolean; readonly seed?: number } = {}): LiveEntryJson => ({
+    ...liveEntry(signature(over.seed ?? 7), seconds(ms), [{ kind: "linked", wallet: over.wallet === undefined ? WALLET_A : over.wallet } as VaultEventJson], 3_900),
+    ok: over.ok ?? true,
+  });
+  const waitingWith = (entries: readonly LiveEntryJson[] | null): LiveDashboard =>
+    liveDashboard({ snapshot: waitingSnapshot(), activity: entries === null ? null : liveActivity(entries) });
+  const SINCE = /waiting since/;
+
+  it("says since when, from the link, with its day once that is not today", () => {
+    const data = waitingWith([link(NOW_MS - 26 * 3_600_000)]);
+    expect(data.stage).toBe("waiting_first_settlement");
+    expect(waitingSinceOf(data)).toBe(NOW_MS - 26 * 3_600_000);
+    expect(render(data)).toContain(LIVE_COPY.setup.waitingSince("yesterday, 10:00 UTC"));
+    expect(render(waitingWith([link(NOW_MS - 2 * 3_600_000)]))).toContain(LIVE_COPY.setup.waitingSince("10:00 UTC"));
+  });
+
+  it("counts from the wallet's latest link: an older one before an unlink is not when this wait began", () => {
+    const data = waitingWith([link(NOW_MS - 3_600_000, { seed: 8 }), link(NOW_MS - 5 * 86_400_000)]);
+    expect(waitingSinceOf(data)).toBe(NOW_MS - 3_600_000);
+  });
+
+  it("says nothing when the loaded history holds no successful link of the wallet linked now", () => {
+    for (const entries of [null, [], [link(NOW_MS - 3_600_000, { ok: false })], [link(NOW_MS - 3_600_000, { wallet: "SomeOtherWa11et1111111111111111111111111111" })]]) {
+      const data = waitingWith(entries);
+      expect(waitingSinceOf(data)).toBeNull();
+      expect(render(data)).not.toMatch(SINCE);
+    }
+  });
+
+  it("is gone once the first saving has landed", () => {
+    const data = liveDashboard({ activity: liveActivity([link(NOW_MS - 3 * 3_600_000)]) });
+    expect(data.stage).toBe("active");
+    expect(render(data)).not.toMatch(SINCE);
+  });
+});
 
 describe("the setup, ticked off through the first buy", () => {
   it("lists what is done while the first saving is awaited, and the first buy ahead when a signed approval has buying on", () => {

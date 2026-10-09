@@ -39,12 +39,19 @@
  * the chain again after the landing, the form is frozen — the old "Update
  * rule" came back live for up to ten seconds after "Rule updated", with the
  * same change on it.
+ *
+ * WHAT MOVES ON THE CARD IS DRAWN HERE TOO (10-09, plan B1). Next investment is
+ * always this page's own drawing (NextInvestmentLive.tsx): the data's figure,
+ * gate and line, and a mark for the work under way. `pulse`, from LiveBody,
+ * says what that work is, a buy under way beside "Last investment", and what
+ * just arrived — the last buy and a rule change each wash their own block.
  */
 
 import { VOLUME_MODE_OFFERED } from "@sip/solana-core/client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { InfoTip } from "@/components/info-tip";
+import { NextInvestmentLive, type LiveRulePulse } from "@/components/live/NextInvestmentLive";
 import { liveCategories, liveSeed, planSettings, type LiveSeed } from "@/components/live/rule-settings-plan";
 import { RuleSettingsDialog, RuleSettingsForm, RuleSettingsStatus, type SettingsJudgement } from "@/components/rule-settings-dialog";
 import { SavingsRulePanel } from "@/components/savings-rule-panel";
@@ -83,6 +90,7 @@ export function LiveRulePanel({
   activity,
   now,
   onRefresh,
+  pulse,
   className,
 }: {
   readonly rule: SavingsRule;
@@ -91,6 +99,8 @@ export function LiveRulePanel({
   readonly now: string;
   /** Reads the dashboard again, so a landed signature shows as the new rule. */
   readonly onRefresh: () => void;
+  /** What is under way and what just arrived (NextInvestmentLive.tsx rulePulseOf). Absent: nothing is marked. */
+  readonly pulse?: LiveRulePulse;
   readonly className?: string;
 }) {
   const screen = useVaultScreen();
@@ -393,6 +403,8 @@ export function LiveRulePanel({
         activity={activity}
         now={now}
         settings={{ open, onOpen, attention }}
+        renderNextInvestment={(next) => <NextInvestmentLive next={next} work={pulse?.work ?? null} />}
+        {...(pulse === undefined ? {} : { pulse })}
         {...(className === undefined ? {} : { className })}
       />
       <RuleSettingsDialog

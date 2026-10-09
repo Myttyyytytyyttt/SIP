@@ -28,7 +28,8 @@
  * a row that has not arrived. When a step ends:
  *  * the read that ended it brought the transaction that did it — a conversion,
  *    a buy, no older than the step's own clock — so its row stays DONE_HOLD_MS as
- *    "Converted to USDC" / "Bought SPYx and ANTHROPIC", with a check in the
+ *    "Converted to USDC · 14:32 UTC" / "Bought SPYx and ANTHROPIC · 14:33 UTC"
+ *    (the time it landed, its day too when not today), with a check in the
  *    step's tone. aria-hidden: the arrival is the feed's news, not this
  *    region's (the announcer, step A5, speaks it);
  *  * otherwise it simply closes (Reveal.tsx), over its last words. When unsure,
@@ -70,6 +71,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { REVEAL_MS, Reveal, revealFrameClass, revealLook, useRevealPhase } from "@/components/live/Reveal";
 import { WorkMark, type WorkState } from "@/components/live/WorkMark";
 import { MONO, TONE_TEXT, type Tone } from "@/lib/classes";
+import { whenLabel } from "@/lib/format";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { namesOf, type PendingKind, type PendingLine, type PendingStep } from "@/lib/live-pending";
 import { symbolOfMint } from "@/lib/live-symbols";
@@ -128,6 +130,10 @@ const ENDS: Readonly<Record<"converting" | "buying", LiveRow["event"]["kind"]>> 
  * page, in the order they landed, as the announcer does (LiveAnnouncer.tsx) —
  * never the basket the step meant to buy (review, 10-09). A landed leg this app
  * cannot name: nothing is claimed.
+ *
+ * IT SAYS WHEN, as the row it is about does: the newest landed transaction's
+ * time, dated against the read that brought it (format.ts whenLabel) — and no
+ * time at all when the chain gave that transaction none.
  */
 export function doneOf(step: PendingStep, key: string, after: LiveDashboard, before: LiveDashboard): DoneLine | null {
   if (step.kind === "measuring") return null;
@@ -141,7 +147,12 @@ export function doneOf(step: PendingStep, key: string, after: LiveDashboard, bef
       (step.since === null || (row.blockTime !== null && row.blockTime * 1_000 >= step.since)),
   );
   if (landed.length === 0) return null;
-  if (step.kind === "converting") return { key, kind: step.kind, title: LIVE_COPY.pendingDone.converted, sub: LIVE_COPY.pendingDone.convertedSub, tone: "quiet" };
+  const newest = landed.reduce((best, row) => (row.slot > best.slot ? row : best));
+  const when = newest.blockTime === null ? null : whenLabel(newest.blockTime * 1_000, after.nowMs);
+  if (step.kind === "converting") {
+    const title = when === null ? LIVE_COPY.pendingDone.converted : LIVE_COPY.pendingDone.convertedAt(when);
+    return { key, kind: step.kind, title, sub: LIVE_COPY.pendingDone.convertedSub, tone: "quiet" };
+  }
   // Every landed row is a buy here, so `names` is never empty: namesOf never falls back to "your basket".
   const names: string[] = [];
   for (const row of [...landed].sort((left, right) => left.slot - right.slot)) {
@@ -150,7 +161,8 @@ export function doneOf(step: PendingStep, key: string, after: LiveDashboard, bef
     if (symbol === null) return null;
     if (!names.includes(symbol)) names.push(symbol);
   }
-  return { key, kind: step.kind, title: LIVE_COPY.pendingDone.bought(namesOf(names)), sub: LIVE_COPY.pendingDone.boughtSub, tone: "invest" };
+  const title = when === null ? LIVE_COPY.pendingDone.bought(namesOf(names)) : LIVE_COPY.pendingDone.boughtAt(namesOf(names), when);
+  return { key, kind: step.kind, title, sub: LIVE_COPY.pendingDone.boughtSub, tone: "invest" };
 }
 
 type Leaving = { readonly show: "line"; readonly line: PendingLine } | { readonly show: "done"; readonly done: DoneLine };
@@ -312,7 +324,8 @@ function Row({ row }: { readonly row: PendingRow }) {
       <div className="flex w-full items-start gap-3 px-4 py-2.5" data-pending-done={done.kind} aria-hidden>
         <WorkMark state="done" tone={done.tone} />
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm">{done.title}</span>
+          {/* Wraps rather than truncating: at the lg column's 263 px the time at its end is what a cut would lose. */}
+          <span className="block text-sm break-words">{done.title}</span>
           <span className="block text-xs text-muted-foreground">{done.sub}</span>
         </span>
       </div>

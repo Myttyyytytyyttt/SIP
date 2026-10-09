@@ -33,6 +33,16 @@ export const WASH_HOST = "relative isolate";
 /** A chip's entrance, as it arrives (strip and header). Nothing for whoever asked for less motion. */
 export const CHIP_ENTRANCE = "motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-left-2";
 
-export function Wash({ tone }: { readonly tone: WashTone }) {
-  return <span aria-hidden className="live-wash" data-tone={tone} />;
+/**
+ * How far a BLEEDING wash reaches past its host: a line with no padding of its
+ * own (the rule card's rate line) would otherwise wear its tint flush against
+ * its words, and its edge against the first letter. Inline, because `.live-wash`
+ * is unlayered CSS that no utility class could move; out past the host and
+ * never into its box, so nothing in the host or around it shifts. The host
+ * wears a radius for it to inherit.
+ */
+const BLEED = { inset: "-0.375rem -0.5rem" } as const;
+
+export function Wash({ tone, bleed = false }: { readonly tone: WashTone; readonly bleed?: boolean }) {
+  return <span aria-hidden className="live-wash" data-tone={tone} {...(bleed ? { style: BLEED } : {})} />;
 }

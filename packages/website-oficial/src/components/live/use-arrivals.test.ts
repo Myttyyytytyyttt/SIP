@@ -211,7 +211,7 @@ describe("the hero's pill", () => {
   it("one saving: its dollars, the chip's own, and its time", () => {
     const { saving, trades } = savingOf([NEW]);
     const chip = trades.find((trade) => trade.txHash === NEW.signature)!;
-    const pill = heroPillOf(saving, trades)!;
+    const pill = heroPillOf(saving, trades, NOW_MS)!;
     expect(pill.text).toBe(`+$${chip.savedUsd!.toFixed(2)} saved · ${new Date(NEW.blockTime! * 1_000).toISOString().slice(11, 16)} UTC`);
     expect(pill.title).toBe("0.04 SOL at today’s SOL price");
   });
@@ -219,7 +219,7 @@ describe("the hero's pill", () => {
   it("more than one: their sum, how many, and the newest one's time", () => {
     const second = liveEntry(signature(14), at(40_000), [settledEvent("20000000")], 4_140);
     const { saving, trades } = savingOf([second, NEW]);
-    const pill = heroPillOf(saving, trades)!;
+    const pill = heroPillOf(saving, trades, NOW_MS)!;
     expect(pill.text).toMatch(/^\+\$\d+\.\d\d · 2 savings · \d\d:\d\d UTC$/);
     expect(pill.text).toContain(`${new Date(second.blockTime! * 1_000).toISOString().slice(11, 16)} UTC`);
     expect(pill.title).toBe("0.06 SOL at today’s SOL price");
@@ -230,6 +230,7 @@ describe("the hero's pill", () => {
     const pill = heroPillOf(
       saving,
       trades.map((trade) => ({ ...trade, savedUsd: null })),
+      NOW_MS,
     )!;
     expect(pill.text).toMatch(/^\+0\.04 SOL saved · \d\d:\d\d UTC$/);
     expect(pill.title).toBe("0.04 SOL");
@@ -237,10 +238,17 @@ describe("the hero's pill", () => {
 
   it("never reads as nothing when it moved something", () => {
     const { saving, trades } = savingOf([NEW]);
-    expect(heroPillOf(saving, trades.map((trade) => ({ ...trade, savedUsd: 0.001 })))!.text).toMatch(/^\+<\$0\.01 saved/);
+    expect(heroPillOf(saving, trades.map((trade) => ({ ...trade, savedUsd: 0.001 })), NOW_MS)!.text).toMatch(/^\+<\$0\.01 saved/);
+  });
+
+  it("says the day too once its time is not the page's today: still up after midnight, it is not minutes old", () => {
+    const { saving, trades } = savingOf([NEW]);
+    // NEW landed at 11:59 UTC on Sep 16; the page's clock has moved to the next day.
+    const pill = heroPillOf(saving, trades, NOW_MS + 13 * 3_600_000)!;
+    expect(pill.text).toMatch(/ · yesterday, 11:59 UTC$/);
   });
 
   it("is nothing before a saving arrived", () => {
-    expect(heroPillOf(null, [])).toBeNull();
+    expect(heroPillOf(null, [], NOW_MS)).toBeNull();
   });
 });

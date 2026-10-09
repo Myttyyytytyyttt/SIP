@@ -11,7 +11,9 @@
  * different on purpose. `now` is the SERVER's clock as at the snapshot
  * (`data.nowMs`): every "4m ago" and every day heading is measured against it,
  * so the page cannot disagree with the numbers it was read with. `nowMs` is the
- * browser's, used only for how long a failure has stood. Every "try again in
+ * browser's, used only for how long a failure has stood — and for the one
+ * label that is about this browser's wait, the stale note's day, since a
+ * snapshot is always "today" against its own clock. Every "try again in
  * 12 s" ticks in its own leaf (RetryButton, LoadOlderButton), and so does the
  * header dot's "Updated 2 min ago" (LiveHeartbeat), so this body is never
  * re-rendered every second for one.
@@ -37,6 +39,14 @@
  * wash on one clock; a saving puts its pill beside the hero's figure; and the
  * page's one announcer says it in words (LiveAnnouncer.tsx). No figure counts
  * up or flashes (owner, 10-09).
+ *
+ * THE RULE CARD SAYS WHAT IS MOVING ITS MONEY (10-09, plan B1): Next
+ * investment's mark from the same steps the rows draw, a buy under way beside
+ * "Last investment", and the washes of a buy or a rule change just arrived —
+ * all worked out here from what the page already holds (rulePulseOf).
+ *
+ * EVERY MOMENT IT NAMES CARRIES ITS DAY WHEN THAT IS NOT TODAY (format.ts
+ * whenLabel): the stale note, the hero's pill, a done step, the setup's wait.
  */
 
 import { useRef, type ReactNode } from "react";
@@ -45,6 +55,7 @@ import { LiveActivityPage } from "@/components/live/LiveActivityPage";
 import { LiveNextStep } from "@/components/live/LiveNextStep";
 import { LiveStartBuying } from "@/components/live/LiveStartBuying";
 import { LiveRulePanel } from "@/components/live/LiveRulePanel";
+import { rulePulseOf } from "@/components/live/NextInvestmentLive";
 import { FeedBanner, HiddenRows, LeadNotes, WalletList } from "@/components/live/LiveColumn";
 import { FeedSkeleton } from "@/components/live/FeedSkeleton";
 import { LiveAnnouncer } from "@/components/live/LiveAnnouncer";
@@ -66,7 +77,7 @@ import { SiteHeader } from "@/components/site-header";
 import { useSolanaConfigOrNull } from "@/app/providers";
 import { useWalletsOpener } from "@/components/wallets-host";
 import type { LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
-import { clockLabel } from "@/lib/format";
+import { whenLabel } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import { rawFrom } from "@/lib/amounts";
 import { anchorOf, toDashboardMock } from "@/lib/live-mock";
@@ -89,10 +100,10 @@ const STALE_WARNING_MS = 5 * 60_000;
  * itself on a view worked out five minutes after the failure, and this body
  * adds it on its own clock; whichever saw it first, it is not said twice.
  */
-export function staleNote(input: { readonly clock: string; readonly message: string; readonly long: boolean }): string {
+export function staleNote(input: { readonly when: string; readonly message: string; readonly long: boolean }): string {
   const said = input.message.endsWith(LIVE_COPY.staleLong);
   const reason = (said ? input.message.slice(0, -LIVE_COPY.staleLong.length) : input.message).trim();
-  return [LIVE_COPY.staleAsOf(input.clock), reason, said || input.long ? LIVE_COPY.staleLong : ""].filter((part) => part !== "").join(" ");
+  return [LIVE_COPY.staleAsOf(input.when), reason, said || input.long ? LIVE_COPY.staleLong : ""].filter((part) => part !== "").join(" ");
 }
 
 /**
@@ -132,7 +143,7 @@ export function LiveBody({
   readonly older: LiveOlder;
   readonly onRefresh: () => void;
   readonly onLoadOlder: () => void;
-  /** The browser's clock: how long a failure has stood. Never a label. */
+  /** The browser's clock: how long a failure has stood, and which day the stale note is read on. Never a time printed. */
   readonly nowMs: number;
   /** The history could not be read. REQUIRED, because forgetting it drew an empty feed over a pension with settlements. */
   readonly activityUnreadable: boolean;
@@ -176,7 +187,9 @@ export function LiveBody({
   // WHAT JUST ARRIVED, once for every surface. From the newest commit: rows
   // change only with a read's history, so there is no half state to wait out.
   const arrivals = useArrivals({ key: pensionKey, data, activityPending, activityUnreadable });
-  const pulse = { pill: heroPillOf(arrivals.saving, page.trades), shown: pillShown(arrivals.saving, data.nowMs) };
+  const pulse = { pill: heroPillOf(arrivals.saving, page.trades, data.nowMs), shown: pillShown(arrivals.saving, data.nowMs) };
+  // The rule card's: the steps as the rows draw them, and the same arrivals.
+  const rulePulse = rulePulseOf({ rows: pending.rows, history: data.rows, arrived: arrivals.arrived });
 
   /** A wallet's own label, so a settlement says which one it came from. */
   const labelOf = (wallet: string | null): string => {
@@ -184,9 +197,12 @@ export function LiveBody({
     return data.wallets.find((entry) => entry.address === wallet)?.label ?? ACTIVITY_COPY.someWallet;
   };
 
-  // A poll that failed keeps the last good data and says as of when, and why.
+  // A poll that failed keeps the last good data and says as of when, and why —
+  // dated against THIS browser's day, not the snapshot's: the snapshot's own
+  // clock is the very moment named, so against it every note would be "today".
+  // The live body renders only in the browser, so no server's day can differ.
   const notice = (): string | null =>
-    stale === null ? null : staleNote({ clock: clockLabel(now), message: stale.message, long: nowMs - stale.since >= STALE_WARNING_MS });
+    stale === null ? null : staleNote({ when: whenLabel(data.nowMs, nowMs), message: stale.message, long: nowMs - stale.since >= STALE_WARNING_MS });
 
   // [FALLBACK] When a Retry reads at once: the manual floor after the last read
   // this browser saw finish, good or failed (RetryButton.tsx). One for the page,
@@ -344,7 +360,15 @@ export function LiveBody({
             cards={
               panels ? null : (
                 <>
-                  <LiveRulePanel rule={page.rule} stats={page.stats} activity={page.activity} now={page.now} onRefresh={onRefresh} className={RULE_SLOT} />
+                  <LiveRulePanel
+                    rule={page.rule}
+                    stats={page.stats}
+                    activity={page.activity}
+                    now={page.now}
+                    onRefresh={onRefresh}
+                    pulse={rulePulse}
+                    className={RULE_SLOT}
+                  />
                   <PensionPanel
                     stats={page.stats}
                     curve={page.curve}

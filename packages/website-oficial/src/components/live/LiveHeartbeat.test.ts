@@ -1,7 +1,7 @@
 // The header's dot (LiveHeartbeat.tsx): one dot at every width, its words in its
 // popover and its accessible name, never text in the bar (owner, 10-09). Solid
 // when updated, breathing only for a check someone asked for, hollow when the
-// last update failed — and that order when two are true. Check now counts down
+// last update failed, saying as of when — and that order when two are true. Check now counts down
 // to when a press helps, and says it is checking once pressed.
 
 import { createElement } from "react";
@@ -68,25 +68,25 @@ describe("the dot's words", () => {
   });
 
   it("say when the figures were updated, and nothing more, while all is well", () => {
-    expect(pulseWords("fresh", 12_000)).toEqual({ lines: ["Updated just now"], name: "Updated just now" });
-    expect(pulseWords("fresh", 120_000).name).toBe("Updated 2 min ago");
+    expect(pulseWords("fresh", 12_000, "11:59 UTC")).toEqual({ lines: ["Updated just now"], name: "Updated just now" });
+    expect(pulseWords("fresh", 120_000, "11:58 UTC").name).toBe("Updated 2 min ago");
   });
 
   it("name a check under way, and leave the popover to Check now's own label", () => {
-    const words = pulseWords("checking", 120_000);
+    const words = pulseWords("checking", 120_000, "11:58 UTC");
     expect(words.name).toBe("Checking… Updated 2 min ago");
     expect(words.lines).toEqual(["Updated 2 min ago"]);
   });
 
-  it("say the page is behind, and when it was last updated", () => {
-    const words = pulseWords("behind", 6 * 60_000);
-    expect(words.lines).toEqual(["Behind — couldn’t update", "Last updated 6 min ago"]);
-    expect(words.name).toBe("Behind — couldn’t update. Last updated 6 min ago");
+  it("say the page is behind, and as of when — the stale note's own moment", () => {
+    const words = pulseWords("behind", 6 * 60_000, "11:54 UTC");
+    expect(words.lines).toEqual(["Behind — couldn’t update", "As of 11:54 UTC"]);
+    expect(words.name).toBe("Behind — couldn’t update. As of 11:54 UTC");
   });
 
   it("use none of the machinery's words, and promise no time", () => {
     const sentences = [
-      ...(["fresh", "checking", "behind"] as const).flatMap((state) => [...pulseWords(state, 300_000).lines, pulseWords(state, 300_000).name]),
+      ...(["fresh", "checking", "behind"] as const).flatMap((state) => [...pulseWords(state, 300_000, "11:55 UTC").lines, pulseWords(state, 300_000, "11:55 UTC").name]),
       LIVE_COPY.pulse.checkNow,
       LIVE_COPY.pulse.checking,
     ];
@@ -129,13 +129,19 @@ describe("in the bar", () => {
     expect(html).toContain('aria-haspopup="dialog"');
   });
 
-  it("is hollow and says so when the last update failed, with when the figures last changed", () => {
+  it("is hollow and says so when the last update failed, with the moment the figures are from", () => {
     expect(dotAt(T, { pensionKey: "behind" })).toContain('data-pulse="fresh"');
-    // Six minutes on, the updates since have failed: the figures are the ones first seen at T.
+    // Six minutes on, the updates since have failed: the figures are the snapshot's, read at 11:59:58.
     const html = dotAt(T + 6 * 60_000, { pensionKey: "behind", stale: failed({ since: T + 6 * 60_000 }) });
     expect(html).toContain('data-pulse="behind"');
     expect(html).toMatch(/border border-muted-foreground bg-transparent/);
-    expect(nameOf(html)).toBe("Behind — couldn’t update. Last updated 6 min ago");
+    expect(nameOf(html)).toBe("Behind — couldn’t update. As of 11:59 UTC");
+  });
+
+  it("names the day the figures are from once that is not this browser's today", () => {
+    // Still behind the next morning: a bare "11:59 UTC" would read as minutes old.
+    const html = dotAt(T + 20 * 3_600_000, { pensionKey: "overnight", stale: failed({ since: T + 60_000 }) });
+    expect(nameOf(html)).toBe("Behind — couldn’t update. As of yesterday, 11:59 UTC");
   });
 
   it("is never a live region: its age changes every minute and must not be spoken", () => {

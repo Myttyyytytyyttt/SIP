@@ -4,6 +4,8 @@ import Image from "next/image";
 import { Settings } from "lucide-react";
 import { useCallback, useState, type ReactNode } from "react";
 
+import { WASH_HOST, Wash } from "@/components/live/Wash";
+import { WorkMark } from "@/components/live/WorkMark";
 import { Num } from "@/components/num";
 import { RuleSettingsDialog, RuleSettingsForm, type SettingsJudgement } from "@/components/rule-settings-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -92,6 +94,34 @@ export interface NextInvestmentView {
   readonly parts: NonNullable<SavingsStats["nextInvestmentParts"]> | null;
 }
 
+/**
+ * WHAT A LIVE PAGE HAS JUST SEEN MOVE ON THIS CARD (10-09, plan B1), outside
+ * the Next investment block, which it draws itself (`renderNextInvestment`):
+ *
+ *   a buy under way   its words and a blue turning mark beside "Last
+ *                     investment", in the label's own 16 px line, so the card
+ *                     does not grow when it starts or shrink when it lands;
+ *   a buy arrived     the last investment's block washes blue (Wash.tsx) —
+ *                     when it IS the transaction that just arrived;
+ *   a rule change     the rate's line washes mustard, once it has landed.
+ *
+ * Every piece is keyed on the prop being there: the sample never passes it,
+ * and keeps its label, its rate line and its block byte for byte
+ * (sample-golden.test.ts).
+ */
+export interface RulePanelPulse {
+  /** A buy under way, in the step's own words ("Buying SPYx and ANTHROPIC…"); null when none is. */
+  readonly buying: { readonly text: string; readonly still: boolean } | null;
+  /** The transactions just arrived, by signature (use-arrivals.ts). */
+  readonly arrived: ReadonlySet<string>;
+  /** A rule change that landed is among them. */
+  readonly ruleArrived: boolean;
+}
+
+/** The rate's line, and the last investment's block: the sample's exact strings, so its markup cannot drift when a live page washes them. */
+const RATE_LINE = "flex items-center justify-between gap-2";
+const LAST_BUY = "flex w-full items-center gap-3 rounded-md border p-3 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50";
+
 /** What the sample's dialog edits, kept by the card. */
 interface SampleRule {
   readonly mode: RuleMode;
@@ -132,6 +162,7 @@ export function SavingsRulePanel({
   now,
   settings,
   renderNextInvestment,
+  pulse,
   className,
 }: {
   rule: SavingsRule;
@@ -147,6 +178,8 @@ export function SavingsRulePanel({
    * today's label, bar and lines character for character.
    */
   renderNextInvestment?: (next: NextInvestmentView) => ReactNode;
+  /** What a live page has just seen move on the card (RulePanelPulse). Absent on the sample. */
+  pulse?: RulePanelPulse;
   className?: string;
 }) {
   // THE SAMPLE'S RULE, as its dialog last saved it. Unused on a live page, whose rule is the chain's.
@@ -235,6 +268,9 @@ export function SavingsRulePanel({
 
   const open = live ? settings.open : sampleOpen;
   const attention = live && settings.attention;
+  // Washed only while a live page says so: never on the sample, which passes no pulse.
+  const ruleWashed = pulse?.ruleArrived === true;
+  const lastWashed = pulse !== undefined && lastInvestment !== undefined && pulse.arrived.has(lastInvestment.txHash);
 
   return (
     // The same desktop spacing as the pension card beside it, and one step
@@ -268,7 +304,9 @@ export function SavingsRulePanel({
       </CardHeader>
 
       <CardContent className="space-y-5 xl:space-y-4 xl:short:space-y-3">
-        <div className="flex items-center justify-between gap-2">
+        <div className={ruleWashed ? cn(RATE_LINE, WASH_HOST, "rounded-md") : RATE_LINE}>
+          {/* The line has no padding of its own: the wash reaches a little past it, and moves nothing. */}
+          {ruleWashed ? <Wash tone="setting" bleed /> : null}
           <p className="text-sm leading-none font-medium">Rate</p>
           <span className="flex items-center gap-2">
             {paused ? <Badge variant="outline">{SETTINGS_COPY.paused}</Badge> : null}
@@ -326,14 +364,25 @@ export function SavingsRulePanel({
         </div>
 
         <div className="space-y-2">
-          <p className={LABEL}>Last investment</p>
+          {pulse === undefined ? (
+            <p className={LABEL}>Last investment</p>
+          ) : (
+            // THE LABEL'S OWN 16 px LINE (h-4), as the hero's pill does it: a buy starting or landing never moves the card.
+            <div className="flex h-4 min-w-0 items-center justify-between gap-2">
+              <p className={cn(LABEL, "shrink-0")}>Last investment</p>
+              {pulse.buying === null ? null : (
+                <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground" data-buying="">
+                  <WorkMark state="active" tone="invest" tile={false} still={pulse.buying.still} />
+                  <span className="truncate">{pulse.buying.text}</span>
+                </span>
+              )}
+            </div>
+          )}
           {lastInvestment ? (
             <Tooltip>
               {/* A real button, like the feed rows: announced as a control, not as stray text. */}
-              <TooltipTrigger
-                type="button"
-                className="flex w-full items-center gap-3 rounded-md border p-3 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-              >
+              <TooltipTrigger type="button" className={lastWashed ? cn(LAST_BUY, WASH_HOST) : LAST_BUY}>
+                {lastWashed ? <Wash tone="invest" /> : null}
                 <Image
                   src={lastInvestment.logo ?? tickerLogo(lastInvestment.symbol)}
                   alt={lastInvestment.symbol}

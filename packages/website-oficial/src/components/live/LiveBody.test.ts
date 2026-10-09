@@ -34,9 +34,9 @@ import { LiveBody, countsUnknownOf, staleNote } from "@/components/live/LiveBody
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
 import { ACTIVITY_COPY, LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
-import type { LiveDashboard } from "@/lib/live-types";
+import type { LiveDashboard, VaultEventJson } from "@/lib/live-types";
 
-import { NOW_MS, OWNER, liveActivity, liveDashboard, liveEntry, liveSnapshot, seconds, signature } from "../../../test/fixtures/live-dashboard";
+import { DEFAULT_ENTRIES, NOW_MS, OWNER, liveActivity, liveDashboard, liveEntry, liveSnapshot, seconds, signature } from "../../../test/fixtures/live-dashboard";
 import { tickingInRegion } from "../../../test/live-regions";
 
 const older = { busy: false, retryAt: null, message: null, complete: false, available: true };
@@ -57,6 +57,8 @@ function render(input: {
   readonly stale?: LiveStale | null;
   readonly older?: LiveOlder;
   readonly activityPending?: boolean;
+  /** The browser's clock; the payload's own by default. */
+  readonly nowMs?: number;
 }): string {
   return renderToStaticMarkup(
     createElement(
@@ -72,7 +74,7 @@ function render(input: {
         older: input.older ?? older,
         onRefresh: vi.fn(),
         onLoadOlder: vi.fn(),
-        nowMs: NOW_MS,
+        nowMs: input.nowMs ?? NOW_MS,
         activityUnreadable: input.activityUnreadable,
         ...(input.activityPending === undefined ? {} : { activityPending: input.activityPending }),
       }),
@@ -281,6 +283,13 @@ describe("a page whose last update failed", () => {
   it("draws no note while the page is current", () => {
     expect(render({ view: "activity", data: liveDashboard(), activityUnreadable: false })).not.toContain(asOf);
   });
+
+  it("names the day the figures are from once that is not today, never a bare clock that reads as minutes old", () => {
+    // The last good update at 12:00 UTC on Sep 16; read in this browser the morning after.
+    const html = render({ data: liveDashboard(), activityUnreadable: false, stale: { ...stale, since: NOW_MS + 60_000 }, nowMs: NOW_MS + 20 * 3_600_000 });
+    expect(html).toContain(LIVE_COPY.staleAsOf("yesterday, 12:00 UTC"));
+    expect(html).not.toContain(asOf);
+  });
 });
 
 describe("the protocol paused for everyone", () => {
@@ -299,7 +308,7 @@ describe("the protocol paused for everyone", () => {
 
 describe("staleNote", () => {
   it("is as of when, then the failure's own words", () => {
-    expect(staleNote({ clock: "14:32 UTC", message: LIVE_COPY.network, long: false })).toBe(`${LIVE_COPY.staleAsOf("14:32 UTC")} ${LIVE_COPY.network}`);
+    expect(staleNote({ when: "14:32 UTC", message: LIVE_COPY.network, long: false })).toBe(`${LIVE_COPY.staleAsOf("14:32 UTC")} ${LIVE_COPY.network}`);
   });
 
   it("says the numbers may be out of date once, last, whoever added it first", () => {
@@ -309,14 +318,14 @@ describe("staleNote", () => {
       [fromHook, true],
       [LIVE_COPY.network, true],
     ] as const) {
-      const note = staleNote({ clock: "14:32 UTC", message, long });
+      const note = staleNote({ when: "14:32 UTC", message, long });
       expect(note.split(LIVE_COPY.staleLong)).toHaveLength(2);
       expect(note.endsWith(LIVE_COPY.staleLong)).toBe(true);
     }
   });
 
   it("drops an empty reason rather than leaving a gap", () => {
-    expect(staleNote({ clock: "14:32 UTC", message: "", long: false })).toBe(LIVE_COPY.staleAsOf("14:32 UTC"));
+    expect(staleNote({ when: "14:32 UTC", message: "", long: false })).toBe(LIVE_COPY.staleAsOf("14:32 UTC"));
   });
 });
 
@@ -490,5 +499,28 @@ describe("what just arrived, on the page's first paint", () => {
     }
     const pension = render({ data: liveDashboard(), activityUnreadable: false });
     expect(pension).toMatch(/<div class="flex h-4 min-w-0 items-center gap-2"><p class="[^"]*">Saved so far<\/p><span class="[^"]*opacity-0" aria-hidden="true"><\/span><\/div>/);
+  });
+});
+
+/**
+ * THE RULE CARD SAYS WHAT IS MOVING ITS MONEY (10-09, plan B1): a buy under way
+ * beside "Last investment", in the step's own words, from the same steps the
+ * rows over the feed draw — and nothing for a buy that only waits.
+ */
+describe("the rule card on a live page", () => {
+  const converted = { kind: "converted", lamportsSpent: "10000000", usdcReceivedRaw: "1000000" } as VaultEventJson;
+  /** The vault's USDC converted a minute ago: its buy is under way, not overdue. */
+  const buying = (): LiveDashboard =>
+    liveDashboard({ activity: liveActivity([liveEntry(signature(30), seconds(NOW_MS - 60_000), [converted], 4_400), ...DEFAULT_ENTRIES]) });
+
+  it("says a buy under way beside the last investment's label", () => {
+    const html = render({ data: buying(), activityUnreadable: false });
+    expect(html).toMatch(/data-buying=""><svg[^>]*motion-safe:animate-spin[^>]*>.*?<span class="truncate">Buying SPYx…<\/span>/);
+  });
+
+  it("says nothing there while the buy only waits, and keeps the label's own line", () => {
+    const html = render({ data: liveDashboard(), activityUnreadable: false });
+    expect(html).not.toContain("data-buying");
+    expect(html).toContain('<div class="flex h-4 min-w-0 items-center justify-between gap-2"><p class="text-xs font-medium uppercase tracking-wide text-muted-foreground shrink-0">Last investment</p></div>');
   });
 });

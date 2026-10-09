@@ -62,7 +62,29 @@ describe("doneOf: a step ends as done only on the transaction that did it", () =
     const step = pendingSteps(before)[0]!;
     expect(step.kind).toBe("converting");
     const after = vault("0", [liveEntry(signature(2), seconds(NOW_MS + 20_000), [converted]), WRAP], NOW_MS + 30_000);
-    expect(doneOf(step, "converting", after, before)).toEqual({ key: "converting", kind: "converting", title: LIVE_COPY.pendingDone.converted, sub: LIVE_COPY.pendingDone.convertedSub, tone: "quiet" });
+    expect(doneOf(step, "converting", after, before)).toEqual({
+      key: "converting",
+      kind: "converting",
+      title: LIVE_COPY.pendingDone.convertedAt("12:00 UTC"),
+      sub: LIVE_COPY.pendingDone.convertedSub,
+      tone: "quiet",
+    });
+  });
+
+  it("says when its transaction landed, with the day when the read that brought it is on the next one", () => {
+    const before = converting();
+    const step = pendingSteps(before)[0]!;
+    // Landed at 23:59:30 UTC on Sep 16, read a minute later, past midnight.
+    const late = NOW_MS + 12 * 3_600_000 - 30_000;
+    const after = vault("0", [liveEntry(signature(2), seconds(late), [converted]), WRAP], late + 60_000);
+    expect(doneOf(step, "converting", after, before)?.title).toBe(LIVE_COPY.pendingDone.convertedAt("yesterday, 23:59 UTC"));
+  });
+
+  it("says no time when the chain gave the transaction none, rather than a guessed one", () => {
+    // A step with no clock of its own (slow) credits a landed conversion that has no block time.
+    const step = { ...pendingSteps(converting())[0]!, since: null };
+    const untimed = { ...liveEntry(signature(2), seconds(NOW_MS + 20_000), [converted]), blockTime: null };
+    expect(doneOf(step, "converting", vault("0", [untimed, WRAP], NOW_MS + 30_000), converting())?.title).toBe(LIVE_COPY.pendingDone.converted);
   });
 
   it("is not done when the step ended any other way: no new conversion on the page, or one that failed", () => {
@@ -96,7 +118,7 @@ describe("doneOf: a buy names only the legs that landed", () => {
 
   it("says only SPYx when the ANTHROPIC leg did not land", () => {
     const done = bought(liveEntry(signature(5), seconds(NOW_MS + 10_000), [invested(SPYX_MINT, "SPYx")], 4_100));
-    expect(done).toEqual({ key: "buying", kind: "buying", title: LIVE_COPY.pendingDone.bought("SPYx"), sub: LIVE_COPY.pendingDone.boughtSub, tone: "invest" });
+    expect(done).toEqual({ key: "buying", kind: "buying", title: LIVE_COPY.pendingDone.boughtAt("SPYx", "12:00 UTC"), sub: LIVE_COPY.pendingDone.boughtSub, tone: "invest" });
   });
 
   it("names both legs, in the order they landed, when both did", () => {
@@ -104,8 +126,8 @@ describe("doneOf: a buy names only the legs that landed", () => {
       liveEntry(signature(6), seconds(NOW_MS + 12_000), [invested(ANTHROPIC_MINT, null)], 4_101),
       liveEntry(signature(5), seconds(NOW_MS + 10_000), [invested(SPYX_MINT, "SPYx")], 4_100),
     );
-    expect(done?.title).toBe("Bought SPYx and ANTHROPIC");
-    expect(done?.title).toBe(LIVE_COPY.pendingDone.bought("SPYx and ANTHROPIC"));
+    expect(done?.title).toBe("Bought SPYx and ANTHROPIC · 12:00 UTC");
+    expect(done?.title).toBe(LIVE_COPY.pendingDone.boughtAt("SPYx and ANTHROPIC", "12:00 UTC"));
   });
 
   it("claims nothing when a landed leg is one this app cannot name", () => {

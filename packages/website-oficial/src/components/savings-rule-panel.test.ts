@@ -7,7 +7,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { SavingsRulePanel, type NextInvestmentView, type RuleSettingsDoor } from "@/components/savings-rule-panel";
+import { SavingsRulePanel, type NextInvestmentView, type RulePanelPulse, type RuleSettingsDoor } from "@/components/savings-rule-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { SETTINGS_COPY } from "@/lib/settings-copy";
@@ -27,6 +27,7 @@ function render(
     readonly stats?: SavingsStats;
     readonly activity?: readonly ActivityEvent[];
     readonly renderNextInvestment?: (next: NextInvestmentView) => ReturnType<typeof createElement>;
+    readonly pulse?: RulePanelPulse;
   } = {},
 ): string {
   return renderToStaticMarkup(
@@ -40,6 +41,7 @@ function render(
         now: NOW,
         ...(options.settings === undefined ? {} : { settings: options.settings }),
         ...(options.renderNextInvestment === undefined ? {} : { renderNextInvestment: options.renderNextInvestment }),
+        ...(options.pulse === undefined ? {} : { pulse: options.pulse }),
       }),
     ),
   );
@@ -329,5 +331,67 @@ describe("last investment", () => {
 
   it("is 'No investments yet' only when the chain says it never bought", () => {
     expect(render(PROFIT, { settings: door(), stats: { ...STATS, investedOutsideHistory: false } })).toContain("No investments yet");
+  });
+});
+
+/**
+ * WHAT A LIVE PAGE HAS JUST SEEN MOVE ON THE CARD (10-09, plan B1): a buy under
+ * way beside "Last investment", in the label's own line; the last buy's block
+ * washed blue when it is the transaction that just arrived; the rate's line
+ * washed mustard for a rule change that landed. All through `pulse`, which the
+ * sample never passes.
+ */
+describe("the card's pulse on a live page", () => {
+  const BUY: ActivityEvent = {
+    kind: "invested",
+    id: "buy",
+    at: "2026-09-24T11:59:00.000Z",
+    txHash: "BuySignature1111111111111111111111111111111111111111111111111111111111111111111111111",
+    symbol: "SPYx",
+    shares: 0.01,
+    priceUsd: 600,
+    amountUsd: 0.5,
+  };
+  const pulse = (over: Partial<RulePanelPulse> = {}): RulePanelPulse => ({ buying: null, arrived: new Set(), ruleArrived: false, ...over });
+  /** The Last investment block alone: from its label to the end of the card's content. */
+  const lastBlock = (html: string): string => html.slice(html.indexOf("Last investment") - 200);
+  const rateLine = (html: string): string => html.slice(html.lastIndexOf("<div", html.indexOf(">Rate<")), html.indexOf(">Rate<"));
+
+  it("keeps the sample's bare label, rate line and block: nothing washes, nothing is said", () => {
+    const html = render(VOLUME, { activity: [BUY] });
+    expect(html).toContain('<p class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Last investment</p>');
+    expect(html).not.toContain("live-wash");
+    expect(html).not.toContain("data-buying");
+    expect(rateLine(html)).toBe('<div class="flex items-center justify-between gap-2"><p class="text-sm leading-none font-medium"');
+  });
+
+  it("says a buy under way beside the label, in the label's own 16 px line, with a blue mark that turns only for motion-safe", () => {
+    const html = render(PROFIT, { settings: door(), activity: [BUY], pulse: pulse({ buying: { text: "Buying SPYx and ANTHROPIC…", still: false } }) });
+    const block = lastBlock(html);
+    expect(block).toContain('<div class="flex h-4 min-w-0 items-center justify-between gap-2">');
+    expect(block).toContain("Buying SPYx and ANTHROPIC…");
+    expect(block).toMatch(/data-buying=""><svg[^>]*class="[^"]*motion-safe:animate-spin[^"]*"/);
+    expect(block).toContain("text-blue-600");
+    expect(block).not.toMatch(/(^|[\s"])animate-spin/);
+  });
+
+  it("draws the same 16 px line with nothing in it when no buy is under way: the card never grows or shrinks for one", () => {
+    const html = render(PROFIT, { settings: door(), activity: [BUY], pulse: pulse() });
+    expect(lastBlock(html)).toContain('<div class="flex h-4 min-w-0 items-center justify-between gap-2"><p class="text-xs font-medium uppercase tracking-wide text-muted-foreground shrink-0">Last investment</p></div>');
+  });
+
+  it("washes the last buy's block blue only when it is the transaction that just arrived", () => {
+    const washed = render(PROFIT, { settings: door(), activity: [BUY], pulse: pulse({ arrived: new Set([BUY.txHash]) }) });
+    expect(lastBlock(washed)).toMatch(/<button[^>]*class="[^"]*relative isolate[^"]*"[^>]*><span aria-hidden="true" class="live-wash" data-tone="invest"><\/span>/);
+    const other = render(PROFIT, { settings: door(), activity: [BUY], pulse: pulse({ arrived: new Set(["SomethingElse"]) }) });
+    expect(other).not.toContain("live-wash");
+  });
+
+  it("washes the rate line mustard for a rule change, reaching past the line so nothing in it moves", () => {
+    const html = render(PROFIT, { settings: door(), pulse: pulse({ ruleArrived: true }) });
+    const line = rateLine(html);
+    expect(line).toContain("relative isolate");
+    expect(line).toContain('class="live-wash" data-tone="setting" style="inset:-0.375rem -0.5rem"');
+    expect(render(PROFIT, { settings: door(), pulse: pulse() })).not.toContain("live-wash");
   });
 });

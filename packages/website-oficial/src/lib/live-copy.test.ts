@@ -185,7 +185,7 @@ describe("the header dot's words", () => {
   it("promise no time and name none of the machinery", () => {
     const words = [
       LIVE_COPY.pulse.updated(LIVE_COPY.pulse.ago(600_000)),
-      LIVE_COPY.pulse.lastUpdated(LIVE_COPY.pulse.ago(600_000)),
+      LIVE_COPY.pulse.asOf("yesterday, 23:58 UTC"),
       LIVE_COPY.pulse.checking,
       LIVE_COPY.pulse.behind,
       LIVE_COPY.pulse.checkNow,
@@ -209,15 +209,23 @@ describe("the steps' and the setup's words", () => {
     expect(LIVE_COPY.pendingDone.bought("SPYx and ANTHROPIC")).toBe("Bought SPYx and ANTHROPIC");
   });
 
+  it("say when a step landed, and since when the first saving has been awaited, with the day when it is not today", () => {
+    expect(LIVE_COPY.pendingDone.convertedAt("14:32 UTC")).toBe("Converted to USDC · 14:32 UTC");
+    expect(LIVE_COPY.pendingDone.boughtAt("SPYx and ANTHROPIC", "yesterday, 23:58 UTC")).toBe("Bought SPYx and ANTHROPIC · yesterday, 23:58 UTC");
+    expect(`${LIVE_COPY.setup.firstSaving} ${LIVE_COPY.setup.waitingSince("Oct 7, 14:32 UTC")}`).toBe("First saving (waiting since Oct 7, 14:32 UTC)");
+  });
+
   it("promise no time and name none of the machinery", () => {
     const words = [
       ...Object.values(LIVE_COPY.pendingHeading),
       LIVE_COPY.pendingIdle,
       LIVE_COPY.pendingDone.converted,
+      LIVE_COPY.pendingDone.convertedAt("14:32 UTC"),
       LIVE_COPY.pendingDone.convertedSub,
       LIVE_COPY.pendingDone.bought("SPYx"),
+      LIVE_COPY.pendingDone.boughtAt("SPYx", "14:32 UTC"),
       LIVE_COPY.pendingDone.boughtSub,
-      ...Object.values(LIVE_COPY.setup),
+      ...Object.values(LIVE_COPY.setup).map((words) => (typeof words === "function" ? words("14:32 UTC") : words)),
       ...Object.values(LIVE_COPY.firstBuy),
     ];
     for (const sentence of words) {

@@ -118,8 +118,11 @@ export const LIVE_COPY = {
    * server's retry-after, and the schedule's backoff kept none of it. What it
    * can promise is that the page has not given up — it reads again by itself
    * while it is on screen. The reason follows it, in the failure's own words.
+   * `when` is dated once it is not today (format.ts whenLabel): a page stuck
+   * since last night said "as of 23:58 UTC" the morning after, which reads as
+   * minutes old.
    */
-  staleAsOf: (clock: string): string => `Showing Solana as of ${clock}. The last update failed; ${BRAND} keeps trying.`,
+  staleAsOf: (when: string): string => `Showing Solana as of ${when}. The last update failed; ${BRAND} keeps trying.`,
   staleLong: "These numbers may be out of date.",
 
   // ── how fresh the page is: the header's dot ────────────────────────────────
@@ -143,7 +146,8 @@ export const LIVE_COPY = {
       return `${Math.round(hours / 24)} days ago`;
     },
     updated: (ago: string): string => `Updated ${ago}`,
-    lastUpdated: (ago: string): string => `Last updated ${ago}`,
+    /** Behind: the moment the figures on screen are from, with its day when that is not today — the stale note's own words. */
+    asOf: (when: string): string => `As of ${when}`,
     checking: "Checking…",
     behind: "Behind — couldn’t update",
     checkNow: "Check now",
@@ -166,13 +170,16 @@ export const LIVE_COPY = {
   pendingIdle: "Nothing in progress right now",
   /**
    * A step whose transaction has landed, held a few seconds where its row was —
-   * only once that transaction is on the page. No time: its row in the
-   * activity carries one, and a done line is gone before it would matter.
+   * only once that transaction is on the page. With the time it landed, and its
+   * day when that is not today (format.ts whenLabel), so the line matches the
+   * row it is about; without one only when the chain gave the transaction no time.
    */
   pendingDone: {
     converted: "Converted to USDC",
+    convertedAt: (when: string): string => `Converted to USDC · ${when}`,
     convertedSub: "The USDC is in your vault",
     bought: (names: string): string => `Bought ${names}`,
+    boughtAt: (names: string, when: string): string => `Bought ${names} · ${when}`,
     boughtSub: "Now in your holdings",
   },
 
@@ -217,6 +224,12 @@ export const LIVE_COPY = {
     vault: "Vault created",
     linked: "Trading wallet linked",
     firstSaving: "First saving",
+    /**
+     * Beside "First saving" while it waits: since the link that started the
+     * wait landed, dated when not today. Only from a link in the loaded
+     * history — never guessed from when the vault was made.
+     */
+    waitingSince: (when: string): string => `(waiting since ${when})`,
     firstBuy: "First buy",
   },
   /** The pension has saved, and its first buy has not happened yet. */
@@ -341,6 +354,21 @@ export const LIVE_COPY = {
   nextInvestment: "Next investment",
   solWaitingToConvert: (sol: string): string => `SOL waiting to convert: ${sol} SOL`,
   progressLabel: "Progress to next investment",
+  /**
+   * THE LIVE BAR, SPOKEN (10-09, NextInvestmentLive.tsx): the headline's own
+   * figures, then — when the bar is drawn in parts — what it is made of, in the
+   * words of the line under it. A colon and commas, never the line's "·", which
+   * a screen reader reads as "dot".
+   */
+  nextBar: {
+    value: (ready: string, threshold: string): string => `${ready} of ${threshold}`,
+    parts: (value: string, parts: readonly string[]): string => `${value}: ${parts.join(", ")}`,
+    usdc: (usd: string): string => `${usd} in USDC`,
+    converting: (usd: string): string => `${usd} of SOL on its way to USDC`,
+    waiting: (usd: string): string => `${usd} of SOL too small to convert yet`,
+  },
+  /** A buy under way, beside "Last investment", in the step's own words: "Buying SPYx and ANTHROPIC…". */
+  buyingUnderWay: (step: string): string => `${step}…`,
   lastInvestment: "Last investment",
   noInvestmentLoaded: "No investment in the loaded history",
   // The chain's counters record a buy the loaded page does not hold. The
