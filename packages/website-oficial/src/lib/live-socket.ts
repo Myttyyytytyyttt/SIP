@@ -21,12 +21,22 @@
  * that does no parsing (jsonParsed) and no extra work (base58, which the node
  * also refuses past 128 bytes; zstd, which pays a frame on 165 bytes).
  *
+ * IT PINGS. The public endpoint closes a silent socket: measured 2026-10-09 on
+ * wss://api.mainnet-beta.solana.com, an idle socket — subscribed to a quiet
+ * account or to nothing — was closed with 1006 at about 60 s, and the server
+ * sent no ping frame of its own; one that sent the text frame
+ * {"jsonrpc":"2.0","method":"ping"} every 30 s stayed open for the whole 150 s
+ * probe (the server never answers it). So an open socket sends that every
+ * PING_MS, as web3.js and @solana/kit's own autoping do.
+ *
  * IT FAILS QUIETLY. The poll goes on whatever happens here. A socket that
- * closes reconnects after RECONNECT_MS (1 s, 2 s, 5 s, 15 s, 30 s); one that
- * fails that many times running without a single subscription confirmed is
- * given up for the life of the page, and onGiveUp says so. A reconnect that
- * does confirm a subscription calls onResync: whatever changed while it was
- * down rang nobody, so one read is owed.
+ * closes reconnects after RECONNECT_MS (1 s, 2 s, 5 s, 15 s, 30 s); the count
+ * starts again only after a socket stayed up STABLE_MS past its first
+ * confirmed subscription, so a server that confirms and then drops cannot hold
+ * the page in a one-second loop. Past the last wait the socket is given up
+ * for the life of the page, and onGiveUp says so. A reconnect that confirms a
+ * subscription calls onResync: whatever changed while it was down rang
+ * nobody, so one read is owed.
  */
 
 /** The subset of the browser's WebSocket this uses, so a test can hand in a fake. */
@@ -69,6 +79,15 @@ const OPEN = 1;
 /** Waits before each reconnect; past the last, the socket is given up. */
 export const RECONNECT_MS: readonly number[] = [1_000, 2_000, 5_000, 15_000, 30_000];
 
+/** The keepalive's beat: half the ~60 s after which the public endpoint closed a silent socket. */
+export const PING_MS = 30_000;
+
+/** The text keepalive: a JSON-RPC notification the endpoint takes and never answers. */
+const PING = JSON.stringify({ jsonrpc: "2.0", method: "ping" });
+
+/** How long a socket must stay up past its first confirmed subscription before the reconnect count starts again. */
+export const STABLE_MS = 5 * 60_000;
+
 export interface ChainWatch {
   /** The accounts to watch from now on; the same set is a no-op, a different one subscribes and unsubscribes the difference. */
   setAddresses(addresses: readonly string[]): void;
@@ -88,6 +107,8 @@ export interface WatchOptions {
   readonly open: SocketFactory;
   readonly setTimer?: (run: () => void, ms: number) => unknown;
   readonly clearTimer?: (timer: unknown) => void;
+  /** This browser's clock, for STABLE_MS. */
+  readonly now?: () => number;
 }
 
 interface Pending {
@@ -98,15 +119,18 @@ interface Pending {
 export function watchAccounts(options: WatchOptions): ChainWatch {
   const setTimer = options.setTimer ?? ((run: () => void, ms: number) => setTimeout(run, ms));
   const clearTimer = options.clearTimer ?? ((timer: unknown) => clearTimeout(timer as ReturnType<typeof setTimeout>));
+  const now = options.now ?? Date.now;
 
   let wanted = new Set(options.addresses);
   let socket: SocketLike | null = null;
   let closed = false;
   let failures = 0;
   let timer: unknown = null;
+  let pingTimer: unknown = null;
   /** Whether this socket has ever confirmed a subscription: a reconnect after one owes a read. */
   let everConfirmed = false;
-  let confirmedThisSocket = false;
+  /** When this socket confirmed its first subscription; null before it has. */
+  let confirmedAt: number | null = null;
   let nextId = 1;
   const pending = new Map<number, Pending>();
   /** address → subscription id, for this socket only. */
@@ -168,17 +192,35 @@ export function watchAccounts(options: WatchOptions): ChainWatch {
     }
     subscribed.set(entry.address, body.result);
     bySubscription.set(body.result, entry.address);
-    if (!confirmedThisSocket) {
-      confirmedThisSocket = true;
-      failures = 0;
+    if (confirmedAt === null) {
+      confirmedAt = now();
       if (everConfirmed) options.onResync?.();
       everConfirmed = true;
     }
   };
 
+  const stopPing = (): void => {
+    if (pingTimer !== null) clearTimer(pingTimer);
+    pingTimer = null;
+  };
+
+  const ping = (of: SocketLike): void => {
+    pingTimer = setTimer(() => {
+      pingTimer = null;
+      if (socket !== of || of.readyState !== OPEN) return;
+      try {
+        of.send(PING);
+      } catch {
+        // A socket that cannot take a ping is about to close; close moves on.
+      }
+      ping(of);
+    }, PING_MS);
+  };
+
   const connect = (): void => {
     if (closed) return;
-    confirmedThisSocket = false;
+    confirmedAt = null;
+    stopPing();
     pending.clear();
     subscribed.clear();
     bySubscription.clear();
@@ -192,6 +234,8 @@ export function watchAccounts(options: WatchOptions): ChainWatch {
     socket = next;
     next.onopen = () => {
       if (socket !== next) return;
+      stopPing();
+      ping(next);
       for (const address of wanted) subscribe(address);
     };
     next.onmessage = (event) => {
@@ -202,13 +246,16 @@ export function watchAccounts(options: WatchOptions): ChainWatch {
     next.onclose = () => {
       if (socket !== next) return;
       socket = null;
+      stopPing();
+      // Only a socket that stayed up starts the count again.
+      if (confirmedAt !== null && now() - confirmedAt >= STABLE_MS) failures = 0;
       retry();
     };
   };
 
   const retry = (): void => {
     if (closed) return;
-    // A socket that confirmed nothing counts as a failure; one that did starts the count again.
+    // Every close counts; onclose has already started the count again after a socket that stayed up.
     const wait = RECONNECT_MS[failures];
     failures += 1;
     if (wait === undefined) {
@@ -240,6 +287,7 @@ export function watchAccounts(options: WatchOptions): ChainWatch {
       closed = true;
       if (timer !== null) clearTimer(timer);
       timer = null;
+      stopPing();
       const last = socket;
       socket = null;
       if (last === null) return;

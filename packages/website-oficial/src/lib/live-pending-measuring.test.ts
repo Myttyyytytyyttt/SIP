@@ -10,8 +10,7 @@ import { PENDING_COPY } from "@/lib/live-copy";
 import { toLiveDashboard } from "@/lib/live-model";
 import {
   MEASURING_HIDE_MS,
-  MEASURING_HIDE_VOLUME_MS,
-  PENDING_STALL_MS,
+  MEASURING_STALL_MS,
   VOLUME_MAX_WAIT_MS,
   VOLUME_MIN_OWED_LAMPORTS,
   anyActive,
@@ -19,9 +18,11 @@ import {
   pendingLines,
   pendingSteps,
 } from "@/lib/live-pending";
+import { EMPTY_PUSH, afterRead, baselineOf, heardLate, movedSince, notified, walletChangesOf, walletEnds, type PushState } from "@/lib/live-push";
 import { pendingPollWanted } from "@/lib/live-schedule";
 import type { LiveDashboard, LiveEntryJson, LiveSnapshotJson, LiveWalletChange } from "@/lib/live-types";
 import { NOW_MS, WALLET_A, liveActivity, liveEntry, liveSnapshot, seconds, settledEvent, signature } from "../../test/fixtures/live-dashboard";
+import { DEFAULT_SWEEP_MS } from "../../../solana-keeper/src/config";
 import { VOLUME_MAX_WAIT_SECONDS, VOLUME_MIN_OWED_LAMPORTS as KEEPER_VOLUME_MIN_OWED } from "../../../solana-keeper/src/volume-base";
 
 /** The link's frontier in the fixture's snapshot. */
@@ -41,6 +42,8 @@ interface Setup {
   readonly policy?: "missing";
   /** The server's clock at this read, ms after the change was first covered. */
   readonly after?: number;
+  /** The trading wallet's balance; the fixture's 0.42 SOL when absent. */
+  readonly lamports?: string | null;
 }
 
 /** A change first covered at NOW_MS; the dashboard read `after` ms later. */
@@ -58,7 +61,7 @@ function dashboard(setup: Setup = {}): LiveDashboard {
     wallets: [
       {
         wallet: WALLET_A,
-        lamports: "420000000",
+        lamports: setup.lamports === undefined ? "420000000" : setup.lamports,
         link: { ...link, status: setup.linkStatus ?? "this_vault", frontierSlot: setup.frontier === undefined ? String(FRONTIER) : setup.frontier },
       },
     ],
@@ -71,6 +74,12 @@ function dashboard(setup: Setup = {}): LiveDashboard {
     walletChanges: setup.changes ?? [change()],
   });
 }
+
+/** The fixture's snapshot as dashboard() builds it, with the link's frontier at FRONTIER. */
+const baseSnapshot = (): LiveSnapshotJson => {
+  const base = liveSnapshot();
+  return { ...base, wallets: [{ ...base.wallets[0]!, link: { ...base.wallets[0]!.link, frontierSlot: String(FRONTIER) } }] };
+};
 
 const measuring = (data: LiveDashboard) => pendingSteps(data).filter((step) => step.kind === "measuring");
 const settleAt = (slot: number, wallet = WALLET_A, ok = true): LiveEntryJson => ({
@@ -114,6 +123,12 @@ describe("a trading wallet that changed past its frontier", () => {
     expect(measuring(dashboard({ entries: [settleAt(TRADE_SLOT, WALLET_A, false)] }))).toHaveLength(1);
   });
 
+  it("leads with the wallet's name, so a title cut short on a phone still says which wallet", () => {
+    for (const title of [PENDING_COPY.measuring("Trading wallet 1"), PENDING_COPY.measuringWaiting("Imported wallet 2")]) {
+      expect(title).toMatch(/^(Trading wallet 1|Imported wallet 2): /);
+    }
+  });
+
   it("says 'activity', never 'trade': a transfer into the wallet changes it too", () => {
     const line = pendingLines(measuring(dashboard()))[0]!;
     expect(line.title).toMatch(/latest activity/);
@@ -143,25 +158,110 @@ describe("nothing while no saving can follow", () => {
   it("a change the push never handed over", () => {
     expect(measuring(dashboard({ changes: [] }))).toEqual([]);
   });
+
+  it("a wallet holding no more than its rent floor and reserve: settle.rs refuses to pay out of it", () => {
+    // Moving the SOL out is itself the change that rang.
+    const empty = dashboard({ lamports: "0" });
+    expect(empty.wallets[0]!.canSettle).toBe(false);
+    expect(measuring(empty)).toEqual([]);
+    // Exactly floor + reserve is already too little; one lamport over is enough.
+    expect(measuring(dashboard({ lamports: String(890_880 + 50_000_000) }))).toEqual([]);
+    expect(measuring(dashboard({ lamports: String(890_880 + 50_000_000 + 1) }))).toHaveLength(1);
+    // A balance nobody could read is no evidence either way.
+    expect(dashboard({ lamports: null }).wallets[0]!.canSettle).toBeNull();
+    expect(measuring(dashboard({ lamports: null }))).toHaveLength(1);
+  });
+});
+
+/**
+ * A CHANGE NOBODY HEARD (review 2026-10-09): the socket was not listening when
+ * the trade happened — the page was on /wallets, or a phone dropped the
+ * backgrounded socket. The next read compares the wallet's balance with the
+ * last read's.
+ */
+describe("a trade made while the socket was not listening", () => {
+  const read = (slot: number, lamports: string, nonce = "3"): LiveSnapshotJson => {
+    const base = baseSnapshot();
+    return liveSnapshot({ ...base, slot, readAtMs: NOW_MS, wallets: [{ ...base.wallets[0]!, lamports, link: { ...base.wallets[0]!.link, settlementNonce: nonce } }] });
+  };
+  const after = (before: LiveSnapshotJson, now: LiveSnapshotJson, entries: readonly LiveEntryJson[] = [], push: PushState = EMPTY_PUSH): LiveDashboard => {
+    const state = afterRead(heardLate(push, movedSince(baselineOf(before), now)), { slot: now.slot, historyRead: true, readAtMs: now.readAtMs, ends: walletEnds(now, entries) });
+    return toLiveDashboard({ snapshot: now, activity: liveActivity(entries), privyWallets: [WALLET_A], walletChanges: walletChangesOf(state) });
+  };
+
+  it("is still being checked when the balance moved since the last read, at the earliest slot it could have", () => {
+    const steps = measuring(after(read(4_000, "420000000"), read(6_000, "395000000")));
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({ state: "active", since: NOW_MS });
+    expect(movedSince(baselineOf(read(4_000, "1")), read(6_000, "2"))).toEqual([{ wallet: WALLET_A, slot: 4_001 }]);
+  });
+
+  it("is nothing when the balance did not move, or there is no earlier read (a fresh tab starts from this one)", () => {
+    expect(measuring(after(read(4_000, "420000000"), read(6_000, "420000000")))).toEqual([]);
+    expect(movedSince(null, read(6_000, "395000000"))).toEqual([]);
+  });
+
+  it("is nothing when a settlement explains it: the link's count moved, or a settlement row lands after the last read", () => {
+    expect(measuring(after(read(4_000, "420000000", "3"), read(6_000, "395000000", "4")))).toEqual([]);
+    expect(measuring(after(read(4_000, "420000000"), read(6_000, "395000000"), [settleAt(4_001)]))).toEqual([]);
+  });
+
+  it("does not move a change the socket already named at a newer slot", () => {
+    const heard = notified(EMPTY_PUSH, { address: WALLET_A, slot: 5_500, now: NOW_MS, wallet: true });
+    const state = heardLate(heard, movedSince(baselineOf(read(4_000, "1")), read(6_000, "2")));
+    expect(state.wallets[WALLET_A]!.pendingSlot).toBe(5_500);
+  });
 });
 
 describe("a loader that stops claiming progress", () => {
-  it("runs for PENDING_STALL_MS after a read first saw the change, then rests quietly, without a loader", () => {
-    expect(measuring(dashboard({ after: PENDING_STALL_MS }))[0]).toMatchObject({ state: "active" });
-    const late = measuring(dashboard({ after: PENDING_STALL_MS + 1 }));
+  it("runs for MEASURING_STALL_MS — two of the keeper's sweeps — after a read first saw the change, then rests quietly, without a loader", () => {
+    // The keeper decides within about a sweep; a span with no profit sends nothing, so nothing on chain would end the step.
+    expect(MEASURING_STALL_MS).toBe(2 * DEFAULT_SWEEP_MS);
+    expect(measuring(dashboard({ after: MEASURING_STALL_MS }))[0]).toMatchObject({ state: "active" });
+    const late = measuring(dashboard({ after: MEASURING_STALL_MS + 1 }));
     expect(late[0]).toMatchObject({ state: "waiting", rest: "slow" });
     expect(anyActive(late)).toBe(false);
     const label = dashboard().wallets[0]!.label;
     expect(pendingLines(late)[0]).toMatchObject({ active: false, title: PENDING_COPY.measuringWaiting(label), sub: PENDING_COPY.measuringRest.profit });
   });
 
-  it("leaves the page after MEASURING_HIDE_MS on a profit vault, and after the volume keeper's hour on a volume one", () => {
+  it("leaves the page after MEASURING_HIDE_MS, on a volume vault too: a plain transfer owes nothing, and an hour's line would say otherwise", () => {
     expect(MEASURING_HIDE_MS).toBe(15 * 60_000);
     expect(measuring(dashboard({ after: MEASURING_HIDE_MS }))).toHaveLength(1);
     expect(measuring(dashboard({ after: MEASURING_HIDE_MS + 1 }))).toEqual([]);
-    expect(MEASURING_HIDE_VOLUME_MS).toBe(VOLUME_MAX_WAIT_MS + PENDING_STALL_MS);
-    expect(measuring(dashboard({ mode: 1, after: MEASURING_HIDE_VOLUME_MS }))).toHaveLength(1);
-    expect(measuring(dashboard({ mode: 1, after: MEASURING_HIDE_VOLUME_MS + 1 }))).toEqual([]);
+    expect(measuring(dashboard({ mode: 1, after: MEASURING_HIDE_MS }))[0]).toMatchObject({ state: "waiting", rest: "slow" });
+    expect(measuring(dashboard({ mode: 1, after: MEASURING_HIDE_MS + 1 }))).toEqual([]);
+    expect(MEASURING_HIDE_MS).toBeLessThan(VOLUME_MAX_WAIT_MS);
+  });
+
+  it("a wallet that keeps trading does not keep the loader turning: later trades move the slot, not the clock", () => {
+    // Review 2026-10-09: every covering read restarted the clock, so a bot trading every few seconds kept the spinner for as long as it ran.
+    let push: PushState = EMPTY_PUSH;
+    let data = dashboard({ changes: [] });
+    for (let t = 0; t <= 6 * 60_000; t += 10_000) {
+      push = notified(push, { address: WALLET_A, slot: TRADE_SLOT + t, now: NOW_MS + t, wallet: true });
+      const snapshot = liveSnapshot({ ...baseSnapshot(), slot: TRADE_SLOT + t + 5, readAtMs: NOW_MS + t + 2_000 });
+      push = afterRead(push, { slot: snapshot.slot, historyRead: true, readAtMs: snapshot.readAtMs, ends: walletEnds(snapshot, []) });
+      data = toLiveDashboard({ snapshot, activity: liveActivity([]), privyWallets: [WALLET_A], walletChanges: walletChangesOf(push) });
+    }
+    const steps = measuring(data);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({ state: "waiting", rest: "slow", since: NOW_MS + 2_000 });
+    expect(anyActive(steps)).toBe(false);
+  });
+
+  it("a saving ends the stretch: the next trade after it starts a clock of its own", () => {
+    let push = afterRead(notified(EMPTY_PUSH, { address: WALLET_A, slot: TRADE_SLOT, now: NOW_MS, wallet: true }), {
+      slot: TRADE_SLOT + 1,
+      historyRead: true,
+      readAtMs: NOW_MS,
+      ends: { [WALLET_A]: FRONTIER },
+    });
+    const settled = [settleAt(TRADE_SLOT + 50)];
+    push = notified(push, { address: WALLET_A, slot: TRADE_SLOT + 100, now: NOW_MS + 180_000, wallet: true });
+    push = afterRead(push, { slot: TRADE_SLOT + 101, historyRead: true, readAtMs: NOW_MS + 181_000, ends: { [WALLET_A]: TRADE_SLOT + 50 } });
+    const data = dashboard({ changes: walletChangesOf(push), entries: settled, after: 181_000 });
+    expect(measuring(data)[0]).toMatchObject({ state: "active", since: NOW_MS + 181_000 });
   });
 
   it("while active, asks for the faster cadence like any step under way (a fallback for a missed push)", () => {

@@ -10,22 +10,25 @@ import {
   EMPTY_PUSH,
   MAX_WATCHED,
   PUSH_DEBOUNCE_MS,
+  PUSH_WALLET_FLOOR_MS,
   WALLET_CHANGE_FORGET_MS,
   afterRead,
   notified,
   pushReadDelayMs,
+  recallPush,
+  rememberPush,
   resynced,
   showReadWanted,
   walletChangesOf,
   watchedAddresses,
   type PushReadInput,
 } from "@/lib/live-push";
-import { MEASURING_HIDE_VOLUME_MS } from "@/lib/live-pending";
+import { MEASURING_HIDE_MS } from "@/lib/live-pending";
 import { MANUAL_FLOOR_MS, POLL_BASE_MS } from "@/lib/live-schedule";
 import { VAULT, WALLET_A, liveSnapshot, tokenAccount } from "../../test/fixtures/live-dashboard";
 
 const NOW = 1_789_500_000_000;
-const quiet: PushReadInput = { dirty: { since: NOW, slot: 10 }, now: NOW, lastReadAt: NOW - 60_000, visible: true, reading: false, failures: 0, retryAt: null };
+const quiet: PushReadInput = { dirty: { since: NOW, slot: 10, urgent: true }, now: NOW, lastReadAt: NOW - 60_000, visible: true, reading: false, failures: 0, retryAt: null };
 
 describe("what a push buys", () => {
   it("nothing, when nothing changed", () => {
@@ -37,7 +40,7 @@ describe("what a push buys", () => {
     expect(pushReadDelayMs(quiet)).toBe(PUSH_DEBOUNCE_MS);
     // A second change 1 s later rides along: the window does not move.
     const state = notified(notified(EMPTY_PUSH, { address: VAULT, slot: 10, now: NOW, wallet: false }), { address: "wsol", slot: 12, now: NOW + 1_000, wallet: false });
-    expect(state.dirty).toEqual({ since: NOW, slot: 12 });
+    expect(state.dirty).toEqual({ since: NOW, slot: 12, urgent: true });
     expect(pushReadDelayMs({ ...quiet, dirty: state.dirty, now: NOW + 1_000 })).toBe(500);
   });
 
@@ -82,6 +85,63 @@ describe("what a push buys", () => {
   });
 });
 
+/**
+ * A BUSY TRADER (review 2026-10-09): a read costs at least five of the 60
+ * tokens a minute one address gets, and a trading wallet rings every slot.
+ */
+describe("what a wallet that keeps trading buys", () => {
+  it("its first change since the last saving is urgent — the manual floor — and the next ones wait PUSH_WALLET_FLOOR_MS", () => {
+    expect(PUSH_WALLET_FLOOR_MS).toBe(30_000);
+    const first = notified(EMPTY_PUSH, { address: WALLET_A, slot: 100, now: NOW, wallet: true });
+    expect(first.dirty?.urgent).toBe(true);
+    const covered = afterRead(first, { slot: 100, historyRead: true, readAtMs: NOW, ends: {} });
+    const again = notified(covered, { address: WALLET_A, slot: 120, now: NOW + 2_000, wallet: true });
+    expect(again.dirty?.urgent).toBe(false);
+    expect(pushReadDelayMs({ ...quiet, dirty: again.dirty, now: NOW + 5_000, lastReadAt: NOW })).toBe(PUSH_WALLET_FLOOR_MS - 5_000);
+    // The vault ringing makes it urgent again: that is the keeper's own step.
+    const vault = notified(again, { address: VAULT, slot: 121, now: NOW + 6_000, wallet: false });
+    expect(vault.dirty?.urgent).toBe(true);
+    expect(pushReadDelayMs({ ...quiet, dirty: vault.dirty, now: NOW + 6_000, lastReadAt: NOW })).toBe(MANUAL_FLOOR_MS - 6_000);
+  });
+
+  it("a change after a saving ended the last one is urgent again", () => {
+    const first = afterRead(notified(EMPTY_PUSH, { address: WALLET_A, slot: 100, now: NOW, wallet: true }), { slot: 100, historyRead: true, readAtMs: NOW, ends: {} });
+    const ended = afterRead(first, { slot: 200, historyRead: true, readAtMs: NOW + 60_000, ends: { [WALLET_A]: 150 } });
+    expect(notified(ended, { address: WALLET_A, slot: 210, now: NOW + 61_000, wallet: true }).dirty?.urgent).toBe(true);
+  });
+
+  it("a socket that came back owes a read, not an urgent one", () => {
+    expect(resynced(EMPTY_PUSH, NOW).dirty?.urgent).toBe(false);
+  });
+
+  it("a wallet ringing every 400 ms for a minute buys two reads after the first, not six", () => {
+    let state = afterRead(notified(EMPTY_PUSH, { address: WALLET_A, slot: 1, now: NOW, wallet: true }), { slot: 1, historyRead: true, readAtMs: NOW, ends: {} });
+    let lastReadAt = NOW;
+    let reads = 0;
+    for (let t = NOW + 400; t <= NOW + 60_000; t += 400) {
+      state = notified(state, { address: WALLET_A, slot: t, now: t, wallet: true });
+      if (pushReadDelayMs({ ...quiet, dirty: state.dirty, now: t, lastReadAt }) === 0) {
+        reads += 1;
+        lastReadAt = t;
+        state = afterRead(state, { slot: t, historyRead: true, readAtMs: t, ends: {} });
+      }
+    }
+    expect(reads).toBe(60_000 / PUSH_WALLET_FLOOR_MS);
+    expect(reads).toBe(2);
+  });
+});
+
+describe("what outlives a remount", () => {
+  it("the push and the last read's balances, per pension key", () => {
+    expect(recallPush("pension-remount")).toEqual({ push: EMPTY_PUSH, baseline: null });
+    const push = notified(EMPTY_PUSH, { address: WALLET_A, slot: 9, now: NOW, wallet: true });
+    rememberPush("pension-remount", { push });
+    rememberPush("pension-remount", { baseline: { slot: 8, wallets: { [WALLET_A]: { lamports: "1", nonce: "0" } } } });
+    expect(recallPush("pension-remount")).toEqual({ push, baseline: { slot: 8, wallets: { [WALLET_A]: { lamports: "1", nonce: "0" } } } });
+    expect(recallPush("another-pension")).toEqual({ push: EMPTY_PUSH, baseline: null });
+  });
+});
+
 describe("coming back to the tab", () => {
   it("reads at once when the last read is MANUAL_FLOOR_MS old — not a whole sweep", () => {
     expect(showReadWanted({ lastReadAt: NOW, now: NOW + MANUAL_FLOOR_MS, failures: 0, retryAt: null })).toBe(true);
@@ -109,7 +169,7 @@ describe("what a read covers", () => {
   const rung = notified(EMPTY_PUSH, { address: WALLET_A, slot: 100, now: NOW, wallet: true });
 
   it("a read at or past the change's slot covers it; one from before leaves it standing", () => {
-    expect(afterRead(rung, { slot: 99, historyRead: true, readAtMs: NOW }).dirty).toEqual({ since: NOW, slot: 100 });
+    expect(afterRead(rung, { slot: 99, historyRead: true, readAtMs: NOW }).dirty).toEqual({ since: NOW, slot: 100, urgent: true });
     expect(afterRead(rung, { slot: 100, historyRead: true, readAtMs: NOW }).dirty).toBeNull();
     // A snapshot that named no slot cannot be compared: covered, rather than read again and again.
     expect(afterRead(rung, { slot: null, historyRead: true, readAtMs: NOW }).dirty).toBeNull();
@@ -124,13 +184,27 @@ describe("what a read covers", () => {
     expect(walletChangesOf(read)).toEqual([{ wallet: WALLET_A, slot: 100, sinceMs: NOW + 12_000 }]);
   });
 
-  it("keeps the newest slot per wallet, and moves the clock to the read that covered a newer change", () => {
+  it("keeps the newest slot per wallet, and the clock of the first change for as long as nothing ended it", () => {
     const first = afterRead(rung, { slot: 100, historyRead: true, readAtMs: NOW });
     const again = notified(first, { address: WALLET_A, slot: 140, now: NOW + 20_000, wallet: true });
     // Until a read covers the newer one, the older stays drawn — no flicker.
     expect(walletChangesOf(again)).toEqual([{ wallet: WALLET_A, slot: 100, sinceMs: NOW }]);
     const covered = afterRead(again, { slot: 150, historyRead: true, readAtMs: NOW + 25_000 });
-    expect(walletChangesOf(covered)).toEqual([{ wallet: WALLET_A, slot: 140, sinceMs: NOW + 25_000 }]);
+    expect(walletChangesOf(covered)).toEqual([{ wallet: WALLET_A, slot: 140, sinceMs: NOW }]);
+  });
+
+  it("starts a new clock once a saving or the frontier ended the last change, or once it is no longer drawn", () => {
+    const first = afterRead(rung, { slot: 100, historyRead: true, readAtMs: NOW, ends: { [WALLET_A]: 50 } });
+    expect(first.wallets[WALLET_A]!.covered).toEqual({ slot: 100, atMs: NOW, open: true });
+    // Ended by a settlement at 120.
+    const settled = afterRead(notified(first, { address: WALLET_A, slot: 140, now: NOW, wallet: true }), { slot: 150, historyRead: true, readAtMs: NOW + 60_000, ends: { [WALLET_A]: 120 } });
+    expect(walletChangesOf(settled)).toEqual([{ wallet: WALLET_A, slot: 140, sinceMs: NOW + 60_000 }]);
+    // A change the same read also ended is not open.
+    const both = afterRead(notified(first, { address: WALLET_A, slot: 140, now: NOW, wallet: true }), { slot: 150, historyRead: true, readAtMs: NOW + 60_000, ends: { [WALLET_A]: 145 } });
+    expect(both.wallets[WALLET_A]!.covered).toMatchObject({ slot: 140, open: false });
+    // No longer drawn: a change past the horizon starts again.
+    const late = afterRead(notified(first, { address: WALLET_A, slot: 140, now: NOW, wallet: true }), { slot: 150, historyRead: true, readAtMs: NOW + WALLET_CHANGE_FORGET_MS + 1 });
+    expect(walletChangesOf(late)).toEqual([{ wallet: WALLET_A, slot: 140, sinceMs: NOW + WALLET_CHANGE_FORGET_MS + 1 }]);
   });
 
   it("the vault and its token accounts mark a change but are no wallet's activity", () => {
@@ -140,7 +214,7 @@ describe("what a read covers", () => {
   });
 
   it("forgets a change no row would draw any more", () => {
-    expect(WALLET_CHANGE_FORGET_MS).toBe(MEASURING_HIDE_VOLUME_MS);
+    expect(WALLET_CHANGE_FORGET_MS).toBe(MEASURING_HIDE_MS);
     const covered = afterRead(rung, { slot: 100, historyRead: true, readAtMs: NOW });
     expect(walletChangesOf(afterRead(covered, { slot: 200, historyRead: true, readAtMs: NOW + WALLET_CHANGE_FORGET_MS }))).toHaveLength(1);
     expect(walletChangesOf(afterRead(covered, { slot: 200, historyRead: true, readAtMs: NOW + WALLET_CHANGE_FORGET_MS + 1 }))).toEqual([]);

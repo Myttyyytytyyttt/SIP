@@ -98,14 +98,24 @@ export const VOLUME_MIN_OWED_LAMPORTS = 1_000_000n;
 export const VOLUME_MAX_WAIT_MS = 60 * 60_000;
 
 /**
- * How long after a read first saw a wallet change its row stays at all: the
- * loader for PENDING_STALL_MS, then a quiet resting line until this. A profit
- * vault's keeper answers within a few sweeps or not at all (no profit, no
- * saving); a volume vault's can wait out VOLUME_MAX_WAIT_MS, and a few sweeps
- * after it.
+ * HOW LONG A WALLET'S CHANGE KEEPS ITS LOADER, counted from the read that
+ * first saw it: about two of the keeper's sweeps (packages/solana-keeper
+ * DEFAULT_SWEEP_MS, one minute). The keeper decides within about one sweep;
+ * a span that made no profit, or a volume span with no trade in it, rests at
+ * NO_PROFIT and sends nothing (settle-decision.ts), so no chain event would
+ * ever end the step. Past this the loader stops and a quiet line says no
+ * saving has come yet.
+ */
+export const MEASURING_STALL_MS = 2 * 60_000;
+
+/**
+ * And how long its row stays at all, whatever the mode. A volume vault's
+ * saving can come up to VOLUME_MAX_WAIT_MS later, but the page cannot tell a
+ * trade from a plain transfer into the wallet, which owes nothing — so it does
+ * not hold a line up for an hour on what may be no trade at all; the saving's
+ * own row says it when it comes.
  */
 export const MEASURING_HIDE_MS = 15 * 60_000;
-export const MEASURING_HIDE_VOLUME_MS = VOLUME_MAX_WAIT_MS + PENDING_STALL_MS;
 
 /** The rows that move money toward each step, newest of which starts its clock. */
 const MOVES_TOWARD: Readonly<Record<InvestKind, ReadonlySet<LiveRow["event"]["kind"]>>> = {
@@ -174,7 +184,8 @@ function turnRest(data: LiveDashboard): PendingRest | null | "unknown" {
  *
  * Nothing while settling cannot happen: the vault or the protocol paused (or
  * not known not to be — settle.rs refuses either), a volume vault while volume
- * is not offered, or a wallet whose link is not this vault's.
+ * is not offered, a wallet whose link is not this vault's, or one holding no
+ * more than its rent floor and reserve.
  */
 function measuringSteps(data: LiveDashboard): PendingStep[] {
   const { vault } = data;
@@ -184,19 +195,21 @@ function measuringSteps(data: LiveDashboard): PendingStep[] {
     const held = newest.get(change.wallet);
     if (held === undefined || change.slot > held.slot) newest.set(change.wallet, change);
   }
-  const hideAfter = vault.mode === 1 ? MEASURING_HIDE_VOLUME_MS : MEASURING_HIDE_MS;
   const steps: PendingStep[] = [];
   for (const wallet of data.wallets) {
     const change = newest.get(wallet.address);
     if (change === undefined || wallet.linkStatus !== "this_vault") continue;
+    // At or under its reserve, settle.rs refuses to pay out of it (WalletBelowReserve):
+    // moving the SOL out is itself the change that rang, and no saving can follow.
+    if (wallet.canSettle === false) continue;
     if (wallet.frontierSlot !== null && wallet.frontierSlot >= BigInt(change.slot)) continue;
     const settled = data.settlementRows.some(
       (row) => row.ok && row.event.kind === "settled" && row.event.wallet === wallet.address && row.slot >= change.slot,
     );
     if (settled) continue;
     const age = data.nowMs - change.sinceMs;
-    if (age > hideAfter) continue;
-    const stalled = age > PENDING_STALL_MS;
+    if (age > MEASURING_HIDE_MS) continue;
+    const stalled = age > MEASURING_STALL_MS;
     steps.push({
       kind: "measuring",
       state: stalled ? "waiting" : "active",

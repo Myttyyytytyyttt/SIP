@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { RECONNECT_MS, watchAccounts, type SocketLike } from "@/lib/live-socket";
+import { PING_MS, RECONNECT_MS, STABLE_MS, watchAccounts, type SocketLike } from "@/lib/live-socket";
 
 class FakeSocket implements SocketLike {
   readyState = 0;
@@ -12,13 +12,13 @@ class FakeSocket implements SocketLike {
   onmessage: ((event: { readonly data: unknown }) => void) | null = null;
   onclose: ((event: unknown) => void) | null = null;
   onerror: ((event: unknown) => void) | null = null;
-  readonly sent: { id: number; method: string; params: unknown[] }[] = [];
+  readonly sent: { id?: number; method: string; params?: unknown[] }[] = [];
   closed = false;
 
   constructor(readonly url: string) {}
 
   send(data: string): void {
-    this.sent.push(JSON.parse(data) as { id: number; method: string; params: unknown[] });
+    this.sent.push(JSON.parse(data) as { id?: number; method: string; params?: unknown[] });
   }
   close(): void {
     this.closed = true;
@@ -45,8 +45,8 @@ class FakeSocket implements SocketLike {
     const ids = new Map<string, number>();
     let next = from;
     for (const message of this.sent.filter((entry) => entry.method === "accountSubscribe")) {
-      ids.set(message.params[0] as string, next);
-      this.answer(message.id, next);
+      ids.set(message.params![0] as string, next);
+      this.answer(message.id!, next);
       next += 1;
     }
     return ids;
@@ -57,6 +57,7 @@ function harness(addresses: readonly string[] = ["WalletA", "Vault"]) {
   const sockets: FakeSocket[] = [];
   const timers: { run: () => void; ms: number; cleared: boolean }[] = [];
   const changes: [string, number][] = [];
+  const clock = { now: 1_000_000 };
   let resyncs = 0;
   let gaveUp = 0;
   const watch = watchAccounts({
@@ -65,6 +66,7 @@ function harness(addresses: readonly string[] = ["WalletA", "Vault"]) {
     onChange: (address, slot) => changes.push([address, slot]),
     onResync: () => (resyncs += 1),
     onGiveUp: () => (gaveUp += 1),
+    now: () => clock.now,
     open: (url) => {
       const socket = new FakeSocket(url);
       sockets.push(socket);
@@ -79,14 +81,16 @@ function harness(addresses: readonly string[] = ["WalletA", "Vault"]) {
       (timer as { cleared: boolean }).cleared = true;
     },
   });
-  const fire = (): number => {
-    const timer = timers.find((entry) => !entry.cleared);
+  /** Runs the first timer still armed — of `ms` when named. */
+  const fire = (ms?: number): number => {
+    const timer = timers.find((entry) => !entry.cleared && (ms === undefined || entry.ms === ms));
     if (timer === undefined) throw new Error("no timer armed");
     timer.cleared = true;
     timer.run();
     return timer.ms;
   };
-  return { watch, sockets, timers, changes, fire, resyncs: () => resyncs, gaveUp: () => gaveUp, last: () => sockets[sockets.length - 1]! };
+  const armed = (): number[] => timers.filter((entry) => !entry.cleared).map((entry) => entry.ms);
+  return { watch, sockets, timers, armed, clock, changes, fire, resyncs: () => resyncs, gaveUp: () => gaveUp, last: () => sockets[sockets.length - 1]! };
 }
 
 describe("subscribing", () => {
@@ -128,7 +132,7 @@ describe("a changed set of addresses", () => {
     expect(h.last().sent).toHaveLength(before);
 
     h.watch.setAddresses(["Vault", "WalletB"]);
-    expect(h.last().sent.slice(before).map((message) => [message.method, message.params[0]])).toEqual([
+    expect(h.last().sent.slice(before).map((message) => [message.method, message.params![0]])).toEqual([
       ["accountUnsubscribe", ids.get("WalletA")],
       ["accountSubscribe", "WalletB"],
     ]);
@@ -141,7 +145,7 @@ describe("a changed set of addresses", () => {
     const h = harness(["WalletA"]);
     h.last().open();
     h.watch.setAddresses([]);
-    h.last().answer(h.last().sent[0]!.id, 77);
+    h.last().answer(h.last().sent[0]!.id!, 77);
     expect(h.last().sent.at(-1)).toMatchObject({ method: "accountUnsubscribe", params: [77] });
     h.last().notify(77, 5);
     expect(h.changes).toEqual([]);
@@ -159,12 +163,12 @@ describe("reconnecting", () => {
     expect(h.sockets).toHaveLength(2);
     h.watch.setAddresses(["Vault"]);
     h.last().open();
-    expect(h.last().sent.map((message) => message.params[0])).toEqual(["Vault"]);
+    expect(h.last().sent.map((message) => message.params![0])).toEqual(["Vault"]);
     h.last().confirmAll(200);
     expect(h.resyncs()).toBe(1);
   });
 
-  it("waits longer after each socket that confirmed nothing, and a confirmed one starts the count again", () => {
+  it("waits longer after each socket that confirmed nothing, and one that stayed up STABLE_MS starts the count again", () => {
     const h = harness();
     const waits: number[] = [];
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -174,8 +178,28 @@ describe("reconnecting", () => {
     expect(waits).toEqual(RECONNECT_MS.slice(0, 3));
     h.last().open();
     h.last().confirmAll();
+    h.clock.now += STABLE_MS;
     h.last().drop();
     expect(h.fire()).toBe(RECONNECT_MS[0]);
+  });
+
+  it("a server that confirms and then drops cannot hold it in a one-second loop: a brief socket does not reset the count", () => {
+    // Review 2026-10-09: 20 confirm→drop cycles all waited 1 s, resynced 20 times and never gave up.
+    const h = harness();
+    const waits: number[] = [];
+    for (let cycle = 0; cycle < RECONNECT_MS.length; cycle += 1) {
+      h.last().open();
+      h.last().confirmAll(100 + cycle * 10);
+      h.clock.now += STABLE_MS - 1;
+      h.last().drop();
+      waits.push(h.fire(RECONNECT_MS[cycle]));
+    }
+    expect(waits).toEqual([...RECONNECT_MS]);
+    h.last().open();
+    h.last().confirmAll(900);
+    h.last().drop();
+    expect(h.gaveUp()).toBe(1);
+    expect(h.armed()).toEqual([]);
   });
 
   it("gives up quietly after RECONNECT_MS runs out, and opens nothing more", () => {
@@ -217,7 +241,7 @@ describe("closing", () => {
     const ids = h.last().confirmAll();
     const before = h.last().sent.length;
     h.watch.close();
-    expect(h.last().sent.slice(before).map((message) => [message.method, message.params[0]])).toEqual([
+    expect(h.last().sent.slice(before).map((message) => [message.method, message.params![0]])).toEqual([
       ["accountUnsubscribe", ids.get("WalletA")],
       ["accountUnsubscribe", ids.get("Vault")],
     ]);
@@ -225,7 +249,9 @@ describe("closing", () => {
     // A close event after our own close re-arms nothing, and a notification names nothing.
     h.last().onclose?.({});
     h.last().notify(ids.get("Vault")!, 1);
-    expect(h.timers).toHaveLength(0);
+    // The only timer ever armed was the keepalive, and it is cleared.
+    expect(h.timers.map((timer) => timer.ms)).toEqual([PING_MS]);
+    expect(h.armed()).toEqual([]);
     expect(h.changes).toEqual([]);
     expect(h.sockets).toHaveLength(1);
   });
@@ -244,5 +270,52 @@ describe("closing", () => {
     h.watch.close();
     expect(h.last().sent).toEqual([]);
     expect(h.last().closed).toBe(true);
+  });
+});
+
+/**
+ * THE PUBLIC ENDPOINT CLOSES A SILENT SOCKET (review 2026-10-09, measured on
+ * wss://api.mainnet-beta.solana.com): an idle socket, subscribed or not, was
+ * closed with 1006 at about 60 s; one sending {"jsonrpc":"2.0","method":"ping"}
+ * every 30 s stayed open for the whole 150 s probe. So the socket pings.
+ */
+describe("keeping a quiet socket open", () => {
+  it("sends a text ping every PING_MS while open, from the moment it opens", () => {
+    expect(PING_MS).toBe(30_000);
+    const h = harness();
+    expect(h.armed()).toEqual([]);
+    h.last().open();
+    h.last().confirmAll();
+    const before = h.last().sent.length;
+    for (let beat = 0; beat < 4; beat += 1) h.fire(PING_MS);
+    expect(h.last().sent.slice(before)).toEqual(Array.from({ length: 4 }, () => ({ jsonrpc: "2.0", method: "ping" })));
+    expect(h.armed()).toEqual([PING_MS]);
+    // Pinging is no change and no resync.
+    expect(h.changes).toEqual([]);
+    expect(h.resyncs()).toBe(0);
+  });
+
+  it("pings an open socket that has nothing subscribed yet, too: the endpoint closes that one as well", () => {
+    const h = harness([]);
+    h.last().open();
+    h.fire(PING_MS);
+    expect(h.last().sent).toEqual([{ jsonrpc: "2.0", method: "ping" }]);
+  });
+
+  it("stops pinging when the socket drops, and pings the next one", () => {
+    const h = harness();
+    h.last().open();
+    h.last().drop();
+    expect(h.armed()).toEqual([RECONNECT_MS[0]]);
+    h.fire();
+    h.last().open();
+    expect(h.armed()).toEqual([PING_MS]);
+  });
+
+  it("stops pinging on close", () => {
+    const h = harness();
+    h.last().open();
+    h.watch.close();
+    expect(h.armed()).toEqual([]);
   });
 });

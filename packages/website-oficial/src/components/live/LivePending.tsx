@@ -9,7 +9,7 @@
  * glyph there and says why. When the chain catches up the step drops out of
  * this list, and the feed below holds the transaction that did it. A trading
  * wallet the chain said changed, and not yet saved from, leads the list
- * ("Checking your latest activity on …"): grey, with no amount, because
+ * ("Trading wallet 1: checking your latest activity"): grey, with no amount, because
  * nothing is known yet about what it will save.
  *
  * THE REGION IS ALWAYS THERE, EMPTY OR NOT. A polite live region announces what

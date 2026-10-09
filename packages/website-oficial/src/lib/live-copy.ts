@@ -595,10 +595,13 @@ export const PENDING_COPY = {
   /**
    * A TRADING WALLET THAT CHANGED and has no saving for it yet (live-pending.ts
    * measuring). "Activity", never "trade": the push says only that the wallet's
-   * balance changed, which a plain transfer into it does too.
+   * balance changed, which a plain transfer into it does too. The wallet's
+   * name LEADS: the title truncates on one line, and at 375 px "Checking your
+   * latest activity on Trading wall…" lost the only part that tells two
+   * wallets apart (review 2026-10-09).
    */
-  measuring: (wallet: string): string => `Checking your latest activity on ${wallet}`,
-  measuringWaiting: (wallet: string): string => `No saving yet from your latest activity on ${wallet}`,
+  measuring: (wallet: string): string => `${wallet}: checking your latest activity`,
+  measuringWaiting: (wallet: string): string => `${wallet}: no saving yet from your latest activity`,
   /** Under the loader, by the vault's mode: whether a saving follows at all. The volume figures are the keeper's (live-pending.ts). */
   measuringSub: {
     profit: `A saving follows only if your trades since the last one made a profit · ${BRAND} checks about once a minute`,

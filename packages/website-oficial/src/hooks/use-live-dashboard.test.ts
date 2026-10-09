@@ -109,10 +109,10 @@ describe("the push from the chain", () => {
   const LEADERBOARD = fileURLToPath(new URL("../components/leaderboard-account.tsx", import.meta.url));
 
   it("opens a socket only for a live pension that draws its history, on the key-free WebSocket, and closes it on the way out", () => {
-    expect(source).toMatch(/if \(pensionKey === null \|\| !wantsActivity \|\| wsUrl === null \|\| typeof WebSocket === "undefined"\) return undefined;/);
+    expect(source).toMatch(/if \(pensionKey === null \|\| !wantsActivity \|\| !hasWatched \|\| wsUrl === null \|\| typeof WebSocket === "undefined"\) return undefined;/);
     expect(source).toMatch(/const wsUrl = useSolanaConfigOrNull\(\)\?\.solanaWsUrl \?\? null;/);
     expect(source).toMatch(/return \(\) => \{\s*watch\.close\(\);/);
-    expect(source).toMatch(/\}, \[pensionKey, wantsActivity, wsUrl\]\);/);
+    expect(source).toMatch(/\}, \[pensionKey, wantsActivity, hasWatched, wsUrl\]\);/);
     // Exactly one place opens one.
     expect(source.match(/watchAccounts\(/g)).toHaveLength(1);
     expect(source).not.toMatch(/new WebSocket\(/);
@@ -121,6 +121,12 @@ describe("the push from the chain", () => {
   it("never in the sample: the shell hands the hook no pension key outside live mode, and the leaderboard's chip reads no history", () => {
     expect(code(readFileSync(SHELL, "utf8"))).toMatch(/useLiveDashboard\(\{ pensionKey: state\.kind === "live" \? pensionKey : null,/);
     expect(code(readFileSync(LEADERBOARD, "utf8"))).toMatch(/useLiveDashboard\(\{ pensionKey, privyWallets, activity: false \}\)/);
+  });
+
+  it("opens nothing while there is nothing to watch: the endpoint closes a socket with no subscription, and a vault created later opens it then", () => {
+    // Review 2026-10-09: a socket opened before the vault existed was closed every ~60 s, gave up after six, and never subscribed the vault.
+    expect(source).toMatch(/const hasWatched = watched !== "";/);
+    expect(source).toMatch(/const watched = useMemo\(\(\) => watchedAddresses\(snapshot\)\.join\(","\), \[snapshot\]\);/);
   });
 
   it("resubscribes a changed set instead of reopening", () => {
@@ -134,9 +140,26 @@ describe("the push from the chain", () => {
 
   it("hands a wallet's change to the page only from a read that read the history", () => {
     expect(read).toMatch(/if \(page\.ok && page\.body\.status === "exists"\) \{\s*historyRead = true;/);
-    expect(read).toMatch(/setPush\(\(held\) => afterRead\(held, \{ slot: answered\.body\.slot, historyRead, readAtMs: answered\.body\.readAtMs \}\)\);/);
+    expect(read).toMatch(/setPush\(\(held\) => afterRead\(heardLate\(held, moved\), \{ slot: answered\.body\.slot, historyRead, readAtMs: answered\.body\.readAtMs, ends \}\)\);/);
     expect(read.match(/historyRead = true/g)).toHaveLength(1);
     expect(source).toMatch(/walletChanges,\s*\}\);/);
+  });
+
+  it("finds a change nobody heard from the balances against the last read's, kept per pension across a remount", () => {
+    // Review 2026-10-09: a trade made while the page was on /wallets, or while a phone had dropped the socket, never showed.
+    expect(read).toMatch(/const moved = movedSince\(recallPush\(pensionKey\)\.baseline, answered\.body\);\s*rememberPush\(pensionKey, \{ baseline: baselineOf\(answered\.body\) \}\);/);
+    expect(read).toMatch(/const ends = walletEnds\(answered\.body, seen\);/);
+    // Only the dashboard's own reads move the baseline, never the leaderboard chip's.
+    expect(read).toMatch(/if \(wantsActivity\) \{\s*const moved = movedSince/);
+    expect(read.match(/seen\.push\(/g)).toHaveLength(2);
+    expect(source).toMatch(/useState<PushState>\(\(\) => \(pensionKey !== null && wantsActivity \? recallPush\(pensionKey\)\.push : EMPTY_PUSH\)\)/);
+    expect(source).toMatch(/setPush\(pensionKey !== null && wantsActivity \? recallPush\(pensionKey\)\.push : EMPTY_PUSH\);/);
+    expect(source).toMatch(/if \(pensionKey !== null && wantsActivity\) rememberPush\(pensionKey, \{ push \}\);/);
+  });
+
+  it("does not read for a push in a tab hidden since the read was armed", () => {
+    const pushEffect = source.slice(source.indexOf("const delay = pushReadDelayMs("), source.indexOf("const refresh = useCallback"));
+    expect(pushEffect).toMatch(/window\.setTimeout\(\(\) => \{\s*if \(typeof document !== "undefined" && document\.visibilityState !== "visible"\) return;\s*void read\(false\)/);
   });
 
   it("reads on returning to the tab by visibility and by focus, under showReadWanted", () => {

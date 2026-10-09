@@ -21,9 +21,20 @@
  * server named (the snapshot's own, or the history's, which every read also
  * asks for), never while the reads are backing off after failures — then the
  * backoff's own read clears the change — and never while a read is in flight
- * (that read re-arms this when it finishes). So a chain that changes
- * continuously costs one read every MANUAL_FLOOR_MS at most: six a minute,
- * where the poll alone is one (three while a step is under way).
+ * (that read re-arms this when it finishes).
+ *
+ * A BUSY TRADER DOES NOT BUY A READ PER TRADE. A trading wallet changes with
+ * every trade — measured on mainnet, a busy account rang once a slot, 325
+ * times in 150 s — and a read costs at least five of the 60 tokens a minute
+ * one address gets (/api/solana-live), shared by every tab it has open. So
+ * only an URGENT change waits the manual floor: the vault or its token
+ * accounts (the keeper's own steps), or a wallet's FIRST change since its last
+ * saving — the one that puts "checking your latest activity" up. Any other
+ * change of a wallet already being checked waits PUSH_WALLET_FLOOR_MS. Worst
+ * case per tab: six reads a minute while the vault itself changes every few
+ * seconds, which only the keeper and deposits do; two a minute for a wallet
+ * that trades continuously (three while a step's faster poll runs). The poll
+ * alone is one.
  *
  * A HIDDEN TAB STILL LISTENS AND DOES NOT READ. The socket costs the keyed RPC
  * nothing; a read does. So a change while hidden is remembered, and the tab
@@ -40,19 +51,22 @@
 
 import { USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
 
-import { MEASURING_HIDE_VOLUME_MS } from "@/lib/live-pending";
+import { MEASURING_HIDE_MS } from "@/lib/live-pending";
 import { MANUAL_FLOOR_MS } from "@/lib/live-schedule";
-import type { LiveSnapshotJson, LiveWalletChange } from "@/lib/live-types";
+import type { LiveEntryJson, LiveSnapshotJson, LiveWalletChange } from "@/lib/live-types";
 
 /** A change opens a window this long; everything inside it is one read. */
 export const PUSH_DEBOUNCE_MS = 1_500;
 
+/** The floor for a change that is not urgent: a wallet already being checked trading again. */
+export const PUSH_WALLET_FLOOR_MS = 30_000;
+
 /**
- * How long a wallet's change is kept once a read has seen it: as long as the
- * longest any row shows it (live-pending.ts MEASURING_HIDE_VOLUME_MS, a volume
- * vault's hour and the stall after it). Past it nothing would draw it.
+ * How long a wallet's change is kept once a read has seen it: as long as any
+ * row shows it (live-pending.ts MEASURING_HIDE_MS). Past it nothing would draw
+ * it, and a change after that starts its own clock.
  */
-export const WALLET_CHANGE_FORGET_MS = MEASURING_HIDE_VOLUME_MS;
+export const WALLET_CHANGE_FORGET_MS = MEASURING_HIDE_MS;
 
 /** The most addresses one dashboard subscribes to: the snapshot's ten wallets, the vault and two token accounts. */
 export const MAX_WATCHED = 13;
@@ -85,13 +99,25 @@ export function watchedWallets(snapshot: LiveSnapshotJson | null): string[] {
 export interface WalletWatch {
   /** The newest slot a notification named that no read has covered yet; null when none is outstanding. */
   readonly pendingSlot: number | null;
-  /** The newest change a read covered — at or past its slot, with the history read — and the server's clock at that read. */
-  readonly covered: { readonly slot: number; readonly atMs: number } | null;
+  /**
+   * The newest change a read covered — at or past its slot, with the history
+   * read. `atMs` is the server's clock at the read that covered the FIRST
+   * change since the wallet's last saving (or since the last one was
+   * forgotten): later changes move the slot, never the clock, so a wallet that
+   * keeps trading cannot keep a loader turning. `open` is whether, at the last
+   * read, nothing had ended it yet (a settlement at or past it, or the link's
+   * frontier).
+   */
+  readonly covered: { readonly slot: number; readonly atMs: number; readonly open: boolean } | null;
 }
 
 export interface PushState {
-  /** Something changed that no read has covered yet: since when (this browser's clock), and the newest slot named. */
-  readonly dirty: { readonly since: number; readonly slot: number } | null;
+  /**
+   * Something changed that no read has covered yet: since when (this browser's
+   * clock), the newest slot named, and whether any of it was urgent (the
+   * floor it waits).
+   */
+  readonly dirty: { readonly since: number; readonly slot: number; readonly urgent: boolean } | null;
   readonly wallets: Readonly<Record<string, WalletWatch>>;
 }
 
@@ -104,18 +130,103 @@ export const EMPTY_PUSH: PushState = { dirty: null, wallets: {} };
  * changing must not postpone its own read forever.
  */
 export function notified(state: PushState, input: { readonly address: string; readonly slot: number; readonly now: number; readonly wallet: boolean }): PushState {
-  const dirty = state.dirty === null ? { since: input.now, slot: input.slot } : { since: state.dirty.since, slot: Math.max(state.dirty.slot, input.slot) };
-  if (!input.wallet) return { ...state, dirty };
-  const held = state.wallets[input.address] ?? { pendingSlot: null, covered: null };
+  const held = input.wallet ? (state.wallets[input.address] ?? { pendingSlot: null, covered: null }) : null;
+  // Urgent: the vault's machinery, or a wallet not already being checked.
+  const urgent = held === null || held.covered?.open !== true;
+  const dirty =
+    state.dirty === null
+      ? { since: input.now, slot: input.slot, urgent }
+      : { since: state.dirty.since, slot: Math.max(state.dirty.slot, input.slot), urgent: state.dirty.urgent || urgent };
+  if (held === null) return { ...state, dirty };
   const pendingSlot = Math.max(held.pendingSlot ?? input.slot, input.slot);
   return { dirty, wallets: { ...state.wallets, [input.address]: { ...held, pendingSlot } } };
 }
 
 /**
  * The socket came back after a gap: whatever changed while it was down rang
- * nobody. One read covers it — slot 0, so any answer at all does.
+ * nobody. One read covers it — slot 0, so any answer at all does — and that
+ * read compares each wallet's balance with the last read's (movedSince).
  */
-export const resynced = (state: PushState, now: number): PushState => ({ ...state, dirty: state.dirty ?? { since: now, slot: 0 } });
+export const resynced = (state: PushState, now: number): PushState => ({ ...state, dirty: state.dirty ?? { since: now, slot: 0, urgent: false } });
+
+/**
+ * WHAT A WALLET HELD AT THE LAST READ: its balance and its link's settlement
+ * count, at the slot that read answered from.
+ *
+ * The push hears a change only while its socket is open. A change made while
+ * it was not — the page left for /wallets and came back, or a phone dropped
+ * the backgrounded socket — rang nobody, but it moved the wallet's balance
+ * (every transaction the wallet signs pays its fee). So each read compares the
+ * balance with the previous one, and a wallet that moved is taken as changed
+ * at the earliest slot it could have: the slot after the previous read. That
+ * lower bound is what keeps it honest — a settlement or a frontier at or past
+ * it ends the step — and a link whose settlement count moved in between is not
+ * taken at all: the keeper's own settlement moved the balance, and whatever
+ * else happened is left to the socket.
+ *
+ * A fresh tab or a reload has no previous read, and starts from this one.
+ */
+export interface LamportsBaseline {
+  readonly slot: number;
+  readonly wallets: Readonly<Record<string, { readonly lamports: string; readonly nonce: string | null }>>;
+}
+
+export function baselineOf(snapshot: LiveSnapshotJson): LamportsBaseline | null {
+  if (snapshot.slot === null || snapshot.vault.status !== "exists") return null;
+  const linked = new Set(watchedWallets(snapshot));
+  const wallets: Record<string, { lamports: string; nonce: string | null }> = {};
+  for (const wallet of snapshot.wallets) {
+    if (!linked.has(wallet.wallet) || wallet.lamports === null) continue;
+    wallets[wallet.wallet] = { lamports: wallet.lamports, nonce: wallet.link.settlementNonce };
+  }
+  return { slot: snapshot.slot, wallets };
+}
+
+/** The wallets whose balance moved since `baseline`, each at the earliest slot it could have. */
+export function movedSince(baseline: LamportsBaseline | null, snapshot: LiveSnapshotJson): { readonly wallet: string; readonly slot: number }[] {
+  const now = baselineOf(snapshot);
+  if (baseline === null || now === null || now.slot <= baseline.slot) return [];
+  const moved: { wallet: string; slot: number }[] = [];
+  for (const [wallet, held] of Object.entries(now.wallets)) {
+    const before = baseline.wallets[wallet];
+    if (before === undefined || before.lamports === held.lamports) continue;
+    // A settlement in between explains the move, or hides what else did: not taken.
+    if (before.nonce === null || held.nonce === null || before.nonce !== held.nonce) continue;
+    moved.push({ wallet, slot: baseline.slot + 1 });
+  }
+  return moved;
+}
+
+/** Changes found by a read rather than heard: outstanding, like a notification, unless a newer one already is. */
+export function heardLate(state: PushState, moved: readonly { readonly wallet: string; readonly slot: number }[]): PushState {
+  if (moved.length === 0) return state;
+  const wallets = { ...state.wallets };
+  for (const { wallet, slot } of moved) {
+    const held = wallets[wallet] ?? { pendingSlot: null, covered: null };
+    if ((held.pendingSlot ?? -1) >= slot || (held.covered?.slot ?? -1) >= slot) continue;
+    wallets[wallet] = { ...held, pendingSlot: slot };
+  }
+  return { ...state, wallets };
+}
+
+/**
+ * WHERE EACH WALLET'S LAST SAVING LEFT IT, as one read sees it: the newer of
+ * its link's frontier and its newest successful settlement among `entries`.
+ * A change at or before it is ended.
+ */
+export function walletEnds(snapshot: LiveSnapshotJson, entries: readonly LiveEntryJson[]): Record<string, number> {
+  const ends: Record<string, number> = {};
+  const raise = (wallet: string, slot: number): void => {
+    if (Number.isSafeInteger(slot) && slot > (ends[wallet] ?? -1)) ends[wallet] = slot;
+  };
+  for (const wallet of snapshot.wallets) if (wallet.link.frontierSlot !== null) raise(wallet.wallet, Number(wallet.link.frontierSlot));
+  for (const link of snapshot.links?.items ?? []) raise(link.wallet, Number(link.frontierSlot));
+  for (const entry of entries) {
+    if (!entry.ok) continue;
+    for (const event of entry.events) if (event.kind === "settled") raise(event.wallet, entry.slot);
+  }
+  return ends;
+}
 
 /**
  * WHAT A READ THAT ANSWERED COVERED. `slot` is the snapshot's; null when it
@@ -126,14 +237,31 @@ export const resynced = (state: PushState, now: number): PushState => ({ ...stat
  * keeper's own settlement. `readAtMs` is the server's clock, the one the page
  * times every step by.
  */
-export function afterRead(state: PushState, input: { readonly slot: number | null; readonly historyRead: boolean; readonly readAtMs: number }): PushState {
+export function afterRead(
+  state: PushState,
+  input: {
+    readonly slot: number | null;
+    readonly historyRead: boolean;
+    readonly readAtMs: number;
+    /** Each wallet's end as this read sees it (walletEnds); a wallet missing from it has none known. */
+    readonly ends?: Readonly<Record<string, number>>;
+  },
+): PushState {
   const reached = (slot: number): boolean => input.slot === null || input.slot >= slot;
   const dirty = state.dirty !== null && !reached(state.dirty.slot) ? state.dirty : null;
+  const ended = (address: string, slot: number): boolean => {
+    const end = input.ends?.[address];
+    return end !== undefined && end >= slot;
+  };
   const wallets: Record<string, WalletWatch> = {};
   for (const [address, watch] of Object.entries(state.wallets)) {
-    let next = watch;
+    const held = watch.covered;
+    // Still the same stretch: something covered, nothing has ended it, and still drawn.
+    const ongoing = held !== null && held.open && !ended(address, held.slot) && input.readAtMs - held.atMs <= WALLET_CHANGE_FORGET_MS;
+    let next: WalletWatch = held === null ? watch : { ...watch, covered: { ...held, open: ongoing } };
     if (watch.pendingSlot !== null && input.historyRead && reached(watch.pendingSlot)) {
-      next = { pendingSlot: null, covered: { slot: watch.pendingSlot, atMs: input.readAtMs } };
+      const slot = watch.pendingSlot;
+      next = { pendingSlot: null, covered: { slot, atMs: ongoing && held !== null ? held.atMs : input.readAtMs, open: !ended(address, slot) } };
     }
     // Forgotten once it is old and nothing is outstanding.
     if (next.pendingSlot === null && (next.covered === null || input.readAtMs - next.covered.atMs > WALLET_CHANGE_FORGET_MS)) continue;
@@ -167,7 +295,7 @@ export interface PushReadInput {
 export function pushReadDelayMs(input: PushReadInput): number | null {
   if (input.dirty === null || !input.visible || input.reading || input.failures > 0) return null;
   const debounce = input.dirty.since + PUSH_DEBOUNCE_MS - input.now;
-  const floor = input.lastReadAt === null ? 0 : input.lastReadAt + MANUAL_FLOOR_MS - input.now;
+  const floor = input.lastReadAt === null ? 0 : input.lastReadAt + (input.dirty.urgent ? MANUAL_FLOOR_MS : PUSH_WALLET_FLOOR_MS) - input.now;
   const retry = input.retryAt === null ? 0 : input.retryAt - input.now;
   return Math.max(0, debounce, floor, retry);
 }
@@ -181,6 +309,28 @@ export function pushReadDelayMs(input: PushReadInput): number | null {
  * socket heard while the tab was hidden is read by pushReadDelayMs the moment
  * the tab is visible, under the same floor.
  */
+/**
+ * WHAT OUTLIVES A REMOUNT. The dashboard's hook remounts whenever someone
+ * walks to /wallets and back; the changes the push heard, and the balances
+ * the last read saw, are kept per pension key for as long as the tab lives —
+ * so a trade made while the page was away is still found when it comes back.
+ * Only a caller that draws the history keeps them (the leaderboard's chip
+ * reads a snapshot too, and must not move the baseline the dashboard compares
+ * against).
+ */
+export interface PushMemory {
+  readonly push: PushState;
+  readonly baseline: LamportsBaseline | null;
+}
+
+const memories = new Map<string, PushMemory>();
+
+export const recallPush = (key: string): PushMemory => memories.get(key) ?? { push: EMPTY_PUSH, baseline: null };
+
+export function rememberPush(key: string, memory: Partial<PushMemory>): void {
+  memories.set(key, { ...recallPush(key), ...memory });
+}
+
 export function showReadWanted(input: { readonly lastReadAt: number | null; readonly now: number; readonly failures: number; readonly retryAt: number | null }): boolean {
   if (input.failures > 0) return false;
   if (input.retryAt !== null && input.retryAt > input.now) return false;
