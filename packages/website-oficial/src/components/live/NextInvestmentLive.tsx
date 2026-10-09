@@ -51,7 +51,7 @@ import { cn } from "@/lib/utils";
 /** The keeper's step under way that feeds the figure, as the steps over the feed draw it. */
 export interface NextWork {
   readonly kind: "converting" | "buying";
-  /** A newer snapshot says it ended and its history has not landed (use-read-settled.ts): the loader stands still. */
+  /** A newer snapshot, committed without its history, no longer has it under way (use-whole-read.ts): the loader stands still. */
   readonly still: boolean;
 }
 

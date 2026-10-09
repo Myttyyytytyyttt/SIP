@@ -14,8 +14,9 @@
  * motion the loader stands still, and a turning square wears a faint ring of its
  * own tone, so it differs from a resting one by more than the shape of its glyph.
  * `still` stops the turn for a step the page is no longer sure of — a newer read
- * says it ended and its history has not landed yet (use-read-settled.ts) — and
- * drops the ring with it: nothing is claimed to be moving.
+ * no longer has it under way and could not read the history that would say
+ * why (use-whole-read.ts) — and drops the ring with it: nothing is claimed to
+ * be moving.
  *
  * THE GLYPH IS DECORATION: aria-hidden. What it means is always in the words
  * beside it — the row's title and line — so it is never said by shape or hue alone.

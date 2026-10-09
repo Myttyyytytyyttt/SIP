@@ -1,9 +1,9 @@
 // What Solana said changed, on the rows before any update brought it (plan B3,
 // 10-09): a heard wallet's line under the very key its step takes, the vault's
-// own line, the bridge over the settled read's lag, and the track that turns
-// one into the other without the row ever closing and growing back. Through the
-// REAL model: a snapshot, a page of history and the push's changes put through
-// toLiveDashboard.
+// own line, and the track that turns one into the other without the row ever
+// closing and growing back — through a read whose history failed, too. Through
+// the REAL model: a snapshot, a page of history and the push's changes put
+// through toLiveDashboard.
 
 import { USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
 import { createElement } from "react";
@@ -57,7 +57,7 @@ const heardFrom = (wallets: readonly string[]): PushHeard => ({ at: 1, wallets }
 function inputOf(data: LiveDashboard, heard: PushHeard | null, behind = false): PendingInput {
   const steps = pendingSteps(data);
   const lines = pendingLines(steps, data.nowMs);
-  return { data, steps, lines, heard: heardLinesOf({ heard, data, lines, latest: lines, behind }) };
+  return { data, steps, lines, heard: heardLinesOf({ heard, data, lines, behind }) };
 }
 
 describe("a trading wallet heard", () => {
@@ -65,7 +65,7 @@ describe("a trading wallet heard", () => {
     const data = page();
     const label = data.wallets[0]!.label;
     expect(linesOf(data)).toEqual([]);
-    const heard = heardLinesOf({ heard: heardFrom([WALLET_A]), data, lines: [], latest: [], behind: false });
+    const heard = heardLinesOf({ heard: heardFrom([WALLET_A]), data, lines: [], behind: false });
     const step = linesOf(covered())[0]!;
     expect(step.key).toBe(KEY);
     expect(heard).toEqual([{ ...step, title: LIVE_COPY.heardLine.wallet(label), active: true, rest: null, heard: true }]);
@@ -76,26 +76,19 @@ describe("a trading wallet heard", () => {
     const paused = page({ paused: true });
     expect(checkedLineOf(paused, WALLET_A)).toBeNull();
     expect(checkedLineOf(page(), WALLET_A)?.key).toBe(KEY);
-    expect(heardLinesOf({ heard: heardFrom([WALLET_A]), data: paused, lines: [], latest: [], behind: false })).toEqual([]);
+    expect(heardLinesOf({ heard: heardFrom([WALLET_A]), data: paused, lines: [], behind: false })).toEqual([]);
   });
 
   it("gives way to its step's line once that is drawn", () => {
     const data = covered();
     const lines = linesOf(data);
-    expect(heardLinesOf({ heard: heardFrom([WALLET_A]), data, lines, latest: lines, behind: false })).toEqual([]);
-  });
-
-  it("bridges the settled read's lag with the newest snapshot's own step, never a frame with neither", () => {
-    // `heard` cleared in the commit that brought the step; the settled read has not caught up yet.
-    const data = covered();
-    const latest = linesOf(data);
-    expect(heardLinesOf({ heard: null, data, lines: [], latest, behind: false })).toEqual(latest);
+    expect(heardLinesOf({ heard: heardFrom([WALLET_A]), data, lines, behind: false })).toEqual([]);
   });
 
   it("is not on this page yet while the updates fail: the still clock of a wait, never 'checking'", () => {
     const data = page();
     const label = data.wallets[0]!.label;
-    const [line] = heardLinesOf({ heard: heardFrom([WALLET_A]), data, lines: [], latest: [], behind: true });
+    const [line] = heardLinesOf({ heard: heardFrom([WALLET_A]), data, lines: [], behind: true });
     expect(line).toMatchObject({ key: KEY, active: false, rest: "slow", title: LIVE_COPY.heardLine.walletBehind(label), heard: true });
     const out = renderToStaticMarkup(createElement(PendingRows, { lines: [line!] }));
     expect(out).not.toContain("data-work-loader");
@@ -104,13 +97,13 @@ describe("a trading wallet heard", () => {
   });
 
   it("ignores an address the page lists no wallet for: there is no name to give it, and no step can follow", () => {
-    expect(heardLinesOf({ heard: heardFrom(["Elsewhere1111111111111111111111111111111111"]), data: page(), lines: [], latest: [], behind: false })).toEqual([]);
+    expect(heardLinesOf({ heard: heardFrom(["Elsewhere1111111111111111111111111111111111"]), data: page(), lines: [], behind: false })).toEqual([]);
   });
 });
 
 describe("the vault heard", () => {
   it("has its own line when only the vault rang", () => {
-    expect(heardLinesOf({ heard: heardFrom([]), data: page(), lines: [], latest: [], behind: false })).toEqual([
+    expect(heardLinesOf({ heard: heardFrom([]), data: page(), lines: [], behind: false })).toEqual([
       {
         key: VAULT_HEARD_KEY,
         kind: "vault",
@@ -129,28 +122,28 @@ describe("the vault heard", () => {
     const data = page({ converting: true });
     const lines = linesOf(data);
     expect(lines.map((line) => [line.key, line.active])).toEqual([["converting", true]]);
-    expect(heardLinesOf({ heard: heardFrom([]), data, lines, latest: lines, behind: false })).toEqual([]);
+    expect(heardLinesOf({ heard: heardFrom([]), data, lines, behind: false })).toEqual([]);
   });
 
   it("has none while something this page signed is still 'updating your pension': the vault rang for it, and its card says so (plan B4)", () => {
-    expect(heardLinesOf({ heard: heardFrom([]), data: page(), lines: [], latest: [], behind: false, signing: true })).toEqual([]);
-    expect(heardLinesOf({ heard: heardFrom([]), data: page(), lines: [], latest: [], behind: false, signing: false }).map((line) => line.key)).toEqual([VAULT_HEARD_KEY]);
+    expect(heardLinesOf({ heard: heardFrom([]), data: page(), lines: [], behind: false, signing: true })).toEqual([]);
+    expect(heardLinesOf({ heard: heardFrom([]), data: page(), lines: [], behind: false, signing: false }).map((line) => line.key)).toEqual([VAULT_HEARD_KEY]);
     // A wallet's own activity is not the signature: its line stays.
-    expect(heardLinesOf({ heard: heardFrom([WALLET_A]), data: page(), lines: [], latest: [], behind: false, signing: true }).map((line) => line.key)).toEqual([KEY]);
+    expect(heardLinesOf({ heard: heardFrom([WALLET_A]), data: page(), lines: [], behind: false, signing: true }).map((line) => line.key)).toEqual([KEY]);
   });
 
   it("has none when a wallet rang too: `heard` cannot say whether the vault did", () => {
-    const lines = heardLinesOf({ heard: heardFrom([WALLET_A]), data: page(), lines: [], latest: [], behind: false });
+    const lines = heardLinesOf({ heard: heardFrom([WALLET_A]), data: page(), lines: [], behind: false });
     expect(lines.map((line) => line.key)).toEqual([KEY]);
   });
 
   it("is not on this page yet while the updates fail, and nothing at all is drawn with nothing heard", () => {
-    expect(heardLinesOf({ heard: heardFrom([]), data: page(), lines: [], latest: [], behind: true })[0]).toMatchObject({
+    expect(heardLinesOf({ heard: heardFrom([]), data: page(), lines: [], behind: true })[0]).toMatchObject({
       active: false,
       rest: "slow",
       title: LIVE_COPY.heardLine.vaultBehind,
     });
-    expect(heardLinesOf({ heard: null, data: page(), lines: [], latest: [], behind: false })).toEqual([]);
+    expect(heardLinesOf({ heard: null, data: page(), lines: [], behind: false })).toEqual([]);
   });
 });
 
@@ -169,17 +162,18 @@ describe("the track: one row, from the change heard to its step", () => {
     expect(next.cardUntil).toBeNull();
   });
 
-  it("keeps it through the bridge, and through the settled read catching up", () => {
+  it("keeps it through a read whose history failed — its wait, never a frame with neither — until the whole read brings the step (plan B5)", () => {
+    const label = page().wallets[0]!.label;
     const start = startTrack(inputOf(page(), heardFrom([WALLET_A])));
-    const quiet = page();
-    const newest = covered();
-    // Settled still on the quiet read; the newest snapshot has the step and `heard` cleared.
-    const bridged = advancePending(start, { data: quiet, steps: [], lines: [], heard: heardLinesOf({ heard: null, data: newest, lines: [], latest: linesOf(newest), behind: false }) }, 1_000);
-    expect(bridged.leaving.size).toBe(0);
-    expect(pendingRowsOf(bridged, new Set())).toMatchObject([{ show: "line", key: KEY, leaving: false }]);
-    const caught = advancePending(bridged, inputOf(newest, null), 2_000);
+    // That read covered no wallet's change (live-push.ts afterRead): still heard, and the page is behind.
+    const behind = advancePending(start, inputOf(page(), heardFrom([WALLET_A]), true), 1_000);
+    expect(behind.leaving.size).toBe(0);
+    expect(pendingRowsOf(behind, new Set())).toMatchObject([{ show: "line", key: KEY, leaving: false, line: { active: false, title: LIVE_COPY.heardLine.walletBehind(label) } }]);
+    // The next read lands whole: `heard` cleared in the very commit that brought the step, which takes the row in place.
+    const caught = advancePending(behind, inputOf(covered(), null), 2_000);
     expect(caught.leaving.size).toBe(0);
-    expect(pendingRowsOf(caught, new Set())).toMatchObject([{ show: "line", key: KEY, leaving: false }]);
+    expect(caught.done.size).toBe(0);
+    expect(pendingRowsOf(caught, new Set())).toMatchObject([{ show: "line", key: KEY, leaving: false, line: { title: PENDING_COPY.measuring(label) } }]);
   });
 
   it("closes a heard line with no step behind it when `heard` clears — the change was the saving itself — and holds the card", () => {
@@ -208,7 +202,7 @@ describe("the track: one row, from the change heard to its step", () => {
 
 describe("drawn", () => {
   const label = page().wallets[0]!.label;
-  const heardLine = heardLinesOf({ heard: heardFrom([WALLET_A]), data: page(), lines: [], latest: [], behind: false })[0]!;
+  const heardLine = heardLinesOf({ heard: heardFrom([WALLET_A]), data: page(), lines: [], behind: false })[0]!;
 
   it("turns like a step under way, for motion-safe only, and stands still with a ring of its own for reduced motion", () => {
     const out = renderToStaticMarkup(createElement(PendingRows, { lines: [heardLine] }));
@@ -229,7 +223,7 @@ describe("drawn", () => {
   });
 
   it("draws the vault's line with no amount, wrapping rather than cut, after a wallet's and before the keeper's steps", () => {
-    const vault = heardLinesOf({ heard: heardFrom([]), data: page(), lines: [], latest: [], behind: false })[0]!;
+    const vault = heardLinesOf({ heard: heardFrom([]), data: page(), lines: [], behind: false })[0]!;
     const out = renderToStaticMarkup(createElement(PendingRows, { lines: [vault] }));
     expect(out).toContain(`<span class="block text-sm break-words">${LIVE_COPY.heardLine.vault}</span>`);
     expect(out).toContain('data-pending-step="vault" data-state="active" data-pending-heard=""');

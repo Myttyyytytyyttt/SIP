@@ -33,12 +33,15 @@
  * the update that covered it, which brings its row whenever the vault's own
  * history holds one.
  *
- * NO FRAME WITH NEITHER (the bridge). The steps are drawn off a SETTLED read
- * (use-read-settled.ts), which can lag the newest by up to READ_SETTLE_MS,
- * while a wallet leaves `heard` in the very commit its step appears in the
- * newest snapshot (use-live-dashboard.ts LiveLiveness.heard). So a wallet whose
- * step the newest snapshot has and the settled read not yet is drawn with that
- * newest step's own line, under the same key, until the settled read has it.
+ * NO FRAME WITH NEITHER, AND NO BRIDGE NEEDED FOR IT (plan B5). A wallet leaves
+ * `heard` in the very commit its step appears in (use-live-dashboard.ts
+ * LiveLiveness.heard), and that commit is a whole read, which the steps are
+ * drawn from at once (use-whole-read.ts). A read that commits its snapshot
+ * alone covers no wallet's change — only a read that read the history does
+ * (live-push.ts afterRead) — so the wallet stays in `heard`, and its line
+ * stands, until the whole read that brings its step. The newest snapshot's
+ * step used to be drawn here in between, over the seconds a settled view
+ * could lag it; they are gone.
  *
  * WHILE THE UPDATES FAIL — the stale note, or the history unreadable — what
  * was heard is not on the page, and nothing on it can say when it will be:
@@ -84,39 +87,29 @@ const vaultMoving = (lines: readonly PendingLine[]): boolean => lines.some((line
 
 /**
  * The heard lines, in the column's order: each wallet's in the page's wallet
- * order (as its step would be), then the vault's. Empty when nothing was heard
- * and nothing is bridged.
+ * order (as its step would be), then the vault's. Empty when nothing was heard.
  *
- * `data` is the newest snapshot, `lines` the steps as the settled read draws
- * them, `latest` the newest snapshot's steps (the same as `lines` once the read
- * has settled). `behind`: the last update failed, or the history could not be
- * read — what was heard is not on the page, and no update is known to be
- * bringing it. `signing`: a signature this page made is still "updating your
- * pension" on the card that signed it.
+ * `data` is the newest snapshot, `lines` the steps as the rows draw them (the
+ * whole read's, use-whole-read.ts). `behind`: the last update failed, or the
+ * history could not be read — what was heard is not on the page, and no update
+ * is known to be bringing it. `signing`: a signature this page made is still
+ * "updating your pension" on the card that signed it.
  */
 export function heardLinesOf(input: {
   readonly heard: PushHeard | null;
   readonly data: LiveDashboard;
   readonly lines: readonly PendingLine[];
-  readonly latest: readonly PendingLine[];
   readonly behind: boolean;
   readonly signing?: boolean;
 }): ShownLine[] {
   const { heard, data, behind } = input;
   const drawn = new Set(input.lines.map((line) => line.key));
-  const newest = new Map(input.latest.map((line) => [line.key, line]));
   const wallets = new Set(heard?.wallets ?? []);
   const out: ShownLine[] = [];
   for (const wallet of data.wallets) {
     const key = measuringKey(wallet.address);
     // Its step is drawn: that line speaks for it.
     if (drawn.has(key)) continue;
-    // The bridge: the newest snapshot's step, until the settled read has it.
-    const bridged = newest.get(key);
-    if (bridged !== undefined) {
-      out.push(bridged);
-      continue;
-    }
     if (!wallets.has(wallet.address)) continue;
     const checked = checkedLineOf(data, wallet.address);
     if (checked === null) continue;
@@ -129,7 +122,7 @@ export function heardLinesOf(input: {
       heard: true,
     });
   }
-  if (heard !== null && heard.wallets.length === 0 && input.signing !== true && !vaultMoving(input.lines) && !vaultMoving(input.latest)) {
+  if (heard !== null && heard.wallets.length === 0 && input.signing !== true && !vaultMoving(input.lines)) {
     out.push({
       key: VAULT_HEARD_KEY,
       kind: "vault",

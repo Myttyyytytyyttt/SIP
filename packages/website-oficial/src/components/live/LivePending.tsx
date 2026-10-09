@@ -32,9 +32,9 @@
  * is aria-hidden: the rows are what the region speaks, and a heading that
  * flips is not news.
  *
- * HOW A STEP ENDS (10-09). The rows read a SETTLED view (use-read-settled.ts):
- * a read's snapshot lands before its history, and a step must not vanish over
- * a row that has not arrived. When a step ends:
+ * HOW A STEP ENDS (10-09). The rows are drawn from a read that landed WHOLE
+ * (use-whole-read.ts): its snapshot and its history in one commit, so a step
+ * never vanishes over a row that has not arrived. When a step ends:
  *  * the read that ended it brought the transaction that did it — a conversion,
  *    a buy, no older than the step's own clock — so its row stays DONE_HOLD_MS as
  *    "Converted to USDC · 14:32 UTC" / "Bought SPYx and ANTHROPIC · 14:33 UTC"
@@ -43,9 +43,11 @@
  *    region's (the announcer, step A5, speaks it);
  *  * otherwise it simply closes (Reveal.tsx), over its last words. When unsure,
  *    nothing is claimed done.
- * Until a read settles — at most READ_SETTLE_MS — a step the newer snapshot no
- * longer has as under way keeps its row, its loader standing still: the page
- * is no longer sure it turns.
+ * A read whose history could not be read commits its snapshot alone, and
+ * nothing is judged off it (plan B5): the rows stay as the last whole read drew
+ * them, and a step that newer snapshot no longer has as under way keeps its
+ * row, its loader standing still — the page is no longer sure it turns — until
+ * a read lands whole and says what became of it.
  *
  * THE REGION IS ALWAYS THERE, EMPTY OR NOT. A polite live region announces what
  * changes inside it, which needs it to exist before the change; it holds
@@ -123,7 +125,7 @@ export type PendingRow =
 
 /** What every copy of the rows draws. */
 export interface PendingView {
-  /** The steps as they stand, from the settled read — and after them what was heard and no step has taken yet. */
+  /** The steps as they stand, from the whole read — and after them what was heard and no step has taken yet. */
   readonly lines: readonly ShownLine[];
   /** What is drawn: those steps, the ones just done, and the ones on their way out, in the steps' order. */
   readonly rows: readonly PendingRow[];
@@ -191,13 +193,13 @@ export function doneOf(step: PendingStep, key: string, after: LiveDashboard, bef
 
 type Leaving = { readonly show: "line"; readonly line: ShownLine } | { readonly show: "done"; readonly done: DoneLine };
 
-/** What the list remembers between settled reads: the steps it last drew, and what it holds, until when (browser ms). */
+/** What the list remembers between whole reads: the steps it last drew, and what it holds, until when (browser ms). */
 export interface PendingTrack {
   readonly data: LiveDashboard;
   /**
-   * The settled steps, and their lines — one line per step, in the same order
-   * (live-pending.ts pendingLines) — then the heard lines no step has taken,
-   * which have no step: past the last one, each closes when it ends.
+   * The whole read's steps, and their lines — one line per step, in the same
+   * order (live-pending.ts pendingLines) — then the heard lines no step has
+   * taken, which have no step: past the last one, each closes when it ends.
    */
   readonly steps: readonly PendingStep[];
   readonly lines: readonly ShownLine[];
@@ -214,7 +216,7 @@ export interface PendingInput {
   readonly steps: readonly PendingStep[];
   readonly lines: readonly PendingLine[];
   /**
-   * What Solana said changed and the settled read does not draw yet
+   * What Solana said changed and the whole read does not draw yet
    * (heard-lines.ts heardLinesOf), each under the key its step will take. A
    * step's own line under the same key wins. None when not given.
    */
@@ -250,7 +252,7 @@ export function startTrack(input: PendingInput): PendingTrack {
 }
 
 /**
- * The track after a new settled read, or a change in what was heard, at
+ * The track after a new whole read, or a change in what was heard, at
  * browser time `now`: what ended is held as done or sent on its way out, a step
  * that is back takes its row back, and the card's minute starts when its last
  * step ends. A heard line its step takes over keeps its row: same key, nothing
@@ -309,13 +311,14 @@ export function nextDue(track: PendingTrack): number | null {
 }
 
 /**
- * THE STEPS THE PAGE IS NO LONGER SURE OF: under way in the settled read, and
- * not under way in the newer snapshot whose history has not landed. Their
- * loader stands still until the read settles. Empty once it has.
+ * THE STEPS THE PAGE IS NO LONGER SURE OF: under way in the whole read the
+ * rows are drawn from, and not under way in the newer snapshot a read
+ * committed without its history (use-whole-read.ts). Their loader stands still
+ * until a read lands whole. Empty while the newest read is the whole one.
  */
-export function stillOf(settled: readonly ShownLine[], latest: readonly ShownLine[]): ReadonlySet<string> {
+export function stillOf(drawn: readonly ShownLine[], latest: readonly ShownLine[]): ReadonlySet<string> {
   const turning = new Set(latest.filter((line) => line.active).map((line) => line.key));
-  return new Set(settled.filter((line) => line.active && !turning.has(line.key)).map((line) => line.key));
+  return new Set(drawn.filter((line) => line.active && !turning.has(line.key)).map((line) => line.key));
 }
 
 const RANK: Readonly<Record<RowKind, number>> = { measuring: 0, vault: 1, converting: 2, buying: 3 };
@@ -340,10 +343,10 @@ export function pendingRowsOf(track: PendingTrack, still: ReadonlySet<string>): 
 }
 
 /**
- * THE TRACK, ONCE FOR THE PAGE (LiveBody). `data` is the settled read and
+ * THE TRACK, ONCE FOR THE PAGE (LiveBody). `data` is the whole read and
  * `steps`/`lines` its steps, `heard` what Solana said changed and no step
  * draws yet; `latest` is the newest snapshot's lines, for the loaders the page
- * is no longer sure of. A new settled read, or a change in what was heard, is
+ * is no longer sure of. A new whole read, or a change in what was heard, is
  * worked out during the render, so a step that ended is drawn done or leaving
  * in the very frame its line would otherwise vanish from; one timer lets go of
  * whatever is due first.

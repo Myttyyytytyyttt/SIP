@@ -29,9 +29,12 @@
  * the stage card swaps its height from one stage to the next, the steps' card
  * grows and closes, the start-buying card grows in (Reveal.tsx).
  *
- * WHAT IS ON ITS WAY IS READ OFF A SETTLED READ (use-read-settled.ts): a
- * read's snapshot lands before its history, and the steps over the feed wait
- * for the history before anything ends or flips (LivePending.tsx).
+ * WHAT IS ON ITS WAY IS READ OFF A READ THAT LANDED WHOLE (plan B5,
+ * use-whole-read.ts): a read commits its snapshot and its history together
+ * and is drawn at once. A later read that could not read its history commits
+ * its snapshot alone; the steps over the feed then stay as the last whole
+ * read drew them, their loaders still where that snapshot no longer has them
+ * under way (LivePending.tsx).
  *
  * AND WHAT SOLANA SAID CHANGED LEADS THEM BEFORE ANY UPDATE HAS (plan B3,
  * heard-lines.ts): "Activity seen on Trading wallet 1 · checking" from the
@@ -91,7 +94,7 @@ import { heardLinesOf } from "@/components/live/heard-lines";
 import { useWriteJudge } from "@/components/live/last-write-context";
 import { heroPillOf, pillShown, useArrivals } from "@/components/live/use-arrivals";
 import { useUpdateAvailable } from "@/components/live/use-update-available";
-import { historyKeyOf, useReadSettled } from "@/components/live/use-read-settled";
+import { useWholeRead } from "@/components/live/use-whole-read";
 import { DashboardSource } from "@/components/DashboardSource";
 import { DashboardMain, PENSION_SLOT, RULE_SLOT } from "@/components/dashboard-main";
 import { PensionPanel } from "@/components/pension-panel";
@@ -210,15 +213,17 @@ export function LiveBody({
   // dash wherever the chain has no answer (src/lib/live-mock.ts).
   const page = toDashboardMock(data, { complete: older.complete });
   // WHAT IS ON ITS WAY: a wallet being checked, SOL converting, a basket about
-  // to be bought (src/lib/live-pending.ts) — from the last read whose history
-  // had landed, with the newest snapshot's steps beside it for the loaders the
-  // page is no longer sure of. Worked out once, for every copy of the rows;
+  // to be bought (src/lib/live-pending.ts) — from the newest read that landed
+  // WHOLE (use-whole-read.ts): every read, unless its history could not be
+  // read — then the newest snapshot's steps go beside it only for the loaders
+  // the page no longer vouches for. A first paint drawn before its history
+  // answered is no read's commit. Worked out once, for every copy of the rows;
   // each "since" said against its payload's own clock, with its day when that
-  // is not today.
-  const settled = useReadSettled(data, { activityPending, activityUnreadable, history: historyKeyOf(data) });
-  const steps = pendingSteps(settled.data);
-  const lines = pendingLines(steps, settled.data.nowMs);
-  const latest = settled.settled ? lines : pendingLines(pendingSteps(data), data.nowMs);
+  // is not today (format.ts whenLabel, in live-pending.ts pendingLines).
+  const shown = useWholeRead(data, { readId: live.readId, whole: !activityPending && !activityUnreadable });
+  const steps = pendingSteps(shown.data);
+  const lines = pendingLines(steps, shown.data.nowMs);
+  const latest = shown.newest ? lines : pendingLines(pendingSteps(data), data.nowMs);
   // WHAT WAS JUST SIGNED, AND WHETHER THIS PAGE SHOWS IT YET: against the
   // newest snapshot's slot, counted in whole updates (last-write-context.ts).
   const sync = useWriteJudge({ pensionKey, readId: live.readId, slot: data.slot, rows: signedRows(data) });
@@ -226,8 +231,8 @@ export function LiveBody({
   // newest snapshot and the store's `heard`, under the keys the steps will
   // take. "Behind" while the updates fail — the stale note, or the history
   // unreadable — when no update is known to be bringing it.
-  const heard = heardLinesOf({ heard: live.heard, data, lines, latest, behind: stale !== null || activityUnreadable, signing: sync?.state === "syncing" });
-  const pending = usePendingView({ data: settled.data, steps, lines, heard, latest });
+  const heard = heardLinesOf({ heard: live.heard, data, lines, behind: stale !== null || activityUnreadable, signing: sync?.state === "syncing" });
+  const pending = usePendingView({ data: shown.data, steps, lines, heard, latest });
 
   // THE STRIP, ONLY ONCE THERE IS ONE (SavingsStrip's own null rule). Grown in
   // when it comes after the page was drawn without it; simply there otherwise.

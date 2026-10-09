@@ -45,9 +45,9 @@ import type { Trade } from "@/mocks/types";
  *
  * NOTHING ARRIVES FOR A PRICE. Dollars are re-priced on every read, so nothing
  * here looks at one: a snapshot with new prices and the same rows marks
- * nothing, and so does the snapshot-only commit before a read's history lands
- * (use-read-settled.ts) — rows change only with the history's own commit, so
- * this needs no settled view to wait for.
+ * nothing, and so does a read that committed its snapshot alone because its
+ * history could not be read (live-commit.ts) — the rows a read brings land in
+ * the same commit as its snapshot, so there is nothing to wait for.
  *
  * HELD FOR ARRIVAL_HOLD_MS OF BROWSER TIME on one timer (use-hold.ts): the wash
  * fades in 2.4 s and keeps its edge for the rest. Worked out ONCE, in LiveBody,

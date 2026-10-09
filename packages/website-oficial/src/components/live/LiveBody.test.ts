@@ -34,11 +34,12 @@ import { LiveBody, countsUnknownOf, signedRows, staleNote } from "@/components/l
 import { LastWriteContext, type LastWrite } from "@/components/live/last-write-context";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { LiveLiveness, LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
-import { ACTIVITY_COPY, LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
+import { ACTIVITY_COPY, LIVE_COPY, PENDING_COPY, STATS_COPY } from "@/lib/live-copy";
+import { toLiveDashboard } from "@/lib/live-model";
 import { MANUAL_FLOOR_MS } from "@/lib/live-schedule";
 import type { LiveDashboard, VaultEventJson } from "@/lib/live-types";
 
-import { DEFAULT_ENTRIES, NOW_MS, OWNER, liveActivity, liveDashboard, liveEntry, liveSnapshot, seconds, signature } from "../../../test/fixtures/live-dashboard";
+import { DEFAULT_ENTRIES, NOW_MS, OWNER, WALLET_A, liveActivity, liveDashboard, liveEntry, liveSnapshot, seconds, settledEvent, signature } from "../../../test/fixtures/live-dashboard";
 import { liveLiveness } from "../../../test/fixtures/live-liveness";
 import { tickingInRegion } from "../../../test/live-regions";
 
@@ -603,5 +604,36 @@ describe("a signature that landed on the page", () => {
     expect(signedRows(data)).toBe(data.rows);
     const hidden = { ...data, hiddenRows: data.rows.slice(0, 1) };
     expect(signedRows(hidden).map((row) => row.signature)).toEqual([...data.rows, ...data.rows.slice(0, 1)].map((row) => row.signature));
+  });
+});
+
+/**
+ * EVERY "SINCE" THE STEPS NAME CARRIES ITS DAY WHEN THAT IS NOT TODAY (plan
+ * B5, G9): the data session's own lines (live-pending.ts pendingLines, dated
+ * through format.ts whenLabel against the payload's clock), as the page draws
+ * them — never a bare "23:58 UTC" that reads as minutes old the morning after.
+ */
+describe("a step that has stood since another day", () => {
+  /** React's escaping of the words, so they can be looked for in the markup. */
+  const escaped = (words: string): string => words.replaceAll("&", "&amp;").replaceAll("'", "&#x27;").replaceAll('"', "&quot;");
+
+  it("says 'Not done since yesterday, 23:58 UTC' for a conversion the keeper has not made since the last saving", () => {
+    const saving = liveEntry(signature(1), seconds(Date.UTC(2026, 8, 15, 23, 58)), [settledEvent("60000000", true, "100000000")]);
+    const html = render({ data: liveDashboard({ activity: liveActivity([saving]) }), activityUnreadable: false });
+    expect(html).toContain(escaped(PENDING_COPY.slow("yesterday, 23:58 UTC")));
+    expect(html).not.toContain(escaped(PENDING_COPY.slow("23:58 UTC")));
+  });
+
+  it("says when a wallet's activity was seen, with its day, once nothing was saved from it", () => {
+    // Read seven minutes after a trade seen at 23:58 UTC: past the two-minute stall, short of the line's fifteen.
+    const readAt = Date.UTC(2026, 8, 17, 0, 5);
+    const data = toLiveDashboard({
+      snapshot: liveSnapshot({ readAtMs: readAt }),
+      activity: liveActivity(DEFAULT_ENTRIES),
+      privyWallets: [WALLET_A],
+      walletChanges: [{ wallet: WALLET_A, slot: 5_000, sinceMs: Date.UTC(2026, 8, 16, 23, 58) }],
+    });
+    const html = render({ data, activityUnreadable: false, nowMs: readAt });
+    expect(html).toContain(escaped(PENDING_COPY.measuringWaiting(data.wallets[0]!.label, "yesterday, 23:58 UTC")));
   });
 });
