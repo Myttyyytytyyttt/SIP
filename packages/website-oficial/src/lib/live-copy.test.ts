@@ -163,6 +163,34 @@ describe("a first read that takes its time", () => {
   });
 });
 
+/**
+ * THE HEADER DOT'S WORDS (owner, 10-09): its popover and its accessible name,
+ * never text in the bar. What this browser saw — never a promise of when the
+ * next update comes, and none of the machinery.
+ */
+describe("the header dot's words", () => {
+  it("are the owner's: updated just now, or minutes ago; checking; behind", () => {
+    expect(LIVE_COPY.pulse.updated(LIVE_COPY.pulse.ago(30_000))).toBe("Updated just now");
+    expect(LIVE_COPY.pulse.updated(LIVE_COPY.pulse.ago(120_000))).toBe("Updated 2 min ago");
+    expect(LIVE_COPY.pulse.checking).toBe("Checking…");
+    expect(LIVE_COPY.pulse.behind).toBe("Behind — couldn’t update");
+  });
+
+  it("promise no time and name none of the machinery", () => {
+    const words = [
+      LIVE_COPY.pulse.updated(LIVE_COPY.pulse.ago(600_000)),
+      LIVE_COPY.pulse.lastUpdated(LIVE_COPY.pulse.ago(600_000)),
+      LIVE_COPY.pulse.checking,
+      LIVE_COPY.pulse.behind,
+      LIVE_COPY.pulse.checkNow,
+    ];
+    for (const sentence of words) {
+      expect(sentence).not.toMatch(/shortly|again in|in a (moment|minute)|next/i);
+      expect(sentence).not.toMatch(/\b(keeper|read|poll|wrap|policy|RPC|socket)\b/i);
+    }
+  });
+});
+
 describe("the rate a sentence quotes is the product's own", () => {
   it("the profit sentences carry ratePercent(DEFAULT_VAULT_POLICY.skimBps)", () => {
     const rate = ratePercent(DEFAULT_VAULT_POLICY.skimBps);

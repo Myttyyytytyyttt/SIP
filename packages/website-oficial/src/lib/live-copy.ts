@@ -114,6 +114,35 @@ export const LIVE_COPY = {
   staleAsOf: (clock: string): string => `Showing Solana as of ${clock}. The last update failed; ${BRAND} keeps trying.`,
   staleLong: "These numbers may be out of date.",
 
+  // ── how fresh the page is: the header's dot ────────────────────────────────
+  /**
+   * THE DOT'S WORDS (owner, 10-09: the dot only, at every width). They are its
+   * popover and its accessible name, never text in the bar (LiveHeartbeat.tsx).
+   * Each says what this browser saw — when the figures last changed, that a
+   * check it asked for is under way, that the last update failed — and none
+   * promises when the next one comes.
+   */
+  pulse: {
+    /** How long ago, coarse: it changes at most once a minute. "just now" under 90 s. */
+    ago: (ms: number): string => {
+      const seconds = Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1_000)) : 0;
+      if (seconds < 90) return "just now";
+      const minutes = Math.round(seconds / 60);
+      if (minutes < 90) return `${minutes} min ago`;
+      const hours = Math.round(minutes / 60);
+      // Past 90 minutes and past 36 hours, so never "1 hour" or "1 day".
+      if (hours < 36) return `${hours} hours ago`;
+      return `${Math.round(hours / 24)} days ago`;
+    },
+    updated: (ago: string): string => `Updated ${ago}`,
+    lastUpdated: (ago: string): string => `Last updated ${ago}`,
+    checking: "Checking…",
+    behind: "Behind — couldn’t update",
+    checkNow: "Check now",
+    /** The floor after the last update, or a retry-after, still running (RetryButton.tsx). */
+    checkIn: (seconds: number): string => `Check again in ${seconds} s`,
+  },
+
   // ── the sidebar ────────────────────────────────────────────────────────────
   pensionKey: "Pension key",
   tradingWallets: "Trading wallets",

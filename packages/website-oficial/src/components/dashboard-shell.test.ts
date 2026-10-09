@@ -529,3 +529,59 @@ describe("a deployment with no Solana configuration", () => {
     expect(html).toContain(MOCK_FIGURE);
   });
 });
+
+/**
+ * THE HEADER'S DOT IS A CONNECTED PENSION'S ALONE (10-09, LiveHeartbeat.tsx).
+ * The sample — and the landing's app-loop video recorded from it — must not
+ * change by a pixel, and the first read, the unreadable cards and the keyless
+ * screen have their own words: none of them draws it.
+ */
+describe("the header's freshness dot", () => {
+  const DOT = "data-pulse=";
+
+  it("is never on the sample: nobody connected, before Privy answers, or with a closed setup", () => {
+    mocked.search = new URLSearchParams("mode=mock");
+    expect(render()).toContain(MOCK_FIGURE);
+    expect(render()).not.toContain(DOT);
+    expect(render(true, "activity")).not.toContain(DOT);
+
+    mocked.privy = { ready: false, authenticated: false, user: null };
+    expect(render()).not.toContain(DOT);
+
+    mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), embedded(TRADING_0, 0, true)]) };
+    mocked.closed = true;
+    const closed = renderWithVault(vaultRead("missing"));
+    expect(closed).toContain(MOCK_FIGURE);
+    expect(closed).not.toContain(DOT);
+  });
+
+  it("is never on a connected key's first read, nor on a card that says it could not read", () => {
+    mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), embedded(TRADING_0, 0, true)]) };
+    mocked.search = new URLSearchParams("mode=live");
+    expect(render()).not.toContain(DOT);
+    mocked.live = { kind: "unreadable", message: "SaverFi could not read your pension on Solana just now.", retryAt: null };
+    expect(render()).not.toContain(DOT);
+    mocked.live = { kind: "ready", data: liveDashboard({ snapshot: liveSnapshot({ vault: { status: "unreadable", address: "v" } }) }), stale: null };
+    expect(render()).not.toContain(DOT);
+  });
+
+  it("is never on the keyless screen", () => {
+    mocked.privy = { ready: true, authenticated: true, user: userWith([embedded(TRADING_0, 0, true)]) };
+    mocked.search = new URLSearchParams("mode=live");
+    const html = render();
+    expect(html).toContain("This session has no pension key");
+    expect(html).not.toContain(DOT);
+  });
+
+  it("is on a connected pension once the chain has answered, before its key, on both views", () => {
+    mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), embedded(TRADING_0, 0, true)]) };
+    mocked.search = new URLSearchParams("mode=live");
+    mocked.live = { kind: "ready", data: liveDashboard(), stale: null };
+    for (const [pathname, view] of [["/", "pension"], ["/activity", "activity"]] as const) {
+      mocked.pathname = pathname;
+      const html = render(true, view);
+      expect(html.match(/data-pulse="fresh"/g)).toHaveLength(1);
+      expect(html.indexOf(DOT)).toBeLessThan(html.indexOf(shortAddress(PENSION_KEY)));
+    }
+  });
+});

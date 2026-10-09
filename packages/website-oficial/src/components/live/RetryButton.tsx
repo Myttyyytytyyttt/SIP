@@ -79,6 +79,32 @@ export function useReadyAt(readKey: unknown): number {
   return readyAt;
 }
 
+/**
+ * WHICH READ A PRESS WAS MADE AFTER: the floor and the retry-after it was
+ * pressed against. A read that finishes moves the floor (or brings a new
+ * retry-after), and that alone ends the press — no effect has to notice it.
+ */
+export function pressKeyOf(retryAt: number | null, readyAt: number): string {
+  return `${readyAt}|${retryAt ?? ""}`;
+}
+
+/**
+ * Whether a press is still waiting on its read: true from the press until
+ * `after` changes (pressKeyOf) or for RETRYING_MS, whichever comes first.
+ * Returns that, and the press. Shared by the Retry buttons and the header's
+ * Check now (LiveHeartbeat.tsx), whose dot breathes for exactly as long.
+ */
+export function usePressedUntilRead(after: string): readonly [boolean, () => void] {
+  const [pressedAfter, setPressedAfter] = useState<string | null>(null);
+  const pressed = pressedAfter === after;
+  useEffect(() => {
+    if (!pressed) return undefined;
+    const timer = setTimeout(() => setPressedAfter(null), RETRYING_MS);
+    return () => clearTimeout(timer);
+  }, [pressed]);
+  return [pressed, () => setPressedAfter(after)];
+}
+
 export function RetryButton({
   retryAt,
   readyAt,
@@ -96,17 +122,7 @@ export function RetryButton({
   readonly className?: string;
 }) {
   const left = useCountdown(retryEnableAt(retryAt, readyAt));
-  // WHICH READ THE PRESS WAS MADE AFTER. A read that finishes moves the floor
-  // (or brings a new retry-after), and that alone ends "Retrying…" — no effect
-  // has to notice it.
-  const after = `${readyAt}|${retryAt ?? ""}`;
-  const [pressedAfter, setPressedAfter] = useState<string | null>(null);
-  const retrying = pressedAfter === after;
-  useEffect(() => {
-    if (!retrying) return undefined;
-    const timer = setTimeout(() => setPressedAfter(null), RETRYING_MS);
-    return () => clearTimeout(timer);
-  }, [retrying]);
+  const [retrying, press] = usePressedUntilRead(pressKeyOf(retryAt, readyAt));
   const look = retryLook({ left, retrying });
 
   return (
@@ -119,7 +135,7 @@ export function RetryButton({
       {...(look.disabled ? { "aria-disabled": true } : {})}
       onClick={() => {
         if (look.disabled) return;
-        setPressedAfter(after);
+        press();
         onRetry();
       }}
     >

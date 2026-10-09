@@ -12,8 +12,9 @@
  * (`data.nowMs`): every "4m ago" and every day heading is measured against it,
  * so the page cannot disagree with the numbers it was read with. `nowMs` is the
  * browser's, used only for how long a failure has stood. Every "try again in
- * 12 s" ticks in its own leaf (RetryButton, LoadOlderButton), so this body is
- * never re-rendered every second for one.
+ * 12 s" ticks in its own leaf (RetryButton, LoadOlderButton), and so does the
+ * header dot's "Updated 2 min ago" (LiveHeartbeat), so this body is never
+ * re-rendered every second for one.
  *
  * A STAGE THAT HAS NOTHING TO SHOW SHOWS NOTHING. Before there is a vault the
  * panels are not rendered at all — not rendered empty — because a hero reading
@@ -29,6 +30,7 @@ import { LiveStartBuying } from "@/components/live/LiveStartBuying";
 import { LiveRulePanel } from "@/components/live/LiveRulePanel";
 import { FeedBanner, HiddenRows, LeadNotes, WalletList } from "@/components/live/LiveColumn";
 import { FeedSkeleton } from "@/components/live/FeedSkeleton";
+import { LiveHeartbeat } from "@/components/live/LiveHeartbeat";
 import { LoadOlderButton } from "@/components/live/LoadOlderButton";
 import { PendingRows } from "@/components/live/LivePending";
 import { readKeyOf, useReadyAt } from "@/components/live/RetryButton";
@@ -230,7 +232,15 @@ export function LiveBody({
         // the feed: a settlement read from a wallet's link is not in the
         // vault's own page and is a contribution all the same.
         contributions={<HeaderContributions rows={data.settlementRows} />}
-        account={account}
+        // HOW FRESH THIS PAGE IS: a dot before the pension key, its words in
+        // its popover (LiveHeartbeat.tsx). Wrapped in here, so the header — the
+        // sample's too — is not edited for it.
+        account={
+          <>
+            <LiveHeartbeat pensionKey={pensionKey} nowMs={data.nowMs} stale={stale} readyAt={readyAt} onCheck={onRefresh} />
+            {account}
+          </>
+        }
         current={view}
       />
 

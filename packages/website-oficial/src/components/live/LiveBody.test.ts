@@ -386,3 +386,54 @@ describe("countsUnknownOf", () => {
     expect(countsUnknownOf({ activityPending: false, activityUnreadable: false, loaded: 0 })).toBe(false);
   });
 });
+
+/**
+ * THE HEADER'S DOT (10-09, LiveHeartbeat.tsx): before the pension key, on both
+ * views, wrapped in by this body so the header itself is not edited — and the
+ * dot only, its words its accessible name, never text in the bar (owner).
+ */
+describe("how fresh the page is", () => {
+  const withAccount = (view: "pension" | "activity", stale: LiveStale | null = null): string =>
+    renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(LiveBody, {
+          view,
+          data: liveDashboard(),
+          stale,
+          pensionKey: OWNER,
+          control: null,
+          account: createElement("span", { "data-account": "" }),
+          older,
+          onRefresh: vi.fn(),
+          onLoadOlder: vi.fn(),
+          nowMs: NOW_MS,
+          activityUnreadable: false,
+        }),
+      ),
+    );
+  /** The header's markup, which the dot must be in. */
+  const header = (html: string): string => html.match(/<header\b[\s\S]*?<\/header>/)?.[0] ?? "";
+
+  it("is a dot in the header, before the account, on both views", () => {
+    for (const view of ["pension", "activity"] as const) {
+      const bar = header(withAccount(view));
+      expect(bar).toContain('data-pulse="fresh"');
+      expect(bar.indexOf("data-pulse")).toBeLessThan(bar.indexOf("data-account"));
+    }
+  });
+
+  it("says nothing in the bar: its words are its name", () => {
+    const bar = header(withAccount("pension"));
+    expect(bar).toContain(`aria-label="${LIVE_COPY.pulse.updated(LIVE_COPY.pulse.ago(0))}"`);
+    expect(seen(bar)).not.toContain(LIVE_COPY.pulse.updated(LIVE_COPY.pulse.ago(0)));
+  });
+
+  it("is behind when the last update failed, beside the stale note that announces it", () => {
+    const html = withAccount("pension", { message: LIVE_COPY.network, retryAt: null, since: Date.now() });
+    expect(header(html)).toContain('data-pulse="behind"');
+    expect(seen(header(html))).not.toContain(LIVE_COPY.pulse.behind);
+    expect(html).toContain(LIVE_COPY.staleAsOf("12:00 UTC"));
+  });
+});
