@@ -49,6 +49,7 @@ import type {
   LiveStage,
   LiveStatsView,
   LiveVaultView,
+  LiveWalletChange,
   LiveWalletView,
   VaultEventJson,
 } from "@/lib/live-types";
@@ -495,6 +496,7 @@ function walletsOf(
       // named but the snapshot could not read is unreadable, never "not linked".
       linkStatus: read?.link.status ?? (link === null ? "unreadable" : "this_vault"),
       settlementNonce: rawFrom(link === null ? read?.link.settlementNonce : link.settlementNonce),
+      frontierSlot: rawFrom(link === null ? read?.link.frontierSlot : link.frontierSlot),
       canSettle: canSettleOf(lamports),
     };
   });
@@ -524,7 +526,7 @@ function rowsIn(entries: readonly LiveEntryJson[], keep: (event: VaultEventJson)
   for (const entry of entries) {
     for (const event of entry.events) {
       if (!keep(event)) continue;
-      rows.push({ signature: entry.signature, at: isoOf(entry.blockTime), blockTime: entry.blockTime, ok: entry.ok, explorerUrl: solscanTx(entry.signature), event });
+      rows.push({ signature: entry.signature, slot: entry.slot, at: isoOf(entry.blockTime), blockTime: entry.blockTime, ok: entry.ok, explorerUrl: solscanTx(entry.signature), event });
     }
   }
   return rows;
@@ -539,6 +541,7 @@ function rowsOf(activity: LiveActivityJson | null): Visible {
     for (const event of entry.events) {
       const row: LiveRow = {
         signature: entry.signature,
+        slot: entry.slot,
         at: isoOf(entry.blockTime),
         blockTime: entry.blockTime,
         ok: entry.ok,
@@ -848,6 +851,8 @@ export interface LiveDashboardInput {
   readonly privyWallets: readonly string[];
   /** Which of them were imported rather than created here: they are named apart. None when absent. */
   readonly importedWallets?: readonly string[];
+  /** Trading wallets the push saw change, as live-push.ts hands them over. None when absent. */
+  readonly walletChanges?: readonly LiveWalletChange[];
 }
 
 /** The whole screen, from one snapshot and the history loaded so far. */
@@ -900,6 +905,7 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
     rows: visible.rows,
     hiddenRows: visible.hidden,
     settlementRows,
+    walletChanges: input.walletChanges ?? [],
     hiddenUpkeep: visible.hiddenUpkeep,
     hiddenDust: visible.hiddenDust,
     chart: chartOf(settlements, vault.lifetimeSaved, nowMs, loadedSince(merged)),

@@ -45,9 +45,16 @@ const KINDS: Readonly<Record<Exclude<Filter, "all">, ReadonlySet<VaultEventKindJ
   withdrawals: new Set<VaultEventKindJson>(["withdrew_sol", "withdrew_token"]),
 };
 
-/** Converting and buying are investing: shown under All and Investing, never under Savings or Withdrawals. */
+/**
+ * Converting and buying are investing: shown under All and Investing. A wallet
+ * being checked is a saving that may follow: under All and Savings. Nothing
+ * pending is a withdrawal.
+ */
 export function pendingShownFor(filter: Filter, pending: readonly PendingLine[]): readonly PendingLine[] {
-  return filter === "all" || filter === "investing" ? pending : [];
+  if (filter === "all") return pending;
+  if (filter === "savings") return pending.filter((line) => line.kind === "measuring");
+  if (filter === "investing") return pending.filter((line) => line.kind !== "measuring");
+  return [];
 }
 
 const CHIPS: readonly (readonly [Filter, string])[] = [

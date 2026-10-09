@@ -7,7 +7,10 @@
  * converting and for anything resting, blue for a buy under way. A step under
  * way puts a small turning mark in the square; one that rests puts a still
  * glyph there and says why. When the chain catches up the step drops out of
- * this list, and the feed below holds the transaction that did it.
+ * this list, and the feed below holds the transaction that did it. A trading
+ * wallet the chain said changed, and not yet saved from, leads the list
+ * ("Checking your latest activity on …"): grey, with no amount, because
+ * nothing is known yet about what it will save.
  *
  * THE REGION IS ALWAYS THERE, EMPTY OR NOT. A polite live region announces what
  * changes inside it, which needs it to exist before the change; it holds

@@ -592,4 +592,23 @@ export const PENDING_COPY = {
   includesConverting: (usd: string): string => `Includes about ${usd} of SOL being converted to USDC`,
   plusConverting: (sol: string): string => `Plus ${sol} SOL being converted to USDC`,
   readyToBuy: `Ready to buy · ${BRAND} checks about once a minute`,
+  /**
+   * A TRADING WALLET THAT CHANGED and has no saving for it yet (live-pending.ts
+   * measuring). "Activity", never "trade": the push says only that the wallet's
+   * balance changed, which a plain transfer into it does too.
+   */
+  measuring: (wallet: string): string => `Checking your latest activity on ${wallet}`,
+  measuringWaiting: (wallet: string): string => `No saving yet from your latest activity on ${wallet}`,
+  /** Under the loader, by the vault's mode: whether a saving follows at all. The volume figures are the keeper's (live-pending.ts). */
+  measuringSub: {
+    profit: `A saving follows only if your trades since the last one made a profit · ${BRAND} checks about once a minute`,
+    volume: `A saving follows once 0.001 SOL is owed, or an hour after your oldest unsaved trade · ${BRAND} checks about once a minute`,
+    unknown: `${BRAND} checks about once a minute`,
+  },
+  /** The same, once the loader has stopped: said once, quietly. */
+  measuringRest: {
+    profit: "A saving follows only if your trades since the last one made a profit",
+    volume: "A saving follows once 0.001 SOL is owed, or an hour after your oldest unsaved trade",
+    unknown: `${BRAND} checks about once a minute`,
+  },
 } as const;
