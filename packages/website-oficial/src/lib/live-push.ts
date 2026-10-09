@@ -78,6 +78,14 @@
  * so far, a Pending and a Next investment that do not have it, until a read at
  * least the 10 s floor later. historyAhead() names that case, and the hook
  * reads the snapshot once more inside the same read.
+ *
+ * AND THE PAGE CAN SAY WHAT IT HEARD BEFORE ANY READ HAS (UI plan 10-09, §5
+ * item 2: "Trading wallet 1: activity seen on Solana" before the covering
+ * read). heardOf() names the URGENT changes still outstanding — the vault's
+ * own, and a wallet's first since its last saving — with the moment the
+ * first of them was heard and the wallets among them. Each change keeps the
+ * moment it was heard (PushState.heard), because a read can cover the first
+ * of them and leave a later one, and "since when" is then the later one's.
  */
 
 import { USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
@@ -169,6 +177,36 @@ export interface PushState {
    */
   readonly dirty: PushDirty | null;
   readonly wallets: Readonly<Record<string, WalletWatch>>;
+  /**
+   * WHEN EACH CHANGE STILL OUTSTANDING WAS HEARD, for heardOf. `dirty` keeps
+   * one moment for the whole window — the one its debounce counts from, which
+   * a remainder keeps — and a wallet's `pending` keeps slots, not moments. So
+   * a read that covered the first change and left a later one would name the
+   * first one's moment. Kept per notification and dropped with what covers it
+   * (afterRead); absent reads as none (a state built before any was heard).
+   */
+  readonly heard?: readonly HeardChange[];
+}
+
+/** One notification the socket brought, kept while what it named is outstanding. */
+export interface HeardChange {
+  readonly address: string;
+  readonly slot: number;
+  /** When the socket first named this slot for this address, on this browser's clock. */
+  readonly at: number;
+  /** A trading wallet's change, rather than the vault's or one of its token accounts'. */
+  readonly wallet: boolean;
+}
+
+/**
+ * WHAT THE PAGE HAS HEARD AND NOT YET READ (heardOf): the moment the first
+ * outstanding urgent change was heard, on this browser's clock, and the
+ * trading wallets among those changes — sorted, empty when only the vault or
+ * its token accounts rang.
+ */
+export interface PushHeard {
+  readonly at: number;
+  readonly wallets: readonly string[];
 }
 
 /** Something changed that no read has covered yet. */
@@ -217,8 +255,27 @@ export function notified(state: PushState, input: { readonly address: string; re
     ...(vaultSlot === undefined ? {} : { vaultSlot }),
     ...(followUp === undefined ? {} : { followUp }),
   };
-  if (held === null) return { ...state, dirty };
-  return { dirty, wallets: { ...state.wallets, [input.address]: { ...held, pending: withSlot(held.pending, input.slot) } } };
+  const known = state.heard ?? [];
+  const heard = known.some((change) => change.address === input.address && change.slot === input.slot)
+    ? known
+    : [...known, { address: input.address, slot: input.slot, at: input.now, wallet: input.wallet }];
+  if (held === null) return { ...state, dirty, heard: boundedHeard(heard, state.wallets) };
+  const wallets = { ...state.wallets, [input.address]: { ...held, pending: withSlot(held.pending, input.slot) } };
+  return { dirty, wallets, heard: boundedHeard(heard, wallets) };
+}
+
+/**
+ * The heard moments a state may keep: a wallet's, only for the slots its
+ * `pending` still holds (withSlot's bound is theirs); the vault side's, the
+ * first heard and the last PENDING_SLOTS_KEPT - 1, as withSlot keeps slots —
+ * the first is the one heardOf names.
+ */
+function boundedHeard(heard: readonly HeardChange[], wallets: Readonly<Record<string, WalletWatch>>): readonly HeardChange[] {
+  const mine = heard.filter((change) => (change.wallet ? wallets[change.address]?.pending.includes(change.slot) === true : true));
+  const vault = mine.filter((change) => !change.wallet);
+  if (vault.length <= PENDING_SLOTS_KEPT) return mine;
+  const kept = new Set([vault[0]!, ...vault.slice(vault.length - PENDING_SLOTS_KEPT + 1)]);
+  return mine.filter((change) => change.wallet || kept.has(change));
 }
 
 /**
@@ -438,9 +495,59 @@ export function afterRead(
     if (next.pending.length === 0 && (next.covered === null || input.readAtMs - next.covered.atMs > WALLET_CHANGE_FORGET_MS)) continue;
     wallets[address] = next;
   }
-  const dirty = coveredDirty(state.dirty, reached, input.historyRead ? (input.historySlot ?? null) : null, wallets);
-  return { dirty, wallets };
+  const historySlot = input.historyRead ? (input.historySlot ?? null) : null;
+  const dirty = coveredDirty(state.dirty, reached, historySlot, wallets);
+  // WHAT IS STILL OUTSTANDING KEEPS THE MOMENT IT WAS HEARD. A wallet's change,
+  // while its slot is still pending. The vault's, while `dirty` still owes the
+  // vault a read and this one did not cover it: coveredDirty's own test, slot
+  // by slot — reached, and the history at or past it unless this was already
+  // the follow-up, which any answer at or past it covers.
+  const followUp = state.dirty?.followUp === true;
+  const heard = (state.heard ?? []).filter((change) =>
+    change.wallet
+      ? wallets[change.address]?.pending.includes(change.slot) === true
+      : dirty?.vaultSlot !== undefined && !(reached(change.slot) && (followUp || (historySlot !== null && historySlot >= change.slot))),
+  );
+  return { dirty, wallets, heard };
 }
+
+/**
+ * WHAT THE PAGE HAS HEARD AND NOT YET READ: the urgent changes still
+ * outstanding, or null when there are none.
+ *
+ * URGENT, BECAUSE THAT IS WHAT HAS NOTHING ELSE ON SCREEN. The vault's own
+ * change (the keeper's step, a deposit) has no line until the read lands; a
+ * wallet's FIRST change since its last saving has none either, until the read
+ * that covers it hands it to the page as "checking your latest activity"
+ * (walletChangesOf). A wallet already being checked trading on is NOT heard:
+ * its line is already up, and for a busy trader that change is outstanding
+ * all the time — an "updating" that never went away (review 2026-10-09).
+ *
+ * NULL ONCE A READ THAT ANSWERED COVERED EVERY ONE OF THEM — the vault's
+ * follow-up read included (afterRead). A read that failed covers nothing and
+ * changes nothing here; nor does a socket that came back (resynced: nobody
+ * heard anything) or a change a read found rather than heard (heardLate).
+ * And a read whose HISTORY failed covers no wallet's change: its slot stays
+ * pending, so it stays heard — even with `dirty` gone, the next poll being
+ * the read that will cover it.
+ */
+export function heardOf(state: PushState): PushHeard | null {
+  let at: number | null = null;
+  const wallets = new Set<string>();
+  for (const change of state.heard ?? []) {
+    if (change.wallet) {
+      const watch = state.wallets[change.address];
+      if (watch === undefined || !watch.pending.includes(change.slot) || watch.covered?.open === true) continue;
+      wallets.add(change.address);
+    } else if (state.dirty?.vaultSlot === undefined) continue;
+    if (at === null || change.at < at) at = change.at;
+  }
+  return at === null ? null : { at, wallets: [...wallets].sort() };
+}
+
+/** Whether two answers of heardOf say the same: the page keeps one object while nothing it shows changed. */
+export const sameHeard = (a: PushHeard | null, b: PushHeard | null): boolean =>
+  a === b || (a !== null && b !== null && a.at === b.at && a.wallets.length === b.wallets.length && a.wallets.every((wallet, index) => wallet === b.wallets[index]));
 
 /** The changes the page may draw: covered ones only, newest slot per wallet. */
 export const walletChangesOf = (state: PushState): LiveWalletChange[] =>

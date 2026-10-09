@@ -14,6 +14,8 @@ import {
   PUSH_WALLET_FLOOR_MS,
   WALLET_CHANGE_FORGET_MS,
   afterRead,
+  heardLate,
+  heardOf,
   historyAhead,
   newestSlotOf,
   notified,
@@ -21,6 +23,7 @@ import {
   recallPush,
   rememberPush,
   resynced,
+  sameHeard,
   showReadWanted,
   walletChangesOf,
   watchedAddresses,
@@ -497,5 +500,109 @@ describe("whether the history is ahead of the snapshot", () => {
   it("the newest slot of a history is its highest, and none for an empty one", () => {
     expect(newestSlotOf([settled(10), settled(30), settled(20)])).toBe(30);
     expect(newestSlotOf([])).toBeNull();
+  });
+});
+
+/**
+ * WHAT THE PAGE HAS HEARD AND NOT YET READ (UI plan 10-09, §5 item 2): the
+ * moment the first outstanding urgent change was heard, and the wallets among
+ * them, so "Trading wallet 1: activity seen on Solana" can come up before the
+ * read that covers it — and go once a read that answered has.
+ */
+describe("what the page has heard and not yet read", () => {
+  const WALLET_B = "TradingOneP1aceho1der111111111111111111111";
+
+  it("nothing before anything rang", () => {
+    expect(heardOf(EMPTY_PUSH)).toBeNull();
+  });
+
+  it("the vault's change: when it was heard, and no wallet — until a read whose history reaches it", () => {
+    const rang = notified(EMPTY_PUSH, { address: VAULT, slot: 300, now: NOW, wallet: false });
+    expect(heardOf(rang)).toEqual({ at: NOW, wallets: [] });
+    // A second ring of the vault keeps the first one's moment.
+    const again = notified(rang, { address: "wsol", slot: 302, now: NOW + 800, wallet: false });
+    expect(heardOf(again)).toEqual({ at: NOW, wallets: [] });
+    expect(heardOf(afterRead(again, { slot: 302, historyRead: true, readAtMs: NOW, ends: {}, historySlot: 302 }))).toBeNull();
+  });
+
+  it("still heard while the vault's follow-up is owed, and gone once the follow-up answered", () => {
+    const rang = notified(EMPTY_PUSH, { address: VAULT, slot: 300, now: NOW, wallet: false });
+    const short = afterRead(rang, { slot: 305, historyRead: true, readAtMs: NOW, ends: {}, historySlot: 299 });
+    expect(short.dirty?.followUp).toBe(true);
+    expect(heardOf(short)).toEqual({ at: NOW, wallets: [] });
+    expect(heardOf(afterRead(short, { slot: 306, historyRead: true, readAtMs: NOW + 12_000, ends: {}, historySlot: 299 }))).toBeNull();
+  });
+
+  it("a wallet's first change names the wallet, and stays heard through a read that could not read the history", () => {
+    const rang = notified(EMPTY_PUSH, { address: WALLET_A, slot: 100, now: NOW, wallet: true });
+    expect(heardOf(rang)).toEqual({ at: NOW, wallets: [WALLET_A] });
+    // The snapshot reached it, the history failed: nothing tells a trade from the keeper's settlement yet.
+    const noHistory = afterRead(rang, { slot: 100, historyRead: false, readAtMs: NOW + 11_000, ends: {} });
+    expect(heardOf(noHistory)).toEqual({ at: NOW, wallets: [WALLET_A] });
+    // The read that read it hands it to the page as "checking your latest activity" — and it is no longer merely heard.
+    const covered = afterRead(noHistory, { slot: 100, historyRead: true, readAtMs: NOW + 70_000, ends: {} });
+    expect(walletChangesOf(covered)).toHaveLength(1);
+    expect(heardOf(covered)).toBeNull();
+  });
+
+  it("a FAILED read changes nothing: only afterRead, on an answer, covers anything", () => {
+    const rang = notified(EMPTY_PUSH, { address: WALLET_A, slot: 100, now: NOW, wallet: true });
+    // The hook applies nothing on a failure; the socket ringing on keeps the first moment.
+    const more = notified(rang, { address: VAULT, slot: 104, now: NOW + 15_000, wallet: false });
+    expect(heardOf(more)).toEqual({ at: NOW, wallets: [WALLET_A] });
+  });
+
+  it("a wallet already being checked trading on is NOT heard: its line is already up", () => {
+    const covered = afterRead(notified(EMPTY_PUSH, { address: WALLET_A, slot: 100, now: NOW, wallet: true }), { slot: 100, historyRead: true, readAtMs: NOW, ends: {} });
+    const trading = notified(covered, { address: WALLET_A, slot: 120, now: NOW + 2_000, wallet: true });
+    expect(trading.dirty?.urgent).toBe(false);
+    expect(heardOf(trading)).toBeNull();
+  });
+
+  it("names the moment of the change still outstanding, not of the window's first one a read already covered", () => {
+    // A's first change opens the window; B's first change arrives while the read is out, past its snapshot.
+    const a = notified(EMPTY_PUSH, { address: WALLET_A, slot: 100, now: NOW, wallet: true });
+    const b = notified(a, { address: WALLET_B, slot: 105, now: NOW + 2_000, wallet: true });
+    expect(heardOf(b)).toEqual({ at: NOW, wallets: [WALLET_A, WALLET_B].sort() });
+    const landed = afterRead(b, { slot: 102, historyRead: true, readAtMs: NOW + 2_500, ends: {} });
+    // The window keeps its first moment for the debounce; what is heard is B's.
+    expect(landed.dirty?.since).toBe(NOW);
+    expect(heardOf(landed)).toEqual({ at: NOW + 2_000, wallets: [WALLET_B] });
+  });
+
+  it("a saving that ended the change a read covered makes the change after it urgent, heard from its own moment", () => {
+    let state = EMPTY_PUSH;
+    for (const [slot, at] of [
+      [100, NOW],
+      [110, NOW + 4_000],
+    ] as const)
+      state = notified(state, { address: WALLET_A, slot, now: at, wallet: true });
+    const ended = afterRead(state, { slot: 107, historyRead: true, readAtMs: NOW + 5_000, ends: { [WALLET_A]: 106 } });
+    expect(heardOf(ended)).toEqual({ at: NOW + 4_000, wallets: [WALLET_A] });
+  });
+
+  it("nothing for a socket that came back, or for a change a read FOUND rather than heard", () => {
+    expect(heardOf(resynced(EMPTY_PUSH, NOW))).toBeNull();
+    expect(heardOf(heardLate(EMPTY_PUSH, [{ wallet: WALLET_A, slot: 50 }]))).toBeNull();
+  });
+
+  it("keeps a bounded number of moments however long a hidden tab listens", () => {
+    let state = EMPTY_PUSH;
+    for (let slot = 1_000; slot < 2_000; slot += 1) {
+      state = notified(state, { address: WALLET_A, slot, now: NOW + slot, wallet: true });
+      state = notified(state, { address: VAULT, slot, now: NOW + slot, wallet: false });
+    }
+    expect(state.heard!.filter((change) => change.wallet)).toHaveLength(PENDING_SLOTS_KEPT);
+    expect(state.heard!.filter((change) => !change.wallet)).toHaveLength(PENDING_SLOTS_KEPT);
+    // The first of each is kept: it is the moment heardOf names.
+    expect(heardOf(state)).toEqual({ at: NOW + 1_000, wallets: [WALLET_A] });
+  });
+
+  it("is the same answer while nothing in it changed, so the page can keep one object", () => {
+    expect(sameHeard(null, null)).toBe(true);
+    expect(sameHeard({ at: NOW, wallets: [WALLET_A] }, { at: NOW, wallets: [WALLET_A] })).toBe(true);
+    expect(sameHeard({ at: NOW, wallets: [WALLET_A] }, { at: NOW + 1, wallets: [WALLET_A] })).toBe(false);
+    expect(sameHeard({ at: NOW, wallets: [WALLET_A] }, { at: NOW, wallets: [] })).toBe(false);
+    expect(sameHeard({ at: NOW, wallets: [] }, null)).toBe(false);
   });
 });

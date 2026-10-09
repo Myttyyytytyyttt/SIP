@@ -31,11 +31,11 @@ const source = code(readFileSync(HOOK, "utf8"));
 const read = source.slice(source.indexOf("const read = useCallback"), source.indexOf("const loadOlder"));
 
 describe("the first paint of a pension waits for its history", () => {
-  it("sets the snapshot through the gate's commit, and only once more AFTER the gate released (its timing is lib/first-paint.test.ts's)", () => {
-    expect(read.match(/setSnapshot\(/g)).toHaveLength(2);
-    expect(read).toMatch(/const gate = firstPaintGate\(\{ hold: holdFirstPaint, commit: \(\) => setSnapshot\(answered\.body\), stale, waitMs: FIRST_PAINT_WAIT_MS \}\);/);
-    // The second is the re-read a history ahead of its snapshot buys: never before the first paint.
-    expect(read.indexOf("setSnapshot(again.body)")).toBeGreaterThan(read.search(/gate\.release\(\);/));
+  it("draws early only the FIRST snapshot, through the gate, and only onto a store holding none (its timing is lib/first-paint.test.ts's)", () => {
+    expect(read).toMatch(/const paint = \(\): void => \{\s*const at = Date\.now\(\);\s*setStore\(\(held\) => paintFirst\(held, answered\.body, at\)\);\s*\};/);
+    expect(read).toMatch(/const gate = holdFirstPaint \? firstPaintGate\(\{ hold: true, commit: paint, stale, waitMs: FIRST_PAINT_WAIT_MS \}\) : null;/);
+    // paintFirst refuses a store that already holds a snapshot (live-commit.test.ts).
+    expect(read.match(/paintFirst\(/g)).toHaveLength(1);
   });
 
   it("holds only the FIRST snapshot, and only when there is a history to wait for", () => {
@@ -47,13 +47,15 @@ describe("the first paint of a pension waits for its history", () => {
     expect(read.search(/if \(holdFirstPaint\) \{\s*setFailures\(0\)/)).toBeLessThan(read.indexOf("api.activity("));
   });
 
-  it("asks for the history after the gate is armed, and releases it in a finally, whatever the history did", () => {
-    const armed = read.indexOf("const gate = firstPaintGate(");
+  it("asks for the history after the gate is armed, cancels it at the read's own commit, and releases it in a finally for a read that ended without one", () => {
+    const armed = read.indexOf("const gate = holdFirstPaint");
     const asked = read.indexOf("api.activity(");
-    const released = read.search(/\} finally \{\s*gate\.release\(\);\s*\}/);
+    const cancelled = read.indexOf("gate?.cancel();");
+    const released = read.search(/\} finally \{\s*gate\?\.release\(\);\s*\}/);
     expect(armed).toBeGreaterThan(-1);
     expect(asked).toBeGreaterThan(armed);
-    expect(released).toBeGreaterThan(asked);
+    expect(cancelled).toBeGreaterThan(asked);
+    expect(released).toBeGreaterThan(cancelled);
   });
 
   it("still drops every answer a newer read has overtaken — the snapshot, the history and the settlement round", () => {
@@ -70,10 +72,53 @@ describe("the first paint of a pension waits for its history", () => {
   });
 });
 
+/**
+ * EVERY READ COMMITS ONCE (UI plan 10-09, §5 item 7). The rule of the commit
+ * is live-commit.ts's, tested there with the converting and buying lines; what
+ * is pinned here is that the read makes no other: the first paint's early draw
+ * aside, nothing of what it read reaches the screen before its last answer, and
+ * then all of it does in one update.
+ */
+describe("every read commits once", () => {
+  const commitAt = read.search(/setStore\(\(held\) => commitRead\(/);
+
+  it("writes the store in two places only: the first paint's early draw and the read's one commit", () => {
+    expect(read.match(/setStore\(/g)).toHaveLength(2);
+    expect(read).toMatch(/gate\?\.cancel\(\);\s*const at = Date\.now\(\);\s*setStore\(\(held\) => commitRead\(held, \{ snapshot: current, history, linkRows, at \}\)\);/);
+    // No setter of its own for any part of what a read brings, anywhere in the hook.
+    expect(source).not.toMatch(/\bset(Snapshot|Entries|LinkEntries|ActivityMeta|ActivityTrouble|LastGoodAt)\(/);
+  });
+
+  it("commits after its LAST answer — the head page, the settlement round and the snapshot's re-read — and awaits nothing after", () => {
+    expect(commitAt).toBeGreaterThan(read.indexOf("api.activity("));
+    expect(commitAt).toBeGreaterThan(read.search(/await backfillLinkSettlements\(/));
+    expect(commitAt).toBeGreaterThan(read.lastIndexOf("api.snapshot("));
+    const after = read.slice(commitAt, read.search(/\} finally \{\s*gate\?\.release\(\);/));
+    expect(after).not.toMatch(/\bawait\b/);
+    // The failure cleared, the push's coverage and the floor's clock land in the same render.
+    expect(after).toMatch(/setFailures\(0\);\s*setFailure\(null\);\s*setUnheardRefused\(false\);/);
+    expect(after).toContain("setPush((held) => afterRead(");
+    expect(after).toContain("setLastReadAt(Date.now());");
+  });
+
+  it("gathers the history it read for that commit instead of drawing it", () => {
+    expect(read).toMatch(/history = \{ page, until, early, answeredAt: Date\.now\(\) \};/);
+    expect(read).toMatch(/linkRows\.push\(\.\.\.filled\.entries\);/);
+  });
+
+  it("forgets a pension's store when the key changes, and keeps the read count going; Load older appends without counting", () => {
+    expect(source).toMatch(/request\.current \+= 1;\s*setStore\(forgottenData\);/);
+    expect(source).toMatch(/setStore\(\(held\) => withOlderPage\(held, page\.body\)\);/);
+    expect(source.match(/setStore\(/g)).toHaveLength(4);
+  });
+});
+
 describe("Load older is offered only when there is an older page", () => {
-  it("is worked out from the cursor a head page named, never stored beside it", () => {
+  it("is worked out from the cursor a head page named, never stored beside it — and so is 'complete'", () => {
     expect(source).toMatch(/available: cursor !== null/);
     expect(source).toMatch(/const cursor = activityMeta\?\.nextBefore \?\? null;/);
+    expect(source).toMatch(/const complete = historyComplete\(store\);/);
+    expect(source).not.toMatch(/complete: (false|page|cursor)/);
   });
 });
 
@@ -95,7 +140,7 @@ describe("the poll runs faster only while something is on its way", () => {
       /const pending = pendingPollWanted\(\{ active: pendingActive, activeSince: activeSinceRef\.current, now: Date\.now\(\), activityRetryAt: activityTrouble\?\.retryAt \?\? null \}\);/,
     );
     expect(poll).toMatch(/nextDelayMs\(\{ failures, retryAfterSeconds: null, visible, lastReadAt, now: Date\.now\(\), reading, pending, unheard \}\)/);
-    expect(poll).toMatch(/\}, \[pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading, pendingActive, socket, unheardRefused\]\);/);
+    expect(poll).toMatch(/\}, \[pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading, visible, pendingActive, socket, unheardRefused\]\);/);
   });
 });
 
@@ -184,7 +229,9 @@ describe("a read whose history and snapshot disagree", () => {
     expect(read).toMatch(/let current = answered\.body;\s*if \(historyAhead\(pageEntries, current\.slot\)\) \{/);
     expect(read).toMatch(/const again = await api\.snapshot\(\{ owner: pensionKey, wallets: wallets\.slice\(0, MAX_WALLETS\), discover \}\);\s*if \(stale\(\)\) return true;/);
     // Only a newer, readable answer replaces the first; a refusal leaves the good one on screen and is no failure.
-    expect(read).toMatch(/if \(again\.ok && again\.body\.vault\.status === "exists" && \(again\.body\.slot \?\? 0\) >= \(current\.slot \?\? 0\)\) \{\s*current = again\.body;\s*setSnapshot\(again\.body\);/);
+    expect(read).toMatch(/if \(again\.ok && again\.body\.vault\.status === "exists" && \(again\.body\.slot \?\? 0\) >= \(current\.slot \?\? 0\)\) \{\s*current = again\.body;\s*\}/);
+    // And it is what the read commits, with the page that bought it (§5 item 7).
+    expect(read.indexOf("snapshot: current, history, linkRows")).toBeGreaterThan(read.indexOf("current = again.body;"));
     // Once: the second answer is never checked again.
     expect(read.match(/historyAhead\(/g)).toHaveLength(1);
     expect(read.match(/api\.snapshot\(/g)).toHaveLength(2);
@@ -198,19 +245,65 @@ describe("a read whose history and snapshot disagree", () => {
 
 /**
  * HOW LIVE THE PAGE IS (owner, 10-09: "necesito que la página en general sea
- * live"). The socket's state, a read out, a change heard and not yet read, and
- * the last good read — handed to whatever draws them — and the socket brought
- * back by the page's own events.
+ * live"; UI plan 10-09, §5 items 1-7). The socket's state, a read out, what
+ * was heard and not yet read, the last good commit, when a refresh stops
+ * waiting, when the next read is due, whether the reads back off, and the read
+ * count — handed to whatever draws them — and the socket brought back by the
+ * page's own events. The rules are live-push.ts's and live-schedule.ts's.
  */
-describe("liveness", () => {
-  it("hands the page the socket's state, the read out, the change heard, and the last GOOD read", () => {
-    expect(source).toMatch(/const liveness = useMemo\(\(\): LiveLiveness => \(\{ socket, reading, heard, lastReadAt: lastGoodAt \}\), \[socket, reading, heard, lastGoodAt\]\);/);
-    // Only an urgent change: a busy trader's later trades are outstanding all the time (review 2026-10-09).
-    expect(source).toMatch(/const heard = push\.dirty\?\.urgent === true;/);
-    expect(source).toMatch(/liveness,\s*vaultStamp,\s*\};/);
-    // The last good read moves only on success: lastReadAt moves on a failure too.
-    expect(read.match(/setLastGoodAt\(/g)).toHaveLength(1);
-    expect(read).toMatch(/setLastReadAt\(Date\.now\(\)\);\s*setLastGoodAt\(Date\.now\(\)\);\s*return true;/);
+describe("live", () => {
+  it("hands the page every signal in one object, returned as `live`", () => {
+    expect(source).toMatch(
+      /const live = useMemo\(\s*\(\): LiveLiveness => \(\{ socket, reading, heard, lastReadAt: committedAt, refreshReadyAt, nextReadAt, backingOff, readId \}\),\s*\[socket, reading, heard, committedAt, refreshReadyAt, nextReadAt, backingOff, readId\],\s*\);/,
+    );
+    expect(source).toMatch(/live,\s*vaultStamp,\s*\};/);
+    expect(source).not.toMatch(/\bliveness\b/);
+  });
+
+  it("heard: the push's outstanding urgent changes, one object while what it says is the same", () => {
+    expect(source).toMatch(/const heardNow = heardOf\(push\);\s*if \(!sameHeard\(heardRef\.current, heardNow\)\) heardRef\.current = heardNow;\s*const heard = heardRef\.current;/);
+  });
+
+  it("reading: the snapshot-and-history read only — Load older has its own busy", () => {
+    expect(source.match(/setReading\(/g)).toHaveLength(2);
+    expect(read.match(/setReading\(/g)).toHaveLength(2);
+    const older = source.slice(source.indexOf("const loadOlder"), source.indexOf("const walletChanges"));
+    expect(older).not.toMatch(/setReading|readingRef/);
+  });
+
+  it("lastReadAt: the last GOOD commit's moment, from the store — a failed read never moves it, and the floor's clock is another", () => {
+    expect(source).toMatch(/const \{ readId, committedAt \} = store;/);
+    // The floor's clock moves on a failure and on a success, nowhere else.
+    expect(read.match(/setLastReadAt\(Date\.now\(\)\)/g)).toHaveLength(2);
+  });
+
+  it("refreshReadyAt: the floor after the last read FINISHED, the one refresh() itself waits for", () => {
+    expect(source).toMatch(/const refreshReadyAt = manualReadyAt\(lastReadAt\);/);
+    expect(source).toMatch(/const delay = nextManualDelayMs\(\{ lastReadAt: lastReadRef\.current, now: Date\.now\(\), retryAfterSeconds: null \}\);/);
+  });
+
+  it("nextReadAt: the moment each timer was armed for, the earlier of the two, none while hidden", () => {
+    expect(source).toMatch(/const nextReadAt = nextReadAtOf\(\{ visible, pollAt, pushAt \}\);/);
+    expect(source).toMatch(/setPollAt\(Date\.now\(\) \+ when\);\s*const timer = window\.setTimeout\(/);
+    expect(source).toMatch(/setPushAt\(delay === null \? null : Date\.now\(\) \+ delay\);\s*if \(delay === null\) return undefined;\s*const timer = window\.setTimeout\(/);
+    // Every way out of either effect without a timer says so.
+    expect(source.match(/setPollAt\(null\);/g)).toHaveLength(2);
+    expect(source.match(/setPushAt\(null\);/g)).toHaveLength(1);
+  });
+
+  it("arms and clears both timers with the tab's visibility, kept as state", () => {
+    expect(source).toMatch(/const onVisibility = \(\): void => setVisible\(document\.visibilityState === "visible"\);/);
+    expect(source).toMatch(/\}, \[pensionKey, push\.dirty, lastReadAt, visible, reading, failures, retryAt, tick, read\]\);/);
+    // Neither effect reads the document for it any more.
+    expect(source).not.toMatch(/const visible = typeof document/);
+  });
+
+  it("backingOff: a failure's backoff, or a refusal the 20 s cadence earned", () => {
+    expect(source).toMatch(/const backingOff = backingOffOf\(\{ failures, refused: unheardRefused \}\);/);
+  });
+
+  it("readId: the store's count of reads committed whole", () => {
+    expect(source).not.toMatch(/readId\s*[+-]=|setReadId/);
   });
 
   it("says 'none' where no socket is wanted, 'off' where one is and cannot open, and otherwise what the socket said", () => {

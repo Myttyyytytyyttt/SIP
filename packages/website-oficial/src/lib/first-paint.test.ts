@@ -34,7 +34,7 @@ describe("the first read of a pension", () => {
     expect(state.commits).toBe(0);
   });
 
-  it("is drawn the moment the history settles — answered or failed — and once", () => {
+  it("is drawn the moment the read settles without its own commit, and once", () => {
     const { state, gate } = setup(true);
     vi.advanceTimersByTime(400);
     gate.release();
@@ -48,6 +48,24 @@ describe("the first read of a pension", () => {
     const { state, gate } = setup(true);
     vi.advanceTimersByTime(WAIT);
     expect(state.commits).toBe(1);
+    gate.release();
+    expect(state.commits).toBe(1);
+  });
+
+  it("is not drawn by the gate at all when the read commits it itself, its history with it — not at the bound, not on a release after", () => {
+    // UI plan 10-09 §5 item 7: the read's one commit draws the snapshot and the head page together.
+    const { state, gate } = setup(true);
+    vi.advanceTimersByTime(400);
+    gate.cancel();
+    vi.advanceTimersByTime(WAIT * 2);
+    gate.release();
+    expect(state.commits).toBe(0);
+  });
+
+  it("a cancel after the bound drew it changes nothing: drawn once", () => {
+    const { state, gate } = setup(true);
+    vi.advanceTimersByTime(WAIT);
+    gate.cancel();
     gate.release();
     expect(state.commits).toBe(1);
   });

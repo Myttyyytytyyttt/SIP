@@ -9,16 +9,23 @@
  * Pure and timer-driven so it can be tested with fake timers; the hook only
  * decides WHEN to hold and WHEN the read has settled.
  *
- *   hold false — the page is drawn at once (every read after the first).
- *   hold true  — drawn when the read settles (`release`) or after `waitMs`,
- *                whichever comes first.
+ *   hold false — the page is drawn at once.
+ *   hold true  — drawn at `waitMs`, unless the read drew it first, its history
+ *                with it, in its own one commit (`cancel`, UI plan 10-09 §5
+ *                item 7); or when the read settles without that commit — it
+ *                threw — (`release`), whichever comes first.
  *   never twice, and never for a read that a newer one has overtaken
  *   (`stale`): a pension key that changed meanwhile has reset the store, and
  *   the old key's snapshot must not land in it.
  */
 export interface FirstPaintGate {
-  /** The read has settled — answered, failed, or needed nothing more: draw now if not drawn yet. */
+  /** The read has settled without drawing the page itself: draw now if not drawn yet. */
   readonly release: () => void;
+  /**
+   * The read drew the page itself, snapshot and history in one commit: nothing
+   * is left for the gate to draw, at the bound or on a release after it.
+   */
+  readonly cancel: () => void;
 }
 
 export function firstPaintGate(input: {
@@ -35,13 +42,17 @@ export function firstPaintGate(input: {
   };
   if (!input.hold) {
     open();
-    return { release: () => undefined };
+    return { release: () => undefined, cancel: () => undefined };
   }
   const timer = setTimeout(open, input.waitMs);
   return {
     release: () => {
       clearTimeout(timer);
       open();
+    },
+    cancel: () => {
+      clearTimeout(timer);
+      done = true;
     },
   };
 }

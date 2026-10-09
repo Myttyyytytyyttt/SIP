@@ -181,6 +181,38 @@ export function nextManualDelayMs(input: Pick<ScheduleInput, "lastReadAt" | "now
   return Math.max(floor, retry);
 }
 
+/**
+ * THE MOMENT A REFRESH STOPS WAITING (UI plan 10-09, §5 item 5): from then on
+ * refresh() reads at once instead of deferring to the floor — the moment a
+ * Retry or a "Check Solana now" can honestly be offered. `lastReadAt` is when
+ * the last read FINISHED, failed ones included: a failed read starts the floor
+ * as a good one does, so a Retry pressed straight after it waits too. 0 before
+ * any read: nothing to wait for. A retry-after is not in it — refresh() does not
+ * wait for one; the page compares it itself.
+ */
+export const manualReadyAt = (lastReadAt: number | null): number => (lastReadAt === null ? 0 : lastReadAt + MANUAL_FLOOR_MS);
+
+/**
+ * WHEN THE NEXT READ NOBODY ASKED FOR IS DUE (§5 item 6), on this browser's
+ * clock: the earlier of the poll's timer and the push's, each as armed (null
+ * when it is not). Null while the tab is hidden — neither timer runs then —
+ * and while none is armed: a read is out, or nothing is scheduled.
+ */
+export function nextReadAtOf(input: { readonly visible: boolean; readonly pollAt: number | null; readonly pushAt: number | null }): number | null {
+  if (!input.visible) return null;
+  if (input.pollAt === null) return input.pushAt;
+  return input.pushAt === null ? input.pollAt : Math.min(input.pollAt, input.pushAt);
+}
+
+/**
+ * WHETHER THE READS ARE BACKING OFF (§5 item 6): a failed read put the poll on
+ * BACKOFF_MS's two to five minutes (`failures`), or a 429 the faster unheard
+ * cadence earned put it back on the minute (`refused`, refusalBacksOff). Not a
+ * history-only refusal: the snapshot was read, nothing is backed off, and the
+ * next read comes EARLIER, at the server's moment (nextActivityRetryMs).
+ */
+export const backingOffOf = (input: { readonly failures: number; readonly refused: boolean }): boolean => input.failures > 0 || input.refused;
+
 /*
  * A tab that becomes visible again reads at once when its last read is the
  * manual floor old — no longer a whole sweep: live-push.ts showReadWanted,
