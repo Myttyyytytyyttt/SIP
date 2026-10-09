@@ -155,6 +155,15 @@ describe("before Privy answers, the sample is never painted", () => {
     expect(tablist(html)).toBeNull();
   });
 
+  it("is the frame the sample waits in, not a pension's first read: no words about reading one", () => {
+    mocked.privy = { ready: false, authenticated: false, user: null };
+    mocked.search = new URLSearchParams("mode=mock");
+    const html = render();
+    expect(html).toContain(`aria-label="${LIVE_COPY.checking}"`);
+    expect(html).not.toContain(LIVE_COPY.firstRead.reading);
+    expect(html).not.toContain("data-feed-skeleton");
+  });
+
   it("the front door still opens without waiting: it holds no numbers", () => {
     mocked.privy = { ready: false, authenticated: false, user: null };
     const html = render();
@@ -294,6 +303,17 @@ describe("a connected pension key", () => {
     const html = render(true, "activity");
     expect(tablist(html)).toBeNull();
     expect(html).not.toContain("Sample data");
+  });
+
+  it("while its first read runs, says so in words beside the skeleton, and the sidebar says the history is on its way", () => {
+    mocked.search = new URLSearchParams("mode=live");
+    const html = render();
+    expect(html).toContain(LIVE_COPY.firstRead.reading);
+    expect(html).toContain(`aria-label="${LIVE_COPY.reading}"`);
+    // The sidebar: the feed's shape under its own sentence, not the bare line it used to be.
+    expect(html).toContain(ACTIVITY_COPY.readingHistory.replaceAll("'", "&#x27;"));
+    expect(html).toContain("data-feed-skeleton");
+    expect(html).not.toContain(LIVE_COPY.readingSidebar);
   });
 
   it("says it could not read, rather than showing a sample or an empty pension", () => {

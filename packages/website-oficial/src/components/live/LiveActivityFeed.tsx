@@ -30,7 +30,7 @@ import { FeedBanner } from "@/components/live/LiveColumn";
 import { keyBySignature } from "@/components/live/row-keys";
 import { Num } from "@/components/num";
 import { relativeDayLabel } from "@/lib/format";
-import { ACTIVITY_COPY } from "@/lib/live-copy";
+import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import type { LiveRow } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
 
@@ -167,6 +167,11 @@ function HiddenTransactions({
  * own rows; `settlements` counts both streams, because a settlement found on a
  * wallet's link is one this pension made even though the vault's page does not
  * list it. So they are separated rather than joined by "of".
+ *
+ * A COUNT NOBODY HAS MADE IS "—", NEVER 0 (10-09, G10). Before any history
+ * has been read — still on its way, or failed with nothing loaded — the
+ * footer read "0 transactions · 0 settlements" about a pension the chain says
+ * has settled. Null is that case.
  */
 export function FeedFooter({
   transactions,
@@ -174,8 +179,8 @@ export function FeedFooter({
   title,
   className,
 }: {
-  readonly transactions: number;
-  readonly settlements: number;
+  readonly transactions: number | null;
+  readonly settlements: number | null;
   /** What window these two counts are over, where nothing beside them says it. */
   readonly title?: string;
   readonly className?: string;
@@ -185,8 +190,8 @@ export function FeedFooter({
   // footers.
   return (
     <span className={cn("text-xs text-muted-foreground", className)} {...(title === undefined ? {} : { title })}>
-      <Num className="text-xs">{transactions}</Num> {transactions === 1 ? "transaction" : "transactions"} · <Num className="text-xs">{settlements}</Num>{" "}
-      {settlements === 1 ? "settlement" : "settlements"}
+      <Num className="text-xs">{transactions ?? LIVE_COPY.unknownFigure}</Num> {transactions === 1 ? "transaction" : "transactions"} ·{" "}
+      <Num className="text-xs">{settlements ?? LIVE_COPY.unknownFigure}</Num> {settlements === 1 ? "settlement" : "settlements"}
     </span>
   );
 }

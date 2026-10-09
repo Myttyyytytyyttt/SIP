@@ -28,6 +28,8 @@ const GATED = [
   "wallets/TradingWalletsCard.tsx",
   "wallets/ImportWalletPanel.tsx",
   "live/LivePending.tsx",
+  // The first read's glyph (10-09); its blocks are Skeleton's, gated above.
+  "live/LiveFirstRead.tsx",
 ] as const;
 
 /** A class that moves something: a spin, a pulse, an entrance's zoom or slide. */

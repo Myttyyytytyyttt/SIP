@@ -28,6 +28,7 @@ import { LiveNextStep } from "@/components/live/LiveNextStep";
 import { LiveStartBuying } from "@/components/live/LiveStartBuying";
 import { LiveRulePanel } from "@/components/live/LiveRulePanel";
 import { FeedBanner, HiddenRows, LeadNotes, WalletList } from "@/components/live/LiveColumn";
+import { FeedSkeleton } from "@/components/live/FeedSkeleton";
 import { LoadOlderButton } from "@/components/live/LoadOlderButton";
 import { PendingRows } from "@/components/live/LivePending";
 import { readKeyOf, useReadyAt } from "@/components/live/RetryButton";
@@ -69,6 +70,19 @@ export function staleNote(input: { readonly clock: string; readonly message: str
   const said = input.message.endsWith(LIVE_COPY.staleLong);
   const reason = (said ? input.message.slice(0, -LIVE_COPY.staleLong.length) : input.message).trim();
   return [LIVE_COPY.staleAsOf(input.clock), reason, said || input.long ? LIVE_COPY.staleLong : ""].filter((part) => part !== "").join(" ");
+}
+
+/**
+ * WHETHER THE FEEDS HAVE ANYTHING TO COUNT (10-09, G10). No page of the vault's
+ * own history has been read — it is still on its way, or it failed before a
+ * single one landed — so a count is nobody's knowledge, and the footers say
+ * "—" rather than "0 events · 0 settlements" beside a pension the chain says
+ * has settled. A history that fails AFTER a page landed keeps those rows on
+ * screen (use-live-dashboard.ts), and the footers go on counting exactly the
+ * rows shown: a known count, of what is there.
+ */
+export function countsUnknownOf(input: { readonly activityPending: boolean; readonly activityUnreadable: boolean; readonly loaded: number }): boolean {
+  return input.activityPending || (input.activityUnreadable && input.loaded === 0);
 }
 
 export function LiveBody({
@@ -158,6 +172,8 @@ export function LiveBody({
   // No vault means no history was even requested; say that rather than "none yet".
   // And a history still on its way is not an empty one either.
   const emptyNote = data.stage === "no_vault" ? LIVE_COPY.noVault.sidebar : activityPending ? ACTIVITY_COPY.readingHistory : undefined;
+  // Counted from the vault's own page, shown or hidden; a settlement found on a link is not one of its rows.
+  const countsUnknown = countsUnknownOf({ activityPending, activityUnreadable, loaded: data.rows.length + data.hiddenRows.length });
   // The wallet the column leads with — the same rule the adapter used to pick `page.wallet`.
   const anchor = anchorOf(data.wallets);
   const lead = anchor === null ? null : (data.wallets.find((wallet) => wallet.address === anchor) ?? null);
@@ -184,6 +200,9 @@ export function LiveBody({
         hidden: <HiddenRows events={page.hidden ?? []} upkeep={data.hiddenUpkeep} dust={data.hiddenDust} now={page.now} id={id} />,
         // A page whose every transaction was upkeep is not an empty history.
         empty: emptyNote ?? (data.hiddenRows.length > 0 ? ACTIVITY_COPY.onlyHidden : ACTIVITY_COPY.empty),
+        // The feed's shape under "Reading this pension's history…", only while it is.
+        skeleton: activityPending ? <FeedSkeleton className="mt-3" /> : null,
+        countsUnknown,
         inSheet,
       }}
     />
@@ -229,6 +248,7 @@ export function LiveBody({
             onRetryActivity={onRefresh}
             activityUnreadable={activityUnreadable}
             activityRetryAt={activityRetryAt}
+            countsUnknown={countsUnknown}
             nextStep={nextStep}
             notes={notes}
             pending={pending}

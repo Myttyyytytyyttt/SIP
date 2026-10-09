@@ -81,6 +81,7 @@ export function LiveActivityPage({
   onRetryActivity,
   activityUnreadable,
   activityRetryAt = null,
+  countsUnknown = false,
   nextStep,
   notes,
   pending = [],
@@ -104,6 +105,8 @@ export function LiveActivityPage({
   readonly activityUnreadable: boolean;
   /** When the server said the history may be asked for again. */
   readonly activityRetryAt?: number | null;
+  /** No history has been read yet (LiveBody.tsx countsUnknownOf): the footer's counts are "—", never 0 (G10). */
+  readonly countsUnknown?: boolean;
   /** The one thing to do next. Shown INSTEAD of the summary before a vault exists. */
   readonly nextStep: ReactNode;
   /** What to keep in mind about every figure on the page — stale, paused — over everything else, as on the pension view. */
@@ -201,7 +204,7 @@ export function LiveActivityPage({
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <FeedFooter transactions={data.rows.length} settlements={settlements} />
+            <FeedFooter transactions={countsUnknown ? null : data.rows.length} settlements={countsUnknown ? null : settlements} />
             {older.complete ? (
               <span className="text-xs text-muted-foreground">{ACTIVITY_COPY.complete}</span>
             ) : (

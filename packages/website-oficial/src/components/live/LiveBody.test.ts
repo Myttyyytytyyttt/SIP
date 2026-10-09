@@ -30,7 +30,7 @@ vi.mock("@/components/live/LiveRulePanel", async () => {
 });
 vi.mock("@/components/pension-chart", () => ({ PensionChart: () => createElement("div", null, "LIVECHART") }));
 
-import { LiveBody, staleNote } from "@/components/live/LiveBody";
+import { LiveBody, countsUnknownOf, staleNote } from "@/components/live/LiveBody";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
 import { ACTIVITY_COPY, LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
@@ -56,6 +56,7 @@ function render(input: {
   readonly data?: LiveDashboard;
   readonly stale?: LiveStale | null;
   readonly older?: LiveOlder;
+  readonly activityPending?: boolean;
 }): string {
   return renderToStaticMarkup(
     createElement(
@@ -73,6 +74,7 @@ function render(input: {
         onLoadOlder: vi.fn(),
         nowMs: NOW_MS,
         activityUnreadable: input.activityUnreadable,
+        ...(input.activityPending === undefined ? {} : { activityPending: input.activityPending }),
       }),
     ),
   );
@@ -324,5 +326,63 @@ describe("an older page that failed", () => {
     const html = render({ view: "activity", data: liveDashboard(), activityUnreadable: false, older: failed });
     expect(html).toContain(ACTIVITY_COPY.olderFailed);
     expect(seen(html)).not.toMatch(/trying again|shortly/i);
+  });
+});
+
+/**
+ * A COUNT NOBODY HAS MADE IS "—", NEVER 0 (10-09, G10). Before a page of the
+ * history had been read — still on its way, or failed with nothing loaded —
+ * both footers said "0 events · 0 settlements" beside a pension the chain
+ * says has settled three times.
+ */
+describe("a history nobody has read yet", () => {
+  /** The words, as React writes them: the apostrophe is escaped. */
+  const readingWords = ACTIVITY_COPY.readingHistory.replaceAll("'", "&#x27;");
+  /** The column's bar (wallet-activity.tsx), as "<events> events · <n> settlements": "—" or digits. */
+  const columnBar = (html: string): string => {
+    const bar = html.match(/border-t px-4 py-2\.5 text-xs text-muted-foreground"><span><span[^>]*>([^<]*)<\/span> events<\/span><span><span[^>]*>([^<]*)<\/span> (settlements?)<\/span>/);
+    return bar === null ? "" : `${bar[1]} events · ${bar[2]} ${bar[3]}`;
+  };
+  /** /activity's footer (LiveActivityFeed.tsx FeedFooter), as a person reads it. */
+  const pageFooter = (html: string): string => seen(html.match(/<span class="text-xs text-muted-foreground"><span[^>]*>[^<]*<\/span> transactions?[^<]*<span[^>]*>[^<]*<\/span> settlements?<\/span>/)?.[0] ?? "");
+
+  it("says it is reading, with the feed's shape under the words — never in place of them", () => {
+    const html = render({ activityUnreadable: false, activityPending: true });
+    expect(html).toContain(readingWords);
+    expect(html).toContain("data-feed-skeleton");
+    expect(html.indexOf(readingWords)).toBeLessThan(html.indexOf("data-feed-skeleton"));
+  });
+
+  it("counts '—' in the column's bar, and on /activity's footer", () => {
+    expect(columnBar(render({ activityUnreadable: false, activityPending: true }))).toBe("— events · — settlements");
+    const activity = render({ view: "activity", activityUnreadable: false, activityPending: true });
+    expect(columnBar(activity)).toBe("— events · — settlements");
+    expect(pageFooter(activity)).toBe("— transactions · — settlements");
+  });
+
+  it("counts '—' when the history failed before a single page was loaded", () => {
+    expect(columnBar(render({ activityUnreadable: true }))).toBe("— events · — settlements");
+    expect(pageFooter(render({ view: "activity", activityUnreadable: true }))).toBe("— transactions · — settlements");
+  });
+
+  it("goes on counting the rows it shows when a later read failed over them", () => {
+    expect(columnBar(render({ data: liveDashboard(), activityUnreadable: true }))).toBe("1 events · 1 settlement");
+    expect(pageFooter(render({ view: "activity", data: liveDashboard(), activityUnreadable: true }))).toBe("1 transaction · 1 settlement");
+  });
+
+  it("draws no skeleton and counts as before once the history has answered", () => {
+    const html = render({ data: liveDashboard(), activityUnreadable: false });
+    expect(html).not.toContain("data-feed-skeleton");
+    expect(columnBar(html)).toBe("1 events · 1 settlement");
+    expect(pageFooter(render({ view: "activity", data: liveDashboard(), activityUnreadable: false }))).toBe("1 transaction · 1 settlement");
+  });
+});
+
+describe("countsUnknownOf", () => {
+  it("is unknown while the history is on its way, or failed with nothing loaded — and only then", () => {
+    expect(countsUnknownOf({ activityPending: true, activityUnreadable: false, loaded: 0 })).toBe(true);
+    expect(countsUnknownOf({ activityPending: false, activityUnreadable: true, loaded: 0 })).toBe(true);
+    expect(countsUnknownOf({ activityPending: false, activityUnreadable: true, loaded: 3 })).toBe(false);
+    expect(countsUnknownOf({ activityPending: false, activityUnreadable: false, loaded: 0 })).toBe(false);
   });
 });

@@ -138,6 +138,31 @@ describe("refusals say what happened, and no time", () => {
   });
 });
 
+/**
+ * THE FIRST READ SAYS WHAT IT IS DOING (10-09, G7/G15): words from the start,
+ * "taking longer" when it is, and a reload as the way out — none of them a
+ * promise of when it will end, and none in the machinery's words.
+ */
+describe("a first read that takes its time", () => {
+  const sentences = [LIVE_COPY.firstRead.reading, LIVE_COPY.firstRead.slow, LIVE_COPY.firstRead.reloadPage];
+
+  it("says it is slower than usual, and that it has not stopped", () => {
+    expect(LIVE_COPY.firstRead.slow).toMatch(/longer than usual/i);
+    expect(LIVE_COPY.firstRead.slow).toMatch(/still/i);
+  });
+
+  it("promises no time, and names none of the machinery", () => {
+    for (const sentence of sentences) {
+      expect(sentence).not.toMatch(/\d|shortly|again in|in a (moment|minute)/i);
+      expect(sentence).not.toMatch(/\b(keeper|read|poll|wrap|policy|RPC)\b/i);
+    }
+  });
+
+  it("counts how long in whole seconds, after a separator, so it reads as an aside", () => {
+    expect(LIVE_COPY.elapsed(8)).toBe("· 8 s");
+  });
+});
+
 describe("the rate a sentence quotes is the product's own", () => {
   it("the profit sentences carry ratePercent(DEFAULT_VAULT_POLICY.skimBps)", () => {
     const rate = ratePercent(DEFAULT_VAULT_POLICY.skimBps);

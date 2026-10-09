@@ -41,7 +41,9 @@ import { DashboardMain, PENSION_SLOT, RULE_SLOT } from "@/components/dashboard-m
 import { DashboardWallets } from "@/components/dashboard-wallets";
 import { DataModeToggle } from "@/components/data-mode";
 import { Landing } from "@/components/landing";
+import { FeedSkeleton } from "@/components/live/FeedSkeleton";
 import { LiveBody } from "@/components/live/LiveBody";
+import { LiveFirstRead } from "@/components/live/LiveFirstRead";
 import { LiveKeylessCard, LiveLoading, LivePrivyStalled, LiveUnavailableCard, LiveUnreadable } from "@/components/live/LiveStates";
 import { readKeyOf } from "@/components/live/RetryButton";
 import { DisconnectButton, PensionKeyChip, worthFrom } from "@/components/account-chip";
@@ -695,9 +697,13 @@ export function DashboardView({ view }: { readonly view: "pension" | "activity" 
       return plain(LIVE_COPY.unavailableSidebar, <LiveUnavailableCard onConnect={context.onConnect} onSeeSample={onSeeSample} />);
 
     case "live": {
-      // The first read, still in flight: skeletons, never the example.
+      // The first read, still in flight: skeletons, never the example — and
+      // words beside them, with how long it has taken and a way out once it
+      // is too long (LiveFirstRead.tsx). The sidebar is the feed's shape under
+      // its own sentence; below lg the header's sheet shows the same, so it
+      // brings its own padding there.
       if (live === null || pensionKey === null || live.view.kind === "idle" || live.view.kind === "loading") {
-        return plain(LIVE_COPY.readingSidebar, <LiveLoading label={LIVE_COPY.reading} />);
+        return plain(<FeedSkeleton label={ACTIVITY_COPY.readingHistory} className="p-4 lg:p-0" />, <LiveFirstRead />);
       }
       // The browser's own clock, and ONLY for how long a failure has stood —
       // every label on the page below is measured against the snapshot's own

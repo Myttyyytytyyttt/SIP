@@ -38,6 +38,21 @@ export function armDeadline(until: number, now: number, onReach: () => void): ()
 }
 
 /**
+ * Whether the moment `at` has come — true from then on. One re-render, at the
+ * moment itself (armDeadline), and none before or after it: for a screen that
+ * changes what it says at a few fixed points rather than every second (the
+ * first read's "taking longer" and its Reload, LiveFirstRead.tsx).
+ *
+ * A moment already past at mount starts true, so the first paint is right. A
+ * new `at` starts over, like useCountdown's `until`.
+ */
+export function useReached(at: number): boolean {
+  const [reached, setReached] = useState<number | null>(() => (at <= Date.now() ? at : null));
+  useEffect(() => armDeadline(at, Date.now(), () => setReached(at)), [at]);
+  return reached === at;
+}
+
+/**
  * The whole seconds left until `until`, or null once it is reached (or when
  * there is nothing to wait for). Ticks only while it counts.
  *

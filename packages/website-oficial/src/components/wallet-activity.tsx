@@ -9,6 +9,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { SheetClose } from "@/components/ui/sheet";
 import { LABEL, MONO } from "@/lib/classes";
 import { relativeDayLabel, shortHex, usd } from "@/lib/format";
+import { LIVE_COPY } from "@/lib/live-copy";
 import { cn } from "@/lib/utils";
 import type { ActivityEvent, Wallet } from "@/mocks/types";
 
@@ -53,6 +54,17 @@ export interface LiveColumnSlots {
   readonly hidden: ReactNode;
   /** What a feed with nothing to list says instead — never nothing. */
   readonly empty: string;
+  /**
+   * Under that sentence, while the history is still being read: the feed's
+   * shape (live/FeedSkeleton.tsx). It never stands in for the words.
+   */
+  readonly skeleton?: ReactNode;
+  /**
+   * No history has been read yet — still on its way, or it failed with nothing
+   * loaded — so the bar's counts are "—", never a 0 that only means nobody
+   * knows (G10).
+   */
+  readonly countsUnknown?: boolean;
   /** Inside the header's sheet: pressing Manage wallets closes the sheet before the modal opens. */
   readonly inSheet: boolean;
 }
@@ -98,6 +110,8 @@ export function WalletActivity({
   const groups = groupByDay(activity);
   // What the right of the bar counts: the sample's trades, or — on a live page — the settlements that stand for them.
   const trades = activity.filter((event) => event.kind === (live === undefined ? "trade" : "saved")).length;
+  // A live page whose history nobody has read yet counts nothing: "—", not 0.
+  const unknown = live?.countsUnknown === true;
   // The first row takes the feed's one Tab stop; the rest are reached with the arrows.
   const firstId = activity[0]?.id;
   // Each row's place in the list, across the day headings, for the entrance's cascade.
@@ -156,6 +170,7 @@ export function WalletActivity({
         {live !== undefined && activity.length === 0 && live.banner === null ? (
           <div className="px-4 py-6">
             <p className="text-sm text-muted-foreground">{live.empty}</p>
+            {live.skeleton ?? null}
           </div>
         ) : null}
         {groups.map(([date, events]) => (
@@ -173,10 +188,10 @@ export function WalletActivity({
 
       <div className="flex justify-between border-t px-4 py-2.5 text-xs text-muted-foreground">
         <span>
-          <Num>{activity.length}</Num> events
+          <Num>{unknown ? LIVE_COPY.unknownFigure : activity.length}</Num> events
         </span>
         <span>
-          <Num>{trades}</Num> {live === undefined ? "trades" : trades === 1 ? "settlement" : "settlements"}
+          <Num>{unknown ? LIVE_COPY.unknownFigure : trades}</Num> {live === undefined ? "trades" : !unknown && trades === 1 ? "settlement" : "settlements"}
         </span>
       </div>
     </div>

@@ -63,8 +63,24 @@ export const LIVE_COPY = {
   connect: "Connect",
 
   // ── connected, reading ─────────────────────────────────────────────────────
+  /** The first read's accessible name, fixed for as long as it runs; what it SHOWS is `firstRead`. */
   reading: "Reading your pension on Solana",
   readingSidebar: "Reading your activity on Solana",
+  /**
+   * THE FIRST READ, IN WORDS (10-09). It used to be pulsing blocks and nothing
+   * else (G7), with no end: the client sets no timeout on it, so a read that
+   * hung pulsed for ever (G15). Now it says what it is doing; after a few
+   * seconds, for how long; after twenty, that this is slower than usual; and
+   * after forty-five it offers a reload — the one control that helps, because
+   * a refresh asked for while a read runs is turned away (LiveFirstRead.tsx).
+   */
+  firstRead: {
+    reading: "Reading your pension…",
+    slow: "Taking longer than usual · still reading",
+    reloadPage: "Reload page",
+  },
+  /** How long a wait has stood, after the words that say what it is: "· 8 s" (Elapsed.tsx). Never inside a live region. */
+  elapsed: (seconds: number): string => `· ${seconds} s`,
 
   // ── connected, and the read failed ─────────────────────────────────────────
   unreadableTitle: "Your pension could not be read",

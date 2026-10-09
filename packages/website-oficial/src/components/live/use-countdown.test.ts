@@ -2,9 +2,11 @@
 // seconds rounded up while it counts, and the deadline met to the millisecond
 // rather than on whichever second's tick happens to come after it.
 
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { armDeadline, secondsUntil } from "@/components/live/use-countdown";
+import { armDeadline, secondsUntil, useReached } from "@/components/live/use-countdown";
 
 describe("secondsUntil", () => {
   it("rounds up, so the last second still reads 1 s and never 0 s", () => {
@@ -46,5 +48,23 @@ describe("armDeadline", () => {
     stop();
     vi.advanceTimersByTime(60_000);
     expect(onReach).not.toHaveBeenCalled();
+  });
+});
+
+describe("useReached", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /** The hook's answer on a first paint at browser time `now`. */
+  const reachedAt = (at: number, now: number): string => {
+    vi.setSystemTime(now);
+    const Probe = () => createElement("i", null, String(useReached(at)));
+    return renderToStaticMarkup(createElement(Probe));
+  };
+
+  it("is false before the moment and true from it, on the very first paint", () => {
+    expect(reachedAt(20_000, 19_999)).toBe("<i>false</i>");
+    expect(reachedAt(20_000, 20_000)).toBe("<i>true</i>");
+    expect(reachedAt(20_000, 90_000)).toBe("<i>true</i>");
   });
 });
