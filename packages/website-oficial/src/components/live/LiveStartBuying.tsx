@@ -37,6 +37,16 @@
  * WHEN ANOTHER SIGNATURE HOLDS THE PAGE'S LOCK, IT SAYS SO. Its buttons were
  * greyed with no word of why; the line under them is the wallets screen's own
  * (LINK_COPY.busy).
+ *
+ * ONCE ITS APPROVAL LANDS, IT STAYS UNTIL THE PAGE SHOWS IT (10-09, plan B4).
+ * The vault screen reads the new policy at once and the card used to close on
+ * that, seconds before the dashboard showed anything of it: nothing said an
+ * update was on its way. Now it is held up, over its last state with nothing
+ * left to press, while the page's verdict on its signature stands
+ * (last-write-context.ts): "Buying set up · Updating your pension…" on its
+ * success line, then the still "Signed at 14:32 UTC · not on this page yet"
+ * past the cap. It closes when the page shows the approval. "Confirming on
+ * Solana" counts the seconds when Solana is slow to answer (`startedAt`).
  */
 
 import {
@@ -53,17 +63,19 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Reveal } from "@/components/live/Reveal";
+import { SyncLine } from "@/components/live/SyncLine";
+import { START_BUYING_WRITER, syncingFor, type WriteSync } from "@/components/live/last-write-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SigningDetail, atMostUsd, policyRequest, readCaps, readMinimum, readWeights } from "@/components/wallets/InvestingCard";
-import { TxProgress } from "@/components/wallets/TxProgress";
+import { TxProgress, useStepStartedAt } from "@/components/wallets/TxProgress";
 import { useBasketChoice } from "@/hooks/use-onboarding-closed";
 import { useVaultWrite, type InvestRequest } from "@/hooks/use-vault-actions";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { USDC_DECIMALS, formatSol, formatUnits, formatUsd, rawFrom } from "@/lib/amounts";
 import { LABEL } from "@/lib/classes";
 import { basketLimits, evenPercents, overCeiling, type BasketLimits, type PickedLeg } from "@/lib/basket-picker";
-import { START_BUYING_COPY } from "@/lib/live-copy";
+import { LIVE_COPY, START_BUYING_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
 import { basketOnShelf } from "@/lib/onboarding";
 import { BASE_THRESHOLD_RAW, minimumFor } from "@/lib/rule-settings";
@@ -163,7 +175,18 @@ export function startBuyingRent(state: VaultStateJson, mints: readonly string[])
  * Where the card may stand. No Privy hook runs here: the card itself, which
  * signs, mounts only once every condition holds.
  */
-export function LiveStartBuying({ data, pensionKey, onRefresh }: { readonly data: LiveDashboard; readonly pensionKey: string; readonly onRefresh: () => void }) {
+export function LiveStartBuying({
+  data,
+  pensionKey,
+  onRefresh,
+  sync = null,
+}: {
+  readonly data: LiveDashboard;
+  readonly pensionKey: string;
+  readonly onRefresh: () => void;
+  /** The page's verdict on the last signature (last-write-context.ts useWriteJudge). Absent or null: nothing to say. */
+  readonly sync?: WriteSync | null;
+}) {
   const choice = useBasketChoice(pensionKey);
   const screen = useVaultScreen();
   /**
@@ -205,7 +228,9 @@ export function LiveStartBuying({ data, pensionKey, onRefresh }: { readonly data
   }, [becameEligible, refreshVault]);
 
   if (eligible && view !== null && view.kind === "ready" && basket !== null && basket.kind === "stocks") shown.current = { state: view.state, mints: basket.mints };
-  const open = (eligible || holding) && shown.current !== null;
+  // ITS OWN APPROVAL, LANDED AND NOT ON THE PAGE YET: the card stays, over what it last showed, until the page has it.
+  const own = sync !== null && sync.write.writer === START_BUYING_WRITER ? sync : null;
+  const open = (eligible || holding || own !== null) && shown.current !== null;
   // In the top column's `gap-4`: it grows in, and closes over what it last showed.
   return (
     <Reveal open={open} inGap>
@@ -217,6 +242,7 @@ export function LiveStartBuying({ data, pensionKey, onRefresh }: { readonly data
           onRefresh={onRefresh}
           onRefreshVault={refreshVault}
           onHolding={setHolding}
+          sync={own}
         />
       ) : null}
     </Reveal>
@@ -230,6 +256,7 @@ function StartBuyingCard({
   onRefresh,
   onRefreshVault,
   onHolding,
+  sync,
 }: {
   readonly state: VaultStateJson;
   readonly mints: readonly string[];
@@ -237,10 +264,13 @@ function StartBuyingCard({
   readonly onRefresh: () => void;
   readonly onRefreshVault: (() => void) | null;
   readonly onHolding: (holding: boolean) => void;
+  /** This card's own approval, landed and not on the page yet; null otherwise. */
+  readonly sync: WriteSync | null;
 }) {
-  const write = useVaultWrite("start-buying");
+  const write = useVaultWrite(START_BUYING_WRITER);
+  const startedAt = useStepStartedAt(write.progress);
   const [acknowledged, setAcknowledged] = useState(false);
-  const [signed, setSigned] = useState<InvestRequest | null>(null);
+  const [signedRequest, setSignedRequest] = useState<InvestRequest | null>(null);
 
   // A landed policy: the dashboard reads again, and the card goes with the policy it created.
   // A refusal: the vault is read again too, so a retry is built from what is on chain now, not from the read that was refused.
@@ -275,8 +305,12 @@ function StartBuyingCard({
   const rent = startBuyingRent(state, plan.legs.map((leg) => leg.asset.mint));
   const fees = SIGNATURE_FEE_LAMPORTS + priorityFeeLamports(ownerComputeBudget("set_invest_policy"));
   const purchase = plan.purchaseRaw === null ? null : formatUsd(plan.purchaseRaw);
-  // Landed is blocked too: until the fresh read hides this card, a second press would sign a second policy.
-  const blocked = write.running || write.busyElsewhere || write.unconfirmed || landed;
+  // Landed is blocked too: until the fresh read hides this card, a second press would sign a second policy —
+  // and so is an approval the page has not shown yet, even on a card mounted again since it was signed.
+  const signed = landed || sync !== null;
+  const blocked = write.running || write.busyElsewhere || write.unconfirmed || signed;
+  // The success line says "updating" while it is its own write; otherwise — late, or a card mounted again — a line of its own does.
+  const syncing = syncingFor(sync, write.progress);
   const ceiling = plan.window?.ceilingRaw ?? null;
   const binding = plan.window?.ceilingBinding ?? null;
   const request = plan.request;
@@ -339,7 +373,7 @@ function StartBuyingCard({
           </div>
         </details>
 
-        {landed ? null : (
+        {signed ? null : (
         <>
         <label className="flex items-start gap-2 rounded-md border border-amber-600/30 bg-amber-600/5 px-3 py-2 text-xs">
           <input
@@ -369,7 +403,7 @@ function StartBuyingCard({
                 ? undefined
                 : () => {
                     if (!acknowledged || blocked) return;
-                    setSigned(request);
+                    setSignedRequest(request);
                     void write.investPolicy(request);
                   }
             }
@@ -386,11 +420,14 @@ function StartBuyingCard({
         <TxProgress
           progress={write.progress}
           successLabel={START_BUYING_COPY.started}
+          startedAt={startedAt}
+          syncing={syncing}
           onBuildAgain={() => void write.buildAgain()}
           onCheckAgain={() => void write.checkAgain()}
           onDismiss={() => write.dismiss()}
-          approveDetail={<SigningDetail progress={write.progress} request={signed} />}
+          approveDetail={<SigningDetail progress={write.progress} request={signedRequest} />}
         />
+        {sync === null || syncing ? null : <SyncLine sync={sync} syncing={LIVE_COPY.syncing.signed} />}
       </CardContent>
     </Card>
   );

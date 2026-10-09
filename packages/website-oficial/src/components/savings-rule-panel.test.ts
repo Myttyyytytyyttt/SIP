@@ -7,7 +7,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { SavingsRulePanel, type NextInvestmentView, type RulePanelPulse, type RuleSettingsDoor } from "@/components/savings-rule-panel";
+import { SavingsRulePanel, type NextInvestmentView, type RulePanelPulse, type RuleSettingsDoor, type RuleSyncing } from "@/components/savings-rule-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { SETTINGS_COPY } from "@/lib/settings-copy";
@@ -28,6 +28,7 @@ function render(
     readonly activity?: readonly ActivityEvent[];
     readonly renderNextInvestment?: (next: NextInvestmentView) => ReturnType<typeof createElement>;
     readonly pulse?: RulePanelPulse;
+    readonly syncing?: RuleSyncing | null;
   } = {},
 ): string {
   return renderToStaticMarkup(
@@ -42,6 +43,7 @@ function render(
         ...(options.settings === undefined ? {} : { settings: options.settings }),
         ...(options.renderNextInvestment === undefined ? {} : { renderNextInvestment: options.renderNextInvestment }),
         ...(options.pulse === undefined ? {} : { pulse: options.pulse }),
+        ...(options.syncing === undefined ? {} : { syncing: options.syncing }),
       }),
     ),
   );
@@ -393,5 +395,38 @@ describe("the card's pulse on a live page", () => {
     expect(line).toContain("relative isolate");
     expect(line).toContain('class="live-wash" data-tone="setting" style="inset:-0.375rem -0.5rem"');
     expect(render(PROFIT, { settings: door(), pulse: pulse() })).not.toContain("live-wash");
+  });
+});
+
+/**
+ * A SIGNATURE FOR THIS CARD, NOT ON THE PAGE YET (10-09, plan B4): said beside
+ * "Rate", in the line's own height — turning while the page updates, the still
+ * clock once late — and only when a live page hands it.
+ */
+describe("a signature the page does not show yet", () => {
+  /** From the rate line's opening to the figure: where the words stand. */
+  const rateLine = (html: string): string => html.slice(html.lastIndexOf('<div class="flex items-center justify-between gap-2', html.indexOf(">Rate<")), html.indexOf("%</span>", html.indexOf(">Rate<")));
+
+  it("says the pension is updating beside the rate, the figure kept whole and the words giving way", () => {
+    const line = rateLine(render(PROFIT, { settings: door(), syncing: { text: LIVE_COPY.syncing.signed, late: false } }));
+    expect(line).toContain('data-syncing="syncing"');
+    expect(line).toContain(`<span class="truncate">${LIVE_COPY.syncing.signed}</span>`);
+    expect(line).toContain(`title="${LIVE_COPY.syncing.signed}"`);
+    expect(line).toMatch(/<svg[^>]*class="[^"]*motion-safe:animate-spin[^"]*"[^>]*aria-hidden="true"/);
+    expect(line).toContain('<p class="shrink-0 text-sm leading-none font-medium">Rate</p>');
+  });
+
+  it("past the cap, the still clock — nothing turns", () => {
+    const line = rateLine(render(PROFIT, { settings: door(), syncing: { text: "Signed at 14:32 UTC · not on this page yet", late: true } }));
+    expect(line).toContain('data-syncing="late"');
+    expect(line).toContain("Signed at 14:32 UTC · not on this page yet");
+    expect(line).not.toContain("animate-spin");
+  });
+
+  it("with nothing to say, the rate line is the one it always was", () => {
+    const plain = render(PROFIT, { settings: door() });
+    expect(render(PROFIT, { settings: door(), syncing: null })).toBe(plain);
+    expect(plain).not.toContain("data-syncing");
+    expect(plain).toContain('<p class="text-sm leading-none font-medium">Rate</p>');
   });
 });

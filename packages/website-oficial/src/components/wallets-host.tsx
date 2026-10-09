@@ -27,12 +27,19 @@
  * knows what the person came for — "Link a wallet" — opens on that tab instead
  * of the overview. The argument is optional, so every `() => void` caller and
  * override still fits.
+ *
+ * WHAT WAS JUST SIGNED IS KEPT HERE TOO (10-09, plan B4): the last write that
+ * landed anywhere on the page — the modal, the rule card's gear, the first-buy
+ * card, the setup — so the live page can say "updating your pension" until it
+ * shows it (components/live/last-write-context.ts). Here, above both, because
+ * the vault is created inside the modal, which the live page cannot see into.
  */
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { usePrivy } from "@privy-io/react-auth";
 import Providers from "@/app/providers";
+import { LastWriteHost } from "@/components/live/last-write-context";
 import { VaultScreen } from "@/components/wallets/VaultScreen";
 import { pensionKeyOf } from "@/lib/pension-key";
 import { WalletsModal } from "@/components/wallets/WalletsModal";
@@ -178,6 +185,7 @@ export function WalletsHost({
       <WalletsOpenContext.Provider value={open}>
       <ClosedContext.Provider value={subscribe}>
       <DisconnectRegistry.Provider value={registerDisconnect}>
+      <LastWriteHost>
       {config !== null ? (
         // THE PROVIDER WRAPS THE TREE, and does not sit beside it: the shell
         // reads the pension key to decide between the landing and the dashboard,
@@ -196,6 +204,7 @@ export function WalletsHost({
           {mounted ? <WalletsSetupModal problems={problems ?? []} open={open} onOpenChange={onOpenChange} /> : null}
         </>
       )}
+      </LastWriteHost>
       </DisconnectRegistry.Provider>
       </ClosedContext.Provider>
       </WalletsOpenContext.Provider>

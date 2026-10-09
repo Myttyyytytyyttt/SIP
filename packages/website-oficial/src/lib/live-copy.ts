@@ -276,6 +276,27 @@ export const LIVE_COPY = {
     count: (count: number): string => `${count} new ${count === 1 ? "transaction" : "transactions"} on your pension.`,
   },
 
+  // ── after a signature lands (last-write-context.ts, plan B4) ───────────────
+  /**
+   * SIGNED, AND NOT ON THE PAGE YET. From the landing until the page shows it
+   * — a snapshot read past the slot it landed in — the card that signed it
+   * says the pension is updating, and the success line beside the signature
+   * says so too. Past a minute, or two updates that did not bring it, the
+   * still "not on this page yet" with when it landed, dated when not today:
+   * never "updating" with no update known to be bringing it, and no promise of
+   * when one will.
+   */
+  syncing: {
+    /** On the card that signed it (the rule card, the first-buy card). */
+    signed: "Signed · updating your pension…",
+    /** In place of Create, once the vault's creation has landed. */
+    vaultCreated: "Vault created · reading it from Solana…",
+    /** Beside a success line (TxProgress), after "Saving rule updated". */
+    progress: "Updating your pension…",
+    /** "Signed at 14:32 UTC", but "Signed yesterday, 23:58 UTC": a bare clock takes "at", a day does not. */
+    late: (when: string): string => `Signed ${/^\d/.test(when) ? "at " : ""}${when} · not on this page yet`,
+  },
+
   // ── the setup, ticked off through the first buy (LiveNextStep.tsx) ─────────
   /**
    * WHAT IS DONE AND WHAT COMES NEXT, as facts the chain can be asked about

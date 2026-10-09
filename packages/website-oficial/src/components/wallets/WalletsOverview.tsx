@@ -35,7 +35,6 @@ import {
   CircleCheck,
   CirclePause,
   LogOut,
-  RefreshCw,
   TriangleAlert,
   Vault,
   Wallet,
@@ -48,6 +47,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddressLine } from "@/components/wallets/AddressLine";
+import { ScreenRefreshButton } from "@/components/wallets/ScreenRefreshButton";
 import { rowStatus, type RowLink, type RowStatus } from "@/components/wallets/TradingWalletRow";
 import { tokenRows } from "@/components/wallets/WithdrawCard";
 import { useVaultScreen, type VaultView } from "@/hooks/use-vault-state";
@@ -325,7 +325,7 @@ export function WalletsOverview({
 
   return (
     <div className="@container space-y-4">
-      <AttentionRows overview={overview} onRefresh={() => screen?.refresh()} onSelect={onSelect} setupGoesTo={nextStepSection(overview.steps)} />
+      <AttentionRows overview={overview} onSelect={onSelect} setupGoesTo={nextStepSection(overview.steps)} />
       <PensionKeyCard address={pensionKey} onDisconnect={onDisconnect} />
       <Tiles overview={overview} onSelect={onSelect} />
       {overview.steps !== null ? <SetupSteps steps={overview.steps} onSelect={onSelect} /> : null}
@@ -348,15 +348,16 @@ export function nextStepSection(steps: Overview["steps"]): WalletsSection | null
  * same tab (a wallet not linked while no wallet is linked yet), the row keeps
  * its sentence and drops its own button: two identical buttons on one screen
  * read as two different things to do.
+ *
+ * "Read again" is the screen's own (ScreenRefreshButton): busy while a read is
+ * out, so a press shows it was heard.
  */
 function AttentionRows({
   overview,
-  onRefresh,
   onSelect,
   setupGoesTo,
 }: {
   readonly overview: Overview;
-  readonly onRefresh: () => void;
   readonly onSelect: (section: WalletsSection) => void;
   readonly setupGoesTo: WalletsSection | null;
 }) {
@@ -374,10 +375,7 @@ function AttentionRows({
   if (overview.read === "failed") {
     rows.push(
       <Notice key="read" icon={CircleAlert} tone="failed" text={OVERVIEW_COPY.readFailed}>
-        <Button type="button" variant="outline" size="sm" onClick={() => onRefresh()}>
-          <RefreshCw aria-hidden />
-          {OVERVIEW_COPY.readAgain}
-        </Button>
+        <ScreenRefreshButton>{OVERVIEW_COPY.readAgain}</ScreenRefreshButton>
       </Notice>,
     );
   }

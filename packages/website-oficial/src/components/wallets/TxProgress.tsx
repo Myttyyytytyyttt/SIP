@@ -22,14 +22,24 @@
  * aria-hidden: this ladder is a polite region, and a number that changes every
  * second inside it would be read out every second. A host that passes nothing
  * keeps today's markup exactly.
+ *
+ * LANDED, AND NOT ON THE PAGE YET (10-09, plan B4). A host whose landed write
+ * the live page has not shown yet passes `syncing` (last-write-context.ts
+ * syncingFor, useWriteSyncing): the success line reads "Saving rule updated ·
+ * Updating your pension…" with a turning mark — still for reduced motion, the
+ * words saying it either way — until the page shows it, or stops claiming it
+ * will. Read out with the line it joins; its leaving is not news. A host that
+ * passes nothing keeps today's markup exactly.
  */
 
 import { Check, ExternalLink, LoaderCircle, RefreshCw } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { Elapsed } from "@/components/live/Elapsed";
+import { WorkMark } from "@/components/live/WorkMark";
 import { Button } from "@/components/ui/button";
 import type { WriteProgress } from "@/hooks/use-vault-actions";
+import { LIVE_COPY } from "@/lib/live-copy";
 import { cn } from "@/lib/utils";
 import { PROGRESS_COPY, VAULT_COPY } from "@/lib/vault-copy";
 import { DECLINED_CODE, type FlowResult, type FlowStep } from "@/lib/vault-flows";
@@ -115,6 +125,7 @@ export function TxProgress({
   onDismiss,
   approveDetail,
   startedAt = null,
+  syncing = false,
 }: {
   readonly progress: WriteProgress;
   /** What landed: "Vault created", "Linked", "Policy signed", "Withdrawn". */
@@ -126,6 +137,8 @@ export function TxProgress({
   readonly approveDetail?: ReactNode;
   /** When the step in flight began, in this browser's clock (useStepStartedAt): "Confirming on Solana" then counts. */
   readonly startedAt?: number | null;
+  /** The write landed and the live page does not show it yet (last-write-context.ts): the success line says the pension is updating. */
+  readonly syncing?: boolean;
 }) {
   if (progress.phase === "idle") return null;
 
@@ -163,6 +176,15 @@ export function TxProgress({
       <div role="status" className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-emerald-600/30 bg-emerald-600/5 px-3 py-2 text-sm">
         <Check className="size-4 text-emerald-700 dark:text-emerald-400" aria-hidden />
         <span className="font-medium">{successLabel}</span>
+        {syncing ? (
+          <>
+            <span aria-hidden>·</span>
+            <span className="inline-flex items-center gap-1.5 text-muted-foreground" data-syncing="">
+              <WorkMark state="syncing" tile={false} />
+              {LIVE_COPY.syncing.progress}
+            </span>
+          </>
+        ) : null}
         {result.explorerUrl !== null ? (
           <>
             <span aria-hidden>·</span>

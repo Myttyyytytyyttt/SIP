@@ -22,7 +22,6 @@
  */
 
 import { OFFERED_LEGS, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
-import { RefreshCw } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { Num } from "@/components/num";
@@ -32,6 +31,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddressLine } from "@/components/wallets/AddressLine";
+import { useWriteSyncing } from "@/components/live/last-write-context";
+import { ScreenRefreshButton } from "@/components/wallets/ScreenRefreshButton";
 import { TxProgress, useStepStartedAt } from "@/components/wallets/TxProgress";
 import { useVaultWrite, type TokenWithdrawRequest } from "@/hooks/use-vault-actions";
 import { useVaultScreen } from "@/hooks/use-vault-state";
@@ -129,6 +130,8 @@ export function WithdrawCard() {
   // Here, with the writes they time: the sections mount only once the vault has been read.
   const solStartedAt = useStepStartedAt(sol.progress);
   const tokensStartedAt = useStepStartedAt(tokens.progress);
+  const solSyncing = useWriteSyncing(sol.progress);
+  const tokensSyncing = useWriteSyncing(tokens.progress);
   const [amountText, setAmountText] = useState("");
   if (screen === null) return null;
   const { view } = screen;
@@ -138,10 +141,7 @@ export function WithdrawCard() {
       <CardTitle>{WITHDRAW_COPY.title}</CardTitle>
       {description}
       <CardAction>
-        <Button type="button" variant="outline" size="sm" onClick={() => screen.refresh()}>
-          <RefreshCw aria-hidden />
-          {WITHDRAW_COPY.refresh}
-        </Button>
+        <ScreenRefreshButton>{WITHDRAW_COPY.refresh}</ScreenRefreshButton>
       </CardAction>
     </CardHeader>
   );
@@ -168,8 +168,8 @@ export function WithdrawCard() {
     <Card>
       {header(null)}
       <CardContent className="space-y-6">
-        <SolSection state={state} write={sol} startedAt={solStartedAt} amountText={amountText} setAmountText={setAmountText} />
-        <TokenSection state={state} write={tokens} startedAt={tokensStartedAt} />
+        <SolSection state={state} write={sol} startedAt={solStartedAt} syncing={solSyncing} amountText={amountText} setAmountText={setAmountText} />
+        <TokenSection state={state} write={tokens} startedAt={tokensStartedAt} syncing={tokensSyncing} />
       </CardContent>
     </Card>
   );
@@ -179,12 +179,15 @@ function SolSection({
   state,
   write,
   startedAt,
+  syncing,
   amountText,
   setAmountText,
 }: {
   readonly state: VaultStateJson;
   readonly write: VaultWrite;
   readonly startedAt: number | null;
+  /** The withdrawal landed and the live page does not show it yet (last-write-context.ts). */
+  readonly syncing: boolean;
   readonly amountText: string;
   readonly setAmountText: (text: string) => void;
 }) {
@@ -257,6 +260,7 @@ function SolSection({
         progress={write.progress}
         successLabel={WITHDRAW_COPY.withdrawn}
         startedAt={startedAt}
+        syncing={syncing}
         onBuildAgain={() => void write.buildAgain()}
         onCheckAgain={() => void write.checkAgain()}
         onDismiss={() => write.dismiss()}
@@ -265,7 +269,17 @@ function SolSection({
   );
 }
 
-function TokenSection({ state, write, startedAt }: { readonly state: VaultStateJson; readonly write: VaultWrite; readonly startedAt: number | null }) {
+function TokenSection({
+  state,
+  write,
+  startedAt,
+  syncing,
+}: {
+  readonly state: VaultStateJson;
+  readonly write: VaultWrite;
+  readonly startedAt: number | null;
+  readonly syncing: boolean;
+}) {
   const offered = tokenRows(state);
   const blocked = write.running || write.busyElsewhere || write.unconfirmed;
   const withdraw = (request: TokenWithdrawRequest): void => void write.withdrawToken(request);
@@ -293,6 +307,7 @@ function TokenSection({ state, write, startedAt }: { readonly state: VaultStateJ
         progress={write.progress}
         successLabel={WITHDRAW_COPY.withdrawn}
         startedAt={startedAt}
+        syncing={syncing}
         onBuildAgain={() => void write.buildAgain()}
         onCheckAgain={() => void write.checkAgain()}
         onDismiss={() => write.dismiss()}

@@ -33,6 +33,7 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 import { OFFERED_LEGS } from "@sip/solana-core/client";
 
 import { LiveNextStep, firstBuyOf, waitingSinceOf } from "@/components/live/LiveNextStep";
+import type { LastWrite, WriteSync } from "@/components/live/last-write-context";
 import { takeImportRequest } from "@/lib/import-intent";
 import { LIVE_COPY } from "@/lib/live-copy";
 import type { LiveDashboard, LiveEntryJson, VaultEventJson } from "@/lib/live-types";
@@ -328,5 +329,58 @@ describe("in the pension view's top column", () => {
 
   it("draws nothing, and holds no gap, when there is no card", () => {
     expect(render(liveDashboard({ snapshot: withPolicy(policyState({ lifetimeInvested: "5000000" })) }), null, true)).toBe("");
+  });
+});
+
+/**
+ * WHAT WAS JUST SIGNED IS NOT OFFERED AGAIN (10-09, plan B4): the write that
+ * moves the stage on, landed and not on the page yet, stands where its button
+ * stood — turning while an update may bring it, still past the cap.
+ */
+describe("a signature that moves the stage on, not on the page yet", () => {
+  const signedNow = (kind: LastWrite["kind"], state: WriteSync["state"] = "syncing"): WriteSync => ({
+    write: { pensionKey: OWNER, kind, writer: "vault", signature: "sigCreate", slot: 9_999, at: Date.now() },
+    state,
+  });
+  const withSync = (data: LiveDashboard, sync: WriteSync | null): string => {
+    mocked.buttons.length = 0;
+    return renderToStaticMarkup(createElement(LiveNextStep, { data, pensionKey: OWNER, seatProblem: null, onOpenWallets, sync }));
+  };
+
+  it("the vault created in the modal stands where Create stood — no second Create, no wallets-page way round", () => {
+    const html = withSync(noVault(), signedNow("create"));
+    expect(html).toContain(LIVE_COPY.syncing.vaultCreated);
+    expect(html).toContain('data-syncing="syncing"');
+    expect(html).toMatch(/<svg[^>]*class="[^"]*motion-safe:animate-spin[^"]*"/);
+    expect(buttons(LIVE_COPY.noVault.create)).toHaveLength(0);
+    expect(html).not.toContain(LIVE_COPY.noVault.openWallets);
+    // The checklist is still the stage's own: nothing is ticked before the page shows it.
+    expect(done(html)).toBe(0);
+  });
+
+  it("past the cap: the still clock, and when it was signed — never 'reading' with no update bringing it", () => {
+    const html = withSync(noVault(), signedNow("create", "late"));
+    expect(html).toMatch(/Signed at \d{2}:\d{2} UTC · not on this page yet/);
+    expect(html).not.toContain(LIVE_COPY.syncing.vaultCreated);
+    expect(html).not.toContain("animate-spin");
+    expect(buttons(LIVE_COPY.noVault.create)).toHaveLength(0);
+  });
+
+  it("a link stands where Link stood, and a created-and-linked wallet where Create and Import stood", () => {
+    expect(withSync(liveDashboard({ snapshot: unlinkedSnapshot(), activity: null }), signedNow("link"))).toContain(LIVE_COPY.syncing.signed);
+    expect(buttons(LIVE_COPY.notLinked.link)).toHaveLength(0);
+    const noWallet = liveDashboard({ snapshot: liveSnapshot({ wallets: [] }), activity: null, privyWallets: [] });
+    expect(withSync(noWallet, signedNow("createLink"))).toContain(LIVE_COPY.syncing.signed);
+    expect(buttons(LIVE_COPY.noTradingWallet.create)).toHaveLength(0);
+    expect(buttons(LIVE_COPY.noTradingWallet.import)).toHaveLength(0);
+  });
+
+  it("any other signature leaves the stage's button where it is", () => {
+    expect(withSync(noVault(), signedNow("rule"))).not.toContain(LIVE_COPY.syncing.signed);
+    expect(buttons(LIVE_COPY.noVault.create)).toHaveLength(1);
+    withSync(liveDashboard({ snapshot: unlinkedSnapshot(), activity: null }), signedNow("withdraw"));
+    expect(buttons(LIVE_COPY.notLinked.link)).toHaveLength(1);
+    // And with nothing to say, the card is the one it always was.
+    expect(withSync(noVault(), null)).toBe(render(noVault()));
   });
 });

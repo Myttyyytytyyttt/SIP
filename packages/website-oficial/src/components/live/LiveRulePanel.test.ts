@@ -15,6 +15,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RuleSettingsFormProps } from "@/components/rule-settings-dialog";
 import type { LiveRulePulse } from "@/components/live/NextInvestmentLive";
+import { START_BUYING_WRITER, type LastWrite, type WriteSync } from "@/components/live/last-write-context";
 import type { NextInvestmentView, RuleSettingsDoor } from "@/components/savings-rule-panel";
 import type { InvestRequest, VaultRuleRequest } from "@/hooks/use-vault-actions";
 import type { SettingsDraft } from "@/lib/rule-settings";
@@ -35,6 +36,7 @@ const calls = vi.hoisted(() => ({
   card: null as unknown,
   next: null as unknown,
   pulse: null as unknown,
+  syncing: null as unknown,
   state: null as unknown,
   running: false,
 }));
@@ -72,11 +74,12 @@ vi.mock("@/hooks/use-vault-actions", () => {
 
 // The card and the dialog have their own tests; here only what the host hands them matters.
 vi.mock("@/components/savings-rule-panel", () => ({
-  SavingsRulePanel: (props: { settings: RuleSettingsDoor; rule: SavingsRule; renderNextInvestment?: unknown; pulse?: unknown }) => {
+  SavingsRulePanel: (props: { settings: RuleSettingsDoor; rule: SavingsRule; renderNextInvestment?: unknown; pulse?: unknown; syncing?: unknown }) => {
     calls.door = props.settings;
     calls.card = props.rule;
     calls.next = props.renderNextInvestment ?? null;
     calls.pulse = props.pulse ?? null;
+    calls.syncing = props.syncing ?? null;
     return null;
   },
 }));
@@ -158,15 +161,24 @@ const RULE: SavingsRule = { mode: "profit", rateBps: 2_000, thresholdUsd: 10, ta
 const STATS = {} as SavingsStats;
 
 /** Mounts the host and returns the form it built (null when it shows a status instead). */
-function mount(state: VaultStateJson | null, pulse?: LiveRulePulse): RuleSettingsFormProps | null {
+function mount(state: VaultStateJson | null, pulse?: LiveRulePulse, sync?: WriteSync | null): RuleSettingsFormProps | null {
   calls.state = state;
   calls.form = null;
   calls.status = null;
   calls.door = null;
   calls.next = null;
   calls.pulse = null;
+  calls.syncing = null;
   renderToStaticMarkup(
-    createElement(LiveRulePanel, { rule: RULE, stats: STATS, activity: [], now: "2026-09-16T12:00:00.000Z", onRefresh: () => undefined, ...(pulse === undefined ? {} : { pulse }) }),
+    createElement(LiveRulePanel, {
+      rule: RULE,
+      stats: STATS,
+      activity: [],
+      now: "2026-09-16T12:00:00.000Z",
+      onRefresh: () => undefined,
+      ...(pulse === undefined ? {} : { pulse }),
+      ...(sync === undefined ? {} : { sync }),
+    }),
   );
   return calls.form as RuleSettingsFormProps | null;
 }
@@ -413,5 +425,38 @@ describe("what moves on the card", () => {
     expect(drawn()).toContain('data-next-mark="active"');
     expect(drawn()).toContain("text-blue-600");
     expect(calls.pulse).toBe(pulse);
+  });
+});
+
+/**
+ * WHAT WAS JUST SIGNED, UNTIL THE PAGE SHOWS IT (10-09, plan B4): a rule or a
+ * basket that landed — from this gear or the wallets modal — is said beside
+ * "Rate"; the first-buy card's own approval is that card's to say.
+ */
+describe("a signature the page does not show yet", () => {
+  const sync = (write: Partial<LastWrite>, state: WriteSync["state"] = "syncing"): WriteSync => ({
+    write: { pensionKey: "owner", kind: "rule", writer: "vault", signature: "sigRule", slot: 9_999, at: Date.now(), ...write },
+    state,
+  });
+
+  it("says the pension is updating beside the rate, for a rule or a basket signed anywhere", () => {
+    for (const write of [{ kind: "rule", writer: "vault" }, { kind: "policy", writer: "policy" }] as const) {
+      mount(vaultState(POLICY), undefined, sync(write));
+      expect(calls.syncing, write.kind).toEqual({ text: LIVE_COPY.syncing.signed, late: false });
+    }
+  });
+
+  it("past the cap, says when it was signed, still", () => {
+    mount(vaultState(POLICY), undefined, sync({}, "late"));
+    const said = calls.syncing as { text: string; late: boolean };
+    expect(said.late).toBe(true);
+    expect(said.text).toMatch(/^Signed at \d{2}:\d{2} UTC · not on this page yet$/);
+  });
+
+  it("hands the card nothing for the first-buy card's approval, another kind of write, or nothing signed", () => {
+    for (const given of [sync({ kind: "policy", writer: START_BUYING_WRITER }), sync({ kind: "create" }), sync({ kind: "withdraw", writer: "withdraw:sol" }), null]) {
+      mount(vaultState(POLICY), undefined, given);
+      expect(calls.syncing).toBeNull();
+    }
   });
 });

@@ -22,8 +22,10 @@
  * token accounts rang — a saving landing, a deposit, a withdrawal, the
  * keeper's own step. Not while a conversion or a buy is under way: that step's
  * turning mark already says the vault is about to move, and one fact wears one
- * moving mark. Not when a wallet is named too: `heard` cannot say whether the
- * vault rang as well.
+ * moving mark. Nor while something this page signed is still "updating your
+ * pension" (plan B4, last-write-context.ts): the vault rang for that very
+ * signature, and its card already says so. Not when a wallet is named too:
+ * `heard` cannot say whether the vault rang as well.
  *
  * IT ENDS WHEN `heard` CLEARS — an update that covered the change landed. A
  * wallet's line becomes its step's, or closes when no step follows (the change
@@ -89,7 +91,8 @@ const vaultMoving = (lines: readonly PendingLine[]): boolean => lines.some((line
  * them, `latest` the newest snapshot's steps (the same as `lines` once the read
  * has settled). `behind`: the last update failed, or the history could not be
  * read — what was heard is not on the page, and no update is known to be
- * bringing it.
+ * bringing it. `signing`: a signature this page made is still "updating your
+ * pension" on the card that signed it.
  */
 export function heardLinesOf(input: {
   readonly heard: PushHeard | null;
@@ -97,6 +100,7 @@ export function heardLinesOf(input: {
   readonly lines: readonly PendingLine[];
   readonly latest: readonly PendingLine[];
   readonly behind: boolean;
+  readonly signing?: boolean;
 }): ShownLine[] {
   const { heard, data, behind } = input;
   const drawn = new Set(input.lines.map((line) => line.key));
@@ -125,7 +129,7 @@ export function heardLinesOf(input: {
       heard: true,
     });
   }
-  if (heard !== null && heard.wallets.length === 0 && !vaultMoving(input.lines) && !vaultMoving(input.latest)) {
+  if (heard !== null && heard.wallets.length === 0 && input.signing !== true && !vaultMoving(input.lines) && !vaultMoving(input.latest)) {
     out.push({
       key: VAULT_HEARD_KEY,
       kind: "vault",

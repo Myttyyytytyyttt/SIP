@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { CONFIRMING_ELAPSED_MS, NO_STEP, TxProgress, markStep, stepKeyOf } from "@/components/wallets/TxProgress";
 import type { WriteProgress } from "@/hooks/use-vault-actions";
+import { LIVE_COPY } from "@/lib/live-copy";
 import { FAILURE_COPY, PROGRESS_COPY, VAULT_COPY } from "@/lib/vault-copy";
 import { DECLINED_CODE, type FlowResult } from "@/lib/vault-flows";
 
@@ -121,5 +122,30 @@ describe("when a step began (useStepStartedAt's core)", () => {
     expect(stopped).toEqual(NO_STEP);
     expect(markStep(stopped, running("confirming"), 7_000).at).toBe(7_000);
     expect(stepKeyOf({ phase: "idle" })).toBeNull();
+  });
+});
+
+describe("landed, and not on the page yet (10-09, plan B4)", () => {
+  const ok = finished({ ok: true, signature: "sig", explorerUrl: "https://solscan.io/tx/sig", slot: 5_000, unitsConsumed: null });
+  const at = (progress: WriteProgress, syncing?: boolean): string =>
+    renderToStaticMarkup(createElement(TxProgress, { progress, successLabel: "Saving rule updated", ...(syncing === undefined ? {} : { syncing }) }));
+
+  it("says the pension is updating on the success line, right after what landed, and before Solscan", () => {
+    const html = at(ok, true);
+    expect(html).toContain(LIVE_COPY.syncing.progress);
+    expect(html.indexOf("Saving rule updated")).toBeLessThan(html.indexOf(LIVE_COPY.syncing.progress));
+    expect(html.indexOf(LIVE_COPY.syncing.progress)).toBeLessThan(html.indexOf(VAULT_COPY.viewOnSolscan));
+    // Its mark turns only for motion-safe, and is decoration: the words carry it.
+    expect(html).toMatch(/<svg[^>]*class="[^"]*motion-safe:animate-spin[^"]*"[^>]*aria-hidden="true"/);
+  });
+
+  it("a host that passes nothing, or false, keeps the success line exactly as it was", () => {
+    expect(at(ok)).toBe(at(ok, false));
+    expect(at(ok)).not.toContain(LIVE_COPY.syncing.progress);
+  });
+
+  it("is never said over a write that is running or stopped", () => {
+    expect(at({ phase: "running", kind: "rule", step: "confirming", built: null }, true)).not.toContain(LIVE_COPY.syncing.progress);
+    expect(at(finished({ ok: false, kind: "expired", message: "x" }), true)).not.toContain(LIVE_COPY.syncing.progress);
   });
 });

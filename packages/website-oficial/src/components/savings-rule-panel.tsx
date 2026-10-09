@@ -118,6 +118,21 @@ export interface RulePanelPulse {
   readonly ruleArrived: boolean;
 }
 
+/**
+ * A SIGNATURE THIS CARD SPEAKS FOR, NOT ON THE PAGE YET (10-09, plan B4): the
+ * rule or the basket, signed from the gear or the wallets modal, landed and
+ * not shown (last-write-context.ts). Beside "Rate", in the line's own height,
+ * so the card does not grow when it starts or shrink when the page catches up:
+ * "Signed · updating your pension…" with a turning mark, then — past a minute
+ * or two updates — the still clock and "Signed at 14:32 UTC · not on this page
+ * yet". The words are the state; the mark is decoration, and stands still for
+ * reduced motion. Absent on the sample, whose rate line stays byte for byte.
+ */
+export interface RuleSyncing {
+  readonly text: string;
+  readonly late: boolean;
+}
+
 /** The rate's line, and the last investment's block: the sample's exact strings, so its markup cannot drift when a live page washes them. */
 const RATE_LINE = "flex items-center justify-between gap-2";
 const LAST_BUY = "flex w-full items-center gap-3 rounded-md border p-3 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50";
@@ -163,6 +178,7 @@ export function SavingsRulePanel({
   settings,
   renderNextInvestment,
   pulse,
+  syncing,
   className,
 }: {
   rule: SavingsRule;
@@ -180,6 +196,8 @@ export function SavingsRulePanel({
   renderNextInvestment?: (next: NextInvestmentView) => ReactNode;
   /** What a live page has just seen move on the card (RulePanelPulse). Absent on the sample. */
   pulse?: RulePanelPulse;
+  /** A signature for this card that the live page does not show yet (RuleSyncing). Absent on the sample, and while there is none. */
+  syncing?: RuleSyncing | null;
   className?: string;
 }) {
   // THE SAMPLE'S RULE, as its dialog last saved it. Unused on a live page, whose rule is the chain's.
@@ -307,7 +325,18 @@ export function SavingsRulePanel({
         <div className={ruleWashed ? cn(RATE_LINE, WASH_HOST, "rounded-md") : RATE_LINE}>
           {/* The line has no padding of its own: the wash reaches a little past it, and moves nothing. */}
           {ruleWashed ? <Wash tone="setting" bleed /> : null}
-          <p className="text-sm leading-none font-medium">Rate</p>
+          {syncing === undefined || syncing === null ? (
+            <p className="text-sm leading-none font-medium">Rate</p>
+          ) : (
+            // The rate's figure keeps its width; the words give way, and the whole sentence is the hover's.
+            <div className="flex min-w-0 items-center gap-2">
+              <p className="shrink-0 text-sm leading-none font-medium">Rate</p>
+              <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground" data-syncing={syncing.late ? "late" : "syncing"} title={syncing.text}>
+                <WorkMark state={syncing.late ? "slow" : "syncing"} tile={false} />
+                <span className="truncate">{syncing.text}</span>
+              </span>
+            </div>
+          )}
           <span className="flex items-center gap-2">
             {paused ? <Badge variant="outline">{SETTINGS_COPY.paused}</Badge> : null}
             <Num className="text-sm">{pct(rateBps)}</Num>

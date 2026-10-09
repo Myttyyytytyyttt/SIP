@@ -132,6 +132,13 @@ describe("the vault heard", () => {
     expect(heardLinesOf({ heard: heardFrom([]), data, lines, latest: lines, behind: false })).toEqual([]);
   });
 
+  it("has none while something this page signed is still 'updating your pension': the vault rang for it, and its card says so (plan B4)", () => {
+    expect(heardLinesOf({ heard: heardFrom([]), data: page(), lines: [], latest: [], behind: false, signing: true })).toEqual([]);
+    expect(heardLinesOf({ heard: heardFrom([]), data: page(), lines: [], latest: [], behind: false, signing: false }).map((line) => line.key)).toEqual([VAULT_HEARD_KEY]);
+    // A wallet's own activity is not the signature: its line stays.
+    expect(heardLinesOf({ heard: heardFrom([WALLET_A]), data: page(), lines: [], latest: [], behind: false, signing: true }).map((line) => line.key)).toEqual([KEY]);
+  });
+
   it("has none when a wallet rang too: `heard` cannot say whether the vault did", () => {
     const lines = heardLinesOf({ heard: heardFrom([WALLET_A]), data: page(), lines: [], latest: [], behind: false });
     expect(lines.map((line) => line.key)).toEqual([KEY]);

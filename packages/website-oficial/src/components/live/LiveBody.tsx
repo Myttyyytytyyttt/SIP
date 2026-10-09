@@ -61,6 +61,16 @@
  * (LiveHeartbeat.tsx), and every Retry on the page opens at that one moment.
  * And whether a newer version is served (use-update-available.ts): asked here,
  * where it is drawn, so the sample never asks.
+ *
+ * WHAT WAS JUST SIGNED IS JUDGED HERE, ONCE (plan B4, last-write-context.ts):
+ * the last signature that landed anywhere on the page — the gear, the
+ * first-buy card, the wallets modal — against what this page shows. Until it
+ * shows it, the card that speaks for it says "updating your pension" (the rule
+ * card, the first-buy card, the next step in place of its button), and past a
+ * minute or two updates the still "not on this page yet". The verdict goes
+ * back up for the modal's own success lines. While it says "updating", the
+ * vault's "Activity seen on your vault" line stands down: it is the same
+ * change, and one fact wears one moving mark.
  */
 
 import { useRef, type ReactNode } from "react";
@@ -78,6 +88,7 @@ import { LoadOlderButton } from "@/components/live/LoadOlderButton";
 import { PendingRows, usePendingView } from "@/components/live/LivePending";
 import { Reveal } from "@/components/live/Reveal";
 import { heardLinesOf } from "@/components/live/heard-lines";
+import { useWriteJudge } from "@/components/live/last-write-context";
 import { heroPillOf, pillShown, useArrivals } from "@/components/live/use-arrivals";
 import { useUpdateAvailable } from "@/components/live/use-update-available";
 import { historyKeyOf, useReadSettled } from "@/components/live/use-read-settled";
@@ -130,6 +141,15 @@ export function staleNote(input: { readonly when: string; readonly message: stri
  * screen (use-live-dashboard.ts), and the footers go on counting exactly the
  * rows shown: a known count, of what is there.
  */
+/**
+ * THE ROWS A SIGNATURE IS LOOKED FOR IN, when a slot is missing on either side
+ * (last-write-context.ts pageShows): the vault's own page, the rows it hides
+ * from the feed too — an owner's write can be one — never the links', which
+ * no owner signature is on.
+ */
+export const signedRows = (data: Pick<LiveDashboard, "rows" | "hiddenRows">): readonly { readonly signature: string }[] =>
+  data.hiddenRows.length === 0 ? data.rows : [...data.rows, ...data.hiddenRows];
+
 export function countsUnknownOf(input: { readonly activityPending: boolean; readonly activityUnreadable: boolean; readonly loaded: number }): boolean {
   return input.activityPending || (input.activityUnreadable && input.loaded === 0);
 }
@@ -199,11 +219,14 @@ export function LiveBody({
   const steps = pendingSteps(settled.data);
   const lines = pendingLines(steps, settled.data.nowMs);
   const latest = settled.settled ? lines : pendingLines(pendingSteps(data), data.nowMs);
+  // WHAT WAS JUST SIGNED, AND WHETHER THIS PAGE SHOWS IT YET: against the
+  // newest snapshot's slot, counted in whole updates (last-write-context.ts).
+  const sync = useWriteJudge({ pensionKey, readId: live.readId, slot: data.slot, rows: signedRows(data) });
   // AND BEFORE ANY OF THAT, WHAT SOLANA SAID CHANGED (heard-lines.ts): from the
   // newest snapshot and the store's `heard`, under the keys the steps will
   // take. "Behind" while the updates fail — the stale note, or the history
   // unreadable — when no update is known to be bringing it.
-  const heard = heardLinesOf({ heard: live.heard, data, lines, latest, behind: stale !== null || activityUnreadable });
+  const heard = heardLinesOf({ heard: live.heard, data, lines, latest, behind: stale !== null || activityUnreadable, signing: sync?.state === "syncing" });
   const pending = usePendingView({ data: settled.data, steps, lines, heard, latest });
 
   // THE STRIP, ONLY ONCE THERE IS ONE (SavingsStrip's own null rule). Grown in
@@ -302,6 +325,7 @@ export function LiveBody({
       pensionKey={pensionKey}
       seatProblem={config === null ? null : seatProblem(config)}
       onOpenWallets={onOpenWallets}
+      sync={sync}
       // In the pension view's top column it enters, swaps and leaves without
       // shoving the page; /activity shows it only before there is a vault.
       animate={view === "pension"}
@@ -368,7 +392,7 @@ export function LiveBody({
                     shows them and this copy is not displayed (LivePending.tsx). */}
                 <PendingRows lines={pending.lines} view={pending} variant="card" className="lg:hidden" />
                 {/* The buying approval the setup promised, once the first savings have landed. */}
-                <LiveStartBuying data={data} pensionKey={pensionKey} onRefresh={onRefresh} />
+                <LiveStartBuying data={data} pensionKey={pensionKey} onRefresh={onRefresh} sync={sync} />
               </>
             }
             strip={
@@ -397,6 +421,7 @@ export function LiveBody({
                     now={page.now}
                     onRefresh={onRefresh}
                     pulse={rulePulse}
+                    sync={sync}
                     className={RULE_SLOT}
                   />
                   <PensionPanel

@@ -334,6 +334,34 @@ describe("the words for what just arrived", () => {
   });
 });
 
+/**
+ * SIGNED, AND NOT ON THE PAGE YET (plan B4, 10-09): "updating" only while an
+ * update may bring it, then the still "not on this page yet" with when it
+ * landed — a bare clock taking "at", a day not. No promise of when the page
+ * will show it, and none of the machinery.
+ */
+describe("the words for a signature the page does not show yet", () => {
+  it("say what landed and that the pension is updating", () => {
+    expect(LIVE_COPY.syncing.signed).toBe("Signed · updating your pension…");
+    expect(LIVE_COPY.syncing.vaultCreated).toBe("Vault created · reading it from Solana…");
+    expect(LIVE_COPY.syncing.progress).toBe("Updating your pension…");
+  });
+
+  it("say when it was signed once late, with its day when that is not today", () => {
+    expect(LIVE_COPY.syncing.late("14:32 UTC")).toBe("Signed at 14:32 UTC · not on this page yet");
+    expect(LIVE_COPY.syncing.late("yesterday, 23:58 UTC")).toBe("Signed yesterday, 23:58 UTC · not on this page yet");
+    expect(LIVE_COPY.syncing.late("Oct 7, 14:32 UTC")).toBe("Signed Oct 7, 14:32 UTC · not on this page yet");
+  });
+
+  it("promise no time and name none of the machinery", () => {
+    const words = [LIVE_COPY.syncing.signed, LIVE_COPY.syncing.vaultCreated, LIVE_COPY.syncing.progress, LIVE_COPY.syncing.late("14:32 UTC")];
+    for (const sentence of words) {
+      expect(sentence).not.toMatch(/shortly|again in|in a (moment|minute)|\bsoon\b|\bnext\b|\d+ s\b/i);
+      expect(sentence).not.toMatch(/\b(keeper|read|poll|wrap|policy|RPC|socket|push|heard|slot)\b/i);
+    }
+  });
+});
+
 describe("the rate a sentence quotes is the product's own", () => {
   it("the profit sentences carry ratePercent(DEFAULT_VAULT_POLICY.skimBps)", () => {
     const rate = ratePercent(DEFAULT_VAULT_POLICY.skimBps);

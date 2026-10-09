@@ -45,6 +45,15 @@
  * gate and line, and a mark for the work under way. `pulse`, from LiveBody,
  * says what that work is, a buy under way beside "Last investment", and what
  * just arrived — the last buy and a rule change each wash their own block.
+ *
+ * AND WHAT WAS JUST SIGNED, UNTIL THE PAGE SHOWS IT (10-09, plan B4). A rule
+ * or a basket that landed — from this gear or the wallets modal — and that
+ * the page does not show yet: "Signed · updating your pension…" beside
+ * "Rate", then the still "not on this page yet" past the cap
+ * (last-write-context.ts, judged once by LiveBody). The dialog's success line
+ * says the same while it does ("Saving rule updated · Updating your
+ * pension…"), and its "Confirming on Solana" counts the seconds when Solana
+ * is slow to answer (TxProgress `startedAt`).
  */
 
 import { VOLUME_MODE_OFFERED } from "@sip/solana-core/client";
@@ -52,12 +61,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { InfoTip } from "@/components/info-tip";
 import { NextInvestmentLive, type LiveRulePulse } from "@/components/live/NextInvestmentLive";
+import { ruleCardWrite, syncWords, syncingFor, type WriteSync } from "@/components/live/last-write-context";
 import { liveCategories, liveSeed, planSettings, type LiveSeed } from "@/components/live/rule-settings-plan";
 import { RuleSettingsDialog, RuleSettingsForm, RuleSettingsStatus, type SettingsJudgement } from "@/components/rule-settings-dialog";
 import { SavingsRulePanel } from "@/components/savings-rule-panel";
 import { Button } from "@/components/ui/button";
 import { SigningDetail, switchToLiveRequest } from "@/components/wallets/InvestingCard";
-import { TxProgress } from "@/components/wallets/TxProgress";
+import { TxProgress, useStepStartedAt } from "@/components/wallets/TxProgress";
 import { useBasketChoice } from "@/hooks/use-onboarding-closed";
 import { useVaultWrite, type InvestRequest } from "@/hooks/use-vault-actions";
 import { useVaultScreen } from "@/hooks/use-vault-state";
@@ -91,6 +101,7 @@ export function LiveRulePanel({
   now,
   onRefresh,
   pulse,
+  sync = null,
   className,
 }: {
   readonly rule: SavingsRule;
@@ -101,11 +112,16 @@ export function LiveRulePanel({
   readonly onRefresh: () => void;
   /** What is under way and what just arrived (NextInvestmentLive.tsx rulePulseOf). Absent: nothing is marked. */
   readonly pulse?: LiveRulePulse;
+  /** The page's verdict on the last signature (last-write-context.ts useWriteJudge). Absent or null: nothing to say. */
+  readonly sync?: WriteSync | null;
   readonly className?: string;
 }) {
   const screen = useVaultScreen();
   const ruleWrite = useVaultWrite("vault");
   const policyWrite = useVaultWrite("policy");
+  // When each write's step began, for "Confirming on Solana · 8 s": kept here, where the writes live, since the dialog's ladder comes and goes.
+  const ruleStartedAt = useStepStartedAt(ruleWrite.progress);
+  const policyStartedAt = useStepStartedAt(policyWrite.progress);
   const pensionKey = screen?.pensionKey ?? null;
   const choice = useBasketChoice(pensionKey);
   const [open, setOpen] = useState(false);
@@ -299,6 +315,8 @@ export function LiveRulePanel({
       <TxProgress
         progress={policyWrite.progress}
         successLabel={policyLabel}
+        startedAt={policyStartedAt}
+        syncing={syncingFor(sync, policyWrite.progress)}
         approveDetail={<SigningDetail progress={policyWrite.progress} request={signedRequest} />}
         onBuildAgain={() => void policyWrite.buildAgain()}
         onCheckAgain={() => void policyWrite.checkAgain()}
@@ -308,6 +326,8 @@ export function LiveRulePanel({
       <TxProgress
         progress={ruleWrite.progress}
         successLabel={SUCCESS.rule}
+        startedAt={ruleStartedAt}
+        syncing={syncingFor(sync, ruleWrite.progress)}
         onBuildAgain={() => void ruleWrite.buildAgain()}
         onCheckAgain={() => void ruleWrite.checkAgain()}
         onDismiss={() => ruleWrite.dismiss()}
@@ -405,6 +425,7 @@ export function LiveRulePanel({
         settings={{ open, onOpen, attention }}
         renderNextInvestment={(next) => <NextInvestmentLive next={next} work={pulse?.work ?? null} />}
         {...(pulse === undefined ? {} : { pulse })}
+        {...(sync === null || !ruleCardWrite(sync.write) ? {} : { syncing: { text: syncWords(sync, LIVE_COPY.syncing.signed, Date.now()), late: sync.state === "late" } })}
         {...(className === undefined ? {} : { className })}
       />
       <RuleSettingsDialog

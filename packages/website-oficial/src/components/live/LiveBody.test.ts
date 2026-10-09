@@ -30,7 +30,8 @@ vi.mock("@/components/live/LiveRulePanel", async () => {
 });
 vi.mock("@/components/pension-chart", () => ({ PensionChart: () => createElement("div", null, "LIVECHART") }));
 
-import { LiveBody, countsUnknownOf, staleNote } from "@/components/live/LiveBody";
+import { LiveBody, countsUnknownOf, signedRows, staleNote } from "@/components/live/LiveBody";
+import { LastWriteContext, type LastWrite } from "@/components/live/last-write-context";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { LiveLiveness, LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
 import { ACTIVITY_COPY, LIVE_COPY, STATS_COPY } from "@/lib/live-copy";
@@ -63,9 +64,15 @@ function render(input: {
   readonly nowMs?: number;
   /** How live the page is; by default a read that finished just now, its floor still running. */
   readonly live?: Partial<LiveLiveness>;
+  /** The last signature that landed on the page (last-write-context.ts); none by default. */
+  readonly lastWrite?: LastWrite;
 }): string {
+  const record = input.lastWrite === undefined ? null : { write: input.lastWrite, sync: null, report: vi.fn() };
   return renderToStaticMarkup(
     createElement(
+      LastWriteContext.Provider,
+      { value: record },
+      createElement(
       TooltipProvider,
       null,
       createElement(LiveBody, {
@@ -83,6 +90,7 @@ function render(input: {
         ...(input.activityPending === undefined ? {} : { activityPending: input.activityPending }),
         live: liveLiveness({ refreshReadyAt: Date.now() + MANUAL_FLOOR_MS, ...input.live }),
       }),
+      ),
     ),
   );
 }
@@ -545,5 +553,55 @@ describe("the rule card on a live page", () => {
     const html = render({ data: liveDashboard(), activityUnreadable: false });
     expect(html).not.toContain("data-buying");
     expect(html).toContain('<div class="flex h-4 min-w-0 items-center justify-between gap-2"><p class="text-xs font-medium uppercase tracking-wide text-muted-foreground shrink-0">Last investment</p></div>');
+  });
+});
+
+/**
+ * WHAT WAS JUST SIGNED IS JUDGED HERE, ONCE (10-09, plan B4): against what the
+ * page shows, and handed to the cards that speak for it.
+ */
+describe("a signature that landed on the page", () => {
+  const noVault = (): LiveDashboard =>
+    liveDashboard({
+      snapshot: liveSnapshot({ vault: { status: "missing", address: "v" }, policy: { status: "missing", address: "p" }, wallets: [] }),
+      activity: null,
+      privyWallets: [],
+    });
+  const created = (overrides: Partial<LastWrite> = {}): LastWrite => ({
+    pensionKey: OWNER,
+    kind: "create",
+    writer: "vault",
+    signature: "sigCreate",
+    slot: 9_999,
+    at: Date.now(),
+    ...overrides,
+  });
+
+  it("stands where Create stood once the vault's creation landed in the modal, until the page shows it", () => {
+    const html = render({ data: noVault(), activityUnreadable: false, lastWrite: created() });
+    expect(html).toContain(LIVE_COPY.syncing.vaultCreated);
+    expect(html).not.toContain(`>${LIVE_COPY.noVault.create}</button>`);
+  });
+
+  it("says nothing once the snapshot was read past it, nor for another pension key's write", () => {
+    for (const lastWrite of [created({ slot: 4_000 }), created({ pensionKey: "SomeoneElse111111111111111111111111111111111" })]) {
+      const html = render({ data: noVault(), activityUnreadable: false, lastWrite });
+      expect(html).not.toContain(LIVE_COPY.syncing.vaultCreated);
+      expect(html).toContain(`>${LIVE_COPY.noVault.create}</button>`);
+    }
+  });
+
+  it("stands the vault's 'activity seen' line down while it says so: the same change, one moving mark", () => {
+    const heard = { heard: { at: Date.now(), wallets: [] } };
+    expect(render({ data: liveDashboard(), activityUnreadable: false, live: heard })).toContain(LIVE_COPY.heardLine.vault);
+    const signed = render({ data: liveDashboard(), activityUnreadable: false, live: heard, lastWrite: created({ kind: "rule" }) });
+    expect(signed).not.toContain(LIVE_COPY.heardLine.vault);
+  });
+
+  it("looks for a slotless signature among the vault's rows, the hidden ones too", () => {
+    const data = liveDashboard();
+    expect(signedRows(data)).toBe(data.rows);
+    const hidden = { ...data, hiddenRows: data.rows.slice(0, 1) };
+    expect(signedRows(hidden).map((row) => row.signature)).toEqual([...data.rows, ...data.rows.slice(0, 1)].map((row) => row.signature));
   });
 });

@@ -16,10 +16,11 @@ vi.mock("@privy-io/react-auth/solana", () => ({
 }));
 
 import { LiveStartBuying, START_BUYING_PER_BUY_RAW, startBuyingPlan, startBuyingRent } from "@/components/live/LiveStartBuying";
+import { START_BUYING_WRITER, type WriteSync } from "@/components/live/last-write-context";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { VaultWriteLock, WriteLockContext, type WriteLock } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue } from "@/hooks/use-vault-state";
-import { START_BUYING_COPY } from "@/lib/live-copy";
+import { LIVE_COPY, START_BUYING_COPY } from "@/lib/live-copy";
 import type { LiveDashboard } from "@/lib/live-types";
 import type { VaultApi, VaultStateJson } from "@/lib/vault-api";
 import { INVEST_COPY, LINK_COPY } from "@/lib/vault-copy";
@@ -195,5 +196,49 @@ describe("LiveStartBuying", () => {
   it("stands in a box that grows in and closes over its last state — simply open on the page's first paint", () => {
     const html = render(activeNoPolicy());
     expect(html).toMatch(/^<div class="grid transition-\[grid-template-rows,opacity,margin-top\][^"]* grid-rows-\[1fr\] opacity-100 mt-0"><div class="min-h-0 min-w-0"><div[^>]*data-start-buying=""/);
+  });
+});
+
+/**
+ * ITS APPROVAL, LANDED AND NOT ON THE PAGE YET (10-09, plan B4): nothing left to
+ * press — the tick, Start buying and Keep as SOL give way — and the card says
+ * the pension is updating, or past the cap that it is not on this page yet.
+ */
+describe("once its approval has landed", () => {
+  const own = (state: WriteSync["state"], writer = START_BUYING_WRITER): WriteSync => ({
+    write: { pensionKey: OWNER, kind: "policy", writer, signature: "sigBuying", slot: 9_999, at: Date.now() },
+    state,
+  });
+  const withSync = (sync: WriteSync | null): string => {
+    const screen: VaultScreenValue = { pensionKey: OWNER, view: { kind: "ready", state: vaultState() }, refresh: vi.fn(), api: {} as VaultApi };
+    return renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(VaultScreenContext.Provider, { value: screen }, createElement(VaultWriteLock, null, createElement(LiveStartBuying, { data: activeNoPolicy(), pensionKey: OWNER, onRefresh: vi.fn(), sync }))),
+      ),
+    );
+  };
+
+  it("offers nothing more to sign or choose, and says the pension is updating", () => {
+    const html = withSync(own("syncing"));
+    expect(html).toContain(START_BUYING_COPY.title);
+    expect(html).not.toContain('name="start-buying-acknowledge"');
+    expect(html).not.toContain(`>${START_BUYING_COPY.start}</button>`);
+    expect(html).not.toContain(START_BUYING_COPY.keepSol);
+    expect(html).toContain(LIVE_COPY.syncing.signed);
+    expect(html).toMatch(/<svg[^>]*class="[^"]*motion-safe:animate-spin[^"]*"/);
+  });
+
+  it("past the cap, says when it was signed and that the page does not show it yet — still", () => {
+    const html = withSync(own("late"));
+    expect(html).toMatch(/Signed at \d{2}:\d{2} UTC · not on this page yet/);
+    expect(html).not.toContain(LIVE_COPY.syncing.signed);
+    expect(html).not.toContain(`>${START_BUYING_COPY.start}</button>`);
+  });
+
+  it("another card's signature changes nothing here", () => {
+    expect(withSync(own("syncing", "policy"))).toBe(withSync(null));
+    expect(withSync(null)).toContain('name="start-buying-acknowledge"');
   });
 });

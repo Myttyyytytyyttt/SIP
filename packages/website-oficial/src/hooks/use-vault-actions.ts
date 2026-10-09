@@ -4,6 +4,7 @@
 import { useSignMessage, useSignTransaction, useWallets } from "@privy-io/react-auth/solana";
 import { createContext, createElement, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 
+import { useNoteWrite } from "@/components/live/last-write-context";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { createAndLinkFlow, importAndLinkFlow, type CreateAndLinkOutcome, type ImportAndLinkOutcome } from "@/lib/create-and-link";
 import { pensionSigner, tradingSigners, type SignMessageFn, type SignTransactionFn } from "@/lib/signing-wallets";
@@ -59,6 +60,12 @@ import {
  *
  * WHILE PHANTOM ASKS, the checked build answer rides in the progress, so a card
  * can show what is being signed (an investment policy's floors).
+ *
+ * EVERY LANDING IS NOTED FOR THE PAGE (10-09, plan B4): its signature, slot,
+ * kind and writer go to the dashboard's record (last-write-context.ts), so the
+ * live page says it is updating until it shows what was just signed — wherever
+ * on the page it was signed. Outside the dashboard there is no record, and
+ * nothing is noted.
  */
 
 type ConnectedWallet = ReturnType<typeof useWallets>["wallets"][number];
@@ -218,6 +225,7 @@ export function useVaultWrite(key: string) {
   const { signTransaction } = useSignTransaction();
   const { signMessage } = useSignMessage();
   const [progress, setProgress] = useState<WriteProgress>({ phase: "idle" });
+  const noteWrite = useNoteWrite();
   const lastRequest = useRef<LastRequest | null>(null);
   /**
    * The connected wallets as they are WHEN A FLOW ASKS, not as they were when the
@@ -256,6 +264,7 @@ export function useVaultWrite(key: string) {
           return;
         }
         setProgress({ phase: "finished", kind, result });
+        if (result.ok) noteWrite?.({ pensionKey: screen.pensionKey, kind, writer: key, signature: result.signature, slot: result.slot, at: Date.now() });
         if (refreshesScreen(result)) screen.refresh();
       } catch {
         const result: FlowResult = { ok: false, kind: "refused", message: FAILURE_COPY.unknown };
@@ -265,7 +274,7 @@ export function useVaultWrite(key: string) {
         lock.release(key);
       }
     },
-    [screen, lock, key],
+    [screen, lock, key, noteWrite],
   );
 
   /**

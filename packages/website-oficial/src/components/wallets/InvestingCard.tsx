@@ -82,6 +82,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TxProgress, useStepStartedAt } from "@/components/wallets/TxProgress";
+import { useWriteSyncing } from "@/components/live/last-write-context";
 import { useVaultWrite, type InvestRequest, type WriteProgress } from "@/hooks/use-vault-actions";
 import { DEFAULT_VENUE_NAME, VERIFIABLE_VENUES, liveFloorsProblem } from "@/lib/vault-flows";
 import { useVaultScreen } from "@/hooks/use-vault-state";
@@ -660,6 +661,7 @@ export function InvestingCard() {
   const screen = useVaultScreen();
   const write = useVaultWrite("policy");
   const startedAt = useStepStartedAt(write.progress);
+  const syncing = useWriteSyncing(write.progress);
   const [signing, setSigning] = useState<InvestRequest | "pause" | null>(null);
   // WHETHER THE OWNER IS CHANGING THE POLICY HE HAS. Declared with the other
   // hooks, above the early return: a hook after a conditional return is a hook
@@ -683,6 +685,7 @@ export function InvestingCard() {
       progress={write.progress}
       successLabel={INVEST_COPY.signed}
       startedAt={startedAt}
+      syncing={syncing}
       onBuildAgain={() => void write.buildAgain()}
       onCheckAgain={() => void write.checkAgain()}
       onDismiss={() => {

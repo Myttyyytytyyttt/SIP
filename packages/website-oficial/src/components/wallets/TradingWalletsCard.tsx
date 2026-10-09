@@ -55,6 +55,7 @@ import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader,
 import { ImportAndLinkNote, ImportWalletPanel } from "@/components/wallets/ImportWalletPanel";
 import { TradingWalletRow, type TradingWalletRowData } from "@/components/wallets/TradingWalletRow";
 import { TxProgress, useStepStartedAt } from "@/components/wallets/TxProgress";
+import { useWriteSyncing } from "@/components/live/last-write-context";
 import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
 import { WalletsSectionContext } from "@/components/wallets/wallets-section-context";
 import { useCreateAndLink } from "@/hooks/use-create-and-link";
@@ -90,6 +91,8 @@ export function TradingWalletsCard() {
   const importer = useImportAndLink(config);
   const createStartedAt = useStepStartedAt(write.progress);
   const importStartedAt = useStepStartedAt(importer.write.progress);
+  const createSyncing = useWriteSyncing(write.progress);
+  const importSyncing = useWriteSyncing(importer.write.progress);
   const [importing, setImporting] = useState(false);
   // The live next-step card's "Import a wallet I already use" opens this tab; the panel opens with it.
   const importAsked = useSyncExternalStore(subscribeImportRequest, importRequested, () => false);
@@ -209,6 +212,7 @@ export function TradingWalletsCard() {
           progress={write.progress}
           successLabel={CREATE_LINK_COPY.done}
           startedAt={createStartedAt}
+          syncing={createSyncing}
           onBuildAgain={() => void write.buildAgain()}
           onCheckAgain={() => void write.checkAgain()}
           // The note beside a stopped link says the wallet is safe; dismissing the one dismisses the other.
@@ -223,6 +227,7 @@ export function TradingWalletsCard() {
           progress={importer.write.progress}
           successLabel={IMPORT_LINK_COPY.done}
           startedAt={importStartedAt}
+          syncing={importSyncing}
           onBuildAgain={() => void importer.write.buildAgain()}
           onCheckAgain={() => void importer.write.checkAgain()}
           onDismiss={() => {

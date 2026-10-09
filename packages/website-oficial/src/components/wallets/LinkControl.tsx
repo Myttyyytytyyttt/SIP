@@ -30,11 +30,12 @@
  */
 
 import { solscanAccount } from "@sip/solana-core/client";
-import { RefreshCw } from "lucide-react";
 import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useWriteSyncing } from "@/components/live/last-write-context";
+import { ScreenRefreshButton } from "@/components/wallets/ScreenRefreshButton";
 import { TxProgress, useStepStartedAt } from "@/components/wallets/TxProgress";
 import { useVaultWrite } from "@/hooks/use-vault-actions";
 import { useVaultScreen } from "@/hooks/use-vault-state";
@@ -47,6 +48,7 @@ export function LinkControl({ address }: { readonly address: string; readonly se
   const screen = useVaultScreen();
   const write = useVaultWrite(`link:${address}`);
   const startedAt = useStepStartedAt(write.progress);
+  const syncing = useWriteSyncing(write.progress);
   const [open, setOpen] = useState(false);
   if (screen === null || address === screen.pensionKey || screen.view.kind === "loading") return null;
 
@@ -55,6 +57,7 @@ export function LinkControl({ address }: { readonly address: string; readonly se
       progress={write.progress}
       successLabel={LINK_COPY.done}
       startedAt={startedAt}
+      syncing={syncing}
       onBuildAgain={() => void write.buildAgain()}
       onCheckAgain={() => void write.checkAgain()}
       onDismiss={() => write.dismiss()}
@@ -79,10 +82,9 @@ export function LinkControl({ address }: { readonly address: string; readonly se
       <div className="space-y-2" data-link="unread">
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-xs text-muted-foreground">{CREATE_LINK_COPY.notReadYet}</p>
-          <Button type="button" size="xs" variant="ghost" disabled={write.running} onClick={() => screen.refresh()}>
-            <RefreshCw aria-hidden />
+          <ScreenRefreshButton size="xs" variant="ghost" disabled={write.running}>
             {CREATE_LINK_COPY.check}
-          </Button>
+          </ScreenRefreshButton>
         </div>
         {progress}
       </div>

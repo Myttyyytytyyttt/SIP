@@ -19,7 +19,6 @@
  */
 
 import { DEFAULT_VAULT_POLICY, MODE_PROFIT, MODE_VOLUME, VOLUME_MODE_OFFERED } from "@sip/solana-core/client";
-import { RefreshCw } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { Num } from "@/components/num";
@@ -29,6 +28,8 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddressLine } from "@/components/wallets/AddressLine";
 import { LimitField } from "@/components/wallets/LimitField";
+import { useWriteSyncing } from "@/components/live/last-write-context";
+import { ScreenRefreshButton } from "@/components/wallets/ScreenRefreshButton";
 import { TxProgress, useStepStartedAt } from "@/components/wallets/TxProgress";
 import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
 import { useVaultWrite } from "@/hooks/use-vault-actions";
@@ -63,6 +64,7 @@ function VaultCardBody({ volumeOffered }: { readonly volumeOffered: boolean }) {
   const screen = useVaultScreen();
   const write = useVaultWrite("vault");
   const startedAt = useStepStartedAt(write.progress);
+  const syncing = useWriteSyncing(write.progress);
   if (screen === null) return null;
   const { view } = screen;
 
@@ -71,6 +73,7 @@ function VaultCardBody({ volumeOffered }: { readonly volumeOffered: boolean }) {
       progress={write.progress}
       successLabel={VAULT_COPY.created}
       startedAt={startedAt}
+      syncing={syncing}
       onBuildAgain={() => void write.buildAgain()}
       onCheckAgain={() => void write.checkAgain()}
       onDismiss={() => write.dismiss()}
@@ -98,10 +101,7 @@ function VaultCardBody({ volumeOffered }: { readonly volumeOffered: boolean }) {
           <CardTitle>{VAULT_COPY.title}</CardTitle>
           <CardDescription role="alert">{VAULT_COPY.unreadable}</CardDescription>
           <CardAction>
-            <Button type="button" variant="outline" size="sm" onClick={() => screen.refresh()}>
-              <RefreshCw aria-hidden />
-              {VAULT_COPY.retry}
-            </Button>
+            <ScreenRefreshButton>{VAULT_COPY.retry}</ScreenRefreshButton>
           </CardAction>
         </CardHeader>
         {write.progress.phase !== "idle" ? <CardContent>{progress}</CardContent> : null}

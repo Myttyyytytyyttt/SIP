@@ -35,12 +35,22 @@
  * (`animate`), the card grows in, swaps its height from one stage's card to the
  * next one's, and closes when there is nothing left to do (Reveal.tsx) — it
  * used to pop in and out at full height and push the page under it.
+ *
+ * WHAT WAS JUST SIGNED IS NOT OFFERED AGAIN (10-09, plan B4). The vault is
+ * created in the wallets modal, a wallet linked there too; until the page
+ * shows it, the stage — and its button — stayed as they were. Now, from the
+ * landing until the page shows it, the button that would sign it again gives
+ * way to "Vault created · reading it from Solana…" (a link: "Signed · updating
+ * your pension…"), and past the cap to the still "Signed at 14:32 UTC · not
+ * on this page yet" (last-write-context.ts stageWrite, SyncLine.tsx).
  */
 
 import { Circle, CircleCheck } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { HeightSwap, Reveal } from "@/components/live/Reveal";
+import { SyncLine } from "@/components/live/SyncLine";
+import { stageWrite, type WriteSync } from "@/components/live/last-write-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useBasketChoice } from "@/hooks/use-onboarding-closed";
@@ -144,6 +154,9 @@ function SetupChecklist({ data, firstBuy }: { readonly data: LiveDashboard; read
   );
 }
 
+/** The height of the button row a sync line stands in for: the card keeps its size when the line takes the buttons' place. */
+const BUTTON_ROW = "min-h-8";
+
 type NextStepProps = {
   readonly data: LiveDashboard;
   readonly pensionKey: string;
@@ -155,6 +168,8 @@ type NextStepProps = {
    * the wallets screen or Privy in with it.
    */
   readonly onOpenWallets: (section?: WalletsSection) => void;
+  /** The page's verdict on the last signature (last-write-context.ts useWriteJudge). Absent or null: nothing to say. */
+  readonly sync?: WriteSync | null;
   readonly className?: string;
 };
 
@@ -175,10 +190,12 @@ export function LiveNextStep({
   );
 }
 
-function nextStepCard({ data, pensionKey, seatProblem = null, onOpenWallets, className }: NextStepProps, choice: BasketChoice | null): ReactNode {
+function nextStepCard({ data, pensionKey, seatProblem = null, onOpenWallets, sync = null, className }: NextStepProps, choice: BasketChoice | null): ReactNode {
   const { stage, vault, wallets, policy, rents, protocolPaused } = data;
   // `vault_unreadable` is the frame's to handle.
   if (stage === "vault_unreadable") return null;
+  // The write that moves this stage on, landed and not on the page yet: said in place of the button that would sign it again.
+  const signed = sync !== null && stageWrite(stage, sync.write) ? sync : null;
   const firstBuy = firstBuyOf(data, choice);
   // A running pension needs no card — until its first buy has happened, when one is on its way.
   if (stage === "active" && firstBuy !== "ahead") return null;
@@ -201,14 +218,18 @@ function nextStepCard({ data, pensionKey, seatProblem = null, onOpenWallets, cla
       copy.title,
       body,
       <>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button type="button" onClick={() => onOpenWallets("vault")}>
-            {copy.create}
-          </Button>
-          <Button type="button" variant="outline" asChild>
-            <a href="/wallets?section=vault">{copy.openWallets}</a>
-          </Button>
-        </div>
+        {signed !== null ? (
+          <SyncLine sync={signed} syncing={LIVE_COPY.syncing.vaultCreated} className={BUTTON_ROW} />
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" onClick={() => onOpenWallets("vault")}>
+              {copy.create}
+            </Button>
+            <Button type="button" variant="outline" asChild>
+              <a href="/wallets?section=vault">{copy.openWallets}</a>
+            </Button>
+          </div>
+        )}
         <div className="space-y-2">
           <p className="text-sm font-medium">{copy.checklist}</p>
           <ul className="space-y-1.5">
@@ -226,6 +247,7 @@ function nextStepCard({ data, pensionKey, seatProblem = null, onOpenWallets, cla
     const copy = LIVE_COPY.noTradingWallet;
     // A deployment with no keeper seat cannot create one: say why, offer nothing.
     if (seatProblem !== null) return shell(copy.title, seatProblem);
+    if (signed !== null) return shell(copy.title, copy.body, <SyncLine sync={signed} syncing={LIVE_COPY.syncing.signed} className={BUTTON_ROW} />);
     return shell(
       copy.title,
       copy.body,
@@ -259,9 +281,13 @@ function nextStepCard({ data, pensionKey, seatProblem = null, onOpenWallets, cla
       // rather than guessed; the modal quotes it before anything is signed.
       copy.bodyNoRent(String(wallets.length)),
       // Each wallet's own row carries its Link to vault, in the trading wallets tab.
-      <Button type="button" onClick={() => onOpenWallets("trading")}>
-        {copy.link}
-      </Button>,
+      signed !== null ? (
+        <SyncLine sync={signed} syncing={LIVE_COPY.syncing.signed} className={BUTTON_ROW} />
+      ) : (
+        <Button type="button" onClick={() => onOpenWallets("trading")}>
+          {copy.link}
+        </Button>
+      ),
     );
   }
 
