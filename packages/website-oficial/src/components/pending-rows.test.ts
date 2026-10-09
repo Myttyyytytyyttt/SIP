@@ -22,7 +22,7 @@ vi.mock("@/components/live/LiveRulePanel", async () => {
 });
 vi.mock("@/components/pension-chart", () => ({ PensionChart: () => createElement("div", null, "LIVECHART") }));
 
-import { USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
+import { ANTHROPIC_MINT, SPYX_MINT, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
 
 import { pendingShownFor } from "@/components/live/LiveActivityPage";
 import { LiveBody } from "@/components/live/LiveBody";
@@ -36,7 +36,7 @@ import type { PendingLine } from "@/lib/live-pending";
 import type { LiveDashboard, VaultEventJson } from "@/lib/live-types";
 import { mock } from "@/mocks";
 
-import { NOW_MS, OWNER, WALLET_A, liveActivity, liveEntry, liveSnapshot, seconds, signature, tokenAccount } from "../../test/fixtures/live-dashboard";
+import { NOW_MS, OWNER, WALLET_A, liveActivity, liveEntry, liveSnapshot, policyState, seconds, signature, tokenAccount } from "../../test/fixtures/live-dashboard";
 
 const ACTIVE: PendingLine = { key: "converting", kind: "converting", active: true, rest: null, title: PENDING_COPY.converting, sub: PENDING_COPY.convertingSub("0.018"), amount: "$1.80", amountSpoken: "" };
 const WAITING: PendingLine = { key: "buying", kind: "buying", active: false, rest: "paused", title: PENDING_COPY.buyingWaiting("SPYx"), sub: PENDING_COPY.rest.paused, amount: "$5.00", amountSpoken: null };
@@ -114,6 +114,9 @@ describe("the sample stays the sample", () => {
   it("has no line under Next investment, and its figure is the sample's own pending pile", () => {
     expect(mock.stats.nextInvestmentNote).toBeUndefined();
     expect(mock.stats.readyToInvestUsd).toBeUndefined();
+    // Nor does it gate its bar or take its "to go" from the keeper: the card keeps the sample's own arithmetic.
+    expect(mock.stats.toGoUsd).toBeUndefined();
+    expect(mock.stats.nextInvestmentGate).toBeUndefined();
     const out = html(createElement(SavingsRulePanel, { rule: mock.rule, stats: mock.stats, activity: mock.activity, now: mock.now }));
     expect(out).not.toContain("data-next-investment-note");
   });
@@ -180,6 +183,42 @@ describe("a live page", () => {
     expect(out).toContain(PENDING_COPY.includesConverting("$1.80"));
     // $1.80 of the policy's $5.00: the bar no longer reads $0.00 while the SOL is in flight.
     expect(out).toMatch(/\$1\.80 <span class="text-muted-foreground">of<\/span> \$5\.00/);
+  });
+
+  /**
+   * THE OWNER'S $0.43 (2026-10-09): one settlement of 3,911,799 lamports, under
+   * the keeper's 0.005 SOL wrap line, no USDC, a $1.00 basket. Nothing moves, so
+   * no row says it — and the card counts it, says what it waits for, and still
+   * agrees with itself.
+   */
+  it("counts SOL under the wrap line under Next investment, with no row over the feed", () => {
+    const base = liveSnapshot();
+    const data = toLiveDashboard({
+      snapshot: liveSnapshot({
+        vault: { ...base.vault, lamports: (1_285_240 + 3_911_799).toString(), rentFloor: "1285240", withdrawableLamports: "3911799" },
+        policy: {
+          status: "exists",
+          address: base.policy.address,
+          state: policyState({
+            minInvestment: "500000",
+            maxPerCall: "149000000",
+            legs: [
+              { mint: SPYX_MINT, weightBps: 5_000, minOutRateWad: "1" },
+              { mint: ANTHROPIC_MINT, weightBps: 5_000, minOutRateWad: "1" },
+            ],
+          }),
+        },
+        vaultTokenAccounts: { status: "exists", items: [tokenAccount(USDC_MINT, "0", "0", 6)] },
+      }),
+      activity: liveActivity([]),
+      privyWallets: [],
+    });
+    const out = render("pension", data);
+    expect(out).toContain('data-pending-steps="0"');
+    expect(out).toMatch(/\$0\.39 <span class="text-muted-foreground">of<\/span> \$1\.00/);
+    expect(out).toContain('<span class="font-mono tabular-nums">$0.61</span> to go');
+    expect(out).toContain(PENDING_COPY.includesWaiting("$0.39", "0.005", "0.0011"));
+    expect(out).not.toContain("$0.00</span> to go");
   });
 
   it("shows the same rows over the full history on /activity, and announces them once", () => {

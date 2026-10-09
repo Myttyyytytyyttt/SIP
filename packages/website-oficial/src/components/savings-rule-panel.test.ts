@@ -90,6 +90,63 @@ describe("the card shows the rule; the gear changes it", () => {
 });
 
 /**
+ * NEXT INVESTMENT ON A LIVE PAGE, WHEN THE KEEPER WILL NOT BUY ON THE BAR
+ * (owner, 2026-10-09). The bar counts SOL waiting under the keeper's wrap line;
+ * the headline, the bar and the "to go" line must still agree, and none may
+ * promise a buy that is not coming.
+ */
+describe("next investment, gated", () => {
+  /** The Next investment block alone: from its label to the next one. */
+  const nextBlock = (html: string): string => html.slice(html.indexOf("Next investment"), html.indexOf("Last investment"));
+  /** The bar's fill, as the indicator draws it. */
+  const fill = (html: string): string | undefined => nextBlock(html).match(/translateX\((-?[0-9.]+)%\)/)?.[1];
+  const NOTE = "Includes about $0.39 of SOL. It converts to USDC once your vault holds 0.005 SOL (0.0011 SOL more)";
+  const live = (stats: Partial<SavingsStats>): string =>
+    render(PROFIT, { settings: door(), stats: { ...STATS, thresholdUsd: 1, nextInvestmentNote: NOTE, ...stats } as SavingsStats });
+
+  it("keeps the dollars to go where they are the headline's own difference, gate or not", () => {
+    const html = nextBlock(live({ readyToInvestUsd: 0.391331, toGoUsd: 0.608669, nextInvestmentGate: "wrap_line" }));
+    expect(html).toMatch(/\$0\.39 <span class="text-muted-foreground">of<\/span> \$1\.00/);
+    expect(html).toContain('<span class="font-mono tabular-nums">$0.61</span> to go');
+    expect(html).toContain(NOTE);
+  });
+
+  it("stops the bar short of full, and prints no dollars to go that argue with the headline, while the line holds the buy", () => {
+    const html = live({ readyToInvestUsd: 1.191331, toGoUsd: 0.108862, nextInvestmentGate: "wrap_line" });
+    expect(nextBlock(html)).toMatch(/\$1\.19 <span class="text-muted-foreground">of<\/span> \$1\.00/);
+    expect(fill(html)).toBe("-5");
+    expect(nextBlock(html)).not.toContain("to go");
+    expect(nextBlock(html)).toContain(NOTE);
+  });
+
+  it("never says $0.00 to go, or draws a full bar, under a conversion that is overdue", () => {
+    const html = live({ readyToInvestUsd: 1.8, toGoUsd: 0, nextInvestmentGate: "slow", nextInvestmentNote: "Includes about $1.80 of SOL not converted yet" });
+    expect(fill(html)).toBe("-5");
+    expect(nextBlock(html)).not.toContain("to go");
+    expect(nextBlock(html)).toContain("not converted yet");
+  });
+
+  it("says no $0.00 to go under the line either, when what the line lacks is worth less than a cent", () => {
+    const html = live({ readyToInvestUsd: 1.5, toGoUsd: 0, nextInvestmentGate: "wrap_line" });
+    expect(fill(html)).toBe("-5");
+    expect(nextBlock(html)).not.toContain("to go");
+    // A fraction of a cent prints as $0.00 all the same.
+    expect(nextBlock(live({ readyToInvestUsd: 0.999999, toGoUsd: 0.000001, nextInvestmentGate: "wrap_line" }))).not.toContain("to go");
+  });
+
+  it("fills the bar and says $0.00 to go when nothing gates the buy", () => {
+    const html = live({ readyToInvestUsd: 1.8, toGoUsd: 0, nextInvestmentGate: null, nextInvestmentNote: null });
+    expect(fill(html)).toBe("-0");
+    expect(nextBlock(html)).toContain('<span class="font-mono tabular-nums">$0.00</span> to go');
+  });
+
+  it("takes a live page's to-go from the keeper's figure, not the threshold less the bar", () => {
+    const html = nextBlock(live({ readyToInvestUsd: 0.2, toGoUsd: 0.75, nextInvestmentGate: null }));
+    expect(html).toContain('<span class="font-mono tabular-nums">$0.75</span> to go');
+  });
+});
+
+/**
  * THE LAST BUY, TOLD HONESTLY. The feed is one page of the newest
  * transactions; a buy older than that page is not "no investments yet" — the
  * vault's own counters record it.
