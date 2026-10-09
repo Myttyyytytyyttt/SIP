@@ -39,8 +39,9 @@ export function StripChip({
    * A live settlement that just arrived (live/use-arrivals.ts): it slides in
    * from the left, where the newest chip goes, and wears the wash — green when
    * it put money aside, grey when it moved nothing (live/Wash.tsx). The newest
-   * chip's ring is untouched. The sample never passes it, and without it the
-   * chip's markup is exactly the sample's.
+   * chip's resting ring is untouched, and the wash's edge steps aside while the
+   * chip has keyboard focus, so its inset focus ring stays whole. The sample
+   * never passes it, and without it the chip's markup is exactly the sample's.
    */
   arrived?: boolean;
 }) {

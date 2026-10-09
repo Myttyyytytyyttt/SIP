@@ -67,22 +67,56 @@ describe("what the line says, and when", () => {
 });
 
 describe("for a screen reader", () => {
-  it("one region, busy, under a fixed name that does not change with the words", () => {
+  it("the words' region, busy, under a fixed name that does not change with the words", () => {
     for (const waited of [0, FIRST_READ_SLOW_MS, FIRST_READ_RELOAD_MS]) {
       const regions = liveRegions(after(waited));
-      expect(regions).toHaveLength(1);
+      expect(regions).toHaveLength(2);
       expect(regions[0]).toContain('aria-busy="true"');
       expect(regions[0]).toContain(`aria-label="${LIVE_COPY.reading}"`);
     }
   });
 
-  it("holds only the words: the count and the Reload button sit beside it, the count hidden", () => {
+  /**
+   * A BUSY REGION HOLDS ITS CHANGES BACK, so the news is said in a second one
+   * beside it: not busy, there and empty from the first render, and filled
+   * exactly twice — slower than usual at 20 s, the way out at 45 s.
+   */
+  it("says 'taking longer' and then the way out in a second region that is not busy, empty until then", () => {
+    const spoken = (waited: number): { readonly tag: string; readonly words: string } => {
+      const region = liveRegions(after(waited))[1]!;
+      return { tag: region.match(/^<[^>]*>/)![0], words: seen(region) };
+    };
+    for (const waited of [0, FIRST_READ_SLOW_MS, FIRST_READ_RELOAD_MS]) {
+      expect(spoken(waited).tag).toBe('<span role="status" class="sr-only">');
+    }
+    expect(spoken(0).words).toBe("");
+    expect(spoken(FIRST_READ_SLOW_MS - 1).words).toBe("");
+    expect(spoken(FIRST_READ_SLOW_MS).words).toBe(LIVE_COPY.firstRead.slowSpoken);
+    expect(spoken(FIRST_READ_RELOAD_MS - 1).words).toBe(LIVE_COPY.firstRead.slowSpoken);
+    expect(spoken(FIRST_READ_RELOAD_MS).words).toBe(LIVE_COPY.firstRead.reloadSpoken);
+  });
+
+  it("holds only words in its regions: the count and the Reload button sit beside them, the count hidden", () => {
     const html = after(FIRST_READ_RELOAD_MS + 3_000);
     expect(seen(html)).toContain(LIVE_COPY.elapsed(48));
     expect(tickingInRegion(html)).toBe(false);
-    const [region] = liveRegions(html);
-    expect(seen(region!)).toBe(LIVE_COPY.firstRead.slow);
+    const regions = liveRegions(html);
+    expect(seen(regions[0]!)).toBe(LIVE_COPY.firstRead.slow);
+    for (const region of regions) expect(region).not.toMatch(/\d+ s\b/);
     expect(html).toMatch(new RegExp(`<span aria-hidden="true"[^>]*>${LIVE_COPY.elapsed(48)}</span>`));
+  });
+
+  /**
+   * AT 375 px THE RELOAD BUTTON WRAPS under the words, so below sm the line
+   * keeps room for both from the first paint, packed to the top: neither the
+   * 20 s words nor the 45 s button moves the blocks under it.
+   */
+  it("keeps the line's height from the start, two lines below sm and one from sm up", () => {
+    for (const waited of [0, FIRST_READ_RELOAD_MS]) {
+      const line = after(waited).match(/^<div class="[^"]*"><div class="([^"]*)">/)?.[1] ?? "";
+      expect(line.split(" ")).toEqual(expect.arrayContaining(["flex-wrap", "content-start", "min-h-16", "sm:min-h-7"]));
+    }
+    expect(after(0)).toContain('<div class="flex min-h-7 min-w-0 items-center gap-1.5 text-sm text-muted-foreground">');
   });
 
   it("hides the blocks, which say nothing", () => {

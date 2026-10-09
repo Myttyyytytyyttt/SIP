@@ -78,6 +78,14 @@ export const LIVE_COPY = {
     reading: "Reading your pension…",
     slow: "Taking longer than usual · still reading",
     reloadPage: "Reload page",
+    /**
+     * WHAT A SCREEN READER HEARS, ONCE EACH (review, 10-09): the busy region
+     * above holds its words back, so these two are said in a second region
+     * beside it — the 20 s news, then at 45 s the way out. Sentences, not the
+     * line's "·", which a screen reader reads as "dot".
+     */
+    slowSpoken: "Taking longer than usual. Still reading.",
+    reloadSpoken: "Taking longer than usual. You can reload the page.",
   },
   /** How long a wait has stood, after the words that say what it is: "· 8 s" (Elapsed.tsx). Never inside a live region. */
   elapsed: (seconds: number): string => `· ${seconds} s`,

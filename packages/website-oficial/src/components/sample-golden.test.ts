@@ -19,7 +19,16 @@
 //
 // The props are MockBody's own (dashboard-shell.tsx), from the sample's own
 // data: the sample as a visitor gets it, not a fixture that resembles it.
+//
+// A MISSING GOLDEN FAILS (review, 10-09). Outside CI — every run here: the repo
+// has no CI — vitest WRITES a file snapshot it cannot find and passes, so a
+// golden a rebase dropped, or one renamed with its key, would stop guarding the
+// sample without a red line, and the changed sample would become the new
+// "frozen" truth. Every golden is named in GOLDENS and must already exist; the
+// folder holds exactly those. A new golden is added on purpose: add its name,
+// create the file, and review what `-u` writes into it.
 
+import { existsSync, readdirSync } from "node:fs";
 import { Fragment, createElement, type ReactElement } from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -45,13 +54,40 @@ const { now, wallet, rule, stats, curve, days, holdings, trades, activity } = mo
 /** One tag per line, so a reviewer reads the diff of a golden rather than one 40 kB line. Nothing is dropped: only a newline goes in. */
 const html = (element: ReactElement): string => renderToString(createElement(TooltipProvider, null, element)).replaceAll("><", ">\n<") + "\n";
 
-/** The golden beside this file, by name. */
-const golden = (name: string): string => `./__golden__/${name}.html`;
+/** Every golden this file checks, by name: the folder holds exactly these. */
+const GOLDENS = [
+  "activity-row",
+  "dashboard-main",
+  "dashboard-source",
+  "dashboard-source-keyless",
+  "live-loading",
+  "pension-holdings",
+  "pension-panel",
+  "pension-stats",
+  "savings-rule-panel",
+  "savings-strip",
+  "strip-chip",
+  "strip-chip-newest",
+  "wallet-activity",
+  "wallet-activity-sheet",
+] as const;
+
+/** The golden beside this file, by name — which must already be there: it is frozen, never re-created by a run. */
+const golden = (name: (typeof GOLDENS)[number]): string => {
+  const path = `./__golden__/${name}.html`;
+  expect(existsSync(new URL(path, import.meta.url)), `missing golden ${path}: it is frozen, never re-created by a run`).toBe(true);
+  return path;
+};
 
 /** The sample's notice, as MockBody puts it over the page. */
 const source = createElement(DashboardSource, { source: "mock", notice: MODE_COPY.sample });
 
 describe("the sample's markup is frozen", () => {
+  it("has every golden it names, and none it does not: a dropped one fails, an orphan left by a rename too", () => {
+    const onDisk = readdirSync(new URL("./__golden__/", import.meta.url)).sort();
+    expect(onDisk).toEqual(GOLDENS.map((name) => `${name}.html`).sort());
+  });
+
   it("has the sample to render, so a reseeded or emptied dataset cannot make this pass by drawing nothing", () => {
     expect(trades.length).toBeGreaterThan(1);
     expect(activity.length).toBeGreaterThan(1);

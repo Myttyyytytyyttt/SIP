@@ -54,7 +54,7 @@ import { PendingRows, usePendingView } from "@/components/live/LivePending";
 import { readKeyOf, useReadyAt } from "@/components/live/RetryButton";
 import { Reveal } from "@/components/live/Reveal";
 import { heroPillOf, pillShown, useArrivals } from "@/components/live/use-arrivals";
-import { useReadSettled } from "@/components/live/use-read-settled";
+import { historyKeyOf, useReadSettled } from "@/components/live/use-read-settled";
 import { DashboardSource } from "@/components/DashboardSource";
 import { DashboardMain, PENSION_SLOT, RULE_SLOT } from "@/components/dashboard-main";
 import { PensionPanel } from "@/components/pension-panel";
@@ -162,7 +162,7 @@ export function LiveBody({
   // page is no longer sure of. Worked out once, for every copy of the rows;
   // each "since" said against its payload's own clock, with its day when that
   // is not today.
-  const settled = useReadSettled(data, { activityPending, activityUnreadable });
+  const settled = useReadSettled(data, { activityPending, activityUnreadable, history: historyKeyOf(data) });
   const steps = pendingSteps(settled.data);
   const lines = pendingLines(steps, settled.data.nowMs);
   const pending = usePendingView({ data: settled.data, steps, lines, latest: settled.settled ? lines : pendingLines(pendingSteps(data), data.nowMs) });

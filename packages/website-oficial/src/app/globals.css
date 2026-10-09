@@ -426,7 +426,10 @@
    host keeps its rise-in, its focus ring (a box-shadow) and its hover ground:
    unlayered CSS here would beat every Tailwind utility on the host itself. The
    host gets `relative isolate` only while it is arrived. It fades from a tint to
-   nothing in 2.4 s and keeps its 2 px edge for as long as it is held.
+   nothing in 2.4 s and keeps its 2 px edge for as long as it is held — except
+   while the host has keyboard focus: that ring is an INSET box-shadow, which
+   the wash (z-index -1 inside the host's isolate) paints over, so its edge
+   steps aside and the ring stays whole on all four sides (review, 10-09).
 
    Under the tab loader it waits, as rise-in does (route-loader.tsx sets
    data-turning). Reduced motion: no fade, no breathing, no ping. The wash
@@ -445,6 +448,9 @@
 .live-wash[data-tone="invest"] { --live-tone: var(--color-blue-500); }
 .live-wash[data-tone="setting"] { --live-tone: var(--color-amber-500); }
 .live-wash[data-tone="quiet"] { --live-tone: var(--muted-foreground); }
+/* A focused host draws its own ring: the edge steps aside. Not display:none —
+   on blur that would restart the fade, a second and false arrival. */
+:focus-visible > .live-wash { box-shadow: none; }
 @keyframes live-wash {
   from { background-color: color-mix(in oklab, var(--live-tone) 14%, transparent); }
 }

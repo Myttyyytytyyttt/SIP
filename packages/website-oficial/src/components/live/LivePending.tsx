@@ -16,8 +16,12 @@
  * layout the one-line title lost its last words.
  *
  * THE HEADING SAYS WHAT THE ROWS ARE (10-09, G14): "In progress" while one is
- * under way, "Waiting" when every one rests. It is aria-hidden: the rows are
- * what the region speaks, and a heading that flips is not news.
+ * under way, "Waiting" when every one rests — and NOTHING once no step stands
+ * (review, 10-09): over the done rows alone, or the held card's "Nothing in
+ * progress right now", either word would be false. It closes then (a Reveal,
+ * in step with the idle line, so the card swaps one line for the other). It
+ * is aria-hidden: the rows are what the region speaks, and a heading that
+ * flips is not news.
  *
  * HOW A STEP ENDS (10-09). The rows read a SETTLED view (use-read-settled.ts):
  * a read's snapshot lands before its history, and a step must not vanish over
@@ -68,6 +72,7 @@ import { WorkMark, type WorkState } from "@/components/live/WorkMark";
 import { MONO, TONE_TEXT, type Tone } from "@/lib/classes";
 import { LIVE_COPY } from "@/lib/live-copy";
 import { namesOf, type PendingKind, type PendingLine, type PendingStep } from "@/lib/live-pending";
+import { symbolOfMint } from "@/lib/live-symbols";
 import type { LiveDashboard, LiveRow } from "@/lib/live-types";
 import { cn } from "@/lib/utils";
 
@@ -116,22 +121,36 @@ const ENDS: Readonly<Record<"converting" | "buying", LiveRow["event"]["kind"]>> 
  * withdrawn, a switch turned off, a wallet whose check found nothing — is not
  * dressed as done. A wallet being checked has no "done": its saving is the
  * feed's own row.
+ *
+ * A BASKET IS BOUGHT ONE TRANSACTION PER LEG (solana-keeper invest-tick.ts), and
+ * a turn can stop after some of them landed — the rest under the basket's
+ * minimum, so the step is gone. The row names only the legs whose buy is on the
+ * page, in the order they landed, as the announcer does (LiveAnnouncer.tsx) —
+ * never the basket the step meant to buy (review, 10-09). A landed leg this app
+ * cannot name: nothing is claimed.
  */
 export function doneOf(step: PendingStep, key: string, after: LiveDashboard, before: LiveDashboard): DoneLine | null {
   if (step.kind === "measuring") return null;
   const kind = ENDS[step.kind];
   const known = new Set(before.rows.map((row) => row.signature));
-  const landed = after.rows.some(
+  const landed = after.rows.filter(
     (row) =>
       row.ok &&
       row.event.kind === kind &&
       !known.has(row.signature) &&
       (step.since === null || (row.blockTime !== null && row.blockTime * 1_000 >= step.since)),
   );
-  if (!landed) return null;
-  return step.kind === "converting"
-    ? { key, kind: step.kind, title: LIVE_COPY.pendingDone.converted, sub: LIVE_COPY.pendingDone.convertedSub, tone: "quiet" }
-    : { key, kind: step.kind, title: LIVE_COPY.pendingDone.bought(namesOf(step.symbols)), sub: LIVE_COPY.pendingDone.boughtSub, tone: "invest" };
+  if (landed.length === 0) return null;
+  if (step.kind === "converting") return { key, kind: step.kind, title: LIVE_COPY.pendingDone.converted, sub: LIVE_COPY.pendingDone.convertedSub, tone: "quiet" };
+  // Every landed row is a buy here, so `names` is never empty: namesOf never falls back to "your basket".
+  const names: string[] = [];
+  for (const row of [...landed].sort((left, right) => left.slot - right.slot)) {
+    if (row.event.kind !== "invested") continue;
+    const symbol = row.event.symbol ?? symbolOfMint(row.event.mint);
+    if (symbol === null) return null;
+    if (!names.includes(symbol)) names.push(symbol);
+  }
+  return { key, kind: step.kind, title: LIVE_COPY.pendingDone.bought(namesOf(names)), sub: LIVE_COPY.pendingDone.boughtSub, tone: "invest" };
 }
 
 type Leaving = { readonly show: "line"; readonly line: PendingLine } | { readonly show: "done"; readonly done: DoneLine };
@@ -275,10 +294,14 @@ export function workStateOf(line: PendingLine): WorkState {
 /** Blue is a buy, and only a buy under way wears it; the conversion, and anything resting, is the machinery's grey. */
 const toneOf = (line: PendingLine): Tone => (line.active && line.kind === "buying" ? "invest" : "quiet");
 
-/** The heading over the rows: under way if one is, waiting if every step rests. A list of done rows alone keeps the first. */
-export function headingOf(lines: readonly PendingLine[]): string {
-  if (lines.some((line) => line.active)) return LIVE_COPY.pendingHeading.active;
-  return lines.length > 0 ? LIVE_COPY.pendingHeading.waiting : LIVE_COPY.pendingHeading.active;
+/**
+ * The heading over the rows: under way if one is, waiting if every step rests,
+ * and none with no step at all — done rows alone, or a card held up over
+ * nothing, are neither in progress nor waiting.
+ */
+export function headingOf(lines: readonly PendingLine[]): string | null {
+  if (lines.length === 0) return null;
+  return lines.some((line) => line.active) ? LIVE_COPY.pendingHeading.active : LIVE_COPY.pendingHeading.waiting;
 }
 
 function Row({ row }: { readonly row: PendingRow }) {
@@ -331,11 +354,15 @@ function Rows({ rows }: { readonly rows: readonly PendingRow[] }) {
 /** The heading and the rows — and, on a card held up with none, the line that says so. */
 function Body({ view, card, className }: { readonly view: PendingView; readonly card: boolean; readonly className?: string }) {
   const idle = card && view.rows.every((row) => row.leaving);
+  const heading = headingOf(view.lines);
   return (
     <div className={cn(card && "overflow-hidden rounded-md border bg-card", className) || undefined}>
-      <div className="px-4 py-2 text-xs text-muted-foreground" aria-hidden>
-        {headingOf(view.lines)}
-      </div>
+      {/* No `appear`: a heading there on the first paint is simply there. It closes over its last word. */}
+      <Reveal open={heading !== null}>
+        <div className="px-4 py-2 text-xs text-muted-foreground" aria-hidden>
+          {heading}
+        </div>
+      </Reveal>
       <Rows rows={view.rows} />
       {card ? (
         <Reveal open={idle} appear>
@@ -387,7 +414,7 @@ function TopCard({ view, region, className }: { readonly view: PendingView; read
       data-pending-steps={view.lines.length}
     >
       {look === "gone" ? null : (
-        <div className={cn("min-h-0", (!open || phase !== "open") && "overflow-hidden")} {...(open ? {} : { inert: true, "aria-hidden": true })}>
+        <div className={cn("min-h-0 min-w-0", (!open || phase !== "open") && "overflow-hidden")} {...(open ? {} : { inert: true, "aria-hidden": true })}>
           {open ? body : last.current}
         </div>
       )}

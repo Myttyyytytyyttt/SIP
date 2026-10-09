@@ -4,10 +4,14 @@
  * (use-arrivals.ts). The look is `.live-wash` in globals.css.
  *
  * ITS OWN ABSOLUTELY PLACED CHILD, never a class on the host: the host keeps its
- * rise-in, its focus ring and its hover ground. While it is arrived the host
- * wears WASH_HOST — a box for the wash to fill, and a stacking context, so the
- * wash sits over the host's ground and under its content — and only then: the
- * sample never passes `arrived`, so its rows and chips keep their exact markup.
+ * rise-in, its focus ring and its hover ground. The ring is an inset
+ * box-shadow the wash would paint over, so while the host has keyboard focus
+ * the wash's edge steps aside (globals.css) and the ring stays whole on all
+ * four sides. It must stay the host's DIRECT child for that rule to find it.
+ * While it is arrived the host wears WASH_HOST — a box for the wash to fill,
+ * and a stacking context, so the wash sits over the host's ground and under its
+ * content — and only then: the sample never passes `arrived`, so its rows and
+ * chips keep their exact markup.
  *
  * DECORATION. The announcer says what arrived (LiveAnnouncer.tsx); the wash is
  * aria-hidden. Reduced motion: a still 10 % tint and the edge, for as long as it

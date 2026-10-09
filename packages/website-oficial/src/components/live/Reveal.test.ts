@@ -24,6 +24,16 @@ describe("the first paint", () => {
     expect(renderToStaticMarkup(createElement(Reveal, { open: false, children: CARD }))).toBe("");
   });
 
+  /**
+   * A grid item whose overflow is visible takes its content's min-content width
+   * as its floor: a strip of 20 chips once widened its column to 1674 px at
+   * 375 and the page scrolled sideways. min-w-0 keeps it in its column.
+   */
+  it("standing open, keeps its content to the column's width: min-w-0 on the row's item, never a clip", () => {
+    const html = renderToStaticMarkup(createElement(Reveal, { open: true, children: CARD }));
+    expect(html).toMatch(/^<div class="grid [^"]*"><div class="min-h-0 min-w-0"><button/);
+  });
+
   it("in a gap-4 column, lets the gap out once open", () => {
     expect(renderToStaticMarkup(createElement(Reveal, { open: true, inGap: true, children: CARD }))).toContain("mt-0");
   });
@@ -47,7 +57,7 @@ describe("its life, frame by frame", () => {
     expect(html).toMatch(/^<div[^>]* aria-hidden="true"/);
     expect(html).toContain("grid-rows-[0fr] opacity-0");
     expect(html).toContain("-mt-4");
-    expect(html).toContain('class="min-h-0 overflow-hidden"');
+    expect(html).toContain('class="min-h-0 min-w-0 overflow-hidden"');
   });
 
   it("stands still under reduced motion: the transition is gated, the end states are the same", () => {
@@ -61,7 +71,7 @@ describe("joining a page already drawn (appear)", () => {
     const html = renderToStaticMarkup(createElement(Reveal, { open: true, appear: true, inGap: true, children: CARD }));
     expect(html).toContain("grid-rows-[0fr] opacity-0");
     expect(html).toContain("-mt-4");
-    expect(html).toContain('class="min-h-0 overflow-hidden"');
+    expect(html).toContain('class="min-h-0 min-w-0 overflow-hidden"');
     // Collapsed on its way IN is usable the moment it is grown: not inert, not hidden.
     expect(html).not.toContain("inert");
     expect(html).not.toContain("aria-hidden");

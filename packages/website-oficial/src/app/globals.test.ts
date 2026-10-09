@@ -95,6 +95,14 @@ describe("the live marks", () => {
     }
   });
 
+  it("step the wash's edge aside while its host has keyboard focus, in every motion mode, so the inset ring stays whole", () => {
+    const aside = LIVE.find((rule) => rule.selector === ":focus-visible > .live-wash");
+    expect(aside?.within).toEqual([]);
+    expect(aside?.body).toMatch(/box-shadow\s*:\s*none/);
+    // Never display:none: on blur the fade would start over, a second and false arrival.
+    expect(aside?.body).not.toMatch(/display\s*:/);
+  });
+
   it("wait under the tab loader, as rise-in does", () => {
     expect(LIVE.some((rule) => rule.selector === ":root[data-turning] .live-wash" && /animation-play-state\s*:\s*paused/.test(rule.body))).toBe(true);
   });

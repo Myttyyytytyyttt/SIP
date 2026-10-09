@@ -231,23 +231,56 @@ describe("the setup, ticked off through the first buy", () => {
   });
 
   it("firstBuyOf: done once the approval has spent, ahead while it can still buy, nothing promised otherwise", () => {
-    const policy = (overrides: Parameters<typeof policyState>[0]) => liveDashboard({ snapshot: withPolicy(policyState(overrides)) }).policy;
+    const policy = (overrides: Parameters<typeof policyState>[0]) => liveDashboard({ snapshot: withPolicy(policyState(overrides)) });
     expect(firstBuyOf(policy({ lifetimeInvested: "1" }), null)).toBe("done");
     expect(firstBuyOf(policy({}), null)).toBe("ahead");
     expect(firstBuyOf(policy({ enabled: false }), null)).toBe("none");
-    const missing = liveDashboard({ snapshot: withPolicy("missing") }).policy;
+    const missing = liveDashboard({ snapshot: withPolicy("missing") });
     expect(firstBuyOf(missing, null)).toBe("none");
     expect(firstBuyOf(missing, { kind: "sol" })).toBe("none");
     expect(firstBuyOf(missing, STOCKS as never)).toBe("ahead");
     // Stocks no longer on the shelf are no buy at all.
     expect(firstBuyOf(missing, { kind: "stocks", mints: ["NotOnTheShelf1111111111111111111111111111"] })).toBe("none");
   });
+
+  /**
+   * NO PROMISE THE CHAIN WOULD REFUSE (review, 10-09): invest.rs refuses while
+   * the vault or the protocol is paused, and caps no balance can clear never
+   * buy. The card then ends at the first saving, as for buying off.
+   */
+  it("promises no buy while the vault or the protocol is paused — and keeps a first buy that happened ticked", () => {
+    const base = withPolicy(policyState());
+    const vaultPaused = liveDashboard({ snapshot: { ...base, vault: { ...base.vault, state: { ...base.vault.state!, paused: true } } } });
+    expect(vaultPaused.stage).toBe("active");
+    expect(vaultPaused.vault.paused).toBe(true);
+    expect(firstBuyOf(vaultPaused, null)).toBe("none");
+    expect(render(vaultPaused)).toBe("");
+    const protocolPaused = liveDashboard({ snapshot: { ...base, config: { ...base.config, paused: true } } });
+    expect(protocolPaused.protocolPaused).toBe(true);
+    expect(firstBuyOf(protocolPaused, null)).toBe("none");
+    expect(render(protocolPaused)).toBe("");
+    // Stocks chosen and nothing approved yet: a paused vault is promised nothing either.
+    mocked.choice = STOCKS;
+    const missing = withPolicy("missing");
+    expect(firstBuyOf(liveDashboard({ snapshot: { ...missing, vault: { ...missing.vault, state: { ...missing.vault.state!, paused: true } } } }), STOCKS as never)).toBe("none");
+    // Done is done, paused or not.
+    const spent = withPolicy(policyState({ lifetimeInvested: "5000000" }));
+    expect(firstBuyOf(liveDashboard({ snapshot: { ...spent, vault: { ...spent.vault, state: { ...spent.vault.state!, paused: true } } } }), null)).toBe("done");
+  });
+
+  it("promises no buy to a basket its caps make unbuyable at any balance", () => {
+    // One call's cap under the minimum: no leg can ever clear it.
+    expect(firstBuyOf(liveDashboard({ snapshot: withPolicy(policyState({ maxPerCall: "4000000" })) }), null)).toBe("none");
+    // The 30-day limit under what the basket needs: never one buy in it.
+    expect(firstBuyOf(liveDashboard({ snapshot: withPolicy(policyState({ maxRolling30d: "4000000" })) }), null)).toBe("none");
+    expect(render(liveDashboard({ snapshot: withPolicy(policyState({ maxRolling30d: "4000000" })) }))).toBe("");
+  });
 });
 
 describe("in the pension view's top column", () => {
   it("is one box that grows and closes, with the stage's card inside one swap — open at once on the first paint", () => {
     const html = render(liveDashboard({ snapshot: waitingSnapshot(), activity: null }), null, true);
-    expect(html).toMatch(/^<div class="grid transition-\[grid-template-rows,opacity,margin-top\][^"]* grid-rows-\[1fr\] opacity-100 mt-0"><div class="min-h-0"><div><div><div data-slot="card"/);
+    expect(html).toMatch(/^<div class="grid transition-\[grid-template-rows,opacity,margin-top\][^"]* grid-rows-\[1fr\] opacity-100 mt-0"><div class="min-h-0 min-w-0"><div><div><div data-slot="card"/);
     expect(html).not.toContain("animate-in");
   });
 

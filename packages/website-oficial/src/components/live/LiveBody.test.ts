@@ -458,12 +458,12 @@ describe("what comes and goes in the pension view (10-09, G8)", () => {
 
   it("draws the strip in a box that can grow in — simply open on the page's first paint", () => {
     const html = render({ data: liveDashboard(), activityUnreadable: false });
-    expect(html).toMatch(new RegExp(`<div class="rise-in"><div class="grid [^"]*grid-rows-\\[1fr\\] opacity-100"><div class="min-h-0"><div[^>]*role="group" aria-label="${STATS_COPY.settlementStripLabel}"`));
+    expect(html).toMatch(new RegExp(`<div class="rise-in"><div class="grid [^"]*grid-rows-\\[1fr\\] opacity-100"><div class="min-h-0 min-w-0"><div[^>]*role="group" aria-label="${STATS_COPY.settlementStripLabel}"`));
   });
 
   it("puts the stage card in one box that grows, swaps and closes, inside the top column's gap", () => {
     const html = render({ data: waiting(), activityUnreadable: false });
-    expect(html).toMatch(/<div class="grid [^"]*grid-rows-\[1fr\] opacity-100 mt-0"><div class="min-h-0"><div><div><div data-slot="card"[^>]*><div[^>]*><div[^>]*>Waiting for the first settlement</);
+    expect(html).toMatch(/<div class="grid [^"]*grid-rows-\[1fr\] opacity-100 mt-0"><div class="min-h-0 min-w-0"><div><div><div data-slot="card"[^>]*><div[^>]*><div[^>]*>Waiting for the first settlement</);
   });
 
   it("draws /activity's own stage card plainly: it stands in a page of its own, not a column that moves", () => {

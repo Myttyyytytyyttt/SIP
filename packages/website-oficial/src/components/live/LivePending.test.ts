@@ -3,7 +3,7 @@
 // the page, an honest heading, the below-lg card held up for a minute, and every
 // copy drawn from one track.
 
-import { USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
+import { ANTHROPIC_MINT, SPYX_MINT, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -26,7 +26,7 @@ import {
 import { REVEAL_MS } from "@/components/live/Reveal";
 import { LIVE_COPY, PENDING_COPY } from "@/lib/live-copy";
 import { toLiveDashboard } from "@/lib/live-model";
-import { pendingLines, pendingSteps, type PendingLine } from "@/lib/live-pending";
+import { pendingLines, pendingSteps, type PendingLine, type PendingStep } from "@/lib/live-pending";
 import type { LiveDashboard, VaultEventJson } from "@/lib/live-types";
 
 import { NOW_MS, liveActivity, liveEntry, liveSnapshot, seconds, signature, tokenAccount } from "../../../test/fixtures/live-dashboard";
@@ -79,6 +79,37 @@ describe("doneOf: a step ends as done only on the transaction that did it", () =
     const before = vault("18000000", [WRAP, old]);
     const step = pendingSteps(before)[0]!;
     expect(doneOf(step, "converting", vault("0", [WRAP, old], NOW_MS + 30_000), before)).toBeNull();
+  });
+});
+
+/**
+ * A BASKET IS BOUGHT ONE TRANSACTION PER LEG (solana-keeper invest-tick.ts),
+ * and a turn can stop after some landed, the rest under the basket's minimum:
+ * the done row names the legs on the page, never the basket the step meant.
+ */
+describe("doneOf: a buy names only the legs that landed", () => {
+  const BUYING: PendingStep = { kind: "buying", state: "active", rest: null, amountRaw: 1_200_000n, valueUsdcRaw: 1_200_000n, symbols: ["SPYx", "ANTHROPIC"], since: NOW_MS - 60_000 };
+  const invested = (mint: string, symbol: string | null) =>
+    ({ kind: "invested", mint, symbol, usdcSpentRaw: "600000", receivedRaw: "1", receivedUi: "0.01" }) as VaultEventJson;
+  const before = vault("0", [WRAP]);
+  const bought = (...entries: ReturnType<typeof liveEntry>[]) => doneOf(BUYING, "buying", vault("0", [...entries, WRAP], NOW_MS + 30_000), before);
+
+  it("says only SPYx when the ANTHROPIC leg did not land", () => {
+    const done = bought(liveEntry(signature(5), seconds(NOW_MS + 10_000), [invested(SPYX_MINT, "SPYx")], 4_100));
+    expect(done).toEqual({ key: "buying", kind: "buying", title: LIVE_COPY.pendingDone.bought("SPYx"), sub: LIVE_COPY.pendingDone.boughtSub, tone: "invest" });
+  });
+
+  it("names both legs, in the order they landed, when both did", () => {
+    const done = bought(
+      liveEntry(signature(6), seconds(NOW_MS + 12_000), [invested(ANTHROPIC_MINT, null)], 4_101),
+      liveEntry(signature(5), seconds(NOW_MS + 10_000), [invested(SPYX_MINT, "SPYx")], 4_100),
+    );
+    expect(done?.title).toBe("Bought SPYx and ANTHROPIC");
+    expect(done?.title).toBe(LIVE_COPY.pendingDone.bought("SPYx and ANTHROPIC"));
+  });
+
+  it("claims nothing when a landed leg is one this app cannot name", () => {
+    expect(bought(liveEntry(signature(5), seconds(NOW_MS + 10_000), [invested("UnknownMint11111111111111111111111111111111", null)], 4_100))).toBeNull();
   });
 });
 
@@ -157,6 +188,10 @@ describe("the heading", () => {
     expect(headingOf([line(false), { ...line(true), key: "converting", kind: "converting" }])).toBe(LIVE_COPY.pendingHeading.active);
   });
 
+  it("is nothing with no step standing: over done rows alone, or a card held up over nothing, neither word is true", () => {
+    expect(headingOf([])).toBeNull();
+  });
+
   it("is never read out", () => {
     const out = renderToStaticMarkup(createElement(PendingRows, { lines: [line(false)] }));
     expect(out).toContain(`<div class="px-4 py-2 text-xs text-muted-foreground" aria-hidden="true">${LIVE_COPY.pendingHeading.waiting}</div>`);
@@ -174,11 +209,17 @@ describe("the rows drawn", () => {
     expect(out).toContain("lucide-check");
     expect(out).toContain(LIVE_COPY.pendingDone.converted);
     expect(out).toContain('data-pending-steps="0"');
+    // A done row alone is neither in progress nor waiting: no heading over it.
+    expect(out).not.toContain(LIVE_COPY.pendingHeading.active);
+    expect(out).not.toContain(LIVE_COPY.pendingHeading.waiting);
   });
 
   it("keep the card up, saying nothing is in progress, through its hold after the last step closed", () => {
     const out = renderToStaticMarkup(createElement(PendingRows, { lines: [], view: { ...viewOf([]), held: true }, variant: "card", className: "lg:hidden" }));
     expect(out).toContain(LIVE_COPY.pendingIdle);
+    // No "In progress" over "Nothing in progress right now", and no "Waiting" either.
+    expect(out).not.toContain(LIVE_COPY.pendingHeading.active);
+    expect(out).not.toContain(LIVE_COPY.pendingHeading.waiting);
     expect(out).toMatch(/^<div role="status" aria-live="polite" class="grid [^"]*lg:hidden" data-pending-steps="0">/);
     // The idle line is not news: not read out.
     expect(out).toMatch(/<p class="[^"]*" aria-hidden="true">Nothing in progress right now<\/p>/);

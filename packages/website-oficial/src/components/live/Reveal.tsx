@@ -28,6 +28,12 @@
  * stands open it is not, so a card's ring and a focused button's ring are drawn
  * whole.
  *
+ * WHY min-w-0 ON THE ROW'S ITEM (review, 10-09): a grid item whose overflow is
+ * visible takes its content's min-content width as its floor, so once the clip
+ * is lifted a strip of 20 chips widened the column to 1674 px at 375 and the
+ * page scrolled sideways, and a pending row's `truncate` title stopped
+ * truncating. min-width only, never overflow: the rings above stay whole.
+ *
  * JOINING A PAGE ALREADY DRAWN (`appear`, 10-09). Something mounted at the very
  * moment it is wanted — the strip on the first settlement, whose wrapper must
  * not stand empty before it; a step joining a card already open — has no
@@ -178,7 +184,7 @@ export function RevealFrame({
 }) {
   return (
     <div className={cn(revealFrameClass({ grown, inGap }), className)} {...(leaving ? { inert: true, "aria-hidden": true } : {})}>
-      <div className={cn("min-h-0", clipped && "overflow-hidden")}>{children}</div>
+      <div className={cn("min-h-0 min-w-0", clipped && "overflow-hidden")}>{children}</div>
     </div>
   );
 }

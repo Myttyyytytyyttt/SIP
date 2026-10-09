@@ -194,6 +194,6 @@ describe("LiveStartBuying", () => {
 
   it("stands in a box that grows in and closes over its last state — simply open on the page's first paint", () => {
     const html = render(activeNoPolicy());
-    expect(html).toMatch(/^<div class="grid transition-\[grid-template-rows,opacity,margin-top\][^"]* grid-rows-\[1fr\] opacity-100 mt-0"><div class="min-h-0"><div[^>]*data-start-buying=""/);
+    expect(html).toMatch(/^<div class="grid transition-\[grid-template-rows,opacity,margin-top\][^"]* grid-rows-\[1fr\] opacity-100 mt-0"><div class="min-h-0 min-w-0"><div[^>]*data-start-buying=""/);
   });
 });

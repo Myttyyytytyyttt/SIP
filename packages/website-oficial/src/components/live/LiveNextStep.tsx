@@ -23,9 +23,11 @@
  * wallet linked, the first saving, the first buy — and once the pension is
  * running it stays, ticked, until that first buy has happened. "First buy" is
  * listed only while one is on its way: a signed approval with buying on, or
- * stocks chosen on the setup and not approved yet. A pension kept as SOL, or
- * one whose buying is off, is never promised a buy, and its card ends at the
- * first saving as it always did.
+ * stocks chosen on the setup and not approved yet. A pension kept as SOL, one
+ * whose buying is off, or one the chain would refuse to buy for right now —
+ * paused, an old price limit passed, caps no balance can clear (review,
+ * 10-09) — is never promised a buy, and its card ends at the first saving as
+ * it always did.
  *
  * ONE CARD, NEVER TWO (10-09, G8). In the pension view's top column
  * (`animate`), the card grows in, swaps its height from one stage's card to the
@@ -43,7 +45,7 @@ import { useBasketChoice } from "@/hooks/use-onboarding-closed";
 import { formatSol } from "@/lib/amounts";
 import { requestImport } from "@/lib/import-intent";
 import { LIVE_COPY } from "@/lib/live-copy";
-import type { LiveDashboard, LivePolicyView } from "@/lib/live-types";
+import type { LiveDashboard } from "@/lib/live-types";
 import { basketOnShelf } from "@/lib/onboarding";
 import type { BasketChoice } from "@/lib/onboarding-memory";
 import { cn } from "@/lib/utils";
@@ -64,13 +66,29 @@ function Step({ label, done }: { readonly label: string; readonly done: boolean 
  * WHERE THE FIRST BUY STANDS: done (the policy has spent USDC), on its way (an
  * approval with buying on and nothing spent yet, or stocks chosen on the setup
  * and no approval signed), or "none" — nothing promised: a pension kept as SOL,
- * buying switched off, or a policy that could not be read.
+ * buying switched off, a policy that could not be read, or a buy the chain
+ * would refuse until the owner changes something.
+ *
+ * "done" is decided before any stop on purpose: a first buy that happened
+ * stays ticked even if the vault is paused later.
  */
-export function firstBuyOf(policy: LivePolicyView, choice: BasketChoice | null): "none" | "ahead" | "done" {
+export function firstBuyOf(data: Pick<LiveDashboard, "policy" | "vault" | "protocolPaused">, choice: BasketChoice | null): "none" | "ahead" | "done" {
+  const { policy, vault, protocolPaused } = data;
+  if (policy.status === "exists" && policy.lifetimeInvested !== null && policy.lifetimeInvested > 0n) return "done";
+  // WHY (review, 10-09): invest.rs refuses while either pause switch is on, so
+  // no buy is on its way and none is promised. A vault switch that could not be
+  // read promises nothing either; the protocol's, unread, is claimed neither
+  // way — as live-pending.ts turnRest reads them, in the same order.
+  if (vault.paused !== false || protocolPaused === true) return "none";
   if (policy.status === "exists") {
-    if (policy.lifetimeInvested === null) return "none";
-    if (policy.lifetimeInvested > 0n) return "done";
-    return policy.enabled === true ? "ahead" : "none";
+    if (policy.lifetimeInvested === null || policy.enabled !== true) return "none";
+    // A policy signed before 10-08 whose stock limit has passed refuses the
+    // whole basket; caps that no balance can clear (one call's, or the 30-day
+    // limit under what every leg needs) never buy. The SOL safety floor stops
+    // only the conversion: USDC already held still buys, so it is no stop here.
+    if (policy.oldLimitsStop === "basket" || policy.readiness?.state === "unreachable") return "none";
+    if (policy.readiness !== null && policy.maxRolling30d !== null && policy.maxRolling30d < policy.readiness.investsAtRaw) return "none";
+    return "ahead";
   }
   if (policy.status === "missing") return choice !== null && basketOnShelf(choice).kind === "stocks" ? "ahead" : "none";
   return "none";
@@ -127,7 +145,7 @@ function nextStepCard({ data, pensionKey, seatProblem = null, onOpenWallets, cla
   const { stage, vault, wallets, policy, rents, protocolPaused } = data;
   // `vault_unreadable` is the frame's to handle.
   if (stage === "vault_unreadable") return null;
-  const firstBuy = firstBuyOf(policy, choice);
+  const firstBuy = firstBuyOf(data, choice);
   // A running pension needs no card — until its first buy has happened, when one is on its way.
   if (stage === "active" && firstBuy !== "ahead") return null;
 

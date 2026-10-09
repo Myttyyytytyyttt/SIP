@@ -34,6 +34,13 @@
  * are hidden from it, and stand still for anyone who asked for less motion
  * (ui/skeleton.tsx); so does the line's glyph.
  *
+ * WHY A SECOND REGION (review, 10-09): a busy region holds its changes back,
+ * so "taking longer" said only inside it was never spoken, and the Reload
+ * button arrived unannounced. Beside it, sr-only and NOT busy, a second status
+ * is there and empty from the first render and says two sentences in the
+ * whole wait: that it is slower than usual (20 s), then that a reload is the
+ * way out (45 s). Nothing in it ticks, and the button itself stays outside.
+ *
  * Only the live first read uses it. The frame /?mode=mock shows before Privy
  * answers is still LiveLoading with no props (LiveStates.tsx), frozen with the
  * sample (sample-golden.test.ts).
@@ -88,14 +95,22 @@ export function LiveFirstRead({
 
   return (
     <div className={COLUMN}>
-      {/* min-h-7: the Reload button's own height, so the line does not grow when it arrives. */}
-      <div className="flex min-h-7 flex-wrap items-center gap-x-3 gap-y-2">
-        <div className="flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
+      {/* Below sm the Reload button wraps under the words (they plus it need ~425 px;
+          a 375 px screen gives 343), so two lines are reserved there: 28 + 8 + 28.
+          The words keep the button's own h-7 and the lines pack to the top, so
+          neither the 20 s words nor the 45 s Reload moves the words or the blocks
+          below. From sm up it all fits on one line of the button's height. */}
+      <div className="flex min-h-16 flex-wrap content-start items-center gap-x-3 gap-y-2 sm:min-h-7">
+        <div className="flex min-h-7 min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
           <Loader2 aria-hidden className="size-3.5 shrink-0 motion-safe:animate-spin" />
           <p role="status" aria-busy="true" aria-label={LIVE_COPY.reading}>
             {slow ? LIVE_COPY.firstRead.slow : LIVE_COPY.firstRead.reading}
           </p>
           <Elapsed from={since} after={FIRST_READ_ELAPSED_MS} className="shrink-0" />
+          {/* Not busy, there and empty from the start: its two sentences are insertions a screen reader reads (see the top of the file). */}
+          <span role="status" className="sr-only">
+            {reload ? LIVE_COPY.firstRead.reloadSpoken : slow ? LIVE_COPY.firstRead.slowSpoken : ""}
+          </span>
         </div>
         {reload ? (
           <Button type="button" variant="outline" size="sm" onClick={() => window.location.reload()}>

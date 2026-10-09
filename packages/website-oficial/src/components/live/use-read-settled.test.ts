@@ -6,11 +6,12 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { READ_SETTLE_MS, readSettled, useReadSettled, type ReadMarks } from "@/components/live/use-read-settled";
+import { READ_SETTLE_MS, historyKeyOf, readSettled, useReadSettled, type ReadMarks } from "@/components/live/use-read-settled";
 
 /** A commit's data: its snapshot's clock, and a tag to tell two commits apart. */
 const commit = (nowMs: number, tag: string) => ({ nowMs, tag });
-const marks = (nowMs: number, history: Partial<Omit<ReadMarks, "nowMs">> = {}): ReadMarks => ({ nowMs, activityPending: false, activityUnreadable: false, ...history });
+/** A commit's marks. `history` is the rows' key: "old" until a head page brings rows, unless a case says otherwise. */
+const marks = (nowMs: number, history: Partial<Omit<ReadMarks, "nowMs">> = {}): ReadMarks => ({ nowMs, activityPending: false, activityUnreadable: false, history: "old", ...history });
 
 describe("readSettled", () => {
   it("takes the page's first paint as settled: there is nothing to wait for", () => {
@@ -30,8 +31,39 @@ describe("readSettled", () => {
     expect(state.settled).toBe(before);
     expect(state.latest).toBe(snapshot);
     expect(state.since).toBe(50);
-    state = readSettled(state, head, marks(21_000), 400);
+    state = readSettled(state, head, marks(21_000, { history: "new" }), 400);
     expect(state.settled).toBe(head);
+    expect(state.since).toBeNull();
+  });
+
+  /**
+   * A SOCKET NOTIFICATION BETWEEN THE TWO COMMITS (review, 10-09): a new `data`
+   * with the same clock and the same rows. Taken as the head page, it settled
+   * the snapshot alone, and a conversion timed off an older settlement read
+   * "Not done since…" until the real head page came.
+   */
+  it("does not take a push between a snapshot and its history for the head page", () => {
+    const before = commit(1_000, "read 1");
+    const snapshot = commit(21_000, "read 2, snapshot");
+    const pushed = commit(21_000, "a trade was noticed");
+    const head = commit(21_000, "read 2, history");
+    let state = readSettled(null, before, marks(1_000), 0);
+    state = readSettled(state, snapshot, marks(21_000), 50);
+    state = readSettled(state, pushed, marks(21_000), 200);
+    expect(state.settled).toBe(before);
+    expect(state.latest).toBe(pushed);
+    expect(state.since).toBe(50);
+    // The head page's commit changes the rows' key: that one settles.
+    state = readSettled(state, head, marks(21_000, { history: "new" }), 400);
+    expect(state.settled).toBe(head);
+    expect(state.since).toBeNull();
+  });
+
+  it("still settles a push past the cap, on the push", () => {
+    let state = readSettled(readSettled(null, commit(1_000, "a"), marks(1_000), 0), commit(21_000, "b"), marks(21_000), 100);
+    const pushed = commit(21_000, "pushed late");
+    state = readSettled(state, pushed, marks(21_000), 100 + READ_SETTLE_MS);
+    expect(state.settled).toBe(pushed);
     expect(state.since).toBeNull();
   });
 
@@ -66,11 +98,29 @@ describe("readSettled", () => {
     expect(both.since).toBeNull();
   });
 
-  it("settles any other change at once: a push, an older page, a failure noted on the same snapshot", () => {
+  it("with nothing waited on, settles any other change at once: a push, an older page, a failure noted on the same snapshot", () => {
     const first = commit(1_000, "read 1");
     const pushed = commit(1_000, "a wallet changed");
     const state = readSettled(readSettled(null, first, marks(1_000), 0), pushed, marks(1_000), 5);
     expect(state.settled).toBe(pushed);
+  });
+});
+
+describe("historyKeyOf", () => {
+  const rows = (...signatures: string[]) => signatures.map((signature) => ({ signature }));
+
+  it("is the same for the same rows in new arrays — what a push hands over", () => {
+    const one = { rows: rows("b", "a"), hiddenRows: rows(), settlementRows: rows("s") };
+    expect(historyKeyOf({ rows: [...one.rows], hiddenRows: [], settlementRows: [...one.settlementRows] })).toBe(historyKeyOf(one));
+  });
+
+  it("changes when a page brings a newer row, an older one, or a settlement", () => {
+    const one = { rows: rows("b", "a"), hiddenRows: rows(), settlementRows: rows("s") };
+    const key = historyKeyOf(one);
+    expect(historyKeyOf({ ...one, rows: rows("c", "b", "a") })).not.toBe(key);
+    expect(historyKeyOf({ ...one, rows: rows("b", "a", "0") })).not.toBe(key);
+    expect(historyKeyOf({ ...one, settlementRows: rows("t", "s") })).not.toBe(key);
+    expect(historyKeyOf({ ...one, hiddenRows: rows("h") })).not.toBe(key);
   });
 });
 
@@ -79,7 +129,7 @@ describe("useReadSettled", () => {
     const data = commit(1_000, "first");
     let seen: { readonly data: unknown; readonly settled: boolean } | null = null;
     function Probe() {
-      seen = useReadSettled(data, { activityPending: false, activityUnreadable: false });
+      seen = useReadSettled(data, { activityPending: false, activityUnreadable: false, history: "" });
       return null;
     }
     renderToStaticMarkup(createElement(Probe));

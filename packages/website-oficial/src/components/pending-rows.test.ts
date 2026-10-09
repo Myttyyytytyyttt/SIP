@@ -171,7 +171,7 @@ describe("a live page", () => {
   it("leads the pension page's own top with the steps below lg, where the activity column is out of sight", () => {
     const out = render("pension", converting());
     // The region is the card's own box: open, at the page's first paint, with nothing to grow from (Reveal.tsx).
-    const top = out.match(/<div role="status" aria-live="polite" class="([^"]*)" data-pending-steps="1"><div class="min-h-0"><div class="([^"]*)">/);
+    const top = out.match(/<div role="status" aria-live="polite" class="([^"]*)" data-pending-steps="1"><div class="min-h-0 min-w-0"><div class="([^"]*)">/);
     expect(top?.[1]).toBe("grid transition-[grid-template-rows,opacity,margin-top] duration-300 ease-out motion-reduce:transition-none grid-rows-[1fr] opacity-100 mt-0 lg:hidden");
     expect(top?.[2]).toBe("overflow-hidden rounded-md border bg-card");
     // Before the holdings and the rule card, inside the main column.
@@ -230,7 +230,7 @@ describe("a live page", () => {
     // One polite region for them, the page's own: the column beside it shows them silently.
     expect(out.match(/<div[^>]*aria-live="polite"[^>]*data-pending-steps="1"/g)).toEqual(['<div role="status" aria-live="polite" data-pending-steps="1"']);
     // Its divider comes and goes with the rows, inside the region.
-    expect(out).toMatch(/<div role="status" aria-live="polite" data-pending-steps="1"><div class="grid[^"]*"><div class="min-h-0"><div class="border-b">/);
+    expect(out).toMatch(/<div role="status" aria-live="polite" data-pending-steps="1"><div class="grid[^"]*"><div class="min-h-0 min-w-0"><div class="border-b">/);
   });
 
   it("keeps them under All and Investing on /activity, and out of Savings and Withdrawals", () => {

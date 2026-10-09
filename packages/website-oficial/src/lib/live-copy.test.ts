@@ -144,11 +144,17 @@ describe("refusals say what happened, and no time", () => {
  * promise of when it will end, and none in the machinery's words.
  */
 describe("a first read that takes its time", () => {
-  const sentences = [LIVE_COPY.firstRead.reading, LIVE_COPY.firstRead.slow, LIVE_COPY.firstRead.reloadPage];
+  const sentences = [LIVE_COPY.firstRead.reading, LIVE_COPY.firstRead.slow, LIVE_COPY.firstRead.reloadPage, LIVE_COPY.firstRead.slowSpoken, LIVE_COPY.firstRead.reloadSpoken];
 
   it("says it is slower than usual, and that it has not stopped", () => {
     expect(LIVE_COPY.firstRead.slow).toMatch(/longer than usual/i);
     expect(LIVE_COPY.firstRead.slow).toMatch(/still/i);
+    expect(LIVE_COPY.firstRead.slowSpoken).toMatch(/longer than usual.*still/i);
+  });
+
+  it("tells a screen reader the way out in words, and in sentences rather than the line's separators", () => {
+    expect(LIVE_COPY.firstRead.reloadSpoken).toMatch(/reload the page/i);
+    for (const sentence of [LIVE_COPY.firstRead.slowSpoken, LIVE_COPY.firstRead.reloadSpoken]) expect(sentence).not.toContain("·");
   });
 
   it("promises no time, and names none of the machinery", () => {
