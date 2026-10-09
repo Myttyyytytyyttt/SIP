@@ -33,6 +33,12 @@
  * read's snapshot lands before its history, and the steps over the feed wait
  * for the history before anything ends or flips (LivePending.tsx).
  *
+ * AND WHAT SOLANA SAID CHANGED LEADS THEM BEFORE ANY UPDATE HAS (plan B3,
+ * heard-lines.ts): "Activity seen on Trading wallet 1 · checking" from the
+ * moment the chain rings (`live.heard`), which becomes that wallet's "checking
+ * your latest activity" in place once the update lands; "Activity seen on your
+ * vault · checking" when only the vault rang. Each ends when `heard` clears.
+ *
  * WHAT JUST ARRIVED IS WORKED OUT ONCE, HERE (use-arrivals.ts): a transaction
  * new to the page and newer than anything it showed. Its rows in the column
  * (both copies), on /activity, its chips in the strip and in the bar wear one
@@ -71,6 +77,7 @@ import { LiveHeartbeat } from "@/components/live/LiveHeartbeat";
 import { LoadOlderButton } from "@/components/live/LoadOlderButton";
 import { PendingRows, usePendingView } from "@/components/live/LivePending";
 import { Reveal } from "@/components/live/Reveal";
+import { heardLinesOf } from "@/components/live/heard-lines";
 import { heroPillOf, pillShown, useArrivals } from "@/components/live/use-arrivals";
 import { useUpdateAvailable } from "@/components/live/use-update-available";
 import { historyKeyOf, useReadSettled } from "@/components/live/use-read-settled";
@@ -191,7 +198,13 @@ export function LiveBody({
   const settled = useReadSettled(data, { activityPending, activityUnreadable, history: historyKeyOf(data) });
   const steps = pendingSteps(settled.data);
   const lines = pendingLines(steps, settled.data.nowMs);
-  const pending = usePendingView({ data: settled.data, steps, lines, latest: settled.settled ? lines : pendingLines(pendingSteps(data), data.nowMs) });
+  const latest = settled.settled ? lines : pendingLines(pendingSteps(data), data.nowMs);
+  // AND BEFORE ANY OF THAT, WHAT SOLANA SAID CHANGED (heard-lines.ts): from the
+  // newest snapshot and the store's `heard`, under the keys the steps will
+  // take. "Behind" while the updates fail — the stale note, or the history
+  // unreadable — when no update is known to be bringing it.
+  const heard = heardLinesOf({ heard: live.heard, data, lines, latest, behind: stale !== null || activityUnreadable });
+  const pending = usePendingView({ data: settled.data, steps, lines, heard, latest });
 
   // THE STRIP, ONLY ONCE THERE IS ONE (SavingsStrip's own null rule). Grown in
   // when it comes after the page was drawn without it; simply there otherwise.

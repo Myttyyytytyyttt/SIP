@@ -30,6 +30,7 @@ import { PendingRows } from "@/components/live/LivePending";
 import { SavingsRulePanel } from "@/components/savings-rule-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WalletActivity } from "@/components/wallet-activity";
+import type { LiveLiveness, LiveStale } from "@/hooks/use-live-dashboard";
 import { LIVE_COPY, PENDING_COPY } from "@/lib/live-copy";
 import { toLiveDashboard } from "@/lib/live-model";
 import type { PendingLine } from "@/lib/live-pending";
@@ -137,12 +138,12 @@ describe("a live page", () => {
       privyWallets: [],
     });
   };
-  const render = (view: "pension" | "activity", data: LiveDashboard): string =>
+  const render = (view: "pension" | "activity", data: LiveDashboard, over: { readonly live?: LiveLiveness; readonly stale?: LiveStale | null } = {}): string =>
     html(
       createElement(LiveBody, {
         view,
         data,
-        stale: null,
+        stale: over.stale ?? null,
         pensionKey: OWNER,
         control: null,
         account: null,
@@ -151,7 +152,7 @@ describe("a live page", () => {
         onLoadOlder: vi.fn(),
         nowMs: NOW_MS,
         activityUnreadable: false,
-        live: liveLiveness(),
+        live: over.live ?? liveLiveness(),
       }),
     );
 
@@ -242,6 +243,11 @@ describe("a live page", () => {
     expect(pendingShownFor("withdrawals", [ACTIVE])).toEqual([]);
   });
 
+  it("keeps a change heard on the vault under every filter: nothing says which kind it is until it lands", () => {
+    const vault = { key: "heard:vault", kind: "vault" as const };
+    for (const filter of ["all", "savings", "investing", "withdrawals"] as const) expect(pendingShownFor(filter, [vault])).toEqual([vault]);
+  });
+
   it("keeps a wallet being checked under All and Savings — a saving may follow — and out of Investing and Withdrawals", () => {
     const checking: PendingLine = { key: "measuring:W", kind: "measuring", active: true, rest: null, title: PENDING_COPY.measuring("Wallet 1"), sub: PENDING_COPY.measuringSub.profit, amount: "", amountSpoken: "" };
     expect(pendingShownFor("all", [checking, ACTIVE])).toEqual([checking, ACTIVE]);
@@ -272,6 +278,45 @@ describe("a live page", () => {
     // The same page without the push draws nothing pending.
     const quiet = render("pension", { ...data, walletChanges: [] });
     expect(quiet).not.toContain('data-pending-step="measuring"');
+  });
+
+  /**
+   * BEFORE ANY UPDATE (plan B3, 10-09): the moment Solana says the trading
+   * wallet changed (`live.heard`), the column says so — under the key the
+   * wallet's step takes once the update lands — and the dot is not the only
+   * thing that moved.
+   */
+  it("leads the column with activity seen on a wallet the moment Solana says so, before any update has brought it", () => {
+    const data = toLiveDashboard({
+      snapshot: liveSnapshot({ readAtMs: NOW_MS, vault: { ...liveSnapshot().vault, lamports: "1285240", withdrawableLamports: "0" }, vaultTokenAccounts: { status: "exists", items: [] } }),
+      activity: liveActivity([]),
+      privyWallets: [WALLET_A],
+    });
+    const label = data.wallets[0]!.label;
+    expect(render("pension", data)).not.toContain("data-pending-step=");
+    const out = render("pension", data, { live: liveLiveness({ heard: { at: Date.now(), wallets: [WALLET_A] } }) });
+    expect(out).toMatch(/<div role="status" aria-live="polite" data-pending-steps="1"/);
+    expect(out).toContain(LIVE_COPY.heardLine.wallet(label));
+    expect(out).toMatch(/data-pending-step="measuring" data-state="active" data-pending-heard="">[\s\S]*?data-work-loader=""/);
+    // While the updates fail, the same row waits: not on this page yet, and nothing turns.
+    const behind = render("pension", data, {
+      live: liveLiveness({ heard: { at: Date.now(), wallets: [WALLET_A] } }),
+      stale: { message: LIVE_COPY.rateLimited(null), retryAt: null, since: NOW_MS },
+    });
+    expect(behind).toContain(LIVE_COPY.heardLine.walletBehind(label));
+    expect(behind).not.toContain(LIVE_COPY.heardLine.wallet(label));
+    expect(behind).not.toMatch(/data-pending-heard="">[\s\S]*?data-work-loader/);
+  });
+
+  it("says a change seen on the vault, when only the vault rang, and not over the conversion already turning for it", () => {
+    const quiet = toLiveDashboard({
+      snapshot: liveSnapshot({ readAtMs: NOW_MS, vault: { ...liveSnapshot().vault, lamports: "1285240", withdrawableLamports: "0" }, vaultTokenAccounts: { status: "exists", items: [] } }),
+      activity: liveActivity([]),
+      privyWallets: [],
+    });
+    const vaultHeard = { live: liveLiveness({ heard: { at: Date.now(), wallets: [] } }) };
+    expect(render("pension", quiet, vaultHeard)).toContain(LIVE_COPY.heardLine.vault);
+    expect(render("pension", converting(), vaultHeard)).not.toContain(LIVE_COPY.heardLine.vault);
   });
 
   it("draws an empty region, and no line under Next investment, once the chain has caught up", () => {

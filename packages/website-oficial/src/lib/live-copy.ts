@@ -207,6 +207,33 @@ export const LIVE_COPY = {
   /** The below-lg card, held up for a minute after its last step ended, so one cycle does not push the page three times. */
   pendingIdle: "Nothing in progress right now",
   /**
+   * WHAT SOLANA SAID CHANGED, BEFORE ANY UPDATE HAS BROUGHT IT (`live.heard`,
+   * plan B3): a trading wallet's first activity since its last saving, or —
+   * when it names no trading wallet — the vault's own. It leads the rows from
+   * the moment the chain says so, seconds before the update; a wallet's line
+   * becomes "checking your latest activity" under the same key once the update
+   * that covers it lands (heard-lines.ts). "Activity", never "trade": the chain
+   * says only that a balance moved, which a plain transfer does too. No time
+   * and no promise of one: when the next update comes is the header dot's to
+   * say (`live.nextReadAt`), and words that tick do not belong in a live region.
+   *
+   * WHILE THE UPDATES FAIL (the stale note, or the history unreadable) the
+   * change is "not on this page yet", never "checking": no update is known to
+   * be bringing it — the dot's own words for the same moment.
+   */
+  heardLine: {
+    wallet: (wallet: string): string => `Activity seen on ${wallet} · checking`,
+    walletBehind: (wallet: string): string => `Activity seen on ${wallet} · not on this page yet`,
+    vault: "Activity seen on your vault · checking",
+    vaultBehind: "Activity seen on your vault · not on this page yet",
+    /**
+     * Under the vault's line. What it is — a saving, a conversion, a buy, a
+     * withdrawal, a plain transfer that never shows as a row of its own — is
+     * not known until it lands; the pension's figures take it in any case.
+     */
+    vaultSub: "Your pension shows it once this page updates",
+  },
+  /**
    * A step whose transaction has landed, held a few seconds where its row was —
    * only once that transaction is on the page. With the time it landed, and its
    * day when that is not today (format.ts whenLabel), so the line matches the

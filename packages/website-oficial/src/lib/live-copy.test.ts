@@ -269,6 +269,36 @@ describe("the steps' and the setup's words", () => {
 });
 
 /**
+ * WHAT SOLANA SAID CHANGED, BEFORE AN UPDATE BROUGHT IT (plan B3, 10-09): the
+ * wallet's name and the vault said as the owner reads them, "activity" rather
+ * than a trade the chain never named, "checking" only while something is, and
+ * no time promised — the header dot alone names the next check.
+ */
+describe("the words for a change seen and not on the page yet", () => {
+  it("say where, and whether anything is checking it", () => {
+    expect(LIVE_COPY.heardLine.wallet("Trading wallet 1")).toBe("Activity seen on Trading wallet 1 · checking");
+    expect(LIVE_COPY.heardLine.walletBehind("Trading wallet 1")).toBe("Activity seen on Trading wallet 1 · not on this page yet");
+    expect(LIVE_COPY.heardLine.vault).toBe("Activity seen on your vault · checking");
+    expect(LIVE_COPY.heardLine.vaultBehind).toBe("Activity seen on your vault · not on this page yet");
+  });
+
+  it("promise no time, name none of the machinery, and never call it a trade", () => {
+    const words = [
+      LIVE_COPY.heardLine.wallet("Trading wallet 1"),
+      LIVE_COPY.heardLine.walletBehind("Trading wallet 1"),
+      LIVE_COPY.heardLine.vault,
+      LIVE_COPY.heardLine.vaultBehind,
+      LIVE_COPY.heardLine.vaultSub,
+    ];
+    for (const sentence of words) {
+      expect(sentence).not.toMatch(/shortly|again in|in a (moment|minute)|\bsoon\b|\bnext\b|\d+:\d+|\d+ s\b/i);
+      expect(sentence).not.toMatch(/\b(keeper|read|poll|wrap|policy|RPC|socket|push|heard)\b/i);
+      expect(sentence).not.toMatch(/\btrade/i);
+    }
+  });
+});
+
+/**
  * WHAT JUST ARRIVED (owner, 10-09): the hero's pill in the owner's own shape,
  * "+$x saved · HH:MM", and the announcer in the chain's own amounts. Neither
  * promises a time nor names the machinery.

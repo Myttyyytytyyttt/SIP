@@ -30,7 +30,7 @@ import { useState, type ReactNode } from "react";
 
 import { FeedFooter, LiveActivityFeed } from "@/components/live/LiveActivityFeed";
 import { LoadOlderButton } from "@/components/live/LoadOlderButton";
-import { PendingRows, viewOf, type PendingView } from "@/components/live/LivePending";
+import { PendingRows, viewOf, type PendingView, type RowKind } from "@/components/live/LivePending";
 import { Num } from "@/components/num";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -38,7 +38,6 @@ import { formatSol } from "@/lib/amounts";
 import { LABEL } from "@/lib/classes";
 import { dateLabel } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
-import type { PendingLine } from "@/lib/live-pending";
 import type { LiveDashboard, LiveRow, VaultEventKindJson } from "@/lib/live-types";
 import type { LiveOlder } from "@/hooks/use-live-dashboard";
 import { cn } from "@/lib/utils";
@@ -54,14 +53,16 @@ const KINDS: Readonly<Record<Exclude<Filter, "all">, ReadonlySet<VaultEventKindJ
 
 /**
  * Converting and buying are investing: shown under All and Investing. A wallet
- * being checked is a saving that may follow: under All and Savings. Nothing
- * pending is a withdrawal.
+ * being checked — or heard, before an update — is a saving that may follow:
+ * under All and Savings. No step is a withdrawal. A change heard on the vault
+ * itself (heard-lines.ts) may turn out to be any of them, a withdrawal
+ * included, and nothing says which until it lands: under every filter.
  */
-export function pendingShownFor<T extends { readonly kind: PendingLine["kind"] }>(filter: Filter, pending: readonly T[]): readonly T[] {
+export function pendingShownFor<T extends { readonly kind: RowKind }>(filter: Filter, pending: readonly T[]): readonly T[] {
   if (filter === "all") return pending;
-  if (filter === "savings") return pending.filter((line) => line.kind === "measuring");
+  if (filter === "savings") return pending.filter((line) => line.kind === "measuring" || line.kind === "vault");
   if (filter === "investing") return pending.filter((line) => line.kind !== "measuring");
-  return [];
+  return pending.filter((line) => line.kind === "vault");
 }
 
 /** The same filter over the steps and over the rows drawn for them, held ones included. */

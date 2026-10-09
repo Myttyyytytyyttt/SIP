@@ -15,6 +15,15 @@
  * truncating: it has no amount beside it, and in the 263 px column of the lg
  * layout the one-line title lost its last words.
  *
+ * WHAT SOLANA SAID CHANGED LEADS BEFORE ANY UPDATE HAS (plan B3, 10-09). A
+ * trading wallet's first activity since its last saving, or the vault's own
+ * change, is a row from the moment the chain rings ("Activity seen on Trading
+ * wallet 1 · checking", heard-lines.ts) — under the key the wallet's step takes
+ * when the update lands, so the step's line replaces it in place, and the row
+ * never closes and grows back. It goes through the same track as a step: it
+ * grows in, and closes when `heard` clears with no step behind it. Its words
+ * are not read out: what it becomes is (Row).
+ *
  * THE HEADING SAYS WHAT THE ROWS ARE (10-09, G14): "In progress" while one is
  * under way, "Waiting" when every one rests — and NOTHING once no step stands
  * (review, 10-09): over the done rows alone, or the held card's "Nothing in
@@ -83,6 +92,21 @@ export const DONE_HOLD_MS = 4_000;
 /** How long the below-lg card stays up after its last step ended. */
 export const CARD_HOLD_MS = 60_000;
 
+/**
+ * WHAT A ROW STANDS FOR: one of the steps (live-pending.ts), or — "vault" — a
+ * change Solana said the vault itself made, before an update brought it
+ * (heard-lines.ts). A wallet's heard change is drawn as the "measuring" step it
+ * becomes, under that step's key.
+ */
+export type RowKind = PendingKind | "vault";
+
+/** A line as the rows draw it: a step's, or a change heard and not on the page yet (heard-lines.ts). */
+export interface ShownLine extends Omit<PendingLine, "kind"> {
+  readonly kind: RowKind;
+  /** Heard, not yet read: no step stands behind it. Its words are not read out (Row). */
+  readonly heard?: true;
+}
+
 /** A step that just finished, as its row says it while it is held. */
 export interface DoneLine {
   readonly key: string;
@@ -94,13 +118,13 @@ export interface DoneLine {
 
 /** One row as the list draws it: a step, or a step just done — either one on its way out. */
 export type PendingRow =
-  | { readonly show: "line"; readonly key: string; readonly kind: PendingKind; readonly line: PendingLine; readonly still: boolean; readonly leaving: boolean }
+  | { readonly show: "line"; readonly key: string; readonly kind: RowKind; readonly line: ShownLine; readonly still: boolean; readonly leaving: boolean }
   | { readonly show: "done"; readonly key: string; readonly kind: PendingKind; readonly done: DoneLine; readonly leaving: boolean };
 
 /** What every copy of the rows draws. */
 export interface PendingView {
-  /** The steps as they stand, from the settled read. */
-  readonly lines: readonly PendingLine[];
+  /** The steps as they stand, from the settled read — and after them what was heard and no step has taken yet. */
+  readonly lines: readonly ShownLine[];
   /** What is drawn: those steps, the ones just done, and the ones on their way out, in the steps' order. */
   readonly rows: readonly PendingRow[];
   /** The below-lg card is held up after its last step ended. */
@@ -108,7 +132,7 @@ export interface PendingView {
 }
 
 /** The steps alone, nothing held: a page's first paint, and every caller that tracks nothing. */
-export function viewOf(lines: readonly PendingLine[]): PendingView {
+export function viewOf(lines: readonly ShownLine[]): PendingView {
   return { lines, rows: lines.map((line) => ({ show: "line", key: line.key, kind: line.kind, line, still: false, leaving: false })), held: false };
 }
 
@@ -165,14 +189,20 @@ export function doneOf(step: PendingStep, key: string, after: LiveDashboard, bef
   return { key, kind: step.kind, title, sub: LIVE_COPY.pendingDone.boughtSub, tone: "invest" };
 }
 
-type Leaving = { readonly show: "line"; readonly line: PendingLine } | { readonly show: "done"; readonly done: DoneLine };
+type Leaving = { readonly show: "line"; readonly line: ShownLine } | { readonly show: "done"; readonly done: DoneLine };
 
 /** What the list remembers between settled reads: the steps it last drew, and what it holds, until when (browser ms). */
 export interface PendingTrack {
   readonly data: LiveDashboard;
-  /** The settled steps, and their lines — one line per step, in the same order (live-pending.ts pendingLines). */
+  /**
+   * The settled steps, and their lines — one line per step, in the same order
+   * (live-pending.ts pendingLines) — then the heard lines no step has taken,
+   * which have no step: past the last one, each closes when it ends.
+   */
   readonly steps: readonly PendingStep[];
-  readonly lines: readonly PendingLine[];
+  readonly lines: readonly ShownLine[];
+  /** The heard lines as last given, to tell a change in them from none. */
+  readonly heard: readonly ShownLine[];
   readonly done: ReadonlyMap<string, { readonly row: DoneLine; readonly until: number }>;
   readonly leaving: ReadonlyMap<string, { readonly row: Leaving; readonly until: number }>;
   /** Until when the card stays up with no step on it; null when it is not held. */
@@ -183,20 +213,54 @@ export interface PendingInput {
   readonly data: LiveDashboard;
   readonly steps: readonly PendingStep[];
   readonly lines: readonly PendingLine[];
+  /**
+   * What Solana said changed and the settled read does not draw yet
+   * (heard-lines.ts heardLinesOf), each under the key its step will take. A
+   * step's own line under the same key wins. None when not given.
+   */
+  readonly heard?: readonly ShownLine[];
 }
 
+const NO_LINES: readonly ShownLine[] = [];
+
+/** The steps' lines, then every heard line whose key no step has. */
+export function withHeard(lines: readonly ShownLine[], heard: readonly ShownLine[]): readonly ShownLine[] {
+  if (heard.length === 0) return lines;
+  const keys = new Set(lines.map((line) => line.key));
+  return [...lines, ...heard.filter((line) => !keys.has(line.key))];
+}
+
+const sameLine = (a: ShownLine, b: ShownLine): boolean =>
+  a.key === b.key &&
+  a.kind === b.kind &&
+  a.active === b.active &&
+  a.rest === b.rest &&
+  a.title === b.title &&
+  a.sub === b.sub &&
+  a.amount === b.amount &&
+  a.amountSpoken === b.amountSpoken &&
+  a.heard === b.heard;
+
+/** Whether two lists of lines say the same: heard lines are made afresh at every render. */
+export const sameLines = (a: readonly ShownLine[], b: readonly ShownLine[]): boolean => a.length === b.length && a.every((line, index) => sameLine(line, b[index]!));
+
 export function startTrack(input: PendingInput): PendingTrack {
-  return { data: input.data, steps: input.steps, lines: input.lines, done: new Map(), leaving: new Map(), cardUntil: null };
+  const heard = input.heard ?? NO_LINES;
+  return { data: input.data, steps: input.steps, lines: withHeard(input.lines, heard), heard, done: new Map(), leaving: new Map(), cardUntil: null };
 }
 
 /**
- * The track after a new settled read, at browser time `now`: what ended is
- * held as done or sent on its way out, a step that is back takes its row back,
- * and the card's minute starts when its last step ends.
+ * The track after a new settled read, or a change in what was heard, at
+ * browser time `now`: what ended is held as done or sent on its way out, a step
+ * that is back takes its row back, and the card's minute starts when its last
+ * step ends. A heard line its step takes over keeps its row: same key, nothing
+ * ended (heard-lines.ts).
  */
 export function advancePending(track: PendingTrack, next: PendingInput, now: number): PendingTrack {
-  if (next.data === track.data) return track;
-  const keys = new Set(next.lines.map((line) => line.key));
+  const heard = next.heard ?? NO_LINES;
+  if (next.data === track.data && sameLines(heard, track.heard)) return track;
+  const lines = withHeard(next.lines, heard);
+  const keys = new Set(lines.map((line) => line.key));
   const done = new Map(track.done);
   const leaving = new Map(track.leaving);
   // A step back on screen takes its row back: no "done" and no exit over a live line.
@@ -206,13 +270,14 @@ export function advancePending(track: PendingTrack, next: PendingInput, now: num
   }
   track.lines.forEach((line, index) => {
     if (keys.has(line.key)) return;
+    // A heard line sits past the last step, so it has none: it simply closes.
     const step = track.steps[index];
     const finished = step === undefined ? null : doneOf(step, line.key, next.data, track.data);
     if (finished !== null) done.set(line.key, { row: finished, until: now + DONE_HOLD_MS });
     else leaving.set(line.key, { row: { show: "line", line }, until: now + REVEAL_MS });
   });
-  const cardUntil = next.lines.length > 0 ? null : track.lines.length > 0 ? now + CARD_HOLD_MS : track.cardUntil;
-  return { data: next.data, steps: next.steps, lines: next.lines, done, leaving, cardUntil };
+  const cardUntil = lines.length > 0 ? null : track.lines.length > 0 ? now + CARD_HOLD_MS : track.cardUntil;
+  return { data: next.data, steps: next.steps, lines, heard, done, leaving, cardUntil };
 }
 
 /** What is still held at `now`: a done whose time ran out closes in its turn, and the same track back when nothing was due. */
@@ -248,14 +313,18 @@ export function nextDue(track: PendingTrack): number | null {
  * not under way in the newer snapshot whose history has not landed. Their
  * loader stands still until the read settles. Empty once it has.
  */
-export function stillOf(settled: readonly PendingLine[], latest: readonly PendingLine[]): ReadonlySet<string> {
+export function stillOf(settled: readonly ShownLine[], latest: readonly ShownLine[]): ReadonlySet<string> {
   const turning = new Set(latest.filter((line) => line.active).map((line) => line.key));
   return new Set(settled.filter((line) => line.active && !turning.has(line.key)).map((line) => line.key));
 }
 
-const RANK: Readonly<Record<PendingKind, number>> = { measuring: 0, converting: 1, buying: 2 };
+const RANK: Readonly<Record<RowKind, number>> = { measuring: 0, vault: 1, converting: 2, buying: 3 };
 
-/** The rows in the steps' own order — a wallet being checked, then converting, then buying — each held row where its step stood. */
+/**
+ * The rows in the steps' own order — a wallet being checked, then a change
+ * heard on the vault, then converting, then buying — each held row where its
+ * step stood.
+ */
 export function pendingRowsOf(track: PendingTrack, still: ReadonlySet<string>): PendingRow[] {
   const rows: PendingRow[] = track.lines.map((line) => ({ show: "line", key: line.key, kind: line.kind, line, still: still.has(line.key), leaving: false }));
   for (const [key, held] of track.done) rows.push({ show: "done", key, kind: held.row.kind, done: held.row, leaving: false });
@@ -272,19 +341,18 @@ export function pendingRowsOf(track: PendingTrack, still: ReadonlySet<string>): 
 
 /**
  * THE TRACK, ONCE FOR THE PAGE (LiveBody). `data` is the settled read and
- * `steps`/`lines` its steps; `latest` is the newest snapshot's lines, for the
- * loaders the page is no longer sure of. A new settled read is worked out
- * during the render, so a step that ended is drawn done or leaving in the very
- * frame its line would otherwise vanish from; one timer lets go of whatever is
- * due first.
+ * `steps`/`lines` its steps, `heard` what Solana said changed and no step
+ * draws yet; `latest` is the newest snapshot's lines, for the loaders the page
+ * is no longer sure of. A new settled read, or a change in what was heard, is
+ * worked out during the render, so a step that ended is drawn done or leaving
+ * in the very frame its line would otherwise vanish from; one timer lets go of
+ * whatever is due first.
  */
 export function usePendingView(input: PendingInput & { readonly latest: readonly PendingLine[] }): PendingView {
   const [track, setTrack] = useState<PendingTrack>(() => startTrack(input));
-  let current = track;
-  if (input.data !== track.data) {
-    current = advancePending(track, input, Date.now());
-    setTrack(current);
-  }
+  // The same track back while nothing moved: no render is asked for.
+  const current = advancePending(track, input, Date.now());
+  if (current !== track) setTrack(current);
 
   const due = nextDue(current);
   useEffect(() => {
@@ -294,24 +362,26 @@ export function usePendingView(input: PendingInput & { readonly latest: readonly
     return () => clearTimeout(timer);
   }, [due]);
 
-  return { lines: current.lines, rows: pendingRowsOf(current, stillOf(current.lines, input.latest)), held: current.cardUntil !== null };
+  // A heard line turns for as long as it is heard: it is in the newest as well.
+  const latest = withHeard(input.latest, input.heard ?? NO_LINES);
+  return { lines: current.lines, rows: pendingRowsOf(current, stillOf(current.lines, latest)), held: current.cardUntil !== null };
 }
 
 /** The mark a step wears: under way, resting on a slow keeper, or held for a reason the row states. */
-export function workStateOf(line: PendingLine): WorkState {
+export function workStateOf(line: ShownLine): WorkState {
   if (line.active) return "active";
   return line.rest === "slow" ? "slow" : "held";
 }
 
 /** Blue is a buy, and only a buy under way wears it; the conversion, and anything resting, is the machinery's grey. */
-const toneOf = (line: PendingLine): Tone => (line.active && line.kind === "buying" ? "invest" : "quiet");
+const toneOf = (line: ShownLine): Tone => (line.active && line.kind === "buying" ? "invest" : "quiet");
 
 /**
  * The heading over the rows: under way if one is, waiting if every step rests,
  * and none with no step at all — done rows alone, or a card held up over
  * nothing, are neither in progress nor waiting.
  */
-export function headingOf(lines: readonly PendingLine[]): string | null {
+export function headingOf(lines: readonly ShownLine[]): string | null {
   if (lines.length === 0) return null;
   return lines.some((line) => line.active) ? LIVE_COPY.pendingHeading.active : LIVE_COPY.pendingHeading.waiting;
 }
@@ -332,11 +402,25 @@ function Row({ row }: { readonly row: PendingRow }) {
     );
   }
   const { line } = row;
+  const heard = line.heard === true;
   return (
-    <div className="flex w-full items-start gap-3 px-4 py-2.5" data-pending-step={line.kind} data-state={line.active ? "active" : "waiting"}>
+    <div
+      className="flex w-full items-start gap-3 px-4 py-2.5"
+      data-pending-step={line.kind}
+      data-state={line.active ? "active" : "waiting"}
+      {...(heard ? { "data-pending-heard": "" } : {})}
+    >
       <WorkMark state={workStateOf(line)} tone={toneOf(line)} still={row.still} />
-      <span className="min-w-0 flex-1">
-        <span className={cn("block text-sm", line.kind === "measuring" ? "break-words" : "truncate")}>{line.title}</span>
+      {/*
+        A CHANGE HEARD IS NOT READ OUT (heard-lines.ts): what it becomes is.
+        Its words are a node of their own, keyed apart from a step's, so when
+        the step's line takes over the same row the region is handed that line
+        as an addition and speaks it, as it speaks any step that joins — while
+        the mark beside it turns on through the swap.
+      */}
+      <span key={heard ? "heard" : "step"} className="min-w-0 flex-1" {...(heard ? { "aria-hidden": true } : {})}>
+        {/* A wallet's line and the vault's carry no amount beside them: they wrap rather than lose their last words. */}
+        <span className={cn("block text-sm", line.kind === "measuring" || line.kind === "vault" ? "break-words" : "truncate")}>{line.title}</span>
         <span className="block text-xs text-muted-foreground">{line.sub}</span>
       </span>
       <span className={cn("shrink-0 text-right text-sm", MONO, TONE_TEXT[toneOf(line)])} {...(line.amountSpoken === null ? {} : { "aria-hidden": true })}>
@@ -443,8 +527,8 @@ export function PendingRows({
   announce = true,
   variant = "column",
 }: {
-  /** The steps as they stand. */
-  readonly lines: readonly PendingLine[];
+  /** The steps as they stand, and what was heard and no step draws yet. */
+  readonly lines: readonly ShownLine[];
   /** What to draw, with what has just ended (usePendingView); the steps alone when not given. */
   readonly view?: PendingView;
   readonly className?: string;
