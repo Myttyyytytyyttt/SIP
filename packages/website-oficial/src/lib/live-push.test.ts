@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   EMPTY_PUSH,
   MAX_WATCHED,
+  PENDING_SLOTS_KEPT,
   PUSH_DEBOUNCE_MS,
   PUSH_WALLET_FLOOR_MS,
   WALLET_CHANGE_FORGET_MS,
@@ -130,6 +131,113 @@ describe("what a wallet that keeps trading buys", () => {
     }
     expect(reads).toBe(60_000 / PUSH_WALLET_FLOOR_MS);
     expect(reads).toBe(2);
+  });
+});
+
+/**
+ * A READ LANDS AFTER MORE NOTIFICATIONS (review 2026-10-09). The hook applies
+ * afterRead to the state as the read lands, notifications that arrived while
+ * it was out included. Judged by the newest slot named, a wallet ringing every
+ * slot was never covered: a read every 10 s, "checking your latest activity"
+ * never up, and `dirty` urgent for good.
+ */
+describe("a read that lands after more notifications", () => {
+  it("covers the newest slot it could see, and keeps what came after as a remainder that is not urgent", () => {
+    const first = notified(EMPTY_PUSH, { address: WALLET_A, slot: 100, now: NOW, wallet: true });
+    // The read takes its snapshot at 100; while it is out the wallet rings at 101 and 102.
+    const during = notified(notified(first, { address: WALLET_A, slot: 101, now: NOW + 400, wallet: true }), { address: WALLET_A, slot: 102, now: NOW + 800, wallet: true });
+    const landed = afterRead(during, { slot: 100, historyRead: true, readAtMs: NOW + 900, ends: {} });
+    expect(landed.wallets[WALLET_A]).toEqual({ pending: [101, 102], covered: { slot: 100, atMs: NOW + 900, open: true } });
+    expect(walletChangesOf(landed)).toEqual([{ wallet: WALLET_A, slot: 100, sinceMs: NOW + 900 }]);
+    expect(landed.dirty).toEqual({ since: NOW, slot: 102, urgent: false });
+    // So the next read waits the wallet's floor, not the manual one.
+    expect(pushReadDelayMs({ ...quiet, dirty: landed.dirty, now: NOW + 1_000, lastReadAt: NOW + 1_000 })).toBe(PUSH_WALLET_FLOOR_MS);
+    // And the read after it covers the rest.
+    const next = afterRead(landed, { slot: 102, historyRead: true, readAtMs: NOW + 31_000, ends: {} });
+    expect(next.dirty).toBeNull();
+    expect(next.wallets[WALLET_A]).toEqual({ pending: [], covered: { slot: 102, atMs: NOW + 900, open: true } });
+  });
+
+  it("covers the newest slot at or under the snapshot's, not the oldest, so a settlement in between is judged against the right one", () => {
+    let state = EMPTY_PUSH;
+    for (const slot of [100, 105, 110]) state = notified(state, { address: WALLET_A, slot, now: NOW, wallet: true });
+    const open = afterRead(state, { slot: 107, historyRead: true, readAtMs: NOW, ends: { [WALLET_A]: 103 } });
+    expect(open.wallets[WALLET_A]).toEqual({ pending: [110], covered: { slot: 105, atMs: NOW, open: true } });
+    expect(open.dirty?.urgent).toBe(false);
+    // A settlement at 106 ended 105: the change after it is the wallet's first since, and urgent.
+    const ended = afterRead(state, { slot: 107, historyRead: true, readAtMs: NOW, ends: { [WALLET_A]: 106 } });
+    expect(ended.wallets[WALLET_A]!.covered).toEqual({ slot: 105, atMs: NOW, open: false });
+    expect(ended.dirty).toMatchObject({ slot: 110, urgent: true });
+  });
+
+  it("keeps a vault change heard while the read was out urgent, with a follow-up of its own", () => {
+    const covered = afterRead(notified(EMPTY_PUSH, { address: WALLET_A, slot: 100, now: NOW, wallet: true }), { slot: 100, historyRead: true, readAtMs: NOW, ends: {} });
+    const busy = notified(covered, { address: WALLET_A, slot: 200, now: NOW + 30_000, wallet: true });
+    // The read takes its snapshot at 200; the settle that follows rings the vault at 205 while it is out.
+    const during = notified(busy, { address: VAULT, slot: 205, now: NOW + 30_500, wallet: false });
+    const landed = afterRead(during, { slot: 200, historyRead: true, readAtMs: NOW + 31_000, ends: {}, historySlot: 200 });
+    expect(landed.dirty).toMatchObject({ slot: 205, urgent: true, vaultSlot: 205 });
+    expect(landed.dirty?.followUp).toBeUndefined();
+    expect(landed.wallets[WALLET_A]!.pending).toEqual([]);
+  });
+
+  it("keeps a vault follow-up that a read reached and its history did not, beside a wallet's remainder", () => {
+    const vault = notified(EMPTY_PUSH, { address: VAULT, slot: 300, now: NOW, wallet: false });
+    const during = notified(vault, { address: WALLET_A, slot: 310, now: NOW + 500, wallet: true });
+    const landed = afterRead(during, { slot: 305, historyRead: true, readAtMs: NOW + 900, ends: {}, historySlot: 299 });
+    expect(landed.dirty).toEqual({ since: NOW, slot: 310, urgent: true, vaultSlot: 300, followUp: true });
+    // Covered by any answer at or past it next time, as before.
+    expect(afterRead(landed, { slot: 310, historyRead: true, readAtMs: NOW + 12_000, ends: {}, historySlot: 299 }).dirty).toBeNull();
+  });
+
+  it("a wallet that rings every slot, read by reads that take 900 ms, buys about two reads a minute and is checked", () => {
+    // The reviewer's probe: the snapshot slot is the slot when the read starts; notifications keep arriving until it lands.
+    const SLOT_MS = 400;
+    const READ_MS = 900;
+    let state = EMPTY_PUSH;
+    let lastReadAt: number | null = null;
+    let out: { readonly slot: number; readonly landsAt: number } | null = null;
+    let reads = 0;
+    let slot = 0;
+    for (let t = NOW; t <= NOW + 120_000; t += 100) {
+      if ((t - NOW) % SLOT_MS === 0) {
+        slot += 1;
+        state = notified(state, { address: WALLET_A, slot, now: t, wallet: true });
+      }
+      if (out !== null && t >= out.landsAt) {
+        state = afterRead(state, { slot: out.slot, historyRead: true, readAtMs: t, ends: {} });
+        lastReadAt = t;
+        out = null;
+      }
+      if (out === null && pushReadDelayMs({ ...quiet, dirty: state.dirty, now: t, lastReadAt, reading: false }) === 0) {
+        reads += 1;
+        out = { slot, landsAt: t + READ_MS };
+      }
+    }
+    // The first, then one per PUSH_WALLET_FLOOR_MS (plus the read's own time): not one per MANUAL_FLOOR_MS (11 before).
+    expect(reads).toBeLessThanOrEqual(1 + Math.ceil(120_000 / (PUSH_WALLET_FLOOR_MS + READ_MS)));
+    expect(state.dirty?.urgent).toBe(false);
+    expect(walletChangesOf(state)).toHaveLength(1);
+    expect(state.wallets[WALLET_A]!.covered).toMatchObject({ atMs: NOW + 1_500 + READ_MS, open: true });
+  });
+
+  it("keeps at most PENDING_SLOTS_KEPT slots a wallet, the oldest among them, so a snapshot behind the rest still covers something", () => {
+    expect(PENDING_SLOTS_KEPT).toBe(64);
+    let state = EMPTY_PUSH;
+    for (let slot = 1_000; slot < 2_000; slot += 1) state = notified(state, { address: WALLET_A, slot, now: NOW, wallet: true });
+    const pending = state.wallets[WALLET_A]!.pending;
+    expect(pending).toHaveLength(PENDING_SLOTS_KEPT);
+    expect(pending[0]).toBe(1_000);
+    expect(pending.at(-1)).toBe(1_999);
+    const landed = afterRead(state, { slot: 1_500, historyRead: true, readAtMs: NOW, ends: {} });
+    expect(landed.wallets[WALLET_A]!.covered?.slot).toBe(1_000);
+    expect(landed.wallets[WALLET_A]!.pending).toHaveLength(PENDING_SLOTS_KEPT - 1);
+  });
+
+  it("names each slot once, in order, however the notifications arrive", () => {
+    let state = EMPTY_PUSH;
+    for (const slot of [12, 10, 12, 11]) state = notified(state, { address: WALLET_A, slot, now: NOW, wallet: true });
+    expect(state.wallets[WALLET_A]!.pending).toEqual([10, 11, 12]);
   });
 });
 

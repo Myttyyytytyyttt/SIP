@@ -593,6 +593,7 @@ export const PENDING_COPY = {
   plusConverting: (sol: string): string => `Plus ${sol} SOL being converted to USDC`,
   /** A conversion due and not done ("slow"): still counted, never called under way. */
   includesConvertingSlow: (usd: string): string => `Includes about ${usd} of SOL not converted yet · ${BRAND} tries again about once a minute`,
+  plusConvertingSlow: (sol: string): string => `Plus ${sol} SOL not converted yet · ${BRAND} tries again about once a minute`,
   /**
    * SOL UNDER THE KEEPER'S WRAP LINE (live-pending.ts solUnderWrapLine): counted
    * like SOL being converted, and the line it waits for named, with what the
@@ -607,6 +608,18 @@ export const PENDING_COPY = {
     `Includes about ${usd} of SOL on its way to USDC, ${waiting} of it once your vault holds ${line} SOL (${short} SOL more)`,
   plusBoth: (sol: string, waiting: string, line: string, short: string): string =>
     `Plus ${sol} SOL on its way to USDC, ${waiting} SOL of it once your vault holds ${line} SOL (${short} SOL more)`,
+  /** The same with the conversion overdue ("slow"): counted, never called on its way. */
+  includesBothSlow: (usd: string, waiting: string, line: string, short: string): string =>
+    `Includes about ${usd} of SOL not converted yet, ${waiting} of it once your vault holds ${line} SOL (${short} SOL more) · ${BRAND} tries again about once a minute`,
+  plusBothSlow: (sol: string, waiting: string, line: string, short: string): string =>
+    `Plus ${sol} SOL not converted yet, ${waiting} SOL of it once your vault holds ${line} SOL (${short} SOL more) · ${BRAND} tries again about once a minute`,
+  /**
+   * THE LINE THE NEXT SAVING MUST CROSS (live-pending.ts wrapLineAhead), when
+   * no SOL waits under it and it is more than the basket lacks: the reason the
+   * card prints no "to go" of its own. `usd` is what the line lacks, at today's
+   * price.
+   */
+  lineAhead: (line: string, usd: string): string => `Your next savings convert to USDC once your vault holds ${line} SOL (about ${usd})`,
   readyToBuy: `Ready to buy · ${BRAND} checks about once a minute`,
   /**
    * A TRADING WALLET THAT CHANGED and has no saving for it yet (live-pending.ts

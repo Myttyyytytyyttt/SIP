@@ -14,6 +14,7 @@ import {
   pendingPollWanted,
   ACTIVITY_RETRIES,
   nextActivityRetryMs,
+  refusalBacksOff,
   unheardPollWanted,
 } from "@/lib/live-schedule";
 
@@ -238,5 +239,46 @@ describe("the poll while the push is down", () => {
   it("is not wanted while the history's retry-after is still ahead: a refusal is obeyed", () => {
     expect(unheardPollWanted({ socket: "off", activityRetryAt: NOW + 1, now: NOW })).toBe(false);
     expect(unheardPollWanted({ socket: "off", activityRetryAt: NOW, now: NOW })).toBe(true);
+  });
+});
+
+/**
+ * THE BUCKET IS PER CLIENT (review 2026-10-09): three visible dashboards
+ * behind one NAT on the 20 s cadence spend ~63 of 60 tokens a minute, reads
+ * come back 429, and each refusal used to step the tab into BACKOFF_MS — two,
+ * four, five minutes between reads, far slower than the minute it replaced.
+ */
+describe("a refusal the faster cadence earned", () => {
+  /** The cadence a tab is on after its reads come back `refusals` times in a row, 429 each, starting under the unheard cadence. */
+  const after = (refusals: number, startUnheard: boolean): number | null => {
+    let failures = 0;
+    let refused = false;
+    for (let index = 0; index < refusals; index += 1) {
+      const unheard = startUnheard && unheardPollWanted({ socket: "off", activityRetryAt: null, now: NOW, refused });
+      if (refusalBacksOff({ rateLimited: true, unheard, failures })) failures += 1;
+      else refused = true;
+    }
+    const unheard = startUnheard && unheardPollWanted({ socket: "off", activityRetryAt: null, now: NOW, refused });
+    return nextDelayMs({ ...base, failures, unheard });
+  };
+
+  it("drops the tab back to the minute instead of backing it off, until a read succeeds", () => {
+    expect(refusalBacksOff({ rateLimited: true, unheard: true, failures: 0 })).toBe(false);
+    expect(unheardPollWanted({ socket: "off", activityRetryAt: null, now: NOW, refused: true })).toBe(false);
+    expect(after(1, true)).toBe(POLL_BASE_MS);
+  });
+
+  it("does not step a tab into BACKOFF_MS any faster than a plain sweep would", () => {
+    for (let refusals = 1; refusals <= 4; refusals += 1) {
+      // Under the unheard cadence it takes one refusal more — the one the cadence itself earned.
+      expect(after(refusals + 1, true)).toBe(after(refusals, false));
+    }
+    expect(after(2, true)).toBe(BACKOFF_MS[0]);
+  });
+
+  it("counts every other failure as before: a network error, a refusal at the minute's cadence, one after a failure", () => {
+    expect(refusalBacksOff({ rateLimited: false, unheard: true, failures: 0 })).toBe(true);
+    expect(refusalBacksOff({ rateLimited: true, unheard: false, failures: 0 })).toBe(true);
+    expect(refusalBacksOff({ rateLimited: true, unheard: true, failures: 1 })).toBe(true);
   });
 });

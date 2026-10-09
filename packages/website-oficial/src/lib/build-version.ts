@@ -6,10 +6,11 @@
  * as it stays open. A tab opened before the push's deploy (4ab56ae, 01:45Z on
  * 10-09) ran feb0a63, which has no push at all, and nothing on the page could
  * say that what it showed was not what had shipped. So the page
- * can now ask: GET /api/version answers the commit the server runs, and this
- * bundle carries the commit it was built from; when they differ, an update is
- * available (src/hooks/use-new-version.ts). What the page does with that is
- * the page's.
+ * has what it needs to ask: GET /api/version answers the commit the server
+ * runs, and this bundle carries the commit it was built from; when they
+ * differ, an update is available (src/hooks/use-new-version.ts). No tab asks
+ * yet — nothing mounts that hook until the UI that draws it does — and what
+ * the page does with the answer is the page's.
  *
  * THE BUNDLE'S COMMIT IS BAKED IN AT BUILD TIME, ON PURPOSE. Everything else
  * this app knows of its deployment is read at request time (lib/config.ts:

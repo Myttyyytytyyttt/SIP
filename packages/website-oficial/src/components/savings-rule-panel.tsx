@@ -149,8 +149,8 @@ export function SavingsRulePanel({
    * not even a float's last digit can move the landing's bar.
    *
    * A LIVE PAGE'S "TO GO" IS THE KEEPER'S (live-pending.ts toGoOf). While a
-   * gate holds the buy — SOL under the wrap line, a conversion overdue — the
-   * bar stops short of full, and dollars to go are printed only where they are
+   * gate holds the buy — the wrap line, a conversion overdue, a rest the page
+   * can read — the bar stops short of full, and dollars to go are printed only where they are
    * the headline's own difference: "$1.19 of $1.00 · $0.11 to go" would argue
    * with itself, and "$0.00 to go" would promise a buy that is not coming. The
    * note under the bar says what is left instead.

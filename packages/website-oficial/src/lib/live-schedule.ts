@@ -48,11 +48,20 @@ export const PENDING_POLL_MAX_MS = 5 * 60_000;
  * relay.perClientPerMin = 60 weighted tokens a minute (solana-core
  * build-handler.ts): a quiet read is a snapshot (4: BUILD_REQUEST_WEIGHT 3 + 1
  * more call) and an activity page (3, plus 1 per new transaction), about 7
- * tokens, so three a minute is about 21 of the 60 — the pending cadence's
- * rate, never added to it, and well inside the bucket. Upstream, 15 calls a
- * minute per such tab (relay.readsGlobalPerMin, 1,800 by default, is what
- * every route's reads share). A hidden tab still reads nothing, a backoff
- * still wins, and so does a retry-after.
+ * tokens, so three a minute is about 21 of the 60 FOR ONE VISIBLE TAB — the
+ * pending cadence's rate, never added to it. Upstream, 15 calls a minute per
+ * such tab (relay.readsGlobalPerMin, 1,800 by default, is what every route's
+ * reads share). A hidden tab still reads nothing, a backoff still wins, and so
+ * does a retry-after.
+ *
+ * THE BUCKET IS PER CLIENT, NOT PER TAB (review 2026-10-09): one IPv4 address
+ * or IPv6 /64 (handlers.ts). With the push down for everyone behind one NAT —
+ * a laptop, a phone on the same Wi-Fi and a second window — every visible
+ * dashboard there drops to 20 s at once: three of them is about 63 tokens a
+ * minute, and reads start coming back 429. So a refusal this cadence earned
+ * is not a failure (refusalBacksOff): the tab goes back to the minute's poll
+ * until a read succeeds, obeying the retry-after, instead of stepping into
+ * BACKOFF_MS's two to five minutes — slower than the minute it replaced.
  */
 export const UNHEARD_POLL_MS = 20_000;
 
@@ -60,11 +69,31 @@ export const UNHEARD_POLL_MS = 20_000;
  * Whether the page is on its own: a socket is wanted (a live pension with a
  * vault to watch — "none" otherwise) and it is not live. Never while the
  * history's retry-after is still ahead: every read asks for the history, and
- * the faster cadence would ask before the moment the server named.
+ * the faster cadence would ask before the moment the server named. Never once
+ * a read at this cadence was refused (`refused`), until a read succeeds.
  */
-export function unheardPollWanted(input: { readonly socket: SocketState | "none"; readonly activityRetryAt: number | null; readonly now: number }): boolean {
-  if (input.socket === "none" || input.socket === "live") return false;
+export function unheardPollWanted(input: {
+  readonly socket: SocketState | "none";
+  readonly activityRetryAt: number | null;
+  readonly now: number;
+  /** A read this cadence bought was refused (429) and none has succeeded since (refusalBacksOff). */
+  readonly refused?: boolean;
+}): boolean {
+  if (input.socket === "none" || input.socket === "live" || input.refused === true) return false;
   return !(input.activityRetryAt !== null && input.activityRetryAt > input.now);
+}
+
+/**
+ * WHETHER A READ THAT FAILED COUNTS TOWARD THE BACKOFF. Every failure does,
+ * but one: a rate limit (429) on a read the faster unheard cadence bought,
+ * with nothing failed before it. That one is the cadence's own doing — the
+ * tab drops back to the minute (unheardPollWanted's `refused`) and obeys the
+ * retry-after, so the faster cadence never steps a tab into BACKOFF_MS sooner
+ * than a plain sweep would. A refusal at the minute's cadence after it counts
+ * as it always has.
+ */
+export function refusalBacksOff(input: { readonly rateLimited: boolean; readonly unheard: boolean; readonly failures: number }): boolean {
+  return !(input.rateLimited && input.unheard && input.failures === 0);
 }
 
 /** After repeated failures: 2 minutes, 4, then 5 at most. Reset on success. */

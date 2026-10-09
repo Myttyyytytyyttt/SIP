@@ -6,6 +6,11 @@
  * as it stays open, and nothing said so. Data only — what the page draws for
  * it (a chip, a reload) is the page's.
  *
+ * PLUMBING ONLY, FOR NOW (review 2026-10-09): nothing mounts this yet, so no
+ * tab asks /api/version and a stale tab still says nothing. It is meant for
+ * the dashboard frame, beside the UI that draws `updateAvailable`; until that
+ * lands, D5 is not fixed — only made fixable.
+ *
  * It asks GET /api/version when the tab is looked at again or takes focus, at
  * most once a minute (VERSION_CHECK_FLOOR_MS), and every VERSION_CHECK_MS
  * while it stays visible; a hidden tab asks nothing. Once an update is

@@ -49,10 +49,30 @@
  * server that confirms and then drops cannot hold the page in a one-second
  * loop, and one closed after a long healthy stretch is not punished for it.
  * reconnect() is the page's way back: on returning to the tab, on focus, on
- * `online`, it connects NOW with the count reset — unless the open socket is
- * demonstrably alive. A reconnect that confirms a subscription calls onResync:
- * whatever changed while it was down rang nobody, so one read is owed. Every
- * change of state reaches onState, so the page can say whether it is live.
+ * `online`, it connects NOW — unless the open socket is demonstrably alive, or
+ * the last attempt is under WAKE_FLOOR_MS old — and only `online` starts the
+ * count again (WAKE_FLOOR_MS). A reconnect that confirms a subscription calls
+ * onResync: whatever changed while it was down rang nobody, so one read is
+ * owed. Every change of state reaches onState, so the page can say whether it
+ * is live.
+ *
+ * "LIVE" MEANS EVERY ADDRESS IS HEARD (review 2026-10-09). An endpoint can
+ * refuse one subscribe and take the others — PublicNode answers a burst with
+ * {"error":{"code":429}} frames, and the page sends up to 13 at once on open —
+ * and the refused address used to be dropped for the life of the socket: the
+ * page said "live" over a trading wallet nobody watched, and a trade from it
+ * rang nobody. So a refused or unanswered subscribe is asked again on the next
+ * beat of the keepalive, for as long as the address is wanted, and the state
+ * is "live" only while every wanted address is confirmed. A socket that is
+ * open and has confirmed NOTHING after UNCONFIRMED_BEATS beats is let go and
+ * counted as a failure, so "connecting" cannot last for the life of the tab.
+ *
+ * A DEAD SOCKET IS NOTICED WHILE THE TAB IS LOOKED AT. A half-open connection
+ * — a backend gone without a FIN, a NAT that dropped the flow — sends no close
+ * event for as long as the OS keeps the TCP alive, often many minutes. Only
+ * reconnect() used to judge it, and nothing calls that on a tab that stays
+ * visible and focused. So each beat checks it too: an endpoint that answers
+ * pings and has answered none of the last MISSED_PINGS is let go and replaced.
  */
 
 /** The subset of the browser's WebSocket this uses, so a test can hand in a fake. */
@@ -106,6 +126,37 @@ export const SLOW_RECONNECT_MS = 60_000;
 /** The keepalive's beat: half the ~60 s after which the public endpoint closed a silent socket. */
 export const PING_MS = 30_000;
 
+/**
+ * HOW MANY PINGS IN A ROW MAY GO UNANSWERED before an endpoint that answers
+ * pings is taken as gone, on the beat itself: about LIVELY_MS after its last
+ * frame. Counted in pings SENT rather than in time since the last frame,
+ * because a hidden tab's timers can be held back for minutes — a socket whose
+ * ping was never sent has missed nothing, and must not be torn down for the
+ * silence its own tab caused.
+ */
+export const MISSED_PINGS = 2;
+
+/**
+ * Beats an open socket may go without confirming a single subscription before
+ * it is let go and counted as a failure: every refused subscribe has been
+ * asked again UNCONFIRMED_BEATS - 1 times by then.
+ */
+export const UNCONFIRMED_BEATS = 3;
+
+/**
+ * THE PAGE'S OWN EVENTS DO NOT OUTRUN THE BACKOFF (review 2026-10-09). Focus
+ * and visibilitychange connect at once only when the last attempt is at least
+ * this old, and never start the count again: against an endpoint that keeps
+ * refusing (a 403, a 429 on the handshake) every window focus used to restart
+ * the 1, 2, 5, 15, 30 s cascade on top of an immediate attempt — about five
+ * handshakes for every 20 s of alt-tabbing, for as long as the tab stayed
+ * open. Now a person switching windows adds at most one handshake per
+ * WAKE_FLOOR_MS. Only `online` — the network itself came back, which is what
+ * the earlier failures were about — connects at once with the count started
+ * again (reconnect({ network: true })).
+ */
+export const WAKE_FLOOR_MS = 15_000;
+
 /** The text keepalive: a JSON-RPC notification the endpoint takes, and answers or not. */
 const PING = JSON.stringify({ jsonrpc: "2.0", method: "ping" });
 
@@ -133,8 +184,9 @@ export const LIVELY_MS = 3 * PING_MS;
 
 /**
  * What the page can say about the push: "connecting" (a socket is being opened,
- * or it is open with nothing confirmed yet), "live" (at least one subscription
- * confirmed on the open socket), "off" (closed, waiting for the next attempt).
+ * or it is open and some address it wants is not confirmed yet — refused, or
+ * still being asked for), "live" (EVERY wanted address confirmed on the open
+ * socket), "off" (closed, waiting for the next attempt).
  */
 export type SocketState = "connecting" | "live" | "off";
 
@@ -142,12 +194,14 @@ export interface ChainWatch {
   /** The accounts to watch from now on; the same set is a no-op, a different one subscribes and unsubscribes the difference. */
   setAddresses(addresses: readonly string[]): void;
   /**
-   * Try NOW, with the reconnect count started again: the tab is looked at, the
-   * window took focus, the network came back. A socket that is opening is left
-   * to finish, and an open one is left alone unless it is demonstrably dead
-   * (LIVELY_MS). Nothing after close().
+   * Try NOW: the tab is looked at, the window took focus, the network came
+   * back. A socket that is opening is left to finish, and an open one is left
+   * alone unless it is demonstrably dead (LIVELY_MS). One waiting to retry
+   * connects at once when its last attempt is WAKE_FLOOR_MS old, keeping its
+   * count; with `network` (the `online` event) at once whatever its age, with
+   * the count started again. Nothing after close().
    */
-  reconnect(): void;
+  reconnect(options?: { readonly network?: boolean }): void;
   /** Unsubscribe, close, and never reconnect. */
   close(): void;
 }
@@ -192,6 +246,14 @@ export function watchAccounts(options: WatchOptions): ChainWatch {
   let lastFrameAt: number | null = null;
   /** Whether this socket's endpoint has answered a ping: only then does its silence say anything (LIVELY_MS). */
   let answersPings = false;
+  /** Whether a good frame came since the last ping was sent (true before the first): the beat's own test of life. */
+  let heardSincePing = true;
+  /** Pings in a row this socket sent and heard nothing after (MISSED_PINGS). */
+  let missedPings = 0;
+  /** Beats this socket has run without confirming any subscription (UNCONFIRMED_BEATS). */
+  let beatsUnconfirmed = 0;
+  /** When the last socket was opened, on this browser's clock (WAKE_FLOOR_MS); null before the first. */
+  let lastAttemptAt: number | null = null;
   let state: SocketState | null = null;
   let nextId = 1;
   const pending = new Map<number, Pending>();
@@ -220,6 +282,20 @@ export function watchAccounts(options: WatchOptions): ChainWatch {
   const subscribe = (address: string): void =>
     send("accountSubscribe", [address, { commitment: "confirmed", encoding: "base64" }], { address, kind: "subscribe" });
 
+  /** Whether a subscribe for `address` is out and unanswered on this socket. */
+  const asking = (address: string): boolean => [...pending.values()].some((entry) => entry.kind === "subscribe" && entry.address === address);
+
+  /**
+   * "live" only while the open socket has every wanted address confirmed;
+   * "connecting" while it is open and any is not. A socket that is not open
+   * says what connect() and retry() set.
+   */
+  const refreshState = (): void => {
+    if (socket === null || socket.readyState !== OPEN) return;
+    const heardAll = confirmedAt !== null && [...wanted].every((address) => subscribed.has(address));
+    setState(heardAll ? "live" : "connecting");
+  };
+
   const unsubscribe = (address: string): void => {
     const id = subscribed.get(address);
     if (id === undefined) return;
@@ -239,7 +315,10 @@ export function watchAccounts(options: WatchOptions): ChainWatch {
     if (message === null || typeof message !== "object") return;
     const body = message as { id?: unknown; result?: unknown; method?: unknown; params?: unknown; error?: unknown };
     // A frame that carried no error is the server showing it is there, whatever it says.
-    if (body.error === undefined) lastFrameAt = now();
+    if (body.error === undefined) {
+      lastFrameAt = now();
+      heardSincePing = true;
+    }
 
     if (body.method === "accountNotification") {
       const params = body.params as { subscription?: unknown; result?: { context?: { slot?: unknown } } } | undefined;
@@ -261,6 +340,9 @@ export function watchAccounts(options: WatchOptions): ChainWatch {
     const entry = pending.get(body.id);
     if (entry === undefined) return;
     pending.delete(body.id);
+    // A SUBSCRIBE REFUSED (an error frame, a 429 among them) is not a
+    // subscription: the address stays unheard, the state is not "live", and
+    // the next beat asks for it again.
     if (entry.kind !== "subscribe" || typeof body.result !== "number") return;
     // Answered for an address no longer wanted: let it go at once.
     if (!wanted.has(entry.address) || subscribed.has(entry.address)) {
@@ -271,10 +353,10 @@ export function watchAccounts(options: WatchOptions): ChainWatch {
     bySubscription.set(body.result, entry.address);
     if (confirmedAt === null) {
       confirmedAt = now();
-      setState("live");
       if (everConfirmed) options.onResync?.();
       everConfirmed = true;
     }
+    refreshState();
   };
 
   const stopPing = (): void => {
@@ -282,15 +364,35 @@ export function watchAccounts(options: WatchOptions): ChainWatch {
     pingTimer = null;
   };
 
+  /**
+   * THE BEAT, every PING_MS while the socket is open: first whether the socket
+   * is still worth keeping (MISSED_PINGS, UNCONFIRMED_BEATS), then every
+   * wanted address that is neither confirmed nor being asked for is asked for
+   * again, then the ping.
+   */
   const ping = (of: SocketLike): void => {
     pingTimer = setTimer(() => {
       pingTimer = null;
       if (socket !== of || of.readyState !== OPEN) return;
+      missedPings = answersPings && !heardSincePing ? missedPings + 1 : 0;
+      if (missedPings >= MISSED_PINGS) {
+        abandon(of);
+        return;
+      }
+      if (confirmedAt === null && wanted.size > 0) {
+        beatsUnconfirmed += 1;
+        if (beatsUnconfirmed >= UNCONFIRMED_BEATS) {
+          abandon(of);
+          return;
+        }
+      }
+      for (const address of wanted) if (!subscribed.has(address) && !asking(address)) subscribe(address);
       try {
         of.send(PING);
       } catch {
         // A socket that cannot take a ping is about to close; close moves on.
       }
+      heardSincePing = false;
       ping(of);
     }, PING_MS);
   };
@@ -308,11 +410,27 @@ export function watchAccounts(options: WatchOptions): ChainWatch {
     }
   };
 
+  /** Only a socket that proved it worked starts the count again (STABLE_MS). */
+  const provedItself = (): boolean => confirmedAt !== null && lastFrameAt !== null && lastFrameAt - confirmedAt >= STABLE_MS;
+
+  /** Gives up on a socket that is still open — dead, or confirming nothing — and moves on as its close would have. */
+  const abandon = (of: SocketLike): void => {
+    socket = null;
+    stopPing();
+    if (provedItself()) failures = 0;
+    detach(of);
+    retry();
+  };
+
   const connect = (): void => {
     if (closed) return;
     confirmedAt = null;
     lastFrameAt = null;
     answersPings = false;
+    heardSincePing = true;
+    missedPings = 0;
+    beatsUnconfirmed = 0;
+    lastAttemptAt = now();
     stopPing();
     pending.clear();
     subscribed.clear();
@@ -341,8 +459,7 @@ export function watchAccounts(options: WatchOptions): ChainWatch {
       if (socket !== next) return;
       socket = null;
       stopPing();
-      // Only a socket that proved it worked starts the count again (STABLE_MS).
-      if (confirmedAt !== null && lastFrameAt !== null && lastFrameAt - confirmedAt >= STABLE_MS) failures = 0;
+      if (provedItself()) failures = 0;
       retry();
     };
   };
@@ -371,19 +488,28 @@ export function watchAccounts(options: WatchOptions): ChainWatch {
       if (closed) return;
       for (const address of before) if (!next.has(address)) unsubscribe(address);
       for (const address of next) if (!before.has(address)) subscribe(address);
+      // A new address is unheard until confirmed; a dropped one may have been the last unheard.
+      refreshState();
     },
-    reconnect() {
+    reconnect(wake = {}) {
       if (closed) return;
-      failures = 0;
       if (socket !== null) {
         // Opening, or open and not shown dead: left alone — tearing a healthy
-        // socket down on every focus would buy a resync read each time.
+        // socket down on every focus would buy a resync read each time — and
+        // its count untouched.
         const dead = socket.readyState === OPEN && answersPings && lastFrameAt !== null && now() - lastFrameAt > LIVELY_MS;
         if (!dead) return;
         const last = socket;
         socket = null;
         stopPing();
+        if (provedItself()) failures = 0;
         detach(last);
+      } else if (wake.network === true) {
+        // The network came back: what failed before was the network's.
+        failures = 0;
+      } else if (lastAttemptAt !== null && now() - lastAttemptAt < WAKE_FLOOR_MS) {
+        // Tried a moment ago: the timer already armed is the next attempt.
+        return;
       }
       if (timer !== null) clearTimer(timer);
       timer = null;

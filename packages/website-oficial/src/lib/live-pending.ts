@@ -386,6 +386,40 @@ export function solUnderWrapLine(data: LiveDashboard): SolUnderWrapLine | null {
   };
 }
 
+/** What the vault's free SOL still lacks before the keeper wraps the NEXT saving: counted by toGoOf, never a row. */
+export interface WrapLineAhead {
+  /** Lamports a saving must bring for the free SOL to reach WRAP_DUST_LAMPORTS. */
+  readonly shortLamports: bigint;
+  /** `shortLamports` in USDC raw at the price this snapshot read. Null without a price. */
+  readonly shortUsdcRaw: bigint | null;
+}
+
+/**
+ * THE WRAP LINE THE NEXT SAVING MUST CROSS (review 2026-10-09). A saving lands
+ * as free SOL, and the keeper wraps nothing under WRAP_DUST_LAMPORTS — so the
+ * line binds every saving, not only the SOL already waiting under it. With no
+ * free SOL at all, the normal state after every wrap, solUnderWrapLine has
+ * nothing to count and says nothing, and "to go" read as the USDC's own gap:
+ * USDC $0.80 of a $1.00 basket said "$0.20 to go", a $0.43 saving landed, the
+ * keeper did not wrap it, bought nothing (each leg $0.40), and only then did
+ * the card name the line.
+ *
+ * What is short: the whole line while the free SOL is over it — the converting
+ * step wraps that SOL first, so the next saving lands on none — and the line
+ * less the free SOL under it otherwise. Null when the free SOL is unread, and
+ * when a rest the page can read holds the SOL back (convertRest): then no
+ * saving converts at all, and the line is not what is in the way.
+ */
+export function wrapLineAhead(data: LiveDashboard): WrapLineAhead | null {
+  const { vault, policy } = data;
+  if (!vault.exists || policy.status !== "exists" || convertRest(data) !== null) return null;
+  const free = vault.withdrawable;
+  if (free === null) return null;
+  const shortLamports = free >= WRAP_DUST_LAMPORTS ? WRAP_DUST_LAMPORTS : WRAP_DUST_LAMPORTS - free;
+  const perSol = rawFrom(data.prices?.usdcRawPerSol);
+  return { shortLamports, shortUsdcRaw: perSol === null ? null : usdcRawForLamports(shortLamports, perSol) };
+}
+
 /** Whether any step is drawn with a loader: the dashboard reads the chain more often while one is. */
 export const anyActive = (steps: readonly PendingStep[]): boolean => steps.some((step) => step.state === "active");
 
@@ -495,18 +529,25 @@ export function nextInvestmentOf(
 ): { readonly extraUsdcRaw: bigint | null; readonly note: string | null } {
   const converting = countedConverting(steps);
   if (converting !== undefined) {
+    // Overdue ("slow"): counted all the same, and never called on its way — in every branch below.
+    const slow = converting.rest === "slow";
     if (waiting === null) {
-      if (converting.valueUsdcRaw === null) return { extraUsdcRaw: null, note: PENDING_COPY.plusConverting(solText(converting.amountRaw)) };
+      if (converting.valueUsdcRaw === null) {
+        const sol = solText(converting.amountRaw);
+        return { extraUsdcRaw: null, note: slow ? PENDING_COPY.plusConvertingSlow(sol) : PENDING_COPY.plusConverting(sol) };
+      }
       const usd = formatUsd(converting.valueUsdcRaw);
-      return { extraUsdcRaw: converting.valueUsdcRaw, note: converting.rest === "slow" ? PENDING_COPY.includesConvertingSlow(usd) : PENDING_COPY.includesConverting(usd) };
+      return { extraUsdcRaw: converting.valueUsdcRaw, note: slow ? PENDING_COPY.includesConvertingSlow(usd) : PENDING_COPY.includesConverting(usd) };
     }
     const short = solText(waiting.shortLamports);
     // One price values every SOL figure here: both have a dollar value, or neither does.
     if (converting.valueUsdcRaw === null || waiting.valueUsdcRaw === null) {
-      return { extraUsdcRaw: null, note: PENDING_COPY.plusBoth(solText(converting.amountRaw + waiting.lamports), solText(waiting.lamports), WRAP_LINE_SOL, short) };
+      const plus = slow ? PENDING_COPY.plusBothSlow : PENDING_COPY.plusBoth;
+      return { extraUsdcRaw: null, note: plus(solText(converting.amountRaw + waiting.lamports), solText(waiting.lamports), WRAP_LINE_SOL, short) };
     }
     const total = converting.valueUsdcRaw + waiting.valueUsdcRaw;
-    return { extraUsdcRaw: total, note: PENDING_COPY.includesBoth(formatUsd(total), formatUsd(waiting.valueUsdcRaw), WRAP_LINE_SOL, short) };
+    const includes = slow ? PENDING_COPY.includesBothSlow : PENDING_COPY.includesBoth;
+    return { extraUsdcRaw: total, note: includes(formatUsd(total), formatUsd(waiting.valueUsdcRaw), WRAP_LINE_SOL, short) };
   }
   const buying = steps.find((step) => step.kind === "buying" && step.state === "active");
   if (waiting === null) return { extraUsdcRaw: null, note: buying === undefined ? null : PENDING_COPY.readyToBuy };
@@ -525,13 +566,17 @@ export function nextInvestmentOf(
 /**
  * Why the keeper will not buy on what the bar counts, whatever the figures say.
  * "wrap_line": the USDC and the SOL being converted do not reach the basket
- * alone, and the rest of what is counted is SOL under the keeper's wrap line,
- * which nothing moves until a saving takes the vault to that line. "slow": the
- * SOL being converted would complete the basket, and its conversion is due and
- * not done — the page cannot tell a crank short of SOL, a thin market or a late
- * oracle apart, only that the keeper has not moved.
+ * alone, and either the rest of what is counted is SOL under the keeper's wrap
+ * line, which nothing moves until a saving takes the vault to that line, or
+ * the line is what the next saving must cross, and it is more than the
+ * basket lacks (wrapLineAhead). "slow": the SOL being converted would complete
+ * the basket, and its conversion is due and not done — the page cannot tell a
+ * crank short of SOL, a thin market or a late oracle apart, only that the
+ * keeper has not moved. "rest": the USDC buys the basket and a rest the page
+ * can read holds the buy — the vault or SaverFi paused, buying off, the
+ * 30-day limit, old price limits (the buying step's own rest).
  */
-export type NextInvestmentGate = "wrap_line" | "slow";
+export type NextInvestmentGate = "wrap_line" | "slow" | "rest";
 
 /**
  * HOW FAR THE NEXT INVESTMENT STILL IS — the smallest further saving, in USDC
@@ -546,15 +591,26 @@ export type NextInvestmentGate = "wrap_line" | "slow";
  * threshold, so what is to go is the larger of the two: the threshold less
  * everything counted, and the value of the SOL the line still lacks.
  *
- * 0 WITH NO GATE MEANS A BUY IS COMING. With a gate it is not, whatever this
- * figure: "slow" lacks no saving at all (0), and a line a few lamports away is
- * worth less than a cent — so the card says a gate in words, never as
- * "$0.00 to go" (savings-rule-panel.tsx).
+ * THE LINE BINDS EVERY SAVING, NOT ONLY THE SOL UNDER IT (review
+ * 2026-10-09). With no free SOL — the state after every wrap — or with the
+ * free SOL being converted now, the next saving lands on an empty vault, and
+ * the keeper wraps it only from the line up: to go is at least what the line
+ * lacks (`ahead`, wrapLineAhead), gated "wrap_line" when that is the larger.
  *
- * - The USDC alone buys the basket: 0, no gate.
+ * 0 WITH NO GATE MEANS A BUY IS COMING. With a gate it is not, whatever this
+ * figure: "slow" lacks no saving at all (0), "rest" lacks the owner's switch
+ * and not money, and a line a few lamports away is worth less than a cent — so
+ * the card says a gate in words, never as "$0.00 to go"
+ * (savings-rule-panel.tsx), and `note` is those words wherever
+ * nextInvestmentOf's own line does not already say them.
+ *
+ * - The USDC alone buys the basket: 0 — gated "rest" when the buying step
+ *   waits on a rest the page can read, and `note` names it.
  * - With the SOL being converted it does: 0 — gated "slow" when that
  *   conversion is overdue, so nothing claims a buy is coming.
  * - SOL waits under the line: gated "wrap_line", and to go is that larger of two.
+ * - The line the next saving must cross is worth more than the threshold less
+ *   what is on its way: that, gated "wrap_line", and `note` names the line.
  * - Otherwise: the threshold less what is on its way.
  *
  * With no price the SOL cannot be added, so what is to go is the USDC's own
@@ -564,18 +620,37 @@ export function toGoOf(
   readiness: { readonly heldRaw: bigint; readonly investsAtRaw: bigint },
   steps: readonly PendingStep[],
   waiting: SolUnderWrapLine | null,
-): { readonly toGoRaw: bigint; readonly gate: NextInvestmentGate | null } {
+  ahead: WrapLineAhead | null = null,
+): { readonly toGoRaw: bigint; readonly gate: NextInvestmentGate | null; readonly note: string | null } {
   const target = readiness.investsAtRaw;
-  if (readiness.heldRaw >= target) return { toGoRaw: 0n, gate: null };
+  if (readiness.heldRaw >= target) {
+    // The buying step carries the turn's rest, and a stock's passed old limit (investSteps); "slow" is not one the page can read.
+    const rest = steps.find((step) => step.kind === "buying")?.rest ?? null;
+    if (rest === null || rest === "slow") return { toGoRaw: 0n, gate: null, note: null };
+    return { toGoRaw: 0n, gate: "rest", note: PENDING_COPY.rest[rest] };
+  }
   const converting = countedConverting(steps);
   const convertingRaw = converting?.valueUsdcRaw ?? null;
   const onItsWay = readiness.heldRaw + (convertingRaw ?? 0n);
   if (converting !== undefined && convertingRaw !== null && onItsWay >= target) {
-    return { toGoRaw: 0n, gate: converting.rest === "slow" ? "slow" : null };
+    return { toGoRaw: 0n, gate: converting.rest === "slow" ? "slow" : null, note: null };
   }
   const gap = target - onItsWay - (waiting?.valueUsdcRaw ?? 0n);
-  if (waiting === null) return { toGoRaw: gap, gate: null };
+  if (waiting === null) {
+    // NO SOL UNDER THE LINE, AND THE LINE STILL IN THE WAY: the next saving must cross it.
+    const toLine = ahead?.shortUsdcRaw ?? null;
+    if (toLine !== null && toLine > gap) return { toGoRaw: toLine, gate: "wrap_line", note: PENDING_COPY.lineAhead(WRAP_LINE_SOL, formatUsd(toLine)) };
+    return { toGoRaw: gap, gate: null, note: null };
+  }
   const toLine = waiting.shortUsdcRaw ?? 0n;
   const toGoRaw = gap > toLine ? gap : toLine;
-  return { toGoRaw: toGoRaw > 0n ? toGoRaw : 0n, gate: "wrap_line" };
+  // nextInvestmentOf's line already names the line and what it lacks.
+  return { toGoRaw: toGoRaw > 0n ? toGoRaw : 0n, gate: "wrap_line", note: null };
 }
+
+/**
+ * THE ONE LINE UNDER THE BAR: what nextInvestmentOf says of the money counted,
+ * then what toGoOf says of its gate, as one line — either may be absent.
+ */
+export const nextInvestmentLine = (counted: string | null, gated: string | null): string | null =>
+  counted === null ? gated : gated === null ? counted : `${counted} · ${gated}`;

@@ -48,6 +48,18 @@
  * or past its slot ALSO read the history, because the keeper's own settlement
  * changes the wallet too, and only the history can tell the page it was that.
  *
+ * AND A READ COVERS WHAT IT COULD SEE, NOT THE NEWEST SLOT NAMED (review
+ * 2026-10-09). A read takes its snapshot first and lands a second or so later,
+ * and the notifications that arrived meanwhile are already in the state it is
+ * applied to. Judged by the NEWEST slot named, a wallet that rings every slot
+ * was never covered: every read was "behind", every change was the wallet's
+ * first, and a busy trader bought a read every 10 s while "checking your latest
+ * activity" never came up. So each wallet keeps the slots still outstanding
+ * (WalletWatch.pending), a read covers the newest of them at or under its
+ * snapshot's slot, and what came after stays outstanding as the remainder —
+ * not urgent once the wallet is being checked, so it waits
+ * PUSH_WALLET_FLOOR_MS like any later trade.
+ *
  * AND A VAULT'S CHANGE ONLY ONCE THE HISTORY SHOWS IT TOO (diagnosis 10-09,
  * push D4). The snapshot is one getMultipleAccounts and the history a separate
  * getSignaturesForAddress, possibly answered by another node of the pool: a
@@ -114,10 +126,29 @@ export function watchedWallets(snapshot: LiveSnapshotJson | null): string[] {
   return [...out].sort().slice(0, MAX_WATCHED - 3);
 }
 
+/**
+ * The most outstanding slots one wallet keeps. Past it the oldest stays and
+ * the ones after it give way: a read whose snapshot is behind every newer slot
+ * still covers the oldest, so it covers SOMETHING, and a hidden tab listening
+ * to a wallet that rings every slot for an hour holds 64 numbers, not 9,000.
+ */
+export const PENDING_SLOTS_KEPT = 64;
+
+/** `slots` with `slot` added: ascending, no repeats, at most PENDING_SLOTS_KEPT. */
+function withSlot(slots: readonly number[], slot: number): readonly number[] {
+  if (slots.includes(slot)) return slots;
+  const next = [...slots, slot].sort((a, b) => a - b);
+  return next.length <= PENDING_SLOTS_KEPT ? next : [next[0]!, ...next.slice(next.length - PENDING_SLOTS_KEPT + 1)];
+}
+
 /** A wallet the push saw change, and what reads have made of it. */
 export interface WalletWatch {
-  /** The newest slot a notification named that no read has covered yet; null when none is outstanding. */
-  readonly pendingSlot: number | null;
+  /**
+   * The slots notifications named that no read has covered yet, ascending
+   * (the newest last); empty when none is outstanding. Every one of them, not
+   * only the newest: a read covers the newest it could see (afterRead).
+   */
+  readonly pending: readonly number[];
   /**
    * The newest change a read covered — at or past its slot, with the history
    * read. `atMs` is the server's clock at the read that covered the FIRST
@@ -142,9 +173,13 @@ export interface PushState {
 
 /** Something changed that no read has covered yet. */
 export interface PushDirty {
-  /** When the window opened, on this browser's clock: the first change, or the one that made it urgent. */
+  /**
+   * When the window opened, on this browser's clock: the first change, or the
+   * one that made it urgent. A remainder a read left keeps it: the floor after
+   * that read is what it waits.
+   */
   readonly since: number;
-  /** The newest slot any notification named. */
+  /** The newest slot any outstanding notification named. */
   readonly slot: number;
   /** Whether any of it waits only the manual floor (the vault's machinery, or a wallet's first change). */
   readonly urgent: boolean;
@@ -163,7 +198,7 @@ export const EMPTY_PUSH: PushState = { dirty: null, wallets: {} };
  * changing must not postpone its own read forever.
  */
 export function notified(state: PushState, input: { readonly address: string; readonly slot: number; readonly now: number; readonly wallet: boolean }): PushState {
-  const held = input.wallet ? (state.wallets[input.address] ?? { pendingSlot: null, covered: null }) : null;
+  const held = input.wallet ? (state.wallets[input.address] ?? { pending: [], covered: null }) : null;
   // Urgent: the vault's machinery, or a wallet not already being checked.
   const urgent = held === null || held.covered?.open !== true;
   const before = state.dirty;
@@ -183,8 +218,7 @@ export function notified(state: PushState, input: { readonly address: string; re
     ...(followUp === undefined ? {} : { followUp }),
   };
   if (held === null) return { ...state, dirty };
-  const pendingSlot = Math.max(held.pendingSlot ?? input.slot, input.slot);
-  return { dirty, wallets: { ...state.wallets, [input.address]: { ...held, pendingSlot } } };
+  return { dirty, wallets: { ...state.wallets, [input.address]: { ...held, pending: withSlot(held.pending, input.slot) } } };
 }
 
 /**
@@ -247,9 +281,9 @@ export function heardLate(state: PushState, moved: readonly { readonly wallet: s
   if (moved.length === 0) return state;
   const wallets = { ...state.wallets };
   for (const { wallet, slot } of moved) {
-    const held = wallets[wallet] ?? { pendingSlot: null, covered: null };
-    if ((held.pendingSlot ?? -1) >= slot || (held.covered?.slot ?? -1) >= slot) continue;
-    wallets[wallet] = { ...held, pendingSlot: slot };
+    const held = wallets[wallet] ?? { pending: [], covered: null };
+    if ((held.pending.at(-1) ?? -1) >= slot || (held.covered?.slot ?? -1) >= slot) continue;
+    wallets[wallet] = { ...held, pending: withSlot(held.pending, slot) };
   }
   return { ...state, wallets };
 }
@@ -278,13 +312,46 @@ export function walletEnds(snapshot: LiveSnapshotJson, entries: readonly LiveEnt
  * slot — unless the vault rang, the history this read holds has not reached
  * that slot, and this was not already the follow-up. Then it stays, marked as
  * the follow-up, urgent, so it waits the manual floor and not a sweep.
+ *
+ * A SNAPSHOT SHORT OF THE NEWEST SLOT LEAVES ONLY WHAT IT DID NOT REACH, and
+ * that remainder is urgent only for what still is: the vault's own change
+ * past the snapshot (or its follow-up), or a wallet whose outstanding slots
+ * are past it and that is not being checked after this read (`wallets`, as
+ * this read left them). A wallet already being checked trading on during the
+ * read is not urgent — it used to keep the whole of `dirty` urgent, read after
+ * read, for as long as the wallet kept trading.
  */
-function coveredDirty(dirty: PushDirty | null, reached: (slot: number) => boolean, historySlot: number | null): PushDirty | null {
+function coveredDirty(
+  dirty: PushDirty | null,
+  reached: (slot: number) => boolean,
+  historySlot: number | null,
+  wallets: Readonly<Record<string, WalletWatch>>,
+): PushDirty | null {
   if (dirty === null) return null;
-  if (!reached(dirty.slot)) return dirty;
-  if (dirty.vaultSlot === undefined || dirty.followUp === true) return null;
-  if (historySlot !== null && historySlot >= dirty.vaultSlot) return null;
-  return { ...dirty, urgent: true, followUp: true };
+  if (reached(dirty.slot)) {
+    if (dirty.vaultSlot === undefined || dirty.followUp === true) return null;
+    if (historySlot !== null && historySlot >= dirty.vaultSlot) return null;
+    return { ...dirty, urgent: true, followUp: true };
+  }
+  let slot = -1;
+  let urgent = false;
+  let vault: Pick<PushDirty, "vaultSlot" | "followUp"> = {};
+  if (dirty.vaultSlot !== undefined) {
+    if (!reached(dirty.vaultSlot)) vault = { vaultSlot: dirty.vaultSlot, ...(dirty.followUp === true ? { followUp: true as const } : {}) };
+    else if (dirty.followUp !== true && !(historySlot !== null && historySlot >= dirty.vaultSlot)) vault = { vaultSlot: dirty.vaultSlot, followUp: true };
+    if (vault.vaultSlot !== undefined) {
+      slot = vault.vaultSlot;
+      urgent = true;
+    }
+  }
+  for (const watch of Object.values(wallets)) {
+    const unseen = watch.pending.filter((pending) => !reached(pending));
+    if (unseen.length === 0) continue;
+    slot = Math.max(slot, unseen[unseen.length - 1]!);
+    if (watch.covered?.open !== true) urgent = true;
+  }
+  if (slot < 0) return null;
+  return { since: dirty.since, slot, urgent, ...vault };
 }
 
 /** The newest slot among `entries`, or null when there are none. */
@@ -325,6 +392,11 @@ export function historyAhead(entries: readonly LiveEntryJson[], snapshotSlot: nu
  * stays outstanding, because the history is what tells a trade from the
  * keeper's own settlement. `readAtMs` is the server's clock, the one the page
  * times every step by.
+ *
+ * `state` is the state as the read LANDS — notifications that arrived while it
+ * was out included — so each wallet is covered at the newest outstanding slot
+ * at or under `slot`, and the slots past it stay outstanding (see the top of
+ * the file: a read covers what it could see).
  */
 export function afterRead(
   state: PushState,
@@ -343,7 +415,6 @@ export function afterRead(
   },
 ): PushState {
   const reached = (slot: number): boolean => input.slot === null || input.slot >= slot;
-  const dirty = coveredDirty(state.dirty, reached, input.historyRead ? (input.historySlot ?? null) : null);
   const ended = (address: string, slot: number): boolean => {
     const end = input.ends?.[address];
     return end !== undefined && end >= slot;
@@ -354,14 +425,20 @@ export function afterRead(
     // Still the same stretch: something covered, nothing has ended it, and still drawn.
     const ongoing = held !== null && held.open && !ended(address, held.slot) && input.readAtMs - held.atMs <= WALLET_CHANGE_FORGET_MS;
     let next: WalletWatch = held === null ? watch : { ...watch, covered: { ...held, open: ongoing } };
-    if (watch.pendingSlot !== null && input.historyRead && reached(watch.pendingSlot)) {
-      const slot = watch.pendingSlot;
-      next = { pendingSlot: null, covered: { slot, atMs: ongoing && held !== null ? held.atMs : input.readAtMs, open: !ended(address, slot) } };
+    // The newest outstanding slot this read could see; what came after it stays outstanding.
+    const seen = watch.pending.filter(reached);
+    if (seen.length > 0 && input.historyRead) {
+      const slot = seen[seen.length - 1]!;
+      next = {
+        pending: watch.pending.filter((pending) => !reached(pending)),
+        covered: { slot, atMs: ongoing && held !== null ? held.atMs : input.readAtMs, open: !ended(address, slot) },
+      };
     }
     // Forgotten once it is old and nothing is outstanding.
-    if (next.pendingSlot === null && (next.covered === null || input.readAtMs - next.covered.atMs > WALLET_CHANGE_FORGET_MS)) continue;
+    if (next.pending.length === 0 && (next.covered === null || input.readAtMs - next.covered.atMs > WALLET_CHANGE_FORGET_MS)) continue;
     wallets[address] = next;
   }
+  const dirty = coveredDirty(state.dirty, reached, input.historyRead ? (input.historySlot ?? null) : null, wallets);
   return { dirty, wallets };
 }
 

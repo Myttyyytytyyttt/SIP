@@ -95,7 +95,7 @@ describe("the poll runs faster only while something is on its way", () => {
       /const pending = pendingPollWanted\(\{ active: pendingActive, activeSince: activeSinceRef\.current, now: Date\.now\(\), activityRetryAt: activityTrouble\?\.retryAt \?\? null \}\);/,
     );
     expect(poll).toMatch(/nextDelayMs\(\{ failures, retryAfterSeconds: null, visible, lastReadAt, now: Date\.now\(\), reading, pending, unheard \}\)/);
-    expect(poll).toMatch(/\}, \[pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading, pendingActive, socket\]\);/);
+    expect(poll).toMatch(/\}, \[pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading, pendingActive, socket, unheardRefused\]\);/);
   });
 });
 
@@ -205,7 +205,8 @@ describe("a read whose history and snapshot disagree", () => {
 describe("liveness", () => {
   it("hands the page the socket's state, the read out, the change heard, and the last GOOD read", () => {
     expect(source).toMatch(/const liveness = useMemo\(\(\): LiveLiveness => \(\{ socket, reading, heard, lastReadAt: lastGoodAt \}\), \[socket, reading, heard, lastGoodAt\]\);/);
-    expect(source).toMatch(/const heard = push\.dirty !== null;/);
+    // Only an urgent change: a busy trader's later trades are outstanding all the time (review 2026-10-09).
+    expect(source).toMatch(/const heard = push\.dirty\?\.urgent === true;/);
     expect(source).toMatch(/liveness,\s*vaultStamp,\s*\};/);
     // The last good read moves only on success: lastReadAt moves on a failure too.
     expect(read.match(/setLastGoodAt\(/g)).toHaveLength(1);
@@ -223,7 +224,18 @@ describe("liveness", () => {
   });
 
   it("polls every 20 s while the push is wanted and not live, under the history's retry-after", () => {
-    expect(source).toMatch(/const unheard = unheardPollWanted\(\{ socket, activityRetryAt: activityTrouble\?\.retryAt \?\? null, now: Date\.now\(\) \}\);/);
+    expect(source).toMatch(
+      /const unheard = unheardPollWanted\(\{ socket, activityRetryAt: activityTrouble\?\.retryAt \?\? null, now: Date\.now\(\), refused: unheardRefused \}\);\s*unheardRef\.current = unheard;/,
+    );
+  });
+
+  it("does not let a 429 that cadence earned back the tab off: it goes back to the minute until a read succeeds", () => {
+    // Review 2026-10-09: the bucket is per client, and three tabs behind one NAT on 20 s overspend it.
+    expect(read).toMatch(
+      /if \(refusalBacksOff\(\{ rateLimited, unheard: unheardRef\.current, failures: failuresRef\.current \}\)\) setFailures\(\(count\) => count \+ 1\);\s*else setUnheardRefused\(true\);/,
+    );
+    expect(read).toMatch(/setFailures\(0\);\s*setFailure\(null\);\s*setUnheardRefused\(false\);/);
+    expect(read.match(/setFailures\(\(count\) => count \+ 1\)/g)).toHaveLength(1);
   });
 
   it("brings the socket back on returning to the tab, on focus and when the network returns", () => {
@@ -232,11 +244,15 @@ describe("liveness", () => {
     for (const [target, event] of [
       ["document", "visibilitychange"],
       ["window", "focus"],
-      ["window", "online"],
     ] as const) {
       expect(wake).toContain(`${target}.addEventListener("${event}", wake);`);
       expect(wake).toContain(`${target}.removeEventListener("${event}", wake);`);
     }
+    // Only the network coming back starts the socket's count again (review 2026-10-09: a focus used to, and outran the backoff).
+    expect(wake).toMatch(/const online = \(\): void => watchRef\.current\?\.reconnect\(\{ network: true \}\);/);
+    expect(wake).toContain(`window.addEventListener("online", online);`);
+    expect(wake).toContain(`window.removeEventListener("online", online);`);
+    expect(source.match(/reconnect\(\{ network: true \}\)/g)).toHaveLength(1);
   });
 
   it("stamps each committed snapshot for the vault screen to follow", () => {

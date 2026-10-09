@@ -31,7 +31,7 @@ import { ACTIVITY_COPY } from "@/lib/live-copy";
 import { artForMint, NATIVE_SOL } from "@/lib/asset-art";
 import { formatSol, rawFrom, usdcRawForLamports } from "@/lib/amounts";
 import { usd } from "@/lib/format";
-import { nextInvestmentOf, pendingSteps, solUnderWrapLine, toGoOf } from "@/lib/live-pending";
+import { nextInvestmentLine, nextInvestmentOf, pendingSteps, solUnderWrapLine, toGoOf, wrapLineAhead } from "@/lib/live-pending";
 import type { LiveDashboard, LiveRow, LiveWalletView } from "@/lib/live-types";
 import { ratePercent } from "@/lib/vault-copy";
 import { measureOf, partsOf } from "@/components/live/LiveActivityRow";
@@ -165,12 +165,14 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
   // the card says so (`nextInvestmentNote`).
   //
   // AND WHAT IS TO GO IS THE KEEPER'S, NOT THE BAR'S. Counting SOL the keeper
-  // will not move yet can fill the bar while nothing is bought; `toGoUsd` and
-  // `nextInvestmentGate` carry what is really left, and why (live-pending.ts toGoOf).
+  // will not move yet can fill the bar while nothing is bought, and the wrap
+  // line binds the next saving even with no SOL under it; `toGoUsd` and
+  // `nextInvestmentGate` carry what is really left, and why (live-pending.ts
+  // toGoOf), and the line under the bar says the gate where nothing else does.
   const steps = pendingSteps(data);
   const waiting = solUnderWrapLine(data);
   const next = nextInvestmentOf(steps, waiting);
-  const toGo = reachable ? toGoOf(readiness, steps, waiting) : null;
+  const toGo = reachable ? toGoOf(readiness, steps, waiting, wrapLineAhead(data)) : null;
 
   // ── the numbers ────────────────────────────────────────────────────────
   const legRows = data.holdings.filter((row) => row.kind === "leg");
@@ -201,7 +203,7 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
     pendingUsd: dollarsOf(data.notInvestedUsdcRaw),
     readyToInvestUsd: readiness === null ? null : dollarsOf(readiness.heldRaw + (next.extraUsdcRaw ?? 0n)),
     // A note about the sum only beside a sum: "Includes about $1.80" under a dash would contradict itself.
-    nextInvestmentNote: readiness === null ? null : next.note,
+    nextInvestmentNote: readiness === null ? null : nextInvestmentLine(next.note, toGo?.note ?? null),
     toGoUsd: toGo === null ? null : dollarsOf(toGo.toGoRaw),
     nextInvestmentGate: toGo === null ? null : toGo.gate,
     thresholdUsd,

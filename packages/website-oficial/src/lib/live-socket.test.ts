@@ -5,7 +5,19 @@
 
 import { describe, expect, it } from "vitest";
 
-import { LIVELY_MS, PING_MS, RECONNECT_MS, SLOW_RECONNECT_MS, STABLE_MS, watchAccounts, type SocketLike, type SocketState } from "@/lib/live-socket";
+import {
+  LIVELY_MS,
+  MISSED_PINGS,
+  PING_MS,
+  RECONNECT_MS,
+  SLOW_RECONNECT_MS,
+  STABLE_MS,
+  UNCONFIRMED_BEATS,
+  WAKE_FLOOR_MS,
+  watchAccounts,
+  type SocketLike,
+  type SocketState,
+} from "@/lib/live-socket";
 
 class FakeSocket implements SocketLike {
   readyState = 0;
@@ -32,6 +44,16 @@ class FakeSocket implements SocketLike {
   }
   answer(id: number, result: unknown): void {
     this.onmessage?.({ data: JSON.stringify({ jsonrpc: "2.0", id, result }) });
+  }
+  /** The endpoint refusing one request, as PublicNode refuses a burst. */
+  refuse(id: number): void {
+    this.onmessage?.({ data: JSON.stringify({ jsonrpc: "2.0", id, error: { code: 429, message: "slow down" } }) });
+  }
+  /** The subscribe sent last for `address`. */
+  subscribeFor(address: string): { id?: number; method: string; params?: unknown[] } {
+    const found = this.sent.filter((entry) => entry.method === "accountSubscribe" && entry.params![0] === address).at(-1);
+    if (found === undefined) throw new Error(`no subscribe for ${address}`);
+    return found;
   }
   notify(subscription: number, slot: number): void {
     this.onmessage?.({ data: JSON.stringify({ jsonrpc: "2.0", method: "accountNotification", params: { subscription, result: { context: { slot }, value: null } } }) });
@@ -60,7 +82,7 @@ class FakeSocket implements SocketLike {
 
 function harness(addresses: readonly string[] = ["WalletA", "Vault"]) {
   const sockets: FakeSocket[] = [];
-  const timers: { run: () => void; ms: number; cleared: boolean }[] = [];
+  const timers: { run: () => void; ms: number; at: number; cleared: boolean }[] = [];
   const changes: [string, number][] = [];
   const clock = { now: 1_000_000 };
   let resyncs = 0;
@@ -78,7 +100,7 @@ function harness(addresses: readonly string[] = ["WalletA", "Vault"]) {
       return socket;
     },
     setTimer: (run, ms) => {
-      const timer = { run, ms, cleared: false };
+      const timer = { run, ms, at: clock.now + ms, cleared: false };
       timers.push(timer);
       return timer;
     },
@@ -95,7 +117,19 @@ function harness(addresses: readonly string[] = ["WalletA", "Vault"]) {
     return timer.ms;
   };
   const armed = (): number[] => timers.filter((entry) => !entry.cleared).map((entry) => entry.ms);
-  return { watch, sockets, timers, armed, clock, changes, fire, resyncs: () => resyncs, states, last: () => sockets[sockets.length - 1]! };
+  /** Moves the clock on by `ms`, running every timer that falls due on the way, in order. */
+  const advance = (ms: number): void => {
+    const end = clock.now + ms;
+    for (;;) {
+      const due = timers.filter((entry) => !entry.cleared && entry.at <= end).sort((a, b) => a.at - b.at)[0];
+      if (due === undefined) break;
+      clock.now = Math.max(clock.now, due.at);
+      due.cleared = true;
+      due.run();
+    }
+    clock.now = end;
+  };
+  return { watch, sockets, timers, armed, advance, clock, changes, fire, resyncs: () => resyncs, states, last: () => sockets[sockets.length - 1]! };
 }
 
 describe("subscribing", () => {
@@ -322,11 +356,14 @@ describe("its state", () => {
 
 /**
  * THE PAGE'S WAY BACK (diagnosis 10-09, D2/D5): returning to the tab, focus
- * and `online` try NOW, with the count started again, instead of waiting out
- * a slow timer — and never tear down a socket that is working.
+ * and `online` try NOW instead of waiting out a slow timer — and never tear
+ * down a socket that is working. Only `online` starts the count again, and a
+ * focus a moment after the last attempt waits for the timer (review
+ * 2026-10-09: focus used to outrun the backoff).
  */
 describe("reconnect()", () => {
-  it("connects at once when a socket is waiting to retry, with the count started again", () => {
+  it("connects at once when a socket is waiting to retry, and keeps its count", () => {
+    expect(WAKE_FLOOR_MS).toBe(15_000);
     const h = harness();
     for (let attempt = 0; attempt < RECONNECT_MS.length + 2; attempt += 1) {
       h.last().drop();
@@ -334,15 +371,71 @@ describe("reconnect()", () => {
     }
     h.last().drop();
     expect(h.armed()).toEqual([SLOW_RECONNECT_MS]);
+    h.clock.now += WAKE_FLOOR_MS;
     const before = h.sockets.length;
     h.watch.reconnect();
     expect(h.sockets).toHaveLength(before + 1);
     // The slow timer is gone, not left to open a second socket.
     expect(h.armed()).toEqual([]);
     expect(h.states.at(-1)).toBe("connecting");
-    // Started again: the next close waits the first wait.
+    // Not started again: a focus is no news about the endpoint.
+    h.last().drop();
+    expect(h.armed()).toEqual([SLOW_RECONNECT_MS]);
+  });
+
+  it("starts the count again only when the network came back (`online`), and then whatever the last attempt's age", () => {
+    const h = harness();
+    for (let attempt = 0; attempt < RECONNECT_MS.length + 2; attempt += 1) {
+      h.last().drop();
+      h.fire();
+    }
+    h.last().drop();
+    const before = h.sockets.length;
+    h.watch.reconnect({ network: true });
+    expect(h.sockets).toHaveLength(before + 1);
     h.last().drop();
     expect(h.armed()).toEqual([RECONNECT_MS[0]]);
+  });
+
+  it("does not connect at once when the last attempt is under WAKE_FLOOR_MS old: the timer already armed is the next one", () => {
+    const h = harness();
+    h.last().drop();
+    h.fire();
+    h.last().drop();
+    expect(h.armed()).toEqual([RECONNECT_MS[1]]);
+    h.clock.now += WAKE_FLOOR_MS - 1;
+    h.watch.reconnect();
+    expect(h.sockets).toHaveLength(2);
+    expect(h.armed()).toEqual([RECONNECT_MS[1]]);
+  });
+
+  it("does not let window focus outrun the backoff against an endpoint that refuses every handshake", () => {
+    // Review 2026-10-09: each focus reset the count, so alt-tabbing every 20 s cost ~5 handshakes per 20 s, for as long as the tab was open.
+    const h = harness();
+    const refuse = (): void => {
+      const socket = h.last();
+      if (socket.readyState === 0 && !socket.closed) socket.drop();
+    };
+    refuse();
+    // Settle into the slow stage first: ten quiet minutes.
+    for (let second = 0; second < 600; second += 1) {
+      h.advance(1_000);
+      refuse();
+    }
+    const before = h.sockets.length;
+    // Then ten minutes of a focus every 5 s.
+    for (let second = 1; second <= 600; second += 1) {
+      h.advance(1_000);
+      refuse();
+      if (second % 5 === 0) {
+        h.watch.reconnect();
+        refuse();
+      }
+    }
+    const perMinute = (h.sockets.length - before) / 10;
+    // At most one handshake per WAKE_FLOOR_MS from the focus, plus the slow timer's.
+    expect(perMinute).toBeLessThanOrEqual(60_000 / WAKE_FLOOR_MS + 1);
+    expect(h.armed()).toEqual([SLOW_RECONNECT_MS]);
   });
 
   it("leaves a working socket alone — no new socket, no resync read — however often the window takes focus", () => {
@@ -398,6 +491,173 @@ describe("reconnect()", () => {
     h.watch.reconnect();
     expect(h.sockets).toHaveLength(1);
     expect(h.armed()).toEqual([]);
+  });
+});
+
+/**
+ * A REFUSED SUBSCRIBE IS ASKED AGAIN, AND "LIVE" MEANS EVERY ADDRESS (review
+ * 2026-10-09). The endpoint answered one address of a burst with a 429 and
+ * the others with ids; the refused one was never asked again, the page said
+ * "live", and a trade from that wallet rang nobody.
+ */
+describe("a subscribe the endpoint refused", () => {
+  it("is asked again on the next beat, and the page is not 'live' until it is confirmed", () => {
+    const h = harness(["Wallet", "Vault"]);
+    h.last().open();
+    h.last().answer(h.last().subscribeFor("Vault").id!, 100);
+    h.last().refuse(h.last().subscribeFor("Wallet").id!);
+    expect(h.states).toEqual(["connecting"]);
+    h.last().pong();
+    const before = h.last().sent.length;
+    h.fire(PING_MS);
+    expect(h.last().sent.slice(before).map((message) => [message.method, message.params?.[0]])).toEqual([
+      ["accountSubscribe", "Wallet"],
+      ["ping", undefined],
+    ]);
+    expect(h.states).toEqual(["connecting"]);
+    h.last().answer(h.last().subscribeFor("Wallet").id!, 101);
+    expect(h.states).toEqual(["connecting", "live"]);
+    h.last().notify(101, 7_000);
+    expect(h.changes).toEqual([["Wallet", 7_000]]);
+  });
+
+  it("is asked again for as long as it is refused, and only it: a confirmed address and one still being asked for are not", () => {
+    const h = harness(["Wallet", "Vault", "Usdc"]);
+    h.last().open();
+    h.last().answer(h.last().subscribeFor("Vault").id!, 100);
+    for (let beat = 0; beat < 4; beat += 1) {
+      h.last().refuse(h.last().subscribeFor("Wallet").id!);
+      h.last().pong();
+      h.fire(PING_MS);
+    }
+    const subscribes = h.last().sent.filter((message) => message.method === "accountSubscribe").map((message) => message.params![0]);
+    expect(subscribes.filter((address) => address === "Wallet")).toHaveLength(5);
+    expect(subscribes.filter((address) => address === "Vault")).toHaveLength(1);
+    // Usdc's first subscribe was never answered, so it is still out, and not sent twice.
+    expect(subscribes.filter((address) => address === "Usdc")).toHaveLength(1);
+    expect(h.states).toEqual(["connecting"]);
+  });
+
+  it("stops being asked for once the address is no longer wanted, and the rest is then 'live'", () => {
+    const h = harness(["Wallet", "Vault"]);
+    h.last().open();
+    h.last().answer(h.last().subscribeFor("Vault").id!, 100);
+    h.last().refuse(h.last().subscribeFor("Wallet").id!);
+    h.watch.setAddresses(["Vault"]);
+    expect(h.states).toEqual(["connecting", "live"]);
+    const before = h.last().sent.length;
+    h.fire(PING_MS);
+    expect(h.last().sent.slice(before)).toEqual([{ jsonrpc: "2.0", method: "ping" }]);
+  });
+
+  it("an address added to a live socket is unheard until it is confirmed", () => {
+    const h = harness(["Vault"]);
+    h.last().open();
+    h.last().confirmAll();
+    h.watch.setAddresses(["Vault", "Usdc"]);
+    expect(h.states).toEqual(["connecting", "live", "connecting"]);
+    h.last().answer(h.last().subscribeFor("Usdc").id!, 300);
+    expect(h.states).toEqual(["connecting", "live", "connecting", "live"]);
+  });
+
+  it("lets go of an open socket that has confirmed NOTHING after UNCONFIRMED_BEATS beats, as a failure, so 'connecting' cannot last", () => {
+    expect(UNCONFIRMED_BEATS).toBe(3);
+    const h = harness(["Wallet", "Vault"]);
+    h.last().open();
+    const first = h.last();
+    for (let beat = 0; beat < UNCONFIRMED_BEATS; beat += 1) {
+      for (const address of ["Wallet", "Vault"]) first.refuse(first.subscribeFor(address).id!);
+      first.pong();
+      h.fire(PING_MS);
+    }
+    expect(first.closed).toBe(true);
+    expect(h.states).toEqual(["connecting", "off"]);
+    expect(h.armed()).toEqual([RECONNECT_MS[0]]);
+    // Its late close moves nothing on.
+    first.onclose?.({});
+    expect(h.armed()).toEqual([RECONNECT_MS[0]]);
+    // The next socket subscribes everything afresh, and is live once it confirms.
+    h.fire(RECONNECT_MS[0]);
+    h.last().open();
+    h.last().confirmAll(400);
+    expect(h.states).toEqual(["connecting", "off", "connecting", "live"]);
+  });
+
+  it("keeps a socket that confirmed something, however long another address is refused", () => {
+    const h = harness(["Wallet", "Vault"]);
+    h.last().open();
+    h.last().answer(h.last().subscribeFor("Vault").id!, 100);
+    for (let beat = 0; beat < 3 * UNCONFIRMED_BEATS; beat += 1) {
+      h.last().refuse(h.last().subscribeFor("Wallet").id!);
+      h.last().pong();
+      h.fire(PING_MS);
+    }
+    expect(h.sockets).toHaveLength(1);
+    expect(h.last().closed).toBe(false);
+  });
+});
+
+/**
+ * A DEAD SOCKET ON A TAB THAT STAYS LOOKED AT (review 2026-10-09): only
+ * reconnect() judged a half-open socket, and nothing calls it while the tab
+ * stays visible and focused — "live" over a dead connection for as long as
+ * the OS kept the TCP.
+ */
+describe("a socket that stops answering", () => {
+  it("is let go on the beat once MISSED_PINGS pings in a row went unanswered, and the page is no longer 'live'", () => {
+    expect(MISSED_PINGS).toBe(2);
+    const h = harness();
+    h.last().open();
+    h.last().confirmAll();
+    h.fire(PING_MS);
+    h.last().pong();
+    const dead = h.last();
+    // From here the endpoint says nothing at all.
+    for (let beat = 0; beat < MISSED_PINGS; beat += 1) h.fire(PING_MS);
+    expect(dead.closed).toBe(false);
+    h.fire(PING_MS);
+    expect(dead.closed).toBe(true);
+    expect(h.states).toEqual(["connecting", "live", "off"]);
+    // Replaced, and the replacement owes the read for the gap.
+    h.fire();
+    h.last().open();
+    h.last().confirmAll(500);
+    expect(h.resyncs()).toBe(1);
+  });
+
+  it("is kept while any frame comes back between pings, a notification as much as a pong", () => {
+    const h = harness();
+    h.last().open();
+    const ids = h.last().confirmAll();
+    h.last().pong();
+    for (let beat = 0; beat < 10; beat += 1) {
+      h.fire(PING_MS);
+      h.last().notify(ids.get("Vault")!, 10 + beat);
+    }
+    expect(h.sockets).toHaveLength(1);
+    expect(h.states).toEqual(["connecting", "live"]);
+  });
+
+  it("is never judged by its silence when its endpoint never answered a ping", () => {
+    const h = harness();
+    h.last().open();
+    h.last().confirmAll();
+    for (let beat = 0; beat < 10; beat += 1) h.fire(PING_MS);
+    expect(h.sockets).toHaveLength(1);
+  });
+
+  it("is not torn down for pings its own tab never sent: a beat held back for minutes has missed nothing", () => {
+    const h = harness();
+    h.last().open();
+    h.last().confirmAll();
+    h.fire(PING_MS);
+    h.last().pong();
+    // The hidden tab's timer runs ten minutes late; the answered ping before it is what counts.
+    h.clock.now += 10 * 60_000;
+    h.fire(PING_MS);
+    h.last().pong();
+    h.fire(PING_MS);
+    expect(h.sockets).toHaveLength(1);
   });
 });
 

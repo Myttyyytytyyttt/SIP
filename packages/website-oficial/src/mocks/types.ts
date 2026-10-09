@@ -286,15 +286,19 @@ export interface SavingsStats {
    * is not USDC yet, or a basket ready to buy (src/lib/live-pending.ts): the
    * SOL being converted, the SOL under the wrap line with the line it waits for
    * ("Includes about $0.43 of SOL. It converts to USDC once your vault holds
-   * 0.005 SOL (0.0011 SOL more)"), or both as one sum. Absent on the sample.
+   * 0.005 SOL (0.0011 SOL more)"), or both as one sum — and, after it, what
+   * gates the buy where nothing else says it: the line the next saving must
+   * cross, or the rest that holds a basket the USDC already buys. Absent on
+   * the sample.
    */
   readonly nextInvestmentNote?: string | null;
   /**
    * A live page's "to go": the smallest further saving, in today's dollars,
    * after which the keeper buys (live-pending.ts toGoOf). Not always the
-   * threshold less `readyToInvestUsd`: while SOL waits under the wrap line, the
-   * next saving must also take the vault to that line, and that can be the
-   * larger figure. 0 with no gate means a buy is coming; with
+   * threshold less `readyToInvestUsd`: the next saving must also take the
+   * vault's free SOL to the keeper's wrap line — from what waits under it, or
+   * from none after a wrap — and that can be the larger figure. 0 with no gate
+   * means a buy is coming; with
    * `nextInvestmentGate` set it is not, whatever this says, and the card says
    * so in words. Null when there is no threshold or the USDC could not be
    * read. Absent on the sample, whose card keeps its own arithmetic.
@@ -303,12 +307,16 @@ export interface SavingsStats {
   /**
    * Why the keeper will not buy on what the bar counts, on a live page:
    * "wrap_line" — part of it is SOL under the keeper's wrap line, which moves
-   * only once a saving takes the vault to that line (the note names it);
+   * only once a saving takes the vault to that line, or the next saving must
+   * cross that line and it is more than the basket lacks (the note names it);
    * "slow" — the SOL being converted would complete the basket and its
-   * conversion is overdue. The card never draws a full bar, or "$0.00 to go",
-   * while one is set. Null when nothing gates the buy. Absent on the sample.
+   * conversion is overdue; "rest" — the USDC buys the basket and a rest the
+   * page can read holds the buy (a pause, buying off, the 30-day limit, old
+   * price limits; the note names it). The card never draws a full bar, or
+   * "$0.00 to go", while one is set. Null when nothing gates the buy. Absent
+   * on the sample.
    */
-  readonly nextInvestmentGate?: "wrap_line" | "slow" | null;
+  readonly nextInvestmentGate?: "wrap_line" | "slow" | "rest" | null;
   /**
    * The words a live page puts on the tiles whose sample names would claim
    * something the chain does not record — "Settlements" where the sample says

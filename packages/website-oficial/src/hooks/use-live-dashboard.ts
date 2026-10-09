@@ -30,7 +30,8 @@
  * data a "Live" dot, an "updating" shimmer and an "updated 12 s ago" need.
  * While the push is wanted and not live, a visible tab reads every 20 s
  * instead of every minute (live-schedule.ts UNHEARD_POLL_MS): the poll is
- * then all it has.
+ * then all it has. A 429 that cadence earns puts it back on the minute until
+ * a read succeeds, and is not counted toward the backoff.
  *
  * A POLL ASKS ONLY FOR WHAT IS NEW: `until` the newest signature already held,
  * so a quiet minute costs one getSignaturesForAddress and nothing else. The rows
@@ -115,7 +116,7 @@ import {
   watchedWallets,
   type PushState,
 } from "@/lib/live-push";
-import { MANUAL_FLOOR_MS, nextActivityRetryMs, nextDelayMs, nextManualDelayMs, pendingPollWanted, unheardPollWanted } from "@/lib/live-schedule";
+import { MANUAL_FLOOR_MS, nextActivityRetryMs, nextDelayMs, nextManualDelayMs, pendingPollWanted, refusalBacksOff, unheardPollWanted } from "@/lib/live-schedule";
 import { browserSocket, watchAccounts, type ChainWatch, type SocketState } from "@/lib/live-socket";
 import type { LiveActivityJson, LiveDashboard, LiveEntryJson, LiveSnapshotJson } from "@/lib/live-types";
 import { vaultFailureWords, type ApiFailure } from "@/lib/vault-api";
@@ -171,17 +172,25 @@ type OlderState = Omit<LiveOlder, "available">;
  */
 export interface LiveLiveness {
   /**
-   * The chain's push. "live": the socket is open and at least one subscription
+   * The chain's push. "live": the socket is open and EVERY address it watches
    * is confirmed — a change shows within seconds. "connecting": a socket is
-   * being opened (or open with nothing confirmed yet). "off": closed and
-   * waiting for its next attempt, or no endpoint to open — the page is on its
-   * 20 s poll. "none": no socket is wanted — no pension key (the sample), a
-   * caller that draws no history, or no vault to watch yet.
+   * being opened, or it is open and some address is not confirmed yet (refused
+   * and being asked again, live-socket.ts). "off": closed and waiting for its
+   * next attempt, or no endpoint to open. Under either of those two the page
+   * is on its 20 s poll. "none": no socket is wanted — no pension key (the
+   * sample), a caller that draws no history, or no vault to watch yet.
    */
   readonly socket: SocketState | "none";
   /** A read is out right now (the first one included: view "loading" says that one apart). */
   readonly reading: boolean;
-  /** The chain said something changed and the read that covers it has not landed yet (live-push.ts dirty). */
+  /**
+   * The chain said something changed that the page will show, and the read
+   * that covers it has not landed yet: an URGENT change (live-push.ts dirty) —
+   * the vault's own step, or a wallet's first change since its last saving.
+   * Not a wallet already being checked trading on: for a busy trader that is
+   * outstanding all the time, says nothing new, and would hold an "updating"
+   * up for good.
+   */
   readonly heard: boolean;
   /** When the last GOOD read landed, on this browser's clock; null before one has. A failed read never moves it. */
   readonly lastReadAt: number | null;
@@ -267,6 +276,13 @@ export function useLiveDashboard(input: {
   const [activityMeta, setActivityMeta] = useState<Pick<LiveActivityJson, "status" | "nextBefore"> | null>(null);
   const [failure, setFailure] = useState<{ readonly message: string; readonly retryAt: number | null; readonly since: number } | null>(null);
   const [failures, setFailures] = useState(0);
+  /**
+   * A read the 20 s unheard cadence bought came back 429, and none has
+   * succeeded since: the poll is back on the minute, and nothing is backed off
+   * (live-schedule.ts refusalBacksOff). The bucket is per client, so three
+   * visible tabs behind one NAT on that cadence overspend it together.
+   */
+  const [unheardRefused, setUnheardRefused] = useState(false);
   const [lastReadAt, setLastReadAt] = useState<number | null>(null);
   /** The last GOOD read's moment, for "updated 12 s ago": lastReadAt moves on a failure too. */
   const [lastGoodAt, setLastGoodAt] = useState<number | null>(null);
@@ -304,6 +320,8 @@ export function useLiveDashboard(input: {
   lastReadRef.current = lastReadAt;
   const failuresRef = useRef(0);
   failuresRef.current = failures;
+  /** Whether the poll last armed was the unheard cadence's: a refusal it earned is not a failure. */
+  const unheardRef = useRef(false);
   /** The later of the snapshot's and the history's retry-after: every read asks for both. */
   const retryAt = latestOf(failure?.retryAt ?? null, activityTrouble?.retryAt ?? null);
   const retryAtRef = useRef<number | null>(null);
@@ -328,6 +346,7 @@ export function useLiveDashboard(input: {
     setActivityMeta(null);
     setFailure(null);
     setFailures(0);
+    setUnheardRefused(false);
     setLastReadAt(null);
     setLastGoodAt(null);
     setOlder({ busy: false, retryAt: null, message: null, complete: false });
@@ -361,8 +380,12 @@ export function useLiveDashboard(input: {
         const answered = await api.snapshot({ owner: pensionKey, wallets: wallets.slice(0, MAX_WALLETS), discover });
         if (stale()) return true;
         if (!answered.ok) {
-          // The last good data stays on screen; only the note changes.
-          setFailures((count) => count + 1);
+          // The last good data stays on screen; only the note changes. A 429
+          // the unheard cadence earned puts the poll back on the minute
+          // instead of counting toward the backoff (live-schedule.ts).
+          const rateLimited = answered.status === 429 || answered.code === "rate_limited";
+          if (refusalBacksOff({ rateLimited, unheard: unheardRef.current, failures: failuresRef.current })) setFailures((count) => count + 1);
+          else setUnheardRefused(true);
           setFailure({ message: wordsFor(answered), retryAt: answered.retryAfterSeconds === null ? null : Date.now() + answered.retryAfterSeconds * 1_000, since: Date.now() });
           setLastReadAt(Date.now());
           return true;
@@ -497,6 +520,7 @@ export function useLiveDashboard(input: {
 
         setFailures(0);
         setFailure(null);
+        setUnheardRefused(false);
         // What the chain rang about and this read has now seen — and what moved
         // that nobody heard, from the balances against the last read's.
         if (wantsActivity) {
@@ -582,21 +606,24 @@ export function useLiveDashboard(input: {
   }, [watched, pensionKey, wantsActivity, hasWatched, wsUrl]);
 
   // THE SOCKET COMES BACK WITH THE PAGE (live-socket.ts reconnect): on
-  // returning to the tab, on focus, and when the network does — at once, with
-  // its count started again, instead of waiting out a slow timer. A socket
-  // that is working is left alone, so a focus costs nothing.
+  // returning to the tab and on focus, at once unless it tried a moment ago
+  // (WAKE_FLOOR_MS), keeping its count — a focus is no news about the
+  // endpoint; and when the network comes back, at once with its count started
+  // again, hidden or not: a hidden tab still listens. A socket that is working
+  // is left alone, so a focus costs nothing.
   useEffect(() => {
     if (typeof document === "undefined") return undefined;
     const wake = (): void => {
       if (document.visibilityState === "visible") watchRef.current?.reconnect();
     };
+    const online = (): void => watchRef.current?.reconnect({ network: true });
     document.addEventListener("visibilitychange", wake);
     window.addEventListener("focus", wake);
-    window.addEventListener("online", wake);
+    window.addEventListener("online", online);
     return () => {
       document.removeEventListener("visibilitychange", wake);
       window.removeEventListener("focus", wake);
-      window.removeEventListener("online", wake);
+      window.removeEventListener("online", online);
     };
   }, []);
 
@@ -715,7 +742,8 @@ export function useLiveDashboard(input: {
     const visible = typeof document === "undefined" || document.visibilityState === "visible";
     const pending = pendingPollWanted({ active: pendingActive, activeSince: activeSinceRef.current, now: Date.now(), activityRetryAt: activityTrouble?.retryAt ?? null });
     // NOTHING WILL RING (live-schedule.ts UNHEARD_POLL_MS): the push is wanted and not live, so the poll is all there is.
-    const unheard = unheardPollWanted({ socket, activityRetryAt: activityTrouble?.retryAt ?? null, now: Date.now() });
+    const unheard = unheardPollWanted({ socket, activityRetryAt: activityTrouble?.retryAt ?? null, now: Date.now(), refused: unheardRefused });
+    unheardRef.current = unheard;
     const delay = nextDelayMs({ failures, retryAfterSeconds: null, visible, lastReadAt, now: Date.now(), reading, pending, unheard });
     if (delay === null) return undefined;
     const retryAt = failure?.retryAt ?? null;
@@ -739,7 +767,7 @@ export function useLiveDashboard(input: {
       });
     }, when);
     return () => window.clearTimeout(timer);
-  }, [pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading, pendingActive, socket]);
+  }, [pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading, pendingActive, socket, unheardRefused]);
 
   const cursor = activityMeta?.nextBefore ?? null;
   const olderView = useMemo((): LiveOlder => ({ ...older, available: cursor !== null }), [older, cursor]);
@@ -747,7 +775,7 @@ export function useLiveDashboard(input: {
   // Drawn, a history to read, and neither an answer nor a failure yet.
   const activityPending = wantsActivity && snapshot !== null && snapshot.vault.status === "exists" && activityMeta === null && activityTrouble === null;
 
-  const heard = push.dirty !== null;
+  const heard = push.dirty?.urgent === true;
   const liveness = useMemo((): LiveLiveness => ({ socket, reading, heard, lastReadAt: lastGoodAt }), [socket, reading, heard, lastGoodAt]);
   const vaultStamp = useMemo(() => vaultStampOf(snapshot), [snapshot]);
 

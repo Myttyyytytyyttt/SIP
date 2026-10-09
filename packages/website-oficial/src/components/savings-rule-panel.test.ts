@@ -126,6 +126,15 @@ describe("next investment, gated", () => {
     expect(nextBlock(html)).toContain("not converted yet");
   });
 
+  it("never says $0.00 to go, or draws a full bar, while a rest the page can read holds a basket the USDC buys", () => {
+    // Review 2026-10-09: the vault paused with $1.20 of USDC read "$0.00 to go" on a full bar, and nothing under it.
+    const paused = "Your vault is paused: nothing is converted or bought until you resume it";
+    const html = live({ readyToInvestUsd: 1.2, toGoUsd: 0, nextInvestmentGate: "rest", nextInvestmentNote: paused });
+    expect(fill(html)).toBe("-5");
+    expect(nextBlock(html)).not.toContain("to go");
+    expect(nextBlock(html)).toContain(paused);
+  });
+
   it("says no $0.00 to go under the line either, when what the line lacks is worth less than a cent", () => {
     const html = live({ readyToInvestUsd: 1.5, toGoUsd: 0, nextInvestmentGate: "wrap_line" });
     expect(fill(html)).toBe("-5");

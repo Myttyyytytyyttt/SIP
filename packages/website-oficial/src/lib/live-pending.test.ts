@@ -18,6 +18,7 @@ import {
   pendingLines,
   pendingSteps,
   solUnderWrapLine,
+  wrapLineAhead,
   type PendingRest,
 } from "@/lib/live-pending";
 import type { LiveDashboard, LiveEntryJson, LiveSnapshotJson, VaultEventJson } from "@/lib/live-types";
@@ -547,15 +548,18 @@ describe("SOL under the keeper's wrap line", () => {
     expect(PENDING_COPY.includesWaiting("$0.39", String(KEEPER_DUST.sol), "0.0011")).toBe(statsOf(owner()).nextInvestmentNote);
   });
 
-  it("moves no figure when the SOL crosses the line: only the line under the bar changes", () => {
+  it("moves no counted figure when the SOL crosses the line; what is to go is then the whole line the next saving must cross", () => {
     const under = statsOf(owner({ free: WRAP_DUST_LAMPORTS - 1n, entries: FRESH }));
     const at = statsOf(owner({ free: WRAP_DUST_LAMPORTS, entries: FRESH }));
     expect(under.readyToInvestUsd).toBe(0.500193);
     expect(at.readyToInvestUsd).toBe(under.readyToInvestUsd);
-    expect(at.toGoUsd).toBe(under.toGoUsd);
+    // Under it, one more lamport crosses the line and the $0.50 the basket lacks is the larger figure.
+    expect(under.toGoUsd).toBe(0.499807);
+    // At it, the conversion takes all of it, and the next saving lands on an empty vault: it must bring the whole line.
+    expect(at.toGoUsd).toBe(Number(value(WRAP_DUST_LAMPORTS)) / 1e6);
     expect(under.nextInvestmentNote).toBe(PENDING_COPY.includesWaiting("$0.50", "0.005", "<0.0001"));
-    expect(at.nextInvestmentNote).toBe(PENDING_COPY.includesConverting("$0.50"));
-    expect([under.nextInvestmentGate, at.nextInvestmentGate]).toEqual(["wrap_line", null]);
+    expect(at.nextInvestmentNote).toBe(`${PENDING_COPY.includesConverting("$0.50")} · ${PENDING_COPY.lineAhead("0.005", "$0.50")}`);
+    expect([under.nextInvestmentGate, at.nextInvestmentGate]).toEqual(["wrap_line", "wrap_line"]);
   });
 
   it("adds free SOL under the line to wSOL converting on its own, and says the one sum the bar adds", () => {
@@ -653,6 +657,125 @@ describe("SOL under the keeper's wrap line", () => {
   it("says no to-go and no gate where there is no basket to measure", () => {
     const stats = statsOf(owner({ tokensReadable: false }));
     expect([stats.readyToInvestUsd, stats.toGoUsd, stats.nextInvestmentGate]).toEqual([null, null, null]);
+  });
+
+  /**
+   * AN OVERDUE CONVERSION BESIDE SOL UNDER THE LINE (review 2026-10-09): the
+   * one-sum line said "on its way to USDC" over a conversion the keeper had
+   * failed for 20 minutes, while the bar stopped short and named nothing.
+   */
+  it("does not call an overdue conversion on its way when SOL also waits under the line", () => {
+    const late = owner({ wsol: 18_000_000n, entries: [liveEntry(signature(1), minutesAgo(20), [wrapped("18000000")])] });
+    expect(pendingSteps(late)[0]).toMatchObject({ kind: "converting", state: "waiting", rest: "slow" });
+    const total = value(18_000_000n) + value(UNDER_LINE);
+    const stats = statsOf(late);
+    expect(stats.nextInvestmentNote).toBe(PENDING_COPY.includesBothSlow(formatUsd(total), "$0.39", "0.005", "0.0011"));
+    expect(stats.nextInvestmentNote).not.toBe(PENDING_COPY.includesBoth(formatUsd(total), "$0.39", "0.005", "0.0011"));
+    expect([stats.toGoUsd, stats.nextInvestmentGate]).toEqual([0, "slow"]);
+    // Without a price, in SOL, and the same.
+    const unpriced = owner({ wsol: 18_000_000n, prices: null, entries: [liveEntry(signature(1), minutesAgo(20), [wrapped("18000000")])] });
+    expect(nextInvestmentOf(pendingSteps(unpriced), solUnderWrapLine(unpriced)).note).toBe(PENDING_COPY.plusBothSlow("0.0219", "0.0039", "0.005", "0.0011"));
+    const alone = owner({ free: 0n, wsol: 18_000_000n, prices: null, entries: [liveEntry(signature(1), minutesAgo(20), [wrapped("18000000")])] });
+    expect(nextInvestmentOf(pendingSteps(alone), solUnderWrapLine(alone)).note).toBe(PENDING_COPY.plusConvertingSlow("0.018"));
+  });
+});
+
+/**
+ * THE LINE BINDS EVERY SAVING, NOT ONLY THE SOL UNDER IT (review 2026-10-09).
+ * After a wrap the vault holds no free SOL, so solUnderWrapLine says nothing —
+ * and "to go" read as the USDC's own gap: USDC $0.80 of $1.00 said "$0.20 to
+ * go", a $0.43 saving landed under the line, the keeper wrapped none of it
+ * and bought nothing ($0.40 a leg), and only then did the card name the line.
+ */
+describe("the wrap line the next saving must cross", () => {
+  const OWNER_POLICY: Partial<InvestmentPolicyJson> = {
+    minInvestment: "500000",
+    maxPerCall: "149000000",
+    legs: [
+      { mint: SPYX_MINT, weightBps: 5_000, minOutRateWad: "1" },
+      { mint: ANTHROPIC_MINT, weightBps: 5_000, minOutRateWad: "1" },
+    ],
+  };
+  const owner = (setup: Setup = {}): LiveDashboard => dashboard({ free: 0n, usdc: 0n, policy: OWNER_POLICY, ...setup });
+  const statsOf = (data: LiveDashboard) => toDashboardMock(data, { complete: true }).stats;
+  const LINE_USD = Number(usdcRawForLamports(WRAP_DUST_LAMPORTS, PER_SOL)) / 1e6;
+
+  it("is what is to go with no free SOL at all, when it is more than the basket lacks, and the line under the bar says it", () => {
+    const data = owner({ usdc: 800_000n });
+    expect(solUnderWrapLine(data)).toBeNull();
+    expect(wrapLineAhead(data)).toEqual({ shortLamports: WRAP_DUST_LAMPORTS, shortUsdcRaw: usdcRawForLamports(WRAP_DUST_LAMPORTS, PER_SOL) });
+    const stats = statsOf(data);
+    expect(stats.readyToInvestUsd).toBe(0.8);
+    expect(stats.toGoUsd).toBeGreaterThanOrEqual(LINE_USD);
+    expect(stats.toGoUsd).toBe(LINE_USD);
+    expect(stats.nextInvestmentGate).toBe("wrap_line");
+    expect(stats.nextInvestmentNote).toBe(PENDING_COPY.lineAhead("0.005", "$0.50"));
+  });
+
+  it("is the whole line while the free SOL is being converted: the next saving lands on an empty vault", () => {
+    const data = owner({ free: 8_000_000n, entries: FRESH });
+    expect(pendingSteps(data)).toEqual([expect.objectContaining({ kind: "converting", state: "active", amountRaw: 8_000_000n })]);
+    expect(wrapLineAhead(data)?.shortLamports).toBe(WRAP_DUST_LAMPORTS);
+    const stats = statsOf(data);
+    expect(stats.readyToInvestUsd).toBe(Number(usdcRawForLamports(8_000_000n, PER_SOL)) / 1e6);
+    expect([stats.toGoUsd, stats.nextInvestmentGate]).toEqual([LINE_USD, "wrap_line"]);
+    expect(stats.nextInvestmentNote).toBe(`${PENDING_COPY.includesConverting("$0.80")} · ${PENDING_COPY.lineAhead("0.005", "$0.50")}`);
+  });
+
+  it("is not what is to go when the basket lacks more than the line: any such saving crosses it", () => {
+    const stats = statsOf(owner({ usdc: 200_000n }));
+    expect([stats.toGoUsd, stats.nextInvestmentGate, stats.nextInvestmentNote]).toEqual([0.8, null, null]);
+  });
+
+  it("cannot be weighed without a price, and is not claimed", () => {
+    const stats = statsOf(owner({ usdc: 800_000n, prices: null }));
+    expect([stats.toGoUsd, stats.nextInvestmentGate, stats.nextInvestmentNote]).toEqual([0.2, null, null]);
+  });
+
+  it("is nothing under a rest the page can read, or with the vault's SOL unread", () => {
+    expect(wrapLineAhead(owner({ usdc: 800_000n, paused: true }))).toBeNull();
+    expect(wrapLineAhead(owner({ policy: { ...OWNER_POLICY, minConvertRateWad: "0" } }))).toBeNull();
+    const stats = statsOf(owner({ usdc: 800_000n, paused: true }));
+    expect([stats.toGoUsd, stats.nextInvestmentGate]).toEqual([0.2, null]);
+  });
+});
+
+/**
+ * A BASKET THE USDC BUYS, HELD BY A REST THE PAGE CAN READ (review
+ * 2026-10-09): the vault paused with $1.20 of USDC read "$1.20 of $1.00 ·
+ * $0.00 to go" on a full bar, with nothing under it — a buy the paused keeper
+ * would never make.
+ */
+describe("a basket the USDC buys, under a rest", () => {
+  const OWNER_POLICY: Partial<InvestmentPolicyJson> = {
+    minInvestment: "500000",
+    maxPerCall: "149000000",
+    legs: [
+      { mint: SPYX_MINT, weightBps: 5_000, minOutRateWad: "1" },
+      { mint: ANTHROPIC_MINT, weightBps: 5_000, minOutRateWad: "1" },
+    ],
+  };
+  const statsOf = (setup: Setup) => toDashboardMock(dashboard({ usdc: 1_200_000n, policy: OWNER_POLICY, entries: FRESH, ...setup }), { complete: true }).stats;
+
+  it("is gated by that rest, and the line under the bar names it", () => {
+    const paused = statsOf({ paused: true });
+    expect(paused).not.toMatchObject({ toGoUsd: 0, nextInvestmentGate: null });
+    expect([paused.toGoUsd, paused.nextInvestmentGate, paused.nextInvestmentNote]).toEqual([0, "rest", PENDING_COPY.rest.paused]);
+    const rests: readonly (readonly [Exclude<PendingRest, "slow">, Setup])[] = [
+      ["buying_off", { policy: { ...OWNER_POLICY, enabled: false } }],
+      ["protocol_paused", { protocolPaused: true }],
+      ["month_cap", { policy: { ...OWNER_POLICY, maxRolling30d: "999999" } }],
+      ["price_limits", { policy: { ...OWNER_POLICY, legs: [{ mint: SPYX_MINT, weightBps: 10_000, minOutRateWad: "131283650130637570" }] } }],
+    ];
+    for (const [rest, setup] of rests) {
+      const stats = statsOf(setup);
+      expect([stats.toGoUsd, stats.nextInvestmentGate, stats.nextInvestmentNote]).toEqual([0, "rest", PENDING_COPY.rest[rest]]);
+    }
+  });
+
+  it("is a buy coming, with no gate, when nothing rests it", () => {
+    const stats = statsOf({});
+    expect([stats.toGoUsd, stats.nextInvestmentGate, stats.nextInvestmentNote]).toEqual([0, null, PENDING_COPY.readyToBuy]);
   });
 });
 

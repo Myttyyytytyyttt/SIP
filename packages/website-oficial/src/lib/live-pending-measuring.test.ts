@@ -209,7 +209,7 @@ describe("a trade made while the socket was not listening", () => {
   it("does not move a change the socket already named at a newer slot", () => {
     const heard = notified(EMPTY_PUSH, { address: WALLET_A, slot: 5_500, now: NOW_MS, wallet: true });
     const state = heardLate(heard, movedSince(baselineOf(read(4_000, "1")), read(6_000, "2")));
-    expect(state.wallets[WALLET_A]!.pendingSlot).toBe(5_500);
+    expect(state.wallets[WALLET_A]!.pending).toEqual([5_500]);
   });
 });
 
