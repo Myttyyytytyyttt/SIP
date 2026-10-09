@@ -69,7 +69,7 @@ describe("the configuration", () => {
       privySignerId: null,
       privyPolicyId: null,
       solanaRpcUrl: "/api/solana-rpc",
-      solanaWsUrl: "wss://api.mainnet-beta.solana.com",
+      solanaWsUrl: "wss://solana-rpc.publicnode.com",
       programId: SIP_PROGRAM_ID,
       explorer: "solscan",
     });

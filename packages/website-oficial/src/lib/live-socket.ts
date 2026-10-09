@@ -21,12 +21,14 @@
  * that does no parsing (jsonParsed) and no extra work (base58, which the node
  * also refuses past 128 bytes; zstd, which pays a frame on 165 bytes).
  *
- * IT PINGS. The public endpoint closes a silent socket: measured 2026-10-09 on
- * wss://api.mainnet-beta.solana.com, an idle socket — subscribed to a quiet
+ * IT PINGS. A public endpoint may close a silent socket: measured 2026-10-09 on
+ * wss://api.mainnet-beta.solana.com (no longer the default: it refuses any
+ * browser Origin, see solana-core public-ws-url.mjs), an idle socket — subscribed to a quiet
  * account or to nothing — was closed with 1006 at about 60 s, and the server
  * sent no ping frame of its own; one that sent the text frame
  * {"jsonrpc":"2.0","method":"ping"} every 30 s stayed open for the whole 150 s
- * probe (the server never answers it). So an open socket sends that every
+ * probe (that server never answers it; PublicNode answers with result null and
+ * no id, which onMessage drops). So an open socket sends that every
  * PING_MS, as web3.js and @solana/kit's own autoping do.
  *
  * IT FAILS QUIETLY. The poll goes on whatever happens here. A socket that

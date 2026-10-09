@@ -46,7 +46,7 @@ export interface SolanaServerSettings {
   readonly programId: string;
   /** SIP_SOLANA_RPC_URLS in failover order. They carry API keys and never serialize. */
   readonly rpcEndpoints: readonly RpcEndpoint[];
-  /** Key-free wss origin for the browser, validated (checkPublicWsUrl), default wss://api.mainnet-beta.solana.com. */
+  /** Key-free wss origin for the browser, validated (checkPublicWsUrl), default wss://solana-rpc.publicnode.com. */
   readonly publicWsUrl: string;
   /** Lowercase header name whose value is the client IP (SIP_TRUSTED_CLIENT_IP_HEADER). Every other header is ignored. */
   readonly trustedClientIpHeader: string;
@@ -239,7 +239,7 @@ export function loadSolanaServerSettings(env: Env): SolanaSettingsLoad {
     problems.push({
       variable: "SIP_SOLANA_PUBLIC_WS_URL",
       message: `SIP_SOLANA_PUBLIC_WS_URL ${ws.reason}. This URL is sent to every browser, so a keyed endpoint must never be in it.`,
-      howToFix: "Set a key-free wss:// origin with no path, query or credentials, or unset it for wss://api.mainnet-beta.solana.com.",
+      howToFix: "Set a key-free wss:// origin with no path, query or credentials, or unset it for wss://solana-rpc.publicnode.com.",
     });
   }
 

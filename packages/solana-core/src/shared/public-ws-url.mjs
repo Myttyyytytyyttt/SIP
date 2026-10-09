@@ -8,7 +8,19 @@
 // they are refused outright, and so is any URL on an RPC host or quoting any
 // secret-looking part of an RPC URL — a keyed endpoint must never reach a page.
 
-export const DEFAULT_PUBLIC_WS_URL = "wss://api.mainnet-beta.solana.com";
+// WHY NOT wss://api.mainnet-beta.solana.com, which this was until 2026-10-09.
+// That endpoint answers the WebSocket handshake with 101 only when it carries NO
+// Origin header, and with 403 when it carries any — measured 2026-10-09 with
+// https://sip-website-oficial.vercel.app, https://example.com and
+// http://localhost:3000. Every browser sends Origin, so from a page it never
+// opened: the live dashboard's push fell back to its poll for every user, and
+// a probe from Node, which sends no Origin, said it worked. PublicNode took the
+// same handshake WITH the site's Origin, held 13 accountSubscribe (confirmed,
+// base64) and a 30 s text ping for 190 s with no close, answered each ping, and
+// delivered 380 notifications (largest gap 5.8 s). drpc refused subscriptions
+// on its free plan and OnFinality rate-limited them, both measured the same day.
+// A candidate must be proven WITH an Origin header: scripts/check-public-ws.mts.
+export const DEFAULT_PUBLIC_WS_URL = "wss://solana-rpc.publicnode.com";
 
 const LOOPBACK = /^(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\])$/;
 const MIN_SECRET_PART = 6;

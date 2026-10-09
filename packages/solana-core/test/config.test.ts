@@ -30,7 +30,7 @@ describe("a valid Solana environment", () => {
     expect(load.settings.programId).toBe(SIP_PROGRAM_ID);
     expect(load.settings.rpcEndpoints).toHaveLength(2);
     expect(load.settings.rpcEndpoints[0]!.reveal()).toBe(UPSTREAM_1);
-    expect(load.settings.publicWsUrl).toBe("wss://api.mainnet-beta.solana.com");
+    expect(load.settings.publicWsUrl).toBe("wss://solana-rpc.publicnode.com");
     expect(load.settings.trustedClientIpHeader).toBe("x-envoy-external-address");
     expect(load.settings.relay).toEqual({ perClientPerMin: 60, signingGlobalPerMin: 1_800, readsGlobalPerMin: 1_800 });
     expect(load.settings.send).toEqual({ perClientPerMin: 6, globalPerMin: 150 });
@@ -152,7 +152,7 @@ describe("SIP_SOLANA_PUBLIC_WS_URL", () => {
     ["wss://example.org/", "wss://example.org"],
     ["wss://example.org:8443", "wss://example.org:8443"],
     ["ws://localhost:8900", "ws://localhost:8900"],
-    ["", "wss://api.mainnet-beta.solana.com"],
+    ["", "wss://solana-rpc.publicnode.com"],
   ])("accepts %s as %s", (raw, url) => {
     expect(checkPublicWsUrl(raw, rpc)).toMatchObject({ ok: true, url });
   });

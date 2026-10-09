@@ -16,6 +16,7 @@
     "test:local": "vitest run -c vitest.local.config.ts",
     "test:local:live": "vitest run -c vitest.local.config.ts test-local/live-local.local.test.ts",
     "check:csp": "tsx scripts/check-csp.mts",
+    "check:public-ws": "tsx scripts/check-public-ws.mts",
     "check:idl": "pnpm --dir ../solana-core run check:idl",
     "verify": "pnpm run check:csp && pnpm run check:idl && pnpm run typecheck && pnpm run test && next build"
   },

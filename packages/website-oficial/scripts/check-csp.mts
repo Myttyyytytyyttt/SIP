@@ -32,10 +32,10 @@ const SOLANA_GOLDEN =
   "child-src https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org; " +
   "frame-src https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org https://challenges.cloudflare.com; " +
   "connect-src 'self' https://auth.privy.io https://*.rpc.privy.systems https://explorer-api.walletconnect.com " +
-  "wss://relay.walletconnect.com wss://relay.walletconnect.org wss://www.walletlink.org wss://api.mainnet-beta.solana.com; " +
+  "wss://relay.walletconnect.com wss://relay.walletconnect.org wss://www.walletlink.org wss://solana-rpc.publicnode.com; " +
   "worker-src 'self' blob:; manifest-src 'self'";
 
-const SOLANA_DEFAULT_WS = "wss://api.mainnet-beta.solana.com";
+const SOLANA_DEFAULT_WS = "wss://solana-rpc.publicnode.com";
 const SAMPLE_OVERRIDE = "https://rpc.example.org/v2/SAMPLEKEY";
 
 /** The EVM wallet-RPC overrides the policy used to read. A leftover must add nothing. */
