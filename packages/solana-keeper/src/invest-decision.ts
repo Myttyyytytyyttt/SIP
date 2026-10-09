@@ -1654,7 +1654,8 @@ export function convertProceedsCeiling(input: {
  * unknown by its cap: a converting turn was tested at min(max_per_call,
  * headroom) whatever it could really buy. That is safe and it refused a vault
  * for a size it could never reach. Measured 2026-10-09 00:42Z on the owner's
- * vault (basket SPYx 50 / ANTHROPIC 50, max_per_call $149, min investment $1):
+ * vault (basket SPYx 50 / ANTHROPIC 50, max_per_call $149, min investment
+ * $0.50 per leg, so $1.00 for the basket):
  * 0.0197 SOL free, about $2.15 to convert, and the gate judged ANTHROPIC at
  * $74.5 — half the cap — found the Manifest venue at 28.1x cover and 38 bps of
  * impact at THAT size, and refused the whole basket and the conversion with it.
