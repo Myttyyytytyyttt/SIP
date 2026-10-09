@@ -596,9 +596,10 @@ export const PENDING_COPY = {
    * A TRADING WALLET THAT CHANGED and has no saving for it yet (live-pending.ts
    * measuring). "Activity", never "trade": the push says only that the wallet's
    * balance changed, which a plain transfer into it does too. The wallet's
-   * name LEADS: the title truncates on one line, and at 375 px "Checking your
-   * latest activity on Trading wall…" lost the only part that tells two
-   * wallets apart (review 2026-10-09).
+   * name LEADS: at 375 px the old order, truncated on one line, read
+   * "Checking your latest activity on Trading wall…" and lost the only part
+   * that tells two wallets apart (review 2026-10-09). The title now wraps
+   * (LivePending.tsx), and the name still comes first.
    */
   measuring: (wallet: string): string => `${wallet}: checking your latest activity`,
   measuringWaiting: (wallet: string): string => `${wallet}: no saving yet from your latest activity`,

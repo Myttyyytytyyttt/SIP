@@ -240,7 +240,7 @@ describe("InvestingCard", () => {
     // ratio and the 50 are unchanged, which is precisely why the WORDS needed
     // changing in the same commit and no test would have said so.
     expect(html).toContain("The keeper refuses a buy unless the venue it buys from holds at least 50 times that buy");
-    expect(html).toContain("a Most per buy above it stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance.");
+    expect(html).toContain("a Most per buy above it does not buy less: once the vault holds more than the ceiling, its SOL included, the buying stops altogether — nothing bought, no SOL converted — and since savings keep arriving, it stays stopped until that market deepens.");
     // THE CEILING IS DATED WHERE THE INSTRUCTION IS, and it is now COMPUTED
     // FROM THE BASKET rather than quoted from one night. It names the leg that
     // set it, that leg's own reading day, the ceiling and the starting value —
@@ -402,7 +402,7 @@ describe("InvestingCard", () => {
     // page could not re-derive, so refusing on it would have been refusing on a
     // number it could not defend; the page computes it now, from the basket on
     // screen, so a cap above it is an arithmetic certainty that the policy buys
-    // NOTHING at any balance — and the rent is spent either way.
+    // NOTHING once the vault holds more than it — and the rent is spent either way.
     expect(canSignPolicy({ acknowledged: true, capsOk: true, minimumOk: true, weightsOk: true, depthOk: false, blocked: false })).toBe(false);
     // And the gate defaults OPEN for the callers that predate it, so a basket
     // whose ceiling nobody could compute is never refused on a missing number.
@@ -419,7 +419,8 @@ describe("InvestingCard", () => {
     const refusal = INVEST_COPY.depthWarning("$298.00", "ANTHROPIC", "2026-09-21", "20 %");
     expect(refusal).toContain("$298.00 is the most this basket can buy with, and ANTHROPIC is what sets it");
     expect(refusal).toContain("counted on 2026-09-21");
-    expect(refusal).toContain("the vault buys nothing and converts no SOL, at any balance");
+    expect(refusal).toContain("the vault stops buying altogether once it holds more than $298.00, its SOL included — nothing bought, no SOL converted");
+    expect(refusal).not.toContain("at any balance");
     expect(refusal).toContain("lower Most per buy to $298.00 or less");
     expect(refusal).toContain("give ANTHROPIC a smaller share — 20 % or under");
     expect(refusal).toContain("take ANTHROPIC out of the basket");
@@ -826,15 +827,15 @@ describe("InvestingCard", () => {
    * THE CAP IS JUDGED AGAINST THE STORED BASKET, WHICH IS WHERE THIS USED TO
    * GO WRONG. The setup form has refused a cap over the depth ceiling since the
    * picker landed; these two buttons went around it, and a stored $1,000 cap on
-   * a half-weighted ANTHROPIC leg re-signs into a policy that buys NOTHING at
-   * any balance — the whole basket, the SOL conversion included — with the rent
-   * spent again. Pause must stay available, because it reads no price.
+   * a half-weighted ANTHROPIC leg re-signs into a policy that buys NOTHING once
+   * the vault holds more than the ceiling — the whole basket, the SOL conversion
+   * included — with the rent spent again. Pause must stay available, because it reads no price.
    */
   it("refuses to switch a stored cap its own basket's counted routes cannot cover, and still offers Pause", () => {
     const overCeiling = { ...POLICY, maxPerCall: "1000000000", maxRolling30d: "31000000000" };
     const html = render(screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: overCeiling } }) }));
     expect(html).toContain("ANTHROPIC");
-    expect(html).toContain("buys nothing at any balance");
+    expect(html).toContain("a policy that stops buying once the vault holds more than");
     expect(buttons(INVEST_COPY.switchToLive).map((button) => button.disabled)).toEqual([true]);
     expect(buttons("Pause investing").map((button) => button.disabled)).toEqual([false]);
   });

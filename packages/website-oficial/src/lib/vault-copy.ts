@@ -1024,10 +1024,14 @@ export const INVEST_COPY = {
   // NOT "only one leg can be bought": the keeper's depth gate is all-or-nothing
   // by explicit doctrine (legDepthDecision refuses "the whole basket ... the deep
   // ones included, and refusing to convert SOL toward it"), so one leg alone is
-  // not a thing that can happen. And the gate tests a CONVERTING turn at
-  // max_per_call itself (turnSpendCeiling), not at what the vault holds — so the
-  // shipped $1,000 default is the figure it is judged by, and at two equal legs
-  // that is $500 into ANTHROPIC's pool against the 50x it must clear.
+  // not a thing that can happen. And the gate tests a turn at what it can
+  // reach (turnSpendCeiling): the USDC the vault holds plus an upper estimate
+  // of what its SOL converts to, capped by max_per_call. So a small vault buys
+  // under any cap, and a cap over the ceiling buys until the vault holds more
+  // than the ceiling, then refuses the whole basket for as long as it does.
+  // Until keeper 87cc22b (2026-10-09) a converting turn was judged at
+  // max_per_call itself, at any balance: the shipped $1,000 default put $500
+  // into ANTHROPIC's pool against the 50x it must clear.
   //
   // WHAT THE FIGURES USED TO BE, AND WHY THEY ARE NO LONGER WRITTEN DOWN HERE.
   // This block held one night's reading of ANTHROPIC's PINNED RAYDIUM POOL —
@@ -1066,7 +1070,7 @@ export const INVEST_COPY = {
    * was counted. Nothing here is a constant, because none of it is constant.
    */
   thinPool: (ceiling: string, suggested: string, symbol: string, readOn: string, derived = false): string =>
-    `The keeper refuses a buy unless the venue it buys from holds at least ${POOL_DEPTH_MULTIPLE} times that buy, so a thin market sets a small ceiling. On the shares you have chosen, the leg that sets it is ${symbol}: from what its route held, ${INVEST_COPY.censusProvenance(readOn, derived)}, the whole buy can be at most ${ceiling}, and that is the ceiling itself, not a target. Because a buy takes all of the basket or none, a Most per buy above it stops the buying altogether whenever the vault has SOL to convert: nothing bought, no SOL converted, at any balance. Most per buy starts at ${suggested}, which is half the ceiling, so an ordinary day's drift in that market does not turn your cap into one that buys nothing. That reading was true on the day it was taken and nothing on this page re-reads it. The keeper measures whichever venue it is actually buying through, in the turn itself, so a market that was deep last week does not count for anything today.`,
+    `The keeper refuses a buy unless the venue it buys from holds at least ${POOL_DEPTH_MULTIPLE} times that buy, so a thin market sets a small ceiling. On the shares you have chosen, the leg that sets it is ${symbol}: from what its route held, ${INVEST_COPY.censusProvenance(readOn, derived)}, the whole buy can be at most ${ceiling}, and that is the ceiling itself, not a target. Because a buy takes all of the basket or none, a Most per buy above it does not buy less: once the vault holds more than the ceiling, its SOL included, the buying stops altogether — nothing bought, no SOL converted — and since savings keep arriving, it stays stopped until that market deepens. Most per buy starts at ${suggested}, which is half the ceiling, so an ordinary day's drift in that market does not turn your cap into one that stops buying. That reading was true on the day it was taken and nothing on this page re-reads it. The keeper measures whichever venue it is actually buying through, in the turn itself, so a market that was deep last week does not count for anything today.`,
   /** The same ceiling as a line of facts, above the box it constrains. */
   capWindow: (floor: string, ceiling: string, symbol: string, readOn: string, derived = false): string =>
     `At these shares, Most per buy can be between ${floor} and ${ceiling}. The bottom is arithmetic on what you are signing; the top is ${symbol}'s market as it was ${INVEST_COPY.censusProvenance(readOn, derived)}, divided by the ${POOL_DEPTH_MULTIPLE}x cover the keeper insists on.`,
@@ -1216,9 +1220,9 @@ export const INVEST_COPY = {
    * now computes it from the basket on screen, the shares in the boxes and
    * solana-core's dated route censuses, and re-computes it on every keystroke.
    * A cap over it is not a risk, it is an arithmetic certainty on the readings
-   * SaverFi has: the keeper's depth gate is all-or-nothing, so the policy buys
-   * NOTHING at any balance, forever, and the rent that signs it does not come
-   * back.
+   * SaverFi has: the keeper's depth gate is all-or-nothing, so once the vault
+   * holds more than the ceiling the policy buys NOTHING, a savings vault only
+   * fills up, and the rent that signs it does not come back.
    *
    * A REFUSAL THAT DOES NOT SAY WHAT TO DO INSTEAD IS HALF A REFUSAL, so this
    * names the leg responsible and every way out — the cap, that leg's share,
@@ -1230,7 +1234,7 @@ export const INVEST_COPY = {
    * and lists two sends the owner looking for a control that is not there.
    */
   depthWarning: (ceiling: string, symbol: string, readOn: string, lighterShare: string | null, derived = false): string =>
-    `${ceiling} is the most this basket can buy with, and ${symbol} is what sets it: its market was ${INVEST_COPY.censusProvenance(readOn, derived)}, and the keeper will not put more than a ${POOL_DEPTH_MULTIPLE}th of what it found there into one leg of one buy. Above this the vault buys nothing and converts no SOL, at any balance, and the rent you pay to sign it does not come back. ${lighterShare === null ? "Two" : "Three"} ways out: lower Most per buy to ${ceiling} or less` +
+    `${ceiling} is the most this basket can buy with, and ${symbol} is what sets it: its market was ${INVEST_COPY.censusProvenance(readOn, derived)}, and the keeper will not put more than a ${POOL_DEPTH_MULTIPLE}th of what it found there into one leg of one buy. Above this the vault stops buying altogether once it holds more than ${ceiling}, its SOL included — nothing bought, no SOL converted — and the rent you pay to sign it does not come back. ${lighterShare === null ? "Two" : "Three"} ways out: lower Most per buy to ${ceiling} or less` +
     (lighterShare === null ? "" : `, give ${symbol} a smaller share — ${lighterShare} or under works at the cap you typed`) +
     `, or take ${symbol} out of the basket.`,
   /**
@@ -1384,8 +1388,9 @@ export const INVEST_COPY = {
   // AND THE STORED CAP IS JUDGED AGAINST THE STORED BASKET, because the cap
   // that was inside the window for the basket he signed can be outside it for
   // any other one. A cap over the ceiling does not buy less: the keeper's depth
-  // gate is all-or-nothing, so the policy buys nothing at any balance for its
-  // whole life, and the rent is spent again. The setup form has refused this
+  // gate is all-or-nothing, so the policy buys nothing once the vault holds
+  // more than the ceiling, which a filling vault reaches and stays past, and
+  // the rent is spent again. The setup form has refused this
   // since the picker landed; these two buttons went around it.
   /** A stored policy whose own fields cannot be read: no re-sign is offered rather than one built on a guess. */
   resignUnreadable: "SaverFi could not read this policy's own basket and limits just now, so it cannot offer to sign it again. Pausing still works: it re-signs exactly what is stored.",
@@ -1397,7 +1402,7 @@ export const INVEST_COPY = {
     `This policy's Most per buy is under ${floor}, the least every stock in it can clear — ${symbol} has the smallest share, so it sets that bar. Signing it again would sign a policy that buys nothing at any balance. Pause it and set it up again with a larger Most per buy.`,
   /** The stored cap is over the depth ceiling its own basket faces: the same refusal the setup form makes. */
   resignOverCeiling: (ceiling: string, symbol: string, readOn: string): string =>
-    `This policy's Most per buy is over ${ceiling}, the most ${symbol}'s market covered when it was read on ${readOn} at the share this policy gives it. The keeper refuses a buy the venue cannot cover ${POOL_DEPTH_MULTIPLE} times over, and it refuses the whole basket with it, so signing this again would sign a policy that buys nothing at any balance and spends the rent doing it. Pause it and set it up again with a smaller Most per buy.`,
+    `This policy's Most per buy is over ${ceiling}, the most ${symbol}'s market covered when it was read on ${readOn} at the share this policy gives it. The keeper refuses a buy the venue cannot cover ${POOL_DEPTH_MULTIPLE} times over, and it refuses the whole basket with it, so signing this again would sign a policy that stops buying once the vault holds more than ${ceiling}, and spends the rent doing it. Pause it and set it up again with a smaller Most per buy.`,
 } as const;
 
 /**

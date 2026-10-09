@@ -193,7 +193,7 @@ export const DEPTH_CEILING_PER_BUY_RAW: bigint | null = DEFAULT_WINDOW.ceilingRa
  * never under the floor.
  *
  * NOT DEFAULT_INVEST_CAPS.maxPerCall, which is $1,000 — a cap this card's own
- * notice calls "nothing bought, no SOL converted, at any balance", and which
+ * notice says stops the buying once the vault holds more than the ceiling, and which
  * the form once pre-filled with Sign lit over 0.0117348 SOL of rent that does
  * not come back.
  *

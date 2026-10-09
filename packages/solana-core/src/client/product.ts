@@ -26,13 +26,15 @@
 //    unbounded per call. This overrides "caps at the maximum"; the owner confirms.
 //  * max_rolling_30d = 31 × max_per_call: one maximum buy per day-bucket.
 //
-// AND AT max_per_call THE KEEPER BUYS NOTHING. This is a DEFECT, measured
-// 2026-09-21 and still standing in the number below, not a decision. The
-// arithmetic is the keeper's own, in solana-keeper/src/invest-decision.ts:
-//  * a CONVERTING turn is tested at its worst reachable case, because the USDC
-//    the convert will bring in does not exist yet — turnSpendCeiling takes
-//    min(max_per_call, 30-day headroom), which on a fresh vault is the whole
-//    1,000 USDC;
+// AND AT max_per_call THE KEEPER BUYS NOTHING once the vault holds that much.
+// This is a DEFECT, measured 2026-09-21 and still standing in the number below,
+// not a decision. The arithmetic is the keeper's own, in
+// solana-keeper/src/invest-decision.ts:
+//  * a turn is tested at what it can reach — turnSpendCeiling takes the USDC
+//    held plus an upper estimate of what this turn's SOL converts to, capped by
+//    min(max_per_call, 30-day headroom), so a vault holding 1,000 USDC or more
+//    is tested at the whole 1,000 USDC (until keeper 87cc22b, 2026-10-09, every
+//    converting turn was, at any balance);
 //  * legShare splits that by weight: at today's two equal legs, 500 USDC into
 //    ONE pool;
 //  * legDepthDecision then requires that pool's in-side reserve to cover the
@@ -48,8 +50,8 @@
 // 9,541,652,779 raw the day before) and the venue-wide figure for the same mint
 // was $331,617. THREE NUMBERS, ALL TRUE, FORTY-FIVE TIMES APART: whoever quotes
 // a depth must say which one it is. What survives of the old paragraph is its
-// conclusion — at a $1,000 default the keeper buys nothing, on any of the three
-// readings — and the picker's live ceiling (website-oficial/src/lib/basket-limits.ts)
+// conclusion — at a $1,000 default the keeper buys nothing once the vault holds
+// that much, on any of the three readings — and the picker's live ceiling (website-oficial/src/lib/basket-limits.ts)
 // is what replaces the arithmetic, not another constant.
 //
 // WHAT SUCH A NUMBER IS CALIBRATED AGAINST, AND WHAT INVALIDATES IT. ONE pool's
@@ -352,7 +354,8 @@ export interface CatalogueAsset {
    * instead and the answer is optimistic by exactly the factor between the two
    * — forty-five times, on ANTHROPIC, on the day both were read — and an
    * optimistic ceiling is the one direction a ceiling may never be wrong in: it
-   * signs a policy that buys nothing, at any balance, with the rent spent.
+   * signs a policy that buys nothing once the vault holds more than the real
+   * ceiling, which a filling vault reaches, with the rent spent.
    *
    * So a route census lives in ITS OWN FIELD and null means "nobody counted",
    * which the picker must render as a ceiling it does not know rather than as a

@@ -17,7 +17,8 @@
  * on 2026-09-21 the two differed by forty-five times. `depth` screens an asset
  * onto the shelf and may be either; a ceiling DIVIDES, so the bigger number
  * makes the cap bigger, and a cap that is too big does not buy less — it buys
- * NOTHING, at any balance, for the life of the policy, with the rent spent. So
+ * NOTHING once the vault holds more than the real ceiling, which a filling
+ * vault reaches and stays past, with the rent spent. So
  * routeCensusRaw() is the only input, and a leg nobody counted leaves the
  * ceiling UNKNOWN rather than large.
  *
