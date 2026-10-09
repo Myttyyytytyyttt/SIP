@@ -47,26 +47,32 @@ export function worthFrom(view: LiveView): bigint | null {
 export function PensionKeyChip({ address, worthUsdcRaw }: { readonly address: string; readonly worthUsdcRaw: bigint | null }) {
   return (
     <span className="hidden items-center gap-1.5 rounded-md border px-2 py-1 sm:inline-flex">
-      <Num className="text-xs">{shortAddress(address)}</Num>
+      <Num className="whitespace-nowrap text-xs">{shortAddress(address)}</Num>
       <CopyButton value={address} />
+      {/* Not between md and lg, where the tabs share the bar: the same figure is the page's "Pension value". */}
       {worthUsdcRaw === null ? null : (
-        <>
+        <span className="inline-flex items-center gap-1.5 md:max-lg:hidden">
           <span aria-hidden className="h-3.5 w-px bg-border" />
           <Num className="text-xs font-medium">{formatUsd(worthUsdcRaw)}</Num>
           <span className="sr-only">{LIVE_COPY.worthNow}</span>
-        </>
+        </span>
       )}
     </span>
   );
 }
 
+/**
+ * The word from lg up, the icon (named) below it. Between md and lg the bar
+ * carries the tabs, Dashboard, the live dot, the key chip and the theme toggle
+ * too, and the word pushed it 52 px past a 768 px screen (measured 10-09).
+ */
 export function DisconnectButton({ onDisconnect }: { readonly onDisconnect: () => void }) {
   return (
     <>
-      <Button size="sm" variant="outline" className="hidden sm:inline-flex" onClick={onDisconnect}>
+      <Button size="sm" variant="outline" className="hidden lg:inline-flex" onClick={onDisconnect}>
         {LIVE_COPY.disconnect}
       </Button>
-      <Button size="sm" variant="outline" className="sm:hidden" aria-label={LIVE_COPY.disconnect} onClick={onDisconnect}>
+      <Button size="sm" variant="outline" className="lg:hidden" aria-label={LIVE_COPY.disconnect} onClick={onDisconnect}>
         <LogOut aria-hidden />
       </Button>
     </>
