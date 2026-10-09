@@ -309,12 +309,22 @@ describe("what the page is told of the schedule", () => {
   });
 
   it("the next read is the earlier of the poll's timer and the push's, and none while the tab is hidden or none is armed", () => {
-    expect(nextReadAtOf({ visible: true, pollAt: NOW + 60_000, pushAt: NOW + 11_500 })).toBe(NOW + 11_500);
-    expect(nextReadAtOf({ visible: true, pollAt: NOW + 20_000, pushAt: NOW + 30_000 })).toBe(NOW + 20_000);
-    expect(nextReadAtOf({ visible: true, pollAt: NOW + 60_000, pushAt: null })).toBe(NOW + 60_000);
-    expect(nextReadAtOf({ visible: true, pollAt: null, pushAt: NOW + 1_500 })).toBe(NOW + 1_500);
-    expect(nextReadAtOf({ visible: true, pollAt: null, pushAt: null })).toBeNull();
-    expect(nextReadAtOf({ visible: false, pollAt: NOW + 60_000, pushAt: NOW + 1_500 })).toBeNull();
+    const at = (input: { visible?: boolean; reading?: boolean; pollAt: number | null; pushAt: number | null }): number | null =>
+      nextReadAtOf({ visible: true, reading: false, ...input });
+    expect(at({ pollAt: NOW + 60_000, pushAt: NOW + 11_500 })).toBe(NOW + 11_500);
+    expect(at({ pollAt: NOW + 20_000, pushAt: NOW + 30_000 })).toBe(NOW + 20_000);
+    expect(at({ pollAt: NOW + 60_000, pushAt: null })).toBe(NOW + 60_000);
+    expect(at({ pollAt: null, pushAt: NOW + 1_500 })).toBe(NOW + 1_500);
+    expect(at({ pollAt: null, pushAt: null })).toBeNull();
+    expect(at({ visible: false, pollAt: NOW + 60_000, pushAt: NOW + 1_500 })).toBeNull();
+  });
+
+  it("no next read while one is out, whatever moment a timer was last armed for", () => {
+    // Review 2026-10-09: the timers' moments are cleared in an effect after the
+    // render that set `reading` has painted, so they still held the old moment then.
+    expect(nextReadAtOf({ visible: true, reading: true, pollAt: NOW + 40_000, pushAt: null })).toBeNull();
+    expect(nextReadAtOf({ visible: true, reading: true, pollAt: null, pushAt: NOW + 1_500 })).toBeNull();
+    expect(nextReadAtOf({ visible: true, reading: true, pollAt: NOW + 40_000, pushAt: NOW + 1_500 })).toBeNull();
   });
 
   it("backing off: after a failed read, or a 429 the 20 s cadence earned — not otherwise", () => {

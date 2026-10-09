@@ -83,7 +83,9 @@
  *
  * A LATE ANSWER FOR AN OLDER REQUEST IS DROPPED (a request counter, as
  * useVaultState does), and changing pension key resets everything — nothing read
- * for the previous key stays on screen for the next one.
+ * for the previous key stays on screen for the next one. What was ASKED for it
+ * ends there too, and on unmount: a refresh deferred to the floor is cleared,
+ * and the read out and a Load older page answer into nothing (keyEpoch).
  *
  * A PAGE OF SIGNATURES IS NOT A PAGE OF SETTLEMENTS. When the chain's own state
  * says a settlement happened and the loaded page holds none — twelve of fifteen
@@ -252,8 +254,9 @@ export interface LiveLiveness {
   /**
    * When the next read nobody asked for is due — the poll's timer or the
    * push's, whichever is earlier (live-schedule.ts nextReadAtOf). Null while
-   * the tab is hidden (no timer runs then), while a read is out, and when
-   * none is scheduled.
+   * the tab is hidden (no timer runs then), while a read is out — in the very
+   * render that sets `reading`, not one frame after it — and when none is
+   * scheduled.
    */
   readonly nextReadAt: number | null;
   /**
@@ -420,6 +423,19 @@ export function useLiveDashboard(input: {
   // the component, and the app's own routes remount this hook — so every
   // remount re-paid a round that had already answered, out of the same 60 read
   // tokens a minute the activity page is paid from.
+  /**
+   * WHICH PENSION ON SCREEN AN ANSWER OR A TIMER BELONGS TO: moved when the key
+   * changes and when the hook unmounts (the reset effect's cleanup). Load older
+   * and a deferred refresh take it when they start and are believed only while
+   * it has not moved. The request counter cannot serve: every read moves it,
+   * and a poll landing during Load older is no reason to drop the older page.
+   */
+  const keyEpoch = useRef(0);
+  /**
+   * THE ONE REFRESH DEFERRED TO THE FLOOR (refresh()), and whether a press
+   * folded into it asked to re-list the links. Null while none is waiting.
+   */
+  const deferred = useRef<{ readonly timer: number; discover: boolean } | null>(null);
 
   // A DIFFERENT PENSION KEY IS A DIFFERENT PENSION: nothing carries over — but
   // the read count goes on, so a read for the new key still reads as one.
@@ -433,6 +449,24 @@ export function useLiveDashboard(input: {
     setOlder({ busy: false, retryAt: null, message: null });
     // What the push heard and the last read's balances outlive a remount (live-push.ts recallPush).
     setPush(pensionKey !== null && wantsActivity ? recallPush(pensionKey).push : EMPTY_PUSH);
+    /*
+     * AND WHAT WAS ASKED FOR THIS KEY ENDS WITH IT, on a key change and on
+     * unmount alike (review 2026-10-09). A refresh deferred to the floor could
+     * fire after either: it read with the key it was armed for and took the
+     * newest request number — so nothing marked it stale — and could commit
+     * pension A's snapshot and rows into pension B's store; or, unmounted, it
+     * spent a read and wrote its balances as the push's baseline
+     * (rememberPush) while the change they showed was dropped with the
+     * component, so the next mount would never see that move. The read still
+     * out when the hook goes is dropped the same way, and a late Load older
+     * page for the old key too (keyEpoch).
+     */
+    return () => {
+      keyEpoch.current += 1;
+      request.current += 1;
+      if (deferred.current !== null) window.clearTimeout(deferred.current.timer);
+      deferred.current = null;
+    };
   }, [pensionKey, wantsActivity]);
   // Kept for the next remount — only by a caller that draws the history.
   useEffect(() => {
@@ -760,11 +794,31 @@ export function useLiveDashboard(input: {
 
   const refresh = useCallback(
     (options: { readonly discover?: boolean } = {}): void => {
+      const discover = options.discover ?? false;
       const delay = nextManualDelayMs({ lastReadAt: lastReadRef.current, now: Date.now(), retryAfterSeconds: null });
       // Clicking twice, or closing the modal straight after opening it, must not
       // spend a minute's tokens in a second.
-      if (delay <= 0) void read(options.discover ?? false);
-      else window.setTimeout(() => void read(options.discover ?? false), Math.min(delay, MANUAL_FLOOR_MS));
+      if (delay <= 0) {
+        void read(discover);
+        return;
+      }
+      // ONE DEFERRED READ, held in a ref so the key's reset can clear it: a
+      // press inside the floor joins the one already waiting, and keeps its
+      // `discover` — two timers used to fire together, the second turned back
+      // by the first's guard, and a re-listing asked by it was lost.
+      if (deferred.current !== null) {
+        deferred.current.discover ||= discover;
+        return;
+      }
+      const epoch = keyEpoch.current;
+      const armed: { timer: number; discover: boolean } = { timer: 0, discover };
+      armed.timer = window.setTimeout(() => {
+        if (deferred.current === armed) deferred.current = null;
+        // Armed for a pension no longer on screen: the reset clears this timer, and this is the guard behind it.
+        if (epoch !== keyEpoch.current) return;
+        void read(armed.discover);
+      }, Math.min(delay, MANUAL_FLOOR_MS));
+      deferred.current = armed;
     },
     [read],
   );
@@ -776,7 +830,17 @@ export function useLiveDashboard(input: {
     if (pensionKey === null || before === null || older.busy || olderBusyRef.current) return;
     olderBusyRef.current = true;
     setOlder((current) => ({ ...current, busy: true, message: null }));
+    const epoch = keyEpoch.current;
     void api.activity({ owner: pensionKey, limit: ACTIVITY_PAGE, before }).then((page) => {
+      /*
+       * AN OLDER PAGE OF A PENSION NO LONGER ON SCREEN TOUCHES NOTHING (review
+       * 2026-10-09). Answering late, it appended the old key's rows to the new
+       * key's forgotten store and set the cursor to the old key's; the new
+       * key's first read would then ask `until` one of those signatures and
+       * merge its page over them. Not even `busy`: the reset already cleared
+       * it, and a Load older of the new pension's may be out by now.
+       */
+      if (epoch !== keyEpoch.current) return;
       olderBusyRef.current = false;
       if (page.ok) {
         // Under the rows held, with the cursor it names: no read of the chain's present, so the count and the clock stay.
@@ -893,7 +957,8 @@ export function useLiveDashboard(input: {
   if (!sameHeard(heardRef.current, heardNow)) heardRef.current = heardNow;
   const heard = heardRef.current;
   const refreshReadyAt = manualReadyAt(lastReadAt);
-  const nextReadAt = nextReadAtOf({ visible, pollAt, pushAt });
+  // `reading` from this render, not from the effect that clears the timers after it has painted (nextReadAtOf).
+  const nextReadAt = nextReadAtOf({ visible, reading, pollAt, pushAt });
   const backingOff = backingOffOf({ failures, refused: unheardRefused });
   const { readId, committedAt } = store;
   const live = useMemo(

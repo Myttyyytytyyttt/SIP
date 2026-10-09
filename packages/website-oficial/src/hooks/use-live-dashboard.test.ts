@@ -113,6 +113,44 @@ describe("every read commits once", () => {
   });
 });
 
+/**
+ * WHAT WAS ASKED FOR A PENSION ENDS WITH IT (review 2026-10-09): on a key
+ * change and on unmount. A refresh deferred to the floor could fire afterwards
+ * with the old key and the newest request number, and commit pension A into
+ * pension B's store; a Load older page answering late appended A's rows and
+ * cursor to B's forgotten store.
+ */
+describe("what was asked for a pension ends with it", () => {
+  const reset = source.slice(source.indexOf("request.current += 1;\n    setStore(forgottenData);"), source.indexOf("const read = useCallback"));
+  const refresh = source.slice(source.indexOf("const refresh = useCallback"), source.indexOf("const loadOlder"));
+  const older = source.slice(source.indexOf("const loadOlder"), source.indexOf("const walletChanges"));
+
+  it("moves the key's epoch, drops the read out and clears the deferred refresh in the reset's cleanup — which runs on a key change and on unmount", () => {
+    expect(reset).toMatch(
+      /return \(\) => \{\s*keyEpoch\.current \+= 1;\s*request\.current \+= 1;\s*if \(deferred\.current !== null\) window\.clearTimeout\(deferred\.current\.timer\);\s*deferred\.current = null;\s*\};\s*\}, \[pensionKey, wantsActivity\]\);/,
+    );
+    // Nowhere else: an epoch that moved on a read would drop the older page a poll landed beside.
+    expect(source.match(/keyEpoch\.current \+= 1/g)).toHaveLength(1);
+  });
+
+  it("keeps ONE deferred refresh, in a ref the reset can clear, and reads from it only for the pension it was armed for", () => {
+    // No bare timer the reset cannot reach.
+    expect(refresh).not.toMatch(/window\.setTimeout\(\(\) => void read\(/);
+    expect(refresh).toMatch(/const epoch = keyEpoch\.current;/);
+    expect(refresh).toMatch(/if \(epoch !== keyEpoch\.current\) return;\s*void read\(armed\.discover\);/);
+    expect(refresh).toMatch(/deferred\.current = armed;/);
+    // A press inside the floor joins the one waiting, and keeps its re-listing.
+    expect(refresh).toMatch(/if \(deferred\.current !== null\) \{\s*deferred\.current\.discover \|\|= discover;\s*return;\s*\}/);
+    expect(refresh.match(/window\.setTimeout\(/g)).toHaveLength(1);
+  });
+
+  it("drops a Load older page of a pension no longer on screen before it touches the store, the cursor or `busy`", () => {
+    expect(older.indexOf("const epoch = keyEpoch.current;")).toBeGreaterThan(-1);
+    expect(older.indexOf("const epoch = keyEpoch.current;")).toBeLessThan(older.indexOf("api.activity("));
+    expect(older).toMatch(/\.then\(\(page\) => \{\s*if \(epoch !== keyEpoch\.current\) return;\s*olderBusyRef\.current = false;/);
+  });
+});
+
 describe("Load older is offered only when there is an older page", () => {
   it("is worked out from the cursor a head page named, never stored beside it — and so is 'complete'", () => {
     expect(source).toMatch(/available: cursor !== null/);
@@ -282,8 +320,9 @@ describe("live", () => {
     expect(source).toMatch(/const delay = nextManualDelayMs\(\{ lastReadAt: lastReadRef\.current, now: Date\.now\(\), retryAfterSeconds: null \}\);/);
   });
 
-  it("nextReadAt: the moment each timer was armed for, the earlier of the two, none while hidden", () => {
-    expect(source).toMatch(/const nextReadAt = nextReadAtOf\(\{ visible, pollAt, pushAt \}\);/);
+  it("nextReadAt: the moment each timer was armed for, the earlier of the two, none while hidden or while a read is out", () => {
+    // `reading` is this render's, handed in: the timers' moments are cleared only after it has painted.
+    expect(source).toMatch(/const nextReadAt = nextReadAtOf\(\{ visible, reading, pollAt, pushAt \}\);/);
     expect(source).toMatch(/setPollAt\(Date\.now\(\) \+ when\);\s*const timer = window\.setTimeout\(/);
     expect(source).toMatch(/setPushAt\(delay === null \? null : Date\.now\(\) \+ delay\);\s*if \(delay === null\) return undefined;\s*const timer = window\.setTimeout\(/);
     // Every way out of either effect without a timer says so.

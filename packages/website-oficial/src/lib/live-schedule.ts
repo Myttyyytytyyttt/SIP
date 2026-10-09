@@ -196,10 +196,21 @@ export const manualReadyAt = (lastReadAt: number | null): number => (lastReadAt 
  * WHEN THE NEXT READ NOBODY ASKED FOR IS DUE (§5 item 6), on this browser's
  * clock: the earlier of the poll's timer and the push's, each as armed (null
  * when it is not). Null while the tab is hidden — neither timer runs then —
- * and while none is armed: a read is out, or nothing is scheduled.
+ * while a read is out, and while none is armed: nothing is scheduled.
+ *
+ * `reading` IS ASKED HERE, NOT LEFT TO THE TIMERS (review 2026-10-09). The
+ * moments are armed and cleared in passive effects, which run only after the
+ * render that set `reading` has painted: for that one frame the timer's old
+ * moment stood beside a read already out — a "next try at" over a read in
+ * progress. The render that sets `reading` now says null itself.
  */
-export function nextReadAtOf(input: { readonly visible: boolean; readonly pollAt: number | null; readonly pushAt: number | null }): number | null {
-  if (!input.visible) return null;
+export function nextReadAtOf(input: {
+  readonly visible: boolean;
+  readonly reading: boolean;
+  readonly pollAt: number | null;
+  readonly pushAt: number | null;
+}): number | null {
+  if (!input.visible || input.reading) return null;
   if (input.pollAt === null) return input.pushAt;
   return input.pushAt === null ? input.pollAt : Math.min(input.pollAt, input.pushAt);
 }
