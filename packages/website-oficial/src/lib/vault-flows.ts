@@ -37,9 +37,10 @@
  * product.ts says why 1 and not 0), and the page builds the intent's legs with
  * that constant, never with a number the answer carries. The SOL floor is the
  * one number the server reads from the chain, so before it reaches the intent
- * it is held to the SOL price THIS PAGE shows (livePriceProblem,
+ * it is held to the SOL price THIS PAGE read (livePriceProblem,
  * CONVERT_FLOOR_BAND_BPS): a build answering a 1-wad floor, or one high enough
- * to stop conversion today, is refused. The basket must be SIP's, the caps and
+ * to stop conversion today, is refused, relative to that read — which comes
+ * from the same server (CONVERT_FLOOR_BAND_BPS says what that leaves). The basket must be SIP's, the caps and
  * on/off what the person chose, and every token account created ahead of the
  * policy the vault's own, at an address the page derived itself.
  *
@@ -68,10 +69,11 @@ import {
   linkConsentMessage,
   solscanTx,
   tryBase64Decode,
+  usdcRawPerSol,
   type ConfirmOutcome,
 } from "@sip/solana-core/client";
 
-import { rawFrom } from "@/lib/amounts";
+import { formatUsd, rawFrom } from "@/lib/amounts";
 import { privyFailure } from "@/lib/privy-failure";
 import { SigningError, isSignerRefusal, type PensionSigner, type SignerRefusal, type TradingSigners } from "@/lib/signing-wallets";
 import { IntentError, checkBuiltIntent, checkSignedIntent, mergeCoSignature, type OwnerIntent, type ReadTransaction, type SignedTransaction, type TokenAccountCreateIntent } from "@/lib/tx-intent";
@@ -156,6 +158,47 @@ const refused = (message: string, code?: string): FlowResult => (code === undefi
 /** The code of a write the person cancelled in their wallet (signingFailure): nothing was sent. */
 export const DECLINED_CODE = "declined";
 
+/**
+ * The code of a policy build whose SOL price is not the one this page shows, or
+ * that met a page showing no SOL price at all (investPolicyFlow): nothing was
+ * signed, and the vault screen is read again (refreshesScreen) so the next press
+ * is judged against a fresh SOL price.
+ *
+ * WHY A CODE AND NOT A MISMATCH (review 2026-10-09). The vault screen reads SOL's
+ * price once and again only when something asks it to, so the price it shows can
+ * be the read from page load. A server that read SOL a few percent away from
+ * that old read is far more often an old screen than a tampered server; called a
+ * mismatch it said the server was not to be trusted, carried no code, and "Build
+ * again" was judged against the same old read and refused again. The words now
+ * name both prices, so a server that is in fact wrong is still in plain sight.
+ */
+export const SOL_PRICE_MOVED_CODE = "sol_price_moved";
+
+/**
+ * Outcomes after which the vault screen's picture of the chain is stale and is
+ * read again (use-vault-actions' run): every landed write, and the refusals
+ * whose code says the screen was behind the chain.
+ */
+const REFRESH_AFTER: ReadonlySet<string> = new Set([
+  "vault_exists",
+  "vault_missing",
+  "config_missing",
+  "protocol_paused",
+  "wallet_already_linked",
+  "already_exists",
+  "above_withdrawable",
+  "not_held",
+  "above_holding",
+  "mint_unexpected",
+  "policy_missing",
+  "already_paused",
+  "balance_moved",
+  SOL_PRICE_MOVED_CODE,
+]);
+
+/** Whether a finished write leaves the vault screen to be read again: see REFRESH_AFTER. */
+export const refreshesScreen = (result: FlowResult): boolean => result.ok || (result.kind === "refused" && result.code !== undefined && REFRESH_AFTER.has(result.code));
+
 /** A flow's own words for a transaction the chain refused, by its error, with a code the screen acts on; null for the general words. */
 type Explain = (err: unknown) => { readonly message: string; readonly code: string } | null;
 
@@ -196,7 +239,7 @@ function fromFailure(failure: ApiFailure, refusal: Refusal = {}): FlowResult {
 }
 
 function intentFailure(error: unknown): FlowResult {
-  if (error instanceof IntentError) return refused(error.message);
+  if (error instanceof IntentError) return refused(error.message, error.code);
   throw error;
 }
 
@@ -526,7 +569,17 @@ export interface InvestPolicyInput {
  * owner was promised — a 1-wad floor most of all, a server weakening the one
  * protection the conversion has. Over 5,250: a floor that is not the half the
  * owner chose, up to one at or over today's price, which would stop conversion
- * the moment it is signed.
+ * the moment it is signed. Either is refused with SOL_PRICE_MOVED_CODE and both
+ * prices in the words, and the vault screen is read again.
+ *
+ * WHAT IT CANNOT CATCH (review 2026-10-09). The yardstick is the vault screen's
+ * SOL price, and that comes from /api/solana-vault, on the same deployment as
+ * the build. "Weakened" means weakened RELATIVE TO THAT READ: a server that
+ * reports a near-zero SOL price in both answers passes the band with a floor
+ * that protects almost nothing. The page has no SOL price of its own today, so
+ * that is a trust the owner still places in SaverFi's server; what is left is
+ * the signing line, which prints the floor in dollars a SOL ("only at $… a SOL
+ * or more") before Phantom opens.
  */
 export const CONVERT_FLOOR_BAND_BPS = Object.freeze({ min: 4_750, max: 5_250 });
 
@@ -658,8 +711,19 @@ export async function investPolicyFlow(deps: PensionFlowDeps, input: InvestPolic
   if (venueProgram === undefined) return refused(FAILURE_COPY.unverifiableVenue(venueName));
   return pensionWrite<InvestPolicyBuildJson>(deps, request, async (body) => {
     const chosen = input.weights === undefined ? OFFERED_LEGS.map((leg, index) => ({ leg, index })) : OFFERED_LEGS.map((leg, index) => ({ leg, index })).filter(({ leg }) => input.weights!.has(leg.mint));
-    const problem = livePriceProblem(body.floors, input.shownConvertWad);
-    if (problem !== null) throw new IntentError(FAILURE_COPY.builtMismatch(problem));
+    // TWO KINDS OF NO. A floor that is not the half of the SOL price the server
+    // itself names, or legs off the constant, is the server contradicting itself:
+    // a mismatch. A self-consistent floor outside the band around the price this
+    // page shows is a SOL price to read again (SOL_PRICE_MOVED_CODE), in words
+    // that name both prices; nothing is signed either way.
+    const shape = liveFloorsProblem(body.floors);
+    if (shape !== null) throw new IntentError(FAILURE_COPY.builtMismatch(shape));
+    const shown = input.shownConvertWad ?? null;
+    if (shown === null || shown <= 0n) throw new IntentError(FAILURE_COPY.noSolPriceShown, SOL_PRICE_MOVED_CODE);
+    if (livePriceProblem(body.floors, shown) !== null) {
+      const serverRead = formatUsd(usdcRawPerSol(rawFrom(body.floors.liveConvertWad)!));
+      throw new IntentError(FAILURE_COPY.solPriceMoved(serverRead, formatUsd(usdcRawPerSol(shown))), SOL_PRICE_MOVED_CODE);
+    }
     // Checked just above: half the SOL price the server read, and inside the band around the one this page shows.
     const convertFloor = rawFrom(body.floors.convertWad)!;
     const vault = await deriveVaultAddress(input.pensionKey);

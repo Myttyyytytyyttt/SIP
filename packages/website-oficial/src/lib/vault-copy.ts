@@ -1563,6 +1563,15 @@ export const FAILURE_COPY = {
   unknown: "Something went wrong. Nothing was sent.",
   builtMismatch: (detail: string): string => `SaverFi's server sent a transaction that is not what you asked for (${detail}). Nothing was signed.`,
   /**
+   * A policy build whose SOL price is not the one this page shows (vault-flows'
+   * SOL_PRICE_MOVED_CODE): most often a page read a while ago, so the words
+   * accuse nobody, name both prices, and say the page is reading SOL again.
+   */
+  solPriceMoved: (serverRead: string, shown: string): string =>
+    `SaverFi's server read SOL at ${serverRead}; this page last read it at ${shown}. Your SOL safety floor is half the price, so it is only signed when the two are within 5 % of each other. This page is reading SOL's price again: try again in a moment. Nothing was signed.`,
+  /** A policy build on a page that has read no SOL price yet: the safety floor has nothing to be checked against. */
+  noSolPriceShown: "This page has not read SOL's price yet, so your SOL safety floor could not be checked. It is reading it again: try again in a moment. Nothing was signed.",
+  /**
    * A venue this app cannot check the bytes of. The server may offer a name the
    * web has not learned the program for yet; signing it would mean trusting the
    * server about which program the vault will call, which is the one thing the

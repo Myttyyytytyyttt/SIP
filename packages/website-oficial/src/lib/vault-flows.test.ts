@@ -54,7 +54,9 @@ import {
   DECLINED_CODE,
   DEFAULT_VENUE_NAME,
   LINK_MAX_BUILDS,
+  SOL_PRICE_MOVED_CODE,
   VERIFIABLE_VENUES,
+  refreshesScreen,
   awaitsConfirmation,
   checkAgainFlow,
   createVaultFlow,
@@ -744,15 +746,87 @@ describe("investPolicyFlow", () => {
     const live = 94_936_737_266_162_442n;
     h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey, { convertFloor: live / 2n, floors: (floors) => ({ ...floors, convertWad: live / 2n, liveConvertWad: live }) })));
     const result = await investPolicyFlowBare(h.createDeps, { pensionKey: h.pensionKey, shownConvertWad: SHOWN_SOL_WAD });
-    expect(result).toMatchObject({ ok: false, kind: "refused" });
-    expect(!result.ok && result.message).toContain("its SOL safety floor is far under half the SOL price this page shows you");
+    // The server read $94.94 against the page's $100.04 (usdcRawPerSol rounds down, formatUsd to the cent).
+    expect(result).toMatchObject({ ok: false, kind: "refused", code: SOL_PRICE_MOVED_CODE, message: FAILURE_COPY.solPriceMoved("$94.94", "$100.04") });
     expect(h.signWithPension).not.toHaveBeenCalled();
     // And a screen with no SOL price signs nothing.
     const blind = harness();
     blind.build.mockImplementationOnce(async () => ok(policyAnswer(blind.pensionKey)));
     const unseen = await investPolicyFlowBare(blind.createDeps, { pensionKey: blind.pensionKey });
-    expect(!unseen.ok && unseen.message).toContain("this page has no SOL price to check its SOL safety floor against");
+    expect(unseen).toMatchObject({ ok: false, kind: "refused", code: SOL_PRICE_MOVED_CODE, message: FAILURE_COPY.noSolPriceShown });
     expect(blind.signWithPension).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A SCREEN READ LONG AGO IS NOT A TAMPERED SERVER (review 2026-10-09). The
+   * vault screen reads SOL's price once and again only when something asks it
+   * to, so the yardstick can be the read from page load. A build outside the
+   * band is then a price to read again: it carries SOL_PRICE_MOVED_CODE, which
+   * refreshesScreen answers true for (the hook re-reads the vault screen on it),
+   * its words name both prices and accuse nobody, and the next press, on the
+   * fresh read, signs.
+   */
+  it("a SOL price outside the band refreshes the screen with words that name both prices, and the press after the fresh read signs", async () => {
+    // The server read SOL 6 % over the page's stale $100.04.
+    const live = (SHOWN_SOL_WAD * 106n) / 100n;
+    const h = harness();
+    h.build.mockImplementation(async () => ok(policyAnswer(h.pensionKey, { convertFloor: live / 2n, floors: (floors) => ({ ...floors, convertWad: live / 2n, liveConvertWad: live }) })));
+    const stale = await investPolicyFlowBare(h.createDeps, { pensionKey: h.pensionKey, shownConvertWad: SHOWN_SOL_WAD });
+    expect(stale).toMatchObject({ ok: false, kind: "refused", code: SOL_PRICE_MOVED_CODE });
+    expect(!stale.ok && stale.message).toBe(FAILURE_COPY.solPriceMoved("$106.04", "$100.04"));
+    expect(!stale.ok && stale.message).toContain("Nothing was signed.");
+    expect(!stale.ok && stale.message).not.toContain("not what you asked for");
+    // The words' "within 5 %" is the band: 250 bps either side of a 5,000-bps half is 5 % of the price.
+    expect(((CONVERT_FLOOR_BAND_BPS.max - CONVERT_SAFETY_FLOOR.web.bps) * 100) / CONVERT_SAFETY_FLOOR.web.bps).toBe(5);
+    expect(((CONVERT_SAFETY_FLOOR.web.bps - CONVERT_FLOOR_BAND_BPS.min) * 100) / CONVERT_SAFETY_FLOOR.web.bps).toBe(5);
+    expect(!stale.ok && stale.message).toContain("within 5 % of each other");
+    expect(refreshesScreen(stale)).toBe(true);
+    expect(h.signWithPension).not.toHaveBeenCalled();
+    // The screen read again and now shows the server's price: the same press signs.
+    const fresh = await investPolicyFlowBare(h.createDeps, { pensionKey: h.pensionKey, shownConvertWad: live });
+    expect(fresh.ok, JSON.stringify(fresh)).toBe(true);
+    // A screen with no SOL price yet is read again too, with its own words.
+    const blind = harness();
+    blind.build.mockImplementationOnce(async () => ok(policyAnswer(blind.pensionKey)));
+    const unseen = await investPolicyFlowBare(blind.createDeps, { pensionKey: blind.pensionKey, shownConvertWad: null });
+    expect(unseen).toMatchObject({ ok: false, kind: "refused", code: SOL_PRICE_MOVED_CODE, message: FAILURE_COPY.noSolPriceShown });
+    expect(blind.signWithPension).not.toHaveBeenCalled();
+  });
+
+  it("a build whose SOL floor contradicts its own SOL price stays a mismatch: no code, no refresh", async () => {
+    const h = harness();
+    h.build.mockImplementationOnce(async () => ok(policyAnswer(h.pensionKey, { floors: (floors) => ({ ...floors, liveConvertWad: SHOWN_SOL_WAD + 2n }) })));
+    const result = await investPolicyFlow(h.createDeps, { pensionKey: h.pensionKey });
+    expect(result).toMatchObject({ ok: false, kind: "refused" });
+    expect(!result.ok && result.message).toContain("not what you asked for");
+    expect(!result.ok && "code" in result ? result.code : undefined).toBeUndefined();
+    expect(refreshesScreen(result)).toBe(false);
+  });
+
+  it("refreshesScreen: a landed write and the stale-state refusals re-read the vault screen; a cancel and a plain refusal do not", () => {
+    const refusedWith = (code?: string): FlowResult => (code === undefined ? { ok: false, kind: "refused", message: "x" } : { ok: false, kind: "refused", message: "x", code });
+    for (const code of [
+      "vault_exists",
+      "vault_missing",
+      "config_missing",
+      "protocol_paused",
+      "wallet_already_linked",
+      "already_exists",
+      "above_withdrawable",
+      "not_held",
+      "above_holding",
+      "mint_unexpected",
+      "policy_missing",
+      "already_paused",
+      "balance_moved",
+      SOL_PRICE_MOVED_CODE,
+    ]) {
+      expect(refreshesScreen(refusedWith(code)), code).toBe(true);
+    }
+    expect(refreshesScreen({ ok: true, signature: "s", explorerUrl: "u", slot: 1, unitsConsumed: null })).toBe(true);
+    expect(refreshesScreen(refusedWith(DECLINED_CODE))).toBe(false);
+    expect(refreshesScreen(refusedWith())).toBe(false);
+    expect(refreshesScreen({ ok: false, kind: "expired", message: "x" })).toBe(false);
   });
 
   it("Phantom dropping a token account creation is refused before anything is sent", async () => {

@@ -17,6 +17,7 @@ import {
   linkWalletFlow,
   setPolicyFlow,
   pauseInvestingFlow,
+  refreshesScreen,
   shownConvertWadOf,
   withdrawFlow,
   withdrawTokenFlow,
@@ -158,23 +159,6 @@ export function VaultWriteLock({ children }: { readonly children?: ReactNode }) 
   return createElement(WriteLockContext.Provider, { value: lock }, children);
 }
 
-/** Outcomes after which the page's picture of the chain is stale. */
-const REFRESH_AFTER = new Set([
-  "vault_exists",
-  "vault_missing",
-  "config_missing",
-  "protocol_paused",
-  "wallet_already_linked",
-  "already_exists",
-  "above_withdrawable",
-  "not_held",
-  "above_holding",
-  "mint_unexpected",
-  "policy_missing",
-  "already_paused",
-  "balance_moved",
-]);
-
 /** The vault's own rule, all six fields, as setPolicy writes them. */
 export interface VaultRuleRequest {
   readonly mode: number;
@@ -272,7 +256,7 @@ export function useVaultWrite(key: string) {
           return;
         }
         setProgress({ phase: "finished", kind, result });
-        if (result.ok || (result.kind === "refused" && result.code !== undefined && REFRESH_AFTER.has(result.code))) screen.refresh();
+        if (refreshesScreen(result)) screen.refresh();
       } catch {
         const result: FlowResult = { ok: false, kind: "refused", message: FAILURE_COPY.unknown };
         after?.(result);
@@ -459,9 +443,11 @@ export function useVaultWrite(key: string) {
       lastRequest.current = { kind: "policy", input };
       const { api, pensionKey, view } = screen;
       // THE SOL PRICE THIS SCREEN IS SHOWING as the button is pressed: the flow
-      // holds the build's SOL safety floor to half of it. Read here rather than
-      // carried in the request, so "Build again" is judged against what is on
-      // screen now and not against a reading from minutes ago.
+      // holds the build's SOL safety floor to half of it. It is the vault
+      // screen's last read, which can be as old as the page: a build outside the
+      // band comes back as SOL_PRICE_MOVED_CODE, run re-reads the screen on it
+      // (refreshesScreen), and because it is read here rather than carried in
+      // the request, the next press after that read is judged against the new one.
       const shownConvertWad = shownConvertWadOf(view);
       return run("policy", ({ onStep, onBuilt }) =>
         investPolicyFlow(

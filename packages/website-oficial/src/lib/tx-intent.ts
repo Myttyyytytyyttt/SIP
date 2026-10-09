@@ -72,8 +72,19 @@ import {
 
 import { FAILURE_COPY, LINK_COPY } from "@/lib/vault-copy";
 
+/**
+ * A build the page will not sign. `code`, when present, is the FlowResult code
+ * the refusal carries (vault-flows' intentFailure): a refusal the screen acts on,
+ * such as SOL_PRICE_MOVED_CODE, which re-reads the vault screen. Without one it
+ * is a plain refusal.
+ */
 export class IntentError extends Error {
   override readonly name = "IntentError";
+  readonly code: string | undefined;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.code = code;
+  }
 }
 
 const PROGRAM_NAMES: Readonly<Record<string, string>> = {
