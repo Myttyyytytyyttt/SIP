@@ -11,7 +11,6 @@ import {
   nextDelayMs,
   nextManualDelayMs,
   pendingPollWanted,
-  shouldRefreshOnShow,
   ACTIVITY_RETRIES,
   nextActivityRetryMs,
 } from "@/lib/live-schedule";
@@ -77,12 +76,6 @@ describe("a hidden tab costs nothing", () => {
     // Not even when it is overdue, or failing.
     expect(nextDelayMs({ ...base, visible: false, now: NOW + 10 * POLL_BASE_MS })).toBeNull();
     expect(nextDelayMs({ ...base, visible: false, failures: 3, retryAfterSeconds: 30 })).toBeNull();
-  });
-
-  it("reads once on becoming visible only when its numbers are a sweep old", () => {
-    expect(shouldRefreshOnShow(NOW, NOW + POLL_BASE_MS)).toBe(true);
-    expect(shouldRefreshOnShow(NOW, NOW + POLL_BASE_MS - 1)).toBe(false);
-    expect(shouldRefreshOnShow(null, NOW)).toBe(true);
   });
 });
 

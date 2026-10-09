@@ -96,3 +96,53 @@ describe("the poll runs faster only while something is on its way", () => {
     expect(poll).toMatch(/\}, \[pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading, pendingActive\]\);/);
   });
 });
+
+/**
+ * THE CHAIN RINGS (owner, 2026-10-09). The decisions are live-push.ts's and
+ * live-socket.ts's, tested there; what is pinned here is that the hook wires
+ * them and nothing else: one socket only where a live pension is drawn, a push
+ * read only through pushReadDelayMs, a wallet's change only after a read that
+ * read the history, and a return to the tab on visibility AND focus.
+ */
+describe("the push from the chain", () => {
+  const SHELL = fileURLToPath(new URL("../components/dashboard-shell.tsx", import.meta.url));
+  const LEADERBOARD = fileURLToPath(new URL("../components/leaderboard-account.tsx", import.meta.url));
+
+  it("opens a socket only for a live pension that draws its history, on the key-free WebSocket, and closes it on the way out", () => {
+    expect(source).toMatch(/if \(pensionKey === null \|\| !wantsActivity \|\| wsUrl === null \|\| typeof WebSocket === "undefined"\) return undefined;/);
+    expect(source).toMatch(/const wsUrl = useSolanaConfigOrNull\(\)\?\.solanaWsUrl \?\? null;/);
+    expect(source).toMatch(/return \(\) => \{\s*watch\.close\(\);/);
+    expect(source).toMatch(/\}, \[pensionKey, wantsActivity, wsUrl\]\);/);
+    // Exactly one place opens one.
+    expect(source.match(/watchAccounts\(/g)).toHaveLength(1);
+    expect(source).not.toMatch(/new WebSocket\(/);
+  });
+
+  it("never in the sample: the shell hands the hook no pension key outside live mode, and the leaderboard's chip reads no history", () => {
+    expect(code(readFileSync(SHELL, "utf8"))).toMatch(/useLiveDashboard\(\{ pensionKey: state\.kind === "live" \? pensionKey : null,/);
+    expect(code(readFileSync(LEADERBOARD, "utf8"))).toMatch(/useLiveDashboard\(\{ pensionKey, privyWallets, activity: false \}\)/);
+  });
+
+  it("resubscribes a changed set instead of reopening", () => {
+    expect(source).toMatch(/watchRef\.current\?\.setAddresses\(watched === "" \? \[\] : watched\.split\(","\)\);/);
+  });
+
+  it("reads for a push only when pushReadDelayMs says, with the floor's inputs, the backoff and the retry-after", () => {
+    expect(source).toMatch(/const delay = pushReadDelayMs\(\{ dirty: push\.dirty, now: Date\.now\(\), lastReadAt, visible, reading, failures, retryAt \}\);/);
+    expect(source).toMatch(/const retryAt = latestOf\(failure\?\.retryAt \?\? null, activityTrouble\?\.retryAt \?\? null\);/);
+  });
+
+  it("hands a wallet's change to the page only from a read that read the history", () => {
+    expect(read).toMatch(/if \(page\.ok && page\.body\.status === "exists"\) \{\s*historyRead = true;/);
+    expect(read).toMatch(/setPush\(\(held\) => afterRead\(held, \{ slot: answered\.body\.slot, historyRead, readAtMs: answered\.body\.readAtMs \}\)\);/);
+    expect(read.match(/historyRead = true/g)).toHaveLength(1);
+    expect(source).toMatch(/walletChanges,\s*\}\);/);
+  });
+
+  it("reads on returning to the tab by visibility and by focus, under showReadWanted", () => {
+    expect(source).toMatch(/if \(showReadWanted\(\{ lastReadAt: lastReadRef\.current, now: Date\.now\(\), failures: failuresRef\.current, retryAt: retryAtRef\.current \}\)\) void read\(false\);/);
+    expect(source).toMatch(/document\.addEventListener\("visibilitychange", onShow\);/);
+    expect(source).toMatch(/window\.addEventListener\("focus", onShow\);/);
+    expect(source).toMatch(/window\.removeEventListener\("focus", onShow\);/);
+  });
+});
