@@ -217,7 +217,7 @@ describe("a live page", () => {
     expect(out).toContain('data-pending-steps="0"');
     expect(out).toMatch(/\$0\.39 <span class="text-muted-foreground">of<\/span> \$1\.00/);
     expect(out).toContain('<span class="font-mono tabular-nums">$0.61</span> to go');
-    expect(out).toContain(PENDING_COPY.includesWaiting("$0.39", "0.005", "0.0011"));
+    expect(out).toContain(PENDING_COPY.includesWaiting("$0.39", "0.0011"));
     expect(out).not.toContain("$0.00</span> to go");
   });
 

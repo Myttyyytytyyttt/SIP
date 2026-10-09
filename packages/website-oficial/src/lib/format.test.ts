@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { clockLabel, compact, dayLabel, relativeDayLabel, timeAgo, weekLabel } from "@/lib/format";
+import { clockLabel, compact, dayLabel, relativeDayLabel, timeAgo, weekLabel, whenLabel } from "@/lib/format";
 
 const AT = "2026-09-16T01:34:00.000Z";
 
@@ -23,6 +23,38 @@ describe("a clock on the page", () => {
 
   it("leaves a relative time alone, which has no zone to name", () => {
     expect(timeAgo(AT, "2026-09-16T01:38:00.000Z")).toBe("4m ago");
+  });
+});
+
+/**
+ * A MOMENT THAT MAY NOT BE TODAY (whenLabel). A stuck step said "Not done since
+ * 23:58 UTC" the morning after, which reads as minutes, not hours: the day is
+ * named the moment it is not the page's own, and the year when that differs.
+ */
+describe("a moment with its day", () => {
+  const NOW = Date.parse("2026-10-09T09:15:00.000Z");
+
+  it("is the bare clock on the page's own UTC day, from its first minute to its last", () => {
+    expect(whenLabel(Date.parse("2026-10-09T08:32:00.000Z"), NOW)).toBe("08:32 UTC");
+    expect(whenLabel(Date.parse("2026-10-09T00:00:00.000Z"), NOW)).toBe("00:00 UTC");
+    expect(whenLabel(Date.parse("2026-10-09T23:59:00.000Z"), NOW)).toBe("23:59 UTC");
+  });
+
+  it("says yesterday, inside a sentence, for the UTC day before", () => {
+    expect(whenLabel(Date.parse("2026-10-08T23:58:00.000Z"), NOW)).toBe("yesterday, 23:58 UTC");
+    expect(whenLabel(Date.parse("2026-10-08T00:00:00.000Z"), NOW)).toBe("yesterday, 00:00 UTC");
+  });
+
+  it("names the date for an older day, and the year only when it is not this one", () => {
+    expect(whenLabel(Date.parse("2026-10-07T14:32:00.000Z"), NOW)).toBe("Oct 7, 14:32 UTC");
+    expect(whenLabel(Date.parse("2025-10-07T14:32:00.000Z"), NOW)).toBe("Oct 7, 2025, 14:32 UTC");
+    // Yesterday across a year: still yesterday, and no year said.
+    expect(whenLabel(Date.parse("2026-12-31T23:58:00.000Z"), Date.parse("2027-01-01T00:05:00.000Z"))).toBe("yesterday, 23:58 UTC");
+  });
+
+  it("judges the day in UTC, as every label on the page: a Lisbon 00:30 is the UTC day before", () => {
+    // 00:30 in Lisbon on Oct 9 is 23:30 UTC on Oct 8.
+    expect(whenLabel(Date.parse("2026-10-08T23:30:00.000Z"), Date.parse("2026-10-09T00:10:00.000Z"))).toBe("yesterday, 23:30 UTC");
   });
 });
 

@@ -584,42 +584,62 @@ export const PENDING_COPY = {
     price_limits: "Held by your policy's old price limits · Switch to live-price buying to drop them",
     safety_floor: "SOL is under half its price when you approved · Approve again at today's price to convert",
   },
-  /** Due, and not done: past a few sweeps the loader stops and says since when. */
-  slow: (clock: string): string => `Not done since ${clock} · ${BRAND} tries again about once a minute`,
+  /**
+   * Due, and not done: past a few sweeps the loader stops and says since when —
+   * with its day when that is not today (format.ts whenLabel): "Not done since
+   * yesterday, 23:58 UTC", never a bare clock that reads as minutes ago.
+   */
+  slow: (when: string): string => `Not done since ${when} · ${BRAND} tries again about once a minute`,
   /** Due, and no move toward it in the loaded history to time it by: no loader, and no clock. */
   slowUntimed: `Not done yet · ${BRAND} tries again about once a minute`,
   /** Under "Next investment": the SOL on its way is counted, and said. */
   includesConverting: (usd: string): string => `Includes about ${usd} of SOL being converted to USDC`,
-  plusConverting: (sol: string): string => `Plus ${sol} SOL being converted to USDC`,
   /** A conversion due and not done ("slow"): still counted, never called under way. */
   includesConvertingSlow: (usd: string): string => `Includes about ${usd} of SOL not converted yet · ${BRAND} tries again about once a minute`,
-  plusConvertingSlow: (sol: string): string => `Plus ${sol} SOL not converted yet · ${BRAND} tries again about once a minute`,
   /**
-   * SOL UNDER THE KEEPER'S WRAP LINE (live-pending.ts solUnderWrapLine): counted
-   * like SOL being converted, and the line it waits for named, with what the
-   * vault still lacks — the one thing that moves it. `line` and `short` are SOL
-   * as printed: WRAP_DUST_LAMPORTS itself, never a figure typed here.
+   * SOL UNDER THE KEEPER'S LINES (live-pending.ts solUnderWrapLine): counted
+   * like SOL being converted, and what moves it said — savings taking the free
+   * SOL to the wrap line, which then converts it all. `short` is the free SOL's
+   * own shortfall, as printed. NEVER "once your vault holds 0.005 SOL": the free
+   * SOL and the wSOL each reach their own line on their own, and 0.003 of each
+   * is 0.006 held with nothing moving (review 2026-10-09).
    */
-  includesWaiting: (usd: string, line: string, short: string): string =>
-    `Includes about ${usd} of SOL. It converts to USDC once your vault holds ${line} SOL (${short} SOL more)`,
-  plusWaiting: (sol: string, line: string, short: string): string => `Plus ${sol} SOL. It converts to USDC once your vault holds ${line} SOL (${short} SOL more)`,
-  /** SOL converting now and SOL under the line at once: one sum, the one the bar adds, and the part that waits. */
-  includesBoth: (usd: string, waiting: string, line: string, short: string): string =>
-    `Includes about ${usd} of SOL on its way to USDC, ${waiting} of it once your vault holds ${line} SOL (${short} SOL more)`,
-  plusBoth: (sol: string, waiting: string, line: string, short: string): string =>
-    `Plus ${sol} SOL on its way to USDC, ${waiting} SOL of it once your vault holds ${line} SOL (${short} SOL more)`,
+  includesWaiting: (usd: string, short: string): string => `Includes about ${usd} of SOL too small to convert yet · It converts once your savings add ${short} SOL`,
+  /** SOL converting now and SOL under the lines at once: one sum, the one the bar adds, and the part that waits. */
+  includesBoth: (usd: string, waiting: string, short: string): string =>
+    `Includes about ${usd} of SOL on its way to USDC, ${waiting} of it once your savings add ${short} SOL`,
   /** The same with the conversion overdue ("slow"): counted, never called on its way. */
-  includesBothSlow: (usd: string, waiting: string, line: string, short: string): string =>
-    `Includes about ${usd} of SOL not converted yet, ${waiting} of it once your vault holds ${line} SOL (${short} SOL more) · ${BRAND} tries again about once a minute`,
-  plusBothSlow: (sol: string, waiting: string, line: string, short: string): string =>
-    `Plus ${sol} SOL not converted yet, ${waiting} SOL of it once your vault holds ${line} SOL (${short} SOL more) · ${BRAND} tries again about once a minute`,
+  includesBothSlow: (usd: string, waiting: string, short: string): string =>
+    `Includes about ${usd} of SOL not converted yet, ${waiting} of it once your savings add ${short} SOL · ${BRAND} tries again about once a minute`,
+  /**
+   * THE SAME, WITH NO PRICE TO VALUE THE SOL: the bar shows no figure then
+   * (live-pending.ts nextInvestment), so these stand on their own, in SOL —
+   * never "Plus" a figure that is not on the screen.
+   */
+  unpricedConverting: (sol: string): string => `${sol} SOL is being converted to USDC`,
+  unpricedConvertingSlow: (sol: string): string => `${sol} SOL not converted yet · ${BRAND} tries again about once a minute`,
+  unpricedWaiting: (sol: string, short: string): string => `${sol} SOL too small to convert yet · It converts once your savings add ${short} SOL`,
+  unpricedBoth: (sol: string, waiting: string, short: string): string => `${sol} SOL on its way to USDC, ${waiting} SOL of it once your savings add ${short} SOL`,
+  unpricedBothSlow: (sol: string, waiting: string, short: string): string =>
+    `${sol} SOL not converted yet, ${waiting} SOL of it once your savings add ${short} SOL · ${BRAND} tries again about once a minute`,
   /**
    * THE LINE THE NEXT SAVING MUST CROSS (live-pending.ts wrapLineAhead), when
    * no SOL waits under it and it is more than the basket lacks: the reason the
-   * card prints no "to go" of its own. `usd` is what the line lacks, at today's
-   * price.
+   * card prints no "to go" of its own. The next savings land on no free SOL, so
+   * they must add up to the whole line themselves. `usd` is what the line
+   * lacks, at today's price.
    */
-  lineAhead: (line: string, usd: string): string => `Your next savings convert to USDC once your vault holds ${line} SOL (about ${usd})`,
+  lineAhead: (line: string, usd: string): string => `Your next savings convert to USDC once they add up to ${line} SOL (about ${usd})`,
+  /**
+   * WHAT THE PAGE CANNOT WEIGH (live-pending.ts NextInvestmentGate "unknown"):
+   * an input it could not read stands between the figures and a buy, so it
+   * shows no dollars to go, and says which input — never a guess either way.
+   */
+  unknown: {
+    price: "Today's SOL price is unavailable, so what is still to go is not shown",
+    balance: "Your vault's SOL balance is unavailable right now, so what is still to go is not shown",
+    switch: `Your vault's settings are unavailable right now, so ${BRAND} cannot say when it buys next`,
+  },
   readyToBuy: `Ready to buy · ${BRAND} checks about once a minute`,
   /**
    * A TRADING WALLET THAT CHANGED and has no saving for it yet (live-pending.ts
@@ -631,7 +651,12 @@ export const PENDING_COPY = {
    * (LivePending.tsx), and the name still comes first.
    */
   measuring: (wallet: string): string => `${wallet}: checking your latest activity`,
-  measuringWaiting: (wallet: string): string => `${wallet}: no saving yet from your latest activity`,
+  /**
+   * Once the loader has stopped, with when the activity was seen — its day too
+   * when that is not today (format.ts whenLabel), so a line read after midnight
+   * does not pass for a few minutes old.
+   */
+  measuringWaiting: (wallet: string, when: string): string => `${wallet}: no saving yet from your latest activity, seen ${when}`,
   /** Under the loader, by the vault's mode: whether a saving follows at all. The volume figures are the keeper's (live-pending.ts). */
   measuringSub: {
     profit: `A saving follows only if your trades since the last one made a profit · ${BRAND} checks about once a minute`,

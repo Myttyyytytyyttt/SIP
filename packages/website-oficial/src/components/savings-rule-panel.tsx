@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { Settings } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 
 import { Num } from "@/components/num";
 import { RuleSettingsDialog, RuleSettingsForm, type SettingsJudgement } from "@/components/rule-settings-dialog";
@@ -68,6 +68,30 @@ const SAMPLE_MAX_LEGS = 5;
  */
 const GATED_PROGRESS_MAX = 95;
 
+/**
+ * THE NEXT INVESTMENT BLOCK'S FIGURES, as the card works them out — the
+ * sample's own arithmetic, or a live page's figures and gate — handed to a
+ * live caller that draws the block itself (`renderNextInvestment`): a mark
+ * beside the label, the parts as segments of the bar, the line as a waiting
+ * note. Everything a drawing needs is here, so it does no arithmetic of its own.
+ */
+export interface NextInvestmentView {
+  /** What counts toward the threshold, in dollars. Null when unknown: then no bar is drawn, never an empty one. */
+  readonly readyUsd: number | null;
+  readonly thresholdUsd: number | null;
+  /** The bar's fill, 0–100, already held short of full while a gate holds the buy; null when no bar is drawn. */
+  readonly progress: number | null;
+  /** What is still to go, in dollars, and whether the card prints it as "$0.61 to go". */
+  readonly toGoUsd: number | null;
+  readonly toGoShown: boolean;
+  /** The line under the bar, verbatim (SavingsStats.nextInvestmentNote). */
+  readonly note: string | null;
+  /** Why the keeper will not buy on the bar (SavingsStats.nextInvestmentGate); null for none, or on the sample. */
+  readonly gate: NonNullable<SavingsStats["nextInvestmentGate"]> | null;
+  /** What the figure is made of (SavingsStats.nextInvestmentParts); null when unknown, or on the sample. */
+  readonly parts: NonNullable<SavingsStats["nextInvestmentParts"]> | null;
+}
+
 /** What the sample's dialog edits, kept by the card. */
 interface SampleRule {
   readonly mode: RuleMode;
@@ -107,6 +131,7 @@ export function SavingsRulePanel({
   activity,
   now,
   settings,
+  renderNextInvestment,
   className,
 }: {
   rule: SavingsRule;
@@ -115,6 +140,13 @@ export function SavingsRulePanel({
   now: string;
   /** A live page: its gear opens a dialog that signs. Absent on the sample, whose own dialog moves local state. */
   settings?: RuleSettingsDoor;
+  /**
+   * A LIVE PAGE'S OWN DRAWING OF THE NEXT INVESTMENT BLOCK, from the figures
+   * the card worked out (NextInvestmentView): what it returns stands in the
+   * block's place, under the same spacing. Absent on the sample, which keeps
+   * today's label, bar and lines character for character.
+   */
+  renderNextInvestment?: (next: NextInvestmentView) => ReactNode;
   className?: string;
 }) {
   // THE SAMPLE'S RULE, as its dialog last saved it. Unused on a live page, whose rule is the chain's.
@@ -156,7 +188,16 @@ export function SavingsRulePanel({
    * note under the bar says what is left instead.
    */
   const gate = stats.nextInvestmentGate ?? null;
-  const progress =
+  /*
+   * A FIGURE NOBODY COULD MAKE DRAWS NO BAR (review 2026-10-09). A live page's
+   * figure is null when an input it is made of could not be read; an empty
+   * bar under "— of $1.00" read as nothing saved, and "— to go" as nothing
+   * left. The headline keeps its dash and the line under it says why. Only a
+   * live page sets the figure to null: the sample's is undefined, and draws
+   * exactly what it always drew.
+   */
+  const figureUnknown = stats.readyToInvestUsd === null;
+  const fill =
     stats.toGoUsd === undefined
       ? ready !== null && thresholdUsd !== null && thresholdUsd > 0
         ? Math.min(100, (ready / thresholdUsd) * 100)
@@ -164,10 +205,22 @@ export function SavingsRulePanel({
       : ready !== null && thresholdUsd !== null && thresholdUsd > 0
         ? Math.min(gate === null ? 100 : GATED_PROGRESS_MAX, (ready / thresholdUsd) * 100)
         : 0;
+  const progress = figureUnknown ? null : fill;
   const toGo = stats.toGoUsd === undefined ? (ready !== null && thresholdUsd !== null ? Math.max(0, thresholdUsd - ready) : null) : stats.toGoUsd;
   const toGoShown =
-    gate === null ||
-    (toGo !== null && ready !== null && thresholdUsd !== null && usd(toGo) !== usd(0) && usd(toGo) === usd(Math.max(0, thresholdUsd - ready)));
+    !figureUnknown &&
+    (gate === null ||
+      (toGo !== null && ready !== null && thresholdUsd !== null && usd(toGo) !== usd(0) && usd(toGo) === usd(Math.max(0, thresholdUsd - ready))));
+  const nextView: NextInvestmentView = {
+    readyUsd: ready,
+    thresholdUsd,
+    progress,
+    toGoUsd: toGo,
+    toGoShown,
+    note: stats.nextInvestmentNote ?? null,
+    gate,
+    parts: stats.nextInvestmentParts ?? null,
+  };
 
   const open = live ? settings.open : sampleOpen;
   const attention = live && settings.attention;
@@ -235,24 +288,30 @@ export function SavingsRulePanel({
         <Separator />
 
         <div className="space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <p className={LABEL}>Next investment</p>
-            <p className={cn(MONO, "text-sm")}>
-              {usd(ready)} <span className="text-muted-foreground">of</span> {usd(thresholdUsd)}
-            </p>
-          </div>
-          <Progress value={progress} aria-label="Progress to next investment" />
-          {toGoShown ? (
-            <p className="text-xs text-muted-foreground">
-              <Num>{usd(toGo)}</Num> to go
-            </p>
-          ) : null}
-          {/* A live page's money not yet USDC, and what it waits for; the sample never sets it. */}
-          {stats.nextInvestmentNote ? (
-            <p className="text-xs text-muted-foreground" data-next-investment-note="">
-              {stats.nextInvestmentNote}
-            </p>
-          ) : null}
+          {renderNextInvestment !== undefined ? (
+            renderNextInvestment(nextView)
+          ) : (
+            <>
+              <div className="flex items-center justify-between gap-2">
+                <p className={LABEL}>Next investment</p>
+                <p className={cn(MONO, "text-sm")}>
+                  {usd(ready)} <span className="text-muted-foreground">of</span> {usd(thresholdUsd)}
+                </p>
+              </div>
+              {progress === null ? null : <Progress value={progress} aria-label="Progress to next investment" />}
+              {toGoShown ? (
+                <p className="text-xs text-muted-foreground">
+                  <Num>{usd(toGo)}</Num> to go
+                </p>
+              ) : null}
+              {/* A live page's money not yet USDC, what it waits for, or the input it could not read; the sample never sets it. */}
+              {stats.nextInvestmentNote ? (
+                <p className="text-xs text-muted-foreground" data-next-investment-note="">
+                  {stats.nextInvestmentNote}
+                </p>
+              ) : null}
+            </>
+          )}
         </div>
 
         <div className="space-y-2">
