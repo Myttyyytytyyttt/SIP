@@ -8,7 +8,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { privyStubAlias } from "../next.config.mjs";
+import { buildCommitOf, privyStubAlias } from "../next.config.mjs";
 
 const PRIVY = "@privy-io/react-auth";
 const PRIVY_SOLANA = "@privy-io/react-auth/solana";
@@ -53,5 +53,32 @@ describe("the stub modules refuse to load in a production build", () => {
     await expect(import("../test/stubs/privy-react-auth")).rejects.toThrow(/must never ship/);
     vi.resetModules();
     await expect(import("../test/stubs/privy-react-auth-solana")).rejects.toThrow(/must never ship/);
+  });
+});
+
+/**
+ * THE BUNDLE'S COMMIT (diagnosis 10-09, D5): baked in so a tab can tell when
+ * the server runs a newer build (src/lib/build-version.ts). Only a real commit
+ * id gets in; anything else is "dev", which never announces an update.
+ */
+describe("the build commit inlined into the bundle", () => {
+  it("is Vercel's commit id, lowercased", () => {
+    expect(buildCommitOf({ VERCEL_GIT_COMMIT_SHA: " 4533733ABCDEF " })).toBe("4533733abcdef");
+    expect(buildCommitOf({ VERCEL_GIT_COMMIT_SHA: "4533733abcdef0123456789abcdef0123456789a" })).toBe("4533733abcdef0123456789abcdef0123456789a");
+  });
+
+  it("is 'dev' without one, or with anything that is not a commit id", () => {
+    expect(buildCommitOf({})).toBe("dev");
+    expect(buildCommitOf({ VERCEL_GIT_COMMIT_SHA: "" })).toBe("dev");
+    expect(buildCommitOf({ VERCEL_GIT_COMMIT_SHA: "main" })).toBe("dev");
+    expect(buildCommitOf({ VERCEL_GIT_COMMIT_SHA: "abc123" })).toBe("dev");
+    expect(buildCommitOf({ VERCEL_GIT_COMMIT_SHA: "${secret}" })).toBe("dev");
+  });
+
+  it("reaches the config as SIP_BUILD_COMMIT, the name src/lib/build-version.ts reads", async () => {
+    vi.resetModules();
+    vi.stubEnv("VERCEL_GIT_COMMIT_SHA", "feb0a63");
+    const config = (await import("../next.config.mjs")).default;
+    expect(config.env).toEqual({ SIP_BUILD_COMMIT: "feb0a63" });
   });
 });

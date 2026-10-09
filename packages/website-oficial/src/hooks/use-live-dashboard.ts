@@ -21,6 +21,17 @@
  * A wallet's change reaches the page, as "checking your latest activity",
  * only once a read at or past it has read the history too.
  *
+ * AND THE PAGE CAN SAY HOW LIVE IT IS (owner, 10-09: "necesito que la página
+ * en general sea live… que aparezca en forma de loadings"). The socket never
+ * gives up now (live-socket.ts), comes back at once when the tab is looked at,
+ * takes focus or the network returns, and reports its state; `liveness`
+ * hands the page that state, whether a read is out, whether a change was
+ * heard and its read has not landed, and when the last good read did — the
+ * data a "Live" dot, an "updating" shimmer and an "updated 12 s ago" need.
+ * While the push is wanted and not live, a visible tab reads every 20 s
+ * instead of every minute (live-schedule.ts UNHEARD_POLL_MS): the poll is
+ * then all it has.
+ *
  * A POLL ASKS ONLY FOR WHAT IS NEW: `until` the newest signature already held,
  * so a quiet minute costs one getSignaturesForAddress and nothing else. The rows
  * already loaded ARE the cache; nothing is re-read to draw them again.
@@ -89,7 +100,9 @@ import {
   afterRead,
   baselineOf,
   heardLate,
+  historyAhead,
   movedSince,
+  newestSlotOf,
   notified,
   pushReadDelayMs,
   recallPush,
@@ -102,10 +115,11 @@ import {
   watchedWallets,
   type PushState,
 } from "@/lib/live-push";
-import { MANUAL_FLOOR_MS, nextActivityRetryMs, nextDelayMs, nextManualDelayMs, pendingPollWanted } from "@/lib/live-schedule";
-import { browserSocket, watchAccounts, type ChainWatch } from "@/lib/live-socket";
+import { MANUAL_FLOOR_MS, nextActivityRetryMs, nextDelayMs, nextManualDelayMs, pendingPollWanted, unheardPollWanted } from "@/lib/live-schedule";
+import { browserSocket, watchAccounts, type ChainWatch, type SocketState } from "@/lib/live-socket";
 import type { LiveActivityJson, LiveDashboard, LiveEntryJson, LiveSnapshotJson } from "@/lib/live-types";
 import { vaultFailureWords, type ApiFailure } from "@/lib/vault-api";
+import { vaultStampOf, type VaultStamp } from "@/lib/vault-follow";
 
 /** Signatures one page asks for. The route's own cap. */
 export const ACTIVITY_PAGE = 15;
@@ -151,6 +165,28 @@ export interface LiveOlder {
 /** What the hook holds; `available` is worked out from the cursor, never stored beside it. */
 type OlderState = Omit<LiveOlder, "available">;
 
+/**
+ * HOW LIVE THE PAGE IS, for whatever draws it (owner, 10-09). Data only: the
+ * page decides how a "Live" dot, a shimmer or a "checking…" looks.
+ */
+export interface LiveLiveness {
+  /**
+   * The chain's push. "live": the socket is open and at least one subscription
+   * is confirmed — a change shows within seconds. "connecting": a socket is
+   * being opened (or open with nothing confirmed yet). "off": closed and
+   * waiting for its next attempt, or no endpoint to open — the page is on its
+   * 20 s poll. "none": no socket is wanted — no pension key (the sample), a
+   * caller that draws no history, or no vault to watch yet.
+   */
+  readonly socket: SocketState | "none";
+  /** A read is out right now (the first one included: view "loading" says that one apart). */
+  readonly reading: boolean;
+  /** The chain said something changed and the read that covers it has not landed yet (live-push.ts dirty). */
+  readonly heard: boolean;
+  /** When the last GOOD read landed, on this browser's clock; null before one has. A failed read never moves it. */
+  readonly lastReadAt: number | null;
+}
+
 export interface LiveDashboardStore {
   readonly view: LiveView;
   /** Read again now (subject to the 10 s floor). `discover` also re-lists the vault's links. */
@@ -166,6 +202,14 @@ export interface LiveDashboardStore {
    * bound came first. The feed says it is reading, never "No activity yet".
    */
   readonly activityPending: boolean;
+  /** How live the page is: the push's state, a read out, a change heard, the last good read (LiveLiveness). */
+  readonly liveness: LiveLiveness;
+  /**
+   * What of the last committed snapshot the vault screen draws (vault-follow.ts
+   * vaultStampOf), so the shell can re-read that screen when the vault moved
+   * (useVaultFollowsLive). Null before a snapshot, or without a vault.
+   */
+  readonly vaultStamp: VaultStamp | null;
 }
 
 /** The later of two moments, either of which may be absent. */
@@ -224,6 +268,10 @@ export function useLiveDashboard(input: {
   const [failure, setFailure] = useState<{ readonly message: string; readonly retryAt: number | null; readonly since: number } | null>(null);
   const [failures, setFailures] = useState(0);
   const [lastReadAt, setLastReadAt] = useState<number | null>(null);
+  /** The last GOOD read's moment, for "updated 12 s ago": lastReadAt moves on a failure too. */
+  const [lastGoodAt, setLastGoodAt] = useState<number | null>(null);
+  /** What the socket last said of itself (live-socket.ts onState); null while this hook has none open. */
+  const [socketState, setSocketState] = useState<SocketState | null>(null);
   const [older, setOlder] = useState<OlderState>({ busy: false, retryAt: null, message: null, complete: false });
   /**
    * The last history read's trouble, or null when it was read.
@@ -281,6 +329,7 @@ export function useLiveDashboard(input: {
     setFailure(null);
     setFailures(0);
     setLastReadAt(null);
+    setLastGoodAt(null);
     setOlder({ busy: false, retryAt: null, message: null, complete: false });
     setActivityTrouble(null);
     // What the push heard and the last read's balances outlive a remount (live-push.ts recallPush).
@@ -331,6 +380,9 @@ export function useLiveDashboard(input: {
         const gate = firstPaintGate({ hold: holdFirstPaint, commit: () => setSnapshot(answered.body), stale, waitMs: FIRST_PAINT_WAIT_MS });
         // Whether this read read the history too: only then may a wallet's change reach the page (live-push.ts).
         let historyRead = false;
+        // What its page brought, and the newest slot the history holds once it landed (live-push.ts afterRead).
+        let pageEntries: readonly LiveEntryJson[] = [];
+        let historySlot: number | null = null;
         // The settlements this read can see, for where each wallet's last saving left it (walletEnds).
         const seen: LiveEntryJson[] = [...entriesRef.current, ...linkEntriesRef.current];
 
@@ -350,6 +402,7 @@ export function useLiveDashboard(input: {
             setActivityTrouble((held) => activityTroubleFrom(page, { attempts: early ? (held?.attempts ?? 0) + 1 : 0, now: Date.now() }));
             if (page.ok && page.body.status === "exists") {
               historyRead = true;
+              pageEntries = page.body.entries;
               // A POLL DOES NOT REDEFINE WHERE THE HISTORY ENDS. It asked only for
               // what is new, and its "nothing more to page" is about that window.
               const cursor = headCursor({
@@ -371,6 +424,7 @@ export function useLiveDashboard(input: {
               // only — a manual page appended while this read was in flight can
               // at worst make it ask for a page it need not have.
               const loaded = until === null || page.body.gap ? page.body.entries : [...page.body.entries, ...entriesRef.current];
+              historySlot = newestSlotOf(loaded);
               seen.push(...page.body.entries);
               // A GAP THREW THE HISTORY AWAY, so what a round already bought is
               // gone with it and the round may be bought once more.
@@ -422,17 +476,37 @@ export function useLiveDashboard(input: {
           // draws nothing (the gate asks).
           gate.release();
         }
+
+        // THE HISTORY CAME BACK AHEAD OF THE SNAPSHOT (live-push.ts
+        // historyAhead): a saving, a conversion or a buy landed between the
+        // two calls, and the feed would show its row beside a Saved so far, a
+        // Pending and a Next investment that do not have it — for the 10 s
+        // floor. So the snapshot is read once more, now, inside this read: no
+        // floor applies to it, and its answer is not checked again. It costs
+        // one snapshot (4 client tokens, 5 when discovering), only when this
+        // happens. A refusal leaves the first answer, which was good, on screen.
+        let current = answered.body;
+        if (historyAhead(pageEntries, current.slot)) {
+          const again = await api.snapshot({ owner: pensionKey, wallets: wallets.slice(0, MAX_WALLETS), discover });
+          if (stale()) return true;
+          if (again.ok && again.body.vault.status === "exists" && (again.body.slot ?? 0) >= (current.slot ?? 0)) {
+            current = again.body;
+            setSnapshot(again.body);
+          }
+        }
+
         setFailures(0);
         setFailure(null);
         // What the chain rang about and this read has now seen — and what moved
         // that nobody heard, from the balances against the last read's.
         if (wantsActivity) {
-          const moved = movedSince(recallPush(pensionKey).baseline, answered.body);
-          rememberPush(pensionKey, { baseline: baselineOf(answered.body) });
-          const ends = walletEnds(answered.body, seen);
-          setPush((held) => afterRead(heardLate(held, moved), { slot: answered.body.slot, historyRead, readAtMs: answered.body.readAtMs, ends }));
+          const moved = movedSince(recallPush(pensionKey).baseline, current);
+          rememberPush(pensionKey, { baseline: baselineOf(current) });
+          const ends = walletEnds(current, seen);
+          setPush((held) => afterRead(heardLate(held, moved), { slot: current.slot, historyRead, readAtMs: current.readAtMs, ends, historySlot }));
         }
         setLastReadAt(Date.now());
+        setLastGoodAt(Date.now());
         return true;
       } finally {
         readingRef.current = false;
@@ -493,17 +567,46 @@ export function useLiveDashboard(input: {
         setPush((held) => notified(held, { address, slot, now: Date.now(), wallet }));
       },
       onResync: () => setPush((held) => resynced(held, Date.now())),
+      onState: setSocketState,
     });
     watchRef.current = watch;
     return () => {
       watch.close();
       if (watchRef.current === watch) watchRef.current = null;
+      setSocketState(null);
     };
   }, [pensionKey, wantsActivity, hasWatched, wsUrl]);
   // A changed set — a wallet linked, a token account created — is resubscribed, not reopened.
   useEffect(() => {
     watchRef.current?.setAddresses(watched === "" ? [] : watched.split(","));
   }, [watched, pensionKey, wantsActivity, hasWatched, wsUrl]);
+
+  // THE SOCKET COMES BACK WITH THE PAGE (live-socket.ts reconnect): on
+  // returning to the tab, on focus, and when the network does — at once, with
+  // its count started again, instead of waiting out a slow timer. A socket
+  // that is working is left alone, so a focus costs nothing.
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    const wake = (): void => {
+      if (document.visibilityState === "visible") watchRef.current?.reconnect();
+    };
+    document.addEventListener("visibilitychange", wake);
+    window.addEventListener("focus", wake);
+    window.addEventListener("online", wake);
+    return () => {
+      document.removeEventListener("visibilitychange", wake);
+      window.removeEventListener("focus", wake);
+      window.removeEventListener("online", wake);
+    };
+  }, []);
+
+  /*
+   * WHAT THE PAGE CAN SAY OF THE PUSH. "none" when no socket is wanted;
+   * "off" when one is and it cannot open here (no endpoint, no WebSocket);
+   * otherwise what the socket last said, "connecting" until it has.
+   */
+  const socketWanted = pensionKey !== null && wantsActivity && hasWatched;
+  const socket: SocketState | "none" = !socketWanted ? "none" : wsUrl === null || typeof WebSocket === "undefined" ? "off" : (socketState ?? "connecting");
 
   /*
    * THE READ A PUSH BUYS (live-push.ts pushReadDelayMs): one, at the end of the
@@ -611,7 +714,9 @@ export function useLiveDashboard(input: {
     if (pensionKey === null) return undefined;
     const visible = typeof document === "undefined" || document.visibilityState === "visible";
     const pending = pendingPollWanted({ active: pendingActive, activeSince: activeSinceRef.current, now: Date.now(), activityRetryAt: activityTrouble?.retryAt ?? null });
-    const delay = nextDelayMs({ failures, retryAfterSeconds: null, visible, lastReadAt, now: Date.now(), reading, pending });
+    // NOTHING WILL RING (live-schedule.ts UNHEARD_POLL_MS): the push is wanted and not live, so the poll is all there is.
+    const unheard = unheardPollWanted({ socket, activityRetryAt: activityTrouble?.retryAt ?? null, now: Date.now() });
+    const delay = nextDelayMs({ failures, retryAfterSeconds: null, visible, lastReadAt, now: Date.now(), reading, pending, unheard });
     if (delay === null) return undefined;
     const retryAt = failure?.retryAt ?? null;
     const wait = retryAt === null ? delay : Math.max(delay, retryAt - Date.now());
@@ -634,13 +739,17 @@ export function useLiveDashboard(input: {
       });
     }, when);
     return () => window.clearTimeout(timer);
-  }, [pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading, pendingActive]);
+  }, [pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading, pendingActive, socket]);
 
   const cursor = activityMeta?.nextBefore ?? null;
   const olderView = useMemo((): LiveOlder => ({ ...older, available: cursor !== null }), [older, cursor]);
 
   // Drawn, a history to read, and neither an answer nor a failure yet.
   const activityPending = wantsActivity && snapshot !== null && snapshot.vault.status === "exists" && activityMeta === null && activityTrouble === null;
+
+  const heard = push.dirty !== null;
+  const liveness = useMemo((): LiveLiveness => ({ socket, reading, heard, lastReadAt: lastGoodAt }), [socket, reading, heard, lastGoodAt]);
+  const vaultStamp = useMemo(() => vaultStampOf(snapshot), [snapshot]);
 
   return {
     view,
@@ -650,5 +759,7 @@ export function useLiveDashboard(input: {
     activityUnreadable: activityTrouble !== null,
     activityRetryAt: activityTrouble?.retryAt ?? null,
     activityPending,
+    liveness,
+    vaultStamp,
   };
 }

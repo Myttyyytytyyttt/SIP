@@ -1,10 +1,11 @@
 // The one WebSocket a live dashboard keeps open (src/lib/live-socket.ts), driven
 // through a fake socket and a fake clock: what it sends, what it hears, how it
-// comes back after a close, when it gives up, and that it leaves nothing behind.
+// comes back after a close — for as long as the page lives — what it says of
+// its state, and that it leaves nothing behind.
 
 import { describe, expect, it } from "vitest";
 
-import { PING_MS, RECONNECT_MS, STABLE_MS, watchAccounts, type SocketLike } from "@/lib/live-socket";
+import { LIVELY_MS, PING_MS, RECONNECT_MS, SLOW_RECONNECT_MS, STABLE_MS, watchAccounts, type SocketLike, type SocketState } from "@/lib/live-socket";
 
 class FakeSocket implements SocketLike {
   readyState = 0;
@@ -35,6 +36,10 @@ class FakeSocket implements SocketLike {
   notify(subscription: number, slot: number): void {
     this.onmessage?.({ data: JSON.stringify({ jsonrpc: "2.0", method: "accountNotification", params: { subscription, result: { context: { slot }, value: null } } }) });
   }
+  /** PublicNode's reply to a ping: a result with no id. */
+  pong(): void {
+    this.onmessage?.({ data: JSON.stringify({ jsonrpc: "2.0", result: null }) });
+  }
   drop(): void {
     this.readyState = 3;
     this.onerror?.({});
@@ -59,13 +64,13 @@ function harness(addresses: readonly string[] = ["WalletA", "Vault"]) {
   const changes: [string, number][] = [];
   const clock = { now: 1_000_000 };
   let resyncs = 0;
-  let gaveUp = 0;
+  const states: SocketState[] = [];
   const watch = watchAccounts({
     url: "wss://api.mainnet-beta.solana.com",
     addresses,
     onChange: (address, slot) => changes.push([address, slot]),
     onResync: () => (resyncs += 1),
-    onGiveUp: () => (gaveUp += 1),
+    onState: (state) => states.push(state),
     now: () => clock.now,
     open: (url) => {
       const socket = new FakeSocket(url);
@@ -90,7 +95,7 @@ function harness(addresses: readonly string[] = ["WalletA", "Vault"]) {
     return timer.ms;
   };
   const armed = (): number[] => timers.filter((entry) => !entry.cleared).map((entry) => entry.ms);
-  return { watch, sockets, timers, armed, clock, changes, fire, resyncs: () => resyncs, gaveUp: () => gaveUp, last: () => sockets[sockets.length - 1]! };
+  return { watch, sockets, timers, armed, clock, changes, fire, resyncs: () => resyncs, states, last: () => sockets[sockets.length - 1]! };
 }
 
 describe("subscribing", () => {
@@ -168,7 +173,8 @@ describe("reconnecting", () => {
     expect(h.resyncs()).toBe(1);
   });
 
-  it("waits longer after each socket that confirmed nothing, and one that stayed up STABLE_MS starts the count again", () => {
+  it("waits longer after each socket that confirmed nothing, and one that WORKED for STABLE_MS starts the count again", () => {
+    expect(STABLE_MS).toBe(2 * PING_MS);
     const h = harness();
     const waits: number[] = [];
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -177,10 +183,39 @@ describe("reconnecting", () => {
     }
     expect(waits).toEqual(RECONNECT_MS.slice(0, 3));
     h.last().open();
-    h.last().confirmAll();
-    h.clock.now += STABLE_MS;
+    const ids = h.last().confirmAll();
+    // A ping answered, then a notification STABLE_MS after the confirmation: it worked.
+    h.clock.now += PING_MS;
+    h.last().pong();
+    h.clock.now += STABLE_MS - PING_MS;
+    h.last().notify(ids.get("Vault")!, 77);
+    h.clock.now += 5 * 60_000;
     h.last().drop();
     expect(h.fire()).toBe(RECONNECT_MS[0]);
+  });
+
+  it("time alone is no proof: a socket that confirmed and then said nothing until it closed does not start the count again", () => {
+    // Diagnosis 10-09 (D5): the old rule counted wall time from the first confirmation, so a socket silent for five minutes "had stayed up".
+    const h = harness();
+    h.last().drop();
+    expect(h.fire()).toBe(RECONNECT_MS[0]);
+    h.last().open();
+    h.last().confirmAll();
+    h.clock.now += 10 * STABLE_MS;
+    h.last().drop();
+    expect(h.fire()).toBe(RECONNECT_MS[1]);
+  });
+
+  it("an error frame is no sign of life", () => {
+    const h = harness();
+    h.last().drop();
+    h.fire();
+    h.last().open();
+    h.last().confirmAll();
+    h.clock.now += STABLE_MS;
+    h.last().onmessage?.({ data: JSON.stringify({ jsonrpc: "2.0", error: { code: 429, message: "slow down" } }) });
+    h.last().drop();
+    expect(h.fire()).toBe(RECONNECT_MS[1]);
   });
 
   it("a server that confirms and then drops cannot hold it in a one-second loop: a brief socket does not reset the count", () => {
@@ -191,6 +226,7 @@ describe("reconnecting", () => {
       h.last().open();
       h.last().confirmAll(100 + cycle * 10);
       h.clock.now += STABLE_MS - 1;
+      h.last().pong();
       h.last().drop();
       waits.push(h.fire(RECONNECT_MS[cycle]));
     }
@@ -198,30 +234,38 @@ describe("reconnecting", () => {
     h.last().open();
     h.last().confirmAll(900);
     h.last().drop();
-    expect(h.gaveUp()).toBe(1);
-    expect(h.armed()).toEqual([]);
+    // Past the list it slows to one attempt a minute, and keeps coming back.
+    expect(h.armed()).toEqual([SLOW_RECONNECT_MS]);
   });
 
-  it("gives up quietly after RECONNECT_MS runs out, and opens nothing more", () => {
+  it("never gives up: past RECONNECT_MS it tries every SLOW_RECONNECT_MS, for as long as the page lives", () => {
+    // Diagnosis 10-09: six refused handshakes in about 53 s ended the push for the life of the tab, silently.
+    expect(SLOW_RECONNECT_MS).toBe(60_000);
     const h = harness();
-    for (const wait of RECONNECT_MS) {
+    const waits: number[] = [];
+    for (let attempt = 0; attempt < RECONNECT_MS.length + 20; attempt += 1) {
       h.last().drop();
-      expect(h.fire()).toBe(wait);
+      waits.push(h.fire());
     }
-    h.last().drop();
-    expect(h.gaveUp()).toBe(1);
-    expect(h.timers.filter((timer) => !timer.cleared)).toHaveLength(0);
-    expect(h.sockets).toHaveLength(RECONNECT_MS.length + 1);
+    expect(waits.slice(0, RECONNECT_MS.length)).toEqual([...RECONNECT_MS]);
+    expect(new Set(waits.slice(RECONNECT_MS.length))).toEqual(new Set([SLOW_RECONNECT_MS]));
+    expect(h.sockets).toHaveLength(RECONNECT_MS.length + 21);
+    // And the last socket works like the first.
+    h.last().open();
+    h.last().confirmAll();
+    expect(h.states.at(-1)).toBe("live");
     expect(RECONNECT_MS).toEqual([1_000, 2_000, 5_000, 15_000, 30_000]);
   });
 
   it("treats a socket that cannot even be opened as a failure, not a crash", () => {
     let calls = 0;
     const timers: (() => void)[] = [];
+    const states: SocketState[] = [];
     watchAccounts({
       url: "wss://x",
       addresses: ["A"],
       onChange: () => undefined,
+      onState: (state) => states.push(state),
       open: () => {
         calls += 1;
         throw new Error("blocked by CSP");
@@ -231,6 +275,129 @@ describe("reconnecting", () => {
     });
     expect(calls).toBe(1);
     expect(timers).toHaveLength(1);
+    expect(states).toEqual(["connecting", "off"]);
+  });
+});
+
+/**
+ * WHAT THE PAGE CAN SAY (owner, 10-09: "necesito que la página sea live"):
+ * connecting, live once a subscription is confirmed, off while it waits for
+ * the next attempt — once per change, and nothing after close().
+ */
+describe("its state", () => {
+  it("is connecting, then live at the first confirmed subscription, then off while it waits, then connecting again", () => {
+    const h = harness();
+    expect(h.states).toEqual(["connecting"]);
+    h.last().open();
+    expect(h.states).toEqual(["connecting"]);
+    h.last().confirmAll();
+    expect(h.states).toEqual(["connecting", "live"]);
+    h.last().drop();
+    expect(h.states).toEqual(["connecting", "live", "off"]);
+    h.fire();
+    h.last().open();
+    h.last().confirmAll(200);
+    expect(h.states).toEqual(["connecting", "live", "off", "connecting", "live"]);
+  });
+
+  it("says each state once, however many subscriptions confirm or notifications arrive", () => {
+    const h = harness(["A", "B", "C"]);
+    h.last().open();
+    const ids = h.last().confirmAll();
+    h.last().notify(ids.get("A")!, 1);
+    h.last().pong();
+    expect(h.states).toEqual(["connecting", "live"]);
+  });
+
+  it("says nothing once closed: the caller that closed it is gone", () => {
+    const h = harness();
+    h.last().open();
+    h.last().confirmAll();
+    h.watch.close();
+    h.last().onclose?.({});
+    h.watch.reconnect();
+    expect(h.states).toEqual(["connecting", "live"]);
+  });
+});
+
+/**
+ * THE PAGE'S WAY BACK (diagnosis 10-09, D2/D5): returning to the tab, focus
+ * and `online` try NOW, with the count started again, instead of waiting out
+ * a slow timer — and never tear down a socket that is working.
+ */
+describe("reconnect()", () => {
+  it("connects at once when a socket is waiting to retry, with the count started again", () => {
+    const h = harness();
+    for (let attempt = 0; attempt < RECONNECT_MS.length + 2; attempt += 1) {
+      h.last().drop();
+      h.fire();
+    }
+    h.last().drop();
+    expect(h.armed()).toEqual([SLOW_RECONNECT_MS]);
+    const before = h.sockets.length;
+    h.watch.reconnect();
+    expect(h.sockets).toHaveLength(before + 1);
+    // The slow timer is gone, not left to open a second socket.
+    expect(h.armed()).toEqual([]);
+    expect(h.states.at(-1)).toBe("connecting");
+    // Started again: the next close waits the first wait.
+    h.last().drop();
+    expect(h.armed()).toEqual([RECONNECT_MS[0]]);
+  });
+
+  it("leaves a working socket alone — no new socket, no resync read — however often the window takes focus", () => {
+    const h = harness();
+    h.last().open();
+    h.last().confirmAll();
+    h.clock.now += PING_MS;
+    h.last().pong();
+    for (let focus = 0; focus < 5; focus += 1) h.watch.reconnect();
+    expect(h.sockets).toHaveLength(1);
+    expect(h.resyncs()).toBe(0);
+  });
+
+  it("leaves a socket that is still opening to finish", () => {
+    const h = harness();
+    h.watch.reconnect();
+    expect(h.sockets).toHaveLength(1);
+  });
+
+  it("replaces an open socket shown dead: its endpoint answers pings and it has said nothing for LIVELY_MS", () => {
+    expect(LIVELY_MS).toBe(3 * PING_MS);
+    const h = harness();
+    h.last().open();
+    h.last().confirmAll();
+    h.last().pong();
+    const dead = h.last();
+    h.clock.now += LIVELY_MS + 1;
+    h.watch.reconnect();
+    expect(h.sockets).toHaveLength(2);
+    expect(dead.closed).toBe(true);
+    // The dead one's late close moves nothing on.
+    dead.onclose?.({});
+    expect(h.armed()).toEqual([]);
+    // The new one owes the read for the gap.
+    h.last().open();
+    h.last().confirmAll(300);
+    expect(h.resyncs()).toBe(1);
+  });
+
+  it("does not judge a socket by its silence when its endpoint never answered a ping", () => {
+    const h = harness();
+    h.last().open();
+    h.last().confirmAll();
+    h.clock.now += 10 * LIVELY_MS;
+    h.watch.reconnect();
+    expect(h.sockets).toHaveLength(1);
+  });
+
+  it("does nothing after close()", () => {
+    const h = harness();
+    h.last().drop();
+    h.watch.close();
+    h.watch.reconnect();
+    expect(h.sockets).toHaveLength(1);
+    expect(h.armed()).toEqual([]);
   });
 });
 

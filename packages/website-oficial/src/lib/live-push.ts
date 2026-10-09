@@ -47,6 +47,25 @@
  * the "checking your latest activity" step (live-pending.ts) — once a read at
  * or past its slot ALSO read the history, because the keeper's own settlement
  * changes the wallet too, and only the history can tell the page it was that.
+ *
+ * AND A VAULT'S CHANGE ONLY ONCE THE HISTORY SHOWS IT TOO (diagnosis 10-09,
+ * push D4). The snapshot is one getMultipleAccounts and the history a separate
+ * getSignaturesForAddress, possibly answered by another node of the pool: a
+ * read could take the vault's new balance and a page that has not indexed the
+ * settle yet, clear the change, and leave the settled row to the next sweep a
+ * minute later. So a change the vault or its token accounts rang for is
+ * covered only when the history the read holds reaches its slot; otherwise it
+ * stays for ONE follow-up read after the floor, and that read covers it
+ * whatever its history says — a plain USDC transfer into the vault's token
+ * account need not appear in the vault's own history at all, and must not buy
+ * a read a minute.
+ *
+ * A HISTORY AHEAD OF ITS SNAPSHOT IS READ AGAIN AT ONCE (diagnosis 10-09,
+ * inventory D4). Each read takes the snapshot first and the history second; a
+ * settle landing between the two draws its "+$0.43" in the feed beside a Saved
+ * so far, a Pending and a Next investment that do not have it, until a read at
+ * least the 10 s floor later. historyAhead() names that case, and the hook
+ * reads the snapshot once more inside the same read.
  */
 
 import { USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
@@ -117,8 +136,22 @@ export interface PushState {
    * clock), the newest slot named, and whether any of it was urgent (the
    * floor it waits).
    */
-  readonly dirty: { readonly since: number; readonly slot: number; readonly urgent: boolean } | null;
+  readonly dirty: PushDirty | null;
   readonly wallets: Readonly<Record<string, WalletWatch>>;
+}
+
+/** Something changed that no read has covered yet. */
+export interface PushDirty {
+  /** When the window opened, on this browser's clock: the first change, or the one that made it urgent. */
+  readonly since: number;
+  /** The newest slot any notification named. */
+  readonly slot: number;
+  /** Whether any of it waits only the manual floor (the vault's machinery, or a wallet's first change). */
+  readonly urgent: boolean;
+  /** The newest slot the vault or one of its token accounts rang at; absent when only wallets rang. The history must reach it too. */
+  readonly vaultSlot?: number;
+  /** A read already reached `slot` and its history did not reach vaultSlot: this is the one follow-up read, covered by any answer at or past `slot`. */
+  readonly followUp?: true;
 }
 
 export const EMPTY_PUSH: PushState = { dirty: null, wallets: {} };
@@ -133,10 +166,22 @@ export function notified(state: PushState, input: { readonly address: string; re
   const held = input.wallet ? (state.wallets[input.address] ?? { pendingSlot: null, covered: null }) : null;
   // Urgent: the vault's machinery, or a wallet not already being checked.
   const urgent = held === null || held.covered?.open !== true;
-  const dirty =
-    state.dirty === null
-      ? { since: input.now, slot: input.slot, urgent }
-      : { since: state.dirty.since, slot: Math.max(state.dirty.slot, input.slot), urgent: state.dirty.urgent || urgent };
+  const before = state.dirty;
+  // THE WINDOW OPENS AGAIN WHEN THE CHANGE TURNS URGENT (push D4). A vault
+  // change arriving while a busy wallet's change waited out its 30 s floor kept
+  // that change's old `since`, so it got no debounce at all: its read could
+  // fire 0.2 s after the confirmation, before the wrap that follows a settle.
+  const since = before === null || (urgent && !before.urgent) ? input.now : before.since;
+  // The vault's own newest slot. A newer one owes its own follow-up; a wallet's change leaves both as they were.
+  const vaultSlot = held === null ? Math.max(before?.vaultSlot ?? input.slot, input.slot) : before?.vaultSlot;
+  const followUp = held === null && vaultSlot !== before?.vaultSlot ? undefined : before?.followUp;
+  const dirty: PushDirty = {
+    since,
+    slot: Math.max(before?.slot ?? input.slot, input.slot),
+    urgent: (before?.urgent ?? false) || urgent,
+    ...(vaultSlot === undefined ? {} : { vaultSlot }),
+    ...(followUp === undefined ? {} : { followUp }),
+  };
   if (held === null) return { ...state, dirty };
   const pendingSlot = Math.max(held.pendingSlot ?? input.slot, input.slot);
   return { dirty, wallets: { ...state.wallets, [input.address]: { ...held, pendingSlot } } };
@@ -229,6 +274,50 @@ export function walletEnds(snapshot: LiveSnapshotJson, entries: readonly LiveEnt
 }
 
 /**
+ * What is left of `dirty` after a read: nothing once the snapshot reached its
+ * slot — unless the vault rang, the history this read holds has not reached
+ * that slot, and this was not already the follow-up. Then it stays, marked as
+ * the follow-up, urgent, so it waits the manual floor and not a sweep.
+ */
+function coveredDirty(dirty: PushDirty | null, reached: (slot: number) => boolean, historySlot: number | null): PushDirty | null {
+  if (dirty === null) return null;
+  if (!reached(dirty.slot)) return dirty;
+  if (dirty.vaultSlot === undefined || dirty.followUp === true) return null;
+  if (historySlot !== null && historySlot >= dirty.vaultSlot) return null;
+  return { ...dirty, urgent: true, followUp: true };
+}
+
+/** The newest slot among `entries`, or null when there are none. */
+export function newestSlotOf(entries: readonly LiveEntryJson[]): number | null {
+  let newest: number | null = null;
+  for (const entry of entries) if (Number.isSafeInteger(entry.slot) && (newest === null || entry.slot > newest)) newest = entry.slot;
+  return newest;
+}
+
+/**
+ * The kinds of row that move a figure the SNAPSHOT draws — Saved so far, the
+ * chart and the stats (settlements, filtered at the snapshot's slot), Pending,
+ * the Next investment bar, the holdings. A settlement is the case the
+ * diagnosis named; a wrap, a conversion or a buy newer than the snapshot draws
+ * the same disagreement between the feed and the figures beside it. Keeper
+ * upkeep, a rule or a link moves none of those, and buys no extra read.
+ */
+const MOVES_FIGURES: ReadonlySet<string> = new Set(["settled", "wrapped", "converted", "invested", "withdrew_sol", "withdrew_token", "received_sol"]);
+
+/**
+ * WHETHER THE HISTORY JUST READ IS AHEAD OF THE SNAPSHOT READ BEFORE IT: a
+ * transaction that succeeded at a slot past the snapshot's and moved a figure
+ * it draws. The hook then reads the snapshot once more within the same read —
+ * past the floor, because it is the same read, and once, because the second
+ * answer is not checked again. A snapshot that named no slot cannot be
+ * compared, and is not.
+ */
+export function historyAhead(entries: readonly LiveEntryJson[], snapshotSlot: number | null): boolean {
+  if (snapshotSlot === null) return false;
+  return entries.some((entry) => entry.ok && entry.slot > snapshotSlot && entry.events.some((event) => MOVES_FIGURES.has(event.kind)));
+}
+
+/**
  * WHAT A READ THAT ANSWERED COVERED. `slot` is the snapshot's; null when it
  * named none, and then the change is taken as covered rather than read again
  * and again over a field the server could not fill. `historyRead` is whether
@@ -245,10 +334,16 @@ export function afterRead(
     readonly readAtMs: number;
     /** Each wallet's end as this read sees it (walletEnds); a wallet missing from it has none known. */
     readonly ends?: Readonly<Record<string, number>>;
+    /**
+     * The newest slot of the vault's history as this read holds it, once its
+     * page landed (newestSlotOf); null or absent when it holds none. Ignored
+     * unless historyRead. A vault's change needs it at or past vaultSlot.
+     */
+    readonly historySlot?: number | null;
   },
 ): PushState {
   const reached = (slot: number): boolean => input.slot === null || input.slot >= slot;
-  const dirty = state.dirty !== null && !reached(state.dirty.slot) ? state.dirty : null;
+  const dirty = coveredDirty(state.dirty, reached, input.historyRead ? (input.historySlot ?? null) : null);
   const ended = (address: string, slot: number): boolean => {
     const end = input.ends?.[address];
     return end !== undefined && end >= slot;

@@ -26,6 +26,20 @@ export function privyStubAlias(env = process.env) {
 
 const resolveAlias = privyStubAlias(process.env);
 
+/**
+ * THE COMMIT THIS BUNDLE IS BUILT FROM, baked in as SIP_BUILD_COMMIT so a tab
+ * can tell when the server runs a newer one (src/lib/build-version.ts,
+ * GET /api/version). Vercel's VERCEL_GIT_COMMIT_SHA is a public git commit
+ * id, nothing secret; anything that is not one — no variable, a local build —
+ * is "dev", which never announces an update. The same rule as
+ * build-version.ts's commitOf, in plain JavaScript because Next loads this
+ * file without a TypeScript loader.
+ */
+export function buildCommitOf(env = process.env) {
+  const raw = typeof env.VERCEL_GIT_COMMIT_SHA === "string" ? env.VERCEL_GIT_COMMIT_SHA.trim() : "";
+  return /^[0-9a-f]{7,40}$/i.test(raw) ? raw.toLowerCase() : "dev";
+}
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // One policy, on every response. Lives in security-headers.mjs so a guard
@@ -50,6 +64,10 @@ const nextConfig = {
   transpilePackages: ["@sip/solana-core", "@sip/solana-program"],
 
   reactStrictMode: true,
+
+  // The bundle's own identity, inlined at build time: the one value that must
+  // be frozen into it (buildCommitOf above).
+  env: { SIP_BUILD_COMMIT: buildCommitOf(process.env) },
 
   // Never let a type error reach a deployed image.
   typescript: { ignoreBuildErrors: false },

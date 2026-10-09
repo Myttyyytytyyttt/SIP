@@ -57,6 +57,7 @@ import { OnboardingHost } from "@/components/onboarding/OnboardingHost";
 import { WalletsOpenerOverride, useWalletsClosed, useWalletsDisconnect, useWalletsModalOpen, useWalletsOpener } from "@/components/wallets-host";
 import { useLiveDashboard, type LiveDashboardStore } from "@/hooks/use-live-dashboard";
 import { useOnboardingClosed } from "@/hooks/use-onboarding-closed";
+import { useVaultFollowsLive } from "@/hooks/use-vault-follow";
 import { useVaultScreen } from "@/hooks/use-vault-state";
 import { decideDashboard, readUrlMode, toggleModeOf, urlWithMode, type DashboardState, type UrlMode } from "@/lib/dashboard-mode";
 import { formatUsd } from "@/lib/amounts";
@@ -350,6 +351,8 @@ function ConfiguredFrame({
   const [engagedKey, setEngagedKey] = useState<string | null>(null);
   const engaged = connectedKey !== null && engagedKey === connectedKey;
   const walletsOpen = useWalletsModalOpen();
+  // The shared vault screen — the modal, the gear dot — re-reads when the live store saw the vault move, and when the modal opens.
+  useVaultFollowsLive({ screen: vaultScreen, stamp: live.vaultStamp, modalOpen: walletsOpen });
   const wanted = !walletsOpen && onboardingWanted({ kind: state.kind, closed, vault, liveStage, engaged });
   useEffect(() => {
     if (wanted && connectedKey !== null) setEngagedKey(connectedKey);

@@ -31,9 +31,11 @@ const source = code(readFileSync(HOOK, "utf8"));
 const read = source.slice(source.indexOf("const read = useCallback"), source.indexOf("const loadOlder"));
 
 describe("the first paint of a pension waits for its history", () => {
-  it("sets the snapshot in ONE place: the gate's commit (its timing is lib/first-paint.test.ts's)", () => {
-    expect(read.match(/setSnapshot\(/g)).toHaveLength(1);
+  it("sets the snapshot through the gate's commit, and only once more AFTER the gate released (its timing is lib/first-paint.test.ts's)", () => {
+    expect(read.match(/setSnapshot\(/g)).toHaveLength(2);
     expect(read).toMatch(/const gate = firstPaintGate\(\{ hold: holdFirstPaint, commit: \(\) => setSnapshot\(answered\.body\), stale, waitMs: FIRST_PAINT_WAIT_MS \}\);/);
+    // The second is the re-read a history ahead of its snapshot buys: never before the first paint.
+    expect(read.indexOf("setSnapshot(again.body)")).toBeGreaterThan(read.search(/gate\.release\(\);/));
   });
 
   it("holds only the FIRST snapshot, and only when there is a history to wait for", () => {
@@ -92,8 +94,8 @@ describe("the poll runs faster only while something is on its way", () => {
     expect(poll).toMatch(
       /const pending = pendingPollWanted\(\{ active: pendingActive, activeSince: activeSinceRef\.current, now: Date\.now\(\), activityRetryAt: activityTrouble\?\.retryAt \?\? null \}\);/,
     );
-    expect(poll).toMatch(/nextDelayMs\(\{ failures, retryAfterSeconds: null, visible, lastReadAt, now: Date\.now\(\), reading, pending \}\)/);
-    expect(poll).toMatch(/\}, \[pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading, pendingActive\]\);/);
+    expect(poll).toMatch(/nextDelayMs\(\{ failures, retryAfterSeconds: null, visible, lastReadAt, now: Date\.now\(\), reading, pending, unheard \}\)/);
+    expect(poll).toMatch(/\}, \[pensionKey, failures, lastReadAt, failure, activityTrouble, tick, read, reading, pendingActive, socket\]\);/);
   });
 });
 
@@ -140,15 +142,15 @@ describe("the push from the chain", () => {
 
   it("hands a wallet's change to the page only from a read that read the history", () => {
     expect(read).toMatch(/if \(page\.ok && page\.body\.status === "exists"\) \{\s*historyRead = true;/);
-    expect(read).toMatch(/setPush\(\(held\) => afterRead\(heardLate\(held, moved\), \{ slot: answered\.body\.slot, historyRead, readAtMs: answered\.body\.readAtMs, ends \}\)\);/);
+    expect(read).toMatch(/setPush\(\(held\) => afterRead\(heardLate\(held, moved\), \{ slot: current\.slot, historyRead, readAtMs: current\.readAtMs, ends, historySlot \}\)\);/);
     expect(read.match(/historyRead = true/g)).toHaveLength(1);
     expect(source).toMatch(/walletChanges,\s*\}\);/);
   });
 
   it("finds a change nobody heard from the balances against the last read's, kept per pension across a remount", () => {
     // Review 2026-10-09: a trade made while the page was on /wallets, or while a phone had dropped the socket, never showed.
-    expect(read).toMatch(/const moved = movedSince\(recallPush\(pensionKey\)\.baseline, answered\.body\);\s*rememberPush\(pensionKey, \{ baseline: baselineOf\(answered\.body\) \}\);/);
-    expect(read).toMatch(/const ends = walletEnds\(answered\.body, seen\);/);
+    expect(read).toMatch(/const moved = movedSince\(recallPush\(pensionKey\)\.baseline, current\);\s*rememberPush\(pensionKey, \{ baseline: baselineOf\(current\) \}\);/);
+    expect(read).toMatch(/const ends = walletEnds\(current, seen\);/);
     // Only the dashboard's own reads move the baseline, never the leaderboard chip's.
     expect(read).toMatch(/if \(wantsActivity\) \{\s*const moved = movedSince/);
     expect(read.match(/seen\.push\(/g)).toHaveLength(2);
@@ -167,5 +169,77 @@ describe("the push from the chain", () => {
     expect(source).toMatch(/document\.addEventListener\("visibilitychange", onShow\);/);
     expect(source).toMatch(/window\.addEventListener\("focus", onShow\);/);
     expect(source).toMatch(/window\.removeEventListener\("focus", onShow\);/);
+  });
+});
+
+/**
+ * A HISTORY AHEAD OF ITS SNAPSHOT, A VAULT CHANGE THE HISTORY HAS NOT SHOWN
+ * (diagnosis 10-09, inventory D4 and push D4). The rules are live-push.ts's
+ * (historyAhead, afterRead's historySlot), tested there; pinned here is that
+ * the read applies them: one more snapshot inside the same read, and the
+ * history's newest slot handed to afterRead.
+ */
+describe("a read whose history and snapshot disagree", () => {
+  it("reads the snapshot once more, inside the same read, when the page holds a row past the snapshot's slot", () => {
+    expect(read).toMatch(/let current = answered\.body;\s*if \(historyAhead\(pageEntries, current\.slot\)\) \{/);
+    expect(read).toMatch(/const again = await api\.snapshot\(\{ owner: pensionKey, wallets: wallets\.slice\(0, MAX_WALLETS\), discover \}\);\s*if \(stale\(\)\) return true;/);
+    // Only a newer, readable answer replaces the first; a refusal leaves the good one on screen and is no failure.
+    expect(read).toMatch(/if \(again\.ok && again\.body\.vault\.status === "exists" && \(again\.body\.slot \?\? 0\) >= \(current\.slot \?\? 0\)\) \{\s*current = again\.body;\s*setSnapshot\(again\.body\);/);
+    // Once: the second answer is never checked again.
+    expect(read.match(/historyAhead\(/g)).toHaveLength(1);
+    expect(read.match(/api\.snapshot\(/g)).toHaveLength(2);
+  });
+
+  it("takes the page's rows, and the newest slot of the history as it stands once the page landed", () => {
+    expect(read).toMatch(/historyRead = true;\s*pageEntries = page\.body\.entries;/);
+    expect(read).toMatch(/const loaded = until === null \|\| page\.body\.gap \? page\.body\.entries : \[\.\.\.page\.body\.entries, \.\.\.entriesRef\.current\];\s*historySlot = newestSlotOf\(loaded\);/);
+  });
+});
+
+/**
+ * HOW LIVE THE PAGE IS (owner, 10-09: "necesito que la página en general sea
+ * live"). The socket's state, a read out, a change heard and not yet read, and
+ * the last good read — handed to whatever draws them — and the socket brought
+ * back by the page's own events.
+ */
+describe("liveness", () => {
+  it("hands the page the socket's state, the read out, the change heard, and the last GOOD read", () => {
+    expect(source).toMatch(/const liveness = useMemo\(\(\): LiveLiveness => \(\{ socket, reading, heard, lastReadAt: lastGoodAt \}\), \[socket, reading, heard, lastGoodAt\]\);/);
+    expect(source).toMatch(/const heard = push\.dirty !== null;/);
+    expect(source).toMatch(/liveness,\s*vaultStamp,\s*\};/);
+    // The last good read moves only on success: lastReadAt moves on a failure too.
+    expect(read.match(/setLastGoodAt\(/g)).toHaveLength(1);
+    expect(read).toMatch(/setLastReadAt\(Date\.now\(\)\);\s*setLastGoodAt\(Date\.now\(\)\);\s*return true;/);
+  });
+
+  it("says 'none' where no socket is wanted, 'off' where one is and cannot open, and otherwise what the socket said", () => {
+    expect(source).toMatch(/const socketWanted = pensionKey !== null && wantsActivity && hasWatched;/);
+    expect(source).toMatch(
+      /const socket: SocketState \| "none" = !socketWanted \? "none" : wsUrl === null \|\| typeof WebSocket === "undefined" \? "off" : \(socketState \?\? "connecting"\);/,
+    );
+    expect(source).toMatch(/onState: setSocketState,/);
+    // Forgotten when the socket is closed, so a new one starts from "connecting".
+    expect(source).toMatch(/watch\.close\(\);\s*if \(watchRef\.current === watch\) watchRef\.current = null;\s*setSocketState\(null\);/);
+  });
+
+  it("polls every 20 s while the push is wanted and not live, under the history's retry-after", () => {
+    expect(source).toMatch(/const unheard = unheardPollWanted\(\{ socket, activityRetryAt: activityTrouble\?\.retryAt \?\? null, now: Date\.now\(\) \}\);/);
+  });
+
+  it("brings the socket back on returning to the tab, on focus and when the network returns", () => {
+    const wake = source.slice(source.indexOf("const wake = (): void =>"), source.indexOf("const socketWanted ="));
+    expect(wake).toMatch(/if \(document\.visibilityState === "visible"\) watchRef\.current\?\.reconnect\(\);/);
+    for (const [target, event] of [
+      ["document", "visibilitychange"],
+      ["window", "focus"],
+      ["window", "online"],
+    ] as const) {
+      expect(wake).toContain(`${target}.addEventListener("${event}", wake);`);
+      expect(wake).toContain(`${target}.removeEventListener("${event}", wake);`);
+    }
+  });
+
+  it("stamps each committed snapshot for the vault screen to follow", () => {
+    expect(source).toMatch(/const vaultStamp = useMemo\(\(\) => vaultStampOf\(snapshot\), \[snapshot\]\);/);
   });
 });
