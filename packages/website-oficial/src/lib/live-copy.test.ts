@@ -339,10 +339,16 @@ describe("the start-buying card's own words", () => {
     expect(sentences.filter((sentence) => /\bkeeper\b|\bSIP\b|nuvem/i.test(sentence))).toEqual([]);
     expect(START_BUYING_COPY.convert(null)).toMatch(/sold for USDC at the live price/);
     expect(START_BUYING_COPY.convert(null)).not.toMatch(/null|undefined/);
-    expect(START_BUYING_COPY.convert("$5.00")).toBe("Your SOL savings, now and later, are sold for USDC at the live price, and bought in once $5.00 is ready.");
-    // NO SIGNED PRICE FLOOR (owner, 2026-10-08), said in one line, and no
-    // sentence on the card still promises one.
-    expect(START_BUYING_COPY.livePrice).toBe("No price limit to approve: SaverFi buys at the live market price and checks it before every buy, so a price move never asks you to sign again.");
+    expect(START_BUYING_COPY.convert("$5.00")).toBe(
+      "Your SOL savings, now and later, are sold for USDC at the live price, never under half the SOL price when you approve, and bought in once $5.00 is ready.",
+    );
+    // NO SIGNED STOCK PRICE FLOOR (owner, 2026-10-08) and the SOL safety floor
+    // (owner, 2026-10-09), said in one line, and no sentence on the card still
+    // promises a stock floor, or that no price move ever asks for an approval.
+    expect(START_BUYING_COPY.livePrice).toBe(
+      "No price limit on the stocks: SaverFi buys them at the live market price and checks it before every buy. Your SOL keeps one safety floor, half its price when you approve; only SOL falling under it asks you to approve again.",
+    );
+    expect(sentences.filter((sentence) => /a price move never asks/i.test(sentence))).toEqual([]);
     expect(sentences.filter((sentence) => /never below|price limits are set|until prices come back/i.test(sentence))).toEqual([]);
     expect(START_BUYING_COPY.cost("0.0118", "0.000035")).toMatch(/not refundable/);
   });

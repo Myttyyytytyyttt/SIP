@@ -528,7 +528,7 @@ export const START_BUYING_COPY = {
   lede: (basket: string): string => `Start buying ${basket}? You chose this when you made your vault.`,
   /** `purchase` is the whole buy that clears every leg's minimum. */
   convert: (purchase: string | null): string =>
-    `Your SOL savings, now and later, are sold for USDC at the live price, and bought in ${purchase === null ? "once enough is ready" : `once ${purchase} is ready`}.`,
+    `Your SOL savings, now and later, are sold for USDC at the live price, never under half the SOL price when you approve, and bought in ${purchase === null ? "once enough is ready" : `once ${purchase} is ready`}.`,
   /**
    * One line per leg whose issuer charges to move it. `written` is a fee the
    * issuer has already set for later ("3 % from around 26 September 2026"), or
@@ -539,11 +539,12 @@ export const START_BUYING_COPY = {
   fee: (symbol: string, fee: string, written: string | null, max: string): string =>
     `${symbol}’s issuer takes ${fee} each time it moves, in and out${written === null ? "" : `, and has already set ${written}`}; above ${max}, buying stops until you change the basket.`,
   /**
-   * THE OWNER'S DECISION OF 2026-10-08, IN ONE LINE: no signed price floor.
-   * "What exactly am I signing?" carries the keeper's checks and what the chain
-   * still enforces (INVEST_COPY.keeperChecks, INVEST_COPY.chainLimits).
+   * THE OWNER'S DECISIONS IN ONE LINE: no price floor on the stocks
+   * (2026-10-08), a safety floor at half the SOL price on the conversion
+   * (2026-10-09). "What exactly am I signing?" carries the keeper's checks and
+   * what the chain still enforces (INVEST_COPY.keeperChecks, INVEST_COPY.chainLimits).
    */
-  livePrice: `No price limit to approve: ${BRAND} buys at the live market price and checks it before every buy, so a price move never asks you to sign again.`,
+  livePrice: `No price limit on the stocks: ${BRAND} buys them at the live market price and checks it before every buy. Your SOL keeps one safety floor, half its price when you approve; only SOL falling under it asks you to approve again.`,
   /** The depth ceiling, for a cap this card fixes rather than one the owner types. */
   depth: (ceiling: string, cap: string, symbol: string, provenance: string): string =>
     `${BRAND} buys only where the market can take the whole buy: on the shares chosen, ${symbol} sets the ceiling at ${ceiling} per buy, from what its route held ${provenance}. ` +

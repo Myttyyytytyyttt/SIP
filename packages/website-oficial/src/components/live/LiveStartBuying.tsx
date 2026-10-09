@@ -7,8 +7,9 @@
  * their savings become — SOL, or the offered stocks at an equal split — and
  * signs only the vault. The investing policy is asked for HERE, once the first
  * settlement has landed, so the rent is spent on a pension that has actually
- * started saving. It signs no price floor: SaverFi buys at the live price
- * (owner, 2026-10-08).
+ * started saving. It signs no stock price floor: SaverFi buys at the live price
+ * (owner, 2026-10-08); the SOL conversion keeps a safety floor at half the SOL
+ * price at signing (owner, 2026-10-09).
  *
  * IT SIGNS WHAT THE INVESTING FORM WOULD SIGN for the same basket. The request
  * is built by InvestingCard's own pure pieces — readWeights, readMinimum,
@@ -180,9 +181,10 @@ export function LiveStartBuying({ data, pensionKey, onRefresh }: { readonly data
 
   // THE VAULT IT SIGNS FOR IS READ NOW. The vault screen is read on changes, not
   // on a timer, so its last answer can be hours old by the time the first
-  // settlement lands. Since 2026-10-08 the policy signs no price floor (live-price
-  // buying), so no shown price is checked any more; what can be stale is the
-  // vault's own state — its policy, its token accounts, the leg fees.
+  // settlement lands. What can be stale is the vault's own state — its policy,
+  // its token accounts, the leg fees — and the SOL price the screen shows,
+  // which the build's SOL safety floor is held to (vault-flows.ts
+  // livePriceProblem). No stock price is checked: none is signed.
   const refreshVault = screen?.refresh ?? null;
   const asked = useRef(false);
   const becameEligible = data.stage === "active" && data.policy.status === "missing" && basket !== null && basket.kind === "stocks";

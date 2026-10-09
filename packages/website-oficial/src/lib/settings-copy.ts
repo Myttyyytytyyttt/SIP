@@ -91,7 +91,7 @@ export const SETTINGS_COPY = {
     unavailable: "Too little of these is traded to buy them safely today. They come back when their markets grow.",
     shares: "How each buy is split between the assets you picked. The shares must add up to 100 %.",
     threshold: "Your savings wait until they reach this amount, then buy everything in one go. Fewer, bigger buys lose less to fees. $10 is the default.",
-    switchLive: "SaverFi now buys at the live market price and checks the price itself before every buy, so there is no price limit for you to approve again. Switching approves your current choices again without the old limits. Nothing is bought when you do it.",
+    switchLive: "SaverFi now buys stocks at the live market price and checks the price itself before every buy, so there is no stock price limit for you to approve again; your SOL keeps one safety floor, half its price when you switch. Switching approves your current choices again without the old limits. Nothing is bought when you do it.",
   },
 
   /**

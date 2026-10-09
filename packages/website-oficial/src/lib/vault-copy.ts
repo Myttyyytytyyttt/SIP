@@ -135,8 +135,8 @@ export const shortAddress = (address: string): string => (address.length > 10 ? 
 //    only (invest-decision.ts oracleConvertDecision); ARM 1 counts units and
 //    has no opinion about what a unit is worth, and ARM 2 divides two quotes
 //    from one quoter, so a uniformly bad price divides out of it.
-//  * there is NO SIGNED PRICE FLOOR since 2026-10-08 (owner's decision,
-//    solana-core product.ts LIVE_PRICE_FLOOR_WAD): the policy signs 1 wad, so
+//  * there is NO SIGNED STOCK PRICE FLOOR since 2026-10-08 (owner's decision,
+//    solana-core product.ts LIVE_PRICE_FLOOR_WAD): every leg signs 1 wad, so
 //    nothing on chain bounds the PRICE a buy pays — only how much it spends
 //    (max_per_call, max_rolling_30d) and that it receives at least the
 //    keeper's own min_out. If the keeper failed or its key were stolen, the
@@ -144,9 +144,11 @@ export const shortAddress = (address: string): string => (address.length > 10 ? 
 //    convert.rs never touches the 30-day buckets, bounds one call only by
 //    max(max_per_call, 1e9) counted in LAMPORTS (1 SOL until the per-buy cap
 //    passes $1,000), and nothing limits how many calls; wrap_sol.rs wraps any
-//    free SOL. With a 1-wad convert floor, every lamport the vault holds is
-//    what a failed or stolen keeper could sell at any price, and chainLimits
-//    says so.
+//    free SOL. So since 2026-10-09 the conversion signs a SAFETY FLOOR at half
+//    the SOL price at signing (product.ts CONVERT_SAFETY_FLOOR_BPS): that is
+//    what bounds a failed or stolen keeper selling the vault's SOL, and SOL
+//    falling under it is the one price move that stops conversion until the
+//    owner signs again. chainLimits says both.
 // INVEST_COPY.keeperChecks and INVEST_COPY.chainLimits say all three in the
 // owner's words.
 
@@ -645,8 +647,9 @@ function chainLimitsParagraph(perBuy: string | null, per30Days: string | null): 
   const caps = perBuy === null || per30Days === null ? "the most per buy and per 30 days you set" : `at most ${perBuy} per buy and ${per30Days} per 30 days`;
   return (
     `What Solana itself still enforces on every buy, whatever happens to SaverFi's keeper: ${caps}, only the stocks you chose, through the exchange you signed, and that the vault receives at least the minimum the keeper sent with the buy. ` +
-    "What it no longer enforces is a price: there is no price floor in what you sign. If SaverFi's keeper failed, or its key were stolen, nothing on Solana would stop a buy at a bad price — for buys, those caps are what would limit how much. " +
-    "Converting SOL to USDC has no such limit: it does not count toward the 30 days, each conversion is capped at 1 SOL (more only if your most per buy is over $1,000), and conversions can repeat. So all the SOL in your vault, not only those caps, is what a failed or stolen keeper could sell at any price."
+    "What it no longer enforces on a buy is a price: there is no price floor on the stocks in what you sign. If SaverFi's keeper failed, or its key were stolen, nothing on Solana would stop a buy at a bad price — for buys, those caps are what would limit how much. " +
+    "Converting SOL to USDC is not limited by those caps: it does not count toward the 30 days, each conversion is capped at 1 SOL (more only if your most per buy is over $1,000), and conversions can repeat. What limits it is the safety floor you sign: Solana refuses any conversion that pays less than half the SOL price when you signed, so a failed or stolen keeper could not sell your SOL for less than that. " +
+    "If SOL's price falls under that floor, nothing is converted until you sign again, at a new floor; USDC already in your vault is still invested."
   );
 }
 
@@ -931,9 +934,14 @@ export const INVEST_COPY = {
   mostPerBuy: "Most per buy",
   mostPer30Days: "Most per 30 days",
   priceTitle: "How the price is set",
-  /** The owner's decision (2026-10-08), in his terms: no signed price floor, and what that buys him. */
+  /**
+   * The owner's decisions, in his terms: no price floor on the stocks
+   * (2026-10-08), and one safety floor on the SOL conversion at half the SOL
+   * price at signing (2026-10-09) — and the one price move that asks him to
+   * sign again because of it.
+   */
   livePrice:
-    "SaverFi buys at the live market price. What you sign has no price floor, so a stock rising or SOL falling is not a reason for SaverFi to stop buying, and a price move never asks you to sign again.",
+    "SaverFi buys stocks at the live market price. What you sign has no price floor on them, so a stock's price moving is not a reason for SaverFi to stop buying. Converting your SOL to USDC keeps one safety floor: half the SOL price when you sign. SaverFi never converts below it, and only if SOL falls under it does conversion stop until you sign again.",
   /** The keeper's live checks, with the code's numbers for THIS basket's legs. */
   keeperChecks: (legs: readonly SignedLeg[]): string => keeperChecksParagraph(legs),
   /** What the chain still enforces, and plainly what it no longer does. Null caps while the boxes cannot be read. */
@@ -978,7 +986,7 @@ export const INVEST_COPY = {
    * know rather than naming a number that is right for a different basket.
    */
   policyRule: (basket: string, purchase: string | null, maxPerCall: string, maxRolling: string, rent: string): string =>
-    `Your vault invests in ${basket}, each bought through Jupiter, which picks the route for every buy, and a buy takes all of them or none. When the vault holds SOL, the keeper converts it to USDC at the live price, then ${purchase === null ? "buys once enough USDC is ready for the smallest share in the basket to clear its minimum" : `buys once ${purchase} of USDC is ready`}, at the live price. At most ${maxPerCall} per buy and ${maxRolling} per 30 days until you change them. If the venue a buy would land in is too small for it, or the keeper's price checks below refuse it, nothing is bought and no SOL is converted on that sweep, and a later sweep tries again. Setting this up costs ${rent} SOL of rent for the policy and the vault's token accounts, and none of it comes back.`,
+    `Your vault invests in ${basket}, each bought through Jupiter, which picks the route for every buy, and a buy takes all of them or none. When the vault holds SOL, the keeper converts it to USDC at the live price, never under its safety floor of half the SOL price when you sign, then ${purchase === null ? "buys once enough USDC is ready for the smallest share in the basket to clear its minimum" : `buys once ${purchase} of USDC is ready`}, at the live price. At most ${maxPerCall} per buy and ${maxRolling} per 30 days until you change them. If the venue a buy would land in is too small for it, or the keeper's price checks below refuse it, nothing is bought and no SOL is converted on that sweep, and a later sweep tries again. Setting this up costs ${rent} SOL of rent for the policy and the vault's token accounts, and none of it comes back.`,
 
   // ── WHAT THE POSITION COSTS, AND WHO OWNS EACH NUMBER ──────────────────────
   //
@@ -1136,13 +1144,13 @@ export const INVEST_COPY = {
   oldLimitsTitle: "Price limits from before",
   /** "held": the limits are not judged to be stopping anything right now (or the prices are unread); the switch is offered, not urged. */
   oldLimitsHeld:
-    "This policy was signed with price limits, before SaverFi switched to buying at the live price. Whenever a stock's price rises past its limit, buying stops, and whenever SOL's price falls past its limit, your SOL stops being converted to USDC, until you sign again. Switching signs the same basket again at the live price, once, and no price limit stops it after that.",
+    "This policy was signed with price limits, before SaverFi switched to buying at the live price. Whenever a stock's price rises past its limit, buying stops, and whenever SOL's price falls past its limit, your SOL stops being converted to USDC, until you sign again. Switching signs the same basket again at the live price, once: after that no stock's price stops buying, and only SOL falling under half its price at the switch stops conversion.",
   /** "blocking" by a stock's limit: the whole basket and the conversion stop, and the switch is the way out. */
   oldLimitsBlocking:
     "This policy's old price limits are stopping your buys: nothing is bought, and no SOL is converted, while the market cannot meet a stock's limit. Switching signs the same basket again at the live price, so those limits stop nothing any more.",
   /** "blocking" by the SOL limit alone: only the conversion stops. */
   oldLimitsBlockingConvert:
-    "This policy's old SOL price limit is stopping your SOL being converted to USDC while SOL's price sits under it. USDC already in your vault is still invested. Switching signs the same basket again at the live price, so that limit stops nothing any more.",
+    "This policy's old SOL price limit is stopping your SOL being converted to USDC while SOL's price sits under it. USDC already in your vault is still invested. Switching signs the same basket again at the live price, with a new SOL safety floor at half today's price, so conversion starts again.",
   switchToLive: "Switch to live-price buying",
 
   sign: "Sign investment policy",
@@ -1359,7 +1367,7 @@ export const INVEST_COPY = {
    */
   editFractionalShare: (symbol: string, share: string): string =>
     `This policy gives ${symbol} ${share}, which is not a whole number of percent, and the share boxes take whole percentages only. Changing the basket here would have to round it into a share you never chose, so it is not offered. Pausing and resuming still work on it exactly as it stands.`,
-  pauseKeeps: "Pausing signs this policy again as it is, with investing off. Resuming signs it again at the live price.",
+  pauseKeeps: "Pausing signs this policy again as it is, with investing off. Resuming signs it again at the live price, with a new SOL safety floor at half that day's price.",
   pauseSigning: "You are signing: investing paused, with every floor and limit this policy has.",
   noRefill: "Signing again does not refill this month's cap.",
 

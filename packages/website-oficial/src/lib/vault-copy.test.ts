@@ -36,7 +36,7 @@ import { describe, expect, it } from "vitest";
 
 import { CATALOGUE, LIVE_PRICE_FLOOR_WAD, OFFERED_LEGS, PRESTOCKS_POWERS, floorWad, keeperInvestMinOutFor, type CatalogueAsset } from "@sip/solana-core/client";
 
-import { ALL_OR_NOTHING, LEG_FEE, LIVE_PRICE_FLOOR, LOSS_FORGIVEN, OWNER_FLOOR_MIN_OUT, POOL_DEPTH, PYTH_GUARD, TRANSFER_HOOK } from "../../../solana-core/test/fixtures/keeper-policy";
+import { ALL_OR_NOTHING, CONVERT_SAFETY_FLOOR, LEG_FEE, LIVE_PRICE_FLOOR, LOSS_FORGIVEN, OWNER_FLOOR_MIN_OUT, POOL_DEPTH, PYTH_GUARD, TRANSFER_HOOK } from "../../../solana-core/test/fixtures/keeper-policy";
 
 import { ROUTE_COST_UNDER_MID_BPS, ROUTE_OVER_MID_BPS, floorRoom, keeperVenueThresholdWad } from "@/lib/invest-limits";
 import {
@@ -501,10 +501,14 @@ describe("how the price is set: the live price, the keeper's checks, and what th
   const impact = (fee: bigint): bigint => LEG_FEE.impactCeilingBps.find(([at]) => at === fee)![1];
   const pct = (bps: bigint): string => ratePercent(Number(bps));
 
-  it("states the owner's decision plainly: no price floor, and a price move never asks him to sign again", () => {
+  it("states the owner's decisions plainly: no price floor on the stocks, a safety floor at half the SOL price on the conversion, and the one move that asks him to sign again", () => {
     expect(INVEST_COPY.livePrice).toBe(
-      "SaverFi buys at the live market price. What you sign has no price floor, so a stock rising or SOL falling is not a reason for SaverFi to stop buying, and a price move never asks you to sign again.",
+      "SaverFi buys stocks at the live market price. What you sign has no price floor on them, so a stock's price moving is not a reason for SaverFi to stop buying. Converting your SOL to USDC keeps one safety floor: half the SOL price when you sign. SaverFi never converts below it, and only if SOL falls under it does conversion stop until you sign again.",
     );
+    // "Half" is the vector's 5,000 bps, not a word the page chose on its own.
+    expect(CONVERT_SAFETY_FLOOR.web.bps).toBe(5_000);
+    // No sentence still promises that no price move ever asks for a signature.
+    expect(INVEST_COPY.livePrice).not.toMatch(/a price move never asks/);
     // And the constant the page builds every policy with is the vector's: the
     // least the program accepts, which floors nothing.
     expect(LIVE_PRICE_FLOOR_WAD).toBe(LIVE_PRICE_FLOOR.web.value);
@@ -553,23 +557,29 @@ describe("how the price is set: the live price, the keeper's checks, and what th
   it("says what the chain still enforces, and plainly what it no longer does if the keeper failed or its key were stolen", () => {
     expect(INVEST_COPY.chainLimits("$149.00", "$31,000.00")).toBe(
       "What Solana itself still enforces on every buy, whatever happens to SaverFi's keeper: at most $149.00 per buy and $31,000.00 per 30 days, only the stocks you chose, through the exchange you signed, and that the vault receives at least the minimum the keeper sent with the buy. " +
-        "What it no longer enforces is a price: there is no price floor in what you sign. If SaverFi's keeper failed, or its key were stolen, nothing on Solana would stop a buy at a bad price — for buys, those caps are what would limit how much. " +
-        "Converting SOL to USDC has no such limit: it does not count toward the 30 days, each conversion is capped at 1 SOL (more only if your most per buy is over $1,000), and conversions can repeat. So all the SOL in your vault, not only those caps, is what a failed or stolen keeper could sell at any price.",
+        "What it no longer enforces on a buy is a price: there is no price floor on the stocks in what you sign. If SaverFi's keeper failed, or its key were stolen, nothing on Solana would stop a buy at a bad price — for buys, those caps are what would limit how much. " +
+        "Converting SOL to USDC is not limited by those caps: it does not count toward the 30 days, each conversion is capped at 1 SOL (more only if your most per buy is over $1,000), and conversions can repeat. What limits it is the safety floor you sign: Solana refuses any conversion that pays less than half the SOL price when you signed, so a failed or stolen keeper could not sell your SOL for less than that. " +
+        "If SOL's price falls under that floor, nothing is converted until you sign again, at a new floor; USDC already in your vault is still invested.",
     );
     expect(INVEST_COPY.chainLimits(null, null)).toContain("the most per buy and per 30 days you set");
   });
 
-  it("names the conversion's exposure: no 30-day cap, 1 SOL per call (convert.rs max(max_per_call, 1e9) in lamports), repeatable — the whole SOL balance", () => {
+  it("names the conversion's exposure — no 30-day cap, 1 SOL per call (convert.rs max(max_per_call, 1e9) in lamports), repeatable — and the safety floor that bounds it", () => {
     // convert.rs: `amount_in <= policy.max_per_call.max(1_000_000_000)`, in
     // lamports, and no bucket write. A per-buy cap of $1,000 is 1e9 USDC raw,
     // the very number the max() takes, so up to it a conversion is 1 SOL.
     for (const text of [INVEST_COPY.chainLimits("$149.00", "$31,000.00"), INVEST_COPY.chainLimits(null, null)]) {
-      expect(text).toContain("Converting SOL to USDC has no such limit: it does not count toward the 30 days");
+      expect(text).toContain("Converting SOL to USDC is not limited by those caps: it does not count toward the 30 days");
       expect(text).toContain("each conversion is capped at 1 SOL (more only if your most per buy is over $1,000)");
       expect(text).toContain("conversions can repeat");
-      expect(text).toContain("all the SOL in your vault, not only those caps");
-      // The caps are never said to bound the whole loss.
+      // WHAT BOUNDS IT SINCE 2026-10-09: the signed safety floor, at half the SOL price at signing.
+      expect(text).toContain("Solana refuses any conversion that pays less than half the SOL price when you signed");
+      // And the one case it stops conversion, with the USDC held still invested.
+      expect(text).toContain("If SOL's price falls under that floor, nothing is converted until you sign again");
+      expect(text).toContain("USDC already in your vault is still invested");
+      // The caps are never said to bound the conversion, nor the SOL said to be sellable at any price.
       expect(text).not.toMatch(/stolen, nothing on Solana would stop a buy at a bad price — those caps are what would limit how much/);
+      expect(text).not.toMatch(/sell at any price/);
     }
   });
 
@@ -711,5 +721,11 @@ describe("a floor signed before 2026-10-08, and whether the keeper still buys un
       expect(line).not.toMatch(/keeper|min_out|bps|wad|Nuvem|\bSIP\b|Jupiter|gross|net\b/i);
     }
     expect(INVEST_COPY.switchToLive).toBe("Switch to live-price buying");
+    // WHAT THE SWITCH SIGNS SINCE 2026-10-09: no stock floor, and a SOL safety
+    // floor at half the price that day — so no line promises that nothing
+    // can ever stop it again.
+    expect(INVEST_COPY.oldLimitsHeld).toContain("only SOL falling under half its price at the switch stops conversion");
+    expect(INVEST_COPY.oldLimitsBlockingConvert).toContain("with a new SOL safety floor at half today's price");
+    for (const line of [INVEST_COPY.oldLimitsHeld, INVEST_COPY.oldLimitsBlocking, INVEST_COPY.oldLimitsBlockingConvert]) expect(line).not.toMatch(/no price limit stops it/);
   });
 });

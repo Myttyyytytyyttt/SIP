@@ -213,7 +213,9 @@ describe("InvestingCard", () => {
     );
     expect(html).not.toContain("invests in SPYx (SP500 xStock)");
     expect(html).not.toContain("each through its own Raydium pool");
-    expect(html).toContain("the keeper converts it to USDC at the live price, then buys once $5.00 of USDC is ready, at the live price.");
+    expect(html).toContain(
+      "the keeper converts it to USDC at the live price, never under its safety floor of half the SOL price when you sign, then buys once $5.00 of USDC is ready, at the live price.",
+    );
     expect(html).toContain("At most $149.00 per buy and $31,000.00 per 30 days until you change them.");
     // THE VENUE, NOT "THE POOL", here too: the same unit change of 2026-09-21
     // that rewrote thinPool sixteen lines below left this clause behind. And
@@ -749,7 +751,7 @@ describe("InvestingCard", () => {
     const build = vi.fn(async () => ({ ok: false as const, status: 409, code: "vault_missing", message: "Create your vault first.", retryAfterSeconds: null, body: {} }));
     const value = screen({ kind: "ready", state: stateWith({ policy: { status: "exists", address: account(), state: POLICY }, prices: null }) }, { build: build as unknown as VaultApi["build"] });
     const html = render(value);
-    expect(html).toContain("Pausing signs this policy again as it is, with investing off. Resuming signs it again at the live price.");
+    expect(html).toContain("Pausing signs this policy again as it is, with investing off. Resuming signs it again at the live price, with a new SOL safety floor at half that day&#x27;s price.");
     expect(buttons("Pause investing").map((button) => button.disabled)).toEqual([false]);
     buttons("Pause investing")[0]?.onClick?.(CLICK);
     await vi.waitFor(() => expect(value.refresh).toHaveBeenCalledTimes(1));
