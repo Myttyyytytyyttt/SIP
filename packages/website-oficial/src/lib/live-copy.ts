@@ -591,6 +591,22 @@ export const PENDING_COPY = {
   /** Under "Next investment": the SOL on its way is counted, and said. */
   includesConverting: (usd: string): string => `Includes about ${usd} of SOL being converted to USDC`,
   plusConverting: (sol: string): string => `Plus ${sol} SOL being converted to USDC`,
+  /** A conversion due and not done ("slow"): still counted, never called under way. */
+  includesConvertingSlow: (usd: string): string => `Includes about ${usd} of SOL not converted yet · ${BRAND} tries again about once a minute`,
+  /**
+   * SOL UNDER THE KEEPER'S WRAP LINE (live-pending.ts solUnderWrapLine): counted
+   * like SOL being converted, and the line it waits for named, with what the
+   * vault still lacks — the one thing that moves it. `line` and `short` are SOL
+   * as printed: WRAP_DUST_LAMPORTS itself, never a figure typed here.
+   */
+  includesWaiting: (usd: string, line: string, short: string): string =>
+    `Includes about ${usd} of SOL. It converts to USDC once your vault holds ${line} SOL (${short} SOL more)`,
+  plusWaiting: (sol: string, line: string, short: string): string => `Plus ${sol} SOL. It converts to USDC once your vault holds ${line} SOL (${short} SOL more)`,
+  /** SOL converting now and SOL under the line at once: one sum, the one the bar adds, and the part that waits. */
+  includesBoth: (usd: string, waiting: string, line: string, short: string): string =>
+    `Includes about ${usd} of SOL on its way to USDC, ${waiting} of it once your vault holds ${line} SOL (${short} SOL more)`,
+  plusBoth: (sol: string, waiting: string, line: string, short: string): string =>
+    `Plus ${sol} SOL on its way to USDC, ${waiting} SOL of it once your vault holds ${line} SOL (${short} SOL more)`,
   readyToBuy: `Ready to buy · ${BRAND} checks about once a minute`,
   /**
    * A TRADING WALLET THAT CHANGED and has no saving for it yet (live-pending.ts

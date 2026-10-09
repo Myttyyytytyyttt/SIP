@@ -31,7 +31,7 @@ import { ACTIVITY_COPY } from "@/lib/live-copy";
 import { artForMint, NATIVE_SOL } from "@/lib/asset-art";
 import { formatSol, rawFrom, usdcRawForLamports } from "@/lib/amounts";
 import { usd } from "@/lib/format";
-import { nextInvestmentOf, pendingSteps } from "@/lib/live-pending";
+import { nextInvestmentOf, pendingSteps, solUnderWrapLine, toGoOf } from "@/lib/live-pending";
 import type { LiveDashboard, LiveRow, LiveWalletView } from "@/lib/live-types";
 import { ratePercent } from "@/lib/vault-copy";
 import { measureOf, partsOf } from "@/components/live/LiveActivityRow";
@@ -159,9 +159,18 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
   const thresholdUsd = reachable ? dollarsOf(readiness.investsAtRaw) : null;
   // WHAT IS ON ITS WAY COUNTS. SOL the keeper is converting to USDC is the next
   // investment as much as the USDC already held; reading "$0.00" while it is in
-  // flight told the owner nothing was coming (10-08). Added at today's SOL
-  // price, and the card says so (`nextInvestmentNote`).
-  const next = nextInvestmentOf(pendingSteps(data));
+  // flight told the owner nothing was coming (10-08). So is SOL waiting under
+  // the keeper's wrap line: "$0.00 of $1.00" beside "Pending $0.43" read as a
+  // saving that never reached the bar (10-09). Added at today's SOL price, and
+  // the card says so (`nextInvestmentNote`).
+  //
+  // AND WHAT IS TO GO IS THE KEEPER'S, NOT THE BAR'S. Counting SOL the keeper
+  // will not move yet can fill the bar while nothing is bought; `toGoUsd` and
+  // `nextInvestmentGate` carry what is really left, and why (live-pending.ts toGoOf).
+  const steps = pendingSteps(data);
+  const waiting = solUnderWrapLine(data);
+  const next = nextInvestmentOf(steps, waiting);
+  const toGo = reachable ? toGoOf(readiness, steps, waiting) : null;
 
   // ── the numbers ────────────────────────────────────────────────────────
   const legRows = data.holdings.filter((row) => row.kind === "leg");
@@ -193,6 +202,8 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
     readyToInvestUsd: readiness === null ? null : dollarsOf(readiness.heldRaw + (next.extraUsdcRaw ?? 0n)),
     // A note about the sum only beside a sum: "Includes about $1.80" under a dash would contradict itself.
     nextInvestmentNote: readiness === null ? null : next.note,
+    toGoUsd: toGo === null ? null : dollarsOf(toGo.toGoRaw),
+    nextInvestmentGate: toGo === null ? null : toGo.gate,
     thresholdUsd,
     savedTodayUsd: $(stats.savedTodayLamports),
     savedThisWeekUsd: $(stats.savedThisWeekLamports),

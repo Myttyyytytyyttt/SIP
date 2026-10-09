@@ -61,6 +61,13 @@ const SAMPLE_CATEGORIES: readonly SettingsCategory[] = [
 /** The most assets the sample's basket holds; the live shelf's own limit is the same five. */
 const SAMPLE_MAX_LEGS = 5;
 
+/**
+ * How full the Next investment bar may draw while a gate holds the buy
+ * (SavingsStats.nextInvestmentGate). Short of 100 by enough to be seen: at the
+ * card's width a 99 % bar reads as full.
+ */
+const GATED_PROGRESS_MAX = 95;
+
 /** What the sample's dialog edits, kept by the card. */
 interface SampleRule {
   readonly mode: RuleMode;
@@ -131,12 +138,36 @@ export function SavingsRulePanel({
 
   const lastInvestment = activity.find((event): event is InvestedEvent => event.kind === "invested");
   // What counts toward the threshold: the sample's pending pile, or — on a live
-  // vault — the USDC already converted and the SOL being converted to it.
+  // vault — everything not invested the keeper will use: the USDC, the SOL
+  // being converted to it, and the SOL waiting under the keeper's wrap line.
   const ready = stats.readyToInvestUsd === undefined ? stats.pendingUsd : stats.readyToInvestUsd;
   // What the rate is taken from, in the vault's own words.
   const appliedTo = mode === "profit" ? "Applied to your realised trading gains" : "Applied to every buy and sell";
-  const progress = ready !== null && thresholdUsd !== null && thresholdUsd > 0 ? Math.min(100, (ready / thresholdUsd) * 100) : 0;
-  const toGo = ready !== null && thresholdUsd !== null ? Math.max(0, thresholdUsd - ready) : null;
+  /*
+   * THE SAMPLE KEEPS ITS OWN ARITHMETIC, character for character: with no
+   * `toGoUsd` (the sample never sets it) both figures are today's formulas, so
+   * not even a float's last digit can move the landing's bar.
+   *
+   * A LIVE PAGE'S "TO GO" IS THE KEEPER'S (live-pending.ts toGoOf). While a
+   * gate holds the buy — SOL under the wrap line, a conversion overdue — the
+   * bar stops short of full, and dollars to go are printed only where they are
+   * the headline's own difference: "$1.19 of $1.00 · $0.11 to go" would argue
+   * with itself, and "$0.00 to go" would promise a buy that is not coming. The
+   * note under the bar says what is left instead.
+   */
+  const gate = stats.nextInvestmentGate ?? null;
+  const progress =
+    stats.toGoUsd === undefined
+      ? ready !== null && thresholdUsd !== null && thresholdUsd > 0
+        ? Math.min(100, (ready / thresholdUsd) * 100)
+        : 0
+      : ready !== null && thresholdUsd !== null && thresholdUsd > 0
+        ? Math.min(gate === null ? 100 : GATED_PROGRESS_MAX, (ready / thresholdUsd) * 100)
+        : 0;
+  const toGo = stats.toGoUsd === undefined ? (ready !== null && thresholdUsd !== null ? Math.max(0, thresholdUsd - ready) : null) : stats.toGoUsd;
+  const toGoShown =
+    gate === null ||
+    (toGo !== null && ready !== null && thresholdUsd !== null && usd(toGo) !== usd(0) && usd(toGo) === usd(Math.max(0, thresholdUsd - ready)));
 
   const open = live ? settings.open : sampleOpen;
   const attention = live && settings.attention;
@@ -211,10 +242,12 @@ export function SavingsRulePanel({
             </p>
           </div>
           <Progress value={progress} aria-label="Progress to next investment" />
-          <p className="text-xs text-muted-foreground">
-            <Num>{usd(toGo)}</Num> to go
-          </p>
-          {/* A live page's money already on its way; the sample never sets it. */}
+          {toGoShown ? (
+            <p className="text-xs text-muted-foreground">
+              <Num>{usd(toGo)}</Num> to go
+            </p>
+          ) : null}
+          {/* A live page's money not yet USDC, and what it waits for; the sample never sets it. */}
           {stats.nextInvestmentNote ? (
             <p className="text-xs text-muted-foreground" data-next-investment-note="">
               {stats.nextInvestmentNote}
