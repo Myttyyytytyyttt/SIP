@@ -16,7 +16,7 @@
  *                        feed, LivePending.tsx) — blue for the buy
  *             hourglass  part of the figure is SOL waiting under the line
  *             clock      the conversion that would complete it is overdue
- *             pause      a rest the line under the bar names holds the buy
+ *             pause      a rest the note names holds the buy
  *           and nothing otherwise: never a mark the words beside it do not
  *           explain. Work under way wins over a gate — it is what is moving.
  *   figure  "$0.43 of $1.00"; "— of $1.00" when the figure could not be made,
@@ -26,18 +26,28 @@
  *           scaled to that fill. No stripes and no transition: the dollars are
  *           re-priced on every update, and a bar that slid on each would say
  *           money moved when only a price did. Its accessible value is the
- *           headline's, then the parts in the line's own words.
- *   lines   "$0.61 to go" where the card prints it, and the data's note verbatim.
+ *           headline's, then the parts in the note's own words.
+ *   line    "$0.61 to go" where the card prints it.
+ *   "?"     the data's note verbatim, beside the label (info-tip.tsx).
  *
- * The mark is aria-hidden, like every WorkMark: what it means is in the note
- * under the bar, and in the steps' own region, which announces them. Nothing
- * here moves for reduced motion but the turning mark, which then stands still
- * with the same words beside it.
+ * THE NOTE IS IN THE "?", NOT UNDER THE BAR (owner, 10-10: "tiene mucho
+ * texto"). "Includes about $0.43 of SOL too small to convert yet · It converts
+ * once your savings add 0.0011 SOL" was a second grey line under every card
+ * with SOL in it. The block keeps its figures — the label and its mark, "$0.43
+ * of $1.00", the bar, "$0.57 to go" where the card prints it — and the
+ * sentence is one hover or tap away, in the button's screen-reader text too.
+ * No live region holds it: a "?" is a button (test/live-regions.ts).
+ *
+ * The mark is aria-hidden, like every WorkMark: what it means is in the note,
+ * and in the steps' own region, which announces them. Nothing here moves for
+ * reduced motion but the turning mark, which then stands still with the same
+ * words beside it.
  *
  * LIVE ONLY: LiveRulePanel hands it to the card as `renderNextInvestment`. The
  * sample never passes that, and keeps its own block character for character.
  */
 
+import { InfoTip } from "@/components/info-tip";
 import type { PendingRow } from "@/components/live/LivePending";
 import { WorkMark, type WorkState } from "@/components/live/WorkMark";
 import { Num } from "@/components/num";
@@ -191,6 +201,12 @@ export function NextInvestmentLive({ next, work }: { readonly next: NextInvestme
               <WorkMark state={mark.state} tone={mark.tone} tile={false} still={mark.still} />
             </span>
           )}
+          {/* What the figure counts, and what moves it: in the "?" rather than under the bar (owner, 10-10). */}
+          {next.note ? (
+            <span className="flex" data-next-investment-note="">
+              <InfoTip label={LIVE_COPY.nextInvestment}>{next.note}</InfoTip>
+            </span>
+          ) : null}
         </div>
         <p className={cn(MONO, "text-sm")}>
           {usd(next.readyUsd)} <span className="text-muted-foreground">of</span> {usd(next.thresholdUsd)}
@@ -200,11 +216,6 @@ export function NextInvestmentLive({ next, work }: { readonly next: NextInvestme
       {next.toGoShown ? (
         <p className="text-xs text-muted-foreground">
           <Num>{usd(next.toGoUsd)}</Num> to go
-        </p>
-      ) : null}
-      {next.note ? (
-        <p className="text-xs text-muted-foreground" data-next-investment-note="">
-          {next.note}
         </p>
       ) : null}
     </>

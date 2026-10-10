@@ -3,7 +3,9 @@
 // the page, an honest heading, the below-lg card held up for a minute, and every
 // copy drawn from one track. And from the review (10-09): a step the newest
 // snapshot no longer has under way rests — no "In progress" with nothing behind
-// it — and a done row the announcer did not speak says itself.
+// it — and a done row the announcer did not speak says itself. And from the
+// owner (10-10, "tiene mucho texto"): each step's sentence is in a "?" beside
+// its title, and the polite region is its own, beside the rows, words only.
 
 import { ANTHROPIC_MINT, SPYX_MINT, USDC_MINT, WSOL_MINT } from "@sip/solana-core/client";
 import { createElement } from "react";
@@ -21,12 +23,16 @@ import {
   pendingRowsOf,
   pendingViewOf,
   releasePending,
+  saidOf,
   startTrack,
   stillOf,
   toldBy,
   unconfirmedOf,
   viewOf,
+  type DoneLine,
+  type PendingRow,
   type PendingTrack,
+  type ShownLine,
 } from "@/components/live/LivePending";
 import { nextWorkOf, rulePulseOf } from "@/components/live/NextInvestmentLive";
 import { REVEAL_MS } from "@/components/live/Reveal";
@@ -37,7 +43,7 @@ import { pendingLines, pendingSteps, type PendingLine, type PendingStep } from "
 import type { LiveDashboard, VaultEventJson } from "@/lib/live-types";
 
 import { NOW_MS, liveActivity, liveEntry, liveSnapshot, seconds, signature, tokenAccount } from "../../../test/fixtures/live-dashboard";
-import { liveRegions } from "../../../test/live-regions";
+import { liveRegions, tickingInRegion } from "../../../test/live-regions";
 
 const wrapped = { kind: "wrapped", lamports: "18000000" } as VaultEventJson;
 const converted = { kind: "converted", lamportsSpent: "18000000", usdcReceivedRaw: "1800000" } as VaultEventJson;
@@ -308,6 +314,8 @@ describe("a done row, and who says it", () => {
     const { view, out } = drawnAfter(before, after, arrived);
     expect(view.rows).toMatchObject([{ show: "done", key: "converting", told: true }]);
     expect(out).toMatch(/<div class="[^"]*" data-pending-done="converting" aria-hidden="true">/);
+    // Nor does the region say it: once is the announcer's.
+    expect(liveRegions(out)).toEqual(['<div role="status" aria-live="polite" class="sr-only" data-pending-region=""></div>']);
   });
 
   it("says it itself when the announcer did not: read N, a read with the history unreadable, then a whole one", () => {
@@ -325,10 +333,9 @@ describe("a done row, and who says it", () => {
     const { view, out } = drawnAfter(n, n2, second.arrived.map((row) => row.signature));
     expect(view.rows).toMatchObject([{ show: "done", key: "converting", told: false }]);
     expect(out).toMatch(/<div class="[^"]*" data-pending-done="converting">/);
-    // Inside the polite region, and not hidden from it.
+    // The polite region says it, its title and its line, as the row did while it was the region.
     const [region] = liveRegions(out);
-    expect(region).toContain(LIVE_COPY.pendingDone.convertedAt("12:00 UTC"));
-    expect(region).not.toMatch(/data-pending-done="converting" aria-hidden/);
+    expect(region).toContain(`<p><span class="block">${LIVE_COPY.pendingDone.convertedAt("12:00 UTC")}</span><span class="block">${LIVE_COPY.pendingDone.convertedSub}</span></p>`);
   });
 
   it("hands back the same view when no row is done, and leaves a row nobody judged as it was", () => {
@@ -337,7 +344,9 @@ describe("a done row, and who says it", () => {
     // A done row drawn without toldBy (a caller that tracks no arrivals) stays out of the region, as before.
     const track = advancePending(startTrack(inputOf(converting())), inputOf(vault("0", [CONVERT, WRAP], NOW_MS + 30_000)), 1_000);
     const plain = pendingViewOf(track, []);
-    expect(renderToStaticMarkup(createElement(PendingRows, { lines: plain.lines, view: plain }))).toMatch(/data-pending-done="converting" aria-hidden="true"/);
+    const out = renderToStaticMarkup(createElement(PendingRows, { lines: plain.lines, view: plain }));
+    expect(out).toMatch(/data-pending-done="converting" aria-hidden="true"/);
+    expect(liveRegions(out)[0]).not.toContain(LIVE_COPY.pendingDone.converted);
   });
 });
 
@@ -382,14 +391,15 @@ describe("the rows drawn", () => {
     // No "In progress" over "Nothing in progress right now", and no "Waiting" either.
     expect(out).not.toContain(LIVE_COPY.pendingHeading.active);
     expect(out).not.toContain(LIVE_COPY.pendingHeading.waiting);
-    expect(out).toMatch(/^<div role="status" aria-live="polite" class="grid [^"]*lg:hidden" data-pending-steps="0">/);
-    // The idle line is not news: not read out.
+    expect(out).toMatch(/^<div class="grid [^"]*lg:hidden" data-pending-steps="0">/);
+    // The idle line is not news: not read out, and the card's region, still there, says nothing.
     expect(out).toMatch(/<p class="[^"]*" aria-hidden="true">Nothing in progress right now<\/p>/);
+    expect(out).toMatch(/<div role="status" aria-live="polite" class="sr-only" data-pending-region=""><\/div><\/div>$/);
   });
 
-  it("keep the card's region out of the flow while there is nothing, and there to announce the first step", () => {
+  it("keep the card's box, and the region in it, out of the flow while there is nothing, and there to announce the first step", () => {
     expect(renderToStaticMarkup(createElement(PendingRows, { lines: [], variant: "card", className: "lg:hidden" }))).toBe(
-      '<div role="status" aria-live="polite" class="sr-only lg:hidden" data-pending-steps="0"></div>',
+      '<div class="sr-only lg:hidden" data-pending-steps="0"><div role="status" aria-live="polite" class="sr-only" data-pending-region=""></div></div>',
     );
   });
 
@@ -401,5 +411,112 @@ describe("the rows drawn", () => {
     const rowsOf = (out: string) => out.match(/data-pending-step="[a-z]+"/g);
     expect(rowsOf(column)).toEqual(['data-pending-step="converting"']);
     expect(rowsOf(card)).toEqual(rowsOf(column));
+  });
+});
+
+/**
+ * THE WHY IN A "?", THE REGION BESIDE THE ROWS (owner, 10-10: "tiene mucho
+ * texto"). The grey line under every step is gone from the screen: its
+ * sentence sits in a "?" beside the title, read out with the button. A "?" is
+ * a button, and no button may sit in a live region — so the rows are no longer
+ * the region: a visually hidden one beside them says, word for word, what they
+ * used to.
+ */
+describe("the why in a '?', and the region beside the rows", () => {
+  const CONVERTING: ShownLine = { key: "converting", kind: "converting", active: true, rest: null, title: PENDING_COPY.converting, sub: PENDING_COPY.convertingSub("0.0235"), amount: "$3.12", amountSpoken: "" };
+  const RESTING: ShownLine = { ...CONVERTING, active: false, rest: "paused", title: PENDING_COPY.convertingWaiting, sub: PENDING_COPY.rest.paused, amountSpoken: "0.0235 SOL" };
+  const BUYING: ShownLine = { key: "buying", kind: "buying", active: false, rest: "paused", title: PENDING_COPY.buyingWaiting("SPYx"), sub: PENDING_COPY.rest.paused, amount: "$5.00", amountSpoken: null };
+  const MEASURING: ShownLine = { key: "measuring:W", kind: "measuring", active: true, rest: null, title: PENDING_COPY.measuring("Trading wallet 1"), sub: PENDING_COPY.measuringSub.volume, amount: "", amountSpoken: "" };
+  /** The same row while it was only heard: its own title, the step's sentence, and no step behind it. */
+  const HEARD: ShownLine = { ...MEASURING, title: LIVE_COPY.heardLine.wallet("Trading wallet 1"), heard: true };
+  const DONE: DoneLine = { key: "converting", kind: "converting", title: LIVE_COPY.pendingDone.convertedAt("14:32 UTC"), sub: LIVE_COPY.pendingDone.convertedSub, tone: "quiet", signatures: [signature(2)] };
+
+  const lineRow = (line: ShownLine, leaving = false): PendingRow => ({ show: "line", key: line.key, kind: line.kind, line, still: false, leaving });
+  const doneRow = (told: boolean | undefined, leaving = false): PendingRow => ({ show: "done", key: DONE.key, kind: DONE.kind, done: DONE, leaving, ...(told === undefined ? {} : { told }) });
+  const view = (rows: readonly PendingRow[], held = false) => ({ lines: rows.flatMap((row) => (row.show === "line" && !row.leaving ? [row.line] : [])), rows, held });
+  const drawn = (rows: readonly PendingRow[], over: { readonly variant?: "column" | "card"; readonly announce?: boolean } = {}) => {
+    const shown = view(rows);
+    return renderToStaticMarkup(createElement(PendingRows, { lines: shown.lines, view: shown, ...over }));
+  };
+  /** What a sighted reader sees: the markup without the region and without any screen-reader-only text. */
+  const onScreen = (out: string): string => out.replace(/<div role="status"[^>]*>[\s\S]*?<\/div>/, "").replace(/<span class="sr-only">[^<]*<\/span>/g, "");
+  const literal = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const region = (...words: string[][]): string =>
+    `<div role="status" aria-live="polite" class="sr-only" data-pending-region="">${words.map((said) => `<p>${said.map((word) => `<span class="block">${word}</span>`).join("")}</p>`).join("")}</div>`;
+
+  it("draws no sentence under a step's title: it is in the '?' beside the title, in the button's own words", () => {
+    const out = drawn([lineRow(MEASURING), lineRow(CONVERTING), lineRow(BUYING)]);
+    for (const line of [MEASURING, CONVERTING, BUYING]) {
+      expect(onScreen(out)).toContain(line.title);
+      expect(onScreen(out)).not.toContain(line.sub);
+      // The "?" sits right after the title, in the title's own box, and says the sentence to a screen reader.
+      expect(out).toMatch(
+        new RegExp(`<span class="min-w-0 text-sm (truncate|break-words)">${literal(line.title)}</span><button type="button"[^>]*><svg[\\s\\S]*?</svg><span class="sr-only">${literal(`${LIVE_COPY.pendingWhy}: ${line.sub}`)}</span></button>`),
+      );
+    }
+    // The figures stay on screen.
+    expect(onScreen(out)).toContain("$3.12");
+    expect(onScreen(out)).toContain("$5.00");
+    // No grey line of any kind is left under a step's title.
+    expect(out).not.toMatch(/data-pending-step="[^"]*"[\s\S]*?<span class="block text-xs text-muted-foreground">/);
+  });
+
+  it("puts no '?' beside a step with no sentence", () => {
+    const out = drawn([lineRow({ ...BUYING, sub: "" })]);
+    expect(out).not.toContain("<button");
+    expect(liveRegions(out)).toEqual([region([BUYING.title, "$5.00"])]);
+  });
+
+  it("says, in a region of its own, each step's title, its sentence and its amount as spoken — and holds no button and no countdown", () => {
+    const out = drawn([lineRow(MEASURING), lineRow(RESTING), lineRow(BUYING)]);
+    // The rows hold the "?"s…
+    expect(out.match(/<button\b/g)).toHaveLength(3);
+    // …and the one live region holds words only: the SOL in place of a conversion's re-priced dollars, a buy's USDC as drawn.
+    expect(liveRegions(out)).toEqual([
+      region([MEASURING.title, MEASURING.sub], [RESTING.title, RESTING.sub, "0.0235 SOL"], [BUYING.title, BUYING.sub, "$5.00"]),
+    ]);
+    expect(tickingInRegion(out)).toBe(false);
+    // An active conversion's dollars are said by nobody.
+    expect(liveRegions(drawn([lineRow(CONVERTING)]))).toEqual([region([CONVERTING.title, CONVERTING.sub])]);
+  });
+
+  it("never says a change heard, and keeps no '?' on it: its words are aria-hidden, and a button never sits inside aria-hidden", () => {
+    const out = drawn([lineRow(HEARD)]);
+    expect(out).toContain(`<span class="flex min-w-0 flex-1 items-start gap-1.5" aria-hidden="true"><span class="min-w-0 text-sm break-words">${HEARD.title}</span></span>`);
+    expect(out).not.toContain("<button");
+    expect(liveRegions(out)).toEqual([region()]);
+    // The step that takes its row over joins the region under the row's key: an addition, as any step that joins.
+    expect(saidOf([lineRow(HEARD)])).toEqual([]);
+    expect(saidOf([lineRow(MEASURING)])).toEqual([{ key: "measuring:W", words: [MEASURING.title, MEASURING.sub] }]);
+  });
+
+  it("says a done row only when the announcer did not, under a key of its own, and nothing on its way out", () => {
+    expect(saidOf([doneRow(false)])).toEqual([{ key: "done:converting", words: [DONE.title, DONE.sub] }]);
+    expect(saidOf([doneRow(true)])).toEqual([]);
+    // Drawn without toldBy: aria-hidden, as before, so not said.
+    expect(saidOf([doneRow(undefined)])).toEqual([]);
+    expect(saidOf([doneRow(false, true)])).toEqual([]);
+    expect(saidOf([lineRow(CONVERTING, true)])).toEqual([]);
+    // A step whose words change keeps its node: the same key, its text rewritten.
+    expect(saidOf([lineRow(CONVERTING)])[0]?.key).toBe(saidOf([lineRow({ ...CONVERTING, sub: PENDING_COPY.convertingSub("0.03") })])[0]?.key);
+  });
+
+  it("says the same on the card as in the column, from the card's own box", () => {
+    const rows = [lineRow(CONVERTING), lineRow(BUYING)];
+    const column = drawn(rows);
+    const card = drawn(rows, { variant: "card" });
+    expect(liveRegions(card)).toEqual(liveRegions(column));
+    // The region is the box's last child, beside what goes inert while it closes.
+    expect(card).toMatch(/<\/div><div role="status" aria-live="polite" class="sr-only" data-pending-region="">[\s\S]*<\/div><\/div>$/);
+  });
+
+  it("draws no region at all on a copy that must not announce, in the column or on the card — the '?'s stay", () => {
+    for (const variant of ["column", "card"] as const) {
+      const out = drawn([lineRow(CONVERTING)], { variant, announce: false });
+      expect(liveRegions(out)).toEqual([]);
+      expect(out).not.toContain("data-pending-region");
+      expect(out).toContain(`<span class="sr-only">${LIVE_COPY.pendingWhy}: ${CONVERTING.sub}</span>`);
+    }
+    expect(renderToStaticMarkup(createElement(PendingRows, { lines: [], announce: false }))).toBe('<div data-pending-steps="0"></div>');
   });
 });

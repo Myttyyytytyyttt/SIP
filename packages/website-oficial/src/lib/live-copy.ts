@@ -204,6 +204,12 @@ export const LIVE_COPY = {
     active: "In progress",
     waiting: "Waiting",
   },
+  /**
+   * THE "?" BESIDE A STEP'S TITLE (owner, 10-10): the step's sentence — the
+   * grey line that sat under the title — is in it now. This names the button:
+   * a screen reader hears "Details: " before that sentence.
+   */
+  pendingWhy: "Details",
   /** The below-lg card, held up for a minute after its last step ended, so one cycle does not push the page three times. */
   pendingIdle: "Nothing in progress right now",
   /**
@@ -235,9 +241,11 @@ export const LIVE_COPY = {
     vault: "Activity seen on your vault · checking",
     vaultBehind: "Activity seen on your vault · not on this page yet",
     /**
-     * Under the vault's line. What it is — a saving, a conversion, a buy, a
-     * withdrawal, a plain transfer that never shows as a row of its own — is
+     * The vault's line's sentence. What it is — a saving, a conversion, a buy,
+     * a withdrawal, a plain transfer that never shows as a row of its own — is
      * not known until it lands; the pension's figures take it in any case.
+     * Not drawn since 10-10: the line under a title went into a "?", and a
+     * heard line, its words aria-hidden, carries none (LivePending.tsx).
      */
     vaultSub: "Your pension shows it once this page updates",
   },
@@ -451,8 +459,8 @@ export const LIVE_COPY = {
   /**
    * THE LIVE BAR, SPOKEN (10-09, NextInvestmentLive.tsx): the headline's own
    * figures, then — when the bar is drawn in parts — what it is made of, in the
-   * words of the line under it. A colon and commas, never the line's "·", which
-   * a screen reader reads as "dot".
+   * words of its note (in the "?" beside the label since 10-10). A colon and
+   * commas, never the note's "·", which a screen reader reads as "dot".
    */
   nextBar: {
     value: (ready: string, threshold: string): string => `${ready} of ${threshold}`,
@@ -838,7 +846,7 @@ export const START_BUYING_COPY = {
 
 /**
  * WHAT THE KEEPER IS ABOUT TO DO WITH THIS VAULT'S MONEY (owner, 2026-10-08):
- * the rows over the activity feed, and the line under "Next investment". Made
+ * the rows over the activity feed, and the note in "Next investment"'s "?". Made
  * from what the dashboard already reads (src/lib/live-pending.ts); nothing here
  * promises a time, only how often the keeper looks, which is its sweep.
  */

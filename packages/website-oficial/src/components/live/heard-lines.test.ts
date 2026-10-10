@@ -20,6 +20,7 @@ import type { PushHeard } from "@/lib/live-push";
 import type { LiveDashboard, LiveWalletChange, VaultEventJson } from "@/lib/live-types";
 
 import { NOW_MS, WALLET_A, liveActivity, liveEntry, liveSnapshot, seconds, signature, tokenAccount } from "../../../test/fixtures/live-dashboard";
+import { liveRegions } from "../../../test/live-regions";
 
 /** A slot past the fixture link's frontier (999): a trade nobody has measured yet. */
 const TRADE_SLOT = 5_000;
@@ -214,18 +215,26 @@ describe("drawn", () => {
     expect(out).toContain("motion-reduce:transition-none");
   });
 
-  it("is not read out — its words are hidden from the region — and the step that takes its row over is", () => {
+  it("is not read out — the region has nothing for it, its words are aria-hidden, it has no '?' — and the step that takes its row over is", () => {
     const heard = renderToStaticMarkup(createElement(PendingRows, { lines: [heardLine] }));
-    expect(heard).toContain(`<span class="min-w-0 flex-1" aria-hidden="true"><span class="block text-sm break-words">${LIVE_COPY.heardLine.wallet(label)}</span>`);
-    const step = renderToStaticMarkup(createElement(PendingRows, { lines: linesOf(covered()) }));
-    expect(step).toContain(`<span class="min-w-0 flex-1"><span class="block text-sm break-words">${PENDING_COPY.measuring(label)}</span>`);
+    expect(heard).toContain(`<span class="flex min-w-0 flex-1 items-start gap-1.5" aria-hidden="true"><span class="min-w-0 text-sm break-words">${LIVE_COPY.heardLine.wallet(label)}</span></span>`);
+    expect(heard).not.toContain("<button");
+    expect(liveRegions(heard)).toEqual(['<div role="status" aria-live="polite" class="sr-only" data-pending-region=""></div>']);
+    const lines = linesOf(covered());
+    const step = renderToStaticMarkup(createElement(PendingRows, { lines }));
+    // On screen: the title, its "?" beside it (owner, 10-10), not hidden.
+    expect(step).toContain(`<span class="flex min-w-0 flex-1 items-start gap-1.5"><span class="min-w-0 text-sm break-words">${PENDING_COPY.measuring(label)}</span><button type="button"`);
     expect(step).not.toContain("data-pending-heard");
+    // In the region: the step, its title and its sentence.
+    expect(liveRegions(step)).toEqual([
+      `<div role="status" aria-live="polite" class="sr-only" data-pending-region=""><p><span class="block">${PENDING_COPY.measuring(label)}</span><span class="block">${lines[0]!.sub}</span></p></div>`,
+    ]);
   });
 
   it("draws the vault's line with no amount, wrapping rather than cut, after a wallet's and before the keeper's steps", () => {
     const vault = heardLinesOf({ heard: heardFrom([]), data: page(), lines: [], behind: false })[0]!;
     const out = renderToStaticMarkup(createElement(PendingRows, { lines: [vault] }));
-    expect(out).toContain(`<span class="block text-sm break-words">${LIVE_COPY.heardLine.vault}</span>`);
+    expect(out).toContain(`<span class="min-w-0 text-sm break-words">${LIVE_COPY.heardLine.vault}</span>`);
     expect(out).toContain('data-pending-step="vault" data-state="active" data-pending-heard=""');
     expect(out).not.toMatch(/font-mono[^"]*"[^>]*>\$/);
     // In the rows' own order, whatever order they were handed in.

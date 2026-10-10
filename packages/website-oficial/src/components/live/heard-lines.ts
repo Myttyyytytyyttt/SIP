@@ -14,8 +14,9 @@
  * (checkedLineOf): a wallet whose activity the page would never check — the
  * vault paused, a link that is not this vault's, a wallet at its reserve —
  * gets no row claiming it is checked; the dot still says a change was seen.
- * Its line under the title is the step's own, so the takeover changes the
- * title alone.
+ * Its sentence is the step's own, so the takeover changes the title — and
+ * gives the row its "?" (LivePending.tsx), which a heard line, its words
+ * aria-hidden, never carries.
  *
  * THE VAULT: "Activity seen on your vault · checking", when what was heard
  * names no trading wallet (`heard.wallets` empty): the vault or one of its
@@ -50,9 +51,10 @@
  * LIVE_COPY.pulse.heardBehind).
  *
  * NOT READ OUT. A heard line is the herald of news, not news: the step's own
- * line is spoken when it takes over (LivePending.tsx gives its words a node of
- * their own), and whatever lands is spoken by the announcer when its row
- * arrives (LiveAnnouncer.tsx). One story, said once.
+ * line is spoken when it takes over (LivePending.tsx saidOf: the region has
+ * nothing for a heard line, so the step joins it as an addition), and
+ * whatever lands is spoken by the announcer when its row arrives
+ * (LiveAnnouncer.tsx). One story, said once.
  */
 
 import type { ShownLine } from "@/components/live/LivePending";

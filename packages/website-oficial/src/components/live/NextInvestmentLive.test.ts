@@ -3,7 +3,8 @@
 // figure, gate and line. The card works the figures out; this only draws them —
 // a mark beside the label for what is moving or what holds it, still segments
 // for what the figure is made of, no bar for a figure nobody could make — and
-// says the bar's value in words.
+// says the bar's value in words. Since 10-10 (owner: "tiene mucho texto") the
+// data's note is in a "?" beside the label, not under the bar.
 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -20,6 +21,7 @@ import type { LiveEntryJson, VaultEventJson } from "@/lib/live-types";
 import type { SavingsRule, SavingsStats } from "@/mocks/types";
 
 import { WALLET_A, liveActivity, liveEntry, liveSnapshot, seconds, signature, NOW_MS } from "../../../test/fixtures/live-dashboard";
+import { liveRegions } from "../../../test/live-regions";
 
 const DOOR: RuleSettingsDoor = { open: false, onOpen: () => undefined, attention: false };
 const RULE: SavingsRule = { mode: "profit", rateBps: 2_000, thresholdUsd: 1, targets: [{ symbol: "SPYx", weightBps: 10_000 }], paused: false };
@@ -82,7 +84,7 @@ describe("the owner's case: SOL under the line", () => {
     expect(html).not.toContain("$0.00 of");
   });
 
-  it("marks the label with the hourglass, and says why in the data's own line", () => {
+  it("marks the label with the hourglass, and says why in the data's own note", () => {
     const html = block(card(OWNERS));
     expect(html).toContain('data-next-mark="gated"');
     expect(html).toContain("lucide-hourglass");
@@ -110,6 +112,43 @@ describe("the owner's case: SOL under the line", () => {
     expect(drawn).toContain('aria-valuemax="100"');
     expect(drawn).toContain('aria-valuenow="43"');
     expect(drawn).toContain('aria-valuetext="$0.43 of $1.00: $0.43 of SOL too small to convert yet"');
+  });
+});
+
+/**
+ * THE NOTE IS IN THE "?", NOT UNDER THE BAR (owner, 10-10: "tiene mucho
+ * texto"). His screenshot: "$0.43 of $1.00", the bar, "$0.57 to go", and under
+ * them "Includes about $0.43 of SOL too small to convert yet · It converts once
+ * your savings add 0.0011 SOL". The figures stay; the sentence is one hover or
+ * tap away.
+ */
+describe("the note, in a '?' beside the label", () => {
+  /** The owner's screenshot: the to-go is the headline's own difference, so the card prints it. */
+  const SCREENSHOT: SavingsStats = { ...OWNERS, toGoUsd: 0.57, nextInvestmentNote: PENDING_COPY.includesWaiting("$0.43", "0.0011") };
+
+  it("draws no line under the bar: the note is the '?''s screen-reader text, and nowhere else", () => {
+    const note = SCREENSHOT.nextInvestmentNote!;
+    const html = block(card(SCREENSHOT));
+    expect(html.split(note)).toHaveLength(2);
+    expect(html).toContain(`<span class="flex" data-next-investment-note=""><button type="button"`);
+    expect(html).toContain(`<span class="sr-only">${LIVE_COPY.nextInvestment}: ${note}</span></button></span>`);
+    expect(html).not.toMatch(/<p class="text-xs text-muted-foreground"[^>]*>Includes/);
+  });
+
+  it("keeps every figure on screen: the label and its mark, the figure of the threshold, the bar, what is still to go", () => {
+    const html = block(card(SCREENSHOT));
+    // The "?" sits in the label's row, after the mark: the block is no taller for it.
+    expect(html).toMatch(/^Next investment<\/p><span class="flex" data-next-mark="gated">[\s\S]*?<\/span><span class="flex" data-next-investment-note="">/);
+    expect(html).toMatch(/\$0\.43 <span class="text-muted-foreground">of<\/span> \$1\.00/);
+    expect(html).toContain('role="progressbar"');
+    expect(html).toContain('<p class="text-xs text-muted-foreground"><span class="font-mono tabular-nums">$0.57</span> to go</p>');
+  });
+
+  it("draws no '?' with no note, and holds no live region, so a button there is never inside one", () => {
+    const quiet = block(card({ ...SCREENSHOT, nextInvestmentNote: null }));
+    expect(quiet).not.toContain("data-next-investment-note");
+    expect(quiet).not.toContain("<button");
+    expect(liveRegions(block(card(SCREENSHOT)))).toEqual([]);
   });
 });
 

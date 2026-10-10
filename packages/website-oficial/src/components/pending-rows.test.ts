@@ -39,17 +39,20 @@ import { mock } from "@/mocks";
 
 import { NOW_MS, OWNER, WALLET_A, liveActivity, liveEntry, liveSnapshot, policyState, seconds, signature, tokenAccount } from "../../test/fixtures/live-dashboard";
 import { liveLiveness } from "../../test/fixtures/live-liveness";
+import { liveRegions } from "../../test/live-regions";
 
 const ACTIVE: PendingLine = { key: "converting", kind: "converting", active: true, rest: null, title: PENDING_COPY.converting, sub: PENDING_COPY.convertingSub("0.018"), amount: "$1.80", amountSpoken: "" };
 const WAITING: PendingLine = { key: "buying", kind: "buying", active: false, rest: "paused", title: PENDING_COPY.buyingWaiting("SPYx"), sub: PENDING_COPY.rest.paused, amount: "$5.00", amountSpoken: null };
 
 const html = (element: ReturnType<typeof createElement>): string => renderToStaticMarkup(createElement(TooltipProvider, null, element));
 const count = (text: string, needle: string): number => text.split(needle).length - 1;
+/** The steps' own polite regions (LivePending.tsx SaidRegion): words only, beside the rows drawn. */
+const pendingRegions = (out: string): string[] => liveRegions(out).filter((region) => region.includes("data-pending-region"));
 
 describe("the rows", () => {
   it("keep a polite live region on the page even with nothing pending, and draw nothing in it", () => {
     const out = html(createElement(PendingRows, { lines: [] }));
-    expect(out).toBe('<div role="status" aria-live="polite" data-pending-steps="0"></div>');
+    expect(out).toBe('<div data-pending-steps="0"><div role="status" aria-live="polite" class="sr-only" data-pending-region=""></div></div>');
   });
 
   it("put a turning mark in the square of a step under way, which stops for reduced motion", () => {
@@ -90,14 +93,23 @@ describe("the rows", () => {
   it("keep a conversion's re-priced dollars out of what the live region reads, and speak its SOL once", () => {
     const spoken = (out: string): string => out.replace(/<span[^>]*aria-hidden="true"[^>]*>[^<]*<\/span>/g, "").replace(/<svg[\s\S]*?<\/svg>/g, "");
     const at = (amount: string): string => html(createElement(PendingRows, { lines: [{ ...ACTIVE, amount }] }));
+    const region = (amount: string): string => pendingRegions(at(amount))[0]!;
     expect(at("$1.80")).toContain("$1.80");
+    // The region, which announces: the same words at either price, and no dollars.
+    expect(region("$1.80")).toBe(region("$1.81"));
+    expect(region("$1.80")).not.toContain("$1.80");
+    // The rows, to a screen reader browsing them: the same.
     expect(spoken(at("$1.80"))).toBe(spoken(at("$1.81")));
     expect(spoken(at("$1.80"))).not.toContain("$1.80");
     // A resting conversion's line is its reason, so the SOL is spoken in the amount's place.
     const resting = html(createElement(PendingRows, { lines: [{ ...ACTIVE, active: false, rest: "paused", sub: PENDING_COPY.rest.paused, amountSpoken: "0.018 SOL" }] }));
     expect(resting).toContain('<span class="sr-only">0.018 SOL</span>');
+    expect(pendingRegions(resting)[0]).toContain('<span class="block">0.018 SOL</span>');
+    expect(pendingRegions(resting)[0]).not.toContain("$1.80");
     // A buy's amount is the USDC it spends, which does not move with SOL: it is read as drawn.
-    expect(html(createElement(PendingRows, { lines: [WAITING] }))).not.toContain('aria-hidden="true">$5.00');
+    const buy = html(createElement(PendingRows, { lines: [WAITING] }));
+    expect(buy).not.toContain('aria-hidden="true">$5.00');
+    expect(pendingRegions(buy)[0]).toContain('<span class="block">$5.00</span>');
   });
 
   it("wear the buy's blue only on a buy under way", () => {
@@ -158,7 +170,10 @@ describe("a live page", () => {
 
   it("leads the activity column with the conversion under way, over the wrap that started it", () => {
     const out = render("pension", converting());
-    expect(out).toMatch(/<div role="status" aria-live="polite" data-pending-steps="1"/);
+    expect(out).toContain('<div data-pending-steps="1">');
+    // Said by the steps' own region, beside the rows: the column's, and the card's below lg.
+    expect(pendingRegions(out).length).toBeGreaterThanOrEqual(1);
+    for (const region of pendingRegions(out)) expect(region).toContain(PENDING_COPY.converting);
     expect(count(out, 'data-pending-step="converting"')).toBeGreaterThanOrEqual(1);
     const pending = out.indexOf('data-pending-step="converting"');
     const wrapRow = out.indexOf("Wrapped SOL for investing");
@@ -173,14 +188,14 @@ describe("a live page", () => {
    */
   it("leads the pension page's own top with the steps below lg, where the activity column is out of sight", () => {
     const out = render("pension", converting());
-    // The region is the card's own box: open, at the page's first paint, with nothing to grow from (Reveal.tsx).
-    const top = out.match(/<div role="status" aria-live="polite" class="([^"]*)" data-pending-steps="1"><div class="min-h-0 min-w-0"><div class="([^"]*)">/);
+    // The card's own box, which holds its region: open, at the page's first paint, with nothing to grow from (Reveal.tsx).
+    const top = out.match(/<div class="([^"]*)" data-pending-steps="1"><div class="min-h-0 min-w-0"><div class="([^"]*)">/);
     expect(top?.[1]).toBe("grid transition-[grid-template-rows,opacity,margin-top] duration-300 ease-out motion-reduce:transition-none grid-rows-[1fr] opacity-100 mt-0 lg:hidden");
     expect(top?.[2]).toBe("overflow-hidden rounded-md border bg-card");
     // Before the holdings and the rule card, inside the main column.
     expect(out.indexOf(top![0])).toBeLessThan(out.indexOf("data-next-investment-note"));
     const empty = render("pension", toLiveDashboard({ snapshot: liveSnapshot({ vaultTokenAccounts: { status: "exists", items: [] }, vault: { ...liveSnapshot().vault, lamports: "1285240", withdrawableLamports: "0" } }), activity: liveActivity([]), privyWallets: [] }));
-    expect(empty).toContain('<div role="status" aria-live="polite" class="sr-only lg:hidden" data-pending-steps="0"></div>');
+    expect(empty).toContain('<div class="sr-only lg:hidden" data-pending-steps="0"><div role="status" aria-live="polite" class="sr-only" data-pending-region=""></div></div>');
   });
 
   it("counts the SOL on its way under Next investment, and says so", () => {
@@ -231,9 +246,11 @@ describe("a live page", () => {
     // The aside's column, and the page's own list.
     expect(count(out, 'data-pending-step="converting"')).toBeGreaterThanOrEqual(2);
     // One polite region for them, the page's own: the column beside it shows them silently.
-    expect(out.match(/<div[^>]*aria-live="polite"[^>]*data-pending-steps="1"/g)).toEqual(['<div role="status" aria-live="polite" data-pending-steps="1"']);
-    // Its divider comes and goes with the rows, inside the region.
-    expect(out).toMatch(/<div role="status" aria-live="polite" data-pending-steps="1"><div class="grid[^"]*"><div class="min-h-0 min-w-0"><div class="border-b">/);
+    const regions = pendingRegions(out);
+    expect(regions).toHaveLength(1);
+    expect(regions[0]).toContain(PENDING_COPY.converting);
+    // Its divider comes and goes with the rows; the region sits after them, out of the flow.
+    expect(out).toMatch(/<div data-pending-steps="1"><div class="grid[^"]*"><div class="min-h-0 min-w-0"><div class="border-b">[\s\S]*?<div role="status" aria-live="polite" class="sr-only" data-pending-region="">/);
   });
 
   it("keeps them under All and Investing on /activity, and out of Savings and Withdrawals", () => {
@@ -271,9 +288,10 @@ describe("a live page", () => {
     });
     const label = data.wallets[0]!.label;
     const out = render("pension", data);
-    expect(out).toMatch(/<div role="status" aria-live="polite" data-pending-steps="1"/);
+    expect(out).toContain('<div data-pending-steps="1">');
     expect(out).toContain('data-pending-step="measuring"');
     expect(out).toContain(PENDING_COPY.measuring(label));
+    for (const region of pendingRegions(out)) expect(region).toContain(PENDING_COPY.measuring(label));
     expect(out).toMatch(/data-pending-step="measuring" data-state="active">[\s\S]*?data-work-loader=""/);
     // The same page without the push draws nothing pending.
     const quiet = render("pension", { ...data, walletChanges: [] });
@@ -295,8 +313,11 @@ describe("a live page", () => {
     const label = data.wallets[0]!.label;
     expect(render("pension", data)).not.toContain("data-pending-step=");
     const out = render("pension", data, { live: liveLiveness({ heard: { at: Date.now(), wallets: [WALLET_A] } }) });
-    expect(out).toMatch(/<div role="status" aria-live="polite" data-pending-steps="1"/);
+    expect(out).toContain('<div data-pending-steps="1">');
     expect(out).toContain(LIVE_COPY.heardLine.wallet(label));
+    // Drawn, and not said: what it becomes is (heard-lines.ts).
+    expect(pendingRegions(out).length).toBeGreaterThanOrEqual(1);
+    for (const region of pendingRegions(out)) expect(region).not.toContain(LIVE_COPY.heardLine.wallet(label));
     expect(out).toMatch(/data-pending-step="measuring" data-state="active" data-pending-heard="">[\s\S]*?data-work-loader=""/);
     // While the updates fail, the same row waits: not on this page yet, and nothing turns.
     const behind = render("pension", data, {
